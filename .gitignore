@@ -1,0 +1,29 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Pytest / Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# MKV Tool Temporary & Output Directories
+Output/
+fonts/
+*.tmp*
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# IDE & Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Miscellaneous log / scratch files
+scratch/
+runtest.txt
