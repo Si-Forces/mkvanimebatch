@@ -64,6 +64,25 @@ def select_subtitle(json_data: dict, file_stem: str, file_dir: Path, ep_tag: str
     return str(track_id), file_dir / f"{file_stem}_{ep_tag}_{language}_track{track_id}.ass"
 
 
+def _cleanup_stale_subtitle_offsets(base_sub_path: Path, current_final_path: Path) -> None:
+    """Remove any stale offset-suffixed subtitle files for the same episode and language."""
+    parent = base_sub_path.parent
+    stem = base_sub_path.stem
+    suffix = base_sub_path.suffix
+    pattern = re.compile(
+        rf"^{re.escape(stem)}(?:\.\[[-+]?\d+(?:\.\d+)?s\])?{re.escape(suffix)}$",
+        re.IGNORECASE,
+    )
+    try:
+        for entry in os.scandir(str(parent)):
+            if entry.is_file() and pattern.match(entry.name):
+                p = Path(entry.path)
+                if p.resolve() != current_final_path.resolve():
+                    p.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def pipeline_worker(
     mkv_path: Path,
     mkv_parsed: EpisodeInfo | None,
@@ -72,7 +91,6 @@ def pipeline_worker(
     font_registry: FontRegistry,
     sub_offset: float = 0.0,
 ) -> bool:
-
     # 1. Inspect (pre-fetched)
     if json_data is None:
         print(f"  [-] Failed: {mkv_path.name} (mkvmerge inspection failed)")
@@ -82,8 +100,12 @@ def pipeline_worker(
     file_stem = mkv_path.stem
     file_dir  = mkv_path.parent
 
-    ep_tag = f"{ep_type_label(mkv_parsed[1])}{mkv_parsed[2]}" if mkv_parsed else file_stem
-    chapter_stem = f"{file_stem}_{ep_tag}" if mkv_parsed else file_stem
+    if mkv_parsed:
+        ep_tag = f"{ep_type_label(mkv_parsed[1])}{mkv_parsed[2]}"
+        chapter_stem = f"{file_stem}_{ep_tag}"
+    else:
+        ep_tag = file_stem
+        chapter_stem = file_stem
 
     temp_dir = None
     claimed_this_call: list[tuple[str, int]] = []
@@ -159,24 +181,7 @@ def pipeline_worker(
         if newly_extracted_sub_path and newly_extracted_sub_path.exists():
             final_sub_path.unlink(missing_ok=True)
             shutil.move(str(newly_extracted_sub_path), str(final_sub_path))
-
-            # Clean up any stale offset versions of this subtitle
-            parent = base_sub_path.parent
-            stem = base_sub_path.stem
-            suffix = base_sub_path.suffix
-            escaped_stem = re.escape(stem)
-            escaped_suffix = re.escape(suffix)
-            pattern = re.compile(rf"^{escaped_stem}(?:\.\[[-+]?\d+(?:\.\d+)?s\])?{escaped_suffix}$", re.IGNORECASE)
-            try:
-                for entry in os.scandir(str(parent)):
-                    if entry.is_file():
-                        name = entry.name
-                        if pattern.match(name):
-                            p = Path(entry.path)
-                            if p.resolve() != final_sub_path.resolve():
-                                p.unlink(missing_ok=True)
-            except OSError:
-                pass
+            _cleanup_stale_subtitle_offsets(base_sub_path, final_sub_path)
 
         if final_chapter_path:
             temp_chapter = temp_dir / final_chapter_path.name
