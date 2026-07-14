@@ -203,6 +203,14 @@ class TestDetectSubLang:
         assert mod.detect_sub_lang("episode_01.jpn.[+2.5s]") == "jpn"
         assert mod.detect_sub_lang("episode_01.[+5s].ind") == "ind"
 
+    # ── release year guard ───────────────────────────────────────────────────
+    def test_release_year_guard_ignores_dash_years(self, mod):
+        assert mod.parse_episode("Frieren - 2023 - 05") == ("", "E", "05")
+        assert mod.parse_episode("One Piece - 1999 - 12") == ("", "E", "12")
+        assert mod.parse_episode("Show - 1234") == ("", "E", "1234")
+        assert mod.parse_episode("Show - 2150") == ("", "E", "2150")
+        assert mod.parse_episode("Show - EP2023") == ("", "E", "2023")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ep_type_label
