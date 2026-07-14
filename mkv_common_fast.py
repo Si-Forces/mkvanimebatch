@@ -65,6 +65,7 @@ def natural_sort_key(path: Path | str) -> list:
 
 # ─── ATTACHMENT FINDERS ──────────────────────────────────────────────────────
 def parse_attachments(attachments: list[dict]) -> tuple[dict | None, list[dict]]:
+    """Separate front-cover image and font attachments from mkvmerge -J attachment metadata."""
     cover = None
     fonts = []
     for a in attachments:
@@ -131,7 +132,7 @@ def is_font_attachment(file_name: str, content_type: str) -> bool:
 
 
 # ─── SUBPROCESS HELPER ───────────────────────────────────────────────────────
-def run_subprocess(cmd: list[str], *, capture_stdout: bool = True, timeout: int | None = None) -> subprocess.CompletedProcess:
+def run_subprocess(cmd: list[str], *, capture_stdout: bool = True, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
     stdout_opt = subprocess.PIPE if capture_stdout else subprocess.DEVNULL
     return subprocess.run(
         cmd, stdout=stdout_opt, stderr=subprocess.PIPE, text=True,
@@ -221,6 +222,7 @@ _LANG_SUFFIX_RE = re.compile(r"[._]([a-zA-Z]{2,3})$")
 
 @lru_cache(maxsize=1024)
 def detect_sub_lang(sub_stem: str) -> str:
+    """Infer subtitle 3-letter language code ('ind', 'eng', 'jpn', 'und') from filename patterns."""
     # Strip any offset suffix like .[+5s] or .[-3s] at the end of the stem
     sub_stem = re.sub(r'\.\[[-+]?\d+(?:\.\d+)?s\]$', '', sub_stem, flags=re.IGNORECASE)
     m = _BRACKET_LANG_RE.search(sub_stem)
@@ -429,7 +431,7 @@ def shift_ass_timestamps(path: Path, offset_seconds: float) -> int:
         with path.open("rb") as f:
             has_bom = f.read(3) == b"\xef\xbb\xbf"
         raw = path.read_text(encoding="utf-8-sig")
-    except Exception:
+    except (OSError, UnicodeDecodeError):
         return 0
 
     lines = raw.splitlines(keepends=True)
@@ -449,6 +451,7 @@ def shift_ass_timestamps(path: Path, offset_seconds: float) -> int:
 
         is_event_line = False
         prefix = ""
+        rest = ""
         if in_events:
             parts_colon = stripped.split(":", 1)
             if len(parts_colon) == 2:
@@ -456,10 +459,10 @@ def shift_ass_timestamps(path: Path, offset_seconds: float) -> int:
                 if key in ("dialogue", "comment"):
                     is_event_line = True
                     prefix = parts_colon[0]
+                    rest = parts_colon[1]
 
         if is_event_line:
             newline = line[len(stripped):]
-            rest = stripped.split(":", 1)[1]
             parts = rest.split(",", 9)
             if len(parts) >= 10:
                 try:
@@ -467,7 +470,7 @@ def shift_ass_timestamps(path: Path, offset_seconds: float) -> int:
                     parts[2] = _ass_cs_to_time(_ass_time_to_cs(parts[2]) + offset_cs)
                     out_lines.append(f"{prefix}:{','.join(parts)}{newline}")
                     shifted_count += 1
-                except Exception:
+                except (ValueError, KeyError, IndexError):
                     out_lines.append(line)
             else:
                 out_lines.append(line)
@@ -485,6 +488,10 @@ def select_best_subtitle_track(
     *,
     codec_filter: frozenset[str] | None = None,
 ) -> tuple[int, str, bool] | None:
+    """Select the best candidate subtitle track using a priority scoring matrix (language, codec, dialogue).
+    
+    Returns (track_id, detected_language, is_embedded) or None if no acceptable candidate exists.
+    """
     candidates = []
     for t in tracks:
         if t.get("type") != "subtitles":
@@ -593,6 +600,16 @@ class ParsedFile:
     parsed: EpisodeInfo | None
 
 
+def _create_parsed_file(path: Path) -> ParsedFile:
+    """Construct a ParsedFile instance with episode number metadata pre-evaluated."""
+    return ParsedFile(
+        path=path,
+        name=path.name,
+        stem=path.stem,
+        parsed=parse_episode(path.stem),
+    )
+
+
 @dataclass(frozen=True)
 class ScanResults:
     subs: list[ParsedFile]
@@ -615,12 +632,7 @@ def scan_mkv_files(dir_path: Path, recursive: bool = True, ignore_paths: set[Pat
                         if entry.is_file():
                             if name.lower().endswith(".mkv"):
                                 path = Path(entry.path)
-                                results.append(ParsedFile(
-                                    path=path,
-                                    name=name,
-                                    stem=path.stem,
-                                    parsed=parse_episode(path.stem)
-                                ))
+                                results.append(_create_parsed_file(path))
                         elif entry.is_dir(follow_symlinks=False) and recursive:
                             if name.lower() != "output":
                                 entry_path = Path(entry.path)
@@ -647,16 +659,14 @@ def scan_assets(dir_path: Path) -> ScanResults:
                     if not entry.is_file():
                         continue
                     suffix = Path(entry.name).suffix.lower()
+                    path = Path(entry.path)
                     
                     if suffix == SUBTITLE_EXT:
-                        path = Path(entry.path)
-                        subs.append(ParsedFile(path=path, name=entry.name, stem=path.stem, parsed=parse_episode(path.stem)))
+                        subs.append(_create_parsed_file(path))
                     elif suffix == CHAPTER_EXT:
-                        path = Path(entry.path)
-                        chapters.append(ParsedFile(path=path, name=entry.name, stem=path.stem, parsed=parse_episode(path.stem)))
+                        chapters.append(_create_parsed_file(path))
                     elif suffix in COVER_EXTENSIONS:
-                        path = Path(entry.path)
-                        covers.append(ParsedFile(path=path, name=entry.name, stem=path.stem, parsed=parse_episode(path.stem)))
+                        covers.append(_create_parsed_file(path))
                 except OSError:
                     continue
     except OSError:

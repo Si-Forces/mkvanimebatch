@@ -177,7 +177,7 @@ def is_font_attachment(file_name: str, content_type: str) -> bool:
 
 
 # ─── SUBPROCESS HELPER ───────────────────────────────────────────────────────
-def run_subprocess(cmd: list[str], *, timeout: int | None = None) -> subprocess.CompletedProcess:
+def run_subprocess(cmd: list[str], *, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
     """Run a subprocess with consistent UTF-8 encoding/error handling."""
     return subprocess.run(
         cmd, capture_output=True, text=True,
@@ -305,6 +305,7 @@ _LANG_SUFFIX_RE = re.compile(r"[._]([a-zA-Z]{2,3})$")
 
 @lru_cache(maxsize=1024)
 def detect_sub_lang(sub_stem: str) -> str:
+    """Infer subtitle 3-letter language code ('ind', 'eng', 'jpn', 'und') from filename patterns."""
     # Strip any offset suffix like .[+5s] or .[-3s] at the end of the stem
     sub_stem = re.sub(r'\.\[[-+]?\d+(?:\.\d+)?s\]$', '', sub_stem, flags=re.IGNORECASE)
     m = _BRACKET_LANG_RE.search(sub_stem)
@@ -647,7 +648,7 @@ def inspect_videos(videos: list[Path], pool: ThreadPoolExecutor) -> dict[Path, d
     return cache
 
 
-def run_subprocess_quiet(cmd: list[str], *, timeout: int | None = None) -> subprocess.CompletedProcess:
+def run_subprocess_quiet(cmd: list[str], *, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
     """Run a subprocess and redirect stdout to DEVNULL, preserving stderr."""
     return subprocess.run(
         cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
@@ -661,6 +662,16 @@ class ParsedFile:
     name: str
     stem: str
     parsed: EpisodeInfo | None
+
+
+def _create_parsed_file(path: Path) -> ParsedFile:
+    """Construct a ParsedFile instance with episode number metadata pre-evaluated."""
+    return ParsedFile(
+        path=path,
+        name=path.name,
+        stem=path.stem,
+        parsed=parse_episode(path.stem),
+    )
 
 
 @dataclass(frozen=True)
@@ -682,12 +693,7 @@ def scan_mkv_files(dir_path: Path, ignore_paths: set[Path] | None = None) -> lis
                         if entry.is_file():
                             if name.lower().endswith(".mkv"):
                                 path = Path(entry.path)
-                                results.append(ParsedFile(
-                                    path=path,
-                                    name=name,
-                                    stem=path.stem,
-                                    parsed=parse_episode(path.stem)
-                                ))
+                                results.append(_create_parsed_file(path))
                         elif entry.is_dir(follow_symlinks=False):
                             if name.lower() != "output":
                                 entry_path = Path(entry.path)
@@ -714,16 +720,14 @@ def scan_assets(dir_path: Path) -> ScanResults:
                     if not entry.is_file():
                         continue
                     suffix = Path(entry.name).suffix.lower()
+                    path = Path(entry.path)
                     
                     if suffix == SUBTITLE_EXT:
-                        path = Path(entry.path)
-                        subs.append(ParsedFile(path=path, name=entry.name, stem=path.stem, parsed=parse_episode(path.stem)))
+                        subs.append(_create_parsed_file(path))
                     elif suffix == CHAPTER_EXT:
-                        path = Path(entry.path)
-                        chapters.append(ParsedFile(path=path, name=entry.name, stem=path.stem, parsed=parse_episode(path.stem)))
+                        chapters.append(_create_parsed_file(path))
                     elif suffix in COVER_EXTENSIONS:
-                        path = Path(entry.path)
-                        covers.append(ParsedFile(path=path, name=entry.name, stem=path.stem, parsed=parse_episode(path.stem)))
+                        covers.append(_create_parsed_file(path))
                 except OSError:
                     continue
     except OSError:
@@ -768,7 +772,7 @@ def shift_ass_timestamps(path: Path, offset_seconds: float, log: list[str] | Non
         with path.open("rb") as f:
             has_bom = f.read(3) == b"\xef\xbb\xbf"
         raw = path.read_text(encoding="utf-8-sig")
-    except Exception as e:
+    except (OSError, UnicodeDecodeError) as e:
         if log is not None:
             log.append(f"   -> ERROR (sub shift): Failed to read subtitle file: {e}")
         return 0
@@ -790,6 +794,7 @@ def shift_ass_timestamps(path: Path, offset_seconds: float, log: list[str] | Non
 
         is_event_line = False
         prefix = ""
+        rest = ""
         if in_events:
             parts_colon = stripped.split(":", 1)
             if len(parts_colon) == 2:
@@ -797,10 +802,10 @@ def shift_ass_timestamps(path: Path, offset_seconds: float, log: list[str] | Non
                 if key in ("dialogue", "comment"):
                     is_event_line = True
                     prefix = parts_colon[0]
+                    rest = parts_colon[1]
 
         if is_event_line:
             newline = line[len(stripped):]
-            rest = stripped.split(":", 1)[1]
             parts = rest.split(",", 9)
             if len(parts) >= 10:
                 try:
@@ -808,7 +813,7 @@ def shift_ass_timestamps(path: Path, offset_seconds: float, log: list[str] | Non
                     parts[2] = _ass_cs_to_time(_ass_time_to_cs(parts[2]) + offset_cs)
                     out_lines.append(f"{prefix}:{','.join(parts)}{newline}")
                     shifted_count += 1
-                except Exception:
+                except (ValueError, KeyError, IndexError):
                     out_lines.append(line)
             else:
                 out_lines.append(line)
