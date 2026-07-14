@@ -40,6 +40,10 @@ from mkv_common_fast import (
 SCRIPT_DIR = Path(__file__).resolve().parent
 SUPPORTED_SUB_CODECS = frozenset({"s_text/ass"})
 IO_LOCK = threading.Lock()
+_OFFSET_SUBTITLE_RE = re.compile(
+    r"^(?P<stem>.+?)(?:\.\[[-+]?\d+(?:\.\d+)?s\])?(?P<suffix>\.ass)$",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -66,22 +70,31 @@ def select_subtitle(json_data: dict, file_stem: str, file_dir: Path, ep_tag: str
 
 
 def _cleanup_stale_subtitle_offsets(base_sub_path: Path, current_final_path: Path) -> None:
-    """Remove any stale offset-suffixed subtitle files for the same episode and language."""
-    if base_sub_path.resolve() != current_final_path.resolve():
-        base_sub_path.unlink(missing_ok=True)
-    parent = base_sub_path.parent
-    stem = base_sub_path.stem
-    suffix = base_sub_path.suffix
-    pattern = re.compile(
-        rf"^{re.escape(stem)}\.\[[-+]?\d+(?:\.\d+)?s\]{re.escape(suffix)}$",
-        re.IGNORECASE,
+    """Remove stale subtitle variants for one track stem."""
+    _cleanup_stale_subtitle_offsets_bulk(
+        base_sub_path.parent,
+        {base_sub_path.stem: current_final_path.name},
     )
+
+
+def _cleanup_stale_subtitle_offsets_bulk(mkv_dir: Path, active_subs: dict[str, str]) -> None:
+    """Single directory pass that removes stale subtitle variants for known stems."""
+    if not active_subs:
+        return
     try:
-        for entry in os.scandir(str(parent)):
-            if entry.is_file() and pattern.match(entry.name):
-                p = Path(entry.path)
-                if p.resolve() != current_final_path.resolve():
-                    p.unlink(missing_ok=True)
+        with os.scandir(str(mkv_dir)) as it:
+            for entry in it:
+                if not entry.is_file():
+                    continue
+                match = _OFFSET_SUBTITLE_RE.match(entry.name)
+                if not match:
+                    continue
+                stem = match.group("stem")
+                expected_name = active_subs.get(stem)
+                if expected_name is None:
+                    continue
+                if entry.name.lower() != expected_name.lower():
+                    Path(entry.path).unlink(missing_ok=True)
     except OSError:
         pass
 
@@ -92,6 +105,8 @@ def pipeline_worker(
     json_data: dict | None,
     fonts_dir: Path,
     font_registry: FontRegistry,
+    stale_subs_map: dict[str, str],
+    stale_subs_lock: threading.Lock,
     sub_offset: float = 0.0,
 ) -> bool:
     # 1. Inspect (pre-fetched)
@@ -184,7 +199,8 @@ def pipeline_worker(
         if newly_extracted_sub_path and newly_extracted_sub_path.exists():
             final_sub_path.unlink(missing_ok=True)
             shutil.move(str(newly_extracted_sub_path), str(final_sub_path))
-            _cleanup_stale_subtitle_offsets(base_sub_path, final_sub_path)
+            with stale_subs_lock:
+                stale_subs_map[base_sub_path.stem] = final_sub_path.name
 
         if final_chapter_path:
             temp_chapter = temp_dir / final_chapter_path.name
@@ -283,13 +299,25 @@ def _run(input_dir: Path, fonts_dir: Path, mkv_files: list[ParsedFile], pool: Th
             pass
             
     font_registry = FontRegistry(existing=existing_fonts)
+    stale_subs_map: dict[str, str] = {}
+    stale_subs_lock = threading.Lock()
 
     # Pre-inspect videos using the global pool
     inspect_cache = inspect_videos([mkv.path for mkv in mkv_files], pool)
 
     success_count = 0
     futures = {
-        pool.submit(pipeline_worker, mkv.path, mkv.parsed, inspect_cache.get(mkv.path), fonts_dir, font_registry, sub_offset): mkv
+        pool.submit(
+            pipeline_worker,
+            mkv.path,
+            mkv.parsed,
+            inspect_cache.get(mkv.path),
+            fonts_dir,
+            font_registry,
+            stale_subs_map,
+            stale_subs_lock,
+            sub_offset,
+        ): mkv
         for mkv in mkv_files
     }
     
@@ -300,7 +328,9 @@ def _run(input_dir: Path, fonts_dir: Path, mkv_files: list[ParsedFile], pool: Th
                 success_count += 1
         except Exception as e:
             print(f"  [-] Failed: {mkv.name} ({e})")
-                
+
+    _cleanup_stale_subtitle_offsets_bulk(input_dir, stale_subs_map)
+
     print(f"Finished folder: {success_count}/{len(mkv_files)} succeeded.")
     return success_count == len(mkv_files)
 

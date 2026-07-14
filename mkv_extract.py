@@ -136,23 +136,38 @@ def _hash_file(filepath: Path) -> str:
 
 
 # ─── PER-FILE WORKER ─────────────────────────────────────────────────────────
+_OFFSET_SUBTITLE_RE = re.compile(
+    r"^(?P<stem>.+?)(?:\.\[[-+]?\d+(?:\.\d+)?s\])?(?P<suffix>\.ass)$",
+    re.IGNORECASE,
+)
+
+
 def _cleanup_stale_subtitle_offsets(base_sub_path: Path, current_final_path: Path) -> None:
-    """Remove any stale offset-suffixed subtitle files for the same episode and language."""
-    if base_sub_path.exists() and base_sub_path.resolve() != current_final_path.resolve():
-        base_sub_path.unlink(missing_ok=True)
-    parent = base_sub_path.parent
-    stem = base_sub_path.stem
-    suffix = base_sub_path.suffix
-    pattern = re.compile(
-        rf"^{re.escape(stem)}\.\[[-+]?\d+(?:\.\d+)?s\]{re.escape(suffix)}$",
-        re.IGNORECASE,
+    """Remove stale subtitle variants for one track stem."""
+    _cleanup_stale_subtitle_offsets_bulk(
+        base_sub_path.parent,
+        {base_sub_path.stem: current_final_path.name},
     )
+
+
+def _cleanup_stale_subtitle_offsets_bulk(mkv_dir: Path, active_subs: dict[str, str]) -> None:
+    """Single directory pass that removes stale subtitle variants for known stems."""
+    if not active_subs:
+        return
     try:
-        for entry in os.scandir(str(parent)):
-            if entry.is_file() and pattern.match(entry.name):
-                p = Path(entry.path)
-                if p.resolve() != current_final_path.resolve():
-                    p.unlink(missing_ok=True)
+        with os.scandir(str(mkv_dir)) as it:
+            for entry in it:
+                if not entry.is_file():
+                    continue
+                match = _OFFSET_SUBTITLE_RE.match(entry.name)
+                if not match:
+                    continue
+                stem = match.group("stem")
+                expected_name = active_subs.get(stem)
+                if expected_name is None:
+                    continue
+                if entry.name.lower() != expected_name.lower():
+                    Path(entry.path).unlink(missing_ok=True)
     except OSError:
         pass
 
@@ -162,6 +177,8 @@ def process_file(
     json_data:     dict | None,
     fonts_dir:     Path,
     font_registry: FontRegistry,
+    stale_subs_map: dict[str, str] | None = None,
+    stale_subs_lock: threading.Lock | None = None,
     sub_offset:    float = 0.0,
 ) -> tuple[Path, list[str], bool]:
     mkv_path = mkv_file.path
@@ -285,7 +302,11 @@ def process_file(
             staged_path.replace(final_path)
 
         if final_sub_path and final_sub_path.exists():
-            _cleanup_stale_subtitle_offsets(base_sub_path, final_sub_path)
+            if stale_subs_map is not None and stale_subs_lock is not None:
+                with stale_subs_lock:
+                    stale_subs_map[base_sub_path.stem] = final_sub_path.name
+            else:
+                _cleanup_stale_subtitle_offsets(base_sub_path, final_sub_path)
 
         if font_args and temp_dir:
             id_to_meta = {str(a["id"]): a for a in new_font_attachments}
@@ -374,6 +395,8 @@ def _run(input_dir: Path, fonts_dir: Path, mkv_files: list[ParsedFile], pool: Th
                     except OSError:
                         pass
     font_registry = FontRegistry(existing=existing_hashes)
+    stale_subs_map: dict[str, str] = {}
+    stale_subs_lock = threading.Lock()
 
     logger.info("Processing %d file(s) (up to %d at a time)...", len(mkv_files), max_workers)
 
@@ -389,6 +412,8 @@ def _run(input_dir: Path, fonts_dir: Path, mkv_files: list[ParsedFile], pool: Th
             json_cache.get(mkv_file.path),
             fonts_dir,
             font_registry,
+            stale_subs_map,
+            stale_subs_lock,
             sub_offset,
         ): mkv_file.path
         for mkv_file in mkv_files
@@ -443,6 +468,8 @@ def _run(input_dir: Path, fonts_dir: Path, mkv_files: list[ParsedFile], pool: Th
                 logger.error(line)
             else:
                 logger.info(line)
+
+    _cleanup_stale_subtitle_offsets_bulk(input_dir, stale_subs_map)
 
     logger.info("=========================================")
     logger.info(" All files processed.")
