@@ -115,7 +115,20 @@ _COMMENTARY_RE = re.compile(r"\b(commentary|comment|audio\s+description|ad|exten
 
 
 def _pick_audio(audio_tracks: list[dict], video_pos: int) -> tuple[dict | None, str]:
-    """Select best audio track using a priority scoring system, excluding commentary/description."""
+    """Select best audio track using a priority scoring matrix, excluding commentary/description tracks.
+    
+    Scoring Priorities:
+    - Tier 10: Japanese stereo dialogue (Primary audio track)
+    - Tier 9:  Japanese stereo (Undesignated dialogue)
+    - Tier 8:  Japanese multi-channel / surround (5.1/7.1)
+    - Tier 7:  Undetermined stereo dialogue (Likely Japanese)
+    - Tier 6:  Undetermined stereo (Likely Japanese)
+    - Tier 5:  Undetermined multi-channel (Likely Japanese)
+    - Tier 4:  Stereo fallback (Non-Japanese audio)
+    - Tier 3:  First audio after video stream
+    - Tier 2:  Japanese audio fallback (Commentary-possible pool)
+    - Tier 1:  First available audio (Last resort)
+    """
     if not audio_tracks:
         return None, ""
 
@@ -231,8 +244,8 @@ def scan_fonts(fonts_dir: Path) -> FontInfo:
                 continue
             font_args += ["--attachment-mime-type", mime, "--attach-file", entry.path]
             count += 1
-    except OSError:
-        pass
+    except OSError as exc:
+        print(f"[WARNING] Failed to scan fonts directory '{fonts_dir}': {exc}")
     return FontInfo(args=tuple(font_args), count=count)
 
 
@@ -577,10 +590,11 @@ def pipeline_worker(
     try:
         if tr.audio_id is not None and tr.audio_codec == "A_FLAC":
             if temp_dir is None:
-                raise RuntimeError("temp_dir is required for FLAC→Opus conversion but was None")
+                print(f"  [-] Failed: {job.video_name} (temp_dir is required for FLAC→Opus conversion)")
+                return False
             temp_opus = _convert_flac_to_opus(video, tr.audio_id, tr.audio_index, temp_dir, job.base, opus_bitrate, complexity, ffmpeg_threads)
             if temp_opus is None:
-                raise RuntimeError("ffmpeg FLAC to Opus conversion failed")
+                return False
 
         # Determine temporary output destination to prevent corrupted/partial files in case of interruption
         if temp_dir:
@@ -732,7 +746,10 @@ def _run(
             except Exception as e:
                 print(f"  [-] Failed: {v.name} ({e})")
 
-        print(f"Finished folder: {success_count}/{parseable_count} succeeded.")
+        if dry_run:
+            print(f"[Dry Run Summary] Planned {len(unprocessed_videos)} file(s), skipped {already_remuxed_count} already remuxed file(s).")
+        else:
+            print(f"Finished folder: {success_count}/{parseable_count} succeeded.")
         return success_count == parseable_count
     finally:
         if temp_dir is not None:
