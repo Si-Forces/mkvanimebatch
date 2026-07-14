@@ -114,9 +114,9 @@ def _run_mkvextract(mkv_path: Path, args: list[str], log: list[str]) -> None:
         
     result = run_subprocess(["mkvextract", str(mkv_path), *args])
     if result.returncode > 1:
-        log.append(
-            f"  WARNING: Extraction failed "
-            f"(exit {result.returncode}): {result.stderr.strip()}"
+        raise RuntimeError(
+            f"mkvextract failed (exit {result.returncode}): "
+            f"{result.stderr.strip()}"
         )
 
 def _clean_empty_file(path: Path, log: list[str], item_name: str) -> None:
@@ -168,7 +168,7 @@ def process_file(
         )
 
     extract_args: list[str] = []
-    paths_to_clean: list[tuple[Path, str]] = [] 
+    queued_outputs: list[tuple[Path, str]] = []
 
     sub_result = select_subtitle(json_data, file_stem, file_dir, ep_tag, log)
     final_sub_path = None
@@ -180,7 +180,7 @@ def process_file(
         final_sub_path = sub_path
         log.append(f"   -> Queued subtitle track {track_id} → {sub_path.name}")
         extract_args += ["tracks", f"{track_id}:{sub_path}"]
-        paths_to_clean.append((sub_path, "Subtitle"))
+        queued_outputs.append((sub_path, "Subtitle"))
     else:
         log.append("   -> No suitable ASS subtitle tracks found.")
 
@@ -189,7 +189,7 @@ def process_file(
         chapter_path = file_dir / f"{chapter_stem}_chapters.xml"
         log.append(f"   -> Queued chapters → {chapter_path.name}")
         extract_args += ["chapters", str(chapter_path)]
-        paths_to_clean.append((chapter_path, "Chapter"))
+        queued_outputs.append((chapter_path, "Chapter"))
     else:
         log.append("   -> No chapters found in source.")
 
@@ -204,13 +204,26 @@ def process_file(
         else:
             log.append(f"   -> Queued cover image → {cover_path.name}")
             extract_args += ["attachments", f"{cover['id']}:{cover_path}"]
-            paths_to_clean.append((cover_path, "Cover"))
+            queued_outputs.append((cover_path, "Cover"))
     else:
         log.append("   -> No cover image found in source.")
 
     temp_dir = None
     claimed_this_call = []
+    extracted_ok: set[tuple[str, int]] = set()
     try:
+        temp_dir = Path(tempfile.mkdtemp(prefix=".tmp_extract_", dir=file_dir))
+        staged_outputs: list[tuple[Path, Path, str]] = []
+        for final_path, item_name in queued_outputs:
+            staged_path = temp_dir / final_path.name
+            final_text = str(final_path)
+            for index, arg in enumerate(extract_args):
+                if arg == final_text:
+                    extract_args[index] = str(staged_path)
+                elif arg.endswith(final_text):
+                    extract_args[index] = f"{arg[:-len(final_text)]}{staged_path}"
+            staged_outputs.append((staged_path, final_path, item_name))
+
         font_count = 0
         font_args: list[str] = []
         _attachments_open = "attachments" in extract_args
@@ -225,9 +238,7 @@ def process_file(
                 if font_registry.try_claim_name_size(safe_name, size):
                     new_font_attachments.append(a)
                     claimed_this_call.append((safe_name, size))
-
         if new_font_attachments:
-            temp_dir = Path(tempfile.mkdtemp(prefix=".tmp_fonts_", dir=file_dir))
             for a in new_font_attachments:
                 safe_name = safe_filename(a["file_name"])
                 temp_font_path = temp_dir / f"{a['id']}_{safe_name}"
@@ -242,9 +253,14 @@ def process_file(
         log.append("   -> Running mkvextract...")
         _run_mkvextract(mkv_path, extract_args, log)
 
-        if final_sub_path and sub_offset != 0.0:
-            if final_sub_path.exists() and final_sub_path.stat().st_size > 0:
-                shift_ass_timestamps(final_sub_path, sub_offset, log)
+        staged_output_paths = {staged for staged, _, _ in staged_outputs}
+        for staged_path, final_path, item_name in staged_outputs:
+            _clean_empty_file(staged_path, log, item_name)
+            if not staged_path.exists():
+                continue
+            if final_path == final_sub_path and sub_offset != 0.0:
+                shift_ass_timestamps(staged_path, sub_offset, log)
+            staged_path.replace(final_path)
 
         if final_sub_path and final_sub_path.exists():
             # Clean up any stale offset versions of this subtitle
@@ -265,11 +281,12 @@ def process_file(
             except OSError:
                 pass
 
-        extracted_ok = set()
         if font_args and temp_dir:
             id_to_meta = {str(a["id"]): a for a in new_font_attachments}
             for temp_font_path in temp_dir.iterdir():
                 if not temp_font_path.is_file() or temp_font_path.stat().st_size == 0:
+                    continue
+                if temp_font_path in staged_output_paths:
                     continue
                 try:
                     file_hash = _hash_file(temp_font_path)
@@ -307,10 +324,7 @@ def process_file(
             if (name, size) not in extracted_ok:
                 font_registry.release_name_size(name, size)
 
-        for path, name in paths_to_clean:
-            _clean_empty_file(path, log, name)
-
-    except Exception as exc:
+    except Exception:
         for name, size in claimed_this_call:
             if (name, size) not in extracted_ok:
                 font_registry.release_name_size(name, size)
