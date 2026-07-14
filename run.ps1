@@ -1,20 +1,12 @@
 # Set console encoding to UTF-8 to handle any special characters cleanly
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-# Base URL for downloading the Python scripts if they don't exist in the current folder.
-# Swap this out with your GitHub/Gist raw URL if you want it fully self-contained.
-$BaseUrl = "https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main"
-
-# Helper function to ensure necessary files are present
-function Ensure-File ($fileName) {
-    $filePath = Join-Path $PSScriptRoot $fileName
-    if (-not (Test-Path $filePath)) {
-        Write-Host "[INFO] $fileName not found. Downloading from source..." -ForegroundColor Cyan
-        try {
-            Invoke-RestMethod -Uri "$BaseUrl/$fileName" -OutFile $filePath
-        } catch {
-            Write-Host "[ERROR] Failed to download $fileName. Ensure `$BaseUrl` is correct and you have an active internet connection." -ForegroundColor Red
-            Read-Host "Press Enter to continue..."
+# Refuse to execute an incomplete or mixed-version local installation.
+function Test-RequiredFiles ([string[]]$FileNames) {
+    foreach ($fileName in $FileNames) {
+        $filePath = Join-Path $PSScriptRoot $fileName
+        if (-not (Test-Path -LiteralPath $filePath -PathType Leaf)) {
+            Write-Host "[ERROR] Required file '$fileName' is missing. Re-download the complete release." -ForegroundColor Red
             return $false
         }
     }
@@ -74,7 +66,7 @@ while ($true) {
             $inputDir = Read-Host "Enter Input Directory (or press Enter)"
 
             # Ensure script components exist locally
-            if ((Ensure-File "mkv_common.py") -and (Ensure-File "mkv_remux.py")) {
+            if (Test-RequiredFiles @("mkv_common.py", "mkv_remux.py")) {
                 $cmdArgs = @()
                 if ($inputDir -ne "") {
                     $cmdArgs += "--input-dir", $inputDir
@@ -104,7 +96,7 @@ while ($true) {
             $inputDir = Read-Host "Enter Input Directory (or press Enter)"
 
             # Ensure script components exist locally
-            if ((Ensure-File "mkv_common.py") -and (Ensure-File "mkv_extract.py")) {
+            if (Test-RequiredFiles @("mkv_common.py", "mkv_extract.py")) {
                 $cmdArgs = @()
                 if ($inputDir -ne "") {
                     $cmdArgs += "--input-dir", $inputDir
