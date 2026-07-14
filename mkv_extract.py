@@ -21,6 +21,7 @@ import shutil
 import tempfile
 import threading
 import logging
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -135,6 +136,27 @@ def _hash_file(filepath: Path) -> str:
 
 
 # ─── PER-FILE WORKER ─────────────────────────────────────────────────────────
+def _cleanup_stale_subtitle_offsets(base_sub_path: Path, current_final_path: Path) -> None:
+    """Remove any stale offset-suffixed subtitle files for the same episode and language."""
+    if base_sub_path.exists() and base_sub_path.resolve() != current_final_path.resolve():
+        base_sub_path.unlink(missing_ok=True)
+    parent = base_sub_path.parent
+    stem = base_sub_path.stem
+    suffix = base_sub_path.suffix
+    pattern = re.compile(
+        rf"^{re.escape(stem)}\.\[[-+]?\d+(?:\.\d+)?s\]{re.escape(suffix)}$",
+        re.IGNORECASE,
+    )
+    try:
+        for entry in os.scandir(str(parent)):
+            if entry.is_file() and pattern.match(entry.name):
+                p = Path(entry.path)
+                if p.resolve() != current_final_path.resolve():
+                    p.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def process_file(
     mkv_file:      ParsedFile,
     json_data:     dict | None,
@@ -263,23 +285,7 @@ def process_file(
             staged_path.replace(final_path)
 
         if final_sub_path and final_sub_path.exists():
-            # Clean up any stale offset versions of this subtitle
-            parent = base_sub_path.parent
-            stem = base_sub_path.stem
-            suffix = base_sub_path.suffix
-            escaped_stem = re.escape(stem)
-            escaped_suffix = re.escape(suffix)
-            pattern = re.compile(rf"^{escaped_stem}(?:\.\[[-+]?\d+(?:\.\d+)?s\])?{escaped_suffix}$", re.IGNORECASE)
-            try:
-                for entry in os.scandir(str(parent)):
-                    if entry.is_file():
-                        name = entry.name
-                        if pattern.match(name):
-                            p = Path(entry.path)
-                            if p.resolve() != final_sub_path.resolve():
-                                p.unlink(missing_ok=True)
-            except OSError:
-                pass
+            _cleanup_stale_subtitle_offsets(base_sub_path, final_sub_path)
 
         if font_args and temp_dir:
             id_to_meta = {str(a["id"]): a for a in new_font_attachments}
@@ -485,7 +491,11 @@ def main() -> None:
         logger.error("No MKV files found.")
         sys.exit(1)
 
-    mkv_dirs = sorted(list(set(mkv.path.parent for mkv in all_mkvs)), key=natural_sort_key)
+    mkvs_by_dir: dict[Path, list[ParsedFile]] = defaultdict(list)
+    for mkv in all_mkvs:
+        mkvs_by_dir[mkv.path.parent].append(mkv)
+
+    mkv_dirs = sorted(list(mkvs_by_dir.keys()), key=natural_sort_key)
 
     overall_success = True
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -495,7 +505,7 @@ def main() -> None:
             logger.info("=" * 60)
 
             current_fonts_dir = mkv_dir / "fonts"
-            dir_mkvs = [mkv for mkv in all_mkvs if mkv.path.parent == mkv_dir]
+            dir_mkvs = mkvs_by_dir[mkv_dir]
             success = _run(mkv_dir, current_fonts_dir, dir_mkvs, pool, max_workers, dry_run, sub_offset=cfg.sub_offset)
             if not success:
                 overall_success = False

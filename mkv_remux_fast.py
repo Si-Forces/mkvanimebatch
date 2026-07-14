@@ -14,6 +14,7 @@ import tempfile
 import argparse
 import uuid
 import threading
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -272,6 +273,7 @@ def scan_fonts(fonts_dir: Path) -> FontInfo:
 class SubIndex:
     def __init__(self) -> None:
         self._index = {}
+        self._seen = set()
 
     def add(self, sub_file: ParsedFile) -> None:
         if not sub_file.parsed:
@@ -280,11 +282,11 @@ class SubIndex:
         lang = detect_sub_lang(sub_file.stem)
         suffix = sub_file.path.suffix.lower()
         key = f"{ep_type}|{ep}"
-        existing = self._index.setdefault(key, [])
-        for f in existing:
-            if f.parsed[0] == season and detect_sub_lang(f.stem) == lang and f.path.suffix.lower() == suffix:
-                return
-        existing.append(sub_file)
+        seen_key = (key, season, lang, suffix)
+        if seen_key in self._seen:
+            return
+        self._seen.add(seen_key)
+        self._index.setdefault(key, []).append(sub_file)
 
     def lookup(self, ep_type: str, ep: str, mkv_season: str) -> tuple[Path, str] | None:
         key = f"{ep_type}|{ep}"
@@ -645,7 +647,8 @@ def pipeline_worker(
 
 
 def _run(
-    input_dir:    Path,
+    mkv_dir:      Path,
+    videos:       list[ParsedFile],
     temp_parent_dir: Path | None,
     output_dir:   Path,
     fonts_dir:    Path,
@@ -663,8 +666,6 @@ def _run(
     else:
         print("No external fonts detected in fonts directory.")
 
-    # Use scandir wrapper non-recursively for the target folder
-    videos = scan_mkv_files(input_dir, recursive=False)
     if not videos:
         return False
 
@@ -803,7 +804,11 @@ def main() -> None:
         print("[ERROR] No MKV files found.")
         sys.exit(1)
 
-    mkv_dirs = sorted(list(set(mkv.path.parent for mkv in all_mkvs)), key=natural_sort_key)
+    mkvs_by_dir: dict[Path, list[ParsedFile]] = defaultdict(list)
+    for mkv in all_mkvs:
+        mkvs_by_dir[mkv.path.parent].append(mkv)
+
+    mkv_dirs = sorted(list(mkvs_by_dir.keys()), key=natural_sort_key)
     overall_success = True
 
     # Global thread pool reuse
@@ -830,7 +835,8 @@ def main() -> None:
                 current_fonts_dir = mkv_dir / "fonts"
 
             try:
-                success = _run(mkv_dir, current_output_dir if not cfg.dry_run else None, current_output_dir, current_fonts_dir, search_dirs, pool, cfg.workers, cfg.bitrate, cfg.complexity, cfg.dry_run)
+                dir_mkvs = mkvs_by_dir[mkv_dir]
+                success = _run(mkv_dir, dir_mkvs, current_output_dir if not cfg.dry_run else None, current_output_dir, current_fonts_dir, search_dirs, pool, cfg.workers, cfg.bitrate, cfg.complexity, cfg.dry_run)
                 if not success:
                     overall_success = False
                 

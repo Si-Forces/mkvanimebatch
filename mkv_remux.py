@@ -24,6 +24,8 @@ import tempfile
 import argparse
 import uuid
 import logging
+import threading
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -300,6 +302,7 @@ def scan_fonts(fonts_dir: Path) -> FontInfo:
 class SubIndex:
     def __init__(self) -> None:
         self._index: dict[str, list[ParsedFile]] = {}
+        self._seen: set[tuple[str, str, str, str]] = set()
 
     def add(self, sub_file: ParsedFile) -> None:
         if not sub_file.parsed:
@@ -308,13 +311,18 @@ class SubIndex:
         lang = detect_sub_lang(sub_file.stem)
         suffix = sub_file.path.suffix.lower()
         key = f"{ep_type}|{ep}"
-        existing = self._index.setdefault(key, [])
-        for f in existing:
-            if f.parsed[0] == season and detect_sub_lang(f.stem) == lang and f.path.suffix.lower() == suffix:
-                if f.path.parent == sub_file.path.parent:
-                    logger.warning("Duplicate subtitle for key %s (lang %s, suffix %s) in '%s': keeping '%s', ignoring '%s'", key, lang, suffix, sub_file.path.parent.name, f.name, sub_file.name)
-                return
-        existing.append(sub_file)
+        seen_key = (key, season, lang, suffix)
+
+        if seen_key in self._seen:
+            for f in self._index.get(key, []):
+                if f.parsed[0] == season and detect_sub_lang(f.stem) == lang and f.path.suffix.lower() == suffix:
+                    if f.path.parent == sub_file.path.parent:
+                        logger.warning("Duplicate subtitle for key %s (lang %s, suffix %s) in '%s': keeping '%s', ignoring '%s'", key, lang, suffix, sub_file.path.parent.name, f.name, sub_file.name)
+                    break
+            return
+
+        self._seen.add(seen_key)
+        self._index.setdefault(key, []).append(sub_file)
 
     def lookup(self, ep_type: str, ep: str, mkv_season: str) -> tuple[Path, str] | None:
         key = f"{ep_type}|{ep}"
@@ -1166,7 +1174,11 @@ def main() -> None:
         logger.error("No MKV files found.")
         sys.exit(1)
 
-    mkv_dirs = sorted(list(set(mkv.path.parent for mkv in all_mkvs)), key=natural_sort_key)
+    mkvs_by_dir: dict[Path, list[ParsedFile]] = defaultdict(list)
+    for mkv in all_mkvs:
+        mkvs_by_dir[mkv.path.parent].append(mkv)
+
+    mkv_dirs = sorted(list(mkvs_by_dir.keys()), key=natural_sort_key)
 
     overall_success = True
 
@@ -1216,7 +1228,7 @@ def main() -> None:
             if not dry_run:
                 temp_dir = Path(tempfile.mkdtemp(prefix=".tmp_remux_", dir=current_output_dir))
             
-            dir_mkvs = [mkv for mkv in all_mkvs if mkv.path.parent == mkv_dir]
+            dir_mkvs = mkvs_by_dir[mkv_dir]
             
             success = False
             try:
