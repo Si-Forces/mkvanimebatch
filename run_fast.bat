@@ -71,7 +71,7 @@ ping 127.0.0.1 -n 3 >nul
 goto menu
 
 
-:: ─── OPTION 1: BATCH REMUX ──────────────────────────────────────────────
+rem --- OPTION 1: BATCH REMUX ---
 :remux
 cls
 echo =====================================================================
@@ -99,7 +99,7 @@ pause >nul
 goto menu
 
 
-:: ─── OPTION 2: EXTRACT TRACKS ───────────────────────────────────────────
+rem --- OPTION 2: EXTRACT TRACKS ---
 :extract
 cls
 echo =====================================================================
@@ -126,7 +126,7 @@ pause >nul
 goto menu
 
 
-:: ─── OPTION 3: TOGGLE DRY RUN ───────────────────────────────────────────
+rem --- OPTION 3: TOGGLE DRY RUN ---
 :toggle_dry_run
 if "!DRY_RUN_MODE!"=="OFF" (
     set "DRY_RUN_MODE=ON"
@@ -135,7 +135,7 @@ if "!DRY_RUN_MODE!"=="OFF" (
 )
 goto menu
 
-rem ─── OPTION 4: TOGGLE KEEP FONTS ─────────────────────────────────────────
+rem --- OPTION 4: TOGGLE KEEP FONTS ---
 :toggle_keep_fonts
 if "!KEEP_FONTS_MODE!"=="OFF" (
     set "KEEP_FONTS_MODE=ON"
@@ -145,7 +145,7 @@ if "!KEEP_FONTS_MODE!"=="OFF" (
 goto menu
 
 
-:: ─── OPTION 0: EXIT ─────────────────────────────────────────────────────
+rem --- OPTION 0: EXIT ---
 :exit
 cls
 echo =====================================================================
