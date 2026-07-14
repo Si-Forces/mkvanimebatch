@@ -205,6 +205,26 @@ def seasons_match(mkv_season: str, sub_season: str) -> bool:
     return mkv_season == sub_season
 
 
+def is_completed_output(path: Path) -> bool:
+    """Return whether a remux output exists and contains data."""
+    return path.is_file() and path.stat().st_size > 0
+
+
+def resolve_output_dir(
+    mkv_dir: Path,
+    root_input_dir: Path,
+    out_override: Path | None,
+) -> Path:
+    """Preserve the source directory layout beneath a custom output root."""
+    if out_override is None:
+        return mkv_dir / "Output"
+    try:
+        relative_dir = mkv_dir.relative_to(root_input_dir)
+    except ValueError:
+        relative_dir = Path()
+    return out_override / relative_dir
+
+
 def _ancestor_dirs(mkv_dir: Path, root_input_dir: Path) -> list[Path]:
     try:
         rel = mkv_dir.relative_to(root_input_dir)
@@ -529,7 +549,7 @@ def pipeline_worker(
     mkv_season, mkv_ep_type, mkv_ep = video_parsed
     out_stem    = output_stem(video.stem, mkv_ep_type, mkv_ep)
     output_file = output_dir / f"{out_stem}.mkv"
-    if output_file.exists() and output_file.stat().st_size > 0:
+    if is_completed_output(output_file):
         return True
 
     # 1. Inspect (pre-fetched)
@@ -611,8 +631,7 @@ def pipeline_worker(
             raise RuntimeError(f"mkvmerge failed (exit {run_result.returncode}): {run_result.stderr.strip()}")
         
         # Atomically promote the temp file to the final destination on success
-        output_file.unlink(missing_ok=True)
-        shutil.move(str(temp_output), str(output_file))
+        temp_output.replace(output_file)
         print(f"  [+] Remuxed: {job.video_name}")
         return True
     except Exception as e:
@@ -676,7 +695,7 @@ def _run(
         mkv_season, mkv_ep_type, mkv_ep = v.parsed
         out_stem = output_stem(v.stem, mkv_ep_type, mkv_ep)
         output_file = output_dir / f"{out_stem}.mkv"
-        if output_file.exists() and output_file.stat().st_size > 0:
+        if is_completed_output(output_file):
             already_remuxed_count += 1
             continue
             
@@ -791,7 +810,11 @@ def main() -> None:
     with ThreadPoolExecutor(max_workers=cfg.workers) as pool:
         for mkv_dir in mkv_dirs:
             print(f"\nFolder: {mkv_dir}")
-            current_output_dir = out_override if out_override else mkv_dir / "Output"
+            current_output_dir = resolve_output_dir(
+                mkv_dir,
+                root_input_dir,
+                out_override,
+            )
             if not cfg.dry_run:
                 current_output_dir.mkdir(parents=True, exist_ok=True)
             search_dirs = _ancestor_dirs(mkv_dir, root_input_dir)
@@ -807,7 +830,7 @@ def main() -> None:
                 current_fonts_dir = mkv_dir / "fonts"
 
             try:
-                success = _run(mkv_dir, mkv_dir if not cfg.dry_run else None, current_output_dir, current_fonts_dir, search_dirs, pool, cfg.workers, cfg.bitrate, cfg.complexity, cfg.dry_run)
+                success = _run(mkv_dir, current_output_dir if not cfg.dry_run else None, current_output_dir, current_fonts_dir, search_dirs, pool, cfg.workers, cfg.bitrate, cfg.complexity, cfg.dry_run)
                 if not success:
                     overall_success = False
                 

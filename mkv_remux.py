@@ -223,6 +223,26 @@ def mkv_success(result) -> bool:
     return result.returncode <= 1
 
 
+def is_completed_output(path: Path) -> bool:
+    """Return whether a remux output exists and contains data."""
+    return path.is_file() and path.stat().st_size > 0
+
+
+def resolve_output_dir(
+    mkv_dir: Path,
+    root_input_dir: Path,
+    out_override: Path | None,
+) -> Path:
+    """Preserve the source directory layout beneath a custom output root."""
+    if out_override is None:
+        return mkv_dir / "Output"
+    try:
+        relative_dir = mkv_dir.relative_to(root_input_dir)
+    except ValueError:
+        relative_dir = Path()
+    return out_override / relative_dir
+
+
 def _ancestor_dirs(mkv_dir: Path, root_input_dir: Path) -> list[Path]:
     """
     Return every directory on the path from root_input_dir down to mkv_dir,
@@ -672,8 +692,7 @@ def process_job(
             return r
 
         # Atomically promote the temp file to the final destination on success
-        output_file.unlink(missing_ok=True)
-        shutil.move(str(temp_output), str(output_file))
+        temp_output.replace(output_file)
         r.log.append("  Completed successfully.")
 
     finally:
@@ -833,7 +852,7 @@ def _plan_jobs(
 
         out_stem    = output_stem(base, mkv_ep_type, mkv_ep)
         output_file = output_dir / f"{out_stem}.mkv"
-        if output_file.exists() and output_file.stat().st_size > 0:
+        if is_completed_output(output_file):
             logger.info("  Output already exists. Skipping.")
             skipped_files.append(f"{video_name} (output already exists)")
             continue
@@ -1038,7 +1057,7 @@ def _run(
             
         mkv_season, mkv_ep_type, mkv_ep = v.parsed
         out_stem = output_stem(v.stem, mkv_ep_type, mkv_ep)
-        if (output_dir / f"{out_stem}.mkv").exists():
+        if is_completed_output(output_dir / f"{out_stem}.mkv"):
             continue
             
         if dry_run and sub_index.lookup(mkv_ep_type, mkv_ep, mkv_season) is not None:
@@ -1157,15 +1176,11 @@ def main() -> None:
             logger.info("Processing directory: %s", mkv_dir)
             logger.info("=" * 60)
 
-            # Resolve output directory for this subdirectory
-            if out_override:
-                try:
-                    rel_path = mkv_dir.relative_to(root_input_dir)
-                except ValueError:
-                    rel_path = Path()
-                current_output_dir = out_override / rel_path
-            else:
-                current_output_dir = mkv_dir / "Output"
+            current_output_dir = resolve_output_dir(
+                mkv_dir,
+                root_input_dir,
+                out_override,
+            )
 
             if not dry_run:
                 current_output_dir.mkdir(parents=True, exist_ok=True)
@@ -1199,7 +1214,7 @@ def main() -> None:
 
             temp_dir = None
             if not dry_run:
-                temp_dir = Path(tempfile.mkdtemp(prefix=".tmp_remux_", dir=mkv_dir))
+                temp_dir = Path(tempfile.mkdtemp(prefix=".tmp_remux_", dir=current_output_dir))
             
             dir_mkvs = [mkv for mkv in all_mkvs if mkv.path.parent == mkv_dir]
             
