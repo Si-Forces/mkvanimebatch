@@ -93,3 +93,23 @@ def test_successful_extraction_promotes_staged_subtitle(tmp_path, monkeypatch):
     assert succeeded is True
     assert subtitle.read_bytes() == b"complete subtitle"
     assert not list(tmp_path.glob(".tmp_extract_*"))
+
+
+def test_stale_subtitle_cleanup(tmp_path):
+    """
+    _cleanup_stale_subtitle_offsets should remove old offset-suffixed versions.
+    """
+    import mkv_extract_fast
+    base_sub = tmp_path / "episode_01_E01_ind_track2.ass"
+    base_sub.touch()
+    old_offset = tmp_path / "episode_01_E01_ind_track2.[+2s].ass"
+    old_offset.touch()
+    new_offset = tmp_path / "episode_01_E01_ind_track2.[+5s].ass"
+    new_offset.touch()
+
+    mkv_extract_fast._cleanup_stale_subtitle_offsets(base_sub, new_offset)
+
+    assert not base_sub.exists()
+    assert not old_offset.exists()
+    assert new_offset.exists()
+

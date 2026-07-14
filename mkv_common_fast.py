@@ -650,6 +650,7 @@ def scan_mkv_files(dir_path: Path, recursive: bool = True, ignore_paths: set[Pat
     return results
 
 
+@lru_cache(maxsize=128)
 def scan_assets(dir_path: Path) -> ScanResults:
     subs = []
     chapters = []

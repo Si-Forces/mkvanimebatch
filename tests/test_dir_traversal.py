@@ -91,3 +91,43 @@ def test_scan_mkv_files_ignores_directory_symlinks(mod):
             results = mod.scan_mkv_files(mock_dir)
             # The root folder was scanned once, but no subfolder scans should have been called
             assert mock_scandir.call_count == 1
+
+
+def test_scan_assets_lru_cache_fast(tmp_path):
+    """
+    scan_assets in mkv_common_fast must use lru_cache to prevent redundant disk reads.
+    """
+    sub_dir = tmp_path / "SubDir"
+    sub_dir.mkdir()
+    (sub_dir / "episode_01.ass").write_bytes(b"[Script Info]")
+    
+    # First call - scans disk
+    res1 = mkv_common_fast.scan_assets(sub_dir)
+    assert len(res1.subs) == 1
+
+    # Second call - returns cached result
+    res2 = mkv_common_fast.scan_assets(sub_dir)
+    assert res1 is res2
+
+
+def test_mkv_grouping_by_dir(tmp_path):
+    """
+    Verify grouping MKVs by parent directory produces expected mapping.
+    """
+    from collections import defaultdict
+    s1 = tmp_path / "Season 1"
+    s2 = tmp_path / "Season 2"
+    s1.mkdir()
+    s2.mkdir()
+    (s1 / "ep01.mkv").touch()
+    (s1 / "ep02.mkv").touch()
+    (s2 / "ep01.mkv").touch()
+
+    all_mkvs = mkv_common_fast.scan_mkv_files(tmp_path)
+    mkvs_by_dir = defaultdict(list)
+    for mkv in all_mkvs:
+        mkvs_by_dir[mkv.path.parent].append(mkv)
+
+    assert len(mkvs_by_dir[s1]) == 2
+    assert len(mkvs_by_dir[s2]) == 1
+
