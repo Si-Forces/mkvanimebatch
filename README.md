@@ -66,6 +66,9 @@ python mkv_remux_fast.py --input-dir "D:/Anime/Series" --out-dir "D:/Anime/Remux
 python mkv_remux_fast.py --input-dir "D:/Anime/Series" --dry-run
 ```
 
+When `--out-dir` is used, nested source folders are preserved beneath the
+output directory so episodes from different seasons cannot overwrite each other.
+
 ### 3. Windows Helper Scripts
 
 Quick-start scripts are included in the repository for convenience:
