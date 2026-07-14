@@ -228,13 +228,11 @@ def pipeline_worker(
                     
                     if not final_path.exists():
                         shutil.move(str(temp_font_path), str(final_path))
-                        font_registry.try_claim(final_path.name, actual_size)
-                        move_succeeded = True
                     else:
-                        # File already exists at final_path, delete temp and mark as succeeded
                         temp_font_path.unlink(missing_ok=True)
-                        font_registry.try_claim(final_path.name, actual_size)
-                        move_succeeded = True
+                    
+                    font_registry.try_claim(final_path.name, actual_size)
+                    move_succeeded = True
                 
                 if move_succeeded:
                     extracted_ok.add((safe_name, mkv_size))
