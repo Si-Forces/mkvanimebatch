@@ -107,9 +107,14 @@ def test_stale_subtitle_cleanup(tmp_path):
     new_offset = tmp_path / "episode_01_E01_ind_track2.[+5s].ass"
     new_offset.touch()
 
-    mkv_extract_fast._cleanup_stale_subtitle_offsets(base_sub, new_offset)
+    manual_sub = tmp_path / "Demon Lord 2099 - 01.ind.ass"
+    manual_sub.touch()
+
+    active_map = {"episode_01_E01_ind_track2": "episode_01_E01_ind_track2.[+5s].ass"}
+    mkv_extract_fast._cleanup_stale_subtitle_offsets_bulk(tmp_path, active_map)
 
     assert not base_sub.exists()
     assert not old_offset.exists()
     assert new_offset.exists()
+    assert manual_sub.exists()
 
