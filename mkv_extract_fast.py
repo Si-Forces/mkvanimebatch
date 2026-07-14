@@ -13,6 +13,7 @@ import re
 import shutil
 import tempfile
 import threading
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -66,11 +67,13 @@ def select_subtitle(json_data: dict, file_stem: str, file_dir: Path, ep_tag: str
 
 def _cleanup_stale_subtitle_offsets(base_sub_path: Path, current_final_path: Path) -> None:
     """Remove any stale offset-suffixed subtitle files for the same episode and language."""
+    if base_sub_path.resolve() != current_final_path.resolve():
+        base_sub_path.unlink(missing_ok=True)
     parent = base_sub_path.parent
     stem = base_sub_path.stem
     suffix = base_sub_path.suffix
     pattern = re.compile(
-        rf"^{re.escape(stem)}(?:\.\[[-+]?\d+(?:\.\d+)?s\])?{re.escape(suffix)}$",
+        rf"^{re.escape(stem)}\.\[[-+]?\d+(?:\.\d+)?s\]{re.escape(suffix)}$",
         re.IGNORECASE,
     )
     try:
@@ -253,9 +256,7 @@ def pipeline_worker(
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-def _run(input_dir: Path, fonts_dir: Path, pool: ThreadPoolExecutor, dry_run: bool = False, sub_offset: float = 0.0) -> bool:
-    # Use scandir wrapper non-recursively for the target folder
-    mkv_files = scan_mkv_files(input_dir, recursive=False)
+def _run(input_dir: Path, fonts_dir: Path, mkv_files: list[ParsedFile], pool: ThreadPoolExecutor, dry_run: bool = False, sub_offset: float = 0.0) -> bool:
     if not mkv_files:
         return False
 
@@ -327,7 +328,11 @@ def main() -> None:
         print("[ERROR] No MKV files found.")
         sys.exit(1)
 
-    mkv_dirs = sorted(list(set(mkv.path.parent for mkv in all_mkvs)), key=natural_sort_key)
+    mkvs_by_dir: dict[Path, list[ParsedFile]] = defaultdict(list)
+    for mkv in all_mkvs:
+        mkvs_by_dir[mkv.path.parent].append(mkv)
+
+    mkv_dirs = sorted(list(mkvs_by_dir.keys()), key=natural_sort_key)
     overall_success = True
     
     # Global ThreadPool reuse
@@ -335,7 +340,8 @@ def main() -> None:
         for mkv_dir in mkv_dirs:
             print(f"\nFolder: {mkv_dir}")
             try:
-                if not _run(mkv_dir, mkv_dir / "fonts", pool, cfg.dry_run, cfg.sub_offset):
+                dir_mkvs = mkvs_by_dir[mkv_dir]
+                if not _run(mkv_dir, mkv_dir / "fonts", dir_mkvs, pool, cfg.dry_run, cfg.sub_offset):
                     overall_success = False
             except Exception as e:
                 print(f"  [ERROR] Folder failed: {e}")
