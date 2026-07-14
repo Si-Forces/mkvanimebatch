@@ -54,7 +54,7 @@ if defined choice set "choice=%choice: =%"
 
 :: --- MENU ROUTING ---
 :: You can easily add more options in the future by defining new cases below
-if not defined choice goto exit
+if not defined choice goto menu
 if "%choice%"=="1" goto remux
 if "%choice%"=="2" goto extract
 if "%choice%"=="3" goto toggle_dry_run
@@ -77,10 +77,24 @@ echo.
 echo [Tip] Leave inputs blank to use defaults (current directory).
 echo       Dry Run status is currently: [!DRY_RUN_MODE!]
 echo.
+if not exist "%SCRIPT_DIR%mkv_common.py" (
+    echo [ERROR] Required file 'mkv_common.py' is missing.
+    pause
+    goto menu
+)
+if not exist "%SCRIPT_DIR%mkv_remux.py" (
+    echo [ERROR] Required file 'mkv_remux.py' is missing.
+    pause
+    goto menu
+)
+set "input_dir="
+set "out_dir="
 set /p input_dir="Enter Input Directory (or press Enter): "
+set /p out_dir="Enter Output Directory (or press Enter): "
 
 set "opts="
 if not "!input_dir!"=="" set opts=!opts! --input-dir "!input_dir!"
+if not "!out_dir!"=="" set opts=!opts! --out-dir "!out_dir!"
 if "!DRY_RUN_MODE!"=="ON" set opts=!opts! --dry-run
 
 echo.
@@ -104,10 +118,24 @@ echo.
 echo [Tip] Leave inputs blank to use defaults (current directory).
 echo       Dry Run status is currently: [!DRY_RUN_MODE!]
 echo.
+if not exist "%SCRIPT_DIR%mkv_common.py" (
+    echo [ERROR] Required file 'mkv_common.py' is missing.
+    pause
+    goto menu
+)
+if not exist "%SCRIPT_DIR%mkv_extract.py" (
+    echo [ERROR] Required file 'mkv_extract.py' is missing.
+    pause
+    goto menu
+)
+set "input_dir="
+set "sub_offset="
 set /p input_dir="Enter Input Directory (or press Enter): "
+set /p sub_offset="Enter Subtitle Delay/Offset in seconds (e.g. -10.0, or press Enter): "
 
 set "opts="
 if not "!input_dir!"=="" set opts=!opts! --input-dir "!input_dir!"
+if not "!sub_offset!"=="" set opts=!opts! --sub-offset "!sub_offset!"
 if "!DRY_RUN_MODE!"=="ON" set opts=!opts! --dry-run
 
 echo.
