@@ -418,7 +418,7 @@ def _convert_flac_to_opus(
         str(temp_opus),
     ], capture_stdout=False)
     if result.returncode != 0:
-        print(f"  [ERROR] ffmpeg transcoding failed (exit {result.returncode}):\n{result.stderr.strip()}")
+        print(f"  [ERROR] ffmpeg transcoding failed for '{video.name}' (exit {result.returncode}):\n{result.stderr.strip()}")
         temp_opus.unlink(missing_ok=True)
         return None
     return temp_opus
@@ -594,6 +594,7 @@ def pipeline_worker(
                 return False
             temp_opus = _convert_flac_to_opus(video, tr.audio_id, tr.audio_index, temp_dir, job.base, opus_bitrate, complexity, ffmpeg_threads)
             if temp_opus is None:
+                print(f"  [-] Failed: {job.video_name} (FLAC→Opus conversion failed)")
                 return False
 
         # Determine temporary output destination to prevent corrupted/partial files in case of interruption
