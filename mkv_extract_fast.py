@@ -33,6 +33,7 @@ from mkv_common_fast import (
     natural_sort_key,
     scan_mkv_files,
     EpisodeInfo,
+    ParsedFile,
     MAX_DEFAULT_WORKERS,
     DEFAULT_WORKER_MULTIPLIER,
 )
