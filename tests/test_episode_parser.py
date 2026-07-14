@@ -207,6 +207,8 @@ class TestDetectSubLang:
     def test_release_year_guard_ignores_dash_years(self, mod):
         assert mod.parse_episode("Frieren - 2023 - 05") == ("", "E", "05")
         assert mod.parse_episode("One Piece - 1999 - 12") == ("", "E", "12")
+        assert mod.parse_episode("Demon Lord 2099 - 01") == ("", "E", "01")
+        assert mod.parse_episode("Demon Lord 2099 - 2024 - 01") == ("", "E", "01")
         assert mod.parse_episode("Show - 1234") == ("", "E", "1234")
         assert mod.parse_episode("Show - 2150") == ("", "E", "2150")
         assert mod.parse_episode("Show - EP2023") == ("", "E", "2023")
