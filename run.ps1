@@ -64,12 +64,16 @@ while ($true) {
             Write-Host "      Dry Run status is currently: [$DryRunMode]"
             Write-Host ""
             $inputDir = Read-Host "Enter Input Directory (or press Enter)"
+            $outDir = Read-Host "Enter Output Directory (or press Enter)"
 
             # Ensure script components exist locally
             if (Test-RequiredFiles @("mkv_common.py", "mkv_remux.py")) {
                 $cmdArgs = @()
                 if ($inputDir -ne "") {
                     $cmdArgs += "--input-dir", $inputDir
+                }
+                if ($outDir -ne "") {
+                    $cmdArgs += "--out-dir", $outDir
                 }
                 if ($DryRunMode -eq "ON") {
                     $cmdArgs += "--dry-run"
@@ -94,12 +98,16 @@ while ($true) {
             Write-Host "      Dry Run status is currently: [$DryRunMode]"
             Write-Host ""
             $inputDir = Read-Host "Enter Input Directory (or press Enter)"
+            $subOffset = Read-Host "Enter Subtitle Delay/Offset in seconds (e.g. -10.0, or press Enter)"
 
             # Ensure script components exist locally
             if (Test-RequiredFiles @("mkv_common.py", "mkv_extract.py")) {
                 $cmdArgs = @()
                 if ($inputDir -ne "") {
                     $cmdArgs += "--input-dir", $inputDir
+                }
+                if ($subOffset -ne "") {
+                    $cmdArgs += "--sub-offset", $subOffset
                 }
                 if ($DryRunMode -eq "ON") {
                     $cmdArgs += "--dry-run"
