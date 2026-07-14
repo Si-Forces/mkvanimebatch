@@ -253,8 +253,10 @@ _SPECIAL_PATTERN = re.compile(r'(?<!\w)(Specials?|SP)(?=\d|\W|$)',  re.IGNORECAS
 _SXXEXX_PATTERN  = re.compile(r'[Ss](\d{1,2})[Ee](\d{1,4}(?:\.\d{1,2}(?![0-9pib]))?)(?:[vV]\d)?')
 _SXXPXX_PATTERN  = re.compile(r'[Ss](\d{1,2})[Pp](\d{1,4}(?:\.\d{1,2}(?![0-9pib]))?)(?:[vV]\d)?')
 
+_YEAR_GUARD = r'(?!(?:19|20)\d{2}(?!\d))'
+
 _EP_NUM_MARKER_RE = re.compile(
-    r'(?:[-\u2013]\s*)(\d{1,4}(?:\.\d{1,2}(?![0-9pib]))?)(?![0-9pib])(?:\s*(?:end|fin|final))?(?:[vV]\d)?'
+    r'(?:[-\u2013]\s*)' + _YEAR_GUARD + r'(\d{1,4}(?:\.\d{1,2}(?![0-9pib]))?)(?![0-9pib])(?:\s*(?:end|fin|final))?(?:[vV]\d)?'
     r'|[\[(](\d{1,3}(?:\.\d{1,2}(?![0-9pib]))?)[\])](?:[vV]\d)?'
     r'|\b[Ee][Pp](?:isode)?\.?\s*(\d{1,4}(?:\.\d{1,2}(?![0-9pib]))?)(?:[vV]\d)?\b',
     re.IGNORECASE
