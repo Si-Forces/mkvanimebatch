@@ -70,14 +70,6 @@ def select_subtitle(json_data: dict, file_stem: str, file_dir: Path, ep_tag: str
     return str(track_id), file_dir / f"{file_stem}_{ep_tag}_{language}_track{track_id}.ass"
 
 
-def _cleanup_stale_subtitle_offsets(base_sub_path: Path, current_final_path: Path) -> None:
-    """Remove stale subtitle variants for one track stem."""
-    _cleanup_stale_subtitle_offsets_bulk(
-        base_sub_path.parent,
-        {base_sub_path.stem: current_final_path.name},
-    )
-
-
 def _cleanup_stale_subtitle_offsets_bulk(mkv_dir: Path, active_subs: dict[str, str]) -> None:
     """Single directory pass that removes stale subtitle variants for known stems."""
     if not active_subs:

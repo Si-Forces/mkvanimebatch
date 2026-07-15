@@ -178,7 +178,7 @@ def process_file(
     fonts_dir:     Path,
     font_registry: FontRegistry,
     stale_subs_map: dict[str, str] | None = None,
-    stale_subs_lock: threading.Lock | None = None,
+    stale_subs_lock: "threading.Lock | None" = None,
     sub_offset:    float = 0.0,
 ) -> tuple[Path, list[str], bool]:
     mkv_path = mkv_file.path
