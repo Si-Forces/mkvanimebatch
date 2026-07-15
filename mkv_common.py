@@ -825,7 +825,8 @@ def shift_ass_timestamps(path: Path, offset_seconds: float, log: list[str] | Non
     if shifted_count > 0:
         try:
             encoding = "utf-8-sig" if has_bom else "utf-8"
-            path.write_text("".join(out_lines), encoding=encoding)
+            # newline="" prevents \n translation: raw already keeps original CRLF/LF endings
+            path.write_text("".join(out_lines), encoding=encoding, newline="")
             if log is not None:
                 log.append(f"   -> Shifted subtitle timing by {offset_seconds:+.2f}s ({shifted_count} lines)")
         except Exception as e:

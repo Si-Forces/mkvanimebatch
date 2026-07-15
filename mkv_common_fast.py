@@ -481,7 +481,8 @@ def shift_ass_timestamps(path: Path, offset_seconds: float) -> int:
 
     if shifted_count > 0:
         encoding = "utf-8-sig" if has_bom else "utf-8"
-        path.write_text("".join(out_lines), encoding=encoding)
+        # newline="" prevents \n translation: raw already keeps original CRLF/LF endings
+        path.write_text("".join(out_lines), encoding=encoding, newline="")
     return shifted_count
 
 

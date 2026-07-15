@@ -813,17 +813,20 @@ def main() -> None:
 
     # Global thread pool reuse
     with ThreadPoolExecutor(max_workers=cfg.workers) as pool:
-        # Pre-inspect un-remuxed videos batch-wide in parallel
-        unprocessed_paths = []
-        for mkv in all_mkvs:
-            if mkv.parsed:
-                mkv_season, mkv_ep_type, mkv_ep = mkv.parsed
-                out_stem = output_stem(mkv.stem, mkv_ep_type, mkv_ep)
-                mkv_output_dir = resolve_output_dir(mkv.path.parent, root_input_dir, out_override)
-                if not is_completed_output(mkv_output_dir / f"{out_stem}.mkv"):
-                    unprocessed_paths.append(mkv.path)
+        # Pre-inspect un-remuxed videos batch-wide in parallel.
+        # Skipped in dry runs so _run can selectively inspect only videos lacking an external subtitle.
+        inspect_cache = None
+        if not cfg.dry_run:
+            unprocessed_paths = []
+            for mkv in all_mkvs:
+                if mkv.parsed:
+                    mkv_season, mkv_ep_type, mkv_ep = mkv.parsed
+                    out_stem = output_stem(mkv.stem, mkv_ep_type, mkv_ep)
+                    mkv_output_dir = resolve_output_dir(mkv.path.parent, root_input_dir, out_override)
+                    if not is_completed_output(mkv_output_dir / f"{out_stem}.mkv"):
+                        unprocessed_paths.append(mkv.path)
 
-        inspect_cache = inspect_videos(unprocessed_paths, pool) if unprocessed_paths else {}
+            inspect_cache = inspect_videos(unprocessed_paths, pool) if unprocessed_paths else {}
 
         for mkv_dir in mkv_dirs:
             print(f"\nFolder: {mkv_dir}")
