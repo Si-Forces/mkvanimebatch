@@ -166,6 +166,10 @@ class TestDetectSubLang:
     def test_lang_after_track(self, mod):
         assert mod.detect_sub_lang("Show_01_track2.ind") == "ind"
 
+    def test_non_primary_lang_track_patterns_are_preserved(self, mod):
+        assert mod.detect_sub_lang("Show_01_tso_track2") == "tso"
+        assert mod.detect_sub_lang("Show_01_track2.ts") == "ts"
+
     # ── suffix patterns ──────────────────────────────────────────────────────
     def test_dot_suffix_known(self, mod):
         assert mod.detect_sub_lang("Show - 01.ind") == "ind"
