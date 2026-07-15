@@ -430,9 +430,9 @@ def shift_ass_timestamps(path: Path, offset_seconds: float) -> int:
     offset_cs = round(offset_seconds * 100)
     
     try:
-        with path.open("rb") as f:
-            has_bom = f.read(3) == b"\xef\xbb\xbf"
-        raw = path.read_text(encoding="utf-8-sig")
+        data = path.read_bytes()
+        has_bom = data.startswith(b"\xef\xbb\xbf")
+        raw = data.decode("utf-8-sig")
     except (OSError, UnicodeDecodeError):
         return 0
 
