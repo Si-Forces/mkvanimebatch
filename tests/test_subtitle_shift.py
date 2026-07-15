@@ -205,3 +205,27 @@ class TestShiftAssTimestamps:
         assert "dialogue:" in text
         assert "COMMENT:" in text
         assert "Dialogue  :" in text
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Line-ending preservation (regression: CRLF must not become \r\r\n)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def test_crlf_line_endings_preserved(self, mod, tmp_path):
+        content = (ASS_HEADER + "Dialogue: 0,0:01:00.00,0:01:05.00,Default,,0,0,0,,Hello\n").replace("\n", "\r\n")
+        p = tmp_path / "crlf.ass"
+        p.write_bytes(content.encode("utf-8"))
+        count = mod.shift_ass_timestamps(p, 5.0)
+        assert count == 1
+        raw = p.read_bytes()
+        assert b"\r\r\n" not in raw
+        assert raw.endswith(b"0:01:10.00,Default,,0,0,0,,Hello\r\n")
+
+    def test_lf_line_endings_preserved(self, mod, tmp_path):
+        content = ASS_HEADER + "Dialogue: 0,0:01:00.00,0:01:05.00,Default,,0,0,0,,Hello\n"
+        p = tmp_path / "lf.ass"
+        p.write_bytes(content.encode("utf-8"))
+        count = mod.shift_ass_timestamps(p, 5.0)
+        assert count == 1
+        raw = p.read_bytes()
+        assert b"\r" not in raw
+        assert raw.endswith(b"0:01:10.00,Default,,0,0,0,,Hello\n")
