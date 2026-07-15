@@ -131,3 +131,44 @@ def test_mkv_grouping_by_dir(tmp_path):
     assert len(mkvs_by_dir[s1]) == 2
     assert len(mkvs_by_dir[s2]) == 1
 
+
+def test_fast_scripts_run_accepts_inspect_cache(tmp_path):
+    """
+    Verify _run in both mkv_remux_fast and mkv_extract_fast accepts inspect_cache keyword argument.
+    """
+    import mkv_remux_fast
+    import mkv_extract_fast
+    from concurrent.futures import ThreadPoolExecutor
+
+    ep_file = tmp_path / "Show_E01.mkv"
+    ep_file.touch()
+
+    all_mkvs = mkv_common_fast.scan_mkv_files(tmp_path)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        # Extract script _run invocation with inspect_cache
+        mkv_extract_fast._run(
+            tmp_path,
+            tmp_path / "fonts",
+            all_mkvs,
+            pool,
+            inspect_cache={ep_file: None},
+            dry_run=True,
+        )
+
+        # Remux script _run invocation with inspect_cache
+        mkv_remux_fast._run(
+            tmp_path,
+            all_mkvs,
+            tmp_path,
+            tmp_path / "out",
+            tmp_path / "fonts",
+            [tmp_path],
+            pool,
+            1,
+            "192k",
+            10,
+            dry_run=True,
+            inspect_cache={ep_file: None},
+        )
+
