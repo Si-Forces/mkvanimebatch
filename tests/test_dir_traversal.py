@@ -172,3 +172,21 @@ def test_fast_scripts_run_accepts_inspect_cache(tmp_path):
             inspect_cache={ep_file: None},
         )
 
+
+def test_all_script_imports():
+    """
+    Ensure all entrypoint and common scripts can be imported cleanly without missing dependencies or syntax errors.
+    """
+    import mkv_common_fast
+    import mkv_extract_fast
+    import mkv_remux_fast
+    import mkv_common
+    import mkv_extract
+    import mkv_remux
+    assert mkv_common_fast is not None
+    assert mkv_extract_fast is not None
+    assert mkv_remux_fast is not None
+    assert mkv_common is not None
+    assert mkv_extract is not None
+    assert mkv_remux is not None
+

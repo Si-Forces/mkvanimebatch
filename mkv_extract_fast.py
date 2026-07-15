@@ -196,66 +196,69 @@ def pipeline_worker(
         if newly_extracted_sub_path and newly_extracted_sub_path.exists():
             final_sub_path.unlink(missing_ok=True)
             shutil.move(str(newly_extracted_sub_path), str(final_sub_path))
+
+        if final_sub_path and final_sub_path.exists():
             with stale_subs_lock:
                 stale_subs_map[base_sub_path.stem] = final_sub_path.name
 
-        if final_chapter_path:
-            temp_chapter = temp_dir / final_chapter_path.name
-            if temp_chapter.exists():
-                final_chapter_path.unlink(missing_ok=True)
-                shutil.move(str(temp_chapter), str(final_chapter_path))
+        if temp_dir is not None:
+            if final_chapter_path:
+                temp_chapter = temp_dir / final_chapter_path.name
+                if temp_chapter.exists():
+                    final_chapter_path.unlink(missing_ok=True)
+                    shutil.move(str(temp_chapter), str(final_chapter_path))
 
-        if final_cover_path:
-            temp_cover = temp_dir / final_cover_path.name
-            if temp_cover.exists():
-                final_cover_path.unlink(missing_ok=True)
-                shutil.move(str(temp_cover), str(final_cover_path))
+            if final_cover_path:
+                temp_cover = temp_dir / final_cover_path.name
+                if temp_cover.exists():
+                    final_cover_path.unlink(missing_ok=True)
+                    shutil.move(str(temp_cover), str(final_cover_path))
 
-        if new_font_attachments:
-            id_to_meta = {str(a["id"]): a for a in new_font_attachments}
+            if new_font_attachments:
+                id_to_meta = {str(a["id"]): a for a in new_font_attachments}
 
-            for temp_font_path in temp_dir.iterdir():
-                if not temp_font_path.is_file() or temp_font_path.stat().st_size == 0:
-                    continue
+                for temp_font_path in temp_dir.iterdir():
+                    if not temp_font_path.is_file() or temp_font_path.stat().st_size == 0:
+                        continue
 
-                if temp_font_path.name in (final_sub_path.name if final_sub_path else "", 
-                                           final_chapter_path.name if final_chapter_path else "", 
-                                           final_cover_path.name if final_cover_path else ""):
-                    continue
+                    if temp_font_path.name in (final_sub_path.name if final_sub_path else "", 
+                                               final_chapter_path.name if final_chapter_path else "", 
+                                               final_cover_path.name if final_cover_path else ""):
+                        continue
 
-                parts = temp_font_path.name.split("_", 1)
-                if len(parts) < 2:
-                    continue
-                fid, safe_name = parts
+                    parts = temp_font_path.name.split("_", 1)
+                    if len(parts) < 2:
+                        continue
+                    fid, safe_name = parts
 
-                att_meta = id_to_meta.get(fid)
-                if not att_meta:
-                    continue
+                    att_meta = id_to_meta.get(fid)
+                    if not att_meta:
+                        continue
 
-                actual_size = temp_font_path.stat().st_size
-                mkv_size = att_meta.get("size", 0)
+                    actual_size = temp_font_path.stat().st_size
+                    mkv_size = att_meta.get("size", 0)
 
-                move_succeeded = False
-                with IO_LOCK:
-                    final_path = fonts_dir / safe_name
-                    if final_path.exists():
-                        stem, suffix = final_path.stem, final_path.suffix
-                        final_path = fonts_dir / f"{stem}_{actual_size:x}{suffix}"
+                    move_succeeded = False
+                    with IO_LOCK:
+                        final_path = fonts_dir / safe_name
+                        if final_path.exists():
+                            stem, suffix = final_path.stem, final_path.suffix
+                            final_path = fonts_dir / f"{stem}_{actual_size:x}{suffix}"
+                        
+                        if not final_path.exists():
+                            shutil.move(str(temp_font_path), str(final_path))
+                        else:
+                            temp_font_path.unlink(missing_ok=True)
+                        
+                        font_registry.try_claim(final_path.name, actual_size)
+                        move_succeeded = True
                     
-                    if not final_path.exists():
-                        shutil.move(str(temp_font_path), str(final_path))
-                    else:
-                        temp_font_path.unlink(missing_ok=True)
-                    
-                    font_registry.try_claim(final_path.name, actual_size)
-                    move_succeeded = True
-                
-                if move_succeeded:
-                    extracted_ok.add((safe_name, mkv_size))
+                    if move_succeeded:
+                        extracted_ok.add((safe_name, mkv_size))
 
-            for name, size in claimed_this_call:
-                if (name, size) not in extracted_ok:
-                    font_registry.release(name, size)
+                for name, size in claimed_this_call:
+                    if (name, size) not in extracted_ok:
+                        font_registry.release(name, size)
         print(f"  [+] Extracted: {mkv_path.name}")
         return True
     except Exception as e:
