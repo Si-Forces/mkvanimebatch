@@ -656,6 +656,7 @@ def _run(
     opus_bitrate: str,
     complexity:   int,
     dry_run:      bool = False,
+    inspect_cache: dict[Path, dict | None] | None = None,
 ) -> bool:
     # Discover assets
     fonts = scan_fonts(fonts_dir)
