@@ -551,8 +551,6 @@ def pipeline_worker(
     mkv_season, mkv_ep_type, mkv_ep = video_parsed
     out_stem    = output_stem(video.stem, mkv_ep_type, mkv_ep)
     output_file = output_dir / f"{out_stem}.mkv"
-    if is_completed_output(output_file):
-        return True
 
     # 1. Inspect (pre-fetched)
     if json_data is None:
@@ -733,7 +731,8 @@ def _run(
 
     try:
         # Pre-inspect only the videos that actually need it
-        inspect_cache = inspect_videos(videos_to_inspect, pool) if videos_to_inspect else {}
+        if inspect_cache is None:
+            inspect_cache = inspect_videos(videos_to_inspect, pool) if videos_to_inspect else {}
 
         success_count = already_remuxed_count
         futures = {
@@ -813,6 +812,18 @@ def main() -> None:
 
     # Global thread pool reuse
     with ThreadPoolExecutor(max_workers=cfg.workers) as pool:
+        # Pre-inspect un-remuxed videos batch-wide in parallel
+        unprocessed_paths = []
+        for mkv in all_mkvs:
+            if mkv.parsed:
+                mkv_season, mkv_ep_type, mkv_ep = mkv.parsed
+                out_stem = output_stem(mkv.stem, mkv_ep_type, mkv_ep)
+                mkv_output_dir = resolve_output_dir(mkv.path.parent, root_input_dir, out_override)
+                if not is_completed_output(mkv_output_dir / f"{out_stem}.mkv"):
+                    unprocessed_paths.append(mkv.path)
+
+        inspect_cache = inspect_videos(unprocessed_paths, pool) if unprocessed_paths else {}
+
         for mkv_dir in mkv_dirs:
             print(f"\nFolder: {mkv_dir}")
             current_output_dir = resolve_output_dir(
@@ -836,7 +847,20 @@ def main() -> None:
 
             try:
                 dir_mkvs = mkvs_by_dir[mkv_dir]
-                success = _run(mkv_dir, dir_mkvs, current_output_dir if not cfg.dry_run else None, current_output_dir, current_fonts_dir, search_dirs, pool, cfg.workers, cfg.bitrate, cfg.complexity, cfg.dry_run)
+                success = _run(
+                    mkv_dir,
+                    dir_mkvs,
+                    current_output_dir if not cfg.dry_run else None,
+                    current_output_dir,
+                    current_fonts_dir,
+                    search_dirs,
+                    pool,
+                    cfg.workers,
+                    cfg.bitrate,
+                    cfg.complexity,
+                    cfg.dry_run,
+                    inspect_cache=inspect_cache,
+                )
                 if not success:
                     overall_success = False
                 

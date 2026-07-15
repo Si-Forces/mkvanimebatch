@@ -126,13 +126,17 @@ def pipeline_worker(
         ep_tag = file_stem
         chapter_stem = file_stem
 
-    temp_dir = None
+    temp_dir: Path | None = None
     claimed_this_call: list[tuple[str, int]] = []
     extracted_ok: set[tuple[str, int]] = set()
 
-    try:
-        temp_dir = Path(tempfile.mkdtemp(prefix="extract_job_", dir=file_dir))
+    def get_temp_dir() -> Path:
+        nonlocal temp_dir
+        if temp_dir is None:
+            temp_dir = Path(tempfile.mkdtemp(prefix="extract_job_", dir=file_dir))
+        return temp_dir
 
+    try:
         extract_args: list[str] = []
         final_sub_path = None
         newly_extracted_sub_path = None
@@ -145,7 +149,7 @@ def pipeline_worker(
                 sub_path = sub_path.with_name(f"{sub_path.stem}.[{sub_offset:+g}s]{sub_path.suffix}")
             final_sub_path = sub_path
             if not sub_path.exists() or sub_path.stat().st_size == 0:
-                temp_sub_path = temp_dir / sub_path.name
+                temp_sub_path = get_temp_dir() / sub_path.name
                 extract_args += ["tracks", f"{track_id}:{temp_sub_path}"]
                 newly_extracted_sub_path = temp_sub_path
 
@@ -154,7 +158,7 @@ def pipeline_worker(
             chapter_path = file_dir / f"{chapter_stem}_chapters.xml"
             final_chapter_path = chapter_path
             if not chapter_path.exists() or chapter_path.stat().st_size == 0:
-                temp_chapter_path = temp_dir / chapter_path.name
+                temp_chapter_path = get_temp_dir() / chapter_path.name
                 extract_args += ["chapters", str(temp_chapter_path)]
 
         final_cover_path = None
@@ -164,7 +168,7 @@ def pipeline_worker(
             cover_path = file_dir / f"{file_stem}_cover{ext}"
             final_cover_path = cover_path
             if not cover_path.exists() or cover_path.stat().st_size == 0:
-                temp_cover_path = temp_dir / cover_path.name
+                temp_cover_path = get_temp_dir() / cover_path.name
                 extract_args += ["attachments", f"{cover['id']}:{temp_cover_path}"]
 
         new_font_attachments = []
@@ -181,7 +185,7 @@ def pipeline_worker(
         if new_font_attachments:
             font_args = []
             for a in new_font_attachments:
-                temp_font_path = temp_dir / f"{a['id']}_{safe_filename(a['file_name'])}"
+                temp_font_path = get_temp_dir() / f"{a['id']}_{safe_filename(a['file_name'])}"
                 font_args.append(f"{a['id']}:{temp_font_path}")
 
             if "attachments" not in extract_args:
@@ -273,7 +277,7 @@ def pipeline_worker(
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-def _run(input_dir: Path, fonts_dir: Path, mkv_files: list[ParsedFile], pool: ThreadPoolExecutor, dry_run: bool = False, sub_offset: float = 0.0) -> bool:
+def _run(input_dir: Path, fonts_dir: Path, mkv_files: list[ParsedFile], pool: ThreadPoolExecutor, inspect_cache: dict[Path, dict | None] | None = None, dry_run: bool = False, sub_offset: float = 0.0) -> bool:
     if not mkv_files:
         return False
 
@@ -303,8 +307,8 @@ def _run(input_dir: Path, fonts_dir: Path, mkv_files: list[ParsedFile], pool: Th
     stale_subs_map: dict[str, str] = {}
     stale_subs_lock = threading.Lock()
 
-    # Pre-inspect videos using the global pool
-    inspect_cache = inspect_videos([mkv.path for mkv in mkv_files], pool)
+    if inspect_cache is None:
+        inspect_cache = inspect_videos([mkv.path for mkv in mkv_files], pool)
 
     success_count = 0
     futures = {
@@ -368,11 +372,12 @@ def main() -> None:
     
     # Global ThreadPool reuse
     with ThreadPoolExecutor(max_workers=cfg.workers) as pool:
+        inspect_cache = inspect_videos([mkv.path for mkv in all_mkvs], pool) if not cfg.dry_run else {}
         for mkv_dir in mkv_dirs:
             print(f"\nFolder: {mkv_dir}")
             try:
                 dir_mkvs = mkvs_by_dir[mkv_dir]
-                if not _run(mkv_dir, mkv_dir / "fonts", dir_mkvs, pool, cfg.dry_run, cfg.sub_offset):
+                if not _run(mkv_dir, mkv_dir / "fonts", dir_mkvs, pool, inspect_cache=inspect_cache, dry_run=cfg.dry_run, sub_offset=cfg.sub_offset):
                     overall_success = False
             except Exception as e:
                 print(f"  [ERROR] Folder failed: {e}")
