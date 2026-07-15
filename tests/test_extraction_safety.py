@@ -1,5 +1,6 @@
 """Failure-path tests for the public extractor."""
 
+import importlib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -118,3 +119,20 @@ def test_stale_subtitle_cleanup(tmp_path):
     assert new_offset.exists()
     assert manual_sub.exists()
 
+
+@pytest.mark.parametrize("module_name", ["mkv_extract", "mkv_extract_fast"])
+def test_stale_subtitle_cleanup_handles_case_variant_stems(tmp_path, module_name):
+    module = importlib.import_module(module_name)
+    current = tmp_path / "Episode_01_E01_ind_track2.[+5s].ass"
+    current.touch()
+    old_offset = tmp_path / "episode_01_e01_ind_track2.[+2s].ass"
+    old_offset.touch()
+    old_base = tmp_path / "episode_01_e01_ind_track2.ass"
+    old_base.touch()
+
+    active_map = {"Episode_01_E01_ind_track2": current.name}
+    module._cleanup_stale_subtitle_offsets_bulk(tmp_path, active_map)
+
+    assert current.exists()
+    assert not old_offset.exists()
+    assert not old_base.exists()
