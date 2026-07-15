@@ -232,10 +232,10 @@ def detect_sub_lang(sub_stem: str) -> str:
         if m.group(3): return "jpn"
 
     m = _LANG_BEFORE_TRACK_RE.search(sub_stem)
-    if m and m.group(1).lower() in _KNOWN_LANG_TOKENS: return m.group(1).lower()
+    if m: return m.group(1).lower()
 
     m = _LANG_AFTER_TRACK_RE.search(sub_stem)
-    if m and m.group(1).lower() in _KNOWN_LANG_TOKENS: return m.group(1).lower()
+    if m: return m.group(1).lower()
 
     m = _LANG_PAREN_SUFFIX_RE.search(sub_stem)
     if m: return m.group(1).lower()
