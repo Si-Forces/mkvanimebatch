@@ -315,10 +315,10 @@ def detect_sub_lang(sub_stem: str) -> str:
         if m.group(3): return "jpn"
 
     m = _LANG_BEFORE_TRACK_RE.search(sub_stem)
-    if m: return m.group(1).lower()
+    if m and m.group(1).lower() in _KNOWN_LANG_TOKENS: return m.group(1).lower()
 
     m = _LANG_AFTER_TRACK_RE.search(sub_stem)
-    if m: return m.group(1).lower()
+    if m and m.group(1).lower() in _KNOWN_LANG_TOKENS: return m.group(1).lower()
 
     m = _LANG_PAREN_SUFFIX_RE.search(sub_stem)
     if m: return m.group(1).lower()
@@ -707,7 +707,7 @@ def scan_mkv_files(dir_path: Path, ignore_paths: set[Path] | None = None) -> lis
         except OSError:
             pass
     _scan(str(dir_path))
-    results.sort(key=lambda pf: natural_sort_key(pf.name))
+    results.sort(key=lambda pf: natural_sort_key(pf.path))
     return results
 
 

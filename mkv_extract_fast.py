@@ -259,7 +259,8 @@ def pipeline_worker(
                 for name, size in claimed_this_call:
                     if (name, size) not in extracted_ok:
                         font_registry.release(name, size)
-        print(f"  [+] Extracted: {mkv_path.name}")
+        action = "Extracted" if extract_args else "Skipped (already complete)"
+        print(f"  [+] {action}: {mkv_path.name}")
         return True
     except Exception as e:
         for name, size in claimed_this_call:
