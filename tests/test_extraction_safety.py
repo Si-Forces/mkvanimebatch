@@ -136,3 +136,26 @@ def test_stale_subtitle_cleanup_handles_case_variant_stems(tmp_path, module_name
     assert current.exists()
     assert not old_offset.exists()
     assert not old_base.exists()
+
+
+@pytest.mark.parametrize("module_name", ["mkv_extract", "mkv_extract_fast"])
+def test_stale_subtitle_cleanup_preserves_multiple_active_casefold_collisions(tmp_path, module_name):
+    module = importlib.import_module(module_name)
+    current_a = tmp_path / "Straße_01_E01_ind_track2.[+5s].ass"
+    current_b = tmp_path / "Strasse_01_E01_ind_track2.[+7s].ass"
+    stale_a = tmp_path / "Straße_01_E01_ind_track2.ass"
+    stale_b = tmp_path / "Strasse_01_E01_ind_track2.ass"
+
+    for path in (current_a, current_b, stale_a, stale_b):
+        path.touch()
+
+    active_map = {
+        "Straße_01_E01_ind_track2": current_a.name,
+        "Strasse_01_E01_ind_track2": current_b.name,
+    }
+    module._cleanup_stale_subtitle_offsets_bulk(tmp_path, active_map)
+
+    assert current_a.exists()
+    assert current_b.exists()
+    assert not stale_a.exists()
+    assert not stale_b.exists()

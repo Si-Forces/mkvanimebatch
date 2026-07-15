@@ -154,10 +154,9 @@ def _cleanup_stale_subtitle_offsets_bulk(mkv_dir: Path, active_subs: dict[str, s
     """Single directory pass that removes stale subtitle variants for known stems."""
     if not active_subs:
         return
-    normalized_active_subs = {
-        stem.casefold(): expected_name
-        for stem, expected_name in active_subs.items()
-    }
+    normalized_active_subs: dict[str, set[str]] = {}
+    for stem, expected_name in active_subs.items():
+        normalized_active_subs.setdefault(stem.casefold(), set()).add(expected_name)
     try:
         with os.scandir(str(mkv_dir)) as it:
             for entry in it:
@@ -167,15 +166,21 @@ def _cleanup_stale_subtitle_offsets_bulk(mkv_dir: Path, active_subs: dict[str, s
                 if not match:
                     continue
                 stem = match.group("stem").casefold()
-                expected_name = normalized_active_subs.get(stem)
-                if expected_name is None:
+                expected_names = normalized_active_subs.get(stem)
+                if not expected_names:
                     continue
                 entry_path = Path(entry.path)
-                expected_path = mkv_dir / expected_name
-                try:
-                    is_expected_file = entry_path.samefile(expected_path)
-                except OSError:
-                    is_expected_file = entry.name == expected_name
+                is_expected_file = False
+                for expected_name in expected_names:
+                    expected_path = mkv_dir / expected_name
+                    try:
+                        if entry_path.samefile(expected_path):
+                            is_expected_file = True
+                            break
+                    except OSError:
+                        if entry.name == expected_name:
+                            is_expected_file = True
+                            break
                 if not is_expected_file:
                     entry_path.unlink(missing_ok=True)
     except OSError:
