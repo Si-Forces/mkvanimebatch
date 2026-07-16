@@ -8,7 +8,10 @@ __pycache__/
 .coverage
 htmlcov/
 
-# MKV Tool Temporary & Output Directories
+# MKV Tool Temporary & Binary artifacts
+*.zip
+
+# Output directories
 Output/
 fonts/
 *.tmp*
