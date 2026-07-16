@@ -432,6 +432,7 @@ def _convert_flac_to_opus(
         "ffmpeg", "-y", "-nostdin", "-threads", str(ffmpeg_threads),
         "-i", str(video),
         "-map", f"0:a:{audio_index}",
+        "-map_chapters", "-1",
         "-vn", "-c:a", "libopus",
         "-b:a", opus_bitrate,
         "-vbr", "on",
@@ -484,10 +485,10 @@ def _build_mkvmerge_args(
     if temp_opus is not None:
         track_lang = tr.audio_lang or "und"
         track_name = tr.audio_name or "Audio"
-        args += ["--language", f"0:{track_lang}", "--track-name", f"0:{track_name}", str(temp_opus)]
+        args += ["--no-chapters", "--language", f"0:{track_lang}", "--track-name", f"0:{track_name}", str(temp_opus)]
 
     if job.subtitle_file is not None:
-        args += ["--language", f"0:{job.subtitle_mkv_lang}", "--track-name", f"0:{job.subtitle_label}",
+        args += ["--no-chapters", "--language", f"0:{job.subtitle_mkv_lang}", "--track-name", f"0:{job.subtitle_label}",
                  "--default-track-flag", "0:yes", str(job.subtitle_file)]
 
     if fonts.args:
