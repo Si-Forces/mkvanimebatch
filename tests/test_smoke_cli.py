@@ -22,7 +22,7 @@ mkv_extract = importlib.import_module("mkv_extract")
     pytest.param(mkv_extract, mkv_common, id="mkv_extract"),
 ])
 def test_cli_dry_run_smoke(tmp_path, mod, common_mod):
-    """Run main() with --dry-run on a mock folder structure to catch any missing imports or undefined variables."""
+    """Run main() with --dry-run and --no-cache on a mock folder structure to catch any missing imports or undefined variables."""
     # Create mock MKV file, subtitle file, cover image, and font dir
     sample_mkv = tmp_path / "Show - S01E01.mkv"
     sample_mkv.write_bytes(b"dummy_mkv")
@@ -37,7 +37,7 @@ def test_cli_dry_run_smoke(tmp_path, mod, common_mod):
     sample_cover = tmp_path / "Show - 01_cover.jpg"
     sample_cover.write_bytes(b"dummy_cover")
 
-    argv = ["script.py", "--input-dir", str(tmp_path), "--dry-run"]
+    argv = ["script.py", "--input-dir", str(tmp_path), "--dry-run", "--no-cache"]
 
     json_data = {
         "tracks": [
@@ -48,6 +48,6 @@ def test_cli_dry_run_smoke(tmp_path, mod, common_mod):
     }
 
     with patch.object(sys, "argv", argv), \
-         patch.object(common_mod, "check_dependencies"), \
+         patch.object(mod, "check_dependencies"), \
          patch.object(common_mod, "run_mkvmerge_json", return_value=json_data):
         mod.main()
