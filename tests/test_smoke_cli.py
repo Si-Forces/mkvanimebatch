@@ -1,0 +1,53 @@
+"""Smoke tests for CLI main() entrypoints to prevent missing import regressions."""
+
+import importlib
+import sys
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+
+mkv_common_fast = importlib.import_module("mkv_common_fast")
+mkv_common = importlib.import_module("mkv_common")
+mkv_remux_fast = importlib.import_module("mkv_remux_fast")
+mkv_remux = importlib.import_module("mkv_remux")
+mkv_extract_fast = importlib.import_module("mkv_extract_fast")
+mkv_extract = importlib.import_module("mkv_extract")
+
+
+@pytest.mark.parametrize("mod, common_mod", [
+    pytest.param(mkv_remux_fast, mkv_common_fast, id="mkv_remux_fast"),
+    pytest.param(mkv_remux, mkv_common, id="mkv_remux"),
+    pytest.param(mkv_extract_fast, mkv_common_fast, id="mkv_extract_fast"),
+    pytest.param(mkv_extract, mkv_common, id="mkv_extract"),
+])
+def test_cli_dry_run_smoke(tmp_path, mod, common_mod):
+    """Run main() with --dry-run on a mock folder structure to catch any missing imports or undefined variables."""
+    # Create mock MKV file, subtitle file, cover image, and font dir
+    sample_mkv = tmp_path / "Show - S01E01.mkv"
+    sample_mkv.write_bytes(b"dummy_mkv")
+
+    sample_sub = tmp_path / "Show - S01E01.ass"
+    sample_sub.write_text("[Script Info]\nTitle: Test\n[Events]\nDialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,Test\n", encoding="utf-8")
+
+    fonts_dir = tmp_path / "fonts"
+    fonts_dir.mkdir()
+    (fonts_dir / "font.ttf").write_bytes(b"dummy_font")
+
+    sample_cover = tmp_path / "Show - 01_cover.jpg"
+    sample_cover.write_bytes(b"dummy_cover")
+
+    argv = ["script.py", "--input-dir", str(tmp_path), "--dry-run"]
+
+    json_data = {
+        "tracks": [
+            {"id": 0, "type": "video"},
+            {"id": 1, "type": "audio", "properties": {"codec_id": "A_AAC", "audio_channels": 2}},
+        ],
+        "attachments": [],
+    }
+
+    with patch.object(sys, "argv", argv), \
+         patch.object(common_mod, "check_dependencies"), \
+         patch.object(common_mod, "run_mkvmerge_json", return_value=json_data):
+        mod.main()

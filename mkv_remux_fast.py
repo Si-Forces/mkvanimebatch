@@ -27,6 +27,7 @@ from mkv_common_fast import (
     check_dependencies,
     detect_sub_lang,
     parse_attachments,
+    find_fonts_dir,
     has_chapters,
     is_chapter_xml,
     is_cover_filename,
