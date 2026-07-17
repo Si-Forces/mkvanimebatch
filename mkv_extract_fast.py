@@ -294,7 +294,7 @@ def pipeline_worker(
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-def _run(input_dir: Path, fonts_dir: Path, mkv_files: list[ParsedFile], pool: ThreadPoolExecutor, inspect_cache: dict[Path, dict | None] | None = None, dry_run: bool = False, sub_offset: float = 0.0, io_semaphore: threading.Semaphore | None = None) -> bool:
+def _run(input_dir: Path, fonts_dir: Path, mkv_files: list[ParsedFile], pool: ThreadPoolExecutor, inspect_cache: dict[Path, dict | None] | None = None, dry_run: bool = False, sub_offset: float = 0.0, persistent_cache: PersistentInspectCache | None = None, io_semaphore: threading.Semaphore | None = None) -> bool:
     if not mkv_files:
         return False
 
@@ -325,7 +325,7 @@ def _run(input_dir: Path, fonts_dir: Path, mkv_files: list[ParsedFile], pool: Th
     stale_subs_lock = threading.Lock()
 
     if inspect_cache is None:
-        inspect_cache = inspect_videos([mkv.path for mkv in mkv_files], pool)
+        inspect_cache = inspect_videos([mkv.path for mkv in mkv_files], pool, persistent_cache=persistent_cache)
 
     success_count = 0
     futures = {
@@ -405,7 +405,7 @@ def main() -> None:
             print(f"\nFolder: {mkv_dir}")
             try:
                 dir_mkvs = mkvs_by_dir[mkv_dir]
-                if not _run(mkv_dir, mkv_dir / "fonts", dir_mkvs, pool, inspect_cache=inspect_cache, dry_run=cfg.dry_run, sub_offset=cfg.sub_offset, io_semaphore=io_semaphore):
+                if not _run(mkv_dir, mkv_dir / "fonts", dir_mkvs, pool, inspect_cache=inspect_cache, dry_run=cfg.dry_run, sub_offset=cfg.sub_offset, persistent_cache=persistent_cache, io_semaphore=io_semaphore):
                     overall_success = False
             except Exception as e:
                 print(f"  [ERROR] Folder failed: {e}")
