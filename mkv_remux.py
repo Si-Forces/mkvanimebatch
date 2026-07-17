@@ -46,7 +46,10 @@ from mkv_common import (
     parse_attachments,
     find_fonts_dir,
     has_chapters,
+    run_subprocess,
     inspect_videos,
+    PersistentInspectCache,
+    safe_filename,
     is_chapter_xml,
     is_cover_filename,
     is_dialogue_track,
@@ -523,7 +526,9 @@ def _convert_flac_to_opus(
     log.append(f"  FLAC detected — converting to Opus {opus_bitrate} via ffmpeg...")
 
     result = run_subprocess([
-        "ffmpeg", "-y", "-nostdin", "-threads", str(ffmpeg_threads),
+        "ffmpeg", "-y", "-nostdin",
+        "-analyzeduration", "0", "-probesize", "1M",
+        "-threads", str(ffmpeg_threads),
         "-i", str(video),
         "-map", f"0:a:{audio_index}",
         "-vn", "-c:a", "libopus",
@@ -611,7 +616,8 @@ def _build_mkvmerge_args(
 # ─── JOB EXECUTION ───────────────────────────────────────────────────────────
 def process_job(
     job: PlannedJob, temp_dir: Path | None, fonts: FontInfo, opus_bitrate: str,
-    json_cache: dict[Path, dict | None], ffmpeg_threads: int,
+    json_cache: dict[Path, dict | None],    ffmpeg_threads: int = 2,
+    io_semaphore: threading.Semaphore | None = None,
 ) -> JobResult:
     r = JobResult()
     video, video_name, base = job.video, job.video_name, job.base
@@ -689,7 +695,11 @@ def process_job(
         args = _build_mkvmerge_args(job, tr, temp_opus, fonts, temp_output)
         r.log.append("  Running mkvmerge...")
 
-        run_result = run_subprocess(["mkvmerge", *args])
+        if io_semaphore is not None:
+            with io_semaphore:
+                run_result = run_subprocess(["mkvmerge", *args])
+        else:
+            run_result = run_subprocess(["mkvmerge", *args])
         if run_result.stderr.strip():
             r.log.append(f"  WARNING (mkvmerge): {run_result.stderr.strip()}")
 
@@ -923,6 +933,7 @@ def _execute_jobs(
     json_cache:    dict[Path, dict | None],
     skipped_files: list[str],
     matched_files: list[str],
+    io_semaphore:  threading.Semaphore | None = None,
 ) -> None:
     logger.info("Processing %d matched file(s) (up to %d at a time)...", len(jobs), max_workers)
 
@@ -931,7 +942,7 @@ def _execute_jobs(
     completed_jobs = 0
 
     futures = {
-        pool.submit(process_job, job, temp_dir, fonts, opus_bitrate, json_cache, ffmpeg_threads): job
+        pool.submit(process_job, job, temp_dir, fonts, opus_bitrate, json_cache, ffmpeg_threads, io_semaphore): job
         for job in jobs
     }
     for future in as_completed(futures):
@@ -1050,6 +1061,8 @@ def _run(
     max_workers:  int,
     opus_bitrate: str,
     dry_run:      bool,
+    persistent_cache: PersistentInspectCache | None = None,
+    io_semaphore: threading.Semaphore | None = None,
 ) -> bool:
     if not videos:
         logger.warning("No MKV files to process in '%s'.", mkv_dir.name)
@@ -1074,7 +1087,7 @@ def _run(
             
         videos_to_inspect.append(v.path)
 
-    json_cache = inspect_videos(videos_to_inspect, pool) if videos_to_inspect else {}
+    json_cache = inspect_videos(videos_to_inspect, pool, persistent_cache=persistent_cache) if videos_to_inspect else {}
 
     # Collect all subtitle paths across the search path for interactive fallback selection
     seen_subs: set[Path] = set()
@@ -1113,7 +1126,7 @@ def _run(
 
     # Distribute available CPU cores evenly among workers to prevent core thrashing
     ffmpeg_threads = max(1, (os.cpu_count() or 4) // max_workers)
-    _execute_jobs(jobs, temp_dir, fonts, opus_bitrate, pool, max_workers, ffmpeg_threads, json_cache, skipped_files, matched_files)
+    _execute_jobs(jobs, temp_dir, fonts, opus_bitrate, pool, max_workers, ffmpeg_threads, json_cache, skipped_files, matched_files, io_semaphore=io_semaphore)
     _print_summary(output_dir, matched_files, skipped_files)
     return not bool(skipped_files)
 
@@ -1145,10 +1158,23 @@ def main() -> None:
                         help="Show matched files without processing.")
     parser.add_argument("--keep-fonts", action="store_true",
                         help="Keep the extracted fonts folder after processing.")
+    parser.add_argument("--io-jobs", type=int, default=2,
+                        help="Maximum concurrent disk I/O jobs for mkvmerge. Set to 0 to disable throttling.")
+    parser.add_argument("--no-cache", action="store_true",
+                        help="Bypass persistent inspection cache.")
+    parser.add_argument("--clear-cache", action="store_true",
+                        help="Clear persistent inspection cache.")
     cfg          = parser.parse_args()
 
     max_workers  = cfg.workers
     opus_bitrate = cfg.bitrate
+
+    if cfg.clear_cache:
+        PersistentInspectCache().clear()
+        logger.info("Persistent inspection cache cleared.")
+
+    persistent_cache = PersistentInspectCache(enabled=not cfg.no_cache)
+    io_semaphore = threading.BoundedSemaphore(cfg.io_jobs) if cfg.io_jobs > 0 else None
 
     if not re.match(r"^\d+[kM]?$", opus_bitrate):
         logger.error("Invalid bitrate format: '%s'. Must match pattern like 128k, 192k, 1M.", opus_bitrate)
@@ -1233,7 +1259,7 @@ def main() -> None:
             
             success = False
             try:
-                success = _run(mkv_dir, dir_mkvs, temp_dir, current_output_dir, current_fonts_dir, search_dirs, pool, max_workers, opus_bitrate, dry_run)
+                success = _run(mkv_dir, dir_mkvs, temp_dir, current_output_dir, current_fonts_dir, search_dirs, pool, max_workers, opus_bitrate, dry_run, persistent_cache=persistent_cache, io_semaphore=io_semaphore)
                 if not success:
                     overall_success = False
             finally:
