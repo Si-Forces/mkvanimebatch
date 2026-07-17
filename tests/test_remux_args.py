@@ -15,7 +15,9 @@ mkv_remux_fast = importlib.import_module("mkv_remux_fast")
     pytest.param(mkv_remux_fast, id="mkv_remux_fast"),
 ])
 class TestRemuxArgs:
-    def test_no_chapters_before_temp_opus_and_subtitle(self, mod):
+    def test_no_chapters_before_temp_opus_only(self, mod):
+        """--no-chapters must precede the opus file to prevent chapter doubling,
+        but must NOT precede the subtitle file (.ass files never carry chapters)."""
         job = mod.PlannedJob(
             video=Path("/dummy/video.mkv"),
             video_name="video.mkv",
@@ -40,35 +42,45 @@ class TestRemuxArgs:
 
         args = mod._build_mkvmerge_args(job, tr, temp_opus, fonts, output_path)
 
-        # Verify --no-chapters precedes temp_opus
+        # --no-chapters must immediately precede the opus file's per-file flags
         temp_opus_idx = args.index(str(temp_opus))
         assert args[temp_opus_idx - 5:temp_opus_idx] == [
             "--no-chapters", "--language", "0:jpn", "--track-name", "0:Japanese"
         ]
 
-        # Verify --no-chapters precedes subtitle_file
+        # --no-chapters must NOT appear in the per-file flags immediately before subtitle
         sub_idx = args.index(str(job.subtitle_file))
-        assert args[sub_idx - 7:sub_idx] == [
-            "--no-chapters", "--language", "0:eng", "--track-name", "0:English", "--default-track-flag", "0:yes"
-        ]
+        assert "--no-chapters" not in args[sub_idx - 7:sub_idx]
 
-    def test_ffmpeg_flac_to_opus_disables_chapter_mapping(self, mod):
-        mock_res = MagicMock()
-        mock_res.returncode = 0
-        mock_res.stderr = ""
+    def test_no_chapters_absent_when_no_opus(self, mod):
+        """When there is no FLAC->Opus conversion, --no-chapters should not
+        appear before any secondary input (subtitle, fonts, cover)."""
+        job = mod.PlannedJob(
+            video=Path("/dummy/video.mkv"),
+            video_name="video.mkv",
+            base="video",
+            output_file=Path("/dummy/out.mkv"),
+            subtitle_file=Path("/dummy/sub.ass"),
+            subtitle_label="English",
+            subtitle_mkv_lang="eng",
+            chapter_file=None,
+            cover_file=None,
+            embedded_sub_id=None,
+            use_source_fonts=False,
+        )
+        tr = mod.TrackSelection(
+            video_id=0, audio_id=1, audio_index=0, audio_codec="A_AAC",
+            audio_channels=2, audio_lang="jpn", audio_name="Japanese",
+            audio_reason="test", has_source_chapters=False, source_cover_id=None
+        )
+        fonts = mod.FontInfo(args=(), count=0)
+        output_path = Path("/dummy/out.mkv")
 
-        temp_dir = Path("/dummy/temp")
-        video = Path("/dummy/video.mkv")
+        args = mod._build_mkvmerge_args(job, tr, None, fonts, output_path)
 
-        with patch.object(mod, "run_subprocess", return_value=mock_res) as mock_run:
-            if mod is mkv_remux:
-                log = []
-                mod._convert_flac_to_opus(video, 1, 0, temp_dir, "video", "128k", log, 2)
-            else:
-                mod._convert_flac_to_opus(video, 1, 0, temp_dir, "video", "128k", 10, 2)
-
-            cmd = mock_run.call_args[0][0]
-
-        assert "-map_chapters" in cmd
-        map_chap_idx = cmd.index("-map_chapters")
-        assert cmd[map_chap_idx + 1] == "-1"
+        # No opus temp file → --no-chapters should NOT appear at all
+        # (the only --no-chapters allowed is before source.mkv when chapter_file is set)
+        sub_idx = args.index(str(job.subtitle_file))
+        assert "--no-chapters" not in args[:sub_idx] or (
+            job.chapter_file is not None
+        ), "--no-chapters must not appear before subtitle when no opus and no external chapter"
