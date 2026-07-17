@@ -620,30 +620,138 @@ def run_mkvmerge_json(filepath: Path, log: list[str] | None = None) -> dict | No
         return None
 
 
-def inspect_videos(videos: list[Path], pool: ThreadPoolExecutor) -> dict[Path, dict | None]:
+def get_default_cache_file() -> Path:
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        base_dir = Path(local_app_data) / "mkvanimebatch"
+    else:
+        base_dir = Path.home() / ".cache" / "mkvanimebatch"
+    return base_dir / "inspect_cache.json"
+
+
+class PersistentInspectCache:
+    """Persistent JSON cache for mkvmerge inspection data keyed on (path, size, mtime)."""
+
+    def __init__(self, cache_file: Path | None = None, enabled: bool = True) -> None:
+        self.cache_file = cache_file or get_default_cache_file()
+        self.enabled = enabled
+        self._data: dict[str, dict] = {}
+        self._lock = threading.Lock()
+        if self.enabled:
+            self._load()
+
+    def _load(self) -> None:
+        if not self.cache_file.exists():
+            return
+        try:
+            with open(self.cache_file, "r", encoding="utf-8") as f:
+                self._data = json.load(f)
+        except Exception:
+            self._data = {}
+
+    def save(self) -> None:
+        if not self.enabled:
+            return
+        try:
+            self.cache_file.parent.mkdir(parents=True, exist_ok=True)
+            temp_file = self.cache_file.with_suffix(".tmp")
+            with open(temp_file, "w", encoding="utf-8") as f:
+                json.dump(self._data, f)
+            temp_file.replace(self.cache_file)
+        except Exception:
+            pass
+
+    def get(self, path: Path) -> dict | None:
+        if not self.enabled:
+            return None
+        key = str(path.resolve())
+        with self._lock:
+            entry = self._data.get(key)
+        if not entry:
+            return None
+        try:
+            st = path.stat()
+            if entry.get("size") == st.st_size and abs(entry.get("mtime", 0) - st.st_mtime) < 0.001:
+                return entry.get("json_data")
+        except OSError:
+            pass
+        return None
+
+    def put(self, path: Path, json_data: dict | None) -> None:
+        if not self.enabled:
+            return
+        key = str(path.resolve())
+        try:
+            st = path.stat()
+            with self._lock:
+                self._data[key] = {
+                    "size": st.st_size,
+                    "mtime": st.st_mtime,
+                    "json_data": json_data,
+                }
+        except OSError:
+            pass
+
+    def clear(self) -> None:
+        with self._lock:
+            self._data.clear()
+        if self.cache_file.exists():
+            try:
+                self.cache_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def inspect_videos(
+    videos: list[Path],
+    pool: ThreadPoolExecutor,
+    persistent_cache: PersistentInspectCache | None = None,
+    force_refresh: bool = False,
+) -> dict[Path, dict | None]:
     """
     Run `mkvmerge -J` on every video in parallel and return a cache mapping
     each path to its parsed JSON (or None if inspection failed).
-
-    Dict writes happen only in the calling thread as futures complete, via
-    `as_completed` — worker threads only compute and return values, so no
-    lock is needed around `cache`.
     """
-    logger.info("Pre-inspecting %d video(s)...", len(videos))
+    if persistent_cache is None and not force_refresh:
+        persistent_cache = PersistentInspectCache()
+
     cache: dict[Path, dict | None] = {}
+    to_inspect: list[Path] = []
 
-    def _inspect(v: Path) -> tuple[Path, dict | None]:
-        return v, run_mkvmerge_json(v)
+    if persistent_cache and not force_refresh:
+        for v in videos:
+            cached_data = persistent_cache.get(v)
+            if cached_data is not None:
+                cache[v] = cached_data
+            else:
+                to_inspect.append(v)
+    else:
+        to_inspect = videos
 
-    futures = {pool.submit(_inspect, v): v for v in videos}
-    for future in as_completed(futures):
-        v = futures[future]
-        try:
-            _, data = future.result()
-            cache[v] = data
-        except Exception as exc:
-            logger.warning("Inspection failed for %s: %s", v.name, exc)
-            cache[v] = None
+    if to_inspect:
+        cached_count = len(videos) - len(to_inspect)
+        if cached_count > 0:
+            logger.info("Pre-inspecting %d video(s) (%d loaded from cache)...", len(to_inspect), cached_count)
+        else:
+            logger.info("Pre-inspecting %d video(s)...", len(to_inspect))
+
+        def _inspect(v: Path) -> tuple[Path, dict | None]:
+            return v, run_mkvmerge_json(v)
+
+        futures = {pool.submit(_inspect, v): v for v in to_inspect}
+        for future in as_completed(futures):
+            v = futures[future]
+            try:
+                _, data = future.result()
+                cache[v] = data
+                if persistent_cache:
+                    persistent_cache.put(v, data)
+            except Exception as exc:
+                logger.warning("Inspection failed for %s: %s", v.name, exc)
+                cache[v] = None
+
+        if persistent_cache:
+            persistent_cache.save()
 
     ok = sum(1 for d in cache.values() if d is not None)
     logger.info("Inspection complete: %d/%d succeeded.", ok, len(videos))

@@ -33,9 +33,11 @@ from mkv_common_fast import (
     is_cover_filename,
     is_dialogue_track,
     output_stem,
-    parse_episode,
+    has_chapters,
     run_subprocess,
     inspect_videos,
+    PersistentInspectCache,
+    safe_filename,
     select_best_subtitle_track,
     natural_sort_key,
     ParsedFile,
@@ -429,7 +431,9 @@ def _convert_flac_to_opus(
     temp_opus = temp_dir / f"{base}_{unique_id}_audio.opus"
 
     result = run_subprocess([
-        "ffmpeg", "-y", "-nostdin", "-threads", str(ffmpeg_threads),
+        "ffmpeg", "-y", "-nostdin",
+        "-analyzeduration", "0", "-probesize", "1M",
+        "-threads", str(ffmpeg_threads),
         "-i", str(video),
         "-map", f"0:a:{audio_index}",
         "-vn", "-c:a", "libopus",
@@ -544,6 +548,7 @@ def pipeline_worker(
     ffmpeg_threads: int,
     temp_parent_dir: Path | None,
     dry_run: bool,
+    io_semaphore: threading.Semaphore | None = None,
 ) -> bool:
     if not video_parsed:
         return False
@@ -625,7 +630,11 @@ def pipeline_worker(
 
         temp_output.unlink(missing_ok=True)
         args = _build_mkvmerge_args(job, tr, temp_opus, fonts, temp_output)
-        run_result = run_subprocess(["mkvmerge", *args], capture_stdout=False)
+        if io_semaphore is not None:
+            with io_semaphore:
+                run_result = run_subprocess(["mkvmerge", *args], capture_stdout=False)
+        else:
+            run_result = run_subprocess(["mkvmerge", *args], capture_stdout=False)
         if run_result.returncode > 1:
             temp_output.unlink(missing_ok=True)
             raise RuntimeError(f"mkvmerge failed (exit {run_result.returncode}): {run_result.stderr.strip()}")
@@ -657,6 +666,7 @@ def _run(
     complexity:   int,
     dry_run:      bool = False,
     inspect_cache: dict[Path, dict | None] | None = None,
+    io_semaphore: threading.Semaphore | None = None,
 ) -> bool:
     # Discover assets
     fonts = scan_fonts(fonts_dir)
@@ -755,6 +765,7 @@ def _run(
                 ffmpeg_threads,
                 temp_dir,
                 dry_run,
+                io_semaphore,
             ): v
             for v in unprocessed_videos
         }
@@ -789,10 +800,20 @@ def main() -> None:
     parser.add_argument("--input-dir", type=str, default=None, help="Input directory")
     parser.add_argument("--dry-run", action="store_true", help="Dry run mode")
     parser.add_argument("--keep-fonts", action="store_true", help="Keep temporary fonts folder")
+    parser.add_argument("--io-jobs", type=int, default=2, help="Maximum concurrent disk I/O jobs for mkvmerge. Set to 0 to disable throttling.")
+    parser.add_argument("--no-cache", action="store_true", help="Bypass persistent inspection cache")
+    parser.add_argument("--clear-cache", action="store_true", help="Clear persistent inspection cache")
     cfg = parser.parse_args()
 
     if cfg.workers < 1:
         parser.error("workers count must be at least 1")
+
+    if cfg.clear_cache:
+        PersistentInspectCache().clear()
+        print("Persistent inspection cache cleared.")
+
+    persistent_cache = PersistentInspectCache(enabled=not cfg.no_cache)
+    io_semaphore = threading.BoundedSemaphore(cfg.io_jobs) if cfg.io_jobs > 0 else None
 
     check_dependencies("mkvmerge", "ffmpeg")
     root_input_dir = Path(cfg.input_dir).resolve() if cfg.input_dir else SCRIPT_DIR
@@ -826,7 +847,7 @@ def main() -> None:
                     if not is_completed_output(mkv_output_dir / f"{out_stem}.mkv"):
                         unprocessed_paths.append(mkv.path)
 
-            inspect_cache = inspect_videos(unprocessed_paths, pool) if unprocessed_paths else {}
+            inspect_cache = inspect_videos(unprocessed_paths, pool, persistent_cache=persistent_cache) if unprocessed_paths else {}
 
         for mkv_dir in mkv_dirs:
             print(f"\nFolder: {mkv_dir}")
@@ -864,6 +885,7 @@ def main() -> None:
                     cfg.complexity,
                     cfg.dry_run,
                     inspect_cache=inspect_cache,
+                    io_semaphore=io_semaphore,
                 )
                 if not success:
                     overall_success = False

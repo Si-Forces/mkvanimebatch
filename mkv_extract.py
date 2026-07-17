@@ -33,9 +33,9 @@ from mkv_common import (
     ep_type_label,
     parse_attachments,
     has_chapters,
-    inspect_videos,
-    parse_episode,
     run_subprocess,
+    inspect_videos,
+    PersistentInspectCache,
     safe_filename,
     select_best_subtitle_track,
     setup_logging,
@@ -107,13 +107,17 @@ def select_subtitle(
 
 
 # ─── EXTRACTION HELPERS ──────────────────────────────────────────────────────
-def _run_mkvextract(mkv_path: Path, args: list[str], log: list[str]) -> None:
+def _run_mkvextract(mkv_path: Path, args: list[str], log: list[str], io_semaphore: threading.Semaphore | None = None) -> None:
     """Run a single mkvextract command with mixed modes (tracks, chapters, attachments)."""
     if not args:
         log.append("   -> Nothing to extract.")
         return
         
-    result = run_subprocess(["mkvextract", str(mkv_path), *args])
+    if io_semaphore is not None:
+        with io_semaphore:
+            result = run_subprocess(["mkvextract", str(mkv_path), *args])
+    else:
+        result = run_subprocess(["mkvextract", str(mkv_path), *args])
     if result.returncode > 1:
         raise RuntimeError(
             f"mkvextract failed (exit {result.returncode}): "
@@ -193,8 +197,9 @@ def process_file(
     fonts_dir:     Path,
     font_registry: FontRegistry,
     stale_subs_map: dict[str, str] | None = None,
-    stale_subs_lock: "threading.Lock | None" = None,
+    stale_subs_lock: threading.Lock | None = None,
     sub_offset:    float = 0.0,
+    io_semaphore: threading.Semaphore | None = None,
 ) -> tuple[Path, list[str], bool]:
     mkv_path = mkv_file.path
     log: list[str] = [f"Processing: {mkv_path.name}"]
@@ -305,7 +310,7 @@ def process_file(
             extract_args += font_args
 
         log.append("   -> Running mkvextract...")
-        _run_mkvextract(mkv_path, extract_args, log)
+        _run_mkvextract(mkv_path, extract_args, log, io_semaphore=io_semaphore)
 
         staged_output_paths = {staged for staged, _, _ in staged_outputs}
         for staged_path, final_path, item_name in staged_outputs:
@@ -381,7 +386,7 @@ def process_file(
 
 
 # ─── RUN ORCHESTRATOR ────────────────────────────────────────────────────────
-def _run(input_dir: Path, fonts_dir: Path, mkv_files: list[ParsedFile], pool: ThreadPoolExecutor, max_workers: int, dry_run: bool, sub_offset: float = 0.0) -> bool:
+def _run(input_dir: Path, fonts_dir: Path, mkv_files: list[ParsedFile], pool: ThreadPoolExecutor, max_workers: int, dry_run: bool, sub_offset: float = 0.0, persistent_cache: PersistentInspectCache | None = None, io_semaphore: threading.Semaphore | None = None) -> bool:
     """Returns True if every file in this directory was processed without
     a crash or mkvmerge-inspection failure; False otherwise. Propagated up
     to main() so the process exits non-zero if anything actually failed."""
@@ -398,7 +403,7 @@ def _run(input_dir: Path, fonts_dir: Path, mkv_files: list[ParsedFile], pool: Th
         return True
 
     fonts_dir.mkdir(parents=True, exist_ok=True)
-    json_cache = inspect_videos([f.path for f in mkv_files], pool)
+    json_cache = inspect_videos([f.path for f in mkv_files], pool, persistent_cache=persistent_cache)
 
     existing_hashes = set()
     if fonts_dir.is_dir():
@@ -430,6 +435,7 @@ def _run(input_dir: Path, fonts_dir: Path, mkv_files: list[ParsedFile], pool: Th
             stale_subs_map,
             stale_subs_lock,
             sub_offset,
+            io_semaphore,
         ): mkv_file.path
         for mkv_file in mkv_files
     }
@@ -509,11 +515,24 @@ def main() -> None:
                         help="List discovered MKV files without extracting anything.")
     parser.add_argument("--sub-offset", type=float, default=0.0,
                         help="Shift extracted subtitle timestamps by this many seconds (negative = earlier, positive = later). Applied once, at extraction time.")
-    cfg = parser.parse_args()
+    parser.add_argument("--io-jobs", type=int, default=2,
+                        help="Maximum concurrent disk I/O jobs for mkvextract. Set to 0 to disable throttling.")
+    parser.add_argument("--no-cache", action="store_true",
+                        help="Bypass persistent inspection cache.")
+    parser.add_argument("--clear-cache", action="store_true",
+                        help="Clear persistent inspection cache.")
+    cfg          = parser.parse_args()
 
     max_workers = cfg.workers
     root_input_dir = Path(cfg.input_dir).resolve() if cfg.input_dir else SCRIPT_DIR
     dry_run     = cfg.dry_run
+
+    if cfg.clear_cache:
+        PersistentInspectCache().clear()
+        logger.info("Persistent inspection cache cleared.")
+
+    persistent_cache = PersistentInspectCache(enabled=not cfg.no_cache)
+    io_semaphore = threading.BoundedSemaphore(cfg.io_jobs) if cfg.io_jobs > 0 else None
 
     setup_logging(logging.INFO)
 
@@ -548,7 +567,7 @@ def main() -> None:
 
             current_fonts_dir = mkv_dir / "fonts"
             dir_mkvs = mkvs_by_dir[mkv_dir]
-            success = _run(mkv_dir, current_fonts_dir, dir_mkvs, pool, max_workers, dry_run, sub_offset=cfg.sub_offset)
+            success = _run(mkv_dir, current_fonts_dir, dir_mkvs, pool, max_workers, dry_run, sub_offset=cfg.sub_offset, persistent_cache=persistent_cache, io_semaphore=io_semaphore)
             if not success:
                 overall_success = False
 

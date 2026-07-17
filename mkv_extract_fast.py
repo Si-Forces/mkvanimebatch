@@ -27,6 +27,7 @@ from mkv_common_fast import (
     has_chapters,
     run_subprocess,
     inspect_videos,
+    PersistentInspectCache,
     safe_filename,
     select_best_subtitle_track,
     shift_ass_timestamps,
@@ -116,6 +117,7 @@ def pipeline_worker(
     stale_subs_map: dict[str, str],
     stale_subs_lock: threading.Lock,
     sub_offset: float = 0.0,
+    io_semaphore: threading.Semaphore | None = None,
 ) -> bool:
     # 1. Inspect (pre-fetched)
     if json_data is None:
@@ -200,7 +202,11 @@ def pipeline_worker(
             extract_args += font_args
 
         if extract_args:
-            result = run_subprocess(["mkvextract", str(mkv_path), *extract_args], capture_stdout=False)
+            if io_semaphore is not None:
+                with io_semaphore:
+                    result = run_subprocess(["mkvextract", str(mkv_path), *extract_args], capture_stdout=False)
+            else:
+                result = run_subprocess(["mkvextract", str(mkv_path), *extract_args], capture_stdout=False)
             if result.returncode > 1:
                 raise RuntimeError(f"mkvextract failed (exit {result.returncode}): {result.stderr.strip()}")
 
@@ -288,7 +294,7 @@ def pipeline_worker(
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-def _run(input_dir: Path, fonts_dir: Path, mkv_files: list[ParsedFile], pool: ThreadPoolExecutor, inspect_cache: dict[Path, dict | None] | None = None, dry_run: bool = False, sub_offset: float = 0.0) -> bool:
+def _run(input_dir: Path, fonts_dir: Path, mkv_files: list[ParsedFile], pool: ThreadPoolExecutor, inspect_cache: dict[Path, dict | None] | None = None, dry_run: bool = False, sub_offset: float = 0.0, io_semaphore: threading.Semaphore | None = None) -> bool:
     if not mkv_files:
         return False
 
@@ -333,6 +339,7 @@ def _run(input_dir: Path, fonts_dir: Path, mkv_files: list[ParsedFile], pool: Th
             stale_subs_map,
             stale_subs_lock,
             sub_offset,
+            io_semaphore,
         ): mkv
         for mkv in mkv_files
     }
@@ -360,10 +367,20 @@ def main() -> None:
     parser.add_argument("--input-dir", type=str, default=None, help="Directory path")
     parser.add_argument("--dry-run", action="store_true", help="Dry run mode")
     parser.add_argument("--sub-offset", type=float, default=0.0, help="Shift extracted subtitle timestamps by this many seconds (negative = earlier, positive = later). Applied once, at extraction time.")
+    parser.add_argument("--io-jobs", type=int, default=2, help="Maximum concurrent disk I/O jobs for mkvextract. Set to 0 to disable throttling.")
+    parser.add_argument("--no-cache", action="store_true", help="Bypass persistent inspection cache")
+    parser.add_argument("--clear-cache", action="store_true", help="Clear persistent inspection cache")
     cfg = parser.parse_args()
 
     if cfg.workers < 1:
         parser.error("workers count must be at least 1")
+
+    if cfg.clear_cache:
+        PersistentInspectCache().clear()
+        print("Persistent inspection cache cleared.")
+
+    persistent_cache = PersistentInspectCache(enabled=not cfg.no_cache)
+    io_semaphore = threading.BoundedSemaphore(cfg.io_jobs) if cfg.io_jobs > 0 else None
 
     check_dependencies("mkvmerge", "mkvextract")
     root_input_dir = Path(cfg.input_dir).resolve() if cfg.input_dir else SCRIPT_DIR
@@ -383,12 +400,12 @@ def main() -> None:
     
     # Global ThreadPool reuse
     with ThreadPoolExecutor(max_workers=cfg.workers) as pool:
-        inspect_cache = inspect_videos([mkv.path for mkv in all_mkvs], pool) if not cfg.dry_run else {}
+        inspect_cache = inspect_videos([mkv.path for mkv in all_mkvs], pool, persistent_cache=persistent_cache) if not cfg.dry_run else {}
         for mkv_dir in mkv_dirs:
             print(f"\nFolder: {mkv_dir}")
             try:
                 dir_mkvs = mkvs_by_dir[mkv_dir]
-                if not _run(mkv_dir, mkv_dir / "fonts", dir_mkvs, pool, inspect_cache=inspect_cache, dry_run=cfg.dry_run, sub_offset=cfg.sub_offset):
+                if not _run(mkv_dir, mkv_dir / "fonts", dir_mkvs, pool, inspect_cache=inspect_cache, dry_run=cfg.dry_run, sub_offset=cfg.sub_offset, io_semaphore=io_semaphore):
                     overall_success = False
             except Exception as e:
                 print(f"  [ERROR] Folder failed: {e}")
