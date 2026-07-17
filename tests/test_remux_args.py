@@ -2,7 +2,6 @@
 
 import importlib
 from pathlib import Path
-from unittest.mock import patch, MagicMock
 
 import pytest
 
@@ -79,8 +78,117 @@ class TestRemuxArgs:
         args = mod._build_mkvmerge_args(job, tr, None, fonts, output_path)
 
         # No opus temp file → --no-chapters should NOT appear at all
-        # (the only --no-chapters allowed is before source.mkv when chapter_file is set)
         sub_idx = args.index(str(job.subtitle_file))
-        assert "--no-chapters" not in args[:sub_idx] or (
-            job.chapter_file is not None
-        ), "--no-chapters must not appear before subtitle when no opus and no external chapter"
+        assert "--no-chapters" not in args[:sub_idx]
+
+    def test_chapter_matrix_no_external_no_opus(self, mod):
+        """No external chapter & no opus conversion -> source chapters preserved from video."""
+        job = mod.PlannedJob(
+            video=Path("/dummy/video.mkv"),
+            video_name="video.mkv",
+            base="video",
+            output_file=Path("/dummy/out.mkv"),
+            subtitle_file=None,
+            subtitle_label="English",
+            subtitle_mkv_lang="eng",
+            chapter_file=None,
+            cover_file=None,
+        )
+        tr = mod.TrackSelection(
+            video_id=0, audio_id=1, audio_index=0, audio_codec="A_AAC",
+            audio_channels=2, audio_lang="jpn", audio_name="Japanese",
+            audio_reason="test", has_source_chapters=True, source_cover_id=None
+        )
+        args = mod._build_mkvmerge_args(job, tr, None, mod.FontInfo(args=(), count=0), Path("/dummy/out.mkv"))
+
+        assert "--no-chapters" not in args
+        assert "--chapters" not in args
+
+    def test_chapter_matrix_no_external_with_opus(self, mod):
+        """No external chapter & with opus conversion -> source chapters preserved from video, opus chapters suppressed."""
+        job = mod.PlannedJob(
+            video=Path("/dummy/video.mkv"),
+            video_name="video.mkv",
+            base="video",
+            output_file=Path("/dummy/out.mkv"),
+            subtitle_file=None,
+            subtitle_label="English",
+            subtitle_mkv_lang="eng",
+            chapter_file=None,
+            cover_file=None,
+        )
+        tr = mod.TrackSelection(
+            video_id=0, audio_id=1, audio_index=0, audio_codec="flac",
+            audio_channels=2, audio_lang="jpn", audio_name="Japanese",
+            audio_reason="test", has_source_chapters=True, source_cover_id=None
+        )
+        temp_opus = Path("/dummy/audio.opus")
+        args = mod._build_mkvmerge_args(job, tr, temp_opus, mod.FontInfo(args=(), count=0), Path("/dummy/out.mkv"))
+
+        video_idx = args.index(str(job.video))
+        opus_idx = args.index(str(temp_opus))
+
+        # Video input must NOT have --no-chapters (so source chapters are kept)
+        assert "--no-chapters" not in args[:video_idx]
+
+        # Opus input MUST have --no-chapters (so opus chapters don't duplicate source chapters)
+        assert "--no-chapters" in args[video_idx:opus_idx]
+        assert "--chapters" not in args
+
+    def test_chapter_matrix_with_external_no_opus(self, mod):
+        """With external chapter & no opus conversion -> source chapters suppressed, external chapters used."""
+        ext_chap = Path("/dummy/chapters.xml")
+        job = mod.PlannedJob(
+            video=Path("/dummy/video.mkv"),
+            video_name="video.mkv",
+            base="video",
+            output_file=Path("/dummy/out.mkv"),
+            subtitle_file=None,
+            subtitle_label="English",
+            subtitle_mkv_lang="eng",
+            chapter_file=ext_chap,
+            cover_file=None,
+        )
+        tr = mod.TrackSelection(
+            video_id=0, audio_id=1, audio_index=0, audio_codec="A_AAC",
+            audio_channels=2, audio_lang="jpn", audio_name="Japanese",
+            audio_reason="test", has_source_chapters=True, source_cover_id=None
+        )
+        args = mod._build_mkvmerge_args(job, tr, None, mod.FontInfo(args=(), count=0), Path("/dummy/out.mkv"))
+
+        video_idx = args.index(str(job.video))
+        assert "--no-chapters" in args[:video_idx]
+
+        chap_idx = args.index("--chapters")
+        assert args[chap_idx + 1] == str(ext_chap)
+
+    def test_chapter_matrix_with_external_with_opus(self, mod):
+        """With external chapter & with opus conversion -> source & opus chapters suppressed, external chapters used."""
+        ext_chap = Path("/dummy/chapters.xml")
+        job = mod.PlannedJob(
+            video=Path("/dummy/video.mkv"),
+            video_name="video.mkv",
+            base="video",
+            output_file=Path("/dummy/out.mkv"),
+            subtitle_file=None,
+            subtitle_label="English",
+            subtitle_mkv_lang="eng",
+            chapter_file=ext_chap,
+            cover_file=None,
+        )
+        tr = mod.TrackSelection(
+            video_id=0, audio_id=1, audio_index=0, audio_codec="flac",
+            audio_channels=2, audio_lang="jpn", audio_name="Japanese",
+            audio_reason="test", has_source_chapters=True, source_cover_id=None
+        )
+        temp_opus = Path("/dummy/audio.opus")
+        args = mod._build_mkvmerge_args(job, tr, temp_opus, mod.FontInfo(args=(), count=0), Path("/dummy/out.mkv"))
+
+        video_idx = args.index(str(job.video))
+        opus_idx = args.index(str(temp_opus))
+
+        assert "--no-chapters" in args[:video_idx]
+        assert "--no-chapters" in args[video_idx:opus_idx]
+
+        chap_idx = args.index("--chapters")
+        assert args[chap_idx + 1] == str(ext_chap)
