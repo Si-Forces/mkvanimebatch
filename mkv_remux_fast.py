@@ -27,17 +27,15 @@ from mkv_common_fast import (
     check_dependencies,
     detect_sub_lang,
     parse_attachments,
-    find_fonts_dir,
     has_chapters,
     is_chapter_xml,
     is_cover_filename,
     is_dialogue_track,
     output_stem,
-    has_chapters,
+    parse_episode,
     run_subprocess,
     inspect_videos,
     PersistentInspectCache,
-    safe_filename,
     select_best_subtitle_track,
     natural_sort_key,
     ParsedFile,
@@ -666,6 +664,7 @@ def _run(
     complexity:   int,
     dry_run:      bool = False,
     inspect_cache: dict[Path, dict | None] | None = None,
+    persistent_cache: PersistentInspectCache | None = None,
     io_semaphore: threading.Semaphore | None = None,
 ) -> bool:
     # Discover assets
@@ -743,7 +742,7 @@ def _run(
     try:
         # Pre-inspect only the videos that actually need it
         if inspect_cache is None:
-            inspect_cache = inspect_videos(videos_to_inspect, pool) if videos_to_inspect else {}
+            inspect_cache = inspect_videos(videos_to_inspect, pool, persistent_cache=persistent_cache) if videos_to_inspect else {}
 
         success_count = already_remuxed_count
         futures = {
@@ -885,6 +884,7 @@ def main() -> None:
                     cfg.complexity,
                     cfg.dry_run,
                     inspect_cache=inspect_cache,
+                    persistent_cache=persistent_cache,
                     io_semaphore=io_semaphore,
                 )
                 if not success:
