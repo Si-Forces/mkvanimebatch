@@ -47,7 +47,7 @@ __all__ = [
     "select_best_subtitle_track", "shift_ass_timestamps",
     # mkvmerge / dependency helpers
     "check_dependencies", "run_mkvmerge_json", "run_subprocess",
-    "inspect_videos",
+    "inspect_videos", "PersistentInspectCache", "get_default_cache_file",
     # natural sorting
     "natural_sort_key",
     # scandir helpers & caching
@@ -589,6 +589,10 @@ class PersistentInspectCache:
             return
         try:
             self.cache_file.parent.mkdir(parents=True, exist_ok=True)
+            with self._lock:
+                # Prune cache entries for files that no longer exist on disk
+                pruned_data = {k: v for k, v in self._data.items() if Path(k).exists()}
+                self._data = pruned_data
             temp_file = self.cache_file.with_suffix(".tmp")
             with open(temp_file, "w", encoding="utf-8") as f:
                 json.dump(self._data, f)
@@ -663,9 +667,6 @@ def inspect_videos(
     persistent_cache: PersistentInspectCache | None = None,
     force_refresh: bool = False,
 ) -> dict[Path, dict | None]:
-    if persistent_cache is None and not force_refresh:
-        persistent_cache = PersistentInspectCache()
-
     cache: dict[Path, dict | None] = {}
     to_inspect: list[Path] = []
 
