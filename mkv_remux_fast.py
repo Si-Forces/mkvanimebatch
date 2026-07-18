@@ -378,7 +378,7 @@ class CoverIndex:
         else:
             m = _COVER_FILE_RE.match(stem)
             if m:
-                parsed = parse_episode(m.group("stem"))
+                parsed = image_file.parsed
                 if not parsed:
                     is_global = True
             else:
@@ -795,15 +795,20 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Fast MKV Remuxer")
     parser.add_argument("--workers", type=int, default=default_workers, help="Concurrency level")
     parser.add_argument("--bitrate", type=str, default="192k", help="Audio target bitrate")
-    parser.add_argument("--complexity", type=int, default=10, help="Opus complexity")
+    parser.add_argument("--complexity", type=int, default=10, choices=range(0, 11), metavar="[0-10]", help="Opus complexity")
     parser.add_argument("--out-dir", type=str, default=None, help="Output directory")
     parser.add_argument("--input-dir", type=str, default=None, help="Input directory")
+    parser.add_argument("--fonts-dir", type=str, default=None, help="Explicit directory to use for fonts")
     parser.add_argument("--dry-run", action="store_true", help="Dry run mode")
     parser.add_argument("--keep-fonts", action="store_true", help="Keep temporary fonts folder")
     parser.add_argument("--io-jobs", type=int, default=2, help="Maximum concurrent disk I/O jobs for mkvmerge. Set to 0 to disable throttling.")
     parser.add_argument("--no-cache", action="store_true", help="Bypass persistent inspection cache")
     parser.add_argument("--clear-cache", action="store_true", help="Clear persistent inspection cache")
     cfg = parser.parse_args()
+
+    if not re.match(r"^\d+[kM]?$", cfg.bitrate):
+        print(f"[ERROR] Invalid bitrate format: '{cfg.bitrate}'. Must match pattern like 128k, 192k, 1M.")
+        sys.exit(1)
 
     if cfg.workers < 1:
         parser.error("workers count must be at least 1")
@@ -860,15 +865,19 @@ def main() -> None:
                 current_output_dir.mkdir(parents=True, exist_ok=True)
             search_dirs = _ancestor_dirs(mkv_dir, root_input_dir)
 
+            fonts_override = Path(cfg.fonts_dir).resolve() if cfg.fonts_dir else None
             # Resolve fonts directory
             current_fonts_dir = None
-            for d in reversed(search_dirs):
-                candidate = find_fonts_dir(d)
-                if candidate.is_dir():
-                    current_fonts_dir = candidate
-                    break
-            if current_fonts_dir is None:
-                current_fonts_dir = mkv_dir / "fonts"
+            if fonts_override:
+                current_fonts_dir = find_fonts_dir(mkv_dir, override=fonts_override)
+            else:
+                for d in reversed(search_dirs):
+                    candidate = find_fonts_dir(d)
+                    if candidate.is_dir():
+                        current_fonts_dir = candidate
+                        break
+                if current_fonts_dir is None:
+                    current_fonts_dir = mkv_dir / "fonts"
 
             try:
                 dir_mkvs = mkvs_by_dir[mkv_dir]
