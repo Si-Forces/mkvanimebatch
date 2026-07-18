@@ -177,10 +177,11 @@ def is_font_attachment(file_name: str, content_type: str) -> bool:
 
 
 # ─── SUBPROCESS HELPER ───────────────────────────────────────────────────────
-def run_subprocess(cmd: list[str], *, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
+def run_subprocess(cmd: list[str], *, capture_stdout: bool = True, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
     """Run a subprocess with consistent UTF-8 encoding/error handling."""
+    stdout_opt = subprocess.PIPE if capture_stdout else subprocess.DEVNULL
     return subprocess.run(
-        cmd, capture_output=True, text=True,
+        cmd, stdout=stdout_opt, stderr=subprocess.PIPE, text=True,
         encoding="utf-8", errors="replace", timeout=timeout,
     )
 
@@ -792,30 +793,33 @@ class ScanResults:
     covers: list[ParsedFile]
 
 
-def scan_mkv_files(dir_path: Path, ignore_paths: set[Path] | None = None) -> list[ParsedFile]:
+def scan_mkv_files(dir_path: Path, recursive: bool = True, ignore_paths: set[Path] | None = None) -> list[ParsedFile]:
     results = []
+    stack = [str(dir_path)]
     resolved_ignores = {p.resolve() for p in ignore_paths} if ignore_paths else set()
-    def _scan(current_dir: str):
+    
+    while stack:
+        current_dir = stack.pop()
         try:
             with os.scandir(current_dir) as it:
                 for entry in it:
                     try:
                         name = entry.name
-                        if entry.is_file():
+                        if entry.is_file(follow_symlinks=False):
                             if name.lower().endswith(".mkv"):
                                 path = Path(entry.path)
                                 results.append(_create_parsed_file(path))
-                        elif entry.is_dir(follow_symlinks=False):
+                        elif entry.is_dir(follow_symlinks=False) and recursive:
                             if name.lower() != "output":
                                 entry_path = Path(entry.path)
                                 if resolved_ignores and entry_path.resolve() in resolved_ignores:
                                     continue
-                                _scan(entry.path)
+                                stack.append(entry.path)
                     except OSError:
                         continue
         except OSError:
-            pass
-    _scan(str(dir_path))
+            continue
+            
     results.sort(key=lambda pf: natural_sort_key(pf.path))
     return results
 
