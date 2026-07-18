@@ -22,6 +22,7 @@ set "SCRIPT_DIR=%~dp0"
 
 :: Initialize global flags (placed before :menu loop to persist state)
 if not defined DRY_RUN_MODE set "DRY_RUN_MODE=OFF"
+if not defined KEEP_FONTS_MODE set "KEEP_FONTS_MODE=OFF"
 
 :menu
 cls
@@ -40,6 +41,9 @@ echo.
 echo   [3] Toggle Dry Run Mode (Currently [!DRY_RUN_MODE!])
 echo       - Preview operations without modifying any files.
 echo.
+echo   [4] Toggle Keep Fonts Mode (Currently [!KEEP_FONTS_MODE!])
+echo       - Keep temporary fonts folder after successful remux.
+echo.
 echo   [0] Exit
 echo.
 echo =====================================================================
@@ -47,17 +51,22 @@ echo.
 
 :: Prompt the user for input
 set "choice="
-set /p choice="Enter your choice (0-3): "
+set /p choice="Enter your choice (0-4): "
 
 :: Strip all spaces from choice to handle trailing spaces gracefully
 if defined choice set "choice=%choice: =%"
 
 :: --- MENU ROUTING ---
-:: You can easily add more options in the future by defining new cases below
-if not defined choice goto menu
+if not defined choice (
+    set /a _empty_cnt+=1
+    if !_empty_cnt! gtr 3 goto exit
+    goto menu
+)
+set "_empty_cnt=0"
 if "%choice%"=="1" goto remux
 if "%choice%"=="2" goto extract
 if "%choice%"=="3" goto toggle_dry_run
+if "%choice%"=="4" goto toggle_keep_fonts
 if "%choice%"=="0" goto exit
 
 :: Fallback if input is invalid
@@ -89,13 +98,23 @@ if not exist "%SCRIPT_DIR%mkv_remux.py" (
 )
 set "input_dir="
 set "out_dir="
+set "fonts_dir="
+set "complexity="
+set "io_jobs="
 set /p input_dir="Enter Input Directory (or press Enter): "
 set /p out_dir="Enter Output Directory (or press Enter): "
+set /p fonts_dir="Enter Fonts Directory override (or press Enter): "
+set /p complexity="Enter Opus Complexity [0-10] (or press Enter for default 10): "
+set /p io_jobs="Enter Concurrent I/O Jobs (or press Enter for default 2): "
 
 set "opts="
 if not "!input_dir!"=="" set opts=!opts! --input-dir "!input_dir!"
 if not "!out_dir!"=="" set opts=!opts! --out-dir "!out_dir!"
+if not "!fonts_dir!"=="" set opts=!opts! --fonts-dir "!fonts_dir!"
+if not "!complexity!"=="" set opts=!opts! --complexity !complexity!
+if not "!io_jobs!"=="" set opts=!opts! --io-jobs !io_jobs!
 if "!DRY_RUN_MODE!"=="ON" set opts=!opts! --dry-run
+if "!KEEP_FONTS_MODE!"=="ON" set opts=!opts! --keep-fonts
 
 echo.
 echo Running: python mkv_remux.py !opts!
@@ -130,12 +149,15 @@ if not exist "%SCRIPT_DIR%mkv_extract.py" (
 )
 set "input_dir="
 set "sub_offset="
+set "io_jobs="
 set /p input_dir="Enter Input Directory (or press Enter): "
 set /p sub_offset="Enter Subtitle Delay/Offset in seconds (e.g. -10.0, or press Enter): "
+set /p io_jobs="Enter Concurrent I/O Jobs (or press Enter for default 2): "
 
 set "opts="
 if not "!input_dir!"=="" set opts=!opts! --input-dir "!input_dir!"
 if not "!sub_offset!"=="" set opts=!opts! --sub-offset "!sub_offset!"
+if not "!io_jobs!"=="" set opts=!opts! --io-jobs !io_jobs!
 if "!DRY_RUN_MODE!"=="ON" set opts=!opts! --dry-run
 
 echo.
@@ -155,6 +177,16 @@ if "!DRY_RUN_MODE!"=="OFF" (
     set "DRY_RUN_MODE=ON"
 ) else (
     set "DRY_RUN_MODE=OFF"
+)
+goto menu
+
+
+rem --- OPTION 4: TOGGLE KEEP FONTS ---
+:toggle_keep_fonts
+if "!KEEP_FONTS_MODE!"=="OFF" (
+    set "KEEP_FONTS_MODE=ON"
+) else (
+    set "KEEP_FONTS_MODE=OFF"
 )
 goto menu
 
