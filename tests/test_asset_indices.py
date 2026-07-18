@@ -86,3 +86,17 @@ class TestAssetIndices:
 
         match = cover_idx.lookup("E", "05", "")
         assert match == cover_path
+
+    def test_cover_index_single_digit_cover_filename(self, tmp_path, remux_mod, common_mod):
+        """Verify 'Show 1_cover.jpg' is indexed as Episode 01 cover, NOT misfiled as a global cover."""
+        cover_path = tmp_path / "Show 1_cover.jpg"
+        cover_path.touch()
+
+        parsed_file = common_mod._create_parsed_file(cover_path)
+
+        cover_idx = remux_mod.CoverIndex()
+        cover_idx.add(parsed_file)
+
+        match = cover_idx.lookup("E", "01", "")
+        assert match == cover_path
+        assert cover_idx._global is None
