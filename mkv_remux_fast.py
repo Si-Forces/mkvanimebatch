@@ -378,7 +378,7 @@ class CoverIndex:
         else:
             m = _COVER_FILE_RE.match(stem)
             if m:
-                parsed = image_file.parsed
+                parsed = parse_episode(m.group("stem"))
                 if not parsed:
                     is_global = True
             else:
