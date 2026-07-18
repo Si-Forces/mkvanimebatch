@@ -192,3 +192,27 @@ class TestRemuxArgs:
 
         chap_idx = args.index("--chapters")
         assert args[chap_idx + 1] == str(ext_chap)
+
+    def test_convert_flac_to_opus_complexity(self, mod, monkeypatch):
+        """Verify _convert_flac_to_opus passes compression_level corresponding to complexity."""
+        captured_cmd = []
+        def mock_run(cmd, *, capture_stdout=True, timeout=None):
+            captured_cmd.extend(cmd)
+            class DummyResult:
+                returncode = 0
+                stderr = ""
+            return DummyResult()
+
+        monkeypatch.setattr(mod, "run_subprocess", mock_run)
+        if mod.__name__ == "mkv_remux":
+            res = mod._convert_flac_to_opus(
+                Path("/dummy/video.mkv"), 1, 0, Path("/dummy/temp"),
+                "video", "192k", [], 2, complexity=8,
+            )
+        else:
+            res = mod._convert_flac_to_opus(
+                Path("/dummy/video.mkv"), 1, 0, Path("/dummy/temp"),
+                "video", "192k", complexity=8, ffmpeg_threads=2,
+            )
+        assert res is not None
+        assert captured_cmd[captured_cmd.index("-compression_level") + 1] == "8"
