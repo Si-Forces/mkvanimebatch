@@ -23,7 +23,8 @@ An automated, high-performance batch processing suite for anime and fansub MKV c
 * **Crash-Resistant Output**: Performs all remuxing and extraction into isolated temporary job directories, promoting completed files via atomic move operations only upon successful exit codes. Partial or interrupted outputs from power failures are automatically quarantined and discarded.
 
 ### 🚀 Standard & Fast Concurrency Engine
-* Offers both standard single-file routines and parallel high-throughput implementations (`mkv_extract_fast.py` and `mkv_remux_fast.py`) backed by thread pools.
+* Offers both standard single-file routines and parallel high-throughput implementations (`mkv_extract_fast.py` and `mkv_remux_fast.py`) backed by thread pools and bounded disk I/O jobs.
+* **Persistent Inspect Cache**: Caches `mkvmerge` JSON probe results to `.mkv_inspect_cache.json` across runs, dramatically reducing repeated disk reads on large collections.
 
 ---
 
@@ -45,7 +46,7 @@ Extract the best matching subtitle, external cover, chapters, and deduplicated f
 
 ```bash
 # High Performance Parallel Extractor
-python mkv_extract_fast.py --input-dir "D:/Anime/Series" --workers 8
+python mkv_extract_fast.py --input-dir "D:/Anime/Series" --workers 8 --io-jobs 2
 
 # With Subtitle Timestamp Shift (+5 seconds)
 python mkv_extract_fast.py --input-dir "D:/Anime/Series" --sub-offset 5.0
@@ -59,8 +60,11 @@ python mkv_extract.py --input-dir "D:/Anime/Series"
 Re-mux anime episodes with extracted subtitles, external chapter XMLs, covers, and attached fonts:
 
 ```bash
-# Parallel Remuxer
-python mkv_remux_fast.py --input-dir "D:/Anime/Series" --out-dir "D:/Anime/Remuxed" --workers 4
+# Parallel Remuxer with custom Opus bitrate, complexity, and font dir
+python mkv_remux_fast.py --input-dir "D:/Anime/Series" --out-dir "D:/Anime/Remuxed" --fonts-dir "D:/Fonts" --bitrate 192k --complexity 10 --workers 4 --io-jobs 2
+
+# Keep temporary font folder after remux
+python mkv_remux_fast.py --input-dir "D:/Anime/Series" --keep-fonts
 
 # Dry-run mode (Inspect without modifying files)
 python mkv_remux_fast.py --input-dir "D:/Anime/Series" --dry-run
@@ -69,23 +73,41 @@ python mkv_remux_fast.py --input-dir "D:/Anime/Series" --dry-run
 When `--out-dir` is used, nested source folders are preserved beneath the
 output directory so episodes from different seasons cannot overwrite each other.
 
-### 3. Windows Helper Scripts
+### 3. CLI Options Reference
 
-Quick-start scripts are included in the repository for convenience:
+| Option | Description | Default |
+| :--- | :--- | :--- |
+| `--input-dir` | Input directory containing MKVs / assets | Current directory |
+| `--out-dir` | Output directory for remuxed files | Input directory |
+| `--fonts-dir` | Explicit font directory override | Auto-detected |
+| `--workers` | Maximum parallel worker threads | CPU count |
+| `--io-jobs` | Maximum concurrent disk I/O tasks | `2` |
+| `--complexity` | Opus audio transcoding complexity (`0`–`10`) | `10` |
+| `--bitrate` | Opus audio bitrate (e.g. `128k`, `192k`) | `192k` |
+| `--sub-offset` | Subtitle timestamp shift offset in seconds | `0.0` |
+| `--keep-fonts` | Keep temporary extracted fonts directory | `False` |
+| `--dry-run` | Preview actions without writing files | `False` |
+| `--capture-stdout` | Capture subprocess stdout for debugging | `False` |
 
-* `run_fast.bat` / `run_fast.ps1` - Runs the fast extraction and remuxing pipeline interactive menu.
-* `run.bat` / `run.ps1` - Runs the standard extraction and remuxing pipeline interactive menu.
+### 4. Interactive Windows Launchers
+
+Interactive quick-start scripts are included for Windows users:
+
+* `run_fast.bat` / `run_fast.ps1` - High-performance parallel pipeline launcher with toggles for Dry Run, Keep Fonts, I/O Jobs, Opus Complexity, and Fonts Directory overrides.
+* `run.bat` / `run.ps1` - Standard pipeline launcher.
+
+All batch launchers include non-interactive EOF loop guards to safely handle redirected input without hanging.
 
 ---
 
 ## 🧪 Running Unit Tests
 
-The test suite includes 220+ automated unit tests covering filename parsing, subtitle shifting, directory traversal, font registry deduplication, and track selection scoring.
+The test suite includes **300+ automated unit tests** covering filename parsing, subtitle shifting, directory traversal, font registry deduplication, multi-threaded cache safety, track selection scoring, and CLI validation.
 
 Run the tests using `pytest`:
 
 ```bash
-python -m pytest tests/ -v
+python -m pytest tests/ --tb=short
 ```
 
 ---
