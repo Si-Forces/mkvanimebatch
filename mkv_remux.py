@@ -94,8 +94,8 @@ def select_tracks(json_data: dict) -> TrackSelection:
     attachments      = json_data.get("attachments") or []
 
     cover, font_attachments = parse_attachments(attachments)
-    source_cover_id = cover.get("id") if cover else None
-    source_font_ids = [a.get("id") for a in font_attachments if a.get("id") is not None]
+    source_cover_id = int(cover["id"]) if cover and cover.get("id") is not None else None
+    source_font_ids = [int(a["id"]) for a in font_attachments if a.get("id") is not None]
 
     video_id  = None
     video_pos = -1
@@ -517,6 +517,7 @@ class JobResult:
 def _convert_flac_to_opus(
     video: Path, audio_id: int, audio_index: int, temp_dir: Path,
     base: str, opus_bitrate: str, log: list[str], ffmpeg_threads: int,
+    complexity: int = 10,
 ) -> Path | None:
     """Convert FLAC audio to Opus. Returns temp opus path or None on failure."""
     unique_id = uuid.uuid4().hex[:8]
@@ -533,9 +534,9 @@ def _convert_flac_to_opus(
         "-b:a", opus_bitrate,
         "-vbr", "on",
         "-application", "audio",
-        "-compression_level", "10",
+        "-compression_level", str(complexity),
         str(temp_opus),
-    ])
+    ], capture_stdout=False)
     if result.returncode != 0:
         log.append(f"  WARNING (ffmpeg): {result.stderr.strip()}")
         temp_opus.unlink(missing_ok=True)
@@ -614,8 +615,9 @@ def _build_mkvmerge_args(
 # ─── JOB EXECUTION ───────────────────────────────────────────────────────────
 def process_job(
     job: PlannedJob, temp_dir: Path | None, fonts: FontInfo, opus_bitrate: str,
-    json_cache: dict[Path, dict | None],    ffmpeg_threads: int = 2,
+    json_cache: dict[Path, dict | None], ffmpeg_threads: int = 2,
     io_semaphore: threading.Semaphore | None = None,
+    complexity: int = 10,
 ) -> JobResult:
     r = JobResult()
     video, video_name, base = job.video, job.video_name, job.base
@@ -662,6 +664,7 @@ def process_job(
         if needs_conversion:
             temp_opus = _convert_flac_to_opus(
                 video, tr.audio_id, tr.audio_index, temp_dir, base, opus_bitrate, r.log, ffmpeg_threads,
+                complexity=complexity,
             )
             if temp_opus is None:
                 r.log.append(f"  !! SKIPPED: {video_name}")
@@ -922,7 +925,7 @@ def _plan_jobs(
 # ─── JOB EXECUTOR ORCHESTRATOR ───────────────────────────────────────────────
 def _execute_jobs(
     jobs:          list[PlannedJob],
-    temp_dir:      Path,
+    temp_dir:      Path | None,
     fonts:         FontInfo,
     opus_bitrate:  str,
     pool:          ThreadPoolExecutor,
@@ -931,6 +934,7 @@ def _execute_jobs(
     json_cache:    dict[Path, dict | None],
     skipped_files: list[str],
     matched_files: list[str],
+    complexity:    int = 10,
     io_semaphore:  threading.Semaphore | None = None,
 ) -> None:
     logger.info("Processing %d matched file(s) (up to %d at a time)...", len(jobs), max_workers)
@@ -940,7 +944,7 @@ def _execute_jobs(
     completed_jobs = 0
 
     futures = {
-        pool.submit(process_job, job, temp_dir, fonts, opus_bitrate, json_cache, ffmpeg_threads, io_semaphore): job
+        pool.submit(process_job, job, temp_dir, fonts, opus_bitrate, json_cache, ffmpeg_threads, io_semaphore, complexity): job
         for job in jobs
     }
     for future in as_completed(futures):
@@ -1059,6 +1063,7 @@ def _run(
     max_workers:  int,
     opus_bitrate: str,
     dry_run:      bool,
+    complexity:   int = 10,
     persistent_cache: PersistentInspectCache | None = None,
     io_semaphore: threading.Semaphore | None = None,
 ) -> bool:
@@ -1124,7 +1129,7 @@ def _run(
 
     # Distribute available CPU cores evenly among workers to prevent core thrashing
     ffmpeg_threads = max(1, (os.cpu_count() or 4) // max_workers)
-    _execute_jobs(jobs, temp_dir, fonts, opus_bitrate, pool, max_workers, ffmpeg_threads, json_cache, skipped_files, matched_files, io_semaphore=io_semaphore)
+    _execute_jobs(jobs, temp_dir, fonts, opus_bitrate, pool, max_workers, ffmpeg_threads, json_cache, skipped_files, matched_files, complexity, io_semaphore=io_semaphore)
     _print_summary(output_dir, matched_files, skipped_files)
     return not bool(skipped_files)
 
@@ -1145,6 +1150,9 @@ def main() -> None:
                         help="Number of concurrent files to process.")
     parser.add_argument("--bitrate", type=str, default="192k",
                         help="Target bitrate for Opus audio conversion (e.g., 128k, 192k).")
+    parser.add_argument("--complexity", type=int, default=10, choices=range(0, 11),
+                        metavar="[0-10]",
+                        help="Opus compression complexity level (0-10, default: 10).")
     parser.add_argument("--out-dir", type=str, default=None,
                         help="Directory where finished MKVs will be saved (defaults to <input-dir>/Output).")
     parser.add_argument("--input-dir", type=str, default=None,
@@ -1257,7 +1265,7 @@ def main() -> None:
             
             success = False
             try:
-                success = _run(mkv_dir, dir_mkvs, temp_dir, current_output_dir, current_fonts_dir, search_dirs, pool, max_workers, opus_bitrate, dry_run, persistent_cache=persistent_cache, io_semaphore=io_semaphore)
+                success = _run(mkv_dir, dir_mkvs, temp_dir, current_output_dir, current_fonts_dir, search_dirs, pool, max_workers, opus_bitrate, dry_run, complexity=cfg.complexity, persistent_cache=persistent_cache, io_semaphore=io_semaphore)
                 if not success:
                     overall_success = False
             finally:
