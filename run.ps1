@@ -25,6 +25,7 @@ if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
 
 # Initialize global flags
 $DryRunMode = "OFF"
+$KeepFontsMode = "OFF"
 
 while ($true) {
     Clear-Host
@@ -43,12 +44,15 @@ while ($true) {
     Write-Host "  [3] Toggle Dry Run Mode (Currently [$DryRunMode])"
     Write-Host "      - Preview operations without modifying any files."
     Write-Host ""
+    Write-Host "  [4] Toggle Keep Fonts Mode (Currently [$KeepFontsMode])"
+    Write-Host "      - Keep temporary fonts folder after successful remux."
+    Write-Host ""
     Write-Host "  [0] Exit"
     Write-Host ""
     Write-Host "=====================================================================" -ForegroundColor Cyan
     Write-Host ""
 
-    $choice = Read-Host "Enter your choice (0-3)"
+    $choice = Read-Host "Enter your choice (0-4)"
     if ($choice) {
         $choice = $choice.Trim()
     }
@@ -65,6 +69,9 @@ while ($true) {
             Write-Host ""
             $inputDir = Read-Host "Enter Input Directory (or press Enter)"
             $outDir = Read-Host "Enter Output Directory (or press Enter)"
+            $fontsDir = Read-Host "Enter Fonts Directory override (or press Enter)"
+            $complexity = Read-Host "Enter Opus Complexity [0-10] (or press Enter for default 10)"
+            $ioJobs = Read-Host "Enter Concurrent I/O Jobs (or press Enter for default 2)"
 
             # Ensure script components exist locally
             if (Test-RequiredFiles @("mkv_common.py", "mkv_remux.py")) {
@@ -75,8 +82,20 @@ while ($true) {
                 if ($outDir -ne "") {
                     $cmdArgs += "--out-dir", $outDir
                 }
+                if ($fontsDir -ne "") {
+                    $cmdArgs += "--fonts-dir", $fontsDir
+                }
+                if ($complexity -ne "") {
+                    $cmdArgs += "--complexity", $complexity
+                }
+                if ($ioJobs -ne "") {
+                    $cmdArgs += "--io-jobs", $ioJobs
+                }
                 if ($DryRunMode -eq "ON") {
                     $cmdArgs += "--dry-run"
+                }
+                if ($KeepFontsMode -eq "ON") {
+                    $cmdArgs += "--keep-fonts"
                 }
 
                 Write-Host ""
@@ -99,6 +118,7 @@ while ($true) {
             Write-Host ""
             $inputDir = Read-Host "Enter Input Directory (or press Enter)"
             $subOffset = Read-Host "Enter Subtitle Delay/Offset in seconds (e.g. -10.0, or press Enter)"
+            $ioJobs = Read-Host "Enter Concurrent I/O Jobs (or press Enter for default 2)"
 
             # Ensure script components exist locally
             if (Test-RequiredFiles @("mkv_common.py", "mkv_extract.py")) {
@@ -108,6 +128,9 @@ while ($true) {
                 }
                 if ($subOffset -ne "") {
                     $cmdArgs += "--sub-offset", $subOffset
+                }
+                if ($ioJobs -ne "") {
+                    $cmdArgs += "--io-jobs", $ioJobs
                 }
                 if ($DryRunMode -eq "ON") {
                     $cmdArgs += "--dry-run"
@@ -127,6 +150,13 @@ while ($true) {
                 $DryRunMode = "ON"
             } else {
                 $DryRunMode = "OFF"
+            }
+        }
+        "4" {
+            if ($KeepFontsMode -eq "OFF") {
+                $KeepFontsMode = "ON"
+            } else {
+                $KeepFontsMode = "OFF"
             }
         }
         "0" {

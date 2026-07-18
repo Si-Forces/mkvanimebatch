@@ -69,6 +69,9 @@ while ($true) {
             Write-Host ""
             $inputDir = Read-Host "Enter Input Directory (or press Enter)"
             $outDir = Read-Host "Enter Output Directory (or press Enter)"
+            $fontsDir = Read-Host "Enter Fonts Directory override (or press Enter)"
+            $complexity = Read-Host "Enter Opus Complexity [0-10] (or press Enter for default 10)"
+            $ioJobs = Read-Host "Enter Concurrent I/O Jobs (or press Enter for default 2)"
 
             # Ensure script components exist locally
             if (Test-RequiredFiles @("mkv_common_fast.py", "mkv_remux_fast.py")) {
@@ -78,6 +81,15 @@ while ($true) {
                 }
                 if ($outDir -ne "") {
                     $cmdArgs += "--out-dir", $outDir
+                }
+                if ($fontsDir -ne "") {
+                    $cmdArgs += "--fonts-dir", $fontsDir
+                }
+                if ($complexity -ne "") {
+                    $cmdArgs += "--complexity", $complexity
+                }
+                if ($ioJobs -ne "") {
+                    $cmdArgs += "--io-jobs", $ioJobs
                 }
                 if ($DryRunMode -eq "ON") {
                     $cmdArgs += "--dry-run"
@@ -106,6 +118,7 @@ while ($true) {
             Write-Host ""
             $inputDir = Read-Host "Enter Input Directory (or press Enter)"
             $subOffset = Read-Host "Enter Subtitle Delay/Offset in seconds (e.g. -10.0, or press Enter)"
+            $ioJobs = Read-Host "Enter Concurrent I/O Jobs (or press Enter for default 2)"
 
             # Ensure script components exist locally
             if (Test-RequiredFiles @("mkv_common_fast.py", "mkv_extract_fast.py")) {
@@ -115,6 +128,9 @@ while ($true) {
                 }
                 if ($subOffset -ne "") {
                     $cmdArgs += "--sub-offset", $subOffset
+                }
+                if ($ioJobs -ne "") {
+                    $cmdArgs += "--io-jobs", $ioJobs
                 }
                 if ($DryRunMode -eq "ON") {
                     $cmdArgs += "--dry-run"
