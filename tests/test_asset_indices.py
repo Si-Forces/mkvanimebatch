@@ -1,0 +1,88 @@
+"""Tests for asset indexing helpers: ChapIndex, CoverIndex, chapter sniffing, and font dir discovery."""
+
+import importlib
+from pathlib import Path
+
+import pytest
+
+mkv_common = importlib.import_module("mkv_common")
+mkv_common_fast = importlib.import_module("mkv_common_fast")
+mkv_remux = importlib.import_module("mkv_remux")
+mkv_remux_fast = importlib.import_module("mkv_remux_fast")
+
+
+@pytest.mark.parametrize("common_mod", [
+    pytest.param(mkv_common, id="mkv_common"),
+    pytest.param(mkv_common_fast, id="mkv_common_fast"),
+])
+class TestFontDirDiscovery:
+    def test_find_fonts_dir_override(self, tmp_path, common_mod):
+        override_dir = tmp_path / "custom_fonts"
+        result = common_mod.find_fonts_dir(tmp_path, override=override_dir)
+        assert result == override_dir
+
+    def test_find_fonts_dir_exact(self, tmp_path, common_mod):
+        exact_dir = tmp_path / "fonts"
+        exact_dir.mkdir()
+        result = common_mod.find_fonts_dir(tmp_path)
+        assert result == exact_dir
+
+    def test_find_fonts_dir_variant(self, tmp_path, common_mod):
+        variant_dir = tmp_path / "attachments"
+        variant_dir.mkdir()
+        result = common_mod.find_fonts_dir(tmp_path)
+        assert result == variant_dir
+
+    def test_find_fonts_dir_fallback(self, tmp_path, common_mod):
+        result = common_mod.find_fonts_dir(tmp_path)
+        assert result == tmp_path / "fonts"
+
+
+@pytest.mark.parametrize("common_mod", [
+    pytest.param(mkv_common, id="mkv_common"),
+    pytest.param(mkv_common_fast, id="mkv_common_fast"),
+])
+class TestChapterSniffing:
+    def test_is_chapter_xml(self, tmp_path, common_mod):
+        xml_file = tmp_path / "chap.xml"
+        xml_file.write_text("<?xml version='1.0'?><Chapters><EditionEntry></EditionEntry></Chapters>", encoding="utf-8")
+        assert common_mod.is_chapter_xml(xml_file) is True
+
+        txt_file = tmp_path / "not_chap.txt"
+        txt_file.write_text("Just regular text", encoding="utf-8")
+        assert common_mod.is_chapter_xml(txt_file) is False
+
+    def test_has_chapters(self, common_mod):
+        assert common_mod.has_chapters({"chapters": [{"num_entries": 1}]}) is True
+        assert common_mod.has_chapters({"chapters": []}) is False
+        assert common_mod.has_chapters(None) is False
+
+
+@pytest.mark.parametrize("remux_mod, common_mod", [
+    pytest.param(mkv_remux, mkv_common, id="mkv_remux"),
+    pytest.param(mkv_remux_fast, mkv_common_fast, id="mkv_remux_fast"),
+])
+class TestAssetIndices:
+    def test_chap_index_lookup(self, tmp_path, remux_mod, common_mod, monkeypatch):
+        xml_path = tmp_path / "Show_S01E01_chapters.xml"
+        xml_path.write_text("<?xml version='1.0'?><Chapters></Chapters>", encoding="utf-8")
+
+        parsed_file = common_mod._create_parsed_file(xml_path)
+
+        chap_idx = remux_mod.ChapterIndex()
+        chap_idx.add(parsed_file)
+
+        match = chap_idx.lookup("E", "01", "1")
+        assert match == xml_path
+
+    def test_cover_index_global_fallback(self, tmp_path, remux_mod, common_mod):
+        cover_path = tmp_path / "cover.jpg"
+        cover_path.touch()
+
+        parsed_file = common_mod._create_parsed_file(cover_path)
+
+        cover_idx = remux_mod.CoverIndex()
+        cover_idx.add(parsed_file)
+
+        match = cover_idx.lookup("E", "05", "")
+        assert match == cover_path

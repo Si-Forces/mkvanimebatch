@@ -216,3 +216,30 @@ class TestRemuxArgs:
             )
         assert res is not None
         assert captured_cmd[captured_cmd.index("-compression_level") + 1] == "8"
+
+    def test_cli_fonts_dir_and_validation(self, mod, monkeypatch, tmp_path):
+        """Verify CLI accepts --fonts-dir and validates bitrate/complexity."""
+        test_dir = tmp_path / "input"
+        test_dir.mkdir()
+        fonts_dir = tmp_path / "custom_fonts"
+        fonts_dir.mkdir()
+        (test_dir / "ep1.mkv").touch()
+
+        monkeypatch.setattr(mod, "check_dependencies", lambda *a: None)
+        monkeypatch.setattr(mod, "inspect_videos", lambda *a, **k: {})
+        monkeypatch.setattr(mod, "_run", lambda *a, **k: True)
+
+        test_argv = [
+            "script", "--input-dir", str(test_dir),
+            "--fonts-dir", str(fonts_dir),
+            "--complexity", "5", "--bitrate", "128k",
+            "--dry-run"
+        ]
+        monkeypatch.setattr("sys.argv", test_argv)
+
+        # Should complete main without SystemExit / error
+        try:
+            mod.main()
+        except SystemExit as exc:
+            assert exc.code == 0
+

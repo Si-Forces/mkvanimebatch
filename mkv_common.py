@@ -458,7 +458,9 @@ def is_chapter_xml(path: Path) -> bool:
         return False
 
 
-def has_chapters(json_data: dict) -> bool:
+def has_chapters(json_data: dict | None) -> bool:
+    if not json_data:
+        return False
     chapters = json_data.get("chapters") or []
     return bool(chapters) and any((c.get("num_entries") or 0) > 0 for c in chapters)
 
@@ -659,9 +661,10 @@ class PersistentInspectCache:
                 # Prune cache entries for files that no longer exist on disk
                 pruned_data = {k: v for k, v in self._data.items() if Path(k).exists()}
                 self._data = pruned_data
+                data_copy = dict(self._data)
             temp_file = self.cache_file.with_suffix(".tmp")
             with open(temp_file, "w", encoding="utf-8") as f:
-                json.dump(self._data, f)
+                json.dump(data_copy, f)
             temp_file.replace(self.cache_file)
         except Exception:
             pass
