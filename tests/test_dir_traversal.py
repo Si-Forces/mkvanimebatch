@@ -93,21 +93,23 @@ def test_scan_mkv_files_ignores_directory_symlinks(mod):
             assert mock_scandir.call_count == 1
 
 
-def test_scan_assets_lru_cache_fast(tmp_path):
+def test_scan_assets_fresh_scan_fast(tmp_path):
     """
-    scan_assets in mkv_common_fast must use lru_cache to prevent redundant disk reads.
+    scan_assets in mkv_common_fast must return fresh ScanResults instances
+    to prevent cross-caller list mutation bugs.
     """
     sub_dir = tmp_path / "SubDir"
     sub_dir.mkdir()
     (sub_dir / "episode_01.ass").write_bytes(b"[Script Info]")
-    
+
     # First call - scans disk
     res1 = mkv_common_fast.scan_assets(sub_dir)
     assert len(res1.subs) == 1
 
-    # Second call - returns cached result
+    # Second call - returns fresh un-cached object with identical contents
     res2 = mkv_common_fast.scan_assets(sub_dir)
-    assert res1 is res2
+    assert res1 == res2
+    assert res1 is not res2
 
 
 def test_mkv_grouping_by_dir(tmp_path):
