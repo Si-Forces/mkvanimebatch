@@ -115,9 +115,9 @@ def _run_mkvextract(mkv_path: Path, args: list[str], log: list[str], io_semaphor
         
     if io_semaphore is not None:
         with io_semaphore:
-            result = run_subprocess(["mkvextract", str(mkv_path), *args])
+            result = run_subprocess(["mkvextract", str(mkv_path), *args], capture_stdout=False)
     else:
-        result = run_subprocess(["mkvextract", str(mkv_path), *args])
+        result = run_subprocess(["mkvextract", str(mkv_path), *args], capture_stdout=False)
     if result.returncode > 1:
         raise RuntimeError(
             f"mkvextract failed (exit {result.returncode}): "
