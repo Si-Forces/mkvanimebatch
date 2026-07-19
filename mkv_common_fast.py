@@ -748,7 +748,7 @@ def scan_mkv_files(dir_path: Path, recursive: bool = True, ignore_paths: set[Pat
                 for entry in it:
                     try:
                         name = entry.name
-                        if entry.is_file(follow_symlinks=False):
+                        if entry.is_file():
                             if name.lower().endswith(".mkv"):
                                 path = Path(entry.path)
                                 results.append(_create_parsed_file(path))
