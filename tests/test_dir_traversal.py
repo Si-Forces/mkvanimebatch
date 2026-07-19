@@ -93,6 +93,29 @@ def test_scan_mkv_files_ignores_directory_symlinks(mod):
             assert mock_scandir.call_count == 1
 
 
+@pytest.mark.parametrize("mod", COMMON_MODULES)
+def test_scan_mkv_files_follows_file_symlinks(mod):
+    """
+    File symlinks pointing to MKV files should be followed and included in scan results.
+    """
+    mock_dir = Path("D:/My Project/fake_dir")
+    
+    entry_file_symlink = MagicMock()
+    entry_file_symlink.name = "symlinked_episode.mkv"
+    entry_file_symlink.path = "D:/My Project/fake_dir/symlinked_episode.mkv"
+    # is_file() with default follow_symlinks=True returns True for valid file symlinks
+    entry_file_symlink.is_file.return_value = True
+    entry_file_symlink.is_dir.return_value = False
+
+    mock_iterator = MagicMock()
+    mock_iterator.__enter__.return_value = [entry_file_symlink]
+
+    with patch("os.scandir", return_value=mock_iterator):
+        results = mod.scan_mkv_files(mock_dir)
+        assert len(results) == 1
+        assert results[0].stem == "symlinked_episode"
+
+
 def test_scan_assets_fresh_scan_fast(tmp_path):
     """
     scan_assets in mkv_common_fast must return fresh ScanResults instances
