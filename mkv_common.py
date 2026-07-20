@@ -47,7 +47,7 @@ __all__ = [
     # subtitle track selection
     "select_best_subtitle_track",
     # mkvmerge / dependency helpers
-    "check_dependencies", "run_mkvmerge_json", "run_subprocess", "run_subprocess_quiet",
+    "check_dependencies", "run_mkvmerge_json", "run_subprocess",
     "inspect_videos", "PersistentInspectCache", "get_default_cache_file", "setup_logging",
     # natural sorting
     "natural_sort_key",
@@ -762,13 +762,6 @@ def inspect_videos(
     logger.info("Inspection complete: %d/%d succeeded.", ok, len(videos))
     return cache
 
-
-def run_subprocess_quiet(cmd: list[str], *, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
-    """Run a subprocess and redirect stdout to DEVNULL, preserving stderr."""
-    return subprocess.run(
-        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
-        encoding="utf-8", errors="replace", timeout=timeout,
-    )
 
 
 @dataclass(frozen=True)

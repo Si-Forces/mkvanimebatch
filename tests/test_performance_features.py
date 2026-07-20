@@ -191,3 +191,29 @@ def test_io_semaphore_throttles_remux(tmp_path):
         assert res is True
         mock_sem.__enter__.assert_called_once()
         mock_sem.__exit__.assert_called_once()
+
+
+@pytest.mark.parametrize("mod", [mkv_remux, mkv_remux_fast])
+def test_io_semaphore_throttles_flac_conversion(mod, tmp_path):
+    """Verify io_semaphore is acquired during _convert_flac_to_opus execution."""
+    mock_sem = MagicMock()
+    video = tmp_path / "video.mkv"
+    video.touch()
+
+    mock_res = MagicMock()
+    mock_res.returncode = 0
+    mock_res.stderr = ""
+
+    with patch.object(mod, "run_subprocess", return_value=mock_res) as mock_run:
+        if mod is mkv_remux:
+            mod._convert_flac_to_opus(
+                video, 1, 0, tmp_path, "video", "192k", [], 2, 10, io_semaphore=mock_sem
+            )
+        else:
+            mod._convert_flac_to_opus(
+                video, 1, 0, tmp_path, "video", "192k", 10, 2, io_semaphore=mock_sem
+            )
+
+        mock_sem.__enter__.assert_called_once()
+        mock_sem.__exit__.assert_called_once()
+        mock_run.assert_called_once()
