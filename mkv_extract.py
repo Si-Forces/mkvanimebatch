@@ -9,6 +9,7 @@ across files into a shared fonts/ folder).
 
 Requires: mkvmerge, mkvextract (MKVToolNix)
 """
+from __future__ import annotations
 
 import sys
 sys.dont_write_bytecode = True

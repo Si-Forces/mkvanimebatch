@@ -13,6 +13,7 @@ default, a local "fonts" folder is deleted after a successful run (pass
 
 Requires: mkvmerge (MKVToolNix), ffmpeg
 """
+from __future__ import annotations
 
 import sys
 sys.dont_write_bytecode = True
