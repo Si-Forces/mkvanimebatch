@@ -425,11 +425,12 @@ class PlannedJob:
 def _convert_flac_to_opus(
     video: Path, audio_id: int, audio_index: int, temp_dir: Path,
     base: str, opus_bitrate: str, complexity: int = 10, ffmpeg_threads: int = 2,
+    io_semaphore: threading.Semaphore | None = None,
 ) -> Path | None:
     unique_id = uuid.uuid4().hex[:8]
     temp_opus = temp_dir / f"{base}_{unique_id}_audio.opus"
 
-    result = run_subprocess([
+    cmd = [
         "ffmpeg", "-y", "-nostdin",
         "-analyzeduration", "0", "-probesize", "1M",
         "-threads", str(ffmpeg_threads),
@@ -441,7 +442,13 @@ def _convert_flac_to_opus(
         "-application", "audio",
         "-compression_level", str(complexity),
         str(temp_opus),
-    ], capture_stdout=False)
+    ]
+
+    if io_semaphore is not None:
+        with io_semaphore:
+            result = run_subprocess(cmd, capture_stdout=False)
+    else:
+        result = run_subprocess(cmd, capture_stdout=False)
     if result.returncode != 0:
         print(f"  [ERROR] ffmpeg transcoding failed for '{video.name}' (exit {result.returncode}):\n{result.stderr.strip()}")
         temp_opus.unlink(missing_ok=True)
@@ -616,7 +623,10 @@ def pipeline_worker(
             if temp_dir is None:
                 print(f"  [-] Failed: {job.video_name} (temp_dir is required for FLAC→Opus conversion)")
                 return False
-            temp_opus = _convert_flac_to_opus(video, tr.audio_id, tr.audio_index, temp_dir, job.base, opus_bitrate, complexity, ffmpeg_threads)
+            temp_opus = _convert_flac_to_opus(
+                video, tr.audio_id, tr.audio_index, temp_dir, job.base,
+                opus_bitrate, complexity, ffmpeg_threads, io_semaphore=io_semaphore,
+            )
             if temp_opus is None:
                 print(f"  [-] Failed: {job.video_name} (FLAC→Opus conversion failed)")
                 return False
