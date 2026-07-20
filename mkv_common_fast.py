@@ -3,6 +3,7 @@ mkv_common_fast.py
 Simplified shared logic for mkv_extract_fast.py and mkv_remux_fast.py.
 Optimized for performance and simplicity (minimal logging and checks).
 """
+from __future__ import annotations
 
 import json
 import os

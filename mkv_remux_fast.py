@@ -3,6 +3,7 @@
 Batch MKV Re-Mux Utility (High Performance & Simplified)
 Optimized for speed and minimal output.
 """
+from __future__ import annotations
 
 import sys
 sys.dont_write_bytecode = True

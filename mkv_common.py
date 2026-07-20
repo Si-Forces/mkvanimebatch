@@ -2,6 +2,7 @@
 mkv_common.py
 Shared logic for mkv_extract.py and mkv_remux.py.
 """
+from __future__ import annotations
 
 import json
 import os
