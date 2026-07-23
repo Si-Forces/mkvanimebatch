@@ -62,6 +62,7 @@ from mkv_common import (
     ScanResults,
     scan_mkv_files,
     scan_assets,
+    resolve_output_dir,
     EpisodeInfo,
     MAX_DEFAULT_WORKERS,
     DEFAULT_WORKER_MULTIPLIER,
@@ -231,20 +232,6 @@ def is_completed_output(path: Path) -> bool:
     """Return whether a remux output exists and contains data."""
     return path.is_file() and path.stat().st_size > 0
 
-
-def resolve_output_dir(
-    mkv_dir: Path,
-    root_input_dir: Path,
-    out_override: Path | None,
-) -> Path:
-    """Preserve the source directory layout beneath a custom output root."""
-    if out_override is None:
-        return mkv_dir / "Output"
-    try:
-        relative_dir = mkv_dir.relative_to(root_input_dir)
-    except ValueError:
-        relative_dir = Path()
-    return out_override / relative_dir
 
 
 def _ancestor_dirs(mkv_dir: Path, root_input_dir: Path) -> list[Path]:

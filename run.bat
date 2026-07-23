@@ -148,14 +148,17 @@ if not exist "%SCRIPT_DIR%mkv_extract.py" (
     goto menu
 )
 set "input_dir="
+set "out_dir="
 set "sub_offset="
 set "io_jobs="
 set /p input_dir="Enter Input Directory (or press Enter): "
+set /p out_dir="Enter Output Directory for extracted files (or press Enter): "
 set /p sub_offset="Enter Subtitle Delay/Offset in seconds (e.g. -10.0, or press Enter): "
 set /p io_jobs="Enter Concurrent I/O Jobs (or press Enter for default 2): "
 
 set "opts="
 if not "!input_dir!"=="" set opts=!opts! --input-dir "!input_dir!"
+if not "!out_dir!"=="" set opts=!opts! --out-dir "!out_dir!"
 if not "!sub_offset!"=="" set opts=!opts! --sub-offset "!sub_offset!"
 if not "!io_jobs!"=="" set opts=!opts! --io-jobs !io_jobs!
 if "!DRY_RUN_MODE!"=="ON" set opts=!opts! --dry-run

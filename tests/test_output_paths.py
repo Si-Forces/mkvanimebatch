@@ -45,3 +45,29 @@ def test_nonempty_output_is_complete(rmod, tmp_path):
     output.write_bytes(b"mkv")
 
     assert rmod.is_completed_output(output) is True
+
+
+EXTRACT_MODULES = [
+    pytest.param(importlib.import_module("mkv_extract"), id="mkv_extract"),
+    pytest.param(importlib.import_module("mkv_extract_fast"), id="mkv_extract_fast"),
+]
+
+
+@pytest.mark.parametrize("emod", EXTRACT_MODULES)
+def test_extract_resolve_output_dir_default(emod, tmp_path):
+    input_dir = tmp_path / "Anime"
+    mkv_dir = input_dir / "Season 1"
+
+    assert emod.resolve_output_dir(mkv_dir, input_dir, None, default_subdir=None) == mkv_dir
+
+
+@pytest.mark.parametrize("emod", EXTRACT_MODULES)
+def test_extract_resolve_output_dir_override(emod, tmp_path):
+    input_dir = tmp_path / "Anime"
+    mkv_dir = input_dir / "Season 1" / "OVAs"
+    out_dir = tmp_path / "Extracted"
+
+    assert emod.resolve_output_dir(mkv_dir, input_dir, out_dir, default_subdir=None) == (
+        out_dir / "Season 1" / "OVAs"
+    )
+

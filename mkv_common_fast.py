@@ -52,7 +52,7 @@ __all__ = [
     # natural sorting
     "natural_sort_key",
     # scandir helpers & caching
-    "ParsedFile", "ScanResults", "scan_mkv_files", "scan_assets",
+    "ParsedFile", "ScanResults", "scan_mkv_files", "scan_assets", "resolve_output_dir",
 ]
 
 MAX_DEFAULT_WORKERS = 16
@@ -728,6 +728,22 @@ def _create_parsed_file(path: Path) -> ParsedFile:
         stem=path.stem,
         parsed=parse_episode(path.stem),
     )
+
+
+def resolve_output_dir(
+    mkv_dir: Path,
+    root_input_dir: Path,
+    out_override: Path | None,
+    default_subdir: str | None = "Output",
+) -> Path:
+    """Preserve the source directory layout beneath a custom output root."""
+    if out_override is None:
+        return mkv_dir / default_subdir if default_subdir else mkv_dir
+    try:
+        relative_dir = mkv_dir.relative_to(root_input_dir)
+    except ValueError:
+        relative_dir = Path()
+    return out_override / relative_dir
 
 
 @dataclass(frozen=True)

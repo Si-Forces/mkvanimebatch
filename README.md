@@ -45,14 +45,14 @@ Make sure the following software executables are installed and available in your
 Extract the best matching subtitle, external cover, chapters, and deduplicated font attachments from all MKVs in a directory:
 
 ```bash
-# High Performance Parallel Extractor
-python mkv_extract_fast.py --input-dir "D:/Anime/Series" --workers 8 --io-jobs 2
+# High Performance Parallel Extractor (with custom Output Dir and Fonts Dir)
+python mkv_extract_fast.py --input-dir "D:/Anime/Series" --out-dir "D:/Anime/Extracted" --fonts-dir "D:/Anime/Fonts" --workers 8 --io-jobs 2
 
 # With Subtitle Timestamp Shift (+5 seconds)
 python mkv_extract_fast.py --input-dir "D:/Anime/Series" --sub-offset 5.0
 
 # Standard Extractor
-python mkv_extract.py --input-dir "D:/Anime/Series"
+python mkv_extract.py --input-dir "D:/Anime/Series" --out-dir "D:/Anime/Extracted"
 ```
 
 ### 2. Batch Remuxing
@@ -78,7 +78,7 @@ output directory so episodes from different seasons cannot overwrite each other.
 | Option | Description | Default |
 | :--- | :--- | :--- |
 | `--input-dir` | Input directory containing MKVs / assets | Current directory |
-| `--out-dir` | Output directory for remuxed files | Input directory |
+| `--out-dir` | Output directory for remuxed or extracted files | Input directory (Remux: `<input>/Output`) |
 | `--fonts-dir` | Explicit font directory override | Auto-detected |
 | `--workers` | Maximum parallel worker threads | CPU count |
 | `--io-jobs` | Maximum concurrent disk I/O tasks | `2` |
@@ -97,6 +97,28 @@ Interactive quick-start scripts are included for Windows users:
 * `run.bat` / `run.ps1` - Standard pipeline launcher.
 
 All batch launchers include non-interactive EOF loop guards to safely handle redirected input without hanging.
+
+### 5. Standalone Tauri Desktop App (`desktop-tauri/`)
+
+A native desktop GUI built with **Tauri v2** featuring an Apple **Liquid Glass** UI aesthetic (frosted glass panels, translucent dark/light mode, traffic light window controls, and live stdout/stderr log streaming).
+
+#### Building locally:
+- **Windows**:
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File .\desktop-tauri\build-sidecars.ps1
+  cd desktop-tauri\src-tauri
+  cargo tauri build
+  ```
+- **Linux (Ubuntu / Debian / Mint)**:
+  ```bash
+  sudo apt update
+  sudo apt install -y build-essential curl wget file libssl-dev libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf python3-pip
+  pip3 install pyinstaller --break-system-packages
+  cargo install tauri-cli --version "^2"
+  export PATH="$HOME/.cargo/bin:$PATH"
+  bash desktop-tauri/build-sidecars.sh
+  cd desktop-tauri/src-tauri && cargo tauri build
+  ```
 
 ---
 
