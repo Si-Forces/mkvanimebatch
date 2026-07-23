@@ -117,6 +117,7 @@ while ($true) {
             Write-Host "      Dry Run status is currently: [$DryRunMode]"
             Write-Host ""
             $inputDir = Read-Host "Enter Input Directory (or press Enter)"
+            $outDir = Read-Host "Enter Output Directory for extracted files (or press Enter)"
             $subOffset = Read-Host "Enter Subtitle Delay/Offset in seconds (e.g. -10.0, or press Enter)"
             $ioJobs = Read-Host "Enter Concurrent I/O Jobs (or press Enter for default 2)"
 
@@ -125,6 +126,9 @@ while ($true) {
                 $cmdArgs = @()
                 if ($inputDir -ne "") {
                     $cmdArgs += "--input-dir", $inputDir
+                }
+                if ($outDir -ne "") {
+                    $cmdArgs += "--out-dir", $outDir
                 }
                 if ($subOffset -ne "") {
                     $cmdArgs += "--sub-offset", $subOffset
