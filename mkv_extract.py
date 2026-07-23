@@ -43,6 +43,7 @@ from mkv_common import (
     natural_sort_key,
     ParsedFile,
     scan_mkv_files,
+    resolve_output_dir,
     MAX_DEFAULT_WORKERS,
     DEFAULT_WORKER_MULTIPLIER,
     shift_ass_timestamps,
@@ -201,6 +202,7 @@ def process_file(
     stale_subs_lock: threading.Lock | None = None,
     sub_offset:    float = 0.0,
     io_semaphore: threading.Semaphore | None = None,
+    output_dir:    Path | None = None,
 ) -> tuple[Path, list[str], bool]:
     mkv_path = mkv_file.path
     log: list[str] = [f"Processing: {mkv_path.name}"]
@@ -211,7 +213,7 @@ def process_file(
 
     meta = parse_mkv_metadata(json_data)
     file_stem = mkv_path.stem
-    file_dir  = mkv_path.parent
+    file_dir  = output_dir if output_dir is not None else mkv_path.parent
 
     parsed = mkv_file.parsed
     if parsed:
@@ -387,12 +389,12 @@ def process_file(
 
 
 # ─── RUN ORCHESTRATOR ────────────────────────────────────────────────────────
-def _run(input_dir: Path, fonts_dir: Path, mkv_files: list[ParsedFile], pool: ThreadPoolExecutor, max_workers: int, dry_run: bool, sub_offset: float = 0.0, persistent_cache: PersistentInspectCache | None = None, io_semaphore: threading.Semaphore | None = None) -> bool:
+def _run(output_dir: Path, fonts_dir: Path, mkv_files: list[ParsedFile], pool: ThreadPoolExecutor, max_workers: int, dry_run: bool, sub_offset: float = 0.0, persistent_cache: PersistentInspectCache | None = None, io_semaphore: threading.Semaphore | None = None) -> bool:
     """Returns True if every file in this directory was processed without
     a crash or mkvmerge-inspection failure; False otherwise. Propagated up
     to main() so the process exits non-zero if anything actually failed."""
     if not mkv_files:
-        logger.warning("No MKV files found in '%s', skipping.", input_dir.name)
+        logger.warning("No MKV files found in '%s', skipping.", output_dir.name)
         return False
     logger.info("MKV files discovered: %d", len(mkv_files))
 
@@ -437,6 +439,7 @@ def _run(input_dir: Path, fonts_dir: Path, mkv_files: list[ParsedFile], pool: Th
             stale_subs_lock,
             sub_offset,
             io_semaphore,
+            output_dir=output_dir,
         ): mkv_file.path
         for mkv_file in mkv_files
     }
@@ -491,7 +494,7 @@ def _run(input_dir: Path, fonts_dir: Path, mkv_files: list[ParsedFile], pool: Th
             else:
                 logger.info(line)
 
-    _cleanup_stale_subtitle_offsets_bulk(input_dir, stale_subs_map)
+    _cleanup_stale_subtitle_offsets_bulk(output_dir, stale_subs_map)
 
     logger.info("=========================================")
     logger.info(" All files processed.")
@@ -510,8 +513,12 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=default_workers, choices=range(1, 33),
                         metavar="[1-32]",
                         help="Number of concurrent files to process.")
+    parser.add_argument("--out-dir", type=str, default=None,
+                        help="Directory where extracted assets (subtitles, covers, chapters, fonts) will be saved.")
     parser.add_argument("--input-dir", type=str, default=None,
                         help="Directory containing MKV files (defaults to script directory).")
+    parser.add_argument("--fonts-dir", type=str, default=None,
+                        help="Directory to save extracted fonts (defaults to <out-dir>/fonts or <input-dir>/fonts).")
     parser.add_argument("--dry-run", action="store_true",
                         help="List discovered MKV files without extracting anything.")
     parser.add_argument("--sub-offset", type=float, default=0.0,
@@ -526,6 +533,8 @@ def main() -> None:
 
     max_workers = cfg.workers
     root_input_dir = Path(cfg.input_dir).resolve() if cfg.input_dir else SCRIPT_DIR
+    out_override = Path(cfg.out_dir).resolve() if cfg.out_dir else None
+    fonts_override = Path(cfg.fonts_dir).resolve() if cfg.fonts_dir else None
     dry_run     = cfg.dry_run
 
     if cfg.clear_cache:
@@ -548,7 +557,8 @@ def main() -> None:
     logger.info("Using mkvextract: %s", shutil.which('mkvextract'))
 
     # Discover all MKV files recursively to find which subdirectories contain them
-    all_mkvs = scan_mkv_files(root_input_dir)
+    ignore_paths = {out_override} if out_override else None
+    all_mkvs = scan_mkv_files(root_input_dir, ignore_paths=ignore_paths)
     if not all_mkvs:
         logger.error("No MKV files found.")
         sys.exit(1)
@@ -566,9 +576,35 @@ def main() -> None:
             logger.info("Processing directory: %s", mkv_dir)
             logger.info("=" * 60)
 
-            current_fonts_dir = mkv_dir / "fonts"
+            current_output_dir = resolve_output_dir(
+                mkv_dir,
+                root_input_dir,
+                out_override,
+                default_subdir=None,
+            )
+
+            if not dry_run:
+                current_output_dir.mkdir(parents=True, exist_ok=True)
+
+            if fonts_override:
+                current_fonts_dir = fonts_override
+            elif out_override:
+                current_fonts_dir = out_override / "fonts"
+            else:
+                current_fonts_dir = mkv_dir / "fonts"
+
             dir_mkvs = mkvs_by_dir[mkv_dir]
-            success = _run(mkv_dir, current_fonts_dir, dir_mkvs, pool, max_workers, dry_run, sub_offset=cfg.sub_offset, persistent_cache=persistent_cache, io_semaphore=io_semaphore)
+            success = _run(
+                current_output_dir,
+                current_fonts_dir,
+                dir_mkvs,
+                pool,
+                max_workers,
+                dry_run,
+                sub_offset=cfg.sub_offset,
+                persistent_cache=persistent_cache,
+                io_semaphore=io_semaphore,
+            )
             if not success:
                 overall_success = False
 
