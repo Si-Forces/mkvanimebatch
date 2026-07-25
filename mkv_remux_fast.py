@@ -710,24 +710,27 @@ def _run(
     fallback_sub_index = None
     fallback_chap_index = None
     fallback_cover_index = None
-    if assets_dir is not None and assets_dir.is_dir():
-        fallback_sub_index = SubIndex()
-        fallback_chap_index = ChapterIndex()
-        fallback_cover_index = CoverIndex()
-        fallback_assets = scan_assets(assets_dir)
-        for sub_file in fallback_assets.subs:
-            fallback_sub_index.add(sub_file)
-        for xml_file in fallback_assets.chapters:
-            fallback_chap_index.add(xml_file)
-        for image_file in fallback_assets.covers:
-            fallback_cover_index.add(image_file)
+    if assets_dir is not None:
+        if not assets_dir.is_dir():
+            print(f"[WARNING] Specified --assets-dir '{assets_dir}' does not exist — fallback search disabled.")
+        else:
+            fallback_sub_index = SubIndex()
+            fallback_chap_index = ChapterIndex()
+            fallback_cover_index = CoverIndex()
+            fallback_assets = scan_assets(assets_dir)
+            for sub_file in fallback_assets.subs:
+                fallback_sub_index.add(sub_file)
+            for xml_file in fallback_assets.chapters:
+                fallback_chap_index.add(xml_file)
+            for image_file in fallback_assets.covers:
+                fallback_cover_index.add(image_file)
 
-        if fonts.count == 0:
-            fallback_fonts_dir = assets_dir / "fonts" if (assets_dir / "fonts").is_dir() else assets_dir
-            fallback_fonts = scan_fonts(fallback_fonts_dir)
-            if fallback_fonts.count > 0:
-                fonts = fallback_fonts
-                print(f"Detected {fonts.count} external font(s) in fallback assets dir: {fallback_fonts_dir}")
+            if fonts.count == 0:
+                fallback_fonts_dir = assets_dir / "fonts" if (assets_dir / "fonts").is_dir() else assets_dir
+                fallback_fonts = scan_fonts(fallback_fonts_dir)
+                if fallback_fonts.count > 0:
+                    fonts = fallback_fonts
+                    print(f"Detected {fonts.count} external font(s) in fallback assets dir: {fallback_fonts_dir}")
 
     # Filter out already remuxed videos to avoid redundant processing
     unprocessed_videos = []
