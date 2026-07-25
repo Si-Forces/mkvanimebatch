@@ -505,6 +505,7 @@ def _build_mkvmerge_args(
 def _resolve_subtitle(
     video: Path, parsed: EpisodeInfo,
     sub_index: SubIndex, json_data: dict | None,
+    fallback_sub_index: SubIndex | None = None,
 ) -> tuple[Path | None, int | None, str, str, str, bool]:
     mkv_season, mkv_ep_type, mkv_ep = parsed
     sub_result = sub_index.lookup(mkv_ep_type, mkv_ep, mkv_season)
@@ -521,6 +522,14 @@ def _resolve_subtitle(
         return (None, embedded_sub_id, subtitle_lang,
                 LANG_LABEL.get(subtitle_lang, subtitle_lang),
                 LANG_MKV_TAG.get(subtitle_lang, subtitle_lang), True)
+
+    if fallback_sub_index is not None:
+        fallback_result = fallback_sub_index.lookup(mkv_ep_type, mkv_ep, mkv_season)
+        if fallback_result is not None:
+            subtitle_file, subtitle_lang = fallback_result
+            return (subtitle_file, None, subtitle_lang,
+                    LANG_LABEL.get(subtitle_lang, subtitle_lang),
+                    LANG_MKV_TAG.get(subtitle_lang, subtitle_lang), True)
 
     return (None, None, "und", LANG_LABEL["und"], LANG_MKV_TAG["und"], False)
 
@@ -543,6 +552,9 @@ def pipeline_worker(
     temp_parent_dir: Path | None,
     dry_run: bool,
     io_semaphore: threading.Semaphore | None = None,
+    fallback_sub_index: SubIndex | None = None,
+    fallback_chap_index: ChapterIndex | None = None,
+    fallback_cover_index: CoverIndex | None = None,
 ) -> bool:
     if not video_parsed:
         return False
@@ -565,7 +577,7 @@ def pipeline_worker(
         return False
 
     sub_file, embedded_id, sub_lang, sub_label, sub_mkv_lang, matched = _resolve_subtitle(
-        video, video_parsed, sub_index, json_data
+        video, video_parsed, sub_index, json_data, fallback_sub_index
     )
     if not matched:
         print(f"  [-] Skipped: {video.name} (No matching subtitle found)")
@@ -578,8 +590,12 @@ def pipeline_worker(
             if len(unclaimed) == 1 and chapter_fallback_count == 1:
                 chapter_file = unclaimed[0]
                 chapter_unmatched_claimed.add(chapter_file)
+    if chapter_file is None and not tr.has_source_chapters and fallback_chap_index is not None:
+        chapter_file = fallback_chap_index.lookup(mkv_ep_type, mkv_ep, mkv_season)
 
     cover_file = cover_index.lookup(mkv_ep_type, mkv_ep, mkv_season)
+    if cover_file is None and tr.source_cover_id is None and fallback_cover_index is not None:
+        cover_file = fallback_cover_index.lookup(mkv_ep_type, mkv_ep, mkv_season)
 
     job = PlannedJob(
         video=video,
@@ -665,6 +681,7 @@ def _run(
     inspect_cache: dict[Path, dict | None] | None = None,
     persistent_cache: PersistentInspectCache | None = None,
     io_semaphore: threading.Semaphore | None = None,
+    assets_dir:   Path | None = None,
 ) -> bool:
     # Discover assets
     fonts = scan_fonts(fonts_dir)
@@ -689,6 +706,28 @@ def _run(
             chap_index.add(xml_file)
         for image_file in assets.covers:
             cover_index.add(image_file)
+
+    fallback_sub_index = None
+    fallback_chap_index = None
+    fallback_cover_index = None
+    if assets_dir is not None and assets_dir.is_dir():
+        fallback_sub_index = SubIndex()
+        fallback_chap_index = ChapterIndex()
+        fallback_cover_index = CoverIndex()
+        fallback_assets = scan_assets(assets_dir)
+        for sub_file in fallback_assets.subs:
+            fallback_sub_index.add(sub_file)
+        for xml_file in fallback_assets.chapters:
+            fallback_chap_index.add(xml_file)
+        for image_file in fallback_assets.covers:
+            fallback_cover_index.add(image_file)
+
+        if fonts.count == 0:
+            fallback_fonts_dir = assets_dir / "fonts" if (assets_dir / "fonts").is_dir() else assets_dir
+            fallback_fonts = scan_fonts(fallback_fonts_dir)
+            if fallback_fonts.count > 0:
+                fonts = fallback_fonts
+                print(f"Detected {fonts.count} external font(s) in fallback assets dir: {fallback_fonts_dir}")
 
     # Filter out already remuxed videos to avoid redundant processing
     unprocessed_videos = []
@@ -764,6 +803,9 @@ def _run(
                 temp_dir,
                 dry_run,
                 io_semaphore,
+                fallback_sub_index,
+                fallback_chap_index,
+                fallback_cover_index,
             ): v
             for v in unprocessed_videos
         }
@@ -797,6 +839,7 @@ def main() -> None:
     parser.add_argument("--out-dir", type=str, default=None, help="Output directory")
     parser.add_argument("--input-dir", type=str, default=None, help="Input directory")
     parser.add_argument("--fonts-dir", type=str, default=None, help="Explicit directory to use for fonts")
+    parser.add_argument("--assets-dir", type=str, default=None, help="Fallback directory (e.g. a prior extraction's --out-dir) to search for subtitles/chapters/covers/fonts when a video has none of its own and none are found alongside it.")
     parser.add_argument("--dry-run", action="store_true", help="Dry run mode")
     parser.add_argument("--keep-fonts", action="store_true", help="Keep temporary fonts folder")
     parser.add_argument("--io-jobs", type=int, default=2, help="Maximum concurrent disk I/O jobs for mkvmerge. Set to 0 to disable throttling.")
@@ -814,6 +857,7 @@ def main() -> None:
     if cfg.clear_cache:
         PersistentInspectCache().clear()
         print("Persistent inspection cache cleared.")
+        sys.exit(0)
 
     persistent_cache = PersistentInspectCache(enabled=not cfg.no_cache)
     io_semaphore = threading.BoundedSemaphore(cfg.io_jobs) if cfg.io_jobs > 0 else None
@@ -821,6 +865,7 @@ def main() -> None:
     check_dependencies("mkvmerge", "ffmpeg")
     root_input_dir = Path(cfg.input_dir).resolve() if cfg.input_dir else SCRIPT_DIR
     out_override = Path(cfg.out_dir).resolve() if cfg.out_dir else None
+    assets_override = Path(cfg.assets_dir).resolve() if cfg.assets_dir else None
 
     ignore_paths = {out_override} if out_override else None
     all_mkvs = scan_mkv_files(root_input_dir, ignore_paths=ignore_paths)
@@ -863,6 +908,12 @@ def main() -> None:
                 current_output_dir.mkdir(parents=True, exist_ok=True)
             search_dirs = _ancestor_dirs(mkv_dir, root_input_dir)
 
+            current_assets_dir = None
+            if assets_override:
+                current_assets_dir = resolve_output_dir(
+                    mkv_dir, root_input_dir, assets_override, default_subdir=None,
+                )
+
             fonts_override = Path(cfg.fonts_dir).resolve() if cfg.fonts_dir else None
             # Resolve fonts directory
             current_fonts_dir = None
@@ -894,6 +945,7 @@ def main() -> None:
                     inspect_cache=inspect_cache,
                     persistent_cache=persistent_cache,
                     io_semaphore=io_semaphore,
+                    assets_dir=current_assets_dir,
                 )
                 if not success:
                     overall_success = False
