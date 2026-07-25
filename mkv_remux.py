@@ -1070,24 +1070,27 @@ def _discover_assets(
     fallback_chap_index: ChapterIndex | None = None
     fallback_cover_index: CoverIndex | None = None
 
-    if assets_dir is not None and assets_dir.is_dir():
-        fallback_sub_index = SubIndex()
-        fallback_chap_index = ChapterIndex()
-        fallback_cover_index = CoverIndex()
-        fallback_assets = scan_assets(assets_dir)
-        for sub_file in fallback_assets.subs:
-            fallback_sub_index.add(sub_file)
-        for xml_file in fallback_assets.chapters:
-            fallback_chap_index.add(xml_file)
-        for image_file in fallback_assets.covers:
-            fallback_cover_index.add(image_file)
+    if assets_dir is not None:
+        if not assets_dir.is_dir():
+            logger.warning("Specified --assets-dir '%s' does not exist — fallback asset search disabled.", assets_dir)
+        else:
+            fallback_sub_index = SubIndex()
+            fallback_chap_index = ChapterIndex()
+            fallback_cover_index = CoverIndex()
+            fallback_assets = scan_assets(assets_dir)
+            for sub_file in fallback_assets.subs:
+                fallback_sub_index.add(sub_file)
+            for xml_file in fallback_assets.chapters:
+                fallback_chap_index.add(xml_file)
+            for image_file in fallback_assets.covers:
+                fallback_cover_index.add(image_file)
 
-        if fonts.count == 0:
-            fallback_fonts_dir = assets_dir / "fonts" if (assets_dir / "fonts").is_dir() else assets_dir
-            fallback_fonts = scan_fonts(fallback_fonts_dir)
-            if fallback_fonts.count > 0:
-                fonts = fallback_fonts
-                logger.info("Detected %d external font(s) in fallback assets directory: %s", fonts.count, fallback_fonts_dir)
+            if fonts.count == 0:
+                fallback_fonts_dir = assets_dir / "fonts" if (assets_dir / "fonts").is_dir() else assets_dir
+                fallback_fonts = scan_fonts(fallback_fonts_dir)
+                if fallback_fonts.count > 0:
+                    fonts = fallback_fonts
+                    logger.info("Detected %d external font(s) in fallback assets directory: %s", fonts.count, fallback_fonts_dir)
 
     logger.info("Subtitles indexed: %d primary, %d English fallback", sub_index.primary_count, sub_index.fallback_count)
     logger.info("Chapters indexed: %d by episode number, %d unmatched", chap_index.indexed_count, len(chap_index.unmatched))
