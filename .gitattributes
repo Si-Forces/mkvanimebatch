@@ -1,0 +1,2 @@
+# Enforce Unix LF line endings for shell scripts so Linux/GitHub Actions builds run without CRLF errors
+*.sh text eol=lf

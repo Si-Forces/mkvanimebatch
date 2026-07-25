@@ -11,6 +11,13 @@ htmlcov/
 # MKV Tool Temporary & Binary artifacts
 *.zip
 
+# PyInstaller build outputs & binaries
+build/
+dist/
+target/
+binaries/
+*.exe
+
 # Output directories
 Output/
 fonts/
@@ -20,6 +27,7 @@ fonts/
 venv/
 env/
 .venv/
+.build_venv/
 
 # IDE & Editor files
 .vscode/

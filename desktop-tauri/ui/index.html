@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MKV Anime Batch</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<div id="app">
+
+  <!-- Border Resize Handles -->
+  <div class="resize-handle n" data-direction="n"></div>
+  <div class="resize-handle s" data-direction="s"></div>
+  <div class="resize-handle e" data-direction="e"></div>
+  <div class="resize-handle w" data-direction="w"></div>
+  <div class="resize-handle ne" data-direction="ne"></div>
+  <div class="resize-handle nw" data-direction="nw"></div>
+  <div class="resize-handle se" data-direction="se"></div>
+  <div class="resize-handle sw" data-direction="sw"></div>
+
+  <!-- ─── Title Bar ──────────────────────────────────────────────────────── -->
+  <div class="titlebar">
+    <div class="titlebar-drag-region" data-tauri-drag-region></div>
+    <div class="traffic-lights">
+      <button class="tl-btn tl-close" id="btn-close" title="Close" type="button">
+        <span class="icon">✕</span>
+      </button>
+      <button class="tl-btn tl-min" id="btn-min" title="Minimize" type="button">
+        <span class="icon">−</span>
+      </button>
+      <button class="tl-btn tl-max" id="btn-max" title="Maximize" type="button">
+        <span class="icon">+</span>
+      </button>
+    </div>
+    <span class="titlebar-title">MKV Anime Batch</span>
+    <div class="titlebar-actions">
+      <button class="theme-toggle" id="btn-theme" title="Toggle theme" type="button">🌙</button>
+    </div>
+  </div>
+
+  <!-- ─── Main Layout ───────────────────────────────────────────────────── -->
+  <div class="layout">
+
+    <!-- Sidebar -->
+    <nav class="sidebar">
+      <div class="sidebar-section">Tools</div>
+      <button class="nav-item active" data-view="remux" id="nav-remux">
+        <span class="nav-icon">⚡</span> Remux
+      </button>
+      <button class="nav-item" data-view="extract" id="nav-extract">
+        <span class="nav-icon">⭳</span> Extract
+      </button>
+    </nav>
+
+    <!-- Content -->
+    <div class="content">
+
+      <!-- ─── Remux View ───────────────────────────────────────────────── -->
+      <div class="view active" id="view-remux">
+
+        <!-- Options Panel -->
+        <div class="glass-panel">
+          <div class="panel-header">
+            <span class="panel-title"><span class="icon">⚡</span> Batch Remux</span>
+          </div>
+          <div class="panel-body">
+            <div class="form-grid">
+
+              <!-- Input Dir -->
+              <div class="form-group">
+                <label class="form-label">Input Directory <span class="required">*</span></label>
+                <div class="input-row">
+                  <input type="text" id="remux-input-dir" placeholder="/path/to/anime" />
+                  <button class="browse-btn" data-target="remux-input-dir">Browse</button>
+                </div>
+              </div>
+
+              <!-- Output Dir -->
+              <div class="form-group">
+                <label class="form-label">Output Directory</label>
+                <div class="input-row">
+                  <input type="text" id="remux-out-dir" placeholder="(same as input)" />
+                  <button class="browse-btn" data-target="remux-out-dir">Browse</button>
+                </div>
+              </div>
+
+              <!-- Fonts Dir -->
+              <div class="form-group">
+                <label class="form-label">Fonts Directory</label>
+                <div class="input-row">
+                  <input type="text" id="remux-fonts-dir" placeholder="(auto-detect)" />
+                  <button class="browse-btn" data-target="remux-fonts-dir">Browse</button>
+                </div>
+              </div>
+
+              <!-- Assets Dir -->
+              <div class="form-group">
+                <label class="form-label">Assets Directory</label>
+                <div class="input-row">
+                  <input type="text" id="remux-assets-dir" placeholder="(optional fallback dir)" />
+                  <button class="browse-btn" data-target="remux-assets-dir">Browse</button>
+                </div>
+              </div>
+
+              <!-- Advanced Options Row -->
+              <div class="form-group full">
+                <div class="num-row" style="align-items: flex-end;">
+                  <!-- Bitrate -->
+                  <div class="num-field" style="flex: 1; min-width: 140px;">
+                    <label>Audio Bitrate</label>
+                    <select id="remux-bitrate" style="height: 29px; padding: 4px 10px; margin: 0;">
+                      <option value="192k">192k (Recommended)</option>
+                      <option value="160k">160k (Balanced)</option>
+                      <option value="128k">128k (Compact)</option>
+                      <option value="256k">256k (High Quality)</option>
+                      <option value="320k">320k (Maximum)</option>
+                    </select>
+                  </div>
+
+                  <!-- Workers -->
+                  <div class="num-field">
+                    <label>Workers</label>
+                    <div class="number-stepper">
+                      <button type="button" class="stepper-btn minus">−</button>
+                      <input type="number" id="remux-workers" value="8" min="1" max="64" />
+                      <button type="button" class="stepper-btn plus">+</button>
+                    </div>
+                  </div>
+
+                  <!-- IO Jobs -->
+                  <div class="num-field">
+                    <label style="display:flex;align-items:center;gap:4px;">IO Jobs <span title="0 = unlimited (no throttling)" style="cursor:help;opacity:0.85;font-size:13px;">ⓘ</span></label>
+                    <div class="number-stepper">
+                      <button type="button" class="stepper-btn minus">−</button>
+                      <input type="number" id="remux-io-jobs" value="2" min="0" max="32" />
+                      <button type="button" class="stepper-btn plus">+</button>
+                    </div>
+                  </div>
+
+                  <!-- Complexity -->
+                  <div class="num-field" style="flex: 1.5; min-width: 150px;">
+                    <label>Complexity</label>
+                    <div style="display:flex;align-items:center;gap:8px; height: 29px;">
+                      <input type="range" id="remux-complexity" value="10" min="0" max="10" step="1" oninput="document.getElementById('remux-cplx-val').value=this.value" style="flex:1; margin: 0;" />
+                      <div class="number-stepper pill-stepper" style="height: 29px;">
+                        <button type="button" class="stepper-btn minus">−</button>
+                        <input type="number" id="remux-cplx-val" value="10" min="0" max="10" oninput="document.getElementById('remux-complexity').value=this.value" style="font-size:12px;font-weight:600;width:34px;text-align:center;background:transparent;border:none;color:var(--text);outline:none;-moz-appearance:textfield;" />
+                        <button type="button" class="stepper-btn plus">+</button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Flags -->
+              <div class="form-group full">
+                <label class="form-label">Options</label>
+                <div class="checkbox-group">
+                  <label class="checkbox-item">
+                    <input type="checkbox" id="remux-dry-run" />
+                    <span>Dry Run</span>
+                  </label>
+                  <label class="checkbox-item">
+                    <input type="checkbox" id="remux-keep-fonts" />
+                    <span>Keep Fonts</span>
+                  </label>
+                  <label class="checkbox-item">
+                    <input type="checkbox" id="remux-no-cache" />
+                    <span title="Skip reading the cache this run">No Cache</span>
+                  </label>
+                  <button class="btn btn-ghost" id="remux-clear-cache" title="Delete the cache file" style="margin-left:auto;padding:4px 8px;font-size:12px;">
+                    🗑 Clear Cache
+                  </button>
+                </div>
+              </div>
+
+            </div>
+          </div>
+        </div>
+
+        <!-- Actions + Log -->
+        <div class="glass-panel" style="flex:1;display:flex;flex-direction:column;overflow:hidden;">
+          <div class="panel-header">
+            <div class="actions-row">
+              <button class="btn btn-primary" id="remux-run">▶ Run Remux</button>
+              <button class="btn btn-stop" id="remux-stop" disabled>■ Stop</button>
+            </div>
+            <div style="display:flex;align-items:center;gap:10px;">
+              <span id="remux-exit-code" class="log-exit-code"></span>
+              <span id="remux-status" class="status-pill status-idle">
+                <span class="status-dot"></span> Idle
+              </span>
+            </div>
+          </div>
+
+          <!-- Log Console -->
+          <div class="log-console" style="margin:0;border:none;border-radius:0;flex:1;">
+            <div class="log-header">
+              <span class="log-title">📋 Output</span>
+              <div class="log-actions">
+                <button class="btn btn-ghost" id="remux-clear-log">Clear</button>
+              </div>
+            </div>
+            <div class="log-body" id="remux-log">
+              <div class="empty-log">
+                <span class="empty-icon">📋</span>
+                <span>No output yet — run a job to see logs here.</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div><!-- /view-remux -->
+
+      <!-- ─── Extract View ──────────────────────────────────────────────── -->
+      <div class="view" id="view-extract">
+
+        <!-- Options Panel -->
+        <div class="glass-panel">
+          <div class="panel-header">
+            <span class="panel-title"><span class="icon">⭳</span> Extract Subtitles &amp; Fonts</span>
+          </div>
+          <div class="panel-body">
+            <div class="form-grid">
+
+              <!-- Input Dir -->
+              <div class="form-group">
+                <label class="form-label">Input Directory <span class="required">*</span></label>
+                <div class="input-row">
+                  <input type="text" id="extract-input-dir" placeholder="/path/to/anime" />
+                  <button class="browse-btn" data-target="extract-input-dir">Browse</button>
+                </div>
+              </div>
+
+              <!-- Output Dir -->
+              <div class="form-group">
+                <label class="form-label">Output Directory</label>
+                <div class="input-row">
+                  <input type="text" id="extract-out-dir" placeholder="(same as input)" />
+                  <button class="browse-btn" data-target="extract-out-dir">Browse</button>
+                </div>
+              </div>
+
+              <!-- Fonts Dir -->
+              <div class="form-group">
+                <label class="form-label">Fonts Directory</label>
+                <div class="input-row">
+                  <input type="text" id="extract-fonts-dir" placeholder="(auto-detect)" />
+                  <button class="browse-btn" data-target="extract-fonts-dir">Browse</button>
+                </div>
+              </div>
+
+              <!-- Advanced Options -->
+              <div class="form-group">
+                <div class="num-row" style="align-items: flex-end;">
+                  <!-- Sub Offset -->
+                  <div class="num-field" style="max-width: 130px;">
+                    <label style="font-size: 10px;">Sub Offset (s)</label>
+                    <div class="number-stepper">
+                      <button type="button" class="stepper-btn minus">−</button>
+                      <input type="number" id="extract-sub-offset" value="0" step="0.1" placeholder="0.0" />
+                      <button type="button" class="stepper-btn plus">+</button>
+                    </div>
+                  </div>
+
+                  <!-- Workers -->
+                  <div class="num-field">
+                    <label style="font-size: 10px;">Workers</label>
+                    <div class="number-stepper">
+                      <button type="button" class="stepper-btn minus">−</button>
+                      <input type="number" id="extract-workers" value="8" min="1" max="64" />
+                      <button type="button" class="stepper-btn plus">+</button>
+                    </div>
+                  </div>
+
+                  <!-- IO Jobs -->
+                  <div class="num-field">
+                    <label style="font-size: 10px; display:flex;align-items:center;gap:4px;">IO Jobs <span title="0 = unlimited (no throttling)" style="cursor:help;opacity:0.85;font-size:11px;">ⓘ</span></label>
+                    <div class="number-stepper">
+                      <button type="button" class="stepper-btn minus">−</button>
+                      <input type="number" id="extract-io-jobs" value="2" min="0" max="32" />
+                      <button type="button" class="stepper-btn plus">+</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Flags -->
+              <div class="form-group full">
+                <label class="form-label">Options</label>
+                <div class="checkbox-group">
+                  <label class="checkbox-item">
+                    <input type="checkbox" id="extract-dry-run" />
+                    <span>Dry Run</span>
+                  </label>
+                  <label class="checkbox-item">
+                    <input type="checkbox" id="extract-no-cache" />
+                    <span title="Skip reading the cache this run">No Cache</span>
+                  </label>
+                  <button class="btn btn-ghost" id="extract-clear-cache" title="Delete the cache file" style="margin-left:auto;padding:4px 8px;font-size:12px;">
+                    🗑 Clear Cache
+                  </button>
+                </div>
+              </div>
+
+            </div>
+          </div>
+        </div>
+
+        <!-- Actions + Log -->
+        <div class="glass-panel" style="flex:1;display:flex;flex-direction:column;overflow:hidden;">
+          <div class="panel-header">
+            <div class="actions-row">
+              <button class="btn btn-primary" id="extract-run">▶ Run Extract</button>
+              <button class="btn btn-stop" id="extract-stop" disabled>■ Stop</button>
+            </div>
+            <div style="display:flex;align-items:center;gap:10px;">
+              <span id="extract-exit-code" class="log-exit-code"></span>
+              <span id="extract-status" class="status-pill status-idle">
+                <span class="status-dot"></span> Idle
+              </span>
+            </div>
+          </div>
+
+          <!-- Log Console -->
+          <div class="log-console" style="margin:0;border:none;border-radius:0;flex:1;">
+            <div class="log-header">
+              <span class="log-title">📋 Output</span>
+              <div class="log-actions">
+                <button class="btn btn-ghost" id="extract-clear-log">Clear</button>
+              </div>
+            </div>
+            <div class="log-body" id="extract-log">
+              <div class="empty-log">
+                <span class="empty-icon">📋</span>
+                <span>No output yet — run a job to see logs here.</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+</div><!-- /#app -->
+
+<!-- Modal Overlay -->
+<div class="modal-overlay" id="confirm-modal">
+  <div class="modal-card">
+    <div class="modal-icon">⚠️</div>
+    <h3 class="modal-title" id="modal-title">Clear Inspection Cache</h3>
+    <p class="modal-desc" id="modal-desc">Are you sure you want to clear the persistent inspection cache?</p>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="modal-cancel" type="button">Cancel</button>
+      <button class="btn btn-danger" id="modal-confirm" type="button">Clear Cache</button>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
