@@ -243,3 +243,34 @@ class TestRemuxArgs:
         except SystemExit as exc:
             assert exc.code == 0
 
+    def test_cli_assets_dir_support(self, mod, monkeypatch, tmp_path):
+        """Verify CLI accepts --assets-dir fallback directory."""
+        test_dir = tmp_path / "input"
+        test_dir.mkdir()
+        assets_dir = tmp_path / "extracted_assets"
+        assets_dir.mkdir()
+        (test_dir / "ep1.mkv").touch()
+
+        monkeypatch.setattr(mod, "check_dependencies", lambda *a: None)
+        monkeypatch.setattr(mod, "inspect_videos", lambda *a, **k: {})
+        captured_kwargs = {}
+        def mock_run(*args, **kwargs):
+            captured_kwargs.update(kwargs)
+            return True
+        monkeypatch.setattr(mod, "_run", mock_run)
+
+        test_argv = [
+            "script", "--input-dir", str(test_dir),
+            "--assets-dir", str(assets_dir),
+            "--dry-run"
+        ]
+        monkeypatch.setattr("sys.argv", test_argv)
+
+        try:
+            mod.main()
+        except SystemExit as exc:
+            assert exc.code == 0
+
+        assert captured_kwargs.get("assets_dir") == assets_dir.resolve()
+
+

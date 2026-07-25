@@ -80,6 +80,7 @@ output directory so episodes from different seasons cannot overwrite each other.
 | `--input-dir` | Input directory containing MKVs / assets | Current directory |
 | `--out-dir` | Output directory for remuxed or extracted files | Input directory (Remux: `<input>/Output`) |
 | `--fonts-dir` | Explicit font directory override | Auto-detected |
+| `--assets-dir` | Fallback directory to search for subtitles/chapters/covers/fonts when missing locally | `None` |
 | `--workers` | Maximum parallel worker threads | CPU count |
 | `--io-jobs` | Maximum concurrent disk I/O tasks | `2` |
 | `--complexity` | Opus audio transcoding complexity (`0`–`10`) | `10` |

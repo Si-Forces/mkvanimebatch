@@ -723,6 +723,7 @@ def _resolve_subtitle(
     sub_index: SubIndex, json_data: dict | None,
     all_subs: list[Path],
     dry_run: bool,
+    fallback_sub_index: SubIndex | None = None,
 ) -> tuple[Path | None, int | None, str, str, str, bool]:
     """
     Returns (subtitle_file, embedded_sub_id, lang, label, mkv_lang, matched).
@@ -759,6 +760,17 @@ def _resolve_subtitle(
                 LANG_LABEL.get(subtitle_lang, subtitle_lang),
                 LANG_MKV_TAG.get(subtitle_lang, subtitle_lang), True)
 
+    if fallback_sub_index is not None:
+        fallback_result = fallback_sub_index.lookup(mkv_ep_type, mkv_ep, mkv_season)
+        if fallback_result is not None:
+            subtitle_file, subtitle_lang = fallback_result
+            if subtitle_lang in SUBTITLE_LANGS_FALLBACK:
+                logger.info("  NOTE: No Indonesian sub in fallback; using English fallback.")
+            logger.info("  Subtitle       : %s [%s] (fallback asset)", subtitle_file.name, LANG_LABEL.get(subtitle_lang, subtitle_lang))
+            return (subtitle_file, None, subtitle_lang,
+                    LANG_LABEL.get(subtitle_lang, subtitle_lang),
+                    LANG_MKV_TAG.get(subtitle_lang, subtitle_lang), True)
+
     logger.warning("No subtitle match found for %s%s (external or embedded).", mkv_ep_type, mkv_ep)
     if not all_subs or dry_run or not sys.stdin.isatty():
         if not all_subs:
@@ -794,6 +806,7 @@ def _resolve_chapter(
     chap_fallback_count: int,
     chapter_unmatched_claimed: set[Path],
     has_source_chapters: bool = False,
+    fallback_chap_index: ChapterIndex | None = None,
 ) -> Path | None:
     mkv_season, mkv_ep_type, mkv_ep = parsed
     chapter_file = chap_index.lookup(mkv_ep_type, mkv_ep, mkv_season)
@@ -805,6 +818,12 @@ def _resolve_chapter(
             chapter_unmatched_claimed.add(chapter_file)
             logger.info("  NOTE: Chapter file name had no episode number — claimed as sole leftover match.")
 
+    if chapter_file is None and not has_source_chapters and fallback_chap_index is not None:
+        chapter_file = fallback_chap_index.lookup(mkv_ep_type, mkv_ep, mkv_season)
+        if chapter_file:
+            logger.info("  Chapters       : %s (fallback asset)", chapter_file.name)
+            return chapter_file
+
     if chapter_file:
         logger.info("  Chapters       : %s (matched)", chapter_file.name)
     else:
@@ -814,9 +833,15 @@ def _resolve_chapter(
 
 def _resolve_cover(
     parsed: EpisodeInfo, cover_index: CoverIndex,
+    fallback_cover_index: CoverIndex | None = None,
 ) -> Path | None:
     mkv_season, mkv_ep_type, mkv_ep = parsed
     cover_file = cover_index.lookup(mkv_ep_type, mkv_ep, mkv_season)
+    if cover_file is None and fallback_cover_index is not None:
+        cover_file = fallback_cover_index.lookup(mkv_ep_type, mkv_ep, mkv_season)
+        if cover_file:
+            logger.info("  Cover          : %s (fallback asset)", cover_file.name)
+            return cover_file
     if cover_file:
         logger.info("  Cover          : %s (matched)", cover_file.name)
     else:
@@ -835,6 +860,9 @@ def _plan_jobs(
     all_subs:     list[Path],
     use_source_fonts: bool,
     dry_run:      bool,
+    fallback_sub_index:  SubIndex | None = None,
+    fallback_chap_index: ChapterIndex | None = None,
+    fallback_cover_index: CoverIndex | None = None,
 ) -> tuple[list[PlannedJob], list[str], list[str]]:
 
     parsed_videos = [(v.path, v.parsed) for v in videos]
@@ -874,6 +902,7 @@ def _plan_jobs(
 
         sub_file, embedded_id, sub_lang, sub_label, sub_mkv_lang, matched = _resolve_subtitle(
             video, parsed, sub_index, json_cache.get(video), all_subs, dry_run,
+            fallback_sub_index=fallback_sub_index,
         )
         if not matched:
             skipped_files.append(f"{video_name} (no subtitle matched)")
@@ -892,11 +921,12 @@ def _plan_jobs(
         chapter_file = _resolve_chapter(
             parsed, chap_index, chapter_fallback_count, chapter_unmatched_claimed,
             has_source_chapters=has_src_chapters,
+            fallback_chap_index=fallback_chap_index,
         )
         if chapter_file:
             matched_files.append(f"{video_name}  <-  {chapter_file.name} [chapters]")
 
-        cover_file = _resolve_cover(parsed, cover_index)
+        cover_file = _resolve_cover(parsed, cover_index, fallback_cover_index=fallback_cover_index)
         if cover_file:
             matched_files.append(f"{video_name}  <-  {cover_file.name} [cover]")
 
@@ -1011,7 +1041,8 @@ def _print_summary(output_dir: Path, matched_files: list[str], skipped_files: li
 # ─── DISCOVERY ───────────────────────────────────────────────────────────────
 def _discover_assets(
     fonts_dir: Path, search_dirs: list[Path],
-) -> tuple[FontInfo, SubIndex, ChapterIndex, CoverIndex]:
+    assets_dir: Path | None = None,
+) -> tuple[FontInfo, SubIndex, ChapterIndex, CoverIndex, SubIndex | None, ChapterIndex | None, CoverIndex | None]:
     if fonts_dir.is_dir():
         logger.info("Scanning detected font directory: '%s'...", fonts_dir.name)
         fonts = scan_fonts(fonts_dir)
@@ -1035,6 +1066,29 @@ def _discover_assets(
         for image_file in assets.covers:
             cover_index.add(image_file)
 
+    fallback_sub_index: SubIndex | None = None
+    fallback_chap_index: ChapterIndex | None = None
+    fallback_cover_index: CoverIndex | None = None
+
+    if assets_dir is not None and assets_dir.is_dir():
+        fallback_sub_index = SubIndex()
+        fallback_chap_index = ChapterIndex()
+        fallback_cover_index = CoverIndex()
+        fallback_assets = scan_assets(assets_dir)
+        for sub_file in fallback_assets.subs:
+            fallback_sub_index.add(sub_file)
+        for xml_file in fallback_assets.chapters:
+            fallback_chap_index.add(xml_file)
+        for image_file in fallback_assets.covers:
+            fallback_cover_index.add(image_file)
+
+        if fonts.count == 0:
+            fallback_fonts_dir = assets_dir / "fonts" if (assets_dir / "fonts").is_dir() else assets_dir
+            fallback_fonts = scan_fonts(fallback_fonts_dir)
+            if fallback_fonts.count > 0:
+                fonts = fallback_fonts
+                logger.info("Detected %d external font(s) in fallback assets directory: %s", fonts.count, fallback_fonts_dir)
+
     logger.info("Subtitles indexed: %d primary, %d English fallback", sub_index.primary_count, sub_index.fallback_count)
     logger.info("Chapters indexed: %d by episode number, %d unmatched", chap_index.indexed_count, len(chap_index.unmatched))
     if chap_index.rejected_count:
@@ -1043,7 +1097,7 @@ def _discover_assets(
     cover_note = " + folder-wide cover.*" if cover_index.has_global else ""
     logger.info("Covers indexed: %d by episode number%s", cover_index.indexed_count, cover_note)
 
-    return fonts, sub_index, chap_index, cover_index
+    return fonts, sub_index, chap_index, cover_index, fallback_sub_index, fallback_chap_index, fallback_cover_index
 
 
 # ─── ORCHESTRATOR ────────────────────────────────────────────────────────────
@@ -1061,13 +1115,14 @@ def _run(
     complexity:   int = 10,
     persistent_cache: PersistentInspectCache | None = None,
     io_semaphore: threading.Semaphore | None = None,
+    assets_dir:   Path | None = None,
 ) -> bool:
     if not videos:
         logger.warning("No MKV files to process in '%s'.", mkv_dir.name)
         return False
         
-    discovered = _discover_assets(fonts_dir, search_dirs)
-    fonts, sub_index, chap_index, cover_index = discovered
+    discovered = _discover_assets(fonts_dir, search_dirs, assets_dir=assets_dir)
+    fonts, sub_index, chap_index, cover_index, f_sub, f_chap, f_cov = discovered
     use_source_fonts = fonts.count == 0
 
     videos_to_inspect = []
@@ -1100,6 +1155,9 @@ def _run(
     jobs, matched_files, skipped_files = _plan_jobs(
         videos, json_cache, sub_index, chap_index, cover_index,
         output_dir, all_subs, use_source_fonts, dry_run,
+        fallback_sub_index=f_sub,
+        fallback_chap_index=f_chap,
+        fallback_cover_index=f_cov,
     )
 
     if dry_run:
@@ -1155,6 +1213,8 @@ def main() -> None:
     parser.add_argument("--fonts-dir", type=str, default=None,
                         help="Directory to use for fonts (auto-detects 'fonts'/'Fonts'/"
                              "'attachments' inside --input-dir if not given).")
+    parser.add_argument("--assets-dir", type=str, default=None,
+                        help="Fallback directory (e.g. a prior extraction's --out-dir) to search for subtitles/chapters/covers/fonts when a video has none of its own and none are found alongside it.")
     parser.add_argument("--dry-run", action="store_true",
                         help="Show matched files without processing.")
     parser.add_argument("--keep-fonts", action="store_true",
@@ -1173,6 +1233,7 @@ def main() -> None:
     if cfg.clear_cache:
         PersistentInspectCache().clear()
         logger.info("Persistent inspection cache cleared.")
+        sys.exit(0)
 
     persistent_cache = PersistentInspectCache(enabled=not cfg.no_cache)
     io_semaphore = threading.BoundedSemaphore(cfg.io_jobs) if cfg.io_jobs > 0 else None
@@ -1183,6 +1244,7 @@ def main() -> None:
     root_input_dir = Path(cfg.input_dir).resolve() if cfg.input_dir else SCRIPT_DIR
     out_override = Path(cfg.out_dir).resolve() if cfg.out_dir else None
     fonts_override = Path(cfg.fonts_dir).resolve() if cfg.fonts_dir else None
+    assets_override = Path(cfg.assets_dir).resolve() if cfg.assets_dir else None
     dry_run      = cfg.dry_run
 
     logger.info("=========================================")
@@ -1227,6 +1289,12 @@ def main() -> None:
 
             search_dirs = _ancestor_dirs(mkv_dir, root_input_dir)
 
+            current_assets_dir = None
+            if assets_override:
+                current_assets_dir = resolve_output_dir(
+                    mkv_dir, root_input_dir, assets_override, default_subdir=None,
+                )
+
             # Resolve fonts directory for this subdirectory by scanning the full ancestor chain (local-first)
             current_fonts_dir = None
             if fonts_override:
@@ -1260,7 +1328,12 @@ def main() -> None:
             
             success = False
             try:
-                success = _run(mkv_dir, dir_mkvs, temp_dir, current_output_dir, current_fonts_dir, search_dirs, pool, max_workers, opus_bitrate, dry_run, complexity=cfg.complexity, persistent_cache=persistent_cache, io_semaphore=io_semaphore)
+                success = _run(
+                    mkv_dir, dir_mkvs, temp_dir, current_output_dir, current_fonts_dir,
+                    search_dirs, pool, max_workers, opus_bitrate, dry_run,
+                    complexity=cfg.complexity, persistent_cache=persistent_cache,
+                    io_semaphore=io_semaphore, assets_dir=current_assets_dir,
+                )
                 if not success:
                     overall_success = False
             finally:
