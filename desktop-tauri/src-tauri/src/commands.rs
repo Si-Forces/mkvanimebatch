@@ -1,0 +1,281 @@
+use std::io::{BufRead, BufReader};
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
+use std::thread;
+use tauri::{AppHandle, Emitter, Manager, State};
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+#[allow(dead_code)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+// ─── App State ──────────────────────────────────────────────────────────────
+
+pub struct JobState {
+    pub child: Mutex<Option<Child>>,
+}
+
+impl Default for JobState {
+    fn default() -> Self {
+        Self {
+            child: Mutex::new(None),
+        }
+    }
+}
+
+// ─── Sidecar Path Resolution ─────────────────────────────────────────────────
+
+fn get_sidecar_path(app: &AppHandle, name: &str) -> Result<PathBuf, String> {
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    let triple = "x86_64-pc-windows-msvc";
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    let triple = "x86_64-unknown-linux-gnu";
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    let triple = "aarch64-unknown-linux-gnu";
+
+    #[cfg(windows)]
+    let filename = format!("{}-{}.exe", name, triple);
+    #[cfg(not(windows))]
+    let filename = format!("{}-{}", name, triple);
+
+    // 1. Resources directory (bundled app)
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        let candidate = resource_dir.join(&filename);
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+
+    // 2. Next to the current executable (other bundle layouts)
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            let candidate = exe_dir.join(&filename);
+            if candidate.exists() {
+                return Ok(candidate);
+            }
+        }
+    }
+
+    // 3. Development: src-tauri/binaries/ relative to Cargo manifest
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let candidate = PathBuf::from(manifest).join("binaries").join(&filename);
+    if candidate.exists() {
+        return Ok(candidate);
+    }
+
+    Err(format!(
+        "Sidecar binary '{}' not found. Run build-sidecars first.",
+        filename
+    ))
+}
+
+// ─── Tauri Commands ──────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn run_job(
+    app: AppHandle,
+    state: State<'_, JobState>,
+    mode: String,
+    args: Vec<String>,
+) -> Result<(), String> {
+    // Only one job at a time
+    {
+        let lock = state.child.lock().map_err(|e| e.to_string())?;
+        if lock.is_some() {
+            return Err("A job is already running. Stop it first.".into());
+        }
+    }
+
+    let sidecar_name = match mode.as_str() {
+        "remux" => "mkv-remux",
+        "extract" => "mkv-extract",
+        _ => return Err(format!("Unknown mode: {}", mode)),
+    };
+
+    let binary = get_sidecar_path(&app, sidecar_name)?;
+
+    let mut cmd = Command::new(&binary);
+    cmd.args(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+
+    let mut child = cmd.spawn()
+        .map_err(|e| format!("Failed to launch {}: {}", binary.display(), e))?;
+
+    let stdout = child.stdout.take().ok_or("no stdout pipe")?;
+    let stderr = child.stderr.take().ok_or("no stderr pipe")?;
+
+    {
+        let mut lock = state.child.lock().map_err(|e| e.to_string())?;
+        *lock = Some(child);
+    }
+
+    // Stdout reader thread
+    let app_out = app.clone();
+    thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            if let Ok(line) = line {
+                let _ = app_out.emit("job-log", line);
+            }
+        }
+    });
+
+    // Stderr reader thread
+    let app_err = app.clone();
+    thread::spawn(move || {
+        for line in BufReader::new(stderr).lines() {
+            if let Ok(line) = line {
+                let _ = app_err.emit("job-log", format!("[ERR] {}", line));
+            }
+        }
+    });
+
+    // Wait-for-exit thread
+    let app_wait = app.clone();
+    thread::spawn(move || loop {
+        let status = {
+            let job = app_wait.state::<JobState>();
+            let mut lock = job.child.lock().unwrap();
+            if let Some(ref mut c) = *lock {
+                c.try_wait().ok().flatten()
+            } else {
+                return;
+            }
+        };
+
+        if let Some(status) = status {
+            let code = status.code().unwrap_or(-1);
+            let _ = app_wait.emit("job-done", code);
+            let job = app_wait.state::<JobState>();
+            let mut lock = job.child.lock().unwrap();
+            *lock = None;
+            return;
+        }
+
+        thread::sleep(std::time::Duration::from_millis(100));
+    });
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn stop_job(state: State<'_, JobState>) -> Result<(), String> {
+    let mut lock = state.child.lock().map_err(|e| e.to_string())?;
+    if let Some(ref mut child) = *lock {
+        #[cfg(windows)]
+        {
+            let pid = child.id();
+            let _ = Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                .output();
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = child.kill();
+        }
+    }
+    *lock = None;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn clear_cache(app: AppHandle, mode: String) -> Result<String, String> {
+    let sidecar_name = match mode.as_str() {
+        "remux" => "mkv-remux",
+        "extract" => "mkv-extract",
+        _ => return Err(format!("Unknown mode: {}", mode)),
+    };
+
+    let binary = get_sidecar_path(&app, sidecar_name)?;
+
+    let mut cmd = Command::new(&binary);
+    cmd.arg("--clear-cache");
+
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+
+    let output = cmd.output().map_err(|e| e.to_string())?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let combined = format!("{}{}", stdout, stderr).trim().to_string();
+
+    if output.status.success() || output.status.code() == Some(0) {
+        Ok(if combined.is_empty() {
+            "Cache cleared.".into()
+        } else {
+            combined
+        })
+    } else {
+        Err(format!("clear-cache failed (exit {}): {}", output.status.code().unwrap_or(-1), combined))
+    }
+}
+
+#[tauri::command]
+pub fn pick_folder() -> Option<String> {
+    // Open the "Open File/Folder" dialog so Windows shows all video files inside directories (matching the Open dialog view)
+    if let Some(path) = rfd::FileDialog::new()
+        .add_filter("Video Files / Anime Folder", &["mkv", "mp4", "avi", "mka", "ass", "srt", "*"])
+        .pick_file()
+    {
+        if path.is_file() {
+            if let Some(parent) = path.parent() {
+                return Some(parent.to_string_lossy().into_owned());
+            }
+        }
+        return Some(path.to_string_lossy().into_owned());
+    }
+
+    // Fallback to standard folder picker if user canceled file picker
+    rfd::FileDialog::new()
+        .pick_folder()
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+pub fn close_window(window: tauri::Window) {
+    let _ = window.close();
+}
+
+#[tauri::command]
+pub fn minimize_window(window: tauri::Window) {
+    let _ = window.minimize();
+}
+
+#[tauri::command]
+pub fn toggle_maximize(window: tauri::Window) {
+    if let Ok(maximized) = window.is_maximized() {
+        if maximized {
+            let _ = window.unmaximize();
+        } else {
+            let _ = window.maximize();
+        }
+    }
+}
+
+#[tauri::command]
+pub fn start_drag(window: tauri::Window) {
+    let _ = window.start_dragging();
+}
+
+#[tauri::command]
+pub fn start_resize(window: tauri::Window, direction: String) {
+    use tauri_runtime::ResizeDirection;
+    let dir = match direction.as_str() {
+        "n" => ResizeDirection::North,
+        "s" => ResizeDirection::South,
+        "e" => ResizeDirection::East,
+        "w" => ResizeDirection::West,
+        "ne" => ResizeDirection::NorthEast,
+        "nw" => ResizeDirection::NorthWest,
+        "se" => ResizeDirection::SouthEast,
+        "sw" => ResizeDirection::SouthWest,
+        _ => return,
+    };
+    let _ = window.start_resize_dragging(dir);
+}

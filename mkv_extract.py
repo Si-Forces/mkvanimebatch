@@ -540,6 +540,7 @@ def main() -> None:
     if cfg.clear_cache:
         PersistentInspectCache().clear()
         logger.info("Persistent inspection cache cleared.")
+        sys.exit(0)
 
     persistent_cache = PersistentInspectCache(enabled=not cfg.no_cache)
     io_semaphore = threading.BoundedSemaphore(cfg.io_jobs) if cfg.io_jobs > 0 else None
