@@ -121,6 +121,9 @@ jobs:
         with:
           name: mkv-anime-batch-windows
           path: |
+            desktop-tauri/src-tauri/target/release/mkv-anime-batch.exe
+            desktop-tauri/src-tauri/target/release/mkv-remux*.exe
+            desktop-tauri/src-tauri/target/release/mkv-extract*.exe
             desktop-tauri/src-tauri/target/release/bundle/nsis/*.exe
             desktop-tauri/src-tauri/target/release/bundle/msi/*.msi
           if-no-files-found: warn
