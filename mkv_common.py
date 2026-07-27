@@ -193,6 +193,13 @@ def acquire_semaphore(sem: threading.Semaphore | None):
     return sem if sem is not None else nullcontext()
 
 
+# ─── SUBTITLE SCORING TABLES ─────────────────────────────────────────────────
+# Used by select_best_subtitle_track — defined at module level so they are not
+# re-created on every loop iteration.
+_ASS_SCORE_MAP: dict[str, int]     = {"ind": 12, "id": 11, "und": 10, "eng": 9, "en": 8}
+_NON_ASS_SCORE_MAP: dict[str, int] = {"ind":  6, "id":  5, "und":  4, "eng": 3, "en": 2}
+
+
 # ─── NAMING HELPERS ──────────────────────────────────────────────────────────
 _UNSAFE_FN_CHARS = re.compile(r'[/:*?"<>|\\]')
 
@@ -533,9 +540,7 @@ def select_best_subtitle_track(
         is_ass  = (codec_id == "s_text/ass")
 
         # Category priority scoring (1 to 12):
-        _ASS_SCORES     = {"ind": 12, "id": 11, "und": 10, "eng": 9, "en": 8}
-        _NON_ASS_SCORES = {"ind":  6, "id":  5, "und":  4, "eng": 3, "en": 2}
-        scores = _ASS_SCORES if is_ass else _NON_ASS_SCORES
+        scores = _ASS_SCORE_MAP if is_ass else _NON_ASS_SCORE_MAP
         category_score = scores.get(language, 7 if is_ass else 1)
 
         priority_key = (category_score, 1 if is_diag else 0, -tid)
