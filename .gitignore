@@ -35,6 +35,12 @@ env/
 *.swp
 *.swo
 
-# Miscellaneous log / scratch files
-scratch/
-runtest.txt
+# Graphify & internal agent scratch files
+.goals/
+GRAPH_REPORT.md
+graph.html
+graph.json
+graphify-out/
+*.AppImage
+*.deb
+
