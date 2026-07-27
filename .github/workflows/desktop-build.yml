@@ -198,10 +198,26 @@ jobs:
 
             | File | Description |
             |------|-------------|
-            | `MKV_Anime_Batch_*_amd64.AppImage` | Universal AppImage — works on any modern distro |
-            | `MKV_Anime_Batch_*_amd64.deb` | Debian / Ubuntu package (`sudo dpkg -i *.deb`) |
+            | `MKV_Anime_Batch_*_amd64.AppImage` | Universal AppImage — works on any modern Linux distro |
+            | `MKV_Anime_Batch_*_amd64.deb` | Debian / Ubuntu package |
 
-            > **Requirements:** [MKVToolNix](https://mkvtoolnix.download/) and [ffmpeg](https://ffmpeg.org/download.html) must be installed and available on `PATH`.
+            ### 📦 Linux Installation & Dependencies
+
+            #### Option A: `.deb` Package (Debian / Ubuntu / Mint)
+            Install with `apt` to automatically fetch required system libraries (`libwebkit2gtk`, `libgtk-3`, etc.):
+            ```bash
+            sudo apt update
+            sudo apt install ./MKV_Anime_Batch_*_amd64.deb mkvtoolnix ffmpeg
+            ```
+
+            #### Option B: `.AppImage` (Universal)
+            Make executable and run:
+            ```bash
+            chmod +x MKV_Anime_Batch_*_amd64.AppImage
+            ./MKV_Anime_Batch_*_amd64.AppImage
+            ```
+
+            > **CLI Tools Requirement:** Make sure `mkvtoolnix` (`mkvmerge`, `mkvextract`) and `ffmpeg` are installed (`sudo apt install mkvtoolnix ffmpeg`).
           files: |
             release-assets/windows/mkv-anime-batch.exe
             release-assets/linux/*.AppImage
