@@ -144,14 +144,18 @@ jobs:
         working-directory: desktop-tauri
         run: cargo tauri build
 
-      # ── Upload AppImage + deb ─────────────────────────────────────────────────
+      # ── Flatten + Upload AppImage + deb ──────────────────────────────────────
+      - name: Collect Linux bundles
+        run: |
+          mkdir -p /tmp/linux-release
+          find desktop-tauri/src-tauri/target/release/bundle/appimage -name "*.AppImage" -exec cp {} /tmp/linux-release/ \;
+          find desktop-tauri/src-tauri/target/release/bundle/deb -name "*.deb" -exec cp {} /tmp/linux-release/ \;
+
       - name: Upload Linux bundles
         uses: actions/upload-artifact@v4
         with:
           name: linux-bundles
-          path: |
-            desktop-tauri/src-tauri/target/release/bundle/appimage/*.AppImage
-            desktop-tauri/src-tauri/target/release/bundle/deb/*.deb
+          path: /tmp/linux-release/
           if-no-files-found: error
 
   # ────────────────────────────────────────────────────────────────────────────
