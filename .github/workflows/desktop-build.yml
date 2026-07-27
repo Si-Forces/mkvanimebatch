@@ -1,38 +1,27 @@
-name: Desktop Build
+name: Release
+
+permissions:
+  contents: write
 
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
     tags:
       - "v*"
-  pull_request:
-    branches:
-      - main
 
 jobs:
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            platform: windows
-          - os: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-            platform: linux
-
-    runs-on: ${{ matrix.os }}
-    name: Build — ${{ matrix.platform }}
+  # ────────────────────────────────────────────────────────────────────────────
+  # Windows build → raw portable exe
+  # ────────────────────────────────────────────────────────────────────────────
+  build-windows:
+    runs-on: windows-latest
+    name: Build — Windows
 
     steps:
-      # ── Checkout ──────────────────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ── Python + PyInstaller ───────────────────────────────────────────────
+      # ── Python + PyInstaller (sidecars) ──────────────────────────────────────
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -41,9 +30,7 @@ jobs:
       - name: Install PyInstaller
         run: pip install pyinstaller
 
-      # ── Build sidecars ─────────────────────────────────────────────────────
-      - name: Build sidecars (Windows)
-        if: matrix.platform == 'windows'
+      - name: Build sidecars
         shell: pwsh
         run: |
           $OutDir = "desktop-tauri/src-tauri/binaries"
@@ -62,8 +49,53 @@ jobs:
             --specpath "pyinstaller-spec-extract" `
             --noconfirm mkv_extract_fast.py
 
-      - name: Build sidecars (Linux)
-        if: matrix.platform == 'linux'
+      # ── Rust + Tauri ─────────────────────────────────────────────────────────
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "desktop-tauri/src-tauri -> target"
+
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Build Tauri app
+        working-directory: desktop-tauri
+        run: cargo tauri build
+
+      # ── Upload raw exe ────────────────────────────────────────────────────────
+      - name: Upload Windows exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-exe
+          path: desktop-tauri/src-tauri/target/release/mkv-anime-batch.exe
+          if-no-files-found: error
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Linux build → AppImage + deb
+  # ────────────────────────────────────────────────────────────────────────────
+  build-linux:
+    runs-on: ubuntu-22.04
+    name: Build — Linux
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── Python + PyInstaller (sidecars) ──────────────────────────────────────
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install PyInstaller
+        run: pip install pyinstaller
+
+      - name: Build sidecars
         run: |
           OUT="desktop-tauri/src-tauri/binaries"
           TRIPLE="x86_64-unknown-linux-gnu"
@@ -81,23 +113,8 @@ jobs:
             --specpath /tmp/pyinstaller-spec-extract \
             --noconfirm mkv_extract_fast.py
 
-      # ── Rust + Tauri CLI ───────────────────────────────────────────────────
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: "desktop-tauri/src-tauri -> target"
-
-      - name: Install tauri-cli
-        run: cargo install tauri-cli --version "^2" --locked
-
-      # ── Linux system deps ──────────────────────────────────────────────────
+      # ── Linux system deps ─────────────────────────────────────────────────────
       - name: Install Linux system dependencies
-        if: matrix.platform == 'linux'
         run: |
           sudo apt-get update -y
           sudo apt-get install -y \
@@ -109,31 +126,81 @@ jobs:
             librsvg2-dev \
             patchelf
 
-      # ── Build Tauri app ────────────────────────────────────────────────────
+      # ── Rust + Tauri ─────────────────────────────────────────────────────────
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "desktop-tauri/src-tauri -> target"
+
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --version "^2" --locked
+
       - name: Build Tauri app
         working-directory: desktop-tauri
         run: cargo tauri build
 
-      # ── Upload artifacts ───────────────────────────────────────────────────
-      - name: Upload Windows bundles
-        if: matrix.platform == 'windows'
-        uses: actions/upload-artifact@v4
-        with:
-          name: mkv-anime-batch-windows
-          path: |
-            desktop-tauri/src-tauri/target/release/mkv-anime-batch.exe
-            desktop-tauri/src-tauri/target/release/mkv-remux*.exe
-            desktop-tauri/src-tauri/target/release/mkv-extract*.exe
-            desktop-tauri/src-tauri/target/release/bundle/nsis/*.exe
-            desktop-tauri/src-tauri/target/release/bundle/msi/*.msi
-          if-no-files-found: warn
-
+      # ── Upload AppImage + deb ─────────────────────────────────────────────────
       - name: Upload Linux bundles
-        if: matrix.platform == 'linux'
         uses: actions/upload-artifact@v4
         with:
-          name: mkv-anime-batch-linux
+          name: linux-bundles
           path: |
-            desktop-tauri/src-tauri/target/release/bundle/deb/*.deb
             desktop-tauri/src-tauri/target/release/bundle/appimage/*.AppImage
-          if-no-files-found: warn
+            desktop-tauri/src-tauri/target/release/bundle/deb/*.deb
+          if-no-files-found: error
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Collect both artifacts → publish GitHub Release
+  # ────────────────────────────────────────────────────────────────────────────
+  release:
+    name: Publish Release
+    needs: [build-windows, build-linux]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download Windows exe
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-exe
+          path: release-assets/windows
+
+      - name: Download Linux bundles
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-bundles
+          path: release-assets/linux
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "MKV Anime Batch ${{ github.ref_name }}"
+          body: |
+            ## 🪟 Windows
+
+            | File | Description |
+            |------|-------------|
+            | `mkv-anime-batch.exe` | Portable executable — just download and run, no installation needed |
+
+            > **Requirements:** [MKVToolNix](https://mkvtoolnix.download/) and [ffmpeg](https://ffmpeg.org/download.html) must be installed and available on `PATH`.
+
+            ---
+
+            ## 🐧 Linux
+
+            | File | Description |
+            |------|-------------|
+            | `MKV_Anime_Batch_*_amd64.AppImage` | Universal AppImage — works on any modern distro |
+            | `MKV_Anime_Batch_*_amd64.deb` | Debian / Ubuntu package (`sudo dpkg -i *.deb`) |
+
+            > **Requirements:** [MKVToolNix](https://mkvtoolnix.download/) and [ffmpeg](https://ffmpeg.org/download.html) must be installed and available on `PATH`.
+          files: |
+            release-assets/windows/mkv-anime-batch.exe
+            release-assets/linux/*.AppImage
+            release-assets/linux/*.deb
+          draft: false
+          prerelease: false
