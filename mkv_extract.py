@@ -30,6 +30,7 @@ from pathlib import Path
 from mkv_common import (
     FONT_EXTENSIONS,
     FontRegistry,
+    acquire_semaphore,
     check_dependencies,
     ep_type_label,
     parse_attachments,
@@ -115,10 +116,7 @@ def _run_mkvextract(mkv_path: Path, args: list[str], log: list[str], io_semaphor
         log.append("   -> Nothing to extract.")
         return
         
-    if io_semaphore is not None:
-        with io_semaphore:
-            result = run_subprocess(["mkvextract", str(mkv_path), *args], capture_stdout=False)
-    else:
+    with acquire_semaphore(io_semaphore):
         result = run_subprocess(["mkvextract", str(mkv_path), *args], capture_stdout=False)
     if result.returncode > 1:
         raise RuntimeError(

@@ -22,6 +22,7 @@ from pathlib import Path
 from mkv_common_fast import (
     FONT_EXTENSIONS,
     FontRegistry,
+    acquire_semaphore,
     check_dependencies,
     ep_type_label,
     parse_attachments,
@@ -205,10 +206,7 @@ def pipeline_worker(
             extract_args += font_args
 
         if extract_args:
-            if io_semaphore is not None:
-                with io_semaphore:
-                    result = run_subprocess(["mkvextract", str(mkv_path), *extract_args], capture_stdout=False)
-            else:
+            with acquire_semaphore(io_semaphore):
                 result = run_subprocess(["mkvextract", str(mkv_path), *extract_args], capture_stdout=False)
             if result.returncode > 1:
                 raise RuntimeError(f"mkvextract failed (exit {result.returncode}): {result.stderr.strip()}")
@@ -262,7 +260,6 @@ def pipeline_worker(
                     actual_size = temp_font_path.stat().st_size
                     mkv_size = att_meta.get("size", 0)
 
-                    move_succeeded = False
                     with IO_LOCK:
                         final_path = fonts_dir / safe_name
                         if final_path.exists():
@@ -275,10 +272,7 @@ def pipeline_worker(
                             temp_font_path.unlink(missing_ok=True)
                         
                         font_registry.try_claim(final_path.name, actual_size)
-                        move_succeeded = True
-                    
-                    if move_succeeded:
-                        extracted_ok.add((safe_name, mkv_size))
+                    extracted_ok.add((safe_name, mkv_size))
 
                 for name, size in claimed_this_call:
                     if (name, size) not in extracted_ok:

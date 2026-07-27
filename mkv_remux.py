@@ -41,6 +41,7 @@ from mkv_common import (
     SUBTITLE_EXT,
     SUBTITLE_LANGS_FALLBACK,
     SUBTITLE_LANGS_PRIMARY,
+    acquire_semaphore,
     check_dependencies,
     detect_sub_lang,
     ep_type_label,
@@ -348,25 +349,21 @@ class SubIndex:
     @property
     def indexed_count(self) -> int: return sum(len(lst) for lst in self._index.values())
 
+    def _count_by_lang(self, lang_set: frozenset[str]) -> int:
+        return sum(
+            1
+            for lst in self._index.values()
+            for f in lst
+            if detect_sub_lang(f.stem) in lang_set
+        )
+
     @property
     def primary_count(self) -> int:
-        count = 0
-        for lst in self._index.values():
-            for f in lst:
-                lang = detect_sub_lang(f.stem)
-                if lang in SUBTITLE_LANGS_PRIMARY:
-                    count += 1
-        return count
+        return self._count_by_lang(SUBTITLE_LANGS_PRIMARY)
 
     @property
     def fallback_count(self) -> int:
-        count = 0
-        for lst in self._index.values():
-            for f in lst:
-                lang = detect_sub_lang(f.stem)
-                if lang in SUBTITLE_LANGS_FALLBACK:
-                    count += 1
-        return count
+        return self._count_by_lang(SUBTITLE_LANGS_FALLBACK)
 
 
 class ChapterIndex:
@@ -527,10 +524,7 @@ def _convert_flac_to_opus(
         str(temp_opus),
     ]
 
-    if io_semaphore is not None:
-        with io_semaphore:
-            result = run_subprocess(cmd, capture_stdout=False)
-    else:
+    with acquire_semaphore(io_semaphore):
         result = run_subprocess(cmd, capture_stdout=False)
     if result.returncode != 0:
         log.append(f"  WARNING (ffmpeg): {result.stderr.strip()}")
@@ -691,10 +685,7 @@ def process_job(
         args = _build_mkvmerge_args(job, tr, temp_opus, fonts, temp_output)
         r.log.append("  Running mkvmerge...")
 
-        if io_semaphore is not None:
-            with io_semaphore:
-                run_result = run_subprocess(["mkvmerge", *args])
-        else:
+        with acquire_semaphore(io_semaphore):
             run_result = run_subprocess(["mkvmerge", *args])
         if run_result.stderr.strip():
             r.log.append(f"  WARNING (mkvmerge): {run_result.stderr.strip()}")

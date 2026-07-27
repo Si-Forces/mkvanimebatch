@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import nullcontext
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -47,7 +48,7 @@ __all__ = [
     # subtitle track selection
     "select_best_subtitle_track", "shift_ass_timestamps",
     # mkvmerge / dependency helpers
-    "check_dependencies", "run_mkvmerge_json", "run_subprocess",
+    "check_dependencies", "run_mkvmerge_json", "run_subprocess", "acquire_semaphore",
     "inspect_videos", "PersistentInspectCache", "get_default_cache_file",
     # natural sorting
     "natural_sort_key",
@@ -139,6 +140,11 @@ def run_subprocess(cmd: list[str], *, capture_stdout: bool = True, timeout: int 
         cmd, stdout=stdout_opt, stderr=subprocess.PIPE, text=True,
         encoding="utf-8", errors="replace", timeout=timeout,
     )
+
+
+def acquire_semaphore(sem: threading.Semaphore | None):
+    """Return the semaphore as a context manager, or a no-op if None."""
+    return sem if sem is not None else nullcontext()
 
 
 # ─── NAMING HELPERS ──────────────────────────────────────────────────────────
@@ -517,32 +523,10 @@ def select_best_subtitle_track(
         is_diag = is_dialogue_track(name)
         is_ass  = (codec_id == "s_text/ass")
         # Category priority scoring (1 to 12):
-        if is_ass:
-            if language == "ind":
-                category_score = 12
-            elif language == "id":
-                category_score = 11
-            elif language == "und":
-                category_score = 10
-            elif language == "eng":
-                category_score = 9
-            elif language == "en":
-                category_score = 8
-            else:
-                category_score = 7
-        else:
-            if language == "ind":
-                category_score = 6
-            elif language == "id":
-                category_score = 5
-            elif language == "und":
-                category_score = 4
-            elif language == "eng":
-                category_score = 3
-            elif language == "en":
-                category_score = 2
-            else:
-                category_score = 1
+        _ASS_SCORES     = {"ind": 12, "id": 11, "und": 10, "eng": 9, "en": 8}
+        _NON_ASS_SCORES = {"ind":  6, "id":  5, "und":  4, "eng": 3, "en": 2}
+        scores = _ASS_SCORES if is_ass else _NON_ASS_SCORES
+        category_score = scores.get(language, 7 if is_ass else 1)
 
         priority_key = (category_score, 1 if is_diag else 0, -tid)
         candidates.append((priority_key, tid, language, is_diag))
