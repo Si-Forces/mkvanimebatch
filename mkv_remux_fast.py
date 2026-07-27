@@ -25,6 +25,7 @@ from mkv_common_fast import (
     FONT_MIME,
     LANG_LABEL,
     LANG_MKV_TAG,
+    acquire_semaphore,
     check_dependencies,
     detect_sub_lang,
     parse_attachments,
@@ -432,10 +433,7 @@ def _convert_flac_to_opus(
         str(temp_opus),
     ]
 
-    if io_semaphore is not None:
-        with io_semaphore:
-            result = run_subprocess(cmd, capture_stdout=False)
-    else:
+    with acquire_semaphore(io_semaphore):
         result = run_subprocess(cmd, capture_stdout=False)
     if result.returncode != 0:
         print(f"  [ERROR] ffmpeg transcoding failed for '{video.name}' (exit {result.returncode}):\n{result.stderr.strip()}")
@@ -643,10 +641,7 @@ def pipeline_worker(
 
         temp_output.unlink(missing_ok=True)
         args = _build_mkvmerge_args(job, tr, temp_opus, fonts, temp_output)
-        if io_semaphore is not None:
-            with io_semaphore:
-                run_result = run_subprocess(["mkvmerge", *args], capture_stdout=False)
-        else:
+        with acquire_semaphore(io_semaphore):
             run_result = run_subprocess(["mkvmerge", *args], capture_stdout=False)
         if run_result.returncode > 1:
             temp_output.unlink(missing_ok=True)
@@ -868,6 +863,7 @@ def main() -> None:
     check_dependencies("mkvmerge", "ffmpeg")
     root_input_dir = Path(cfg.input_dir).resolve() if cfg.input_dir else SCRIPT_DIR
     out_override = Path(cfg.out_dir).resolve() if cfg.out_dir else None
+    fonts_override = Path(cfg.fonts_dir).resolve() if cfg.fonts_dir else None
     assets_override = Path(cfg.assets_dir).resolve() if cfg.assets_dir else None
 
     ignore_paths = {out_override} if out_override else None
@@ -917,7 +913,6 @@ def main() -> None:
                     mkv_dir, root_input_dir, assets_override, default_subdir=None,
                 )
 
-            fonts_override = Path(cfg.fonts_dir).resolve() if cfg.fonts_dir else None
             # Resolve fonts directory
             current_fonts_dir = None
             if fonts_override:
