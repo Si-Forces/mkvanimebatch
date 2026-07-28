@@ -34,6 +34,21 @@ pub fn run() {
                 }
             }
 
+            // On Linux there is no reliable compositor blur support.
+            // Disable transparency so the window is fully opaque and readable.
+            #[cfg(target_os = "linux")]
+            {
+                use tauri::Manager;
+                if let Some(window) = _app.get_webview_window("main") {
+                    // Make window opaque — transparent: true in tauri.conf.json
+                    // causes a see-through window on Linux without a compositor.
+                    let _ = window.set_transparent(false);
+                    // Restore native decorations so the user gets a title bar
+                    // from their window manager (GTK/KDE/etc).
+                    let _ = window.set_decorations(true);
+                }
+            }
+
             Ok(())
         })
         .run(tauri::generate_context!())
