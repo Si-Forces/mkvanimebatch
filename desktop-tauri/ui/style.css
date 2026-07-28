@@ -115,24 +115,13 @@ html, body {
   box-shadow: none;
 }
 
-/* Linux: native WM decorations handle the frame — go fully opaque & square */
+/* Linux: frameless + opaque — same custom UI as Windows, just no blur */
 .is-linux #app {
   border-radius: 0;
   border: none;
   box-shadow: none;
-  background: var(--bg); /* --bg is overridden to fully opaque in Linux block below */
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
-}
-
-/* Hide the custom titlebar on Linux — native WM title bar is used instead */
-.is-linux .titlebar {
-  display: none;
-}
-
-/* Hide resize handles on Linux — WM handles resizing */
-.is-linux .resize-handle {
-  display: none;
 }
 
 /* Subtle noise texture overlay */
