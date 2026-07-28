@@ -830,43 +830,41 @@ input[type="range"]::-webkit-slider-thumb:hover {
 }
 
 /* ─── Linux: no compositor blur — use opaque backgrounds ─────────────────── */
-/* Overrides the semi-transparent rgba values since blur-behind isn't         */
-/* available on most Linux compositors (Mutter/GNOME doesn't support it).     */
-.is-linux [data-theme="dark"] #app,
-.is-linux[data-theme="dark"] #app {
-  background: rgb(20, 20, 25);
-}
-.is-linux [data-theme="light"] #app,
-.is-linux[data-theme="light"] #app {
-  background: rgb(234, 234, 239);
-}
+/* is-linux is on <body>, data-theme is on <html>.                            */
+/* body.is-linux sets variables that cascade to all children, overriding the  */
+/* semi-transparent values from html[data-theme="dark"].                      */
 
-/* Dark theme Linux overrides */
-.is-linux [data-theme="dark"],
-.is-linux[data-theme="dark"] {
-  --bg: rgba(20, 20, 25, 1);
+/* Dark mode (default) — fully opaque dark surface */
+body.is-linux {
+  --bg: rgb(20, 20, 25);
   --glass-bg: rgba(255, 255, 255, 0.07);
   --glass-bg-hover: rgba(255, 255, 255, 0.11);
   --glass-bg-active: rgba(255, 255, 255, 0.16);
-  --glass-panel-bg: rgba(30, 30, 38, 0.98);
+  --glass-panel-bg: rgb(30, 30, 38);
   --glass-border: rgba(255, 255, 255, 0.13);
-  --sidebar-bg: rgba(255, 255, 255, 0.05);
+  --sidebar-bg: rgb(24, 24, 30);
   --sidebar-border: rgba(255, 255, 255, 0.09);
-  --titlebar-bg: rgba(22, 22, 28, 1);
+  --titlebar-bg: rgb(18, 18, 23);
   --input-bg: rgba(255, 255, 255, 0.09);
   --input-border: rgba(255, 255, 255, 0.17);
-  --log-bg: rgba(14, 14, 18, 1);
+  --log-bg: rgb(14, 14, 18);
 }
 
-/* Light theme Linux overrides */
-.is-linux [data-theme="light"],
-.is-linux[data-theme="light"] {
-  --bg: rgba(234, 234, 239, 1);
-  --glass-panel-bg: rgba(255, 255, 255, 0.98);
-  --sidebar-bg: rgba(230, 230, 235, 0.98);
+/* Light mode override */
+html[data-theme="light"] body.is-linux {
+  --bg: rgb(234, 234, 239);
+  --glass-panel-bg: rgb(255, 255, 255);
+  --sidebar-bg: rgb(224, 224, 229);
   --sidebar-border: rgba(0, 0, 0, 0.11);
-  --titlebar-bg: rgba(240, 240, 245, 1);
-  --log-bg: rgba(252, 252, 255, 1);
+  --titlebar-bg: rgb(238, 238, 243);
+  --log-bg: rgb(252, 252, 255);
+}
+
+/* Force #app background to be fully opaque on Linux */
+body.is-linux #app {
+  background: var(--bg);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 
 /* ─── Confirmation Modal Overlay ────────────────────────────────────────────── */

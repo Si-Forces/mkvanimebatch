@@ -142,9 +142,7 @@ jobs:
 
       - name: Build Tauri app
         working-directory: desktop-tauri
-        run: >
-          cargo tauri build --config
-          '{"app":{"windows":[{"label":"main","transparent":false,"decorations":true}]}}'
+        run: cargo tauri build --config src-tauri/tauri.linux.conf.json
 
       # ── Flatten + Upload AppImage + deb ──────────────────────────────────────
       - name: Collect Linux bundles
