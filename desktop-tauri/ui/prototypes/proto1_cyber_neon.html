@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MKV Anime Batch - Cyber Neon HUD</title>
+  <link rel="stylesheet" href="proto1_cyber_neon.css">
+</head>
+<body>
+
+  <!-- Top Navigation Header -->
+  <header class="cyber-header">
+    <div class="brand">
+      <div class="brand-icon">⚡</div>
+      <span>MKV ANIME BATCH <small style="font-size:0.65rem; color:var(--neon-magenta);">v2.0 HUD</small></span>
+    </div>
+    
+    <nav class="nav-tabs">
+      <button class="tab-btn active"><span>⚡</span> BATCH REMUX</button>
+      <button class="tab-btn"><span>⭳</span> SUB & FONT EXTRACT</button>
+      <button class="tab-btn"><span>📊</span> TELEMETRY</button>
+    </nav>
+
+    <div class="system-status">
+      <span>CPU: <strong style="color:var(--neon-cyan);">18%</strong></span>
+      <span>RAM: <strong style="color:var(--neon-cyan);">1.2 GB</strong></span>
+      <div class="status-badge">
+        <span class="dot"></span>
+        <span>NODE READY</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Cyber Container -->
+  <main class="cyber-container">
+    
+    <!-- Left Column: Transcode Configuration -->
+    <section class="panel">
+      <div class="panel-title">
+        <span>⚙️ PARAMS CONTROL</span>
+        <span style="font-size:0.7rem; color:var(--text-muted);">AUTO-SAVED</span>
+      </div>
+
+      <div class="panel-body">
+        
+        <div class="form-group">
+          <label class="form-label">Input Directory</label>
+          <div class="input-with-btn">
+            <input type="text" class="input-cyber" value="D:/Anime/Frieren_S01_BD/" />
+            <button class="btn-cyber">BROWSE</button>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Output Directory</label>
+          <div class="input-with-btn">
+            <input type="text" class="input-cyber" value="D:/Anime/Remux_Out/" />
+            <button class="btn-cyber">BROWSE</button>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Fonts Vault Path</label>
+          <div class="input-with-btn">
+            <input type="text" class="input-cyber" value="D:/Assets/Fonts/" />
+            <button class="btn-cyber">BROWSE</button>
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Audio Bitrate</label>
+            <select class="input-cyber">
+              <option value="192k">192k OPUS (Rec)</option>
+              <option value="256k">256k High Quality</option>
+              <option value="320k">320k Lossless Pass</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Sub Delay (Sec)</label>
+            <input type="number" class="input-cyber" value="0.0" step="0.5" />
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Parallel Workers</label>
+            <input type="number" class="input-cyber" value="8" min="1" max="32" />
+          </div>
+          <div class="form-group">
+            <label class="form-label">Max IO Throttling</label>
+            <input type="number" class="input-cyber" value="2" />
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Remux Engine Complexity: <span id="cplx-val" style="color:var(--neon-cyan);">10</span></label>
+          <div class="range-wrap">
+            <input type="range" min="0" max="10" value="10" oninput="document.getElementById('cplx-val').innerText=this.value" />
+          </div>
+        </div>
+
+        <div class="form-group" style="margin-top:auto; padding-top:12px; border-top:1px solid rgba(255,255,255,0.08);">
+          <label class="form-label">Execution Flags</label>
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; font-size:0.8rem; font-family:var(--font-mono);">
+            <label style="display:flex; align-items:center; gap:6px; cursor:pointer;"><input type="checkbox" checked /> Keep Fonts</label>
+            <label style="display:flex; align-items:center; gap:6px; cursor:pointer;"><input type="checkbox" /> Dry Run Mode</label>
+            <label style="display:flex; align-items:center; gap:6px; cursor:pointer;"><input type="checkbox" /> Bypass Cache</label>
+            <label style="display:flex; align-items:center; gap:6px; cursor:pointer;"><input type="checkbox" checked /> Auto Mux ASS</label>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- Center Column: Episode Batch Visual Queue -->
+    <section class="panel">
+      <div class="panel-title">
+        <span>📦 BATCH QUEUE PIPELINE (12 EPISODES LOADED)</span>
+        <button class="btn-cyber" style="padding:2px 8px; font-size:0.65rem;">+ ADD FILES</button>
+      </div>
+
+      <div class="panel-body">
+        <div class="queue-list">
+          
+          <div class="queue-card processing">
+            <div class="card-top">
+              <span class="file-name">Frieren_E01_The_Journey's_End.mkv</span>
+              <div class="file-tags">
+                <span class="tag cyan">FLAC → OPUS 192k</span>
+                <span class="tag magenta">ASS SUB</span>
+                <span class="tag yellow">MUXING (68%)</span>
+              </div>
+            </div>
+            <div class="progress-bar-wrap">
+              <div class="progress-bar-fill" style="width: 68%;"></div>
+            </div>
+          </div>
+
+          <div class="queue-card processing">
+            <div class="card-top">
+              <span class="file-name">Frieren_E02_It_Wasn't_A_Magic.mkv</span>
+              <div class="file-tags">
+                <span class="tag cyan">FLAC → OPUS 192k</span>
+                <span class="tag magenta">ASS SUB</span>
+                <span class="tag yellow">MUXING (42%)</span>
+              </div>
+            </div>
+            <div class="progress-bar-wrap">
+              <div class="progress-bar-fill" style="width: 42%;"></div>
+            </div>
+          </div>
+
+          <div class="queue-card">
+            <div class="card-top">
+              <span class="file-name">Frieren_E03_Killing_Magic.mkv</span>
+              <div class="file-tags">
+                <span class="tag cyan">QUEUE</span>
+                <span class="tag">FLAC</span>
+                <span class="tag">12 FONTS DETECTED</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="queue-card">
+            <div class="card-top">
+              <span class="file-name">Frieren_E04_The_Land_Where_Souls_Rest.mkv</span>
+              <div class="file-tags">
+                <span class="tag cyan">QUEUE</span>
+                <span class="tag">FLAC</span>
+                <span class="tag">8 FONTS DETECTED</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="queue-card done">
+            <div class="card-top">
+              <span class="file-name">Frieren_E00_Special_Prologue.mkv</span>
+              <div class="file-tags">
+                <span class="tag cyan">COMPLETED</span>
+                <span class="tag">1.4 GB → 1.1 GB</span>
+                <span class="tag">PASSED</span>
+              </div>
+            </div>
+            <div class="progress-bar-wrap">
+              <div class="progress-bar-fill" style="width: 100%; background:var(--neon-green);"></div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </section>
+
+    <!-- Right Column: Real-time Terminal Log Console -->
+    <section class="panel">
+      <div class="panel-title">
+        <span>📟 ACTIVE TERMINAL STREAM</span>
+        <button class="btn-cyber" style="padding:2px 8px; font-size:0.65rem;">CLEAR</button>
+      </div>
+
+      <div class="panel-body" style="padding:8px;">
+        <div class="console-box">
+          <div class="log-line"><span class="time">[10:41:02]</span> <span class="info">[INIT]</span> <span class="msg">MKV Anime Batch Transcoder Engine initialized.</span></div>
+          <div class="log-line"><span class="time">[10:41:03]</span> <span class="info">[CACHE]</span> <span class="msg">Loaded inspection database (12 items cached).</span></div>
+          <div class="log-line"><span class="time">[10:41:05]</span> <span class="warn">[OPUS]</span> <span class="msg">Converting 24-bit FLAC audio stream 0:1 to Opus 192k...</span></div>
+          <div class="log-line"><span class="time">[10:41:08]</span> <span class="info">[MUX]</span> <span class="msg">Merging ASS Subtitles with 14 detected custom fonts...</span></div>
+          <div class="log-line"><span class="time">[10:41:12]</span> <span class="success">[OK]</span> <span class="msg">Episode 00 remuxed cleanly in 9.4 seconds.</span></div>
+          <div class="log-line"><span class="time">[10:41:15]</span> <span class="info">[WORKER 1]</span> <span class="msg">Processing Episode 01 chapter metadata...</span></div>
+          <div class="log-line"><span class="time">[10:41:18]</span> <span class="info">[WORKER 2]</span> <span class="msg">Processing Episode 02 opus audio stream...</span></div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Footer Actions -->
+  <footer class="cyber-footer">
+    <div style="font-family:var(--font-mono); font-size:0.8rem;">
+      STATUS: <span style="color:var(--neon-yellow); font-weight:bold;">PROCESSING (2/12 ACTIVE)</span>
+    </div>
+
+    <div class="action-cluster">
+      <button class="btn-cyber btn-magenta">■ ABORT JOBS</button>
+      <button class="btn-cyber" style="padding:8px 24px; font-weight:bold; background:var(--neon-cyan); color:#000;">▶ START BATCH REMUX</button>
+    </div>
+  </footer>
+
+</body>
+</html>

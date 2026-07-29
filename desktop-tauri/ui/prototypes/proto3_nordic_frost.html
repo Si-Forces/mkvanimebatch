@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MKV Anime Batch - Nordic Frost</title>
+  <link rel="stylesheet" href="proto3_nordic_frost.css">
+</head>
+<body>
+
+  <header class="nordic-topbar">
+    <div class="nordic-brand">
+      <span>🏔️</span> MKV Anime Batch - Nordic Edition
+    </div>
+    <div style="font-size:0.85rem; color:var(--nordic-sub);">
+      Engine Status: <strong style="color:var(--nordic-mint);">Ready (8 Threads Idle)</strong>
+    </div>
+  </header>
+
+  <main class="nordic-layout">
+
+    <aside class="nordic-box">
+      <div class="nordic-box-header">
+        <span>📋 Workflow Parameters</span>
+      </div>
+      
+      <div class="nordic-box-body">
+        
+        <div class="step-card">
+          <span class="step-title">Step 1: Target Folder</span>
+          <input type="text" class="nordic-input" value="D:/Anime/Cyberpunk_Edgerunners/" />
+        </div>
+
+        <div class="step-card">
+          <span class="step-title">Step 2: Opus Transcode & Audio</span>
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+            <select class="nordic-input">
+              <option>192k Opus</option>
+              <option>256k Opus</option>
+            </select>
+            <input type="number" class="nordic-input" value="0.0" step="0.5" placeholder="Sub offset" />
+          </div>
+        </div>
+
+        <div class="step-card">
+          <span class="step-title">Step 3: Performance</span>
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+            <div>
+              <label style="font-size:0.75rem; color:var(--nordic-sub);">Workers</label>
+              <input type="number" class="nordic-input" value="8" />
+            </div>
+            <div>
+              <label style="font-size:0.75rem; color:var(--nordic-sub);">IO Limit</label>
+              <input type="number" class="nordic-input" value="2" />
+            </div>
+          </div>
+        </div>
+
+        <div style="margin-top:auto;">
+          <button class="nordic-btn nordic-btn-mint" style="width:100%;">Run Remux Pipeline</button>
+        </div>
+
+      </div>
+    </aside>
+
+    <section class="nordic-box">
+      <div class="nordic-box-header">
+        <span>📂 Episode Batch List</span>
+        <span style="font-size:0.8rem; color:var(--nordic-sub);">10 Episodes Detected</span>
+      </div>
+
+      <div class="nordic-box-body">
+        
+        <div class="ep-item-row">
+          <div>
+            <strong style="display:block; font-size:0.9rem;">Cyberpunk_Edgerunners_E01.mkv</strong>
+            <span style="font-size:0.75rem; color:var(--nordic-sub);">Audio: FLAC 5.1 → Opus 192k | Subtitles: ASS (English)</span>
+          </div>
+          <button class="nordic-btn" style="padding:6px 12px; font-size:0.75rem;">Inspect</button>
+        </div>
+
+        <div class="ep-item-row">
+          <div>
+            <strong style="display:block; font-size:0.9rem;">Cyberpunk_Edgerunners_E02.mkv</strong>
+            <span style="font-size:0.75rem; color:var(--nordic-sub);">Audio: FLAC 5.1 → Opus 192k | Subtitles: ASS (English)</span>
+          </div>
+          <button class="nordic-btn" style="padding:6px 12px; font-size:0.75rem;">Inspect</button>
+        </div>
+
+        <div class="ep-item-row">
+          <div>
+            <strong style="display:block; font-size:0.9rem;">Cyberpunk_Edgerunners_E03.mkv</strong>
+            <span style="font-size:0.75rem; color:var(--nordic-sub);">Audio: FLAC 5.1 → Opus 192k | Subtitles: ASS (English)</span>
+          </div>
+          <button class="nordic-btn" style="padding:6px 12px; font-size:0.75rem;">Inspect</button>
+        </div>
+
+      </div>
+    </section>
+
+  </main>
+
+</body>
+</html>
