@@ -182,10 +182,7 @@ def _pick_audio(audio_tracks: list[dict], video_pos: int) -> tuple[dict | None, 
             score = 3
 
         if score == 0:
-            if is_ja:
-                score = 2
-            else:
-                score = 1
+            score = 2 if is_ja else 1
 
         priority_key = (score, -a["pos"])
         candidates.append((priority_key, a))
@@ -914,10 +911,7 @@ def _plan_jobs(
             matched_files.append(f"{video_name}  <-  [embedded track {embedded_id}]")
 
         json_data = json_cache.get(video)
-        has_src_chapters = False
-        if json_data:
-            tr = select_tracks(json_data)
-            has_src_chapters = tr.has_source_chapters
+        has_src_chapters = has_chapters(json_data) if json_data else False
 
         chapter_file = _resolve_chapter(
             parsed, chap_index, chapter_fallback_count, chapter_unmatched_claimed,

@@ -7,7 +7,19 @@ from __future__ import annotations
 
 import sys
 sys.dont_write_bytecode = True
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except Exception:
+        pass
 
+import builtins
+_orig_print = builtins.print
+def print(*args, **kwargs):
+    kwargs.setdefault("flush", True)
+    _orig_print(*args, **kwargs)
+
+import time
 import re
 import os
 import shutil
@@ -172,10 +184,7 @@ def _pick_audio(audio_tracks: list[dict], video_pos: int) -> tuple[dict | None, 
             score = 3
 
         if score == 0:
-            if is_ja:
-                score = 2
-            else:
-                score = 1
+            score = 2 if is_ja else 1
 
         priority_key = (score, -a["pos"])
         candidates.append((priority_key, a))
@@ -565,6 +574,8 @@ def pipeline_worker(
     if not video_parsed:
         return False
 
+    start_time = time.perf_counter()
+
     mkv_season, mkv_ep_type, mkv_ep = video_parsed
     out_stem    = output_stem(video.stem, mkv_ep_type, mkv_ep)
     output_file = output_dir / f"{out_stem}.mkv"
@@ -617,9 +628,11 @@ def pipeline_worker(
         use_source_fonts=fonts.count == 0,
     )
 
+    print(f"[JOB_START] {job.video_name}")
     if dry_run:
         sub = job.subtitle_file.name if job.subtitle_file else (f"embedded:{job.embedded_sub_id}" if job.embedded_sub_id is not None else "None")
         print(f"  {job.video_name} -> sub: {sub}, chap: {job.chapter_file.name if job.chapter_file else 'none'}, cover: {job.cover_file.name if job.cover_file else 'none'}")
+        print(f"[JOB_DRY_RUN] {job.video_name} | sub: {sub}")
         return True
 
     # 3. Process
@@ -630,7 +643,9 @@ def pipeline_worker(
     temp_opus = None
     try:
         if tr.audio_id is not None and tr.audio_codec == "A_FLAC":
+            print(f"[JOB_PROGRESS] {job.video_name} | 30%")
             if temp_dir is None:
+                print(f"[JOB_FAIL] {job.video_name} | temp_dir is required for FLAC→Opus conversion")
                 print(f"  [-] Failed: {job.video_name} (temp_dir is required for FLAC→Opus conversion)")
                 return False
             temp_opus = _convert_flac_to_opus(
@@ -638,10 +653,11 @@ def pipeline_worker(
                 opus_bitrate, complexity, ffmpeg_threads, io_semaphore=io_semaphore,
             )
             if temp_opus is None:
+                print(f"[JOB_FAIL] {job.video_name} | FLAC→Opus conversion failed")
                 print(f"  [-] Failed: {job.video_name} (FLAC→Opus conversion failed)")
                 return False
 
-        # Determine temporary output destination to prevent corrupted/partial files in case of interruption
+        print(f"[JOB_PROGRESS] {job.video_name} | 65%")
         if temp_dir:
             temp_output = temp_dir / job.output_file.name
         else:
@@ -655,11 +671,14 @@ def pipeline_worker(
             temp_output.unlink(missing_ok=True)
             raise RuntimeError(f"mkvmerge failed (exit {run_result.returncode}): {run_result.stderr.strip()}")
         
-        # Atomically promote the temp file to the final destination on success
+        print(f"[JOB_PROGRESS] {job.video_name} | 95%")
         temp_output.replace(output_file)
-        print(f"  [+] Remuxed: {job.video_name}")
+        elapsed = time.perf_counter() - start_time
+        print(f"[JOB_DONE] {job.video_name} | {elapsed:.1f}s")
+        print(f"  [+] Remuxed: {job.video_name} in {elapsed:.1f}s")
         return True
     except Exception as e:
+        print(f"[JOB_FAIL] {job.video_name} | {e}")
         print(f"  [-] Failed: {job.video_name} ({e})")
         return False
     finally:
@@ -809,11 +828,11 @@ def _run(
                 ffmpeg_threads,
                 temp_dir,
                 dry_run,
-                io_semaphore,
-                fallback_sub_index,
-                fallback_chap_index,
-                fallback_cover_index,
-                sub_offset,
+                io_semaphore=io_semaphore,
+                fallback_sub_index=fallback_sub_index,
+                fallback_chap_index=fallback_chap_index,
+                fallback_cover_index=fallback_cover_index,
+                sub_offset=sub_offset,
             ): v
             for v in unprocessed_videos
         }
