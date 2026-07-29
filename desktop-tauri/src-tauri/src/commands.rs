@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::thread;
+use sysinfo::System;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 #[cfg(windows)]
@@ -25,6 +26,28 @@ impl Default for JobState {
     }
 }
 
+pub struct TelemetryState {
+    pub sys: Mutex<System>,
+}
+
+impl Default for TelemetryState {
+    fn default() -> Self {
+        let mut sys = System::new_all();
+        sys.refresh_all();
+        Self {
+            sys: Mutex::new(sys),
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+pub struct TelemetryData {
+    pub cpu_pct: f32,
+    pub ram_used_mb: u64,
+    pub ram_total_mb: u64,
+    pub ram_pct: f32,
+}
+
 // ─── Sidecar Path Resolution ─────────────────────────────────────────────────
 
 fn get_sidecar_path(app: &AppHandle, name: &str) -> Result<PathBuf, String> {
@@ -40,7 +63,6 @@ fn get_sidecar_path(app: &AppHandle, name: &str) -> Result<PathBuf, String> {
     #[cfg(not(windows))]
     let filename = format!("{}-{}", name, triple);
 
-    // 1. Resources directory (bundled app)
     if let Ok(resource_dir) = app.path().resource_dir() {
         let candidate = resource_dir.join(&filename);
         if candidate.exists() {
@@ -48,7 +70,6 @@ fn get_sidecar_path(app: &AppHandle, name: &str) -> Result<PathBuf, String> {
         }
     }
 
-    // 2. Next to the current executable (other bundle layouts)
     if let Ok(exe) = std::env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
             let candidate = exe_dir.join(&filename);
@@ -58,7 +79,6 @@ fn get_sidecar_path(app: &AppHandle, name: &str) -> Result<PathBuf, String> {
         }
     }
 
-    // 3. Development: src-tauri/binaries/ relative to Cargo manifest
     let manifest = env!("CARGO_MANIFEST_DIR");
     let candidate = PathBuf::from(manifest).join("binaries").join(&filename);
     if candidate.exists() {
@@ -74,13 +94,79 @@ fn get_sidecar_path(app: &AppHandle, name: &str) -> Result<PathBuf, String> {
 // ─── Tauri Commands ──────────────────────────────────────────────────────────
 
 #[tauri::command]
+pub fn get_system_telemetry(state: State<'_, TelemetryState>) -> Result<TelemetryData, String> {
+    let mut sys = state.sys.lock().map_err(|e| e.to_string())?;
+    sys.refresh_cpu_all();
+    sys.refresh_memory();
+
+    let cpus = sys.cpus();
+    let cpu_pct = if !cpus.is_empty() {
+        let total: f32 = cpus.iter().map(|c| c.cpu_usage()).sum();
+        (total / cpus.len() as f32).round()
+    } else {
+        sys.global_cpu_usage().round()
+    };
+
+    let ram_used = sys.used_memory() / 1024 / 1024;
+    let ram_total = sys.total_memory() / 1024 / 1024;
+    let ram_pct = if ram_total > 0 {
+        ((ram_used as f32 / ram_total as f32) * 100.0).round()
+    } else {
+        0.0
+    };
+
+    Ok(TelemetryData {
+        cpu_pct,
+        ram_used_mb: ram_used,
+        ram_total_mb: ram_total,
+        ram_pct,
+    })
+}
+
+#[tauri::command]
+pub fn scan_directory(path: String) -> Result<Vec<String>, String> {
+    let dir = PathBuf::from(&path);
+    if !dir.exists() || !dir.is_dir() {
+        return Err("Directory does not exist".into());
+    }
+
+    let mut files = Vec::new();
+    let mut dirs_to_visit = vec![dir];
+
+    while let Some(current_dir) = dirs_to_visit.pop() {
+        if let Ok(entries) = std::fs::read_dir(&current_dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                let file_name = p.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
+                
+                if p.is_dir() {
+                    // Skip hidden directories, Output, fonts, attachments to match Python scanner logic
+                    if !file_name.starts_with('.') && file_name != "output" && file_name != "fonts" && file_name != "attachments" {
+                        dirs_to_visit.push(p);
+                    }
+                } else if p.is_file() {
+                    if let Some(ext) = p.extension() {
+                        if ext.to_string_lossy().to_lowercase() == "mkv" {
+                            if let Some(name) = p.file_name() {
+                                files.push(name.to_string_lossy().into_owned());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+#[tauri::command]
 pub fn run_job(
     app: AppHandle,
     state: State<'_, JobState>,
     mode: String,
     args: Vec<String>,
 ) -> Result<(), String> {
-    // Only one job at a time
     {
         let lock = state.child.lock().map_err(|e| e.to_string())?;
         if lock.is_some() {
@@ -115,7 +201,6 @@ pub fn run_job(
         *lock = Some(child);
     }
 
-    // Stdout reader thread
     let app_out = app.clone();
     thread::spawn(move || {
         for line in BufReader::new(stdout).lines() {
@@ -125,7 +210,6 @@ pub fn run_job(
         }
     });
 
-    // Stderr reader thread
     let app_err = app.clone();
     thread::spawn(move || {
         for line in BufReader::new(stderr).lines() {
@@ -135,7 +219,6 @@ pub fn run_job(
         }
     });
 
-    // Wait-for-exit thread
     let app_wait = app.clone();
     thread::spawn(move || loop {
         let status = {
@@ -218,7 +301,6 @@ pub fn clear_cache(app: AppHandle, mode: String) -> Result<String, String> {
 
 #[tauri::command]
 pub fn pick_folder() -> Option<String> {
-    // Open the "Open File/Folder" dialog so Windows shows all video files inside directories (matching the Open dialog view)
     if let Some(path) = rfd::FileDialog::new()
         .add_filter("Video Files / Anime Folder", &["mkv", "mp4", "avi", "mka", "ass", "srt", "*"])
         .pick_file()
@@ -231,7 +313,6 @@ pub fn pick_folder() -> Option<String> {
         return Some(path.to_string_lossy().into_owned());
     }
 
-    // Fallback to standard folder picker if user canceled file picker
     rfd::FileDialog::new()
         .pick_folder()
         .map(|p| p.to_string_lossy().into_owned())

@@ -1,0 +1,149 @@
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=Space+Grotesk:wght@500;700&display=swap');
+
+:root {
+  --nordic-bg: #0f172a;
+  --nordic-panel: #1e293b;
+  --nordic-card: #334155;
+  --nordic-border: #475569;
+  --nordic-mint: #10b981;
+  --nordic-ice: #38bdf8;
+  --nordic-amber: #f59e0b;
+  --nordic-text: #f8fafc;
+  --nordic-sub: #94a3b8;
+  --font-heading: 'Space Grotesk', sans-serif;
+  --font-body: 'Outfit', sans-serif;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: var(--nordic-bg);
+  color: var(--nordic-text);
+  font-family: var(--font-body);
+  height: 100vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.nordic-topbar {
+  height: 56px;
+  background: var(--nordic-panel);
+  border-bottom: 1px solid var(--nordic-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 20px;
+}
+
+.nordic-brand {
+  font-family: var(--font-heading);
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--nordic-ice);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.nordic-layout {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 380px 1fr;
+  gap: 20px;
+  padding: 20px;
+  overflow: hidden;
+}
+
+.nordic-box {
+  background: var(--nordic-panel);
+  border: 1px solid var(--nordic-border);
+  border-radius: 14px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.nordic-box-header {
+  padding: 16px;
+  border-bottom: 1px solid var(--nordic-border);
+  font-family: var(--font-heading);
+  font-size: 0.95rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.nordic-box-body {
+  padding: 20px;
+  overflow-y: auto;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.step-card {
+  background: rgba(0,0,0,0.15);
+  border: 1px solid var(--nordic-border);
+  border-radius: 10px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.step-title {
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--nordic-ice);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.nordic-input {
+  background: var(--nordic-bg);
+  border: 1px solid var(--nordic-border);
+  border-radius: 8px;
+  padding: 8px 12px;
+  color: #fff;
+  font-family: inherit;
+  font-size: 0.85rem;
+  width: 100%;
+}
+
+.nordic-btn {
+  background: var(--nordic-ice);
+  color: #0f172a;
+  font-family: var(--font-heading);
+  font-weight: 700;
+  border: none;
+  border-radius: 8px;
+  padding: 10px 16px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.nordic-btn:hover {
+  background: #7dd3fc;
+  transform: translateY(-1px);
+}
+
+.nordic-btn-mint {
+  background: var(--nordic-mint);
+}
+
+.nordic-btn-mint:hover {
+  background: #34d399;
+}
+
+.ep-item-row {
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--nordic-border);
+  border-radius: 10px;
+  padding: 12px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
