@@ -446,6 +446,7 @@ def _build_mkvmerge_args(
     job: PlannedJob, tr: TrackSelection,
     temp_opus: Path | None, fonts: FontInfo,
     output_path: Path,
+    sub_offset: float = 0.0,
 ) -> list[str]:
     """Construct the mkvmerge argument list for a planned job."""
     args: list[str] = ["-o", str(output_path), "--video-tracks", str(tr.video_id)]
@@ -463,6 +464,9 @@ def _build_mkvmerge_args(
         args.append("--no-attachments")
 
     if job.embedded_sub_id is not None:
+        if sub_offset != 0.0:
+            sync_ms = int(round(sub_offset * 1000))
+            args += ["--sync", f"{job.embedded_sub_id}:{sync_ms}"]
         args += ["--subtitle-tracks", str(job.embedded_sub_id), "--default-track-flag", f"{job.embedded_sub_id}:yes"]
     else:
         args.append("--no-subtitles")
@@ -483,6 +487,9 @@ def _build_mkvmerge_args(
         args += ["--no-chapters", "--language", f"0:{track_lang}", "--track-name", f"0:{track_name}", str(temp_opus)]
 
     if job.subtitle_file is not None:
+        if sub_offset != 0.0:
+            sync_ms = int(round(sub_offset * 1000))
+            args += ["--sync", f"0:{sync_ms}"]
         args += ["--language", f"0:{job.subtitle_mkv_lang}", "--track-name", f"0:{job.subtitle_label}",
                  "--default-track-flag", "0:yes", str(job.subtitle_file)]
 
@@ -553,6 +560,7 @@ def pipeline_worker(
     fallback_sub_index: SubIndex | None = None,
     fallback_chap_index: ChapterIndex | None = None,
     fallback_cover_index: CoverIndex | None = None,
+    sub_offset: float = 0.0,
 ) -> bool:
     if not video_parsed:
         return False
@@ -640,7 +648,7 @@ def pipeline_worker(
             temp_output = job.output_file.with_suffix(".tmp")
 
         temp_output.unlink(missing_ok=True)
-        args = _build_mkvmerge_args(job, tr, temp_opus, fonts, temp_output)
+        args = _build_mkvmerge_args(job, tr, temp_opus, fonts, temp_output, sub_offset=sub_offset)
         with acquire_semaphore(io_semaphore):
             run_result = run_subprocess(["mkvmerge", *args], capture_stdout=False)
         if run_result.returncode > 1:
@@ -673,6 +681,7 @@ def _run(
     opus_bitrate: str,
     complexity:   int,
     dry_run:      bool = False,
+    sub_offset:   float = 0.0,
     inspect_cache: dict[Path, dict | None] | None = None,
     persistent_cache: PersistentInspectCache | None = None,
     io_semaphore: threading.Semaphore | None = None,
@@ -804,6 +813,7 @@ def _run(
                 fallback_sub_index,
                 fallback_chap_index,
                 fallback_cover_index,
+                sub_offset,
             ): v
             for v in unprocessed_videos
         }
@@ -834,6 +844,7 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=default_workers, help="Concurrency level")
     parser.add_argument("--bitrate", type=str, default="192k", help="Audio target bitrate")
     parser.add_argument("--complexity", type=int, default=10, choices=range(0, 11), metavar="[0-10]", help="Opus complexity")
+    parser.add_argument("--sub-offset", type=float, default=0.0, help="Shift subtitle timestamps by this many seconds (negative = earlier, positive = later).")
     parser.add_argument("--out-dir", type=str, default=None, help="Output directory")
     parser.add_argument("--input-dir", type=str, default=None, help="Input directory")
     parser.add_argument("--fonts-dir", type=str, default=None, help="Explicit directory to use for fonts")
@@ -940,6 +951,7 @@ def main() -> None:
                     cfg.bitrate,
                     cfg.complexity,
                     cfg.dry_run,
+                    sub_offset=cfg.sub_offset,
                     inspect_cache=inspect_cache,
                     persistent_cache=persistent_cache,
                     io_semaphore=io_semaphore,

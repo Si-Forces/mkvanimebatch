@@ -56,7 +56,7 @@ __all__ = [
     # scandir helpers
     "ParsedFile", "ScanResults", "scan_mkv_files", "scan_assets", "resolve_output_dir",
     # subtitle shift helper
-    "shift_ass_timestamps",
+    "shift_ass_timestamps", "shift_ass_content",
 ]
 
 # Initialize shared parent logger
@@ -879,22 +879,16 @@ def _ass_cs_to_time(total_cs: int) -> str:
     return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
 
-def shift_ass_timestamps(path: Path, offset_seconds: float, log: list[str] | None = None) -> int:
-    """Shift every Dialogue/Comment line in an .ass file by offset_seconds (in place). Returns the number of lines shifted."""
+def shift_ass_content(content: str, offset_seconds: float) -> tuple[str, int]:
+    """
+    Shift every Dialogue/Comment line in ASS format text by offset_seconds in memory.
+    Returns tuple of (shifted_content_str, shifted_line_count).
+    """
     if offset_seconds == 0.0:
-        return 0
+        return content, 0
 
     offset_cs = round(offset_seconds * 100)
-    try:
-        data = path.read_bytes()
-        has_bom = data.startswith(b"\xef\xbb\xbf")
-        raw = data.decode("utf-8-sig")
-    except (OSError, UnicodeDecodeError) as e:
-        if log is not None:
-            log.append(f"   -> ERROR (sub shift): Failed to read subtitle file: {e}")
-        return 0
-
-    lines = raw.splitlines(keepends=True)
+    lines = content.splitlines(keepends=True)
 
     out_lines = []
     in_events = False
@@ -937,11 +931,30 @@ def shift_ass_timestamps(path: Path, offset_seconds: float, log: list[str] | Non
         else:
             out_lines.append(line)
 
+    return "".join(out_lines), shifted_count
+
+
+def shift_ass_timestamps(path: Path, offset_seconds: float, log: list[str] | None = None) -> int:
+    """Shift every Dialogue/Comment line in an .ass file by offset_seconds (in place). Returns the number of lines shifted."""
+    if offset_seconds == 0.0:
+        return 0
+
+    try:
+        data = path.read_bytes()
+        has_bom = data.startswith(b"\xef\xbb\xbf")
+        raw = data.decode("utf-8-sig")
+    except (OSError, UnicodeDecodeError) as e:
+        if log is not None:
+            log.append(f"   -> ERROR (sub shift): Failed to read subtitle file: {e}")
+        return 0
+
+    shifted_text, shifted_count = shift_ass_content(raw, offset_seconds)
+
     if shifted_count > 0:
         try:
             encoding = "utf-8-sig" if has_bom else "utf-8"
             # newline="" prevents \n translation: raw already keeps original CRLF/LF endings
-            path.write_text("".join(out_lines), encoding=encoding, newline="")
+            path.write_text(shifted_text, encoding=encoding, newline="")
             if log is not None:
                 log.append(f"   -> Shifted subtitle timing by {offset_seconds:+.2f}s ({shifted_count} lines)")
         except Exception as e:
@@ -949,3 +962,4 @@ def shift_ass_timestamps(path: Path, offset_seconds: float, log: list[str] | Non
                 log.append(f"   -> ERROR (sub shift): Failed to write shifted subtitle: {e}")
 
     return shifted_count
+
