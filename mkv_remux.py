@@ -539,6 +539,7 @@ def _build_mkvmerge_args(
     job: PlannedJob, tr: TrackSelection,
     temp_opus: Path | None, fonts: FontInfo,
     output_path: Path,
+    sub_offset: float = 0.0,
 ) -> list[str]:
     """Construct the mkvmerge argument list for a planned job."""
     args: list[str] = ["-o", str(output_path),
@@ -557,6 +558,9 @@ def _build_mkvmerge_args(
         args.append("--no-attachments")
 
     if job.embedded_sub_id is not None:
+        if sub_offset != 0.0:
+            sync_ms = int(round(sub_offset * 1000))
+            args += ["--sync", f"{job.embedded_sub_id}:{sync_ms}"]
         args += ["--subtitle-tracks", str(job.embedded_sub_id),
                  "--default-track-flag", f"{job.embedded_sub_id}:yes"]
     else:
@@ -581,6 +585,9 @@ def _build_mkvmerge_args(
                  str(temp_opus)]
 
     if job.subtitle_file is not None:
+        if sub_offset != 0.0:
+            sync_ms = int(round(sub_offset * 1000))
+            args += ["--sync", f"0:{sync_ms}"]
         args += ["--language", f"0:{job.subtitle_mkv_lang}",
                  "--track-name", f"0:{job.subtitle_label}",
                  "--default-track-flag", "0:yes",
@@ -607,6 +614,7 @@ def process_job(
     json_cache: dict[Path, dict | None], ffmpeg_threads: int = 2,
     io_semaphore: threading.Semaphore | None = None,
     complexity: int = 10,
+    sub_offset: float = 0.0,
 ) -> JobResult:
     r = JobResult()
     video, video_name, base = job.video, job.video_name, job.base
@@ -645,6 +653,8 @@ def process_job(
         r.log.append(f"  Subtitle       : embedded track {job.embedded_sub_id} (from source)")
     elif job.subtitle_file is not None:
         r.log.append(f"  Subtitle       : {job.subtitle_file.name} (external)")
+    if sub_offset != 0.0:
+        r.log.append(f"  Sub Offset     : {sub_offset:+.2f}s")
     if job.use_source_fonts:
         r.log.append("  Font source    : using source's embedded fonts (no external fonts)")
 
@@ -682,7 +692,7 @@ def process_job(
             temp_output = job.output_file.with_suffix(".tmp")
 
         temp_output.unlink(missing_ok=True)
-        args = _build_mkvmerge_args(job, tr, temp_opus, fonts, temp_output)
+        args = _build_mkvmerge_args(job, tr, temp_opus, fonts, temp_output, sub_offset=sub_offset)
         r.log.append("  Running mkvmerge...")
 
         with acquire_semaphore(io_semaphore):
@@ -952,6 +962,7 @@ def _execute_jobs(
     matched_files: list[str],
     complexity:    int = 10,
     io_semaphore:  threading.Semaphore | None = None,
+    sub_offset:    float = 0.0,
 ) -> None:
     logger.info("Processing %d matched file(s) (up to %d at a time)...", len(jobs), max_workers)
 
@@ -960,7 +971,7 @@ def _execute_jobs(
     completed_jobs = 0
 
     futures = {
-        pool.submit(process_job, job, temp_dir, fonts, opus_bitrate, json_cache, ffmpeg_threads, io_semaphore, complexity): job
+        pool.submit(process_job, job, temp_dir, fonts, opus_bitrate, json_cache, ffmpeg_threads, io_semaphore, complexity, sub_offset): job
         for job in jobs
     }
     for future in as_completed(futures):
@@ -1106,6 +1117,7 @@ def _run(
     max_workers:  int,
     opus_bitrate: str,
     dry_run:      bool,
+    sub_offset:   float = 0.0,
     complexity:   int = 10,
     persistent_cache: PersistentInspectCache | None = None,
     io_semaphore: threading.Semaphore | None = None,
@@ -1176,7 +1188,7 @@ def _run(
 
     # Distribute available CPU cores evenly among workers to prevent core thrashing
     ffmpeg_threads = max(1, (os.cpu_count() or 4) // max_workers)
-    _execute_jobs(jobs, temp_dir, fonts, opus_bitrate, pool, max_workers, ffmpeg_threads, json_cache, skipped_files, matched_files, complexity, io_semaphore=io_semaphore)
+    _execute_jobs(jobs, temp_dir, fonts, opus_bitrate, pool, max_workers, ffmpeg_threads, json_cache, skipped_files, matched_files, complexity, io_semaphore=io_semaphore, sub_offset=sub_offset)
     _print_summary(output_dir, matched_files, skipped_files)
     return not bool(skipped_files)
 
@@ -1200,6 +1212,8 @@ def main() -> None:
     parser.add_argument("--complexity", type=int, default=10, choices=range(0, 11),
                         metavar="[0-10]",
                         help="Opus compression complexity level (0-10, default: 10).")
+    parser.add_argument("--sub-offset", type=float, default=0.0,
+                        help="Shift subtitle timestamps by this many seconds (negative = earlier, positive = later).")
     parser.add_argument("--out-dir", type=str, default=None,
                         help="Directory where finished MKVs will be saved (defaults to <input-dir>/Output).")
     parser.add_argument("--input-dir", type=str, default=None,
@@ -1325,6 +1339,7 @@ def main() -> None:
                 success = _run(
                     mkv_dir, dir_mkvs, temp_dir, current_output_dir, current_fonts_dir,
                     search_dirs, pool, max_workers, opus_bitrate, dry_run,
+                    sub_offset=cfg.sub_offset,
                     complexity=cfg.complexity, persistent_cache=persistent_cache,
                     io_semaphore=io_semaphore, assets_dir=current_assets_dir,
                 )

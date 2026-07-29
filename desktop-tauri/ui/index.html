@@ -107,7 +107,7 @@
               <div class="form-group full">
                 <div class="num-row" style="align-items: flex-end;">
                   <!-- Bitrate -->
-                  <div class="num-field" style="flex: 1; min-width: 140px;">
+                  <div class="num-field" style="flex: 1; min-width: 130px;">
                     <label>Audio Bitrate</label>
                     <select id="remux-bitrate" style="height: 29px; padding: 4px 10px; margin: 0;">
                       <option value="192k">192k (Recommended)</option>
@@ -116,6 +116,16 @@
                       <option value="256k">256k (High Quality)</option>
                       <option value="320k">320k (Maximum)</option>
                     </select>
+                  </div>
+
+                  <!-- Sub Offset -->
+                  <div class="num-field" style="max-width: 130px;">
+                    <label style="display:flex;align-items:center;gap:4px;">Sub Offset (s) <span title="Shift subtitle timestamps (+ = delay/later, - = earlier)" style="cursor:help;opacity:0.85;font-size:13px;">ⓘ</span></label>
+                    <div class="number-stepper">
+                      <button type="button" class="stepper-btn minus">−</button>
+                      <input type="number" id="remux-sub-offset" value="0" step="0.5" placeholder="0.0" />
+                      <button type="button" class="stepper-btn plus">+</button>
+                    </div>
                   </div>
 
                   <!-- Workers -->
@@ -256,10 +266,10 @@
                 <div class="num-row" style="align-items: flex-end;">
                   <!-- Sub Offset -->
                   <div class="num-field" style="max-width: 130px;">
-                    <label style="font-size: 10px;">Sub Offset (s)</label>
+                    <label style="font-size: 10px; display:flex;align-items:center;gap:4px;">Sub Offset (s) <span title="Shift subtitle timestamps (+ = delay/later, - = earlier)" style="cursor:help;opacity:0.85;font-size:11px;">ⓘ</span></label>
                     <div class="number-stepper">
                       <button type="button" class="stepper-btn minus">−</button>
-                      <input type="number" id="extract-sub-offset" value="0" step="0.1" placeholder="0.0" />
+                      <input type="number" id="extract-sub-offset" value="0" step="0.5" placeholder="0.0" />
                       <button type="button" class="stepper-btn plus">+</button>
                     </div>
                   </div>
