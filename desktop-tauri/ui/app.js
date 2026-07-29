@@ -233,6 +233,7 @@ class JobController {
       const fontsDir = val("fonts-dir"); if (fontsDir)  args.push("--fonts-dir", fontsDir);
       const assetsDir = val("assets-dir"); if (assetsDir) args.push("--assets-dir", assetsDir);
       const bitrate = val("bitrate");    if (bitrate)   args.push("--bitrate",   bitrate);
+      const offset  = val("sub-offset"); if (offset && offset !== "0") args.push("--sub-offset", offset);
       const workers = val("workers");    if (workers)   args.push("--workers",   workers);
       const ioJobs  = val("io-jobs");    if (ioJobs)    args.push("--io-jobs",   ioJobs);
       const cplx    = val("complexity"); if (cplx)      args.push("--complexity",cplx);

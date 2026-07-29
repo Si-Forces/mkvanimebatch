@@ -229,3 +229,37 @@ class TestShiftAssTimestamps:
         raw = p.read_bytes()
         assert b"\r" not in raw
         assert raw.endswith(b"0:01:10.00,Default,,0,0,0,,Hello\n")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# In-Memory shift_ass_content direct tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestShiftAssContent:
+
+    def test_zero_offset_returns_unchanged(self, mod):
+        raw = ASS_HEADER + "Dialogue: 0,0:01:00.00,0:01:05.00,Default,,0,0,0,,Hello\n"
+        content, count = mod.shift_ass_content(raw, 0.0)
+        assert count == 0
+        assert content == raw
+
+    def test_in_memory_positive_shift(self, mod):
+        raw = ASS_HEADER + "Dialogue: 0,0:01:00.00,0:01:05.00,Default,,0,0,0,,Hello\n"
+        content, count = mod.shift_ass_content(raw, 5.0)
+        assert count == 1
+        assert "0:01:05.00,0:01:10.00" in content
+
+    def test_in_memory_negative_clamping(self, mod):
+        raw = ASS_HEADER + "Dialogue: 0,0:00:02.00,0:00:05.00,Default,,0,0,0,,Hello\n"
+        content, count = mod.shift_ass_content(raw, -10.0)
+        assert count == 1
+        assert "0:00:00.00,0:00:00.00" in content
+
+    def test_in_memory_crlf_preserved(self, mod):
+        raw = (ASS_HEADER + "Dialogue: 0,0:01:00.00,0:01:05.00,Default,,0,0,0,,Hello\n").replace("\n", "\r\n")
+        content, count = mod.shift_ass_content(raw, 2.5)
+        assert count == 1
+        assert "\r\n" in content
+        assert "\r\r\n" not in content
+        assert "0:01:02.50,0:01:07.50" in content
+
