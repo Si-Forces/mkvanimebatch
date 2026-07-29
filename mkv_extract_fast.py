@@ -7,7 +7,19 @@ from __future__ import annotations
 
 import sys
 sys.dont_write_bytecode = True
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except Exception:
+        pass
 
+import builtins
+_orig_print = builtins.print
+def print(*args, **kwargs):
+    kwargs.setdefault("flush", True)
+    _orig_print(*args, **kwargs)
+
+import time
 import argparse
 import os
 import re
@@ -40,16 +52,8 @@ from mkv_common_fast import (
     ParsedFile,
     MAX_DEFAULT_WORKERS,
     DEFAULT_WORKER_MULTIPLIER,
+    cleanup_stale_subtitle_offsets_bulk as _cleanup_stale_subtitle_offsets_bulk,
 )
-
-SCRIPT_DIR = Path(__file__).resolve().parent
-SUPPORTED_SUB_CODECS = frozenset({"s_text/ass"})
-IO_LOCK = threading.Lock()
-_OFFSET_SUBTITLE_RE = re.compile(
-    r"^(?P<stem>.+?)(?:\.\[[-+]?\d+(?:\.\d+)?s\])?(?P<suffix>\.ass)$",
-    re.IGNORECASE,
-)
-
 
 @dataclass
 class MkvMetadata:
@@ -74,41 +78,10 @@ def select_subtitle(json_data: dict, file_stem: str, file_dir: Path, ep_tag: str
     return str(track_id), file_dir / f"{file_stem}_{ep_tag}_{language}_track{track_id}.ass"
 
 
-def _cleanup_stale_subtitle_offsets_bulk(mkv_dir: Path, active_subs: dict[str, str]) -> None:
-    """Single directory pass that removes stale subtitle variants for known stems."""
-    if not active_subs:
-        return
-    normalized_active_subs: dict[str, set[str]] = {}
-    for stem, expected_name in active_subs.items():
-        normalized_active_subs.setdefault(stem.casefold(), set()).add(expected_name)
-    try:
-        with os.scandir(str(mkv_dir)) as it:
-            for entry in it:
-                if not entry.is_file():
-                    continue
-                match = _OFFSET_SUBTITLE_RE.match(entry.name)
-                if not match:
-                    continue
-                stem = match.group("stem").casefold()
-                expected_names = normalized_active_subs.get(stem)
-                if not expected_names:
-                    continue
-                entry_path = Path(entry.path)
-                is_expected_file = False
-                for expected_name in expected_names:
-                    expected_path = mkv_dir / expected_name
-                    try:
-                        if entry_path.samefile(expected_path):
-                            is_expected_file = True
-                            break
-                    except OSError:
-                        if entry.name == expected_name:
-                            is_expected_file = True
-                            break
-                if not is_expected_file:
-                    entry_path.unlink(missing_ok=True)
-    except OSError:
-        pass
+SCRIPT_DIR = Path(__file__).resolve().parent
+SUPPORTED_SUB_CODECS = frozenset({"s_text/ass"})
+IO_LOCK = threading.Lock()
+
 
 
 def pipeline_worker(
@@ -123,8 +96,11 @@ def pipeline_worker(
     io_semaphore: threading.Semaphore | None = None,
     output_dir: Path | None = None,
 ) -> bool:
+    start_time = time.perf_counter()
+    print(f"[JOB_START] {mkv_path.name}")
     # 1. Inspect (pre-fetched)
     if json_data is None:
+        print(f"[JOB_FAIL] {mkv_path.name} | mkvmerge inspection failed")
         print(f"  [-] Failed: {mkv_path.name} (mkvmerge inspection failed)")
         return False
 
@@ -278,12 +254,15 @@ def pipeline_worker(
                     if (name, size) not in extracted_ok:
                         font_registry.release(name, size)
         action = "Extracted" if extract_args else "Skipped (already complete)"
-        print(f"  [+] {action}: {mkv_path.name}")
+        elapsed = time.perf_counter() - start_time
+        print(f"[JOB_DONE] {mkv_path.name} | {elapsed:.1f}s")
+        print(f"  [+] {action}: {mkv_path.name} in {elapsed:.1f}s")
         return True
     except Exception as e:
         for name, size in claimed_this_call:
             if (name, size) not in extracted_ok:
                 font_registry.release(name, size)
+        print(f"[JOB_FAIL] {mkv_path.name} | {e}")
         print(f"  [-] Failed: {mkv_path.name} ({e})")
         return False
     finally:
@@ -298,6 +277,7 @@ def _run(output_dir: Path, fonts_dir: Path, mkv_files: list[ParsedFile], pool: T
     if dry_run:
         print(f"  [Dry Run] Discovered {len(mkv_files)} file(s):")
         for mkv in mkv_files:
+            print(f"[JOB_DRY_RUN] {mkv.name}")
             print(f"    - {mkv.name}")
         return True
     

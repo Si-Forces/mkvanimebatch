@@ -46,7 +46,7 @@ __all__ = [
     # fonts directory discovery
     "find_fonts_dir",
     # subtitle track selection
-    "select_best_subtitle_track", "shift_ass_timestamps", "shift_ass_content",
+    "select_best_subtitle_track", "shift_ass_timestamps", "shift_ass_content", "cleanup_stale_subtitle_offsets_bulk",
     # mkvmerge / dependency helpers
     "check_dependencies", "run_mkvmerge_json", "run_subprocess", "acquire_semaphore",
     "inspect_videos", "PersistentInspectCache", "get_default_cache_file",
@@ -814,3 +814,47 @@ def scan_assets(dir_path: Path) -> ScanResults:
     chapters.sort(key=lambda pf: natural_sort_key(pf.name))
     covers.sort(key=lambda pf: natural_sort_key(pf.name))
     return ScanResults(subs=subs, chapters=chapters, covers=covers)
+
+
+_OFFSET_SUBTITLE_RE = re.compile(
+    r"^(?P<stem>.+?)(?:\.\[[-+]?\d+(?:\.\d+)?s\])?(?P<suffix>\.ass)$",
+    re.IGNORECASE,
+)
+
+
+def cleanup_stale_subtitle_offsets_bulk(mkv_dir: Path, active_subs: dict[str, str]) -> None:
+    """Single directory pass that removes stale subtitle variants for known stems."""
+    if not active_subs:
+        return
+    normalized_active_subs: dict[str, set[str]] = {}
+    for stem, expected_name in active_subs.items():
+        normalized_active_subs.setdefault(stem.casefold(), set()).add(expected_name)
+    try:
+        with os.scandir(str(mkv_dir)) as it:
+            for entry in it:
+                if not entry.is_file():
+                    continue
+                match = _OFFSET_SUBTITLE_RE.match(entry.name)
+                if not match:
+                    continue
+                stem = match.group("stem").casefold()
+                expected_names = normalized_active_subs.get(stem)
+                if not expected_names:
+                    continue
+                entry_path = Path(entry.path)
+                is_expected_file = False
+                for expected_name in expected_names:
+                    expected_path = mkv_dir / expected_name
+                    try:
+                        if entry_path.samefile(expected_path):
+                            is_expected_file = True
+                            break
+                    except OSError:
+                        if entry.name == expected_name:
+                            is_expected_file = True
+                            break
+                if not is_expected_file:
+                    entry_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
