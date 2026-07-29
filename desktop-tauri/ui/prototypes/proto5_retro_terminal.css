@@ -1,0 +1,128 @@
+@import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;600;700&family=VT323&display=swap');
+
+:root {
+  --synth-bg: #12091c;
+  --synth-panel: #1e102d;
+  --synth-border: #9d4edd;
+  --synth-pink: #ff70a6;
+  --synth-violet: #9d4edd;
+  --synth-mint: #70e4d5;
+  --synth-yellow: #ffd166;
+  --synth-text: #f72585;
+  --font-retro: 'VT323', monospace;
+  --font-code: 'Fira Code', monospace;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: var(--synth-bg);
+  color: #fff;
+  font-family: var(--font-code);
+  height: 100vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+/* Toggleable CRT Scanlines Overlay */
+.crt-overlay {
+  position: absolute;
+  top: 0; left: 0; width: 100%; height: 100%;
+  background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%);
+  background-size: 100% 4px;
+  z-index: 999;
+  pointer-events: none;
+  opacity: 0.7;
+}
+
+.synth-header {
+  height: 54px;
+  background: var(--synth-panel);
+  border-bottom: 2px solid var(--synth-pink);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 20px;
+  box-shadow: 0 0 15px var(--synth-pink);
+}
+
+.synth-brand {
+  font-family: var(--font-retro);
+  font-size: 1.8rem;
+  color: var(--synth-pink);
+  text-shadow: 0 0 10px var(--synth-pink);
+  letter-spacing: 2px;
+}
+
+.synth-layout {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 340px 1fr;
+  gap: 16px;
+  padding: 16px;
+  overflow: hidden;
+}
+
+.synth-card {
+  background: var(--synth-panel);
+  border: 2px solid var(--synth-violet);
+  border-radius: 8px;
+  box-shadow: 0 0 20px rgba(157, 78, 221, 0.2);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.synth-card-header {
+  padding: 10px 16px;
+  background: rgba(157, 78, 221, 0.15);
+  border-bottom: 2px solid var(--synth-violet);
+  font-family: var(--font-retro);
+  font-size: 1.3rem;
+  color: var(--synth-mint);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.synth-card-body {
+  padding: 16px;
+  overflow-y: auto;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.synth-input {
+  background: #09030f;
+  border: 1px solid var(--synth-pink);
+  color: var(--synth-mint);
+  font-family: var(--font-code);
+  font-size: 0.85rem;
+  padding: 8px 12px;
+  border-radius: 4px;
+  outline: none;
+  width: 100%;
+}
+
+.synth-btn {
+  background: var(--synth-pink);
+  color: #000;
+  font-family: var(--font-retro);
+  font-size: 1.3rem;
+  font-weight: bold;
+  border: none;
+  padding: 8px 20px;
+  cursor: pointer;
+  border-radius: 4px;
+  box-shadow: 0 0 10px var(--synth-pink);
+  transition: all 0.2s ease;
+}
+
+.synth-btn:hover {
+  background: var(--synth-mint);
+  box-shadow: 0 0 15px var(--synth-mint);
+}

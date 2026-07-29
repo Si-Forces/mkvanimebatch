@@ -6,11 +6,14 @@ pub use commands::*;
 pub fn run() {
     tauri::Builder::default()
         .manage(JobState::default())
+        .manage(TelemetryState::default())
         .invoke_handler(tauri::generate_handler![
             commands::run_job,
             commands::stop_job,
             commands::clear_cache,
             commands::pick_folder,
+            commands::scan_directory,
+            commands::get_system_telemetry,
             commands::close_window,
             commands::minimize_window,
             commands::toggle_maximize,
