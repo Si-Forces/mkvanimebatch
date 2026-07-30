@@ -58,37 +58,63 @@ fn get_sidecar_path(app: &AppHandle, name: &str) -> Result<PathBuf, String> {
     let triple = "x86_64-unknown-linux-gnu";
     #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
     let triple = "aarch64-unknown-linux-gnu";
+    #[cfg(not(any(
+        all(target_os = "windows", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64")
+    )))]
+    let triple = "";
 
+    let mut candidate_filenames = Vec::new();
+    if !triple.is_empty() {
+        #[cfg(windows)]
+        candidate_filenames.push(format!("{}-{}.exe", name, triple));
+        #[cfg(not(windows))]
+        candidate_filenames.push(format!("{}-{}", name, triple));
+    }
     #[cfg(windows)]
-    let filename = format!("{}-{}.exe", name, triple);
+    candidate_filenames.push(format!("{}.exe", name));
     #[cfg(not(windows))]
-    let filename = format!("{}-{}", name, triple);
+    candidate_filenames.push(name.to_string());
+
+    let mut candidate_dirs = Vec::new();
 
     if let Ok(resource_dir) = app.path().resource_dir() {
-        let candidate = resource_dir.join(&filename);
-        if candidate.exists() {
-            return Ok(candidate);
-        }
+        candidate_dirs.push(resource_dir.clone());
+        candidate_dirs.push(resource_dir.join("binaries"));
+        candidate_dirs.push(resource_dir.join("bin"));
+        candidate_dirs.push(resource_dir.join("_up_").join("binaries"));
     }
 
     if let Ok(exe) = std::env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
-            let candidate = exe_dir.join(&filename);
-            if candidate.exists() {
+            candidate_dirs.push(exe_dir.to_path_buf());
+            candidate_dirs.push(exe_dir.join("binaries"));
+            candidate_dirs.push(exe_dir.join("bin"));
+        }
+    }
+
+    if let Ok(cwd) = std::env::current_dir() {
+        candidate_dirs.push(cwd.clone());
+        candidate_dirs.push(cwd.join("binaries"));
+    }
+
+    if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
+        candidate_dirs.push(PathBuf::from(manifest).join("binaries"));
+    }
+
+    for dir in &candidate_dirs {
+        for filename in &candidate_filenames {
+            let candidate = dir.join(filename);
+            if candidate.is_file() && candidate.exists() {
                 return Ok(candidate);
             }
         }
     }
 
-    let manifest = env!("CARGO_MANIFEST_DIR");
-    let candidate = PathBuf::from(manifest).join("binaries").join(&filename);
-    if candidate.exists() {
-        return Ok(candidate);
-    }
-
     Err(format!(
-        "Sidecar binary '{}' not found. Run build-sidecars first.",
-        filename
+        "Sidecar binary '{}' not found in resources or executable folder. Searched filenames: {:?}",
+        name, candidate_filenames
     ))
 }
 
