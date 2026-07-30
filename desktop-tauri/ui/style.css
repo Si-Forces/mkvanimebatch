@@ -137,10 +137,17 @@ input[type="number"] {
   position: relative;
 }
 
-.is-windows #app, .is-linux #app {
+.is-windows #app {
   border-radius: 0;
   border: none;
   box-shadow: none;
+}
+
+.is-linux #app {
+  border-radius: 12px;
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
 }
 
 /* ─── Clean Title Bar (Dedicated Drag Area) ──────────────────────────────── */
@@ -182,9 +189,14 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
   gap: 8px;
   flex-shrink: 0;
   z-index: 20;
+  position: relative;
 }
 
 .tl-btn {
+  -webkit-appearance: none !important;
+  -moz-appearance: none !important;
+  appearance: none !important;
+  outline: none !important;
   width: 14px;
   height: 14px;
   border-radius: 50%;
@@ -196,11 +208,14 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
   transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
   color: rgba(0, 0, 0, 0.7);
   padding: 0;
+  margin: 0;
+  box-sizing: border-box;
 }
 
 .tl-btn svg {
   opacity: 0;
   transition: opacity 0.15s ease;
+  pointer-events: none;
 }
 
 .traffic-lights:hover .tl-btn svg,
@@ -221,7 +236,7 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
 .is-windows .traffic-lights,
 .is-linux .traffic-lights {
   gap: 0;
-  margin-left: -16px;
+  margin: 0;
   height: 40px;
 }
 
@@ -229,9 +244,10 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
 .is-linux .tl-btn {
   width: 44px;
   height: 40px;
-  border-radius: 0;
+  border-radius: 0 !important;
   background: transparent !important;
   border: none !important;
+  box-shadow: none !important;
   color: var(--text-muted);
   transition: background 0.15s ease, color 0.15s ease;
 }
@@ -245,9 +261,10 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
 
 .is-windows .tl-btn:hover,
 .is-linux .tl-btn:hover {
-  transform: none;
+  transform: none !important;
+  filter: none !important;
   background: var(--glass-bg-hover) !important;
-  color: var(--text);
+  color: var(--text) !important;
 }
 
 .is-windows .tl-close:hover,
