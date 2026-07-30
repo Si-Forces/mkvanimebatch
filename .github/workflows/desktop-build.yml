@@ -67,12 +67,45 @@ jobs:
         working-directory: desktop-tauri
         run: cargo tauri build
 
-      # ── Upload raw exe ────────────────────────────────────────────────────────
-      - name: Upload Windows exe
+      # ── Package Windows Artifacts (Portable Zip & Installer) ───────────
+      - name: Package Windows Artifacts
+        shell: pwsh
+        run: |
+          $ReleaseDir = "desktop-tauri/src-tauri/target/release"
+          $BundleDir  = "desktop-tauri/src-tauri/target/release/bundle"
+          $OutDir     = "windows-artifacts"
+          $StageDir   = "mkv-anime-batch-windows-x64"
+
+          New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
+          New-Item -ItemType Directory -Force -Path $StageDir | Out-Null
+
+          # Copy main executable and sidecars into portable package
+          Copy-Item "$ReleaseDir\mkv-anime-batch.exe" "$StageDir\" -Force
+          Copy-Item "desktop-tauri/src-tauri/binaries\mkv-remux-x86_64-pc-windows-msvc.exe" "$StageDir\" -Force
+          Copy-Item "desktop-tauri/src-tauri/binaries\mkv-extract-x86_64-pc-windows-msvc.exe" "$StageDir\" -Force
+
+          # Create Portable Zip
+          Compress-Archive -Path "$StageDir\*" -DestinationPath "$OutDir\MKV_Anime_Batch_Portable_win64.zip" -Force
+
+          # Collect NSIS setup installer if generated
+          if (Test-Path "$BundleDir\nsis\*.exe") {
+              Get-ChildItem "$BundleDir\nsis\*.exe" | ForEach-Object {
+                  Copy-Item $_.FullName "$OutDir\MKV_Anime_Batch_Setup_x64.exe" -Force
+              }
+          }
+
+          # Collect MSI installer if generated
+          if (Test-Path "$BundleDir\msi\*.msi") {
+              Get-ChildItem "$BundleDir\msi\*.msi" | ForEach-Object {
+                  Copy-Item $_.FullName "$OutDir\" -Force
+              }
+          }
+
+      - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: windows-exe
-          path: desktop-tauri/src-tauri/target/release/mkv-anime-batch.exe
+          name: windows-artifacts
+          path: windows-artifacts/
           if-no-files-found: error
 
   # ────────────────────────────────────────────────────────────────────────────
@@ -167,10 +200,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Download Windows exe
+      - name: Download Windows artifacts
         uses: actions/download-artifact@v4
         with:
-          name: windows-exe
+          name: windows-artifacts
           path: release-assets/windows
 
       - name: Download Linux bundles
@@ -188,7 +221,8 @@ jobs:
 
             | File | Description |
             |------|-------------|
-            | `mkv-anime-batch.exe` | Portable executable — just download and run, no installation needed |
+            | `MKV_Anime_Batch_Portable_win64.zip` | Portable Zip package (includes main app + sidecars). Extract and run! |
+            | `MKV_Anime_Batch_Setup_x64.exe` | Windows Installer (NSIS Setup) |
 
             > **Requirements:** [MKVToolNix](https://mkvtoolnix.download/) and [ffmpeg](https://ffmpeg.org/download.html) must be installed and available on `PATH`.
 
@@ -204,14 +238,12 @@ jobs:
             ### 📦 Linux Installation & Dependencies
 
             #### Option A: `.deb` Package (Debian / Ubuntu / Mint)
-            Install with `apt` to automatically fetch required system libraries (`libwebkit2gtk`, `libgtk-3`, etc.):
             ```bash
             sudo apt update
             sudo apt install ./MKV_Anime_Batch_*_amd64.deb mkvtoolnix ffmpeg
             ```
 
             #### Option B: `.AppImage` (Universal)
-            Make executable and run:
             ```bash
             chmod +x MKV_Anime_Batch_*_amd64.AppImage
             ./MKV_Anime_Batch_*_amd64.AppImage
@@ -219,7 +251,7 @@ jobs:
 
             > **CLI Tools Requirement:** Make sure `mkvtoolnix` (`mkvmerge`, `mkvextract`) and `ffmpeg` are installed (`sudo apt install mkvtoolnix ffmpeg`).
           files: |
-            release-assets/windows/mkv-anime-batch.exe
+            release-assets/windows/*
             release-assets/linux/*.AppImage
             release-assets/linux/*.deb
           draft: false

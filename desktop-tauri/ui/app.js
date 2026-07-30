@@ -83,21 +83,16 @@ function applyPreset(presetKey) {
 // ─── Tauri API helpers ──────────────────────────────────────────────────────
 
 async function invoke(cmd, args = {}) {
-  try {
-    const fn = window.__TAURI__?.core?.invoke
-      || window.__TAURI__?.tauri?.invoke
-      || window.__TAURI__?.invoke
-      || window.__TAURI_INTERNALS__?.invoke;
+  const fn = window.__TAURI__?.core?.invoke
+    || window.__TAURI__?.tauri?.invoke
+    || window.__TAURI__?.invoke
+    || window.__TAURI_INTERNALS__?.invoke;
 
-    if (fn) {
-      return await fn(cmd, args);
-    }
-    console.log("[mock invoke]", cmd, args);
-    return null;
-  } catch (err) {
-    console.error(`[IPC Error] ${cmd}:`, err);
-    return null;
+  if (fn) {
+    return await fn(cmd, args);
   }
+  console.log("[mock invoke]", cmd, args);
+  return null;
 }
 
 async function listen(event, handler) {
