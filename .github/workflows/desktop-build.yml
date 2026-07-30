@@ -79,6 +79,9 @@ jobs:
           New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
           New-Item -ItemType Directory -Force -Path $StageDir | Out-Null
 
+          # Copy single self-contained standalone executable
+          Copy-Item "$ReleaseDir\mkv-anime-batch.exe" "$OutDir\mkv-anime-batch.exe" -Force
+
           # Copy main executable and sidecars into portable package
           Copy-Item "$ReleaseDir\mkv-anime-batch.exe" "$StageDir\" -Force
           Copy-Item "desktop-tauri/src-tauri/binaries\mkv-remux-x86_64-pc-windows-msvc.exe" "$StageDir\" -Force
@@ -221,7 +224,8 @@ jobs:
 
             | File | Description |
             |------|-------------|
-            | `MKV_Anime_Batch_Portable_win64.zip` | Portable Zip package (includes main app + sidecars). Extract and run! |
+            | `mkv-anime-batch.exe` | Single self-contained standalone executable — download & run anywhere! |
+            | `MKV_Anime_Batch_Portable_win64.zip` | Portable Zip package |
             | `MKV_Anime_Batch_Setup_x64.exe` | Windows Installer (NSIS Setup) |
 
             > **Requirements:** [MKVToolNix](https://mkvtoolnix.download/) and [ffmpeg](https://ffmpeg.org/download.html) must be installed and available on `PATH`.
