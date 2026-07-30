@@ -8,7 +8,7 @@
 
 const PRESETS = {
   default: {
-    name: "🌸 Opus 192k + Keep Fonts",
+    name: "Opus 192k + Keep Fonts",
     bitrate: "192k",
     complexity: "10",
     workers: "8",
@@ -19,7 +19,7 @@ const PRESETS = {
     noCache: false,
   },
   fast: {
-    name: "⚡ Fast Muxing (128k)",
+    name: "Fast Muxing (128k)",
     bitrate: "128k",
     complexity: "5",
     workers: "16",
@@ -30,7 +30,7 @@ const PRESETS = {
     noCache: false,
   },
   high_quality: {
-    name: "🎧 Hi-Fi Master (320k)",
+    name: "Hi-Fi Master (320k)",
     bitrate: "320k",
     complexity: "10",
     workers: "8",
@@ -47,7 +47,7 @@ function applyPreset(presetKey) {
   const nameEl = document.getElementById("active-profile-name");
 
   if (!p) {
-    if (nameEl) nameEl.textContent = "🛠️ Custom Configuration";
+    if (nameEl) nameEl.textContent = "Custom Configuration";
     document.querySelectorAll(".profile-option-item").forEach(item => {
       item.classList.toggle("active", item.dataset.preset === "custom");
     });
@@ -169,8 +169,6 @@ const THEME_KEY = "mkv-theme";
 
 function applyTheme(theme) {
   document.documentElement.setAttribute("data-theme", theme);
-  const btn = document.getElementById("btn-theme");
-  if (btn) btn.textContent = theme === "dark" ? "🌙" : "☀️";
   try {
     localStorage.setItem(THEME_KEY, theme);
   } catch (e) {}
@@ -209,19 +207,29 @@ function switchView(viewId) {
 
 let telemetryTimer = null;
 
-function startTelemetryMonitor(workersCount = 8, ioJobsCount = 2) {
-  stopTelemetryMonitor();
+function updateWorkerChips(isJobActive = false, workersCount = 8, ioJobsCount = 2) {
+  const workerChips = document.querySelectorAll(".metric-workers-chip, #workers-telemetry-chip");
+  const ioJobChips = document.querySelectorAll(".metric-iojobs-chip, #iojobs-telemetry-chip");
+
+  workerChips.forEach(chip => {
+    chip.innerText = isJobActive ? `⚡ ${workersCount} Workers Active` : `⚡ Standby (${workersCount} Workers)`;
+  });
+  ioJobChips.forEach(chip => {
+    chip.innerText = isJobActive ? `🔀 ${ioJobsCount} IO Jobs Active` : `🔀 Idle (${ioJobsCount} IO Jobs)`;
+  });
+}
+
+function startTelemetryMonitor() {
+  if (telemetryTimer) return;
+
   const cpuFills = document.querySelectorAll(".metric-cpu-fill, #cpu-telemetry-fill");
   const cpuVals = document.querySelectorAll(".metric-cpu-val, #cpu-telemetry-val");
   const ioFills = document.querySelectorAll(".metric-io-fill, #io-telemetry-fill");
   const ioVals = document.querySelectorAll(".metric-io-val, #io-telemetry-val");
   const ramFills = document.querySelectorAll(".metric-ram-fill, #ram-telemetry-fill");
   const ramVals = document.querySelectorAll(".metric-ram-val, #ram-telemetry-val");
-  const workerChips = document.querySelectorAll(".metric-workers-chip, #workers-telemetry-chip");
-  const ioJobChips = document.querySelectorAll(".metric-iojobs-chip, #iojobs-telemetry-chip");
 
-  workerChips.forEach(chip => { chip.innerText = `⚡ ${workersCount} Workers Active`; });
-  ioJobChips.forEach(chip => { chip.innerText = `🔀 ${ioJobsCount} IO Jobs Active`; });
+  updateWorkerChips(false);
 
   const updateMetrics = async () => {
     try {
@@ -231,6 +239,7 @@ function startTelemetryMonitor(workersCount = 8, ioJobsCount = 2) {
         const ramUsed = data.ram_used_mb || 0;
         const ramTotal = data.ram_total_mb || 16384;
         const ramPct = Math.round(data.ram_pct || 0);
+        const ioMb = typeof data.io_mb_s === "number" ? data.io_mb_s : 0;
 
         cpuFills.forEach(fill => fill.style.width = `${cpu}%`);
         cpuVals.forEach(val => val.innerText = `${cpu}%`);
@@ -238,9 +247,8 @@ function startTelemetryMonitor(workersCount = 8, ioJobsCount = 2) {
         ramFills.forEach(fill => fill.style.width = `${ramPct}%`);
         ramVals.forEach(val => val.innerText = `${ramUsed} MB / ${(ramTotal/1024).toFixed(0)} GB`);
 
-        ioFills.forEach(fill => fill.style.width = `0%`);
-        ioVals.forEach(val => val.innerText = `-- MB/s`);
-        return;
+        ioFills.forEach(fill => fill.style.width = `${Math.min(100, (ioMb / 300) * 100)}%`);
+        ioVals.forEach(val => val.innerText = `${ioMb.toFixed(1)} MB/s`);
       }
     } catch (e) {
       console.log("[Telemetry Error]", e);
@@ -249,27 +257,6 @@ function startTelemetryMonitor(workersCount = 8, ioJobsCount = 2) {
 
   updateMetrics();
   telemetryTimer = setInterval(updateMetrics, 1000);
-}
-
-function stopTelemetryMonitor() {
-  if (telemetryTimer) {
-    clearInterval(telemetryTimer);
-    telemetryTimer = null;
-  }
-
-  const cpuFills = document.querySelectorAll(".metric-cpu-fill, #cpu-telemetry-fill");
-  const cpuVals = document.querySelectorAll(".metric-cpu-val, #cpu-telemetry-val");
-  const ioFills = document.querySelectorAll(".metric-io-fill, #io-telemetry-fill");
-  const ioVals = document.querySelectorAll(".metric-io-val, #io-telemetry-val");
-  const ramFills = document.querySelectorAll(".metric-ram-fill, #ram-telemetry-fill");
-  const ramVals = document.querySelectorAll(".metric-ram-val, #ram-telemetry-val");
-
-  cpuFills.forEach(fill => fill.style.width = `0%`);
-  cpuVals.forEach(val => val.innerText = `0%`);
-  ioFills.forEach(fill => fill.style.width = `0%`);
-  ioVals.forEach(val => val.innerText = `0 MB/s`);
-  ramFills.forEach(fill => fill.style.width = `0%`);
-  ramVals.forEach(val => val.innerText = `0 MB`);
 }
 
 // ─── Real-Time Episode Queue & Progress/Duration Tracker ───────────────────
@@ -293,15 +280,22 @@ class QueueTracker {
     this.totalCount = 0;
     if (this.listEl) {
       this.listEl.innerHTML = `
-        <div class="empty-log">
-          <span class="empty-icon">📁</span>
-          <span>No directory selected — browse an input folder to view episodes.</span>
+        <div class="empty-state-card">
+          <div class="empty-icon-glow">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+              <line x1="12" y1="11" x2="12" y2="17"></line>
+              <line x1="9" y1="14" x2="15" y2="14"></line>
+            </svg>
+          </div>
+          <div class="empty-state-title">No Episodes Queued</div>
+          <div class="empty-state-desc">Select an input directory on the left to auto-scan MKV files into the batch queue.</div>
         </div>`;
     }
     if (this.countEl) this.countEl.textContent = "Ready";
   }
 
-  populateDirectoryFiles(files) {
+  populateDirectoryFiles(files, dirPath = "") {
     this.items.forEach(item => {
       if (item.timerId) clearInterval(item.timerId);
     });
@@ -316,10 +310,52 @@ class QueueTracker {
     this.totalCount = files.length;
     if (this.countEl) this.countEl.textContent = `${files.length} Episodes Queued`;
 
+    const bitrate = document.getElementById(`${this.mode}-bitrate`)?.value?.trim() || "192k";
+
     files.forEach((filename, idx) => {
       const epCard = this.createCardElement(filename, idx + 1);
       this.listEl.appendChild(epCard.el);
       this.items.set(filename, epCard);
+
+      if (dirPath) {
+        const fullPath = `${dirPath}/${filename}`;
+        invoke("inspect_mkv_file", { filePath: fullPath }).then(meta => {
+          if (meta && epCard && epCard.el) {
+            const codecEl = epCard.el.querySelector(".ep-codec");
+            const tag1El = epCard.el.querySelector(".track-tag.cyan");
+            const tag2El = epCard.el.querySelector(".track-tag.magenta");
+
+            if (codecEl) codecEl.textContent = meta.video_tag;
+
+            if (this.mode === "remux") {
+              if (tag1El) {
+                tag1El.textContent = meta.has_flac
+                  ? `${meta.audio_summary} → Opus ${bitrate}`
+                  : `${meta.audio_summary} (Passthrough)`;
+              }
+              if (tag2El) {
+                tag2El.textContent = meta.fonts_count > 0
+                  ? `${meta.sub_summary} + ${meta.fonts_count} Fonts`
+                  : meta.sub_summary;
+              }
+            } else {
+              if (tag1El) tag1El.textContent = meta.sub_summary;
+              if (tag2El) tag2El.textContent = `${meta.fonts_count} Attached Fonts`;
+            }
+          }
+        }).catch(err => {
+          console.log("[Inspection Error]", filename, err);
+          if (epCard && epCard.el) {
+            const codecEl = epCard.el.querySelector(".ep-codec");
+            const tag1El = epCard.el.querySelector(".track-tag.cyan");
+            const tag2El = epCard.el.querySelector(".track-tag.magenta");
+
+            if (codecEl) codecEl.textContent = this.mode === "extract" ? "SUB & FONTS" : "MKV BATCH";
+            if (tag1El) tag1El.textContent = this.mode === "extract" ? "ASS Subtitles (.ass)" : `Audio → Opus ${bitrate}`;
+            if (tag2El) tag2El.textContent = this.mode === "extract" ? "Attachment Fonts" : "Subtitles";
+          }
+        });
+      }
     });
   }
 
@@ -328,23 +364,9 @@ class QueueTracker {
     el.className = "tokyo-ep-card";
     const numStr = String(epNum).padStart(2, "0");
 
-    let codecTag = "MKV SOURCE";
-    const fnUpper = filename.toUpperCase();
-    if (fnUpper.includes("1080P")) codecTag = "1080p MKV";
-    else if (fnUpper.includes("2160P") || fnUpper.includes("4K")) codecTag = "2160p 4K";
-    else if (fnUpper.includes("720P")) codecTag = "720p MKV";
-    else if (filename.toLowerCase().endsWith(".mp4")) codecTag = "MP4 CONTAINER";
-
-    let trackTag1 = this.mode === "extract" ? "ASS/SRT Subtitles" : "Audio Remux (Opus)";
-    let trackTag2 = this.mode === "extract" ? "Font Attachments" : "Subtitle Track";
-
-    if (fnUpper.includes("HEVC") || fnUpper.includes("H.265") || fnUpper.includes("X265")) {
-      trackTag2 += " • HEVC";
-    } else if (fnUpper.includes("AVC") || fnUpper.includes("H.264") || fnUpper.includes("X264")) {
-      trackTag2 += " • AVC";
-    } else if (fnUpper.includes("AV1")) {
-      trackTag2 += " • AV1";
-    }
+    const codecTag = "PROBING MKV";
+    const trackTag1 = "Inspecting tracks...";
+    const trackTag2 = "Reading headers...";
 
     el.innerHTML = `
       <div class="ep-card-top">
@@ -381,29 +403,25 @@ class QueueTracker {
 
     if (this.items.has(cleanFn)) return this.items.get(cleanFn);
 
-    // Exact or case-insensitive match
     for (const [key, item] of this.items.entries()) {
       if (key.toLowerCase() === cleanFn.toLowerCase()) {
         return item;
       }
     }
 
-    // Substring match
     for (const [key, item] of this.items.entries()) {
       if (key.toLowerCase().includes(cleanFn.toLowerCase()) || cleanFn.toLowerCase().includes(key.toLowerCase())) {
         return item;
       }
     }
 
-    // Sequence order fallback: return the first item currently queued or processing
     for (const [key, item] of this.items.entries()) {
       if (item.status === "queued" || item.status === "processing") {
         return item;
       }
     }
 
-    // Fallback: create card if empty
-    const placeholder = this.listEl.querySelector(".empty-log");
+    const placeholder = this.listEl.querySelector(".empty-state-card, .empty-log");
     if (placeholder) placeholder.remove();
 
     const epNum = this.items.size + 1;
@@ -468,7 +486,7 @@ class QueueTracker {
     item.badge.className = "ep-badge green";
     item.badge.textContent = "COMPLETED";
     item.statusTag.className = "ep-duration-tag green status-tag";
-    item.statusTag.textContent = `⏱️ Done in ${dur}s`;
+    item.statusTag.textContent = `Done in ${dur}s`;
     item.fill.className = "ep-progress-fill green";
     item.fill.style.width = "100%";
 
@@ -493,7 +511,7 @@ class QueueTracker {
     item.badge.className = "ep-badge cyan";
     item.badge.textContent = "DRY RUN";
     item.statusTag.className = "ep-duration-tag cyan status-tag";
-    item.statusTag.textContent = "⚡ Planned (Dry Run)";
+    item.statusTag.textContent = "Planned (Dry Run)";
     item.fill.className = "ep-progress-fill cyan";
     item.fill.style.width = "100%";
 
@@ -530,7 +548,7 @@ async function scanInputDirectory(path, mode) {
     const files = await invoke("scan_directory", { path });
     if (files && Array.isArray(files)) {
       const tracker = mode === "extract" ? extractQueue : remuxQueue;
-      tracker.populateDirectoryFiles(files);
+      tracker.populateDirectoryFiles(files, path);
     }
   } catch (err) {
     console.log("[Scan Dir] Error:", err);
@@ -552,7 +570,7 @@ function classifyLine(text) {
 
 function appendLog(logEl, text, mode = "remux") {
   if (!logEl) return;
-  const placeholder = logEl.querySelector(".empty-log");
+  const placeholder = logEl.querySelector(".empty-state-card, .empty-log, .console-empty-prompt");
   if (placeholder) placeholder.remove();
 
   const div = document.createElement("div");
@@ -567,28 +585,24 @@ function appendLog(logEl, text, mode = "remux") {
 function parseLogStream(text, mode) {
   const tracker = mode === "extract" ? extractQueue : remuxQueue;
 
-  // 1. Explicit [JOB_DRY_RUN]
   const dryMatch = text.match(/\[JOB_DRY_RUN\]\s*([^|]+)/i);
   if (dryMatch) {
     tracker.markDryRun(dryMatch[1].trim());
     return;
   }
 
-  // 2. Explicit [JOB_START]
   const startMatch = text.match(/\[JOB_START\]\s*(.+)$/i);
   if (startMatch) {
     tracker.markProcessing(startMatch[1].trim());
     return;
   }
 
-  // 3. Explicit [JOB_PROGRESS]
   const progressMatch = text.match(/\[JOB_PROGRESS\]\s*([^|]+)\|\s*(\d+)%/i);
   if (progressMatch) {
     tracker.updateProgress(progressMatch[1].trim(), parseInt(progressMatch[2]));
     return;
   }
 
-  // 4. Explicit [JOB_DONE]
   const doneMatch = text.match(/\[JOB_DONE\]\s*([^|]+)\|(?:.*?([\d\.]+)\s*s)?/i);
   if (doneMatch) {
     const fn = doneMatch[1].trim();
@@ -597,7 +611,6 @@ function parseLogStream(text, mode) {
     return;
   }
 
-  // 4. Explicit [JOB_FAIL]
   const failMatch = text.match(/\[JOB_FAIL\]\s*([^|]+)\|\s*(.+)$/i);
   if (failMatch) {
     const fn = failMatch[1].trim();
@@ -606,7 +619,6 @@ function parseLogStream(text, mode) {
     return;
   }
 
-  // Fallback pattern matching for standard stdout messages
   const altStartMatch = text.match(/(?:Processing|Remuxing|Extracting|\bJob\b).*?[:\s]+([\w-]+\.mkv)/i)
     || text.match(/\b([\w-]+\.mkv)\b\s*->/i);
   if (altStartMatch) {
@@ -623,9 +635,9 @@ function parseLogStream(text, mode) {
 function clearLog(logEl) {
   if (!logEl) return;
   logEl.innerHTML = `
-    <div class="empty-log">
-      <span class="empty-icon">📋</span>
-      <span>No output stream yet — run a job to see logs here.</span>
+    <div class="console-empty-prompt">
+      <span class="prompt-arrow">&gt;_</span>
+      <span class="prompt-text">Console stream output ready. Waiting for job execution...</span>
     </div>`;
 }
 
@@ -741,9 +753,8 @@ class JobController {
 
     const workers = parseInt(document.getElementById(`${this.mode}-workers`)?.value || '8');
     const ioJobs  = parseInt(document.getElementById(`${this.mode}-io-jobs`)?.value || '2');
-    startTelemetryMonitor(workers, ioJobs);
+    updateWorkerChips(true, workers, ioJobs);
 
-    // Auto-scan input folder first so episode cards appear immediately in QUEUED state!
     const inputDir = document.getElementById(`${this.mode}-input-dir`)?.value?.trim();
     if (inputDir) {
       await scanInputDirectory(inputDir, this.mode);
@@ -763,7 +774,7 @@ class JobController {
     } catch (err) {
       appendLog(this.logEl, `[ERROR] ${err}`, this.mode);
       this.setRunning(false);
-      stopTelemetryMonitor();
+      updateWorkerChips(false);
       unlistenDone();
     }
   }
@@ -776,7 +787,7 @@ class JobController {
       appendLog(this.logEl, `[ERROR] ${err}`, this.mode);
     }
     this.setRunning(false);
-    stopTelemetryMonitor();
+    updateWorkerChips(false);
   }
 
   async clearCache() {
@@ -796,17 +807,18 @@ class JobController {
 
   onDone(code) {
     this.setRunning(false);
-    stopTelemetryMonitor();
+    updateWorkerChips(false);
     if (this.exitCodeEl) this.exitCodeEl.textContent = `exit ${code}`;
 
+    const isDryRun = document.getElementById(`${this.mode}-dry-run`)?.checked ?? false;
     const tracker = this.mode === "extract" ? extractQueue : remuxQueue;
-    const isSuccess = (code === 0);
+
     tracker.items.forEach(item => {
       if (item.status === "processing" || item.status === "queued") {
-        if (isSuccess) {
-          tracker.markCompleted(item.filename);
+        if (isDryRun) {
+          tracker.markDryRun(item.filename);
         } else {
-          tracker.markFailed(item.filename, `Process exited (${code})`);
+          tracker.markCompleted(item.filename);
         }
       }
     });
@@ -927,6 +939,7 @@ function initApp() {
 
   new JobController("remux");
   new JobController("extract");
+  startTelemetryMonitor();
 
   if (window.matchMedia) {
     window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", e => {
