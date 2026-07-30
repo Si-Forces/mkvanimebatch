@@ -182,7 +182,7 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
   pointer-events: auto !important;
 }
 
-/* ─── Traffic Lights / Window Controls ──────────────────────────────────── */
+/* ─── Sleek Floating Circular Traffic Lights (Top-Left) ─────────────────── */
 .traffic-lights {
   display: flex;
   align-items: center;
@@ -197,23 +197,25 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
   -moz-appearance: none !important;
   appearance: none !important;
   outline: none !important;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  border: none;
+  width: 14px !important;
+  height: 14px !important;
+  border-radius: 50% !important;
+  border: none !important;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-  color: rgba(0, 0, 0, 0.7);
-  padding: 0;
-  margin: 0;
+  transition: transform 0.15s cubic-bezier(0.16, 1, 0.3, 1), filter 0.15s ease;
+  color: rgba(0, 0, 0, 0.75);
+  padding: 0 !important;
+  margin: 0 !important;
   box-sizing: border-box;
 }
 
 .tl-btn svg {
   opacity: 0;
+  width: 10px;
+  height: 10px;
   transition: opacity 0.15s ease;
   pointer-events: none;
 }
@@ -223,54 +225,13 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
   opacity: 1;
 }
 
-.tl-close { background: #ff5f56; border: 0.5px solid rgba(0, 0, 0, 0.12); }
-.tl-min   { background: #ffbd2e; border: 0.5px solid rgba(0, 0, 0, 0.12); }
-.tl-max   { background: #27c93f; border: 0.5px solid rgba(0, 0, 0, 0.12); }
+.tl-close { background: #ff5f56 !important; border: 0.5px solid rgba(0, 0, 0, 0.15) !important; }
+.tl-min   { background: #ffbd2e !important; border: 0.5px solid rgba(0, 0, 0, 0.15) !important; }
+.tl-max   { background: #27c93f !important; border: 0.5px solid rgba(0, 0, 0, 0.15) !important; }
 
 .tl-btn:hover {
-  transform: scale(1.1);
-  filter: brightness(1.08);
-}
-
-/* Windows / Linux Native Modern Titlebar Controls */
-.is-windows .traffic-lights,
-.is-linux .traffic-lights {
-  gap: 0;
-  margin: 0;
-  height: 40px;
-}
-
-.is-windows .tl-btn,
-.is-linux .tl-btn {
-  width: 44px;
-  height: 40px;
-  border-radius: 0 !important;
-  background: transparent !important;
-  border: none !important;
-  box-shadow: none !important;
-  color: var(--text-muted);
-  transition: background 0.15s ease, color 0.15s ease;
-}
-
-.is-windows .tl-btn svg,
-.is-linux .tl-btn svg {
-  opacity: 0.85 !important;
-  width: 12px;
-  height: 12px;
-}
-
-.is-windows .tl-btn:hover,
-.is-linux .tl-btn:hover {
-  transform: none !important;
-  filter: none !important;
-  background: var(--glass-bg-hover) !important;
-  color: var(--text) !important;
-}
-
-.is-windows .tl-close:hover,
-.is-linux .tl-close:hover {
-  background: #e81123 !important;
-  color: #ffffff !important;
+  transform: scale(1.15) !important;
+  filter: brightness(1.12) !important;
 }
 
 .titlebar-brand {
@@ -307,8 +268,9 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
 .titlebar-actions {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   margin-left: auto;
+  height: 100%;
   z-index: 20;
 }
 
