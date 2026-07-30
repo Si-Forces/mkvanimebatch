@@ -46,6 +46,7 @@ pub struct TelemetryData {
     pub ram_used_mb: u64,
     pub ram_total_mb: u64,
     pub ram_pct: f32,
+    pub io_mb_s: f32,
 }
 
 // ─── Sidecar Path Resolution ─────────────────────────────────────────────────
@@ -98,6 +99,7 @@ pub fn get_system_telemetry(state: State<'_, TelemetryState>) -> Result<Telemetr
     let mut sys = state.sys.lock().map_err(|e| e.to_string())?;
     sys.refresh_cpu_all();
     sys.refresh_memory();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
 
     let cpus = sys.cpus();
     let cpu_pct = if !cpus.is_empty() {
@@ -115,11 +117,19 @@ pub fn get_system_telemetry(state: State<'_, TelemetryState>) -> Result<Telemetr
         0.0
     };
 
+    let io_bytes: u64 = sys
+        .processes()
+        .values()
+        .map(|p| p.disk_usage().read_bytes + p.disk_usage().written_bytes)
+        .sum();
+    let io_mb_s = (io_bytes as f32 / 1024.0 / 1024.0 * 10.0).round() / 10.0;
+
     Ok(TelemetryData {
         cpu_pct,
         ram_used_mb: ram_used,
         ram_total_mb: ram_total,
         ram_pct,
+        io_mb_s,
     })
 }
 
@@ -158,6 +168,128 @@ pub fn scan_directory(path: String) -> Result<Vec<String>, String> {
     }
     files.sort();
     Ok(files)
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
+pub struct MkvMetadata {
+    pub resolution: String,
+    pub video_codec: String,
+    pub video_tag: String,
+    pub audio_summary: String,
+    pub has_flac: bool,
+    pub sub_summary: String,
+    pub fonts_count: usize,
+}
+
+#[tauri::command]
+pub fn inspect_mkv_file(file_path: String) -> Result<MkvMetadata, String> {
+    let mut cmd = std::process::Command::new("mkvmerge");
+    cmd.args(["-J", &file_path]);
+
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+
+    let output = cmd.output().map_err(|e| format!("Failed to run mkvmerge: {}", e))?;
+    if !output.status.success() && output.stdout.is_empty() {
+        return Err("mkvmerge failed to inspect file".into());
+    }
+
+    let json_val: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|e| format!("Failed to parse mkvmerge JSON: {}", e))?;
+
+    let mut res = "1080p".to_string();
+    let mut vcodec = "MKV".to_string();
+    let mut audio_parts = Vec::new();
+    let mut has_flac = false;
+    let mut sub_langs = Vec::new();
+    let mut fonts_count = 0;
+
+    if let Some(tracks) = json_val.get("tracks").and_then(|t| t.as_array()) {
+        for t in tracks {
+            let t_type = t.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            let codec = t.get("codec").and_then(|v| v.as_str()).unwrap_or("");
+            let props = t.get("properties");
+
+            if t_type == "video" {
+                if codec.to_lowercase().contains("hevc") || codec.to_lowercase().contains("h.265") {
+                    vcodec = "HEVC".into();
+                } else if codec.to_lowercase().contains("avc") || codec.to_lowercase().contains("h.264") {
+                    vcodec = "AVC".into();
+                } else if codec.to_lowercase().contains("av1") {
+                    vcodec = "AV1".into();
+                } else if codec.to_lowercase().contains("vp9") {
+                    vcodec = "VP9".into();
+                }
+
+                if let Some(dim) = props.and_then(|p| p.get("pixel_dimensions")).and_then(|v| v.as_str()) {
+                    if dim.contains("3840") || dim.contains("2160") {
+                        res = "4K".into();
+                    } else if dim.contains("1920") || dim.contains("1080") {
+                        res = "1080p".into();
+                    } else if dim.contains("1280") || dim.contains("720") {
+                        res = "720p".into();
+                    }
+                }
+            } else if t_type == "audio" {
+                let is_flac = codec.to_lowercase().contains("flac");
+                if is_flac {
+                    has_flac = true;
+                }
+                let channels = props
+                    .and_then(|p| p.get("audio_channels"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(2);
+                let ch_str = if channels == 6 { "5.1" } else { "2.0" };
+                let aud_name = if is_flac {
+                    "FLAC"
+                } else if codec.to_lowercase().contains("aac") {
+                    "AAC"
+                } else if codec.to_lowercase().contains("opus") {
+                    "Opus"
+                } else if codec.to_lowercase().contains("ac3") || codec.to_lowercase().contains("ac-3") {
+                    "AC3"
+                } else {
+                    "Audio"
+                };
+                audio_parts.push(format!("{} {}", aud_name, ch_str));
+            } else if t_type == "subtitles" {
+                let lang = props
+                    .and_then(|p| p.get("language"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("sub");
+                let ulang = lang.to_uppercase();
+                if !sub_langs.contains(&ulang) {
+                    sub_langs.push(ulang);
+                }
+            }
+        }
+    }
+
+    if let Some(attachments) = json_val.get("attachments").and_then(|a| a.as_array()) {
+        fonts_count = attachments.len();
+    }
+
+    let video_tag = format!("{} {}", res, vcodec);
+    let audio_summary = if audio_parts.is_empty() {
+        "No Audio".into()
+    } else {
+        audio_parts.join(" / ")
+    };
+    let sub_summary = if sub_langs.is_empty() {
+        "ASS Subs".into()
+    } else {
+        format!("ASS ({})", sub_langs.join(", "))
+    };
+
+    Ok(MkvMetadata {
+        resolution: res,
+        video_codec: vcodec,
+        video_tag,
+        audio_summary,
+        has_flac,
+        sub_summary,
+        fonts_count,
+    })
 }
 
 #[tauri::command]
