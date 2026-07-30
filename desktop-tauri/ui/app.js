@@ -374,7 +374,7 @@ class QueueTracker {
         <span class="ep-codec">${codecTag}</span>
         <span class="ep-duration-tag status-tag">Queued</span>
       </div>
-      <div class="ep-title">${filename}</div>
+      <div class="ep-title"></div>
       <div class="ep-tracks">
         <span class="track-tag cyan">${trackTag1}</span>
         <span class="track-tag magenta">${trackTag2}</span>
@@ -383,6 +383,9 @@ class QueueTracker {
         <div class="ep-progress-fill" style="width: 0%;"></div>
       </div>
     `;
+
+    const titleEl = el.querySelector(".ep-title");
+    if (titleEl) titleEl.textContent = filename;
 
     return {
       el,
