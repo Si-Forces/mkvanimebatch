@@ -175,6 +175,7 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
   pointer-events: auto !important;
 }
 
+/* ─── Traffic Lights / Window Controls ──────────────────────────────────── */
 .traffic-lights {
   display: flex;
   align-items: center;
@@ -184,18 +185,76 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
 }
 
 .tl-btn {
-  width: 13px; height: 13px;
+  width: 14px;
+  height: 14px;
   border-radius: 50%;
-  border: none; cursor: pointer;
-  position: relative;
-  transition: filter var(--transition), transform var(--transition);
-  display: flex; align-items: center; justify-content: center;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  color: rgba(0, 0, 0, 0.7);
+  padding: 0;
 }
 
-.tl-btn:hover { filter: brightness(1.15); transform: scale(1.08); }
-.tl-close { background: #ff5f57; }
-.tl-min   { background: #febc2e; }
-.tl-max   { background: #28c840; }
+.tl-btn svg {
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.traffic-lights:hover .tl-btn svg,
+.tl-btn:hover svg {
+  opacity: 1;
+}
+
+.tl-close { background: #ff5f56; border: 0.5px solid rgba(0, 0, 0, 0.12); }
+.tl-min   { background: #ffbd2e; border: 0.5px solid rgba(0, 0, 0, 0.12); }
+.tl-max   { background: #27c93f; border: 0.5px solid rgba(0, 0, 0, 0.12); }
+
+.tl-btn:hover {
+  transform: scale(1.1);
+  filter: brightness(1.08);
+}
+
+/* Windows / Linux Native Modern Titlebar Controls */
+.is-windows .traffic-lights,
+.is-linux .traffic-lights {
+  gap: 0;
+  margin-left: -16px;
+  height: 40px;
+}
+
+.is-windows .tl-btn,
+.is-linux .tl-btn {
+  width: 44px;
+  height: 40px;
+  border-radius: 0;
+  background: transparent !important;
+  border: none !important;
+  color: var(--text-muted);
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.is-windows .tl-btn svg,
+.is-linux .tl-btn svg {
+  opacity: 0.85 !important;
+  width: 12px;
+  height: 12px;
+}
+
+.is-windows .tl-btn:hover,
+.is-linux .tl-btn:hover {
+  transform: none;
+  background: var(--glass-bg-hover) !important;
+  color: var(--text);
+}
+
+.is-windows .tl-close:hover,
+.is-linux .tl-close:hover {
+  background: #e81123 !important;
+  color: #ffffff !important;
+}
 
 .titlebar-brand {
   display: flex;
@@ -236,16 +295,65 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
   z-index: 20;
 }
 
-.theme-toggle {
-  width: 30px; height: 22px;
-  border-radius: 11px;
-  background: var(--glass-bg);
+/* ─── Premium Glassmorphic Theme Toggle Switch ────────────────────────── */
+.theme-toggle-switch {
+  width: 52px;
+  height: 26px;
+  border-radius: 13px;
+  background: var(--input-bg);
   border: 1px solid var(--glass-border);
   cursor: pointer;
-  display: flex; align-items: center; justify-content: center;
-  font-size: 12px;
-  color: var(--text);
-  transition: all var(--transition);
+  position: relative;
+  padding: 2px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.theme-toggle-switch:hover {
+  border-color: var(--accent);
+  box-shadow: 0 0 12px var(--accent-glow);
+}
+
+.theme-toggle-track {
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 6px;
+  pointer-events: none;
+}
+
+.theme-icon {
+  transition: opacity 0.2s ease, color 0.2s ease;
+}
+
+.sun-icon { color: #f59e0b; opacity: 0.35; }
+.moon-icon { color: #a855f7; opacity: 0.35; }
+
+[data-theme="light"] .sun-icon { opacity: 1; filter: drop-shadow(0 0 4px rgba(245, 158, 11, 0.5)); }
+[data-theme="dark"] .moon-icon { opacity: 1; filter: drop-shadow(0 0 4px rgba(168, 85, 247, 0.5)); }
+
+.theme-toggle-knob {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+  transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1), background 0.25s ease;
+  z-index: 2;
+}
+
+[data-theme="light"] .theme-toggle-knob {
+  transform: translateX(0px);
+  background: linear-gradient(135deg, #f59e0b, #fbbf24);
+}
+
+[data-theme="dark"] .theme-toggle-knob {
+  transform: translateX(26px);
+  background: linear-gradient(135deg, #6366f1, #a855f7);
 }
 
 /* ─── Dedicated Sub-Header Navigation Bar & Active Profile Dropdown ──────── */
@@ -605,6 +713,109 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
   flex-direction: column;
   gap: 10px;
   padding: 12px;
+}
+
+/* ─── Empty State Glass Placeholder & Legacy Fallback ───────────────────────── */
+.empty-state-card, .empty-log {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 36px 20px;
+  margin: 12px;
+  border-radius: 16px;
+  background: var(--glass-bg);
+  border: 1px dashed var(--glass-border);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  transition: all 0.25s ease;
+  color: var(--text) !important;
+}
+
+.empty-state-card:hover, .empty-log:hover {
+  border-color: var(--accent);
+  background: var(--glass-bg-hover);
+}
+
+.empty-icon-glow {
+  width: 52px;
+  height: 52px;
+  border-radius: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 12px;
+  background: rgba(99, 102, 241, 0.12);
+  border: 1px solid rgba(99, 102, 241, 0.28);
+  color: var(--accent);
+  box-shadow: 0 0 20px rgba(99, 102, 241, 0.15);
+}
+
+.empty-icon-glow.magenta {
+  background: rgba(168, 85, 247, 0.12);
+  border-color: rgba(168, 85, 247, 0.28);
+  color: var(--accent-magenta);
+  box-shadow: 0 0 20px rgba(168, 85, 247, 0.15);
+}
+
+.empty-state-title {
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--text) !important;
+  margin-bottom: 5px;
+  letter-spacing: -0.01em;
+}
+
+.empty-state-desc, .empty-log span {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--text-dim) !important;
+  max-width: 260px;
+  line-height: 1.5;
+}
+
+[data-theme="dark"] .empty-state-title { color: #f8fafc !important; }
+[data-theme="dark"] .empty-state-desc,
+[data-theme="dark"] .empty-log span {
+  color: #94a3b8 !important;
+}
+
+[data-theme="light"] .empty-state-title { color: #0f172a !important; }
+[data-theme="light"] .empty-state-desc,
+[data-theme="light"] .empty-log span {
+  color: #334155 !important;
+}
+
+/* ─── Developer Terminal Prompt Console Empty State ──────────────────────── */
+.console-empty-prompt {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px;
+  font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+  user-select: none;
+}
+
+.console-empty-prompt .prompt-arrow {
+  color: var(--accent-magenta);
+  font-weight: 800;
+  font-size: 13px;
+  letter-spacing: 1px;
+}
+
+.console-empty-prompt .prompt-text {
+  font-weight: 500;
+}
+
+[data-theme="dark"] .console-empty-prompt .prompt-text {
+  color: #94a3b8 !important;
+}
+
+[data-theme="light"] .console-empty-prompt .prompt-text {
+  color: #475569 !important;
 }
 
 .queue-count-badge {
