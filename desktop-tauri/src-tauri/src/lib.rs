@@ -13,6 +13,7 @@ pub fn run() {
             commands::clear_cache,
             commands::pick_folder,
             commands::scan_directory,
+            commands::inspect_mkv_file,
             commands::get_system_telemetry,
             commands::close_window,
             commands::minimize_window,
