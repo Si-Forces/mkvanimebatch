@@ -4,6 +4,20 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>MKV Anime Batch</title>
+  <script>
+    (function() {
+      const ua = navigator.userAgent.toLowerCase();
+      const platform = navigator.platform ? navigator.platform.toLowerCase() : "";
+      const root = document.documentElement;
+      if (ua.includes("win") || platform.includes("win")) {
+        root.classList.add("is-windows");
+      } else if (ua.includes("mac") || platform.includes("mac")) {
+        root.classList.add("is-mac");
+      } else if (ua.includes("linux") || platform.includes("linux")) {
+        root.classList.add("is-linux");
+      }
+    })();
+  </script>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body style="background: transparent !important; background-color: transparent !important;">
