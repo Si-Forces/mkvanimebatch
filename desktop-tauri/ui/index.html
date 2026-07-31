@@ -23,7 +23,7 @@
   <div class="titlebar">
     <div class="titlebar-drag-region" data-tauri-drag-region></div>
 
-    <!-- Left: Traffic Light Dots & Brand -->
+    <!-- Left: Window Control Dots & App Brand -->
     <div class="titlebar-left">
       <div class="traffic-lights">
         <button class="tl-btn tl-close" id="btn-close" title="Close" type="button">
@@ -49,18 +49,25 @@
       </div>
     </div>
 
-    <!-- Center: Navigation Tabs -->
-    <nav class="pipeline-tab-group">
-      <button class="pipeline-tab-btn active" data-view="remux" id="nav-remux">
-        <span class="tab-icon">⚡</span> Batch Remux Pipeline
-      </button>
-      <button class="pipeline-tab-btn" data-view="extract" id="nav-extract">
-        <span class="tab-icon">⭳</span> Subtitle &amp; Font Extractor
-      </button>
-    </nav>
+    <!-- Center: Navigation Tabs (Flex Centered) -->
+    <div class="titlebar-center">
+      <nav class="pipeline-tab-group">
+        <button class="pipeline-tab-btn active" data-view="remux" id="nav-remux">
+          <span class="tab-icon">⚡</span> Batch Remux Pipeline
+        </button>
+        <button class="pipeline-tab-btn" data-view="extract" id="nav-extract">
+          <span class="tab-icon">⭳</span> Subtitle &amp; Font Extractor
+        </button>
+      </nav>
+    </div>
 
-    <!-- Right Header Actions (Profile & Theme Toggle) -->
+    <!-- Right Header Actions (Profile, Live Worker Badge, Theme Toggle) -->
     <div class="titlebar-actions">
+      <div class="header-worker-badge" id="header-worker-badge" title="Active Parallel Pipeline Workers">
+        <span class="worker-icon">⚡</span>
+        <span class="worker-count-label"><strong id="header-worker-count">8</strong> Workers</span>
+      </div>
+
       <div class="profile-dropdown-wrapper">
         <button class="preset-pill-btn" id="active-profile-btn" type="button">
           <span id="active-profile-name">🌸 Opus 192k + Keep Fonts</span> ▾
