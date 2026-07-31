@@ -167,6 +167,7 @@ function applyTheme(theme) {
   try {
     localStorage.setItem(THEME_KEY, theme);
   } catch (e) {}
+  invoke("set_window_theme", { theme: theme });
 }
 
 function initTheme() {

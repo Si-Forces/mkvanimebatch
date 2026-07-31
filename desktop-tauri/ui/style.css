@@ -167,9 +167,9 @@ html.is-mac, body.is-mac, .is-mac #app {
 /* ─── Single Unified Top Header ────────────────────────────────────────── */
 .titlebar {
   height: 48px;
-  background: var(--titlebar-bg);
-  backdrop-filter: var(--blur);
-  -webkit-backdrop-filter: var(--blur);
+  background: rgba(255, 255, 255, 0.03);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
   border-bottom: 1px solid var(--glass-border);
   display: flex;
   align-items: center;
@@ -179,6 +179,15 @@ html.is-mac, body.is-mac, .is-mac #app {
   flex-shrink: 0;
   position: relative;
   z-index: 100;
+}
+
+.traffic-lights {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  z-index: 20;
+  position: relative;
 }
 
 .titlebar-left {

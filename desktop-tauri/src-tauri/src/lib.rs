@@ -20,32 +20,13 @@ pub fn run() {
             commands::toggle_maximize,
             commands::start_drag,
             commands::start_resize,
+            commands::set_window_theme,
         ])
         .setup(|_app| {
-            #[cfg(target_os = "macos")]
-            {
-                use tauri::Manager;
-                if let Some(window) = _app.get_webview_window("main") {
-                    let _ = window_vibrancy::apply_vibrancy(&window, window_vibrancy::NSVisualEffectMaterial::HudWindow, None, None);
-                }
+            use tauri::Manager;
+            if let Some(window) = _app.get_webview_window("main") {
+                let _ = window.set_theme(Some(tauri::Theme::Dark));
             }
-
-            #[cfg(target_os = "windows")]
-            {
-                use tauri::Manager;
-                if let Some(window) = _app.get_webview_window("main") {
-                    let _ = window_vibrancy::apply_acrylic(&window, Some((0, 0, 0, 0)));
-                }
-            }
-
-            #[cfg(target_os = "linux")]
-            {
-                use tauri::Manager;
-                if let Some(window) = _app.get_webview_window("main") {
-                    let _ = window.set_shadow(false);
-                }
-            }
-
             Ok(())
         })
         .run(tauri::generate_context!())
