@@ -283,6 +283,9 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
 }
 
 .pipeline-tab-group {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
   display: flex;
   gap: 6px;
   background: rgba(0, 0, 0, 0.2);
