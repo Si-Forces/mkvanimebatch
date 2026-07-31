@@ -299,24 +299,6 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
   z-index: 20;
 }
 
-.header-worker-badge {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  padding: 4px 10px;
-  border-radius: 20px;
-  background: rgba(99, 102, 241, 0.12);
-  border: 1px solid rgba(99, 102, 241, 0.25);
-  font-size: 11.5px;
-  font-weight: 600;
-  color: var(--accent-indigo);
-  white-space: nowrap;
-}
-
-.header-worker-badge .worker-icon {
-  font-size: 11px;
-}
-
 .pipeline-tab-group {
   display: flex;
   gap: 6px;
