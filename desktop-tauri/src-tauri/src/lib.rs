@@ -38,6 +38,14 @@ pub fn run() {
                 }
             }
 
+            #[cfg(target_os = "linux")]
+            {
+                use tauri::Manager;
+                if let Some(window) = _app.get_webview_window("main") {
+                    let _ = window.set_shadow(false);
+                }
+            }
+
             Ok(())
         })
         .run(tauri::generate_context!())
