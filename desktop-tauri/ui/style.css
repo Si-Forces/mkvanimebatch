@@ -3,8 +3,9 @@
 
 html, body {
   width: 100%; height: 100%;
-  background: transparent;
-  overflow: hidden;
+  background: transparent !important;
+  background-color: transparent !important;
+  overflow: hidden !important;
   font-family: "Plus Jakarta Sans", -apple-system, "SF Pro Display", "Segoe UI", system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
   user-select: none;
@@ -143,9 +144,10 @@ input[type="number"] {
   box-shadow: none;
 }
 
-.is-linux {
+html.is-linux, body.is-linux {
   padding: 6px;
   background: transparent !important;
+  background-color: transparent !important;
 }
 
 .is-linux #app {
