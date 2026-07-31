@@ -19,62 +19,37 @@
   <div class="resize-handle se" data-direction="se"></div>
   <div class="resize-handle sw" data-direction="sw"></div>
 
-  <!-- ─── Clean Title Bar (Dedicated to Dragging & Window Controls) ────────── -->
+  <!-- ─── Single Unified Top Header ────────────────────────────────────────── -->
   <div class="titlebar">
     <div class="titlebar-drag-region" data-tauri-drag-region></div>
 
-    <!-- Top-Left Floating Traffic Light Dots -->
-    <div class="traffic-lights">
-      <button class="tl-btn tl-close" id="btn-close" title="Close" type="button">
-        <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
-          <line x1="2" y1="2" x2="10" y2="10"></line>
-          <line x1="10" y1="2" x2="2" y2="10"></line>
-        </svg>
-      </button>
-      <button class="tl-btn tl-min" id="btn-min" title="Minimize" type="button">
-        <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
-          <line x1="2" y1="6" x2="10" y2="6"></line>
-        </svg>
-      </button>
-      <button class="tl-btn tl-max" id="btn-max" title="Maximize" type="button">
-        <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
-          <rect x="2.5" y="2.5" width="7" height="7" rx="1.5"></rect>
-        </svg>
-      </button>
-    </div>
-
-    <!-- App Brand -->
-    <div class="titlebar-brand">
-      <span class="titlebar-logo-pill">⚡</span>
-      <span class="brand-name">MKV Anime Batch</span>
-    </div>
-
-    <!-- Right Header Actions -->
-    <div class="titlebar-actions">
-      <button class="theme-toggle-switch" id="btn-theme" title="Toggle Light/Dark Theme" type="button" aria-label="Toggle theme">
-        <div class="theme-toggle-track">
-          <svg class="theme-icon sun-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="5"></circle>
-            <line x1="12" y1="1" x2="12" y2="3"></line>
-            <line x1="12" y1="21" x2="12" y2="23"></line>
-            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
-            <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
-            <line x1="1" y1="12" x2="3" y2="12"></line>
-            <line x1="21" y1="12" x2="23" y2="12"></line>
-            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
-            <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+    <!-- Left: Traffic Light Dots & Brand -->
+    <div class="titlebar-left">
+      <div class="traffic-lights">
+        <button class="tl-btn tl-close" id="btn-close" title="Close" type="button">
+          <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+            <line x1="2" y1="2" x2="10" y2="10"></line>
+            <line x1="10" y1="2" x2="2" y2="10"></line>
           </svg>
-          <svg class="theme-icon moon-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+        </button>
+        <button class="tl-btn tl-min" id="btn-min" title="Minimize" type="button">
+          <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+            <line x1="2" y1="6" x2="10" y2="6"></line>
           </svg>
-        </div>
-        <div class="theme-toggle-knob"></div>
-      </button>
+        </button>
+        <button class="tl-btn tl-max" id="btn-max" title="Maximize" type="button">
+          <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+            <rect x="2.5" y="2.5" width="7" height="7" rx="1.5"></rect>
+          </svg>
+        </button>
+      </div>
+      <div class="titlebar-brand">
+        <span class="titlebar-logo-pill">⚡</span>
+        <span class="brand-name">MKV Anime Batch</span>
+      </div>
     </div>
-  </div>
 
-  <!-- ─── Dedicated Sub-Header Navigation Bar (Below Titlebar) ─────────────── -->
-  <div class="sub-header-bar">
+    <!-- Center: Navigation Tabs -->
     <nav class="pipeline-tab-group">
       <button class="pipeline-tab-btn active" data-view="remux" id="nav-remux">
         <span class="tab-icon">⚡</span> Batch Remux Pipeline
@@ -84,9 +59,8 @@
       </button>
     </nav>
 
-    <!-- Active Profile Preset Dropdown -->
-    <div class="sub-header-right">
-      <span class="preset-label">Active Profile:</span>
+    <!-- Right Header Actions (Profile & Theme Toggle) -->
+    <div class="titlebar-actions">
       <div class="profile-dropdown-wrapper">
         <button class="preset-pill-btn" id="active-profile-btn" type="button">
           <span id="active-profile-name">🌸 Opus 192k + Keep Fonts</span> ▾
@@ -109,19 +83,39 @@
           <div class="profile-option-item" data-preset="high_quality">
             <span class="preset-icon">🎧</span>
             <div class="preset-info">
-              <div class="preset-title">Hi-Fi Master (Opus 320k)</div>
-              <div class="preset-sub">Opus 320k • Keep Fonts • Complexity 10</div>
+              <div class="preset-title">Lossless Audio</div>
+              <div class="preset-sub">FLAC Passthrough • Keep Fonts</div>
             </div>
           </div>
           <div class="profile-option-item" data-preset="custom">
             <span class="preset-icon">🛠️</span>
             <div class="preset-info">
               <div class="preset-title">Custom Configuration</div>
-              <div class="preset-sub">User-defined parameter settings</div>
+              <div class="preset-sub">User-defined pipeline parameters</div>
             </div>
           </div>
         </div>
       </div>
+
+      <button class="theme-toggle-switch" id="btn-theme" title="Toggle Light/Dark Theme" type="button" aria-label="Toggle theme">
+        <div class="theme-toggle-track">
+          <svg class="theme-icon sun-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="5"></circle>
+            <line x1="12" y1="1" x2="12" y2="3"></line>
+            <line x1="12" y1="21" x2="12" y2="23"></line>
+            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+            <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+            <line x1="1" y1="12" x2="3" y2="12"></line>
+            <line x1="21" y1="12" x2="23" y2="12"></line>
+            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+            <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+          </svg>
+          <svg class="theme-icon moon-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+          </svg>
+        </div>
+        <div class="theme-toggle-knob"></div>
+      </button>
     </div>
   </div>
 
