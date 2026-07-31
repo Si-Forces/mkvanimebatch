@@ -854,9 +854,16 @@ function initApp() {
   initTheme();
 
   const ua = navigator.userAgent.toLowerCase();
-  if (ua.includes("windows") || ua.includes("win32")) document.body.classList.add("is-windows");
-  else if (ua.includes("mac")) document.body.classList.add("is-mac");
-  else if (ua.includes("linux")) document.body.classList.add("is-linux");
+  if (ua.includes("windows") || ua.includes("win32")) {
+    document.documentElement.classList.add("is-windows");
+    document.body.classList.add("is-windows");
+  } else if (ua.includes("mac")) {
+    document.documentElement.classList.add("is-mac");
+    document.body.classList.add("is-mac");
+  } else if (ua.includes("linux")) {
+    document.documentElement.classList.add("is-linux");
+    document.body.classList.add("is-linux");
+  }
 
   safeAddListener("btn-theme", "click", () => {
     const current = document.documentElement.getAttribute("data-theme");
