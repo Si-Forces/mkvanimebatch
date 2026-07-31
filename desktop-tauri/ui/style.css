@@ -3,9 +3,13 @@
 
 html, body {
   width: 100%; height: 100%;
+  margin: 0; padding: 0;
   background: transparent !important;
   background-color: transparent !important;
   overflow: hidden !important;
+  border-radius: 12px !important;
+  clip-path: inset(0 round 12px) !important;
+  -webkit-clip-path: inset(0 round 12px) !important;
   font-family: "Plus Jakarta Sans", -apple-system, "SF Pro Display", "Segoe UI", system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
   user-select: none;
@@ -133,6 +137,8 @@ input[type="number"] {
   border: 1px solid var(--glass-border);
   box-shadow: var(--shadow-lg);
   overflow: hidden;
+  clip-path: inset(0 round 14px);
+  -webkit-clip-path: inset(0 round 14px);
   display: flex;
   flex-direction: column;
   position: relative;
@@ -142,6 +148,8 @@ input[type="number"] {
   border-radius: 0;
   border: none;
   box-shadow: none;
+  clip-path: none;
+  -webkit-clip-path: none;
 }
 
 html.is-linux, body.is-linux {
@@ -154,10 +162,12 @@ html.is-linux, body.is-linux {
 .is-linux #app {
   width: 100vw;
   height: 100vh;
-  border-radius: 12px;
+  border-radius: 14px;
   border: 1px solid var(--glass-border);
   box-shadow: var(--shadow-lg);
   overflow: hidden;
+  clip-path: inset(0 round 14px);
+  -webkit-clip-path: inset(0 round 14px);
 }
 
 /* ─── Single Unified Top Header ────────────────────────────────────────── */
@@ -274,18 +284,40 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
   letter-spacing: -0.02em;
 }
 
+.titlebar-center {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 20;
+}
+
 .titlebar-actions {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin-left: auto;
   z-index: 20;
 }
 
+.header-worker-badge {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 20px;
+  background: rgba(99, 102, 241, 0.12);
+  border: 1px solid rgba(99, 102, 241, 0.25);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--accent-indigo);
+  white-space: nowrap;
+}
+
+.header-worker-badge .worker-icon {
+  font-size: 11px;
+}
+
 .pipeline-tab-group {
-  position: absolute;
-  left: 50%;
-  transform: translateX(-50%);
   display: flex;
   gap: 6px;
   background: rgba(0, 0, 0, 0.2);
