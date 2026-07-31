@@ -7,9 +7,6 @@ html, body {
   background: transparent !important;
   background-color: transparent !important;
   overflow: hidden !important;
-  border-radius: 12px !important;
-  clip-path: inset(0 round 12px) !important;
-  -webkit-clip-path: inset(0 round 12px) !important;
   font-family: "Plus Jakarta Sans", -apple-system, "SF Pro Display", "Segoe UI", system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
   user-select: none;
@@ -133,41 +130,47 @@ input[type="number"] {
   background: var(--bg-gradient);
   backdrop-filter: blur(24px);
   -webkit-backdrop-filter: blur(24px);
-  border-radius: 14px;
-  border: 1px solid var(--glass-border);
-  box-shadow: var(--shadow-lg);
-  overflow: hidden;
-  clip-path: inset(0 round 14px);
-  -webkit-clip-path: inset(0 round 14px);
   display: flex;
   flex-direction: column;
   position: relative;
+  overflow: hidden;
+}
+
+/* ─── Windows Platform: Clean Rectangular Desktop Shell (Flush Corners) ───── */
+html.is-windows, body.is-windows {
+  border-radius: 0 !important;
+  clip-path: none !important;
+  -webkit-clip-path: none !important;
 }
 
 .is-windows #app {
-  border-radius: 0;
-  border: none;
-  box-shadow: none;
-  clip-path: none;
-  -webkit-clip-path: none;
+  border-radius: 0 !important;
+  border: none !important;
+  box-shadow: none !important;
+  clip-path: none !important;
+  -webkit-clip-path: none !important;
 }
 
+/* ─── Linux Platform: WebKitGTK Transparent Hardware Corner Clipping ────── */
 html.is-linux, body.is-linux {
   padding: 0 !important;
   margin: 0 !important;
   background: transparent !important;
   background-color: transparent !important;
+  border-radius: 12px !important;
+  clip-path: inset(0 round 12px) !important;
+  -webkit-clip-path: inset(0 round 12px) !important;
 }
 
 .is-linux #app {
   width: 100vw;
   height: 100vh;
-  border-radius: 14px;
+  border-radius: 12px !important;
   border: 1px solid var(--glass-border);
   box-shadow: var(--shadow-lg);
   overflow: hidden;
-  clip-path: inset(0 round 14px);
-  -webkit-clip-path: inset(0 round 14px);
+  clip-path: inset(0 round 12px) !important;
+  -webkit-clip-path: inset(0 round 12px) !important;
 }
 
 /* ─── Single Unified Top Header ────────────────────────────────────────── */
