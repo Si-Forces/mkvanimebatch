@@ -22,30 +22,6 @@ pub fn run() {
             commands::start_resize,
         ])
         .setup(|_app| {
-            #[cfg(target_os = "macos")]
-            {
-                use tauri::Manager;
-                if let Some(window) = _app.get_webview_window("main") {
-                    let _ = window_vibrancy::apply_vibrancy(&window, window_vibrancy::NSVisualEffectMaterial::HudWindow, None, None);
-                }
-            }
-
-            #[cfg(target_os = "windows")]
-            {
-                use tauri::Manager;
-                if let Some(window) = _app.get_webview_window("main") {
-                    let _ = window_vibrancy::apply_acrylic(&window, Some((0, 0, 0, 0)));
-                }
-            }
-
-            #[cfg(target_os = "linux")]
-            {
-                use tauri::Manager;
-                if let Some(window) = _app.get_webview_window("main") {
-                    let _ = window.set_shadow(false);
-                }
-            }
-
             Ok(())
         })
         .run(tauri::generate_context!())
