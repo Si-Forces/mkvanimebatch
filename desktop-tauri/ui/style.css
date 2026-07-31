@@ -181,6 +181,10 @@ html.is-mac, body.is-mac, .is-mac #app {
   z-index: 100;
 }
 
+.traffic-lights {
+  display: none !important;
+}
+
 .titlebar-left {
   display: flex;
   align-items: center;
