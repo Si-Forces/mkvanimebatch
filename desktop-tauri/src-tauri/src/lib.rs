@@ -20,8 +20,13 @@ pub fn run() {
             commands::toggle_maximize,
             commands::start_drag,
             commands::start_resize,
+            commands::set_window_theme,
         ])
         .setup(|_app| {
+            use tauri::Manager;
+            if let Some(window) = _app.get_webview_window("main") {
+                let _ = window.set_theme(Some(tauri::Theme::Dark));
+            }
             Ok(())
         })
         .run(tauri::generate_context!())
