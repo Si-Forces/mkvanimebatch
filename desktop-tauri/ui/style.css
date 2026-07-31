@@ -4,12 +4,22 @@
 html, body {
   width: 100%; height: 100%;
   margin: 0; padding: 0;
-  background: transparent !important;
-  background-color: transparent !important;
-  overflow: hidden !important;
+  background: var(--bg-dark-base);
+  color: var(--text);
+  overflow: hidden;
   font-family: "Plus Jakarta Sans", -apple-system, "SF Pro Display", "Segoe UI", system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
   user-select: none;
+}
+
+[data-theme="dark"] html, [data-theme="dark"] body {
+  background: #0b0d14 !important;
+  background-color: #0b0d14 !important;
+}
+
+[data-theme="light"] html, [data-theme="light"] body {
+  background: #f8fafc !important;
+  background-color: #f8fafc !important;
 }
 
 /* Hide native browser up/down number spin buttons completely across all browsers */
@@ -151,15 +161,23 @@ html.is-windows, body.is-windows {
   -webkit-clip-path: none !important;
 }
 
-/* ─── Linux Platform: WebKitGTK Transparent Hardware Corner Clipping ────── */
+/* ─── Linux Platform: WebKitGTK Background & Corner Clipping ────── */
 html.is-linux, body.is-linux {
   padding: 0 !important;
   margin: 0 !important;
-  background: transparent !important;
-  background-color: transparent !important;
   border-radius: 12px !important;
   clip-path: inset(0 round 12px) !important;
   -webkit-clip-path: inset(0 round 12px) !important;
+}
+
+[data-theme="dark"] html.is-linux, [data-theme="dark"] body.is-linux {
+  background: #0b0d14 !important;
+  background-color: #0b0d14 !important;
+}
+
+[data-theme="light"] html.is-linux, [data-theme="light"] body.is-linux {
+  background: #f8fafc !important;
+  background-color: #f8fafc !important;
 }
 
 .is-linux #app {
