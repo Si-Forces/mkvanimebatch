@@ -78,6 +78,16 @@ function applyPreset(presetKey) {
   setChk("remux-keep-fonts", p.keepFonts);
   setChk("remux-dry-run", p.dryRun);
   setChk("remux-no-cache", p.noCache);
+
+  updateHeaderWorkerCount();
+}
+
+function updateHeaderWorkerCount() {
+  const workersInput = document.getElementById("remux-workers");
+  const countLabel = document.getElementById("header-worker-count");
+  if (workersInput && countLabel) {
+    countLabel.textContent = workersInput.value || "8";
+  }
 }
 
 // ─── Tauri API helpers ──────────────────────────────────────────────────────
@@ -942,8 +952,14 @@ function initApp() {
   ["remux-bitrate", "remux-complexity", "remux-cplx-val", "remux-workers", "remux-io-jobs", "remux-sub-offset", "remux-keep-fonts", "remux-dry-run", "remux-no-cache"].forEach(id => {
     const el = document.getElementById(id);
     if (el) {
-      el.addEventListener("change", () => applyPreset("custom"));
-      el.addEventListener("input", () => applyPreset("custom"));
+      el.addEventListener("change", () => {
+        applyPreset("custom");
+        updateHeaderWorkerCount();
+      });
+      el.addEventListener("input", () => {
+        applyPreset("custom");
+        updateHeaderWorkerCount();
+      });
     }
   });
 
