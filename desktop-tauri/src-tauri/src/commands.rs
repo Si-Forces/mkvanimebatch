@@ -58,38 +58,125 @@ fn get_sidecar_path(app: &AppHandle, name: &str) -> Result<PathBuf, String> {
     let triple = "x86_64-unknown-linux-gnu";
     #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
     let triple = "aarch64-unknown-linux-gnu";
+    #[cfg(not(any(
+        all(target_os = "windows", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64")
+    )))]
+    let triple = "";
 
+    let mut candidate_filenames = Vec::new();
+    if !triple.is_empty() {
+        #[cfg(windows)]
+        candidate_filenames.push(format!("{}-{}.exe", name, triple));
+        #[cfg(not(windows))]
+        candidate_filenames.push(format!("{}-{}", name, triple));
+    }
     #[cfg(windows)]
-    let filename = format!("{}-{}.exe", name, triple);
+    candidate_filenames.push(format!("{}.exe", name));
     #[cfg(not(windows))]
-    let filename = format!("{}-{}", name, triple);
+    candidate_filenames.push(name.to_string());
+
+    let mut candidate_dirs = Vec::new();
 
     if let Ok(resource_dir) = app.path().resource_dir() {
-        let candidate = resource_dir.join(&filename);
-        if candidate.exists() {
-            return Ok(candidate);
-        }
+        candidate_dirs.push(resource_dir.clone());
+        candidate_dirs.push(resource_dir.join("binaries"));
+        candidate_dirs.push(resource_dir.join("bin"));
     }
 
     if let Ok(exe) = std::env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
-            let candidate = exe_dir.join(&filename);
-            if candidate.exists() {
+            candidate_dirs.push(exe_dir.to_path_buf());
+            candidate_dirs.push(exe_dir.join("binaries"));
+            candidate_dirs.push(exe_dir.join("bin"));
+        }
+    }
+
+    if let Ok(cwd) = std::env::current_dir() {
+        candidate_dirs.push(cwd.clone());
+        candidate_dirs.push(cwd.join("binaries"));
+    }
+
+    if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
+        candidate_dirs.push(PathBuf::from(manifest).join("binaries"));
+    }
+
+    // 1. Search disk for existing sidecar binary
+    for dir in &candidate_dirs {
+        for filename in &candidate_filenames {
+            let candidate = dir.join(filename);
+            if candidate.is_file() && candidate.exists() {
                 return Ok(candidate);
             }
         }
     }
 
-    let manifest = env!("CARGO_MANIFEST_DIR");
-    let candidate = PathBuf::from(manifest).join("binaries").join(&filename);
-    if candidate.exists() {
-        return Ok(candidate);
+    // 2. Embedded sidecar fallback (extract from binary payload to temp directory)
+    let embedded_bytes: Option<&[u8]> = match name {
+        "mkv-remux" => get_embedded_remux_bytes(),
+        "mkv-extract" => get_embedded_extract_bytes(),
+        _ => None,
+    };
+
+    if let Some(bytes) = embedded_bytes {
+        let temp_dir = std::env::temp_dir().join("mkv_anime_batch_sidecars");
+        let _ = std::fs::create_dir_all(&temp_dir);
+
+        #[cfg(windows)]
+        let target_filename = format!("{}-{}.exe", name, if triple.is_empty() { "x86_64-pc-windows-msvc" } else { triple });
+        #[cfg(not(windows))]
+        let target_filename = format!("{}-{}", name, if triple.is_empty() { "x86_64-unknown-linux-gnu" } else { triple });
+
+        let temp_sidecar = temp_dir.join(&target_filename);
+
+        // Extract if file doesn't exist or size mismatch
+        let need_write = match std::fs::metadata(&temp_sidecar) {
+            Ok(meta) => meta.len() != bytes.len() as u64,
+            Err(_) => true,
+        };
+
+        if need_write {
+            if let Err(e) = std::fs::write(&temp_sidecar, bytes) {
+                return Err(format!("Failed to unpack embedded sidecar to temp dir: {}", e));
+            }
+        }
+
+        if temp_sidecar.exists() {
+            return Ok(temp_sidecar);
+        }
     }
 
     Err(format!(
-        "Sidecar binary '{}' not found. Run build-sidecars first.",
-        filename
+        "Sidecar binary '{}' not found on disk or embedded payload.",
+        name
     ))
+}
+
+fn get_embedded_remux_bytes() -> Option<&'static [u8]> {
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    {
+        return Some(include_bytes!("../binaries/mkv-remux-x86_64-pc-windows-msvc.exe"));
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        return Some(include_bytes!("../binaries/mkv-remux-x86_64-unknown-linux-gnu"));
+    }
+    #[allow(unreachable_code)]
+    None
+}
+
+fn get_embedded_extract_bytes() -> Option<&'static [u8]> {
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    {
+        return Some(include_bytes!("../binaries/mkv-extract-x86_64-pc-windows-msvc.exe"));
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        return Some(include_bytes!("../binaries/mkv-extract-x86_64-unknown-linux-gnu"));
+    }
+    #[allow(unreachable_code)]
+    None
 }
 
 // ─── Tauri Commands ──────────────────────────────────────────────────────────
