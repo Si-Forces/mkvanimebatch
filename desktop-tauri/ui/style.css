@@ -145,34 +145,43 @@ input[type="number"] {
 }
 
 html.is-linux, body.is-linux {
-  padding: 6px;
+  padding: 0 !important;
+  margin: 0 !important;
   background: transparent !important;
   background-color: transparent !important;
 }
 
 .is-linux #app {
-  width: 100%;
-  height: 100%;
+  width: 100vw;
+  height: 100vh;
   border-radius: 12px;
   border: 1px solid var(--glass-border);
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--shadow-lg);
   overflow: hidden;
 }
 
-/* ─── Clean Title Bar (Dedicated Drag Area) ──────────────────────────────── */
+/* ─── Single Unified Top Header ────────────────────────────────────────── */
 .titlebar {
-  height: 40px;
+  height: 48px;
   background: var(--titlebar-bg);
   backdrop-filter: var(--blur);
   -webkit-backdrop-filter: var(--blur);
   border-bottom: 1px solid var(--glass-border);
   display: flex;
   align-items: center;
+  justify-content: space-between;
   padding: 0 16px;
-  gap: 12px;
+  gap: 16px;
   flex-shrink: 0;
   position: relative;
-  z-index: 10;
+  z-index: 100;
+}
+
+.titlebar-left {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  z-index: 20;
 }
 
 .titlebar-drag-region {
@@ -265,22 +274,48 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
   letter-spacing: -0.02em;
 }
 
-.version-tag {
-  font-size: 9.5px;
-  padding: 2px 6px;
-  border-radius: 10px;
-  background: rgba(236, 72, 153, 0.15);
-  color: var(--accent-pink);
-  font-weight: 700;
-}
-
 .titlebar-actions {
   display: flex;
   align-items: center;
   gap: 12px;
   margin-left: auto;
-  height: 100%;
   z-index: 20;
+}
+
+.pipeline-tab-group {
+  display: flex;
+  gap: 6px;
+  background: rgba(0, 0, 0, 0.2);
+  padding: 3px;
+  border-radius: 10px;
+  border: 1px solid var(--glass-border);
+  z-index: 20;
+}
+
+.pipeline-tab-btn {
+  padding: 5px 14px;
+  border-radius: 7px;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  transition: all var(--transition);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pipeline-tab-btn:hover {
+  color: var(--text);
+  background: var(--glass-bg-hover);
+}
+
+.pipeline-tab-btn.active {
+  background: var(--btn-primary);
+  color: #ffffff;
+  box-shadow: 0 2px 10px rgba(99, 102, 241, 0.35);
 }
 
 /* ─── Premium Glassmorphic Theme Toggle Switch ────────────────────────── */
@@ -344,53 +379,13 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
   background: linear-gradient(135deg, #6366f1, #a855f7);
 }
 
-/* ─── Dedicated Sub-Header Navigation Bar & Active Profile Dropdown ──────── */
-.sub-header-bar {
-  height: 48px;
-  background: var(--sub-header-bg);
-  border-bottom: 1px solid var(--glass-border);
-  backdrop-filter: blur(16px);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 16px;
-  flex-shrink: 0;
-  z-index: 99;
-}
-
-.pipeline-tab-group {
-  display: flex;
-  gap: 8px;
-  background: rgba(0, 0, 0, 0.15);
-  padding: 4px;
-  border-radius: 12px;
-  border: 1px solid var(--glass-border);
-}
-
-.pipeline-tab-btn {
-  padding: 7px 18px;
-  border-radius: 9px;
-  font-size: 13px;
+/* ─── Active Profile Preset Dropdown ──────────────────────────────────── */
+.preset-label {
+  font-size: 11.5px;
   font-weight: 700;
-  color: var(--text-muted);
-  background: transparent;
-  border: none;
-  cursor: pointer;
-  transition: all var(--transition);
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.pipeline-tab-btn:hover {
-  color: var(--text);
-  background: var(--glass-bg-hover);
-}
-
-.pipeline-tab-btn.active {
-  background: var(--accent-gradient);
-  color: #fff;
-  box-shadow: 0 4px 18px rgba(99, 102, 241, 0.4);
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
 }
 
 .sub-header-right {
