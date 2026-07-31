@@ -579,3 +579,15 @@ pub fn start_resize(window: tauri::Window, direction: String) {
     };
     let _ = window.start_resize_dragging(dir);
 }
+
+#[tauri::command]
+pub fn set_window_theme(app: AppHandle, theme: String) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("main") {
+        let tauri_theme = match theme.as_str() {
+            "light" => tauri::Theme::Light,
+            _ => tauri::Theme::Dark,
+        };
+        let _ = window.set_theme(Some(tauri_theme));
+    }
+    Ok(())
+}
