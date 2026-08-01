@@ -18,6 +18,7 @@ pub fn run() {
             commands::close_window,
             commands::minimize_window,
             commands::toggle_maximize,
+            commands::is_maximized,
             commands::start_drag,
             commands::start_resize,
             commands::set_window_theme,
