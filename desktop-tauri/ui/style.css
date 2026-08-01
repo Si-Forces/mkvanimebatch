@@ -39,6 +39,7 @@ input[type="number"] {
 
 /* ─── Theme Variables ─────────────────────────────────────────────────────── */
 :root {
+  --window-radius: 12px;
   --radius: 16px;
   --radius-sm: 10px;
   --radius-lg: 24px;
@@ -162,6 +163,47 @@ html.is-mac, body.is-mac, .is-mac #app {
   box-shadow: none !important;
   clip-path: none !important;
   -webkit-clip-path: none !important;
+}
+
+/* ─── Linux: rounded window corners ─────────────────────────────────────────
+   Windows 11 (DWM) rounds undecorated windows for free; GTK does not. On Linux
+   the window is transparent (tauri.linux.conf.json) and #app paints the rounded
+   surface itself. html/body must stay fully transparent or their opaque square
+   background bleeds through the corners as white/dark wedges. */
+html.is-linux,
+html.is-linux body {
+  background: transparent !important;
+  background-color: transparent !important;
+}
+
+html.is-linux #app {
+  border-radius: var(--window-radius) !important;
+  overflow: hidden;
+  /* Nothing sits behind a transparent window, so blurring it only costs
+     performance and produces artifacts in WebKitGTK. */
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+/* WebKitGTK does not reliably clip a child's backdrop-filter layer to the
+   parent's rounded corners, so edge-touching children round themselves. */
+html.is-linux .titlebar {
+  border-top-left-radius: var(--window-radius);
+  border-top-right-radius: var(--window-radius);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+html.is-linux .modal-overlay {
+  border-radius: var(--window-radius);
+  overflow: hidden;
+}
+
+/* A maximized window must be square or the desktop shows through the corners. */
+html.is-linux.is-maximized #app,
+html.is-linux.is-maximized .titlebar,
+html.is-linux.is-maximized .modal-overlay {
+  border-radius: 0 !important;
 }
 
 /* ─── Single Unified Top Header ────────────────────────────────────────── */

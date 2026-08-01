@@ -559,6 +559,11 @@ pub fn toggle_maximize(window: tauri::Window) {
 }
 
 #[tauri::command]
+pub fn is_maximized(window: tauri::Window) -> bool {
+    window.is_maximized().unwrap_or(false)
+}
+
+#[tauri::command]
 pub fn start_drag(window: tauri::Window) {
     let _ = window.start_dragging();
 }

@@ -846,6 +846,17 @@ class JobController {
 
 // ─── Initialization ──────────────────────────────────────────────────────────
 
+// The Linux window is transparent with CSS-drawn rounded corners, which must
+// flatten when maximized so the desktop cannot show through the corner gaps.
+async function syncMaximizedState() {
+  try {
+    const maximized = await invoke("is_maximized");
+    document.documentElement.classList.toggle("is-maximized", !!maximized);
+  } catch {
+    /* command unavailable outside the Tauri shell */
+  }
+}
+
 function initApp() {
   initTheme();
 
@@ -868,7 +879,13 @@ function initApp() {
 
   safeAddListener("btn-close", "click", () => invoke("close_window"));
   safeAddListener("btn-min", "click", () => invoke("minimize_window"));
-  safeAddListener("btn-max", "click", () => invoke("toggle_maximize"));
+  safeAddListener("btn-max", "click", async () => {
+    await invoke("toggle_maximize");
+    syncMaximizedState();
+  });
+
+  window.addEventListener("resize", syncMaximizedState);
+  syncMaximizedState();
 
   document.querySelectorAll("[data-tauri-drag-region]").forEach(el => {
     safeAddListener(el, "mousedown", (e) => {
