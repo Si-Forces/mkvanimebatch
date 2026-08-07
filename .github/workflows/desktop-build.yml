@@ -65,7 +65,7 @@ jobs:
 
       - name: Build Tauri app
         working-directory: desktop-tauri
-        run: cargo tauri build
+        run: cargo tauri build --bundles none
 
       # ── Package Windows Artifacts (Portable Zip & Installer) ───────────
       - name: Package Windows Artifacts
@@ -90,19 +90,7 @@ jobs:
           # Create Portable Zip
           Compress-Archive -Path "$StageDir\*" -DestinationPath "$OutDir\MKV_Anime_Batch_Portable_win64.zip" -Force
 
-          # Collect NSIS setup installer if generated
-          if (Test-Path "$BundleDir\nsis\*.exe") {
-              Get-ChildItem "$BundleDir\nsis\*.exe" | ForEach-Object {
-                  Copy-Item $_.FullName "$OutDir\MKV_Anime_Batch_Setup_x64.exe" -Force
-              }
-          }
-
-          # Collect MSI installer if generated
-          if (Test-Path "$BundleDir\msi\*.msi") {
-              Get-ChildItem "$BundleDir\msi\*.msi" | ForEach-Object {
-                  Copy-Item $_.FullName "$OutDir\" -Force
-              }
-          }
+          # Collect MSI installer if generated (Disabled via --bundles none)
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
@@ -154,7 +142,7 @@ jobs:
         run: |
           sudo apt-get update -y
           sudo apt-get install -y \
-            build-essential curl wget file \
+            build-essential curl wget file rpm \
             libssl-dev \
             libgtk-3-dev \
             libwebkit2gtk-4.1-dev \
@@ -178,7 +166,7 @@ jobs:
 
       - name: Build Tauri app
         working-directory: desktop-tauri
-        run: cargo tauri build --config src-tauri/tauri.linux.conf.json
+        run: cargo tauri build --config src-tauri/tauri.linux.conf.json --bundles appimage,deb,rpm
 
       # ── Flatten + Upload AppImage + deb ──────────────────────────────────────
       - name: Collect Linux bundles
@@ -186,6 +174,7 @@ jobs:
           mkdir -p /tmp/linux-release
           find desktop-tauri/src-tauri/target/release/bundle/appimage -name "*.AppImage" -exec cp {} /tmp/linux-release/ \;
           find desktop-tauri/src-tauri/target/release/bundle/deb -name "*.deb" -exec cp {} /tmp/linux-release/ \;
+          find desktop-tauri/src-tauri/target/release/bundle/rpm -name "*.rpm" -exec cp {} /tmp/linux-release/ \;
 
       - name: Upload Linux bundles
         uses: actions/upload-artifact@v4
@@ -226,7 +215,6 @@ jobs:
             |------|-------------|
             | `mkv-anime-batch.exe` | Single self-contained standalone executable — download & run anywhere! |
             | `MKV_Anime_Batch_Portable_win64.zip` | Portable Zip package |
-            | `MKV_Anime_Batch_Setup_x64.exe` | Windows Installer (NSIS Setup) |
 
             > **Requirements:** [MKVToolNix](https://mkvtoolnix.download/) and [ffmpeg](https://ffmpeg.org/download.html) must be installed and available on `PATH`.
 
@@ -238,6 +226,7 @@ jobs:
             |------|-------------|
             | `MKV_Anime_Batch_*_amd64.AppImage` | Universal AppImage — works on any modern Linux distro |
             | `MKV_Anime_Batch_*_amd64.deb` | Debian / Ubuntu package |
+            | `MKV_Anime_Batch_*_x86_64.rpm` | Fedora / RedHat / SUSE package |
 
             ### 📦 Linux Installation & Dependencies
 
@@ -247,7 +236,12 @@ jobs:
             sudo apt install ./MKV_Anime_Batch_*_amd64.deb mkvtoolnix ffmpeg
             ```
 
-            #### Option B: `.AppImage` (Universal)
+            #### Option B: `.rpm` Package (Fedora / RHEL / CentOS)
+            ```bash
+            sudo dnf install ./MKV_Anime_Batch_*_x86_64.rpm mkvtoolnix ffmpeg
+            ```
+
+            #### Option C: `.AppImage` (Universal)
             ```bash
             chmod +x MKV_Anime_Batch_*_amd64.AppImage
             ./MKV_Anime_Batch_*_amd64.AppImage
@@ -258,5 +252,6 @@ jobs:
             release-assets/windows/*
             release-assets/linux/*.AppImage
             release-assets/linux/*.deb
+            release-assets/linux/*.rpm
           draft: false
           prerelease: false
