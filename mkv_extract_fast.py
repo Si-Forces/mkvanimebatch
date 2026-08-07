@@ -50,6 +50,15 @@ from mkv_common_fast import (
     cleanup_stale_subtitle_offsets_bulk as _cleanup_stale_subtitle_offsets_bulk,
 )
 
+def _hash_file(filepath: Path) -> str:
+    """Calculate BLAKE2b hash of a file for content-based font deduplication."""
+    h = hashlib.blake2b()
+    with filepath.open("rb") as f:
+        while chunk := f.read(65536):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 @dataclass
 class MkvMetadata:
     tracks: list[dict] = field(default_factory=list)
@@ -289,20 +298,20 @@ def _run(output_dir: Path, fonts_dir: Path, mkv_files: list[ParsedFile], pool: T
     fonts_dir.mkdir(parents=True, exist_ok=True)
     print(f"Extracting {len(mkv_files)} file(s)...")
 
-    existing_fonts = set()
+    existing_hashes = set()
     if fonts_dir.is_dir():
         try:
             with os.scandir(str(fonts_dir)) as it:
                 for entry in it:
                     if entry.is_file() and Path(entry.name).suffix.lower() in FONT_EXTENSIONS:
                         try:
-                            existing_fonts.add((entry.name, entry.stat().st_size))
+                            existing_hashes.add(_hash_file(Path(entry.path)))
                         except OSError:
                             pass
         except OSError:
             pass
-            
-    font_registry = FontRegistry(existing=existing_fonts)
+
+    font_registry = FontRegistry(existing=existing_hashes)
     stale_subs_map: dict[str, str] = {}
     stale_subs_lock = threading.Lock()
 

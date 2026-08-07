@@ -122,6 +122,13 @@ class TestFontRegistryNormal:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# mkv_common_fast.FontRegistry  (name/size only, no hash)
+# mkv_common_fast.FontRegistry now mirrors mkv_common's hash-based API.
+# We inherit the test suite to ensure the fast module's class is fully covered.
 # ─────────────────────────────────────────────────────────────────────────────
+
+class TestFontRegistryFast(TestFontRegistryNormal):
+    """Tests for the FontRegistry in mkv_common_fast."""
+
+    def _reg(self, existing=None):
+        return mkv_common_fast.FontRegistry(existing=existing)
 
