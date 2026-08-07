@@ -44,3 +44,6 @@ graphify-out/
 *.AppImage
 *.deb
 
+# Windows Zone Identifier metadata
+*:Zone.Identifier
+*Zone.Identifier*

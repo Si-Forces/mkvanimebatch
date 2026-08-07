@@ -1,2 +1,30 @@
-# Enforce Unix LF line endings for shell scripts so Linux/GitHub Actions builds run without CRLF errors
+# Auto-detect text files and normalize line endings to LF in repository
+* text=auto eol=lf
+
+# Enforce Unix LF line endings for scripts, code, docs, and configurations
+*.py text eol=lf
 *.sh text eol=lf
+*.md text eol=lf
+*.rs text eol=lf
+*.js text eol=lf
+*.json text eol=lf
+*.html text eol=lf
+*.css text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.lock text eol=lf
+*.toml text eol=lf
+
+# Enforce Windows CRLF line endings for batch & PowerShell scripts
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary files
+*.exe binary
+*.dll binary
+*.so binary
+*.dylib binary
+*.png binary
+*.jpg binary
+*.ico binary
+*.mkv binary
