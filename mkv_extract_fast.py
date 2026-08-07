@@ -13,14 +13,9 @@ if hasattr(sys.stdout, "reconfigure"):
     except Exception:
         pass
 
-import builtins
-_orig_print = builtins.print
-def print(*args, **kwargs):
-    kwargs.setdefault("flush", True)
-    _orig_print(*args, **kwargs)
-
 import time
 import argparse
+import hashlib
 import os
 import re
 import shutil
@@ -167,7 +162,7 @@ def pipeline_worker(
             key_name = safe_filename(a["file_name"])
             key_size = a.get("size", 0)
 
-            if font_registry.try_claim(key_name, key_size):
+            if font_registry.try_claim_name_size(key_name, key_size):
                 new_font_attachments.append(a)
                 claimed_this_call.append((key_name, key_size))
 
@@ -236,23 +231,33 @@ def pipeline_worker(
                     actual_size = temp_font_path.stat().st_size
                     mkv_size = att_meta.get("size", 0)
 
-                    with IO_LOCK:
-                        final_path = fonts_dir / safe_name
-                        if final_path.exists():
-                            stem, suffix = final_path.stem, final_path.suffix
-                            final_path = fonts_dir / f"{stem}_{actual_size:x}{suffix}"
-                        
-                        if not final_path.exists():
-                            shutil.move(str(temp_font_path), str(final_path))
-                        else:
-                            temp_font_path.unlink(missing_ok=True)
-                        
-                        font_registry.try_claim(final_path.name, actual_size)
+                    # Calculate BLAKE2b hash for deduplication
+                    try:
+                        with open(temp_font_path, "rb") as f:
+                            h = hashlib.blake2b()
+                            while chunk := f.read(65536):
+                                h.update(chunk)
+                            file_hash = h.hexdigest()
+                    except OSError:
+                        temp_font_path.unlink(missing_ok=True)
+                        continue
+
                     extracted_ok.add((safe_name, mkv_size))
+
+                    if font_registry.try_claim_hash(file_hash):
+                        with IO_LOCK:
+                            final_path = fonts_dir / safe_name
+                            if final_path.exists():
+                                stem, suffix = final_path.stem, final_path.suffix
+                                final_path = fonts_dir / f"{stem}_{file_hash[:8]}{suffix}"
+                            
+                            shutil.move(str(temp_font_path), str(final_path))
+                    else:
+                        temp_font_path.unlink(missing_ok=True)
 
                 for name, size in claimed_this_call:
                     if (name, size) not in extracted_ok:
-                        font_registry.release(name, size)
+                        font_registry.release_name_size(name, size)
         action = "Extracted" if extract_args else "Skipped (already complete)"
         elapsed = time.perf_counter() - start_time
         print(f"[JOB_DONE] {mkv_path.name} | {elapsed:.1f}s")
@@ -261,7 +266,7 @@ def pipeline_worker(
     except Exception as e:
         for name, size in claimed_this_call:
             if (name, size) not in extracted_ok:
-                font_registry.release(name, size)
+                font_registry.release_name_size(name, size)
         print(f"[JOB_FAIL] {mkv_path.name} | {e}")
         print(f"  [-] Failed: {mkv_path.name} ({e})")
         return False
