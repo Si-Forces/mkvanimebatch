@@ -594,7 +594,7 @@ def run_mkvmerge_json(filepath: Path, log: list[str] | None = None) -> dict | No
             logger.warning(msg)
 
     try:
-        result = run_subprocess(["mkvmerge", "-J", str(filepath)], timeout=60)
+        result = run_subprocess(["mkvmerge", "-J", str(filepath)], timeout=300)
     except subprocess.TimeoutExpired:
         _warn(f"mkvmerge inspection timed out for '{filepath.name}', skipping.")
         return None
@@ -639,7 +639,8 @@ class PersistentInspectCache:
         try:
             with open(self.cache_file, "r", encoding="utf-8") as f:
                 self._data = json.load(f)
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Failed to load inspect cache from {self.cache_file}: {e}")
             self._data = {}
 
     def save(self) -> None:
@@ -656,8 +657,8 @@ class PersistentInspectCache:
             with open(temp_file, "w", encoding="utf-8") as f:
                 json.dump(data_copy, f)
             temp_file.replace(self.cache_file)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to save inspect cache to {self.cache_file}: {e}")
 
     def get(self, path: Path) -> dict | None:
         if not self.enabled:
@@ -812,7 +813,7 @@ def scan_mkv_files(dir_path: Path, recursive: bool = True, ignore_paths: set[Pat
                                 path = Path(entry.path)
                                 results.append(_create_parsed_file(path))
                         elif entry.is_dir(follow_symlinks=False) and recursive:
-                            if name.lower() != "output":
+                            if name.lower() not in {"output", "fonts", "font", "attachments"}:
                                 entry_path = Path(entry.path)
                                 if resolved_ignores and entry_path.resolve() in resolved_ignores:
                                     continue

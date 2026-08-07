@@ -478,6 +478,8 @@ pub fn stop_job(state: State<'_, JobState>) -> Result<(), String> {
         }
         #[cfg(not(windows))]
         {
+            let pid = child.id();
+            let _ = Command::new("pkill").args(["-P", &pid.to_string()]).output();
             let _ = child.kill();
         }
     }

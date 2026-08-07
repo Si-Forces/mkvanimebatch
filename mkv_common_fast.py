@@ -170,29 +170,39 @@ def output_stem(base: str, ep_type: str, ep: str) -> str:
 
 # ─── FONT REGISTRY ───────────────────────────────────────────────────────────
 class FontRegistry:
-    def __init__(self, existing: set[tuple[str, int]] | None = None) -> None:
-        self._claimed: set[tuple[str, int]] = set(existing or ())
+    """Thread-safe registry of claimed font hashes and name/sizes for cross-file dedup."""
+
+    def __init__(self, existing: set[str] | None = None) -> None:
+        self._claimed_hashes: set[str] = set(existing or ())
+        self._claimed_name_size: set[tuple[str, int]] = set()
         self._lock = threading.Lock()
 
-    def try_claim(self, name: str, size: int) -> bool:
+    def try_claim_hash(self, file_hash: str) -> bool:
+        """Atomically claim a file hash. Returns True if newly claimed."""
         with self._lock:
-            if (name, size) in self._claimed:
+            if file_hash in self._claimed_hashes:
                 return False
-            self._claimed.add((name, size))
+            self._claimed_hashes.add(file_hash)
             return True
 
-    def release(self, name: str, size: int) -> None:
+    def try_claim_name_size(self, name: str, size: int) -> bool:
+        """Atomically claim a font by name and size. Returns True if newly claimed."""
         with self._lock:
-            self._claimed.discard((name, size))
+            key = (name, size)
+            if key in self._claimed_name_size:
+                return False
+            self._claimed_name_size.add(key)
+            return True
 
-    def is_claimed(self, name: str, size: int) -> bool:
+    def release_name_size(self, name: str, size: int) -> None:
+        """Release a claimed name and size (e.g. if extraction fails)."""
         with self._lock:
-            return (name, size) in self._claimed
+            self._claimed_name_size.discard((name, size))
 
     @property
-    def claimed(self) -> set[tuple[str, int]]:
+    def claimed_hashes(self) -> set[str]:
         with self._lock:
-            return set(self._claimed)
+            return set(self._claimed_hashes)
 
 
 # ─── FONTS DIRECTORY DISCOVERY ───────────────────────────────────────────────
@@ -586,7 +596,8 @@ class PersistentInspectCache:
         try:
             with open(self.cache_file, "r", encoding="utf-8") as f:
                 self._data = json.load(f)
-        except Exception:
+        except Exception as e:
+            print(f"[WARNING] Failed to load inspect cache from {self.cache_file}: {e}")
             self._data = {}
 
     def save(self) -> None:
@@ -603,8 +614,8 @@ class PersistentInspectCache:
             with open(temp_file, "w", encoding="utf-8") as f:
                 json.dump(data_copy, f)
             temp_file.replace(self.cache_file)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[WARNING] Failed to save inspect cache to {self.cache_file}: {e}")
 
     def get(self, path: Path) -> dict | None:
         if not self.enabled:
@@ -656,7 +667,7 @@ def check_dependencies(*required: str) -> None:
 
 def run_mkvmerge_json(filepath: Path) -> dict | None:
     try:
-        result = run_subprocess(["mkvmerge", "-J", str(filepath)], timeout=60)
+        result = run_subprocess(["mkvmerge", "-J", str(filepath)], timeout=300)
     except subprocess.TimeoutExpired:
         return None
     if result.returncode > 1 or not result.stdout.strip():
@@ -772,7 +783,7 @@ def scan_mkv_files(dir_path: Path, recursive: bool = True, ignore_paths: set[Pat
                                 path = Path(entry.path)
                                 results.append(_create_parsed_file(path))
                         elif entry.is_dir(follow_symlinks=False) and recursive:
-                            if name.lower() != "output":
+                            if name.lower() not in {"output", "fonts", "font", "attachments"}:
                                 entry_path = Path(entry.path)
                                 if resolved_ignores and entry_path.resolve() in resolved_ignores:
                                     continue

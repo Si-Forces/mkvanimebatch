@@ -13,12 +13,6 @@ if hasattr(sys.stdout, "reconfigure"):
     except Exception:
         pass
 
-import builtins
-_orig_print = builtins.print
-def print(*args, **kwargs):
-    kwargs.setdefault("flush", True)
-    _orig_print(*args, **kwargs)
-
 import time
 import re
 import os

@@ -1178,13 +1178,13 @@ def _run(
             logger.info("  (no jobs planned)")
         logger.info("Total: %d job(s). No processing performed.", len(jobs))
         _print_summary(output_dir, matched_files, skipped_files)
-        return not bool(skipped_files)
+        return all("(output already exists)" in s for s in skipped_files)
 
     # Distribute available CPU cores evenly among workers to prevent core thrashing
     ffmpeg_threads = max(1, (os.cpu_count() or 4) // max_workers)
     _execute_jobs(jobs, temp_dir, fonts, opus_bitrate, pool, max_workers, ffmpeg_threads, json_cache, skipped_files, matched_files, complexity, io_semaphore=io_semaphore, sub_offset=sub_offset)
     _print_summary(output_dir, matched_files, skipped_files)
-    return not bool(skipped_files)
+    return all("(output already exists)" in s for s in skipped_files)
 
 
 # ─── MAIN ────────────────────────────────────────────────────────────────────
