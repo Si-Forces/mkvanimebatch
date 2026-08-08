@@ -298,20 +298,20 @@ def _run(output_dir: Path, fonts_dir: Path, mkv_files: list[ParsedFile], pool: T
     fonts_dir.mkdir(parents=True, exist_ok=True)
     print(f"Extracting {len(mkv_files)} file(s)...")
 
-    existing_hashes = set()
+    existing_name_sizes = set()
     if fonts_dir.is_dir():
         try:
             with os.scandir(str(fonts_dir)) as it:
                 for entry in it:
                     if entry.is_file() and Path(entry.name).suffix.lower() in FONT_EXTENSIONS:
                         try:
-                            existing_hashes.add(_hash_file(Path(entry.path)))
+                            existing_name_sizes.add((entry.name, entry.stat().st_size))
                         except OSError:
                             pass
         except OSError:
             pass
-
-    font_registry = FontRegistry(existing=existing_hashes)
+            
+    font_registry = FontRegistry(existing_name_sizes=existing_name_sizes)
     stale_subs_map: dict[str, str] = {}
     stale_subs_lock = threading.Lock()
 
