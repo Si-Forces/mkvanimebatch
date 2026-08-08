@@ -29,8 +29,8 @@ mkv_common_fast = importlib.import_module("mkv_common_fast")
 class TestFontRegistryNormal:
     """Tests for the standard FontRegistry in mkv_common."""
 
-    def _reg(self, existing=None):
-        return mkv_common.FontRegistry(existing=existing)
+    def _reg(self, existing_hashes=None):
+        return mkv_common.FontRegistry(existing_hashes=existing_hashes)
 
     def test_name_size_claim_first_time(self):
         reg = self._reg()
@@ -68,7 +68,7 @@ class TestFontRegistryNormal:
 
     def test_existing_hashes_pre_seeded(self):
         existing = {"deadbeef"}
-        reg = self._reg(existing=existing)
+        reg = self._reg(existing_hashes=existing)
         # Pre-seeded hash must be rejected
         assert reg.try_claim_hash("deadbeef") is False
         # New hash must be accepted
@@ -129,6 +129,6 @@ class TestFontRegistryNormal:
 class TestFontRegistryFast(TestFontRegistryNormal):
     """Tests for the FontRegistry in mkv_common_fast."""
 
-    def _reg(self, existing=None):
-        return mkv_common_fast.FontRegistry(existing=existing)
+    def _reg(self, existing_hashes=None):
+        return mkv_common_fast.FontRegistry(existing_hashes=existing_hashes)
 

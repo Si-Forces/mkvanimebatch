@@ -220,9 +220,13 @@ def output_stem(base: str, ep_type: str, ep: str) -> str:
 class FontRegistry:
     """Thread-safe registry of claimed font hashes and name/sizes for cross-file dedup."""
 
-    def __init__(self, existing: set[str] | None = None) -> None:
-        self._claimed_hashes: set[str] = set(existing or ())
-        self._claimed_name_size: set[tuple[str, int]] = set()
+    def __init__(
+        self, 
+        existing_hashes: set[str] | None = None,
+        existing_name_sizes: set[tuple[str, int]] | None = None
+    ) -> None:
+        self._claimed_hashes: set[str] = set(existing_hashes or ())
+        self._claimed_name_size: set[tuple[str, int]] = set(existing_name_sizes or ())
         self._lock = threading.Lock()
 
     def try_claim_hash(self, file_hash: str) -> bool:
