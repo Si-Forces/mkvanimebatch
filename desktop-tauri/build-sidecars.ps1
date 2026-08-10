@@ -1,5 +1,5 @@
 # build-sidecars.ps1
-# Builds mkv_remux_fast.py and mkv_extract_fast.py into standalone console
+# Builds mkv_remux.py and mkv_extract.py into standalone console
 # executables named with the Tauri target-triple convention.
 #
 # Usage (from repo root):
@@ -18,12 +18,12 @@ $ErrorActionPreference = "Stop"
 if (-not $SourceDir) {
     # Support running from desktop/ or from repo root
     $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-    if (Test-Path (Join-Path $scriptDir "..\mkv_remux_fast.py")) {
+    if (Test-Path (Join-Path $scriptDir "..\mkv_remux.py")) {
         $SourceDir = (Resolve-Path (Join-Path $scriptDir "..")).Path
-    } elseif (Test-Path (Join-Path $scriptDir "mkv_remux_fast.py")) {
+    } elseif (Test-Path (Join-Path $scriptDir "mkv_remux.py")) {
         $SourceDir = $scriptDir
     } else {
-        Write-Error "Cannot find mkv_remux_fast.py. Run from repo root or pass -SourceDir."
+        Write-Error "Cannot find mkv_remux.py. Run from repo root or pass -SourceDir."
     }
 }
 
@@ -45,7 +45,7 @@ python -m PyInstaller `
     --workpath (Join-Path $env:TEMP "pyinstaller-work-remux") `
     --specpath (Join-Path $env:TEMP "pyinstaller-spec-remux") `
     --noconfirm `
-    (Join-Path $SourceDir "mkv_remux_fast.py")
+    (Join-Path $SourceDir "mkv_remux.py")
 
 if ($LASTEXITCODE -ne 0) { Write-Error "PyInstaller failed for mkv-remux"; exit 1 }
 
@@ -57,7 +57,7 @@ python -m PyInstaller `
     --workpath (Join-Path $env:TEMP "pyinstaller-work-extract") `
     --specpath (Join-Path $env:TEMP "pyinstaller-spec-extract") `
     --noconfirm `
-    (Join-Path $SourceDir "mkv_extract_fast.py")
+    (Join-Path $SourceDir "mkv_extract.py")
 
 if ($LASTEXITCODE -ne 0) { Write-Error "PyInstaller failed for mkv-extract"; exit 1 }
 

@@ -15,11 +15,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 mkv_remux      = importlib.import_module("mkv_remux")
-mkv_remux_fast = importlib.import_module("mkv_remux_fast")
 
 REMUX_MODULES = [
     pytest.param(mkv_remux,      id="mkv_remux"),
-    pytest.param(mkv_remux_fast, id="mkv_remux_fast"),
+    pytest.param(mkv_remux, id="mkv_remux"),
 ]
 
 
