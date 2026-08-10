@@ -8,7 +8,7 @@ import pytest
 
 REMUX_MODULES = [
     pytest.param(importlib.import_module("mkv_remux"), id="mkv_remux"),
-    pytest.param(importlib.import_module("mkv_remux_fast"), id="mkv_remux_fast"),
+    pytest.param(importlib.import_module("mkv_remux"), id="mkv_remux"),
 ]
 
 
@@ -49,7 +49,7 @@ def test_nonempty_output_is_complete(rmod, tmp_path):
 
 EXTRACT_MODULES = [
     pytest.param(importlib.import_module("mkv_extract"), id="mkv_extract"),
-    pytest.param(importlib.import_module("mkv_extract_fast"), id="mkv_extract_fast"),
+    pytest.param(importlib.import_module("mkv_extract"), id="mkv_extract"),
 ]
 
 

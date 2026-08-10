@@ -1,7 +1,7 @@
 """
 Tests for parse_episode() and detect_sub_lang().
 
-Both functions exist in mkv_common and mkv_common_fast and must behave
+Both functions exist in mkv_common and mkv_common and must behave
 identically.  The `mod` fixture (from conftest.py) runs every test twice —
 once per module — so any divergence is caught immediately.
 """

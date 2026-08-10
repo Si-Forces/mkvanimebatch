@@ -2,7 +2,7 @@
 Tests for FontRegistry thread-safety.
 
 mkv_common.FontRegistry   — hash-based + name/size dedup
-mkv_common_fast.FontRegistry — name/size dedup only
+mkv_common.FontRegistry — name/size dedup only
 
 The two registries have different interfaces, so they are tested separately
 rather than through the parametrized `mod` fixture.
@@ -19,7 +19,6 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 mkv_common      = importlib.import_module("mkv_common")
-mkv_common_fast = importlib.import_module("mkv_common_fast")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -122,13 +121,13 @@ class TestFontRegistryNormal:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# mkv_common_fast.FontRegistry now mirrors mkv_common's hash-based API.
+# mkv_common.FontRegistry now mirrors mkv_common's hash-based API.
 # We inherit the test suite to ensure the fast module's class is fully covered.
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestFontRegistryFast(TestFontRegistryNormal):
-    """Tests for the FontRegistry in mkv_common_fast."""
+    """Tests for the FontRegistry in mkv_common."""
 
     def _reg(self, existing_hashes=None):
-        return mkv_common_fast.FontRegistry(existing_hashes=existing_hashes)
+        return mkv_common.FontRegistry(existing_hashes=existing_hashes)
 
