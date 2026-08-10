@@ -9,16 +9,12 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-mkv_common_fast = importlib.import_module("mkv_common_fast")
 mkv_common = importlib.import_module("mkv_common")
-mkv_remux_fast = importlib.import_module("mkv_remux_fast")
 mkv_remux = importlib.import_module("mkv_remux")
-mkv_extract_fast = importlib.import_module("mkv_extract_fast")
 mkv_extract = importlib.import_module("mkv_extract")
 
 
 @pytest.mark.parametrize("mod", [
-    pytest.param(mkv_common_fast, id="mkv_common_fast"),
     pytest.param(mkv_common, id="mkv_common"),
 ])
 class TestPersistentInspectCache:
@@ -101,14 +97,13 @@ class TestPersistentInspectCache:
 
 def test_cover_index_add_episode_cover_no_nameerror():
     """Verify CoverIndex.add() with per-episode cover does not raise NameError for parse_episode."""
-    cover_index = mkv_remux_fast.CoverIndex()
-    pf = mkv_common_fast._create_parsed_file(Path("/dummy/Show - 01_cover.jpg"))
+    cover_index = mkv_remux.CoverIndex()
+    pf = mkv_common._create_parsed_file(Path("/dummy/Show - 01_cover.jpg"))
     cover_index.add(pf)
     assert cover_index.lookup("E", "01", "") == Path("/dummy/Show - 01_cover.jpg")
 
 
 @pytest.mark.parametrize("mod", [
-    pytest.param(mkv_remux_fast, id="mkv_remux_fast"),
     pytest.param(mkv_remux, id="mkv_remux"),
 ])
 def test_ffmpeg_probesize_args(mod):
@@ -133,87 +128,4 @@ def test_ffmpeg_probesize_args(mod):
         assert cmd[cmd.index("-probesize") + 1] == "1M"
 
 
-def test_io_semaphore_throttles_remux(tmp_path):
-    """Verify io_semaphore context manager is entered during mkvmerge execution in remux."""
-    mock_sem = MagicMock()
 
-    def fake_subprocess(cmd, **kwargs):
-        if len(cmd) > 1 and cmd[0] == "mkvmerge" and cmd[1] == "-o":
-            Path(cmd[2]).touch()
-        res = MagicMock()
-        res.returncode = 0
-        res.stderr = ""
-        return res
-
-    sample_video = tmp_path / "video.mkv"
-    sample_video.touch()
-
-    parsed = ("1", "E", "01")
-
-    mock_sub_index = MagicMock()
-    mock_sub_index.lookup.return_value = (tmp_path / "sub.ass", "ind")
-    mock_chap_index = MagicMock()
-    mock_chap_index.lookup.return_value = None
-    mock_cover_index = MagicMock()
-    mock_cover_index.lookup.return_value = None
-
-    with patch.object(mkv_remux_fast, "run_subprocess", side_effect=fake_subprocess), \
-         patch.object(mkv_remux_fast, "select_tracks") as mock_tracks:
-        tr = MagicMock()
-        tr.video_id = 0
-        tr.audio_id = None
-        tr.audio_codec = "A_AAC"
-        tr.source_cover_id = None
-        tr.use_source_fonts = False
-        tr.source_font_ids = []
-        mock_tracks.return_value = tr
-
-        res = mkv_remux_fast.pipeline_worker(
-            video=sample_video,
-            video_parsed=parsed,
-            json_data={"tracks": [{"id": 0, "type": "video"}]},
-            chapter_fallback_count=0,
-            chapter_unmatched_claimed=set(),
-            chapter_unmatched_claimed_lock=threading.Lock(),
-            sub_index=mock_sub_index,
-            chap_index=mock_chap_index,
-            cover_index=mock_cover_index,
-            output_dir=tmp_path,
-            fonts=mkv_remux_fast.FontInfo(args=(), count=0),
-            opus_bitrate="192k",
-            complexity=10,
-            ffmpeg_threads=2,
-            temp_parent_dir=None,
-            dry_run=False,
-            io_semaphore=mock_sem,
-        )
-
-        assert res is True
-        mock_sem.__enter__.assert_called_once()
-        mock_sem.__exit__.assert_called_once()
-
-
-@pytest.mark.parametrize("mod", [mkv_remux, mkv_remux_fast])
-def test_io_semaphore_throttles_flac_conversion(mod, tmp_path):
-    """Verify io_semaphore is acquired during _convert_flac_to_opus execution."""
-    mock_sem = MagicMock()
-    video = tmp_path / "video.mkv"
-    video.touch()
-
-    mock_res = MagicMock()
-    mock_res.returncode = 0
-    mock_res.stderr = ""
-
-    with patch.object(mod, "run_subprocess", return_value=mock_res) as mock_run:
-        if mod is mkv_remux:
-            mod._convert_flac_to_opus(
-                video, 1, 0, tmp_path, "video", "192k", [], 2, 10, io_semaphore=mock_sem
-            )
-        else:
-            mod._convert_flac_to_opus(
-                video, 1, 0, tmp_path, "video", "192k", 10, 2, io_semaphore=mock_sem
-            )
-
-        mock_sem.__enter__.assert_called_once()
-        mock_sem.__exit__.assert_called_once()
-        mock_run.assert_called_once()
