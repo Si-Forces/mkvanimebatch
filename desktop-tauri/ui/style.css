@@ -4,7 +4,7 @@
 html, body {
   width: 100%; height: 100%;
   margin: 0; padding: 0;
-  background: var(--bg-dark-base);
+  background: var(--bg);
   color: var(--text);
   overflow: hidden;
   font-family: "Plus Jakarta Sans", -apple-system, "SF Pro Display", "Segoe UI", system-ui, sans-serif;
@@ -46,7 +46,6 @@ input[type="number"] {
   --transition: 0.22s cubic-bezier(0.4, 0, 0.2, 1);
   --shadow-lg: 0 30px 70px rgba(0,0,0,0.5), 0 10px 30px rgba(0,0,0,0.35);
   --shadow-sm: 0 4px 15px rgba(0,0,0,0.25);
-  --blur: blur(20px);
   --accent-indigo: #6366f1;
   --accent-pink: #ec4899;
   --accent-purple: #8b5cf6;
@@ -71,6 +70,8 @@ input[type="number"] {
   --accent: #6366f1;
   --accent-hover: #818cf8;
   --accent-glow: rgba(99, 102, 241, 0.4);
+  --accent-cyan: #06b6d4;
+  --accent-magenta: #ec4899;
   --success: #34d399;
   --warning: #fbbf24;
   --error: #f87171;
@@ -112,6 +113,8 @@ input[type="number"] {
   --accent: #4f46e5;
   --accent-hover: #4338ca;
   --accent-glow: rgba(79, 70, 229, 0.25);
+  --accent-cyan: #0891b2;
+  --accent-magenta: #db2777;
   --success: #059669;
   --warning: #d97706;
   --error: #dc2626;
@@ -442,26 +445,6 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
 }
 
 /* ─── Active Profile Preset Dropdown ──────────────────────────────────── */
-.preset-label {
-  font-size: 11.5px;
-  font-weight: 700;
-  color: var(--text-dim);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-}
-
-.sub-header-right {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.preset-label {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-dim);
-}
-
 .preset-pill-btn {
   font-size: 11.5px;
   font-weight: 700;
@@ -904,6 +887,17 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
   background: rgba(52, 211, 153, 0.06);
 }
 
+.tokyo-ep-card.skipped {
+  border-left: 4px solid var(--text-dim);
+  background: rgba(100, 116, 139, 0.06);
+  opacity: 0.75;
+}
+
+.tokyo-ep-card.failed {
+  border-left: 4px solid var(--error);
+  background: rgba(239, 68, 68, 0.06);
+}
+
 .ep-badge {
   font-size: 10px;
   font-weight: 800;
@@ -916,6 +910,8 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
 .ep-badge.purple { background: rgba(139, 92, 246, 0.2); color: var(--log-done); }
 .ep-badge.green  { background: rgba(52, 211, 153, 0.2); color: var(--success); }
 .ep-badge.cyan   { background: rgba(6, 182, 212, 0.2); color: var(--accent-cyan); }
+.ep-badge.grey   { background: rgba(100, 116, 139, 0.2); color: var(--text-dim); }
+.ep-badge.red    { background: rgba(239, 68, 68, 0.2); color: var(--error); }
 
 .ep-codec {
   font-size: 10px;
@@ -935,6 +931,8 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
 .ep-duration-tag.green { background: rgba(52, 211, 153, 0.15); color: var(--success); }
 .ep-duration-tag.yellow { background: rgba(251, 191, 36, 0.15); color: var(--warning); }
 .ep-duration-tag.cyan   { background: rgba(6, 182, 212, 0.15); color: var(--accent-cyan); }
+.ep-duration-tag.grey   { background: rgba(100, 116, 139, 0.15); color: var(--text-dim); }
+.ep-duration-tag.red    { background: rgba(239, 68, 68, 0.15); color: var(--error); }
 .ep-progress-fill.cyan  { background: linear-gradient(90deg, var(--accent-cyan), #38bdf8); }
 
 .ep-title {
@@ -982,6 +980,25 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
   background: var(--success);
 }
 
+/* Honest indeterminate progress: shimmer sweep shown while a job is running
+   but the backend has not yet emitted a real percentage. Replaces the old
+   random-walk fake progress. */
+.ep-progress-fill.indeterminate {
+  width: 40% !important;
+  background: linear-gradient(90deg,
+    transparent 0%,
+    var(--accent-indigo) 40%,
+    var(--accent-pink) 60%,
+    transparent 100%);
+  background-size: 200% 100%;
+  animation: ep-indeterminate-sweep 1.4s ease-in-out infinite;
+}
+
+@keyframes ep-indeterminate-sweep {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(250%); }
+}
+
 /* ─── Form Inputs & Dropdowns ───────────────────────────────────────────── */
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .form-grid-3col { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; }
@@ -1015,6 +1032,13 @@ input[type="text"]:focus, input[type="number"]:focus, select:focus {
   border-color: var(--input-focus);
   box-shadow: 0 0 0 3px var(--accent-glow);
 }
+
+/* Inline validation state (replaces native alert()) */
+.input-error {
+  border-color: var(--error) !important;
+  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.25) !important;
+}
+.input-error::placeholder { color: var(--error); }
 
 /* Dropdown Arrow Fix (Prevents duplicate inner/outer arrows) */
 select {
@@ -1198,8 +1222,6 @@ select::-ms-expand { display: none; }
 }
 
 /* ─── Buttons & Controls ─────────────────────────────────────────────────── */
-.actions-row { display: flex; gap: 8px; }
-
 .btn {
   padding: 8px 14px;
   border-radius: var(--radius-sm);
