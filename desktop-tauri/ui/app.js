@@ -134,24 +134,25 @@ window.stepNumber = function(btn, dir) {
 };
 
 document.addEventListener('DOMContentLoaded', () => {
-  let stepInterval = null;
-  let stepTimeout = null;
-
   document.querySelectorAll('.stepper-btn').forEach(btn => {
     const dir = btn.classList.contains('minus') ? -1 : 1;
-    
+    // Per-button timers: sharing these across all steppers lets one button's
+    // mouseup kill another button's active repeat interval.
+    let stepInterval = null;
+    let stepTimeout = null;
+
     const startStepping = () => {
       window.stepNumber(btn, dir);
       stepTimeout = setTimeout(() => {
         stepInterval = setInterval(() => window.stepNumber(btn, dir), 80);
       }, 400);
     };
-    
+
     const stopStepping = () => {
       clearTimeout(stepTimeout);
       clearInterval(stepInterval);
     };
-    
+
     btn.addEventListener('mousedown', startStepping);
     btn.addEventListener('mouseup', stopStepping);
     btn.addEventListener('mouseleave', stopStepping);
@@ -197,6 +198,10 @@ function switchView(viewId) {
   if (nav) {
     nav.classList.add("active");
   }
+  // Keep tab aria-selected in sync with the active view.
+  document.querySelectorAll(".pipeline-tab-btn[data-view]").forEach(btn => {
+    btn.setAttribute("aria-selected", btn.classList.contains("active") ? "true" : "false");
+  });
 }
 
 // ─── Real System Hardware Telemetry & Monitor ─────────────────────────────
@@ -291,6 +296,58 @@ class QueueTracker {
     if (this.countEl) this.countEl.textContent = "Ready";
   }
 
+  // Batch-probe all files in one command (Rust joins paths + spawns mkvmerge
+  // on a thread pool), rather than one inspect_mkv_file IPC call per MKV.
+  populateFromInspection(entries) {
+    this.items.forEach(item => {
+      if (item.timerId) clearInterval(item.timerId);
+    });
+    this.items.clear();
+    this.completedCount = 0;
+    if (this.listEl) this.listEl.innerHTML = "";
+
+    if (!entries || entries.length === 0) {
+      this.reset();
+      return;
+    }
+    this.totalCount = entries.length;
+    if (this.countEl) this.countEl.textContent = `${entries.length} Episodes Queued`;
+
+    const bitrate = document.getElementById(`${this.mode}-bitrate`)?.value?.trim() || "192k";
+
+    entries.forEach(([filename, meta], idx) => {
+      const epCard = this.createCardElement(filename, idx + 1);
+      this.listEl.appendChild(epCard.el);
+      this.items.set(filename, epCard);
+      if (meta) this.applyMetadata(epCard, meta, bitrate);
+    });
+  }
+
+  applyMetadata(epCard, meta, bitrate) {
+    if (!epCard || !epCard.el || !meta) return;
+    const codecEl = epCard.el.querySelector(".ep-codec");
+    const tag1El = epCard.el.querySelector(".track-tag.cyan");
+    const tag2El = epCard.el.querySelector(".track-tag.magenta");
+
+    if (codecEl) codecEl.textContent = meta.video_tag;
+
+    if (this.mode === "remux") {
+      if (tag1El) {
+        tag1El.textContent = meta.has_flac
+          ? `${meta.audio_summary} → Opus ${bitrate}`
+          : `${meta.audio_summary} (Passthrough)`;
+      }
+      if (tag2El) {
+        tag2El.textContent = meta.fonts_count > 0
+          ? `${meta.sub_summary} + ${meta.fonts_count} Fonts`
+          : meta.sub_summary;
+      }
+    } else {
+      if (tag1El) tag1El.textContent = meta.sub_summary;
+      if (tag2El) tag2El.textContent = `${meta.fonts_count} Attached Fonts`;
+    }
+  }
+
   populateDirectoryFiles(files, dirPath = "") {
     this.items.forEach(item => {
       if (item.timerId) clearInterval(item.timerId);
@@ -314,31 +371,8 @@ class QueueTracker {
       this.items.set(filename, epCard);
 
       if (dirPath) {
-        const fullPath = `${dirPath}/${filename}`;
-        invoke("inspect_mkv_file", { filePath: fullPath }).then(meta => {
-          if (meta && epCard && epCard.el) {
-            const codecEl = epCard.el.querySelector(".ep-codec");
-            const tag1El = epCard.el.querySelector(".track-tag.cyan");
-            const tag2El = epCard.el.querySelector(".track-tag.magenta");
-
-            if (codecEl) codecEl.textContent = meta.video_tag;
-
-            if (this.mode === "remux") {
-              if (tag1El) {
-                tag1El.textContent = meta.has_flac
-                  ? `${meta.audio_summary} → Opus ${bitrate}`
-                  : `${meta.audio_summary} (Passthrough)`;
-              }
-              if (tag2El) {
-                tag2El.textContent = meta.fonts_count > 0
-                  ? `${meta.sub_summary} + ${meta.fonts_count} Fonts`
-                  : meta.sub_summary;
-              }
-            } else {
-              if (tag1El) tag1El.textContent = meta.sub_summary;
-              if (tag2El) tag2El.textContent = `${meta.fonts_count} Attached Fonts`;
-            }
-          }
+        invoke("inspect_mkv_file", { dirPath, filename }).then(meta => {
+          if (meta) this.applyMetadata(epCard, meta, bitrate);
         }).catch(err => {
           console.log("[Inspection Error]", filename, err);
           if (epCard && epCard.el) {
@@ -441,27 +475,20 @@ class QueueTracker {
     item.badge.className = "ep-badge purple";
     item.badge.textContent = "PROCESSING";
     item.statusTag.className = "ep-duration-tag yellow status-tag";
-    item.statusTag.textContent = "Muxing (0%)";
     item.startTime = Date.now();
-    item.pct = 0;
-    item.fill.style.width = "0%";
+    item.pct = null; // no real percentage yet — show indeterminate shimmer
+    item.fill.classList.add("indeterminate");
+    item.fill.style.width = "";
+    item.statusTag.textContent = "Muxing...";
 
-    if (item.timerId) clearInterval(item.timerId);
-    item.timerId = setInterval(() => {
-      if (item.status === "processing" && item.pct < 92) {
-        item.pct += Math.floor(Math.random() * 6) + 2;
-        if (item.pct > 92) item.pct = 92;
-        item.fill.style.width = `${item.pct}%`;
-        const elapsedSec = ((Date.now() - item.startTime) / 1000).toFixed(1);
-        item.statusTag.textContent = `${item.pct}% (${elapsedSec}s)`;
-      }
-    }, 300);
+    if (item.timerId) { clearInterval(item.timerId); item.timerId = null; }
   }
 
   updateProgress(filename, pct, speedStr = "") {
     const item = this.getItem(filename);
     if (!item) return;
     item.pct = Math.min(100, Math.max(0, pct));
+    item.fill.classList.remove("indeterminate");
     item.fill.style.width = `${item.pct}%`;
     const elapsedSec = item.startTime ? ((Date.now() - item.startTime) / 1000).toFixed(1) : "0.0";
     const speed = speedStr ? ` • ${speedStr}` : "";
@@ -479,6 +506,7 @@ class QueueTracker {
 
     item.status = "completed";
     item.pct = 100;
+    item.fill.classList.remove("indeterminate");
     const dur = durationSec !== null ? parseFloat(durationSec).toFixed(1) : (item.startTime ? ((Date.now() - item.startTime) / 1000).toFixed(1) : "8.5");
 
     item.el.className = "tokyo-ep-card completed";
@@ -495,6 +523,26 @@ class QueueTracker {
     }
   }
 
+  markSkipped(filename, reason = "Skipped") {
+    const item = this.getItem(filename);
+    if (!item) return;
+
+    if (item.timerId) {
+      clearInterval(item.timerId);
+      item.timerId = null;
+    }
+
+    item.status = "skipped";
+    item.pct = 100;
+    item.fill.classList.remove("indeterminate");
+    item.el.className = "tokyo-ep-card skipped";
+    item.badge.className = "ep-badge grey";
+    item.badge.textContent = "SKIPPED";
+    item.statusTag.className = "ep-duration-tag grey status-tag";
+    item.statusTag.textContent = reason;
+    item.fill.style.width = "100%";
+  }
+
   markDryRun(filename) {
     const item = this.getItem(filename);
     if (!item) return;
@@ -506,6 +554,7 @@ class QueueTracker {
 
     item.status = "dry_run";
     item.pct = 100;
+    item.fill.classList.remove("indeterminate");
     item.el.className = "tokyo-ep-card dry-run";
     item.badge.className = "ep-badge cyan";
     item.badge.textContent = "DRY RUN";
@@ -530,6 +579,7 @@ class QueueTracker {
     }
 
     item.status = "failed";
+    item.fill.classList.remove("indeterminate");
     item.el.className = "tokyo-ep-card failed";
     item.badge.className = "ep-badge red";
     item.badge.textContent = "FAILED";
@@ -543,14 +593,27 @@ const extractQueue = new QueueTracker("extract");
 
 async function scanInputDirectory(path, mode) {
   if (!path) return;
+  const tracker = mode === "extract" ? extractQueue : remuxQueue;
   try {
-    const files = await invoke("scan_directory", { path });
-    if (files && Array.isArray(files)) {
-      const tracker = mode === "extract" ? extractQueue : remuxQueue;
-      tracker.populateDirectoryFiles(files, path);
+    // Preferred: single batch command that scans + probes all MKVs in Rust.
+    const entries = await invoke("inspect_directory", { path });
+    if (entries && Array.isArray(entries)) {
+      tracker.populateFromInspection(entries);
+      return;
     }
+    tracker.populateDirectoryFiles([], path);
   } catch (err) {
-    console.log("[Scan Dir] Error:", err);
+    // Fallback for older backends without inspect_directory: scan filenames,
+    // then probe per-file (inspect_mkv_file joins dir+filename in Rust).
+    console.log("[inspect_directory] unavailable, falling back:", err);
+    try {
+      const files = await invoke("scan_directory", { path });
+      if (files && Array.isArray(files)) {
+        tracker.populateDirectoryFiles(files, path);
+      }
+    } catch (err2) {
+      console.log("[Scan Dir] Error:", err2);
+    }
   }
 }
 
@@ -558,14 +621,16 @@ async function scanInputDirectory(path, mode) {
 
 function classifyLine(text) {
   const t = text.toLowerCase();
-  if (t.includes("[+]") || t.includes("success") || t.includes("finished") || t.includes("completed") || t.includes("remuxed cleanly") || t.includes("extracted cleanly") || t.includes("[job_done]") || t.includes("[job_dry_run]")) return "line-ok";
-  if (t.includes("[-]") || t.includes("[err]") || t.includes("error") || t.includes("failed") || t.includes("[error]") || t.includes("[job_fail]")) return "line-err";
+  if (t.includes("crashed") || t.includes("[-]") || t.includes("[err]") || t.includes("error") || t.includes("failed") || t.includes("[error]")) return "line-err";
+  if (t.includes("skipped") || t.includes("skip") || t.includes("already exists") || t.includes("already complete")) return "line-skip";
+  if (t.includes("[+]") || t.includes("success") || t.includes("finished") || t.includes("completed") || t.includes("remuxed:") || t.includes("extracted:") || t.includes("remuxed cleanly") || t.includes("extracted cleanly")) return "line-ok";
   if (t.includes("warn") || t.includes("[warn]")) return "line-warn";
-  if (t.includes("skip") || t.includes("already complete")) return "line-skip";
-  if (t.includes("folder:") || t.includes("dry run") || t.startsWith("extracting") || t.startsWith("processing") || t.includes("[job_start]") || t.includes("[job_progress]")) return "line-info";
+  if (t.includes("folder:") || t.includes("dry run") || t.startsWith("processing") || t.startsWith("extracting")) return "line-info";
   if (t.includes("persistent inspection cache") || t.includes("cache cleared")) return "line-done";
   return "";
 }
+
+const MAX_LOG_LINES = 2000;
 
 function appendLog(logEl, text, mode = "remux") {
   if (!logEl) return;
@@ -576,59 +641,104 @@ function appendLog(logEl, text, mode = "remux") {
   div.className = `log-line ${classifyLine(text)}`;
   div.textContent = text;
   logEl.appendChild(div);
+
+  // Cap the DOM: long batches can emit tens of thousands of lines, and an
+  // unbounded console grinds the webview to a halt.
+  while (logEl.childElementCount > MAX_LOG_LINES) {
+    logEl.firstElementChild.remove();
+  }
+
   logEl.scrollTop = logEl.scrollHeight;
 
   parseLogStream(text, mode);
 }
 
+// Parses the *actual* stdout/stderr lines emitted by mkv_remux.py /
+// mkv_extract.py. Filenames are captured as "rest of line after the colon" so
+// real fansub names with spaces/brackets/dots ([Group] Show - 01 [1080p].mkv)
+// match — the old [\w-]+\.mkv heuristic silently failed on those.
+//
+// Real backend line shapes (verified against the Python source):
+//   remux   -> [N/M (P%)] Remuxed: <name>
+//   remux   -> [N/M (P%)] Failed/Skipped: <name>
+//   remux   SKIPPED: <name> | Reason: <r>
+//   extract [N/M (P%)] Extracted: <name>
+//   extract [N/M (P%)] Skipped: <name>
+//   both    -> [N/M (P%)] CRASHED: <name>
+//   both    Processing: <name>          (per-file deferred log block header)
+//   remux     <name>  |  sub=... | chap=...   (under "--- DRY RUN: Planned jobs ---")
+//   extract   <name>                        (under "--- DRY RUN: Files that would be processed ---")
 function parseLogStream(text, mode) {
   const tracker = mode === "extract" ? extractQueue : remuxQueue;
 
-  const dryMatch = text.match(/\[JOB_DRY_RUN\]\s*([^|]+)/i);
-  if (dryMatch) {
-    tracker.markDryRun(dryMatch[1].trim());
+  // Track dry-run list context across lines (module-level, reset per section).
+  if (/---\s*DRY RUN:/i.test(text)) {
+    parseLogStream._drySection = true;
+    return;
+  }
+  if (parseLogStream._drySection) {
+    // Dry-run sections end at the Total/summary lines.
+    if (/^\s*Total:/i.test(text) || /---\s*SKIPPED FILES/i.test(text) || /^=+$/.test(text.trim())) {
+      parseLogStream._drySection = false;
+    } else {
+      const dryName = text.replace(/^\s+/, "").split(/\s{2,}|\s*\|\s*/)[0];
+      if (dryName && /\.mkv$/i.test(dryName)) {
+        tracker.markDryRun(dryName.trim());
+      }
+      return;
+    }
+  }
+
+  // Per-file deferred log block header -> marks the card as having started.
+  const procMatch = text.match(/^\s*Processing:\s*(.+?)\s*$/i);
+  if (procMatch && /\.mkv$/i.test(procMatch[1])) {
+    tracker.markProcessing(procMatch[1].trim());
     return;
   }
 
-  const startMatch = text.match(/\[JOB_START\]\s*(.+)$/i);
-  if (startMatch) {
-    tracker.markProcessing(startMatch[1].trim());
+  // remux: SKIPPED: <name> | Reason: <r>
+  const skipMatch = text.match(/^\s*SKIPPED:\s*(.+?)\s*\|\s*Reason:\s*(.+?)\s*$/i);
+  if (skipMatch) {
+    tracker.markSkipped(skipMatch[1].trim(), skipMatch[2].trim());
     return;
   }
 
-  const progressMatch = text.match(/\[JOB_PROGRESS\]\s*([^|]+)\|\s*(\d+)%/i);
-  if (progressMatch) {
-    tracker.updateProgress(progressMatch[1].trim(), parseInt(progressMatch[2]));
+  // remux:  -> [N/M (P%)] Remuxed: <name>
+  // extract:   [N/M (P%)] Extracted: <name>
+  // both:   -> [N/M (P%)] CRASHED: <name>   /   Failed/Skipped: <name>
+  const progMatch = text.match(/^\s*(?:->\s*)?\[\s*(\d+)\s*\/\s*(\d+)\s*\(\s*([\d.]+)%\)\]\s*(Remuxed|Extracted|Failed\/Skipped|Skipped|CRASHED):\s*(.+?)\s*$/i);
+  if (progMatch) {
+    const batchPct = parseFloat(progMatch[3]);
+    const verb = progMatch[4].toLowerCase();
+    const name = progMatch[5].trim();
+    if (verb === "remuxed" || verb === "extracted") {
+      tracker.markCompleted(name);
+    } else if (verb === "crashed") {
+      tracker.markFailed(name, "Worker crashed");
+    } else {
+      // "Failed/Skipped" and "Skipped" both mean the backend did not produce
+      // output for this file.
+      tracker.markSkipped(name, "Skipped");
+    }
+    // Surface real batch-level progress on the active card(s) so the bar
+    // reflects reality instead of the old random-walk fake.
+    tracker.items.forEach(item => {
+      if (item.status === "processing") tracker.updateProgress(item.filename, batchPct);
+    });
     return;
   }
 
-  const doneMatch = text.match(/\[JOB_DONE\]\s*([^|]+)\|(?:.*?([\d\.]+)\s*s)?/i);
-  if (doneMatch) {
-    const fn = doneMatch[1].trim();
-    const dur = doneMatch[2] ? doneMatch[2].trim() : null;
-    tracker.markCompleted(fn, dur);
-    return;
-  }
-
-  const failMatch = text.match(/\[JOB_FAIL\]\s*([^|]+)\|\s*(.+)$/i);
-  if (failMatch) {
-    const fn = failMatch[1].trim();
-    const reason = failMatch[2].trim();
-    tracker.markFailed(fn, reason);
-    return;
-  }
-
-  const altStartMatch = text.match(/(?:Processing|Remuxing|Extracting|\bJob\b).*?[:\s]+([\w-]+\.mkv)/i)
-    || text.match(/\b([\w-]+\.mkv)\b\s*->/i);
-  if (altStartMatch) {
-    tracker.markProcessing(altStartMatch[1].trim());
-    return;
-  }
-
-  const altDoneMatch = text.match(/(?:Remuxed|Extracted|Completed).*?[:\s]+([\w-]+\.mkv)(?:.*?in\s+([\d\.]+)\s*s)?/i);
-  if (altDoneMatch) {
-    tracker.markCompleted(altDoneMatch[1].trim(), altDoneMatch[2] ? altDoneMatch[2].trim() : null);
-  }
+  // ─── Future-proofing: structured [JOB_*] tags (not yet emitted by backend) ─
+  const jobStart = text.match(/\[JOB_START\]\s*(.+)$/i);
+  if (jobStart) { tracker.markProcessing(jobStart[1].trim()); return; }
+  const jobProg = text.match(/\[JOB_PROGRESS\]\s*([^|]+)\|\s*(\d+)%/i);
+  if (jobProg) { tracker.updateProgress(jobProg[1].trim(), parseInt(jobProg[2])); return; }
+  const jobDone = text.match(/\[JOB_DONE\]\s*([^|]+)\|?(?:.*?([\d.]+)\s*s)?/i);
+  if (jobDone) { tracker.markCompleted(jobDone[1].trim(), jobDone[2] ? jobDone[2].trim() : null); return; }
+  const jobFail = text.match(/\[JOB_FAIL\]\s*([^|]+)\|\s*(.+)$/i);
+  if (jobFail) { tracker.markFailed(jobFail[1].trim(), jobFail[2].trim()); return; }
+  const jobDry = text.match(/\[JOB_DRY_RUN\]\s*([^|]+)/i);
+  if (jobDry) { tracker.markDryRun(jobDry[1].trim()); return; }
 }
 
 function clearLog(logEl) {
@@ -703,6 +813,18 @@ class JobController {
     }
   }
 
+  flagInputError(inputId, message) {
+    const el = document.getElementById(`${this.mode}-${inputId}`);
+    if (el) {
+      el.classList.add("input-error");
+      el.focus();
+      const clear = () => el.classList.remove("input-error");
+      el.addEventListener("input", clear, { once: true });
+      el.addEventListener("change", clear, { once: true });
+    }
+    appendLog(this.logEl, `[ERROR] ${message}`, this.mode);
+  }
+
   buildArgs() {
     const val = id => document.getElementById(`${this.mode}-${id}`)?.value?.trim() ?? "";
     const chk = id => document.getElementById(`${this.mode}-${id}`)?.checked ?? false;
@@ -710,7 +832,7 @@ class JobController {
 
     if (this.mode === "remux") {
       const inputDir = val("input-dir");
-      if (!inputDir) { alert("Input directory is required."); return null; }
+      if (!inputDir) { this.flagInputError("input-dir", "Input directory is required."); return null; }
       args.push("--input-dir", inputDir);
       const outDir = val("out-dir");     if (outDir)    args.push("--out-dir",   outDir);
       const fontsDir = val("fonts-dir"); if (fontsDir)  args.push("--fonts-dir", fontsDir);
@@ -727,7 +849,7 @@ class JobController {
 
     if (this.mode === "extract") {
       const inputDir = val("input-dir");
-      if (!inputDir) { alert("Input directory is required."); return null; }
+      if (!inputDir) { this.flagInputError("input-dir", "Input directory is required."); return null; }
       args.push("--input-dir", inputDir);
       const outDir = val("out-dir");     if (outDir)    args.push("--out-dir",   outDir);
       const fontsDir = val("fonts-dir"); if (fontsDir)  args.push("--fonts-dir", fontsDir);
@@ -811,14 +933,21 @@ class JobController {
 
     const isDryRun = document.getElementById(`${this.mode}-dry-run`)?.checked ?? false;
     const tracker = this.mode === "extract" ? extractQueue : remuxQueue;
+    const ok = code === 0;
 
+    // Resolve only cards the backend actually touched. Queued cards the
+    // backend never reported on were genuinely not processed — mark them
+    // Skipped (truthful), never Completed.
     tracker.items.forEach(item => {
-      if (item.status === "processing" || item.status === "queued") {
-        if (isDryRun) {
+      if (isDryRun) {
+        if (item.status === "processing" || item.status === "queued") {
           tracker.markDryRun(item.filename);
-        } else {
-          tracker.markCompleted(item.filename);
         }
+      } else if (item.status === "processing") {
+        if (ok) tracker.markCompleted(item.filename);
+        else tracker.markFailed(item.filename, `No result (exit ${code})`);
+      } else if (item.status === "queued") {
+        tracker.markSkipped(item.filename, ok ? "Not processed" : `Aborted (exit ${code})`);
       }
     });
   }
@@ -860,17 +989,9 @@ async function syncMaximizedState() {
 function initApp() {
   initTheme();
 
-  const ua = navigator.userAgent.toLowerCase();
-  if (ua.includes("windows") || ua.includes("win32")) {
-    document.documentElement.classList.add("is-windows");
-    document.body.classList.add("is-windows");
-  } else if (ua.includes("mac")) {
-    document.documentElement.classList.add("is-mac");
-    document.body.classList.add("is-mac");
-  } else if (ua.includes("linux")) {
-    document.documentElement.classList.add("is-linux");
-    document.body.classList.add("is-linux");
-  }
+  // NOTE: OS-class detection (is-windows / is-mac / is-linux) lives in the
+  // inline <head> script in index.html so it runs before first paint; we do
+  // not duplicate it here.
 
   safeAddListener("btn-theme", "click", () => {
     const current = document.documentElement.getAttribute("data-theme");
@@ -909,6 +1030,25 @@ function initApp() {
   document.querySelectorAll(".pipeline-tab-btn[data-view], .nav-item[data-view], .top-tab-item[data-view]").forEach(btn => {
     safeAddListener(btn, "click", () => switchView(btn.dataset.view));
   });
+
+  // ─── Low-cost accessibility wiring ──────────────────────────────────────
+  document.querySelectorAll(".stepper-btn").forEach(btn => {
+    if (!btn.hasAttribute("aria-label")) {
+      btn.setAttribute("aria-label", btn.classList.contains("minus") ? "Decrease" : "Increase");
+    }
+  });
+  document.querySelectorAll(".log-body").forEach(el => el.setAttribute("aria-live", "polite"));
+  const modal = document.getElementById("confirm-modal");
+  if (modal) { modal.setAttribute("role", "dialog"); modal.setAttribute("aria-modal", "true"); }
+  const tabGroup = document.querySelector(".pipeline-tab-group");
+  if (tabGroup) tabGroup.setAttribute("role", "tablist");
+  const syncTabAria = () => {
+    document.querySelectorAll(".pipeline-tab-btn[data-view]").forEach(btn => {
+      btn.setAttribute("role", "tab");
+      btn.setAttribute("aria-selected", btn.classList.contains("active") ? "true" : "false");
+    });
+  };
+  syncTabAria();
 
   document.querySelectorAll(".browse-btn[data-target]").forEach(btn => {
     safeAddListener(btn, "click", async () => {

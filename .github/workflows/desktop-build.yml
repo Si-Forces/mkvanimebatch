@@ -41,13 +41,13 @@ jobs:
             --distpath $OutDir `
             --workpath "pyinstaller-work-remux" `
             --specpath "pyinstaller-spec-remux" `
-            --noconfirm mkv_remux_fast.py
+            --noconfirm mkv_remux.py
           python -m PyInstaller --onefile --console `
             --name "mkv-extract-$Triple" `
             --distpath $OutDir `
             --workpath "pyinstaller-work-extract" `
             --specpath "pyinstaller-spec-extract" `
-            --noconfirm mkv_extract_fast.py
+            --noconfirm mkv_extract.py
 
       # ── Rust + Tauri ─────────────────────────────────────────────────────────
       - name: Install Rust stable
@@ -129,13 +129,13 @@ jobs:
             --distpath "$OUT" \
             --workpath /tmp/pyinstaller-work-remux \
             --specpath /tmp/pyinstaller-spec-remux \
-            --noconfirm mkv_remux_fast.py
+            --noconfirm mkv_remux.py
           python3 -m PyInstaller --onefile --console \
             --name "mkv-extract-$TRIPLE" \
             --distpath "$OUT" \
             --workpath /tmp/pyinstaller-work-extract \
             --specpath /tmp/pyinstaller-spec-extract \
-            --noconfirm mkv_extract_fast.py
+            --noconfirm mkv_extract.py
 
       # ── Linux system deps ─────────────────────────────────────────────────────
       - name: Install Linux system dependencies
