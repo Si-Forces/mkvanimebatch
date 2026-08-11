@@ -155,6 +155,47 @@ def test_mkv_grouping_by_dir(tmp_path):
     assert len(mkvs_by_dir[s2]) == 1
 
 
+def test_scripts_run_accepts_persistent_cache(tmp_path):
+    """
+    Verify _run in both mkv_remux and mkv_extract accepts persistent_cache keyword argument.
+    """
+    import mkv_remux
+    import mkv_extract
+    import mkv_common
+    from concurrent.futures import ThreadPoolExecutor
+
+    ep_file = tmp_path / "Show_E01.mkv"
+    ep_file.touch()
+
+    all_mkvs = mkv_common.scan_mkv_files(tmp_path)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        # Extract script _run invocation with persistent_cache
+        mkv_extract._run(
+            tmp_path,
+            tmp_path / "fonts",
+            all_mkvs,
+            pool,
+            1,
+            dry_run=True,
+            persistent_cache={ep_file: None},
+        )
+
+        # Remux script _run invocation with persistent_cache
+        mkv_remux._run(
+            tmp_path,
+            all_mkvs,
+            tmp_path,
+            tmp_path / "out",
+            tmp_path / "fonts",
+            [tmp_path],
+            pool,
+            1,
+            "192k",
+            dry_run=True,
+            persistent_cache={ep_file: None},
+        )
+
 
 def test_all_script_imports():
     """
@@ -166,7 +207,6 @@ def test_all_script_imports():
     assert mkv_common is not None
     assert mkv_extract is not None
     assert mkv_remux is not None
-    assert mkv_common is not None
     assert mkv_extract is not None
     assert mkv_remux is not None
 

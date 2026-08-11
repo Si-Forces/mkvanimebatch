@@ -125,7 +125,7 @@ class TestFontRegistryNormal:
 # We inherit the test suite to ensure the fast module's class is fully covered.
 # ─────────────────────────────────────────────────────────────────────────────
 
-class TestFontRegistryFast(TestFontRegistryNormal):
+class TestFontRegistryLocalHash(TestFontRegistryNormal):
     """Tests for the FontRegistry in mkv_common."""
 
     def _reg(self, existing_hashes=None):
