@@ -65,7 +65,7 @@ jobs:
 
       - name: Build Tauri app
         working-directory: desktop-tauri
-        run: cargo tauri build --bundles none
+        run: cargo tauri build --no-bundle
 
       # ── Package Windows Artifacts (Portable Zip & Installer) ───────────
       - name: Package Windows Artifacts
@@ -90,7 +90,7 @@ jobs:
           # Create Portable Zip
           Compress-Archive -Path "$StageDir\*" -DestinationPath "$OutDir\MKV_Anime_Batch_Portable_win64.zip" -Force
 
-          # Collect MSI installer if generated (Disabled via --bundles none)
+          # Collect MSI installer if generated (Disabled via --no-bundle)
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
