@@ -1276,6 +1276,7 @@ def main() -> None:
 
     overall_success = True
     scan_cache: dict[Path, ScanResults] = {}
+    fonts_dir_cache: dict[Path, Path] = {}
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         for mkv_dir in mkv_dirs:
@@ -1306,7 +1307,7 @@ def main() -> None:
                 current_fonts_dir = fonts_override
             else:
                 for d in reversed(search_dirs):
-                    candidate = find_fonts_dir(d)
+                    candidate = find_fonts_dir(d, fonts_dir_cache=fonts_dir_cache)
                     if candidate.is_dir():
                         current_fonts_dir = candidate
                         break
