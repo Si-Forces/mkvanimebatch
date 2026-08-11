@@ -117,8 +117,7 @@ class TestFontRegistryNormal:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# mkv_common.FontRegistry now mirrors mkv_common's hash-based API.
-# We inherit the test suite to ensure the fast module's class is fully covered.
+# We inherit the test suite to ensure the hash-based class is fully covered.
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestFontRegistryLocalHash(TestFontRegistryNormal):
