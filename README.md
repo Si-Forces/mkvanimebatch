@@ -102,6 +102,8 @@ All batch launchers include non-interactive EOF loop guards to safely handle red
 
 A native desktop GUI built with **Tauri v2** featuring an Apple **Liquid Glass** UI aesthetic (frosted glass panels, translucent dark/light mode, traffic light window controls, and live stdout/stderr log streaming).
 
+> 🎨 Alternative UI design explorations live in [`docs/prototypes/`](docs/prototypes/) (open `docs/prototypes/index.html` in a browser to browse them). They are dev artifacts and are not shipped in the built app.
+
 #### Building locally:
 - **Windows**:
   ```powershell
