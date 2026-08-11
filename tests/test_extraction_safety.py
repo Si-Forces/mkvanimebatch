@@ -100,7 +100,6 @@ def test_stale_subtitle_cleanup(tmp_path):
     """
     _cleanup_stale_subtitle_offsets should remove old offset-suffixed versions.
     """
-    import mkv_extract_fast
     base_sub = tmp_path / "episode_01_E01_ind_track2.ass"
     base_sub.touch()
     old_offset = tmp_path / "episode_01_E01_ind_track2.[+2s].ass"
@@ -112,7 +111,7 @@ def test_stale_subtitle_cleanup(tmp_path):
     manual_sub.touch()
 
     active_map = {"episode_01_E01_ind_track2": "episode_01_E01_ind_track2.[+5s].ass"}
-    mkv_extract_fast._cleanup_stale_subtitle_offsets_bulk(tmp_path, active_map)
+    mkv_extract._cleanup_stale_subtitle_offsets_bulk(tmp_path, active_map)
 
     assert not base_sub.exists()
     assert not old_offset.exists()
@@ -120,7 +119,7 @@ def test_stale_subtitle_cleanup(tmp_path):
     assert manual_sub.exists()
 
 
-@pytest.mark.parametrize("module_name", ["mkv_extract", "mkv_extract_fast"])
+@pytest.mark.parametrize("module_name", ["mkv_extract"])
 def test_stale_subtitle_cleanup_handles_case_variant_stems(tmp_path, module_name):
     module = importlib.import_module(module_name)
     current = tmp_path / "Episode_01_E01_ind_track2.[+5s].ass"
@@ -138,7 +137,7 @@ def test_stale_subtitle_cleanup_handles_case_variant_stems(tmp_path, module_name
     assert not old_base.exists()
 
 
-@pytest.mark.parametrize("module_name", ["mkv_extract", "mkv_extract_fast"])
+@pytest.mark.parametrize("module_name", ["mkv_extract"])
 def test_stale_subtitle_cleanup_preserves_multiple_active_casefold_collisions(tmp_path, module_name):
     module = importlib.import_module(module_name)
     current_a = tmp_path / "Straße_01_E01_ind_track2.[+5s].ass"

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # build-sidecars.sh
-# Builds mkv_remux_fast.py and mkv_extract_fast.py as standalone Linux executables.
+# Builds mkv_remux.py and mkv_extract.py as standalone Linux executables.
 # Usage (from repo root):  bash desktop-tauri/build-sidecars.sh
 # or from desktop-tauri/:  bash build-sidecars.sh
 
@@ -21,7 +21,7 @@ python3 -m PyInstaller \
     --workpath "/tmp/pyinstaller-work-remux" \
     --specpath "/tmp/pyinstaller-spec-remux" \
     --noconfirm \
-    "$REPO_ROOT/mkv_remux_fast.py"
+    "$REPO_ROOT/mkv_remux.py"
 
 echo "==> Building mkv-extract sidecar..."
 python3 -m PyInstaller \
@@ -31,7 +31,7 @@ python3 -m PyInstaller \
     --workpath "/tmp/pyinstaller-work-extract" \
     --specpath "/tmp/pyinstaller-spec-extract" \
     --noconfirm \
-    "$REPO_ROOT/mkv_extract_fast.py"
+    "$REPO_ROOT/mkv_extract.py"
 
 # Ensure binaries have executable permissions
 chmod +x "$OUT_DIR"/mkv-* 2>/dev/null || true

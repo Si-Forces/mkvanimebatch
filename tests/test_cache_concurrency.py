@@ -7,12 +7,10 @@ from pathlib import Path
 import pytest
 
 mkv_common = importlib.import_module("mkv_common")
-mkv_common_fast = importlib.import_module("mkv_common_fast")
 
 
 @pytest.mark.parametrize("mod", [
     pytest.param(mkv_common, id="mkv_common"),
-    pytest.param(mkv_common_fast, id="mkv_common_fast"),
 ])
 def test_concurrent_put_and_save_safety(tmp_path, mod):
     """Ensure calling .put() repeatedly across 10 threads while calling .save()
