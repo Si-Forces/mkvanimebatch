@@ -15,11 +15,9 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 mkv_common = importlib.import_module("mkv_common")
-mkv_common_fast = importlib.import_module("mkv_common_fast")
 
 COMMON_MODULES = [
     pytest.param(mkv_common, id="mkv_common"),
-    pytest.param(mkv_common_fast, id="mkv_common_fast"),
 ]
 
 
@@ -118,7 +116,7 @@ def test_scan_mkv_files_follows_file_symlinks(mod):
 
 def test_scan_assets_fresh_scan_fast(tmp_path):
     """
-    scan_assets in mkv_common_fast must return fresh ScanResults instances
+    scan_assets in mkv_common must return fresh ScanResults instances
     to prevent cross-caller list mutation bugs.
     """
     sub_dir = tmp_path / "SubDir"
@@ -126,11 +124,11 @@ def test_scan_assets_fresh_scan_fast(tmp_path):
     (sub_dir / "episode_01.ass").write_bytes(b"[Script Info]")
 
     # First call - scans disk
-    res1 = mkv_common_fast.scan_assets(sub_dir)
+    res1 = mkv_common.scan_assets(sub_dir)
     assert len(res1.subs) == 1
 
     # Second call - returns fresh un-cached object with identical contents
-    res2 = mkv_common_fast.scan_assets(sub_dir)
+    res2 = mkv_common.scan_assets(sub_dir)
     assert res1 == res2
     assert res1 is not res2
 
@@ -148,7 +146,7 @@ def test_mkv_grouping_by_dir(tmp_path):
     (s1 / "ep02.mkv").touch()
     (s2 / "ep01.mkv").touch()
 
-    all_mkvs = mkv_common_fast.scan_mkv_files(tmp_path)
+    all_mkvs = mkv_common.scan_mkv_files(tmp_path)
     mkvs_by_dir = defaultdict(list)
     for mkv in all_mkvs:
         mkvs_by_dir[mkv.path.parent].append(mkv)
@@ -157,32 +155,34 @@ def test_mkv_grouping_by_dir(tmp_path):
     assert len(mkvs_by_dir[s2]) == 1
 
 
-def test_fast_scripts_run_accepts_inspect_cache(tmp_path):
+def test_scripts_run_accepts_persistent_cache(tmp_path):
     """
-    Verify _run in both mkv_remux_fast and mkv_extract_fast accepts inspect_cache keyword argument.
+    Verify _run in both mkv_remux and mkv_extract accepts persistent_cache keyword argument.
     """
-    import mkv_remux_fast
-    import mkv_extract_fast
+    import mkv_remux
+    import mkv_extract
+    import mkv_common
     from concurrent.futures import ThreadPoolExecutor
 
     ep_file = tmp_path / "Show_E01.mkv"
     ep_file.touch()
 
-    all_mkvs = mkv_common_fast.scan_mkv_files(tmp_path)
+    all_mkvs = mkv_common.scan_mkv_files(tmp_path)
 
     with ThreadPoolExecutor(max_workers=1) as pool:
-        # Extract script _run invocation with inspect_cache
-        mkv_extract_fast._run(
+        # Extract script _run invocation with persistent_cache
+        mkv_extract._run(
             tmp_path,
             tmp_path / "fonts",
             all_mkvs,
             pool,
-            inspect_cache={ep_file: None},
+            1,
             dry_run=True,
+            persistent_cache={ep_file: None},
         )
 
-        # Remux script _run invocation with inspect_cache
-        mkv_remux_fast._run(
+        # Remux script _run invocation with persistent_cache
+        mkv_remux._run(
             tmp_path,
             all_mkvs,
             tmp_path,
@@ -192,9 +192,8 @@ def test_fast_scripts_run_accepts_inspect_cache(tmp_path):
             pool,
             1,
             "192k",
-            10,
             dry_run=True,
-            inspect_cache={ep_file: None},
+            persistent_cache={ep_file: None},
         )
 
 
@@ -202,16 +201,12 @@ def test_all_script_imports():
     """
     Ensure all entrypoint and common scripts can be imported cleanly without missing dependencies or syntax errors.
     """
-    import mkv_common_fast
-    import mkv_extract_fast
-    import mkv_remux_fast
     import mkv_common
     import mkv_extract
     import mkv_remux
-    assert mkv_common_fast is not None
-    assert mkv_extract_fast is not None
-    assert mkv_remux_fast is not None
     assert mkv_common is not None
+    assert mkv_extract is not None
+    assert mkv_remux is not None
     assert mkv_extract is not None
     assert mkv_remux is not None
 

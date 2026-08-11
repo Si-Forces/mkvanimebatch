@@ -7,18 +7,13 @@ from unittest.mock import patch
 
 import pytest
 
-mkv_common_fast = importlib.import_module("mkv_common_fast")
 mkv_common = importlib.import_module("mkv_common")
-mkv_remux_fast = importlib.import_module("mkv_remux_fast")
 mkv_remux = importlib.import_module("mkv_remux")
-mkv_extract_fast = importlib.import_module("mkv_extract_fast")
 mkv_extract = importlib.import_module("mkv_extract")
 
 
 @pytest.mark.parametrize("mod, common_mod", [
-    pytest.param(mkv_remux_fast, mkv_common_fast, id="mkv_remux_fast"),
     pytest.param(mkv_remux, mkv_common, id="mkv_remux"),
-    pytest.param(mkv_extract_fast, mkv_common_fast, id="mkv_extract_fast"),
     pytest.param(mkv_extract, mkv_common, id="mkv_extract"),
 ])
 def test_cli_dry_run_smoke(tmp_path, mod, common_mod):

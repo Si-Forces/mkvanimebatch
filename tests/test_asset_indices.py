@@ -6,14 +6,11 @@ from pathlib import Path
 import pytest
 
 mkv_common = importlib.import_module("mkv_common")
-mkv_common_fast = importlib.import_module("mkv_common_fast")
 mkv_remux = importlib.import_module("mkv_remux")
-mkv_remux_fast = importlib.import_module("mkv_remux_fast")
 
 
 @pytest.mark.parametrize("common_mod", [
     pytest.param(mkv_common, id="mkv_common"),
-    pytest.param(mkv_common_fast, id="mkv_common_fast"),
 ])
 class TestFontDirDiscovery:
     def test_find_fonts_dir_override(self, tmp_path, common_mod):
@@ -40,7 +37,6 @@ class TestFontDirDiscovery:
 
 @pytest.mark.parametrize("common_mod", [
     pytest.param(mkv_common, id="mkv_common"),
-    pytest.param(mkv_common_fast, id="mkv_common_fast"),
 ])
 class TestChapterSniffing:
     def test_is_chapter_xml(self, tmp_path, common_mod):
@@ -60,7 +56,6 @@ class TestChapterSniffing:
 
 @pytest.mark.parametrize("remux_mod, common_mod", [
     pytest.param(mkv_remux, mkv_common, id="mkv_remux"),
-    pytest.param(mkv_remux_fast, mkv_common_fast, id="mkv_remux_fast"),
 ])
 class TestAssetIndices:
     def test_chap_index_lookup(self, tmp_path, remux_mod, common_mod, monkeypatch):
