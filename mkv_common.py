@@ -719,8 +719,8 @@ def inspect_videos(
     to_inspect: list[Path] = []
 
     if persistent_cache and not force_refresh:
-        for v in videos:
-            cached_data = persistent_cache.get(v)
+        results = list(pool.map(persistent_cache.get, videos))
+        for v, cached_data in zip(videos, results):
             if cached_data is not None:
                 cache[v] = cached_data
             else:
@@ -831,7 +831,15 @@ def scan_mkv_files(dir_path: Path, recursive: bool = True, ignore_paths: set[Pat
     return results
 
 
-def scan_assets(dir_path: Path) -> ScanResults:
+def scan_assets(dir_path: Path, scan_cache: dict[Path, ScanResults] | None = None) -> ScanResults:
+    if scan_cache is not None and dir_path in scan_cache:
+        cached = scan_cache[dir_path]
+        return ScanResults(
+            subs=list(cached.subs),
+            chapters=list(cached.chapters),
+            covers=list(cached.covers)
+        )
+
     subs = []
     chapters = []
     covers = []
@@ -858,7 +866,10 @@ def scan_assets(dir_path: Path) -> ScanResults:
     subs.sort(key=lambda pf: natural_sort_key(pf.name))
     chapters.sort(key=lambda pf: natural_sort_key(pf.name))
     covers.sort(key=lambda pf: natural_sort_key(pf.name))
-    return ScanResults(subs=subs, chapters=chapters, covers=covers)
+    res = ScanResults(subs=subs, chapters=chapters, covers=covers)
+    if scan_cache is not None:
+        scan_cache[dir_path] = res
+    return res
 
 _ASS_TIME_RE = re.compile(r'^(\d+):(\d{2}):(\d{2})\.(\d{2})$')
 
