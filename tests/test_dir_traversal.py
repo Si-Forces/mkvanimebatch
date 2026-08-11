@@ -210,3 +210,50 @@ def test_all_script_imports():
     assert mkv_extract is not None
     assert mkv_remux is not None
 
+def test_scan_assets_uses_scan_cache(tmp_path, monkeypatch):
+    import mkv_common
+    import os
+
+    shared_ancestor = tmp_path / "Anime"
+    shared_ancestor.mkdir()
+    (shared_ancestor / "op.ass").touch()
+    
+    original_scandir = os.scandir
+    call_count = 0
+    
+    def mock_scandir(path):
+        nonlocal call_count
+        if str(path) == str(shared_ancestor):
+            call_count += 1
+        return original_scandir(path)
+        
+    monkeypatch.setattr(os, "scandir", mock_scandir)
+    
+    cache = {}
+    
+    # First call scans the directory
+    res1 = mkv_common.scan_assets(shared_ancestor, scan_cache=cache)
+    assert call_count == 1
+    assert shared_ancestor in cache
+    
+    # Second call returns from cache
+    res2 = mkv_common.scan_assets(shared_ancestor, scan_cache=cache)
+    assert call_count == 1
+    
+    # Fresh copies
+    assert res1 is not res2
+    assert res1.subs is not res2.subs
+
+    assert len(res1.subs) == 1
+    assert res1.subs[0].path == res2.subs[0].path
+
+    # Caller mutating a returned list must not corrupt the cached entry
+    res1.subs.clear()
+    res3 = mkv_common.scan_assets(shared_ancestor, scan_cache=cache)
+    assert len(res3.subs) == 1
+
+    # Equivalent path spellings hit the same cache entry
+    res4 = mkv_common.scan_assets(shared_ancestor / ".", scan_cache=cache)
+    assert call_count == 1
+    assert len(res4.subs) == 1
+

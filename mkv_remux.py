@@ -1038,6 +1038,7 @@ def _print_summary(output_dir: Path, matched_files: list[str], skipped_files: li
 def _discover_assets(
     fonts_dir: Path, search_dirs: list[Path],
     assets_dir: Path | None = None,
+    scan_cache: dict[Path, ScanResults] | None = None,
 ) -> tuple[FontInfo, SubIndex, ChapterIndex, CoverIndex, SubIndex | None, ChapterIndex | None, CoverIndex | None]:
     if fonts_dir.is_dir():
         logger.info("Scanning detected font directory: '%s'...", fonts_dir.name)
@@ -1054,7 +1055,7 @@ def _discover_assets(
     cover_index = CoverIndex()
 
     for d in reversed(search_dirs):
-        assets = scan_assets(d)
+        assets = scan_assets(d, scan_cache)
         for sub_file in assets.subs:
             sub_index.add(sub_file)
         for xml_file in assets.chapters:
@@ -1073,7 +1074,7 @@ def _discover_assets(
             fallback_sub_index = SubIndex()
             fallback_chap_index = ChapterIndex()
             fallback_cover_index = CoverIndex()
-            fallback_assets = scan_assets(assets_dir)
+            fallback_assets = scan_assets(assets_dir, scan_cache)
             for sub_file in fallback_assets.subs:
                 fallback_sub_index.add(sub_file)
             for xml_file in fallback_assets.chapters:
@@ -1116,12 +1117,13 @@ def _run(
     persistent_cache: PersistentInspectCache | None = None,
     io_semaphore: threading.Semaphore | None = None,
     assets_dir:   Path | None = None,
+    scan_cache: dict[Path, ScanResults] | None = None,
 ) -> bool:
     if not videos:
         logger.warning("No MKV files to process in '%s'.", mkv_dir.name)
         return False
         
-    discovered = _discover_assets(fonts_dir, search_dirs, assets_dir=assets_dir)
+    discovered = _discover_assets(fonts_dir, search_dirs, assets_dir=assets_dir, scan_cache=scan_cache)
     fonts, sub_index, chap_index, cover_index, f_sub, f_chap, f_cov = discovered
     use_source_fonts = fonts.count == 0
 
@@ -1146,7 +1148,7 @@ def _run(
     seen_subs: set[Path] = set()
     all_subs: list[Path] = []
     for d in search_dirs:
-        for sf in scan_assets(d).subs:
+        for sf in scan_assets(d, scan_cache).subs:
             if sf.path not in seen_subs:
                 seen_subs.add(sf.path)
                 all_subs.append(sf.path)
@@ -1273,6 +1275,8 @@ def main() -> None:
     mkv_dirs = sorted(list(mkvs_by_dir.keys()), key=natural_sort_key)
 
     overall_success = True
+    scan_cache: dict[Path, ScanResults] = {}
+    fonts_dir_cache: dict[Path, Path] = {}
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         for mkv_dir in mkv_dirs:
@@ -1303,7 +1307,7 @@ def main() -> None:
                 current_fonts_dir = fonts_override
             else:
                 for d in reversed(search_dirs):
-                    candidate = find_fonts_dir(d)
+                    candidate = find_fonts_dir(d, fonts_dir_cache=fonts_dir_cache)
                     if candidate.is_dir():
                         current_fonts_dir = candidate
                         break
@@ -1336,6 +1340,7 @@ def main() -> None:
                     sub_offset=cfg.sub_offset,
                     complexity=cfg.complexity, persistent_cache=persistent_cache,
                     io_semaphore=io_semaphore, assets_dir=current_assets_dir,
+                    scan_cache=scan_cache,
                 )
                 if not success:
                     overall_success = False
