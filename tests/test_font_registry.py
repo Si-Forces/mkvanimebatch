@@ -1,11 +1,7 @@
 """
 Tests for FontRegistry thread-safety.
 
-mkv_common.FontRegistry   — hash-based + name/size dedup
-mkv_common.FontRegistry — name/size dedup only
-
-The two registries have different interfaces, so they are tested separately
-rather than through the parametrized `mod` fixture.
+mkv_common.FontRegistry — hash-based + name/size dedup
 """
 import threading
 import importlib

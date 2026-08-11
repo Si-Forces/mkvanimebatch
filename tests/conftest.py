@@ -1,9 +1,5 @@
 """
 Shared pytest fixtures for the MKV automation test suite.
-
-Tests are parametrized over mkv_common so that any
-function present in both modules is verified to behave identically. A failure
-in only one variant immediately flags a divergence between the two files.
 """
 import importlib
 import sys
