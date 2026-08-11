@@ -244,7 +244,17 @@ def test_scan_assets_uses_scan_cache(tmp_path, monkeypatch):
     # Fresh copies
     assert res1 is not res2
     assert res1.subs is not res2.subs
-    
+
     assert len(res1.subs) == 1
     assert res1.subs[0].path == res2.subs[0].path
+
+    # Caller mutating a returned list must not corrupt the cached entry
+    res1.subs.clear()
+    res3 = mkv_common.scan_assets(shared_ancestor, scan_cache=cache)
+    assert len(res3.subs) == 1
+
+    # Equivalent path spellings hit the same cache entry
+    res4 = mkv_common.scan_assets(shared_ancestor / ".", scan_cache=cache)
+    assert call_count == 1
+    assert len(res4.subs) == 1
 
