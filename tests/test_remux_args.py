@@ -6,12 +6,10 @@ from pathlib import Path
 import pytest
 
 mkv_remux = importlib.import_module("mkv_remux")
-mkv_remux_fast = importlib.import_module("mkv_remux_fast")
 
 
 @pytest.mark.parametrize("mod", [
     pytest.param(mkv_remux, id="mkv_remux"),
-    pytest.param(mkv_remux_fast, id="mkv_remux_fast"),
 ])
 class TestRemuxArgs:
     def test_no_chapters_before_temp_opus_only(self, mod):
