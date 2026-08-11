@@ -14,6 +14,7 @@ pub fn run() {
             commands::pick_folder,
             commands::scan_directory,
             commands::inspect_mkv_file,
+            commands::inspect_directory,
             commands::get_system_telemetry,
             commands::close_window,
             commands::minimize_window,

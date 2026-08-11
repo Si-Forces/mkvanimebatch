@@ -257,7 +257,7 @@ pub fn scan_directory(path: String) -> Result<Vec<String>, String> {
     Ok(files)
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct MkvMetadata {
     pub resolution: String,
     pub video_codec: String,
@@ -268,22 +268,9 @@ pub struct MkvMetadata {
     pub fonts_count: usize,
 }
 
-#[tauri::command]
-pub fn inspect_mkv_file(file_path: String) -> Result<MkvMetadata, String> {
-    let mut cmd = std::process::Command::new("mkvmerge");
-    cmd.args(["-J", &file_path]);
-
-    #[cfg(windows)]
-    cmd.creation_flags(CREATE_NO_WINDOW);
-
-    let output = cmd.output().map_err(|e| format!("Failed to run mkvmerge: {}", e))?;
-    if !output.status.success() && output.stdout.is_empty() {
-        return Err("mkvmerge failed to inspect file".into());
-    }
-
-    let json_val: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .map_err(|e| format!("Failed to parse mkvmerge JSON: {}", e))?;
-
+/// Parse the track/attachment data out of `mkvmerge -J` JSON into metadata.
+/// Shared by `inspect_mkv_file` (single) and `inspect_directory` (batch).
+fn parse_mkv_metadata(json_val: &serde_json::Value) -> MkvMetadata {
     let mut res = "1080p".to_string();
     let mut vcodec = "MKV".to_string();
     let mut audio_parts = Vec::new();
@@ -368,7 +355,7 @@ pub fn inspect_mkv_file(file_path: String) -> Result<MkvMetadata, String> {
         format!("ASS ({})", sub_langs.join(", "))
     };
 
-    Ok(MkvMetadata {
+    MkvMetadata {
         resolution: res,
         video_codec: vcodec,
         video_tag,
@@ -376,7 +363,77 @@ pub fn inspect_mkv_file(file_path: String) -> Result<MkvMetadata, String> {
         has_flac,
         sub_summary,
         fonts_count,
-    })
+    }
+}
+
+/// Probe a single MKV with `mkvmerge -J` and return parsed metadata.
+fn probe_mkv(file_path: &std::path::Path) -> Result<MkvMetadata, String> {
+    let mut cmd = std::process::Command::new("mkvmerge");
+    cmd.args(["-J", &file_path.to_string_lossy()]);
+
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+
+    let output = cmd.output().map_err(|e| format!("Failed to run mkvmerge: {}", e))?;
+    if !output.status.success() && output.stdout.is_empty() {
+        return Err("mkvmerge failed to inspect file".into());
+    }
+
+    let json_val: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|e| format!("Failed to parse mkvmerge JSON: {}", e))?;
+
+    Ok(parse_mkv_metadata(&json_val))
+}
+
+#[tauri::command]
+pub fn inspect_mkv_file(dir_path: String, filename: String) -> Result<MkvMetadata, String> {
+    // Join in Rust with Path::join so Windows backslash separators are handled
+    // correctly — the frontend never builds path strings itself.
+    let full_path = PathBuf::from(&dir_path).join(&filename);
+    probe_mkv(&full_path)
+}
+
+/// Scan a directory for MKVs and probe each one on a small thread pool,
+/// returning (filename, metadata) pairs in a single IPC round-trip. This
+/// replaces the old pattern of one `inspect_mkv_file` invoke per file, which
+/// spawned one mkvmerge process per IPC call.
+#[tauri::command]
+pub fn inspect_directory(path: String) -> Result<Vec<(String, MkvMetadata)>, String> {
+    let files = scan_directory(path.clone())?;
+    let dir = PathBuf::from(&path);
+
+    let results: Vec<(String, MkvMetadata)> = thread::scope(|s| {
+        // Bounded worker pool: probe at most 4 files concurrently to avoid
+        // saturating disk I/O with simultaneous mkvmerge processes.
+        let (tx, rx) = std::sync::mpsc::channel::<(String, MkvMetadata)>();
+        let chunk_size = 4.max((files.len() + 3) / 4);
+        let mut handles = Vec::new();
+
+        for chunk in files.chunks(chunk_size) {
+            let tx = tx.clone();
+            let dir = dir.clone();
+            let chunk: Vec<String> = chunk.to_vec();
+            handles.push(s.spawn(move || {
+                for name in chunk {
+                    let full = dir.join(&name);
+                    if let Ok(meta) = probe_mkv(&full) {
+                        let _ = tx.send((name, meta));
+                    }
+                }
+            }));
+        }
+        drop(tx); // close sender so rx iteration terminates
+
+        let mut out: Vec<(String, MkvMetadata)> = rx.iter().collect();
+        for h in handles {
+            let _ = h.join();
+        }
+        // Restore deterministic (sorted) order to match the scan order.
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    });
+
+    Ok(results)
 }
 
 #[tauri::command]
