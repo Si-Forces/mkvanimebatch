@@ -4,31 +4,31 @@ An automated, high-performance batch processing suite for anime and fansub MKV c
 
 ---
 
-## 🔥 Key Features
+## Key Features
 
-### 🎬 Intelligent Subtitle Selection & Extraction
+### Intelligent Subtitle Selection & Extraction
 * **Language Priority**: Automatically detects and scores subtitle tracks, prioritizing Indonesian (`ind`, `id`) and fallback English (`eng`, `en`).
 * **Format & Track Type Scoring**: Prefers Advanced SubStation Alpha (`.ass` typesetting) over SubRip (`.srt`), prioritizing dialogue tracks over signs/titles or commentaries.
 * **Format-Variant Coexistence**: Supports evaluating multiple subtitle formats (`.ass` vs `.srt`) for the same episode without prematurely discarding candidates.
 
-### 🔊 10-Tier Audio Picker
+### 10-Tier Audio Picker
 * **Dialogue Priority**: Automatically scores audio tracks, favoring Japanese stereo and multi-channel audio tracks.
 * **Audio Commentary Exclusion**: Isolates commentary tracks into a secondary fallback pool, ensuring voice-actor/director commentaries never override film dialogue.
 
-### ⏱️ Subtitle Offset Shifting & Preservation
+### Subtitle Offset Shifting & Preservation
 * **Offset-Encoded Filenames**: Encodes timestamp offsets into output filenames (e.g. `episode_01.ind.[+5s].ass`) to allow instant skip checks on automated runs.
 * **BOM Preservation**: Preserves UTF-8 BOM byte-order marks (`utf-8-sig`) when shifting timestamps.
 
-### 🛡️ Atomic Operations & Safe Recovery
+### Atomic Operations & Safe Recovery
 * **Crash-Resistant Output**: Performs all remuxing and extraction into isolated temporary job directories, promoting completed files via atomic move operations only upon successful exit codes. Partial or interrupted outputs from power failures are automatically quarantined and discarded.
 
-### 🚀 Standard & Fast Concurrency Engine
+### Standard & Fast Concurrency Engine
 * Offers both standard single-file routines and parallel high-throughput implementations (`mkv_extract.py` and `mkv_remux.py`) backed by thread pools and bounded disk I/O jobs.
 * **Persistent Inspect Cache**: Caches `mkvmerge` JSON probe results to `.mkv_inspect_cache.json` across runs, dramatically reducing repeated disk reads on large collections.
 
 ---
 
-## 🛠️ System Requirements
+## System Requirements
 
 Make sure the following software executables are installed and available in your system `PATH`:
 
@@ -38,7 +38,7 @@ Make sure the following software executables are installed and available in your
 
 ---
 
-## 🚀 Quick Start & Usage
+## Quick Start & Usage
 
 ### 1. Extract Subtitles & Fonts
 
@@ -102,7 +102,7 @@ All batch launchers include non-interactive EOF loop guards to safely handle red
 
 A native desktop GUI built with **Tauri v2** featuring an Apple **Liquid Glass** UI aesthetic (frosted glass panels, translucent dark/light mode, traffic light window controls, and live stdout/stderr log streaming).
 
-> 🎨 Alternative UI design explorations live in [`docs/prototypes/`](docs/prototypes/) (open `docs/prototypes/index.html` in a browser to browse them). They are dev artifacts and are not shipped in the built app.
+> Alternative UI design explorations live in [`docs/prototypes/`](docs/prototypes/) (open `docs/prototypes/index.html` in a browser to browse them). They are dev artifacts and are not shipped in the built app.
 
 #### Building locally:
 - **Windows**:
@@ -124,7 +124,7 @@ A native desktop GUI built with **Tauri v2** featuring an Apple **Liquid Glass**
 
 ---
 
-## 🧪 Running Unit Tests
+## Running Unit Tests
 
 The test suite includes **300+ automated unit tests** covering filename parsing, subtitle shifting, directory traversal, font registry deduplication, multi-threaded cache safety, track selection scoring, and CLI validation.
 
@@ -136,6 +136,6 @@ python -m pytest tests/ --tb=short
 
 ---
 
-## 📄 License
+## License
 
 This project is open-source and available under the MIT License.
