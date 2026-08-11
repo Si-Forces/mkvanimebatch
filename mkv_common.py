@@ -272,7 +272,7 @@ class FontRegistry:
 _FONT_DIR_NAMES = frozenset({"fonts", "font", "attachments"})
 
 
-def find_fonts_dir(input_dir: Path, override: Path | None = None) -> Path:
+def find_fonts_dir(input_dir: Path, override: Path | None = None, fonts_dir_cache: dict[Path, Path] | None = None) -> Path:
     """
     Resolve which directory to use for fonts.
 
@@ -291,15 +291,24 @@ def find_fonts_dir(input_dir: Path, override: Path | None = None) -> Path:
     if override is not None:
         return override
 
+    if fonts_dir_cache is not None and input_dir in fonts_dir_cache:
+        return fonts_dir_cache[input_dir]
+
     exact = input_dir / "fonts"
     if exact.is_dir():
+        if fonts_dir_cache is not None:
+            fonts_dir_cache[input_dir] = exact
         return exact
 
     if input_dir.is_dir():
         for entry in sorted(input_dir.iterdir()):
             if entry.is_dir() and entry.name.lower() in _FONT_DIR_NAMES:
+                if fonts_dir_cache is not None:
+                    fonts_dir_cache[input_dir] = entry
                 return entry
 
+    if fonts_dir_cache is not None:
+        fonts_dir_cache[input_dir] = exact
     return exact
 
 
@@ -719,8 +728,8 @@ def inspect_videos(
     to_inspect: list[Path] = []
 
     if persistent_cache and not force_refresh:
-        for v in videos:
-            cached_data = persistent_cache.get(v)
+        results = list(pool.map(persistent_cache.get, videos))
+        for v, cached_data in zip(videos, results):
             if cached_data is not None:
                 cache[v] = cached_data
             else:
@@ -831,7 +840,17 @@ def scan_mkv_files(dir_path: Path, recursive: bool = True, ignore_paths: set[Pat
     return results
 
 
-def scan_assets(dir_path: Path) -> ScanResults:
+def scan_assets(dir_path: Path, scan_cache: dict[Path, ScanResults] | None = None) -> ScanResults:
+    if scan_cache is not None:
+        dir_path = dir_path.resolve()
+        if dir_path in scan_cache:
+            cached = scan_cache[dir_path]
+            return ScanResults(
+                subs=list(cached.subs),
+                chapters=list(cached.chapters),
+                covers=list(cached.covers)
+            )
+
     subs = []
     chapters = []
     covers = []
@@ -858,7 +877,16 @@ def scan_assets(dir_path: Path) -> ScanResults:
     subs.sort(key=lambda pf: natural_sort_key(pf.name))
     chapters.sort(key=lambda pf: natural_sort_key(pf.name))
     covers.sort(key=lambda pf: natural_sort_key(pf.name))
-    return ScanResults(subs=subs, chapters=chapters, covers=covers)
+    res = ScanResults(subs=subs, chapters=chapters, covers=covers)
+    if scan_cache is not None:
+        # Store immutable snapshots: callers may mutate the lists they get
+        # back, and that must not corrupt the cached entry for other callers.
+        scan_cache[dir_path] = ScanResults(
+            subs=tuple(res.subs),
+            chapters=tuple(res.chapters),
+            covers=tuple(res.covers),
+        )
+    return res
 
 _ASS_TIME_RE = re.compile(r'^(\d+):(\d{2}):(\d{2})\.(\d{2})$')
 

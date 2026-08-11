@@ -135,7 +135,7 @@ def _hash_file(filepath: Path) -> str:
     """Calculate BLAKE2b hash of a file for content-based font deduplication."""
     h = hashlib.blake2b()
     with filepath.open('rb') as f:
-        while chunk := f.read(8192):
+        while chunk := f.read(1048576):
             h.update(chunk)
     return h.hexdigest()
 
@@ -194,8 +194,7 @@ def process_file(
             f"subtitle tag will use stem '{file_stem}'."
         )
 
-    extract_args: list[str] = []
-    queued_outputs: list[tuple[Path, str]] = []
+    queued_outputs: list[tuple[str, str | None, Path, str]] = []
 
     sub_result = select_subtitle(json_data, file_stem, file_dir, ep_tag, log)
     final_sub_path = None
@@ -206,8 +205,7 @@ def process_file(
             sub_path = sub_path.with_name(f"{sub_path.stem}.[{sub_offset:+g}s]{sub_path.suffix}")
         final_sub_path = sub_path
         log.append(f"   -> Queued subtitle track {track_id} → {sub_path.name}")
-        extract_args += ["tracks", f"{track_id}:{sub_path}"]
-        queued_outputs.append((sub_path, "Subtitle"))
+        queued_outputs.append(("tracks", str(track_id), sub_path, "Subtitle"))
     else:
         log.append("   -> No suitable ASS subtitle tracks found.")
 
@@ -215,8 +213,7 @@ def process_file(
     if meta.has_chapters:
         chapter_path = file_dir / f"{chapter_stem}_chapters.xml"
         log.append(f"   -> Queued chapters → {chapter_path.name}")
-        extract_args += ["chapters", str(chapter_path)]
-        queued_outputs.append((chapter_path, "Chapter"))
+        queued_outputs.append(("chapters", None, chapter_path, "Chapter"))
     else:
         log.append("   -> No chapters found in source.")
 
@@ -230,8 +227,7 @@ def process_file(
             cover_path = None
         else:
             log.append(f"   -> Queued cover image → {cover_path.name}")
-            extract_args += ["attachments", f"{cover['id']}:{cover_path}"]
-            queued_outputs.append((cover_path, "Cover"))
+            queued_outputs.append(("attachments", str(cover['id']), cover_path, "Cover"))
     else:
         log.append("   -> No cover image found in source.")
 
@@ -240,15 +236,14 @@ def process_file(
     extracted_ok: set[tuple[str, int]] = set()
     try:
         temp_dir = Path(tempfile.mkdtemp(prefix=".tmp_extract_", dir=file_dir))
+        extract_args: list[str] = []
         staged_outputs: list[tuple[Path, Path, str]] = []
-        for final_path, item_name in queued_outputs:
+        for cmd_type, arg_id, final_path, item_name in queued_outputs:
             staged_path = temp_dir / final_path.name
-            final_text = str(final_path)
-            for index, arg in enumerate(extract_args):
-                if arg == final_text:
-                    extract_args[index] = str(staged_path)
-                elif arg.endswith(final_text):
-                    extract_args[index] = f"{arg[:-len(final_text)]}{staged_path}"
+            if arg_id is not None:
+                extract_args += [cmd_type, f"{arg_id}:{staged_path}"]
+            else:
+                extract_args += [cmd_type, str(staged_path)]
             staged_outputs.append((staged_path, final_path, item_name))
 
         font_count = 0
