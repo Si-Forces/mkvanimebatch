@@ -92,12 +92,57 @@ jobs:
 
           # Collect MSI installer if generated (Disabled via --no-bundle)
 
-      - name: Upload Windows artifacts
-        uses: actions/upload-artifact@v4
+      # Attach Windows files directly to the release — no artifact-store
+      # handoff, so the artifact storage quota no longer blocks releases.
+      - name: Publish Windows files to release
+        uses: softprops/action-gh-release@v2
         with:
-          name: windows-artifacts
-          path: windows-artifacts/
-          if-no-files-found: error
+          name: "MKV Anime Batch ${{ github.ref_name }}"
+          body: |
+            ## 🪟 Windows
+
+            | File | Description |
+            |------|-------------|
+            | `mkv-anime-batch.exe` | Single self-contained standalone executable — download & run anywhere! |
+            | `MKV_Anime_Batch_Portable_win64.zip` | Portable Zip package |
+
+            > **Requirements:** [MKVToolNix](https://mkvtoolnix.download/) and [ffmpeg](https://ffmpeg.org/download.html) must be installed and available on `PATH`.
+
+            ---
+
+            ## 🐧 Linux
+
+            | File | Description |
+            |------|-------------|
+            | `MKV_Anime_Batch_*_amd64.AppImage` | Universal AppImage — works on any modern Linux distro |
+            | `MKV_Anime_Batch_*_amd64.deb` | Debian / Ubuntu package |
+            | `MKV_Anime_Batch_*_x86_64.rpm` | Fedora / RedHat / SUSE package |
+
+            ### 📦 Linux Installation & Dependencies
+
+            #### Option A: `.deb` Package (Debian / Ubuntu / Mint)
+            ```bash
+            sudo apt update
+            sudo apt install ./MKV_Anime_Batch_*_amd64.deb mkvtoolnix ffmpeg
+            ```
+
+            #### Option B: `.rpm` Package (Fedora / RHEL / CentOS)
+            ```bash
+            sudo dnf install ./MKV_Anime_Batch_*_x86_64.rpm mkvtoolnix ffmpeg
+            ```
+
+            #### Option C: `.AppImage` (Universal)
+            ```bash
+            chmod +x MKV_Anime_Batch_*_amd64.AppImage
+            ./MKV_Anime_Batch_*_amd64.AppImage
+            ```
+
+            > **CLI Tools Requirement:** Make sure `mkvtoolnix` (`mkvmerge`, `mkvextract`) and `ffmpeg` are installed (`sudo apt install mkvtoolnix ffmpeg`).
+          files: |
+            windows-artifacts/mkv-anime-batch.exe
+            windows-artifacts/MKV_Anime_Batch_Portable_win64.zip
+          draft: false
+          prerelease: false
 
   # ────────────────────────────────────────────────────────────────────────────
   # Linux build → AppImage + deb
@@ -176,35 +221,9 @@ jobs:
           find desktop-tauri/src-tauri/target/release/bundle/deb -name "*.deb" -exec cp {} /tmp/linux-release/ \;
           find desktop-tauri/src-tauri/target/release/bundle/rpm -name "*.rpm" -exec cp {} /tmp/linux-release/ \;
 
-      - name: Upload Linux bundles
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-bundles
-          path: /tmp/linux-release/
-          if-no-files-found: error
-
-  # ────────────────────────────────────────────────────────────────────────────
-  # Collect both artifacts → publish GitHub Release
-  # ────────────────────────────────────────────────────────────────────────────
-  release:
-    name: Publish Release
-    needs: [build-windows, build-linux]
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Download Windows artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: windows-artifacts
-          path: release-assets/windows
-
-      - name: Download Linux bundles
-        uses: actions/download-artifact@v4
-        with:
-          name: linux-bundles
-          path: release-assets/linux
-
-      - name: Publish GitHub Release
+      # Attach Linux bundles directly to the release — no artifact-store
+      # handoff, so the artifact storage quota no longer blocks releases.
+      - name: Publish Linux bundles to release
         uses: softprops/action-gh-release@v2
         with:
           name: "MKV Anime Batch ${{ github.ref_name }}"
@@ -249,9 +268,8 @@ jobs:
 
             > **CLI Tools Requirement:** Make sure `mkvtoolnix` (`mkvmerge`, `mkvextract`) and `ffmpeg` are installed (`sudo apt install mkvtoolnix ffmpeg`).
           files: |
-            release-assets/windows/*
-            release-assets/linux/*.AppImage
-            release-assets/linux/*.deb
-            release-assets/linux/*.rpm
+            /tmp/linux-release/*.AppImage
+            /tmp/linux-release/*.deb
+            /tmp/linux-release/*.rpm
           draft: false
           prerelease: false
