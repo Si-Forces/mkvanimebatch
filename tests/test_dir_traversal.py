@@ -210,7 +210,6 @@ def test_all_script_imports():
     assert mkv_extract is not None
     assert mkv_remux is not None
 
-
 def test_scan_assets_uses_scan_cache(tmp_path, monkeypatch):
     import mkv_common
     import os
