@@ -18,7 +18,6 @@ mkv_remux      = importlib.import_module("mkv_remux")
 
 REMUX_MODULES = [
     pytest.param(mkv_remux,      id="mkv_remux"),
-    pytest.param(mkv_remux, id="mkv_remux"),
 ]
 
 

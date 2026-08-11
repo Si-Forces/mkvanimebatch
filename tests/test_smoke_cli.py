@@ -15,7 +15,6 @@ mkv_extract = importlib.import_module("mkv_extract")
 @pytest.mark.parametrize("mod, common_mod", [
     pytest.param(mkv_remux, mkv_common, id="mkv_remux"),
     pytest.param(mkv_extract, mkv_common, id="mkv_extract"),
-    pytest.param(mkv_extract, mkv_common, id="mkv_extract"),
 ])
 def test_cli_dry_run_smoke(tmp_path, mod, common_mod):
     """Run main() with --dry-run and --no-cache on a mock folder structure to catch any missing imports or undefined variables."""

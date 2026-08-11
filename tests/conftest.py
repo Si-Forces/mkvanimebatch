@@ -1,7 +1,7 @@
 """
 Shared pytest fixtures for the MKV automation test suite.
 
-Tests are parametrized over both mkv_common and mkv_common so that any
+Tests are parametrized over mkv_common so that any
 function present in both modules is verified to behave identically. A failure
 in only one variant immediately flags a divergence between the two files.
 """
@@ -30,9 +30,7 @@ def mod(request):
     return m
 
 
-@pytest.fixture()
-def mkv_common():
-    return importlib.import_module("mkv_common")
+
 
 
 @pytest.fixture()

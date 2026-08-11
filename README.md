@@ -23,7 +23,7 @@ An automated, high-performance batch processing suite for anime and fansub MKV c
 * **Crash-Resistant Output**: Performs all remuxing and extraction into isolated temporary job directories, promoting completed files via atomic move operations only upon successful exit codes. Partial or interrupted outputs from power failures are automatically quarantined and discarded.
 
 ### 🚀 Standard & Fast Concurrency Engine
-* Offers both standard single-file routines and parallel high-throughput implementations (`mkv_extract_fast.py` and `mkv_remux_fast.py`) backed by thread pools and bounded disk I/O jobs.
+* Offers both standard single-file routines and parallel high-throughput implementations (`mkv_extract.py` and `mkv_remux.py`) backed by thread pools and bounded disk I/O jobs.
 * **Persistent Inspect Cache**: Caches `mkvmerge` JSON probe results to `.mkv_inspect_cache.json` across runs, dramatically reducing repeated disk reads on large collections.
 
 ---
@@ -46,10 +46,10 @@ Extract the best matching subtitle, external cover, chapters, and deduplicated f
 
 ```bash
 # High Performance Parallel Extractor (with custom Output Dir and Fonts Dir)
-python mkv_extract_fast.py --input-dir "D:/Anime/Series" --out-dir "D:/Anime/Extracted" --fonts-dir "D:/Anime/Fonts" --workers 8 --io-jobs 2
+python mkv_extract.py --input-dir "D:/Anime/Series" --out-dir "D:/Anime/Extracted" --fonts-dir "D:/Anime/Fonts" --workers 8 --io-jobs 2
 
 # With Subtitle Timestamp Shift (+5 seconds)
-python mkv_extract_fast.py --input-dir "D:/Anime/Series" --sub-offset 5.0
+python mkv_extract.py --input-dir "D:/Anime/Series" --sub-offset 5.0
 
 # Standard Extractor
 python mkv_extract.py --input-dir "D:/Anime/Series" --out-dir "D:/Anime/Extracted"
@@ -61,13 +61,13 @@ Re-mux anime episodes with extracted subtitles, external chapter XMLs, covers, a
 
 ```bash
 # Parallel Remuxer with custom Opus bitrate, complexity, and font dir
-python mkv_remux_fast.py --input-dir "D:/Anime/Series" --out-dir "D:/Anime/Remuxed" --fonts-dir "D:/Fonts" --bitrate 192k --complexity 10 --workers 4 --io-jobs 2
+python mkv_remux.py --input-dir "D:/Anime/Series" --out-dir "D:/Anime/Remuxed" --fonts-dir "D:/Fonts" --bitrate 192k --complexity 10 --workers 4 --io-jobs 2
 
 # Keep temporary font folder after remux
-python mkv_remux_fast.py --input-dir "D:/Anime/Series" --keep-fonts
+python mkv_remux.py --input-dir "D:/Anime/Series" --keep-fonts
 
 # Dry-run mode (Inspect without modifying files)
-python mkv_remux_fast.py --input-dir "D:/Anime/Series" --dry-run
+python mkv_remux.py --input-dir "D:/Anime/Series" --dry-run
 ```
 
 When `--out-dir` is used, nested source folders are preserved beneath the
@@ -94,8 +94,7 @@ output directory so episodes from different seasons cannot overwrite each other.
 
 Interactive quick-start scripts are included for Windows users:
 
-* `run_fast.bat` / `run_fast.ps1` - High-performance parallel pipeline launcher with toggles for Dry Run, Keep Fonts, I/O Jobs, Opus Complexity, and Fonts Directory overrides.
-* `run.bat` / `run.ps1` - Standard pipeline launcher.
+* `run.bat` / `run.ps1` - High-performance parallel pipeline launcher with toggles for Dry Run, Keep Fonts, I/O Jobs, Opus Complexity, and Fonts Directory overrides.
 
 All batch launchers include non-interactive EOF loop guards to safely handle redirected input without hanging.
 
