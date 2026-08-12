@@ -430,6 +430,28 @@ class QueueTracker {
     };
   }
 
+  // Strict lookup used by terminal-state markers (completed/failed/skipped).
+  // Matches by exact / case-insensitive / path-normalized basename equality and
+  // a conservative "one endswith the other" check — but NEVER invents a card and
+  // NEVER grabs an arbitrary queued card (that caused skips to land on the
+  // wrong episode).
+  findItem(filename) {
+    if (!filename) return null;
+    const norm = s => s.trim().toLowerCase().replace(/\\/g, "/").split("/").pop();
+    const target = norm(filename);
+
+    if (this.items.has(filename.trim())) return this.items.get(filename.trim());
+
+    for (const [key, item] of this.items.entries()) {
+      if (norm(key) === target) return item;
+    }
+    for (const [key, item] of this.items.entries()) {
+      const k = norm(key);
+      if (k && target && (k === target)) return item;
+    }
+    return null;
+  }
+
   getItem(filename) {
     if (!filename) return null;
     const cleanFn = filename.trim();
@@ -448,12 +470,6 @@ class QueueTracker {
       }
     }
 
-    for (const [key, item] of this.items.entries()) {
-      if (item.status === "queued" || item.status === "processing") {
-        return item;
-      }
-    }
-
     const placeholder = this.listEl.querySelector(".empty-state-card, .empty-log");
     if (placeholder) placeholder.remove();
 
@@ -466,18 +482,32 @@ class QueueTracker {
     return card;
   }
 
+  // Promote the next queued card to "processing" (indeterminate). Called when a
+  // job starts and after each real completion, so the queue flows live instead
+  // of dumping all updates at the end of the batch.
+  promoteNext() {
+    for (const item of this.items.values()) {
+      if (item.status === "queued") {
+        this.markProcessing(item.filename);
+        return;
+      }
+    }
+  }
+
   markProcessing(filename) {
-    const item = this.getItem(filename);
+    const item = this.findItem(filename) || this.getItem(filename);
     if (!item) return;
+    // Idempotent: re-marking a card already processing just refreshes the timer.
+    if (item.status === "completed" || item.status === "failed" || item.status === "skipped") return;
 
     item.status = "processing";
     item.el.className = "tokyo-ep-card processing";
     item.badge.className = "ep-badge purple";
     item.badge.textContent = "PROCESSING";
     item.statusTag.className = "ep-duration-tag yellow status-tag";
-    item.startTime = Date.now();
-    item.pct = null; // no real percentage yet — show indeterminate shimmer
-    item.fill.classList.add("indeterminate");
+    if (!item.startTime) item.startTime = Date.now();
+    item.pct = null; // no real percentage — show indeterminate shimmer
+    item.fill.className = "ep-progress-fill indeterminate";
     item.fill.style.width = "";
     item.statusTag.textContent = "Muxing...";
 
@@ -496,8 +526,10 @@ class QueueTracker {
   }
 
   markCompleted(filename, durationSec = null) {
-    const item = this.getItem(filename);
+    const item = this.findItem(filename) || this.getItem(filename);
     if (!item) return;
+    // Don't clobber a card already in a terminal state.
+    if (item.status === "completed" || item.status === "failed" || item.status === "skipped") return;
 
     if (item.timerId) {
       clearInterval(item.timerId);
@@ -507,13 +539,13 @@ class QueueTracker {
     item.status = "completed";
     item.pct = 100;
     item.fill.classList.remove("indeterminate");
-    const dur = durationSec !== null ? parseFloat(durationSec).toFixed(1) : (item.startTime ? ((Date.now() - item.startTime) / 1000).toFixed(1) : "8.5");
+    const dur = durationSec !== null ? parseFloat(durationSec).toFixed(1) : (item.startTime ? ((Date.now() - item.startTime) / 1000).toFixed(1) : null);
 
     item.el.className = "tokyo-ep-card completed";
     item.badge.className = "ep-badge green";
     item.badge.textContent = "COMPLETED";
     item.statusTag.className = "ep-duration-tag green status-tag";
-    item.statusTag.textContent = `Done in ${dur}s`;
+    item.statusTag.textContent = dur ? `Done in ${dur}s` : "Done";
     item.fill.className = "ep-progress-fill green";
     item.fill.style.width = "100%";
 
@@ -521,11 +553,14 @@ class QueueTracker {
     if (this.countEl) {
       this.countEl.textContent = `${this.completedCount} / ${Math.max(this.totalCount, this.completedCount)} Completed`;
     }
+    this.promoteNext();
   }
 
   markSkipped(filename, reason = "Skipped") {
-    const item = this.getItem(filename);
+    // Strict match only — never stamp "Skipped" on an arbitrary card.
+    const item = this.findItem(filename);
     if (!item) return;
+    if (item.status === "completed" || item.status === "failed" || item.status === "skipped") return;
 
     if (item.timerId) {
       clearInterval(item.timerId);
@@ -541,6 +576,7 @@ class QueueTracker {
     item.statusTag.className = "ep-duration-tag grey status-tag";
     item.statusTag.textContent = reason;
     item.fill.style.width = "100%";
+    this.promoteNext();
   }
 
   markDryRun(filename) {
@@ -570,8 +606,9 @@ class QueueTracker {
   }
 
   markFailed(filename, errReason = "Failed") {
-    const item = this.getItem(filename);
+    const item = this.findItem(filename) || this.getItem(filename);
     if (!item) return;
+    if (item.status === "completed" || item.status === "failed" || item.status === "skipped") return;
 
     if (item.timerId) {
       clearInterval(item.timerId);
@@ -585,6 +622,11 @@ class QueueTracker {
     item.badge.textContent = "FAILED";
     item.statusTag.className = "ep-duration-tag red status-tag";
     item.statusTag.textContent = errReason;
+    this.completedCount++;
+    if (this.countEl) {
+      this.countEl.textContent = `${this.completedCount} / ${Math.max(this.totalCount, this.completedCount)} Completed`;
+    }
+    this.promoteNext();
   }
 }
 
@@ -708,7 +750,6 @@ function parseLogStream(text, mode) {
   // both:   -> [N/M (P%)] CRASHED: <name>   /   Failed/Skipped: <name>
   const progMatch = text.match(/^\s*(?:->\s*)?\[\s*(\d+)\s*\/\s*(\d+)\s*\(\s*([\d.]+)%\)\]\s*(Remuxed|Extracted|Failed\/Skipped|Skipped|CRASHED):\s*(.+?)\s*$/i);
   if (progMatch) {
-    const batchPct = parseFloat(progMatch[3]);
     const verb = progMatch[4].toLowerCase();
     const name = progMatch[5].trim();
     if (verb === "remuxed" || verb === "extracted") {
@@ -716,15 +757,12 @@ function parseLogStream(text, mode) {
     } else if (verb === "crashed") {
       tracker.markFailed(name, "Worker crashed");
     } else {
-      // "Failed/Skipped" and "Skipped" both mean the backend did not produce
-      // output for this file.
+      // "Failed/Skipped" and "Skipped" both mean the backend produced no output.
       tracker.markSkipped(name, "Skipped");
     }
-    // Surface real batch-level progress on the active card(s) so the bar
-    // reflects reality instead of the old random-walk fake.
-    tracker.items.forEach(item => {
-      if (item.status === "processing") tracker.updateProgress(item.filename, batchPct);
-    });
+    // Note: per-card bars stay indeterminate while running and snap to 100% on
+    // that card's own completion line. Batch-level N/M progress is shown in the
+    // queue-count badge, so we no longer paint a batch % onto individual bars.
     return;
   }
 
@@ -881,6 +919,13 @@ class JobController {
       await scanInputDirectory(inputDir, this.mode);
     }
 
+    // Kick off live flow immediately: mark the first `workers` queued cards as
+    // processing (indeterminate). The backend only emits per-file lines on
+    // *completion* (in real time), so without this the queue would look frozen
+    // until the batch dumped its deferred log block at the end.
+    const tracker = this.mode === "extract" ? extractQueue : remuxQueue;
+    for (let i = 0; i < workers; i++) tracker.promoteNext();
+
     if (this.unlisten) this.unlisten();
     this.unlisten = await listen("job-log", e => appendLog(this.logEl, e.payload, this.mode));
 
@@ -935,19 +980,20 @@ class JobController {
     const tracker = this.mode === "extract" ? extractQueue : remuxQueue;
     const ok = code === 0;
 
-    // Resolve only cards the backend actually touched. Queued cards the
-    // backend never reported on were genuinely not processed — mark them
-    // Skipped (truthful), never Completed.
+    // Reaching job-done means the batch ran to completion. Cards still
+    // "processing" were mid-flight and finished; cards still "queued" were
+    // resolved by their own skip/completion log lines already — so a leftover
+    // here simply means the per-file line didn't parse. Resolve leftovers to a
+    // sensible terminal state instead of leaving them stuck or falsely marking
+    // them "Not processed".
     tracker.items.forEach(item => {
+      if (item.status !== "processing" && item.status !== "queued") return;
       if (isDryRun) {
-        if (item.status === "processing" || item.status === "queued") {
-          tracker.markDryRun(item.filename);
-        }
-      } else if (item.status === "processing") {
-        if (ok) tracker.markCompleted(item.filename);
-        else tracker.markFailed(item.filename, `No result (exit ${code})`);
-      } else if (item.status === "queued") {
-        tracker.markSkipped(item.filename, ok ? "Not processed" : `Aborted (exit ${code})`);
+        tracker.markDryRun(item.filename);
+      } else if (ok) {
+        tracker.markCompleted(item.filename);
+      } else {
+        tracker.markFailed(item.filename, `Aborted (exit ${code})`);
       }
     });
   }

@@ -276,7 +276,6 @@
               <div class="param-actions-footer">
                 <button class="btn btn-primary btn-gradient" id="remux-run" style="flex:2;">▶ Run Batch Remux</button>
                 <button class="btn btn-stop" id="remux-stop" disabled style="flex:1;">■ Stop</button>
-                <span id="remux-exit-code" class="log-exit-code"></span>
               </div>
 
             </div>
@@ -286,7 +285,10 @@
           <div class="glass-panel col-queue">
             <div class="panel-header">
               <span class="panel-title">📦 Episode Batch Queue</span>
-              <span class="queue-count-badge" id="remux-queue-count">Ready</span>
+              <span class="queue-header-right">
+                <span id="remux-exit-code" class="log-exit-code"></span>
+                <span class="queue-count-badge" id="remux-queue-count">Ready</span>
+              </span>
             </div>
             <div class="panel-body queue-body" id="remux-episode-list">
 
@@ -479,7 +481,6 @@
               <div class="param-actions-footer">
                 <button class="btn btn-primary btn-gradient" id="extract-run" style="flex:2;">▶ Run Extraction</button>
                 <button class="btn btn-stop" id="extract-stop" disabled style="flex:1;">■ Stop</button>
-                <span id="extract-exit-code" class="log-exit-code"></span>
               </div>
 
             </div>
@@ -489,7 +490,10 @@
           <div class="glass-panel col-queue">
             <div class="panel-header">
               <span class="panel-title">⭳ Extract Queue</span>
-              <span class="queue-count-badge" id="extract-queue-count">Ready</span>
+              <span class="queue-header-right">
+                <span id="extract-exit-code" class="log-exit-code"></span>
+                <span class="queue-count-badge" id="extract-queue-count">Ready</span>
+              </span>
             </div>
             <div class="panel-body queue-body" id="extract-episode-list">
 
