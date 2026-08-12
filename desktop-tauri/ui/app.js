@@ -669,8 +669,18 @@ async function scanInputDirectory(path, mode) {
 
 // ─── Log Console & Episode Parser ──────────────────────────────────────────
 
+// The backend logs via Python logging with format '%(asctime)s [%(levelname)s]
+// %(message)s', so every stdout line actually arrives prefixed like:
+//   2026-08-12 07:33:38,123 [INFO] -> [1/3 (33%)] Remuxed: file.mkv
+// Stderr lines additionally get "[ERR] " prepended by the Rust sidecar reader.
+// Queue-state regexes are anchored to the start of the *message*, so we must
+// strip this logging envelope first or nothing ever matches.
+function stripLogPrefix(text) {
+  return text.replace(/^(\[ERR\]\s*)?\d{4}-\d{2}-\d{2}[ T][\d:]+[.,]\d+\s+\[\w+\]\s+/, "$1");
+}
+
 function classifyLine(text) {
-  const t = text.toLowerCase();
+  const t = stripLogPrefix(text).toLowerCase();
   if (t.includes("crashed") || t.includes("[-]") || t.includes("[err]") || t.includes("error") || t.includes("failed") || t.includes("[error]")) return "line-err";
   if (t.includes("skipped") || t.includes("skip") || t.includes("already exists") || t.includes("already complete")) return "line-skip";
   if (t.includes("[+]") || t.includes("success") || t.includes("finished") || t.includes("completed") || t.includes("remuxed:") || t.includes("extracted:") || t.includes("remuxed cleanly") || t.includes("extracted cleanly")) return "line-ok";
@@ -721,6 +731,10 @@ function appendLog(logEl, text, mode = "remux") {
 function parseLogStream(text, mode) {
   const tracker = mode === "extract" ? extractQueue : remuxQueue;
 
+  // Strip the Python logging envelope ("2026-08-12 07:33:38,123 [INFO] ") and any
+  // Rust-added "[ERR] " prefix so the anchored regexes below actually match.
+  text = stripLogPrefix(text);
+
   // Track dry-run list context across lines (module-level, reset per section).
   if (/---\s*DRY RUN:/i.test(text)) {
     parseLogStream._drySection = true;
@@ -758,7 +772,7 @@ function parseLogStream(text, mode) {
   // remux:  -> [N/M (P%)] Remuxed: <name>
   // extract:   [N/M (P%)] Extracted: <name>
   // both:   -> [N/M (P%)] CRASHED: <name>   /   Failed/Skipped: <name>
-  const progMatch = text.match(/^\s*(?:->\s*)?\[\s*(\d+)\s*\/\s*(\d+)\s*\(\s*([\d.]+)%\)\]\s*(Remuxed|Extracted|Failed\/Skipped|Skipped|CRASHED):\s*(.+?)\s*$/i);
+  const progMatch = text.match(/^\s*(?:\[ERR\]\s*)?(?:->\s*)?\[\s*(\d+)\s*\/\s*(\d+)\s*\(\s*([\d.]+)%\)\]\s*(Remuxed|Extracted|Failed\/Skipped|Skipped|CRASHED):\s*(.+?)\s*$/i);
   if (progMatch) {
     const verb = progMatch[4].toLowerCase();
     const name = progMatch[5].trim();
