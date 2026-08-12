@@ -270,6 +270,7 @@ class QueueTracker {
     this.items = new Map();
     this.completedCount = 0;
     this.totalCount = 0;
+    this.batchStartTime = null; // set when a job starts; basis for per-file durations
   }
 
   reset() {
@@ -539,7 +540,14 @@ class QueueTracker {
     item.status = "completed";
     item.pct = 100;
     item.fill.classList.remove("indeterminate");
-    const dur = durationSec !== null ? parseFloat(durationSec).toFixed(1) : (item.startTime ? ((Date.now() - item.startTime) / 1000).toFixed(1) : null);
+    // Duration: prefer the real elapsed time. A card promoted to processing has
+    // its own startTime; otherwise fall back to time since the batch began (we
+    // can't know true per-file start — the backend never streams one).
+    const dur = durationSec !== null
+      ? parseFloat(durationSec).toFixed(1)
+      : (item.startTime
+          ? ((Date.now() - item.startTime) / 1000).toFixed(1)
+          : (this.batchStartTime ? ((Date.now() - this.batchStartTime) / 1000).toFixed(1) : null));
 
     item.el.className = "tokyo-ep-card completed";
     item.badge.className = "ep-badge green";
@@ -731,10 +739,12 @@ function parseLogStream(text, mode) {
     }
   }
 
-  // Per-file deferred log block header -> marks the card as having started.
-  const procMatch = text.match(/^\s*Processing:\s*(.+?)\s*$/i);
-  if (procMatch && /\.mkv$/i.test(procMatch[1])) {
-    tracker.markProcessing(procMatch[1].trim());
+  // Per-file deferred log block header. The backend buffers these into r.log and
+  // dumps them all at the END of the batch — so acting on them would (a) re-trigger
+  // processing on already-done cards and (b) cause the "all-at-once" dump. Cards are
+  // already promoted to processing live via promoteNext(), so we intentionally
+  // IGNORE these lines for queue-state purposes. (They still render in the console.)
+  if (/^\s*Processing:\s*(.+?)\s*$/i.test(text) && /\.mkv$/i.test(text)) {
     return;
   }
 
@@ -831,7 +841,7 @@ class JobController {
 
     this.logEl     = document.getElementById(`${mode}-log`);
     this.statusEl  = document.getElementById(`${mode}-status`);
-    this.exitCodeEl= document.getElementById(`${mode}-exit-code`);
+    this.lastExitCode = null; // internal only — no visible badge
     this.runBtn    = document.getElementById(`${mode}-run`);
     this.stopBtn   = document.getElementById(`${mode}-stop`);
 
@@ -908,7 +918,7 @@ class JobController {
 
     this.setRunning(true);
     clearLog(this.logEl);
-    if (this.exitCodeEl) this.exitCodeEl.textContent = "";
+    this.lastExitCode = null;
 
     const workers = parseInt(document.getElementById(`${this.mode}-workers`)?.value || '8');
     const ioJobs  = parseInt(document.getElementById(`${this.mode}-io-jobs`)?.value || '2');
@@ -924,6 +934,7 @@ class JobController {
     // *completion* (in real time), so without this the queue would look frozen
     // until the batch dumped its deferred log block at the end.
     const tracker = this.mode === "extract" ? extractQueue : remuxQueue;
+    tracker.batchStartTime = Date.now();
     for (let i = 0; i < workers; i++) tracker.promoteNext();
 
     if (this.unlisten) this.unlisten();
@@ -974,7 +985,7 @@ class JobController {
   onDone(code) {
     this.setRunning(false);
     updateWorkerChips(false);
-    if (this.exitCodeEl) this.exitCodeEl.textContent = `exit ${code}`;
+    this.lastExitCode = code;
 
     const isDryRun = document.getElementById(`${this.mode}-dry-run`)?.checked ?? false;
     const tracker = this.mode === "extract" ? extractQueue : remuxQueue;
@@ -1009,10 +1020,10 @@ class JobController {
       ? `<span class="status-dot"></span> Running`
       : `<span class="status-dot"></span> Idle`;
 
-    if (!running && this.exitCodeEl?.textContent.includes("exit 0")) {
+    if (!running && this.lastExitCode === 0) {
       el.className = "status-pill status-success";
       el.innerHTML = `<span class="status-dot"></span> Done`;
-    } else if (!running && this.exitCodeEl?.textContent && !this.exitCodeEl.textContent.includes("exit 0")) {
+    } else if (!running && this.lastExitCode !== null && this.lastExitCode !== 0) {
       el.className = "status-pill status-error";
       el.innerHTML = `<span class="status-dot"></span> Failed`;
     }
