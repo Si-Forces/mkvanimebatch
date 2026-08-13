@@ -5,58 +5,71 @@ Shared logic for mkv_extract.py and mkv_remux.py.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
 import subprocess
 import sys
 import threading
-import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import nullcontext
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
-
 __all__ = [
     # constants
-    "SUBTITLE_LANGS_PRIMARY", "SUBTITLE_LANGS_FALLBACK",
-    "SUBTITLE_LANGS_PRIMARY_ORDER", "SUBTITLE_LANGS_FALLBACK_ORDER",
-    "DIALOGUE_KEYWORDS", "COVER_EXTENSIONS", "COVER_MIME",
-    "FONT_MIME", "FONT_EXTENSIONS",
-    "LANG_LABEL", "LANG_MKV_TAG",
-    "SUBTITLE_EXT", "CHAPTER_EXT",
-    "MAX_DEFAULT_WORKERS", "DEFAULT_WORKER_MULTIPLIER",
+    "CHAPTER_EXT",
+    "COVER_EXTENSIONS",
+    "COVER_MIME",
+    "DEFAULT_WORKER_MULTIPLIER",
+    "DIALOGUE_KEYWORDS",
+    "FONT_EXTENSIONS",
+    "FONT_MIME",
+    "LANG_LABEL",
+    "LANG_MKV_TAG",
+    "MAX_DEFAULT_WORKERS",
+    "SUBTITLE_EXT",
+    "SUBTITLE_LANGS_FALLBACK",
+    "SUBTITLE_LANGS_FALLBACK_ORDER",
+    "SUBTITLE_LANGS_PRIMARY",
+    "SUBTITLE_LANGS_PRIMARY_ORDER",
     # type aliases
     "EpisodeInfo",
-    # episode parsing
-    "parse_episode", "ep_type_label", "is_dialogue_track",
-    # naming helpers
-    "safe_filename", "output_stem",
-    # chapter sniffing
-    "is_chapter_xml", "has_chapters",
-    # cover sniffing
-    "is_cover_filename", "is_cover_attachment",
     # font sniffing
-    "is_font_attachment", "FontRegistry",
-    # subtitle language detection
+    "FontRegistry",
+    "ParsedFile",
+    "PersistentInspectCache",
+    "ScanResults",
+    "acquire_semaphore",
+    "check_dependencies",
+    "cleanup_stale_subtitle_offsets_bulk",
     "detect_sub_lang",
-    # attachment finders
-    "parse_attachments",
-    # fonts directory discovery
+    "ep_type_label",
     "find_fonts_dir",
-    # subtitle track selection
-    "select_best_subtitle_track",
-    # mkvmerge / dependency helpers
-    "check_dependencies", "run_mkvmerge_json", "run_subprocess", "acquire_semaphore",
-    "inspect_videos", "PersistentInspectCache", "get_default_cache_file", "setup_logging",
-    # natural sorting
+    "get_default_cache_file",
+    "has_chapters",
+    "inspect_videos",
+    "is_chapter_xml",
+    "is_cover_attachment",
+    "is_cover_filename",
+    "is_dialogue_track",
+    "is_font_attachment",
     "natural_sort_key",
-    # scandir helpers
-    "ParsedFile", "ScanResults", "scan_mkv_files", "scan_assets", "resolve_output_dir",
-    # subtitle shift helper
-    "shift_ass_timestamps", "shift_ass_content", "cleanup_stale_subtitle_offsets_bulk",
+    "output_stem",
+    "parse_attachments",
+    "parse_episode",
+    "resolve_output_dir",
+    "run_mkvmerge_json",
+    "run_subprocess",
+    "safe_filename",
+    "scan_assets",
+    "scan_mkv_files",
+    "select_best_subtitle_track",
+    "setup_logging",
+    "shift_ass_content",
+    "shift_ass_timestamps",
 ]
 
 # Initialize shared parent logger
@@ -183,8 +196,14 @@ def run_subprocess(cmd: list[str], *, capture_stdout: bool = True, timeout: int 
     """Run a subprocess with consistent UTF-8 encoding/error handling."""
     stdout_opt = subprocess.PIPE if capture_stdout else subprocess.DEVNULL
     return subprocess.run(
-        cmd, stdout=stdout_opt, stderr=subprocess.PIPE, text=True,
-        encoding="utf-8", errors="replace", timeout=timeout,
+        cmd,
+        stdout=stdout_opt,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+        check=False,
     )
 
 
@@ -652,7 +671,7 @@ class PersistentInspectCache:
         try:
             with open(self.cache_file, "r", encoding="utf-8") as f:
                 self._data = json.load(f)
-        except Exception as e:
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as e:
             logger.warning(f"Failed to load inspect cache from {self.cache_file}: {e}")
             self._data = {}
 
@@ -670,7 +689,7 @@ class PersistentInspectCache:
             with open(temp_file, "w", encoding="utf-8") as f:
                 json.dump(data_copy, f)
             temp_file.replace(self.cache_file)
-        except Exception as e:
+        except (OSError, TypeError, ValueError) as e:
             logger.warning(f"Failed to save inspect cache to {self.cache_file}: {e}")
 
     def get(self, path: Path) -> dict | None:
@@ -750,14 +769,16 @@ def inspect_videos(
         futures = {pool.submit(_inspect, v): v for v in to_inspect}
         for future in as_completed(futures):
             v = futures[future]
-            try:
-                _, data = future.result()
-                cache[v] = data
-                if persistent_cache:
-                    persistent_cache.put(v, data)
-            except Exception as exc:
+            # Soft-fail via future.exception() so arbitrary worker errors don't abort the batch.
+            exc = future.exception()
+            if exc is not None:
                 logger.warning("Inspection failed for %s: %s", v.name, exc)
                 cache[v] = None
+                continue
+            _, data = future.result()
+            cache[v] = data
+            if persistent_cache:
+                persistent_cache.put(v, data)
 
         if persistent_cache:
             persistent_cache.save()
@@ -825,12 +846,11 @@ def scan_mkv_files(dir_path: Path, recursive: bool = True, ignore_paths: set[Pat
                             if name.lower().endswith(".mkv"):
                                 path = Path(entry.path)
                                 results.append(_create_parsed_file(path))
-                        elif entry.is_dir(follow_symlinks=False) and recursive:
-                            if name.lower() not in {"output", "fonts", "font", "attachments"}:
-                                entry_path = Path(entry.path)
-                                if resolved_ignores and entry_path.resolve() in resolved_ignores:
-                                    continue
-                                stack.append(entry.path)
+                        elif entry.is_dir(follow_symlinks=False) and recursive and name.lower() not in {"output", "fonts", "font", "attachments"}:
+                            entry_path = Path(entry.path)
+                            if resolved_ignores and entry_path.resolve() in resolved_ignores:
+                                continue
+                            stack.append(entry.path)
                     except OSError:
                         continue
         except OSError:
@@ -877,16 +897,21 @@ def scan_assets(dir_path: Path, scan_cache: dict[Path, ScanResults] | None = Non
     subs.sort(key=lambda pf: natural_sort_key(pf.name))
     chapters.sort(key=lambda pf: natural_sort_key(pf.name))
     covers.sort(key=lambda pf: natural_sort_key(pf.name))
-    res = ScanResults(subs=subs, chapters=chapters, covers=covers)
     if scan_cache is not None:
-        # Store immutable snapshots: callers may mutate the lists they get
-        # back, and that must not corrupt the cached entry for other callers.
-        scan_cache[dir_path] = ScanResults(
-            subs=tuple(res.subs),
-            chapters=tuple(res.chapters),
-            covers=tuple(res.covers),
+        # Copy-in / copy-out: cache holds private list copies, and callers always
+        # receive independent lists so mutation cannot corrupt the cache entry.
+        cached = ScanResults(
+            subs=list(subs),
+            chapters=list(chapters),
+            covers=list(covers),
         )
-    return res
+        scan_cache[dir_path] = cached
+        return ScanResults(
+            subs=list(cached.subs),
+            chapters=list(cached.chapters),
+            covers=list(cached.covers),
+        )
+    return ScanResults(subs=subs, chapters=chapters, covers=covers)
 
 _ASS_TIME_RE = re.compile(r'^(\d+):(\d{2}):(\d{2})\.(\d{2})$')
 
@@ -990,7 +1015,7 @@ def shift_ass_timestamps(path: Path, offset_seconds: float, log: list[str] | Non
             path.write_text(shifted_text, encoding=encoding, newline="")
             if log is not None:
                 log.append(f"   -> Shifted subtitle timing by {offset_seconds:+.2f}s ({shifted_count} lines)")
-        except Exception as e:
+        except OSError as e:
             if log is not None:
                 log.append(f"   -> ERROR (sub shift): Failed to write shifted subtitle: {e}")
 

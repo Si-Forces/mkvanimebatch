@@ -15,59 +15,56 @@ Requires: mkvmerge (MKVToolNix), ffmpeg
 """
 from __future__ import annotations
 
-import sys
-sys.dont_write_bytecode = True
-
+import argparse
+import logging
 import os
 import re
 import shutil
+import sys
 import tempfile
-import argparse
-import uuid
-import logging
 import threading
+import uuid
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from mkv_common import (
-    CHAPTER_EXT,
-    COVER_EXTENSIONS,
     COVER_MIME,
+    DEFAULT_WORKER_MULTIPLIER,
     FONT_MIME,
     LANG_LABEL,
     LANG_MKV_TAG,
-    SUBTITLE_EXT,
+    MAX_DEFAULT_WORKERS,
     SUBTITLE_LANGS_FALLBACK,
     SUBTITLE_LANGS_PRIMARY,
+    EpisodeInfo,
+    ParsedFile,
+    PersistentInspectCache,
+    ScanResults,
     acquire_semaphore,
     check_dependencies,
     detect_sub_lang,
     ep_type_label,
-    parse_attachments,
     find_fonts_dir,
     has_chapters,
-    run_subprocess,
     inspect_videos,
-    PersistentInspectCache,
     is_chapter_xml,
     is_cover_filename,
     is_dialogue_track,
+    natural_sort_key,
     output_stem,
+    parse_attachments,
     parse_episode,
+    resolve_output_dir,
+    run_subprocess,
+    scan_assets,
+    scan_mkv_files,
     select_best_subtitle_track,
     setup_logging,
-    natural_sort_key,
-    ParsedFile,
-    ScanResults,
-    scan_mkv_files,
-    scan_assets,
-    resolve_output_dir,
-    EpisodeInfo,
-    MAX_DEFAULT_WORKERS,
-    DEFAULT_WORKER_MULTIPLIER,
 )
+
+sys.dont_write_bytecode = True
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -302,7 +299,7 @@ class SubIndex:
 
         if seen_key in self._seen:
             for f in self._index.get(key, []):
-                if f.parsed[0] == season and detect_sub_lang(f.stem) == lang and f.path.suffix.lower() == suffix:
+                if f.parsed is not None and f.parsed[0] == season and detect_sub_lang(f.stem) == lang and f.path.suffix.lower() == suffix:
                     if f.path.parent == sub_file.path.parent:
                         logger.warning("Duplicate subtitle for key %s (lang %s, suffix %s) in '%s': keeping '%s', ignoring '%s'", key, lang, suffix, sub_file.path.parent.name, f.name, sub_file.name)
                     break
@@ -315,7 +312,7 @@ class SubIndex:
         key = f"{ep_type}|{ep}"
         candidates = []
         for f in self._index.get(key, ()):
-            if seasons_match(mkv_season, f.parsed[0]):
+            if f.parsed is not None and seasons_match(mkv_season, f.parsed[0]):
                 candidates.append(f)
 
         if not candidates:
@@ -440,6 +437,8 @@ class CoverIndex:
                 logger.warning("Duplicate global cover in '%s': keeping '%s', ignoring '%s'", image_file.path.parent.name, self._global.name, image_file.name)
             return
 
+        if parsed is None:
+            return
         season, ep_type, ep = parsed
         key = f"{ep_type}|{ep}"
         existing = self._index.setdefault(key, [])
@@ -546,7 +545,7 @@ def _build_mkvmerge_args(
     keep_attachment_ids: list[int] = []
     if job.use_source_fonts:
         keep_attachment_ids += tr.source_font_ids
-    if keep_source_cover:
+    if keep_source_cover and tr.source_cover_id is not None:
         keep_attachment_ids.append(tr.source_cover_id)
 
     if keep_attachment_ids:
@@ -556,7 +555,7 @@ def _build_mkvmerge_args(
 
     if job.embedded_sub_id is not None:
         if sub_offset != 0.0:
-            sync_ms = int(round(sub_offset * 1000))
+            sync_ms = round(sub_offset * 1000)
             args += ["--sync", f"{job.embedded_sub_id}:{sync_ms}"]
         args += ["--subtitle-tracks", str(job.embedded_sub_id),
                  "--default-track-flag", f"{job.embedded_sub_id}:yes"]
@@ -583,7 +582,7 @@ def _build_mkvmerge_args(
 
     if job.subtitle_file is not None:
         if sub_offset != 0.0:
-            sync_ms = int(round(sub_offset * 1000))
+            sync_ms = round(sub_offset * 1000)
             args += ["--sync", f"0:{sync_ms}"]
         args += ["--language", f"0:{job.subtitle_mkv_lang}",
                  "--track-name", f"0:{job.subtitle_label}",
@@ -658,9 +657,28 @@ def process_job(
     try:
         needs_conversion = tr.audio_id is not None and tr.audio_codec == "A_FLAC"
         if needs_conversion:
+            if temp_dir is None:
+                r.log.append(f"  !! SKIPPED: {video_name}")
+                r.log.append("  !! Reason : Temporary directory unavailable for FLAC→Opus conversion.")
+                r.skipped_reason = "temp dir unavailable"
+                return r
+            audio_id = tr.audio_id
+            if audio_id is None:
+                r.log.append(f"  !! SKIPPED: {video_name}")
+                r.log.append("  !! Reason : Selected audio track id missing.")
+                r.skipped_reason = "audio id missing"
+                return r
             temp_opus = _convert_flac_to_opus(
-                video, tr.audio_id, tr.audio_index, temp_dir, base, opus_bitrate, r.log, ffmpeg_threads,
-                complexity=complexity, io_semaphore=io_semaphore,
+                video,
+                audio_id,
+                tr.audio_index,
+                temp_dir,
+                base,
+                opus_bitrate,
+                r.log,
+                ffmpeg_threads,
+                complexity=complexity,
+                io_semaphore=io_semaphore,
             )
             if temp_opus is None:
                 r.log.append(f"  !! SKIPPED: {video_name}")
@@ -898,7 +916,7 @@ def _plan_jobs(
             skipped_files.append(f"{video_name} (output already exists)")
             continue
 
-        sub_file, embedded_id, sub_lang, sub_label, sub_mkv_lang, matched = _resolve_subtitle(
+        sub_file, embedded_id, _sub_lang, sub_label, sub_mkv_lang, matched = _resolve_subtitle(
             video, parsed, sub_index, json_cache.get(video), all_subs, dry_run,
             fallback_sub_index=fallback_sub_index,
         )
@@ -962,15 +980,12 @@ def _execute_jobs(
 
     results: dict[Path, JobResult] = {}
     total_jobs = len(jobs)
-    completed_jobs = 0
-
     futures = {
         pool.submit(process_job, job, temp_dir, fonts, opus_bitrate, json_cache, ffmpeg_threads, io_semaphore, complexity, sub_offset): job
         for job in jobs
     }
-    for future in as_completed(futures):
+    for completed_jobs, future in enumerate(as_completed(futures), start=1):
         job = futures[future]
-        completed_jobs += 1
         progress = completed_jobs / total_jobs
         try:
             res = future.result()
@@ -983,10 +998,9 @@ def _execute_jobs(
             # Immediate ERROR with full traceback attached — shows up right
             # away on stderr, in context, rather than buried in the final
             # per-file summary at the end of a long batch run.
-            logger.error(
+            logger.exception(
                 " -> [%d/%d (%.0f%%)] CRASHED: %s",
                 completed_jobs, total_jobs, progress * 100, job.video_name,
-                exc_info=True,
             )
             # Deferred summary uses WARNING (not ERROR) so the final
             # per-file log loop doesn't emit a second ERROR-level record
@@ -1205,7 +1219,7 @@ def main() -> None:
                         help="Number of concurrent files to process.")
     parser.add_argument("--bitrate", type=str, default="192k",
                         help="Target bitrate for Opus audio conversion (e.g., 128k, 192k).")
-    parser.add_argument("--complexity", type=int, default=10, choices=range(0, 11),
+    parser.add_argument("--complexity", type=int, default=10, choices=range(11),
                         metavar="[0-10]",
                         help="Opus compression complexity level (0-10, default: 10).")
     parser.add_argument("--sub-offset", type=float, default=0.0,
@@ -1272,7 +1286,7 @@ def main() -> None:
     for mkv in all_mkvs:
         mkvs_by_dir[mkv.path.parent].append(mkv)
 
-    mkv_dirs = sorted(list(mkvs_by_dir.keys()), key=natural_sort_key)
+    mkv_dirs = sorted(mkvs_by_dir.keys(), key=natural_sort_key)
 
     overall_success = True
     scan_cache: dict[Path, ScanResults] = {}
@@ -1348,13 +1362,20 @@ def main() -> None:
                 if temp_dir is not None:
                     shutil.rmtree(temp_dir, ignore_errors=True)
 
-            if success and not dry_run and not cfg.keep_fonts and fonts_override is None:
-                if current_fonts_dir.is_dir() and current_fonts_dir.name == "fonts" and current_fonts_dir.parent == mkv_dir:
-                    try:
-                        shutil.rmtree(current_fonts_dir)
-                        logger.info("Cleanup: Removed temporary fonts folder '%s'", current_fonts_dir.name)
-                    except Exception as e:
-                        logger.error("Failed to remove fonts folder: %s", e)
+            if (
+                success
+                and not dry_run
+                and not cfg.keep_fonts
+                and fonts_override is None
+                and current_fonts_dir.is_dir()
+                and current_fonts_dir.name == "fonts"
+                and current_fonts_dir.parent == mkv_dir
+            ):
+                try:
+                    shutil.rmtree(current_fonts_dir)
+                    logger.info("Cleanup: Removed temporary fonts folder '%s'", current_fonts_dir.name)
+                except OSError as e:
+                    logger.error("Failed to remove fonts folder: %s", e)
 
     if not overall_success:
         sys.exit(1)
