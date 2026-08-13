@@ -11,45 +11,47 @@ Requires: mkvmerge, mkvextract (MKVToolNix)
 """
 from __future__ import annotations
 
-import sys
-sys.dont_write_bytecode = True
-
-import os
-import re
 import argparse
 import hashlib
+import logging
+import os
+import re
 import shutil
+import sys
 import tempfile
 import threading
-import logging
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from mkv_common import (
+    DEFAULT_WORKER_MULTIPLIER,
     FONT_EXTENSIONS,
+    MAX_DEFAULT_WORKERS,
     FontRegistry,
+    ParsedFile,
+    PersistentInspectCache,
     acquire_semaphore,
     check_dependencies,
     ep_type_label,
-    parse_attachments,
     has_chapters,
-    run_subprocess,
     inspect_videos,
-    PersistentInspectCache,
+    natural_sort_key,
+    parse_attachments,
+    resolve_output_dir,
+    run_subprocess,
     safe_filename,
+    scan_mkv_files,
     select_best_subtitle_track,
     setup_logging,
-    natural_sort_key,
-    ParsedFile,
-    scan_mkv_files,
-    resolve_output_dir,
-    MAX_DEFAULT_WORKERS,
-    DEFAULT_WORKER_MULTIPLIER,
     shift_ass_timestamps,
+)
+from mkv_common import (
     cleanup_stale_subtitle_offsets_bulk as _cleanup_stale_subtitle_offsets_bulk,
 )
+
+sys.dont_write_bytecode = True
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 SUPPORTED_SUB_CODECS = frozenset({"s_text/ass"})
@@ -197,6 +199,7 @@ def process_file(
     queued_outputs: list[tuple[str, str | None, Path, str]] = []
 
     sub_result = select_subtitle(json_data, file_stem, file_dir, ep_tag, log)
+    base_sub_path: Path | None = None
     final_sub_path = None
     if sub_result:
         track_id, sub_path = sub_result
@@ -285,10 +288,10 @@ def process_file(
             staged_path.replace(final_path)
 
         if final_sub_path and final_sub_path.exists():
-            if stale_subs_map is not None and stale_subs_lock is not None:
+            if stale_subs_map is not None and stale_subs_lock is not None and base_sub_path is not None:
                 with stale_subs_lock:
                     stale_subs_map[base_sub_path.stem] = final_sub_path.name
-            else:
+            elif base_sub_path is not None:
                 _cleanup_stale_subtitle_offsets(base_sub_path, final_sub_path)
 
         if font_args and temp_dir:
@@ -385,7 +388,6 @@ def _run(output_dir: Path, fonts_dir: Path, mkv_files: list[ParsedFile], pool: T
 
     results: dict[Path, list[str]] = {}
     total_files = len(mkv_files)
-    completed_files = 0
     any_failures = False
 
     futures = {
@@ -404,9 +406,8 @@ def _run(output_dir: Path, fonts_dir: Path, mkv_files: list[ParsedFile], pool: T
         for mkv_file in mkv_files
     }
 
-    for future in as_completed(futures):
+    for completed_files, future in enumerate(as_completed(futures), start=1):
         mkv_path = futures[future]
-        completed_files += 1
         progress = completed_files / total_files
 
         try:
@@ -427,10 +428,9 @@ def _run(output_dir: Path, fonts_dir: Path, mkv_files: list[ParsedFile], pool: T
         except Exception:
             any_failures = True
             # 1. Logs a single ERROR with the progress text and attaches the traceback
-            logger.error(
+            logger.exception(
                 "[%d/%d (%.0f%%)] CRASHED: %s",
                 completed_files, total_files, progress * 100, mkv_path.name,
-                exc_info=True
             )
 
             # 2. Use WARNING for the deferred log so the final print loop
@@ -528,7 +528,7 @@ def main() -> None:
     for mkv in all_mkvs:
         mkvs_by_dir[mkv.path.parent].append(mkv)
 
-    mkv_dirs = sorted(list(mkvs_by_dir.keys()), key=natural_sort_key)
+    mkv_dirs = sorted(mkvs_by_dir.keys(), key=natural_sort_key)
 
     overall_success = True
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
