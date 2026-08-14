@@ -51,8 +51,6 @@ from mkv_common import (
     cleanup_stale_subtitle_offsets_bulk as _cleanup_stale_subtitle_offsets_bulk,
 )
 
-sys.dont_write_bytecode = True
-
 SCRIPT_DIR = Path(__file__).resolve().parent
 SUPPORTED_SUB_CODECS = frozenset({"s_text/ass"})
 IO_LOCK = threading.Lock()
