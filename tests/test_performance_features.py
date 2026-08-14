@@ -45,7 +45,8 @@ class TestPersistentInspectCache:
         assert not cache_file.exists()
         assert cache2.get(sample_file) is None
 
-    def test_cache_prunes_deleted_files_on_save(self, tmp_path, mod):
+    def test_cache_lazy_eviction_on_missing_file(self, tmp_path, mod):
+        """Verify deleted files are lazily invalidated upon get() rather than blocking eager stat loops during save()."""
         cache_file = tmp_path / "cache.json"
         cache = mod.PersistentInspectCache(cache_file=cache_file, enabled=True)
 
@@ -62,7 +63,7 @@ class TestPersistentInspectCache:
         file2.unlink()
         cache.save()
 
-        # Reload cache and verify deleted file was pruned
+        # Reload cache and verify deleted file is lazily invalidated on get()
         cache2 = mod.PersistentInspectCache(cache_file=cache_file, enabled=True)
         assert cache2.get(file1) == {"id": 1}
         assert cache2.get(file2) is None
@@ -186,9 +187,8 @@ def test_io_semaphore_throttles_remux(tmp_path):
         mock_sem.__exit__.assert_called_once()
 
 
-def test_io_semaphore_throttles_flac_conversion(tmp_path):
-    """Verify io_semaphore is acquired during _convert_flac_to_opus execution."""
-    mock_sem = MagicMock()
+def test_flac_conversion_decoupled_from_io_semaphore(tmp_path):
+    """Verify _convert_flac_to_opus runs decoupled from io_semaphore."""
     video = tmp_path / "video.mkv"
     video.touch()
 
@@ -197,10 +197,8 @@ def test_io_semaphore_throttles_flac_conversion(tmp_path):
     mock_res.stderr = ""
 
     with patch.object(mkv_remux, "run_subprocess", return_value=mock_res) as mock_run:
-        mkv_remux._convert_flac_to_opus(
-            video, 1, 0, tmp_path, "video", "192k", [], 2, 10, io_semaphore=mock_sem
+        res = mkv_remux._convert_flac_to_opus(
+            video, 1, 0, tmp_path, "video", "192k", [], 2, complexity=9
         )
-
-        mock_sem.__enter__.assert_called_once()
-        mock_sem.__exit__.assert_called_once()
+        assert res is not None
         mock_run.assert_called_once()

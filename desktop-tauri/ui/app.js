@@ -691,26 +691,55 @@ function classifyLine(text) {
 }
 
 const MAX_LOG_LINES = 2000;
+const _logQueues = new WeakMap();
+const _logRafIds = new WeakMap();
 
 function appendLog(logEl, text, mode = "remux") {
   if (!logEl) return;
-  const placeholder = logEl.querySelector(".empty-state-card, .empty-log, .console-empty-prompt");
-  if (placeholder) placeholder.remove();
 
-  const div = document.createElement("div");
-  div.className = `log-line ${classifyLine(text)}`;
-  div.textContent = text;
-  logEl.appendChild(div);
-
-  // Cap the DOM: long batches can emit tens of thousands of lines, and an
-  // unbounded console grinds the webview to a halt.
-  while (logEl.childElementCount > MAX_LOG_LINES) {
-    logEl.firstElementChild.remove();
+  if (Array.isArray(text)) {
+    for (const line of text) {
+      appendLog(logEl, line, mode);
+    }
+    return;
   }
 
-  logEl.scrollTop = logEl.scrollHeight;
-
   parseLogStream(text, mode);
+
+  let queue = _logQueues.get(logEl);
+  if (!queue) {
+    queue = [];
+    _logQueues.set(logEl, queue);
+  }
+  queue.push(text);
+
+  if (!_logRafIds.has(logEl)) {
+    const rafId = requestAnimationFrame(() => {
+      _logRafIds.delete(logEl);
+      const pending = _logQueues.get(logEl);
+      if (!pending || pending.length === 0) return;
+      _logQueues.set(logEl, []);
+
+      const placeholder = logEl.querySelector(".empty-state-card, .empty-log, .console-empty-prompt");
+      if (placeholder) placeholder.remove();
+
+      const frag = document.createDocumentFragment();
+      for (const lineText of pending) {
+        const div = document.createElement("div");
+        div.className = `log-line ${classifyLine(lineText)}`;
+        div.textContent = lineText;
+        frag.appendChild(div);
+      }
+      logEl.appendChild(frag);
+
+      while (logEl.childElementCount > MAX_LOG_LINES) {
+        logEl.firstElementChild.remove();
+      }
+
+      logEl.scrollTop = logEl.scrollHeight;
+    });
+    _logRafIds.set(logEl, rafId);
+  }
 }
 
 // Parses the *actual* stdout/stderr lines emitted by mkv_remux.py /
