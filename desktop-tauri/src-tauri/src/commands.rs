@@ -479,19 +479,39 @@ pub fn run_job(
 
     let app_out = app.clone();
     thread::spawn(move || {
+        let mut batch = Vec::with_capacity(30);
+        let mut last_flush = std::time::Instant::now();
         for line in BufReader::new(stdout).lines() {
             if let Ok(line) = line {
-                let _ = app_out.emit("job-log", line);
+                batch.push(line);
+                if batch.len() >= 25 || last_flush.elapsed().as_millis() >= 25 {
+                    let _ = app_out.emit("job-log", &batch);
+                    batch.clear();
+                    last_flush = std::time::Instant::now();
+                }
             }
+        }
+        if !batch.is_empty() {
+            let _ = app_out.emit("job-log", &batch);
         }
     });
 
     let app_err = app.clone();
     thread::spawn(move || {
+        let mut batch = Vec::with_capacity(30);
+        let mut last_flush = std::time::Instant::now();
         for line in BufReader::new(stderr).lines() {
             if let Ok(line) = line {
-                let _ = app_err.emit("job-log", format!("[ERR] {}", line));
+                batch.push(format!("[ERR] {}", line));
+                if batch.len() >= 25 || last_flush.elapsed().as_millis() >= 25 {
+                    let _ = app_err.emit("job-log", &batch);
+                    batch.clear();
+                    last_flush = std::time::Instant::now();
+                }
             }
+        }
+        if !batch.is_empty() {
+            let _ = app_err.emit("job-log", &batch);
         }
     });
 

@@ -1319,6 +1319,8 @@ select::-ms-expand { display: none; }
   line-height: 1.6;
   overflow-y: auto;
   color: var(--text);
+  contain: content;
+  will-change: scroll-position;
 }
 
 .log-line { white-space: pre-wrap; word-break: break-all; }
