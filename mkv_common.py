@@ -81,9 +81,12 @@ EpisodeInfo = tuple[str, str, str]
 
 
 # ─── SORTING HELPER ──────────────────────────────────────────────────────────
+_NATURAL_SORT_RE = re.compile(r'(\d+)')
+
+
 def natural_sort_key(path: Path | str) -> list:
     """Key function for sorting paths naturally (e.g. EP2 before EP10)."""
-    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', str(path))]
+    return [int(text) if text.isdigit() else text.lower() for text in _NATURAL_SORT_RE.split(str(path))]
 
 
 class BelowLevelFilter(logging.Filter):
@@ -681,9 +684,6 @@ class PersistentInspectCache:
         try:
             self.cache_file.parent.mkdir(parents=True, exist_ok=True)
             with self._lock:
-                # Prune cache entries for files that no longer exist on disk
-                pruned_data = {k: v for k, v in self._data.items() if Path(k).exists()}
-                self._data = pruned_data
                 data_copy = dict(self._data)
             temp_file = self.cache_file.with_suffix(".tmp")
             with open(temp_file, "w", encoding="utf-8") as f:
@@ -918,7 +918,25 @@ _ASS_TIME_RE = re.compile(r'^(\d+):(\d{2}):(\d{2})\.(\d{2})$')
 
 def _ass_time_to_cs(t: str) -> int:
     """Parse ASS format time (H:MM:SS.cc) to centiseconds."""
-    m = _ASS_TIME_RE.match(t.strip())
+    s_clean = t.strip()
+    col1 = s_clean.find(':')
+    if col1 != -1:
+        col2 = s_clean.find(':', col1 + 1)
+        if col2 != -1:
+            dot = s_clean.find('.', col2 + 1)
+            if dot != -1:
+                try:
+                    h_str = s_clean[:col1]
+                    mi_str = s_clean[col1+1:col2]
+                    s_str = s_clean[col2+1:dot]
+                    cs_str = s_clean[dot+1:]
+                    if (h_str.isdigit() and len(mi_str) == 2 and mi_str.isdigit() 
+                            and len(s_str) == 2 and s_str.isdigit() 
+                            and len(cs_str) == 2 and cs_str.isdigit()):
+                        return ((int(h_str) * 3600 + int(mi_str) * 60 + int(s_str)) * 100) + int(cs_str)
+                except (ValueError, IndexError):
+                    pass
+    m = _ASS_TIME_RE.match(s_clean)
     if not m:
         raise ValueError(f"Bad ASS timestamp: {t!r}")
     h, mi, s, cs = map(int, m.groups())

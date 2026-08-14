@@ -64,8 +64,6 @@ from mkv_common import (
     setup_logging,
 )
 
-sys.dont_write_bytecode = True
-
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 # Initialize child logger for the remux module
@@ -498,8 +496,7 @@ class JobResult:
 def _convert_flac_to_opus(
     video: Path, audio_id: int, audio_index: int, temp_dir: Path,
     base: str, opus_bitrate: str, log: list[str], ffmpeg_threads: int,
-    complexity: int = 10,
-    io_semaphore: threading.Semaphore | None = None,
+    complexity: int = 9,
 ) -> Path | None:
     """Convert FLAC audio to Opus. Returns temp opus path or None on failure."""
     unique_id = uuid.uuid4().hex[:8]
@@ -520,8 +517,7 @@ def _convert_flac_to_opus(
         str(temp_opus),
     ]
 
-    with acquire_semaphore(io_semaphore):
-        result = run_subprocess(cmd, capture_stdout=False)
+    result = run_subprocess(cmd, capture_stdout=False)
     if result.returncode != 0:
         log.append(f"  WARNING (ffmpeg): {result.stderr.strip()}")
         temp_opus.unlink(missing_ok=True)
@@ -678,7 +674,6 @@ def process_job(
                 r.log,
                 ffmpeg_threads,
                 complexity=complexity,
-                io_semaphore=io_semaphore,
             )
             if temp_opus is None:
                 r.log.append(f"  !! SKIPPED: {video_name}")
@@ -1219,9 +1214,9 @@ def main() -> None:
                         help="Number of concurrent files to process.")
     parser.add_argument("--bitrate", type=str, default="192k",
                         help="Target bitrate for Opus audio conversion (e.g., 128k, 192k).")
-    parser.add_argument("--complexity", type=int, default=10, choices=range(11),
+    parser.add_argument("--complexity", type=int, default=9, choices=range(11),
                         metavar="[0-10]",
-                        help="Opus compression complexity level (0-10, default: 10).")
+                        help="Opus compression complexity level (0-10, default: 9).")
     parser.add_argument("--sub-offset", type=float, default=0.0,
                         help="Shift subtitle timestamps by this many seconds (negative = earlier, positive = later).")
     parser.add_argument("--out-dir", type=str, default=None,

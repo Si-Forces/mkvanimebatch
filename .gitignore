@@ -47,3 +47,6 @@ graphify-out/
 # Windows Zone Identifier metadata
 *:Zone.Identifier
 *Zone.Identifier*
+
+# pyright
+pyrightconfig.json
