@@ -497,7 +497,6 @@ def _convert_flac_to_opus(
     video: Path, audio_id: int, audio_index: int, temp_dir: Path,
     base: str, opus_bitrate: str, log: list[str], ffmpeg_threads: int,
     complexity: int = 9,
-    io_semaphore: threading.Semaphore | None = None,
 ) -> Path | None:
     """Convert FLAC audio to Opus. Returns temp opus path or None on failure."""
     unique_id = uuid.uuid4().hex[:8]
@@ -518,8 +517,7 @@ def _convert_flac_to_opus(
         str(temp_opus),
     ]
 
-    with acquire_semaphore(io_semaphore):
-        result = run_subprocess(cmd, capture_stdout=False)
+    result = run_subprocess(cmd, capture_stdout=False)
     if result.returncode != 0:
         log.append(f"  WARNING (ffmpeg): {result.stderr.strip()}")
         temp_opus.unlink(missing_ok=True)
@@ -676,7 +674,6 @@ def process_job(
                 r.log,
                 ffmpeg_threads,
                 complexity=complexity,
-                io_semaphore=None,
             )
             if temp_opus is None:
                 r.log.append(f"  !! SKIPPED: {video_name}")
