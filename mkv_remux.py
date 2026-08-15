@@ -239,13 +239,7 @@ def _ancestor_dirs(mkv_dir: Path, root_input_dir: Path) -> list[Path]:
         rel = mkv_dir.relative_to(root_input_dir)
     except ValueError:
         return [mkv_dir]
-    dirs: list[Path] = []
-    current = root_input_dir
-    dirs.append(current)
-    for part in rel.parts:
-        current = current / part
-        dirs.append(current)
-    return dirs
+    return [root_input_dir, *(root_input_dir / Path(*rel.parts[:i]) for i in range(1, len(rel.parts) + 1))]
 
 
 # ─── FONT SCANNING ───────────────────────────────────────────────────────────
@@ -461,13 +455,7 @@ class CoverIndex:
     def has_global(self) -> bool:   return self._global is not None
 
 
-# ─── EMBEDDED SUBTITLE SELECTION ─────────────────────────────────────────────
-def select_embedded_subtitle(json_data: dict) -> tuple[int, str] | None:
-    result = select_best_subtitle_track(json_data.get("tracks", []))
-    if result is None:
-        return None
-    tid, lang, _ = result
-    return tid, lang
+
 
 
 # ─── JOB PLANNING ────────────────────────────────────────────────────────────
@@ -761,9 +749,9 @@ def _resolve_subtitle(
                 LANG_MKV_TAG.get(subtitle_lang, subtitle_lang), True)
 
     logger.info("  No external subtitle match — checking source for embedded subtitles...")
-    _embedded = select_embedded_subtitle(json_data) if json_data else None
+    _embedded = select_best_subtitle_track(json_data.get("tracks", [])) if json_data else None
     if _embedded is not None:
-        embedded_sub_id, subtitle_lang = _embedded
+        embedded_sub_id, subtitle_lang, _ = _embedded
         if subtitle_lang in SUBTITLE_LANGS_FALLBACK:
             logger.info("  NOTE: No Indonesian sub in source; using English fallback (possible mislabelled fansub).")
         logger.info("  Subtitle       : embedded track %d [%s] (from source)", embedded_sub_id, LANG_LABEL.get(subtitle_lang, subtitle_lang))
