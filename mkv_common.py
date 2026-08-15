@@ -30,6 +30,7 @@ __all__ = [
     "LANG_LABEL",
     "LANG_MKV_TAG",
     "MAX_DEFAULT_WORKERS",
+    "SUBPROCESS_TIMEOUT",
     "SUBTITLE_EXT",
     "SUBTITLE_LANGS_FALLBACK",
     "SUBTITLE_LANGS_FALLBACK_ORDER",
@@ -77,6 +78,7 @@ logger = logging.getLogger("mkv_automation")
 
 MAX_DEFAULT_WORKERS = 16
 DEFAULT_WORKER_MULTIPLIER = 2
+SUBPROCESS_TIMEOUT = 3600
 EpisodeInfo = tuple[str, str, str]
 
 

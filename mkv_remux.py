@@ -12,6 +12,8 @@ default, a local "fonts" folder is deleted after a successful run (pass
 --keep-fonts to keep it). Use --dry-run to preview without touching disk.
 
 Requires: mkvmerge (MKVToolNix), ffmpeg
+
+NOTE: Concurrent invocations on the same output tree are unsupported.
 """
 from __future__ import annotations
 
@@ -20,6 +22,7 @@ import logging
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -36,6 +39,7 @@ from mkv_common import (
     LANG_LABEL,
     LANG_MKV_TAG,
     MAX_DEFAULT_WORKERS,
+    SUBPROCESS_TIMEOUT,
     SUBTITLE_LANGS_FALLBACK,
     SUBTITLE_LANGS_PRIMARY,
     EpisodeInfo,
@@ -505,7 +509,12 @@ def _convert_flac_to_opus(
         str(temp_opus),
     ]
 
-    result = run_subprocess(cmd, capture_stdout=False)
+    try:
+        result = run_subprocess(cmd, capture_stdout=False, timeout=SUBPROCESS_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        log.append(f"  ERROR (ffmpeg): conversion timed out after {SUBPROCESS_TIMEOUT}s.")
+        temp_opus.unlink(missing_ok=True)
+        return None
     if result.returncode != 0:
         log.append(f"  WARNING (ffmpeg): {result.stderr.strip()}")
         temp_opus.unlink(missing_ok=True)
@@ -693,8 +702,16 @@ def process_job(
         args = _build_mkvmerge_args(job, tr, temp_opus, fonts, temp_output, sub_offset=sub_offset)
         r.log.append("  Running mkvmerge...")
 
-        with acquire_semaphore(io_semaphore):
-            run_result = run_subprocess(["mkvmerge", *args])
+        try:
+            with acquire_semaphore(io_semaphore):
+                run_result = run_subprocess(["mkvmerge", *args], timeout=SUBPROCESS_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            r.log.append(f"  ERROR: mkvmerge timed out after {SUBPROCESS_TIMEOUT}s.")
+            temp_output.unlink(missing_ok=True)
+            r.log.append("  Removed partial output.")
+            r.skipped_reason = f"mkvmerge timed out after {SUBPROCESS_TIMEOUT}s"
+            return r
+
         if run_result.stderr.strip():
             r.log.append(f"  WARNING (mkvmerge): {run_result.stderr.strip()}")
 

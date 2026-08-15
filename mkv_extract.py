@@ -8,6 +8,8 @@ source's front-cover attachment (if any), and any embedded fonts (deduped
 across files into a shared fonts/ folder).
 
 Requires: mkvmerge, mkvextract (MKVToolNix)
+
+NOTE: Concurrent invocations on the same output tree are unsupported.
 """
 from __future__ import annotations
 
@@ -16,18 +18,21 @@ import hashlib
 import logging
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from mkv_common import (
+    COVER_EXTENSIONS,
     DEFAULT_WORKER_MULTIPLIER,
     FONT_EXTENSIONS,
     MAX_DEFAULT_WORKERS,
+    SUBPROCESS_TIMEOUT,
     FontRegistry,
     ParsedFile,
     PersistentInspectCache,
@@ -54,9 +59,6 @@ IO_LOCK = threading.Lock()
 
 # Initialize local child logger
 logger = logging.getLogger("mkv_automation.extract")
-
-# Backward compatibility alias
-_cleanup_stale_subtitle_offsets_bulk = cleanup_stale_subtitle_offsets_bulk
 
 
 
@@ -89,8 +91,14 @@ def _run_mkvextract(mkv_path: Path, args: list[str], log: list[str], io_semaphor
         log.append("   -> Nothing to extract.")
         return
         
-    with acquire_semaphore(io_semaphore):
-        result = run_subprocess(["mkvextract", str(mkv_path), *args], capture_stdout=False)
+    try:
+        with acquire_semaphore(io_semaphore):
+            result = run_subprocess(["mkvextract", str(mkv_path), *args], capture_stdout=False, timeout=SUBPROCESS_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        log.append(f"   -> ERROR: mkvextract timed out after {SUBPROCESS_TIMEOUT}s for '{mkv_path.name}'.")
+        raise RuntimeError(
+            f"mkvextract timed out after {SUBPROCESS_TIMEOUT}s for '{mkv_path.name}'"
+        )
     if result.returncode > 1:
         raise RuntimeError(
             f"mkvextract failed (exit {result.returncode}): "
@@ -177,7 +185,8 @@ def process_file(
     cover_path: Path | None = None
     cover, font_attachments = parse_attachments(json_data.get("attachments") or [])
     if cover:
-        ext = Path(cover["file_name"]).suffix.lower() or ".jpg"
+        raw_ext = Path(cover.get("file_name", "")).suffix.lower()
+        ext = raw_ext if raw_ext in COVER_EXTENSIONS else ".jpg"
         cover_path = file_dir / f"{file_stem}_cover{ext}"
         if cover_path.exists():
             log.append(f"   -> Cover already exists ({cover_path.name}), skipping.")
@@ -308,8 +317,33 @@ def process_file(
 
 
 
+def _build_font_registry(fonts_dir: Path) -> FontRegistry:
+    """Build a FontRegistry populated with any existing font files in fonts_dir."""
+    existing_name_sizes = set()
+    if fonts_dir.is_dir():
+        with os.scandir(str(fonts_dir)) as it:
+            for entry in it:
+                if entry.is_file() and Path(entry.name).suffix.lower() in FONT_EXTENSIONS:
+                    try:
+                        existing_name_sizes.add((entry.name, entry.stat().st_size))
+                    except OSError:
+                        pass
+    return FontRegistry(existing_name_sizes=existing_name_sizes)
+
+
 # ─── RUN ORCHESTRATOR ────────────────────────────────────────────────────────
-def _run(output_dir: Path, fonts_dir: Path, mkv_files: list[ParsedFile], pool: ThreadPoolExecutor, max_workers: int, dry_run: bool, sub_offset: float = 0.0, persistent_cache: PersistentInspectCache | None = None, io_semaphore: threading.Semaphore | None = None) -> bool:
+def _run(
+    output_dir: Path,
+    fonts_dir: Path,
+    mkv_files: list[ParsedFile],
+    pool: ThreadPoolExecutor,
+    max_workers: int,
+    dry_run: bool,
+    sub_offset: float = 0.0,
+    persistent_cache: PersistentInspectCache | None = None,
+    io_semaphore: threading.Semaphore | None = None,
+    font_registry: FontRegistry | None = None,
+) -> bool:
     """Returns True if every file in this directory was processed without
     a crash or mkvmerge-inspection failure; False otherwise. Propagated up
     to main() so the process exits non-zero if anything actually failed."""
@@ -328,16 +362,8 @@ def _run(output_dir: Path, fonts_dir: Path, mkv_files: list[ParsedFile], pool: T
     fonts_dir.mkdir(parents=True, exist_ok=True)
     json_cache = inspect_videos([f.path for f in mkv_files], pool, persistent_cache=persistent_cache)
 
-    existing_name_sizes = set()
-    if fonts_dir.is_dir():
-        with os.scandir(str(fonts_dir)) as it:
-            for entry in it:
-                if entry.is_file() and Path(entry.name).suffix.lower() in FONT_EXTENSIONS:
-                    try:
-                        existing_name_sizes.add((entry.name, entry.stat().st_size))
-                    except OSError:
-                        pass
-    font_registry = FontRegistry(existing_name_sizes=existing_name_sizes)
+    if font_registry is None:
+        font_registry = _build_font_registry(fonts_dir)
     stale_subs_map: dict[str, str] = {}
     stale_subs_lock = threading.Lock()
 
@@ -487,6 +513,12 @@ def main() -> None:
 
     mkv_dirs = sorted(mkvs_by_dir.keys(), key=natural_sort_key)
 
+    shared_font_registry: FontRegistry | None = None
+    if fonts_override:
+        shared_font_registry = _build_font_registry(fonts_override)
+    elif out_override:
+        shared_font_registry = _build_font_registry(out_override / "fonts")
+
     overall_success = True
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         for mkv_dir in mkv_dirs:
@@ -522,6 +554,7 @@ def main() -> None:
                 sub_offset=cfg.sub_offset,
                 persistent_cache=persistent_cache,
                 io_semaphore=io_semaphore,
+                font_registry=shared_font_registry,
             )
             if not success:
                 overall_success = False

@@ -9,6 +9,9 @@ use tauri::{AppHandle, Emitter, Manager, State};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+
 #[allow(dead_code)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
@@ -101,7 +104,7 @@ fn get_sidecar_path(app: &AppHandle, name: &str) -> Result<PathBuf, String> {
     for dir in &candidate_dirs {
         for filename in &candidate_filenames {
             let candidate = dir.join(filename);
-            if candidate.is_file() && candidate.exists() {
+            if candidate.is_file() {
                 return Ok(candidate);
             }
         }
@@ -118,36 +121,46 @@ fn get_sidecar_path(app: &AppHandle, name: &str) -> Result<PathBuf, String> {
         let sidecar_dir = app
             .path()
             .app_local_data_dir()
-            .unwrap_or_else(|_| std::env::temp_dir().join("mkv_anime_batch_sidecars"))
+            .map_err(|e| format!("Failed to resolve app local data directory: {}", e))?
             .join("binaries");
-        let _ = std::fs::create_dir_all(&sidecar_dir);
+        std::fs::create_dir_all(&sidecar_dir)
+            .map_err(|e| format!("Failed to create sidecar directory: {}", e))?;
 
         #[cfg(windows)]
         let target_filename = format!("{}-{}.exe", name, if triple.is_empty() { "x86_64-pc-windows-msvc" } else { triple });
         #[cfg(not(windows))]
         let target_filename = format!("{}-{}", name, if triple.is_empty() { "x86_64-unknown-linux-gnu" } else { triple });
 
-        let temp_sidecar = sidecar_dir.join(&target_filename);
+        let target_path = sidecar_dir.join(&target_filename);
 
-        // Extract if file doesn't exist or size mismatch
-        let need_write = match std::fs::metadata(&temp_sidecar) {
-            Ok(meta) => meta.len() != bytes.len() as u64,
+        // Content comparison: read existing file bytes and compare to embedded bytes
+        let need_write = match std::fs::read(&target_path) {
+            Ok(existing_bytes) => existing_bytes != bytes,
             Err(_) => true,
         };
 
         if need_write {
-            if let Err(e) = std::fs::write(&temp_sidecar, bytes) {
-                return Err(format!("Failed to unpack embedded sidecar to data dir: {}", e));
-            }
+            let tmp_path = sidecar_dir.join(format!(".{}.tmp-{}", target_filename, std::process::id()));
+            std::fs::write(&tmp_path, bytes)
+                .map_err(|e| format!("Failed to write embedded sidecar to temporary file: {}", e))?;
+
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&temp_sidecar, std::fs::Permissions::from_mode(0o755));
+                if let Err(e) = std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o700)) {
+                    let _ = std::fs::remove_file(&tmp_path);
+                    return Err(format!("Failed to set permissions on temporary sidecar: {}", e));
+                }
+            }
+
+            if let Err(e) = std::fs::rename(&tmp_path, &target_path) {
+                let _ = std::fs::remove_file(&tmp_path);
+                return Err(format!("Failed to rename temporary sidecar to target: {}", e));
             }
         }
 
-        if temp_sidecar.exists() {
-            return Ok(temp_sidecar);
+        if target_path.is_file() {
+            return Ok(target_path);
         }
     }
 
@@ -218,9 +231,9 @@ pub fn get_system_telemetry(state: State<'_, TelemetryState>) -> Result<Telemetr
 
 #[tauri::command]
 pub fn scan_directory(path: String) -> Result<Vec<String>, String> {
-    let dir = PathBuf::from(&path);
-    if !dir.exists() || !dir.is_dir() {
-        return Err("Directory does not exist".into());
+    let dir = std::fs::canonicalize(&path).map_err(|e| format!("Invalid directory path: {}", e))?;
+    if !dir.is_dir() {
+        return Err("Directory does not exist or is not a directory".into());
     }
 
     let mut files = Vec::new();
@@ -405,10 +418,21 @@ fn probe_mkv(file_path: &std::path::Path) -> Result<MkvMetadata, String> {
 
 #[tauri::command]
 pub fn inspect_mkv_file(dir_path: String, filename: String) -> Result<MkvMetadata, String> {
-    // Join in Rust with Path::join so Windows backslash separators are handled
-    // correctly — the frontend never builds path strings itself.
-    let full_path = PathBuf::from(&dir_path).join(&filename);
-    probe_mkv(&full_path)
+    let base = std::fs::canonicalize(&dir_path)
+        .map_err(|e| format!("Invalid base directory: {}", e))?;
+    if !base.is_dir() {
+        return Err("Base path is not a directory".into());
+    }
+
+    let full_path = base.join(&filename);
+    let canonical_file = std::fs::canonicalize(&full_path)
+        .map_err(|e| format!("Invalid file path: {}", e))?;
+
+    if !canonical_file.starts_with(&base) || !canonical_file.is_file() {
+        return Err("Path traversal detected or invalid file".into());
+    }
+
+    probe_mkv(&canonical_file)
 }
 
 /// Scan a directory for MKVs and probe each one on a small thread pool,
@@ -417,8 +441,11 @@ pub fn inspect_mkv_file(dir_path: String, filename: String) -> Result<MkvMetadat
 /// spawned one mkvmerge process per IPC call.
 #[tauri::command]
 pub fn inspect_directory(path: String) -> Result<Vec<(String, MkvMetadata)>, String> {
-    let files = scan_directory(path.clone())?;
-    let dir = PathBuf::from(&path);
+    let dir = std::fs::canonicalize(&path).map_err(|e| format!("Invalid directory path: {}", e))?;
+    if !dir.is_dir() {
+        return Err("Directory does not exist or is not a directory".into());
+    }
+    let files = scan_directory(path)?;
 
     let results: Vec<(String, MkvMetadata)> = thread::scope(|s| {
         // Bounded worker pool: probe at most 4 files concurrently to avoid
@@ -461,18 +488,22 @@ pub fn run_job(
     mode: String,
     args: Vec<String>,
 ) -> Result<(), String> {
-    {
-        let lock = state.child.lock().map_err(|e| e.to_string())?;
-        if lock.is_some() {
-            return Err("A job is already running. Stop it first.".into());
-        }
-    }
-
     let sidecar_name = match mode.as_str() {
         "remux" => "mkv-remux",
         "extract" => "mkv-extract",
         _ => return Err(format!("Unknown mode: {}", mode)),
     };
+
+    for arg in &args {
+        if arg.contains('\0') {
+            return Err("Argument contains invalid null character".into());
+        }
+    }
+
+    let mut lock = state.child.lock().map_err(|e| e.to_string())?;
+    if lock.is_some() {
+        return Err("A job is already running. Stop it first.".into());
+    }
 
     let binary = get_sidecar_path(&app, sidecar_name)?;
 
@@ -484,16 +515,17 @@ pub fn run_job(
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
 
+    #[cfg(unix)]
+    cmd.process_group(0);
+
     let mut child = cmd.spawn()
         .map_err(|e| format!("Failed to launch {}: {}", binary.display(), e))?;
 
     let stdout = child.stdout.take().ok_or("no stdout pipe")?;
     let stderr = child.stderr.take().ok_or("no stderr pipe")?;
 
-    {
-        let mut lock = state.child.lock().map_err(|e| e.to_string())?;
-        *lock = Some(child);
-    }
+    *lock = Some(child);
+    drop(lock);
 
     let app_out = app.clone();
     let stdout_handle = thread::spawn(move || {
@@ -537,22 +569,20 @@ pub fn run_job(
     thread::spawn(move || {
         let _ = stdout_handle.join();
         let _ = stderr_handle.join();
-        let status = {
+        let code = {
             let job = app_wait.state::<JobState>();
             let mut lock = job.child.lock().unwrap();
             if let Some(ref mut c) = *lock {
-                c.wait().ok()
+                let code = c.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
+                *lock = None;
+                Some(code)
             } else {
                 None
             }
         };
 
-        if let Some(status) = status {
-            let code = status.code().unwrap_or(-1);
+        if let Some(code) = code {
             let _ = app_wait.emit("job-done", code);
-            let job = app_wait.state::<JobState>();
-            let mut lock = job.child.lock().unwrap();
-            *lock = None;
         }
     });
 
@@ -563,21 +593,23 @@ pub fn run_job(
 pub fn stop_job(state: State<'_, JobState>) -> Result<(), String> {
     let mut lock = state.child.lock().map_err(|e| e.to_string())?;
     if let Some(ref mut child) = *lock {
-        #[cfg(windows)]
-        {
+        if let Ok(None) = child.try_wait() {
             let pid = child.id();
-            let _ = Command::new("taskkill")
-                .args(["/PID", &pid.to_string(), "/T", "/F"])
-                .output();
-        }
-        #[cfg(not(windows))]
-        {
-            let pid = child.id();
-            let _ = Command::new("pkill").args(["-P", &pid.to_string()]).output();
-            let _ = child.kill();
+            #[cfg(windows)]
+            {
+                let _ = Command::new("taskkill")
+                    .args(["/PID", &pid.to_string(), "/T", "/F"])
+                    .output();
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = Command::new("kill")
+                    .args(["-s", "KILL", "--", &format!("-{}", pid)])
+                    .output();
+                let _ = child.kill();
+            }
         }
     }
-    *lock = None;
     Ok(())
 }
 
@@ -603,7 +635,7 @@ pub fn clear_cache(app: AppHandle, mode: String) -> Result<String, String> {
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     let combined = format!("{}{}", stdout, stderr).trim().to_string();
 
-    if output.status.success() || output.status.code() == Some(0) {
+    if output.status.success() {
         Ok(if combined.is_empty() {
             "Cache cleared.".into()
         } else {
