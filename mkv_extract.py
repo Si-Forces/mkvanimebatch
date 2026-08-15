@@ -15,7 +15,6 @@ import argparse
 import hashlib
 import logging
 import os
-import re
 import shutil
 import sys
 import tempfile
@@ -34,6 +33,7 @@ from mkv_common import (
     PersistentInspectCache,
     acquire_semaphore,
     check_dependencies,
+    cleanup_stale_subtitle_offsets_bulk,
     ep_type_label,
     has_chapters,
     inspect_videos,
@@ -47,9 +47,6 @@ from mkv_common import (
     setup_logging,
     shift_ass_timestamps,
 )
-from mkv_common import (
-    cleanup_stale_subtitle_offsets_bulk as _cleanup_stale_subtitle_offsets_bulk,
-)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 SUPPORTED_SUB_CODECS = frozenset({"s_text/ass"})
@@ -58,35 +55,10 @@ IO_LOCK = threading.Lock()
 # Initialize local child logger
 logger = logging.getLogger("mkv_automation.extract")
 
-# ─── DATA TYPES ──────────────────────────────────────────────────────────────
-@dataclass
-class MkvMetadata:
-    tracks: list[dict] = field(default_factory=list)
-    attachments: list[dict] = field(default_factory=list)
-    has_chapters: bool = False
+# Backward compatibility alias
+_cleanup_stale_subtitle_offsets_bulk = cleanup_stale_subtitle_offsets_bulk
 
 
-def parse_mkv_metadata(json_data: dict) -> MkvMetadata:
-    tracks = []
-    for t in json_data.get("tracks") or []:
-        props = t.get("properties") or {}
-        tracks.append({
-            "id":         t.get("id", ""),
-            "type":       t.get("type", ""),
-            "codec_id":   (props.get("codec_id") or "").lower(),
-            "language":   props.get("language") or "und",
-            "track_name": props.get("track_name") or "",
-        })
-    attachments = []
-    for a in json_data.get("attachments") or []:
-        attachments.append({
-            "id":           a.get("id", ""),
-            "file_name":    a.get("file_name", ""),
-            "content_type": a.get("content_type") or "",
-            "size":         a.get("size", 0),
-        })
-    return MkvMetadata(tracks=tracks, attachments=attachments,
-                       has_chapters=has_chapters(json_data))
 
 
 # ─── SUBTITLE SELECTION ──────────────────────────────────────────────────────
@@ -133,26 +105,11 @@ def _clean_empty_file(path: Path, log: list[str], item_name: str) -> None:
         
 def _hash_file(filepath: Path) -> str:
     """Calculate BLAKE2b hash of a file for content-based font deduplication."""
-    h = hashlib.blake2b()
     with filepath.open('rb') as f:
-        while chunk := f.read(1048576):
-            h.update(chunk)
-    return h.hexdigest()
+        return hashlib.file_digest(f, hashlib.blake2b).hexdigest()
 
 
 # ─── PER-FILE WORKER ─────────────────────────────────────────────────────────
-_OFFSET_SUBTITLE_RE = re.compile(
-    r"^(?P<stem>.+?)(?:\.\[[-+]?\d+(?:\.\d+)?s\])?(?P<suffix>\.ass)$",
-    re.IGNORECASE,
-)
-
-
-def _cleanup_stale_subtitle_offsets(base_sub_path: Path, current_final_path: Path) -> None:
-    """Remove stale subtitle variants for one track stem."""
-    _cleanup_stale_subtitle_offsets_bulk(
-        base_sub_path.parent,
-        {base_sub_path.stem: current_final_path.name},
-    )
 
 
 
@@ -176,7 +133,6 @@ def process_file(
         log.append(f"  WARNING: mkvmerge inspection failed for '{mkv_path.name}', skipping.")
         return mkv_path, log, False
 
-    meta = parse_mkv_metadata(json_data)
     file_stem = mkv_path.stem
     file_dir  = output_dir if output_dir is not None else mkv_path.parent
 
@@ -211,7 +167,7 @@ def process_file(
         log.append("   -> No suitable ASS subtitle tracks found.")
 
     chapter_path: Path | None = None
-    if meta.has_chapters:
+    if has_chapters(json_data):
         chapter_path = file_dir / f"{chapter_stem}_chapters.xml"
         log.append(f"   -> Queued chapters → {chapter_path.name}")
         queued_outputs.append(("chapters", None, chapter_path, "Chapter"))
@@ -219,7 +175,7 @@ def process_file(
         log.append("   -> No chapters found in source.")
 
     cover_path: Path | None = None
-    cover, font_attachments = parse_attachments(meta.attachments)
+    cover, font_attachments = parse_attachments(json_data.get("attachments") or [])
     if cover:
         ext = Path(cover["file_name"]).suffix.lower() or ".jpg"
         cover_path = file_dir / f"{file_stem}_cover{ext}"
@@ -290,7 +246,10 @@ def process_file(
                 with stale_subs_lock:
                     stale_subs_map[base_sub_path.stem] = final_sub_path.name
             elif base_sub_path is not None:
-                _cleanup_stale_subtitle_offsets(base_sub_path, final_sub_path)
+                cleanup_stale_subtitle_offsets_bulk(
+                    base_sub_path.parent,
+                    {base_sub_path.stem: final_sub_path.name},
+                )
 
         if font_args and temp_dir:
             id_to_meta = {str(a["id"]): a for a in new_font_attachments}
@@ -452,7 +411,7 @@ def _run(output_dir: Path, fonts_dir: Path, mkv_files: list[ParsedFile], pool: T
             else:
                 logger.info(line)
 
-    _cleanup_stale_subtitle_offsets_bulk(output_dir, stale_subs_map)
+    cleanup_stale_subtitle_offsets_bulk(output_dir, stale_subs_map)
 
     logger.info("=========================================")
     logger.info(" All files processed.")

@@ -383,8 +383,8 @@ def detect_sub_lang(sub_stem: str) -> str:
 # ─── EPISODE PARSER CONFIG ───────────────────────────────────────────────────
 _OVA_PATTERN     = re.compile(r'(?<!\w)(OVA|OAD|ONA)(?=\d|\W|$)', re.IGNORECASE)
 _SPECIAL_PATTERN = re.compile(r'(?<!\w)(Specials?|SP)(?=\d|\W|$)',  re.IGNORECASE)
-_SXXEXX_PATTERN  = re.compile(r'[Ss](\d{1,2})[Ee](\d{1,4}(?:\.\d{1,2}(?![0-9pib]))?)(?:[vV]\d)?')
-_SXXPXX_PATTERN  = re.compile(r'[Ss](\d{1,2})[Pp](\d{1,4}(?:\.\d{1,2}(?![0-9pib]))?)(?:[vV]\d)?')
+_SXXEXX_PATTERN  = re.compile(r'[Ss](\d{1,2})[Ee](\d{1,4}(?:\.\d{1,2}(?![0-9pib]))?)(?:-[Ee]?\d{1,4})?(?:[vV]\d)?')
+_SXXPXX_PATTERN  = re.compile(r'[Ss](\d{1,2})[Pp](\d{1,4}(?:\.\d{1,2}(?![0-9pib]))?)(?:-[Pp]?\d{1,4})?(?:[vV]\d)?')
 
 _YEAR_GUARD = r'(?!(?:19|20)\d{2}(?!\d))'
 
@@ -392,9 +392,10 @@ _YEAR_GUARD = r'(?!(?:19|20)\d{2}(?!\d))'
 # NOTE: (?![0-9]) after \d{1,4} in the dash branch prevents 5-digit numbers
 # from being silently truncated. _YEAR_GUARD rejects release years (1900-2099).
 _EP_NUM_MARKER_RE = re.compile(
-    r'(?:[-\u2013]\s*)' + _YEAR_GUARD + r'(\d{1,4}(?:\.\d{1,2}(?![0-9pib]))?)(?![0-9pib])(?:\s*(?:end|fin|final))?(?:[vV]\d)?'
+    r'(?:[-\u2013]\s*)' + _YEAR_GUARD + r'(\d{1,4}(?:\.\d{1,2}(?![0-9pib]))?)(?:-\d{1,4})?(?![0-9pib])(?:\s*(?:end|fin|final))?(?:[vV]\d)?'
     r'|[\[(](\d{1,3}(?:\.\d{1,2}(?![0-9pib]))?)[\])](?:[vV]\d)?'
-    r'|\b[Ee][Pp](?:isode)?\.?\s*(\d{1,4}(?:\.\d{1,2}(?![0-9pib]))?)(?:[vV]\d)?\b',
+    r'|\b[Ee][Pp](?:isode)?\.?\s*(\d{1,4}(?:\.\d{1,2}(?![0-9pib]))?)(?:[vV]\d)?\b'
+    r'|第\s*(\d{1,4}(?:\.\d{1,2})?)\s*話?',
     re.IGNORECASE
 )
 
@@ -685,10 +686,11 @@ class PersistentInspectCache:
             self.cache_file.parent.mkdir(parents=True, exist_ok=True)
             with self._lock:
                 data_copy = dict(self._data)
-            temp_file = self.cache_file.with_suffix(".tmp")
-            with open(temp_file, "w", encoding="utf-8") as f:
+            import tempfile
+            with tempfile.NamedTemporaryFile("w", dir=self.cache_file.parent, encoding="utf-8", delete=False) as f:
+                temp_name = f.name
                 json.dump(data_copy, f)
-            temp_file.replace(self.cache_file)
+            Path(temp_name).replace(self.cache_file)
         except (OSError, TypeError, ValueError) as e:
             logger.warning(f"Failed to save inspect cache to {self.cache_file}: {e}")
 
@@ -702,9 +704,11 @@ class PersistentInspectCache:
             return None
         try:
             st = path.stat()
-            if entry.get("size") == st.st_size and abs(entry.get("mtime", 0) - st.st_mtime) < 0.001:
+            cached_mtime = entry.get("mtime")
+            cached_size = entry.get("size")
+            if cached_mtime is not None and cached_size == st.st_size and abs(float(cached_mtime) - st.st_mtime) < 0.001:
                 return entry.get("json_data")
-        except OSError:
+        except (OSError, TypeError, ValueError):
             pass
         return None
 
@@ -919,23 +923,6 @@ _ASS_TIME_RE = re.compile(r'^(\d+):(\d{2}):(\d{2})\.(\d{2})$')
 def _ass_time_to_cs(t: str) -> int:
     """Parse ASS format time (H:MM:SS.cc) to centiseconds."""
     s_clean = t.strip()
-    col1 = s_clean.find(':')
-    if col1 != -1:
-        col2 = s_clean.find(':', col1 + 1)
-        if col2 != -1:
-            dot = s_clean.find('.', col2 + 1)
-            if dot != -1:
-                try:
-                    h_str = s_clean[:col1]
-                    mi_str = s_clean[col1+1:col2]
-                    s_str = s_clean[col2+1:dot]
-                    cs_str = s_clean[dot+1:]
-                    if (h_str.isdigit() and len(mi_str) == 2 and mi_str.isdigit() 
-                            and len(s_str) == 2 and s_str.isdigit() 
-                            and len(cs_str) == 2 and cs_str.isdigit()):
-                        return ((int(h_str) * 3600 + int(mi_str) * 60 + int(s_str)) * 100) + int(cs_str)
-                except (ValueError, IndexError):
-                    pass
     m = _ASS_TIME_RE.match(s_clean)
     if not m:
         raise ValueError(f"Bad ASS timestamp: {t!r}")
@@ -946,12 +933,9 @@ def _ass_time_to_cs(t: str) -> int:
 def _ass_cs_to_time(total_cs: int) -> str:
     """Format centiseconds to ASS format time (H:MM:SS.cc) with clamping at 0."""
     total_cs = max(0, total_cs)  # clamp at 0:00:00.00, timestamps can't go negative
-    cs = total_cs % 100
-    total_s = total_cs // 100
-    s = total_s % 60
-    total_m = total_s // 60
-    m = total_m % 60
-    h = total_m // 60
+    total_s, cs = divmod(total_cs, 100)
+    total_m, s = divmod(total_s, 60)
+    h, m = divmod(total_m, 60)
     return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
 
@@ -960,7 +944,10 @@ def shift_ass_content(content: str, offset_seconds: float) -> tuple[str, int]:
     Shift every Dialogue/Comment line in ASS format text by offset_seconds in memory.
     Returns tuple of (shifted_content_str, shifted_line_count).
     """
-    if offset_seconds == 0.0:
+    try:
+        if offset_seconds == 0.0 or not (-360000.0 <= float(offset_seconds) <= 360000.0):
+            return content, 0
+    except (ValueError, TypeError):
         return content, 0
 
     offset_cs = round(offset_seconds * 100)
