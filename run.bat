@@ -23,6 +23,7 @@ set "SCRIPT_DIR=%~dp0"
 :: Initialize global flags (placed before :menu loop to persist state)
 if not defined DRY_RUN_MODE set "DRY_RUN_MODE=OFF"
 if not defined KEEP_FONTS_MODE set "KEEP_FONTS_MODE=OFF"
+set "_empty_cnt=0"
 
 :menu
 cls
@@ -53,8 +54,9 @@ echo.
 set "choice="
 set /p choice="Enter your choice (0-4): "
 
-:: Strip all spaces from choice to handle trailing spaces gracefully
-if defined choice set "choice=%choice: =%"
+:: Strip quotes and spaces from choice (delayed expansion: injection-safe)
+if defined choice set choice=!choice:"=!
+if defined choice set "choice=!choice: =!"
 
 :: --- MENU ROUTING ---
 if not defined choice (
@@ -63,15 +65,15 @@ if not defined choice (
     goto menu
 )
 set "_empty_cnt=0"
-if "%choice%"=="1" goto remux
-if "%choice%"=="2" goto extract
-if "%choice%"=="3" goto toggle_dry_run
-if "%choice%"=="4" goto toggle_keep_fonts
-if "%choice%"=="0" goto exit
+if "!choice!"=="1" goto remux
+if "!choice!"=="2" goto extract
+if "!choice!"=="3" goto toggle_dry_run
+if "!choice!"=="4" goto toggle_keep_fonts
+if "!choice!"=="0" goto exit
 
 :: Fallback if input is invalid
 echo.
-echo [ERROR] "%choice%" is not a valid option. Please try again.
+echo [ERROR] "!choice!" is not a valid option. Please try again.
 timeout /t 2 /nobreak >nul 2>nul || ping 127.0.0.1 -n 3 >nul
 goto menu
 
@@ -106,6 +108,13 @@ set /p out_dir="Enter Output Directory (or press Enter): "
 set /p fonts_dir="Enter Fonts Directory override (or press Enter): "
 set /p complexity="Enter Opus Complexity [0-10] (or press Enter for default 10): "
 set /p io_jobs="Enter Concurrent I/O Jobs (or press Enter for default 2): "
+
+:: Strip double quotes from inputs (prevents argument injection; handles pasted quoted paths)
+if defined input_dir set input_dir=!input_dir:"=!
+if defined out_dir set out_dir=!out_dir:"=!
+if defined fonts_dir set fonts_dir=!fonts_dir:"=!
+if defined complexity set complexity=!complexity:"=!
+if defined io_jobs set io_jobs=!io_jobs:"=!
 
 set "opts="
 if not "!input_dir!"=="" set opts=!opts! --input-dir "!input_dir!"
@@ -169,6 +178,12 @@ set /p input_dir="Enter Input Directory (or press Enter): "
 set /p out_dir="Enter Output Directory for extracted files (or press Enter): "
 set /p sub_offset="Enter Subtitle Delay/Offset in seconds (e.g. -10.0, or press Enter): "
 set /p io_jobs="Enter Concurrent I/O Jobs (or press Enter for default 2): "
+
+:: Strip double quotes from inputs (prevents argument injection; handles pasted quoted paths)
+if defined input_dir set input_dir=!input_dir:"=!
+if defined out_dir set out_dir=!out_dir:"=!
+if defined sub_offset set sub_offset=!sub_offset:"=!
+if defined io_jobs set io_jobs=!io_jobs:"=!
 
 set "opts="
 if not "!input_dir!"=="" set opts=!opts! --input-dir "!input_dir!"

@@ -2053,7 +2053,7 @@ dependencies = [
 
 [[package]]
 name = "mkv-anime-batch"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "rfd",
  "serde",
