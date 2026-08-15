@@ -446,10 +446,6 @@ class QueueTracker {
     for (const [key, item] of this.items.entries()) {
       if (norm(key) === target) return item;
     }
-    for (const [key, item] of this.items.entries()) {
-      const k = norm(key);
-      if (k && target && (k === target)) return item;
-    }
     return null;
   }
 
@@ -818,18 +814,6 @@ function parseLogStream(text, mode) {
     // queue-count badge, so we no longer paint a batch % onto individual bars.
     return;
   }
-
-  // ─── Future-proofing: structured [JOB_*] tags (not yet emitted by backend) ─
-  const jobStart = text.match(/\[JOB_START\]\s*(.+)$/i);
-  if (jobStart) { tracker.markProcessing(jobStart[1].trim()); return; }
-  const jobProg = text.match(/\[JOB_PROGRESS\]\s*([^|]+)\|\s*(\d+)%/i);
-  if (jobProg) { tracker.updateProgress(jobProg[1].trim(), parseInt(jobProg[2])); return; }
-  const jobDone = text.match(/\[JOB_DONE\]\s*([^|]+)\|?(?:.*?([\d.]+)\s*s)?/i);
-  if (jobDone) { tracker.markCompleted(jobDone[1].trim(), jobDone[2] ? jobDone[2].trim() : null); return; }
-  const jobFail = text.match(/\[JOB_FAIL\]\s*([^|]+)\|\s*(.+)$/i);
-  if (jobFail) { tracker.markFailed(jobFail[1].trim(), jobFail[2].trim()); return; }
-  const jobDry = text.match(/\[JOB_DRY_RUN\]\s*([^|]+)/i);
-  if (jobDry) { tracker.markDryRun(jobDry[1].trim()); return; }
 }
 
 function clearLog(logEl) {

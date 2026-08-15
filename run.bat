@@ -72,7 +72,7 @@ if "%choice%"=="0" goto exit
 :: Fallback if input is invalid
 echo.
 echo [ERROR] "%choice%" is not a valid option. Please try again.
-ping 127.0.0.1 -n 3 >nul
+timeout /t 2 /nobreak >nul 2>nul || ping 127.0.0.1 -n 3 >nul
 goto menu
 
 
@@ -111,8 +111,22 @@ set "opts="
 if not "!input_dir!"=="" set opts=!opts! --input-dir "!input_dir!"
 if not "!out_dir!"=="" set opts=!opts! --out-dir "!out_dir!"
 if not "!fonts_dir!"=="" set opts=!opts! --fonts-dir "!fonts_dir!"
-if not "!complexity!"=="" set opts=!opts! --complexity !complexity!
-if not "!io_jobs!"=="" set opts=!opts! --io-jobs !io_jobs!
+if not "!complexity!"=="" (
+    for /f "delims=0123456789" %%a in ("!complexity!") do (
+        echo [ERROR] Complexity must be numeric (0-10).
+        pause
+        goto menu
+    )
+    set opts=!opts! --complexity "!complexity!"
+)
+if not "!io_jobs!"=="" (
+    for /f "delims=0123456789" %%a in ("!io_jobs!") do (
+        echo [ERROR] I/O jobs must be numeric.
+        pause
+        goto menu
+    )
+    set opts=!opts! --io-jobs "!io_jobs!"
+)
 if "!DRY_RUN_MODE!"=="ON" set opts=!opts! --dry-run
 if "!KEEP_FONTS_MODE!"=="ON" set opts=!opts! --keep-fonts
 
@@ -159,8 +173,22 @@ set /p io_jobs="Enter Concurrent I/O Jobs (or press Enter for default 2): "
 set "opts="
 if not "!input_dir!"=="" set opts=!opts! --input-dir "!input_dir!"
 if not "!out_dir!"=="" set opts=!opts! --out-dir "!out_dir!"
-if not "!sub_offset!"=="" set opts=!opts! --sub-offset "!sub_offset!"
-if not "!io_jobs!"=="" set opts=!opts! --io-jobs !io_jobs!
+if not "!sub_offset!"=="" (
+    for /f "delims=0123456789.-+" %%a in ("!sub_offset!") do (
+        echo [ERROR] Subtitle offset must be a valid numeric value.
+        pause
+        goto menu
+    )
+    set opts=!opts! --sub-offset "!sub_offset!"
+)
+if not "!io_jobs!"=="" (
+    for /f "delims=0123456789" %%a in ("!io_jobs!") do (
+        echo [ERROR] I/O jobs must be numeric.
+        pause
+        goto menu
+    )
+    set opts=!opts! --io-jobs "!io_jobs!"
+)
 if "!DRY_RUN_MODE!"=="ON" set opts=!opts! --dry-run
 
 echo.
