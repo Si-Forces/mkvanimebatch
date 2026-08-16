@@ -208,36 +208,48 @@
 
                 <!-- Input Dir -->
                 <div class="form-group full">
-                  <label class="form-label">Input Directory <span class="required">*</span></label>
+                  <div class="form-label-row">
+                    <label class="form-label">Input Directory <span class="required">*</span></label>
+                    <span class="field-hint">Source MKVs</span>
+                  </div>
                   <div class="input-row">
-                    <input type="text" id="remux-input-dir" placeholder="/path/to/anime" />
+                    <input type="text" id="remux-input-dir" placeholder="/path/to/anime/episodes" />
                     <button class="browse-btn" data-target="remux-input-dir">📁 Browse</button>
                   </div>
                 </div>
 
                 <!-- Output Dir -->
                 <div class="form-group full">
-                  <label class="form-label">Output Directory</label>
+                  <div class="form-label-row">
+                    <label class="form-label">Output Directory</label>
+                    <span class="field-hint">Default: input/Output</span>
+                  </div>
                   <div class="input-row">
-                    <input type="text" id="remux-out-dir" placeholder="(same as input)" />
+                    <input type="text" id="remux-out-dir" placeholder="(same as input or <input>/Output)" />
                     <button class="browse-btn" data-target="remux-out-dir">📁 Browse</button>
                   </div>
                 </div>
 
                 <!-- Fonts Dir -->
                 <div class="form-group full">
-                  <label class="form-label">Fonts Directory</label>
+                  <div class="form-label-row">
+                    <label class="form-label">Fonts Directory</label>
+                    <span class="field-hint">Auto: input/fonts</span>
+                  </div>
                   <div class="input-row">
-                    <input type="text" id="remux-fonts-dir" placeholder="<out-dir>/fonts (auto-detect)" />
+                    <input type="text" id="remux-fonts-dir" placeholder="Auto-detect fonts in input directory" />
                     <button class="browse-btn" data-target="remux-fonts-dir">📁 Browse</button>
                   </div>
                 </div>
 
                 <!-- Assets Dir -->
                 <div class="form-group full">
-                  <label class="form-label">Assets Directory</label>
+                  <div class="form-label-row">
+                    <label class="form-label">Assets Directory</label>
+                    <span class="field-hint">Optional Fallback</span>
+                  </div>
                   <div class="input-row">
-                    <input type="text" id="remux-assets-dir" placeholder="(optional chapter/cover fallback)" />
+                    <input type="text" id="remux-assets-dir" placeholder="(optional subtitle/chapter/cover fallback)" />
                     <button class="browse-btn" data-target="remux-assets-dir">📁 Browse</button>
                   </div>
                 </div>
@@ -504,27 +516,36 @@
               <div class="form-grid" style="flex:1;">
                 <!-- Input Dir -->
                 <div class="form-group full">
-                  <label class="form-label">Input Directory <span class="required">*</span></label>
+                  <div class="form-label-row">
+                    <label class="form-label">Input Directory <span class="required">*</span></label>
+                    <span class="field-hint">Source MKVs</span>
+                  </div>
                   <div class="input-row">
-                    <input type="text" id="extract-input-dir" placeholder="/path/to/anime" />
+                    <input type="text" id="extract-input-dir" placeholder="/path/to/anime/episodes" />
                     <button class="browse-btn" data-target="extract-input-dir">📁 Browse</button>
                   </div>
                 </div>
 
                 <!-- Output Dir -->
                 <div class="form-group full">
-                  <label class="form-label">Output Directory</label>
+                  <div class="form-label-row">
+                    <label class="form-label">Output Directory</label>
+                    <span class="field-hint">Default: same as input</span>
+                  </div>
                   <div class="input-row">
-                    <input type="text" id="extract-out-dir" placeholder="(same as input)" />
+                    <input type="text" id="extract-out-dir" placeholder="(same as input directory)" />
                     <button class="browse-btn" data-target="extract-out-dir">📁 Browse</button>
                   </div>
                 </div>
 
                 <!-- Fonts Dir -->
                 <div class="form-group full">
-                  <label class="form-label">Fonts Output Directory</label>
+                  <div class="form-label-row">
+                    <label class="form-label">Fonts Output Directory</label>
+                    <span class="field-hint">Default: output/fonts</span>
+                  </div>
                   <div class="input-row">
-                    <input type="text" id="extract-fonts-dir" placeholder="<out-dir>/fonts (auto-detect)" />
+                    <input type="text" id="extract-fonts-dir" placeholder="Save extracted fonts to output/fonts" />
                     <button class="browse-btn" data-target="extract-fonts-dir">📁 Browse</button>
                   </div>
                 </div>
