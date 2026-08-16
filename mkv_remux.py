@@ -52,6 +52,7 @@ from mkv_common import (
     ep_type_label,
     find_fonts_dir,
     has_chapters,
+    has_cover,
     inspect_videos,
     is_chapter_xml,
     is_cover_filename,
@@ -849,11 +850,12 @@ def _resolve_chapter(
 
 def _resolve_cover(
     parsed: EpisodeInfo, cover_index: CoverIndex,
+    has_source_cover: bool = False,
     fallback_cover_index: CoverIndex | None = None,
 ) -> Path | None:
     mkv_season, mkv_ep_type, mkv_ep = parsed
     cover_file = cover_index.lookup(mkv_ep_type, mkv_ep, mkv_season)
-    if cover_file is None and fallback_cover_index is not None:
+    if cover_file is None and not has_source_cover and fallback_cover_index is not None:
         cover_file = fallback_cover_index.lookup(mkv_ep_type, mkv_ep, mkv_season)
         if cover_file:
             logger.info("  Cover          : %s (fallback asset)", cover_file.name)
@@ -930,6 +932,7 @@ def _plan_jobs(
 
         json_data = json_cache.get(video)
         has_src_chapters = has_chapters(json_data) if json_data else False
+        has_src_cover = has_cover(json_data) if json_data else False
 
         chapter_file = _resolve_chapter(
             parsed, chap_index, chapter_fallback_count, chapter_unmatched_claimed,
@@ -939,7 +942,11 @@ def _plan_jobs(
         if chapter_file:
             matched_files.append(f"{video_name}  <-  {chapter_file.name} [chapters]")
 
-        cover_file = _resolve_cover(parsed, cover_index, fallback_cover_index=fallback_cover_index)
+        cover_file = _resolve_cover(
+            parsed, cover_index,
+            has_source_cover=has_src_cover,
+            fallback_cover_index=fallback_cover_index,
+        )
         if cover_file:
             matched_files.append(f"{video_name}  <-  {cover_file.name} [cover]")
 

@@ -53,6 +53,12 @@ class TestChapterSniffing:
         assert common_mod.has_chapters({"chapters": []}) is False
         assert common_mod.has_chapters(None) is False
 
+    def test_has_cover(self, common_mod):
+        assert common_mod.has_cover({"attachments": [{"file_name": "cover.jpg", "content_type": "image/jpeg", "id": 1}]}) is True
+        assert common_mod.has_cover({"attachments": [{"file_name": "font.ttf", "content_type": "application/x-truetype-font", "id": 2}]}) is False
+        assert common_mod.has_cover({"attachments": []}) is False
+        assert common_mod.has_cover(None) is False
+
 
 @pytest.mark.parametrize("remux_mod, common_mod", [
     pytest.param(mkv_remux, mkv_common, id="mkv_remux"),
@@ -95,3 +101,58 @@ class TestAssetIndices:
         match = cover_idx.lookup("E", "01", "")
         assert match == cover_path
         assert cover_idx._global is None
+
+    def test_resolve_cover_local_overrides_all(self, tmp_path, remux_mod, common_mod):
+        """Local cover in cover_index always takes priority over source cover and fallback assets."""
+        local_cover = tmp_path / "Show 01_cover.jpg"
+        local_cover.touch()
+        fallback_cover = tmp_path / "fallback_cover.jpg"
+        fallback_cover.touch()
+
+        cover_idx = remux_mod.CoverIndex()
+        cover_idx.add(common_mod._create_parsed_file(local_cover))
+
+        fallback_idx = remux_mod.CoverIndex()
+        fallback_idx.add(common_mod._create_parsed_file(fallback_cover))
+
+        parsed = ("1", "E", "01")
+        result = remux_mod._resolve_cover(
+            parsed, cover_idx,
+            has_source_cover=True,
+            fallback_cover_index=fallback_idx,
+        )
+        assert result == local_cover
+
+    def test_resolve_cover_source_cover_gates_fallback(self, tmp_path, remux_mod, common_mod):
+        """When no local cover exists and video has source cover, fallback assets-dir cover is ignored."""
+        fallback_cover = tmp_path / "cover.jpg"
+        fallback_cover.touch()
+
+        cover_idx = remux_mod.CoverIndex()
+        fallback_idx = remux_mod.CoverIndex()
+        fallback_idx.add(common_mod._create_parsed_file(fallback_cover))
+
+        parsed = ("1", "E", "01")
+        result = remux_mod._resolve_cover(
+            parsed, cover_idx,
+            has_source_cover=True,
+            fallback_cover_index=fallback_idx,
+        )
+        assert result is None
+
+    def test_resolve_cover_fallback_used_when_no_source_cover(self, tmp_path, remux_mod, common_mod):
+        """When no local cover exists and video has no source cover, fallback assets-dir cover is used."""
+        fallback_cover = tmp_path / "cover.jpg"
+        fallback_cover.touch()
+
+        cover_idx = remux_mod.CoverIndex()
+        fallback_idx = remux_mod.CoverIndex()
+        fallback_idx.add(common_mod._create_parsed_file(fallback_cover))
+
+        parsed = ("1", "E", "01")
+        result = remux_mod._resolve_cover(
+            parsed, cover_idx,
+            has_source_cover=False,
+            fallback_cover_index=fallback_idx,
+        )
+        assert result == fallback_cover
