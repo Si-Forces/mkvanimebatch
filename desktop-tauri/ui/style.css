@@ -1184,6 +1184,7 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
 
 input[type="text"], input[type="number"], select {
   flex: 1;
+  min-width: 0;
   background: var(--input-bg);
   border: 1px solid var(--input-border);
   border-radius: var(--radius-sm);
@@ -1192,6 +1193,12 @@ input[type="text"], input[type="number"], select {
   color: var(--text);
   outline: none;
   transition: all var(--transition);
+  text-overflow: ellipsis;
+}
+
+input::placeholder {
+  color: var(--text-dim);
+  opacity: 0.85;
 }
 
 input[type="text"]:focus, input[type="number"]:focus, select:focus {
