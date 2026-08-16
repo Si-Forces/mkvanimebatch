@@ -18,6 +18,9 @@
       }
     })();
   </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;600;700;800&family=Plus+Jakarta+Sans:wght@500;600;700;800;900&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
@@ -37,7 +40,7 @@
   <div class="titlebar">
     <div class="titlebar-drag-region" data-tauri-drag-region></div>
 
-    <!-- Left: Window Control Dots & App Brand -->
+    <!-- Left: Window Control Dots & Navigation Tabs -->
     <div class="titlebar-left">
       <div class="traffic-lights">
         <button class="tl-btn tl-close" id="btn-close" title="Close" type="button">
@@ -57,27 +60,51 @@
           </svg>
         </button>
       </div>
-      <div class="titlebar-brand">
-        <span class="titlebar-logo-pill">⚡</span>
-        <span class="brand-name">MKV Anime Batch</span>
-      </div>
-    </div>
 
-    <!-- Center: Navigation Tabs (Flex Centered) -->
-    <div class="titlebar-center">
+      <!-- Elevated Segmented Navigation Tabs (Left Side) -->
       <nav class="pipeline-tab-group">
         <button class="pipeline-tab-btn active" data-view="remux" id="nav-remux">
-          <span class="tab-icon">⚡</span> Batch Remux Pipeline
+          <span class="tab-icon">
+            <svg class="app-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M20.2 6 3 11l-.9-4.2L18 2l2.2 4z"></path>
+              <line x1="7" y1="4.5" x2="8.5" y2="9.5"></line>
+              <line x1="12" y1="3" x2="13.5" y2="8"></line>
+              <rect x="2" y="10.5" width="20" height="11.5" rx="2.5"></rect>
+              <polygon points="10 13.5 15 16.2 10 19" fill="currentColor"></polygon>
+            </svg>
+          </span>
+          <span>Batch Remux</span>
         </button>
         <button class="pipeline-tab-btn" data-view="extract" id="nav-extract">
-          <span class="tab-icon">⭳</span> Subtitle &amp; Font Extractor
+          <span class="tab-icon">
+            <svg class="app-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
+              <polyline points="2 12 12 17 22 12"></polyline>
+              <path d="M12 17v5"></path>
+              <polyline points="9 19 12 22 15 19"></polyline>
+            </svg>
+          </span>
+          <span>Subtitle &amp; Fonts</span>
         </button>
       </nav>
     </div>
 
+    <!-- Center: App Brand & Custom Vector Logo Badge (Mathematically Centered) -->
+    <div class="titlebar-center">
+      <div class="titlebar-brand">
+        <div class="titlebar-logo-badge">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path>
+            <polygon points="10 9 14.5 12 10 15" fill="currentColor"></polygon>
+          </svg>
+        </div>
+        <span class="brand-name">MKV Anime Batch</span>
+      </div>
+    </div>
+
     <!-- Right Header Actions (Profile & Theme Toggle) -->
     <div class="titlebar-actions">
-      <div class="profile-dropdown-wrapper">
+      <div class="profile-dropdown-wrapper" id="profile-dropdown-wrapper">
         <button class="preset-pill-btn" id="active-profile-btn" type="button">
           <span id="active-profile-name">🌸 Opus 192k + Keep Fonts</span> ▾
         </button>
@@ -113,6 +140,19 @@
         </div>
       </div>
 
+      <div class="header-mode-badge" id="extract-header-badge" style="display: none;">
+        <span class="mode-badge-dot"></span>
+        <span class="mode-badge-text">
+          <svg class="app-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
+            <polyline points="2 12 12 17 22 12"></polyline>
+            <path d="M12 17v5"></path>
+            <polyline points="9 19 12 22 15 19"></polyline>
+          </svg>
+          Extractor Pipeline
+        </span>
+      </div>
+
       <button class="theme-toggle-switch" id="btn-theme" title="Toggle Light/Dark Theme" type="button" aria-label="Toggle theme">
         <div class="theme-toggle-track">
           <svg class="theme-icon sun-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
@@ -146,7 +186,18 @@
           <!-- Col 1: Parameters Glass Panel with Run/Stop at Bottom -->
           <div class="glass-panel col-options">
             <div class="panel-header">
-              <span class="panel-title"><span class="icon">⚙️</span> Remux Parameters</span>
+              <span class="panel-title">
+                <span class="icon">
+                  <svg class="app-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M20.2 6 3 11l-.9-4.2L18 2l2.2 4z"></path>
+                    <line x1="7" y1="4.5" x2="8.5" y2="9.5"></line>
+                    <line x1="12" y1="3" x2="13.5" y2="8"></line>
+                    <rect x="2" y="10.5" width="20" height="11.5" rx="2.5"></rect>
+                    <polygon points="10 13.5 15 16.2 10 19" fill="currentColor"></polygon>
+                  </svg>
+                </span>
+                Remux Parameters
+              </span>
               <span class="status-pill status-idle" id="remux-status">
                 <span class="status-dot"></span> Idle
               </span>
@@ -177,8 +228,8 @@
                 <div class="form-group full">
                   <label class="form-label">Fonts Directory</label>
                   <div class="input-row">
-                    <input type="text" id="remux-fonts-dir" placeholder="(auto-detect)" />
-                    <button class="browse-btn" data-target="remux-fonts-dir">Browse</button>
+                    <input type="text" id="remux-fonts-dir" placeholder="<out-dir>/fonts (auto-detect)" />
+                    <button class="browse-btn" data-target="remux-fonts-dir">📁 Browse</button>
                   </div>
                 </div>
 
@@ -186,14 +237,17 @@
                 <div class="form-group full">
                   <label class="form-label">Assets Directory</label>
                   <div class="input-row">
-                    <input type="text" id="remux-assets-dir" placeholder="(optional fallback)" />
-                    <button class="browse-btn" data-target="remux-assets-dir">Browse</button>
+                    <input type="text" id="remux-assets-dir" placeholder="(optional chapter/cover fallback)" />
+                    <button class="browse-btn" data-target="remux-assets-dir">📁 Browse</button>
                   </div>
                 </div>
 
                 <!-- Audio Bitrate -->
                 <div class="form-group full">
-                  <label class="form-label">Audio Bitrate</label>
+                  <div class="form-label-row">
+                    <label class="form-label">Audio Bitrate</label>
+                    <span class="field-hint">Opus Encoder</span>
+                  </div>
                   <select id="remux-bitrate">
                     <option value="192k">192k (Recommended)</option>
                     <option value="160k">160k (Balanced)</option>
@@ -205,53 +259,56 @@
 
                 <!-- Complexity Level (Placed directly below Audio Bitrate) -->
                 <div class="form-group full">
-                  <label class="form-label">Complexity Level</label>
+                  <div class="form-label-row">
+                    <label class="form-label">Complexity Level <span title="libopus encoding complexity (10 = maximum quality / psychoacoustics, 0 = fastest)" style="cursor:help;opacity:0.85;font-size:10px;">ⓘ</span></label>
+                    <span class="field-hint">0 (Fast) → 10 (Max)</span>
+                  </div>
                   <div style="display:flex;align-items:center;gap:10px; height: 32px;">
                     <input type="range" id="remux-complexity" value="10" min="0" max="10" step="1" oninput="document.getElementById('remux-cplx-val').value=this.value" style="flex:1; margin: 0;" />
                     <div class="number-stepper pill-stepper" style="height: 32px; width: 80px; min-width: 80px;">
-                      <button type="button" class="stepper-btn minus">−</button>
+                      <button type="button" class="stepper-btn minus" aria-label="Decrease complexity">−</button>
                       <input type="number" id="remux-cplx-val" value="10" min="0" max="10" oninput="document.getElementById('remux-complexity').value=this.value" />
-                      <button type="button" class="stepper-btn plus">+</button>
+                      <button type="button" class="stepper-btn plus" aria-label="Increase complexity">+</button>
                     </div>
                   </div>
                 </div>
 
-                <!-- 3-Column Single Row: Sub Offset, Workers, IO Jobs -->
+                <!-- Subtitle Timestamp Offset (Full Width Dedicated Row) -->
                 <div class="form-group full">
-                  <div class="form-grid-3col">
-                    <div class="form-group">
-                      <label class="form-label" style="display:flex;align-items:center;gap:2px;font-size:9.5px;">Sub Offset <span title="Shift subtitle timestamps" style="cursor:help;opacity:0.85;font-size:10px;">ⓘ</span></label>
-                      <div class="number-stepper" style="width:100%;">
-                        <button type="button" class="stepper-btn minus">−</button>
-                        <input type="number" id="remux-sub-offset" value="0" step="0.5" placeholder="0.0" />
-                        <button type="button" class="stepper-btn plus">+</button>
-                      </div>
-                    </div>
-
-                    <div class="form-group">
-                      <label class="form-label" style="font-size:9.5px;">Workers</label>
-                      <div class="number-stepper" style="width:100%;">
-                        <button type="button" class="stepper-btn minus">−</button>
-                        <input type="number" id="remux-workers" value="8" min="1" max="64" />
-                        <button type="button" class="stepper-btn plus">+</button>
-                      </div>
-                    </div>
-
-                    <div class="form-group">
-                      <label class="form-label" style="display:flex;align-items:center;gap:2px;font-size:9.5px;">IO Jobs <span title="0 = unlimited" style="cursor:help;opacity:0.85;font-size:10px;">ⓘ</span></label>
-                      <div class="number-stepper" style="width:100%;">
-                        <button type="button" class="stepper-btn minus">−</button>
-                        <input type="number" id="remux-io-jobs" value="2" min="0" max="32" />
-                        <button type="button" class="stepper-btn plus">+</button>
-                      </div>
-                    </div>
+                  <div class="form-label-row">
+                    <label class="form-label">Subtitle Timestamp Offset <span title="Shift subtitle timestamps by seconds (+ delay, − advance)" style="cursor:help;opacity:0.85;font-size:10px;">ⓘ</span></label>
+                    <span class="field-hint">Seconds (±)</span>
+                  </div>
+                  <div class="number-stepper" style="width:100%;">
+                    <button type="button" class="stepper-btn minus" aria-label="Decrease offset">−</button>
+                    <input type="number" id="remux-sub-offset" value="0" step="0.5" placeholder="0.0" />
+                    <button type="button" class="stepper-btn plus" aria-label="Increase offset">+</button>
                   </div>
                 </div>
 
-                <!-- CLI Execution Flags (2x2 Grid Card Layout) -->
-                <div class="form-group full" style="margin-top: 4px;">
-                  <label class="form-label">CLI Execution Flags</label>
-                  <div class="cli-flags-grid">
+                <!-- 2-Column Hardware / Concurrency Tuning: Workers & Disk I/O Jobs -->
+                <div class="form-group">
+                  <label class="form-label" style="display:flex;align-items:center;gap:2px;font-size:9.5px;">Workers <span title="Concurrent files to process (1-32)" style="cursor:help;opacity:0.85;font-size:10px;">ⓘ</span></label>
+                  <div class="number-stepper" style="width:100%;">
+                    <button type="button" class="stepper-btn minus" aria-label="Decrease workers">−</button>
+                    <input type="number" id="remux-workers" value="8" min="1" max="64" />
+                    <button type="button" class="stepper-btn plus" aria-label="Increase workers">+</button>
+                  </div>
+                </div>
+
+                <div class="form-group">
+                  <label class="form-label" style="display:flex;align-items:center;gap:2px;font-size:9.5px;">Disk I/O Jobs <span title="Max concurrent disk I/O streams (0 = unlimited)" style="cursor:help;opacity:0.85;font-size:10px;">ⓘ</span></label>
+                  <div class="number-stepper" style="width:100%;">
+                    <button type="button" class="stepper-btn minus" aria-label="Decrease IO jobs">−</button>
+                    <input type="number" id="remux-io-jobs" value="2" min="0" max="32" />
+                    <button type="button" class="stepper-btn plus">+</button>
+                  </div>
+                </div>
+
+                <!-- CLI Execution Flags & Maintenance -->
+                <div class="form-group full" style="margin-top: 2px;">
+                  <label class="form-label">CLI Flags &amp; Cache</label>
+                  <div class="cli-flags-grid tri-flags">
                     <label class="cli-flag-card">
                       <input type="checkbox" id="remux-dry-run" />
                       <span class="flag-title">Dry Run</span>
@@ -264,10 +321,10 @@
                       <input type="checkbox" id="remux-no-cache" />
                       <span class="flag-title">Bypass Cache</span>
                     </label>
-                    <button class="clear-cache-btn" id="remux-clear-cache" type="button" title="Delete inspection cache">
-                      🗑 Clear Cache
-                    </button>
                   </div>
+                  <button class="clear-cache-btn" id="remux-clear-cache" type="button" title="Delete inspection cache" style="margin-top: 6px; width: 100%;">
+                    🗑 Clear Inspection Cache
+                  </button>
                 </div>
 
               </div>
@@ -284,7 +341,18 @@
           <!-- Col 2: Episode Batch Queue & Track Inspector -->
           <div class="glass-panel col-queue">
             <div class="panel-header">
-              <span class="panel-title">📦 Episode Batch Queue</span>
+              <span class="panel-title">
+                <span class="icon">
+                  <svg class="app-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M20.2 6 3 11l-.9-4.2L18 2l2.2 4z"></path>
+                    <line x1="7" y1="4.5" x2="8.5" y2="9.5"></line>
+                    <line x1="12" y1="3" x2="13.5" y2="8"></line>
+                    <rect x="2" y="10.5" width="20" height="11.5" rx="2.5"></rect>
+                    <polygon points="10 13.5 15 16.2 10 19" fill="currentColor"></polygon>
+                  </svg>
+                </span>
+                Episode Batch Queue
+              </span>
               <span class="queue-header-right">
                 <span class="queue-count-badge" id="remux-queue-count">Ready</span>
               </span>
@@ -389,13 +457,50 @@
           <!-- Col 1: Parameters Glass Panel with Run/Stop at Bottom -->
           <div class="glass-panel col-options">
             <div class="panel-header">
-              <span class="panel-title"><span class="icon">⭳</span> Extract Parameters</span>
+              <span class="panel-title">
+                <span class="icon">
+                  <svg class="app-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
+                    <polyline points="2 12 12 17 22 12"></polyline>
+                    <path d="M12 17v5"></path>
+                    <polyline points="9 19 12 22 15 19"></polyline>
+                  </svg>
+                </span>
+                Extract Parameters
+              </span>
               <span class="status-pill status-idle" id="extract-status">
                 <span class="status-dot"></span> Idle
               </span>
             </div>
 
-            <div class="panel-body" style="display:flex; flex-direction:column;">
+            <div class="panel-body" style="display:flex; flex-direction:column; gap: 10px;">
+
+              <!-- Scope Card: Pipeline Targets Overview -->
+              <div class="extract-scope-card">
+                <div class="extract-scope-header">
+                  <span class="scope-label">EXTRACT TARGETS</span>
+                  <span class="scope-badge">Batch Mode</span>
+                </div>
+                <div class="extract-targets-pills">
+                  <div class="extract-target-pill cyan" title="Extracts best-match ASS subtitle track">
+                    <span class="pill-dot"></span>
+                    <span class="pill-text">.ASS Subtitles</span>
+                  </div>
+                  <div class="extract-target-pill purple" title="Extracts embedded fonts and deduplicates with BLAKE2b">
+                    <span class="pill-dot"></span>
+                    <span class="pill-text">Deduped Fonts</span>
+                  </div>
+                  <div class="extract-target-pill green" title="Extracts XML/text chapters if present">
+                    <span class="pill-dot"></span>
+                    <span class="pill-text">Chapters</span>
+                  </div>
+                  <div class="extract-target-pill yellow" title="Extracts cover artwork attachments">
+                    <span class="pill-dot"></span>
+                    <span class="pill-text">Cover Art</span>
+                  </div>
+                </div>
+              </div>
+
               <div class="form-grid" style="flex:1;">
                 <!-- Input Dir -->
                 <div class="form-group full">
@@ -417,48 +522,48 @@
 
                 <!-- Fonts Dir -->
                 <div class="form-group full">
-                  <label class="form-label">Fonts Directory</label>
+                  <label class="form-label">Fonts Output Directory</label>
                   <div class="input-row">
-                    <input type="text" id="extract-fonts-dir" placeholder="(auto-detect)" />
-                    <button class="browse-btn" data-target="extract-fonts-dir">Browse</button>
+                    <input type="text" id="extract-fonts-dir" placeholder="<out-dir>/fonts (auto-detect)" />
+                    <button class="browse-btn" data-target="extract-fonts-dir">📁 Browse</button>
                   </div>
                 </div>
 
-                <!-- 3-Column Single Row: Sub Offset, Workers, IO Jobs -->
+                <!-- Subtitle Timestamp Offset (Full Width Dedicated Row) -->
                 <div class="form-group full">
-                  <div class="form-grid-3col">
-                    <div class="form-group">
-                      <label class="form-label" style="display:flex;align-items:center;gap:2px;font-size:9.5px;">Sub Offset <span title="Shift subtitle timestamps" style="cursor:help;opacity:0.85;font-size:10px;">ⓘ</span></label>
-                      <div class="number-stepper" style="width:100%;">
-                        <button type="button" class="stepper-btn minus">−</button>
-                        <input type="number" id="extract-sub-offset" value="0" step="0.5" placeholder="0.0" />
-                        <button type="button" class="stepper-btn plus">+</button>
-                      </div>
-                    </div>
-
-                    <div class="form-group">
-                      <label class="form-label" style="font-size:9.5px;">Workers</label>
-                      <div class="number-stepper" style="width:100%;">
-                        <button type="button" class="stepper-btn minus">−</button>
-                        <input type="number" id="extract-workers" value="8" min="1" max="64" />
-                        <button type="button" class="stepper-btn plus">+</button>
-                      </div>
-                    </div>
-
-                    <div class="form-group">
-                      <label class="form-label" style="display:flex;align-items:center;gap:2px;font-size:9.5px;">IO Jobs <span title="0 = unlimited" style="cursor:help;opacity:0.85;font-size:10px;">ⓘ</span></label>
-                      <div class="number-stepper" style="width:100%;">
-                        <button type="button" class="stepper-btn minus">−</button>
-                        <input type="number" id="extract-io-jobs" value="2" min="0" max="32" />
-                        <button type="button" class="stepper-btn plus">+</button>
-                      </div>
-                    </div>
+                  <div class="form-label-row">
+                    <label class="form-label">Subtitle Timestamp Offset <span title="Shift extracted subtitle timestamps by seconds (+ delay, − advance)" style="cursor:help;opacity:0.85;font-size:10px;">ⓘ</span></label>
+                    <span class="field-hint">Seconds (±)</span>
+                  </div>
+                  <div class="number-stepper" style="width:100%;">
+                    <button type="button" class="stepper-btn minus" aria-label="Decrease offset">−</button>
+                    <input type="number" id="extract-sub-offset" value="0" step="0.5" placeholder="0.0" />
+                    <button type="button" class="stepper-btn plus" aria-label="Increase offset">+</button>
                   </div>
                 </div>
 
-                <!-- CLI Execution Flags -->
-                <div class="form-group full" style="margin-top: 4px;">
-                  <label class="form-label">CLI Execution Flags</label>
+                <!-- 2-Column Hardware / Concurrency Tuning: Workers & Disk I/O Jobs -->
+                <div class="form-group">
+                  <label class="form-label" style="display:flex;align-items:center;gap:2px;font-size:9.5px;">Workers <span title="Concurrent files to process (1-32)" style="cursor:help;opacity:0.85;font-size:10px;">ⓘ</span></label>
+                  <div class="number-stepper" style="width:100%;">
+                    <button type="button" class="stepper-btn minus" aria-label="Decrease workers">−</button>
+                    <input type="number" id="extract-workers" value="8" min="1" max="64" />
+                    <button type="button" class="stepper-btn plus" aria-label="Increase workers">+</button>
+                  </div>
+                </div>
+
+                <div class="form-group">
+                  <label class="form-label" style="display:flex;align-items:center;gap:2px;font-size:9.5px;">Disk I/O Jobs <span title="Max concurrent disk I/O streams (0 = unlimited)" style="cursor:help;opacity:0.85;font-size:10px;">ⓘ</span></label>
+                  <div class="number-stepper" style="width:100%;">
+                    <button type="button" class="stepper-btn minus" aria-label="Decrease IO jobs">−</button>
+                    <input type="number" id="extract-io-jobs" value="2" min="0" max="32" />
+                    <button type="button" class="stepper-btn plus" aria-label="Increase IO jobs">+</button>
+                  </div>
+                </div>
+
+                <!-- CLI Execution Flags & Maintenance -->
+                <div class="form-group full" style="margin-top: 2px;">
+                  <label class="form-label">CLI Flags &amp; Cache</label>
                   <div class="cli-flags-grid">
                     <label class="cli-flag-card">
                       <input type="checkbox" id="extract-dry-run" />
@@ -468,10 +573,10 @@
                       <input type="checkbox" id="extract-no-cache" />
                       <span class="flag-title">Bypass Cache</span>
                     </label>
-                    <button class="clear-cache-btn" id="extract-clear-cache" type="button" title="Delete inspection cache">
-                      🗑 Clear Cache
-                    </button>
                   </div>
+                  <button class="clear-cache-btn" id="extract-clear-cache" type="button" title="Delete inspection cache" style="margin-top: 6px; width: 100%;">
+                    🗑 Clear Inspection Cache
+                  </button>
                 </div>
 
               </div>
@@ -488,7 +593,17 @@
           <!-- Col 2: Extraction Queue -->
           <div class="glass-panel col-queue">
             <div class="panel-header">
-              <span class="panel-title">⭳ Extract Queue</span>
+              <span class="panel-title">
+                <span class="icon">
+                  <svg class="app-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
+                    <polyline points="2 12 12 17 22 12"></polyline>
+                    <path d="M12 17v5"></path>
+                    <polyline points="9 19 12 22 15 19"></polyline>
+                  </svg>
+                </span>
+                Extract Queue
+              </span>
               <span class="queue-header-right">
                 <span class="queue-count-badge" id="extract-queue-count">Ready</span>
               </span>

@@ -226,22 +226,6 @@ html.is-linux.is-maximized .modal-overlay {
   z-index: 100;
 }
 
-.traffic-lights {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-shrink: 0;
-  z-index: 20;
-  position: relative;
-}
-
-.titlebar-left {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  z-index: 20;
-}
-
 .titlebar-drag-region {
   position: absolute;
   top: 0; left: 0; right: 0; bottom: 0;
@@ -310,77 +294,131 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
   filter: brightness(1.12) !important;
 }
 
-.titlebar-brand {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  z-index: 20;
-}
-
-.titlebar-logo-pill {
-  width: 22px; height: 22px;
-  border-radius: 6px;
-  background: var(--accent-gradient);
-  display: grid; place-items: center;
-  color: #fff; font-size: 12px; font-weight: bold;
-}
-
-.brand-name {
-  font-size: 13px;
-  font-weight: 800;
-  color: var(--text);
-  letter-spacing: -0.02em;
-}
-
-.titlebar-center {
-  flex: 1;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  z-index: 20;
-}
-
-.titlebar-actions {
+.titlebar-left {
   display: flex;
   align-items: center;
   gap: 12px;
   z-index: 20;
 }
 
-.pipeline-tab-group {
+.titlebar-center {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
   display: flex;
-  gap: 6px;
-  background: rgba(0, 0, 0, 0.2);
-  padding: 3px;
-  border-radius: 10px;
+  align-items: center;
+  justify-content: center;
+  z-index: 20;
+  pointer-events: none;
+}
+
+.titlebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  pointer-events: auto;
+  padding: 3px 10px;
+  border-radius: 9px;
+  background: var(--glass-bg);
   border: 1px solid var(--glass-border);
+  backdrop-filter: blur(8px);
+}
+
+.titlebar-logo-badge {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: var(--accent-gradient);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  box-shadow: 0 0 10px rgba(99, 102, 241, 0.35);
+  flex-shrink: 0;
+}
+
+.brand-name {
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--text);
+  letter-spacing: -0.01em;
+}
+
+.titlebar-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   z-index: 20;
 }
 
+.pipeline-tab-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--input-bg);
+  padding: 3.5px;
+  border-radius: 11px;
+  border: 1px solid var(--glass-border);
+  z-index: 20;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+
 .pipeline-tab-btn {
-  padding: 5px 14px;
-  border-radius: 7px;
-  font-size: 12.5px;
+  padding: 5px 13px;
+  border-radius: 8px;
+  font-family: "Plus Jakarta Sans", "SF Pro Display", "Inter", -apple-system, sans-serif;
+  font-size: 12px;
   font-weight: 700;
+  letter-spacing: -0.01em;
   color: var(--text-muted);
   background: transparent;
   border: none;
   cursor: pointer;
-  transition: all var(--transition);
+  transition: all 0.22s cubic-bezier(0.16, 1, 0.3, 1);
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
+  user-select: none;
+}
+
+.pipeline-tab-btn .tab-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.2s ease;
 }
 
 .pipeline-tab-btn:hover {
   color: var(--text);
   background: var(--glass-bg-hover);
+  transform: translateY(-0.5px);
+}
+
+.pipeline-tab-btn:hover .tab-icon {
+  transform: scale(1.08);
 }
 
 .pipeline-tab-btn.active {
   background: var(--btn-primary);
-  color: #ffffff;
-  box-shadow: 0 2px 10px rgba(99, 102, 241, 0.35);
+  color: #ffffff !important;
+  box-shadow: 0 2px 12px rgba(99, 102, 241, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.25);
+  font-weight: 800;
+}
+
+.pipeline-tab-btn[data-view="extract"].active {
+  background: linear-gradient(135deg, #9333ea, #ec4899);
+  box-shadow: 0 2px 12px rgba(168, 85, 247, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.25);
+}
+
+.app-icon {
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  fill: none;
+  stroke: currentColor;
+  display: inline-block;
+  vertical-align: middle;
+  flex-shrink: 0;
 }
 
 /* ─── Premium Glassmorphic Theme Toggle Switch ────────────────────────── */
@@ -533,6 +571,113 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
 .preset-sub {
   font-size: 10px;
   color: var(--text-muted);
+}
+
+/* ─── Header Mode Badge (Extract Mode) ─────────────────────────────────── */
+.header-mode-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  border-radius: 20px;
+  background: rgba(168, 85, 247, 0.14);
+  border: 1px solid rgba(168, 85, 247, 0.35);
+  color: var(--accent-magenta);
+  font-size: 11.5px;
+  font-weight: 700;
+  user-select: none;
+  transition: all 0.2s;
+}
+
+.header-mode-badge .mode-badge-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-magenta);
+  box-shadow: 0 0 8px var(--accent-magenta);
+  animation: pulse-dot 1.5s infinite;
+}
+
+/* ─── Extraction Scope Card & Targets Overview ───────────────────────────── */
+.extract-scope-card {
+  background: var(--input-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  padding: 9px 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  box-shadow: inset 0 1px 0 var(--glass-specular);
+}
+
+.extract-scope-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.extract-scope-header .scope-label {
+  font-family: "SF Mono", "JetBrains Mono", monospace;
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+
+.extract-scope-header .scope-badge {
+  font-size: 9px;
+  font-weight: 800;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: rgba(168, 85, 247, 0.18);
+  color: var(--accent-magenta);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.extract-targets-pills {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 5px;
+}
+
+.extract-target-pill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 7px;
+  border-radius: 6px;
+  font-size: 10.5px;
+  font-weight: 600;
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: all 0.15s ease;
+}
+
+.extract-target-pill:hover {
+  background: var(--glass-bg-hover);
+  border-color: var(--accent);
+}
+
+.extract-target-pill .pill-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.extract-target-pill.cyan .pill-dot { background: var(--accent-cyan); box-shadow: 0 0 6px var(--accent-cyan); }
+.extract-target-pill.purple .pill-dot { background: var(--log-done); box-shadow: 0 0 6px var(--log-done); }
+.extract-target-pill.green .pill-dot { background: var(--success); box-shadow: 0 0 6px var(--success); }
+.extract-target-pill.yellow .pill-dot { background: var(--warning); box-shadow: 0 0 6px var(--warning); }
+
+.extract-target-pill .pill-text {
+  font-size: 10.5px;
+  font-weight: 600;
 }
 
 /* ─── Main Workspace & 3-Column Layout ──────────────────────────────────── */
@@ -1020,6 +1165,21 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
 }
 .form-label .required { color: var(--error); margin-left: 2px; }
 
+.form-label-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 2px;
+}
+
+.field-hint {
+  font-size: 9.5px;
+  font-weight: 700;
+  color: var(--text-dim);
+  font-family: "SF Mono", "JetBrains Mono", monospace;
+  letter-spacing: 0.02em;
+}
+
 .input-row { display: flex; gap: 6px; }
 
 input[type="text"], input[type="number"], select {
@@ -1152,6 +1312,24 @@ select::-ms-expand { display: none; }
   grid-template-columns: 1fr 1fr;
   gap: 8px;
   margin-top: 4px;
+}
+
+.cli-flags-grid.tri-flags {
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 5px;
+}
+
+.cli-flags-grid.tri-flags .cli-flag-card {
+  padding: 7px 6px;
+  font-size: 11px;
+  gap: 5px;
+  justify-content: center;
+}
+
+.cli-flags-grid.tri-flags .cli-flag-card .flag-title {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .cli-flag-card {
