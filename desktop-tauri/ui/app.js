@@ -202,6 +202,16 @@ function switchView(viewId) {
   document.querySelectorAll(".pipeline-tab-btn[data-view]").forEach(btn => {
     btn.setAttribute("aria-selected", btn.classList.contains("active") ? "true" : "false");
   });
+
+  // Toggle titlebar context controls between Remux Profiles and Extract Mode Badge
+  const profileDropdown = document.getElementById("profile-dropdown-wrapper");
+  const extractBadge = document.getElementById("extract-header-badge");
+  if (profileDropdown) {
+    profileDropdown.style.display = viewId === "extract" ? "none" : "";
+  }
+  if (extractBadge) {
+    extractBadge.style.display = viewId === "extract" ? "inline-flex" : "none";
+  }
 }
 
 // ─── Real System Hardware Telemetry & Monitor ─────────────────────────────
