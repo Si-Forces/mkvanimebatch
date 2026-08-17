@@ -30,6 +30,11 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Install dependencies for typechecking
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest
+
       - name: Check Python syntax compilation
         run: |
           python -m py_compile mkv_common.py mkv_extract.py mkv_remux.py
@@ -104,6 +109,15 @@ jobs:
             libappindicator3-dev \
             librsvg2-dev \
             patchelf
+
+      - name: Create placeholder sidecar binaries
+        shell: bash
+        run: |
+          mkdir -p desktop-tauri/src-tauri/binaries
+          touch desktop-tauri/src-tauri/binaries/mkv-remux-x86_64-unknown-linux-gnu
+          touch desktop-tauri/src-tauri/binaries/mkv-extract-x86_64-unknown-linux-gnu
+          touch desktop-tauri/src-tauri/binaries/mkv-remux-x86_64-pc-windows-msvc.exe
+          touch desktop-tauri/src-tauri/binaries/mkv-extract-x86_64-pc-windows-msvc.exe
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
