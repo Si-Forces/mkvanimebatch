@@ -63,7 +63,7 @@
 
       <!-- Elevated Segmented Navigation Tabs (Left Side) -->
       <nav class="pipeline-tab-group">
-        <button class="pipeline-tab-btn active" data-view="remux" id="nav-remux">
+        <button class="pipeline-tab-btn active" data-view="remux" id="nav-remux" aria-label="Batch Remux">
           <span class="tab-icon">
             <svg class="app-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M20.2 6 3 11l-.9-4.2L18 2l2.2 4z"></path>
@@ -75,7 +75,7 @@
           </span>
           <span>Batch Remux</span>
         </button>
-        <button class="pipeline-tab-btn" data-view="extract" id="nav-extract">
+        <button class="pipeline-tab-btn" data-view="extract" id="nav-extract" aria-label="Subtitle and Fonts Extractor">
           <span class="tab-icon">
             <svg class="app-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
@@ -105,38 +105,38 @@
     <!-- Right Header Actions (Profile & Theme Toggle) -->
     <div class="titlebar-actions">
       <div class="profile-dropdown-wrapper" id="profile-dropdown-wrapper">
-        <button class="preset-pill-btn" id="active-profile-btn" type="button">
+        <button class="preset-pill-btn" id="active-profile-btn" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="profile-dropdown-menu">
           <span id="active-profile-name">🌸 Opus 192k + Keep Fonts</span> ▾
         </button>
         <div class="profile-dropdown-menu" id="profile-dropdown-menu">
-          <div class="profile-option-item active" data-preset="default">
+          <button class="profile-option-item active" type="button" data-preset="default" aria-pressed="true">
             <span class="preset-icon">🌸</span>
             <div class="preset-info">
               <div class="preset-title">Balanced Anime (Opus 192k)</div>
               <div class="preset-sub">Opus 192k • Keep Fonts • Complexity 10</div>
             </div>
-          </div>
-          <div class="profile-option-item" data-preset="fast">
+          </button>
+          <button class="profile-option-item" type="button" data-preset="fast" aria-pressed="false">
             <span class="preset-icon">⚡</span>
             <div class="preset-info">
               <div class="preset-title">Fast Muxing</div>
               <div class="preset-sub">Opus 128k • 16 Workers • Complexity 5</div>
             </div>
-          </div>
-          <div class="profile-option-item" data-preset="high_quality">
+          </button>
+          <button class="profile-option-item" type="button" data-preset="high_quality" aria-pressed="false">
             <span class="preset-icon">🎧</span>
             <div class="preset-info">
-              <div class="preset-title">Lossless Audio</div>
-              <div class="preset-sub">FLAC Passthrough • Keep Fonts</div>
+              <div class="preset-title">Hi-Fi Master (320k)</div>
+              <div class="preset-sub">Opus 320k • Keep Fonts • Complexity 10</div>
             </div>
-          </div>
-          <div class="profile-option-item" data-preset="custom">
+          </button>
+          <button class="profile-option-item" type="button" data-preset="custom" aria-pressed="false">
             <span class="preset-icon">🛠️</span>
             <div class="preset-info">
               <div class="preset-title">Custom Configuration</div>
               <div class="preset-sub">User-defined pipeline parameters</div>
             </div>
-          </div>
+          </button>
         </div>
       </div>
 
@@ -375,13 +375,14 @@
               <div class="empty-state-card">
                 <div class="empty-icon-glow">
                   <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
-                    <line x1="12" y1="11" x2="12" y2="17"></line>
-                    <line x1="9" y1="14" x2="15" y2="14"></line>
+                    <path d="M22 19a2 2 0 0 1-2-2V8a2 2 0 0 0-2-2h-7l-2-3H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2z"></path>
+                    <line x1="12" y1="10" x2="12" y2="16"></line>
+                    <line x1="9" y1="13" x2="15" y2="13"></line>
                   </svg>
                 </div>
                 <div class="empty-state-title">No Episodes Queued</div>
-                <div class="empty-state-desc">Select an input directory on the left to auto-scan MKV files into the batch queue.</div>
+                <div class="empty-state-desc">Choose an input folder to scan MKV episodes into this batch.</div>
+                <button class="btn btn-gradient empty-state-action" type="button" data-target="remux-input-dir">📁 Choose Input Folder</button>
               </div>
 
             </div>
@@ -415,11 +416,11 @@
               <!-- Metric 2: Disk IO -->
               <div class="metric-block">
                 <div class="metric-header">
-                  <span class="metric-name">NVME / DISK IO</span>
-                  <span class="metric-val cyan metric-io-val" id="io-telemetry-val">0 MB/s</span>
+                  <span class="metric-name">DISK I/O</span>
+                  <span class="metric-val muted metric-io-val" id="io-telemetry-val">Not measured</span>
                 </div>
                 <div class="metric-bar-bg">
-                  <div class="metric-bar-fill cyan metric-io-fill" id="io-telemetry-fill" style="width: 0%;"></div>
+                  <div class="metric-bar-fill cyan metric-io-fill unavailable" id="io-telemetry-fill" style="width: 0%;"></div>
                 </div>
               </div>
 
@@ -436,8 +437,8 @@
 
               <!-- Metric Badges Row (Workers & IO Jobs) -->
               <div class="metric-badges-row">
-                <div class="metric-pill metric-workers-chip" id="workers-telemetry-chip">⚡ 8 Workers Active</div>
-                <div class="metric-pill purple metric-iojobs-chip" id="iojobs-telemetry-chip">🔀 2 IO Jobs Active</div>
+                <div class="metric-pill metric-workers-chip" id="workers-telemetry-chip">⚡ Standby (8 Workers)</div>
+                <div class="metric-pill purple metric-iojobs-chip" id="iojobs-telemetry-chip">🔀 Idle (2 IO Jobs)</div>
               </div>
             </div>
 
@@ -635,13 +636,14 @@
               <div class="empty-state-card">
                 <div class="empty-icon-glow">
                   <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
-                    <line x1="12" y1="11" x2="12" y2="17"></line>
-                    <line x1="9" y1="14" x2="15" y2="14"></line>
+                    <path d="M22 19a2 2 0 0 1-2-2V8a2 2 0 0 0-2-2h-7l-2-3H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2z"></path>
+                    <line x1="12" y1="10" x2="12" y2="16"></line>
+                    <line x1="9" y1="13" x2="15" y2="13"></line>
                   </svg>
                 </div>
                 <div class="empty-state-title">No Episodes Queued</div>
-                <div class="empty-state-desc">Select an input directory on the left to auto-scan MKV files into the batch queue.</div>
+                <div class="empty-state-desc">Choose an input folder to scan MKV episodes into this batch.</div>
+                <button class="btn btn-gradient empty-state-action" type="button" data-target="extract-input-dir">📁 Choose Input Folder</button>
               </div>
 
             </div>
@@ -674,11 +676,11 @@
               <!-- Metric 2: Disk IO -->
               <div class="metric-block">
                 <div class="metric-header">
-                  <span class="metric-name">NVME / DISK IO</span>
-                  <span class="metric-val cyan metric-io-val">0 MB/s</span>
+                  <span class="metric-name">DISK I/O</span>
+                  <span class="metric-val muted metric-io-val">Not measured</span>
                 </div>
                 <div class="metric-bar-bg">
-                  <div class="metric-bar-fill cyan metric-io-fill" style="width: 0%;"></div>
+                  <div class="metric-bar-fill cyan metric-io-fill unavailable" style="width: 0%;"></div>
                 </div>
               </div>
 
@@ -695,8 +697,8 @@
 
               <!-- Metric Badges Row (Workers & IO Jobs) -->
               <div class="metric-badges-row">
-                <div class="metric-pill metric-workers-chip">⚡ 8 Workers Active</div>
-                <div class="metric-pill purple metric-iojobs-chip">🔀 2 IO Jobs Active</div>
+                <div class="metric-pill metric-workers-chip">⚡ Standby (8 Workers)</div>
+                <div class="metric-pill purple metric-iojobs-chip">🔀 Idle (2 IO Jobs)</div>
               </div>
             </div>
 

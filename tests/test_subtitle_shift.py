@@ -19,7 +19,7 @@ Style: Default,Arial,20
 Format: Layer, Start, End, Style, Name, MarginV, MarginR, MarginL, Effect, Text
 """
 
-def _make_ass(tmp_path, lines: list[str], filename: str = "sub.ass") -> object:
+def _make_ass(tmp_path, lines: list[str], filename: str = "sub.ass"):
     """Write a minimal .ass file and return its Path."""
     from pathlib import Path
     content = ASS_HEADER + "\n".join(lines) + "\n"

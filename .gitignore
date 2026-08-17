@@ -48,5 +48,3 @@ graphify-out/
 *:Zone.Identifier
 *Zone.Identifier*
 
-# pyright
-pyrightconfig.json

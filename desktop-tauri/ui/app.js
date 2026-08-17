@@ -49,7 +49,9 @@ function applyPreset(presetKey) {
   if (!p) {
     if (nameEl) nameEl.textContent = "Custom Configuration";
     document.querySelectorAll(".profile-option-item").forEach(item => {
-      item.classList.toggle("active", item.dataset.preset === "custom");
+      const active = item.dataset.preset === "custom";
+      item.classList.toggle("active", active);
+      item.setAttribute("aria-pressed", active ? "true" : "false");
     });
     return;
   }
@@ -57,7 +59,9 @@ function applyPreset(presetKey) {
   if (nameEl) nameEl.textContent = p.name;
 
   document.querySelectorAll(".profile-option-item").forEach(item => {
-    item.classList.toggle("active", item.dataset.preset === presetKey);
+    const active = item.dataset.preset === presetKey;
+    item.classList.toggle("active", active);
+    item.setAttribute("aria-pressed", active ? "true" : "false");
   });
 
   const setVal = (id, val) => {
@@ -250,7 +254,11 @@ function startTelemetryMonitor() {
         const ramUsed = data.ram_used_mb || 0;
         const ramTotal = data.ram_total_mb || 16384;
         const ramPct = Math.round(data.ram_pct || 0);
-        const ioMb = typeof data.io_mb_s === "number" ? data.io_mb_s : 0;
+        // The backend currently exposes CPU/RAM only; keep an unmeasured disk
+        // metric visibly neutral instead of presenting a hard-coded zero.
+        const ioMb = typeof data.io_mb_s === "number" && data.io_mb_s > 0
+          ? data.io_mb_s
+          : null;
 
         cpuFills.forEach(fill => fill.style.width = `${cpu}%`);
         cpuVals.forEach(val => val.innerText = `${cpu}%`);
@@ -258,8 +266,14 @@ function startTelemetryMonitor() {
         ramFills.forEach(fill => fill.style.width = `${ramPct}%`);
         ramVals.forEach(val => val.innerText = `${ramUsed} MB / ${(ramTotal/1024).toFixed(0)} GB`);
 
-        ioFills.forEach(fill => fill.style.width = `${Math.min(100, (ioMb / 300) * 100)}%`);
-        ioVals.forEach(val => val.innerText = `${ioMb.toFixed(1)} MB/s`);
+        ioFills.forEach(fill => {
+          fill.classList.toggle("unavailable", ioMb === null);
+          fill.style.width = ioMb === null ? "0%" : `${Math.min(100, (ioMb / 300) * 100)}%`;
+        });
+        ioVals.forEach(val => {
+          val.classList.toggle("muted", ioMb === null);
+          val.innerText = ioMb === null ? "Not measured" : `${ioMb.toFixed(1)} MB/s`;
+        });
       }
     } catch (e) {
       console.log("[Telemetry Error]", e);
@@ -281,9 +295,27 @@ class QueueTracker {
     this.completedCount = 0;
     this.totalCount = 0;
     this.batchStartTime = null; // set when a job starts; basis for per-file durations
+    this.scanToken = 0;
   }
 
-  reset() {
+  emptyStateMarkup(title, description, actionLabel = "📁 Choose Input Folder") {
+    return `
+      <div class="empty-state-card">
+        <div class="empty-icon-glow">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22 19a2 2 0 0 1-2-2V8a2 2 0 0 0-2-2h-7l-2-3H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2z"></path>
+            <line x1="12" y1="10" x2="12" y2="16"></line>
+            <line x1="9" y1="13" x2="15" y2="13"></line>
+          </svg>
+        </div>
+        <div class="empty-state-title">${title}</div>
+        <div class="empty-state-desc">${description}</div>
+        <button class="btn btn-gradient empty-state-action" type="button" data-target="${this.mode}-input-dir">${actionLabel}</button>
+      </div>`;
+  }
+
+  startScan() {
+    const token = ++this.scanToken;
     this.items.forEach(item => {
       if (item.timerId) clearInterval(item.timerId);
     });
@@ -292,18 +324,41 @@ class QueueTracker {
     this.totalCount = 0;
     if (this.listEl) {
       this.listEl.innerHTML = `
-        <div class="empty-state-card">
-          <div class="empty-icon-glow">
-            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
-              <line x1="12" y1="11" x2="12" y2="17"></line>
-              <line x1="9" y1="14" x2="15" y2="14"></line>
-            </svg>
-          </div>
-          <div class="empty-state-title">No Episodes Queued</div>
-          <div class="empty-state-desc">Select an input directory on the left to auto-scan MKV files into the batch queue.</div>
+        <div class="empty-state-card scanning-state">
+          <div class="scan-spinner" aria-hidden="true"></div>
+          <div class="empty-state-title">Scanning Folder</div>
+          <div class="empty-state-desc">Inspecting MKV files and reading track metadata…</div>
         </div>`;
     }
+    if (this.countEl) this.countEl.textContent = "Scanning…";
+    return token;
+  }
+
+  isCurrentScan(token) {
+    return token === this.scanToken;
+  }
+
+  showScanError(token) {
+    if (!this.isCurrentScan(token)) return;
+    if (this.listEl) {
+      this.listEl.innerHTML = this.emptyStateMarkup(
+        "Scan failed",
+        "That folder could not be inspected. Choose another folder and try again.",
+        "↻ Choose Another Folder"
+      );
+    }
+    if (this.countEl) this.countEl.textContent = "Scan failed";
+  }
+
+  reset(title = "No Episodes Queued", description = "Choose an input folder to scan MKV episodes into this batch.") {
+    this.scanToken++;
+    this.items.forEach(item => {
+      if (item.timerId) clearInterval(item.timerId);
+    });
+    this.items.clear();
+    this.completedCount = 0;
+    this.totalCount = 0;
+    if (this.listEl) this.listEl.innerHTML = this.emptyStateMarkup(title, description);
     if (this.countEl) this.countEl.textContent = "Ready";
   }
 
@@ -318,7 +373,10 @@ class QueueTracker {
     if (this.listEl) this.listEl.innerHTML = "";
 
     if (!entries || entries.length === 0) {
-      this.reset();
+      this.reset(
+        "No MKV files found",
+        "This folder does not contain any MKV episodes. Choose another input folder to continue."
+      );
       return;
     }
     this.totalCount = entries.length;
@@ -368,7 +426,10 @@ class QueueTracker {
     if (this.listEl) this.listEl.innerHTML = "";
 
     if (!files || files.length === 0) {
-      this.reset();
+      this.reset(
+        "No MKV files found",
+        "This folder does not contain any MKV episodes. Choose another input folder to continue."
+      );
       return;
     }
     this.totalCount = files.length;
@@ -648,11 +709,17 @@ const remuxQueue = new QueueTracker("remux");
 const extractQueue = new QueueTracker("extract");
 
 async function scanInputDirectory(path, mode) {
-  if (!path) return;
   const tracker = mode === "extract" ? extractQueue : remuxQueue;
+  if (!path) {
+    tracker.reset();
+    return;
+  }
+
+  const scanToken = tracker.startScan();
   try {
     // Preferred: single batch command that scans + probes all MKVs in Rust.
     const entries = await invoke("inspect_directory", { path });
+    if (!tracker.isCurrentScan(scanToken)) return;
     if (entries && Array.isArray(entries)) {
       tracker.populateFromInspection(entries);
       return;
@@ -664,12 +731,30 @@ async function scanInputDirectory(path, mode) {
     console.log("[inspect_directory] unavailable, falling back:", err);
     try {
       const files = await invoke("scan_directory", { path });
+      if (!tracker.isCurrentScan(scanToken)) return;
       if (files && Array.isArray(files)) {
         tracker.populateDirectoryFiles(files, path);
+      } else {
+        tracker.showScanError(scanToken);
       }
     } catch (err2) {
       console.log("[Scan Dir] Error:", err2);
+      tracker.showScanError(scanToken);
     }
+  }
+}
+
+async function chooseInputFolder(targetId) {
+  const folder = await invoke("pick_folder");
+  if (!folder) return;
+
+  const input = document.getElementById(targetId);
+  if (!input) return;
+  input.value = folder;
+
+  if (targetId === "remux-input-dir" || targetId === "extract-input-dir") {
+    const mode = targetId.startsWith("extract") ? "extract" : "remux";
+    await scanInputDirectory(folder, mode);
   }
 }
 
@@ -736,13 +821,14 @@ function appendLog(logEl, text, mode = "remux") {
         div.textContent = lineText;
         frag.appendChild(div);
       }
+      const shouldFollow = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 32;
       logEl.appendChild(frag);
 
       while (logEl.childElementCount > MAX_LOG_LINES) {
         logEl.firstElementChild.remove();
       }
 
-      logEl.scrollTop = logEl.scrollHeight;
+      if (shouldFollow) logEl.scrollTop = logEl.scrollHeight;
     });
     _logRafIds.set(logEl, rafId);
   }
@@ -1145,20 +1231,11 @@ function initApp() {
   syncTabAria();
 
   document.querySelectorAll(".browse-btn[data-target]").forEach(btn => {
-    safeAddListener(btn, "click", async () => {
-      const folder = await invoke("pick_folder");
-      if (folder) {
-        const input = document.getElementById(btn.dataset.target);
-        if (input) {
-          input.value = folder;
-          const targetId = btn.dataset.target;
-          if (targetId === "remux-input-dir" || targetId === "extract-input-dir") {
-            const mode = targetId.startsWith("extract") ? "extract" : "remux";
-            scanInputDirectory(folder, mode);
-          }
-        }
-      }
-    });
+    safeAddListener(btn, "click", () => chooseInputFolder(btn.dataset.target));
+  });
+  document.addEventListener("click", e => {
+    const emptyAction = e.target.closest(".empty-state-action[data-target]");
+    if (emptyAction) chooseInputFolder(emptyAction.dataset.target);
   });
 
   // ─── Active Profile Dropdown Menu Handlers ────────────────────────────────
@@ -1166,21 +1243,41 @@ function initApp() {
   const profileMenu = document.getElementById("profile-dropdown-menu");
 
   if (profileBtn && profileMenu) {
+    const setProfileMenuOpen = open => {
+      profileMenu.classList.toggle("active", open);
+      profileBtn.setAttribute("aria-expanded", open ? "true" : "false");
+    };
+
     profileBtn.addEventListener("click", (e) => {
       e.stopPropagation();
-      profileMenu.classList.toggle("active");
+      setProfileMenuOpen(!profileMenu.classList.contains("active"));
     });
 
-    document.addEventListener("click", () => {
-      profileMenu.classList.remove("active");
+    profileBtn.addEventListener("keydown", e => {
+      if (e.key === "ArrowDown" || e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        setProfileMenuOpen(true);
+        profileMenu.querySelector(".profile-option-item")?.focus();
+      } else if (e.key === "Escape") {
+        setProfileMenuOpen(false);
+      }
+    });
+
+    document.addEventListener("click", () => setProfileMenuOpen(false));
+    profileMenu.addEventListener("keydown", e => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setProfileMenuOpen(false);
+        profileBtn.focus();
+      }
     });
 
     document.querySelectorAll(".profile-option-item[data-preset]").forEach(item => {
       item.addEventListener("click", (e) => {
         e.stopPropagation();
-        const presetKey = item.dataset.preset;
-        applyPreset(presetKey);
-        profileMenu.classList.remove("active");
+        applyPreset(item.dataset.preset);
+        setProfileMenuOpen(false);
+        profileBtn.focus();
       });
     });
   }
