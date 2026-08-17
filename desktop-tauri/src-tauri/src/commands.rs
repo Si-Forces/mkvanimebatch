@@ -127,9 +127,25 @@ fn get_sidecar_path(app: &AppHandle, name: &str) -> Result<PathBuf, String> {
             .map_err(|e| format!("Failed to create sidecar directory: {}", e))?;
 
         #[cfg(windows)]
-        let target_filename = format!("{}-{}.exe", name, if triple.is_empty() { "x86_64-pc-windows-msvc" } else { triple });
+        let target_filename = format!(
+            "{}-{}.exe",
+            name,
+            if triple.is_empty() {
+                "x86_64-pc-windows-msvc"
+            } else {
+                triple
+            }
+        );
         #[cfg(not(windows))]
-        let target_filename = format!("{}-{}", name, if triple.is_empty() { "x86_64-unknown-linux-gnu" } else { triple });
+        let target_filename = format!(
+            "{}-{}",
+            name,
+            if triple.is_empty() {
+                "x86_64-unknown-linux-gnu"
+            } else {
+                triple
+            }
+        );
 
         let target_path = sidecar_dir.join(&target_filename);
 
@@ -140,22 +156,32 @@ fn get_sidecar_path(app: &AppHandle, name: &str) -> Result<PathBuf, String> {
         };
 
         if need_write {
-            let tmp_path = sidecar_dir.join(format!(".{}.tmp-{}", target_filename, std::process::id()));
-            std::fs::write(&tmp_path, bytes)
-                .map_err(|e| format!("Failed to write embedded sidecar to temporary file: {}", e))?;
+            let tmp_path =
+                sidecar_dir.join(format!(".{}.tmp-{}", target_filename, std::process::id()));
+            std::fs::write(&tmp_path, bytes).map_err(|e| {
+                format!("Failed to write embedded sidecar to temporary file: {}", e)
+            })?;
 
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                if let Err(e) = std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o700)) {
+                if let Err(e) =
+                    std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o700))
+                {
                     let _ = std::fs::remove_file(&tmp_path);
-                    return Err(format!("Failed to set permissions on temporary sidecar: {}", e));
+                    return Err(format!(
+                        "Failed to set permissions on temporary sidecar: {}",
+                        e
+                    ));
                 }
             }
 
             if let Err(e) = std::fs::rename(&tmp_path, &target_path) {
                 let _ = std::fs::remove_file(&tmp_path);
-                return Err(format!("Failed to rename temporary sidecar to target: {}", e));
+                return Err(format!(
+                    "Failed to rename temporary sidecar to target: {}",
+                    e
+                ));
             }
         }
 
@@ -173,11 +199,15 @@ fn get_sidecar_path(app: &AppHandle, name: &str) -> Result<PathBuf, String> {
 fn get_embedded_remux_bytes() -> Option<&'static [u8]> {
     #[cfg(all(windows, target_arch = "x86_64"))]
     {
-        return Some(include_bytes!("../binaries/mkv-remux-x86_64-pc-windows-msvc.exe"));
+        return Some(include_bytes!(
+            "../binaries/mkv-remux-x86_64-pc-windows-msvc.exe"
+        ));
     }
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     {
-        return Some(include_bytes!("../binaries/mkv-remux-x86_64-unknown-linux-gnu"));
+        return Some(include_bytes!(
+            "../binaries/mkv-remux-x86_64-unknown-linux-gnu"
+        ));
     }
     #[allow(unreachable_code)]
     None
@@ -186,11 +216,15 @@ fn get_embedded_remux_bytes() -> Option<&'static [u8]> {
 fn get_embedded_extract_bytes() -> Option<&'static [u8]> {
     #[cfg(all(windows, target_arch = "x86_64"))]
     {
-        return Some(include_bytes!("../binaries/mkv-extract-x86_64-pc-windows-msvc.exe"));
+        return Some(include_bytes!(
+            "../binaries/mkv-extract-x86_64-pc-windows-msvc.exe"
+        ));
     }
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     {
-        return Some(include_bytes!("../binaries/mkv-extract-x86_64-unknown-linux-gnu"));
+        return Some(include_bytes!(
+            "../binaries/mkv-extract-x86_64-unknown-linux-gnu"
+        ));
     }
     #[allow(unreachable_code)]
     None
@@ -243,12 +277,20 @@ pub fn scan_directory(path: String) -> Result<Vec<String>, String> {
         if let Ok(entries) = std::fs::read_dir(&current_dir) {
             for entry in entries.flatten() {
                 let p = entry.path();
-                let file_name = p.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
-                
+                let file_name = p
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_lowercase();
+
                 if let Ok(ft) = entry.file_type() {
                     if ft.is_dir() && !ft.is_symlink() {
                         // Skip hidden directories, Output, fonts, attachments to match Python scanner logic
-                        if !file_name.starts_with('.') && file_name != "output" && file_name != "fonts" && file_name != "attachments" {
+                        if !file_name.starts_with('.')
+                            && file_name != "output"
+                            && file_name != "fonts"
+                            && file_name != "attachments"
+                        {
                             dirs_to_visit.push(p);
                         }
                     } else if ft.is_file() {
@@ -298,7 +340,9 @@ fn parse_mkv_metadata(json_val: &serde_json::Value) -> MkvMetadata {
             if t_type == "video" {
                 if codec.to_lowercase().contains("hevc") || codec.to_lowercase().contains("h.265") {
                     vcodec = "HEVC".into();
-                } else if codec.to_lowercase().contains("avc") || codec.to_lowercase().contains("h.264") {
+                } else if codec.to_lowercase().contains("avc")
+                    || codec.to_lowercase().contains("h.264")
+                {
                     vcodec = "AVC".into();
                 } else if codec.to_lowercase().contains("av1") {
                     vcodec = "AV1".into();
@@ -306,7 +350,10 @@ fn parse_mkv_metadata(json_val: &serde_json::Value) -> MkvMetadata {
                     vcodec = "VP9".into();
                 }
 
-                if let Some(dim) = props.and_then(|p| p.get("pixel_dimensions")).and_then(|v| v.as_str()) {
+                if let Some(dim) = props
+                    .and_then(|p| p.get("pixel_dimensions"))
+                    .and_then(|v| v.as_str())
+                {
                     let parts: Vec<&str> = dim.split('x').collect();
                     if parts.len() == 2 {
                         let width: u32 = parts[0].trim().parse().unwrap_or(0);
@@ -351,7 +398,9 @@ fn parse_mkv_metadata(json_val: &serde_json::Value) -> MkvMetadata {
                     "AAC"
                 } else if codec.to_lowercase().contains("opus") {
                     "Opus"
-                } else if codec.to_lowercase().contains("ac3") || codec.to_lowercase().contains("ac-3") {
+                } else if codec.to_lowercase().contains("ac3")
+                    || codec.to_lowercase().contains("ac-3")
+                {
                     "AC3"
                 } else {
                     "Audio"
@@ -405,7 +454,9 @@ fn probe_mkv(file_path: &std::path::Path) -> Result<MkvMetadata, String> {
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
 
-    let output = cmd.output().map_err(|e| format!("Failed to run mkvmerge: {}", e))?;
+    let output = cmd
+        .output()
+        .map_err(|e| format!("Failed to run mkvmerge: {}", e))?;
     if !output.status.success() && output.stdout.is_empty() {
         return Err("mkvmerge failed to inspect file".into());
     }
@@ -418,15 +469,15 @@ fn probe_mkv(file_path: &std::path::Path) -> Result<MkvMetadata, String> {
 
 #[tauri::command]
 pub fn inspect_mkv_file(dir_path: String, filename: String) -> Result<MkvMetadata, String> {
-    let base = std::fs::canonicalize(&dir_path)
-        .map_err(|e| format!("Invalid base directory: {}", e))?;
+    let base =
+        std::fs::canonicalize(&dir_path).map_err(|e| format!("Invalid base directory: {}", e))?;
     if !base.is_dir() {
         return Err("Base path is not a directory".into());
     }
 
     let full_path = base.join(&filename);
-    let canonical_file = std::fs::canonicalize(&full_path)
-        .map_err(|e| format!("Invalid file path: {}", e))?;
+    let canonical_file =
+        std::fs::canonicalize(&full_path).map_err(|e| format!("Invalid file path: {}", e))?;
 
     if !canonical_file.starts_with(&base) || !canonical_file.is_file() {
         return Err("Path traversal detected or invalid file".into());
@@ -451,7 +502,7 @@ pub fn inspect_directory(path: String) -> Result<Vec<(String, MkvMetadata)>, Str
         // Bounded worker pool: probe at most 4 files concurrently to avoid
         // saturating disk I/O with simultaneous mkvmerge processes.
         let (tx, rx) = std::sync::mpsc::channel::<(String, MkvMetadata)>();
-        let chunk_size = 4.max((files.len() + 3) / 4);
+        let chunk_size = 4.max(files.len().div_ceil(4));
         let mut handles = Vec::new();
 
         for chunk in files.chunks(chunk_size) {
@@ -518,7 +569,8 @@ pub fn run_job(
     #[cfg(unix)]
     cmd.process_group(0);
 
-    let mut child = cmd.spawn()
+    let mut child = cmd
+        .spawn()
         .map_err(|e| format!("Failed to launch {}: {}", binary.display(), e))?;
 
     let stdout = child.stdout.take().ok_or("no stdout pipe")?;
@@ -531,14 +583,12 @@ pub fn run_job(
     let stdout_handle = thread::spawn(move || {
         let mut batch = Vec::with_capacity(30);
         let mut last_flush = std::time::Instant::now();
-        for line in BufReader::new(stdout).lines() {
-            if let Ok(line) = line {
-                batch.push(line);
-                if batch.len() >= 25 || last_flush.elapsed().as_millis() >= 25 {
-                    let _ = app_out.emit("job-log", &batch);
-                    batch.clear();
-                    last_flush = std::time::Instant::now();
-                }
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            batch.push(line);
+            if batch.len() >= 25 || last_flush.elapsed().as_millis() >= 25 {
+                let _ = app_out.emit("job-log", &batch);
+                batch.clear();
+                last_flush = std::time::Instant::now();
             }
         }
         if !batch.is_empty() {
@@ -550,14 +600,12 @@ pub fn run_job(
     let stderr_handle = thread::spawn(move || {
         let mut batch = Vec::with_capacity(30);
         let mut last_flush = std::time::Instant::now();
-        for line in BufReader::new(stderr).lines() {
-            if let Ok(line) = line {
-                batch.push(format!("[ERR] {}", line));
-                if batch.len() >= 25 || last_flush.elapsed().as_millis() >= 25 {
-                    let _ = app_err.emit("job-log", &batch);
-                    batch.clear();
-                    last_flush = std::time::Instant::now();
-                }
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            batch.push(format!("[ERR] {}", line));
+            if batch.len() >= 25 || last_flush.elapsed().as_millis() >= 25 {
+                let _ = app_err.emit("job-log", &batch);
+                batch.clear();
+                last_flush = std::time::Instant::now();
             }
         }
         if !batch.is_empty() {
@@ -642,14 +690,21 @@ pub fn clear_cache(app: AppHandle, mode: String) -> Result<String, String> {
             combined
         })
     } else {
-        Err(format!("clear-cache failed (exit {}): {}", output.status.code().unwrap_or(-1), combined))
+        Err(format!(
+            "clear-cache failed (exit {}): {}",
+            output.status.code().unwrap_or(-1),
+            combined
+        ))
     }
 }
 
 #[tauri::command]
 pub fn pick_folder() -> Option<String> {
     if let Some(path) = rfd::FileDialog::new()
-        .add_filter("Video Files / Anime Folder", &["mkv", "mp4", "avi", "mka", "ass", "srt", "*"])
+        .add_filter(
+            "Video Files / Anime Folder",
+            &["mkv", "mp4", "avi", "mka", "ass", "srt", "*"],
+        )
         .pick_file()
     {
         if path.is_file() {

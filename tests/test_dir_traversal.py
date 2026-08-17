@@ -3,12 +3,13 @@ Tests for directory scanners (scan_mkv_files and scan_assets).
 Ensures robustness against individual files throwing OSError and prevents
 recursive symlink traversal.
 """
-from pathlib import Path
+import importlib
 import os
 import sys
-import importlib
-import pytest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -73,22 +74,21 @@ def test_scan_mkv_files_ignores_directory_symlinks(mod):
     entry_symlink.name = "recursive_symlink"
     entry_symlink.path = "D:/My Project/fake_dir/recursive_symlink"
     # is_dir(follow_symlinks=False) should return False for symlinks
-    entry_symlink.is_dir.side_effect = lambda follow_symlinks=True: False if not follow_symlinks else True
+    entry_symlink.is_dir.side_effect = lambda follow_symlinks=True: follow_symlinks
     entry_symlink.is_file.return_value = False
 
     mock_iterator = MagicMock()
     mock_iterator.__enter__.return_value = [entry_symlink]
 
-    with patch("os.scandir", return_value=mock_iterator):
-        # We recursively scan, but since follow_symlinks=False is checked,
-        # it should treat entry_symlink as a symlink and not recurse into it.
-        # If it recursed, it would call os.scandir again (which would raise
-        # or be tracked).
-        with patch("os.scandir") as mock_scandir:
-            mock_scandir.return_value = mock_iterator
-            results = mod.scan_mkv_files(mock_dir)
-            # The root folder was scanned once, but no subfolder scans should have been called
-            assert mock_scandir.call_count == 1
+    # We recursively scan, but since follow_symlinks=False is checked,
+    # it should treat entry_symlink as a symlink and not recurse into it.
+    # If it recursed, it would call os.scandir again (which would raise
+    # or be tracked).
+    with patch("os.scandir") as mock_scandir:
+        mock_scandir.return_value = mock_iterator
+        mod.scan_mkv_files(mock_dir)
+        # The root folder was scanned once, but no subfolder scans should have been called
+        assert mock_scandir.call_count == 1
 
 
 @pytest.mark.parametrize("mod", COMMON_MODULES)
@@ -159,10 +159,11 @@ def test_scripts_run_accepts_persistent_cache(tmp_path):
     """
     Verify _run in both mkv_remux and mkv_extract accepts persistent_cache keyword argument.
     """
-    import mkv_remux
-    import mkv_extract
-    import mkv_common
     from concurrent.futures import ThreadPoolExecutor
+
+    import mkv_common
+    import mkv_extract
+    import mkv_remux
 
     ep_file = tmp_path / "Show_E01.mkv"
     ep_file.touch()
@@ -170,6 +171,7 @@ def test_scripts_run_accepts_persistent_cache(tmp_path):
     all_mkvs = mkv_common.scan_mkv_files(tmp_path)
 
     with ThreadPoolExecutor(max_workers=1) as pool:
+        cache = mkv_common.PersistentInspectCache(cache_file=tmp_path / ".mkv_inspect_cache.json")
         # Extract script _run invocation with persistent_cache
         mkv_extract._run(
             tmp_path,
@@ -178,7 +180,7 @@ def test_scripts_run_accepts_persistent_cache(tmp_path):
             pool,
             1,
             dry_run=True,
-            persistent_cache={ep_file: None},
+            persistent_cache=cache,
         )
 
         # Remux script _run invocation with persistent_cache
@@ -193,7 +195,7 @@ def test_scripts_run_accepts_persistent_cache(tmp_path):
             1,
             "192k",
             dry_run=True,
-            persistent_cache={ep_file: None},
+            persistent_cache=cache,
         )
 
 
@@ -212,7 +214,6 @@ def test_all_script_imports():
 
 def test_scan_assets_uses_scan_cache(tmp_path, monkeypatch):
     import mkv_common
-    import os
 
     shared_ancestor = tmp_path / "Anime"
     shared_ancestor.mkdir()

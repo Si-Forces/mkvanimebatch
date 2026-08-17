@@ -113,7 +113,12 @@ def _clean_empty_file(path: Path, log: list[str], item_name: str) -> None:
 def _hash_file(filepath: Path) -> str:
     """Calculate BLAKE2b hash of a file for content-based font deduplication."""
     with filepath.open('rb') as f:
-        return hashlib.file_digest(f, hashlib.blake2b).hexdigest()
+        if hasattr(hashlib, "file_digest"):
+            return hashlib.file_digest(f, hashlib.blake2b).hexdigest()  # type: ignore[attr-defined]
+        hasher = hashlib.blake2b()
+        while chunk := f.read(65536):
+            hasher.update(chunk)
+        return hasher.hexdigest()
 
 
 # ─── PER-FILE WORKER ─────────────────────────────────────────────────────────

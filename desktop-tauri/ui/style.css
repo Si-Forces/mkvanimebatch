@@ -12,6 +12,16 @@ html, body {
   user-select: none;
 }
 
+button:focus-visible, input:focus-visible, select:focus-visible {
+  outline: 2px solid var(--accent-hover);
+  outline-offset: 2px;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 [data-theme="dark"] html, [data-theme="dark"] body {
   background: #0b0d14 !important;
   background-color: #0b0d14 !important;
@@ -294,6 +304,11 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
   filter: brightness(1.12) !important;
 }
 
+.tl-btn:focus-visible {
+  outline: 2px solid var(--accent-hover) !important;
+  outline-offset: 3px;
+}
+
 .titlebar-left {
   display: flex;
   align-items: center;
@@ -535,11 +550,17 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
 }
 
 .profile-option-item {
+  width: 100%;
   display: flex;
   align-items: center;
   gap: 10px;
   padding: 8px 10px;
+  border: 1px solid transparent;
   border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
   cursor: pointer;
   transition: all 0.15s ease;
 }
@@ -729,6 +750,7 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
   isolation: isolate;
   background-clip: padding-box;
   -webkit-mask-image: -webkit-radial-gradient(white, black);
+  mask-image: radial-gradient(white, black);
 }
 
 .panel-header {
@@ -825,6 +847,7 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
 .metric-val.green { color: var(--success); }
 .metric-val.cyan { color: var(--log-info); }
 .metric-val.purple { color: var(--log-done); }
+.metric-val.muted { color: var(--text-dim); }
 
 .metric-bar-bg {
   height: 8px;
@@ -853,6 +876,13 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
 .metric-bar-fill.purple {
   background: linear-gradient(90deg, #8b5cf6, #c084fc);
   box-shadow: 0 0 12px rgba(192, 132, 252, 0.4);
+}
+
+.metric-bar-fill.unavailable {
+  width: 0 !important;
+  background: repeating-linear-gradient(135deg, var(--text-dim) 0 3px, transparent 3px 6px);
+  box-shadow: none;
+  opacity: 0.45;
 }
 
 .metric-badges-row {
@@ -946,6 +976,30 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
   color: var(--text-dim) !important;
   max-width: 260px;
   line-height: 1.5;
+}
+
+.empty-state-action {
+  margin-top: 14px;
+  padding: 7px 12px;
+  font-size: 11.5px;
+}
+
+.scanning-state {
+  min-height: 180px;
+}
+
+.scan-spinner {
+  width: 28px;
+  height: 28px;
+  margin-bottom: 14px;
+  border: 3px solid var(--glass-border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 
 [data-theme="dark"] .empty-state-title { color: #f8fafc !important; }
@@ -1504,6 +1558,8 @@ select::-ms-expand { display: none; }
   line-height: 1.6;
   overflow-y: auto;
   color: var(--text);
+  user-select: text;
+  cursor: text;
   contain: content;
   will-change: scroll-position;
 }
@@ -1544,3 +1600,41 @@ select::-ms-expand { display: none; }
 .resize-handle.s { bottom: 0; left: 0; right: 0; height: 6px; cursor: ns-resize; }
 .resize-handle.e { top: 0; right: 0; bottom: 0; width: 6px; cursor: ew-resize; }
 .resize-handle.w { top: 0; left: 0; bottom: 0; width: 6px; cursor: ew-resize; }
+
+/* Keep the three-pane workflow usable at the window's compact size. */
+@media (max-width: 860px) {
+  .content { padding: 10px; }
+  .view-3col-layout {
+    grid-template-columns: 250px minmax(0, 1fr) 230px;
+    gap: 8px;
+  }
+  .titlebar {
+    padding-inline: 10px;
+    gap: 8px;
+  }
+  .pipeline-tab-btn { padding-inline: 9px; }
+  .preset-pill-btn {
+    max-width: 190px;
+    overflow: hidden;
+    white-space: nowrap;
+  }
+  .preset-pill-btn span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+@media (max-width: 800px) {
+  .view-3col-layout {
+    grid-template-columns: 220px minmax(0, 1fr) 210px;
+  }
+  .titlebar-center { display: none; }
+  .pipeline-tab-btn {
+    min-width: 34px;
+    padding: 7px 9px;
+    justify-content: center;
+  }
+  .pipeline-tab-btn > span:not(.tab-icon) { display: none; }
+  .preset-pill-btn { max-width: 150px; }
+}

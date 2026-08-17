@@ -1,5 +1,5 @@
 {
-  "$schema": "https://schemas.tauri.app/config/2",
+  "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default capabilities for MKV Anime Batch desktop app",
   "windows": ["main"],
