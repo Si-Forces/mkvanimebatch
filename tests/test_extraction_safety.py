@@ -206,9 +206,10 @@ def test_cover_extension_whitelisting(tmp_path, monkeypatch, file_name, expected
 
     def mock_run(command, **_kwargs):
         for arg in command:
-            if ":" in str(arg):
-                parts = str(arg).split(":", 1)
-                if len(parts) == 2 and Path(parts[1]).parent.name.startswith(".tmp_extract_"):
+            s_arg = str(arg)
+            if ":" in s_arg:
+                parts = s_arg.split(":", 1)
+                if len(parts) == 2 and parts[0].isdigit() and Path(parts[1]).parent.name.startswith(".tmp_extract_"):
                     Path(parts[1]).write_bytes(b"image data")
         return SimpleNamespace(returncode=0, stderr="")
 
@@ -259,9 +260,10 @@ def test_font_registry_shared_across_dirs(tmp_path, monkeypatch):
 
     def mock_run(command, **_kwargs):
         for arg in command:
-            if ":" in str(arg):
-                parts = str(arg).split(":", 1)
-                if len(parts) == 2:
+            s_arg = str(arg)
+            if ":" in s_arg:
+                parts = s_arg.split(":", 1)
+                if len(parts) == 2 and parts[0].isdigit():
                     Path(parts[1]).write_bytes(b"font data 12")
         return SimpleNamespace(returncode=0, stderr="")
 
