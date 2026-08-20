@@ -1,0 +1,420 @@
+name: Release
+
+permissions:
+  contents: write
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ────────────────────────────────────────────────────────────────────────────
+  # 1. Python Code Quality & Type Checking
+  # ────────────────────────────────────────────────────────────────────────────
+  python-quality:
+    name: Python Quality & Types
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies for typechecking
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest
+
+      - name: Check Python syntax compilation
+        run: |
+          python -m py_compile mkv_common.py mkv_extract.py mkv_remux.py
+
+      - name: Set up Node.js for Pyright
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Run Pyright Type Checker
+        run: |
+          npx --yes pyright
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 2. Python Unit Tests Matrix (Linux & Windows x Python 3.10–3.13)
+  # ────────────────────────────────────────────────────────────────────────────
+  python-tests:
+    name: Python Test (${{ matrix.os }} - Py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest
+
+      - name: Run pytest test suite
+        run: |
+          pytest tests/ --tb=short -v
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 3. Rust & Tauri Desktop Engine Checks (Linux & Windows)
+  # ────────────────────────────────────────────────────────────────────────────
+  rust-tauri-checks:
+    name: Tauri Engine Check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            build-essential curl wget file \
+            libssl-dev \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: Create placeholder sidecar binaries
+        shell: bash
+        run: |
+          mkdir -p desktop-tauri/src-tauri/binaries
+          touch desktop-tauri/src-tauri/binaries/mkv-remux-x86_64-unknown-linux-gnu
+          touch desktop-tauri/src-tauri/binaries/mkv-extract-x86_64-unknown-linux-gnu
+          touch desktop-tauri/src-tauri/binaries/mkv-remux-x86_64-pc-windows-msvc.exe
+          touch desktop-tauri/src-tauri/binaries/mkv-extract-x86_64-pc-windows-msvc.exe
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          components: rustfmt, clippy
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "desktop-tauri/src-tauri -> target"
+
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path desktop-tauri/src-tauri/Cargo.toml --all -- --check
+
+      - name: Run Clippy linter
+        run: cargo clippy --manifest-path desktop-tauri/src-tauri/Cargo.toml -- -D warnings
+
+      - name: Run Rust unit tests
+        run: cargo test --manifest-path desktop-tauri/src-tauri/Cargo.toml --verbose
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 4. CI Completion Gate (Required Check Summary)
+  # ────────────────────────────────────────────────────────────────────────────
+  ci-status:
+    name: CI Status Gate
+    needs: [python-quality, python-tests, rust-tauri-checks]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Evaluate status
+        run: |
+          if [ "${{ needs.python-quality.result }}" != "success" ] || \
+             [ "${{ needs.python-tests.result }}" != "success" ] || \
+             [ "${{ needs.rust-tauri-checks.result }}" != "success" ]; then
+            echo "CI pipeline checks failed!"
+            exit 1
+          fi
+          echo "All CI pipeline checks passed successfully!"
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 5. Desktop Build — Windows (Runs ONLY after CI passes)
+  # ────────────────────────────────────────────────────────────────────────────
+  build-windows:
+    name: Build — Windows
+    needs: [ci-status]
+    if: needs.ci-status.result == 'success'
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── Python + PyInstaller (sidecars) ──────────────────────────────────────
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install PyInstaller
+        run: pip install pyinstaller
+
+      - name: Build sidecars
+        shell: pwsh
+        run: |
+          $OutDir = "desktop-tauri/src-tauri/binaries"
+          New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
+          $Triple = "x86_64-pc-windows-msvc"
+          python -m PyInstaller --onefile --console `
+            --name "mkv-remux-$Triple" `
+            --distpath $OutDir `
+            --workpath "pyinstaller-work-remux" `
+            --specpath "pyinstaller-spec-remux" `
+            --noconfirm mkv_remux.py
+          python -m PyInstaller --onefile --console `
+            --name "mkv-extract-$Triple" `
+            --distpath $OutDir `
+            --workpath "pyinstaller-work-extract" `
+            --specpath "pyinstaller-spec-extract" `
+            --noconfirm mkv_extract.py
+
+      # ── Rust + Tauri ─────────────────────────────────────────────────────────
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "desktop-tauri/src-tauri -> target"
+
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Build Tauri app
+        working-directory: desktop-tauri
+        run: cargo tauri build --no-bundle
+
+      # ── Package Windows Artifacts (Portable Zip & Standalone Exe) ────────────
+      - name: Package Windows Artifacts
+        shell: pwsh
+        run: |
+          $ReleaseDir = "desktop-tauri/src-tauri/target/release"
+          $OutDir     = "windows-artifacts"
+          $StageDir   = "mkv-anime-batch-windows-x64"
+
+          New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
+          New-Item -ItemType Directory -Force -Path $StageDir | Out-Null
+
+          # Copy single self-contained standalone executable
+          Copy-Item "$ReleaseDir\mkv-anime-batch.exe" "$OutDir\mkv-anime-batch.exe" -Force
+
+          # Copy main executable and sidecars into portable package
+          Copy-Item "$ReleaseDir\mkv-anime-batch.exe" "$StageDir\" -Force
+          Copy-Item "desktop-tauri/src-tauri/binaries\mkv-remux-x86_64-pc-windows-msvc.exe" "$StageDir\" -Force
+          Copy-Item "desktop-tauri/src-tauri/binaries\mkv-extract-x86_64-pc-windows-msvc.exe" "$StageDir\" -Force
+
+          # Create Portable Zip
+          Compress-Archive -Path "$StageDir\*" -DestinationPath "$OutDir\MKV_Anime_Batch_Portable_win64.zip" -Force
+
+      - name: Publish Windows files to release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "MKV Anime Batch ${{ github.ref_name }}"
+          body: |
+            ## 🪟 Windows
+
+            | File | Description |
+            |------|-------------|
+            | `mkv-anime-batch.exe` | Single self-contained standalone executable — download & run anywhere! |
+            | `MKV_Anime_Batch_Portable_win64.zip` | Portable Zip package |
+
+            > **Requirements:** [MKVToolNix](https://mkvtoolnix.download/) and [ffmpeg](https://ffmpeg.org/download.html) must be installed and available on `PATH`.
+
+            ---
+
+            ## 🐧 Linux
+
+            | File | Description |
+            |------|-------------|
+            | `MKV_Anime_Batch_*_amd64.AppImage` | Universal AppImage — works on any modern Linux distro |
+            | `MKV_Anime_Batch_*_amd64.deb` | Debian / Ubuntu package |
+            | `MKV_Anime_Batch_*_x86_64.rpm` | Fedora / RedHat / SUSE package |
+
+            ### 📦 Linux Installation & Dependencies
+
+            #### Option A: `.deb` Package (Debian / Ubuntu / Mint)
+            ```bash
+            sudo apt update
+            sudo apt install ./MKV_Anime_Batch_*_amd64.deb mkvtoolnix ffmpeg
+            ```
+
+            #### Option B: `.rpm` Package (Fedora / RHEL / CentOS)
+            ```bash
+            sudo dnf install ./MKV_Anime_Batch_*_x86_64.rpm mkvtoolnix ffmpeg
+            ```
+
+            #### Option C: `.AppImage` (Universal)
+            ```bash
+            chmod +x MKV_Anime_Batch_*_amd64.AppImage
+            ./MKV_Anime_Batch_*_amd64.AppImage
+            ```
+
+            > **CLI Tools Requirement:** Make sure `mkvtoolnix` (`mkvmerge`, `mkvextract`) and `ffmpeg` are installed (`sudo apt install mkvtoolnix ffmpeg`).
+          files: |
+            windows-artifacts/mkv-anime-batch.exe
+            windows-artifacts/MKV_Anime_Batch_Portable_win64.zip
+          draft: false
+          prerelease: false
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 6. Desktop Build — Linux (Runs ONLY after CI passes)
+  # ────────────────────────────────────────────────────────────────────────────
+  build-linux:
+    name: Build — Linux
+    needs: [ci-status]
+    if: needs.ci-status.result == 'success'
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── Python + PyInstaller (sidecars) ──────────────────────────────────────
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install PyInstaller
+        run: pip install pyinstaller
+
+      - name: Build sidecars
+        run: |
+          OUT="desktop-tauri/src-tauri/binaries"
+          TRIPLE="x86_64-unknown-linux-gnu"
+          mkdir -p "$OUT"
+          python3 -m PyInstaller --onefile --console \
+            --name "mkv-remux-$TRIPLE" \
+            --distpath "$OUT" \
+            --workpath /tmp/pyinstaller-work-remux \
+            --specpath /tmp/pyinstaller-spec-remux \
+            --noconfirm mkv_remux.py
+          python3 -m PyInstaller --onefile --console \
+            --name "mkv-extract-$TRIPLE" \
+            --distpath "$OUT" \
+            --workpath /tmp/pyinstaller-work-extract \
+            --specpath /tmp/pyinstaller-spec-extract \
+            --noconfirm mkv_extract.py
+
+      # ── Linux system deps ─────────────────────────────────────────────────────
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            build-essential curl wget file rpm \
+            libssl-dev \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      # ── Rust + Tauri ─────────────────────────────────────────────────────────
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "desktop-tauri/src-tauri -> target"
+
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Build Tauri app
+        working-directory: desktop-tauri
+        run: cargo tauri build --config src-tauri/tauri.linux.conf.json --bundles appimage,deb,rpm
+
+      # ── Flatten + Collect Bundles ────────────────────────────────────────────
+      - name: Collect Linux bundles
+        run: |
+          mkdir -p /tmp/linux-release
+          find desktop-tauri/src-tauri/target/release/bundle/appimage -name "*.AppImage" -exec cp {} /tmp/linux-release/ \;
+          find desktop-tauri/src-tauri/target/release/bundle/deb -name "*.deb" -exec cp {} /tmp/linux-release/ \;
+          find desktop-tauri/src-tauri/target/release/bundle/rpm -name "*.rpm" -exec cp {} /tmp/linux-release/ \;
+
+      - name: Publish Linux bundles to release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "MKV Anime Batch ${{ github.ref_name }}"
+          body: |
+            ## 🪟 Windows
+
+            | File | Description |
+            |------|-------------|
+            | `mkv-anime-batch.exe` | Single self-contained standalone executable — download & run anywhere! |
+            | `MKV_Anime_Batch_Portable_win64.zip` | Portable Zip package |
+
+            > **Requirements:** [MKVToolNix](https://mkvtoolnix.download/) and [ffmpeg](https://ffmpeg.org/download.html) must be installed and available on `PATH`.
+
+            ---
+
+            ## 🐧 Linux
+
+            | File | Description |
+            |------|-------------|
+            | `MKV_Anime_Batch_*_amd64.AppImage` | Universal AppImage — works on any modern Linux distro |
+            | `MKV_Anime_Batch_*_amd64.deb` | Debian / Ubuntu package |
+            | `MKV_Anime_Batch_*_x86_64.rpm` | Fedora / RedHat / SUSE package |
+
+            ### 📦 Linux Installation & Dependencies
+
+            #### Option A: `.deb` Package (Debian / Ubuntu / Mint)
+            ```bash
+            sudo apt update
+            sudo apt install ./MKV_Anime_Batch_*_amd64.deb mkvtoolnix ffmpeg
+            ```
+
+            #### Option B: `.rpm` Package (Fedora / RHEL / CentOS)
+            ```bash
+            sudo dnf install ./MKV_Anime_Batch_*_x86_64.rpm mkvtoolnix ffmpeg
+            ```
+
+            #### Option C: `.AppImage` (Universal)
+            ```bash
+            chmod +x MKV_Anime_Batch_*_amd64.AppImage
+            ./MKV_Anime_Batch_*_amd64.AppImage
+            ```
+
+            > **CLI Tools Requirement:** Make sure `mkvtoolnix` (`mkvmerge`, `mkvextract`) and `ffmpeg` are installed (`sudo apt install mkvtoolnix ffmpeg`).
+          files: |
+            /tmp/linux-release/*.AppImage
+            /tmp/linux-release/*.deb
+            /tmp/linux-release/*.rpm
+          draft: false
+          prerelease: false
