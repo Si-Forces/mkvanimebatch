@@ -169,7 +169,7 @@ jobs:
   build-windows:
     name: Build — Windows
     needs: [ci-status]
-    if: needs.ci-status.result == 'success' && github.event_name != 'pull_request'
+    if: needs.ci-status.result == 'success' && (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
     runs-on: windows-latest
 
     steps:
@@ -309,7 +309,7 @@ jobs:
   build-linux:
     name: Build — Linux
     needs: [ci-status]
-    if: needs.ci-status.result == 'success' && github.event_name != 'pull_request'
+    if: needs.ci-status.result == 'success' && (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-22.04
 
     steps:
