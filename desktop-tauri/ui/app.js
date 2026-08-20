@@ -1012,7 +1012,7 @@ class JobController {
       const offset  = val("sub-offset"); if (offset && offset !== "0") args.push("--sub-offset", offset);
       const workers = val("workers");    if (workers)   args.push("--workers",   workers);
       const ioJobs  = val("io-jobs");    if (ioJobs)    args.push("--io-jobs",   ioJobs);
-      const cplx    = val("complexity"); if (cplx)      args.push("--complexity",cplx);
+      const cplx    = val("complexity") || val("cplx-val"); if (cplx) args.push("--complexity", cplx);
       if (chk("dry-run"))   args.push("--dry-run");
       if (chk("keep-fonts"))args.push("--keep-fonts");
       if (chk("no-cache"))  args.push("--no-cache");
@@ -1280,6 +1280,36 @@ function initApp() {
         profileBtn.focus();
       });
     });
+  }
+
+  // ─── Complexity Slider & Stepper Synchronization ────────────────────────
+  const cplxSlider = document.getElementById("remux-complexity");
+  const cplxNumber = document.getElementById("remux-cplx-val");
+  if (cplxSlider && cplxNumber) {
+    const syncFromSlider = () => {
+      cplxNumber.value = cplxSlider.value;
+    };
+    const syncFromNumber = () => {
+      let v = parseInt(cplxNumber.value, 10);
+      if (!isNaN(v)) {
+        if (v < 0) v = 0;
+        if (v > 10) v = 10;
+        cplxSlider.value = String(v);
+      }
+    };
+    const normalizeNumber = () => {
+      let v = parseInt(cplxNumber.value, 10);
+      if (isNaN(v) || v < 0) v = 0;
+      else if (v > 10) v = 10;
+      cplxNumber.value = String(v);
+      cplxSlider.value = String(v);
+    };
+
+    cplxSlider.addEventListener("input", syncFromSlider);
+    cplxSlider.addEventListener("change", syncFromSlider);
+    cplxNumber.addEventListener("input", syncFromNumber);
+    cplxNumber.addEventListener("change", normalizeNumber);
+    cplxNumber.addEventListener("blur", normalizeNumber);
   }
 
   // Detect custom input modifications
