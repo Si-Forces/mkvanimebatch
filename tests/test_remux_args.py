@@ -79,6 +79,46 @@ class TestRemuxArgs:
         sub_idx = args.index(str(job.subtitle_file))
         assert "--no-chapters" not in args[:sub_idx]
 
+    def test_external_cover_preserves_source_fonts(self, mod):
+        job = mod.PlannedJob(
+            video=Path("/dummy/video.mkv"),
+            video_name="video.mkv",
+            base="video",
+            output_file=Path("/dummy/out.mkv"),
+            subtitle_file=Path("/dummy/sub.ass"),
+            subtitle_label="English",
+            subtitle_mkv_lang="eng",
+            chapter_file=None,
+            cover_file=Path("/dummy/cover.jpg"),
+            use_source_fonts=True,
+        )
+        tracks = mod.TrackSelection(
+            video_id=0,
+            audio_id=1,
+            audio_index=0,
+            audio_codec="A_AAC",
+            audio_channels=2,
+            audio_lang="jpn",
+            audio_name="Japanese",
+            audio_reason="test",
+            has_source_chapters=False,
+            source_cover_id=9,
+            source_font_ids=[3, 5],
+        )
+
+        args = mod._build_mkvmerge_args(
+            job,
+            tracks,
+            None,
+            mod.FontInfo(args=(), count=0),
+            Path("/dummy/out.mkv"),
+        )
+
+        video_idx = args.index(str(job.video))
+        assert args[args.index("--attachments") + 1] == "3,5"
+        assert "--no-attachments" not in args[:video_idx]
+        assert "9" not in args[:video_idx]
+
     def test_chapter_matrix_no_external_no_opus(self, mod):
         """No external chapter & no opus conversion -> source chapters preserved from video."""
         job = mod.PlannedJob(
@@ -202,16 +242,10 @@ class TestRemuxArgs:
             return DummyResult()
 
         monkeypatch.setattr(mod, "run_subprocess", mock_run)
-        if mod.__name__ == "mkv_remux":
-            res = mod._convert_flac_to_opus(
-                Path("/dummy/video.mkv"), 1, 0, Path("/dummy/temp"),
-                "video", "192k", [], 2, complexity=8,
-            )
-        else:
-            res = mod._convert_flac_to_opus(
-                Path("/dummy/video.mkv"), 1, 0, Path("/dummy/temp"),
-                "video", "192k", complexity=8, ffmpeg_threads=2,
-            )
+        res = mod._convert_flac_to_opus(
+            Path("/dummy/video.mkv"), 0, Path("/dummy/temp"),
+            "video", "192k", [], 2, complexity=8,
+        )
         assert res is not None
         assert captured_cmd[captured_cmd.index("-compression_level") + 1] == "8"
 
@@ -334,16 +368,10 @@ class TestRemuxArgs:
 
         monkeypatch.setattr(mod, "run_subprocess", mock_run_timeout)
         log = []
-        if mod.__name__ == "mkv_remux":
-            res = mod._convert_flac_to_opus(
-                Path("/dummy/video.mkv"), 1, 0, tmp_path,
-                "video", "192k", log, 2, complexity=8,
-            )
-        else:
-            res = mod._convert_flac_to_opus(
-                Path("/dummy/video.mkv"), 1, 0, tmp_path,
-                "video", "192k", log=log, complexity=8, ffmpeg_threads=2,
-            )
+        res = mod._convert_flac_to_opus(
+            Path("/dummy/video.mkv"), 0, tmp_path,
+            "video", "192k", log, 2, complexity=8,
+        )
         assert res is None
         assert any("conversion timed out" in line for line in log)
 
@@ -384,5 +412,4 @@ class TestRemuxArgs:
         assert "timed out" in result.skipped_reason
         assert any("mkvmerge timed out" in line for line in result.log)
         assert not (tmp_path / "out.mkv").exists()
-
 

@@ -74,7 +74,7 @@ while ($true) {
             $ioJobs = Read-Host "Enter Concurrent I/O Jobs (or press Enter for default 2)"
 
             # Ensure script components exist locally
-            if (Test-RequiredFiles @("mkv_common.py", "mkv_remux.py")) {
+            if (Test-RequiredFiles @("mkv_common.py", "mkv_assets.py", "mkv_remux.py")) {
                 $cmdArgs = @()
                 if ($inputDir -ne "") {
                     $cmdArgs += "--input-dir", $inputDir

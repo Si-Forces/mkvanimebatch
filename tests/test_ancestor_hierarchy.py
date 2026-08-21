@@ -41,16 +41,17 @@ def test_ancestor_asset_override_precedence(tmp_path):
     search_dirs = mkv_remux._ancestor_dirs(season_dir, root_dir)
     assert search_dirs == [root_dir, season_dir]
 
-    fonts, sub_idx, chap_idx, cover_idx, _, _, _ = mkv_remux._discover_assets(
-        season_dir / "fonts", search_dirs
+    import mkv_assets
+    resolver = mkv_assets.AssetResolver.discover(
+        search_dirs, season_dir / "fonts"
     )
 
     # Local Indonesian sub must take precedence over root English sub
-    matched_sub = sub_idx.lookup("E", "01", "1")
+    matched_sub = resolver.sub_index.lookup("E", "01", "1")
     assert matched_sub is not None
     assert matched_sub[0] == season_dir / "Show - 01.ind.ass"
     assert matched_sub[1] == "ind"
 
     # Local episode cover must take precedence over root global cover
-    matched_cover = cover_idx.lookup("E", "01", "1")
+    matched_cover = resolver.cover_index.lookup("E", "01", "1")
     assert matched_cover == season_dir / "Show - 01_cover.jpg"

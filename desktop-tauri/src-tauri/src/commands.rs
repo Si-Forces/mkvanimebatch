@@ -54,19 +54,23 @@ pub struct TelemetryData {
 
 // ─── Sidecar Path Resolution ─────────────────────────────────────────────────
 
-fn get_sidecar_path(app: &AppHandle, name: &str) -> Result<PathBuf, String> {
+fn target_triple() -> &'static str {
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-    let triple = "x86_64-pc-windows-msvc";
+    return "x86_64-pc-windows-msvc";
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    let triple = "x86_64-unknown-linux-gnu";
+    return "x86_64-unknown-linux-gnu";
     #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-    let triple = "aarch64-unknown-linux-gnu";
+    return "aarch64-unknown-linux-gnu";
     #[cfg(not(any(
         all(target_os = "windows", target_arch = "x86_64"),
         all(target_os = "linux", target_arch = "x86_64"),
         all(target_os = "linux", target_arch = "aarch64")
     )))]
-    let triple = "";
+    return "";
+}
+
+fn get_sidecar_path(app: &AppHandle, name: &str) -> Result<PathBuf, String> {
+    let triple = target_triple();
 
     let mut candidate_filenames = Vec::new();
     if !triple.is_empty() {
@@ -111,11 +115,7 @@ fn get_sidecar_path(app: &AppHandle, name: &str) -> Result<PathBuf, String> {
     }
 
     // 2. Embedded sidecar fallback (extract from binary payload to app local data directory)
-    let embedded_bytes: Option<&[u8]> = match name {
-        "mkv-remux" => get_embedded_remux_bytes(),
-        "mkv-extract" => get_embedded_extract_bytes(),
-        _ => None,
-    };
+    let embedded_bytes: Option<&[u8]> = get_embedded_bytes(name);
 
     if let Some(bytes) = embedded_bytes {
         let sidecar_dir = app
@@ -126,26 +126,25 @@ fn get_sidecar_path(app: &AppHandle, name: &str) -> Result<PathBuf, String> {
         std::fs::create_dir_all(&sidecar_dir)
             .map_err(|e| format!("Failed to create sidecar directory: {}", e))?;
 
-        #[cfg(windows)]
-        let target_filename = format!(
-            "{}-{}.exe",
-            name,
-            if triple.is_empty() {
-                "x86_64-pc-windows-msvc"
-            } else {
-                triple
+        let target_filename = if triple.is_empty() {
+            #[cfg(windows)]
+            {
+                format!("{}.exe", name)
             }
-        );
-        #[cfg(not(windows))]
-        let target_filename = format!(
-            "{}-{}",
-            name,
-            if triple.is_empty() {
-                "x86_64-unknown-linux-gnu"
-            } else {
-                triple
+            #[cfg(not(windows))]
+            {
+                name.to_string()
             }
-        );
+        } else {
+            #[cfg(windows)]
+            {
+                format!("{}-{}.exe", name, triple)
+            }
+            #[cfg(not(windows))]
+            {
+                format!("{}-{}", name, triple)
+            }
+        };
 
         let target_path = sidecar_dir.join(&target_filename);
 
@@ -196,38 +195,59 @@ fn get_sidecar_path(app: &AppHandle, name: &str) -> Result<PathBuf, String> {
     ))
 }
 
-fn get_embedded_remux_bytes() -> Option<&'static [u8]> {
-    #[cfg(all(windows, target_arch = "x86_64"))]
-    {
-        return Some(include_bytes!(
-            "../binaries/mkv-remux-x86_64-pc-windows-msvc.exe"
-        ));
+fn get_embedded_bytes(name: &str) -> Option<&'static [u8]> {
+    match name {
+        "mkv-remux" => {
+            #[cfg(all(windows, target_arch = "x86_64"))]
+            {
+                return Some(include_bytes!(
+                    "../binaries/mkv-remux-x86_64-pc-windows-msvc.exe"
+                ));
+            }
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            {
+                return Some(include_bytes!(
+                    "../binaries/mkv-remux-x86_64-unknown-linux-gnu"
+                ));
+            }
+            #[allow(unreachable_code)]
+            None
+        }
+        "mkv-extract" => {
+            #[cfg(all(windows, target_arch = "x86_64"))]
+            {
+                return Some(include_bytes!(
+                    "../binaries/mkv-extract-x86_64-pc-windows-msvc.exe"
+                ));
+            }
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            {
+                return Some(include_bytes!(
+                    "../binaries/mkv-extract-x86_64-unknown-linux-gnu"
+                ));
+            }
+            #[allow(unreachable_code)]
+            None
+        }
+        _ => None,
     }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    {
-        return Some(include_bytes!(
-            "../binaries/mkv-remux-x86_64-unknown-linux-gnu"
-        ));
-    }
-    #[allow(unreachable_code)]
-    None
 }
 
-fn get_embedded_extract_bytes() -> Option<&'static [u8]> {
-    #[cfg(all(windows, target_arch = "x86_64"))]
-    {
-        return Some(include_bytes!(
-            "../binaries/mkv-extract-x86_64-pc-windows-msvc.exe"
-        ));
+fn sidecar_name(mode: &str) -> Result<&'static str, String> {
+    match mode {
+        "remux" => Ok("mkv-remux"),
+        "extract" => Ok("mkv-extract"),
+        _ => Err(format!("Unknown mode: {}", mode)),
     }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    {
-        return Some(include_bytes!(
-            "../binaries/mkv-extract-x86_64-unknown-linux-gnu"
-        ));
-    }
-    #[allow(unreachable_code)]
-    None
+}
+
+fn run_sidecar_once(app: &AppHandle, name: &str, args: &[&str]) -> Result<std::process::Output, String> {
+    let binary = get_sidecar_path(app, name)?;
+    let mut cmd = Command::new(&binary);
+    cmd.args(args);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd.output().map_err(|e| e.to_string())
 }
 
 // ─── Tauri Commands ──────────────────────────────────────────────────────────
@@ -263,273 +283,93 @@ pub fn get_system_telemetry(state: State<'_, TelemetryState>) -> Result<Telemetr
     })
 }
 
+pub fn parse_manifest_json(bytes: &[u8]) -> Result<serde_json::Value, String> {
+    if bytes.is_empty() {
+        return Err("Sidecar returned empty stdout.".to_string());
+    }
+
+    let manifest: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| {
+        let prefix = String::from_utf8_lossy(bytes)
+            .chars()
+            .take(100)
+            .collect::<String>();
+        format!("Failed to parse JSON: {}. Got: {}", e, prefix)
+    })?;
+
+    if manifest.get("version").and_then(|v| v.as_i64()) != Some(1) {
+        return Err("Unsupported manifest version. Expected version 1.".to_string());
+    }
+
+    if manifest.get("items").and_then(|it| it.as_array()).is_none() {
+        return Err("Malformed manifest: 'items' array missing.".to_string());
+    }
+
+    Ok(manifest)
+}
+
 #[tauri::command]
-pub fn scan_directory(path: String) -> Result<Vec<String>, String> {
+pub async fn inspect_directory(app: AppHandle, path: String) -> Result<serde_json::Value, String> {
     let dir = std::fs::canonicalize(&path).map_err(|e| format!("Invalid directory path: {}", e))?;
     if !dir.is_dir() {
         return Err("Directory does not exist or is not a directory".into());
     }
+    let path = dir.to_string_lossy().into_owned();
 
-    let mut files = Vec::new();
-    let mut dirs_to_visit = vec![dir];
+    tauri::async_runtime::spawn_blocking(move || {
+        get_sidecar_path(&app, "mkv-remux")
+            .map_err(|_| "Sidecar 'mkv-remux' not found.".to_string())?;
+        let output = run_sidecar_once(&app, "mkv-remux", &["--plan", "--input-dir", &path])
+            .map_err(|e| format!("Failed to spawn sidecar: {}", e))?;
 
-    while let Some(current_dir) = dirs_to_visit.pop() {
-        if let Ok(entries) = std::fs::read_dir(&current_dir) {
-            for entry in entries.flatten() {
-                let p = entry.path();
-                let file_name = p
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_lowercase();
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(format!(
+                "Sidecar exit code {:?}: {}",
+                output.status.code(),
+                stderr
+            ));
+        }
 
-                if let Ok(ft) = entry.file_type() {
-                    if ft.is_dir() && !ft.is_symlink() {
-                        // Skip hidden directories, Output, fonts, attachments to match Python scanner logic
-                        if !file_name.starts_with('.')
-                            && file_name != "output"
-                            && file_name != "fonts"
-                            && file_name != "attachments"
-                        {
-                            dirs_to_visit.push(p);
+        parse_manifest_json(&output.stdout)
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("Async runtime error: {}", e)))
+}
+
+fn spawn_log_stream_reader<R: std::io::Read + Send + 'static>(
+    reader: R,
+    app: AppHandle,
+    is_stderr: bool,
+    event_mode: Option<String>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let mut log_batch = Vec::with_capacity(30);
+        let mut last_flush = std::time::Instant::now();
+        for line in BufReader::new(reader).lines().map_while(Result::ok) {
+            if !is_stderr {
+                if let Some(event_str) = line.strip_prefix("@event:") {
+                    let trimmed = event_str.trim();
+                    if let Ok(mut event_json) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                        if let (Some(event), Some(ref mode)) = (event_json.as_object_mut(), &event_mode) {
+                            event.insert("mode".to_string(), mode.clone().into());
                         }
-                    } else if ft.is_file() {
-                        if let Some(ext) = p.extension() {
-                            if ext.to_string_lossy().to_lowercase() == "mkv" {
-                                if let Some(name) = p.file_name() {
-                                    files.push(name.to_string_lossy().into_owned());
-                                }
-                            }
-                        }
+                        let _ = app.emit("job-event", event_json);
+                        continue;
                     }
                 }
             }
-        }
-    }
-    files.sort();
-    Ok(files)
-}
-
-#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
-pub struct MkvMetadata {
-    pub resolution: String,
-    pub video_codec: String,
-    pub video_tag: String,
-    pub audio_summary: String,
-    pub has_flac: bool,
-    pub sub_summary: String,
-    pub fonts_count: usize,
-}
-
-/// Parse the track/attachment data out of `mkvmerge -J` JSON into metadata.
-/// Shared by `inspect_mkv_file` (single) and `inspect_directory` (batch).
-fn parse_mkv_metadata(json_val: &serde_json::Value) -> MkvMetadata {
-    let mut res = "1080p".to_string();
-    let mut vcodec = "MKV".to_string();
-    let mut audio_parts = Vec::new();
-    let mut has_flac = false;
-    let mut sub_langs = Vec::new();
-    let mut fonts_count = 0;
-
-    if let Some(tracks) = json_val.get("tracks").and_then(|t| t.as_array()) {
-        for t in tracks {
-            let t_type = t.get("type").and_then(|v| v.as_str()).unwrap_or("");
-            let codec = t.get("codec").and_then(|v| v.as_str()).unwrap_or("");
-            let props = t.get("properties");
-
-            if t_type == "video" {
-                if codec.to_lowercase().contains("hevc") || codec.to_lowercase().contains("h.265") {
-                    vcodec = "HEVC".into();
-                } else if codec.to_lowercase().contains("avc")
-                    || codec.to_lowercase().contains("h.264")
-                {
-                    vcodec = "AVC".into();
-                } else if codec.to_lowercase().contains("av1") {
-                    vcodec = "AV1".into();
-                } else if codec.to_lowercase().contains("vp9") {
-                    vcodec = "VP9".into();
-                }
-
-                if let Some(dim) = props
-                    .and_then(|p| p.get("pixel_dimensions"))
-                    .and_then(|v| v.as_str())
-                {
-                    let parts: Vec<&str> = dim.split('x').collect();
-                    if parts.len() == 2 {
-                        let width: u32 = parts[0].trim().parse().unwrap_or(0);
-                        let height: u32 = parts[1].trim().parse().unwrap_or(0);
-                        if width >= 3800 || height >= 2100 {
-                            res = "4K".into();
-                        } else if width >= 2500 || height >= 1400 {
-                            res = "1440p".into();
-                        } else if width >= 1900 || height >= 1000 {
-                            res = "1080p".into();
-                        } else if width >= 1200 || height >= 700 {
-                            res = "720p".into();
-                        } else if height >= 480 {
-                            res = "480p".into();
-                        }
-                    } else if dim.contains("3840") || dim.contains("2160") {
-                        res = "4K".into();
-                    } else if dim.contains("1920") || dim.contains("1080") {
-                        res = "1080p".into();
-                    } else if dim.contains("1280") || dim.contains("720") {
-                        res = "720p".into();
-                    }
-                }
-            } else if t_type == "audio" {
-                let is_flac = codec.to_lowercase().contains("flac");
-                if is_flac {
-                    has_flac = true;
-                }
-                let channels = props
-                    .and_then(|p| p.get("audio_channels"))
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(2);
-                let ch_str = match channels {
-                    8 => "7.1",
-                    6 => "5.1",
-                    1 => "1.0",
-                    _ => "2.0",
-                };
-                let aud_name = if is_flac {
-                    "FLAC"
-                } else if codec.to_lowercase().contains("aac") {
-                    "AAC"
-                } else if codec.to_lowercase().contains("opus") {
-                    "Opus"
-                } else if codec.to_lowercase().contains("ac3")
-                    || codec.to_lowercase().contains("ac-3")
-                {
-                    "AC3"
-                } else {
-                    "Audio"
-                };
-                audio_parts.push(format!("{} {}", aud_name, ch_str));
-            } else if t_type == "subtitles" {
-                let lang = props
-                    .and_then(|p| p.get("language"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("sub");
-                let ulang = lang.to_uppercase();
-                if !sub_langs.contains(&ulang) {
-                    sub_langs.push(ulang);
-                }
+            let formatted_line = if is_stderr { format!("[ERR] {}", line) } else { line };
+            log_batch.push(formatted_line);
+            if log_batch.len() >= 25 || last_flush.elapsed().as_millis() >= 25 {
+                let _ = app.emit("job-log", &log_batch);
+                log_batch.clear();
+                last_flush = std::time::Instant::now();
             }
         }
-    }
-
-    if let Some(attachments) = json_val.get("attachments").and_then(|a| a.as_array()) {
-        fonts_count = attachments.len();
-    }
-
-    let video_tag = format!("{} {}", res, vcodec);
-    let audio_summary = if audio_parts.is_empty() {
-        "No Audio".into()
-    } else {
-        audio_parts.join(" / ")
-    };
-    let sub_summary = if sub_langs.is_empty() {
-        "ASS Subs".into()
-    } else {
-        format!("ASS ({})", sub_langs.join(", "))
-    };
-
-    MkvMetadata {
-        resolution: res,
-        video_codec: vcodec,
-        video_tag,
-        audio_summary,
-        has_flac,
-        sub_summary,
-        fonts_count,
-    }
-}
-
-/// Probe a single MKV with `mkvmerge -J` and return parsed metadata.
-fn probe_mkv(file_path: &std::path::Path) -> Result<MkvMetadata, String> {
-    let mut cmd = std::process::Command::new("mkvmerge");
-    cmd.args(["-J", &file_path.to_string_lossy()]);
-
-    #[cfg(windows)]
-    cmd.creation_flags(CREATE_NO_WINDOW);
-
-    let output = cmd
-        .output()
-        .map_err(|e| format!("Failed to run mkvmerge: {}", e))?;
-    if !output.status.success() && output.stdout.is_empty() {
-        return Err("mkvmerge failed to inspect file".into());
-    }
-
-    let json_val: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .map_err(|e| format!("Failed to parse mkvmerge JSON: {}", e))?;
-
-    Ok(parse_mkv_metadata(&json_val))
-}
-
-#[tauri::command]
-pub fn inspect_mkv_file(dir_path: String, filename: String) -> Result<MkvMetadata, String> {
-    let base =
-        std::fs::canonicalize(&dir_path).map_err(|e| format!("Invalid base directory: {}", e))?;
-    if !base.is_dir() {
-        return Err("Base path is not a directory".into());
-    }
-
-    let full_path = base.join(&filename);
-    let canonical_file =
-        std::fs::canonicalize(&full_path).map_err(|e| format!("Invalid file path: {}", e))?;
-
-    if !canonical_file.starts_with(&base) || !canonical_file.is_file() {
-        return Err("Path traversal detected or invalid file".into());
-    }
-
-    probe_mkv(&canonical_file)
-}
-
-/// Scan a directory for MKVs and probe each one on a small thread pool,
-/// returning (filename, metadata) pairs in a single IPC round-trip. This
-/// replaces the old pattern of one `inspect_mkv_file` invoke per file, which
-/// spawned one mkvmerge process per IPC call.
-#[tauri::command]
-pub fn inspect_directory(path: String) -> Result<Vec<(String, MkvMetadata)>, String> {
-    let dir = std::fs::canonicalize(&path).map_err(|e| format!("Invalid directory path: {}", e))?;
-    if !dir.is_dir() {
-        return Err("Directory does not exist or is not a directory".into());
-    }
-    let files = scan_directory(path)?;
-
-    let results: Vec<(String, MkvMetadata)> = thread::scope(|s| {
-        // Bounded worker pool: probe at most 4 files concurrently to avoid
-        // saturating disk I/O with simultaneous mkvmerge processes.
-        let (tx, rx) = std::sync::mpsc::channel::<(String, MkvMetadata)>();
-        let chunk_size = 4.max(files.len().div_ceil(4));
-        let mut handles = Vec::new();
-
-        for chunk in files.chunks(chunk_size) {
-            let tx = tx.clone();
-            let dir = dir.clone();
-            let chunk: Vec<String> = chunk.to_vec();
-            handles.push(s.spawn(move || {
-                for name in chunk {
-                    let full = dir.join(&name);
-                    if let Ok(meta) = probe_mkv(&full) {
-                        let _ = tx.send((name, meta));
-                    }
-                }
-            }));
+        if !log_batch.is_empty() {
+            let _ = app.emit("job-log", &log_batch);
         }
-        drop(tx); // close sender so rx iteration terminates
-
-        let mut out: Vec<(String, MkvMetadata)> = rx.iter().collect();
-        for h in handles {
-            let _ = h.join();
-        }
-        // Restore deterministic (sorted) order to match the scan order.
-        out.sort_by(|a, b| a.0.cmp(&b.0));
-        out
-    });
-
-    Ok(results)
+    })
 }
 
 #[tauri::command]
@@ -539,11 +379,7 @@ pub fn run_job(
     mode: String,
     args: Vec<String>,
 ) -> Result<(), String> {
-    let sidecar_name = match mode.as_str() {
-        "remux" => "mkv-remux",
-        "extract" => "mkv-extract",
-        _ => return Err(format!("Unknown mode: {}", mode)),
-    };
+    let sidecar_name = sidecar_name(&mode)?;
 
     for arg in &args {
         if arg.contains('\0') {
@@ -559,9 +395,11 @@ pub fn run_job(
     let binary = get_sidecar_path(&app, sidecar_name)?;
 
     let mut cmd = Command::new(&binary);
-    cmd.args(&args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    cmd.args(&args);
+    if !args.iter().any(|a| a == "--events") {
+        cmd.arg("--events");
+    }
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
@@ -579,47 +417,17 @@ pub fn run_job(
     *lock = Some(child);
     drop(lock);
 
-    let app_out = app.clone();
-    let stdout_handle = thread::spawn(move || {
-        let mut batch = Vec::with_capacity(30);
-        let mut last_flush = std::time::Instant::now();
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            batch.push(line);
-            if batch.len() >= 25 || last_flush.elapsed().as_millis() >= 25 {
-                let _ = app_out.emit("job-log", &batch);
-                batch.clear();
-                last_flush = std::time::Instant::now();
-            }
-        }
-        if !batch.is_empty() {
-            let _ = app_out.emit("job-log", &batch);
-        }
-    });
-
-    let app_err = app.clone();
-    let stderr_handle = thread::spawn(move || {
-        let mut batch = Vec::with_capacity(30);
-        let mut last_flush = std::time::Instant::now();
-        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-            batch.push(format!("[ERR] {}", line));
-            if batch.len() >= 25 || last_flush.elapsed().as_millis() >= 25 {
-                let _ = app_err.emit("job-log", &batch);
-                batch.clear();
-                last_flush = std::time::Instant::now();
-            }
-        }
-        if !batch.is_empty() {
-            let _ = app_err.emit("job-log", &batch);
-        }
-    });
+    let stdout_handle = spawn_log_stream_reader(stdout, app.clone(), false, Some(mode.clone()));
+    let stderr_handle = spawn_log_stream_reader(stderr, app.clone(), true, None);
 
     let app_wait = app.clone();
+    let done_mode = mode;
     thread::spawn(move || {
         let _ = stdout_handle.join();
         let _ = stderr_handle.join();
         let code = {
             let job = app_wait.state::<JobState>();
-            let mut lock = job.child.lock().unwrap();
+            let mut lock = job.child.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref mut c) = *lock {
                 let code = c.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
                 *lock = None;
@@ -630,7 +438,10 @@ pub fn run_job(
         };
 
         if let Some(code) = code {
-            let _ = app_wait.emit("job-done", code);
+            let _ = app_wait.emit(
+                "job-done",
+                serde_json::json!({"mode": done_mode, "code": code}),
+            );
         }
     });
 
@@ -662,59 +473,35 @@ pub fn stop_job(state: State<'_, JobState>) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn clear_cache(app: AppHandle, mode: String) -> Result<String, String> {
-    let sidecar_name = match mode.as_str() {
-        "remux" => "mkv-remux",
-        "extract" => "mkv-extract",
-        _ => return Err(format!("Unknown mode: {}", mode)),
-    };
+pub async fn clear_cache(app: AppHandle, mode: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let sidecar_name = sidecar_name(&mode)?;
+        let output = run_sidecar_once(&app, sidecar_name, &["--clear-cache"])?;
 
-    let binary = get_sidecar_path(&app, sidecar_name)?;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let combined = format!("{}{}", stdout, stderr).trim().to_string();
 
-    let mut cmd = Command::new(&binary);
-    cmd.arg("--clear-cache");
-
-    #[cfg(windows)]
-    cmd.creation_flags(CREATE_NO_WINDOW);
-
-    let output = cmd.output().map_err(|e| e.to_string())?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let combined = format!("{}{}", stdout, stderr).trim().to_string();
-
-    if output.status.success() {
-        Ok(if combined.is_empty() {
-            "Cache cleared.".into()
+        if output.status.success() {
+            Ok(if combined.is_empty() {
+                "Cache cleared.".into()
+            } else {
+                combined
+            })
         } else {
-            combined
-        })
-    } else {
-        Err(format!(
-            "clear-cache failed (exit {}): {}",
-            output.status.code().unwrap_or(-1),
-            combined
-        ))
-    }
+            Err(format!(
+                "clear-cache failed (exit {}): {}",
+                output.status.code().unwrap_or(-1),
+                combined
+            ))
+        }
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("Async runtime error: {}", e)))
 }
 
 #[tauri::command]
 pub fn pick_folder() -> Option<String> {
-    if let Some(path) = rfd::FileDialog::new()
-        .add_filter(
-            "Video Files / Anime Folder",
-            &["mkv", "mp4", "avi", "mka", "ass", "srt", "*"],
-        )
-        .pick_file()
-    {
-        if path.is_file() {
-            if let Some(parent) = path.parent() {
-                return Some(parent.to_string_lossy().into_owned());
-            }
-        }
-        return Some(path.to_string_lossy().into_owned());
-    }
-
     rfd::FileDialog::new()
         .pick_folder()
         .map(|p| p.to_string_lossy().into_owned())
@@ -783,85 +570,62 @@ pub fn set_window_theme(app: AppHandle, theme: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
-    fn test_parse_mkv_metadata_4k_hevc_flac() {
-        let json_val = json!({
-            "tracks": [
+    fn test_parse_manifest_json_valid_v1() {
+        let json_bytes = br#"{
+            "version": 1,
+            "items": [
                 {
-                    "type": "video",
-                    "codec": "HEVC/H.265",
-                    "properties": {
-                        "pixel_dimensions": "3840x2160"
-                    }
-                },
-                {
-                    "type": "audio",
-                    "codec": "FLAC",
-                    "properties": {
-                        "audio_channels": 6
-                    }
-                },
-                {
-                    "type": "subtitles",
-                    "codec": "SubStationAlpha",
-                    "properties": {
-                        "language": "ind"
-                    }
-                }
-            ],
-            "attachments": [
-                {"id": 1, "file_name": "font.ttf"}
-            ]
-        });
-
-        let meta = parse_mkv_metadata(&json_val);
-        assert_eq!(meta.resolution, "4K");
-        assert_eq!(meta.video_codec, "HEVC");
-        assert_eq!(meta.video_tag, "4K HEVC");
-        assert!(meta.has_flac);
-        assert_eq!(meta.audio_summary, "FLAC 5.1");
-        assert_eq!(meta.sub_summary, "ASS (IND)");
-        assert_eq!(meta.fonts_count, 1);
-    }
-
-    #[test]
-    fn test_parse_mkv_metadata_1440p_opus_7_1() {
-        let json_val = json!({
-            "tracks": [
-                {
-                    "type": "video",
-                    "codec": "VP9",
-                    "properties": {
-                        "pixel_dimensions": "2560x1440"
-                    }
-                },
-                {
-                    "type": "audio",
-                    "codec": "Opus",
-                    "properties": {
-                        "audio_channels": 8
+                    "id": "Season 01/Show - 01.mkv",
+                    "name": "Show - 01.mkv",
+                    "metadata": {
+                        "resolution": "1080p",
+                        "video_codec": "HEVC",
+                        "video_tag": "1080p HEVC",
+                        "audio_summary": "FLAC 2.0",
+                        "has_flac": true,
+                        "sub_summary": "ASS (IND)",
+                        "fonts_count": 5
                     }
                 }
             ]
-        });
+        }"#;
 
-        let meta = parse_mkv_metadata(&json_val);
-        assert_eq!(meta.resolution, "1440p");
-        assert_eq!(meta.video_codec, "VP9");
-        assert_eq!(meta.audio_summary, "Opus 7.1");
-        assert!(!meta.has_flac);
+        let res = parse_manifest_json(json_bytes);
+        assert!(res.is_ok());
+        let manifest = res.unwrap();
+        assert_eq!(manifest["version"], 1);
+        let items = manifest["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["id"], "Season 01/Show - 01.mkv");
+        assert_eq!(items[0]["name"], "Show - 01.mkv");
     }
 
     #[test]
-    fn test_parse_mkv_metadata_empty_and_fallback() {
-        let json_val = json!({});
-        let meta = parse_mkv_metadata(&json_val);
-        assert_eq!(meta.resolution, "1080p");
-        assert_eq!(meta.video_codec, "MKV");
-        assert_eq!(meta.audio_summary, "No Audio");
-        assert_eq!(meta.sub_summary, "ASS Subs");
-        assert_eq!(meta.fonts_count, 0);
+    fn test_parse_manifest_json_rejects_unsupported_version() {
+        let json_bytes = br#"{"version": 2, "items": []}"#;
+        let res = parse_manifest_json(json_bytes);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("Unsupported manifest version"));
+    }
+
+    #[test]
+    fn test_parse_manifest_json_rejects_empty() {
+        let res = parse_manifest_json(b"");
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_event_line_parsing() {
+        let line =
+            r#"@event: {"version":1,"type":"item_start","id":"Season 01/01.mkv","file":"01.mkv"}"#;
+        assert!(line.starts_with("@event:"));
+        let event_str = line.strip_prefix("@event:").unwrap().trim();
+        let parsed: serde_json::Value = serde_json::from_str(event_str).unwrap();
+        assert_eq!(parsed["version"], 1);
+        assert_eq!(parsed["type"], "item_start");
+        assert_eq!(parsed["id"], "Season 01/01.mkv");
+        assert_eq!(parsed["file"], "01.mkv");
     }
 }
