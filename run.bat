@@ -93,6 +93,11 @@ if not exist "%SCRIPT_DIR%mkv_common.py" (
     pause
     goto menu
 )
+if not exist "%SCRIPT_DIR%mkv_assets.py" (
+    echo [ERROR] Required file 'mkv_assets.py' is missing.
+    pause
+    goto menu
+)
 if not exist "%SCRIPT_DIR%mkv_remux.py" (
     echo [ERROR] Required file 'mkv_remux.py' is missing.
     pause

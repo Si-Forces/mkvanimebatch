@@ -12,6 +12,7 @@ import pytest
 mkv_common = importlib.import_module("mkv_common")
 mkv_remux = importlib.import_module("mkv_remux")
 mkv_extract = importlib.import_module("mkv_extract")
+mkv_assets = importlib.import_module("mkv_assets")
 
 
 @pytest.mark.parametrize("mod", [
@@ -94,11 +95,26 @@ class TestPersistentInspectCache:
             with ThreadPoolExecutor(max_workers=1) as pool:
                 results = mod.inspect_videos([sample_file], pool=pool, persistent_cache=None)
             assert results[sample_file] == json_data
+    def test_cache_save_exception_unlinks_temp_file(self, tmp_path, mod):
+        """Verify that any temporary file created during save() is unlinked if serialization or write fails."""
+        cache_file = tmp_path / "cache.json"
+        cache = mod.PersistentInspectCache(cache_file=cache_file, enabled=True)
+        sample_file = tmp_path / "video.mkv"
+        sample_file.write_bytes(b"dummy")
+
+        # Put an object that raises a TypeError during json.dump
+        cache.put(sample_file, {"bad_object": object()})
+        cache.save()
+
+        # Ensure no leftover temporary files in the directory
+        temp_files = list(tmp_path.glob("tmp*"))
+        assert len(temp_files) == 0
+        assert not cache_file.exists()
 
 
 def test_cover_index_add_episode_cover_no_nameerror():
     """Verify CoverIndex.add() with per-episode cover does not raise NameError for parse_episode."""
-    cover_index = mkv_remux.CoverIndex()
+    cover_index = mkv_assets.CoverIndex()
     pf = mkv_common._create_parsed_file(Path("/dummy/Show - 01_cover.jpg"))
     cover_index.add(pf)
     assert cover_index.lookup("E", "01", "") == Path("/dummy/Show - 01_cover.jpg")
@@ -117,10 +133,7 @@ def test_ffmpeg_probesize_args(mod):
     mock_res.stderr = ""
 
     with patch.object(mod, "run_subprocess", return_value=mock_res) as mock_run:
-        if mod is mkv_remux:
-            mod._convert_flac_to_opus(video, 1, 0, temp_dir, "video", "128k", [], 2)
-        else:
-            mod._convert_flac_to_opus(video, 1, 0, temp_dir, "video", "128k", 10, 2)
+        mod._convert_flac_to_opus(video, 0, temp_dir, "video", "128k", [], 2)
 
         cmd = mock_run.call_args[0][0]
         assert "-analyzeduration" in cmd
@@ -198,7 +211,7 @@ def test_flac_conversion_decoupled_from_io_semaphore(tmp_path):
 
     with patch.object(mkv_remux, "run_subprocess", return_value=mock_res) as mock_run:
         res = mkv_remux._convert_flac_to_opus(
-            video, 1, 0, tmp_path, "video", "192k", [], 2, complexity=9
+            video, 0, tmp_path, "video", "192k", [], 2, complexity=9
         )
         assert res is not None
         mock_run.assert_called_once()

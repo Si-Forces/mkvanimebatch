@@ -37,7 +37,7 @@ jobs:
 
       - name: Check Python syntax compilation
         run: |
-          python -m py_compile mkv_common.py mkv_extract.py mkv_remux.py
+          python -m py_compile mkv_common.py mkv_assets.py mkv_extract.py mkv_remux.py
 
       - name: Set up Node.js for Pyright
         uses: actions/setup-node@v4

@@ -72,7 +72,7 @@ class TestPickAudio:
             _audio("eng", channels=2, pos=1),
             _audio("jpn", channels=2, pos=2),
         ]
-        audio, reason = rmod._pick_audio(tracks, video_pos=0)
+        audio, _reason = rmod._pick_audio(tracks, video_pos=0)
         assert audio["lang"] in ("ja", "jpn", "jpn")
         assert audio["pos"] == 2
 
@@ -82,7 +82,7 @@ class TestPickAudio:
             _audio("jpn", channels=2, name="Commentary", pos=1),
             _audio("jpn", channels=2, name="Full Dialogue", pos=2),
         ]
-        audio, reason = rmod._pick_audio(tracks, video_pos=0)
+        audio, _reason = rmod._pick_audio(tracks, video_pos=0)
         assert audio["pos"] == 2
 
     @pytest.mark.parametrize("rmod", REMUX_MODULES)
@@ -91,7 +91,7 @@ class TestPickAudio:
             _audio("jpn", channels=2, name="Audio Commentary", pos=1),
             _audio("jpn", channels=2, name="Main Audio", pos=2),
         ]
-        audio, reason = rmod._pick_audio(tracks, video_pos=0)
+        audio, _reason = rmod._pick_audio(tracks, video_pos=0)
         assert audio["pos"] == 2
 
     @pytest.mark.parametrize("rmod", REMUX_MODULES)
@@ -100,7 +100,7 @@ class TestPickAudio:
             _audio("jpn", channels=6, pos=1),   # 5.1
             _audio("jpn", channels=2, pos=2),   # stereo
         ]
-        audio, reason = rmod._pick_audio(tracks, video_pos=0)
+        audio, _reason = rmod._pick_audio(tracks, video_pos=0)
         assert audio["channels"] == 2
         assert audio["pos"] == 2
 
@@ -109,7 +109,7 @@ class TestPickAudio:
         tracks = [
             _audio("und", channels=2, pos=1),
         ]
-        audio, reason = rmod._pick_audio(tracks, video_pos=0)
+        audio, _reason = rmod._pick_audio(tracks, video_pos=0)
         assert audio is not None
         assert audio["pos"] == 1
 
@@ -119,7 +119,7 @@ class TestPickAudio:
             _audio("eng", channels=2, pos=1),
             _audio("eng", channels=6, pos=2),
         ]
-        audio, reason = rmod._pick_audio(tracks, video_pos=0)
+        audio, _reason = rmod._pick_audio(tracks, video_pos=0)
         assert audio["channels"] == 2
 
     @pytest.mark.parametrize("rmod", REMUX_MODULES)
@@ -144,7 +144,7 @@ class TestPickAudio:
         tracks = [
             _audio("xyz", channels=6, name="Some Audio", pos=5),
         ]
-        audio, reason = rmod._pick_audio(tracks, video_pos=0)
+        audio, _reason = rmod._pick_audio(tracks, video_pos=0)
         assert audio is not None
 
     @pytest.mark.parametrize("rmod", REMUX_MODULES)
@@ -153,7 +153,7 @@ class TestPickAudio:
             _audio("und", channels=2, pos=1),
             _audio("jpn", channels=2, pos=2),
         ]
-        audio, reason = rmod._pick_audio(tracks, video_pos=0)
+        audio, _reason = rmod._pick_audio(tracks, video_pos=0)
         assert audio["pos"] == 2
 
     @pytest.mark.parametrize("rmod", REMUX_MODULES)

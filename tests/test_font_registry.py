@@ -1,11 +1,9 @@
 """
-Tests for FontRegistry thread-safety.
-
-mkv_common.FontRegistry — hash-based + name/size dedup
+Tests for FontManager thread-safety, transaction lifecycle, deduplication, collision safety, and rollback.
 """
-import threading
 import importlib
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -14,115 +12,157 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-mkv_common      = importlib.import_module("mkv_common")
+mkv_common = importlib.import_module("mkv_common")
+FontManager = mkv_common.FontManager
+FontClaim = mkv_common.FontClaim
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# mkv_common.FontRegistry  (hash + name/size)
-# ─────────────────────────────────────────────────────────────────────────────
+class TestFontManagerLifecycle:
+    """Tests for the FontManager claim -> promote -> release lifecycle."""
 
-class TestFontRegistryNormal:
-    """Tests for the standard FontRegistry in mkv_common."""
+    def test_claim_and_promote(self, tmp_path):
+        fonts_dir = tmp_path / "fonts"
+        mgr = FontManager(fonts_dir)
 
-    def _reg(self, existing_hashes=None):
-        return mkv_common.FontRegistry(existing_hashes=existing_hashes)
+        claim = mgr.claim("Arial.ttf", 100)
+        assert claim is not None
+        assert isinstance(claim, FontClaim)
+        assert claim.name == "Arial.ttf"
+        assert claim.staging_path.parent.name == ".font_staging"
 
-    def test_name_size_claim_first_time(self):
-        reg = self._reg()
-        assert reg.try_claim_name_size("font.ttf", 1234) is True
+        # Staging file is created by worker/mkvextract
+        claim.staging_path.write_bytes(b"unique font content 1")
 
-    def test_name_size_claim_second_time_fails(self):
-        reg = self._reg()
-        reg.try_claim_name_size("font.ttf", 1234)
-        assert reg.try_claim_name_size("font.ttf", 1234) is False
+        promoted = mgr.promote(claim)
+        assert promoted is not None
+        assert promoted == fonts_dir / "Arial.ttf"
+        assert promoted.read_bytes() == b"unique font content 1"
+        assert not claim.staging_path.exists()
 
-    def test_different_size_same_name_allowed(self):
-        reg = self._reg()
-        assert reg.try_claim_name_size("font.ttf", 1234) is True
-        assert reg.try_claim_name_size("font.ttf", 5678) is True
+    def test_claim_duplicate_name_size_rejected(self, tmp_path):
+        fonts_dir = tmp_path / "fonts"
+        mgr = FontManager(fonts_dir)
 
-    def test_hash_claim_first_time(self):
-        reg = self._reg()
-        assert reg.try_claim_hash("abc123") is True
+        claim1 = mgr.claim("Arial.ttf", 100)
+        assert claim1 is not None
 
-    def test_hash_claim_duplicate_fails(self):
-        reg = self._reg()
-        reg.try_claim_hash("abc123")
-        assert reg.try_claim_hash("abc123") is False
+        claim2 = mgr.claim("Arial.ttf", 100)
+        assert claim2 is None
 
-    def test_hash_claim_different_hashes_allowed(self):
-        reg = self._reg()
-        assert reg.try_claim_hash("abc123") is True
-        assert reg.try_claim_hash("def456") is True
+    def test_claim_different_size_allowed(self, tmp_path):
+        fonts_dir = tmp_path / "fonts"
+        mgr = FontManager(fonts_dir)
 
-    def test_release_name_size_allows_reclaim(self):
-        reg = self._reg()
-        reg.try_claim_name_size("font.ttf", 1234)
-        reg.release_name_size("font.ttf", 1234)
-        assert reg.try_claim_name_size("font.ttf", 1234) is True
+        claim1 = mgr.claim("Arial.ttf", 100)
+        claim2 = mgr.claim("Arial.ttf", 200)
+        assert claim1 is not None
+        assert claim2 is not None
 
-    def test_existing_hashes_pre_seeded(self):
-        existing = {"deadbeef"}
-        reg = self._reg(existing_hashes=existing)
-        # Pre-seeded hash must be rejected
-        assert reg.try_claim_hash("deadbeef") is False
-        # New hash must be accepted
-        assert reg.try_claim_hash("cafebabe") is True
+    def test_release_allows_reclaim(self, tmp_path):
+        fonts_dir = tmp_path / "fonts"
+        mgr = FontManager(fonts_dir)
 
-    def test_claimed_hashes_property(self):
-        reg = self._reg()
-        reg.try_claim_hash("aaa")
-        reg.try_claim_hash("bbb")
-        assert {"aaa", "bbb"}.issubset(reg.claimed_hashes)
+        claim1 = mgr.claim("Arial.ttf", 100)
+        assert claim1 is not None
+        claim1.staging_path.write_bytes(b"temp")
 
-    def test_thread_safety_name_size(self):
-        """Only one thread should win the first claim for a given key."""
-        reg = self._reg()
-        wins = []
+        mgr.release(claim1)
+        assert not claim1.staging_path.exists()
+
+        # Should be re-claimable now
+        claim2 = mgr.claim("Arial.ttf", 100)
+        assert claim2 is not None
+
+    def test_promote_hash_deduplication(self, tmp_path):
+        fonts_dir = tmp_path / "fonts"
+        mgr = FontManager(fonts_dir)
+
+        # First font
+        claim1 = mgr.claim("FontA.ttf", 100)
+        assert claim1 is not None
+        claim1.staging_path.write_bytes(b"identical font content")
+        promoted1 = mgr.promote(claim1)
+        assert promoted1 == fonts_dir / "FontA.ttf"
+
+        # Second font with different name and size but same content
+        claim2 = mgr.claim("FontB.ttf", 200)
+        assert claim2 is not None
+        claim2.staging_path.write_bytes(b"identical font content")
+        promoted2 = mgr.promote(claim2)
+
+        # Content duplicate should be deduplicated (return None, staging file cleaned up)
+        assert promoted2 is None
+        assert not claim2.staging_path.exists()
+        assert not (fonts_dir / "FontB.ttf").exists()
+
+    def test_collision_safe_target_allocation(self, tmp_path):
+        fonts_dir = tmp_path / "fonts"
+        fonts_dir.mkdir(parents=True)
+        existing_font = fonts_dir / "Arial.ttf"
+        existing_font.write_bytes(b"existing content")
+
+        mgr = FontManager(fonts_dir)
+
+        # New font with same filename but different content and size
+        claim = mgr.claim("Arial.ttf", 999)
+        assert claim is not None
+        claim.staging_path.write_bytes(b"new different content")
+
+        promoted = mgr.promote(claim)
+        assert promoted is not None
+        assert promoted != existing_font
+        assert promoted.name.startswith("Arial_")
+        assert promoted.name.endswith(".ttf")
+        assert promoted.read_bytes() == b"new different content"
+        # Original file is preserved untouched
+        assert existing_font.read_bytes() == b"existing content"
+
+    def test_seed_existing_fonts(self, tmp_path):
+        fonts_dir = tmp_path / "fonts"
+        fonts_dir.mkdir(parents=True)
+        existing_font = fonts_dir / "Existing.otf"
+        existing_font.write_bytes(b"pre-existing content")
+
+        mgr = FontManager(fonts_dir)
+
+        # Name and size should already be reserved
+        assert mgr.claim("Existing.otf", len(b"pre-existing content")) is None
+
+        # Content hash should already be known
+        claim = mgr.claim("DifferentName.otf", 500)
+        assert claim is not None
+        claim.staging_path.write_bytes(b"pre-existing content")
+        assert mgr.promote(claim) is None
+
+    def test_empty_staging_file_promotion_fails(self, tmp_path):
+        fonts_dir = tmp_path / "fonts"
+        mgr = FontManager(fonts_dir)
+
+        claim = mgr.claim("Empty.ttf", 0)
+        assert claim is not None
+        claim.staging_path.write_bytes(b"")  # 0 bytes
+
+        assert mgr.promote(claim) is None
+        assert not claim.staging_path.exists()
+
+    def test_thread_safety_claim(self, tmp_path):
+        fonts_dir = tmp_path / "fonts"
+        mgr = FontManager(fonts_dir)
+
+        claims = []
         lock = threading.Lock()
 
-        def claim():
-            result = reg.try_claim_name_size("shared.ttf", 999)
-            if result:
+        def try_claim():
+            c = mgr.claim("Concurrent.ttf", 123)
+            if c is not None:
                 with lock:
-                    wins.append(1)
+                    claims.append(c)
 
-        threads = [threading.Thread(target=claim) for _ in range(50)]
+        threads = [threading.Thread(target=try_claim) for _ in range(50)]
         for t in threads:
             t.start()
         for t in threads:
             t.join()
 
-        assert len(wins) == 1, f"Expected exactly 1 winner, got {len(wins)}"
-
-    def test_thread_safety_hash(self):
-        """Only one thread should win the first hash claim."""
-        reg = self._reg()
-        wins = []
-        lock = threading.Lock()
-
-        def claim():
-            result = reg.try_claim_hash("sharedHash")
-            if result:
-                with lock:
-                    wins.append(1)
-
-        threads = [threading.Thread(target=claim) for _ in range(50)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-
-        assert len(wins) == 1, f"Expected exactly 1 winner, got {len(wins)}"
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# We inherit the test suite to ensure the hash-based class is fully covered.
-# ─────────────────────────────────────────────────────────────────────────────
-
-class TestFontRegistryLocalHash(TestFontRegistryNormal):
-    """Tests for the FontRegistry in mkv_common."""
-
-    def _reg(self, existing_hashes=None):
-        return mkv_common.FontRegistry(existing_hashes=existing_hashes)
+        assert len(claims) == 1
 

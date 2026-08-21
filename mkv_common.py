@@ -1,9 +1,10 @@
 """
 mkv_common.py
-Shared logic for mkv_extract.py and mkv_remux.py.
+Shared logic, domain models, asset resolution, and batch execution for mkvanimebatch.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -11,7 +12,9 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -31,32 +34,42 @@ __all__ = [
     "LANG_MKV_TAG",
     "MAX_DEFAULT_WORKERS",
     "SUBPROCESS_TIMEOUT",
-    "SUBTITLE_EXT",
+    "SUBTITLE_EXTENSIONS",
     "SUBTITLE_LANGS_FALLBACK",
     "SUBTITLE_LANGS_FALLBACK_ORDER",
     "SUBTITLE_LANGS_PRIMARY",
     "SUBTITLE_LANGS_PRIMARY_ORDER",
-    # type aliases
+    # types & data classes
     "EpisodeInfo",
-    # font sniffing
-    "FontRegistry",
+    "FontClaim",
+    "FontInfo",
+    # classes
+    "FontManager",
     "ParsedFile",
     "PersistentInspectCache",
     "ScanResults",
+    "StaleSubtitleTracker",
+    # functions
     "acquire_semaphore",
+    "ancestor_dirs",
     "check_dependencies",
     "cleanup_stale_subtitle_offsets_bulk",
     "detect_sub_lang",
+    "emit_event",
     "ep_type_label",
     "find_fonts_dir",
+    "format_ep",
     "get_default_cache_file",
+    "get_item_id",
     "has_chapters",
     "has_cover",
+    "hash_file",
     "inspect_videos",
     "is_chapter_xml",
     "is_cover_attachment",
     "is_cover_filename",
     "is_dialogue_track",
+    "is_events_enabled",
     "is_font_attachment",
     "natural_sort_key",
     "output_stem",
@@ -67,8 +80,11 @@ __all__ = [
     "run_subprocess",
     "safe_filename",
     "scan_assets",
+    "scan_fonts",
     "scan_mkv_files",
+    "seasons_match",
     "select_best_subtitle_track",
+    "set_events_enabled",
     "setup_logging",
     "shift_ass_content",
     "shift_ass_timestamps",
@@ -82,12 +98,36 @@ DEFAULT_WORKER_MULTIPLIER = 2
 SUBPROCESS_TIMEOUT = 3600
 EpisodeInfo = tuple[str, str, str]
 
+_EVENTS_ENABLED: bool = False
+
+
+def set_events_enabled(enabled: bool = True) -> None:
+    """Enable or disable machine-readable structured @event: output."""
+    global _EVENTS_ENABLED
+    _EVENTS_ENABLED = enabled
+
+
+def is_events_enabled() -> bool:
+    """Return whether structured event output is currently enabled."""
+    return _EVENTS_ENABLED
+
+
+def get_item_id(video_path: Path, root_input_dir: Path) -> str:
+    """Derive root-relative POSIX path ID for sidecar contract events and manifest items."""
+    try:
+        return video_path.resolve().relative_to(root_input_dir.resolve()).as_posix()
+    except ValueError:
+        try:
+            return video_path.relative_to(root_input_dir).as_posix()
+        except ValueError:
+            return video_path.name
+
 
 # ─── SORTING HELPER ──────────────────────────────────────────────────────────
-_NATURAL_SORT_RE = re.compile(r'(\d+)')
+_NATURAL_SORT_RE = re.compile(r"(\d+)")
 
 
-def natural_sort_key(path: Path | str) -> list:
+def natural_sort_key(path: Path | str) -> list[int | str]:
     """Key function for sorting paths naturally (e.g. EP2 before EP10)."""
     return [int(text) if text.isdigit() else text.lower() for text in _NATURAL_SORT_RE.split(str(path))]
 
@@ -102,31 +142,45 @@ class BelowLevelFilter(logging.Filter):
         return record.levelno < self.below_level
 
 
-def setup_logging(level: int = logging.INFO) -> None:
+def setup_logging(level: int = logging.INFO, *, stderr_only: bool = False) -> None:
     """Configure system-wide logging with standard output and error splits."""
     root_logger = logging.getLogger()
     root_logger.setLevel(level)
 
-    # Remove pre-existing default handlers
     for handler in list(root_logger.handlers):
         root_logger.removeHandler(handler)
         handler.close()
 
-    log_format = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
+    log_format = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
 
-    # Stream standard info/warning messages strictly to stdout
-    stdout_handler = logging.StreamHandler(sys.stdout)
-    stdout_handler.setLevel(level)
-    stdout_handler.setFormatter(log_format)
-    stdout_handler.addFilter(BelowLevelFilter(logging.ERROR))
+    def _stream_handler(stream, handler_level: int) -> logging.StreamHandler:
+        handler = logging.StreamHandler(stream)
+        handler.setLevel(handler_level)
+        handler.setFormatter(log_format)
+        return handler
 
-    # Stream error/critical messages strictly to stderr
-    stderr_handler = logging.StreamHandler(sys.stderr)
-    stderr_handler.setLevel(logging.ERROR)
-    stderr_handler.setFormatter(log_format)
+    if stderr_only:
+        root_logger.addHandler(_stream_handler(sys.stderr, level))
+    else:
+        stdout_handler = _stream_handler(sys.stdout, level)
+        stdout_handler.addFilter(BelowLevelFilter(logging.ERROR))
+        root_logger.addHandler(stdout_handler)
+        root_logger.addHandler(_stream_handler(sys.stderr, logging.ERROR))
 
-    root_logger.addHandler(stdout_handler)
-    root_logger.addHandler(stderr_handler)
+
+def emit_event(event_type: str, *, item_id: str | None = None, **payload) -> None:
+    """Emit a machine-readable structured JSON-line to stdout for sidecar consumers when enabled."""
+    if not _EVENTS_ENABLED:
+        return
+    ev = {"version": 1, "type": event_type}
+    if item_id is not None:
+        ev["id"] = item_id
+    elif "id" in payload:
+        ev["id"] = payload.pop("id")
+    ev.update(payload)
+    msg = json.dumps(ev, ensure_ascii=False)
+    sys.stdout.write(f"@event: {msg}\n")
+    sys.stdout.flush()
 
 
 def parse_attachments(attachments: list[dict]) -> tuple[dict | None, list[dict]]:
@@ -168,7 +222,7 @@ LANG_MKV_TAG: dict[str, str] = {
     "jpn": "jpn", "ja": "jpn",
 }
 
-SUBTITLE_EXT = ".ass"
+SUBTITLE_EXTENSIONS = frozenset({".ass", ".srt"})
 CHAPTER_EXT  = ".xml"
 
 # ─── MIME TABLES ─────────────────────────────────────────────────────────────
@@ -197,7 +251,7 @@ def is_font_attachment(file_name: str, content_type: str) -> bool:
     return any(pat in ct_lower for pat in ("font", "truetype", "opentype"))
 
 
-# ─── SUBPROCESS HELPER ───────────────────────────────────────────────────────
+# ─── SUBPROCESS & HASHING HELPERS ─────────────────────────────────────────────
 def run_subprocess(cmd: list[str], *, capture_stdout: bool = True, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
     """Run a subprocess with consistent UTF-8 encoding/error handling."""
     stdout_opt = subprocess.PIPE if capture_stdout else subprocess.DEVNULL
@@ -218,14 +272,23 @@ def acquire_semaphore(sem: threading.Semaphore | None):
     return sem if sem is not None else nullcontext()
 
 
+def hash_file(filepath: Path) -> str:
+    """Calculate BLAKE2b hash of a file for content-based deduplication."""
+    with filepath.open("rb") as f:
+        if hasattr(hashlib, "file_digest"):
+            return hashlib.file_digest(f, hashlib.blake2b).hexdigest()  # type: ignore[attr-defined]
+        hasher = hashlib.blake2b()
+        while chunk := f.read(65536):
+            hasher.update(chunk)
+        return hasher.hexdigest()
+
+
 # ─── SUBTITLE SCORING TABLES ─────────────────────────────────────────────────
-# Used by select_best_subtitle_track — defined at module level so they are not
-# re-created on every loop iteration.
 _ASS_SCORE_MAP: dict[str, int]     = {"ind": 12, "id": 11, "und": 10, "eng": 9, "en": 8}
 _NON_ASS_SCORE_MAP: dict[str, int] = {"ind":  6, "id":  5, "und":  4, "eng": 3, "en": 2}
 
 
-# ─── NAMING HELPERS ──────────────────────────────────────────────────────────
+# ─── NAMING & PATH HELPERS ───────────────────────────────────────────────────
 _UNSAFE_FN_CHARS = re.compile(r'[/:*?"<>|\\]')
 
 
@@ -241,77 +304,86 @@ def output_stem(base: str, ep_type: str, ep: str) -> str:
     return base
 
 
-# ─── FONT REGISTRY (thread-safe dedup by hash and name/size) ──────────────── Preserved
-class FontRegistry:
-    """Thread-safe registry of claimed font hashes and name/sizes for cross-file dedup."""
-
-    def __init__(
-        self, 
-        existing_hashes: set[str] | None = None,
-        existing_name_sizes: set[tuple[str, int]] | None = None
-    ) -> None:
-        self._claimed_hashes: set[str] = set(existing_hashes or ())
-        self._claimed_name_size: set[tuple[str, int]] = set(existing_name_sizes or ())
-        self._lock = threading.Lock()
-
-    def try_claim_hash(self, file_hash: str) -> bool:
-        """Atomically claim a file hash. Returns True if newly claimed."""
-        with self._lock:
-            if file_hash in self._claimed_hashes:
-                return False
-            self._claimed_hashes.add(file_hash)
-            return True
-
-    def try_claim_name_size(self, name: str, size: int) -> bool:
-        """Atomically claim a font by name and size. Returns True if newly claimed."""
-        with self._lock:
-            key = (name, size)
-            if key in self._claimed_name_size:
-                return False
-            self._claimed_name_size.add(key)
-            return True
-
-    def release_name_size(self, name: str, size: int) -> None:
-        """Release a claimed name and size (e.g. if extraction fails)."""
-        with self._lock:
-            self._claimed_name_size.discard((name, size))
-
-    @property
-    def claimed_hashes(self) -> set[str]:
-        with self._lock:
-            return set(self._claimed_hashes)
+def resolve_output_dir(
+    mkv_dir: Path,
+    root_input_dir: Path,
+    out_override: Path | None,
+    default_subdir: str | None = "Output",
+) -> Path:
+    """Preserve the source directory layout beneath a custom output root."""
+    if out_override is None:
+        return mkv_dir / default_subdir if default_subdir else mkv_dir
+    try:
+        relative_dir = mkv_dir.relative_to(root_input_dir)
+    except ValueError:
+        relative_dir = Path()
+    return out_override / relative_dir
 
 
-# ─── FONTS DIRECTORY DISCOVERY ───────────────────────────────────────────────
-# Fansub releases sometimes ship external fonts in a folder alongside external
-# subtitles, but naming isn't standardised ("Fonts", "FONT", "attachments").
-# This lets both scripts recognise the common variants without the user
-# having to rename anything every time.
-#
-# Deliberately NOT recursive: every other discovery in this codebase (videos,
-# subtitles, chapters) only looks at the top level of input_dir, since the
-# whole design assumes one flat folder per release. Searching subdirectories
-# for font-like files would be non-deterministic when more than one candidate
-# exists, and could silently pick up an unrelated folder (another season, a
-# leftover backup, an "Extras" folder) if input_dir isn't perfectly flat.
+def seasons_match(mkv_season: str, sub_season: str) -> bool:
+    if not mkv_season or not sub_season:
+        return True
+    return mkv_season == sub_season
+
+
+def ancestor_dirs(mkv_dir: Path, root_input_dir: Path) -> list[Path]:
+    """
+    Return every directory on the path from root_input_dir down to mkv_dir,
+    inclusive of both endpoints. If mkv_dir is not under root_input_dir the
+    list contains only mkv_dir.
+    """
+    try:
+        rel = mkv_dir.relative_to(root_input_dir)
+    except ValueError:
+        return [mkv_dir]
+    return [root_input_dir, *(root_input_dir / Path(*rel.parts[:i]) for i in range(1, len(rel.parts) + 1))]
+
+
+# ─── FONT INFO & SCANNING ────────────────────────────────────────────────────
+@dataclass(frozen=True)
+class FontInfo:
+    args:  tuple[str, ...]
+    count: int
+
+
+def scan_fonts(fonts_dir: Path) -> FontInfo:
+    """Scan a fonts directory and build mkvmerge attachment arguments."""
+    font_args: list[str] = []
+    count = 0
+    if not fonts_dir.is_dir():
+        return FontInfo(args=(), count=0)
+
+    try:
+        entries = []
+        with os.scandir(str(fonts_dir)) as it:
+            for entry in it:
+                if entry.is_file():
+                    entries.append(entry)
+        entries.sort(key=lambda e: natural_sort_key(e.name))
+        for entry in entries:
+            suffix = Path(entry.name).suffix.lower()
+            mime = FONT_MIME.get(suffix)
+            if not mime:
+                continue
+            font_args += ["--attachment-mime-type", mime, "--attach-file", entry.path]
+            count += 1
+    except OSError:
+        pass
+    return FontInfo(args=tuple(font_args), count=count)
+
+
 _FONT_DIR_NAMES = frozenset({"fonts", "font", "attachments"})
+_IGNORED_SCAN_DIR_NAMES = frozenset({"output", *_FONT_DIR_NAMES})
 
 
 def find_fonts_dir(input_dir: Path, override: Path | None = None, fonts_dir_cache: dict[Path, Path] | None = None) -> Path:
     """
     Resolve which directory to use for fonts.
-
     Priority:
-      1. `override` (e.g. from --fonts-dir) — used exactly as given.
-      2. input_dir / "fonts" (the canonical, exact-match default) — checked
-         first so existing setups are completely unaffected by this function.
-      3. Any TOP-LEVEL subdirectory of input_dir whose name case-insensitively
-         matches a recognised fonts-folder convention (fonts/font/attachments),
-         checked in sorted order for determinism.
-      4. Falls back to input_dir / "fonts" even if it doesn't exist yet —
-         callers decide whether to create it or treat it as "no fonts".
-
-    Always returns a Path (never None) — callers just check .is_dir().
+      1. override (e.g. from --fonts-dir)
+      2. input_dir / "fonts"
+      3. Any top-level directory matching fonts/font/attachments
+      4. Falls back to input_dir / "fonts"
     """
     if override is not None:
         return override
@@ -319,22 +391,189 @@ def find_fonts_dir(input_dir: Path, override: Path | None = None, fonts_dir_cach
     if fonts_dir_cache is not None and input_dir in fonts_dir_cache:
         return fonts_dir_cache[input_dir]
 
+    def _store(path: Path) -> Path:
+        if fonts_dir_cache is not None:
+            fonts_dir_cache[input_dir] = path
+        return path
+
     exact = input_dir / "fonts"
     if exact.is_dir():
-        if fonts_dir_cache is not None:
-            fonts_dir_cache[input_dir] = exact
-        return exact
+        return _store(exact)
 
     if input_dir.is_dir():
         for entry in sorted(input_dir.iterdir()):
             if entry.is_dir() and entry.name.lower() in _FONT_DIR_NAMES:
-                if fonts_dir_cache is not None:
-                    fonts_dir_cache[input_dir] = entry
-                return entry
+                return _store(entry)
 
-    if fonts_dir_cache is not None:
-        fonts_dir_cache[input_dir] = exact
-    return exact
+    return _store(exact)
+
+
+# ─── FONT MANAGER (Thread-safe deduplication & atomic promotion) ─────────────
+@dataclass
+class FontClaim:
+    name: str
+    size: int
+    staging_path: Path
+    identity: tuple[str, int]
+    _promoted: bool = False
+    _released: bool = False
+
+
+class FontManager:
+    """
+    Thread-safe manager configured with a fonts destination directory for font extraction,
+    hash/name deduplication, collision safety, atomic promotion, and safe rollback.
+    """
+
+    def __init__(self, fonts_dir: Path) -> None:
+        self.fonts_dir = fonts_dir
+        self._claimed_hashes: set[str] = set()
+        self._claimed_name_size: set[tuple[str, int]] = set()
+        self._staging_dir = self.fonts_dir / ".font_staging"
+        self._lock = threading.Lock()
+        self._seed_existing()
+
+    def _seed_existing(self) -> None:
+        if not self.fonts_dir.is_dir():
+            return
+        try:
+            with os.scandir(str(self.fonts_dir)) as it:
+                for entry in it:
+                    try:
+                        if not entry.is_file():
+                            continue
+                        p = Path(entry.path)
+                        if p.suffix.lower() not in FONT_EXTENSIONS:
+                            continue
+                        st = entry.stat()
+                        self._claimed_name_size.add((entry.name, st.st_size))
+                        if st.st_size > 0:
+                            h = hash_file(p)
+                            self._claimed_hashes.add(h)
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+
+    @property
+    def claimed_hashes(self) -> set[str]:
+        with self._lock:
+            return set(self._claimed_hashes)
+
+    def claim(self, name: str, size: int) -> FontClaim | None:
+        """
+        Atomically reserve a font by sanitized name and size.
+        Returns a FontClaim with a manager-created same-filesystem staging path, or None if already claimed.
+        """
+        safe_name = safe_filename(name)
+        key = (safe_name, size)
+        with self._lock:
+            if key in self._claimed_name_size:
+                return None
+            self._staging_dir.mkdir(parents=True, exist_ok=True)
+            self._claimed_name_size.add(key)
+            unique_id = uuid.uuid4().hex
+            staging_path = self._staging_dir / f".tmp_{unique_id}_{safe_name}"
+
+        return FontClaim(
+            name=safe_name,
+            size=size,
+            staging_path=staging_path,
+            identity=key,
+        )
+
+    def promote(self, claim: FontClaim) -> Path | None:
+        """
+        Validate, hash, deduplicate, and atomically promote a staged font file to fonts_dir.
+        If hash is duplicate or validation fails, staging file is removed and released.
+        Returns the final promoted destination Path, or None if duplicate or failed.
+        """
+        if claim._promoted:
+            return None
+
+        def _abandon_locked() -> None:
+            try:
+                claim.staging_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            self._claimed_name_size.discard(claim.identity)
+            claim._released = True
+
+        try:
+            if not claim.staging_path.is_file() or claim.staging_path.stat().st_size == 0:
+                self.release(claim)
+                return None
+            file_hash = hash_file(claim.staging_path)
+        except OSError:
+            self.release(claim)
+            return None
+
+        with self._lock:
+            if file_hash in self._claimed_hashes:
+                _abandon_locked()
+                return None
+
+            try:
+                self.fonts_dir.mkdir(parents=True, exist_ok=True)
+                target_path = self.fonts_dir / claim.name
+                if target_path.exists():
+                    stem = target_path.stem
+                    suffix = target_path.suffix
+                    target_path = self.fonts_dir / f"{stem}_{file_hash[:8]}{suffix}"
+                    counter = 1
+                    while target_path.exists():
+                        target_path = self.fonts_dir / f"{stem}_{file_hash[:8]}_{counter}{suffix}"
+                        counter += 1
+                claim.staging_path.replace(target_path)
+                self._claimed_hashes.add(file_hash)
+                claim._promoted = True
+                return target_path
+            except OSError as e:
+                logger.error("Failed to promote font '%s': %s", claim.staging_path.name, e)
+                _abandon_locked()
+                return None
+
+    def release(self, claim: FontClaim | None) -> None:
+        """
+        Idempotently release an uncommitted claim and clean up its staging path.
+        Never removes committed/promoted files.
+        """
+        if claim is None or claim._promoted or claim._released:
+            return
+
+        with self._lock:
+            self._claimed_name_size.discard(claim.identity)
+            try:
+                claim.staging_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            claim._released = True
+
+    def cleanup_staging(self) -> None:
+        """Remove staging directory if empty."""
+        with self._lock:
+            if self._staging_dir.is_dir():
+                try:
+                    self._staging_dir.rmdir()
+                except OSError:
+                    pass
+
+
+# ─── RUNTIME STATE TRACKERS ──────────────────────────────────────────────────
+class StaleSubtitleTracker:
+    """Thread-safe collector for active subtitle output variants with single-pass bulk purge."""
+    def __init__(self) -> None:
+        self._map: dict[str, str] = {}
+        self._lock = threading.Lock()
+
+    def record(self, base_stem: str, final_name: str) -> None:
+        with self._lock:
+            self._map[base_stem] = final_name
+
+    def cleanup(self, mkv_dir: Path) -> None:
+        with self._lock:
+            items = dict(self._map)
+        cleanup_stale_subtitle_offsets_bulk(mkv_dir, items)
 
 
 # ─── SUBTITLE LANGUAGE DETECTION ─────────────────────────────────────────────
@@ -346,7 +585,7 @@ _KNOWN_LANG_TOKENS = frozenset({
 })
 
 _BRACKET_LANG_RE = re.compile(
-    r'\[(?:(ID|Ind|Indonesian|Indo)|(EN|ENG|English)|(JA|JPN|Japanese))\]',
+    r"\[(?:(ID|Ind|Indonesian|Indo)|(EN|ENG|English)|(JA|JPN|Japanese))\]",
     re.IGNORECASE,
 )
 
@@ -356,72 +595,71 @@ _LANG_PAREN_SUFFIX_RE = re.compile(r"\(([a-zA-Z]{2,3})\)$")
 _LANG_SUFFIX_RE = re.compile(r"[._]([a-zA-Z]{2,3})$")
 
 
+_OFFSET_TAG_RE = re.compile(r"\.\[[-+]?\d+(?:\.\d+)?s\]$", re.IGNORECASE)
+
+
 @lru_cache(maxsize=1024)
 def detect_sub_lang(sub_stem: str) -> str:
     """Infer subtitle 3-letter language code ('ind', 'eng', 'jpn', 'und') from filename patterns."""
-    # Strip any offset suffix like .[+5s] or .[-3s] at the end of the stem
-    sub_stem = re.sub(r'\.\[[-+]?\d+(?:\.\d+)?s\]$', '', sub_stem, flags=re.IGNORECASE)
+    sub_stem = _OFFSET_TAG_RE.sub("", sub_stem)
     m = _BRACKET_LANG_RE.search(sub_stem)
     if m:
         if m.group(1): return "ind"
         if m.group(2): return "eng"
         if m.group(3): return "jpn"
 
-    m = _LANG_BEFORE_TRACK_RE.search(sub_stem)
-    if m: return m.group(1).lower()
-
-    m = _LANG_AFTER_TRACK_RE.search(sub_stem)
-    if m: return m.group(1).lower()
-
-    m = _LANG_PAREN_SUFFIX_RE.search(sub_stem)
-    if m: return m.group(1).lower()
-
-    m = _LANG_SUFFIX_RE.search(sub_stem)
-    if m and m.group(1).lower() in _KNOWN_LANG_TOKENS:
-        return m.group(1).lower()
+    for regex, require_known in (
+        (_LANG_BEFORE_TRACK_RE, False),
+        (_LANG_AFTER_TRACK_RE, False),
+        (_LANG_PAREN_SUFFIX_RE, False),
+        (_LANG_SUFFIX_RE, True),
+    ):
+        m = regex.search(sub_stem)
+        if not m:
+            continue
+        token = m.group(1).lower()
+        if not require_known or token in _KNOWN_LANG_TOKENS:
+            return token
 
     return "und"
 
 
-# ─── EPISODE PARSER CONFIG ───────────────────────────────────────────────────
-_OVA_PATTERN     = re.compile(r'(?<!\w)(OVA|OAD|ONA)(?=\d|\W|$)', re.IGNORECASE)
-_SPECIAL_PATTERN = re.compile(r'(?<!\w)(Specials?|SP)(?=\d|\W|$)',  re.IGNORECASE)
-_SXXEXX_PATTERN  = re.compile(r'[Ss](\d{1,2})[Ee](\d{1,4}(?:\.\d{1,2}(?![0-9pib]))?)(?:-[Ee]?\d{1,4})?(?:[vV]\d)?')
-_SXXPXX_PATTERN  = re.compile(r'[Ss](\d{1,2})[Pp](\d{1,4}(?:\.\d{1,2}(?![0-9pib]))?)(?:-[Pp]?\d{1,4})?(?:[vV]\d)?')
+# ─── EPISODE PARSER ──────────────────────────────────────────────────────────
+_OVA_PATTERN     = re.compile(r"(?<!\w)(OVA|OAD|ONA)(?=\d|\W|$)", re.IGNORECASE)
+_SPECIAL_PATTERN = re.compile(r"(?<!\w)(Specials?|SP)(?=\d|\W|$)",  re.IGNORECASE)
+_SXXEXX_PATTERN  = re.compile(r"[Ss](\d{1,2})[Ee](\d{1,4}(?:\.\d{1,2}(?![0-9pib]))?)(?:-[Ee]?\d{1,4})?(?:[vV]\d)?")
+_SXXPXX_PATTERN  = re.compile(r"[Ss](\d{1,2})[Pp](\d{1,4}(?:\.\d{1,2}(?![0-9pib]))?)(?:-[Pp]?\d{1,4})?(?:[vV]\d)?")
+_YEAR_GUARD = r"(?!(?:19|20)\d{2}(?!\d))"
 
-_YEAR_GUARD = r'(?!(?:19|20)\d{2}(?!\d))'
-
-# High-priority explicit markers anywhere in the filename.
-# NOTE: (?![0-9]) after \d{1,4} in the dash branch prevents 5-digit numbers
-# from being silently truncated. _YEAR_GUARD rejects release years (1900-2099).
 _EP_NUM_MARKER_RE = re.compile(
-    r'(?:[-\u2013]\s*)' + _YEAR_GUARD + r'(\d{1,4}(?:\.\d{1,2}(?![0-9pib]))?)(?:-\d{1,4})?(?![0-9pib])(?:\s*(?:end|fin|final))?(?:[vV]\d)?'
-    r'|[\[(](\d{1,3}(?:\.\d{1,2}(?![0-9pib]))?)[\])](?:[vV]\d)?'
-    r'|\b[Ee][Pp](?:isode)?\.?\s*(\d{1,4}(?:\.\d{1,2}(?![0-9pib]))?)(?:[vV]\d)?\b'
-    r'|第\s*(\d{1,4}(?:\.\d{1,2})?)\s*話?',
+    r"(?:[-\u2013]\s*)" + _YEAR_GUARD + r"(\d{1,4}(?:\.\d{1,2}(?![0-9pib]))?)(?:-\d{1,4})?(?![0-9pib])(?:\s*(?:end|fin|final))?(?:[vV]\d)?"
+    r"|[\[(](\d{1,3}(?:\.\d{1,2}(?![0-9pib]))?)[\])](?:[vV]\d)?"
+    r"|\b[Ee][Pp](?:isode)?\.?\s*(\d{1,4}(?:\.\d{1,2}(?![0-9pib]))?)(?:[vV]\d)?\b"
+    r"|第\s*(\d{1,4}(?:\.\d{1,2})?)\s*話?",
     re.IGNORECASE
 )
 
-# Fallback standalone numbers (for titles without explicit dashes/EP tags)
 _EP_NUM_FALLBACK_RE = re.compile(
-    r'(?:^|\s)(\d{1,3}(?:\.\d{1,2}(?![0-9pib]))?)(?![0-9pib])(?:\s*(?:end|fin|final))?(?:[vV]\d)?\b',
+    r"(?:^|\s)(\d{1,3}(?:\.\d{1,2}(?![0-9pib]))?)(?![0-9pib])(?:\s*(?:end|fin|final))?(?:[vV]\d)?\b",
     re.IGNORECASE
 )
 
 _SEASON_PATTERNS = (
-    re.compile(r'[Ss]eason\s*(\d{1,2})'),
-    re.compile(r'\bS(\d{1,2})\b(?![EePp])'),
-    re.compile(r'(?<=[a-zA-Z])\s+(\d{1})\s+(?=[a-zA-Z])'),
+    re.compile(r"[Ss]eason\s*(\d{1,2})"),
+    re.compile(r"\bS(\d{1,2})\b(?![EePp])"),
+    re.compile(r"(?<=[a-zA-Z])\s+(\d{1})\s+(?=[a-zA-Z])"),
 )
+
 
 def _first_group(m: re.Match) -> str | None:
     return next((g for g in m.groups() if g is not None), None)
 
+
 def _parse_typed_ep(name: str, pattern: re.Pattern) -> str:
     m = pattern.search(name)
-    if m is None: return '00'
+    if m is None: return "00"
     remainder = name[m.end():]
-    glued = re.match(r'\s*(\d{1,4}(?:\.\d{1,2}(?![0-9pib]))?)', remainder)
+    glued = re.match(r"\s*(\d{1,4}(?:\.\d{1,2}(?![0-9pib]))?)", remainder)
     if glued: 
         return format_ep(glued.group(1))
     
@@ -433,23 +671,24 @@ def _parse_typed_ep(name: str, pattern: re.Pattern) -> str:
     matches = _EP_NUM_FALLBACK_RE.findall(remainder)
     if matches:
         return format_ep(matches[-1])
-    return '00'
+    return "00"
+
 
 def format_ep(val: str) -> str:
-    if '.' in val:
-        parts = val.split('.', 1)
+    if "." in val:
+        parts = val.split(".", 1)
         return f"{int(parts[0]):02d}.{parts[1]}"
     return f"{int(val):02d}"
+
 
 @lru_cache(maxsize=1024)
 def parse_episode(name: str) -> EpisodeInfo | None:
     """Return (season, type, ep) or None."""
-    # Strip any offset suffix like .[+5s] or .[-3s] at the end of the name/stem
-    name = re.sub(r'\.\[[-+]?\d+(?:\.\d+)?s\]$', '', name, flags=re.IGNORECASE)
-    name = name.replace('_', ' ')
-    name = re.sub(r'(?<!\d)\.|\.(?!\d)', ' ', name)
+    name = _OFFSET_TAG_RE.sub("", name)
+    name = name.replace("_", " ")
+    name = re.sub(r"(?<!\d)\.|\.(?!\d)", " ", name)
 
-    season = ''
+    season = ""
     for pat in _SEASON_PATTERNS:
         s = pat.search(name)
         if s:
@@ -458,25 +697,25 @@ def parse_episode(name: str) -> EpisodeInfo | None:
             break
 
     if _OVA_PATTERN.search(name):
-        return season, 'OVA', _parse_typed_ep(name, _OVA_PATTERN)
+        return season, "OVA", _parse_typed_ep(name, _OVA_PATTERN)
     if _SPECIAL_PATTERN.search(name):
-        return season, 'SP', _parse_typed_ep(name, _SPECIAL_PATTERN)
+        return season, "SP", _parse_typed_ep(name, _SPECIAL_PATTERN)
 
     m = _SXXEXX_PATTERN.search(name)
-    if m: return str(int(m.group(1))), 'E', format_ep(m.group(2))
+    if m: return str(int(m.group(1))), "E", format_ep(m.group(2))
 
     m = _SXXPXX_PATTERN.search(name)
-    if m: return str(int(m.group(1))), 'P', format_ep(m.group(2))
+    if m: return str(int(m.group(1))), "P", format_ep(m.group(2))
 
     ep_m = _EP_NUM_MARKER_RE.search(name)
     if ep_m:
         val = _first_group(ep_m)
         if val is not None:
-            return season, 'E', format_ep(val)
+            return season, "E", format_ep(val)
 
     matches = _EP_NUM_FALLBACK_RE.findall(name)
     if matches:
-        return season, 'E', format_ep(matches[-1])
+        return season, "E", format_ep(matches[-1])
 
     return None
 
@@ -497,14 +736,14 @@ def is_dialogue_track(name: str | None) -> bool:
     return bool(DIALOGUE_KEYWORDS.intersection(tokens))
 
 
-# ─── CHAPTER CONTENT-SNIFFING ────────────────────────────────────────────────
+# ─── CHAPTER & COVER SNIFFING ────────────────────────────────────────────────
 _CHAPTER_SNIFF_BYTES = 4096
-_CHAPTER_TAG_RE = re.compile(rb'<Chapters[ >]', re.IGNORECASE)
+_CHAPTER_TAG_RE = re.compile(rb"<Chapters[ >]", re.IGNORECASE)
 
 
 def is_chapter_xml(path: Path) -> bool:
     try:
-        with path.open('rb') as fh:
+        with path.open("rb") as fh:
             head = fh.read(_CHAPTER_SNIFF_BYTES)
         return bool(_CHAPTER_TAG_RE.search(head))
     except OSError:
@@ -526,8 +765,7 @@ def has_cover(json_data: dict | None) -> bool:
     return cover is not None
 
 
-# ─── COVER IMAGE SNIFFING ────────────────────────────────────────────────────
-_COVER_STEM_RE = re.compile(r'^cover$', re.IGNORECASE)
+_COVER_STEM_RE = re.compile(r"^cover$", re.IGNORECASE)
 _COVER_LIKE_STEMS = frozenset({
     "cover", "cover_land", "small_cover", "small_cover_land",
     "poster", "thumbnail", "thumb", "fanart",
@@ -550,18 +788,13 @@ def is_cover_attachment(file_name: str, content_type: str) -> bool:
     return Path(file_name).stem.lower() in _COVER_LIKE_STEMS
 
 
-# ─── UNIFIED SUBTITLE TRACK SELECTION ────────────────────────────────────────
+# ─── SUBTITLE TRACK SELECTION ────────────────────────────────────────────────
 def select_best_subtitle_track(
     tracks: list[dict],
     *,
     codec_filter: frozenset[str] | None = None,
     log: list[str] | None = None,
 ) -> tuple[int, str, bool] | None:
-    """
-    Priority:
-    1. Primary languages (ind → id → und), dialogue-keyword tiebreaker
-    2. Fallback languages (eng → en), same tiebreaker
-    """
     candidates = []
     for t in tracks:
         if t.get("type") != "subtitles":
@@ -577,16 +810,12 @@ def select_best_subtitle_track(
 
         if codec_filter is not None and codec_id not in codec_filter:
             if log is not None:
-                log.append(
-                    f"   -> INFO: Track {tid} ({codec_id or 'unknown codec'}) "
-                    "— excluded by codec filter, skipped"
-                )
+                log.append(f"   -> INFO: Track {tid} ({codec_id or 'unknown codec'}) excluded by codec filter, skipped")
             continue
 
         is_diag = is_dialogue_track(name)
         is_ass  = (codec_id == "s_text/ass")
 
-        # Category priority scoring (1 to 12):
         scores = _ASS_SCORE_MAP if is_ass else _NON_ASS_SCORE_MAP
         category_score = scores.get(language, 7 if is_ass else 1)
 
@@ -596,36 +825,16 @@ def select_best_subtitle_track(
     if not candidates:
         return None
 
-    # Pick candidate with highest priority_key
     best_candidate = max(candidates, key=lambda c: c[0])
     priority_key, tid, language, is_diag = best_candidate
 
     if log is not None:
-        category_score = priority_key[0]
-        category_desc = {
-            12: "Indonesian ASS (ind)",
-            11: "Indonesian ASS (id)",
-            10: "Undetermined ASS (und)",
-            9: "English ASS (eng)",
-            8: "English ASS (en)",
-            7: "Other ASS",
-            6: "Indonesian non-ASS (ind)",
-            5: "Indonesian non-ASS (id)",
-            4: "Undetermined non-ASS (und)",
-            3: "English non-ASS (eng)",
-            2: "English non-ASS (en)",
-            1: "Other non-ASS",
-        }.get(category_score, "unknown")
-        
-        log.append(
-            f"   -> Selected Track {tid} (lang '{language}', {category_desc}, "
-            f"dialogue={is_diag})"
-        )
+        log.append(f"   -> Selected Track {tid} (lang '{language}', dialogue={is_diag})")
 
     return tid, language, is_diag
 
 
-# ─── MKVMERGE / DEPENDENCY HELPERS ───────────────────────────────────────────
+# ─── MKVMERGE & DEPENDENCY HELPERS ───────────────────────────────────────────
 def check_dependencies(*required: str) -> None:
     for cmd in required:
         if not shutil.which(cmd):
@@ -697,11 +906,18 @@ class PersistentInspectCache:
             self.cache_file.parent.mkdir(parents=True, exist_ok=True)
             with self._lock:
                 data_copy = dict(self._data)
-            import tempfile
-            with tempfile.NamedTemporaryFile("w", dir=self.cache_file.parent, encoding="utf-8", delete=False) as f:
-                temp_name = f.name
-                json.dump(data_copy, f)
-            Path(temp_name).replace(self.cache_file)
+            temp_name = ""
+            try:
+                with tempfile.NamedTemporaryFile(
+                    "w", dir=self.cache_file.parent, encoding="utf-8", delete=False
+                ) as temp_file:
+                    temp_name = temp_file.name
+                    json.dump(data_copy, temp_file)
+                Path(temp_name).replace(self.cache_file)
+            except BaseException:
+                if temp_name:
+                    Path(temp_name).unlink(missing_ok=True)
+                raise
         except (OSError, TypeError, ValueError) as e:
             logger.warning(f"Failed to save inspect cache to {self.cache_file}: {e}")
 
@@ -754,10 +970,7 @@ def inspect_videos(
     persistent_cache: PersistentInspectCache | None = None,
     force_refresh: bool = False,
 ) -> dict[Path, dict | None]:
-    """
-    Run `mkvmerge -J` on every video in parallel and return a cache mapping
-    each path to its parsed JSON (or None if inspection failed).
-    """
+    """Run `mkvmerge -J` on every video in parallel and return metadata mapping."""
     cache: dict[Path, dict | None] = {}
     to_inspect: list[Path] = []
 
@@ -784,7 +997,6 @@ def inspect_videos(
         futures = {pool.submit(_inspect, v): v for v in to_inspect}
         for future in as_completed(futures):
             v = futures[future]
-            # Soft-fail via future.exception() so arbitrary worker errors don't abort the batch.
             exc = future.exception()
             if exc is not None:
                 logger.warning("Inspection failed for %s: %s", v.name, exc)
@@ -803,7 +1015,7 @@ def inspect_videos(
     return cache
 
 
-
+# ─── PARSED FILE & SCANNING ──────────────────────────────────────────────────
 @dataclass(frozen=True)
 class ParsedFile:
     path: Path
@@ -813,29 +1025,12 @@ class ParsedFile:
 
 
 def _create_parsed_file(path: Path) -> ParsedFile:
-    """Construct a ParsedFile instance with episode number metadata pre-evaluated."""
     return ParsedFile(
         path=path,
         name=path.name,
         stem=path.stem,
         parsed=parse_episode(path.stem),
     )
-
-
-def resolve_output_dir(
-    mkv_dir: Path,
-    root_input_dir: Path,
-    out_override: Path | None,
-    default_subdir: str | None = "Output",
-) -> Path:
-    """Preserve the source directory layout beneath a custom output root."""
-    if out_override is None:
-        return mkv_dir / default_subdir if default_subdir else mkv_dir
-    try:
-        relative_dir = mkv_dir.relative_to(root_input_dir)
-    except ValueError:
-        relative_dir = Path()
-    return out_override / relative_dir
 
 
 @dataclass(frozen=True)
@@ -849,7 +1044,7 @@ def scan_mkv_files(dir_path: Path, recursive: bool = True, ignore_paths: set[Pat
     results = []
     stack = [str(dir_path)]
     resolved_ignores = {p.resolve() for p in ignore_paths} if ignore_paths else set()
-    
+
     while stack:
         current_dir = stack.pop()
         try:
@@ -861,7 +1056,7 @@ def scan_mkv_files(dir_path: Path, recursive: bool = True, ignore_paths: set[Pat
                             if name.lower().endswith(".mkv"):
                                 path = Path(entry.path)
                                 results.append(_create_parsed_file(path))
-                        elif entry.is_dir(follow_symlinks=False) and recursive and name.lower() not in {"output", "fonts", "font", "attachments"}:
+                        elif entry.is_dir(follow_symlinks=False) and recursive and name.lower() not in _IGNORED_SCAN_DIR_NAMES:
                             entry_path = Path(entry.path)
                             if resolved_ignores and entry_path.resolve() in resolved_ignores:
                                 continue
@@ -870,21 +1065,20 @@ def scan_mkv_files(dir_path: Path, recursive: bool = True, ignore_paths: set[Pat
                         continue
         except OSError:
             continue
-            
+
     results.sort(key=lambda pf: natural_sort_key(pf.path))
     return results
+
+
+def _clone_scan_results(sr: ScanResults) -> ScanResults:
+    return ScanResults(subs=list(sr.subs), chapters=list(sr.chapters), covers=list(sr.covers))
 
 
 def scan_assets(dir_path: Path, scan_cache: dict[Path, ScanResults] | None = None) -> ScanResults:
     if scan_cache is not None:
         dir_path = dir_path.resolve()
         if dir_path in scan_cache:
-            cached = scan_cache[dir_path]
-            return ScanResults(
-                subs=list(cached.subs),
-                chapters=list(cached.chapters),
-                covers=list(cached.covers)
-            )
+            return _clone_scan_results(scan_cache[dir_path])
 
     subs = []
     chapters = []
@@ -897,8 +1091,8 @@ def scan_assets(dir_path: Path, scan_cache: dict[Path, ScanResults] | None = Non
                         continue
                     suffix = Path(entry.name).suffix.lower()
                     path = Path(entry.path)
-                    
-                    if suffix == SUBTITLE_EXT:
+
+                    if suffix in SUBTITLE_EXTENSIONS:
                         subs.append(_create_parsed_file(path))
                     elif suffix == CHAPTER_EXT:
                         chapters.append(_create_parsed_file(path))
@@ -908,27 +1102,19 @@ def scan_assets(dir_path: Path, scan_cache: dict[Path, ScanResults] | None = Non
                     continue
     except OSError:
         pass
-    
+
     subs.sort(key=lambda pf: natural_sort_key(pf.name))
     chapters.sort(key=lambda pf: natural_sort_key(pf.name))
     covers.sort(key=lambda pf: natural_sort_key(pf.name))
+    result = ScanResults(subs=subs, chapters=chapters, covers=covers)
     if scan_cache is not None:
-        # Copy-in / copy-out: cache holds private list copies, and callers always
-        # receive independent lists so mutation cannot corrupt the cache entry.
-        cached = ScanResults(
-            subs=list(subs),
-            chapters=list(chapters),
-            covers=list(covers),
-        )
-        scan_cache[dir_path] = cached
-        return ScanResults(
-            subs=list(cached.subs),
-            chapters=list(cached.chapters),
-            covers=list(cached.covers),
-        )
-    return ScanResults(subs=subs, chapters=chapters, covers=covers)
+        scan_cache[dir_path] = result
+        return _clone_scan_results(result)
+    return result
 
-_ASS_TIME_RE = re.compile(r'^(\d+):(\d{2}):(\d{2})\.(\d{2})$')
+
+# ─── ASS SUBTITLE TIMING MANIPULATION ─────────────────────────────────────────
+_ASS_TIME_RE = re.compile(r"^(\d+):(\d{2}):(\d{2})\.(\d{2})$")
 
 
 def _ass_time_to_cs(t: str) -> int:
@@ -943,7 +1129,7 @@ def _ass_time_to_cs(t: str) -> int:
 
 def _ass_cs_to_time(total_cs: int) -> str:
     """Format centiseconds to ASS format time (H:MM:SS.cc) with clamping at 0."""
-    total_cs = max(0, total_cs)  # clamp at 0:00:00.00, timestamps can't go negative
+    total_cs = max(0, total_cs)
     total_s, cs = divmod(total_cs, 100)
     total_m, s = divmod(total_s, 60)
     h, m = divmod(total_m, 60)
@@ -964,7 +1150,7 @@ def shift_ass_content(content: str, offset_seconds: float) -> tuple[str, int]:
     offset_cs = round(offset_seconds * 100)
     lines = content.splitlines(keepends=True)
 
-    out_lines = []
+    out_lines: list[str] = []
     in_events = False
     shifted_count = 0
 
@@ -977,39 +1163,34 @@ def shift_ass_content(content: str, offset_seconds: float) -> tuple[str, int]:
             out_lines.append(line)
             continue
 
-        is_event_line = False
-        prefix = ""
-        rest = ""
-        if in_events:
-            parts_colon = stripped.split(":", 1)
-            if len(parts_colon) == 2:
-                key = parts_colon[0].strip().lower()
-                if key in ("dialogue", "comment"):
-                    is_event_line = True
-                    prefix = parts_colon[0]
-                    rest = parts_colon[1]
+        if not in_events:
+            out_lines.append(line)
+            continue
 
-        if is_event_line:
-            newline = line[len(stripped):]
+        parts_colon = stripped.split(":", 1)
+        if len(parts_colon) == 2 and parts_colon[0].strip().lower() in ("dialogue", "comment"):
+            prefix, rest = parts_colon
             parts = rest.split(",", 9)
             if len(parts) >= 10:
                 try:
-                    parts[1] = _ass_cs_to_time(_ass_time_to_cs(parts[1]) + offset_cs)
-                    parts[2] = _ass_cs_to_time(_ass_time_to_cs(parts[2]) + offset_cs)
+                    start_cs = _ass_time_to_cs(parts[1]) + offset_cs
+                    end_cs = _ass_time_to_cs(parts[2]) + offset_cs
+                    parts[1] = _ass_cs_to_time(start_cs)
+                    parts[2] = _ass_cs_to_time(end_cs)
+                    newline = line[len(stripped):]
                     out_lines.append(f"{prefix}:{','.join(parts)}{newline}")
                     shifted_count += 1
+                    continue
                 except (ValueError, KeyError, IndexError):
-                    out_lines.append(line)
-            else:
-                out_lines.append(line)
-        else:
-            out_lines.append(line)
+                    pass
+
+        out_lines.append(line)
 
     return "".join(out_lines), shifted_count
 
 
 def shift_ass_timestamps(path: Path, offset_seconds: float, log: list[str] | None = None) -> int:
-    """Shift every Dialogue/Comment line in an .ass file by offset_seconds (in place). Returns the number of lines shifted."""
+    """Shift every Dialogue/Comment line in an .ass file by offset_seconds (in place)."""
     if offset_seconds == 0.0:
         return 0
 
@@ -1027,7 +1208,6 @@ def shift_ass_timestamps(path: Path, offset_seconds: float, log: list[str] | Non
     if shifted_count > 0:
         try:
             encoding = "utf-8-sig" if has_bom else "utf-8"
-            # newline="" prevents \n translation: raw already keeps original CRLF/LF endings
             path.write_text(shifted_text, encoding=encoding, newline="")
             if log is not None:
                 log.append(f"   -> Shifted subtitle timing by {offset_seconds:+.2f}s ({shifted_count} lines)")
@@ -1079,4 +1259,3 @@ def cleanup_stale_subtitle_offsets_bulk(mkv_dir: Path, active_subs: dict[str, st
                     entry_path.unlink(missing_ok=True)
     except OSError:
         pass
-

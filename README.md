@@ -44,7 +44,7 @@ Available both as a fast **Python CLI suite** and as a native **Tauri v2 Desktop
 * **High-Efficiency Opus Conversion**: Transcodes audio to high-quality Opus with customizable bitrates (e.g. `128k`, `192k`) and compression complexity (`0`–`10`, default: `9`).
 
 ### Font Registry & Asset Deduplication
-* **True Type / OpenType Magic Byte Inspection**: Sniffs attachment MIME types and font headers (`OTTO`, `\x00\x01\x00\x00`, `ttcf`, `wOFF`, `wOF2`) to reliably extract embedded fonts.
+* **Embedded Font Detection**: Identifies font attachments from supported filename extensions and mkvmerge content types before transactional extraction and deduplication.
 * **Font Table Deduplication**: Deduplicates fonts across entire seasons by full font name and content hash to eliminate redundant font copies.
 * **Chapter & Cover Art Preservation**: Automatically extracts and embeds XML chapter definitions and front cover art (`cover.jpg`, `cover.png`, `folder.jpg`).
 
@@ -131,8 +131,8 @@ python mkv_extract.py --input-dir "D:/Anime/Series" --dry-run
 Re-mux anime episodes with extracted subtitles, external chapter XMLs, covers, and attached fonts:
 
 ```bash
-# High-throughput remuxing with Opus audio encoding (192k, complexity 9)
-python mkv_remux.py --input-dir "D:/Anime/Series" --out-dir "D:/Anime/Remuxed" --fonts-dir "D:/Fonts" --bitrate 192k --complexity 9 --workers 4 --io-jobs 2
+# High-throughput remuxing with Opus audio encoding (192k, complexity 10)
+python mkv_remux.py --input-dir "D:/Anime/Series" --out-dir "D:/Anime/Remuxed" --fonts-dir "D:/Fonts" --bitrate 192k --complexity 10 --workers 4 --io-jobs 2
 
 # Remux using external assets from a prior extraction directory
 python mkv_remux.py --input-dir "D:/Anime/Raw" --assets-dir "D:/Anime/Extracted" --out-dir "D:/Anime/Output"
@@ -152,15 +152,17 @@ python mkv_remux.py --input-dir "D:/Anime/Series" --dry-run
 | `--out-dir` | `extract`, `remux` | Output directory for finished files | Extract: `<input-dir>`<br>Remux: `<input-dir>/Output` |
 | `--fonts-dir` | `extract`, `remux` | Explicit font directory override | Auto-detected (`fonts/`, `attachments/`) |
 | `--assets-dir` | `remux` | Fallback directory to search for subtitles, chapters, covers, or fonts | `None` |
-| `--workers` | `extract`, `remux` | Maximum concurrent files to process (`1`–`32`) | Auto (CPU count, max `16`) |
+| `--workers` | `extract`, `remux` | Maximum concurrent files to process (`1`–`64`) | Auto (CPU count, max `64`) |
 | `--io-jobs` | `extract`, `remux` | Maximum concurrent disk I/O operations (`0` to disable throttling) | `2` |
 | `--sub-offset` | `extract`, `remux` | Shift subtitle timestamps in seconds (negative = earlier, positive = later) | `0.0` |
 | `--bitrate` | `remux` | Target bitrate for Opus audio conversion (e.g. `128k`, `192k`) | `192k` |
-| `--complexity` | `remux` | Opus audio compression complexity level (`0`–`10`) | `9` |
+| `--complexity` | `remux` | Opus audio compression complexity level (`0`–`10`) | `10` |
 | `--keep-fonts` | `remux` | Keep temporary extracted fonts directory after remuxing | `False` |
 | `--dry-run` | `extract`, `remux` | Preview discovered files and track plans without writing files | `False` |
+| `--events` | `extract`, `remux` | Emit structured machine-readable JSON events (`@event: {...}`) on stdout | `False` |
+| `--plan` | `remux` | Output inspection manifest JSON for directory without executing | `False` |
 | `--no-cache` | `extract`, `remux` | Bypass the persistent MKV probe inspect cache | `False` |
-| `--clear-cache` | `extract`, `remux` | Clear all entries in `.mkv_inspect_cache.json` before running | `False` |
+| `--clear-cache` | `extract`, `remux` | Clear `.mkv_inspect_cache.json` and exit without processing files | `False` |
 
 ### 4. Interactive Windows Launchers
 
@@ -240,7 +242,7 @@ cargo tauri build --config tauri.linux.conf.json --bundles appimage,deb,rpm
 ┌─────────────────────────────────────────────────────────────┐
 │                      mkv_common.py                          │
 ├─────────────────────────────────────────────────────────────┤
-│  • FontRegistry (MIME Sniffing & OpenType Table Parsing)    │
+│  • FontManager (Transactional Deduplication & Promotion)    │
 │  • PersistentInspectCache (Thread-safe JSON Probe Cache)    │
 │  • 10-Tier Audio Picker & Commentary Exclusion              │
 │  • Subtitle Scorer (Indonesian / English & ASS / SRT)       │

@@ -7,6 +7,7 @@ import pytest
 
 mkv_common = importlib.import_module("mkv_common")
 mkv_remux = importlib.import_module("mkv_remux")
+mkv_assets = importlib.import_module("mkv_assets")
 
 
 @pytest.mark.parametrize("common_mod", [
@@ -70,7 +71,7 @@ class TestAssetIndices:
 
         parsed_file = common_mod._create_parsed_file(xml_path)
 
-        chap_idx = remux_mod.ChapterIndex()
+        chap_idx = mkv_assets.ChapterIndex()
         chap_idx.add(parsed_file)
 
         match = chap_idx.lookup("E", "01", "1")
@@ -82,7 +83,7 @@ class TestAssetIndices:
 
         parsed_file = common_mod._create_parsed_file(cover_path)
 
-        cover_idx = remux_mod.CoverIndex()
+        cover_idx = mkv_assets.CoverIndex()
         cover_idx.add(parsed_file)
 
         match = cover_idx.lookup("E", "05", "")
@@ -95,7 +96,7 @@ class TestAssetIndices:
 
         parsed_file = common_mod._create_parsed_file(cover_path)
 
-        cover_idx = remux_mod.CoverIndex()
+        cover_idx = mkv_assets.CoverIndex()
         cover_idx.add(parsed_file)
 
         match = cover_idx.lookup("E", "01", "")
@@ -109,17 +110,23 @@ class TestAssetIndices:
         fallback_cover = tmp_path / "fallback_cover.jpg"
         fallback_cover.touch()
 
-        cover_idx = remux_mod.CoverIndex()
+        cover_idx = mkv_assets.CoverIndex()
         cover_idx.add(common_mod._create_parsed_file(local_cover))
 
-        fallback_idx = remux_mod.CoverIndex()
+        fallback_idx = mkv_assets.CoverIndex()
         fallback_idx.add(common_mod._create_parsed_file(fallback_cover))
 
         parsed = ("1", "E", "01")
-        result = remux_mod._resolve_cover(
-            parsed, cover_idx,
-            has_source_cover=True,
+        resolver = mkv_assets.AssetResolver(
+            fonts=common_mod.FontInfo(args=(), count=0),
+            sub_index=mkv_assets.SubIndex(),
+            chap_index=mkv_assets.ChapterIndex(),
+            cover_index=cover_idx,
             fallback_cover_index=fallback_idx,
+        )
+        result = resolver._resolve_cov(
+            parsed,
+            has_source_cover=True,
         )
         assert result == local_cover
 
@@ -128,15 +135,21 @@ class TestAssetIndices:
         fallback_cover = tmp_path / "cover.jpg"
         fallback_cover.touch()
 
-        cover_idx = remux_mod.CoverIndex()
-        fallback_idx = remux_mod.CoverIndex()
+        cover_idx = mkv_assets.CoverIndex()
+        fallback_idx = mkv_assets.CoverIndex()
         fallback_idx.add(common_mod._create_parsed_file(fallback_cover))
 
         parsed = ("1", "E", "01")
-        result = remux_mod._resolve_cover(
-            parsed, cover_idx,
-            has_source_cover=True,
+        resolver = mkv_assets.AssetResolver(
+            fonts=common_mod.FontInfo(args=(), count=0),
+            sub_index=mkv_assets.SubIndex(),
+            chap_index=mkv_assets.ChapterIndex(),
+            cover_index=cover_idx,
             fallback_cover_index=fallback_idx,
+        )
+        result = resolver._resolve_cov(
+            parsed,
+            has_source_cover=True,
         )
         assert result is None
 
@@ -145,14 +158,20 @@ class TestAssetIndices:
         fallback_cover = tmp_path / "cover.jpg"
         fallback_cover.touch()
 
-        cover_idx = remux_mod.CoverIndex()
-        fallback_idx = remux_mod.CoverIndex()
+        cover_idx = mkv_assets.CoverIndex()
+        fallback_idx = mkv_assets.CoverIndex()
         fallback_idx.add(common_mod._create_parsed_file(fallback_cover))
 
         parsed = ("1", "E", "01")
-        result = remux_mod._resolve_cover(
-            parsed, cover_idx,
-            has_source_cover=False,
+        resolver = mkv_assets.AssetResolver(
+            fonts=common_mod.FontInfo(args=(), count=0),
+            sub_index=mkv_assets.SubIndex(),
+            chap_index=mkv_assets.ChapterIndex(),
+            cover_index=cover_idx,
             fallback_cover_index=fallback_idx,
+        )
+        result = resolver._resolve_cov(
+            parsed,
+            has_source_cover=False,
         )
         assert result == fallback_cover

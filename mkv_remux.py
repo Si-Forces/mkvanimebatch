@@ -18,6 +18,7 @@ NOTE: Concurrent invocations on the same output tree are unsupported.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import re
@@ -32,40 +33,37 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from mkv_assets import (
+    AssetResolver,
+)
 from mkv_common import (
     COVER_MIME,
     DEFAULT_WORKER_MULTIPLIER,
-    FONT_MIME,
-    LANG_LABEL,
-    LANG_MKV_TAG,
     MAX_DEFAULT_WORKERS,
     SUBPROCESS_TIMEOUT,
-    SUBTITLE_LANGS_FALLBACK,
-    SUBTITLE_LANGS_PRIMARY,
-    EpisodeInfo,
+    FontInfo,
     ParsedFile,
     PersistentInspectCache,
     ScanResults,
     acquire_semaphore,
+    ancestor_dirs,
     check_dependencies,
-    detect_sub_lang,
+    emit_event,
     ep_type_label,
     find_fonts_dir,
+    get_item_id,
     has_chapters,
-    has_cover,
     inspect_videos,
-    is_chapter_xml,
-    is_cover_filename,
     is_dialogue_track,
     natural_sort_key,
     output_stem,
     parse_attachments,
-    parse_episode,
     resolve_output_dir,
     run_subprocess,
     scan_assets,
     scan_mkv_files,
-    select_best_subtitle_track,
+    seasons_match,  # noqa: F401 - compatibility re-export
+    set_events_enabled,
     setup_logging,
 )
 
@@ -73,6 +71,8 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 
 # Initialize child logger for the remux module
 logger = logging.getLogger("mkv_automation.remux")
+
+_ancestor_dirs = ancestor_dirs
 
 
 # ─── TRACK SELECTOR ──────────────────────────────────────────────────────────
@@ -92,46 +92,54 @@ class TrackSelection:
 
 
 def select_tracks(json_data: dict) -> TrackSelection:
-    tracks           = json_data.get("tracks") or []
+    tracks = json_data.get("tracks") or []
     has_src_chapters = has_chapters(json_data)
-    attachments      = json_data.get("attachments") or []
+    attachments = json_data.get("attachments") or []
 
     cover, font_attachments = parse_attachments(attachments)
     source_cover_id = int(cover["id"]) if cover and cover.get("id") is not None else None
     source_font_ids = [int(a["id"]) for a in font_attachments if a.get("id") is not None]
 
-    video_id  = None
+    video_id = None
     video_pos = -1
     audio_tracks: list[dict] = []
     audio_idx_counter = 0
 
-    for i, t in enumerate(tracks):
-        if t.get("type") == "video" and video_id is None:
-            video_id  = t.get("id")
+    for i, track in enumerate(tracks):
+        if track.get("type") == "video" and video_id is None:
+            video_id = track.get("id")
             video_pos = i
-        elif t.get("type") == "audio":
-            p = t.get("properties") or {}
+        elif track.get("type") == "audio":
+            props = track.get("properties") or {}
             audio_tracks.append({
-                "id":       t.get("id"),
-                "pos":      i,
+                "id": track.get("id"),
+                "pos": i,
                 "audio_idx": audio_idx_counter,
-                "lang":     p.get("language") or "",
-                "name":     p.get("track_name") or "",
-                "channels": p.get("audio_channels") or 0,
-                "codec":    (p.get("codec_id") or "").upper(),
+                "lang": props.get("language") or "",
+                "name": props.get("track_name") or "",
+                "channels": props.get("audio_channels") or 0,
+                "codec": (props.get("codec_id") or "").upper(),
             })
             audio_idx_counter += 1
 
     audio, reason = _pick_audio(audio_tracks, video_pos)
+    audio = audio or {
+        "id": None,
+        "audio_idx": 0,
+        "codec": "",
+        "channels": 0,
+        "lang": "",
+        "name": "",
+    }
 
     return TrackSelection(
         video_id=video_id,
-        audio_id=audio["id"] if audio else None,
-        audio_index=audio["audio_idx"] if audio else 0,
-        audio_codec=audio["codec"] if audio else "",
-        audio_channels=audio["channels"] if audio else 0,
-        audio_lang=audio["lang"] if audio else "",
-        audio_name=audio["name"] if audio else "",
+        audio_id=audio["id"],
+        audio_index=audio["audio_idx"],
+        audio_codec=audio["codec"],
+        audio_channels=audio["channels"],
+        audio_lang=audio["lang"],
+        audio_name=audio["name"],
         audio_reason=reason,
         has_source_chapters=has_src_chapters,
         source_cover_id=source_cover_id,
@@ -148,7 +156,7 @@ def _pick_audio(audio_tracks: list[dict], video_pos: int) -> tuple[dict | None, 
         return None, ""
 
     # Separate into primary (no commentary) and fallback (commentary allowed) pools
-    primary_tracks = [a for a in audio_tracks if not _COMMENTARY_RE.search(a["name"])]
+    primary_tracks = [track for track in audio_tracks if not _COMMENTARY_RE.search(track["name"])]
     if primary_tracks:
         pool_to_use = primary_tracks
         is_fallback_pool = False
@@ -157,11 +165,11 @@ def _pick_audio(audio_tracks: list[dict], video_pos: int) -> tuple[dict | None, 
         is_fallback_pool = True
 
     candidates = []
-    for a in pool_to_use:
-        is_ja = a["lang"].startswith(("ja", "jpn"))
-        is_und = (a["lang"] == "und")
-        is_stereo = (a["channels"] == 2)
-        is_diag = is_dialogue_track(a["name"])
+    for track in pool_to_use:
+        is_ja = track["lang"].startswith(("ja", "jpn"))
+        is_und = (track["lang"] == "und")
+        is_stereo = (track["channels"] == 2)
+        is_diag = is_dialogue_track(track["name"])
 
         score = 0
         if is_ja and is_stereo and is_diag:
@@ -178,16 +186,16 @@ def _pick_audio(audio_tracks: list[dict], video_pos: int) -> tuple[dict | None, 
             score = 5
         elif is_stereo:
             score = 4
-        elif a["pos"] > video_pos:
+        elif track["pos"] > video_pos:
             score = 3
 
         if score == 0:
             score = 2 if is_ja else 1
 
-        priority_key = (score, -a["pos"])
-        candidates.append((priority_key, a))
+        priority_key = (score, -track["pos"])
+        candidates.append((priority_key, track))
 
-    best_candidate = max(candidates, key=lambda c: c[0])
+    best_candidate = max(candidates, key=lambda candidate: candidate[0])
     priority_key, best_track = best_candidate
     score = priority_key[0]
 
@@ -216,12 +224,6 @@ def log_skip(video_name: str, reason: str) -> None:
     logger.warning("SKIPPED: %s | Reason: %s", video_name, reason)
 
 
-def seasons_match(mkv_season: str, sub_season: str) -> bool:
-    if not mkv_season or not sub_season:
-        return True
-    return mkv_season == sub_season
-
-
 def mkv_success(result) -> bool:
     return result.returncode <= 1
 
@@ -231,252 +233,21 @@ def is_completed_output(path: Path) -> bool:
     return path.is_file() and path.stat().st_size > 0
 
 
-
-def _ancestor_dirs(mkv_dir: Path, root_input_dir: Path) -> list[Path]:
-    """
-    Return every directory on the path from root_input_dir down to mkv_dir,
-    inclusive of both endpoints.  If mkv_dir is not under root_input_dir the
-    list contains only mkv_dir.
-
-    Example: root=Root/, mkv_dir=Root/Season1/Arc/ → [Root/, Root/Season1/, Root/Season1/Arc/]
-    """
-    try:
-        rel = mkv_dir.relative_to(root_input_dir)
-    except ValueError:
-        return [mkv_dir]
-    return [root_input_dir, *(root_input_dir / Path(*rel.parts[:i]) for i in range(1, len(rel.parts) + 1))]
-
-
-# ─── FONT SCANNING ───────────────────────────────────────────────────────────
-@dataclass(frozen=True)
-class FontInfo:
-    args:  tuple[str, ...]
-    count: int
-
-
-def scan_fonts(fonts_dir: Path) -> FontInfo:
-    font_args: list[str] = []
-    count = 0
-    if not fonts_dir.is_dir():
-        return FontInfo(args=(), count=0)
-
-    try:
-        entries = []
-        with os.scandir(str(fonts_dir)) as it:
-            for entry in it:
-                if entry.is_file():
-                    entries.append(entry)
-        entries.sort(key=lambda e: natural_sort_key(e.name))
-        for entry in entries:
-            suffix = Path(entry.name).suffix.lower()
-            mime = FONT_MIME.get(suffix)
-            if not mime:
-                continue
-            font_args += ["--attachment-mime-type", mime, "--attach-file", entry.path]
-            count += 1
-    except OSError:
-        pass
-    return FontInfo(args=tuple(font_args), count=count)
-
-
-# ─── INDEX CLASSES (Subtitles, Chapters, Covers) ─────────────────────────────
-class SubIndex:
-    def __init__(self) -> None:
-        self._index: dict[str, list[ParsedFile]] = {}
-        self._seen: set[tuple[str, str, str, str]] = set()
-
-    def add(self, sub_file: ParsedFile) -> None:
-        if not sub_file.parsed:
-            return
-        season, ep_type, ep = sub_file.parsed
-        lang = detect_sub_lang(sub_file.stem)
-        suffix = sub_file.path.suffix.lower()
-        key = f"{ep_type}|{ep}"
-        seen_key = (key, season, lang, suffix)
-
-        if seen_key in self._seen:
-            for f in self._index.get(key, []):
-                if f.parsed is not None and f.parsed[0] == season and detect_sub_lang(f.stem) == lang and f.path.suffix.lower() == suffix:
-                    if f.path.parent == sub_file.path.parent:
-                        logger.warning("Duplicate subtitle for key %s (lang %s, suffix %s) in '%s': keeping '%s', ignoring '%s'", key, lang, suffix, sub_file.path.parent.name, f.name, sub_file.name)
-                    break
-            return
-
-        self._seen.add(seen_key)
-        self._index.setdefault(key, []).append(sub_file)
-
-    def lookup(self, ep_type: str, ep: str, mkv_season: str) -> tuple[Path, str] | None:
-        key = f"{ep_type}|{ep}"
-        candidates = []
-        for f in self._index.get(key, ()):
-            if f.parsed is not None and seasons_match(mkv_season, f.parsed[0]):
-                candidates.append(f)
-
-        if not candidates:
-            return None
-
-        # Build mock tracks list for select_best_subtitle_track
-        tracks = []
-        for idx, f in enumerate(candidates):
-            lang = detect_sub_lang(f.stem)
-            codec_id = "s_text/ass" if f.path.suffix.lower() == ".ass" else "s_text/utf8"
-            tracks.append({
-                "id": idx,
-                "type": "subtitles",
-                "properties": {
-                    "codec_id": codec_id,
-                    "language": lang,
-                    "track_name": f.stem,
-                }
-            })
-
-        result = select_best_subtitle_track(tracks)
-        if result is not None:
-            idx, lang, _ = result
-            return candidates[idx].path, lang
-
-        return None
-
-    @property
-    def indexed_count(self) -> int: return sum(len(lst) for lst in self._index.values())
-
-    def _count_by_lang(self, lang_set: frozenset[str]) -> int:
-        return sum(
-            1
-            for lst in self._index.values()
-            for f in lst
-            if detect_sub_lang(f.stem) in lang_set
-        )
-
-    @property
-    def primary_count(self) -> int:
-        return self._count_by_lang(SUBTITLE_LANGS_PRIMARY)
-
-    @property
-    def fallback_count(self) -> int:
-        return self._count_by_lang(SUBTITLE_LANGS_FALLBACK)
-
-
-class ChapterIndex:
-    def __init__(self) -> None:
-        self._index:     dict[str, list[tuple[Path, str]]] = {}
-        self._unmatched: list[Path] = []
-        self._rejected = 0
-
-    def add(self, xml_file: ParsedFile) -> None:
-        if not is_chapter_xml(xml_file.path):
-            self._rejected += 1
-            return
-        parsed = xml_file.parsed
-        if parsed:
-            season, ep_type, ep = parsed
-            key = f"{ep_type}|{ep}"
-            existing = self._index.setdefault(key, [])
-            for path, s in existing:
-                if s == season:
-                    if path.parent == xml_file.path.parent:
-                        logger.warning("Duplicate chapter file for key %s in '%s': keeping '%s', ignoring '%s'", key, xml_file.path.parent.name, path.name, xml_file.name)
-                    return
-            existing.append((xml_file.path, season))
-        else:
-            self._unmatched.append(xml_file.path)
-
-    def lookup(self, ep_type: str, ep: str, mkv_season: str) -> Path | None:
-        key = f"{ep_type}|{ep}"
-        if key in self._index:
-            for path, season in self._index[key]:
-                if seasons_match(mkv_season, season):
-                    return path
-        return None
-
-    def has_match(self, ep_type: str, ep: str, season: str) -> bool:
-        key = f"{ep_type}|{ep}"
-        if key not in self._index:
-            return False
-        return any(seasons_match(season, s) for _, s in self._index[key])
-
-    @property
-    def indexed_count(self) -> int:  return sum(len(lst) for lst in self._index.values())
-    @property
-    def rejected_count(self) -> int: return self._rejected
-    @property
-    def unmatched(self) -> list[Path]: return list(self._unmatched)
-
-
-_COVER_FILE_RE = re.compile(r'^(?P<stem>.+)_cover$', re.IGNORECASE)
-
-
-class CoverIndex:
-    def __init__(self) -> None:
-        self._index: dict[str, list[tuple[Path, str]]] = {}
-        self._global: Path | None = None
-
-    def add(self, image_file: ParsedFile) -> None:
-        stem = image_file.stem
-        is_global = False
-        parsed = None
-
-        if is_cover_filename(image_file.name):
-            is_global = True
-        else:
-            m = _COVER_FILE_RE.match(stem)
-            if m:
-                parsed = parse_episode(m.group("stem"))
-                if not parsed:
-                    is_global = True
-            else:
-                return
-
-        if is_global:
-            if self._global is None:
-                self._global = image_file.path
-            elif self._global.parent == image_file.path.parent:
-                logger.warning("Duplicate global cover in '%s': keeping '%s', ignoring '%s'", image_file.path.parent.name, self._global.name, image_file.name)
-            return
-
-        if parsed is None:
-            return
-        season, ep_type, ep = parsed
-        key = f"{ep_type}|{ep}"
-        existing = self._index.setdefault(key, [])
-        for path, s in existing:
-            if s == season:
-                if path.parent == image_file.path.parent:
-                    logger.warning("Duplicate cover image for key %s in '%s': keeping '%s', ignoring '%s'", key, image_file.path.parent.name, path.name, image_file.name)
-                return
-        existing.append((image_file.path, season))
-
-    def lookup(self, ep_type: str, ep: str, mkv_season: str) -> Path | None:
-        key = f"{ep_type}|{ep}"
-        if key in self._index:
-            for path, season in self._index[key]:
-                if seasons_match(mkv_season, season):
-                    return path
-        return self._global
-
-    @property
-    def indexed_count(self) -> int: return sum(len(lst) for lst in self._index.values())
-    @property
-    def has_global(self) -> bool:   return self._global is not None
-
-
-
-
-
-# ─── JOB PLANNING ────────────────────────────────────────────────────────────
+# ─── JOB MODEL ───────────────────────────────────────────────────────────────
 @dataclass
 class PlannedJob:
-    video:              Path
-    video_name:         str
-    base:               str
-    output_file:        Path
-    subtitle_file:      Path | None
-    subtitle_label:     str
-    subtitle_mkv_lang:  str
-    chapter_file:       Path | None
-    cover_file:         Path | None
-    embedded_sub_id:    int | None  = None
-    use_source_fonts:   bool        = False
+    video:             Path
+    video_name:        str
+    base:              str
+    output_file:       Path
+    subtitle_file:     Path | None
+    subtitle_label:    str
+    subtitle_mkv_lang: str
+    chapter_file:      Path | None
+    cover_file:        Path | None
+    embedded_sub_id:   int | None = None
+    use_source_fonts:  bool = False
+    item_id:           str = ""
 
 
 @dataclass
@@ -487,114 +258,124 @@ class JobResult:
 
 # ─── AUDIO CONVERSION ────────────────────────────────────────────────────────
 def _convert_flac_to_opus(
-    video: Path, audio_id: int, audio_index: int, temp_dir: Path,
-    base: str, opus_bitrate: str, log: list[str], ffmpeg_threads: int,
-    complexity: int = 9,
+    video: Path,
+    audio_index: int,
+    temp_dir: Path,
+    base: str,
+    opus_bitrate: str,
+    log: list[str] | None = None,
+    ffmpeg_threads: int = 2,
+    complexity: int = 10,
 ) -> Path | None:
-    """Convert FLAC audio to Opus. Returns temp opus path or None on failure."""
+    if log is not None:
+        log.append(f"  Converting FLAC audio -> Opus ({opus_bitrate})...")
     unique_id = uuid.uuid4().hex[:8]
-    temp_opus = temp_dir / f"{base}_{unique_id}_audio.opus"
-    log.append(f"  FLAC detected — converting to Opus {opus_bitrate} via ffmpeg...")
+    temp_opus = temp_dir / f"{base}_{unique_id}.opus"
 
     cmd = [
-        "ffmpeg", "-y", "-nostdin",
-        "-analyzeduration", "0", "-probesize", "1M",
+        "ffmpeg", "-y",
+        "-analyzeduration", "0",
+        "-probesize", "1M",
+        "-v", "warning",
         "-threads", str(ffmpeg_threads),
         "-i", str(video),
         "-map", f"0:a:{audio_index}",
-        "-vn", "-c:a", "libopus",
+        "-c:a", "libopus",
         "-b:a", opus_bitrate,
         "-vbr", "on",
-        "-application", "audio",
         "-compression_level", str(complexity),
+        "-application", "audio",
         str(temp_opus),
     ]
 
     try:
-        result = run_subprocess(cmd, capture_stdout=False, timeout=SUBPROCESS_TIMEOUT)
+        run_res = run_subprocess(cmd, timeout=SUBPROCESS_TIMEOUT)
     except subprocess.TimeoutExpired:
-        log.append(f"  ERROR (ffmpeg): conversion timed out after {SUBPROCESS_TIMEOUT}s.")
+        if log is not None:
+            log.append(f"  ERROR: ffmpeg FLAC→Opus conversion timed out after {SUBPROCESS_TIMEOUT}s.")
         temp_opus.unlink(missing_ok=True)
         return None
-    if result.returncode != 0:
-        log.append(f"  WARNING (ffmpeg): {result.stderr.strip()}")
+
+    if run_res.returncode != 0:
+        if log is not None:
+            log.append(f"  ERROR: ffmpeg audio conversion failed (exit {run_res.returncode}): {run_res.stderr.strip()}")
         temp_opus.unlink(missing_ok=True)
         return None
-    log.append(f"  Conversion done: {temp_opus.name}")
+
+    if log is not None:
+        log.append("  Audio conversion done.")
     return temp_opus
 
 
-# ─── MKVMERGE ARGUMENT BUILDING ──────────────────────────────────────────────
+# ─── MKVMERGE ARGS BUILDER ───────────────────────────────────────────────────
 def _build_mkvmerge_args(
-    job: PlannedJob, tr: TrackSelection,
-    temp_opus: Path | None, fonts: FontInfo,
+    job: PlannedJob,
+    selection: TrackSelection,
+    temp_opus: Path | None,
+    fonts: FontInfo,
     output_path: Path,
     sub_offset: float = 0.0,
 ) -> list[str]:
-    """Construct the mkvmerge argument list for a planned job."""
-    args: list[str] = ["-o", str(output_path),
-                       "--video-tracks", str(tr.video_id)]
-
-    keep_source_cover = job.cover_file is None and tr.source_cover_id is not None
-    keep_attachment_ids: list[int] = []
-    if job.use_source_fonts:
-        keep_attachment_ids += tr.source_font_ids
-    if keep_source_cover and tr.source_cover_id is not None:
-        keep_attachment_ids.append(tr.source_cover_id)
-
-    if keep_attachment_ids:
-        args += ["--attachments", ",".join(str(i) for i in keep_attachment_ids)]
-    else:
-        args.append("--no-attachments")
-
-    if job.embedded_sub_id is not None:
-        if sub_offset != 0.0:
-            sync_ms = round(sub_offset * 1000)
-            args += ["--sync", f"{job.embedded_sub_id}:{sync_ms}"]
-        args += ["--subtitle-tracks", str(job.embedded_sub_id),
-                 "--default-track-flag", f"{job.embedded_sub_id}:yes"]
-    else:
-        args.append("--no-subtitles")
+    args: list[str] = ["-o", str(output_path)]
 
     if job.chapter_file:
-        args.append("--no-chapters")
+        args += ["--no-chapters"]
 
-    if tr.audio_id is not None and temp_opus is None:
-        args += ["--audio-tracks", str(tr.audio_id)]
+    if job.subtitle_file is None and job.embedded_sub_id is not None:
+        args += ["--subtitle-tracks", str(job.embedded_sub_id)]
     else:
-        args.append("--no-audio")
+        args += ["--no-subtitles"]
+
+    if temp_opus is None and selection.audio_id is not None:
+        args += ["--audio-tracks", str(selection.audio_id)]
+    else:
+        args += ["--no-audio"]
+
+    keep_ids: list[int] = []
+    if not job.cover_file and selection.source_cover_id is not None:
+        keep_ids.append(selection.source_cover_id)
+    if job.use_source_fonts:
+        keep_ids.extend(selection.source_font_ids)
+    args += ["--attachments", ",".join(map(str, keep_ids))] if keep_ids else ["--no-attachments"]
+
+    if selection.video_id is not None:
+        args += ["--video-tracks", str(selection.video_id)]
+    else:
+        args += ["--no-video"]
 
     args.append(str(job.video))
 
     if temp_opus is not None:
-        track_lang = tr.audio_lang or "und"
-        track_name = tr.audio_name or "Audio"
-        args += ["--no-chapters",
-                 "--language", f"0:{track_lang}",
-                 "--track-name", f"0:{track_name}",
-                 str(temp_opus)]
+        args += ["--no-chapters"]
+        if selection.audio_lang:
+            args += ["--language", f"0:{selection.audio_lang}"]
+        if selection.audio_name:
+            args += ["--track-name", f"0:{selection.audio_name}"]
+        args.append(str(temp_opus))
 
-    if job.subtitle_file is not None:
+    if job.subtitle_file:
         if sub_offset != 0.0:
-            sync_ms = round(sub_offset * 1000)
-            args += ["--sync", f"0:{sync_ms}"]
-        args += ["--language", f"0:{job.subtitle_mkv_lang}",
-                 "--track-name", f"0:{job.subtitle_label}",
-                 "--default-track-flag", "0:yes",
-                 str(job.subtitle_file)]
-
-    if fonts.args:
-        args.extend(fonts.args)
-
-    if job.cover_file:
-        cover_mime = COVER_MIME.get(job.cover_file.suffix.lower(), "image/jpeg")
-        args += ["--attachment-name", f"cover{job.cover_file.suffix.lower()}",
-                 "--attachment-mime-type", cover_mime,
-                 "--attach-file", str(job.cover_file)]
+            offset_ms = round(sub_offset * 1000)
+            args += ["--sync", f"0:{offset_ms}"]
+        args += [
+            "--language", f"0:{job.subtitle_mkv_lang}",
+            "--track-name", f"0:{job.subtitle_label}",
+            "--default-track-flag", "0:yes",
+        ]
+        args.append(str(job.subtitle_file))
 
     if job.chapter_file:
         args += ["--chapters", str(job.chapter_file)]
 
+    if job.cover_file:
+        mime = COVER_MIME.get(job.cover_file.suffix.lower(), "image/jpeg")
+        args += [
+            "--attachment-name", "cover" + job.cover_file.suffix.lower(),
+            "--attachment-mime-type", mime,
+            "--attach-file", str(job.cover_file),
+        ]
+
+    args += list(fonts.args)
     return args
 
 
@@ -606,305 +387,174 @@ def process_job(
     complexity: int = 10,
     sub_offset: float = 0.0,
 ) -> JobResult:
-    r = JobResult()
+    result = JobResult()
     video, video_name, base = job.video, job.video_name, job.base
     output_file = job.output_file
     temp_opus: Path | None = None
 
-    r.log.append(f"Processing: {video_name}")
-    r.log.append("  Inspecting tracks...")
+    emit_event("item_start", item_id=job.item_id, file=video_name)
+
+    result.log.append(f"Processing: {video_name}")
+    result.log.append("  Inspecting tracks...")
+
+    def _skip(reason: str, detail: str) -> JobResult:
+        result.log.append(f"  !! SKIPPED: {video_name}")
+        result.log.append(f"  !! Reason : {detail}")
+        result.skipped_reason = reason
+        emit_event("item_complete", item_id=job.item_id, file=video_name, status="skipped", reason=reason)
+        return result
 
     json_data = json_cache.get(video)
     if json_data is None:
-        r.log.append(f"  !! SKIPPED: {video_name}")
-        r.log.append("  !! Reason : mkvmerge inspection failed.")
-        r.skipped_reason = "mkvmerge failed"
-        return r
+        return _skip("mkvmerge failed", "mkvmerge inspection failed.")
 
-    tr = select_tracks(json_data)
+    selection = select_tracks(json_data)
 
-    if tr.video_id is None:
-        r.log.append(f"  !! SKIPPED: {video_name}")
-        r.log.append("  !! Reason : No video track found.")
-        r.skipped_reason = "no video track"
-        return r
+    if selection.video_id is None:
+        return _skip("no video track", "No video track found.")
 
-    if tr.audio_id is not None:
-        r.log.append(
-            f"  Audio          : {tr.audio_reason} "
-            f"(Track ID: {tr.audio_id}, codec: {tr.audio_codec}, "
-            f"channels: {tr.audio_channels})"
+    if selection.audio_id is not None:
+        result.log.append(
+            f"  Audio          : {selection.audio_reason} "
+            f"(Track ID: {selection.audio_id}, codec: {selection.audio_codec}, "
+            f"channels: {selection.audio_channels})"
         )
     else:
-        r.log.append("  WARNING: No audio tracks found.")
-    r.log.append(f"  Video Track ID : {tr.video_id}")
-    r.log.append(f"  External fonts : {fonts.count}")
+        result.log.append("  WARNING: No audio tracks found.")
+    result.log.append(f"  Video Track ID : {selection.video_id}")
+    result.log.append(f"  External fonts : {fonts.count}")
     if job.embedded_sub_id is not None:
-        r.log.append(f"  Subtitle       : embedded track {job.embedded_sub_id} (from source)")
+        result.log.append(f"  Subtitle       : embedded track {job.embedded_sub_id} (from source)")
     elif job.subtitle_file is not None:
-        r.log.append(f"  Subtitle       : {job.subtitle_file.name} (external)")
+        result.log.append(f"  Subtitle       : {job.subtitle_file.name} (external)")
     if sub_offset != 0.0:
-        r.log.append(f"  Sub Offset     : {sub_offset:+.2f}s")
+        result.log.append(f"  Sub Offset     : {sub_offset:+.2f}s")
     if job.use_source_fonts:
-        r.log.append("  Font source    : using source's embedded fonts (no external fonts)")
+        result.log.append("  Font source    : using source's embedded fonts (no external fonts)")
 
     try:
-        needs_conversion = tr.audio_id is not None and tr.audio_codec == "A_FLAC"
+        needs_conversion = selection.audio_id is not None and selection.audio_codec == "A_FLAC"
         if needs_conversion:
             if temp_dir is None:
-                r.log.append(f"  !! SKIPPED: {video_name}")
-                r.log.append("  !! Reason : Temporary directory unavailable for FLAC→Opus conversion.")
-                r.skipped_reason = "temp dir unavailable"
-                return r
-            audio_id = tr.audio_id
-            if audio_id is None:
-                r.log.append(f"  !! SKIPPED: {video_name}")
-                r.log.append("  !! Reason : Selected audio track id missing.")
-                r.skipped_reason = "audio id missing"
-                return r
+                return _skip("temp dir unavailable", "Temporary directory unavailable for FLAC→Opus conversion.")
             temp_opus = _convert_flac_to_opus(
-                video,
-                audio_id,
-                tr.audio_index,
-                temp_dir,
-                base,
-                opus_bitrate,
-                r.log,
-                ffmpeg_threads,
+                video=video,
+                audio_index=selection.audio_index,
+                temp_dir=temp_dir,
+                base=base,
+                opus_bitrate=opus_bitrate,
+                log=result.log,
+                ffmpeg_threads=ffmpeg_threads,
                 complexity=complexity,
             )
             if temp_opus is None:
-                r.log.append(f"  !! SKIPPED: {video_name}")
-                r.log.append("  !! Reason : ffmpeg FLAC→Opus conversion failed.")
-                r.skipped_reason = "Opus conversion failed"
-                return r
+                return _skip("Opus conversion failed", "ffmpeg FLAC→Opus conversion failed.")
 
         if job.chapter_file:
-            r.log.append(f"  Chapters       : {job.chapter_file.name} (external)")
-        elif tr.has_source_chapters:
-            r.log.append("  Chapters       : using source's embedded chapters (no external match found)")
+            result.log.append(f"  Chapters       : {job.chapter_file.name} (external)")
+        elif selection.has_source_chapters:
+            result.log.append("  Chapters       : using source's embedded chapters (no external match found)")
         else:
-            r.log.append("  Chapters       : none found in folder or source")
+            result.log.append("  Chapters       : none found in folder or source")
 
         if job.cover_file:
-            r.log.append(f"  Cover          : {job.cover_file.name} (external, attached)")
-        elif job.cover_file is None and tr.source_cover_id is not None:
-            r.log.append("  Cover          : keeping source's embedded cover (no external match found)")
+            result.log.append(f"  Cover          : {job.cover_file.name} (external, attached)")
+        elif selection.source_cover_id is not None:
+            result.log.append("  Cover          : keeping source's embedded cover (no external match found)")
         else:
-            r.log.append("  Cover          : none found in folder or source")
+            result.log.append("  Cover          : none found in folder or source")
 
-        # Determine temporary output destination to prevent corrupted/partial files in case of interruption
         if temp_dir:
             temp_output = temp_dir / job.output_file.name
         else:
             temp_output = job.output_file.with_suffix(".tmp")
 
         temp_output.unlink(missing_ok=True)
-        args = _build_mkvmerge_args(job, tr, temp_opus, fonts, temp_output, sub_offset=sub_offset)
-        r.log.append("  Running mkvmerge...")
+        args = _build_mkvmerge_args(job, selection, temp_opus, fonts, temp_output, sub_offset=sub_offset)
+        result.log.append("  Running mkvmerge...")
 
         try:
             with acquire_semaphore(io_semaphore):
                 run_result = run_subprocess(["mkvmerge", *args], timeout=SUBPROCESS_TIMEOUT)
         except subprocess.TimeoutExpired:
-            r.log.append(f"  ERROR: mkvmerge timed out after {SUBPROCESS_TIMEOUT}s.")
+            result.log.append(f"  ERROR: mkvmerge timed out after {SUBPROCESS_TIMEOUT}s.")
             temp_output.unlink(missing_ok=True)
-            r.log.append("  Removed partial output.")
-            r.skipped_reason = f"mkvmerge timed out after {SUBPROCESS_TIMEOUT}s"
-            return r
+            result.log.append("  Removed partial output.")
+            result.skipped_reason = f"mkvmerge timed out after {SUBPROCESS_TIMEOUT}s"
+            emit_event("item_complete", item_id=job.item_id, file=video_name, status="skipped", reason=result.skipped_reason)
+            return result
 
         if run_result.stderr.strip():
-            r.log.append(f"  WARNING (mkvmerge): {run_result.stderr.strip()}")
+            result.log.append(f"  WARNING (mkvmerge): {run_result.stderr.strip()}")
 
         if not mkv_success(run_result):
-            r.log.append(f"  ERROR: mkvmerge failed (exit {run_result.returncode}).")
+            result.log.append(f"  ERROR: mkvmerge failed (exit {run_result.returncode}).")
             temp_output.unlink(missing_ok=True)
-            r.log.append("  Removed partial output.")
-            r.skipped_reason = f"mkvmerge failed, exit {run_result.returncode}"
-            return r
+            result.log.append("  Removed partial output.")
+            result.skipped_reason = f"mkvmerge failed, exit {run_result.returncode}"
+            emit_event("item_complete", item_id=job.item_id, file=video_name, status="skipped", reason=result.skipped_reason)
+            return result
 
-        # Atomically promote the temp file to the final destination on success
         temp_output.replace(output_file)
-        r.log.append("  Completed successfully.")
+        result.log.append("  Completed successfully.")
+        emit_event("item_complete", item_id=job.item_id, file=video_name, status="completed")
 
     finally:
         if temp_opus is not None:
             temp_opus.unlink(missing_ok=True)
 
-    return r
-
-
-# ─── SUBTITLE/CHAPTER/COVER RESOLVERS ────────────────────────────────────────
-def _resolve_subtitle(
-    video: Path, parsed: EpisodeInfo,
-    sub_index: SubIndex, json_data: dict | None,
-    all_subs: list[Path],
-    dry_run: bool,
-    fallback_sub_index: SubIndex | None = None,
-) -> tuple[Path | None, int | None, str, str, str, bool]:
-    """
-    Returns (subtitle_file, embedded_sub_id, lang, label, mkv_lang, matched).
-    `matched=False` means user chose to skip (or, in dry-run mode, that a
-    real run would prompt for manual selection here).
-
-    The interactive input() prompt is skipped entirely when dry_run=True —
-    dry-run must never block on keyboard input.
-    """
-    mkv_season, mkv_ep_type, mkv_ep = parsed
-    sub_result = sub_index.lookup(mkv_ep_type, mkv_ep, mkv_season)
-
-    subtitle_file:     Path | None = None
-    embedded_sub_id:   int | None  = None
-    subtitle_lang:     str         = "und"
-
-    if sub_result is not None:
-        subtitle_file, subtitle_lang = sub_result
-        if subtitle_lang in SUBTITLE_LANGS_FALLBACK:
-            logger.info("  NOTE: No Indonesian sub found; using English fallback (possible mislabelled fansub).")
-        logger.info("  Subtitle       : %s [%s] (matched)", subtitle_file.name, LANG_LABEL.get(subtitle_lang, subtitle_lang))
-        return (subtitle_file, None, subtitle_lang,
-                LANG_LABEL.get(subtitle_lang, subtitle_lang),
-                LANG_MKV_TAG.get(subtitle_lang, subtitle_lang), True)
-
-    logger.info("  No external subtitle match — checking source for embedded subtitles...")
-    _embedded = select_best_subtitle_track(json_data.get("tracks", [])) if json_data else None
-    if _embedded is not None:
-        embedded_sub_id, subtitle_lang, _ = _embedded
-        if subtitle_lang in SUBTITLE_LANGS_FALLBACK:
-            logger.info("  NOTE: No Indonesian sub in source; using English fallback (possible mislabelled fansub).")
-        logger.info("  Subtitle       : embedded track %d [%s] (from source)", embedded_sub_id, LANG_LABEL.get(subtitle_lang, subtitle_lang))
-        return (None, embedded_sub_id, subtitle_lang,
-                LANG_LABEL.get(subtitle_lang, subtitle_lang),
-                LANG_MKV_TAG.get(subtitle_lang, subtitle_lang), True)
-
-    if fallback_sub_index is not None:
-        fallback_result = fallback_sub_index.lookup(mkv_ep_type, mkv_ep, mkv_season)
-        if fallback_result is not None:
-            subtitle_file, subtitle_lang = fallback_result
-            if subtitle_lang in SUBTITLE_LANGS_FALLBACK:
-                logger.info("  NOTE: No Indonesian sub in fallback; using English fallback.")
-            logger.info("  Subtitle       : %s [%s] (fallback asset)", subtitle_file.name, LANG_LABEL.get(subtitle_lang, subtitle_lang))
-            return (subtitle_file, None, subtitle_lang,
-                    LANG_LABEL.get(subtitle_lang, subtitle_lang),
-                    LANG_MKV_TAG.get(subtitle_lang, subtitle_lang), True)
-
-    logger.warning("No subtitle match found for %s%s (external or embedded).", mkv_ep_type, mkv_ep)
-    if not all_subs or dry_run or not sys.stdin.isatty():
-        if not all_subs:
-            log_skip(video.name, "No .ass files exist in the folder at all.")
-        elif dry_run:
-            logger.info("  DRY RUN: would prompt for manual subtitle selection here (skipped).")
-        elif not sys.stdin.isatty():
-            log_skip(video.name, "Non-interactive environment — skipped manual subtitle selection.")
-        return (None, None, "und", LANG_LABEL["und"], LANG_MKV_TAG["und"], False)
-
-    # Standard interactive shell prints remain for direct command prompts
-    print("  Available subtitles in folder:")
-    for i, sub in enumerate(all_subs):
-        print(f"    [{i + 1}] {sub.name}")
-    print("    [0] Skip this video")
-    choice = input("\n  Type a number to assign a subtitle, or 0 to skip: ").strip()
-
-    if choice.isdigit() and 0 < int(choice) <= len(all_subs):
-        chosen_sub    = all_subs[int(choice) - 1]
-        subtitle_lang = detect_sub_lang(chosen_sub.stem)
-        logger.info("  -> Manually linked: %s", chosen_sub.name)
-        return (chosen_sub, None, subtitle_lang,
-                LANG_LABEL.get(subtitle_lang, subtitle_lang),
-                LANG_MKV_TAG.get(subtitle_lang, subtitle_lang), True)
-
-    log_skip(video.name, "User skipped manual subtitle selection.")
-    return (None, None, "und", LANG_LABEL["und"], LANG_MKV_TAG["und"], False)
-
-
-def _resolve_chapter(
-    parsed: EpisodeInfo,
-    chap_index: ChapterIndex,
-    chap_fallback_count: int,
-    chapter_unmatched_claimed: set[Path],
-    has_source_chapters: bool = False,
-    fallback_chap_index: ChapterIndex | None = None,
-) -> Path | None:
-    mkv_season, mkv_ep_type, mkv_ep = parsed
-    chapter_file = chap_index.lookup(mkv_ep_type, mkv_ep, mkv_season)
-
-    if chapter_file is None and not has_source_chapters and chap_index.unmatched:
-        unclaimed = [f for f in chap_index.unmatched if f not in chapter_unmatched_claimed]
-        if len(unclaimed) == 1 and chap_fallback_count == 1:
-            chapter_file = unclaimed[0]
-            chapter_unmatched_claimed.add(chapter_file)
-            logger.info("  NOTE: Chapter file name had no episode number — claimed as sole leftover match.")
-
-    if chapter_file is None and not has_source_chapters and fallback_chap_index is not None:
-        chapter_file = fallback_chap_index.lookup(mkv_ep_type, mkv_ep, mkv_season)
-        if chapter_file:
-            logger.info("  Chapters       : %s (fallback asset)", chapter_file.name)
-            return chapter_file
-
-    if chapter_file:
-        logger.info("  Chapters       : %s (matched)", chapter_file.name)
-    else:
-        logger.info("  Chapters       : no matching file — will check source's own chapters")
-    return chapter_file
-
-
-def _resolve_cover(
-    parsed: EpisodeInfo, cover_index: CoverIndex,
-    has_source_cover: bool = False,
-    fallback_cover_index: CoverIndex | None = None,
-) -> Path | None:
-    mkv_season, mkv_ep_type, mkv_ep = parsed
-    cover_file = cover_index.lookup(mkv_ep_type, mkv_ep, mkv_season)
-    if cover_file is None and not has_source_cover and fallback_cover_index is not None:
-        cover_file = fallback_cover_index.lookup(mkv_ep_type, mkv_ep, mkv_season)
-        if cover_file:
-            logger.info("  Cover          : %s (fallback asset)", cover_file.name)
-            return cover_file
-    if cover_file:
-        logger.info("  Cover          : %s (matched)", cover_file.name)
-    else:
-        logger.info("  Cover          : no external file — will check source's own cover")
-    return cover_file
+    return result
 
 
 # ─── JOB PLANNING ────────────────────────────────────────────────────────────
 def _plan_jobs(
-    videos:       list[ParsedFile],
-    json_cache:   dict[Path, dict | None],
-    sub_index:    SubIndex,
-    chap_index:   ChapterIndex,
-    cover_index:  CoverIndex,
-    output_dir:   Path,
-    all_subs:     list[Path],
-    use_source_fonts: bool,
-    dry_run:      bool,
-    fallback_sub_index:  SubIndex | None = None,
-    fallback_chap_index: ChapterIndex | None = None,
-    fallback_cover_index: CoverIndex | None = None,
+    videos:           list[ParsedFile],
+    json_cache:       dict[Path, dict | None],
+    resolver:         AssetResolver,
+    output_dir:       Path | None = None,
+    all_subs:         list[Path] | None = None,
+    use_source_fonts: bool = False,
+    dry_run:          bool = False,
+    root_input_dir:   Path | None = None,
 ) -> tuple[list[PlannedJob], list[str], list[str]]:
 
-    parsed_videos = [(v.path, v.parsed) for v in videos]
+    out_dir = output_dir or Path()
+    subs_list = all_subs or []
+    root_dir = root_input_dir or out_dir
 
-    chapter_fallback_count = sum(
-        1 for _, ep in parsed_videos
-        if ep and not chap_index.has_match(ep[1], ep[2], ep[0])
-    )
-    chapter_unmatched_claimed: set[Path] = set()
+    chapter_fallback_count = resolver.count_unmatched_chapter_videos(videos)
 
     skipped_files: list[str] = []
+    skipped_events: list[tuple[ParsedFile, str]] = []
     matched_files: list[str] = []
     jobs: list[PlannedJob] = []
 
-    for video, parsed in parsed_videos:
+    def record_skip(video_file: ParsedFile, reason: str) -> None:
+        skipped_files.append(f"{video_file.name} ({reason})")
+        if not dry_run:
+            emit_event(
+                "item_complete",
+                item_id=get_item_id(video_file.path, root_dir),
+                file=video_file.name,
+                status="skipped",
+                reason=reason,
+            )
+        else:
+            skipped_events.append((video_file, reason))
+
+    for video_file in videos:
+        video = video_file.path
+        parsed = video_file.parsed
         video_name = video.name
         base       = video.stem
+        item_id    = get_item_id(video, root_dir)
 
         logger.info("-" * 60)
         logger.info("Matching: %s", video_name)
 
         if not parsed:
             log_skip(video_name, "Could not extract episode number from filename.")
-            skipped_files.append(f"{video_name} (episode number not found)")
+            record_skip(video_file, "episode number not found")
             continue
 
         mkv_season, mkv_ep_type, mkv_ep = parsed
@@ -912,83 +562,98 @@ def _plan_jobs(
         logger.info("  Episode        : %s %s%s", ep_type_label(mkv_ep_type, long=True), mkv_ep, season_tag)
 
         out_stem    = output_stem(base, mkv_ep_type, mkv_ep)
-        output_file = output_dir / f"{out_stem}.mkv"
+        output_file = out_dir / f"{out_stem}.mkv"
         if is_completed_output(output_file):
             logger.info("  Output already exists. Skipping.")
-            skipped_files.append(f"{video_name} (output already exists)")
+            record_skip(video_file, "output already exists")
             continue
-
-        sub_file, embedded_id, _sub_lang, sub_label, sub_mkv_lang, matched = _resolve_subtitle(
-            video, parsed, sub_index, json_cache.get(video), all_subs, dry_run,
-            fallback_sub_index=fallback_sub_index,
-        )
-        if not matched:
-            skipped_files.append(f"{video_name} (no subtitle matched)")
-            continue
-        if sub_file:
-            matched_files.append(f"{video_name}  <-  {sub_file.name}")
-        elif embedded_id is not None:
-            matched_files.append(f"{video_name}  <-  [embedded track {embedded_id}]")
 
         json_data = json_cache.get(video)
-        has_src_chapters = has_chapters(json_data) if json_data else False
-        has_src_cover = has_cover(json_data) if json_data else False
-
-        chapter_file = _resolve_chapter(
-            parsed, chap_index, chapter_fallback_count, chapter_unmatched_claimed,
-            has_source_chapters=has_src_chapters,
-            fallback_chap_index=fallback_chap_index,
+        res_assets = resolver.resolve_for(
+            video_file,
+            json_data,
+            all_subs=subs_list,
+            dry_run=dry_run,
+            chapter_fallback_count=chapter_fallback_count,
+            interactive=True,
         )
-        if chapter_file:
-            matched_files.append(f"{video_name}  <-  {chapter_file.name} [chapters]")
 
-        cover_file = _resolve_cover(
-            parsed, cover_index,
-            has_source_cover=has_src_cover,
-            fallback_cover_index=fallback_cover_index,
-        )
-        if cover_file:
-            matched_files.append(f"{video_name}  <-  {cover_file.name} [cover]")
+        if not res_assets.matched_subtitle:
+            record_skip(video_file, "no subtitle matched")
+            continue
+
+        if res_assets.subtitle_file:
+            matched_files.append(f"{video_name}  <-  {res_assets.subtitle_file.name}")
+        elif res_assets.embedded_sub_id is not None:
+            matched_files.append(f"{video_name}  <-  [embedded track {res_assets.embedded_sub_id}]")
+
+        if res_assets.chapter_file:
+            matched_files.append(f"{video_name}  <-  {res_assets.chapter_file.name} [chapters]")
+
+        if res_assets.cover_file:
+            matched_files.append(f"{video_name}  <-  {res_assets.cover_file.name} [cover]")
 
         jobs.append(PlannedJob(
             video=video,
             video_name=video_name,
             base=base,
             output_file=output_file,
-            subtitle_file=sub_file,
-            subtitle_label=sub_label,
-            subtitle_mkv_lang=sub_mkv_lang,
-            chapter_file=chapter_file,
-            cover_file=cover_file,
-            embedded_sub_id=embedded_id,
+            subtitle_file=res_assets.subtitle_file,
+            subtitle_label=res_assets.subtitle_label,
+            subtitle_mkv_lang=res_assets.subtitle_mkv_lang,
+            chapter_file=res_assets.chapter_file,
+            cover_file=res_assets.cover_file,
+            embedded_sub_id=res_assets.embedded_sub_id,
             use_source_fonts=use_source_fonts,
+            item_id=item_id,
         ))
+
+    if dry_run:
+        for job in jobs:
+            emit_event("item_complete", item_id=job.item_id, file=job.video_name, status="planned")
+        for video, reason in skipped_events:
+            emit_event(
+                "item_complete",
+                item_id=get_item_id(video.path, root_dir),
+                file=video.name,
+                status="skipped",
+                reason=reason,
+            )
 
     return jobs, matched_files, skipped_files
 
 
 # ─── JOB EXECUTOR ORCHESTRATOR ───────────────────────────────────────────────
 def _execute_jobs(
-    jobs:          list[PlannedJob],
-    temp_dir:      Path | None,
-    fonts:         FontInfo,
-    opus_bitrate:  str,
-    pool:          ThreadPoolExecutor,
-    max_workers:   int,
+    jobs:           list[PlannedJob],
+    temp_dir:       Path | None,
+    fonts:          FontInfo,
+    opus_bitrate:   str,
+    pool:           ThreadPoolExecutor,
+    max_workers:    int,
     ffmpeg_threads: int,
-    json_cache:    dict[Path, dict | None],
-    skipped_files: list[str],
-    matched_files: list[str],
-    complexity:    int = 10,
-    io_semaphore:  threading.Semaphore | None = None,
-    sub_offset:    float = 0.0,
+    json_cache:     dict[Path, dict | None],
+    skipped_files:  list[str],
+    complexity:     int = 10,
+    io_semaphore:   threading.Semaphore | None = None,
+    sub_offset:     float = 0.0,
 ) -> None:
     logger.info("Processing %d matched file(s) (up to %d at a time)...", len(jobs), max_workers)
 
-    results: dict[Path, JobResult] = {}
     total_jobs = len(jobs)
     futures = {
-        pool.submit(process_job, job, temp_dir, fonts, opus_bitrate, json_cache, ffmpeg_threads, io_semaphore, complexity, sub_offset): job
+        pool.submit(
+            process_job,
+            job=job,
+            temp_dir=temp_dir,
+            fonts=fonts,
+            opus_bitrate=opus_bitrate,
+            json_cache=json_cache,
+            ffmpeg_threads=ffmpeg_threads,
+            io_semaphore=io_semaphore,
+            complexity=complexity,
+            sub_offset=sub_offset,
+        ): job
         for job in jobs
     }
     for completed_jobs, future in enumerate(as_completed(futures), start=1):
@@ -996,57 +661,35 @@ def _execute_jobs(
         progress = completed_jobs / total_jobs
         try:
             res = future.result()
-            results[job.video] = res
             if res.skipped_reason:
-                logger.info(" -> [%d/%d (%.0f%%)] Failed/Skipped: %s", completed_jobs, total_jobs, progress * 100, job.video_name)
+                skipped_files.append(f"{job.video_name} ({res.skipped_reason})")
+                logger.info(
+                    "[%d/%d (%.0f%%)] Skipped: %s",
+                    completed_jobs, total_jobs, progress * 100, job.video_name,
+                )
             else:
-                logger.info(" -> [%d/%d (%.0f%%)] Remuxed: %s", completed_jobs, total_jobs, progress * 100, job.video_name)
+                logger.info(
+                    "[%d/%d (%.0f%%)] Remuxed: %s",
+                    completed_jobs, total_jobs, progress * 100, job.video_name,
+                )
         except Exception as exc:
-            # Immediate ERROR with full traceback attached — shows up right
-            # away on stderr, in context, rather than buried in the final
-            # per-file summary at the end of a long batch run.
             logger.exception(
-                " -> [%d/%d (%.0f%%)] CRASHED: %s",
+                "[%d/%d (%.0f%%)] CRASHED: %s",
                 completed_jobs, total_jobs, progress * 100, job.video_name,
             )
-            # Deferred summary uses WARNING (not ERROR) so the final
-            # per-file log loop doesn't emit a second ERROR-level record
-            # for the same crash — the traceback was already logged above.
-            r = JobResult()
-            r.log.append(f"Processing: {job.video_name}")
-            r.log.append("  WARNING: Worker crashed. See traceback above.")
-            r.skipped_reason = f"worker crash: {exc}"
-            results[job.video] = r
-
-    for job in jobs:
-        result = results[job.video]
-        logger.info("=" * 60)
-        for line in result.log:
-            # Prefix check (not substring) — a filename containing "ERROR" or
-            # "WARNING" anywhere in it must not get misclassified as an error.
-            stripped = line.lstrip()
-            if stripped.startswith("WARNING"):
-                logger.warning(line)
-            elif stripped.startswith("ERROR"):
-                logger.error(line)
-            else:
-                logger.info(line)
-        if result.skipped_reason:
-            skipped_files.append(f"{job.video_name} ({result.skipped_reason})")
-            matched_files[:] = [
-                m for m in matched_files
-                if not m.startswith(f"{job.video_name}  <-")
-            ]
+            emit_event("item_complete", item_id=job.item_id, file=job.video_name, status="error", error=str(exc))
+            skipped_files.append(f"{job.video_name} (exception: {exc})")
 
 
-# ─── SUMMARY ─────────────────────────────────────────────────────────────────
 def _print_summary(output_dir: Path, matched_files: list[str], skipped_files: list[str]) -> None:
     logger.info("=========================================")
-    logger.info(" Batch Processing Complete")
-    logger.info(" Output: %s", output_dir)
+    logger.info(" Processing Summary")
     logger.info("=========================================")
+    logger.info("Output directory: %s", output_dir)
+    logger.info("Matched & processed: %d", len(matched_files))
+    logger.info("Skipped: %d", len(skipped_files))
     if matched_files:
-        logger.info("--- MATCHED SUBTITLES & CHAPTERS (%d) ---", len(matched_files))
+        logger.info("--- MATCHED FILES (%d) ---", len(matched_files))
         for entry in matched_files:
             logger.info("  %s", entry)
     if skipped_files:
@@ -1055,117 +698,222 @@ def _print_summary(output_dir: Path, matched_files: list[str], skipped_files: li
             logger.info("  - %s", entry)
 
 
-# ─── DISCOVERY ───────────────────────────────────────────────────────────────
-def _discover_assets(
-    fonts_dir: Path, search_dirs: list[Path],
-    assets_dir: Path | None = None,
-    scan_cache: dict[Path, ScanResults] | None = None,
-) -> tuple[FontInfo, SubIndex, ChapterIndex, CoverIndex, SubIndex | None, ChapterIndex | None, CoverIndex | None]:
-    if fonts_dir.is_dir():
-        logger.info("Scanning detected font directory: '%s'...", fonts_dir.name)
-        fonts = scan_fonts(fonts_dir)
-        logger.info("Fonts found: %d", fonts.count)
-        if fonts.count == 0:
-            logger.info("  (fonts folder is empty — will use source fonts if available)")
+# ─── PLAN INSPECTION EXTRACTION ──────────────────────────────────────────────
+def _parse_resolution(pixel_dimensions: str) -> str | None:
+    if not pixel_dimensions:
+        return None
+    parts = pixel_dimensions.split("x")
+    if len(parts) == 2:
+        try:
+            w, h = int(parts[0].strip()), int(parts[1].strip())
+            if w >= 3800 or h >= 2100:
+                return "4K"
+            if w >= 2500 or h >= 1400:
+                return "1440p"
+            if w >= 1900 or h >= 1000:
+                return "1080p"
+            if w >= 1200 or h >= 700:
+                return "720p"
+            if h >= 480:
+                return "480p"
+        except ValueError:
+            pass
+
+    if "3840" in pixel_dimensions or "2160" in pixel_dimensions:
+        return "4K"
+    if "1920" in pixel_dimensions or "1080" in pixel_dimensions:
+        return "1080p"
+    if "1280" in pixel_dimensions or "720" in pixel_dimensions:
+        return "720p"
+    return None
+
+
+def _parse_video_codec(codec: str, codec_id: str) -> str | None:
+    c_low = f"{codec} {codec_id}".lower()
+    if "hevc" in c_low or "h.265" in c_low:
+        return "HEVC"
+    if "avc" in c_low or "h.264" in c_low:
+        return "AVC"
+    if "av1" in c_low:
+        return "AV1"
+    if "vp9" in c_low:
+        return "VP9"
+    return codec or None
+
+
+_CH_MAP = {8: "7.1", 6: "5.1", 1: "1.0"}
+
+
+def _parse_audio_track_info(track: dict) -> tuple[str, bool]:
+    codec = track.get("codec", "")
+    props = track.get("properties") or {}
+    codec_id = props.get("codec_id", "")
+    c_low = f"{codec} {codec_id}".lower()
+    is_flac = "flac" in c_low
+    channels = props.get("audio_channels", 2)
+    ch_str = _CH_MAP.get(channels, "2.0")
+
+    if is_flac:
+        aud_name = "FLAC"
+    elif "aac" in c_low:
+        aud_name = "AAC"
+    elif "opus" in c_low:
+        aud_name = "Opus"
+    elif "ac3" in c_low or "ac-3" in c_low:
+        aud_name = "AC3"
     else:
-        logger.info("No font directory found — will use source fonts if available.")
-        fonts = FontInfo(args=(), count=0)
+        aud_name = "Audio"
 
-    sub_index = SubIndex()
-    chap_index = ChapterIndex()
-    cover_index = CoverIndex()
+    return f"{aud_name} {ch_str}", is_flac
 
-    for d in reversed(search_dirs):
-        assets = scan_assets(d, scan_cache)
-        for sub_file in assets.subs:
-            sub_index.add(sub_file)
-        for xml_file in assets.chapters:
-            chap_index.add(xml_file)
-        for image_file in assets.covers:
-            cover_index.add(image_file)
 
-    fallback_sub_index: SubIndex | None = None
-    fallback_chap_index: ChapterIndex | None = None
-    fallback_cover_index: CoverIndex | None = None
+def _extract_mkv_metadata(json_data: dict | None) -> dict:
+    if not json_data:
+        return {
+            "resolution": None,
+            "video_codec": None,
+            "video_tag": None,
+            "audio_summary": None,
+            "has_flac": None,
+            "sub_summary": None,
+            "fonts_count": None,
+        }
 
-    if assets_dir is not None:
-        if not assets_dir.is_dir():
-            logger.warning("Specified --assets-dir '%s' does not exist — fallback asset search disabled.", assets_dir)
-        else:
-            fallback_sub_index = SubIndex()
-            fallback_chap_index = ChapterIndex()
-            fallback_cover_index = CoverIndex()
-            fallback_assets = scan_assets(assets_dir, scan_cache)
-            for sub_file in fallback_assets.subs:
-                fallback_sub_index.add(sub_file)
-            for xml_file in fallback_assets.chapters:
-                fallback_chap_index.add(xml_file)
-            for image_file in fallback_assets.covers:
-                fallback_cover_index.add(image_file)
+    resolution = None
+    video_codec = None
+    audio_parts = []
+    has_flac = False
+    has_audio = False
+    sub_langs = []
+    sub_formats = []
 
-            if fonts.count == 0:
-                fallback_fonts_dir = assets_dir / "fonts" if (assets_dir / "fonts").is_dir() else assets_dir
-                fallback_fonts = scan_fonts(fallback_fonts_dir)
-                if fallback_fonts.count > 0:
-                    fonts = fallback_fonts
-                    logger.info("Detected %d external font(s) in fallback assets directory: %s", fonts.count, fallback_fonts_dir)
+    for track in json_data.get("tracks") or []:
+        t_type = track.get("type", "")
+        props = track.get("properties") or {}
 
-    logger.info("Subtitles indexed: %d primary, %d English fallback", sub_index.primary_count, sub_index.fallback_count)
-    logger.info("Chapters indexed: %d by episode number, %d unmatched", chap_index.indexed_count, len(chap_index.unmatched))
-    if chap_index.rejected_count:
-        logger.info("  (%d .xml file(s) skipped — not chapter data)", chap_index.rejected_count)
+        if t_type == "video":
+            video_codec = _parse_video_codec(track.get("codec", ""), props.get("codec_id", ""))
+            resolution = _parse_resolution(props.get("pixel_dimensions", ""))
+        elif t_type == "audio":
+            has_audio = True
+            aud_str, flac_found = _parse_audio_track_info(track)
+            if flac_found:
+                has_flac = True
+            audio_parts.append(aud_str)
+        elif t_type == "subtitles":
+            c_low = f"{track.get('codec', '')} {props.get('codec_id', '')}".lower()
+            if "ass" in c_low or "substation" in c_low:
+                fmt_name = "ASS"
+            elif "srt" in c_low or "subrip" in c_low or "utf8" in c_low:
+                fmt_name = "SRT"
+            elif "pgs" in c_low or "hdmv" in c_low:
+                fmt_name = "PGS"
+            elif "vob" in c_low:
+                fmt_name = "VobSub"
+            else:
+                fmt_name = "Subtitles"
 
-    cover_note = " + folder-wide cover.*" if cover_index.has_global else ""
-    logger.info("Covers indexed: %d by episode number%s", cover_index.indexed_count, cover_note)
+            if fmt_name not in sub_formats:
+                sub_formats.append(fmt_name)
 
-    return fonts, sub_index, chap_index, cover_index, fallback_sub_index, fallback_chap_index, fallback_cover_index
+            lang = (props.get("language") or "und").upper()
+            if lang not in sub_langs:
+                sub_langs.append(lang)
+
+    attachments = json_data.get("attachments") or []
+    _, font_attachments = parse_attachments(attachments)
+
+    video_tag = f"{resolution} {video_codec}" if (resolution and video_codec) else None
+    audio_summary = " / ".join(audio_parts) if audio_parts else (None if not has_audio else "No Audio")
+
+    if sub_langs:
+        fmt = sub_formats[0] if len(sub_formats) == 1 else "Subs"
+        sub_summary = f"{fmt} ({', '.join(sub_langs)})"
+    elif sub_formats:
+        sub_summary = sub_formats[0] if len(sub_formats) == 1 else "Subtitles"
+    else:
+        sub_summary = None
+
+    return {
+        "resolution": resolution,
+        "video_codec": video_codec,
+        "video_tag": video_tag,
+        "audio_summary": audio_summary,
+        "has_flac": has_flac if has_audio else False,
+        "sub_summary": sub_summary,
+        "fonts_count": len(font_attachments),
+    }
+
+
+def generate_directory_plan(input_dir: Path, persistent_cache: PersistentInspectCache | None = None) -> dict:
+    all_mkvs = scan_mkv_files(input_dir)
+    if not all_mkvs:
+        return {"version": 1, "items": []}
+
+    with ThreadPoolExecutor(max_workers=min(len(all_mkvs), 16)) as pool:
+        json_cache = inspect_videos(
+            [m.path for m in all_mkvs],
+            pool=pool,
+            persistent_cache=persistent_cache,
+        )
+
+    items = []
+    for mkv in all_mkvs:
+        json_data = json_cache.get(mkv.path)
+        meta = _extract_mkv_metadata(json_data)
+        items.append({
+            "id": get_item_id(mkv.path, input_dir),
+            "name": mkv.name,
+            "metadata": meta,
+        })
+
+    return {"version": 1, "items": items}
 
 
 # ─── ORCHESTRATOR ────────────────────────────────────────────────────────────
 def _run(
-    mkv_dir:      Path,
-    videos:       list[ParsedFile],
-    temp_dir:     Path | None,
-    output_dir:   Path,
-    fonts_dir:    Path,
-    search_dirs:  list[Path],
-    pool:         ThreadPoolExecutor,
-    max_workers:  int,
-    opus_bitrate: str,
-    dry_run:      bool,
-    sub_offset:   float = 0.0,
-    complexity:   int = 10,
+    mkv_dir:          Path,
+    videos:           list[ParsedFile],
+    temp_dir:         Path | None,
+    output_dir:       Path,
+    fonts_dir:        Path,
+    search_dirs:      list[Path],
+    pool:             ThreadPoolExecutor,
+    max_workers:      int,
+    opus_bitrate:     str,
+    dry_run:          bool,
+    sub_offset:       float = 0.0,
+    complexity:       int = 10,
     persistent_cache: PersistentInspectCache | None = None,
-    io_semaphore: threading.Semaphore | None = None,
-    assets_dir:   Path | None = None,
-    scan_cache: dict[Path, ScanResults] | None = None,
+    io_semaphore:     threading.Semaphore | None = None,
+    assets_dir:       Path | None = None,
+    scan_cache:       dict[Path, ScanResults] | None = None,
+    root_input_dir:   Path | None = None,
 ) -> bool:
     if not videos:
         logger.warning("No MKV files to process in '%s'.", mkv_dir.name)
         return False
         
-    discovered = _discover_assets(fonts_dir, search_dirs, assets_dir=assets_dir, scan_cache=scan_cache)
-    fonts, sub_index, chap_index, cover_index, f_sub, f_chap, f_cov = discovered
-    use_source_fonts = fonts.count == 0
+    resolver = AssetResolver.discover(search_dirs, fonts_dir, assets_dir=assets_dir, scan_cache=scan_cache)
+    use_source_fonts = resolver.use_source_fonts
 
     videos_to_inspect = []
     for v in videos:
         if not v.parsed:
-            continue  # _plan_jobs will skip these anyway
+            continue
             
         mkv_season, mkv_ep_type, mkv_ep = v.parsed
         out_stem = output_stem(v.stem, mkv_ep_type, mkv_ep)
         if is_completed_output(output_dir / f"{out_stem}.mkv"):
             continue
             
-        if dry_run and sub_index.lookup(mkv_ep_type, mkv_ep, mkv_season) is not None:
+        if dry_run and resolver.has_local_subtitle(mkv_ep_type, mkv_ep, mkv_season):
             continue
             
         videos_to_inspect.append(v.path)
 
     json_cache = inspect_videos(videos_to_inspect, pool, persistent_cache=persistent_cache) if videos_to_inspect else {}
 
-    # Collect all subtitle paths across the search path for interactive fallback selection
     seen_subs: set[Path] = set()
     all_subs: list[Path] = []
     for d in search_dirs:
@@ -1176,11 +924,9 @@ def _run(
     all_subs.sort(key=natural_sort_key)
 
     jobs, matched_files, skipped_files = _plan_jobs(
-        videos, json_cache, sub_index, chap_index, cover_index,
-        output_dir, all_subs, use_source_fonts, dry_run,
-        fallback_sub_index=f_sub,
-        fallback_chap_index=f_chap,
-        fallback_cover_index=f_cov,
+        videos, json_cache, resolver,
+        output_dir=output_dir, all_subs=all_subs, use_source_fonts=use_source_fonts, dry_run=dry_run,
+        root_input_dir=root_input_dir,
     )
 
     if dry_run:
@@ -1201,13 +947,26 @@ def _run(
             logger.info("  (no jobs planned)")
         logger.info("Total: %d job(s). No processing performed.", len(jobs))
         _print_summary(output_dir, matched_files, skipped_files)
-        return all("(output already exists)" in s for s in skipped_files)
+        return True
 
-    # Distribute available CPU cores evenly among workers to prevent core thrashing
     ffmpeg_threads = max(1, (os.cpu_count() or 4) // max_workers)
-    _execute_jobs(jobs, temp_dir, fonts, opus_bitrate, pool, max_workers, ffmpeg_threads, json_cache, skipped_files, matched_files, complexity, io_semaphore=io_semaphore, sub_offset=sub_offset)
+    _execute_jobs(
+        jobs=jobs,
+        temp_dir=temp_dir,
+        fonts=resolver.fonts,
+        opus_bitrate=opus_bitrate,
+        pool=pool,
+        max_workers=max_workers,
+        ffmpeg_threads=ffmpeg_threads,
+        json_cache=json_cache,
+        skipped_files=skipped_files,
+        complexity=complexity,
+        io_semaphore=io_semaphore,
+        sub_offset=sub_offset,
+    )
     _print_summary(output_dir, matched_files, skipped_files)
-    return all("(output already exists)" in s for s in skipped_files)
+    has_failures = any(not s.endswith("(output already exists)") for s in skipped_files)
+    return not has_failures
 
 
 # ─── MAIN ────────────────────────────────────────────────────────────────────
@@ -1221,14 +980,14 @@ def main() -> None:
         description="Batch MKV Re-Mux Utility for Anime & Fansubs",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--workers", type=int, default=default_workers, choices=range(1, 33),
-                        metavar="[1-32]",
+    parser.add_argument("--workers", type=int, default=default_workers, choices=range(1, 65),
+                        metavar="[1-64]",
                         help="Number of concurrent files to process.")
     parser.add_argument("--bitrate", type=str, default="192k",
                         help="Target bitrate for Opus audio conversion (e.g., 128k, 192k).")
-    parser.add_argument("--complexity", type=int, default=9, choices=range(11),
+    parser.add_argument("--complexity", type=int, default=10, choices=range(11),
                         metavar="[0-10]",
-                        help="Opus compression complexity level (0-10, default: 9).")
+                        help="Opus compression complexity level (0-10, default: 10).")
     parser.add_argument("--sub-offset", type=float, default=0.0,
                         help="Shift subtitle timestamps by this many seconds (negative = earlier, positive = later).")
     parser.add_argument("--out-dir", type=str, default=None,
@@ -1249,8 +1008,17 @@ def main() -> None:
     parser.add_argument("--no-cache", action="store_true",
                         help="Bypass persistent inspection cache.")
     parser.add_argument("--clear-cache", action="store_true",
-                        help="Clear persistent inspection cache.")
-    cfg          = parser.parse_args()
+                        help="Clear persistent inspection cache and exit.")
+    parser.add_argument("--plan", action="store_true",
+                        help="Output JSON directory plan and exit without processing.")
+    parser.add_argument("--events", action="store_true",
+                        help="Emit structured @event: JSON-line events on stdout.")
+    cfg = parser.parse_args()
+
+    set_events_enabled(cfg.events)
+
+    if cfg.plan:
+        setup_logging(logging.WARNING, stderr_only=True)
 
     max_workers  = cfg.workers
     opus_bitrate = cfg.bitrate
@@ -1266,11 +1034,17 @@ def main() -> None:
     if not re.match(r"^\d+[kM]?$", opus_bitrate):
         logger.error("Invalid bitrate format: '%s'. Must match pattern like 128k, 192k, 1M.", opus_bitrate)
         sys.exit(1)
+
     root_input_dir = Path(cfg.input_dir).resolve() if cfg.input_dir else SCRIPT_DIR
     out_override = Path(cfg.out_dir).resolve() if cfg.out_dir else None
     fonts_override = Path(cfg.fonts_dir).resolve() if cfg.fonts_dir else None
     assets_override = Path(cfg.assets_dir).resolve() if cfg.assets_dir else None
-    dry_run      = cfg.dry_run
+    dry_run = cfg.dry_run
+
+    if cfg.plan:
+        plan_manifest = generate_directory_plan(root_input_dir, persistent_cache)
+        print(json.dumps(plan_manifest, ensure_ascii=False))
+        sys.exit(0)
 
     logger.info("=========================================")
     logger.info(" MKV Batch Re-Mux Utility")
@@ -1282,7 +1056,6 @@ def main() -> None:
     logger.info("Using mkvmerge : %s", shutil.which('mkvmerge'))
     logger.info("Using ffmpeg   : %s", shutil.which('ffmpeg'))
 
-    # Discover all MKV files recursively to find which subdirectories contain them
     ignore_paths = {out_override} if out_override else None
     all_mkvs = scan_mkv_files(root_input_dir, ignore_paths=ignore_paths)
     if not all_mkvs:
@@ -1295,13 +1068,16 @@ def main() -> None:
 
     mkv_dirs = sorted(mkvs_by_dir.keys(), key=natural_sort_key)
 
+    emit_event("batch_start", total=len(all_mkvs), input_dir=str(root_input_dir))
+
     overall_success = True
     scan_cache: dict[Path, ScanResults] = {}
     fonts_dir_cache: dict[Path, Path] = {}
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         for mkv_dir in mkv_dirs:
-            logger.info("\n" + "=" * 60)
+            logger.info("")
+            logger.info("=" * 60)
             logger.info("Processing directory: %s", mkv_dir)
             logger.info("=" * 60)
 
@@ -1314,7 +1090,7 @@ def main() -> None:
             if not dry_run:
                 current_output_dir.mkdir(parents=True, exist_ok=True)
 
-            search_dirs = _ancestor_dirs(mkv_dir, root_input_dir)
+            search_dirs = ancestor_dirs(mkv_dir, root_input_dir)
 
             current_assets_dir = None
             if assets_override:
@@ -1322,7 +1098,6 @@ def main() -> None:
                     mkv_dir, root_input_dir, assets_override, default_subdir=None,
                 )
 
-            # Resolve fonts directory for this subdirectory by scanning the full ancestor chain (local-first)
             current_fonts_dir = None
             if fonts_override:
                 current_fonts_dir = fonts_override
@@ -1353,24 +1128,25 @@ def main() -> None:
             
             dir_mkvs = mkvs_by_dir[mkv_dir]
             
-            success = False
+            dir_success = False
             try:
-                success = _run(
+                dir_success = _run(
                     mkv_dir, dir_mkvs, temp_dir, current_output_dir, current_fonts_dir,
                     search_dirs, pool, max_workers, opus_bitrate, dry_run,
                     sub_offset=cfg.sub_offset,
                     complexity=cfg.complexity, persistent_cache=persistent_cache,
                     io_semaphore=io_semaphore, assets_dir=current_assets_dir,
                     scan_cache=scan_cache,
+                    root_input_dir=root_input_dir,
                 )
-                if not success:
+                if not dir_success:
                     overall_success = False
             finally:
                 if temp_dir is not None:
                     shutil.rmtree(temp_dir, ignore_errors=True)
 
             if (
-                success
+                dir_success
                 and not dry_run
                 and not cfg.keep_fonts
                 and fonts_override is None
@@ -1383,6 +1159,8 @@ def main() -> None:
                     logger.info("Cleanup: Removed temporary fonts folder '%s'", current_fonts_dir.name)
                 except OSError as e:
                     logger.error("Failed to remove fonts folder: %s", e)
+
+    emit_event("batch_complete", success=overall_success)
 
     if not overall_success:
         sys.exit(1)

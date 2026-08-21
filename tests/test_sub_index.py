@@ -12,10 +12,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-mkv_remux = importlib.import_module("mkv_remux")
+mkv_assets = importlib.import_module("mkv_assets")
 
 REMUX_MODULES = [
-    pytest.param(mkv_remux, id="mkv_remux"),
+    pytest.param(mkv_assets, id="mkv_assets"),
 ]
 
 @pytest.mark.parametrize("rmod", REMUX_MODULES)
@@ -108,3 +108,39 @@ def test_sub_index_different_formats_not_duplicates(rmod):
     path, lang = result
     assert path == Path("D:/My Project/episode_01.ind.ass")
     assert lang == "ind"
+
+
+@pytest.mark.parametrize("rmod", REMUX_MODULES)
+def test_sub_index_prefers_dialogue_candidate_with_same_language_and_format(rmod):
+    from mkv_common import ParsedFile
+
+    sub_index = rmod.SubIndex()
+    plain = ParsedFile(
+        path=Path("D:/My Project/episode_01.ass"),
+        name="episode_01.ass",
+        stem="episode_01",
+        parsed=("", "E", "01"),
+    )
+    dialogue = ParsedFile(
+        path=Path("D:/My Project/episode_01_dialogue.ass"),
+        name="episode_01_dialogue.ass",
+        stem="episode_01_dialogue",
+        parsed=("", "E", "01"),
+    )
+
+    sub_index.add(plain)
+    sub_index.add(dialogue)
+
+    assert sub_index.lookup("E", "01", "") == (dialogue.path, "und")
+
+
+def test_scan_assets_discovers_ass_and_srt(tmp_path):
+    from mkv_common import scan_assets
+
+    (tmp_path / "episode_01.ind.ass").touch()
+    (tmp_path / "episode_02.eng.srt").touch()
+
+    assert [sub.name for sub in scan_assets(tmp_path).subs] == [
+        "episode_01.ind.ass",
+        "episode_02.eng.srt",
+    ]
