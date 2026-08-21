@@ -241,7 +241,11 @@ fn sidecar_name(mode: &str) -> Result<&'static str, String> {
     }
 }
 
-fn run_sidecar_once(app: &AppHandle, name: &str, args: &[&str]) -> Result<std::process::Output, String> {
+fn run_sidecar_once(
+    app: &AppHandle,
+    name: &str,
+    args: &[&str],
+) -> Result<std::process::Output, String> {
     let binary = get_sidecar_path(app, name)?;
     let mut cmd = Command::new(&binary);
     cmd.args(args);
@@ -350,7 +354,9 @@ fn spawn_log_stream_reader<R: std::io::Read + Send + 'static>(
                 if let Some(event_str) = line.strip_prefix("@event:") {
                     let trimmed = event_str.trim();
                     if let Ok(mut event_json) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                        if let (Some(event), Some(ref mode)) = (event_json.as_object_mut(), &event_mode) {
+                        if let (Some(event), Some(ref mode)) =
+                            (event_json.as_object_mut(), &event_mode)
+                        {
                             event.insert("mode".to_string(), mode.clone().into());
                         }
                         let _ = app.emit("job-event", event_json);
@@ -358,7 +364,11 @@ fn spawn_log_stream_reader<R: std::io::Read + Send + 'static>(
                     }
                 }
             }
-            let formatted_line = if is_stderr { format!("[ERR] {}", line) } else { line };
+            let formatted_line = if is_stderr {
+                format!("[ERR] {}", line)
+            } else {
+                line
+            };
             log_batch.push(formatted_line);
             if log_batch.len() >= 25 || last_flush.elapsed().as_millis() >= 25 {
                 let _ = app.emit("job-log", &log_batch);
