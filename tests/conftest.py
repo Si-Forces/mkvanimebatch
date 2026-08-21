@@ -15,6 +15,14 @@ if str(PROJECT_ROOT) not in sys.path:
 COMMON_MODULES = ["mkv_common"]
 
 
+@pytest.fixture(autouse=True)
+def reset_sidecar_events():
+    common = importlib.import_module("mkv_common")
+    common.set_events_enabled(False)
+    yield
+    common.set_events_enabled(False)
+
+
 @pytest.fixture(params=COMMON_MODULES, ids=COMMON_MODULES)
 def mod(request):
     """Import the requested common module and clear LRU caches between tests."""

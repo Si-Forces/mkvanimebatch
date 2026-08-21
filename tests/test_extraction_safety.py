@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 import mkv_extract
-from mkv_common import FontRegistry, ParsedFile
+from mkv_common import FontManager, ParsedFile
 
 
 def test_failed_extraction_does_not_replace_existing_subtitle(tmp_path, monkeypatch):
@@ -46,8 +46,7 @@ def test_failed_extraction_does_not_replace_existing_subtitle(tmp_path, monkeypa
         mkv_extract.process_file(
             parsed_video,
             metadata,
-            tmp_path / "fonts",
-            FontRegistry(),
+            FontManager(tmp_path / "fonts"),
         )
 
     assert subtitle.read_bytes() == b"existing subtitle"
@@ -87,8 +86,7 @@ def test_successful_extraction_promotes_staged_subtitle(tmp_path, monkeypatch):
     _, _, succeeded = mkv_extract.process_file(
         parsed_video,
         metadata,
-        tmp_path / "fonts",
-        FontRegistry(),
+        FontManager(tmp_path / "fonts"),
     )
 
     assert succeeded is True
@@ -218,8 +216,7 @@ def test_cover_extension_whitelisting(tmp_path, monkeypatch, file_name, expected
     _, _, succeeded = mkv_extract.process_file(
         parsed_video,
         metadata,
-        tmp_path / "fonts",
-        FontRegistry(),
+        FontManager(tmp_path / "fonts"),
     )
     assert succeeded is True
     expected_file = tmp_path / f"Show_cover{expected_ext}"
@@ -227,12 +224,12 @@ def test_cover_extension_whitelisting(tmp_path, monkeypatch, file_name, expected
 
 
 def test_font_registry_shared_across_dirs(tmp_path, monkeypatch):
-    """When a shared FontRegistry is passed across multiple directories,
+    """When a shared FontManager is passed across multiple directories,
     fonts with the same content hash are deduplicated."""
     fonts_dir = tmp_path / "shared_fonts"
     fonts_dir.mkdir()
 
-    shared_registry = mkv_extract._build_font_registry(fonts_dir)
+    shared_manager = FontManager(fonts_dir)
 
     dir_a = tmp_path / "dir_a"
     dir_b = tmp_path / "dir_b"
@@ -270,13 +267,14 @@ def test_font_registry_shared_across_dirs(tmp_path, monkeypatch):
     monkeypatch.setattr(mkv_extract, "run_subprocess", mock_run)
 
     # Process file A with shared registry
-    _, _, ok_a = mkv_extract.process_file(parsed_a, meta_a, fonts_dir, shared_registry)
+    _, _, ok_a = mkv_extract.process_file(parsed_a, meta_a, shared_manager)
     assert ok_a is True
     assert (fonts_dir / "font_a.ttf").exists()
 
     # Process file B with same shared registry
-    _, _, ok_b = mkv_extract.process_file(parsed_b, meta_b, fonts_dir, shared_registry)
+    _, _, ok_b = mkv_extract.process_file(parsed_b, meta_b, shared_manager)
     assert ok_b is True
     # font_b should be deduped (not saved as duplicate or with hash suffix)
     assert not (fonts_dir / "font_b.ttf").exists()
+    shared_manager.cleanup_staging()
     assert len(list(fonts_dir.iterdir())) == 1

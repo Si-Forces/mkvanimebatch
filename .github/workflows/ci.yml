@@ -37,7 +37,7 @@ jobs:
 
       - name: Check Python syntax compilation
         run: |
-          python -m py_compile mkv_common.py mkv_extract.py mkv_remux.py
+          python -m py_compile mkv_common.py mkv_assets.py mkv_extract.py mkv_remux.py
 
       - name: Set up Node.js for Pyright
         uses: actions/setup-node@v4
@@ -140,11 +140,30 @@ jobs:
         run: cargo test --manifest-path desktop-tauri/src-tauri/Cargo.toml --verbose
 
   # ────────────────────────────────────────────────────────────────────────────
-  # 4. CI Completion Gate (Required Check Summary)
+  # 4. Frontend UI State & Contract Tests
+  # ────────────────────────────────────────────────────────────────────────────
+  ui-tests:
+    name: UI State & Contract Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Run UI contract tests
+        run: |
+          node --test desktop-tauri/ui/*.test.js
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 5. CI Completion Gate (Required Check Summary)
   # ────────────────────────────────────────────────────────────────────────────
   ci-status:
     name: CI Status Gate
-    needs: [python-quality, python-tests, rust-tauri-checks]
+    needs: [python-quality, python-tests, rust-tauri-checks, ui-tests]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -152,7 +171,8 @@ jobs:
         run: |
           if [ "${{ needs.python-quality.result }}" != "success" ] || \
              [ "${{ needs.python-tests.result }}" != "success" ] || \
-             [ "${{ needs.rust-tauri-checks.result }}" != "success" ]; then
+             [ "${{ needs.rust-tauri-checks.result }}" != "success" ] || \
+             [ "${{ needs.ui-tests.result }}" != "success" ]; then
             echo "CI pipeline checks failed!"
             exit 1
           fi

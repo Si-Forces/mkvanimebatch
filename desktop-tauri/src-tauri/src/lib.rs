@@ -16,21 +16,19 @@ pub fn run() {
         .manage(JobState::default())
         .manage(TelemetryState::default())
         .invoke_handler(tauri::generate_handler![
-            commands::run_job,
-            commands::stop_job,
-            commands::clear_cache,
-            commands::pick_folder,
-            commands::scan_directory,
-            commands::inspect_mkv_file,
-            commands::inspect_directory,
-            commands::get_system_telemetry,
-            commands::close_window,
-            commands::minimize_window,
-            commands::toggle_maximize,
-            commands::is_maximized,
-            commands::start_drag,
-            commands::start_resize,
-            commands::set_window_theme,
+            run_job,
+            stop_job,
+            clear_cache,
+            pick_folder,
+            inspect_directory,
+            get_system_telemetry,
+            close_window,
+            minimize_window,
+            toggle_maximize,
+            is_maximized,
+            start_drag,
+            start_resize,
+            set_window_theme,
         ])
         .setup(|_app| {
             use tauri::Manager;
