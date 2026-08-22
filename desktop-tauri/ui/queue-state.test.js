@@ -241,8 +241,67 @@ test("successful process exit does not hide missing completion events", () => {
     items: [{ id: "ep1.mkv", name: "ep1.mkv" }],
   });
 
-  finalizeQueueState(state, 0);
+  const finalState = finalizeQueueState(state, 0);
 
-  assert.equal(state.items.get("ep1.mkv").status, "error");
-  assert.equal(state.batchSuccess, false);
+  assert.equal(finalState.items.get("ep1.mkv").status, "error");
+  assert.equal(finalState.batchSuccess, false);
 });
+
+test("all items completed without batch_complete event fails batch completion", () => {
+  let state = createQueueState({
+    version: 1,
+    items: [{ id: "ep1.mkv", name: "ep1.mkv" }],
+  });
+
+  state = reduceQueueEvent(state, {
+    version: 1,
+    type: "batch_start",
+    total: 1,
+  });
+  state = reduceQueueEvent(state, {
+    version: 1,
+    type: "item_complete",
+    id: "ep1.mkv",
+    status: "completed",
+  });
+
+  assert.equal(state.completedCount, 1);
+  assert.equal(state.errorCount, 0);
+  assert.equal(state.batchSuccess, null);
+
+  // Process exits 0, but no batch_complete was sent
+  const finalState = finalizeQueueState(state, 0);
+  assert.equal(finalState.batchCompleted, true);
+  assert.equal(finalState.batchSuccess, false);
+});
+
+test("reduceQueueEvent is a pure reducer and does not mutate input state", () => {
+  const initialState = createQueueState({
+    version: 1,
+    items: [{ id: "ep1.mkv", name: "ep1.mkv" }],
+  });
+
+  const nextState = reduceQueueEvent(initialState, {
+    version: 1,
+    type: "item_start",
+    id: "ep1.mkv",
+  }, 1000);
+
+  assert.notEqual(initialState, nextState);
+  assert.notEqual(initialState.items, nextState.items);
+  assert.equal(initialState.items.get("ep1.mkv").status, "queued");
+  assert.equal(nextState.items.get("ep1.mkv").status, "processing");
+
+  const completedState = reduceQueueEvent(nextState, {
+    version: 1,
+    type: "item_complete",
+    id: "ep1.mkv",
+    status: "completed",
+  }, 2000);
+
+  assert.notEqual(nextState, completedState);
+  assert.equal(nextState.completedCount, 0);
+  assert.equal(completedState.completedCount, 1);
+  assert.equal(completedState.items.get("ep1.mkv").durationSec, "1.0");
+});
+

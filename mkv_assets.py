@@ -27,6 +27,7 @@ from mkv_common import (
     is_cover_filename,
     is_dialogue_track,
     logger,
+    natural_sort_key,
     parse_episode,
     scan_assets,
     scan_fonts,
@@ -62,9 +63,14 @@ class SubIndex:
     """Index of subtitle files supporting language scoring."""
     def __init__(self) -> None:
         self._index: dict[str, list[ParsedFile]] = {}
+        self._unparsed: list[ParsedFile] = []
+        self._unparsed_paths: set[Path] = set()
 
     def add(self, sub_file: ParsedFile) -> None:
         if not sub_file.parsed:
+            if sub_file.path not in self._unparsed_paths:
+                self._unparsed_paths.add(sub_file.path)
+                self._unparsed.append(sub_file)
             return
         _, ep_type, ep = sub_file.parsed
         key = _ep_key(ep_type, ep)
@@ -111,6 +117,14 @@ class SubIndex:
     @property
     def fallback_count(self) -> int:
         return self._count_by_lang(SUBTITLE_LANGS_FALLBACK)
+
+    @property
+    def all_subtitles(self) -> list[Path]:
+        """Every discovered subtitle path, including files with no parseable
+        episode number (which lookups ignore but manual selection can still use)."""
+        discovered = [f.path for f in self._unparsed]
+        discovered += [f.path for lst in self._index.values() for f in lst]
+        return sorted(dict.fromkeys(discovered), key=natural_sort_key)
 
 
 class ChapterIndex:
@@ -231,6 +245,7 @@ class ResolvedAssets:
     chapter_file: Path | None
     cover_file: Path | None
     fonts: FontInfo
+    skip_reason: str | None = None
 
 
 def _populate_indices(
@@ -268,6 +283,10 @@ class AssetResolver:
         self.fallback_chap_index = fallback_chap_index
         self.fallback_cover_index = fallback_cover_index
         self._chapter_unmatched_claimed: set[Path] = set()
+
+    @property
+    def all_subtitles(self) -> list[Path]:
+        return self.sub_index.all_subtitles
 
     @property
     def use_source_fonts(self) -> bool:
@@ -353,7 +372,7 @@ class AssetResolver:
         all_subs: list[Path],
         dry_run: bool,
         interactive: bool = True,
-    ) -> tuple[Path | None, int | None, str, bool]:
+    ) -> tuple[Path | None, int | None, str, bool, str | None]:
         season, ep_type, ep = parsed
         result = self.sub_index.lookup(ep_type, ep, season)
         if result is not None:
@@ -361,7 +380,7 @@ class AssetResolver:
             if lang in SUBTITLE_LANGS_FALLBACK:
                 logger.info("  NOTE: No Indonesian sub found; using English fallback (possible mislabelled fansub).")
             logger.info("  Subtitle       : %s [%s] (matched)", sub_path.name, LANG_LABEL.get(lang, lang))
-            return sub_path, None, lang, True
+            return sub_path, None, lang, True, None
 
         logger.info("  No external subtitle match — checking source for embedded subtitles...")
         if json_data:
@@ -371,7 +390,7 @@ class AssetResolver:
                 if lang in SUBTITLE_LANGS_FALLBACK:
                     logger.info("  NOTE: No Indonesian sub in source; using English fallback (possible mislabelled fansub).")
                 logger.info("  Subtitle       : embedded track %d [%s] (from source)", track_id, LANG_LABEL.get(lang, lang))
-                return None, track_id, lang, True
+                return None, track_id, lang, True, None
 
         if self.fallback_sub_index is not None:
             fb_result = self.fallback_sub_index.lookup(ep_type, ep, season)
@@ -380,20 +399,21 @@ class AssetResolver:
                 if lang in SUBTITLE_LANGS_FALLBACK:
                     logger.info("  NOTE: No Indonesian sub in fallback; using English fallback.")
                 logger.info("  Subtitle       : %s [%s] (fallback asset)", sub_path.name, LANG_LABEL.get(lang, lang))
-                return sub_path, None, lang, True
+                return sub_path, None, lang, True, None
 
         logger.warning("No subtitle match found for %s%s (external or embedded).", ep_type, ep)
+        skip_reason = "no subtitle files found" if not all_subs else "subtitle files found but none matched"
         is_tty = interactive and sys.stdin.isatty()
         if not all_subs or dry_run or not is_tty:
             if not all_subs:
-                logger.warning("SKIPPED: %s | Reason: %s", video.name, "No subtitle files exist in the folder at all.")
+                logger.warning("SKIPPED: %s | Reason: %s", video.name, "No subtitle files exist in the release directory at all.")
             elif dry_run:
                 logger.info("  DRY RUN: would prompt for manual subtitle selection here (skipped).")
             elif not is_tty:
                 logger.warning("SKIPPED: %s | Reason: %s", video.name, "Non-interactive environment — skipped manual subtitle selection.")
-            return None, None, "und", False
+            return None, None, "und", False, skip_reason
 
-        print("  Available subtitles in folder:")
+        print("  Available subtitles in release directory:")
         for i, sub in enumerate(all_subs):
             print(f"    [{i + 1}] {sub.name}")
         print("    [0] Skip this video")
@@ -403,10 +423,10 @@ class AssetResolver:
             chosen_sub = all_subs[int(choice) - 1]
             sub_lang = detect_sub_lang(chosen_sub.stem)
             logger.info("  -> Manually linked: %s", chosen_sub.name)
-            return chosen_sub, None, sub_lang, True
+            return chosen_sub, None, sub_lang, True, None
 
         logger.warning("SKIPPED: %s | Reason: %s", video.name, "User skipped manual subtitle selection.")
-        return None, None, "und", False
+        return None, None, "und", False, "user skipped manual selection"
 
     def _resolve_chap(
         self,
@@ -483,8 +503,9 @@ class AssetResolver:
                 fonts=self.fonts,
             )
 
-        sub_file, embedded_id, sub_lang, matched = self._resolve_sub(
-            video, parsed, json_data, all_subs or [], dry_run, interactive=interactive
+        sub_file, embedded_id, sub_lang, matched, skip_reason = self._resolve_sub(
+            video, parsed, json_data, all_subs or [], dry_run,
+            interactive=interactive
         )
         chapter_file = self._resolve_chap(
             parsed, chapter_fallback_count, has_source_chapters=has_chapters(json_data)
@@ -503,4 +524,5 @@ class AssetResolver:
             chapter_file=chapter_file,
             cover_file=cover_file,
             fonts=self.fonts,
+            skip_reason=skip_reason,
         )
