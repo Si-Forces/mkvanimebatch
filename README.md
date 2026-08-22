@@ -162,6 +162,7 @@ python mkv_remux.py --input-dir "D:/Anime/Series" --dry-run
 | `--dry-run` | `extract`, `remux` | Preview discovered files and track plans without writing files | `False` |
 | `--events` | `extract`, `remux` | Emit structured machine-readable JSON events (`@event: {...}`) on stdout | `False` |
 | `--plan` | `remux` | Output inspection manifest JSON for directory without executing | `False` |
+| `--sub-assignments` | `remux` | Path to a JSON file (`{"version": 1, "assignments": {"<item_id>": "<subtitle_path>"}}`) mapping manifest item IDs to subtitle files; assigned subtitles override automatic matching | `None` |
 | `--no-cache` | `extract`, `remux` | Bypass the persistent MKV probe inspect cache | `False` |
 | `--clear-cache` | `extract`, `remux` | Clear `.mkv_inspect_cache.json` and exit without processing files | `False` |
 

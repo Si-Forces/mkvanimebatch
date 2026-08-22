@@ -82,6 +82,7 @@ def test_local_subtitle_next_to_mkv_always_wins_over_ancestor(tmp_path):
     assert matched is not None
     assert matched[0] == local_sub
 
+
 def test_assets_dir_multi_level_fallback_hierarchy(tmp_path):
     """Fallback assets placed at the root of --assets-dir are discovered when resolving nested folders."""
     root_dir = tmp_path / "Anime"
@@ -104,6 +105,7 @@ def test_assets_dir_multi_level_fallback_hierarchy(tmp_path):
     assert resolver.fonts.count == 1
     assert resolver.fallback_cover_index is not None
     assert resolver.fallback_cover_index.has_global
+
 
 def test_assets_dir_wins_tie_over_its_parent(tmp_path):
     """On an exact score tie, --assets-dir itself must beat its immediate parent,
@@ -130,6 +132,7 @@ def test_assets_dir_wins_tie_over_its_parent(tmp_path):
     assert matched is not None
     assert matched[0] == assets_dir / "Show - 01.ass"
 
+
 def test_assets_dir_fonts_take_precedence_over_parent_fonts(tmp_path):
     """When both --assets-dir and its parent provide fonts, the more specific one wins."""
     root_dir = tmp_path / "Anime"
@@ -148,6 +151,8 @@ def test_assets_dir_fonts_take_precedence_over_parent_fonts(tmp_path):
     )
 
     assert resolver.fonts.count == 1
+
+
 def test_unparsed_subtitles_listed_for_manual_selection_but_never_matched(tmp_path):
     """Subtitles without a parseable episode number stay visible in the manual
     picker (all_subtitles) but are ignored by automatic lookups."""
@@ -203,4 +208,31 @@ def test_skip_reason_distinguishes_missing_vs_present_but_unmatched(tmp_path):
     )
     assert res_full.matched_subtitle is False
     assert res_full.skip_reason == "subtitle files found but none matched"
+
+
+def test_assigned_subtitle_overrides_every_automatic_source(tmp_path):
+    """A GUI/CLI-assigned subtitle wins over index matches, embedded tracks,
+    and fallback assets — explicit human intent has highest precedence."""
+    root_dir = tmp_path / "Anime"
+    season_dir = root_dir / "Season 01"
+    season_dir.mkdir(parents=True)
+
+    auto_sub = season_dir / "Show - 01.ass"
+    auto_sub.write_bytes(b"auto_match")
+    manual_sub = tmp_path / "elsewhere" / "Better Rip.ass"
+    manual_sub.parent.mkdir()
+    manual_sub.write_bytes(b"manual_pick")
+
+    import mkv_assets
+    resolver = mkv_assets.AssetResolver.discover(
+        mkv_remux._ancestor_dirs(season_dir, root_dir), season_dir / "fonts"
+    )
+
+    video = _make_video(season_dir / "Show - 01.mkv")
+    res = resolver.resolve_for(video, None, all_subs=resolver.all_subtitles,
+                               assigned_subtitle=manual_sub)
+
+    assert res.matched_subtitle is True
+    assert res.subtitle_file == manual_sub
+    assert res.embedded_sub_id is None
 

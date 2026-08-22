@@ -111,6 +111,50 @@ def test_plan_mode_cli_output(tmp_path, monkeypatch, capsys):
         assert meta["fonts_count"] == 1  # Only the true font attachment, not the cover
 
 
+def test_plan_manifest_includes_sub_candidates(tmp_path, monkeypatch, capsys):
+    """Manifest v1 gains an additive sub_candidates field: root-relative POSIX
+    paths of every discovered external subtitle, omitted when none exist."""
+    season = tmp_path / "Season 01"
+    season.mkdir()
+    (season / "Show - 01.mkv").write_bytes(b"v1")
+    (season / "Show - 02.mkv").write_bytes(b"v2")
+    (season / "Show - 01.ass").write_bytes(b"sub1")
+    (tmp_path / "shared.ass").write_bytes(b"ancestor_sub")
+
+    argv = ["mkv_remux.py", "--plan", "--input-dir", str(tmp_path)]
+    with patch.object(sys, "argv", argv), \
+         patch.object(mkv_common, "run_mkvmerge_json", return_value={"tracks": []}):
+        with pytest.raises(SystemExit) as exc:
+            mkv_remux.main()
+        assert exc.value.code == 0
+
+    captured = capsys.readouterr()
+    manifest = json.loads(captured.out.strip())
+    assert manifest["version"] == 1
+
+    by_id = {item["id"]: item for item in manifest["items"]}
+    ep1 = by_id["Season 01/Show - 01.mkv"]
+    assert set(ep1["sub_candidates"]) == {"Season 01/Show - 01.ass", "shared.ass"}
+    # Episode 02 has no dedicated sub but still sees ancestor candidates.
+    assert "shared.ass" in by_id["Season 01/Show - 02.mkv"]["sub_candidates"]
+
+
+def test_plan_manifest_omits_sub_candidates_when_no_subtitles(tmp_path, monkeypatch, capsys):
+    bare = tmp_path / "Bare"
+    bare.mkdir()
+    (bare / "Show - 01.mkv").write_bytes(b"v")
+
+    argv = ["mkv_remux.py", "--plan", "--input-dir", str(tmp_path)]
+    with patch.object(sys, "argv", argv), \
+         patch.object(mkv_common, "run_mkvmerge_json", return_value={"tracks": []}):
+        with pytest.raises(SystemExit) as exc:
+            mkv_remux.main()
+        assert exc.value.code == 0
+
+    manifest = json.loads(capsys.readouterr().out.strip())
+    assert "sub_candidates" not in manifest["items"][0]
+
+
 def test_plan_mode_duplicate_basenames_distinct_ids(tmp_path, monkeypatch, capsys):
     """Items with identical basenames in different subdirectories have unique root-relative POSIX IDs."""
     s1 = tmp_path / "Season 01"
@@ -182,6 +226,52 @@ def test_skip_event_reason_distinguishes_missing_vs_unmatched_subtitles(tmp_path
     assert len(terminal) == 1
     assert terminal[0]["status"] == "skipped"
     assert terminal[0]["reason"] == "subtitle files found but none matched"
+
+
+def test_sub_assignments_drive_job_planning(tmp_path):
+    """GUI manual selection (--sub-assignments) plans a job with the assigned
+    subtitle; a stale assignment path falls back to automatic matching."""
+    season = tmp_path / "Season 01"
+    season.mkdir()
+    video_path = season / "Show - 01.mkv"
+    video_path.write_bytes(b"video")
+    auto_sub = season / "Show - 01.ass"
+    auto_sub.write_bytes(b"auto")
+    video = mkv_common._create_parsed_file(video_path)
+    resolver = AssetResolver.discover([season], season / "fonts")
+    item_id = mkv_common.get_item_id(video_path, tmp_path)
+
+    # Assigned sub outside the input tree wins over the auto match.
+    manual_dir = tmp_path.parent / "manual_subs_test"
+    manual_dir.mkdir(exist_ok=True)
+    manual_sub = manual_dir / "Better Rip.ass"
+    manual_sub.write_bytes(b"manual")
+
+    jobs, matched_files, _ = mkv_remux._plan_jobs(
+        [video],
+        {video_path: None},
+        resolver,
+        output_dir=tmp_path / "Output",
+        all_subs=resolver.all_subtitles,
+        root_input_dir=tmp_path,
+        sub_assignments={item_id: manual_sub},
+    )
+    assert len(jobs) == 1
+    assert jobs[0].subtitle_file == manual_sub
+    assert any("Better Rip.ass" in entry for entry in matched_files)
+
+    # Stale path: falls back to the automatic index match instead of failing.
+    jobs2, _, _ = mkv_remux._plan_jobs(
+        [video],
+        {video_path: None},
+        resolver,
+        output_dir=tmp_path / "Output",
+        all_subs=resolver.all_subtitles,
+        root_input_dir=tmp_path,
+        sub_assignments={item_id: tmp_path / "deleted.ass"},
+    )
+    assert len(jobs2) == 1
+    assert jobs2[0].subtitle_file == auto_sub
 
 
 def test_plan_metadata_keeps_unknown_resolution_null():
