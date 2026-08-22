@@ -5,6 +5,7 @@
 "use strict";
 
 import { createQueueState, reduceQueueEvent, finalizeQueueState, carryOverAssignments } from "./queue-state.js";
+import { createTelemetryLoop } from "./telemetry.js";
 
 // ─── Preset Configurations ──────────────────────────────────────────────────
 
@@ -232,8 +233,6 @@ function switchView(viewId) {
 
 // ─── Real System Hardware Telemetry & Monitor ─────────────────────────────
 
-let telemetryTimer = null;
-
 function updateWorkerChips(isJobActive = false, workersCount = 8, ioJobsCount = 2) {
   const workerChips = document.querySelectorAll(".metric-workers-chip, #workers-telemetry-chip");
   const ioJobChips = document.querySelectorAll(".metric-iojobs-chip, #iojobs-telemetry-chip");
@@ -246,9 +245,7 @@ function updateWorkerChips(isJobActive = false, workersCount = 8, ioJobsCount = 
   });
 }
 
-function startTelemetryMonitor() {
-  if (telemetryTimer) return;
-
+function applyTelemetryData(data) {
   const cpuFills = document.querySelectorAll(".metric-cpu-fill, #cpu-telemetry-fill");
   const cpuVals = document.querySelectorAll(".metric-cpu-val, #cpu-telemetry-val");
   const ioFills = document.querySelectorAll(".metric-io-fill, #io-telemetry-fill");
@@ -256,61 +253,58 @@ function startTelemetryMonitor() {
   const ramFills = document.querySelectorAll(".metric-ram-fill, #ram-telemetry-fill");
   const ramVals = document.querySelectorAll(".metric-ram-val, #ram-telemetry-val");
 
-  updateWorkerChips(false);
+  const cpu = Math.round(data.cpu_pct || 0);
+  const ramUsed = data.ram_used_mb || 0;
+  const ramTotal = data.ram_total_mb || 16384;
+  const ramPct = Math.round(data.ram_pct || 0);
+  // The backend currently exposes CPU/RAM only; keep an unmeasured disk
+  // metric visibly neutral instead of presenting a hard-coded zero.
+  const ioMb = typeof data.io_mb_s === "number" && data.io_mb_s > 0
+    ? data.io_mb_s
+    : null;
 
-  const updateMetrics = async () => {
-    try {
-      const data = await invoke("get_system_telemetry");
-      if (data) {
-        const cpu = Math.round(data.cpu_pct || 0);
-        const ramUsed = data.ram_used_mb || 0;
-        const ramTotal = data.ram_total_mb || 16384;
-        const ramPct = Math.round(data.ram_pct || 0);
-        // The backend currently exposes CPU/RAM only; keep an unmeasured disk
-        // metric visibly neutral instead of presenting a hard-coded zero.
-        const ioMb = typeof data.io_mb_s === "number" && data.io_mb_s > 0
-          ? data.io_mb_s
-          : null;
+  const ioTooltip = ioMb === null
+    ? "System-wide disk I/O is not measured; batch disk concurrency is limited by the Disk I/O Jobs (--io-jobs) setting"
+    : `${ioMb.toFixed(1)} MB/s`;
 
-        cpuFills.forEach(fill => fill.style.width = `${cpu}%`);
-        cpuVals.forEach(val => val.innerText = `${cpu}%`);
-
-        ramFills.forEach(fill => fill.style.width = `${ramPct}%`);
-        ramVals.forEach(val => val.innerText = `${ramUsed} MB / ${(ramTotal/1024).toFixed(0)} GB`);
-
-        const ioTooltip = ioMb === null
-          ? "System-wide disk I/O is not measured; batch disk concurrency is limited by the Disk I/O Jobs (--io-jobs) setting"
-          : `${ioMb.toFixed(1)} MB/s`;
-
-        ioFills.forEach(fill => {
-          fill.classList.toggle("unavailable", ioMb === null);
-          fill.style.width = ioMb === null ? "0%" : `${Math.min(100, (ioMb / 300) * 100)}%`;
-          fill.title = ioTooltip;
-        });
-        ioVals.forEach(val => {
-          val.classList.toggle("muted", ioMb === null);
-          val.innerText = ioMb === null ? "Not measured" : `${ioMb.toFixed(1)} MB/s`;
-          val.title = ioTooltip;
-        });
-      }
-    } catch (e) {
-      console.log("[Telemetry Error]", e);
-    }
+  const setWidth = (fill, width) => {
+    if (fill.style.width !== width) fill.style.width = width;
+  };
+  const setText = (el, text) => {
+    if (el.textContent !== text) el.textContent = text;
   };
 
-  updateMetrics();
-  telemetryTimer = setInterval(updateMetrics, 1000);
+  cpuFills.forEach(fill => setWidth(fill, `${cpu}%`));
+  cpuVals.forEach(el => setText(el, `${cpu}%`));
 
-  document.addEventListener("visibilitychange", () => {
-    if (document.hidden) {
-      clearInterval(telemetryTimer);
-      telemetryTimer = null;
-    } else if (!telemetryTimer) {
-      updateMetrics();
-      telemetryTimer = setInterval(updateMetrics, 1000);
+  ramFills.forEach(fill => setWidth(fill, `${ramPct}%`));
+  ramVals.forEach(el => setText(el, `${ramUsed} MB / ${(ramTotal/1024).toFixed(0)} GB`));
+
+  const ioWidth = ioMb === null ? "0%" : `${Math.min(100, (ioMb / 300) * 100)}%`;
+  const ioText = ioMb === null ? "Not measured" : `${ioMb.toFixed(1)} MB/s`;
+
+  ioFills.forEach(fill => {
+    setWidth(fill, ioWidth);
+    if (fill.classList.contains("unavailable") !== (ioMb === null)) {
+      fill.classList.toggle("unavailable", ioMb === null);
     }
+    if (fill.title !== ioTooltip) fill.title = ioTooltip;
+  });
+  ioVals.forEach(val => {
+    setText(val, ioText);
+    if (val.classList.contains("muted") !== (ioMb === null)) {
+      val.classList.toggle("muted", ioMb === null);
+    }
+    if (val.title !== ioTooltip) val.title = ioTooltip;
   });
 }
+
+const telemetryLoop = createTelemetryLoop({
+  invoke,
+  onData: applyTelemetryData,
+  onError: (e) => console.log("[Telemetry Error]", e),
+  doc: document,
+});
 
 // ─── Real-Time Episode Queue & Progress/Duration Tracker ───────────────────
 
@@ -931,6 +925,7 @@ class JobController {
     const workers = parseInt(document.getElementById(`${this.mode}-workers`)?.value || '8');
     const ioJobs  = parseInt(document.getElementById(`${this.mode}-io-jobs`)?.value || '2');
     updateWorkerChips(true, workers, ioJobs);
+    telemetryLoop.setJobActive(true);
 
     const inputDir = document.getElementById(`${this.mode}-input-dir`)?.value?.trim();
     if (inputDir) {
@@ -970,6 +965,7 @@ class JobController {
       this.lastExitCode = -1;
       this.setRunning(false);
       updateWorkerChips(false);
+      telemetryLoop.setJobActive(false);
       this.cleanupListeners();
     }
   }
@@ -1004,6 +1000,7 @@ class JobController {
     this.lastExitCode = tracker.state?.batchSuccess ? code : -1;
     this.setRunning(false);
     updateWorkerChips(false);
+    telemetryLoop.setJobActive(false);
   }
 
   setRunning(running) {
@@ -1218,7 +1215,7 @@ function initApp() {
 
   new JobController("remux");
   new JobController("extract");
-  startTelemetryMonitor();
+  telemetryLoop.start();
 
   if (window.matchMedia) {
     window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", e => {
