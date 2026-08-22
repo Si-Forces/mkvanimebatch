@@ -128,6 +128,7 @@ def test_assets_dir_wins_tie_over_its_parent(tmp_path):
         search_dirs, season_dir / "fonts", assets_dir=assets_dir
     )
 
+    assert resolver.fallback_sub_index is not None
     matched = resolver.fallback_sub_index.lookup("E", "01", "1")
     assert matched is not None
     assert matched[0] == assets_dir / "Show - 01.ass"

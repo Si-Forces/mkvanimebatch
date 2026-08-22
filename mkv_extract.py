@@ -303,8 +303,7 @@ def _run(
     # A manager passed in from main() is shared across directory passes; its
     # staging directory must outlive this pass and is cleaned up by the caller.
     owns_font_manager = font_manager is None
-    if owns_font_manager:
-        font_manager = FontManager(fonts_dir, hash_memo=font_hash_memo)
+    active_font_manager = FontManager(fonts_dir, hash_memo=font_hash_memo) if font_manager is None else font_manager
     stale_subs_tracker = StaleSubtitleTracker()
 
     logger.info("Processing %d file(s) (up to %d at a time)...", len(mkv_files), max_workers)
@@ -318,7 +317,7 @@ def _run(
             process_file,
             mkv_file,
             json_cache.get(mkv_file.path),
-            font_manager,
+            active_font_manager,
             stale_subs_tracker=stale_subs_tracker,
             sub_offset=sub_offset,
             io_semaphore=io_semaphore,
@@ -375,7 +374,7 @@ def _run(
 
     stale_subs_tracker.cleanup(output_dir)
     if owns_font_manager:
-        font_manager.cleanup_staging()
+        active_font_manager.cleanup_staging()
 
     logger.info("=========================================")
     logger.info(" All files processed.")
