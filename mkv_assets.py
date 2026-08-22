@@ -394,8 +394,16 @@ class AssetResolver:
         all_subs: list[Path],
         dry_run: bool,
         interactive: bool = True,
+        assigned_subtitle: Path | None = None,
     ) -> tuple[Path | None, int | None, str, bool, str | None]:
         season, ep_type, ep = parsed
+
+        # Explicit human assignment (GUI/CLI) overrides every automatic source.
+        if assigned_subtitle is not None:
+            sub_lang = detect_sub_lang(assigned_subtitle.stem)
+            logger.info("  Subtitle       : %s [%s] (manually assigned)", assigned_subtitle.name, LANG_LABEL.get(sub_lang, sub_lang))
+            return assigned_subtitle, None, sub_lang, True, None
+
         result = self.sub_index.lookup(ep_type, ep, season, local_dir=video.path.parent)
         if result is not None:
             sub_path, lang = result
@@ -510,6 +518,7 @@ class AssetResolver:
         dry_run: bool = False,
         chapter_fallback_count: int = 0,
         interactive: bool = True,
+        assigned_subtitle: Path | None = None,
     ) -> ResolvedAssets:
         parsed = video.parsed
         if not parsed:
@@ -527,7 +536,7 @@ class AssetResolver:
 
         sub_file, embedded_id, sub_lang, matched, skip_reason = self._resolve_sub(
             video, parsed, json_data, all_subs or [], dry_run,
-            interactive=interactive
+            interactive=interactive, assigned_subtitle=assigned_subtitle
         )
         chapter_file = self._resolve_chap(
             parsed, chapter_fallback_count, has_source_chapters=has_chapters(json_data)

@@ -529,11 +529,13 @@ def _plan_jobs(
     use_source_fonts: bool = False,
     dry_run:          bool = False,
     root_input_dir:   Path | None = None,
+    sub_assignments:  dict[str, Path] | None = None,
 ) -> tuple[list[PlannedJob], list[str], list[str]]:
 
     out_dir = output_dir or Path()
     subs_list = all_subs or []
     root_dir = root_input_dir or out_dir
+    assignments = sub_assignments or {}
 
     chapter_fallback_count = resolver.count_unmatched_chapter_videos(videos)
 
@@ -582,6 +584,10 @@ def _plan_jobs(
             continue
 
         json_data = json_cache.get(video)
+        assigned_sub = assignments.get(item_id)
+        if assigned_sub is not None and not assigned_sub.is_file():
+            logger.warning("  Assigned subtitle '%s' no longer exists — falling back to automatic matching.", assigned_sub)
+            assigned_sub = None
         res_assets = resolver.resolve_for(
             video_file,
             json_data,
@@ -589,6 +595,7 @@ def _plan_jobs(
             dry_run=dry_run,
             chapter_fallback_count=chapter_fallback_count,
             interactive=True,
+            assigned_subtitle=assigned_sub,
         )
 
         if not res_assets.matched_subtitle:
@@ -717,7 +724,7 @@ def _print_summary(output_dir: Path, matched_files: list[str], skipped_files: li
             logger.info("  - %s", entry)
 
 
-# ─── PLAN INSPECTION EXTRACTION ──────────────────────────────────────────────
+# ─── INSPECTION MANIFEST GENERATION ──────────────────────────────────────────
 def _parse_resolution(pixel_dimensions: str) -> str | None:
     if not pixel_dimensions:
         return None
@@ -873,7 +880,7 @@ def _extract_mkv_metadata(json_data: dict | None) -> dict:
     }
 
 
-def generate_directory_plan(input_dir: Path, persistent_cache: PersistentInspectCache | None = None) -> dict:
+def generate_inspection_manifest(input_dir: Path, persistent_cache: PersistentInspectCache | None = None) -> dict:
     all_mkvs = scan_mkv_files(input_dir)
     if not all_mkvs:
         return {"version": 1, "items": []}
@@ -885,15 +892,41 @@ def generate_directory_plan(input_dir: Path, persistent_cache: PersistentInspect
             persistent_cache=persistent_cache,
         )
 
+    # Discover external subtitle candidates once per distinct release directory
+    # so the UI can offer manual subtitle assignment before a run.
+    scan_cache: dict[Path, ScanResults] = {}
+    resolver_by_dir: dict[Path, AssetResolver] = {}
+    for mkv_dir in sorted({m.path.parent for m in all_mkvs}):
+        search_dirs = ancestor_dirs(mkv_dir, input_dir)
+        no_fonts_dir = mkv_dir / ".mkvanimebatch-no-fonts"
+        resolver_by_dir[mkv_dir] = AssetResolver.discover(
+            search_dirs, no_fonts_dir, scan_cache=scan_cache
+        )
+
+    sub_ids_by_dir: dict[Path, list[str]] = {
+        mkv_dir: [
+            get_item_id(sub_path, input_dir)
+            for sub_path in resolver.sub_index.all_subtitles
+        ]
+        for mkv_dir, resolver in resolver_by_dir.items()
+    }
+
+    if persistent_cache is not None:
+        persistent_cache.save()
+
     items = []
     for mkv in all_mkvs:
         json_data = json_cache.get(mkv.path)
         meta = _extract_mkv_metadata(json_data)
-        items.append({
+        item = {
             "id": get_item_id(mkv.path, input_dir),
             "name": mkv.name,
             "metadata": meta,
-        })
+        }
+        candidates = sub_ids_by_dir[mkv.path.parent]
+        if candidates:
+            item["sub_candidates"] = candidates
+        items.append(item)
 
     return {"version": 1, "items": items}
 
@@ -918,6 +951,7 @@ def _run(
     scan_cache:       dict[Path, ScanResults] | None = None,
     root_input_dir:   Path | None = None,
     ffmpeg_threads:   int | None = None,
+    sub_assignments:  dict[str, Path] | None = None,
 ) -> bool:
     if not videos:
         logger.warning("No MKV files to process in '%s'.", mkv_dir.name)
@@ -949,6 +983,7 @@ def _run(
         videos, json_cache, resolver,
         output_dir=output_dir, all_subs=all_subs, use_source_fonts=use_source_fonts, dry_run=dry_run,
         root_input_dir=root_input_dir,
+        sub_assignments=sub_assignments,
     )
 
     if dry_run:
@@ -1038,9 +1073,12 @@ def main() -> None:
     parser.add_argument("--clear-cache", action="store_true",
                         help="Clear persistent inspection cache and exit.")
     parser.add_argument("--plan", action="store_true",
-                        help="Output JSON directory plan and exit without processing.")
+                        help="Output inspection manifest as JSON document and exit without processing.")
     parser.add_argument("--events", action="store_true",
                         help="Emit structured @event: JSON-line events on stdout.")
+    parser.add_argument("--sub-assignments", type=str, default=None,
+                        help="Path to a JSON file mapping manifest item IDs to subtitle file paths "
+                             "(from GUI manual selection). Assigned subtitles take precedence over automatic matching.")
     cfg = parser.parse_args()
 
     set_events_enabled(cfg.events)
@@ -1069,8 +1107,22 @@ def main() -> None:
     assets_override = Path(cfg.assets_dir).resolve() if cfg.assets_dir else None
     dry_run = cfg.dry_run
 
+    sub_assignments: dict[str, Path] | None = None
+    if cfg.sub_assignments:
+        try:
+            raw = json.loads(Path(cfg.sub_assignments).read_text(encoding="utf-8"))
+            if not isinstance(raw, dict) or raw.get("version") != 1 or not isinstance(raw.get("assignments"), dict):
+                raise ValueError("expected {\"version\": 1, \"assignments\": {<item_id>: <subtitle_path>}}")
+            sub_assignments = {}
+            for item_id, sub_path in raw["assignments"].items():
+                p = Path(str(sub_path))
+                sub_assignments[item_id] = p if p.is_absolute() else root_input_dir / p
+        except (OSError, ValueError) as exc:
+            logger.error("Invalid --sub-assignments file '%s': %s", cfg.sub_assignments, exc)
+            sys.exit(1)
+
     if cfg.plan:
-        plan_manifest = generate_directory_plan(root_input_dir, persistent_cache)
+        plan_manifest = generate_inspection_manifest(root_input_dir, persistent_cache)
         print(json.dumps(plan_manifest, ensure_ascii=False))
         sys.exit(0)
 
@@ -1167,6 +1219,7 @@ def main() -> None:
                     scan_cache=scan_cache,
                     root_input_dir=root_input_dir,
                     ffmpeg_threads=cfg.ffmpeg_threads,
+                    sub_assignments=sub_assignments,
                 )
                 if not dir_success:
                     overall_success = False

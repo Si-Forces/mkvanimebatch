@@ -53,6 +53,20 @@ export function createQueueState(manifest, options = {}) {
   return state;
 }
 
+/**
+ * Keep only the manual assignments whose item id still exists in the given
+ * manifest, so a rescan does not silently drop selections for surviving items.
+ */
+export function carryOverAssignments(previousAssignments, manifest) {
+  const carried = new Map();
+  for (const entry of manifest?.items ?? []) {
+    if (entry && previousAssignments.has(entry.id)) {
+      carried.set(entry.id, previousAssignments.get(entry.id));
+    }
+  }
+  return carried;
+}
+
 export function reduceQueueEvent(state, event, now = Date.now()) {
   if (!state || !event || typeof event !== "object" || event.version !== 1) {
     return state;

@@ -4,7 +4,7 @@
 
 "use strict";
 
-import { createQueueState, reduceQueueEvent, finalizeQueueState } from "./queue-state.js";
+import { createQueueState, reduceQueueEvent, finalizeQueueState, carryOverAssignments } from "./queue-state.js";
 
 // ─── Preset Configurations ──────────────────────────────────────────────────
 
@@ -322,6 +322,9 @@ class QueueTracker {
     this.state = createQueueState({ version: 1, items: [] }, { mode });
     this.cards = new Map();
     this.scanToken = 0;
+    // GUI manual subtitle selection (remux only): item id -> candidate path
+    this.assignments = new Map();
+    this.candidatesByItem = new Map();
   }
 
   emptyStateMarkup(title, description, actionLabel = "📁 Choose Input Folder") {
@@ -343,6 +346,8 @@ class QueueTracker {
   startScan() {
     const token = ++this.scanToken;
     this.cards.clear();
+    // Assignments and candidates survive a rescan: populateFromInspection
+    // rebuilds candidates and carries over assignments whose items persist.
     this.state = createQueueState({ version: 1, items: [] }, { mode: this.mode });
     if (this.listEl) {
       this.listEl.innerHTML = `
@@ -375,6 +380,8 @@ class QueueTracker {
   reset(title = "No Episodes Queued", description = "Choose an input folder to scan MKV episodes into this batch.") {
     this.scanToken++;
     this.cards.clear();
+    this.assignments.clear();
+    this.candidatesByItem.clear();
     this.state = createQueueState({ version: 1, items: [] }, { mode: this.mode });
     if (this.listEl) this.listEl.innerHTML = this.emptyStateMarkup(title, description);
     if (this.countEl) this.countEl.textContent = "Ready";
@@ -387,6 +394,16 @@ class QueueTracker {
     const bitrate = document.getElementById(`${this.mode}-bitrate`)?.value?.trim() || "192k";
     this.state = createQueueState(manifest, { mode: this.mode });
 
+    // Refresh candidate lists; keep assignments whose item still exists so a
+    // rescan right before Start does not silently drop manual selections.
+    this.assignments = carryOverAssignments(this.assignments, manifest);
+    this.candidatesByItem.clear();
+    for (const item of manifest?.items ?? []) {
+      if (Array.isArray(item.sub_candidates) && item.sub_candidates.length > 0) {
+        this.candidatesByItem.set(item.id, item.sub_candidates);
+      }
+    }
+
     if (!manifest || !manifest.items || manifest.items.length === 0) {
       this.reset(
         "No MKV files found",
@@ -397,17 +414,20 @@ class QueueTracker {
 
     if (this.countEl) this.countEl.textContent = `${this.state.totalCount} Episodes Queued`;
 
-    if (this.state) {
+    if (this.state && this.listEl) {
+      const frag = document.createDocumentFragment();
       let epIdx = 1;
       for (const id of this.state.order) {
         const item = this.state.items.get(id);
         const card = this.createCardElement(item.id, item.name, epIdx++);
-        this.listEl.appendChild(card.el);
         this.cards.set(id, card);
+        this.applyAssignmentToCard(id);
         if (item.metadata) {
           this.applyMetadata(card, item.metadata, bitrate);
         }
+        frag.appendChild(card.el);
       }
+      this.listEl.appendChild(frag);
     }
   }
 
@@ -440,6 +460,9 @@ class QueueTracker {
     const codecTag = "MKV";
     const trackTag1 = "Inspecting tracks...";
     const trackTag2 = "Reading headers...";
+    const subAssignBtn = this.mode === "remux"
+      ? `<button type="button" class="sub-assign-btn" title="Manually assign a subtitle file">+ Sub</button>`
+      : "";
 
     el.innerHTML = `
       <div class="ep-card-top">
@@ -451,6 +474,7 @@ class QueueTracker {
       <div class="ep-tracks">
         <span class="track-tag cyan">${trackTag1}</span>
         <span class="track-tag magenta">${trackTag2}</span>
+        ${subAssignBtn}
       </div>
       <div class="ep-progress-bar">
         <div class="ep-progress-fill" style="width: 0%;"></div>
@@ -459,6 +483,9 @@ class QueueTracker {
 
     const titleEl = el.querySelector(".ep-title");
     if (titleEl) titleEl.textContent = name;
+
+    const subBtn = el.querySelector(".sub-assign-btn");
+    if (subBtn) subBtn.dataset.itemId = id;
 
     return {
       el,
@@ -470,7 +497,24 @@ class QueueTracker {
       codec: el.querySelector(".ep-codec"),
       tag1: el.querySelector(".track-tag.cyan"),
       tag2: el.querySelector(".track-tag.magenta"),
+      subBtn,
     };
+  }
+
+  applyAssignmentToCard(id) {
+    const card = this.cards.get(id);
+    if (!card?.subBtn) return;
+    const assigned = this.assignments.get(id);
+    if (assigned) {
+      const base = assigned.split("/").pop();
+      card.subBtn.textContent = `Sub: ${base}`;
+      card.subBtn.classList.add("assigned");
+      card.subBtn.title = `Manually assigned: ${assigned}`;
+    } else {
+      card.subBtn.textContent = "+ Sub";
+      card.subBtn.classList.remove("assigned");
+      card.subBtn.title = "Manually assign a subtitle file";
+    }
   }
 
   handleEvent(event) {
@@ -585,6 +629,62 @@ const extractQueue = new QueueTracker("extract");
 
 function queueFor(mode) {
   return mode === "extract" ? extractQueue : remuxQueue;
+}
+
+// ─── GUI Manual Subtitle Selection ──────────────────────────────────────────
+
+let subAssignModalItemId = null;
+
+function openSubAssignModal(itemId) {
+  const tracker = remuxQueue;
+  const item = tracker.state?.items.get(itemId);
+  const candidates = tracker.candidatesByItem.get(itemId) || [];
+  if (!item) return;
+
+  subAssignModalItemId = itemId;
+  const titleEl = document.getElementById("sub-assign-episode");
+  if (titleEl) titleEl.textContent = item.name;
+
+  renderSubAssignList(candidates, tracker.assignments.get(itemId) || null);
+
+  const modal = document.getElementById("sub-assign-modal");
+  if (modal) modal.classList.add("active");
+}
+
+function renderSubAssignList(candidates, assignedPath) {
+  const listEl = document.getElementById("sub-assign-list");
+  if (!listEl) return;
+  listEl.innerHTML = "";
+
+  if (candidates.length === 0) {
+    listEl.innerHTML = `<div class="sub-assign-empty">No external subtitle files were found near this episode.</div>`;
+    return;
+  }
+
+  for (const candidate of candidates) {
+    const base = candidate.split("/").pop();
+    const dirHint = candidate.includes("/")
+      ? candidate.slice(0, candidate.lastIndexOf("/"))
+      : "";
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "sub-assign-option" + (candidate === assignedPath ? " selected" : "");
+    btn.dataset.path = candidate;
+    const nameSpan = document.createElement("span");
+    nameSpan.className = "sub-assign-name";
+    nameSpan.textContent = base;
+    const dirSpan = document.createElement("span");
+    dirSpan.className = "sub-assign-dir";
+    dirSpan.textContent = dirHint || "(input root)";
+    btn.append(nameSpan, dirSpan);
+    listEl.appendChild(btn);
+  }
+}
+
+function closeSubAssignModal() {
+  subAssignModalItemId = null;
+  const modal = document.getElementById("sub-assign-modal");
+  if (modal) modal.classList.remove("active");
 }
 
 async function scanInputDirectory(path, mode) {
@@ -856,7 +956,14 @@ class JobController {
     });
 
     try {
-      await invoke("run_job", { mode: this.mode, args });
+      let assignmentsJson = null;
+      if (this.mode === "remux" && tracker.assignments.size > 0) {
+        assignmentsJson = JSON.stringify({
+          version: 1,
+          assignments: Object.fromEntries(tracker.assignments),
+        });
+      }
+      await invoke("run_job", { mode: this.mode, args, assignmentsJson });
     } catch (err) {
       appendLog(this.logEl, `[ERROR] ${err}`);
       tracker.finalize(-1);
@@ -997,6 +1104,33 @@ function initApp() {
   document.addEventListener("click", e => {
     const emptyAction = e.target.closest(".empty-state-action[data-target]");
     if (emptyAction) chooseInputFolder(emptyAction.dataset.target);
+  });
+
+  // ─── GUI Manual Subtitle Selection ────────────────────────────────────────
+  const remuxList = document.getElementById("remux-episode-list");
+  if (remuxList) {
+    remuxList.addEventListener("click", e => {
+      const btn = e.target.closest(".sub-assign-btn");
+      if (btn?.dataset.itemId) openSubAssignModal(btn.dataset.itemId);
+    });
+  }
+  safeAddListener("sub-assign-close", "click", closeSubAssignModal);
+  safeAddListener("sub-assign-clear", "click", () => {
+    if (subAssignModalItemId) {
+      remuxQueue.assignments.delete(subAssignModalItemId);
+      remuxQueue.applyAssignmentToCard(subAssignModalItemId);
+    }
+    closeSubAssignModal();
+  });
+  safeAddListener("sub-assign-modal", "click", e => {
+    if (e.target === e.currentTarget) closeSubAssignModal();
+  });
+  safeAddListener("sub-assign-list", "click", e => {
+    const option = e.target.closest(".sub-assign-option");
+    if (!option?.dataset.path || !subAssignModalItemId) return;
+    remuxQueue.assignments.set(subAssignModalItemId, option.dataset.path);
+    remuxQueue.applyAssignmentToCard(subAssignModalItemId);
+    closeSubAssignModal();
   });
 
   // ─── Active Profile Dropdown Menu Handlers ────────────────────────────────
