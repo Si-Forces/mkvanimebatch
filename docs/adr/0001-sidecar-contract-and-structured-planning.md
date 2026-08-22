@@ -10,3 +10,10 @@ We establish a versioned Sidecar Contract between the desktop UI and Python engi
 3. The desktop adapter (`commands.rs`) strips the `@event:` prefix and emits `job-event` payloads to the frontend, while passing human-readable lines as `job-log`.
 4. The frontend `QueueTracker` consumes `job-event` via a pure reducer in `queue-state.js` indexed strictly by item ID, eliminating fuzzy matching, card invention, regex log parsing, and optimistic completion heuristics.
 
+## Addendum: GUI Manual Subtitle Selection (additive, still v1)
+Manual subtitle assignment extends the contract without a version bump:
+1. **Candidates out**: manifest items may carry an additive optional field `"sub_candidates": [<relative_posix_path>, ...]` listing every external subtitle discovered for that item across its ancestor chain. The field is omitted when empty; consumers must treat it as optional.
+2. **Assignments in**: the frontend sends manual selections as a JSON document (`{"version": 1, "assignments": {<item_id>: <subtitle_path>}}`). Rust persists this payload verbatim to a temp file and appends `--sub-assignments <path>` to the sidecar invocation — the adapter never interprets the payload.
+3. **Precedence**: an assigned subtitle overrides every automatic source (local index match, embedded track, fallback assets). A stale path at run time falls back to automatic matching rather than failing the job.
+4. Scope: candidates cover the input-root ancestor chain only; `--assets-dir` fallback assets remain automatic-only and are not offered as GUI picks.
+
