@@ -254,6 +254,8 @@ class PlannedJob:
 class JobResult:
     log:            list[str] = field(default_factory=list)
     skipped_reason: str | None = None
+    error_reason:   str | None = None
+    failed:         bool = False
 
 
 # ─── AUDIO CONVERSION ────────────────────────────────────────────────────────
@@ -404,14 +406,22 @@ def process_job(
         emit_event("item_complete", item_id=job.item_id, file=video_name, status="skipped", reason=reason)
         return result
 
+    def _error(reason: str, detail: str) -> JobResult:
+        result.log.append(f"  !! ERROR: {video_name}")
+        result.log.append(f"  !! Detail : {detail}")
+        result.failed = True
+        result.error_reason = reason
+        emit_event("item_complete", item_id=job.item_id, file=video_name, status="error", error=reason)
+        return result
+
     json_data = json_cache.get(video)
     if json_data is None:
-        return _skip("mkvmerge failed", "mkvmerge inspection failed.")
+        return _error("mkvmerge failed", "mkvmerge inspection failed.")
 
     selection = select_tracks(json_data)
 
     if selection.video_id is None:
-        return _skip("no video track", "No video track found.")
+        return _error("no video track", "No video track found.")
 
     if selection.audio_id is not None:
         result.log.append(
@@ -448,7 +458,7 @@ def process_job(
                 complexity=complexity,
             )
             if temp_opus is None:
-                return _skip("Opus conversion failed", "ffmpeg FLAC→Opus conversion failed.")
+                return _error("Opus conversion failed", "ffmpeg FLAC→Opus conversion failed.")
 
         if job.chapter_file:
             result.log.append(f"  Chapters       : {job.chapter_file.name} (external)")
@@ -480,8 +490,9 @@ def process_job(
             result.log.append(f"  ERROR: mkvmerge timed out after {SUBPROCESS_TIMEOUT}s.")
             temp_output.unlink(missing_ok=True)
             result.log.append("  Removed partial output.")
-            result.skipped_reason = f"mkvmerge timed out after {SUBPROCESS_TIMEOUT}s"
-            emit_event("item_complete", item_id=job.item_id, file=video_name, status="skipped", reason=result.skipped_reason)
+            result.failed = True
+            result.error_reason = f"mkvmerge timed out after {SUBPROCESS_TIMEOUT}s"
+            emit_event("item_complete", item_id=job.item_id, file=video_name, status="error", error=result.error_reason)
             return result
 
         if run_result.stderr.strip():
@@ -491,8 +502,9 @@ def process_job(
             result.log.append(f"  ERROR: mkvmerge failed (exit {run_result.returncode}).")
             temp_output.unlink(missing_ok=True)
             result.log.append("  Removed partial output.")
-            result.skipped_reason = f"mkvmerge failed, exit {run_result.returncode}"
-            emit_event("item_complete", item_id=job.item_id, file=video_name, status="skipped", reason=result.skipped_reason)
+            result.failed = True
+            result.error_reason = f"mkvmerge failed, exit {run_result.returncode}"
+            emit_event("item_complete", item_id=job.item_id, file=video_name, status="error", error=result.error_reason)
             return result
 
         temp_output.replace(output_file)
@@ -579,7 +591,7 @@ def _plan_jobs(
         )
 
         if not res_assets.matched_subtitle:
-            record_skip(video_file, "no subtitle matched")
+            record_skip(video_file, res_assets.skip_reason or "no subtitle matched")
             continue
 
         if res_assets.subtitle_file:
@@ -661,7 +673,13 @@ def _execute_jobs(
         progress = completed_jobs / total_jobs
         try:
             res = future.result()
-            if res.skipped_reason:
+            if res.failed or res.error_reason:
+                skipped_files.append(f"{job.video_name} (failed: {res.error_reason or 'error'})")
+                logger.info(
+                    "[%d/%d (%.0f%%)] Failed: %s",
+                    completed_jobs, total_jobs, progress * 100, job.video_name,
+                )
+            elif res.skipped_reason:
                 skipped_files.append(f"{job.video_name} ({res.skipped_reason})")
                 logger.info(
                     "[%d/%d (%.0f%%)] Skipped: %s",
@@ -721,6 +739,8 @@ def _parse_resolution(pixel_dimensions: str) -> str | None:
 
     if "3840" in pixel_dimensions or "2160" in pixel_dimensions:
         return "4K"
+    if "2560" in pixel_dimensions or "1440" in pixel_dimensions:
+        return "1440p"
     if "1920" in pixel_dimensions or "1080" in pixel_dimensions:
         return "1080p"
     if "1280" in pixel_dimensions or "720" in pixel_dimensions:
@@ -750,8 +770,11 @@ def _parse_audio_track_info(track: dict) -> tuple[str, bool]:
     codec_id = props.get("codec_id", "")
     c_low = f"{codec} {codec_id}".lower()
     is_flac = "flac" in c_low
-    channels = props.get("audio_channels", 2)
-    ch_str = _CH_MAP.get(channels, "2.0")
+    channels = props.get("audio_channels")
+    if channels is not None:
+        ch_str = _CH_MAP.get(channels, f"{channels}.0" if channels <= 2 else f"{channels}.1")
+    else:
+        ch_str = None
 
     if is_flac:
         aud_name = "FLAC"
@@ -761,10 +784,14 @@ def _parse_audio_track_info(track: dict) -> tuple[str, bool]:
         aud_name = "Opus"
     elif "ac3" in c_low or "ac-3" in c_low:
         aud_name = "AC3"
+    elif codec:
+        aud_name = codec
     else:
         aud_name = "Audio"
 
-    return f"{aud_name} {ch_str}", is_flac
+    if ch_str is not None:
+        return f"{aud_name} {ch_str}", is_flac
+    return aud_name, is_flac
 
 
 def _extract_mkv_metadata(json_data: dict | None) -> dict:
@@ -839,9 +866,9 @@ def _extract_mkv_metadata(json_data: dict | None) -> dict:
         "video_codec": video_codec,
         "video_tag": video_tag,
         "audio_summary": audio_summary,
-        "has_flac": has_flac if has_audio else False,
+        "has_flac": has_flac if has_audio else None,
         "sub_summary": sub_summary,
-        "fonts_count": len(font_attachments),
+        "fonts_count": len(font_attachments) if (json_data and "attachments" in json_data) else None,
     }
 
 
@@ -914,14 +941,7 @@ def _run(
 
     json_cache = inspect_videos(videos_to_inspect, pool, persistent_cache=persistent_cache) if videos_to_inspect else {}
 
-    seen_subs: set[Path] = set()
-    all_subs: list[Path] = []
-    for d in search_dirs:
-        for sf in scan_assets(d, scan_cache).subs:
-            if sf.path not in seen_subs:
-                seen_subs.add(sf.path)
-                all_subs.append(sf.path)
-    all_subs.sort(key=natural_sort_key)
+    all_subs = resolver.all_subtitles
 
     jobs, matched_files, skipped_files = _plan_jobs(
         videos, json_cache, resolver,

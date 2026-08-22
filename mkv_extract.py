@@ -132,8 +132,8 @@ def process_file(
     emit_event("item_start", item_id=item_id, file=mkv_path.name)
 
     if json_data is None:
-        log.append(f"  WARNING: mkvmerge inspection failed for '{mkv_path.name}', skipping.")
-        emit_event("item_complete", item_id=item_id, file=mkv_path.name, status="skipped", reason="mkvmerge failed")
+        log.append(f"  ERROR: mkvmerge inspection failed for '{mkv_path.name}'.")
+        emit_event("item_complete", item_id=item_id, file=mkv_path.name, status="error", error="mkvmerge inspection failed")
         return mkv_path, log, False
 
     file_stem = mkv_path.stem
