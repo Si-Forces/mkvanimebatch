@@ -306,6 +306,38 @@ test("reduceQueueEvent is a pure reducer and does not mutate input state", () =>
   assert.equal(completedState.items.get("ep1.mkv").durationSec, "1.0");
 });
 
+test("skips and plans report no duration instead of elapsed batch time", () => {
+  let state = createQueueState({
+    version: 1,
+    items: [{ id: "ep1.mkv", name: "ep1.mkv" }, { id: "ep2.mkv", name: "ep2.mkv" }],
+  });
+  state = reduceQueueEvent(state, { version: 1, type: "batch_start", total: 2 }, 1000);
+
+  // Skipped without a prior item_start (planning-time skip).
+  state = reduceQueueEvent(state, {
+    version: 1,
+    type: "item_complete",
+    id: "ep1.mkv",
+    status: "skipped",
+    reason: "subtitle files found but none matched",
+  }, 56000);
+
+  assert.equal(state.items.get("ep1.mkv").status, "skipped");
+  assert.equal(state.skippedCount, 1);
+  assert.equal(state.items.get("ep1.mkv").durationSec, null);
+
+  // Same for dry-run planned outcomes.
+  state = reduceQueueEvent(state, {
+    version: 1,
+    type: "item_complete",
+    id: "ep2.mkv",
+    status: "planned",
+  }, 57000);
+
+  assert.equal(state.completedCount, 1);
+  assert.equal(state.items.get("ep2.mkv").durationSec, null);
+});
+
 test("carryOverAssignments keeps selections for surviving items and drops stale ones", () => {
   const assignments = new Map([
     ["Season 01/ep1.mkv", "Season 01/better.ass"],

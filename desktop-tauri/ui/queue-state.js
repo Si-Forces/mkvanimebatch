@@ -104,9 +104,6 @@ export function reduceQueueEvent(state, event, now = Date.now()) {
       const prevItem = state.items.get(event.id);
       if (isTerminal(prevItem.status)) return state;
 
-      const startTime = prevItem.startTime || state.batchStartTime;
-      const dur = startTime ? ((now - startTime) / 1000).toFixed(1) : null;
-
       // Completion status -> item patch plus which counters it increments.
       const outcomes = {
         completed: { status: "completed", completed: 1 },
@@ -120,6 +117,13 @@ export function reduceQueueEvent(state, event, now = Date.now()) {
         failed: 1,
       };
       const { completed = 0, skipped = 0, failed = 0, ...itemPatch } = outcome;
+
+      // Only measured work gets a duration: skips and dry-run plans are
+      // decided during planning without an item_start, so falling back to
+      // batch-elapsed time would report a meaningless number.
+      const timed = outcome.status === "completed" || outcome.status === "error";
+      const startTime = prevItem.startTime || state.batchStartTime;
+      const dur = timed && startTime ? ((now - startTime) / 1000).toFixed(1) : null;
 
       const nextItems = new Map(state.items);
       nextItems.set(event.id, {
