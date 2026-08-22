@@ -45,9 +45,9 @@ __all__ = [
     # types & data classes
     "EpisodeInfo",
     "FontClaim",
-    "FontInfo",
     # classes
     "FontHashMemo",
+    "FontInfo",
     "FontManager",
     "ParsedFile",
     "PersistentInspectCache",
