@@ -298,22 +298,35 @@
                   </div>
                 </div>
 
-                <!-- 2-Column Hardware / Concurrency Tuning: Workers & Disk I/O Jobs -->
-                <div class="form-group">
-                  <label class="form-label" style="display:flex;align-items:center;gap:2px;font-size:9.5px;">Workers <span title="Concurrent files to process (1-32)" style="cursor:help;opacity:0.85;font-size:10px;">ⓘ</span></label>
-                  <div class="number-stepper" style="width:100%;">
-                    <button type="button" class="stepper-btn minus" aria-label="Decrease workers">−</button>
-                    <input type="number" id="remux-workers" value="8" min="1" max="64" />
-                    <button type="button" class="stepper-btn plus" aria-label="Increase workers">+</button>
-                  </div>
-                </div>
+                <!-- 3-Column Hardware / Concurrency Tuning: Workers, Disk I/O Jobs, FFmpeg Threads -->
+                <div class="form-group full" style="margin-bottom: 2px;">
+                  <div class="form-grid-3col">
+                    <div class="form-group" style="margin-bottom: 0;">
+                      <label class="form-label" style="display:flex;align-items:center;gap:2px;font-size:9.5px;">Workers <span title="Concurrent files to process (1-64)" style="cursor:help;opacity:0.85;font-size:10px;">ⓘ</span></label>
+                      <div class="number-stepper" style="width:100%;">
+                        <button type="button" class="stepper-btn minus" aria-label="Decrease workers">−</button>
+                        <input type="number" id="remux-workers" value="8" min="1" max="64" />
+                        <button type="button" class="stepper-btn plus" aria-label="Increase workers">+</button>
+                      </div>
+                    </div>
 
-                <div class="form-group">
-                  <label class="form-label" style="display:flex;align-items:center;gap:2px;font-size:9.5px;">Disk I/O Jobs <span title="Max concurrent disk I/O streams (0 = unlimited)" style="cursor:help;opacity:0.85;font-size:10px;">ⓘ</span></label>
-                  <div class="number-stepper" style="width:100%;">
-                    <button type="button" class="stepper-btn minus" aria-label="Decrease IO jobs">−</button>
-                    <input type="number" id="remux-io-jobs" value="2" min="0" max="32" />
-                    <button type="button" class="stepper-btn plus">+</button>
+                    <div class="form-group" style="margin-bottom: 0;">
+                      <label class="form-label" style="display:flex;align-items:center;gap:2px;font-size:9.5px;">Disk I/O <span title="Max concurrent disk I/O streams (0 = unlimited)" style="cursor:help;opacity:0.85;font-size:10px;">ⓘ</span></label>
+                      <div class="number-stepper" style="width:100%;">
+                        <button type="button" class="stepper-btn minus" aria-label="Decrease IO jobs">−</button>
+                        <input type="number" id="remux-io-jobs" value="2" min="0" max="32" />
+                        <button type="button" class="stepper-btn plus" aria-label="Increase IO jobs">+</button>
+                      </div>
+                    </div>
+
+                    <div class="form-group" style="margin-bottom: 0;">
+                      <label class="form-label" style="display:flex;align-items:center;gap:2px;font-size:9.5px;">FFmpeg Thds <span title="Max CPU threads per Opus transcode job (empty = auto capped at 8)" style="cursor:help;opacity:0.85;font-size:10px;">ⓘ</span></label>
+                      <div class="number-stepper" style="width:100%;">
+                        <button type="button" class="stepper-btn minus" aria-label="Decrease FFmpeg threads">−</button>
+                        <input type="number" id="remux-ffmpeg-threads" placeholder="auto" min="1" max="64" />
+                        <button type="button" class="stepper-btn plus" aria-label="Increase FFmpeg threads">+</button>
+                      </div>
+                    </div>
                   </div>
                 </div>
 

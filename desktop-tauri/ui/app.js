@@ -15,6 +15,7 @@ const PRESETS = {
     complexity: "10",
     workers: "8",
     ioJobs: "2",
+    ffmpegThreads: "",
     subOffset: "0",
     keepFonts: true,
     dryRun: false,
@@ -26,6 +27,7 @@ const PRESETS = {
     complexity: "5",
     workers: "16",
     ioJobs: "4",
+    ffmpegThreads: "",
     subOffset: "0",
     keepFonts: false,
     dryRun: false,
@@ -37,6 +39,7 @@ const PRESETS = {
     complexity: "10",
     workers: "8",
     ioJobs: "2",
+    ffmpegThreads: "",
     subOffset: "0",
     keepFonts: true,
     dryRun: false,
@@ -79,6 +82,7 @@ function applyPreset(presetKey) {
   setVal("remux-cplx-val", p.complexity);
   setVal("remux-workers", p.workers);
   setVal("remux-io-jobs", p.ioJobs);
+  setVal("remux-ffmpeg-threads", p.ffmpegThreads || "");
   setVal("remux-sub-offset", p.subOffset);
   setChk("remux-keep-fonts", p.keepFonts);
   setChk("remux-dry-run", p.dryRun);
@@ -808,6 +812,7 @@ class JobController {
       const assetsDir = val("assets-dir"); if (assetsDir) args.push("--assets-dir", assetsDir);
       const bitrate = val("bitrate");    if (bitrate)   args.push("--bitrate",   bitrate);
       const cplx    = val("complexity") || val("cplx-val"); if (cplx) args.push("--complexity", cplx);
+      const ffmpegThreads = val("ffmpeg-threads"); if (ffmpegThreads) args.push("--ffmpeg-threads", ffmpegThreads);
       if (chk("keep-fonts")) args.push("--keep-fonts");
     }
 
@@ -1069,7 +1074,7 @@ function initApp() {
   }
 
   // Detect custom input modifications
-  ["remux-bitrate", "remux-complexity", "remux-cplx-val", "remux-workers", "remux-io-jobs", "remux-sub-offset", "remux-keep-fonts", "remux-dry-run", "remux-no-cache"].forEach(id => {
+  ["remux-bitrate", "remux-complexity", "remux-cplx-val", "remux-workers", "remux-io-jobs", "remux-ffmpeg-threads", "remux-sub-offset", "remux-keep-fonts", "remux-dry-run", "remux-no-cache"].forEach(id => {
     const el = document.getElementById(id);
     if (el) {
       el.addEventListener("change", () => applyPreset("custom"));
