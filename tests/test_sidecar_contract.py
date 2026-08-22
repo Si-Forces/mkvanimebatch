@@ -156,6 +156,34 @@ def test_dry_run_skip_event_keeps_parenthesized_filename_id(tmp_path, monkeypatc
     assert terminal[0]["item_id"] == "Show - 01 (BD 1080p).mkv"
 
 
+def test_skip_event_reason_distinguishes_missing_vs_unmatched_subtitles(tmp_path, monkeypatch):
+    """Frontend-facing contract: unmatched-subtitle skips must say WHY, so GUI
+    cards can distinguish 'no files on disk' from 'files exist but none match'."""
+    season = tmp_path / "Season 01"
+    season.mkdir()
+    (season / "Show - 02.ass").write_bytes(b"other episode")
+    video_path = season / "Show - 01.mkv"
+    video_path.write_bytes(b"video")
+    video = mkv_common._create_parsed_file(video_path)
+    resolver = AssetResolver.discover([season], season / "fonts")
+    emitted = []
+    monkeypatch.setattr(mkv_remux, "emit_event", lambda event_type, **payload: emitted.append((event_type, payload)))
+
+    mkv_remux._plan_jobs(
+        [video],
+        {video_path: None},
+        resolver,
+        output_dir=tmp_path / "Output",
+        all_subs=resolver.all_subtitles,
+        root_input_dir=tmp_path,
+    )
+
+    terminal = [p for e, p in emitted if e == "item_complete"]
+    assert len(terminal) == 1
+    assert terminal[0]["status"] == "skipped"
+    assert terminal[0]["reason"] == "subtitle files found but none matched"
+
+
 def test_plan_metadata_keeps_unknown_resolution_null():
     metadata = mkv_remux._extract_mkv_metadata({
         "tracks": [{
@@ -451,4 +479,69 @@ def test_extract_mkv_metadata_codec_id_only_flac():
     meta = mkv_remux._extract_mkv_metadata(json_val)
     assert meta["has_flac"] is True
     assert meta["audio_summary"] == "FLAC 2.0"
+
+
+def test_extract_mkv_metadata_unknown_channels_not_fabricated():
+    """Missing audio channels or codecs must not fabricate stereo 'Audio 2.0' or has_flac: False."""
+    json_val = {
+        "tracks": [
+            {
+                "type": "audio",
+                "properties": {}
+            }
+        ]
+    }
+    meta = mkv_remux._extract_mkv_metadata(json_val)
+    assert meta["audio_summary"] == "Audio"
+    assert meta["has_flac"] is False
+
+    # Completely missing tracks
+    meta_empty = mkv_remux._extract_mkv_metadata({"tracks": []})
+    assert meta_empty["has_flac"] is None
+    assert meta_empty["audio_summary"] is None
+
+
+def test_remux_error_event_emitted_on_failure(monkeypatch, tmp_path):
+    """Execution failure emits @event: item_complete with status='error' instead of 'skipped'."""
+    events = []
+    monkeypatch.setattr(mkv_common, "set_events_enabled", lambda _: None)
+    monkeypatch.setattr(mkv_remux, "emit_event", lambda ev_type, **k: events.append((ev_type, k)))
+
+    import subprocess
+    def mock_run_fail(cmd, **_k):
+        class Res:
+            returncode = 2
+            stderr = "mkvmerge error"
+        return Res()
+    monkeypatch.setattr(mkv_remux, "run_subprocess", mock_run_fail)
+
+    job = mkv_remux.PlannedJob(
+        video=tmp_path / "video.mkv",
+        video_name="video.mkv",
+        base="video",
+        output_file=tmp_path / "out.mkv",
+        subtitle_file=None,
+        subtitle_label="English",
+        subtitle_mkv_lang="eng",
+        chapter_file=None,
+        cover_file=None,
+        item_id="video.mkv",
+    )
+    tr = mkv_remux.TrackSelection(
+        video_id=0, audio_id=1, audio_index=0, audio_codec="A_AAC",
+        audio_channels=2, audio_lang="jpn", audio_name="Japanese",
+        audio_reason="test", has_source_chapters=False, source_cover_id=None
+    )
+    monkeypatch.setattr(mkv_remux, "select_tracks", lambda *a, **k: tr)
+
+    res = mkv_remux.process_job(
+        job, tmp_path / "temp", mkv_remux.FontInfo(args=(), count=0),
+        "192k", {job.video: {}}, ffmpeg_threads=2,
+    )
+    assert res.failed is True
+    complete_events = [k for ev_type, k in events if ev_type == "item_complete"]
+    assert len(complete_events) == 1
+    assert complete_events[0]["status"] == "error"
+    assert "exit 2" in complete_events[0]["error"]
+
 

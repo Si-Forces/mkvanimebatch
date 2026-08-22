@@ -275,7 +275,7 @@ function startTelemetryMonitor() {
         ramVals.forEach(val => val.innerText = `${ramUsed} MB / ${(ramTotal/1024).toFixed(0)} GB`);
 
         const ioTooltip = ioMb === null
-          ? "Disk I/O requires platform elevated metrics or extended counters"
+          ? "System-wide disk I/O is not measured; batch disk concurrency is limited by the Disk I/O Jobs (--io-jobs) setting"
           : `${ioMb.toFixed(1)} MB/s`;
 
         ioFills.forEach(fill => {
@@ -562,16 +562,16 @@ class QueueTracker {
 
   renderQueueCount() {
     if (!this.countEl || !this.state) return;
-    const total = this.state.totalCount;
-    const processed = this.state.completedCount + this.state.skippedCount + this.state.errorCount;
-    if (this.state.batchCompleted) {
-      if (this.state.errorCount > 0) {
-        this.countEl.textContent = `${this.state.completedCount} / ${total} Completed (${this.state.errorCount} Failed)`;
-      } else {
-        this.countEl.textContent = `${this.state.completedCount + this.state.skippedCount} / ${total} Completed`;
-      }
+    const { totalCount, completedCount, skippedCount, errorCount, batchCompleted } = this.state;
+    const processed = completedCount + skippedCount + errorCount;
+
+    if (batchCompleted) {
+      const parts = [`${completedCount} Completed`];
+      if (skippedCount > 0) parts.push(`${skippedCount} Skipped`);
+      if (errorCount > 0) parts.push(`${errorCount} Failed`);
+      this.countEl.textContent = `${parts.join(", ")} (${totalCount} Total)`;
     } else {
-      this.countEl.textContent = `${processed} / ${total} Processed`;
+      this.countEl.textContent = `${processed} / ${totalCount} Processed`;
     }
   }
 }

@@ -53,86 +53,84 @@ export function createQueueState(manifest, options = {}) {
   return state;
 }
 
-export function reduceQueueEvent(state, event) {
-  if (!state || !event || typeof event !== "object") {
-    return state;
-  }
-
-  if (event.version !== 1) {
+export function reduceQueueEvent(state, event, now = Date.now()) {
+  if (!state || !event || typeof event !== "object" || event.version !== 1) {
     return state;
   }
 
   switch (event.type) {
     case "batch_start": {
-      if (!state.batchStartTime) {
-        state.batchStartTime = Date.now();
-      }
-      if (typeof event.total === "number") {
-        state.expectedTotal = event.total;
-      }
-      return state;
+      return {
+        ...state,
+        batchStartTime: state.batchStartTime || now,
+        expectedTotal: typeof event.total === "number" ? event.total : state.expectedTotal,
+      };
     }
 
     case "item_start": {
-      if (!event.id) return state;
-      const item = state.items.get(event.id);
-      if (!item) return state;
+      if (!event.id || !state.items.has(event.id)) return state;
+      const prevItem = state.items.get(event.id);
+      if (isTerminal(prevItem.status)) return state;
 
-      if (isTerminal(item.status)) {
-        return state;
-      }
+      const nextItems = new Map(state.items);
+      nextItems.set(event.id, {
+        ...prevItem,
+        status: "processing",
+        startTime: prevItem.startTime || now,
+      });
 
-      item.status = "processing";
-      if (!item.startTime) {
-        item.startTime = Date.now();
-      }
-      return state;
+      return {
+        ...state,
+        items: nextItems,
+      };
     }
 
     case "item_complete": {
-      if (!event.id) return state;
-      const item = state.items.get(event.id);
-      if (!item) return state;
+      if (!event.id || !state.items.has(event.id)) return state;
+      const prevItem = state.items.get(event.id);
+      if (isTerminal(prevItem.status)) return state;
 
-      if (isTerminal(item.status)) {
-        return state;
-      }
+      const startTime = prevItem.startTime || state.batchStartTime;
+      const dur = startTime ? ((now - startTime) / 1000).toFixed(1) : null;
 
-      let dur = null;
-      if (item.startTime) {
-        dur = ((Date.now() - item.startTime) / 1000).toFixed(1);
-      } else if (state.batchStartTime) {
-        dur = ((Date.now() - state.batchStartTime) / 1000).toFixed(1);
-      }
-      item.durationSec = dur;
+      // Completion status -> item patch plus which counters it increments.
+      const outcomes = {
+        completed: { status: "completed", completed: 1 },
+        planned: { status: "planned", completed: 1 },
+        skipped: { status: "skipped", reason: event.reason || "Skipped", skipped: 1 },
+        error: { status: "error", error: event.error || "Failed", failed: 1 },
+      };
+      const outcome = outcomes[event.status] ?? {
+        status: "error",
+        error: `Unknown status: ${event.status}`,
+        failed: 1,
+      };
+      const { completed = 0, skipped = 0, failed = 0, ...itemPatch } = outcome;
 
-      const status = event.status;
-      if (status === "completed") {
-        item.status = "completed";
-        state.completedCount++;
-      } else if (status === "skipped") {
-        item.status = "skipped";
-        item.reason = event.reason || "Skipped";
-        state.skippedCount++;
-      } else if (status === "planned") {
-        item.status = "planned";
-        state.completedCount++;
-      } else if (status === "error") {
-        item.status = "error";
-        item.error = event.error || "Failed";
-        state.errorCount++;
-      } else {
-        item.status = "error";
-        item.error = `Unknown status: ${status}`;
-        state.errorCount++;
-      }
-      return state;
+      const nextItems = new Map(state.items);
+      nextItems.set(event.id, {
+        ...prevItem,
+        durationSec: dur,
+        reason: null,
+        error: null,
+        ...itemPatch,
+      });
+
+      return {
+        ...state,
+        items: nextItems,
+        completedCount: state.completedCount + completed,
+        skippedCount: state.skippedCount + skipped,
+        errorCount: state.errorCount + failed,
+      };
     }
 
     case "batch_complete": {
-      state.batchCompleted = true;
-      state.batchSuccess = event.success === true;
-      return state;
+      return {
+        ...state,
+        batchCompleted: true,
+        batchSuccess: event.success === true,
+      };
     }
 
     default:
@@ -143,19 +141,35 @@ export function reduceQueueEvent(state, event) {
 export function finalizeQueueState(state, exitCode) {
   if (!state) return state;
 
-  state.items.forEach((item) => {
+  let nextItems = state.items;
+  let addedErrors = 0;
+
+  for (const [id, item] of state.items.entries()) {
     if (!isTerminal(item.status)) {
-      item.status = "error";
-      item.error =
-        exitCode === 0
-          ? "Protocol error: missing completion event"
-          : `Aborted (exit ${exitCode})`;
-      state.errorCount++;
+      if (nextItems === state.items) {
+        nextItems = new Map(state.items);
+      }
+      nextItems.set(id, {
+        ...item,
+        status: "error",
+        error:
+          exitCode === 0
+            ? "Protocol error: missing completion event"
+            : `Aborted (exit ${exitCode})`,
+      });
+      addedErrors++;
     }
-  });
+  }
 
-  state.batchCompleted = true;
-  state.batchSuccess = state.batchSuccess !== false && exitCode === 0 && state.errorCount === 0;
+  const finalErrorCount = state.errorCount + addedErrors;
+  const receivedBatchComplete = state.batchSuccess === true;
+  const finalBatchSuccess = receivedBatchComplete && exitCode === 0 && finalErrorCount === 0;
 
-  return state;
+  return {
+    ...state,
+    items: nextItems,
+    errorCount: finalErrorCount,
+    batchCompleted: true,
+    batchSuccess: finalBatchSuccess,
+  };
 }

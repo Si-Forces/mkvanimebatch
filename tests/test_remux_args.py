@@ -408,8 +408,10 @@ class TestRemuxArgs:
             job, tmp_path / "temp", mod.FontInfo(args=(), count=0),
             "192k", {job.video: {}}, ffmpeg_threads=2,
         )
-        assert result.skipped_reason is not None
-        assert "timed out" in result.skipped_reason
+        assert result.failed is True
+        assert result.skipped_reason is None
+        assert result.error_reason is not None
+        assert "timed out" in result.error_reason
         assert any("mkvmerge timed out" in line for line in result.log)
         assert not (tmp_path / "out.mkv").exists()
 
