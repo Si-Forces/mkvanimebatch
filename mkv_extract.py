@@ -31,6 +31,7 @@ from mkv_common import (
     MAX_DEFAULT_WORKERS,
     SUBPROCESS_TIMEOUT,
     FontClaim,
+    FontHashMemo,
     FontManager,
     ParsedFile,
     PersistentInspectCache,
@@ -40,6 +41,7 @@ from mkv_common import (
     cleanup_stale_subtitle_offsets_bulk,
     emit_event,
     ep_type_label,
+    get_default_font_hash_memo_file,
     get_item_id,
     has_chapters,
     inspect_videos,
@@ -277,6 +279,7 @@ def _run(
     io_semaphore:       threading.Semaphore | None = None,
     font_manager:       FontManager | None = None,
     root_input_dir:     Path | None = None,
+    font_hash_memo:     FontHashMemo | None = None,
 ) -> bool:
     if not mkv_files:
         logger.warning("No MKV files found in '%s', skipping.", output_dir.name)
@@ -297,8 +300,11 @@ def _run(
     fonts_dir.mkdir(parents=True, exist_ok=True)
     json_cache = inspect_videos([f.path for f in mkv_files], pool, persistent_cache=persistent_cache)
 
-    if font_manager is None:
-        font_manager = FontManager(fonts_dir)
+    # A manager passed in from main() is shared across directory passes; its
+    # staging directory must outlive this pass and is cleaned up by the caller.
+    owns_font_manager = font_manager is None
+    if owns_font_manager:
+        font_manager = FontManager(fonts_dir, hash_memo=font_hash_memo)
     stale_subs_tracker = StaleSubtitleTracker()
 
     logger.info("Processing %d file(s) (up to %d at a time)...", len(mkv_files), max_workers)
@@ -368,7 +374,8 @@ def _run(
                 logger.info(line)
 
     stale_subs_tracker.cleanup(output_dir)
-    font_manager.cleanup_staging()
+    if owns_font_manager:
+        font_manager.cleanup_staging()
 
     logger.info("=========================================")
     logger.info(" All files processed.")
@@ -456,9 +463,11 @@ def main() -> None:
             return out_override / "fonts"
         return mkv_dir / "fonts"
 
+    font_hash_memo = FontHashMemo(get_default_font_hash_memo_file())
+
     shared_font_manager: FontManager | None = None
     if fonts_override or out_override:
-        shared_font_manager = FontManager(fonts_dir_for(root_input_dir))
+        shared_font_manager = FontManager(fonts_dir_for(root_input_dir), hash_memo=font_hash_memo)
 
     overall_success = True
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -493,9 +502,19 @@ def main() -> None:
                 io_semaphore=io_semaphore,
                 font_manager=shared_font_manager,
                 root_input_dir=root_input_dir,
+                font_hash_memo=font_hash_memo,
             )
             if not success:
                 overall_success = False
+
+            persistent_cache.save(min_interval=60.0)
+
+    persistent_cache.save()
+    font_hash_memo.save()
+    # The shared manager's staging directory spans the whole batch; remove it
+    # once here instead of per-directory pass.
+    if shared_font_manager is not None:
+        shared_font_manager.cleanup_staging()
 
     emit_event("batch_complete", success=overall_success)
 
