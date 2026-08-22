@@ -4,6 +4,7 @@ import {
   createQueueState,
   reduceQueueEvent,
   finalizeQueueState,
+  carryOverAssignments,
 } from "./queue-state.js";
 
 test("createQueueState initializes state from manifest v1", () => {
@@ -304,4 +305,34 @@ test("reduceQueueEvent is a pure reducer and does not mutate input state", () =>
   assert.equal(completedState.completedCount, 1);
   assert.equal(completedState.items.get("ep1.mkv").durationSec, "1.0");
 });
+
+test("carryOverAssignments keeps selections for surviving items and drops stale ones", () => {
+  const assignments = new Map([
+    ["Season 01/ep1.mkv", "Season 01/better.ass"],
+    ["Season 01/gone.mkv", "Season 01/deleted.ass"],
+  ]);
+  const manifest = {
+    version: 1,
+    items: [
+      { id: "Season 01/ep1.mkv", name: "ep1.mkv" },
+      { id: "Season 01/ep2.mkv", name: "ep2.mkv" },
+    ],
+  };
+
+  const carried = carryOverAssignments(assignments, manifest);
+
+  assert.deepEqual([...carried.entries()], [
+    ["Season 01/ep1.mkv", "Season 01/better.ass"],
+  ]);
+  // Input map is not mutated.
+  assert.equal(assignments.size, 2);
+});
+
+test("carryOverAssignments returns empty map for missing or itemless manifests", () => {
+  const assignments = new Map([["ep1.mkv", "sub.ass"]]);
+
+  assert.equal(carryOverAssignments(assignments, null).size, 0);
+  assert.equal(carryOverAssignments(assignments, { version: 1, items: [] }).size, 0);
+});
+
 

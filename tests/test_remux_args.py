@@ -414,6 +414,7 @@ class TestRemuxArgs:
         assert "timed out" in result.error_reason
         assert any("mkvmerge timed out" in line for line in result.log)
         assert not (tmp_path / "out.mkv").exists()
+
     def test_cli_ffmpeg_threads_support(self, mod, monkeypatch, tmp_path):
         """Verify CLI accepts --ffmpeg-threads and forwards it."""
         test_dir = tmp_path / "input"
@@ -442,6 +443,57 @@ class TestRemuxArgs:
 
         assert captured_kwargs.get("ffmpeg_threads") == 4
 
+    def test_cli_sub_assignments_loading(self, mod, monkeypatch, tmp_path):
+        """--sub-assignments loads the JSON map and resolves relative paths
+        against the input root; malformed files abort with exit 1."""
+        import json as json_lib
+
+        test_dir = tmp_path / "input"
+        test_dir.mkdir()
+        (test_dir / "ep1.mkv").touch()
+        assign_file = tmp_path / "assign.json"
+
+        captured_kwargs = {}
+        def mock_run(*args, **kwargs):
+            captured_kwargs.update(kwargs)
+            return True
+
+        monkeypatch.setattr(mod, "check_dependencies", lambda *a: None)
+        monkeypatch.setattr(mod, "inspect_videos", lambda *a, **k: {})
+        monkeypatch.setattr(mod, "_run", mock_run)
+
+        # Valid file with a relative path -> resolved against input root
+        assign_file.write_text(json_lib.dumps({
+            "version": 1,
+            "assignments": {"Season 01/ep1.mkv": "Season 01/sub.ass"},
+        }), encoding="utf-8")
+        monkeypatch.setattr("sys.argv", [
+            "script", "--input-dir", str(test_dir), "--dry-run",
+            "--sub-assignments", str(assign_file),
+        ])
+        try:
+            mod.main()
+        except SystemExit as exc:
+            assert exc.code == 0
+
+        passed = captured_kwargs.get("sub_assignments")
+        assert passed is not None
+        assert passed["Season 01/ep1.mkv"] == test_dir / "Season 01" / "sub.ass"
+
+        # Malformed JSON -> exit 1
+        assign_file.write_text("{ not json", encoding="utf-8")
+        monkeypatch.setattr("sys.argv", [
+            "script", "--input-dir", str(test_dir), "--dry-run",
+            "--sub-assignments", str(assign_file),
+        ])
+        try:
+            mod.main()
+            raised = False
+        except SystemExit as exc:
+            raised = True
+            assert exc.code == 1
+        assert raised
+
     def test_ffmpeg_threads_capping_behavior(self, mod, monkeypatch):
         """Verify default_ffmpeg_threads caps at MAX_FFMPEG_AUDIO_THREADS and scales down."""
         import os
@@ -458,3 +510,5 @@ class TestRemuxArgs:
 
         # Never returns less than 1, even with more workers than cores
         assert default_ffmpeg_threads(16) == 1
+
+
