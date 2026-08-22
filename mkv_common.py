@@ -35,6 +35,7 @@ __all__ = [
     "LANG_LABEL",
     "LANG_MKV_TAG",
     "MAX_DEFAULT_WORKERS",
+    "MAX_FFMPEG_AUDIO_THREADS",
     "SUBPROCESS_TIMEOUT",
     "SUBTITLE_EXTENSIONS",
     "SUBTITLE_LANGS_FALLBACK",
@@ -57,6 +58,7 @@ __all__ = [
     "ancestor_dirs",
     "check_dependencies",
     "cleanup_stale_subtitle_offsets_bulk",
+    "default_ffmpeg_threads",
     "detect_sub_lang",
     "emit_event",
     "ep_type_label",
@@ -98,10 +100,16 @@ __all__ = [
 logger = logging.getLogger("mkv_automation")
 
 MAX_DEFAULT_WORKERS = 16
+MAX_FFMPEG_AUDIO_THREADS = 8
 DEFAULT_WORKER_MULTIPLIER = 2
 SUBPROCESS_TIMEOUT = 3600
 EpisodeInfo = tuple[str, str, str]
 
+
+def default_ffmpeg_threads(max_workers: int) -> int:
+    """Per-job ffmpeg audio thread budget: divide CPUs across concurrent workers,
+    capped at MAX_FFMPEG_AUDIO_THREADS."""
+    return min(MAX_FFMPEG_AUDIO_THREADS, max(1, (os.cpu_count() or 4) // max_workers))
 
 _EVENTS_ENABLED: bool = False
 

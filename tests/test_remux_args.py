@@ -414,4 +414,47 @@ class TestRemuxArgs:
         assert "timed out" in result.error_reason
         assert any("mkvmerge timed out" in line for line in result.log)
         assert not (tmp_path / "out.mkv").exists()
+    def test_cli_ffmpeg_threads_support(self, mod, monkeypatch, tmp_path):
+        """Verify CLI accepts --ffmpeg-threads and forwards it."""
+        test_dir = tmp_path / "input"
+        test_dir.mkdir()
+        (test_dir / "ep1.mkv").touch()
 
+        monkeypatch.setattr(mod, "check_dependencies", lambda *a: None)
+        monkeypatch.setattr(mod, "inspect_videos", lambda *a, **k: {})
+        captured_kwargs = {}
+        def mock_run(*args, **kwargs):
+            captured_kwargs.update(kwargs)
+            return True
+        monkeypatch.setattr(mod, "_run", mock_run)
+
+        test_argv = [
+            "script", "--input-dir", str(test_dir),
+            "--ffmpeg-threads", "4",
+            "--dry-run"
+        ]
+        monkeypatch.setattr("sys.argv", test_argv)
+
+        try:
+            mod.main()
+        except SystemExit as exc:
+            assert exc.code == 0
+
+        assert captured_kwargs.get("ffmpeg_threads") == 4
+
+    def test_ffmpeg_threads_capping_behavior(self, mod, monkeypatch):
+        """Verify default_ffmpeg_threads caps at MAX_FFMPEG_AUDIO_THREADS and scales down."""
+        import os
+        from mkv_common import MAX_FFMPEG_AUDIO_THREADS, default_ffmpeg_threads
+
+        # 64-core machine with 1 worker should be capped at MAX_FFMPEG_AUDIO_THREADS (8)
+        monkeypatch.setattr(os, "cpu_count", lambda: 64)
+        assert default_ffmpeg_threads(1) == MAX_FFMPEG_AUDIO_THREADS
+        assert default_ffmpeg_threads(1) == 8
+
+        # 4-core machine with 2 workers should calculate 2
+        monkeypatch.setattr(os, "cpu_count", lambda: 4)
+        assert default_ffmpeg_threads(2) == 2
+
+        # Never returns less than 1, even with more workers than cores
+        assert default_ffmpeg_threads(16) == 1

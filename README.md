@@ -152,7 +152,8 @@ python mkv_remux.py --input-dir "D:/Anime/Series" --dry-run
 | `--out-dir` | `extract`, `remux` | Output directory for finished files | Extract: `<input-dir>`<br>Remux: `<input-dir>/Output` |
 | `--fonts-dir` | `extract`, `remux` | Explicit font directory override | Auto-detected (`fonts/`, `attachments/`) |
 | `--assets-dir` | `remux` | Fallback directory (and immediate parent) to search for subtitles, chapters, covers, or fonts | `None` |
-| `--workers` | `extract`, `remux` | Maximum concurrent files to process (`1`–`64`) | Auto (CPU count, max `64`) |
+| `--workers` | `extract`, `remux` | Maximum concurrent files to process (`1`–`64`) | Auto (CPU count × 2, max `16`) |
+| `--ffmpeg-threads` | `remux` | Maximum CPU threads per ffmpeg audio transcode job (`1`–`64`) | Auto (capped at `8`) |
 | `--io-jobs` | `extract`, `remux` | Maximum concurrent disk I/O operations (`0` to disable throttling) | `2` |
 | `--sub-offset` | `extract`, `remux` | Shift subtitle timestamps in seconds (negative = earlier, positive = later) | `0.0` |
 | `--bitrate` | `remux` | Target bitrate for Opus audio conversion (e.g. `128k`, `192k`) | `192k` |
