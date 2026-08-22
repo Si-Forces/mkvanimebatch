@@ -934,7 +934,7 @@ def _run(
         if is_completed_output(output_dir / f"{out_stem}.mkv"):
             continue
             
-        if dry_run and resolver.has_local_subtitle(mkv_ep_type, mkv_ep, mkv_season):
+        if dry_run and resolver.has_local_subtitle(mkv_ep_type, mkv_ep, mkv_season, local_dir=v.path.parent):
             continue
             
         videos_to_inspect.append(v.path)
@@ -1018,7 +1018,9 @@ def main() -> None:
                         help="Directory to use for fonts (auto-detects 'fonts'/'Fonts'/"
                              "'attachments' inside --input-dir if not given).")
     parser.add_argument("--assets-dir", type=str, default=None,
-                        help="Fallback directory (e.g. a prior extraction's --out-dir) to search for subtitles/chapters/covers/fonts when a video has none of its own and none are found alongside it.")
+                        help="Fallback directory (e.g. a prior extraction's --out-dir) to search for "
+                             "subtitles/chapters/covers/fonts when a video has none of its own and none are "
+                             "found alongside it. Also searches its immediate parent directory for shared assets.")
     parser.add_argument("--dry-run", action="store_true",
                         help="Show matched files without processing.")
     parser.add_argument("--keep-fonts", action="store_true",
@@ -1112,7 +1114,7 @@ def main() -> None:
 
             search_dirs = ancestor_dirs(mkv_dir, root_input_dir)
 
-            current_assets_dir = None
+            current_assets_dir: Path | None = None
             if assets_override:
                 current_assets_dir = resolve_output_dir(
                     mkv_dir, root_input_dir, assets_override, default_subdir=None,

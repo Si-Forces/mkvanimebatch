@@ -9,7 +9,7 @@ A directory containing video files, subtitle files, chapter XMLs, cover images, 
 _Avoid_: Folder, package, album
 
 **Asset Resolver**:
-The module (`mkv_assets.py`) responsible for discovering, indexing, and matching external and embedded assets (subtitles, chapters, covers, fonts) to video files across ancestor directories.
+The module (`mkv_assets.py`) responsible for discovering, indexing, and matching external and embedded assets (subtitles, chapters, covers, fonts) to video files across ancestor directories. Local assets in the same release directory next to the MKV file take strict precedence over ancestor and fallback assets.
 _Avoid_: Asset finder, index manager, track matcher
 
 **Episode Info**:

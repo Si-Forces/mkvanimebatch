@@ -10,8 +10,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from mkv_common import (
-    _ASS_SCORE_MAP,
-    _NON_ASS_SCORE_MAP,
     LANG_LABEL,
     LANG_MKV_TAG,
     SUBTITLE_LANGS_FALLBACK,
@@ -31,6 +29,7 @@ from mkv_common import (
     parse_episode,
     scan_assets,
     scan_fonts,
+    score_subtitle_category,
     seasons_match,
     select_best_subtitle_track,
 )
@@ -78,7 +77,13 @@ class SubIndex:
             return
         self._index.setdefault(key, []).append(sub_file)
 
-    def lookup(self, ep_type: str, ep: str, mkv_season: str) -> tuple[Path, str] | None:
+    def lookup(
+        self,
+        ep_type: str,
+        ep: str,
+        mkv_season: str,
+        local_dir: Path | None = None,
+    ) -> tuple[Path, str] | None:
         key = _ep_key(ep_type, ep)
         candidates = []
         for f in self._index.get(key, ()):
@@ -88,13 +93,13 @@ class SubIndex:
         if not candidates:
             return None
 
-        def _candidate_score(f: ParsedFile) -> tuple[int, int, int]:
+        def _candidate_score(f: ParsedFile) -> tuple[int, int, int, int]:
+            is_local = 1 if (local_dir is not None and f.path.parent == local_dir) else 0
             lang = detect_sub_lang(f.stem)
             is_ass = (f.path.suffix.lower() == ".ass")
             is_diag = is_dialogue_track(f.stem)
-            scores = _ASS_SCORE_MAP if is_ass else _NON_ASS_SCORE_MAP
-            cat_score = scores.get(lang, 7 if is_ass else 1)
-            return (cat_score, 1 if is_diag else 0, -len(f.name))
+            cat_score = score_subtitle_category(lang, is_ass)
+            return (is_local, cat_score, 1 if is_diag else 0, -len(f.name))
 
         best = max(candidates, key=_candidate_score)
         return best.path, detect_sub_lang(best.stem)
@@ -292,8 +297,8 @@ class AssetResolver:
     def use_source_fonts(self) -> bool:
         return self.fonts.count == 0
 
-    def has_local_subtitle(self, ep_type: str, ep: str, season: str) -> bool:
-        return self.sub_index.lookup(ep_type, ep, season) is not None
+    def has_local_subtitle(self, ep_type: str, ep: str, season: str, local_dir: Path | None = None) -> bool:
+        return self.sub_index.lookup(ep_type, ep, season, local_dir=local_dir) is not None
 
     def count_unmatched_chapter_videos(self, videos: list[ParsedFile]) -> int:
         return sum(
@@ -306,15 +311,22 @@ class AssetResolver:
         cls,
         search_dirs: list[Path],
         fonts_dir: Path,
-        assets_dir: Path | None = None,
+        assets_dir: Path | list[Path] | None = None,
         scan_cache: dict[Path, ScanResults] | None = None,
     ) -> AssetResolver:
+        """
+        Discover and index fonts, subtitles, chapters, and covers across search directories.
+
+        When `assets_dir` is provided as a single `Path`, both `assets_dir` and its immediate
+        parent directory (`assets_dir.parent`, if distinct and existing) are added to the
+        fallback directory list to resolve shared ancestor assets (e.g. root fonts or covers).
+        """
         if fonts_dir.is_dir():
             logger.info("Scanning detected font directory: '%s'...", fonts_dir.name)
             fonts = scan_fonts(fonts_dir)
             logger.info("Fonts found: %d", fonts.count)
             if fonts.count == 0:
-                logger.info("  (fonts folder is empty — will use source fonts if available)")
+                logger.info("  (fonts directory is empty — will use source fonts if available)")
         else:
             logger.info("No font directory found — will use source fonts if available.")
             fonts = FontInfo(args=(), count=0)
@@ -331,27 +343,37 @@ class AssetResolver:
         fallback_cover_index: CoverIndex | None = None
 
         if assets_dir is not None:
-            if not assets_dir.is_dir():
-                logger.warning("Specified --assets-dir '%s' does not exist — fallback asset search disabled.", assets_dir)
+            if isinstance(assets_dir, Path):
+                fallback_dirs = [assets_dir]
+                if assets_dir.parent != assets_dir and assets_dir.parent.is_dir():
+                    fallback_dirs.append(assets_dir.parent)
+            else:
+                fallback_dirs = list(assets_dir)
+            valid_fallback_dirs = [d for d in fallback_dirs if d.is_dir()]
+            if not valid_fallback_dirs:
+                logger.warning("Specified --assets-dir does not exist — fallback asset search disabled.")
             else:
                 fallback_sub_index = SubIndex()
                 fallback_chap_index = ChapterIndex()
                 fallback_cover_index = CoverIndex()
-                _populate_indices(scan_assets(assets_dir, scan_cache), fallback_sub_index, fallback_chap_index, fallback_cover_index)
+                # Populate most-specific directory first: first-indexed entries win
+                # score ties in lookups, mirroring the primary ancestor chain.
+                for ad in valid_fallback_dirs:
+                    _populate_indices(scan_assets(ad, scan_cache), fallback_sub_index, fallback_chap_index, fallback_cover_index)
 
-                if fonts.count == 0:
-                    fallback_fonts_dir = assets_dir / "fonts" if (assets_dir / "fonts").is_dir() else assets_dir
-                    fallback_fonts = scan_fonts(fallback_fonts_dir)
-                    if fallback_fonts.count > 0:
-                        fonts = fallback_fonts
-                        logger.info("Detected %d external font(s) in fallback assets directory: %s", fonts.count, fallback_fonts_dir)
+                    if fonts.count == 0:
+                        fallback_fonts_dir = ad / "fonts" if (ad / "fonts").is_dir() else ad
+                        fallback_fonts = scan_fonts(fallback_fonts_dir)
+                        if fallback_fonts.count > 0:
+                            fonts = fallback_fonts
+                            logger.info("Detected %d external font(s) in fallback assets directory: %s", fonts.count, fallback_fonts_dir)
 
         logger.info("Subtitles indexed: %d primary, %d English fallback", sub_index.primary_count, sub_index.fallback_count)
         logger.info("Chapters indexed: %d by episode number, %d unmatched", chap_index.indexed_count, len(chap_index.unmatched))
         if chap_index.rejected_count:
             logger.info("  (%d .xml file(s) skipped — not chapter data)", chap_index.rejected_count)
 
-        cover_note = " + folder-wide cover.*" if cover_index.has_global else ""
+        cover_note = " + directory-wide cover.*" if cover_index.has_global else ""
         logger.info("Covers indexed: %d by episode number%s", cover_index.indexed_count, cover_note)
 
         return cls(
@@ -374,7 +396,7 @@ class AssetResolver:
         interactive: bool = True,
     ) -> tuple[Path | None, int | None, str, bool, str | None]:
         season, ep_type, ep = parsed
-        result = self.sub_index.lookup(ep_type, ep, season)
+        result = self.sub_index.lookup(ep_type, ep, season, local_dir=video.path.parent)
         if result is not None:
             sub_path, lang = result
             if lang in SUBTITLE_LANGS_FALLBACK:
@@ -393,7 +415,7 @@ class AssetResolver:
                 return None, track_id, lang, True, None
 
         if self.fallback_sub_index is not None:
-            fb_result = self.fallback_sub_index.lookup(ep_type, ep, season)
+            fb_result = self.fallback_sub_index.lookup(ep_type, ep, season, local_dir=video.path.parent)
             if fb_result is not None:
                 sub_path, lang = fb_result
                 if lang in SUBTITLE_LANGS_FALLBACK:
