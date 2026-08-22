@@ -48,6 +48,7 @@ from mkv_common import (
     acquire_semaphore,
     ancestor_dirs,
     check_dependencies,
+    default_ffmpeg_threads,
     emit_event,
     ep_type_label,
     find_fonts_dir,
@@ -916,6 +917,7 @@ def _run(
     assets_dir:       Path | None = None,
     scan_cache:       dict[Path, ScanResults] | None = None,
     root_input_dir:   Path | None = None,
+    ffmpeg_threads:   int | None = None,
 ) -> bool:
     if not videos:
         logger.warning("No MKV files to process in '%s'.", mkv_dir.name)
@@ -969,7 +971,8 @@ def _run(
         _print_summary(output_dir, matched_files, skipped_files)
         return True
 
-    ffmpeg_threads = max(1, (os.cpu_count() or 4) // max_workers)
+    if ffmpeg_threads is None:
+        ffmpeg_threads = default_ffmpeg_threads(max_workers)
     _execute_jobs(
         jobs=jobs,
         temp_dir=temp_dir,
@@ -1003,6 +1006,9 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=default_workers, choices=range(1, 65),
                         metavar="[1-64]",
                         help="Number of concurrent files to process.")
+    parser.add_argument("--ffmpeg-threads", type=int, default=None, choices=range(1, 65),
+                        metavar="[1-64]",
+                        help="Maximum CPU threads per ffmpeg audio transcode job (defaults to automatic scaling capped at 8).")
     parser.add_argument("--bitrate", type=str, default="192k",
                         help="Target bitrate for Opus audio conversion (e.g., 128k, 192k).")
     parser.add_argument("--complexity", type=int, default=10, choices=range(11),
@@ -1160,6 +1166,7 @@ def main() -> None:
                     io_semaphore=io_semaphore, assets_dir=current_assets_dir,
                     scan_cache=scan_cache,
                     root_input_dir=root_input_dir,
+                    ffmpeg_threads=cfg.ffmpeg_threads,
                 )
                 if not dir_success:
                     overall_success = False
