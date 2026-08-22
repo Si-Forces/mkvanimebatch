@@ -1097,8 +1097,9 @@ def main() -> None:
     persistent_cache = PersistentInspectCache(enabled=not cfg.no_cache)
     io_semaphore = threading.BoundedSemaphore(cfg.io_jobs) if cfg.io_jobs > 0 else None
 
-    if not re.match(r"^\d+[kM]?$", opus_bitrate):
-        logger.error("Invalid bitrate format: '%s'. Must match pattern like 128k, 192k, 1M.", opus_bitrate)
+    bitrate_match = re.match(r"^(\d+)([kM]?)$", opus_bitrate)
+    if not bitrate_match or int(bitrate_match.group(1)) == 0:
+        logger.error("Invalid bitrate format: '%s'. Must be a positive value like 128k, 192k, 1M.", opus_bitrate)
         sys.exit(1)
 
     root_input_dir = Path(cfg.input_dir).resolve() if cfg.input_dir else SCRIPT_DIR

@@ -512,3 +512,16 @@ class TestRemuxArgs:
         assert default_ffmpeg_threads(16) == 1
 
 
+    def test_cli_bitrate_rejects_zero(self, mod, monkeypatch, tmp_path):
+        """--bitrate 0 / 0k / 0M must abort at CLI validation, not fail per-job in ffmpeg."""
+        test_dir = tmp_path / "input"
+        test_dir.mkdir()
+        (test_dir / "ep1.mkv").touch()
+
+        monkeypatch.setattr(mod, "check_dependencies", lambda *a: None)
+        monkeypatch.setattr("sys.argv", [
+            "script", "--input-dir", str(test_dir), "--dry-run", "--bitrate", "0k",
+        ])
+        with pytest.raises(SystemExit) as exc:
+            mod.main()
+        assert exc.value.code == 1
