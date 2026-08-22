@@ -1160,6 +1160,9 @@ def main() -> None:
                 except OSError as e:
                     logger.error("Failed to remove fonts folder: %s", e)
 
+            persistent_cache.save(min_interval=60.0)
+
+    persistent_cache.save()
     emit_event("batch_complete", success=overall_success)
 
     if not overall_success:

@@ -1,6 +1,6 @@
 """
 mkv_common.py
-Shared logic, domain models, asset resolution, and batch execution for mkvanimebatch.
+Shared utilities, domain constants, data models, inspection caching, and event logging for mkvanimebatch.
 """
 from __future__ import annotations
 
@@ -10,10 +10,12 @@ import logging
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import nullcontext
@@ -44,6 +46,7 @@ __all__ = [
     "FontClaim",
     "FontInfo",
     # classes
+    "FontHashMemo",
     "FontManager",
     "ParsedFile",
     "PersistentInspectCache",
@@ -60,6 +63,7 @@ __all__ = [
     "find_fonts_dir",
     "format_ep",
     "get_default_cache_file",
+    "get_default_font_hash_memo_file",
     "get_item_id",
     "has_chapters",
     "has_cover",
@@ -98,6 +102,7 @@ DEFAULT_WORKER_MULTIPLIER = 2
 SUBPROCESS_TIMEOUT = 3600
 EpisodeInfo = tuple[str, str, str]
 
+
 _EVENTS_ENABLED: bool = False
 
 
@@ -112,6 +117,7 @@ def is_events_enabled() -> bool:
     return _EVENTS_ENABLED
 
 
+@lru_cache(maxsize=16384)
 def get_item_id(video_path: Path, root_input_dir: Path) -> str:
     """Derive root-relative POSIX path ID for sidecar contract events and manifest items."""
     try:
@@ -288,6 +294,12 @@ _ASS_SCORE_MAP: dict[str, int]     = {"ind": 12, "id": 11, "und": 10, "eng": 9, 
 _NON_ASS_SCORE_MAP: dict[str, int] = {"ind":  6, "id":  5, "und":  4, "eng": 3, "en": 2}
 
 
+def score_subtitle_category(language: str, is_ass: bool) -> int:
+    """Return priority score for a subtitle based on language and whether it is ASS format."""
+    scores = _ASS_SCORE_MAP if is_ass else _NON_ASS_SCORE_MAP
+    return scores.get(language, 7 if is_ass else 1)
+
+
 # ─── NAMING & PATH HELPERS ───────────────────────────────────────────────────
 _UNSAFE_FN_CHARS = re.compile(r'[/:*?"<>|\\]')
 
@@ -409,6 +421,74 @@ def find_fonts_dir(input_dir: Path, override: Path | None = None, fonts_dir_cach
 
 
 # ─── FONT MANAGER (Thread-safe deduplication & atomic promotion) ─────────────
+class FontHashMemo:
+    """Persistent blake2b memo for font files keyed by (path, size, mtime_ns).
+
+    Lets repeated runs skip re-reading and re-hashing unchanged fonts during
+    seeding. Not thread-safe; intended for single-threaded seed passes.
+    """
+
+    def __init__(self, memo_file: Path) -> None:
+        self.memo_file = memo_file
+        self._data: dict[str, dict] = {}
+        self._dirty = False
+        self._load()
+
+    def _load(self) -> None:
+        if not self.memo_file.exists():
+            return
+        try:
+            with open(self.memo_file, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                self._data = loaded
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as e:
+            logger.warning(f"Failed to load font hash memo from {self.memo_file}: {e}")
+            self._data = {}
+
+    def get(self, path: Path, st: os.stat_result) -> str | None:
+        entry = self._data.get(str(path))
+        if (
+            isinstance(entry, dict)
+            and entry.get("size") == st.st_size
+            and entry.get("mtime_ns") == st.st_mtime_ns
+        ):
+            digest = entry.get("hash")
+            if isinstance(digest, str):
+                return digest
+        return None
+
+    def put(self, path: Path, st: os.stat_result, digest: str) -> None:
+        entry = {"size": st.st_size, "mtime_ns": st.st_mtime_ns, "hash": digest}
+        key = str(path)
+        if self._data.get(key) != entry:
+            self._data[key] = entry
+            self._dirty = True
+
+    def save(self) -> None:
+        if not self._dirty:
+            return
+        temp_name = ""
+        try:
+            self.memo_file.parent.mkdir(parents=True, exist_ok=True)
+            live_data = {key: val for key, val in self._data.items() if Path(key).exists()}
+            try:
+                with tempfile.NamedTemporaryFile(
+                    "w", dir=self.memo_file.parent, encoding="utf-8", delete=False
+                ) as temp_file:
+                    temp_name = temp_file.name
+                    json.dump(live_data, temp_file)
+                Path(temp_name).replace(self.memo_file)
+            except BaseException:
+                if temp_name:
+                    Path(temp_name).unlink(missing_ok=True)
+                raise
+            self._data = live_data
+            self._dirty = False
+        except (OSError, TypeError, ValueError) as e:
+            logger.warning(f"Failed to save font hash memo to {self.memo_file}: {e}")
+
+
 @dataclass
 class FontClaim:
     name: str
@@ -425,8 +505,9 @@ class FontManager:
     hash/name deduplication, collision safety, atomic promotion, and safe rollback.
     """
 
-    def __init__(self, fonts_dir: Path) -> None:
+    def __init__(self, fonts_dir: Path, hash_memo: FontHashMemo | None = None) -> None:
         self.fonts_dir = fonts_dir
+        self._hash_memo = hash_memo
         self._claimed_hashes: set[str] = set()
         self._claimed_name_size: set[tuple[str, int]] = set()
         self._staging_dir = self.fonts_dir / ".font_staging"
@@ -448,8 +529,14 @@ class FontManager:
                         st = entry.stat()
                         self._claimed_name_size.add((entry.name, st.st_size))
                         if st.st_size > 0:
-                            h = hash_file(p)
-                            self._claimed_hashes.add(h)
+                            file_hash = None
+                            if self._hash_memo is not None:
+                                file_hash = self._hash_memo.get(p, st)
+                            if file_hash is None:
+                                file_hash = hash_file(p)
+                                if self._hash_memo is not None:
+                                    self._hash_memo.put(p, st, file_hash)
+                            self._claimed_hashes.add(file_hash)
                     except OSError:
                         pass
         except OSError:
@@ -741,13 +828,24 @@ _CHAPTER_SNIFF_BYTES = 4096
 _CHAPTER_TAG_RE = re.compile(rb"<Chapters[ >]", re.IGNORECASE)
 
 
-def is_chapter_xml(path: Path) -> bool:
+@lru_cache(maxsize=4096)
+def _chapter_xml_sniff(path_str: str, size: int, mtime_ns: int) -> bool:
     try:
-        with path.open("rb") as fh:
+        with open(path_str, "rb") as fh:
             head = fh.read(_CHAPTER_SNIFF_BYTES)
         return bool(_CHAPTER_TAG_RE.search(head))
     except OSError:
         return False
+
+
+def is_chapter_xml(path: Path) -> bool:
+    """Sniff whether a file is MKV chapter XML; memoized per (path, size,
+    mtime) so repeated asset-resolution passes skip re-reading unchanged files."""
+    try:
+        st = path.stat()
+    except OSError:
+        return False
+    return _chapter_xml_sniff(str(path), st.st_size, st.st_mtime_ns)
 
 
 def has_chapters(json_data: dict | None) -> bool:
@@ -815,9 +913,7 @@ def select_best_subtitle_track(
 
         is_diag = is_dialogue_track(name)
         is_ass  = (codec_id == "s_text/ass")
-
-        scores = _ASS_SCORE_MAP if is_ass else _NON_ASS_SCORE_MAP
-        category_score = scores.get(language, 7 if is_ass else 1)
+        category_score = score_subtitle_category(language, is_ass)
 
         priority_key = (category_score, 1 if is_diag else 0, -tid)
         candidates.append((priority_key, tid, language, is_diag))
@@ -869,13 +965,19 @@ def run_mkvmerge_json(filepath: Path, log: list[str] | None = None) -> dict | No
         return None
 
 
-def get_default_cache_file() -> Path:
+def _cache_base_dir() -> Path:
     local_app_data = os.environ.get("LOCALAPPDATA")
     if local_app_data:
-        base_dir = Path(local_app_data) / "mkvanimebatch"
-    else:
-        base_dir = Path.home() / ".cache" / "mkvanimebatch"
-    return base_dir / "inspect_cache.json"
+        return Path(local_app_data) / "mkvanimebatch"
+    return Path.home() / ".cache" / "mkvanimebatch"
+
+
+def get_default_cache_file() -> Path:
+    return _cache_base_dir() / "inspect_cache.json"
+
+
+def get_default_font_hash_memo_file() -> Path:
+    return _cache_base_dir() / "font_hash_memo.json"
 
 
 class PersistentInspectCache:
@@ -885,6 +987,8 @@ class PersistentInspectCache:
         self.cache_file = cache_file or get_default_cache_file()
         self.enabled = enabled
         self._data: dict[str, dict] = {}
+        self._dirty = False
+        self._last_save_ts = 0.0
         self._lock = threading.Lock()
         if self.enabled:
             self._load()
@@ -899,25 +1003,57 @@ class PersistentInspectCache:
             logger.warning(f"Failed to load inspect cache from {self.cache_file}: {e}")
             self._data = {}
 
-    def save(self) -> None:
+    def save(self, *, min_interval: float = 0.0) -> None:
+        """Atomically persist the cache to disk.
+
+        Skips all disk work when nothing has been cached since the last
+        successful save. With min_interval > 0, saves are debounced to at most
+        one per interval; skipped saves stay dirty so a later call flushes
+        them. Each actual write drops entries whose source file no longer
+        exists (or holds no usable data) so the cache file cannot grow
+        without bound.
+        """
         if not self.enabled:
             return
+
+        now = time.monotonic()
+        with self._lock:
+            if not self._dirty:
+                return
+            if min_interval > 0 and (now - self._last_save_ts) < min_interval:
+                return
+            data_copy = dict(self._data)
+
+        temp_name = ""
         try:
             self.cache_file.parent.mkdir(parents=True, exist_ok=True)
-            with self._lock:
-                data_copy = dict(self._data)
-            temp_name = ""
+            live_data = {
+                key: entry
+                for key, entry in data_copy.items()
+                if Path(key).exists() and entry.get("json_data") is not None
+            }
             try:
                 with tempfile.NamedTemporaryFile(
                     "w", dir=self.cache_file.parent, encoding="utf-8", delete=False
                 ) as temp_file:
                     temp_name = temp_file.name
-                    json.dump(data_copy, temp_file)
+                    json.dump(live_data, temp_file)
+                # NamedTemporaryFile creates mode 0600; keep the previous
+                # cache file's permissions (or a standard readable default)
+                # so the cache stays usable across users of a shared directory.
+                if self.cache_file.exists():
+                    os.chmod(temp_name, stat.S_IMODE(self.cache_file.stat().st_mode))
+                else:
+                    os.chmod(temp_name, 0o644)
                 Path(temp_name).replace(self.cache_file)
             except BaseException:
                 if temp_name:
                     Path(temp_name).unlink(missing_ok=True)
                 raise
+            with self._lock:
+                self._data = live_data
+                self._dirty = False
+                self._last_save_ts = time.monotonic()
         except (OSError, TypeError, ValueError) as e:
             logger.warning(f"Failed to save inspect cache to {self.cache_file}: {e}")
 
@@ -951,12 +1087,15 @@ class PersistentInspectCache:
                     "mtime": st.st_mtime,
                     "json_data": json_data,
                 }
+                self._dirty = True
         except OSError:
             pass
 
     def clear(self) -> None:
         with self._lock:
             self._data.clear()
+            self._dirty = False
+            self._last_save_ts = 0.0
         if self.cache_file.exists():
             try:
                 self.cache_file.unlink(missing_ok=True)
@@ -970,13 +1109,18 @@ def inspect_videos(
     persistent_cache: PersistentInspectCache | None = None,
     force_refresh: bool = False,
 ) -> dict[Path, dict | None]:
-    """Run `mkvmerge -J` on every video in parallel and return metadata mapping."""
+    """Run `mkvmerge -J` on every video in parallel and return metadata mapping.
+
+    Populates `persistent_cache` with fresh results but does not persist it;
+    callers batch multiple inspect passes per run and must call
+    `persistent_cache.save()` themselves once the batch completes.
+    """
     cache: dict[Path, dict | None] = {}
     to_inspect: list[Path] = []
 
     if persistent_cache and not force_refresh:
-        results = list(pool.map(persistent_cache.get, videos))
-        for v, cached_data in zip(videos, results):
+        for v in videos:
+            cached_data = persistent_cache.get(v)
             if cached_data is not None:
                 cache[v] = cached_data
             else:
@@ -1006,9 +1150,6 @@ def inspect_videos(
             cache[v] = data
             if persistent_cache:
                 persistent_cache.put(v, data)
-
-        if persistent_cache:
-            persistent_cache.save()
 
     ok = sum(1 for d in cache.values() if d is not None)
     logger.info("Inspection complete: %d/%d succeeded.", ok, len(videos))

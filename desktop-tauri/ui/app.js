@@ -296,6 +296,16 @@ function startTelemetryMonitor() {
 
   updateMetrics();
   telemetryTimer = setInterval(updateMetrics, 1000);
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      clearInterval(telemetryTimer);
+      telemetryTimer = null;
+    } else if (!telemetryTimer) {
+      updateMetrics();
+      telemetryTimer = setInterval(updateMetrics, 1000);
+    }
+  });
 }
 
 // ─── Real-Time Episode Queue & Progress/Duration Tracker ───────────────────
