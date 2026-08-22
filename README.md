@@ -151,7 +151,7 @@ python mkv_remux.py --input-dir "D:/Anime/Series" --dry-run
 | `--input-dir` | `extract`, `remux` | Directory containing MKV video files | Current working directory |
 | `--out-dir` | `extract`, `remux` | Output directory for finished files | Extract: `<input-dir>`<br>Remux: `<input-dir>/Output` |
 | `--fonts-dir` | `extract`, `remux` | Explicit font directory override | Auto-detected (`fonts/`, `attachments/`) |
-| `--assets-dir` | `remux` | Fallback directory to search for subtitles, chapters, covers, or fonts | `None` |
+| `--assets-dir` | `remux` | Fallback directory (and immediate parent) to search for subtitles, chapters, covers, or fonts | `None` |
 | `--workers` | `extract`, `remux` | Maximum concurrent files to process (`1`–`64`) | Auto (CPU count, max `64`) |
 | `--io-jobs` | `extract`, `remux` | Maximum concurrent disk I/O operations (`0` to disable throttling) | `2` |
 | `--sub-offset` | `extract`, `remux` | Shift subtitle timestamps in seconds (negative = earlier, positive = later) | `0.0` |
@@ -256,7 +256,7 @@ When evaluating subtitle candidates for an episode:
 1. **Language Check**: Indonesian (`ind`, `id`) tracks are scored higher than English (`eng`, `en`).
 2. **Format Score**: Advanced SubStation Alpha (`.ass`) is scored above SubRip (`.srt`).
 3. **Keyword Filtering**: Dialogue tracks receive high priority, while signs, songs, titles, and commentaries are deprioritized.
-4. **Fallback Asset Search**: If an MKV contains no internal subtitle or cover, `--assets-dir` is searched using fuzzy episode number matching (e.g. `[01]`, `E01`, `EP01`, `01v2`).
+4. **Fallback Asset Search**: If an MKV contains no internal subtitle or cover, `--assets-dir` (as well as its immediate parent directory for shared ancestor assets) is searched using fuzzy episode number matching (e.g. `[01]`, `E01`, `EP01`, `01v2`).
 
 ### 2. Audio Scoring & Commentary Isolation
 1. Non-commentary Japanese stereo and surround tracks score highest.

@@ -57,6 +57,97 @@ def test_ancestor_asset_override_precedence(tmp_path):
     assert matched_cover == season_dir / "Show - 01_cover.jpg"
 
 
+def test_local_subtitle_next_to_mkv_always_wins_over_ancestor(tmp_path):
+    """A subtitle residing in the same release directory next to the MKV unconditionally
+    wins over an ancestor subtitle, even if the ancestor has a shorter filename."""
+    root_dir = tmp_path / "Anime"
+    season_dir = root_dir / "Season 01"
+    season_dir.mkdir(parents=True)
+
+    # Ancestor has short filename
+    (root_dir / "01.ass").write_bytes(b"ancestor_short_sub")
+
+    # Local release directory next to MKV has long filename
+    local_sub = season_dir / "[SuperLongFansubGroup] Anime Title - 01 [1080p FLAC BD].ass"
+    local_sub.write_bytes(b"local_long_sub")
+
+    search_dirs = mkv_remux._ancestor_dirs(season_dir, root_dir)
+    import mkv_assets
+    resolver = mkv_assets.AssetResolver.discover(
+        search_dirs, season_dir / "fonts"
+    )
+
+    # When lookup is performed with local_dir=season_dir, local sub must win
+    matched = resolver.sub_index.lookup("E", "01", "1", local_dir=season_dir)
+    assert matched is not None
+    assert matched[0] == local_sub
+
+def test_assets_dir_multi_level_fallback_hierarchy(tmp_path):
+    """Fallback assets placed at the root of --assets-dir are discovered when resolving nested folders."""
+    root_dir = tmp_path / "Anime"
+    season_dir = root_dir / "Season 01"
+    season_dir.mkdir(parents=True)
+
+    assets_override = tmp_path / "GlobalAssets"
+    (assets_override / "fonts").mkdir(parents=True)
+    (assets_override / "fonts" / "FontA.ttf").write_bytes(b"font_data")
+    (assets_override / "cover.jpg").write_bytes(b"root_cover_data")
+
+    search_dirs = mkv_remux._ancestor_dirs(season_dir, root_dir)
+    import mkv_assets
+    resolver = mkv_assets.AssetResolver.discover(
+        search_dirs,
+        season_dir / "fonts",
+        assets_dir=assets_override / "Season 01",
+    )
+
+    assert resolver.fonts.count == 1
+    assert resolver.fallback_cover_index is not None
+    assert resolver.fallback_cover_index.has_global
+
+def test_assets_dir_wins_tie_over_its_parent(tmp_path):
+    """On an exact score tie, --assets-dir itself must beat its immediate parent,
+    mirroring how the nearest ancestor wins ties in the primary search chain."""
+    root_dir = tmp_path / "Anime"
+    season_dir = root_dir / "Season 01"
+    season_dir.mkdir(parents=True)
+
+    assets_dir = tmp_path / "Output" / "Season 01"
+    assets_dir.mkdir(parents=True)
+    parent_dir = assets_dir.parent
+
+    # Identical basenames force an exact score tie (same lang, format, length)
+    (assets_dir / "Show - 01.ass").write_bytes(b"assets_copy")
+    (parent_dir / "Show - 01.ass").write_bytes(b"parent_copy")
+
+    search_dirs = mkv_remux._ancestor_dirs(season_dir, root_dir)
+    import mkv_assets
+    resolver = mkv_assets.AssetResolver.discover(
+        search_dirs, season_dir / "fonts", assets_dir=assets_dir
+    )
+
+    matched = resolver.fallback_sub_index.lookup("E", "01", "1")
+    assert matched is not None
+    assert matched[0] == assets_dir / "Show - 01.ass"
+
+def test_assets_dir_fonts_take_precedence_over_parent_fonts(tmp_path):
+    """When both --assets-dir and its parent provide fonts, the more specific one wins."""
+    root_dir = tmp_path / "Anime"
+    season_dir = root_dir / "Season 01"
+    season_dir.mkdir(parents=True)
+
+    assets_dir = tmp_path / "Output" / "Season 01"
+    assets_dir.mkdir(parents=True)
+    (assets_dir / "Specific.ttf").write_bytes(b"specific_font")
+    (assets_dir.parent / "Shared.ttf").write_bytes(b"shared_font")
+
+    search_dirs = mkv_remux._ancestor_dirs(season_dir, root_dir)
+    import mkv_assets
+    resolver = mkv_assets.AssetResolver.discover(
+        search_dirs, season_dir / "fonts", assets_dir=assets_dir
+    )
+
+    assert resolver.fonts.count == 1
 def test_unparsed_subtitles_listed_for_manual_selection_but_never_matched(tmp_path):
     """Subtitles without a parseable episode number stay visible in the manual
     picker (all_subtitles) but are ignored by automatic lookups."""
