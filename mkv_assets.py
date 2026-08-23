@@ -8,6 +8,7 @@ import logging
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 from mkv_domain import (
@@ -37,12 +38,32 @@ from mkv_scan import (
 
 logger = logging.getLogger("mkv_automation")
 
-__all__ = ["AssetResolver", "ChapterIndex", "CoverIndex", "ResolvedAssets", "SubIndex", "SubtitlePrompt"]
+__all__ = [
+    "AssetResolver",
+    "ChapterIndex",
+    "CoverIndex",
+    "InteractionMode",
+    "ResolvedAssets",
+    "SubIndex",
+    "SubtitlePrompt",
+]
 
 # Callback that offers a video's available subtitle files to a human and returns
 # the chosen one (or None to skip). Injected by the CLI layer so this module
 # stays free of stdin/stdout concerns.
 SubtitlePrompt = Callable[[ParsedFile, list[Path]], "Path | None"]
+
+
+class InteractionMode(Enum):
+    """How resolution should behave when no automatic subtitle matches.
+
+    Decided once at the CLI edge; replaces the former dry_run flag,
+    interactive flag, and subtitle_prompt=None injection combination.
+    """
+
+    INTERACTIVE = "interactive"
+    DRY_RUN = "dry_run"
+    NON_INTERACTIVE = "non_interactive"
 
 
 # ─── ASSET INDICES (Subtitles, Chapters, Covers) ─────────────────────────────
@@ -256,6 +277,17 @@ class ResolvedAssets:
     skip_reason: str | None = None
 
 
+@dataclass(frozen=True)
+class _SubResolution:
+    """Internal result of subtitle resolution for one video."""
+
+    subtitle_file: Path | None
+    embedded_sub_id: int | None
+    lang: str
+    matched: bool
+    skip_reason: str | None
+
+
 def _populate_indices(
     assets: ScanResults,
     sub_index: SubIndex,
@@ -292,7 +324,6 @@ class AssetResolver:
         self.fallback_chap_index = fallback_chap_index
         self.fallback_cover_index = fallback_cover_index
         self.subtitle_prompt = subtitle_prompt
-        self._chapter_unmatched_claimed: set[Path] = set()
 
     @property
     def all_subtitles(self) -> list[Path]:
@@ -399,15 +430,14 @@ class AssetResolver:
         parsed: EpisodeInfo,
         json_data: dict | None,
         all_subs: list[Path],
-        dry_run: bool,
-        interactive: bool = True,
+        mode: InteractionMode,
         assigned_subtitle: Path | None = None,
-    ) -> tuple[Path | None, int | None, str, bool, str | None]:
+    ) -> _SubResolution:
         # Explicit human assignment (GUI/CLI) overrides every automatic source.
         if assigned_subtitle is not None:
             sub_lang = detect_sub_lang(assigned_subtitle.stem)
             logger.info("  Subtitle       : %s [%s] (manually assigned)", assigned_subtitle.name, LANG_LABEL.get(sub_lang, sub_lang))
-            return assigned_subtitle, None, sub_lang, True, None
+            return _SubResolution(assigned_subtitle, None, sub_lang, True, None)
 
         result = self.sub_index.lookup(parsed, local_dir=video.path.parent)
         if result is not None:
@@ -415,7 +445,7 @@ class AssetResolver:
             if lang in SUBTITLE_LANGS_FALLBACK:
                 logger.info("  NOTE: No Indonesian sub found; using English fallback (possible mislabelled fansub).")
             logger.info("  Subtitle       : %s [%s] (matched)", sub_path.name, LANG_LABEL.get(lang, lang))
-            return sub_path, None, lang, True, None
+            return _SubResolution(sub_path, None, lang, True, None)
 
         logger.info("  No external subtitle match — checking source for embedded subtitles...")
         if json_data:
@@ -425,7 +455,7 @@ class AssetResolver:
                 if lang in SUBTITLE_LANGS_FALLBACK:
                     logger.info("  NOTE: No Indonesian sub in source; using English fallback (possible mislabelled fansub).")
                 logger.info("  Subtitle       : embedded track %d [%s] (from source)", track_id, LANG_LABEL.get(lang, lang))
-                return None, track_id, lang, True, None
+                return _SubResolution(None, track_id, lang, True, None)
 
         if self.fallback_sub_index is not None:
             fb_result = self.fallback_sub_index.lookup(parsed, local_dir=video.path.parent)
@@ -434,51 +464,47 @@ class AssetResolver:
                 if lang in SUBTITLE_LANGS_FALLBACK:
                     logger.info("  NOTE: No Indonesian sub in fallback; using English fallback.")
                 logger.info("  Subtitle       : %s [%s] (fallback asset)", sub_path.name, LANG_LABEL.get(lang, lang))
-                return sub_path, None, lang, True, None
+                return _SubResolution(sub_path, None, lang, True, None)
 
         logger.warning("No subtitle match found for %s%s (external or embedded).", parsed.ep_type, parsed.ep)
         skip_reason = "no subtitle files found" if not all_subs else "subtitle files found but none matched"
 
         if not all_subs:
             logger.warning("SKIPPED: %s | Reason: %s", video.name, "No subtitle files exist in the release directory at all.")
-            return None, None, "und", False, skip_reason
+            return _SubResolution(None, None, "und", False, skip_reason)
 
-        if dry_run:
+        if mode is InteractionMode.DRY_RUN:
             logger.info("  DRY RUN: would prompt for manual subtitle selection here (skipped).")
-            return None, None, "und", False, skip_reason
+            return _SubResolution(None, None, "und", False, skip_reason)
 
-        if self.subtitle_prompt is None or not interactive:
+        if mode is not InteractionMode.INTERACTIVE or self.subtitle_prompt is None:
             logger.warning("SKIPPED: %s | Reason: %s", video.name, "Non-interactive environment — skipped manual subtitle selection.")
-            return None, None, "und", False, skip_reason
+            return _SubResolution(None, None, "und", False, skip_reason)
 
         chosen_sub = self.subtitle_prompt(video, all_subs)
         if chosen_sub is not None:
             sub_lang = detect_sub_lang(chosen_sub.stem)
             logger.info("  -> Manually linked: %s", chosen_sub.name)
-            return chosen_sub, None, sub_lang, True, None
+            return _SubResolution(chosen_sub, None, sub_lang, True, None)
 
         logger.warning("SKIPPED: %s | Reason: %s", video.name, "User skipped manual selection.")
-        return None, None, "und", False, "user skipped manual selection"
+        return _SubResolution(None, None, "und", False, "user skipped manual selection")
 
     def _resolve_chap(
         self,
         parsed: EpisodeInfo,
-        chapter_fallback_count: int,
         has_source_chapters: bool,
+        claimed_chapter: Path | None = None,
     ) -> Path | None:
         match = self.chap_index.lookup(parsed)
         if match:
             logger.info("  Chapters       : %s (matched)", match.name)
             return match
 
-        if not has_source_chapters and self.chap_index.unmatched:
-            unclaimed = [f for f in self.chap_index.unmatched if f not in self._chapter_unmatched_claimed]
-            if len(unclaimed) == 1 and chapter_fallback_count == 1:
-                single_match = unclaimed[0]
-                self._chapter_unmatched_claimed.add(single_match)
-                logger.info("  NOTE: Chapter file name had no episode number — claimed as sole leftover match.")
-                logger.info("  Chapters       : %s (matched)", single_match.name)
-                return single_match
+        if claimed_chapter is not None and not has_source_chapters:
+            logger.info("  NOTE: Chapter file name had no episode number — claimed as sole leftover match.")
+            logger.info("  Chapters       : %s (matched)", claimed_chapter.name)
+            return claimed_chapter
 
         if not has_source_chapters and self.fallback_chap_index is not None:
             fb_match = self.fallback_chap_index.lookup(parsed)
@@ -515,11 +541,13 @@ class AssetResolver:
         video: ParsedFile,
         json_data: dict | None,
         all_subs: list[Path] | None = None,
-        dry_run: bool = False,
-        chapter_fallback_count: int = 0,
-        interactive: bool = True,
+        mode: InteractionMode = InteractionMode.INTERACTIVE,
+        claimed_chapter: Path | None = None,
         assigned_subtitle: Path | None = None,
     ) -> ResolvedAssets:
+        """Resolve assets for one video. Pure with respect to resolver state —
+        sole-leftover chapter claims are computed up front by
+        claim_leftover_chapters() and passed in as claimed_chapter."""
         parsed = video.parsed
         if not parsed:
             return ResolvedAssets(
@@ -534,26 +562,59 @@ class AssetResolver:
                 fonts=self.fonts,
             )
 
-        sub_file, embedded_id, sub_lang, matched, skip_reason = self._resolve_sub(
-            video, parsed, json_data, all_subs or [], dry_run,
-            interactive=interactive, assigned_subtitle=assigned_subtitle
+        sub = self._resolve_sub(
+            video, parsed, json_data, all_subs or [], mode,
+            assigned_subtitle=assigned_subtitle
         )
         chapter_file = self._resolve_chap(
-            parsed, chapter_fallback_count, has_source_chapters=has_chapters(json_data)
+            parsed,
+            has_source_chapters=has_chapters(json_data),
+            claimed_chapter=claimed_chapter,
         )
         cover_file = self._resolve_cov(
             parsed, has_source_cover=has_cover(json_data)
         )
 
         return ResolvedAssets(
-            subtitle_file=sub_file,
-            embedded_sub_id=embedded_id,
-            subtitle_lang=sub_lang,
-            subtitle_label=LANG_LABEL.get(sub_lang, sub_lang),
-            subtitle_mkv_lang=LANG_MKV_TAG.get(sub_lang, sub_lang),
-            matched_subtitle=matched,
+            subtitle_file=sub.subtitle_file,
+            embedded_sub_id=sub.embedded_sub_id,
+            subtitle_lang=sub.lang,
+            subtitle_label=LANG_LABEL.get(sub.lang, sub.lang),
+            subtitle_mkv_lang=LANG_MKV_TAG.get(sub.lang, sub.lang),
+            matched_subtitle=sub.matched,
             chapter_file=chapter_file,
             cover_file=cover_file,
             fonts=self.fonts,
-            skip_reason=skip_reason,
+            skip_reason=sub.skip_reason,
         )
+
+
+def claim_leftover_chapters(
+    videos: list[ParsedFile],
+    json_cache: dict[Path, dict | None],
+    resolver: AssetResolver,
+) -> dict[Path, Path]:
+    """Precompute the sole-leftover chapter claim for a release directory.
+
+    When exactly one unmatched chapter file exists and exactly one video
+    lacks any chapter source, that file is claimed by the first such video
+    in iteration order — the same order resolve_for is called in. Running
+    this before resolution keeps AssetResolver free of mutable state and
+    makes the ordering explicit instead of emergent.
+    """
+    claims: dict[Path, Path] = {}
+    unmatched = resolver.chap_index.unmatched
+    if len(unmatched) != 1 or resolver.count_unmatched_chapter_videos(videos) != 1:
+        return claims
+
+    leftover = unmatched[0]
+    for v in videos:
+        if not v.parsed:
+            continue
+        if resolver.chap_index.lookup(v.parsed):
+            continue
+        if has_chapters(json_cache.get(v.path)):
+            continue
+        claims[v.path] = leftover
+        break
+    return claims

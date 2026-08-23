@@ -198,7 +198,7 @@ def test_skip_reason_distinguishes_missing_vs_present_but_unmatched(tmp_path):
 
     # Case 1: release directory has no subtitle files at all
     empty_resolver = mkv_assets.AssetResolver.discover([season_dir], season_dir / "fonts")
-    res_empty = empty_resolver.resolve_for(video, None, interactive=False)
+    res_empty = empty_resolver.resolve_for(video, None, mode=mkv_assets.InteractionMode.NON_INTERACTIVE)
     assert res_empty.matched_subtitle is False
     assert res_empty.skip_reason == "no subtitle files found"
 
@@ -207,7 +207,8 @@ def test_skip_reason_distinguishes_missing_vs_present_but_unmatched(tmp_path):
     (season_dir / "[Group] Unparseable Name.ass").write_bytes(b"unparseable")
     full_resolver = mkv_assets.AssetResolver.discover([season_dir], season_dir / "fonts")
     res_full = full_resolver.resolve_for(
-        video, None, all_subs=full_resolver.all_subtitles, interactive=False
+        video, None, all_subs=full_resolver.all_subtitles,
+        mode=mkv_assets.InteractionMode.NON_INTERACTIVE
     )
     assert res_full.matched_subtitle is False
     assert res_full.skip_reason == "subtitle files found but none matched"
