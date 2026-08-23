@@ -95,14 +95,6 @@ def has_chapters(json_data: dict | None) -> bool:
     return bool(chapters) and any((c.get("num_entries") or 0) > 0 for c in chapters)
 
 
-def has_cover(json_data: dict | None) -> bool:
-    if not json_data:
-        return False
-    attachments = json_data.get("attachments") or []
-    cover, _ = parse_attachments(attachments)
-    return cover is not None
-
-
 class InspectedVideo:
     """Typed view over one video's raw mkvmerge -J JSON.
 
