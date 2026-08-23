@@ -1,16 +1,14 @@
 """Failure-path tests for the public extractor."""
 
-import importlib
 from pathlib import Path
 from types import SimpleNamespace
-
-from mkv_fonts import FontManager
-from mkv_scan import ParsedFile
 
 import pytest
 
 import mkv_extract
 import mkv_proc
+from mkv_fonts import FontManager
+from mkv_scan import ParsedFile
 
 
 def test_failed_extraction_does_not_replace_existing_subtitle(tmp_path, monkeypatch):

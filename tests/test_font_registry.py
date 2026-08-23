@@ -1,12 +1,9 @@
 """
 Tests for FontManager thread-safety, transaction lifecycle, deduplication, collision safety, and rollback.
 """
-import importlib
 import sys
 import threading
 from pathlib import Path
-
-import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:

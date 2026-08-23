@@ -39,15 +39,6 @@ from mkv_proc import (
     acquire_semaphore,
     run_subprocess_cancellable,
 )
-from mkv_scan import (
-    ParsedFile,
-    PersistentInspectCache,
-    check_dependencies,
-    get_default_font_hash_memo_file,
-    has_chapters,
-    inspect_videos,
-    parse_attachments,
-)
 from mkv_runner import (
     SCRIPT_DIR,
     add_shared_args,
@@ -56,6 +47,15 @@ from mkv_runner import (
     handle_clear_cache_flag,
     install_cancel_handlers,
     run_batch,
+)
+from mkv_scan import (
+    ParsedFile,
+    PersistentInspectCache,
+    check_dependencies,
+    get_default_font_hash_memo_file,
+    has_chapters,
+    inspect_videos,
+    parse_attachments,
 )
 
 SUPPORTED_SUB_CODECS = frozenset({"s_text/ass"})
@@ -178,10 +178,8 @@ def process_file(
     queued_outputs: list[tuple[str, str | None, Path, str]] = []
 
     sub_result = select_subtitle(json_data, file_stem, file_dir, parsed, log)
-    final_sub_path = None
     if sub_result:
         track_id, sub_path = sub_result
-        final_sub_path = sub_path
         log.append(f"   -> Queued subtitle track {track_id} → {sub_path.name}")
         queued_outputs.append(("tracks", str(track_id), sub_path, "Subtitle"))
     else:

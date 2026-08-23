@@ -23,9 +23,9 @@ REMUX_MODULES = [
 @pytest.mark.parametrize("rmod", REMUX_MODULES)
 def test_sub_index_other_language_matching(rmod):
     from mkv_scan import ParsedFile
-    
+
     sub_index = rmod.SubIndex()
-    
+
     # Simulate a parsed external subtitle file named `episode_01(ts).ass`
     # which is detected as having language 'ts' (Tsonga)
     sub_file = ParsedFile(
@@ -34,13 +34,13 @@ def test_sub_index_other_language_matching(rmod):
         stem="episode_01(ts)",
         parsed=EpisodeInfo("", "E", "01")
     )
-    
+
     sub_index.add(sub_file)
-    
+
     # Lookup for episode 1 should find the external Tsonga subtitle
     result = sub_index.lookup(EpisodeInfo("", "E", "01"))
     assert result is not None
-    
+
     path, lang = result
     assert path == Path("D:/My Project/episode_01(ts).ass")
     assert lang == "ts"
@@ -48,9 +48,9 @@ def test_sub_index_other_language_matching(rmod):
 @pytest.mark.parametrize("rmod", REMUX_MODULES)
 def test_sub_index_different_languages_not_duplicates(rmod):
     from mkv_scan import ParsedFile
-    
+
     sub_index = rmod.SubIndex()
-    
+
     # Add English subtitle first
     sub_eng = ParsedFile(
         path=Path("D:/My Project/episode_01.eng.ass"),
@@ -65,15 +65,15 @@ def test_sub_index_different_languages_not_duplicates(rmod):
         stem="episode_01.ind",
         parsed=EpisodeInfo("", "E", "01")
     )
-    
+
     sub_index.add(sub_eng)
     sub_index.add(sub_ind)
-    
+
     # Lookup should choose the Indonesian one (higher priority score)
     # even though English was added first.
     result = sub_index.lookup(EpisodeInfo("", "E", "01"))
     assert result is not None
-    
+
     path, lang = result
     assert path == Path("D:/My Project/episode_01.ind.ass")
     assert lang == "ind"
@@ -81,9 +81,9 @@ def test_sub_index_different_languages_not_duplicates(rmod):
 @pytest.mark.parametrize("rmod", REMUX_MODULES)
 def test_sub_index_different_formats_not_duplicates(rmod):
     from mkv_scan import ParsedFile
-    
+
     sub_index = rmod.SubIndex()
-    
+
     # Add Indonesian SRT
     sub_srt = ParsedFile(
         path=Path("D:/My Project/episode_01.ind.srt"),
@@ -98,15 +98,15 @@ def test_sub_index_different_formats_not_duplicates(rmod):
         stem="episode_01.ind",
         parsed=EpisodeInfo("", "E", "01")
     )
-    
+
     sub_index.add(sub_srt)
     sub_index.add(sub_ass)
-    
+
     # Lookup should choose the ASS one because it scores higher than SRT,
     # proving they were not treated as duplicates of each other.
     result = sub_index.lookup(EpisodeInfo("", "E", "01"))
     assert result is not None
-    
+
     path, lang = result
     assert path == Path("D:/My Project/episode_01.ind.ass")
     assert lang == "ind"

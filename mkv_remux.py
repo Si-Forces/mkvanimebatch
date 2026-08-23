@@ -53,17 +53,6 @@ from mkv_proc import (
     acquire_semaphore,
     run_subprocess_cancellable,
 )
-from mkv_scan import (
-    ParsedFile,
-    PersistentInspectCache,
-    ScanResults,
-    check_dependencies,
-    has_chapters,
-    inspect_videos,
-    parse_attachments,
-    scan_assets,
-    scan_mkv_files,
-)
 from mkv_runner import (
     SCRIPT_DIR,
     add_shared_args,
@@ -72,6 +61,16 @@ from mkv_runner import (
     handle_clear_cache_flag,
     install_cancel_handlers,
     run_batch,
+)
+from mkv_scan import (
+    ParsedFile,
+    PersistentInspectCache,
+    ScanResults,
+    check_dependencies,
+    has_chapters,
+    inspect_videos,
+    parse_attachments,
+    scan_mkv_files,
 )
 
 # Initialize child logger for the remux module
@@ -1007,7 +1006,7 @@ def _run(
     if not videos:
         logger.warning("No MKV files to process in '%s'.", mkv_dir.name)
         return False
-        
+
     interactive_prompt = _prompt_for_subtitle if sys.stdin.isatty() else None
     resolver = AssetResolver.discover(
         search_dirs, fonts_dir,
@@ -1020,14 +1019,14 @@ def _run(
     for v in videos:
         if not v.parsed:
             continue
-            
+
         out_stem = output_stem(v.stem, v.parsed.ep_type, v.parsed.ep)
         if is_completed_output(output_dir / f"{out_stem}.mkv"):
             continue
-            
+
         if dry_run and resolver.has_local_subtitle(v.parsed, local_dir=v.path.parent):
             continue
-            
+
         videos_to_inspect.append(v.path)
 
     json_cache = inspect_videos(videos_to_inspect, pool, persistent_cache=persistent_cache, cancel_token=cancel_token) if videos_to_inspect else {}

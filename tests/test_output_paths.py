@@ -1,10 +1,8 @@
 """Tests for remux output path handling shared by both variants."""
 
 import importlib
-from pathlib import Path
 
 import pytest
-
 
 REMUX_MODULES = [
     pytest.param(importlib.import_module("mkv_remux"), id="mkv_remux"),

@@ -3,13 +3,10 @@ Tests for directory scanners (scan_mkv_files and scan_assets).
 Ensures robustness against individual files throwing OSError and prevents
 recursive symlink traversal.
 """
-import importlib
 import os
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -25,7 +22,7 @@ def test_scanner_handles_oserror_on_individual_entries():
     instead of skipping the rest of the folder.
     """
     mock_dir = Path("D:/My Project/fake_dir")
-    
+
     # Mock entries
     entry1 = MagicMock()
     entry1.name = "episode_01.mkv"
@@ -50,7 +47,7 @@ def test_scanner_handles_oserror_on_individual_entries():
 
     with patch("os.scandir", return_value=mock_iterator):
         results = scan_mkv_files(mock_dir)
-        
+
         # Verify that episode_01 and episode_02 are still found successfully
         assert len(results) == 2
         stems = {r.stem for r in results}
@@ -63,7 +60,7 @@ def test_scan_mkv_files_ignores_directory_symlinks():
     Directory symlinks should not be followed to prevent infinite recursive loop.
     """
     mock_dir = Path("D:/My Project/fake_dir")
-    
+
     entry_symlink = MagicMock()
     entry_symlink.name = "recursive_symlink"
     entry_symlink.path = "D:/My Project/fake_dir/recursive_symlink"
@@ -90,7 +87,7 @@ def test_scan_mkv_files_follows_file_symlinks():
     File symlinks pointing to MKV files should be followed and included in scan results.
     """
     mock_dir = Path("D:/My Project/fake_dir")
-    
+
     entry_file_symlink = MagicMock()
     entry_file_symlink.name = "symlinked_episode.mkv"
     entry_file_symlink.path = "D:/My Project/fake_dir/symlinked_episode.mkv"
@@ -209,29 +206,29 @@ def test_scan_assets_uses_scan_cache(tmp_path, monkeypatch):
     shared_ancestor = tmp_path / "Anime"
     shared_ancestor.mkdir()
     (shared_ancestor / "op.ass").touch()
-    
+
     original_scandir = os.scandir
     call_count = 0
-    
+
     def mock_scandir(path):
         nonlocal call_count
         if str(path) == str(shared_ancestor):
             call_count += 1
         return original_scandir(path)
-        
+
     monkeypatch.setattr(os, "scandir", mock_scandir)
-    
+
     cache = {}
-    
+
     # First call scans the directory
     res1 = scan_assets(shared_ancestor, scan_cache=cache)
     assert call_count == 1
     assert shared_ancestor in cache
-    
+
     # Second call returns from cache
     res2 = scan_assets(shared_ancestor, scan_cache=cache)
     assert call_count == 1
-    
+
     # Fresh copies
     assert res1 is not res2
     assert res1.subs is not res2.subs

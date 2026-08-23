@@ -2,10 +2,10 @@
 Tests for ancestor directory asset discovery and local-first override precedence.
 """
 from pathlib import Path
-from mkv_domain import EpisodeInfo
-from mkv_scan import ParsedFile
 
 import mkv_remux
+from mkv_domain import EpisodeInfo
+from mkv_scan import ParsedFile
 
 
 def test_ancestor_dirs_structure(tmp_path):

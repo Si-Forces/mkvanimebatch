@@ -1,11 +1,9 @@
 """Tests for performance optimizations: PersistentInspectCache, io_semaphore, and probesize flags."""
 
 import importlib
-import json
-import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -158,8 +156,6 @@ def test_io_semaphore_throttles_remux(tmp_path):
     sample_video = tmp_path / "video.mkv"
     sample_video.touch()
 
-    parsed = ("1", "E", "01")
-
     mock_sub_index = MagicMock()
     mock_sub_index.lookup.return_value = (tmp_path / "sub.ass", "ind")
     mock_chap_index = MagicMock()
@@ -183,7 +179,7 @@ def test_io_semaphore_throttles_remux(tmp_path):
         mock_job.video_name = "video.mkv"
         mock_job.base = "video"
         mock_job.output_file = tmp_path / "video.mkv"
-        
+
         res = mkv_remux.process_job(
             job=mock_job,
             temp_dir=tmp_path,

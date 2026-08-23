@@ -5,7 +5,6 @@ Both functions must behave consistently across modules.
 identically.  The `mod` fixture (from conftest.py) runs every test twice —
 once per module — so any divergence is caught immediately.
 """
-import pytest
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -4,13 +4,10 @@ from __future__ import annotations
 import io
 import json
 import sys
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-import mkv_assets
-import mkv_extract
 import mkv_proc
 import mkv_remux
 import mkv_scan
@@ -599,7 +596,6 @@ def test_remux_error_event_emitted_on_failure(monkeypatch, tmp_path):
     monkeypatch.setattr(mkv_remux, "set_events_enabled", lambda _: None)
     monkeypatch.setattr(mkv_remux, "emit_event", lambda ev_type, **k: events.append((ev_type, k)))
 
-    import subprocess
     def mock_run_fail(cmd, **_k):
         class Res:
             returncode = 2

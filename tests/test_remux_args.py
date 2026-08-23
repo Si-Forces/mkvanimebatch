@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 import mkv_proc
+
 mkv_remux = importlib.import_module("mkv_remux")
 
 
@@ -498,6 +499,7 @@ class TestRemuxArgs:
     def test_ffmpeg_threads_capping_behavior(self, mod, monkeypatch):
         """Verify default_ffmpeg_threads caps at MAX_FFMPEG_AUDIO_THREADS and scales down."""
         import os
+
         from mkv_domain import MAX_FFMPEG_AUDIO_THREADS, default_ffmpeg_threads
 
         # 64-core machine with 1 worker should be capped at MAX_FFMPEG_AUDIO_THREADS (8)

@@ -1,9 +1,6 @@
 """Tests for multi-threaded concurrency safety in PersistentInspectCache."""
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from pathlib import Path
-
-import pytest
 
 from mkv_scan import PersistentInspectCache
 
