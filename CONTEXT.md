@@ -24,6 +24,10 @@ _Avoid_: IPC, subprocess pipe, wrapper
 The structured JSON document produced by `mkv-remux --plan --input-dir <dir>` summarizing discovered files and metadata for frontend queue hydration.
 _Avoid_: Execution plan, dry run report
 
+**Item Outcome**:
+The closed set of terminal statuses an `item_complete` event may carry through the Sidecar Contract: `completed`, `skipped`, `error`, `cancelled`, `planned`. Planning-time outcomes are emitted without a preceding `item_start`.
+_Avoid_: Status string, job state, result code
+
 **Queue Tracker**:
 The frontend state machine (`queue-state.js`) managing batch item lifecycles (`queued` → `processing` → `completed` / `skipped` / `planned` / `error`) strictly keyed by item ID.
 _Avoid_: Task list, item manager
