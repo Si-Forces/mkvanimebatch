@@ -4,7 +4,7 @@
 
 ### Code review before every commit
 
-Always run the code review skill (Standards + Spec axes, parallel sub-agents) on the full diff before committing anything — no exceptions for small changes. Fix or explicitly accept findings first, then commit.
+Always run the code review skill (Standards + Spec axes, parallel sub-agents) on the full diff before committing. Fix or explicitly accept findings first, then commit.
 
 ## Agent skills
 
