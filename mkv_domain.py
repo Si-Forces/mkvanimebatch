@@ -166,9 +166,12 @@ def detect_sub_lang(sub_stem: str) -> str:
     sub_stem = _OFFSET_TAG_RE.sub("", sub_stem)
     m = _BRACKET_LANG_RE.search(sub_stem)
     if m:
-        if m.group(1): return "ind"
-        if m.group(2): return "eng"
-        if m.group(3): return "jpn"
+        if m.group(1):
+            return "ind"
+        if m.group(2):
+            return "eng"
+        if m.group(3):
+            return "jpn"
 
     for regex, require_known in (
         (_LANG_BEFORE_TRACK_RE, False),
@@ -218,17 +221,19 @@ def _first_group(m: re.Match) -> str | None:
 
 def _parse_typed_ep(name: str, pattern: re.Pattern) -> str:
     m = pattern.search(name)
-    if m is None: return "00"
+    if m is None:
+        return "00"
     remainder = name[m.end():]
     glued = re.match(r"\s*(\d{1,4}(?:\.\d{1,2}(?![0-9pib]))?)", remainder)
-    if glued: 
+    if glued:
         return format_ep(glued.group(1))
-    
+
     m2 = _EP_NUM_MARKER_RE.search(remainder)
     if m2:
         val = _first_group(m2)
-        if val is not None: return format_ep(val)
-        
+        if val is not None:
+            return format_ep(val)
+
     matches = _EP_NUM_FALLBACK_RE.findall(remainder)
     if matches:
         return format_ep(matches[-1])
@@ -263,10 +268,12 @@ def parse_episode(name: str) -> EpisodeInfo | None:
         return EpisodeInfo(season, "SP", _parse_typed_ep(name, _SPECIAL_PATTERN))
 
     m = _SXXEXX_PATTERN.search(name)
-    if m: return EpisodeInfo(str(int(m.group(1))), "E", format_ep(m.group(2)))
+    if m:
+        return EpisodeInfo(str(int(m.group(1))), "E", format_ep(m.group(2)))
 
     m = _SXXPXX_PATTERN.search(name)
-    if m: return EpisodeInfo(str(int(m.group(1))), "P", format_ep(m.group(2)))
+    if m:
+        return EpisodeInfo(str(int(m.group(1))), "P", format_ep(m.group(2)))
 
     ep_m = _EP_NUM_MARKER_RE.search(name)
     if ep_m:

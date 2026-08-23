@@ -23,12 +23,12 @@ mkv_runner = importlib.import_module("mkv_runner")
 mkv_remux = importlib.import_module("mkv_remux")
 mkv_extract = importlib.import_module("mkv_extract")
 
+import mkv_proc
 from mkv_domain import EpisodeInfo
 from mkv_fonts import FontInfo, FontManager
-from mkv_proc import CancelToken, CancelledError, run_subprocess_cancellable
-import mkv_proc
-from mkv_scan import ParsedFile, PersistentInspectCache
+from mkv_proc import CancelledError, CancelToken, run_subprocess_cancellable
 from mkv_runner import CliRuntime
+from mkv_scan import ParsedFile, PersistentInspectCache
 
 
 def _cancelled_token() -> CancelToken:

@@ -1,9 +1,9 @@
 """
 Edge case tests for episode parsing.
 """
-from mkv_domain import parse_episode
-
 import pytest
+
+from mkv_domain import parse_episode
 
 
 class TestEpisodeParserEdgeCases:
