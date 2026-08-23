@@ -189,6 +189,7 @@ def test_scripts_run_accepts_persistent_cache(tmp_path):
             opus_bitrate="192k",
             complexity=10,
             ffmpeg_threads=None,
+            interaction_mode=mkv_remux.InteractionMode.DRY_RUN,
         )
         mkv_remux._run(release, config, pool)
 
