@@ -174,8 +174,6 @@ def test_process_file_reports_cancelled_before_start(tmp_path):
 # ─── batch scheduling ─────────────────────────────────────────────────────────
 def _runtime(tmp_path: Path) -> CliRuntime:
     return mkv_runner.CliRuntime(
-        root_input_dir=tmp_path,
-        out_override=None,
         workers=2,
         sub_offset=0.0,
         dry_run=True,

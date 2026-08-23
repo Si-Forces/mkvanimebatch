@@ -81,8 +81,6 @@ def handle_clear_cache_flag(clear_cache: bool) -> None:
 class CliRuntime:
     """Infrastructure shared across one whole CLI batch run."""
 
-    root_input_dir:   Path
-    out_override:     Path | None
     workers:          int
     sub_offset:       float
     dry_run:          bool
@@ -109,8 +107,6 @@ def install_cancel_handlers(cancel_token: CancelToken) -> None:
 
 def build_cli_runtime(
     *,
-    root_input_dir: Path,
-    out_override: Path | None,
     workers: int,
     sub_offset: float,
     dry_run: bool,
@@ -119,8 +115,6 @@ def build_cli_runtime(
 ) -> CliRuntime:
     """Assemble the runtime from already-validated CLI arguments."""
     return CliRuntime(
-        root_input_dir=root_input_dir,
-        out_override=out_override,
         workers=workers,
         sub_offset=sub_offset,
         dry_run=dry_run,

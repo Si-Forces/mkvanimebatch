@@ -12,6 +12,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+import mkv_runner
 from mkv_scan import PersistentInspectCache, scan_assets, scan_mkv_files
 
 
@@ -173,19 +174,23 @@ def test_scripts_run_accepts_persistent_cache(tmp_path):
         )
 
         # Remux script _run invocation with persistent_cache
-        mkv_remux._run(
-            tmp_path,
-            all_mkvs,
-            tmp_path,
-            tmp_path / "out",
-            tmp_path / "fonts",
-            [tmp_path],
-            pool,
-            1,
-            "192k",
-            dry_run=True,
-            persistent_cache=cache,
+        release = mkv_remux.prepare_release_directory(tmp_path, tmp_path, all_mkvs)
+        config = mkv_remux.RemuxRunConfig(
+            runtime=mkv_runner.CliRuntime(
+                workers=1,
+                sub_offset=0.0,
+                dry_run=True,
+                io_semaphore=None,
+                persistent_cache=cache,
+            ),
+            root_input_dir=tmp_path,
+            output_dir=tmp_path / "out",
+            temp_dir=None,
+            opus_bitrate="192k",
+            complexity=10,
+            ffmpeg_threads=None,
         )
+        mkv_remux._run(release, config, pool)
 
 
 def test_all_script_imports():

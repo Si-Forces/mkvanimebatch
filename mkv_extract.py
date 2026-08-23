@@ -30,7 +30,19 @@ from mkv_domain import (
     resolve_output_dir,
     select_best_subtitle_track,
 )
-from mkv_events import emit_event, get_item_id, set_events_enabled, setup_logging
+from mkv_events import (
+    OUTCOME_CANCELLED,
+    OUTCOME_COMPLETED,
+    OUTCOME_ERROR,
+    OUTCOME_PLANNED,
+    emit_batch_complete,
+    emit_batch_start,
+    emit_item_complete,
+    emit_item_start,
+    get_item_id,
+    set_events_enabled,
+    setup_logging,
+)
 from mkv_fonts import FontClaim, FontHashMemo, FontManager
 from mkv_proc import (
     SUBPROCESS_TIMEOUT,
@@ -149,16 +161,16 @@ def process_file(
     log: list[str] = [f"Processing: {mkv_path.name}"]
 
     if cancel_token is not None and cancel_token.cancelled:
-        emit_event("item_start", item_id=item_id, file=mkv_path.name)
+        emit_item_start(item_id, mkv_path.name)
         log.append("  !! CANCELLED before start.")
-        emit_event("item_complete", item_id=item_id, file=mkv_path.name, status="cancelled")
+        emit_item_complete(item_id, mkv_path.name, OUTCOME_CANCELLED)
         return mkv_path, log, False
 
-    emit_event("item_start", item_id=item_id, file=mkv_path.name)
+    emit_item_start(item_id, mkv_path.name)
 
     if json_data is None:
         log.append(f"  ERROR: mkvmerge inspection failed for '{mkv_path.name}'.")
-        emit_event("item_complete", item_id=item_id, file=mkv_path.name, status="error", error="mkvmerge inspection failed")
+        emit_item_complete(item_id, mkv_path.name, OUTCOME_ERROR, error="mkvmerge inspection failed")
         return mkv_path, log, False
 
     file_stem = mkv_path.stem
@@ -273,7 +285,7 @@ def process_file(
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     log.append(f"Done: {mkv_path.name}")
-    emit_event("item_complete", item_id=item_id, file=mkv_path.name, status="completed")
+    emit_item_complete(item_id, mkv_path.name, OUTCOME_COMPLETED)
     return mkv_path, log, True
 
 
@@ -303,7 +315,7 @@ def _run(
         logger.info("--- DRY RUN: Files that would be processed ---")
         for f in mkv_files:
             item_id = get_item_id(f.path, root_dir)
-            emit_event("item_complete", item_id=item_id, file=f.name, status="planned")
+            emit_item_complete(item_id, f.name, OUTCOME_PLANNED)
             logger.info("  %s", f.name)
         logger.info("Total: %d file(s). No extraction performed.", len(mkv_files))
         return True
@@ -363,7 +375,7 @@ def _run(
                 completed_files, total_files, progress * 100, mkv_path.name,
             )
             item_id = get_item_id(mkv_path, root_dir)
-            emit_event("item_complete", item_id=item_id, file=mkv_path.name, status="error", error=str(exc))
+            emit_item_complete(item_id, mkv_path.name, OUTCOME_ERROR, error=str(exc))
             results[mkv_path] = [
                 f"Processing: {mkv_path.name}",
                 "  WARNING: Worker crashed. See traceback above.",
@@ -416,8 +428,6 @@ def main() -> None:
     fonts_override = Path(cfg.fonts_dir).resolve() if cfg.fonts_dir else None
 
     runtime = build_cli_runtime(
-        root_input_dir=root_input_dir,
-        out_override=out_override,
         workers=cfg.workers,
         sub_offset=0.0,
         dry_run=cfg.dry_run,
@@ -441,8 +451,7 @@ def main() -> None:
         ignore_paths={out_override} if out_override else None,
     )
 
-    emit_event(
-        "batch_start",
+    emit_batch_start(
         total=sum(len(files) for files in mkvs_by_dir.values()),
         input_dir=str(root_input_dir),
     )
@@ -493,7 +502,7 @@ def main() -> None:
     if shared_font_manager is not None:
         shared_font_manager.cleanup_staging()
 
-    emit_event("batch_complete", success=overall_success and not cancelled, cancelled=cancelled)
+    emit_batch_complete(success=overall_success and not cancelled, cancelled=cancelled)
 
     if cancelled:
         sys.exit(130)

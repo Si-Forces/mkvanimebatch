@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
+import mkv_events
 import mkv_proc
 import mkv_remux
 import mkv_scan
@@ -180,7 +181,7 @@ def test_dry_run_skip_event_keeps_parenthesized_filename_id(tmp_path, monkeypatc
     video = _create_parsed_file(video_path)
     resolver = AssetResolver.discover([tmp_path], tmp_path / "fonts")
     emitted = []
-    monkeypatch.setattr(mkv_remux, "emit_event", lambda event_type, **payload: emitted.append((event_type, payload)))
+    monkeypatch.setattr(mkv_events, "emit_event", lambda event_type, **payload: emitted.append((event_type, payload)))
 
     mkv_remux._plan_jobs(
         [video],
@@ -207,7 +208,7 @@ def test_skip_event_reason_distinguishes_missing_vs_unmatched_subtitles(tmp_path
     video = _create_parsed_file(video_path)
     resolver = AssetResolver.discover([season], season / "fonts")
     emitted = []
-    monkeypatch.setattr(mkv_remux, "emit_event", lambda event_type, **payload: emitted.append((event_type, payload)))
+    monkeypatch.setattr(mkv_events, "emit_event", lambda event_type, **payload: emitted.append((event_type, payload)))
 
     mkv_remux._plan_jobs(
         [video],
@@ -375,7 +376,7 @@ def test_crashed_job_emits_error_event(tmp_path, monkeypatch):
     def mock_emit(event_type, **payload):
         emitted.append((event_type, payload))
 
-    monkeypatch.setattr(mkv_remux, "emit_event", mock_emit)
+    monkeypatch.setattr(mkv_events, "emit_event", mock_emit)
 
     job = mkv_remux.PlannedJob(
         video=tmp_path / "crash.mkv",
@@ -594,7 +595,7 @@ def test_remux_error_event_emitted_on_failure(monkeypatch, tmp_path):
     """Execution failure emits @event: item_complete with status='error' instead of 'skipped'."""
     events = []
     monkeypatch.setattr(mkv_remux, "set_events_enabled", lambda _: None)
-    monkeypatch.setattr(mkv_remux, "emit_event", lambda ev_type, **k: events.append((ev_type, k)))
+    monkeypatch.setattr(mkv_events, "emit_event", lambda ev_type, **k: events.append((ev_type, k)))
 
     def mock_run_fail(cmd, **_k):
         class Res:

@@ -65,8 +65,7 @@ def test_handle_clear_cache_flag_noop_when_unset():
 # ─── build_cli_runtime ────────────────────────────────────────────────────────
 def test_build_cli_runtime_io_jobs_disabled():
     runtime = mkv_runner.build_cli_runtime(
-        root_input_dir=Path("."), out_override=None, workers=4,
-        sub_offset=0.0, dry_run=True, no_cache=True, io_jobs=0,
+        workers=4, sub_offset=0.0, dry_run=True, no_cache=True, io_jobs=0,
     )
     assert runtime.io_semaphore is None
     assert runtime.persistent_cache.enabled is False
@@ -74,8 +73,7 @@ def test_build_cli_runtime_io_jobs_disabled():
 
 def test_build_cli_runtime_io_jobs_bounded():
     runtime = mkv_runner.build_cli_runtime(
-        root_input_dir=Path("."), out_override=None, workers=4,
-        sub_offset=0.0, dry_run=True, no_cache=True, io_jobs=3,
+        workers=4, sub_offset=0.0, dry_run=True, no_cache=True, io_jobs=3,
     )
     assert isinstance(runtime.io_semaphore, threading.BoundedSemaphore)
 
@@ -111,8 +109,6 @@ def _runtime_with_dirty_cache(cache_file: Path) -> CliRuntime:
     cache = PersistentInspectCache(cache_file=cache_file)
     cache._dirty = True  # force the post-loop flush to write a file
     return mkv_runner.CliRuntime(
-        root_input_dir=Path("."),
-        out_override=None,
         workers=2,
         sub_offset=0.0,
         dry_run=True,
