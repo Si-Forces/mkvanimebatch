@@ -9,19 +9,20 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-mkv_common = importlib.import_module("mkv_common")
 mkv_remux = importlib.import_module("mkv_remux")
 mkv_extract = importlib.import_module("mkv_extract")
 mkv_assets = importlib.import_module("mkv_assets")
 
+import mkv_proc
+import mkv_scan
+from mkv_domain import EpisodeInfo
+from mkv_scan import PersistentInspectCache, _create_parsed_file, inspect_videos
 
-@pytest.mark.parametrize("mod", [
-    pytest.param(mkv_common, id="mkv_common"),
-])
+
 class TestPersistentInspectCache:
-    def test_cache_hit_and_miss(self, tmp_path, mod):
+    def test_cache_hit_and_miss(self, tmp_path):
         cache_file = tmp_path / "cache.json"
-        cache = mod.PersistentInspectCache(cache_file=cache_file, enabled=True)
+        cache = PersistentInspectCache(cache_file=cache_file, enabled=True)
 
         sample_file = tmp_path / "video.mkv"
         sample_file.write_bytes(b"dummy_mkv_data")
@@ -34,7 +35,7 @@ class TestPersistentInspectCache:
         assert cache_file.exists()
 
         # Load into new cache instance
-        cache2 = mod.PersistentInspectCache(cache_file=cache_file, enabled=True)
+        cache2 = PersistentInspectCache(cache_file=cache_file, enabled=True)
         assert cache2.get(sample_file) == json_data
 
         # Test cache miss on modified size
@@ -46,10 +47,10 @@ class TestPersistentInspectCache:
         assert not cache_file.exists()
         assert cache2.get(sample_file) is None
 
-    def test_cache_lazy_eviction_on_missing_file(self, tmp_path, mod):
+    def test_cache_lazy_eviction_on_missing_file(self, tmp_path):
         """Verify deleted files are lazily invalidated upon get() rather than blocking eager stat loops during save()."""
         cache_file = tmp_path / "cache.json"
-        cache = mod.PersistentInspectCache(cache_file=cache_file, enabled=True)
+        cache = PersistentInspectCache(cache_file=cache_file, enabled=True)
 
         file1 = tmp_path / "video1.mkv"
         file2 = tmp_path / "video2.mkv"
@@ -65,13 +66,13 @@ class TestPersistentInspectCache:
         cache.save()
 
         # Reload cache and verify deleted file is lazily invalidated on get()
-        cache2 = mod.PersistentInspectCache(cache_file=cache_file, enabled=True)
+        cache2 = PersistentInspectCache(cache_file=cache_file, enabled=True)
         assert cache2.get(file1) == {"id": 1}
         assert cache2.get(file2) is None
 
-    def test_inspect_videos_uses_cache(self, tmp_path, mod):
+    def test_inspect_videos_uses_cache(self, tmp_path):
         cache_file = tmp_path / "cache.json"
-        cache = mod.PersistentInspectCache(cache_file=cache_file, enabled=True)
+        cache = PersistentInspectCache(cache_file=cache_file, enabled=True)
 
         sample_file = tmp_path / "video.mkv"
         sample_file.write_bytes(b"dummy_mkv_data")
@@ -80,25 +81,25 @@ class TestPersistentInspectCache:
         cache.put(sample_file, json_data)
 
         # Mock run_mkvmerge_json to verify it is NOT called for cached video
-        with patch.object(mod, "run_mkvmerge_json") as mock_mkvmerge:
+        with patch.object(mkv_scan, "run_mkvmerge_json") as mock_mkvmerge:
             with ThreadPoolExecutor(max_workers=1) as pool:
-                results = mod.inspect_videos([sample_file], pool=pool, persistent_cache=cache)
+                results = inspect_videos([sample_file], pool=pool, persistent_cache=cache)
             assert results[sample_file] == json_data
             mock_mkvmerge.assert_not_called()
 
-    def test_inspect_videos_without_cache(self, tmp_path, mod):
+    def test_inspect_videos_without_cache(self, tmp_path):
         sample_file = tmp_path / "video.mkv"
         sample_file.write_bytes(b"dummy_mkv_data")
 
         json_data = {"tracks": [{"id": 0, "type": "video"}]}
-        with patch.object(mod, "run_mkvmerge_json", return_value=json_data):
+        with patch.object(mkv_scan, "run_mkvmerge_json", return_value=json_data):
             with ThreadPoolExecutor(max_workers=1) as pool:
-                results = mod.inspect_videos([sample_file], pool=pool, persistent_cache=None)
+                results = inspect_videos([sample_file], pool=pool, persistent_cache=None)
             assert results[sample_file] == json_data
-    def test_cache_save_exception_unlinks_temp_file(self, tmp_path, mod):
+    def test_cache_save_exception_unlinks_temp_file(self, tmp_path):
         """Verify that any temporary file created during save() is unlinked if serialization or write fails."""
         cache_file = tmp_path / "cache.json"
-        cache = mod.PersistentInspectCache(cache_file=cache_file, enabled=True)
+        cache = PersistentInspectCache(cache_file=cache_file, enabled=True)
         sample_file = tmp_path / "video.mkv"
         sample_file.write_bytes(b"dummy")
 
@@ -115,9 +116,9 @@ class TestPersistentInspectCache:
 def test_cover_index_add_episode_cover_no_nameerror():
     """Verify CoverIndex.add() with per-episode cover does not raise NameError for parse_episode."""
     cover_index = mkv_assets.CoverIndex()
-    pf = mkv_common._create_parsed_file(Path("/dummy/Show - 01_cover.jpg"))
+    pf = _create_parsed_file(Path("/dummy/Show - 01_cover.jpg"))
     cover_index.add(pf)
-    assert cover_index.lookup("E", "01", "") == Path("/dummy/Show - 01_cover.jpg")
+    assert cover_index.lookup(EpisodeInfo("", "E", "01")) == Path("/dummy/Show - 01_cover.jpg")
 
 
 @pytest.mark.parametrize("mod", [
@@ -132,7 +133,7 @@ def test_ffmpeg_probesize_args(mod):
     mock_res.returncode = 0
     mock_res.stderr = ""
 
-    with patch.object(mod, "run_subprocess", return_value=mock_res) as mock_run:
+    with patch.object(mkv_proc, "run_subprocess", return_value=mock_res) as mock_run:
         mod._convert_flac_to_opus(video, 0, temp_dir, "video", "128k", [], 2)
 
         cmd = mock_run.call_args[0][0]
@@ -166,7 +167,7 @@ def test_io_semaphore_throttles_remux(tmp_path):
     mock_cover_index = MagicMock()
     mock_cover_index.lookup.return_value = None
 
-    with patch.object(mkv_remux, "run_subprocess", side_effect=fake_subprocess), \
+    with patch.object(mkv_proc, "run_subprocess", side_effect=fake_subprocess), \
          patch.object(mkv_remux, "select_tracks") as mock_tracks:
         tr = MagicMock()
         tr.video_id = 0
@@ -209,7 +210,7 @@ def test_flac_conversion_decoupled_from_io_semaphore(tmp_path):
     mock_res.returncode = 0
     mock_res.stderr = ""
 
-    with patch.object(mkv_remux, "run_subprocess", return_value=mock_res) as mock_run:
+    with patch.object(mkv_proc, "run_subprocess", return_value=mock_res) as mock_run:
         res = mkv_remux._convert_flac_to_opus(
             video, 0, tmp_path, "video", "192k", [], 2, complexity=9
         )

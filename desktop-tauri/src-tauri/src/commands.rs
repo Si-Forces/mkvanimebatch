@@ -5,7 +5,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
-use sysinfo::System;
+use sysinfo::{Pid, ProcessesToUpdate, System};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 #[cfg(windows)]
@@ -34,7 +34,14 @@ impl Default for JobState {
 }
 
 pub struct TelemetryState {
-    pub sys: Mutex<System>,
+    inner: Mutex<TelemetryInner>,
+}
+
+struct TelemetryInner {
+    sys: System,
+    /// Timestamp of the previous telemetry poll; the window between polls
+    /// converts the per-refresh written-bytes delta into a rate.
+    last_poll: Option<std::time::Instant>,
 }
 
 impl Default for TelemetryState {
@@ -42,7 +49,10 @@ impl Default for TelemetryState {
         let mut sys = System::new_all();
         sys.refresh_all();
         Self {
-            sys: Mutex::new(sys),
+            inner: Mutex::new(TelemetryInner {
+                sys,
+                last_poll: None,
+            }),
         }
     }
 }
@@ -280,9 +290,26 @@ fn run_sidecar_once(
 
 #[tauri::command]
 pub fn get_system_telemetry(state: State<'_, TelemetryState>) -> Result<TelemetryData, String> {
-    let mut sys = state.sys.lock().map_err(|e| e.to_string())?;
+    let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
+    let sys = &mut inner.sys;
     sys.refresh_cpu_all();
     sys.refresh_memory();
+    // `written_bytes` is a per-refresh delta, so the poll interval doubles as
+    // the measurement window. Scoped to this app and the mkv-* sidecar
+    // processes; I/O from their grandchildren (mkvmerge/ffmpeg) is not
+    // attributed to them by the OS process accounting used here.
+    sys.refresh_processes(ProcessesToUpdate::All, false);
+
+    let self_pid = Pid::from_u32(std::process::id());
+    let mut written_window = 0u64;
+    for (pid, process) in sys.processes() {
+        let lowered = process.name().to_string_lossy().to_lowercase();
+        let is_engine =
+            *pid == self_pid || lowered.starts_with("mkv-remux") || lowered.starts_with("mkv-extract");
+        if is_engine {
+            written_window += process.disk_usage().written_bytes;
+        }
+    }
 
     let cpus = sys.cpus();
     let cpu_pct = if !cpus.is_empty() {
@@ -299,13 +326,27 @@ pub fn get_system_telemetry(state: State<'_, TelemetryState>) -> Result<Telemetr
     } else {
         0.0
     };
+    // `sys` is no longer borrowed past this point, so the poll bookkeeping
+    // can read `last_poll` freely.
+    let io_mb_s = match inner.last_poll {
+        Some(prev) => {
+            let elapsed = prev.elapsed().as_secs_f64();
+            if elapsed > 0.0 {
+                (written_window as f64 / elapsed / (1024.0 * 1024.0)) as f32
+            } else {
+                0.0
+            }
+        }
+        None => 0.0,
+    };
+    inner.last_poll = Some(std::time::Instant::now());
 
     Ok(TelemetryData {
         cpu_pct,
         ram_used_mb: ram_used,
         ram_total_mb: ram_total,
         ram_pct,
-        io_mb_s: 0.0,
+        io_mb_s,
     })
 }
 
@@ -552,18 +593,70 @@ pub fn run_job(
 
 #[tauri::command]
 pub fn stop_job(state: State<'_, JobState>) -> Result<(), String> {
-    let mut lock = state.child.lock().map_err(|e| e.to_string())?;
-    if let Some((_, ref mut child)) = *lock {
-        if let Ok(None) = child.try_wait() {
-            let pid = child.id();
-            #[cfg(windows)]
-            {
-                let _ = Command::new("taskkill")
-                    .args(["/PID", &pid.to_string(), "/T", "/F"])
-                    .output();
+    {
+        // Signal phase: hold the lock only long enough to inspect the child
+        // and deliver the stop signal.
+        let mut lock = state.child.lock().map_err(|e| e.to_string())?;
+        if let Some((_, ref mut child)) = *lock {
+            if let Ok(None) = child.try_wait() {
+                let pid = child.id();
+                #[cfg(windows)]
+                {
+                    let _ = Command::new("taskkill")
+                        .args(["/PID", &pid.to_string(), "/T", "/F"])
+                        .output();
+                }
+                #[cfg(not(windows))]
+                {
+                    // Ask nicely first: SIGTERM lets the Python sidecar run
+                    // its cancellation handlers (terminate ffmpeg/mkvmerge
+                    // children, clean temp dirs, emit final events).
+                    let _ = Command::new("kill")
+                        .args(["-s", "TERM", "--", &format!("-{}", pid)])
+                        .output();
+                }
             }
-            #[cfg(not(windows))]
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        // Grace phase: wait for a cooperative exit WITHOUT holding the mutex,
+        // so the job-wait thread can reap the process and concurrent commands
+        // stay responsive. Re-acquire briefly per tick just to poll status.
+        let grace = std::time::Duration::from_secs(8);
+        let start = std::time::Instant::now();
+        let mut exited = false;
+        while start.elapsed() < grace {
             {
+                let mut lock = state.child.lock().map_err(|e| e.to_string())?;
+                match *lock {
+                    Some((_, ref mut child)) => match child.try_wait() {
+                        Ok(Some(_)) | Err(_) => {
+                            exited = true;
+                        }
+                        Ok(None) => {}
+                    },
+                    None => {
+                        exited = true;
+                    }
+                }
+            }
+            if exited {
+                return Ok(());
+            }
+            thread::sleep(std::time::Duration::from_millis(200));
+        }
+
+        // Escalation phase: the sidecar ignored the grace period; hard kill.
+        let mut lock = state.child.lock().map_err(|e| e.to_string())?;
+        if let Some((_, ref mut child)) = *lock {
+            if child
+                .try_wait()
+                .map(|status| status.is_none())
+                .unwrap_or(false)
+            {
+                let pid = child.id();
                 let _ = Command::new("kill")
                     .args(["-s", "KILL", "--", &format!("-{}", pid)])
                     .output();
@@ -571,6 +664,7 @@ pub fn stop_job(state: State<'_, JobState>) -> Result<(), String> {
             }
         }
     }
+
     Ok(())
 }
 

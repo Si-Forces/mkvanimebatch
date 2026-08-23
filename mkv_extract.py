@@ -15,48 +15,49 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
-from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from mkv_common import (
+from mkv_domain import (
     COVER_EXTENSIONS,
-    DEFAULT_WORKER_MULTIPLIER,
-    MAX_DEFAULT_WORKERS,
+    EpisodeInfo,
+    ep_type_label,
+    resolve_output_dir,
+    select_best_subtitle_track,
+)
+from mkv_events import emit_event, get_item_id, set_events_enabled, setup_logging
+from mkv_fonts import FontClaim, FontHashMemo, FontManager
+from mkv_proc import (
     SUBPROCESS_TIMEOUT,
-    FontClaim,
-    FontHashMemo,
-    FontManager,
+    CancelledError,
+    CancelToken,
+    acquire_semaphore,
+    run_subprocess_cancellable,
+)
+from mkv_scan import (
     ParsedFile,
     PersistentInspectCache,
-    StaleSubtitleTracker,
-    acquire_semaphore,
     check_dependencies,
-    cleanup_stale_subtitle_offsets_bulk,
-    emit_event,
-    ep_type_label,
     get_default_font_hash_memo_file,
-    get_item_id,
     has_chapters,
     inspect_videos,
-    natural_sort_key,
     parse_attachments,
-    resolve_output_dir,
-    run_subprocess,
-    scan_mkv_files,
-    select_best_subtitle_track,
-    set_events_enabled,
-    setup_logging,
-    shift_ass_timestamps,
+)
+from mkv_runner import (
+    SCRIPT_DIR,
+    add_shared_args,
+    build_cli_runtime,
+    collect_release_dirs,
+    handle_clear_cache_flag,
+    install_cancel_handlers,
+    run_batch,
 )
 
-SCRIPT_DIR = Path(__file__).resolve().parent
 SUPPORTED_SUB_CODECS = frozenset({"s_text/ass"})
 
 # Initialize local child logger
@@ -64,11 +65,19 @@ logger = logging.getLogger("mkv_automation.extract")
 
 
 # ─── SUBTITLE SELECTION ──────────────────────────────────────────────────────
+def _episode_suffix(parsed: EpisodeInfo | None, file_stem: str) -> str:
+    """Filename segment identifying the episode; falls back to the raw stem
+    when the file name carried no parseable Episode Info."""
+    if parsed is None:
+        return file_stem
+    return f"{ep_type_label(parsed.ep_type)}{parsed.ep}"
+
+
 def select_subtitle(
     json_data: dict,
     file_stem: str,
     file_dir:  Path,
-    ep_tag:    str,
+    parsed:    EpisodeInfo | None,
     log:       list[str],
 ) -> tuple[str, Path] | None:
     """Pick the best ASS subtitle track and build its output path."""
@@ -80,20 +89,31 @@ def select_subtitle(
     if result is None:
         return None
     track_id, language, _ = result
-    sub_path = file_dir / f"{file_stem}_{ep_tag}_{language}_track{track_id}.ass"
+    sub_path = file_dir / f"{file_stem}_{_episode_suffix(parsed, file_stem)}_{language}_track{track_id}.ass"
     return str(track_id), sub_path
 
 
 # ─── EXTRACTION HELPERS ──────────────────────────────────────────────────────
-def _run_mkvextract(mkv_path: Path, args: list[str], log: list[str], io_semaphore: threading.Semaphore | None = None) -> None:
+def _run_mkvextract(
+    mkv_path: Path,
+    args: list[str],
+    log: list[str],
+    io_semaphore: threading.Semaphore | None = None,
+    cancel_token: CancelToken | None = None,
+) -> None:
     """Run a single mkvextract command with mixed modes (tracks, chapters, attachments)."""
     if not args:
         log.append("   -> Nothing to extract.")
         return
-        
+
     try:
         with acquire_semaphore(io_semaphore):
-            result = run_subprocess(["mkvextract", str(mkv_path), *args], capture_stdout=False, timeout=SUBPROCESS_TIMEOUT)
+            result = run_subprocess_cancellable(
+                ["mkvextract", str(mkv_path), *args],
+                capture_stdout=False,
+                timeout=SUBPROCESS_TIMEOUT,
+                cancel_token=cancel_token,
+            )
     except subprocess.TimeoutExpired:
         log.append(f"   -> ERROR: mkvextract timed out after {SUBPROCESS_TIMEOUT}s for '{mkv_path.name}'.")
         raise RuntimeError(
@@ -118,16 +138,21 @@ def process_file(
     mkv_file:            ParsedFile,
     json_data:           dict | None,
     font_manager:        FontManager,
-    stale_subs_tracker:  StaleSubtitleTracker | None = None,
-    sub_offset:          float = 0.0,
     io_semaphore:        threading.Semaphore | None = None,
     output_dir:          Path | None = None,
     root_input_dir:      Path | None = None,
+    cancel_token:        CancelToken | None = None,
 ) -> tuple[Path, list[str], bool]:
     mkv_path = mkv_file.path
     root_dir = root_input_dir or mkv_path.parent
     item_id = get_item_id(mkv_path, root_dir)
     log: list[str] = [f"Processing: {mkv_path.name}"]
+
+    if cancel_token is not None and cancel_token.cancelled:
+        emit_event("item_start", item_id=item_id, file=mkv_path.name)
+        log.append("  !! CANCELLED before start.")
+        emit_event("item_complete", item_id=item_id, file=mkv_path.name, status="cancelled")
+        return mkv_path, log, False
 
     emit_event("item_start", item_id=item_id, file=mkv_path.name)
 
@@ -141,12 +166,9 @@ def process_file(
 
     parsed = mkv_file.parsed
     if parsed:
-        _, ep_type, ep = parsed
-        ep_tag       = f"{ep_type_label(ep_type)}{ep}"
-        chapter_stem = f"{file_stem}_{ep_tag}"
-        log.append(f"   -> Type: {ep_type_label(ep_type)} {ep}")
+        chapter_stem = f"{file_stem}_{_episode_suffix(parsed, file_stem)}"
+        log.append(f"   -> Type: {ep_type_label(parsed.ep_type)} {parsed.ep}")
     else:
-        ep_tag       = file_stem
         chapter_stem = file_stem
         log.append(
             "   -> WARNING: Could not parse episode number; "
@@ -155,14 +177,10 @@ def process_file(
 
     queued_outputs: list[tuple[str, str | None, Path, str]] = []
 
-    sub_result = select_subtitle(json_data, file_stem, file_dir, ep_tag, log)
-    base_sub_path: Path | None = None
+    sub_result = select_subtitle(json_data, file_stem, file_dir, parsed, log)
     final_sub_path = None
     if sub_result:
         track_id, sub_path = sub_result
-        base_sub_path = sub_path
-        if sub_offset != 0.0:
-            sub_path = sub_path.with_name(f"{sub_path.stem}.[{sub_offset:+g}s]{sub_path.suffix}")
         final_sub_path = sub_path
         log.append(f"   -> Queued subtitle track {track_id} → {sub_path.name}")
         queued_outputs.append(("tracks", str(track_id), sub_path, "Subtitle"))
@@ -225,24 +243,19 @@ def process_file(
             extract_args += font_args
 
         log.append("   -> Running mkvextract...")
-        _run_mkvextract(mkv_path, extract_args, log, io_semaphore=io_semaphore)
+        _run_mkvextract(
+            mkv_path,
+            extract_args,
+            log,
+            io_semaphore=io_semaphore,
+            cancel_token=cancel_token,
+        )
 
         for staged_path, final_path, item_name in staged_outputs:
             _clean_empty_file(staged_path, log, item_name)
             if not staged_path.exists():
                 continue
-            if final_path == final_sub_path and sub_offset != 0.0:
-                shift_ass_timestamps(staged_path, sub_offset, log)
             staged_path.replace(final_path)
-
-        if final_sub_path and final_sub_path.exists():
-            if stale_subs_tracker is not None and base_sub_path is not None:
-                stale_subs_tracker.record(base_sub_path.stem, final_sub_path.name)
-            elif base_sub_path is not None:
-                cleanup_stale_subtitle_offsets_bulk(
-                    base_sub_path.parent,
-                    {base_sub_path.stem: final_sub_path.name},
-                )
 
         saved_count = 0
         for claim in font_claims:
@@ -253,7 +266,7 @@ def process_file(
         if font_claims:
             log.append(f"   -> Extracted {saved_count} new font(s).")
 
-    except Exception:
+    except BaseException:
         for claim in font_claims:
             font_manager.release(claim)
         raise
@@ -274,12 +287,12 @@ def _run(
     pool:               ThreadPoolExecutor,
     max_workers:        int,
     dry_run:            bool,
-    sub_offset:         float = 0.0,
     persistent_cache:   PersistentInspectCache | None = None,
     io_semaphore:       threading.Semaphore | None = None,
     font_manager:       FontManager | None = None,
     root_input_dir:     Path | None = None,
     font_hash_memo:     FontHashMemo | None = None,
+    cancel_token:       CancelToken | None = None,
 ) -> bool:
     if not mkv_files:
         logger.warning("No MKV files found in '%s', skipping.", output_dir.name)
@@ -298,13 +311,12 @@ def _run(
         return True
 
     fonts_dir.mkdir(parents=True, exist_ok=True)
-    json_cache = inspect_videos([f.path for f in mkv_files], pool, persistent_cache=persistent_cache)
+    json_cache = inspect_videos([f.path for f in mkv_files], pool, persistent_cache=persistent_cache, cancel_token=cancel_token)
 
     # A manager passed in from main() is shared across directory passes; its
     # staging directory must outlive this pass and is cleaned up by the caller.
     owns_font_manager = font_manager is None
     active_font_manager = FontManager(fonts_dir, hash_memo=font_hash_memo) if font_manager is None else font_manager
-    stale_subs_tracker = StaleSubtitleTracker()
 
     logger.info("Processing %d file(s) (up to %d at a time)...", len(mkv_files), max_workers)
 
@@ -318,11 +330,10 @@ def _run(
             mkv_file,
             json_cache.get(mkv_file.path),
             active_font_manager,
-            stale_subs_tracker=stale_subs_tracker,
-            sub_offset=sub_offset,
             io_semaphore=io_semaphore,
             output_dir=output_dir,
             root_input_dir=root_dir,
+            cancel_token=cancel_token,
         ): mkv_file
         for mkv_file in mkv_files
     }
@@ -372,7 +383,6 @@ def _run(
             else:
                 logger.info(line)
 
-    stale_subs_tracker.cleanup(output_dir)
     if owns_font_manager:
         active_font_manager.cleanup_staging()
 
@@ -383,77 +393,61 @@ def _run(
 
 
 def main() -> None:
-    cpu_count = os.cpu_count() or 4
-    default_workers = min(cpu_count * DEFAULT_WORKER_MULTIPLIER, MAX_DEFAULT_WORKERS)
+    setup_logging(logging.INFO)
 
     parser = argparse.ArgumentParser(
         description="MKV Track & Font Extractor for Anime & Fansubs",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--workers", type=int, default=default_workers, choices=range(1, 65),
-                        metavar="[1-64]",
-                        help="Number of concurrent files to process.")
+    add_shared_args(parser)
     parser.add_argument("--out-dir", type=str, default=None,
                         help="Directory where extracted assets (subtitles, covers, chapters, fonts) will be saved.")
-    parser.add_argument("--input-dir", type=str, default=None,
-                        help="Directory containing MKV files (defaults to script directory).")
     parser.add_argument("--fonts-dir", type=str, default=None,
                         help="Directory to save extracted fonts (defaults to <out-dir>/fonts or <input-dir>/fonts).")
     parser.add_argument("--dry-run", action="store_true",
                         help="List discovered MKV files without extracting anything.")
-    parser.add_argument("--sub-offset", type=float, default=0.0,
-                        help="Shift extracted subtitle timestamps by this many seconds (negative = earlier, positive = later). Applied once, at extraction time.")
     parser.add_argument("--io-jobs", type=int, default=2,
                         help="Maximum concurrent disk I/O jobs for mkvextract. Set to 0 to disable throttling.")
-    parser.add_argument("--no-cache", action="store_true",
-                        help="Bypass persistent inspection cache.")
-    parser.add_argument("--clear-cache", action="store_true",
-                        help="Clear persistent inspection cache and exit.")
-    parser.add_argument("--events", action="store_true",
-                        help="Emit structured @event: JSON-line events on stdout.")
     cfg = parser.parse_args()
 
     set_events_enabled(cfg.events)
+    handle_clear_cache_flag(cfg.clear_cache)
 
-    max_workers = cfg.workers
     root_input_dir = Path(cfg.input_dir).resolve() if cfg.input_dir else SCRIPT_DIR
     out_override = Path(cfg.out_dir).resolve() if cfg.out_dir else None
     fonts_override = Path(cfg.fonts_dir).resolve() if cfg.fonts_dir else None
-    dry_run = cfg.dry_run
 
-    if cfg.clear_cache:
-        PersistentInspectCache().clear()
-        logger.info("Persistent inspection cache cleared.")
-        sys.exit(0)
-
-    persistent_cache = PersistentInspectCache(enabled=not cfg.no_cache)
-    io_semaphore = threading.BoundedSemaphore(cfg.io_jobs) if cfg.io_jobs > 0 else None
-
-    setup_logging(logging.INFO)
+    runtime = build_cli_runtime(
+        root_input_dir=root_input_dir,
+        out_override=out_override,
+        workers=cfg.workers,
+        sub_offset=0.0,
+        dry_run=cfg.dry_run,
+        no_cache=cfg.no_cache,
+        io_jobs=cfg.io_jobs,
+    )
+    install_cancel_handlers(runtime.cancel_token)
 
     logger.info("=========================================")
     logger.info(" MKV Track & Font Extractor")
     logger.info(" Anime / Indonesian Fansub Edition")
     logger.info("=========================================")
-    logger.info("Workers: %d | Input: %s", max_workers, root_input_dir)
+    logger.info("Workers: %d | Input: %s", runtime.workers, root_input_dir)
 
     check_dependencies("mkvmerge", "mkvextract")
     logger.info("Using mkvmerge  : %s", shutil.which('mkvmerge'))
     logger.info("Using mkvextract: %s", shutil.which('mkvextract'))
 
-    ignore_paths = {out_override} if out_override else None
-    all_mkvs = scan_mkv_files(root_input_dir, ignore_paths=ignore_paths)
-    if not all_mkvs:
-        logger.error("No MKV files found.")
-        sys.exit(1)
+    mkvs_by_dir = collect_release_dirs(
+        root_input_dir,
+        ignore_paths={out_override} if out_override else None,
+    )
 
-    mkvs_by_dir: dict[Path, list[ParsedFile]] = defaultdict(list)
-    for mkv in all_mkvs:
-        mkvs_by_dir[mkv.path.parent].append(mkv)
-
-    mkv_dirs = sorted(mkvs_by_dir.keys(), key=natural_sort_key)
-
-    emit_event("batch_start", total=len(all_mkvs), input_dir=str(root_input_dir))
+    emit_event(
+        "batch_start",
+        total=sum(len(files) for files in mkvs_by_dir.values()),
+        input_dir=str(root_input_dir),
+    )
 
     def fonts_dir_for(mkv_dir: Path) -> Path:
         if fonts_override:
@@ -468,54 +462,43 @@ def main() -> None:
     if fonts_override or out_override:
         shared_font_manager = FontManager(fonts_dir_for(root_input_dir), hash_memo=font_hash_memo)
 
-    overall_success = True
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        for mkv_dir in mkv_dirs:
-            logger.info("")
-            logger.info("=" * 60)
-            logger.info("Processing directory: %s", mkv_dir)
-            logger.info("=" * 60)
+    def process_directory(pool: ThreadPoolExecutor, mkv_dir: Path, dir_mkvs: list[ParsedFile]) -> bool:
+        current_output_dir = resolve_output_dir(mkv_dir, root_input_dir, out_override, default_subdir=None)
+        if not runtime.dry_run:
+            current_output_dir.mkdir(parents=True, exist_ok=True)
+        return _run(
+            current_output_dir,
+            fonts_dir_for(mkv_dir),
+            dir_mkvs,
+            pool,
+            runtime.workers,
+            runtime.dry_run,
+            persistent_cache=runtime.persistent_cache,
+            io_semaphore=runtime.io_semaphore,
+            font_manager=shared_font_manager,
+            root_input_dir=root_input_dir,
+            font_hash_memo=font_hash_memo,
+            cancel_token=runtime.cancel_token,
+        )
 
-            current_output_dir = resolve_output_dir(
-                mkv_dir,
-                root_input_dir,
-                out_override,
-                default_subdir=None,
-            )
+    try:
+        overall_success = run_batch(runtime, mkvs_by_dir, process_directory)
+    except CancelledError:
+        logger.warning("Cancelled by user.")
+        overall_success = False
 
-            if not dry_run:
-                current_output_dir.mkdir(parents=True, exist_ok=True)
+    cancelled = runtime.cancel_token.cancelled
 
-            current_fonts_dir = fonts_dir_for(mkv_dir)
-
-            dir_mkvs = mkvs_by_dir[mkv_dir]
-            success = _run(
-                current_output_dir,
-                current_fonts_dir,
-                dir_mkvs,
-                pool,
-                max_workers,
-                dry_run,
-                sub_offset=cfg.sub_offset,
-                persistent_cache=persistent_cache,
-                io_semaphore=io_semaphore,
-                font_manager=shared_font_manager,
-                root_input_dir=root_input_dir,
-                font_hash_memo=font_hash_memo,
-            )
-            if not success:
-                overall_success = False
-
-            persistent_cache.save(min_interval=60.0)
-
-    persistent_cache.save()
     font_hash_memo.save()
     # The shared manager's staging directory spans the whole batch; remove it
     # once here instead of per-directory pass.
     if shared_font_manager is not None:
         shared_font_manager.cleanup_staging()
 
-    emit_event("batch_complete", success=overall_success)
+    emit_event("batch_complete", success=overall_success and not cancelled, cancelled=cancelled)
+
+    if cancelled:
+        sys.exit(130)
 
     if not overall_success:
         sys.exit(1)

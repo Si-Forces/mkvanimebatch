@@ -4,42 +4,50 @@ Asset discovery, indexing, and resolution for anime releases (subtitles, chapter
 """
 from __future__ import annotations
 
+import logging
 import re
-import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from mkv_common import (
+from mkv_domain import (
     LANG_LABEL,
     LANG_MKV_TAG,
     SUBTITLE_LANGS_FALLBACK,
     SUBTITLE_LANGS_PRIMARY,
     EpisodeInfo,
-    FontInfo,
-    ParsedFile,
-    ScanResults,
     detect_sub_lang,
-    has_chapters,
-    has_cover,
-    is_chapter_xml,
-    is_cover_filename,
     is_dialogue_track,
-    logger,
     natural_sort_key,
     parse_episode,
-    scan_assets,
-    scan_fonts,
     score_subtitle_category,
     seasons_match,
     select_best_subtitle_track,
 )
+from mkv_fonts import FontInfo, scan_fonts
+from mkv_scan import (
+    ParsedFile,
+    ScanResults,
+    has_chapters,
+    has_cover,
+    is_chapter_xml,
+    is_cover_filename,
+    scan_assets,
+)
 
-__all__ = ["AssetResolver", "ChapterIndex", "CoverIndex", "ResolvedAssets", "SubIndex"]
+logger = logging.getLogger("mkv_automation")
+
+__all__ = ["AssetResolver", "ChapterIndex", "CoverIndex", "ResolvedAssets", "SubIndex", "SubtitlePrompt"]
+
+# Callback that offers a video's available subtitle files to a human and returns
+# the chosen one (or None to skip). Injected by the CLI layer so this module
+# stays free of stdin/stdout concerns.
+SubtitlePrompt = Callable[[ParsedFile, list[Path]], "Path | None"]
 
 
 # ─── ASSET INDICES (Subtitles, Chapters, Covers) ─────────────────────────────
-def _ep_key(ep_type: str, ep: str) -> str:
-    return f"{ep_type}|{ep}"
+def _ep_key(info: EpisodeInfo) -> str:
+    return f"{info.ep_type}|{info.ep}"
 
 
 def _reject_duplicate(
@@ -71,23 +79,20 @@ class SubIndex:
                 self._unparsed_paths.add(sub_file.path)
                 self._unparsed.append(sub_file)
             return
-        _, ep_type, ep = sub_file.parsed
-        key = _ep_key(ep_type, ep)
+        key = _ep_key(sub_file.parsed)
         if any(existing.path == sub_file.path for existing in self._index.get(key, ())):
             return
         self._index.setdefault(key, []).append(sub_file)
 
     def lookup(
         self,
-        ep_type: str,
-        ep: str,
-        mkv_season: str,
+        parsed: EpisodeInfo,
         local_dir: Path | None = None,
     ) -> tuple[Path, str] | None:
-        key = _ep_key(ep_type, ep)
+        key = _ep_key(parsed)
         candidates = []
         for f in self._index.get(key, ()):
-            if f.parsed is not None and seasons_match(mkv_season, f.parsed[0]):
+            if f.parsed is not None and seasons_match(parsed.season, f.parsed.season):
                 candidates.append(f)
 
         if not candidates:
@@ -144,31 +149,30 @@ class ChapterIndex:
             return
         parsed = xml_file.parsed
         if parsed:
-            season, ep_type, ep = parsed
-            key = _ep_key(ep_type, ep)
+            key = _ep_key(parsed)
             existing = self._index.setdefault(key, [])
             if _reject_duplicate(
                 existing,
                 xml_file.path,
-                season,
+                parsed.season,
                 key,
                 "Duplicate chapter file for key %s in '%s': keeping '%s', ignoring '%s'",
             ):
                 return
-            existing.append((xml_file.path, season))
+            existing.append((xml_file.path, parsed.season))
         else:
             self._unmatched.append(xml_file.path)
 
-    def lookup(self, ep_type: str, ep: str, mkv_season: str) -> Path | None:
-        key = _ep_key(ep_type, ep)
+    def lookup(self, parsed: EpisodeInfo) -> Path | None:
+        key = _ep_key(parsed)
         if key in self._index:
             for path, season in self._index[key]:
-                if seasons_match(mkv_season, season):
+                if seasons_match(parsed.season, season):
                     return path
         return None
 
-    def has_match(self, ep_type: str, ep: str, season: str) -> bool:
-        return self.lookup(ep_type, ep, season) is not None
+    def has_match(self, parsed: EpisodeInfo) -> bool:
+        return self.lookup(parsed) is not None
 
     @property
     def indexed_count(self) -> int:  return sum(len(lst) for lst in self._index.values())
@@ -211,24 +215,23 @@ class CoverIndex:
 
         if parsed is None:
             return
-        season, ep_type, ep = parsed
-        key = _ep_key(ep_type, ep)
+        key = _ep_key(parsed)
         existing = self._index.setdefault(key, [])
         if _reject_duplicate(
             existing,
             image_file.path,
-            season,
+            parsed.season,
             key,
             "Duplicate cover image for key %s in '%s': keeping '%s', ignoring '%s'",
         ):
             return
-        existing.append((image_file.path, season))
+        existing.append((image_file.path, parsed.season))
 
-    def lookup(self, ep_type: str, ep: str, mkv_season: str) -> Path | None:
-        key = _ep_key(ep_type, ep)
+    def lookup(self, parsed: EpisodeInfo) -> Path | None:
+        key = _ep_key(parsed)
         if key in self._index:
             for path, season in self._index[key]:
-                if seasons_match(mkv_season, season):
+                if seasons_match(parsed.season, season):
                     return path
         return self._global
 
@@ -279,6 +282,7 @@ class AssetResolver:
         fallback_sub_index: SubIndex | None = None,
         fallback_chap_index: ChapterIndex | None = None,
         fallback_cover_index: CoverIndex | None = None,
+        subtitle_prompt: SubtitlePrompt | None = None,
     ) -> None:
         self.fonts = fonts
         self.sub_index = sub_index
@@ -287,6 +291,7 @@ class AssetResolver:
         self.fallback_sub_index = fallback_sub_index
         self.fallback_chap_index = fallback_chap_index
         self.fallback_cover_index = fallback_cover_index
+        self.subtitle_prompt = subtitle_prompt
         self._chapter_unmatched_claimed: set[Path] = set()
 
     @property
@@ -297,13 +302,13 @@ class AssetResolver:
     def use_source_fonts(self) -> bool:
         return self.fonts.count == 0
 
-    def has_local_subtitle(self, ep_type: str, ep: str, season: str, local_dir: Path | None = None) -> bool:
-        return self.sub_index.lookup(ep_type, ep, season, local_dir=local_dir) is not None
+    def has_local_subtitle(self, parsed: EpisodeInfo, local_dir: Path | None = None) -> bool:
+        return self.sub_index.lookup(parsed, local_dir=local_dir) is not None
 
     def count_unmatched_chapter_videos(self, videos: list[ParsedFile]) -> int:
         return sum(
             1 for v in videos
-            if v.parsed and not self.chap_index.has_match(v.parsed[1], v.parsed[2], v.parsed[0])
+            if v.parsed and not self.chap_index.has_match(v.parsed)
         )
 
     @classmethod
@@ -313,6 +318,7 @@ class AssetResolver:
         fonts_dir: Path,
         assets_dir: Path | list[Path] | None = None,
         scan_cache: dict[Path, ScanResults] | None = None,
+        subtitle_prompt: SubtitlePrompt | None = None,
     ) -> AssetResolver:
         """
         Discover and index fonts, subtitles, chapters, and covers across search directories.
@@ -384,6 +390,7 @@ class AssetResolver:
             fallback_sub_index=fallback_sub_index,
             fallback_chap_index=fallback_chap_index,
             fallback_cover_index=fallback_cover_index,
+            subtitle_prompt=subtitle_prompt,
         )
 
     def _resolve_sub(
@@ -396,15 +403,13 @@ class AssetResolver:
         interactive: bool = True,
         assigned_subtitle: Path | None = None,
     ) -> tuple[Path | None, int | None, str, bool, str | None]:
-        season, ep_type, ep = parsed
-
         # Explicit human assignment (GUI/CLI) overrides every automatic source.
         if assigned_subtitle is not None:
             sub_lang = detect_sub_lang(assigned_subtitle.stem)
             logger.info("  Subtitle       : %s [%s] (manually assigned)", assigned_subtitle.name, LANG_LABEL.get(sub_lang, sub_lang))
             return assigned_subtitle, None, sub_lang, True, None
 
-        result = self.sub_index.lookup(ep_type, ep, season, local_dir=video.path.parent)
+        result = self.sub_index.lookup(parsed, local_dir=video.path.parent)
         if result is not None:
             sub_path, lang = result
             if lang in SUBTITLE_LANGS_FALLBACK:
@@ -423,7 +428,7 @@ class AssetResolver:
                 return None, track_id, lang, True, None
 
         if self.fallback_sub_index is not None:
-            fb_result = self.fallback_sub_index.lookup(ep_type, ep, season, local_dir=video.path.parent)
+            fb_result = self.fallback_sub_index.lookup(parsed, local_dir=video.path.parent)
             if fb_result is not None:
                 sub_path, lang = fb_result
                 if lang in SUBTITLE_LANGS_FALLBACK:
@@ -431,31 +436,28 @@ class AssetResolver:
                 logger.info("  Subtitle       : %s [%s] (fallback asset)", sub_path.name, LANG_LABEL.get(lang, lang))
                 return sub_path, None, lang, True, None
 
-        logger.warning("No subtitle match found for %s%s (external or embedded).", ep_type, ep)
+        logger.warning("No subtitle match found for %s%s (external or embedded).", parsed.ep_type, parsed.ep)
         skip_reason = "no subtitle files found" if not all_subs else "subtitle files found but none matched"
-        is_tty = interactive and sys.stdin.isatty()
-        if not all_subs or dry_run or not is_tty:
-            if not all_subs:
-                logger.warning("SKIPPED: %s | Reason: %s", video.name, "No subtitle files exist in the release directory at all.")
-            elif dry_run:
-                logger.info("  DRY RUN: would prompt for manual subtitle selection here (skipped).")
-            elif not is_tty:
-                logger.warning("SKIPPED: %s | Reason: %s", video.name, "Non-interactive environment — skipped manual subtitle selection.")
+
+        if not all_subs:
+            logger.warning("SKIPPED: %s | Reason: %s", video.name, "No subtitle files exist in the release directory at all.")
             return None, None, "und", False, skip_reason
 
-        print("  Available subtitles in release directory:")
-        for i, sub in enumerate(all_subs):
-            print(f"    [{i + 1}] {sub.name}")
-        print("    [0] Skip this video")
-        choice = input("\n  Type a number to assign a subtitle, or 0 to skip: ").strip()
+        if dry_run:
+            logger.info("  DRY RUN: would prompt for manual subtitle selection here (skipped).")
+            return None, None, "und", False, skip_reason
 
-        if choice.isdigit() and 0 < int(choice) <= len(all_subs):
-            chosen_sub = all_subs[int(choice) - 1]
+        if self.subtitle_prompt is None or not interactive:
+            logger.warning("SKIPPED: %s | Reason: %s", video.name, "Non-interactive environment — skipped manual subtitle selection.")
+            return None, None, "und", False, skip_reason
+
+        chosen_sub = self.subtitle_prompt(video, all_subs)
+        if chosen_sub is not None:
             sub_lang = detect_sub_lang(chosen_sub.stem)
             logger.info("  -> Manually linked: %s", chosen_sub.name)
             return chosen_sub, None, sub_lang, True, None
 
-        logger.warning("SKIPPED: %s | Reason: %s", video.name, "User skipped manual subtitle selection.")
+        logger.warning("SKIPPED: %s | Reason: %s", video.name, "User skipped manual selection.")
         return None, None, "und", False, "user skipped manual selection"
 
     def _resolve_chap(
@@ -464,8 +466,7 @@ class AssetResolver:
         chapter_fallback_count: int,
         has_source_chapters: bool,
     ) -> Path | None:
-        season, ep_type, ep = parsed
-        match = self.chap_index.lookup(ep_type, ep, season)
+        match = self.chap_index.lookup(parsed)
         if match:
             logger.info("  Chapters       : %s (matched)", match.name)
             return match
@@ -480,7 +481,7 @@ class AssetResolver:
                 return single_match
 
         if not has_source_chapters and self.fallback_chap_index is not None:
-            fb_match = self.fallback_chap_index.lookup(ep_type, ep, season)
+            fb_match = self.fallback_chap_index.lookup(parsed)
             if fb_match:
                 logger.info("  Chapters       : %s (fallback asset)", fb_match.name)
                 return fb_match
@@ -492,14 +493,13 @@ class AssetResolver:
         return None
 
     def _resolve_cov(self, parsed: EpisodeInfo, has_source_cover: bool) -> Path | None:
-        season, ep_type, ep = parsed
-        cov = self.cover_index.lookup(ep_type, ep, season)
+        cov = self.cover_index.lookup(parsed)
         if cov:
             logger.info("  Cover          : %s (matched)", cov.name)
             return cov
 
         if not has_source_cover and self.fallback_cover_index is not None:
-            fb_cov = self.fallback_cover_index.lookup(ep_type, ep, season)
+            fb_cov = self.fallback_cover_index.lookup(parsed)
             if fb_cov:
                 logger.info("  Cover          : %s (fallback asset)", fb_cov.name)
                 return fb_cov

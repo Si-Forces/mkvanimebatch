@@ -4,10 +4,13 @@ import importlib
 from pathlib import Path
 from types import SimpleNamespace
 
+from mkv_fonts import FontManager
+from mkv_scan import ParsedFile
+
 import pytest
 
 import mkv_extract
-from mkv_common import FontManager, ParsedFile
+import mkv_proc
 
 
 def test_failed_extraction_does_not_replace_existing_subtitle(tmp_path, monkeypatch):
@@ -40,7 +43,7 @@ def test_failed_extraction_does_not_replace_existing_subtitle(tmp_path, monkeypa
         track_target.write_bytes(b"partial subtitle")
         return SimpleNamespace(returncode=2, stderr="simulated failure")
 
-    monkeypatch.setattr(mkv_extract, "run_subprocess", fail_after_partial_write)
+    monkeypatch.setattr(mkv_proc, "run_subprocess", fail_after_partial_write)
 
     with pytest.raises(RuntimeError, match="mkvextract failed"):
         mkv_extract.process_file(
@@ -81,7 +84,7 @@ def test_successful_extraction_promotes_staged_subtitle(tmp_path, monkeypatch):
         track_target.write_bytes(b"complete subtitle")
         return SimpleNamespace(returncode=0, stderr="")
 
-    monkeypatch.setattr(mkv_extract, "run_subprocess", write_complete_output)
+    monkeypatch.setattr(mkv_proc, "run_subprocess", write_complete_output)
 
     _, _, succeeded = mkv_extract.process_file(
         parsed_video,
@@ -94,70 +97,6 @@ def test_successful_extraction_promotes_staged_subtitle(tmp_path, monkeypatch):
     assert not list(tmp_path.glob(".tmp_extract_*"))
 
 
-def test_stale_subtitle_cleanup(tmp_path):
-    """
-    _cleanup_stale_subtitle_offsets should remove old offset-suffixed versions.
-    """
-    base_sub = tmp_path / "episode_01_E01_ind_track2.ass"
-    base_sub.touch()
-    old_offset = tmp_path / "episode_01_E01_ind_track2.[+2s].ass"
-    old_offset.touch()
-    new_offset = tmp_path / "episode_01_E01_ind_track2.[+5s].ass"
-    new_offset.touch()
-
-    manual_sub = tmp_path / "Demon Lord 2099 - 01.ind.ass"
-    manual_sub.touch()
-
-    active_map = {"episode_01_E01_ind_track2": "episode_01_E01_ind_track2.[+5s].ass"}
-    mkv_extract.cleanup_stale_subtitle_offsets_bulk(tmp_path, active_map)
-
-    assert not base_sub.exists()
-    assert not old_offset.exists()
-    assert new_offset.exists()
-    assert manual_sub.exists()
-
-
-@pytest.mark.parametrize("module_name", ["mkv_extract"])
-def test_stale_subtitle_cleanup_handles_case_variant_stems(tmp_path, module_name):
-    module = importlib.import_module(module_name)
-    current = tmp_path / "Episode_01_E01_ind_track2.[+5s].ass"
-    current.touch()
-    old_offset = tmp_path / "episode_01_e01_ind_track2.[+2s].ass"
-    old_offset.touch()
-    old_base = tmp_path / "episode_01_e01_ind_track2.ass"
-    old_base.touch()
-
-    active_map = {"Episode_01_E01_ind_track2": current.name}
-    module.cleanup_stale_subtitle_offsets_bulk(tmp_path, active_map)
-
-    assert current.exists()
-    assert not old_offset.exists()
-    assert not old_base.exists()
-
-
-@pytest.mark.parametrize("module_name", ["mkv_extract"])
-def test_stale_subtitle_cleanup_preserves_multiple_active_casefold_collisions(tmp_path, module_name):
-    module = importlib.import_module(module_name)
-    current_a = tmp_path / "Straße_01_E01_ind_track2.[+5s].ass"
-    current_b = tmp_path / "Strasse_01_E01_ind_track2.[+7s].ass"
-    stale_a = tmp_path / "Straße_01_E01_ind_track2.ass"
-    stale_b = tmp_path / "Strasse_01_E01_ind_track2.ass"
-
-    for path in (current_a, current_b, stale_a, stale_b):
-        path.touch()
-
-    active_map = {
-        "Straße_01_E01_ind_track2": current_a.name,
-        "Strasse_01_E01_ind_track2": current_b.name,
-    }
-    module.cleanup_stale_subtitle_offsets_bulk(tmp_path, active_map)
-
-    assert current_a.exists()
-    assert current_b.exists()
-    assert not stale_a.exists()
-    assert not stale_b.exists()
-
-
 def test_mkvextract_timeout_raises_runtime_error(tmp_path, monkeypatch):
     import subprocess
     video = tmp_path / "Show.mkv"
@@ -167,7 +106,7 @@ def test_mkvextract_timeout_raises_runtime_error(tmp_path, monkeypatch):
     def mock_run_timeout(*_a, **_k):
         raise subprocess.TimeoutExpired(cmd=["mkvextract"], timeout=3600)
 
-    monkeypatch.setattr(mkv_extract, "run_subprocess", mock_run_timeout)
+    monkeypatch.setattr(mkv_proc, "run_subprocess", mock_run_timeout)
 
     with pytest.raises(RuntimeError, match="mkvextract timed out after 3600s"):
         mkv_extract._run_mkvextract(video, ["tracks", f"0:{tmp_path / 'sub.ass'}"], log)
@@ -211,7 +150,7 @@ def test_cover_extension_whitelisting(tmp_path, monkeypatch, file_name, expected
                     Path(parts[1]).write_bytes(b"image data")
         return SimpleNamespace(returncode=0, stderr="")
 
-    monkeypatch.setattr(mkv_extract, "run_subprocess", mock_run)
+    monkeypatch.setattr(mkv_proc, "run_subprocess", mock_run)
 
     _, _, succeeded = mkv_extract.process_file(
         parsed_video,
@@ -264,7 +203,7 @@ def test_font_registry_shared_across_dirs(tmp_path, monkeypatch):
                     Path(parts[1]).write_bytes(b"font data 12")
         return SimpleNamespace(returncode=0, stderr="")
 
-    monkeypatch.setattr(mkv_extract, "run_subprocess", mock_run)
+    monkeypatch.setattr(mkv_proc, "run_subprocess", mock_run)
 
     # Process file A with shared registry
     _, _, ok_a = mkv_extract.process_file(parsed_a, meta_a, shared_manager)
