@@ -364,14 +364,14 @@ class QueueTracker {
     if (this.listEl) {
       this.listEl.innerHTML = this.emptyStateMarkup(
         "Scan failed",
-        "That folder could not be inspected. Choose another folder and try again.",
-        "↻ Choose Another Folder"
+        "That release directory could not be inspected. Choose another directory and try again.",
+        "↻ Choose Another Directory"
       );
     }
     if (this.countEl) this.countEl.textContent = "Scan failed";
   }
 
-  reset(title = "No Episodes Queued", description = "Choose an input folder to scan MKV episodes into this batch.") {
+  reset(title = "No Episodes Queued", description = "Choose an input release directory to scan MKV episodes into this batch.") {
     this.scanToken++;
     this.cards.clear();
     this.assignments.clear();
@@ -401,7 +401,7 @@ class QueueTracker {
     if (!manifest || !manifest.items || manifest.items.length === 0) {
       this.reset(
         "No MKV files found",
-        "This folder does not contain any MKV episodes. Choose another input folder to continue."
+        "This release directory does not contain any MKV episodes. Choose another input directory to continue."
       );
       return;
     }
@@ -554,6 +554,15 @@ class QueueTracker {
         badgeText: "SKIPPED",
         tag: "ep-duration-tag grey status-tag",
         tagText: item.reason || "Skipped",
+        fill: "ep-progress-fill",
+        width: "100%",
+      },
+      cancelled: {
+        el: "tokyo-ep-card skipped",
+        badge: "ep-badge grey",
+        badgeText: "CANCELLED",
+        tag: "ep-duration-tag grey status-tag",
+        tagText: item.reason || "Cancelled",
         fill: "ep-progress-fill",
         width: "100%",
       },

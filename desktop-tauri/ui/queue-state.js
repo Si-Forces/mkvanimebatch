@@ -4,7 +4,7 @@
  */
 
 function isTerminal(status) {
-  return status === "completed" || status === "skipped" || status === "planned" || status === "error";
+  return status === "completed" || status === "skipped" || status === "planned" || status === "error" || status === "cancelled";
 }
 
 export function createQueueState(manifest, options = {}) {
@@ -18,6 +18,7 @@ export function createQueueState(manifest, options = {}) {
     batchStartTime: null,
     batchCompleted: false,
     batchSuccess: null,
+    batchCancelled: false,
     completedCount: 0,
     totalCount: 0,
     skippedCount: 0,
@@ -109,6 +110,7 @@ export function reduceQueueEvent(state, event, now = Date.now()) {
         completed: { status: "completed", completed: 1 },
         planned: { status: "planned", completed: 1 },
         skipped: { status: "skipped", reason: event.reason || "Skipped", skipped: 1 },
+        cancelled: { status: "cancelled", reason: event.reason || "Cancelled", skipped: 1 },
         error: { status: "error", error: event.error || "Failed", failed: 1 },
       };
       const outcome = outcomes[event.status] ?? {
@@ -120,10 +122,19 @@ export function reduceQueueEvent(state, event, now = Date.now()) {
 
       // Only measured work gets a duration: skips and dry-run plans are
       // decided during planning without an item_start, so falling back to
-      // batch-elapsed time would report a meaningless number.
-      const timed = outcome.status === "completed" || outcome.status === "error";
+      // batch-elapsed time would report a meaningless number. Cancelled
+      // items that had started still report how long they ran. Sub-second
+      // jobs render as "<0.1" so fast extractions don't display as "0.0s".
+      const timed =
+        outcome.status === "completed" ||
+        outcome.status === "error" ||
+        (outcome.status === "cancelled" && prevItem.startTime !== null);
       const startTime = prevItem.startTime || state.batchStartTime;
-      const dur = timed && startTime ? ((now - startTime) / 1000).toFixed(1) : null;
+      const elapsedMs = timed && startTime ? now - startTime : null;
+      const dur =
+        elapsedMs === null ? null
+        : elapsedMs < 100 ? "<0.1"
+        : (elapsedMs / 1000).toFixed(1);
 
       const nextItems = new Map(state.items);
       nextItems.set(event.id, {
@@ -148,6 +159,7 @@ export function reduceQueueEvent(state, event, now = Date.now()) {
         ...state,
         batchCompleted: true,
         batchSuccess: event.success === true,
+        batchCancelled: event.cancelled === true,
       };
     }
 
