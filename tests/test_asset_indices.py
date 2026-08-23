@@ -1,9 +1,6 @@
 """Tests for asset indexing helpers: ChapIndex, CoverIndex, chapter sniffing, and font dir discovery."""
 
-import importlib
-from pathlib import Path
 
-import pytest
 
 import mkv_assets
 from mkv_domain import EpisodeInfo

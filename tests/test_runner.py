@@ -16,8 +16,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 mkv_runner = importlib.import_module("mkv_runner")
 
-from mkv_scan import PersistentInspectCache
 from mkv_runner import CliRuntime
+from mkv_scan import PersistentInspectCache
 
 
 # ─── default_worker_count ─────────────────────────────────────────────────────

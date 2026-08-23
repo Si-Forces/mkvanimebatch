@@ -1,7 +1,6 @@
 """Smoke tests for CLI main() entrypoints to prevent missing import regressions."""
 
 import sys
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest

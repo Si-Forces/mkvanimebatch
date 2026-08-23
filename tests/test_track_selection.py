@@ -2,7 +2,6 @@
 Tests for select_best_subtitle_track() and is_dialogue_track().
 Parametrized over both common modules.
 """
-import pytest
 
 
 def _track(tid, lang, codec="s_text/ass", name=""):
