@@ -5,7 +5,7 @@
 import mkv_assets
 from mkv_domain import EpisodeInfo
 from mkv_fonts import FontInfo, find_fonts_dir
-from mkv_scan import _create_parsed_file, has_chapters, has_cover, is_chapter_xml
+from mkv_scan import InspectedVideo, _create_parsed_file, has_chapters, is_chapter_xml
 
 
 class TestFontDirDiscovery:
@@ -47,10 +47,9 @@ class TestChapterSniffing:
         assert has_chapters(None) is False
 
     def test_has_cover(self):
-        assert has_cover({"attachments": [{"file_name": "cover.jpg", "content_type": "image/jpeg", "id": 1}]}) is True
-        assert has_cover({"attachments": [{"file_name": "font.ttf", "content_type": "application/x-truetype-font", "id": 2}]}) is False
-        assert has_cover({"attachments": []}) is False
-        assert has_cover(None) is False
+        assert InspectedVideo({"attachments": [{"file_name": "cover.jpg", "content_type": "image/jpeg", "id": 1}]}).cover_attachment() is not None
+        assert InspectedVideo({"attachments": [{"file_name": "font.ttf", "content_type": "application/x-truetype-font", "id": 2}]}).cover_attachment() is None
+        assert InspectedVideo({"attachments": []}).cover_attachment() is None
 
 
 class TestAssetIndices:
