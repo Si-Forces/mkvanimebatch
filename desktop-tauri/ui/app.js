@@ -5,7 +5,7 @@
 "use strict";
 
 import { createQueueState, reduceQueueEvent, finalizeQueueState, carryOverAssignments } from "./queue-state.js";
-import { classifyLine, stripLogPrefix } from "./log-classify.js";
+import { classifyLine } from "./log-classify.js";
 import { createTelemetryLoop } from "./telemetry.js";
 
 // ─── Preset Configurations ──────────────────────────────────────────────────

@@ -565,6 +565,13 @@ def _plan_jobs(
     sub_assignments:  dict[str, Path] | None = None,
     mode:             InteractionMode = InteractionMode.INTERACTIVE,
 ) -> tuple[list[PlannedJob], list[str], list[str]]:
+    """Plan jobs for one release directory.
+
+    dry_run and mode are deliberately independent: dry_run defers skip-event
+    emission to the end of planning, while mode decides prompting inside
+    resolution. Production keeps them consistent via main(); direct callers
+    may combine them freely.
+    """
 
     out_dir = output_dir or Path()
     subs_list = all_subs or []
