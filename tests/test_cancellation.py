@@ -323,10 +323,17 @@ def test_save_preserves_entries_put_during_write(tmp_path, monkeypatch):
 
     second = tmp_path / "b.mkv"
     real_dump = json.dump
+    interleaved = {"done": False}
 
     def dump_with_interleaved_put(obj, fh):
-        second.write_bytes(b"y")
-        cache.put(second, {"tracks": [1]})
+        # Interleave exactly once: rewriting the file on every dump call
+        # would change its mtime after save() snapshots live_data, and the
+        # cache's staleness guard would then (correctly) reject the entry
+        # on reload — platform-timing flake, not the behavior under test.
+        if not interleaved["done"]:
+            second.write_bytes(b"y")
+            cache.put(second, {"tracks": [1]})
+            interleaved["done"] = True
         real_dump(obj, fh)
 
     monkeypatch.setattr(json, "dump", dump_with_interleaved_put)

@@ -304,8 +304,9 @@ pub fn get_system_telemetry(state: State<'_, TelemetryState>) -> Result<Telemetr
     let mut written_window = 0u64;
     for (pid, process) in sys.processes() {
         let lowered = process.name().to_string_lossy().to_lowercase();
-        let is_engine =
-            *pid == self_pid || lowered.starts_with("mkv-remux") || lowered.starts_with("mkv-extract");
+        let is_engine = *pid == self_pid
+            || lowered.starts_with("mkv-remux")
+            || lowered.starts_with("mkv-extract");
         if is_engine {
             written_window += process.disk_usage().written_bytes;
         }
