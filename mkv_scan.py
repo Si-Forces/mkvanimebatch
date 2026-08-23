@@ -103,6 +103,83 @@ def has_cover(json_data: dict | None) -> bool:
     return cover is not None
 
 
+class InspectedVideo:
+    """Typed view over one video's raw mkvmerge -J JSON.
+
+    Wraps the probed dict verbatim — persistent-cache format is unchanged —
+    and normalizes mkvmerge's schema access (.get chains) in one place, so
+    consumers never re-learn the wire shape. Audio tracks are exposed in the
+    normalized {id, pos, audio_idx, lang, name, channels, codec} form that
+    track selection scores.
+    """
+
+    def __init__(self, data: dict) -> None:
+        self._data = data
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, InspectedVideo) and self._data == other._data
+
+    def __repr__(self) -> str:
+        return f"InspectedVideo({self._data!r})"
+
+    @property
+    def tracks(self) -> list[dict]:
+        return self._data.get("tracks") or []
+
+    @property
+    def attachments(self) -> list[dict]:
+        return self._data.get("attachments") or []
+
+    @property
+    def has_attachments_key(self) -> bool:
+        """True when the probe reported an attachments key at all (even empty)."""
+        return "attachments" in self._data
+
+    @property
+    def video_track(self) -> dict | None:
+        return next((t for t in self.tracks if t.get("type") == "video"), None)
+
+    @property
+    def video_track_pos(self) -> int:
+        return next((i for i, t in enumerate(self.tracks) if t.get("type") == "video"), -1)
+
+    def audio_tracks(self) -> list[dict]:
+        normalized: list[dict] = []
+        for i, track in enumerate(self.tracks):
+            if track.get("type") != "audio":
+                continue
+            props = track.get("properties") or {}
+            normalized.append({
+                "id": track.get("id"),
+                "pos": i,
+                "audio_idx": len(normalized),
+                "lang": props.get("language") or "",
+                "name": props.get("track_name") or "",
+                "channels": props.get("audio_channels") or 0,
+                "codec": (props.get("codec_id") or "").upper(),
+            })
+        return normalized
+
+    def subtitle_tracks(self) -> list[dict]:
+        return [t for t in self.tracks if t.get("type") == "subtitles"]
+
+    def has_chapters(self) -> bool:
+        return has_chapters(self._data)
+
+    def cover_attachment(self) -> dict | None:
+        cover, _ = parse_attachments(self.attachments)
+        return cover
+
+    def font_attachments(self) -> list[dict]:
+        _, fonts = parse_attachments(self.attachments)
+        return fonts
+
+    def fonts_count(self) -> int | None:
+        """Number of font attachments; None when the probe reported no
+        attachments key (indistinguishable from a failed probe upstream)."""
+        return len(self.font_attachments()) if self.has_attachments_key else None
+
+
 _COVER_STEM_RE = re.compile(r"^cover$", re.IGNORECASE)
 _COVER_LIKE_STEMS = frozenset({
     "cover", "cover_land", "small_cover", "small_cover_land",
@@ -322,10 +399,11 @@ def inspect_videos(
     persistent_cache: PersistentInspectCache | None = None,
     force_refresh: bool = False,
     cancel_token: CancelToken | None = None,
-) -> dict[Path, dict | None]:
-    """Run `mkvmerge -J` on every video in parallel and return metadata mapping.
+) -> dict[Path, InspectedVideo | None]:
+    """Run `mkvmerge -J` on every video in parallel and return typed metadata views.
 
-    Populates `persistent_cache` with fresh results but does not persist it;
+    Values are None when probing failed for that video. Populates
+    `persistent_cache` with fresh raw results but does not persist it;
     callers batch multiple inspect passes per run and must call
     `persistent_cache.save()` themselves once the batch completes.
     """
@@ -367,7 +445,7 @@ def inspect_videos(
 
     ok = sum(1 for d in cache.values() if d is not None)
     logger.info("Inspection complete: %d/%d succeeded.", ok, len(videos))
-    return cache
+    return {v: (InspectedVideo(d) if d is not None else None) for v, d in cache.items()}
 
 @dataclass(frozen=True)
 class ParsedFile:

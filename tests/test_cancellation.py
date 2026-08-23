@@ -28,7 +28,7 @@ from mkv_domain import EpisodeInfo
 from mkv_fonts import FontInfo, FontManager
 from mkv_proc import CancelledError, CancelToken, run_subprocess_cancellable
 from mkv_runner import CliRuntime
-from mkv_scan import ParsedFile, PersistentInspectCache
+from mkv_scan import InspectedVideo, ParsedFile, PersistentInspectCache
 
 
 def _cancelled_token() -> CancelToken:
@@ -222,7 +222,7 @@ def test_process_job_forwards_token_into_ffmpeg_conversion(monkeypatch, tmp_path
         path=video, name=video.name, stem=video.stem,
         parsed=EpisodeInfo("1", "E", "01"),
     )
-    json_data = {
+    json_data = InspectedVideo({
         "tracks": [
             {"id": 0, "type": "video"},
             {
@@ -232,7 +232,7 @@ def test_process_job_forwards_token_into_ffmpeg_conversion(monkeypatch, tmp_path
             },
         ],
         "attachments": [],
-    }
+    })
     job = mkv_remux.PlannedJob(
         video=parsed.path,
         video_name=parsed.name,
@@ -278,7 +278,7 @@ def test_process_file_forwards_token_into_mkvextract(monkeypatch, tmp_path):
         path=video, name=video.name, stem=video.stem,
         parsed=EpisodeInfo("1", "E", "01"),
     )
-    json_data = {
+    json_data = InspectedVideo({
         "tracks": [
             {
                 "id": 1,
@@ -287,7 +287,7 @@ def test_process_file_forwards_token_into_mkvextract(monkeypatch, tmp_path):
             }
         ],
         "attachments": [],
-    }
+    })
     font_manager = FontManager(tmp_path / "fonts")
 
     seen: dict = {}

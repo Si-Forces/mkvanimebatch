@@ -16,7 +16,7 @@ from mkv_assets import AssetResolver
 from mkv_domain import EpisodeInfo
 from mkv_events import emit_event, get_item_id, set_events_enabled
 from mkv_fonts import FontInfo
-from mkv_scan import ParsedFile, _create_parsed_file
+from mkv_scan import InspectedVideo, ParsedFile, _create_parsed_file
 
 
 def test_emit_event_stdout_format(monkeypatch):
@@ -272,16 +272,17 @@ def test_sub_assignments_drive_job_planning(tmp_path):
 
 
 def test_plan_metadata_keeps_unknown_resolution_null():
-    metadata = mkv_remux._extract_mkv_metadata({
+    json_val = {
         "tracks": [{
             "type": "video",
             "codec": "AVC",
             "properties": {"pixel_dimensions": "640x360"},
         }],
-    })
+    }
+    meta = mkv_remux._extract_mkv_metadata(InspectedVideo(json_val))
 
-    assert metadata["resolution"] is None
-    assert metadata["video_tag"] is None
+    assert meta["resolution"] is None
+    assert meta["video_tag"] is None
 
 
 def test_plan_mode_stdout_purity_corrupt_cache(tmp_path, monkeypatch, capsys):
@@ -316,7 +317,7 @@ def test_plan_mode_stdout_purity_with_mock(tmp_path, monkeypatch, capsys):
 
     def mock_inspect(*args, **kwargs):
         logging.getLogger().warning("This is a mock warning that must not corrupt stdout")
-        return {mkv1: {"tracks": []}}
+        return {mkv1: InspectedVideo({"tracks": []})}
 
     monkeypatch.setattr(mkv_remux, "inspect_videos", mock_inspect)
 
@@ -361,7 +362,7 @@ def test_asset_resolver_discovery_and_resolve_for(tmp_path):
         parsed=EpisodeInfo("1", "E", "01"),
     )
 
-    resolved = resolver.resolve_for(video, json_data=None)
+    resolved = resolver.resolve_for(video, None)
     assert resolved.matched_subtitle is True
     assert resolved.subtitle_file == season / "Show - S01E01.ass"
     assert resolved.chapter_file == season / "Show - S01E01_chapters.xml"
@@ -406,7 +407,7 @@ def test_crashed_job_emits_error_event(tmp_path, monkeypatch):
                 pool=pool,
                 max_workers=1,
                 ffmpeg_threads=1,
-                json_cache={job.video: {}},
+                json_cache={job.video: InspectedVideo({})},
                 skipped_files=skipped_files,
                 failed_files=failed_files,
             )
@@ -450,7 +451,7 @@ def test_extract_mkv_metadata_4k_hevc_flac():
         ]
     }
 
-    meta = mkv_remux._extract_mkv_metadata(json_val)
+    meta = mkv_remux._extract_mkv_metadata(InspectedVideo(json_val))
     assert meta["resolution"] == "4K"
     assert meta["video_codec"] == "HEVC"
     assert meta["video_tag"] == "4K HEVC"
@@ -480,7 +481,7 @@ def test_extract_mkv_metadata_1440p_opus_7_1():
         ]
     }
 
-    meta = mkv_remux._extract_mkv_metadata(json_val)
+    meta = mkv_remux._extract_mkv_metadata(InspectedVideo(json_val))
     assert meta["resolution"] == "1440p"
     assert meta["video_codec"] == "VP9"
     assert meta["audio_summary"] == "Opus 7.1"
@@ -507,7 +508,7 @@ def test_extract_mkv_metadata_subtitle_formats():
             {"type": "subtitles", "codec": "SubRip/SRT", "properties": {"language": "eng"}},
         ]
     }
-    meta_srt = mkv_remux._extract_mkv_metadata(json_srt)
+    meta_srt = mkv_remux._extract_mkv_metadata(InspectedVideo(json_srt))
     assert meta_srt["sub_summary"] == "SRT (ENG)"
 
     json_pgs = {
@@ -515,7 +516,7 @@ def test_extract_mkv_metadata_subtitle_formats():
             {"type": "subtitles", "codec": "HDMV PGS", "properties": {"language": "jpn"}},
         ]
     }
-    meta_pgs = mkv_remux._extract_mkv_metadata(json_pgs)
+    meta_pgs = mkv_remux._extract_mkv_metadata(InspectedVideo(json_pgs))
     assert meta_pgs["sub_summary"] == "PGS (JPN)"
 
     json_mixed = {
@@ -524,7 +525,7 @@ def test_extract_mkv_metadata_subtitle_formats():
             {"type": "subtitles", "codec": "HDMV PGS", "properties": {"language": "jpn"}},
         ]
     }
-    meta_mixed = mkv_remux._extract_mkv_metadata(json_mixed)
+    meta_mixed = mkv_remux._extract_mkv_metadata(InspectedVideo(json_mixed))
     assert meta_mixed["sub_summary"] == "Subs (ENG, JPN)"
 
     json_no_lang = {
@@ -532,7 +533,7 @@ def test_extract_mkv_metadata_subtitle_formats():
             {"type": "subtitles", "codec": "SubRip/SRT", "properties": {}},
         ]
     }
-    meta_no_lang = mkv_remux._extract_mkv_metadata(json_no_lang)
+    meta_no_lang = mkv_remux._extract_mkv_metadata(InspectedVideo(json_no_lang))
     assert meta_no_lang["sub_summary"] == "SRT (UND)"
 
 
@@ -548,7 +549,7 @@ def test_extract_mkv_metadata_dimension_string_fallback():
             }
         ]
     }
-    meta = mkv_remux._extract_mkv_metadata(json_val)
+    meta = mkv_remux._extract_mkv_metadata(InspectedVideo(json_val))
     assert meta["resolution"] == "1080p"
     assert meta["video_codec"] == "VP9"
 
@@ -566,7 +567,7 @@ def test_extract_mkv_metadata_codec_id_only_flac():
             }
         ]
     }
-    meta = mkv_remux._extract_mkv_metadata(json_val)
+    meta = mkv_remux._extract_mkv_metadata(InspectedVideo(json_val))
     assert meta["has_flac"] is True
     assert meta["audio_summary"] == "FLAC 2.0"
 
@@ -581,12 +582,12 @@ def test_extract_mkv_metadata_unknown_channels_not_fabricated():
             }
         ]
     }
-    meta = mkv_remux._extract_mkv_metadata(json_val)
+    meta = mkv_remux._extract_mkv_metadata(InspectedVideo(json_val))
     assert meta["audio_summary"] == "Audio"
     assert meta["has_flac"] is False
 
     # Completely missing tracks
-    meta_empty = mkv_remux._extract_mkv_metadata({"tracks": []})
+    meta_empty = mkv_remux._extract_mkv_metadata(InspectedVideo({"tracks": []}))
     assert meta_empty["has_flac"] is None
     assert meta_empty["audio_summary"] is None
 
@@ -625,7 +626,7 @@ def test_remux_error_event_emitted_on_failure(monkeypatch, tmp_path):
 
     res = mkv_remux.process_job(
         job, tmp_path / "temp", mkv_remux.FontInfo(args=(), count=0),
-        "192k", {job.video: {}}, ffmpeg_threads=2,
+        "192k", {job.video: InspectedVideo({})}, ffmpeg_threads=2,
     )
     assert res.failed is True
     complete_events = [k for ev_type, k in events if ev_type == "item_complete"]

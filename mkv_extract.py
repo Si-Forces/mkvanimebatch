@@ -61,13 +61,12 @@ from mkv_runner import (
     run_batch,
 )
 from mkv_scan import (
+    InspectedVideo,
     ParsedFile,
     PersistentInspectCache,
     check_dependencies,
     get_default_font_hash_memo_file,
-    has_chapters,
     inspect_videos,
-    parse_attachments,
 )
 
 SUPPORTED_SUB_CODECS = frozenset({"s_text/ass"})
@@ -86,7 +85,7 @@ def _episode_suffix(parsed: EpisodeInfo | None, file_stem: str) -> str:
 
 
 def select_subtitle(
-    json_data: dict,
+    inspected: InspectedVideo,
     file_stem: str,
     file_dir:  Path,
     parsed:    EpisodeInfo | None,
@@ -94,7 +93,7 @@ def select_subtitle(
 ) -> tuple[str, Path] | None:
     """Pick the best ASS subtitle track and build its output path."""
     result = select_best_subtitle_track(
-        json_data.get("tracks", []),
+        inspected.subtitle_tracks(),
         codec_filter=SUPPORTED_SUB_CODECS,
         log=log,
     )
@@ -148,7 +147,7 @@ def _clean_empty_file(path: Path, log: list[str], item_name: str) -> None:
 # ─── PER-FILE WORKER ─────────────────────────────────────────────────────────
 def process_file(
     mkv_file:            ParsedFile,
-    json_data:           dict | None,
+    inspected:           InspectedVideo | None,
     font_manager:        FontManager,
     io_semaphore:        threading.Semaphore | None = None,
     output_dir:          Path | None = None,
@@ -168,7 +167,7 @@ def process_file(
 
     emit_item_start(item_id, mkv_path.name)
 
-    if json_data is None:
+    if inspected is None:
         log.append(f"  ERROR: mkvmerge inspection failed for '{mkv_path.name}'.")
         emit_item_complete(item_id, mkv_path.name, OUTCOME_ERROR, error="mkvmerge inspection failed")
         return mkv_path, log, False
@@ -189,7 +188,7 @@ def process_file(
 
     queued_outputs: list[tuple[str, str | None, Path, str]] = []
 
-    sub_result = select_subtitle(json_data, file_stem, file_dir, parsed, log)
+    sub_result = select_subtitle(inspected, file_stem, file_dir, parsed, log)
     if sub_result:
         track_id, sub_path = sub_result
         log.append(f"   -> Queued subtitle track {track_id} → {sub_path.name}")
@@ -198,7 +197,7 @@ def process_file(
         log.append("   -> No suitable ASS subtitle tracks found.")
 
     chapter_path: Path | None = None
-    if has_chapters(json_data):
+    if inspected.has_chapters():
         chapter_path = file_dir / f"{chapter_stem}_chapters.xml"
         log.append(f"   -> Queued chapters → {chapter_path.name}")
         queued_outputs.append(("chapters", None, chapter_path, "Chapter"))
@@ -206,7 +205,8 @@ def process_file(
         log.append("   -> No chapters found in source.")
 
     cover_path: Path | None = None
-    cover, font_attachments = parse_attachments(json_data.get("attachments") or [])
+    cover = inspected.cover_attachment()
+    font_attachments = inspected.font_attachments()
     if cover:
         raw_ext = Path(cover.get("file_name", "")).suffix.lower()
         ext = raw_ext if raw_ext in COVER_EXTENSIONS else ".jpg"

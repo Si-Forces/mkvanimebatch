@@ -81,13 +81,12 @@ from mkv_runner import (
     run_batch,
 )
 from mkv_scan import (
+    InspectedVideo,
     ParsedFile,
     PersistentInspectCache,
     ScanResults,
     check_dependencies,
-    has_chapters,
     inspect_videos,
-    parse_attachments,
     scan_mkv_files,
 )
 
@@ -113,36 +112,17 @@ class TrackSelection:
     source_font_ids:     list[int] = field(default_factory=list)
 
 
-def select_tracks(json_data: dict) -> TrackSelection:
-    tracks = json_data.get("tracks") or []
-    has_src_chapters = has_chapters(json_data)
-    attachments = json_data.get("attachments") or []
-
-    cover, font_attachments = parse_attachments(attachments)
+def select_tracks(inspected: InspectedVideo) -> TrackSelection:
+    has_src_chapters = inspected.has_chapters()
+    cover = inspected.cover_attachment()
     source_cover_id = int(cover["id"]) if cover and cover.get("id") is not None else None
-    source_font_ids = [int(a["id"]) for a in font_attachments if a.get("id") is not None]
+    source_font_ids = [int(a["id"]) for a in inspected.font_attachments() if a.get("id") is not None]
 
-    video_id = None
-    video_pos = -1
-    audio_tracks: list[dict] = []
-    audio_idx_counter = 0
+    video_track = inspected.video_track
+    video_id = video_track.get("id") if video_track is not None else None
+    video_pos = inspected.video_track_pos
 
-    for i, track in enumerate(tracks):
-        if track.get("type") == "video" and video_id is None:
-            video_id = track.get("id")
-            video_pos = i
-        elif track.get("type") == "audio":
-            props = track.get("properties") or {}
-            audio_tracks.append({
-                "id": track.get("id"),
-                "pos": i,
-                "audio_idx": audio_idx_counter,
-                "lang": props.get("language") or "",
-                "name": props.get("track_name") or "",
-                "channels": props.get("audio_channels") or 0,
-                "codec": (props.get("codec_id") or "").upper(),
-            })
-            audio_idx_counter += 1
+    audio_tracks = inspected.audio_tracks()
 
     audio, reason = _pick_audio(audio_tracks, video_pos)
     audio = audio or {
@@ -423,7 +403,7 @@ def _build_mkvmerge_args(
 # ─── JOB EXECUTION ───────────────────────────────────────────────────────────
 def process_job(
     job: PlannedJob, temp_dir: Path | None, fonts: FontInfo, opus_bitrate: str,
-    json_cache: dict[Path, dict | None], ffmpeg_threads: int = 2,
+    json_cache: dict[Path, InspectedVideo | None], ffmpeg_threads: int = 2,
     io_semaphore: threading.Semaphore | None = None,
     complexity: int = 10,
     sub_offset: float = 0.0,
@@ -462,11 +442,11 @@ def process_job(
         emit_item_complete(job.item_id, video_name, OUTCOME_ERROR, error=reason)
         return result
 
-    json_data = json_cache.get(video)
-    if json_data is None:
+    inspected = json_cache.get(video)
+    if inspected is None:
         return _error("mkvmerge failed", "mkvmerge inspection failed.")
 
-    selection = select_tracks(json_data)
+    selection = select_tracks(inspected)
 
     if selection.video_id is None:
         return _error("no video track", "No video track found.")
@@ -575,7 +555,7 @@ def process_job(
 # ─── JOB PLANNING ────────────────────────────────────────────────────────────
 def _plan_jobs(
     videos:           list[ParsedFile],
-    json_cache:       dict[Path, dict | None],
+    json_cache:       dict[Path, InspectedVideo | None],
     resolver:         AssetResolver,
     output_dir:       Path | None = None,
     all_subs:         list[Path] | None = None,
@@ -636,14 +616,14 @@ def _plan_jobs(
             record_skip(video_file, "output already exists")
             continue
 
-        json_data = json_cache.get(video)
+        inspected = json_cache.get(video)
         assigned_sub = assignments.get(item_id)
         if assigned_sub is not None and not assigned_sub.is_file():
             logger.warning("  Assigned subtitle '%s' no longer exists — falling back to automatic matching.", assigned_sub)
             assigned_sub = None
         res_assets = resolver.resolve_for(
             video_file,
-            json_data,
+            inspected,
             all_subs=subs_list,
             mode=mode,
             claimed_chapter=chapter_claims.get(video_file.path),
@@ -703,7 +683,7 @@ def _execute_jobs(
     pool:           ThreadPoolExecutor,
     max_workers:    int,
     ffmpeg_threads: int,
-    json_cache:     dict[Path, dict | None],
+    json_cache:     dict[Path, InspectedVideo | None],
     skipped_files:  list[str],
     failed_files:   list[str],
     complexity:     int = 10,
@@ -867,8 +847,8 @@ def _parse_audio_track_info(track: dict) -> tuple[str, bool]:
     return aud_name, is_flac
 
 
-def _extract_mkv_metadata(json_data: dict | None) -> dict:
-    if not json_data:
+def _extract_mkv_metadata(inspected: InspectedVideo | None) -> dict:
+    if not inspected:
         return {
             "resolution": None,
             "video_codec": None,
@@ -887,7 +867,7 @@ def _extract_mkv_metadata(json_data: dict | None) -> dict:
     sub_langs = []
     sub_formats = []
 
-    for track in json_data.get("tracks") or []:
+    for track in inspected.tracks:
         t_type = track.get("type", "")
         props = track.get("properties") or {}
 
@@ -920,9 +900,6 @@ def _extract_mkv_metadata(json_data: dict | None) -> dict:
             if lang not in sub_langs:
                 sub_langs.append(lang)
 
-    attachments = json_data.get("attachments") or []
-    _, font_attachments = parse_attachments(attachments)
-
     video_tag = f"{resolution} {video_codec}" if (resolution and video_codec) else None
     audio_summary = " / ".join(audio_parts) if audio_parts else (None if not has_audio else "No Audio")
 
@@ -941,7 +918,7 @@ def _extract_mkv_metadata(json_data: dict | None) -> dict:
         "audio_summary": audio_summary,
         "has_flac": has_flac if has_audio else None,
         "sub_summary": sub_summary,
-        "fonts_count": len(font_attachments) if (json_data and "attachments" in json_data) else None,
+        "fonts_count": inspected.fonts_count(),
     }
 
 
@@ -1092,8 +1069,7 @@ def generate_inspection_manifest(input_dir: Path, persistent_cache: PersistentIn
 
     items = []
     for mkv in all_mkvs:
-        json_data = json_cache.get(mkv.path)
-        meta = _extract_mkv_metadata(json_data)
+        meta = _extract_mkv_metadata(json_cache.get(mkv.path))
         item = {
             "id": get_item_id(mkv.path, input_dir),
             "name": mkv.name,

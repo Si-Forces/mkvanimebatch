@@ -7,7 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import mkv_assets
-from mkv_scan import ParsedFile
+from mkv_scan import InspectedVideo, ParsedFile
 
 
 def _make_video(path: Path) -> ParsedFile:
@@ -63,7 +63,7 @@ def test_no_claim_when_candidate_has_source_chapters(tmp_path):
     ep1 = tmp_path / "Show - 01.mkv"
     videos = [_make_video(ep1)]
     # Sole leftover video has embedded chapters -> rule must not fire.
-    json_cache: dict[Path, dict | None] = {ep1: {"chapters": [{"num_entries": 5}]}}
+    json_cache: dict[Path, InspectedVideo | None] = {ep1: InspectedVideo({"chapters": [{"num_entries": 5}]})}
 
     claims = mkv_assets.claim_leftover_chapters(videos, json_cache, resolver)
 
