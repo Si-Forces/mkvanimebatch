@@ -88,8 +88,8 @@ echo.
 echo [Tip] Leave inputs blank to use defaults (current directory).
 echo       Dry Run status is currently: [!DRY_RUN_MODE!]
 echo.
-if not exist "%SCRIPT_DIR%mkv_common.py" (
-    echo [ERROR] Required file 'mkv_common.py' is missing.
+if not exist "%SCRIPT_DIR%mkv_domain.py" (
+    echo [ERROR] Required file 'mkv_domain.py' is missing.
     pause
     goto menu
 )
@@ -165,8 +165,8 @@ echo.
 echo [Tip] Leave inputs blank to use defaults (current directory).
 echo       Dry Run status is currently: [!DRY_RUN_MODE!]
 echo.
-if not exist "%SCRIPT_DIR%mkv_common.py" (
-    echo [ERROR] Required file 'mkv_common.py' is missing.
+if not exist "%SCRIPT_DIR%mkv_domain.py" (
+    echo [ERROR] Required file 'mkv_domain.py' is missing.
     pause
     goto menu
 )
@@ -177,30 +177,19 @@ if not exist "%SCRIPT_DIR%mkv_extract.py" (
 )
 set "input_dir="
 set "out_dir="
-set "sub_offset="
 set "io_jobs="
 set /p input_dir="Enter Input Directory (or press Enter): "
 set /p out_dir="Enter Output Directory for extracted files (or press Enter): "
-set /p sub_offset="Enter Subtitle Delay/Offset in seconds (e.g. -10.0, or press Enter): "
 set /p io_jobs="Enter Concurrent I/O Jobs (or press Enter for default 2): "
 
 :: Strip double quotes from inputs (prevents argument injection; handles pasted quoted paths)
 if defined input_dir set input_dir=!input_dir:"=!
 if defined out_dir set out_dir=!out_dir:"=!
-if defined sub_offset set sub_offset=!sub_offset:"=!
 if defined io_jobs set io_jobs=!io_jobs:"=!
 
 set "opts="
 if not "!input_dir!"=="" set opts=!opts! --input-dir "!input_dir!"
 if not "!out_dir!"=="" set opts=!opts! --out-dir "!out_dir!"
-if not "!sub_offset!"=="" (
-    for /f "delims=0123456789.-+" %%a in ("!sub_offset!") do (
-        echo [ERROR] Subtitle offset must be a valid numeric value.
-        pause
-        goto menu
-    )
-    set opts=!opts! --sub-offset "!sub_offset!"
-)
 if not "!io_jobs!"=="" (
     for /f "delims=0123456789" %%a in ("!io_jobs!") do (
         echo [ERROR] I/O jobs must be numeric.

@@ -17,3 +17,10 @@ Manual subtitle assignment extends the contract without a version bump:
 3. **Precedence**: an assigned subtitle overrides every automatic source (local index match, embedded track, fallback assets). A stale path at run time falls back to automatic matching rather than failing the job.
 4. Scope: candidates cover the input-root ancestor chain only; `--assets-dir` fallback assets remain automatic-only and are not offered as GUI picks.
 
+## Addendum: Cooperative Cancellation (additive, still v1)
+Graceful shutdown extends the event contract without a version bump:
+1. **New item outcome**: `item_complete` may carry additive optional `status: "cancelled"` for jobs terminated by a cancellation request — either never started (queued drain) or interrupted mid-run (child process terminated). Consumers must treat it as a terminal status distinct from both `skipped` (planning-time decision) and `error` (job failure).
+2. **Batch flag**: `batch_complete` may carry an additive optional boolean field `cancelled`. When `true`, the run ended because cancellation was requested; `success` is `false` in that case and the sidecar exits with code 130.
+3. **Mechanics**: the engine routes SIGINT/SIGTERM into a shared cancel token; worker threads observe it between stages and long-running children (`mkvmerge`, `mkvextract`, `ffmpeg`) are terminated with a kill escalation after a short grace period. Temp scratch directories are removed by existing `finally` paths before exit.
+4. **Adapter duty**: the desktop stop path must signal before killing — on Unix it sends SIGTERM to the sidecar process group and escalates to SIGKILL only after a grace period; on Windows `taskkill /T /F` remains a hard stop (no catchable signal), so cancelled-status events are best-effort there.
+

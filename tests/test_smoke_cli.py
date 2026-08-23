@@ -1,22 +1,21 @@
 """Smoke tests for CLI main() entrypoints to prevent missing import regressions."""
 
-import importlib
 import sys
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-mkv_common = importlib.import_module("mkv_common")
-mkv_remux = importlib.import_module("mkv_remux")
-mkv_extract = importlib.import_module("mkv_extract")
+import mkv_extract
+import mkv_remux
+import mkv_scan
 
 
-@pytest.mark.parametrize("mod, common_mod", [
-    pytest.param(mkv_remux, mkv_common, id="mkv_remux"),
-    pytest.param(mkv_extract, mkv_common, id="mkv_extract"),
+@pytest.mark.parametrize("mod", [
+    pytest.param(mkv_remux, id="mkv_remux"),
+    pytest.param(mkv_extract, id="mkv_extract"),
 ])
-def test_cli_dry_run_smoke(tmp_path, mod, common_mod):
+def test_cli_dry_run_smoke(tmp_path, mod):
     """Run main() with --dry-run and --no-cache on a mock folder structure to catch any missing imports or undefined variables."""
     # Create mock MKV file, subtitle file, cover image, and font dir
     sample_mkv = tmp_path / "Show - S01E01.mkv"
@@ -44,5 +43,5 @@ def test_cli_dry_run_smoke(tmp_path, mod, common_mod):
 
     with patch.object(sys, "argv", argv), \
          patch.object(mod, "check_dependencies"), \
-         patch.object(common_mod, "run_mkvmerge_json", return_value=json_data):
+         patch.object(mkv_scan, "run_mkvmerge_json", return_value=json_data):
         mod.main()

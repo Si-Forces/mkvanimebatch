@@ -306,6 +306,23 @@ test("reduceQueueEvent is a pure reducer and does not mutate input state", () =>
   assert.equal(completedState.items.get("ep1.mkv").durationSec, "1.0");
 });
 
+test("sub-second completions render as <0.1 instead of 0.0", () => {
+  let state = createQueueState({
+    version: 1,
+    items: [{ id: "fast.mkv", name: "fast.mkv" }],
+  });
+  state = reduceQueueEvent(state, { version: 1, type: "batch_start", total: 1 }, 1000);
+  state = reduceQueueEvent(state, { version: 1, type: "item_start", id: "fast.mkv" }, 1050);
+  state = reduceQueueEvent(state, {
+    version: 1,
+    type: "item_complete",
+    id: "fast.mkv",
+    status: "completed",
+  }, 1099);
+
+  assert.equal(state.items.get("fast.mkv").durationSec, "<0.1");
+});
+
 test("skips and plans report no duration instead of elapsed batch time", () => {
   let state = createQueueState({
     version: 1,
@@ -365,6 +382,76 @@ test("carryOverAssignments returns empty map for missing or itemless manifests",
 
   assert.equal(carryOverAssignments(assignments, null).size, 0);
   assert.equal(carryOverAssignments(assignments, { version: 1, items: [] }).size, 0);
+});
+
+test("reduceQueueEvent treats cancelled items as terminal and counts them as skipped", () => {
+  const manifest = {
+    version: 1,
+    items: [
+      { id: "ep1.mkv", name: "ep1.mkv" },
+      { id: "ep2.mkv", name: "ep2.mkv" },
+    ],
+  };
+  let state = createQueueState(manifest);
+
+  // Started then cancelled mid-run: reports how long it ran.
+  state = reduceQueueEvent(state, { version: 1, type: "item_start", id: "ep1.mkv" }, 1000);
+  state = reduceQueueEvent(state, {
+    version: 1,
+    type: "item_complete",
+    id: "ep1.mkv",
+    status: "cancelled",
+  }, 3500);
+  assert.equal(state.items.get("ep1.mkv").status, "cancelled");
+  assert.equal(state.items.get("ep1.mkv").durationSec, "2.5");
+  assert.equal(state.skippedCount, 1);
+
+  // Cancelled before start (queued -> cancelled): no fabricated duration.
+  state = reduceQueueEvent(state, {
+    version: 1,
+    type: "item_complete",
+    id: "ep2.mkv",
+    status: "cancelled",
+  }, 3600);
+  assert.equal(state.items.get("ep2.mkv").status, "cancelled");
+  assert.equal(state.items.get("ep2.mkv").durationSec, null);
+
+  // Terminal: duplicate completion and late starts are ignored.
+  state = reduceQueueEvent(state, {
+    version: 1,
+    type: "item_complete",
+    id: "ep1.mkv",
+    status: "completed",
+  });
+  state = reduceQueueEvent(state, { version: 1, type: "item_start", id: "ep2.mkv" });
+  assert.equal(state.items.get("ep1.mkv").status, "cancelled");
+  assert.equal(state.items.get("ep2.mkv").status, "cancelled");
+  assert.equal(state.completedCount, 0);
+});
+
+test("batch_complete carries the cancelled flag and fails batch success", () => {
+  let state = createQueueState({
+    version: 1,
+    items: [{ id: "ep1.mkv", name: "ep1.mkv" }],
+  });
+
+  state = reduceQueueEvent(state, { version: 1, type: "batch_start", total: 1 });
+  state = reduceQueueEvent(state, {
+    version: 1,
+    type: "item_complete",
+    id: "ep1.mkv",
+    status: "cancelled",
+  });
+  state = reduceQueueEvent(state, {
+    version: 1,
+    type: "batch_complete",
+    success: false,
+    cancelled: true,
+  });
+
+  assert.equal(state.batchCompleted, true);
+  assert.equal(state.batchSuccess, false);
+  assert.equal(state.batchCancelled, true);
 });
 
 

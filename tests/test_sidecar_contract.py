@@ -10,16 +10,15 @@ from unittest.mock import patch
 import pytest
 
 import mkv_assets
-import mkv_common
 import mkv_extract
+import mkv_proc
 import mkv_remux
+import mkv_scan
 from mkv_assets import AssetResolver
-from mkv_common import (
-    FontInfo,
-    ParsedFile,
-    emit_event,
-    set_events_enabled,
-)
+from mkv_domain import EpisodeInfo
+from mkv_events import emit_event, get_item_id, set_events_enabled
+from mkv_fonts import FontInfo
+from mkv_scan import ParsedFile, _create_parsed_file
 
 
 def test_emit_event_stdout_format(monkeypatch):
@@ -87,7 +86,7 @@ def test_plan_mode_cli_output(tmp_path, monkeypatch, capsys):
 
     argv = ["mkv_remux.py", "--plan", "--input-dir", str(tmp_path)]
     with patch.object(sys, "argv", argv), \
-         patch.object(mkv_common, "run_mkvmerge_json", return_value=mock_json):
+         patch.object(mkv_scan, "run_mkvmerge_json", return_value=mock_json):
         with pytest.raises(SystemExit) as exc:
             mkv_remux.main()
         assert exc.value.code == 0
@@ -123,7 +122,7 @@ def test_plan_manifest_includes_sub_candidates(tmp_path, monkeypatch, capsys):
 
     argv = ["mkv_remux.py", "--plan", "--input-dir", str(tmp_path)]
     with patch.object(sys, "argv", argv), \
-         patch.object(mkv_common, "run_mkvmerge_json", return_value={"tracks": []}):
+         patch.object(mkv_scan, "run_mkvmerge_json", return_value={"tracks": []}):
         with pytest.raises(SystemExit) as exc:
             mkv_remux.main()
         assert exc.value.code == 0
@@ -146,7 +145,7 @@ def test_plan_manifest_omits_sub_candidates_when_no_subtitles(tmp_path, monkeypa
 
     argv = ["mkv_remux.py", "--plan", "--input-dir", str(tmp_path)]
     with patch.object(sys, "argv", argv), \
-         patch.object(mkv_common, "run_mkvmerge_json", return_value={"tracks": []}):
+         patch.object(mkv_scan, "run_mkvmerge_json", return_value={"tracks": []}):
         with pytest.raises(SystemExit) as exc:
             mkv_remux.main()
         assert exc.value.code == 0
@@ -166,7 +165,7 @@ def test_plan_mode_duplicate_basenames_distinct_ids(tmp_path, monkeypatch, capsy
 
     argv = ["mkv_remux.py", "--plan", "--input-dir", str(tmp_path)]
     with patch.object(sys, "argv", argv), \
-         patch.object(mkv_common, "run_mkvmerge_json", return_value={"tracks": []}):
+         patch.object(mkv_scan, "run_mkvmerge_json", return_value={"tracks": []}):
         with pytest.raises(SystemExit) as exc:
             mkv_remux.main()
         assert exc.value.code == 0
@@ -181,7 +180,7 @@ def test_plan_mode_duplicate_basenames_distinct_ids(tmp_path, monkeypatch, capsy
 
 def test_dry_run_skip_event_keeps_parenthesized_filename_id(tmp_path, monkeypatch):
     video_path = tmp_path / "Show - 01 (BD 1080p).mkv"
-    video = mkv_common._create_parsed_file(video_path)
+    video = _create_parsed_file(video_path)
     resolver = AssetResolver.discover([tmp_path], tmp_path / "fonts")
     emitted = []
     monkeypatch.setattr(mkv_remux, "emit_event", lambda event_type, **payload: emitted.append((event_type, payload)))
@@ -208,7 +207,7 @@ def test_skip_event_reason_distinguishes_missing_vs_unmatched_subtitles(tmp_path
     (season / "Show - 02.ass").write_bytes(b"other episode")
     video_path = season / "Show - 01.mkv"
     video_path.write_bytes(b"video")
-    video = mkv_common._create_parsed_file(video_path)
+    video = _create_parsed_file(video_path)
     resolver = AssetResolver.discover([season], season / "fonts")
     emitted = []
     monkeypatch.setattr(mkv_remux, "emit_event", lambda event_type, **payload: emitted.append((event_type, payload)))
@@ -237,9 +236,9 @@ def test_sub_assignments_drive_job_planning(tmp_path):
     video_path.write_bytes(b"video")
     auto_sub = season / "Show - 01.ass"
     auto_sub.write_bytes(b"auto")
-    video = mkv_common._create_parsed_file(video_path)
+    video = _create_parsed_file(video_path)
     resolver = AssetResolver.discover([season], season / "fonts")
-    item_id = mkv_common.get_item_id(video_path, tmp_path)
+    item_id = get_item_id(video_path, tmp_path)
 
     # Assigned sub outside the input tree wins over the auto match.
     manual_dir = tmp_path.parent / "manual_subs_test"
@@ -295,7 +294,7 @@ def test_plan_mode_stdout_purity_corrupt_cache(tmp_path, monkeypatch, capsys):
     cache_file = tmp_path / "corrupt_cache.json"
     cache_file.write_text("{ bad json")
 
-    monkeypatch.setattr(mkv_common, "get_default_cache_file", lambda: cache_file)
+    monkeypatch.setattr(mkv_scan, "get_default_cache_file", lambda: cache_file)
 
     argv = ["mkv_remux.py", "--plan", "--input-dir", str(tmp_path)]
     with patch.object(sys, "argv", argv):
@@ -361,7 +360,7 @@ def test_asset_resolver_discovery_and_resolve_for(tmp_path):
         path=season / "Show - S01E01.mkv",
         name="Show - S01E01.mkv",
         stem="Show - S01E01",
-        parsed=("1", "E", "01"),
+        parsed=EpisodeInfo("1", "E", "01"),
     )
 
     resolved = resolver.resolve_for(video, json_data=None)
@@ -400,6 +399,7 @@ def test_crashed_job_emits_error_event(tmp_path, monkeypatch):
         from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=1) as pool:
             skipped_files = []
+            failed_files = []
             mkv_remux._execute_jobs(
                 jobs=[job],
                 temp_dir=None,
@@ -410,10 +410,12 @@ def test_crashed_job_emits_error_event(tmp_path, monkeypatch):
                 ffmpeg_threads=1,
                 json_cache={job.video: {}},
                 skipped_files=skipped_files,
+                failed_files=failed_files,
             )
 
     assert len(skipped_files) == 1
     assert "exception: Subprocess exploded" in skipped_files[0]
+    assert failed_files == ["crash.mkv"]
     error_events = [e for e in emitted if e[0] == "item_complete" and e[1].get("status") == "error"]
     assert len(error_events) == 1
     assert error_events[0][1]["file"] == "crash.mkv"
@@ -594,7 +596,7 @@ def test_extract_mkv_metadata_unknown_channels_not_fabricated():
 def test_remux_error_event_emitted_on_failure(monkeypatch, tmp_path):
     """Execution failure emits @event: item_complete with status='error' instead of 'skipped'."""
     events = []
-    monkeypatch.setattr(mkv_common, "set_events_enabled", lambda _: None)
+    monkeypatch.setattr(mkv_remux, "set_events_enabled", lambda _: None)
     monkeypatch.setattr(mkv_remux, "emit_event", lambda ev_type, **k: events.append((ev_type, k)))
 
     import subprocess
@@ -603,7 +605,7 @@ def test_remux_error_event_emitted_on_failure(monkeypatch, tmp_path):
             returncode = 2
             stderr = "mkvmerge error"
         return Res()
-    monkeypatch.setattr(mkv_remux, "run_subprocess", mock_run_fail)
+    monkeypatch.setattr(mkv_proc, "run_subprocess", mock_run_fail)
 
     job = mkv_remux.PlannedJob(
         video=tmp_path / "video.mkv",

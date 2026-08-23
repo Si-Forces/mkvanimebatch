@@ -12,15 +12,15 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-COMMON_MODULES = ["mkv_common"]
+COMMON_MODULES = ["mkv_domain"]
 
 
 @pytest.fixture(autouse=True)
 def reset_sidecar_events():
-    common = importlib.import_module("mkv_common")
-    common.set_events_enabled(False)
+    events = importlib.import_module("mkv_events")
+    events.set_events_enabled(False)
     yield
-    common.set_events_enabled(False)
+    events.set_events_enabled(False)
 
 
 @pytest.fixture(params=COMMON_MODULES, ids=COMMON_MODULES)
@@ -34,9 +34,6 @@ def mod(request):
     return m
 
 
-
-
-
 @pytest.fixture()
 def mkv_common():
-    return importlib.import_module("mkv_common")
+    return importlib.import_module("mkv_domain")

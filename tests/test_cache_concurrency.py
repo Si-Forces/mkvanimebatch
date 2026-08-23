@@ -1,23 +1,19 @@
 """Tests for multi-threaded concurrency safety in PersistentInspectCache."""
 
-import importlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import pytest
 
-mkv_common = importlib.import_module("mkv_common")
+from mkv_scan import PersistentInspectCache
 
 
-@pytest.mark.parametrize("mod", [
-    pytest.param(mkv_common, id="mkv_common"),
-])
-def test_concurrent_put_and_save_safety(tmp_path, mod):
+def test_concurrent_put_and_save_safety(tmp_path):
     """Ensure calling .put() repeatedly across 10 threads while calling .save()
     does not cause RuntimeError: dictionary changed size during iteration.
     """
     cache_file = tmp_path / "inspect_cache.json"
-    cache = mod.PersistentInspectCache(cache_file=cache_file, enabled=True)
+    cache = PersistentInspectCache(cache_file=cache_file, enabled=True)
 
     dummy_files = []
     for i in range(50):

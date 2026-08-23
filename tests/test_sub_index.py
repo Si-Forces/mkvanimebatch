@@ -2,15 +2,17 @@
 Tests for SubIndex matching unrecognized/other languages (like Tsonga)
 as external subtitle files.
 """
-from pathlib import Path
 import importlib
 import sys
+from pathlib import Path
 
 import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+from mkv_domain import EpisodeInfo
 
 mkv_assets = importlib.import_module("mkv_assets")
 
@@ -20,7 +22,7 @@ REMUX_MODULES = [
 
 @pytest.mark.parametrize("rmod", REMUX_MODULES)
 def test_sub_index_other_language_matching(rmod):
-    from mkv_common import ParsedFile
+    from mkv_scan import ParsedFile
     
     sub_index = rmod.SubIndex()
     
@@ -30,13 +32,13 @@ def test_sub_index_other_language_matching(rmod):
         path=Path("D:/My Project/episode_01(ts).ass"),
         name="episode_01(ts).ass",
         stem="episode_01(ts)",
-        parsed=("", "E", "01")
+        parsed=EpisodeInfo("", "E", "01")
     )
     
     sub_index.add(sub_file)
     
     # Lookup for episode 1 should find the external Tsonga subtitle
-    result = sub_index.lookup("E", "01", "")
+    result = sub_index.lookup(EpisodeInfo("", "E", "01"))
     assert result is not None
     
     path, lang = result
@@ -45,7 +47,7 @@ def test_sub_index_other_language_matching(rmod):
 
 @pytest.mark.parametrize("rmod", REMUX_MODULES)
 def test_sub_index_different_languages_not_duplicates(rmod):
-    from mkv_common import ParsedFile
+    from mkv_scan import ParsedFile
     
     sub_index = rmod.SubIndex()
     
@@ -54,14 +56,14 @@ def test_sub_index_different_languages_not_duplicates(rmod):
         path=Path("D:/My Project/episode_01.eng.ass"),
         name="episode_01.eng.ass",
         stem="episode_01.eng",
-        parsed=("", "E", "01")
+        parsed=EpisodeInfo("", "E", "01")
     )
     # Add Indonesian subtitle second
     sub_ind = ParsedFile(
         path=Path("D:/My Project/episode_01.ind.ass"),
         name="episode_01.ind.ass",
         stem="episode_01.ind",
-        parsed=("", "E", "01")
+        parsed=EpisodeInfo("", "E", "01")
     )
     
     sub_index.add(sub_eng)
@@ -69,7 +71,7 @@ def test_sub_index_different_languages_not_duplicates(rmod):
     
     # Lookup should choose the Indonesian one (higher priority score)
     # even though English was added first.
-    result = sub_index.lookup("E", "01", "")
+    result = sub_index.lookup(EpisodeInfo("", "E", "01"))
     assert result is not None
     
     path, lang = result
@@ -78,7 +80,7 @@ def test_sub_index_different_languages_not_duplicates(rmod):
 
 @pytest.mark.parametrize("rmod", REMUX_MODULES)
 def test_sub_index_different_formats_not_duplicates(rmod):
-    from mkv_common import ParsedFile
+    from mkv_scan import ParsedFile
     
     sub_index = rmod.SubIndex()
     
@@ -87,14 +89,14 @@ def test_sub_index_different_formats_not_duplicates(rmod):
         path=Path("D:/My Project/episode_01.ind.srt"),
         name="episode_01.ind.srt",
         stem="episode_01.ind",
-        parsed=("", "E", "01")
+        parsed=EpisodeInfo("", "E", "01")
     )
     # Add Indonesian ASS
     sub_ass = ParsedFile(
         path=Path("D:/My Project/episode_01.ind.ass"),
         name="episode_01.ind.ass",
         stem="episode_01.ind",
-        parsed=("", "E", "01")
+        parsed=EpisodeInfo("", "E", "01")
     )
     
     sub_index.add(sub_srt)
@@ -102,7 +104,7 @@ def test_sub_index_different_formats_not_duplicates(rmod):
     
     # Lookup should choose the ASS one because it scores higher than SRT,
     # proving they were not treated as duplicates of each other.
-    result = sub_index.lookup("E", "01", "")
+    result = sub_index.lookup(EpisodeInfo("", "E", "01"))
     assert result is not None
     
     path, lang = result
@@ -112,30 +114,30 @@ def test_sub_index_different_formats_not_duplicates(rmod):
 
 @pytest.mark.parametrize("rmod", REMUX_MODULES)
 def test_sub_index_prefers_dialogue_candidate_with_same_language_and_format(rmod):
-    from mkv_common import ParsedFile
+    from mkv_scan import ParsedFile
 
     sub_index = rmod.SubIndex()
     plain = ParsedFile(
         path=Path("D:/My Project/episode_01.ass"),
         name="episode_01.ass",
         stem="episode_01",
-        parsed=("", "E", "01"),
+        parsed=EpisodeInfo("", "E", "01"),
     )
     dialogue = ParsedFile(
         path=Path("D:/My Project/episode_01_dialogue.ass"),
         name="episode_01_dialogue.ass",
         stem="episode_01_dialogue",
-        parsed=("", "E", "01"),
+        parsed=EpisodeInfo("", "E", "01"),
     )
 
     sub_index.add(plain)
     sub_index.add(dialogue)
 
-    assert sub_index.lookup("E", "01", "") == (dialogue.path, "und")
+    assert sub_index.lookup(EpisodeInfo("", "E", "01")) == (dialogue.path, "und")
 
 
 def test_scan_assets_discovers_ass_and_srt(tmp_path):
-    from mkv_common import scan_assets
+    from mkv_scan import scan_assets
 
     (tmp_path / "episode_01.ind.ass").touch()
     (tmp_path / "episode_02.eng.srt").touch()

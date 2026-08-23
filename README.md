@@ -6,7 +6,7 @@
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey)](https://github.com/sifahaz/mkvanimebatch/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-An automated, high-performance batch processing suite and native desktop GUI for anime and fansub MKV collections. `mkvanimebatch` provides intelligent subtitle track selection, font extraction & deduplication, 10-tier audio track scoring, subtitle timestamp shifting, crash-resilient atomic processing, and multi-threaded remuxing.
+An automated, high-performance batch processing suite and native desktop GUI for anime and fansub MKV collections. `mkvanimebatch` provides intelligent subtitle track selection, font extraction & deduplication, 10-tier audio track scoring, subtitle sync offsets during remuxing, crash-resilient atomic processing, and multi-threaded remuxing.
 
 Available both as a fast **Python CLI suite** and as a native **Tauri v2 Desktop Application** with real-time hardware telemetry and live log streaming.
 
@@ -41,17 +41,12 @@ Available both as a fast **Python CLI suite** and as a native **Tauri v2 Desktop
 ### 10-Tier Audio Picker & Opus Transcoding
 * **Dialogue Priority**: Automatically scores audio tracks, favoring Japanese stereo and multi-channel audio tracks.
 * **Commentary Track Isolation**: Isolates commentary tracks into a secondary fallback pool, ensuring voice-actor/director commentary never overrides main film dialogue.
-* **High-Efficiency Opus Conversion**: Transcodes audio to high-quality Opus with customizable bitrates (e.g. `128k`, `192k`) and compression complexity (`0`–`10`, default: `9`).
+* **High-Efficiency Opus Conversion**: Transcodes audio to high-quality Opus with customizable bitrates (e.g. `128k`, `192k`) and compression complexity (`0`–`10`, default: `10`).
 
 ### Font Registry & Asset Deduplication
 * **Embedded Font Detection**: Identifies font attachments from supported filename extensions and mkvmerge content types before transactional extraction and deduplication.
 * **Font Table Deduplication**: Deduplicates fonts across entire seasons by full font name and content hash to eliminate redundant font copies.
 * **Chapter & Cover Art Preservation**: Automatically extracts and embeds XML chapter definitions and front cover art (`cover.jpg`, `cover.png`, `folder.jpg`).
-
-### Subtitle Timestamp Shifting & Preservation
-* **Offset-Encoded Filenames**: Encodes timestamp offsets into output filenames (e.g., `episode_01.ind.[+5s].ass`) to allow instant skip checks on subsequent runs.
-* **BOM Preservation**: Preserves UTF-8 byte-order marks (`utf-8-sig`) when adjusting subtitle timing.
-* **Stale Offset Cleanup**: Automatically purges stale offset variants when re-running with a different timing offset.
 
 ### Crash-Resistant Output & Safe Recovery
 * **Atomic Job Isolation**: Performs all remuxing and extraction inside isolated temporary scratch directories, promoting completed files via atomic move operations only upon successful exit codes.
@@ -59,7 +54,7 @@ Available both as a fast **Python CLI suite** and as a native **Tauri v2 Desktop
 
 ### Concurrency Engine & Persistent Cache
 * **Bounded Concurrency**: Uses configurable thread pools (`--workers`) paired with disk I/O throttles (`--io-jobs`, default: `2`) to prevent disk thrashing on HDDs and SSDs.
-* **Persistent Probe Cache**: Caches `mkvmerge` JSON probe results to `.mkv_inspect_cache.json` with thread-safe file locks, dramatically speeding up repeated runs on large collections.
+* **Persistent Probe Cache**: Caches `mkvmerge` JSON probe results in a per-user cache directory (`%LOCALAPPDATA%\mkvanimebatch\inspect_cache.json` on Windows, `~/.cache/mkvanimebatch/inspect_cache.json` elsewhere) with thread-safe atomic writes, dramatically speeding up repeated runs on large collections.
 * **Nested Directory Hierarchy**: Preserves source folder hierarchies under `--out-dir` so episodes across different seasons never collide or overwrite each other.
 
 ---
@@ -119,9 +114,6 @@ Extract best-matching subtitles, covers, XML chapters, and deduplicated fonts fr
 # Parallel extraction with custom output and font directories
 python mkv_extract.py --input-dir "D:/Anime/Series" --out-dir "D:/Anime/Extracted" --fonts-dir "D:/Anime/Fonts" --workers 8 --io-jobs 2
 
-# Extract with a +5.0 second subtitle timestamp shift
-python mkv_extract.py --input-dir "D:/Anime/Series" --sub-offset 5.0
-
 # Dry-run inspection (preview matches without extracting)
 python mkv_extract.py --input-dir "D:/Anime/Series" --dry-run
 ```
@@ -155,7 +147,7 @@ python mkv_remux.py --input-dir "D:/Anime/Series" --dry-run
 | `--workers` | `extract`, `remux` | Maximum concurrent files to process (`1`–`64`) | Auto (CPU count × 2, max `16`) |
 | `--ffmpeg-threads` | `remux` | Maximum CPU threads per ffmpeg audio transcode job (`1`–`64`) | Auto (capped at `8`) |
 | `--io-jobs` | `extract`, `remux` | Maximum concurrent disk I/O operations (`0` to disable throttling) | `2` |
-| `--sub-offset` | `extract`, `remux` | Shift subtitle timestamps in seconds (negative = earlier, positive = later) | `0.0` |
+| `--sub-offset` | `remux` | Shift embedded subtitle timing in seconds via mkvmerge `--sync` (negative = earlier, positive = later) | `0.0` |
 | `--bitrate` | `remux` | Target bitrate for Opus audio conversion (e.g. `128k`, `192k`) | `192k` |
 | `--complexity` | `remux` | Opus audio compression complexity level (`0`–`10`) | `10` |
 | `--keep-fonts` | `remux` | Keep temporary extracted fonts directory after remuxing | `False` |
@@ -164,7 +156,7 @@ python mkv_remux.py --input-dir "D:/Anime/Series" --dry-run
 | `--plan` | `remux` | Output inspection manifest JSON for directory without executing | `False` |
 | `--sub-assignments` | `remux` | Path to a JSON file (`{"version": 1, "assignments": {"<item_id>": "<subtitle_path>"}}`) mapping manifest item IDs to subtitle files; assigned subtitles override automatic matching | `None` |
 | `--no-cache` | `extract`, `remux` | Bypass the persistent MKV probe inspect cache | `False` |
-| `--clear-cache` | `extract`, `remux` | Clear `.mkv_inspect_cache.json` and exit without processing files | `False` |
+| `--clear-cache` | `extract`, `remux` | Clear the persistent inspection cache and exit without processing files | `False` |
 
 ### 4. Interactive Windows Launchers
 
@@ -242,13 +234,13 @@ cargo tauri build --config tauri.linux.conf.json --bundles appimage,deb,rpm
                │                              │
                ▼                              ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                      mkv_common.py                          │
+│              mkv_domain / mkv_fonts / mkv_scan              │
+│          mkv_events / mkv_proc  (shared engine)             │
 ├─────────────────────────────────────────────────────────────┤
 │  • FontManager (Transactional Deduplication & Promotion)    │
 │  • PersistentInspectCache (Thread-safe JSON Probe Cache)    │
 │  • 10-Tier Audio Picker & Commentary Exclusion              │
 │  • Subtitle Scorer (Indonesian / English & ASS / SRT)       │
-│  • Timestamp Shifter (utf-8-sig BOM & Offset Encoders)      │
 │  • Crash-Resistant Scratch Directories & Atomic Promotion   │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -276,7 +268,7 @@ When evaluating subtitle candidates for an episode:
 
 ## Running Automated Tests
 
-The test suite includes **300+ automated unit tests** covering subtitle shifting, filename and episode parsing, audio track scoring, font deduplication, multi-threaded cache concurrency, and CLI error handling.
+The test suite includes **300+ automated unit tests** covering filename and episode parsing, audio track scoring, font deduplication, multi-threaded cache concurrency, and CLI error handling.
 
 To run the full test suite locally:
 
@@ -295,7 +287,11 @@ cargo test --verbose
 
 ```
 mkvanimebatch/
-├── mkv_common.py            # Shared parsing, scoring, caching, and font registry logic
+├── mkv_domain.py            # Episode parsing, language detection, track scoring, naming
+├── mkv_events.py            # Structured @event: output, logging setup, item identity
+├── mkv_proc.py              # Subprocess execution, cooperative cancellation, hashing
+├── mkv_fonts.py             # Font discovery + transactional FontManager (dedup/promote)
+├── mkv_scan.py              # mkvmerge probing, persistent cache, scanning, classification
 ├── mkv_extract.py           # CLI tool for extracting subtitles, chapters, covers & fonts
 ├── mkv_remux.py             # CLI tool for batch remuxing and audio transcoding
 ├── run.bat                  # Interactive Windows batch launcher
@@ -310,7 +306,6 @@ mkvanimebatch/
 │   ├── test_cache_concurrency.py
 │   ├── test_episode_parser.py
 │   ├── test_font_registry.py
-│   ├── test_subtitle_shift.py
 │   └── test_track_selection.py
 └── .github/workflows/       # GitHub Actions CI/CD matrix (Python 3.10-3.13, Pyright, Tauri)
 ```

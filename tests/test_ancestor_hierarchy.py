@@ -2,7 +2,9 @@
 Tests for ancestor directory asset discovery and local-first override precedence.
 """
 from pathlib import Path
-import mkv_common
+from mkv_domain import EpisodeInfo
+from mkv_scan import ParsedFile
+
 import mkv_remux
 
 
@@ -47,13 +49,13 @@ def test_ancestor_asset_override_precedence(tmp_path):
     )
 
     # Local Indonesian sub must take precedence over root English sub
-    matched_sub = resolver.sub_index.lookup("E", "01", "1")
+    matched_sub = resolver.sub_index.lookup(EpisodeInfo("1", "E", "01"))
     assert matched_sub is not None
     assert matched_sub[0] == season_dir / "Show - 01.ind.ass"
     assert matched_sub[1] == "ind"
 
     # Local episode cover must take precedence over root global cover
-    matched_cover = resolver.cover_index.lookup("E", "01", "1")
+    matched_cover = resolver.cover_index.lookup(EpisodeInfo("1", "E", "01"))
     assert matched_cover == season_dir / "Show - 01_cover.jpg"
 
 
@@ -78,7 +80,7 @@ def test_local_subtitle_next_to_mkv_always_wins_over_ancestor(tmp_path):
     )
 
     # When lookup is performed with local_dir=season_dir, local sub must win
-    matched = resolver.sub_index.lookup("E", "01", "1", local_dir=season_dir)
+    matched = resolver.sub_index.lookup(EpisodeInfo("1", "E", "01"), local_dir=season_dir)
     assert matched is not None
     assert matched[0] == local_sub
 
@@ -129,7 +131,7 @@ def test_assets_dir_wins_tie_over_its_parent(tmp_path):
     )
 
     assert resolver.fallback_sub_index is not None
-    matched = resolver.fallback_sub_index.lookup("E", "01", "1")
+    matched = resolver.fallback_sub_index.lookup(EpisodeInfo("1", "E", "01"))
     assert matched is not None
     assert matched[0] == assets_dir / "Show - 01.ass"
 
@@ -172,14 +174,14 @@ def test_unparsed_subtitles_listed_for_manual_selection_but_never_matched(tmp_pa
 
     assert set(resolver.all_subtitles) == {unparsed_sub, parsed_sub}
     # Lookup for E01 matches only the parseable candidate; E02 matches nothing.
-    matched_e01 = resolver.sub_index.lookup("E", "01", "1")
+    matched_e01 = resolver.sub_index.lookup(EpisodeInfo("1", "E", "01"))
     assert matched_e01 is not None and matched_e01[0] == parsed_sub
-    assert resolver.sub_index.lookup("E", "02", "1") is None
+    assert resolver.sub_index.lookup(EpisodeInfo("1", "E", "02")) is None
 
 
 def _make_video(path: Path):
-    return mkv_common.ParsedFile(
-        path=path, name=path.name, stem=path.stem, parsed=("1", "E", "01")
+    return ParsedFile(
+        path=path, name=path.name, stem=path.stem, parsed=EpisodeInfo("1", "E", "01")
     )
 
 

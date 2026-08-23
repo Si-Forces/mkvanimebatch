@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import mkv_proc
 mkv_remux = importlib.import_module("mkv_remux")
 
 
@@ -241,7 +242,7 @@ class TestRemuxArgs:
                 stderr = ""
             return DummyResult()
 
-        monkeypatch.setattr(mod, "run_subprocess", mock_run)
+        monkeypatch.setattr(mkv_proc, "run_subprocess", mock_run)
         res = mod._convert_flac_to_opus(
             Path("/dummy/video.mkv"), 0, Path("/dummy/temp"),
             "video", "192k", [], 2, complexity=8,
@@ -366,7 +367,7 @@ class TestRemuxArgs:
         def mock_run_timeout(*_a, **_k):
             raise subprocess.TimeoutExpired(cmd=["ffmpeg"], timeout=3600)
 
-        monkeypatch.setattr(mod, "run_subprocess", mock_run_timeout)
+        monkeypatch.setattr(mkv_proc, "run_subprocess", mock_run_timeout)
         log = []
         res = mod._convert_flac_to_opus(
             Path("/dummy/video.mkv"), 0, tmp_path,
@@ -384,7 +385,7 @@ class TestRemuxArgs:
                 raise subprocess.TimeoutExpired(cmd=cmd, timeout=3600)
             return None
 
-        monkeypatch.setattr(mod, "run_subprocess", mock_run_timeout)
+        monkeypatch.setattr(mkv_proc, "run_subprocess", mock_run_timeout)
 
         job = mod.PlannedJob(
             video=tmp_path / "video.mkv",
@@ -497,7 +498,7 @@ class TestRemuxArgs:
     def test_ffmpeg_threads_capping_behavior(self, mod, monkeypatch):
         """Verify default_ffmpeg_threads caps at MAX_FFMPEG_AUDIO_THREADS and scales down."""
         import os
-        from mkv_common import MAX_FFMPEG_AUDIO_THREADS, default_ffmpeg_threads
+        from mkv_domain import MAX_FFMPEG_AUDIO_THREADS, default_ffmpeg_threads
 
         # 64-core machine with 1 worker should be capped at MAX_FFMPEG_AUDIO_THREADS (8)
         monkeypatch.setattr(os, "cpu_count", lambda: 64)
