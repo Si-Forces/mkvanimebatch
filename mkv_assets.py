@@ -27,10 +27,9 @@ from mkv_domain import (
 )
 from mkv_fonts import FontInfo, scan_fonts
 from mkv_scan import (
+    InspectedVideo,
     ParsedFile,
     ScanResults,
-    has_chapters,
-    has_cover,
     is_chapter_xml,
     is_cover_filename,
     scan_assets,
@@ -428,7 +427,7 @@ class AssetResolver:
         self,
         video: ParsedFile,
         parsed: EpisodeInfo,
-        json_data: dict | None,
+        inspected: InspectedVideo | None,
         all_subs: list[Path],
         mode: InteractionMode,
         assigned_subtitle: Path | None = None,
@@ -448,8 +447,8 @@ class AssetResolver:
             return _SubResolution(sub_path, None, lang, True, None)
 
         logger.info("  No external subtitle match — checking source for embedded subtitles...")
-        if json_data:
-            embedded_res = select_best_subtitle_track(json_data.get("tracks", []))
+        if inspected:
+            embedded_res = select_best_subtitle_track(inspected.subtitle_tracks())
             if embedded_res:
                 track_id, lang, _ = embedded_res
                 if lang in SUBTITLE_LANGS_FALLBACK:
@@ -539,7 +538,7 @@ class AssetResolver:
     def resolve_for(
         self,
         video: ParsedFile,
-        json_data: dict | None,
+        inspected: InspectedVideo | None,
         all_subs: list[Path] | None = None,
         mode: InteractionMode = InteractionMode.INTERACTIVE,
         claimed_chapter: Path | None = None,
@@ -563,16 +562,16 @@ class AssetResolver:
             )
 
         sub = self._resolve_sub(
-            video, parsed, json_data, all_subs or [], mode,
+            video, parsed, inspected, all_subs or [], mode,
             assigned_subtitle=assigned_subtitle
         )
         chapter_file = self._resolve_chap(
             parsed,
-            has_source_chapters=has_chapters(json_data),
+            has_source_chapters=inspected is not None and inspected.has_chapters(),
             claimed_chapter=claimed_chapter,
         )
         cover_file = self._resolve_cov(
-            parsed, has_source_cover=has_cover(json_data)
+            parsed, has_source_cover=inspected is not None and inspected.cover_attachment() is not None
         )
 
         return ResolvedAssets(
@@ -591,7 +590,7 @@ class AssetResolver:
 
 def claim_leftover_chapters(
     videos: list[ParsedFile],
-    json_cache: dict[Path, dict | None],
+    json_cache: dict[Path, InspectedVideo | None],
     resolver: AssetResolver,
 ) -> dict[Path, Path]:
     """Precompute the sole-leftover chapter claim for a release directory.
@@ -613,7 +612,8 @@ def claim_leftover_chapters(
             continue
         if resolver.chap_index.lookup(v.parsed):
             continue
-        if has_chapters(json_cache.get(v.path)):
+        inspected = json_cache.get(v.path)
+        if inspected is not None and inspected.has_chapters():
             continue
         claims[v.path] = leftover
         break

@@ -8,7 +8,7 @@ import pytest
 import mkv_extract
 import mkv_proc
 from mkv_fonts import FontManager
-from mkv_scan import ParsedFile
+from mkv_scan import InspectedVideo, ParsedFile
 
 
 def test_failed_extraction_does_not_replace_existing_subtitle(tmp_path, monkeypatch):
@@ -22,7 +22,7 @@ def test_failed_extraction_does_not_replace_existing_subtitle(tmp_path, monkeypa
     )
     subtitle = tmp_path / "Show_Show_ind_track2.ass"
     subtitle.write_bytes(b"existing subtitle")
-    metadata = {
+    metadata = InspectedVideo({
         "tracks": [
             {
                 "id": 2,
@@ -34,7 +34,7 @@ def test_failed_extraction_does_not_replace_existing_subtitle(tmp_path, monkeypa
                 },
             }
         ]
-    }
+    })
 
     def fail_after_partial_write(command, **_kwargs):
         track_target = Path(command[3].split(":", 1)[1])
@@ -63,7 +63,7 @@ def test_successful_extraction_promotes_staged_subtitle(tmp_path, monkeypatch):
         parsed=None,
     )
     subtitle = tmp_path / "Show_Show_ind_track2.ass"
-    metadata = {
+    metadata = InspectedVideo({
         "tracks": [
             {
                 "id": 2,
@@ -75,7 +75,7 @@ def test_successful_extraction_promotes_staged_subtitle(tmp_path, monkeypatch):
                 },
             }
         ]
-    }
+    })
 
     def write_complete_output(command, **_kwargs):
         track_target = Path(command[3].split(":", 1)[1])
@@ -128,7 +128,7 @@ def test_cover_extension_whitelisting(tmp_path, monkeypatch, file_name, expected
     video = tmp_path / "Show.mkv"
     video.touch()
     parsed_video = ParsedFile(path=video, name=video.name, stem=video.stem, parsed=None)
-    metadata = {
+    metadata = InspectedVideo({
         "attachments": [
             {
                 "id": 1,
@@ -137,7 +137,7 @@ def test_cover_extension_whitelisting(tmp_path, monkeypatch, file_name, expected
                 "size": 100,
             }
         ]
-    }
+    })
 
     def mock_run(command, **_kwargs):
         for arg in command:
@@ -181,16 +181,16 @@ def test_font_registry_shared_across_dirs(tmp_path, monkeypatch):
     parsed_a = ParsedFile(path=video_a, name=video_a.name, stem=video_a.stem, parsed=None)
     parsed_b = ParsedFile(path=video_b, name=video_b.name, stem=video_b.stem, parsed=None)
 
-    meta_a = {
+    meta_a = InspectedVideo({
         "attachments": [
             {"id": 1, "file_name": "font_a.ttf", "content_type": "application/x-truetype-font", "size": 12}
         ]
-    }
-    meta_b = {
+    })
+    meta_b = InspectedVideo({
         "attachments": [
             {"id": 1, "file_name": "font_b.ttf", "content_type": "application/x-truetype-font", "size": 12}
         ]
-    }
+    })
 
     def mock_run(command, **_kwargs):
         for arg in command:

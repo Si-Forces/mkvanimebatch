@@ -14,7 +14,7 @@ mkv_assets = importlib.import_module("mkv_assets")
 import mkv_proc
 import mkv_scan
 from mkv_domain import EpisodeInfo
-from mkv_scan import PersistentInspectCache, _create_parsed_file, inspect_videos
+from mkv_scan import InspectedVideo, PersistentInspectCache, _create_parsed_file, inspect_videos
 
 
 class TestPersistentInspectCache:
@@ -82,7 +82,7 @@ class TestPersistentInspectCache:
         with patch.object(mkv_scan, "run_mkvmerge_json") as mock_mkvmerge:
             with ThreadPoolExecutor(max_workers=1) as pool:
                 results = inspect_videos([sample_file], pool=pool, persistent_cache=cache)
-            assert results[sample_file] == json_data
+            assert results[sample_file] == InspectedVideo(json_data)
             mock_mkvmerge.assert_not_called()
 
     def test_inspect_videos_without_cache(self, tmp_path):
@@ -93,7 +93,7 @@ class TestPersistentInspectCache:
         with patch.object(mkv_scan, "run_mkvmerge_json", return_value=json_data):
             with ThreadPoolExecutor(max_workers=1) as pool:
                 results = inspect_videos([sample_file], pool=pool, persistent_cache=None)
-            assert results[sample_file] == json_data
+            assert results[sample_file] == InspectedVideo(json_data)
     def test_cache_save_exception_unlinks_temp_file(self, tmp_path):
         """Verify that any temporary file created during save() is unlinked if serialization or write fails."""
         cache_file = tmp_path / "cache.json"
@@ -185,7 +185,7 @@ def test_io_semaphore_throttles_remux(tmp_path):
             temp_dir=tmp_path,
             fonts=mkv_remux.FontInfo(args=(), count=0),
             opus_bitrate="192k",
-            json_cache={sample_video: {"tracks": [{"id": 0, "type": "video"}]}},
+            json_cache={sample_video: InspectedVideo({"tracks": [{"id": 0, "type": "video"}]})},
             ffmpeg_threads=2,
             io_semaphore=mock_sem,
             complexity=10,
