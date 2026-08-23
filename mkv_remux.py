@@ -35,6 +35,8 @@ from typing import Literal
 
 from mkv_assets import (
     AssetResolver,
+    InteractionMode,
+    claim_leftover_chapters,
 )
 from mkv_domain import (
     COVER_MIME,
@@ -581,6 +583,7 @@ def _plan_jobs(
     dry_run:          bool = False,
     root_input_dir:   Path | None = None,
     sub_assignments:  dict[str, Path] | None = None,
+    mode:             InteractionMode = InteractionMode.INTERACTIVE,
 ) -> tuple[list[PlannedJob], list[str], list[str]]:
 
     out_dir = output_dir or Path()
@@ -588,7 +591,7 @@ def _plan_jobs(
     root_dir = root_input_dir or out_dir
     assignments = sub_assignments or {}
 
-    chapter_fallback_count = resolver.count_unmatched_chapter_videos(videos)
+    chapter_claims = claim_leftover_chapters(videos, json_cache, resolver)
 
     skipped_files: list[str] = []
     skipped_events: list[tuple[ParsedFile, str]] = []
@@ -642,9 +645,8 @@ def _plan_jobs(
             video_file,
             json_data,
             all_subs=subs_list,
-            dry_run=dry_run,
-            chapter_fallback_count=chapter_fallback_count,
-            interactive=True,
+            mode=mode,
+            claimed_chapter=chapter_claims.get(video_file.path),
             assigned_subtitle=assigned_sub,
         )
 
@@ -1034,6 +1036,7 @@ class RemuxRunConfig:
     opus_bitrate: str
     complexity: int
     ffmpeg_threads: int | None
+    interaction_mode: InteractionMode = InteractionMode.INTERACTIVE
     sub_assignments: dict[str, Path] | None = None
 
 
@@ -1146,6 +1149,7 @@ def _run(
         output_dir=output_dir, all_subs=all_subs, use_source_fonts=use_source_fonts, dry_run=dry_run,
         root_input_dir=config.root_input_dir,
         sub_assignments=config.sub_assignments,
+        mode=config.interaction_mode,
     )
 
     if dry_run:
@@ -1308,6 +1312,12 @@ def main() -> None:
     scan_cache: dict[Path, ScanResults] = {}
     fonts_dir_cache: dict[Path, Path] = {}
     interactive_prompt = _prompt_for_subtitle if sys.stdin.isatty() else None
+    if dry_run:
+        interaction_mode = InteractionMode.DRY_RUN
+    elif interactive_prompt is not None:
+        interaction_mode = InteractionMode.INTERACTIVE
+    else:
+        interaction_mode = InteractionMode.NON_INTERACTIVE
 
     def process_directory(pool: ThreadPoolExecutor, mkv_dir: Path, dir_mkvs: list[ParsedFile]) -> bool:
         current_output_dir = resolve_output_dir(mkv_dir, root_input_dir, out_override)
@@ -1339,6 +1349,7 @@ def main() -> None:
                 opus_bitrate=opus_bitrate,
                 complexity=cfg.complexity,
                 ffmpeg_threads=cfg.ffmpeg_threads,
+                interaction_mode=interaction_mode,
                 sub_assignments=sub_assignments,
             )
             dir_success = _run(release, config, pool)
