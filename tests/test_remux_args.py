@@ -279,6 +279,8 @@ class TestRemuxArgs:
 
     def test_cli_assets_dir_support(self, mod, monkeypatch, tmp_path):
         """Verify CLI accepts --assets-dir fallback directory."""
+        from types import SimpleNamespace
+
         test_dir = tmp_path / "input"
         test_dir.mkdir()
         assets_dir = tmp_path / "extracted_assets"
@@ -288,10 +290,11 @@ class TestRemuxArgs:
         monkeypatch.setattr(mod, "check_dependencies", lambda *a: None)
         monkeypatch.setattr(mod, "inspect_videos", lambda *a, **k: {})
         captured_kwargs = {}
-        def mock_run(*args, **kwargs):
-            captured_kwargs.update(kwargs)
-            return True
-        monkeypatch.setattr(mod, "_run", mock_run)
+        def fake_prepare(*args, **kwargs):
+            captured_kwargs["assets_dir"] = kwargs.get("assets_dir")
+            return SimpleNamespace(fonts_origin="default", fonts_dir=test_dir / "fonts")
+        monkeypatch.setattr(mod, "prepare_release_directory", fake_prepare)
+        monkeypatch.setattr(mod, "_run", lambda release, config, pool: True)
 
         test_argv = [
             "script", "--input-dir", str(test_dir),
@@ -426,8 +429,8 @@ class TestRemuxArgs:
         monkeypatch.setattr(mod, "check_dependencies", lambda *a: None)
         monkeypatch.setattr(mod, "inspect_videos", lambda *a, **k: {})
         captured_kwargs = {}
-        def mock_run(*args, **kwargs):
-            captured_kwargs.update(kwargs)
+        def mock_run(release, config, pool):
+            captured_kwargs["config"] = config
             return True
         monkeypatch.setattr(mod, "_run", mock_run)
 
@@ -443,7 +446,7 @@ class TestRemuxArgs:
         except SystemExit as exc:
             assert exc.code == 0
 
-        assert captured_kwargs.get("ffmpeg_threads") == 4
+        assert captured_kwargs["config"].ffmpeg_threads == 4
 
     def test_cli_sub_assignments_loading(self, mod, monkeypatch, tmp_path):
         """--sub-assignments loads the JSON map and resolves relative paths
@@ -456,8 +459,8 @@ class TestRemuxArgs:
         assign_file = tmp_path / "assign.json"
 
         captured_kwargs = {}
-        def mock_run(*args, **kwargs):
-            captured_kwargs.update(kwargs)
+        def mock_run(release, config, pool):
+            captured_kwargs["config"] = config
             return True
 
         monkeypatch.setattr(mod, "check_dependencies", lambda *a: None)
@@ -478,7 +481,7 @@ class TestRemuxArgs:
         except SystemExit as exc:
             assert exc.code == 0
 
-        passed = captured_kwargs.get("sub_assignments")
+        passed = captured_kwargs["config"].sub_assignments
         assert passed is not None
         assert passed["Season 01/ep1.mkv"] == test_dir / "Season 01" / "sub.ass"
 
