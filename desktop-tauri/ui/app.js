@@ -5,6 +5,7 @@
 "use strict";
 
 import { createQueueState, reduceQueueEvent, finalizeQueueState, carryOverAssignments } from "./queue-state.js";
+import { classifyLine, stripLogPrefix } from "./log-classify.js";
 import { createTelemetryLoop } from "./telemetry.js";
 
 // ─── Preset Configurations ──────────────────────────────────────────────────
@@ -727,21 +728,6 @@ async function chooseInputFolder(targetId) {
 }
 
 // ─── Log Console ────────────────────────────────────────────────────────────
-
-function stripLogPrefix(text) {
-  return text.replace(/^(\[ERR\]\s*)?\d{4}-\d{2}-\d{2}[ T][\d:]+[.,]\d+\s+\[\w+\]\s+/, "$1");
-}
-
-function classifyLine(text) {
-  const t = stripLogPrefix(text).toLowerCase();
-  if (t.includes("crashed") || t.includes("[-]") || t.includes("[err]") || t.includes("error") || t.includes("failed") || t.includes("[error]")) return "line-err";
-  if (t.includes("skipped") || t.includes("skip") || t.includes("already exists") || t.includes("already complete")) return "line-skip";
-  if (t.includes("[+]") || t.includes("success") || t.includes("finished") || t.includes("completed") || t.includes("remuxed:") || t.includes("extracted:") || t.includes("remuxed cleanly") || t.includes("extracted cleanly")) return "line-ok";
-  if (t.includes("warn") || t.includes("[warn]")) return "line-warn";
-  if (t.includes("folder:") || t.includes("dry run") || t.startsWith("processing") || t.startsWith("extracting")) return "line-info";
-  if (t.includes("persistent inspection cache") || t.includes("cache cleared")) return "line-done";
-  return "";
-}
 
 const MAX_LOG_LINES = 2000;
 const _logQueues = new WeakMap();
