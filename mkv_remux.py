@@ -46,7 +46,6 @@ from mkv_domain import (
     is_dialogue_track,
     output_stem,
     resolve_output_dir,
-    seasons_match,  # noqa: F401 - compatibility re-export
 )
 from mkv_events import (
     OUTCOME_CANCELLED,
@@ -92,8 +91,6 @@ from mkv_scan import (
 
 # Initialize child logger for the remux module
 logger = logging.getLogger("mkv_automation.remux")
-
-_ancestor_dirs = ancestor_dirs
 
 
 # ─── TRACK SELECTOR ──────────────────────────────────────────────────────────
@@ -244,7 +241,11 @@ def _prompt_for_subtitle(video: ParsedFile, all_subs: list[Path]) -> Path | None
     for i, sub in enumerate(all_subs):
         print(f"    [{i + 1}] {sub.name}")
     print("    [0] Skip this video")
-    choice = input("\n  Type a number to assign a subtitle, or 0 to skip: ").strip()
+    try:
+        choice = input("\n  Type a number to assign a subtitle, or 0 to skip: ").strip()
+    except EOFError:
+        # stdin closed mid-prompt (e.g. detached run): treat as a user skip.
+        return None
     if choice.isdigit() and 0 < int(choice) <= len(all_subs):
         return all_subs[int(choice) - 1]
     return None
@@ -832,7 +833,9 @@ def _parse_audio_track_info(track: dict) -> tuple[str, bool]:
     is_flac = "flac" in c_low
     channels = props.get("audio_channels")
     if channels is not None:
-        ch_str = _CH_MAP.get(channels, f"{channels}.0" if channels <= 2 else f"{channels}.1")
+        # mkvmerge reports total channel count including the LFE (6 -> 5.1,
+        # 8 -> 7.1), so unknown counts above stereo are rendered as (n-1).1.
+        ch_str = _CH_MAP.get(channels, f"{channels}.0" if channels <= 2 else f"{channels - 1}.1")
     else:
         ch_str = None
 

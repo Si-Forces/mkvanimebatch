@@ -96,10 +96,10 @@ def emit_event(event_type: str, *, item_id: str | None = None, **payload) -> Non
     if not _EVENTS_ENABLED:
         return
     ev = {"version": 1, "type": event_type}
-    if item_id is not None:
-        ev["id"] = item_id
-    elif "id" in payload:
-        ev["id"] = payload.pop("id")
+    payload_id = payload.pop("id", None)
+    item = item_id if item_id is not None else payload_id
+    if item is not None:
+        ev["id"] = item
     ev.update(payload)
     msg = json.dumps(ev, ensure_ascii=False)
     sys.stdout.write(f"@event: {msg}\n")
