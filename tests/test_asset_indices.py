@@ -1,6 +1,5 @@
 """Tests for asset indexing helpers: ChapIndex, CoverIndex, chapter sniffing, and font dir discovery."""
-
-
+import logging
 
 import mkv_assets
 from mkv_domain import EpisodeInfo
@@ -64,6 +63,32 @@ class TestAssetIndices:
 
         match = chap_idx.lookup(EpisodeInfo("1", "E", "01"))
         assert match == xml_path
+
+    def test_chap_index_cross_dir_duplicate_kept_first_and_logged(self, tmp_path, caplog):
+        """Same-season chapter files in different directories keep the first
+        indexed (most specific) file and log the ignored one instead of
+        dropping it silently."""
+        specific_dir = tmp_path / "Season 01"
+        shared_dir = tmp_path / "root"
+        specific_dir.mkdir()
+        shared_dir.mkdir()
+        first = specific_dir / "Show_S01E01_chapters.xml"
+        second = shared_dir / "Show_S01E01_chapters.xml"
+        for p in (first, second):
+            p.write_text("<?xml version='1.0'?><Chapters></Chapters>", encoding="utf-8")
+
+        chap_idx = mkv_assets.ChapterIndex()
+        caplog.set_level(logging.INFO, logger="mkv_automation")
+        chap_idx.add(_create_parsed_file(first))
+        chap_idx.add(_create_parsed_file(second))
+
+        assert chap_idx.lookup(EpisodeInfo("1", "E", "01")) == first
+        assert any(
+            "Duplicate asset" in r.getMessage()
+            and second.name in r.getMessage()
+            and str(shared_dir) in r.getMessage()
+            for r in caplog.records
+        )
 
     def test_cover_index_global_fallback(self, tmp_path):
         cover_path = tmp_path / "cover.jpg"

@@ -47,6 +47,35 @@ def test_emit_event_stdout_format(monkeypatch):
     assert payload["count"] == 42
 
 
+def test_emit_event_explicit_item_id_beats_payload_id(monkeypatch):
+    """An explicit item_id argument wins over a stray id= kwarg; bare id= still works."""
+    buf = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", buf)
+    set_events_enabled(True)
+
+    emit_event("t", item_id="from_param", **{"id": "from_payload"})
+    emit_event("t2", **{"id": "only_payload"})
+    set_events_enabled(False)
+
+    lines = buf.getvalue().strip().splitlines()
+    first, second = (json.loads(line[8:]) for line in lines)
+    assert first["id"] == "from_param"
+    assert second["id"] == "only_payload"
+
+
+def test_emit_event_omits_id_when_none_given(monkeypatch):
+    """Batch-level events carry no id key at all — never id: null."""
+    buf = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", buf)
+    set_events_enabled(True)
+
+    emit_event("batch_start", total=3, input_dir="/x")
+    set_events_enabled(False)
+
+    payload = json.loads(buf.getvalue()[8:])
+    assert "id" not in payload
+
+
 def test_plan_mode_cli_output(tmp_path, monkeypatch, capsys):
     """mkv-remux --plan outputs valid JSON object with version: 1 and items list."""
     sub_dir = tmp_path / "Season 01"

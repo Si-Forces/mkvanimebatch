@@ -3,8 +3,7 @@ Tests for ancestor directory asset discovery and local-first override precedence
 """
 from pathlib import Path
 
-import mkv_remux
-from mkv_domain import EpisodeInfo
+from mkv_domain import EpisodeInfo, ancestor_dirs
 from mkv_scan import ParsedFile
 
 
@@ -14,7 +13,7 @@ def test_ancestor_dirs_structure(tmp_path):
     arc = s1 / "Cour 1"
     arc.mkdir(parents=True)
 
-    ancestors = mkv_remux._ancestor_dirs(arc, root)
+    ancestors = ancestor_dirs(arc, root)
     assert ancestors == [root, s1, arc]
 
 
@@ -24,7 +23,7 @@ def test_ancestor_dirs_outside_root(tmp_path):
     other.mkdir(parents=True)
     root.mkdir(parents=True)
 
-    assert mkv_remux._ancestor_dirs(other, root) == [other]
+    assert ancestor_dirs(other, root) == [other]
 
 
 def test_ancestor_asset_override_precedence(tmp_path):
@@ -40,7 +39,7 @@ def test_ancestor_asset_override_precedence(tmp_path):
     (season_dir / "Show - 01_cover.jpg").write_bytes(b"local_cover")
     (season_dir / "Show - 01.ind.ass").write_bytes(b"local_ind_sub")
 
-    search_dirs = mkv_remux._ancestor_dirs(season_dir, root_dir)
+    search_dirs = ancestor_dirs(season_dir, root_dir)
     assert search_dirs == [root_dir, season_dir]
 
     import mkv_assets
@@ -73,7 +72,7 @@ def test_local_subtitle_next_to_mkv_always_wins_over_ancestor(tmp_path):
     local_sub = season_dir / "[SuperLongFansubGroup] Anime Title - 01 [1080p FLAC BD].ass"
     local_sub.write_bytes(b"local_long_sub")
 
-    search_dirs = mkv_remux._ancestor_dirs(season_dir, root_dir)
+    search_dirs = ancestor_dirs(season_dir, root_dir)
     import mkv_assets
     resolver = mkv_assets.AssetResolver.discover(
         search_dirs, season_dir / "fonts"
@@ -96,7 +95,7 @@ def test_assets_dir_multi_level_fallback_hierarchy(tmp_path):
     (assets_override / "fonts" / "FontA.ttf").write_bytes(b"font_data")
     (assets_override / "cover.jpg").write_bytes(b"root_cover_data")
 
-    search_dirs = mkv_remux._ancestor_dirs(season_dir, root_dir)
+    search_dirs = ancestor_dirs(season_dir, root_dir)
     import mkv_assets
     resolver = mkv_assets.AssetResolver.discover(
         search_dirs,
@@ -124,7 +123,7 @@ def test_assets_dir_wins_tie_over_its_parent(tmp_path):
     (assets_dir / "Show - 01.ass").write_bytes(b"assets_copy")
     (parent_dir / "Show - 01.ass").write_bytes(b"parent_copy")
 
-    search_dirs = mkv_remux._ancestor_dirs(season_dir, root_dir)
+    search_dirs = ancestor_dirs(season_dir, root_dir)
     import mkv_assets
     resolver = mkv_assets.AssetResolver.discover(
         search_dirs, season_dir / "fonts", assets_dir=assets_dir
@@ -147,7 +146,7 @@ def test_assets_dir_fonts_take_precedence_over_parent_fonts(tmp_path):
     (assets_dir / "Specific.ttf").write_bytes(b"specific_font")
     (assets_dir.parent / "Shared.ttf").write_bytes(b"shared_font")
 
-    search_dirs = mkv_remux._ancestor_dirs(season_dir, root_dir)
+    search_dirs = ancestor_dirs(season_dir, root_dir)
     import mkv_assets
     resolver = mkv_assets.AssetResolver.discover(
         search_dirs, season_dir / "fonts", assets_dir=assets_dir
@@ -168,7 +167,7 @@ def test_unparsed_subtitles_listed_for_manual_selection_but_never_matched(tmp_pa
     parsed_sub = season_dir / "Show - 01.ass"
     parsed_sub.write_bytes(b"parsed")
 
-    search_dirs = mkv_remux._ancestor_dirs(season_dir, root_dir)
+    search_dirs = ancestor_dirs(season_dir, root_dir)
     import mkv_assets
     resolver = mkv_assets.AssetResolver.discover(search_dirs, season_dir / "fonts")
 
@@ -229,7 +228,7 @@ def test_assigned_subtitle_overrides_every_automatic_source(tmp_path):
 
     import mkv_assets
     resolver = mkv_assets.AssetResolver.discover(
-        mkv_remux._ancestor_dirs(season_dir, root_dir), season_dir / "fonts"
+        ancestor_dirs(season_dir, root_dir), season_dir / "fonts"
     )
 
     video = _make_video(season_dir / "Show - 01.mkv")

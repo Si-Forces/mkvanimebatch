@@ -1,5 +1,5 @@
 """
-Tests for _pick_audio() from both remux modules, and seasons_match().
+Tests for _pick_audio() and seasons_match() from the domain module.
 
 _pick_audio is a private function but it is the most complex piece of logic
 in the audio selection pipeline, so it is tested directly.
@@ -15,6 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 mkv_remux      = importlib.import_module("mkv_remux")
+mkv_domain     = importlib.import_module("mkv_domain")
 
 REMUX_MODULES = [
     pytest.param(mkv_remux,      id="mkv_remux"),
@@ -34,30 +35,25 @@ def _audio(lang, channels=2, name="", pos=1, codec="A_AAC"):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# seasons_match  (identical in both modules)
+# seasons_match
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestSeasonsMatch:
 
-    @pytest.mark.parametrize("rmod", REMUX_MODULES)
-    def test_both_empty_returns_true(self, rmod):
-        assert rmod.seasons_match("", "") is True
+    def test_both_empty_returns_true(self):
+        assert mkv_domain.seasons_match("", "") is True
 
-    @pytest.mark.parametrize("rmod", REMUX_MODULES)
-    def test_mkv_empty_returns_true(self, rmod):
-        assert rmod.seasons_match("", "2") is True
+    def test_mkv_empty_returns_true(self):
+        assert mkv_domain.seasons_match("", "2") is True
 
-    @pytest.mark.parametrize("rmod", REMUX_MODULES)
-    def test_sub_empty_returns_true(self, rmod):
-        assert rmod.seasons_match("2", "") is True
+    def test_sub_empty_returns_true(self):
+        assert mkv_domain.seasons_match("2", "") is True
 
-    @pytest.mark.parametrize("rmod", REMUX_MODULES)
-    def test_matching_seasons(self, rmod):
-        assert rmod.seasons_match("1", "1") is True
+    def test_matching_seasons(self):
+        assert mkv_domain.seasons_match("1", "1") is True
 
-    @pytest.mark.parametrize("rmod", REMUX_MODULES)
-    def test_different_seasons(self, rmod):
-        assert rmod.seasons_match("1", "2") is False
+    def test_different_seasons(self):
+        assert mkv_domain.seasons_match("1", "2") is False
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -531,3 +531,17 @@ class TestRemuxArgs:
         with pytest.raises(SystemExit) as exc:
             mod.main()
         assert exc.value.code == 1
+
+
+def test_prompt_for_subtitle_eof_treated_as_skip(monkeypatch, tmp_path):
+    """stdin closing mid-prompt (EOF) must return None, not crash the worker."""
+    import builtins
+
+    from mkv_scan import _create_parsed_file
+
+    def raise_eof(*_a, **_k):
+        raise EOFError
+
+    monkeypatch.setattr(builtins, "input", raise_eof)
+    video = _create_parsed_file(tmp_path / "Show - 01.mkv")
+    assert mkv_remux._prompt_for_subtitle(video, [tmp_path / "sub.ass"]) is None
