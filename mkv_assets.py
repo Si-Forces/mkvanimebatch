@@ -82,6 +82,15 @@ def _reject_duplicate(
             continue
         if existing_path.parent == path.parent:
             logger.warning(warning, key, path.parent.name, existing_path.name, path.name)
+        else:
+            logger.info(
+                "Duplicate asset for key %s also found in '%s': keeping '%s', ignoring '%s' from '%s'",
+                key,
+                path.parent.name,
+                existing_path.name,
+                path.name,
+                path.parent,
+            )
         return True
     return False
 
