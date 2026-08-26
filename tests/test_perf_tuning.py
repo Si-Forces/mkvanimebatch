@@ -9,6 +9,7 @@ import json
 import os
 import stat
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -350,10 +351,12 @@ def test_debounced_save_interval_skip_stays_dirty(tmp_path):
     video = tmp_path / "video.mkv"
     video.write_bytes(b"a")
     cache.put(video, {"id": 1})
+    cache._last_save_ts = 0.0  # never saved before: debounce cannot skip
     cache.save(min_interval=60.0)  # first write goes through
 
     snapshot = cache_file.read_text()
     cache.put(video, {"id": 9})  # dirty again
+    cache._last_save_ts = time.monotonic()  # pretend a save just happened
     cache.save(min_interval=60.0, prune=False)  # within interval -> skipped
     assert cache._dirty is True
     assert cache_file.read_text() == snapshot
