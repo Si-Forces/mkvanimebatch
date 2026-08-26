@@ -88,13 +88,6 @@ def is_chapter_xml(path: Path) -> bool:
     return _chapter_xml_sniff(str(path), st.st_size, st.st_mtime_ns)
 
 
-def has_chapters(json_data: dict | None) -> bool:
-    if not json_data:
-        return False
-    chapters = json_data.get("chapters") or []
-    return bool(chapters) and any((c.get("num_entries") or 0) > 0 for c in chapters)
-
-
 class InspectedVideo:
     """Typed view over one video's raw mkvmerge -J JSON.
 
@@ -156,7 +149,9 @@ class InspectedVideo:
         return [t for t in self.tracks if t.get("type") == "subtitles"]
 
     def has_chapters(self) -> bool:
-        return has_chapters(self._data)
+        """True when the probe reported chapters with at least one entry."""
+        chapters = self._data.get("chapters") or []
+        return bool(chapters) and any((c.get("num_entries") or 0) > 0 for c in chapters)
 
     def cover_attachment(self) -> dict | None:
         cover, _ = parse_attachments(self.attachments)
@@ -257,8 +252,24 @@ class PersistentInspectCache:
         self._revision = 0
         self._last_save_ts = 0.0
         self._lock = threading.Lock()
+        # Memoized path.resolve() results: probing caches are consulted once
+        # per video per pass, and realpath syscalls add up across passes.
+        self._resolved_keys: dict[str, str] = {}
         if self.enabled:
             self._load()
+
+    def _cache_key(self, path: Path) -> str:
+        """Stable on-disk identity for a video path, realpath-resolved once."""
+        raw = str(path)
+        with self._lock:
+            key = self._resolved_keys.get(raw)
+            if key is None:
+                try:
+                    key = str(path.resolve())
+                except OSError:
+                    key = raw
+                self._resolved_keys[raw] = key
+        return key
 
     def _load(self) -> None:
         if not self.cache_file.exists():
@@ -270,7 +281,7 @@ class PersistentInspectCache:
             logger.warning(f"Failed to load inspect cache from {self.cache_file}: {e}")
             self._data = {}
 
-    def save(self, *, min_interval: float = 0.0) -> None:
+    def save(self, *, min_interval: float = 0.0, prune: bool = True) -> None:
         """Atomically persist the cache to disk.
 
         Skips all disk work when nothing has been cached since the last
@@ -284,6 +295,10 @@ class PersistentInspectCache:
         written are preserved: entries pruned by this save are removed from
         memory only when unchanged since the snapshot, and the dirty flag is
         only cleared when no mutation happened during the write.
+
+        With prune=False the snapshot skips the per-entry existence stat pass
+        (O(N) syscalls); use it for intermediate debounced saves so growth
+        stays bounded via the final full save.
         """
         if not self.enabled:
             return
@@ -303,7 +318,7 @@ class PersistentInspectCache:
             live_data = {
                 key: entry
                 for key, entry in data_copy.items()
-                if Path(key).exists() and entry.get("json_data") is not None
+                if entry.get("json_data") is not None and (not prune or Path(key).exists())
             }
             try:
                 with tempfile.NamedTemporaryFile(
@@ -340,7 +355,7 @@ class PersistentInspectCache:
     def get(self, path: Path) -> dict | None:
         if not self.enabled:
             return None
-        key = str(path.resolve())
+        key = self._cache_key(path)
         with self._lock:
             entry = self._data.get(key)
         if not entry:
@@ -358,7 +373,7 @@ class PersistentInspectCache:
     def put(self, path: Path, json_data: dict | None) -> None:
         if not self.enabled:
             return
-        key = str(path.resolve())
+        key = self._cache_key(path)
         try:
             st = path.stat()
             with self._lock:
