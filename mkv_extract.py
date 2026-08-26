@@ -5,7 +5,7 @@ Optimized for anime & Indonesian fansub releases — including OVA, OAD, ONA, SP
 
 Extracts, per MKV: best-match ASS subtitle, chapters (if present), the
 source's front-cover attachment (if any), and any embedded fonts (deduped
-across files into a shared fonts/ folder).
+across files into a shared fonts/ directory).
 
 Requires: mkvmerge, mkvextract (MKVToolNix)
 
@@ -21,7 +21,9 @@ import sys
 import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 from mkv_domain import (
     COVER_EXTENSIONS,
@@ -53,6 +55,7 @@ from mkv_proc import (
 )
 from mkv_runner import (
     SCRIPT_DIR,
+    CliRuntime,
     add_shared_args,
     build_cli_runtime,
     collect_release_dirs,
@@ -63,11 +66,11 @@ from mkv_runner import (
 from mkv_scan import (
     InspectedVideo,
     ParsedFile,
-    PersistentInspectCache,
     check_dependencies,
     get_default_font_hash_memo_file,
     inspect_videos,
 )
+from mkv_storage import resolve_io_jobs
 
 SUPPORTED_SUB_CODECS = frozenset({"s_text/ass"})
 
@@ -76,6 +79,15 @@ logger = logging.getLogger("mkv_automation.extract")
 
 
 # ─── SUBTITLE SELECTION ──────────────────────────────────────────────────────
+class ExtractTarget(NamedTuple):
+    """One queued mkvextract output: how to address it and where it lands."""
+
+    cmd_type: str  # "tracks" | "chapters" | "attachments"
+    arg_id: str | None  # track/attachment id; None for whole-file outputs
+    final_path: Path
+    item_name: str
+
+
 def _episode_suffix(parsed: EpisodeInfo | None, file_stem: str) -> str:
     """Filename segment identifying the episode; falls back to the raw stem
     when the file name carried no parseable Episode Info."""
@@ -186,13 +198,13 @@ def process_file(
             f"subtitle tag will use stem '{file_stem}'."
         )
 
-    queued_outputs: list[tuple[str, str | None, Path, str]] = []
+    queued_outputs: list[ExtractTarget] = []
 
     sub_result = select_subtitle(inspected, file_stem, file_dir, parsed, log)
     if sub_result:
         track_id, sub_path = sub_result
         log.append(f"   -> Queued subtitle track {track_id} → {sub_path.name}")
-        queued_outputs.append(("tracks", str(track_id), sub_path, "Subtitle"))
+        queued_outputs.append(ExtractTarget("tracks", str(track_id), sub_path, "Subtitle"))
     else:
         log.append("   -> No suitable ASS subtitle tracks found.")
 
@@ -200,7 +212,7 @@ def process_file(
     if inspected.has_chapters():
         chapter_path = file_dir / f"{chapter_stem}_chapters.xml"
         log.append(f"   -> Queued chapters → {chapter_path.name}")
-        queued_outputs.append(("chapters", None, chapter_path, "Chapter"))
+        queued_outputs.append(ExtractTarget("chapters", None, chapter_path, "Chapter"))
     else:
         log.append("   -> No chapters found in source.")
 
@@ -216,7 +228,7 @@ def process_file(
             cover_path = None
         else:
             log.append(f"   -> Queued cover image → {cover_path.name}")
-            queued_outputs.append(("attachments", str(cover['id']), cover_path, "Cover"))
+            queued_outputs.append(ExtractTarget("attachments", str(cover['id']), cover_path, "Cover"))
     else:
         log.append("   -> No cover image found in source.")
 
@@ -225,14 +237,14 @@ def process_file(
     try:
         temp_dir = Path(tempfile.mkdtemp(prefix=".tmp_extract_", dir=file_dir))
         extract_args: list[str] = []
-        staged_outputs: list[tuple[Path, Path, str]] = []
-        for cmd_type, arg_id, final_path, item_name in queued_outputs:
-            staged_path = temp_dir / final_path.name
-            if arg_id is not None:
-                extract_args += [cmd_type, f"{arg_id}:{staged_path}"]
+        staged_outputs: list[tuple[Path, ExtractTarget]] = []
+        for target in queued_outputs:
+            staged_path = temp_dir / target.final_path.name
+            if target.arg_id is not None:
+                extract_args += [target.cmd_type, f"{target.arg_id}:{staged_path}"]
             else:
-                extract_args += [cmd_type, str(staged_path)]
-            staged_outputs.append((staged_path, final_path, item_name))
+                extract_args += [target.cmd_type, str(staged_path)]
+            staged_outputs.append((staged_path, target))
 
         font_args: list[str] = []
         attachments_open = cover_path is not None
@@ -261,11 +273,11 @@ def process_file(
             cancel_token=cancel_token,
         )
 
-        for staged_path, final_path, item_name in staged_outputs:
-            _clean_empty_file(staged_path, log, item_name)
+        for staged_path, target in staged_outputs:
+            _clean_empty_file(staged_path, log, target.item_name)
             if not staged_path.exists():
                 continue
-            staged_path.replace(final_path)
+            staged_path.replace(target.final_path)
 
         saved_count = 0
         for claim in font_claims:
@@ -290,28 +302,38 @@ def process_file(
 
 
 # ─── RUN ORCHESTRATOR ────────────────────────────────────────────────────────
+@dataclass
+class ExtractRunConfig:
+    """Per-directory extraction values plus extract-owned knobs; process-wide
+    infrastructure (worker count, dry-run, inspect cache, io semaphore,
+    cancel token) travels on the embedded CliRuntime."""
+
+    runtime:         CliRuntime
+    root_input_dir:  Path
+    output_dir:      Path
+    fonts_dir:       Path
+    # A manager passed in from main() is shared across directory passes; its
+    # staging directory must outlive each pass and is cleaned up by the caller.
+    font_manager:    FontManager | None = None
+    font_hash_memo:  FontHashMemo | None = None
+
+
 def _run(
-    output_dir:         Path,
-    fonts_dir:          Path,
-    mkv_files:          list[ParsedFile],
-    pool:               ThreadPoolExecutor,
-    max_workers:        int,
-    dry_run:            bool,
-    persistent_cache:   PersistentInspectCache | None = None,
-    io_semaphore:       threading.Semaphore | None = None,
-    font_manager:       FontManager | None = None,
-    root_input_dir:     Path | None = None,
-    font_hash_memo:     FontHashMemo | None = None,
-    cancel_token:       CancelToken | None = None,
+    mkv_files:  list[ParsedFile],
+    pool:       ThreadPoolExecutor,
+    config:     ExtractRunConfig,
 ) -> bool:
+    runtime = config.runtime
+    output_dir = config.output_dir
+    fonts_dir = config.fonts_dir
     if not mkv_files:
         logger.warning("No MKV files found in '%s', skipping.", output_dir.name)
         return False
     logger.info("MKV files discovered: %d", len(mkv_files))
 
-    root_dir = root_input_dir or output_dir
+    root_dir = config.root_input_dir
 
-    if dry_run:
+    if runtime.dry_run:
         logger.info("--- DRY RUN: Files that would be processed ---")
         for f in mkv_files:
             item_id = get_item_id(f.path, root_dir)
@@ -321,14 +343,18 @@ def _run(
         return True
 
     fonts_dir.mkdir(parents=True, exist_ok=True)
-    json_cache = inspect_videos([f.path for f in mkv_files], pool, persistent_cache=persistent_cache, cancel_token=cancel_token)
+    json_cache = inspect_videos(
+        [f.path for f in mkv_files],
+        pool,
+        persistent_cache=runtime.persistent_cache,
+        cancel_token=runtime.cancel_token,
+    )
 
-    # A manager passed in from main() is shared across directory passes; its
-    # staging directory must outlive this pass and is cleaned up by the caller.
+    font_manager = config.font_manager
     owns_font_manager = font_manager is None
-    active_font_manager = FontManager(fonts_dir, hash_memo=font_hash_memo) if font_manager is None else font_manager
+    active_font_manager = FontManager(fonts_dir, hash_memo=config.font_hash_memo) if font_manager is None else font_manager
 
-    logger.info("Processing %d file(s) (up to %d at a time)...", len(mkv_files), max_workers)
+    logger.info("Processing %d file(s) (up to %d at a time)...", len(mkv_files), runtime.workers)
 
     results: dict[Path, list[str]] = {}
     total_files = len(mkv_files)
@@ -340,10 +366,10 @@ def _run(
             mkv_file,
             json_cache.get(mkv_file.path),
             active_font_manager,
-            io_semaphore=io_semaphore,
+            io_semaphore=runtime.io_semaphore,
             output_dir=output_dir,
             root_input_dir=root_dir,
-            cancel_token=cancel_token,
+            cancel_token=runtime.cancel_token,
         ): mkv_file
         for mkv_file in mkv_files
     }
@@ -416,8 +442,6 @@ def main() -> None:
                         help="Directory to save extracted fonts (defaults to <out-dir>/fonts or <input-dir>/fonts).")
     parser.add_argument("--dry-run", action="store_true",
                         help="List discovered MKV files without extracting anything.")
-    parser.add_argument("--io-jobs", type=int, default=2,
-                        help="Maximum concurrent disk I/O jobs for mkvextract. Set to 0 to disable throttling.")
     cfg = parser.parse_args()
 
     set_events_enabled(cfg.events)
@@ -427,12 +451,13 @@ def main() -> None:
     out_override = Path(cfg.out_dir).resolve() if cfg.out_dir else None
     fonts_override = Path(cfg.fonts_dir).resolve() if cfg.fonts_dir else None
 
+    io_jobs = resolve_io_jobs(cfg.io_jobs, root_input_dir)
+
     runtime = build_cli_runtime(
         workers=cfg.workers,
-        sub_offset=0.0,
         dry_run=cfg.dry_run,
         no_cache=cfg.no_cache,
-        io_jobs=cfg.io_jobs,
+        io_jobs=io_jobs,
     )
     install_cancel_handlers(runtime.cancel_token)
 
@@ -440,7 +465,8 @@ def main() -> None:
     logger.info(" MKV Track & Font Extractor")
     logger.info(" Anime / Indonesian Fansub Edition")
     logger.info("=========================================")
-    logger.info("Workers: %d | Input: %s", runtime.workers, root_input_dir)
+    logger.info("Workers: %d | IO jobs: %s | Input: %s",
+                runtime.workers, runtime.io_jobs or "unlimited", root_input_dir)
 
     check_dependencies("mkvmerge", "mkvextract")
     logger.info("Using mkvmerge  : %s", shutil.which('mkvmerge'))
@@ -473,20 +499,15 @@ def main() -> None:
         current_output_dir = resolve_output_dir(mkv_dir, root_input_dir, out_override, default_subdir=None)
         if not runtime.dry_run:
             current_output_dir.mkdir(parents=True, exist_ok=True)
-        return _run(
-            current_output_dir,
-            fonts_dir_for(mkv_dir),
-            dir_mkvs,
-            pool,
-            runtime.workers,
-            runtime.dry_run,
-            persistent_cache=runtime.persistent_cache,
-            io_semaphore=runtime.io_semaphore,
-            font_manager=shared_font_manager,
+        config = ExtractRunConfig(
+            runtime=runtime,
             root_input_dir=root_input_dir,
+            output_dir=current_output_dir,
+            fonts_dir=fonts_dir_for(mkv_dir),
+            font_manager=shared_font_manager,
             font_hash_memo=font_hash_memo,
-            cancel_token=runtime.cancel_token,
         )
+        return _run(dir_mkvs, pool, config)
 
     try:
         overall_success = run_batch(runtime, mkvs_by_dir, process_directory)

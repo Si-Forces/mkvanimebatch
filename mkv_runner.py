@@ -52,6 +52,12 @@ def default_worker_count() -> int:
     return min((os.cpu_count() or 4) * DEFAULT_WORKER_MULTIPLIER, MAX_DEFAULT_WORKERS)
 
 
+IO_JOBS_HELP = (
+    "Maximum concurrent disk I/O jobs. Defaults to 4 on SSD/NVMe storage, 2 "
+    "otherwise (auto-detected from --input-dir). Set to 0 to disable throttling."
+)
+
+
 def add_shared_args(parser: argparse.ArgumentParser) -> None:
     """Register the flags every mkvanimebatch CLI accepts."""
     parser.add_argument("--workers", type=int, default=default_worker_count(),
@@ -60,6 +66,7 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
                         help="Number of concurrent files to process.")
     parser.add_argument("--input-dir", type=str, default=None,
                         help="Directory containing MKV files (defaults to script directory).")
+    parser.add_argument("--io-jobs", type=int, default=None, help=IO_JOBS_HELP)
     parser.add_argument("--no-cache", action="store_true",
                         help="Bypass persistent inspection cache.")
     parser.add_argument("--clear-cache", action="store_true",
@@ -82,11 +89,17 @@ class CliRuntime:
     """Infrastructure shared across one whole CLI batch run."""
 
     workers:          int
-    sub_offset:       float
     dry_run:          bool
     io_semaphore:     threading.Semaphore | None
     persistent_cache: PersistentInspectCache
     cancel_token:     CancelToken = field(default_factory=CancelToken)
+    io_jobs:          int | None = None
+
+    @property
+    def effective_concurrency(self) -> int:
+        """How many subprocess jobs can actually run at once; the ffmpeg
+        thread budget must divide CPUs across this, not across workers."""
+        return min(self.workers, self.io_jobs) if self.io_jobs is not None else self.workers
 
 
 def install_cancel_handlers(cancel_token: CancelToken) -> None:
@@ -108,7 +121,6 @@ def install_cancel_handlers(cancel_token: CancelToken) -> None:
 def build_cli_runtime(
     *,
     workers: int,
-    sub_offset: float,
     dry_run: bool,
     no_cache: bool,
     io_jobs: int,
@@ -116,10 +128,10 @@ def build_cli_runtime(
     """Assemble the runtime from already-validated CLI arguments."""
     return CliRuntime(
         workers=workers,
-        sub_offset=sub_offset,
         dry_run=dry_run,
         io_semaphore=threading.BoundedSemaphore(io_jobs) if io_jobs > 0 else None,
         persistent_cache=PersistentInspectCache(enabled=not no_cache),
+        io_jobs=io_jobs if io_jobs > 0 else None,
     )
 
 
@@ -178,7 +190,9 @@ def run_batch(
             if not process_directory(pool, mkv_dir, dir_mkvs):
                 overall_success = False
 
-            runtime.persistent_cache.save(min_interval=60.0)
+            # Intermediate save: debounced and without the O(N) prune pass;
+            # the flush below does full pruning.
+            runtime.persistent_cache.save(min_interval=60.0, prune=False)
 
     runtime.persistent_cache.save()
     return overall_success and not token.cancelled
