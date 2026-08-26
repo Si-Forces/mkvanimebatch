@@ -20,7 +20,8 @@ Available both as a fast **Python CLI suite** and as a native **Tauri v2 Desktop
   - [1. Subtitle & Asset Extraction](#1-subtitle--asset-extraction-mkv_extractpy)
   - [2. Batch Remuxing](#2-batch-remuxing-mkv_remuxpy)
   - [3. CLI Options Reference](#3-cli-options-reference)
-  - [4. Interactive Windows Launchers](#4-interactive-windows-launchers)
+  - [4. Performance Tuning](#4-performance-tuning)
+  - [5. Interactive Windows Launchers](#5-interactive-windows-launchers)
 - [Tauri Desktop Application](#tauri-desktop-application)
   - [Pre-built Releases](#pre-built-releases)
   - [Building from Source](#building-from-source)
@@ -112,7 +113,7 @@ Extract best-matching subtitles, covers, XML chapters, and deduplicated fonts fr
 
 ```bash
 # Parallel extraction with custom output and font directories
-python mkv_extract.py --input-dir "D:/Anime/Series" --out-dir "D:/Anime/Extracted" --fonts-dir "D:/Anime/Fonts" --workers 8 --io-jobs 2
+python mkv_extract.py --input-dir "D:/Anime/Series" --out-dir "D:/Anime/Extracted" --fonts-dir "D:/Anime/Fonts" --workers 8
 
 # Dry-run inspection (preview matches without extracting)
 python mkv_extract.py --input-dir "D:/Anime/Series" --dry-run
@@ -123,8 +124,8 @@ python mkv_extract.py --input-dir "D:/Anime/Series" --dry-run
 Re-mux anime episodes with extracted subtitles, external chapter XMLs, covers, and attached fonts:
 
 ```bash
-# High-throughput remuxing with Opus audio encoding (192k, complexity 10)
-python mkv_remux.py --input-dir "D:/Anime/Series" --out-dir "D:/Anime/Remuxed" --fonts-dir "D:/Fonts" --bitrate 192k --complexity 10 --workers 4 --io-jobs 2
+# High-throughput remuxing with Opus audio encoding (192k, default complexity 5)
+python mkv_remux.py --input-dir "D:/Anime/Series" --out-dir "D:/Anime/Remuxed" --fonts-dir "D:/Fonts" --bitrate 192k --workers 4
 
 # Remux using external assets from a prior extraction directory
 python mkv_remux.py --input-dir "D:/Anime/Raw" --assets-dir "D:/Anime/Extracted" --out-dir "D:/Anime/Output"
@@ -146,10 +147,10 @@ python mkv_remux.py --input-dir "D:/Anime/Series" --dry-run
 | `--assets-dir` | `remux` | Fallback directory (and immediate parent) to search for subtitles, chapters, covers, or fonts | `None` |
 | `--workers` | `extract`, `remux` | Maximum concurrent files to process (`1`–`64`) | Auto (CPU count × 2, max `16`) |
 | `--ffmpeg-threads` | `remux` | Maximum CPU threads per ffmpeg audio transcode job (`1`–`64`) | Auto (capped at `8`) |
-| `--io-jobs` | `extract`, `remux` | Maximum concurrent disk I/O operations (`0` to disable throttling) | `2` |
+| `--io-jobs` | `extract`, `remux` | Maximum concurrent disk I/O operations (`0` to disable throttling) | Auto (`4` on SSD/NVMe, `2` otherwise — detected from `--input-dir`) |
 | `--sub-offset` | `remux` | Shift embedded subtitle timing in seconds via mkvmerge `--sync` (negative = earlier, positive = later) | `0.0` |
 | `--bitrate` | `remux` | Target bitrate for Opus audio conversion (e.g. `128k`, `192k`) | `192k` |
-| `--complexity` | `remux` | Opus audio compression complexity level (`0`–`10`) | `10` |
+| `--complexity` | `remux` | Opus audio compression complexity level (`0`–`10`) | `5` |
 | `--keep-fonts` | `remux` | Keep temporary extracted fonts directory after remuxing | `False` |
 | `--dry-run` | `extract`, `remux` | Preview discovered files and track plans without writing files | `False` |
 | `--events` | `extract`, `remux` | Emit structured machine-readable JSON events (`@event: {...}`) on stdout | `False` |
@@ -158,7 +159,18 @@ python mkv_remux.py --input-dir "D:/Anime/Series" --dry-run
 | `--no-cache` | `extract`, `remux` | Bypass the persistent MKV probe inspect cache | `False` |
 | `--clear-cache` | `extract`, `remux` | Clear the persistent inspection cache and exit without processing files | `False` |
 
-### 4. Interactive Windows Launchers
+### 4. Performance Tuning
+
+Throughput is governed by three knobs that interact:
+
+* **`--io-jobs`** caps how many `mkvmerge`/`mkvextract`/`ffmpeg` subprocesses run at once. The default auto-detects the backing store of `--input-dir`: **4** on SSD/NVMe (sequential remux streams scale well there) and **2** on spinning disks or network shares to avoid seek thrash. Detection runs once per drive; override explicitly with `--io-jobs N`.
+* **`--workers`** is the thread pool size (files in flight). Only `--io-jobs` processes do work at any instant, so values beyond a few times `--io-jobs` mainly queue files.
+* **`--ffmpeg-threads`** divides CPU cores across *concurrently running* audio conversions — it scales by effective concurrency (`min(workers, io-jobs)`), capped at 8 per job. Note libopus itself parallelizes poorly for a single stream: more cores come from more concurrent `--io-jobs`, not more threads per job.
+* **`--complexity`** trades encode speed against Opus quality. The default `5` is roughly 2× faster than `10` with near-identical quality at typical bitrates (`128k`+); raise it only if you need to squeeze out marginal gains on archival encodes.
+
+For HDDs, keeping `--io-jobs 2` is deliberate: remux reads are large and sequential, so extra concurrency causes seeks that cost more than parallelism gains. On SSD/NVMe, raising to `6`–`8` can help when episodes have no FLAC track (pure remux is mostly I/O-light).
+
+### 5. Interactive Windows Launchers
 
 Quick-start interactive scripts are provided for Windows users:
 
@@ -292,6 +304,8 @@ mkvanimebatch/
 ├── mkv_proc.py              # Subprocess execution, cooperative cancellation, hashing
 ├── mkv_fonts.py             # Font discovery + transactional FontManager (dedup/promote)
 ├── mkv_scan.py              # mkvmerge probing, persistent cache, scanning, classification
+├── mkv_runner.py            # Shared CLI scaffolding, runtime, batch loop
+├── mkv_storage.py           # Backing-store detection for --io-jobs auto-defaults
 ├── mkv_extract.py           # CLI tool for extracting subtitles, chapters, covers & fonts
 ├── mkv_remux.py             # CLI tool for batch remuxing and audio transcoding
 ├── run.bat                  # Interactive Windows batch launcher
