@@ -4,7 +4,7 @@ import logging
 import mkv_assets
 from mkv_domain import EpisodeInfo
 from mkv_fonts import FontInfo, find_fonts_dir
-from mkv_scan import InspectedVideo, _create_parsed_file, has_chapters, is_chapter_xml
+from mkv_scan import InspectedVideo, _create_parsed_file, is_chapter_xml
 
 
 class TestFontDirDiscovery:
@@ -41,9 +41,9 @@ class TestChapterSniffing:
         assert is_chapter_xml(txt_file) is False
 
     def test_has_chapters(self):
-        assert has_chapters({"chapters": [{"num_entries": 1}]}) is True
-        assert has_chapters({"chapters": []}) is False
-        assert has_chapters(None) is False
+        assert InspectedVideo({"chapters": [{"num_entries": 1}]}).has_chapters() is True
+        assert InspectedVideo({"chapters": []}).has_chapters() is False
+        assert InspectedVideo({}).has_chapters() is False
 
     def test_has_cover(self):
         assert InspectedVideo({"attachments": [{"file_name": "cover.jpg", "content_type": "image/jpeg", "id": 1}]}).cover_attachment() is not None
