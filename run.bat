@@ -111,8 +111,8 @@ set "io_jobs="
 set /p input_dir="Enter Input Directory (or press Enter): "
 set /p out_dir="Enter Output Directory (or press Enter): "
 set /p fonts_dir="Enter Fonts Directory override (or press Enter): "
-set /p complexity="Enter Opus Complexity [0-10] (or press Enter for default 10): "
-set /p io_jobs="Enter Concurrent I/O Jobs (or press Enter for default 2): "
+set /p complexity="Enter Opus Complexity [0-10] (or press Enter for default 5): "
+set /p io_jobs="Enter Concurrent I/O Jobs (or press Enter for auto - 4 on SSD, 2 on HDD): "
 
 :: Strip double quotes from inputs (prevents argument injection; handles pasted quoted paths)
 if defined input_dir set input_dir=!input_dir:"=!
@@ -180,7 +180,7 @@ set "out_dir="
 set "io_jobs="
 set /p input_dir="Enter Input Directory (or press Enter): "
 set /p out_dir="Enter Output Directory for extracted files (or press Enter): "
-set /p io_jobs="Enter Concurrent I/O Jobs (or press Enter for default 2): "
+set /p io_jobs="Enter Concurrent I/O Jobs (or press Enter for auto - 4 on SSD, 2 on HDD): "
 
 :: Strip double quotes from inputs (prevents argument injection; handles pasted quoted paths)
 if defined input_dir set input_dir=!input_dir:"=!

@@ -70,8 +70,8 @@ while ($true) {
             $inputDir = Read-Host "Enter Input Directory (or press Enter)"
             $outDir = Read-Host "Enter Output Directory (or press Enter)"
             $fontsDir = Read-Host "Enter Fonts Directory override (or press Enter)"
-            $complexity = Read-Host "Enter Opus Complexity [0-10] (or press Enter for default 10)"
-            $ioJobs = Read-Host "Enter Concurrent I/O Jobs (or press Enter for default 2)"
+            $complexity = Read-Host "Enter Opus Complexity [0-10] (or press Enter for default 5)"
+            $ioJobs = Read-Host "Enter Concurrent I/O Jobs (or press Enter for auto: 4 on SSD/NVMe, 2 otherwise)"
 
             # Ensure script components exist locally
             if (Test-RequiredFiles @("mkv_domain.py", "mkv_proc.py", "mkv_events.py", "mkv_fonts.py", "mkv_scan.py", "mkv_assets.py", "mkv_runner.py", "mkv_remux.py")) {
@@ -118,7 +118,7 @@ while ($true) {
             Write-Host ""
             $inputDir = Read-Host "Enter Input Directory (or press Enter)"
             $outDir = Read-Host "Enter Output Directory for extracted files (or press Enter)"
-            $ioJobs = Read-Host "Enter Concurrent I/O Jobs (or press Enter for default 2)"
+            $ioJobs = Read-Host "Enter Concurrent I/O Jobs (or press Enter for auto: 4 on SSD/NVMe, 2 otherwise)"
 
             # Ensure script components exist locally
             if (Test-RequiredFiles @("mkv_domain.py", "mkv_proc.py", "mkv_events.py", "mkv_fonts.py", "mkv_scan.py", "mkv_assets.py", "mkv_runner.py", "mkv_extract.py")) {
