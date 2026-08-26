@@ -5,10 +5,10 @@ Optimized for anime & Indonesian fansub releases — including OVA, OAD, ONA, SP
 
 Recursively finds MKVs under --input-dir and remuxes each with its best-
 matching subtitle (external .ass, embedded fallback, or interactive pick),
-chapter XML, and cover image — searched from the video's own folder up to
---input-dir, so a shared season/show-level folder is found automatically.
+chapter XML, and cover image — searched from the video's own directory up to
+--input-dir, so a shared season/show-level directory is found automatically.
 Prefers stereo Japanese audio, converting FLAC to Opus via ffmpeg. By
-default, a local "fonts" folder is deleted after a successful run (pass
+default, a local "fonts" directory is deleted after a successful run (pass
 --keep-fonts to keep it). Use --dry-run to preview without touching disk.
 
 Requires: mkvmerge (MKVToolNix), ffmpeg
@@ -88,6 +88,7 @@ from mkv_scan import (
     inspect_videos,
     scan_mkv_files,
 )
+from mkv_storage import resolve_io_jobs
 
 # Initialize child logger for the remux module
 logger = logging.getLogger("mkv_automation.remux")
@@ -495,14 +496,14 @@ def process_job(
         elif selection.has_source_chapters:
             result.log.append("  Chapters       : using source's embedded chapters (no external match found)")
         else:
-            result.log.append("  Chapters       : none found in folder or source")
+            result.log.append("  Chapters       : none found in directory or source")
 
         if job.cover_file:
             result.log.append(f"  Cover          : {job.cover_file.name} (external, attached)")
         elif selection.source_cover_id is not None:
             result.log.append("  Cover          : keeping source's embedded cover (no external match found)")
         else:
-            result.log.append("  Cover          : none found in folder or source")
+            result.log.append("  Cover          : none found in directory or source")
 
         if temp_dir:
             temp_output = temp_dir / job.output_file.name
@@ -685,39 +686,37 @@ def _plan_jobs(
 # ─── JOB EXECUTOR ORCHESTRATOR ───────────────────────────────────────────────
 def _execute_jobs(
     jobs:           list[PlannedJob],
-    temp_dir:       Path | None,
     fonts:          FontInfo,
-    opus_bitrate:   str,
     pool:           ThreadPoolExecutor,
-    max_workers:    int,
-    ffmpeg_threads: int,
     json_cache:     dict[Path, InspectedVideo | None],
     skipped_files:  list[str],
     failed_files:   list[str],
-    complexity:     int = 10,
-    io_semaphore:   threading.Semaphore | None = None,
-    sub_offset:     float = 0.0,
-    cancel_token:   CancelToken | None = None,
+    config:         RemuxRunConfig,
 ) -> None:
     """Execute planned jobs; intentional skips land in skipped_files while
     genuine processing errors/crashes additionally land in failed_files so
-    callers can exit non-zero without treating planning skips as failures."""
-    logger.info("Processing %d matched file(s) (up to %d at a time)...", len(jobs), max_workers)
+    callers can exit non-zero without treating planning skips as failures.
 
+    Engine knobs travel on the RemuxRunConfig instead of loose parameters.
+    """
+    runtime = config.runtime
+    logger.info("Processing %d matched file(s) (up to %d at a time)...", len(jobs), runtime.workers)
+
+    ffmpeg_threads = _effective_ffmpeg_threads(config.ffmpeg_threads, runtime)
     total_jobs = len(jobs)
     futures = {
         pool.submit(
             process_job,
             job=job,
-            temp_dir=temp_dir,
+            temp_dir=config.temp_dir,
             fonts=fonts,
-            opus_bitrate=opus_bitrate,
+            opus_bitrate=config.opus_bitrate,
             json_cache=json_cache,
             ffmpeg_threads=ffmpeg_threads,
-            io_semaphore=io_semaphore,
-            complexity=complexity,
-            sub_offset=sub_offset,
-            cancel_token=cancel_token,
+            io_semaphore=runtime.io_semaphore,
+            complexity=config.complexity,
+            sub_offset=config.sub_offset,
+            cancel_token=runtime.cancel_token,
         ): job
         for job in jobs
     }
@@ -969,7 +968,7 @@ def prepare_release_directory(
 
     Single owner of the fonts-directory policy shared by --plan mode and
     remux runs: an explicit override wins, else the nearest ancestor fonts
-    directory (shallowest last), else the conventional local 'fonts' folder.
+    directory (shallowest last), else the conventional local 'fonts' directory.
     """
     search_dirs = ancestor_dirs(mkv_dir, root_input_dir)
 
@@ -1023,6 +1022,7 @@ class RemuxRunConfig:
     opus_bitrate: str
     complexity: int
     ffmpeg_threads: int | None
+    sub_offset: float = 0.0
     interaction_mode: InteractionMode = InteractionMode.INTERACTIVE
     sub_assignments: dict[str, Path] | None = None
 
@@ -1033,7 +1033,7 @@ def _log_fonts_dir(release: PreparedRelease) -> None:
         "root_fallback": " (root fallback)",
         "parent_fallback": " (parent fallback)",
     }.get(release.fonts_origin, "")
-    logger.info("Fonts folder: %s%s", release.fonts_dir, suffix)
+    logger.info("Fonts directory: %s%s", release.fonts_dir, suffix)
 
 
 def generate_inspection_manifest(input_dir: Path, persistent_cache: PersistentInspectCache | None = None) -> dict:
@@ -1094,6 +1094,19 @@ def generate_inspection_manifest(input_dir: Path, persistent_cache: PersistentIn
 
 
 # ─── ORCHESTRATOR ────────────────────────────────────────────────────────────
+def _effective_ffmpeg_threads(config_threads: int | None, runtime: CliRuntime) -> int:
+    """Per-job ffmpeg thread budget.
+
+    An explicit --ffmpeg-threads always wins; otherwise CPUs must be divided
+    across jobs that can actually run concurrently (io-jobs), not the nominal
+    worker count — otherwise the budget collapses to 1 thread per conversion
+    while the io semaphore idles the remaining cores.
+    """
+    if config_threads is not None:
+        return config_threads
+    return default_ffmpeg_threads(runtime.effective_concurrency)
+
+
 def _run(
     release: PreparedRelease,
     config:  RemuxRunConfig,
@@ -1104,7 +1117,6 @@ def _run(
     mkv_dir = release.mkv_dir
     videos = release.videos
     output_dir = config.output_dir
-    temp_dir = config.temp_dir
     resolver = release.resolver
     use_source_fonts = resolver.use_source_fonts
 
@@ -1158,26 +1170,15 @@ def _run(
         _print_summary(output_dir, matched_files, skipped_files)
         return True
 
-    if config.ffmpeg_threads is None:
-        ffmpeg_threads = default_ffmpeg_threads(runtime.workers)
-    else:
-        ffmpeg_threads = config.ffmpeg_threads
     failed_files: list[str] = []
     _execute_jobs(
         jobs=jobs,
-        temp_dir=temp_dir,
         fonts=resolver.fonts,
-        opus_bitrate=config.opus_bitrate,
         pool=pool,
-        max_workers=runtime.workers,
-        ffmpeg_threads=ffmpeg_threads,
         json_cache=json_cache,
         skipped_files=skipped_files,
         failed_files=failed_files,
-        complexity=config.complexity,
-        io_semaphore=runtime.io_semaphore,
-        sub_offset=runtime.sub_offset,
-        cancel_token=runtime.cancel_token,
+        config=config,
     )
     _print_summary(output_dir, matched_files, skipped_files)
     # Intentional planning skips (no matching assets, output already exists,
@@ -1200,9 +1201,10 @@ def main() -> None:
                         help="Maximum CPU threads per ffmpeg audio transcode job (defaults to automatic scaling capped at 8).")
     parser.add_argument("--bitrate", type=str, default="192k",
                         help="Target bitrate for Opus audio conversion (e.g., 128k, 192k).")
-    parser.add_argument("--complexity", type=int, default=10, choices=range(11),
+    parser.add_argument("--complexity", type=int, default=5, choices=range(11),
                         metavar="[0-10]",
-                        help="Opus compression complexity level (0-10, default: 10).")
+                        help="Opus compression complexity level (0-10, default: 5 — roughly 2x faster "
+                             "than 10 with near-identical quality at typical bitrates).")
     parser.add_argument("--sub-offset", type=float, default=0.0,
                         help="Shift subtitle timestamps by this many seconds (negative = earlier, positive = later).")
     parser.add_argument("--out-dir", type=str, default=None,
@@ -1217,9 +1219,7 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true",
                         help="Show matched files without processing.")
     parser.add_argument("--keep-fonts", action="store_true",
-                        help="Keep the extracted fonts folder after processing.")
-    parser.add_argument("--io-jobs", type=int, default=2,
-                        help="Maximum concurrent disk I/O jobs for mkvmerge. Set to 0 to disable throttling.")
+                        help="Keep the extracted fonts directory after processing.")
     parser.add_argument("--plan", action="store_true",
                         help="Output inspection manifest as JSON document and exit without processing.")
     parser.add_argument("--sub-assignments", type=str, default=None,
@@ -1247,12 +1247,13 @@ def main() -> None:
     assets_override = Path(cfg.assets_dir).resolve() if cfg.assets_dir else None
     dry_run = cfg.dry_run
 
+    io_jobs = resolve_io_jobs(cfg.io_jobs, root_input_dir)
+
     runtime = build_cli_runtime(
         workers=cfg.workers,
-        sub_offset=cfg.sub_offset,
         dry_run=dry_run,
         no_cache=cfg.no_cache,
-        io_jobs=cfg.io_jobs,
+        io_jobs=io_jobs,
     )
     install_cancel_handlers(runtime.cancel_token)
 
@@ -1279,7 +1280,8 @@ def main() -> None:
     logger.info(" MKV Batch Re-Mux Utility")
     logger.info(" Anime / Indonesian Fansub Edition")
     logger.info("=========================================")
-    logger.info("Workers: %d | Bitrate: %s | Input: %s", runtime.workers, opus_bitrate, root_input_dir)
+    logger.info("Workers: %d | IO jobs: %s | Bitrate: %s | Input: %s",
+                runtime.workers, runtime.io_jobs or "unlimited", opus_bitrate, root_input_dir)
 
     check_dependencies("mkvmerge", "ffmpeg")
     logger.info("Using mkvmerge : %s", shutil.which('mkvmerge'))
@@ -1335,6 +1337,7 @@ def main() -> None:
                 opus_bitrate=opus_bitrate,
                 complexity=cfg.complexity,
                 ffmpeg_threads=cfg.ffmpeg_threads,
+                sub_offset=cfg.sub_offset,
                 interaction_mode=interaction_mode,
                 sub_assignments=sub_assignments,
             )
@@ -1352,9 +1355,9 @@ def main() -> None:
         ):
             try:
                 shutil.rmtree(release.fonts_dir)
-                logger.info("Cleanup: Removed temporary fonts folder '%s'", release.fonts_dir.name)
+                logger.info("Cleanup: Removed temporary fonts directory '%s'", release.fonts_dir.name)
             except OSError as e:
-                logger.error("Failed to remove fonts folder: %s", e)
+                logger.error("Failed to remove fonts directory: %s", e)
 
         return dir_success
 

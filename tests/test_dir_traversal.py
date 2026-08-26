@@ -148,7 +148,7 @@ def test_mkv_grouping_by_dir(tmp_path):
 
 def test_scripts_run_accepts_persistent_cache(tmp_path):
     """
-    Verify _run in both mkv_remux and mkv_extract accepts persistent_cache keyword argument.
+    Verify _run in both mkv_remux and mkv_extract honors the runtime's persistent_cache.
     """
     from concurrent.futures import ThreadPoolExecutor
 
@@ -163,22 +163,24 @@ def test_scripts_run_accepts_persistent_cache(tmp_path):
     with ThreadPoolExecutor(max_workers=1) as pool:
         cache = PersistentInspectCache(cache_file=tmp_path / ".mkv_inspect_cache.json")
         # Extract script _run invocation with persistent_cache
-        mkv_extract._run(
-            tmp_path,
-            tmp_path / "fonts",
-            all_mkvs,
-            pool,
-            1,
-            dry_run=True,
-            persistent_cache=cache,
+        extract_config = mkv_extract.ExtractRunConfig(
+            runtime=mkv_runner.CliRuntime(
+                workers=1,
+                dry_run=True,
+                io_semaphore=None,
+                persistent_cache=cache,
+            ),
+            root_input_dir=tmp_path,
+            output_dir=tmp_path,
+            fonts_dir=tmp_path / "fonts",
         )
+        mkv_extract._run(all_mkvs, pool, extract_config)
 
         # Remux script _run invocation with persistent_cache
         release = mkv_remux.prepare_release_directory(tmp_path, tmp_path, all_mkvs)
         config = mkv_remux.RemuxRunConfig(
             runtime=mkv_runner.CliRuntime(
                 workers=1,
-                sub_offset=0.0,
                 dry_run=True,
                 io_semaphore=None,
                 persistent_cache=cache,
