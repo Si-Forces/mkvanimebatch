@@ -70,6 +70,28 @@ def _ep_key(info: EpisodeInfo) -> str:
     return f"{info.ep_type}|{info.ep}"
 
 
+@dataclass(frozen=True)
+class _SubEntry:
+    """Indexed subtitle with its language/format scoring precomputed once,
+    so repeated lookups never re-run regex-based detection per candidate."""
+
+    file: ParsedFile
+    lang: str
+    category_score: int
+    is_dialogue: bool
+
+
+def _make_sub_entry(sub_file: ParsedFile) -> _SubEntry:
+    lang = detect_sub_lang(sub_file.stem)
+    is_ass = sub_file.path.suffix.lower() == ".ass"
+    return _SubEntry(
+        file=sub_file,
+        lang=lang,
+        category_score=score_subtitle_category(lang, is_ass),
+        is_dialogue=is_dialogue_track(sub_file.stem),
+    )
+
+
 def _reject_duplicate(
     existing: list[tuple[Path, str]],
     path: Path,
@@ -98,7 +120,7 @@ def _reject_duplicate(
 class SubIndex:
     """Index of subtitle files supporting language scoring."""
     def __init__(self) -> None:
-        self._index: dict[str, list[ParsedFile]] = {}
+        self._index: dict[str, list[_SubEntry]] = {}
         self._unparsed: list[ParsedFile] = []
         self._unparsed_paths: set[Path] = set()
 
@@ -109,9 +131,9 @@ class SubIndex:
                 self._unparsed.append(sub_file)
             return
         key = _ep_key(sub_file.parsed)
-        if any(existing.path == sub_file.path for existing in self._index.get(key, ())):
+        if any(existing.file.path == sub_file.path for existing in self._index.get(key, ())):
             return
-        self._index.setdefault(key, []).append(sub_file)
+        self._index.setdefault(key, []).append(_make_sub_entry(sub_file))
 
     def lookup(
         self,
@@ -120,34 +142,26 @@ class SubIndex:
     ) -> tuple[Path, str] | None:
         key = _ep_key(parsed)
         candidates = []
-        for f in self._index.get(key, ()):
-            if f.parsed is not None and seasons_match(parsed.season, f.parsed.season):
-                candidates.append(f)
+        for entry in self._index.get(key, ()):
+            file_parsed = entry.file.parsed
+            if file_parsed is not None and seasons_match(parsed.season, file_parsed.season):
+                candidates.append(entry)
 
         if not candidates:
             return None
 
-        def _candidate_score(f: ParsedFile) -> tuple[int, int, int, int]:
-            is_local = 1 if (local_dir is not None and f.path.parent == local_dir) else 0
-            lang = detect_sub_lang(f.stem)
-            is_ass = (f.path.suffix.lower() == ".ass")
-            is_diag = is_dialogue_track(f.stem)
-            cat_score = score_subtitle_category(lang, is_ass)
-            return (is_local, cat_score, 1 if is_diag else 0, -len(f.name))
+        def _candidate_score(entry: _SubEntry) -> tuple[int, int, int, int]:
+            is_local = 1 if (local_dir is not None and entry.file.path.parent == local_dir) else 0
+            return (is_local, entry.category_score, 1 if entry.is_dialogue else 0, -len(entry.file.name))
 
         best = max(candidates, key=_candidate_score)
-        return best.path, detect_sub_lang(best.stem)
+        return best.file.path, best.lang
 
     @property
     def indexed_count(self) -> int: return sum(len(lst) for lst in self._index.values())
 
     def _count_by_lang(self, lang_set: frozenset[str]) -> int:
-        return sum(
-            1
-            for lst in self._index.values()
-            for f in lst
-            if detect_sub_lang(f.stem) in lang_set
-        )
+        return sum(1 for lst in self._index.values() for e in lst if e.lang in lang_set)
 
     @property
     def primary_count(self) -> int:
@@ -162,7 +176,7 @@ class SubIndex:
         """Every discovered subtitle path, including files with no parseable
         episode number (which lookups ignore but manual selection can still use)."""
         discovered = [f.path for f in self._unparsed]
-        discovered += [f.path for lst in self._index.values() for f in lst]
+        discovered += [e.file.path for lst in self._index.values() for e in lst]
         return sorted(dict.fromkeys(discovered), key=natural_sort_key)
 
 
