@@ -23,7 +23,7 @@ const RULES = [
     includes: ["[+]", "success", "finished", "completed", "remuxed:", "extracted:", "remuxed cleanly", "extracted cleanly"],
   },
   { class: "line-warn", includes: ["warn"] },
-  { class: "line-info", includes: ["folder:", "dry run"], startsWith: ["processing", "extracting"] },
+  { class: "line-info", includes: ["directory:", "dry run"], startsWith: ["processing", "extracting"] },
   { class: "line-done", includes: ["persistent inspection cache", "cache cleared"] },
 ];
 
