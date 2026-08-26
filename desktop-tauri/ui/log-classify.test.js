@@ -40,7 +40,7 @@ test("warning wording classifies as line-warn", () => {
 test("info wording classifies as line-info", () => {
   assert.equal(classifyLine("2026-08-23 10:00:00,000 [INFO] Processing directory: Season 01"), "line-info");
   assert.equal(classifyLine("--- DRY RUN: Planned jobs ---"), "line-info");
-  assert.equal(classifyLine("Fonts folder: /x/fonts"), "line-info");
+  assert.equal(classifyLine("Fonts directory: /x/fonts"), "line-info");
   assert.equal(classifyLine("Extracting attachments from Show.mkv"), "line-info");
 });
 
