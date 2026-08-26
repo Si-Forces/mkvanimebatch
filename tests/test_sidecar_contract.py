@@ -4,6 +4,7 @@ from __future__ import annotations
 import io
 import json
 import sys
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -11,12 +12,13 @@ import pytest
 import mkv_events
 import mkv_proc
 import mkv_remux
+import mkv_runner
 import mkv_scan
 from mkv_assets import AssetResolver
 from mkv_domain import EpisodeInfo
 from mkv_events import emit_event, get_item_id, set_events_enabled
 from mkv_fonts import FontInfo
-from mkv_scan import InspectedVideo, ParsedFile, _create_parsed_file
+from mkv_scan import InspectedVideo, ParsedFile, PersistentInspectCache, _create_parsed_file
 
 
 def test_emit_event_stdout_format(monkeypatch):
@@ -428,17 +430,28 @@ def test_crashed_job_emits_error_event(tmp_path, monkeypatch):
         with ThreadPoolExecutor(max_workers=1) as pool:
             skipped_files = []
             failed_files = []
+            config = mkv_remux.RemuxRunConfig(
+                runtime=mkv_runner.CliRuntime(
+                    workers=1,
+                    dry_run=False,
+                    io_semaphore=None,
+                    persistent_cache=PersistentInspectCache(enabled=False),
+                ),
+                root_input_dir=Path("/src"),
+                output_dir=Path("/out"),
+                temp_dir=None,
+                opus_bitrate="192k",
+                complexity=10,
+                ffmpeg_threads=1,
+            )
             mkv_remux._execute_jobs(
                 jobs=[job],
-                temp_dir=None,
                 fonts=FontInfo(args=(), count=0),
-                opus_bitrate="192k",
                 pool=pool,
-                max_workers=1,
-                ffmpeg_threads=1,
                 json_cache={job.video: InspectedVideo({})},
                 skipped_files=skipped_files,
                 failed_files=failed_files,
+                config=config,
             )
 
     assert len(skipped_files) == 1

@@ -175,7 +175,6 @@ def test_process_file_reports_cancelled_before_start(tmp_path):
 def _runtime(tmp_path: Path) -> CliRuntime:
     return mkv_runner.CliRuntime(
         workers=2,
-        sub_offset=0.0,
         dry_run=True,
         io_semaphore=None,
         persistent_cache=PersistentInspectCache(cache_file=tmp_path / "cache.json"),
