@@ -322,7 +322,7 @@ class QueueTracker {
     this.candidatesByItem = new Map();
   }
 
-  emptyStateMarkup(title, description, actionLabel = "📁 Choose Input Folder") {
+  emptyStateMarkup(title, description, actionLabel = "📁 Choose Input Directory") {
     return `
       <div class="empty-state-card">
         <div class="empty-icon-glow">
@@ -348,7 +348,7 @@ class QueueTracker {
       this.listEl.innerHTML = `
         <div class="empty-state-card scanning-state">
           <div class="scan-spinner" aria-hidden="true"></div>
-          <div class="empty-state-title">Scanning Folder</div>
+          <div class="empty-state-title">Scanning Directory</div>
           <div class="empty-state-desc">Inspecting MKV files and reading track metadata…</div>
         </div>`;
     }
