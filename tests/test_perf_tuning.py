@@ -9,7 +9,6 @@ import json
 import os
 import stat
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -20,6 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 mkv_remux = importlib.import_module("mkv_remux")
 mkv_runner = importlib.import_module("mkv_runner")
+mkv_scan = importlib.import_module("mkv_scan")
 mkv_storage = importlib.import_module("mkv_storage")
 
 from mkv_assets import SubIndex, _make_sub_entry  # noqa: E402
@@ -345,19 +345,31 @@ def test_debounced_save_skips_prune_full_save_prunes(tmp_path):
     assert live_key in on_disk
 
 
-def test_debounced_save_interval_skip_stays_dirty(tmp_path):
+def test_debounced_save_interval_skip_stays_dirty(tmp_path, monkeypatch):
+    """Debounce must skip within the window and flush outside it, independent
+    of host uptime (fresh CI runners can report monotonic() near zero)."""
+
+    class FakeClock:
+        def __init__(self):
+            self.now = 10_000.0
+
+        def monotonic(self):
+            return self.now
+
+    clock = FakeClock()
+    monkeypatch.setattr(mkv_scan, "time", clock)
+
     cache_file = tmp_path / "cache.json"
     cache = PersistentInspectCache(cache_file=cache_file)
     video = tmp_path / "video.mkv"
     video.write_bytes(b"a")
     cache.put(video, {"id": 1})
-    cache._last_save_ts = 0.0  # never saved before: debounce cannot skip
-    cache.save(min_interval=60.0)  # first write goes through
+    cache.save(min_interval=60.0)  # never saved before: writes regardless
 
     snapshot = cache_file.read_text()
     cache.put(video, {"id": 9})  # dirty again
-    cache._last_save_ts = time.monotonic()  # pretend a save just happened
-    cache.save(min_interval=60.0, prune=False)  # within interval -> skipped
+    clock.now += 10  # still inside the debounce window
+    cache.save(min_interval=60.0, prune=False)  # skipped
     assert cache._dirty is True
     assert cache_file.read_text() == snapshot
 
