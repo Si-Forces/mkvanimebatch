@@ -25,7 +25,13 @@ from mkv_assets import SubIndex, _make_sub_entry  # noqa: E402
 from mkv_domain import EpisodeInfo  # noqa: E402
 from mkv_scan import PersistentInspectCache, _create_parsed_file  # noqa: E402
 
+posix_only = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="exercises Linux-only machinery: sysfs trees, /proc mountinfo, os.major",
+)
 
+
+@posix_only
 def test_device_key_uses_rdev_for_block_nodes():
     """Block special files must report their own device (st_rdev), not the
     device of the filesystem hosting /dev — otherwise backing-device fallback
@@ -110,6 +116,7 @@ def _clear_storage_caches():
     mkv_storage._DEV_CLASS_CACHE.clear()
 
 
+@posix_only
 def test_storage_class_detection_runs_once_per_filesystem(monkeypatch, tmp_path):
     """All paths on one backing filesystem share a single detection pass."""
     _clear_storage_caches()
@@ -181,6 +188,7 @@ def test_windows_class_cached_per_drive_root(monkeypatch, tmp_path):
         _clear_storage_caches()
 
 
+@posix_only
 def test_linux_class_network_fs_by_mount_prefix(tmp_path, monkeypatch):
     """A network fstype on the covering mount classifies as network before
     any sysfs lookup happens."""
@@ -203,6 +211,7 @@ def test_linux_class_network_fs_by_mount_prefix(tmp_path, monkeypatch):
         _clear_storage_caches()
 
 
+@posix_only
 def test_rotational_walk_ssd_partition_under_disk(tmp_path):
     """Partition dev resolves (via symlink) into its disk dir owning queue/."""
     sysfs = tmp_path / "sys" / "dev" / "block"
@@ -216,6 +225,7 @@ def test_rotational_walk_ssd_partition_under_disk(tmp_path):
     assert mkv_storage._rotational_from_sysfs("8:1", sysfs) == "ssd"
 
 
+@posix_only
 def test_rotational_walk_hdd(tmp_path):
     sysfs = tmp_path / "sys" / "dev" / "block"
     disk = sysfs / "8:0"
@@ -225,6 +235,7 @@ def test_rotational_walk_hdd(tmp_path):
     assert mkv_storage._rotational_from_sysfs("8:0", sysfs) == "hdd"
 
 
+@posix_only
 def test_rotational_walk_descends_into_dm_slaves(tmp_path):
     sysfs = tmp_path / "block"
     dm = sysfs / "253:0"
@@ -263,11 +274,13 @@ def test_linux_class_btrfs_anon_device_falls_back_to_mount_source(tmp_path, monk
         _clear_storage_caches()
 
 
+@posix_only
 def test_rotational_walk_unknown_when_sysfs_missing(tmp_path):
     assert mkv_storage._rotational_from_sysfs("8:1", tmp_path / "empty") is None
 
 
 def test_storage_class_unknown_when_stat_fails(tmp_path, monkeypatch):
+    monkeypatch.setattr(mkv_storage.sys, "platform", "linux")
     monkeypatch.setattr(mkv_storage, "_device_key", lambda target: None)
     assert mkv_storage.storage_class(tmp_path / "missing") == "unknown"
 
