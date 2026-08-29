@@ -7,6 +7,7 @@
 import { createQueueState, reduceQueueEvent, finalizeQueueState, carryOverAssignments } from "./queue-state.js";
 import { classifyLine } from "./log-classify.js";
 import { createTelemetryLoop } from "./telemetry.js";
+import { createJobCoordinator } from "./job-coordinator.js";
 
 // ─── Preset Configurations ──────────────────────────────────────────────────
 
@@ -93,6 +94,10 @@ function applyPreset(presetKey) {
 
 // ─── Tauri API helpers ──────────────────────────────────────────────────────
 
+// Global execution coordinator
+const JobCoordinator = createJobCoordinator();
+
+
 async function invoke(cmd, args = {}) {
   const fn = window.__TAURI__?.core?.invoke
     || window.__TAURI__?.tauri?.invoke
@@ -102,21 +107,15 @@ async function invoke(cmd, args = {}) {
   if (fn) {
     return await fn(cmd, args);
   }
-  console.log("[mock invoke]", cmd, args);
-  return null;
+  throw new Error(`Failed to invoke ${cmd}: Tauri API is unavailable.`);
 }
 
 async function listen(event, handler) {
-  try {
-    const fn = window.__TAURI__?.event?.listen || window.__TAURI__?.listen;
-    if (fn) {
-      return await fn(event, handler);
-    }
-    return () => {};
-  } catch (err) {
-    console.error(`[Listen Error] ${event}:`, err);
-    return () => {};
+  const fn = window.__TAURI__?.event?.listen || window.__TAURI__?.listen;
+  if (fn) {
+    return await fn(event, handler);
   }
+  throw new Error(`Failed to register ${event} listener: Tauri API is unavailable.`);
 }
 
 function safeAddListener(idOrEl, event, handler) {
@@ -317,6 +316,10 @@ class QueueTracker {
     this.state = createQueueState({ version: 1, items: [] }, { mode });
     this.cards = new Map();
     this.scanToken = 0;
+    this.scanPath = null;
+    this.scanPromise = null;
+    this.lastScannedPath = null;
+    this.lastManifest = null;
     // GUI manual subtitle selection (remux only): item id -> candidate path
     this.assignments = new Map();
     this.candidatesByItem = new Map();
@@ -383,6 +386,7 @@ class QueueTracker {
   }
 
   populateFromInspection(manifest) {
+    this.lastManifest = manifest;
     this.cards.clear();
     if (this.listEl) this.listEl.innerHTML = "";
 
@@ -598,9 +602,9 @@ class QueueTracker {
     card.fill.style.width = style.width;
   }
 
-  finalize(exitCode) {
+  finalize(exitCode, cancelled = false) {
     if (!this.state) return;
-    this.state = finalizeQueueState(this.state, exitCode);
+    this.state = finalizeQueueState(this.state, exitCode, cancelled);
 
     for (const [id, item] of this.state.items.entries()) {
       const card = this.cards.get(id);
@@ -614,12 +618,13 @@ class QueueTracker {
 
   renderQueueCount() {
     if (!this.countEl || !this.state) return;
-    const { totalCount, completedCount, skippedCount, errorCount, batchCompleted } = this.state;
-    const processed = completedCount + skippedCount + errorCount;
+    const { totalCount, completedCount, skippedCount, cancelledCount = 0, errorCount, batchCompleted } = this.state;
+    const processed = completedCount + skippedCount + cancelledCount + errorCount;
 
     if (batchCompleted) {
       const parts = [`${completedCount} Completed`];
       if (skippedCount > 0) parts.push(`${skippedCount} Skipped`);
+      if (cancelledCount > 0) parts.push(`${cancelledCount} Cancelled`);
       if (errorCount > 0) parts.push(`${errorCount} Failed`);
       this.countEl.textContent = `${parts.join(", ")} (${totalCount} Total)`;
     } else {
@@ -691,39 +696,68 @@ function closeSubAssignModal() {
   if (modal) modal.classList.remove("active");
 }
 
-async function scanInputDirectory(path, mode) {
+async function scanInputDirectory(path, mode, { force = false } = {}) {
   const tracker = queueFor(mode);
+  path = path.trim();
   if (!path) {
     tracker.reset();
-    return;
+    tracker.lastScannedPath = null;
+    return false;
+  }
+  if (!force && tracker.lastScannedPath === path) {
+    tracker.scanToken++;
+    tracker.scanPath = null;
+    tracker.scanPromise = null;
+    tracker.populateFromInspection(tracker.lastManifest);
+    return true;
+  }
+  if (tracker.scanPath === path && tracker.scanPromise) {
+    return tracker.scanPromise;
   }
 
-  const scanToken = tracker.startScan();
-  try {
-    const manifest = await invoke("inspect_directory", { path });
-    if (!tracker.isCurrentScan(scanToken)) return;
-    if (manifest && manifest.version === 1 && Array.isArray(manifest.items)) {
-      tracker.populateFromInspection(manifest);
-    } else {
+  tracker.scanPath = path;
+  const scanPromise = (async () => {
+    const scanToken = tracker.startScan();
+    try {
+      const manifest = await invoke("inspect_directory", { path });
+      if (!tracker.isCurrentScan(scanToken)) return false;
+      if (manifest && manifest.version === 1 && Array.isArray(manifest.items)) {
+        tracker.populateFromInspection(manifest);
+        tracker.lastScannedPath = path;
+        return true;
+      }
       tracker.showScanError(scanToken);
+      tracker.lastScannedPath = null;
+      return false;
+    } catch (err) {
+      console.log("[inspect_directory] failed:", err);
+      tracker.showScanError(scanToken);
+      tracker.lastScannedPath = null;
+      return false;
     }
-  } catch (err) {
-    console.log("[inspect_directory] failed:", err);
-    tracker.showScanError(scanToken);
+  })();
+  tracker.scanPromise = scanPromise;
+  try {
+    return await scanPromise;
+  } finally {
+    if (tracker.scanPromise === scanPromise) {
+      tracker.scanPath = null;
+      tracker.scanPromise = null;
+    }
   }
 }
 
-async function chooseInputFolder(targetId) {
-  const folder = await invoke("pick_folder");
-  if (!folder) return;
+async function chooseInputDirectory(targetId) {
+  const directory = await invoke("pick_folder");
+  if (!directory) return;
 
   const input = document.getElementById(targetId);
   if (!input) return;
-  input.value = folder;
+  input.value = directory;
 
   if (targetId === "remux-input-dir" || targetId === "extract-input-dir") {
     const mode = targetId.startsWith("extract") ? "extract" : "remux";
-    await scanInputDirectory(folder, mode);
+    await scanInputDirectory(directory, mode);
   }
 }
 
@@ -839,8 +873,18 @@ class JobController {
     this.logEl     = document.getElementById(`${mode}-log`);
     this.statusEl  = document.getElementById(`${mode}-status`);
     this.lastExitCode = null;
+    this.lifecycle = "idle";
+    this.startGeneration = 0;
+    this.launched = false;
+    this.jobId = null;
+    this.launchPromise = null;
     this.runBtn    = document.getElementById(`${mode}-run`);
     this.stopBtn   = document.getElementById(`${mode}-stop`);
+    this.formControls = document.querySelectorAll(
+      `#view-${mode} input, #view-${mode} select, #view-${mode} .browse-btn, #view-${mode} .clear-cache-btn`
+    );
+
+    JobCoordinator.register(this);
 
     if (this.runBtn)  safeAddListener(this.runBtn,  "click", () => this.start());
     if (this.stopBtn) safeAddListener(this.stopBtn, "click", () => this.stop());
@@ -908,10 +952,32 @@ class JobController {
     return args;
   }
 
+  abortStart(cancelled = false) {
+    if (cancelled) queueFor(this.mode).finalize(-1, true);
+    this.running = false;
+    this.launched = false;
+    this.lifecycle = cancelled ? "cancelled" : "failed";
+    updateWorkerChips(false);
+    telemetryLoop.setJobActive(false);
+    this.cleanupListeners();
+    JobCoordinator.finish();
+    this.renderStatus();
+  }
+
   async start() {
-    if (this.running) return;
+    if (this.running || !JobCoordinator.canStart()) return;
     const args = this.buildArgs();
     if (!args) return;
+    const inputDir = args[args.indexOf("--input-dir") + 1];
+    const generation = ++this.startGeneration;
+    const assignmentsJson = this.mode === "remux" && queueFor(this.mode).assignments.size > 0
+      ? JSON.stringify({
+          version: 1,
+          assignments: Object.fromEntries(queueFor(this.mode).assignments),
+        })
+      : null;
+
+    if (!JobCoordinator.begin(this.mode)) return;
 
     this.setRunning(true);
     clearLog(this.logEl);
@@ -922,55 +988,84 @@ class JobController {
     updateWorkerChips(true, workers, ioJobs);
     telemetryLoop.setJobActive(true);
 
-    const inputDir = document.getElementById(`${this.mode}-input-dir`)?.value?.trim();
-    if (inputDir) {
-      await scanInputDirectory(inputDir, this.mode);
+    const inspected = await scanInputDirectory(inputDir, this.mode, { force: true });
+    if (generation !== this.startGeneration || !JobCoordinator.isStarting) {
+      appendLog(this.logEl, "[INFO] Start aborted by stop request.");
+      this.abortStart(true);
+      return;
+    }
+    if (!inspected) {
+      appendLog(this.logEl, "[ERROR] Input inspection failed; job was not started.");
+      this.abortStart();
+      return;
     }
 
     const tracker = queueFor(this.mode);
-
     this.cleanupListeners();
 
-    this.unlistenLog = await listen("job-log", e => appendLog(this.logEl, e.payload));
-    this.unlistenEvent = await listen("job-event", e => {
-      if (!e.payload?.mode || e.payload.mode === this.mode) {
-        tracker.handleEvent(e.payload);
-      }
-    });
+    try {
+      this.unlistenLog = await listen("job-log", e => appendLog(this.logEl, e.payload));
+      this.unlistenEvent = await listen("job-event", e => {
+        const sameJob = this.jobId === null || e.payload?.job_id === this.jobId;
+        if (sameJob && (!e.payload?.mode || e.payload.mode === this.mode)) {
+          tracker.handleEvent(e.payload);
+        }
+      });
+      this.unlistenDone = await listen("job-done", e => {
+        const payload = e.payload;
+        if (typeof payload === "object" && payload?.mode && payload.mode !== this.mode) return;
+        if (this.jobId !== null && payload?.job_id !== this.jobId) return;
+        this.onDone(typeof payload === "object" ? payload.code : payload);
+      });
+    } catch (err) {
+      appendLog(this.logEl, `[ERROR] Listeners failed: ${err}`);
+      this.abortStart();
+      return;
+    }
 
-    this.unlistenDone = await listen("job-done", e => {
-      const payload = e.payload;
-      if (typeof payload === "object" && payload?.mode && payload.mode !== this.mode) return;
-      this.onDone(typeof payload === "object" ? payload.code : payload);
-      this.cleanupListeners();
-    });
+    if (generation !== this.startGeneration || JobCoordinator.isStopping) {
+      appendLog(this.logEl, "[INFO] Start aborted by stop request.");
+      this.abortStart(true);
+      return;
+    }
 
     try {
-      let assignmentsJson = null;
-      if (this.mode === "remux" && tracker.assignments.size > 0) {
-        assignmentsJson = JSON.stringify({
-          version: 1,
-          assignments: Object.fromEntries(tracker.assignments),
-        });
-      }
-      await invoke("run_job", { mode: this.mode, args, assignmentsJson });
+      this.launched = true;
+      JobCoordinator.isStarting = false;
+      this.launchPromise = invoke("run_job", { mode: this.mode, args, assignmentsJson });
+      const jobId = await this.launchPromise;
+      if (this.running) this.jobId = jobId;
     } catch (err) {
       appendLog(this.logEl, `[ERROR] ${err}`);
       tracker.finalize(-1);
       this.lastExitCode = -1;
-      this.setRunning(false);
-      updateWorkerChips(false);
-      telemetryLoop.setJobActive(false);
-      this.cleanupListeners();
+      this.abortStart();
     }
   }
 
   async stop() {
+    if (!this.running || JobCoordinator.isStopping) return;
+    ++this.startGeneration;
+    JobCoordinator.isStarting = false;
+    JobCoordinator.isStopping = true;
+    this.lifecycle = "stopping";
+    this.renderStatus();
+    this.syncGlobalControls();
+
     try {
-      await invoke("stop_job");
-      appendLog(this.logEl, "[INFO] Job stopped by user.");
+      if (this.launched && this.jobId === null && this.launchPromise) {
+        this.jobId = await this.launchPromise;
+      }
+      await invoke("stop_job", { jobId: this.jobId });
+      if (this.launched) {
+        appendLog(this.logEl, "[INFO] Stop requested; waiting for shutdown.");
+      }
     } catch (err) {
       appendLog(this.logEl, `[ERROR] ${err}`);
+      JobCoordinator.isStopping = false;
+      this.lifecycle = "running";
+      this.renderStatus();
+      JobCoordinator.syncControls();
     }
   }
 
@@ -991,28 +1086,60 @@ class JobController {
 
   onDone(code) {
     const tracker = queueFor(this.mode);
-    tracker.finalize(code);
+    const cancelled = JobCoordinator.isStopping || tracker.state?.batchCancelled === true || code === 130;
+    tracker.finalize(code, cancelled);
     this.lastExitCode = tracker.state?.batchSuccess ? code : -1;
+    this.lifecycle = cancelled ? "cancelled" : (this.lastExitCode === 0 ? "done" : "failed");
+    this.launched = false;
+    this.jobId = null;
+    this.launchPromise = null;
     this.setRunning(false);
     updateWorkerChips(false);
     telemetryLoop.setJobActive(false);
+    JobCoordinator.finish();
+    this.cleanupListeners();
   }
 
   setRunning(running) {
     this.running = running;
-    if (this.runBtn)  this.runBtn.disabled  = running;
-    if (this.stopBtn) this.stopBtn.disabled = !running;
+    this.lifecycle = running ? "running" : this.lifecycle;
+    JobCoordinator.syncControls();
+    this.renderStatus();
+  }
+
+  syncGlobalControls() {
+    const busy = JobCoordinator.activeMode !== null;
+    if (this.runBtn) this.runBtn.disabled = busy;
+    for (const control of this.formControls) control.disabled = busy;
+    document.querySelectorAll(`#view-${this.mode} .sub-assign-btn`).forEach(control => {
+      control.disabled = busy;
+    });
+    if (this.stopBtn) {
+      this.stopBtn.disabled = JobCoordinator.activeMode !== this.mode || JobCoordinator.isStopping;
+      this.stopBtn.textContent = JobCoordinator.isStopping && JobCoordinator.activeMode === this.mode
+        ? "Stopping..."
+        : "■ Stop";
+    }
+  }
+
+  renderStatus() {
     const el = this.statusEl;
     if (!el) return;
     let statusClass = "status-idle";
     let statusLabel = "Idle";
-    if (running) {
+    if (this.lifecycle === "running") {
       statusClass = "status-running";
       statusLabel = "Running";
-    } else if (this.lastExitCode === 0) {
+    } else if (this.lifecycle === "stopping") {
+      statusClass = "status-running";
+      statusLabel = "Stopping";
+    } else if (this.lifecycle === "cancelled") {
+      statusClass = "status-cancelled";
+      statusLabel = "Cancelled";
+    } else if (this.lifecycle === "done") {
       statusClass = "status-success";
       statusLabel = "Done";
-    } else if (this.lastExitCode !== null) {
+    } else if (this.lifecycle === "failed") {
       statusClass = "status-error";
       statusLabel = "Failed";
     }
@@ -1091,11 +1218,11 @@ function initApp() {
   syncTabAria({ includeRole: true });
 
   document.querySelectorAll(".browse-btn[data-target]").forEach(btn => {
-    safeAddListener(btn, "click", () => chooseInputFolder(btn.dataset.target));
+    safeAddListener(btn, "click", () => chooseInputDirectory(btn.dataset.target));
   });
   document.addEventListener("click", e => {
     const emptyAction = e.target.closest(".empty-state-action[data-target]");
-    if (emptyAction) chooseInputFolder(emptyAction.dataset.target);
+    if (emptyAction) chooseInputDirectory(emptyAction.dataset.target);
   });
 
   // ─── GUI Manual Subtitle Selection ────────────────────────────────────────
@@ -1210,6 +1337,7 @@ function initApp() {
 
   new JobController("remux");
   new JobController("extract");
+  JobCoordinator.syncControls();
   telemetryLoop.start();
 
   if (window.matchMedia) {
