@@ -384,7 +384,7 @@ test("carryOverAssignments returns empty map for missing or itemless manifests",
   assert.equal(carryOverAssignments(assignments, { version: 1, items: [] }).size, 0);
 });
 
-test("reduceQueueEvent treats cancelled items as terminal and counts them as skipped", () => {
+test("reduceQueueEvent treats cancelled items as terminal and counts them as cancelled", () => {
   const manifest = {
     version: 1,
     items: [
@@ -404,7 +404,7 @@ test("reduceQueueEvent treats cancelled items as terminal and counts them as ski
   }, 3500);
   assert.equal(state.items.get("ep1.mkv").status, "cancelled");
   assert.equal(state.items.get("ep1.mkv").durationSec, "2.5");
-  assert.equal(state.skippedCount, 1);
+  assert.equal(state.cancelledCount, 1);
 
   // Cancelled before start (queued -> cancelled): no fabricated duration.
   state = reduceQueueEvent(state, {
@@ -454,4 +454,16 @@ test("batch_complete carries the cancelled flag and fails batch success", () => 
   assert.equal(state.batchCancelled, true);
 });
 
+test("finalizeQueueState marks unresolved items cancelled after a forced stop", () => {
+  const state = createQueueState({
+    version: 1,
+    items: [{ id: "ep1.mkv", name: "ep1.mkv" }],
+  });
+
+  const final = finalizeQueueState(state, -1, true);
+
+  assert.equal(final.items.get("ep1.mkv").status, "cancelled");
+  assert.equal(final.cancelledCount, 1);
+  assert.equal(final.errorCount, 0);
+});
 

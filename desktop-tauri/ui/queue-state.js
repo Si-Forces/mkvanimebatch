@@ -22,6 +22,7 @@ export function createQueueState(manifest, options = {}) {
     completedCount: 0,
     totalCount: 0,
     skippedCount: 0,
+    cancelledCount: 0,
     errorCount: 0,
   };
 
@@ -110,7 +111,7 @@ export function reduceQueueEvent(state, event, now = Date.now()) {
         completed: { status: "completed", completed: 1 },
         planned: { status: "planned", completed: 1 },
         skipped: { status: "skipped", reason: event.reason || "Skipped", skipped: 1 },
-        cancelled: { status: "cancelled", reason: event.reason || "Cancelled", skipped: 1 },
+        cancelled: { status: "cancelled", reason: event.reason || "Cancelled", cancelledCount: 1 },
         error: { status: "error", error: event.error || "Failed", failed: 1 },
       };
       const outcome = outcomes[event.status] ?? {
@@ -118,7 +119,7 @@ export function reduceQueueEvent(state, event, now = Date.now()) {
         error: `Unknown status: ${event.status}`,
         failed: 1,
       };
-      const { completed = 0, skipped = 0, failed = 0, ...itemPatch } = outcome;
+      const { completed = 0, skipped = 0, cancelledCount = 0, failed = 0, ...itemPatch } = outcome;
 
       // Only measured work gets a duration: skips and dry-run plans are
       // decided during planning without an item_start, so falling back to
@@ -150,6 +151,7 @@ export function reduceQueueEvent(state, event, now = Date.now()) {
         items: nextItems,
         completedCount: state.completedCount + completed,
         skippedCount: state.skippedCount + skipped,
+        cancelledCount: (state.cancelledCount || 0) + cancelledCount,
         errorCount: state.errorCount + failed,
       };
     }
@@ -168,11 +170,12 @@ export function reduceQueueEvent(state, event, now = Date.now()) {
   }
 }
 
-export function finalizeQueueState(state, exitCode) {
+export function finalizeQueueState(state, exitCode, cancelled = false) {
   if (!state) return state;
 
   let nextItems = state.items;
   let addedErrors = 0;
+  let addedCancelled = 0;
 
   for (const [id, item] of state.items.entries()) {
     if (!isTerminal(item.status)) {
@@ -181,13 +184,16 @@ export function finalizeQueueState(state, exitCode) {
       }
       nextItems.set(id, {
         ...item,
-        status: "error",
-        error:
-          exitCode === 0
+        status: cancelled ? "cancelled" : "error",
+        reason: cancelled ? "Cancelled" : null,
+        error: cancelled
+          ? null
+          : exitCode === 0
             ? "Protocol error: missing completion event"
             : `Aborted (exit ${exitCode})`,
       });
-      addedErrors++;
+      if (cancelled) addedCancelled++;
+      else addedErrors++;
     }
   }
 
@@ -199,6 +205,7 @@ export function finalizeQueueState(state, exitCode) {
     ...state,
     items: nextItems,
     errorCount: finalErrorCount,
+    cancelledCount: state.cancelledCount + addedCancelled,
     batchCompleted: true,
     batchSuccess: finalBatchSuccess,
   };
