@@ -22,7 +22,7 @@ from mkv_domain import (
     MAX_DEFAULT_WORKERS,
     natural_sort_key,
 )
-from mkv_proc import CancelToken
+from mkv_proc import CancelledError, CancelToken
 from mkv_scan import (
     ParsedFile,
     PersistentInspectCache,
@@ -180,7 +180,7 @@ def run_batch(
         for mkv_dir, dir_mkvs in mkvs_by_dir.items():
             if token.cancelled:
                 logger.warning("Cancellation requested — skipping remaining director(ies).")
-                break
+                raise CancelledError("Cancellation requested between release directories")
 
             logger.info("")
             logger.info("=" * 60)

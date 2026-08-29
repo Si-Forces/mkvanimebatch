@@ -9,7 +9,9 @@ import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -20,6 +22,7 @@ if str(PROJECT_ROOT) not in sys.path:
 import json
 
 mkv_runner = importlib.import_module("mkv_runner")
+mkv_scan = importlib.import_module("mkv_scan")
 mkv_remux = importlib.import_module("mkv_remux")
 mkv_extract = importlib.import_module("mkv_extract")
 
@@ -114,10 +117,21 @@ def test_no_token_delegates_to_plain_run_subprocess(monkeypatch):
     assert calls == [(["tool"], True, 7)]
 
 
+def test_cancelled_token_prevents_subprocess_spawn(monkeypatch):
+    token = _cancelled_token()
+    popen = MagicMock()
+    monkeypatch.setattr(mkv_proc.subprocess, "Popen", popen)
+
+    with pytest.raises(CancelledError):
+        run_subprocess_cancellable(["tool"], cancel_token=token)
+
+    popen.assert_not_called()
+
+
 # ─── worker entry checks ──────────────────────────────────────────────────────
 
 
-def test_process_job_reports_cancelled_before_start(tmp_path):
+def test_process_job_reports_cancelled_without_start_event(tmp_path, monkeypatch):
     video = tmp_path / "Show - S01E01.mkv"
     video.write_bytes(b"dummy")
     parsed = ParsedFile(
@@ -137,6 +151,11 @@ def test_process_job_reports_cancelled_before_start(tmp_path):
         item_id=parsed.name,
     )
 
+    start = MagicMock()
+    complete = MagicMock()
+    monkeypatch.setattr(mkv_remux, "emit_item_start", start)
+    monkeypatch.setattr(mkv_remux, "emit_item_complete", complete)
+
     result = mkv_remux.process_job(
         job=job,
         temp_dir=None,
@@ -146,12 +165,14 @@ def test_process_job_reports_cancelled_before_start(tmp_path):
         cancel_token=_cancelled_token(),
     )
 
+    start.assert_not_called()
+    complete.assert_called_once_with(job.item_id, job.video_name, "cancelled")
     assert result.cancelled is True
     assert result.failed is False
     assert any("CANCELLED" in line for line in result.log)
 
 
-def test_process_file_reports_cancelled_before_start(tmp_path):
+def test_process_file_reports_cancelled_without_start_event(tmp_path, monkeypatch):
     video = tmp_path / "Show - S01E01.mkv"
     video.write_bytes(b"dummy")
     parsed = ParsedFile(
@@ -160,6 +181,11 @@ def test_process_file_reports_cancelled_before_start(tmp_path):
     )
     font_manager = FontManager(tmp_path / "fonts")
 
+    start = MagicMock()
+    complete = MagicMock()
+    monkeypatch.setattr(mkv_extract, "emit_item_start", start)
+    monkeypatch.setattr(mkv_extract, "emit_item_complete", complete)
+
     _, log, ok = mkv_extract.process_file(
         parsed,
         None,
@@ -167,6 +193,8 @@ def test_process_file_reports_cancelled_before_start(tmp_path):
         cancel_token=_cancelled_token(),
     )
 
+    start.assert_not_called()
+    complete.assert_called_once_with(parsed.name, parsed.name, "cancelled")
     assert ok is False
     assert any("CANCELLED" in line for line in log)
 
@@ -181,7 +209,7 @@ def _runtime(tmp_path: Path) -> CliRuntime:
     )
 
 
-def test_run_batch_skips_remaining_directories_once_cancelled(tmp_path):
+def test_run_batch_raises_before_remaining_directories_once_cancelled(tmp_path):
     runtime = _runtime(tmp_path)
     visited = []
 
@@ -191,9 +219,9 @@ def test_run_batch_skips_remaining_directories_once_cancelled(tmp_path):
         return True
 
     grouped = {Path("/src/a"): [], Path("/src/b"): [], Path("/src/c"): []}
-    overall = mkv_runner.run_batch(runtime, grouped, process_directory)
+    with pytest.raises(CancelledError):
+        mkv_runner.run_batch(runtime, grouped, process_directory)
 
-    assert overall is False
     assert visited == ["a"]
 
 
@@ -361,3 +389,37 @@ def test_install_cancel_handlers_routes_signals_into_token(monkeypatch):
 
     captured[signal.SIGINT](signal.SIGINT, None)
     assert token.cancelled is True
+
+def test_semaphore_wait_is_cancellation_aware():
+    token = CancelToken()
+    sem = threading.Semaphore(0)  # zero permits, will block
+
+    def canceller():
+        time.sleep(0.1)
+        token.request()
+
+    t = threading.Thread(target=canceller)
+    t.start()
+
+    with pytest.raises(CancelledError):
+        with mkv_proc.acquire_semaphore(sem, cancel_token=token):
+            pass
+
+    t.join()
+
+
+def test_inspect_videos_does_not_launch_children_if_cancelled(monkeypatch):
+    token = CancelToken()
+    token.request()  # pre-cancel
+    pool = ThreadPoolExecutor(max_workers=1)
+
+    videos = [Path("a.mkv")]
+    # Should not even call run_mkvmerge_json
+    mock_run = MagicMock()
+    monkeypatch.setattr(mkv_scan, "run_mkvmerge_json", mock_run)
+
+    with pytest.raises(CancelledError):
+        mkv_scan.inspect_videos(videos, pool, cancel_token=token)
+
+    mock_run.assert_not_called()
+    pool.shutdown(wait=True)

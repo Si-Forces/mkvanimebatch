@@ -8,7 +8,7 @@ import hashlib
 import subprocess
 import threading
 import time
-from contextlib import nullcontext
+from contextlib import contextmanager
 from pathlib import Path
 
 SUBPROCESS_TIMEOUT = 3600
@@ -80,6 +80,7 @@ def run_subprocess_cancellable(
     if cancel_token is None:
         return run_subprocess(cmd, capture_stdout=capture_stdout, timeout=timeout)
 
+    cancel_token.check()
     stdout_opt = subprocess.PIPE if capture_stdout else subprocess.DEVNULL
     proc = subprocess.Popen(
         cmd,
@@ -127,9 +128,35 @@ def run_subprocess(cmd: list[str], *, capture_stdout: bool = True, timeout: floa
     )
 
 
-def acquire_semaphore(sem: threading.Semaphore | None):
-    """Return the semaphore as a context manager, or a no-op if None."""
-    return sem if sem is not None else nullcontext()
+@contextmanager
+def acquire_semaphore(
+    sem: threading.Semaphore | None,
+    cancel_token: CancelToken | None = None,
+):
+    """Acquire a concurrency permit while continuing to observe cancellation."""
+    if cancel_token is not None:
+        cancel_token.check()
+    if sem is None:
+        yield
+        return
+
+    if cancel_token is None:
+        sem.acquire()
+        try:
+            yield
+        finally:
+            sem.release()
+        return
+
+    while True:
+        cancel_token.check()
+        if sem.acquire(timeout=0.25):
+            try:
+                yield
+            finally:
+                sem.release()
+            return
+
 
 def hash_file(filepath: Path) -> str:
     """Calculate BLAKE2b hash of a file for content-based deduplication."""

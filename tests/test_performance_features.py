@@ -141,12 +141,17 @@ def test_ffmpeg_probesize_args(mod):
         assert cmd[cmd.index("-probesize") + 1] == "1M"
 
 
-def test_io_semaphore_throttles_remux(tmp_path):
-    """Verify io_semaphore context manager is entered during mkvmerge execution in remux."""
+def test_io_semaphore_covers_flac_conversion_and_remux(tmp_path):
+    """One heavy-I/O permit covers both conversion and the following mux."""
     mock_sem = MagicMock()
+    mock_sem.acquire.return_value = True
+    commands = []
 
     def fake_subprocess(cmd, **kwargs):
+        commands.append(cmd[0])
+        mock_sem.acquire.assert_called()
         if len(cmd) > 1 and cmd[0] == "mkvmerge" and cmd[1] == "-o":
+            from pathlib import Path
             Path(cmd[2]).touch()
         res = MagicMock()
         res.returncode = 0
@@ -163,12 +168,16 @@ def test_io_semaphore_throttles_remux(tmp_path):
     mock_cover_index = MagicMock()
     mock_cover_index.lookup.return_value = None
 
-    with patch.object(mkv_proc, "run_subprocess", side_effect=fake_subprocess), \
+    with patch.object(mkv_remux, "run_subprocess_cancellable", side_effect=fake_subprocess), \
          patch.object(mkv_remux, "select_tracks") as mock_tracks:
         tr = MagicMock()
         tr.video_id = 0
-        tr.audio_id = None
-        tr.audio_codec = "A_AAC"
+        tr.audio_id = 1
+        tr.audio_index = 0
+        tr.audio_codec = "A_FLAC"
+        tr.audio_reason = "Japanese FLAC"
+        tr.audio_channels = 2
+        tr.has_source_chapters = False
         tr.source_cover_id = None
         tr.use_source_fonts = False
         tr.source_font_ids = []
@@ -193,22 +202,6 @@ def test_io_semaphore_throttles_remux(tmp_path):
         )
 
         assert res.skipped_reason is None
-        mock_sem.__enter__.assert_called_once()
-        mock_sem.__exit__.assert_called_once()
-
-
-def test_flac_conversion_decoupled_from_io_semaphore(tmp_path):
-    """Verify _convert_flac_to_opus runs decoupled from io_semaphore."""
-    video = tmp_path / "video.mkv"
-    video.touch()
-
-    mock_res = MagicMock()
-    mock_res.returncode = 0
-    mock_res.stderr = ""
-
-    with patch.object(mkv_proc, "run_subprocess", return_value=mock_res) as mock_run:
-        res = mkv_remux._convert_flac_to_opus(
-            video, 0, tmp_path, "video", "192k", [], 2, complexity=9
-        )
-        assert res is not None
-        mock_run.assert_called_once()
+        assert commands == ["ffmpeg", "mkvmerge"]
+        mock_sem.acquire.assert_called_once()
+        mock_sem.release.assert_called_once()

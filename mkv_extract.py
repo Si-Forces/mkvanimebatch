@@ -20,7 +20,7 @@ import subprocess
 import sys
 import tempfile
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
@@ -42,6 +42,7 @@ from mkv_events import (
     emit_item_complete,
     emit_item_start,
     get_item_id,
+    has_terminal_outcome,
     set_events_enabled,
     setup_logging,
 )
@@ -130,7 +131,7 @@ def _run_mkvextract(
         return
 
     try:
-        with acquire_semaphore(io_semaphore):
+        with acquire_semaphore(io_semaphore, cancel_token):
             result = run_subprocess_cancellable(
                 ["mkvextract", str(mkv_path), *args],
                 capture_stdout=False,
@@ -172,7 +173,6 @@ def process_file(
     log: list[str] = [f"Processing: {mkv_path.name}"]
 
     if cancel_token is not None and cancel_token.cancelled:
-        emit_item_start(item_id, mkv_path.name)
         log.append("  !! CANCELLED before start.")
         emit_item_complete(item_id, mkv_path.name, OUTCOME_CANCELLED)
         return mkv_path, log, False
@@ -273,6 +273,8 @@ def process_file(
             cancel_token=cancel_token,
         )
 
+        if cancel_token is not None:
+            cancel_token.check()
         for staged_path, target in staged_outputs:
             _clean_empty_file(staged_path, log, target.item_name)
             if not staged_path.exists():
@@ -288,6 +290,11 @@ def process_file(
         if font_claims:
             log.append(f"   -> Extracted {saved_count} new font(s).")
 
+    except CancelledError:
+        for claim in font_claims:
+            font_manager.release(claim)
+        emit_item_complete(item_id, mkv_path.name, OUTCOME_CANCELLED)
+        raise
     except BaseException:
         for claim in font_claims:
             font_manager.release(claim)
@@ -394,6 +401,16 @@ def _run(
                 mkv_path.name,
             )
 
+        except CancelledError:
+            for pending, pending_file in futures.items():
+                if pending.cancel():
+                    emit_item_complete(
+                        get_item_id(pending_file.path, root_dir),
+                        pending_file.name,
+                        OUTCOME_CANCELLED,
+                    )
+            wait(futures)
+            raise
         except Exception as exc:
             any_failures = True
             logger.exception(
@@ -513,6 +530,16 @@ def main() -> None:
         overall_success = run_batch(runtime, mkvs_by_dir, process_directory)
     except CancelledError:
         logger.warning("Cancelled by user.")
+        for files in mkvs_by_dir.values():
+            for mkv_file in files:
+                item_id = get_item_id(mkv_file.path, root_input_dir)
+                if has_terminal_outcome(item_id):
+                    continue
+                emit_item_complete(
+                    item_id,
+                    mkv_file.name,
+                    OUTCOME_CANCELLED,
+                )
         overall_success = False
 
     cancelled = runtime.cancel_token.cancelled

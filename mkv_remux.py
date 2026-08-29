@@ -28,7 +28,7 @@ import tempfile
 import threading
 import uuid
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -58,6 +58,7 @@ from mkv_events import (
     emit_item_complete,
     emit_item_start,
     get_item_id,
+    has_terminal_outcome,
     set_events_enabled,
     setup_logging,
 )
@@ -417,7 +418,6 @@ def process_job(
     temp_opus: Path | None = None
 
     if cancel_token is not None and cancel_token.cancelled:
-        emit_item_start(job.item_id, video_name)
         result.cancelled = True
         result.log.append(f"Processing: {video_name}")
         result.log.append("  !! CANCELLED before start.")
@@ -473,58 +473,59 @@ def process_job(
         result.log.append("  Font source    : using source's embedded fonts (no external fonts)")
 
     try:
-        needs_conversion = selection.audio_id is not None and selection.audio_codec == "A_FLAC"
-        if needs_conversion:
-            if temp_dir is None:
-                return _skip("temp dir unavailable", "Temporary directory unavailable for FLAC→Opus conversion.")
-            temp_opus = _convert_flac_to_opus(
-                video=video,
-                audio_index=selection.audio_index,
-                temp_dir=temp_dir,
-                base=base,
-                opus_bitrate=opus_bitrate,
-                log=result.log,
-                ffmpeg_threads=ffmpeg_threads,
-                complexity=complexity,
-                cancel_token=cancel_token,
-            )
-            if temp_opus is None:
-                return _error("Opus conversion failed", "ffmpeg FLAC→Opus conversion failed.")
+        with acquire_semaphore(io_semaphore, cancel_token):
+            needs_conversion = selection.audio_id is not None and selection.audio_codec == "A_FLAC"
+            if needs_conversion:
+                if temp_dir is None:
+                    return _skip("temp dir unavailable", "Temporary directory unavailable for FLAC→Opus conversion.")
+                temp_opus = _convert_flac_to_opus(
+                    video=video,
+                    audio_index=selection.audio_index,
+                    temp_dir=temp_dir,
+                    base=base,
+                    opus_bitrate=opus_bitrate,
+                    log=result.log,
+                    ffmpeg_threads=ffmpeg_threads,
+                    complexity=complexity,
+                    cancel_token=cancel_token,
+                )
+                if temp_opus is None:
+                    return _error("Opus conversion failed", "ffmpeg FLAC→Opus conversion failed.")
 
-        if job.chapter_file:
-            result.log.append(f"  Chapters       : {job.chapter_file.name} (external)")
-        elif selection.has_source_chapters:
-            result.log.append("  Chapters       : using source's embedded chapters (no external match found)")
-        else:
-            result.log.append("  Chapters       : none found in directory or source")
+            if job.chapter_file:
+                result.log.append(f"  Chapters       : {job.chapter_file.name} (external)")
+            elif selection.has_source_chapters:
+                result.log.append("  Chapters       : using source's embedded chapters (no external match found)")
+            else:
+                result.log.append("  Chapters       : none found in directory or source")
 
-        if job.cover_file:
-            result.log.append(f"  Cover          : {job.cover_file.name} (external, attached)")
-        elif selection.source_cover_id is not None:
-            result.log.append("  Cover          : keeping source's embedded cover (no external match found)")
-        else:
-            result.log.append("  Cover          : none found in directory or source")
+            if job.cover_file:
+                result.log.append(f"  Cover          : {job.cover_file.name} (external, attached)")
+            elif selection.source_cover_id is not None:
+                result.log.append("  Cover          : keeping source's embedded cover (no external match found)")
+            else:
+                result.log.append("  Cover          : none found in directory or source")
 
-        if temp_dir:
-            temp_output = temp_dir / job.output_file.name
-        else:
-            temp_output = job.output_file.with_suffix(".tmp")
+            if temp_dir:
+                temp_output = temp_dir / job.output_file.name
+            else:
+                temp_output = job.output_file.with_suffix(".tmp")
 
-        temp_output.unlink(missing_ok=True)
-        args = _build_mkvmerge_args(job, selection, temp_opus, fonts, temp_output, sub_offset=sub_offset)
-        result.log.append("  Running mkvmerge...")
-
-        try:
-            with acquire_semaphore(io_semaphore):
-                run_result = run_subprocess_cancellable(["mkvmerge", *args], cancel_token=cancel_token, timeout=SUBPROCESS_TIMEOUT)
-        except subprocess.TimeoutExpired:
-            result.log.append(f"  ERROR: mkvmerge timed out after {SUBPROCESS_TIMEOUT}s.")
             temp_output.unlink(missing_ok=True)
-            result.log.append("  Removed partial output.")
-            result.failed = True
-            result.error_reason = f"mkvmerge timed out after {SUBPROCESS_TIMEOUT}s"
-            emit_item_complete(job.item_id, video_name, OUTCOME_ERROR, error=result.error_reason)
-            return result
+            args = _build_mkvmerge_args(job, selection, temp_opus, fonts, temp_output, sub_offset=sub_offset)
+            result.log.append("  Running mkvmerge...")
+
+            try:
+                run_result = run_subprocess_cancellable(["mkvmerge", *args], cancel_token=cancel_token, timeout=SUBPROCESS_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                result.log.append(f"  ERROR: mkvmerge timed out after {SUBPROCESS_TIMEOUT}s.")
+                temp_output.unlink(missing_ok=True)
+                result.log.append("  Removed partial output.")
+                result.failed = True
+                result.error_reason = f"mkvmerge timed out after {SUBPROCESS_TIMEOUT}s"
+                emit_item_complete(job.item_id, video_name, OUTCOME_ERROR, error=result.error_reason)
+                return result
+
 
         if run_result.stderr.strip():
             result.log.append(f"  WARNING (mkvmerge): {run_result.stderr.strip()}")
@@ -538,6 +539,8 @@ def process_job(
             emit_item_complete(job.item_id, video_name, OUTCOME_ERROR, error=result.error_reason)
             return result
 
+        if cancel_token is not None:
+            cancel_token.check()
         temp_output.replace(output_file)
         result.log.append("  Completed successfully.")
         emit_item_complete(job.item_id, video_name, OUTCOME_COMPLETED)
@@ -749,6 +752,23 @@ def _execute_jobs(
                     "[%d/%d (%.0f%%)] Remuxed: %s",
                     completed_jobs, total_jobs, progress * 100, job.video_name,
                 )
+        except CancelledError:
+            skipped_files.append(f"{job.video_name} (cancelled)")
+            logger.info(
+                "[%d/%d (%.0f%%)] Cancelled: %s",
+                completed_jobs, total_jobs, progress * 100, job.video_name,
+            )
+            for future_to_cancel, pending_job in futures.items():
+                if future_to_cancel.cancel():
+                    emit_item_complete(
+                        pending_job.item_id,
+                        pending_job.video_name,
+                        OUTCOME_CANCELLED,
+                    )
+            # process_directory removes one shared temp directory as it
+            # unwinds, so every active worker must release its files first.
+            wait(futures)
+            raise
         except Exception as exc:
             logger.exception(
                 "[%d/%d (%.0f%%)] CRASHED: %s",
@@ -1365,6 +1385,16 @@ def main() -> None:
         overall_success = run_batch(runtime, mkvs_by_dir, process_directory)
     except CancelledError:
         logger.warning("Cancelled by user.")
+        for files in mkvs_by_dir.values():
+            for mkv_file in files:
+                item_id = get_item_id(mkv_file.path, root_input_dir)
+                if has_terminal_outcome(item_id):
+                    continue
+                emit_item_complete(
+                    item_id,
+                    mkv_file.name,
+                    OUTCOME_CANCELLED,
+                )
         overall_success = False
 
     cancelled = runtime.cancel_token.cancelled

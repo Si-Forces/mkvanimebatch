@@ -31,12 +31,19 @@ ItemOutcome = Literal[
 ]
 
 _EVENTS_ENABLED: bool = False
+_TERMINAL_ITEM_IDS: set[str] = set()
 
 
 def set_events_enabled(enabled: bool = True) -> None:
     """Enable or disable machine-readable structured @event: output."""
     global _EVENTS_ENABLED
     _EVENTS_ENABLED = enabled
+    _TERMINAL_ITEM_IDS.clear()
+
+
+def has_terminal_outcome(item_id: str) -> bool:
+    """Whether an Item Outcome has already been emitted for this item."""
+    return item_id in _TERMINAL_ITEM_IDS
 
 
 def is_events_enabled() -> bool:
@@ -125,6 +132,9 @@ def emit_item_complete(
     outcomes (planned, dry-run skipped) are emitted without a prior
     item_start — that asymmetry is contract-visible and intentional.
     """
+    if item_id in _TERMINAL_ITEM_IDS:
+        return
+    _TERMINAL_ITEM_IDS.add(item_id)
     extra: dict[str, str] = {}
     if reason is not None:
         extra["reason"] = reason

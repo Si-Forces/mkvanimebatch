@@ -16,7 +16,7 @@ import sys
 import tempfile
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -31,7 +31,7 @@ from mkv_domain import (
     parse_episode,
 )
 from mkv_fonts import _FONT_DIR_NAMES
-from mkv_proc import CancelToken, run_subprocess_cancellable
+from mkv_proc import CancelledError, CancelToken, run_subprocess_cancellable
 
 _IGNORED_SCAN_DIR_NAMES = frozenset({"output", *_FONT_DIR_NAMES})
 
@@ -435,20 +435,32 @@ def inspect_videos(
             logger.info("Pre-inspecting %d video(s)...", len(to_inspect))
 
         def _inspect(v: Path) -> tuple[Path, dict | None]:
+            if cancel_token and cancel_token.cancelled:
+                raise CancelledError("Cancellation requested before probe")
             return v, run_mkvmerge_json(v, cancel_token=cancel_token)
 
         futures = {pool.submit(_inspect, v): v for v in to_inspect}
-        for future in as_completed(futures):
-            v = futures[future]
-            exc = future.exception()
-            if exc is not None:
-                logger.warning("Inspection failed for %s: %s", v.name, exc)
-                cache[v] = None
-                continue
-            _, data = future.result()
-            cache[v] = data
-            if persistent_cache:
-                persistent_cache.put(v, data)
+        try:
+            for future in as_completed(futures):
+                v = futures[future]
+                exc = future.exception()
+                if exc is not None:
+                    if isinstance(exc, CancelledError):
+                        raise exc
+                    logger.warning("Inspection failed for %s: %s", v.name, exc)
+                    cache[v] = None
+                    continue
+                _, data = future.result()
+                cache[v] = data
+                if persistent_cache:
+                    persistent_cache.put(v, data)
+        except CancelledError:
+            for future in futures:
+                future.cancel()
+            # Active probes own child processes. Do not let callers tear down
+            # shared state until every probe has observed cancellation.
+            wait(futures)
+            raise
 
     ok = sum(1 for d in cache.values() if d is not None)
     logger.info("Inspection complete: %d/%d succeeded.", ok, len(videos))
