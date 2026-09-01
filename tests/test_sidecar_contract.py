@@ -677,3 +677,58 @@ def test_remux_error_event_emitted_on_failure(monkeypatch, tmp_path):
     assert "exit 2" in complete_events[0]["error"]
 
 
+def test_concurrent_emit_item_complete_is_idempotent(monkeypatch):
+    """Concurrent calls to emit_item_complete for the same item ID emit exactly once.
+
+    Uses a coordinated set test double to force competing threads into the
+    check-then-act membership check window, and exercises real emit_event
+    output to verify nested RLock re-entrancy and complete JSON-line emission.
+    """
+    import threading
+
+    from mkv_events import emit_item_complete, set_events_enabled
+
+    class CoordinatedSet:
+        """Forces competing threads into the membership-check window before add()."""
+
+        def __init__(self):
+            self._inner = set()
+            self.barrier = threading.Barrier(2)
+
+        def __contains__(self, item):
+            has_item = item in self._inner
+            try:
+                self.barrier.wait(timeout=0.01)
+            except threading.BrokenBarrierError:
+                pass
+            return has_item
+
+        def add(self, item):
+            self._inner.add(item)
+
+        def clear(self):
+            self._inner.clear()
+    buf = io.StringIO()
+    coord_set = CoordinatedSet()
+    monkeypatch.setattr(sys, "stdout", buf)
+    monkeypatch.setattr(mkv_events, "_TERMINAL_ITEM_IDS", coord_set)
+
+    set_events_enabled(True)
+    try:
+        t1 = threading.Thread(target=emit_item_complete, args=("ep01.mkv", "ep01.mkv", "completed"))
+        t2 = threading.Thread(target=emit_item_complete, args=("ep01.mkv", "ep01.mkv", "completed"))
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        lines = [line for line in buf.getvalue().splitlines() if line.startswith("@event:")]
+        assert len(lines) == 1
+        payload = json.loads(lines[0][8:].strip())
+        assert payload["version"] == 1
+        assert payload["type"] == "item_complete"
+        assert payload["id"] == "ep01.mkv"
+        assert payload["status"] == "completed"
+    finally:
+        set_events_enabled(False)
+

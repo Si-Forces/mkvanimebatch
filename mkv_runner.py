@@ -176,23 +176,25 @@ def run_batch(
     token = runtime.cancel_token
     overall_success = True
 
-    with ThreadPoolExecutor(max_workers=runtime.workers) as pool:
-        for mkv_dir, dir_mkvs in mkvs_by_dir.items():
-            if token.cancelled:
-                logger.warning("Cancellation requested — skipping remaining director(ies).")
-                raise CancelledError("Cancellation requested between release directories")
+    try:
+        with ThreadPoolExecutor(max_workers=runtime.workers) as pool:
+            for mkv_dir, dir_mkvs in mkvs_by_dir.items():
+                if token.cancelled:
+                    logger.warning("Cancellation requested — skipping remaining directories.")
+                    raise CancelledError("Cancellation requested between release directories")
 
-            logger.info("")
-            logger.info("=" * 60)
-            logger.info("Processing directory: %s", mkv_dir)
-            logger.info("=" * 60)
+                logger.info("")
+                logger.info("=" * 60)
+                logger.info("Processing directory: %s", mkv_dir)
+                logger.info("=" * 60)
 
-            if not process_directory(pool, mkv_dir, dir_mkvs):
-                overall_success = False
+                if not process_directory(pool, mkv_dir, dir_mkvs):
+                    overall_success = False
 
-            # Intermediate save: debounced and without the O(N) prune pass;
-            # the flush below does full pruning.
-            runtime.persistent_cache.save(min_interval=60.0, prune=False)
+                # Intermediate save: debounced and without the O(N) prune pass;
+                # the flush below does full pruning.
+                runtime.persistent_cache.save(min_interval=60.0, prune=False)
+    finally:
+        runtime.persistent_cache.save()
 
-    runtime.persistent_cache.save()
     return overall_success and not token.cancelled

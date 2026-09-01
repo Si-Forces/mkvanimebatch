@@ -74,7 +74,7 @@ while ($true) {
             $ioJobs = Read-Host "Enter Concurrent I/O Jobs (or press Enter for auto: 4 on SSD/NVMe, 2 otherwise)"
 
             # Ensure script components exist locally
-            if (Test-RequiredFiles @("mkv_domain.py", "mkv_proc.py", "mkv_events.py", "mkv_fonts.py", "mkv_scan.py", "mkv_assets.py", "mkv_runner.py", "mkv_remux.py")) {
+            if (Test-RequiredFiles @("mkv_domain.py", "mkv_proc.py", "mkv_events.py", "mkv_fonts.py", "mkv_scan.py", "mkv_assets.py", "mkv_storage.py", "mkv_runner.py", "mkv_remux.py")) {
                 $cmdArgs = @()
                 if ($inputDir -ne "") {
                     $cmdArgs += "--input-dir", $inputDir
@@ -121,7 +121,7 @@ while ($true) {
             $ioJobs = Read-Host "Enter Concurrent I/O Jobs (or press Enter for auto: 4 on SSD/NVMe, 2 otherwise)"
 
             # Ensure script components exist locally
-            if (Test-RequiredFiles @("mkv_domain.py", "mkv_proc.py", "mkv_events.py", "mkv_fonts.py", "mkv_scan.py", "mkv_assets.py", "mkv_runner.py", "mkv_extract.py")) {
+            if (Test-RequiredFiles @("mkv_domain.py", "mkv_proc.py", "mkv_events.py", "mkv_fonts.py", "mkv_scan.py", "mkv_assets.py", "mkv_storage.py", "mkv_runner.py", "mkv_extract.py")) {
                 $cmdArgs = @()
                 if ($inputDir -ne "") {
                     $cmdArgs += "--input-dir", $inputDir

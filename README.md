@@ -311,6 +311,7 @@ mkvanimebatch/
 ├── mkv_proc.py              # Subprocess execution, cooperative cancellation, hashing
 ├── mkv_fonts.py             # Font discovery + transactional FontManager (dedup/promote)
 ├── mkv_scan.py              # mkvmerge probing, persistent cache, scanning, classification
+├── mkv_assets.py            # Unified asset indexing (subtitles, chapters, covers) and resolution
 ├── mkv_runner.py            # Shared CLI scaffolding, runtime, batch loop
 ├── mkv_storage.py           # Backing-store detection for --io-jobs auto-defaults
 ├── mkv_extract.py           # CLI tool for extracting subtitles, chapters, covers & fonts
