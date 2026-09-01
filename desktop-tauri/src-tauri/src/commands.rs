@@ -986,9 +986,8 @@ fn stop_job_internal_with_timeout(
                     group_pid = Some(slot.child.id());
                 }
                 if let Ok(None) = slot.child.try_wait() {
-                    let pid = slot.child.id();
                     #[cfg(unix)]
-                    signal_process_group(pid, libc::SIGKILL, "force-kill job")?;
+                    signal_process_group(slot.child.id(), libc::SIGKILL, "force-kill job")?;
                     #[cfg(windows)]
                     slot.child
                         .kill()
