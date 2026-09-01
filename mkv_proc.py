@@ -110,8 +110,7 @@ def run_subprocess_cancellable(
                     raise subprocess.TimeoutExpired(cmd, timeout_seconds) from None
     finally:
         if proc.poll() is None:
-            proc.kill()
-
+            _terminate_process(proc)
 
 def run_subprocess(cmd: list[str], *, capture_stdout: bool = True, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
     """Run a subprocess with consistent UTF-8 encoding/error handling."""

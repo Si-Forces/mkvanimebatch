@@ -161,3 +161,28 @@ class TestFontManagerLifecycle:
 
         assert len(claims) == 1
 
+
+def test_font_hash_memo_save_permissions(tmp_path):
+    import os
+    import stat
+
+    from mkv_fonts import FontHashMemo
+
+    memo_path = tmp_path / "sub" / "memo.json"
+    memo = FontHashMemo(memo_path)
+    dummy_file = tmp_path / "dummy.ttf"
+    dummy_file.write_bytes(b"test font")
+    memo.put(dummy_file, dummy_file.stat(), "hash123")
+    memo.save()
+
+    assert memo_path.exists()
+    if sys.platform != "win32":
+        mode = stat.S_IMODE(memo_path.stat().st_mode)
+        assert mode == 0o644
+
+        # Overwrite existing memo with custom permission (e.g. 0o640)
+        os.chmod(memo_path, 0o640)
+        memo.put(dummy_file, dummy_file.stat(), "hash456")
+        memo.save()
+        mode_after = stat.S_IMODE(memo_path.stat().st_mode)
+        assert mode_after == 0o640

@@ -423,3 +423,26 @@ def test_inspect_videos_does_not_launch_children_if_cancelled(monkeypatch):
 
     mock_run.assert_not_called()
     pool.shutdown(wait=True)
+
+def test_run_batch_saves_persistent_cache_on_cancellation():
+    """run_batch must flush persistent_cache.save() in finally even when cancelled."""
+    token = CancelToken()
+    token.request()  # pre-cancel
+
+    mock_cache = MagicMock()
+    runtime = CliRuntime(
+        workers=1,
+        dry_run=False,
+        io_semaphore=None,
+        persistent_cache=mock_cache,
+        cancel_token=token,
+    )
+
+    mkvs_by_dir = {
+        Path("/fake/dir"): [ParsedFile(path=Path("/fake/dir/01.mkv"), name="01.mkv", stem="01", parsed=None)]
+    }
+
+    with pytest.raises(CancelledError):
+        mkv_runner.run_batch(runtime, mkvs_by_dir, lambda *args: True)
+
+    mock_cache.save.assert_called_once_with()

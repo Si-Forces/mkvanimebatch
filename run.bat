@@ -88,20 +88,12 @@ echo.
 echo [Tip] Leave inputs blank to use defaults (current directory).
 echo       Dry Run status is currently: [!DRY_RUN_MODE!]
 echo.
-if not exist "%SCRIPT_DIR%mkv_domain.py" (
-    echo [ERROR] Required file 'mkv_domain.py' is missing.
-    pause
-    goto menu
-)
-if not exist "%SCRIPT_DIR%mkv_assets.py" (
-    echo [ERROR] Required file 'mkv_assets.py' is missing.
-    pause
-    goto menu
-)
-if not exist "%SCRIPT_DIR%mkv_remux.py" (
-    echo [ERROR] Required file 'mkv_remux.py' is missing.
-    pause
-    goto menu
+for %%F in (mkv_domain.py mkv_events.py mkv_proc.py mkv_fonts.py mkv_scan.py mkv_assets.py mkv_storage.py mkv_runner.py mkv_remux.py) do (
+    if not exist "%SCRIPT_DIR%%%F" (
+        echo [ERROR] Required file '%%F' is missing.
+        pause
+        goto menu
+    )
 )
 set "input_dir="
 set "out_dir="
@@ -165,15 +157,12 @@ echo.
 echo [Tip] Leave inputs blank to use defaults (current directory).
 echo       Dry Run status is currently: [!DRY_RUN_MODE!]
 echo.
-if not exist "%SCRIPT_DIR%mkv_domain.py" (
-    echo [ERROR] Required file 'mkv_domain.py' is missing.
-    pause
-    goto menu
-)
-if not exist "%SCRIPT_DIR%mkv_extract.py" (
-    echo [ERROR] Required file 'mkv_extract.py' is missing.
-    pause
-    goto menu
+for %%F in (mkv_domain.py mkv_events.py mkv_proc.py mkv_fonts.py mkv_scan.py mkv_assets.py mkv_storage.py mkv_runner.py mkv_extract.py) do (
+    if not exist "%SCRIPT_DIR%%%F" (
+        echo [ERROR] Required file '%%F' is missing.
+        pause
+        goto menu
+    )
 )
 set "input_dir="
 set "out_dir="
