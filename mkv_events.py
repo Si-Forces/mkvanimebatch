@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
+import threading
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -32,24 +33,27 @@ ItemOutcome = Literal[
 
 _EVENTS_ENABLED: bool = False
 _TERMINAL_ITEM_IDS: set[str] = set()
+_EVENTS_LOCK = threading.RLock()
 
 
 def set_events_enabled(enabled: bool = True) -> None:
     """Enable or disable machine-readable structured @event: output."""
     global _EVENTS_ENABLED
-    _EVENTS_ENABLED = enabled
-    _TERMINAL_ITEM_IDS.clear()
+    with _EVENTS_LOCK:
+        _EVENTS_ENABLED = enabled
+        _TERMINAL_ITEM_IDS.clear()
 
 
 def has_terminal_outcome(item_id: str) -> bool:
     """Whether an Item Outcome has already been emitted for this item."""
-    return item_id in _TERMINAL_ITEM_IDS
+    with _EVENTS_LOCK:
+        return item_id in _TERMINAL_ITEM_IDS
 
 
 def is_events_enabled() -> bool:
     """Return whether structured event output is currently enabled."""
-    return _EVENTS_ENABLED
-
+    with _EVENTS_LOCK:
+        return _EVENTS_ENABLED
 
 @lru_cache(maxsize=16384)
 def get_item_id(video_path: Path, root_input_dir: Path) -> str:
@@ -100,18 +104,18 @@ def setup_logging(level: int = logging.INFO, *, stderr_only: bool = False) -> No
 
 def emit_event(event_type: str, *, item_id: str | None = None, **payload) -> None:
     """Emit a machine-readable structured JSON-line to stdout for sidecar consumers when enabled."""
-    if not _EVENTS_ENABLED:
-        return
-    ev = {"version": 1, "type": event_type}
-    payload_id = payload.pop("id", None)
-    item = item_id if item_id is not None else payload_id
-    if item is not None:
-        ev["id"] = item
-    ev.update(payload)
-    msg = json.dumps(ev, ensure_ascii=False)
-    sys.stdout.write(f"@event: {msg}\n")
-    sys.stdout.flush()
-
+    with _EVENTS_LOCK:
+        if not _EVENTS_ENABLED:
+            return
+        ev = {"version": 1, "type": event_type}
+        payload_id = payload.pop("id", None)
+        item = item_id if item_id is not None else payload_id
+        if item is not None:
+            ev["id"] = item
+        ev.update(payload)
+        msg = json.dumps(ev, ensure_ascii=False)
+        sys.stdout.write(f"@event: {msg}\n")
+        sys.stdout.flush()
 
 def emit_item_start(item_id: str, file: str) -> None:
     """Emit item_start for a job beginning execution."""
@@ -132,16 +136,16 @@ def emit_item_complete(
     outcomes (planned, dry-run skipped) are emitted without a prior
     item_start — that asymmetry is contract-visible and intentional.
     """
-    if item_id in _TERMINAL_ITEM_IDS:
-        return
-    _TERMINAL_ITEM_IDS.add(item_id)
-    extra: dict[str, str] = {}
-    if reason is not None:
-        extra["reason"] = reason
-    if error is not None:
-        extra["error"] = error
-    emit_event("item_complete", item_id=item_id, file=file, status=outcome, **extra)
-
+    with _EVENTS_LOCK:
+        if item_id in _TERMINAL_ITEM_IDS:
+            return
+        _TERMINAL_ITEM_IDS.add(item_id)
+        extra: dict[str, str] = {}
+        if reason is not None:
+            extra["reason"] = reason
+        if error is not None:
+            extra["error"] = error
+        emit_event("item_complete", item_id=item_id, file=file, status=outcome, **extra)
 
 def emit_batch_start(total: int, input_dir: str) -> None:
     """Emit batch_start for the beginning of a batch run."""

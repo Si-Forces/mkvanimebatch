@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import stat
 import tempfile
 import threading
 import uuid
@@ -141,6 +142,10 @@ class FontHashMemo:
                 ) as temp_file:
                     temp_name = temp_file.name
                     json.dump(live_data, temp_file)
+                if self.memo_file.exists():
+                    os.chmod(temp_name, stat.S_IMODE(self.memo_file.stat().st_mode))
+                else:
+                    os.chmod(temp_name, 0o644)
                 Path(temp_name).replace(self.memo_file)
             except BaseException:
                 if temp_name:
