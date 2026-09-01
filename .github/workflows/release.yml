@@ -145,11 +145,29 @@ jobs:
         run: cargo test --manifest-path desktop-tauri/src-tauri/Cargo.toml --verbose
 
   # ────────────────────────────────────────────────────────────────────────────
-  # 4. CI Completion Gate (Required Check Summary)
+  # 4. Frontend UI State & Contract Tests
+  # ────────────────────────────────────────────────────────────────────────────
+  ui-tests:
+    name: UI State & Contract Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Run UI contract tests
+        run: node --test desktop-tauri/ui/*.test.js
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 5. CI Completion Gate (Required Check Summary)
   # ────────────────────────────────────────────────────────────────────────────
   ci-status:
     name: CI Status Gate
-    needs: [python-quality, python-tests, rust-tauri-checks]
+    needs: [python-quality, python-tests, rust-tauri-checks, ui-tests]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -157,14 +175,15 @@ jobs:
         run: |
           if [ "${{ needs.python-quality.result }}" != "success" ] || \
              [ "${{ needs.python-tests.result }}" != "success" ] || \
-             [ "${{ needs.rust-tauri-checks.result }}" != "success" ]; then
+             [ "${{ needs.rust-tauri-checks.result }}" != "success" ] || \
+             [ "${{ needs.ui-tests.result }}" != "success" ]; then
             echo "CI pipeline checks failed!"
             exit 1
           fi
           echo "All CI pipeline checks passed successfully!"
 
   # ────────────────────────────────────────────────────────────────────────────
-  # 5. Desktop Build — Windows (Runs ONLY after CI passes)
+  # 6. Desktop Build — Windows (Runs ONLY after CI passes)
   # ────────────────────────────────────────────────────────────────────────────
   build-windows:
     name: Build — Windows
@@ -295,7 +314,7 @@ jobs:
           prerelease: false
 
   # ────────────────────────────────────────────────────────────────────────────
-  # 6. Desktop Build — Linux (Runs ONLY after CI passes)
+  # 7. Desktop Build — Linux (Runs ONLY after CI passes)
   # ────────────────────────────────────────────────────────────────────────────
   build-linux:
     name: Build — Linux

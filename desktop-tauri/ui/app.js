@@ -4,10 +4,17 @@
 
 "use strict";
 
-import { createQueueState, reduceQueueEvent, finalizeQueueState, carryOverAssignments } from "./queue-state.js";
+import {
+  createQueueState,
+  reduceQueueEvent,
+  finalizeQueueState,
+  carryOverAssignments,
+  serializeAssignmentsForManifest,
+} from "./queue-state.js";
 import { classifyLine } from "./log-classify.js";
 import { createTelemetryLoop } from "./telemetry.js";
 import { createJobCoordinator } from "./job-coordinator.js";
+import { createInspectionCoordinator } from "./inspection-coordinator.js";
 
 // ─── Preset Configurations ──────────────────────────────────────────────────
 
@@ -96,6 +103,7 @@ function applyPreset(presetKey) {
 
 // Global execution coordinator
 const JobCoordinator = createJobCoordinator();
+const inspectDirectory = createInspectionCoordinator(path => invoke("inspect_directory", { path }));
 
 
 async function invoke(cmd, args = {}) {
@@ -316,8 +324,6 @@ class QueueTracker {
     this.state = createQueueState({ version: 1, items: [] }, { mode });
     this.cards = new Map();
     this.scanToken = 0;
-    this.scanPath = null;
-    this.scanPromise = null;
     this.lastScannedPath = null;
     this.lastManifest = null;
     // GUI manual subtitle selection (remux only): item id -> candidate path
@@ -361,6 +367,31 @@ class QueueTracker {
 
   isCurrentScan(token) {
     return token === this.scanToken;
+  }
+
+  reuseInspection(path) {
+    if (this.lastScannedPath !== path) return false;
+    this.scanToken++;
+    this.populateFromInspection(this.lastManifest);
+    return true;
+  }
+
+  acceptInspection(token, path, manifest) {
+    if (!this.isCurrentScan(token)) return false;
+    if (manifest?.version !== 1 || !Array.isArray(manifest.items)) {
+      this.showScanError(token);
+      this.lastScannedPath = null;
+      return false;
+    }
+    this.populateFromInspection(manifest);
+    this.lastScannedPath = path;
+    return true;
+  }
+
+  rejectInspection(token) {
+    if (!this.isCurrentScan(token)) return;
+    this.showScanError(token);
+    this.lastScannedPath = null;
   }
 
   showScanError(token) {
@@ -698,58 +729,33 @@ function closeSubAssignModal() {
 
 async function scanInputDirectory(path, mode, { force = false } = {}) {
   const tracker = queueFor(mode);
+  let scanToken = null;
   path = path.trim();
   if (!path) {
     tracker.reset();
     tracker.lastScannedPath = null;
+    JobCoordinator.syncControls();
     return false;
   }
-  if (!force && tracker.lastScannedPath === path) {
-    tracker.scanToken++;
-    tracker.scanPath = null;
-    tracker.scanPromise = null;
-    tracker.populateFromInspection(tracker.lastManifest);
-    return true;
-  }
-  if (tracker.scanPath === path && tracker.scanPromise) {
-    return tracker.scanPromise;
-  }
-
-  tracker.scanPath = path;
-  const scanPromise = (async () => {
-    const scanToken = tracker.startScan();
-    try {
-      const manifest = await invoke("inspect_directory", { path });
-      if (!tracker.isCurrentScan(scanToken)) return false;
-      if (manifest && manifest.version === 1 && Array.isArray(manifest.items)) {
-        tracker.populateFromInspection(manifest);
-        tracker.lastScannedPath = path;
-        return true;
-      }
-      tracker.showScanError(scanToken);
-      tracker.lastScannedPath = null;
-      return false;
-    } catch (err) {
-      console.log("[inspect_directory] failed:", err);
-      tracker.showScanError(scanToken);
-      tracker.lastScannedPath = null;
-      return false;
-    }
-  })();
-  tracker.scanPromise = scanPromise;
   try {
-    return await scanPromise;
+    if (!force && tracker.reuseInspection(path)) return true;
+
+    scanToken = tracker.startScan();
+    const manifest = await inspectDirectory(path, { force });
+    return tracker.acceptInspection(scanToken, path, manifest);
+  } catch (err) {
+    console.log("[inspect_directory] failed:", err);
+    if (scanToken !== null) tracker.rejectInspection(scanToken);
+    return false;
   } finally {
-    if (tracker.scanPromise === scanPromise) {
-      tracker.scanPath = null;
-      tracker.scanPromise = null;
-    }
+    JobCoordinator.syncControls();
   }
 }
 
 async function chooseInputDirectory(targetId) {
+  if (JobCoordinator.activeMode !== null) return;
   const directory = await invoke("pick_folder");
-  if (!directory) return;
+  if (!directory || JobCoordinator.activeMode !== null) return;
 
   const input = document.getElementById(targetId);
   if (!input) return;
@@ -829,37 +835,62 @@ function clearLog(logEl) {
 
 // ─── Modal Dialog ────────────────────────────────────────────────────────────
 
-function showConfirmModal(title, message) {
-  return new Promise(resolve => {
-    const modal = document.getElementById("confirm-modal");
-    const titleEl = document.getElementById("modal-title");
-    const descEl = document.getElementById("modal-desc");
-    const cancelBtn = document.getElementById("modal-cancel");
-    const confirmBtn = document.getElementById("modal-confirm");
+let modalChain = Promise.resolve();
 
-    if (!modal || !cancelBtn || !confirmBtn) {
-      resolve(confirm(message));
-      return;
-    }
+function showModal(title, message, { confirmLabel = "Confirm", showCancel = true } = {}) {
+  const run = () =>
+    new Promise(resolve => {
+      const modal = document.getElementById("confirm-modal");
+      const titleEl = document.getElementById("modal-title");
+      const descEl = document.getElementById("modal-desc");
+      const cancelBtn = document.getElementById("modal-cancel");
+      const confirmBtn = document.getElementById("modal-confirm");
 
-    if (titleEl) titleEl.textContent = title;
-    if (descEl) descEl.textContent = message;
+      if (!modal || !cancelBtn || !confirmBtn) {
+        if (!showCancel) {
+          alert(message);
+          resolve(true);
+        } else {
+          resolve(confirm(message));
+        }
+        return;
+      }
 
-    modal.classList.add("active");
+      if (titleEl) titleEl.textContent = title;
+      if (descEl) descEl.textContent = message;
+      confirmBtn.textContent = confirmLabel;
+      cancelBtn.textContent = "Cancel";
+      cancelBtn.hidden = !showCancel;
 
-    const cleanup = (result) => {
-      modal.classList.remove("active");
-      cancelBtn.removeEventListener("click", onCancel);
-      confirmBtn.removeEventListener("click", onConfirm);
-      resolve(result);
-    };
+      modal.classList.add("active");
 
-    const onCancel = () => cleanup(false);
-    const onConfirm = () => cleanup(true);
+      const cleanup = (result) => {
+        modal.classList.remove("active");
+        cancelBtn.hidden = false;
+        cancelBtn.removeEventListener("click", onCancel);
+        confirmBtn.removeEventListener("click", onConfirm);
+        resolve(result);
+      };
 
-    cancelBtn.addEventListener("click", onCancel);
-    confirmBtn.addEventListener("click", onConfirm);
-  });
+      const onCancel = () => cleanup(false);
+      const onConfirm = () => cleanup(true);
+
+      cancelBtn.addEventListener("click", onCancel);
+      confirmBtn.addEventListener("click", onConfirm);
+    });
+
+  const nextPromise = modalChain.then(run, run);
+  modalChain = nextPromise.catch(() => false);
+  return nextPromise;
+}
+
+function showCleanupError(error) {
+  console.error("[cleanup] failed:", error);
+  return showModal(
+    "Could Not Close Safely",
+    `MKV Anime Batch is still open because process cleanup failed: ${error}`,
+    { confirmLabel: "OK", showCancel: false }
+  );
 }
 
 class JobController {
@@ -970,14 +1001,9 @@ class JobController {
     if (!args) return;
     const inputDir = args[args.indexOf("--input-dir") + 1];
     const generation = ++this.startGeneration;
-    const assignmentsJson = this.mode === "remux" && queueFor(this.mode).assignments.size > 0
-      ? JSON.stringify({
-          version: 1,
-          assignments: Object.fromEntries(queueFor(this.mode).assignments),
-        })
-      : null;
-
+    const assignmentSnapshot = new Map(queueFor(this.mode).assignments);
     if (!JobCoordinator.begin(this.mode)) return;
+    closeSubAssignModal();
 
     this.setRunning(true);
     clearLog(this.logEl);
@@ -1001,6 +1027,9 @@ class JobController {
     }
 
     const tracker = queueFor(this.mode);
+    const assignmentsJson = this.mode === "remux"
+      ? serializeAssignmentsForManifest(assignmentSnapshot, tracker.lastManifest)
+      : null;
     this.cleanupListeners();
 
     try {
@@ -1070,9 +1099,10 @@ class JobController {
   }
 
   async clearCache() {
-    const confirmed = await showConfirmModal(
+    const confirmed = await showModal(
       "Clear Inspection Cache",
-      `Are you sure you want to clear the persistent inspection cache for ${this.mode}?`
+      `Are you sure you want to clear the persistent inspection cache for ${this.mode}?`,
+      { confirmLabel: "Clear Cache" }
     );
     if (!confirmed) return;
 
@@ -1112,6 +1142,9 @@ class JobController {
     if (this.runBtn) this.runBtn.disabled = busy;
     for (const control of this.formControls) control.disabled = busy;
     document.querySelectorAll(`#view-${this.mode} .sub-assign-btn`).forEach(control => {
+      control.disabled = busy;
+    });
+    document.querySelectorAll(`#view-${this.mode} .empty-state-action`).forEach(control => {
       control.disabled = busy;
     });
     if (this.stopBtn) {
@@ -1171,7 +1204,7 @@ function initApp() {
   safeAddListener("btn-theme", "click", toggleTheme);
   initSteppers();
 
-  safeAddListener("btn-close", "click", () => invoke("close_window"));
+  safeAddListener("btn-close", "click", () => invoke("close_window").catch(showCleanupError));
   safeAddListener("btn-min", "click", () => invoke("minimize_window"));
   safeAddListener("btn-max", "click", async () => {
     await invoke("toggle_maximize");
@@ -1213,6 +1246,9 @@ function initApp() {
   document.querySelectorAll(".log-body").forEach(el => el.setAttribute("aria-live", "polite"));
   const modal = document.getElementById("confirm-modal");
   if (modal) { modal.setAttribute("role", "dialog"); modal.setAttribute("aria-modal", "true"); }
+  listen("cleanup-error", event => showCleanupError(event.payload)).catch(error => {
+    console.error("[cleanup-error] listener failed:", error);
+  });
   const tabGroup = document.querySelector(".pipeline-tab-group");
   if (tabGroup) tabGroup.setAttribute("role", "tablist");
   syncTabAria({ includeRole: true });
@@ -1235,6 +1271,7 @@ function initApp() {
   }
   safeAddListener("sub-assign-close", "click", closeSubAssignModal);
   safeAddListener("sub-assign-clear", "click", () => {
+    if (JobCoordinator.activeMode !== null) return;
     if (subAssignModalItemId) {
       remuxQueue.assignments.delete(subAssignModalItemId);
       remuxQueue.applyAssignmentToCard(subAssignModalItemId);
@@ -1245,6 +1282,7 @@ function initApp() {
     if (e.target === e.currentTarget) closeSubAssignModal();
   });
   safeAddListener("sub-assign-list", "click", e => {
+    if (JobCoordinator.activeMode !== null) return;
     const option = e.target.closest(".sub-assign-option");
     if (!option?.dataset.path || !subAssignModalItemId) return;
     remuxQueue.assignments.set(subAssignModalItemId, option.dataset.path);

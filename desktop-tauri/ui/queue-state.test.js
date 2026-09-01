@@ -5,6 +5,7 @@ import {
   reduceQueueEvent,
   finalizeQueueState,
   carryOverAssignments,
+  serializeAssignmentsForManifest,
 } from "./queue-state.js";
 
 test("createQueueState initializes state from manifest v1", () => {
@@ -384,6 +385,19 @@ test("carryOverAssignments returns empty map for missing or itemless manifests",
   assert.equal(carryOverAssignments(assignments, { version: 1, items: [] }).size, 0);
 });
 
+test("assignment payload excludes items removed by preflight inspection", () => {
+  const assignments = new Map([
+    ["kept.mkv", "kept.ass"],
+    ["removed.mkv", "removed.ass"],
+  ]);
+  const manifest = { version: 1, items: [{ id: "kept.mkv" }] };
+
+  assert.equal(
+    serializeAssignmentsForManifest(assignments, manifest),
+    JSON.stringify({ version: 1, assignments: { "kept.mkv": "kept.ass" } })
+  );
+});
+
 test("reduceQueueEvent treats cancelled items as terminal and counts them as cancelled", () => {
   const manifest = {
     version: 1,
@@ -466,4 +480,3 @@ test("finalizeQueueState marks unresolved items cancelled after a forced stop", 
   assert.equal(final.cancelledCount, 1);
   assert.equal(final.errorCount, 0);
 });
-
