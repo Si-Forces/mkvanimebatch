@@ -69,6 +69,13 @@ export function carryOverAssignments(previousAssignments, manifest) {
   return carried;
 }
 
+export function serializeAssignmentsForManifest(assignments, manifest) {
+  const carried = carryOverAssignments(assignments, manifest);
+  return carried.size > 0
+    ? JSON.stringify({ version: 1, assignments: Object.fromEntries(carried) })
+    : null;
+}
+
 export function reduceQueueEvent(state, event, now = Date.now()) {
   if (!state || !event || typeof event !== "object" || event.version !== 1) {
     return state;

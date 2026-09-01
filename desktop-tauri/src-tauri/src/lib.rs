@@ -1,7 +1,7 @@
 mod commands;
 
 pub use commands::*;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -44,18 +44,18 @@ pub fn run() {
             if let tauri::RunEvent::ExitRequested { api, .. } = event {
                 let state = app.state::<JobState>();
                 let scan_state = app.state::<ScanState>();
-                let job_active = state.slot.lock().is_ok_and(|slot| slot.is_some());
-                let scan_active = scan_state.is_active();
-                if job_active || scan_active {
+                if begin_shutdown(&state, &scan_state) {
                     api.prevent_exit();
                     let app = app.clone();
                     std::thread::spawn(move || {
                         let state = app.state::<JobState>();
                         let scan_state = app.state::<ScanState>();
-                        if stop_scan_internal(&scan_state).is_ok()
-                            && stop_job_internal(&state, None).is_ok()
-                        {
-                            app.exit(0);
+                        match cleanup_owned_processes(&state, &scan_state) {
+                            Ok(()) => app.exit(0),
+                            Err(error) => {
+                                cancel_shutdown(&state, &scan_state);
+                                let _ = app.emit("cleanup-error", error);
+                            }
                         }
                     });
                 }

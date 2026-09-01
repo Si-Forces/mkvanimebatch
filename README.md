@@ -291,7 +291,14 @@ python -m pytest tests/ --tb=short -v
 # Run Rust desktop tests
 cd desktop-tauri/src-tauri
 cargo test --verbose
+
+# Run desktop UI state and Sidecar Contract tests (Node.js 20+)
+cd ../..
+node --test desktop-tauri/ui/*.test.js
 ```
+
+The release workflow runs the UI tests as a required CI job. Windows and Linux
+desktop builds start only after the Python, Rust, and UI test jobs pass.
 
 ---
 
