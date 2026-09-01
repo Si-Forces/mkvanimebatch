@@ -123,11 +123,7 @@ impl ScanState {
 
     fn wait_until_empty(&self, timeout: std::time::Duration) -> Result<(), String> {
         wait_until(timeout, "directory inspection", || {
-            Ok(self
-                .active
-                .lock()
-                .map_err(|e| e.to_string())?
-                .is_none())
+            Ok(self.active.lock().map_err(|e| e.to_string())?.is_none())
         })
     }
 }
@@ -179,11 +175,7 @@ impl JobState {
 
     fn wait_until_empty(&self, timeout: std::time::Duration) -> Result<(), String> {
         wait_until(timeout, "job", || {
-            Ok(self
-                .slot
-                .lock()
-                .map_err(|e| e.to_string())?
-                .is_none())
+            Ok(self.slot.lock().map_err(|e| e.to_string())?.is_none())
         })
     }
 }
@@ -782,6 +774,18 @@ pub fn run_job(
     Ok(job_id)
 }
 
+/// Default bound on waiting for owned-process teardown to finish.
+const STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+fn combine_errors(errors: impl IntoIterator<Item = Option<String>>) -> Result<(), String> {
+    let errors: Vec<String> = errors.into_iter().flatten().collect();
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join(" "))
+    }
+}
+
 pub(crate) fn stop_job_inner(
     state: &JobState,
     scan_state: &ScanState,
@@ -797,15 +801,7 @@ pub(crate) fn stop_job_inner(
     // Stopping the job must proceed even if scan teardown fails; report both.
     let scan_error = stop_scan_internal(scan_state).err();
     let job_error = stop_job_internal(state, job_id).err();
-    let errors = [scan_error, job_error]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(errors.join(" "))
-    }
+    combine_errors([scan_error, job_error])
 }
 
 #[tauri::command]
@@ -818,7 +814,7 @@ pub fn stop_job(
 }
 
 pub fn stop_scan_internal(state: &ScanState) -> Result<(), String> {
-    stop_scan_internal_with_timeout(state, std::time::Duration::from_secs(2))
+    stop_scan_internal_with_timeout(state, STOP_TIMEOUT)
 }
 
 fn stop_scan_internal_with_timeout(
@@ -830,7 +826,7 @@ fn stop_scan_internal_with_timeout(
 }
 
 fn stop_registered_scan(state: &ScanState) -> Result<(), String> {
-    stop_registered_scan_with_timeout(state, std::time::Duration::from_secs(2))
+    stop_registered_scan_with_timeout(state, STOP_TIMEOUT)
 }
 
 fn stop_registered_scan_with_timeout(
@@ -895,7 +891,7 @@ fn stop_registered_scan_with_timeout(
 }
 
 pub fn stop_job_internal(state: &JobState, expected_id: Option<u64>) -> Result<(), String> {
-    stop_job_internal_with_timeout(state, expected_id, std::time::Duration::from_secs(2))
+    stop_job_internal_with_timeout(state, expected_id, STOP_TIMEOUT)
 }
 
 fn stop_job_internal_with_timeout(
@@ -1040,7 +1036,7 @@ fn wait_until(
 }
 
 pub fn cleanup_owned_processes(job_state: &JobState, scan_state: &ScanState) -> Result<(), String> {
-    cleanup_owned_processes_with_timeout(job_state, scan_state, std::time::Duration::from_secs(2))
+    cleanup_owned_processes_with_timeout(job_state, scan_state, STOP_TIMEOUT)
 }
 
 fn cleanup_owned_processes_with_timeout(
@@ -1048,34 +1044,19 @@ fn cleanup_owned_processes_with_timeout(
     scan_state: &ScanState,
     timeout: std::time::Duration,
 ) -> Result<(), String> {
-    let scan_error = stop_scan_internal_with_timeout(scan_state, timeout).err();
-    let job_error = stop_job_internal_with_timeout(job_state, None, timeout).err();
-
-    let scan_wait_error = if scan_error.is_none() {
-        scan_state.wait_until_empty(timeout).err()
-    } else {
-        None
-    };
-    let job_wait_error = if job_error.is_none() {
-        job_state.wait_until_empty(timeout).err()
-    } else {
-        None
-    };
-
-    let errors = [
+    // Both stops run before either wait; a failed stop already reports why, so skip its wait.
+    let scan_stop = stop_scan_internal_with_timeout(scan_state, timeout);
+    let job_stop = stop_job_internal_with_timeout(job_state, None, timeout);
+    let scan_error = scan_stop
+        .and_then(|()| scan_state.wait_until_empty(timeout))
+        .err();
+    let job_error = job_stop
+        .and_then(|()| job_state.wait_until_empty(timeout))
+        .err();
+    combine_errors([
         scan_error.map(|error| format!("Directory inspection cleanup failed: {error}")),
-        scan_wait_error.map(|error| format!("Directory inspection cleanup failed: {error}")),
         job_error.map(|error| format!("Job cleanup failed: {error}")),
-        job_wait_error.map(|error| format!("Job cleanup failed: {error}")),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>();
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(errors.join(" "))
-    }
+    ])
 }
 
 pub fn begin_shutdown(job_state: &JobState, scan_state: &ScanState) -> bool {
@@ -1394,7 +1375,8 @@ mod job_tests {
             stopping: true,
         });
 
-        let result = stop_job_internal_with_timeout(&state, None, std::time::Duration::from_millis(50));
+        let result =
+            stop_job_internal_with_timeout(&state, None, std::time::Duration::from_millis(50));
         assert!(result.is_ok());
 
         let mut slot = state.slot.lock().unwrap().take().unwrap();
