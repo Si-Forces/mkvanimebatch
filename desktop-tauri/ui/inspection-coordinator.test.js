@@ -16,13 +16,13 @@ test("inspection coordinator shares only the current same-path request", async (
   await Promise.resolve();
   assert.deepEqual(paths, ["/release"]);
 
-  resolvers[0]({ version: 1, items: [] });
+  resolvers[0]({ version: 2, items: [] });
   assert.deepEqual(await first, await shared);
 
   const replacement = inspect("/release");
   await Promise.resolve();
   assert.deepEqual(paths, ["/release", "/release"]);
-  resolvers[1]({ version: 1, items: [{ id: "01.mkv" }] });
+  resolvers[1]({ version: 2, items: [{ id: "01.mkv" }] });
   assert.equal((await replacement).items.length, 1);
 });
 

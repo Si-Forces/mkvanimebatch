@@ -1,7 +1,7 @@
 """
 Tests for performance tuning changes: storage-based --io-jobs detection,
 ffmpeg thread budgeting against effective concurrency, inspect-cache
-syscall/prune semantics, and SubIndex precomputed scoring parity.
+syscall semantics, and SubIndex precomputed scoring parity.
 """
 
 import importlib
@@ -10,6 +10,7 @@ import os
 import stat
 import sys
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -24,7 +25,7 @@ mkv_storage = importlib.import_module("mkv_storage")
 
 from mkv_assets import SubIndex, _make_sub_entry  # noqa: E402
 from mkv_domain import EpisodeInfo  # noqa: E402
-from mkv_scan import PersistentInspectCache, _create_parsed_file  # noqa: E402
+from mkv_scan import InspectCacheEntry, PersistentInspectCache, _create_parsed_file  # noqa: E402
 
 posix_only = pytest.mark.skipif(
     sys.platform == "win32",
@@ -306,7 +307,7 @@ def test_build_cli_runtime_carries_io_jobs():
     assert runtime_disabled.io_semaphore is None
 
 
-# ─── PersistentInspectCache syscall/prune semantics ──────────────────────────
+# ─── PersistentInspectCache syscall semantics ─────────────────────────────────
 def test_cache_key_resolved_once(tmp_path):
     cache_file = tmp_path / "cache.json"
     cache = PersistentInspectCache(cache_file=cache_file)
@@ -318,7 +319,44 @@ def test_cache_key_resolved_once(tmp_path):
     assert cache._resolved_keys[raw_key] == str(video.resolve())
 
 
-def test_debounced_save_skips_prune_full_save_prunes(tmp_path):
+def test_save_never_stats_source_paths(tmp_path, monkeypatch):
+    """save() must serialize the in-memory state without probing historical
+    source paths: dead entries are evicted lazily by get(), not by save()."""
+    cache_file = tmp_path / "cache.json"
+    cache = PersistentInspectCache(cache_file=cache_file)
+    live = tmp_path / "live.mkv"
+    live.write_bytes(b"a")
+    cache.put(live, {"id": 1})
+
+    dead_keys = [str(tmp_path / f"gone_{i}.mkv") for i in range(1000)]
+    with cache._lock:
+        for key in dead_keys:
+            cache._data[key] = cast(InspectCacheEntry, {"size": 1, "mtime": 1.0, "json_data": {"id": 0}})
+
+    touched: list[str] = []
+    real_exists = Path.exists
+    real_stat = Path.stat
+
+    def counting_exists(self, *args, **kwargs):
+        touched.append(str(self))
+        return real_exists(self, *args, **kwargs)
+
+    def counting_stat(self, *args, **kwargs):
+        touched.append(str(self))
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "exists", counting_exists)
+    monkeypatch.setattr(Path, "stat", counting_stat)
+    cache.save()
+
+    assert not set(dead_keys).intersection(touched)  # zero source-path syscalls
+    on_disk = json.loads(cache_file.read_text())
+    assert str(live.resolve()) in on_disk
+    for key in dead_keys:
+        assert key in on_disk  # save persists as-is; eviction is get()'s job
+
+
+def test_get_evicts_stale_entry_and_next_save_drops_it(tmp_path):
     cache_file = tmp_path / "cache.json"
     cache = PersistentInspectCache(cache_file=cache_file)
     live = tmp_path / "live.mkv"
@@ -327,22 +365,28 @@ def test_debounced_save_skips_prune_full_save_prunes(tmp_path):
     dead.write_bytes(b"b")
     cache.put(live, {"id": 1})
     cache.put(dead, {"id": 2})
-    cache.save(prune=False)
-
-    on_disk = json.loads(cache_file.read_text())
+    cache.save()
     dead_key = str(dead.resolve())
     live_key = str(live.resolve())
-    assert dead_key in on_disk  # intermediate save does no stat pass
-    assert live_key in on_disk
+    assert dead_key in json.loads(cache_file.read_text())
+    assert cache._dirty is False
 
-    # Full save prunes entries whose source vanished. A write must be
-    # pending for pruning to run (saves skip entirely when not dirty).
+    # Missing source: get() self-heals the entry and dirties the cache.
     dead.unlink()
-    cache.put(live, {"id": 1})
+    assert cache.get(dead) is None
+    assert dead_key not in cache._data
+    assert cache._dirty is True
+
     cache.save()
     on_disk = json.loads(cache_file.read_text())
     assert dead_key not in on_disk
     assert live_key in on_disk
+
+    # Changed source (size/mtime mismatch) is evicted the same way.
+    live.write_bytes(b"different content")
+    assert cache.get(live) is None
+    assert live_key not in cache._data
+    assert cache._dirty is True
 
 
 def test_debounced_save_interval_skip_stays_dirty(tmp_path, monkeypatch):
@@ -369,7 +413,7 @@ def test_debounced_save_interval_skip_stays_dirty(tmp_path, monkeypatch):
     snapshot = cache_file.read_text()
     cache.put(video, {"id": 9})  # dirty again
     clock.now += 10  # still inside the debounce window
-    cache.save(min_interval=60.0, prune=False)  # skipped
+    cache.save(min_interval=60.0)  # skipped
     assert cache._dirty is True
     assert cache_file.read_text() == snapshot
 

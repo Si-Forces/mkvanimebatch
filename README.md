@@ -42,7 +42,7 @@ Available both as a fast **Python CLI suite** and as a native **Tauri v2 Desktop
 ### 10-Tier Audio Picker & Opus Transcoding
 * **Dialogue Priority**: Automatically scores audio tracks, favoring Japanese stereo and multi-channel audio tracks.
 * **Commentary Track Isolation**: Isolates commentary tracks into a secondary fallback pool, ensuring voice-actor/director commentary never overrides main film dialogue.
-* **High-Efficiency Opus Conversion**: Transcodes audio to high-quality Opus with customizable bitrates (e.g. `128k`, `192k`) and compression complexity (`0`–`10`, default: `10`).
+* **High-Efficiency Opus Conversion**: Transcodes audio to high-quality Opus with customizable bitrates (e.g. `128k`, `192k`) and compression complexity (`0`–`10`, default: `5`).
 
 ### Font Registry & Asset Deduplication
 * **Embedded Font Detection**: Identifies font attachments from supported filename extensions and mkvmerge content types before transactional extraction and deduplication.

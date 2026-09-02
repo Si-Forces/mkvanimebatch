@@ -157,10 +157,9 @@ def test_process_job_reports_cancelled_without_start_event(tmp_path, monkeypatch
     monkeypatch.setattr(mkv_remux_job, "emit_item_start", start)
     monkeypatch.setattr(mkv_remux_job, "emit_item_complete", complete)
 
-    result = mkv_remux_job.process_job(job=job,
-    temp_dir=None,
-    fonts=FontInfo(args=(), count=0),
-    opus_bitrate="192k", inspection_results={}, cancel_token=_cancelled_token(),)
+    result = mkv_remux_job.process_job(
+        job=job, opus_bitrate="192k", inspection_results={}, cancel_token=_cancelled_token(),
+    )
 
     start.assert_not_called()
     complete.assert_called_once_with(job.item_id, job.video_name, "cancelled")
@@ -206,35 +205,40 @@ def _runtime(tmp_path: Path) -> CliRuntime:
     )
 
 
-def test_run_batch_raises_before_remaining_directories_once_cancelled(tmp_path):
+def test_extract_pipeline_stops_between_releases_once_cancelled(tmp_path, monkeypatch):
     runtime = _runtime(tmp_path)
     visited = []
+    real_resolve = mkv_extract.resolve_output_dir
 
-    def process_directory(pool, mkv_dir, dir_mkvs):
+    def resolve_and_cancel(mkv_dir, *args, **kwargs):
         visited.append(mkv_dir.name)
         runtime.cancel_token.request()
-        return True
+        return real_resolve(mkv_dir, *args, **kwargs)
 
+    monkeypatch.setattr(mkv_extract, "resolve_output_dir", resolve_and_cancel)
+
+    config = mkv_extract.ExtractRunConfig(runtime=runtime, root_input_dir=Path("/src"))
     grouped = {Path("/src/a"): [], Path("/src/b"): [], Path("/src/c"): []}
     with pytest.raises(CancelledError):
-        mkv_runner.run_batch(runtime, grouped, process_directory)
+        mkv_extract._run_pipeline(grouped, config)
 
     assert visited == ["a"]
 
 
-def test_run_batch_unaffected_without_cancellation(tmp_path):
+def test_extract_pipeline_unaffected_without_cancellation(tmp_path):
     runtime = _runtime(tmp_path)
-    visited = []
 
-    def process_directory(pool, mkv_dir, dir_mkvs):
-        visited.append(mkv_dir.name)
-        return True
+    def parsed_file(directory: Path, name: str) -> ParsedFile:
+        path = directory / name
+        return ParsedFile(path=path, name=name, stem=path.stem, parsed=None)
 
-    grouped = {Path("/src/a"): [], Path("/src/b"): []}
-    overall = mkv_runner.run_batch(runtime, grouped, process_directory)
+    grouped = {
+        Path("/src/a"): [parsed_file(Path("/src/a"), "01.mkv")],
+        Path("/src/b"): [parsed_file(Path("/src/b"), "02.mkv")],
+    }
+    config = mkv_extract.ExtractRunConfig(runtime=runtime, root_input_dir=Path("/src"))
 
-    assert overall is True
-    assert visited == ["a", "b"]
+    assert mkv_extract._run_pipeline(grouped, config) is True
 
 
 # ─── token pass-through to the subprocess layer ──────────────────────────────
@@ -280,11 +284,12 @@ def test_process_job_forwards_token_into_ffmpeg_conversion(monkeypatch, tmp_path
     monkeypatch.setattr(mkv_remux_job, "run_subprocess_cancellable", fake_run)
     token = CancelToken()
 
+    (tmp_path / "out").mkdir()  # scratch space is created beside the output
     with pytest.raises(CancelledError):
-        mkv_remux_job.process_job(job=job,
-        temp_dir=tmp_path,
-        fonts=FontInfo(args=(), count=0),
-        opus_bitrate="192k", inspection_results={parsed.path: InspectionResult(video=json_data)}, cancel_token=token,)
+        mkv_remux_job.process_job(
+            job=job, opus_bitrate="192k",
+            inspection_results={parsed.path: InspectionResult(video=json_data)}, cancel_token=token,
+        )
 
     assert seen["cmd"] == "ffmpeg"
     assert seen["cancel_token"] is token
@@ -337,8 +342,6 @@ def test_cleanup_error_does_not_mask_cancellation(monkeypatch, tmp_path):
     with pytest.raises(CancelledError, match="terminated"):
         mkv_remux_job.process_job(
             job=job,
-            temp_dir=None,
-            fonts=FontInfo(args=(), count=0),
             opus_bitrate="192k",
             inspection_results={video: InspectionResult.success({})},
             cancel_token=CancelToken(),
@@ -474,8 +477,8 @@ def test_inspect_videos_does_not_launch_children_if_cancelled(monkeypatch):
     mock_run.assert_not_called()
     pool.shutdown(wait=True)
 
-def test_run_batch_saves_persistent_cache_on_cancellation():
-    """run_batch must flush persistent_cache.save() in finally even when cancelled."""
+def test_extract_pipeline_saves_persistent_cache_on_cancellation():
+    """_run_pipeline must flush persistent_cache.save() in finally even when cancelled."""
     token = CancelToken()
     token.request()  # pre-cancel
 
@@ -491,9 +494,10 @@ def test_run_batch_saves_persistent_cache_on_cancellation():
     mkvs_by_dir = {
         Path("/fake/dir"): [ParsedFile(path=Path("/fake/dir/01.mkv"), name="01.mkv", stem="01", parsed=None)]
     }
+    config = mkv_extract.ExtractRunConfig(runtime=runtime, root_input_dir=Path("/fake"))
 
     with pytest.raises(CancelledError):
-        mkv_runner.run_batch(runtime, mkvs_by_dir, lambda *args: True)
+        mkv_extract._run_pipeline(mkvs_by_dir, config)
 
     mock_cache.save.assert_called_once_with()
 

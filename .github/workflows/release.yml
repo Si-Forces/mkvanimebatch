@@ -368,7 +368,7 @@ jobs:
           EMPTY="$(mktemp -d)"
           trap 'rm -rf "$EMPTY"' EXIT
           "$REMUX" --plan --no-cache --input-dir "$EMPTY" > "$EMPTY/manifest.json"
-          python -c 'import json, pathlib, sys; m=json.loads(pathlib.Path(sys.argv[1]).read_text()); assert m == {"version": 1, "items": []}' "$EMPTY/manifest.json"
+          python -c 'import json, pathlib, sys; m=json.loads(pathlib.Path(sys.argv[1]).read_text()); assert m == {"version": 2, "subtitle_candidates": {}, "items": []}' "$EMPTY/manifest.json"
 
       # ── Linux system deps ─────────────────────────────────────────────────────
       - name: Install Linux system dependencies
