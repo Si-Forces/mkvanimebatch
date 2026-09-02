@@ -496,3 +496,22 @@ def test_run_batch_saves_persistent_cache_on_cancellation():
         mkv_runner.run_batch(runtime, mkvs_by_dir, lambda *args: True)
 
     mock_cache.save.assert_called_once_with()
+
+
+def test_plan_mode_cancellation_exits_130(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["mkv_remux.py", "--plan", "--input-dir", str(tmp_path)],
+    )
+
+    def mock_manifest(*args, **kwargs):
+        raise CancelledError("User cancelled")
+
+    monkeypatch.setattr(mkv_remux, "generate_inspection_manifest", mock_manifest)
+
+    with pytest.raises(SystemExit) as exc_info:
+        mkv_remux.main()
+
+    assert exc_info.value.code == 130
+

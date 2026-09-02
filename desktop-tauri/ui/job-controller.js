@@ -141,18 +141,28 @@ export class JobController {
       : null;
     this.cleanupListeners();
 
+    const earlyEvents = [];
+    const earlyDone = [];
+
     try {
       this.unlistenLog = await this.runtime.listen("job-log", e => this.runtime.appendLog(this.logEl, e.payload));
       this.unlistenEvent = await this.runtime.listen("job-event", e => {
-        const sameJob = this.jobId === null || e.payload?.job_id === this.jobId;
-        if (sameJob && (!e.payload?.mode || e.payload.mode === this.mode)) {
+        if (this.jobId === null) {
+          earlyEvents.push(e);
+          return;
+        }
+        if (e.payload?.job_id === this.jobId && (!e.payload?.mode || e.payload.mode === this.mode)) {
           tracker.handleEvent(e.payload);
         }
       });
       this.unlistenDone = await this.runtime.listen("job-done", e => {
         const payload = e.payload;
+        if (this.jobId === null) {
+          earlyDone.push(e);
+          return;
+        }
         if (typeof payload === "object" && payload?.mode && payload.mode !== this.mode) return;
-        if (this.jobId !== null && payload?.job_id !== this.jobId) return;
+        if (payload?.job_id !== this.jobId) return;
         this.onDone(typeof payload === "object" ? payload.code : payload);
       });
     } catch (err) {
@@ -172,7 +182,21 @@ export class JobController {
       this.runtime.coordinator.isStarting = false;
       this.launchPromise = this.runtime.invoke("run_job", { mode: this.mode, args, assignmentsJson });
       const jobId = await this.launchPromise;
-      if (this.running) this.jobId = jobId;
+      if (this.running) {
+        this.jobId = jobId;
+        for (const e of earlyEvents) {
+          if (e.payload?.job_id === this.jobId && (!e.payload?.mode || e.payload.mode === this.mode)) {
+            tracker.handleEvent(e.payload);
+          }
+        }
+        for (const e of earlyDone) {
+          const payload = e.payload;
+          if (typeof payload === "object" && payload?.job_id === this.jobId && (!payload?.mode || payload.mode === this.mode)) {
+            this.onDone(typeof payload === "object" ? payload.code : payload);
+            break;
+          }
+        }
+      }
     } catch (err) {
       this.runtime.appendLog(this.logEl, `[ERROR] ${err}`);
       tracker.finalize(-1);
