@@ -42,7 +42,7 @@ jobs:
 
       - name: Check Python syntax compilation
         run: |
-          python -m py_compile mkv_events.py mkv_proc.py mkv_domain.py mkv_fonts.py mkv_scan.py mkv_assets.py mkv_storage.py mkv_runner.py mkv_extract.py mkv_remux.py
+          python -m py_compile mkv_events.py mkv_proc.py mkv_domain.py mkv_fonts.py mkv_scan.py mkv_assets.py mkv_storage.py mkv_runner.py mkv_manifest.py mkv_remux_job.py mkv_extract.py mkv_remux.py
 
       - name: Set up Node.js for Pyright
         uses: actions/setup-node@v4
@@ -159,8 +159,10 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Run UI contract tests
-        run: node --test desktop-tauri/ui/*.test.js
+      - name: Run UI syntax and contract tests
+        run: |
+          node --check desktop-tauri/ui/app.js
+          node --test desktop-tauri/ui/*.test.js
 
   # ────────────────────────────────────────────────────────────────────────────
   # 5. CI Completion Gate (Required Check Summary)
@@ -206,22 +208,27 @@ jobs:
 
       - name: Build sidecars
         shell: pwsh
+        run: ./desktop-tauri/build-sidecars.ps1
+
+      - name: Smoke-test sidecars
+        shell: pwsh
         run: |
-          $OutDir = "desktop-tauri/src-tauri/binaries"
-          New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
-          $Triple = "x86_64-pc-windows-msvc"
-          python -m PyInstaller --onefile --console `
-            --name "mkv-remux-$Triple" `
-            --distpath $OutDir `
-            --workpath "pyinstaller-work-remux" `
-            --specpath "pyinstaller-spec-remux" `
-            --noconfirm mkv_remux.py
-          python -m PyInstaller --onefile --console `
-            --name "mkv-extract-$Triple" `
-            --distpath $OutDir `
-            --workpath "pyinstaller-work-extract" `
-            --specpath "pyinstaller-spec-extract" `
-            --noconfirm mkv_extract.py
+          $Binaries = "desktop-tauri/src-tauri/binaries"
+          $Remux = Join-Path $Binaries "mkv-remux-x86_64-pc-windows-msvc.exe"
+          $Extract = Join-Path $Binaries "mkv-extract-x86_64-pc-windows-msvc.exe"
+          if ((Get-Item $Remux).Length -eq 0 -or (Get-Item $Extract).Length -eq 0) {
+            throw "Built sidecar is empty"
+          }
+          & $Remux --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "mkv-remux --help failed" }
+          & $Extract --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "mkv-extract --help failed" }
+          $Empty = Join-Path $env:RUNNER_TEMP "empty-release"
+          New-Item -ItemType Directory -Force -Path $Empty | Out-Null
+          $Manifest = (& $Remux --plan --no-cache --input-dir $Empty) | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $Manifest.version -ne 1 -or $Manifest.items.Count -ne 0) {
+            throw "mkv-remux empty-directory plan contract failed"
+          }
 
       # ── Rust + Tauri ─────────────────────────────────────────────────────────
       - name: Install Rust stable
@@ -262,6 +269,17 @@ jobs:
 
           # Create Portable Zip
           Compress-Archive -Path "$StageDir\*" -DestinationPath "$OutDir\MKV_Anime_Batch_Portable_win64.zip" -Force
+
+          foreach ($Artifact in @(
+            "$OutDir\mkv-anime-batch.exe",
+            "$StageDir\mkv-remux-x86_64-pc-windows-msvc.exe",
+            "$StageDir\mkv-extract-x86_64-pc-windows-msvc.exe",
+            "$OutDir\MKV_Anime_Batch_Portable_win64.zip"
+          )) {
+            if (-not (Test-Path $Artifact) -or (Get-Item $Artifact).Length -eq 0) {
+              throw "Missing or empty packaged artifact: $Artifact"
+            }
+          }
 
       - name: Publish Windows files to release
         uses: softprops/action-gh-release@v2
@@ -336,22 +354,21 @@ jobs:
         run: pip install pyinstaller
 
       - name: Build sidecars
+        run: bash desktop-tauri/build-sidecars.sh
+
+      - name: Smoke-test sidecars
         run: |
-          OUT="desktop-tauri/src-tauri/binaries"
-          TRIPLE="x86_64-unknown-linux-gnu"
-          mkdir -p "$OUT"
-          python3 -m PyInstaller --onefile --console \
-            --name "mkv-remux-$TRIPLE" \
-            --distpath "$OUT" \
-            --workpath /tmp/pyinstaller-work-remux \
-            --specpath /tmp/pyinstaller-spec-remux \
-            --noconfirm mkv_remux.py
-          python3 -m PyInstaller --onefile --console \
-            --name "mkv-extract-$TRIPLE" \
-            --distpath "$OUT" \
-            --workpath /tmp/pyinstaller-work-extract \
-            --specpath /tmp/pyinstaller-spec-extract \
-            --noconfirm mkv_extract.py
+          BINARIES="desktop-tauri/src-tauri/binaries"
+          REMUX="$BINARIES/mkv-remux-x86_64-unknown-linux-gnu"
+          EXTRACT="$BINARIES/mkv-extract-x86_64-unknown-linux-gnu"
+          test -s "$REMUX"
+          test -s "$EXTRACT"
+          "$REMUX" --help >/dev/null
+          "$EXTRACT" --help >/dev/null
+          EMPTY="$(mktemp -d)"
+          trap 'rm -rf "$EMPTY"' EXIT
+          "$REMUX" --plan --no-cache --input-dir "$EMPTY" > "$EMPTY/manifest.json"
+          python -c 'import json, pathlib, sys; m=json.loads(pathlib.Path(sys.argv[1]).read_text()); assert m == {"version": 1, "items": []}' "$EMPTY/manifest.json"
 
       # ── Linux system deps ─────────────────────────────────────────────────────
       - name: Install Linux system dependencies
@@ -391,6 +408,27 @@ jobs:
           find desktop-tauri/src-tauri/target/release/bundle/appimage -name "*.AppImage" -exec cp {} /tmp/linux-release/ \;
           find desktop-tauri/src-tauri/target/release/bundle/deb -name "*.deb" -exec cp {} /tmp/linux-release/ \;
           find desktop-tauri/src-tauri/target/release/bundle/rpm -name "*.rpm" -exec cp {} /tmp/linux-release/ \;
+
+      - name: Verify bundled sidecars
+        run: |
+          DEB="$(find /tmp/linux-release -name '*.deb' -print -quit)"
+          RPM="$(find /tmp/linux-release -name '*.rpm' -print -quit)"
+          APPIMAGE="$(find /tmp/linux-release -name '*.AppImage' -print -quit)"
+          test -n "$DEB" && test -n "$RPM" && test -n "$APPIMAGE"
+
+          dpkg-deb --contents "$DEB" > /tmp/deb-contents.txt
+          grep -q 'mkv-remux' /tmp/deb-contents.txt
+          grep -q 'mkv-extract' /tmp/deb-contents.txt
+
+          rpm -qlp "$RPM" > /tmp/rpm-contents.txt
+          grep -q 'mkv-remux' /tmp/rpm-contents.txt
+          grep -q 'mkv-extract' /tmp/rpm-contents.txt
+
+          chmod +x "$APPIMAGE"
+          mkdir -p /tmp/appimage-contents
+          (cd /tmp/appimage-contents && "$APPIMAGE" --appimage-extract >/dev/null)
+          find /tmp/appimage-contents/squashfs-root -name 'mkv-remux*' -print -quit | grep -q .
+          find /tmp/appimage-contents/squashfs-root -name 'mkv-extract*' -print -quit | grep -q .
 
       - name: Publish Linux bundles to release
         uses: softprops/action-gh-release@v2

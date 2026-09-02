@@ -18,7 +18,7 @@ from pathlib import Path
 from mkv_domain import FONT_EXTENSIONS, FONT_MIME, natural_sort_key, safe_filename
 from mkv_proc import hash_file
 
-_FONT_DIR_NAMES = frozenset({"fonts", "font", "attachments"})
+FONT_DIR_NAMES = frozenset({"fonts", "font", "attachments"})
 
 logger = logging.getLogger("mkv_automation")
 
@@ -79,7 +79,7 @@ def find_fonts_dir(input_dir: Path, override: Path | None = None, fonts_dir_cach
 
     if input_dir.is_dir():
         for entry in sorted(input_dir.iterdir()):
-            if entry.is_dir() and entry.name.lower() in _FONT_DIR_NAMES:
+            if entry.is_dir() and entry.name.lower() in FONT_DIR_NAMES:
                 return _store(entry)
 
     return _store(exact)

@@ -39,6 +39,28 @@ test("createQueueState initializes state from manifest v1", () => {
   assert.deepEqual(item1.metadata, { resolution: "1080p", video_codec: "HEVC" });
 });
 
+test("createQueueState preserves inspection failures for presentation", () => {
+  const state = createQueueState({
+    version: 1,
+    items: [{
+      id: "broken.mkv",
+      name: "broken.mkv",
+      metadata: {
+        resolution: null,
+        video_codec: null,
+        video_tag: null,
+        audio_summary: null,
+        has_flac: null,
+        sub_summary: null,
+        fonts_count: null,
+      },
+      inspection_error: "mkvmerge inspection timed out",
+    }],
+  });
+
+  assert.equal(state.items.get("broken.mkv").inspectionError, "mkvmerge inspection timed out");
+});
+
 test("createQueueState correctly distinguishes duplicate basenames in different directories", () => {
   const manifest = {
     version: 1,
@@ -479,4 +501,5 @@ test("finalizeQueueState marks unresolved items cancelled after a forced stop", 
   assert.equal(final.items.get("ep1.mkv").status, "cancelled");
   assert.equal(final.cancelledCount, 1);
   assert.equal(final.errorCount, 0);
+  assert.equal(final.batchCancelled, true);
 });
