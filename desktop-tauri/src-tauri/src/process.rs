@@ -12,7 +12,7 @@ use sysinfo::{Pid, ProcessesToUpdate, System};
 use tauri::State;
 
 #[allow(dead_code)]
-const CREATE_NO_WINDOW: u32 = 0x08000000;
+pub(crate) const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 #[cfg(unix)]
 fn signal_process_group(pid: u32, signal: i32, action: &str) -> Result<(), String> {
@@ -493,4 +493,290 @@ pub fn close_window(
         cancel_shutdown(&state, &scan_state);
         error.to_string()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_job_state_initialization_and_increment() {
+        let state = JobState::default();
+        assert!(state.slot.lock().unwrap().is_none());
+        assert_eq!(state.next_id.load(Ordering::SeqCst), 1);
+        let id1 = state.next_id.fetch_add(1, Ordering::SeqCst);
+        let id2 = state.next_id.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(id1, 1);
+        assert_eq!(id2, 2);
+        assert_eq!(state.next_id.load(Ordering::SeqCst), 3);
+    }
+}
+
+#[cfg(test)]
+mod job_tests {
+    use super::*;
+    use std::process::Command;
+    use std::sync::Arc;
+
+    #[test]
+    fn test_job_slot_transitions() {
+        let mut slot = JobSlot {
+            id: 42,
+            child: Command::new("rustc").arg("--version").spawn().unwrap(),
+            stopping: false,
+        };
+        assert_eq!(slot.id, 42);
+        assert!(!slot.stopping);
+        slot.stopping = true;
+        assert!(slot.stopping);
+        let _ = slot.child.wait();
+    }
+
+    #[test]
+    fn test_wait_for_job_slot_release_waits_for_cleanup() {
+        let state = Arc::new(JobState::default());
+        *state.slot.lock().unwrap() = Some(JobSlot {
+            id: 42,
+            child: Command::new("rustc").arg("--version").spawn().unwrap(),
+            stopping: true,
+        });
+
+        let cleanup_state = Arc::clone(&state);
+        let cleanup = thread::spawn(move || {
+            thread::sleep(std::time::Duration::from_millis(100));
+            let mut slot = cleanup_state.slot.lock().unwrap().take().unwrap();
+            let _ = slot.child.wait();
+        });
+
+        assert!(state
+            .wait_until_released(42, std::time::Duration::from_secs(1))
+            .is_ok());
+        cleanup.join().unwrap();
+    }
+
+    #[test]
+    fn test_wait_for_job_slot_release_times_out_while_owned() {
+        let state = JobState::default();
+        *state.slot.lock().unwrap() = Some(JobSlot {
+            id: 42,
+            child: Command::new("rustc").arg("--version").spawn().unwrap(),
+            stopping: true,
+        });
+
+        let result = state.wait_until_released(42, std::time::Duration::from_millis(10));
+        assert!(result.unwrap_err().contains("Timed out"));
+        let mut slot = state.slot.lock().unwrap().take().unwrap();
+        let _ = slot.child.wait();
+    }
+
+    #[test]
+    fn test_stale_stop_job_does_not_stop_active_scan() {
+        let job_state = JobState::default();
+        let scan_state = ScanState::default();
+
+        *job_state.slot.lock().unwrap() = Some(JobSlot {
+            id: 7,
+            child: Command::new("rustc").arg("--version").spawn().unwrap(),
+            stopping: false,
+        });
+
+        *scan_state.active.lock().unwrap() = Some((1, 99999));
+
+        let result = stop_job_inner(&job_state, &scan_state, Some(99));
+        assert!(result.is_ok());
+        assert_eq!(*scan_state.active.lock().unwrap(), Some((1, 99999)));
+
+        let empty_job_state = JobState::default();
+        let result_empty = stop_job_inner(&empty_job_state, &scan_state, Some(99));
+        assert!(result_empty.is_ok());
+        assert_eq!(*scan_state.active.lock().unwrap(), Some((1, 99999)));
+
+        let mut slot = job_state.slot.lock().unwrap().take().unwrap();
+        let _ = slot.child.wait();
+    }
+
+    #[test]
+    fn test_stop_job_proceeds_when_scan_teardown_fails() {
+        let scan_state = Arc::new(ScanState::default());
+        let poison_scan = Arc::clone(&scan_state);
+        let _ = thread::spawn(move || {
+            let _lock = poison_scan.start_lock.lock().unwrap();
+            panic!("poison scan teardown");
+        })
+        .join();
+
+        let job_state = JobState::default();
+        *job_state.slot.lock().unwrap() = Some(JobSlot {
+            id: 7,
+            child: Command::new("rustc").arg("--version").spawn().unwrap(),
+            stopping: false,
+        });
+
+        let error = stop_job_inner(&job_state, &scan_state, Some(7)).unwrap_err();
+        assert!(error.contains("poisoned"));
+        // The job stop still ran despite the scan failure: the slot is stopping.
+        assert!(job_state
+            .slot
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|slot| slot.stopping));
+
+        let mut slot = job_state.slot.lock().unwrap().take().unwrap();
+        let _ = slot.child.wait();
+    }
+
+    #[test]
+    fn test_stop_job_internal_succeeds_even_if_slot_release_times_out() {
+        let state = JobState::default();
+        *state.slot.lock().unwrap() = Some(JobSlot {
+            id: 42,
+            child: Command::new("rustc").arg("--version").spawn().unwrap(),
+            stopping: true,
+        });
+
+        let result =
+            stop_job_internal_with_timeout(&state, None, std::time::Duration::from_millis(50));
+        assert!(result.is_ok());
+
+        let mut slot = state.slot.lock().unwrap().take().unwrap();
+        let _ = slot.child.wait();
+    }
+}
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    use std::process::Command;
+    use std::sync::Arc;
+
+    #[test]
+    fn test_cleanup_attempts_scan_and_job_teardown() {
+        let scan_state = Arc::new(ScanState::default());
+        let poison_scan = Arc::clone(&scan_state);
+        let _ = thread::spawn(move || {
+            let _lock = poison_scan.start_lock.lock().unwrap();
+            panic!("poison scan cleanup");
+        })
+        .join();
+
+        let job_state = Arc::new(JobState::default());
+        let poison_job = Arc::clone(&job_state);
+        let _ = thread::spawn(move || {
+            let _lock = poison_job.slot.lock().unwrap();
+            panic!("poison job cleanup");
+        })
+        .join();
+
+        let error = cleanup_owned_processes(&job_state, &scan_state).unwrap_err();
+        assert!(error.contains("Directory inspection cleanup failed"));
+        assert!(error.contains("Job cleanup failed"));
+    }
+
+    #[test]
+    fn test_scan_startup_is_visible_before_process_registration() {
+        let job_state = JobState::default();
+        let scan_state = ScanState::default();
+
+        let _startup = scan_state.start_lock.lock().unwrap();
+        assert!(begin_shutdown(&job_state, &scan_state));
+        assert!(scan_state.ensure_accepting_starts().is_err());
+        assert!(reserve_job_slot(&job_state).is_err());
+    }
+
+    #[test]
+    fn test_cancel_shutdown_restores_accepting_starts() {
+        let job_state = JobState::default();
+        let scan_state = ScanState::default();
+
+        begin_shutdown(&job_state, &scan_state);
+        assert!(scan_state.ensure_accepting_starts().is_err());
+        assert!(reserve_job_slot(&job_state).is_err());
+
+        cancel_shutdown(&job_state, &scan_state);
+        assert!(scan_state.ensure_accepting_starts().is_ok());
+        assert!(reserve_job_slot(&job_state).is_ok());
+    }
+
+    #[test]
+    fn test_cleanup_fails_if_job_slot_not_released() {
+        let job_state = JobState::default();
+        let scan_state = ScanState::default();
+
+        *job_state.slot.lock().unwrap() = Some(JobSlot {
+            id: 42,
+            child: Command::new("rustc").arg("--version").spawn().unwrap(),
+            stopping: true,
+        });
+
+        let error = cleanup_owned_processes_with_timeout(
+            &job_state,
+            &scan_state,
+            std::time::Duration::from_millis(50),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("Timed out"));
+        assert!(error.contains("Job cleanup failed"));
+
+        let mut slot = job_state.slot.lock().unwrap().take().unwrap();
+        let _ = slot.child.wait();
+    }
+}
+
+#[cfg(all(test, unix))]
+mod unix_scan_tests {
+    use super::*;
+    use std::os::unix::process::CommandExt;
+    use std::process::Command;
+    use std::sync::Arc;
+
+    #[test]
+    fn test_stop_scan_waits_until_process_is_reaped_and_registration_clears() {
+        let state = Arc::new(ScanState::default());
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 30"]);
+        command.process_group(0);
+        let mut child = command.spawn().unwrap();
+        let pid = child.id();
+        *state.active.lock().unwrap() = Some((1, pid));
+
+        let wait_state = Arc::clone(&state);
+        let waiter = thread::spawn(move || {
+            let registration = ScanRegistration {
+                state: &wait_state,
+                id: 1,
+            };
+            let _ = child.wait();
+            thread::sleep(std::time::Duration::from_millis(200));
+            drop(registration);
+        });
+
+        assert!(stop_registered_scan(&state).is_ok());
+        assert!(!state.is_active());
+        waiter.join().unwrap();
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_scan_tests {
+    use super::*;
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+
+    #[test]
+    fn test_stopping_an_already_exited_scan_succeeds() {
+        let state = ScanState::default();
+        let mut child = Command::new("cmd")
+            .args(["/C", "exit", "/B", "0"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        *state.active.lock().unwrap() = Some((1, pid));
+
+        assert!(stop_registered_scan(&state).is_ok());
+        assert!(!state.is_active());
+    }
 }

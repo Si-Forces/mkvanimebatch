@@ -170,17 +170,18 @@ export function reduceQueueEvent(state, event, now = Date.now()) {
       };
       const { completed = 0, skipped = 0, cancelledCount = 0, failed = 0, ...itemPatch } = outcome;
 
-      // Only measured work gets a duration: skips and dry-run plans are
-      // decided during planning without an item_start, so falling back to
-      // batch-elapsed time would report a meaningless number. Cancelled
-      // items that had started still report how long they ran. Sub-second
+      // Only measured work gets a duration: skips, dry-run plans, and
+      // items that error before starting have no item_start, so falling
+      // back to batch-elapsed time would report a meaningless number.
+      // Items that had started still report how long they ran. Sub-second
       // jobs render as "<0.1" so fast extractions don't display as "0.0s".
       const timed =
-        outcome.status === "completed" ||
-        outcome.status === "error" ||
-        (outcome.status === "cancelled" && prevItem.startTime !== null);
-      const startTime = prevItem.startTime || state.batchStartTime;
-      const elapsedMs = timed && startTime ? now - startTime : null;
+        prevItem.startTime !== null &&
+        (outcome.status === "completed" ||
+         outcome.status === "error" ||
+         outcome.status === "cancelled");
+      const startTime = prevItem.startTime;
+      const elapsedMs = timed && startTime !== null ? now - startTime : null;
       const dur =
         elapsedMs === null ? null
         : elapsedMs < 100 ? "<0.1"

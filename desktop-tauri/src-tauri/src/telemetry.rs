@@ -150,3 +150,88 @@ pub fn get_system_telemetry(state: State<'_, TelemetryState>) -> Result<Telemetr
         io_mb_s,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_is_engine_process_ancestry_and_naming() {
+        let self_pid = Pid::from_u32(100);
+        let sidecar_pid = Pid::from_u32(101);
+        let grandchild_pid = Pid::from_u32(102);
+        let unrelated_sidecar = Pid::from_u32(201);
+        let unrelated_grandchild = Pid::from_u32(202);
+        let unrelated_app = Pid::from_u32(300);
+
+        let mut parents = HashMap::new();
+        parents.insert(sidecar_pid, self_pid);
+        parents.insert(grandchild_pid, sidecar_pid);
+        parents.insert(unrelated_sidecar, Pid::from_u32(999));
+        parents.insert(unrelated_grandchild, unrelated_sidecar);
+        parents.insert(unrelated_app, self_pid);
+
+        let parent_fn = |p| parents.get(&p).copied();
+
+        // 1. self_pid is always engine
+        assert!(is_engine_process(
+            self_pid,
+            "mkvanimebatch",
+            parent_fn,
+            self_pid
+        ));
+
+        // 2. sidecar descendant of self_pid is engine
+        assert!(is_engine_process(
+            sidecar_pid,
+            "mkv-remux-x86_64",
+            parent_fn,
+            self_pid
+        ));
+
+        // 3. grandchild (mkvmerge, mkvextract, ffmpeg) descending from self_pid is engine
+        assert!(is_engine_process(
+            grandchild_pid,
+            "mkvmerge",
+            parent_fn,
+            self_pid
+        ));
+
+        // 4. unrelated sidecar or grandchild with different ancestor is NOT engine
+        assert!(!is_engine_process(
+            unrelated_sidecar,
+            "mkv-remux-x86_64",
+            parent_fn,
+            self_pid
+        ));
+        assert!(!is_engine_process(
+            unrelated_grandchild,
+            "mkvmerge",
+            parent_fn,
+            self_pid
+        ));
+
+        // 5. unrelated binary even if child of self_pid is NOT engine
+        assert!(!is_engine_process(
+            unrelated_app,
+            "chrome",
+            parent_fn,
+            self_pid
+        ));
+
+        // 6. Unicode process names must not panic on UTF-8 character boundaries
+        assert!(!is_engine_process(
+            sidecar_pid,
+            "ééééé",
+            parent_fn,
+            self_pid
+        ));
+        assert!(!is_engine_process(
+            sidecar_pid,
+            "アニメプロセス",
+            parent_fn,
+            self_pid
+        ));
+    }
+}
