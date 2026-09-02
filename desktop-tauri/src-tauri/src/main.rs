@@ -9,6 +9,10 @@ fn main() {
         if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
             std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
         }
+        // Workaround for WebKitWebProcess crash (EGL_BAD_PARAMETER / SIGABRT) on modern Wayland/Mesa distros (e.g. Fedora)
+        if std::env::var_os("WEBKIT_DISABLE_COMPOSITING_MODE").is_none() {
+            std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+        }
     }
 
     mkv_anime_batch_lib::run()
