@@ -503,3 +503,38 @@ test("finalizeQueueState marks unresolved items cancelled after a forced stop", 
   assert.equal(final.errorCount, 0);
   assert.equal(final.batchCancelled, true);
 });
+
+test("item transitioning directly from queued to error leaves durationSec as null instead of batchStartTime fallback", () => {
+  let state = createQueueState({
+    version: 1,
+    items: [{ id: "ep1.mkv", name: "ep1.mkv" }, { id: "ep2.mkv", name: "ep2.mkv" }],
+  });
+  state = reduceQueueEvent(state, { version: 1, type: "batch_start", total: 2 }, 1000);
+
+  // ep1 transitions directly from queued to error without prior item_start
+  state = reduceQueueEvent(state, {
+    version: 1,
+    type: "item_complete",
+    id: "ep1.mkv",
+    status: "error",
+    error: "probe failed before start",
+  }, 6000);
+
+  assert.equal(state.items.get("ep1.mkv").status, "error");
+  assert.equal(state.items.get("ep1.mkv").durationSec, null);
+  assert.equal(state.errorCount, 1);
+
+  // ep2 starts and then errors: correctly calculates duration against its item_start time
+  state = reduceQueueEvent(state, { version: 1, type: "item_start", id: "ep2.mkv" }, 7000);
+  state = reduceQueueEvent(state, {
+    version: 1,
+    type: "item_complete",
+    id: "ep2.mkv",
+    status: "error",
+    error: "ffmpeg process crashed",
+  }, 9500);
+
+  assert.equal(state.items.get("ep2.mkv").status, "error");
+  assert.equal(state.items.get("ep2.mkv").durationSec, "2.5");
+  assert.equal(state.errorCount, 2);
+});

@@ -485,11 +485,15 @@ def main() -> None:
             sys.exit(1)
 
     if cfg.plan:
-        plan_manifest = generate_inspection_manifest(
-            root_input_dir,
-            persistent_cache=runtime.persistent_cache,
-            cancel_token=runtime.cancel_token,
-        )
+        try:
+            plan_manifest = generate_inspection_manifest(
+                root_input_dir,
+                persistent_cache=runtime.persistent_cache,
+                cancel_token=runtime.cancel_token,
+            )
+        except CancelledError:
+            logger.warning("Cancelled by user.")
+            sys.exit(130)
         print(json.dumps(plan_manifest, ensure_ascii=False))
         sys.exit(0)
 
@@ -608,6 +612,6 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, CancelledError):
         logger.warning("Cancelled by user.")
         sys.exit(130)
