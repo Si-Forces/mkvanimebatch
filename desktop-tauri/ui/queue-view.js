@@ -12,14 +12,21 @@ export class QueueTracker {
     this.mode = mode;
     this.listEl = document.getElementById(`${mode}-episode-list`);
     this.countEl = document.getElementById(`${mode}-queue-count`);
-    this.state = createQueueState({ version: 1, items: [] }, { mode });
+    this.state = createQueueState({ version: 2, items: [] }, { mode });
     this.cards = new Map();
     this.scanToken = 0;
     this.lastScannedPath = null;
     this.lastManifest = null;
     // GUI manual subtitle selection (remux only): item id -> candidate path
     this.assignments = new Map();
-    this.candidatesByItem = new Map();
+    // v2 manifest: candidates are stored once per release directory.
+    this.subtitleCandidates = {};
+  }
+
+  candidatesForItem(itemId) {
+    const item = this.state.items.get(itemId);
+    if (!item?.release) return [];
+    return this.subtitleCandidates[item.release] ?? [];
   }
 
   emptyStateMarkup(title, description, actionLabel = "📁 Choose Input Directory") {
@@ -43,7 +50,7 @@ export class QueueTracker {
     this.cards.clear();
     // Assignments and candidates survive a rescan: populateFromInspection
     // rebuilds candidates and carries over assignments whose items persist.
-    this.state = createQueueState({ version: 1, items: [] }, { mode: this.mode });
+    this.state = createQueueState({ version: 2, items: [] }, { mode: this.mode });
     if (this.listEl) {
       this.listEl.innerHTML = `
         <div class="empty-state-card scanning-state">
@@ -69,7 +76,7 @@ export class QueueTracker {
 
   acceptInspection(token, path, manifest) {
     if (!this.isCurrentScan(token)) return false;
-    if (manifest?.version !== 1 || !Array.isArray(manifest.items)) {
+    if (manifest?.version !== 2 || !Array.isArray(manifest.items)) {
       this.showScanError(token);
       this.lastScannedPath = null;
       return false;
@@ -101,8 +108,8 @@ export class QueueTracker {
     this.scanToken++;
     this.cards.clear();
     this.assignments.clear();
-    this.candidatesByItem.clear();
-    this.state = createQueueState({ version: 1, items: [] }, { mode: this.mode });
+    this.subtitleCandidates = {};
+    this.state = createQueueState({ version: 2, items: [] }, { mode: this.mode });
     if (this.listEl) this.listEl.innerHTML = this.emptyStateMarkup(title, description);
     if (this.countEl) this.countEl.textContent = "Ready";
   }
@@ -118,12 +125,7 @@ export class QueueTracker {
     // Refresh candidate lists; keep assignments whose item still exists so a
     // rescan right before Start does not silently drop manual selections.
     this.assignments = carryOverAssignments(this.assignments, manifest);
-    this.candidatesByItem.clear();
-    for (const item of manifest?.items ?? []) {
-      if (Array.isArray(item.sub_candidates) && item.sub_candidates.length > 0) {
-        this.candidatesByItem.set(item.id, item.sub_candidates);
-      }
-    }
+    this.subtitleCandidates = manifest?.subtitle_candidates ?? {};
 
     if (!manifest || !manifest.items || manifest.items.length === 0) {
       this.reset(
@@ -136,11 +138,29 @@ export class QueueTracker {
     if (this.countEl) this.countEl.textContent = `${this.state.totalCount} Episodes Queued`;
 
     if (this.state && this.listEl) {
+      this.renderCardsIncrementally(this.scanToken, bitrate);
+    }
+  }
+
+  // Creates card DOM in requestAnimationFrame batches under a ~8 ms frame
+  // budget so large manifests don't block the main thread. Each tick aborts
+  // when scanToken has moved on (reset/startScan/reuseInspection bump it).
+  // Cards render from the item's CURRENT reducer state, so events that
+  // arrived before a card existed are reflected once it is created.
+  renderCardsIncrementally(token, bitrate) {
+    const order = this.state.order;
+    let index = 0;
+
+    const renderBatch = () => {
+      if (!this.isCurrentScan(token)) return;
       const frag = document.createDocumentFragment();
-      let epIdx = 1;
-      for (const id of this.state.order) {
+      const deadline = performance.now() + 8;
+      do {
+        const id = order[index];
         const item = this.state.items.get(id);
-        const card = this.createCardElement(item.id, item.name, epIdx++);
+        index++;
+        if (!item) continue;
+        const card = this.createCardElement(item.id, item.name, index);
         this.cards.set(id, card);
         this.applyAssignmentToCard(id);
         if (item.inspectionError) {
@@ -148,10 +168,14 @@ export class QueueTracker {
         } else if (item.metadata) {
           this.applyMetadata(card, item.metadata, bitrate);
         }
+        this.renderCardState(card, item);
         frag.appendChild(card.el);
-      }
+      } while (index < order.length && performance.now() < deadline);
       this.listEl.appendChild(frag);
-    }
+      if (index < order.length) requestAnimationFrame(renderBatch);
+    };
+
+    requestAnimationFrame(renderBatch);
   }
 
   applyMetadata(card, meta, bitrate) {

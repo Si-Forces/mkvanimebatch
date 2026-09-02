@@ -161,6 +161,58 @@ class TestFontManagerLifecycle:
 
         assert len(claims) == 1
 
+    def test_shared_manager_hammered_across_threads(self, tmp_path):
+        """One manager shared by many threads (as in the global extraction
+        queue): concurrent claims of identical and distinct fonts must yield
+        no lost and no duplicate promotions."""
+        fonts_dir = tmp_path / "fonts"
+        mgr = FontManager(fonts_dir)
+
+        n_threads = 8
+        contents = {f"Font{i}.ttf": f"font-bytes-{i}".encode() * 4 for i in range(6)}
+        dup_bytes = b"duplicate-font-bytes"
+
+        promoted = []
+        lock = threading.Lock()
+        barrier = threading.Barrier(n_threads)
+
+        def worker(thread_id):
+            barrier.wait(timeout=10)
+            # Identical fonts: every thread races for the same (name, size).
+            for name, data in contents.items():
+                claim = mgr.claim(name, len(data))
+                if claim is None:
+                    continue
+                claim.staging_path.write_bytes(data)
+                path = mgr.promote(claim)
+                if path is not None:
+                    with lock:
+                        promoted.append(path)
+            # Distinct names with identical bytes: promote must dedup by hash.
+            claim = mgr.claim(f"Dup{thread_id}.ttf", len(dup_bytes))
+            if claim is not None:
+                claim.staging_path.write_bytes(dup_bytes)
+                path = mgr.promote(claim)
+                if path is not None:
+                    with lock:
+                        promoted.append(path)
+
+        threads = [threading.Thread(target=worker, args=(t,)) for t in range(n_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        # One promotion per unique content: 6 distinct fonts + 1 dup winner.
+        assert len(promoted) == len(contents) + 1
+        on_disk = [p for p in fonts_dir.iterdir() if p.is_file()]
+        assert sorted(p.name for p in on_disk) == sorted(p.name for p in promoted)
+        assert len({p.read_bytes() for p in on_disk}) == len(contents) + 1
+
+        # Losing claims cleaned their staging files, so staging is removable.
+        mgr.cleanup_staging()
+        assert not (fonts_dir / ".font_staging").exists()
+
 
 def test_font_hash_memo_save_permissions(tmp_path):
     import os

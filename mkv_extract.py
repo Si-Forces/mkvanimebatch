@@ -62,7 +62,7 @@ from mkv_runner import (
     collect_release_dirs,
     handle_clear_cache_flag,
     install_cancel_handlers,
-    run_batch,
+    log_directory_banner,
 )
 from mkv_scan import (
     InspectedVideo,
@@ -314,138 +314,201 @@ def process_file(
 # ─── RUN ORCHESTRATOR ────────────────────────────────────────────────────────
 @dataclass
 class ExtractRunConfig:
-    """Per-directory extraction values plus extract-owned knobs; process-wide
-    infrastructure (worker count, dry-run, inspect cache, io semaphore,
-    cancel token) travels on the embedded CliRuntime."""
+    """Inputs for one whole extract batch run; process-wide infrastructure
+    (worker count, dry-run, inspect cache, io semaphore, cancel token)
+    travels on the embedded CliRuntime."""
 
     runtime:         CliRuntime
     root_input_dir:  Path
-    output_dir:      Path
-    fonts_dir:       Path
-    # A manager passed in from main() is shared across directory passes; its
-    # staging directory must outlive each pass and is cleaned up by the caller.
-    font_manager:    FontManager | None = None
+    out_override:    Path | None = None
+    fonts_override:  Path | None = None
     font_hash_memo:  FontHashMemo | None = None
 
 
-def _run(
-    mkv_files:  list[ParsedFile],
-    pool:       ThreadPoolExecutor,
-    config:     ExtractRunConfig,
+@dataclass(frozen=True)
+class _ExtractRelease:
+    """Immutable per-release task record produced by the sequential prep pass."""
+
+    mkv_dir:      Path
+    mkv_files:    tuple[ParsedFile, ...]
+    output_dir:   Path
+    fonts_dir:    Path
+    font_manager: FontManager
+
+
+def _fonts_dir_for(mkv_dir: Path, config: ExtractRunConfig) -> Path:
+    if config.fonts_override:
+        return config.fonts_override
+    if config.out_override:
+        return config.out_override / "fonts"
+    return mkv_dir / "fonts"
+
+
+def _run_pipeline(
+    mkvs_by_dir: dict[Path, list[ParsedFile]],
+    config:      ExtractRunConfig,
 ) -> bool:
+    """Prepare every release sequentially, inspect every source once, then
+    execute every file through one global bounded queue. Per-file logs are
+    buffered and printed grouped per release in stable source order after the
+    queue drains; staging cleanup for every FontManager is deferred until
+    then. Raises CancelledError on batch cancellation.
+    """
     runtime = config.runtime
-    output_dir = config.output_dir
-    fonts_dir = config.fonts_dir
-    if not mkv_files:
-        logger.warning("No MKV files found in '%s', skipping.", output_dir.name)
-        return False
-    logger.info("MKV files discovered: %d", len(mkv_files))
-
+    token = runtime.cancel_token
     root_dir = config.root_input_dir
-
-    if runtime.dry_run:
-        logger.info("--- DRY RUN: Files that would be processed ---")
-        for f in mkv_files:
-            item_id = get_item_id(f.path, root_dir)
-            emit_item_complete(item_id, f.name, OUTCOME_PLANNED)
-            logger.info("  %s", f.name)
-        logger.info("Total: %d file(s). No extraction performed.", len(mkv_files))
-        return True
-
-    fonts_dir.mkdir(parents=True, exist_ok=True)
-    inspection_results = inspect_videos(
-        [f.path for f in mkv_files],
-        pool,
-        persistent_cache=runtime.persistent_cache,
-        cancel_token=runtime.cancel_token,
-    )
-
-    font_manager = config.font_manager
-    owns_font_manager = font_manager is None
-    active_font_manager = FontManager(fonts_dir, hash_memo=config.font_hash_memo) if font_manager is None else font_manager
-
-    logger.info("Processing %d file(s) (up to %d at a time)...", len(mkv_files), runtime.workers)
-
-    results: dict[Path, list[str]] = {}
-    total_files = len(mkv_files)
     any_failures = False
 
-    futures = {
-        pool.submit(
-            process_file,
-            mkv_file,
-            inspection_results[mkv_file.path].video,
-            active_font_manager,
-            io_semaphore=runtime.io_semaphore,
-            output_dir=output_dir,
-            root_input_dir=root_dir,
-            cancel_token=runtime.cancel_token,
-        ): mkv_file
-        for mkv_file in mkv_files
-    }
+    # Managers are keyed by fonts destination so releases whose outputs share
+    # a destination share one manager (and dedup fonts across releases);
+    # distinct local fonts directories keep distinct managers. Creation stays
+    # on this sequential pass because seeding (and the shared hash memo) is
+    # not thread-safe.
+    font_managers: dict[Path, FontManager] = {}
 
-    for completed_files, future in enumerate(as_completed(futures), start=1):
-        mkv_file = futures[future]
-        mkv_path = mkv_file.path
-        progress = completed_files / total_files
+    try:
+        with ThreadPoolExecutor(max_workers=runtime.workers) as pool:
+            # Phase 1: sequential prep — output dirs and FontManagers up front.
+            prepared: list[_ExtractRelease] = []
+            for mkv_dir, dir_mkvs in mkvs_by_dir.items():
+                if token.cancelled:
+                    logger.warning("Cancellation requested — skipping remaining directories.")
+                    raise CancelledError("Cancellation requested between release directories")
 
-        try:
-            _, log, ok = future.result()
-            results[mkv_path] = log
-            if not ok:
-                any_failures = True
+                output_dir = resolve_output_dir(mkv_dir, root_dir, config.out_override, default_subdir=None)
 
-            logger.info(
-                "[%d/%d (%.0f%%)] %s: %s",
-                completed_files,
-                total_files,
-                progress * 100,
-                "Extracted" if ok else "Skipped",
-                mkv_path.name,
+                if not dir_mkvs:
+                    logger.warning("No MKV files found in '%s', skipping.", output_dir.name)
+                    any_failures = True
+                    continue
+
+                if runtime.dry_run:
+                    log_directory_banner(mkv_dir)
+                    logger.info("MKV files discovered: %d", len(dir_mkvs))
+                    logger.info("--- DRY RUN: Files that would be processed ---")
+                    for f in dir_mkvs:
+                        emit_item_complete(get_item_id(f.path, root_dir), f.name, OUTCOME_PLANNED)
+                        logger.info("  %s", f.name)
+                    logger.info("Total: %d file(s). No extraction performed.", len(dir_mkvs))
+                    continue
+
+                output_dir.mkdir(parents=True, exist_ok=True)
+                fonts_dir = _fonts_dir_for(mkv_dir, config)
+                font_manager = font_managers.get(fonts_dir)
+                if font_manager is None:
+                    fonts_dir.mkdir(parents=True, exist_ok=True)
+                    font_manager = FontManager(fonts_dir, hash_memo=config.font_hash_memo)
+                    font_managers[fonts_dir] = font_manager
+
+                prepared.append(_ExtractRelease(
+                    mkv_dir=mkv_dir,
+                    mkv_files=tuple(dir_mkvs),
+                    output_dir=output_dir,
+                    fonts_dir=fonts_dir,
+                    font_manager=font_manager,
+                ))
+
+            if runtime.dry_run or not prepared:
+                return not any_failures
+
+            # Phase 2: one batch inspection across every release.
+            inspection_results = inspect_videos(
+                [f.path for release in prepared for f in release.mkv_files],
+                pool,
+                persistent_cache=runtime.persistent_cache,
+                cancel_token=token,
+                probe_semaphore=runtime.io_semaphore,
             )
+            runtime.persistent_cache.save()
 
-        except CancelledError:
-            for pending, pending_file in futures.items():
-                if pending.cancel():
-                    emit_item_complete(
-                        get_item_id(pending_file.path, root_dir),
-                        pending_file.name,
-                        OUTCOME_CANCELLED,
+            # Phase 3: one global bounded execution queue for every file.
+            total_files = sum(len(release.mkv_files) for release in prepared)
+            logger.info("Processing %d file(s) (up to %d at a time)...", total_files, runtime.workers)
+
+            results: dict[Path, list[str]] = {}
+            futures = {
+                pool.submit(
+                    process_file,
+                    mkv_file,
+                    inspection_results[mkv_file.path].video,
+                    release.font_manager,
+                    io_semaphore=runtime.io_semaphore,
+                    output_dir=release.output_dir,
+                    root_input_dir=root_dir,
+                    cancel_token=token,
+                ): mkv_file
+                for release in prepared
+                for mkv_file in release.mkv_files
+            }
+
+            for completed_files, future in enumerate(as_completed(futures), start=1):
+                mkv_file = futures[future]
+                mkv_path = mkv_file.path
+                progress = completed_files / total_files
+
+                try:
+                    _, log, ok = future.result()
+                    results[mkv_path] = log
+                    if not ok:
+                        any_failures = True
+
+                    logger.info(
+                        "[%d/%d (%.0f%%)] %s: %s",
+                        completed_files,
+                        total_files,
+                        progress * 100,
+                        "Extracted" if ok else "Skipped",
+                        mkv_path.name,
                     )
-            wait(futures)
-            raise
-        except Exception as exc:
-            any_failures = True
-            logger.exception(
-                "[%d/%d (%.0f%%)] CRASHED: %s",
-                completed_files, total_files, progress * 100, mkv_path.name,
-            )
-            item_id = get_item_id(mkv_path, root_dir)
-            emit_item_complete(item_id, mkv_path.name, OUTCOME_ERROR, error=str(exc))
-            results[mkv_path] = [
-                f"Processing: {mkv_path.name}",
-                "  WARNING: Worker crashed. See traceback above.",
-            ]
 
-    for mkv_file in mkv_files:
-        mkv_path = mkv_file.path
-        logger.info("-" * 60)
-        for line in results.get(mkv_path, []):
-            stripped = line.lstrip()
-            if stripped.startswith("WARNING"):
-                logger.warning(line)
-            elif stripped.startswith("ERROR"):
-                logger.error(line)
-            else:
-                logger.info(line)
+                except CancelledError:
+                    for pending, pending_file in futures.items():
+                        if pending.cancel():
+                            emit_item_complete(
+                                get_item_id(pending_file.path, root_dir),
+                                pending_file.name,
+                                OUTCOME_CANCELLED,
+                            )
+                    wait(futures)
+                    raise
+                except Exception as exc:
+                    any_failures = True
+                    logger.exception(
+                        "[%d/%d (%.0f%%)] CRASHED: %s",
+                        completed_files, total_files, progress * 100, mkv_path.name,
+                    )
+                    item_id = get_item_id(mkv_path, root_dir)
+                    emit_item_complete(item_id, mkv_path.name, OUTCOME_ERROR, error=str(exc))
+                    results[mkv_path] = [
+                        f"Processing: {mkv_path.name}",
+                        "  WARNING: Worker crashed. See traceback above.",
+                    ]
 
-    if owns_font_manager:
-        active_font_manager.cleanup_staging()
+            # Phase 4: grouped per-release logs, stable source order.
+            for release in prepared:
+                log_directory_banner(release.mkv_dir)
+                logger.info("MKV files discovered: %d", len(release.mkv_files))
+                for mkv_file in release.mkv_files:
+                    logger.info("-" * 60)
+                    for line in results.get(mkv_file.path, []):
+                        stripped = line.lstrip()
+                        if stripped.startswith("WARNING"):
+                            logger.warning(line)
+                        elif stripped.startswith("ERROR"):
+                            logger.error(line)
+                        else:
+                            logger.info(line)
+                logger.info("=========================================")
+                logger.info(" All files processed.")
+                logger.info("=========================================")
 
-    logger.info("=========================================")
-    logger.info(" All files processed.")
-    logger.info("=========================================")
-    return not any_failures
+            return not any_failures
+    finally:
+        # Staging directories span the whole batch; remove them once here,
+        # strictly after the queue drains.
+        for font_manager in font_managers.values():
+            font_manager.cleanup_staging()
+        runtime.persistent_cache.save()
 
 
 def main() -> None:
@@ -502,35 +565,18 @@ def main() -> None:
         input_dir=str(root_input_dir),
     )
 
-    def fonts_dir_for(mkv_dir: Path) -> Path:
-        if fonts_override:
-            return fonts_override
-        if out_override:
-            return out_override / "fonts"
-        return mkv_dir / "fonts"
-
     font_hash_memo = FontHashMemo(get_default_font_hash_memo_file())
 
-    shared_font_manager: FontManager | None = None
-    if fonts_override or out_override:
-        shared_font_manager = FontManager(fonts_dir_for(root_input_dir), hash_memo=font_hash_memo)
-
-    def process_directory(pool: ThreadPoolExecutor, mkv_dir: Path, dir_mkvs: list[ParsedFile]) -> bool:
-        current_output_dir = resolve_output_dir(mkv_dir, root_input_dir, out_override, default_subdir=None)
-        if not runtime.dry_run:
-            current_output_dir.mkdir(parents=True, exist_ok=True)
-        config = ExtractRunConfig(
-            runtime=runtime,
-            root_input_dir=root_input_dir,
-            output_dir=current_output_dir,
-            fonts_dir=fonts_dir_for(mkv_dir),
-            font_manager=shared_font_manager,
-            font_hash_memo=font_hash_memo,
-        )
-        return _run(dir_mkvs, pool, config)
+    config = ExtractRunConfig(
+        runtime=runtime,
+        root_input_dir=root_input_dir,
+        out_override=out_override,
+        fonts_override=fonts_override,
+        font_hash_memo=font_hash_memo,
+    )
 
     try:
-        overall_success = run_batch(runtime, mkvs_by_dir, process_directory)
+        overall_success = _run_pipeline(mkvs_by_dir, config)
     except CancelledError:
         logger.warning("Cancelled by user.")
         for files in mkvs_by_dir.values():
@@ -548,10 +594,6 @@ def main() -> None:
     cancelled = runtime.cancel_token.cancelled
 
     font_hash_memo.save()
-    # The shared manager's staging directory spans the whole batch; remove it
-    # once here instead of per-directory pass.
-    if shared_font_manager is not None:
-        shared_font_manager.cleanup_staging()
 
     emit_batch_complete(success=overall_success and not cancelled, cancelled=cancelled)
 

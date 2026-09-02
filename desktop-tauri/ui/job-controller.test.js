@@ -42,7 +42,7 @@ test("job controller completes inspect-run-event lifecycle and restores controls
   const handledEvents = [];
   const tracker = {
     assignments: new Map(),
-    lastManifest: { version: 1, items: [] },
+    lastManifest: { version: 2, items: [] },
     state: { batchCancelled: false, batchSuccess: false },
     handleEvent: event => handledEvents.push(event),
     finalize(code) {
@@ -115,7 +115,7 @@ test("job controller buffers early events and filters stale events while run_job
 
   const tracker = {
     assignments: new Map(),
-    lastManifest: { version: 1, items: [] },
+    lastManifest: { version: 2, items: [] },
     state: { batchCancelled: false, batchSuccess: false },
     handleEvent: event => handledEvents.push(event),
     finalize(code) {
@@ -212,7 +212,7 @@ test("job controller replays early job-done arriving while run_job is in flight"
 
   const tracker = {
     assignments: new Map(),
-    lastManifest: { version: 1, items: [] },
+    lastManifest: { version: 2, items: [] },
     state: { batchCancelled: false, batchSuccess: false },
     handleEvent() {},
     finalize(code) {

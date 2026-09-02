@@ -1,8 +1,11 @@
 """Tests for performance optimizations: PersistentInspectCache, io_semaphore, and probesize flags."""
 
 import importlib
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -149,6 +152,60 @@ class TestPersistentInspectCache:
         assert len(temp_files) == 0
         assert not cache_file.exists()
 
+    def test_inspect_videos_semaphore_bounds_probe_concurrency(self, tmp_path):
+        """probe_semaphore of size N never admits more than N concurrent
+        probes, and cache hits never invoke the probe at all."""
+        limit = 3
+        files = [tmp_path / f"video_{i}.mkv" for i in range(12)]
+        for f in files:
+            f.write_bytes(b"x")
+        hit_files, miss_files = files[:4], files[4:]
+
+        class FakeCache:
+            def __init__(self, hits):
+                self.hits = hits
+                self.puts = []
+
+            def get(self, path):
+                return self.hits.get(path)
+
+            def put(self, path, data):
+                self.puts.append(path)
+
+        cache = FakeCache({f: {"tracks": [{"id": 0}]} for f in hit_files})
+
+        lock = threading.Lock()
+        state = {"current": 0, "peak": 0}
+        probed = []
+
+        def fake_probe(video, cancel_token=None):
+            with lock:
+                state["current"] += 1
+                state["peak"] = max(state["peak"], state["current"])
+                probed.append(video)
+            time.sleep(0.02)
+            with lock:
+                state["current"] -= 1
+            return {"tracks": []}
+
+        semaphore = threading.BoundedSemaphore(limit)
+        with patch.object(mkv_scan, "run_mkvmerge_json", side_effect=fake_probe):
+            with ThreadPoolExecutor(max_workers=len(files)) as pool:
+                results = inspect_videos(
+                    files,
+                    pool=pool,
+                    persistent_cache=cast(PersistentInspectCache, cache),
+                    probe_semaphore=semaphore,
+                )
+
+        assert state["peak"] <= limit
+        assert set(probed) == set(miss_files)  # cache hits never spawn a probe
+        assert set(cache.puts) == set(miss_files)  # only fresh probes are cached
+        for f in hit_files:
+            assert results[f] == InspectionResult.success({"tracks": [{"id": 0}]})
+        for f in miss_files:
+            assert results[f] == InspectionResult.success({"tracks": []})
+
 
 def test_cover_index_add_episode_cover_no_nameerror():
     """Verify CoverIndex.add() with per-episode cover does not raise NameError for parse_episode."""
@@ -227,11 +284,10 @@ def test_io_semaphore_covers_flac_conversion_and_remux(tmp_path):
         mock_job.video_name = "video.mkv"
         mock_job.base = "video"
         mock_job.output_file = tmp_path / "video.mkv"
+        mock_job.fonts = FontInfo(args=(), count=0)
 
         res = mkv_remux_job.process_job(
             job=mock_job,
-            temp_dir=tmp_path,
-            fonts=FontInfo(args=(), count=0),
             opus_bitrate="192k",
             inspection_results={sample_video: InspectionResult.success({"tracks": [{"id": 0, "type": "video"}]})},
             ffmpeg_threads=2,

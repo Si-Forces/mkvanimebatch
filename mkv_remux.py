@@ -23,15 +23,15 @@ import logging
 import re
 import shutil
 import sys
-import tempfile
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from mkv_assets import (
     AssetResolver,
     InteractionMode,
     PreparedRelease,
+    SubtitlePrompt,
     claim_leftover_chapters,
     prepare_release_directory,
 )
@@ -64,7 +64,7 @@ from mkv_runner import (
     collect_release_dirs,
     handle_clear_cache_flag,
     install_cancel_handlers,
-    run_batch,
+    log_directory_banner,
 )
 from mkv_scan import (
     InspectionResult,
@@ -227,6 +227,7 @@ def _plan_jobs(
             cover_file=res_assets.cover_file,
             embedded_sub_id=res_assets.embedded_sub_id,
             use_source_fonts=use_source_fonts,
+            fonts=res_assets.fonts,
             item_id=item_id,
         ))
 
@@ -269,23 +270,26 @@ def _print_summary(output_dir: Path, matched_files: list[str], skipped_files: li
 
 @dataclass
 class RemuxRunConfig:
-    """Inputs for one release-directory remux pass.
+    """Inputs for one whole remux batch run.
 
-    Per-directory values plus remux-owned engine knobs; process-wide
-    infrastructure (worker count, inspect caches, io semaphore, cancel
-    token) travels on the embedded CliRuntime.
+    Batch-wide knobs owned by the remux CLI; process-wide infrastructure
+    (worker count, inspect caches, io semaphore, cancel token) travels on the
+    embedded CliRuntime.
     """
 
     runtime: CliRuntime
     root_input_dir: Path
-    output_dir: Path
-    temp_dir: Path | None
     opus_bitrate: str
     complexity: int
     ffmpeg_threads: int | None
     sub_offset: float = 0.0
     interaction_mode: InteractionMode = InteractionMode.INTERACTIVE
     sub_assignments: dict[str, Path] | None = None
+    out_override: Path | None = None
+    fonts_override: Path | None = None
+    assets_override: Path | None = None
+    keep_fonts: bool = False
+    subtitle_prompt: SubtitlePrompt | None = None
 
 
 def _log_fonts_dir(release: PreparedRelease) -> None:
@@ -313,91 +317,178 @@ def _effective_ffmpeg_threads(config_threads: int | None, runtime: CliRuntime) -
     return default_ffmpeg_threads(runtime.effective_concurrency)
 
 
-def _run(
-    release: PreparedRelease,
-    config:  RemuxRunConfig,
-    pool:    ThreadPoolExecutor,
+@dataclass
+class _PlannedRelease:
+    """Per-release bookkeeping threaded through the pipeline phases."""
+
+    release:       PreparedRelease
+    output_dir:    Path
+    jobs:          list[PlannedJob] = field(default_factory=list)
+    matched_files: list[str] = field(default_factory=list)
+    skipped_files: list[str] = field(default_factory=list)
+
+
+def _run_pipeline(
+    mkvs_by_dir: dict[Path, list[ParsedFile]],
+    config:      RemuxRunConfig,
 ) -> bool:
+    """Prepare every release, inspect once, plan all releases, then execute
+    every job through one global bounded queue; fonts cleanup is deferred
+    until the queue drains. Raises CancelledError on batch cancellation.
+    """
     runtime = config.runtime
     dry_run = runtime.dry_run
-    mkv_dir = release.mkv_dir
-    videos = release.videos
-    output_dir = config.output_dir
-    resolver = release.resolver
-    use_source_fonts = resolver.use_source_fonts
+    token = runtime.cancel_token
 
-    if not videos:
-        logger.warning("No MKV files to process in '%s'.", mkv_dir.name)
-        return False
+    scan_cache: dict[Path, ScanResults] = {}
+    fonts_dir_cache: dict[Path, Path] = {}
 
-    videos_to_inspect = []
-    for v in videos:
-        if not v.parsed:
-            continue
+    try:
+        with ThreadPoolExecutor(max_workers=runtime.workers) as pool:
+            # Phase 1: prepare every release directory (prompts stay sequential).
+            planned: list[_PlannedRelease] = []
+            for mkv_dir, dir_mkvs in mkvs_by_dir.items():
+                if token.cancelled:
+                    logger.warning("Cancellation requested — skipping remaining directories.")
+                    raise CancelledError("Cancellation requested between release directories")
 
-        out_stem = output_stem(v.stem, v.parsed.ep_type, v.parsed.ep)
-        if is_completed_output(output_dir / f"{out_stem}.mkv"):
-            continue
+                log_directory_banner(mkv_dir)
 
-        if dry_run and resolver.has_local_subtitle(v.parsed, local_dir=v.path.parent):
-            continue
+                output_dir = resolve_output_dir(mkv_dir, config.root_input_dir, config.out_override)
+                if not dry_run:
+                    output_dir.mkdir(parents=True, exist_ok=True)
 
-        videos_to_inspect.append(v.path)
+                release = prepare_release_directory(
+                    mkv_dir,
+                    config.root_input_dir,
+                    dir_mkvs,
+                    fonts_override=config.fonts_override,
+                    assets_dir=resolve_output_dir(mkv_dir, config.root_input_dir, config.assets_override, default_subdir=None) if config.assets_override else None,
+                    scan_cache=scan_cache,
+                    fonts_dir_cache=fonts_dir_cache,
+                    subtitle_prompt=config.subtitle_prompt,
+                )
+                _log_fonts_dir(release)
 
-    inspection_results = inspect_videos(videos_to_inspect, pool, persistent_cache=runtime.persistent_cache, cancel_token=runtime.cancel_token) if videos_to_inspect else {}
+                if not release.videos:
+                    logger.warning("No MKV files to process in '%s'.", mkv_dir.name)
+                    continue
 
-    all_subs = resolver.all_subtitles
+                planned.append(_PlannedRelease(release=release, output_dir=output_dir))
 
-    jobs, matched_files, skipped_files = _plan_jobs(
-        videos, inspection_results, resolver,
-        output_dir=output_dir, all_subs=all_subs, use_source_fonts=use_source_fonts, dry_run=dry_run,
-        root_input_dir=config.root_input_dir,
-        sub_assignments=config.sub_assignments,
-        mode=config.interaction_mode,
-    )
+            # Phase 2: one batch inspection across every release.
+            videos_to_inspect: list[Path] = []
+            for item in planned:
+                resolver = item.release.resolver
+                for v in item.release.videos:
+                    if not v.parsed:
+                        continue
 
-    if dry_run:
-        logger.info("--- DRY RUN: Planned jobs ---")
-        if jobs:
-            for job in jobs:
-                parts = [f"  {job.video_name}"]
-                if job.subtitle_file:
-                    parts.append(f"sub={job.subtitle_file.name}")
-                elif job.embedded_sub_id is not None:
-                    parts.append(f"sub=embedded:{job.embedded_sub_id}")
-                if job.chapter_file:
-                    parts.append(f"chap={job.chapter_file.name}")
-                if job.cover_file:
-                    parts.append(f"cover={job.cover_file.name}")
-                logger.info("  |  ".join(parts))
-        else:
-            logger.info("  (no jobs planned)")
-        logger.info("Total: %d job(s). No processing performed.", len(jobs))
-        _print_summary(output_dir, matched_files, skipped_files)
-        return True
+                    out_stem = output_stem(v.stem, v.parsed.ep_type, v.parsed.ep)
+                    if is_completed_output(item.output_dir / f"{out_stem}.mkv"):
+                        continue
 
-    execution = execute_jobs(
-        jobs,
-        pool,
-        inspection_results,
-        RemuxExecutionContext(
-            temp_dir=config.temp_dir,
-            fonts=resolver.fonts,
-            opus_bitrate=config.opus_bitrate,
-            ffmpeg_threads=_effective_ffmpeg_threads(config.ffmpeg_threads, runtime),
-            io_semaphore=runtime.io_semaphore,
-            complexity=config.complexity,
-            sub_offset=config.sub_offset,
-            cancel_token=runtime.cancel_token,
-            workers=runtime.workers,
-        ),
-    )
-    skipped_files.extend(execution.skipped_files)
-    _print_summary(output_dir, matched_files, skipped_files)
-    # Intentional planning skips (no matching assets, output already exists,
-    # user declined manual selection) are successful outcomes; only genuine
-    # processing failures or worker crashes fail the batch.
-    return not execution.failed_files
+                    if dry_run and resolver.has_local_subtitle(v.parsed, local_dir=v.path.parent):
+                        continue
+
+                    videos_to_inspect.append(v.path)
+
+            inspection_results = inspect_videos(videos_to_inspect, pool, persistent_cache=runtime.persistent_cache, cancel_token=token, probe_semaphore=runtime.io_semaphore) if videos_to_inspect else {}
+            runtime.persistent_cache.save()
+
+            # Phase 3: plan every release against the complete inspection map.
+            all_jobs: list[PlannedJob] = []
+            for item in planned:
+                resolver = item.release.resolver
+                jobs, item.matched_files, item.skipped_files = _plan_jobs(
+                    item.release.videos, inspection_results, resolver,
+                    output_dir=item.output_dir, all_subs=resolver.all_subtitles,
+                    use_source_fonts=resolver.use_source_fonts, dry_run=dry_run,
+                    root_input_dir=config.root_input_dir,
+                    sub_assignments=config.sub_assignments,
+                    mode=config.interaction_mode,
+                )
+                for job in jobs:
+                    job.release_dir = item.release.mkv_dir
+                item.jobs = jobs
+                all_jobs.extend(jobs)
+
+            # Phase 4: dry run stops after planning.
+            if dry_run:
+                for item in planned:
+                    logger.info("--- DRY RUN: Planned jobs ---")
+                    if item.jobs:
+                        for job in item.jobs:
+                            parts = [f"  {job.video_name}"]
+                            if job.subtitle_file:
+                                parts.append(f"sub={job.subtitle_file.name}")
+                            elif job.embedded_sub_id is not None:
+                                parts.append(f"sub=embedded:{job.embedded_sub_id}")
+                            if job.chapter_file:
+                                parts.append(f"chap={job.chapter_file.name}")
+                            if job.cover_file:
+                                parts.append(f"cover={job.cover_file.name}")
+                            logger.info("  |  ".join(parts))
+                    else:
+                        logger.info("  (no jobs planned)")
+                    logger.info("Total: %d job(s). No processing performed.", len(item.jobs))
+                    _print_summary(item.output_dir, item.matched_files, item.skipped_files)
+                return True
+
+            # Phase 5: one global bounded execution queue for every job.
+            execution = execute_jobs(
+                all_jobs,
+                pool,
+                inspection_results,
+                RemuxExecutionContext(
+                    opus_bitrate=config.opus_bitrate,
+                    ffmpeg_threads=_effective_ffmpeg_threads(config.ffmpeg_threads, runtime),
+                    io_semaphore=runtime.io_semaphore,
+                    complexity=config.complexity,
+                    sub_offset=config.sub_offset,
+                    cancel_token=token,
+                    workers=runtime.workers,
+                ),
+            )
+
+            # Phase 6: per-release summaries in stable release order; skip lines
+            # within a release follow original job order, not completion order.
+            job_order = {id(job): idx for idx, job in enumerate(all_jobs)}
+            execution_skips: dict[Path | None, list[tuple[int, str]]] = {}
+            for job, line in execution.job_skips:
+                execution_skips.setdefault(job.release_dir, []).append((job_order[id(job)], line))
+            for item in planned:
+                item.skipped_files.extend(line for _, line in sorted(execution_skips.get(item.release.mkv_dir, [])))
+                _print_summary(item.output_dir, item.matched_files, item.skipped_files)
+
+            # Phase 7: deferred fonts cleanup, strictly after the queue drains.
+            # A fonts directory goes only when every release that used it
+            # finished without a failed job.
+            if not config.keep_fonts:
+                failed_releases = {job.release_dir for job in execution.failed_jobs}
+                releases_by_fonts_dir: dict[Path, list[PreparedRelease]] = {}
+                for item in planned:
+                    releases_by_fonts_dir.setdefault(item.release.fonts_dir, []).append(item.release)
+                for fonts_dir, releases in releases_by_fonts_dir.items():
+                    if any(r.mkv_dir in failed_releases for r in releases):
+                        continue
+                    # Deletable only if some release owns it as a local temp
+                    # 'fonts' dir; sharers resolve it via fallback and must not
+                    # block cleanup, but every sharer must have succeeded.
+                    if fonts_dir.name != "fonts" or not any(r.fonts_origin == "local" for r in releases):
+                        continue
+                    try:
+                        shutil.rmtree(fonts_dir)
+                        logger.info("Cleanup: Removed temporary fonts directory '%s'", fonts_dir.name)
+                    except OSError as e:
+                        logger.error("Failed to remove fonts directory: %s", e)
+
+            # Intentional planning skips (no matching assets, output already
+            # exists, user declined manual selection) are successful outcomes;
+            # only genuine processing failures or worker crashes fail the batch.
+            return not execution.failed_files
+    finally:
+        runtime.persistent_cache.save()
 
 
 # ─── MAIN ────────────────────────────────────────────────────────────────────
@@ -518,8 +609,6 @@ def main() -> None:
         input_dir=str(root_input_dir),
     )
 
-    scan_cache: dict[Path, ScanResults] = {}
-    fonts_dir_cache: dict[Path, Path] = {}
     interactive_prompt = _prompt_for_subtitle if sys.stdin.isatty() else None
     if dry_run:
         interaction_mode = InteractionMode.DRY_RUN
@@ -528,62 +617,24 @@ def main() -> None:
     else:
         interaction_mode = InteractionMode.NON_INTERACTIVE
 
-    def process_directory(pool: ThreadPoolExecutor, mkv_dir: Path, dir_mkvs: list[ParsedFile]) -> bool:
-        current_output_dir = resolve_output_dir(mkv_dir, root_input_dir, out_override)
-        if not dry_run:
-            current_output_dir.mkdir(parents=True, exist_ok=True)
-
-        release = prepare_release_directory(
-            mkv_dir,
-            root_input_dir,
-            dir_mkvs,
-            fonts_override=fonts_override,
-            assets_dir=resolve_output_dir(mkv_dir, root_input_dir, assets_override, default_subdir=None) if assets_override else None,
-            scan_cache=scan_cache,
-            fonts_dir_cache=fonts_dir_cache,
-            subtitle_prompt=interactive_prompt,
-        )
-        _log_fonts_dir(release)
-
-        temp_dir = None
-        if not dry_run:
-            temp_dir = Path(tempfile.mkdtemp(prefix=".tmp_remux_", dir=current_output_dir))
-
-        try:
-            config = RemuxRunConfig(
-                runtime=runtime,
-                root_input_dir=root_input_dir,
-                output_dir=current_output_dir,
-                temp_dir=temp_dir,
-                opus_bitrate=opus_bitrate,
-                complexity=cfg.complexity,
-                ffmpeg_threads=cfg.ffmpeg_threads,
-                sub_offset=cfg.sub_offset,
-                interaction_mode=interaction_mode,
-                sub_assignments=sub_assignments,
-            )
-            dir_success = _run(release, config, pool)
-        finally:
-            if temp_dir is not None:
-                shutil.rmtree(temp_dir, ignore_errors=True)
-
-        if (
-            dir_success
-            and not dry_run
-            and not cfg.keep_fonts
-            and release.fonts_origin == "local"
-            and release.fonts_dir.name == "fonts"
-        ):
-            try:
-                shutil.rmtree(release.fonts_dir)
-                logger.info("Cleanup: Removed temporary fonts directory '%s'", release.fonts_dir.name)
-            except OSError as e:
-                logger.error("Failed to remove fonts directory: %s", e)
-
-        return dir_success
+    config = RemuxRunConfig(
+        runtime=runtime,
+        root_input_dir=root_input_dir,
+        opus_bitrate=opus_bitrate,
+        complexity=cfg.complexity,
+        ffmpeg_threads=cfg.ffmpeg_threads,
+        sub_offset=cfg.sub_offset,
+        interaction_mode=interaction_mode,
+        sub_assignments=sub_assignments,
+        out_override=out_override,
+        fonts_override=fonts_override,
+        assets_override=assets_override,
+        keep_fonts=cfg.keep_fonts,
+        subtitle_prompt=interactive_prompt,
+    )
 
     try:
-        overall_success = run_batch(runtime, mkvs_by_dir, process_directory)
+        overall_success = _run_pipeline(mkvs_by_dir, config)
     except CancelledError:
         logger.warning("Cancelled by user.")
         for files in mkvs_by_dir.values():
