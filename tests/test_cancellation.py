@@ -29,7 +29,7 @@ mkv_extract = importlib.import_module("mkv_extract")
 
 import mkv_proc
 from mkv_domain import EpisodeInfo
-from mkv_fonts import FontInfo, FontManager
+from mkv_fonts import FontManager
 from mkv_proc import CancelledError, CancelToken, run_subprocess_cancellable
 from mkv_runner import CliRuntime
 from mkv_scan import InspectedVideo, InspectionResult, ParsedFile, PersistentInspectCache
