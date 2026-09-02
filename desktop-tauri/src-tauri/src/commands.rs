@@ -1,10 +1,10 @@
 use crate::contract::{parse_job_event, parse_manifest_json, InspectionManifest};
+#[cfg(windows)]
+use crate::process::CREATE_NO_WINDOW;
 pub use crate::process::{
     begin_shutdown, cancel_shutdown, cleanup_owned_processes, close_window, stop_job, JobState,
     ScanState,
 };
-#[cfg(windows)]
-use crate::process::CREATE_NO_WINDOW;
 use crate::process::{reserve_job_slot, stop_registered_scan, JobSlot, ScanRegistration};
 use crate::sidecar::{get_sidecar_path, run_sidecar_once, sidecar_name};
 pub use crate::telemetry::{get_system_telemetry, TelemetryState};
