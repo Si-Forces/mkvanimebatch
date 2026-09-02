@@ -16,9 +16,6 @@ if str(PROJECT_ROOT) not in sys.path:
 
 mkv_runner = importlib.import_module("mkv_runner")
 
-from mkv_runner import CliRuntime
-from mkv_scan import PersistentInspectCache
-
 
 # ─── default_worker_count ─────────────────────────────────────────────────────
 def test_default_worker_count_scaled_and_capped(monkeypatch):
@@ -102,69 +99,3 @@ def test_collect_release_dirs_exits_when_no_mkvs(tmp_path):
     with pytest.raises(SystemExit) as excinfo:
         mkv_runner.collect_release_dirs(tmp_path)
     assert excinfo.value.code == 1
-
-
-# ─── run_batch ────────────────────────────────────────────────────────────────
-def _runtime_with_dirty_cache(cache_file: Path) -> CliRuntime:
-    cache = PersistentInspectCache(cache_file=cache_file)
-    cache._dirty = True  # force the post-loop flush to write a file
-    return mkv_runner.CliRuntime(
-        workers=2,
-        dry_run=True,
-        io_semaphore=None,
-        persistent_cache=cache,
-    )
-
-
-def test_run_batch_visits_directories_in_order_and_reports_success(tmp_path):
-    runtime = _runtime_with_dirty_cache(tmp_path / "cache.json")
-    visited = []
-
-    def process_directory(pool, mkv_dir, dir_mkvs):
-        visited.append(mkv_dir.name)
-        return True
-
-    grouped = {Path("/src/b"): [], Path("/src/a"): []}
-    assert mkv_runner.run_batch(runtime, grouped, process_directory) is True
-    assert visited == ["b", "a"]  # caller-supplied ordering is preserved
-
-
-def test_run_batch_returns_false_when_any_directory_fails(tmp_path):
-    runtime = _runtime_with_dirty_cache(tmp_path / "cache.json")
-
-    def process_directory(pool, mkv_dir, dir_mkvs):
-        return mkv_dir.name != "b"
-
-    grouped = {Path("/src/a"): [], Path("/src/b"): []}
-    assert mkv_runner.run_batch(runtime, grouped, process_directory) is False
-
-
-def test_run_batch_flushes_persistent_cache_after_loop(tmp_path):
-    cache_file = tmp_path / "cache.json"
-    runtime = _runtime_with_dirty_cache(cache_file)
-
-    mkv_runner.run_batch(runtime, {Path("/src/a"): []}, lambda pool, d, f: True)
-
-    assert cache_file.is_file()
-
-
-def test_run_batch_uses_worker_pool_size(tmp_path):
-    runtime = _runtime_with_dirty_cache(tmp_path / "cache.json")
-    observed = {}
-
-    import concurrent.futures
-
-    real_init = concurrent.futures.ThreadPoolExecutor.__init__
-
-    def spy_init(self, *args, **kwargs):
-        observed["max_workers"] = kwargs.get("max_workers")
-        real_init(self, *args, **kwargs)
-
-    monkey = pytest.MonkeyPatch()
-    monkey.setattr(concurrent.futures.ThreadPoolExecutor, "__init__", spy_init)
-    try:
-        mkv_runner.run_batch(runtime, {Path("/src/a"): []}, lambda pool, d, f: True)
-    finally:
-        monkey.undo()
-
-    assert observed["max_workers"] == 2

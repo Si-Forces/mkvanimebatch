@@ -1,6 +1,7 @@
 """Typed inspection manifest generation for desktop sidecar consumers."""
 from __future__ import annotations
 
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TypedDict
@@ -18,6 +19,7 @@ from mkv_scan import (
     inspect_videos,
     scan_mkv_files,
 )
+from mkv_storage import resolve_io_jobs
 
 
 class InspectionMetadata(TypedDict):
@@ -33,16 +35,17 @@ class InspectionMetadata(TypedDict):
 class RequiredManifestItem(TypedDict):
     id: str
     name: str
+    release: str
     metadata: InspectionMetadata
 
 
 class ManifestItem(RequiredManifestItem, total=False):
-    sub_candidates: list[str]
     inspection_error: str
 
 
 class InspectionManifest(TypedDict):
     version: int
+    subtitle_candidates: dict[str, list[str]]
     items: list[ManifestItem]
 
 
@@ -209,14 +212,19 @@ def generate_inspection_manifest(
 ) -> InspectionManifest:
     all_mkvs = scan_mkv_files(input_dir)
     if not all_mkvs:
-        return {"version": 1, "items": []}
+        return {"version": 2, "subtitle_candidates": {}, "items": []}
 
+    # Pool stays wide so cache validation runs unrestricted; actual mkvmerge
+    # probes are throttled to the storage-appropriate concurrency.
+    probe_limit = resolve_io_jobs(None, input_dir)
+    probe_semaphore = threading.BoundedSemaphore(probe_limit) if probe_limit > 0 else None
     with ThreadPoolExecutor(max_workers=min(len(all_mkvs), 16)) as pool:
         inspection_results = inspect_videos(
             [m.path for m in all_mkvs],
             pool=pool,
             persistent_cache=persistent_cache,
             cancel_token=cancel_token,
+            probe_semaphore=probe_semaphore,
         )
 
     videos_by_dir: dict[Path, list[ParsedFile]] = {}
@@ -235,13 +243,17 @@ def generate_inspection_manifest(
             fonts_dir_cache=fonts_dir_cache,
         ).resolver
 
-    subtitle_ids_by_dir = {
-        mkv_dir: [get_item_id(path, input_dir) for path in resolver.sub_index.all_subtitles]
-        for mkv_dir, resolver in resolver_by_dir.items()
-    }
+    release_by_dir: dict[Path, str] = {}
+    subtitle_candidates: dict[str, list[str]] = {}
+    for mkv_dir, resolver in resolver_by_dir.items():
+        release = get_item_id(mkv_dir, input_dir)
+        release_by_dir[mkv_dir] = release
+        candidates = [get_item_id(path, input_dir) for path in resolver.sub_index.all_subtitles]
+        if candidates:
+            subtitle_candidates[release] = candidates
 
     if persistent_cache is not None:
-        persistent_cache.save(prune=False)
+        persistent_cache.save()
 
     items: list[ManifestItem] = []
     for mkv in all_mkvs:
@@ -249,13 +261,11 @@ def generate_inspection_manifest(
         item: ManifestItem = {
             "id": get_item_id(mkv.path, input_dir),
             "name": mkv.name,
+            "release": release_by_dir[mkv.path.parent],
             "metadata": extract_mkv_metadata(inspection.video),
         }
         if inspection.error is not None:
             item["inspection_error"] = inspection.error
-        candidates = subtitle_ids_by_dir[mkv.path.parent]
-        if candidates:
-            item["sub_candidates"] = candidates
         items.append(item)
 
-    return {"version": 1, "items": items}
+    return {"version": 2, "subtitle_candidates": subtitle_candidates, "items": items}

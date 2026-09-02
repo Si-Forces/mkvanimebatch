@@ -148,10 +148,8 @@ def test_mkv_grouping_by_dir(tmp_path):
 
 def test_scripts_run_accepts_persistent_cache(tmp_path):
     """
-    Verify _run in both mkv_remux and mkv_extract honors the runtime's persistent_cache.
+    Verify the mkv_extract and mkv_remux pipelines honor the runtime's persistent_cache.
     """
-    from concurrent.futures import ThreadPoolExecutor
-
     import mkv_extract
     import mkv_remux
 
@@ -160,40 +158,34 @@ def test_scripts_run_accepts_persistent_cache(tmp_path):
 
     all_mkvs = scan_mkv_files(tmp_path)
 
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        cache = PersistentInspectCache(cache_file=tmp_path / ".mkv_inspect_cache.json")
-        # Extract script _run invocation with persistent_cache
-        extract_config = mkv_extract.ExtractRunConfig(
-            runtime=mkv_runner.CliRuntime(
-                workers=1,
-                dry_run=True,
-                io_semaphore=None,
-                persistent_cache=cache,
-            ),
-            root_input_dir=tmp_path,
-            output_dir=tmp_path,
-            fonts_dir=tmp_path / "fonts",
-        )
-        mkv_extract._run(all_mkvs, pool, extract_config)
+    cache = PersistentInspectCache(cache_file=tmp_path / ".mkv_inspect_cache.json")
+    # Extract pipeline invocation with persistent_cache
+    extract_config = mkv_extract.ExtractRunConfig(
+        runtime=mkv_runner.CliRuntime(
+            workers=1,
+            dry_run=True,
+            io_semaphore=None,
+            persistent_cache=cache,
+        ),
+        root_input_dir=tmp_path,
+    )
+    mkv_extract._run_pipeline({tmp_path: all_mkvs}, extract_config)
 
-        # Remux script _run invocation with persistent_cache
-        release = mkv_remux.prepare_release_directory(tmp_path, tmp_path, all_mkvs)
-        config = mkv_remux.RemuxRunConfig(
-            runtime=mkv_runner.CliRuntime(
-                workers=1,
-                dry_run=True,
-                io_semaphore=None,
-                persistent_cache=cache,
-            ),
-            root_input_dir=tmp_path,
-            output_dir=tmp_path / "out",
-            temp_dir=None,
-            opus_bitrate="192k",
-            complexity=10,
-            ffmpeg_threads=None,
-            interaction_mode=mkv_remux.InteractionMode.DRY_RUN,
-        )
-        mkv_remux._run(release, config, pool)
+    # Remux pipeline invocation with persistent_cache
+    config = mkv_remux.RemuxRunConfig(
+        runtime=mkv_runner.CliRuntime(
+            workers=1,
+            dry_run=True,
+            io_semaphore=None,
+            persistent_cache=cache,
+        ),
+        root_input_dir=tmp_path,
+        opus_bitrate="192k",
+        complexity=10,
+        ffmpeg_threads=None,
+        interaction_mode=mkv_remux.InteractionMode.DRY_RUN,
+    )
+    mkv_remux._run_pipeline({tmp_path: all_mkvs}, config)
 
 
 def test_all_script_imports():

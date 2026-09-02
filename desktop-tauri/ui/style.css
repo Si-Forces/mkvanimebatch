@@ -1069,6 +1069,8 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
   flex-direction: column;
   gap: 8px;
   transition: all 0.2s ease;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 120px;
 }
 
 .tokyo-ep-card:hover {

@@ -35,7 +35,7 @@ from mkv_domain import (
     parse_episode,
 )
 from mkv_fonts import FONT_DIR_NAMES
-from mkv_proc import CancelledError, CancelToken, run_subprocess_cancellable
+from mkv_proc import CancelledError, CancelToken, acquire_semaphore, run_subprocess_cancellable
 
 _IGNORED_SCAN_DIR_NAMES = frozenset({"output", *FONT_DIR_NAMES})
 
@@ -358,24 +358,18 @@ class PersistentInspectCache:
             logger.warning(f"Failed to load inspect cache from {self.cache_file}: {e}")
             self._data = {}
 
-    def save(self, *, min_interval: float = 0.0, prune: bool = True) -> None:
+    def save(self, *, min_interval: float = 0.0) -> None:
         """Atomically persist the cache to disk.
 
         Skips all disk work when nothing has been cached since the last
         successful save. With min_interval > 0, saves are debounced to at most
         one per interval; skipped saves stay dirty so a later call flushes
-        them. Each actual write drops entries whose source file no longer
-        exists (or holds no usable data) so the cache file cannot grow
-        without bound.
+        them. Saves never stat historical source paths; stale entries are
+        evicted lazily by get() when their source vanishes or changes.
 
         Concurrent puts() that land while the serialized snapshot is being
-        written are preserved: entries pruned by this save are removed from
-        memory only when unchanged since the snapshot, and the dirty flag is
-        only cleared when no mutation happened during the write.
-
-        With prune=False the snapshot skips the per-entry existence stat pass
-        (O(N) syscalls); use it for intermediate debounced saves so growth
-        stays bounded via the final full save.
+        written are preserved: the dirty flag is only cleared when no mutation
+        happened during the write.
         """
         if not self.enabled:
             return
@@ -395,7 +389,7 @@ class PersistentInspectCache:
             live_data = {
                 key: entry
                 for key, entry in data_copy.items()
-                if entry.get("json_data") is not None and (not prune or Path(key).exists())
+                if entry.get("json_data") is not None
             }
             try:
                 with tempfile.NamedTemporaryFile(
@@ -416,7 +410,7 @@ class PersistentInspectCache:
                     Path(temp_name).unlink(missing_ok=True)
                 raise
             with self._lock:
-                # Prune entries dropped during pruning of the snapshot, but
+                # Drop entries the snapshot filtered out (no usable data), but
                 # only when they were not re-put (with fresh data) meanwhile.
                 for key in data_copy.keys() - live_data.keys():
                     if self._data.get(key) == data_copy.get(key):
@@ -445,6 +439,14 @@ class PersistentInspectCache:
                 return entry.get("json_data")
         except (OSError, TypeError, ValueError):
             pass
+        # Source vanished or changed: self-heal so dead entries never
+        # accumulate (save() no longer prunes). Skip when a concurrent put()
+        # already refreshed the entry.
+        with self._lock:
+            if self._data.get(key) == entry:
+                del self._data[key]
+                self._dirty = True
+                self._revision += 1
         return None
 
     def put(self, path: Path, json_data: Mapping[str, object]) -> None:
@@ -483,62 +485,62 @@ def inspect_videos(
     persistent_cache: PersistentInspectCache | None = None,
     force_refresh: bool = False,
     cancel_token: CancelToken | None = None,
+    probe_semaphore: threading.Semaphore | None = None,
 ) -> dict[Path, InspectionResult]:
     """Probe videos in parallel, preserving failures as explicit results.
 
-    Only successful raw metadata is cached. Callers own persistence and should
-    invoke ``persistent_cache.save()`` after their batch completes.
+    Each worker validates the persistent cache itself, so cache hits and
+    probe misses start concurrently without a synchronous pre-pass. Only the
+    mkvmerge probe runs under probe_semaphore; cache validation stays wide.
+    Only successful raw metadata is cached. Callers own persistence and
+    should invoke ``persistent_cache.save()`` after their batch completes.
     """
     results: dict[Path, InspectionResult] = {}
-    to_inspect: list[Path] = []
 
-    if persistent_cache and not force_refresh:
-        for video in videos:
+    if videos:
+        logger.info("Pre-inspecting %d video(s)...", len(videos))
+
+    def _inspect(video: Path) -> tuple[Path, MkvmergeMetadata, bool]:
+        if cancel_token and cancel_token.cancelled:
+            raise CancelledError("Cancellation requested before probe")
+        if persistent_cache and not force_refresh:
             cached_data = persistent_cache.get(video)
             if cached_data is not None:
-                results[video] = InspectionResult.success(cached_data)
+                return video, cached_data, True
+        with acquire_semaphore(probe_semaphore, cancel_token):
+            return video, run_mkvmerge_json(video, cancel_token=cancel_token), False
+
+    cached_count = 0
+    futures = {pool.submit(_inspect, video): video for video in videos}
+    try:
+        for future in as_completed(futures):
+            video = futures[future]
+            try:
+                _, data, from_cache = future.result()
+            except CancelledError:
+                raise
+            except InspectionError as exc:
+                results[video] = InspectionResult.failure(str(exc))
+            except Exception as exc:
+                logger.warning("Inspection failed for %s: %s", video.name, exc)
+                results[video] = InspectionResult.failure(f"Inspection failed: {exc}")
             else:
-                to_inspect.append(video)
-    else:
-        to_inspect = videos
-
-    if to_inspect:
-        cached_count = len(videos) - len(to_inspect)
-        if cached_count > 0:
-            logger.info("Pre-inspecting %d video(s) (%d loaded from cache)...", len(to_inspect), cached_count)
-        else:
-            logger.info("Pre-inspecting %d video(s)...", len(to_inspect))
-
-        def _inspect(video: Path) -> tuple[Path, MkvmergeMetadata]:
-            if cancel_token and cancel_token.cancelled:
-                raise CancelledError("Cancellation requested before probe")
-            return video, run_mkvmerge_json(video, cancel_token=cancel_token)
-
-        futures = {pool.submit(_inspect, video): video for video in to_inspect}
-        try:
-            for future in as_completed(futures):
-                video = futures[future]
-                try:
-                    _, data = future.result()
-                except CancelledError:
-                    raise
-                except InspectionError as exc:
-                    results[video] = InspectionResult.failure(str(exc))
-                except Exception as exc:
-                    logger.warning("Inspection failed for %s: %s", video.name, exc)
-                    results[video] = InspectionResult.failure(f"Inspection failed: {exc}")
-                else:
-                    results[video] = InspectionResult.success(data)
-                    if persistent_cache:
-                        persistent_cache.put(video, data)
-        except CancelledError:
-            for future in futures:
-                future.cancel()
-            wait(futures)
-            raise
+                results[video] = InspectionResult.success(data)
+                if from_cache:
+                    cached_count += 1
+                elif persistent_cache:
+                    persistent_cache.put(video, data)
+    except CancelledError:
+        for future in futures:
+            future.cancel()
+        wait(futures)
+        raise
 
     succeeded = sum(1 for result in results.values() if result.video is not None)
-    logger.info("Inspection complete: %d/%d succeeded.", succeeded, len(videos))
+    if cached_count:
+        logger.info("Inspection complete: %d/%d succeeded (%d from cache).", succeeded, len(videos), cached_count)
+    else:
+        logger.info("Inspection complete: %d/%d succeeded.", succeeded, len(videos))
     return results
 
 @dataclass(frozen=True)

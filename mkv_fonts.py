@@ -135,13 +135,12 @@ class FontHashMemo:
         temp_name = ""
         try:
             self.memo_file.parent.mkdir(parents=True, exist_ok=True)
-            live_data = {key: val for key, val in self._data.items() if Path(key).exists()}
             try:
                 with tempfile.NamedTemporaryFile(
                     "w", dir=self.memo_file.parent, encoding="utf-8", delete=False
                 ) as temp_file:
                     temp_name = temp_file.name
-                    json.dump(live_data, temp_file)
+                    json.dump(self._data, temp_file)
                 if self.memo_file.exists():
                     os.chmod(temp_name, stat.S_IMODE(self.memo_file.stat().st_mode))
                 else:
@@ -151,7 +150,6 @@ class FontHashMemo:
                 if temp_name:
                     Path(temp_name).unlink(missing_ok=True)
                 raise
-            self._data = live_data
             self._dirty = False
         except (OSError, TypeError, ValueError) as e:
             logger.warning(f"Failed to save font hash memo to {self.memo_file}: {e}")

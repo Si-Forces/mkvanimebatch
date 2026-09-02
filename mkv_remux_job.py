@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
 import subprocess
+import tempfile
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait
@@ -15,7 +17,6 @@ from mkv_events import (
     OUTCOME_CANCELLED,
     OUTCOME_COMPLETED,
     OUTCOME_ERROR,
-    OUTCOME_SKIPPED,
     emit_item_complete,
     emit_item_start,
 )
@@ -32,8 +33,6 @@ def mkv_success(result: subprocess.CompletedProcess[str]) -> bool:
 
 @dataclass(frozen=True)
 class RemuxExecutionContext:
-    temp_dir: Path | None
-    fonts: FontInfo
     opus_bitrate: str
     ffmpeg_threads: int
     io_semaphore: threading.Semaphore | None
@@ -41,12 +40,6 @@ class RemuxExecutionContext:
     sub_offset: float
     cancel_token: CancelToken
     workers: int
-
-
-@dataclass
-class ExecutionSummary:
-    skipped_files: list[str] = field(default_factory=list[str])
-    failed_files: list[str] = field(default_factory=list[str])
 
 
 # ─── TRACK SELECTOR ──────────────────────────────────────────────────────────
@@ -190,6 +183,20 @@ class PlannedJob:
     embedded_sub_id:   int | None = None
     use_source_fonts:  bool = False
     item_id:           str = ""
+    fonts:             FontInfo = FontInfo(args=(), count=0)
+    release_dir:       Path | None = None
+
+
+@dataclass
+class ExecutionSummary:
+    """All non-success outcomes: display lines for the batch log, plus per-job
+    records so a multi-release batch can attribute results to each release."""
+
+    skipped_files: list[str] = field(default_factory=list[str])
+    failed_files: list[str] = field(default_factory=list[str])
+    job_skips: list[tuple[PlannedJob, str]] = field(default_factory=list[tuple[PlannedJob, str]])
+    failed_jobs: list[PlannedJob] = field(default_factory=list[PlannedJob])
+
 
 
 @dataclass
@@ -210,7 +217,7 @@ def _convert_flac_to_opus(
     opus_bitrate: str,
     log: list[str] | None = None,
     ffmpeg_threads: int = 2,
-    complexity: int = 10,
+    complexity: int = 5,
     cancel_token: CancelToken | None = None,
 ) -> Path | None:
     if log is not None:
@@ -327,18 +334,19 @@ def _build_mkvmerge_args(
 
 # ─── JOB EXECUTION ───────────────────────────────────────────────────────────
 def process_job(
-    job: PlannedJob, temp_dir: Path | None, fonts: FontInfo, opus_bitrate: str,
+    job: PlannedJob, opus_bitrate: str,
     inspection_results: dict[Path, InspectionResult], ffmpeg_threads: int = 2,
     io_semaphore: threading.Semaphore | None = None,
-    complexity: int = 10,
+    complexity: int = 5,
     sub_offset: float = 0.0,
     cancel_token: CancelToken | None = None,
 ) -> JobResult:
     result = JobResult()
     video, video_name, base = job.video, job.video_name, job.base
     output_file = job.output_file
+    fonts = job.fonts
+    scratch_dir: Path | None = None
     temp_opus: Path | None = None
-    temp_output: Path | None = None
 
     if cancel_token is not None and cancel_token.cancelled:
         result.cancelled = True
@@ -351,13 +359,6 @@ def process_job(
 
     result.log.append(f"Processing: {video_name}")
     result.log.append("  Inspecting tracks...")
-
-    def _skip(reason: str, detail: str) -> JobResult:
-        result.log.append(f"  !! SKIPPED: {video_name}")
-        result.log.append(f"  !! Reason : {detail}")
-        result.skipped_reason = reason
-        emit_item_complete(job.item_id, video_name, OUTCOME_SKIPPED, reason=reason)
-        return result
 
     def _error(reason: str, detail: str) -> JobResult:
         result.log.append(f"  !! ERROR: {video_name}")
@@ -399,14 +400,15 @@ def process_job(
 
     try:
         with acquire_semaphore(io_semaphore, cancel_token):
+            # Scratch space beside the final output so the promote below is an
+            # atomic same-filesystem rename.
+            scratch_dir = Path(tempfile.mkdtemp(prefix=".tmp_remux_", dir=output_file.parent))
             needs_conversion = selection.audio_id is not None and selection.audio_codec == "A_FLAC"
             if needs_conversion:
-                if temp_dir is None:
-                    return _skip("temp dir unavailable", "Temporary directory unavailable for FLAC→Opus conversion.")
                 temp_opus = _convert_flac_to_opus(
                     video=video,
                     audio_index=selection.audio_index,
-                    temp_dir=temp_dir,
+                    temp_dir=scratch_dir,
                     base=base,
                     opus_bitrate=opus_bitrate,
                     log=result.log,
@@ -431,17 +433,12 @@ def process_job(
             else:
                 result.log.append("  Cover          : none found in directory or source")
 
-            if temp_dir:
-                temp_output = temp_dir / job.output_file.name
-            else:
-                temp_output = job.output_file.with_suffix(".tmp")
-
-            temp_output.unlink(missing_ok=True)
+            temp_output = scratch_dir / job.output_file.name
             args = _build_mkvmerge_args(job, selection, temp_opus, fonts, temp_output, sub_offset=sub_offset)
             result.log.append("  Running mkvmerge...")
 
             try:
-                run_result = run_subprocess_cancellable(["mkvmerge", *args], cancel_token=cancel_token, timeout=SUBPROCESS_TIMEOUT)
+                run_result = run_subprocess_cancellable(["mkvmerge", *args], cancel_token=cancel_token, timeout=SUBPROCESS_TIMEOUT, capture_stdout=False)
             except subprocess.TimeoutExpired:
                 result.log.append(f"  ERROR: mkvmerge timed out after {SUBPROCESS_TIMEOUT}s.")
                 temp_output.unlink(missing_ok=True)
@@ -476,13 +473,8 @@ def process_job(
         raise
 
     finally:
-        for temp_path in (temp_opus, temp_output):
-            if temp_path is None:
-                continue
-            try:
-                temp_path.unlink(missing_ok=True)
-            except OSError as exc:
-                logger.warning("Failed to remove temporary file %s: %s", temp_path, exc)
+        if scratch_dir is not None:
+            shutil.rmtree(scratch_dir, ignore_errors=True)
     return result
 # ─── JOB EXECUTOR ORCHESTRATOR ────────────────────────────────────────────────
 def execute_jobs(
@@ -495,13 +487,20 @@ def execute_jobs(
     summary = ExecutionSummary()
     logger.info("Processing %d matched file(s) (up to %d at a time)...", len(jobs), context.workers)
 
+    def record_skip(skipped_job: PlannedJob, line: str) -> None:
+        summary.skipped_files.append(line)
+        summary.job_skips.append((skipped_job, line))
+
+    def record_failure(failed_job: PlannedJob, line: str) -> None:
+        summary.failed_files.append(failed_job.video_name)
+        summary.failed_jobs.append(failed_job)
+        record_skip(failed_job, line)
+
     total_jobs = len(jobs)
     futures = {
         pool.submit(
             process_job,
             job=job,
-            temp_dir=context.temp_dir,
-            fonts=context.fonts,
             opus_bitrate=context.opus_bitrate,
             inspection_results=inspection_results,
             ffmpeg_threads=context.ffmpeg_threads,
@@ -518,14 +517,13 @@ def execute_jobs(
         try:
             result = future.result()
             if result.cancelled:
-                summary.skipped_files.append(f"{job.video_name} (cancelled)")
+                record_skip(job, f"{job.video_name} (cancelled)")
                 status = "Cancelled"
             elif result.failed or result.error_reason:
-                summary.failed_files.append(job.video_name)
-                summary.skipped_files.append(f"{job.video_name} (failed: {result.error_reason or 'error'})")
+                record_failure(job, f"{job.video_name} (failed: {result.error_reason or 'error'})")
                 status = "Failed"
             elif result.skipped_reason:
-                summary.skipped_files.append(f"{job.video_name} ({result.skipped_reason})")
+                record_skip(job, f"{job.video_name} ({result.skipped_reason})")
                 status = "Skipped"
             else:
                 status = "Remuxed"
@@ -538,7 +536,7 @@ def execute_jobs(
                 job.video_name,
             )
         except CancelledError:
-            summary.skipped_files.append(f"{job.video_name} (cancelled)")
+            record_skip(job, f"{job.video_name} (cancelled)")
             logger.info(
                 "[%d/%d (%.0f%%)] Cancelled: %s",
                 completed_jobs,
@@ -564,7 +562,6 @@ def execute_jobs(
                 job.video_name,
             )
             emit_item_complete(job.item_id, job.video_name, OUTCOME_ERROR, error=str(exc))
-            summary.failed_files.append(job.video_name)
-            summary.skipped_files.append(f"{job.video_name} (exception: {exc})")
+            record_failure(job, f"{job.video_name} (exception: {exc})")
 
     return summary

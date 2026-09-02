@@ -1,13 +1,17 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-pub const CONTRACT_VERSION: u64 = 1;
+pub const CONTRACT_VERSION: u64 = 2;
 
 type ExtraFields = Map<String, Value>;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InspectionManifest {
     pub version: u64,
+    #[serde(default)]
+    pub subtitle_candidates: BTreeMap<String, Vec<String>>,
     pub items: Vec<ManifestItem>,
     #[serde(flatten)]
     pub extra: ExtraFields,
@@ -17,9 +21,8 @@ pub struct InspectionManifest {
 pub struct ManifestItem {
     pub id: String,
     pub name: String,
+    pub release: String,
     pub metadata: InspectionMetadata,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sub_candidates: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inspection_error: Option<String>,
     #[serde(flatten)]
@@ -130,11 +133,16 @@ mod tests {
     #[test]
     fn manifest_round_trip_preserves_additive_fields() {
         let input = serde_json::json!({
-            "version": 1,
+            "version": 2,
             "future_root": {"enabled": true},
+            "subtitle_candidates": {
+                ".": ["shared.ass"],
+                "Season 01": ["Season 01/Show - 01.ass", "shared.ass"]
+            },
             "items": [{
                 "id": "Season 01/Show - 01.mkv",
                 "name": "Show - 01.mkv",
+                "release": "Season 01",
                 "future_item": [1, 2, 3],
                 "metadata": {
                     "resolution": "1080p",
@@ -150,8 +158,14 @@ mod tests {
         });
 
         let manifest = parse_manifest_json(input.to_string().as_bytes()).unwrap();
+        assert_eq!(manifest.items[0].release, "Season 01");
+        assert_eq!(
+            manifest.subtitle_candidates["Season 01"],
+            vec!["Season 01/Show - 01.ass", "shared.ass"]
+        );
         let output = serde_json::to_value(manifest).unwrap();
         assert_eq!(output["future_root"], input["future_root"]);
+        assert_eq!(output["subtitle_candidates"], input["subtitle_candidates"]);
         assert_eq!(
             output["items"][0]["future_item"],
             input["items"][0]["future_item"]
@@ -164,8 +178,10 @@ mod tests {
 
     #[test]
     fn manifest_rejects_unsupported_version() {
-        let error = parse_manifest_json(br#"{"version":2,"items":[]}"#).unwrap_err();
-        assert!(error.contains("Unsupported manifest version"));
+        let stale = parse_manifest_json(br#"{"version":1,"items":[]}"#).unwrap_err();
+        assert!(stale.contains("Unsupported manifest version"));
+        let future = parse_manifest_json(br#"{"version":3,"items":[]}"#).unwrap_err();
+        assert!(future.contains("Unsupported manifest version"));
     }
 
     #[test]

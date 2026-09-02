@@ -1,7 +1,7 @@
 """
 mkv_runner.py
 Shared command-line scaffolding for the mkvanimebatch tools: common argument
-definitions, inspect-cache lifecycle, and the batch directory-iteration loop.
+definitions and inspect-cache lifecycle.
 """
 from __future__ import annotations
 
@@ -12,8 +12,6 @@ import signal
 import sys
 import threading
 from collections import defaultdict
-from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -22,7 +20,7 @@ from mkv_domain import (
     MAX_DEFAULT_WORKERS,
     natural_sort_key,
 )
-from mkv_proc import CancelledError, CancelToken
+from mkv_proc import CancelToken
 from mkv_scan import (
     ParsedFile,
     PersistentInspectCache,
@@ -40,7 +38,7 @@ __all__ = [
     "default_worker_count",
     "handle_clear_cache_flag",
     "install_cancel_handlers",
-    "run_batch",
+    "log_directory_banner",
 ]
 
 # Both CLI entrypoints live beside this module, so this resolves to the same
@@ -50,6 +48,14 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 
 def default_worker_count() -> int:
     return min((os.cpu_count() or 4) * DEFAULT_WORKER_MULTIPLIER, MAX_DEFAULT_WORKERS)
+
+
+def log_directory_banner(mkv_dir: Path) -> None:
+    """Print the banner both CLIs show before each release directory."""
+    logger.info("")
+    logger.info("=" * 60)
+    logger.info("Processing directory: %s", mkv_dir)
+    logger.info("=" * 60)
 
 
 IO_JOBS_HELP = (
@@ -155,46 +161,3 @@ def collect_release_dirs(
 
     return {d: grouped[d] for d in sorted(grouped.keys(), key=natural_sort_key)}
 
-
-DirectoryProcessor = Callable[[ThreadPoolExecutor, Path, list[ParsedFile]], bool]
-
-
-def run_batch(
-    runtime: CliRuntime,
-    mkvs_by_dir: dict[Path, list[ParsedFile]],
-    process_directory: DirectoryProcessor,
-) -> bool:
-    """Process every release directory through one shared worker pool.
-
-    Prints the per-directory banner, delegates each directory to
-    `process_directory(pool, mkv_dir, dir_mkvs)`, and debounces persistent-cache
-    saves between directories plus one final flush. Remaining directories are
-    skipped once cancellation is requested. Returns True only when every
-    directory succeeded without cancellation; emitting batch events stays the
-    caller's responsibility so post-loop work can run before batch_complete.
-    """
-    token = runtime.cancel_token
-    overall_success = True
-
-    try:
-        with ThreadPoolExecutor(max_workers=runtime.workers) as pool:
-            for mkv_dir, dir_mkvs in mkvs_by_dir.items():
-                if token.cancelled:
-                    logger.warning("Cancellation requested — skipping remaining directories.")
-                    raise CancelledError("Cancellation requested between release directories")
-
-                logger.info("")
-                logger.info("=" * 60)
-                logger.info("Processing directory: %s", mkv_dir)
-                logger.info("=" * 60)
-
-                if not process_directory(pool, mkv_dir, dir_mkvs):
-                    overall_success = False
-
-                # Intermediate save: debounced and without the O(N) prune pass;
-                # the flush below does full pruning.
-                runtime.persistent_cache.save(min_interval=60.0, prune=False)
-    finally:
-        runtime.persistent_cache.save()
-
-    return overall_success and not token.cancelled

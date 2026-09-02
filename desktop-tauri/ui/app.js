@@ -17,7 +17,7 @@ const PRESETS = {
   default: {
     name: "Opus 192k + Keep Fonts",
     bitrate: "192k",
-    complexity: "10",
+    complexity: "5",
     workers: "8",
     ioJobs: "2",
     ffmpegThreads: "",
@@ -324,7 +324,7 @@ let subAssignModalItemId = null;
 function openSubAssignModal(itemId) {
   const tracker = remuxQueue;
   const item = tracker.state?.items.get(itemId);
-  const candidates = tracker.candidatesByItem.get(itemId) || [];
+  const candidates = tracker.candidatesForItem(itemId);
   if (!item) return;
 
   subAssignModalItemId = itemId;

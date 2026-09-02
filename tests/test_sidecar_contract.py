@@ -17,7 +17,6 @@ import mkv_scan
 from mkv_assets import AssetResolver
 from mkv_domain import EpisodeInfo
 from mkv_events import emit_event, get_item_id, set_events_enabled
-from mkv_fonts import FontInfo
 from mkv_scan import InspectedVideo, InspectionResult, ParsedFile, _create_parsed_file
 
 
@@ -79,7 +78,7 @@ def test_emit_event_omits_id_when_none_given(monkeypatch):
 
 
 def test_plan_mode_cli_output(tmp_path, monkeypatch, capsys):
-    """mkv-remux --plan outputs valid JSON object with version: 1 and items list."""
+    """mkv-remux --plan outputs valid JSON object with version: 2 and items list."""
     sub_dir = tmp_path / "Season 01"
     sub_dir.mkdir()
     mkv1 = sub_dir / "[Fansub] Show - 01 [1080p].mkv"
@@ -122,12 +121,13 @@ def test_plan_mode_cli_output(tmp_path, monkeypatch, capsys):
 
     captured = capsys.readouterr()
     manifest = json.loads(captured.out.strip())
-    assert manifest["version"] == 1
+    assert manifest["version"] == 2
     items = manifest["items"]
     assert len(items) == 2
     for item in items:
         assert "id" in item
         assert "name" in item
+        assert "release" in item
         assert item["name"].endswith(".mkv")
         meta = item["metadata"]
         assert meta["resolution"] == "1080p"
@@ -151,15 +151,17 @@ def test_plan_mode_never_checks_runtime_dependencies(tmp_path, monkeypatch):
     check_dependencies.assert_not_called()
 
 
-def test_plan_manifest_includes_sub_candidates(tmp_path, monkeypatch, capsys):
-    """Manifest v1 gains an additive sub_candidates field: root-relative POSIX
-    paths of every discovered external subtitle, omitted when none exist."""
+def test_plan_manifest_normalizes_subtitle_candidates_by_release(tmp_path, monkeypatch, capsys):
+    """Manifest v2 lists subtitle candidates once per release directory as
+    root-relative POSIX paths; items reference their release instead of
+    carrying per-item copies."""
     season = tmp_path / "Season 01"
     season.mkdir()
     (season / "Show - 01.mkv").write_bytes(b"v1")
     (season / "Show - 02.mkv").write_bytes(b"v2")
     (season / "Show - 01.ass").write_bytes(b"sub1")
     (tmp_path / "shared.ass").write_bytes(b"ancestor_sub")
+    (tmp_path / "Movie.mkv").write_bytes(b"v3")
 
     argv = ["mkv_remux.py", "--plan", "--input-dir", str(tmp_path)]
     with patch.object(sys, "argv", argv), \
@@ -170,16 +172,26 @@ def test_plan_manifest_includes_sub_candidates(tmp_path, monkeypatch, capsys):
 
     captured = capsys.readouterr()
     manifest = json.loads(captured.out.strip())
-    assert manifest["version"] == 1
+    assert manifest["version"] == 2
 
+    # Candidates are stored once per release, keyed by root-relative POSIX
+    # directory ("." for the input root itself).
+    candidates = manifest["subtitle_candidates"]
+    assert set(candidates["Season 01"]) == {"Season 01/Show - 01.ass", "shared.ass"}
+    assert candidates["."] == ["shared.ass"]
+
+    # No item carries a copied candidate list; each references its release.
     by_id = {item["id"]: item for item in manifest["items"]}
-    ep1 = by_id["Season 01/Show - 01.mkv"]
-    assert set(ep1["sub_candidates"]) == {"Season 01/Show - 01.ass", "shared.ass"}
-    # Episode 02 has no dedicated sub but still sees ancestor candidates.
-    assert "shared.ass" in by_id["Season 01/Show - 02.mkv"]["sub_candidates"]
+    for item in manifest["items"]:
+        assert "sub_candidates" not in item
+    assert by_id["Season 01/Show - 01.mkv"]["release"] == "Season 01"
+    # Episode 02 has no dedicated sub but resolves the same release list,
+    # so it still sees ancestor candidates.
+    assert by_id["Season 01/Show - 02.mkv"]["release"] == "Season 01"
+    assert by_id["Movie.mkv"]["release"] == "."
 
 
-def test_plan_manifest_omits_sub_candidates_when_no_subtitles(tmp_path, monkeypatch, capsys):
+def test_plan_manifest_omits_release_entry_when_no_subtitles(tmp_path, monkeypatch, capsys):
     bare = tmp_path / "Bare"
     bare.mkdir()
     (bare / "Show - 01.mkv").write_bytes(b"v")
@@ -192,7 +204,10 @@ def test_plan_manifest_omits_sub_candidates_when_no_subtitles(tmp_path, monkeypa
         assert exc.value.code == 0
 
     manifest = json.loads(capsys.readouterr().out.strip())
-    assert "sub_candidates" not in manifest["items"][0]
+    assert manifest["subtitle_candidates"] == {}
+    item = manifest["items"][0]
+    assert "sub_candidates" not in item
+    assert item["release"] == "Bare"
 
 
 def test_plan_mode_duplicate_basenames_distinct_ids(tmp_path, monkeypatch, capsys):
@@ -364,7 +379,7 @@ def test_plan_mode_stdout_purity_corrupt_cache(tmp_path, monkeypatch, capsys):
 
     captured = capsys.readouterr()
     manifest = json.loads(captured.out)
-    assert manifest["version"] == 1
+    assert manifest["version"] == 2
     assert isinstance(manifest["items"], list)
     assert "Failed to load inspect cache" in captured.err
 
@@ -390,7 +405,7 @@ def test_plan_mode_stdout_purity_with_mock(tmp_path, monkeypatch, capsys):
 
     captured = capsys.readouterr()
     manifest = json.loads(captured.out)
-    assert manifest["version"] == 1
+    assert manifest["version"] == 2
     assert len(manifest["items"]) == 1
     assert "This is a mock warning that must not corrupt stdout" in captured.err
 
@@ -485,8 +500,6 @@ def test_crashed_job_emits_error_event(tmp_path, monkeypatch):
                 pool,
                 {job.video: InspectionResult.success({})},
                 mkv_remux_job.RemuxExecutionContext(
-                    temp_dir=None,
-                    fonts=FontInfo(args=(), count=0),
                     opus_bitrate="192k",
                     ffmpeg_threads=1,
                     io_semaphore=None,
@@ -713,8 +726,7 @@ def test_remux_error_event_emitted_on_failure(monkeypatch, tmp_path):
     monkeypatch.setattr(mkv_remux_job, "select_tracks", lambda *a, **k: tr)
 
     res = mkv_remux_job.process_job(
-        job, tmp_path / "temp", FontInfo(args=(), count=0),
-        "192k", {job.video: InspectionResult.success({})}, ffmpeg_threads=2,
+        job, "192k", {job.video: InspectionResult.success({})}, ffmpeg_threads=2,
     )
     assert res.failed is True
     complete_events = [k for ev_type, k in events if ev_type == "item_complete"]

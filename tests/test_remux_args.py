@@ -264,7 +264,6 @@ class TestRemuxArgs:
 
         monkeypatch.setattr(mod, "check_dependencies", lambda *a: None)
         monkeypatch.setattr(mod, "inspect_videos", lambda *a, **k: {})
-        monkeypatch.setattr(mod, "_run", lambda *a, **k: True)
 
         test_argv = [
             "script", "--input-dir", str(test_dir),
@@ -295,9 +294,8 @@ class TestRemuxArgs:
         captured_kwargs = {}
         def fake_prepare(*args, **kwargs):
             captured_kwargs["assets_dir"] = kwargs.get("assets_dir")
-            return SimpleNamespace(fonts_origin="default", fonts_dir=test_dir / "fonts")
+            return SimpleNamespace(fonts_origin="default", fonts_dir=test_dir / "fonts", videos=[])
         monkeypatch.setattr(mod, "prepare_release_directory", fake_prepare)
-        monkeypatch.setattr(mod, "_run", lambda release, config, pool: True)
 
         test_argv = [
             "script", "--input-dir", str(test_dir),
@@ -413,8 +411,7 @@ class TestRemuxArgs:
         monkeypatch.setattr(mkv_remux_job, "select_tracks", lambda *a, **k: tr)
 
         result = mkv_remux_job.process_job(
-            job, tmp_path / "temp", FontInfo(args=(), count=0),
-            "192k", {job.video: InspectionResult.success({})}, ffmpeg_threads=2,
+            job, "192k", {job.video: InspectionResult.success({})}, ffmpeg_threads=2,
         )
         assert result.failed is True
         assert result.skipped_reason is None
@@ -422,6 +419,46 @@ class TestRemuxArgs:
         assert "timed out" in result.error_reason
         assert any("mkvmerge timed out" in line for line in result.log)
         assert not (tmp_path / "out.mkv").exists()
+
+    def test_mkvmerge_discards_stdout(self, mod, monkeypatch, tmp_path):
+        """Verify process_job runs mkvmerge with stdout discarded (stderr stays captured)."""
+        import subprocess
+
+        calls = {}
+
+        def mock_run(cmd, **kwargs):
+            calls[cmd[0]] = kwargs
+            if cmd[0] == "mkvmerge":
+                Path(cmd[cmd.index("-o") + 1]).touch()
+            res = subprocess.CompletedProcess(cmd, 0, stdout=None, stderr="")
+            return res
+
+        monkeypatch.setattr(mkv_remux_job, "run_subprocess_cancellable", mock_run)
+
+        job = mkv_remux_job.PlannedJob(
+            video=tmp_path / "video.mkv",
+            video_name="video.mkv",
+            base="video",
+            output_file=tmp_path / "out.mkv",
+            subtitle_file=None,
+            subtitle_label="English",
+            subtitle_mkv_lang="eng",
+            chapter_file=None,
+            cover_file=None,
+        )
+        tr = mkv_remux_job.TrackSelection(
+            video_id=0, audio_id=1, audio_index=0, audio_codec="A_FLAC",
+            audio_channels=2, audio_lang="jpn", audio_name="Japanese",
+            audio_reason="test", has_source_chapters=False, source_cover_id=None
+        )
+        monkeypatch.setattr(mkv_remux_job, "select_tracks", lambda *a, **k: tr)
+
+        result = mkv_remux_job.process_job(
+            job, "192k", {job.video: InspectionResult.success({})}, ffmpeg_threads=2,
+        )
+        assert result.failed is False
+        assert calls["mkvmerge"]["capture_stdout"] is False
+        assert calls["ffmpeg"].get("capture_stdout", True) is True
 
     def test_cli_ffmpeg_threads_support(self, mod, monkeypatch, tmp_path):
         """Verify CLI accepts --ffmpeg-threads and forwards it."""
@@ -431,16 +468,15 @@ class TestRemuxArgs:
 
         monkeypatch.setattr(mod, "check_dependencies", lambda *a: None)
         monkeypatch.setattr(mod, "inspect_videos", lambda *a, **k: {})
-        captured_kwargs = {}
-        def mock_run(release, config, pool):
-            captured_kwargs["config"] = config
-            return True
-        monkeypatch.setattr(mod, "_run", mock_run)
+        captured = {}
+        def mock_execute(jobs, pool, inspection_results, context):
+            captured["context"] = context
+            return mkv_remux_job.ExecutionSummary()
+        monkeypatch.setattr(mod, "execute_jobs", mock_execute)
 
         test_argv = [
             "script", "--input-dir", str(test_dir),
             "--ffmpeg-threads", "4",
-            "--dry-run"
         ]
         monkeypatch.setattr("sys.argv", test_argv)
 
@@ -449,7 +485,7 @@ class TestRemuxArgs:
         except SystemExit as exc:
             assert exc.code == 0
 
-        assert captured_kwargs["config"].ffmpeg_threads == 4
+        assert captured["context"].ffmpeg_threads == 4
 
     def test_cli_sub_assignments_loading(self, mod, monkeypatch, tmp_path):
         """--sub-assignments loads the JSON map and resolves relative paths
@@ -462,13 +498,14 @@ class TestRemuxArgs:
         assign_file = tmp_path / "assign.json"
 
         captured_kwargs = {}
-        def mock_run(release, config, pool):
-            captured_kwargs["config"] = config
-            return True
+        real_plan_jobs = mod._plan_jobs
+        def spy_plan_jobs(*args, **kwargs):
+            captured_kwargs["sub_assignments"] = kwargs.get("sub_assignments")
+            return real_plan_jobs(*args, **kwargs)
 
         monkeypatch.setattr(mod, "check_dependencies", lambda *a: None)
         monkeypatch.setattr(mod, "inspect_videos", lambda *a, **k: {})
-        monkeypatch.setattr(mod, "_run", mock_run)
+        monkeypatch.setattr(mod, "_plan_jobs", spy_plan_jobs)
 
         # Valid file with a relative path -> resolved against input root
         assign_file.write_text(json_lib.dumps({
@@ -484,7 +521,7 @@ class TestRemuxArgs:
         except SystemExit as exc:
             assert exc.code == 0
 
-        passed = captured_kwargs["config"].sub_assignments
+        passed = captured_kwargs["sub_assignments"]
         assert passed is not None
         assert passed["Season 01/ep1.mkv"] == test_dir / "Season 01" / "sub.ass"
 
@@ -548,3 +585,139 @@ def test_prompt_for_subtitle_eof_treated_as_skip(monkeypatch, tmp_path):
     monkeypatch.setattr(builtins, "input", raise_eof)
     video = _create_parsed_file(tmp_path / "Show - 01.mkv")
     assert mkv_remux._prompt_for_subtitle(video, [tmp_path / "sub.ass"]) is None
+
+
+# ─── global pipeline ──────────────────────────────────────────────────────────
+def _pipeline_config(runtime, root_input_dir):
+    from mkv_assets import InteractionMode
+
+    return mkv_remux.RemuxRunConfig(
+        runtime=runtime,
+        root_input_dir=root_input_dir,
+        opus_bitrate="192k",
+        complexity=5,
+        ffmpeg_threads=2,
+        interaction_mode=InteractionMode.NON_INTERACTIVE,
+    )
+
+
+def _pipeline_runtime(tmp_path, workers):
+    from mkv_runner import CliRuntime
+    from mkv_scan import PersistentInspectCache
+
+    return CliRuntime(
+        workers=workers,
+        dry_run=False,
+        io_semaphore=None,
+        persistent_cache=PersistentInspectCache(cache_file=tmp_path / "cache.json"),
+    )
+
+
+def _make_release(root, name, ep):
+    rel = root / name
+    rel.mkdir()
+    (rel / f"Show - {ep}.mkv").write_bytes(b"video")
+    (rel / f"Show - {ep}.ass").write_bytes(b"sub")
+    return rel
+
+
+def _fake_inspect(videos, pool, **_kwargs):
+    return {v: InspectionResult.success({"tracks": [{"id": 0, "type": "video"}]}) for v in videos}
+
+
+def test_pipeline_runs_jobs_from_different_releases_concurrently(tmp_path, monkeypatch):
+    """8 single-file releases with 4 workers must overlap execution across
+    releases (no per-release barrier) while honouring the worker bound."""
+    import threading
+    import time
+
+    from mkv_runner import collect_release_dirs
+
+    for i in range(8):
+        _make_release(tmp_path, f"Release {i + 1}", f"{i + 1:02d}")
+
+    monkeypatch.setattr(mkv_remux, "inspect_videos", _fake_inspect)
+
+    lock = threading.Lock()
+    state = {"active": 0, "peak": 0}
+
+    def fake_process_job(job, *args, **kwargs):
+        with lock:
+            state["active"] += 1
+            state["peak"] = max(state["peak"], state["active"])
+        time.sleep(0.05)
+        with lock:
+            state["active"] -= 1
+        return mkv_remux_job.JobResult()
+
+    monkeypatch.setattr(mkv_remux_job, "process_job", fake_process_job)
+
+    runtime = _pipeline_runtime(tmp_path, workers=4)
+    mkvs_by_dir = collect_release_dirs(tmp_path)
+    assert len(mkvs_by_dir) == 8
+
+    assert mkv_remux._run_pipeline(mkvs_by_dir, _pipeline_config(runtime, tmp_path)) is True
+    assert state["peak"] > 1
+    assert state["peak"] <= 4
+
+
+def test_fonts_cleanup_deferred_and_skipped_for_failed_release(tmp_path, monkeypatch):
+    """Fonts directories go only after the whole queue drains, and only for
+    releases whose jobs all succeeded; a failed release keeps its fonts dir."""
+    from mkv_runner import collect_release_dirs
+
+    rel_ok = _make_release(tmp_path, "Good", "01")
+    rel_bad = _make_release(tmp_path, "Bad", "02")
+    for rel in (rel_ok, rel_bad):
+        fonts = rel / "fonts"
+        fonts.mkdir()
+        (fonts / "font.ttf").write_bytes(b"f")
+
+    monkeypatch.setattr(mkv_remux, "inspect_videos", _fake_inspect)
+
+    fonts_seen_during_jobs = []
+
+    def fake_process_job(job, *args, **kwargs):
+        # Deferral: while ANY job runs, NO fonts dir may have been removed yet.
+        fonts_seen_during_jobs.append(
+            ((rel_ok / "fonts").is_dir(), (rel_bad / "fonts").is_dir())
+        )
+        result = mkv_remux_job.JobResult()
+        if job.video.parent == rel_bad:
+            result.failed = True
+            result.error_reason = "boom"
+        return result
+
+    monkeypatch.setattr(mkv_remux_job, "process_job", fake_process_job)
+
+    runtime = _pipeline_runtime(tmp_path, workers=2)
+    mkvs_by_dir = collect_release_dirs(tmp_path)
+
+    assert mkv_remux._run_pipeline(mkvs_by_dir, _pipeline_config(runtime, tmp_path)) is False
+    assert fonts_seen_during_jobs and all(ok and bad for ok, bad in fonts_seen_during_jobs)
+    assert not (rel_ok / "fonts").exists()   # fully successful release cleaned
+    assert (rel_bad / "fonts").exists()      # failed release keeps its fonts
+
+
+def test_shared_fallback_fonts_dir_deleted_once_when_all_sharers_succeed(tmp_path, monkeypatch):
+    """A release's local 'fonts' dir shared via fallback by a nested release is
+    deleted after the whole batch when every sharing release succeeded; fallback
+    origins on the sharers must not block cleanup."""
+    from mkv_runner import collect_release_dirs
+
+    (tmp_path / "Show - 01.mkv").write_bytes(b"video")
+    fonts = tmp_path / "fonts"
+    fonts.mkdir()
+    (fonts / "font.ttf").write_bytes(b"f")
+    nested = _make_release(tmp_path, "Season 2", "02")  # no fonts dir: falls back to root's
+
+    monkeypatch.setattr(mkv_remux, "inspect_videos", _fake_inspect)
+    monkeypatch.setattr(mkv_remux_job, "process_job", lambda job, *a, **k: mkv_remux_job.JobResult())
+
+    runtime = _pipeline_runtime(tmp_path, workers=2)
+    mkvs_by_dir = collect_release_dirs(tmp_path)
+    assert len(mkvs_by_dir) == 2
+
+    assert mkv_remux._run_pipeline(mkvs_by_dir, _pipeline_config(runtime, tmp_path)) is True
+    assert not fonts.exists()  # deleted once, fallback sharers don't block it
+    assert nested.is_dir()
