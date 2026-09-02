@@ -189,7 +189,9 @@ mod tests {
         let input = r#"{"version":1,"type":"batch_complete","success":true}"#;
         let event = parse_job_event(input).unwrap();
         match event {
-            JobEvent::BatchComplete { success, cancelled, .. } => {
+            JobEvent::BatchComplete {
+                success, cancelled, ..
+            } => {
                 assert!(success);
                 assert!(!cancelled);
             }
