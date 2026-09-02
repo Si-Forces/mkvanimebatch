@@ -7,7 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import mkv_assets
-from mkv_scan import InspectedVideo, ParsedFile
+from mkv_scan import InspectionResult, ParsedFile
 
 
 def _make_video(path: Path) -> ParsedFile:
@@ -43,7 +43,7 @@ def test_sole_leftover_claimed_by_first_eligible_video(tmp_path):
     )
 
     resolver.chap_index.add(_make_video(tmp_path / "Show - 01.xml"))
-    claims = mkv_assets.claim_leftover_chapters(videos, {ep1: None, ep2: None}, resolver)
+    claims = mkv_assets.claim_leftover_chapters(videos, {}, resolver)
 
     assert claims == {ep2: resolver.chap_index.unmatched[0]}
 
@@ -53,7 +53,7 @@ def test_no_claim_when_multiple_unmatched_files(tmp_path):
     ep1 = tmp_path / "Show - 01.mkv"
     videos = [_make_video(ep1)]
 
-    claims = mkv_assets.claim_leftover_chapters(videos, {ep1: None}, resolver)
+    claims = mkv_assets.claim_leftover_chapters(videos, {}, resolver)
 
     assert claims == {}
 
@@ -63,9 +63,11 @@ def test_no_claim_when_candidate_has_source_chapters(tmp_path):
     ep1 = tmp_path / "Show - 01.mkv"
     videos = [_make_video(ep1)]
     # Sole leftover video has embedded chapters -> rule must not fire.
-    json_cache: dict[Path, InspectedVideo | None] = {ep1: InspectedVideo({"chapters": [{"num_entries": 5}]})}
+    inspection_results = {
+        ep1: InspectionResult.success({"chapters": [{"num_entries": 5}]})
+    }
 
-    claims = mkv_assets.claim_leftover_chapters(videos, json_cache, resolver)
+    claims = mkv_assets.claim_leftover_chapters(videos, inspection_results, resolver)
 
     assert claims == {}
 

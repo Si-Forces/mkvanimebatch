@@ -16,10 +16,12 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+from typing import TypedDict, cast
 
 from mkv_domain import (
     CHAPTER_EXT,
@@ -27,34 +29,73 @@ from mkv_domain import (
     FONT_EXTENSIONS,
     SUBTITLE_EXTENSIONS,
     EpisodeInfo,
+    MkvTrack,
+    TrackProperties,
     natural_sort_key,
     parse_episode,
 )
-from mkv_fonts import _FONT_DIR_NAMES
+from mkv_fonts import FONT_DIR_NAMES
 from mkv_proc import CancelledError, CancelToken, run_subprocess_cancellable
 
-_IGNORED_SCAN_DIR_NAMES = frozenset({"output", *_FONT_DIR_NAMES})
+_IGNORED_SCAN_DIR_NAMES = frozenset({"output", *FONT_DIR_NAMES})
 
 logger = logging.getLogger("mkv_automation")
+
+
+
+
+class MkvAttachment(TypedDict, total=False):
+    id: int
+    file_name: str
+    content_type: str
+    size: int
+
+
+class MkvChapter(TypedDict, total=False):
+    num_entries: int
+
+
+class MkvmergeMetadata(TypedDict, total=False):
+    tracks: list[MkvTrack]
+    attachments: list[MkvAttachment]
+    chapters: list[MkvChapter]
+
+
+class AudioTrack(TypedDict):
+    id: int | None
+    pos: int
+    audio_idx: int
+    lang: str
+    name: str
+    channels: int
+    codec: str
+
+
+class InspectCacheEntry(TypedDict, total=False):
+    size: int
+    mtime: float
+    json_data: MkvmergeMetadata | None
 
 # Inspection (`mkvmerge -J`) only parses container headers, so it gets a much
 # shorter ceiling than SUBPROCESS_TIMEOUT to keep unresponsive files from
 # stalling a whole batch.
 INSPECT_TIMEOUT = 300
 
-def parse_attachments(attachments: list[dict]) -> tuple[dict | None, list[dict]]:
-    """Parse attachments list once, returning (cover, list of fonts)."""
-    cover = None
-    fonts = []
-    for a in attachments:
-        fname = a.get("file_name")
-        if not fname:
+def parse_attachments(
+    attachments: list[MkvAttachment],
+) -> tuple[MkvAttachment | None, list[MkvAttachment]]:
+    """Parse attachments once, returning the cover and fonts."""
+    cover: MkvAttachment | None = None
+    fonts: list[MkvAttachment] = []
+    for attachment in attachments:
+        file_name = attachment.get("file_name")
+        if not file_name:
             continue
-        ctype = a.get("content_type") or ""
-        if cover is None and is_cover_attachment(fname, ctype):
-            cover = a
-        if is_font_attachment(fname, ctype):
-            fonts.append(a)
+        content_type = attachment.get("content_type") or ""
+        if cover is None and is_cover_attachment(file_name, content_type):
+            cover = attachment
+        if is_font_attachment(file_name, content_type):
+            fonts.append(attachment)
     return cover, fonts
 
 def is_font_attachment(file_name: str, content_type: str) -> bool:
@@ -98,8 +139,8 @@ class InspectedVideo:
     track selection scores.
     """
 
-    def __init__(self, data: dict) -> None:
-        self._data = data
+    def __init__(self, data: Mapping[str, object]) -> None:
+        self._data = cast(MkvmergeMetadata, dict(data))
 
     def __eq__(self, other: object) -> bool:
         return isinstance(other, InspectedVideo) and self._data == other._data
@@ -108,12 +149,12 @@ class InspectedVideo:
         return f"InspectedVideo({self._data!r})"
 
     @property
-    def tracks(self) -> list[dict]:
-        return self._data.get("tracks") or []
+    def tracks(self) -> list[MkvTrack]:
+        return self._data.get("tracks", [])
 
     @property
-    def attachments(self) -> list[dict]:
-        return self._data.get("attachments") or []
+    def attachments(self) -> list[MkvAttachment]:
+        return self._data.get("attachments", [])
 
     @property
     def has_attachments_key(self) -> bool:
@@ -121,31 +162,31 @@ class InspectedVideo:
         return "attachments" in self._data
 
     @property
-    def video_track(self) -> dict | None:
+    def video_track(self) -> MkvTrack | None:
         return next((t for t in self.tracks if t.get("type") == "video"), None)
 
     @property
     def video_track_pos(self) -> int:
         return next((i for i, t in enumerate(self.tracks) if t.get("type") == "video"), -1)
 
-    def audio_tracks(self) -> list[dict]:
-        normalized: list[dict] = []
-        for i, track in enumerate(self.tracks):
+    def audio_tracks(self) -> list[AudioTrack]:
+        normalized: list[AudioTrack] = []
+        for position, track in enumerate(self.tracks):
             if track.get("type") != "audio":
                 continue
-            props = track.get("properties") or {}
+            properties: TrackProperties = track.get("properties", {})
             normalized.append({
                 "id": track.get("id"),
-                "pos": i,
+                "pos": position,
                 "audio_idx": len(normalized),
-                "lang": props.get("language") or "",
-                "name": props.get("track_name") or "",
-                "channels": props.get("audio_channels") or 0,
-                "codec": (props.get("codec_id") or "").upper(),
+                "lang": properties.get("language") or "",
+                "name": properties.get("track_name") or "",
+                "channels": properties.get("audio_channels") or 0,
+                "codec": (properties.get("codec_id") or "").upper(),
             })
         return normalized
 
-    def subtitle_tracks(self) -> list[dict]:
+    def subtitle_tracks(self) -> list[MkvTrack]:
         return [t for t in self.tracks if t.get("type") == "subtitles"]
 
     def has_chapters(self) -> bool:
@@ -153,11 +194,11 @@ class InspectedVideo:
         chapters = self._data.get("chapters") or []
         return bool(chapters) and any((c.get("num_entries") or 0) > 0 for c in chapters)
 
-    def cover_attachment(self) -> dict | None:
+    def cover_attachment(self) -> MkvAttachment | None:
         cover, _ = parse_attachments(self.attachments)
         return cover
 
-    def font_attachments(self) -> list[dict]:
+    def font_attachments(self) -> list[MkvAttachment]:
         _, fonts = parse_attachments(self.attachments)
         return fonts
 
@@ -165,6 +206,22 @@ class InspectedVideo:
         """Number of font attachments; None when the probe reported no
         attachments key (indistinguishable from a failed probe upstream)."""
         return len(self.font_attachments()) if self.has_attachments_key else None
+
+
+@dataclass(frozen=True)
+class InspectionResult:
+    """One completed probe: typed metadata or the reason it failed."""
+
+    video: InspectedVideo | None
+    error: str | None = None
+
+    @classmethod
+    def success(cls, data: Mapping[str, object]) -> InspectionResult:
+        return cls(video=InspectedVideo(data))
+
+    @classmethod
+    def failure(cls, error: str) -> InspectionResult:
+        return cls(video=None, error=error)
 
 
 _COVER_STEM_RE = re.compile(r"^cover$", re.IGNORECASE)
@@ -196,12 +253,20 @@ def check_dependencies(*required: str) -> None:
             sys.exit(1)
 
 
-def run_mkvmerge_json(filepath: Path, log: list[str] | None = None, cancel_token: CancelToken | None = None) -> dict | None:
-    def _warn(msg: str):
+class InspectionError(Exception):
+    """Expected mkvmerge probe failure with a user-facing reason."""
+
+
+def run_mkvmerge_json(
+    filepath: Path,
+    log: list[str] | None = None,
+    cancel_token: CancelToken | None = None,
+) -> MkvmergeMetadata:
+    def _warn(message: str) -> None:
         if log is not None:
-            log.append(f"  WARNING: {msg}")
+            log.append(f"  WARNING: {message}")
         else:
-            logger.warning(msg)
+            logger.warning(message)
 
     try:
         result = run_subprocess_cancellable(
@@ -209,22 +274,31 @@ def run_mkvmerge_json(filepath: Path, log: list[str] | None = None, cancel_token
             cancel_token=cancel_token,
             timeout=INSPECT_TIMEOUT,
         )
-    except subprocess.TimeoutExpired:
-        _warn(f"mkvmerge inspection timed out for '{filepath.name}', skipping.")
-        return None
+    except subprocess.TimeoutExpired as exc:
+        message = f"mkvmerge inspection timed out for '{filepath.name}'."
+        _warn(message)
+        raise InspectionError(message) from exc
     if result.stderr.strip():
         _warn(f"(mkvmerge) {result.stderr.strip()}")
     if result.returncode > 1:
-        _warn(f"mkvmerge failed (exit {result.returncode}), skipping '{filepath.name}'.")
-        return None
+        message = f"mkvmerge failed with exit {result.returncode} for '{filepath.name}'."
+        _warn(message)
+        raise InspectionError(message)
     if not result.stdout.strip():
-        _warn(f"No metadata returned for '{filepath.name}', skipping.")
-        return None
+        message = f"No metadata returned for '{filepath.name}'."
+        _warn(message)
+        raise InspectionError(message)
     try:
-        return json.loads(result.stdout)
+        data = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
-        _warn(f"Failed to parse metadata for '{filepath.name}': {exc}")
-        return None
+        message = f"Failed to parse metadata for '{filepath.name}': {exc}"
+        _warn(message)
+        raise InspectionError(message) from exc
+    if not isinstance(data, dict):
+        message = f"Invalid metadata document returned for '{filepath.name}'."
+        _warn(message)
+        raise InspectionError(message)
+    return cast(MkvmergeMetadata, data)
 
 
 def _cache_base_dir() -> Path:
@@ -247,7 +321,7 @@ class PersistentInspectCache:
     def __init__(self, cache_file: Path | None = None, enabled: bool = True) -> None:
         self.cache_file = cache_file or get_default_cache_file()
         self.enabled = enabled
-        self._data: dict[str, dict] = {}
+        self._data: dict[str, InspectCacheEntry] = {}
         self._dirty = False
         self._revision = 0
         self._last_save_ts = 0.0
@@ -275,8 +349,11 @@ class PersistentInspectCache:
         if not self.cache_file.exists():
             return
         try:
-            with open(self.cache_file, "r", encoding="utf-8") as f:
-                self._data = json.load(f)
+            with open(self.cache_file, "r", encoding="utf-8") as file:
+                loaded: object = json.load(file)
+            if not isinstance(loaded, dict):
+                raise ValueError("cache root must be an object")
+            self._data = cast(dict[str, InspectCacheEntry], loaded)
         except (OSError, json.JSONDecodeError, TypeError, ValueError) as e:
             logger.warning(f"Failed to load inspect cache from {self.cache_file}: {e}")
             self._data = {}
@@ -352,7 +429,7 @@ class PersistentInspectCache:
         except (OSError, TypeError, ValueError) as e:
             logger.warning(f"Failed to save inspect cache to {self.cache_file}: {e}")
 
-    def get(self, path: Path) -> dict | None:
+    def get(self, path: Path) -> MkvmergeMetadata | None:
         if not self.enabled:
             return None
         key = self._cache_key(path)
@@ -370,7 +447,7 @@ class PersistentInspectCache:
             pass
         return None
 
-    def put(self, path: Path, json_data: dict | None) -> None:
+    def put(self, path: Path, json_data: Mapping[str, object]) -> None:
         if not self.enabled:
             return
         key = self._cache_key(path)
@@ -380,7 +457,7 @@ class PersistentInspectCache:
                 self._data[key] = {
                     "size": st.st_size,
                     "mtime": st.st_mtime,
-                    "json_data": json_data,
+                    "json_data": cast(MkvmergeMetadata, dict(json_data)),
                 }
                 self._dirty = True
                 self._revision += 1
@@ -406,24 +483,22 @@ def inspect_videos(
     persistent_cache: PersistentInspectCache | None = None,
     force_refresh: bool = False,
     cancel_token: CancelToken | None = None,
-) -> dict[Path, InspectedVideo | None]:
-    """Run `mkvmerge -J` on every video in parallel and return typed metadata views.
+) -> dict[Path, InspectionResult]:
+    """Probe videos in parallel, preserving failures as explicit results.
 
-    Values are None when probing failed for that video. Populates
-    `persistent_cache` with fresh raw results but does not persist it;
-    callers batch multiple inspect passes per run and must call
-    `persistent_cache.save()` themselves once the batch completes.
+    Only successful raw metadata is cached. Callers own persistence and should
+    invoke ``persistent_cache.save()`` after their batch completes.
     """
-    cache: dict[Path, dict | None] = {}
+    results: dict[Path, InspectionResult] = {}
     to_inspect: list[Path] = []
 
     if persistent_cache and not force_refresh:
-        for v in videos:
-            cached_data = persistent_cache.get(v)
+        for video in videos:
+            cached_data = persistent_cache.get(video)
             if cached_data is not None:
-                cache[v] = cached_data
+                results[video] = InspectionResult.success(cached_data)
             else:
-                to_inspect.append(v)
+                to_inspect.append(video)
     else:
         to_inspect = videos
 
@@ -434,37 +509,37 @@ def inspect_videos(
         else:
             logger.info("Pre-inspecting %d video(s)...", len(to_inspect))
 
-        def _inspect(v: Path) -> tuple[Path, dict | None]:
+        def _inspect(video: Path) -> tuple[Path, MkvmergeMetadata]:
             if cancel_token and cancel_token.cancelled:
                 raise CancelledError("Cancellation requested before probe")
-            return v, run_mkvmerge_json(v, cancel_token=cancel_token)
+            return video, run_mkvmerge_json(video, cancel_token=cancel_token)
 
-        futures = {pool.submit(_inspect, v): v for v in to_inspect}
+        futures = {pool.submit(_inspect, video): video for video in to_inspect}
         try:
             for future in as_completed(futures):
-                v = futures[future]
-                exc = future.exception()
-                if exc is not None:
-                    if isinstance(exc, CancelledError):
-                        raise exc
-                    logger.warning("Inspection failed for %s: %s", v.name, exc)
-                    cache[v] = None
-                    continue
-                _, data = future.result()
-                cache[v] = data
-                if persistent_cache:
-                    persistent_cache.put(v, data)
+                video = futures[future]
+                try:
+                    _, data = future.result()
+                except CancelledError:
+                    raise
+                except InspectionError as exc:
+                    results[video] = InspectionResult.failure(str(exc))
+                except Exception as exc:
+                    logger.warning("Inspection failed for %s: %s", video.name, exc)
+                    results[video] = InspectionResult.failure(f"Inspection failed: {exc}")
+                else:
+                    results[video] = InspectionResult.success(data)
+                    if persistent_cache:
+                        persistent_cache.put(video, data)
         except CancelledError:
             for future in futures:
                 future.cancel()
-            # Active probes own child processes. Do not let callers tear down
-            # shared state until every probe has observed cancellation.
             wait(futures)
             raise
 
-    ok = sum(1 for d in cache.values() if d is not None)
-    logger.info("Inspection complete: %d/%d succeeded.", ok, len(videos))
-    return {v: (InspectedVideo(d) if d is not None else None) for v, d in cache.items()}
+    succeeded = sum(1 for result in results.values() if result.video is not None)
+    logger.info("Inspection complete: %d/%d succeeded.", succeeded, len(videos))
+    return results
 
 @dataclass(frozen=True)
 class ParsedFile:
@@ -491,9 +566,9 @@ class ScanResults:
 
 
 def scan_mkv_files(dir_path: Path, recursive: bool = True, ignore_paths: set[Path] | None = None) -> list[ParsedFile]:
-    results = []
-    stack = [str(dir_path)]
-    resolved_ignores = {p.resolve() for p in ignore_paths} if ignore_paths else set()
+    results: list[ParsedFile] = []
+    stack: list[str] = [str(dir_path)]
+    resolved_ignores: set[Path] = {p.resolve() for p in ignore_paths} if ignore_paths else set()
 
     while stack:
         current_dir = stack.pop()
@@ -530,9 +605,9 @@ def scan_assets(dir_path: Path, scan_cache: dict[Path, ScanResults] | None = Non
         if dir_path in scan_cache:
             return _clone_scan_results(scan_cache[dir_path])
 
-    subs = []
-    chapters = []
-    covers = []
+    subs: list[ParsedFile] = []
+    chapters: list[ParsedFile] = []
+    covers: list[ParsedFile] = []
     try:
         with os.scandir(str(dir_path)) as it:
             for entry in it:

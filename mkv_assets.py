@@ -10,6 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from typing import Literal
 
 from mkv_domain import (
     LANG_LABEL,
@@ -17,6 +18,7 @@ from mkv_domain import (
     SUBTITLE_LANGS_FALLBACK,
     SUBTITLE_LANGS_PRIMARY,
     EpisodeInfo,
+    ancestor_dirs,
     detect_sub_lang,
     is_dialogue_track,
     natural_sort_key,
@@ -25,9 +27,10 @@ from mkv_domain import (
     seasons_match,
     select_best_subtitle_track,
 )
-from mkv_fonts import FontInfo, scan_fonts
+from mkv_fonts import FontInfo, find_fonts_dir, scan_fonts
 from mkv_scan import (
     InspectedVideo,
+    InspectionResult,
     ParsedFile,
     ScanResults,
     is_chapter_xml,
@@ -42,6 +45,8 @@ __all__ = [
     "ChapterIndex",
     "CoverIndex",
     "InteractionMode",
+    "PreparedRelease",
+    "prepare_release_directory",
     "ResolvedAssets",
     "SubIndex",
     "SubtitlePrompt",
@@ -51,6 +56,79 @@ __all__ = [
 # the chosen one (or None to skip). Injected by the CLI layer so this module
 # stays free of stdin/stdout concerns.
 SubtitlePrompt = Callable[[ParsedFile, list[Path]], "Path | None"]
+# ─── RELEASE PREPARATION ─────────────────────────────────────────────────────
+FontsOrigin = Literal["override", "local", "root_fallback", "parent_fallback", "default"]
+
+
+@dataclass
+class PreparedRelease:
+    """One Release Directory resolved against its ancestor chain.
+
+    Carries every filesystem-derived fact a planning or execution pass needs:
+    the videos to process, the effective fonts directory (with provenance),
+    and the Asset Resolver built for this directory. Inspection results are
+    deliberately NOT included — each mode probes mkvmerge itself so run mode
+    can skip completed outputs first.
+    """
+
+    mkv_dir: Path
+    videos: list[ParsedFile]
+    fonts_dir: Path
+    fonts_origin: FontsOrigin
+    resolver: AssetResolver
+
+
+def prepare_release_directory(
+    mkv_dir: Path,
+    root_input_dir: Path,
+    videos: list[ParsedFile],
+    *,
+    fonts_override: Path | None = None,
+    assets_dir: Path | None = None,
+    scan_cache: dict[Path, ScanResults] | None = None,
+    fonts_dir_cache: dict[Path, Path] | None = None,
+    subtitle_prompt: Callable[[ParsedFile, list[Path]], Path | None] | None = None,
+) -> PreparedRelease:
+    """Resolve one Release Directory's fonts policy and Asset Resolver.
+
+    Single owner of the fonts-directory policy shared by --plan mode and
+    remux runs: an explicit override wins, else the nearest ancestor fonts
+    directory (shallowest last), else the conventional local 'fonts' directory.
+    """
+    search_dirs = ancestor_dirs(mkv_dir, root_input_dir)
+
+    if fonts_override is not None:
+        fonts_dir = fonts_override
+        fonts_origin: FontsOrigin = "override"
+    else:
+        fonts_dir = mkv_dir / "fonts"
+        fonts_origin = "default"
+        for d in reversed(search_dirs):
+            candidate = find_fonts_dir(d, fonts_dir_cache=fonts_dir_cache)
+            if candidate.is_dir():
+                fonts_dir = candidate
+                if candidate.parent == mkv_dir:
+                    fonts_origin = "local"
+                elif candidate.parent == root_input_dir:
+                    fonts_origin = "root_fallback"
+                else:
+                    fonts_origin = "parent_fallback"
+                break
+
+    resolver = AssetResolver.discover(
+        search_dirs,
+        fonts_dir,
+        assets_dir=assets_dir,
+        scan_cache=scan_cache,
+        subtitle_prompt=subtitle_prompt,
+    )
+    return PreparedRelease(
+        mkv_dir=mkv_dir,
+        videos=videos,
+        fonts_dir=fonts_dir,
+        fonts_origin=fonts_origin,
+        resolver=resolver,
+    )
 
 
 class InteractionMode(Enum):
@@ -613,7 +691,7 @@ class AssetResolver:
 
 def claim_leftover_chapters(
     videos: list[ParsedFile],
-    json_cache: dict[Path, InspectedVideo | None],
+    inspection_results: dict[Path, InspectionResult],
     resolver: AssetResolver,
 ) -> dict[Path, Path]:
     """Precompute the sole-leftover chapter claim for a release directory.
@@ -635,8 +713,8 @@ def claim_leftover_chapters(
             continue
         if resolver.chap_index.lookup(v.parsed):
             continue
-        inspected = json_cache.get(v.path)
-        if inspected is not None and inspected.has_chapters():
+        result = inspection_results.get(v.path)
+        if result is not None and result.video is not None and result.video.has_chapters():
             continue
         claims[v.path] = leftover
         break
