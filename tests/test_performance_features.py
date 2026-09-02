@@ -8,13 +8,15 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 mkv_remux = importlib.import_module("mkv_remux")
+mkv_remux_job = importlib.import_module("mkv_remux_job")
 mkv_extract = importlib.import_module("mkv_extract")
 mkv_assets = importlib.import_module("mkv_assets")
 
 import mkv_proc
 import mkv_scan
 from mkv_domain import EpisodeInfo
-from mkv_scan import InspectedVideo, PersistentInspectCache, _create_parsed_file, inspect_videos
+from mkv_fonts import FontInfo
+from mkv_scan import InspectionResult, PersistentInspectCache, _create_parsed_file, inspect_videos
 
 
 class TestPersistentInspectCache:
@@ -82,7 +84,7 @@ class TestPersistentInspectCache:
         with patch.object(mkv_scan, "run_mkvmerge_json") as mock_mkvmerge:
             with ThreadPoolExecutor(max_workers=1) as pool:
                 results = inspect_videos([sample_file], pool=pool, persistent_cache=cache)
-            assert results[sample_file] == InspectedVideo(json_data)
+            assert results[sample_file] == InspectionResult.success(json_data)
             mock_mkvmerge.assert_not_called()
 
     def test_inspect_videos_without_cache(self, tmp_path):
@@ -93,7 +95,44 @@ class TestPersistentInspectCache:
         with patch.object(mkv_scan, "run_mkvmerge_json", return_value=json_data):
             with ThreadPoolExecutor(max_workers=1) as pool:
                 results = inspect_videos([sample_file], pool=pool, persistent_cache=None)
-            assert results[sample_file] == InspectedVideo(json_data)
+            assert results[sample_file] == InspectionResult.success(json_data)
+
+    def test_failed_inspection_is_explicit_not_cached_and_retries(self, tmp_path):
+        sample_file = tmp_path / "video.mkv"
+        sample_file.write_bytes(b"dummy")
+        cache = PersistentInspectCache(cache_file=tmp_path / "cache.json")
+        probe = MagicMock(side_effect=[
+            mkv_scan.InspectionError("mkvmerge inspection timed out"),
+            {"tracks": []},
+        ])
+
+        with patch.object(mkv_scan, "run_mkvmerge_json", probe), \
+             patch.object(cache, "put", wraps=cache.put) as cache_put:
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                first = inspect_videos([sample_file], pool=pool, persistent_cache=cache)
+                second = inspect_videos([sample_file], pool=pool, persistent_cache=cache)
+
+        assert first[sample_file] == InspectionResult.failure("mkvmerge inspection timed out")
+        assert second[sample_file] == InspectionResult.success({"tracks": []})
+        assert probe.call_count == 2
+        cache_put.assert_called_once_with(sample_file, {"tracks": []})
+
+    def test_probe_timeout_preserves_reason(self, tmp_path):
+        sample_file = tmp_path / "video.mkv"
+        with patch.object(
+            mkv_scan,
+            "run_subprocess_cancellable",
+            side_effect=mkv_scan.subprocess.TimeoutExpired(["mkvmerge"], 1),
+        ):
+            with pytest.raises(mkv_scan.InspectionError, match="inspection timed out"):
+                mkv_scan.run_mkvmerge_json(sample_file)
+
+    def test_probe_malformed_json_preserves_reason(self, tmp_path):
+        sample_file = tmp_path / "video.mkv"
+        completed = mkv_scan.subprocess.CompletedProcess(["mkvmerge"], 0, "not json", "")
+        with patch.object(mkv_scan, "run_subprocess_cancellable", return_value=completed):
+            with pytest.raises(mkv_scan.InspectionError, match="Failed to parse metadata"):
+                mkv_scan.run_mkvmerge_json(sample_file)
     def test_cache_save_exception_unlinks_temp_file(self, tmp_path):
         """Verify that any temporary file created during save() is unlinked if serialization or write fails."""
         cache_file = tmp_path / "cache.json"
@@ -120,7 +159,7 @@ def test_cover_index_add_episode_cover_no_nameerror():
 
 
 @pytest.mark.parametrize("mod", [
-    pytest.param(mkv_remux, id="mkv_remux"),
+    pytest.param(mkv_remux_job, id="mkv_remux_job"),
 ])
 def test_ffmpeg_probesize_args(mod):
     """Verify -analyzeduration 0 -probesize 1M flags are included in ffmpeg calls."""
@@ -168,8 +207,8 @@ def test_io_semaphore_covers_flac_conversion_and_remux(tmp_path):
     mock_cover_index = MagicMock()
     mock_cover_index.lookup.return_value = None
 
-    with patch.object(mkv_remux, "run_subprocess_cancellable", side_effect=fake_subprocess), \
-         patch.object(mkv_remux, "select_tracks") as mock_tracks:
+    with patch.object(mkv_remux_job, "run_subprocess_cancellable", side_effect=fake_subprocess), \
+         patch.object(mkv_remux_job, "select_tracks") as mock_tracks:
         tr = MagicMock()
         tr.video_id = 0
         tr.audio_id = 1
@@ -189,16 +228,16 @@ def test_io_semaphore_covers_flac_conversion_and_remux(tmp_path):
         mock_job.base = "video"
         mock_job.output_file = tmp_path / "video.mkv"
 
-        res = mkv_remux.process_job(
+        res = mkv_remux_job.process_job(
             job=mock_job,
             temp_dir=tmp_path,
-            fonts=mkv_remux.FontInfo(args=(), count=0),
+            fonts=FontInfo(args=(), count=0),
             opus_bitrate="192k",
-            json_cache={sample_video: InspectedVideo({"tracks": [{"id": 0, "type": "video"}]})},
+            inspection_results={sample_video: InspectionResult.success({"tracks": [{"id": 0, "type": "video"}]})},
             ffmpeg_threads=2,
             io_semaphore=mock_sem,
             complexity=10,
-            sub_offset=0.0
+            sub_offset=0.0,
         )
 
         assert res.skipped_reason is None

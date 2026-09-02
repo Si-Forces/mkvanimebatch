@@ -14,11 +14,11 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-mkv_remux      = importlib.import_module("mkv_remux")
+mkv_remux      = importlib.import_module("mkv_remux_job")
 mkv_domain     = importlib.import_module("mkv_domain")
 
 REMUX_MODULES = [
-    pytest.param(mkv_remux,      id="mkv_remux"),
+    pytest.param(mkv_remux,      id="mkv_remux_job"),
 ]
 
 

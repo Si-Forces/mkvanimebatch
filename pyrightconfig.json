@@ -2,6 +2,12 @@
   "include": [
     "."
   ],
+  "strict": [
+    "mkv_events.py",
+    "mkv_manifest.py",
+    "mkv_remux_job.py",
+    "mkv_scan.py"
+  ],
   "exclude": [
     "**/.venv",
     "**/__pycache__",

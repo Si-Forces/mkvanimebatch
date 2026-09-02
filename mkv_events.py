@@ -15,7 +15,7 @@ import sys
 import threading
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TextIO
 
 # Item Outcome: the closed set of terminal statuses an item_complete event
 # may carry. Planning-time outcomes ("planned", "skipped" in --plan/dry-run
@@ -31,16 +31,16 @@ ItemOutcome = Literal[
     "completed", "skipped", "error", "cancelled", "planned"
 ]
 
-_EVENTS_ENABLED: bool = False
+_events_enabled: bool = False
 _TERMINAL_ITEM_IDS: set[str] = set()
 _EVENTS_LOCK = threading.RLock()
 
 
 def set_events_enabled(enabled: bool = True) -> None:
     """Enable or disable machine-readable structured @event: output."""
-    global _EVENTS_ENABLED
+    global _events_enabled
     with _EVENTS_LOCK:
-        _EVENTS_ENABLED = enabled
+        _events_enabled = enabled
         _TERMINAL_ITEM_IDS.clear()
 
 
@@ -53,7 +53,7 @@ def has_terminal_outcome(item_id: str) -> bool:
 def is_events_enabled() -> bool:
     """Return whether structured event output is currently enabled."""
     with _EVENTS_LOCK:
-        return _EVENTS_ENABLED
+        return _events_enabled
 
 @lru_cache(maxsize=16384)
 def get_item_id(video_path: Path, root_input_dir: Path) -> str:
@@ -87,7 +87,7 @@ def setup_logging(level: int = logging.INFO, *, stderr_only: bool = False) -> No
 
     log_format = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
 
-    def _stream_handler(stream, handler_level: int) -> logging.StreamHandler:
+    def _stream_handler(stream: TextIO, handler_level: int) -> logging.StreamHandler[TextIO]:
         handler = logging.StreamHandler(stream)
         handler.setLevel(handler_level)
         handler.setFormatter(log_format)
@@ -102,18 +102,18 @@ def setup_logging(level: int = logging.INFO, *, stderr_only: bool = False) -> No
         root_logger.addHandler(_stream_handler(sys.stderr, logging.ERROR))
 
 
-def emit_event(event_type: str, *, item_id: str | None = None, **payload) -> None:
+def emit_event(event_type: str, *, item_id: str | None = None, **payload: object) -> None:
     """Emit a machine-readable structured JSON-line to stdout for sidecar consumers when enabled."""
     with _EVENTS_LOCK:
-        if not _EVENTS_ENABLED:
+        if not _events_enabled:
             return
-        ev = {"version": 1, "type": event_type}
+        event: dict[str, object] = {"version": 1, "type": event_type}
         payload_id = payload.pop("id", None)
-        item = item_id if item_id is not None else payload_id
+        item = item_id if item_id is not None else payload_id if isinstance(payload_id, str) else None
         if item is not None:
-            ev["id"] = item
-        ev.update(payload)
-        msg = json.dumps(ev, ensure_ascii=False)
+            event["id"] = item
+        event.update(payload)
+        msg = json.dumps(event, ensure_ascii=False)
         sys.stdout.write(f"@event: {msg}\n")
         sys.stdout.flush()
 

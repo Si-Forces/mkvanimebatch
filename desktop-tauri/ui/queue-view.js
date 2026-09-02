@@ -1,0 +1,366 @@
+import {
+  carryOverAssignments,
+  createQueueState,
+  finalizeQueueState,
+  reduceQueueEvent,
+} from "./queue-state.js";
+
+// ─── Real-Time Episode Queue & Progress/Duration Tracker ───────────────────
+
+export class QueueTracker {
+  constructor(mode) {
+    this.mode = mode;
+    this.listEl = document.getElementById(`${mode}-episode-list`);
+    this.countEl = document.getElementById(`${mode}-queue-count`);
+    this.state = createQueueState({ version: 1, items: [] }, { mode });
+    this.cards = new Map();
+    this.scanToken = 0;
+    this.lastScannedPath = null;
+    this.lastManifest = null;
+    // GUI manual subtitle selection (remux only): item id -> candidate path
+    this.assignments = new Map();
+    this.candidatesByItem = new Map();
+  }
+
+  emptyStateMarkup(title, description, actionLabel = "📁 Choose Input Directory") {
+    return `
+      <div class="empty-state-card">
+        <div class="empty-icon-glow">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22 19a2 2 0 0 1-2-2V8a2 2 0 0 0-2-2h-7l-2-3H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2z"></path>
+            <line x1="12" y1="10" x2="12" y2="16"></line>
+            <line x1="9" y1="13" x2="15" y2="13"></line>
+          </svg>
+        </div>
+        <div class="empty-state-title">${title}</div>
+        <div class="empty-state-desc">${description}</div>
+        <button class="btn btn-gradient empty-state-action" type="button" data-target="${this.mode}-input-dir">${actionLabel}</button>
+      </div>`;
+  }
+
+  startScan() {
+    const token = ++this.scanToken;
+    this.cards.clear();
+    // Assignments and candidates survive a rescan: populateFromInspection
+    // rebuilds candidates and carries over assignments whose items persist.
+    this.state = createQueueState({ version: 1, items: [] }, { mode: this.mode });
+    if (this.listEl) {
+      this.listEl.innerHTML = `
+        <div class="empty-state-card scanning-state">
+          <div class="scan-spinner" aria-hidden="true"></div>
+          <div class="empty-state-title">Scanning Directory</div>
+          <div class="empty-state-desc">Inspecting MKV files and reading track metadata…</div>
+        </div>`;
+    }
+    if (this.countEl) this.countEl.textContent = "Scanning…";
+    return token;
+  }
+
+  isCurrentScan(token) {
+    return token === this.scanToken;
+  }
+
+  reuseInspection(path) {
+    if (this.lastScannedPath !== path) return false;
+    this.scanToken++;
+    this.populateFromInspection(this.lastManifest);
+    return true;
+  }
+
+  acceptInspection(token, path, manifest) {
+    if (!this.isCurrentScan(token)) return false;
+    if (manifest?.version !== 1 || !Array.isArray(manifest.items)) {
+      this.showScanError(token);
+      this.lastScannedPath = null;
+      return false;
+    }
+    this.populateFromInspection(manifest);
+    this.lastScannedPath = path;
+    return true;
+  }
+
+  rejectInspection(token) {
+    if (!this.isCurrentScan(token)) return;
+    this.showScanError(token);
+    this.lastScannedPath = null;
+  }
+
+  showScanError(token) {
+    if (!this.isCurrentScan(token)) return;
+    if (this.listEl) {
+      this.listEl.innerHTML = this.emptyStateMarkup(
+        "Scan failed",
+        "That release directory could not be inspected. Choose another directory and try again.",
+        "↻ Choose Another Directory"
+      );
+    }
+    if (this.countEl) this.countEl.textContent = "Scan failed";
+  }
+
+  reset(title = "No Episodes Queued", description = "Choose an input release directory to scan MKV episodes into this batch.") {
+    this.scanToken++;
+    this.cards.clear();
+    this.assignments.clear();
+    this.candidatesByItem.clear();
+    this.state = createQueueState({ version: 1, items: [] }, { mode: this.mode });
+    if (this.listEl) this.listEl.innerHTML = this.emptyStateMarkup(title, description);
+    if (this.countEl) this.countEl.textContent = "Ready";
+  }
+
+  populateFromInspection(manifest) {
+    this.lastManifest = manifest;
+    this.cards.clear();
+    if (this.listEl) this.listEl.innerHTML = "";
+
+    const bitrate = document.getElementById(`${this.mode}-bitrate`)?.value?.trim() || "192k";
+    this.state = createQueueState(manifest, { mode: this.mode });
+
+    // Refresh candidate lists; keep assignments whose item still exists so a
+    // rescan right before Start does not silently drop manual selections.
+    this.assignments = carryOverAssignments(this.assignments, manifest);
+    this.candidatesByItem.clear();
+    for (const item of manifest?.items ?? []) {
+      if (Array.isArray(item.sub_candidates) && item.sub_candidates.length > 0) {
+        this.candidatesByItem.set(item.id, item.sub_candidates);
+      }
+    }
+
+    if (!manifest || !manifest.items || manifest.items.length === 0) {
+      this.reset(
+        "No MKV files found",
+        "This release directory does not contain any MKV episodes. Choose another input directory to continue."
+      );
+      return;
+    }
+
+    if (this.countEl) this.countEl.textContent = `${this.state.totalCount} Episodes Queued`;
+
+    if (this.state && this.listEl) {
+      const frag = document.createDocumentFragment();
+      let epIdx = 1;
+      for (const id of this.state.order) {
+        const item = this.state.items.get(id);
+        const card = this.createCardElement(item.id, item.name, epIdx++);
+        this.cards.set(id, card);
+        this.applyAssignmentToCard(id);
+        if (item.inspectionError) {
+          this.applyInspectionError(card, item.inspectionError);
+        } else if (item.metadata) {
+          this.applyMetadata(card, item.metadata, bitrate);
+        }
+        frag.appendChild(card.el);
+      }
+      this.listEl.appendChild(frag);
+    }
+  }
+
+  applyMetadata(card, meta, bitrate) {
+    if (!card || !card.el || !meta) return;
+    if (card.codec) card.codec.textContent = meta.video_tag || "MKV";
+
+    if (this.mode === "remux") {
+      if (card.tag1) {
+        card.tag1.textContent = meta.has_flac
+          ? `${meta.audio_summary || "Audio"} → Opus ${bitrate}`
+          : (meta.audio_summary ? `${meta.audio_summary} (Passthrough)` : "No Audio");
+      }
+      if (card.tag2) {
+        card.tag2.textContent = meta.fonts_count > 0
+          ? `${meta.sub_summary || "No Subs"} + ${meta.fonts_count} Fonts`
+          : (meta.sub_summary || "No Subs");
+      }
+    } else {
+      if (card.tag1) card.tag1.textContent = meta.sub_summary || "No Subs";
+      if (card.tag2) card.tag2.textContent = `${meta.fonts_count || 0} Attached Fonts`;
+    }
+  }
+
+  applyInspectionError(card, error) {
+    if (!card?.el) return;
+    card.el.classList.add("inspection-failed");
+    if (card.codec) card.codec.textContent = "Inspection Failed";
+    if (card.tag1) card.tag1.textContent = "Metadata unavailable";
+    if (card.tag2) card.tag2.textContent = error;
+  }
+
+  createCardElement(id, name, epNum = 1) {
+    const el = document.createElement("div");
+    el.className = "tokyo-ep-card";
+    const numStr = String(epNum).padStart(2, "0");
+
+    const codecTag = "MKV";
+    const trackTag1 = "Inspecting tracks...";
+    const trackTag2 = "Reading headers...";
+    const subAssignBtn = this.mode === "remux"
+      ? `<button type="button" class="sub-assign-btn" title="Manually assign a subtitle file">+ Sub</button>`
+      : "";
+
+    el.innerHTML = `
+      <div class="ep-card-top">
+        <div class="ep-badge">EPISODE ${numStr}</div>
+        <span class="ep-codec">${codecTag}</span>
+        <span class="ep-duration-tag status-tag">Queued</span>
+      </div>
+      <div class="ep-title"></div>
+      <div class="ep-tracks">
+        <span class="track-tag cyan">${trackTag1}</span>
+        <span class="track-tag magenta">${trackTag2}</span>
+        ${subAssignBtn}
+      </div>
+      <div class="ep-progress-bar">
+        <div class="ep-progress-fill" style="width: 0%;"></div>
+      </div>
+    `;
+
+    const titleEl = el.querySelector(".ep-title");
+    if (titleEl) titleEl.textContent = name;
+
+    const subBtn = el.querySelector(".sub-assign-btn");
+    if (subBtn) subBtn.dataset.itemId = id;
+
+    return {
+      el,
+      id,
+      name,
+      statusTag: el.querySelector(".status-tag"),
+      badge: el.querySelector(".ep-badge"),
+      fill: el.querySelector(".ep-progress-fill"),
+      codec: el.querySelector(".ep-codec"),
+      tag1: el.querySelector(".track-tag.cyan"),
+      tag2: el.querySelector(".track-tag.magenta"),
+      subBtn,
+    };
+  }
+
+  applyAssignmentToCard(id) {
+    const card = this.cards.get(id);
+    if (!card?.subBtn) return;
+    const assigned = this.assignments.get(id);
+    if (assigned) {
+      const base = assigned.split("/").pop();
+      card.subBtn.textContent = `Sub: ${base}`;
+      card.subBtn.classList.add("assigned");
+      card.subBtn.title = `Manually assigned: ${assigned}`;
+    } else {
+      card.subBtn.textContent = "+ Sub";
+      card.subBtn.classList.remove("assigned");
+      card.subBtn.title = "Manually assign a subtitle file";
+    }
+  }
+
+  handleEvent(event) {
+    if (!this.state) return;
+    this.state = reduceQueueEvent(this.state, event);
+
+    if (event.id) {
+      const item = this.state.items.get(event.id);
+      const card = this.cards.get(event.id);
+      if (item && card) {
+        this.renderCardState(card, item);
+      }
+    }
+
+    this.renderQueueCount();
+  }
+
+  renderCardState(card, item) {
+    if (!card || !card.el || !item) return;
+
+    const styles = {
+      processing: {
+        el: "tokyo-ep-card processing",
+        badge: "ep-badge purple",
+        badgeText: "PROCESSING",
+        tag: "ep-duration-tag yellow status-tag",
+        tagText: "Processing...",
+        fill: "ep-progress-fill indeterminate",
+        width: "",
+      },
+      completed: {
+        el: "tokyo-ep-card completed",
+        badge: "ep-badge green",
+        badgeText: "COMPLETED",
+        tag: "ep-duration-tag green status-tag",
+        tagText: item.durationSec ? `Done in ${item.durationSec}s` : "Done",
+        fill: "ep-progress-fill green",
+        width: "100%",
+      },
+      skipped: {
+        el: "tokyo-ep-card skipped",
+        badge: "ep-badge grey",
+        badgeText: "SKIPPED",
+        tag: "ep-duration-tag grey status-tag",
+        tagText: item.reason || "Skipped",
+        fill: "ep-progress-fill",
+        width: "100%",
+      },
+      cancelled: {
+        el: "tokyo-ep-card skipped",
+        badge: "ep-badge grey",
+        badgeText: "CANCELLED",
+        tag: "ep-duration-tag grey status-tag",
+        tagText: item.reason || "Cancelled",
+        fill: "ep-progress-fill",
+        width: "100%",
+      },
+      planned: {
+        el: "tokyo-ep-card dry-run",
+        badge: "ep-badge cyan",
+        badgeText: "DRY RUN",
+        tag: "ep-duration-tag cyan status-tag",
+        tagText: "Planned (Dry Run)",
+        fill: "ep-progress-fill cyan",
+        width: "100%",
+      },
+      error: {
+        el: "tokyo-ep-card failed",
+        badge: "ep-badge red",
+        badgeText: "FAILED",
+        tag: "ep-duration-tag red status-tag",
+        tagText: item.error || "Failed",
+        fill: "ep-progress-fill",
+        width: "100%",
+      },
+    };
+    const style = styles[item.status];
+    if (!style) return;
+
+    card.el.className = style.el;
+    card.badge.className = style.badge;
+    card.badge.textContent = style.badgeText;
+    card.statusTag.className = style.tag;
+    card.statusTag.textContent = style.tagText;
+    card.fill.className = style.fill;
+    card.fill.style.width = style.width;
+  }
+
+  finalize(exitCode, cancelled = false) {
+    if (!this.state) return;
+    this.state = finalizeQueueState(this.state, exitCode, cancelled);
+
+    for (const [id, item] of this.state.items.entries()) {
+      const card = this.cards.get(id);
+      if (card) {
+        this.renderCardState(card, item);
+      }
+    }
+
+    this.renderQueueCount();
+  }
+
+  renderQueueCount() {
+    if (!this.countEl || !this.state) return;
+    const { totalCount, completedCount, skippedCount, cancelledCount = 0, errorCount, batchCompleted } = this.state;
+    const processed = completedCount + skippedCount + cancelledCount + errorCount;
+
+    if (batchCompleted) {
+      const parts = [`${completedCount} Completed`];
+      if (skippedCount > 0) parts.push(`${skippedCount} Skipped`);
+      if (cancelledCount > 0) parts.push(`${cancelledCount} Cancelled`);
+      if (errorCount > 0) parts.push(`${errorCount} Failed`);
+      this.countEl.textContent = `${parts.join(", ")} (${totalCount} Total)`;
+    } else {
+      this.countEl.textContent = `${processed} / ${totalCount} Processed`;
+    }
+  }
+}

@@ -219,7 +219,8 @@ def process_file(
     cover_path: Path | None = None
     cover = inspected.cover_attachment()
     font_attachments = inspected.font_attachments()
-    if cover:
+    cover_id = cover.get("id") if cover is not None else None
+    if cover is not None and cover_id is not None:
         raw_ext = Path(cover.get("file_name", "")).suffix.lower()
         ext = raw_ext if raw_ext in COVER_EXTENSIONS else ".jpg"
         cover_path = file_dir / f"{file_stem}_cover{ext}"
@@ -228,7 +229,7 @@ def process_file(
             cover_path = None
         else:
             log.append(f"   -> Queued cover image → {cover_path.name}")
-            queued_outputs.append(ExtractTarget("attachments", str(cover['id']), cover_path, "Cover"))
+            queued_outputs.append(ExtractTarget("attachments", str(cover_id), cover_path, "Cover"))
     else:
         log.append("   -> No cover image found in source.")
 
@@ -250,13 +251,15 @@ def process_file(
         attachments_open = cover_path is not None
 
         if font_attachments:
-            for a in font_attachments:
-                if a.get("id") is None or not a.get("file_name"):
+            for attachment in font_attachments:
+                attachment_id = attachment.get("id")
+                file_name = attachment.get("file_name")
+                if attachment_id is None or not file_name:
                     continue
-                claim = font_manager.claim(a["file_name"], a.get("size", 0))
+                claim = font_manager.claim(file_name, attachment.get("size", 0))
                 if claim is not None:
                     font_claims.append(claim)
-                    font_args.append(f"{a['id']}:{claim.staging_path}")
+                    font_args.append(f"{attachment_id}:{claim.staging_path}")
 
         if font_args:
             log.append(f"   -> Queued {len(font_args)} font(s) for extraction...")
@@ -350,7 +353,7 @@ def _run(
         return True
 
     fonts_dir.mkdir(parents=True, exist_ok=True)
-    json_cache = inspect_videos(
+    inspection_results = inspect_videos(
         [f.path for f in mkv_files],
         pool,
         persistent_cache=runtime.persistent_cache,
@@ -371,7 +374,7 @@ def _run(
         pool.submit(
             process_file,
             mkv_file,
-            json_cache.get(mkv_file.path),
+            inspection_results[mkv_file.path].video,
             active_font_manager,
             io_semaphore=runtime.io_semaphore,
             output_dir=output_dir,

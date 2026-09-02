@@ -4,21 +4,21 @@ from __future__ import annotations
 import io
 import json
 import sys
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 import mkv_events
+import mkv_manifest
 import mkv_proc
 import mkv_remux
-import mkv_runner
+import mkv_remux_job
 import mkv_scan
 from mkv_assets import AssetResolver
 from mkv_domain import EpisodeInfo
 from mkv_events import emit_event, get_item_id, set_events_enabled
 from mkv_fonts import FontInfo
-from mkv_scan import InspectedVideo, ParsedFile, PersistentInspectCache, _create_parsed_file
+from mkv_scan import InspectedVideo, InspectionResult, ParsedFile, _create_parsed_file
 
 
 def test_emit_event_stdout_format(monkeypatch):
@@ -139,6 +139,18 @@ def test_plan_mode_cli_output(tmp_path, monkeypatch, capsys):
         assert meta["fonts_count"] == 1  # Only the true font attachment, not the cover
 
 
+def test_plan_mode_never_checks_runtime_dependencies(tmp_path, monkeypatch):
+    """Inspection planning must work without MKVToolNix or ffmpeg installed."""
+    argv = ["mkv_remux.py", "--plan", "--input-dir", str(tmp_path)]
+    with patch.object(sys, "argv", argv), \
+         patch.object(mkv_remux, "check_dependencies") as check_dependencies:
+        with pytest.raises(SystemExit) as exc:
+            mkv_remux.main()
+
+    assert exc.value.code == 0
+    check_dependencies.assert_not_called()
+
+
 def test_plan_manifest_includes_sub_candidates(tmp_path, monkeypatch, capsys):
     """Manifest v1 gains an additive sub_candidates field: root-relative POSIX
     paths of every discovered external subtitle, omitted when none exist."""
@@ -216,7 +228,7 @@ def test_dry_run_skip_event_keeps_parenthesized_filename_id(tmp_path, monkeypatc
 
     mkv_remux._plan_jobs(
         [video],
-        {video_path: None},
+        {},
         resolver,
         output_dir=tmp_path / "Output",
         dry_run=True,
@@ -243,7 +255,7 @@ def test_skip_event_reason_distinguishes_missing_vs_unmatched_subtitles(tmp_path
 
     mkv_remux._plan_jobs(
         [video],
-        {video_path: None},
+        {},
         resolver,
         output_dir=tmp_path / "Output",
         all_subs=resolver.all_subtitles,
@@ -277,7 +289,7 @@ def test_sub_assignments_drive_job_planning(tmp_path):
 
     jobs, matched_files, _ = mkv_remux._plan_jobs(
         [video],
-        {video_path: None},
+        {},
         resolver,
         output_dir=tmp_path / "Output",
         all_subs=resolver.all_subtitles,
@@ -291,7 +303,7 @@ def test_sub_assignments_drive_job_planning(tmp_path):
     # Stale path: falls back to the automatic index match instead of failing.
     jobs2, _, _ = mkv_remux._plan_jobs(
         [video],
-        {video_path: None},
+        {},
         resolver,
         output_dir=tmp_path / "Output",
         all_subs=resolver.all_subtitles,
@@ -310,10 +322,28 @@ def test_plan_metadata_keeps_unknown_resolution_null():
             "properties": {"pixel_dimensions": "640x360"},
         }],
     }
-    meta = mkv_remux._extract_mkv_metadata(InspectedVideo(json_val))
+    meta = mkv_manifest.extract_mkv_metadata(InspectedVideo(json_val))
 
     assert meta["resolution"] is None
     assert meta["video_tag"] is None
+
+
+def test_inspection_manifest_exposes_probe_failure(tmp_path, monkeypatch):
+    video = tmp_path / "Show - 01.mkv"
+    video.write_bytes(b"mkv")
+    monkeypatch.setattr(
+        mkv_manifest,
+        "inspect_videos",
+        lambda *_args, **_kwargs: {
+            video: InspectionResult.failure("mkvmerge inspection timed out")
+        },
+    )
+
+    manifest = mkv_manifest.generate_inspection_manifest(tmp_path)
+
+    item = manifest["items"][0]
+    assert item.get("inspection_error") == "mkvmerge inspection timed out"
+    assert item["metadata"]["video_tag"] is None
 
 
 def test_plan_mode_stdout_purity_corrupt_cache(tmp_path, monkeypatch, capsys):
@@ -348,9 +378,9 @@ def test_plan_mode_stdout_purity_with_mock(tmp_path, monkeypatch, capsys):
 
     def mock_inspect(*args, **kwargs):
         logging.getLogger().warning("This is a mock warning that must not corrupt stdout")
-        return {mkv1: InspectedVideo({"tracks": []})}
+        return {mkv1: InspectionResult.success({"tracks": []})}
 
-    monkeypatch.setattr(mkv_remux, "inspect_videos", mock_inspect)
+    monkeypatch.setattr(mkv_manifest, "inspect_videos", mock_inspect)
 
     argv = ["mkv_remux.py", "--plan", "--input-dir", str(tmp_path)]
     with patch.object(sys, "argv", argv):
@@ -364,6 +394,27 @@ def test_plan_mode_stdout_purity_with_mock(tmp_path, monkeypatch, capsys):
     assert len(manifest["items"]) == 1
     assert "This is a mock warning that must not corrupt stdout" in captured.err
 
+
+def test_plan_mode_forwards_cancel_token(tmp_path, monkeypatch):
+    """Plan mode must forward runtime cancel token into inspect_videos."""
+    mkv1 = tmp_path / "Show - 01.mkv"
+    mkv1.write_bytes(b"dummy")
+
+    captured_kwargs = {}
+    def mock_inspect(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return {mkv1: InspectionResult.success({"tracks": []})}
+
+    monkeypatch.setattr(mkv_manifest, "inspect_videos", mock_inspect)
+
+    argv = ["mkv_remux.py", "--plan", "--input-dir", str(tmp_path)]
+    with patch.object(sys, "argv", argv):
+        with pytest.raises(SystemExit) as exc:
+            mkv_remux.main()
+        assert exc.value.code == 0
+
+    assert "cancel_token" in captured_kwargs
+    assert isinstance(captured_kwargs["cancel_token"], mkv_proc.CancelToken)
 
 def test_asset_resolver_discovery_and_resolve_for(tmp_path):
     """AssetResolver.discover correctly indexes ancestor hierarchies and resolves per episode."""
@@ -410,7 +461,7 @@ def test_crashed_job_emits_error_event(tmp_path, monkeypatch):
 
     monkeypatch.setattr(mkv_events, "emit_event", mock_emit)
 
-    job = mkv_remux.PlannedJob(
+    job = mkv_remux_job.PlannedJob(
         video=tmp_path / "crash.mkv",
         video_name="crash.mkv",
         base="crash",
@@ -425,34 +476,29 @@ def test_crashed_job_emits_error_event(tmp_path, monkeypatch):
         item_id="crash.mkv",
     )
 
-    with patch.object(mkv_remux, "process_job", side_effect=RuntimeError("Subprocess exploded")):
+    with patch.object(mkv_remux_job, "process_job", side_effect=RuntimeError("Subprocess exploded")):
         from concurrent.futures import ThreadPoolExecutor
+
         with ThreadPoolExecutor(max_workers=1) as pool:
-            skipped_files = []
-            failed_files = []
-            config = mkv_remux.RemuxRunConfig(
-                runtime=mkv_runner.CliRuntime(
-                    workers=1,
-                    dry_run=False,
+            summary = mkv_remux_job.execute_jobs(
+                [job],
+                pool,
+                {job.video: InspectionResult.success({})},
+                mkv_remux_job.RemuxExecutionContext(
+                    temp_dir=None,
+                    fonts=FontInfo(args=(), count=0),
+                    opus_bitrate="192k",
+                    ffmpeg_threads=1,
                     io_semaphore=None,
-                    persistent_cache=PersistentInspectCache(enabled=False),
+                    complexity=10,
+                    sub_offset=0.0,
+                    cancel_token=mkv_proc.CancelToken(),
+                    workers=1,
                 ),
-                root_input_dir=Path("/src"),
-                output_dir=Path("/out"),
-                temp_dir=None,
-                opus_bitrate="192k",
-                complexity=10,
-                ffmpeg_threads=1,
             )
-            mkv_remux._execute_jobs(
-                jobs=[job],
-                fonts=FontInfo(args=(), count=0),
-                pool=pool,
-                json_cache={job.video: InspectedVideo({})},
-                skipped_files=skipped_files,
-                failed_files=failed_files,
-                config=config,
-            )
+
+    skipped_files = summary.skipped_files
+    failed_files = summary.failed_files
 
     assert len(skipped_files) == 1
     assert "exception: Subprocess exploded" in skipped_files[0]
@@ -493,7 +539,7 @@ def test_extract_mkv_metadata_4k_hevc_flac():
         ]
     }
 
-    meta = mkv_remux._extract_mkv_metadata(InspectedVideo(json_val))
+    meta = mkv_manifest.extract_mkv_metadata(InspectedVideo(json_val))
     assert meta["resolution"] == "4K"
     assert meta["video_codec"] == "HEVC"
     assert meta["video_tag"] == "4K HEVC"
@@ -523,7 +569,7 @@ def test_extract_mkv_metadata_1440p_opus_7_1():
         ]
     }
 
-    meta = mkv_remux._extract_mkv_metadata(InspectedVideo(json_val))
+    meta = mkv_manifest.extract_mkv_metadata(InspectedVideo(json_val))
     assert meta["resolution"] == "1440p"
     assert meta["video_codec"] == "VP9"
     assert meta["audio_summary"] == "Opus 7.1"
@@ -533,7 +579,7 @@ def test_extract_mkv_metadata_1440p_opus_7_1():
 def test_extract_mkv_metadata_empty_and_null_fields():
     """Empty or failed inspection metadata must return None for unknown fields, not fabricated defaults."""
     json_val = None
-    meta = mkv_remux._extract_mkv_metadata(json_val)
+    meta = mkv_manifest.extract_mkv_metadata(json_val)
     assert meta["resolution"] is None
     assert meta["video_codec"] is None
     assert meta["video_tag"] is None
@@ -550,7 +596,7 @@ def test_extract_mkv_metadata_subtitle_formats():
             {"type": "subtitles", "codec": "SubRip/SRT", "properties": {"language": "eng"}},
         ]
     }
-    meta_srt = mkv_remux._extract_mkv_metadata(InspectedVideo(json_srt))
+    meta_srt = mkv_manifest.extract_mkv_metadata(InspectedVideo(json_srt))
     assert meta_srt["sub_summary"] == "SRT (ENG)"
 
     json_pgs = {
@@ -558,7 +604,7 @@ def test_extract_mkv_metadata_subtitle_formats():
             {"type": "subtitles", "codec": "HDMV PGS", "properties": {"language": "jpn"}},
         ]
     }
-    meta_pgs = mkv_remux._extract_mkv_metadata(InspectedVideo(json_pgs))
+    meta_pgs = mkv_manifest.extract_mkv_metadata(InspectedVideo(json_pgs))
     assert meta_pgs["sub_summary"] == "PGS (JPN)"
 
     json_mixed = {
@@ -567,7 +613,7 @@ def test_extract_mkv_metadata_subtitle_formats():
             {"type": "subtitles", "codec": "HDMV PGS", "properties": {"language": "jpn"}},
         ]
     }
-    meta_mixed = mkv_remux._extract_mkv_metadata(InspectedVideo(json_mixed))
+    meta_mixed = mkv_manifest.extract_mkv_metadata(InspectedVideo(json_mixed))
     assert meta_mixed["sub_summary"] == "Subs (ENG, JPN)"
 
     json_no_lang = {
@@ -575,7 +621,7 @@ def test_extract_mkv_metadata_subtitle_formats():
             {"type": "subtitles", "codec": "SubRip/SRT", "properties": {}},
         ]
     }
-    meta_no_lang = mkv_remux._extract_mkv_metadata(InspectedVideo(json_no_lang))
+    meta_no_lang = mkv_manifest.extract_mkv_metadata(InspectedVideo(json_no_lang))
     assert meta_no_lang["sub_summary"] == "SRT (UND)"
 
 
@@ -591,7 +637,7 @@ def test_extract_mkv_metadata_dimension_string_fallback():
             }
         ]
     }
-    meta = mkv_remux._extract_mkv_metadata(InspectedVideo(json_val))
+    meta = mkv_manifest.extract_mkv_metadata(InspectedVideo(json_val))
     assert meta["resolution"] == "1080p"
     assert meta["video_codec"] == "VP9"
 
@@ -609,7 +655,7 @@ def test_extract_mkv_metadata_codec_id_only_flac():
             }
         ]
     }
-    meta = mkv_remux._extract_mkv_metadata(InspectedVideo(json_val))
+    meta = mkv_manifest.extract_mkv_metadata(InspectedVideo(json_val))
     assert meta["has_flac"] is True
     assert meta["audio_summary"] == "FLAC 2.0"
 
@@ -624,12 +670,12 @@ def test_extract_mkv_metadata_unknown_channels_not_fabricated():
             }
         ]
     }
-    meta = mkv_remux._extract_mkv_metadata(InspectedVideo(json_val))
+    meta = mkv_manifest.extract_mkv_metadata(InspectedVideo(json_val))
     assert meta["audio_summary"] == "Audio"
     assert meta["has_flac"] is False
 
     # Completely missing tracks
-    meta_empty = mkv_remux._extract_mkv_metadata(InspectedVideo({"tracks": []}))
+    meta_empty = mkv_manifest.extract_mkv_metadata(InspectedVideo({"tracks": []}))
     assert meta_empty["has_flac"] is None
     assert meta_empty["audio_summary"] is None
 
@@ -647,7 +693,7 @@ def test_remux_error_event_emitted_on_failure(monkeypatch, tmp_path):
         return Res()
     monkeypatch.setattr(mkv_proc, "run_subprocess", mock_run_fail)
 
-    job = mkv_remux.PlannedJob(
+    job = mkv_remux_job.PlannedJob(
         video=tmp_path / "video.mkv",
         video_name="video.mkv",
         base="video",
@@ -659,16 +705,16 @@ def test_remux_error_event_emitted_on_failure(monkeypatch, tmp_path):
         cover_file=None,
         item_id="video.mkv",
     )
-    tr = mkv_remux.TrackSelection(
+    tr = mkv_remux_job.TrackSelection(
         video_id=0, audio_id=1, audio_index=0, audio_codec="A_AAC",
         audio_channels=2, audio_lang="jpn", audio_name="Japanese",
         audio_reason="test", has_source_chapters=False, source_cover_id=None
     )
-    monkeypatch.setattr(mkv_remux, "select_tracks", lambda *a, **k: tr)
+    monkeypatch.setattr(mkv_remux_job, "select_tracks", lambda *a, **k: tr)
 
-    res = mkv_remux.process_job(
-        job, tmp_path / "temp", mkv_remux.FontInfo(args=(), count=0),
-        "192k", {job.video: InspectedVideo({})}, ffmpeg_threads=2,
+    res = mkv_remux_job.process_job(
+        job, tmp_path / "temp", FontInfo(args=(), count=0),
+        "192k", {job.video: InspectionResult.success({})}, ffmpeg_threads=2,
     )
     assert res.failed is True
     complete_events = [k for ev_type, k in events if ev_type == "item_complete"]

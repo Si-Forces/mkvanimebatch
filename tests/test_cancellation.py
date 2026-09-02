@@ -24,6 +24,7 @@ import json
 mkv_runner = importlib.import_module("mkv_runner")
 mkv_scan = importlib.import_module("mkv_scan")
 mkv_remux = importlib.import_module("mkv_remux")
+mkv_remux_job = importlib.import_module("mkv_remux_job")
 mkv_extract = importlib.import_module("mkv_extract")
 
 import mkv_proc
@@ -31,7 +32,7 @@ from mkv_domain import EpisodeInfo
 from mkv_fonts import FontInfo, FontManager
 from mkv_proc import CancelledError, CancelToken, run_subprocess_cancellable
 from mkv_runner import CliRuntime
-from mkv_scan import InspectedVideo, ParsedFile, PersistentInspectCache
+from mkv_scan import InspectedVideo, InspectionResult, ParsedFile, PersistentInspectCache
 
 
 def _cancelled_token() -> CancelToken:
@@ -138,7 +139,7 @@ def test_process_job_reports_cancelled_without_start_event(tmp_path, monkeypatch
         path=video, name=video.name, stem=video.stem,
         parsed=EpisodeInfo("1", "E", "01"),
     )
-    job = mkv_remux.PlannedJob(
+    job = mkv_remux_job.PlannedJob(
         video=parsed.path,
         video_name=parsed.name,
         base=parsed.stem,
@@ -153,17 +154,13 @@ def test_process_job_reports_cancelled_without_start_event(tmp_path, monkeypatch
 
     start = MagicMock()
     complete = MagicMock()
-    monkeypatch.setattr(mkv_remux, "emit_item_start", start)
-    monkeypatch.setattr(mkv_remux, "emit_item_complete", complete)
+    monkeypatch.setattr(mkv_remux_job, "emit_item_start", start)
+    monkeypatch.setattr(mkv_remux_job, "emit_item_complete", complete)
 
-    result = mkv_remux.process_job(
-        job=job,
-        temp_dir=None,
-        fonts=FontInfo(args=(), count=0),
-        opus_bitrate="192k",
-        json_cache={},
-        cancel_token=_cancelled_token(),
-    )
+    result = mkv_remux_job.process_job(job=job,
+    temp_dir=None,
+    fonts=FontInfo(args=(), count=0),
+    opus_bitrate="192k", inspection_results={}, cancel_token=_cancelled_token(),)
 
     start.assert_not_called()
     complete.assert_called_once_with(job.item_id, job.video_name, "cancelled")
@@ -260,7 +257,7 @@ def test_process_job_forwards_token_into_ffmpeg_conversion(monkeypatch, tmp_path
         ],
         "attachments": [],
     })
-    job = mkv_remux.PlannedJob(
+    job = mkv_remux_job.PlannedJob(
         video=parsed.path,
         video_name=parsed.name,
         base=parsed.stem,
@@ -280,21 +277,74 @@ def test_process_job_forwards_token_into_ffmpeg_conversion(monkeypatch, tmp_path
         seen["cancel_token"] = cancel_token
         raise CancelledError("terminated")
 
-    monkeypatch.setattr(mkv_remux, "run_subprocess_cancellable", fake_run)
+    monkeypatch.setattr(mkv_remux_job, "run_subprocess_cancellable", fake_run)
     token = CancelToken()
 
     with pytest.raises(CancelledError):
-        mkv_remux.process_job(
-            job=job,
-            temp_dir=tmp_path,
-            fonts=FontInfo(args=(), count=0),
-            opus_bitrate="192k",
-            json_cache={parsed.path: json_data},
-            cancel_token=token,
-        )
+        mkv_remux_job.process_job(job=job,
+        temp_dir=tmp_path,
+        fonts=FontInfo(args=(), count=0),
+        opus_bitrate="192k", inspection_results={parsed.path: InspectionResult(video=json_data)}, cancel_token=token,)
 
     assert seen["cmd"] == "ffmpeg"
     assert seen["cancel_token"] is token
+
+
+def test_cleanup_error_does_not_mask_cancellation(monkeypatch, tmp_path):
+    video = tmp_path / "Show - S01E01.mkv"
+    video.write_bytes(b"dummy")
+    output = tmp_path / "out.mkv"
+    temp_output = output.with_suffix(".tmp")
+    job = mkv_remux_job.PlannedJob(
+        video=video,
+        video_name=video.name,
+        base=video.stem,
+        output_file=output,
+        subtitle_file=None,
+        subtitle_label="",
+        subtitle_mkv_lang="und",
+        chapter_file=None,
+        cover_file=None,
+        item_id=video.name,
+    )
+    selection = mkv_remux_job.TrackSelection(
+        video_id=0,
+        audio_id=1,
+        audio_index=0,
+        audio_codec="A_AAC",
+        audio_channels=2,
+        audio_lang="jpn",
+        audio_name="Japanese",
+        audio_reason="test",
+        has_source_chapters=False,
+        source_cover_id=None,
+    )
+    real_unlink = Path.unlink
+
+    def cancel_with_partial_output(*_args, **_kwargs):
+        temp_output.write_bytes(b"partial")
+        raise CancelledError("terminated")
+
+    def fail_existing_temp_cleanup(path, *, missing_ok=False):
+        if path == temp_output and path.exists():
+            raise PermissionError("file still in use")
+        return real_unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(mkv_remux_job, "select_tracks", lambda *_args: selection)
+    monkeypatch.setattr(mkv_remux_job, "run_subprocess_cancellable", cancel_with_partial_output)
+    monkeypatch.setattr(Path, "unlink", fail_existing_temp_cleanup)
+
+    with pytest.raises(CancelledError, match="terminated"):
+        mkv_remux_job.process_job(
+            job=job,
+            temp_dir=None,
+            fonts=FontInfo(args=(), count=0),
+            opus_bitrate="192k",
+            inspection_results={video: InspectionResult.success({})},
+            cancel_token=CancelToken(),
+        )
+
+    assert temp_output.read_bytes() == b"partial"
 
 
 def test_process_file_forwards_token_into_mkvextract(monkeypatch, tmp_path):

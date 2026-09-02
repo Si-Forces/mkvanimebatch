@@ -42,7 +42,7 @@ jobs:
 
       - name: Check Python syntax compilation
         run: |
-          python -m py_compile mkv_events.py mkv_proc.py mkv_domain.py mkv_fonts.py mkv_scan.py mkv_assets.py mkv_storage.py mkv_runner.py mkv_extract.py mkv_remux.py
+          python -m py_compile mkv_events.py mkv_proc.py mkv_domain.py mkv_fonts.py mkv_scan.py mkv_assets.py mkv_storage.py mkv_runner.py mkv_manifest.py mkv_remux_job.py mkv_extract.py mkv_remux.py
 
       - name: Set up Node.js for Pyright
         uses: actions/setup-node@v4
@@ -159,8 +159,9 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Run UI contract tests
+      - name: Run UI syntax and contract tests
         run: |
+          node --check desktop-tauri/ui/app.js
           node --test desktop-tauri/ui/*.test.js
 
   # ────────────────────────────────────────────────────────────────────────────

@@ -1,4 +1,9 @@
 mod commands;
+pub mod contract;
+mod process;
+mod sidecar;
+mod telemetry;
+mod window;
 
 pub use commands::*;
 use tauri::{Emitter, Manager};

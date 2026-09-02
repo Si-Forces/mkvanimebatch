@@ -3,10 +3,50 @@
  * Pure state reducer and sidecar event contract handler for MKV Anime Batch UI.
  */
 
+/**
+ * @typedef {Object} InspectionMetadata
+ * @property {string|null} resolution
+ * @property {string|null} video_codec
+ * @property {string|null} video_tag
+ * @property {string|null} audio_summary
+ * @property {boolean|null} has_flac
+ * @property {string|null} sub_summary
+ * @property {number|null} fonts_count
+ */
+
+/**
+ * @typedef {Object} ManifestItem
+ * @property {string} id
+ * @property {string} name
+ * @property {InspectionMetadata} metadata
+ * @property {string[]=} sub_candidates
+ * @property {string=} inspection_error
+ */
+
+/** @typedef {{version: number, items: ManifestItem[]}} InspectionManifest */
+/** @typedef {"completed"|"skipped"|"planned"|"error"|"cancelled"} ItemOutcome */
+/**
+ * @typedef {Object} JobEvent
+ * @property {number} version
+ * @property {string} type
+ * @property {string=} id
+ * @property {string=} file
+ * @property {ItemOutcome=} status
+ * @property {string=} reason
+ * @property {string=} error
+ * @property {number=} duration_sec
+ * @property {boolean=} success
+ * @property {boolean=} cancelled
+ */
+
 function isTerminal(status) {
   return status === "completed" || status === "skipped" || status === "planned" || status === "error" || status === "cancelled";
 }
 
+/**
+ * @param {InspectionManifest} manifest
+ * @param {{mode?: string}} [options]
+ */
 export function createQueueState(manifest, options = {}) {
   const mode = options.mode || "remux";
 
@@ -40,6 +80,7 @@ export function createQueueState(manifest, options = {}) {
       id,
       name,
       metadata,
+      inspectionError: entry.inspection_error || null,
       status: "queued", // 'queued' | 'processing' | 'completed' | 'skipped' | 'planned' | 'error'
       startTime: null,
       durationSec: null,
@@ -76,6 +117,7 @@ export function serializeAssignmentsForManifest(assignments, manifest) {
     : null;
 }
 
+/** @param {JobEvent} event */
 export function reduceQueueEvent(state, event, now = Date.now()) {
   if (!state || !event || typeof event !== "object" || event.version !== 1) {
     return state;
@@ -214,6 +256,7 @@ export function finalizeQueueState(state, exitCode, cancelled = false) {
     errorCount: finalErrorCount,
     cancelledCount: state.cancelledCount + addedCancelled,
     batchCompleted: true,
+    batchCancelled: state.batchCancelled || cancelled,
     batchSuccess: finalBatchSuccess,
   };
 }

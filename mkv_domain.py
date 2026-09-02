@@ -9,7 +9,7 @@ import os
 import re
 from functools import lru_cache
 from pathlib import Path
-from typing import NamedTuple
+from typing import NamedTuple, Sequence, TypedDict
 
 MAX_DEFAULT_WORKERS = 16
 MAX_FFMPEG_AUDIO_THREADS = 8
@@ -21,6 +21,19 @@ class EpisodeInfo(NamedTuple):
     season: str
     ep_type: str
     ep: str
+class TrackProperties(TypedDict, total=False):
+    language: str
+    track_name: str
+    audio_channels: int
+    codec_id: str
+    pixel_dimensions: str
+
+
+class MkvTrack(TypedDict, total=False):
+    id: int
+    type: str
+    codec: str
+    properties: TrackProperties
 
 def default_ffmpeg_threads(max_workers: int) -> int:
     """Per-job ffmpeg audio thread budget: divide CPUs across concurrent workers,
@@ -303,7 +316,7 @@ def is_dialogue_track(name: str | None) -> bool:
     return bool(DIALOGUE_KEYWORDS.intersection(tokens))
 
 def select_best_subtitle_track(
-    tracks: list[dict],
+    tracks: Sequence[MkvTrack],
     *,
     codec_filter: frozenset[str] | None = None,
     log: list[str] | None = None,
