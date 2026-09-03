@@ -337,13 +337,14 @@ class PersistentInspectCache:
         raw = str(path)
         with self._lock:
             key = self._resolved_keys.get(raw)
-            if key is None:
-                try:
-                    key = str(path.resolve())
-                except OSError:
-                    key = raw
-                self._resolved_keys[raw] = key
-        return key
+        if key is not None:
+            return key
+        try:
+            key = str(path.resolve())
+        except OSError:
+            key = raw
+        with self._lock:
+            return self._resolved_keys.setdefault(raw, key)
 
     def _load(self) -> None:
         if not self.cache_file.exists():

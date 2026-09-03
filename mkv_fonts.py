@@ -280,11 +280,17 @@ class FontManager:
                 claim.staging_path.replace(target_path)
                 self._claimed_hashes.add(file_hash)
                 claim._promoted = True
-                return target_path
             except OSError as e:
                 logger.error("Failed to promote font '%s': %s", claim.staging_path.name, e)
                 _abandon_locked()
                 return None
+            # Memo is a cache: a failed record must never change the promote outcome.
+            if self._hash_memo is not None:
+                try:
+                    self._hash_memo.put(target_path, target_path.stat(), file_hash)
+                except OSError:
+                    pass
+            return target_path
 
     def release(self, claim: FontClaim | None) -> None:
         """
