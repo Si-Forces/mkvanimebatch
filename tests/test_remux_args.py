@@ -365,6 +365,80 @@ class TestRemuxArgs:
             "--default-track-flag", "0:yes",
         ]
 
+    def test_sync_offset_for_embedded_subtitle_track(self, mod):
+        """When using embedded subtitles with a sync offset, --sync <embedded_sub_id>:<ms>
+        must precede the source video file."""
+        job = mkv_remux_job.PlannedJob(
+            video=Path("/dummy/video.mkv"),
+            video_name="video.mkv",
+            base="video",
+            output_file=Path("/dummy/out.mkv"),
+            subtitle_file=None,
+            subtitle_label="",
+            subtitle_mkv_lang="",
+            chapter_file=None,
+            cover_file=None,
+            embedded_sub_id=3,
+            use_source_fonts=False,
+        )
+        tr = mkv_remux_job.TrackSelection(
+            video_id=0, audio_id=1, audio_index=0, audio_codec="aac",
+            audio_channels=2, audio_lang="jpn", audio_name="Japanese Audio",
+            audio_reason="test", has_source_chapters=False, source_cover_id=None
+        )
+        fonts = FontInfo(args=(), count=0)
+        output_path = Path("/dummy/out.mkv")
+
+        # 1. Non-zero offset (-1.25s -> -1250ms)
+        args = mkv_remux_job._build_mkvmerge_args(job, tr, None, fonts, output_path, sub_offset=-1.25)
+        video_idx = args.index(str(job.video))
+        pre_video_args = args[:video_idx]
+
+        assert "--subtitle-tracks" in pre_video_args
+        assert pre_video_args[pre_video_args.index("--subtitle-tracks") + 1] == "3"
+        assert "--sync" in pre_video_args
+        assert pre_video_args[pre_video_args.index("--sync") + 1] == "3:-1250"
+
+        # 2. Zero offset -> no --sync
+        args_zero = mkv_remux_job._build_mkvmerge_args(job, tr, None, fonts, output_path, sub_offset=0.0)
+        assert "--sync" not in args_zero
+
+    def test_sync_offset_for_external_subtitles_does_not_affect_video(self, mod):
+        """When using external subtitles with a sync offset, --sync 0:<ms> precedes the
+        external subtitle file, and NO --sync argument precedes job.video."""
+        job = mkv_remux_job.PlannedJob(
+            video=Path("/dummy/video.mkv"),
+            video_name="video.mkv",
+            base="video",
+            output_file=Path("/dummy/out.mkv"),
+            subtitle_file=Path("/dummy/sub.ass"),
+            subtitle_label="English",
+            subtitle_mkv_lang="eng",
+            chapter_file=None,
+            cover_file=None,
+            embedded_sub_id=2,  # Present in source but ignored because external sub exists
+            use_source_fonts=False,
+        )
+        tr = mkv_remux_job.TrackSelection(
+            video_id=0, audio_id=1, audio_index=0, audio_codec="aac",
+            audio_channels=2, audio_lang="jpn", audio_name="Japanese Audio",
+            audio_reason="test", has_source_chapters=False, source_cover_id=None
+        )
+        fonts = FontInfo(args=(), count=0)
+        output_path = Path("/dummy/out.mkv")
+
+        args = mkv_remux_job._build_mkvmerge_args(job, tr, None, fonts, output_path, sub_offset=1.5)
+        video_idx = args.index(str(job.video))
+        sub_idx = args.index(str(job.subtitle_file))
+
+        pre_video_args = args[:video_idx]
+        assert "--no-subtitles" in pre_video_args
+        assert "--sync" not in pre_video_args
+
+        sub_args = args[video_idx + 1:sub_idx]
+        assert "--sync" in sub_args
+        assert sub_args[sub_args.index("--sync") + 1] == "0:1500"
+
     def test_ffmpeg_timeout_handling(self, mod, monkeypatch, tmp_path):
         """Verify _convert_flac_to_opus handles subprocess.TimeoutExpired gracefully."""
         import subprocess
