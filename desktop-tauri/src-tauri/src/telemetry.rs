@@ -57,11 +57,11 @@ fn starts_with_ignore_ascii_case(s: &str, prefix: &str) -> bool {
         .is_some_and(|start| start.eq_ignore_ascii_case(prefix.as_bytes()))
 }
 
-/// Maximum depth for traversing the process tree (e.g. sidecar -> media tool).
-const MAX_DESCENDANT_SEARCH_DEPTH: usize = 4;
-
 #[cfg(target_os = "linux")]
 fn collect_linux_descendant_pids(roots: &[Pid]) -> Option<Vec<Pid>> {
+    /// Maximum depth for traversing the process tree (e.g. sidecar -> media tool).
+    const MAX_DESCENDANT_SEARCH_DEPTH: usize = 4;
+
     let mut collected = Vec::new();
     let mut queue = Vec::new();
     for &root in roots {
