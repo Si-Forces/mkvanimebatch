@@ -238,3 +238,27 @@ def test_font_hash_memo_save_permissions(tmp_path):
         memo.save()
         mode_after = stat.S_IMODE(memo_path.stat().st_mode)
         assert mode_after == 0o640
+
+
+def test_promote_records_hash_in_memo(tmp_path, monkeypatch):
+    """A promoted font must be a memo hit for the next run, not a re-hash."""
+    import mkv_fonts
+    from mkv_fonts import FontHashMemo
+
+    fonts_dir = tmp_path / "fonts"
+    memo = FontHashMemo(tmp_path / "memo.json")
+
+    mgr = FontManager(fonts_dir, hash_memo=memo)
+    claim = mgr.claim("Promoted.ttf", 12)
+    assert claim is not None
+    claim.staging_path.write_bytes(b"font payload")
+    promoted = mgr.promote(claim)
+    assert promoted is not None
+    assert memo.get(promoted, promoted.stat()) == mkv_fonts.hash_file(promoted)
+
+    def _no_rehash(_path):
+        raise AssertionError("promoted font was re-hashed on seed")
+
+    monkeypatch.setattr(mkv_fonts, "hash_file", _no_rehash)
+    seeded = FontManager(fonts_dir, hash_memo=memo)
+    assert seeded.claimed_hashes == {memo.get(promoted, promoted.stat())}
