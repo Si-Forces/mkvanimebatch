@@ -7,8 +7,9 @@ use std::thread;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
+use sysinfo::Pid;
 #[cfg(windows)]
-use sysinfo::{Pid, ProcessesToUpdate, System};
+use sysinfo::{ProcessesToUpdate, System};
 use tauri::State;
 
 #[allow(dead_code)]
@@ -102,6 +103,10 @@ impl ScanState {
         self.active.lock().is_ok_and(|active| active.is_some())
     }
 
+    pub fn active_pid(&self) -> Option<Pid> {
+        self.active.lock().ok()?.map(|(_, pid)| Pid::from_u32(pid))
+    }
+
     pub(crate) fn ensure_accepting_starts(&self) -> Result<(), String> {
         if self.accepting_starts.load(Ordering::SeqCst) {
             Ok(())
@@ -159,6 +164,10 @@ impl Default for JobState {
 impl JobState {
     fn is_active(&self) -> bool {
         self.slot.lock().is_ok_and(|slot| slot.is_some())
+    }
+
+    pub fn active_pid(&self) -> Option<Pid> {
+        self.slot.lock().ok()?.as_ref().map(|slot| Pid::from_u32(slot.child.id()))
     }
 
     pub(crate) fn wait_until_released(
