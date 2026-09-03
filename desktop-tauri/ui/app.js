@@ -15,7 +15,8 @@ import { createInspectionCoordinator } from "./inspection-coordinator.js";
 
 const PRESETS = {
   default: {
-    name: "Opus 192k + Keep Fonts",
+    icon: "🌸",
+    name: "Balanced Anime (Opus 192k)",
     bitrate: "192k",
     complexity: "5",
     workers: "8",
@@ -27,6 +28,7 @@ const PRESETS = {
     noCache: false,
   },
   fast: {
+    icon: "⚡",
     name: "Fast Muxing (128k)",
     bitrate: "128k",
     complexity: "5",
@@ -39,6 +41,7 @@ const PRESETS = {
     noCache: false,
   },
   high_quality: {
+    icon: "🎧",
     name: "Hi-Fi Master (320k)",
     bitrate: "320k",
     complexity: "10",
@@ -65,12 +68,12 @@ function applyPreset(presetKey) {
   const nameEl = document.getElementById("active-profile-name");
 
   if (!p) {
-    if (nameEl) nameEl.textContent = "Custom Configuration";
+    if (nameEl) nameEl.textContent = "🛠️ Custom Configuration";
     setActiveProfileOption("custom");
     return;
   }
 
-  if (nameEl) nameEl.textContent = p.name;
+  if (nameEl) nameEl.textContent = `${p.icon} ${p.name}`;
   setActiveProfileOption(presetKey);
 
   const setVal = (id, val) => {
