@@ -3,6 +3,8 @@ use std::sync::Mutex;
 use sysinfo::{Pid, ProcessesToUpdate, System};
 use tauri::State;
 
+use crate::process::{JobState, ScanState};
+
 pub struct TelemetryState {
     inner: Mutex<TelemetryInner>,
 }
@@ -12,6 +14,7 @@ struct TelemetryInner {
     /// Timestamp of the previous telemetry poll; the window between polls
     /// converts the per-refresh written-bytes delta into a rate.
     last_poll: Option<std::time::Instant>,
+    tracked_pids: Vec<Pid>,
 }
 
 impl Default for TelemetryState {
@@ -22,6 +25,7 @@ impl Default for TelemetryState {
             inner: Mutex::new(TelemetryInner {
                 sys,
                 last_poll: None,
+                tracked_pids: Vec::new(),
             }),
         }
     }
@@ -51,6 +55,52 @@ fn starts_with_ignore_ascii_case(s: &str, prefix: &str) -> bool {
     s.as_bytes()
         .get(..prefix.len())
         .is_some_and(|start| start.eq_ignore_ascii_case(prefix.as_bytes()))
+}
+
+/// Maximum depth for traversing the process tree (e.g. sidecar -> media tool).
+const MAX_DESCENDANT_SEARCH_DEPTH: usize = 4;
+
+#[cfg(target_os = "linux")]
+fn collect_linux_descendant_pids(roots: &[Pid]) -> Option<Vec<Pid>> {
+    let mut collected = Vec::new();
+    let mut queue = Vec::new();
+    for &root in roots {
+        if !collected.contains(&root) {
+            collected.push(root);
+            queue.push(root);
+        }
+    }
+
+    let mut depth = 0;
+    while !queue.is_empty() && depth < MAX_DESCENDANT_SEARCH_DEPTH {
+        let mut next_queue = Vec::new();
+        for pid in queue {
+            let path = format!("/proc/{}/task/{}/children", pid.as_u32(), pid.as_u32());
+            match std::fs::read_to_string(&path) {
+                Ok(content) => {
+                    for token in content.split_whitespace() {
+                        if let Ok(child_u32) = token.parse::<u32>() {
+                            let child_pid = Pid::from_u32(child_u32);
+                            if !collected.contains(&child_pid) {
+                                collected.push(child_pid);
+                                next_queue.push(child_pid);
+                            }
+                        }
+                    }
+                }
+                Err(err) => {
+                    // PermissionDenied indicates the /proc children interface is restricted or
+                    // unsupported on this kernel, so signal a fallback to full process scan.
+                    if err.kind() == std::io::ErrorKind::PermissionDenied {
+                        return None;
+                    }
+                }
+            }
+        }
+        queue = next_queue;
+        depth += 1;
+    }
+    Some(collected)
 }
 
 /// Determines if a process is an engine process (the desktop app itself, or its
@@ -89,19 +139,70 @@ pub fn is_engine_process(
 }
 
 #[tauri::command]
-pub fn get_system_telemetry(state: State<'_, TelemetryState>) -> Result<TelemetryData, String> {
-    let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
-    let sys = &mut inner.sys;
+pub fn get_system_telemetry(
+    state: State<'_, TelemetryState>,
+    job_state: State<'_, JobState>,
+    scan_state: State<'_, ScanState>,
+) -> Result<TelemetryData, String> {
+    let mut guard = state.inner.lock().map_err(|e| e.to_string())?;
+    let TelemetryInner {
+        ref mut sys,
+        ref mut last_poll,
+        ref mut tracked_pids,
+    } = *guard;
+    let self_pid = Pid::from_u32(std::process::id());
+
+    let job_pid = job_state.active_pid();
+    let scan_pid = scan_state.active_pid();
+    let has_active_job = job_pid.is_some() || scan_pid.is_some();
+
     sys.refresh_cpu_all();
     sys.refresh_memory();
-    // `written_bytes` is a per-refresh delta, so the poll interval doubles as
-    // the measurement window. Scoped to this app and its descendant sidecars
-    // and media tools (mkv-remux, mkv-extract, mkvmerge, mkvextract, ffmpeg)
-    // by tracing process ancestry back to self_pid.
-    sys.refresh_processes(ProcessesToUpdate::All, false);
 
-    let self_pid = Pid::from_u32(std::process::id());
+    #[cfg(target_os = "linux")]
+    {
+        if !has_active_job && tracked_pids.len() <= 1 {
+            sys.refresh_processes(ProcessesToUpdate::Some(&[self_pid]), true);
+            tracked_pids.clear();
+        } else {
+            let mut sidecar_roots = Vec::new();
+            if let Some(p) = job_pid {
+                sidecar_roots.push(p);
+            }
+            if let Some(p) = scan_pid {
+                sidecar_roots.push(p);
+            }
+            match collect_linux_descendant_pids(&sidecar_roots) {
+                Some(mut descendants) => {
+                    if !descendants.contains(&self_pid) {
+                        descendants.push(self_pid);
+                    }
+                    for prev_pid in tracked_pids.iter() {
+                        if !descendants.contains(prev_pid) {
+                            descendants.push(*prev_pid);
+                        }
+                    }
+                    sys.refresh_processes(ProcessesToUpdate::Some(&descendants), true);
+                }
+                None => {
+                    sys.refresh_processes(ProcessesToUpdate::All, false);
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        if !has_active_job {
+            sys.refresh_processes(ProcessesToUpdate::Some(&[self_pid]), true);
+            tracked_pids.clear();
+        } else {
+            sys.refresh_processes(ProcessesToUpdate::All, false);
+        }
+    }
+
     let mut written_window = 0u64;
+    let mut active_engine_pids = Vec::new();
     for (pid, process) in sys.processes() {
         if is_engine_process(
             *pid,
@@ -110,8 +211,10 @@ pub fn get_system_telemetry(state: State<'_, TelemetryState>) -> Result<Telemetr
             self_pid,
         ) {
             written_window += process.disk_usage().written_bytes;
+            active_engine_pids.push(*pid);
         }
     }
+    *tracked_pids = active_engine_pids;
     let cpus = sys.cpus();
     let cpu_pct = if !cpus.is_empty() {
         let total: f32 = cpus.iter().map(|c| c.cpu_usage()).sum();
@@ -129,7 +232,7 @@ pub fn get_system_telemetry(state: State<'_, TelemetryState>) -> Result<Telemetr
     };
     // `sys` is no longer borrowed past this point, so the poll bookkeeping
     // can read `last_poll` freely.
-    let io_mb_s = match inner.last_poll {
+    let io_mb_s = match last_poll {
         Some(prev) => {
             let elapsed = prev.elapsed().as_secs_f64();
             if elapsed > 0.0 {
@@ -140,7 +243,7 @@ pub fn get_system_telemetry(state: State<'_, TelemetryState>) -> Result<Telemetr
         }
         None => 0.0,
     };
-    inner.last_poll = Some(std::time::Instant::now());
+    *last_poll = Some(std::time::Instant::now());
 
     Ok(TelemetryData {
         cpu_pct,
@@ -233,5 +336,25 @@ mod tests {
             parent_fn,
             self_pid
         ));
+    }
+
+    #[test]
+    fn test_active_pid_defaults_to_none() {
+        let job_state = JobState::default();
+        let scan_state = ScanState::default();
+        assert_eq!(job_state.active_pid(), None);
+        assert_eq!(scan_state.active_pid(), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_collect_linux_descendant_pids_resilience() {
+        let self_pid = Pid::from_u32(std::process::id());
+        let res = collect_linux_descendant_pids(&[self_pid]);
+        assert!(res.is_some_and(|pids| pids.contains(&self_pid)));
+
+        let non_existent = Pid::from_u32(999_999);
+        let non_res = collect_linux_descendant_pids(&[non_existent]);
+        assert_eq!(non_res, Some(vec![non_existent]));
     }
 }
