@@ -260,6 +260,13 @@ def _convert_flac_to_opus(
     return temp_opus
 
 
+def _format_sync_args(track_id: int, sub_offset: float) -> list[str]:
+    if sub_offset != 0.0:
+        offset_ms = round(sub_offset * 1000)
+        return ["--sync", f"{track_id}:{offset_ms}"]
+    return []
+
+
 # ─── MKVMERGE ARGS BUILDER ───────────────────────────────────────────────────
 def _build_mkvmerge_args(
     job: PlannedJob,
@@ -276,6 +283,7 @@ def _build_mkvmerge_args(
 
     if job.subtitle_file is None and job.embedded_sub_id is not None:
         args += ["--subtitle-tracks", str(job.embedded_sub_id)]
+        args += _format_sync_args(job.embedded_sub_id, sub_offset)
     else:
         args += ["--no-subtitles"]
 
@@ -307,9 +315,7 @@ def _build_mkvmerge_args(
         args.append(str(temp_opus))
 
     if job.subtitle_file:
-        if sub_offset != 0.0:
-            offset_ms = round(sub_offset * 1000)
-            args += ["--sync", f"0:{offset_ms}"]
+        args += _format_sync_args(0, sub_offset)
         args += [
             "--language", f"0:{job.subtitle_mkv_lang}",
             "--track-name", f"0:{job.subtitle_label}",
