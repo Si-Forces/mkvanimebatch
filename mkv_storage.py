@@ -177,7 +177,7 @@ def _windows_storage_class(path: Path) -> str:
             return "unknown"
         drive = anchor.rstrip("\\/")
         volume = f"\\\\.\\{drive}"
-        GENERIC_READ = 0x80000000
+        QUERY_ONLY_ACCESS = 0
         FILE_SHARE_READ_WRITE = 0x1 | 0x2
         OPEN_EXISTING = 3
         IOCTL_STORAGE_QUERY_PROPERTY = 0x2D1400
@@ -187,7 +187,7 @@ def _windows_storage_class(path: Path) -> str:
         kernel32 = windll.kernel32
         kernel32.CreateFileW.restype = ctypes.c_void_p
         handle = kernel32.CreateFileW(
-            volume, GENERIC_READ, FILE_SHARE_READ_WRITE, None, OPEN_EXISTING, 0, None
+            volume, QUERY_ONLY_ACCESS, FILE_SHARE_READ_WRITE, None, OPEN_EXISTING, 0, None
         )
         if not handle or handle == ctypes.c_void_p(-1).value:
             return "unknown"
