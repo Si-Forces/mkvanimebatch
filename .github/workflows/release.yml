@@ -226,7 +226,7 @@ jobs:
           $Empty = Join-Path $env:RUNNER_TEMP "empty-release"
           New-Item -ItemType Directory -Force -Path $Empty | Out-Null
           $Manifest = (& $Remux --plan --no-cache --input-dir $Empty) | ConvertFrom-Json
-          if ($LASTEXITCODE -ne 0 -or $Manifest.version -ne 1 -or $Manifest.items.Count -ne 0) {
+          if ($LASTEXITCODE -ne 0 -or $Manifest.version -ne 2 -or $Manifest.items.Count -ne 0) {
             throw "mkv-remux empty-directory plan contract failed"
           }
 
