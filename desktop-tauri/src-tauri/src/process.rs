@@ -167,7 +167,11 @@ impl JobState {
     }
 
     pub fn active_pid(&self) -> Option<Pid> {
-        self.slot.lock().ok()?.as_ref().map(|slot| Pid::from_u32(slot.child.id()))
+        self.slot
+            .lock()
+            .ok()?
+            .as_ref()
+            .map(|slot| Pid::from_u32(slot.child.id()))
     }
 
     pub(crate) fn wait_until_released(
