@@ -8,15 +8,27 @@ mod window;
 pub use commands::*;
 use tauri::{Emitter, Manager};
 
+#[cfg(target_os = "linux")]
+pub fn init_linux_env() {
+    // Workaround for upstream WebKitGTK / Mesa EGL race condition crash on shutdown.
+    // Disabling the DMABUF renderer prevents SkiaGLContext / __eglFini SEGV upon exit.
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
+    // Workaround for WebKitWebProcess crash (EGL_BAD_PARAMETER / SIGABRT) on modern Wayland/Mesa distros (e.g. Fedora)
+    if std::env::var_os("WEBKIT_DISABLE_COMPOSITING_MODE").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+    }
+    // Prefer X11/XWayland backend by default to prevent WebKitWebProcess EGL_BAD_PARAMETER abort on Wayland
+    if std::env::var_os("GDK_BACKEND").is_none() {
+        std::env::set_var("GDK_BACKEND", "x11,wayland");
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(target_os = "linux")]
-    {
-        // Workaround for upstream WebKitGTK / Mesa EGL race condition crash on shutdown
-        if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
-            std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
-        }
-    }
+    init_linux_env();
 
     tauri::Builder::default()
         .manage(JobState::default())
