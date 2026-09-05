@@ -1,6 +1,26 @@
 import { serializeAssignmentsForManifest } from "./queue-state.js";
 
 
+export function extractInspectionOptions(args) {
+  const options = {};
+  for (const [flag, key, minimum] of [["--workers", "workers", 1], ["--io-jobs", "ioJobs", 0]]) {
+    const index = args.indexOf(flag);
+    if (index === -1) continue;
+    const raw = args[index + 1];
+    const value = Number(raw);
+    if (!/^\+?\d+$/.test(raw ?? "") || !Number.isInteger(value) || value < minimum || value > 64) {
+      return { error: `Invalid ${flag.slice(2)} value '${raw}': must be an integer between ${minimum} and 64.` };
+    }
+    options[key] = value;
+  }
+
+  if (args.includes("--no-cache")) {
+    options.noCache = true;
+  }
+
+  return { options };
+}
+
 export class JobController {
   constructor(mode, runtime) {
     this.mode     = mode;
@@ -109,6 +129,11 @@ export class JobController {
     const args = this.buildArgs();
     if (!args) return;
     const inputDir = args[args.indexOf("--input-dir") + 1];
+    const { options, error: optionsError } = extractInspectionOptions(args);
+    if (optionsError) {
+      this.runtime.appendLog(this.logEl, `[ERROR] ${optionsError}`);
+      return;
+    }
     const generation = ++this.startGeneration;
     const assignmentSnapshot = new Map(this.runtime.queueFor(this.mode).assignments);
     if (!this.runtime.coordinator.begin(this.mode)) return;
@@ -118,12 +143,12 @@ export class JobController {
     this.runtime.clearLog(this.logEl);
     this.lastExitCode = null;
 
-    const workers = parseInt(document.getElementById(`${this.mode}-workers`)?.value || '8');
-    const ioJobs  = parseInt(document.getElementById(`${this.mode}-io-jobs`)?.value || '2');
+    const workers = options.workers ?? 8;
+    const ioJobs  = options.ioJobs ?? 2;
     this.runtime.updateWorkerChips(true, workers, ioJobs);
     this.runtime.telemetryLoop.setJobActive(true);
 
-    const inspected = await this.runtime.scanInputDirectory(inputDir, this.mode, { force: true });
+    const inspected = await this.runtime.scanInputDirectory(inputDir, this.mode, { force: true, options });
     if (generation !== this.startGeneration || !this.runtime.coordinator.isStarting) {
       this.runtime.appendLog(this.logEl, "[INFO] Start aborted by stop request.");
       this.abortStart(true);

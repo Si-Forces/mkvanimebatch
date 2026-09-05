@@ -629,7 +629,7 @@ def test_font_scan_failure_is_not_cached(tmp_path, monkeypatch):
     assert calls == 2
 
 
-def test_manifest_shares_font_cache_only_within_one_call(tmp_path, monkeypatch):
+def test_manifest_avoids_font_scans(tmp_path, monkeypatch):
     import mkv_manifest
     from mkv_scan import InspectionResult
 
@@ -655,10 +655,10 @@ def test_manifest_shares_font_cache_only_within_one_call(tmp_path, monkeypatch):
 
     monkeypatch.setattr(os, "scandir", scandir)
     assert len(mkv_manifest.generate_inspection_manifest(tmp_path)["items"]) == 2
-    assert len(scans) == 1
+    assert len(scans) == 0
     (fonts / "second.otf").touch()
     assert len(mkv_manifest.generate_inspection_manifest(tmp_path)["items"]) == 2
-    assert len(scans) == 2
+    assert len(scans) == 0
 
 
 # ─── SubIndex bucket duplicate & cross-bucket tests ──────────────────────────
@@ -719,3 +719,242 @@ def test_sub_index_insertion_order_tie_parity(tmp_path):
     idx2.add(file_b)
     idx2.add(file_a)
     assert idx2.lookup(EpisodeInfo("1", "E", "01")) == (file_b.path, "und")
+
+
+# ─── Manifest subtitle discovery parity and performance tests ─────────────────
+def test_manifest_candidate_ordering_parity_with_resolver(tmp_path, monkeypatch):
+    """Manifest subtitle-only discovery produces identical candidates to AssetResolver,
+    preserving local vs ancestor paths, unparsed subtitles, and natural sort order."""
+    import mkv_manifest
+    from mkv_events import get_item_id
+    from mkv_scan import InspectionResult
+
+    # Root ancestor
+    (tmp_path / "root_notes.ass").touch()
+    (tmp_path / "Show - 01 [ENG].srt").touch()
+
+    # Release directory
+    rel_dir = tmp_path / "Season 01"
+    rel_dir.mkdir()
+    video_path = rel_dir / "Show - 01.mkv"
+    video_path.touch()
+    (rel_dir / "Show - 01 [IND].ass").touch()
+    (rel_dir / "Show - 02 [IND].ass").touch()
+    (rel_dir / "local_notes.ass").touch()
+    # Same base stem with different casing / natural-key tie
+    (rel_dir / "extra.ass").touch()
+    (rel_dir / "EXTRA.ass").touch()
+
+    video_parsed = _create_parsed_file(video_path)
+    monkeypatch.setattr(mkv_manifest, "scan_mkv_files", lambda _root: [video_parsed])
+    monkeypatch.setattr(mkv_manifest, "inspect_videos", lambda paths, **_kw: {
+        path: InspectionResult.success({"tracks": []}) for path in paths
+    })
+
+    manifest = mkv_manifest.generate_inspection_manifest(tmp_path)
+    rel_id = get_item_id(rel_dir, tmp_path)
+    manifest_candidates = manifest["subtitle_candidates"][rel_id]
+
+    prep = prepare_release_directory(rel_dir, tmp_path, [video_parsed])
+    expected_candidates = [get_item_id(p, tmp_path) for p in prep.resolver.sub_index.all_subtitles]
+
+    assert manifest_candidates == expected_candidates
+
+
+def test_manifest_avoids_font_scan_and_xml_sniff(tmp_path, monkeypatch):
+    """Manifest generation strictly avoids font directory scans and chapter XML sniffing."""
+    import mkv_assets
+    import mkv_fonts
+    import mkv_manifest
+    from mkv_scan import InspectionResult
+
+    rel_dir = tmp_path / "Release"
+    rel_dir.mkdir()
+    video = _create_parsed_file(rel_dir / "Show - 01.mkv")
+    (rel_dir / "Show - 01.ass").touch()
+
+    fonts_dir = tmp_path / "fonts"
+    fonts_dir.mkdir()
+    (fonts_dir / "custom.ttf").touch()
+
+    chap_xml = rel_dir / "chapters.xml"
+    chap_xml.write_text("<Chapters></Chapters>")
+
+    monkeypatch.setattr(mkv_manifest, "scan_mkv_files", lambda _root: [video])
+    monkeypatch.setattr(mkv_manifest, "inspect_videos", lambda paths, **_kw: {
+        path: InspectionResult.success({"tracks": []}) for path in paths
+    })
+
+    def fail_font(*_args, **_kwargs):
+        raise AssertionError("Manifest generation must not scan fonts")
+
+    def fail_xml(*_args, **_kwargs):
+        raise AssertionError("Manifest generation must not sniff chapter XML")
+
+    monkeypatch.setattr(mkv_fonts, "scan_fonts", fail_font)
+    monkeypatch.setattr(mkv_fonts, "find_fonts_dir", fail_font)
+    monkeypatch.setattr(mkv_assets, "scan_fonts", fail_font)
+    monkeypatch.setattr(mkv_assets, "find_fonts_dir", fail_font)
+    monkeypatch.setattr(mkv_scan, "is_chapter_xml", fail_xml)
+    monkeypatch.setattr(mkv_scan, "_chapter_xml_sniff", fail_xml)
+
+    manifest = mkv_manifest.generate_inspection_manifest(tmp_path)
+    assert len(manifest["items"]) == 1
+    assert len(manifest["subtitle_candidates"]) == 1
+
+
+def test_manifest_cancellation_during_subtitle_discovery(tmp_path, monkeypatch):
+    import mkv_manifest
+    from mkv_proc import CancelledError, CancelToken
+    from mkv_scan import InspectionResult
+
+    v1 = _create_parsed_file(tmp_path / "Dir1" / "Show - 01.mkv")
+    v2 = _create_parsed_file(tmp_path / "Dir2" / "Show - 02.mkv")
+    v1.path.parent.mkdir()
+    v2.path.parent.mkdir()
+    (v1.path.parent / "Show - 01.ass").touch()
+    (v2.path.parent / "Show - 02.ass").touch()
+
+    monkeypatch.setattr(mkv_manifest, "scan_mkv_files", lambda _root: [v1, v2])
+    monkeypatch.setattr(mkv_manifest, "inspect_videos", lambda paths, **_kw: {
+        path: InspectionResult.success({"tracks": []}) for path in paths
+    })
+
+    token = CancelToken()
+    real_scan_assets = mkv_manifest.scan_assets
+    call_count = 0
+
+    def cancelling_scan_assets(d, cache=None):
+        nonlocal call_count
+        call_count += 1
+        if call_count >= 1:
+            token.request()
+        return real_scan_assets(d, cache)
+
+    monkeypatch.setattr(mkv_manifest, "scan_assets", cancelling_scan_assets)
+    with pytest.raises(CancelledError):
+        mkv_manifest.generate_inspection_manifest(tmp_path, cancel_token=token)
+
+
+def test_cli_plan_forwards_workers_and_io_jobs(tmp_path, monkeypatch):
+    import mkv_remux
+    monkeypatch.setattr(mkv_scan, "get_default_cache_file", lambda: tmp_path / "inspect_cache.json")
+    (tmp_path / "Show - 01.mkv").touch()
+
+    captured_kwargs: list[dict] = []
+
+    def mock_generate(input_dir, persistent_cache=None, cancel_token=None, *, workers=None, io_jobs=None):
+        captured_kwargs.append({
+            "workers": workers,
+            "io_jobs": io_jobs,
+            "cache_enabled": persistent_cache.enabled if persistent_cache else None,
+        })
+        return {"version": 2, "subtitle_candidates": {}, "items": []}
+
+    monkeypatch.setattr(mkv_remux, "generate_inspection_manifest", mock_generate)
+
+    # 1. Explicit workers and explicit non-zero io_jobs
+    monkeypatch.setattr(sys, "argv", [
+        "mkv_remux.py", "--plan", "--workers", "6", "--io-jobs", "3", "--input-dir", str(tmp_path)
+    ])
+    with pytest.raises(SystemExit) as exc:
+        mkv_remux.main()
+    assert exc.value.code == 0
+    assert captured_kwargs[-1] == {"workers": 6, "io_jobs": 3, "cache_enabled": True}
+
+    # 2. Explicit workers and io_jobs=0 (unlimited)
+    monkeypatch.setattr(sys, "argv", [
+        "mkv_remux.py", "--plan", "--workers", "8", "--io-jobs", "0", "--input-dir", str(tmp_path)
+    ])
+    with pytest.raises(SystemExit) as exc:
+        mkv_remux.main()
+    assert exc.value.code == 0
+    assert captured_kwargs[-1] == {"workers": 8, "io_jobs": 0, "cache_enabled": True}
+
+    # 3. Default CLI values (no explicit workers or io-jobs)
+    monkeypatch.setattr(sys, "argv", ["mkv_remux.py", "--plan", "--input-dir", str(tmp_path)])
+    with pytest.raises(SystemExit) as exc:
+        mkv_remux.main()
+    assert exc.value.code == 0
+    assert captured_kwargs[-1]["workers"] == mkv_runner.default_worker_count()
+    assert captured_kwargs[-1]["io_jobs"] in (2, 4)
+    assert captured_kwargs[-1]["cache_enabled"] is True
+
+    # 4. Forwarding --no-cache
+    monkeypatch.setattr(sys, "argv", [
+        "mkv_remux.py", "--plan", "--no-cache", "--input-dir", str(tmp_path)
+    ])
+    with pytest.raises(SystemExit) as exc:
+        mkv_remux.main()
+    assert exc.value.code == 0
+    assert captured_kwargs[-1]["cache_enabled"] is False
+
+
+def test_manifest_semaphore_concurrency_and_warm_hits(tmp_path, monkeypatch):
+    """Manifest bounds cold probe concurrency to io_jobs and bypasses probes on warm hits."""
+    import mkv_manifest
+    from mkv_scan import PersistentInspectCache
+
+    cache_file = tmp_path / "test_cache.json"
+    cache = PersistentInspectCache(cache_file=cache_file)
+    videos = [tmp_path / f"video_{i}.mkv" for i in range(6)]
+    for v in videos:
+        v.touch()
+
+    parsed_videos = [_create_parsed_file(v) for v in videos]
+    monkeypatch.setattr(mkv_manifest, "scan_mkv_files", lambda _root: parsed_videos)
+
+    probed = []
+
+    def fake_probe(video, cancel_token=None):
+        probed.append(video)
+        return {"tracks": []}
+
+    monkeypatch.setattr(mkv_scan, "run_mkvmerge_json", fake_probe)
+
+    real_inspect_videos = mkv_manifest.inspect_videos
+    captured_inspections: list[dict] = []
+
+    def wrapped_inspect_videos(paths, pool, persistent_cache=None, cancel_token=None, probe_semaphore=None):
+        captured_inspections.append({
+            "workers": getattr(pool, "_max_workers", None) if pool else None,
+            "semaphore_capacity": getattr(probe_semaphore, "_initial_value", None) if probe_semaphore else None,
+            "probe_semaphore": probe_semaphore,
+        })
+        return real_inspect_videos(
+            paths,
+            pool=pool,
+            persistent_cache=persistent_cache,
+            cancel_token=cancel_token,
+            probe_semaphore=probe_semaphore,
+        )
+
+    monkeypatch.setattr(mkv_manifest, "inspect_videos", wrapped_inspect_videos)
+
+    # Cold pass with io_jobs=2
+    manifest = mkv_manifest.generate_inspection_manifest(
+        tmp_path, persistent_cache=cache, workers=6, io_jobs=2
+    )
+    assert len(manifest["items"]) == 6
+    assert len(probed) == 6
+    assert captured_inspections[-1]["workers"] == 6
+    assert captured_inspections[-1]["semaphore_capacity"] == 2
+
+    # Warm pass: all 6 items hit cache, no probes executed
+    probed.clear()
+    manifest2 = mkv_manifest.generate_inspection_manifest(
+        tmp_path, persistent_cache=cache, workers=6, io_jobs=2
+    )
+    assert len(manifest2["items"]) == 6
+    assert len(probed) == 0
+
+    # Pass with io_jobs=0 (unlimited semaphore: probe_semaphore is None)
+    cache_unlimited = PersistentInspectCache(cache_file=tmp_path / "uncached.json")
+    probed.clear()
+    manifest3 = mkv_manifest.generate_inspection_manifest(
+        tmp_path, persistent_cache=cache_unlimited, workers=6, io_jobs=0
+    )
+    assert len(manifest3["items"]) == 6
+    assert len(probed) == 6
+    assert captured_inspections[-1]["workers"] == 6
+    assert captured_inspections[-1]["probe_semaphore"] is None

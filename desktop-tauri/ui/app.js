@@ -99,9 +99,8 @@ function applyPreset(presetKey) {
 
 // ─── Tauri API helpers ──────────────────────────────────────────────────────
 
-// Global execution coordinator
 const JobCoordinator = createJobCoordinator();
-const inspectDirectory = createInspectionCoordinator(path => invoke("inspect_directory", { path }));
+const inspectDirectory = createInspectionCoordinator((path, options) => invoke("inspect_directory", { path, options }));
 
 
 async function invoke(cmd, args = {}) {
@@ -376,7 +375,7 @@ function closeSubAssignModal() {
   if (modal) modal.classList.remove("active");
 }
 
-async function scanInputDirectory(path, mode, { force = false } = {}) {
+export async function scanInputDirectory(path, mode, { force = false, options } = {}) {
   const tracker = queueFor(mode);
   let scanToken = null;
   path = path.trim();
@@ -390,7 +389,7 @@ async function scanInputDirectory(path, mode, { force = false } = {}) {
     if (!force && tracker.reuseInspection(path)) return true;
 
     scanToken = tracker.startScan();
-    const manifest = await inspectDirectory(path, { force });
+    const manifest = await inspectDirectory(path, { force, options });
     return tracker.acceptInspection(scanToken, path, manifest);
   } catch (err) {
     console.log("[inspect_directory] failed:", err);

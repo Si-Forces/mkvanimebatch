@@ -584,6 +584,8 @@ def main() -> None:
                 root_input_dir,
                 persistent_cache=runtime.persistent_cache,
                 cancel_token=runtime.cancel_token,
+                workers=runtime.workers,
+                io_jobs=runtime.io_jobs if runtime.io_jobs is not None else 0,
             )
         except CancelledError:
             logger.warning("Cancelled by user.")
