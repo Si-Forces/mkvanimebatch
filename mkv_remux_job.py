@@ -1,6 +1,7 @@
 """Remux track selection, command construction, and transactional execution."""
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 import re
 import shutil
@@ -8,7 +9,7 @@ import subprocess
 import tempfile
 import threading
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed, wait
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -21,7 +22,14 @@ from mkv_events import (
     emit_item_start,
 )
 from mkv_fonts import FontInfo
-from mkv_proc import SUBPROCESS_TIMEOUT, CancelledError, CancelToken, acquire_semaphore, run_subprocess_cancellable
+from mkv_proc import (
+    SUBPROCESS_TIMEOUT,
+    CancelledError,
+    CancelToken,
+    acquire_semaphore,
+    run_subprocess_cancellable,
+    submit_bounded,
+)
 from mkv_scan import AudioTrack, InspectedVideo, InspectionResult
 
 logger = logging.getLogger("mkv_automation.remux")
@@ -491,6 +499,9 @@ def execute_jobs(
 ) -> ExecutionSummary:
     """Execute jobs and return all non-success outcomes."""
     summary = ExecutionSummary()
+    if not jobs:
+        return summary
+
     logger.info("Processing %d matched file(s) (up to %d at a time)...", len(jobs), context.workers)
 
     def record_skip(skipped_job: PlannedJob, line: str) -> None:
@@ -502,10 +513,8 @@ def execute_jobs(
         summary.failed_jobs.append(failed_job)
         record_skip(failed_job, line)
 
-    total_jobs = len(jobs)
-    futures = {
-        pool.submit(
-            process_job,
+    def _run_job(job: PlannedJob) -> JobResult:
+        return process_job(
             job=job,
             opus_bitrate=context.opus_bitrate,
             inspection_results=inspection_results,
@@ -514,60 +523,74 @@ def execute_jobs(
             complexity=context.complexity,
             sub_offset=context.sub_offset,
             cancel_token=context.cancel_token,
-        ): job
-        for job in jobs
-    }
-    for completed_jobs, future in enumerate(as_completed(futures), start=1):
-        job = futures[future]
-        progress = completed_jobs / total_jobs
-        try:
-            result = future.result()
-            if result.cancelled:
-                record_skip(job, f"{job.video_name} (cancelled)")
-                status = "Cancelled"
-            elif result.failed or result.error_reason:
-                record_failure(job, f"{job.video_name} (failed: {result.error_reason or 'error'})")
-                status = "Failed"
-            elif result.skipped_reason:
-                record_skip(job, f"{job.video_name} ({result.skipped_reason})")
-                status = "Skipped"
-            else:
-                status = "Remuxed"
-            logger.info(
-                "[%d/%d (%.0f%%)] %s: %s",
-                completed_jobs,
-                total_jobs,
-                progress * 100,
-                status,
-                job.video_name,
-            )
-        except CancelledError:
-            record_skip(job, f"{job.video_name} (cancelled)")
-            logger.info(
-                "[%d/%d (%.0f%%)] Cancelled: %s",
-                completed_jobs,
-                total_jobs,
-                progress * 100,
-                job.video_name,
-            )
-            for future_to_cancel, pending_job in futures.items():
-                if future_to_cancel.cancel():
-                    emit_item_complete(
-                        pending_job.item_id,
-                        pending_job.video_name,
-                        OUTCOME_CANCELLED,
+        )
+
+    total_jobs = len(jobs)
+    completed_jobs = 0
+    cancelled = False
+
+    try:
+        with submit_bounded(
+            pool,
+            _run_job,
+            jobs,
+            cancel_token=context.cancel_token,
+        ) as completions:
+            for job, future in completions:
+                completed_jobs += 1
+                progress = completed_jobs / total_jobs
+                try:
+                    result = future.result()
+                    if result.cancelled:
+                        cancelled = True
+                        context.cancel_token.request()
+                        record_skip(job, f"{job.video_name} (cancelled)")
+                        status = "Cancelled"
+                    elif result.failed or result.error_reason:
+                        record_failure(job, f"{job.video_name} (failed: {result.error_reason or 'error'})")
+                        status = "Failed"
+                    elif result.skipped_reason:
+                        record_skip(job, f"{job.video_name} ({result.skipped_reason})")
+                        status = "Skipped"
+                    else:
+                        status = "Remuxed"
+                    logger.info(
+                        "[%d/%d (%.0f%%)] %s: %s",
+                        completed_jobs,
+                        total_jobs,
+                        progress * 100,
+                        status,
+                        job.video_name,
                     )
-            wait(futures)
-            raise
-        except Exception as exc:
-            logger.exception(
-                "[%d/%d (%.0f%%)] CRASHED: %s",
-                completed_jobs,
-                total_jobs,
-                progress * 100,
-                job.video_name,
-            )
-            emit_item_complete(job.item_id, job.video_name, OUTCOME_ERROR, error=str(exc))
-            record_failure(job, f"{job.video_name} (exception: {exc})")
+                except (CancelledError, concurrent.futures.CancelledError):
+                    cancelled = True
+                    context.cancel_token.request()
+                    record_skip(job, f"{job.video_name} (cancelled)")
+                    logger.info(
+                        "[%d/%d (%.0f%%)] Cancelled: %s",
+                        completed_jobs,
+                        total_jobs,
+                        progress * 100,
+                        job.video_name,
+                    )
+                except Exception as exc:
+                    logger.exception(
+                        "[%d/%d (%.0f%%)] CRASHED: %s",
+                        completed_jobs,
+                        total_jobs,
+                        progress * 100,
+                        job.video_name,
+                    )
+                    emit_item_complete(job.item_id, job.video_name, OUTCOME_ERROR, error=str(exc))
+                    record_failure(job, f"{job.video_name} (exception: {exc})")
+    except CancelledError:
+        cancelled = True
+    finally:
+        if cancelled or context.cancel_token.cancelled:
+            for job in jobs:
+                emit_item_complete(job.item_id, job.video_name, OUTCOME_CANCELLED)
+
+    if cancelled or context.cancel_token.cancelled:
+        raise CancelledError("Cancellation requested during job execution")
 
     return summary

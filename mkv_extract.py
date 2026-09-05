@@ -14,13 +14,14 @@ NOTE: Concurrent invocations on the same output tree are unsupported.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import logging
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed, wait
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
@@ -53,6 +54,7 @@ from mkv_proc import (
     CancelToken,
     acquire_semaphore,
     run_subprocess_cancellable,
+    submit_bounded,
 )
 from mkv_runner import (
     SCRIPT_DIR,
@@ -426,9 +428,17 @@ def _run_pipeline(
             logger.info("Processing %d file(s) (up to %d at a time)...", total_files, runtime.workers)
 
             results: dict[Path, list[str]] = {}
-            futures = {
-                pool.submit(
-                    process_file,
+            extract_tasks = (
+                (mkv_file, release)
+                for release in prepared
+                for mkv_file in release.mkv_files
+            )
+            completed_files = 0
+            cancelled = False
+
+            def _run_extract(task: tuple[ParsedFile, _ExtractRelease]) -> tuple[Path, list[str], bool]:
+                mkv_file, release = task
+                return process_file(
                     mkv_file,
                     inspection_results[mkv_file.path].video,
                     release.font_manager,
@@ -436,53 +446,69 @@ def _run_pipeline(
                     output_dir=release.output_dir,
                     root_input_dir=root_dir,
                     cancel_token=token,
-                ): mkv_file
-                for release in prepared
-                for mkv_file in release.mkv_files
-            }
+                )
 
-            for completed_files, future in enumerate(as_completed(futures), start=1):
-                mkv_file = futures[future]
-                mkv_path = mkv_file.path
-                progress = completed_files / total_files
+            try:
+                with submit_bounded(
+                    pool,
+                    _run_extract,
+                    extract_tasks,
+                    cancel_token=token,
+                ) as completions:
+                    for (mkv_file, _release), future in completions:
+                        mkv_path = mkv_file.path
+                        item_id = get_item_id(mkv_path, root_dir)
+                        completed_files += 1
+                        progress = completed_files / total_files
 
-                try:
-                    _, log, ok = future.result()
-                    results[mkv_path] = log
-                    if not ok:
-                        any_failures = True
+                        try:
+                            _, log, ok = future.result()
+                            results[mkv_path] = log
+                            if not ok:
+                                any_failures = True
 
-                    logger.info(
-                        "[%d/%d (%.0f%%)] %s: %s",
-                        completed_files,
-                        total_files,
-                        progress * 100,
-                        "Extracted" if ok else "Skipped",
-                        mkv_path.name,
-                    )
-
-                except CancelledError:
-                    for pending, pending_file in futures.items():
-                        if pending.cancel():
-                            emit_item_complete(
-                                get_item_id(pending_file.path, root_dir),
-                                pending_file.name,
-                                OUTCOME_CANCELLED,
+                            logger.info(
+                                "[%d/%d (%.0f%%)] %s: %s",
+                                completed_files,
+                                total_files,
+                                progress * 100,
+                                "Extracted" if ok else "Skipped",
+                                mkv_path.name,
                             )
-                    wait(futures)
-                    raise
-                except Exception as exc:
-                    any_failures = True
-                    logger.exception(
-                        "[%d/%d (%.0f%%)] CRASHED: %s",
-                        completed_files, total_files, progress * 100, mkv_path.name,
-                    )
-                    item_id = get_item_id(mkv_path, root_dir)
-                    emit_item_complete(item_id, mkv_path.name, OUTCOME_ERROR, error=str(exc))
-                    results[mkv_path] = [
-                        f"Processing: {mkv_path.name}",
-                        "  WARNING: Worker crashed. See traceback above.",
-                    ]
+
+                        except (CancelledError, concurrent.futures.CancelledError):
+                            cancelled = True
+                            token.request()
+                            emit_item_complete(item_id, mkv_file.name, OUTCOME_CANCELLED)
+                            logger.info(
+                                "[%d/%d (%.0f%%)] Cancelled: %s",
+                                completed_files,
+                                total_files,
+                                progress * 100,
+                                mkv_path.name,
+                            )
+                        except Exception as exc:
+                            any_failures = True
+                            logger.exception(
+                                "[%d/%d (%.0f%%)] CRASHED: %s",
+                                completed_files, total_files, progress * 100, mkv_path.name,
+                            )
+                            emit_item_complete(item_id, mkv_path.name, OUTCOME_ERROR, error=str(exc))
+                            results[mkv_path] = [
+                                f"Processing: {mkv_path.name}",
+                                "  WARNING: Worker crashed. See traceback above.",
+                            ]
+            except CancelledError:
+                cancelled = True
+            finally:
+                if cancelled or token.cancelled:
+                    for release in prepared:
+                        for mkv_file in release.mkv_files:
+                            tid = get_item_id(mkv_file.path, root_dir)
+                            emit_item_complete(tid, mkv_file.name, OUTCOME_CANCELLED)
+
+            if cancelled or token.cancelled:
+                raise CancelledError("Cancellation requested during file extraction")
 
             # Phase 4: grouped per-release logs, stable source order.
             for release in prepared:
