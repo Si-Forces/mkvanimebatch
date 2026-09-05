@@ -23,9 +23,10 @@ mkv_runner = importlib.import_module("mkv_runner")
 mkv_scan = importlib.import_module("mkv_scan")
 mkv_storage = importlib.import_module("mkv_storage")
 
-from mkv_assets import SubIndex, _make_sub_entry  # noqa: E402
+from mkv_assets import SubIndex, _make_sub_entry, prepare_release_directory  # noqa: E402
 from mkv_domain import EpisodeInfo  # noqa: E402
-from mkv_scan import InspectCacheEntry, PersistentInspectCache, _create_parsed_file  # noqa: E402
+from mkv_fonts import scan_fonts  # noqa: E402
+from mkv_scan import InspectCacheEntry, ParsedFile, PersistentInspectCache, _create_parsed_file  # noqa: E402
 
 posix_only = pytest.mark.skipif(
     sys.platform == "win32",
@@ -461,3 +462,260 @@ def test_sub_index_counts_use_cached_langs(tmp_path):
     index.add(_create_parsed_file(tmp_path / "Show - 03 [ENG].ass"))
     assert index.primary_count == 2
     assert index.fallback_count == 1
+
+
+# ─── Font caching across releases in batch ───────────────────────────────────
+def test_shared_primary_fonts_scanned_once_per_batch(tmp_path, monkeypatch):
+    root = tmp_path / "Anime"
+    fonts_dir = root / "fonts"
+    fonts_dir.mkdir(parents=True)
+    (fonts_dir / "font_a.ttf").write_bytes(b"a")
+    (fonts_dir / "font_b.otf").write_bytes(b"b")
+    (fonts_dir / "ignore.txt").write_bytes(b"txt")
+
+    s1 = root / "Season 01"
+    s2 = root / "Season 02"
+    s1.mkdir()
+    s2.mkdir()
+    v1 = _create_parsed_file(s1 / "Show - S01E01.mkv")
+    v2 = _create_parsed_file(s2 / "Show - S02E01.mkv")
+
+    font_cache = {}
+    fonts_dir_cache = {}
+
+    scanned = []
+    real_scandir = os.scandir
+
+    def spy_scandir(path):
+        scanned.append(Path(path).resolve())
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", spy_scandir)
+
+    rel1 = prepare_release_directory(s1, root, [v1], fonts_dir_cache=fonts_dir_cache, font_cache=font_cache)
+    rel2 = prepare_release_directory(s2, root, [v2], fonts_dir_cache=fonts_dir_cache, font_cache=font_cache)
+
+    assert rel1.resolver.fonts.count == 2
+    assert rel2.resolver.fonts.count == 2
+    assert rel1.resolver.fonts == rel2.resolver.fonts
+    assert scanned.count(fonts_dir.resolve()) == 1
+
+
+def test_shared_fallback_fonts_scanned_once_per_batch(tmp_path, monkeypatch):
+    root = tmp_path / "Anime"
+    s1 = root / "Season 01"
+    s2 = root / "Season 02"
+    s1.mkdir(parents=True)
+    s2.mkdir()
+    v1 = _create_parsed_file(s1 / "Show - S01E01.mkv")
+    v2 = _create_parsed_file(s2 / "Show - S02E01.mkv")
+
+    assets = tmp_path / "Assets"
+    assets_fonts = assets / "fonts"
+    assets_fonts.mkdir(parents=True)
+    (assets_fonts / "fallback.ttf").write_bytes(b"f")
+
+    font_cache = {}
+    fonts_dir_cache = {}
+
+    scanned = []
+    real_scandir = os.scandir
+
+    def spy_scandir(path):
+        scanned.append(Path(path).resolve())
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", spy_scandir)
+
+    rel1 = prepare_release_directory(s1, root, [v1], assets_dir=assets, fonts_dir_cache=fonts_dir_cache, font_cache=font_cache)
+    rel2 = prepare_release_directory(s2, root, [v2], assets_dir=assets, fonts_dir_cache=fonts_dir_cache, font_cache=font_cache)
+
+    assert rel1.resolver.fonts.count == 1
+    assert rel2.resolver.fonts.count == 1
+    assert rel1.resolver.fonts == rel2.resolver.fonts
+    assert scanned.count(assets_fonts.resolve()) == 1
+
+
+def test_empty_font_dir_result_reused_in_batch(tmp_path, monkeypatch):
+    root = tmp_path / "Anime"
+    fonts_dir = root / "fonts"
+    fonts_dir.mkdir(parents=True)
+    (fonts_dir / "readme.txt").write_bytes(b"no fonts here")
+
+    s1 = root / "Season 01"
+    s2 = root / "Season 02"
+    s1.mkdir()
+    s2.mkdir()
+    v1 = _create_parsed_file(s1 / "Show - S01E01.mkv")
+    v2 = _create_parsed_file(s2 / "Show - S02E01.mkv")
+
+    font_cache = {}
+    fonts_dir_cache = {}
+
+    scanned = []
+    real_scandir = os.scandir
+
+    def spy_scandir(path):
+        scanned.append(Path(path).resolve())
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", spy_scandir)
+
+    rel1 = prepare_release_directory(s1, root, [v1], fonts_dir_cache=fonts_dir_cache, font_cache=font_cache)
+    rel2 = prepare_release_directory(s2, root, [v2], fonts_dir_cache=fonts_dir_cache, font_cache=font_cache)
+
+    assert rel1.resolver.fonts.count == 0
+    assert rel2.resolver.fonts.count == 0
+    assert rel1.resolver.fonts.args == ()
+    assert scanned.count(fonts_dir.resolve()) == 1
+
+
+def test_font_cache_no_stale_reuse_next_batch(tmp_path):
+    root = tmp_path / "Anime"
+    fonts_dir = root / "fonts"
+    fonts_dir.mkdir(parents=True)
+    (fonts_dir / "font1.ttf").write_bytes(b"1")
+
+    s1 = root / "Season 01"
+    s1.mkdir()
+    v1 = _create_parsed_file(s1 / "Show - S01E01.mkv")
+
+    # Batch 1 preparation pass
+    batch1_cache = {}
+    rel1 = prepare_release_directory(s1, root, [v1], font_cache=batch1_cache)
+    assert rel1.resolver.fonts.count == 1
+
+    # External change between batches
+    (fonts_dir / "font2.otf").write_bytes(b"2")
+
+    # Batch 2 has a separate batch-local cache (no persistent global leak)
+    batch2_cache = {}
+    rel2 = prepare_release_directory(s1, root, [v1], font_cache=batch2_cache)
+    assert rel2.resolver.fonts.count == 2
+
+
+def test_scan_fonts_early_suffix_filtering(tmp_path):
+    fonts_dir = tmp_path / "fonts"
+    fonts_dir.mkdir()
+    (fonts_dir / "z_font.ttf").write_bytes(b"z")
+    (fonts_dir / "a_font.otf").write_bytes(b"a")
+    (fonts_dir / "not_a_font.txt").write_bytes(b"txt")
+    (fonts_dir / "sub.ass").write_bytes(b"sub")
+
+    info = scan_fonts(fonts_dir)
+    assert info.count == 2
+    attached_files = [Path(info.args[i]).name for i in range(3, len(info.args), 4)]
+    assert attached_files == ["a_font.otf", "z_font.ttf"]
+
+
+def test_font_scan_failure_is_not_cached(tmp_path, monkeypatch):
+    (tmp_path / "font.ttf").touch()
+    real_scandir = os.scandir
+    calls = 0
+
+    def scandir(path):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("temporary scan failure")
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", scandir)
+    cache = {}
+    assert scan_fonts(tmp_path, cache).count == 0
+    assert tmp_path not in cache
+    assert scan_fonts(tmp_path, cache).count == 1
+    assert scan_fonts(tmp_path, cache).count == 1
+    assert calls == 2
+
+
+def test_manifest_shares_font_cache_only_within_one_call(tmp_path, monkeypatch):
+    import mkv_manifest
+    from mkv_scan import InspectionResult
+
+    videos = []
+    for name in ("First", "Second"):
+        release = tmp_path / name
+        release.mkdir()
+        videos.append(_create_parsed_file(release / "Show - 01.mkv"))
+    fonts = tmp_path / "fonts"
+    fonts.mkdir()
+    (fonts / "first.ttf").touch()
+    monkeypatch.setattr(mkv_manifest, "scan_mkv_files", lambda _root: videos)
+    monkeypatch.setattr(mkv_manifest, "inspect_videos", lambda paths, **_kw: {
+        path: InspectionResult.success({"tracks": []}) for path in paths
+    })
+    real_scandir = os.scandir
+    scans = []
+
+    def scandir(path):
+        if Path(path) == fonts:
+            scans.append(path)
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", scandir)
+    assert len(mkv_manifest.generate_inspection_manifest(tmp_path)["items"]) == 2
+    assert len(scans) == 1
+    (fonts / "second.otf").touch()
+    assert len(mkv_manifest.generate_inspection_manifest(tmp_path)["items"]) == 2
+    assert len(scans) == 2
+
+
+# ─── SubIndex bucket duplicate & cross-bucket tests ──────────────────────────
+def test_sub_index_same_bucket_duplicate_and_cross_bucket(tmp_path):
+    index = SubIndex()
+    sub_path = tmp_path / "shared.ass"
+    sub_path.touch()
+
+    # Add for Episode 01
+    file_ep1 = ParsedFile(path=sub_path, name=sub_path.name, stem=sub_path.stem, parsed=EpisodeInfo("1", "E", "01"))
+    index.add(file_ep1)
+    assert index.indexed_count == 1
+
+    # Duplicate in same bucket ignored
+    index.add(file_ep1)
+    assert index.indexed_count == 1
+
+    # Same path with different season but same episode bucket ("E|01") is also ignored
+    file_ep1_s2 = ParsedFile(path=sub_path, name=sub_path.name, stem=sub_path.stem, parsed=EpisodeInfo("2", "E", "01"))
+    index.add(file_ep1_s2)
+    assert index.indexed_count == 1
+
+    # Same path for a DIFFERENT bucket ("E|02") is permitted
+    file_ep2 = ParsedFile(path=sub_path, name=sub_path.name, stem=sub_path.stem, parsed=EpisodeInfo("1", "E", "02"))
+    index.add(file_ep2)
+    assert index.indexed_count == 2
+
+    # Both lookups find the path
+    lookup_ep1 = index.lookup(EpisodeInfo("1", "E", "01"))
+    lookup_ep2 = index.lookup(EpisodeInfo("1", "E", "02"))
+    assert lookup_ep1 is not None and lookup_ep1[0] == sub_path
+    assert lookup_ep2 is not None and lookup_ep2[0] == sub_path
+
+    # Duplicate unparsed subtitle additions are ignored
+    unparsed_path = tmp_path / "unparsed_notes.ass"
+    unparsed_path.touch()
+    unparsed_file = ParsedFile(path=unparsed_path, name=unparsed_path.name, stem=unparsed_path.stem, parsed=None)
+    index.add(unparsed_file)
+    assert unparsed_path in index.all_subtitles
+    assert len(index.all_subtitles) == 2
+    index.add(unparsed_file)
+    assert len(index.all_subtitles) == 2
+
+
+def test_sub_index_insertion_order_tie_parity(tmp_path):
+    # Two candidates with identical score: same lang (und), same format (ass), same name length
+    file_a = ParsedFile(path=tmp_path / "sub_a.ass", name="sub_a.ass", stem="sub_a", parsed=EpisodeInfo("1", "E", "01"))
+    file_b = ParsedFile(path=tmp_path / "sub_b.ass", name="sub_b.ass", stem="sub_b", parsed=EpisodeInfo("1", "E", "01"))
+
+    # When file_a is added first, lookup returns file_a
+    idx1 = SubIndex()
+    idx1.add(file_a)
+    idx1.add(file_b)
+    assert idx1.lookup(EpisodeInfo("1", "E", "01")) == (file_a.path, "und")
+
+    # When file_b is added first, lookup returns file_b
+    idx2 = SubIndex()
+    idx2.add(file_b)
+    idx2.add(file_a)
+    assert idx2.lookup(EpisodeInfo("1", "E", "01")) == (file_b.path, "und")

@@ -735,6 +735,49 @@ def test_pipeline_runs_jobs_from_different_releases_concurrently(tmp_path, monke
     assert state["peak"] <= 4
 
 
+def test_pipeline_shares_font_scan_but_refreshes_next_run(tmp_path, monkeypatch):
+    import os
+    from dataclasses import replace
+
+    from mkv_runner import collect_release_dirs
+
+    for name in ("First", "Second"):
+        _make_release(tmp_path, name, "01")
+    fonts = tmp_path / "shared-fonts"
+    fonts.mkdir()
+    (fonts / "font.ttf").touch()
+    releases = collect_release_dirs(tmp_path)
+    real_scandir = os.scandir
+    scans = []
+
+    def scandir(path):
+        if Path(path) == fonts:
+            scans.append(path)
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", scandir)
+    monkeypatch.setattr(mkv_remux, "inspect_videos", _fake_inspect)
+    jobs = []
+
+    def execute(batch, *_args):
+        jobs.extend(batch)
+        return mkv_remux_job.ExecutionSummary()
+
+    monkeypatch.setattr(mkv_remux, "execute_jobs", execute)
+    config = replace(_pipeline_config(_pipeline_runtime(tmp_path, 2), tmp_path),
+                     fonts_override=fonts, keep_fonts=True)
+    assert mkv_remux._run_pipeline(releases, config)
+    assert len(scans) == 1
+    assert [job.fonts.count for job in jobs] == [1, 1]
+    assert jobs[0].fonts is jobs[1].fonts
+
+    (fonts / "another.otf").touch()
+    jobs.clear()
+    assert mkv_remux._run_pipeline(releases, config)
+    assert len(scans) == 2
+    assert [job.fonts.count for job in jobs] == [2, 2]
+
+
 def test_fonts_cleanup_deferred_and_skipped_for_failed_release(tmp_path, monkeypatch):
     """Fonts directories go only after the whole queue drains, and only for
     releases whose jobs all succeeded; a failed release keeps its fonts dir."""

@@ -53,6 +53,7 @@ from mkv_events import (
     set_events_enabled,
     setup_logging,
 )
+from mkv_fonts import FontInfo
 from mkv_manifest import generate_inspection_manifest
 from mkv_proc import CancelledError
 from mkv_remux_job import PlannedJob, RemuxExecutionContext, execute_jobs
@@ -342,6 +343,7 @@ def _run_pipeline(
 
     scan_cache: dict[Path, ScanResults] = {}
     fonts_dir_cache: dict[Path, Path] = {}
+    font_cache: dict[Path, FontInfo] = {}
 
     try:
         with ThreadPoolExecutor(max_workers=runtime.workers) as pool:
@@ -366,6 +368,7 @@ def _run_pipeline(
                     assets_dir=resolve_output_dir(mkv_dir, config.root_input_dir, config.assets_override, default_subdir=None) if config.assets_override else None,
                     scan_cache=scan_cache,
                     fonts_dir_cache=fonts_dir_cache,
+                    font_cache=font_cache,
                     subtitle_prompt=config.subtitle_prompt,
                 )
                 _log_fonts_dir(release)

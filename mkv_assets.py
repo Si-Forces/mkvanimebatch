@@ -87,6 +87,7 @@ def prepare_release_directory(
     assets_dir: Path | None = None,
     scan_cache: dict[Path, ScanResults] | None = None,
     fonts_dir_cache: dict[Path, Path] | None = None,
+    font_cache: dict[Path, FontInfo] | None = None,
     subtitle_prompt: Callable[[ParsedFile, list[Path]], Path | None] | None = None,
 ) -> PreparedRelease:
     """Resolve one Release Directory's fonts policy and Asset Resolver.
@@ -120,6 +121,7 @@ def prepare_release_directory(
         fonts_dir,
         assets_dir=assets_dir,
         scan_cache=scan_cache,
+        font_cache=font_cache,
         subtitle_prompt=subtitle_prompt,
     )
     return PreparedRelease(
@@ -199,6 +201,7 @@ class SubIndex:
     """Index of subtitle files supporting language scoring."""
     def __init__(self) -> None:
         self._index: dict[str, list[_SubEntry]] = {}
+        self._index_paths: dict[str, set[Path]] = {}
         self._unparsed: list[ParsedFile] = []
         self._unparsed_paths: set[Path] = set()
 
@@ -209,8 +212,10 @@ class SubIndex:
                 self._unparsed.append(sub_file)
             return
         key = _ep_key(sub_file.parsed)
-        if any(existing.file.path == sub_file.path for existing in self._index.get(key, ())):
+        paths = self._index_paths.setdefault(key, set())
+        if sub_file.path in paths:
             return
+        paths.add(sub_file.path)
         self._index.setdefault(key, []).append(_make_sub_entry(sub_file))
 
     def lookup(
@@ -450,6 +455,7 @@ class AssetResolver:
         assets_dir: Path | list[Path] | None = None,
         scan_cache: dict[Path, ScanResults] | None = None,
         subtitle_prompt: SubtitlePrompt | None = None,
+        font_cache: dict[Path, FontInfo] | None = None,
     ) -> AssetResolver:
         """
         Discover and index fonts, subtitles, chapters, and covers across search directories.
@@ -458,15 +464,14 @@ class AssetResolver:
         parent directory (`assets_dir.parent`, if distinct and existing) are added to the
         fallback directory list to resolve shared ancestor assets (e.g. root fonts or covers).
         """
+        fonts = scan_fonts(fonts_dir, font_cache=font_cache)
         if fonts_dir.is_dir():
             logger.info("Scanning detected font directory: '%s'...", fonts_dir.name)
-            fonts = scan_fonts(fonts_dir)
             logger.info("Fonts found: %d", fonts.count)
             if fonts.count == 0:
                 logger.info("  (fonts directory is empty — will use source fonts if available)")
         else:
             logger.info("No font directory found — will use source fonts if available.")
-            fonts = FontInfo(args=(), count=0)
 
         sub_index = SubIndex()
         chap_index = ChapterIndex()
@@ -500,7 +505,7 @@ class AssetResolver:
 
                     if fonts.count == 0:
                         fallback_fonts_dir = ad / "fonts" if (ad / "fonts").is_dir() else ad
-                        fallback_fonts = scan_fonts(fallback_fonts_dir)
+                        fallback_fonts = scan_fonts(fallback_fonts_dir, font_cache=font_cache)
                         if fallback_fonts.count > 0:
                             fonts = fallback_fonts
                             logger.info("Detected %d external font(s) in fallback assets directory: %s", fonts.count, fallback_fonts_dir)
