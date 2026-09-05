@@ -11,6 +11,7 @@ pub use crate::telemetry::{get_system_telemetry, TelemetryState};
 pub use crate::window::{
     is_maximized, minimize_window, set_window_theme, start_drag, start_resize, toggle_maximize,
 };
+use serde::Deserialize;
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::sync::atomic::Ordering;
@@ -23,12 +24,51 @@ use std::os::windows::process::CommandExt;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InspectOptions {
+    workers: Option<i64>,
+    io_jobs: Option<i64>,
+    no_cache: Option<bool>,
+}
+
+fn inspect_options_to_args(options: Option<&InspectOptions>) -> Result<Vec<String>, String> {
+    let Some(opts) = options else {
+        return Ok(Vec::new());
+    };
+    let mut args = Vec::new();
+    if let Some(workers) = opts.workers {
+        if !(1..=64).contains(&workers) {
+            return Err(format!(
+                "Invalid workers '{workers}': must be an integer between 1 and 64"
+            ));
+        }
+        args.push("--workers".to_string());
+        args.push(workers.to_string());
+    }
+    if let Some(io_jobs) = opts.io_jobs {
+        if !(0..=64).contains(&io_jobs) {
+            return Err(format!(
+                "Invalid io_jobs '{io_jobs}': must be an integer between 0 and 64"
+            ));
+        }
+        args.push("--io-jobs".to_string());
+        args.push(io_jobs.to_string());
+    }
+    if opts.no_cache.unwrap_or(false) {
+        args.push("--no-cache".to_string());
+    }
+    Ok(args)
+}
+
 #[tauri::command]
 pub async fn inspect_directory(
     app: AppHandle,
     state: State<'_, ScanState>,
     path: String,
+    options: Option<InspectOptions>,
 ) -> Result<InspectionManifest, String> {
+    let extra_args = inspect_options_to_args(options.as_ref())?;
     let start_lock = state.start_lock.lock().map_err(|e| e.to_string())?;
     state.ensure_accepting_starts()?;
     let dir = std::fs::canonicalize(&path).map_err(|e| format!("Invalid directory path: {}", e))?;
@@ -42,6 +82,7 @@ pub async fn inspect_directory(
         .map_err(|_| "Sidecar 'mkv-remux' not found.".to_string())?;
     let mut command = Command::new(binary);
     command.args(["--plan", "--input-dir", &path]);
+    command.args(&extra_args);
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
@@ -305,4 +346,108 @@ pub fn pick_folder() -> Option<String> {
     rfd::FileDialog::new()
         .pick_folder()
         .map(|p| p.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_inspect_options_omitted_and_defaults() {
+        assert!(inspect_options_to_args(None)
+            .expect("must succeed")
+            .is_empty());
+        let default_opts = InspectOptions::default();
+        assert!(inspect_options_to_args(Some(&default_opts))
+            .expect("must succeed")
+            .is_empty());
+    }
+
+    #[test]
+    fn test_inspect_options_zero_and_nocache_mapping() {
+        let opts = InspectOptions {
+            workers: Some(8),
+            io_jobs: Some(0),
+            no_cache: Some(false),
+        };
+        assert_eq!(
+            inspect_options_to_args(Some(&opts)).expect("must succeed"),
+            vec!["--workers", "8", "--io-jobs", "0"]
+        );
+
+        let opts_nc = InspectOptions {
+            workers: Some(4),
+            io_jobs: Some(2),
+            no_cache: Some(true),
+        };
+        assert_eq!(
+            inspect_options_to_args(Some(&opts_nc)).expect("must succeed"),
+            vec!["--workers", "4", "--io-jobs", "2", "--no-cache"]
+        );
+    }
+
+    #[test]
+    fn test_inspect_options_boundaries() {
+        for (w, expected) in [
+            (1, Some(vec!["--workers", "1"])),
+            (64, Some(vec!["--workers", "64"])),
+            (0, None),
+            (-1, None),
+            (65, None),
+        ] {
+            let opts = InspectOptions {
+                workers: Some(w),
+                ..Default::default()
+            };
+            let res = inspect_options_to_args(Some(&opts));
+            if let Some(exp) = expected {
+                assert_eq!(res.unwrap(), exp);
+            } else {
+                assert!(res.is_err());
+            }
+        }
+
+        for (j, expected) in [
+            (0, Some(vec!["--io-jobs", "0"])),
+            (64, Some(vec!["--io-jobs", "64"])),
+            (-1, None),
+            (65, None),
+        ] {
+            let opts = InspectOptions {
+                io_jobs: Some(j),
+                ..Default::default()
+            };
+            let res = inspect_options_to_args(Some(&opts));
+            if let Some(exp) = expected {
+                assert_eq!(res.unwrap(), exp);
+            } else {
+                assert!(res.is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn test_inspect_options_deserialization() {
+        let opts: InspectOptions =
+            serde_json::from_str(r#"{"workers": 6, "ioJobs": 0, "noCache": true}"#).unwrap();
+        assert_eq!(opts.workers, Some(6));
+        assert_eq!(opts.io_jobs, Some(0));
+        assert_eq!(opts.no_cache, Some(true));
+
+        for invalid in [
+            r#"{"workers": 4.5}"#,
+            r#"{"workers": "4"}"#,
+            r#"{"workers": true}"#,
+            r#"{"ioJobs": 2.5}"#,
+            r#"{"ioJobs": "2"}"#,
+            r#"{"ioJobs": false}"#,
+            r#"{"noCache": 1}"#,
+            r#"{"noCache": "true"}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<InspectOptions>(invalid).is_err(),
+                "Expected deserialization error for: {invalid}"
+            );
+        }
+    }
 }

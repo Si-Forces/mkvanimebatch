@@ -6,9 +6,9 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TypedDict
 
-from mkv_assets import AssetResolver, prepare_release_directory
+from mkv_assets import SubIndex
+from mkv_domain import ancestor_dirs
 from mkv_events import get_item_id
-from mkv_fonts import FontInfo
 from mkv_proc import CancelToken
 from mkv_scan import (
     InspectedVideo,
@@ -18,6 +18,7 @@ from mkv_scan import (
     ScanResults,
     TrackProperties,
     inspect_videos,
+    scan_assets,
     scan_mkv_files,
 )
 from mkv_storage import resolve_io_jobs
@@ -210,6 +211,9 @@ def generate_inspection_manifest(
     input_dir: Path,
     persistent_cache: PersistentInspectCache | None = None,
     cancel_token: CancelToken | None = None,
+    *,
+    workers: int | None = None,
+    io_jobs: int | None = None,
 ) -> InspectionManifest:
     all_mkvs = scan_mkv_files(input_dir)
     if not all_mkvs:
@@ -217,9 +221,11 @@ def generate_inspection_manifest(
 
     # Pool stays wide so cache validation runs unrestricted; actual mkvmerge
     # probes are throttled to the storage-appropriate concurrency.
-    probe_limit = resolve_io_jobs(None, input_dir)
+    worker_limit = workers if workers is not None else 16
+    pool_workers = min(len(all_mkvs), worker_limit)
+    probe_limit = resolve_io_jobs(io_jobs, input_dir)
     probe_semaphore = threading.BoundedSemaphore(probe_limit) if probe_limit > 0 else None
-    with ThreadPoolExecutor(max_workers=min(len(all_mkvs), 16)) as pool:
+    with ThreadPoolExecutor(max_workers=pool_workers) as pool:
         inspection_results = inspect_videos(
             [m.path for m in all_mkvs],
             pool=pool,
@@ -233,25 +239,19 @@ def generate_inspection_manifest(
         videos_by_dir.setdefault(video.path.parent, []).append(video)
 
     scan_cache: dict[Path, ScanResults] = {}
-    fonts_dir_cache: dict[Path, Path] = {}
-    font_cache: dict[Path, FontInfo] = {}
-    resolver_by_dir: dict[Path, AssetResolver] = {}
-    for mkv_dir in sorted(videos_by_dir):
-        resolver_by_dir[mkv_dir] = prepare_release_directory(
-            mkv_dir,
-            input_dir,
-            videos_by_dir[mkv_dir],
-            scan_cache=scan_cache,
-            fonts_dir_cache=fonts_dir_cache,
-            font_cache=font_cache,
-        ).resolver
-
     release_by_dir: dict[Path, str] = {}
     subtitle_candidates: dict[str, list[str]] = {}
-    for mkv_dir, resolver in resolver_by_dir.items():
+    for mkv_dir in sorted(videos_by_dir):
         release = get_item_id(mkv_dir, input_dir)
         release_by_dir[mkv_dir] = release
-        candidates = [get_item_id(path, input_dir) for path in resolver.sub_index.all_subtitles]
+        # Reuse candidate ordering without discovering fonts or validating chapters.
+        sub_index = SubIndex()
+        for directory in reversed(ancestor_dirs(mkv_dir, input_dir)):
+            if cancel_token is not None:
+                cancel_token.check()
+            for subtitle in scan_assets(directory, scan_cache).subs:
+                sub_index.add(subtitle)
+        candidates = [get_item_id(path, input_dir) for path in sub_index.all_subtitles]
         if candidates:
             subtitle_candidates[release] = candidates
 
