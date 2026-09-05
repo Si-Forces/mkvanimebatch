@@ -5,6 +5,7 @@ attachment/chapter/cover classification, and release-directory scanning.
 """
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
 import os
@@ -17,7 +18,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Mapping
-from concurrent.futures import ThreadPoolExecutor, as_completed, wait
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -35,7 +36,13 @@ from mkv_domain import (
     parse_episode,
 )
 from mkv_fonts import FONT_DIR_NAMES
-from mkv_proc import CancelledError, CancelToken, acquire_semaphore, run_subprocess_cancellable
+from mkv_proc import (
+    CancelledError,
+    CancelToken,
+    acquire_semaphore,
+    run_subprocess_cancellable,
+    submit_bounded,
+)
 
 _IGNORED_SCAN_DIR_NAMES = frozenset({"output", *FONT_DIR_NAMES})
 
@@ -498,44 +505,55 @@ def inspect_videos(
     """
     results: dict[Path, InspectionResult] = {}
 
-    if videos:
-        logger.info("Pre-inspecting %d video(s)...", len(videos))
+    if not videos:
+        return results
+
+    logger.info("Pre-inspecting %d video(s)...", len(videos))
+
+    active_token = cancel_token or CancelToken()
 
     def _inspect(video: Path) -> tuple[Path, MkvmergeMetadata, bool]:
-        if cancel_token and cancel_token.cancelled:
+        if active_token.cancelled:
             raise CancelledError("Cancellation requested before probe")
         if persistent_cache and not force_refresh:
             cached_data = persistent_cache.get(video)
             if cached_data is not None:
                 return video, cached_data, True
-        with acquire_semaphore(probe_semaphore, cancel_token):
-            return video, run_mkvmerge_json(video, cancel_token=cancel_token), False
+        with acquire_semaphore(probe_semaphore, active_token):
+            return video, run_mkvmerge_json(video, cancel_token=active_token), False
 
     cached_count = 0
-    futures = {pool.submit(_inspect, video): video for video in videos}
+    cancelled = False
+
     try:
-        for future in as_completed(futures):
-            video = futures[future]
-            try:
-                _, data, from_cache = future.result()
-            except CancelledError:
-                raise
-            except InspectionError as exc:
-                results[video] = InspectionResult.failure(str(exc))
-            except Exception as exc:
-                logger.warning("Inspection failed for %s: %s", video.name, exc)
-                results[video] = InspectionResult.failure(f"Inspection failed: {exc}")
-            else:
-                results[video] = InspectionResult.success(data)
-                if from_cache:
-                    cached_count += 1
-                elif persistent_cache:
-                    persistent_cache.put(video, data)
+        with submit_bounded(
+            pool,
+            _inspect,
+            videos,
+            cancel_token=active_token,
+        ) as completions:
+            for video, future in completions:
+                try:
+                    _, data, from_cache = future.result()
+                except (CancelledError, concurrent.futures.CancelledError):
+                    cancelled = True
+                    active_token.request()
+                except InspectionError as exc:
+                    results[video] = InspectionResult.failure(str(exc))
+                except Exception as exc:
+                    logger.warning("Inspection failed for %s: %s", video.name, exc)
+                    results[video] = InspectionResult.failure(f"Inspection failed: {exc}")
+                else:
+                    results[video] = InspectionResult.success(data)
+                    if from_cache:
+                        cached_count += 1
+                    elif persistent_cache:
+                        persistent_cache.put(video, data)
     except CancelledError:
-        for future in futures:
-            future.cancel()
-        wait(futures)
-        raise
+        cancelled = True
+
+    if cancelled or active_token.cancelled:
+        raise CancelledError("Cancellation requested during video inspection")
 
     succeeded = sum(1 for result in results.values() if result.video is not None)
     if cached_count:
@@ -543,6 +561,7 @@ def inspect_videos(
     else:
         logger.info("Inspection complete: %d/%d succeeded.", succeeded, len(videos))
     return results
+
 
 @dataclass(frozen=True)
 class ParsedFile:

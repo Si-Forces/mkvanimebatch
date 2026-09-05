@@ -23,12 +23,20 @@ def main() -> None:
     parser.add_argument("--subs", type=int, default=5000)
     parser.add_argument("--chapters", type=int, default=100)
     parser.add_argument("--runs", type=int, default=5)
+    parser.add_argument(
+        "--bench-scheduling",
+        action="store_true",
+        help="Measure inspection scheduling at 1k/10k items with media mocked; compare using --source-tree",
+    )
     args = parser.parse_args()
     if args.runs < 1 or min(args.releases, args.fonts, args.non_fonts, args.subs, args.chapters) < 0:
         parser.error("runs must be positive; workload sizes must be nonnegative")
     if not all((args.source_tree / name).is_file() for name in
                ("mkv_assets.py", "mkv_domain.py", "mkv_scan.py", "mkv_fonts.py", "mkv_manifest.py")):
         parser.error("source-tree must contain the MKV Python source modules")
+    if args.bench_scheduling:
+        run_scheduling_benchmark(args.source_tree, runs=args.runs)
+        return
 
     sys.path.insert(0, str(args.source_tree.resolve()))
     import mkv_scan
@@ -98,6 +106,43 @@ def main() -> None:
     for name, times in samples.items():
         print(f"{name}: median {statistics.median(times) * 1000:.2f} ms "
               f"(min {min(times) * 1000:.2f}, max {max(times) * 1000:.2f})")
+
+
+def run_scheduling_benchmark(source_tree: Path, runs: int = 3, workers: int = 4) -> None:
+    import tracemalloc
+    from concurrent.futures import ThreadPoolExecutor
+
+    sys.path.insert(0, str(source_tree.resolve()))
+    import mkv_scan
+    from mkv_scan import inspect_videos
+
+    # Media tools are mocked so no external subprocesses or files are required
+    mkv_scan.run_mkvmerge_json = lambda *a, **k: {"tracks": []}
+
+    print(f"SYNTHETIC task scheduling benchmark: {source_tree.resolve()}")
+    print(f"workers={workers}, runs={runs}; media mocked, timing excludes tracemalloc overhead")
+
+    for count in (1000, 10000):
+        videos = [Path(f"/mock/ep_{i:05d}.mkv") for i in range(count)]
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            inspect_videos(videos[:16], pool, force_refresh=True)
+            times: list[float] = []
+            peaks: list[int] = []
+            for _ in range(runs):
+                t0 = time.perf_counter()
+                result = inspect_videos(videos, pool, force_refresh=True)
+                times.append(time.perf_counter() - t0)
+                assert len(result) == count and all(value.video is not None for value in result.values())
+                del result
+                tracemalloc.start()
+                result = inspect_videos(videos, pool, force_refresh=True)
+                _, peak = tracemalloc.get_traced_memory()
+                tracemalloc.stop()
+                peaks.append(peak)
+                del result
+            print(f"{count} items: median {statistics.median(times) * 1000:.2f} ms; "
+                  f"median peak Python allocations {statistics.median(peaks) / 1024**2:.2f} MiB")
+    print("Not OS RSS or media throughput. Result maps remain O(N).")
 
 
 if __name__ == "__main__":

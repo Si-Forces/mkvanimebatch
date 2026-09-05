@@ -403,3 +403,100 @@ def test_extract_pipeline_visits_releases_in_caller_order(tmp_path, monkeypatch)
 
     assert mkv_extract._run_pipeline({dir_b: [parsed_b], dir_a: [parsed_a]}, config) is True
     assert emitted == ["B.mkv", "A.mkv"]  # caller-supplied ordering is preserved
+
+
+def test_extract_pipeline_cancellation_crash_bounded_drain(tmp_path, monkeypatch):
+    """Regression test: crash and cancellation stop refill, drain running tasks, and emit all terminal events."""
+    import mkv_events
+    from mkv_events import set_events_enabled
+    from mkv_proc import CancelledError
+
+    set_events_enabled(True)
+    input_dir = tmp_path / "in"
+    total_files = 8
+    grouped = {}
+    for i in range(total_files):
+        d, p = _release(input_dir, f"Rel_{i:02d}", f"Show_{i:02d}.mkv")
+        grouped[d] = [p]
+
+    _fake_inspect_no_assets(monkeypatch)
+
+    emitted_events = []
+    monkeypatch.setattr(
+        mkv_events, "emit_event",
+        lambda ev, **pl: emitted_events.append({"type": ev, **pl}),
+    )
+
+    orig_executor = mkv_extract.ThreadPoolExecutor
+    submissions = {"count": 0, "max_inflight": 0, "active": 0}
+    lock = threading.Lock()
+
+    class InstrumentedExecutor(orig_executor):
+        def submit(self, fn, *args, **kwargs):
+            with lock:
+                submissions["count"] += 1
+                submissions["active"] += 1
+                if submissions["active"] > submissions["max_inflight"]:
+                    submissions["max_inflight"] = submissions["active"]
+            fut = super().submit(fn, *args, **kwargs)
+            fut.add_done_callback(lambda _: self._on_done())
+            return fut
+
+        def _on_done(self):
+            with lock:
+                submissions["active"] -= 1
+
+    monkeypatch.setattr(mkv_extract, "ThreadPoolExecutor", InstrumentedExecutor)
+
+    runtime = _pipeline_runtime(tmp_path, workers=2)
+    config = mkv_extract.ExtractRunConfig(runtime=runtime, root_input_dir=input_dir)
+    token = runtime.cancel_token
+    running = 0
+    drained = 0
+    both_running = threading.Barrier(2)
+    cleanup_calls = []
+    original_cleanup = mkv_extract.FontManager.cleanup_staging
+
+    def cleanup(manager):
+        assert running == 0 and drained >= 2
+        cleanup_calls.append(manager)
+        original_cleanup(manager)
+
+    monkeypatch.setattr(mkv_extract.FontManager, "cleanup_staging", cleanup)
+
+    def fake_process_file(mkv_file, inspected, font_manager, **_kwargs):
+        nonlocal running, drained
+        with lock:
+            running += 1
+        try:
+            if mkv_file.name == "Show_00.mkv":
+                both_running.wait(timeout=5)
+                raise RuntimeError("Worker exploded")
+            if mkv_file.name == "Show_01.mkv":
+                token.request()
+                both_running.wait(timeout=5)
+                raise CancelledError("Cancellation triggered")
+            return mkv_file.path, [f"Processing: {mkv_file.name}"], True
+        finally:
+            with lock:
+                running -= 1
+                drained += 1
+
+    monkeypatch.setattr(mkv_extract, "process_file", fake_process_file)
+
+    with pytest.raises(CancelledError):
+        mkv_extract._run_pipeline(grouped, config)
+
+    assert submissions["max_inflight"] <= 4  # Window bound never exceeded (2 * workers)
+    assert submissions["count"] < total_files  # Refill stopped upon cancellation
+    assert running == 0  # All running tasks drained before pipeline exit
+    assert drained >= 2
+    assert cleanup_calls
+
+    complete_events = [e for e in emitted_events if e["type"] == "item_complete"]
+    assert len(complete_events) == total_files
+    statuses = {e.get("file"): e.get("status") for e in complete_events}
+    assert statuses.get("Show_00.mkv") == "error"
+    assert statuses.get("Show_01.mkv") == "cancelled"
+    for i in range(2, total_files):
+        assert statuses.get(f"Show_{i:02d}.mkv") == "cancelled"
