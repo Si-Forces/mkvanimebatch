@@ -21,25 +21,28 @@ def main() -> None:
     parser.add_argument("--fonts", type=int, default=100)
     parser.add_argument("--non-fonts", type=int, default=50)
     parser.add_argument("--subs", type=int, default=5000)
+    parser.add_argument("--chapters", type=int, default=100)
     parser.add_argument("--runs", type=int, default=5)
     args = parser.parse_args()
-    if args.runs < 1 or min(args.releases, args.fonts, args.non_fonts, args.subs) < 0:
+    if args.runs < 1 or min(args.releases, args.fonts, args.non_fonts, args.subs, args.chapters) < 0:
         parser.error("runs must be positive; workload sizes must be nonnegative")
     if not all((args.source_tree / name).is_file() for name in
-               ("mkv_assets.py", "mkv_domain.py", "mkv_scan.py", "mkv_fonts.py")):
+               ("mkv_assets.py", "mkv_domain.py", "mkv_scan.py", "mkv_fonts.py", "mkv_manifest.py")):
         parser.error("source-tree must contain the MKV Python source modules")
 
     sys.path.insert(0, str(args.source_tree.resolve()))
+    import mkv_scan
     from mkv_assets import SubIndex, prepare_release_directory
     from mkv_domain import EpisodeInfo
-    from mkv_scan import ParsedFile
+    from mkv_manifest import generate_inspection_manifest
+    from mkv_scan import ParsedFile, PersistentInspectCache
 
     # The baseline API predates the optional cache; all other inputs are identical.
     supports_cache = "font_cache" in inspect.signature(prepare_release_directory).parameters
     print(f"SYNTHETIC preparation only: {args.source_tree.resolve()}")
     print(f"releases={args.releases}, fonts={args.fonts}, non-fonts={args.non_fonts}, "
-          f"subtitles in one bucket={args.subs}, runs={args.runs}")
-    samples: dict[str, list[float]] = {"shared fonts": [], "subtitle insertion": []}
+          f"subtitles in one bucket={args.subs}, shared chapter XMLs={args.chapters}, runs={args.runs}")
+    samples: dict[str, list[float]] = {"shared fonts": [], "subtitle insertion": [], "warm manifest": []}
     with tempfile.TemporaryDirectory(prefix="mkv_bench_") as temp:
         root = Path(temp)
         fonts = root / "fonts"
@@ -70,6 +73,27 @@ def main() -> None:
                 index.add(item)
             samples["subtitle insertion"].append(time.perf_counter() - start)
             assert index.indexed_count == args.subs
+
+        # Warm probe cache isolates directory loading from subprocess/media costs.
+        cache = PersistentInspectCache(cache_file=root / "inspect_cache.json")
+        for release in releases:
+            video = release / "Show - 01.mkv"
+            video.touch()
+            (release / "Show - 01.ass").touch()
+            cache.put(video, {"tracks": [], "attachments": []})
+        cache.save()
+        for i in range(args.chapters):
+            (root / f"chapter{i}.xml").write_text("<Chapters></Chapters>", encoding="utf-8")
+        def unexpected_probe(*_args: Any, **_kwargs: Any) -> Any:
+            raise AssertionError("Synthetic warm manifest must not invoke media tools")
+        mkv_scan.run_mkvmerge_json = unexpected_probe
+        for _ in range(args.runs):
+            start = time.perf_counter()
+            manifest = generate_inspection_manifest(root, persistent_cache=cache)
+            samples["warm manifest"].append(time.perf_counter() - start)
+            assert len(manifest["items"]) == args.releases
+            assert len(manifest["subtitle_candidates"]) == args.releases
+            assert all("inspection_error" not in item for item in manifest["items"])
 
     for name, times in samples.items():
         print(f"{name}: median {statistics.median(times) * 1000:.2f} ms "
