@@ -396,7 +396,13 @@ def _run_pipeline(
 
                     videos_to_inspect.append(v.path)
 
-            inspection_results = inspect_videos(videos_to_inspect, pool, persistent_cache=runtime.persistent_cache, cancel_token=token, probe_semaphore=runtime.io_semaphore) if videos_to_inspect else {}
+            inspection_results = inspect_videos(
+                videos_to_inspect,
+                pool,
+                persistent_cache=runtime.persistent_cache,
+                cancel_token=token,
+                probe_semaphore=runtime.io_semaphore,
+            ) if videos_to_inspect else {}
             runtime.persistent_cache.save()
 
             # Phase 3: plan every release against the complete inspection map.

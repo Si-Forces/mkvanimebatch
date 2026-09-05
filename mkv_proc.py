@@ -8,10 +8,18 @@ import hashlib
 import subprocess
 import threading
 import time
+import weakref
+from collections.abc import Callable, Generator, Iterable, Iterator
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from pathlib import Path
+from queue import Empty, SimpleQueue
+from typing import TypeVar
 
 SUBPROCESS_TIMEOUT = 3600
+
+T = TypeVar("T")
+R = TypeVar("R")
 
 class CancelledError(BaseException):
     """Raised inside workers once cooperative cancellation has been requested.
@@ -166,3 +174,74 @@ def hash_file(filepath: Path) -> str:
         while chunk := f.read(65536):
             hasher.update(chunk)
         return hasher.hexdigest()
+
+
+@contextmanager
+def submit_bounded(
+    pool: ThreadPoolExecutor,
+    fn: Callable[[T], R],
+    items: Iterable[T],
+    *,
+    max_pending: int | None = None,
+    cancel_token: CancelToken | None = None,
+) -> Iterator[Iterator[tuple[T, Future[R]]]]:
+    """Bound submission and yield completions; context exit cancels/drains remaining work.
+
+    Cancellation stops refill but yields every submitted outcome before raising.
+    Callers handle item outcomes, including items never submitted, after context exit.
+    """
+    # ThreadPoolExecutor has no public worker-count accessor; keep this dependency here.
+    limit = 2 * pool._max_workers if max_pending is None else max_pending
+    if limit < 1:
+        raise ValueError("max_pending must be positive")
+    pending: dict[Future[R], T] = {}
+    ready: SimpleQueue[Future[R]] = SimpleQueue()
+    ready_ref = weakref.ref(ready)
+
+    def completed(future: Future[R]) -> None:
+        queue = ready_ref()
+        if queue is not None:
+            queue.put(future)
+
+    def completions() -> Generator[tuple[T, Future[R]], None, None]:
+        iterator = iter(items)
+        exhausted = False
+        while True:
+            while not exhausted and len(pending) < limit and not (cancel_token and cancel_token.cancelled):
+                try:
+                    item = next(iterator)
+                except StopIteration:
+                    exhausted = True
+                    break
+                if cancel_token and cancel_token.cancelled:
+                    break
+                future = pool.submit(fn, item)
+                pending[future] = item
+                # Callbacks also notify for plain CANCELLED futures, unlike wait().
+                future.add_done_callback(completed)
+                del item, future
+            if cancel_token and cancel_token.cancelled:
+                for future in pending:
+                    future.cancel()
+            if not pending:
+                if cancel_token:
+                    cancel_token.check()
+                return
+            try:
+                future = ready.get(timeout=0.25)
+            except Empty:
+                continue
+            yield pending.pop(future), future
+            del future
+
+    iterator = completions()
+    try:
+        yield iterator
+    finally:
+        iterator.close()
+        # Exclude successfully cancelled futures: wait() may otherwise await the
+        # executor acknowledging a cancellation behind unrelated running work.
+        running = [future for future in pending if not future.cancel()]
+        if running:
+            wait(running)
+        pending.clear()
