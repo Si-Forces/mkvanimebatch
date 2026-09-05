@@ -8,6 +8,7 @@ from typing import TypedDict
 
 from mkv_assets import AssetResolver, prepare_release_directory
 from mkv_events import get_item_id
+from mkv_fonts import FontInfo
 from mkv_proc import CancelToken
 from mkv_scan import (
     InspectedVideo,
@@ -233,6 +234,7 @@ def generate_inspection_manifest(
 
     scan_cache: dict[Path, ScanResults] = {}
     fonts_dir_cache: dict[Path, Path] = {}
+    font_cache: dict[Path, FontInfo] = {}
     resolver_by_dir: dict[Path, AssetResolver] = {}
     for mkv_dir in sorted(videos_by_dir):
         resolver_by_dir[mkv_dir] = prepare_release_directory(
@@ -241,6 +243,7 @@ def generate_inspection_manifest(
             videos_by_dir[mkv_dir],
             scan_cache=scan_cache,
             fonts_dir_cache=fonts_dir_cache,
+            font_cache=font_cache,
         ).resolver
 
     release_by_dir: dict[Path, str] = {}
