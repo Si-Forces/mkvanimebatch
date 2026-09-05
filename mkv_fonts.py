@@ -28,30 +28,38 @@ class FontInfo:
     count: int
 
 
-def scan_fonts(fonts_dir: Path) -> FontInfo:
-    """Scan a fonts directory and build mkvmerge attachment arguments."""
+def scan_fonts(fonts_dir: Path, font_cache: dict[Path, FontInfo] | None = None) -> FontInfo:
+    """Build attachment arguments; an optional cache lasts one preparation pass."""
+    if font_cache is not None and fonts_dir in font_cache:
+        return font_cache[fonts_dir]
+
     font_args: list[str] = []
     count = 0
     if not fonts_dir.is_dir():
-        return FontInfo(args=(), count=0)
+        info = FontInfo(args=(), count=0)
+        if font_cache is not None:
+            font_cache[fonts_dir] = info
+        return info
 
     try:
-        entries = []
+        entries: list[tuple[os.DirEntry[str], str]] = []
         with os.scandir(str(fonts_dir)) as it:
             for entry in it:
                 if entry.is_file():
-                    entries.append(entry)
-        entries.sort(key=lambda e: natural_sort_key(e.name))
-        for entry in entries:
-            suffix = Path(entry.name).suffix.lower()
-            mime = FONT_MIME.get(suffix)
-            if not mime:
-                continue
+                    mime = FONT_MIME.get(Path(entry.name).suffix.lower())
+                    if mime:
+                        entries.append((entry, mime))
+        entries.sort(key=lambda item: natural_sort_key(item[0].name))
+        for entry, mime in entries:
             font_args += ["--attachment-mime-type", mime, "--attach-file", entry.path]
             count += 1
     except OSError:
-        pass
-    return FontInfo(args=tuple(font_args), count=count)
+        # A failed scan is not a successful empty snapshot; let the next release retry.
+        return FontInfo(args=tuple(font_args), count=count)
+    info = FontInfo(args=tuple(font_args), count=count)
+    if font_cache is not None:
+        font_cache[fonts_dir] = info
+    return info
 
 def find_fonts_dir(input_dir: Path, override: Path | None = None, fonts_dir_cache: dict[Path, Path] | None = None) -> Path:
     """
