@@ -69,11 +69,13 @@ fn test_inspected_video_properties() {
             MkvTrack {
                 id: Some(0),
                 track_type: "video".to_string(),
+                codec: None,
                 properties: TrackProperties::default(),
             },
             MkvTrack {
                 id: Some(1),
                 track_type: "audio".to_string(),
+                codec: None,
                 properties: TrackProperties {
                     language: Some("jpn".to_string()),
                     track_name: Some("Main Audio".to_string()),
@@ -85,6 +87,7 @@ fn test_inspected_video_properties() {
             MkvTrack {
                 id: Some(2),
                 track_type: "subtitles".to_string(),
+                codec: None,
                 properties: TrackProperties {
                     language: Some("ind".to_string()),
                     track_name: Some("Full Dialogue".to_string()),
@@ -159,6 +162,7 @@ fn test_persistent_inspect_cache() {
         tracks: vec![MkvTrack {
             id: Some(0),
             track_type: "video".to_string(),
+            codec: None,
             properties: TrackProperties::default(),
         }],
         attachments: vec![],

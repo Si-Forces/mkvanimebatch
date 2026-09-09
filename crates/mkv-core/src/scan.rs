@@ -50,6 +50,25 @@ pub struct MkvmergeMetadata {
     pub chapters: Vec<MkvChapter>,
 }
 
+/// Probes MKV container headers, tracks, attachments, and chapters using `mkvmerge -J`.
+pub fn probe_video(path: &Path) -> Result<MkvmergeMetadata, String> {
+    let output = std::process::Command::new("mkvmerge")
+        .args(["-J", &path.to_string_lossy()])
+        .output()
+        .map_err(|e| format!("Failed to execute mkvmerge: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(format!(
+            "mkvmerge exit code {:?}: {stderr}",
+            output.status.code()
+        ));
+    }
+
+    serde_json::from_slice(&output.stdout)
+        .map_err(|e| format!("Failed to parse mkvmerge JSON: {e}"))
+}
+
 // ─── ATTACHMENT & CHAPTER CLASSIFICATION ──────────────────────────────────────
 
 static CHAPTER_TAG_RE: LazyLock<BytesRegex> =
@@ -333,7 +352,7 @@ pub struct ScanResults {
     pub covers: Vec<ParsedFile>,
 }
 
-/// Scans directory entries, grouping files into videos (.mkv, .mp4), subs (.ass, .srt),
+/// Scans directory entries, grouping files into videos (.mkv), subs (.ass, .srt),
 /// chapters (.xml verified via `is_chapter_xml`), and covers (cover stem or ending in `_cover`).
 pub fn scan_assets(
     dir: &Path,

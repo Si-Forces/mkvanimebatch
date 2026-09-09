@@ -63,6 +63,8 @@ pub struct MkvTrack {
     #[serde(rename = "type")]
     pub track_type: String,
     #[serde(default)]
+    pub codec: Option<String>,
+    #[serde(default)]
     pub properties: TrackProperties,
 }
 
@@ -220,13 +222,18 @@ pub fn safe_filename(name: &str) -> String {
     let file_name = Path::new(name)
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| name.to_string());
-    UNSAFE_FN_CHARS.replace_all(&file_name, "_").into_owned()
+        .unwrap_or_default();
+    let sanitized = UNSAFE_FN_CHARS.replace_all(&file_name, "_").into_owned();
+    if sanitized.is_empty() || sanitized == "." || sanitized == ".." {
+        "unnamed".to_string()
+    } else {
+        sanitized
+    }
 }
 
 pub fn output_stem(base: &str, ep_type: &str, ep: &str) -> String {
     if ep_type == "OVA" || ep_type == "SP" {
-        format!("{ep_type}{ep}")
+        format!("{ep_type}{ep}_{base}")
     } else {
         base.to_string()
     }

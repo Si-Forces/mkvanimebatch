@@ -183,8 +183,9 @@ pub fn extract_mkv_metadata(inspected: Option<&InspectedVideo>) -> InspectionMet
 
     for track in inspected.tracks() {
         if track.track_type == "video" {
+            let codec = track.codec.as_deref().unwrap_or("");
             let cid = track.properties.codec_id.as_deref().unwrap_or("");
-            video_codec = parse_video_codec(cid, cid);
+            video_codec = parse_video_codec(codec, cid);
             resolution = track
                 .properties
                 .pixel_dimensions
@@ -332,15 +333,21 @@ pub fn generate_inspection_manifest(
         }
     }
 
-    if let Some(cache) = persistent_cache {
-        cache.save_shared();
-    }
-
     let mut items = Vec::with_capacity(all_mkvs.len());
     for mkv in &all_mkvs {
-        let inspected = persistent_cache
-            .and_then(|c| c.get_path(&mkv.path))
-            .map(InspectedVideo::new);
+        let (inspected, inspection_error) =
+            match persistent_cache.and_then(|c| c.get_path(&mkv.path)) {
+                Some(cached) => (Some(InspectedVideo::new(cached)), None),
+                None => match crate::scan::probe_video(&mkv.path) {
+                    Ok(probed) => {
+                        if let Some(cache) = persistent_cache {
+                            cache.put_path(&mkv.path, probed.clone());
+                        }
+                        (Some(InspectedVideo::new(probed)), None)
+                    }
+                    Err(err) => (None, Some(err)),
+                },
+            };
 
         let parent = mkv.path.parent().unwrap_or(input_dir);
         let release = release_by_dir
@@ -353,9 +360,13 @@ pub fn generate_inspection_manifest(
             name: mkv.name.clone(),
             release,
             metadata: extract_mkv_metadata(inspected.as_ref()),
-            inspection_error: None,
+            inspection_error,
         };
         items.push(item);
+    }
+
+    if let Some(cache) = persistent_cache {
+        cache.save_shared();
     }
 
     InspectionManifest {
@@ -420,6 +431,7 @@ mod tests {
         let flac_track = MkvTrack {
             id: Some(1),
             track_type: "audio".to_string(),
+            codec: None,
             properties: TrackProperties {
                 codec_id: Some("A_FLAC".to_string()),
                 audio_channels: Some(2),
@@ -434,6 +446,7 @@ mod tests {
         let aac_track = MkvTrack {
             id: Some(2),
             track_type: "audio".to_string(),
+            codec: None,
             properties: TrackProperties {
                 codec_id: Some("A_AAC".to_string()),
                 audio_channels: Some(6),
@@ -448,6 +461,7 @@ mod tests {
         let opus_track = MkvTrack {
             id: Some(3),
             track_type: "audio".to_string(),
+            codec: None,
             properties: TrackProperties {
                 codec_id: Some("A_OPUS".to_string()),
                 audio_channels: Some(8),
@@ -462,6 +476,7 @@ mod tests {
         let ac3_track = MkvTrack {
             id: Some(4),
             track_type: "audio".to_string(),
+            codec: None,
             properties: TrackProperties {
                 codec_id: Some("A_AC3".to_string()),
                 audio_channels: Some(1),
@@ -483,6 +498,7 @@ mod tests {
                 MkvTrack {
                     id: Some(0),
                     track_type: "video".to_string(),
+                    codec: None,
                     properties: TrackProperties {
                         codec_id: Some("V_MPEGH/ISO/HEVC".to_string()),
                         pixel_dimensions: Some("1920x1080".to_string()),
@@ -492,6 +508,7 @@ mod tests {
                 MkvTrack {
                     id: Some(1),
                     track_type: "audio".to_string(),
+                    codec: None,
                     properties: TrackProperties {
                         codec_id: Some("A_FLAC".to_string()),
                         audio_channels: Some(2),
@@ -501,6 +518,7 @@ mod tests {
                 MkvTrack {
                     id: Some(2),
                     track_type: "subtitles".to_string(),
+                    codec: None,
                     properties: TrackProperties {
                         codec_id: Some("S_TEXT/ASS".to_string()),
                         language: Some("eng".to_string()),

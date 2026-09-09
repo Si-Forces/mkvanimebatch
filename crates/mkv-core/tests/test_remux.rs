@@ -14,11 +14,13 @@ fn test_select_tracks() {
             MkvTrack {
                 id: Some(0),
                 track_type: "video".to_string(),
+                codec: None,
                 properties: TrackProperties::default(),
             },
             MkvTrack {
                 id: Some(1),
                 track_type: "audio".to_string(),
+                codec: None,
                 properties: TrackProperties {
                     language: Some("jpn".to_string()),
                     track_name: Some("Stereo".to_string()),
@@ -197,4 +199,34 @@ fn test_ffmpeg_args() {
     assert!(args.contains(&"192k".to_string()));
     assert!(args.contains(&"-compression_level".to_string()));
     assert!(args.contains(&"10".to_string()));
+}
+
+#[test]
+fn test_subtitle_extraction_filename_format() {
+    use mkv_core::domain::EpisodeInfo;
+    use mkv_core::extract::select_subtitle_for_extraction;
+    use std::path::Path;
+
+    let meta = MkvmergeMetadata {
+        tracks: vec![MkvTrack {
+            id: Some(2),
+            track_type: "subtitles".to_string(),
+            codec: None,
+            properties: TrackProperties {
+                codec_id: Some("s_text/ass".to_string()),
+                language: Some("eng".to_string()),
+                ..Default::default()
+            },
+        }],
+        attachments: vec![],
+        chapters: vec![],
+    };
+    let inspected = InspectedVideo::new(meta);
+    let parsed = EpisodeInfo::new("1", "E", "01");
+    let res =
+        select_subtitle_for_extraction(&inspected, "Show - 01", Path::new("/out"), Some(&parsed));
+    assert!(res.is_some());
+    let (tid, path) = res.unwrap();
+    assert_eq!(tid, 2);
+    assert_eq!(path.to_string_lossy(), "/out/Show - 01_EP01_eng_track2.ass");
 }
