@@ -241,3 +241,11 @@ fn test_scan_mkv_files_recursive_and_ignore() {
     assert!(!names.contains(&"ignored_output.mkv"));
     assert!(!names.contains(&"ignored_font.mkv"));
 }
+
+#[test]
+fn test_probe_video_fallback() {
+    let tmp = tempdir().unwrap();
+    let corrupt_mkv = tmp.path().join("corrupt.mkv");
+    fs::write(&corrupt_mkv, b"not a real ebml file").unwrap();
+    assert!(mkv_core::scan::probe_video(&corrupt_mkv).is_err());
+}
