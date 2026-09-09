@@ -96,7 +96,11 @@ jobs:
       - name: Package Windows Desktop Artifacts
         shell: pwsh
         run: |
-          $ReleaseDir = "desktop-tauri/src-tauri/target/release"
+          $ReleaseExe = Get-ChildItem -Path . -Filter "mkv-anime-batch.exe" -Recurse | Where-Object { $_.FullName -like "*release*" -and $_.FullName -notlike "*windows-artifacts*" } | Select-Object -First 1
+          if (-not $ReleaseExe) {
+            throw "mkv-anime-batch.exe not found after tauri build"
+          }
+          $ReleaseDir = $ReleaseExe.DirectoryName
           $OutDir     = "windows-artifacts"
           $StageDir   = "mkv-anime-batch-windows-x64"
 
@@ -279,10 +283,9 @@ jobs:
       - name: Collect Linux bundles
         run: |
           mkdir -p /tmp/linux-release
-          find desktop-tauri/src-tauri/target/release/bundle/appimage -name "*.AppImage" -exec cp {} /tmp/linux-release/ \;
-          find desktop-tauri/src-tauri/target/release/bundle/deb -name "*.deb" -exec cp {} /tmp/linux-release/ \;
-          find desktop-tauri/src-tauri/target/release/bundle/rpm -name "*.rpm" -exec cp {} /tmp/linux-release/ \;
-
+          find target desktop-tauri -type f -name "*.AppImage" -exec cp {} /tmp/linux-release/ \;
+          find target desktop-tauri -type f -name "*.deb" -exec cp {} /tmp/linux-release/ \;
+          find target desktop-tauri -type f -name "*.rpm" -exec cp {} /tmp/linux-release/ \;
       - name: Verify bundled sidecars
         run: |
           DEB="$(find /tmp/linux-release -name '*.deb' -print -quit)"
