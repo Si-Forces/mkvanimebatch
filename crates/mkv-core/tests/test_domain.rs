@@ -9,6 +9,7 @@ fn track(id: u32, lang: &str, codec: &str, name: &str) -> MkvTrack {
     MkvTrack {
         id: Some(id),
         track_type: "subtitles".to_string(),
+        codec: None,
         properties: TrackProperties {
             codec_id: Some(codec.to_string()),
             language: Some(lang.to_string()),
@@ -22,6 +23,7 @@ fn non_sub_track(id: u32, lang: &str) -> MkvTrack {
     MkvTrack {
         id: Some(id),
         track_type: "audio".to_string(),
+        codec: None,
         properties: TrackProperties {
             language: Some(lang.to_string()),
             ..Default::default()
@@ -713,5 +715,33 @@ fn test_item_outcome_variants() {
     assert_eq!(
         serde_json::to_string(&ItemOutcome::Planned).unwrap(),
         "\"planned\""
+    );
+}
+
+#[test]
+fn test_safe_filename_traversal_prevention() {
+    use mkv_core::domain::safe_filename;
+    assert_eq!(safe_filename(".."), "unnamed");
+    assert_eq!(safe_filename("."), "unnamed");
+    assert_eq!(safe_filename(""), "unnamed");
+    assert_eq!(safe_filename("../../../etc/passwd"), "passwd");
+    assert_eq!(safe_filename("font.ttf"), "font.ttf");
+    assert_eq!(safe_filename("font:test?.ttf"), "font_test_.ttf");
+}
+
+#[test]
+fn test_output_stem_restores_base() {
+    use mkv_core::domain::output_stem;
+    assert_eq!(
+        output_stem("[Group] Title - OVA 01", "OVA", "01"),
+        "OVA01_[Group] Title - OVA 01"
+    );
+    assert_eq!(
+        output_stem("[Group] Title - Special 02", "SP", "02"),
+        "SP02_[Group] Title - Special 02"
+    );
+    assert_eq!(
+        output_stem("[Group] Title - 01", "E", "01"),
+        "[Group] Title - 01"
     );
 }
