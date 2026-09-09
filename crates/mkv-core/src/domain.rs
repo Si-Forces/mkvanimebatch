@@ -11,17 +11,69 @@ use serde::{Deserialize, Serialize};
 // ─── DOMAIN TYPES ────────────────────────────────────────────────────────────
 
 /// Canonical parsed identity of an episode: season tag, type key, number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum EpisodeType {
+    #[default]
+    Episode,
+    Part,
+    Ova,
+    Special,
+}
+
+impl EpisodeType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Episode => "E",
+            Self::Part => "P",
+            Self::Ova => "OVA",
+            Self::Special => "SP",
+        }
+    }
+
+    pub fn label(&self, long: bool) -> &'static str {
+        match (self, long) {
+            (Self::Episode, false) => "EP",
+            (Self::Episode, true) => "Episode",
+            (Self::Part, _) => "Part",
+            (Self::Ova, _) => "OVA",
+            (Self::Special, false) => "SP",
+            (Self::Special, true) => "Special",
+        }
+    }
+
+    pub fn is_special_or_ova(&self) -> bool {
+        matches!(self, Self::Ova | Self::Special)
+    }
+}
+
+impl std::fmt::Display for EpisodeType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl From<&str> for EpisodeType {
+    fn from(s: &str) -> Self {
+        match s {
+            "OVA" | "ova" => Self::Ova,
+            "SP" | "sp" | "Special" | "special" => Self::Special,
+            "P" | "p" | "Part" | "part" => Self::Part,
+            _ => Self::Episode,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EpisodeInfo {
     pub season: String,
-    pub ep_type: String,
+    pub ep_type: EpisodeType,
     pub ep: String,
 }
 
 impl EpisodeInfo {
     pub fn new(
         season: impl Into<String>,
-        ep_type: impl Into<String>,
+        ep_type: impl Into<EpisodeType>,
         ep: impl Into<String>,
     ) -> Self {
         Self {
@@ -31,7 +83,6 @@ impl EpisodeInfo {
         }
     }
 }
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ItemOutcome {
@@ -231,9 +282,9 @@ pub fn safe_filename(name: &str) -> String {
     }
 }
 
-pub fn output_stem(base: &str, ep_type: &str, ep: &str) -> String {
-    if ep_type == "OVA" || ep_type == "SP" {
-        format!("{ep_type}{ep}_{base}")
+pub fn output_stem(base: &str, ep_type: &EpisodeType, ep: &str) -> String {
+    if ep_type.is_special_or_ova() {
+        format!("{}{ep}_{base}", ep_type.as_str())
     } else {
         base.to_string()
     }
@@ -470,50 +521,53 @@ pub fn parse_episode(name: &str) -> Option<EpisodeInfo> {
 
     if let Ok(Some(_)) = OVA_PATTERN.find(&normalized) {
         let ep = parse_typed_ep(&normalized, &OVA_PATTERN);
-        return Some(EpisodeInfo::new(season, "OVA", ep));
+        return Some(EpisodeInfo::new(season, EpisodeType::Ova, ep));
     }
 
     if let Ok(Some(_)) = SPECIAL_PATTERN.find(&normalized) {
         let ep = parse_typed_ep(&normalized, &SPECIAL_PATTERN);
-        return Some(EpisodeInfo::new(season, "SP", ep));
+        return Some(EpisodeInfo::new(season, EpisodeType::Special, ep));
     }
 
     if let Ok(Some(caps)) = SXXEXX_PATTERN.captures(&normalized) {
         let s_num: u32 = caps.get(1).unwrap().as_str().parse().unwrap_or(0);
         let ep = format_ep(caps.get(2).unwrap().as_str());
-        return Some(EpisodeInfo::new(s_num.to_string(), "E", ep));
+        return Some(EpisodeInfo::new(
+            s_num.to_string(),
+            EpisodeType::Episode,
+            ep,
+        ));
     }
 
     if let Ok(Some(caps)) = SXXPXX_PATTERN.captures(&normalized) {
         let s_num: u32 = caps.get(1).unwrap().as_str().parse().unwrap_or(0);
         let ep = format_ep(caps.get(2).unwrap().as_str());
-        return Some(EpisodeInfo::new(s_num.to_string(), "P", ep));
+        return Some(EpisodeInfo::new(s_num.to_string(), EpisodeType::Part, ep));
     }
 
     if let Ok(Some(caps)) = EP_NUM_MARKER_RE.captures(&normalized[..]) {
         if let Some(val) = first_captured_group(&caps) {
-            return Some(EpisodeInfo::new(season, "E", format_ep(val)));
+            return Some(EpisodeInfo::new(
+                season,
+                EpisodeType::Episode,
+                format_ep(val),
+            ));
         }
     }
 
     if let Some(val) = last_fallback_ep(&normalized) {
-        return Some(EpisodeInfo::new(season, "E", format_ep(val)));
+        return Some(EpisodeInfo::new(
+            season,
+            EpisodeType::Episode,
+            format_ep(val),
+        ));
     }
 
     None
 }
 
-pub fn ep_type_label(ep_type: &str, long: bool) -> &str {
-    match (ep_type, long) {
-        ("E", false) => "EP",
-        ("E", true) => "Episode",
-        ("P", false) => "Part",
-        ("P", true) => "Part",
-        ("OVA", _) => "OVA",
-        ("SP", false) => "SP",
-        ("SP", true) => "Special",
-        _ => ep_type,
-    }
+pub fn ep_type_label(ep_type: &EpisodeType, long: bool) -> &str {
+    ep_type.label(long)
 }
 
 // ─── TRACK SELECTION & HEURISTICS ────────────────────────────────────────────
@@ -586,7 +640,10 @@ static COMMENTARY_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b(commentary|comment|audio\s+description|ad|extension)\b").unwrap()
 });
 
-pub fn pick_audio(audio_tracks: &[AudioTrack], video_pos: u32) -> (Option<AudioTrack>, String) {
+pub fn select_audio_track(
+    audio_tracks: &[AudioTrack],
+    video_pos: u32,
+) -> (Option<AudioTrack>, String) {
     if audio_tracks.is_empty() {
         return (None, String::new());
     }

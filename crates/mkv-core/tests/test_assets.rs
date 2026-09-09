@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use mkv_core::assets::{
     claim_leftover_chapters, prepare_release_directory, AssetResolver, ChapterIndex, CoverIndex,
-    FontsOrigin, InteractionMode, ReleasePreparationOptions, SubIndex,
+    FontsOrigin, ReleasePreparationOptions, SubIndex,
 };
 use mkv_core::domain::{ancestor_dirs, EpisodeInfo};
 use mkv_core::fonts::FontInfo;
@@ -474,5 +474,4 @@ fn test_prepare_release_directory() {
 
     assert_eq!(prepared.fonts_origin, FontsOrigin::Local);
     assert_eq!(prepared.videos.len(), 1);
-    assert_eq!(InteractionMode::default(), InteractionMode::Interactive);
 }

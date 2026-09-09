@@ -50,8 +50,8 @@ pub struct MkvmergeMetadata {
     pub chapters: Vec<MkvChapter>,
 }
 
-/// Probes MKV container headers, tracks, attachments, and chapters using `mkvmerge -J`.
-pub fn probe_video(path: &Path) -> Result<MkvmergeMetadata, String> {
+/// Probes MKV metadata using `mkvmerge -J` subprocess.
+pub fn probe_video_mkvmerge(path: &Path) -> Result<MkvmergeMetadata, String> {
     let output = std::process::Command::new("mkvmerge")
         .args(["-J", &path.to_string_lossy()])
         .output()
@@ -65,8 +65,43 @@ pub fn probe_video(path: &Path) -> Result<MkvmergeMetadata, String> {
         ));
     }
 
-    serde_json::from_slice(&output.stdout)
-        .map_err(|e| format!("Failed to parse mkvmerge JSON: {e}"))
+    let val: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|e| format!("Failed to parse mkvmerge JSON: {e}"))?;
+
+    if let Some(false) = val
+        .pointer("/container/recognized")
+        .and_then(|v| v.as_bool())
+    {
+        return Err("File is not a recognized Matroska container".to_string());
+    }
+
+    serde_json::from_value(val).map_err(|e| format!("Failed to parse mkvmerge metadata: {e}"))
+}
+
+/// Probes MKV container headers, tracks, attachments, and chapters using hybrid native EBML
+/// parsing with automatic fallback to `mkvmerge -J` (ADR 0006).
+pub fn probe_video(path: &Path) -> Result<MkvmergeMetadata, String> {
+    // 1. Fast path: native EBML probe directly in pure Rust (< 1ms)
+    if let Ok(meta) = crate::ebml::probe_ebml_native(path) {
+        return Ok(meta);
+    }
+    // 2. Safe fallback: shell out to mkvmerge -J for non-standard containers or quirks (ADR 0006)
+    probe_video_mkvmerge(path)
+}
+
+/// Looks up cached inspection metadata or probes the video with `mkvmerge`, caching on success.
+pub fn get_or_probe_video(
+    path: &Path,
+    cache: Option<&PersistentInspectCache>,
+) -> Result<MkvmergeMetadata, String> {
+    if let Some(cached) = cache.and_then(|c| c.get_path(path)) {
+        return Ok(cached);
+    }
+    let probed = probe_video(path)?;
+    if let Some(c) = cache {
+        c.put_path(path, probed.clone());
+    }
+    Ok(probed)
 }
 
 // ─── ATTACHMENT & CHAPTER CLASSIFICATION ──────────────────────────────────────
@@ -508,16 +543,24 @@ pub fn get_default_cache_file() -> PathBuf {
     get_default_cache_dir().join("inspect_cache.json")
 }
 
-fn path_size_and_mtime_ns(path: &Path) -> Option<(u64, u128)> {
-    let meta = path.metadata().ok()?;
-    let size = meta.len();
-    let mtime_ns = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    Some((size, mtime_ns))
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct FileSignature {
+    pub size: u64,
+    pub mtime_ns: u128,
+}
+
+impl FileSignature {
+    pub fn of(path: &Path) -> Option<Self> {
+        let meta = path.metadata().ok()?;
+        let size = meta.len();
+        let mtime_ns = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        Some(Self { size, mtime_ns })
+    }
 }
 
 /// Thread-safe persistent JSON cache for mkvmerge inspection metadata keyed on (path, size, mtime).
@@ -589,59 +632,47 @@ impl PersistentInspectCache {
         }
     }
 
-    pub fn get(&self, path: &Path, size: u64, mtime_ns: u128) -> Option<MkvmergeMetadata> {
+    pub fn get(&self, path: &Path, sig: FileSignature) -> Option<MkvmergeMetadata> {
         if !self.enabled {
             return None;
         }
         let key = self.cache_key(path);
         let state = self.state.lock();
-        if let Some(entry) = state.data.get(&key) {
-            let entry_mtime_ns = if entry.mtime_ns != 0 {
-                entry.mtime_ns
-            } else if let Some(mtime) = entry.mtime {
-                (mtime * 1_000_000_000.0) as u128
-            } else {
-                0
-            };
-
-            let mtime_matches = if entry.mtime_ns != 0 {
-                entry.mtime_ns == mtime_ns
-            } else {
-                entry_mtime_ns.abs_diff(mtime_ns) < 2_000_000
-            };
-
-            if entry.size == size && mtime_matches {
-                return entry.json_data.clone();
-            }
+        let entry = state.data.get(&key)?;
+        if entry.size == sig.size && entry.mtime_ns == sig.mtime_ns {
+            entry.json_data.clone()
+        } else {
+            None
         }
-        None
     }
 
     pub fn get_path(&self, path: &Path) -> Option<MkvmergeMetadata> {
-        let (size, mtime_ns) = path_size_and_mtime_ns(path)?;
-        self.get(path, size, mtime_ns)
+        let sig = FileSignature::of(path)?;
+        self.get(path, sig)
     }
 
-    pub fn put(&self, path: &Path, size: u64, mtime_ns: u128, data: MkvmergeMetadata) {
+    pub fn put(&self, path: &Path, sig: FileSignature, data: MkvmergeMetadata) {
         if !self.enabled {
             return;
         }
         let key = self.cache_key(path);
         let entry = InspectCacheEntry {
-            size,
-            mtime_ns,
-            mtime: Some(mtime_ns as f64 / 1_000_000_000.0),
+            size: sig.size,
+            mtime_ns: sig.mtime_ns,
+            mtime: Some(sig.mtime_ns as f64 / 1_000_000_000.0),
             json_data: Some(data),
         };
         let mut state = self.state.lock();
-        state.data.insert(key, entry);
-        state.dirty = true;
-        state.revision += 1;
+        if state.data.get(&key) != Some(&entry) {
+            state.data.insert(key, entry);
+            state.dirty = true;
+            state.revision += 1;
+        }
     }
 
     pub fn put_path(&self, path: &Path, data: MkvmergeMetadata) {
-        if let Some((size, mtime_ns)) = path_size_and_mtime_ns(path) {
-            self.put(path, size, mtime_ns, data);
+        if let Some(sig) = FileSignature::of(path) {
+            self.put(path, sig, data);
         }
     }
 

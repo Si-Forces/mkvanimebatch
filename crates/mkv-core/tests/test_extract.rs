@@ -3,7 +3,7 @@ use tempfile::tempdir;
 
 use mkv_core::domain::{MkvTrack, TrackProperties};
 use mkv_core::extract::extract_mkv_file;
-use mkv_core::fonts::FontManager;
+use mkv_core::fonts::FontRegistry;
 use mkv_core::scan::{InspectedVideo, MkvmergeMetadata};
 
 #[test]
@@ -25,7 +25,7 @@ fn test_extract_mkv_file_no_work() {
             chapters: vec![],
         };
         let inspected = InspectedVideo::new(meta);
-        let font_mgr = FontManager::new(dir.path().join("fonts"), None);
+        let font_mgr = FontRegistry::new(dir.path().join("fonts"), None);
 
         let summary = extract_mkv_file(&mkv_path, &inspected, &font_mgr, None)
             .await

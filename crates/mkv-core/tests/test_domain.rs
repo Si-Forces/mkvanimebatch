@@ -1,7 +1,7 @@
 use mkv_core::domain::{
     detect_sub_lang, ep_type_label, format_ep, is_dialogue_track, natural_sort_key, parse_episode,
-    pick_audio, score_subtitle_category, seasons_match, select_best_subtitle_track, AudioTrack,
-    EpisodeInfo, MkvTrack, TrackProperties,
+    score_subtitle_category, seasons_match, select_audio_track, select_best_subtitle_track,
+    AudioTrack, EpisodeInfo, EpisodeType, MkvTrack, TrackProperties,
 };
 use std::collections::HashSet;
 
@@ -146,7 +146,7 @@ fn test_decimal_episode() {
     let res = parse_episode("Show - 12.5");
     assert!(res.is_some());
     let info = res.unwrap();
-    assert_eq!(info.ep_type, "E");
+    assert_eq!(info.ep_type, EpisodeType::Episode);
     assert!(info.ep.starts_with("12."));
 }
 
@@ -170,7 +170,7 @@ fn test_ova_no_space() {
 fn test_oad() {
     let res = parse_episode("Show OAD 01");
     assert!(res.is_some());
-    assert_eq!(res.unwrap().ep_type, "OVA");
+    assert_eq!(res.unwrap().ep_type, EpisodeType::Ova);
 }
 
 #[test]
@@ -361,15 +361,14 @@ fn test_detect_sub_lang_offset_suffix() {
 
 #[test]
 fn test_ep_type_label() {
-    assert_eq!(ep_type_label("E", false), "EP");
-    assert_eq!(ep_type_label("E", true), "Episode");
-    assert_eq!(ep_type_label("P", false), "Part");
-    assert_eq!(ep_type_label("P", true), "Part");
-    assert_eq!(ep_type_label("OVA", false), "OVA");
-    assert_eq!(ep_type_label("OVA", true), "OVA");
-    assert_eq!(ep_type_label("SP", false), "SP");
-    assert_eq!(ep_type_label("SP", true), "Special");
-    assert_eq!(ep_type_label("UNKNOWN", false), "UNKNOWN");
+    assert_eq!(ep_type_label(&EpisodeType::Episode, false), "EP");
+    assert_eq!(ep_type_label(&EpisodeType::Episode, true), "Episode");
+    assert_eq!(ep_type_label(&EpisodeType::Part, false), "Part");
+    assert_eq!(ep_type_label(&EpisodeType::Part, true), "Part");
+    assert_eq!(ep_type_label(&EpisodeType::Ova, false), "OVA");
+    assert_eq!(ep_type_label(&EpisodeType::Ova, true), "OVA");
+    assert_eq!(ep_type_label(&EpisodeType::Special, false), "SP");
+    assert_eq!(ep_type_label(&EpisodeType::Special, true), "Special");
 }
 
 #[test]
@@ -539,7 +538,7 @@ fn test_audio_prefers_japanese_stereo() {
         audio("eng", 2, "", 1, "A_AAC"),
         audio("jpn", 2, "", 2, "A_AAC"),
     ];
-    let (track, _) = pick_audio(&tracks, 0);
+    let (track, _) = select_audio_track(&tracks, 0);
     let track = track.unwrap();
     assert_eq!(track.lang, "jpn");
     assert_eq!(track.pos, 2);
@@ -551,7 +550,7 @@ fn test_audio_prefers_japanese_stereo_dialogue() {
         audio("jpn", 2, "Commentary", 1, "A_AAC"),
         audio("jpn", 2, "Full Dialogue", 2, "A_AAC"),
     ];
-    let (track, _) = pick_audio(&tracks, 0);
+    let (track, _) = select_audio_track(&tracks, 0);
     let track = track.unwrap();
     assert_eq!(track.pos, 2);
 }
@@ -562,7 +561,7 @@ fn test_audio_skips_commentary_track() {
         audio("jpn", 2, "Audio Commentary", 1, "A_AAC"),
         audio("jpn", 2, "Main Audio", 2, "A_AAC"),
     ];
-    let (track, _) = pick_audio(&tracks, 0);
+    let (track, _) = select_audio_track(&tracks, 0);
     let track = track.unwrap();
     assert_eq!(track.pos, 2);
 }
@@ -573,7 +572,7 @@ fn test_audio_prefers_stereo_over_surround() {
         audio("jpn", 6, "", 1, "A_AAC"),
         audio("jpn", 2, "", 2, "A_AAC"),
     ];
-    let (track, _) = pick_audio(&tracks, 0);
+    let (track, _) = select_audio_track(&tracks, 0);
     let track = track.unwrap();
     assert_eq!(track.channels, 2);
     assert_eq!(track.pos, 2);
@@ -582,7 +581,7 @@ fn test_audio_prefers_stereo_over_surround() {
 #[test]
 fn test_audio_und_stereo_fallback() {
     let tracks = vec![audio("und", 2, "", 1, "A_AAC")];
-    let (track, _) = pick_audio(&tracks, 0);
+    let (track, _) = select_audio_track(&tracks, 0);
     assert_eq!(track.unwrap().pos, 1);
 }
 
@@ -592,13 +591,13 @@ fn test_audio_stereo_fallback_no_japanese() {
         audio("eng", 2, "", 1, "A_AAC"),
         audio("eng", 6, "", 2, "A_AAC"),
     ];
-    let (track, _) = pick_audio(&tracks, 0);
+    let (track, _) = select_audio_track(&tracks, 0);
     assert_eq!(track.unwrap().channels, 2);
 }
 
 #[test]
 fn test_audio_empty_tracks_returns_none() {
-    let (track, reason) = pick_audio(&[], 0);
+    let (track, reason) = select_audio_track(&[], 0);
     assert!(track.is_none());
     assert_eq!(reason, "");
 }
@@ -606,7 +605,7 @@ fn test_audio_empty_tracks_returns_none() {
 #[test]
 fn test_audio_all_commentary_falls_back_to_japanese() {
     let tracks = vec![audio("jpn", 2, "Director Commentary", 1, "A_AAC")];
-    let (track, reason) = pick_audio(&tracks, 0);
+    let (track, reason) = select_audio_track(&tracks, 0);
     assert!(track.is_some());
     assert!(
         reason.contains("Japanese") || reason.contains("fallback") || reason.contains("commentary")
@@ -616,7 +615,7 @@ fn test_audio_all_commentary_falls_back_to_japanese() {
 #[test]
 fn test_audio_first_audio_after_video_as_last_resort() {
     let tracks = vec![audio("xyz", 6, "Some Audio", 5, "A_AAC")];
-    let (track, _) = pick_audio(&tracks, 0);
+    let (track, _) = select_audio_track(&tracks, 0);
     assert!(track.is_some());
 }
 
@@ -626,7 +625,7 @@ fn test_audio_japanese_preferred_over_undetermined() {
         audio("und", 2, "", 1, "A_AAC"),
         audio("jpn", 2, "", 2, "A_AAC"),
     ];
-    let (track, _) = pick_audio(&tracks, 0);
+    let (track, _) = select_audio_track(&tracks, 0);
     assert_eq!(track.unwrap().pos, 2);
 }
 
@@ -636,7 +635,7 @@ fn test_audio_non_commentary_preferred_over_commentary_even_if_commentary_is_jap
         audio("jpn", 2, "Audio Commentary", 1, "A_AAC"),
         audio("eng", 2, "English Stereo", 2, "A_AC3"),
     ];
-    let (track, reason) = pick_audio(&tracks, 0);
+    let (track, reason) = select_audio_track(&tracks, 0);
     let track = track.unwrap();
     assert_eq!(track.id, 2);
     assert!(reason.contains("Stereo fallback"));
@@ -733,15 +732,15 @@ fn test_safe_filename_traversal_prevention() {
 fn test_output_stem_restores_base() {
     use mkv_core::domain::output_stem;
     assert_eq!(
-        output_stem("[Group] Title - OVA 01", "OVA", "01"),
+        output_stem("[Group] Title - OVA 01", &EpisodeType::Ova, "01"),
         "OVA01_[Group] Title - OVA 01"
     );
     assert_eq!(
-        output_stem("[Group] Title - Special 02", "SP", "02"),
+        output_stem("[Group] Title - Special 02", &EpisodeType::Special, "02"),
         "SP02_[Group] Title - Special 02"
     );
     assert_eq!(
-        output_stem("[Group] Title - 01", "E", "01"),
+        output_stem("[Group] Title - 01", &EpisodeType::Episode, "01"),
         "[Group] Title - 01"
     );
 }

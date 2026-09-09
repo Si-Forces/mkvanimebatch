@@ -27,11 +27,14 @@ use std::os::unix::process::CommandExt;
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InspectOptions {
+    #[allow(dead_code)]
     workers: Option<i64>,
+    #[allow(dead_code)]
     io_jobs: Option<i64>,
     no_cache: Option<bool>,
 }
 
+#[allow(dead_code)]
 fn inspect_options_to_args(options: Option<&InspectOptions>) -> Result<Vec<String>, String> {
     let Some(opts) = options else {
         return Ok(Vec::new());
@@ -63,62 +66,38 @@ fn inspect_options_to_args(options: Option<&InspectOptions>) -> Result<Vec<Strin
 
 #[tauri::command]
 pub async fn inspect_directory(
-    app: AppHandle,
+    _app: AppHandle,
     state: State<'_, ScanState>,
     path: String,
     options: Option<InspectOptions>,
 ) -> Result<InspectionManifest, String> {
-    let extra_args = inspect_options_to_args(options.as_ref())?;
     let start_lock = state.start_lock.lock().map_err(|e| e.to_string())?;
     state.ensure_accepting_starts()?;
     let dir = std::fs::canonicalize(&path).map_err(|e| format!("Invalid directory path: {}", e))?;
     if !dir.is_dir() {
         return Err("Directory does not exist or is not a directory".into());
     }
-    let path = dir.to_string_lossy().into_owned();
     stop_registered_scan(&state)?;
 
-    let binary = get_sidecar_path(&app, "mkv-remux")
-        .map_err(|_| "Sidecar 'mkv-remux' not found.".to_string())?;
-    let mut command = Command::new(binary);
-    command.args(["--plan", "--input-dir", &path]);
-    command.args(&extra_args);
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    #[cfg(windows)]
-    command.creation_flags(CREATE_NO_WINDOW);
-    #[cfg(unix)]
-    command.process_group(0);
-
-    let child = command
-        .spawn()
-        .map_err(|e| format!("Failed to spawn sidecar: {e}"))?;
     let scan_id = state.next_id.fetch_add(1, Ordering::SeqCst);
-    let pid = child.id();
-    *state.active.lock().map_err(|e| e.to_string())? = Some((scan_id, pid));
+    *state.active.lock().map_err(|e| e.to_string())? = Some((scan_id, 0));
     drop(start_lock);
     let registration = ScanRegistration {
         state: &state,
         id: scan_id,
     };
 
+    let no_cache = options.as_ref().and_then(|o| o.no_cache).unwrap_or(false);
     let result = tauri::async_runtime::spawn_blocking(move || {
-        let output = child
-            .wait_with_output()
-            .map_err(|e| format!("Failed to wait for sidecar: {e}"))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            return Err(format!(
-                "Sidecar exit code {:?}: {}",
-                output.status.code(),
-                stderr
-            ));
-        }
-
-        parse_manifest_json(&output.stdout)
+        let cache = mkv_core::scan::PersistentInspectCache::default();
+        let cache_opt = if no_cache { None } else { Some(&cache) };
+        let core_manifest = mkv_core::manifest::generate_inspection_manifest(&dir, cache_opt);
+        let bytes = serde_json::to_vec(&core_manifest).map_err(|e| e.to_string())?;
+        parse_manifest_json(&bytes)
     })
     .await
     .unwrap_or_else(|e| Err(format!("Async runtime error: {}", e)));
+
     drop(registration);
     result
 }

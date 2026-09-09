@@ -69,6 +69,18 @@ pub enum JobEvent {
         #[serde(flatten)]
         extra: ExtraFields,
     },
+    ItemProgress {
+        version: u64,
+        id: String,
+        file: String,
+        progress: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        speed: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        eta: Option<String>,
+        #[serde(flatten)]
+        extra: ExtraFields,
+    },
     ItemComplete {
         version: u64,
         id: String,
@@ -92,6 +104,7 @@ impl JobEvent {
         let extra = match self {
             Self::BatchStart { extra, .. }
             | Self::ItemStart { extra, .. }
+            | Self::ItemProgress { extra, .. }
             | Self::ItemComplete { extra, .. }
             | Self::BatchComplete { extra, .. } => extra,
         };

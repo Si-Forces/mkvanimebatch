@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::domain::{cover_mime, pick_audio};
+use crate::domain::{cover_mime, select_audio_track};
 use crate::fonts::FontInfo;
 use crate::scan::InspectedVideo;
 
@@ -53,7 +53,7 @@ pub fn select_tracks(inspected: &InspectedVideo) -> TrackSelection {
     let video_pos = inspected.video_track_pos();
 
     let audio_tracks = inspected.audio_tracks();
-    let (audio, reason) = pick_audio(
+    let (audio, reason) = select_audio_track(
         &audio_tracks,
         if video_pos >= 0 { video_pos as u32 } else { 0 },
     );
@@ -290,8 +290,10 @@ pub async fn execute_remux_job(
         summary
             .log
             .push("  Transcoding audio to Opus with ffmpeg...".into());
-        let ffmpeg_out = tokio::process::Command::new("ffmpeg")
-            .args(&ffmpeg_args)
+        let mut ffmpeg_cmd = tokio::process::Command::new("ffmpeg");
+        ffmpeg_cmd.kill_on_drop(true);
+        ffmpeg_cmd.args(&ffmpeg_args);
+        let ffmpeg_out = ffmpeg_cmd
             .output()
             .await
             .map_err(|e| format!("Failed to execute ffmpeg: {e}"))?;
@@ -315,8 +317,10 @@ pub async fn execute_remux_job(
     );
 
     summary.log.push("  Running mkvmerge...".into());
-    let mkvmerge_out = tokio::process::Command::new("mkvmerge")
-        .args(&mkvmerge_args)
+    let mut mkvmerge_cmd = tokio::process::Command::new("mkvmerge");
+    mkvmerge_cmd.kill_on_drop(true);
+    mkvmerge_cmd.args(&mkvmerge_args);
+    let mkvmerge_out = mkvmerge_cmd
         .output()
         .await
         .map_err(|e| format!("Failed to execute mkvmerge: {e}"))?;

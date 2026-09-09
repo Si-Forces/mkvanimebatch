@@ -7,7 +7,6 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::SystemTime;
 
 use blake2::{Blake2b512, Digest};
 use parking_lot::Mutex;
@@ -16,6 +15,7 @@ use tracing::{error, warn};
 use uuid::Uuid;
 
 use crate::domain::{font_mime, natural_sort_key, safe_filename, FONT_EXTENSIONS};
+use crate::scan::FileSignature;
 
 pub const FONT_DIR_NAMES: &[&str] = &["fonts", "font", "attachments"];
 
@@ -226,20 +226,20 @@ impl FontHashMemo {
         }
     }
 
-    pub fn get(&self, path: &Path, size: u64, mtime_ns: u128) -> Option<String> {
+    pub fn get(&self, path: &Path, sig: FileSignature) -> Option<String> {
         let key = path.to_string_lossy();
         if let Some(entry) = self.data.get(key.as_ref()) {
-            if entry.size == size && entry.mtime_ns == mtime_ns {
+            if entry.size == sig.size && entry.mtime_ns == sig.mtime_ns {
                 return Some(entry.hash.clone());
             }
         }
         None
     }
 
-    pub fn put(&mut self, path: &Path, size: u64, mtime_ns: u128, hash: String) {
+    pub fn put(&mut self, path: &Path, sig: FileSignature, hash: String) {
         let entry = FontMemoEntry {
-            size,
-            mtime_ns,
+            size: sig.size,
+            mtime_ns: sig.mtime_ns,
             hash,
         };
         let key = path.to_string_lossy().into_owned();
@@ -303,25 +303,25 @@ impl FontClaim {
 }
 
 #[derive(Default)]
-struct FontManagerState {
+struct FontRegistryState {
     claimed_hashes: HashSet<String>,
     claimed_name_size: HashSet<(String, u64)>,
 }
 
-pub struct FontManager {
+pub struct FontRegistry {
     pub fonts_dir: PathBuf,
     hash_memo: Option<Arc<Mutex<FontHashMemo>>>,
-    state: Mutex<FontManagerState>,
+    state: Mutex<FontRegistryState>,
     staging_dir: PathBuf,
 }
 
-impl FontManager {
+impl FontRegistry {
     pub fn new(fonts_dir: PathBuf, hash_memo: Option<Arc<Mutex<FontHashMemo>>>) -> Self {
         let staging_dir = fonts_dir.join(".font_staging");
         let manager = Self {
             fonts_dir,
             hash_memo,
-            state: Mutex::new(FontManagerState::default()),
+            state: Mutex::new(FontRegistryState::default()),
             staging_dir,
         };
         manager.seed_existing();
@@ -357,25 +357,18 @@ impl FontManager {
                 let file_name = entry.file_name().to_string_lossy().into_owned();
                 state.claimed_name_size.insert((file_name, size));
 
-                if size > 0 {
-                    let mtime_ns = meta
-                        .modified()
-                        .ok()
-                        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-                        .map(|d| d.as_nanos())
-                        .unwrap_or(0);
-
+                if let Some(sig) = FileSignature::of(&path) {
                     let mut file_hash = None;
                     if let Some(memo_arc) = &self.hash_memo {
                         let memo = memo_arc.lock();
-                        file_hash = memo.get(&path, size, mtime_ns);
+                        file_hash = memo.get(&path, sig);
                     }
 
                     if file_hash.is_none() {
                         if let Ok(h) = hash_file(&path) {
                             if let Some(memo_arc) = &self.hash_memo {
                                 let mut memo = memo_arc.lock();
-                                memo.put(&path, size, mtime_ns, h.clone());
+                                memo.put(&path, sig, h.clone());
                             }
                             file_hash = Some(h);
                         }
@@ -424,7 +417,7 @@ impl FontManager {
     /// If hash is duplicate or validation fails, staging file is removed and released.
     /// Returns the final promoted destination Path, or None if duplicate or failed.
     pub fn promote(&self, claim: &mut FontClaim) -> Option<PathBuf> {
-        let cleanup_and_release = |claim: &mut FontClaim, state: &mut FontManagerState| {
+        let cleanup_and_release = |claim: &mut FontClaim, state: &mut FontRegistryState| {
             let _ = fs::remove_file(&claim.staging_path);
             state.claimed_name_size.remove(&claim.identity);
             claim.released = true;
@@ -507,15 +500,9 @@ impl FontManager {
         claim.promoted = true;
 
         if let Some(memo_arc) = &self.hash_memo {
-            if let Ok(target_meta) = fs::metadata(&target_path) {
-                let mtime_ns = target_meta
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-                    .map(|d| d.as_nanos())
-                    .unwrap_or(0);
+            if let Some(sig) = FileSignature::of(&target_path) {
                 let mut memo = memo_arc.lock();
-                memo.put(&target_path, target_meta.len(), mtime_ns, file_hash);
+                memo.put(&target_path, sig, file_hash);
             }
         }
 
