@@ -1,11 +1,19 @@
 //! CLI adapter for mkv-core batch processing engine.
 
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use mkv_core::manifest::generate_inspection_manifest;
-use mkv_core::pipeline::{JobEvent, EVENT_VERSION};
-use mkv_core::scan::PersistentInspectCache;
+use mkv_core::assets::{prepare_release_directory, ReleasePreparationOptions};
+use mkv_core::domain::output_stem;
+use mkv_core::extract::extract_mkv_file;
+use mkv_core::fonts::{scan_fonts, FontManager};
+use mkv_core::manifest::{generate_inspection_manifest, get_item_id};
+use mkv_core::pipeline::{ItemOutcome, JobEvent, EVENT_VERSION};
+use mkv_core::remux::{execute_remux_job, select_tracks, PlannedJob};
+use mkv_core::scan::{
+    probe_video, scan_mkv_files, InspectedVideo, ParsedFile, PersistentInspectCache,
+};
 
 #[derive(Debug, Default)]
 struct CliArgs {
@@ -190,31 +198,424 @@ async fn main() -> ExitCode {
             }
         }
     }
+    if args.extract {
+        let files = scan_mkv_files(&input_dir, true, None);
+        if files.is_empty() {
+            println!("No MKV files found in '{}'", input_dir.display());
+            return ExitCode::SUCCESS;
+        }
+
+        let out_dir = args.out_dir.clone();
+        let fonts_dir = args
+            .fonts_dir
+            .clone()
+            .unwrap_or_else(|| out_dir.as_ref().unwrap_or(&input_dir).join("fonts"));
+        let font_manager = FontManager::new(fonts_dir, None);
+
+        if args.events {
+            let start_ev = JobEvent::BatchStart {
+                version: EVENT_VERSION,
+                total: files.len(),
+                input_dir: input_dir.to_string_lossy().to_string(),
+            };
+            if let Ok(line) = start_ev.to_ndjson() {
+                println!("{line}");
+            }
+        }
+
+        let mut success_count = 0;
+        let mut error_count = 0;
+
+        for file in &files {
+            let item_id = get_item_id(&file.path, &input_dir);
+            if args.events {
+                let item_start = JobEvent::ItemStart {
+                    version: EVENT_VERSION,
+                    id: item_id.clone(),
+                    file: file.name.clone(),
+                };
+                if let Ok(line) = item_start.to_ndjson() {
+                    println!("{line}");
+                }
+            }
+
+            if args.dry_run {
+                println!(
+                    "[DRY-RUN] Would extract assets from: {}",
+                    file.path.display()
+                );
+                if args.events {
+                    let item_comp = JobEvent::ItemComplete {
+                        version: EVENT_VERSION,
+                        id: item_id.clone(),
+                        file: file.name.clone(),
+                        status: ItemOutcome::Completed,
+                        error: None,
+                    };
+                    if let Ok(line) = item_comp.to_ndjson() {
+                        println!("{line}");
+                    }
+                }
+                success_count += 1;
+                continue;
+            }
+
+            let meta = if let Some(cached) = cache_opt.and_then(|c| c.get_path(&file.path)) {
+                cached
+            } else {
+                match probe_video(&file.path) {
+                    Ok(m) => {
+                        if let Some(c) = cache_opt {
+                            c.put_path(&file.path, m.clone());
+                        }
+                        m
+                    }
+                    Err(err) => {
+                        eprintln!("  ERROR: Failed to probe '{}': {err}", file.path.display());
+                        if args.events {
+                            let item_comp = JobEvent::ItemComplete {
+                                version: EVENT_VERSION,
+                                id: item_id.clone(),
+                                file: file.name.clone(),
+                                status: ItemOutcome::Error,
+                                error: Some(err),
+                            };
+                            if let Ok(line) = item_comp.to_ndjson() {
+                                println!("{line}");
+                            }
+                        }
+                        error_count += 1;
+                        continue;
+                    }
+                }
+            };
+
+            let inspected = InspectedVideo::new(meta);
+            match extract_mkv_file(&file.path, &inspected, &font_manager, out_dir.as_deref()).await
+            {
+                Ok(summary) => {
+                    for line in summary.log {
+                        println!("{line}");
+                    }
+                    if args.events {
+                        let item_comp = JobEvent::ItemComplete {
+                            version: EVENT_VERSION,
+                            id: item_id.clone(),
+                            file: file.name.clone(),
+                            status: ItemOutcome::Completed,
+                            error: None,
+                        };
+                        if let Ok(line) = item_comp.to_ndjson() {
+                            println!("{line}");
+                        }
+                    }
+                    success_count += 1;
+                }
+                Err(err) => {
+                    eprintln!(
+                        "  ERROR: Extraction failed for '{}': {err}",
+                        file.path.display()
+                    );
+                    if args.events {
+                        let item_comp = JobEvent::ItemComplete {
+                            version: EVENT_VERSION,
+                            id: item_id.clone(),
+                            file: file.name.clone(),
+                            status: ItemOutcome::Error,
+                            error: Some(err),
+                        };
+                        if let Ok(line) = item_comp.to_ndjson() {
+                            println!("{line}");
+                        }
+                    }
+                    error_count += 1;
+                }
+            }
+        }
+
+        if let Some(c) = cache_opt {
+            c.save_shared();
+        }
+
+        if args.events {
+            let batch_comp = JobEvent::BatchComplete {
+                version: EVENT_VERSION,
+                success: error_count == 0,
+                cancelled: false,
+            };
+            if let Ok(line) = batch_comp.to_ndjson() {
+                println!("{line}");
+            }
+        } else {
+            println!(
+                "Extraction complete. Successfully processed {success_count} file(s) with {error_count} error(s)."
+            );
+        }
+
+        return if error_count == 0 {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        };
+    }
+
+    // Remux Batch Mode
+    let files = scan_mkv_files(&input_dir, true, None);
+    if files.is_empty() {
+        println!("No MKV files found in '{}'", input_dir.display());
+        return ExitCode::SUCCESS;
+    }
+
+    let mut videos_by_dir: BTreeMap<PathBuf, Vec<ParsedFile>> = BTreeMap::new();
+    for file in files {
+        let parent = file.path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        videos_by_dir.entry(parent).or_default().push(file);
+    }
+
+    let mut total_videos = 0;
+    for v in videos_by_dir.values() {
+        total_videos += v.len();
+    }
 
     if args.events {
         let start_ev = JobEvent::BatchStart {
             version: EVENT_VERSION,
-            total: 0,
+            total: total_videos,
             input_dir: input_dir.to_string_lossy().to_string(),
-        };
-        let complete_ev = JobEvent::BatchComplete {
-            version: EVENT_VERSION,
-            success: true,
-            cancelled: false,
         };
         if let Ok(line) = start_ev.to_ndjson() {
             println!("{line}");
         }
-        if let Ok(line) = complete_ev.to_ndjson() {
+    }
+
+    let mut success_count = 0;
+    let mut error_count = 0;
+
+    for (mkv_dir, videos) in videos_by_dir {
+        let prep_opts = ReleasePreparationOptions {
+            fonts_override: args.fonts_dir.as_deref(),
+            assets_dir: args.assets_dir.as_deref(),
+            ..Default::default()
+        };
+        let prepared = prepare_release_directory(&mkv_dir, &input_dir, &videos, prep_opts);
+        let font_info = scan_fonts(&prepared.fonts_dir, None);
+
+        for video_file in videos {
+            let item_id = get_item_id(&video_file.path, &input_dir);
+            if args.events {
+                let item_start = JobEvent::ItemStart {
+                    version: EVENT_VERSION,
+                    id: item_id.clone(),
+                    file: video_file.name.clone(),
+                };
+                if let Ok(line) = item_start.to_ndjson() {
+                    println!("{line}");
+                }
+            }
+
+            let Some(parsed) = &video_file.parsed else {
+                eprintln!(
+                    "Skipping '{}': Could not extract episode number from filename.",
+                    video_file.name
+                );
+                if args.events {
+                    let item_comp = JobEvent::ItemComplete {
+                        version: EVENT_VERSION,
+                        id: item_id.clone(),
+                        file: video_file.name.clone(),
+                        status: ItemOutcome::Skipped,
+                        error: Some("Could not extract episode number".into()),
+                    };
+                    if let Ok(line) = item_comp.to_ndjson() {
+                        println!("{line}");
+                    }
+                }
+                continue;
+            };
+
+            let base = video_file
+                .path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "video".to_string());
+            let out_stem = output_stem(&base, &parsed.ep_type, &parsed.ep);
+            let out_dir_base = args
+                .out_dir
+                .clone()
+                .unwrap_or_else(|| mkv_dir.join("Output"));
+            let output_file = out_dir_base.join(format!("{out_stem}.mkv"));
+
+            let meta = if let Some(cached) = cache_opt.and_then(|c| c.get_path(&video_file.path)) {
+                cached
+            } else {
+                match probe_video(&video_file.path) {
+                    Ok(m) => {
+                        if let Some(c) = cache_opt {
+                            c.put_path(&video_file.path, m.clone());
+                        }
+                        m
+                    }
+                    Err(err) => {
+                        eprintln!(
+                            "  ERROR: Failed to probe '{}': {err}",
+                            video_file.path.display()
+                        );
+                        if args.events {
+                            let item_comp = JobEvent::ItemComplete {
+                                version: EVENT_VERSION,
+                                id: item_id.clone(),
+                                file: video_file.name.clone(),
+                                status: ItemOutcome::Error,
+                                error: Some(err),
+                            };
+                            if let Ok(line) = item_comp.to_ndjson() {
+                                println!("{line}");
+                            }
+                        }
+                        error_count += 1;
+                        continue;
+                    }
+                }
+            };
+
+            let inspected = InspectedVideo::new(meta);
+            let res_assets =
+                prepared
+                    .resolver
+                    .resolve_for(&video_file, Some(&inspected), None, None, None);
+
+            if !res_assets.matched_subtitle {
+                let reason = res_assets
+                    .skip_reason
+                    .unwrap_or_else(|| "No matching subtitle found".into());
+                eprintln!("Skipping '{}': {reason}", video_file.name);
+                if args.events {
+                    let item_comp = JobEvent::ItemComplete {
+                        version: EVENT_VERSION,
+                        id: item_id.clone(),
+                        file: video_file.name.clone(),
+                        status: ItemOutcome::Skipped,
+                        error: Some(reason),
+                    };
+                    if let Ok(line) = item_comp.to_ndjson() {
+                        println!("{line}");
+                    }
+                }
+                continue;
+            }
+
+            let job = PlannedJob {
+                video: video_file.path.clone(),
+                video_name: video_file.name.clone(),
+                base,
+                output_file,
+                subtitle_file: res_assets.subtitle_file,
+                subtitle_label: res_assets.subtitle_label,
+                subtitle_mkv_lang: res_assets.subtitle_mkv_lang,
+                chapter_file: res_assets.chapter_file,
+                cover_file: res_assets.cover_file,
+                embedded_sub_id: res_assets.embedded_sub_id,
+                use_source_fonts: font_info.count == 0,
+                release_dir: Some(mkv_dir.clone()),
+                item_id: item_id.clone(),
+            };
+
+            let selection = select_tracks(&inspected);
+
+            if args.dry_run {
+                println!(
+                    "[DRY-RUN] Would remux '{}' -> '{}'",
+                    video_file.name,
+                    job.output_file.display()
+                );
+                if args.events {
+                    let item_comp = JobEvent::ItemComplete {
+                        version: EVENT_VERSION,
+                        id: item_id.clone(),
+                        file: video_file.name.clone(),
+                        status: ItemOutcome::Completed,
+                        error: None,
+                    };
+                    if let Ok(line) = item_comp.to_ndjson() {
+                        println!("{line}");
+                    }
+                }
+                success_count += 1;
+                continue;
+            }
+
+            let ffmpeg_threads = args.ffmpeg_threads.unwrap_or(2) as usize;
+            match execute_remux_job(
+                &job,
+                &selection,
+                &font_info,
+                &args.bitrate,
+                args.complexity,
+                ffmpeg_threads,
+                args.sub_offset,
+            )
+            .await
+            {
+                Ok(summary) => {
+                    for line in summary.log {
+                        println!("{line}");
+                    }
+                    if args.events {
+                        let item_comp = JobEvent::ItemComplete {
+                            version: EVENT_VERSION,
+                            id: item_id.clone(),
+                            file: video_file.name.clone(),
+                            status: ItemOutcome::Completed,
+                            error: None,
+                        };
+                        if let Ok(line) = item_comp.to_ndjson() {
+                            println!("{line}");
+                        }
+                    }
+                    success_count += 1;
+                }
+                Err(err) => {
+                    eprintln!("  ERROR: Remux failed for '{}': {err}", video_file.name);
+                    if args.events {
+                        let item_comp = JobEvent::ItemComplete {
+                            version: EVENT_VERSION,
+                            id: item_id.clone(),
+                            file: video_file.name.clone(),
+                            status: ItemOutcome::Error,
+                            error: Some(err),
+                        };
+                        if let Ok(line) = item_comp.to_ndjson() {
+                            println!("{line}");
+                        }
+                    }
+                    error_count += 1;
+                }
+            }
+        }
+    }
+
+    if let Some(c) = cache_opt {
+        c.save_shared();
+    }
+
+    if args.events {
+        let batch_comp = JobEvent::BatchComplete {
+            version: EVENT_VERSION,
+            success: error_count == 0,
+            cancelled: false,
+        };
+        if let Ok(line) = batch_comp.to_ndjson() {
             println!("{line}");
         }
     } else {
         println!(
-            "Processed directory '{}' (dry-run: {})",
-            input_dir.display(),
-            args.dry_run
+            "Remux complete. Successfully processed {success_count} file(s) with {error_count} error(s)."
         );
     }
 
-    ExitCode::SUCCESS
+    if error_count == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
 }
