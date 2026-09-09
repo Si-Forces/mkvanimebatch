@@ -1,0 +1,172 @@
+name: Rust Unstable Release
+
+permissions:
+  contents: read
+
+on:
+  push:
+    tags:
+      - "rust-v*"
+      - "rust-*"
+  workflow_dispatch:
+    inputs:
+      version_tag:
+        description: "Release tag (e.g. rust-v0.1.0-unstable.1)"
+        required: true
+        default: "rust-v0.1.0-unstable.1"
+      prerelease:
+        description: "Mark as pre-release"
+        type: boolean
+        default: true
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ────────────────────────────────────────────────────────────────────────────
+  # 1. Compile native mkv-cli release binaries
+  # ────────────────────────────────────────────────────────────────────────────
+  build-binaries:
+    name: Build mkv-cli (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary_name: mkv-cli
+            archive_name: mkv-cli-x86_64-unknown-linux-gnu.tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary_name: mkv-cli.exe
+            archive_name: mkv-cli-x86_64-pc-windows-msvc.zip
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Compile mkv-cli (Release)
+        run: cargo build --release -p mkv-cli
+
+      - name: Package Linux Binary Archive
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p dist
+          cp target/release/${{ matrix.binary_name }} dist/
+          cd dist
+          tar -czvf ../${{ matrix.archive_name }} ${{ matrix.binary_name }}
+          cd ..
+          sha256sum ${{ matrix.archive_name }} > ${{ matrix.archive_name }}.sha256
+
+      - name: Package Windows Binary Archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          Copy-Item target/release/${{ matrix.binary_name }} dist/
+          Compress-Archive -Path dist/${{ matrix.binary_name }} -DestinationPath ${{ matrix.archive_name }} -Force
+          $hash = (Get-FileHash -Algorithm SHA256 ${{ matrix.archive_name }}).Hash.ToLower()
+          "$hash  ${{ matrix.archive_name }}" | Out-File -Encoding utf8 "${{ matrix.archive_name }}.sha256"
+
+      - name: Upload Binary Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}-binaries
+          path: |
+            ${{ matrix.archive_name }}
+            ${{ matrix.archive_name }}.sha256
+          if-no-files-found: error
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 2. Publish GitHub Pre-Release
+  # ────────────────────────────────────────────────────────────────────────────
+  publish-release:
+    name: Publish Unstable Pre-Release
+    needs: build-binaries
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve Release Tag
+        id: release-tag
+        env:
+          INPUT_TAG: ${{ inputs.version_tag }}
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=$INPUT_TAG" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download all built binary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Display release assets
+        run: |
+          ls -lh release-assets/
+
+      - name: Create GitHub Pre-Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release-tag.outputs.tag }}
+          name: "MKV Anime Batch Rust Engine (Early Unstable Preview) ${{ steps.release-tag.outputs.tag }}"
+          body: |
+            # ⚠️ Early Unstable Preview — Rust Media Engine
+
+            This is an early preview release of the pure Rust batch processing engine (`mkv-cli` / `mkv-core`) for `mkvanimebatch`.
+
+            > **Status**: Early testing / pre-release. Core heuristics, asset resolution, font deduplication, and inspection manifest generation are implemented.
+
+            ---
+
+            ### 📦 Included Standalone Executables
+
+            | Archive | Target | Platform |
+            |---|---|---|
+            | `mkv-cli-x86_64-unknown-linux-gnu.tar.gz` | Linux x86_64 | Ubuntu, Debian, Fedora, Arch, etc. |
+            | `mkv-cli-x86_64-pc-windows-msvc.zip` | Windows x86_64 | Windows 10, Windows 11 (64-bit) |
+
+            Each archive includes a `.sha256` checksum file for integrity verification.
+
+            ---
+
+            ### 🚀 Quick Start (CLI)
+
+            ```bash
+            # Inspect releases and generate Manifest v2 JSON
+            ./mkv-cli --input-dir "/path/to/anime/series" --plan
+
+            # Dry-run inspection
+            ./mkv-cli --input-dir "/path/to/anime/series" --dry-run
+            ```
+
+            ---
+
+            ### ⚙️ External Prerequisites
+            Ensure the following command-line tools are installed and in your `PATH`:
+            - `mkvmerge` (from MKVToolNix)
+            - `ffmpeg` (for Opus audio transcoding)
+          files: |
+            release-assets/*
+          draft: false
+          prerelease: ${{ github.event_name != 'workflow_dispatch' || inputs.prerelease }}
