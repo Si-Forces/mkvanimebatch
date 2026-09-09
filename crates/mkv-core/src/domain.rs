@@ -399,6 +399,14 @@ fn first_captured_group<'a>(caps: &'a fancy_regex::Captures<'a, str>) -> Option<
     None
 }
 
+fn last_fallback_ep(text: &str) -> Option<&str> {
+    EP_NUM_FALLBACK_RE
+        .captures_iter(text)
+        .flatten()
+        .filter_map(|m| m.get(1).map(|v| v.as_str()))
+        .last()
+}
+
 fn parse_typed_ep(name: &str, pattern: &FancyRegex) -> String {
     let Ok(Some(m)) = pattern.find(name) else {
         return "00".to_string();
@@ -418,15 +426,8 @@ fn parse_typed_ep(name: &str, pattern: &FancyRegex) -> String {
         }
     }
 
-    let mut last_match = None;
-    for m in EP_NUM_FALLBACK_RE.captures_iter(remainder).flatten() {
-        if let Some(val) = m.get(1) {
-            last_match = Some(val.as_str().to_string());
-        }
-    }
-
-    if let Some(val) = last_match {
-        return format_ep(&val);
+    if let Some(val) = last_fallback_ep(remainder) {
+        return format_ep(val);
     }
 
     "00".to_string()
@@ -495,15 +496,8 @@ pub fn parse_episode(name: &str) -> Option<EpisodeInfo> {
         }
     }
 
-    let mut last_match = None;
-    for m in EP_NUM_FALLBACK_RE.captures_iter(&normalized).flatten() {
-        if let Some(val) = m.get(1) {
-            last_match = Some(val.as_str().to_string());
-        }
-    }
-
-    if let Some(val) = last_match {
-        return Some(EpisodeInfo::new(season, "E", format_ep(&val)));
+    if let Some(val) = last_fallback_ep(&normalized) {
+        return Some(EpisodeInfo::new(season, "E", format_ep(val)));
     }
 
     None
