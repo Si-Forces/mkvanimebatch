@@ -2,5 +2,9 @@
 
 pub mod assets;
 pub mod domain;
+pub mod extract;
 pub mod fonts;
+pub mod manifest;
+pub mod pipeline;
+pub mod remux;
 pub mod scan;
