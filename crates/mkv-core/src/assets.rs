@@ -151,35 +151,23 @@ fn reject_duplicate(
         if existing_season != season {
             continue;
         }
+        let parent_name = path
+            .parent()
+            .and_then(|p| p.file_name())
+            .map(|s| s.to_string_lossy())
+            .unwrap_or_default();
+        let existing_name = existing_path
+            .file_name()
+            .map(|s| s.to_string_lossy())
+            .unwrap_or_default();
+        let path_name = path
+            .file_name()
+            .map(|s| s.to_string_lossy())
+            .unwrap_or_default();
+
         if existing_path.parent() == path.parent() {
-            let parent_name = path
-                .parent()
-                .and_then(|p| p.file_name())
-                .map(|s| s.to_string_lossy())
-                .unwrap_or_default();
-            let existing_name = existing_path
-                .file_name()
-                .map(|s| s.to_string_lossy())
-                .unwrap_or_default();
-            let path_name = path
-                .file_name()
-                .map(|s| s.to_string_lossy())
-                .unwrap_or_default();
             warn!("{warning}: key {key} in '{parent_name}': keeping '{existing_name}', ignoring '{path_name}'");
         } else {
-            let parent_name = path
-                .parent()
-                .and_then(|p| p.file_name())
-                .map(|s| s.to_string_lossy())
-                .unwrap_or_default();
-            let existing_name = existing_path
-                .file_name()
-                .map(|s| s.to_string_lossy())
-                .unwrap_or_default();
-            let path_name = path
-                .file_name()
-                .map(|s| s.to_string_lossy())
-                .unwrap_or_default();
             let parent_display = path
                 .parent()
                 .map(|p| p.display().to_string())
@@ -307,6 +295,14 @@ impl SubIndex {
 
 // ─── CHAPTER INDEX ───────────────────────────────────────────────────────────
 
+fn find_matching_season_path(
+    entries: &[(PathBuf, String)],
+    target_season: &str,
+) -> Option<PathBuf> {
+    entries
+        .iter()
+        .find_map(|(path, season)| seasons_match(target_season, season).then(|| path.clone()))
+}
 #[derive(Debug, Clone, Default)]
 pub struct ChapterIndex {
     index: HashMap<String, Vec<(PathBuf, String)>>,
@@ -345,14 +341,7 @@ impl ChapterIndex {
 
     pub fn lookup(&self, parsed: &EpisodeInfo) -> Option<PathBuf> {
         let key = ep_key(parsed);
-        if let Some(entries) = self.index.get(&key) {
-            for (path, season) in entries {
-                if seasons_match(&parsed.season, season) {
-                    return Some(path.clone());
-                }
-            }
-        }
-        None
+        find_matching_season_path(self.index.get(&key)?, &parsed.season)
     }
 
     pub fn has_match(&self, parsed: &EpisodeInfo) -> bool {
@@ -448,16 +437,12 @@ impl CoverIndex {
 
     pub fn lookup(&self, parsed: &EpisodeInfo) -> Option<PathBuf> {
         let key = ep_key(parsed);
-        if let Some(entries) = self.index.get(&key) {
-            for (path, season) in entries {
-                if seasons_match(&parsed.season, season) {
-                    return Some(path.clone());
-                }
-            }
-        }
-        self.global.clone()
+        let matched = self
+            .index
+            .get(&key)
+            .and_then(|entries| find_matching_season_path(entries, &parsed.season));
+        matched.or_else(|| self.global.clone())
     }
-
     pub fn indexed_count(&self) -> usize {
         self.index.values().map(|v| v.len()).sum()
     }
@@ -490,6 +475,53 @@ struct SubResolution {
     lang: String,
     matched: bool,
     skip_reason: Option<String>,
+}
+
+impl SubResolution {
+    fn from_assigned(assigned: &Path) -> Self {
+        let stem = assigned
+            .file_stem()
+            .map(|s| s.to_string_lossy())
+            .unwrap_or_default();
+        let sub_lang = detect_sub_lang(&stem);
+        Self {
+            subtitle_file: Some(assigned.to_path_buf()),
+            embedded_sub_id: None,
+            lang: sub_lang,
+            matched: true,
+            skip_reason: None,
+        }
+    }
+
+    fn external(path: PathBuf, lang: String) -> Self {
+        Self {
+            subtitle_file: Some(path),
+            embedded_sub_id: None,
+            lang,
+            matched: true,
+            skip_reason: None,
+        }
+    }
+
+    fn embedded(track_id: u32, lang: String) -> Self {
+        Self {
+            subtitle_file: None,
+            embedded_sub_id: Some(track_id),
+            lang,
+            matched: true,
+            skip_reason: None,
+        }
+    }
+
+    fn unmatched(reason: impl Into<String>) -> Self {
+        Self {
+            subtitle_file: None,
+            embedded_sub_id: None,
+            lang: "und".to_string(),
+            matched: false,
+            skip_reason: Some(reason.into()),
+        }
+    }
 }
 
 fn populate_indices(
@@ -645,29 +677,12 @@ impl AssetResolver {
     ) -> SubResolution {
         // 1. Explicit human assignment overrides everything (ADR 0004)
         if let Some(assigned) = assigned_subtitle {
-            let stem = assigned
-                .file_stem()
-                .map(|s| s.to_string_lossy())
-                .unwrap_or_default();
-            let sub_lang = detect_sub_lang(&stem);
-            return SubResolution {
-                subtitle_file: Some(assigned.to_path_buf()),
-                embedded_sub_id: None,
-                lang: sub_lang,
-                matched: true,
-                skip_reason: None,
-            };
+            return SubResolution::from_assigned(assigned);
         }
 
         // 2. Local subtitle from release directory / ancestor chain (ADR 0004)
         if let Some((sub_path, lang)) = self.sub_index.lookup(parsed, video.path.parent()) {
-            return SubResolution {
-                subtitle_file: Some(sub_path),
-                embedded_sub_id: None,
-                lang,
-                matched: true,
-                skip_reason: None,
-            };
+            return SubResolution::external(sub_path, lang);
         }
 
         // 3. Embedded track from source video (ADR 0004)
@@ -675,26 +690,14 @@ impl AssetResolver {
             if let Some((track_id, lang, _)) =
                 select_best_subtitle_track(&insp.subtitle_tracks(), None)
             {
-                return SubResolution {
-                    subtitle_file: None,
-                    embedded_sub_id: Some(track_id),
-                    lang,
-                    matched: true,
-                    skip_reason: None,
-                };
+                return SubResolution::embedded(track_id, lang);
             }
         }
 
         // 4. Fallback assets directory (ADR 0004)
         if let Some(ref fb_sub) = self.fallback_sub_index {
             if let Some((sub_path, lang)) = fb_sub.lookup(parsed, video.path.parent()) {
-                return SubResolution {
-                    subtitle_file: Some(sub_path),
-                    embedded_sub_id: None,
-                    lang,
-                    matched: true,
-                    skip_reason: None,
-                };
+                return SubResolution::external(sub_path, lang);
             }
         }
 
@@ -704,31 +707,19 @@ impl AssetResolver {
         } else {
             "subtitle files found but none matched"
         };
-
-        SubResolution {
-            subtitle_file: None,
-            embedded_sub_id: None,
-            lang: "und".to_string(),
-            matched: false,
-            skip_reason: Some(skip_reason.to_string()),
-        }
+        SubResolution::unmatched(skip_reason)
     }
 
     pub fn resolve_cov(&self, parsed: &EpisodeInfo, has_source_cover: bool) -> Option<PathBuf> {
-        // Local cover index takes precedence
         if let Some(cov) = self.cover_index.lookup(parsed) {
             return Some(cov);
         }
-
-        // Fallback cover index is only used if video has NO source cover
         if !has_source_cover {
-            if let Some(ref fb_cov) = self.fallback_cover_index {
-                if let Some(cov) = fb_cov.lookup(parsed) {
-                    return Some(cov);
-                }
-            }
+            return self
+                .fallback_cover_index
+                .as_ref()
+                .and_then(|fb| fb.lookup(parsed));
         }
-
         None
     }
 
@@ -738,27 +729,17 @@ impl AssetResolver {
         has_source_chapters: bool,
         claimed_chapter: Option<&Path>,
     ) -> Option<PathBuf> {
-        // 1. External match in chap_index
         if let Some(chap) = self.chap_index.lookup(parsed) {
             return Some(chap);
         }
-
-        // 2. Sole leftover chapter claim (only if no source chapters)
-        if let Some(claimed) = claimed_chapter {
-            if !has_source_chapters {
+        if !has_source_chapters {
+            if let Some(claimed) = claimed_chapter {
                 return Some(claimed.to_path_buf());
             }
-        }
-
-        // 3. Fallback chapter index (only if no source chapters)
-        if !has_source_chapters {
             if let Some(ref fb_chap) = self.fallback_chap_index {
-                if let Some(chap) = fb_chap.lookup(parsed) {
-                    return Some(chap);
-                }
+                return fb_chap.lookup(parsed);
             }
         }
-
         None
     }
 
@@ -790,27 +771,9 @@ impl AssetResolver {
             let cov = self.resolve_cov(parsed, has_source_cover);
             (sub, chap, cov)
         } else {
-            let sub = if let Some(assigned) = assigned_subtitle {
-                let stem = assigned
-                    .file_stem()
-                    .map(|s| s.to_string_lossy())
-                    .unwrap_or_default();
-                let sub_lang = detect_sub_lang(&stem);
-                SubResolution {
-                    subtitle_file: Some(assigned.to_path_buf()),
-                    embedded_sub_id: None,
-                    lang: sub_lang,
-                    matched: true,
-                    skip_reason: None,
-                }
-            } else {
-                SubResolution {
-                    subtitle_file: None,
-                    embedded_sub_id: None,
-                    lang: "und".to_string(),
-                    matched: false,
-                    skip_reason: Some("unparsed episode".to_string()),
-                }
+            let sub = match assigned_subtitle {
+                Some(assigned) => SubResolution::from_assigned(assigned),
+                None => SubResolution::unmatched("unparsed episode"),
             };
             let cov = if !has_source_cover {
                 self.cover_index.global.clone()

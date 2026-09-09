@@ -107,22 +107,27 @@ pub fn is_chapter_xml(path: &Path) -> bool {
     CHAPTER_TAG_RE.is_match(&buf[..n])
 }
 
+fn path_ext_lower(path: &Path) -> String {
+    path.extension()
+        .map(|e| format!(".{}", e.to_string_lossy().to_lowercase()))
+        .unwrap_or_default()
+}
+
+fn path_stem_lower(path: &Path) -> String {
+    path.file_stem()
+        .map(|s| s.to_string_lossy().to_lowercase())
+        .unwrap_or_default()
+}
+
 /// Returns true if the file stem is "cover" (case-insensitive) and the extension
 /// is in `COVER_EXTENSIONS`.
 pub fn is_cover_filename(file_name: &str) -> bool {
     let p = Path::new(file_name);
-    let ext = p
-        .extension()
-        .map(|e| format!(".{}", e.to_string_lossy().to_lowercase()))
-        .unwrap_or_default();
+    let ext = path_ext_lower(p);
     if !COVER_EXTENSIONS.contains(&ext.as_str()) {
         return false;
     }
-    let stem = p
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
-    stem == "cover"
+    path_stem_lower(p) == "cover"
 }
 
 /// Returns true if the attachment filename or content-type indicates a cover image.
@@ -133,21 +138,13 @@ pub fn is_cover_attachment(file_name: &str, content_type: &str) -> bool {
     if !content_type.to_lowercase().starts_with("image/") {
         return false;
     }
-    let p = Path::new(file_name);
-    let stem = p
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
+    let stem = path_stem_lower(Path::new(file_name));
     COVER_LIKE_STEMS.contains(stem.as_str())
 }
 
 /// Returns true if the attachment filename extension or content-type indicates a font.
 pub fn is_font_attachment(file_name: &str, content_type: &str) -> bool {
-    let p = Path::new(file_name);
-    let ext = p
-        .extension()
-        .map(|e| format!(".{}", e.to_string_lossy().to_lowercase()))
-        .unwrap_or_default();
+    let ext = path_ext_lower(Path::new(file_name));
     if FONT_EXTENSIONS.contains(&ext.as_str()) {
         return true;
     }
@@ -379,10 +376,7 @@ pub fn scan_assets(
             if path.file_name().and_then(|s| s.to_str()).is_none() {
                 continue;
             }
-            let ext = path
-                .extension()
-                .map(|e| format!(".{}", e.to_string_lossy().to_lowercase()))
-                .unwrap_or_default();
+            let ext = path_ext_lower(&path);
 
             if ext == ".mkv" {
                 videos.push(create_parsed_file(&path));
@@ -391,10 +385,7 @@ pub fn scan_assets(
             } else if ext == ".xml" && is_chapter_xml(&path) {
                 chapters.push(create_parsed_file(&path));
             } else if COVER_EXTENSIONS.contains(&ext.as_str()) {
-                let stem = path
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().to_lowercase())
-                    .unwrap_or_default();
+                let stem = path_stem_lower(&path);
                 if stem == "cover" || stem.ends_with("_cover") {
                     covers.push(create_parsed_file(&path));
                 }
@@ -517,6 +508,18 @@ pub fn get_default_cache_file() -> PathBuf {
     get_default_cache_dir().join("inspect_cache.json")
 }
 
+fn path_size_and_mtime_ns(path: &Path) -> Option<(u64, u128)> {
+    let meta = path.metadata().ok()?;
+    let size = meta.len();
+    let mtime_ns = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    Some((size, mtime_ns))
+}
+
 /// Thread-safe persistent JSON cache for mkvmerge inspection metadata keyed on (path, size, mtime).
 pub struct PersistentInspectCache {
     pub cache_file: PathBuf,
@@ -615,18 +618,8 @@ impl PersistentInspectCache {
     }
 
     pub fn get_path(&self, path: &Path) -> Option<MkvmergeMetadata> {
-        if let Ok(meta) = path.metadata() {
-            let size = meta.len();
-            let mtime_ns = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
-                .map(|d| d.as_nanos())
-                .unwrap_or(0);
-            self.get(path, size, mtime_ns)
-        } else {
-            None
-        }
+        let (size, mtime_ns) = path_size_and_mtime_ns(path)?;
+        self.get(path, size, mtime_ns)
     }
 
     pub fn put(&self, path: &Path, size: u64, mtime_ns: u128, data: MkvmergeMetadata) {
@@ -647,14 +640,7 @@ impl PersistentInspectCache {
     }
 
     pub fn put_path(&self, path: &Path, data: MkvmergeMetadata) {
-        if let Ok(meta) = path.metadata() {
-            let size = meta.len();
-            let mtime_ns = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
-                .map(|d| d.as_nanos())
-                .unwrap_or(0);
+        if let Some((size, mtime_ns)) = path_size_and_mtime_ns(path) {
             self.put(path, size, mtime_ns, data);
         }
     }

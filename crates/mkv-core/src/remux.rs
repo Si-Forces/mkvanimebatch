@@ -109,34 +109,26 @@ pub fn build_mkvmerge_args(
         args.push("--no-chapters".to_string());
     }
 
-    if job.subtitle_file.is_none() {
-        if let Some(sid) = job.embedded_sub_id {
+    match (&job.subtitle_file, job.embedded_sub_id) {
+        (None, Some(sid)) => {
             args.push("--subtitle-tracks".to_string());
             args.push(sid.to_string());
             args.extend(format_sync_args(sid, sub_offset));
-        } else {
-            args.push("--no-subtitles".to_string());
         }
-    } else {
-        args.push("--no-subtitles".to_string());
+        _ => args.push("--no-subtitles".to_string()),
     }
 
-    if temp_opus.is_none() {
-        if let Some(audio_id) = selection.audio_id {
+    match (temp_opus, selection.audio_id) {
+        (None, Some(audio_id)) => {
             args.push("--audio-tracks".to_string());
             args.push(audio_id.to_string());
-        } else {
-            args.push("--no-audio".to_string());
         }
-    } else {
-        args.push("--no-audio".to_string());
+        _ => args.push("--no-audio".to_string()),
     }
 
     let mut keep_ids: Vec<u32> = Vec::new();
     if job.cover_file.is_none() {
-        if let Some(cover_id) = selection.source_cover_id {
-            keep_ids.push(cover_id);
-        }
+        keep_ids.extend(selection.source_cover_id);
     }
     if job.use_source_fonts {
         keep_ids.extend(&selection.source_font_ids);
