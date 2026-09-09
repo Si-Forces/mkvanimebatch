@@ -1,7 +1,7 @@
 name: Rust Unstable Release
 
 permissions:
-  contents: read
+  contents: write
 
 on:
   push:
@@ -25,23 +25,11 @@ concurrency:
 
 jobs:
   # ────────────────────────────────────────────────────────────────────────────
-  # 1. Compile native mkv-cli release binaries
+  # 1. Desktop GUI & CLI Build — Windows
   # ────────────────────────────────────────────────────────────────────────────
-  build-binaries:
-    name: Build mkv-cli (${{ matrix.target }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            binary_name: mkv-cli
-            archive_name: mkv-cli-x86_64-unknown-linux-gnu.tar.gz
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            binary_name: mkv-cli.exe
-            archive_name: mkv-cli-x86_64-pc-windows-msvc.zip
+  build-windows:
+    name: Build & Release — Windows
+    runs-on: windows-latest
 
     steps:
       - name: Checkout repository
@@ -50,82 +38,110 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: x86_64-pc-windows-msvc
 
-      - name: Cache Cargo dependencies
+      - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          key: x86_64-pc-windows-msvc
 
       - name: Compile mkv-cli (Release)
         run: cargo build --release -p mkv-cli
 
-      - name: Package Linux Binary Archive
-        if: runner.os == 'Linux'
-        run: |
-          mkdir -p dist
-          cp target/release/${{ matrix.binary_name }} dist/
-          cd dist
-          tar -czvf ../${{ matrix.archive_name }} ${{ matrix.binary_name }}
-          cd ..
-          sha256sum ${{ matrix.archive_name }} > ${{ matrix.archive_name }}.sha256
-
-      - name: Package Windows Binary Archive
-        if: runner.os == 'Windows'
+      - name: Populate Tauri sidecars from native mkv-cli
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path dist
-          Copy-Item target/release/${{ matrix.binary_name }} dist/
-          Compress-Archive -Path dist/${{ matrix.binary_name }} -DestinationPath ${{ matrix.archive_name }} -Force
-          $hash = (Get-FileHash -Algorithm SHA256 ${{ matrix.archive_name }}).Hash.ToLower()
-          "$hash  ${{ matrix.archive_name }}" | Out-File -Encoding utf8 "${{ matrix.archive_name }}.sha256"
+          $Binaries = "desktop-tauri/src-tauri/binaries"
+          New-Item -ItemType Directory -Force -Path $Binaries | Out-Null
+          Copy-Item target\release\mkv-cli.exe "$Binaries\mkv-remux-x86_64-pc-windows-msvc.exe" -Force
+          Copy-Item target\release\mkv-cli.exe "$Binaries\mkv-extract-x86_64-pc-windows-msvc.exe" -Force
 
-      - name: Upload Binary Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.target }}-binaries
-          path: |
-            ${{ matrix.archive_name }}
-            ${{ matrix.archive_name }}.sha256
-          if-no-files-found: error
+      - name: Smoke-test sidecars
+        shell: pwsh
+        run: |
+          $Binaries = "desktop-tauri/src-tauri/binaries"
+          $Remux = Join-Path $Binaries "mkv-remux-x86_64-pc-windows-msvc.exe"
+          $Extract = Join-Path $Binaries "mkv-extract-x86_64-pc-windows-msvc.exe"
+          if ((Get-Item $Remux).Length -eq 0 -or (Get-Item $Extract).Length -eq 0) {
+            throw "Built sidecar is empty"
+          }
+          & $Remux --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "mkv-remux --help failed" }
+          & $Extract --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "mkv-extract --help failed" }
+          $Empty = Join-Path $env:RUNNER_TEMP "empty-release"
+          New-Item -ItemType Directory -Force -Path $Empty | Out-Null
+          $Manifest = (& $Remux --plan --no-cache --input-dir $Empty) | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $Manifest.version -ne 2 -or $Manifest.items.Count -ne 0) {
+            throw "mkv-remux empty-directory plan contract failed"
+          }
 
-  # ────────────────────────────────────────────────────────────────────────────
-  # 2. Publish GitHub Pre-Release
-  # ────────────────────────────────────────────────────────────────────────────
-  publish-release:
-    name: Publish Unstable Pre-Release
-    needs: build-binaries
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
+      - name: Package Windows CLI Archive
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target\release\mkv-cli.exe dist\
+          Compress-Archive -Path dist\mkv-cli.exe -DestinationPath mkv-cli-x86_64-pc-windows-msvc.zip -Force
+          $hash = (Get-FileHash -Algorithm SHA256 mkv-cli-x86_64-pc-windows-msvc.zip).Hash.ToLower()
+          "$hash  mkv-cli-x86_64-pc-windows-msvc.zip" | Out-File -Encoding utf8 "mkv-cli-x86_64-pc-windows-msvc.zip.sha256"
 
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Build Tauri app
+        working-directory: desktop-tauri
+        run: cargo tauri build --no-bundle
+
+      # ── Package Windows Artifacts (Portable Zip & Standalone Exe) ────────────
+      - name: Package Windows Desktop Artifacts
+        shell: pwsh
+        run: |
+          $ReleaseDir = "desktop-tauri/src-tauri/target/release"
+          $OutDir     = "windows-artifacts"
+          $StageDir   = "mkv-anime-batch-windows-x64"
+
+          New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
+          New-Item -ItemType Directory -Force -Path $StageDir | Out-Null
+
+          # Copy single self-contained standalone executable
+          Copy-Item "$ReleaseDir\mkv-anime-batch.exe" "$OutDir\mkv-anime-batch.exe" -Force
+
+          # Copy main executable and sidecars into portable package
+          Copy-Item "$ReleaseDir\mkv-anime-batch.exe" "$StageDir\" -Force
+          Copy-Item "desktop-tauri/src-tauri/binaries\mkv-remux-x86_64-pc-windows-msvc.exe" "$StageDir\" -Force
+          Copy-Item "desktop-tauri/src-tauri/binaries\mkv-extract-x86_64-pc-windows-msvc.exe" "$StageDir\" -Force
+
+          # Create Portable Zip
+          Compress-Archive -Path "$StageDir\*" -DestinationPath "$OutDir\MKV_Anime_Batch_Portable_win64.zip" -Force
+
+          foreach ($Artifact in @(
+            "$OutDir\mkv-anime-batch.exe",
+            "$StageDir\mkv-remux-x86_64-pc-windows-msvc.exe",
+            "$StageDir\mkv-extract-x86_64-pc-windows-msvc.exe",
+            "$OutDir\MKV_Anime_Batch_Portable_win64.zip",
+            "mkv-cli-x86_64-pc-windows-msvc.zip",
+            "mkv-cli-x86_64-pc-windows-msvc.zip.sha256"
+          )) {
+            if (-not (Test-Path $Artifact) -or (Get-Item $Artifact).Length -eq 0) {
+              throw "Missing or empty packaged artifact: $Artifact"
+            }
+          }
 
       - name: Resolve Release Tag
         id: release-tag
+        shell: bash
         env:
           INPUT_TAG: ${{ inputs.version_tag }}
-        shell: bash
+          REF_NAME: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             echo "tag=$INPUT_TAG" >> "$GITHUB_OUTPUT"
           else
-            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+            echo "tag=$REF_NAME" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Download all built binary artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: release-assets
-          merge-multiple: true
-
-      - name: Display release assets
-        run: |
-          ls -lh release-assets/
-
-      - name: Create GitHub Pre-Release
+      - name: Publish Windows files to release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.release-tag.outputs.tag }}
@@ -133,20 +149,30 @@ jobs:
           body: |
             # ⚠️ Early Unstable Preview — Rust Media Engine
 
-            This is an early preview release of the pure Rust batch processing engine (`mkv-cli` / `mkv-core`) for `mkvanimebatch`.
+            This is an early preview release of the pure Rust batch processing engine (`mkv-cli` / `mkv-core`) and desktop application for `mkvanimebatch`.
 
             > **Status**: Early testing / pre-release. Core heuristics, asset resolution, font deduplication, and inspection manifest generation are implemented.
 
             ---
 
-            ### 📦 Included Standalone Executables
+            ### 🪟 Windows
 
-            | Archive | Target | Platform |
-            |---|---|---|
-            | `mkv-cli-x86_64-unknown-linux-gnu.tar.gz` | Linux x86_64 | Ubuntu, Debian, Fedora, Arch, etc. |
-            | `mkv-cli-x86_64-pc-windows-msvc.zip` | Windows x86_64 | Windows 10, Windows 11 (64-bit) |
+            | File | Description |
+            |------|-------------|
+            | `mkv-anime-batch.exe` | Single self-contained standalone desktop GUI executable |
+            | `MKV_Anime_Batch_Portable_win64.zip` | Portable Zip package (GUI + bundled sidecars) |
+            | `mkv-cli-x86_64-pc-windows-msvc.zip` | Standalone native CLI executable (includes `.sha256`) |
 
-            Each archive includes a `.sha256` checksum file for integrity verification.
+            ---
+
+            ### 🐧 Linux
+
+            | File | Description |
+            |------|-------------|
+            | `MKV_Anime_Batch_*_amd64.AppImage` | Universal AppImage — works on any modern Linux distro |
+            | `MKV_Anime_Batch_*_amd64.deb` | Debian / Ubuntu package |
+            | `MKV_Anime_Batch_*_x86_64.rpm` | Fedora / RedHat / SUSE package |
+            | `mkv-cli-x86_64-unknown-linux-gnu.tar.gz` | Standalone native CLI executable (includes `.sha256`) |
 
             ---
 
@@ -167,6 +193,187 @@ jobs:
             - `mkvmerge` (from MKVToolNix)
             - `ffmpeg` (for Opus audio transcoding)
           files: |
-            release-assets/*
+            windows-artifacts/mkv-anime-batch.exe
+            windows-artifacts/MKV_Anime_Batch_Portable_win64.zip
+            mkv-cli-x86_64-pc-windows-msvc.zip
+            mkv-cli-x86_64-pc-windows-msvc.zip.sha256
+          draft: false
+          prerelease: ${{ github.event_name != 'workflow_dispatch' || inputs.prerelease }}
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 2. Desktop GUI & CLI Build — Linux
+  # ────────────────────────────────────────────────────────────────────────────
+  build-linux:
+    name: Build & Release — Linux
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── Linux system deps ─────────────────────────────────────────────────────
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            build-essential curl wget file rpm \
+            libssl-dev \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      # ── Rust + Tauri ─────────────────────────────────────────────────────────
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: x86_64-unknown-linux-gnu
+
+      - name: Compile mkv-cli (Release)
+        run: cargo build --release -p mkv-cli
+
+      - name: Populate Tauri sidecars from native mkv-cli
+        run: |
+          mkdir -p desktop-tauri/src-tauri/binaries
+          cp target/release/mkv-cli desktop-tauri/src-tauri/binaries/mkv-remux-x86_64-unknown-linux-gnu
+          cp target/release/mkv-cli desktop-tauri/src-tauri/binaries/mkv-extract-x86_64-unknown-linux-gnu
+          chmod +x desktop-tauri/src-tauri/binaries/mkv-*
+
+      - name: Smoke-test sidecars
+        run: |
+          BINARIES="desktop-tauri/src-tauri/binaries"
+          REMUX="$BINARIES/mkv-remux-x86_64-unknown-linux-gnu"
+          EXTRACT="$BINARIES/mkv-extract-x86_64-unknown-linux-gnu"
+          test -s "$REMUX"
+          test -s "$EXTRACT"
+          "$REMUX" --help >/dev/null
+          "$EXTRACT" --help >/dev/null
+          EMPTY="$(mktemp -d)"
+          trap 'rm -rf "$EMPTY"' EXIT
+          "$REMUX" --plan --no-cache --input-dir "$EMPTY" > "$EMPTY/manifest.json"
+          python3 -c 'import json, pathlib, sys; m=json.loads(pathlib.Path(sys.argv[1]).read_text()); assert m == {"version": 2, "subtitle_candidates": {}, "items": []}' "$EMPTY/manifest.json"
+
+      - name: Package Linux CLI Archive
+        run: |
+          mkdir -p dist
+          cp target/release/mkv-cli dist/
+          cd dist
+          tar -czvf ../mkv-cli-x86_64-unknown-linux-gnu.tar.gz mkv-cli
+          cd ..
+          sha256sum mkv-cli-x86_64-unknown-linux-gnu.tar.gz > mkv-cli-x86_64-unknown-linux-gnu.tar.gz.sha256
+
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Build Tauri app
+        working-directory: desktop-tauri
+        run: cargo tauri build --config src-tauri/tauri.linux.conf.json --bundles appimage,deb,rpm
+
+      # ── Flatten + Collect Bundles ────────────────────────────────────────────
+      - name: Collect Linux bundles
+        run: |
+          mkdir -p /tmp/linux-release
+          find desktop-tauri/src-tauri/target/release/bundle/appimage -name "*.AppImage" -exec cp {} /tmp/linux-release/ \;
+          find desktop-tauri/src-tauri/target/release/bundle/deb -name "*.deb" -exec cp {} /tmp/linux-release/ \;
+          find desktop-tauri/src-tauri/target/release/bundle/rpm -name "*.rpm" -exec cp {} /tmp/linux-release/ \;
+
+      - name: Verify bundled sidecars
+        run: |
+          DEB="$(find /tmp/linux-release -name '*.deb' -print -quit)"
+          RPM="$(find /tmp/linux-release -name '*.rpm' -print -quit)"
+          APPIMAGE="$(find /tmp/linux-release -name '*.AppImage' -print -quit)"
+          test -n "$DEB" && test -n "$RPM" && test -n "$APPIMAGE"
+
+          dpkg-deb --contents "$DEB" > /tmp/deb-contents.txt
+          grep -q 'mkv-remux' /tmp/deb-contents.txt
+          grep -q 'mkv-extract' /tmp/deb-contents.txt
+
+          rpm -qlp "$RPM" > /tmp/rpm-contents.txt
+          grep -q 'mkv-remux' /tmp/rpm-contents.txt
+          grep -q 'mkv-extract' /tmp/rpm-contents.txt
+
+          chmod +x "$APPIMAGE"
+          mkdir -p /tmp/appimage-contents
+          (cd /tmp/appimage-contents && "$APPIMAGE" --appimage-extract >/dev/null)
+          find /tmp/appimage-contents/squashfs-root -name 'mkv-remux*' -print -quit | grep -q .
+          find /tmp/appimage-contents/squashfs-root -name 'mkv-extract*' -print -quit | grep -q .
+
+      - name: Resolve Release Tag
+        id: release-tag
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.version_tag }}
+          REF_NAME: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "tag=$INPUT_TAG" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=$REF_NAME" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish Linux bundles to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release-tag.outputs.tag }}
+          name: "MKV Anime Batch Rust Engine (Early Unstable Preview) ${{ steps.release-tag.outputs.tag }}"
+          body: |
+            # ⚠️ Early Unstable Preview — Rust Media Engine
+
+            This is an early preview release of the pure Rust batch processing engine (`mkv-cli` / `mkv-core`) and desktop application for `mkvanimebatch`.
+
+            > **Status**: Early testing / pre-release. Core heuristics, asset resolution, font deduplication, and inspection manifest generation are implemented.
+
+            ---
+
+            ### 🪟 Windows
+
+            | File | Description |
+            |------|-------------|
+            | `mkv-anime-batch.exe` | Single self-contained standalone desktop GUI executable |
+            | `MKV_Anime_Batch_Portable_win64.zip` | Portable Zip package (GUI + bundled sidecars) |
+            | `mkv-cli-x86_64-pc-windows-msvc.zip` | Standalone native CLI executable (includes `.sha256`) |
+
+            ---
+
+            ### 🐧 Linux
+
+            | File | Description |
+            |------|-------------|
+            | `MKV_Anime_Batch_*_amd64.AppImage` | Universal AppImage — works on any modern Linux distro |
+            | `MKV_Anime_Batch_*_amd64.deb` | Debian / Ubuntu package |
+            | `MKV_Anime_Batch_*_x86_64.rpm` | Fedora / RedHat / SUSE package |
+            | `mkv-cli-x86_64-unknown-linux-gnu.tar.gz` | Standalone native CLI executable (includes `.sha256`) |
+
+            ---
+
+            ### 🚀 Quick Start (CLI)
+
+            ```bash
+            # Inspect releases and generate Manifest v2 JSON
+            ./mkv-cli --input-dir "/path/to/anime/series" --plan
+
+            # Dry-run inspection
+            ./mkv-cli --input-dir "/path/to/anime/series" --dry-run
+            ```
+
+            ---
+
+            ### ⚙️ External Prerequisites
+            Ensure the following command-line tools are installed and in your `PATH`:
+            - `mkvmerge` (from MKVToolNix)
+            - `ffmpeg` (for Opus audio transcoding)
+          files: |
+            /tmp/linux-release/*.AppImage
+            /tmp/linux-release/*.deb
+            /tmp/linux-release/*.rpm
+            mkv-cli-x86_64-unknown-linux-gnu.tar.gz
+            mkv-cli-x86_64-unknown-linux-gnu.tar.gz.sha256
           draft: false
           prerelease: ${{ github.event_name != 'workflow_dispatch' || inputs.prerelease }}
