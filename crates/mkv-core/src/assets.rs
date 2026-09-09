@@ -105,14 +105,6 @@ pub fn prepare_release_directory(
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum InteractionMode {
-    #[default]
-    Interactive,
-    DryRun,
-    NonInteractive,
-}
-
 // ─── ASSET INDICES (Subtitles, Chapters, Covers) ─────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -675,9 +667,16 @@ impl AssetResolver {
         all_subs: &[PathBuf],
         assigned_subtitle: Option<&Path>,
     ) -> SubResolution {
-        // 1. Explicit human assignment overrides everything (ADR 0004)
+        // 1. Explicit human assignment overrides everything (ADR 0004),
+        // but a stale path at run time falls back to automatic matching (ADR 0001, ADR 0004).
         if let Some(assigned) = assigned_subtitle {
-            return SubResolution::from_assigned(assigned);
+            if assigned.is_file() {
+                return SubResolution::from_assigned(assigned);
+            }
+            warn!(
+                "Assigned subtitle '{}' no longer exists — falling back to automatic matching",
+                assigned.display()
+            );
         }
 
         // 2. Local subtitle from release directory / ancestor chain (ADR 0004)

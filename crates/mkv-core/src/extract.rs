@@ -6,16 +6,8 @@ use tokio::process::Command;
 use crate::domain::{
     ep_type_label, parse_episode, select_best_subtitle_track, EpisodeInfo, COVER_EXTENSIONS,
 };
-use crate::fonts::{FontClaim, FontManager};
+use crate::fonts::{FontClaim, FontRegistry};
 use crate::scan::InspectedVideo;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExtractTarget {
-    pub cmd_type: String, // "tracks", "chapters", "attachments"
-    pub arg_id: Option<u32>,
-    pub final_path: PathBuf,
-    pub item_name: String,
-}
 
 #[derive(Debug, Default, Clone)]
 pub struct ExtractSummary {
@@ -79,7 +71,7 @@ pub fn build_mkvextract_args(
 pub async fn extract_mkv_file(
     mkv_path: &Path,
     inspected: &InspectedVideo,
-    font_manager: &FontManager,
+    font_manager: &FontRegistry,
     out_dir: Option<&Path>,
 ) -> Result<ExtractSummary, String> {
     let mut summary = ExtractSummary {
@@ -197,11 +189,11 @@ pub async fn extract_mkv_file(
             extract_args.push(format!("{aid}:{}", claim.staging_path.display()));
         }
     }
-    let output = match Command::new("mkvextract")
-        .args(&extract_args)
-        .output()
-        .await
-    {
+
+    let mut cmd = Command::new("mkvextract");
+    cmd.kill_on_drop(true);
+    cmd.args(&extract_args);
+    let output = match cmd.output().await {
         Ok(out) => out,
         Err(e) => {
             for (_, mut claim) in font_claims {
@@ -213,11 +205,19 @@ pub async fn extract_mkv_file(
 
     let code = output.status.code().unwrap_or(-1);
     if code > 1 {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let err_msg = if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            format!("exit code {code}")
+        };
         for (_, mut claim) in font_claims {
             font_manager.release(&mut claim);
         }
-        return Err(format!("mkvextract failed with code {code}: {stderr}"));
+        return Err(format!("mkvextract failed: {err_msg}"));
     }
 
     if let Some((staged, final_path)) = staged_sub {

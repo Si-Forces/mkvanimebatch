@@ -3,7 +3,8 @@ use std::fs;
 use std::sync::Arc;
 use std::thread;
 
-use mkv_core::fonts::{find_fonts_dir, hash_file, scan_fonts, FontHashMemo, FontManager};
+use mkv_core::fonts::{find_fonts_dir, hash_file, scan_fonts, FontHashMemo, FontRegistry};
+use mkv_core::scan::FileSignature;
 use tempfile::tempdir;
 
 #[test]
@@ -20,7 +21,7 @@ fn test_hash_file() {
 fn test_claim_and_promote() {
     let tmp = tempdir().unwrap();
     let fonts_dir = tmp.path().join("fonts");
-    let mgr = FontManager::new(fonts_dir.clone(), None);
+    let mgr = FontRegistry::new(fonts_dir.clone(), None);
 
     let mut claim = mgr.claim("Arial.ttf", 100).expect("claim should succeed");
     assert_eq!(claim.name, "Arial.ttf");
@@ -42,7 +43,7 @@ fn test_claim_and_promote() {
 fn test_claim_duplicate_name_size_rejected() {
     let tmp = tempdir().unwrap();
     let fonts_dir = tmp.path().join("fonts");
-    let mgr = FontManager::new(fonts_dir, None);
+    let mgr = FontRegistry::new(fonts_dir, None);
 
     let claim1 = mgr.claim("Arial.ttf", 100);
     assert!(claim1.is_some());
@@ -55,7 +56,7 @@ fn test_claim_duplicate_name_size_rejected() {
 fn test_claim_different_size_allowed() {
     let tmp = tempdir().unwrap();
     let fonts_dir = tmp.path().join("fonts");
-    let mgr = FontManager::new(fonts_dir, None);
+    let mgr = FontRegistry::new(fonts_dir, None);
 
     let claim1 = mgr.claim("Arial.ttf", 100);
     let claim2 = mgr.claim("Arial.ttf", 200);
@@ -67,7 +68,7 @@ fn test_claim_different_size_allowed() {
 fn test_release_allows_reclaim() {
     let tmp = tempdir().unwrap();
     let fonts_dir = tmp.path().join("fonts");
-    let mgr = FontManager::new(fonts_dir, None);
+    let mgr = FontRegistry::new(fonts_dir, None);
 
     let mut claim1 = mgr.claim("Arial.ttf", 100).unwrap();
     fs::write(&claim1.staging_path, b"temp").unwrap();
@@ -85,7 +86,7 @@ fn test_release_allows_reclaim() {
 fn test_promote_hash_deduplication() {
     let tmp = tempdir().unwrap();
     let fonts_dir = tmp.path().join("fonts");
-    let mgr = FontManager::new(fonts_dir.clone(), None);
+    let mgr = FontRegistry::new(fonts_dir.clone(), None);
 
     // First font
     let mut claim1 = mgr.claim("FontA.ttf", 100).unwrap();
@@ -113,7 +114,7 @@ fn test_collision_safe_target_allocation() {
     let existing_font = fonts_dir.join("Arial.ttf");
     fs::write(&existing_font, b"existing content").unwrap();
 
-    let mgr = FontManager::new(fonts_dir.clone(), None);
+    let mgr = FontRegistry::new(fonts_dir.clone(), None);
 
     // New font with same filename but different content and size
     let mut claim = mgr.claim("Arial.ttf", 999).unwrap();
@@ -140,7 +141,7 @@ fn test_seed_existing_fonts() {
     fs::write(&existing_font, b"pre-existing content").unwrap();
     let size = fs::metadata(&existing_font).unwrap().len();
 
-    let mgr = FontManager::new(fonts_dir, None);
+    let mgr = FontRegistry::new(fonts_dir, None);
 
     // Name and size should already be reserved
     assert!(mgr.claim("Existing.otf", size).is_none());
@@ -155,7 +156,7 @@ fn test_seed_existing_fonts() {
 fn test_cleanup_staging() {
     let tmp = tempdir().unwrap();
     let fonts_dir = tmp.path().join("fonts");
-    let mgr = FontManager::new(fonts_dir.clone(), None);
+    let mgr = FontRegistry::new(fonts_dir.clone(), None);
 
     let mut claim = mgr.claim("Test.ttf", 100).unwrap();
     fs::write(&claim.staging_path, b"abc").unwrap();
@@ -173,23 +174,30 @@ fn test_font_hash_memo() {
 
     {
         let mut memo = FontHashMemo::new(memo_file.clone());
-        memo.put(
-            &tmp.path().join("f1.ttf"),
-            100,
-            12345,
-            "hash123".to_string(),
-        );
+        let sig = FileSignature {
+            size: 100,
+            mtime_ns: 12345,
+        };
+        memo.put(&tmp.path().join("f1.ttf"), sig, "hash123".to_string());
         memo.save();
     }
 
     {
         let memo = FontHashMemo::new(memo_file);
+        let sig = FileSignature {
+            size: 100,
+            mtime_ns: 12345,
+        };
+        let sig_diff_mtime = FileSignature {
+            size: 100,
+            mtime_ns: 99999,
+        };
         assert_eq!(
-            memo.get(&tmp.path().join("f1.ttf"), 100, 12345),
+            memo.get(&tmp.path().join("f1.ttf"), sig),
             Some("hash123".to_string())
         );
-        assert_eq!(memo.get(&tmp.path().join("f1.ttf"), 100, 99999), None);
-        assert_eq!(memo.get(&tmp.path().join("f2.ttf"), 100, 12345), None);
+        assert_eq!(memo.get(&tmp.path().join("f1.ttf"), sig_diff_mtime), None);
+        assert_eq!(memo.get(&tmp.path().join("f2.ttf"), sig), None);
     }
 }
 
@@ -233,7 +241,7 @@ fn test_find_fonts_dir() {
 fn test_concurrent_font_claims_and_promotions() {
     let tmp = tempdir().unwrap();
     let fonts_dir = tmp.path().join("fonts");
-    let mgr = Arc::new(FontManager::new(fonts_dir.clone(), None));
+    let mgr = Arc::new(FontRegistry::new(fonts_dir.clone(), None));
 
     let mut handles = Vec::new();
     for i in 0..10 {

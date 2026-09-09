@@ -259,6 +259,13 @@ pub(crate) fn stop_registered_scan_with_timeout(
         return Ok(());
     };
 
+    if pid == 0 {
+        let mut active = state.active.lock().map_err(|e| e.to_string())?;
+        if active.is_some_and(|target| target == (scan_id, 0)) {
+            *active = None;
+        }
+        return Ok(());
+    }
     #[cfg(unix)]
     signal_process_group(pid, libc::SIGTERM, "stop directory inspection")?;
     #[cfg(windows)]

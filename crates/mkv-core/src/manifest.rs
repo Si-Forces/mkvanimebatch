@@ -131,7 +131,7 @@ pub fn parse_audio_track_info(track: &MkvTrack) -> (String, bool) {
     (full_name, is_flac)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct InspectionMetadata {
     pub resolution: Option<String>,
     pub video_codec: Option<String>,
@@ -140,9 +140,11 @@ pub struct InspectionMetadata {
     pub has_flac: Option<bool>,
     pub sub_summary: Option<String>,
     pub fonts_count: Option<usize>,
+    #[serde(default, flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ManifestItem {
     pub id: String,
     pub name: String,
@@ -150,14 +152,18 @@ pub struct ManifestItem {
     pub metadata: InspectionMetadata,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inspection_error: Option<String>,
+    #[serde(default, flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InspectionManifest {
     pub version: u64,
     #[serde(default)]
     pub subtitle_candidates: BTreeMap<String, Vec<String>>,
     pub items: Vec<ManifestItem>,
+    #[serde(default, flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Extracts summarized video inspection metadata from an `InspectedVideo`.
@@ -269,6 +275,7 @@ pub fn extract_mkv_metadata(inspected: Option<&InspectedVideo>) -> InspectionMet
         has_flac: if has_audio { Some(has_flac) } else { None },
         sub_summary,
         fonts_count: inspected.fonts_count(),
+        extra: Default::default(),
     }
 }
 
@@ -283,6 +290,7 @@ pub fn generate_inspection_manifest(
             version: MANIFEST_VERSION,
             subtitle_candidates: BTreeMap::new(),
             items: Vec::new(),
+            extra: Default::default(),
         };
     }
 
@@ -354,6 +362,7 @@ pub fn generate_inspection_manifest(
             release,
             metadata: extract_mkv_metadata(inspected.as_ref()),
             inspection_error,
+            extra: Default::default(),
         };
         items.push(item);
     }
@@ -366,6 +375,7 @@ pub fn generate_inspection_manifest(
         version: MANIFEST_VERSION,
         subtitle_candidates,
         items,
+        extra: Default::default(),
     }
 }
 
@@ -536,5 +546,45 @@ mod tests {
         assert_eq!(meta.has_flac, Some(true));
         assert_eq!(meta.sub_summary.as_deref(), Some("ASS (ENG)"));
         assert_eq!(meta.fonts_count, Some(1));
+    }
+
+    #[test]
+    fn test_additive_field_preservation() {
+        let json = r#"{
+            "version": 2,
+            "subtitle_candidates": {},
+            "items": [
+                {
+                    "id": "show_01.mkv",
+                    "name": "Show - 01",
+                    "release": ".",
+                    "metadata": {
+                        "custom_metric": 42
+                    },
+                    "custom_flag": true
+                }
+            ],
+            "custom_root_field": "preserved"
+        }"#;
+
+        let manifest: InspectionManifest = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            manifest.extra.get("custom_root_field").unwrap(),
+            "preserved"
+        );
+        assert_eq!(manifest.items[0].extra.get("custom_flag").unwrap(), true);
+        assert_eq!(
+            manifest.items[0]
+                .metadata
+                .extra
+                .get("custom_metric")
+                .unwrap(),
+            42
+        );
+
+        let reserialized = serde_json::to_string(&manifest).unwrap();
+        assert!(reserialized.contains("custom_root_field"));
+        assert!(reserialized.contains("custom_flag"));
+        assert!(reserialized.contains("custom_metric"));
     }
 }
