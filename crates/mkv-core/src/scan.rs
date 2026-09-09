@@ -690,12 +690,12 @@ impl PersistentInspectCache {
                 };
 
                 if temp_file.write_all(serialized.as_bytes()).is_ok() && temp_file.flush().is_ok() {
-                    if let Ok(persisted) = temp_file.persist(&self.cache_file) {
+                    if let Ok(_persisted) = temp_file.persist(&self.cache_file) {
                         #[cfg(unix)]
                         {
                             use std::os::unix::fs::PermissionsExt;
                             let _ =
-                                persisted.set_permissions(std::fs::Permissions::from_mode(0o644));
+                                _persisted.set_permissions(std::fs::Permissions::from_mode(0o644));
                         }
                         let mut state = self.state.lock();
                         if state.revision == saved_revision {
