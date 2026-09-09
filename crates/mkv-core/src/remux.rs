@@ -238,3 +238,104 @@ pub fn build_ffmpeg_args(
         temp_opus.to_string_lossy().to_string(),
     ]
 }
+
+#[derive(Debug, Default, Clone)]
+pub struct RemuxSummary {
+    pub video_path: PathBuf,
+    pub output_file: PathBuf,
+    pub log: Vec<String>,
+}
+
+/// Executes audio transcoding (if required) and remuxing via `mkvmerge` into `job.output_file`.
+pub async fn execute_remux_job(
+    job: &PlannedJob,
+    selection: &TrackSelection,
+    fonts: &FontInfo,
+    opus_bitrate: &str,
+    complexity: u32,
+    ffmpeg_threads: usize,
+    sub_offset: f64,
+) -> Result<RemuxSummary, String> {
+    let mut summary = RemuxSummary {
+        video_path: job.video.clone(),
+        output_file: job.output_file.clone(),
+        log: Vec::new(),
+    };
+    summary.log.push(format!("Processing: {}", job.video_name));
+
+    let out_dir = job.output_file.parent().unwrap_or(Path::new("."));
+    if let Err(e) = std::fs::create_dir_all(out_dir) {
+        return Err(format!(
+            "Failed to create output directory '{}': {e}",
+            out_dir.display()
+        ));
+    }
+
+    let scratch_dir = tempfile::Builder::new()
+        .prefix(".tmp_remux_")
+        .tempdir_in(out_dir)
+        .map_err(|e| format!("Failed to create temporary remux directory: {e}"))?;
+
+    let mut temp_opus_file: Option<PathBuf> = None;
+    if selection.audio_id.is_some() && selection.audio_codec == "A_FLAC" {
+        let temp_opus = scratch_dir.path().join("audio.opus");
+        let ffmpeg_args = build_ffmpeg_args(
+            &job.video,
+            selection.audio_index,
+            &temp_opus,
+            opus_bitrate,
+            complexity,
+            ffmpeg_threads,
+        );
+        summary
+            .log
+            .push("  Transcoding audio to Opus with ffmpeg...".into());
+        let ffmpeg_out = tokio::process::Command::new("ffmpeg")
+            .args(&ffmpeg_args)
+            .output()
+            .await
+            .map_err(|e| format!("Failed to execute ffmpeg: {e}"))?;
+        if !ffmpeg_out.status.success() {
+            let stderr = String::from_utf8_lossy(&ffmpeg_out.stderr);
+            return Err(format!("ffmpeg audio transcode failed: {stderr}"));
+        }
+        temp_opus_file = Some(temp_opus);
+    }
+
+    let temp_output = scratch_dir
+        .path()
+        .join(job.output_file.file_name().unwrap());
+    let mkvmerge_args = build_mkvmerge_args(
+        job,
+        selection,
+        temp_opus_file.as_deref(),
+        fonts,
+        &temp_output,
+        sub_offset,
+    );
+
+    summary.log.push("  Running mkvmerge...".into());
+    let mkvmerge_out = tokio::process::Command::new("mkvmerge")
+        .args(&mkvmerge_args)
+        .output()
+        .await
+        .map_err(|e| format!("Failed to execute mkvmerge: {e}"))?;
+
+    let code = mkvmerge_out.status.code().unwrap_or(-1);
+    if code > 1 {
+        let stderr = String::from_utf8_lossy(&mkvmerge_out.stderr);
+        return Err(format!("mkvmerge failed with exit code {code}: {stderr}"));
+    }
+
+    if !temp_output.exists() || temp_output.metadata().map(|m| m.len() == 0).unwrap_or(true) {
+        return Err("mkvmerge succeeded but output file was not created or is empty".into());
+    }
+
+    std::fs::rename(&temp_output, &job.output_file)
+        .map_err(|e| format!("Failed to promote remuxed file to final destination: {e}"))?;
+
+    summary
+        .log
+        .push(format!("  Completed -> {}", job.output_file.display()));
+    Ok(summary)
+}
