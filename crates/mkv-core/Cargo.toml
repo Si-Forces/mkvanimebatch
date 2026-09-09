@@ -1,0 +1,22 @@
+[package]
+name = "mkv-core"
+version = "0.1.0"
+edition = "2021"
+description = "Core anime fansub batch processing and media engine"
+
+[dependencies]
+regex = "1.10"
+fancy-regex = "0.19"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+tracing = "0.1"
+xxhash-rust = { version = "0.8", features = ["xxh64"] }
+sha1 = "0.10"
+crc32fast = "1.4"
+blake2 = "0.10"
+uuid = { version = "1", features = ["v4"] }
+parking_lot = "0.12"
+tempfile = "3"
+tokio = { version = "1", features = ["sync", "rt-multi-thread", "process", "fs"] }
+tokio-util = "0.7"

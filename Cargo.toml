@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/mkv-core",
+    "desktop-tauri/src-tauri",
+]
+
+[profile.dev]
+incremental = true
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
