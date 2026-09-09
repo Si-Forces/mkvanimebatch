@@ -38,16 +38,9 @@ pub fn get_item_id(path: &Path, root_dir: &Path) -> String {
 
 /// Parses standard video resolution buckets from `pixel_dimensions` string (e.g. "1920x1080").
 pub fn parse_resolution(pixel_dimensions: &str) -> Option<String> {
-    if pixel_dimensions.is_empty() {
-        return None;
-    }
-
-    let parts: Vec<&str> = pixel_dimensions.split('x').collect();
-    if parts.len() == 2 {
-        if let (Ok(width), Ok(height)) = (
-            parts[0].trim().parse::<u32>(),
-            parts[1].trim().parse::<u32>(),
-        ) {
+    if let Some((w_str, h_str)) = pixel_dimensions.split_once('x') {
+        if let (Ok(width), Ok(height)) = (w_str.trim().parse::<u32>(), h_str.trim().parse::<u32>())
+        {
             if width >= 3800 || height >= 2100 {
                 return Some("4K".to_string());
             }
