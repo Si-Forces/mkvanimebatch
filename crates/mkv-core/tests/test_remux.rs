@@ -228,5 +228,8 @@ fn test_subtitle_extraction_filename_format() {
     assert!(res.is_some());
     let (tid, path) = res.unwrap();
     assert_eq!(tid, 2);
-    assert_eq!(path.to_string_lossy(), "/out/Show - 01_EP01_eng_track2.ass");
+    assert_eq!(
+        path,
+        Path::new("/out").join("Show - 01_EP01_eng_track2.ass")
+    );
 }
