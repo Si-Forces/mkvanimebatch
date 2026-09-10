@@ -249,3 +249,20 @@ fn test_probe_video_fallback() {
     fs::write(&corrupt_mkv, b"not a real ebml file").unwrap();
     assert!(mkv_core::scan::probe_video(&corrupt_mkv).is_err());
 }
+
+#[test]
+fn test_probe_ebml_8byte_vint() {
+    let tmp = tempdir().unwrap();
+    let test_mkv = tmp.path().join("eight_byte_vint.mkv");
+    // EBML header (0x1A45DFA3 + length 0) + Segment (0x18538067 + 8-byte VINT length)
+    let mut data = vec![
+        0x1A, 0x45, 0xDF, 0xA3, 0x80, // EBML Header, len 0
+        0x18, 0x53, 0x80, 0x67, // Segment ID
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, // 8-byte VINT length (16 bytes)
+    ];
+    data.extend(vec![0u8; 16]); // Payload
+    fs::write(&test_mkv, &data).unwrap();
+    // Must not panic with bit-shift overflow
+    let res = mkv_core::ebml::probe_ebml_native(&test_mkv);
+    assert!(res.is_err()); // Will fail finding tracks, but must NOT panic!
+}

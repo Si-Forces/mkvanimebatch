@@ -86,6 +86,10 @@ pub enum JobEvent {
         id: String,
         file: String,
         status: ItemOutcome,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
         #[serde(flatten)]
         extra: ExtraFields,
     },

@@ -156,6 +156,23 @@ export function reduceQueueEvent(state, event, now = Date.now()) {
       return state;
     }
 
+    case "item_progress": {
+      if (!event.id || !state.items.has(event.id)) return state;
+      const item = state.items.get(event.id);
+      if (isTerminal(item.status)) return state;
+
+      if (typeof event.progress === "number") {
+        item.progress = event.progress;
+      }
+      if (typeof event.speed === "string") {
+        item.speed = event.speed;
+      }
+      if (typeof event.eta === "string") {
+        item.eta = event.eta;
+      }
+      return state;
+    }
+
     case "item_complete": {
       if (!event.id || !state.items.has(event.id)) return state;
       const item = state.items.get(event.id);

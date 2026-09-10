@@ -88,9 +88,8 @@ fn read_vint_length<R: Read>(reader: &mut R) -> Result<u64, std::io::Error> {
 
     let num_zeros = b.leading_zeros() as usize;
     let len = num_zeros + 1;
-    let mask = 0xFF >> len;
+    let mask = if len == 8 { 0 } else { 0xFF >> len };
     let mut value = (b & mask) as u64;
-
     for _ in 1..len {
         let mut next = [0u8; 1];
         reader.read_exact(&mut next)?;
@@ -204,13 +203,15 @@ pub fn probe_ebml_native(path: &Path) -> Result<MkvmergeMetadata, String> {
                                 Ok(l) => l,
                                 Err(_) => break,
                             };
+                            let child_start =
+                                reader.stream_position().map_err(|e| e.to_string())?;
+                            let child_end = child_start + child_len;
                             if child == ID_SEEK_ID {
                                 target_id = read_element_id(&mut reader).ok();
                             } else if child == ID_SEEK_POSITION {
                                 target_pos = read_uint(&mut reader, child_len).ok();
-                            } else {
-                                let _ = reader.seek(SeekFrom::Current(child_len as i64));
                             }
+                            let _ = reader.seek(SeekFrom::Start(child_end));
                         }
                         if let (Some(tid), Some(pos)) = (target_id, target_pos) {
                             match tid {
@@ -220,10 +221,12 @@ pub fn probe_ebml_native(path: &Path) -> Result<MkvmergeMetadata, String> {
                                 _ => {}
                             }
                         }
+                        let _ = reader.seek(SeekFrom::Start(entry_end));
                     } else {
                         let _ = reader.seek(SeekFrom::Current(seek_entry_len as i64));
                     }
                 }
+                let _ = reader.seek(SeekFrom::Start(end_pos));
             }
             ID_TRACKS => {
                 let current_pos = reader.stream_position().map_err(|e| e.to_string())?;
@@ -326,15 +329,18 @@ fn parse_tracks_block<R: Read + Seek>(
             Ok(l) => l,
             Err(_) => break,
         };
+        let entry_start = reader.stream_position().map_err(|e| e.to_string())?;
+        let entry_end = entry_start + entry_len;
         if entry_id == ID_TRACK_ENTRY {
             if let Ok(mut track) = parse_track_entry(reader, entry_len) {
                 track.id = Some(track_idx);
                 track_idx += 1;
                 tracks.push(track);
             }
-        } else {
-            let _ = reader.seek(SeekFrom::Current(entry_len as i64));
         }
+        reader
+            .seek(SeekFrom::Start(entry_end))
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -356,15 +362,18 @@ fn parse_attachments_block<R: Read + Seek>(
             Ok(l) => l,
             Err(_) => break,
         };
+        let entry_start = reader.stream_position().map_err(|e| e.to_string())?;
+        let entry_end = entry_start + file_len;
         if file_id == ID_ATTACHED_FILE {
             if let Ok(mut att) = parse_attached_file(reader, file_len) {
                 att.id = Some(att_id);
                 att_id += 1;
                 attachments.push(att);
             }
-        } else {
-            let _ = reader.seek(SeekFrom::Current(file_len as i64));
         }
+        reader
+            .seek(SeekFrom::Start(entry_end))
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
