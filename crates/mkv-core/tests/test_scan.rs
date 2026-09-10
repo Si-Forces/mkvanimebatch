@@ -170,7 +170,7 @@ fn test_persistent_inspect_cache() {
     };
 
     {
-        let mut cache = PersistentInspectCache::new(Some(cache_file.clone()), true);
+        let cache = PersistentInspectCache::new(Some(cache_file.clone()), true);
         cache.put_path(&video_path, meta.clone());
         cache.save();
     }
