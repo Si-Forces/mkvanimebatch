@@ -45,6 +45,19 @@ const ID_FILE_DATA: u32 = 0x465C;
 
 const ID_CHAPTERS: u32 = 0x1043A770;
 
+/// Safely seeks forward by `len` bytes, ensuring the length fits within a non-negative `i64`.
+#[inline]
+fn seek_forward<R: Read + Seek>(reader: &mut R, len: u64) -> Result<(), std::io::Error> {
+    let offset = i64::try_from(len).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "EBML element length exceeds i64::MAX",
+        )
+    })?;
+    reader.seek(SeekFrom::Current(offset))?;
+    Ok(())
+}
+
 /// Reads an EBML Element ID as a raw u32.
 fn read_element_id<R: Read>(reader: &mut R) -> Result<u32, std::io::Error> {
     let mut first_byte = [0u8; 1];
@@ -141,9 +154,7 @@ pub fn probe_ebml_native(path: &Path) -> Result<MkvmergeMetadata, String> {
         return Err("Not an EBML file".to_string());
     }
     let ebml_len = read_vint_length(&mut reader).map_err(|e| e.to_string())?;
-    reader
-        .seek(SeekFrom::Current(ebml_len as i64))
-        .map_err(|e| e.to_string())?;
+    seek_forward(&mut reader, ebml_len).map_err(|e| e.to_string())?;
 
     // Find Segment element
     let segment_id = read_element_id(&mut reader).map_err(|e| e.to_string())?;
@@ -223,7 +234,7 @@ pub fn probe_ebml_native(path: &Path) -> Result<MkvmergeMetadata, String> {
                         }
                         let _ = reader.seek(SeekFrom::Start(entry_end));
                     } else {
-                        let _ = reader.seek(SeekFrom::Current(seek_entry_len as i64));
+                        let _ = seek_forward(&mut reader, seek_entry_len);
                     }
                 }
                 let _ = reader.seek(SeekFrom::Start(end_pos));
@@ -244,7 +255,7 @@ pub fn probe_ebml_native(path: &Path) -> Result<MkvmergeMetadata, String> {
             }
             ID_CHAPTERS => {
                 has_chapters = true;
-                let _ = reader.seek(SeekFrom::Current(elem_len as i64));
+                let _ = seek_forward(&mut reader, elem_len);
             }
             ID_CLUSTER => {
                 // Reached video/audio clusters. If we have a SeekHead, use it to inspect post-cluster attachments/chapters.
@@ -257,7 +268,7 @@ pub fn probe_ebml_native(path: &Path) -> Result<MkvmergeMetadata, String> {
                 break;
             }
             _ => {
-                let _ = reader.seek(SeekFrom::Current(elem_len as i64));
+                let _ = seek_forward(&mut reader, elem_len);
             }
         }
     }
@@ -431,7 +442,7 @@ fn parse_track_entry<R: Read + Seek>(reader: &mut R, len: u64) -> Result<MkvTrac
                             pixel_height = Some(read_uint(reader, vid_len)? as u32);
                         }
                         _ => {
-                            reader.seek(SeekFrom::Current(vid_len as i64))?;
+                            seek_forward(reader, vid_len)?;
                         }
                     }
                 }
@@ -446,13 +457,13 @@ fn parse_track_entry<R: Read + Seek>(reader: &mut R, len: u64) -> Result<MkvTrac
                             channels = Some(read_uint(reader, aud_len)? as u32);
                         }
                         _ => {
-                            reader.seek(SeekFrom::Current(aud_len as i64))?;
+                            seek_forward(reader, aud_len)?;
                         }
                     }
                 }
             }
             _ => {
-                reader.seek(SeekFrom::Current(child_len as i64))?;
+                seek_forward(reader, child_len)?;
             }
         }
     }
@@ -512,10 +523,10 @@ fn parse_attached_file<R: Read + Seek>(
             }
             ID_FILE_DATA => {
                 size = Some(child_len);
-                reader.seek(SeekFrom::Current(child_len as i64))?;
+                seek_forward(reader, child_len)?;
             }
             _ => {
-                reader.seek(SeekFrom::Current(child_len as i64))?;
+                seek_forward(reader, child_len)?;
             }
         }
     }

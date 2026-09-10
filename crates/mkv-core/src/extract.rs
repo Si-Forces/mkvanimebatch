@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
 use crate::domain::{
-    ep_type_label, parse_episode, select_best_subtitle_track, EpisodeInfo, COVER_EXTENSIONS,
+    ep_type_label, parse_episode, promote_file, read_progress_stream, select_best_subtitle_track,
+    EpisodeInfo, COVER_EXTENSIONS,
 };
 use crate::fonts::{FontClaim, FontRegistry};
 use crate::scan::InspectedVideo;
@@ -19,13 +20,6 @@ pub struct ExtractSummary {
     pub log: Vec<String>,
 }
 
-fn promote_file(staged: &Path, final_path: &Path) -> Result<(), std::io::Error> {
-    if std::fs::rename(staged, final_path).is_err() {
-        std::fs::copy(staged, final_path)?;
-        let _ = std::fs::remove_file(staged);
-    }
-    Ok(())
-}
 fn episode_suffix(parsed: Option<&EpisodeInfo>, file_stem: &str) -> String {
     match parsed {
         Some(info) => format!("{}{}", ep_type_label(&info.ep_type, false), info.ep),
@@ -73,6 +67,7 @@ pub async fn extract_mkv_file(
     inspected: &InspectedVideo,
     font_manager: &FontRegistry,
     out_dir: Option<&Path>,
+    on_progress: Option<&(dyn Fn(f64) + Send + Sync)>,
 ) -> Result<ExtractSummary, String> {
     let mut summary = ExtractSummary {
         mkv_path: mkv_path.to_path_buf(),
@@ -191,10 +186,15 @@ pub async fn extract_mkv_file(
     }
 
     let mut cmd = Command::new("mkvextract");
+    #[cfg(windows)]
+    cmd.creation_flags(0x08000000);
     cmd.kill_on_drop(true);
     cmd.args(&extract_args);
-    let output = match cmd.output().await {
-        Ok(out) => out,
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
         Err(e) => {
             for (_, mut claim) in font_claims {
                 font_manager.release(&mut claim);
@@ -203,10 +203,38 @@ pub async fn extract_mkv_file(
         }
     };
 
-    let code = output.status.code().unwrap_or(-1);
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+
+    let mut stderr_bytes = Vec::new();
+    let stderr_handle = tokio::spawn(async move {
+        if let Some(mut stream) = stderr {
+            use tokio::io::AsyncReadExt;
+            let _ = stream.read_to_end(&mut stderr_bytes).await;
+        }
+        stderr_bytes
+    });
+
+    let mut stdout_bytes = Vec::new();
+    if let Some(out_stream) = stdout {
+        let _ = read_progress_stream(out_stream, on_progress, Some(&mut stdout_bytes)).await;
+    }
+
+    let status = match child.wait().await {
+        Ok(s) => s,
+        Err(e) => {
+            for (_, mut claim) in font_claims {
+                font_manager.release(&mut claim);
+            }
+            return Err(format!("Failed to wait on mkvextract: {e}"));
+        }
+    };
+    let stderr_output = stderr_handle.await.unwrap_or_default();
+
+    let code = status.code().unwrap_or(-1);
     if code > 1 {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let stderr = String::from_utf8_lossy(&stderr_output).trim().to_string();
+        let stdout = String::from_utf8_lossy(&stdout_bytes).trim().to_string();
         let err_msg = if !stderr.is_empty() {
             stderr
         } else if !stdout.is_empty() {
