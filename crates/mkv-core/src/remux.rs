@@ -358,11 +358,15 @@ pub async fn execute_remux_job(
         .map_err(|e| format!("Failed to wait on mkvmerge: {e}"))?;
     let stderr_output = stderr_handle.await.unwrap_or_default();
 
-    let code = status.code().unwrap_or(-1);
-    if code > 1 {
+    let is_success = matches!(status.code(), Some(0) | Some(1));
+    if !is_success {
         let _ = std::fs::remove_file(&temp_output);
         let stderr = String::from_utf8_lossy(&stderr_output);
-        return Err(format!("mkvmerge failed with exit code {code}: {stderr}"));
+        let code_str = status
+            .code()
+            .map(|c| format!("exit code {c}"))
+            .unwrap_or_else(|| "terminated by signal".into());
+        return Err(format!("mkvmerge failed ({code_str}): {stderr}"));
     }
 
     if !temp_output.exists() || temp_output.metadata().map(|m| m.len() == 0).unwrap_or(true) {

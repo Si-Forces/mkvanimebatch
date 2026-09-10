@@ -231,16 +231,20 @@ pub async fn extract_mkv_file(
     };
     let stderr_output = stderr_handle.await.unwrap_or_default();
 
-    let code = status.code().unwrap_or(-1);
-    if code > 1 {
+    let is_success = matches!(status.code(), Some(0) | Some(1));
+    if !is_success {
         let stderr = String::from_utf8_lossy(&stderr_output).trim().to_string();
         let stdout = String::from_utf8_lossy(&stdout_bytes).trim().to_string();
+        let code_str = status
+            .code()
+            .map(|c| format!("exit code {c}"))
+            .unwrap_or_else(|| "terminated by signal".into());
         let err_msg = if !stderr.is_empty() {
             stderr
         } else if !stdout.is_empty() {
             stdout
         } else {
-            format!("exit code {code}")
+            code_str
         };
         for (_, mut claim) in font_claims {
             font_manager.release(&mut claim);
@@ -250,20 +254,19 @@ pub async fn extract_mkv_file(
 
     if let Some((staged, final_path)) = staged_sub {
         if staged.is_file() && staged.metadata().map(|m| m.len() > 0).unwrap_or(false) {
-            match promote_file(&staged, &final_path) {
-                Ok(()) => {
-                    summary
-                        .log
-                        .push(format!("   -> Subtitle: {}", final_path.display()));
-                    summary.extracted_sub = Some(final_path);
+            if let Err(e) = promote_file(&staged, &final_path) {
+                for (_, claim) in &mut font_claims {
+                    font_manager.release(claim);
                 }
-                Err(e) => {
-                    summary.log.push(format!(
-                        "   -> WARNING: Failed to promote subtitle to '{}': {e}",
-                        final_path.display()
-                    ));
-                }
+                return Err(format!(
+                    "Failed to promote subtitle to '{}': {e}",
+                    final_path.display()
+                ));
             }
+            summary
+                .log
+                .push(format!("   -> Subtitle: {}", final_path.display()));
+            summary.extracted_sub = Some(final_path);
         }
     }
 
