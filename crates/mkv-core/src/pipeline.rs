@@ -219,21 +219,23 @@ impl BatchPipeline {
             Some(&cache)
         };
 
-        for file in &files {
+        for (idx, file) in files.iter().enumerate() {
             if self.cancel_token.is_cancelled() {
                 summary.cancelled = true;
-                let item_id = get_item_id(&file.path, &self.config.input_dir);
-                self.emit(JobEvent::ItemComplete {
-                    version: EVENT_VERSION,
-                    id: item_id,
-                    file: file.name.clone(),
-                    status: ItemOutcome::Cancelled,
-                    reason: Some("Operation cancelled".into()),
-                    error: None,
-                    extra: Default::default(),
-                })
-                .await;
-                continue;
+                for rem in &files[idx..] {
+                    let rem_id = get_item_id(&rem.path, &self.config.input_dir);
+                    self.emit(JobEvent::ItemComplete {
+                        version: EVENT_VERSION,
+                        id: rem_id,
+                        file: rem.name.clone(),
+                        status: ItemOutcome::Cancelled,
+                        reason: Some("Operation cancelled".into()),
+                        error: None,
+                        extra: Default::default(),
+                    })
+                    .await;
+                }
+                break;
             }
 
             let item_id = get_item_id(&file.path, &self.config.input_dir);
@@ -302,6 +304,19 @@ impl BatchPipeline {
                         extra: Default::default(),
                     })
                     .await;
+                    for rem in &files[(idx + 1)..] {
+                        let rem_id = get_item_id(&rem.path, &self.config.input_dir);
+                        self.emit(JobEvent::ItemComplete {
+                            version: EVENT_VERSION,
+                            id: rem_id,
+                            file: rem.name.clone(),
+                            status: ItemOutcome::Cancelled,
+                            reason: Some("Operation cancelled".into()),
+                            error: None,
+                            extra: Default::default(),
+                        })
+                        .await;
+                    }
                     break;
                 }
                 res = extract_mkv_file(&file.path, &inspected, &font_registry, out_dir.as_deref()) => res,
@@ -399,31 +414,68 @@ impl BatchPipeline {
             Some(&cache)
         };
 
-        for (mkv_dir, videos) in videos_by_dir {
+        let dir_list: Vec<(PathBuf, Vec<ParsedFile>)> = videos_by_dir.into_iter().collect();
+        'dir_loop: for (d_idx, (mkv_dir, videos)) in dir_list.iter().enumerate() {
+            if self.cancel_token.is_cancelled() {
+                summary.cancelled = true;
+                for (_, remaining_videos) in &dir_list[d_idx..] {
+                    for rem in remaining_videos {
+                        let rem_id = get_item_id(&rem.path, &self.config.input_dir);
+                        self.emit(JobEvent::ItemComplete {
+                            version: EVENT_VERSION,
+                            id: rem_id,
+                            file: rem.name.clone(),
+                            status: ItemOutcome::Cancelled,
+                            reason: Some("Operation cancelled".into()),
+                            error: None,
+                            extra: Default::default(),
+                        })
+                        .await;
+                    }
+                }
+                break;
+            }
             let prep_opts = ReleasePreparationOptions {
                 fonts_override: self.config.fonts_dir.as_deref(),
                 assets_dir: self.config.assets_dir.as_deref(),
                 ..Default::default()
             };
             let prepared =
-                prepare_release_directory(&mkv_dir, &self.config.input_dir, &videos, prep_opts);
+                prepare_release_directory(mkv_dir, &self.config.input_dir, videos, prep_opts);
             let font_info = scan_fonts(&prepared.fonts_dir, None);
 
-            for video_file in videos {
+            for (v_idx, video_file) in videos.iter().enumerate() {
                 if self.cancel_token.is_cancelled() {
                     summary.cancelled = true;
-                    let item_id = get_item_id(&video_file.path, &self.config.input_dir);
-                    self.emit(JobEvent::ItemComplete {
-                        version: EVENT_VERSION,
-                        id: item_id,
-                        file: video_file.name.clone(),
-                        status: ItemOutcome::Cancelled,
-                        reason: Some("Operation cancelled".into()),
-                        error: None,
-                        extra: Default::default(),
-                    })
-                    .await;
-                    continue;
+                    for rem in &videos[v_idx..] {
+                        let rem_id = get_item_id(&rem.path, &self.config.input_dir);
+                        self.emit(JobEvent::ItemComplete {
+                            version: EVENT_VERSION,
+                            id: rem_id,
+                            file: rem.name.clone(),
+                            status: ItemOutcome::Cancelled,
+                            reason: Some("Operation cancelled".into()),
+                            error: None,
+                            extra: Default::default(),
+                        })
+                        .await;
+                    }
+                    for (_, remaining_videos) in &dir_list[(d_idx + 1)..] {
+                        for rem in remaining_videos {
+                            let rem_id = get_item_id(&rem.path, &self.config.input_dir);
+                            self.emit(JobEvent::ItemComplete {
+                                version: EVENT_VERSION,
+                                id: rem_id,
+                                file: rem.name.clone(),
+                                status: ItemOutcome::Cancelled,
+                                reason: Some("Operation cancelled".into()),
+                                error: None,
+                                extra: Default::default(),
+                            })
+                            .await;
+                        }
+                    }
+                    break 'dir_loop;
                 }
 
                 let item_id = get_item_id(&video_file.path, &self.config.input_dir);
@@ -490,7 +542,7 @@ impl BatchPipeline {
                     .and_then(|m| m.get(&item_id).map(|p| p.as_path()));
 
                 let res_assets = prepared.resolver.resolve_for(
-                    &video_file,
+                    video_file,
                     Some(&inspected),
                     None,
                     None,
@@ -578,7 +630,35 @@ impl BatchPipeline {
                             extra: Default::default(),
                         })
                         .await;
-                        break;
+                        for rem in &videos[(v_idx + 1)..] {
+                            let rem_id = get_item_id(&rem.path, &self.config.input_dir);
+                            self.emit(JobEvent::ItemComplete {
+                                version: EVENT_VERSION,
+                                id: rem_id,
+                                file: rem.name.clone(),
+                                status: ItemOutcome::Cancelled,
+                                reason: Some("Operation cancelled".into()),
+                                error: None,
+                                extra: Default::default(),
+                            })
+                            .await;
+                        }
+                        for (_, remaining_videos) in &dir_list[(d_idx + 1)..] {
+                            for rem in remaining_videos {
+                                let rem_id = get_item_id(&rem.path, &self.config.input_dir);
+                                self.emit(JobEvent::ItemComplete {
+                                    version: EVENT_VERSION,
+                                    id: rem_id,
+                                    file: rem.name.clone(),
+                                    status: ItemOutcome::Cancelled,
+                                    reason: Some("Operation cancelled".into()),
+                                    error: None,
+                                    extra: Default::default(),
+                                })
+                                .await;
+                            }
+                        }
+                        break 'dir_loop;
                     }
                     res = execute_remux_job(
                         &job,
