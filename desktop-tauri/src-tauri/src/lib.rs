@@ -23,6 +23,34 @@ pub fn init_linux_env() {
     if std::env::var_os("GDK_BACKEND").is_none() {
         std::env::set_var("GDK_BACKEND", "x11,wayland");
     }
+
+    // Fix for WebKitWebProcess EGL_BAD_PARAMETER crash inside AppImage on modern Linux (Fedora/Arch/Ubuntu 24+).
+    // AppImage bundles an older libwayland-client.so.0 that conflicts with host Mesa EGL drivers.
+    // Preloading the host system's native libwayland-client.so.0 resolves the ABI/symbol mismatch.
+    if std::env::var_os("APPIMAGE").is_some() || std::env::var_os("APPDIR").is_some() {
+        let current_preload = std::env::var("LD_PRELOAD").unwrap_or_default();
+        if !current_preload.contains("libwayland-client") {
+            const CANDIDATES: &[&str] = &[
+                "/usr/lib64/libwayland-client.so.0",
+                "/lib64/libwayland-client.so.0",
+                "/usr/lib/x86_64-linux-gnu/libwayland-client.so.0",
+                "/usr/lib/libwayland-client.so.0",
+                "/usr/lib/libwayland-client.so",
+                "/lib64/libwayland-client.so",
+            ];
+            for candidate in CANDIDATES {
+                if std::path::Path::new(candidate).exists() {
+                    let new_preload = if current_preload.is_empty() {
+                        candidate.to_string()
+                    } else {
+                        format!("{}:{}", candidate, current_preload)
+                    };
+                    std::env::set_var("LD_PRELOAD", new_preload);
+                    break;
+                }
+            }
+        }
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
