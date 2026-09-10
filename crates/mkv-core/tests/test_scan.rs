@@ -183,6 +183,97 @@ fn test_persistent_inspect_cache() {
 }
 
 #[test]
+fn test_persistent_inspect_cache_save_shared_debouncing_and_direct_save() {
+    let tmp = tempdir().unwrap();
+    let cache_file = tmp.path().join("inspect_cache.json");
+    let video_path1 = tmp.path().join("test_video1.mkv");
+    let video_path2 = tmp.path().join("test_video2.mkv");
+    fs::write(&video_path1, b"dummy content 1").unwrap();
+    fs::write(&video_path2, b"dummy content 2").unwrap();
+
+    let meta1 = MkvmergeMetadata {
+        tracks: vec![MkvTrack {
+            id: Some(0),
+            track_type: "video".to_string(),
+            codec: None,
+            properties: TrackProperties::default(),
+        }],
+        attachments: vec![],
+        chapters: vec![],
+    };
+
+    let meta2 = MkvmergeMetadata {
+        tracks: vec![MkvTrack {
+            id: Some(1),
+            track_type: "audio".to_string(),
+            codec: None,
+            properties: TrackProperties::default(),
+        }],
+        attachments: vec![],
+        chapters: vec![],
+    };
+
+    let cache = PersistentInspectCache::new(Some(cache_file.clone()), true);
+
+    // 1. First save_shared() writes to disk (no prior last_save_ts).
+    cache.put_path(&video_path1, meta1.clone());
+    cache.save_shared();
+
+    // Verify video1 is persisted to disk
+    let disk_content = fs::read_to_string(&cache_file).unwrap();
+    assert!(disk_content.contains("test_video1.mkv"));
+    assert!(!disk_content.contains("test_video2.mkv"));
+
+    // 2. Intermediate save_shared() within 500ms debounces and does NOT flush to disk.
+    cache.put_path(&video_path2, meta2.clone());
+    cache.save_shared();
+
+    // Disk content should still only contain video1, not video2
+    let disk_content_after_debounce = fs::read_to_string(&cache_file).unwrap();
+    assert!(!disk_content_after_debounce.contains("test_video2.mkv"));
+
+    // 3. Direct save() immediately flushes regardless of the debounce interval.
+    cache.save();
+
+    let disk_content_after_save = fs::read_to_string(&cache_file).unwrap();
+    assert!(disk_content_after_save.contains("test_video1.mkv"));
+    assert!(disk_content_after_save.contains("test_video2.mkv"));
+
+    // 4. Data persists correctly to disk and reloads on startup.
+    let reloaded_cache = PersistentInspectCache::new(Some(cache_file), true);
+    assert_eq!(reloaded_cache.get_path(&video_path1), Some(meta1));
+    assert_eq!(reloaded_cache.get_path(&video_path2), Some(meta2));
+}
+
+#[test]
+fn test_persistent_inspect_cache_save_shared_flushes_after_interval() {
+    let tmp = tempdir().unwrap();
+    let cache_file = tmp.path().join("inspect_cache.json");
+    let video_path1 = tmp.path().join("video1.mkv");
+    let video_path2 = tmp.path().join("video2.mkv");
+    fs::write(&video_path1, b"v1").unwrap();
+    fs::write(&video_path2, b"v2").unwrap();
+
+    let meta = MkvmergeMetadata::default();
+    let cache = PersistentInspectCache::new(Some(cache_file.clone()), true);
+
+    cache.put_path(&video_path1, meta.clone());
+    cache.save_shared();
+    assert!(fs::read_to_string(&cache_file)
+        .unwrap()
+        .contains("video1.mkv"));
+
+    cache.put_path(&video_path2, meta.clone());
+    // Sleep to exceed the 500ms debounce interval
+    std::thread::sleep(std::time::Duration::from_millis(520));
+    cache.save_shared();
+
+    let disk_content = fs::read_to_string(&cache_file).unwrap();
+    assert!(disk_content.contains("video1.mkv"));
+    assert!(disk_content.contains("video2.mkv"));
+}
+
+#[test]
 fn test_scan_assets_grouping() {
     let tmp = tempdir().unwrap();
     let dir = tmp.path().join("release");

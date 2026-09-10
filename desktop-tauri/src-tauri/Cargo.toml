@@ -21,6 +21,7 @@ rfd = "0.15"
 window-vibrancy = "0.8.0"
 sysinfo = "0.33"
 tempfile = "3"
+tokio-util = "0.7"
 
 [target."cfg(unix)".dependencies]
 libc = "0.2"

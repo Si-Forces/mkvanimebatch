@@ -5,9 +5,9 @@ use tokio::process::Command;
 
 use crate::domain::{
     ep_type_label, parse_episode, promote_file, read_progress_stream, select_best_subtitle_track,
-    EpisodeInfo, COVER_EXTENSIONS,
+    EpisodeInfo, COVER_EXTENSIONS, SUBPROCESS_TIMEOUT,
 };
-use crate::fonts::{FontClaim, FontRegistry};
+use crate::fonts::{FontClaimsGuard, FontRegistry};
 use crate::scan::InspectedVideo;
 
 #[derive(Debug, Default, Clone)]
@@ -128,12 +128,12 @@ pub async fn extract_mkv_file(
         None
     };
 
-    let mut font_claims: Vec<(u32, FontClaim)> = Vec::new();
+    let mut font_claims = FontClaimsGuard::new(font_manager);
     for attachment in inspected.font_attachments() {
         if let (Some(id), Some(file_name)) = (attachment.id, attachment.file_name.as_ref()) {
             let size = attachment.size.unwrap_or(0);
             if let Some(claim) = font_manager.claim(file_name, size) {
-                font_claims.push((id, claim));
+                font_claims.push(id, claim);
             }
         }
     }
@@ -180,7 +180,7 @@ pub async fn extract_mkv_file(
             extract_args.push(format!("{aid}:{}", staged.display()));
             staged_cover = Some((staged, final_path.clone()));
         }
-        for (aid, claim) in &font_claims {
+        for (aid, claim) in font_claims.claims() {
             extract_args.push(format!("{aid}:{}", claim.staging_path.display()));
         }
     }
@@ -193,15 +193,9 @@ pub async fn extract_mkv_file(
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
 
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => {
-            for (_, mut claim) in font_claims {
-                font_manager.release(&mut claim);
-            }
-            return Err(format!("Failed to run mkvextract: {e}"));
-        }
-    };
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to run mkvextract: {e}"))?;
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -215,21 +209,29 @@ pub async fn extract_mkv_file(
         stderr_bytes
     });
 
-    let mut stdout_bytes = Vec::new();
-    if let Some(out_stream) = stdout {
-        let _ = read_progress_stream(out_stream, on_progress, Some(&mut stdout_bytes)).await;
-    }
-
-    let status = match child.wait().await {
-        Ok(s) => s,
-        Err(e) => {
-            for (_, mut claim) in font_claims {
-                font_manager.release(&mut claim);
-            }
-            return Err(format!("Failed to wait on mkvextract: {e}"));
+    let execution = async {
+        let mut stdout_bytes = Vec::new();
+        if let Some(out_stream) = stdout {
+            let _ = read_progress_stream(out_stream, on_progress, Some(&mut stdout_bytes)).await;
         }
+        let status = child
+            .wait()
+            .await
+            .map_err(|e| format!("Failed to wait on mkvextract: {e}"))?;
+        let stderr_output = stderr_handle.await.unwrap_or_default();
+        Ok::<_, String>((status, stdout_bytes, stderr_output))
     };
-    let stderr_output = stderr_handle.await.unwrap_or_default();
+
+    let (status, stdout_bytes, stderr_output) =
+        match tokio::time::timeout(SUBPROCESS_TIMEOUT, execution).await {
+            Ok(res) => res?,
+            Err(_) => {
+                return Err(format!(
+                    "mkvextract timed out after {} seconds",
+                    SUBPROCESS_TIMEOUT.as_secs()
+                ))
+            }
+        };
 
     let is_success = matches!(status.code(), Some(0) | Some(1));
     if !is_success {
@@ -246,18 +248,12 @@ pub async fn extract_mkv_file(
         } else {
             code_str
         };
-        for (_, mut claim) in font_claims {
-            font_manager.release(&mut claim);
-        }
         return Err(format!("mkvextract failed: {err_msg}"));
     }
 
     if let Some((staged, final_path)) = staged_sub {
         if staged.is_file() && staged.metadata().map(|m| m.len() > 0).unwrap_or(false) {
             if let Err(e) = promote_file(&staged, &final_path) {
-                for (_, claim) in &mut font_claims {
-                    font_manager.release(claim);
-                }
                 return Err(format!(
                     "Failed to promote subtitle to '{}': {e}",
                     final_path.display()
@@ -308,19 +304,19 @@ pub async fn extract_mkv_file(
         }
     }
 
-    for (_, mut claim) in font_claims {
+    for (_, mut claim) in font_claims.drain_claims() {
         if font_manager.promote(&mut claim).is_some() {
             summary.extracted_fonts += 1;
         }
     }
+    font_claims.defuse();
+
     if summary.extracted_fonts > 0 {
         summary.log.push(format!(
             "   -> Extracted {} new font(s).",
             summary.extracted_fonts
         ));
     }
-
-    let _ = std::fs::remove_dir(font_manager.fonts_dir.join(".font_staging"));
 
     Ok(summary)
 }

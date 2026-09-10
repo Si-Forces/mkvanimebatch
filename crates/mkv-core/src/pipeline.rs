@@ -150,6 +150,18 @@ pub struct PipelineSummary {
     pub log: Vec<String>,
 }
 
+fn fonts_dir_for(
+    mkv_dir: &Path,
+    input_dir: &Path,
+    out_override: Option<&Path>,
+    fonts_override: Option<&Path>,
+) -> PathBuf {
+    if let Some(f) = fonts_override {
+        return f.to_path_buf();
+    }
+    resolve_output_dir(&mkv_dir.join("placeholder.mkv"), input_dir, out_override).join("fonts")
+}
+
 pub struct BatchPipeline {
     pub config: PipelineConfig,
     pub event_sender: Option<EventSender>,
@@ -211,14 +223,6 @@ impl BatchPipeline {
             return Ok(summary);
         }
 
-        let out_dir = self.config.out_dir.clone();
-        let fonts_dir = self.config.fonts_dir.clone().unwrap_or_else(|| {
-            out_dir
-                .as_ref()
-                .unwrap_or(&self.config.input_dir)
-                .join("fonts")
-        });
-        let font_registry = Arc::new(FontRegistry::new(fonts_dir, None));
         let cache = self.config.cache.clone().unwrap_or_else(|| {
             Arc::new(PersistentInspectCache::new(
                 self.config.cache_file.clone(),
@@ -270,7 +274,7 @@ impl BatchPipeline {
             }
 
             if let Some(c) = cache_opt {
-                c.save_shared();
+                c.save();
             }
 
             let success = summary.errors == 0 && !summary.cancelled;
@@ -293,6 +297,7 @@ impl BatchPipeline {
         let io_semaphore = Arc::new(tokio::sync::Semaphore::new(io_limit));
         let mut join_set = tokio::task::JoinSet::new();
         let mut in_flight: HashMap<String, String> = HashMap::new();
+        let mut font_registries: HashMap<PathBuf, Arc<FontRegistry>> = HashMap::new();
         let mut file_idx = 0;
 
         while file_idx < files.len() || !join_set.is_empty() {
@@ -313,7 +318,17 @@ impl BatchPipeline {
                 let item_id = get_item_id(&file.path, &self.config.input_dir);
                 let file_path = file.path.clone();
                 let file_name = file.name.clone();
-                let font_registry = font_registry.clone();
+                let mkv_dir = file_path.parent().unwrap_or(Path::new("."));
+                let fonts_dir = fonts_dir_for(
+                    mkv_dir,
+                    &self.config.input_dir,
+                    self.config.out_dir.as_deref(),
+                    self.config.fonts_dir.as_deref(),
+                );
+                let font_registry = font_registries
+                    .entry(fonts_dir.clone())
+                    .or_insert_with(|| Arc::new(FontRegistry::new(fonts_dir, None)))
+                    .clone();
                 let target_out_dir =
                     self.config.out_dir.as_deref().map(|out| {
                         resolve_output_dir(&file_path, &self.config.input_dir, Some(out))
@@ -475,8 +490,12 @@ impl BatchPipeline {
             }
         }
 
+        for registry in font_registries.values() {
+            registry.cleanup_staging();
+        }
+
         if !self.config.no_cache {
-            cache.save_shared();
+            cache.save();
         }
 
         let success = summary.errors == 0 && !summary.cancelled;
@@ -1005,7 +1024,7 @@ impl BatchPipeline {
         }
 
         if !self.config.no_cache {
-            cache.save_shared();
+            cache.save();
         }
 
         let success = summary.errors == 0 && !summary.cancelled;
@@ -1018,5 +1037,30 @@ impl BatchPipeline {
         .await;
 
         Ok(summary)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_fonts_dir_for() {
+        let input_dir = Path::new("/anime");
+        let mkv_dir = Path::new("/anime/Season 1");
+        let out_dir = Path::new("/output");
+        let fonts_override = Path::new("/custom/fonts");
+
+        // 1. Fonts override takes precedence
+        let res1 = fonts_dir_for(mkv_dir, input_dir, Some(out_dir), Some(fonts_override));
+        assert_eq!(res1, fonts_override);
+
+        // 2. Out override resolves nested release
+        let res2 = fonts_dir_for(mkv_dir, input_dir, Some(out_dir), None);
+        assert_eq!(res2, PathBuf::from("/output/Season 1/fonts"));
+
+        // 3. Default joins mkv_dir / "fonts"
+        let res3 = fonts_dir_for(mkv_dir, input_dir, None, None);
+        assert_eq!(res3, PathBuf::from("/anime/Season 1/fonts"));
     }
 }

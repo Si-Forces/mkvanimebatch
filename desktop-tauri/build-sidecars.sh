@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # build-sidecars.sh
-# Builds mkv_remux.py and mkv_extract.py as standalone Linux executables.
+# Builds mkv-cli as standalone Linux sidecar executables.
 # Usage (from repo root):  bash desktop-tauri/build-sidecars.sh
 # or from desktop-tauri/:  bash build-sidecars.sh
 
@@ -13,28 +13,11 @@ TRIPLE="x86_64-unknown-linux-gnu"
 
 mkdir -p "$OUT_DIR"
 
-echo "==> Building mkv-remux sidecar..."
-python3 -m PyInstaller \
-    --onefile --console \
-    --name "mkv-remux-$TRIPLE" \
-    --distpath "$OUT_DIR" \
-    --workpath "/tmp/pyinstaller-work-remux" \
-    --specpath "/tmp/pyinstaller-spec-remux" \
-    --noconfirm \
-    "$REPO_ROOT/mkv_remux.py"
-
-echo "==> Building mkv-extract sidecar..."
-python3 -m PyInstaller \
-    --onefile --console \
-    --name "mkv-extract-$TRIPLE" \
-    --distpath "$OUT_DIR" \
-    --workpath "/tmp/pyinstaller-work-extract" \
-    --specpath "/tmp/pyinstaller-spec-extract" \
-    --noconfirm \
-    "$REPO_ROOT/mkv_extract.py"
-
-# Ensure binaries have executable permissions
-chmod +x "$OUT_DIR"/mkv-* 2>/dev/null || true
+echo "==> Building mkv-cli in release mode..."
+cargo build --release -p mkv-cli
+cp "$REPO_ROOT/target/release/mkv-cli" "$OUT_DIR/mkv-remux-$TRIPLE"
+cp "$REPO_ROOT/target/release/mkv-cli" "$OUT_DIR/mkv-extract-$TRIPLE"
+chmod +x "$OUT_DIR"/mkv-*
 
 echo ""
 echo "==> Sidecars built successfully:"

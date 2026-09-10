@@ -2,7 +2,9 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::domain::{cover_mime, promote_file, read_progress_stream, select_audio_track};
+use crate::domain::{
+    cover_mime, promote_file, read_progress_stream, select_audio_track, SUBPROCESS_TIMEOUT,
+};
 use crate::fonts::FontInfo;
 use crate::scan::InspectedVideo;
 
@@ -300,10 +302,16 @@ pub async fn execute_remux_job(
         ffmpeg_cmd.creation_flags(0x08000000);
         ffmpeg_cmd.kill_on_drop(true);
         ffmpeg_cmd.args(&ffmpeg_args);
-        let ffmpeg_out = ffmpeg_cmd
-            .output()
-            .await
-            .map_err(|e| format!("Failed to execute ffmpeg: {e}"))?;
+        let ffmpeg_out = match tokio::time::timeout(SUBPROCESS_TIMEOUT, ffmpeg_cmd.output()).await {
+            Ok(Ok(out)) => out,
+            Ok(Err(e)) => return Err(format!("Failed to execute ffmpeg: {e}")),
+            Err(_) => {
+                return Err(format!(
+                    "ffmpeg audio transcode timed out after {} seconds",
+                    SUBPROCESS_TIMEOUT.as_secs()
+                ))
+            }
+        };
         if !ffmpeg_out.status.success() {
             let stderr = String::from_utf8_lossy(&ffmpeg_out.stderr);
             return Err(format!("ffmpeg audio transcode failed: {stderr}"));
@@ -348,15 +356,27 @@ pub async fn execute_remux_job(
         stderr_bytes
     });
 
-    if let Some(out_stream) = stdout {
-        let _ = read_progress_stream(out_stream, on_progress, None).await;
-    }
+    let execution = async {
+        if let Some(out_stream) = stdout {
+            let _ = read_progress_stream(out_stream, on_progress, None).await;
+        }
+        let status = child
+            .wait()
+            .await
+            .map_err(|e| format!("Failed to wait on mkvmerge: {e}"))?;
+        let stderr_output = stderr_handle.await.unwrap_or_default();
+        Ok::<_, String>((status, stderr_output))
+    };
 
-    let status = child
-        .wait()
-        .await
-        .map_err(|e| format!("Failed to wait on mkvmerge: {e}"))?;
-    let stderr_output = stderr_handle.await.unwrap_or_default();
+    let (status, stderr_output) = match tokio::time::timeout(SUBPROCESS_TIMEOUT, execution).await {
+        Ok(res) => res?,
+        Err(_) => {
+            return Err(format!(
+                "mkvmerge timed out after {} seconds",
+                SUBPROCESS_TIMEOUT.as_secs()
+            ))
+        }
+    };
 
     let is_success = matches!(status.code(), Some(0) | Some(1));
     if !is_success {

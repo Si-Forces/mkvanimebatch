@@ -481,9 +481,17 @@ fn parse_track_entry<R: Read + Seek>(reader: &mut R, len: u64) -> Result<MkvTrac
         _ => None,
     };
 
+    let resolved_language = match language {
+        Some(lang) => Some(lang),
+        None => language_ietf.map(|ietf| {
+            let base = ietf.split('-').next().unwrap_or(&ietf);
+            crate::domain::lang_mkv_tag(base).to_string()
+        }),
+    };
+
     let properties = TrackProperties {
         codec_id: codec_id.clone(),
-        language: language_ietf.or(language),
+        language: resolved_language,
         track_name,
         audio_channels: channels,
         pixel_dimensions,
@@ -537,4 +545,64 @@ fn parse_attached_file<R: Read + Seek>(
         content_type,
         size,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    fn make_track_buf(lang: Option<&str>, lang_ietf: Option<&str>) -> Vec<u8> {
+        let mut buf = Vec::new();
+        // TrackType = 17 (subtitles)
+        buf.extend_from_slice(&[0x83, 0x81, 17]);
+        if let Some(l) = lang {
+            buf.extend_from_slice(&[0x22, 0xB5, 0x9C]);
+            buf.push(0x80 | (l.len() as u8));
+            buf.extend_from_slice(l.as_bytes());
+        }
+        if let Some(li) = lang_ietf {
+            buf.extend_from_slice(&[0x22, 0xB5, 0x9D]);
+            buf.push(0x80 | (li.len() as u8));
+            buf.extend_from_slice(li.as_bytes());
+        }
+        buf
+    }
+
+    #[test]
+    fn test_track_language_priority() {
+        // 1. Both present: ISO 639-2 `language` wins over BCP 47 `language_ietf`
+        let buf1 = make_track_buf(Some("jpn"), Some("en-US"));
+        let mut cur1 = Cursor::new(&buf1);
+        let track1 = parse_track_entry(&mut cur1, buf1.len() as u64).unwrap();
+        assert_eq!(track1.properties.language.as_deref(), Some("jpn"));
+
+        // 2. Only language_ietf present: primary subtag extracted and mapped via lang_mkv_tag
+        let buf2 = make_track_buf(None, Some("id-ID"));
+        let mut cur2 = Cursor::new(&buf2);
+        let track2 = parse_track_entry(&mut cur2, buf2.len() as u64).unwrap();
+        assert_eq!(track2.properties.language.as_deref(), Some("ind"));
+
+        let buf3 = make_track_buf(None, Some("en-US"));
+        let mut cur3 = Cursor::new(&buf3);
+        let track3 = parse_track_entry(&mut cur3, buf3.len() as u64).unwrap();
+        assert_eq!(track3.properties.language.as_deref(), Some("eng"));
+
+        let buf4 = make_track_buf(None, Some("ja"));
+        let mut cur4 = Cursor::new(&buf4);
+        let track4 = parse_track_entry(&mut cur4, buf4.len() as u64).unwrap();
+        assert_eq!(track4.properties.language.as_deref(), Some("jpn"));
+
+        // 3. Only ISO 639-2 language present
+        let buf5 = make_track_buf(Some("ind"), None);
+        let mut cur5 = Cursor::new(&buf5);
+        let track5 = parse_track_entry(&mut cur5, buf5.len() as u64).unwrap();
+        assert_eq!(track5.properties.language.as_deref(), Some("ind"));
+
+        // 4. Neither present
+        let buf6 = make_track_buf(None, None);
+        let mut cur6 = Cursor::new(&buf6);
+        let track6 = parse_track_entry(&mut cur6, buf6.len() as u64).unwrap();
+        assert_eq!(track6.properties.language, None);
+    }
 }
