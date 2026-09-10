@@ -1,46 +1,11 @@
-use std::collections::BTreeMap;
-
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-pub const CONTRACT_VERSION: u64 = 2;
+pub const CONTRACT_VERSION: u64 = mkv_core::manifest::MANIFEST_VERSION;
 
 type ExtraFields = Map<String, Value>;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct InspectionManifest {
-    pub version: u64,
-    #[serde(default)]
-    pub subtitle_candidates: BTreeMap<String, Vec<String>>,
-    pub items: Vec<ManifestItem>,
-    #[serde(flatten)]
-    pub extra: ExtraFields,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ManifestItem {
-    pub id: String,
-    pub name: String,
-    pub release: String,
-    pub metadata: InspectionMetadata,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub inspection_error: Option<String>,
-    #[serde(flatten)]
-    pub extra: ExtraFields,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct InspectionMetadata {
-    pub resolution: Option<String>,
-    pub video_codec: Option<String>,
-    pub video_tag: Option<String>,
-    pub audio_summary: Option<String>,
-    pub has_flac: Option<bool>,
-    pub sub_summary: Option<String>,
-    pub fonts_count: Option<u64>,
-    #[serde(flatten)]
-    pub extra: ExtraFields,
-}
+pub use mkv_core::manifest::{InspectionManifest, InspectionMetadata, ManifestItem};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

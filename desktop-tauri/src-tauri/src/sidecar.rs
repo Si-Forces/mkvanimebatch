@@ -92,7 +92,7 @@ pub(crate) fn get_sidecar_path(app: &AppHandle, name: &str) -> Result<PathBuf, S
     }
 
     // 2. Embedded sidecar fallback (extract from binary payload to app local data directory)
-    let embedded_bytes: Option<&[u8]> = get_embedded_bytes(name);
+    let embedded_bytes: Option<&[u8]> = get_embedded_bytes(name).filter(|b| !b.is_empty());
 
     if let Some(bytes) = embedded_bytes {
         let sidecar_dir = app

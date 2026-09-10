@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::domain::{cover_mime, select_audio_track};
+use crate::domain::{cover_mime, promote_file, read_progress_stream, select_audio_track};
 use crate::fonts::FontInfo;
 use crate::scan::InspectedVideo;
 
@@ -246,15 +246,20 @@ pub struct RemuxSummary {
     pub log: Vec<String>,
 }
 
+pub struct RemuxOptions<'a> {
+    pub opus_bitrate: &'a str,
+    pub complexity: u32,
+    pub ffmpeg_threads: usize,
+    pub sub_offset: f64,
+}
+
 /// Executes audio transcoding (if required) and remuxing via `mkvmerge` into `job.output_file`.
 pub async fn execute_remux_job(
     job: &PlannedJob,
     selection: &TrackSelection,
     fonts: &FontInfo,
-    opus_bitrate: &str,
-    complexity: u32,
-    ffmpeg_threads: usize,
-    sub_offset: f64,
+    options: &RemuxOptions<'_>,
+    on_progress: Option<&(dyn Fn(f64) + Send + Sync)>,
 ) -> Result<RemuxSummary, String> {
     let mut summary = RemuxSummary {
         video_path: job.video.clone(),
@@ -283,14 +288,16 @@ pub async fn execute_remux_job(
             &job.video,
             selection.audio_index,
             &temp_opus,
-            opus_bitrate,
-            complexity,
-            ffmpeg_threads,
+            options.opus_bitrate,
+            options.complexity,
+            options.ffmpeg_threads,
         );
         summary
             .log
             .push("  Transcoding audio to Opus with ffmpeg...".into());
         let mut ffmpeg_cmd = tokio::process::Command::new("ffmpeg");
+        #[cfg(windows)]
+        ffmpeg_cmd.creation_flags(0x08000000);
         ffmpeg_cmd.kill_on_drop(true);
         ffmpeg_cmd.args(&ffmpeg_args);
         let ffmpeg_out = ffmpeg_cmd
@@ -313,21 +320,48 @@ pub async fn execute_remux_job(
         temp_opus_file.as_deref(),
         fonts,
         &temp_output,
-        sub_offset,
+        options.sub_offset,
     );
 
     summary.log.push("  Running mkvmerge...".into());
     let mut mkvmerge_cmd = tokio::process::Command::new("mkvmerge");
+    #[cfg(windows)]
+    mkvmerge_cmd.creation_flags(0x08000000);
     mkvmerge_cmd.kill_on_drop(true);
     mkvmerge_cmd.args(&mkvmerge_args);
-    let mkvmerge_out = mkvmerge_cmd
-        .output()
-        .await
-        .map_err(|e| format!("Failed to execute mkvmerge: {e}"))?;
+    mkvmerge_cmd.stdout(std::process::Stdio::piped());
+    mkvmerge_cmd.stderr(std::process::Stdio::piped());
 
-    let code = mkvmerge_out.status.code().unwrap_or(-1);
+    let mut child = mkvmerge_cmd
+        .spawn()
+        .map_err(|e| format!("Failed to spawn mkvmerge: {e}"))?;
+
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+
+    let mut stderr_bytes = Vec::new();
+    let stderr_handle = tokio::spawn(async move {
+        if let Some(mut stream) = stderr {
+            use tokio::io::AsyncReadExt;
+            let _ = stream.read_to_end(&mut stderr_bytes).await;
+        }
+        stderr_bytes
+    });
+
+    if let Some(out_stream) = stdout {
+        let _ = read_progress_stream(out_stream, on_progress, None).await;
+    }
+
+    let status = child
+        .wait()
+        .await
+        .map_err(|e| format!("Failed to wait on mkvmerge: {e}"))?;
+    let stderr_output = stderr_handle.await.unwrap_or_default();
+
+    let code = status.code().unwrap_or(-1);
     if code > 1 {
-        let stderr = String::from_utf8_lossy(&mkvmerge_out.stderr);
+        let _ = std::fs::remove_file(&temp_output);
+        let stderr = String::from_utf8_lossy(&stderr_output);
         return Err(format!("mkvmerge failed with exit code {code}: {stderr}"));
     }
 
@@ -335,7 +369,7 @@ pub async fn execute_remux_job(
         return Err("mkvmerge succeeded but output file was not created or is empty".into());
     }
 
-    std::fs::rename(&temp_output, &job.output_file)
+    promote_file(&temp_output, &job.output_file)
         .map_err(|e| format!("Failed to promote remuxed file to final destination: {e}"))?;
 
     summary

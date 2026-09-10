@@ -27,7 +27,7 @@ fn test_extract_mkv_file_no_work() {
         let inspected = InspectedVideo::new(meta);
         let font_mgr = FontRegistry::new(dir.path().join("fonts"), None);
 
-        let summary = extract_mkv_file(&mkv_path, &inspected, &font_mgr, None)
+        let summary = extract_mkv_file(&mkv_path, &inspected, &font_mgr, None, None)
             .await
             .unwrap();
         assert_eq!(summary.extracted_sub, None);

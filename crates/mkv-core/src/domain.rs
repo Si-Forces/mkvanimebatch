@@ -725,3 +725,116 @@ pub fn select_audio_track(
 
     (Some(best_track), reason.to_string())
 }
+
+/// Promotes a staged file to its final destination path atomically and safely.
+/// Ensures the parent directory exists. If destination exists (e.g. on Windows where
+/// rename fails on existing targets), a temporary backup is used with rollback support.
+pub fn promote_file(staged: &Path, final_path: &Path) -> Result<(), std::io::Error> {
+    let parent = final_path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+
+    if std::fs::rename(staged, final_path).is_ok() {
+        return Ok(());
+    }
+
+    // Rename failed. If destination already exists (typical on Windows), use backup-and-rollback
+    if final_path.exists() {
+        let backup_path = final_path.with_extension(format!("bak.{}", uuid::Uuid::new_v4()));
+        if std::fs::rename(final_path, &backup_path).is_ok() {
+            if std::fs::rename(staged, final_path).is_ok() {
+                let _ = std::fs::remove_file(&backup_path);
+                return Ok(());
+            } else {
+                // Rollback: restore backup
+                let _ = std::fs::rename(&backup_path, final_path);
+            }
+        }
+    }
+
+    // Fallback across filesystem boundaries: copy to a temporary sibling file in final_path's
+    // parent directory first, then rename over final_path to guarantee atomic replacement.
+    let temp_sibling = parent.join(format!(".tmp_promote_{}", uuid::Uuid::new_v4()));
+    if let Err(e) = std::fs::copy(staged, &temp_sibling) {
+        let _ = std::fs::remove_file(&temp_sibling);
+        return Err(e);
+    }
+
+    let rename_result = if std::fs::rename(&temp_sibling, final_path).is_ok() {
+        Ok(())
+    } else if final_path.exists() {
+        let backup_path = final_path.with_extension(format!("bak.{}", uuid::Uuid::new_v4()));
+        if std::fs::rename(final_path, &backup_path).is_ok() {
+            if std::fs::rename(&temp_sibling, final_path).is_ok() {
+                let _ = std::fs::remove_file(&backup_path);
+                Ok(())
+            } else {
+                let _ = std::fs::rename(&backup_path, final_path);
+                let _ = std::fs::remove_file(&temp_sibling);
+                Err(std::io::Error::other(
+                    "Failed to replace destination with temporary sibling file",
+                ))
+            }
+        } else {
+            let _ = std::fs::remove_file(&temp_sibling);
+            Err(std::io::Error::other(
+                "Failed to backup existing destination file",
+            ))
+        }
+    } else {
+        let _ = std::fs::remove_file(&temp_sibling);
+        Err(std::io::Error::other(
+            "Failed to rename temporary sibling file to final destination",
+        ))
+    };
+
+    if rename_result.is_ok() {
+        let _ = std::fs::remove_file(staged);
+    }
+    rename_result
+}
+
+/// Parses standard mkvmerge/mkvextract "Progress: XX%" output strings.
+pub fn parse_progress_percentage(line: &str) -> Option<f64> {
+    if let Some(rest) = line.trim().strip_prefix("Progress:") {
+        let p = rest.trim().trim_end_matches('%').trim();
+        p.parse::<f64>().ok()
+    } else {
+        None
+    }
+}
+
+/// Reads an asynchronous byte stream, splitting on '\r' or '\n', and dispatches progress updates.
+pub async fn read_progress_stream<R: tokio::io::AsyncRead + Unpin>(
+    mut stream: R,
+    on_progress: Option<&(dyn Fn(f64) + Send + Sync)>,
+    mut on_bytes: Option<&mut Vec<u8>>,
+) -> Result<(), std::io::Error> {
+    use tokio::io::AsyncReadExt;
+    let mut buf = [0u8; 1024];
+    let mut pending = String::new();
+    loop {
+        let n = stream.read(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        if let Some(ref mut b) = on_bytes {
+            b.extend_from_slice(&buf[..n]);
+        }
+        pending.push_str(&String::from_utf8_lossy(&buf[..n]));
+        while let Some(pos) = pending.find(['\r', '\n']) {
+            let line = &pending[..pos];
+            if let Some(pct) = parse_progress_percentage(line) {
+                if let Some(cb) = on_progress {
+                    cb(pct);
+                }
+            }
+            pending.drain(..=pos);
+        }
+    }
+    if let Some(pct) = parse_progress_percentage(&pending) {
+        if let Some(cb) = on_progress {
+            cb(pct);
+        }
+    }
+    Ok(())
+}

@@ -271,8 +271,36 @@ async fn main() -> ExitCode {
     let cancel_token_clone = cancel_token.clone();
 
     tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            cancel_token_clone.cancel();
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigterm = match signal(SignalKind::terminate()) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    eprintln!("Warning: Failed to bind SIGTERM listener: {e}");
+                    None
+                }
+            };
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {
+                    cancel_token_clone.cancel();
+                }
+                _ = async {
+                    if let Some(s) = sigterm.as_mut() {
+                        s.recv().await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {
+                    cancel_token_clone.cancel();
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                cancel_token_clone.cancel();
+            }
         }
     });
     let (event_sender, event_forwarder) = if args.events {

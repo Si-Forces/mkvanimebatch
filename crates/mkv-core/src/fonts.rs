@@ -11,6 +11,7 @@ use std::sync::Arc;
 use blake2::{Blake2b512, Digest};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use tempfile::NamedTempFile;
 use tracing::{error, warn};
 use uuid::Uuid;
 
@@ -254,13 +255,9 @@ impl FontHashMemo {
             return;
         }
 
-        if let Some(parent) = self.memo_file.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
+        let parent = self.memo_file.parent().unwrap_or_else(|| Path::new("."));
+        let _ = fs::create_dir_all(parent);
 
-        let temp_path = self
-            .memo_file
-            .with_extension(format!("tmp.{}", Uuid::new_v4()));
         let serialized = match serde_json::to_string(&self.data) {
             Ok(s) => s,
             Err(e) => {
@@ -269,14 +266,18 @@ impl FontHashMemo {
             }
         };
 
-        if let Ok(mut file) = File::create(&temp_path) {
-            if file.write_all(serialized.as_bytes()).is_ok() && file.sync_all().is_ok() {
-                let _ = fs::rename(&temp_path, &self.memo_file);
-                self.dirty = false;
-                return;
+        if let Ok(mut temp_file) = NamedTempFile::new_in(parent) {
+            if temp_file.write_all(serialized.as_bytes()).is_ok() && temp_file.flush().is_ok() {
+                if temp_file.persist(&self.memo_file).is_ok() {
+                    self.dirty = false;
+                } else {
+                    warn!(
+                        "Failed to atomically replace font hash memo at {}",
+                        self.memo_file.display()
+                    );
+                }
             }
         }
-        let _ = fs::remove_file(&temp_path);
     }
 }
 

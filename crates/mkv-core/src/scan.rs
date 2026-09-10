@@ -52,7 +52,13 @@ pub struct MkvmergeMetadata {
 
 /// Probes MKV metadata using `mkvmerge -J` subprocess.
 pub fn probe_video_mkvmerge(path: &Path) -> Result<MkvmergeMetadata, String> {
-    let output = std::process::Command::new("mkvmerge")
+    let mut cmd = std::process::Command::new("mkvmerge");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+    }
+    let output = cmd
         .args(["-J", &path.to_string_lossy()])
         .output()
         .map_err(|e| format!("Failed to execute mkvmerge: {e}"))?;
