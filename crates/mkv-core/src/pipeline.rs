@@ -104,6 +104,8 @@ pub struct PipelineConfig {
     pub mode: PipelineMode,
     pub dry_run: bool,
     pub no_cache: bool,
+    pub cache: Option<Arc<PersistentInspectCache>>,
+    pub cache_file: Option<PathBuf>,
     pub workers: usize,
     pub io_jobs: usize,
     pub bitrate: String,
@@ -124,6 +126,8 @@ impl Default for PipelineConfig {
             mode: PipelineMode::Remux,
             dry_run: false,
             no_cache: false,
+            cache: None,
+            cache_file: None,
             workers: 4,
             io_jobs: 2,
             bitrate: "192k".to_string(),
@@ -215,7 +219,12 @@ impl BatchPipeline {
                 .join("fonts")
         });
         let font_registry = Arc::new(FontRegistry::new(fonts_dir, None));
-        let cache = Arc::new(PersistentInspectCache::default());
+        let cache = self.config.cache.clone().unwrap_or_else(|| {
+            Arc::new(PersistentInspectCache::new(
+                self.config.cache_file.clone(),
+                !self.config.no_cache,
+            ))
+        });
         let cache_opt = if self.config.no_cache {
             None
         } else {
@@ -517,7 +526,12 @@ impl BatchPipeline {
             videos_by_dir.entry(parent).or_default().push(file);
         }
 
-        let cache = Arc::new(PersistentInspectCache::default());
+        let cache = self.config.cache.clone().unwrap_or_else(|| {
+            Arc::new(PersistentInspectCache::new(
+                self.config.cache_file.clone(),
+                !self.config.no_cache,
+            ))
+        });
         let cache_opt = if self.config.no_cache {
             None
         } else {
@@ -558,18 +572,31 @@ impl BatchPipeline {
                 break;
             }
 
-            let resolved_assets_dir = self.config.assets_dir.as_deref().map(|assets| match mkv_dir
-                .strip_prefix(&self.config.input_dir)
-            {
-                Ok(rel) => {
-                    let candidate = assets.join(rel);
-                    if candidate.is_dir() {
-                        candidate
-                    } else {
-                        assets.to_path_buf()
+            let resolved_assets_dir = self.config.assets_dir.as_deref().map(|assets| {
+                let rel_buf: Option<PathBuf> = mkv_dir
+                    .strip_prefix(&self.config.input_dir)
+                    .map(|p| p.to_path_buf())
+                    .ok()
+                    .or_else(|| {
+                        if let (Ok(m_canon), Ok(r_canon)) =
+                            (mkv_dir.canonicalize(), self.config.input_dir.canonicalize())
+                        {
+                            m_canon.strip_prefix(&r_canon).map(|p| p.to_path_buf()).ok()
+                        } else {
+                            None
+                        }
+                    });
+                match rel_buf {
+                    Some(rel) => {
+                        let candidate = assets.join(rel);
+                        if candidate.is_dir() {
+                            candidate
+                        } else {
+                            assets.to_path_buf()
+                        }
                     }
+                    None => assets.to_path_buf(),
                 }
-                Err(_) => assets.to_path_buf(),
             });
             let prep_opts = ReleasePreparationOptions {
                 fonts_override: self.config.fonts_dir.as_deref(),

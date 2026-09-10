@@ -570,6 +570,7 @@ impl FileSignature {
 }
 
 /// Thread-safe persistent JSON cache for mkvmerge inspection metadata keyed on (path, size, mtime).
+#[derive(Debug)]
 pub struct PersistentInspectCache {
     pub cache_file: PathBuf,
     pub enabled: bool,
@@ -598,6 +599,18 @@ impl PersistentInspectCache {
                 return k.clone();
             }
         }
+        #[cfg(windows)]
+        let mut resolved = path
+            .canonicalize()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| raw.clone());
+        #[cfg(windows)]
+        {
+            if let Some(stripped) = resolved.strip_prefix(r"\\?\") {
+                resolved = stripped.to_string();
+            }
+        }
+        #[cfg(not(windows))]
         let resolved = path
             .canonicalize()
             .map(|p| p.to_string_lossy().into_owned())
@@ -682,7 +695,7 @@ impl PersistentInspectCache {
         }
     }
 
-    pub fn save(&mut self) {
+    pub fn save(&self) {
         self.save_internal();
     }
 
@@ -716,9 +729,28 @@ impl PersistentInspectCache {
             None => Path::new("."),
         };
 
+        let save_data = if self.cache_file.exists() {
+            match std::fs::read_to_string(&self.cache_file) {
+                Ok(content) => {
+                    match serde_json::from_str::<HashMap<String, InspectCacheEntry>>(&content) {
+                        Ok(mut on_disk) => {
+                            for (k, v) in live_data {
+                                on_disk.insert(k, v);
+                            }
+                            on_disk
+                        }
+                        Err(_) => live_data,
+                    }
+                }
+                Err(_) => live_data,
+            }
+        } else {
+            live_data
+        };
+
         match NamedTempFile::new_in(parent) {
             Ok(mut temp_file) => {
-                let serialized = match serde_json::to_string(&live_data) {
+                let serialized = match serde_json::to_string(&save_data) {
                     Ok(s) => s,
                     Err(e) => {
                         warn!("Failed to serialize inspect cache: {e}");

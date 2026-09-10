@@ -1,4 +1,5 @@
 use std::fs;
+use std::sync::Arc;
 use tempfile::tempdir;
 
 use mkv_core::domain::{MkvTrack, TrackProperties};
@@ -58,6 +59,8 @@ async fn test_extract_dry_run_emits_planned_events() {
         mode: PipelineMode::Extract,
         dry_run: true,
         no_cache: false,
+        cache: None,
+        cache_file: None,
         workers: 2,
         io_jobs: 1,
         bitrate: "192k".to_string(),
@@ -131,6 +134,8 @@ async fn test_extract_dry_run_preserves_nested_output_directory() {
         mode: PipelineMode::Extract,
         dry_run: true,
         no_cache: false,
+        cache: None,
+        cache_file: None,
         workers: 1,
         io_jobs: 1,
         bitrate: "192k".to_string(),
@@ -180,7 +185,10 @@ async fn test_remux_dry_run_preserves_nested_output_directory() {
     fs::write(&sub1, b"[Script Info]\nTitle: Test Sub").unwrap();
 
     // Seed inspection cache so probe succeeds without external mkvmerge
-    let mut cache = PersistentInspectCache::default();
+    let cache = Arc::new(PersistentInspectCache::new(
+        Some(in_tmp.path().join("test_cache.json")),
+        true,
+    ));
     cache.put_path(&ep1, sample_video_metadata());
     cache.save();
 
@@ -192,6 +200,8 @@ async fn test_remux_dry_run_preserves_nested_output_directory() {
         mode: PipelineMode::Remux,
         dry_run: true,
         no_cache: false,
+        cache: Some(cache.clone()),
+        cache_file: None,
         workers: 2,
         io_jobs: 1,
         bitrate: "192k".to_string(),
@@ -201,7 +211,6 @@ async fn test_remux_dry_run_preserves_nested_output_directory() {
         keep_fonts: false,
         sub_assignments: None,
     };
-
     let cancel_token = CancellationToken::new();
     let (event_sender, mut event_receiver) = create_event_channel(64);
 
@@ -214,10 +223,12 @@ async fn test_remux_dry_run_preserves_nested_output_directory() {
 
     // Verify output path preserved Season 02 subdirectory
     let expected_nested_path = out_tmp.path().join("Season 02").join("Show - 01.mkv");
+    let expected_nested_str = expected_nested_path.to_string_lossy().to_string();
+    let expected_nested_slash = expected_nested_str.replace('\\', "/");
     let log_contains_expected_output = summary
         .log
         .iter()
-        .any(|line| line.contains(&expected_nested_path.to_string_lossy().to_string()));
+        .any(|line| line.contains(&expected_nested_str) || line.contains(&expected_nested_slash));
     assert!(
         log_contains_expected_output,
         "Log should contain preserved nested output path '{}'. Actual log:\n{:#?}",
@@ -245,7 +256,10 @@ async fn test_remux_skips_when_no_matching_subtitle() {
     let ep = in_tmp.path().join("Show - 01.mkv");
     fs::write(&ep, b"dummy mkv").unwrap();
 
-    let mut cache = PersistentInspectCache::default();
+    let cache = Arc::new(PersistentInspectCache::new(
+        Some(in_tmp.path().join("test_cache.json")),
+        true,
+    ));
     cache.put_path(&ep, sample_video_metadata());
     cache.save();
 
@@ -257,6 +271,8 @@ async fn test_remux_skips_when_no_matching_subtitle() {
         mode: PipelineMode::Remux,
         dry_run: true,
         no_cache: false,
+        cache: Some(cache.clone()),
+        cache_file: None,
         workers: 2,
         io_jobs: 1,
         bitrate: "192k".to_string(),
@@ -266,7 +282,6 @@ async fn test_remux_skips_when_no_matching_subtitle() {
         keep_fonts: false,
         sub_assignments: None,
     };
-
     let cancel_token = CancellationToken::new();
     let (event_sender, mut event_receiver) = create_event_channel(64);
 
@@ -307,6 +322,8 @@ async fn test_pipeline_cancellation_drains_items() {
         mode: PipelineMode::Extract,
         dry_run: true,
         no_cache: false,
+        cache: None,
+        cache_file: None,
         workers: 1,
         io_jobs: 1,
         bitrate: "192k".to_string(),
