@@ -257,6 +257,8 @@ async fn main() -> ExitCode {
         },
         dry_run: args.dry_run,
         no_cache: args.no_cache,
+        cache: None,
+        cache_file: None,
         workers: args.workers.unwrap_or(4) as usize,
         io_jobs: args.io_jobs.unwrap_or(2) as usize,
         bitrate: args.bitrate,

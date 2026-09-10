@@ -299,10 +299,15 @@ pub fn resolve_output_dir(
     let Some(out_override) = out_override else {
         return parent.to_path_buf();
     };
-    match parent.strip_prefix(input_dir) {
-        Ok(rel) => out_override.join(rel),
-        Err(_) => out_override.to_path_buf(),
+    if let Ok(rel) = parent.strip_prefix(input_dir) {
+        return out_override.join(rel);
     }
+    if let (Ok(p_canon), Ok(in_canon)) = (parent.canonicalize(), input_dir.canonicalize()) {
+        if let Ok(rel) = p_canon.strip_prefix(&in_canon) {
+            return out_override.join(rel);
+        }
+    }
+    out_override.to_path_buf()
 }
 
 pub fn seasons_match(mkv_season: &str, sub_season: &str) -> bool {
@@ -314,7 +319,21 @@ pub fn seasons_match(mkv_season: &str, sub_season: &str) -> bool {
 }
 
 pub fn ancestor_dirs(mkv_dir: &Path, root_input_dir: &Path) -> Vec<PathBuf> {
-    let Ok(rel) = mkv_dir.strip_prefix(root_input_dir) else {
+    let rel_buf: Option<PathBuf> = mkv_dir
+        .strip_prefix(root_input_dir)
+        .map(|p| p.to_path_buf())
+        .ok()
+        .or_else(|| {
+            if let (Ok(m_canon), Ok(r_canon)) =
+                (mkv_dir.canonicalize(), root_input_dir.canonicalize())
+            {
+                m_canon.strip_prefix(&r_canon).map(|p| p.to_path_buf()).ok()
+            } else {
+                None
+            }
+        });
+
+    let Some(rel) = rel_buf else {
         return vec![mkv_dir.to_path_buf()];
     };
 
