@@ -6,6 +6,7 @@ description = "CLI adapter for mkv-core batch processing engine"
 
 [dependencies]
 mkv-core = { path = "../mkv-core" }
+regex = "1.10"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }

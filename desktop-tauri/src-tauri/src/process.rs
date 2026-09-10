@@ -80,8 +80,15 @@ pub struct JobState {
     accepting_starts: AtomicBool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ActiveScan {
+    pub(crate) id: u64,
+    pub(crate) pid: u32,
+    pub(crate) cancel_token: Option<tokio_util::sync::CancellationToken>,
+}
+
 pub struct ScanState {
-    pub(crate) active: Mutex<Option<(u64, u32)>>,
+    pub(crate) active: Mutex<Option<ActiveScan>>,
     pub(crate) next_id: AtomicU64,
     pub(crate) start_lock: Mutex<()>,
     accepting_starts: AtomicBool,
@@ -104,7 +111,11 @@ impl ScanState {
     }
 
     pub fn active_pid(&self) -> Option<Pid> {
-        self.active.lock().ok()?.map(|(_, pid)| Pid::from_u32(pid))
+        self.active
+            .lock()
+            .ok()?
+            .as_ref()
+            .map(|scan| Pid::from_u32(scan.pid))
     }
 
     pub(crate) fn ensure_accepting_starts(&self) -> Result<(), String> {
@@ -125,7 +136,8 @@ impl ScanState {
                 .active
                 .lock()
                 .map_err(|e| e.to_string())?
-                .is_some_and(|(id, _)| id == scan_id))
+                .as_ref()
+                .is_some_and(|scan| scan.id == scan_id))
         })
     }
 
@@ -144,7 +156,7 @@ pub(crate) struct ScanRegistration<'a> {
 impl Drop for ScanRegistration<'_> {
     fn drop(&mut self) {
         if let Ok(mut active) = self.state.active.lock() {
-            if active.is_some_and(|(id, _)| id == self.id) {
+            if active.as_ref().is_some_and(|scan| scan.id == self.id) {
                 *active = None;
             }
         }
@@ -254,14 +266,23 @@ pub(crate) fn stop_registered_scan_with_timeout(
     state: &ScanState,
     timeout: std::time::Duration,
 ) -> Result<(), String> {
-    let target = *state.active.lock().map_err(|e| e.to_string())?;
-    let Some((scan_id, pid)) = target else {
+    let target = state.active.lock().map_err(|e| e.to_string())?.clone();
+    let Some(scan) = target else {
         return Ok(());
     };
+    let scan_id = scan.id;
+    let pid = scan.pid;
+
+    if let Some(token) = scan.cancel_token {
+        token.cancel();
+    }
 
     if pid == 0 {
         let mut active = state.active.lock().map_err(|e| e.to_string())?;
-        if active.is_some_and(|target| target == (scan_id, 0)) {
+        if active
+            .as_ref()
+            .is_some_and(|target| target.id == scan_id && target.pid == 0)
+        {
             *active = None;
         }
         return Ok(());
@@ -282,7 +303,7 @@ pub(crate) fn stop_registered_scan_with_timeout(
             let mut active = state.active.lock().map_err(|e| e.to_string())?;
             if active
                 .as_ref()
-                .is_some_and(|target| *target != (scan_id, pid))
+                .is_some_and(|target| target.id != scan_id || target.pid != pid)
             {
                 return Ok(());
             }
@@ -309,7 +330,8 @@ pub(crate) fn stop_registered_scan_with_timeout(
             .active
             .lock()
             .map_err(|e| e.to_string())?
-            .is_some_and(|(id, _)| id == scan_id)
+            .as_ref()
+            .is_some_and(|scan| scan.id == scan_id)
         {
             signal_process_group(pid, libc::SIGKILL, "force-stop directory inspection")?;
         }
@@ -600,16 +622,34 @@ mod job_tests {
             stopping: false,
         });
 
-        *scan_state.active.lock().unwrap() = Some((1, 99999));
+        *scan_state.active.lock().unwrap() = Some(ActiveScan {
+            id: 1,
+            pid: 99999,
+            cancel_token: None,
+        });
 
         let result = stop_job_inner(&job_state, &scan_state, Some(99));
         assert!(result.is_ok());
-        assert_eq!(*scan_state.active.lock().unwrap(), Some((1, 99999)));
+        assert_eq!(
+            *scan_state.active.lock().unwrap(),
+            Some(ActiveScan {
+                id: 1,
+                pid: 99999,
+                cancel_token: None,
+            })
+        );
 
         let empty_job_state = JobState::default();
         let result_empty = stop_job_inner(&empty_job_state, &scan_state, Some(99));
         assert!(result_empty.is_ok());
-        assert_eq!(*scan_state.active.lock().unwrap(), Some((1, 99999)));
+        assert_eq!(
+            *scan_state.active.lock().unwrap(),
+            Some(ActiveScan {
+                id: 1,
+                pid: 99999,
+                cancel_token: None,
+            })
+        );
 
         let mut slot = job_state.slot.lock().unwrap().take().unwrap();
         let _ = slot.child.wait();
@@ -742,6 +782,43 @@ mod cleanup_tests {
         let mut slot = job_state.slot.lock().unwrap().take().unwrap();
         let _ = slot.child.wait();
     }
+
+    #[test]
+    fn test_stop_registered_scan_cancels_token() {
+        let state = ScanState::default();
+        let token = tokio_util::sync::CancellationToken::new();
+        *state.active.lock().unwrap() = Some(ActiveScan {
+            id: 1,
+            pid: 0,
+            cancel_token: Some(token.clone()),
+        });
+
+        assert!(!token.is_cancelled());
+        assert!(stop_registered_scan(&state).is_ok());
+        assert!(token.is_cancelled());
+        assert!(!state.is_active());
+    }
+
+    #[test]
+    fn test_scan_registration_drop_clears_active_scan() {
+        let state = ScanState::default();
+        let token = tokio_util::sync::CancellationToken::new();
+        *state.active.lock().unwrap() = Some(ActiveScan {
+            id: 1,
+            pid: 0,
+            cancel_token: Some(token.clone()),
+        });
+
+        {
+            let _registration = ScanRegistration {
+                state: &state,
+                id: 1,
+            };
+        }
+
+        assert!(!state.is_active());
+        assert!(!token.is_cancelled());
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -759,7 +836,11 @@ mod unix_scan_tests {
         command.process_group(0);
         let mut child = command.spawn().unwrap();
         let pid = child.id();
-        *state.active.lock().unwrap() = Some((1, pid));
+        *state.active.lock().unwrap() = Some(ActiveScan {
+            id: 1,
+            pid,
+            cancel_token: None,
+        });
 
         let wait_state = Arc::clone(&state);
         let waiter = thread::spawn(move || {
@@ -794,7 +875,11 @@ mod windows_scan_tests {
             .unwrap();
         let pid = child.id();
         child.wait().unwrap();
-        *state.active.lock().unwrap() = Some((1, pid));
+        *state.active.lock().unwrap() = Some(ActiveScan {
+            id: 1,
+            pid,
+            cancel_token: None,
+        });
 
         assert!(stop_registered_scan(&state).is_ok());
         assert!(!state.is_active());

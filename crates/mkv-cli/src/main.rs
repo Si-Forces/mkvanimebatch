@@ -33,35 +33,104 @@ struct CliArgs {
     dry_run: bool,
 }
 
+impl CliArgs {
+    pub fn validate(&self) -> Result<(), String> {
+        let re = regex::Regex::new(r"^(\d+)([kM]?)$").map_err(|e| e.to_string())?;
+        let val = &self.bitrate;
+        let err_msg = format!(
+            "Invalid bitrate format: '{val}'. Must be a positive value like 128k, 192k, 1M."
+        );
+        match re.captures(val) {
+            Some(caps) => {
+                let num: u64 = caps.get(1).map_or("", |m| m.as_str()).parse().unwrap_or(0);
+                if num == 0 {
+                    return Err(err_msg);
+                }
+            }
+            None => return Err(err_msg),
+        }
+
+        if !(0..=10).contains(&self.complexity) {
+            let val = self.complexity;
+            return Err(format!(
+                "Invalid complexity: {val}. Must be between 0 and 10."
+            ));
+        }
+
+        if let Some(workers) = self.workers {
+            if !(1..=64).contains(&workers) {
+                return Err("Workers must be between 1 and 64".into());
+            }
+        }
+
+        if let Some(io) = self.io_jobs {
+            if !(0..=64).contains(&io) {
+                return Err("io-jobs must be between 0 and 64".into());
+            }
+        }
+
+        if let Some(threads) = self.ffmpeg_threads {
+            if !(1..=32).contains(&threads) {
+                return Err("ffmpeg-threads must be between 1 and 32".into());
+            }
+        }
+
+        Ok(())
+    }
+}
+
 fn parse_args() -> Result<CliArgs, String> {
+    let mut args = parse_args_from(std::env::args().skip(1))?;
+
+    let exe_name = std::env::args()
+        .next()
+        .and_then(|p| {
+            PathBuf::from(p)
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+        })
+        .unwrap_or_default();
+    if exe_name.contains("mkv-extract") {
+        args.extract = true;
+    }
+
+    Ok(args)
+}
+
+fn parse_args_from<I, T>(iter: I) -> Result<CliArgs, String>
+where
+    I: IntoIterator<Item = T>,
+    T: AsRef<str>,
+{
     let mut args = CliArgs {
         bitrate: "192k".to_string(),
         complexity: 10,
         ..Default::default()
     };
 
-    let mut iter = std::env::args().skip(1);
+    let mut iter = iter.into_iter();
     while let Some(arg) = iter.next() {
-        match arg.as_str() {
+        let arg_str = arg.as_ref().to_string();
+        match arg_str.as_str() {
             "--input-dir" => {
                 let val = iter.next().ok_or("Missing value for --input-dir")?;
-                args.input_dir = Some(PathBuf::from(val));
+                args.input_dir = Some(PathBuf::from(val.as_ref()));
             }
             "--out-dir" => {
                 let val = iter.next().ok_or("Missing value for --out-dir")?;
-                args.out_dir = Some(PathBuf::from(val));
+                args.out_dir = Some(PathBuf::from(val.as_ref()));
             }
             "--sub-assignments" => {
                 let val = iter.next().ok_or("Missing value for --sub-assignments")?;
-                args.sub_assignments = Some(PathBuf::from(val));
+                args.sub_assignments = Some(PathBuf::from(val.as_ref()));
             }
             "--fonts-dir" => {
                 let val = iter.next().ok_or("Missing value for --fonts-dir")?;
-                args.fonts_dir = Some(PathBuf::from(val));
+                args.fonts_dir = Some(PathBuf::from(val.as_ref()));
             }
             "--assets-dir" => {
                 let val = iter.next().ok_or("Missing value for --assets-dir")?;
-                args.assets_dir = Some(PathBuf::from(val));
+                args.assets_dir = Some(PathBuf::from(val.as_ref()));
             }
             "--plan" => args.plan = true,
             "--events" => args.events = true,
@@ -72,29 +141,43 @@ fn parse_args() -> Result<CliArgs, String> {
             "--keep-fonts" => args.keep_fonts = true,
             "--sub-offset" => {
                 let val = iter.next().ok_or("Missing value for --sub-offset")?;
-                args.sub_offset = val.parse().map_err(|_| "Invalid number for --sub-offset")?;
+                args.sub_offset = val
+                    .as_ref()
+                    .parse()
+                    .map_err(|_| "Invalid number for --sub-offset")?;
             }
             "--workers" => {
                 let val = iter.next().ok_or("Missing value for --workers")?;
-                args.workers = Some(val.parse().map_err(|_| "Invalid integer for --workers")?);
+                args.workers = Some(
+                    val.as_ref()
+                        .parse()
+                        .map_err(|_| "Invalid integer for --workers")?,
+                );
             }
             "--io-jobs" => {
                 let val = iter.next().ok_or("Missing value for --io-jobs")?;
-                args.io_jobs = Some(val.parse().map_err(|_| "Invalid integer for --io-jobs")?);
+                args.io_jobs = Some(
+                    val.as_ref()
+                        .parse()
+                        .map_err(|_| "Invalid integer for --io-jobs")?,
+                );
             }
             "--ffmpeg-threads" => {
                 let val = iter.next().ok_or("Missing value for --ffmpeg-threads")?;
                 args.ffmpeg_threads = Some(
-                    val.parse()
+                    val.as_ref()
+                        .parse()
                         .map_err(|_| "Invalid integer for --ffmpeg-threads")?,
                 );
             }
             "--bitrate" => {
-                args.bitrate = iter.next().ok_or("Missing value for --bitrate")?;
+                let val = iter.next().ok_or("Missing value for --bitrate")?;
+                args.bitrate = val.as_ref().to_string();
             }
             "--complexity" => {
                 let val = iter.next().ok_or("Missing value for --complexity")?;
                 args.complexity = val
+                    .as_ref()
                     .parse()
                     .map_err(|_| "Invalid integer for --complexity")?;
             }
@@ -108,17 +191,7 @@ fn parse_args() -> Result<CliArgs, String> {
         }
     }
 
-    let exe_name = std::env::args()
-        .next()
-        .and_then(|p| {
-            PathBuf::from(p)
-                .file_name()
-                .map(|s| s.to_string_lossy().to_string())
-        })
-        .unwrap_or_default();
-    if exe_name.contains("mkv-extract") {
-        args.extract = true;
-    }
+    args.validate()?;
 
     Ok(args)
 }
@@ -188,12 +261,21 @@ fn load_sub_assignments(path: &Path, input_dir: &Path) -> Result<HashMap<String,
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    match run().await {
+        Ok(code) => code,
+        Err(err) => {
+            eprintln!("Error: {err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run() -> Result<ExitCode, String> {
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("Error: {e}");
             print_help();
-            return ExitCode::FAILURE;
+            return Err(e);
         }
     };
 
@@ -202,35 +284,32 @@ async fn main() -> ExitCode {
     if args.clear_cache {
         cache.clear();
         println!("Persistent inspection cache cleared.");
-        return ExitCode::SUCCESS;
+        return Ok(ExitCode::SUCCESS);
     }
 
     let Some(input_dir) = args.input_dir else {
-        eprintln!("Error: --input-dir is required.");
         print_help();
-        return ExitCode::FAILURE;
+        return Err("--input-dir is required.".into());
     };
 
     if !input_dir.exists() {
-        eprintln!(
-            "Error: Input directory does not exist: {}",
+        return Err(format!(
+            "Input directory does not exist: {}",
             input_dir.display()
-        );
-        return ExitCode::FAILURE;
+        ));
     }
 
     let cache_opt = if args.no_cache { None } else { Some(&cache) };
 
     if args.plan {
-        let manifest = generate_inspection_manifest(&input_dir, cache_opt);
+        let manifest = generate_inspection_manifest(&input_dir, cache_opt, None)?;
         match serde_json::to_string_pretty(&manifest) {
             Ok(json) => {
                 println!("{json}");
-                return ExitCode::SUCCESS;
+                return Ok(ExitCode::SUCCESS);
             }
             Err(e) => {
-                eprintln!("Failed to serialize manifest: {e}");
-                return ExitCode::FAILURE;
+                return Err(format!("Failed to serialize manifest: {e}"));
             }
         }
     }
@@ -238,8 +317,7 @@ async fn main() -> ExitCode {
         Some(path) => match load_sub_assignments(path, &input_dir) {
             Ok(m) => Some(m),
             Err(err) => {
-                eprintln!("Error loading subtitle assignments: {err}");
-                return ExitCode::FAILURE;
+                return Err(format!("Error loading subtitle assignments: {err}"));
             }
         },
         None => None,
@@ -339,16 +417,62 @@ async fn main() -> ExitCode {
                 );
             }
             if summary.cancelled {
-                ExitCode::from(130)
+                Ok(ExitCode::from(130))
             } else if summary.errors == 0 {
-                ExitCode::SUCCESS
+                Ok(ExitCode::SUCCESS)
             } else {
-                ExitCode::FAILURE
+                Ok(ExitCode::FAILURE)
             }
         }
         Err(err) => {
             eprintln!("Fatal error: {err}");
-            ExitCode::FAILURE
+            Ok(ExitCode::FAILURE)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_bitrate_validation() {
+        assert!(parse_args_from(["--bitrate", "0"]).is_err());
+        assert!(parse_args_from(["--bitrate", "0k"]).is_err());
+        assert!(parse_args_from(["--bitrate", "invalid"]).is_err());
+
+        assert!(parse_args_from(["--bitrate", "128k"]).is_ok());
+        assert!(parse_args_from(["--bitrate", "192k"]).is_ok());
+        assert!(parse_args_from(["--bitrate", "1M"]).is_ok());
+    }
+
+    #[test]
+    fn test_complexity_validation() {
+        assert!(parse_args_from(["--complexity", "11"]).is_err());
+        assert!(parse_args_from(["--complexity", "0"]).is_ok());
+        assert!(parse_args_from(["--complexity", "10"]).is_ok());
+    }
+
+    #[test]
+    fn test_workers_validation() {
+        assert!(parse_args_from(["--workers", "0"]).is_err());
+        assert!(parse_args_from(["--workers", "65"]).is_err());
+        assert!(parse_args_from(["--workers", "4"]).is_ok());
+        assert!(parse_args_from(["--workers", "64"]).is_ok());
+    }
+
+    #[test]
+    fn test_io_jobs_validation() {
+        assert!(parse_args_from(["--io-jobs", "65"]).is_err());
+        assert!(parse_args_from(["--io-jobs", "0"]).is_ok());
+        assert!(parse_args_from(["--io-jobs", "64"]).is_ok());
+    }
+
+    #[test]
+    fn test_ffmpeg_threads_validation() {
+        assert!(parse_args_from(["--ffmpeg-threads", "0"]).is_err());
+        assert!(parse_args_from(["--ffmpeg-threads", "33"]).is_err());
+        assert!(parse_args_from(["--ffmpeg-threads", "1"]).is_ok());
+        assert!(parse_args_from(["--ffmpeg-threads", "32"]).is_ok());
     }
 }

@@ -2187,6 +2187,7 @@ dependencies = [
  "tauri-build",
  "tauri-runtime",
  "tempfile",
+ "tokio-util",
  "window-vibrancy 0.8.0",
 ]
 
@@ -2195,6 +2196,7 @@ name = "mkv-cli"
 version = "0.1.0"
 dependencies = [
  "mkv-core",
+ "regex",
  "serde",
  "serde_json",
  "tokio",
