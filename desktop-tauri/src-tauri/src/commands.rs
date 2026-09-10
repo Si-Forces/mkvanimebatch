@@ -1,4 +1,4 @@
-use crate::contract::{parse_job_event, parse_manifest_json, InspectionManifest};
+use crate::contract::{parse_job_event, InspectionManifest};
 #[cfg(windows)]
 use crate::process::CREATE_NO_WINDOW;
 pub use crate::process::{
@@ -91,9 +91,9 @@ pub async fn inspect_directory(
     let result = tauri::async_runtime::spawn_blocking(move || {
         let cache = mkv_core::scan::PersistentInspectCache::default();
         let cache_opt = if no_cache { None } else { Some(&cache) };
-        let core_manifest = mkv_core::manifest::generate_inspection_manifest(&dir, cache_opt);
-        let bytes = serde_json::to_vec(&core_manifest).map_err(|e| e.to_string())?;
-        parse_manifest_json(&bytes)
+        Ok(mkv_core::manifest::generate_inspection_manifest(
+            &dir, cache_opt,
+        ))
     })
     .await
     .unwrap_or_else(|e| Err(format!("Async runtime error: {}", e)));
