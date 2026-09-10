@@ -696,14 +696,14 @@ impl PersistentInspectCache {
     }
 
     pub fn save(&self) {
-        self.save_internal();
+        self.save_internal(std::time::Duration::ZERO);
     }
 
     pub fn save_shared(&self) {
-        self.save_internal();
+        self.save_internal(std::time::Duration::from_millis(500));
     }
 
-    fn save_internal(&self) {
+    fn save_internal(&self, min_interval: std::time::Duration) {
         if !self.enabled {
             return;
         }
@@ -713,10 +713,17 @@ impl PersistentInspectCache {
             if !state.dirty {
                 return;
             }
+            if !min_interval.is_zero() {
+                if let Some(last) = state.last_save_ts {
+                    if last.elapsed() < min_interval {
+                        return;
+                    }
+                }
+            }
             (state.data.clone(), state.revision)
         };
 
-        let live_data: HashMap<String, InspectCacheEntry> = data_snapshot
+        let save_data: HashMap<String, InspectCacheEntry> = data_snapshot
             .into_iter()
             .filter(|(_, entry)| entry.json_data.is_some())
             .collect();
@@ -727,25 +734,6 @@ impl PersistentInspectCache {
                 p
             }
             None => Path::new("."),
-        };
-
-        let save_data = if self.cache_file.exists() {
-            match std::fs::read_to_string(&self.cache_file) {
-                Ok(content) => {
-                    match serde_json::from_str::<HashMap<String, InspectCacheEntry>>(&content) {
-                        Ok(mut on_disk) => {
-                            for (k, v) in live_data {
-                                on_disk.insert(k, v);
-                            }
-                            on_disk
-                        }
-                        Err(_) => live_data,
-                    }
-                }
-                Err(_) => live_data,
-            }
-        } else {
-            live_data
         };
 
         match NamedTempFile::new_in(parent) {

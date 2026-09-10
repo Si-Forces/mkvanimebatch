@@ -269,18 +269,56 @@ pub fn score_subtitle_category(language: &str, is_ass: bool) -> i32 {
 
 static UNSAFE_FN_CHARS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"[/:*?"<>|\\]"#).unwrap());
 
+pub fn is_windows_reserved_device(stem: &str) -> bool {
+    let s = stem.to_ascii_uppercase();
+    matches!(
+        s.as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    )
+}
+
 pub fn safe_filename(name: &str) -> String {
     let file_name = Path::new(name)
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
     let sanitized = UNSAFE_FN_CHARS.replace_all(&file_name, "_").into_owned();
-    if sanitized.is_empty() || sanitized == "." || sanitized == ".." {
+    let base_name = if sanitized.is_empty() || sanitized == "." || sanitized == ".." {
         "unnamed".to_string()
     } else {
         sanitized
+    };
+
+    let check_stem = base_name.split('.').next().unwrap_or(&base_name);
+    if is_windows_reserved_device(check_stem) {
+        format!("_{base_name}")
+    } else {
+        base_name
     }
 }
+
+pub const SUBPROCESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1800);
 
 pub fn output_stem(base: &str, ep_type: &EpisodeType, ep: &str) -> String {
     if ep_type.is_special_or_ova() {
@@ -748,6 +786,18 @@ pub fn select_audio_track(
 /// Promotes a staged file to its final destination path atomically and safely.
 /// Ensures the parent directory exists. If destination exists (e.g. on Windows where
 /// rename fails on existing targets), a temporary backup is used with rollback support.
+fn rollback_error(
+    final_path: &Path,
+    backup_path: &Path,
+    rb_err: &std::io::Error,
+) -> std::io::Error {
+    std::io::Error::other(format!(
+        "Failed to replace destination '{}' and rollback failed ({rb_err}); backup preserved at '{}'",
+        final_path.display(),
+        backup_path.display()
+    ))
+}
+
 pub fn promote_file(staged: &Path, final_path: &Path) -> Result<(), std::io::Error> {
     let parent = final_path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)?;
@@ -765,7 +815,9 @@ pub fn promote_file(staged: &Path, final_path: &Path) -> Result<(), std::io::Err
                 return Ok(());
             } else {
                 // Rollback: restore backup
-                let _ = std::fs::rename(&backup_path, final_path);
+                if let Err(rb_err) = std::fs::rename(&backup_path, final_path) {
+                    return Err(rollback_error(final_path, &backup_path, &rb_err));
+                }
             }
         }
     }
@@ -787,11 +839,14 @@ pub fn promote_file(staged: &Path, final_path: &Path) -> Result<(), std::io::Err
                 let _ = std::fs::remove_file(&backup_path);
                 Ok(())
             } else {
-                let _ = std::fs::rename(&backup_path, final_path);
                 let _ = std::fs::remove_file(&temp_sibling);
-                Err(std::io::Error::other(
-                    "Failed to replace destination with temporary sibling file",
-                ))
+                if let Err(rb_err) = std::fs::rename(&backup_path, final_path) {
+                    Err(rollback_error(final_path, &backup_path, &rb_err))
+                } else {
+                    Err(std::io::Error::other(
+                        "Failed to replace destination with temporary sibling file",
+                    ))
+                }
             }
         } else {
             let _ = std::fs::remove_file(&temp_sibling);

@@ -3,7 +3,9 @@ use std::fs;
 use std::sync::Arc;
 use std::thread;
 
-use mkv_core::fonts::{find_fonts_dir, hash_file, scan_fonts, FontHashMemo, FontRegistry};
+use mkv_core::fonts::{
+    find_fonts_dir, hash_file, scan_fonts, FontClaimsGuard, FontHashMemo, FontRegistry,
+};
 use mkv_core::scan::FileSignature;
 use tempfile::tempdir;
 
@@ -262,4 +264,92 @@ fn test_concurrent_font_claims_and_promotions() {
     }
 
     assert_eq!(mgr.claimed_hashes().len(), 10);
+}
+
+#[test]
+fn test_font_claims_guard_drop_releases_and_deletes() {
+    let tmp = tempdir().unwrap();
+    let fonts_dir = tmp.path().join("fonts");
+    let mgr = FontRegistry::new(fonts_dir, None);
+
+    let staging_path_1;
+    let staging_path_2;
+
+    {
+        let mut guard = FontClaimsGuard::new(&mgr);
+        assert!(guard.is_empty());
+        assert_eq!(guard.len(), 0);
+
+        let claim1 = mgr.claim("GuardFont1.ttf", 500).unwrap();
+        staging_path_1 = claim1.staging_path.clone();
+        fs::write(&staging_path_1, b"font 1 data").unwrap();
+        assert!(staging_path_1.exists());
+        guard.push(1, claim1);
+
+        let claim2 = mgr.claim("GuardFont2.otf", 700).unwrap();
+        staging_path_2 = claim2.staging_path.clone();
+        fs::write(&staging_path_2, b"font 2 data").unwrap();
+        assert!(staging_path_2.exists());
+        guard.push(2, claim2);
+
+        assert!(!guard.is_empty());
+        assert_eq!(guard.len(), 2);
+        assert_eq!(guard.claims().len(), 2);
+
+        // Name and size are reserved while claim is active
+        assert!(mgr.claim("GuardFont1.ttf", 500).is_none());
+        assert!(mgr.claim("GuardFont2.otf", 700).is_none());
+
+        // Guard dropped here without calling defuse()
+    }
+
+    // After drop without defuse():
+    // 1. Reservations in claimed_name_size must be released (can be re-claimed)
+    let reclaim1 = mgr.claim("GuardFont1.ttf", 500);
+    assert!(reclaim1.is_some());
+    let reclaim2 = mgr.claim("GuardFont2.otf", 700);
+    assert!(reclaim2.is_some());
+
+    // 2. Staging files must be deleted
+    assert!(!staging_path_1.exists());
+    assert!(!staging_path_2.exists());
+}
+
+#[test]
+fn test_font_claims_guard_defuse_preserves_claims() {
+    let tmp = tempdir().unwrap();
+    let fonts_dir = tmp.path().join("fonts");
+    let mgr = FontRegistry::new(fonts_dir, None);
+
+    let staging_path;
+
+    {
+        let mut guard = FontClaimsGuard::new(&mgr);
+        let claim = mgr.claim("PreservedFont.ttf", 300).unwrap();
+        staging_path = claim.staging_path.clone();
+        fs::write(&staging_path, b"preserved data").unwrap();
+        guard.push(1, claim);
+
+        guard.defuse();
+        // Guard dropped with defuse() called
+    }
+
+    // Staging file should still exist and reservation should NOT be released
+    assert!(staging_path.exists());
+    assert!(mgr.claim("PreservedFont.ttf", 300).is_none());
+}
+
+#[test]
+fn test_font_claims_guard_drain_claims() {
+    let tmp = tempdir().unwrap();
+    let fonts_dir = tmp.path().join("fonts");
+    let mgr = FontRegistry::new(fonts_dir, None);
+
+    let mut guard = FontClaimsGuard::new(&mgr);
+    let claim = mgr.claim("DrainedFont.ttf", 400).unwrap();
+    guard.push(1, claim);
+
+    let drained: Vec<_> = guard.drain_claims().collect();
+    assert_eq!(drained.len(), 1);
+    assert!(guard.is_empty());
 }

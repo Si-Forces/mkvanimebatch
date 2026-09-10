@@ -283,15 +283,22 @@ pub fn extract_mkv_metadata(inspected: Option<&InspectedVideo>) -> InspectionMet
 pub fn generate_inspection_manifest(
     input_dir: &Path,
     persistent_cache: Option<&PersistentInspectCache>,
-) -> InspectionManifest {
+    cancel_token: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<InspectionManifest, String> {
+    if let Some(token) = cancel_token {
+        if token.is_cancelled() {
+            return Err("Inspection cancelled".into());
+        }
+    }
+
     let all_mkvs = scan_mkv_files(input_dir, true, None);
     if all_mkvs.is_empty() {
-        return InspectionManifest {
+        return Ok(InspectionManifest {
             version: MANIFEST_VERSION,
             subtitle_candidates: BTreeMap::new(),
             items: Vec::new(),
             extra: Default::default(),
-        };
+        });
     }
 
     let mut videos_by_dir: BTreeMap<PathBuf, Vec<&crate::scan::ParsedFile>> = BTreeMap::new();
@@ -336,6 +343,15 @@ pub fn generate_inspection_manifest(
 
     let mut items = Vec::with_capacity(all_mkvs.len());
     for mkv in &all_mkvs {
+        if let Some(token) = cancel_token {
+            if token.is_cancelled() {
+                if let Some(cache) = persistent_cache {
+                    cache.save_shared();
+                }
+                return Err("Inspection cancelled".into());
+            }
+        }
+
         let (inspected, inspection_error) =
             match persistent_cache.and_then(|c| c.get_path(&mkv.path)) {
                 Some(cached) => (Some(InspectedVideo::new(cached)), None),
@@ -371,12 +387,12 @@ pub fn generate_inspection_manifest(
         cache.save_shared();
     }
 
-    InspectionManifest {
+    Ok(InspectionManifest {
         version: MANIFEST_VERSION,
         subtitle_candidates,
         items,
         extra: Default::default(),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -586,5 +602,33 @@ mod tests {
         assert!(reserialized.contains("custom_root_field"));
         assert!(reserialized.contains("custom_flag"));
         assert!(reserialized.contains("custom_metric"));
+    }
+
+    #[test]
+    fn test_generate_inspection_manifest_empty() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let res = generate_inspection_manifest(temp_dir.path(), None, None).unwrap();
+        assert_eq!(res.items.len(), 0);
+    }
+
+    #[test]
+    fn test_generate_inspection_manifest_cancelled() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let token = tokio_util::sync::CancellationToken::new();
+        token.cancel();
+        let res = generate_inspection_manifest(temp_dir.path(), None, Some(&token));
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err(), "Inspection cancelled");
+    }
+
+    #[test]
+    fn test_generate_inspection_manifest_cancelled_in_loop() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        std::fs::write(temp_dir.path().join("ep01.mkv"), b"dummy content").unwrap();
+        let token = tokio_util::sync::CancellationToken::new();
+        token.cancel();
+        let res = generate_inspection_manifest(temp_dir.path(), None, Some(&token));
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err(), "Inspection cancelled");
     }
 }

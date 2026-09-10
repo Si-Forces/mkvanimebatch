@@ -729,6 +729,53 @@ fn test_safe_filename_traversal_prevention() {
 }
 
 #[test]
+fn test_safe_filename_windows_reserved_names() {
+    use mkv_core::domain::safe_filename;
+
+    // Classic DOS devices with extension
+    assert_eq!(safe_filename("con.ass"), "_con.ass");
+    assert_eq!(safe_filename("CON.ass"), "_CON.ass");
+    assert_eq!(safe_filename("prn.txt"), "_prn.txt");
+    assert_eq!(safe_filename("aux.ttf"), "_aux.ttf");
+    assert_eq!(safe_filename("nul.otf"), "_nul.otf");
+
+    // Classic DOS devices without extension
+    assert_eq!(safe_filename("NUL"), "_NUL");
+    assert_eq!(safe_filename("con"), "_con");
+    assert_eq!(safe_filename("AUX"), "_AUX");
+    assert_eq!(safe_filename("prn"), "_prn");
+
+    // COM1 - COM9
+    for i in 1..=9 {
+        let com_lower = format!("com{i}.ass");
+        let com_upper = format!("COM{i}.ass");
+        assert_eq!(safe_filename(&com_lower), format!("_{com_lower}"));
+        assert_eq!(safe_filename(&com_upper), format!("_{com_upper}"));
+        assert_eq!(safe_filename(&format!("com{i}")), format!("_com{i}"));
+    }
+
+    // LPT1 - LPT9
+    for i in 1..=9 {
+        let lpt_lower = format!("lpt{i}.ass");
+        let lpt_upper = format!("LPT{i}.ass");
+        assert_eq!(safe_filename(&lpt_lower), format!("_{lpt_lower}"));
+        assert_eq!(safe_filename(&lpt_upper), format!("_{lpt_upper}"));
+        assert_eq!(safe_filename(&format!("lpt{i}")), format!("_lpt{i}"));
+    }
+
+    // Mixed-case
+    assert_eq!(safe_filename("CoM1.sub"), "_CoM1.sub");
+    assert_eq!(safe_filename("LpT3.ttf"), "_LpT3.ttf");
+
+    // Non-reserved names that contain reserved words as substrings
+    assert_eq!(safe_filename("context.ass"), "context.ass");
+    assert_eq!(safe_filename("auxiliary.ttf"), "auxiliary.ttf");
+    assert_eq!(safe_filename("my_con.ass"), "my_con.ass");
+    assert_eq!(safe_filename("com10.txt"), "com10.txt");
+    assert_eq!(safe_filename("lpt0.txt"), "lpt0.txt");
+}
+
+#[test]
 fn test_output_stem_restores_base() {
     use mkv_core::domain::output_stem;
     assert_eq!(
@@ -743,4 +790,26 @@ fn test_output_stem_restores_base() {
         output_stem("[Group] Title - 01", &EpisodeType::Episode, "01"),
         "[Group] Title - 01"
     );
+}
+
+#[test]
+fn test_promote_file_basic_and_overwrite() {
+    use mkv_core::domain::promote_file;
+    use tempfile::tempdir;
+
+    let tmp = tempdir().unwrap();
+    let staged = tmp.path().join("staged.txt");
+    let dest = tmp.path().join("sub_dir").join("final.txt");
+
+    std::fs::write(&staged, b"initial content").unwrap();
+    assert!(promote_file(&staged, &dest).is_ok());
+    assert!(!staged.exists());
+    assert_eq!(std::fs::read(&dest).unwrap(), b"initial content");
+
+    // Overwrite existing final destination
+    let staged2 = tmp.path().join("staged2.txt");
+    std::fs::write(&staged2, b"updated content").unwrap();
+    assert!(promote_file(&staged2, &dest).is_ok());
+    assert!(!staged2.exists());
+    assert_eq!(std::fs::read(&dest).unwrap(), b"updated content");
 }

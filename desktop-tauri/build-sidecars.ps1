@@ -1,10 +1,10 @@
 # build-sidecars.ps1
-# Builds mkv_remux.py and mkv_extract.py into standalone console
+# Builds mkv-cli into standalone console
 # executables named with the Tauri target-triple convention.
 #
 # Usage (from repo root):
-#   .\desktop\build-sidecars.ps1
-# or from desktop/:
+#   .\desktop-tauri\build-sidecars.ps1
+# or from desktop-tauri/:
 #   .\build-sidecars.ps1
 
 param(
@@ -14,16 +14,16 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-# Resolve source directory (repo root with the Python scripts)
+# Resolve source directory (repo root with Cargo.toml)
 if (-not $SourceDir) {
-    # Support running from desktop/ or from repo root
+    # Support running from desktop-tauri/ or from repo root
     $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-    if (Test-Path (Join-Path $scriptDir "..\mkv_remux.py")) {
+    if (Test-Path (Join-Path $scriptDir "..\Cargo.toml")) {
         $SourceDir = (Resolve-Path (Join-Path $scriptDir "..")).Path
-    } elseif (Test-Path (Join-Path $scriptDir "mkv_remux.py")) {
+    } elseif (Test-Path (Join-Path $scriptDir "Cargo.toml")) {
         $SourceDir = $scriptDir
     } else {
-        Write-Error "Cannot find mkv_remux.py. Run from repo root or pass -SourceDir."
+        Write-Error "Cannot find Cargo.toml. Run from repo root or pass -SourceDir."
     }
 }
 
@@ -37,29 +37,11 @@ New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
 $Triple = "x86_64-pc-windows-msvc"
 
-Write-Host "==> Building mkv-remux sidecar..." -ForegroundColor Cyan
-python -m PyInstaller `
-    --onefile --console `
-    --name "mkv-remux-$Triple" `
-    --distpath $OutDir `
-    --workpath (Join-Path $env:TEMP "pyinstaller-work-remux") `
-    --specpath (Join-Path $env:TEMP "pyinstaller-spec-remux") `
-    --noconfirm `
-    (Join-Path $SourceDir "mkv_remux.py")
-
-if ($LASTEXITCODE -ne 0) { Write-Error "PyInstaller failed for mkv-remux"; exit 1 }
-
-Write-Host "==> Building mkv-extract sidecar..." -ForegroundColor Cyan
-python -m PyInstaller `
-    --onefile --console `
-    --name "mkv-extract-$Triple" `
-    --distpath $OutDir `
-    --workpath (Join-Path $env:TEMP "pyinstaller-work-extract") `
-    --specpath (Join-Path $env:TEMP "pyinstaller-spec-extract") `
-    --noconfirm `
-    (Join-Path $SourceDir "mkv_extract.py")
-
-if ($LASTEXITCODE -ne 0) { Write-Error "PyInstaller failed for mkv-extract"; exit 1 }
+Write-Host "==> Building mkv-cli in release mode..." -ForegroundColor Cyan
+cargo build --release -p mkv-cli
+if ($LASTEXITCODE -ne 0) { Write-Error "Cargo build failed for mkv-cli"; exit 1 }
+Copy-Item (Join-Path $SourceDir "target\release\mkv-cli.exe") "$OutDir\mkv-remux-$Triple.exe" -Force
+Copy-Item (Join-Path $SourceDir "target\release\mkv-cli.exe") "$OutDir\mkv-extract-$Triple.exe" -Force
 
 Write-Host ""
 Write-Host "==> Sidecars built successfully:" -ForegroundColor Green

@@ -1,11 +1,13 @@
-use crate::contract::{parse_job_event, InspectionManifest};
+use crate::contract::{parse_job_event, InspectionManifest, JobEventExt};
 #[cfg(windows)]
 use crate::process::CREATE_NO_WINDOW;
 pub use crate::process::{
     begin_shutdown, cancel_shutdown, cleanup_owned_processes, close_window, stop_job, JobState,
     ScanState,
 };
-use crate::process::{reserve_job_slot, stop_registered_scan, JobSlot, ScanRegistration};
+use crate::process::{
+    reserve_job_slot, stop_registered_scan, ActiveScan, JobSlot, ScanRegistration,
+};
 use crate::sidecar::{get_sidecar_path, run_sidecar_once, sidecar_name};
 pub use crate::telemetry::{get_system_telemetry, TelemetryState};
 pub use crate::window::{
@@ -80,7 +82,12 @@ pub async fn inspect_directory(
     stop_registered_scan(&state)?;
 
     let scan_id = state.next_id.fetch_add(1, Ordering::SeqCst);
-    *state.active.lock().map_err(|e| e.to_string())? = Some((scan_id, 0));
+    let cancel_token = tokio_util::sync::CancellationToken::new();
+    *state.active.lock().map_err(|e| e.to_string())? = Some(ActiveScan {
+        id: scan_id,
+        pid: 0,
+        cancel_token: Some(cancel_token.clone()),
+    });
     drop(start_lock);
     let registration = ScanRegistration {
         state: &state,
@@ -91,9 +98,7 @@ pub async fn inspect_directory(
     let result = tauri::async_runtime::spawn_blocking(move || {
         let cache = mkv_core::scan::PersistentInspectCache::default();
         let cache_opt = if no_cache { None } else { Some(&cache) };
-        Ok(mkv_core::manifest::generate_inspection_manifest(
-            &dir, cache_opt,
-        ))
+        mkv_core::manifest::generate_inspection_manifest(&dir, cache_opt, Some(&cancel_token))
     })
     .await
     .unwrap_or_else(|e| Err(format!("Async runtime error: {}", e)));

@@ -530,3 +530,54 @@ impl FontRegistry {
         }
     }
 }
+
+/// RAII guard that holds uncommitted font claims and releases them on drop unless defused.
+pub struct FontClaimsGuard<'a> {
+    registry: &'a FontRegistry,
+    claims: Vec<(u32, FontClaim)>,
+    defused: bool,
+}
+
+impl<'a> FontClaimsGuard<'a> {
+    pub fn new(registry: &'a FontRegistry) -> Self {
+        Self {
+            registry,
+            claims: Vec::new(),
+            defused: false,
+        }
+    }
+
+    pub fn push(&mut self, track_id: u32, claim: FontClaim) {
+        self.claims.push((track_id, claim));
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.claims.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.claims.len()
+    }
+
+    pub fn claims(&self) -> &[(u32, FontClaim)] {
+        &self.claims
+    }
+
+    pub fn drain_claims(&mut self) -> std::vec::Drain<'_, (u32, FontClaim)> {
+        self.claims.drain(..)
+    }
+
+    pub fn defuse(&mut self) {
+        self.defused = true;
+    }
+}
+
+impl<'a> Drop for FontClaimsGuard<'a> {
+    fn drop(&mut self) {
+        if !self.defused {
+            for (_, mut claim) in self.claims.drain(..) {
+                self.registry.release(&mut claim);
+            }
+        }
+    }
+}

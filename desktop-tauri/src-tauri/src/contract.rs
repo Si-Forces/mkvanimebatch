@@ -1,75 +1,16 @@
-use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
-
 pub const CONTRACT_VERSION: u64 = mkv_core::manifest::MANIFEST_VERSION;
 
-type ExtraFields = Map<String, Value>;
+pub type ExtraFields = serde_json::Map<String, serde_json::Value>;
 
 pub use mkv_core::manifest::{InspectionManifest, InspectionMetadata, ManifestItem};
+pub use mkv_core::pipeline::{ItemOutcome, JobEvent};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ItemOutcome {
-    Completed,
-    Skipped,
-    Error,
-    Cancelled,
-    Planned,
+pub trait JobEventExt {
+    fn attach_context(&mut self, mode: &str, job_id: u64);
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum JobEvent {
-    BatchStart {
-        version: u64,
-        total: usize,
-        input_dir: String,
-        #[serde(flatten)]
-        extra: ExtraFields,
-    },
-    ItemStart {
-        version: u64,
-        id: String,
-        file: String,
-        #[serde(flatten)]
-        extra: ExtraFields,
-    },
-    ItemProgress {
-        version: u64,
-        id: String,
-        file: String,
-        progress: f64,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        speed: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        eta: Option<String>,
-        #[serde(flatten)]
-        extra: ExtraFields,
-    },
-    ItemComplete {
-        version: u64,
-        id: String,
-        file: String,
-        status: ItemOutcome,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        reason: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        error: Option<String>,
-        #[serde(flatten)]
-        extra: ExtraFields,
-    },
-    BatchComplete {
-        version: u64,
-        success: bool,
-        #[serde(default)]
-        cancelled: bool,
-        #[serde(flatten)]
-        extra: ExtraFields,
-    },
-}
-
-impl JobEvent {
-    pub fn attach_context(&mut self, mode: &str, job_id: u64) {
+impl JobEventExt for JobEvent {
+    fn attach_context(&mut self, mode: &str, job_id: u64) {
         let extra = match self {
             Self::BatchStart { extra, .. }
             | Self::ItemStart { extra, .. }
@@ -77,8 +18,14 @@ impl JobEvent {
             | Self::ItemComplete { extra, .. }
             | Self::BatchComplete { extra, .. } => extra,
         };
-        extra.insert("mode".to_string(), mode.into());
-        extra.insert("job_id".to_string(), job_id.into());
+        extra.insert(
+            "mode".to_string(),
+            serde_json::Value::String(mode.to_string()),
+        );
+        extra.insert(
+            "job_id".to_string(),
+            serde_json::Value::Number(job_id.into()),
+        );
     }
 }
 
