@@ -1,4 +1,3 @@
-use std::process::Child;
 #[cfg(windows)]
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -57,7 +56,8 @@ fn process_exists(pid: u32) -> bool {
 
 pub struct JobSlot {
     pub(crate) id: u64,
-    pub(crate) child: Child,
+    pub(crate) cancel_token: tokio_util::sync::CancellationToken,
+    pub(crate) task_handle: tokio::task::JoinHandle<()>,
     pub(crate) stopping: bool,
 }
 
@@ -179,11 +179,15 @@ impl JobState {
     }
 
     pub fn active_pid(&self) -> Option<Pid> {
-        self.slot
-            .lock()
-            .ok()?
-            .as_ref()
-            .map(|slot| Pid::from_u32(slot.child.id()))
+        None
+    }
+
+    pub(crate) fn release_slot(&self, job_id: u64) {
+        if let Ok(mut lock) = self.slot.lock() {
+            if lock.as_ref().is_some_and(|slot| slot.id == job_id) {
+                *lock = None;
+            }
+        }
     }
 
     pub(crate) fn wait_until_released(
@@ -350,119 +354,37 @@ pub(crate) fn stop_job_internal_with_timeout(
     expected_id: Option<u64>,
     timeout: std::time::Duration,
 ) -> Result<(), String> {
-    let target_id = {
+    let target = {
         let mut lock = state.slot.lock().map_err(|e| e.to_string())?;
         match &mut *lock {
             Some(slot) if expected_id.is_some_and(|id| id != slot.id) => return Ok(()),
-            Some(slot) if !slot.stopping => {
-                let child = &mut slot.child;
-                let pid = child.id();
-                let current_id = slot.id;
-
-                #[cfg(windows)]
-                {
-                    let output = taskkill_process_tree(pid)?;
-                    if !output.status.success() && child.try_wait().ok().flatten().is_none() {
-                        return Err(format!(
-                            "Failed to terminate job process tree: {}",
-                            String::from_utf8_lossy(&output.stderr).trim()
-                        ));
-                    }
-                }
-                #[cfg(not(windows))]
-                signal_process_group(pid, libc::SIGTERM, "signal job")?;
-
-                lock.as_mut().expect("slot exists").stopping = true;
-
-                current_id
+            Some(slot) => {
+                slot.stopping = true;
+                slot.cancel_token.cancel();
+                Some(slot.id)
             }
-            Some(slot) => slot.id,
-            None => {
-                return Ok(());
-            }
+            None => None,
         }
     };
 
-    {
-        #[cfg(unix)]
-        let grace = std::time::Duration::from_secs(8);
-        #[cfg(windows)]
-        let grace = std::time::Duration::from_secs(2);
-        let start = std::time::Instant::now();
-        let mut exited = false;
-        while start.elapsed() < grace {
-            {
-                let mut lock = state.slot.lock().map_err(|e| e.to_string())?;
-                if let Some(slot) = &mut *lock {
-                    if slot.id == target_id {
-                        match slot.child.try_wait() {
-                            Ok(Some(_)) | Err(_) => {
-                                exited = true;
-                            }
-                            Ok(None) => {}
-                        }
-                    } else {
-                        exited = true;
-                    }
-                } else {
-                    exited = true;
-                }
-            }
-            if exited {
-                #[cfg(unix)]
-                if let Some(slot) = state
-                    .slot
-                    .lock()
-                    .map_err(|e| e.to_string())?
-                    .as_ref()
-                    .filter(|slot| slot.id == target_id)
-                {
-                    let pid = slot.child.id();
-                    if process_group_exists(pid) {
-                        let _ = signal_process_group(pid, libc::SIGKILL, "force-kill job");
-                    }
-                }
-                break;
-            }
-            thread::sleep(std::time::Duration::from_millis(200));
-        }
+    let Some(target_id) = target else {
+        return Ok(());
+    };
 
-        #[cfg(unix)]
-        let mut group_pid = None;
-        let mut lock = state.slot.lock().map_err(|e| e.to_string())?;
-        if let Some(slot) = &mut *lock {
-            if slot.id == target_id {
-                #[cfg(unix)]
-                {
-                    group_pid = Some(slot.child.id());
-                }
-                if let Ok(None) = slot.child.try_wait() {
-                    #[cfg(unix)]
-                    signal_process_group(slot.child.id(), libc::SIGKILL, "force-kill job")?;
-                    #[cfg(windows)]
-                    slot.child
-                        .kill()
-                        .map_err(|e| format!("Failed to force-kill job: {e}"))?;
+    // Phase 1: Wait up to timeout for the task to finish cooperatively and release the slot.
+    if state.wait_until_released(target_id, timeout).is_err() {
+        // Phase 2: If unreleased after timeout, call slot.task_handle.abort().
+        {
+            let lock = state.slot.lock().map_err(|e| e.to_string())?;
+            if let Some(slot) = lock.as_ref() {
+                if slot.id == target_id {
+                    slot.task_handle.abort();
                 }
             }
         }
-        drop(lock);
-        #[cfg(unix)]
-        if let Some(pid) = group_pid {
-            for _ in 0..20 {
-                if !process_group_exists(pid) {
-                    break;
-                }
-                thread::sleep(std::time::Duration::from_millis(100));
-            }
-            if process_group_exists(pid) {
-                signal_process_group(pid, libc::SIGKILL, "force-kill job")?;
-            }
-        }
+        // Brief grace period for abort cleanup
+        let _ = state.wait_until_released(target_id, std::time::Duration::from_millis(200));
     }
-
-    // UI stop path must not misreport a delivered kill as failure; exit path re-verifies strictly.
-    let _ = state.wait_until_released(target_id, timeout);
     Ok(())
 }
 
@@ -501,8 +423,30 @@ pub(crate) fn cleanup_owned_processes_with_timeout(
         .and_then(|()| scan_state.wait_until_empty(timeout))
         .err();
     let job_error = job_stop
-        .and_then(|()| job_state.wait_until_empty(timeout))
+        .and_then(|()| {
+            if job_state.is_active() {
+                job_state.wait_until_empty(std::time::Duration::from_millis(50))
+            } else {
+                Ok(())
+            }
+        })
         .err();
+
+    // Release all slots if still present
+    if job_error.is_some() {
+        if let Ok(mut lock) = job_state.slot.lock() {
+            if let Some(slot) = lock.as_mut() {
+                slot.task_handle.abort();
+            }
+            *lock = None;
+        }
+    }
+    if scan_error.is_some() {
+        if let Ok(mut lock) = scan_state.active.lock() {
+            *lock = None;
+        }
+    }
+
     combine_errors([
         scan_error.map(|error| format!("Directory inspection cleanup failed: {error}")),
         job_error.map(|error| format!("Job cleanup failed: {error}")),
@@ -512,6 +456,19 @@ pub(crate) fn cleanup_owned_processes_with_timeout(
 pub fn begin_shutdown(job_state: &JobState, scan_state: &ScanState) -> bool {
     job_state.accepting_starts.store(false, Ordering::SeqCst);
     scan_state.accepting_starts.store(false, Ordering::SeqCst);
+    if let Ok(mut lock) = job_state.slot.lock() {
+        if let Some(slot) = lock.as_mut() {
+            slot.stopping = true;
+            slot.cancel_token.cancel();
+        }
+    }
+    if let Ok(mut lock) = scan_state.active.lock() {
+        if let Some(scan) = lock.as_mut() {
+            if let Some(token) = &scan.cancel_token {
+                token.cancel();
+            }
+        }
+    }
     let scan_starting = scan_state.start_lock.try_lock().is_err();
     scan_starting || scan_state.is_active() || job_state.is_active()
 }
@@ -557,37 +514,41 @@ mod tests {
 #[cfg(test)]
 mod job_tests {
     use super::*;
-    use std::process::Command;
     use std::sync::Arc;
+
+    pub(crate) fn dummy_slot(id: u64, stopping: bool) -> JobSlot {
+        static RT: std::sync::LazyLock<tokio::runtime::Runtime> = std::sync::LazyLock::new(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+        });
+        JobSlot {
+            id,
+            cancel_token: tokio_util::sync::CancellationToken::new(),
+            task_handle: RT.spawn(async {}),
+            stopping,
+        }
+    }
 
     #[test]
     fn test_job_slot_transitions() {
-        let mut slot = JobSlot {
-            id: 42,
-            child: Command::new("rustc").arg("--version").spawn().unwrap(),
-            stopping: false,
-        };
+        let mut slot = dummy_slot(42, false);
         assert_eq!(slot.id, 42);
         assert!(!slot.stopping);
         slot.stopping = true;
         assert!(slot.stopping);
-        let _ = slot.child.wait();
     }
 
     #[test]
     fn test_wait_for_job_slot_release_waits_for_cleanup() {
         let state = Arc::new(JobState::default());
-        *state.slot.lock().unwrap() = Some(JobSlot {
-            id: 42,
-            child: Command::new("rustc").arg("--version").spawn().unwrap(),
-            stopping: true,
-        });
+        *state.slot.lock().unwrap() = Some(dummy_slot(42, true));
 
         let cleanup_state = Arc::clone(&state);
         let cleanup = thread::spawn(move || {
             thread::sleep(std::time::Duration::from_millis(100));
-            let mut slot = cleanup_state.slot.lock().unwrap().take().unwrap();
-            let _ = slot.child.wait();
+            let _ = cleanup_state.slot.lock().unwrap().take();
         });
 
         assert!(state
@@ -599,16 +560,11 @@ mod job_tests {
     #[test]
     fn test_wait_for_job_slot_release_times_out_while_owned() {
         let state = JobState::default();
-        *state.slot.lock().unwrap() = Some(JobSlot {
-            id: 42,
-            child: Command::new("rustc").arg("--version").spawn().unwrap(),
-            stopping: true,
-        });
+        *state.slot.lock().unwrap() = Some(dummy_slot(42, true));
 
         let result = state.wait_until_released(42, std::time::Duration::from_millis(10));
         assert!(result.unwrap_err().contains("Timed out"));
-        let mut slot = state.slot.lock().unwrap().take().unwrap();
-        let _ = slot.child.wait();
+        let _ = state.slot.lock().unwrap().take();
     }
 
     #[test]
@@ -616,11 +572,7 @@ mod job_tests {
         let job_state = JobState::default();
         let scan_state = ScanState::default();
 
-        *job_state.slot.lock().unwrap() = Some(JobSlot {
-            id: 7,
-            child: Command::new("rustc").arg("--version").spawn().unwrap(),
-            stopping: false,
-        });
+        *job_state.slot.lock().unwrap() = Some(dummy_slot(7, false));
 
         *scan_state.active.lock().unwrap() = Some(ActiveScan {
             id: 1,
@@ -651,8 +603,7 @@ mod job_tests {
             })
         );
 
-        let mut slot = job_state.slot.lock().unwrap().take().unwrap();
-        let _ = slot.child.wait();
+        let _ = job_state.slot.lock().unwrap().take();
     }
 
     #[test]
@@ -666,11 +617,7 @@ mod job_tests {
         .join();
 
         let job_state = JobState::default();
-        *job_state.slot.lock().unwrap() = Some(JobSlot {
-            id: 7,
-            child: Command::new("rustc").arg("--version").spawn().unwrap(),
-            stopping: false,
-        });
+        *job_state.slot.lock().unwrap() = Some(dummy_slot(7, false));
 
         let error = stop_job_inner(&job_state, &scan_state, Some(7)).unwrap_err();
         assert!(error.contains("poisoned"));
@@ -682,32 +629,26 @@ mod job_tests {
             .as_ref()
             .is_some_and(|slot| slot.stopping));
 
-        let mut slot = job_state.slot.lock().unwrap().take().unwrap();
-        let _ = slot.child.wait();
+        let _ = job_state.slot.lock().unwrap().take();
     }
 
     #[test]
     fn test_stop_job_internal_succeeds_even_if_slot_release_times_out() {
         let state = JobState::default();
-        *state.slot.lock().unwrap() = Some(JobSlot {
-            id: 42,
-            child: Command::new("rustc").arg("--version").spawn().unwrap(),
-            stopping: true,
-        });
+        *state.slot.lock().unwrap() = Some(dummy_slot(42, true));
 
         let result =
             stop_job_internal_with_timeout(&state, None, std::time::Duration::from_millis(50));
         assert!(result.is_ok());
 
-        let mut slot = state.slot.lock().unwrap().take().unwrap();
-        let _ = slot.child.wait();
+        let _ = state.slot.lock().unwrap().take();
     }
 }
 
 #[cfg(test)]
 mod cleanup_tests {
     use super::*;
-    use std::process::Command;
+
     use std::sync::Arc;
 
     #[test]
@@ -763,11 +704,7 @@ mod cleanup_tests {
         let job_state = JobState::default();
         let scan_state = ScanState::default();
 
-        *job_state.slot.lock().unwrap() = Some(JobSlot {
-            id: 42,
-            child: Command::new("rustc").arg("--version").spawn().unwrap(),
-            stopping: true,
-        });
+        *job_state.slot.lock().unwrap() = Some(job_tests::dummy_slot(42, true));
 
         let error = cleanup_owned_processes_with_timeout(
             &job_state,
@@ -779,8 +716,7 @@ mod cleanup_tests {
         assert!(error.contains("Timed out"));
         assert!(error.contains("Job cleanup failed"));
 
-        let mut slot = job_state.slot.lock().unwrap().take().unwrap();
-        let _ = slot.child.wait();
+        let _ = job_state.slot.lock().unwrap().take();
     }
 
     #[test]

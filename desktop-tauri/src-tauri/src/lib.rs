@@ -1,7 +1,6 @@
 mod commands;
 pub mod contract;
 mod process;
-mod sidecar;
 mod telemetry;
 mod window;
 

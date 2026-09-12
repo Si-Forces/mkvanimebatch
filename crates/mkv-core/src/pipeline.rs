@@ -89,6 +89,13 @@ pub fn create_event_channel(buffer_size: usize) -> (EventSender, EventReceiver) 
     mpsc::channel(buffer_size)
 }
 
+pub type LogSender = mpsc::Sender<String>;
+pub type LogReceiver = mpsc::Receiver<String>;
+
+pub fn create_log_channel(buffer_size: usize) -> (LogSender, LogReceiver) {
+    mpsc::channel(buffer_size)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipelineMode {
     Extract,
@@ -140,6 +147,177 @@ impl Default for PipelineConfig {
     }
 }
 
+pub fn parse_sub_assignments_json(
+    json_str: &str,
+    input_dir: &Path,
+) -> Result<HashMap<String, PathBuf>, String> {
+    let parsed: serde_json::Value =
+        serde_json::from_str(json_str).map_err(|e| format!("Invalid assignments JSON: {e}"))?;
+    let mut map = HashMap::new();
+    let insert_entry = |map: &mut HashMap<String, PathBuf>, k: String, v: &str| {
+        let p = Path::new(v);
+        let resolved = if p.is_relative() {
+            input_dir.join(p)
+        } else {
+            p.to_path_buf()
+        };
+        map.insert(k, resolved);
+    };
+
+    if let Some(obj) = parsed.get("assignments").and_then(|v| v.as_object()) {
+        for (k, v) in obj {
+            if let Some(p) = v.as_str() {
+                insert_entry(&mut map, k.clone(), p);
+            }
+        }
+    } else if let Some(obj) = parsed.as_object() {
+        for (k, v) in obj {
+            if let Some(p) = v.as_str() {
+                insert_entry(&mut map, k.clone(), p);
+            }
+        }
+    }
+    Ok(map)
+}
+
+pub fn load_sub_assignments_file(
+    path: &Path,
+    input_dir: &Path,
+) -> Result<HashMap<String, PathBuf>, String> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read assignments file '{}': {e}", path.display()))?;
+    parse_sub_assignments_json(&content, input_dir)
+}
+
+impl PipelineConfig {
+    pub fn from_args<I, T>(iter: I) -> Result<Self, String>
+    where
+        I: IntoIterator<Item = T>,
+        T: AsRef<str>,
+    {
+        let mut config = Self::default();
+        let mut iter = iter.into_iter();
+        let mut sub_assign_path: Option<PathBuf> = None;
+        let bitrate_re = regex::Regex::new(r"^(\d+)(k|M)?$").unwrap();
+
+        while let Some(arg) = iter.next() {
+            let arg_str = arg.as_ref().to_string();
+            match arg_str.as_str() {
+                "--input-dir" => {
+                    let val = iter.next().ok_or("Missing value for --input-dir")?;
+                    config.input_dir = PathBuf::from(val.as_ref());
+                }
+                "--out-dir" => {
+                    let val = iter.next().ok_or("Missing value for --out-dir")?;
+                    config.out_dir = Some(PathBuf::from(val.as_ref()));
+                }
+                "--fonts-dir" => {
+                    let val = iter.next().ok_or("Missing value for --fonts-dir")?;
+                    config.fonts_dir = Some(PathBuf::from(val.as_ref()));
+                }
+                "--assets-dir" => {
+                    let val = iter.next().ok_or("Missing value for --assets-dir")?;
+                    config.assets_dir = Some(PathBuf::from(val.as_ref()));
+                }
+                "--extract" => {
+                    config.mode = PipelineMode::Extract;
+                }
+                "--remux" => {
+                    config.mode = PipelineMode::Remux;
+                }
+                "--dry-run" => config.dry_run = true,
+                "--no-cache" => config.no_cache = true,
+                "--keep-fonts" => config.keep_fonts = true,
+                "--sub-offset" => {
+                    let val = iter.next().ok_or("Missing value for --sub-offset")?;
+                    config.sub_offset = val
+                        .as_ref()
+                        .parse()
+                        .map_err(|_| "Invalid number for --sub-offset")?;
+                }
+                "--workers" => {
+                    let val = iter.next().ok_or("Missing value for --workers")?;
+                    let workers: usize = val
+                        .as_ref()
+                        .parse()
+                        .map_err(|_| "Invalid integer for --workers")?;
+                    if !(1..=64).contains(&workers) {
+                        return Err("Workers must be between 1 and 64".into());
+                    }
+                    config.workers = workers;
+                }
+                "--io-jobs" => {
+                    let val = iter.next().ok_or("Missing value for --io-jobs")?;
+                    let io_jobs: usize = val
+                        .as_ref()
+                        .parse()
+                        .map_err(|_| "Invalid integer for --io-jobs")?;
+                    if !(0..=64).contains(&io_jobs) {
+                        return Err("io-jobs must be between 0 and 64".into());
+                    }
+                    config.io_jobs = io_jobs;
+                }
+                "--ffmpeg-threads" => {
+                    let val = iter.next().ok_or("Missing value for --ffmpeg-threads")?;
+                    let threads: usize = val
+                        .as_ref()
+                        .parse()
+                        .map_err(|_| "Invalid integer for --ffmpeg-threads")?;
+                    if !(1..=32).contains(&threads) {
+                        return Err("ffmpeg-threads must be between 1 and 32".into());
+                    }
+                    config.ffmpeg_threads = threads;
+                }
+                "--bitrate" => {
+                    let val = iter.next().ok_or("Missing value for --bitrate")?;
+                    let val_str = val.as_ref();
+                    let err_msg = format!(
+                        "Invalid bitrate format: '{val_str}'. Must be a positive value like 128k, 192k, 1M."
+                    );
+                    match bitrate_re.captures(val_str) {
+                        Some(caps) => {
+                            let num: u64 =
+                                caps.get(1).map_or("", |m| m.as_str()).parse().unwrap_or(0);
+                            if num == 0 {
+                                return Err(err_msg);
+                            }
+                        }
+                        None => return Err(err_msg),
+                    }
+                    config.bitrate = val_str.to_string();
+                }
+                "--complexity" => {
+                    let val = iter.next().ok_or("Missing value for --complexity")?;
+                    let complexity: u32 = val
+                        .as_ref()
+                        .parse()
+                        .map_err(|_| "Invalid integer for --complexity")?;
+                    if !(0..=10).contains(&complexity) {
+                        return Err(format!(
+                            "Invalid complexity: {complexity}. Must be between 0 and 10."
+                        ));
+                    }
+                    config.complexity = complexity;
+                }
+                "--sub-assignments" => {
+                    let val = iter.next().ok_or("Missing value for --sub-assignments")?;
+                    sub_assign_path = Some(PathBuf::from(val.as_ref()));
+                }
+                "--plan" | "--events" | "--clear-cache" | "-h" | "--help" => {}
+                other => {
+                    return Err(format!("Unknown argument: {other}"));
+                }
+            }
+        }
+
+        if let Some(path) = sub_assign_path {
+            config.sub_assignments = Some(load_sub_assignments_file(&path, &config.input_dir)?);
+        }
+
+        Ok(config)
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct PipelineSummary {
     pub total: usize,
@@ -165,6 +343,7 @@ fn fonts_dir_for(
 pub struct BatchPipeline {
     pub config: PipelineConfig,
     pub event_sender: Option<EventSender>,
+    pub log_sender: Option<LogSender>,
     pub cancel_token: CancellationToken,
 }
 
@@ -177,12 +356,33 @@ impl BatchPipeline {
         Self {
             config,
             event_sender,
+            log_sender: None,
             cancel_token,
         }
     }
 
+    pub fn with_log_sender(mut self, log_sender: Option<LogSender>) -> Self {
+        self.log_sender = log_sender;
+        self
+    }
+
+    async fn log(&self, msg: impl Into<String>) {
+        let s = msg.into();
+        if let Some(tx) = &self.log_sender {
+            let _ = tx.send(s).await;
+        }
+    }
+
+    async fn log_batch(&self, msgs: &[String]) {
+        if let Some(tx) = &self.log_sender {
+            for msg in msgs {
+                let _ = tx.send(msg.clone()).await;
+            }
+        }
+    }
+
     async fn emit(&self, event: JobEvent) {
-        if let Some(ref tx) = self.event_sender {
+        if let Some(tx) = &self.event_sender {
             let _ = tx.send(event).await;
         }
     }
@@ -209,10 +409,12 @@ impl BatchPipeline {
         .await;
 
         if files.is_empty() {
-            summary.log.push(format!(
+            let msg = format!(
                 "No MKV files found in '{}'",
                 self.config.input_dir.display()
-            ));
+            );
+            self.log(&msg).await;
+            summary.log.push(msg);
             self.emit(JobEvent::BatchComplete {
                 version: EVENT_VERSION,
                 success: true,
@@ -256,10 +458,12 @@ impl BatchPipeline {
                 }
 
                 let item_id = get_item_id(&file.path, &self.config.input_dir);
-                summary.log.push(format!(
+                let msg = format!(
                     "[DRY-RUN] Would extract assets from: {}",
                     file.path.display()
-                ));
+                );
+                self.log(&msg).await;
+                summary.log.push(msg);
                 self.emit(JobEvent::ItemComplete {
                     version: EVENT_VERSION,
                     id: item_id,
@@ -421,6 +625,7 @@ impl BatchPipeline {
                             match task_res {
                                 Ok(logs) => {
                                     summary.completed += 1;
+                                    self.log_batch(&logs).await;
                                     summary.log.extend(logs);
                                     self.emit(JobEvent::ItemComplete {
                                         version: EVENT_VERSION,
@@ -435,9 +640,11 @@ impl BatchPipeline {
                                 }
                                 Err(err) => {
                                     summary.errors += 1;
-                                    summary.log.push(format!(
+                                    let msg = format!(
                                         "  ERROR: Extraction failed for '{file_name}': {err}"
-                                    ));
+                                    );
+                                    self.log(&msg).await;
+                                    summary.log.push(msg);
                                     self.emit(JobEvent::ItemComplete {
                                         version: EVENT_VERSION,
                                         id: item_id,
@@ -454,7 +661,9 @@ impl BatchPipeline {
                     }
                     Err(join_err) => {
                         summary.errors += 1;
-                        summary.log.push(format!("  ERROR: Task panic: {join_err}"));
+                        let msg = format!("  ERROR: Task panic: {join_err}");
+                        self.log(&msg).await;
+                        summary.log.push(msg);
                     }
                 }
             }
@@ -525,10 +734,12 @@ impl BatchPipeline {
         .await;
 
         if files.is_empty() {
-            summary.log.push(format!(
+            let msg = format!(
                 "No MKV files found in '{}'",
                 self.config.input_dir.display()
-            ));
+            );
+            self.log(&msg).await;
+            summary.log.push(msg);
             self.emit(JobEvent::BatchComplete {
                 version: EVENT_VERSION,
                 success: true,
@@ -727,10 +938,12 @@ impl BatchPipeline {
                             .get(&video_file.path)
                             .and_then(|r| r.error.clone())
                             .unwrap_or_else(|| "Failed to probe video".to_string());
-                        summary.log.push(format!(
+                        let msg = format!(
                             "  ERROR: Failed to probe '{}': {err}",
                             video_file.path.display()
-                        ));
+                        );
+                        self.log(&msg).await;
+                        summary.log.push(msg);
                         self.emit(JobEvent::ItemComplete {
                             version: EVENT_VERSION,
                             id: item_id,
@@ -765,9 +978,9 @@ impl BatchPipeline {
                     let reason = res_assets
                         .skip_reason
                         .unwrap_or_else(|| "No matching subtitle found".into());
-                    summary
-                        .log
-                        .push(format!("Skipping '{}': {reason}", video_file.name));
+                    let log_msg = format!("Skipping '{}': {reason}", video_file.name);
+                    self.log(&log_msg).await;
+                    summary.log.push(log_msg);
                     self.emit(JobEvent::ItemComplete {
                         version: EVENT_VERSION,
                         id: item_id,
@@ -800,11 +1013,13 @@ impl BatchPipeline {
                 let selection = select_tracks(&inspected);
 
                 if self.config.dry_run {
-                    summary.log.push(format!(
+                    let msg = format!(
                         "[DRY-RUN] Would remux '{}' -> '{}'",
                         video_file.name,
                         job.output_file.display()
-                    ));
+                    );
+                    self.log(&msg).await;
+                    summary.log.push(msg);
                     self.emit(JobEvent::ItemComplete {
                         version: EVENT_VERSION,
                         id: item_id,
@@ -937,6 +1152,7 @@ impl BatchPipeline {
                                     match task_res {
                                         Ok(logs) => {
                                             summary.completed += 1;
+                                            self.log_batch(&logs).await;
                                             summary.log.extend(logs);
                                             self.emit(JobEvent::ItemComplete {
                                                 version: EVENT_VERSION,
@@ -951,9 +1167,11 @@ impl BatchPipeline {
                                         }
                                         Err(err) => {
                                             summary.errors += 1;
-                                            summary.log.push(format!(
+                                            let msg = format!(
                                                 "  ERROR: Remux failed for '{file_name}': {err}"
-                                            ));
+                                            );
+                                            self.log(&msg).await;
+                                            summary.log.push(msg);
                                             self.emit(JobEvent::ItemComplete {
                                                 version: EVENT_VERSION,
                                                 id: item_id,
@@ -970,7 +1188,9 @@ impl BatchPipeline {
                             }
                             Err(join_err) => {
                                 summary.errors += 1;
-                                summary.log.push(format!("  ERROR: Task panic: {join_err}"));
+                                let msg = format!("  ERROR: Task panic: {join_err}");
+                                self.log(&msg).await;
+                                summary.log.push(msg);
                             }
                         }
                     }

@@ -2187,6 +2187,7 @@ dependencies = [
  "tauri-build",
  "tauri-runtime",
  "tempfile",
+ "tokio",
  "tokio-util",
  "window-vibrancy 0.8.0",
 ]
