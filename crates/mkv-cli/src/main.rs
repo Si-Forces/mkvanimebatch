@@ -1,8 +1,6 @@
 //! CLI adapter for mkv-core batch processing engine.
 
-use std::collections::HashMap;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use mkv_core::manifest::generate_inspection_manifest;
@@ -11,72 +9,14 @@ use mkv_core::pipeline::{
 };
 use mkv_core::scan::PersistentInspectCache;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct CliArgs {
-    input_dir: Option<PathBuf>,
-    out_dir: Option<PathBuf>,
-    sub_assignments: Option<PathBuf>,
-    fonts_dir: Option<PathBuf>,
-    assets_dir: Option<PathBuf>,
-    sub_offset: f64,
-    workers: Option<u32>,
-    io_jobs: Option<u32>,
-    ffmpeg_threads: Option<u32>,
-    bitrate: String,
-    complexity: u32,
-    keep_fonts: bool,
-    no_cache: bool,
-    clear_cache: bool,
+    config: PipelineConfig,
     plan: bool,
     events: bool,
-    extract: bool,
-    dry_run: bool,
-}
-
-impl CliArgs {
-    pub fn validate(&self) -> Result<(), String> {
-        let re = regex::Regex::new(r"^(\d+)([kM]?)$").map_err(|e| e.to_string())?;
-        let val = &self.bitrate;
-        let err_msg = format!(
-            "Invalid bitrate format: '{val}'. Must be a positive value like 128k, 192k, 1M."
-        );
-        match re.captures(val) {
-            Some(caps) => {
-                let num: u64 = caps.get(1).map_or("", |m| m.as_str()).parse().unwrap_or(0);
-                if num == 0 {
-                    return Err(err_msg);
-                }
-            }
-            None => return Err(err_msg),
-        }
-
-        if !(0..=10).contains(&self.complexity) {
-            let val = self.complexity;
-            return Err(format!(
-                "Invalid complexity: {val}. Must be between 0 and 10."
-            ));
-        }
-
-        if let Some(workers) = self.workers {
-            if !(1..=64).contains(&workers) {
-                return Err("Workers must be between 1 and 64".into());
-            }
-        }
-
-        if let Some(io) = self.io_jobs {
-            if !(0..=64).contains(&io) {
-                return Err("io-jobs must be between 0 and 64".into());
-            }
-        }
-
-        if let Some(threads) = self.ffmpeg_threads {
-            if !(1..=32).contains(&threads) {
-                return Err("ffmpeg-threads must be between 1 and 32".into());
-            }
-        }
-
-        Ok(())
-    }
+    clear_cache: bool,
+    help: bool,
+    has_input_dir: bool,
 }
 
 fn parse_args() -> Result<CliArgs, String> {
@@ -91,7 +31,7 @@ fn parse_args() -> Result<CliArgs, String> {
         })
         .unwrap_or_default();
     if exe_name.contains("mkv-extract") {
-        args.extract = true;
+        args.config.mode = PipelineMode::Extract;
     }
 
     Ok(args)
@@ -102,98 +42,44 @@ where
     I: IntoIterator<Item = T>,
     T: AsRef<str>,
 {
-    let mut args = CliArgs {
-        bitrate: "192k".to_string(),
-        complexity: 10,
-        ..Default::default()
-    };
+    let raw_args: Vec<String> = iter.into_iter().map(|s| s.as_ref().to_string()).collect();
 
-    let mut iter = iter.into_iter();
-    while let Some(arg) = iter.next() {
-        let arg_str = arg.as_ref().to_string();
-        match arg_str.as_str() {
+    let mut plan = false;
+    let mut events = false;
+    let mut clear_cache = false;
+    let mut help = false;
+    let mut has_input_dir = false;
+
+    let mut it = raw_args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--plan" => plan = true,
+            "--events" => events = true,
+            "--clear-cache" => clear_cache = true,
+            "-h" | "--help" => help = true,
             "--input-dir" => {
-                let val = iter.next().ok_or("Missing value for --input-dir")?;
-                args.input_dir = Some(PathBuf::from(val.as_ref()));
+                has_input_dir = true;
+                let _ = it.next();
             }
-            "--out-dir" => {
-                let val = iter.next().ok_or("Missing value for --out-dir")?;
-                args.out_dir = Some(PathBuf::from(val.as_ref()));
+            "--out-dir" | "--fonts-dir" | "--assets-dir" | "--sub-offset" | "--workers"
+            | "--io-jobs" | "--ffmpeg-threads" | "--bitrate" | "--complexity"
+            | "--sub-assignments" => {
+                let _ = it.next();
             }
-            "--sub-assignments" => {
-                let val = iter.next().ok_or("Missing value for --sub-assignments")?;
-                args.sub_assignments = Some(PathBuf::from(val.as_ref()));
-            }
-            "--fonts-dir" => {
-                let val = iter.next().ok_or("Missing value for --fonts-dir")?;
-                args.fonts_dir = Some(PathBuf::from(val.as_ref()));
-            }
-            "--assets-dir" => {
-                let val = iter.next().ok_or("Missing value for --assets-dir")?;
-                args.assets_dir = Some(PathBuf::from(val.as_ref()));
-            }
-            "--plan" => args.plan = true,
-            "--events" => args.events = true,
-            "--extract" => args.extract = true,
-            "--dry-run" => args.dry_run = true,
-            "--no-cache" => args.no_cache = true,
-            "--clear-cache" => args.clear_cache = true,
-            "--keep-fonts" => args.keep_fonts = true,
-            "--sub-offset" => {
-                let val = iter.next().ok_or("Missing value for --sub-offset")?;
-                args.sub_offset = val
-                    .as_ref()
-                    .parse()
-                    .map_err(|_| "Invalid number for --sub-offset")?;
-            }
-            "--workers" => {
-                let val = iter.next().ok_or("Missing value for --workers")?;
-                args.workers = Some(
-                    val.as_ref()
-                        .parse()
-                        .map_err(|_| "Invalid integer for --workers")?,
-                );
-            }
-            "--io-jobs" => {
-                let val = iter.next().ok_or("Missing value for --io-jobs")?;
-                args.io_jobs = Some(
-                    val.as_ref()
-                        .parse()
-                        .map_err(|_| "Invalid integer for --io-jobs")?,
-                );
-            }
-            "--ffmpeg-threads" => {
-                let val = iter.next().ok_or("Missing value for --ffmpeg-threads")?;
-                args.ffmpeg_threads = Some(
-                    val.as_ref()
-                        .parse()
-                        .map_err(|_| "Invalid integer for --ffmpeg-threads")?,
-                );
-            }
-            "--bitrate" => {
-                let val = iter.next().ok_or("Missing value for --bitrate")?;
-                args.bitrate = val.as_ref().to_string();
-            }
-            "--complexity" => {
-                let val = iter.next().ok_or("Missing value for --complexity")?;
-                args.complexity = val
-                    .as_ref()
-                    .parse()
-                    .map_err(|_| "Invalid integer for --complexity")?;
-            }
-            "-h" | "--help" => {
-                print_help();
-                std::process::exit(0);
-            }
-            other => {
-                return Err(format!("Unknown argument: {other}"));
-            }
+            _ => {}
         }
     }
 
-    args.validate()?;
+    let config = PipelineConfig::from_args(&raw_args)?;
 
-    Ok(args)
+    Ok(CliArgs {
+        config,
+        plan,
+        events,
+        clear_cache,
+        help,
+        has_input_dir,
+    })
 }
 
 fn print_help() {
@@ -227,38 +113,6 @@ OPTIONS:
     );
 }
 
-fn load_sub_assignments(path: &Path, input_dir: &Path) -> Result<HashMap<String, PathBuf>, String> {
-    let content = fs::read_to_string(path)
-        .map_err(|e| format!("Failed to read assignments file '{}': {e}", path.display()))?;
-    let json: serde_json::Value = serde_json::from_str(&content)
-        .map_err(|e| format!("Invalid assignments JSON in '{}': {e}", path.display()))?;
-    let mut map = HashMap::new();
-    let insert_entry = |map: &mut HashMap<String, PathBuf>, k: String, v: &str| {
-        let p = Path::new(v);
-        let resolved = if p.is_relative() {
-            input_dir.join(p)
-        } else {
-            p.to_path_buf()
-        };
-        map.insert(k, resolved);
-    };
-
-    if let Some(obj) = json.get("assignments").and_then(|v| v.as_object()) {
-        for (k, v) in obj {
-            if let Some(p) = v.as_str() {
-                insert_entry(&mut map, k.clone(), p);
-            }
-        }
-    } else if let Some(obj) = json.as_object() {
-        for (k, v) in obj {
-            if let Some(p) = v.as_str() {
-                insert_entry(&mut map, k.clone(), p);
-            }
-        }
-    }
-    Ok(map)
-}
-
 #[tokio::main]
 async fn main() -> ExitCode {
     match run().await {
@@ -279,6 +133,11 @@ async fn run() -> Result<ExitCode, String> {
         }
     };
 
+    if args.help {
+        print_help();
+        return Ok(ExitCode::SUCCESS);
+    }
+
     let cache = PersistentInspectCache::default();
 
     if args.clear_cache {
@@ -287,65 +146,17 @@ async fn run() -> Result<ExitCode, String> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    let Some(input_dir) = args.input_dir else {
+    if !args.has_input_dir {
         print_help();
         return Err("--input-dir is required.".into());
-    };
+    }
 
-    if !input_dir.exists() {
+    if !args.config.input_dir.exists() {
         return Err(format!(
             "Input directory does not exist: {}",
-            input_dir.display()
+            args.config.input_dir.display()
         ));
     }
-
-    let cache_opt = if args.no_cache { None } else { Some(&cache) };
-
-    if args.plan {
-        let manifest = generate_inspection_manifest(&input_dir, cache_opt, None)?;
-        match serde_json::to_string_pretty(&manifest) {
-            Ok(json) => {
-                println!("{json}");
-                return Ok(ExitCode::SUCCESS);
-            }
-            Err(e) => {
-                return Err(format!("Failed to serialize manifest: {e}"));
-            }
-        }
-    }
-    let sub_assignments = match &args.sub_assignments {
-        Some(path) => match load_sub_assignments(path, &input_dir) {
-            Ok(m) => Some(m),
-            Err(err) => {
-                return Err(format!("Error loading subtitle assignments: {err}"));
-            }
-        },
-        None => None,
-    };
-
-    let config = PipelineConfig {
-        input_dir,
-        out_dir: args.out_dir,
-        fonts_dir: args.fonts_dir,
-        assets_dir: args.assets_dir,
-        mode: if args.extract {
-            PipelineMode::Extract
-        } else {
-            PipelineMode::Remux
-        },
-        dry_run: args.dry_run,
-        no_cache: args.no_cache,
-        cache: None,
-        cache_file: None,
-        workers: args.workers.unwrap_or(4) as usize,
-        io_jobs: args.io_jobs.unwrap_or(2) as usize,
-        bitrate: args.bitrate,
-        complexity: args.complexity,
-        ffmpeg_threads: args.ffmpeg_threads.unwrap_or(2) as usize,
-        sub_offset: args.sub_offset,
-        keep_fonts: args.keep_fonts,
-        sub_assignments,
-    };
 
     let cancel_token = CancellationToken::new();
     let cancel_token_clone = cancel_token.clone();
@@ -383,6 +194,27 @@ async fn run() -> Result<ExitCode, String> {
             }
         }
     });
+
+    let cache_opt = if args.config.no_cache {
+        None
+    } else {
+        Some(&cache)
+    };
+
+    if args.plan {
+        let manifest =
+            generate_inspection_manifest(&args.config.input_dir, cache_opt, Some(&cancel_token))?;
+        match serde_json::to_string_pretty(&manifest) {
+            Ok(json) => {
+                println!("{json}");
+                return Ok(ExitCode::SUCCESS);
+            }
+            Err(e) => {
+                return Err(format!("Failed to serialize manifest: {e}"));
+            }
+        }
+    }
+
     let (event_sender, event_forwarder) = if args.events {
         let (tx, mut rx) = create_event_channel(128);
         let forwarder = tokio::spawn(async move {
@@ -397,7 +229,7 @@ async fn run() -> Result<ExitCode, String> {
         (None, None)
     };
 
-    let pipeline = BatchPipeline::new(config, event_sender, cancel_token.clone());
+    let pipeline = BatchPipeline::new(args.config, event_sender, cancel_token.clone());
 
     let result = pipeline.run().await;
     drop(pipeline);
@@ -474,5 +306,39 @@ mod tests {
         assert!(parse_args_from(["--ffmpeg-threads", "33"]).is_err());
         assert!(parse_args_from(["--ffmpeg-threads", "1"]).is_ok());
         assert!(parse_args_from(["--ffmpeg-threads", "32"]).is_ok());
+    }
+
+    #[test]
+    fn test_cli_flags_and_extract() {
+        let parsed = parse_args_from([
+            "--input-dir",
+            "/tmp/anime",
+            "--plan",
+            "--events",
+            "--clear-cache",
+            "--extract",
+        ])
+        .unwrap();
+
+        assert!(parsed.has_input_dir);
+        assert_eq!(parsed.config.input_dir, PathBuf::from("/tmp/anime"));
+        assert!(parsed.plan);
+        assert!(parsed.events);
+        assert!(parsed.clear_cache);
+        assert_eq!(parsed.config.mode, PipelineMode::Extract);
+    }
+
+    #[test]
+    fn test_help_flag() {
+        let parsed = parse_args_from(["-h"]).unwrap();
+        assert!(parsed.help);
+
+        let parsed2 = parse_args_from(["--help"]).unwrap();
+        assert!(parsed2.help);
+    }
+
+    #[test]
+    fn test_unknown_flag() {
+        assert!(parse_args_from(["--unknown-flag"]).is_err());
     }
 }
