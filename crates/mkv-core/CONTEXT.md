@@ -43,3 +43,7 @@ _Avoid_: Progress message, notification, log line
 **Fallback Inspector**:
 The secondary probing mechanism that delegates to `mkvmerge -J` when native EBML parsing encounters unhandled container extensions or malformed elements.
 _Avoid_: Backup scanner, external probe
+
+**Log Channel**:
+The dedicated auxiliary channel streaming real-time diagnostic console text from the media engine to frontend log observers.
+_Avoid_: Output stream, log buffer, console pipe

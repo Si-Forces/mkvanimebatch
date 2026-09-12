@@ -304,7 +304,7 @@ pub fn safe_filename(name: &str) -> String {
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
     let sanitized = UNSAFE_FN_CHARS.replace_all(&file_name, "_").into_owned();
-    let base_name = if sanitized.is_empty() || sanitized == "." || sanitized == ".." {
+    let base_name = if sanitized.trim().is_empty() || sanitized == "." || sanitized == ".." {
         "unnamed".to_string()
     } else {
         sanitized

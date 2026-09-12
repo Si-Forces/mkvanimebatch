@@ -9,11 +9,11 @@ The frontend state machine managing batch item lifecycles (`queued` → `process
 _Avoid_: Task list, item manager
 
 **Engine Bridge**:
-The in-process Rust integration layer connecting Tauri commands and channels to the Media Engine's Batch Pipeline.
+The in-process Rust integration layer connecting Tauri commands and channels to the Media Engine's Batch Pipeline with task-level panic isolation, dual-channel event/log streaming, and cooperative cancellation.
 _Avoid_: Wrapper, helper, controller
 
 **Sidecar Contract**:
-The backward-compatible CLI command-line and event streaming interface used when invoking the engine as an external subprocess.
+_Deprecated_: The legacy CLI subprocess invocation and event streaming interface, superseded by the in-process Engine Bridge.
 _Avoid_: IPC, subprocess pipe
 
 **Inspection Manifest**:

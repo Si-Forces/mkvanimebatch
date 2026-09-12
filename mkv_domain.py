@@ -104,12 +104,26 @@ def score_subtitle_category(language: str, is_ass: bool) -> int:
 
 # ─── NAMING & PATH HELPERS ───────────────────────────────────────────────────
 _UNSAFE_FN_CHARS = re.compile(r'[/:*?"<>|\\]')
+_WINDOWS_RESERVED_DEVICES = frozenset({
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+})
 
 
 def safe_filename(name: str) -> str:
     """Sanitize a filename for OS-safe output."""
-    return _UNSAFE_FN_CHARS.sub("_", Path(name).name)
+    file_name = Path(name).name
+    sanitized = _UNSAFE_FN_CHARS.sub("_", file_name)
+    if not sanitized.strip() or sanitized in (".", ".."):
+        base_name = "unnamed"
+    else:
+        base_name = sanitized
 
+    check_stem = base_name.split(".")[0].upper()
+    if check_stem in _WINDOWS_RESERVED_DEVICES:
+        return f"_{base_name}"
+    return base_name
 
 def output_stem(base: str, ep_type: str, ep: str) -> str:
     """Build output filename stem with optional OVA/SP prefix."""
@@ -222,7 +236,7 @@ _EP_NUM_FALLBACK_RE = re.compile(
 )
 
 _SEASON_PATTERNS = (
-    re.compile(r"[Ss]eason\s*(\d{1,2})"),
+    re.compile(r"[Ss]eason\s*(\d{1,2})", re.IGNORECASE),
     re.compile(r"\bS(\d{1,2})\b(?![EePp])"),
     re.compile(r"(?<=[a-zA-Z])\s+(\d{1})\s+(?=[a-zA-Z])"),
 )
