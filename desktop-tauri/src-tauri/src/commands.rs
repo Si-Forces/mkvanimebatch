@@ -64,8 +64,8 @@ pub async fn inspect_directory(
 }
 
 #[tauri::command]
-pub fn run_job(
-    app: AppHandle,
+pub fn run_job<R: tauri::Runtime>(
+    app: AppHandle<R>,
     state: State<'_, JobState>,
     request: mkv_core::request::BatchRequest,
 ) -> Result<u64, String> {
@@ -94,12 +94,12 @@ pub fn run_job(
 
     let app_task = app.clone();
     let mode_task = mode_str;
-    let task_handle = tokio::spawn(async move {
-        struct JobSlotGuard {
-            app: AppHandle,
+    let task_handle = tauri::async_runtime::spawn(async move {
+        struct JobSlotGuard<R: tauri::Runtime> {
+            app: AppHandle<R>,
             job_id: u64,
         }
-        impl Drop for JobSlotGuard {
+        impl<R: tauri::Runtime> Drop for JobSlotGuard<R> {
             fn drop(&mut self) {
                 let state = self.app.state::<JobState>();
                 state.release_slot(self.job_id);
@@ -331,5 +331,28 @@ mod tests {
         let state = app.state::<JobState>();
         let snap = get_job_snapshot(state).expect("get_job_snapshot should succeed");
         assert!(snap.is_none());
+    }
+
+    #[test]
+    fn test_run_job_starts_without_panic() {
+        let app = tauri::test::mock_app();
+        app.manage(JobState::default());
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let request = mkv_core::request::BatchRequest {
+            mode: mkv_core::pipeline::PipelineMode::Extract,
+            input_dir: temp_dir.path().to_path_buf(),
+            dry_run: Some(true),
+            ..Default::default()
+        };
+
+        let state = app.state::<JobState>();
+        let res = run_job(app.handle().clone(), state, request);
+        assert!(res.is_ok());
+        let job_id = res.unwrap();
+        let verify_state = app.state::<JobState>();
+        assert!(verify_state
+            .wait_until_released(job_id, std::time::Duration::from_secs(5))
+            .is_ok());
     }
 }
