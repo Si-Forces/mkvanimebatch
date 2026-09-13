@@ -1202,13 +1202,14 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
 .ep-progress-fill.indeterminate {
   width: 40% !important;
   transition: none !important;
+  transform: translateX(-100%);
+  will-change: transform;
   background: linear-gradient(90deg,
     transparent 0%,
-    var(--accent-indigo) 40%,
-    var(--accent-pink) 60%,
+    var(--accent-indigo) 35%,
+    var(--accent-pink) 65%,
     transparent 100%);
-  background-size: 200% 100%;
-  animation: ep-indeterminate-sweep 1.4s ease-in-out infinite;
+  animation: ep-indeterminate-sweep 1.3s cubic-bezier(0.4, 0, 0.2, 1) infinite;
 }
 
 @keyframes ep-indeterminate-sweep {
