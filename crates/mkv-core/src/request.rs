@@ -36,14 +36,28 @@ fn is_drive_prefix(s: &str) -> bool {
 
 impl TrackAssignment {
     /// Returns the normalized target video path relative to input directory,
-    /// with backslashes converted to forward slashes and leading relative prefixes (`./`) stripped.
+    /// with backslashes converted to forward slashes, redundant separators collapsed,
+    /// and relative `.` (`CurDir`) components stripped.
     pub fn clean_target_video(&self) -> String {
         let norm = self.target_video.trim().replace('\\', "/");
-        let mut clean = norm.as_str();
-        while let Some(rest) = clean.strip_prefix("./") {
-            clean = rest;
+        let path = Path::new(&norm);
+        let mut parts = Vec::new();
+        for component in path.components() {
+            match component {
+                std::path::Component::Normal(c) => {
+                    parts.push(c.to_string_lossy().to_string());
+                }
+                std::path::Component::CurDir => {}
+                _ => {
+                    parts.push(component.as_os_str().to_string_lossy().to_string());
+                }
+            }
         }
-        clean.to_string()
+        if parts.is_empty() {
+            String::new()
+        } else {
+            parts.join("/")
+        }
     }
 
     /// Returns true if the asset path is relative to the release/input directory
@@ -366,7 +380,7 @@ impl BatchRequest {
 }
 
 /// Helper to convert a list of `TrackAssignment`s into a lookup map keyed by normalized
-/// target path and file name, resolving relative asset paths against input_dir (or assets_dir fallback).
+/// relative target path, resolving relative asset paths against input_dir (or assets_dir fallback).
 pub fn assignments_to_track_map(
     assignments: &[TrackAssignment],
     input_dir: &Path,
@@ -394,13 +408,7 @@ pub fn assignments_to_track_map(
         };
 
         let clean = a.clean_target_video();
-        let file_name = Path::new(&clean)
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| clean.clone());
-
-        map.insert(clean, resolved.clone());
-        map.insert(file_name, resolved);
+        map.insert(clean, resolved);
     }
     map
 }
@@ -961,8 +969,34 @@ mod tests {
         assert!(err2.contains(
             r"Multiple track assignments for target video '.\ep01.mkv' are not supported"
         ));
+        // 4. Duplicate detection catches normalized collisions with internal relative segments
+        std::fs::create_dir_all(dir.path().join("Season 1")).unwrap();
+        std::fs::write(dir.path().join("Season 1/ep01.mkv"), b"dummy s1 video").unwrap();
+        let mut dup_req3 = minimal_request(dir.path());
+        dup_req3.assignments = Some(vec![
+            TrackAssignment {
+                target_video: "Season 1/ep01.mkv".into(),
+                asset_path: sub_path1.clone(),
+                track_type: Some("subtitle".into()),
+                language: None,
+                title: None,
+                offset_ms: None,
+            },
+            TrackAssignment {
+                target_video: "Season 1/./ep01.mkv".into(),
+                asset_path: sub_path1.clone(),
+                track_type: Some("subtitle".into()),
+                language: None,
+                title: None,
+                offset_ms: None,
+            },
+        ]);
+        let err3 = dup_req3.validate().unwrap_err();
+        assert!(err3.contains(
+            r"Multiple track assignments for target video 'Season 1/./ep01.mkv' are not supported"
+        ));
 
-        // 4. assignments_to_sub_map normalizes ./ and .\ and inserts clean and file_name
+        // 5. assignments_to_sub_map normalizes ./ and .\ and keys strictly by relative path
         let assignments = vec![
             TrackAssignment {
                 target_video: "././ep01.mkv".into(),
@@ -1017,13 +1051,43 @@ mod tests {
             map.get("Season 1/ep02.mkv"),
             Some(&dir.path().join("ep02.ass"))
         );
-        assert_eq!(map.get("ep02.mkv"), Some(&dir.path().join("ep02.ass")));
+        // Does NOT insert bare filename 'ep02.mkv', preventing cross-directory collisions
+        assert_eq!(map.get("ep02.mkv"), None);
         assert_eq!(map.get("ep03.mkv"), Some(&PathBuf::from("/abs/ep03.ass")));
         assert_eq!(map.get("ep04.mkv"), Some(&PathBuf::from("C:/ep04.ass")));
         assert_eq!(
             map.get("ep05.mkv"),
             Some(&PathBuf::from(r"D:\subs\ep05.ass"))
         );
+        // 6. Multi-season assignments do not collide or overwrite root/peer entries
+        let multi_season = vec![
+            TrackAssignment {
+                target_video: "Season 1/ep01.mkv".into(),
+                asset_path: PathBuf::from("s01e01.ass"),
+                track_type: Some("subtitle".into()),
+                language: None,
+                title: None,
+                offset_ms: None,
+            },
+            TrackAssignment {
+                target_video: "Season 2/ep01.mkv".into(),
+                asset_path: PathBuf::from("s02e01.ass"),
+                track_type: Some("subtitle".into()),
+                language: None,
+                title: None,
+                offset_ms: None,
+            },
+        ];
+        let ms_map = assignments_to_sub_map(&multi_season, dir.path(), None);
+        assert_eq!(
+            ms_map.get("Season 1/ep01.mkv"),
+            Some(&dir.path().join("s01e01.ass"))
+        );
+        assert_eq!(
+            ms_map.get("Season 2/ep01.mkv"),
+            Some(&dir.path().join("s02e01.ass"))
+        );
+        assert_eq!(ms_map.get("ep01.mkv"), None);
     }
 
     #[test]
