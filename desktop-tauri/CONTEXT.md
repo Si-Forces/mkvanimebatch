@@ -27,3 +27,11 @@ _Avoid_: Config preset, setting template
 **Job Snapshot**:
 The in-memory projection maintained in real-time by the Engine Bridge from Job Events, summarizing active or last-completed batch execution, manifest items, and terminal outcomes across UI reloads.
 _Avoid_: Job state, queue cache, execution status
+
+**Card Progress**:
+The visual representation of an active episode's execution within the Queue Tracker, presenting an indeterminate preflight shimmer sweep during startup and audio transcoding, transitioning to a determinate percentage fill upon receiving streamed item progress.
+_Avoid_: Loading bar, queue spinner, progress gauge
+
+**Item Duration**:
+The authoritative wall-clock execution duration in seconds measured from item start to completion and rendered on terminal episode cards (`Done in Xs`).
+_Avoid_: Run time, execution clock, stop watch
