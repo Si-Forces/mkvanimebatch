@@ -83,7 +83,7 @@ fn query_python(payload: &CrossCheckPayload) -> CrossCheckResponse {
         .unwrap_or(manifest_dir);
 
     let script = r#"
-import json, sys, os, re
+import json, os, re, sys
 from pathlib import Path
 
 repo_root = os.environ.get("REPO_ROOT")
@@ -95,7 +95,8 @@ from mkv_remux_job import _COMMENTARY_RE
 from mkv_scan import _CHAPTER_TAG_RE
 from mkv_assets import _COVER_FILE_RE
 
-payload = json.loads(sys.stdin.read())
+# Read raw UTF-8 bytes directly to avoid Windows console/pipe code page mangling
+payload = json.loads(sys.stdin.buffer.read().decode("utf-8"))
 
 ep_results = []
 for name in payload["episodes"]:
@@ -149,18 +150,26 @@ response = {
     "cover_stem_results": cover_results,
     "bitrate_results": bitrate_results,
 }
-print(json.dumps(response))
+sys.stdout.buffer.write(json.dumps(response).encode("utf-8"))
+sys.stdout.buffer.flush()
 "#;
 
     let (bin, args) = if Command::new("uv").arg("--version").output().is_ok() {
-        ("uv", vec!["run", "python3", "-c", script])
+        ("uv", vec!["run", "python", "-c", script])
     } else {
-        ("python3", vec!["-c", script])
+        let python = if Command::new("python3").arg("--version").output().is_ok() {
+            "python3"
+        } else {
+            "python"
+        };
+        (python, vec!["-c", script])
     };
 
     let mut child = Command::new(bin)
         .args(&args)
         .env("REPO_ROOT", repo_root)
+        .env("PYTHONUTF8", "1")
+        .env("PYTHONIOENCODING", "utf-8")
         .current_dir(repo_root)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
