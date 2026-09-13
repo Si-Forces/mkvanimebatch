@@ -3,6 +3,8 @@ import {
   createQueueState,
   createQueueStateFromSnapshot,
   finalizeQueueState,
+  formatElapsedDuration,
+  formatOutcomeDuration,
   reduceQueueEvent,
 } from "./queue-state.js";
 
@@ -22,6 +24,55 @@ export class QueueTracker {
     this.assignments = new Map();
     // v2 manifest: candidates are stored once per release directory.
     this.subtitleCandidates = {};
+    this.heartbeatTimer = null;
+  }
+
+  startHeartbeat() {
+    if (this.heartbeatTimer === null) {
+      this.heartbeatTimer = setInterval(() => this.tickHeartbeat(), 1000);
+      if (typeof this.heartbeatTimer?.unref === "function") {
+        this.heartbeatTimer.unref();
+      }
+    }
+  }
+
+  stopHeartbeat() {
+    if (this.heartbeatTimer !== null) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+  }
+
+  hasProcessingItems() {
+    if (!this.state?.items) return false;
+    for (const item of this.state.items.values()) {
+      if (item.status === "processing") {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  formatProcessingTag(item) {
+    const elapsed = Math.floor((Date.now() - (item.startTime || Date.now())) / 1000);
+    if (typeof item.progress === "number") {
+      return `${Math.round(item.progress)}% (${formatElapsedDuration(elapsed)})`;
+    }
+    return `Processing (${formatElapsedDuration(elapsed)})`;
+  }
+
+  tickHeartbeat() {
+    let hasProcessing = false;
+    for (const [id, card] of this.cards.entries()) {
+      const item = this.state?.items?.get(id);
+      if (item && item.status === "processing" && card.statusTag) {
+        hasProcessing = true;
+        card.statusTag.textContent = this.formatProcessingTag(item);
+      }
+    }
+    if (!hasProcessing && !this.hasProcessingItems()) {
+      this.stopHeartbeat();
+    }
   }
 
   candidatesForItem(itemId) {
@@ -47,6 +98,7 @@ export class QueueTracker {
   }
 
   startScan() {
+    this.stopHeartbeat();
     const token = ++this.scanToken;
     this.cards.clear();
     // Assignments and candidates survive a rescan: populateFromInspection
@@ -106,6 +158,7 @@ export class QueueTracker {
   }
 
   reset(title = "No Episodes Queued", description = "Choose an input release directory to scan MKV episodes into this batch.") {
+    this.stopHeartbeat();
     this.scanToken++;
     this.cards.clear();
     this.assignments.clear();
@@ -116,6 +169,7 @@ export class QueueTracker {
   }
 
   populateFromInspection(manifest) {
+    this.stopHeartbeat();
     this.lastManifest = manifest;
     this.cards.clear();
     if (this.listEl) this.listEl.innerHTML = "";
@@ -219,7 +273,7 @@ export class QueueTracker {
     if (card.codec) card.codec.textContent = "MKV";
     if (item.status === "completed") {
       if (card.tag1) card.tag1.textContent = "Processed";
-      if (card.tag2) card.tag2.textContent = item.durationSec ? `Done in ${item.durationSec}s` : "Complete";
+      if (card.tag2) card.tag2.textContent = item.durationSec != null ? `Done in ${formatOutcomeDuration(item.durationSec)}` : "Complete";
     } else if (item.status === "skipped") {
       if (card.tag1) card.tag1.textContent = "Skipped";
       if (card.tag2) card.tag2.textContent = item.reason || "Already processed";
@@ -301,6 +355,7 @@ export class QueueTracker {
   }
 
   restoreFromSnapshot(snapshot) {
+    this.stopHeartbeat();
     if (!snapshot || !snapshot.items) return;
     this.scanToken++;
     this.cards.clear();
@@ -337,75 +392,83 @@ export class QueueTracker {
   renderCardState(card, item) {
     if (!card || !card.el || !item) return;
 
-    const styles = {
-      processing: {
-        el: "tokyo-ep-card processing",
-        badge: "ep-badge purple",
-        badgeText: "PROCESSING",
-        tag: "ep-duration-tag yellow status-tag",
-        tagText: "Processing...",
-        fill: "ep-progress-fill indeterminate",
-        width: "",
-      },
-      completed: {
-        el: "tokyo-ep-card completed",
-        badge: "ep-badge green",
-        badgeText: "COMPLETED",
-        tag: "ep-duration-tag green status-tag",
-        tagText: item.durationSec ? `Done in ${item.durationSec}s` : "Done",
-        fill: "ep-progress-fill green",
-        width: "100%",
-      },
-      skipped: {
-        el: "tokyo-ep-card skipped",
-        badge: "ep-badge grey",
-        badgeText: "SKIPPED",
-        tag: "ep-duration-tag grey status-tag",
-        tagText: item.reason || "Skipped",
-        fill: "ep-progress-fill",
-        width: "100%",
-      },
-      cancelled: {
-        el: "tokyo-ep-card skipped",
-        badge: "ep-badge grey",
-        badgeText: "CANCELLED",
-        tag: "ep-duration-tag grey status-tag",
-        tagText: item.reason || "Cancelled",
-        fill: "ep-progress-fill",
-        width: "100%",
-      },
-      planned: {
-        el: "tokyo-ep-card dry-run",
-        badge: "ep-badge cyan",
-        badgeText: "DRY RUN",
-        tag: "ep-duration-tag cyan status-tag",
-        tagText: "Planned (Dry Run)",
-        fill: "ep-progress-fill cyan",
-        width: "100%",
-      },
-      error: {
-        el: "tokyo-ep-card failed",
-        badge: "ep-badge red",
-        badgeText: "FAILED",
-        tag: "ep-duration-tag red status-tag",
-        tagText: item.error || "Failed",
-        fill: "ep-progress-fill",
-        width: "100%",
-      },
-    };
-    const style = styles[item.status];
-    if (!style) return;
+    switch (item.status) {
+      case "processing": {
+        card.el.className = "tokyo-ep-card processing";
+        card.badge.className = "ep-badge purple";
+        card.badge.textContent = "PROCESSING";
+        card.statusTag.className = "ep-duration-tag yellow status-tag";
+        card.statusTag.textContent = this.formatProcessingTag(item);
+        if (typeof item.progress === "number") {
+          card.fill.className = "ep-progress-fill";
+          card.fill.style.width = `${Math.min(100, Math.max(0, item.progress))}%`;
+        } else {
+          card.fill.className = "ep-progress-fill indeterminate";
+          card.fill.style.width = "";
+        }
+        break;
+      }
+      case "completed": {
+        card.el.className = "tokyo-ep-card completed";
+        card.badge.className = "ep-badge green";
+        card.badge.textContent = "COMPLETED";
+        card.statusTag.className = "ep-duration-tag green status-tag";
+        card.statusTag.textContent = item.durationSec != null ? `Done in ${formatOutcomeDuration(item.durationSec)}` : "Done";
+        card.fill.className = "ep-progress-fill green";
+        card.fill.style.width = "100%";
+        break;
+      }
+      case "skipped": {
+        card.el.className = "tokyo-ep-card skipped";
+        card.badge.className = "ep-badge grey";
+        card.badge.textContent = "SKIPPED";
+        card.statusTag.className = "ep-duration-tag grey status-tag";
+        card.statusTag.textContent = item.reason || "Skipped";
+        card.fill.className = "ep-progress-fill grey";
+        card.fill.style.width = "100%";
+        break;
+      }
+      case "cancelled": {
+        card.el.className = "tokyo-ep-card skipped";
+        card.badge.className = "ep-badge grey";
+        card.badge.textContent = "CANCELLED";
+        card.statusTag.className = "ep-duration-tag grey status-tag";
+        card.statusTag.textContent = item.reason || "Cancelled";
+        card.fill.className = "ep-progress-fill grey";
+        card.fill.style.width = "100%";
+        break;
+      }
+      case "planned": {
+        card.el.className = "tokyo-ep-card dry-run";
+        card.badge.className = "ep-badge cyan";
+        card.badge.textContent = "DRY RUN";
+        card.statusTag.className = "ep-duration-tag cyan status-tag";
+        card.statusTag.textContent = "Planned (Dry Run)";
+        card.fill.className = "ep-progress-fill cyan";
+        card.fill.style.width = "100%";
+        break;
+      }
+      case "error": {
+        card.el.className = "tokyo-ep-card failed";
+        card.badge.className = "ep-badge red";
+        card.badge.textContent = "FAILED";
+        card.statusTag.className = "ep-duration-tag red status-tag";
+        card.statusTag.textContent = item.error || "Failed";
+        card.fill.className = "ep-progress-fill red";
+        card.fill.style.width = "100%";
+        break;
+      }
+    }
 
-    card.el.className = style.el;
-    card.badge.className = style.badge;
-    card.badge.textContent = style.badgeText;
-    card.statusTag.className = style.tag;
-    card.statusTag.textContent = style.tagText;
-    card.fill.className = style.fill;
-    card.fill.style.width = style.width;
+    if (item.status === "processing") {
+      this.startHeartbeat();
+    } else if (!this.hasProcessingItems()) {
+      this.stopHeartbeat();
+    }
   }
 
   finalize(exitCode, cancelled = false) {
+    this.stopHeartbeat();
     if (!this.state) return;
     this.state = finalizeQueueState(this.state, exitCode, cancelled);
 

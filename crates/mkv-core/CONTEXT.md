@@ -40,6 +40,10 @@ _Avoid_: Status string, job state, result code
 A strongly-typed lifecycle event emitted across an in-process channel describing real-time execution progress (`BatchStart`, `ItemStart`, `ItemProgress`, `ItemComplete`, `BatchComplete`).
 _Avoid_: Progress message, notification, log line
 
+**Item Duration**:
+The authoritative wall-clock execution duration in seconds measured by the Batch Pipeline from item execution start to completion and attached to `ItemComplete` events.
+_Avoid_: Execution time, run clock, process timing
+
 **Fallback Inspector**:
 The secondary probing mechanism that delegates to `mkvmerge -J` when native EBML parsing encounters unhandled container extensions or malformed elements.
 _Avoid_: Backup scanner, external probe

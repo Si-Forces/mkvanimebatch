@@ -168,6 +168,7 @@ async fn test_extract_dry_run_preserves_nested_output_directory() {
         JobEvent::ItemComplete {
             id,
             status: ItemOutcome::Planned,
+            duration_sec: None,
             ..
         } if id == "Season 03/Show - 01.mkv"
     )));
@@ -248,6 +249,7 @@ async fn test_remux_dry_run_preserves_nested_output_directory() {
         JobEvent::ItemComplete {
             id,
             status: ItemOutcome::Planned,
+            duration_sec: None,
             ..
         } if id == "Season 02/Show - 01.mkv"
     )));
@@ -305,6 +307,7 @@ async fn test_remux_skips_when_no_matching_subtitle() {
         e,
         JobEvent::ItemComplete {
             status: ItemOutcome::Skipped,
+            duration_sec: None,
             ..
         }
     )));
@@ -370,6 +373,7 @@ async fn test_pipeline_cancellation_drains_items() {
                 e,
                 JobEvent::ItemComplete {
                     status: ItemOutcome::Cancelled,
+                    duration_sec: None,
                     ..
                 }
             )
@@ -558,4 +562,240 @@ fn test_pipeline_config_from_args_preset() {
     assert_eq!(config.bitrate, "160k"); // overridden
     assert_eq!(config.complexity, 5); // from fast preset
     assert!(!config.keep_fonts); // from fast preset
+}
+
+#[tokio::test]
+async fn test_extract_emits_item_complete_duration_sec() {
+    let in_tmp = tempdir().unwrap();
+    let out_tmp = tempdir().unwrap();
+
+    let ep1 = in_tmp.path().join("Show - 01.mkv");
+    fs::write(&ep1, b"dummy mkv").unwrap();
+
+    let cache = Arc::new(PersistentInspectCache::new(
+        Some(in_tmp.path().join("test_cache.json")),
+        true,
+    ));
+    cache.put_path(&ep1, sample_video_metadata());
+    cache.save();
+
+    let config = PipelineConfig {
+        input_dir: in_tmp.path().to_path_buf(),
+        out_dir: Some(out_tmp.path().to_path_buf()),
+        fonts_dir: None,
+        assets_dir: None,
+        mode: PipelineMode::Extract,
+        dry_run: false,
+        no_cache: false,
+        cache: Some(cache.clone()),
+        cache_file: None,
+        workers: 1,
+        io_jobs: 1,
+        bitrate: "192k".to_string(),
+        complexity: 10,
+        ffmpeg_threads: 1,
+        sub_offset: 0.0,
+        keep_fonts: false,
+        sub_assignments: None,
+        ..Default::default()
+    };
+
+    let cancel_token = CancellationToken::new();
+    let (event_sender, mut event_receiver) = create_event_channel(64);
+
+    let pipeline = BatchPipeline::new(config, Some(event_sender), cancel_token);
+    let summary = pipeline.run().await.unwrap();
+
+    assert_eq!(summary.total, 1);
+    assert_eq!(summary.completed, 1);
+    assert_eq!(summary.errors, 0);
+
+    let mut events = Vec::new();
+    while let Ok(event) = event_receiver.try_recv() {
+        events.push(event);
+    }
+
+    let complete_events: Vec<&JobEvent> = events
+        .iter()
+        .filter(|e| matches!(e, JobEvent::ItemComplete { .. }))
+        .collect();
+    assert_eq!(complete_events.len(), 1);
+
+    match complete_events[0] {
+        JobEvent::ItemComplete {
+            id,
+            status,
+            duration_sec,
+            ..
+        } => {
+            assert_eq!(id, "Show - 01.mkv");
+            assert_eq!(*status, ItemOutcome::Completed);
+            assert!(
+                duration_sec.is_some(),
+                "duration_sec should be Some(...) on completed item"
+            );
+            let d = duration_sec.unwrap();
+            assert!(d >= 0.0, "duration_sec should be non-negative, got {d}");
+        }
+        _ => panic!("Expected ItemComplete event"),
+    }
+}
+
+#[tokio::test]
+async fn test_extract_error_in_worker_emits_duration_sec() {
+    let tmp = tempdir().unwrap();
+    // Create a non-MKV corrupt file that fails probing in the worker
+    let ep = tmp.path().join("Corrupt - 01.mkv");
+    fs::write(&ep, b"not a real mkv file").unwrap();
+
+    let config = PipelineConfig {
+        input_dir: tmp.path().to_path_buf(),
+        out_dir: None,
+        fonts_dir: None,
+        assets_dir: None,
+        mode: PipelineMode::Extract,
+        dry_run: false,
+        no_cache: true,
+        cache: None,
+        cache_file: None,
+        workers: 1,
+        io_jobs: 1,
+        bitrate: "192k".to_string(),
+        complexity: 10,
+        ffmpeg_threads: 1,
+        sub_offset: 0.0,
+        keep_fonts: false,
+        sub_assignments: None,
+        ..Default::default()
+    };
+
+    let cancel_token = CancellationToken::new();
+    let (event_sender, mut event_receiver) = create_event_channel(64);
+
+    let pipeline = BatchPipeline::new(config, Some(event_sender), cancel_token);
+    let summary = pipeline.run().await.unwrap();
+
+    assert_eq!(summary.total, 1);
+    assert_eq!(summary.errors, 1);
+
+    let mut events = Vec::new();
+    while let Ok(event) = event_receiver.try_recv() {
+        events.push(event);
+    }
+
+    let error_event = events
+        .iter()
+        .find(|e| {
+            matches!(
+                e,
+                JobEvent::ItemComplete {
+                    status: ItemOutcome::Error,
+                    ..
+                }
+            )
+        })
+        .expect("Expected ItemComplete with Error status");
+
+    match error_event {
+        JobEvent::ItemComplete {
+            id, duration_sec, ..
+        } => {
+            assert_eq!(id, "Corrupt - 01.mkv");
+            assert!(
+                duration_sec.is_some(),
+                "duration_sec should be Some(...) even on worker error"
+            );
+            assert!(duration_sec.unwrap() >= 0.0);
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[tokio::test]
+async fn test_pipeline_in_flight_cancellation_emits_duration_sec() {
+    let tmp = tempdir().unwrap();
+    let cache = Arc::new(PersistentInspectCache::new(None, false));
+    for i in 1..=20 {
+        let ep = tmp.path().join(format!("Show - {i:02}.mkv"));
+        fs::write(&ep, b"dummy mkv").unwrap();
+        cache.put_path(&ep, sample_video_metadata());
+    }
+    let config = PipelineConfig {
+        input_dir: tmp.path().to_path_buf(),
+        out_dir: None,
+        fonts_dir: None,
+        assets_dir: None,
+        mode: PipelineMode::Extract,
+        dry_run: false,
+        no_cache: false,
+        cache: Some(cache),
+        cache_file: None,
+        workers: 1,
+        io_jobs: 1,
+        bitrate: "192k".to_string(),
+        complexity: 10,
+        ffmpeg_threads: 1,
+        sub_offset: 0.0,
+        keep_fonts: false,
+        sub_assignments: None,
+        ..Default::default()
+    };
+
+    let cancel_token = CancellationToken::new();
+    let (event_sender, mut event_receiver) = create_event_channel(1);
+    let cancel_token_clone = cancel_token.clone();
+    let runner = tokio::spawn(async move {
+        let pipeline = BatchPipeline::new(config, Some(event_sender), cancel_token);
+        pipeline.run().await.unwrap()
+    });
+
+    let mut events = Vec::new();
+    while let Some(event) = event_receiver.recv().await {
+        if matches!(event, JobEvent::BatchStart { .. }) {
+            cancel_token_clone.cancel();
+        }
+        events.push(event);
+        if matches!(events.last(), Some(JobEvent::BatchComplete { .. })) {
+            break;
+        }
+    }
+
+    let summary = runner.await.unwrap();
+    assert!(summary.cancelled);
+
+    let cancelled_events: Vec<&JobEvent> = events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                JobEvent::ItemComplete {
+                    status: ItemOutcome::Cancelled,
+                    ..
+                }
+            )
+        })
+        .collect();
+
+    assert!(!cancelled_events.is_empty());
+
+    let in_flight_cancelled = cancelled_events
+        .iter()
+        .find(|e| {
+            matches!(
+                e,
+                JobEvent::ItemComplete {
+                    duration_sec: Some(_),
+                    ..
+                }
+            )
+        })
+        .expect("Expected at least one in-flight cancelled item with duration_sec");
+
+    if let JobEvent::ItemComplete {
+        duration_sec: Some(d),
+        ..
+    } = in_flight_cancelled
+    {
+        assert!(*d >= 0.0, "duration_sec must be non-negative");
+    }
 }
