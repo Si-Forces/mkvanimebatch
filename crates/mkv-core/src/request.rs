@@ -29,6 +29,11 @@ pub struct TrackAssignment {
     pub offset_ms: Option<i64>,
 }
 
+/// Returns true if a path string begins with a Windows drive prefix (e.g. `C:` or `D:\`).
+fn is_drive_prefix(s: &str) -> bool {
+    s.len() >= 2 && s.as_bytes()[1] == b':' && s.as_bytes()[0].is_ascii_alphabetic()
+}
+
 impl TrackAssignment {
     /// Returns the normalized target video path relative to input directory,
     /// with backslashes converted to forward slashes and leading relative prefixes (`./`) stripped.
@@ -39,6 +44,14 @@ impl TrackAssignment {
             clean = rest;
         }
         clean.to_string()
+    }
+
+    /// Returns true if the asset path is relative to the release/input directory
+    /// (i.e. not absolute, not root-relative, and not a drive-prefixed path).
+    pub fn is_relative_asset(&self) -> bool {
+        let path = &self.asset_path;
+        let s = path.to_string_lossy();
+        !is_drive_prefix(&s) && path.is_relative() && !path.has_root()
     }
 }
 
@@ -213,9 +226,7 @@ impl BatchRequest {
 
                 let target_norm = assignment.target_video.trim().replace('\\', "/");
                 let target_path = Path::new(&target_norm);
-                let is_target_drive = target_norm.len() >= 2
-                    && target_norm.as_bytes()[1] == b':'
-                    && target_norm.as_bytes()[0].is_ascii_alphabetic();
+                let is_target_drive = is_drive_prefix(&target_norm);
                 if target_norm.starts_with('/')
                     || target_path.has_root()
                     || is_target_drive
@@ -230,13 +241,10 @@ impl BatchRequest {
                     ));
                 }
 
+                let is_rel_asset = assignment.is_relative_asset();
                 let asset_str = assignment.asset_path.to_string_lossy().replace('\\', "/");
                 let asset_norm_path = Path::new(&asset_str);
-                let is_asset_drive = asset_str.len() >= 2
-                    && asset_str.as_bytes()[1] == b':'
-                    && asset_str.as_bytes()[0].is_ascii_alphabetic();
-                if !is_asset_drive
-                    && asset_norm_path.is_relative()
+                if is_rel_asset
                     && asset_norm_path
                         .components()
                         .any(|c| matches!(c, std::path::Component::ParentDir))
@@ -273,7 +281,7 @@ impl BatchRequest {
 
                 // Fail-fast preflight validation per ADR-0008: assigned asset must exist on disk
                 // Checks relative to input_dir, or relative to assets_dir if configured.
-                let asset_exists = if !is_asset_drive && asset_norm_path.is_relative() {
+                let asset_exists = if is_rel_asset {
                     let in_input = self.input_dir.join(asset_norm_path);
                     in_input.is_file()
                         || self
@@ -288,7 +296,7 @@ impl BatchRequest {
                 if !asset_exists {
                     return Err(format!(
                         "Assigned asset file does not exist: '{}'",
-                        if !is_asset_drive && asset_norm_path.is_relative() {
+                        if is_rel_asset {
                             self.input_dir.join(asset_norm_path).display().to_string()
                         } else {
                             assignment.asset_path.display().to_string()
@@ -366,12 +374,13 @@ pub fn assignments_to_track_map(
 ) -> HashMap<String, PathBuf> {
     let mut map = HashMap::new();
     for a in assignments {
-        let resolved = if a.asset_path.is_relative() {
-            let from_input = input_dir.join(&a.asset_path);
+        let resolved = if a.is_relative_asset() {
+            let clean_asset = PathBuf::from(a.asset_path.to_string_lossy().replace('\\', "/"));
+            let from_input = input_dir.join(&clean_asset);
             if from_input.is_file() {
                 from_input
             } else if let Some(assets) = assets_dir {
-                let from_assets = assets.join(&a.asset_path);
+                let from_assets = assets.join(&clean_asset);
                 if from_assets.is_file() {
                     from_assets
                 } else {
@@ -971,7 +980,37 @@ mod tests {
                 title: None,
                 offset_ms: None,
             },
+            TrackAssignment {
+                target_video: "ep03.mkv".into(),
+                asset_path: PathBuf::from("/abs/ep03.ass"),
+                track_type: Some("subtitle".into()),
+                language: None,
+                title: None,
+                offset_ms: None,
+            },
+            TrackAssignment {
+                target_video: "ep04.mkv".into(),
+                asset_path: PathBuf::from("C:/ep04.ass"),
+                track_type: Some("subtitle".into()),
+                language: None,
+                title: None,
+                offset_ms: None,
+            },
+            TrackAssignment {
+                target_video: "ep05.mkv".into(),
+                asset_path: PathBuf::from(r"D:\subs\ep05.ass"),
+                track_type: Some("subtitle".into()),
+                language: None,
+                title: None,
+                offset_ms: None,
+            },
         ];
+        assert!(assignments[0].is_relative_asset());
+        assert!(assignments[1].is_relative_asset());
+        assert!(!assignments[2].is_relative_asset());
+        assert!(!assignments[3].is_relative_asset());
+        assert!(!assignments[4].is_relative_asset());
+
         let map = assignments_to_sub_map(&assignments, dir.path(), None);
         assert_eq!(map.get("ep01.mkv"), Some(&dir.path().join("ep01.ass")));
         assert_eq!(
@@ -979,6 +1018,12 @@ mod tests {
             Some(&dir.path().join("ep02.ass"))
         );
         assert_eq!(map.get("ep02.mkv"), Some(&dir.path().join("ep02.ass")));
+        assert_eq!(map.get("ep03.mkv"), Some(&PathBuf::from("/abs/ep03.ass")));
+        assert_eq!(map.get("ep04.mkv"), Some(&PathBuf::from("C:/ep04.ass")));
+        assert_eq!(
+            map.get("ep05.mkv"),
+            Some(&PathBuf::from(r"D:\subs\ep05.ass"))
+        );
     }
 
     #[test]
