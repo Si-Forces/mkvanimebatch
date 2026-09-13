@@ -1,6 +1,7 @@
 import {
   carryOverAssignments,
   createQueueState,
+  createQueueStateFromSnapshot,
   finalizeQueueState,
   reduceQueueEvent,
 } from "./queue-state.js";
@@ -119,7 +120,7 @@ export class QueueTracker {
     this.cards.clear();
     if (this.listEl) this.listEl.innerHTML = "";
 
-    const bitrate = document.getElementById(`${this.mode}-bitrate`)?.value?.trim() || "192k";
+    const bitrate = this.getBitrate();
     this.state = createQueueState(manifest, { mode: this.mode });
 
     // Refresh candidate lists; keep assignments whose item still exists so a
@@ -140,6 +141,10 @@ export class QueueTracker {
     if (this.state && this.listEl) {
       this.renderCardsIncrementally(this.scanToken, bitrate);
     }
+  }
+
+  getBitrate() {
+    return document.getElementById(`${this.mode}-bitrate`)?.value?.trim() || "192k";
   }
 
   // Creates card DOM in requestAnimationFrame batches under a ~8 ms frame
@@ -167,6 +172,8 @@ export class QueueTracker {
           this.applyInspectionError(card, item.inspectionError);
         } else if (item.metadata) {
           this.applyMetadata(card, item.metadata, bitrate);
+        } else {
+          this.applyRestoredTags(card, item);
         }
         this.renderCardState(card, item);
         frag.appendChild(card.el);
@@ -205,6 +212,27 @@ export class QueueTracker {
     if (card.codec) card.codec.textContent = "Inspection Failed";
     if (card.tag1) card.tag1.textContent = "Metadata unavailable";
     if (card.tag2) card.tag2.textContent = error;
+  }
+
+  applyRestoredTags(card, item) {
+    if (!card || !card.el || !item) return;
+    if (card.codec) card.codec.textContent = "MKV";
+    if (item.status === "completed") {
+      if (card.tag1) card.tag1.textContent = "Processed";
+      if (card.tag2) card.tag2.textContent = item.durationSec ? `Done in ${item.durationSec}s` : "Complete";
+    } else if (item.status === "skipped") {
+      if (card.tag1) card.tag1.textContent = "Skipped";
+      if (card.tag2) card.tag2.textContent = item.reason || "Already processed";
+    } else if (item.status === "cancelled") {
+      if (card.tag1) card.tag1.textContent = "Cancelled";
+      if (card.tag2) card.tag2.textContent = item.reason || "Cancelled";
+    } else if (item.status === "error") {
+      if (card.tag1) card.tag1.textContent = "Failed";
+      if (card.tag2) card.tag2.textContent = item.error || "Error";
+    } else {
+      if (card.tag1) card.tag1.textContent = "Queued";
+      if (card.tag2) card.tag2.textContent = "";
+    }
   }
 
   createCardElement(id, name, epNum = 1) {
@@ -269,6 +297,25 @@ export class QueueTracker {
       card.subBtn.textContent = "+ Sub";
       card.subBtn.classList.remove("assigned");
       card.subBtn.title = "Manually assign a subtitle file";
+    }
+  }
+
+  restoreFromSnapshot(snapshot) {
+    if (!snapshot || !snapshot.items) return;
+    this.scanToken++;
+    this.cards.clear();
+    this.lastManifest = null;
+    if (this.listEl) this.listEl.innerHTML = "";
+
+    this.state = createQueueStateFromSnapshot(snapshot, { mode: this.mode });
+
+    if (this.countEl) {
+      this.renderQueueCount();
+    }
+
+    if (this.state && this.listEl) {
+      const bitrate = this.getBitrate();
+      this.renderCardsIncrementally(this.scanToken, bitrate);
     }
   }
 

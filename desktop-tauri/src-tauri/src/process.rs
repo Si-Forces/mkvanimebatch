@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 #[cfg(windows)]
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -74,9 +76,66 @@ pub(crate) fn reserve_job_slot(
     Ok(lock)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BatchStatus {
+    Queued,
+    Running,
+    Completed,
+    Cancelled,
+    Error,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ItemStatus {
+    Processing,
+    Completed,
+    Skipped,
+    Error,
+    Cancelled,
+    Planned,
+}
+
+impl From<mkv_core::pipeline::ItemOutcome> for ItemStatus {
+    fn from(outcome: mkv_core::pipeline::ItemOutcome) -> Self {
+        match outcome {
+            mkv_core::pipeline::ItemOutcome::Completed => ItemStatus::Completed,
+            mkv_core::pipeline::ItemOutcome::Skipped => ItemStatus::Skipped,
+            mkv_core::pipeline::ItemOutcome::Error => ItemStatus::Error,
+            mkv_core::pipeline::ItemOutcome::Cancelled => ItemStatus::Cancelled,
+            mkv_core::pipeline::ItemOutcome::Planned => ItemStatus::Planned,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ItemSnapshot {
+    pub id: String,
+    pub file: String,
+    pub status: ItemStatus,
+    pub outcome: Option<mkv_core::pipeline::ItemOutcome>,
+    pub duration_sec: Option<f64>,
+    pub reason: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JobSnapshot {
+    pub job_id: u64,
+    pub mode: String,
+    pub status: BatchStatus,
+    pub start_time_ms: u64,
+    pub duration_sec: Option<f64>,
+    pub total_items: usize,
+    pub completed_items: usize,
+    pub items: std::collections::HashMap<String, ItemSnapshot>,
+}
+
 pub struct JobState {
     pub slot: Mutex<Option<JobSlot>>,
     pub next_id: AtomicU64,
+    pub snapshot: std::sync::Mutex<Option<JobSnapshot>>,
     accepting_starts: AtomicBool,
 }
 
@@ -168,6 +227,7 @@ impl Default for JobState {
         Self {
             slot: Mutex::new(None),
             next_id: AtomicU64::new(1),
+            snapshot: std::sync::Mutex::new(None),
             accepting_starts: AtomicBool::new(true),
         }
     }
@@ -209,6 +269,163 @@ impl JobState {
         wait_until(timeout, "job", || {
             Ok(self.slot.lock().map_err(|e| e.to_string())?.is_none())
         })
+    }
+
+    pub fn update_snapshot(&self, event: &mkv_core::pipeline::JobEvent, job_id: u64, mode: &str) {
+        if let Ok(mut snap) = self.snapshot.lock() {
+            match event {
+                mkv_core::pipeline::JobEvent::BatchStart { total, .. } => {
+                    let start_time_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    *snap = Some(JobSnapshot {
+                        job_id,
+                        mode: mode.to_string(),
+                        status: BatchStatus::Running,
+                        start_time_ms,
+                        duration_sec: None,
+                        total_items: *total,
+                        completed_items: 0,
+                        items: HashMap::new(),
+                    });
+                }
+                mkv_core::pipeline::JobEvent::ItemStart { id, file, .. } => {
+                    if let Some(snapshot) = snap.as_mut() {
+                        if let Some(item) = snapshot.items.get_mut(id) {
+                            item.file = file.clone();
+                            item.status = ItemStatus::Processing;
+                        } else {
+                            snapshot.items.insert(
+                                id.clone(),
+                                ItemSnapshot {
+                                    id: id.clone(),
+                                    file: file.clone(),
+                                    status: ItemStatus::Processing,
+                                    duration_sec: None,
+                                    reason: None,
+                                    error: None,
+                                    outcome: None,
+                                },
+                            );
+                        }
+                    }
+                }
+                mkv_core::pipeline::JobEvent::ItemComplete {
+                    id,
+                    file,
+                    status,
+                    reason,
+                    error,
+                    extra,
+                    ..
+                } => {
+                    if let Some(snapshot) = snap.as_mut() {
+                        let duration_sec = extra.get("duration_sec").and_then(|v| v.as_f64());
+                        snapshot.items.insert(
+                            id.clone(),
+                            ItemSnapshot {
+                                id: id.clone(),
+                                file: file.clone(),
+                                status: (*status).into(),
+                                duration_sec,
+                                reason: reason.clone(),
+                                error: error.clone(),
+                                outcome: Some(*status),
+                            },
+                        );
+                        snapshot.completed_items += 1;
+                    }
+                }
+                mkv_core::pipeline::JobEvent::BatchComplete {
+                    success,
+                    cancelled,
+                    extra,
+                    ..
+                } => {
+                    if let Some(snapshot) = snap.as_mut() {
+                        snapshot.status = if *cancelled {
+                            BatchStatus::Cancelled
+                        } else if *success {
+                            BatchStatus::Completed
+                        } else {
+                            BatchStatus::Error
+                        };
+                        if *cancelled {
+                            for item in snapshot.items.values_mut() {
+                                if item.status == ItemStatus::Processing {
+                                    item.status = ItemStatus::Cancelled;
+                                    item.reason = Some("Operation cancelled".to_string());
+                                }
+                            }
+                        } else if !*success {
+                            let err_msg = extra
+                                .get("error")
+                                .or_else(|| extra.get("reason"))
+                                .or_else(|| extra.get("panic"))
+                                .and_then(|v| v.as_str())
+                                .map(ToString::to_string)
+                                .unwrap_or_else(|| "Batch failed".to_string());
+                            let reason_msg = extra
+                                .get("reason")
+                                .and_then(|v| v.as_str())
+                                .map(ToString::to_string);
+                            for item in snapshot.items.values_mut() {
+                                if item.status == ItemStatus::Processing {
+                                    item.status = ItemStatus::Error;
+                                    item.error = Some(err_msg.clone());
+                                    if reason_msg.is_some() {
+                                        item.reason = reason_msg.clone();
+                                    }
+                                }
+                            }
+                        }
+                        let duration_sec = extra
+                            .get("duration_sec")
+                            .and_then(|v| v.as_f64())
+                            .or_else(|| {
+                                if snapshot.start_time_ms > 0 {
+                                    let now_ms = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map(|d| d.as_millis() as u64)
+                                        .unwrap_or(0);
+                                    if now_ms >= snapshot.start_time_ms {
+                                        Some((now_ms - snapshot.start_time_ms) as f64 / 1000.0)
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
+                            });
+                        snapshot.duration_sec = duration_sec;
+                    }
+                }
+                mkv_core::pipeline::JobEvent::ItemProgress { .. } => {}
+            }
+        }
+    }
+
+    pub fn clear_snapshot(&self) {
+        if let Ok(mut snap) = self.snapshot.lock() {
+            *snap = None;
+        }
+    }
+
+    pub fn cancel_snapshot_if_running(&self) {
+        if let Ok(mut snap) = self.snapshot.lock() {
+            if let Some(snapshot) = snap.as_mut() {
+                if snapshot.status == BatchStatus::Running {
+                    snapshot.status = BatchStatus::Cancelled;
+                    for item in snapshot.items.values_mut() {
+                        if item.status == ItemStatus::Processing {
+                            item.status = ItemStatus::Cancelled;
+                            item.reason = Some("Operation cancelled".to_string());
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 /// Default bound on waiting for owned-process teardown to finish.
@@ -502,12 +719,277 @@ mod tests {
     fn test_job_state_initialization_and_increment() {
         let state = JobState::default();
         assert!(state.slot.lock().unwrap().is_none());
+        assert!(state.snapshot.lock().unwrap().is_none());
         assert_eq!(state.next_id.load(Ordering::SeqCst), 1);
         let id1 = state.next_id.fetch_add(1, Ordering::SeqCst);
         let id2 = state.next_id.fetch_add(1, Ordering::SeqCst);
         assert_eq!(id1, 1);
         assert_eq!(id2, 2);
         assert_eq!(state.next_id.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn test_job_state_snapshot_lifecycle() {
+        let state = JobState::default();
+        assert!(state.snapshot.lock().unwrap().is_none());
+
+        let start_event = mkv_core::pipeline::JobEvent::BatchStart {
+            version: 1,
+            total: 2,
+            input_dir: "/test".to_string(),
+            extra: Default::default(),
+        };
+        state.update_snapshot(&start_event, 10, "remux");
+        {
+            let snap_guard = state.snapshot.lock().unwrap();
+            let snap = snap_guard.as_ref().unwrap();
+            assert_eq!(snap.job_id, 10);
+            assert_eq!(snap.mode, "remux");
+            assert_eq!(snap.status, BatchStatus::Running);
+            assert_eq!(snap.total_items, 2);
+            assert_eq!(snap.completed_items, 0);
+            assert!(snap.items.is_empty());
+        }
+
+        let item_start = mkv_core::pipeline::JobEvent::ItemStart {
+            version: 1,
+            id: "ep1".to_string(),
+            file: "ep1.mkv".to_string(),
+            extra: Default::default(),
+        };
+        state.update_snapshot(&item_start, 10, "remux");
+        {
+            let snap_guard = state.snapshot.lock().unwrap();
+            let snap = snap_guard.as_ref().unwrap();
+            assert_eq!(snap.items.len(), 1);
+            let item = snap.items.get("ep1").unwrap();
+            assert_eq!(item.status, ItemStatus::Processing);
+        }
+
+        let item_complete = mkv_core::pipeline::JobEvent::ItemComplete {
+            version: 1,
+            id: "ep1".to_string(),
+            file: "ep1.mkv".to_string(),
+            status: mkv_core::pipeline::ItemOutcome::Completed,
+            reason: None,
+            error: None,
+            extra: Default::default(),
+        };
+        state.update_snapshot(&item_complete, 10, "remux");
+        {
+            let snap_guard = state.snapshot.lock().unwrap();
+            let snap = snap_guard.as_ref().unwrap();
+            assert_eq!(snap.completed_items, 1);
+            let item = snap.items.get("ep1").unwrap();
+            assert_eq!(item.status, ItemStatus::Completed);
+            assert_eq!(
+                item.outcome,
+                Some(mkv_core::pipeline::ItemOutcome::Completed)
+            );
+        }
+
+        let batch_complete = mkv_core::pipeline::JobEvent::BatchComplete {
+            version: 1,
+            success: true,
+            cancelled: false,
+            extra: Default::default(),
+        };
+        state.update_snapshot(&batch_complete, 10, "remux");
+        {
+            let snap_guard = state.snapshot.lock().unwrap();
+            let snap = snap_guard.as_ref().unwrap();
+            assert_eq!(snap.status, BatchStatus::Completed);
+            assert!(snap.duration_sec.is_some());
+        }
+
+        state.clear_snapshot();
+        assert!(state.snapshot.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_item_status_serde_and_from() {
+        assert_eq!(
+            serde_json::to_string(&ItemStatus::Processing).unwrap(),
+            "\"processing\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ItemStatus::Completed).unwrap(),
+            "\"completed\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ItemStatus::Skipped).unwrap(),
+            "\"skipped\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ItemStatus::Error).unwrap(),
+            "\"error\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ItemStatus::Cancelled).unwrap(),
+            "\"cancelled\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ItemStatus::Planned).unwrap(),
+            "\"planned\""
+        );
+
+        assert_eq!(
+            ItemStatus::from(mkv_core::pipeline::ItemOutcome::Completed),
+            ItemStatus::Completed
+        );
+        assert_eq!(
+            ItemStatus::from(mkv_core::pipeline::ItemOutcome::Skipped),
+            ItemStatus::Skipped
+        );
+        assert_eq!(
+            ItemStatus::from(mkv_core::pipeline::ItemOutcome::Error),
+            ItemStatus::Error
+        );
+        assert_eq!(
+            ItemStatus::from(mkv_core::pipeline::ItemOutcome::Cancelled),
+            ItemStatus::Cancelled
+        );
+        assert_eq!(
+            ItemStatus::from(mkv_core::pipeline::ItemOutcome::Planned),
+            ItemStatus::Planned
+        );
+    }
+
+    #[test]
+    fn test_clear_snapshot_safely_clears_without_panic() {
+        let state = JobState::default();
+        // Clearing when already None does not panic
+        state.clear_snapshot();
+        assert!(state.snapshot.lock().unwrap().is_none());
+
+        // Populate a snapshot
+        let start_event = mkv_core::pipeline::JobEvent::BatchStart {
+            version: 1,
+            total: 1,
+            input_dir: "/test".to_string(),
+            extra: Default::default(),
+        };
+        state.update_snapshot(&start_event, 42, "remux");
+        assert!(state.snapshot.lock().unwrap().is_some());
+
+        // Clear existing snapshot safely
+        state.clear_snapshot();
+        assert!(state.snapshot.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_cancel_snapshot_if_running_transitions_processing_items() {
+        let state = JobState::default();
+        let start_event = mkv_core::pipeline::JobEvent::BatchStart {
+            version: 1,
+            total: 2,
+            input_dir: "/test".to_string(),
+            extra: Default::default(),
+        };
+        state.update_snapshot(&start_event, 10, "remux");
+
+        let item1_start = mkv_core::pipeline::JobEvent::ItemStart {
+            version: 1,
+            id: "ep1".to_string(),
+            file: "ep1.mkv".to_string(),
+            extra: Default::default(),
+        };
+        state.update_snapshot(&item1_start, 10, "remux");
+
+        let item2_start = mkv_core::pipeline::JobEvent::ItemStart {
+            version: 1,
+            id: "ep2".to_string(),
+            file: "ep2.mkv".to_string(),
+            extra: Default::default(),
+        };
+        state.update_snapshot(&item2_start, 10, "remux");
+
+        let item1_complete = mkv_core::pipeline::JobEvent::ItemComplete {
+            version: 1,
+            id: "ep1".to_string(),
+            file: "ep1.mkv".to_string(),
+            status: mkv_core::pipeline::ItemOutcome::Completed,
+            reason: None,
+            error: None,
+            extra: Default::default(),
+        };
+        state.update_snapshot(&item1_complete, 10, "remux");
+
+        state.cancel_snapshot_if_running();
+
+        let snap_guard = state.snapshot.lock().unwrap();
+        let snap = snap_guard.as_ref().unwrap();
+        assert_eq!(snap.status, BatchStatus::Cancelled);
+
+        let ep1 = snap.items.get("ep1").unwrap();
+        assert_eq!(ep1.status, ItemStatus::Completed);
+
+        let ep2 = snap.items.get("ep2").unwrap();
+        assert_eq!(ep2.status, ItemStatus::Cancelled);
+        assert_eq!(ep2.reason.as_deref(), Some("Operation cancelled"));
+    }
+
+    #[test]
+    fn test_update_snapshot_batch_complete_transitions_processing_items() {
+        // Test cancelled batch complete
+        let state = JobState::default();
+        let start_event = mkv_core::pipeline::JobEvent::BatchStart {
+            version: 1,
+            total: 1,
+            input_dir: "/test".to_string(),
+            extra: Default::default(),
+        };
+        state.update_snapshot(&start_event, 1, "remux");
+        let item_start = mkv_core::pipeline::JobEvent::ItemStart {
+            version: 1,
+            id: "ep1".to_string(),
+            file: "ep1.mkv".to_string(),
+            extra: Default::default(),
+        };
+        state.update_snapshot(&item_start, 1, "remux");
+
+        let batch_cancel = mkv_core::pipeline::JobEvent::BatchComplete {
+            version: 1,
+            success: false,
+            cancelled: true,
+            extra: Default::default(),
+        };
+        state.update_snapshot(&batch_cancel, 1, "remux");
+
+        {
+            let snap = state.snapshot.lock().unwrap();
+            let snap = snap.as_ref().unwrap();
+            assert_eq!(snap.status, BatchStatus::Cancelled);
+            let ep1 = snap.items.get("ep1").unwrap();
+            assert_eq!(ep1.status, ItemStatus::Cancelled);
+            assert_eq!(ep1.reason.as_deref(), Some("Operation cancelled"));
+        }
+
+        // Test error batch complete
+        let state2 = JobState::default();
+        state2.update_snapshot(&start_event, 2, "remux");
+        state2.update_snapshot(&item_start, 2, "remux");
+        let mut err_extra = serde_json::Map::new();
+        err_extra.insert(
+            "error".to_string(),
+            serde_json::Value::String("Fatal error".to_string()),
+        );
+        let batch_err = mkv_core::pipeline::JobEvent::BatchComplete {
+            version: 1,
+            success: false,
+            cancelled: false,
+            extra: err_extra,
+        };
+        state2.update_snapshot(&batch_err, 2, "remux");
+
+        {
+            let snap = state2.snapshot.lock().unwrap();
+            let snap = snap.as_ref().unwrap();
+            assert_eq!(snap.status, BatchStatus::Error);
+            let ep1 = snap.items.get("ep1").unwrap();
+            assert_eq!(ep1.status, ItemStatus::Error);
+            assert_eq!(ep1.error.as_deref(), Some("Fatal error"));
+        }
     }
 }
 

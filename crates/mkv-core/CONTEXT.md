@@ -47,3 +47,14 @@ _Avoid_: Backup scanner, external probe
 **Log Channel**:
 The dedicated auxiliary channel streaming real-time diagnostic console text from the media engine to frontend log observers.
 _Avoid_: Output stream, log buffer, console pipe
+
+**Batch Request**:
+The canonical serializable specification submitted across the Engine Bridge or constructed from CLI arguments to configure and initiate a Batch Pipeline execution.
+_Avoid_: Job spec, pipeline config, run arguments
+**Preset Profile**:
+A canonical named bundle of audio transcoding bitrate, encoder complexity, and container retention flags evaluated by the Media Engine for batch remuxing, decoupled from hardware worker concurrency.
+_Avoid_: Config preset, setting template, encoding profile
+
+**Track Assignment**:
+An explicit mapping attaching an external or embedded asset to a specific target video file with designated track type, language tag, and time offset. While the domain model anticipates multi-track stacking, current pipeline execution enforces 1:1 subtitle overrides (`track_type: "subtitle"`).
+_Avoid_: Sub assignment, manual override, track mapping

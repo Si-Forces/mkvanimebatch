@@ -1,7 +1,7 @@
 use crate::contract::{InspectionManifest, JobEvent, JobEventExt};
 pub use crate::process::{
-    begin_shutdown, cancel_shutdown, cleanup_owned_processes, close_window, stop_job, JobState,
-    ScanState,
+    begin_shutdown, cancel_shutdown, cleanup_owned_processes, close_window, stop_job, ItemSnapshot,
+    ItemStatus, JobSnapshot, JobState, ScanState,
 };
 use crate::process::{
     reserve_job_slot, stop_registered_scan, ActiveScan, JobSlot, ScanRegistration,
@@ -23,7 +23,7 @@ pub struct InspectOptions {
 
 #[tauri::command]
 pub async fn inspect_directory(
-    _app: AppHandle,
+    app: AppHandle,
     state: State<'_, ScanState>,
     path: String,
     options: Option<InspectOptions>,
@@ -43,6 +43,7 @@ pub async fn inspect_directory(
         pid: 0,
         cancel_token: Some(cancel_token.clone()),
     });
+    app.state::<JobState>().clear_snapshot();
     drop(start_lock);
     let registration = ScanRegistration {
         state: &state,
@@ -66,29 +67,17 @@ pub async fn inspect_directory(
 pub fn run_job(
     app: AppHandle,
     state: State<'_, JobState>,
-    mode: String,
-    args: Vec<String>,
-    assignments_json: Option<String>,
+    request: mkv_core::request::BatchRequest,
 ) -> Result<u64, String> {
-    for arg in &args {
-        if arg.contains('\0') {
-            return Err("Argument contains invalid null character".into());
-        }
-    }
-
-    let mut config = mkv_core::pipeline::PipelineConfig::from_args(&args)?;
-    config.mode = if mode == "extract" {
-        mkv_core::pipeline::PipelineMode::Extract
-    } else {
-        mkv_core::pipeline::PipelineMode::Remux
-    };
-
-    if let Some(json) = assignments_json.as_ref().filter(|j| !j.is_empty()) {
-        let parsed = mkv_core::pipeline::parse_sub_assignments_json(json, &config.input_dir)?;
-        config.sub_assignments = Some(parsed);
-    }
+    request.validate()?;
 
     let mut lock = reserve_job_slot(&state)?;
+
+    let mode_str = match request.mode {
+        mkv_core::pipeline::PipelineMode::Extract => "extract",
+        mkv_core::pipeline::PipelineMode::Remux => "remux",
+    }
+    .to_string();
 
     let job_id = state.next_id.fetch_add(1, Ordering::SeqCst);
     let cancel_token = tokio_util::sync::CancellationToken::new();
@@ -96,12 +85,15 @@ pub fn run_job(
     let (event_tx, mut event_rx) = mkv_core::pipeline::create_event_channel(64);
     let (log_tx, mut log_rx) = mkv_core::pipeline::create_log_channel(128);
 
-    let pipeline =
-        mkv_core::pipeline::BatchPipeline::new(config, Some(event_tx), cancel_token.clone())
-            .with_log_sender(Some(log_tx));
+    let pipeline = mkv_core::pipeline::BatchPipeline::from_request(
+        request,
+        Some(event_tx),
+        cancel_token.clone(),
+    )?
+    .with_log_sender(Some(log_tx));
 
     let app_task = app.clone();
-    let mode_task = mode.clone();
+    let mode_task = mode_str;
     let task_handle = tokio::spawn(async move {
         struct JobSlotGuard {
             app: AppHandle,
@@ -111,6 +103,7 @@ pub fn run_job(
             fn drop(&mut self) {
                 let state = self.app.state::<JobState>();
                 state.release_slot(self.job_id);
+                state.cancel_snapshot_if_running();
             }
         }
         let _guard = JobSlotGuard {
@@ -120,13 +113,14 @@ pub fn run_job(
 
         let app_event = app_task.clone();
         let mode_event = mode_task.clone();
+        let state_for_event = app_task.state::<JobState>();
         let event_task = async move {
             while let Some(mut event) = event_rx.recv().await {
                 event.attach_context(&mode_event, job_id);
+                state_for_event.update_snapshot(&event, job_id, &mode_event);
                 let _ = app_event.emit("job-event", &event);
             }
         };
-
         let app_log = app_task.clone();
         let log_task = async move {
             let mut batch: Vec<String> = Vec::with_capacity(25);
@@ -223,6 +217,8 @@ pub fn run_job(
                     cancelled: false,
                     extra,
                 };
+                let state_for_panic = app_task.state::<JobState>();
+                state_for_panic.update_snapshot(&event, job_id, &mode_task);
                 let _ = app_task.emit("job-event", &event);
                 let _ = app_task.emit("job-log", vec![format!("[PANIC] {panic_msg}")]);
                 1
@@ -261,10 +257,27 @@ pub async fn clear_cache(_app: AppHandle, _mode: String) -> Result<String, Strin
 }
 
 #[tauri::command]
-pub fn pick_folder() -> Option<String> {
+pub fn pick_directory() -> Option<String> {
     rfd::FileDialog::new()
         .pick_folder()
         .map(|p| p.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+pub fn pick_folder() -> Option<String> {
+    pick_directory()
+}
+
+#[tauri::command]
+pub fn get_preset_profiles() -> Vec<mkv_core::preset::PresetProfile> {
+    mkv_core::preset::get_preset_profiles()
+}
+
+#[tauri::command]
+pub fn get_job_snapshot(
+    state: State<'_, JobState>,
+) -> Result<Option<crate::process::JobSnapshot>, String> {
+    Ok(state.snapshot.lock().map_err(|e| e.to_string())?.clone())
 }
 
 #[cfg(test)]
@@ -284,5 +297,39 @@ mod tests {
 
         assert!(serde_json::from_str::<InspectOptions>(r#"{"noCache": 1}"#).is_err());
         assert!(serde_json::from_str::<InspectOptions>(r#"{"noCache": "true"}"#).is_err());
+    }
+
+    #[test]
+    fn test_get_and_clear_job_snapshot() {
+        let app = tauri::test::mock_app();
+        app.manage(JobState::default());
+
+        let state = app.state::<JobState>();
+        let snap = get_job_snapshot(state).expect("get_job_snapshot should succeed");
+        assert!(snap.is_none());
+
+        let state = app.state::<JobState>();
+        let start_event = mkv_core::pipeline::JobEvent::BatchStart {
+            version: 1,
+            total: 2,
+            input_dir: "/test".to_string(),
+            extra: Default::default(),
+        };
+        state.update_snapshot(&start_event, 101, "remux");
+
+        let state = app.state::<JobState>();
+        let snap = get_job_snapshot(state)
+            .expect("get_job_snapshot should succeed")
+            .expect("snapshot should be present");
+        assert_eq!(snap.job_id, 101);
+        assert_eq!(snap.mode, "remux");
+        assert_eq!(snap.total_items, 2);
+
+        let state = app.state::<JobState>();
+        state.clear_snapshot();
+
+        let state = app.state::<JobState>();
+        let snap = get_job_snapshot(state).expect("get_job_snapshot should succeed");
+        assert!(snap.is_none());
     }
 }

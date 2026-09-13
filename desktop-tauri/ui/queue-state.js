@@ -106,6 +106,75 @@ export function createQueueState(manifest, options = {}) {
 }
 
 /**
+ * Creates and initializes a queue state projection from an in-memory JobSnapshot.
+ *
+ * @param {Object} snapshot
+ * @param {{mode?: string}} [options]
+ */
+export function createQueueStateFromSnapshot(snapshot, options = {}) {
+  const mode = snapshot?.mode || options.mode || "remux";
+  const state = {
+    version: 1,
+    mode,
+    items: new Map(),
+    order: [],
+    batchStartTime: snapshot?.start_time_ms ?? null,
+    batchCompleted: snapshot?.status === "completed" || snapshot?.status === "cancelled" || snapshot?.status === "error",
+    batchSuccess: snapshot?.status === "completed",
+    batchCancelled: snapshot?.status === "cancelled",
+    completedCount: 0,
+    totalCount: 0,
+    skippedCount: 0,
+    cancelledCount: 0,
+    errorCount: 0,
+  };
+
+  if (!snapshot || !snapshot.items) {
+    return state;
+  }
+
+  for (const snapItem of Object.values(snapshot.items)) {
+    if (!snapItem || !snapItem.id) continue;
+    const id = String(snapItem.id);
+    const name = String(snapItem.file || id);
+    const status = snapItem.status || "queued";
+
+    let resolvedStatus = status;
+    if (state.batchCompleted && (status === "processing" || status === "queued")) {
+      resolvedStatus = state.batchCancelled ? "cancelled" : "error";
+    }
+
+    const item = {
+      id,
+      name,
+      release: "",
+      metadata: null,
+      inspectionError: null,
+      status: resolvedStatus,
+      startTime: null,
+      durationSec: snapItem.duration_sec ?? null,
+      reason: snapItem.reason ?? null,
+      error: snapItem.error ?? null,
+    };
+
+    state.items.set(id, item);
+    state.order.push(id);
+    state.totalCount++;
+
+    if (resolvedStatus === "completed" || resolvedStatus === "planned") state.completedCount++;
+    else if (resolvedStatus === "skipped") state.skippedCount++;
+    else if (resolvedStatus === "cancelled") state.cancelledCount++;
+    else if (resolvedStatus === "error") state.errorCount++;
+  }
+
+  if (typeof snapshot.total_items === "number" && snapshot.total_items > state.totalCount) {
+    state.totalCount = snapshot.total_items;
+  }
+
+  return state;
+}
+
+/**
  * Keep only the manual assignments whose item id still exists in the given
  * manifest, so a rescan does not silently drop selections for surviving items.
  */
@@ -126,8 +195,22 @@ export function serializeAssignmentsForManifest(assignments, manifest) {
     : null;
 }
 
+export function buildTrackAssignmentsForManifest(assignments, manifest) {
+  const carried = carryOverAssignments(assignments, manifest);
+  if (carried.size === 0) return null;
+  const list = [];
+  for (const [targetVideo, assetPath] of carried.entries()) {
+    list.push({
+      target_video: targetVideo,
+      asset_path: assetPath,
+      track_type: "subtitle",
+    });
+  }
+  return list;
+}
+
 /**
- * Advance queue state for one sidecar event. Mutates `state` in place and
+ * Advance queue state for one engine JobEvent. Mutates `state` in place and
  * returns it (see ownership contract in the module header).
  *
  * @param {JobEvent} event
