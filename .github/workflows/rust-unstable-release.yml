@@ -48,32 +48,20 @@ jobs:
       - name: Compile mkv-cli (Release)
         run: cargo build --release -p mkv-cli
 
-      - name: Populate Tauri sidecars from native mkv-cli
+      - name: Smoke-test mkv-cli
         shell: pwsh
         run: |
-          $Binaries = "desktop-tauri/src-tauri/binaries"
-          New-Item -ItemType Directory -Force -Path $Binaries | Out-Null
-          Copy-Item target\release\mkv-cli.exe "$Binaries\mkv-remux-x86_64-pc-windows-msvc.exe" -Force
-          Copy-Item target\release\mkv-cli.exe "$Binaries\mkv-extract-x86_64-pc-windows-msvc.exe" -Force
-
-      - name: Smoke-test sidecars
-        shell: pwsh
-        run: |
-          $Binaries = "desktop-tauri/src-tauri/binaries"
-          $Remux = Join-Path $Binaries "mkv-remux-x86_64-pc-windows-msvc.exe"
-          $Extract = Join-Path $Binaries "mkv-extract-x86_64-pc-windows-msvc.exe"
-          if ((Get-Item $Remux).Length -eq 0 -or (Get-Item $Extract).Length -eq 0) {
-            throw "Built sidecar is empty"
+          $Cli = "target\release\mkv-cli.exe"
+          if (-not (Test-Path $Cli) -or (Get-Item $Cli).Length -eq 0) {
+            throw "Built mkv-cli is empty or missing"
           }
-          & $Remux --help | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw "mkv-remux --help failed" }
-          & $Extract --help | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw "mkv-extract --help failed" }
+          & $Cli --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "mkv-cli --help failed" }
           $Empty = Join-Path $env:RUNNER_TEMP "empty-release"
           New-Item -ItemType Directory -Force -Path $Empty | Out-Null
-          $Manifest = (& $Remux --plan --no-cache --input-dir $Empty) | ConvertFrom-Json
-          if ($LASTEXITCODE -ne 0 -or $Manifest.version -ne 2 -or $Manifest.items.Count -ne 0) {
-            throw "mkv-remux empty-directory plan contract failed"
+          $Manifest = (& $Cli --plan --no-cache --input-dir $Empty) | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $Manifest.version -ne 2 -or $Manifest.items.Count -ne 0 -or $null -eq $Manifest.subtitle_candidates) {
+            throw "mkv-cli empty-directory plan contract failed"
           }
 
       - name: Package Windows CLI Archive
@@ -110,18 +98,14 @@ jobs:
           # Copy single self-contained standalone executable
           Copy-Item "$ReleaseDir\mkv-anime-batch.exe" "$OutDir\mkv-anime-batch.exe" -Force
 
-          # Copy main executable and sidecars into portable package
+          # Copy main executable into portable package
           Copy-Item "$ReleaseDir\mkv-anime-batch.exe" "$StageDir\" -Force
-          Copy-Item "desktop-tauri/src-tauri/binaries\mkv-remux-x86_64-pc-windows-msvc.exe" "$StageDir\" -Force
-          Copy-Item "desktop-tauri/src-tauri/binaries\mkv-extract-x86_64-pc-windows-msvc.exe" "$StageDir\" -Force
 
           # Create Portable Zip
           Compress-Archive -Path "$StageDir\*" -DestinationPath "$OutDir\MKV_Anime_Batch_Portable_win64.zip" -Force
 
           foreach ($Artifact in @(
             "$OutDir\mkv-anime-batch.exe",
-            "$StageDir\mkv-remux-x86_64-pc-windows-msvc.exe",
-            "$StageDir\mkv-extract-x86_64-pc-windows-msvc.exe",
             "$OutDir\MKV_Anime_Batch_Portable_win64.zip",
             "mkv-cli-x86_64-pc-windows-msvc.zip",
             "mkv-cli-x86_64-pc-windows-msvc.zip.sha256"
@@ -164,7 +148,7 @@ jobs:
             | File | Description |
             |------|-------------|
             | `mkv-anime-batch.exe` | Single self-contained standalone desktop GUI executable |
-            | `MKV_Anime_Batch_Portable_win64.zip` | Portable Zip package (GUI + bundled sidecars) |
+            | `MKV_Anime_Batch_Portable_win64.zip` | Portable Zip package (self-contained GUI) |
             | `mkv-cli-x86_64-pc-windows-msvc.zip` | Standalone native CLI executable (includes `.sha256`) |
 
             ---
@@ -242,25 +226,14 @@ jobs:
       - name: Compile mkv-cli (Release)
         run: cargo build --release -p mkv-cli
 
-      - name: Populate Tauri sidecars from native mkv-cli
+      - name: Smoke-test mkv-cli
         run: |
-          mkdir -p desktop-tauri/src-tauri/binaries
-          cp target/release/mkv-cli desktop-tauri/src-tauri/binaries/mkv-remux-x86_64-unknown-linux-gnu
-          cp target/release/mkv-cli desktop-tauri/src-tauri/binaries/mkv-extract-x86_64-unknown-linux-gnu
-          chmod +x desktop-tauri/src-tauri/binaries/mkv-*
-
-      - name: Smoke-test sidecars
-        run: |
-          BINARIES="desktop-tauri/src-tauri/binaries"
-          REMUX="$BINARIES/mkv-remux-x86_64-unknown-linux-gnu"
-          EXTRACT="$BINARIES/mkv-extract-x86_64-unknown-linux-gnu"
-          test -s "$REMUX"
-          test -s "$EXTRACT"
-          "$REMUX" --help >/dev/null
-          "$EXTRACT" --help >/dev/null
+          CLI="target/release/mkv-cli"
+          test -s "$CLI"
+          "$CLI" --help >/dev/null
           EMPTY="$(mktemp -d)"
           trap 'rm -rf "$EMPTY"' EXIT
-          "$REMUX" --plan --no-cache --input-dir "$EMPTY" > "$EMPTY/manifest.json"
+          "$CLI" --plan --no-cache --input-dir "$EMPTY" > "$EMPTY/manifest.json"
           python3 -c 'import json, pathlib, sys; m=json.loads(pathlib.Path(sys.argv[1]).read_text()); assert m == {"version": 2, "subtitle_candidates": {}, "items": []}' "$EMPTY/manifest.json"
 
       - name: Package Linux CLI Archive
@@ -286,7 +259,7 @@ jobs:
           find target desktop-tauri -type f -name "*.AppImage" -exec cp {} /tmp/linux-release/ \;
           find target desktop-tauri -type f -name "*.deb" -exec cp {} /tmp/linux-release/ \;
           find target desktop-tauri -type f -name "*.rpm" -exec cp {} /tmp/linux-release/ \;
-      - name: Verify bundled sidecars
+      - name: Verify Linux packages
         run: |
           DEB="$(find /tmp/linux-release -name '*.deb' -print -quit)"
           RPM="$(find /tmp/linux-release -name '*.rpm' -print -quit)"
@@ -294,18 +267,21 @@ jobs:
           test -n "$DEB" && test -n "$RPM" && test -n "$APPIMAGE"
 
           dpkg-deb --contents "$DEB" > /tmp/deb-contents.txt
-          grep -q 'mkv-remux' /tmp/deb-contents.txt
-          grep -q 'mkv-extract' /tmp/deb-contents.txt
+          grep -q 'bin/mkv-anime-batch' /tmp/deb-contents.txt
+          ! grep -q 'mkv-remux' /tmp/deb-contents.txt
+          ! grep -q 'mkv-extract' /tmp/deb-contents.txt
 
           rpm -qlp "$RPM" > /tmp/rpm-contents.txt
-          grep -q 'mkv-remux' /tmp/rpm-contents.txt
-          grep -q 'mkv-extract' /tmp/rpm-contents.txt
+          grep -q 'bin/mkv-anime-batch' /tmp/rpm-contents.txt
+          ! grep -q 'mkv-remux' /tmp/rpm-contents.txt
+          ! grep -q 'mkv-extract' /tmp/rpm-contents.txt
 
           chmod +x "$APPIMAGE"
           mkdir -p /tmp/appimage-contents
           (cd /tmp/appimage-contents && "$APPIMAGE" --appimage-extract >/dev/null)
-          find /tmp/appimage-contents/squashfs-root -name 'mkv-remux*' -print -quit | grep -q .
-          find /tmp/appimage-contents/squashfs-root -name 'mkv-extract*' -print -quit | grep -q .
+          find /tmp/appimage-contents/squashfs-root -name 'mkv-anime-batch' -type f -print -quit | grep -q .
+          ! find /tmp/appimage-contents/squashfs-root -name 'mkv-remux*' -print -quit | grep -q .
+          ! find /tmp/appimage-contents/squashfs-root -name 'mkv-extract*' -print -quit | grep -q .
 
       - name: Resolve Release Tag
         id: release-tag
@@ -340,7 +316,7 @@ jobs:
             | File | Description |
             |------|-------------|
             | `mkv-anime-batch.exe` | Single self-contained standalone desktop GUI executable |
-            | `MKV_Anime_Batch_Portable_win64.zip` | Portable Zip package (GUI + bundled sidecars) |
+            | `MKV_Anime_Batch_Portable_win64.zip` | Portable Zip package (self-contained GUI) |
             | `mkv-cli-x86_64-pc-windows-msvc.zip` | Standalone native CLI executable (includes `.sha256`) |
 
             ---
