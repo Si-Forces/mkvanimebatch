@@ -317,18 +317,17 @@ impl JobState {
                     status,
                     reason,
                     error,
-                    extra,
+                    duration_sec,
                     ..
                 } => {
                     if let Some(snapshot) = snap.as_mut() {
-                        let duration_sec = extra.get("duration_sec").and_then(|v| v.as_f64());
                         snapshot.items.insert(
                             id.clone(),
                             ItemSnapshot {
                                 id: id.clone(),
                                 file: file.clone(),
                                 status: (*status).into(),
-                                duration_sec,
+                                duration_sec: *duration_sec,
                                 reason: reason.clone(),
                                 error: error.clone(),
                                 outcome: Some(*status),
@@ -773,6 +772,7 @@ mod tests {
             status: mkv_core::pipeline::ItemOutcome::Completed,
             reason: None,
             error: None,
+            duration_sec: Some(42.5),
             extra: Default::default(),
         };
         state.update_snapshot(&item_complete, 10, "remux");
@@ -782,6 +782,7 @@ mod tests {
             assert_eq!(snap.completed_items, 1);
             let item = snap.items.get("ep1").unwrap();
             assert_eq!(item.status, ItemStatus::Completed);
+            assert_eq!(item.duration_sec, Some(42.5));
             assert_eq!(
                 item.outcome,
                 Some(mkv_core::pipeline::ItemOutcome::Completed)
@@ -911,6 +912,7 @@ mod tests {
             status: mkv_core::pipeline::ItemOutcome::Completed,
             reason: None,
             error: None,
+            duration_sec: Some(15.2),
             extra: Default::default(),
         };
         state.update_snapshot(&item1_complete, 10, "remux");
@@ -923,6 +925,7 @@ mod tests {
 
         let ep1 = snap.items.get("ep1").unwrap();
         assert_eq!(ep1.status, ItemStatus::Completed);
+        assert_eq!(ep1.duration_sec, Some(15.2));
 
         let ep2 = snap.items.get("ep2").unwrap();
         assert_eq!(ep2.status, ItemStatus::Cancelled);

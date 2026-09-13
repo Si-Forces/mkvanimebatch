@@ -62,6 +62,8 @@ pub enum JobEvent {
         reason: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_sec: Option<f64>,
         #[serde(default, flatten)]
         extra: serde_json::Map<String, serde_json::Value>,
     },
@@ -453,6 +455,7 @@ impl BatchPipeline {
                             status: ItemOutcome::Cancelled,
                             reason: Some("Operation cancelled".into()),
                             error: None,
+                            duration_sec: None,
                             extra: Default::default(),
                         })
                         .await;
@@ -474,6 +477,7 @@ impl BatchPipeline {
                     status: ItemOutcome::Planned,
                     reason: None,
                     error: None,
+                    duration_sec: None,
                     extra: Default::default(),
                 })
                 .await;
@@ -503,7 +507,7 @@ impl BatchPipeline {
         };
         let io_semaphore = Arc::new(tokio::sync::Semaphore::new(io_limit));
         let mut join_set = tokio::task::JoinSet::new();
-        let mut in_flight: HashMap<String, String> = HashMap::new();
+        let mut in_flight: HashMap<String, (String, std::time::Instant)> = HashMap::new();
         let mut font_registries: HashMap<PathBuf, Arc<FontRegistry>> = HashMap::new();
         let mut file_idx = 0;
 
@@ -546,7 +550,8 @@ impl BatchPipeline {
                 let task_cache = cache.clone();
                 let no_cache = self.config.no_cache;
 
-                in_flight.insert(item_id.clone(), file_name.clone());
+                let start_instant = std::time::Instant::now();
+                in_flight.insert(item_id.clone(), (file_name.clone(), start_instant));
                 self.emit(JobEvent::ItemStart {
                     version: EVENT_VERSION,
                     id: item_id.clone(),
@@ -557,13 +562,23 @@ impl BatchPipeline {
 
                 join_set.spawn(async move {
                     if cancel_token.is_cancelled() {
-                        return (item_id, file_name, Err("Operation cancelled".into()), true);
+                        let duration = start_instant.elapsed().as_secs_f64();
+                        return (
+                            item_id,
+                            file_name,
+                            Err("Operation cancelled".into()),
+                            true,
+                            duration,
+                        );
                     }
 
                     let cache_opt = if no_cache { None } else { Some(&*task_cache) };
                     let meta = match get_or_probe_video(&file_path, cache_opt) {
                         Ok(m) => m,
-                        Err(err) => return (item_id, file_name, Err(err), false),
+                        Err(err) => {
+                            let duration = start_instant.elapsed().as_secs_f64();
+                            return (item_id, file_name, Err(err), false, duration);
+                        }
                     };
                     let inspected = InspectedVideo::new(meta);
 
@@ -571,7 +586,7 @@ impl BatchPipeline {
                     let progress_item_id = item_id.clone();
                     let progress_file_name = file_name.clone();
                     let on_progress = move |pct: f64| {
-                        if let Some(ref tx) = progress_tx {
+                        if let Some(tx) = &progress_tx {
                             let _ = tx.try_send(JobEvent::ItemProgress {
                                 version: EVENT_VERSION,
                                 id: progress_item_id.clone(),
@@ -596,12 +611,14 @@ impl BatchPipeline {
                     tokio::select! {
                         biased;
                         _ = cancel_token.cancelled() => {
-                            (item_id, file_name, Err("Operation cancelled".into()), true)
+                            let duration = start_instant.elapsed().as_secs_f64();
+                            (item_id, file_name, Err("Operation cancelled".into()), true, duration)
                         }
                         res = extract_future => {
+                            let duration = start_instant.elapsed().as_secs_f64();
                             match res {
-                                Ok(file_summary) => (item_id, file_name, Ok(file_summary.log), false),
-                                Err(err) => (item_id, file_name, Err(err), false),
+                                Ok(file_summary) => (item_id, file_name, Ok(file_summary.log), false, duration),
+                                Err(err) => (item_id, file_name, Err(err), false, duration),
                             }
                         }
                     }
@@ -610,7 +627,7 @@ impl BatchPipeline {
 
             if let Some(res) = join_set.join_next().await {
                 match res {
-                    Ok((item_id, file_name, task_res, is_cancelled)) => {
+                    Ok((item_id, file_name, task_res, is_cancelled, duration)) => {
                         in_flight.remove(&item_id);
                         if is_cancelled {
                             summary.cancelled = true;
@@ -621,6 +638,7 @@ impl BatchPipeline {
                                 status: ItemOutcome::Cancelled,
                                 reason: Some("Operation cancelled".into()),
                                 error: None,
+                                duration_sec: Some(duration),
                                 extra: Default::default(),
                             })
                             .await;
@@ -637,6 +655,7 @@ impl BatchPipeline {
                                         status: ItemOutcome::Completed,
                                         reason: None,
                                         error: None,
+                                        duration_sec: Some(duration),
                                         extra: Default::default(),
                                     })
                                     .await;
@@ -655,6 +674,7 @@ impl BatchPipeline {
                                         status: ItemOutcome::Error,
                                         reason: None,
                                         error: Some(err),
+                                        duration_sec: Some(duration),
                                         extra: Default::default(),
                                     })
                                     .await;
@@ -675,7 +695,8 @@ impl BatchPipeline {
         if summary.cancelled {
             join_set.abort_all();
             while join_set.join_next().await.is_some() {}
-            for (item_id, file_name) in in_flight.drain() {
+            for (item_id, (file_name, start_instant)) in in_flight.drain() {
+                let duration = start_instant.elapsed().as_secs_f64();
                 self.emit(JobEvent::ItemComplete {
                     version: EVENT_VERSION,
                     id: item_id,
@@ -683,6 +704,7 @@ impl BatchPipeline {
                     status: ItemOutcome::Cancelled,
                     reason: Some("Operation cancelled".into()),
                     error: None,
+                    duration_sec: Some(duration),
                     extra: Default::default(),
                 })
                 .await;
@@ -696,6 +718,7 @@ impl BatchPipeline {
                     status: ItemOutcome::Cancelled,
                     reason: Some("Operation cancelled".into()),
                     error: None,
+                    duration_sec: None,
                     extra: Default::default(),
                 })
                 .await;
@@ -797,6 +820,7 @@ impl BatchPipeline {
                             status: ItemOutcome::Cancelled,
                             reason: Some("Operation cancelled".into()),
                             error: None,
+                            duration_sec: None,
                             extra: Default::default(),
                         })
                         .await;
@@ -870,6 +894,7 @@ impl BatchPipeline {
                             status: ItemOutcome::Cancelled,
                             reason: Some("Operation cancelled".into()),
                             error: None,
+                            duration_sec: None,
                             extra: Default::default(),
                         })
                         .await;
@@ -884,6 +909,7 @@ impl BatchPipeline {
                                 status: ItemOutcome::Cancelled,
                                 reason: Some("Operation cancelled".into()),
                                 error: None,
+                                duration_sec: None,
                                 extra: Default::default(),
                             })
                             .await;
@@ -907,6 +933,7 @@ impl BatchPipeline {
                         status: ItemOutcome::Skipped,
                         reason: Some(reason.into()),
                         error: None,
+                        duration_sec: None,
                         extra: Default::default(),
                     })
                     .await;
@@ -954,6 +981,7 @@ impl BatchPipeline {
                             status: ItemOutcome::Error,
                             reason: None,
                             error: Some(err),
+                            duration_sec: None,
                             extra: Default::default(),
                         })
                         .await;
@@ -991,6 +1019,7 @@ impl BatchPipeline {
                         status: ItemOutcome::Skipped,
                         reason: Some(reason),
                         error: None,
+                        duration_sec: None,
                         extra: Default::default(),
                     })
                     .await;
@@ -1030,6 +1059,7 @@ impl BatchPipeline {
                         status: ItemOutcome::Planned,
                         reason: None,
                         error: None,
+                        duration_sec: None,
                         extra: Default::default(),
                     })
                     .await;
@@ -1042,7 +1072,7 @@ impl BatchPipeline {
 
             if !planned_jobs.is_empty() {
                 let mut join_set = tokio::task::JoinSet::new();
-                let mut in_flight: HashMap<String, String> = HashMap::new();
+                let mut in_flight: HashMap<String, (String, std::time::Instant)> = HashMap::new();
                 let mut job_idx = 0;
 
                 while job_idx < planned_jobs.len() || !join_set.is_empty() {
@@ -1060,7 +1090,9 @@ impl BatchPipeline {
                         let (job, selection) = planned_jobs[job_idx].clone();
                         job_idx += 1;
 
-                        in_flight.insert(job.item_id.clone(), job.video_name.clone());
+                        let start_instant = std::time::Instant::now();
+                        in_flight
+                            .insert(job.item_id.clone(), (job.video_name.clone(), start_instant));
                         self.emit(JobEvent::ItemStart {
                             version: EVENT_VERSION,
                             id: job.item_id.clone(),
@@ -1080,11 +1112,13 @@ impl BatchPipeline {
 
                         join_set.spawn(async move {
                             if cancel_token.is_cancelled() {
+                                let duration = start_instant.elapsed().as_secs_f64();
                                 return (
                                     job.item_id,
                                     job.video_name,
                                     Err("Operation cancelled".into()),
                                     true,
+                                    duration,
                                 );
                             }
 
@@ -1092,7 +1126,7 @@ impl BatchPipeline {
                             let progress_item_id = job.item_id.clone();
                             let progress_file_name = job.video_name.clone();
                             let on_progress = move |pct: f64| {
-                                if let Some(ref tx) = progress_tx {
+                                if let Some(tx) = &progress_tx {
                                     let _ = tx.try_send(JobEvent::ItemProgress {
                                         version: EVENT_VERSION,
                                         id: progress_item_id.clone(),
@@ -1123,12 +1157,14 @@ impl BatchPipeline {
                             tokio::select! {
                                 biased;
                                 _ = cancel_token.cancelled() => {
-                                    (job.item_id, job.video_name, Err("Operation cancelled".into()), true)
+                                    let duration = start_instant.elapsed().as_secs_f64();
+                                    (job.item_id, job.video_name, Err("Operation cancelled".into()), true, duration)
                                 }
                                 res = remux_future => {
+                                    let duration = start_instant.elapsed().as_secs_f64();
                                     match res {
-                                        Ok(res_summary) => (job.item_id, job.video_name, Ok(res_summary.log), false),
-                                        Err(err) => (job.item_id, job.video_name, Err(err), false),
+                                        Ok(res_summary) => (job.item_id, job.video_name, Ok(res_summary.log), false, duration),
+                                        Err(err) => (job.item_id, job.video_name, Err(err), false, duration),
                                     }
                                 }
                             }
@@ -1137,7 +1173,7 @@ impl BatchPipeline {
 
                     if let Some(res) = join_set.join_next().await {
                         match res {
-                            Ok((item_id, file_name, task_res, is_cancelled)) => {
+                            Ok((item_id, file_name, task_res, is_cancelled, duration)) => {
                                 in_flight.remove(&item_id);
                                 if is_cancelled {
                                     summary.cancelled = true;
@@ -1148,6 +1184,7 @@ impl BatchPipeline {
                                         status: ItemOutcome::Cancelled,
                                         reason: Some("Operation cancelled".into()),
                                         error: None,
+                                        duration_sec: Some(duration),
                                         extra: Default::default(),
                                     })
                                     .await;
@@ -1164,6 +1201,7 @@ impl BatchPipeline {
                                                 status: ItemOutcome::Completed,
                                                 reason: None,
                                                 error: None,
+                                                duration_sec: Some(duration),
                                                 extra: Default::default(),
                                             })
                                             .await;
@@ -1182,6 +1220,7 @@ impl BatchPipeline {
                                                 status: ItemOutcome::Error,
                                                 reason: None,
                                                 error: Some(err),
+                                                duration_sec: Some(duration),
                                                 extra: Default::default(),
                                             })
                                             .await;
@@ -1202,7 +1241,8 @@ impl BatchPipeline {
                 if summary.cancelled {
                     join_set.abort_all();
                     while join_set.join_next().await.is_some() {}
-                    for (item_id, file_name) in in_flight.drain() {
+                    for (item_id, (file_name, start_instant)) in in_flight.drain() {
+                        let duration = start_instant.elapsed().as_secs_f64();
                         self.emit(JobEvent::ItemComplete {
                             version: EVENT_VERSION,
                             id: item_id,
@@ -1210,6 +1250,7 @@ impl BatchPipeline {
                             status: ItemOutcome::Cancelled,
                             reason: Some("Operation cancelled".into()),
                             error: None,
+                            duration_sec: Some(duration),
                             extra: Default::default(),
                         })
                         .await;
@@ -1222,6 +1263,7 @@ impl BatchPipeline {
                             status: ItemOutcome::Cancelled,
                             reason: Some("Operation cancelled".into()),
                             error: None,
+                            duration_sec: None,
                             extra: Default::default(),
                         })
                         .await;
@@ -1236,6 +1278,7 @@ impl BatchPipeline {
                                 status: ItemOutcome::Cancelled,
                                 reason: Some("Operation cancelled".into()),
                                 error: None,
+                                duration_sec: None,
                                 extra: Default::default(),
                             })
                             .await;

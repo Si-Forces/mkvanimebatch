@@ -216,3 +216,163 @@ test("restoreFromSnapshot sets meaningful restored tags instead of placeholder i
   assert.equal(card2.tag1.textContent, "Skipped");
   assert.equal(card2.tag2.textContent, "Up to date");
 });
+
+test("QueueTracker handles item_start (indeterminate shimmer), item_progress (determinate width), item_complete (green fill + stop heartbeat)", t => {
+  setupMockEnvironment(t);
+  const tracker = new QueueTracker("remux");
+
+  const manifest = {
+    version: 2,
+    items: [
+      { id: "ep1", name: "Show - 01.mkv", release: "Season 1" },
+    ],
+  };
+
+  tracker.populateFromInspection(manifest);
+  const card = tracker.cards.get("ep1");
+  assert.ok(card);
+  assert.equal(tracker.heartbeatTimer, null);
+
+  // 1. item_start -> indeterminate shimmer + ticking text + starts heartbeat
+  tracker.handleEvent({ version: 1, type: "batch_start", total: 1 });
+  tracker.handleEvent({ version: 1, type: "item_start", id: "ep1" });
+
+  assert.ok(card.el.className.includes("processing"));
+  assert.equal(card.badge.textContent, "PROCESSING");
+  assert.equal(card.fill.className, "ep-progress-fill indeterminate");
+  assert.equal(card.fill.style.width, "");
+  assert.match(card.statusTag.textContent, /^Processing \(\d+s\)$/);
+  assert.notEqual(tracker.heartbeatTimer, null);
+
+  // Tick heartbeat advances clock text
+  tracker.state.items.get("ep1").startTime = Date.now() - 5000;
+  tracker.tickHeartbeat();
+  assert.equal(card.statusTag.textContent, "Processing (5s)");
+
+  // 2. item_progress -> determinate width percentage
+  tracker.handleEvent({
+    version: 1,
+    type: "item_progress",
+    id: "ep1",
+    progress: 64.2,
+  });
+
+  assert.equal(card.fill.className, "ep-progress-fill");
+  assert.equal(card.fill.style.width, "64.2%");
+  assert.equal(card.statusTag.textContent, "64% (5s)");
+
+  // Tick heartbeat with progress still active
+  tracker.state.items.get("ep1").startTime = Date.now() - 12000;
+  tracker.tickHeartbeat();
+  assert.equal(card.statusTag.textContent, "64% (12s)");
+
+  // 3. item_complete -> green fill, Done in X.Xs, stops heartbeat
+  tracker.handleEvent({
+    version: 1,
+    type: "item_complete",
+    id: "ep1",
+    status: "completed",
+    duration_sec: 14.8,
+  });
+
+  assert.equal(card.el.className, "tokyo-ep-card completed");
+  assert.equal(card.badge.textContent, "COMPLETED");
+  assert.equal(card.fill.className, "ep-progress-fill green");
+  assert.equal(card.fill.style.width, "100%");
+  assert.equal(card.statusTag.textContent, "Done in 14.8s");
+  assert.equal(tracker.heartbeatTimer, null);
+});
+
+test("QueueTracker stops heartbeat on finalize, reset, startScan, restoreFromSnapshot, and populateFromInspection", t => {
+  setupMockEnvironment(t);
+  const tracker = new QueueTracker("remux");
+
+  const manifest = {
+    version: 2,
+    items: [{ id: "ep1", name: "01.mkv" }],
+  };
+
+  // 1. finalize stops heartbeat
+  tracker.populateFromInspection(manifest);
+  tracker.handleEvent({ version: 1, type: "item_start", id: "ep1" });
+  assert.notEqual(tracker.heartbeatTimer, null);
+  tracker.finalize(0);
+  assert.equal(tracker.heartbeatTimer, null);
+
+  // 2. reset stops heartbeat
+  tracker.populateFromInspection(manifest);
+  tracker.handleEvent({ version: 1, type: "item_start", id: "ep1" });
+  assert.notEqual(tracker.heartbeatTimer, null);
+  tracker.reset();
+  assert.equal(tracker.heartbeatTimer, null);
+
+  // 3. startScan stops heartbeat
+  tracker.populateFromInspection(manifest);
+  tracker.handleEvent({ version: 1, type: "item_start", id: "ep1" });
+  assert.notEqual(tracker.heartbeatTimer, null);
+  tracker.startScan();
+  assert.equal(tracker.heartbeatTimer, null);
+
+  // 4. restoreFromSnapshot stops previous heartbeat
+  tracker.populateFromInspection(manifest);
+  tracker.handleEvent({ version: 1, type: "item_start", id: "ep1" });
+  assert.notEqual(tracker.heartbeatTimer, null);
+  tracker.restoreFromSnapshot({
+    job_id: 1,
+    mode: "remux",
+    status: "completed",
+    items: {
+      ep1: { id: "ep1", file: "01.mkv", status: "completed", duration_sec: 4.5 },
+    },
+  });
+  assert.equal(tracker.heartbeatTimer, null);
+
+  // 5. populateFromInspection stops previous heartbeat
+  tracker.populateFromInspection(manifest);
+  tracker.handleEvent({ version: 1, type: "item_start", id: "ep1" });
+  assert.notEqual(tracker.heartbeatTimer, null);
+  tracker.populateFromInspection(manifest);
+  assert.equal(tracker.heartbeatTimer, null);
+});
+
+test("restoreFromSnapshot formats duration with formatOutcomeDuration (>60s minutes formatting)", t => {
+  setupMockEnvironment(t);
+  const tracker = new QueueTracker("remux");
+
+  const snapshot = {
+    job_id: 1,
+    mode: "remux",
+    status: "completed",
+    items: {
+      ep1: { id: "ep1", file: "01.mkv", status: "completed", duration_sec: 75.4 },
+    },
+  };
+
+  tracker.restoreFromSnapshot(snapshot);
+  const card1 = tracker.cards.get("ep1");
+  assert.equal(card1.tag2.textContent, "Done in 1m 15.4s");
+});
+
+test("QueueTracker renders <0.1s for instantaneous completed items with 0s duration", t => {
+  setupMockEnvironment(t);
+  const tracker = new QueueTracker("remux");
+
+  const manifest = {
+    version: 2,
+    items: [{ id: "ep1", name: "01.mkv" }],
+  };
+
+  tracker.populateFromInspection(manifest);
+  const card = tracker.cards.get("ep1");
+
+  tracker.handleEvent({
+    version: 1,
+    type: "item_complete",
+    id: "ep1",
+    status: "completed",
+    duration_sec: 0,
+  });
+
+  assert.equal(card.statusTag.textContent, "Done in <0.1s");
+});
+

@@ -1181,10 +1181,19 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
   height: 100%;
   background: var(--accent-gradient);
   border-radius: 3px;
+  transition: width 0.2s ease-out;
 }
 
 .ep-progress-fill.green {
   background: var(--success);
+}
+
+.ep-progress-fill.red {
+  background: var(--error);
+}
+
+.ep-progress-fill.grey {
+  background: var(--text-dim);
 }
 
 /* Honest indeterminate progress: shimmer sweep shown while a job is running
@@ -1192,6 +1201,7 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
    random-walk fake progress. */
 .ep-progress-fill.indeterminate {
   width: 40% !important;
+  transition: none !important;
   background: linear-gradient(90deg,
     transparent 0%,
     var(--accent-indigo) 40%,

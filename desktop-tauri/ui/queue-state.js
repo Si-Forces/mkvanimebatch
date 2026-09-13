@@ -51,6 +51,52 @@ function isTerminal(status) {
 }
 
 /**
+ * Format a duration outcome for display in cards and tags.
+ *
+ * @param {number|string|null|undefined} seconds
+ * @returns {string|null}
+ */
+export function formatOutcomeDuration(seconds) {
+  if (seconds == null) return null;
+  if (typeof seconds === "string") {
+    if (seconds.endsWith("s")) return seconds;
+    if (seconds.startsWith("<")) return `${seconds}s`;
+  }
+
+  const num = typeof seconds === "number" ? seconds : parseFloat(seconds);
+  if (Number.isNaN(num)) return null;
+
+  const rawSec = Math.max(0, num);
+  if (rawSec < 0.1) return "<0.1s";
+
+  const rounded = Math.round(rawSec * 10) / 10;
+  if (rounded < 60) {
+    return `${rounded.toFixed(1)}s`;
+  }
+
+  const mins = Math.floor(rounded / 60);
+  const secs = (rounded % 60).toFixed(1);
+  return `${mins}m ${secs}s`;
+}
+
+/**
+ * Format an elapsed seconds counter as an in-flight duration string (e.g. 5s, 1m 15s).
+ *
+ * @param {number} seconds
+ * @returns {string}
+ */
+export function formatElapsedDuration(seconds) {
+  let sec = Number(seconds);
+  if (Number.isNaN(sec) || sec < 0) {
+    sec = 0;
+  }
+  if (sec < 60) {
+    return `${Math.floor(sec)}s`;
+  }
+  return `${Math.floor(sec / 60)}m ${Math.floor(sec % 60)}s`;
+}
+
+/**
  * @param {InspectionManifest} manifest
  * @param {{mode?: string}} [options]
  */
@@ -151,7 +197,7 @@ export function createQueueStateFromSnapshot(snapshot, options = {}) {
       metadata: null,
       inspectionError: null,
       status: resolvedStatus,
-      startTime: null,
+      startTime: resolvedStatus === "processing" ? (options.now ?? Date.now()) : null,
       durationSec: snapItem.duration_sec ?? null,
       reason: snapItem.reason ?? null,
       error: snapItem.error ?? null,
@@ -245,7 +291,7 @@ export function reduceQueueEvent(state, event, now = Date.now()) {
       if (isTerminal(item.status)) return state;
 
       if (typeof event.progress === "number") {
-        item.progress = event.progress;
+        item.progress = Math.min(100, Math.max(0, event.progress));
       }
       if (typeof event.speed === "string") {
         item.speed = event.speed;
@@ -281,16 +327,18 @@ export function reduceQueueEvent(state, event, now = Date.now()) {
       // back to batch-elapsed time would report a meaningless number.
       // Items that had started still report how long they ran. Sub-second
       // jobs render as "<0.1" so fast extractions don't display as "0.0s".
-      const timed =
+      let dur = null;
+      if (event.duration_sec != null) {
+        const d = Number(event.duration_sec);
+        dur = Number.isNaN(d) ? null : Math.max(0, d);
+      } else if (
         item.startTime !== null &&
         (outcome.status === "completed" ||
          outcome.status === "error" ||
-         outcome.status === "cancelled");
-      const elapsedMs = timed ? now - item.startTime : null;
-      const dur =
-        elapsedMs === null ? null
-        : elapsedMs < 100 ? "<0.1"
-        : (elapsedMs / 1000).toFixed(1);
+         outcome.status === "cancelled")
+      ) {
+        dur = Math.max(0, (now - item.startTime) / 1000);
+      }
 
       item.durationSec = dur;
       item.reason = null;
