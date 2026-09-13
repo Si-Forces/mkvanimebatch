@@ -16,3 +16,7 @@ parking_lot = "0.12"
 tempfile = "3"
 tokio = { version = "1", features = ["sync", "rt-multi-thread", "process", "fs", "macros", "io-util", "time"] }
 tokio-util = "0.7"
+
+[[bench]]
+name = "bench_pipeline"
+harness = false

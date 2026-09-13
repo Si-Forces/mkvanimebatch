@@ -96,7 +96,8 @@ pub fn create_log_channel(buffer_size: usize) -> (LogSender, LogReceiver) {
     mpsc::channel(buffer_size)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum PipelineMode {
     Extract,
     Remux,
@@ -121,6 +122,8 @@ pub struct PipelineConfig {
     pub sub_offset: f64,
     pub keep_fonts: bool,
     pub sub_assignments: Option<HashMap<String, PathBuf>>,
+    /// Retained for forward-compatibility with multi-track remuxing (dialogue + signs/songs).
+    pub track_assignments: Option<Vec<crate::request::TrackAssignment>>,
 }
 
 impl Default for PipelineConfig {
@@ -142,51 +145,34 @@ impl Default for PipelineConfig {
             ffmpeg_threads: 2,
             sub_offset: 0.0,
             keep_fonts: false,
+            track_assignments: None,
             sub_assignments: None,
         }
     }
 }
 
-pub fn parse_sub_assignments_json(
-    json_str: &str,
-    input_dir: &Path,
-) -> Result<HashMap<String, PathBuf>, String> {
-    let parsed: serde_json::Value =
-        serde_json::from_str(json_str).map_err(|e| format!("Invalid assignments JSON: {e}"))?;
-    let mut map = HashMap::new();
-    let insert_entry = |map: &mut HashMap<String, PathBuf>, k: String, v: &str| {
-        let p = Path::new(v);
-        let resolved = if p.is_relative() {
-            input_dir.join(p)
-        } else {
-            p.to_path_buf()
-        };
-        map.insert(k, resolved);
-    };
-
-    if let Some(obj) = parsed.get("assignments").and_then(|v| v.as_object()) {
-        for (k, v) in obj {
-            if let Some(p) = v.as_str() {
-                insert_entry(&mut map, k.clone(), p);
-            }
-        }
-    } else if let Some(obj) = parsed.as_object() {
-        for (k, v) in obj {
-            if let Some(p) = v.as_str() {
-                insert_entry(&mut map, k.clone(), p);
-            }
-        }
-    }
-    Ok(map)
-}
-
-pub fn load_sub_assignments_file(
+pub fn load_track_assignments_file(
     path: &Path,
     input_dir: &Path,
 ) -> Result<HashMap<String, PathBuf>, String> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("Failed to read assignments file '{}': {e}", path.display()))?;
-    parse_sub_assignments_json(&content, input_dir)
+    let assignments = crate::request::parse_assignments_json(&content)?;
+    Ok(crate::request::assignments_to_sub_map(
+        &assignments,
+        input_dir,
+        None,
+    ))
+}
+
+/// Alias for `load_track_assignments_file` to maintain backwards compatibility while
+/// adhering to Track Assignment domain glossary (ADR-0008).
+#[deprecated(note = "Use load_track_assignments_file per ADR-0008 domain glossary")]
+pub fn load_sub_assignments_file(
+    path: &Path,
+    input_dir: &Path,
+) -> Result<HashMap<String, PathBuf>, String> {
+    load_track_assignments_file(path, input_dir)
 }
 
 impl PipelineConfig {
@@ -299,8 +285,16 @@ impl PipelineConfig {
                     }
                     config.complexity = complexity;
                 }
-                "--sub-assignments" => {
-                    let val = iter.next().ok_or("Missing value for --sub-assignments")?;
+                "--preset" => {
+                    let val = iter.next().ok_or("Missing value for --preset")?;
+                    let preset = crate::preset::lookup_preset(val.as_ref())
+                        .ok_or_else(|| format!("Unknown preset profile: '{}'", val.as_ref()))?;
+                    config.bitrate = preset.bitrate;
+                    config.complexity = preset.complexity;
+                    config.keep_fonts = preset.keep_fonts;
+                }
+                "--assignments" | "--sub-assignments" => {
+                    let val = iter.next().ok_or("Missing value for --assignments")?;
                     sub_assign_path = Some(PathBuf::from(val.as_ref()));
                 }
                 "--plan" | "--events" | "--clear-cache" | "-h" | "--help" => {}
@@ -311,7 +305,7 @@ impl PipelineConfig {
         }
 
         if let Some(path) = sub_assign_path {
-            config.sub_assignments = Some(load_sub_assignments_file(&path, &config.input_dir)?);
+            config.sub_assignments = Some(load_track_assignments_file(&path, &config.input_dir)?);
         }
 
         Ok(config)
@@ -359,6 +353,15 @@ impl BatchPipeline {
             log_sender: None,
             cancel_token,
         }
+    }
+
+    pub fn from_request(
+        request: crate::request::BatchRequest,
+        event_sender: Option<EventSender>,
+        cancel_token: CancellationToken,
+    ) -> Result<Self, String> {
+        let config = request.into_pipeline_config()?;
+        Ok(Self::new(config, event_sender, cancel_token))
     }
 
     pub fn with_log_sender(mut self, log_sender: Option<LogSender>) -> Self {

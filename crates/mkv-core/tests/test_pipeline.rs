@@ -69,6 +69,7 @@ async fn test_extract_dry_run_emits_planned_events() {
         sub_offset: 0.0,
         keep_fonts: false,
         sub_assignments: None,
+        ..Default::default()
     };
 
     let cancel_token = CancellationToken::new();
@@ -144,6 +145,7 @@ async fn test_extract_dry_run_preserves_nested_output_directory() {
         sub_offset: 0.0,
         keep_fonts: false,
         sub_assignments: None,
+        ..Default::default()
     };
 
     let cancel_token = CancellationToken::new();
@@ -210,6 +212,7 @@ async fn test_remux_dry_run_preserves_nested_output_directory() {
         sub_offset: 0.0,
         keep_fonts: false,
         sub_assignments: None,
+        ..Default::default()
     };
     let cancel_token = CancellationToken::new();
     let (event_sender, mut event_receiver) = create_event_channel(64);
@@ -281,6 +284,7 @@ async fn test_remux_skips_when_no_matching_subtitle() {
         sub_offset: 0.0,
         keep_fonts: false,
         sub_assignments: None,
+        ..Default::default()
     };
     let cancel_token = CancellationToken::new();
     let (event_sender, mut event_receiver) = create_event_channel(64);
@@ -332,6 +336,7 @@ async fn test_pipeline_cancellation_drains_items() {
         sub_offset: 0.0,
         keep_fonts: false,
         sub_assignments: None,
+        ..Default::default()
     };
 
     let cancel_token = CancellationToken::new();
@@ -503,4 +508,54 @@ async fn test_pipeline_with_log_sender() {
 
     assert!(!logs.is_empty());
     assert!(logs[0].contains("No MKV files found in"));
+}
+
+#[tokio::test]
+async fn test_pipeline_from_request_with_preset_and_overrides() {
+    let dir = tempdir().unwrap();
+    let req = mkv_core::request::BatchRequest {
+        mode: PipelineMode::Remux,
+        input_dir: dir.path().to_path_buf(),
+        out_dir: None,
+        fonts_dir: None,
+        assets_dir: None,
+        preset: Some("balanced".into()),
+        bitrate: Some("256k".into()),
+        complexity: None,
+        workers: Some(6),
+        io_jobs: None,
+        ffmpeg_threads: None,
+        sub_offset: None,
+        keep_fonts: None,
+        dry_run: Some(true),
+        no_cache: None,
+        assignments: None,
+    };
+
+    assert!(req.validate().is_ok());
+
+    let cancel_token = CancellationToken::new();
+    let pipeline = BatchPipeline::from_request(req, None, cancel_token).unwrap();
+    assert_eq!(pipeline.config.bitrate, "256k"); // overridden from 192k
+    assert_eq!(pipeline.config.complexity, 5); // baseline from balanced
+    assert!(pipeline.config.keep_fonts); // baseline from balanced
+    assert_eq!(pipeline.config.workers, 6);
+    assert!(pipeline.config.dry_run);
+}
+
+#[test]
+fn test_pipeline_config_from_args_preset() {
+    let config = PipelineConfig::from_args([
+        "--input-dir",
+        "/tmp",
+        "--preset",
+        "fast",
+        "--bitrate",
+        "160k",
+    ])
+    .unwrap();
+
+    assert_eq!(config.bitrate, "160k"); // overridden
+    assert_eq!(config.complexity, 5); // from fast preset
+    assert!(!config.keep_fonts); // from fast preset
 }

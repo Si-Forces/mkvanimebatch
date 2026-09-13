@@ -6,6 +6,8 @@ import {
   finalizeQueueState,
   carryOverAssignments,
   serializeAssignmentsForManifest,
+  buildTrackAssignmentsForManifest,
+  createQueueStateFromSnapshot,
 } from "./queue-state.js";
 
 test("createQueueState initializes state from manifest v2", () => {
@@ -573,3 +575,159 @@ test("item transitioning directly from queued to error leaves durationSec as nul
   assert.equal(state.items.get("ep2.mkv").durationSec, "2.5");
   assert.equal(state.errorCount, 2);
 });
+
+test("buildTrackAssignmentsForManifest builds track assignments from carried over manual assignments", () => {
+  const manifest = {
+    version: 2,
+    items: [
+      { id: "Season 1/ep1.mkv", name: "ep1.mkv" },
+      { id: "Season 1/ep2.mkv", name: "ep2.mkv" },
+    ],
+  };
+  const assignments = new Map([
+    ["Season 1/ep1.mkv", "/subs/ep1.ass"],
+    ["Season 1/ep2.mkv", "/subs/ep2.ass"],
+  ]);
+
+  const result = buildTrackAssignmentsForManifest(assignments, manifest);
+  assert.deepEqual(result, [
+    {
+      target_video: "Season 1/ep1.mkv",
+      asset_path: "/subs/ep1.ass",
+      track_type: "subtitle",
+    },
+    {
+      target_video: "Season 1/ep2.mkv",
+      asset_path: "/subs/ep2.ass",
+      track_type: "subtitle",
+    },
+  ]);
+});
+
+test("buildTrackAssignmentsForManifest returns null when assignments map is empty", () => {
+  const manifest = {
+    version: 2,
+    items: [{ id: "ep1.mkv", name: "ep1.mkv" }],
+  };
+  const assignments = new Map();
+
+  const result = buildTrackAssignmentsForManifest(assignments, manifest);
+  assert.equal(result, null);
+});
+
+test("buildTrackAssignmentsForManifest ignores assignments for items not in the manifest", () => {
+  const manifest = {
+    version: 2,
+    items: [{ id: "ep1.mkv", name: "ep1.mkv" }],
+  };
+  const assignments = new Map([
+    ["ep1.mkv", "/subs/ep1.ass"],
+    ["deleted_ep2.mkv", "/subs/ep2.ass"],
+  ]);
+
+  const result = buildTrackAssignmentsForManifest(assignments, manifest);
+  assert.deepEqual(result, [
+    {
+      target_video: "ep1.mkv",
+      asset_path: "/subs/ep1.ass",
+      track_type: "subtitle",
+    },
+  ]);
+
+  const orphanedAssignments = new Map([
+    ["orphaned.mkv", "/subs/orphaned.ass"],
+  ]);
+  assert.equal(buildTrackAssignmentsForManifest(orphanedAssignments, manifest), null);
+});
+
+test("createQueueStateFromSnapshot constructs state and counts from JobSnapshot", () => {
+  const snapshot = {
+    job_id: 42,
+    mode: "extract",
+    status: "completed",
+    start_time_ms: 123456789,
+    items: {
+      "ep1.mkv": { id: "ep1.mkv", file: "Show - 01.mkv", status: "completed", duration_sec: 5.4 },
+      "ep2.mkv": { id: "ep2.mkv", file: "Show - 02.mkv", status: "skipped", reason: "Already extracted" },
+      "ep3.mkv": { id: "ep3.mkv", file: "Show - 03.mkv", status: "cancelled", reason: "Cancelled by user" },
+      "ep4.mkv": { id: "ep4.mkv", file: "Show - 04.mkv", status: "error", error: "mkvextract failed" },
+    },
+  };
+
+  const state = createQueueStateFromSnapshot(snapshot);
+  assert.equal(state.version, 1);
+  assert.equal(state.mode, "extract");
+  assert.equal(state.totalCount, 4);
+  assert.equal(state.completedCount, 1);
+  assert.equal(state.skippedCount, 1);
+  assert.equal(state.cancelledCount, 1);
+  assert.equal(state.errorCount, 1);
+  assert.equal(state.batchCompleted, true);
+  assert.equal(state.batchSuccess, true);
+  assert.equal(state.batchCancelled, false);
+  assert.equal(state.items.get("ep1.mkv").durationSec, 5.4);
+  assert.equal(state.items.get("ep2.mkv").reason, "Already extracted");
+  assert.equal(state.items.get("ep4.mkv").error, "mkvextract failed");
+});
+
+test("createQueueStateFromSnapshot handles empty or null snapshots", () => {
+  const stateNull = createQueueStateFromSnapshot(null);
+  assert.equal(stateNull.totalCount, 0);
+  assert.equal(stateNull.items.size, 0);
+
+  const stateEmpty = createQueueStateFromSnapshot({});
+  assert.equal(stateEmpty.totalCount, 0);
+});
+
+test("createQueueStateFromSnapshot resolves in-flight processing and queued items to cancelled for cancelled snapshot", () => {
+  const snapshot = {
+    job_id: 101,
+    mode: "remux",
+    status: "cancelled",
+    start_time_ms: 123456789,
+    items: {
+      "ep1.mkv": { id: "ep1.mkv", file: "Show - 01.mkv", status: "completed", duration_sec: 4.2 },
+      "ep2.mkv": { id: "ep2.mkv", file: "Show - 02.mkv", status: "processing" },
+      "ep3.mkv": { id: "ep3.mkv", file: "Show - 03.mkv", status: "queued" },
+    },
+  };
+
+  const state = createQueueStateFromSnapshot(snapshot);
+  assert.equal(state.batchCompleted, true);
+  assert.equal(state.batchCancelled, true);
+  assert.equal(state.batchSuccess, false);
+  assert.equal(state.totalCount, 3);
+  assert.equal(state.completedCount, 1);
+  assert.equal(state.cancelledCount, 2);
+  assert.equal(state.errorCount, 0);
+  assert.equal(state.items.get("ep1.mkv").status, "completed");
+  assert.equal(state.items.get("ep2.mkv").status, "cancelled");
+  assert.equal(state.items.get("ep3.mkv").status, "cancelled");
+});
+
+test("createQueueStateFromSnapshot resolves in-flight processing and queued items to error for error snapshot", () => {
+  const snapshot = {
+    job_id: 102,
+    mode: "extract",
+    status: "error",
+    start_time_ms: 123456789,
+    items: {
+      "ep1.mkv": { id: "ep1.mkv", file: "Show - 01.mkv", status: "completed", duration_sec: 5.0 },
+      "ep2.mkv": { id: "ep2.mkv", file: "Show - 02.mkv", status: "processing" },
+      "ep3.mkv": { id: "ep3.mkv", file: "Show - 03.mkv", status: "queued" },
+    },
+  };
+
+  const state = createQueueStateFromSnapshot(snapshot);
+  assert.equal(state.batchCompleted, true);
+  assert.equal(state.batchCancelled, false);
+  assert.equal(state.batchSuccess, false);
+  assert.equal(state.totalCount, 3);
+  assert.equal(state.completedCount, 1);
+  assert.equal(state.cancelledCount, 0);
+  assert.equal(state.errorCount, 2);
+  assert.equal(state.items.get("ep1.mkv").status, "completed");
+  assert.equal(state.items.get("ep2.mkv").status, "error");
+  assert.equal(state.items.get("ep3.mkv").status, "error");
+});
+
