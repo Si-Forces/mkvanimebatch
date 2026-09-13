@@ -59,7 +59,7 @@ fn process_exists(pid: u32) -> bool {
 pub struct JobSlot {
     pub(crate) id: u64,
     pub(crate) cancel_token: tokio_util::sync::CancellationToken,
-    pub(crate) task_handle: tokio::task::JoinHandle<()>,
+    pub(crate) task_handle: tauri::async_runtime::JoinHandle<()>,
     pub(crate) stopping: bool,
 }
 
@@ -1002,16 +1002,10 @@ mod job_tests {
     use std::sync::Arc;
 
     pub(crate) fn dummy_slot(id: u64, stopping: bool) -> JobSlot {
-        static RT: std::sync::LazyLock<tokio::runtime::Runtime> = std::sync::LazyLock::new(|| {
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .unwrap()
-        });
         JobSlot {
             id,
             cancel_token: tokio_util::sync::CancellationToken::new(),
-            task_handle: RT.spawn(async {}),
+            task_handle: tauri::async_runtime::spawn(async {}),
             stopping,
         }
     }
