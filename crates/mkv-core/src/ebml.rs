@@ -448,19 +448,22 @@ fn parse_track_entry<R: Read + Seek>(reader: &mut R, len: u64) -> Result<MkvTrac
                 }
             }
             ID_AUDIO => {
+                let mut explicit_channels: Option<u32> = None;
                 let a_end = reader.stream_position()? + child_len;
                 while reader.stream_position()? < a_end {
                     let aud_child = read_element_id(reader)?;
                     let aud_len = read_vint_length(reader)?;
                     match aud_child {
                         ID_CHANNELS => {
-                            channels = Some(read_uint(reader, aud_len)? as u32);
+                            explicit_channels = Some(read_uint(reader, aud_len)? as u32);
                         }
                         _ => {
                             seek_forward(reader, aud_len)?;
                         }
                     }
                 }
+                // Matroska spec RFC 9559 §21.1: Channels defaults to 1 when omitted.
+                channels = Some(explicit_channels.unwrap_or(1));
             }
             _ => {
                 seek_forward(reader, child_len)?;
@@ -604,5 +607,36 @@ mod tests {
         let mut cur6 = Cursor::new(&buf6);
         let track6 = parse_track_entry(&mut cur6, buf6.len() as u64).unwrap();
         assert_eq!(track6.properties.language, None);
+    }
+
+    fn make_audio_track_buf(audio_block: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        // TrackType = 2 (audio) -> 0x83, 0x81, 0x02
+        buf.extend_from_slice(&[0x83, 0x81, 0x02]);
+        buf.extend_from_slice(audio_block);
+        buf
+    }
+
+    #[test]
+    fn test_audio_channels_spec_default() {
+        // 1. Audio track with ID_AUDIO but omitted ID_CHANNELS: must default to Some(1) per RFC 9559 §21.1
+        // ID_AUDIO (0xE1), len 0 (0x80)
+        let buf_mono = make_audio_track_buf(&[0xE1, 0x80]);
+        let mut cur_mono = Cursor::new(&buf_mono);
+        let track_mono = parse_track_entry(&mut cur_mono, buf_mono.len() as u64).unwrap();
+        assert_eq!(track_mono.properties.audio_channels, Some(1));
+
+        // 2. Audio track with explicit ID_CHANNELS = 2: must parse as Some(2)
+        // ID_AUDIO (0xE1), len 3 (0x83): ID_CHANNELS (0x9F), len 1 (0x81), value 2 (0x02)
+        let buf_stereo = make_audio_track_buf(&[0xE1, 0x83, 0x9F, 0x81, 0x02]);
+        let mut cur_stereo = Cursor::new(&buf_stereo);
+        let track_stereo = parse_track_entry(&mut cur_stereo, buf_stereo.len() as u64).unwrap();
+        assert_eq!(track_stereo.properties.audio_channels, Some(2));
+
+        // 3. Non-audio track (e.g. subtitle, no ID_AUDIO): must remain None
+        let buf_sub = make_track_buf(None, None);
+        let mut cur_sub = Cursor::new(&buf_sub);
+        let track_sub = parse_track_entry(&mut cur_sub, buf_sub.len() as u64).unwrap();
+        assert_eq!(track_sub.properties.audio_channels, None);
     }
 }
