@@ -7,5 +7,7 @@ pub mod extract;
 pub mod fonts;
 pub mod manifest;
 pub mod pipeline;
+pub mod preset;
 pub mod remux;
+pub mod request;
 pub mod scan;

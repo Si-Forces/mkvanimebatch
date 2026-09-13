@@ -21,5 +21,9 @@ The structured document consumed by the UI to hydrate the queue and display cand
 _Avoid_: Execution plan, dry run report
 
 **Preset Profile**:
-A saved configuration bundle of audio transcoding bitrates, complexity settings, and naming options selected by the user.
+A named audio and pipeline configuration queried from the Media Engine and applied in the desktop GUI.
 _Avoid_: Config preset, setting template
+
+**Job Snapshot**:
+The in-memory projection maintained in real-time by the Engine Bridge from Job Events, summarizing active or last-completed batch execution, manifest items, and terminal outcomes across UI reloads.
+_Avoid_: Job state, queue cache, execution status

@@ -61,6 +61,7 @@ pub fn run() {
             run_job,
             stop_job,
             clear_cache,
+            pick_directory,
             pick_folder,
             inspect_directory,
             get_system_telemetry,
@@ -71,6 +72,8 @@ pub fn run() {
             start_drag,
             start_resize,
             set_window_theme,
+            get_preset_profiles,
+            get_job_snapshot,
         ])
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {

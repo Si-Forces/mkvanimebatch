@@ -4,19 +4,32 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use mkv_core::manifest::generate_inspection_manifest;
-use mkv_core::pipeline::{
-    create_event_channel, BatchPipeline, CancellationToken, PipelineConfig, PipelineMode,
-};
+use mkv_core::pipeline::{create_event_channel, BatchPipeline, CancellationToken, PipelineMode};
+use mkv_core::request::{parse_assignments_json, BatchRequest};
 use mkv_core::scan::PersistentInspectCache;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, PartialEq)]
 struct CliArgs {
-    config: PipelineConfig,
+    request: BatchRequest,
     plan: bool,
     events: bool,
     clear_cache: bool,
     help: bool,
     has_input_dir: bool,
+}
+
+#[allow(clippy::derivable_impls)]
+impl Default for CliArgs {
+    fn default() -> Self {
+        Self {
+            request: BatchRequest::default(),
+            plan: false,
+            events: false,
+            clear_cache: false,
+            help: false,
+            has_input_dir: false,
+        }
+    }
 }
 
 fn parse_args() -> Result<CliArgs, String> {
@@ -31,7 +44,7 @@ fn parse_args() -> Result<CliArgs, String> {
         })
         .unwrap_or_default();
     if exe_name.contains("mkv-extract") {
-        args.config.mode = PipelineMode::Extract;
+        args.request.mode = PipelineMode::Extract;
     }
 
     Ok(args)
@@ -43,12 +56,15 @@ where
     T: AsRef<str>,
 {
     let raw_args: Vec<String> = iter.into_iter().map(|s| s.as_ref().to_string()).collect();
+    let mut request = BatchRequest::default();
 
     let mut plan = false;
     let mut events = false;
     let mut clear_cache = false;
     let mut help = false;
     let mut has_input_dir = false;
+    let mut assignments_path: Option<PathBuf> = None;
+    let bitrate_re = regex::Regex::new(r"^(\d+)(k|M)?$").unwrap();
 
     let mut it = raw_args.iter();
     while let Some(arg) = it.next() {
@@ -58,22 +74,108 @@ where
             "--clear-cache" => clear_cache = true,
             "-h" | "--help" => help = true,
             "--input-dir" => {
+                let val = it.next().ok_or("Missing value for --input-dir")?;
+                request.input_dir = PathBuf::from(val);
                 has_input_dir = true;
-                let _ = it.next();
             }
-            "--out-dir" | "--fonts-dir" | "--assets-dir" | "--sub-offset" | "--workers"
-            | "--io-jobs" | "--ffmpeg-threads" | "--bitrate" | "--complexity"
-            | "--sub-assignments" => {
-                let _ = it.next();
+            "--out-dir" => {
+                let val = it.next().ok_or("Missing value for --out-dir")?;
+                request.out_dir = Some(PathBuf::from(val));
             }
-            _ => {}
+            "--fonts-dir" => {
+                let val = it.next().ok_or("Missing value for --fonts-dir")?;
+                request.fonts_dir = Some(PathBuf::from(val));
+            }
+            "--assets-dir" => {
+                let val = it.next().ok_or("Missing value for --assets-dir")?;
+                request.assets_dir = Some(PathBuf::from(val));
+            }
+            "--preset" => {
+                let val = it.next().ok_or("Missing value for --preset")?;
+                if mkv_core::preset::lookup_preset(val).is_none() {
+                    return Err(format!("Unknown preset profile: '{val}'"));
+                }
+                request.preset = Some(val.clone());
+            }
+            "--assignments" | "--sub-assignments" => {
+                let val = it.next().ok_or("Missing value for --assignments")?;
+                assignments_path = Some(PathBuf::from(val));
+            }
+            "--extract" => {
+                request.mode = PipelineMode::Extract;
+            }
+            "--remux" => {
+                request.mode = PipelineMode::Remux;
+            }
+            "--dry-run" => {
+                request.dry_run = Some(true);
+            }
+            "--no-cache" => {
+                request.no_cache = Some(true);
+            }
+            "--keep-fonts" => {
+                request.keep_fonts = Some(true);
+            }
+            "--sub-offset" => {
+                let val = it.next().ok_or("Missing value for --sub-offset")?;
+                let offset: f64 = val.parse().map_err(|_| "Invalid number for --sub-offset")?;
+                request.sub_offset = Some(offset);
+            }
+            "--workers" => {
+                let val = it.next().ok_or("Missing value for --workers")?;
+                let workers: usize = val.parse().map_err(|_| "Invalid integer for --workers")?;
+                request.workers = Some(workers);
+            }
+            "--io-jobs" => {
+                let val = it.next().ok_or("Missing value for --io-jobs")?;
+                let io_jobs: usize = val.parse().map_err(|_| "Invalid integer for --io-jobs")?;
+                request.io_jobs = Some(io_jobs);
+            }
+            "--ffmpeg-threads" => {
+                let val = it.next().ok_or("Missing value for --ffmpeg-threads")?;
+                let threads: usize = val
+                    .parse()
+                    .map_err(|_| "Invalid integer for --ffmpeg-threads")?;
+                request.ffmpeg_threads = Some(threads);
+            }
+            "--bitrate" => {
+                let val = it.next().ok_or("Missing value for --bitrate")?;
+                let err_msg = format!(
+                    "Invalid bitrate format: '{val}'. Must be a positive value like 128k, 192k, 1M."
+                );
+                match bitrate_re.captures(val) {
+                    Some(caps) => {
+                        let num: u64 = caps.get(1).map_or("", |m| m.as_str()).parse().unwrap_or(0);
+                        if num == 0 {
+                            return Err(err_msg);
+                        }
+                    }
+                    None => return Err(err_msg),
+                }
+                request.bitrate = Some(val.clone());
+            }
+            "--complexity" => {
+                let val = it.next().ok_or("Missing value for --complexity")?;
+                let complexity: u32 = val
+                    .parse()
+                    .map_err(|_| "Invalid integer for --complexity")?;
+                request.complexity = Some(complexity);
+            }
+            other => {
+                return Err(format!("Unknown argument: {other}"));
+            }
         }
     }
 
-    let config = PipelineConfig::from_args(&raw_args)?;
+    if let Some(path) = assignments_path {
+        let content = std::fs::read_to_string(&path)
+            .map_err(|e| format!("Failed to read assignments file '{}': {e}", path.display()))?;
+        let assignments = parse_assignments_json(&content)?;
+        request.assignments = Some(assignments);
+    }
 
     Ok(CliArgs {
-        config,
+        request,
         plan,
         events,
         clear_cache,
@@ -92,7 +194,9 @@ USAGE:
 OPTIONS:
     --input-dir <DIR>          Source directory containing anime video releases
     --out-dir <DIR>            Destination output directory for processed files
-    --sub-assignments <FILE>   Path to JSON file mapping episode IDs to subtitle paths
+    --preset <PROFILE>         Preset profile (balanced, fast, hifi, custom)
+    --assignments <FILE>       Path to JSON file mapping episode IDs to track paths
+    --sub-assignments <FILE>   Legacy alias for --assignments
     --fonts-dir <DIR>          Explicit fonts directory override
     --assets-dir <DIR>         Fallback asset directory
     --plan                     Generate structured inspection manifest JSON for queue hydration
@@ -151,12 +255,7 @@ async fn run() -> Result<ExitCode, String> {
         return Err("--input-dir is required.".into());
     }
 
-    if !args.config.input_dir.exists() {
-        return Err(format!(
-            "Input directory does not exist: {}",
-            args.config.input_dir.display()
-        ));
-    }
+    args.request.validate()?;
 
     let cancel_token = CancellationToken::new();
     let cancel_token_clone = cancel_token.clone();
@@ -195,7 +294,7 @@ async fn run() -> Result<ExitCode, String> {
         }
     });
 
-    let cache_opt = if args.config.no_cache {
+    let cache_opt = if args.request.no_cache.unwrap_or(false) {
         None
     } else {
         Some(&cache)
@@ -203,7 +302,7 @@ async fn run() -> Result<ExitCode, String> {
 
     if args.plan {
         let manifest =
-            generate_inspection_manifest(&args.config.input_dir, cache_opt, Some(&cancel_token))?;
+            generate_inspection_manifest(&args.request.input_dir, cache_opt, Some(&cancel_token))?;
         match serde_json::to_string_pretty(&manifest) {
             Ok(json) => {
                 println!("{json}");
@@ -229,7 +328,7 @@ async fn run() -> Result<ExitCode, String> {
         (None, None)
     };
 
-    let pipeline = BatchPipeline::new(args.config, event_sender, cancel_token.clone());
+    let pipeline = BatchPipeline::from_request(args.request, event_sender, cancel_token.clone())?;
 
     let result = pipeline.run().await;
     drop(pipeline);
@@ -280,32 +379,178 @@ mod tests {
 
     #[test]
     fn test_complexity_validation() {
-        assert!(parse_args_from(["--complexity", "11"]).is_err());
-        assert!(parse_args_from(["--complexity", "0"]).is_ok());
-        assert!(parse_args_from(["--complexity", "10"]).is_ok());
+        assert!(parse_args_from(["--complexity", "invalid"]).is_err());
+        assert_eq!(
+            parse_args_from(["--complexity", "11"])
+                .unwrap()
+                .request
+                .complexity,
+            Some(11)
+        );
+        assert_eq!(
+            parse_args_from(["--complexity", "0"])
+                .unwrap()
+                .request
+                .complexity,
+            Some(0)
+        );
+        assert_eq!(
+            parse_args_from(["--complexity", "10"])
+                .unwrap()
+                .request
+                .complexity,
+            Some(10)
+        );
     }
 
     #[test]
     fn test_workers_validation() {
-        assert!(parse_args_from(["--workers", "0"]).is_err());
-        assert!(parse_args_from(["--workers", "65"]).is_err());
-        assert!(parse_args_from(["--workers", "4"]).is_ok());
-        assert!(parse_args_from(["--workers", "64"]).is_ok());
+        assert!(parse_args_from(["--workers", "invalid"]).is_err());
+        assert_eq!(
+            parse_args_from(["--workers", "0"]).unwrap().request.workers,
+            Some(0)
+        );
+        assert_eq!(
+            parse_args_from(["--workers", "65"])
+                .unwrap()
+                .request
+                .workers,
+            Some(65)
+        );
+        assert_eq!(
+            parse_args_from(["--workers", "4"]).unwrap().request.workers,
+            Some(4)
+        );
+        assert_eq!(
+            parse_args_from(["--workers", "64"])
+                .unwrap()
+                .request
+                .workers,
+            Some(64)
+        );
     }
 
     #[test]
     fn test_io_jobs_validation() {
-        assert!(parse_args_from(["--io-jobs", "65"]).is_err());
-        assert!(parse_args_from(["--io-jobs", "0"]).is_ok());
-        assert!(parse_args_from(["--io-jobs", "64"]).is_ok());
+        assert!(parse_args_from(["--io-jobs", "invalid"]).is_err());
+        assert_eq!(
+            parse_args_from(["--io-jobs", "65"])
+                .unwrap()
+                .request
+                .io_jobs,
+            Some(65)
+        );
+        assert_eq!(
+            parse_args_from(["--io-jobs", "0"]).unwrap().request.io_jobs,
+            Some(0)
+        );
+        assert_eq!(
+            parse_args_from(["--io-jobs", "64"])
+                .unwrap()
+                .request
+                .io_jobs,
+            Some(64)
+        );
     }
 
     #[test]
     fn test_ffmpeg_threads_validation() {
-        assert!(parse_args_from(["--ffmpeg-threads", "0"]).is_err());
-        assert!(parse_args_from(["--ffmpeg-threads", "33"]).is_err());
-        assert!(parse_args_from(["--ffmpeg-threads", "1"]).is_ok());
-        assert!(parse_args_from(["--ffmpeg-threads", "32"]).is_ok());
+        assert!(parse_args_from(["--ffmpeg-threads", "invalid"]).is_err());
+        assert_eq!(
+            parse_args_from(["--ffmpeg-threads", "0"])
+                .unwrap()
+                .request
+                .ffmpeg_threads,
+            Some(0)
+        );
+        assert_eq!(
+            parse_args_from(["--ffmpeg-threads", "33"])
+                .unwrap()
+                .request
+                .ffmpeg_threads,
+            Some(33)
+        );
+        assert_eq!(
+            parse_args_from(["--ffmpeg-threads", "1"])
+                .unwrap()
+                .request
+                .ffmpeg_threads,
+            Some(1)
+        );
+        assert_eq!(
+            parse_args_from(["--ffmpeg-threads", "32"])
+                .unwrap()
+                .request
+                .ffmpeg_threads,
+            Some(32)
+        );
+    }
+
+    #[test]
+    fn test_cli_request_boundary_validation_deferred() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("mkv_cli_test_bounds_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+
+        let mut args =
+            parse_args_from(["--input-dir", temp_dir.to_str().unwrap(), "--workers", "0"]).unwrap();
+        assert_eq!(
+            args.request.validate().unwrap_err(),
+            "Worker thread count must be between 1 and 64"
+        );
+
+        args = parse_args_from(["--input-dir", temp_dir.to_str().unwrap(), "--workers", "65"])
+            .unwrap();
+        assert_eq!(
+            args.request.validate().unwrap_err(),
+            "Worker thread count must be between 1 and 64"
+        );
+
+        args = parse_args_from(["--input-dir", temp_dir.to_str().unwrap(), "--io-jobs", "65"])
+            .unwrap();
+        assert_eq!(
+            args.request.validate().unwrap_err(),
+            "I/O job count must be between 0 and 64"
+        );
+
+        args = parse_args_from([
+            "--input-dir",
+            temp_dir.to_str().unwrap(),
+            "--ffmpeg-threads",
+            "0",
+        ])
+        .unwrap();
+        assert_eq!(
+            args.request.validate().unwrap_err(),
+            "FFmpeg thread count must be between 1 and 32"
+        );
+
+        args = parse_args_from([
+            "--input-dir",
+            temp_dir.to_str().unwrap(),
+            "--ffmpeg-threads",
+            "33",
+        ])
+        .unwrap();
+        assert_eq!(
+            args.request.validate().unwrap_err(),
+            "FFmpeg thread count must be between 1 and 32"
+        );
+
+        args = parse_args_from([
+            "--input-dir",
+            temp_dir.to_str().unwrap(),
+            "--complexity",
+            "11",
+        ])
+        .unwrap();
+        assert!(args
+            .request
+            .validate()
+            .unwrap_err()
+            .contains("Encoder complexity must be between 0 and 10"));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
@@ -321,11 +566,11 @@ mod tests {
         .unwrap();
 
         assert!(parsed.has_input_dir);
-        assert_eq!(parsed.config.input_dir, PathBuf::from("/tmp/anime"));
+        assert_eq!(parsed.request.input_dir, PathBuf::from("/tmp/anime"));
         assert!(parsed.plan);
         assert!(parsed.events);
         assert!(parsed.clear_cache);
-        assert_eq!(parsed.config.mode, PipelineMode::Extract);
+        assert_eq!(parsed.request.mode, PipelineMode::Extract);
     }
 
     #[test]
@@ -340,5 +585,120 @@ mod tests {
     #[test]
     fn test_unknown_flag() {
         assert!(parse_args_from(["--unknown-flag"]).is_err());
+    }
+
+    #[test]
+    fn test_preset_parsing() {
+        let parsed = parse_args_from(["--preset", "balanced"]).unwrap();
+        assert_eq!(parsed.request.preset.as_deref(), Some("balanced"));
+
+        let parsed_fast = parse_args_from(["--preset", "fast"]).unwrap();
+        assert_eq!(parsed_fast.request.preset.as_deref(), Some("fast"));
+
+        assert!(parse_args_from(["--preset", "unknown_profile"]).is_err());
+    }
+
+    #[test]
+    fn test_assignments_parsing() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("mkv_cli_test_assign_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let assign_file = temp_dir.join("assignments.json");
+        std::fs::write(
+            &assign_file,
+            r#"[{"target_video": "ep01.mkv", "asset_path": "ep01.ass"}]"#,
+        )
+        .unwrap();
+
+        let parsed = parse_args_from([
+            "--input-dir",
+            temp_dir.to_str().unwrap(),
+            "--assignments",
+            assign_file.to_str().unwrap(),
+        ])
+        .unwrap();
+
+        let assignments = parsed.request.assignments.expect("should have assignments");
+        assert_eq!(assignments.len(), 1);
+        assert_eq!(assignments[0].target_video, "ep01.mkv");
+        assert_eq!(assignments[0].asset_path, PathBuf::from("ep01.ass"));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_sub_assignments_legacy_flag_parsing() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("mkv_cli_test_sub_assign_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let assign_file = temp_dir.join("subs.json");
+        std::fs::write(&assign_file, r#"{"ep01.mkv": "ep01.ass"}"#).unwrap();
+
+        let parsed = parse_args_from([
+            "--input-dir",
+            temp_dir.to_str().unwrap(),
+            "--sub-assignments",
+            assign_file.to_str().unwrap(),
+        ])
+        .unwrap();
+
+        let assignments = parsed.request.assignments.expect("should have assignments");
+        assert_eq!(assignments.len(), 1);
+        assert_eq!(assignments[0].target_video, "ep01.mkv");
+        assert_eq!(assignments[0].asset_path, PathBuf::from("ep01.ass"));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_request_validate_preflight() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("mkv_cli_test_preflight_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let video_file = temp_dir.join("ep01.mkv");
+        std::fs::write(&video_file, b"dummy video").unwrap();
+        let sub_file = temp_dir.join("ep01.ass");
+        std::fs::write(&sub_file, b"dummy subtitle").unwrap();
+
+        let assign_file = temp_dir.join("assignments.json");
+        std::fs::write(
+            &assign_file,
+            r#"[{"target_video": "ep01.mkv", "asset_path": "ep01.ass"}]"#,
+        )
+        .unwrap();
+
+        let parsed = parse_args_from([
+            "--input-dir",
+            temp_dir.to_str().unwrap(),
+            "--assignments",
+            assign_file.to_str().unwrap(),
+            "--preset",
+            "fast",
+            "--workers",
+            "4",
+        ])
+        .unwrap();
+
+        assert!(parsed.request.validate().is_ok());
+
+        // If assigned target file is missing, validation fails fast
+        let assign_missing_file = temp_dir.join("assignments_missing.json");
+        std::fs::write(
+            &assign_missing_file,
+            r#"[{"target_video": "missing.mkv", "asset_path": "ep01.ass"}]"#,
+        )
+        .unwrap();
+
+        let parsed_missing = parse_args_from([
+            "--input-dir",
+            temp_dir.to_str().unwrap(),
+            "--assignments",
+            assign_missing_file.to_str().unwrap(),
+        ])
+        .unwrap();
+
+        assert!(parsed_missing.request.validate().is_err());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

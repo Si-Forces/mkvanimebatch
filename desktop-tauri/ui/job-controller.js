@@ -1,20 +1,47 @@
-import { serializeAssignmentsForManifest } from "./queue-state.js";
+import { buildTrackAssignmentsForManifest } from "./queue-state.js";
 
 
-export function extractInspectionOptions(args) {
+export function extractInspectionOptions(argsOrRequest) {
   const options = {};
-  for (const [flag, key, minimum] of [["--workers", "workers", 1], ["--io-jobs", "ioJobs", 0]]) {
-    const index = args.indexOf(flag);
-    if (index === -1) continue;
-    const raw = args[index + 1];
-    const value = Number(raw);
-    if (!/^\+?\d+$/.test(raw ?? "") || !Number.isInteger(value) || value < minimum || value > 64) {
-      return { error: `Invalid ${flag.slice(2)} value '${raw}': must be an integer between ${minimum} and 64.` };
+
+  if (Array.isArray(argsOrRequest)) {
+    const args = argsOrRequest;
+    for (const [flag, key, minimum] of [["--workers", "workers", 1], ["--io-jobs", "ioJobs", 0]]) {
+      const index = args.indexOf(flag);
+      if (index === -1) continue;
+      const raw = args[index + 1];
+      const value = Number(raw);
+      if (!/^\+?\d+$/.test(raw ?? "") || !Number.isInteger(value) || value < minimum || value > 64) {
+        return { error: `Invalid ${flag.slice(2)} value '${raw}': must be an integer between ${minimum} and 64.` };
+      }
+      options[key] = value;
     }
-    options[key] = value;
+
+    if (args.includes("--no-cache")) {
+      options.noCache = true;
+    }
+
+    return { options };
   }
 
-  if (args.includes("--no-cache")) {
+  const batchRequest = argsOrRequest || {};
+  if (batchRequest.workers !== null && batchRequest.workers !== undefined) {
+    const w = batchRequest.workers;
+    if (typeof w !== "number" || !Number.isInteger(w) || w < 1 || w > 64) {
+      return { error: `Invalid workers value '${w}': must be an integer between 1 and 64.` };
+    }
+    options.workers = w;
+  }
+
+  if (batchRequest.io_jobs !== null && batchRequest.io_jobs !== undefined) {
+    const j = batchRequest.io_jobs;
+    if (typeof j !== "number" || !Number.isInteger(j) || j < 0 || j > 64) {
+      return { error: `Invalid io-jobs value '${j}': must be an integer between 0 and 64.` };
+    }
+    options.ioJobs = j;
+  }
+
+  if (batchRequest.no_cache) {
     options.noCache = true;
   }
 
@@ -83,33 +110,76 @@ export class JobController {
     this.runtime.appendLog(this.logEl, `[ERROR] ${message}`);
   }
 
-  buildArgs() {
-    if (this.mode !== "remux" && this.mode !== "extract") return [];
+
+  buildBatchRequest() {
+    if (this.mode !== "remux" && this.mode !== "extract") return null;
 
     const val = id => document.getElementById(`${this.mode}-${id}`)?.value?.trim() ?? "";
     const chk = id => document.getElementById(`${this.mode}-${id}`)?.checked ?? false;
-    const args = [];
 
     const inputDir = val("input-dir");
-    if (!inputDir) { this.flagInputError("input-dir", "Input directory is required."); return null; }
-    args.push("--input-dir", inputDir);
-    const outDir = val("out-dir");     if (outDir)    args.push("--out-dir",   outDir);
-    const fontsDir = val("fonts-dir"); if (fontsDir)  args.push("--fonts-dir", fontsDir);
-    const offset  = val("sub-offset"); if (offset && offset !== "0") args.push("--sub-offset", offset);
-    const workers = val("workers");    if (workers)   args.push("--workers",   workers);
-    const ioJobs  = val("io-jobs");    if (ioJobs)    args.push("--io-jobs",   ioJobs);
-    if (chk("dry-run"))  args.push("--dry-run");
-    if (chk("no-cache")) args.push("--no-cache");
+    if (!inputDir) {
+      this.flagInputError("input-dir", "Input directory is required.");
+      return null;
+    }
+    const outDir = val("out-dir") || null;
+    const fontsDir = val("fonts-dir") || null;
+    const offset = val("sub-offset");
+    const subOffset = offset && offset !== "0" ? parseFloat(offset) : null;
+    const workersVal = val("workers");
+    const workers = workersVal ? parseInt(workersVal, 10) : null;
+    const ioJobsVal = val("io-jobs");
+    const ioJobs = ioJobsVal !== "" ? parseInt(ioJobsVal, 10) : null;
+    const dryRun = chk("dry-run");
+    const noCache = chk("no-cache");
+
+    let assetsDir = null;
+    let bitrate = null;
+    let complexity = null;
+    let ffmpegThreads = null;
+    let keepFonts = null;
 
     if (this.mode === "remux") {
-      const assetsDir = val("assets-dir"); if (assetsDir) args.push("--assets-dir", assetsDir);
-      const bitrate = val("bitrate");    if (bitrate)   args.push("--bitrate",   bitrate);
-      const cplx    = val("complexity") || val("cplx-val"); if (cplx) args.push("--complexity", cplx);
-      const ffmpegThreads = val("ffmpeg-threads"); if (ffmpegThreads) args.push("--ffmpeg-threads", ffmpegThreads);
-      if (chk("keep-fonts")) args.push("--keep-fonts");
+      assetsDir = val("assets-dir") || null;
+      bitrate = val("bitrate") || null;
+      const cplx = val("complexity") || val("cplx-val");
+      complexity = cplx ? parseInt(cplx, 10) : null;
+      const ffmpegVal = val("ffmpeg-threads");
+      ffmpegThreads = ffmpegVal ? parseInt(ffmpegVal, 10) : null;
+      keepFonts = chk("keep-fonts");
     }
 
-    return args;
+    const activePresetEl = typeof document?.querySelector === "function"
+      ? document.querySelector(".profile-option-item.active")
+      : null;
+    const presetKey = activePresetEl?.dataset?.preset;
+    let preset = null;
+    if (presetKey === "default" || presetKey === "balanced") {
+      preset = "balanced";
+    } else if (presetKey === "hifi" || presetKey === "high_quality") {
+      preset = "hifi";
+    } else if (presetKey) {
+      preset = presetKey;
+    }
+
+    return {
+      mode: this.mode,
+      input_dir: inputDir,
+      out_dir: outDir,
+      fonts_dir: fontsDir,
+      assets_dir: assetsDir,
+      preset,
+      bitrate,
+      complexity,
+      workers,
+      io_jobs: ioJobs,
+      ffmpeg_threads: ffmpegThreads,
+      sub_offset: subOffset,
+      keep_fonts: keepFonts,
+      dry_run: dryRun,
+      no_cache: noCache,
+      assignments: null,
+    };
   }
 
   abortStart(cancelled = false) {
@@ -126,10 +196,10 @@ export class JobController {
 
   async start() {
     if (this.running || !this.runtime.coordinator.canStart()) return;
-    const args = this.buildArgs();
-    if (!args) return;
-    const inputDir = args[args.indexOf("--input-dir") + 1];
-    const { options, error: optionsError } = extractInspectionOptions(args);
+    const batchRequest = this.buildBatchRequest();
+    if (!batchRequest) return;
+    const inputDir = batchRequest.input_dir;
+    const { options, error: optionsError } = extractInspectionOptions(batchRequest);
     if (optionsError) {
       this.runtime.appendLog(this.logEl, `[ERROR] ${optionsError}`);
       return;
@@ -161,9 +231,9 @@ export class JobController {
     }
 
     const tracker = this.runtime.queueFor(this.mode);
-    const assignmentsJson = this.mode === "remux"
-      ? serializeAssignmentsForManifest(assignmentSnapshot, tracker.lastManifest)
-      : null;
+    if (batchRequest && this.mode === "remux") {
+      batchRequest.assignments = buildTrackAssignmentsForManifest(assignmentSnapshot, tracker.lastManifest);
+    }
     this.cleanupListeners();
 
     const earlyEvents = [];
@@ -205,7 +275,9 @@ export class JobController {
     try {
       this.launched = true;
       this.runtime.coordinator.isStarting = false;
-      this.launchPromise = this.runtime.invoke("run_job", { mode: this.mode, args, assignmentsJson });
+      this.launchPromise = this.runtime.invoke("run_job", {
+        request: batchRequest,
+      });
       const jobId = await this.launchPromise;
       if (this.running) {
         this.jobId = jobId;
