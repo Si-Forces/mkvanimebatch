@@ -235,13 +235,10 @@ impl SubIndex {
             }
         }
 
-        if candidates.is_empty() {
-            return None;
-        }
-
-        candidates.sort_by_key(|c| c.0);
-        let (_, best) = candidates.pop().unwrap();
-        Some((best.file.path.clone(), best.lang.clone()))
+        candidates
+            .into_iter()
+            .max_by_key(|c| c.0)
+            .map(|(_, best)| (best.file.path.clone(), best.lang.clone()))
     }
 
     pub fn indexed_count(&self) -> usize {
@@ -694,7 +691,7 @@ impl AssetResolver {
         }
 
         // 4. Fallback assets directory (ADR 0004)
-        if let Some(ref fb_sub) = self.fallback_sub_index {
+        if let Some(fb_sub) = &self.fallback_sub_index {
             if let Some((sub_path, lang)) = fb_sub.lookup(parsed, video.path.parent()) {
                 return SubResolution::external(sub_path, lang);
             }
@@ -735,7 +732,7 @@ impl AssetResolver {
             if let Some(claimed) = claimed_chapter {
                 return Some(claimed.to_path_buf());
             }
-            if let Some(ref fb_chap) = self.fallback_chap_index {
+            if let Some(fb_chap) = &self.fallback_chap_index {
                 return fb_chap.lookup(parsed);
             }
         }
@@ -813,7 +810,7 @@ pub fn claim_leftover_chapters(
 
     let mut candidate_videos: Vec<&ParsedFile> = Vec::new();
     for video in videos {
-        let Some(ref parsed) = video.parsed else {
+        let Some(parsed) = &video.parsed else {
             continue;
         };
         if resolver.chap_index.has_match(parsed) {

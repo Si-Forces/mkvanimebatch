@@ -380,7 +380,27 @@ export class QueueTracker {
 
     if (event.id) {
       const item = this.state.items.get(event.id);
-      const card = this.cards.get(event.id);
+      let card = this.cards.get(event.id);
+      if (!card && item) {
+        const index = this.cards.size + 1;
+        card = this.createCardElement(item.id, item.name, index);
+        this.cards.set(item.id, card);
+        this.applyAssignmentToCard(item.id);
+        if (item.inspectionError) {
+          this.applyInspectionError(card, item.inspectionError);
+        } else if (item.metadata) {
+          this.applyMetadata(card, item.metadata, this.getBitrate());
+        } else {
+          this.applyRestoredTags(card, item);
+        }
+        if (this.listEl) {
+          const empty = this.listEl.querySelector(".empty-state-card");
+          if (empty && typeof empty.remove === "function") {
+            empty.remove();
+          }
+          this.listEl.appendChild(card.el);
+        }
+      }
       if (item && card) {
         this.renderCardState(card, item);
       }

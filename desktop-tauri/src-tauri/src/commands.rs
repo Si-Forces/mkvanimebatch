@@ -313,6 +313,7 @@ mod tests {
             version: 1,
             total: 2,
             input_dir: "/test".to_string(),
+            items: None,
             extra: Default::default(),
         };
         state.update_snapshot(&start_event, 101, "remux");

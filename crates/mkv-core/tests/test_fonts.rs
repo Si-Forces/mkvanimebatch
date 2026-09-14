@@ -108,6 +108,36 @@ fn test_promote_hash_deduplication() {
 }
 
 #[test]
+fn test_promote_hash_deduplication_preserves_name_size_claim() {
+    let tmp = tempdir().unwrap();
+    let fonts_dir = tmp.path().join("fonts");
+    let mgr = FontRegistry::new(fonts_dir.clone(), None);
+
+    // First font
+    let mut claim1 = mgr.claim("FontA.ttf", 100).unwrap();
+    fs::write(&claim1.staging_path, b"shared font data").unwrap();
+    let promoted1 = mgr.promote(&mut claim1);
+    assert_eq!(promoted1, Some(fonts_dir.join("FontA.ttf")));
+
+    // Second font with different name/size but same content
+    let mut claim2 = mgr.claim("FontB.ttf", 200).unwrap();
+    fs::write(&claim2.staging_path, b"shared font data").unwrap();
+    let promoted2 = mgr.promote(&mut claim2);
+
+    // Should be deduplicated
+    assert!(promoted2.is_none());
+    assert!(!claim2.staging_path.exists());
+    assert!(!fonts_dir.join("FontB.ttf").exists());
+
+    // Preserves (name, size) in claimed_name_size so subsequent episodes skip extraction
+    let claim3 = mgr.claim("FontB.ttf", 200);
+    assert!(
+        claim3.is_none(),
+        "subsequent claim of hash-deduplicated font should be skipped via claimed_name_size"
+    );
+}
+
+#[test]
 fn test_collision_safe_target_allocation() {
     let tmp = tempdir().unwrap();
     let fonts_dir = tmp.path().join("fonts");
@@ -352,4 +382,21 @@ fn test_font_claims_guard_drain_claims() {
     let drained: Vec<_> = guard.drain_claims().collect();
     assert_eq!(drained.len(), 1);
     assert!(guard.is_empty());
+}
+
+#[test]
+fn test_font_claims_guard_pop() {
+    let tmp = tempdir().unwrap();
+    let fonts_dir = tmp.path().join("fonts");
+    let mgr = FontRegistry::new(fonts_dir, None);
+
+    let mut guard = FontClaimsGuard::new(&mgr);
+    let claim = mgr.claim("PopFont.ttf", 400).unwrap();
+    guard.push(1, claim);
+
+    let popped = guard.pop();
+    assert!(popped.is_some());
+    assert_eq!(popped.unwrap().0, 1);
+    assert!(guard.is_empty());
+    assert!(guard.pop().is_none());
 }

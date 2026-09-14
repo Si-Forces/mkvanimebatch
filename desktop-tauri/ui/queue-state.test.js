@@ -872,3 +872,23 @@ test("reduceQueueEvent clamps item_progress and preserves float precision", () =
   assert.equal(state.items.get("ep1.mkv").progress, 0);
 });
 
+test("reduceQueueEvent populates items from batch_start when provided", () => {
+  let state = createQueueState({ version: 2, items: [] });
+  state = reduceQueueEvent(state, {
+    version: 1,
+    type: "batch_start",
+    total: 2,
+    items: [
+      { id: "e1", file: "Episode 1.mkv" },
+      { id: "e2", file: "Episode 2.mkv" },
+    ],
+  });
+
+  assert.equal(state.items.size, 2);
+  assert.equal(state.totalCount, 2);
+  assert.equal(state.items.get("e1").status, "queued");
+  assert.equal(state.items.get("e1").name, "Episode 1.mkv");
+  assert.equal(state.items.get("e2").status, "queued");
+  assert.equal(state.items.get("e2").name, "Episode 2.mkv");
+});
+

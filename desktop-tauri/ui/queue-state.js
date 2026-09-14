@@ -272,6 +272,32 @@ export function reduceQueueEvent(state, event, now = Date.now()) {
       if (typeof event.total === "number") {
         state.expectedTotal = event.total;
       }
+      if (Array.isArray(event.items)) {
+        for (const it of event.items) {
+          if (!it || !it.id || state.items.has(it.id)) continue;
+          state.items.set(it.id, {
+            id: it.id,
+            name: it.file || it.id,
+            release: ".",
+            metadata: null,
+            inspectionError: null,
+            status: "queued",
+            startTime: null,
+            durationSec: null,
+            durationFormatted: null,
+            progress: null,
+            speed: null,
+            eta: null,
+            reason: null,
+            error: null,
+            outcome: null,
+          });
+          if (!state.order.includes(it.id)) {
+            state.order.push(it.id);
+          }
+        }
+        state.totalCount = state.items.size;
+      }
       return state;
     }
 

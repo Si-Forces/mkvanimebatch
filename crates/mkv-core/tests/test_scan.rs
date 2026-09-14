@@ -357,3 +357,142 @@ fn test_probe_ebml_8byte_vint() {
     let res = mkv_core::ebml::probe_ebml_native(&test_mkv);
     assert!(res.is_err()); // Will fail finding tracks, but must NOT panic!
 }
+
+#[test]
+fn test_unknown_size_vint_triggers_fallback() {
+    let tmp = tempdir().unwrap();
+
+    // 1. Test 8-byte unknown-size VINT (RFC 8794 §5.1.1: all 56 data bits are 1)
+    let test_mkv_8byte = tmp.path().join("unknown_vint_8byte.mkv");
+    let mut data_8byte = vec![
+        0x1A, 0x45, 0xDF, 0xA3, 0x80, // EBML Header, len 0
+        0x18, 0x53, 0x80, 0x67, // Segment ID
+        0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // 8-byte unknown-size VINT
+    ];
+    data_8byte.extend(vec![0u8; 32]);
+    fs::write(&test_mkv_8byte, &data_8byte).unwrap();
+
+    let ebml_res = mkv_core::ebml::probe_ebml_native(&test_mkv_8byte);
+    assert!(ebml_res.is_err());
+    assert!(
+        ebml_res
+            .as_ref()
+            .unwrap_err()
+            .contains("Unknown EBML element length"),
+        "Expected unknown length error, got: {:?}",
+        ebml_res
+    );
+    // Must fall back to mkvmerge -J without panicking
+    let _ = mkv_core::scan::probe_video(&test_mkv_8byte);
+
+    // 2. Test 1-byte unknown-size VINT (RFC 8794 §5.1.1: 0xFF has all 7 data bits as 1)
+    let test_mkv_1byte = tmp.path().join("unknown_vint_1byte.mkv");
+    let mut data_1byte = vec![
+        0x1A, 0x45, 0xDF, 0xA3, 0x80, // EBML Header, len 0
+        0x18, 0x53, 0x80, 0x67, // Segment ID
+        0xFF, // 1-byte unknown-size VINT
+    ];
+    data_1byte.extend(vec![0u8; 32]);
+    fs::write(&test_mkv_1byte, &data_1byte).unwrap();
+
+    let ebml_res_1byte = mkv_core::ebml::probe_ebml_native(&test_mkv_1byte);
+    assert!(ebml_res_1byte.is_err());
+    assert!(
+        ebml_res_1byte
+            .as_ref()
+            .unwrap_err()
+            .contains("Unknown EBML element length"),
+        "Expected unknown length error, got: {:?}",
+        ebml_res_1byte
+    );
+    // Must fall back to mkvmerge -J without panicking
+    let _ = mkv_core::scan::probe_video(&test_mkv_1byte);
+}
+
+#[test]
+fn test_corrupted_track_entry_triggers_fallback() {
+    let tmp = tempdir().unwrap();
+    let corrupt_tracks_mkv = tmp.path().join("corrupt_tracks.mkv");
+
+    // Track 1: valid video track entry
+    let track1 = vec![
+        0xAE, 0x86, // TrackEntry, length 6
+        0xD7, 0x81, 0x01, // TrackNumber = 1
+        0x83, 0x81, 0x01, // TrackType = 1 (video)
+    ];
+
+    // Track 2: corrupted track entry with invalid zero EBML ID child
+    let track2 = vec![
+        0xAE, 0x84, // TrackEntry, length 4
+        0x00, 0x00, 0x00, 0x00, // Invalid zero EBML ID
+    ];
+
+    let mut tracks_payload = Vec::new();
+    tracks_payload.extend_from_slice(&track1);
+    tracks_payload.extend_from_slice(&track2);
+
+    let mut tracks_elem = vec![0x16, 0x54, 0xAE, 0x6B]; // Tracks ID
+    tracks_elem.push(0x80 | (tracks_payload.len() as u8));
+    tracks_elem.extend_from_slice(&tracks_payload);
+
+    let mut segment_payload = Vec::new();
+    segment_payload.extend_from_slice(&tracks_elem);
+
+    let mut data = vec![
+        0x1A, 0x45, 0xDF, 0xA3, 0x80, // EBML Header, len 0
+        0x18, 0x53, 0x80, 0x67, // Segment ID
+    ];
+    data.push(0x80 | (segment_payload.len() as u8));
+    data.extend_from_slice(&segment_payload);
+
+    fs::write(&corrupt_tracks_mkv, &data).unwrap();
+
+    // Native EBML probe MUST fail instead of silently dropping Track 2 and returning partial tracks
+    let ebml_res = mkv_core::ebml::probe_ebml_native(&corrupt_tracks_mkv);
+    assert!(
+        ebml_res.is_err(),
+        "Native probe should have failed on corrupted track entry, but returned: {:?}",
+        ebml_res
+    );
+
+    // probe_video must trigger fallback to mkvmerge -J without panicking or returning partial tracks
+    let _ = mkv_core::scan::probe_video(&corrupt_tracks_mkv);
+}
+
+#[test]
+fn test_truncated_tracks_block_triggers_fallback() {
+    let tmp = tempdir().unwrap();
+    let truncated_mkv = tmp.path().join("truncated_tracks.mkv");
+
+    // Track 1: valid video track entry
+    let track1 = vec![
+        0xAE, 0x86, // TrackEntry, length 6
+        0xD7, 0x81, 0x01, // TrackNumber = 1
+        0x83, 0x81, 0x01, // TrackType = 1 (video)
+    ];
+
+    let mut tracks_payload = Vec::new();
+    tracks_payload.extend_from_slice(&track1);
+    // Add incomplete trailing element ID (end_pos not reached, unexpected EOF)
+    tracks_payload.push(0xAE);
+
+    let mut tracks_elem = vec![0x16, 0x54, 0xAE, 0x6B]; // Tracks ID
+    tracks_elem.push(0x80 | (tracks_payload.len() as u8));
+    tracks_elem.extend_from_slice(&tracks_payload);
+
+    let mut data = vec![
+        0x1A, 0x45, 0xDF, 0xA3, 0x80, // EBML Header, len 0
+        0x18, 0x53, 0x80, 0x67, // Segment ID
+    ];
+    data.push(0x80 | (tracks_elem.len() as u8));
+    data.extend_from_slice(&tracks_elem);
+
+    fs::write(&truncated_mkv, &data).unwrap();
+
+    let ebml_res = mkv_core::ebml::probe_ebml_native(&truncated_mkv);
+    assert!(
+        ebml_res.is_err(),
+        "Native probe should have failed on truncated track entry, but returned: {:?}",
+        ebml_res
+    );
+}

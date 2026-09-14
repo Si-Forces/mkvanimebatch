@@ -304,7 +304,7 @@ pub async fn extract_mkv_file(
         }
     }
 
-    for (_, mut claim) in font_claims.drain_claims() {
+    while let Some((_, mut claim)) = font_claims.pop() {
         if font_manager.promote(&mut claim).is_some() {
             summary.extracted_fonts += 1;
         }
