@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
 use parking_lot::Mutex;
@@ -434,10 +434,10 @@ pub fn scan_assets(
         }
     }
 
-    videos.sort_by_key(|a| natural_sort_key(&a.name));
-    subs.sort_by_key(|a| natural_sort_key(&a.name));
-    chapters.sort_by_key(|a| natural_sort_key(&a.name));
-    covers.sort_by_key(|a| natural_sort_key(&a.name));
+    videos.sort_by_cached_key(|a| natural_sort_key(&a.name));
+    subs.sort_by_cached_key(|a| natural_sort_key(&a.name));
+    chapters.sort_by_cached_key(|a| natural_sort_key(&a.name));
+    covers.sort_by_cached_key(|a| natural_sort_key(&a.name));
 
     let result = ScanResults {
         videos,
@@ -506,7 +506,7 @@ pub fn scan_mkv_files(
         }
     }
 
-    results.sort_by_key(|a| natural_sort_key(&a.path.to_string_lossy()));
+    results.sort_by_cached_key(|a| natural_sort_key(&a.path.to_string_lossy()));
     results
 }
 
@@ -524,7 +524,7 @@ pub struct InspectCacheEntry {
 
 #[derive(Debug, Default)]
 struct CacheState {
-    data: HashMap<String, InspectCacheEntry>,
+    data: Arc<HashMap<String, InspectCacheEntry>>,
     dirty: bool,
     revision: u64,
     last_save_ts: Option<Instant>,
@@ -629,7 +629,7 @@ impl PersistentInspectCache {
                 match serde_json::from_str::<HashMap<String, InspectCacheEntry>>(&content) {
                     Ok(loaded) => {
                         let mut state = self.state.lock();
-                        state.data = loaded;
+                        state.data = Arc::new(loaded);
                         state.dirty = false;
                     }
                     Err(e) => {
@@ -683,7 +683,8 @@ impl PersistentInspectCache {
         };
         let mut state = self.state.lock();
         if state.data.get(&key) != Some(&entry) {
-            state.data.insert(key, entry);
+            let data = Arc::make_mut(&mut state.data);
+            data.insert(key, entry);
             state.dirty = true;
             state.revision += 1;
         }
@@ -720,12 +721,13 @@ impl PersistentInspectCache {
                     }
                 }
             }
-            (state.data.clone(), state.revision)
+            (Arc::clone(&state.data), state.revision)
         };
 
-        let save_data: HashMap<String, InspectCacheEntry> = data_snapshot
-            .into_iter()
+        let save_data: HashMap<&str, &InspectCacheEntry> = data_snapshot
+            .iter()
             .filter(|(_, entry)| entry.json_data.is_some())
+            .map(|(k, v)| (k.as_str(), v))
             .collect();
 
         let parent = match self.cache_file.parent() {
@@ -779,7 +781,7 @@ impl PersistentInspectCache {
 
     pub fn clear(&self) {
         let mut state = self.state.lock();
-        state.data.clear();
+        state.data = Arc::default();
         state.dirty = false;
         state.revision = 0;
         state.last_save_ts = None;

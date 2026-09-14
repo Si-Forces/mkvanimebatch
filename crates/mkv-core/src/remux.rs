@@ -1,6 +1,7 @@
 //! Remux track selection, command construction, and argument generation.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::domain::{
     cover_mime, promote_file, read_progress_stream, select_audio_track, SUBPROCESS_TIMEOUT,
@@ -262,6 +263,7 @@ pub async fn execute_remux_job(
     fonts: &FontInfo,
     options: &RemuxOptions<'_>,
     on_progress: Option<&(dyn Fn(f64) + Send + Sync)>,
+    io_semaphore: Option<&Arc<tokio::sync::Semaphore>>,
 ) -> Result<RemuxSummary, String> {
     let mut summary = RemuxSummary {
         video_path: job.video.clone(),
@@ -331,6 +333,11 @@ pub async fn execute_remux_job(
         options.sub_offset,
     );
 
+    let _io_permit = match io_semaphore {
+        Some(sem) => sem.acquire().await.ok(),
+        None => None,
+    };
+
     summary.log.push("  Running mkvmerge...".into());
     let mut mkvmerge_cmd = tokio::process::Command::new("mkvmerge");
     #[cfg(windows)]
@@ -357,36 +364,67 @@ pub async fn execute_remux_job(
     });
 
     let execution = async {
+        let mut stdout_bytes = Vec::new();
         if let Some(out_stream) = stdout {
-            let _ = read_progress_stream(out_stream, on_progress, None).await;
+            let _ = read_progress_stream(out_stream, on_progress, Some(&mut stdout_bytes)).await;
         }
         let status = child
             .wait()
             .await
             .map_err(|e| format!("Failed to wait on mkvmerge: {e}"))?;
         let stderr_output = stderr_handle.await.unwrap_or_default();
-        Ok::<_, String>((status, stderr_output))
+        Ok::<_, String>((status, stdout_bytes, stderr_output))
     };
 
-    let (status, stderr_output) = match tokio::time::timeout(SUBPROCESS_TIMEOUT, execution).await {
-        Ok(res) => res?,
-        Err(_) => {
-            return Err(format!(
-                "mkvmerge timed out after {} seconds",
-                SUBPROCESS_TIMEOUT.as_secs()
-            ))
-        }
-    };
+    let (status, stdout_bytes, stderr_output) =
+        match tokio::time::timeout(SUBPROCESS_TIMEOUT, execution).await {
+            Ok(res) => res?,
+            Err(_) => {
+                return Err(format!(
+                    "mkvmerge timed out after {} seconds",
+                    SUBPROCESS_TIMEOUT.as_secs()
+                ))
+            }
+        };
 
     let is_success = matches!(status.code(), Some(0) | Some(1));
     if !is_success {
         let _ = std::fs::remove_file(&temp_output);
-        let stderr = String::from_utf8_lossy(&stderr_output);
+        let stderr = String::from_utf8_lossy(&stderr_output).trim().to_string();
+        let stdout = String::from_utf8_lossy(&stdout_bytes).trim().to_string();
         let code_str = status
             .code()
             .map(|c| format!("exit code {c}"))
             .unwrap_or_else(|| "terminated by signal".into());
-        return Err(format!("mkvmerge failed ({code_str}): {stderr}"));
+        let err_msg = if !stderr.is_empty() && !stdout.is_empty() {
+            format!("{stderr}\n{stdout}")
+        } else if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            code_str.clone()
+        };
+        return Err(format!("mkvmerge failed ({code_str}): {err_msg}"));
+    }
+
+    if status.code() == Some(1) {
+        let stderr = String::from_utf8_lossy(&stderr_output).trim().to_string();
+        let stdout = String::from_utf8_lossy(&stdout_bytes).trim().to_string();
+        let warning_output = if !stderr.is_empty() && !stdout.is_empty() {
+            format!("{stderr}\n{stdout}")
+        } else if !stderr.is_empty() {
+            stderr
+        } else {
+            stdout
+        };
+        if !warning_output.is_empty() {
+            if warning_output.to_lowercase().starts_with("warning") {
+                summary.log.push(format!("  {warning_output}"));
+            } else {
+                summary.log.push(format!("  Warning: {warning_output}"));
+            }
+        }
     }
 
     if !temp_output.exists() || temp_output.metadata().map(|m| m.len() == 0).unwrap_or(true) {

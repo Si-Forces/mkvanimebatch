@@ -451,7 +451,8 @@ impl FontRegistry {
         let mut state = self.state.lock();
 
         if state.claimed_hashes.contains(&file_hash) {
-            cleanup_and_release(claim, &mut state);
+            let _ = fs::remove_file(&claim.staging_path);
+            claim.released = true;
             return None;
         }
 
@@ -491,7 +492,7 @@ impl FontRegistry {
             }
         }
 
-        if let Err(e) = fs::rename(&claim.staging_path, &target_path) {
+        if let Err(e) = crate::domain::promote_file(&claim.staging_path, &target_path) {
             error!("Failed to promote font '{}': {e}", claim.name);
             cleanup_and_release(claim, &mut state);
             return None;
@@ -553,6 +554,10 @@ impl<'a> FontClaimsGuard<'a> {
 
     pub fn is_empty(&self) -> bool {
         self.claims.is_empty()
+    }
+
+    pub fn pop(&mut self) -> Option<(u32, FontClaim)> {
+        self.claims.pop()
     }
 
     pub fn len(&self) -> usize {

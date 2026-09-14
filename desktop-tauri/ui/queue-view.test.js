@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { QueueTracker } from "./queue-view.js";
+import { createQueueState } from "./queue-state.js";
 
 class FakeElement {
   constructor(value = "") {
@@ -374,5 +375,30 @@ test("QueueTracker renders <0.1s for instantaneous completed items with 0s durat
   });
 
   assert.equal(card.statusTag.textContent, "Done in <0.1s");
+});
+
+test("QueueTracker dynamically mounts card element in handleEvent if card not present but state item exists", t => {
+  const { elements } = setupMockEnvironment(t);
+  const tracker = new QueueTracker("remux");
+
+  const manifest = {
+    version: 2,
+    items: [{ id: "ep1", name: "01.mkv" }],
+  };
+  tracker.state = createQueueState(manifest, { mode: "remux" });
+  assert.equal(tracker.cards.has("ep1"), false);
+
+  tracker.handleEvent({
+    version: 1,
+    type: "item_start",
+    id: "ep1",
+  });
+
+  assert.equal(tracker.cards.has("ep1"), true);
+  const card = tracker.cards.get("ep1");
+  assert.equal(card.name, "01.mkv");
+  const listEl = elements.get("remux-episode-list");
+  assert.ok(listEl.children.includes(card.el));
+  assert.equal(card.badge.textContent, "PROCESSING");
 });
 
