@@ -543,20 +543,20 @@ fn parse_typed_ep(name: &str, pattern: &FancyRegex) -> String {
 
 pub fn parse_episode(name: &str) -> Option<EpisodeInfo> {
     let without_offset = OFFSET_TAG_RE.replace(name, "");
-    let mut normalized = without_offset.replace('_', " ");
+    let normalized = without_offset.replace('_', " ");
 
     // Replace non-decimal '.' with space
-    let mut chars: Vec<char> = normalized.chars().collect();
-    for i in 0..chars.len() {
-        if chars[i] == '.' {
-            let prev_digit = i > 0 && chars[i - 1].is_ascii_digit();
-            let next_digit = i + 1 < chars.len() && chars[i + 1].is_ascii_digit();
+    let mut norm_bytes = normalized.into_bytes();
+    for i in 0..norm_bytes.len() {
+        if norm_bytes[i] == b'.' {
+            let prev_digit = i > 0 && norm_bytes[i - 1].is_ascii_digit();
+            let next_digit = i + 1 < norm_bytes.len() && norm_bytes[i + 1].is_ascii_digit();
             if !(prev_digit && next_digit) {
-                chars[i] = ' ';
+                norm_bytes[i] = b' ';
             }
         }
     }
-    normalized = chars.into_iter().collect();
+    let mut normalized = String::from_utf8(norm_bytes).unwrap_or_default();
 
     let mut season = String::new();
     for pat in SEASON_PATTERNS.iter() {
@@ -684,13 +684,10 @@ pub fn select_best_subtitle_track(
         candidates.push((priority_key, tid, language.to_string(), is_diag));
     }
 
-    if candidates.is_empty() {
-        return None;
-    }
-
-    candidates.sort_by_key(|c| c.0);
-    let (_, tid, language, is_diag) = candidates.pop().unwrap();
-    Some((tid, language, is_diag))
+    candidates
+        .into_iter()
+        .max_by_key(|c| c.0)
+        .map(|(_, tid, language, is_diag)| (tid, language, is_diag))
 }
 
 static COMMENTARY_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -752,8 +749,7 @@ pub fn select_audio_track(
         candidates.push((priority_key, track));
     }
 
-    candidates.sort_by_key(|c| c.0);
-    let (priority_key, best_track) = candidates.pop().unwrap();
+    let (priority_key, best_track) = candidates.into_iter().max_by_key(|c| c.0).unwrap();
     let score = priority_key.0;
 
     if is_fallback_pool {
@@ -802,12 +798,17 @@ pub fn promote_file(staged: &Path, final_path: &Path) -> Result<(), std::io::Err
     let parent = final_path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)?;
 
-    if std::fs::rename(staged, final_path).is_ok() {
-        return Ok(());
-    }
+    let rename_err = match std::fs::rename(staged, final_path) {
+        Ok(()) => return Ok(()),
+        Err(err) => err,
+    };
 
-    // Rename failed. If destination already exists (typical on Windows), use backup-and-rollback
-    if final_path.exists() {
+    let is_cross_device = rename_err.kind() == std::io::ErrorKind::CrossesDevices
+        || rename_err.raw_os_error() == Some(18)
+        || (cfg!(windows) && rename_err.raw_os_error() == Some(17));
+
+    // Rename failed. If not cross-device and destination already exists (typical on Windows), use backup-and-rollback
+    if !is_cross_device && final_path.exists() {
         let backup_path = final_path.with_extension(format!("bak.{}", uuid::Uuid::new_v4()));
         if std::fs::rename(final_path, &backup_path).is_ok() {
             if std::fs::rename(staged, final_path).is_ok() {
@@ -891,7 +892,7 @@ pub async fn read_progress_stream<R: tokio::io::AsyncRead + Unpin>(
         if n == 0 {
             break;
         }
-        if let Some(ref mut b) = on_bytes {
+        if let Some(b) = &mut on_bytes {
             b.extend_from_slice(&buf[..n]);
         }
         pending.push_str(&String::from_utf8_lossy(&buf[..n]));

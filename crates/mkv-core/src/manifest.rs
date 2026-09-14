@@ -384,7 +384,7 @@ pub fn generate_inspection_manifest(
     }
 
     if let Some(cache) = persistent_cache {
-        cache.save_shared();
+        cache.save();
     }
 
     Ok(InspectionManifest {

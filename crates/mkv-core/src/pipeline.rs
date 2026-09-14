@@ -24,6 +24,12 @@ use crate::scan::{
 
 pub const EVENT_VERSION: u64 = 1;
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchItemInfo {
+    pub id: String,
+    pub file: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum JobEvent {
@@ -31,6 +37,8 @@ pub enum JobEvent {
         version: u64,
         total: usize,
         input_dir: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        items: Option<Vec<BatchItemInfo>>,
         #[serde(default, flatten)]
         extra: serde_json::Map<String, serde_json::Value>,
     },
@@ -404,11 +412,19 @@ impl BatchPipeline {
         let files = scan_mkv_files(&self.config.input_dir, true, None);
         summary.total = files.len();
 
+        let items: Vec<BatchItemInfo> = files
+            .iter()
+            .map(|f| BatchItemInfo {
+                id: get_item_id(&f.path, &self.config.input_dir),
+                file: f.name.clone(),
+            })
+            .collect();
         let input_dir_str = self.config.input_dir.to_string_lossy().to_string();
         self.emit(JobEvent::BatchStart {
             version: EVENT_VERSION,
             total: summary.total,
             input_dir: input_dir_str,
+            items: Some(items),
             extra: Default::default(),
         })
         .await;
@@ -562,13 +578,12 @@ impl BatchPipeline {
 
                 join_set.spawn(async move {
                     if cancel_token.is_cancelled() {
-                        let duration = start_instant.elapsed().as_secs_f64();
                         return (
                             item_id,
                             file_name,
                             Err("Operation cancelled".into()),
                             true,
-                            duration,
+                            start_instant.elapsed().as_secs_f64(),
                         );
                     }
 
@@ -576,8 +591,7 @@ impl BatchPipeline {
                     let meta = match get_or_probe_video(&file_path, cache_opt) {
                         Ok(m) => m,
                         Err(err) => {
-                            let duration = start_instant.elapsed().as_secs_f64();
-                            return (item_id, file_name, Err(err), false, duration);
+                            return (item_id, file_name, Err(err), false, start_instant.elapsed().as_secs_f64());
                         }
                     };
                     let inspected = InspectedVideo::new(meta);
@@ -599,7 +613,14 @@ impl BatchPipeline {
                         }
                     };
 
-                    let _io_permit = io_sem.acquire().await.ok();
+                    let _io_permit = tokio::select! {
+                        biased;
+                        _ = cancel_token.cancelled() => {
+                            return (item_id, file_name, Err("Operation cancelled".into()), true, start_instant.elapsed().as_secs_f64());
+                        }
+                        permit = io_sem.acquire() => permit.ok(),
+                    };
+
                     let extract_future = extract_mkv_file(
                         &file_path,
                         &inspected,
@@ -683,10 +704,12 @@ impl BatchPipeline {
                         }
                     }
                     Err(join_err) => {
-                        summary.errors += 1;
-                        let msg = format!("  ERROR: Task panic: {join_err}");
-                        self.log(&msg).await;
-                        summary.log.push(msg);
+                        if !join_err.is_cancelled() {
+                            summary.errors += 1;
+                            let msg = format!("  ERROR: Task panic: {join_err}");
+                            self.log(&msg).await;
+                            summary.log.push(msg);
+                        }
                     }
                 }
             }
@@ -750,11 +773,19 @@ impl BatchPipeline {
         let files = scan_mkv_files(&self.config.input_dir, true, None);
         summary.total = files.len();
 
+        let items: Vec<BatchItemInfo> = files
+            .iter()
+            .map(|f| BatchItemInfo {
+                id: get_item_id(&f.path, &self.config.input_dir),
+                file: f.name.clone(),
+            })
+            .collect();
         let input_dir_str = self.config.input_dir.to_string_lossy().to_string();
         self.emit(JobEvent::BatchStart {
             version: EVENT_VERSION,
             total: summary.total,
             input_dir: input_dir_str,
+            items: Some(items),
             extra: Default::default(),
         })
         .await;
@@ -1112,13 +1143,12 @@ impl BatchPipeline {
 
                         join_set.spawn(async move {
                             if cancel_token.is_cancelled() {
-                                let duration = start_instant.elapsed().as_secs_f64();
                                 return (
                                     job.item_id,
                                     job.video_name,
                                     Err("Operation cancelled".into()),
                                     true,
-                                    duration,
+                                    start_instant.elapsed().as_secs_f64(),
                                 );
                             }
 
@@ -1139,7 +1169,6 @@ impl BatchPipeline {
                                 }
                             };
 
-                            let _io_permit = io_sem.acquire().await.ok();
                             let remux_opts = RemuxOptions {
                                 opus_bitrate: &bitrate,
                                 complexity,
@@ -1152,6 +1181,7 @@ impl BatchPipeline {
                                 &font_info_clone,
                                 &remux_opts,
                                 Some(&on_progress),
+                                Some(&io_sem),
                             );
 
                             tokio::select! {
@@ -1229,10 +1259,12 @@ impl BatchPipeline {
                                 }
                             }
                             Err(join_err) => {
-                                summary.errors += 1;
-                                let msg = format!("  ERROR: Task panic: {join_err}");
-                                self.log(&msg).await;
-                                summary.log.push(msg);
+                                if !join_err.is_cancelled() {
+                                    summary.errors += 1;
+                                    let msg = format!("  ERROR: Task panic: {join_err}");
+                                    self.log(&msg).await;
+                                    summary.log.push(msg);
+                                }
                             }
                         }
                     }

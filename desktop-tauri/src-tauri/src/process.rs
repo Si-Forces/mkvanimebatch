@@ -89,6 +89,7 @@ pub enum BatchStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ItemStatus {
+    Queued,
     Processing,
     Completed,
     Skipped,
@@ -274,11 +275,28 @@ impl JobState {
     pub fn update_snapshot(&self, event: &mkv_core::pipeline::JobEvent, job_id: u64, mode: &str) {
         if let Ok(mut snap) = self.snapshot.lock() {
             match event {
-                mkv_core::pipeline::JobEvent::BatchStart { total, .. } => {
+                mkv_core::pipeline::JobEvent::BatchStart { total, items, .. } => {
                     let start_time_ms = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_millis() as u64)
                         .unwrap_or(0);
+                    let mut snapshot_items = HashMap::new();
+                    if let Some(items) = items {
+                        for item in items {
+                            snapshot_items.insert(
+                                item.id.clone(),
+                                ItemSnapshot {
+                                    id: item.id.clone(),
+                                    file: item.file.clone(),
+                                    status: ItemStatus::Queued,
+                                    duration_sec: None,
+                                    reason: None,
+                                    error: None,
+                                    outcome: None,
+                                },
+                            );
+                        }
+                    }
                     *snap = Some(JobSnapshot {
                         job_id,
                         mode: mode.to_string(),
@@ -287,7 +305,7 @@ impl JobState {
                         duration_sec: None,
                         total_items: *total,
                         completed_items: 0,
-                        items: HashMap::new(),
+                        items: snapshot_items,
                     });
                 }
                 mkv_core::pipeline::JobEvent::ItemStart { id, file, .. } => {
@@ -352,7 +370,9 @@ impl JobState {
                         };
                         if *cancelled {
                             for item in snapshot.items.values_mut() {
-                                if item.status == ItemStatus::Processing {
+                                if item.status == ItemStatus::Processing
+                                    || item.status == ItemStatus::Queued
+                                {
                                     item.status = ItemStatus::Cancelled;
                                     item.reason = Some("Operation cancelled".to_string());
                                 }
@@ -370,13 +390,31 @@ impl JobState {
                                 .and_then(|v| v.as_str())
                                 .map(ToString::to_string);
                             for item in snapshot.items.values_mut() {
-                                if item.status == ItemStatus::Processing {
+                                if item.status == ItemStatus::Processing
+                                    || item.status == ItemStatus::Queued
+                                {
                                     item.status = ItemStatus::Error;
                                     item.error = Some(err_msg.clone());
                                     if reason_msg.is_some() {
                                         item.reason = reason_msg.clone();
                                     }
                                 }
+                            }
+                        } else {
+                            let mut lingering_errors = false;
+                            for item in snapshot.items.values_mut() {
+                                if item.status == ItemStatus::Processing
+                                    || item.status == ItemStatus::Queued
+                                {
+                                    item.status = ItemStatus::Error;
+                                    item.error = Some(
+                                        "Protocol error: missing completion event".to_string(),
+                                    );
+                                    lingering_errors = true;
+                                }
+                            }
+                            if lingering_errors {
+                                snapshot.status = BatchStatus::Error;
                             }
                         }
                         let duration_sec = extra
@@ -417,7 +455,9 @@ impl JobState {
                 if snapshot.status == BatchStatus::Running {
                     snapshot.status = BatchStatus::Cancelled;
                     for item in snapshot.items.values_mut() {
-                        if item.status == ItemStatus::Processing {
+                        if item.status == ItemStatus::Processing
+                            || item.status == ItemStatus::Queued
+                        {
                             item.status = ItemStatus::Cancelled;
                             item.reason = Some("Operation cancelled".to_string());
                         }
@@ -736,6 +776,7 @@ mod tests {
             version: 1,
             total: 2,
             input_dir: "/test".to_string(),
+            items: None,
             extra: Default::default(),
         };
         state.update_snapshot(&start_event, 10, "remux");
@@ -808,7 +849,65 @@ mod tests {
     }
 
     #[test]
+    fn test_batch_complete_success_transitions_lingering_queued_items_to_error() {
+        let state = JobState::default();
+        let start_event = mkv_core::pipeline::JobEvent::BatchStart {
+            version: 1,
+            total: 2,
+            input_dir: "/test".to_string(),
+            items: Some(vec![
+                mkv_core::pipeline::BatchItemInfo {
+                    id: "ep1".to_string(),
+                    file: "ep1.mkv".to_string(),
+                },
+                mkv_core::pipeline::BatchItemInfo {
+                    id: "ep2".to_string(),
+                    file: "ep2.mkv".to_string(),
+                },
+            ]),
+            extra: Default::default(),
+        };
+        state.update_snapshot(&start_event, 10, "remux");
+
+        let item_complete = mkv_core::pipeline::JobEvent::ItemComplete {
+            version: 1,
+            id: "ep1".to_string(),
+            file: "ep1.mkv".to_string(),
+            status: mkv_core::pipeline::ItemOutcome::Completed,
+            reason: None,
+            error: None,
+            duration_sec: Some(10.0),
+            extra: Default::default(),
+        };
+        state.update_snapshot(&item_complete, 10, "remux");
+
+        // ep2 was left in Queued state!
+        let batch_complete = mkv_core::pipeline::JobEvent::BatchComplete {
+            version: 1,
+            success: true,
+            cancelled: false,
+            extra: Default::default(),
+        };
+        state.update_snapshot(&batch_complete, 10, "remux");
+
+        let snap_guard = state.snapshot.lock().unwrap();
+        let snap = snap_guard.as_ref().unwrap();
+        assert_eq!(snap.status, BatchStatus::Error);
+        assert_eq!(snap.items.get("ep1").unwrap().status, ItemStatus::Completed);
+        let ep2 = snap.items.get("ep2").unwrap();
+        assert_eq!(ep2.status, ItemStatus::Error);
+        assert_eq!(
+            ep2.error.as_deref(),
+            Some("Protocol error: missing completion event")
+        );
+    }
+
+    #[test]
     fn test_item_status_serde_and_from() {
+        assert_eq!(
+            serde_json::to_string(&ItemStatus::Queued).unwrap(),
+            "\"queued\""
+        );
         assert_eq!(
             serde_json::to_string(&ItemStatus::Processing).unwrap(),
             "\"processing\""
@@ -868,6 +967,7 @@ mod tests {
             version: 1,
             total: 1,
             input_dir: "/test".to_string(),
+            items: None,
             extra: Default::default(),
         };
         state.update_snapshot(&start_event, 42, "remux");
@@ -885,6 +985,7 @@ mod tests {
             version: 1,
             total: 2,
             input_dir: "/test".to_string(),
+            items: None,
             extra: Default::default(),
         };
         state.update_snapshot(&start_event, 10, "remux");
@@ -940,6 +1041,7 @@ mod tests {
             version: 1,
             total: 1,
             input_dir: "/test".to_string(),
+            items: None,
             extra: Default::default(),
         };
         state.update_snapshot(&start_event, 1, "remux");
@@ -993,6 +1095,42 @@ mod tests {
             assert_eq!(ep1.status, ItemStatus::Error);
             assert_eq!(ep1.error.as_deref(), Some("Fatal error"));
         }
+    }
+
+    #[test]
+    fn test_update_snapshot_batch_start_populates_queued_items() {
+        let state = JobState::default();
+        let items = vec![
+            mkv_core::pipeline::BatchItemInfo {
+                id: "ep1".to_string(),
+                file: "Episode 1.mkv".to_string(),
+            },
+            mkv_core::pipeline::BatchItemInfo {
+                id: "ep2".to_string(),
+                file: "Episode 2.mkv".to_string(),
+            },
+        ];
+        let start_event = mkv_core::pipeline::JobEvent::BatchStart {
+            version: 1,
+            total: 2,
+            input_dir: "/anime".to_string(),
+            items: Some(items),
+            extra: Default::default(),
+        };
+        state.update_snapshot(&start_event, 5, "remux");
+
+        let snap_guard = state.snapshot.lock().unwrap();
+        let snap = snap_guard.as_ref().unwrap();
+        assert_eq!(snap.total_items, 2);
+        assert_eq!(snap.items.len(), 2);
+
+        let ep1 = snap.items.get("ep1").unwrap();
+        assert_eq!(ep1.file, "Episode 1.mkv");
+        assert_eq!(ep1.status, ItemStatus::Queued);
+
+        let ep2 = snap.items.get("ep2").unwrap();
+        assert_eq!(ep2.file, "Episode 2.mkv");
+        assert_eq!(ep2.status, ItemStatus::Queued);
     }
 }
 
