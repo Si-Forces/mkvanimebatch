@@ -376,10 +376,23 @@ fn test_cross_language_regex_and_domain() {
     for (i, name) in payload.safe_names.iter().enumerate() {
         let rust_res = safe_filename(name);
         let py_res = &py_response.safe_names[i];
-        if rust_res != *py_res {
+
+        // On Windows, backslash is the path separator, matching Python's WindowsPath behavior where
+        // `Path(r"foo\bar").name == "bar"` and trailing backslashes are stripped. On POSIX/Linux,
+        // backslash is not a separator, so `PosixPath(r"foo\bar").name == r"foo\bar"`.
+        #[cfg(windows)]
+        let expected = match name.as_str() {
+            "foo\\bar" => "bar",
+            "/:*?\"<>|\\" => "_______",
+            _ => py_res.as_str(),
+        };
+        #[cfg(not(windows))]
+        let expected = py_res.as_str();
+
+        if rust_res != expected {
             mismatches.push(format!(
-                "Safe filename: '{name}'\n  Rust:   {:?}\n  Python: {:?}",
-                rust_res, py_res
+                "Safe filename: '{name}'\n  Rust:     {:?}\n  Expected: {:?}",
+                rust_res, expected
             ));
         }
     }
