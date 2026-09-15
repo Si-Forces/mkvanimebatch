@@ -1,0 +1,687 @@
+//! Native lightweight EBML parser for Matroska containers.
+//!
+//! Parses Segment Header, Tracks (video, audio, subtitles), Attachments
+//! (fonts, covers), and Chapters directly in pure Rust without external process spawning.
+//! Fallback to `mkvmerge -J` occurs on any unhandled error, non-standard quirk,
+//! missing SeekHead with post-cluster elements, or malformed structure (ADR 0006).
+
+use std::fs::File;
+use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::path::Path;
+
+use crate::domain::{MkvTrack, TrackProperties};
+use crate::scan::{MkvAttachment, MkvChapter, MkvmergeMetadata};
+
+// EBML and Matroska IDs
+const ID_EBML_HEADER: u32 = 0x1A45DFA3;
+const ID_SEGMENT: u32 = 0x18538067;
+const ID_SEEK_HEAD: u32 = 0x114D9B74;
+const ID_SEEK: u32 = 0x4DBB;
+const ID_SEEK_ID: u32 = 0x53AB;
+const ID_SEEK_POSITION: u32 = 0x53AC;
+const ID_CLUSTER: u32 = 0x1F43B675;
+
+const ID_TRACKS: u32 = 0x1654AE6B;
+const ID_TRACK_ENTRY: u32 = 0xAE;
+const ID_TRACK_NUMBER: u32 = 0xD7;
+const ID_TRACK_TYPE: u32 = 0x83;
+const ID_FLAG_DEFAULT: u32 = 0x88;
+const ID_FLAG_FORCED: u32 = 0x55AA;
+const ID_CODEC_ID: u32 = 0x86;
+const ID_LANGUAGE: u32 = 0x22B59C;
+const ID_LANGUAGE_IETF: u32 = 0x22B59D;
+const ID_TRACK_NAME: u32 = 0x536E;
+const ID_VIDEO: u32 = 0xE0;
+const ID_PIXEL_WIDTH: u32 = 0xB0;
+const ID_PIXEL_HEIGHT: u32 = 0xBA;
+const ID_AUDIO: u32 = 0xE1;
+const ID_CHANNELS: u32 = 0x9F;
+
+const ID_ATTACHMENTS: u32 = 0x1941A469;
+const ID_ATTACHED_FILE: u32 = 0x61A7;
+const ID_FILE_NAME: u32 = 0x466E;
+const ID_FILE_MIME: u32 = 0x4660;
+const ID_FILE_DATA: u32 = 0x465C;
+
+const ID_CHAPTERS: u32 = 0x1043A770;
+
+/// Safely seeks forward by `len` bytes, ensuring the length fits within a non-negative `i64`.
+#[inline]
+fn seek_forward<R: Read + Seek>(reader: &mut R, len: u64) -> Result<(), std::io::Error> {
+    let offset = i64::try_from(len).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "EBML element length exceeds i64::MAX",
+        )
+    })?;
+    reader.seek(SeekFrom::Current(offset))?;
+    Ok(())
+}
+
+/// Reads an EBML Element ID as a raw u32.
+fn read_element_id<R: Read>(reader: &mut R) -> Result<u32, std::io::Error> {
+    let mut first_byte = [0u8; 1];
+    reader.read_exact(&mut first_byte)?;
+    let b = first_byte[0];
+    if b == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Invalid zero EBML ID",
+        ));
+    }
+
+    let len = b.leading_zeros() as usize + 1;
+    if len > 4 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "EBML ID too large (> 4 bytes)",
+        ));
+    }
+
+    let mut id = b as u32;
+    for _ in 1..len {
+        let mut next = [0u8; 1];
+        reader.read_exact(&mut next)?;
+        id = (id << 8) | (next[0] as u32);
+    }
+    Ok(id)
+}
+
+/// Reads an EBML Variable Size Integer (VINT) representing length.
+fn read_vint_length<R: Read>(reader: &mut R) -> Result<u64, std::io::Error> {
+    let mut first_byte = [0u8; 1];
+    reader.read_exact(&mut first_byte)?;
+    let b = first_byte[0];
+    if b == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Invalid zero VINT length",
+        ));
+    }
+
+    let num_zeros = b.leading_zeros() as usize;
+    let len = num_zeros + 1;
+    let mask = if len == 8 { 0 } else { 0xFF >> len };
+    let mut value = (b & mask) as u64;
+    for _ in 1..len {
+        let mut next = [0u8; 1];
+        reader.read_exact(&mut next)?;
+        value = (value << 8) | (next[0] as u64);
+    }
+    let unknown_mask = if len == 8 {
+        0x00FF_FFFF_FFFF_FFFF
+    } else {
+        (1u64 << (7 * len)) - 1
+    };
+    if value == unknown_mask {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Unknown EBML element length",
+        ));
+    }
+    Ok(value)
+}
+
+fn read_uint<R: Read>(reader: &mut R, size: u64) -> Result<u64, std::io::Error> {
+    if size > 8 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Uint size > 8",
+        ));
+    }
+    let mut val = 0u64;
+    for _ in 0..size {
+        let mut b = [0u8; 1];
+        reader.read_exact(&mut b)?;
+        val = (val << 8) | (b[0] as u64);
+    }
+    Ok(val)
+}
+
+fn read_string<R: Read>(reader: &mut R, size: u64) -> Result<String, std::io::Error> {
+    if size > 1024 * 1024 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "String too long (> 1MB)",
+        ));
+    }
+    let mut buf = vec![0u8; size as usize];
+    reader.read_exact(&mut buf)?;
+    while buf.last() == Some(&0) {
+        buf.pop();
+    }
+    Ok(String::from_utf8_lossy(&buf).to_string())
+}
+
+/// Native EBML probe for Matroska files. Returns `MkvmergeMetadata` on success,
+/// or `Err` if anything is unhandled or malformed.
+pub fn probe_ebml_native(path: &Path) -> Result<MkvmergeMetadata, String> {
+    let file = File::open(path).map_err(|e| e.to_string())?;
+    let mut reader = BufReader::new(file);
+
+    // Verify EBML Header
+    let ebml_id = read_element_id(&mut reader).map_err(|e| e.to_string())?;
+    if ebml_id != ID_EBML_HEADER {
+        return Err("Not an EBML file".to_string());
+    }
+    let ebml_len = read_vint_length(&mut reader).map_err(|e| e.to_string())?;
+    seek_forward(&mut reader, ebml_len).map_err(|e| e.to_string())?;
+
+    // Find Segment element
+    let segment_id = read_element_id(&mut reader).map_err(|e| e.to_string())?;
+    if segment_id != ID_SEGMENT {
+        return Err("Segment element not found after EBML header".to_string());
+    }
+    let _segment_len = read_vint_length(&mut reader).map_err(|e| e.to_string())?;
+    let segment_data_start = reader.stream_position().map_err(|e| e.to_string())?;
+
+    let mut tracks = Vec::new();
+    let mut attachments = Vec::new();
+    let mut has_chapters = false;
+
+    let mut seek_tracks: Option<u64> = None;
+    let mut seek_attachments: Option<u64> = None;
+    let mut seek_chapters: Option<u64> = None;
+    let mut has_seek_head = false;
+
+    // First scan top-level elements up to first Cluster
+    loop {
+        let elem_id = match read_element_id(&mut reader) {
+            Ok(id) => id,
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(format!("Error reading element ID: {e}")),
+        };
+        let elem_len = match read_vint_length(&mut reader) {
+            Ok(len) => len,
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(format!("Error reading element length: {e}")),
+        };
+
+        match elem_id {
+            ID_SEEK_HEAD => {
+                has_seek_head = true;
+                let current_pos = reader.stream_position().map_err(|e| e.to_string())?;
+                let end_pos = current_pos
+                    .checked_add(elem_len)
+                    .ok_or_else(|| "SeekHead element length overflow".to_string())?;
+                while reader.stream_position().map_err(|e| e.to_string())? < end_pos {
+                    let seek_entry_id = match read_element_id(&mut reader) {
+                        Ok(id) => id,
+                        Err(_) => break,
+                    };
+                    let seek_entry_len = match read_vint_length(&mut reader) {
+                        Ok(l) => l,
+                        Err(_) => break,
+                    };
+                    if seek_entry_id == ID_SEEK {
+                        let entry_start = reader.stream_position().map_err(|e| e.to_string())?;
+                        let entry_end = entry_start
+                            .checked_add(seek_entry_len)
+                            .ok_or_else(|| "Seek entry length overflow".to_string())?;
+                        let mut target_id: Option<u32> = None;
+                        let mut target_pos: Option<u64> = None;
+                        while reader.stream_position().map_err(|e| e.to_string())? < entry_end {
+                            let child = match read_element_id(&mut reader) {
+                                Ok(c) => c,
+                                Err(_) => break,
+                            };
+                            let child_len = match read_vint_length(&mut reader) {
+                                Ok(l) => l,
+                                Err(_) => break,
+                            };
+                            let child_start =
+                                reader.stream_position().map_err(|e| e.to_string())?;
+                            let child_end = child_start
+                                .checked_add(child_len)
+                                .ok_or_else(|| "Seek child length overflow".to_string())?;
+                            if child == ID_SEEK_ID {
+                                target_id = read_element_id(&mut reader).ok();
+                            } else if child == ID_SEEK_POSITION {
+                                target_pos = read_uint(&mut reader, child_len).ok();
+                            }
+                            let _ = reader.seek(SeekFrom::Start(child_end));
+                        }
+                        if let (Some(tid), Some(pos)) = (target_id, target_pos) {
+                            match tid {
+                                ID_TRACKS => seek_tracks = Some(pos),
+                                ID_ATTACHMENTS => seek_attachments = Some(pos),
+                                ID_CHAPTERS => seek_chapters = Some(pos),
+                                _ => {}
+                            }
+                        }
+                        let _ = reader.seek(SeekFrom::Start(entry_end));
+                    } else {
+                        let _ = seek_forward(&mut reader, seek_entry_len);
+                    }
+                }
+                let _ = reader.seek(SeekFrom::Start(end_pos));
+            }
+            ID_TRACKS => {
+                let current_pos = reader.stream_position().map_err(|e| e.to_string())?;
+                parse_tracks_block(&mut reader, elem_len, &mut tracks)?;
+                let next_pos = current_pos
+                    .checked_add(elem_len)
+                    .ok_or_else(|| "Tracks block length overflow".to_string())?;
+                reader
+                    .seek(SeekFrom::Start(next_pos))
+                    .map_err(|e| e.to_string())?;
+            }
+            ID_ATTACHMENTS => {
+                let current_pos = reader.stream_position().map_err(|e| e.to_string())?;
+                parse_attachments_block(&mut reader, elem_len, &mut attachments)?;
+                let next_pos = current_pos
+                    .checked_add(elem_len)
+                    .ok_or_else(|| "Attachments block length overflow".to_string())?;
+                reader
+                    .seek(SeekFrom::Start(next_pos))
+                    .map_err(|e| e.to_string())?;
+            }
+            ID_CHAPTERS => {
+                has_chapters = true;
+                let _ = seek_forward(&mut reader, elem_len);
+            }
+            ID_CLUSTER => {
+                // Reached video/audio clusters. If we have a SeekHead, use it to inspect post-cluster attachments/chapters.
+                // If there is NO SeekHead and we haven't seen attachments/chapters, fall back to mkvmerge -J!
+                if !has_seek_head {
+                    return Err(
+                        "No SeekHead before clusters, falling back to mkvmerge -J".to_string()
+                    );
+                }
+                break;
+            }
+            _ => {
+                let _ = seek_forward(&mut reader, elem_len);
+            }
+        }
+    }
+
+    // Follow SeekHead pointers if elements were located after clusters
+    if tracks.is_empty() {
+        if let Some(pos) = seek_tracks {
+            let target_pos = segment_data_start
+                .checked_add(pos)
+                .ok_or_else(|| "SeekHead tracks position overflow".to_string())?;
+            reader
+                .seek(SeekFrom::Start(target_pos))
+                .map_err(|e| e.to_string())?;
+            let elem_id = read_element_id(&mut reader).map_err(|e| e.to_string())?;
+            let elem_len = read_vint_length(&mut reader).map_err(|e| e.to_string())?;
+            if elem_id == ID_TRACKS {
+                parse_tracks_block(&mut reader, elem_len, &mut tracks)?;
+            }
+        }
+    }
+
+    if attachments.is_empty() {
+        if let Some(pos) = seek_attachments {
+            let target_pos = segment_data_start
+                .checked_add(pos)
+                .ok_or_else(|| "SeekHead attachments position overflow".to_string())?;
+            reader
+                .seek(SeekFrom::Start(target_pos))
+                .map_err(|e| e.to_string())?;
+            let elem_id = read_element_id(&mut reader).map_err(|e| e.to_string())?;
+            let elem_len = read_vint_length(&mut reader).map_err(|e| e.to_string())?;
+            if elem_id == ID_ATTACHMENTS {
+                parse_attachments_block(&mut reader, elem_len, &mut attachments)?;
+            }
+        }
+    }
+
+    if !has_chapters && seek_chapters.is_some() {
+        has_chapters = true;
+    }
+
+    if tracks.is_empty() {
+        return Err("No tracks discovered via native EBML probe".to_string());
+    }
+
+    let chapters = if has_chapters {
+        vec![MkvChapter {
+            num_entries: Some(1),
+        }]
+    } else {
+        Vec::new()
+    };
+
+    Ok(MkvmergeMetadata {
+        tracks,
+        attachments,
+        chapters,
+    })
+}
+
+fn parse_tracks_block<R: Read + Seek>(
+    reader: &mut R,
+    elem_len: u64,
+    tracks: &mut Vec<MkvTrack>,
+) -> Result<(), String> {
+    let current_pos = reader.stream_position().map_err(|e| e.to_string())?;
+    let end_pos = current_pos
+        .checked_add(elem_len)
+        .ok_or_else(|| "Tracks block length overflow".to_string())?;
+    let mut track_idx = tracks.len() as u32;
+    while reader.stream_position().map_err(|e| e.to_string())? < end_pos {
+        let entry_id = read_element_id(reader).map_err(|e| e.to_string())?;
+        let entry_len = read_vint_length(reader).map_err(|e| e.to_string())?;
+        let entry_start = reader.stream_position().map_err(|e| e.to_string())?;
+        let entry_end = entry_start
+            .checked_add(entry_len)
+            .ok_or_else(|| "Track entry length overflow".to_string())?;
+        if entry_id == ID_TRACK_ENTRY {
+            let mut track = parse_track_entry(reader, entry_len).map_err(|e| e.to_string())?;
+            track.id = Some(track_idx);
+            track_idx += 1;
+            tracks.push(track);
+        }
+        reader
+            .seek(SeekFrom::Start(entry_end))
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn parse_attachments_block<R: Read + Seek>(
+    reader: &mut R,
+    elem_len: u64,
+    attachments: &mut Vec<MkvAttachment>,
+) -> Result<(), String> {
+    let current_pos = reader.stream_position().map_err(|e| e.to_string())?;
+    let end_pos = current_pos
+        .checked_add(elem_len)
+        .ok_or_else(|| "Attachments block length overflow".to_string())?;
+    let mut att_id = (attachments.len() + 1) as u32;
+    while reader.stream_position().map_err(|e| e.to_string())? < end_pos {
+        let file_id = read_element_id(reader).map_err(|e| e.to_string())?;
+        let file_len = read_vint_length(reader).map_err(|e| e.to_string())?;
+        let entry_start = reader.stream_position().map_err(|e| e.to_string())?;
+        let entry_end = entry_start
+            .checked_add(file_len)
+            .ok_or_else(|| "Attached file length overflow".to_string())?;
+        if file_id == ID_ATTACHED_FILE {
+            let mut att = parse_attached_file(reader, file_len).map_err(|e| e.to_string())?;
+            att.id = Some(att_id);
+            att_id += 1;
+            attachments.push(att);
+        }
+        reader
+            .seek(SeekFrom::Start(entry_end))
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn parse_track_entry<R: Read + Seek>(reader: &mut R, len: u64) -> Result<MkvTrack, std::io::Error> {
+    let start_pos = reader.stream_position()?;
+    let end_pos = start_pos.checked_add(len).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Track entry length overflow",
+        )
+    })?;
+
+    let mut track_number: Option<u32> = None;
+    let mut track_type_num: Option<u64> = None;
+    let mut codec_id: Option<String> = None;
+    let mut language: Option<String> = None;
+    let mut language_ietf: Option<String> = None;
+    let mut track_name: Option<String> = None;
+    let mut pixel_width: Option<u32> = None;
+    let mut pixel_height: Option<u32> = None;
+    let mut channels: Option<u32> = None;
+
+    while reader.stream_position()? < end_pos {
+        let child_id = read_element_id(reader)?;
+        let child_len = read_vint_length(reader)?;
+
+        match child_id {
+            ID_TRACK_NUMBER => {
+                track_number = Some(read_uint(reader, child_len)? as u32);
+            }
+            ID_TRACK_TYPE => {
+                track_type_num = Some(read_uint(reader, child_len)?);
+            }
+            ID_CODEC_ID => {
+                codec_id = Some(read_string(reader, child_len)?);
+            }
+            ID_LANGUAGE => {
+                language = Some(read_string(reader, child_len)?);
+            }
+            ID_LANGUAGE_IETF => {
+                language_ietf = Some(read_string(reader, child_len)?);
+            }
+            ID_TRACK_NAME => {
+                track_name = Some(read_string(reader, child_len)?);
+            }
+            ID_FLAG_DEFAULT | ID_FLAG_FORCED => {
+                let _ = read_uint(reader, child_len)?;
+            }
+            ID_VIDEO => {
+                let v_start = reader.stream_position()?;
+                let v_end = v_start.checked_add(child_len).ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "Video element length overflow",
+                    )
+                })?;
+                while reader.stream_position()? < v_end {
+                    let vid_child = read_element_id(reader)?;
+                    let vid_len = read_vint_length(reader)?;
+                    match vid_child {
+                        ID_PIXEL_WIDTH => {
+                            pixel_width = Some(read_uint(reader, vid_len)? as u32);
+                        }
+                        ID_PIXEL_HEIGHT => {
+                            pixel_height = Some(read_uint(reader, vid_len)? as u32);
+                        }
+                        _ => {
+                            seek_forward(reader, vid_len)?;
+                        }
+                    }
+                }
+            }
+            ID_AUDIO => {
+                let mut explicit_channels: Option<u32> = None;
+                let a_start = reader.stream_position()?;
+                let a_end = a_start.checked_add(child_len).ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "Audio element length overflow",
+                    )
+                })?;
+                while reader.stream_position()? < a_end {
+                    let aud_child = read_element_id(reader)?;
+                    let aud_len = read_vint_length(reader)?;
+                    match aud_child {
+                        ID_CHANNELS => {
+                            explicit_channels = Some(read_uint(reader, aud_len)? as u32);
+                        }
+                        _ => {
+                            seek_forward(reader, aud_len)?;
+                        }
+                    }
+                }
+                // Matroska spec RFC 9559 §21.1: Channels defaults to 1 when omitted.
+                channels = Some(explicit_channels.unwrap_or(1));
+            }
+            _ => {
+                seek_forward(reader, child_len)?;
+            }
+        }
+    }
+
+    let track_type = match track_type_num {
+        Some(1) => "video",
+        Some(2) => "audio",
+        Some(17) => "subtitles",
+        _ => "unknown",
+    }
+    .to_string();
+
+    let pixel_dimensions = match (pixel_width, pixel_height) {
+        (Some(w), Some(h)) => Some(format!("{w}x{h}")),
+        _ => None,
+    };
+
+    let resolved_language = match language {
+        Some(lang) => Some(lang),
+        None => language_ietf.map(|ietf| {
+            let base = ietf.split('-').next().unwrap_or(&ietf);
+            crate::domain::lang_mkv_tag(base).to_string()
+        }),
+    };
+
+    let properties = TrackProperties {
+        codec_id: codec_id.clone(),
+        language: resolved_language,
+        track_name,
+        audio_channels: channels,
+        pixel_dimensions,
+    };
+
+    let id = track_number.map(|n| if n > 0 { n - 1 } else { 0 });
+
+    Ok(MkvTrack {
+        id,
+        track_type,
+        codec: codec_id,
+        properties,
+    })
+}
+
+fn parse_attached_file<R: Read + Seek>(
+    reader: &mut R,
+    len: u64,
+) -> Result<MkvAttachment, std::io::Error> {
+    let start_pos = reader.stream_position()?;
+    let end_pos = start_pos.checked_add(len).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Attached file length overflow",
+        )
+    })?;
+
+    let mut file_name: Option<String> = None;
+    let mut content_type: Option<String> = None;
+    let mut size: Option<u64> = None;
+
+    while reader.stream_position()? < end_pos {
+        let child_id = read_element_id(reader)?;
+        let child_len = read_vint_length(reader)?;
+
+        match child_id {
+            ID_FILE_NAME => {
+                file_name = Some(read_string(reader, child_len)?);
+            }
+            ID_FILE_MIME => {
+                content_type = Some(read_string(reader, child_len)?);
+            }
+            ID_FILE_DATA => {
+                size = Some(child_len);
+                seek_forward(reader, child_len)?;
+            }
+            _ => {
+                seek_forward(reader, child_len)?;
+            }
+        }
+    }
+
+    Ok(MkvAttachment {
+        id: None,
+        file_name,
+        content_type,
+        size,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    fn make_track_buf(lang: Option<&str>, lang_ietf: Option<&str>) -> Vec<u8> {
+        let mut buf = Vec::new();
+        // TrackType = 17 (subtitles)
+        buf.extend_from_slice(&[0x83, 0x81, 17]);
+        if let Some(l) = lang {
+            buf.extend_from_slice(&[0x22, 0xB5, 0x9C]);
+            buf.push(0x80 | (l.len() as u8));
+            buf.extend_from_slice(l.as_bytes());
+        }
+        if let Some(li) = lang_ietf {
+            buf.extend_from_slice(&[0x22, 0xB5, 0x9D]);
+            buf.push(0x80 | (li.len() as u8));
+            buf.extend_from_slice(li.as_bytes());
+        }
+        buf
+    }
+
+    #[test]
+    fn test_track_language_priority() {
+        // 1. Both present: ISO 639-2 `language` wins over BCP 47 `language_ietf`
+        let buf1 = make_track_buf(Some("jpn"), Some("en-US"));
+        let mut cur1 = Cursor::new(&buf1);
+        let track1 = parse_track_entry(&mut cur1, buf1.len() as u64).unwrap();
+        assert_eq!(track1.properties.language.as_deref(), Some("jpn"));
+
+        // 2. Only language_ietf present: primary subtag extracted and mapped via lang_mkv_tag
+        let buf2 = make_track_buf(None, Some("id-ID"));
+        let mut cur2 = Cursor::new(&buf2);
+        let track2 = parse_track_entry(&mut cur2, buf2.len() as u64).unwrap();
+        assert_eq!(track2.properties.language.as_deref(), Some("ind"));
+
+        let buf3 = make_track_buf(None, Some("en-US"));
+        let mut cur3 = Cursor::new(&buf3);
+        let track3 = parse_track_entry(&mut cur3, buf3.len() as u64).unwrap();
+        assert_eq!(track3.properties.language.as_deref(), Some("eng"));
+
+        let buf4 = make_track_buf(None, Some("ja"));
+        let mut cur4 = Cursor::new(&buf4);
+        let track4 = parse_track_entry(&mut cur4, buf4.len() as u64).unwrap();
+        assert_eq!(track4.properties.language.as_deref(), Some("jpn"));
+
+        // 3. Only ISO 639-2 language present
+        let buf5 = make_track_buf(Some("ind"), None);
+        let mut cur5 = Cursor::new(&buf5);
+        let track5 = parse_track_entry(&mut cur5, buf5.len() as u64).unwrap();
+        assert_eq!(track5.properties.language.as_deref(), Some("ind"));
+
+        // 4. Neither present
+        let buf6 = make_track_buf(None, None);
+        let mut cur6 = Cursor::new(&buf6);
+        let track6 = parse_track_entry(&mut cur6, buf6.len() as u64).unwrap();
+        assert_eq!(track6.properties.language, None);
+    }
+
+    fn make_audio_track_buf(audio_block: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        // TrackType = 2 (audio) -> 0x83, 0x81, 0x02
+        buf.extend_from_slice(&[0x83, 0x81, 0x02]);
+        buf.extend_from_slice(audio_block);
+        buf
+    }
+
+    #[test]
+    fn test_audio_channels_spec_default() {
+        // 1. Audio track with ID_AUDIO but omitted ID_CHANNELS: must default to Some(1) per RFC 9559 §21.1
+        // ID_AUDIO (0xE1), len 0 (0x80)
+        let buf_mono = make_audio_track_buf(&[0xE1, 0x80]);
+        let mut cur_mono = Cursor::new(&buf_mono);
+        let track_mono = parse_track_entry(&mut cur_mono, buf_mono.len() as u64).unwrap();
+        assert_eq!(track_mono.properties.audio_channels, Some(1));
+
+        // 2. Audio track with explicit ID_CHANNELS = 2: must parse as Some(2)
+        // ID_AUDIO (0xE1), len 3 (0x83): ID_CHANNELS (0x9F), len 1 (0x81), value 2 (0x02)
+        let buf_stereo = make_audio_track_buf(&[0xE1, 0x83, 0x9F, 0x81, 0x02]);
+        let mut cur_stereo = Cursor::new(&buf_stereo);
+        let track_stereo = parse_track_entry(&mut cur_stereo, buf_stereo.len() as u64).unwrap();
+        assert_eq!(track_stereo.properties.audio_channels, Some(2));
+
+        // 3. Non-audio track (e.g. subtitle, no ID_AUDIO): must remain None
+        let buf_sub = make_track_buf(None, None);
+        let mut cur_sub = Cursor::new(&buf_sub);
+        let track_sub = parse_track_entry(&mut cur_sub, buf_sub.len() as u64).unwrap();
+        assert_eq!(track_sub.properties.audio_channels, None);
+    }
+}

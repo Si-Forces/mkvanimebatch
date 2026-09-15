@@ -6,6 +6,10 @@ import {
   finalizeQueueState,
   carryOverAssignments,
   serializeAssignmentsForManifest,
+  buildTrackAssignmentsForManifest,
+  createQueueStateFromSnapshot,
+  formatOutcomeDuration,
+  formatElapsedDuration,
 } from "./queue-state.js";
 
 test("createQueueState initializes state from manifest v2", () => {
@@ -332,7 +336,8 @@ test("reduceQueueEvent evolves the single owned state object in place", () => {
   assert.equal(completed, state);
   assert.equal(state.completedCount, 1);
   assert.equal(item.status, "completed");
-  assert.equal(item.durationSec, "1.0");
+  assert.equal(item.durationSec, 1);
+  assert.equal(formatOutcomeDuration(item.durationSec), "1.0s");
 });
 
 test("reduceQueueEvent handles 10,000 start/complete pairs in linear time", () => {
@@ -378,7 +383,8 @@ test("sub-second completions render as <0.1 instead of 0.0", () => {
     status: "completed",
   }, 1099);
 
-  assert.equal(state.items.get("fast.mkv").durationSec, "<0.1");
+  assert.equal(formatOutcomeDuration(state.items.get("fast.mkv").durationSec), "<0.1s");
+  assert.equal(state.items.get("fast.mkv").durationSec, 0.049);
 });
 
 test("skips and plans report no duration instead of elapsed batch time", () => {
@@ -474,7 +480,8 @@ test("reduceQueueEvent treats cancelled items as terminal and counts them as can
     status: "cancelled",
   }, 3500);
   assert.equal(state.items.get("ep1.mkv").status, "cancelled");
-  assert.equal(state.items.get("ep1.mkv").durationSec, "2.5");
+  assert.equal(state.items.get("ep1.mkv").durationSec, 2.5);
+  assert.equal(formatOutcomeDuration(state.items.get("ep1.mkv").durationSec), "2.5s");
   assert.equal(state.cancelledCount, 1);
 
   // Cancelled before start (queued -> cancelled): no fabricated duration.
@@ -570,6 +577,318 @@ test("item transitioning directly from queued to error leaves durationSec as nul
   }, 9500);
 
   assert.equal(state.items.get("ep2.mkv").status, "error");
-  assert.equal(state.items.get("ep2.mkv").durationSec, "2.5");
+  assert.equal(state.items.get("ep2.mkv").durationSec, 2.5);
+  assert.equal(formatOutcomeDuration(state.items.get("ep2.mkv").durationSec), "2.5s");
   assert.equal(state.errorCount, 2);
 });
+
+test("buildTrackAssignmentsForManifest builds track assignments from carried over manual assignments", () => {
+  const manifest = {
+    version: 2,
+    items: [
+      { id: "Season 1/ep1.mkv", name: "ep1.mkv" },
+      { id: "Season 1/ep2.mkv", name: "ep2.mkv" },
+    ],
+  };
+  const assignments = new Map([
+    ["Season 1/ep1.mkv", "/subs/ep1.ass"],
+    ["Season 1/ep2.mkv", "/subs/ep2.ass"],
+  ]);
+
+  const result = buildTrackAssignmentsForManifest(assignments, manifest);
+  assert.deepEqual(result, [
+    {
+      target_video: "Season 1/ep1.mkv",
+      asset_path: "/subs/ep1.ass",
+      track_type: "subtitle",
+    },
+    {
+      target_video: "Season 1/ep2.mkv",
+      asset_path: "/subs/ep2.ass",
+      track_type: "subtitle",
+    },
+  ]);
+});
+
+test("buildTrackAssignmentsForManifest returns null when assignments map is empty", () => {
+  const manifest = {
+    version: 2,
+    items: [{ id: "ep1.mkv", name: "ep1.mkv" }],
+  };
+  const assignments = new Map();
+
+  const result = buildTrackAssignmentsForManifest(assignments, manifest);
+  assert.equal(result, null);
+});
+
+test("buildTrackAssignmentsForManifest ignores assignments for items not in the manifest", () => {
+  const manifest = {
+    version: 2,
+    items: [{ id: "ep1.mkv", name: "ep1.mkv" }],
+  };
+  const assignments = new Map([
+    ["ep1.mkv", "/subs/ep1.ass"],
+    ["deleted_ep2.mkv", "/subs/ep2.ass"],
+  ]);
+
+  const result = buildTrackAssignmentsForManifest(assignments, manifest);
+  assert.deepEqual(result, [
+    {
+      target_video: "ep1.mkv",
+      asset_path: "/subs/ep1.ass",
+      track_type: "subtitle",
+    },
+  ]);
+
+  const orphanedAssignments = new Map([
+    ["orphaned.mkv", "/subs/orphaned.ass"],
+  ]);
+  assert.equal(buildTrackAssignmentsForManifest(orphanedAssignments, manifest), null);
+});
+
+test("createQueueStateFromSnapshot constructs state and counts from JobSnapshot", () => {
+  const snapshot = {
+    job_id: 42,
+    mode: "extract",
+    status: "completed",
+    start_time_ms: 123456789,
+    items: {
+      "ep1.mkv": { id: "ep1.mkv", file: "Show - 01.mkv", status: "completed", duration_sec: 5.4 },
+      "ep2.mkv": { id: "ep2.mkv", file: "Show - 02.mkv", status: "skipped", reason: "Already extracted" },
+      "ep3.mkv": { id: "ep3.mkv", file: "Show - 03.mkv", status: "cancelled", reason: "Cancelled by user" },
+      "ep4.mkv": { id: "ep4.mkv", file: "Show - 04.mkv", status: "error", error: "mkvextract failed" },
+    },
+  };
+
+  const state = createQueueStateFromSnapshot(snapshot);
+  assert.equal(state.version, 1);
+  assert.equal(state.mode, "extract");
+  assert.equal(state.totalCount, 4);
+  assert.equal(state.completedCount, 1);
+  assert.equal(state.skippedCount, 1);
+  assert.equal(state.cancelledCount, 1);
+  assert.equal(state.errorCount, 1);
+  assert.equal(state.batchCompleted, true);
+  assert.equal(state.batchSuccess, true);
+  assert.equal(state.batchCancelled, false);
+  assert.equal(state.items.get("ep1.mkv").durationSec, 5.4);
+  assert.equal(state.items.get("ep2.mkv").reason, "Already extracted");
+  assert.equal(state.items.get("ep4.mkv").error, "mkvextract failed");
+});
+
+test("createQueueStateFromSnapshot handles empty or null snapshots", () => {
+  const stateNull = createQueueStateFromSnapshot(null);
+  assert.equal(stateNull.totalCount, 0);
+  assert.equal(stateNull.items.size, 0);
+
+  const stateEmpty = createQueueStateFromSnapshot({});
+  assert.equal(stateEmpty.totalCount, 0);
+});
+
+test("createQueueStateFromSnapshot resolves in-flight processing and queued items to cancelled for cancelled snapshot", () => {
+  const snapshot = {
+    job_id: 101,
+    mode: "remux",
+    status: "cancelled",
+    start_time_ms: 123456789,
+    items: {
+      "ep1.mkv": { id: "ep1.mkv", file: "Show - 01.mkv", status: "completed", duration_sec: 4.2 },
+      "ep2.mkv": { id: "ep2.mkv", file: "Show - 02.mkv", status: "processing" },
+      "ep3.mkv": { id: "ep3.mkv", file: "Show - 03.mkv", status: "queued" },
+    },
+  };
+
+  const state = createQueueStateFromSnapshot(snapshot);
+  assert.equal(state.batchCompleted, true);
+  assert.equal(state.batchCancelled, true);
+  assert.equal(state.batchSuccess, false);
+  assert.equal(state.totalCount, 3);
+  assert.equal(state.completedCount, 1);
+  assert.equal(state.cancelledCount, 2);
+  assert.equal(state.errorCount, 0);
+  assert.equal(state.items.get("ep1.mkv").status, "completed");
+  assert.equal(state.items.get("ep2.mkv").status, "cancelled");
+  assert.equal(state.items.get("ep3.mkv").status, "cancelled");
+});
+
+test("createQueueStateFromSnapshot resolves in-flight processing and queued items to error for error snapshot", () => {
+  const snapshot = {
+    job_id: 102,
+    mode: "extract",
+    status: "error",
+    start_time_ms: 123456789,
+    items: {
+      "ep1.mkv": { id: "ep1.mkv", file: "Show - 01.mkv", status: "completed", duration_sec: 5.0 },
+      "ep2.mkv": { id: "ep2.mkv", file: "Show - 02.mkv", status: "processing" },
+      "ep3.mkv": { id: "ep3.mkv", file: "Show - 03.mkv", status: "queued" },
+    },
+  };
+
+  const state = createQueueStateFromSnapshot(snapshot);
+  assert.equal(state.batchCompleted, true);
+  assert.equal(state.batchCancelled, false);
+  assert.equal(state.batchSuccess, false);
+  assert.equal(state.totalCount, 3);
+  assert.equal(state.completedCount, 1);
+  assert.equal(state.cancelledCount, 0);
+  assert.equal(state.errorCount, 2);
+  assert.equal(state.items.get("ep1.mkv").status, "completed");
+  assert.equal(state.items.get("ep2.mkv").status, "error");
+  assert.equal(state.items.get("ep3.mkv").status, "error");
+});
+
+test("createQueueStateFromSnapshot sets startTime for active in-flight processing items", () => {
+  const snapshot = {
+    job_id: 103,
+    mode: "remux",
+    status: "running",
+    start_time_ms: 123456789,
+    items: {
+      "ep1.mkv": { id: "ep1.mkv", file: "Show - 01.mkv", status: "processing" },
+      "ep2.mkv": { id: "ep2.mkv", file: "Show - 02.mkv", status: "queued" },
+    },
+  };
+
+  const fixedNow = 1700000000000;
+  const state = createQueueStateFromSnapshot(snapshot, { now: fixedNow });
+  assert.equal(state.batchCompleted, false);
+  assert.equal(state.items.get("ep1.mkv").status, "processing");
+  assert.equal(state.items.get("ep1.mkv").startTime, fixedNow);
+  assert.equal(state.items.get("ep2.mkv").status, "queued");
+  assert.equal(state.items.get("ep2.mkv").startTime, null);
+});
+
+test("formatOutcomeDuration formats null, existing formatted strings, and seconds thresholds", () => {
+  assert.equal(formatOutcomeDuration(null), null);
+  assert.equal(formatOutcomeDuration(undefined), null);
+
+  // Return strings ending with 's' or containing 'm' as-is
+  assert.equal(formatOutcomeDuration("4.2s"), "4.2s");
+  assert.equal(formatOutcomeDuration("1m 15.4s"), "1m 15.4s");
+  assert.equal(formatOutcomeDuration("2m 05s"), "2m 05s");
+  assert.equal(formatOutcomeDuration("<0.1s"), "<0.1s");
+
+  // Thresholds: < 0.1s, 4.2s, 75.4s -> 1m 15.4s
+  assert.equal(formatOutcomeDuration(0), "<0.1s");
+  assert.equal(formatOutcomeDuration(0.0), "<0.1s");
+  assert.equal(formatOutcomeDuration(0.04), "<0.1s");
+  assert.equal(formatOutcomeDuration("<0.1"), "<0.1s");
+  assert.equal(formatOutcomeDuration(4.2), "4.2s");
+  assert.equal(formatOutcomeDuration("4.2"), "4.2s");
+  assert.equal(formatOutcomeDuration(59.94), "59.9s");
+  assert.equal(formatOutcomeDuration(59.96), "1m 0.0s");
+  assert.equal(formatOutcomeDuration(60.0), "1m 0.0s");
+  assert.equal(formatOutcomeDuration(75.4), "1m 15.4s");
+  assert.equal(formatOutcomeDuration(119.96), "2m 0.0s");
+  assert.equal(formatOutcomeDuration("invalid"), null);
+});
+
+test("formatElapsedDuration formats negative seconds, seconds, and minutes", () => {
+  assert.equal(formatElapsedDuration(-5), "0s");
+  assert.equal(formatElapsedDuration(-0.1), "0s");
+  assert.equal(formatElapsedDuration(0), "0s");
+  assert.equal(formatElapsedDuration(4.2), "4s");
+  assert.equal(formatElapsedDuration(42), "42s");
+  assert.equal(formatElapsedDuration(59.9), "59s");
+  assert.equal(formatElapsedDuration(75.4), "1m 15s");
+  assert.equal(formatElapsedDuration(130), "2m 10s");
+});
+
+test("reduceQueueEvent uses event.duration_sec directly from engine", () => {
+  const manifest = {
+    version: 2,
+    items: [
+      { id: "ep1.mkv", name: "ep1.mkv" },
+      { id: "ep2.mkv", name: "ep2.mkv" },
+      { id: "ep3.mkv", name: "ep3.mkv" },
+    ],
+  };
+  let state = createQueueState(manifest);
+
+  // <0.1s
+  state = reduceQueueEvent(state, {
+    version: 1,
+    type: "item_complete",
+    id: "ep1.mkv",
+    status: "completed",
+    duration_sec: 0.08,
+  });
+  assert.equal(state.items.get("ep1.mkv").durationSec, 0.08);
+  assert.equal(formatOutcomeDuration(state.items.get("ep1.mkv").durationSec), "<0.1s");
+
+  // 4.2s
+  state = reduceQueueEvent(state, {
+    version: 1,
+    type: "item_complete",
+    id: "ep2.mkv",
+    status: "completed",
+    duration_sec: 4.2,
+  });
+  assert.equal(state.items.get("ep2.mkv").durationSec, 4.2);
+  assert.equal(formatOutcomeDuration(state.items.get("ep2.mkv").durationSec), "4.2s");
+
+  // 75.4s -> 1m 15.4s
+  state = reduceQueueEvent(state, {
+    version: 1,
+    type: "item_complete",
+    id: "ep3.mkv",
+    status: "completed",
+    duration_sec: 75.4,
+  });
+  assert.equal(state.items.get("ep3.mkv").durationSec, 75.4);
+  assert.equal(formatOutcomeDuration(state.items.get("ep3.mkv").durationSec), "1m 15.4s");
+});
+
+test("reduceQueueEvent clamps item_progress and preserves float precision", () => {
+  const manifest = {
+    version: 2,
+    items: [{ id: "ep1.mkv", name: "ep1.mkv" }],
+  };
+  let state = createQueueState(manifest);
+  state = reduceQueueEvent(state, { version: 1, type: "item_start", id: "ep1.mkv" });
+
+  state = reduceQueueEvent(state, {
+    version: 1,
+    type: "item_progress",
+    id: "ep1.mkv",
+    progress: 42.75,
+  });
+  assert.equal(state.items.get("ep1.mkv").progress, 42.75);
+
+  state = reduceQueueEvent(state, {
+    version: 1,
+    type: "item_progress",
+    id: "ep1.mkv",
+    progress: 120,
+  });
+  assert.equal(state.items.get("ep1.mkv").progress, 100);
+
+  state = reduceQueueEvent(state, {
+    version: 1,
+    type: "item_progress",
+    id: "ep1.mkv",
+    progress: -10,
+  });
+  assert.equal(state.items.get("ep1.mkv").progress, 0);
+});
+
+test("reduceQueueEvent populates items from batch_start when provided", () => {
+  let state = createQueueState({ version: 2, items: [] });
+  state = reduceQueueEvent(state, {
+    version: 1,
+    type: "batch_start",
+    total: 2,
+    items: [
+      { id: "e1", file: "Episode 1.mkv" },
+      { id: "e2", file: "Episode 2.mkv" },
+    ],
+  });
+
+  assert.equal(state.items.size, 2);
+  assert.equal(state.totalCount, 2);
+  assert.equal(state.items.get("e1").status, "queued");
+  assert.equal(state.items.get("e1").name, "Episode 1.mkv");
+  assert.equal(state.items.get("e2").status, "queued");
+  assert.equal(state.items.get("e2").name, "Episode 2.mkv");
+});
+

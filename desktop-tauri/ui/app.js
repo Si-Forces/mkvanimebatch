@@ -14,66 +14,94 @@ import { createInspectionCoordinator } from "./inspection-coordinator.js";
 // ─── Preset Configurations ──────────────────────────────────────────────────
 
 const PRESETS = {
-  default: {
+  balanced: {
     icon: "🌸",
     name: "Balanced Anime (Opus 192k)",
     bitrate: "192k",
     complexity: "5",
-    workers: "8",
-    ioJobs: "2",
-    ffmpegThreads: "",
-    subOffset: "0",
     keepFonts: true,
-    dryRun: false,
-    noCache: false,
   },
   fast: {
     icon: "⚡",
     name: "Fast Muxing (128k)",
     bitrate: "128k",
     complexity: "5",
-    workers: "16",
-    ioJobs: "4",
-    ffmpegThreads: "",
-    subOffset: "0",
     keepFonts: false,
-    dryRun: false,
-    noCache: false,
   },
-  high_quality: {
+  hifi: {
     icon: "🎧",
     name: "Hi-Fi Master (320k)",
     bitrate: "320k",
     complexity: "10",
-    workers: "8",
-    ioJobs: "2",
-    ffmpegThreads: "",
-    subOffset: "0",
     keepFonts: true,
-    dryRun: false,
-    noCache: false,
-  }
+  },
 };
+PRESETS.default = PRESETS.balanced;
+PRESETS.high_quality = PRESETS.hifi;
+
+async function restoreQueueFromSnapshot() {
+  try {
+    const snapshot = await invoke("get_job_snapshot");
+    if (!snapshot || !snapshot.job_id || !snapshot.items) return;
+    const mode = snapshot.mode || "remux";
+    const queue = queueFor(mode);
+    if (!queue || !queue.state) return;
+
+    if (queue.state.items.size === 0 && Object.keys(snapshot.items).length > 0) {
+      queue.restoreFromSnapshot(snapshot);
+      if (mode && mode !== "remux") {
+        switchView(mode);
+      }
+    }
+  } catch (_err) {
+    // Graceful fallback for non-Tauri or initial run environments
+  }
+}
+
+async function loadPresetProfiles() {
+  try {
+    const profiles = await invoke("get_preset_profiles");
+    if (Array.isArray(profiles) && profiles.length > 0) {
+      for (const p of profiles) {
+        const existing = PRESETS[p.id] || {};
+        PRESETS[p.id] = {
+          ...existing,
+          icon: p.icon,
+          name: p.name,
+          bitrate: p.bitrate,
+          complexity: String(p.complexity),
+          keepFonts: p.keep_fonts,
+        };
+      }
+    }
+  } catch (_err) {
+    // Graceful fallback for non-Tauri test environments
+  }
+}
 
 function setActiveProfileOption(presetKey) {
+  if (typeof document?.querySelectorAll !== "function") return;
   document.querySelectorAll(".profile-option-item").forEach(item => {
-    const active = item.dataset.preset === presetKey;
-    item.classList.toggle("active", active);
-    item.setAttribute("aria-pressed", active ? "true" : "false");
+    const active = item.dataset?.preset === presetKey;
+    item.classList?.toggle("active", active);
+    item.setAttribute?.("aria-pressed", active ? "true" : "false");
   });
 }
 
 function applyPreset(presetKey) {
   const p = PRESETS[presetKey];
   const nameEl = document.getElementById("active-profile-name");
+  const profileBtn = document.getElementById("active-profile-btn");
 
-  if (!p) {
+  if (!p || presetKey === "custom") {
     if (nameEl) nameEl.textContent = "🛠️ Custom Configuration";
+    if (profileBtn) profileBtn.dataset.preset = "custom";
     setActiveProfileOption("custom");
     return;
   }
 
   if (nameEl) nameEl.textContent = `${p.icon} ${p.name}`;
+  if (profileBtn) profileBtn.dataset.preset = presetKey;
   setActiveProfileOption(presetKey);
 
   const setVal = (id, val) => {
@@ -85,16 +113,14 @@ function applyPreset(presetKey) {
     if (el) el.checked = val;
   };
 
-  setVal("remux-bitrate", p.bitrate);
-  setVal("remux-complexity", p.complexity);
-  setVal("remux-cplx-val", p.complexity);
-  setVal("remux-workers", p.workers);
-  setVal("remux-io-jobs", p.ioJobs);
-  setVal("remux-ffmpeg-threads", p.ffmpegThreads || "");
-  setVal("remux-sub-offset", p.subOffset);
-  setChk("remux-keep-fonts", p.keepFonts);
-  setChk("remux-dry-run", p.dryRun);
-  setChk("remux-no-cache", p.noCache);
+  if (p.bitrate !== undefined) setVal("remux-bitrate", p.bitrate);
+  if (p.complexity !== undefined) {
+    setVal("remux-complexity", p.complexity);
+    setVal("remux-cplx-val", p.complexity);
+  }
+  if (p.keepFonts !== undefined) {
+    setChk("remux-keep-fonts", p.keepFonts);
+  }
 }
 
 // ─── Tauri API helpers ──────────────────────────────────────────────────────
@@ -402,7 +428,7 @@ export async function scanInputDirectory(path, mode, { force = false, options } 
 
 async function chooseInputDirectory(targetId) {
   if (JobCoordinator.activeMode !== null) return;
-  const directory = await invoke("pick_folder");
+  const directory = await invoke("pick_directory");
   if (!directory || JobCoordinator.activeMode !== null) return;
 
   const input = document.getElementById(targetId);
@@ -725,7 +751,7 @@ function initApp() {
   }
 
   // Detect custom input modifications
-  ["remux-bitrate", "remux-complexity", "remux-cplx-val", "remux-workers", "remux-io-jobs", "remux-ffmpeg-threads", "remux-sub-offset", "remux-keep-fonts", "remux-dry-run", "remux-no-cache"].forEach(id => {
+  ["remux-bitrate", "remux-complexity", "remux-cplx-val", "remux-ffmpeg-threads", "remux-sub-offset", "remux-keep-fonts", "remux-dry-run", "remux-no-cache"].forEach(id => {
     const el = document.getElementById(id);
     if (el) {
       el.addEventListener("change", () => applyPreset("custom"));
@@ -751,6 +777,8 @@ function initApp() {
   new JobController("extract", jobRuntime);
   JobCoordinator.syncControls();
   telemetryLoop.start();
+  loadPresetProfiles();
+  restoreQueueFromSnapshot();
 
   if (window.matchMedia) {
     window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", e => {

@@ -1,0 +1,666 @@
+{
+  "episodes": [
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "01"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "12"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "100"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "05"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "01"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "01"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "01"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "01"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "05"
+    },
+    {
+      "season": "2",
+      "ep_type": "E",
+      "ep": "10"
+    },
+    {
+      "season": "1",
+      "ep_type": "E",
+      "ep": "03"
+    },
+    {
+      "season": "3",
+      "ep_type": "E",
+      "ep": "125"
+    },
+    {
+      "season": "1",
+      "ep_type": "E",
+      "ep": "05"
+    },
+    {
+      "season": "1",
+      "ep_type": "E",
+      "ep": "01"
+    },
+    {
+      "season": "1",
+      "ep_type": "E",
+      "ep": "05"
+    },
+    {
+      "season": "1",
+      "ep_type": "E",
+      "ep": "01"
+    },
+    {
+      "season": "1",
+      "ep_type": "P",
+      "ep": "01"
+    },
+    {
+      "season": "2",
+      "ep_type": "P",
+      "ep": "05"
+    },
+    {
+      "season": "2",
+      "ep_type": "E",
+      "ep": "01"
+    },
+    {
+      "season": "2",
+      "ep_type": "E",
+      "ep": "01"
+    },
+    {
+      "season": "2",
+      "ep_type": "E",
+      "ep": "01"
+    },
+    {
+      "season": "1",
+      "ep_type": "E",
+      "ep": "05"
+    },
+    {
+      "season": "2",
+      "ep_type": "E",
+      "ep": "05"
+    },
+    {
+      "season": "2",
+      "ep_type": "E",
+      "ep": "05"
+    },
+    {
+      "season": "2",
+      "ep_type": "E",
+      "ep": "01"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "03"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "03"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "03"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "07"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "07"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "07"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "07"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "13"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "12.5"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "00.5"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "01.25"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "00.5"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "12.5"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "01.5"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "01.5"
+    },
+    {
+      "season": "",
+      "ep_type": "OVA",
+      "ep": "03"
+    },
+    {
+      "season": "",
+      "ep_type": "OVA",
+      "ep": "03"
+    },
+    {
+      "season": "",
+      "ep_type": "OVA",
+      "ep": "03"
+    },
+    {
+      "season": "",
+      "ep_type": "OVA",
+      "ep": "01"
+    },
+    {
+      "season": "",
+      "ep_type": "OVA",
+      "ep": "01"
+    },
+    {
+      "season": "",
+      "ep_type": "SP",
+      "ep": "01"
+    },
+    {
+      "season": "",
+      "ep_type": "SP",
+      "ep": "01"
+    },
+    {
+      "season": "",
+      "ep_type": "SP",
+      "ep": "02"
+    },
+    {
+      "season": "",
+      "ep_type": "SP",
+      "ep": "02"
+    },
+    {
+      "season": "",
+      "ep_type": "SP",
+      "ep": "02"
+    },
+    {
+      "season": "",
+      "ep_type": "OVA",
+      "ep": "00"
+    },
+    {
+      "season": "",
+      "ep_type": "SP",
+      "ep": "00"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "05"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "01"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "12"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "12.5"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "03"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "04"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "100"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "05"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "12"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "01"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "01"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "1234"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "2150"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "2023"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "1089"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "1100"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "03"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "02"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "01"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "02"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "03"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "01"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "01"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "12"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "12"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "12"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "24"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "24"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "01"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "01"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "01"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "01"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "01"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "01"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "01"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "01"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "01"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "01"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "01"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "01"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "01"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "01"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "01"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "01"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "01"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "01"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "02"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "03"
+    },
+    {
+      "season": "",
+      "ep_type": "E",
+      "ep": "04"
+    },
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null
+  ],
+  "sub_stems": [
+    "ind",
+    "ind",
+    "ind",
+    "ind",
+    "ind",
+    "ind",
+    "ind",
+    "eng",
+    "eng",
+    "eng",
+    "eng",
+    "jpn",
+    "jpn",
+    "jpn",
+    "ind",
+    "ind",
+    "tso",
+    "ts",
+    "ind",
+    "eng",
+    "ind",
+    "und",
+    "und",
+    "ind",
+    "eng",
+    "jpn",
+    "ind"
+  ],
+  "safe_names": [
+    "bar",
+    "foo_bar",
+    "foo_bar",
+    "foo_bar",
+    "foo_bar",
+    "foo_bar",
+    "foo_bar",
+    "foo_bar",
+    "foo_bar",
+    "  hello world  ",
+    "________",
+    "unnamed",
+    "unnamed",
+    ".hidden",
+    "unnamed",
+    "unnamed",
+    "_CON",
+    "_prn.txt",
+    "_aux",
+    "_NUL.tar.gz",
+    "normal_name-123"
+  ],
+  "track_names": [
+    true,
+    true,
+    true,
+    true,
+    true,
+    false,
+    false,
+    false,
+    false,
+    true,
+    true,
+    true,
+    false,
+    false,
+    false
+  ],
+  "commentary_names": [
+    true,
+    true,
+    true,
+    true,
+    true,
+    false,
+    false,
+    false,
+    false,
+    false
+  ],
+  "sorted_outputs": [
+    "EP1",
+    "EP2",
+    "EP10",
+    "Episode 02",
+    "Episode 99",
+    "Episode 100",
+    "Season 1/EP1",
+    "Season 2/EP1",
+    "Season 10/EP1",
+    "Show - 1.5.mkv",
+    "Show - 01.mkv",
+    "Show - 1.mkv",
+    "Show - 01v1.mkv",
+    "Show - 01v2.mkv",
+    "Show - 2.mkv",
+    "Show - 10.mkv"
+  ],
+  "chapter_xml_results": [
+    true,
+    true,
+    true,
+    true,
+    true,
+    false,
+    false,
+    false,
+    false
+  ],
+  "cover_stem_results": [
+    "Show - 01",
+    "Show S01E02",
+    "Movie",
+    null,
+    null,
+    null,
+    null
+  ],
+  "bitrate_results": [
+    [
+      128,
+      "k"
+    ],
+    [
+      192,
+      "k"
+    ],
+    [
+      1,
+      "M"
+    ],
+    [
+      320,
+      ""
+    ],
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null
+  ]
+}

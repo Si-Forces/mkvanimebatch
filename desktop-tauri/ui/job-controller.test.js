@@ -299,6 +299,46 @@ test("extractInspectionOptions parses valid options, preserves 0, and rejects in
   assert.ok(extractInspectionOptions(["--input-dir", "/dir", "--io-jobs"]).error, "trailing --io-jobs after flags should be rejected");
 });
 
+test("extractInspectionOptions parses valid options, preserves 0, and rejects invalid values from BatchRequest objects", () => {
+  // Valid combined
+  const res1 = extractInspectionOptions({ workers: 6, io_jobs: 0, no_cache: true });
+  assert.deepEqual(res1.options, { workers: 6, ioJobs: 0, noCache: true });
+  assert.equal(res1.error, undefined);
+
+  // Defaults on empty / null / undefined fields
+  const res2 = extractInspectionOptions({});
+  assert.deepEqual(res2.options, {});
+
+  const res3 = extractInspectionOptions({ workers: null, io_jobs: null, no_cache: false });
+  assert.deepEqual(res3.options, {});
+
+  const res4 = extractInspectionOptions(null);
+  assert.deepEqual(res4.options, {});
+
+  // Boundary workers
+  assert.equal(extractInspectionOptions({ workers: 1 }).options.workers, 1);
+  assert.equal(extractInspectionOptions({ workers: 64 }).options.workers, 64);
+  assert.ok(extractInspectionOptions({ workers: 0 }).error);
+  assert.ok(extractInspectionOptions({ workers: -1 }).error);
+  assert.ok(extractInspectionOptions({ workers: 65 }).error);
+  assert.ok(extractInspectionOptions({ workers: "abc" }).error);
+  assert.ok(extractInspectionOptions({ workers: 4.5 }).error);
+  assert.ok(extractInspectionOptions({ workers: NaN }).error);
+
+  // Boundary io-jobs (preserves 0)
+  assert.equal(extractInspectionOptions({ io_jobs: 0 }).options.ioJobs, 0);
+  assert.equal(extractInspectionOptions({ io_jobs: 64 }).options.ioJobs, 64);
+  assert.ok(extractInspectionOptions({ io_jobs: -1 }).error);
+  assert.ok(extractInspectionOptions({ io_jobs: 65 }).error);
+  assert.ok(extractInspectionOptions({ io_jobs: "abc" }).error);
+  assert.ok(extractInspectionOptions({ io_jobs: 1.5 }).error);
+  assert.ok(extractInspectionOptions({ io_jobs: NaN }).error);
+
+  // no_cache
+  assert.equal(extractInspectionOptions({ no_cache: true }).options.noCache, true);
+  assert.equal(extractInspectionOptions({ no_cache: false }).options.noCache, undefined);
+});
+
 test("job controller forwards snapshotted execution args incl zero io-jobs and no-cache, ignoring subsequent DOM mutations", async t => {
   const elements = new Map([
     ["remux-input-dir", new FakeElement("/my-anime")],
@@ -373,12 +413,13 @@ test("job controller forwards snapshotted execution args incl zero io-jobs and n
   // Verify worker chips received (true, 6, 0) - 0 is not coerced!
   assert.deepEqual(workerChipCalls[0], [true, 6, 0]);
 
-  // Verify run_job args still reflect original snapshot, not mutated DOM
-  const runJobArgs = invocations.find(([cmd]) => cmd === "run_job")[1].args;
-  assert.equal(runJobArgs[runJobArgs.indexOf("--input-dir") + 1], "/my-anime");
-  assert.equal(runJobArgs[runJobArgs.indexOf("--workers") + 1], "6");
-  assert.equal(runJobArgs[runJobArgs.indexOf("--io-jobs") + 1], "0");
-  assert.ok(runJobArgs.includes("--no-cache"));
+  // Verify run_job request still reflects original snapshot, not mutated DOM
+  const runJobCall = invocations.find(([cmd]) => cmd === "run_job");
+  const runJobReq = runJobCall[1].request;
+  assert.equal(runJobReq.input_dir, "/my-anime");
+  assert.equal(runJobReq.workers, 6);
+  assert.equal(runJobReq.io_jobs, 0);
+  assert.equal(runJobReq.no_cache, true);
 });
 
 test("deferred preflight stop releases ownership, finalizes cancelled queue, and avoids run_job for option-bearing preflight", async t => {
@@ -507,4 +548,90 @@ test("job controller fails immediately when workers or io-jobs are invalid", asy
   assert.equal(scanCalled, false);
   assert.equal(controller.running, false);
   assert.ok(errorLogs.some(msg => msg.includes("Invalid workers value '0'")));
+});
+
+test("job controller passes typed BatchRequest with track assignments to run_job", async t => {
+  const elements = new Map([
+    ["remux-input-dir", new FakeElement("/anime/series")],
+    ["remux-out-dir", new FakeElement("/anime/out")],
+    ["remux-fonts-dir", new FakeElement("/anime/fonts")],
+    ["remux-bitrate", new FakeElement("256k")],
+    ["remux-complexity", new FakeElement("8")],
+    ["remux-workers", new FakeElement("6")],
+    ["remux-io-jobs", new FakeElement("3")],
+    ["remux-ffmpeg-threads", new FakeElement("4")],
+    ["remux-sub-offset", new FakeElement("1.5")],
+    ["remux-keep-fonts", Object.assign(new FakeElement(), { checked: true })],
+    ["remux-dry-run", Object.assign(new FakeElement(), { checked: false })],
+    ["remux-no-cache", Object.assign(new FakeElement(), { checked: true })],
+    ["remux-run", new FakeElement()],
+    ["remux-stop", new FakeElement()],
+    ["remux-log", new FakeElement()],
+    ["remux-status", new FakeElement()],
+  ]);
+  const previousDocument = globalThis.document;
+  globalThis.document = {
+    getElementById: id => elements.get(id) ?? null,
+    querySelectorAll: () => [],
+    querySelector: sel => {
+      if (sel === ".profile-option-item.active") {
+        return { dataset: { preset: "balanced" } };
+      }
+      return null;
+    },
+  };
+  t.after(() => { globalThis.document = previousDocument; });
+
+  const invocations = [];
+  const coordinator = createJobCoordinator();
+  const queue = {
+    assignments: new Map([["ep1.mkv", "/subs/ep1.ass"]]),
+    lastManifest: { version: 2, items: [{ id: "ep1.mkv", name: "ep1.mkv" }] },
+    handleEvent() {},
+    finalize() {},
+  };
+  const runtime = {
+    coordinator,
+    appendLog() {},
+    clearLog() {},
+    closeSubAssignModal() {},
+    queueFor: () => queue,
+    safeAddListener() {},
+    scanInputDirectory: async () => true,
+    showModal: async () => true,
+    telemetryLoop: { setJobActive() {} },
+    updateWorkerChips() {},
+    async listen() { return () => {}; },
+    async invoke(command, args) {
+      invocations.push([command, args]);
+      if (command === "run_job") return 42;
+      return null;
+    },
+  };
+
+  const controller = new JobController("remux", runtime);
+  await controller.start();
+
+  assert.equal(controller.jobId, 42);
+  const runJobCall = invocations.find(([cmd]) => cmd === "run_job");
+  assert.ok(runJobCall);
+  const req = runJobCall[1].request;
+  assert.ok(req);
+  assert.equal(req.mode, "remux");
+  assert.equal(req.input_dir, "/anime/series");
+  assert.equal(req.out_dir, "/anime/out");
+  assert.equal(req.fonts_dir, "/anime/fonts");
+  assert.equal(req.bitrate, "256k");
+  assert.equal(req.complexity, 8);
+  assert.equal(req.workers, 6);
+  assert.equal(req.io_jobs, 3);
+  assert.equal(req.ffmpeg_threads, 4);
+  assert.equal(req.sub_offset, 1.5);
+  assert.equal(req.keep_fonts, true);
+  assert.equal(req.no_cache, true);
+  assert.equal(req.preset, "balanced");
+  assert.ok(Array.isArray(req.assignments));
+  assert.equal(req.assignments.length, 1);
+  assert.equal(req.assignments[0].target_video, "ep1.mkv");
+  assert.equal(req.assignments[0].asset_path, "/subs/ep1.ass");
 });

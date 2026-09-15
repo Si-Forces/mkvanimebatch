@@ -1,64 +1,24 @@
-use crate::contract::{parse_job_event, parse_manifest_json, InspectionManifest};
-#[cfg(windows)]
-use crate::process::CREATE_NO_WINDOW;
+use crate::contract::{InspectionManifest, JobEvent, JobEventExt};
 pub use crate::process::{
-    begin_shutdown, cancel_shutdown, cleanup_owned_processes, close_window, stop_job, JobState,
-    ScanState,
+    begin_shutdown, cancel_shutdown, cleanup_owned_processes, close_window, stop_job, ItemSnapshot,
+    ItemStatus, JobSnapshot, JobState, ScanState,
 };
-use crate::process::{reserve_job_slot, stop_registered_scan, JobSlot, ScanRegistration};
-use crate::sidecar::{get_sidecar_path, run_sidecar_once, sidecar_name};
+use crate::process::{
+    reserve_job_slot, stop_registered_scan, ActiveScan, JobSlot, ScanRegistration,
+};
 pub use crate::telemetry::{get_system_telemetry, TelemetryState};
 pub use crate::window::{
     is_maximized, minimize_window, set_window_theme, start_drag, start_resize, toggle_maximize,
 };
 use serde::Deserialize;
-use std::io::{BufRead, BufReader};
-use std::process::{Command, Stdio};
 use std::sync::atomic::Ordering;
-use std::thread;
 use tauri::{AppHandle, Emitter, Manager, State};
-
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
-
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InspectOptions {
-    workers: Option<i64>,
-    io_jobs: Option<i64>,
-    no_cache: Option<bool>,
-}
-
-fn inspect_options_to_args(options: Option<&InspectOptions>) -> Result<Vec<String>, String> {
-    let Some(opts) = options else {
-        return Ok(Vec::new());
-    };
-    let mut args = Vec::new();
-    if let Some(workers) = opts.workers {
-        if !(1..=64).contains(&workers) {
-            return Err(format!(
-                "Invalid workers '{workers}': must be an integer between 1 and 64"
-            ));
-        }
-        args.push("--workers".to_string());
-        args.push(workers.to_string());
-    }
-    if let Some(io_jobs) = opts.io_jobs {
-        if !(0..=64).contains(&io_jobs) {
-            return Err(format!(
-                "Invalid io_jobs '{io_jobs}': must be an integer between 0 and 64"
-            ));
-        }
-        args.push("--io-jobs".to_string());
-        args.push(io_jobs.to_string());
-    }
-    if opts.no_cache.unwrap_or(false) {
-        args.push("--no-cache".to_string());
-    }
-    Ok(args)
+    #[serde(default)]
+    pub no_cache: Option<bool>,
 }
 
 #[tauri::command]
@@ -68,284 +28,256 @@ pub async fn inspect_directory(
     path: String,
     options: Option<InspectOptions>,
 ) -> Result<InspectionManifest, String> {
-    let extra_args = inspect_options_to_args(options.as_ref())?;
     let start_lock = state.start_lock.lock().map_err(|e| e.to_string())?;
     state.ensure_accepting_starts()?;
     let dir = std::fs::canonicalize(&path).map_err(|e| format!("Invalid directory path: {}", e))?;
     if !dir.is_dir() {
         return Err("Directory does not exist or is not a directory".into());
     }
-    let path = dir.to_string_lossy().into_owned();
     stop_registered_scan(&state)?;
 
-    let binary = get_sidecar_path(&app, "mkv-remux")
-        .map_err(|_| "Sidecar 'mkv-remux' not found.".to_string())?;
-    let mut command = Command::new(binary);
-    command.args(["--plan", "--input-dir", &path]);
-    command.args(&extra_args);
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    #[cfg(windows)]
-    command.creation_flags(CREATE_NO_WINDOW);
-    #[cfg(unix)]
-    command.process_group(0);
-
-    let child = command
-        .spawn()
-        .map_err(|e| format!("Failed to spawn sidecar: {e}"))?;
     let scan_id = state.next_id.fetch_add(1, Ordering::SeqCst);
-    let pid = child.id();
-    *state.active.lock().map_err(|e| e.to_string())? = Some((scan_id, pid));
+    let cancel_token = tokio_util::sync::CancellationToken::new();
+    *state.active.lock().map_err(|e| e.to_string())? = Some(ActiveScan {
+        id: scan_id,
+        pid: 0,
+        cancel_token: Some(cancel_token.clone()),
+    });
+    app.state::<JobState>().clear_snapshot();
     drop(start_lock);
     let registration = ScanRegistration {
         state: &state,
         id: scan_id,
     };
 
+    let no_cache = options.as_ref().and_then(|o| o.no_cache).unwrap_or(false);
     let result = tauri::async_runtime::spawn_blocking(move || {
-        let output = child
-            .wait_with_output()
-            .map_err(|e| format!("Failed to wait for sidecar: {e}"))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            return Err(format!(
-                "Sidecar exit code {:?}: {}",
-                output.status.code(),
-                stderr
-            ));
-        }
-
-        parse_manifest_json(&output.stdout)
+        let cache = mkv_core::scan::PersistentInspectCache::default();
+        let cache_opt = if no_cache { None } else { Some(&cache) };
+        mkv_core::manifest::generate_inspection_manifest(&dir, cache_opt, Some(&cancel_token))
     })
     .await
     .unwrap_or_else(|e| Err(format!("Async runtime error: {}", e)));
+
     drop(registration);
     result
 }
 
-fn spawn_log_stream_reader<R: std::io::Read + Send + 'static>(
-    reader: R,
-    app: AppHandle,
-    is_stderr: bool,
-    event_mode: Option<String>,
-    job_id: u64,
-) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
-        let mut log_batch = Vec::with_capacity(30);
-        let mut last_flush = std::time::Instant::now();
-        for line in BufReader::new(reader).lines().map_while(Result::ok) {
-            if !is_stderr {
-                if let Some(event_str) = line.strip_prefix("@event:") {
-                    let trimmed = event_str.trim();
-                    if let Ok(mut event) = parse_job_event(trimmed) {
-                        if let Some(ref mode) = event_mode {
-                            event.attach_context(mode, job_id);
-                        }
-                        let _ = app.emit("job-event", event);
-                        continue;
-                    }
-                }
-            }
-            let formatted_line = if is_stderr {
-                format!("[ERR] {}", line)
-            } else {
-                line
-            };
-            log_batch.push(formatted_line);
-            if log_batch.len() >= 25 || last_flush.elapsed().as_millis() >= 25 {
-                let _ = app.emit("job-log", &log_batch);
-                log_batch.clear();
-                last_flush = std::time::Instant::now();
-            }
-        }
-        if !log_batch.is_empty() {
-            let _ = app.emit("job-log", &log_batch);
-        }
-    })
-}
-
-/// Owns the temporary assignments file until it is handed to the wait thread.
-/// Dropping the guard (any early return before spawn succeeds) removes the
-/// file; after `defuse()`, removal becomes the wait thread's responsibility.
-struct TempAssignmentFile(Option<tempfile::TempPath>);
-
-impl TempAssignmentFile {
-    fn defuse(&mut self) -> Option<tempfile::TempPath> {
-        self.0.take()
-    }
-}
-
 #[tauri::command]
-pub fn run_job(
-    app: AppHandle,
+pub fn run_job<R: tauri::Runtime>(
+    app: AppHandle<R>,
     state: State<'_, JobState>,
-    mode: String,
-    args: Vec<String>,
-    assignments_json: Option<String>,
+    request: mkv_core::request::BatchRequest,
 ) -> Result<u64, String> {
-    let sidecar_name = sidecar_name(&mode)?;
-
-    for arg in &args {
-        if arg.contains('\0') {
-            return Err("Argument contains invalid null character".into());
-        }
-    }
+    request.validate()?;
 
     let mut lock = reserve_job_slot(&state)?;
 
-    let mut full_args = args;
-    let mut temp_assignments = TempAssignmentFile(None);
-    if let Some(json) = assignments_json.filter(|json| !json.is_empty()) {
-        use std::io::Write;
-        let mut temp_file = tempfile::Builder::new()
-            .prefix("mkvanimebatch-assignments-")
-            .suffix(".json")
-            .tempfile()
-            .map_err(|e| format!("Failed to create secure temp file: {}", e))?;
-        temp_file
-            .write_all(json.as_bytes())
-            .map_err(|e| format!("Failed to write assignments file: {}", e))?;
-        temp_file
-            .flush()
-            .map_err(|e| format!("Failed to flush assignments file: {}", e))?;
-        let path = temp_file.into_temp_path();
-        full_args.push("--sub-assignments".into());
-        full_args.push(path.to_path_buf().to_string_lossy().into_owned());
-        temp_assignments.0 = Some(path);
+    let mode_str = match request.mode {
+        mkv_core::pipeline::PipelineMode::Extract => "extract",
+        mkv_core::pipeline::PipelineMode::Remux => "remux",
     }
-
-    let binary = get_sidecar_path(&app, sidecar_name)?;
-
-    let mut cmd = Command::new(&binary);
-    cmd.args(&full_args);
-    if !full_args.iter().any(|a| a == "--events") {
-        cmd.arg("--events");
-    }
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-
-    #[cfg(windows)]
-    cmd.creation_flags(CREATE_NO_WINDOW);
-
-    #[cfg(unix)]
-    cmd.process_group(0);
-
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("Failed to launch {}: {}", binary.display(), e))?;
-
-    let stdout = child.stdout.take().ok_or("no stdout pipe")?;
-    let stderr = child.stderr.take().ok_or("no stderr pipe")?;
-
-    // Spawn fully succeeded; the sidecar has (or will) read its argv, so the
-    // wait thread now owns temp-file removal for after the process exits.
-    let temp_assignments_path = temp_assignments.defuse();
+    .to_string();
 
     let job_id = state.next_id.fetch_add(1, Ordering::SeqCst);
-    *lock = Some(JobSlot {
-        id: job_id,
-        child,
-        stopping: false,
-    });
-    drop(lock);
+    let cancel_token = tokio_util::sync::CancellationToken::new();
 
-    let stdout_handle =
-        spawn_log_stream_reader(stdout, app.clone(), false, Some(mode.clone()), job_id);
-    let stderr_handle = spawn_log_stream_reader(stderr, app.clone(), true, None, job_id);
+    let (event_tx, mut event_rx) = mkv_core::pipeline::create_event_channel(64);
+    let (log_tx, mut log_rx) = mkv_core::pipeline::create_log_channel(128);
 
-    let app_wait = app.clone();
-    let done_mode = mode.clone();
-    thread::spawn(move || {
-        let _ = stdout_handle.join();
-        let _ = stderr_handle.join();
+    let pipeline = mkv_core::pipeline::BatchPipeline::from_request(
+        request,
+        Some(event_tx),
+        cancel_token.clone(),
+    )?
+    .with_log_sender(Some(log_tx));
 
-        let code = {
-            let job = app_wait.state::<JobState>();
-            // We loop wait in case it hasn't exited, without holding the lock
-            let mut exit_code = None;
+    let app_task = app.clone();
+    let mode_task = mode_str;
+    let task_handle = tauri::async_runtime::spawn(async move {
+        struct JobSlotGuard<R: tauri::Runtime> {
+            app: AppHandle<R>,
+            job_id: u64,
+        }
+        impl<R: tauri::Runtime> Drop for JobSlotGuard<R> {
+            fn drop(&mut self) {
+                let state = self.app.state::<JobState>();
+                state.release_slot(self.job_id);
+                state.cancel_snapshot_if_running();
+            }
+        }
+        let _guard = JobSlotGuard {
+            app: app_task.clone(),
+            job_id,
+        };
+
+        let app_event = app_task.clone();
+        let mode_event = mode_task.clone();
+        let state_for_event = app_task.state::<JobState>();
+        let event_task = async move {
+            while let Some(mut event) = event_rx.recv().await {
+                event.attach_context(&mode_event, job_id);
+                state_for_event.update_snapshot(&event, job_id, &mode_event);
+                let _ = app_event.emit("job-event", &event);
+            }
+        };
+        let app_log = app_task.clone();
+        let log_task = async move {
+            let mut batch: Vec<String> = Vec::with_capacity(25);
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(25));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
             loop {
-                let mut lock = job.slot.lock().unwrap_or_else(|e| e.into_inner());
-                let mut should_wait = false;
-
-                if let Some(slot) = &mut *lock {
-                    if slot.id == job_id {
-                        match slot.child.try_wait() {
-                            Ok(Some(status)) => {
-                                exit_code = Some(status.code().unwrap_or(-1));
+                tokio::select! {
+                    line = log_rx.recv() => {
+                        match line {
+                            Some(l) => {
+                                batch.push(l);
+                                if batch.len() >= 25 {
+                                    let _ = app_log.emit("job-log", &batch);
+                                    batch.clear();
+                                }
                             }
-                            Ok(None) => {
-                                should_wait = true;
-                            }
-                            Err(_) => {
-                                exit_code = Some(-1);
+                            None => {
+                                if !batch.is_empty() {
+                                    let _ = app_log.emit("job-log", &batch);
+                                    batch.clear();
+                                }
+                                break;
                             }
                         }
                     }
-                }
-                drop(lock);
-
-                if should_wait {
-                    thread::sleep(std::time::Duration::from_millis(100));
-                } else {
-                    break;
+                    _ = interval.tick() => {
+                        if !batch.is_empty() {
+                            let _ = app_log.emit("job-log", &batch);
+                            batch.clear();
+                        }
+                    }
                 }
             }
-            exit_code
         };
 
-        drop(temp_assignments_path);
-
-        {
-            let job = app_wait.state::<JobState>();
-            let mut lock = job.slot.lock().unwrap_or_else(|e| e.into_inner());
-            if lock.as_ref().is_some_and(|slot| slot.id == job_id) {
-                *lock = None;
+        struct PipelineAbortGuard(tokio::task::AbortHandle);
+        impl Drop for PipelineAbortGuard {
+            fn drop(&mut self) {
+                self.0.abort();
             }
         }
 
-        if let Some(code) = code {
-            let _ = app_wait.emit(
-                "job-done",
-                serde_json::json!({"mode": done_mode, "job_id": job_id, "code": code}),
-            );
-        }
+        let pipeline_handle = tokio::spawn(async move { pipeline.run().await });
+        let _abort_guard = PipelineAbortGuard(pipeline_handle.abort_handle());
+
+        let (pipeline_result, (), ()) = tokio::join!(pipeline_handle, event_task, log_task);
+
+        let code = match pipeline_result {
+            Ok(Ok(summary)) => {
+                if summary.cancelled {
+                    -1
+                } else if summary.errors > 0 {
+                    1
+                } else {
+                    0
+                }
+            }
+            Ok(Err(e)) => {
+                let _ = app_task.emit("job-log", vec![format!("[ERR] Pipeline failed: {e}")]);
+                1
+            }
+            Err(join_err) => {
+                let panic_msg = if join_err.is_panic() {
+                    let panic_payload = join_err.into_panic();
+                    if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        "Unknown pipeline panic".to_string()
+                    }
+                } else {
+                    "Pipeline task cancelled or aborted".to_string()
+                };
+
+                let mut extra = serde_json::Map::new();
+                extra.insert(
+                    "mode".to_string(),
+                    serde_json::Value::String(mode_task.clone()),
+                );
+                extra.insert(
+                    "job_id".to_string(),
+                    serde_json::Value::Number(job_id.into()),
+                );
+                extra.insert(
+                    "panic".to_string(),
+                    serde_json::Value::String(panic_msg.clone()),
+                );
+
+                let event = JobEvent::BatchComplete {
+                    version: 1,
+                    success: false,
+                    cancelled: false,
+                    extra,
+                };
+                let state_for_panic = app_task.state::<JobState>();
+                state_for_panic.update_snapshot(&event, job_id, &mode_task);
+                let _ = app_task.emit("job-event", &event);
+                let _ = app_task.emit("job-log", vec![format!("[PANIC] {panic_msg}")]);
+                1
+            }
+        };
+
+        let _ = app_task.emit(
+            "job-done",
+            serde_json::json!({
+                "mode": mode_task,
+                "job_id": job_id,
+                "code": code
+            }),
+        );
+    });
+
+    *lock = Some(JobSlot {
+        id: job_id,
+        cancel_token,
+        task_handle,
+        stopping: false,
     });
 
     Ok(job_id)
 }
 
 #[tauri::command]
-pub async fn clear_cache(app: AppHandle, mode: String) -> Result<String, String> {
+pub async fn clear_cache(_app: AppHandle, _mode: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let sidecar_name = sidecar_name(&mode)?;
-        let output = run_sidecar_once(&app, sidecar_name, &["--clear-cache"])?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        let combined = format!("{}{}", stdout, stderr).trim().to_string();
-
-        if output.status.success() {
-            Ok(if combined.is_empty() {
-                "Cache cleared.".into()
-            } else {
-                combined
-            })
-        } else {
-            Err(format!(
-                "clear-cache failed (exit {}): {}",
-                output.status.code().unwrap_or(-1),
-                combined
-            ))
-        }
+        let cache = mkv_core::scan::PersistentInspectCache::default();
+        cache.clear();
+        Ok("Persistent inspection cache cleared.".into())
     })
     .await
     .unwrap_or_else(|e| Err(format!("Async runtime error: {}", e)))
 }
 
 #[tauri::command]
-pub fn pick_folder() -> Option<String> {
+pub fn pick_directory() -> Option<String> {
     rfd::FileDialog::new()
         .pick_folder()
         .map(|p| p.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+pub fn pick_folder() -> Option<String> {
+    pick_directory()
+}
+
+#[tauri::command]
+pub fn get_preset_profiles() -> Vec<mkv_core::preset::PresetProfile> {
+    mkv_core::preset::get_preset_profiles()
+}
+
+#[tauri::command]
+pub fn get_job_snapshot(
+    state: State<'_, JobState>,
+) -> Result<Option<crate::process::JobSnapshot>, String> {
+    Ok(state.snapshot.lock().map_err(|e| e.to_string())?.clone())
 }
 
 #[cfg(test)]
@@ -353,101 +285,75 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_inspect_options_omitted_and_defaults() {
-        assert!(inspect_options_to_args(None)
-            .expect("must succeed")
-            .is_empty());
-        let default_opts = InspectOptions::default();
-        assert!(inspect_options_to_args(Some(&default_opts))
-            .expect("must succeed")
-            .is_empty());
-    }
-
-    #[test]
-    fn test_inspect_options_zero_and_nocache_mapping() {
-        let opts = InspectOptions {
-            workers: Some(8),
-            io_jobs: Some(0),
-            no_cache: Some(false),
-        };
-        assert_eq!(
-            inspect_options_to_args(Some(&opts)).expect("must succeed"),
-            vec!["--workers", "8", "--io-jobs", "0"]
-        );
-
-        let opts_nc = InspectOptions {
-            workers: Some(4),
-            io_jobs: Some(2),
-            no_cache: Some(true),
-        };
-        assert_eq!(
-            inspect_options_to_args(Some(&opts_nc)).expect("must succeed"),
-            vec!["--workers", "4", "--io-jobs", "2", "--no-cache"]
-        );
-    }
-
-    #[test]
-    fn test_inspect_options_boundaries() {
-        for (w, expected) in [
-            (1, Some(vec!["--workers", "1"])),
-            (64, Some(vec!["--workers", "64"])),
-            (0, None),
-            (-1, None),
-            (65, None),
-        ] {
-            let opts = InspectOptions {
-                workers: Some(w),
-                ..Default::default()
-            };
-            let res = inspect_options_to_args(Some(&opts));
-            if let Some(exp) = expected {
-                assert_eq!(res.unwrap(), exp);
-            } else {
-                assert!(res.is_err());
-            }
-        }
-
-        for (j, expected) in [
-            (0, Some(vec!["--io-jobs", "0"])),
-            (64, Some(vec!["--io-jobs", "64"])),
-            (-1, None),
-            (65, None),
-        ] {
-            let opts = InspectOptions {
-                io_jobs: Some(j),
-                ..Default::default()
-            };
-            let res = inspect_options_to_args(Some(&opts));
-            if let Some(exp) = expected {
-                assert_eq!(res.unwrap(), exp);
-            } else {
-                assert!(res.is_err());
-            }
-        }
-    }
-
-    #[test]
     fn test_inspect_options_deserialization() {
-        let opts: InspectOptions =
-            serde_json::from_str(r#"{"workers": 6, "ioJobs": 0, "noCache": true}"#).unwrap();
-        assert_eq!(opts.workers, Some(6));
-        assert_eq!(opts.io_jobs, Some(0));
+        let opts: InspectOptions = serde_json::from_str(r#"{"noCache": true}"#).unwrap();
         assert_eq!(opts.no_cache, Some(true));
 
-        for invalid in [
-            r#"{"workers": 4.5}"#,
-            r#"{"workers": "4"}"#,
-            r#"{"workers": true}"#,
-            r#"{"ioJobs": 2.5}"#,
-            r#"{"ioJobs": "2"}"#,
-            r#"{"ioJobs": false}"#,
-            r#"{"noCache": 1}"#,
-            r#"{"noCache": "true"}"#,
-        ] {
-            assert!(
-                serde_json::from_str::<InspectOptions>(invalid).is_err(),
-                "Expected deserialization error for: {invalid}"
-            );
-        }
+        let opts_default: InspectOptions = serde_json::from_str(r#"{}"#).unwrap();
+        assert_eq!(opts_default.no_cache, None);
+
+        let opts_false: InspectOptions = serde_json::from_str(r#"{"noCache": false}"#).unwrap();
+        assert_eq!(opts_false.no_cache, Some(false));
+
+        assert!(serde_json::from_str::<InspectOptions>(r#"{"noCache": 1}"#).is_err());
+        assert!(serde_json::from_str::<InspectOptions>(r#"{"noCache": "true"}"#).is_err());
+    }
+
+    #[test]
+    fn test_get_and_clear_job_snapshot() {
+        let app = tauri::test::mock_app();
+        app.manage(JobState::default());
+
+        let state = app.state::<JobState>();
+        let snap = get_job_snapshot(state).expect("get_job_snapshot should succeed");
+        assert!(snap.is_none());
+
+        let state = app.state::<JobState>();
+        let start_event = mkv_core::pipeline::JobEvent::BatchStart {
+            version: 1,
+            total: 2,
+            input_dir: "/test".to_string(),
+            items: None,
+            extra: Default::default(),
+        };
+        state.update_snapshot(&start_event, 101, "remux");
+
+        let state = app.state::<JobState>();
+        let snap = get_job_snapshot(state)
+            .expect("get_job_snapshot should succeed")
+            .expect("snapshot should be present");
+        assert_eq!(snap.job_id, 101);
+        assert_eq!(snap.mode, "remux");
+        assert_eq!(snap.total_items, 2);
+
+        let state = app.state::<JobState>();
+        state.clear_snapshot();
+
+        let state = app.state::<JobState>();
+        let snap = get_job_snapshot(state).expect("get_job_snapshot should succeed");
+        assert!(snap.is_none());
+    }
+
+    #[test]
+    fn test_run_job_starts_without_panic() {
+        let app = tauri::test::mock_app();
+        app.manage(JobState::default());
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let request = mkv_core::request::BatchRequest {
+            mode: mkv_core::pipeline::PipelineMode::Extract,
+            input_dir: temp_dir.path().to_path_buf(),
+            dry_run: Some(true),
+            ..Default::default()
+        };
+
+        let state = app.state::<JobState>();
+        let res = run_job(app.handle().clone(), state, request);
+        assert!(res.is_ok());
+        let job_id = res.unwrap();
+        let verify_state = app.state::<JobState>();
+        assert!(verify_state
+            .wait_until_released(job_id, std::time::Duration::from_secs(5))
+            .is_ok());
     }
 }

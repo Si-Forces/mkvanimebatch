@@ -146,10 +146,10 @@ pub fn get_system_telemetry(
 ) -> Result<TelemetryData, String> {
     let mut guard = state.inner.lock().map_err(|e| e.to_string())?;
     let TelemetryInner {
-        ref mut sys,
-        ref mut last_poll,
-        ref mut tracked_pids,
-    } = *guard;
+        sys,
+        last_poll,
+        tracked_pids,
+    } = &mut *guard;
     let self_pid = Pid::from_u32(std::process::id());
 
     let job_pid = job_state.active_pid();
