@@ -5,6 +5,12 @@ members = [
     "crates/mkv-cli",
     "desktop-tauri/src-tauri",
 ]
+[workspace.package]
+version = "1.0.0"
+edition = "2021"
+authors = ["sifahaz"]
+license = "MIT"
+repository = "https://github.com/sifahaz/mkvanimebatch"
 
 [profile.dev]
 incremental = true

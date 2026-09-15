@@ -1,5 +1,8 @@
 name: CI
 
+permissions:
+  contents: read
+
 on:
   push:
     branches:
@@ -15,85 +18,16 @@ concurrency:
 
 jobs:
   # ────────────────────────────────────────────────────────────────────────────
-  # 1. Python Code Quality & Type Checking
+  # 1. Rust Workspace Checks (Linux Ubuntu 24.04 & Windows)
   # ────────────────────────────────────────────────────────────────────────────
-  python-quality:
-    name: Python Quality & Types
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-
-      - name: Run Ruff Linter
-        uses: astral-sh/ruff-action@v3
-        with:
-          args: "check ."
-
-      - name: Install dependencies for typechecking
-        run: |
-          python -m pip install --upgrade pip
-          pip install pytest
-
-      - name: Check Python syntax compilation
-        run: |
-          python -m py_compile mkv_events.py mkv_proc.py mkv_domain.py mkv_fonts.py mkv_scan.py mkv_assets.py mkv_storage.py mkv_runner.py mkv_manifest.py mkv_remux_job.py mkv_extract.py mkv_remux.py
-
-      - name: Set up Node.js for Pyright
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Run Pyright Type Checker
-        run: |
-          npx --yes pyright
-
-  # ────────────────────────────────────────────────────────────────────────────
-  # 2. Python Unit Tests Matrix (Linux & Windows x Python 3.10–3.13)
-  # ────────────────────────────────────────────────────────────────────────────
-  python-tests:
-    name: Python Test (${{ matrix.os }} - Py${{ matrix.python-version }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install pytest
-
-      - name: Run pytest test suite
-        run: |
-          pytest tests/ --tb=short -v
-
-  # ────────────────────────────────────────────────────────────────────────────
-  # 3. Rust & Tauri Desktop Engine Checks (Linux & Windows)
-  # ────────────────────────────────────────────────────────────────────────────
-  rust-tauri-checks:
-    name: Tauri Engine Check (${{ matrix.os }})
+  workspace-checks:
+    name: Rust Workspace (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-22.04
+          - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
           - os: windows-latest
             target: x86_64-pc-windows-msvc
@@ -111,18 +45,9 @@ jobs:
             libssl-dev \
             libgtk-3-dev \
             libwebkit2gtk-4.1-dev \
-            libappindicator3-dev \
+            libayatana-appindicator3-dev \
             librsvg2-dev \
             patchelf
-
-      - name: Create placeholder sidecar binaries
-        shell: bash
-        run: |
-          mkdir -p desktop-tauri/src-tauri/binaries
-          touch desktop-tauri/src-tauri/binaries/mkv-remux-x86_64-unknown-linux-gnu
-          touch desktop-tauri/src-tauri/binaries/mkv-extract-x86_64-unknown-linux-gnu
-          touch desktop-tauri/src-tauri/binaries/mkv-remux-x86_64-pc-windows-msvc.exe
-          touch desktop-tauri/src-tauri/binaries/mkv-extract-x86_64-pc-windows-msvc.exe
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -133,19 +58,35 @@ jobs:
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: "desktop-tauri/src-tauri -> target"
+          key: ${{ matrix.target }}
 
-      - name: Check Rust formatting
-        run: cargo fmt --manifest-path desktop-tauri/src-tauri/Cargo.toml --all -- --check
+      - name: Check Rust formatting (Linux only)
+        if: runner.os == 'Linux'
+        run: cargo fmt --all -- --check
 
       - name: Run Clippy linter
-        run: cargo clippy --manifest-path desktop-tauri/src-tauri/Cargo.toml -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Run Rust unit tests
-        run: cargo test --manifest-path desktop-tauri/src-tauri/Cargo.toml --verbose
+      - name: Run Rust workspace unit and integration tests
+        run: cargo test --workspace --verbose
+
+      - name: Build Standalone mkv-cli Binary (Release)
+        run: cargo build --release -p mkv-cli
+
+      - name: Smoke Test CLI Executable
+        shell: bash
+        run: |
+          CLI="./target/release/mkv-cli${{ runner.os == 'Windows' && '.exe' || '' }}"
+          test -s "$CLI"
+          "$CLI" --help >/dev/null
+          EMPTY="$(mktemp -d 2>/dev/null || mktemp -d -t 'empty')"
+          trap 'rm -rf "$EMPTY"' EXIT
+          "$CLI" --plan --no-cache --input-dir "$EMPTY" > "$EMPTY/manifest.json"
+          grep -q '"version": 2' "$EMPTY/manifest.json"
+          grep -q '"items": \[\]' "$EMPTY/manifest.json"
 
   # ────────────────────────────────────────────────────────────────────────────
-  # 4. Frontend UI State & Contract Tests
+  # 2. Frontend UI State & Contract Tests
   # ────────────────────────────────────────────────────────────────────────────
   ui-tests:
     name: UI State & Contract Tests
@@ -165,19 +106,17 @@ jobs:
           node --test desktop-tauri/ui/*.test.js
 
   # ────────────────────────────────────────────────────────────────────────────
-  # 5. CI Completion Gate (Required Check Summary)
+  # 3. CI Completion Gate (Required Check Summary for Branch Protection)
   # ────────────────────────────────────────────────────────────────────────────
   ci-status:
     name: CI Status Gate
-    needs: [python-quality, python-tests, rust-tauri-checks, ui-tests]
+    needs: [workspace-checks, ui-tests]
     runs-on: ubuntu-latest
     if: always()
     steps:
       - name: Evaluate status
         run: |
-          if [ "${{ needs.python-quality.result }}" != "success" ] || \
-             [ "${{ needs.python-tests.result }}" != "success" ] || \
-             [ "${{ needs.rust-tauri-checks.result }}" != "success" ] || \
+          if [ "${{ needs.workspace-checks.result }}" != "success" ] || \
              [ "${{ needs.ui-tests.result }}" != "success" ]; then
             echo "CI pipeline checks failed!"
             exit 1

@@ -1,8 +1,8 @@
-//! Cross-language verification test: Rust (mkv-core) vs Python (mkv_domain, mkv_assets, mkv_scan, mkv_remux_job).
+//! Regression verification test: Rust (mkv-core) vs reference fixture snapshot (ADR-0010).
 //!
 //! Ensures regex matching, episode parsing, language detection, filename sanitization,
 //! natural sorting, track classification, chapter XML sniffing, and cover pattern matching
-//! behave identically across both implementations.
+//! retain 100% fidelity against the verified canonical reference snapshot.
 
 use mkv_core::domain::{
     detect_sub_lang, is_dialogue_track, natural_sort_key, parse_episode, safe_filename,
@@ -11,7 +11,6 @@ use mkv_core::domain::{
 use regex::bytes::Regex as BytesRegex;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::process::Command;
 use std::sync::LazyLock;
 
 static COMMENTARY_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -74,127 +73,9 @@ struct CrossCheckResponse {
     bitrate_results: Vec<Option<(u64, String)>>,
 }
 
-fn query_python(payload: &CrossCheckPayload) -> CrossCheckResponse {
-    let json_input = serde_json::to_string(payload).expect("serialize payload");
-    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let repo_root = manifest_dir
-        .parent()
-        .and_then(|p| p.parent())
-        .unwrap_or(manifest_dir);
-
-    let script = r#"
-import json, os, re, sys
-from pathlib import Path
-
-repo_root = os.environ.get("REPO_ROOT")
-if repo_root:
-    sys.path.insert(0, repo_root)
-
-from mkv_domain import parse_episode, detect_sub_lang, safe_filename, is_dialogue_track, natural_sort_key
-from mkv_remux_job import _COMMENTARY_RE
-from mkv_scan import _CHAPTER_TAG_RE
-from mkv_assets import _COVER_FILE_RE
-
-# Read raw UTF-8 bytes directly to avoid Windows console/pipe code page mangling
-payload = json.loads(sys.stdin.buffer.read().decode("utf-8"))
-
-ep_results = []
-for name in payload["episodes"]:
-    res = parse_episode(name)
-    if res is None:
-        ep_results.append(None)
-    else:
-        ep_results.append({
-            "season": res.season,
-            "ep_type": res.ep_type,
-            "ep": res.ep,
-        })
-
-sub_results = [detect_sub_lang(s) for s in payload["sub_stems"]]
-safe_results = [safe_filename(n) for n in payload["safe_names"]]
-track_results = [is_dialogue_track(t) for t in payload["track_names"]]
-commentary_results = [bool(_COMMENTARY_RE.search(c.lower())) for c in payload["commentary_names"]]
-
-# Natural sort order
-sorted_outputs = sorted(payload["sort_inputs"], key=natural_sort_key)
-
-# Chapter XML sniffing
-chapter_results = [bool(_CHAPTER_TAG_RE.search(s.encode("utf-8"))) for s in payload["chapter_xml_samples"]]
-
-# Cover file matching
-cover_results = []
-for stem in payload["cover_stems"]:
-    m = _COVER_FILE_RE.match(stem)
-    cover_results.append(m.group("stem") if m else None)
-
-# Bitrate parsing
-bitrate_re = re.compile(r"^(\d+)([kM]?)$")
-bitrate_results = []
-for b in payload["bitrate_strings"]:
-    m = bitrate_re.match(b)
-    if m:
-        num = int(m.group(1))
-        unit = m.group(2)
-        bitrate_results.append([num, unit] if num > 0 else None)
-    else:
-        bitrate_results.append(None)
-
-response = {
-    "episodes": ep_results,
-    "sub_stems": sub_results,
-    "safe_names": safe_results,
-    "track_names": track_results,
-    "commentary_names": commentary_results,
-    "sorted_outputs": sorted_outputs,
-    "chapter_xml_results": chapter_results,
-    "cover_stem_results": cover_results,
-    "bitrate_results": bitrate_results,
-}
-sys.stdout.buffer.write(json.dumps(response).encode("utf-8"))
-sys.stdout.buffer.flush()
-"#;
-
-    let (bin, args) = if Command::new("uv").arg("--version").output().is_ok() {
-        ("uv", vec!["run", "python", "-c", script])
-    } else {
-        let python = if Command::new("python3").arg("--version").output().is_ok() {
-            "python3"
-        } else {
-            "python"
-        };
-        (python, vec!["-c", script])
-    };
-
-    let mut child = Command::new(bin)
-        .args(&args)
-        .env("REPO_ROOT", repo_root)
-        .env("PYTHONUTF8", "1")
-        .env("PYTHONIOENCODING", "utf-8")
-        .current_dir(repo_root)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("spawn python process");
-
-    use std::io::Write;
-    child
-        .stdin
-        .as_mut()
-        .expect("stdin")
-        .write_all(json_input.as_bytes())
-        .expect("write payload");
-
-    let output = child.wait_with_output().expect("wait uv python");
-    if !output.status.success() {
-        panic!(
-            "Python process failed:\nstdout: {}\nstderr: {}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    serde_json::from_slice(&output.stdout).expect("deserialize python response")
+fn load_reference_response() -> CrossCheckResponse {
+    let fixture_str = include_str!("fixtures/cross_regex_reference.json");
+    serde_json::from_str(fixture_str).expect("deserialize cross regex reference fixture")
 }
 
 #[test]
@@ -464,7 +345,7 @@ fn test_cross_language_regex_and_domain() {
         ],
     };
 
-    let py_response = query_python(&payload);
+    let py_response = load_reference_response();
 
     // 1. Verify episode parsing
     let mut mismatches = Vec::new();
