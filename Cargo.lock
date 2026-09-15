@@ -2194,7 +2194,7 @@ dependencies = [
 
 [[package]]
 name = "mkv-cli"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "mkv-core",
  "regex",
@@ -2205,7 +2205,7 @@ dependencies = [
 
 [[package]]
 name = "mkv-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "blake2",
  "fancy-regex",
