@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/mkv-core",
+    "crates/mkv-cli",
+    "desktop-tauri/src-tauri",
+]
+[workspace.package]
+version = "1.0.0"
+edition = "2021"
+authors = ["sifahaz"]
+license = "MIT"
+repository = "https://github.com/sifahaz/mkvanimebatch"
+
+[profile.dev]
+incremental = true
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

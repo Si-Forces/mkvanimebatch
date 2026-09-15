@@ -1,33 +1,22 @@
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[cod]
-*$py.class
-
-# Pytest / Coverage
-.pytest_cache/
-.coverage
-htmlcov/
-
-# MKV Tool Temporary & Binary artifacts
-*.zip
-
-# PyInstaller build outputs & binaries
-build/
-dist/
+# Rust target & build outputs
 target/
+dist/
+build/
 binaries/
+windows-artifacts/
 *.exe
+*.zip
+*.tar.gz
+*.sha256
+*.AppImage
+*.deb
+*.rpm
 
-# Output directories
+# Output directories & scratch files
 Output/
 fonts/
 *.tmp*
-
-# Virtual environments
-venv/
-env/
-.venv/
-.build_venv/
+.font_staging/
 
 # IDE & Editor files
 .vscode/
@@ -41,10 +30,7 @@ GRAPH_REPORT.md
 graph.html
 graph.json
 graphify-out/
-*.AppImage
-*.deb
 
 # Windows Zone Identifier metadata
 *:Zone.Identifier
 *Zone.Identifier*
-
