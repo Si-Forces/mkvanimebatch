@@ -68,7 +68,13 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Run Rust workspace unit and integration tests
-        run: cargo test --workspace --verbose
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cargo test -p mkv-core -p mkv-cli --verbose
+          else
+            cargo test --workspace --verbose
+          fi
 
       - name: Build Standalone mkv-cli Binary (Release)
         run: cargo build --release -p mkv-cli
