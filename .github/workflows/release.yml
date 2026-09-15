@@ -8,6 +8,11 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      version_tag:
+        description: "Release tag (e.g. v1.0.0)"
+        required: true
+        default: "v1.0.0"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -15,85 +20,16 @@ concurrency:
 
 jobs:
   # ────────────────────────────────────────────────────────────────────────────
-  # 1. Python Code Quality & Type Checking
+  # 1. Release Verification: Rust Workspace Checks
   # ────────────────────────────────────────────────────────────────────────────
-  python-quality:
-    name: Python Quality & Types
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-
-      - name: Run Ruff Linter
-        uses: astral-sh/ruff-action@v3
-        with:
-          args: "check ."
-
-      - name: Install dependencies for typechecking
-        run: |
-          python -m pip install --upgrade pip
-          pip install pytest
-
-      - name: Check Python syntax compilation
-        run: |
-          python -m py_compile mkv_events.py mkv_proc.py mkv_domain.py mkv_fonts.py mkv_scan.py mkv_assets.py mkv_storage.py mkv_runner.py mkv_manifest.py mkv_remux_job.py mkv_extract.py mkv_remux.py
-
-      - name: Set up Node.js for Pyright
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Run Pyright Type Checker
-        run: |
-          npx --yes pyright
-
-  # ────────────────────────────────────────────────────────────────────────────
-  # 2. Python Unit Tests Matrix (Linux & Windows x Python 3.10–3.13)
-  # ────────────────────────────────────────────────────────────────────────────
-  python-tests:
-    name: Python Test (${{ matrix.os }} - Py${{ matrix.python-version }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install pytest
-
-      - name: Run pytest test suite
-        run: |
-          pytest tests/ --tb=short -v
-
-  # ────────────────────────────────────────────────────────────────────────────
-  # 3. Rust & Tauri Desktop Engine Checks (Linux & Windows)
-  # ────────────────────────────────────────────────────────────────────────────
-  rust-tauri-checks:
-    name: Tauri Engine Check (${{ matrix.os }})
+  workspace-checks:
+    name: Verify Rust Workspace (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-22.04
+          - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
           - os: windows-latest
             target: x86_64-pc-windows-msvc
@@ -111,18 +47,9 @@ jobs:
             libssl-dev \
             libgtk-3-dev \
             libwebkit2gtk-4.1-dev \
-            libappindicator3-dev \
+            libayatana-appindicator3-dev \
             librsvg2-dev \
             patchelf
-
-      - name: Create placeholder sidecar binaries
-        shell: bash
-        run: |
-          mkdir -p desktop-tauri/src-tauri/binaries
-          touch desktop-tauri/src-tauri/binaries/mkv-remux-x86_64-unknown-linux-gnu
-          touch desktop-tauri/src-tauri/binaries/mkv-extract-x86_64-unknown-linux-gnu
-          touch desktop-tauri/src-tauri/binaries/mkv-remux-x86_64-pc-windows-msvc.exe
-          touch desktop-tauri/src-tauri/binaries/mkv-extract-x86_64-pc-windows-msvc.exe
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -133,22 +60,29 @@ jobs:
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: "desktop-tauri/src-tauri -> target"
+          key: ${{ matrix.target }}
 
-      - name: Check Rust formatting
-        run: cargo fmt --manifest-path desktop-tauri/src-tauri/Cargo.toml --all -- --check
+      - name: Check Rust formatting (Linux only)
+        if: runner.os == 'Linux'
+        run: cargo fmt --all -- --check
 
       - name: Run Clippy linter
-        run: cargo clippy --manifest-path desktop-tauri/src-tauri/Cargo.toml -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Run Rust unit tests
-        run: cargo test --manifest-path desktop-tauri/src-tauri/Cargo.toml --verbose
+      - name: Run Rust workspace unit and integration tests
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cargo test -p mkv-core -p mkv-cli --verbose
+          else
+            cargo test --workspace --verbose
+          fi
 
   # ────────────────────────────────────────────────────────────────────────────
-  # 4. Frontend UI State & Contract Tests
+  # 2. Release Verification: Frontend UI State & Contract Tests
   # ────────────────────────────────────────────────────────────────────────────
   ui-tests:
-    name: UI State & Contract Tests
+    name: Verify UI State & Contract Tests
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -165,30 +99,28 @@ jobs:
           node --test desktop-tauri/ui/*.test.js
 
   # ────────────────────────────────────────────────────────────────────────────
-  # 5. CI Completion Gate (Required Check Summary)
+  # 3. Release Verification Gate
   # ────────────────────────────────────────────────────────────────────────────
   ci-status:
-    name: CI Status Gate
-    needs: [python-quality, python-tests, rust-tauri-checks, ui-tests]
+    name: Release Verification Gate
+    needs: [workspace-checks, ui-tests]
     runs-on: ubuntu-latest
     if: always()
     steps:
-      - name: Evaluate status
+      - name: Evaluate verification status
         run: |
-          if [ "${{ needs.python-quality.result }}" != "success" ] || \
-             [ "${{ needs.python-tests.result }}" != "success" ] || \
-             [ "${{ needs.rust-tauri-checks.result }}" != "success" ] || \
+          if [ "${{ needs.workspace-checks.result }}" != "success" ] || \
              [ "${{ needs.ui-tests.result }}" != "success" ]; then
-            echo "CI pipeline checks failed!"
+            echo "Release verification failed! Aborting release build."
             exit 1
           fi
-          echo "All CI pipeline checks passed successfully!"
+          echo "All release verification checks passed!"
 
   # ────────────────────────────────────────────────────────────────────────────
-  # 6. Desktop Build — Windows (Runs ONLY after CI passes)
+  # 4. Desktop GUI & CLI Build — Windows (Runs ONLY after verification passes)
   # ────────────────────────────────────────────────────────────────────────────
   build-windows:
-    name: Build — Windows
+    name: Build & Release — Windows
     needs: [ci-status]
     if: needs.ci-status.result == 'success'
     runs-on: windows-latest
@@ -197,41 +129,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ── Python + PyInstaller (sidecars) ──────────────────────────────────────
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install PyInstaller
-        run: pip install pyinstaller
-
-      - name: Build sidecars
-        shell: pwsh
-        run: ./desktop-tauri/build-sidecars.ps1
-
-      - name: Smoke-test sidecars
-        shell: pwsh
-        run: |
-          $Binaries = "desktop-tauri/src-tauri/binaries"
-          $Remux = Join-Path $Binaries "mkv-remux-x86_64-pc-windows-msvc.exe"
-          $Extract = Join-Path $Binaries "mkv-extract-x86_64-pc-windows-msvc.exe"
-          if ((Get-Item $Remux).Length -eq 0 -or (Get-Item $Extract).Length -eq 0) {
-            throw "Built sidecar is empty"
-          }
-          & $Remux --help | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw "mkv-remux --help failed" }
-          & $Extract --help | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw "mkv-extract --help failed" }
-          $Empty = Join-Path $env:RUNNER_TEMP "empty-release"
-          New-Item -ItemType Directory -Force -Path $Empty | Out-Null
-          $Manifest = (& $Remux --plan --no-cache --input-dir $Empty) | ConvertFrom-Json
-          if ($LASTEXITCODE -ne 0 -or $Manifest.version -ne 2 -or $Manifest.items.Count -ne 0) {
-            throw "mkv-remux empty-directory plan contract failed"
-          }
-
-      # ── Rust + Tauri ─────────────────────────────────────────────────────────
-      - name: Install Rust stable
+      - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
@@ -239,7 +137,35 @@ jobs:
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: "desktop-tauri/src-tauri -> target"
+          key: x86_64-pc-windows-msvc
+
+      - name: Compile mkv-cli (Release)
+        run: cargo build --release -p mkv-cli
+
+      - name: Smoke-test mkv-cli
+        shell: pwsh
+        run: |
+          $Cli = "target\release\mkv-cli.exe"
+          if (-not (Test-Path $Cli) -or (Get-Item $Cli).Length -eq 0) {
+            throw "Built mkv-cli is empty or missing"
+          }
+          & $Cli --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "mkv-cli --help failed" }
+          $Empty = Join-Path $env:RUNNER_TEMP "empty-release"
+          New-Item -ItemType Directory -Force -Path $Empty | Out-Null
+          $Manifest = (& $Cli --plan --no-cache --input-dir $Empty) | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $Manifest.version -ne 2 -or $Manifest.items.Count -ne 0 -or $null -eq $Manifest.subtitle_candidates) {
+            throw "mkv-cli empty-directory plan contract failed"
+          }
+
+      - name: Package Windows CLI Archive
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target\release\mkv-cli.exe dist\
+          Compress-Archive -Path dist\mkv-cli.exe -DestinationPath mkv-cli-x86_64-pc-windows-msvc.zip -Force
+          $hash = (Get-FileHash -Algorithm SHA256 mkv-cli-x86_64-pc-windows-msvc.zip).Hash.ToLower()
+          "$hash  mkv-cli-x86_64-pc-windows-msvc.zip" | Out-File -Encoding utf8 "mkv-cli-x86_64-pc-windows-msvc.zip.sha256"
 
       - name: Install tauri-cli
         run: cargo install tauri-cli --version "^2" --locked
@@ -249,10 +175,14 @@ jobs:
         run: cargo tauri build --no-bundle
 
       # ── Package Windows Artifacts (Portable Zip & Standalone Exe) ────────────
-      - name: Package Windows Artifacts
+      - name: Package Windows Desktop Artifacts
         shell: pwsh
         run: |
-          $ReleaseDir = "desktop-tauri/src-tauri/target/release"
+          $ReleaseExe = Get-ChildItem -Path . -Filter "mkv-anime-batch.exe" -Recurse | Where-Object { $_.FullName -like "*release*" -and $_.FullName -notlike "*windows-artifacts*" } | Select-Object -First 1
+          if (-not $ReleaseExe) {
+            throw "mkv-anime-batch.exe not found after tauri build"
+          }
+          $ReleaseDir = $ReleaseExe.DirectoryName
           $OutDir     = "windows-artifacts"
           $StageDir   = "mkv-anime-batch-windows-x64"
 
@@ -262,38 +192,50 @@ jobs:
           # Copy single self-contained standalone executable
           Copy-Item "$ReleaseDir\mkv-anime-batch.exe" "$OutDir\mkv-anime-batch.exe" -Force
 
-          # Copy main executable and sidecars into portable package
+          # Copy main executable into portable package
           Copy-Item "$ReleaseDir\mkv-anime-batch.exe" "$StageDir\" -Force
-          Copy-Item "desktop-tauri/src-tauri/binaries\mkv-remux-x86_64-pc-windows-msvc.exe" "$StageDir\" -Force
-          Copy-Item "desktop-tauri/src-tauri/binaries\mkv-extract-x86_64-pc-windows-msvc.exe" "$StageDir\" -Force
 
           # Create Portable Zip
           Compress-Archive -Path "$StageDir\*" -DestinationPath "$OutDir\MKV_Anime_Batch_Portable_win64.zip" -Force
 
           foreach ($Artifact in @(
             "$OutDir\mkv-anime-batch.exe",
-            "$StageDir\mkv-remux-x86_64-pc-windows-msvc.exe",
-            "$StageDir\mkv-extract-x86_64-pc-windows-msvc.exe",
-            "$OutDir\MKV_Anime_Batch_Portable_win64.zip"
+            "$OutDir\MKV_Anime_Batch_Portable_win64.zip",
+            "mkv-cli-x86_64-pc-windows-msvc.zip",
+            "mkv-cli-x86_64-pc-windows-msvc.zip.sha256"
           )) {
             if (-not (Test-Path $Artifact) -or (Get-Item $Artifact).Length -eq 0) {
               throw "Missing or empty packaged artifact: $Artifact"
             }
           }
 
+      - name: Resolve Release Tag
+        id: release-tag
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.version_tag }}
+          REF_NAME: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "tag=$INPUT_TAG" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=$REF_NAME" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish Windows files to release
         uses: softprops/action-gh-release@v2
         with:
-          name: "MKV Anime Batch ${{ github.ref_name }}"
+          tag_name: ${{ steps.release-tag.outputs.tag }}
+          name: "MKV Anime Batch ${{ steps.release-tag.outputs.tag }}"
           body: |
             ## 🪟 Windows
 
             | File | Description |
             |------|-------------|
-            | `mkv-anime-batch.exe` | Single self-contained standalone executable — download & run anywhere! |
-            | `MKV_Anime_Batch_Portable_win64.zip` | Portable Zip package |
-
-            > **Requirements:** [MKVToolNix](https://mkvtoolnix.download/) and [ffmpeg](https://ffmpeg.org/download.html) must be installed and available on `PATH`.
+            | `mkv-anime-batch.exe` | Single self-contained standalone desktop GUI executable |
+            | `MKV_Anime_Batch_Portable_win64.zip` | Portable Zip package (self-contained GUI) |
+            | `mkv-cli-x86_64-pc-windows-msvc.zip` | Standalone native CLI executable (includes `.sha256`) |
 
             ---
 
@@ -304,71 +246,46 @@ jobs:
             | `MKV_Anime_Batch_*_amd64.AppImage` | Universal AppImage — works on any modern Linux distro |
             | `MKV_Anime_Batch_*_amd64.deb` | Debian / Ubuntu package |
             | `MKV_Anime_Batch_*_x86_64.rpm` | Fedora / RedHat / SUSE package |
+            | `mkv-cli-x86_64-unknown-linux-gnu.tar.gz` | Standalone native CLI executable (includes `.sha256`) |
 
-            ### 📦 Linux Installation & Dependencies
+            ---
 
-            #### Option A: `.deb` Package (Debian / Ubuntu / Mint)
+            ### 🚀 Quick Start (CLI)
+
             ```bash
-            sudo apt update
-            sudo apt install ./MKV_Anime_Batch_*_amd64.deb mkvtoolnix ffmpeg
+            # Inspect releases and generate Manifest v2 JSON
+            ./mkv-cli --input-dir "/path/to/anime/series" --plan
+
+            # Dry-run batch remuxing simulation
+            ./mkv-cli --input-dir "/path/to/anime/series" --dry-run
             ```
 
-            #### Option B: `.rpm` Package (Fedora / RHEL / CentOS)
-            ```bash
-            sudo dnf install ./MKV_Anime_Batch_*_x86_64.rpm mkvtoolnix ffmpeg
-            ```
+            ---
 
-            #### Option C: `.AppImage` (Universal)
-            ```bash
-            chmod +x MKV_Anime_Batch_*_amd64.AppImage
-            ./MKV_Anime_Batch_*_amd64.AppImage
-            ```
-
-            > **CLI Tools Requirement:** Make sure `mkvtoolnix` (`mkvmerge`, `mkvextract`) and `ffmpeg` are installed (`sudo apt install mkvtoolnix ffmpeg`).
+            ### ⚙️ External Prerequisites
+            Ensure the following command-line tools are installed and in your `PATH`:
+            - `mkvmerge` & `mkvextract` (from [MKVToolNix](https://mkvtoolnix.download/))
+            - `ffmpeg` (for Opus audio transcoding, from [ffmpeg.org](https://ffmpeg.org/))
           files: |
             windows-artifacts/mkv-anime-batch.exe
             windows-artifacts/MKV_Anime_Batch_Portable_win64.zip
+            mkv-cli-x86_64-pc-windows-msvc.zip
+            mkv-cli-x86_64-pc-windows-msvc.zip.sha256
           draft: false
           prerelease: false
 
   # ────────────────────────────────────────────────────────────────────────────
-  # 7. Desktop Build — Linux (Runs ONLY after CI passes)
+  # 5. Desktop GUI & CLI Build — Linux (Runs ONLY after verification passes)
   # ────────────────────────────────────────────────────────────────────────────
   build-linux:
-    name: Build — Linux
+    name: Build & Release — Linux
     needs: [ci-status]
     if: needs.ci-status.result == 'success'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      # ── Python + PyInstaller (sidecars) ──────────────────────────────────────
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install PyInstaller
-        run: pip install pyinstaller
-
-      - name: Build sidecars
-        run: bash desktop-tauri/build-sidecars.sh
-
-      - name: Smoke-test sidecars
-        run: |
-          BINARIES="desktop-tauri/src-tauri/binaries"
-          REMUX="$BINARIES/mkv-remux-x86_64-unknown-linux-gnu"
-          EXTRACT="$BINARIES/mkv-extract-x86_64-unknown-linux-gnu"
-          test -s "$REMUX"
-          test -s "$EXTRACT"
-          "$REMUX" --help >/dev/null
-          "$EXTRACT" --help >/dev/null
-          EMPTY="$(mktemp -d)"
-          trap 'rm -rf "$EMPTY"' EXIT
-          "$REMUX" --plan --no-cache --input-dir "$EMPTY" > "$EMPTY/manifest.json"
-          python -c 'import json, pathlib, sys; m=json.loads(pathlib.Path(sys.argv[1]).read_text()); assert m == {"version": 2, "subtitle_candidates": {}, "items": []}' "$EMPTY/manifest.json"
 
       # ── Linux system deps ─────────────────────────────────────────────────────
       - name: Install Linux system dependencies
@@ -379,12 +296,12 @@ jobs:
             libssl-dev \
             libgtk-3-dev \
             libwebkit2gtk-4.1-dev \
-            libappindicator3-dev \
+            libayatana-appindicator3-dev \
             librsvg2-dev \
             patchelf
 
       # ── Rust + Tauri ─────────────────────────────────────────────────────────
-      - name: Install Rust stable
+      - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-gnu
@@ -392,7 +309,28 @@ jobs:
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: "desktop-tauri/src-tauri -> target"
+          key: x86_64-unknown-linux-gnu
+
+      - name: Compile mkv-cli (Release)
+        run: cargo build --release -p mkv-cli
+
+      - name: Smoke-test mkv-cli
+        run: |
+          CLI="target/release/mkv-cli"
+          test -s "$CLI"
+          "$CLI" --help >/dev/null
+          EMPTY="$(mktemp -d)"
+          trap 'rm -rf "$EMPTY"' EXIT
+          "$CLI" --plan --no-cache --input-dir "$EMPTY" > "$EMPTY/manifest.json"
+
+      - name: Package Linux CLI Archive
+        run: |
+          mkdir -p dist
+          cp target/release/mkv-cli dist/
+          cd dist
+          tar -czvf ../mkv-cli-x86_64-unknown-linux-gnu.tar.gz mkv-cli
+          cd ..
+          sha256sum mkv-cli-x86_64-unknown-linux-gnu.tar.gz > mkv-cli-x86_64-unknown-linux-gnu.tar.gz.sha256
 
       - name: Install tauri-cli
         run: cargo install tauri-cli --version "^2" --locked
@@ -405,11 +343,11 @@ jobs:
       - name: Collect Linux bundles
         run: |
           mkdir -p /tmp/linux-release
-          find desktop-tauri/src-tauri/target/release/bundle/appimage -name "*.AppImage" -exec cp {} /tmp/linux-release/ \;
-          find desktop-tauri/src-tauri/target/release/bundle/deb -name "*.deb" -exec cp {} /tmp/linux-release/ \;
-          find desktop-tauri/src-tauri/target/release/bundle/rpm -name "*.rpm" -exec cp {} /tmp/linux-release/ \;
+          find target desktop-tauri -type f -name "*.AppImage" -exec cp {} /tmp/linux-release/ \;
+          find target desktop-tauri -type f -name "*.deb" -exec cp {} /tmp/linux-release/ \;
+          find target desktop-tauri -type f -name "*.rpm" -exec cp {} /tmp/linux-release/ \;
 
-      - name: Verify bundled sidecars
+      - name: Verify Linux packages
         run: |
           DEB="$(find /tmp/linux-release -name '*.deb' -print -quit)"
           RPM="$(find /tmp/linux-release -name '*.rpm' -print -quit)"
@@ -417,32 +355,43 @@ jobs:
           test -n "$DEB" && test -n "$RPM" && test -n "$APPIMAGE"
 
           dpkg-deb --contents "$DEB" > /tmp/deb-contents.txt
-          grep -q 'mkv-remux' /tmp/deb-contents.txt
-          grep -q 'mkv-extract' /tmp/deb-contents.txt
+          grep -q 'bin/mkv-anime-batch' /tmp/deb-contents.txt
 
           rpm -qlp "$RPM" > /tmp/rpm-contents.txt
-          grep -q 'mkv-remux' /tmp/rpm-contents.txt
-          grep -q 'mkv-extract' /tmp/rpm-contents.txt
+          grep -q 'bin/mkv-anime-batch' /tmp/rpm-contents.txt
 
           chmod +x "$APPIMAGE"
           mkdir -p /tmp/appimage-contents
           (cd /tmp/appimage-contents && "$APPIMAGE" --appimage-extract >/dev/null)
-          find /tmp/appimage-contents/squashfs-root -name 'mkv-remux*' -print -quit | grep -q .
-          find /tmp/appimage-contents/squashfs-root -name 'mkv-extract*' -print -quit | grep -q .
+          find /tmp/appimage-contents/squashfs-root -name 'mkv-anime-batch' -type f -print -quit | grep -q .
+
+      - name: Resolve Release Tag
+        id: release-tag
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.version_tag }}
+          REF_NAME: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "tag=$INPUT_TAG" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=$REF_NAME" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Publish Linux bundles to release
         uses: softprops/action-gh-release@v2
         with:
-          name: "MKV Anime Batch ${{ github.ref_name }}"
+          tag_name: ${{ steps.release-tag.outputs.tag }}
+          name: "MKV Anime Batch ${{ steps.release-tag.outputs.tag }}"
           body: |
             ## 🪟 Windows
 
             | File | Description |
             |------|-------------|
-            | `mkv-anime-batch.exe` | Single self-contained standalone executable — download & run anywhere! |
-            | `MKV_Anime_Batch_Portable_win64.zip` | Portable Zip package |
-
-            > **Requirements:** [MKVToolNix](https://mkvtoolnix.download/) and [ffmpeg](https://ffmpeg.org/download.html) must be installed and available on `PATH`.
+            | `mkv-anime-batch.exe` | Single self-contained standalone desktop GUI executable |
+            | `MKV_Anime_Batch_Portable_win64.zip` | Portable Zip package (self-contained GUI) |
+            | `mkv-cli-x86_64-pc-windows-msvc.zip` | Standalone native CLI executable (includes `.sha256`) |
 
             ---
 
@@ -453,30 +402,31 @@ jobs:
             | `MKV_Anime_Batch_*_amd64.AppImage` | Universal AppImage — works on any modern Linux distro |
             | `MKV_Anime_Batch_*_amd64.deb` | Debian / Ubuntu package |
             | `MKV_Anime_Batch_*_x86_64.rpm` | Fedora / RedHat / SUSE package |
+            | `mkv-cli-x86_64-unknown-linux-gnu.tar.gz` | Standalone native CLI executable (includes `.sha256`) |
 
-            ### 📦 Linux Installation & Dependencies
+            ---
 
-            #### Option A: `.deb` Package (Debian / Ubuntu / Mint)
+            ### 🚀 Quick Start (CLI)
+
             ```bash
-            sudo apt update
-            sudo apt install ./MKV_Anime_Batch_*_amd64.deb mkvtoolnix ffmpeg
+            # Inspect releases and generate Manifest v2 JSON
+            ./mkv-cli --input-dir "/path/to/anime/series" --plan
+
+            # Dry-run batch remuxing simulation
+            ./mkv-cli --input-dir "/path/to/anime/series" --dry-run
             ```
 
-            #### Option B: `.rpm` Package (Fedora / RHEL / CentOS)
-            ```bash
-            sudo dnf install ./MKV_Anime_Batch_*_x86_64.rpm mkvtoolnix ffmpeg
-            ```
+            ---
 
-            #### Option C: `.AppImage` (Universal)
-            ```bash
-            chmod +x MKV_Anime_Batch_*_amd64.AppImage
-            ./MKV_Anime_Batch_*_amd64.AppImage
-            ```
-
-            > **CLI Tools Requirement:** Make sure `mkvtoolnix` (`mkvmerge`, `mkvextract`) and `ffmpeg` are installed (`sudo apt install mkvtoolnix ffmpeg`).
+            ### ⚙️ External Prerequisites
+            Ensure the following command-line tools are installed and in your `PATH`:
+            - `mkvmerge` & `mkvextract` (from [MKVToolNix](https://mkvtoolnix.download/))
+            - `ffmpeg` (for Opus audio transcoding, from [ffmpeg.org](https://ffmpeg.org/))
           files: |
             /tmp/linux-release/*.AppImage
             /tmp/linux-release/*.deb
             /tmp/linux-release/*.rpm
+            mkv-cli-x86_64-unknown-linux-gnu.tar.gz
+            mkv-cli-x86_64-unknown-linux-gnu.tar.gz.sha256
           draft: false
           prerelease: false

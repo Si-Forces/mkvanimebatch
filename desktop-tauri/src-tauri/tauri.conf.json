@@ -37,10 +37,6 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "externalBin": [
-      "binaries/mkv-remux",
-      "binaries/mkv-extract"
-    ],
     "windows": {
       "nsis": {
         "installMode": "perMachine"

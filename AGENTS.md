@@ -8,9 +8,8 @@ Always run the code review skill (Standards + Spec axes, parallel sub-agents) on
 
 ### CI formatting & lint gate before committing
 
-Never commit without running the exact checks required by GitHub CI:
-- **Rust**: Always run `cargo fmt --manifest-path desktop-tauri/src-tauri/Cargo.toml --all` and verify with `cargo fmt --manifest-path desktop-tauri/src-tauri/Cargo.toml --all -- --check` and `cargo clippy --manifest-path desktop-tauri/src-tauri/Cargo.toml -- -D warnings` whenever Rust files are touched.
-- **Python**: Run `ruff check .` whenever Python files are touched.
+- **Rust Workspace**: Always run `cargo fmt --all` and verify with `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace` whenever Rust files are touched.
+- **Frontend UI**: Always run `node --check desktop-tauri/ui/app.js` and `node --test desktop-tauri/ui/*.test.js` whenever UI files are touched.
 
 ## Agent skills
 
@@ -24,4 +23,4 @@ Canonical triage roles mapped to GitHub issue labels (`needs-triage`, `needs-inf
 
 ### Domain docs
 
-Single-context layout (`CONTEXT.md` + `docs/adr/` at repo root). See `docs/agents/domain.md`.
+Multi-context layout (`CONTEXT-MAP.md` at repo root pointing to bounded contexts `crates/mkv-core/CONTEXT.md` and `desktop-tauri/CONTEXT.md`, with system-wide ADRs under `docs/adr/`). See `docs/agents/domain.md`.
