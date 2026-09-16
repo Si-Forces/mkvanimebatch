@@ -2,46 +2,26 @@ import { buildTrackAssignmentsForManifest } from "./queue-state.js";
 
 
 export function extractInspectionOptions(argsOrRequest) {
+  const req = argsOrRequest || {};
   const options = {};
 
-  if (Array.isArray(argsOrRequest)) {
-    const args = argsOrRequest;
-    for (const [flag, key, minimum] of [["--workers", "workers", 1], ["--io-jobs", "ioJobs", 0]]) {
-      const index = args.indexOf(flag);
-      if (index === -1) continue;
-      const raw = args[index + 1];
-      const value = Number(raw);
-      if (!/^\+?\d+$/.test(raw ?? "") || !Number.isInteger(value) || value < minimum || value > 64) {
-        return { error: `Invalid ${flag.slice(2)} value '${raw}': must be an integer between ${minimum} and 64.` };
-      }
-      options[key] = value;
-    }
-
-    if (args.includes("--no-cache")) {
-      options.noCache = true;
-    }
-
-    return { options };
-  }
-
-  const batchRequest = argsOrRequest || {};
-  if (batchRequest.workers !== null && batchRequest.workers !== undefined) {
-    const w = batchRequest.workers;
+  if (req.workers !== null && req.workers !== undefined) {
+    const w = req.workers;
     if (typeof w !== "number" || !Number.isInteger(w) || w < 1 || w > 64) {
       return { error: `Invalid workers value '${w}': must be an integer between 1 and 64.` };
     }
     options.workers = w;
   }
 
-  if (batchRequest.io_jobs !== null && batchRequest.io_jobs !== undefined) {
-    const j = batchRequest.io_jobs;
-    if (typeof j !== "number" || !Number.isInteger(j) || j < 0 || j > 64) {
-      return { error: `Invalid io-jobs value '${j}': must be an integer between 0 and 64.` };
+  const ioJobs = req.ioJobs ?? req.io_jobs;
+  if (ioJobs !== null && ioJobs !== undefined) {
+    if (typeof ioJobs !== "number" || !Number.isInteger(ioJobs) || ioJobs < 0 || ioJobs > 64) {
+      return { error: `Invalid io-jobs value '${ioJobs}': must be an integer between 0 and 64.` };
     }
-    options.ioJobs = j;
+    options.ioJobs = ioJobs;
   }
 
-  if (batchRequest.no_cache) {
+  if (req.noCache || req.no_cache) {
     options.noCache = true;
   }
 

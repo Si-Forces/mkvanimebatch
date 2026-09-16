@@ -813,3 +813,18 @@ fn test_promote_file_basic_and_overwrite() {
     assert!(!staged2.exists());
     assert_eq!(std::fs::read(&dest).unwrap(), b"updated content");
 }
+
+#[test]
+fn test_unique_file_token_distinct() {
+    use mkv_core::domain::unique_file_token;
+
+    let t1 = unique_file_token();
+    let t2 = unique_file_token();
+    assert_ne!(t1, t2);
+
+    let parts: Vec<&str> = t1.split('.').collect();
+    assert_eq!(parts.len(), 3);
+    assert_eq!(parts[0], std::process::id().to_string());
+    assert!(parts[1].parse::<u128>().is_ok());
+    assert!(parts[2].parse::<u64>().is_ok());
+}

@@ -1,58 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-#[cfg(windows)]
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::thread;
 
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
-use sysinfo::Pid;
-#[cfg(windows)]
-use sysinfo::{ProcessesToUpdate, System};
 use tauri::State;
-
-#[allow(dead_code)]
-pub(crate) const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-#[cfg(unix)]
-fn signal_process_group(pid: u32, signal: i32, action: &str) -> Result<(), String> {
-    if pid == 0 {
-        return Err(format!("Invalid PID 0 to {action}"));
-    }
-    let result = unsafe { libc::kill(-(pid as i32), signal) };
-    if result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
-        Ok(())
-    } else {
-        Err(format!("Failed to {action} process group"))
-    }
-}
-
-#[cfg(unix)]
-fn process_group_exists(pid: u32) -> bool {
-    if pid == 0 {
-        return false;
-    }
-    (unsafe { libc::kill(-(pid as i32), 0) }) == 0
-}
-
-#[cfg(windows)]
-fn taskkill_process_tree(pid: u32) -> Result<std::process::Output, String> {
-    Command::new("taskkill")
-        .args(["/PID", &pid.to_string(), "/T", "/F"])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map_err(|e| format!("Failed to launch taskkill: {e}"))
-}
-
-#[cfg(windows)]
-fn process_exists(pid: u32) -> bool {
-    let pid = Pid::from_u32(pid);
-    let mut sys = System::new();
-    sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
-    sys.process(pid).is_some()
-}
 
 // ─── App State ──────────────────────────────────────────────────────────────
 
@@ -143,7 +95,6 @@ pub struct JobState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ActiveScan {
     pub(crate) id: u64,
-    pub(crate) pid: u32,
     pub(crate) cancel_token: Option<tokio_util::sync::CancellationToken>,
 }
 
@@ -170,35 +121,12 @@ impl ScanState {
         self.active.lock().is_ok_and(|active| active.is_some())
     }
 
-    pub fn active_pid(&self) -> Option<Pid> {
-        self.active
-            .lock()
-            .ok()?
-            .as_ref()
-            .map(|scan| Pid::from_u32(scan.pid))
-    }
-
     pub(crate) fn ensure_accepting_starts(&self) -> Result<(), String> {
         if self.accepting_starts.load(Ordering::SeqCst) {
             Ok(())
         } else {
             Err("Application is closing; no new directory inspection can start.".into())
         }
-    }
-
-    fn wait_until_released(
-        &self,
-        scan_id: u64,
-        timeout: std::time::Duration,
-    ) -> Result<(), String> {
-        wait_until(timeout, "directory inspection", || {
-            Ok(!self
-                .active
-                .lock()
-                .map_err(|e| e.to_string())?
-                .as_ref()
-                .is_some_and(|scan| scan.id == scan_id))
-        })
     }
 
     fn wait_until_empty(&self, timeout: std::time::Duration) -> Result<(), String> {
@@ -235,12 +163,8 @@ impl Default for JobState {
 }
 
 impl JobState {
-    fn is_active(&self) -> bool {
+    pub fn is_active(&self) -> bool {
         self.slot.lock().is_ok_and(|slot| slot.is_some())
-    }
-
-    pub fn active_pid(&self) -> Option<Pid> {
-        None
     }
 
     pub(crate) fn release_slot(&self, job_id: u64) {
@@ -507,97 +431,26 @@ pub fn stop_job(
 }
 
 pub fn stop_scan_internal(state: &ScanState) -> Result<(), String> {
-    stop_scan_internal_with_timeout(state, STOP_TIMEOUT)
+    let _start_lock = state.start_lock.lock().map_err(|e| e.to_string())?;
+    stop_registered_scan(state)
 }
 
+/// In-process scan cancellation is immediate via `CancellationToken`; `_timeout` is retained
+/// for uniform shutdown orchestration in `cleanup_owned_processes_with_timeout`.
 pub(crate) fn stop_scan_internal_with_timeout(
     state: &ScanState,
-    timeout: std::time::Duration,
+    _timeout: std::time::Duration,
 ) -> Result<(), String> {
-    let _start_lock = state.start_lock.lock().map_err(|e| e.to_string())?;
-    stop_registered_scan_with_timeout(state, timeout)
+    stop_scan_internal(state)
 }
 
 pub(crate) fn stop_registered_scan(state: &ScanState) -> Result<(), String> {
-    stop_registered_scan_with_timeout(state, STOP_TIMEOUT)
-}
-
-pub(crate) fn stop_registered_scan_with_timeout(
-    state: &ScanState,
-    timeout: std::time::Duration,
-) -> Result<(), String> {
-    let target = state.active.lock().map_err(|e| e.to_string())?.clone();
-    let Some(scan) = target else {
-        return Ok(());
-    };
-    let scan_id = scan.id;
-    let pid = scan.pid;
-
-    if let Some(token) = scan.cancel_token {
-        token.cancel();
-    }
-
-    if pid == 0 {
-        let mut active = state.active.lock().map_err(|e| e.to_string())?;
-        if active
-            .as_ref()
-            .is_some_and(|target| target.id == scan_id && target.pid == 0)
-        {
-            *active = None;
-        }
-        return Ok(());
-    }
-    #[cfg(unix)]
-    signal_process_group(pid, libc::SIGTERM, "stop directory inspection")?;
-    #[cfg(windows)]
-    {
-        let failure = match taskkill_process_tree(pid) {
-            Ok(output) if output.status.success() => None,
-            Ok(output) => Some(format!(
-                "Failed to stop directory inspection: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            )),
-            Err(error) => Some(error),
-        };
-        if let Some(error) = failure {
-            let mut active = state.active.lock().map_err(|e| e.to_string())?;
-            if active
-                .as_ref()
-                .is_some_and(|target| target.id != scan_id || target.pid != pid)
-            {
-                return Ok(());
-            }
-            if !process_exists(pid) {
-                *active = None;
-                return Ok(());
-            }
-            return Err(error);
+    let mut active = state.active.lock().map_err(|e| e.to_string())?;
+    if let Some(scan) = active.take() {
+        if let Some(token) = scan.cancel_token {
+            token.cancel();
         }
     }
-
-    #[cfg(unix)]
-    {
-        let iterations = (timeout.as_millis() / 100).max(1);
-        for _ in 0..iterations {
-            if !process_group_exists(pid) {
-                // UI stop path must not misreport a delivered kill as failure; exit path re-verifies strictly.
-                let _ = state.wait_until_released(scan_id, timeout);
-                return Ok(());
-            }
-            thread::sleep(std::time::Duration::from_millis(100));
-        }
-        if state
-            .active
-            .lock()
-            .map_err(|e| e.to_string())?
-            .as_ref()
-            .is_some_and(|scan| scan.id == scan_id)
-        {
-            signal_process_group(pid, libc::SIGKILL, "force-stop directory inspection")?;
-        }
-    }
-    // UI stop path must not misreport a delivered kill as failure; exit path re-verifies strictly.
-    let _ = state.wait_until_released(scan_id, timeout);
     Ok(())
 }
 
@@ -1193,7 +1046,6 @@ mod job_tests {
 
         *scan_state.active.lock().unwrap() = Some(ActiveScan {
             id: 1,
-            pid: 99999,
             cancel_token: None,
         });
 
@@ -1203,7 +1055,6 @@ mod job_tests {
             *scan_state.active.lock().unwrap(),
             Some(ActiveScan {
                 id: 1,
-                pid: 99999,
                 cancel_token: None,
             })
         );
@@ -1215,14 +1066,12 @@ mod job_tests {
             *scan_state.active.lock().unwrap(),
             Some(ActiveScan {
                 id: 1,
-                pid: 99999,
                 cancel_token: None,
             })
         );
 
         let _ = job_state.slot.lock().unwrap().take();
     }
-
     #[test]
     fn test_stop_job_proceeds_when_scan_teardown_fails() {
         let scan_state = Arc::new(ScanState::default());
@@ -1342,7 +1191,6 @@ mod cleanup_tests {
         let token = tokio_util::sync::CancellationToken::new();
         *state.active.lock().unwrap() = Some(ActiveScan {
             id: 1,
-            pid: 0,
             cancel_token: Some(token.clone()),
         });
 
@@ -1358,7 +1206,6 @@ mod cleanup_tests {
         let token = tokio_util::sync::CancellationToken::new();
         *state.active.lock().unwrap() = Some(ActiveScan {
             id: 1,
-            pid: 0,
             cancel_token: Some(token.clone()),
         });
 
@@ -1371,70 +1218,5 @@ mod cleanup_tests {
 
         assert!(!state.is_active());
         assert!(!token.is_cancelled());
-    }
-}
-
-#[cfg(all(test, unix))]
-mod unix_scan_tests {
-    use super::*;
-    use std::os::unix::process::CommandExt;
-    use std::process::Command;
-    use std::sync::Arc;
-
-    #[test]
-    fn test_stop_scan_waits_until_process_is_reaped_and_registration_clears() {
-        let state = Arc::new(ScanState::default());
-        let mut command = Command::new("sh");
-        command.args(["-c", "sleep 30"]);
-        command.process_group(0);
-        let mut child = command.spawn().unwrap();
-        let pid = child.id();
-        *state.active.lock().unwrap() = Some(ActiveScan {
-            id: 1,
-            pid,
-            cancel_token: None,
-        });
-
-        let wait_state = Arc::clone(&state);
-        let waiter = thread::spawn(move || {
-            let registration = ScanRegistration {
-                state: &wait_state,
-                id: 1,
-            };
-            let _ = child.wait();
-            thread::sleep(std::time::Duration::from_millis(200));
-            drop(registration);
-        });
-
-        assert!(stop_registered_scan(&state).is_ok());
-        assert!(!state.is_active());
-        waiter.join().unwrap();
-    }
-}
-
-#[cfg(all(test, windows))]
-mod windows_scan_tests {
-    use super::*;
-    use std::os::windows::process::CommandExt;
-    use std::process::Command;
-
-    #[test]
-    fn test_stopping_an_already_exited_scan_succeeds() {
-        let state = ScanState::default();
-        let mut child = Command::new("cmd")
-            .args(["/C", "exit", "/B", "0"])
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn()
-            .unwrap();
-        let pid = child.id();
-        child.wait().unwrap();
-        *state.active.lock().unwrap() = Some(ActiveScan {
-            id: 1,
-            pid,
-            cancel_token: None,
-        });
-
-        assert!(stop_registered_scan(&state).is_ok());
-        assert!(!state.is_active());
     }
 }

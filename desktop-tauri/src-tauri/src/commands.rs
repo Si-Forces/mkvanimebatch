@@ -40,7 +40,6 @@ pub async fn inspect_directory(
     let cancel_token = tokio_util::sync::CancellationToken::new();
     *state.active.lock().map_err(|e| e.to_string())? = Some(ActiveScan {
         id: scan_id,
-        pid: 0,
         cancel_token: Some(cancel_token.clone()),
     });
     app.state::<JobState>().clear_snapshot();

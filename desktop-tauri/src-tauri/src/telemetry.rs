@@ -14,7 +14,6 @@ struct TelemetryInner {
     /// Timestamp of the previous telemetry poll; the window between polls
     /// converts the per-refresh written-bytes delta into a rate.
     last_poll: Option<std::time::Instant>,
-    tracked_pids: Vec<Pid>,
 }
 
 impl Default for TelemetryState {
@@ -25,7 +24,6 @@ impl Default for TelemetryState {
             inner: Mutex::new(TelemetryInner {
                 sys,
                 last_poll: None,
-                tracked_pids: Vec::new(),
             }),
         }
     }
@@ -42,13 +40,7 @@ pub struct TelemetryData {
 
 // ─── Tauri Commands ──────────────────────────────────────────────────────────
 
-const KNOWN_ENGINE_PREFIXES: [&str; 5] = [
-    "mkv-remux",
-    "mkv-extract",
-    "mkvmerge",
-    "mkvextract",
-    "ffmpeg",
-];
+const KNOWN_ENGINE_PREFIXES: [&str; 3] = ["mkvmerge", "mkvextract", "ffmpeg"];
 
 #[inline]
 fn starts_with_ignore_ascii_case(s: &str, prefix: &str) -> bool {
@@ -57,55 +49,9 @@ fn starts_with_ignore_ascii_case(s: &str, prefix: &str) -> bool {
         .is_some_and(|start| start.eq_ignore_ascii_case(prefix.as_bytes()))
 }
 
-#[cfg(target_os = "linux")]
-fn collect_linux_descendant_pids(roots: &[Pid]) -> Option<Vec<Pid>> {
-    /// Maximum depth for traversing the process tree (e.g. sidecar -> media tool).
-    const MAX_DESCENDANT_SEARCH_DEPTH: usize = 4;
-
-    let mut collected = Vec::new();
-    let mut queue = Vec::new();
-    for &root in roots {
-        if !collected.contains(&root) {
-            collected.push(root);
-            queue.push(root);
-        }
-    }
-
-    let mut depth = 0;
-    while !queue.is_empty() && depth < MAX_DESCENDANT_SEARCH_DEPTH {
-        let mut next_queue = Vec::new();
-        for pid in queue {
-            let path = format!("/proc/{}/task/{}/children", pid.as_u32(), pid.as_u32());
-            match std::fs::read_to_string(&path) {
-                Ok(content) => {
-                    for token in content.split_whitespace() {
-                        if let Ok(child_u32) = token.parse::<u32>() {
-                            let child_pid = Pid::from_u32(child_u32);
-                            if !collected.contains(&child_pid) {
-                                collected.push(child_pid);
-                                next_queue.push(child_pid);
-                            }
-                        }
-                    }
-                }
-                Err(err) => {
-                    // PermissionDenied indicates the /proc children interface is restricted or
-                    // unsupported on this kernel, so signal a fallback to full process scan.
-                    if err.kind() == std::io::ErrorKind::PermissionDenied {
-                        return None;
-                    }
-                }
-            }
-        }
-        queue = next_queue;
-        depth += 1;
-    }
-    Some(collected)
-}
-
 /// Determines if a process is an engine process (the desktop app itself, or its
-/// descendant sidecars and media tools: mkv-remux, mkv-extract, mkvmerge, mkvextract, ffmpeg)
-/// by checking process name and tracing its parent chain back to `self_pid`.
+/// direct child media tools: mkvmerge, mkvextract, ffmpeg)
+/// by checking process name and whether its parent is `self_pid`.
 pub fn is_engine_process(
     pid: Pid,
     process_name: &str,
@@ -124,18 +70,7 @@ pub fn is_engine_process(
         return false;
     }
 
-    let mut current = parent_fn(pid);
-    for _ in 0..5 {
-        if let Some(parent) = current {
-            if parent == self_pid {
-                return true;
-            }
-            current = parent_fn(parent);
-        } else {
-            break;
-        }
-    }
-    false
+    parent_fn(pid) == Some(self_pid)
 }
 
 #[tauri::command]
@@ -145,64 +80,21 @@ pub fn get_system_telemetry(
     scan_state: State<'_, ScanState>,
 ) -> Result<TelemetryData, String> {
     let mut guard = state.inner.lock().map_err(|e| e.to_string())?;
-    let TelemetryInner {
-        sys,
-        last_poll,
-        tracked_pids,
-    } = &mut *guard;
+    let TelemetryInner { sys, last_poll } = &mut *guard;
     let self_pid = Pid::from_u32(std::process::id());
 
-    let job_pid = job_state.active_pid();
-    let scan_pid = scan_state.active_pid();
-    let has_active_job = job_pid.is_some() || scan_pid.is_some();
+    let has_active_job = job_state.is_active() || scan_state.is_active();
 
     sys.refresh_cpu_all();
     sys.refresh_memory();
 
-    #[cfg(target_os = "linux")]
-    {
-        if !has_active_job && tracked_pids.len() <= 1 {
-            sys.refresh_processes(ProcessesToUpdate::Some(&[self_pid]), true);
-            tracked_pids.clear();
-        } else {
-            let mut sidecar_roots = Vec::new();
-            if let Some(p) = job_pid {
-                sidecar_roots.push(p);
-            }
-            if let Some(p) = scan_pid {
-                sidecar_roots.push(p);
-            }
-            match collect_linux_descendant_pids(&sidecar_roots) {
-                Some(mut descendants) => {
-                    if !descendants.contains(&self_pid) {
-                        descendants.push(self_pid);
-                    }
-                    for prev_pid in tracked_pids.iter() {
-                        if !descendants.contains(prev_pid) {
-                            descendants.push(*prev_pid);
-                        }
-                    }
-                    sys.refresh_processes(ProcessesToUpdate::Some(&descendants), true);
-                }
-                None => {
-                    sys.refresh_processes(ProcessesToUpdate::All, false);
-                }
-            }
-        }
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        if !has_active_job {
-            sys.refresh_processes(ProcessesToUpdate::Some(&[self_pid]), true);
-            tracked_pids.clear();
-        } else {
-            sys.refresh_processes(ProcessesToUpdate::All, false);
-        }
+    if !has_active_job {
+        sys.refresh_processes(ProcessesToUpdate::Some(&[self_pid]), true);
+    } else {
+        sys.refresh_processes(ProcessesToUpdate::All, false);
     }
 
     let mut written_window = 0u64;
-    let mut active_engine_pids = Vec::new();
     for (pid, process) in sys.processes() {
         if is_engine_process(
             *pid,
@@ -211,10 +103,8 @@ pub fn get_system_telemetry(
             self_pid,
         ) {
             written_window += process.disk_usage().written_bytes;
-            active_engine_pids.push(*pid);
         }
     }
-    *tracked_pids = active_engine_pids;
     let cpus = sys.cpus();
     let cpu_pct = if !cpus.is_empty() {
         let total: f32 = cpus.iter().map(|c| c.cpu_usage()).sum();
@@ -262,17 +152,15 @@ mod tests {
     #[test]
     fn test_is_engine_process_ancestry_and_naming() {
         let self_pid = Pid::from_u32(100);
-        let sidecar_pid = Pid::from_u32(101);
+        let child_pid = Pid::from_u32(101);
         let grandchild_pid = Pid::from_u32(102);
-        let unrelated_sidecar = Pid::from_u32(201);
-        let unrelated_grandchild = Pid::from_u32(202);
+        let unrelated_process = Pid::from_u32(201);
         let unrelated_app = Pid::from_u32(300);
 
         let mut parents = HashMap::new();
-        parents.insert(sidecar_pid, self_pid);
-        parents.insert(grandchild_pid, sidecar_pid);
-        parents.insert(unrelated_sidecar, Pid::from_u32(999));
-        parents.insert(unrelated_grandchild, unrelated_sidecar);
+        parents.insert(child_pid, self_pid);
+        parents.insert(grandchild_pid, child_pid);
+        parents.insert(unrelated_process, Pid::from_u32(999));
         parents.insert(unrelated_app, self_pid);
 
         let parent_fn = |p| parents.get(&p).copied();
@@ -285,31 +173,29 @@ mod tests {
             self_pid
         ));
 
-        // 2. sidecar descendant of self_pid is engine
+        // 2. direct child tool (mkvmerge, mkvextract, ffmpeg) of self_pid is engine
         assert!(is_engine_process(
-            sidecar_pid,
-            "mkv-remux-x86_64",
+            child_pid, "mkvmerge", parent_fn, self_pid
+        ));
+        assert!(is_engine_process(
+            child_pid,
+            "mkvextract",
             parent_fn,
             self_pid
         ));
+        assert!(is_engine_process(child_pid, "ffmpeg", parent_fn, self_pid));
 
-        // 3. grandchild (mkvmerge, mkvextract, ffmpeg) descending from self_pid is engine
-        assert!(is_engine_process(
+        // 3. grandchild is NOT engine (only direct children matched)
+        assert!(!is_engine_process(
             grandchild_pid,
             "mkvmerge",
             parent_fn,
             self_pid
         ));
 
-        // 4. unrelated sidecar or grandchild with different ancestor is NOT engine
+        // 4. unrelated tool with different parent is NOT engine
         assert!(!is_engine_process(
-            unrelated_sidecar,
-            "mkv-remux-x86_64",
-            parent_fn,
-            self_pid
-        ));
-        assert!(!is_engine_process(
-            unrelated_grandchild,
+            unrelated_process,
             "mkvmerge",
             parent_fn,
             self_pid
@@ -324,14 +210,9 @@ mod tests {
         ));
 
         // 6. Unicode process names must not panic on UTF-8 character boundaries
+        assert!(!is_engine_process(child_pid, "ééééé", parent_fn, self_pid));
         assert!(!is_engine_process(
-            sidecar_pid,
-            "ééééé",
-            parent_fn,
-            self_pid
-        ));
-        assert!(!is_engine_process(
-            sidecar_pid,
+            child_pid,
             "アニメプロセス",
             parent_fn,
             self_pid
@@ -339,22 +220,10 @@ mod tests {
     }
 
     #[test]
-    fn test_active_pid_defaults_to_none() {
+    fn test_state_is_active_defaults_to_false() {
         let job_state = JobState::default();
         let scan_state = ScanState::default();
-        assert_eq!(job_state.active_pid(), None);
-        assert_eq!(scan_state.active_pid(), None);
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn test_collect_linux_descendant_pids_resilience() {
-        let self_pid = Pid::from_u32(std::process::id());
-        let res = collect_linux_descendant_pids(&[self_pid]);
-        assert!(res.is_some_and(|pids| pids.contains(&self_pid)));
-
-        let non_existent = Pid::from_u32(999_999);
-        let non_res = collect_linux_descendant_pids(&[non_existent]);
-        assert_eq!(non_res, Some(vec![non_existent]));
+        assert!(!job_state.is_active());
+        assert!(!scan_state.is_active());
     }
 }

@@ -1,12 +1,6 @@
 /**
  * log-classify.js
- * Classification of engine log lines for console colouring.
- *
- * The vocabulary below mirrors wording emitted by the Python engines
- * (mkv_remux.py / mkv_extract.py) after Rust prefixes error lines with
- * "[ERR] ". It is display-only cosmetics — not part of the Sidecar
- * Contract. When job-log payloads eventually carry structured levels,
- * replace the rules table; consumers should not change.
+ * Classification of engine log lines for console styling.
  */
 
 export function stripLogPrefix(text) {

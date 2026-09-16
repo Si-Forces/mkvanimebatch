@@ -382,110 +382,6 @@ async fn test_pipeline_cancellation_drains_items() {
     assert_eq!(cancelled_count, 2);
 }
 
-#[test]
-fn test_pipeline_config_from_args_validation() {
-    // Default / basic parsing
-    let config = PipelineConfig::from_args([
-        "--input-dir",
-        "/path/to/in",
-        "--out-dir",
-        "/path/to/out",
-        "--workers",
-        "8",
-        "--io-jobs",
-        "4",
-        "--ffmpeg-threads",
-        "4",
-        "--bitrate",
-        "192k",
-        "--complexity",
-        "8",
-        "--sub-offset",
-        "-1.5",
-        "--dry-run",
-        "--no-cache",
-        "--keep-fonts",
-        "--extract",
-    ])
-    .unwrap();
-
-    assert_eq!(config.input_dir.to_str().unwrap(), "/path/to/in");
-    assert_eq!(
-        config.out_dir.as_ref().unwrap().to_str().unwrap(),
-        "/path/to/out"
-    );
-    assert_eq!(config.workers, 8);
-    assert_eq!(config.io_jobs, 4);
-    assert_eq!(config.ffmpeg_threads, 4);
-    assert_eq!(config.bitrate, "192k");
-    assert_eq!(config.complexity, 8);
-    assert_eq!(config.sub_offset, -1.5);
-    assert!(config.dry_run);
-    assert!(config.no_cache);
-    assert!(config.keep_fonts);
-    assert_eq!(config.mode, PipelineMode::Extract);
-
-    // Bitrate validation
-    assert!(PipelineConfig::from_args(["--bitrate", "0"]).is_err());
-    assert!(PipelineConfig::from_args(["--bitrate", "0k"]).is_err());
-    assert!(PipelineConfig::from_args(["--bitrate", "invalid"]).is_err());
-    assert!(PipelineConfig::from_args(["--bitrate", "128k"]).is_ok());
-    assert!(PipelineConfig::from_args(["--bitrate", "1M"]).is_ok());
-
-    // Complexity validation
-    assert!(PipelineConfig::from_args(["--complexity", "11"]).is_err());
-    assert!(PipelineConfig::from_args(["--complexity", "0"]).is_ok());
-    assert!(PipelineConfig::from_args(["--complexity", "10"]).is_ok());
-
-    // Workers validation
-    assert!(PipelineConfig::from_args(["--workers", "0"]).is_err());
-    assert!(PipelineConfig::from_args(["--workers", "65"]).is_err());
-    assert!(PipelineConfig::from_args(["--workers", "1"]).is_ok());
-    assert!(PipelineConfig::from_args(["--workers", "64"]).is_ok());
-
-    // IO jobs validation
-    assert!(PipelineConfig::from_args(["--io-jobs", "65"]).is_err());
-    assert!(PipelineConfig::from_args(["--io-jobs", "0"]).is_ok());
-    assert!(PipelineConfig::from_args(["--io-jobs", "64"]).is_ok());
-
-    // FFmpeg threads validation
-    assert!(PipelineConfig::from_args(["--ffmpeg-threads", "0"]).is_err());
-    assert!(PipelineConfig::from_args(["--ffmpeg-threads", "33"]).is_err());
-    assert!(PipelineConfig::from_args(["--ffmpeg-threads", "1"]).is_ok());
-    assert!(PipelineConfig::from_args(["--ffmpeg-threads", "32"]).is_ok());
-
-    // Unknown arg
-    assert!(PipelineConfig::from_args(["--non-existent"]).is_err());
-}
-
-#[test]
-fn test_pipeline_config_from_args_sub_assignments() {
-    let dir = tempdir().unwrap();
-    let assign_file = dir.path().join("assignments.json");
-    fs::write(
-        &assign_file,
-        r#"{"assignments": {"ep1": "subs/ep1.ass", "ep2": "/abs/ep2.ass"}}"#,
-    )
-    .unwrap();
-
-    let config = PipelineConfig::from_args([
-        "--input-dir",
-        dir.path().to_str().unwrap(),
-        "--sub-assignments",
-        assign_file.to_str().unwrap(),
-    ])
-    .unwrap();
-
-    let subs = config
-        .sub_assignments
-        .expect("sub_assignments should be loaded");
-    assert_eq!(subs.get("ep1").unwrap(), &dir.path().join("subs/ep1.ass"));
-    assert_eq!(
-        subs.get("ep2").unwrap(),
-        &std::path::PathBuf::from("/abs/ep2.ass")
-    );
-}
-
 #[tokio::test]
 async fn test_pipeline_with_log_sender() {
     let dir = tempdir().unwrap();
@@ -545,23 +441,6 @@ async fn test_pipeline_from_request_with_preset_and_overrides() {
     assert!(pipeline.config.keep_fonts); // baseline from balanced
     assert_eq!(pipeline.config.workers, 6);
     assert!(pipeline.config.dry_run);
-}
-
-#[test]
-fn test_pipeline_config_from_args_preset() {
-    let config = PipelineConfig::from_args([
-        "--input-dir",
-        "/tmp",
-        "--preset",
-        "fast",
-        "--bitrate",
-        "160k",
-    ])
-    .unwrap();
-
-    assert_eq!(config.bitrate, "160k"); // overridden
-    assert_eq!(config.complexity, 5); // from fast preset
-    assert!(!config.keep_fonts); // from fast preset
 }
 
 #[tokio::test]
