@@ -2178,7 +2178,6 @@ dependencies = [
 name = "mkv-anime-batch"
 version = "1.0.0"
 dependencies = [
- "libc",
  "mkv-core",
  "rfd",
  "serde",
@@ -2217,7 +2216,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
- "uuid",
 ]
 
 [[package]]

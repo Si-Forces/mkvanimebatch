@@ -794,6 +794,18 @@ fn rollback_error(
     ))
 }
 
+pub fn unique_file_token() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{pid}.{nanos}.{seq}")
+}
+
 pub fn promote_file(staged: &Path, final_path: &Path) -> Result<(), std::io::Error> {
     let parent = final_path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)?;
@@ -809,7 +821,7 @@ pub fn promote_file(staged: &Path, final_path: &Path) -> Result<(), std::io::Err
 
     // Rename failed. If not cross-device and destination already exists (typical on Windows), use backup-and-rollback
     if !is_cross_device && final_path.exists() {
-        let backup_path = final_path.with_extension(format!("bak.{}", uuid::Uuid::new_v4()));
+        let backup_path = final_path.with_extension(format!("bak.{}", unique_file_token()));
         if std::fs::rename(final_path, &backup_path).is_ok() {
             if std::fs::rename(staged, final_path).is_ok() {
                 let _ = std::fs::remove_file(&backup_path);
@@ -825,7 +837,7 @@ pub fn promote_file(staged: &Path, final_path: &Path) -> Result<(), std::io::Err
 
     // Fallback across filesystem boundaries: copy to a temporary sibling file in final_path's
     // parent directory first, then rename over final_path to guarantee atomic replacement.
-    let temp_sibling = parent.join(format!(".tmp_promote_{}", uuid::Uuid::new_v4()));
+    let temp_sibling = parent.join(format!(".tmp_promote_{}", unique_file_token()));
     if let Err(e) = std::fs::copy(staged, &temp_sibling) {
         let _ = std::fs::remove_file(&temp_sibling);
         return Err(e);
@@ -834,7 +846,7 @@ pub fn promote_file(staged: &Path, final_path: &Path) -> Result<(), std::io::Err
     let rename_result = if std::fs::rename(&temp_sibling, final_path).is_ok() {
         Ok(())
     } else if final_path.exists() {
-        let backup_path = final_path.with_extension(format!("bak.{}", uuid::Uuid::new_v4()));
+        let backup_path = final_path.with_extension(format!("bak.{}", unique_file_token()));
         if std::fs::rename(final_path, &backup_path).is_ok() {
             if std::fs::rename(&temp_sibling, final_path).is_ok() {
                 let _ = std::fs::remove_file(&backup_path);

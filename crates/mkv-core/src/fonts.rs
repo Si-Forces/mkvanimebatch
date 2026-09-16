@@ -13,7 +13,6 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 use tracing::{error, warn};
-use uuid::Uuid;
 
 use crate::domain::{font_mime, natural_sort_key, safe_filename, FONT_EXTENSIONS};
 use crate::scan::FileSignature;
@@ -399,7 +398,7 @@ impl FontRegistry {
         let _ = fs::create_dir_all(&self.staging_dir);
         state.claimed_name_size.insert(key.clone());
 
-        let unique_id = Uuid::new_v4().simple().to_string();
+        let unique_id = crate::domain::unique_file_token();
         let staging_path = self
             .staging_dir
             .join(format!(".tmp_{unique_id}_{safe_name}"));
