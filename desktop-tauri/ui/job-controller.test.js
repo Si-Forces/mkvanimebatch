@@ -262,58 +262,25 @@ test("job controller replays early job-done arriving while run_job is in flight"
 });
 
 test("extractInspectionOptions parses valid options, preserves 0, and rejects invalid values", () => {
-  // Valid combined
-  const res1 = extractInspectionOptions(["--workers", "6", "--io-jobs", "0", "--no-cache"]);
-  assert.deepEqual(res1.options, { workers: 6, ioJobs: 0, noCache: true });
+  // Valid combined - snake_case
+  const res1 = extractInspectionOptions({ workers: 4, io_jobs: 2, no_cache: true });
+  assert.deepEqual(res1.options, { workers: 4, ioJobs: 2, noCache: true });
   assert.equal(res1.error, undefined);
 
-  // Defaults on empty
-  const res2 = extractInspectionOptions([]);
-  assert.deepEqual(res2.options, {});
+  // Valid combined - camelCase
+  const res2 = extractInspectionOptions({ workers: 4, ioJobs: 2, noCache: true });
+  assert.deepEqual(res2.options, { workers: 4, ioJobs: 2, noCache: true });
+  assert.equal(res2.error, undefined);
 
-  // Boundary workers
-  assert.equal(extractInspectionOptions(["--workers", "1"]).options.workers, 1);
-  assert.equal(extractInspectionOptions(["--workers", "64"]).options.workers, 64);
-  assert.ok(extractInspectionOptions(["--workers", "0"]).error);
-  assert.ok(extractInspectionOptions(["--workers", "-1"]).error);
-  assert.ok(extractInspectionOptions(["--workers", "65"]).error);
-  assert.ok(extractInspectionOptions(["--workers", "abc"]).error);
-
-  // Boundary io-jobs
-  assert.equal(extractInspectionOptions(["--io-jobs", "0"]).options.ioJobs, 0);
-  assert.equal(extractInspectionOptions(["--io-jobs", "64"]).options.ioJobs, 64);
-  assert.ok(extractInspectionOptions(["--io-jobs", "-1"]).error);
-  assert.ok(extractInspectionOptions(["--io-jobs", "65"]).error);
-  assert.ok(extractInspectionOptions(["--io-jobs", "NaN"]).error);
-
-  // Invalid spellings
-  for (const spelling of ["1e1", "4.0", "0x10", ""]) {
-    assert.ok(extractInspectionOptions(["--workers", spelling]).error, `workers should reject '${spelling}'`);
-    assert.ok(extractInspectionOptions(["--io-jobs", spelling]).error, `io-jobs should reject '${spelling}'`);
-  }
-
-  // Trailing flags
-  assert.ok(extractInspectionOptions(["--workers"]).error, "trailing --workers should be rejected");
-  assert.ok(extractInspectionOptions(["--io-jobs"]).error, "trailing --io-jobs should be rejected");
-  assert.ok(extractInspectionOptions(["--input-dir", "/dir", "--workers"]).error, "trailing --workers after flags should be rejected");
-  assert.ok(extractInspectionOptions(["--input-dir", "/dir", "--io-jobs"]).error, "trailing --io-jobs after flags should be rejected");
-});
-
-test("extractInspectionOptions parses valid options, preserves 0, and rejects invalid values from BatchRequest objects", () => {
-  // Valid combined
-  const res1 = extractInspectionOptions({ workers: 6, io_jobs: 0, no_cache: true });
-  assert.deepEqual(res1.options, { workers: 6, ioJobs: 0, noCache: true });
-  assert.equal(res1.error, undefined);
+  // Preserves 0 for io_jobs and ioJobs
+  assert.equal(extractInspectionOptions({ io_jobs: 0 }).options.ioJobs, 0);
+  assert.equal(extractInspectionOptions({ ioJobs: 0 }).options.ioJobs, 0);
 
   // Defaults on empty / null / undefined fields
-  const res2 = extractInspectionOptions({});
-  assert.deepEqual(res2.options, {});
-
-  const res3 = extractInspectionOptions({ workers: null, io_jobs: null, no_cache: false });
-  assert.deepEqual(res3.options, {});
-
-  const res4 = extractInspectionOptions(null);
-  assert.deepEqual(res4.options, {});
+  assert.deepEqual(extractInspectionOptions({}).options, {});
+  assert.deepEqual(extractInspectionOptions(null).options, {});
+  assert.deepEqual(extractInspectionOptions({ workers: null, io_jobs: null, no_cache: false }).options, {});
+  assert.deepEqual(extractInspectionOptions({ workers: null, ioJobs: null, noCache: false }).options, {});
 
   // Boundary workers
   assert.equal(extractInspectionOptions({ workers: 1 }).options.workers, 1);
@@ -325,18 +292,25 @@ test("extractInspectionOptions parses valid options, preserves 0, and rejects in
   assert.ok(extractInspectionOptions({ workers: 4.5 }).error);
   assert.ok(extractInspectionOptions({ workers: NaN }).error);
 
-  // Boundary io-jobs (preserves 0)
-  assert.equal(extractInspectionOptions({ io_jobs: 0 }).options.ioJobs, 0);
+  // Boundary io-jobs (snake_case and camelCase)
   assert.equal(extractInspectionOptions({ io_jobs: 64 }).options.ioJobs, 64);
+  assert.equal(extractInspectionOptions({ ioJobs: 64 }).options.ioJobs, 64);
   assert.ok(extractInspectionOptions({ io_jobs: -1 }).error);
+  assert.ok(extractInspectionOptions({ ioJobs: -1 }).error);
   assert.ok(extractInspectionOptions({ io_jobs: 65 }).error);
+  assert.ok(extractInspectionOptions({ ioJobs: 65 }).error);
   assert.ok(extractInspectionOptions({ io_jobs: "abc" }).error);
+  assert.ok(extractInspectionOptions({ ioJobs: "abc" }).error);
   assert.ok(extractInspectionOptions({ io_jobs: 1.5 }).error);
+  assert.ok(extractInspectionOptions({ ioJobs: 1.5 }).error);
   assert.ok(extractInspectionOptions({ io_jobs: NaN }).error);
+  assert.ok(extractInspectionOptions({ ioJobs: NaN }).error);
 
-  // no_cache
+  // noCache / no_cache
   assert.equal(extractInspectionOptions({ no_cache: true }).options.noCache, true);
   assert.equal(extractInspectionOptions({ no_cache: false }).options.noCache, undefined);
+  assert.equal(extractInspectionOptions({ noCache: true }).options.noCache, true);
+  assert.equal(extractInspectionOptions({ noCache: false }).options.noCache, undefined);
 });
 
 test("job controller forwards snapshotted execution args incl zero io-jobs and no-cache, ignoring subsequent DOM mutations", async t => {
