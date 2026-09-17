@@ -62,3 +62,8 @@ _Avoid_: Config preset, setting template, encoding profile
 **Track Assignment**:
 An explicit mapping attaching an external or embedded asset to a specific target video file with designated track type, language tag, and time offset. While the domain model anticipates multi-track stacking, current pipeline execution enforces 1:1 subtitle overrides (`track_type: "subtitle"`).
 _Avoid_: Sub assignment, manual override, track mapping
+
+**Selected Items**:
+An ordered subset of canonical relative video paths or item IDs designated in a Batch Request to restrict and sequence pipeline execution. When omitted, all discovered media files execute in natural directory order.
+_Avoid_: Target filter, whitelist, item subset
+
