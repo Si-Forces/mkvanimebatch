@@ -62,7 +62,7 @@ pub fn run() {
             stop_job,
             clear_cache,
             pick_directory,
-            pick_folder,
+            pick_subtitle_file,
             inspect_directory,
             get_system_telemetry,
             close_window,

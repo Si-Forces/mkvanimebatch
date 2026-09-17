@@ -5,7 +5,12 @@ import {
   finalizeQueueState,
   formatElapsedDuration,
   formatOutcomeDuration,
+  getSelectedCount,
   reduceQueueEvent,
+  reorderItem,
+  selectAll,
+  deselectAll,
+  toggleItemSelection,
 } from "./queue-state.js";
 
 // ─── Real-Time Episode Queue & Progress/Duration Tracker ───────────────────
@@ -20,11 +25,30 @@ export class QueueTracker {
     this.scanToken = 0;
     this.lastScannedPath = null;
     this.lastManifest = null;
-    // GUI manual subtitle selection (remux only): item id -> candidate path
+    // Track Assignment overrides (remux only): item id -> assignment payload
     this.assignments = new Map();
     // v2 manifest: candidates are stored once per release directory.
     this.subtitleCandidates = {};
     this.heartbeatTimer = null;
+    if (this.listEl) {
+      this.listEl.addEventListener("change", (e) => {
+        const check = e.target?.closest?.(".ep-select-check");
+        if (check?.dataset?.itemId) {
+          toggleItemSelection(this.state, check.dataset.itemId, check.checked);
+          this.updateSelectionBadge();
+          this.onSelectionChange?.();
+        }
+      });
+
+      this.listEl.addEventListener("click", (e) => {
+        const btn = e.target?.closest?.(".ep-reorder-btn");
+        if (!btn?.dataset?.itemId) return;
+        const id = btn.dataset.itemId;
+        const isUp = btn.classList?.contains?.("ep-up-btn");
+        const dir = isUp ? "up" : "down";
+        this.reorderCard(id, dir);
+      });
+    }
   }
 
   startHeartbeat() {
@@ -190,7 +214,7 @@ export class QueueTracker {
       return;
     }
 
-    if (this.countEl) this.countEl.textContent = `${this.state.totalCount} Episodes Queued`;
+    this.updateSelectionBadge();
 
     if (this.state && this.listEl) {
       this.renderCardsIncrementally(this.scanToken, bitrate);
@@ -301,9 +325,21 @@ export class QueueTracker {
       ? `<button type="button" class="sub-assign-btn" title="Manually assign a subtitle file">+ Sub</button>`
       : "";
 
+    const checkHtml = `<input type="checkbox" class="ep-select-check" checked data-item-id="${id}" title="Include in batch" />`;
+    const reorderHtml = `
+      <div class="ep-reorder-group">
+        <button type="button" class="ep-reorder-btn ep-up-btn" data-item-id="${id}" title="Move up">▲</button>
+        <button type="button" class="ep-reorder-btn ep-down-btn" data-item-id="${id}" title="Move down">▼</button>
+      </div>
+    `;
+
     el.innerHTML = `
       <div class="ep-card-top">
-        <div class="ep-badge">EPISODE ${numStr}</div>
+        <div class="ep-card-left">
+          ${checkHtml}
+          ${reorderHtml}
+          <div class="ep-badge">EPISODE ${numStr}</div>
+        </div>
         <span class="ep-codec">${codecTag}</span>
         <span class="ep-duration-tag status-tag">Queued</span>
       </div>
@@ -335,6 +371,9 @@ export class QueueTracker {
       tag1: el.querySelector(".track-tag.cyan"),
       tag2: el.querySelector(".track-tag.magenta"),
       subBtn,
+      checkbox: el.querySelector(".ep-select-check"),
+      upBtn: el.querySelector(".ep-up-btn"),
+      downBtn: el.querySelector(".ep-down-btn"),
     };
   }
 
@@ -343,10 +382,11 @@ export class QueueTracker {
     if (!card?.subBtn) return;
     const assigned = this.assignments.get(id);
     if (assigned) {
-      const base = assigned.split("/").pop();
+      const assetPath = typeof assigned === "string" ? assigned : (assigned.asset_path || "");
+      const base = assetPath.split("/").pop().split("\\").pop();
       card.subBtn.textContent = `Sub: ${base}`;
       card.subBtn.classList.add("assigned");
-      card.subBtn.title = `Manually assigned: ${assigned}`;
+      card.subBtn.title = `Manually assigned: ${assetPath}`;
     } else {
       card.subBtn.textContent = "+ Sub";
       card.subBtn.classList.remove("assigned");
@@ -502,8 +542,78 @@ export class QueueTracker {
     this.renderQueueCount();
   }
 
+  updateSelectionBadge() {
+    if (!this.countEl) return;
+    if (!this.state || this.state.totalCount === 0) {
+      this.countEl.textContent = "Ready";
+      return;
+    }
+    const selected = getSelectedCount(this.state);
+    const total = this.state.totalCount;
+    this.countEl.textContent = `${selected} / ${total} Selected`;
+  }
+
+  getSelectedCount() {
+    return getSelectedCount(this.state);
+  }
+
+  getSelectedOrderedItemIds() {
+    if (!this.state) return [];
+    return this.state.order.filter(id => {
+      const item = this.state.items.get(id);
+      return item && item.selected !== false;
+    });
+  }
+
+  selectAll() {
+    selectAll(this.state);
+    for (const card of this.cards.values()) {
+      if (card.checkbox) card.checkbox.checked = true;
+    }
+    this.updateSelectionBadge();
+    this.onSelectionChange?.();
+  }
+
+  deselectAll() {
+    deselectAll(this.state);
+    for (const card of this.cards.values()) {
+      if (card.checkbox) card.checkbox.checked = false;
+    }
+    this.updateSelectionBadge();
+    this.onSelectionChange?.();
+  }
+
+  reorderCard(id, dir) {
+    reorderItem(this.state, id, dir);
+    const card = this.cards.get(id);
+    if (card?.el) {
+      if (dir === "up" && card.el.previousElementSibling) {
+        card.el.previousElementSibling.before(card.el);
+      } else if (dir === "down" && card.el.nextElementSibling) {
+        card.el.nextElementSibling.after(card.el);
+      }
+    }
+    this.updateEpisodeBadges();
+    this.onSelectionChange?.();
+  }
+
+  updateEpisodeBadges() {
+    if (!this.state?.order) return;
+    this.state.order.forEach((id, idx) => {
+      const card = this.cards.get(id);
+      if (card?.badge) {
+        const numStr = String(idx + 1).padStart(2, "0");
+        card.badge.textContent = `EPISODE ${numStr}`;
+      }
+    });
+  }
+
   renderQueueCount() {
     if (!this.countEl || !this.state) return;
+    if (this.state.batchStartTime === null && !this.state.batchCompleted) {
+      this.updateSelectionBadge();
+      return;
+    }
     const { totalCount, completedCount, skippedCount, cancelledCount = 0, errorCount, batchCompleted } = this.state;
     const processed = completedCount + skippedCount + cancelledCount + errorCount;
 

@@ -402,3 +402,38 @@ test("QueueTracker dynamically mounts card element in handleEvent if card not pr
   assert.equal(card.badge.textContent, "PROCESSING");
 });
 
+test("QueueTracker selection and card reordering", t => {
+  const { elements } = setupMockEnvironment(t);
+  const tracker = new QueueTracker("remux");
+
+  const manifest = {
+    version: 2,
+    items: [
+      { id: "ep1", name: "01.mkv" },
+      { id: "ep2", name: "02.mkv" },
+      { id: "ep3", name: "03.mkv" },
+    ],
+  };
+
+  tracker.populateFromInspection(manifest);
+  const countEl = elements.get("remux-queue-count");
+  assert.equal(countEl.textContent, "3 / 3 Selected");
+  assert.deepEqual(tracker.getSelectedOrderedItemIds(), ["ep1", "ep2", "ep3"]);
+
+  // deselect all
+  tracker.deselectAll();
+  assert.equal(countEl.textContent, "0 / 3 Selected");
+  assert.deepEqual(tracker.getSelectedOrderedItemIds(), []);
+
+  // select all
+  tracker.selectAll();
+  assert.equal(countEl.textContent, "3 / 3 Selected");
+  assert.deepEqual(tracker.getSelectedOrderedItemIds(), ["ep1", "ep2", "ep3"]);
+
+  // reorder
+  tracker.reorderCard("ep2", "up");
+  assert.deepEqual(tracker.getSelectedOrderedItemIds(), ["ep2", "ep1", "ep3"]);
+  assert.equal(tracker.cards.get("ep2").badge.textContent, "EPISODE 01");
+  assert.equal(tracker.cards.get("ep1").badge.textContent, "EPISODE 02");
+});
+

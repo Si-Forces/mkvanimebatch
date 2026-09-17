@@ -1,6 +1,6 @@
 /**
  * queue-state.js
- * Queue state factory, event reducer, and sidecar event contract handler
+ * Queue state factory, event reducer, and Engine Bridge event stream handler
  * for MKV Anime Batch UI.
  *
  * Ownership contract: the state object returned by createQueueState is
@@ -141,6 +141,7 @@ export function createQueueState(manifest, options = {}) {
       durationSec: null,
       reason: null,
       error: null,
+      selected: true,
     };
 
     state.items.set(id, item);
@@ -201,6 +202,7 @@ export function createQueueStateFromSnapshot(snapshot, options = {}) {
       durationSec: snapItem.duration_sec ?? null,
       reason: snapItem.reason ?? null,
       error: snapItem.error ?? null,
+      selected: true,
     };
 
     state.items.set(id, item);
@@ -245,12 +247,23 @@ export function buildTrackAssignmentsForManifest(assignments, manifest) {
   const carried = carryOverAssignments(assignments, manifest);
   if (carried.size === 0) return null;
   const list = [];
-  for (const [targetVideo, assetPath] of carried.entries()) {
-    list.push({
-      target_video: targetVideo,
-      asset_path: assetPath,
-      track_type: "subtitle",
-    });
+  for (const [targetVideo, val] of carried.entries()) {
+    if (typeof val === "object" && val !== null) {
+      list.push({
+        target_video: targetVideo,
+        asset_path: val.asset_path || val.path,
+        track_type: val.track_type || "subtitle",
+        language: val.language || null,
+        title: val.title || null,
+        offset_ms: typeof val.offset_ms === "number" ? val.offset_ms : null,
+      });
+    } else {
+      list.push({
+        target_video: targetVideo,
+        asset_path: val,
+        track_type: "subtitle",
+      });
+    }
   }
   return list;
 }
@@ -430,4 +443,60 @@ export function finalizeQueueState(state, exitCode, cancelled = false) {
     batchCancelled: state.batchCancelled || cancelled,
     batchSuccess: finalBatchSuccess,
   };
+}
+
+/**
+ * Toggles or sets item selection in queue state.
+ */
+export function toggleItemSelection(state, id, selected) {
+  if (!state || !state.items) return;
+  const item = state.items.get(id);
+  if (!item) return;
+  item.selected = typeof selected === "boolean" ? selected : !item.selected;
+}
+
+/**
+ * Selects all items in queue state.
+ */
+export function selectAll(state) {
+  if (!state || !state.items) return;
+  for (const item of state.items.values()) {
+    item.selected = true;
+  }
+}
+
+/**
+ * Deselects all items in queue state.
+ */
+export function deselectAll(state) {
+  if (!state || !state.items) return;
+  for (const item of state.items.values()) {
+    item.selected = false;
+  }
+}
+
+/**
+ * Reorders an item within state.order earlier or later.
+ */
+export function reorderItem(state, id, direction) {
+  if (!state || !Array.isArray(state.order)) return;
+  const idx = state.order.indexOf(id);
+  if (idx === -1) return;
+  if (direction === "up" && idx > 0) {
+    [state.order[idx - 1], state.order[idx]] = [state.order[idx], state.order[idx - 1]];
+  } else if (direction === "down" && idx < state.order.length - 1) {
+    [state.order[idx + 1], state.order[idx]] = [state.order[idx], state.order[idx + 1]];
+  }
+}
+
+/**
+ * Returns the count of selected items in state.
+ */
+export function getSelectedCount(state) {
+  if (!state || !state.items) return 0;
+  let count = 0;
+  for (const item of state.items.values()) {
+    if (item.selected !== false) count++;
+  }
+  return count;
 }

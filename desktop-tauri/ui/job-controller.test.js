@@ -609,3 +609,142 @@ test("job controller passes typed BatchRequest with track assignments to run_job
   assert.equal(req.assignments[0].target_video, "ep1.mkv");
   assert.equal(req.assignments[0].asset_path, "/subs/ep1.ass");
 });
+
+test("job controller includes selected_items and filters assignments to selected items", async t => {
+  const elements = new Map([
+    ["remux-input-dir", new FakeElement("/anime/series")],
+    ["remux-out-dir", new FakeElement("")],
+    ["remux-fonts-dir", new FakeElement("")],
+    ["remux-assets-dir", new FakeElement("")],
+    ["remux-sub-offset", new FakeElement("0")],
+    ["remux-workers", new FakeElement("")],
+    ["remux-io-jobs", new FakeElement("")],
+    ["remux-ffmpeg-threads", new FakeElement("")],
+    ["remux-bitrate", new FakeElement("")],
+    ["remux-complexity", new FakeElement("")],
+    ["remux-dry-run", new FakeElement(false)],
+    ["remux-no-cache", new FakeElement(false)],
+    ["remux-keep-fonts", new FakeElement(false)],
+    ["remux-run", new FakeElement()],
+    ["remux-stop", new FakeElement()],
+    ["remux-log", new FakeElement()],
+    ["remux-status", new FakeElement()],
+  ]);
+  const previousDocument = globalThis.document;
+  globalThis.document = {
+    getElementById: id => elements.get(id) ?? null,
+    querySelectorAll: () => [],
+    querySelector: () => null,
+  };
+  t.after(() => { globalThis.document = previousDocument; });
+
+  const invocations = [];
+  const coordinator = createJobCoordinator();
+  const queue = {
+    assignments: new Map([
+      ["ep1.mkv", "/subs/ep1.ass"],
+      ["ep2.mkv", "/subs/ep2.ass"],
+    ]),
+    lastManifest: {
+      version: 2,
+      items: [
+        { id: "ep1.mkv", name: "ep1.mkv" },
+        { id: "ep2.mkv", name: "ep2.mkv" },
+      ],
+    },
+    state: { totalCount: 2 },
+    getSelectedOrderedItemIds: () => ["ep1.mkv"],
+    handleEvent() {},
+    finalize() {},
+  };
+  const runtime = {
+    coordinator,
+    appendLog() {},
+    clearLog() {},
+    closeSubAssignModal() {},
+    queueFor: () => queue,
+    safeAddListener() {},
+    scanInputDirectory: async () => true,
+    showModal: async () => true,
+    telemetryLoop: { setJobActive() {} },
+    updateWorkerChips() {},
+    async listen() { return () => {}; },
+    async invoke(command, args) {
+      invocations.push([command, args]);
+      if (command === "run_job") return 42;
+      return null;
+    },
+  };
+
+  const controller = new JobController("remux", runtime);
+  await controller.start();
+
+  assert.equal(controller.jobId, 42);
+  const runJobCall = invocations.find(([cmd]) => cmd === "run_job");
+  assert.ok(runJobCall);
+  const req = runJobCall[1].request;
+  assert.deepEqual(req.selected_items, ["ep1.mkv"]);
+  assert.ok(Array.isArray(req.assignments));
+  assert.equal(req.assignments.length, 1);
+  assert.equal(req.assignments[0].target_video, "ep1.mkv");
+});
+
+test("job controller aborts start if episodes exist in queue but zero are selected", async t => {
+  const elements = new Map([
+    ["remux-input-dir", new FakeElement("/anime/series")],
+    ["remux-out-dir", new FakeElement("")],
+    ["remux-fonts-dir", new FakeElement("")],
+    ["remux-assets-dir", new FakeElement("")],
+    ["remux-sub-offset", new FakeElement("0")],
+    ["remux-workers", new FakeElement("")],
+    ["remux-io-jobs", new FakeElement("")],
+    ["remux-ffmpeg-threads", new FakeElement("")],
+    ["remux-bitrate", new FakeElement("")],
+    ["remux-complexity", new FakeElement("")],
+    ["remux-dry-run", new FakeElement(false)],
+    ["remux-no-cache", new FakeElement(false)],
+    ["remux-keep-fonts", new FakeElement(false)],
+    ["remux-run", new FakeElement()],
+    ["remux-stop", new FakeElement()],
+    ["remux-log", new FakeElement()],
+    ["remux-status", new FakeElement()],
+  ]);
+  const previousDocument = globalThis.document;
+  globalThis.document = {
+    getElementById: id => elements.get(id) ?? null,
+    querySelectorAll: () => [],
+    querySelector: () => null,
+  };
+  t.after(() => { globalThis.document = previousDocument; });
+
+  const logs = [];
+  const coordinator = createJobCoordinator();
+  const queue = {
+    assignments: new Map(),
+    lastManifest: { version: 2, items: [{ id: "ep1.mkv", name: "ep1.mkv" }] },
+    state: { totalCount: 1 },
+    getSelectedOrderedItemIds: () => [],
+    handleEvent() {},
+    finalize() {},
+  };
+  const runtime = {
+    coordinator,
+    appendLog(el, msg) { logs.push(msg); },
+    clearLog() {},
+    closeSubAssignModal() {},
+    queueFor: () => queue,
+    safeAddListener() {},
+    scanInputDirectory: async () => true,
+    showModal: async () => true,
+    telemetryLoop: { setJobActive() {} },
+    updateWorkerChips() {},
+    async listen() { return () => {}; },
+    async invoke() { return null; },
+  };
+
+  const controller = new JobController("remux", runtime);
+  await controller.start();
+
+  assert.equal(controller.running, false);
+  assert.ok(logs.some(l => l.includes("No episodes selected in queue")));
+});

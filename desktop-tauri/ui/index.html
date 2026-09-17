@@ -379,6 +379,10 @@
                 Episode Batch Queue
               </span>
               <span class="queue-header-right">
+                <div class="queue-bulk-actions" id="remux-queue-bulk">
+                  <button type="button" class="btn btn-xs" id="remux-select-all">Select All</button>
+                  <button type="button" class="btn btn-xs" id="remux-deselect-all">Deselect All</button>
+                </div>
                 <span class="queue-count-badge" id="remux-queue-count">Ready</span>
               </span>
             </div>
@@ -627,6 +631,10 @@
                 Extract Queue
               </span>
               <span class="queue-header-right">
+                <div class="queue-bulk-actions" id="extract-queue-bulk">
+                  <button type="button" class="btn btn-xs" id="extract-select-all">Select All</button>
+                  <button type="button" class="btn btn-xs" id="extract-deselect-all">Deselect All</button>
+                </div>
                 <span class="queue-count-badge" id="extract-queue-count">Ready</span>
               </span>
             </div>
@@ -742,16 +750,52 @@
   </div>
 </div>
 
-<!-- Subtitle Assignment Modal (GUI manual selection) -->
+<!-- Subtitle Assignment Modal (GUI manual selection & track assignment) -->
 <div class="modal-overlay" id="sub-assign-modal" role="dialog" aria-modal="true" aria-labelledby="sub-assign-title">
   <div class="modal-card sub-assign-card">
     <div class="modal-icon">💬</div>
     <h3 class="modal-title" id="sub-assign-title">Assign Subtitle</h3>
     <p class="modal-desc" id="sub-assign-episode"></p>
+
+    <div class="sub-assign-section-label">Discovered Candidates</div>
     <div class="sub-assign-list" id="sub-assign-list"></div>
+
+    <div class="sub-assign-section-label">Custom Subtitle File</div>
+    <div class="sub-assign-custom-row">
+      <input type="text" id="sub-custom-path" class="input-text" readonly placeholder="Choose custom subtitle file..." />
+      <button type="button" id="sub-browse-btn" class="btn btn-sm">📁 Browse...</button>
+    </div>
+
+    <div class="sub-assign-params-grid">
+      <div class="field-group">
+        <label for="sub-lang-select" class="field-label">Language</label>
+        <div class="sub-lang-inputs">
+          <select id="sub-lang-select" class="input-select">
+            <option value="ind">Indonesian (ind)</option>
+            <option value="eng">English (eng)</option>
+            <option value="jpn">Japanese (jpn)</option>
+            <option value="custom">Custom tag...</option>
+          </select>
+          <input type="text" id="sub-lang-custom" class="input-text" placeholder="ISO-639-2 tag" style="display: none;" maxlength="3" />
+        </div>
+      </div>
+      <div class="field-group">
+        <label for="sub-title-input" class="field-label">Track Title</label>
+        <input type="text" id="sub-title-input" class="input-text" placeholder="e.g. Dialogue" />
+      </div>
+      <div class="field-group">
+        <label for="sub-offset-input" class="field-label">Time Offset</label>
+        <div class="sub-offset-input-wrap">
+          <input type="number" id="sub-offset-input" class="input-text" step="100" placeholder="0" />
+          <span class="sub-offset-unit">ms</span>
+        </div>
+      </div>
+    </div>
+
     <div class="modal-actions">
-      <button class="btn btn-ghost" id="sub-assign-clear" type="button">Clear Selection</button>
-      <button class="btn btn-gradient" id="sub-assign-close" type="button">Done</button>
+      <button class="btn btn-ghost" id="sub-assign-clear" type="button">Clear Assignment</button>
+      <button class="btn btn-ghost" id="sub-assign-cancel" type="button">Cancel</button>
+      <button class="btn btn-gradient" id="sub-assign-save" type="button">Save Assignment</button>
     </div>
   </div>
 </div>

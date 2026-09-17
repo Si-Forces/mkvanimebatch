@@ -430,6 +430,7 @@ async fn test_pipeline_from_request_with_preset_and_overrides() {
         dry_run: Some(true),
         no_cache: None,
         assignments: None,
+        selected_items: None,
     };
 
     assert!(req.validate().is_ok());
@@ -677,4 +678,53 @@ async fn test_pipeline_in_flight_cancellation_emits_duration_sec() {
     {
         assert!(*d >= 0.0, "duration_sec must be non-negative");
     }
+}
+
+#[tokio::test]
+async fn test_pipeline_selected_items_filters_and_orders_batch() {
+    let dir = tempdir().unwrap();
+    let ep1 = dir.path().join("[SubsPlease] Show - 01 (1080p).mkv");
+    let ep2 = dir.path().join("[SubsPlease] Show - 02 (1080p).mkv");
+    let ep3 = dir.path().join("[SubsPlease] Show - 03 (1080p).mkv");
+    std::fs::write(&ep1, b"dummy1").unwrap();
+    std::fs::write(&ep2, b"dummy2").unwrap();
+    std::fs::write(&ep3, b"dummy3").unwrap();
+
+    let config = PipelineConfig {
+        mode: PipelineMode::Extract,
+        input_dir: dir.path().to_path_buf(),
+        dry_run: true,
+        selected_items: Some(vec![
+            "[SubsPlease] Show - 03 (1080p).mkv".into(),
+            "[SubsPlease] Show - 01 (1080p).mkv".into(),
+        ]),
+        ..Default::default()
+    };
+
+    let (tx, mut rx) = create_event_channel(32);
+    let cancel_token = CancellationToken::new();
+    let pipeline = BatchPipeline::new(config, Some(tx), cancel_token);
+
+    let summary = pipeline.run().await.unwrap();
+    assert_eq!(summary.total, 2);
+    assert_eq!(summary.completed, 2);
+
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(event);
+    }
+
+    let start_event = events
+        .iter()
+        .find_map(|e| match e {
+            JobEvent::BatchStart { total, items, .. } => Some((*total, items.clone())),
+            _ => None,
+        })
+        .expect("Expected BatchStart event");
+
+    assert_eq!(start_event.0, 2);
+    let items = start_event.1.unwrap();
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].file, "[SubsPlease] Show - 03 (1080p).mkv");
+    assert_eq!(items[1].file, "[SubsPlease] Show - 01 (1080p).mkv");
 }

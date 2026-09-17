@@ -359,7 +359,58 @@ function openSubAssignModal(itemId) {
   const titleEl = document.getElementById("sub-assign-episode");
   if (titleEl) titleEl.textContent = item.name;
 
-  renderSubAssignList(candidates, tracker.assignments.get(itemId) || null);
+  const currentAssignment = tracker.assignments.get(itemId) || null;
+  const currentPath = typeof currentAssignment === "object" && currentAssignment !== null
+    ? currentAssignment.asset_path
+    : currentAssignment;
+
+  renderSubAssignList(candidates, currentPath);
+
+  const customPathInput = document.getElementById("sub-custom-path");
+  const langSelect = document.getElementById("sub-lang-select");
+  const langCustom = document.getElementById("sub-lang-custom");
+  const titleInput = document.getElementById("sub-title-input");
+  const offsetInput = document.getElementById("sub-offset-input");
+
+  const isCandidate = candidates.includes(currentPath);
+  if (customPathInput) {
+    customPathInput.value = (!isCandidate && currentPath) ? currentPath : "";
+  }
+
+  const currentLang = (typeof currentAssignment === "object" && currentAssignment !== null)
+    ? currentAssignment.language
+    : "ind";
+  const currentTitle = (typeof currentAssignment === "object" && currentAssignment !== null)
+    ? currentAssignment.title || ""
+    : "";
+  const currentOffset = (typeof currentAssignment === "object" && currentAssignment !== null && typeof currentAssignment.offset_ms === "number")
+    ? currentAssignment.offset_ms
+    : "";
+
+  if (langSelect) {
+    if (["ind", "eng", "jpn"].includes(currentLang)) {
+      langSelect.value = currentLang;
+      if (langCustom) {
+        langCustom.value = "";
+        langCustom.style.display = "none";
+      }
+    } else if (currentLang) {
+      langSelect.value = "custom";
+      if (langCustom) {
+        langCustom.value = currentLang;
+        langCustom.style.display = "block";
+      }
+    } else {
+      langSelect.value = "ind";
+      if (langCustom) {
+        langCustom.value = "";
+        langCustom.style.display = "none";
+      }
+    }
+  }
+
+  if (titleInput) titleInput.value = currentTitle;
+  if (offsetInput) offsetInput.value = currentOffset !== "" ? currentOffset : "";
 
   const modal = document.getElementById("sub-assign-modal");
   if (modal) modal.classList.add("active");
@@ -655,6 +706,50 @@ function initApp() {
       if (btn?.dataset.itemId) openSubAssignModal(btn.dataset.itemId);
     });
   }
+  safeAddListener("sub-assign-save", "click", () => {
+    if (JobCoordinator.activeMode !== null) return;
+    if (!subAssignModalItemId) {
+      closeSubAssignModal();
+      return;
+    }
+    const customPath = document.getElementById("sub-custom-path")?.value?.trim() || "";
+    const selectedBtn = document.querySelector("#sub-assign-list .sub-assign-option.selected");
+    const candidatePath = selectedBtn?.dataset?.path || "";
+    const chosenPath = customPath || candidatePath;
+
+    if (!chosenPath) {
+      remuxQueue.assignments.delete(subAssignModalItemId);
+      remuxQueue.applyAssignmentToCard(subAssignModalItemId);
+      closeSubAssignModal();
+      return;
+    }
+
+    const langSelect = document.getElementById("sub-lang-select");
+    const langCustom = document.getElementById("sub-lang-custom");
+    const titleInput = document.getElementById("sub-title-input");
+    const offsetInput = document.getElementById("sub-offset-input");
+
+    let lang = langSelect?.value || "ind";
+    if (lang === "custom") {
+      lang = langCustom?.value?.trim() || null;
+    }
+    const title = titleInput?.value?.trim() || null;
+    const offsetVal = offsetInput?.value?.trim();
+    const offsetMs = offsetVal && !isNaN(parseInt(offsetVal, 10)) ? parseInt(offsetVal, 10) : null;
+
+    remuxQueue.assignments.set(subAssignModalItemId, {
+      target_video: subAssignModalItemId,
+      asset_path: chosenPath,
+      track_type: "subtitle",
+      language: lang || null,
+      title: title || null,
+      offset_ms: offsetMs,
+    });
+    remuxQueue.applyAssignmentToCard(subAssignModalItemId);
+    closeSubAssignModal();
+  });
+
+  safeAddListener("sub-assign-cancel", "click", closeSubAssignModal);
   safeAddListener("sub-assign-close", "click", closeSubAssignModal);
   safeAddListener("sub-assign-clear", "click", () => {
     if (JobCoordinator.activeMode !== null) return;
@@ -664,17 +759,51 @@ function initApp() {
     }
     closeSubAssignModal();
   });
+
+  safeAddListener("sub-browse-btn", "click", async () => {
+    if (JobCoordinator.activeMode !== null) return;
+    try {
+      const picked = await invoke("pick_subtitle_file");
+      if (picked) {
+        const customPathInput = document.getElementById("sub-custom-path");
+        if (customPathInput) customPathInput.value = picked;
+        document.querySelectorAll("#sub-assign-list .sub-assign-option").forEach(btn => {
+          btn.classList.remove("selected");
+        });
+      }
+    } catch (e) {
+      console.error("Failed to pick subtitle file:", e);
+    }
+  });
+
+  safeAddListener("sub-lang-select", "change", e => {
+    const langCustom = document.getElementById("sub-lang-custom");
+    if (langCustom) {
+      langCustom.style.display = e.target.value === "custom" ? "block" : "none";
+      if (e.target.value === "custom") langCustom.focus();
+    }
+  });
+
   safeAddListener("sub-assign-modal", "click", e => {
     if (e.target === e.currentTarget) closeSubAssignModal();
   });
+
   safeAddListener("sub-assign-list", "click", e => {
     if (JobCoordinator.activeMode !== null) return;
     const option = e.target.closest(".sub-assign-option");
-    if (!option?.dataset.path || !subAssignModalItemId) return;
-    remuxQueue.assignments.set(subAssignModalItemId, option.dataset.path);
-    remuxQueue.applyAssignmentToCard(subAssignModalItemId);
-    closeSubAssignModal();
+    if (!option?.dataset.path) return;
+    document.querySelectorAll("#sub-assign-list .sub-assign-option").forEach(btn => {
+      btn.classList.remove("selected");
+    });
+    option.classList.add("selected");
+    const customPathInput = document.getElementById("sub-custom-path");
+    if (customPathInput) customPathInput.value = "";
   });
+
+  safeAddListener("remux-select-all", "click", () => remuxQueue.selectAll());
+  safeAddListener("remux-deselect-all", "click", () => remuxQueue.deselectAll());
+  safeAddListener("extract-select-all", "click", () => extractQueue.selectAll());
+  safeAddListener("extract-deselect-all", "click", () => extractQueue.deselectAll());
 
   // ─── Active Profile Dropdown Menu Handlers ────────────────────────────────
   const profileBtn = document.getElementById("active-profile-btn");

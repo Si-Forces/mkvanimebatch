@@ -10,6 +10,11 @@ import {
   createQueueStateFromSnapshot,
   formatOutcomeDuration,
   formatElapsedDuration,
+  toggleItemSelection,
+  selectAll,
+  deselectAll,
+  reorderItem,
+  getSelectedCount,
 } from "./queue-state.js";
 
 test("createQueueState initializes state from manifest v2", () => {
@@ -890,5 +895,53 @@ test("reduceQueueEvent populates items from batch_start when provided", () => {
   assert.equal(state.items.get("e1").name, "Episode 1.mkv");
   assert.equal(state.items.get("e2").status, "queued");
   assert.equal(state.items.get("e2").name, "Episode 2.mkv");
+});
+
+test("item selection and reordering helpers", () => {
+  const manifest = {
+    version: 2,
+    items: [
+      { id: "e1", name: "Episode 1.mkv" },
+      { id: "e2", name: "Episode 2.mkv" },
+      { id: "e3", name: "Episode 3.mkv" },
+    ],
+  };
+
+  const state = createQueueState(manifest);
+  assert.equal(getSelectedCount(state), 3);
+  assert.equal(state.items.get("e1").selected, true);
+
+  // toggle selection
+  toggleItemSelection(state, "e2");
+  assert.equal(state.items.get("e2").selected, false);
+  assert.equal(getSelectedCount(state), 2);
+
+  toggleItemSelection(state, "e2", true);
+  assert.equal(state.items.get("e2").selected, true);
+  assert.equal(getSelectedCount(state), 3);
+
+  // deselect all
+  deselectAll(state);
+  assert.equal(getSelectedCount(state), 0);
+  assert.equal(state.items.get("e1").selected, false);
+  assert.equal(state.items.get("e2").selected, false);
+  assert.equal(state.items.get("e3").selected, false);
+
+  // select all
+  selectAll(state);
+  assert.equal(getSelectedCount(state), 3);
+  assert.equal(state.items.get("e1").selected, true);
+
+  // reorder item
+  assert.deepEqual(state.order, ["e1", "e2", "e3"]);
+  reorderItem(state, "e2", "up");
+  assert.deepEqual(state.order, ["e2", "e1", "e3"]);
+  reorderItem(state, "e2", "up"); // at top, noop
+  assert.deepEqual(state.order, ["e2", "e1", "e3"]);
+
+  reorderItem(state, "e2", "down");
+  assert.deepEqual(state.order, ["e1", "e2", "e3"]);
+  reorderItem(state, "e3", "down"); // at bottom, noop
+  assert.deepEqual(state.order, ["e1", "e2", "e3"]);
 });
 

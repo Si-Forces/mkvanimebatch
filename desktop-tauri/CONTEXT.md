@@ -35,3 +35,8 @@ _Avoid_: Loading bar, queue spinner, progress gauge
 **Item Duration**:
 The authoritative wall-clock execution duration in seconds measured from item start to completion and rendered on terminal episode cards (`Done in Xs`).
 _Avoid_: Run time, execution clock, stop watch
+
+**Queue Selection**:
+The interactive subset and custom ordering of scanned manifest items marked by the user for active execution within the Queue Tracker.
+_Avoid_: Checked items, run list, active batch
+

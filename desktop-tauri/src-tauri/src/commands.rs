@@ -263,8 +263,11 @@ pub fn pick_directory() -> Option<String> {
 }
 
 #[tauri::command]
-pub fn pick_folder() -> Option<String> {
-    pick_directory()
+pub fn pick_subtitle_file() -> Option<String> {
+    rfd::FileDialog::new()
+        .add_filter("Subtitle Files", &["ass", "ssa", "srt", "vtt", "sub"])
+        .pick_file()
+        .map(|p| p.to_string_lossy().into_owned())
 }
 
 #[tauri::command]
