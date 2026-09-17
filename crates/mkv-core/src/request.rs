@@ -34,32 +34,37 @@ fn is_drive_prefix(s: &str) -> bool {
     s.len() >= 2 && s.as_bytes()[1] == b':' && s.as_bytes()[0].is_ascii_alphabetic()
 }
 
+/// Normalizes a relative path string by converting backslashes to forward slashes,
+/// collapsing redundant separators, and stripping relative `.` (`CurDir`) components.
+pub fn clean_relative_path(s: &str) -> String {
+    let norm = s.trim().replace('\\', "/");
+    let path = Path::new(&norm);
+    let mut parts = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(c) => {
+                parts.push(c.to_string_lossy().to_string());
+            }
+            std::path::Component::CurDir => {}
+            _ => {
+                parts.push(component.as_os_str().to_string_lossy().to_string());
+            }
+        }
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        parts.join("/")
+    }
+}
+
 impl TrackAssignment {
     /// Returns the normalized target video path relative to input directory,
     /// with backslashes converted to forward slashes, redundant separators collapsed,
     /// and relative `.` (`CurDir`) components stripped.
     pub fn clean_target_video(&self) -> String {
-        let norm = self.target_video.trim().replace('\\', "/");
-        let path = Path::new(&norm);
-        let mut parts = Vec::new();
-        for component in path.components() {
-            match component {
-                std::path::Component::Normal(c) => {
-                    parts.push(c.to_string_lossy().to_string());
-                }
-                std::path::Component::CurDir => {}
-                _ => {
-                    parts.push(component.as_os_str().to_string_lossy().to_string());
-                }
-            }
-        }
-        if parts.is_empty() {
-            String::new()
-        } else {
-            parts.join("/")
-        }
+        clean_relative_path(&self.target_video)
     }
-
     /// Returns true if the asset path is relative to the release/input directory
     /// (i.e. not absolute, not root-relative, and not a drive-prefixed path).
     pub fn is_relative_asset(&self) -> bool {
@@ -118,6 +123,9 @@ pub struct BatchRequest {
     /// Explicit track assignments
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assignments: Option<Vec<TrackAssignment>>,
+    /// Optional ordered subset of relative video paths or item IDs designating active execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_items: Option<Vec<String>>,
 }
 
 impl Default for BatchRequest {
@@ -139,6 +147,7 @@ impl Default for BatchRequest {
             dry_run: None,
             no_cache: None,
             assignments: None,
+            selected_items: None,
         }
     }
 }
@@ -320,6 +329,53 @@ impl BatchRequest {
             }
         }
 
+        if let Some(items) = &self.selected_items {
+            if items.is_empty() {
+                return Err("selected_items cannot be empty when specified".into());
+            }
+
+            let mut seen_items: HashSet<String> = HashSet::new();
+            for item in items {
+                let norm = item.trim().replace('\\', "/");
+                let path = Path::new(&norm);
+                if norm.is_empty()
+                    || norm.starts_with('/')
+                    || path.has_root()
+                    || is_drive_prefix(&norm)
+                    || !path.is_relative()
+                    || path
+                        .components()
+                        .any(|c| matches!(c, std::path::Component::ParentDir))
+                {
+                    return Err(format!("Invalid relative path in selected_items: '{item}'"));
+                }
+
+                let clean = clean_relative_path(&norm);
+                if !seen_items.insert(clean.clone()) {
+                    return Err(format!("Duplicate entry in selected_items: '{clean}'"));
+                }
+
+                let full_path = self.input_dir.join(&clean);
+                if !full_path.is_file() {
+                    return Err(format!(
+                        "Selected item does not exist: '{}'",
+                        full_path.display()
+                    ));
+                }
+            }
+
+            if let Some(assignments) = &self.assignments {
+                for assignment in assignments {
+                    let clean_target = assignment.clean_target_video();
+                    if !seen_items.contains(&clean_target) {
+                        return Err(format!(
+                            "Track assignment targets video '{clean_target}' which is not in selected_items"
+                        ));
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -363,6 +419,7 @@ impl BatchRequest {
             sub_offset: self.sub_offset.unwrap_or(0.0),
             dry_run: self.dry_run.unwrap_or(false),
             no_cache: self.no_cache.unwrap_or(false),
+            selected_items: self.selected_items,
             ..Default::default()
         };
 
@@ -1137,5 +1194,95 @@ mod tests {
         req.out_dir = Some(file_path);
         let err_out = req.validate().unwrap_err();
         assert!(err_out.contains("Output directory path points to an existing file"));
+    }
+
+    #[test]
+    fn test_validate_selected_items_success() {
+        let dir = tempdir().unwrap();
+        let ep1 = dir.path().join("ep1.mkv");
+        let ep2 = dir.path().join("ep2.mkv");
+        std::fs::write(&ep1, b"").unwrap();
+        std::fs::write(&ep2, b"").unwrap();
+
+        let mut req = minimal_request(dir.path());
+        req.selected_items = Some(vec!["ep2.mkv".into(), "ep1.mkv".into()]);
+        assert!(req.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_selected_items_empty_fails() {
+        let dir = tempdir().unwrap();
+        let mut req = minimal_request(dir.path());
+        req.selected_items = Some(vec![]);
+        let err = req.validate().unwrap_err();
+        assert_eq!(err, "selected_items cannot be empty when specified");
+    }
+
+    #[test]
+    fn test_validate_selected_items_duplicate_fails() {
+        let dir = tempdir().unwrap();
+        let ep1 = dir.path().join("ep1.mkv");
+        std::fs::write(&ep1, b"").unwrap();
+
+        let mut req = minimal_request(dir.path());
+        req.selected_items = Some(vec!["ep1.mkv".into(), "ep1.mkv".into()]);
+        let err = req.validate().unwrap_err();
+        assert!(err.contains("Duplicate entry in selected_items: 'ep1.mkv'"));
+    }
+
+    #[test]
+    fn test_validate_selected_items_traversal_fails() {
+        let dir = tempdir().unwrap();
+        let mut req = minimal_request(dir.path());
+        req.selected_items = Some(vec!["../secret.mkv".into()]);
+        let err = req.validate().unwrap_err();
+        assert!(err.contains("Invalid relative path in selected_items: '../secret.mkv'"));
+    }
+
+    #[test]
+    fn test_validate_selected_items_nonexistent_fails() {
+        let dir = tempdir().unwrap();
+        let mut req = minimal_request(dir.path());
+        req.selected_items = Some(vec!["ghost.mkv".into()]);
+        let err = req.validate().unwrap_err();
+        assert!(err.contains("Selected item does not exist:"));
+    }
+
+    #[test]
+    fn test_validate_assignment_not_in_selected_items_fails() {
+        let dir = tempdir().unwrap();
+        let ep1 = dir.path().join("ep1.mkv");
+        let ep2 = dir.path().join("ep2.mkv");
+        let sub1 = dir.path().join("ep1.ass");
+        let sub2 = dir.path().join("ep2.ass");
+        std::fs::write(&ep1, b"").unwrap();
+        std::fs::write(&ep2, b"").unwrap();
+        std::fs::write(&sub1, b"").unwrap();
+        std::fs::write(&sub2, b"").unwrap();
+
+        let mut req = minimal_request(dir.path());
+        req.selected_items = Some(vec!["ep1.mkv".into()]);
+        req.assignments = Some(vec![
+            TrackAssignment {
+                target_video: "ep1.mkv".into(),
+                asset_path: PathBuf::from("ep1.ass"),
+                track_type: Some("subtitle".into()),
+                language: None,
+                title: None,
+                offset_ms: None,
+            },
+            TrackAssignment {
+                target_video: "ep2.mkv".into(),
+                asset_path: PathBuf::from("ep2.ass"),
+                track_type: Some("subtitle".into()),
+                language: None,
+                title: None,
+                offset_ms: None,
+            },
+        ]);
+        let err = req.validate().unwrap_err();
+        assert!(
+            err.contains("Track assignment targets video 'ep2.mkv' which is not in selected_items")
+        );
     }
 }

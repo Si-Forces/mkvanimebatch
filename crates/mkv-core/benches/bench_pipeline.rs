@@ -115,6 +115,7 @@ fn bench_validation(runs: usize) {
             title: None,
             offset_ms: None,
         }]),
+        selected_items: None,
     };
 
     let start = Instant::now();

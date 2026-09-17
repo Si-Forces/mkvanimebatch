@@ -52,6 +52,11 @@ export class JobController {
     );
 
     this.runtime.coordinator.register(this);
+    const tracker = this.runtime.queueFor?.(mode);
+    if (tracker) {
+      tracker.onSelectionChange = () => this.syncGlobalControls();
+    }
+
 
     if (this.runBtn)  this.runtime.safeAddListener(this.runBtn,  "click", () => this.start());
     if (this.stopBtn) this.runtime.safeAddListener(this.stopBtn, "click", () => this.stop());
@@ -159,6 +164,7 @@ export class JobController {
       dry_run: dryRun,
       no_cache: noCache,
       assignments: null,
+      selected_items: null,
     };
   }
 
@@ -211,8 +217,32 @@ export class JobController {
     }
 
     const tracker = this.runtime.queueFor(this.mode);
+    let selectedIds = null;
+    if (typeof tracker?.getSelectedOrderedItemIds === "function") {
+      const totalItems = tracker.state?.totalCount ?? 0;
+      selectedIds = tracker.getSelectedOrderedItemIds();
+      if (totalItems > 0 && selectedIds.length === 0) {
+        this.runtime.appendLog(this.logEl, "[ERROR] No episodes selected in queue.");
+        this.abortStart();
+        return;
+      }
+      if (selectedIds.length > 0) {
+        batchRequest.selected_items = selectedIds;
+      }
+    }
+
     if (batchRequest && this.mode === "remux") {
-      batchRequest.assignments = buildTrackAssignmentsForManifest(assignmentSnapshot, tracker.lastManifest);
+      const fullAssignments = buildTrackAssignmentsForManifest(assignmentSnapshot, tracker.lastManifest);
+      if (fullAssignments) {
+        if (selectedIds && selectedIds.length > 0) {
+          const selectedSet = new Set(selectedIds);
+          batchRequest.assignments = fullAssignments.filter(a => selectedSet.has(a.target_video));
+        } else {
+          batchRequest.assignments = fullAssignments;
+        }
+      } else {
+        batchRequest.assignments = null;
+      }
     }
     this.cleanupListeners();
 
@@ -349,12 +379,20 @@ export class JobController {
 
   syncGlobalControls() {
     const busy = this.runtime.coordinator.activeMode !== null;
-    if (this.runBtn) this.runBtn.disabled = busy;
+    const tracker = this.runtime.queueFor?.(this.mode);
+    const hasItems = (tracker?.state?.totalCount ?? 0) > 0;
+    const selectedCount = tracker?.getSelectedCount?.() ?? 0;
+    const selectionDisabled = hasItems && selectedCount === 0;
+
+    if (this.runBtn) this.runBtn.disabled = busy || selectionDisabled;
     for (const control of this.formControls) control.disabled = busy;
     document.querySelectorAll(`#view-${this.mode} .sub-assign-btn`).forEach(control => {
       control.disabled = busy;
     });
     document.querySelectorAll(`#view-${this.mode} .empty-state-action`).forEach(control => {
+      control.disabled = busy;
+    });
+    document.querySelectorAll(`#view-${this.mode} .ep-select-check, #view-${this.mode} .ep-reorder-btn`).forEach(control => {
       control.disabled = busy;
     });
     if (this.stopBtn) {
