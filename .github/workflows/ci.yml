@@ -120,11 +120,12 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
+
       - name: Run Cargo Audit
-        uses: rustsec/audit-check@v1.4.1
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          args: --config audit.toml
+        run: cargo audit
 
   # ────────────────────────────────────────────────────────────────────────────
   # 4. CI Completion Gate (Required Check Summary for Branch Protection)
