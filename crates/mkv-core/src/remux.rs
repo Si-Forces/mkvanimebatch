@@ -24,6 +24,9 @@ pub struct PlannedJob {
     pub use_source_fonts: bool,
     pub release_dir: Option<PathBuf>,
     pub item_id: String,
+    pub custom_offset_ms: Option<i64>,
+    pub custom_language: Option<String>,
+    pub custom_title: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,11 +175,33 @@ pub fn build_mkvmerge_args(
     }
 
     if let Some(sub_file) = &job.subtitle_file {
-        args.extend(format_sync_args(0, sub_offset));
-        args.push("--language".to_string());
-        args.push(format!("0:{}", job.subtitle_mkv_lang));
-        args.push("--track-name".to_string());
-        args.push(format!("0:{}", job.subtitle_label));
+        if let Some(ms) = job.custom_offset_ms {
+            if ms != 0 {
+                args.push("--sync".to_string());
+                args.push(format!("0:{ms}"));
+            }
+        } else {
+            args.extend(format_sync_args(0, sub_offset));
+        }
+
+        let lang = match &job.custom_language {
+            Some(lang) => lang.as_str(),
+            None => job.subtitle_mkv_lang.as_str(),
+        };
+        if !lang.is_empty() {
+            args.push("--language".to_string());
+            args.push(format!("0:{lang}"));
+        }
+
+        let title = match &job.custom_title {
+            Some(title) => title.as_str(),
+            None => job.subtitle_label.as_str(),
+        };
+        if !title.is_empty() {
+            args.push("--track-name".to_string());
+            args.push(format!("0:{title}"));
+        }
+
         args.push("--default-track-flag".to_string());
         args.push("0:yes".to_string());
         args.push(sub_file.to_string_lossy().to_string());

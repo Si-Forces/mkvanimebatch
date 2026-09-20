@@ -68,7 +68,6 @@ async fn test_extract_dry_run_emits_planned_events() {
         ffmpeg_threads: 2,
         sub_offset: 0.0,
         keep_fonts: false,
-        sub_assignments: None,
         ..Default::default()
     };
 
@@ -144,7 +143,6 @@ async fn test_extract_dry_run_preserves_nested_output_directory() {
         ffmpeg_threads: 1,
         sub_offset: 0.0,
         keep_fonts: false,
-        sub_assignments: None,
         ..Default::default()
     };
 
@@ -212,7 +210,6 @@ async fn test_remux_dry_run_preserves_nested_output_directory() {
         ffmpeg_threads: 2,
         sub_offset: 0.0,
         keep_fonts: false,
-        sub_assignments: None,
         ..Default::default()
     };
     let cancel_token = CancellationToken::new();
@@ -285,7 +282,6 @@ async fn test_remux_skips_when_no_matching_subtitle() {
         ffmpeg_threads: 2,
         sub_offset: 0.0,
         keep_fonts: false,
-        sub_assignments: None,
         ..Default::default()
     };
     let cancel_token = CancellationToken::new();
@@ -338,7 +334,6 @@ async fn test_pipeline_cancellation_drains_items() {
         ffmpeg_threads: 1,
         sub_offset: 0.0,
         keep_fonts: false,
-        sub_assignments: None,
         ..Default::default()
     };
 
@@ -476,7 +471,6 @@ async fn test_extract_emits_item_complete_duration_sec() {
         ffmpeg_threads: 1,
         sub_offset: 0.0,
         keep_fonts: false,
-        sub_assignments: None,
         ..Default::default()
     };
 
@@ -545,7 +539,6 @@ async fn test_extract_error_in_worker_emits_duration_sec() {
         ffmpeg_threads: 1,
         sub_offset: 0.0,
         keep_fonts: false,
-        sub_assignments: None,
         ..Default::default()
     };
 
@@ -617,7 +610,6 @@ async fn test_pipeline_in_flight_cancellation_emits_duration_sec() {
         ffmpeg_threads: 1,
         sub_offset: 0.0,
         keep_fonts: false,
-        sub_assignments: None,
         ..Default::default()
     };
 
@@ -727,4 +719,70 @@ async fn test_pipeline_selected_items_filters_and_orders_batch() {
     assert_eq!(items.len(), 2);
     assert_eq!(items[0].file, "[SubsPlease] Show - 03 (1080p).mkv");
     assert_eq!(items[1].file, "[SubsPlease] Show - 01 (1080p).mkv");
+}
+
+#[tokio::test]
+async fn test_pipeline_with_track_assignments_plans_override() {
+    let dir = tempfile::tempdir().unwrap();
+    let video_path = dir.path().join("Episode - 01.mkv");
+    let sub_path = dir.path().join("custom_track.ass");
+
+    std::fs::write(&video_path, b"dummy mkv content").unwrap();
+    std::fs::write(&sub_path, b"[Script Info]\nTitle: Custom\n").unwrap();
+
+    let cache = Arc::new(PersistentInspectCache::new(
+        Some(dir.path().join("test_cache.json")),
+        true,
+    ));
+    cache.put_path(&video_path, sample_video_metadata());
+    cache.save();
+
+    let assignment = mkv_core::request::TrackAssignment {
+        target_video: "Episode - 01.mkv".into(),
+        asset_path: std::path::PathBuf::from("custom_track.ass"),
+        track_type: Some("subtitle".into()),
+        language: Some("ind".into()),
+        title: Some("Bahasa Indonesia".into()),
+        offset_ms: Some(1250),
+    };
+
+    let config = PipelineConfig {
+        mode: PipelineMode::Remux,
+        input_dir: dir.path().to_path_buf(),
+        dry_run: true,
+        cache: Some(cache),
+        track_assignments: Some(vec![assignment]),
+        ..Default::default()
+    };
+
+    let (tx, mut rx) = create_event_channel(32);
+    let cancel_token = CancellationToken::new();
+    let pipeline = BatchPipeline::new(config, Some(tx), cancel_token);
+
+    let summary = pipeline.run().await.unwrap();
+    assert_eq!(summary.total, 1);
+    assert_eq!(summary.completed, 1);
+    assert_eq!(summary.errors, 0);
+
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(event);
+    }
+
+    let complete_event = events
+        .iter()
+        .find(|e| {
+            matches!(
+                e,
+                JobEvent::ItemComplete {
+                    status: ItemOutcome::Planned,
+                    ..
+                }
+            )
+        })
+        .expect("Expected ItemComplete with Planned status");
+
+    if let JobEvent::ItemComplete { file, .. } = complete_event {
+        assert_eq!(file, "Episode - 01.mkv");
+    }
 }

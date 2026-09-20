@@ -10,6 +10,7 @@ pub use crate::telemetry::{get_system_telemetry, TelemetryState};
 pub use crate::window::{
     is_maximized, minimize_window, set_window_theme, start_drag, start_resize, toggle_maximize,
 };
+use mkv_core::pipeline::CancellationToken;
 use serde::Deserialize;
 use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -37,7 +38,7 @@ pub async fn inspect_directory(
     stop_registered_scan(&state)?;
 
     let scan_id = state.next_id.fetch_add(1, Ordering::SeqCst);
-    let cancel_token = tokio_util::sync::CancellationToken::new();
+    let cancel_token = CancellationToken::new();
     *state.active.lock().map_err(|e| e.to_string())? = Some(ActiveScan {
         id: scan_id,
         cancel_token: Some(cancel_token.clone()),
@@ -79,7 +80,7 @@ pub fn run_job<R: tauri::Runtime>(
     .to_string();
 
     let job_id = state.next_id.fetch_add(1, Ordering::SeqCst);
-    let cancel_token = tokio_util::sync::CancellationToken::new();
+    let cancel_token = CancellationToken::new();
 
     let (event_tx, mut event_rx) = mkv_core::pipeline::create_event_channel(64);
     let (log_tx, mut log_rx) = mkv_core::pipeline::create_log_channel(128);
