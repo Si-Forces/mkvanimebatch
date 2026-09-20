@@ -112,18 +112,34 @@ jobs:
           node --test desktop-tauri/ui/*.test.js
 
   # ────────────────────────────────────────────────────────────────────────────
-  # 3. CI Completion Gate (Required Check Summary for Branch Protection)
+  # 3. Security Audit (Cargo Audit with audit.toml)
+  # ────────────────────────────────────────────────────────────────────────────
+  security-audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Run Cargo Audit
+        uses: rustsec/audit-check@v1.4.1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          args: --config audit.toml
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 4. CI Completion Gate (Required Check Summary for Branch Protection)
   # ────────────────────────────────────────────────────────────────────────────
   ci-status:
     name: CI Status Gate
-    needs: [workspace-checks, ui-tests]
+    needs: [workspace-checks, ui-tests, security-audit]
     runs-on: ubuntu-latest
     if: always()
     steps:
       - name: Evaluate status
         run: |
           if [ "${{ needs.workspace-checks.result }}" != "success" ] || \
-             [ "${{ needs.ui-tests.result }}" != "success" ]; then
+             [ "${{ needs.ui-tests.result }}" != "success" ] || \
+             [ "${{ needs.security-audit.result }}" != "success" ]; then
             echo "CI pipeline checks failed!"
             exit 1
           fi

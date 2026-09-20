@@ -1,5 +1,9 @@
 # 0005. Rust Media Engine Migration and Workspace Topology
 
+> **Status**: Accepted (Completed in ADR-0010)
+> **Date**: 2026-04-01
+> **Context**: System Workspace Topology
+
 ## Context
 The core fansub batch processing engine (`mkv_*.py`) was implemented as a pure Python standard-library suite executed as PyInstaller sidecars from the Tauri desktop app and run via standalone CLI scripts. PyInstaller sidecar compilation added build friction across platforms, process spawn and NDJSON stream overhead in the GUI, and GIL-constrained concurrency.
 

@@ -1,5 +1,12 @@
 # 0003. Transactional Font Extraction and Concurrency Safety
 
+> **Status**: Migrated to Rust (ADR-0005, ADR-0010)
+> **Date**: 2026-03-10
+> **Context**: Media Engine Context
+
+> [!NOTE]
+> Transactional font deduplication has been ported to pure Rust in `crates/mkv-core/src/fonts.rs` (`FontRegistry` and RAII `FontClaimsGuard`).
+
 ## Context
 When extracting fonts concurrently from multiple MKV files in a release directory, worker threads frequently encounter identical font attachments (e.g. common subtitle fonts across 12-24 episodes). Simultaneous writes to the same destination font files can cause corrupted font binaries, race conditions, and disk I/O thrashing.
 

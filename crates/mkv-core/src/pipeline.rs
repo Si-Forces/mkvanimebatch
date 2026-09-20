@@ -17,6 +17,7 @@ use crate::extract::extract_mkv_file;
 use crate::fonts::{scan_fonts, FontInfo, FontRegistry};
 use crate::manifest::get_item_id;
 use crate::remux::{execute_remux_job, select_tracks, PlannedJob, RemuxOptions, TrackSelection};
+use crate::request::{clean_relative_path, TrackAssignment};
 use crate::scan::{
     get_or_probe_video, scan_mkv_files, InspectedVideo, InspectionResult, ParsedFile,
     PersistentInspectCache, ScanResults,
@@ -131,12 +132,14 @@ pub struct PipelineConfig {
     pub ffmpeg_threads: usize,
     pub sub_offset: f64,
     pub keep_fonts: bool,
+    #[deprecated(since = "1.0.0", note = "Use track_assignments instead")]
     pub sub_assignments: Option<HashMap<String, PathBuf>>,
-    /// Retained for forward-compatibility with multi-track remuxing (dialogue + signs/songs).
+    /// Canonical track assignments for multi-track or custom asset overrides.
     pub track_assignments: Option<Vec<crate::request::TrackAssignment>>,
     pub selected_items: Option<Vec<String>>,
 }
 
+#[allow(deprecated)]
 impl Default for PipelineConfig {
     fn default() -> Self {
         Self {
@@ -806,6 +809,40 @@ impl BatchPipeline {
         let mut all_planned_jobs: Vec<(PlannedJob, TrackSelection, FontInfo)> = Vec::new();
 
         // Sequence planned jobs strictly adhering to custom files ordering across directories
+        let mut assignment_index: HashMap<String, &TrackAssignment> = HashMap::new();
+        #[allow(deprecated)]
+        let legacy_converted: Option<Vec<TrackAssignment>> =
+            if self.config.track_assignments.is_none() {
+                self.config.sub_assignments.as_ref().map(|m| {
+                    m.iter()
+                        .map(|(target, path)| TrackAssignment {
+                            target_video: target.clone(),
+                            asset_path: path.clone(),
+                            track_type: Some("subtitle".into()),
+                            language: None,
+                            title: None,
+                            offset_ms: None,
+                        })
+                        .collect()
+                })
+            } else {
+                None
+            };
+
+        let effective_assignments = self
+            .config
+            .track_assignments
+            .as_ref()
+            .or(legacy_converted.as_ref());
+
+        if let Some(assignments) = effective_assignments {
+            for a in assignments {
+                let clean_target = a.clean_target_video();
+                assignment_index.insert(a.target_video.clone(), a);
+                assignment_index.insert(clean_target, a);
+            }
+        }
+
         for (v_idx, video_file) in files.iter().enumerate() {
             if self.cancel_token.is_cancelled() {
                 summary.cancelled = true;
@@ -905,11 +942,28 @@ impl BatchPipeline {
                 }
             };
 
-            let assigned_sub = self
-                .config
-                .sub_assignments
-                .as_ref()
-                .and_then(|m| m.get(&item_id).map(|p| p.as_path()));
+            let clean_rel = clean_relative_path(&item_id);
+            let rel_from_input = video_file
+                .path
+                .strip_prefix(&self.config.input_dir)
+                .ok()
+                .map(|p| clean_relative_path(&p.to_string_lossy()));
+
+            let matched_assignment = assignment_index
+                .get(&item_id)
+                .or_else(|| assignment_index.get(&clean_rel))
+                .or_else(|| {
+                    rel_from_input
+                        .as_deref()
+                        .and_then(|r| assignment_index.get(r))
+                })
+                .or_else(|| assignment_index.get(&video_file.name))
+                .copied();
+
+            let assigned_sub_path = matched_assignment.map(|a| {
+                a.resolve_asset_path(&self.config.input_dir, self.config.assets_dir.as_deref())
+            });
+            let assigned_sub = assigned_sub_path.as_deref();
 
             let claimed_chapter = dir_prep
                 .chapter_claims
@@ -959,6 +1013,9 @@ impl BatchPipeline {
                 use_source_fonts: dir_prep.font_info.count == 0,
                 release_dir: Some(mkv_dir.clone()),
                 item_id: item_id.clone(),
+                custom_offset_ms: matched_assignment.and_then(|a| a.offset_ms),
+                custom_language: matched_assignment.and_then(|a| a.language.clone()),
+                custom_title: matched_assignment.and_then(|a| a.title.clone()),
             };
 
             let selection = select_tracks(&inspected);

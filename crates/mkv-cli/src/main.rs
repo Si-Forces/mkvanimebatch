@@ -64,7 +64,6 @@ where
     let mut help = false;
     let mut has_input_dir = false;
     let mut assignments_path: Option<PathBuf> = None;
-    let bitrate_re = regex::Regex::new(r"^(\d+)(k|M)?$").unwrap();
 
     let mut it = raw_args.iter();
     while let Some(arg) = it.next() {
@@ -97,8 +96,13 @@ where
                 }
                 request.preset = Some(val.clone());
             }
-            "--assignments" | "--sub-assignments" => {
+            "--assignments" => {
                 let val = it.next().ok_or("Missing value for --assignments")?;
+                assignments_path = Some(PathBuf::from(val));
+            }
+            "--sub-assignments" => {
+                eprintln!("Warning: '--sub-assignments' is deprecated and will be removed in a future release. Use '--assignments' instead.");
+                let val = it.next().ok_or("Missing value for --sub-assignments")?;
                 assignments_path = Some(PathBuf::from(val));
             }
             "--extract" => {
@@ -140,17 +144,16 @@ where
             }
             "--bitrate" => {
                 let val = it.next().ok_or("Missing value for --bitrate")?;
-                let err_msg = format!(
-                    "Invalid bitrate format: '{val}'. Must be a positive value like 128k, 192k, 1M."
-                );
-                match bitrate_re.captures(val) {
-                    Some(caps) => {
-                        let num: u64 = caps.get(1).map_or("", |m| m.as_str()).parse().unwrap_or(0);
-                        if num == 0 {
-                            return Err(err_msg);
-                        }
-                    }
-                    None => return Err(err_msg),
+                let rate = val.as_str();
+                let valid_rate = if let Some(digits) = rate.strip_suffix(['k', 'M']) {
+                    digits.parse::<u32>().is_ok_and(|n| n > 0)
+                } else {
+                    rate.parse::<u32>().is_ok_and(|n| n > 0)
+                };
+                if !valid_rate {
+                    return Err(format!(
+                        "Invalid bitrate format: '{val}'. Must be a positive value like 128k, 192k, 1M."
+                    ));
                 }
                 request.bitrate = Some(val.clone());
             }
@@ -196,7 +199,7 @@ OPTIONS:
     --out-dir <DIR>            Destination output directory for processed files
     --preset <PROFILE>         Preset profile (balanced, fast, hifi, custom)
     --assignments <FILE>       Path to JSON file mapping episode IDs to track paths
-    --sub-assignments <FILE>   Legacy alias for --assignments
+    --sub-assignments <FILE>   [Deprecated: use --assignments] Path to TrackAssignment JSON
     --fonts-dir <DIR>          Explicit fonts directory override
     --assets-dir <DIR>         Fallback asset directory
     --plan                     Generate structured inspection manifest JSON for queue hydration

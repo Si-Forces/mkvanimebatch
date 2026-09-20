@@ -423,30 +423,18 @@ impl BatchRequest {
             ..Default::default()
         };
 
-        if let Some(assignments) = self.assignments {
-            config.track_assignments = Some(assignments.clone());
-            config.sub_assignments = Some(assignments_to_sub_map(
-                &assignments,
-                &self.input_dir,
-                self.assets_dir.as_deref(),
-            ));
-        }
+        config.track_assignments = self.assignments.clone();
 
         Ok(config)
     }
 }
 
-/// Helper to convert a list of `TrackAssignment`s into a lookup map keyed by normalized
-/// relative target path, resolving relative asset paths against input_dir (or assets_dir fallback).
-pub fn assignments_to_track_map(
-    assignments: &[TrackAssignment],
-    input_dir: &Path,
-    assets_dir: Option<&Path>,
-) -> HashMap<String, PathBuf> {
-    let mut map = HashMap::new();
-    for a in assignments {
-        let resolved = if a.is_relative_asset() {
-            let clean_asset = PathBuf::from(a.asset_path.to_string_lossy().replace('\\', "/"));
+impl TrackAssignment {
+    /// Resolves relative asset path against input_dir (or assets_dir fallback),
+    /// or returns the absolute asset path unchanged.
+    pub fn resolve_asset_path(&self, input_dir: &Path, assets_dir: Option<&Path>) -> PathBuf {
+        if self.is_relative_asset() {
+            let clean_asset = PathBuf::from(self.asset_path.to_string_lossy().replace('\\', "/"));
             let from_input = input_dir.join(&clean_asset);
             if from_input.is_file() {
                 from_input
@@ -461,9 +449,21 @@ pub fn assignments_to_track_map(
                 from_input
             }
         } else {
-            a.asset_path.clone()
-        };
+            self.asset_path.clone()
+        }
+    }
+}
 
+/// Helper to convert a list of `TrackAssignment`s into a lookup map keyed by normalized
+/// relative target path, resolving relative asset paths against input_dir (or assets_dir fallback).
+pub fn assignments_to_track_map(
+    assignments: &[TrackAssignment],
+    input_dir: &Path,
+    assets_dir: Option<&Path>,
+) -> HashMap<String, PathBuf> {
+    let mut map = HashMap::new();
+    for a in assignments {
+        let resolved = a.resolve_asset_path(input_dir, assets_dir);
         let clean = a.clean_target_video();
         map.insert(clean, resolved);
     }
@@ -471,6 +471,10 @@ pub fn assignments_to_track_map(
 }
 
 /// Backward-compatible alias for `assignments_to_track_map`.
+#[deprecated(
+    since = "1.0.0",
+    note = "Use assignments_to_track_map or TrackAssignment methods instead"
+)]
 pub use assignments_to_track_map as assignments_to_sub_map;
 
 /// Parse track assignments from JSON, supporting both `Vec<TrackAssignment>` and

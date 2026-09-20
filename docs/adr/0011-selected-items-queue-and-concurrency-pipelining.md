@@ -1,5 +1,10 @@
 # 0011. Selected Items Execution Queue, Concurrency Pipelining, and Enriched Track Assignment
 
+> **Status**: Accepted (Amended by ADR-0012)
+> **Date**: 2026-08-01
+> **Context**: Media Engine Context & Desktop Application Bridge
+> **Amends**: ADR-0008
+
 ## Context
 Following v1.0.0, batch remux execution was strictly directory-bound: `BatchPipeline` partitioned files by parent directory and processed directories sequentially. In multi-directory releases (e.g. `Season 1/`, `Season 2/`, `Specials/`), worker tasks stalled at directory boundaries, and probing within each directory executed synchronously file-by-file. Furthermore, `BatchRequest` offered no mechanism for the desktop `QueueTracker` to exclude episodes or specify custom execution sequences, and manual `TrackAssignment` in the GUI was restricted to clicking pre-discovered subtitle candidates without file browsing or metadata overrides.
 

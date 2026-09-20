@@ -1,5 +1,12 @@
 # 0002. Asset Resolver and Runner Architecture
 
+> **Status**: Migrated to Rust (ADR-0005, ADR-0010, ADR-0011)
+> **Date**: 2026-03-05
+> **Context**: Media Engine Context
+
+> [!NOTE]
+> The asset resolution logic originally documented for `mkv_assets.py` has been migrated to pure Rust in `crates/mkv-core/src/assets.rs`. Runner execution was unified in `BatchPipeline` with `tokio::task::JoinSet` under ADR-0011.
+
 ## Context
 `mkv_remux.py` and `mkv_extract.py` previously had asset resolution logic and discovery scattered across multiple ad-hoc helper functions and parameter-heavy tuple returns. We evaluated whether to combine asset resolution and merge execution loops into a unified multi-tool `BatchRunner`/`PipelineStrategy` framework.
 

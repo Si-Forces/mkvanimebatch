@@ -2185,10 +2185,8 @@ dependencies = [
  "sysinfo",
  "tauri",
  "tauri-build",
- "tauri-runtime",
  "tempfile",
  "tokio",
- "tokio-util",
 ]
 
 [[package]]
@@ -2196,7 +2194,6 @@ name = "mkv-cli"
 version = "1.0.0"
 dependencies = [
  "mkv-core",
- "regex",
  "serde",
  "serde_json",
  "tokio",
