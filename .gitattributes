@@ -2,7 +2,6 @@
 * text=auto eol=lf
 
 # Enforce Unix LF line endings for scripts, code, docs, and configurations
-*.py text eol=lf
 *.sh text eol=lf
 *.md text eol=lf
 *.rs text eol=lf

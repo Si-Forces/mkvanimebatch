@@ -1,5 +1,9 @@
 # 0009. Streaming Card Progress, Centralized Heartbeat, and Authoritative Item Duration Model
 
+> **Status**: Accepted
+> **Date**: 2026-06-01
+> **Context**: Desktop Application Context
+
 ## Context
 Following the implementation of the typed engine bridge (ADR-0008) and asynchronous event streaming (ADR-0006, ADR-0007), the desktop interface received real-time batch execution events. However, the queue card presentation suffered from visual and state inconsistencies:
 1. **Persistent Indeterminate Shimmer**: Queue cards retained an indeterminate pulsing shimmer even after ffmpeg progress was actively reporting, failing to reflect granular track muxing completion.

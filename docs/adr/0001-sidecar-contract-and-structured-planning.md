@@ -1,5 +1,12 @@
 # 0001. Sidecar Contract and Structured Planning
 
+> **Status**: Superseded by ADR-0007, ADR-0008, ADR-0010
+> **Date**: 2026-03-01
+> **Context**: Media Engine Context & Desktop Application Bridge
+
+> [!WARNING]
+> **SUPERSEDED**: Subprocess sidecars, NDJSON stdout streams, and Python planning were superseded by ADR-0007 (In-Process Engine Bridge), ADR-0008 (Typed Engine Bridge), and ADR-0010 (Mainline Rust Cutover). Only the Manifest v2 normalized candidate schema remains active in `mkv-core`.
+
 ## Context
 The Tauri desktop application previously duplicated directory scanning, `mkvmerge -J` probing, and metadata parsing in Rust (`commands.rs`), while relying on freeform regex matching of stdout logs for progress tracking. This caused severe logic duplication, disk I/O double-passes, parameter range drift, and fragile progress state machines.
 

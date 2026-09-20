@@ -31,7 +31,7 @@ impl JobEventExt for JobEvent {
 
 pub fn parse_manifest_json(bytes: &[u8]) -> Result<InspectionManifest, String> {
     if bytes.is_empty() {
-        return Err("Sidecar returned empty stdout.".to_string());
+        return Err("Manifest output is empty.".to_string());
     }
 
     let manifest: InspectionManifest = serde_json::from_slice(bytes).map_err(|error| {

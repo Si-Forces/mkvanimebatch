@@ -1,5 +1,9 @@
 # 0004. Resolution Precedence and Naming Conventions
 
+> **Status**: Amended by ADR-0008
+> **Date**: 2026-03-15
+> **Context**: Media Engine Context
+
 ## Context
 Several deliberate behaviours in asset resolution, episode naming, and
 font/cover conventions keep being flagged as defects by code review. Each is
@@ -8,6 +12,9 @@ a settled design decision; recording them prevents re-litigation.
 ## Decision
 
 ### 1. Subtitle source precedence: local index → embedded track → fallback assets
+
+> [!IMPORTANT]
+> **AMENDED BY ADR-0008**: Explicit track assignments that cannot be resolved on disk now fail preflight fast instead of silently falling back to automatic matching.
 
 `AssetResolver._resolve_sub` tries sources in a fixed order: an external
 subtitle matched from the release directory / ancestor chain first, then the

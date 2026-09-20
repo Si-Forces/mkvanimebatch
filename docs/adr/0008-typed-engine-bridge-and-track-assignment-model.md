@@ -1,5 +1,10 @@
 # 0008. Typed Engine Bridge, Preset Profiles, and Track Assignment Domain
 
+> **Status**: Accepted (Extended by ADR-0011, ADR-0012)
+> **Date**: 2026-05-15
+> **Context**: Media Engine Context & Desktop Application Bridge
+> **Amends**: ADR-0004, ADR-0007
+
 ## Context
 Following the in-process Engine Bridge cutover (ADR-0007), the desktop integration boundary retained legacy string-based CLI argument passing (`run_job(mode, args, assignments_json)`), hardcoded JavaScript presets in the webview, and an untyped flat map for subtitle assignments. Furthermore, ADR-0004 permitted stale manual subtitle assignments to silently fall back to automatic track matching, which risk producing unintended batch remux outputs after lengthy encoding runs.
 

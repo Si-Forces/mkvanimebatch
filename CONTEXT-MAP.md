@@ -7,4 +7,4 @@
 
 ## Relationships
 
-- **Desktop Application → Media Engine**: Desktop Application imports `mkv-core` as an in-process library (and optionally invokes `mkv-cli`); sends `BatchRequest` (with optional `TrackAssignment`s) and preset queries (`PresetProfile`), and consumes domain types (`InspectionManifest`, `BatchItem`, `ItemOutcome`, `JobSnapshot`) and dual streaming channels (Job Event & Log Channel).
+- **Desktop Application → Media Engine**: Desktop Application imports `mkv-core` as an in-process library; sends `BatchRequest` (with optional `TrackAssignment` entities) and preset queries (`PresetProfile`), and consumes domain types (`InspectionManifest`, `BatchItemInfo`, `ItemOutcome`, `JobEvent`) and dual streaming channels (Job Event & Log Channel). Desktop Application owns and projects `JobSnapshot` from the event stream.

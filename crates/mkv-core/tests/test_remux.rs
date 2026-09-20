@@ -56,6 +56,9 @@ fn test_no_chapters_before_temp_opus_only() {
         use_source_fonts: false,
         release_dir: None,
         item_id: "video.mkv".to_string(),
+        custom_offset_ms: None,
+        custom_language: None,
+        custom_title: None,
     };
 
     let selection = TrackSelection {
@@ -117,6 +120,9 @@ fn test_no_chapters_absent_when_no_opus() {
         use_source_fonts: false,
         release_dir: None,
         item_id: "video.mkv".to_string(),
+        custom_offset_ms: None,
+        custom_language: None,
+        custom_title: None,
     };
 
     let selection = TrackSelection {
@@ -157,6 +163,9 @@ fn test_subtitle_sync_args() {
         use_source_fonts: false,
         release_dir: None,
         item_id: "video.mkv".to_string(),
+        custom_offset_ms: None,
+        custom_language: None,
+        custom_title: None,
     };
 
     let selection = TrackSelection {
@@ -284,6 +293,9 @@ async fn test_execute_remux_job_collects_stdout_on_mkvmerge_failure() {
         use_source_fonts: false,
         release_dir: None,
         item_id: "test.mkv".to_string(),
+        custom_offset_ms: None,
+        custom_language: None,
+        custom_title: None,
     };
 
     let selection = TrackSelection {
@@ -379,6 +391,9 @@ async fn test_execute_remux_job_combines_stderr_and_stdout_on_failure() {
         use_source_fonts: false,
         release_dir: None,
         item_id: "test_both.mkv".to_string(),
+        custom_offset_ms: None,
+        custom_language: None,
+        custom_title: None,
     };
 
     let selection = TrackSelection {
@@ -465,6 +480,9 @@ async fn test_execute_remux_job_logs_warnings_on_exit_code_1() {
         use_source_fonts: false,
         release_dir: None,
         item_id: "test_warn.mkv".to_string(),
+        custom_offset_ms: None,
+        custom_language: None,
+        custom_title: None,
     };
 
     let selection = TrackSelection {
@@ -506,4 +524,79 @@ async fn test_execute_remux_job_logs_warnings_on_exit_code_1() {
         "Summary log did not contain warning: {:?}",
         summary.log
     );
+}
+
+#[test]
+fn test_custom_track_assignment_remux_args() {
+    let mut job = PlannedJob {
+        video: PathBuf::from("/dummy/video.mkv"),
+        video_name: "video.mkv".to_string(),
+        base: "video".to_string(),
+        output_file: PathBuf::from("/dummy/out.mkv"),
+        subtitle_file: Some(PathBuf::from("/dummy/sub.ass")),
+        subtitle_label: "Default English".to_string(),
+        subtitle_mkv_lang: "eng".to_string(),
+        chapter_file: None,
+        cover_file: None,
+        embedded_sub_id: None,
+        use_source_fonts: false,
+        release_dir: None,
+        item_id: "video.mkv".to_string(),
+        custom_offset_ms: Some(750),
+        custom_language: Some("ind".into()),
+        custom_title: Some("Custom Translation".into()),
+    };
+
+    let selection = TrackSelection {
+        video_id: Some(0),
+        audio_id: Some(1),
+        audio_index: 0,
+        audio_codec: "aac".to_string(),
+        audio_channels: 2,
+        audio_lang: "jpn".to_string(),
+        audio_name: "Stereo".to_string(),
+        audio_reason: "test".to_string(),
+        has_source_chapters: false,
+        source_cover_id: None,
+        source_font_ids: vec![],
+    };
+    let fonts = FontInfo::default();
+    let output_path = PathBuf::from("/dummy/out.mkv");
+
+    // 1. With custom fields populated:
+    // When custom_offset_ms is Some(750), --sync 0:750 is generated even if sub_offset is 0.0 or different.
+    let args_zero_offset = build_mkvmerge_args(&job, &selection, None, &fonts, &output_path, 0.0);
+    assert!(args_zero_offset.contains(&"--sync".to_string()));
+    assert!(args_zero_offset.contains(&"0:750".to_string()));
+    assert!(args_zero_offset.contains(&"--language".to_string()));
+    assert!(args_zero_offset.contains(&"0:ind".to_string()));
+    assert!(args_zero_offset.contains(&"--track-name".to_string()));
+    assert!(args_zero_offset.contains(&"0:Custom Translation".to_string()));
+
+    // When sub_offset is different (e.g. 2.0 / 2000ms), custom_offset_ms 750 is still generated
+    let args_diff_offset = build_mkvmerge_args(&job, &selection, None, &fonts, &output_path, 2.0);
+    assert!(args_diff_offset.contains(&"0:750".to_string()));
+    assert!(!args_diff_offset.contains(&"0:2000".to_string()));
+
+    // When custom_offset_ms is Some(0), nothing is added for --sync
+    job.custom_offset_ms = Some(0);
+    let args_custom_zero = build_mkvmerge_args(&job, &selection, None, &fonts, &output_path, 2.0);
+    assert!(!args_custom_zero.contains(&"--sync".to_string()));
+
+    // 2. Fallback behavior when these are None:
+    job.custom_offset_ms = None;
+    job.custom_language = None;
+    job.custom_title = None;
+
+    let args_fallback = build_mkvmerge_args(&job, &selection, None, &fonts, &output_path, 1.25);
+    assert!(args_fallback.contains(&"--sync".to_string()));
+    assert!(args_fallback.contains(&"0:1250".to_string()));
+    assert!(args_fallback.contains(&"--language".to_string()));
+    assert!(args_fallback.contains(&"0:eng".to_string()));
+    assert!(args_fallback.contains(&"--track-name".to_string()));
+    assert!(args_fallback.contains(&"0:Default English".to_string()));
+
+    // Fallback when sub_offset is 0.0: no --sync
+    let args_fallback_zero = build_mkvmerge_args(&job, &selection, None, &fonts, &output_path, 0.0);
+    assert!(!args_fallback_zero.contains(&"--sync".to_string()));
 }

@@ -1,3 +1,22 @@
+/* ─── Local Fonts & Fallback ─────────────────────────────────────────────────── */
+@font-face {
+  font-family: 'Plus Jakarta Sans';
+  font-style: normal;
+  font-weight: 500 900;
+  font-display: swap;
+  src: local('Plus Jakarta Sans'),
+       url('fonts/PlusJakartaSans.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 500 800;
+  font-display: swap;
+  src: local('JetBrains Mono'),
+       url('fonts/JetBrainsMono.woff2') format('woff2');
+}
+
 /* ─── Reset & Base ──────────────────────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -7,7 +26,7 @@ html, body {
   background: var(--bg);
   color: var(--text);
   overflow: hidden;
-  font-family: "Plus Jakarta Sans", -apple-system, "SF Pro Display", "Segoe UI", system-ui, sans-serif;
+  font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
   user-select: none;
 }
@@ -49,6 +68,8 @@ input[type="number"] {
 
 /* ─── Theme Variables ─────────────────────────────────────────────────────── */
 :root {
+  --font-sans: 'Plus Jakarta Sans', system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'Cascadia Code', 'Consolas', 'Courier New', monospace;
   --window-radius: 12px;
   --radius: 16px;
   --radius-sm: 10px;
@@ -381,7 +402,7 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
 .pipeline-tab-btn {
   padding: 5px 13px;
   border-radius: 8px;
-  font-family: "Plus Jakarta Sans", "SF Pro Display", "Inter", -apple-system, sans-serif;
+  font-family: var(--font-sans);
   font-size: 12px;
   font-weight: 700;
   letter-spacing: -0.01em;
@@ -638,7 +659,7 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
 }
 
 .extract-scope-header .scope-label {
-  font-family: "SF Mono", "JetBrains Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 9.5px;
   font-weight: 800;
   letter-spacing: 0.05em;
@@ -801,7 +822,7 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
 }
 
 .res-card-title {
-  font-family: "SF Mono", "JetBrains Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   font-weight: 800;
   letter-spacing: 0.06em;
@@ -829,7 +850,7 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
   display: flex;
   justify-content: space-between;
   align-items: center;
-  font-family: "SF Mono", "JetBrains Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
 }
 
@@ -898,7 +919,7 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
   color: var(--accent);
   padding: 6px 10px;
   border-radius: 8px;
-  font-family: "SF Mono", "JetBrains Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 10.5px;
   font-weight: 700;
   text-align: center;
@@ -1020,7 +1041,7 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
   align-items: center;
   gap: 10px;
   padding: 14px 16px;
-  font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+  font-family: var(--font-mono);
   font-size: 12.5px;
   line-height: 1.5;
   user-select: none;
@@ -1243,7 +1264,7 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
   font-size: 9.5px;
   font-weight: 700;
   color: var(--text-dim);
-  font-family: "SF Mono", "JetBrains Mono", monospace;
+  font-family: var(--font-mono);
   letter-spacing: 0.02em;
 }
 
@@ -1627,13 +1648,13 @@ input[type="range"]::-moz-range-thumb:hover {
   font-size: 10.5px;
   font-weight: 700;
   color: var(--text-muted);
-  font-family: "SF Mono", "JetBrains Mono", monospace;
+  font-family: var(--font-mono);
 }
 
 .log-body {
   flex: 1;
   padding: 8px 12px;
-  font-family: "SF Mono", "JetBrains Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   line-height: 1.6;
   overflow-y: auto;

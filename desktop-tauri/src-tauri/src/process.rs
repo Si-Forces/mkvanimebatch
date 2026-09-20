@@ -1,3 +1,4 @@
+use mkv_core::pipeline::CancellationToken;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -10,7 +11,7 @@ use tauri::State;
 
 pub struct JobSlot {
     pub(crate) id: u64,
-    pub(crate) cancel_token: tokio_util::sync::CancellationToken,
+    pub(crate) cancel_token: CancellationToken,
     pub(crate) task_handle: tauri::async_runtime::JoinHandle<()>,
     pub(crate) stopping: bool,
 }
@@ -95,7 +96,7 @@ pub struct JobState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ActiveScan {
     pub(crate) id: u64,
-    pub(crate) cancel_token: Option<tokio_util::sync::CancellationToken>,
+    pub(crate) cancel_token: Option<CancellationToken>,
 }
 
 pub struct ScanState {
@@ -995,7 +996,7 @@ mod job_tests {
     pub(crate) fn dummy_slot(id: u64, stopping: bool) -> JobSlot {
         JobSlot {
             id,
-            cancel_token: tokio_util::sync::CancellationToken::new(),
+            cancel_token: CancellationToken::new(),
             task_handle: tauri::async_runtime::spawn(async {}),
             stopping,
         }
@@ -1188,7 +1189,7 @@ mod cleanup_tests {
     #[test]
     fn test_stop_registered_scan_cancels_token() {
         let state = ScanState::default();
-        let token = tokio_util::sync::CancellationToken::new();
+        let token = CancellationToken::new();
         *state.active.lock().unwrap() = Some(ActiveScan {
             id: 1,
             cancel_token: Some(token.clone()),
@@ -1203,7 +1204,7 @@ mod cleanup_tests {
     #[test]
     fn test_scan_registration_drop_clears_active_scan() {
         let state = ScanState::default();
-        let token = tokio_util::sync::CancellationToken::new();
+        let token = CancellationToken::new();
         *state.active.lock().unwrap() = Some(ActiveScan {
             id: 1,
             cancel_token: Some(token.clone()),

@@ -39,7 +39,7 @@ Available both as a standalone native **CLI binary (`mkv-cli`)** and as a self-c
 ### Intelligent Subtitle Selection & Extraction
 * **Language Priority**: Automatically detects and scores subtitle tracks, prioritizing Indonesian (`ind`, `id`) and fallback English (`eng`, `en`).
 * **Format & Track Type Scoring**: Prefers Advanced SubStation Alpha (`.ass` typesetting) over SubRip (`.srt`), prioritizing dialogue tracks over signs/titles or commentaries.
-* **Manual Track Assignments**: Supports precise per-episode subtitle overrides via `--assignments` while retaining automatic fallback.
+* **Manual Track Assignments**: Supports precise per-episode subtitle overrides via `--assignments` with fail-fast preflight validation.
 
 ### 10-Tier Audio Scoring & Opus Transcoding
 * **Dialogue Priority**: Automatically scores audio tracks, favoring Japanese stereo and multi-channel audio tracks.
@@ -224,6 +224,8 @@ See the architecture decision records in `docs/adr/` for complete architectural 
 - [ADR-0008: Typed Engine Bridge & Track Assignment Model](docs/adr/0008-typed-engine-bridge-and-track-assignment-model.md)
 - [ADR-0009: Streaming Card Progress & Item Duration Model](docs/adr/0009-streaming-card-progress-and-item-duration-model.md)
 - [ADR-0010: Mainline Rust Engine Cutover & Python Decommissioning](docs/adr/0010-mainline-rust-cutover-and-python-decommissioning.md)
+- [ADR-0011: Selected Items Queue & Concurrency Pipelining](docs/adr/0011-selected-items-queue-and-concurrency-pipelining.md)
+- [ADR-0012: Track Assignment Override Execution & Seam Unification](docs/adr/0012-track-assignment-override-execution-and-seam-unification.md)
 
 ---
 
@@ -265,7 +267,7 @@ mkvanimebatch/
 │   ├── ui/                  # Web frontend (Liquid Glass UI, Queue Tracker, tests)
 │   └── src-tauri/           # In-process Tauri Engine Bridge & telemetry
 ├── docs/
-│   └── adr/                 # System Architecture Decision Records (0001 - 0010)
+│   └── adr/                 # System Architecture Decision Records (0001 - 0012)
 └── .github/
     └── workflows/           # Consolidated CI matrix & Release workflows
 ```

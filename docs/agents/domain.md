@@ -4,43 +4,31 @@ How the engineering skills should consume this repo's domain documentation when 
 
 ## Before exploring, read these
 
-- **`CONTEXT.md`** at the repo root, or
-- **`CONTEXT-MAP.md`** at the repo root if it exists — it points at one `CONTEXT.md` per context. Read each one relevant to the topic.
-- **`docs/adr/`** — read ADRs that touch the area you're about to work in. In multi-context repos, also check `src/<context>/docs/adr/` for context-scoped decisions.
+- **`CONTEXT-MAP.md`** at the repo root — it points to bounded contexts across the workspace. Read each context file relevant to the task:
+  - [`crates/mkv-core/CONTEXT.md`](../../crates/mkv-core/CONTEXT.md) for media probing, scoring, asset resolution, font extraction, and batch remuxing.
+  - [`desktop-tauri/CONTEXT.md`](../../desktop-tauri/CONTEXT.md) for desktop GUI, queue state projection, and the in-process Engine Bridge.
+- **`docs/adr/`** — read ADRs that touch the area you're about to work in (`0001` through `0012`).
 
 If any of these files don't exist, **proceed silently**. Don't flag their absence; don't suggest creating them upfront. The `/domain-modeling` skill (reached via `/grill-with-docs` and `/improve-codebase-architecture`) creates them lazily when terms or decisions actually get resolved.
 
 ## File structure
 
-Single-context repo (most repos):
+This repository follows a multi-context layout governed by `CONTEXT-MAP.md`:
 
 ```
 /
-├── CONTEXT.md
-├── docs/adr/
-│   ├── 0001-event-sourced-orders.md
-│   └── 0002-postgres-for-write-model.md
-└── src/
-```
-
-Multi-context repo (presence of `CONTEXT-MAP.md` at the root):
-
-```
-/
-├── CONTEXT-MAP.md
-├── docs/adr/                          ← system-wide decisions
-└── src/
-    ├── ordering/
-    │   ├── CONTEXT.md
-    │   └── docs/adr/                  ← context-specific decisions
-    └── billing/
-        ├── CONTEXT.md
-        └── docs/adr/
+├── CONTEXT-MAP.md                     ← Bounded context map and relationships
+├── docs/adr/                          ← System-wide and bridge architecture decisions (0001 - 0012)
+├── crates/
+│   └── mkv-core/
+│       └── CONTEXT.md                 ← Media Engine Context
+└── desktop-tauri/
+    └── CONTEXT.md                     ← Desktop Application Context
 ```
 
 ## Use the glossary's vocabulary
 
-When your output names a domain concept (in an issue title, a refactor proposal, a hypothesis, a test name), use the term as defined in `CONTEXT.md`. Don't drift to synonyms the glossary explicitly avoids.
+When your output names a domain concept (in an issue title, a refactor proposal, a hypothesis, a test name), use the term as defined in the relevant `CONTEXT.md`. Don't drift to synonyms the glossary explicitly avoids.
 
 If the concept you need isn't in the glossary yet, that's a signal — either you're inventing language the project doesn't use (reconsider) or there's a real gap (note it for `/domain-modeling`).
 
@@ -48,4 +36,4 @@ If the concept you need isn't in the glossary yet, that's a signal — either yo
 
 If your output contradicts an existing ADR, surface it explicitly rather than silently overriding:
 
-> _Contradicts ADR-0007 (event-sourced orders) — but worth reopening because…_
+> _Contradicts ADR-0008 (typed engine bridge and track assignments) — but worth reopening because…_

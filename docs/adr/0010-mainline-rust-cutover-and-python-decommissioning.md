@@ -1,5 +1,10 @@
 # 0010. Mainline Rust Engine Cutover and Python Pipeline Decommissioning
 
+> **Status**: Accepted
+> **Date**: 2026-07-01
+> **Context**: System Workspace Topology
+> **Supersedes**: ADR-0001, ADR-0002, ADR-0003, ADR-0005
+
 ## Context
 Following the implementation of the pure Rust media engine (ADR-0005, ADR-0006), the in-process Engine Bridge (ADR-0007), typed track assignments (ADR-0008), and streaming progress telemetry (ADR-0009), the legacy Python prototype codebase (`mkv_*.py`), PyInstaller sidecar compilation scripts, and pytest suites remained in the repository root to verify behavioral parity during development. With all 142 Rust engine/CLI tests, 32 in-process bridge tests, and 80 UI contract tests passing with 100% contract fidelity, retaining the Python codebase creates unnecessary cognitive overhead, duplicate CI overhead, and maintenance friction.
 

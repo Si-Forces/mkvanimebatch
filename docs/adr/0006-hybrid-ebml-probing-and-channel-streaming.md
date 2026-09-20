@@ -1,5 +1,9 @@
 # 0006. Hybrid EBML Probing and Channel-First Event Streaming
 
+> **Status**: Accepted
+> **Date**: 2026-04-15
+> **Context**: Media Engine Context
+
 ## Context
 During preflight inspection, probing anime fansub MKVs using `mkvmerge -J` subprocesses can be slow across large release directories (50+ episodes). However, anime fansub files frequently contain non-standard container quirks, custom attachments, and variable font MIME types that fragile native parsers might mishandle. In addition, Tauri v2 needs low-overhead progress updates without string serializing and deserializing over stdout.
 

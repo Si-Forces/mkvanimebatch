@@ -634,8 +634,8 @@ async function syncMaximizedState() {
 function initApp() {
   initTheme();
 
-  // NOTE: OS-class detection (is-windows / is-mac / is-linux) lives in the
-  // inline <head> script in index.html so it runs before first paint; we do
+  // NOTE: OS-class detection (is-windows / is-mac / is-linux) lives in
+  // os-detect.js in <head> so it runs before first paint; we do
   // not duplicate it here.
 
   safeAddListener("btn-theme", "click", toggleTheme);

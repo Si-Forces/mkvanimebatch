@@ -281,7 +281,7 @@ jobs:
     name: Build & Release — Linux
     needs: [ci-status]
     if: needs.ci-status.result == 'success'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout repository
