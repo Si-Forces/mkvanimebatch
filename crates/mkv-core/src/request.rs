@@ -397,9 +397,12 @@ impl BatchRequest {
                 (None, None, None)
             };
 
-        let default_workers = std::thread::available_parallelism()
-            .map(|p| p.get().clamp(1, 16))
+        let total_cores = std::thread::available_parallelism()
+            .map(|p| p.get())
             .unwrap_or(4);
+        let default_workers = total_cores.clamp(1, 16);
+        let workers = self.workers.unwrap_or(default_workers);
+        let default_ffmpeg_threads = (total_cores / workers.max(1)).clamp(1, 4);
 
         let mut config = PipelineConfig {
             mode: self.mode,
@@ -411,11 +414,11 @@ impl BatchRequest {
                 .bitrate
                 .or(preset_bitrate)
                 .unwrap_or_else(|| "192k".to_string()),
-            complexity: self.complexity.or(preset_complexity).unwrap_or(10),
+            complexity: self.complexity.or(preset_complexity).unwrap_or(5),
             keep_fonts: self.keep_fonts.or(preset_keep_fonts).unwrap_or(false),
-            workers: self.workers.unwrap_or(default_workers),
+            workers,
             io_jobs: self.io_jobs.unwrap_or(2),
-            ffmpeg_threads: self.ffmpeg_threads.unwrap_or(2),
+            ffmpeg_threads: self.ffmpeg_threads.unwrap_or(default_ffmpeg_threads),
             sub_offset: self.sub_offset.unwrap_or(0.0),
             dry_run: self.dry_run.unwrap_or(false),
             no_cache: self.no_cache.unwrap_or(false),
@@ -626,6 +629,12 @@ mod tests {
             .map(|p| p.get().clamp(1, 16))
             .unwrap_or(4);
         assert_eq!(config.workers, expected);
+        assert_eq!(config.complexity, 5);
+        let total_cores = std::thread::available_parallelism()
+            .map(|p| p.get())
+            .unwrap_or(4);
+        let expected_ffmpeg_threads = (total_cores / expected.max(1)).clamp(1, 4);
+        assert_eq!(config.ffmpeg_threads, expected_ffmpeg_threads);
     }
 
     #[test]

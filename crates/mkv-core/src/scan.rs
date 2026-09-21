@@ -51,16 +51,15 @@ pub struct MkvmergeMetadata {
 }
 
 /// Probes MKV metadata using `mkvmerge -J` subprocess.
-pub fn probe_video_mkvmerge(path: &Path) -> Result<MkvmergeMetadata, String> {
-    let mut cmd = std::process::Command::new("mkvmerge");
+pub async fn probe_video_mkvmerge(path: &Path) -> Result<MkvmergeMetadata, String> {
+    let mut cmd = tokio::process::Command::new("mkvmerge");
     #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000);
-    }
+    cmd.creation_flags(0x08000000);
+    cmd.kill_on_drop(true);
     let output = cmd
         .args(["-J", &path.to_string_lossy()])
         .output()
+        .await
         .map_err(|e| format!("Failed to execute mkvmerge: {e}"))?;
 
     if !output.status.success() {
@@ -86,24 +85,24 @@ pub fn probe_video_mkvmerge(path: &Path) -> Result<MkvmergeMetadata, String> {
 
 /// Probes MKV container headers, tracks, attachments, and chapters using hybrid native EBML
 /// parsing with automatic fallback to `mkvmerge -J` (ADR 0006).
-pub fn probe_video(path: &Path) -> Result<MkvmergeMetadata, String> {
+pub async fn probe_video(path: &Path) -> Result<MkvmergeMetadata, String> {
     // 1. Fast path: native EBML probe directly in pure Rust (< 1ms)
     if let Ok(meta) = crate::ebml::probe_ebml_native(path) {
         return Ok(meta);
     }
     // 2. Safe fallback: shell out to mkvmerge -J for non-standard containers or quirks (ADR 0006)
-    probe_video_mkvmerge(path)
+    probe_video_mkvmerge(path).await
 }
 
 /// Looks up cached inspection metadata or probes the video with `mkvmerge`, caching on success.
-pub fn get_or_probe_video(
+pub async fn get_or_probe_video(
     path: &Path,
     cache: Option<&PersistentInspectCache>,
 ) -> Result<MkvmergeMetadata, String> {
     if let Some(cached) = cache.and_then(|c| c.get_path(path)) {
         return Ok(cached);
     }
-    let probed = probe_video(path)?;
+    let probed = probe_video(path).await?;
     if let Some(c) = cache {
         c.put_path(path, probed.clone());
     }
@@ -519,6 +518,7 @@ pub struct InspectCacheEntry {
     pub mtime_ns: u128,
     #[serde(default)]
     pub mtime: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub json_data: Option<MkvmergeMetadata>,
 }
 
@@ -724,12 +724,6 @@ impl PersistentInspectCache {
             (Arc::clone(&state.data), state.revision)
         };
 
-        let save_data: HashMap<&str, &InspectCacheEntry> = data_snapshot
-            .iter()
-            .filter(|(_, entry)| entry.json_data.is_some())
-            .map(|(k, v)| (k.as_str(), v))
-            .collect();
-
         let parent = match self.cache_file.parent() {
             Some(p) => {
                 let _ = std::fs::create_dir_all(p);
@@ -740,15 +734,11 @@ impl PersistentInspectCache {
 
         match NamedTempFile::new_in(parent) {
             Ok(mut temp_file) => {
-                let serialized = match serde_json::to_string(&save_data) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        warn!("Failed to serialize inspect cache: {e}");
-                        return;
-                    }
-                };
-
-                if temp_file.write_all(serialized.as_bytes()).is_ok() && temp_file.flush().is_ok() {
+                let mut writer = std::io::BufWriter::new(&mut temp_file);
+                if serde_json::to_writer(&mut writer, &*data_snapshot).is_ok()
+                    && writer.flush().is_ok()
+                {
+                    drop(writer);
                     if let Ok(_persisted) = temp_file.persist(&self.cache_file) {
                         #[cfg(unix)]
                         {

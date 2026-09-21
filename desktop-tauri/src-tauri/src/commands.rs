@@ -51,13 +51,11 @@ pub async fn inspect_directory(
     };
 
     let no_cache = options.as_ref().and_then(|o| o.no_cache).unwrap_or(false);
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        let cache = mkv_core::scan::PersistentInspectCache::default();
-        let cache_opt = if no_cache { None } else { Some(&cache) };
+    let cache = mkv_core::scan::PersistentInspectCache::default();
+    let cache_opt = if no_cache { None } else { Some(&cache) };
+    let result =
         mkv_core::manifest::generate_inspection_manifest(&dir, cache_opt, Some(&cancel_token))
-    })
-    .await
-    .unwrap_or_else(|e| Err(format!("Async runtime error: {}", e)));
+            .await;
 
     drop(registration);
     result

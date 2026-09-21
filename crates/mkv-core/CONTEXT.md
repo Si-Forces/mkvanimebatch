@@ -36,6 +36,17 @@ Domain logic for parsing, indexing, scoring, probing, and executing anime fansub
   - If renaming fails due to cross-device link boundaries (`EXDEV`), the engine falls back to an atomic copy-then-remove sequence with cleanup.
   - Interrupted or failed outputs are quarantined and deleted immediately, ensuring no partial or corrupt media files remain in output directories.
 
+- **Asynchronous Reactor Isolation**:
+  - Container probing (`probe_video` and `get_or_probe_video`) executes asynchronously across all pipeline stages.
+  - Fallback inspection to `mkvmerge -J` uses asynchronous process execution (`tokio::process::Command`), preventing thread starvation on Tokio async runtime worker pools (ADR-0013).
+- **Dynamic Transcode Thread Governance**:
+  - Audio transcoding algorithmic complexity defaults to `5` for general and balanced remuxing, saving ~40% CPU time per episode compared to maximum complexity 10.
+  - Transcode thread concurrency is dynamically derived as `(total_physical_cores / workers).clamp(1, 4)` when unspecified by the caller, preventing CPU core oversubscription across parallel worker slots (ADR-0013).
+- **Fine-Grained Font Seeding**:
+  - Initial font discovery and BLAKE2b cryptographic hashing in `FontRegistry::seed_existing` are executed outside the registry state lock.
+  - The state lock is acquired exclusively during final batch insertion, reducing mutex hold duration from hundreds of milliseconds to under 15 microseconds and eliminating contention against concurrent worker claims (ADR-0013).
+- **Zero-Copy Cache Persistence**:
+  - `PersistentInspectCache` serializes disk snapshots directly via `std::io::BufWriter` and `serde_json::to_writer`, eliminating temporary heap string allocations and intermediate collection copies (ADR-0013).
 ## Core Domain Types & Aggregates
 
 - **`ReleaseDirectory`**: Aggregates an anime release folder structure, grouping video files, external subtitle tracks, chapter XML files, cover images, and fonts belonging to a batch.
@@ -73,3 +84,5 @@ Domain logic for parsing, indexing, scoring, probing, and executing anime fansub
 | **Preset Profile** | A canonical named bundle of audio transcoding bitrate, encoder complexity, and container retention flags evaluated by the Media Engine for batch remuxing, decoupled from hardware worker concurrency. | Config preset, setting template, encoding profile |
 | **Track Assignment** | An explicit mapping attaching an external or embedded asset to a specific target video file with designated track type, language tag, and time offset. While the domain model anticipates multi-track stacking, current pipeline execution enforces 1:1 subtitle overrides (`track_type: "subtitle"`). | Sub assignment, manual override, track mapping |
 | **Selected Items** | An ordered subset of canonical relative video paths or item IDs designated in a Batch Request to restrict and sequence pipeline execution. When omitted, all discovered media files execute in natural directory order. | Target filter, whitelist, item subset |
+| **Transcode Governor** | The dynamic calculation mechanism deriving FFmpeg worker thread concurrency from physical CPU core topology and active batch workers (`(total_physical_cores / workers).clamp(1, 4)`). | Thread scaler, core allocator |
+| **Zero-Copy Cache Persistence** | Direct-to-disk buffered streaming serialization of persistent inspection cache entries bypassing heap string allocations. | JSON dumper, cache writer |

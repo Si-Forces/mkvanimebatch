@@ -333,12 +333,12 @@ fn test_scan_mkv_files_recursive_and_ignore() {
     assert!(!names.contains(&"ignored_font.mkv"));
 }
 
-#[test]
-fn test_probe_video_fallback() {
+#[tokio::test]
+async fn test_probe_video_fallback() {
     let tmp = tempdir().unwrap();
     let corrupt_mkv = tmp.path().join("corrupt.mkv");
     fs::write(&corrupt_mkv, b"not a real ebml file").unwrap();
-    assert!(mkv_core::scan::probe_video(&corrupt_mkv).is_err());
+    assert!(mkv_core::scan::probe_video(&corrupt_mkv).await.is_err());
 }
 
 #[test]
@@ -358,8 +358,8 @@ fn test_probe_ebml_8byte_vint() {
     assert!(res.is_err()); // Will fail finding tracks, but must NOT panic!
 }
 
-#[test]
-fn test_unknown_size_vint_triggers_fallback() {
+#[tokio::test]
+async fn test_unknown_size_vint_triggers_fallback() {
     let tmp = tempdir().unwrap();
 
     // 1. Test 8-byte unknown-size VINT (RFC 8794 §5.1.1: all 56 data bits are 1)
@@ -383,7 +383,7 @@ fn test_unknown_size_vint_triggers_fallback() {
         ebml_res
     );
     // Must fall back to mkvmerge -J without panicking
-    let _ = mkv_core::scan::probe_video(&test_mkv_8byte);
+    let _ = mkv_core::scan::probe_video(&test_mkv_8byte).await;
 
     // 2. Test 1-byte unknown-size VINT (RFC 8794 §5.1.1: 0xFF has all 7 data bits as 1)
     let test_mkv_1byte = tmp.path().join("unknown_vint_1byte.mkv");
@@ -406,11 +406,11 @@ fn test_unknown_size_vint_triggers_fallback() {
         ebml_res_1byte
     );
     // Must fall back to mkvmerge -J without panicking
-    let _ = mkv_core::scan::probe_video(&test_mkv_1byte);
+    let _ = mkv_core::scan::probe_video(&test_mkv_1byte).await;
 }
 
-#[test]
-fn test_corrupted_track_entry_triggers_fallback() {
+#[tokio::test]
+async fn test_corrupted_track_entry_triggers_fallback() {
     let tmp = tempdir().unwrap();
     let corrupt_tracks_mkv = tmp.path().join("corrupt_tracks.mkv");
 
@@ -456,7 +456,7 @@ fn test_corrupted_track_entry_triggers_fallback() {
     );
 
     // probe_video must trigger fallback to mkvmerge -J without panicking or returning partial tracks
-    let _ = mkv_core::scan::probe_video(&corrupt_tracks_mkv);
+    let _ = mkv_core::scan::probe_video(&corrupt_tracks_mkv).await;
 }
 
 #[test]

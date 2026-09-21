@@ -337,7 +337,8 @@ impl FontRegistry {
             return;
         };
 
-        let mut state = self.state.lock();
+        let mut discovered_name_sizes = Vec::new();
+        let mut discovered_hashes = Vec::new();
 
         for entry in entries.flatten() {
             let path = entry.path();
@@ -355,7 +356,7 @@ impl FontRegistry {
             if let Ok(meta) = entry.metadata() {
                 let size = meta.len();
                 let file_name = entry.file_name().to_string_lossy().into_owned();
-                state.claimed_name_size.insert((file_name, size));
+                discovered_name_sizes.push((file_name, size));
 
                 if let Some(sig) = FileSignature::of(&path) {
                     let mut file_hash = None;
@@ -374,11 +375,15 @@ impl FontRegistry {
                         }
                     }
                     if let Some(h) = file_hash {
-                        state.claimed_hashes.insert(h);
+                        discovered_hashes.push(h);
                     }
                 }
             }
         }
+
+        let mut state = self.state.lock();
+        state.claimed_name_size.extend(discovered_name_sizes);
+        state.claimed_hashes.extend(discovered_hashes);
     }
 
     pub fn claimed_hashes(&self) -> HashSet<String> {
