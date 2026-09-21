@@ -52,7 +52,7 @@ pub fn get_preset_profiles() -> Vec<PresetProfile> {
             icon: "🛠️".to_string(),
             description: "Custom user configuration".to_string(),
             bitrate: "192k".to_string(),
-            complexity: 10,
+            complexity: 5,
             keep_fonts: false,
         },
     ]

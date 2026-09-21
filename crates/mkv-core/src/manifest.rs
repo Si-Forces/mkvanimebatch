@@ -353,17 +353,9 @@ pub async fn generate_inspection_manifest(
         }
 
         let (inspected, inspection_error) =
-            match persistent_cache.and_then(|c| c.get_path(&mkv.path)) {
-                Some(cached) => (Some(InspectedVideo::new(cached)), None),
-                None => match crate::scan::probe_video(&mkv.path).await {
-                    Ok(probed) => {
-                        if let Some(cache) = persistent_cache {
-                            cache.put_path(&mkv.path, probed.clone());
-                        }
-                        (Some(InspectedVideo::new(probed)), None)
-                    }
-                    Err(err) => (None, Some(err)),
-                },
+            match crate::scan::get_or_probe_video(&mkv.path, persistent_cache).await {
+                Ok(probed) => (Some(InspectedVideo::new(probed)), None),
+                Err(err) => (None, Some(err)),
             };
 
         let parent = mkv.path.parent().unwrap_or(input_dir);

@@ -739,7 +739,7 @@ impl PersistentInspectCache {
                 }
                 if let Err(e) = writer.flush() {
                     warn!(
-                        "Failed to flush inspect cache writer in {}: {e}",
+                        "Failed to flush inspect cache stream in {}: {e}",
                         parent.display()
                     );
                     return;
