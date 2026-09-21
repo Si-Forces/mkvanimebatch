@@ -748,6 +748,7 @@ impl BatchPipeline {
                 }
             }
         }
+        cache.save_shared();
 
         // Prepare release directory assets per release directory
         struct PreparedDir {
