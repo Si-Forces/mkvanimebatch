@@ -56,12 +56,13 @@ pub async fn probe_video_mkvmerge(path: &Path) -> Result<MkvmergeMetadata, Strin
     #[cfg(windows)]
     cmd.creation_flags(0x08000000);
     cmd.kill_on_drop(true);
-    let output = cmd
-        .args(["-J", &path.to_string_lossy()])
-        .output()
-        .await
-        .map_err(|e| format!("Failed to execute mkvmerge: {e}"))?;
-
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        cmd.arg("-J").arg(path).output(),
+    )
+    .await
+    .map_err(|_| "mkvmerge probe timed out after 30 seconds".to_string())?
+    .map_err(|e| format!("Failed to execute mkvmerge: {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(format!(
@@ -624,26 +625,20 @@ impl PersistentInspectCache {
         if !self.cache_file.exists() {
             return;
         }
-        match std::fs::read_to_string(&self.cache_file) {
-            Ok(content) => {
-                match serde_json::from_str::<HashMap<String, InspectCacheEntry>>(&content) {
-                    Ok(loaded) => {
-                        let mut state = self.state.lock();
-                        state.data = Arc::new(loaded);
-                        state.dirty = false;
-                    }
-                    Err(e) => {
-                        warn!(
-                            "Failed to parse inspect cache from {}: {}",
-                            self.cache_file.display(),
-                            e
-                        );
-                    }
-                }
+        let file = match File::open(&self.cache_file) {
+            Ok(f) => f,
+            Err(_) => return,
+        };
+        let reader = std::io::BufReader::new(file);
+        match serde_json::from_reader::<_, HashMap<String, InspectCacheEntry>>(reader) {
+            Ok(loaded) => {
+                let mut state = self.state.lock();
+                state.data = Arc::new(loaded);
+                state.dirty = false;
             }
             Err(e) => {
                 warn!(
-                    "Failed to read inspect cache from {}: {}",
+                    "Failed to parse inspect cache from {}: {}",
                     self.cache_file.display(),
                     e
                 );
@@ -725,38 +720,47 @@ impl PersistentInspectCache {
         };
 
         let parent = match self.cache_file.parent() {
-            Some(p) => {
+            Some(p) if !p.as_os_str().is_empty() => {
                 let _ = std::fs::create_dir_all(p);
                 p
             }
-            None => Path::new("."),
+            _ => Path::new("."),
         };
 
         match NamedTempFile::new_in(parent) {
             Ok(mut temp_file) => {
                 let mut writer = std::io::BufWriter::new(&mut temp_file);
-                if serde_json::to_writer(&mut writer, &*data_snapshot).is_ok()
-                    && writer.flush().is_ok()
-                {
-                    drop(writer);
-                    if let Ok(_persisted) = temp_file.persist(&self.cache_file) {
-                        #[cfg(unix)]
-                        {
-                            use std::os::unix::fs::PermissionsExt;
-                            let _ =
-                                _persisted.set_permissions(std::fs::Permissions::from_mode(0o644));
-                        }
-                        let mut state = self.state.lock();
-                        if state.revision == saved_revision {
-                            state.dirty = false;
-                        }
-                        state.last_save_ts = Some(Instant::now());
-                    } else {
-                        warn!(
-                            "Failed to atomically replace inspect cache at {}",
-                            self.cache_file.display()
-                        );
+                if let Err(e) = serde_json::to_writer(&mut writer, &*data_snapshot) {
+                    warn!(
+                        "Failed to stream serialize inspect cache to {}: {e}",
+                        parent.display()
+                    );
+                    return;
+                }
+                if let Err(e) = writer.flush() {
+                    warn!(
+                        "Failed to flush inspect cache writer in {}: {e}",
+                        parent.display()
+                    );
+                    return;
+                }
+                drop(writer);
+                if let Ok(_persisted) = temp_file.persist(&self.cache_file) {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let _ = _persisted.set_permissions(std::fs::Permissions::from_mode(0o644));
                     }
+                    let mut state = self.state.lock();
+                    if state.revision == saved_revision {
+                        state.dirty = false;
+                    }
+                    state.last_save_ts = Some(Instant::now());
+                } else {
+                    warn!(
+                        "Failed to atomically replace inspect cache at {}",
+                        self.cache_file.display()
+                    );
                 }
             }
             Err(e) => {
