@@ -137,10 +137,14 @@ where
             }
             "--ffmpeg-threads" => {
                 let val = it.next().ok_or("Missing value for --ffmpeg-threads")?;
-                let threads: usize = val
-                    .parse()
-                    .map_err(|_| "Invalid integer for --ffmpeg-threads")?;
-                request.ffmpeg_threads = Some(threads);
+                if val.eq_ignore_ascii_case("auto") {
+                    request.ffmpeg_threads = None;
+                } else {
+                    let threads: usize = val
+                        .parse()
+                        .map_err(|_| "Invalid integer for --ffmpeg-threads")?;
+                    request.ffmpeg_threads = Some(threads);
+                }
             }
             "--bitrate" => {
                 let val = it.next().ok_or("Missing value for --bitrate")?;
@@ -207,10 +211,10 @@ OPTIONS:
     --extract                  Extract best-match subtitles, fonts, chapters, and covers
     --dry-run                  Simulate batch processing without executing remux commands
     --bitrate <RATE>           Opus audio transcoding bitrate (default: 192k)
-    --complexity <1-10>        Opus compression complexity level (default: 10)
+    --complexity <0-10>        Opus compression complexity level (default: 5)
     --workers <N>              Number of concurrent worker tasks (default: 4)
     --io-jobs <N>              Bounded disk I/O jobs concurrency limit (default: 2)
-    --ffmpeg-threads <N>       CPU threads allocated per audio transcode job (default: 2)
+    --ffmpeg-threads <N|auto>  CPU threads allocated per audio transcode job (default: auto)
     --sub-offset <SEC>         Subtitle timestamp offset in seconds
     --keep-fonts               Retain extracted fonts directory
     --no-cache                 Bypass persistent inspect cache
@@ -704,5 +708,21 @@ mod tests {
         assert!(parsed_missing.request.validate().is_err());
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_parse_args_ffmpeg_threads_auto() {
+        let parsed_auto =
+            parse_args_from(["--input-dir", ".", "--ffmpeg-threads", "auto"]).unwrap();
+        assert_eq!(parsed_auto.request.ffmpeg_threads, None);
+
+        let parsed_zero = parse_args_from(["--input-dir", ".", "--ffmpeg-threads", "0"]).unwrap();
+        assert_eq!(parsed_zero.request.ffmpeg_threads, Some(0));
+
+        let parsed_fixed = parse_args_from(["--input-dir", ".", "--ffmpeg-threads", "4"]).unwrap();
+        assert_eq!(parsed_fixed.request.ffmpeg_threads, Some(4));
+
+        let parsed_invalid = parse_args_from(["--input-dir", ".", "--ffmpeg-threads", "invalid"]);
+        assert!(parsed_invalid.is_err());
     }
 }
