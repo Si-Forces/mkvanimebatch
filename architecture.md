@@ -108,6 +108,8 @@ flowchart TD
 | **Job Snapshot** | Desktop App | In-memory projection maintained in real-time by the Engine Bridge summarizing active or last-completed batch runs across UI reloads. | *Job state, queue cache, execution status* |
 | **Card Progress** | Desktop App | Visual representation of an active episode's execution: indeterminate shimmer sweep transitioning to determinate percentage fill. | *Loading bar, queue spinner, progress gauge* |
 | **Queue Selection** | Desktop App | Interactive subset and custom ordering of scanned manifest items marked by the user for active execution within the Queue Tracker. | *Checked items, run list, active batch* |
+| **Transcode Governor** | Media Engine | The dynamic calculation mechanism deriving FFmpeg worker thread concurrency from physical CPU core topology and active batch workers (`(total_physical_cores / workers).clamp(1, 4)`). | *Thread scaler, core allocator* |
+| **Zero-Copy Cache Persistence** | Media Engine | Direct-to-disk buffered streaming serialization of persistent inspection cache entries bypassing heap string allocations. | *JSON dumper, cache writer* |
 
 ---
 
@@ -122,7 +124,7 @@ mkvanimebatch/
 ├── AGENTS.md                        # Agent workflow guidelines, CI gates, and review rules
 ├── README.md                        # User guide and CLI/GUI reference
 ├── docs/
-│   ├── adr/                         # Architectural Decision Records (0001 - 0012)
+│   ├── adr/                         # Architectural Decision Records (0001 - 0013)
 │   └── agents/                      # Domain modeling and issue tracker documentation
 ├── crates/
 │   ├── mkv-core/                    # Pure-Rust Core Domain & Batch Processing Engine
@@ -432,7 +434,7 @@ flowchart LR
     Cmds --> Telem
     Cmds --> Win
 
-    Proc -->|spawn_blocking| CoreScan
+    Cmds -->|async .await| CoreScan
     Proc -->|tokio::spawn| CorePipe
 
     CorePipe -->|JobEvent MPSC| Proc
@@ -529,7 +531,7 @@ sequenceDiagram
     User->>UI: Selects Release Directory
     UI->>Cmd: inspect_directory(path, options)
     Cmd->>Proc: Acquire start_lock & register ActiveScan
-    Cmd->>Core: spawn_blocking(input_dir, cache, cancel_token)
+    Cmd->>Core: generate_inspection_manifest(input_dir, cache, cancel_token).await
     Core->>Core: scan_mkv_files(recursive)
     loop For each MKV file
         Core->>Cache: Check FileSignature (size, mtime_ns)
@@ -640,7 +642,7 @@ sequenceDiagram
 
 ## 9. Architectural Decision Records (ADR) Traceability Matrix
 
-The system architecture represents the cumulative implementation of 12 formal Architectural Decision Records:
+The system architecture represents the cumulative implementation of 13 formal Architectural Decision Records:
 
 | ADR | Title | Core Architectural Impact | Primary Code Location |
 | :---: | :--- | :--- | :--- |
@@ -656,6 +658,7 @@ The system architecture represents the cumulative implementation of 12 formal Ar
 | **0010** | Mainline Rust Engine Cutover | Decommissioned legacy Python codebase; established unified 1.0.0 semantic versioning and CI status gate. | Root `Cargo.toml`, `.github/workflows/ci.yml` |
 | **0011** | Selected Items Queue & Concurrency Pipelining | Global Tokio JoinSet, dual-governor I/O semaphore, parallel probing, enriched 1:1 track assignment modal. | `pipeline.rs`, `request.rs`, `app.js` |
 | **0012** | Track Assignment Override Execution and Seam Unification | Unified full TrackAssignment execution into mkvmerge args (offset, language, title); eliminated sub_assignments flattening. | `pipeline.rs`, `remux.rs`, `mkv-cli` |
+| **0013** | Asynchronous Probing and Transcode Governance Performance Overhaul | Asynchronous mkvmerge fallback probing, transcode thread governor, downshifted complexity (5), fine-grained font seeding lock, zero-copy cache serialization. | `scan.rs`, `request.rs`, `fonts.rs`, `pipeline.rs` |
 
 ---
 
