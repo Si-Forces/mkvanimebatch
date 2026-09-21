@@ -305,7 +305,8 @@ async fn run() -> Result<ExitCode, String> {
 
     if args.plan {
         let manifest =
-            generate_inspection_manifest(&args.request.input_dir, cache_opt, Some(&cancel_token))?;
+            generate_inspection_manifest(&args.request.input_dir, cache_opt, Some(&cancel_token))
+                .await?;
         match serde_json::to_string_pretty(&manifest) {
             Ok(json) => {
                 println!("{json}");

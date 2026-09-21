@@ -280,7 +280,7 @@ pub fn extract_mkv_metadata(inspected: Option<&InspectedVideo>) -> InspectionMet
 }
 
 /// Generates a complete preflight inspection manifest for an anime batch directory.
-pub fn generate_inspection_manifest(
+pub async fn generate_inspection_manifest(
     input_dir: &Path,
     persistent_cache: Option<&PersistentInspectCache>,
     cancel_token: Option<&tokio_util::sync::CancellationToken>,
@@ -355,7 +355,7 @@ pub fn generate_inspection_manifest(
         let (inspected, inspection_error) =
             match persistent_cache.and_then(|c| c.get_path(&mkv.path)) {
                 Some(cached) => (Some(InspectedVideo::new(cached)), None),
-                None => match crate::scan::probe_video(&mkv.path) {
+                None => match crate::scan::probe_video(&mkv.path).await {
                     Ok(probed) => {
                         if let Some(cache) = persistent_cache {
                             cache.put_path(&mkv.path, probed.clone());
@@ -604,30 +604,32 @@ mod tests {
         assert!(reserialized.contains("custom_metric"));
     }
 
-    #[test]
-    fn test_generate_inspection_manifest_empty() {
+    #[tokio::test]
+    async fn test_generate_inspection_manifest_empty() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let res = generate_inspection_manifest(temp_dir.path(), None, None).unwrap();
+        let res = generate_inspection_manifest(temp_dir.path(), None, None)
+            .await
+            .unwrap();
         assert_eq!(res.items.len(), 0);
     }
 
-    #[test]
-    fn test_generate_inspection_manifest_cancelled() {
+    #[tokio::test]
+    async fn test_generate_inspection_manifest_cancelled() {
         let temp_dir = tempfile::tempdir().unwrap();
         let token = tokio_util::sync::CancellationToken::new();
         token.cancel();
-        let res = generate_inspection_manifest(temp_dir.path(), None, Some(&token));
+        let res = generate_inspection_manifest(temp_dir.path(), None, Some(&token)).await;
         assert!(res.is_err());
         assert_eq!(res.unwrap_err(), "Inspection cancelled");
     }
 
-    #[test]
-    fn test_generate_inspection_manifest_cancelled_in_loop() {
+    #[tokio::test]
+    async fn test_generate_inspection_manifest_cancelled_in_loop() {
         let temp_dir = tempfile::tempdir().unwrap();
         std::fs::write(temp_dir.path().join("ep01.mkv"), b"dummy content").unwrap();
         let token = tokio_util::sync::CancellationToken::new();
         token.cancel();
-        let res = generate_inspection_manifest(temp_dir.path(), None, Some(&token));
+        let res = generate_inspection_manifest(temp_dir.path(), None, Some(&token)).await;
         assert!(res.is_err());
         assert_eq!(res.unwrap_err(), "Inspection cancelled");
     }

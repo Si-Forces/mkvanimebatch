@@ -155,7 +155,7 @@ impl Default for PipelineConfig {
             workers: 4,
             io_jobs: 2,
             bitrate: "192k".to_string(),
-            complexity: 10,
+            complexity: 5,
             ffmpeg_threads: 2,
             sub_offset: 0.0,
             keep_fonts: false,
@@ -470,7 +470,7 @@ impl BatchPipeline {
                     }
 
                     let cache_opt = if no_cache { None } else { Some(&*task_cache) };
-                    let meta = match get_or_probe_video(&file_path, cache_opt) {
+                    let meta = match get_or_probe_video(&file_path, cache_opt).await {
                         Ok(m) => m,
                         Err(err) => {
                             return (item_id, file_name, Err(err), false, start_instant.elapsed().as_secs_f64());
@@ -731,7 +731,7 @@ impl BatchPipeline {
             probe_set.spawn(async move {
                 let _permit = sem.acquire().await.ok();
                 let cache_ref = if no_cache { None } else { Some(&*cache_clone) };
-                let res = get_or_probe_video(&path, cache_ref);
+                let res = get_or_probe_video(&path, cache_ref).await;
                 (path, res)
             });
         }
