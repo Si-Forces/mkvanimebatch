@@ -152,6 +152,34 @@ impl Default for BatchRequest {
     }
 }
 
+/// Returns the number of physical CPU cores, falling back to hardware concurrency.
+pub fn physical_core_count() -> usize {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(cpuinfo) = std::fs::read_to_string("/proc/cpuinfo") {
+            let mut cores = std::collections::HashSet::new();
+            let mut phys_id = "";
+            for line in cpuinfo.lines() {
+                if let Some(rest) = line.strip_prefix("physical id") {
+                    if let Some((_, id)) = rest.split_once(':') {
+                        phys_id = id.trim();
+                    }
+                } else if let Some(rest) = line.strip_prefix("core id") {
+                    if let Some((_, id)) = rest.split_once(':') {
+                        cores.insert((phys_id, id.trim()));
+                    }
+                }
+            }
+            if !cores.is_empty() {
+                return cores.len();
+            }
+        }
+    }
+    std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(4)
+}
+
 impl BatchRequest {
     /// Synchronously validate the batch request parameters and track assignments
     /// before acquiring any locks or starting execution tasks.
@@ -402,7 +430,8 @@ impl BatchRequest {
             .unwrap_or(4);
         let default_workers = total_cores.clamp(1, 16);
         let workers = self.workers.unwrap_or(default_workers);
-        let default_ffmpeg_threads = (total_cores / workers.max(1)).clamp(1, 4);
+        let physical_cores = physical_core_count();
+        let default_ffmpeg_threads = (physical_cores / workers.max(1)).clamp(1, 4);
 
         let mut config = PipelineConfig {
             mode: self.mode,
@@ -630,10 +659,7 @@ mod tests {
             .unwrap_or(4);
         assert_eq!(config.workers, expected);
         assert_eq!(config.complexity, 5);
-        let total_cores = std::thread::available_parallelism()
-            .map(|p| p.get())
-            .unwrap_or(4);
-        let expected_ffmpeg_threads = (total_cores / expected.max(1)).clamp(1, 4);
+        let expected_ffmpeg_threads = (physical_core_count() / expected.max(1)).clamp(1, 4);
         assert_eq!(config.ffmpeg_threads, expected_ffmpeg_threads);
     }
 
