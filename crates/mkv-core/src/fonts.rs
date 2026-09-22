@@ -57,15 +57,13 @@ pub fn scan_fonts(
     let mut font_args = Vec::new();
     let mut count = 0;
 
+    // Intentionally do not cache negative (non-existent) results: if extraction creates
+    // fonts_dir later in the run, subsequent scans must discover it.
     if !fonts_dir.is_dir() {
-        let info = FontInfo {
+        return FontInfo {
             args: Vec::new(),
             count: 0,
         };
-        if let Some(cache) = &mut font_cache {
-            cache.insert(fonts_dir.to_path_buf(), info.clone());
-        }
-        return info;
     }
 
     let Ok(entries) = fs::read_dir(fonts_dir) else {

@@ -748,3 +748,91 @@ test("job controller aborts start if episodes exist in queue but zero are select
   assert.equal(controller.running, false);
   assert.ok(logs.some(l => l.includes("No episodes selected in queue")));
 });
+
+test("job controller onDone is ignored when jobId is null or not running", t => {
+  const elements = new Map([
+    ["remux-stop", new FakeElement()],
+    ["remux-run", new FakeElement()],
+    ["remux-status", new FakeElement()],
+    ["remux-log", new FakeElement()],
+  ]);
+  const previousDocument = globalThis.document;
+  globalThis.document = {
+    getElementById: id => elements.get(id) ?? null,
+    querySelectorAll: () => [],
+    querySelector: () => null,
+  };
+  t.after(() => { globalThis.document = previousDocument; });
+
+  let finalized = false;
+  const queue = {
+    assignments: new Map(),
+    finalize() { finalized = true; },
+  };
+  const runtime = {
+    coordinator: createJobCoordinator(),
+    queueFor: () => queue,
+    safeAddListener() {},
+    updateWorkerChips() {},
+    telemetryLoop: { setJobActive() {} },
+  };
+  const controller = new JobController("remux", runtime);
+  controller.running = false;
+  controller.jobId = null;
+
+  controller.onDone(0);
+  assert.equal(finalized, false);
+
+  controller.running = true;
+  controller.jobId = null;
+  controller.onDone(0);
+  assert.equal(finalized, false);
+});
+
+test("job controller stop transitions lifecycle to cancelled when aborted before launch", async t => {
+  const elements = new Map([
+    ["remux-stop", new FakeElement()],
+    ["remux-run", new FakeElement()],
+    ["remux-status", new FakeElement()],
+    ["remux-log", new FakeElement()],
+  ]);
+  const previousDocument = globalThis.document;
+  globalThis.document = {
+    getElementById: id => elements.get(id) ?? null,
+    querySelectorAll: () => [],
+    querySelector: () => null,
+  };
+  t.after(() => { globalThis.document = previousDocument; });
+
+  let finalizedCancelled = null;
+  const queue = {
+    assignments: new Map(),
+    finalize(code, cancelled) { finalizedCancelled = cancelled; },
+  };
+  const coordinator = createJobCoordinator();
+  coordinator.begin("remux");
+  let invokedCommand = null;
+  const runtime = {
+    coordinator,
+    appendLog() {},
+    queueFor: () => queue,
+    safeAddListener() {},
+    updateWorkerChips() {},
+    telemetryLoop: { setJobActive() {} },
+    invoke: async (cmd, args) => {
+      invokedCommand = cmd;
+      return null; // Normal successful resolve
+    },
+  };
+
+  const controller = new JobController("remux", runtime);
+  controller.running = true;
+  controller.jobId = null;
+
+  await controller.stop();
+  assert.equal(invokedCommand, "stop_job");
+  assert.equal(controller.lifecycle, "cancelled");
+  assert.equal(finalizedCancelled, true);
+  assert.equal(controller.running, false);
+});
+

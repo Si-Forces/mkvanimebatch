@@ -496,3 +496,56 @@ fn test_truncated_tracks_block_triggers_fallback() {
         ebml_res
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn test_scan_mkv_files_symlink_cycle() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempdir().unwrap();
+    let season = tmp.path().join("Season 1");
+    fs::create_dir(&season).unwrap();
+
+    let mkv = season.join("ep01.mkv");
+    fs::write(&mkv, b"dummy").unwrap();
+
+    let extras = season.join("extras");
+    fs::create_dir(&extras).unwrap();
+    let extra_mkv = extras.join("extra.mkv");
+    fs::write(&extra_mkv, b"dummy").unwrap();
+
+    // Create recursive symlink: Season 1/cycle -> Season 1
+    let cycle = season.join("cycle");
+    let _ = symlink(&season, &cycle);
+
+    // Create duplicate symlink to existing subdir: Season 1/link_extras -> extras
+    let link_extras = season.join("link_extras");
+    let _ = symlink(&extras, &link_extras);
+
+    // scan_mkv_files must terminate without infinite loop and not double-count extra.mkv
+    let results = scan_mkv_files(tmp.path(), true, None);
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].name, "ep01.mkv");
+    assert_eq!(results[1].name, "extra.mkv");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_scan_mkv_files_symlink_file_duplicate() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempdir().unwrap();
+    let mkv = tmp.path().join("ep01.mkv");
+    fs::write(&mkv, b"dummy").unwrap();
+
+    let symlink_mkv = tmp.path().join("ep01_link.mkv");
+    let _ = symlink(&mkv, &symlink_mkv);
+
+    let results = scan_mkv_files(tmp.path(), false, None);
+    assert_eq!(results.len(), 1);
+    assert!(
+        results[0].name == "ep01.mkv" || results[0].name == "ep01_link.mkv",
+        "Unexpected name: {}",
+        results[0].name
+    );
+}

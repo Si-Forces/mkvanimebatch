@@ -7,6 +7,9 @@ authors.workspace = true
 repository.workspace = true
 description = "Core anime fansub batch processing and media engine"
 
+[lints]
+workspace = true
+
 [dependencies]
 regex = "1.10"
 fancy-regex = "0.19"
