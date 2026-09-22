@@ -12,7 +12,7 @@ use crate::scan::{
 
 pub const MANIFEST_VERSION: u64 = 2;
 
-/// Derives a root-relative POSIX path ID for sidecar contract events and manifest items.
+/// Derives a root-relative POSIX path ID for job events and manifest items.
 /// Normalizes backslashes `\` to `/`. If stripped is empty or points to root, returns `"."`.
 pub fn get_item_id(path: &Path, root_dir: &Path) -> String {
     let rel = match path.strip_prefix(root_dir) {

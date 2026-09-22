@@ -79,7 +79,7 @@ fn load_reference_response() -> CrossCheckResponse {
 }
 
 #[test]
-fn test_cross_language_regex_and_domain() {
+fn test_reference_regression() {
     let payload = CrossCheckPayload {
         episodes: vec![
             // Basic dashes
@@ -345,17 +345,17 @@ fn test_cross_language_regex_and_domain() {
         ],
     };
 
-    let py_response = load_reference_response();
+    let reference_response = load_reference_response();
 
     // 1. Verify episode parsing
     let mut mismatches = Vec::new();
     for (i, name) in payload.episodes.iter().enumerate() {
         let rust_res = parse_episode(name).map(ParsedResult::from);
-        let py_res = &py_response.episodes[i];
-        if rust_res != *py_res {
+        let expected = &reference_response.episodes[i];
+        if rust_res != *expected {
             mismatches.push(format!(
-                "Filename: '{name}'\n  Rust:   {:?}\n  Python: {:?}",
-                rust_res, py_res
+                "Filename: '{name}'\n  Rust:   {:?}\n  Expected: {:?}",
+                rust_res, expected
             ));
         }
     }
@@ -363,11 +363,11 @@ fn test_cross_language_regex_and_domain() {
     // 2. Verify sub language detection
     for (i, stem) in payload.sub_stems.iter().enumerate() {
         let rust_res = detect_sub_lang(stem);
-        let py_res = &py_response.sub_stems[i];
-        if rust_res != *py_res {
+        let expected = &reference_response.sub_stems[i];
+        if rust_res != *expected {
             mismatches.push(format!(
-                "Sub stem: '{stem}'\n  Rust:   {:?}\n  Python: {:?}",
-                rust_res, py_res
+                "Sub stem: '{stem}'\n  Rust:   {:?}\n  Expected: {:?}",
+                rust_res, expected
             ));
         }
     }
@@ -375,19 +375,19 @@ fn test_cross_language_regex_and_domain() {
     // 3. Verify safe filename
     for (i, name) in payload.safe_names.iter().enumerate() {
         let rust_res = safe_filename(name);
-        let py_res = &py_response.safe_names[i];
+        let expected_fixture = &reference_response.safe_names[i];
 
-        // On Windows, backslash is the path separator, matching Python's WindowsPath behavior where
-        // `Path(r"foo\bar").name == "bar"` and trailing backslashes are stripped. On POSIX/Linux,
-        // backslash is not a separator, so `PosixPath(r"foo\bar").name == r"foo\bar"`.
+        // On Windows, backslash is a path separator: the final component of `foo\bar` is
+        // `bar` and trailing backslashes are stripped. On POSIX/Linux, backslash is not a
+        // separator, so `foo\bar` remains a single filename.
         #[cfg(windows)]
         let expected = match name.as_str() {
             "foo\\bar" => "bar",
             "/:*?\"<>|\\" => "_______",
-            _ => py_res.as_str(),
+            _ => expected_fixture.as_str(),
         };
         #[cfg(not(windows))]
-        let expected = py_res.as_str();
+        let expected = expected_fixture.as_str();
 
         if rust_res != expected {
             mismatches.push(format!(
@@ -400,11 +400,11 @@ fn test_cross_language_regex_and_domain() {
     // 4. Verify is_dialogue_track
     for (i, name) in payload.track_names.iter().enumerate() {
         let rust_res = is_dialogue_track(Some(name));
-        let py_res = py_response.track_names[i];
-        if rust_res != py_res {
+        let expected = reference_response.track_names[i];
+        if rust_res != expected {
             mismatches.push(format!(
-                "Track name: '{name}'\n  Rust:   {:?}\n  Python: {:?}",
-                rust_res, py_res
+                "Track name: '{name}'\n  Rust:   {:?}\n  Expected: {:?}",
+                rust_res, expected
             ));
         }
     }
@@ -412,11 +412,11 @@ fn test_cross_language_regex_and_domain() {
     // 5. Verify commentary detection
     for (i, name) in payload.commentary_names.iter().enumerate() {
         let rust_res = COMMENTARY_RE.is_match(name);
-        let py_res = py_response.commentary_names[i];
-        if rust_res != py_res {
+        let expected = reference_response.commentary_names[i];
+        if rust_res != expected {
             mismatches.push(format!(
-                "Commentary name: '{name}'\n  Rust:   {:?}\n  Python: {:?}",
-                rust_res, py_res
+                "Commentary name: '{name}'\n  Rust:   {:?}\n  Expected: {:?}",
+                rust_res, expected
             ));
         }
     }
@@ -424,21 +424,21 @@ fn test_cross_language_regex_and_domain() {
     // 6. Verify natural sort ordering
     let mut rust_sorted = payload.sort_inputs.clone();
     rust_sorted.sort_by_key(|s| natural_sort_key(s));
-    if rust_sorted != py_response.sorted_outputs {
+    if rust_sorted != reference_response.sorted_outputs {
         mismatches.push(format!(
-            "Natural sort mismatch:\n  Rust:   {:?}\n  Python: {:?}",
-            rust_sorted, py_response.sorted_outputs
+            "Natural sort mismatch:\n  Rust:   {:?}\n  Expected: {:?}",
+            rust_sorted, reference_response.sorted_outputs
         ));
     }
 
     // 7. Verify chapter XML sniffing
     for (i, sample) in payload.chapter_xml_samples.iter().enumerate() {
         let rust_res = CHAPTER_TAG_RE.is_match(sample.as_bytes());
-        let py_res = py_response.chapter_xml_results[i];
-        if rust_res != py_res {
+        let expected = reference_response.chapter_xml_results[i];
+        if rust_res != expected {
             mismatches.push(format!(
-                "Chapter XML sample: '{sample}'\n  Rust:   {:?}\n  Python: {:?}",
-                rust_res, py_res
+                "Chapter XML sample: '{sample}'\n  Rust:   {:?}\n  Expected: {:?}",
+                rust_res, expected
             ));
         }
     }
@@ -448,11 +448,11 @@ fn test_cross_language_regex_and_domain() {
         let rust_res = COVER_FILE_RE
             .captures(stem)
             .and_then(|c| c.name("stem").map(|m| m.as_str().to_string()));
-        let py_res = &py_response.cover_stem_results[i];
-        if rust_res != *py_res {
+        let expected = &reference_response.cover_stem_results[i];
+        if rust_res != *expected {
             mismatches.push(format!(
-                "Cover stem: '{stem}'\n  Rust:   {:?}\n  Python: {:?}",
-                rust_res, py_res
+                "Cover stem: '{stem}'\n  Rust:   {:?}\n  Expected: {:?}",
+                rust_res, expected
             ));
         }
     }
@@ -468,20 +468,20 @@ fn test_cross_language_regex_and_domain() {
                 Some((num, unit))
             }
         });
-        let py_res = py_response.bitrate_results[i]
+        let expected = reference_response.bitrate_results[i]
             .as_ref()
             .map(|(n, u)| (*n, u.clone()));
-        if rust_res != py_res {
+        if rust_res != expected {
             mismatches.push(format!(
-                "Bitrate string: '{b}'\n  Rust:   {:?}\n  Python: {:?}",
-                rust_res, py_res
+                "Bitrate string: '{b}'\n  Rust:   {:?}\n  Expected: {:?}",
+                rust_res, expected
             ));
         }
     }
 
     if !mismatches.is_empty() {
         panic!(
-            "Cross-language regex/domain mismatches found ({}):\n{}",
+            "Reference regression mismatches found ({}):\n{}",
             mismatches.len(),
             mismatches.join("\n\n")
         );
