@@ -156,9 +156,16 @@ pub async fn extract_mkv_file(
 
     let mut extract_args = vec![mkv_path.to_string_lossy().into_owned()];
 
+    let stage_target = |path: &Path, kind: &str| -> Result<PathBuf, String> {
+        let name = path
+            .file_name()
+            .ok_or_else(|| format!("{kind} target path has no file name: {}", path.display()))?;
+        Ok(temp_dir.path().join(name))
+    };
+
     let mut staged_sub: Option<(PathBuf, PathBuf)> = None;
     if let Some((tid, final_path)) = &sub_target {
-        let staged = temp_dir.path().join(final_path.file_name().unwrap());
+        let staged = stage_target(final_path, "Subtitle")?;
         extract_args.push("tracks".into());
         extract_args.push(format!("{tid}:{}", staged.display()));
         staged_sub = Some((staged, final_path.clone()));
@@ -166,7 +173,7 @@ pub async fn extract_mkv_file(
 
     let mut staged_chapters: Option<(PathBuf, PathBuf)> = None;
     if let Some(final_path) = &chapter_target {
-        let staged = temp_dir.path().join(final_path.file_name().unwrap());
+        let staged = stage_target(final_path, "Chapter")?;
         extract_args.push("chapters".into());
         extract_args.push(staged.to_string_lossy().into_owned());
         staged_chapters = Some((staged, final_path.clone()));
@@ -176,7 +183,7 @@ pub async fn extract_mkv_file(
     if cover_target.is_some() || !font_claims.is_empty() {
         extract_args.push("attachments".into());
         if let Some((aid, final_path)) = &cover_target {
-            let staged = temp_dir.path().join(final_path.file_name().unwrap());
+            let staged = stage_target(final_path, "Cover")?;
             extract_args.push(format!("{aid}:{}", staged.display()));
             staged_cover = Some((staged, final_path.clone()));
         }
