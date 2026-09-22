@@ -7,6 +7,9 @@ authors.workspace = true
 repository.workspace = true
 description = "High-performance batch anime fansub processing desktop application"
 
+[lints]
+workspace = true
+
 [lib]
 name = "mkv_anime_batch_lib"
 crate-type = ["lib"]

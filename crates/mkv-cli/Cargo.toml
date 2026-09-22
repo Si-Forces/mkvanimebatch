@@ -7,6 +7,9 @@ authors.workspace = true
 repository.workspace = true
 description = "CLI adapter for mkv-core batch processing engine"
 
+[lints]
+workspace = true
+
 [dependencies]
 mkv-core = { path = "../mkv-core" }
 serde = { version = "1.0", features = ["derive"] }

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { QueueTracker } from "./queue-view.js";
+import { QueueTracker, escapeAttr } from "./queue-view.js";
 import { createQueueState } from "./queue-state.js";
 
 class FakeElement {
@@ -435,5 +435,13 @@ test("QueueTracker selection and card reordering", t => {
   assert.deepEqual(tracker.getSelectedOrderedItemIds(), ["ep2", "ep1", "ep3"]);
   assert.equal(tracker.cards.get("ep2").badge.textContent, "EPISODE 01");
   assert.equal(tracker.cards.get("ep1").badge.textContent, "EPISODE 02");
+});
+
+test("escapeAttr escapes &, \", ', <, and >", () => {
+  assert.equal(escapeAttr("hello"), "hello");
+  assert.equal(
+    escapeAttr('"><script>alert(1)</script><input attr=\'evil\'&'),
+    '&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;&lt;input attr=&#39;evil&#39;&amp;'
+  );
 });
 

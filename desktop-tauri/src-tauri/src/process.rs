@@ -51,6 +51,22 @@ pub enum ItemStatus {
     Planned,
 }
 
+impl ItemStatus {
+    /// Returns true if the status represents a finished/terminal item outcome.
+    /// Note: `Planned` is a terminal dry-run outcome emitted upon completion
+    /// (pipeline.rs:375, 1040), never a queued or pending state.
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            ItemStatus::Completed
+                | ItemStatus::Skipped
+                | ItemStatus::Error
+                | ItemStatus::Cancelled
+                | ItemStatus::Planned
+        )
+    }
+}
+
 impl From<mkv_core::pipeline::ItemOutcome> for ItemStatus {
     fn from(outcome: mkv_core::pipeline::ItemOutcome) -> Self {
         match outcome {
@@ -264,6 +280,10 @@ impl JobState {
                     ..
                 } => {
                     if let Some(snapshot) = snap.as_mut() {
+                        let already_terminal = snapshot
+                            .items
+                            .get(id)
+                            .is_some_and(|it| it.status.is_terminal());
                         snapshot.items.insert(
                             id.clone(),
                             ItemSnapshot {
@@ -276,7 +296,9 @@ impl JobState {
                                 outcome: Some(*status),
                             },
                         );
-                        snapshot.completed_items += 1;
+                        if !already_terminal {
+                            snapshot.completed_items += 1;
+                        }
                     }
                 }
                 mkv_core::pipeline::JobEvent::BatchComplete {
@@ -682,6 +704,14 @@ mod tests {
                 item.outcome,
                 Some(mkv_core::pipeline::ItemOutcome::Completed)
             );
+        }
+
+        // Duplicate completion event must not increment completed_items beyond 1
+        state.update_snapshot(&item_complete, 10, "remux");
+        {
+            let snap_guard = state.snapshot.lock().unwrap();
+            let snap = snap_guard.as_ref().unwrap();
+            assert_eq!(snap.completed_items, 1);
         }
 
         let batch_complete = mkv_core::pipeline::JobEvent::BatchComplete {

@@ -13,6 +13,15 @@ import {
   toggleItemSelection,
 } from "./queue-state.js";
 
+export function escapeAttr(str) {
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
 // ─── Real-Time Episode Queue & Progress/Duration Tracker ───────────────────
 
 export class QueueTracker {
@@ -321,15 +330,16 @@ export class QueueTracker {
     const codecTag = "MKV";
     const trackTag1 = "Inspecting tracks...";
     const trackTag2 = "Reading headers...";
+    const safeId = escapeAttr(id);
     const subAssignBtn = this.mode === "remux"
-      ? `<button type="button" class="sub-assign-btn" title="Manually assign a subtitle file">+ Sub</button>`
+      ? `<button type="button" class="sub-assign-btn" data-item-id="${safeId}" title="Manually assign a subtitle file">+ Sub</button>`
       : "";
 
-    const checkHtml = `<input type="checkbox" class="ep-select-check" checked data-item-id="${id}" title="Include in batch" />`;
+    const checkHtml = `<input type="checkbox" class="ep-select-check" checked data-item-id="${safeId}" title="Include in batch" />`;
     const reorderHtml = `
       <div class="ep-reorder-group">
-        <button type="button" class="ep-reorder-btn ep-up-btn" data-item-id="${id}" title="Move up">▲</button>
-        <button type="button" class="ep-reorder-btn ep-down-btn" data-item-id="${id}" title="Move down">▼</button>
+        <button type="button" class="ep-reorder-btn ep-up-btn" data-item-id="${safeId}" title="Move up">▲</button>
+        <button type="button" class="ep-reorder-btn ep-down-btn" data-item-id="${safeId}" title="Move down">▼</button>
       </div>
     `;
 
@@ -357,9 +367,17 @@ export class QueueTracker {
     const titleEl = el.querySelector(".ep-title");
     if (titleEl) titleEl.textContent = name;
 
+    const checkEl = el.querySelector(".ep-select-check");
+    if (checkEl) checkEl.dataset.itemId = id;
+
+    const upBtn = el.querySelector(".ep-up-btn");
+    if (upBtn) upBtn.dataset.itemId = id;
+
+    const downBtn = el.querySelector(".ep-down-btn");
+    if (downBtn) downBtn.dataset.itemId = id;
+
     const subBtn = el.querySelector(".sub-assign-btn");
     if (subBtn) subBtn.dataset.itemId = id;
-
     return {
       el,
       id,

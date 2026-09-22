@@ -12,6 +12,9 @@ authors = ["sifahaz"]
 license = "MIT"
 repository = "https://github.com/sifahaz/mkvanimebatch"
 
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
 [profile.dev]
 incremental = true
 

@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
 use crate::domain::{
-    ep_type_label, parse_episode, promote_file, read_progress_stream, select_best_subtitle_track,
-    EpisodeInfo, COVER_EXTENSIONS, SUBPROCESS_TIMEOUT,
+    ep_type_label, parse_episode, promote_file, read_progress_stream, safe_filename,
+    select_best_subtitle_track, EpisodeInfo, COVER_EXTENSIONS, SUBPROCESS_TIMEOUT,
 };
 use crate::fonts::{FontClaimsGuard, FontRegistry};
 use crate::scan::InspectedVideo;
@@ -41,10 +41,10 @@ pub fn select_subtitle_for_extraction(
     let (track_id, language, _) = result?;
 
     let ep_suffix = episode_suffix(parsed, file_stem);
+    let safe_lang = safe_filename(&language);
     let sub_path = file_dir.join(format!(
-        "{file_stem}_{ep_suffix}_{language}_track{track_id}.ass"
+        "{file_stem}_{ep_suffix}_{safe_lang}_track{track_id}.ass"
     ));
-
     Some((track_id, sub_path))
 }
 
@@ -215,7 +215,7 @@ pub async fn extract_mkv_file(
         }
         stderr_bytes
     });
-
+    let stderr_abort = stderr_handle.abort_handle();
     let execution = async {
         let mut stdout_bytes = Vec::new();
         if let Some(out_stream) = stdout {
@@ -233,10 +233,14 @@ pub async fn extract_mkv_file(
         match tokio::time::timeout(SUBPROCESS_TIMEOUT, execution).await {
             Ok(res) => res?,
             Err(_) => {
+                stderr_abort.abort();
+                if let Some((staged, _)) = staged_cover {
+                    let _ = std::fs::remove_file(staged);
+                }
                 return Err(format!(
                     "mkvextract timed out after {} seconds",
                     SUBPROCESS_TIMEOUT.as_secs()
-                ))
+                ));
             }
         };
 
