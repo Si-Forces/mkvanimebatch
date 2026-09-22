@@ -45,6 +45,7 @@ Available both as a standalone native **CLI binary (`mkv-cli`)** and as a self-c
 * **Dialogue Priority**: Automatically scores audio tracks, favoring Japanese stereo and multi-channel audio tracks.
 * **Commentary Track Isolation**: Isolates commentary tracks into a secondary fallback pool, ensuring commentary never overrides dialogue.
 * **Preset Profiles**: Configurable Preset Profiles (`balanced`, `fast`, `hifi`, `custom`) targeting high-quality Opus encoding via FFmpeg.
+* **Automatic Thread Governance**: Per-job FFmpeg threads default to `auto`, derived from physical CPU topology (`/proc/cpuinfo` on Linux) as `(cores / workers)` clamped to 1–4, preventing core oversubscription (ADR-0013).
 
 ### Transactional Font Registry & Asset Deduplication
 * **Embedded Font Detection**: Identifies font attachments by MIME type and filename extensions before transactional extraction.
@@ -105,8 +106,14 @@ Download `mkv-cli` from [GitHub Releases](https://github.com/sifahaz/mkvanimebat
 # Inspect a series directory and generate structured Manifest v2 JSON
 ./mkv-cli --input-dir "/path/to/anime/series" --plan
 
+# Plan inspection manifest filtered to specific episodes
+./mkv-cli --input-dir "/path/to/anime/series" --selected-item "[Group] Show - 01 [1080p, AAC].mkv" --plan
+
 # Dry-run batch remuxing simulation (validates tracks without modifying files)
 ./mkv-cli --input-dir "/path/to/anime/series" --dry-run
+
+# Batch remux selected episodes with Opus audio conversion
+./mkv-cli --input-dir "/path/to/anime/series" --selected-items "01.mkv, 02.mkv" --preset balanced
 
 # Batch remux episodes with Opus audio conversion and custom output directory
 ./mkv-cli --input-dir "/path/to/anime/series" --out-dir "/path/to/output" --preset balanced
@@ -124,16 +131,22 @@ Download `mkv-cli` from [GitHub Releases](https://github.com/sifahaz/mkvanimebat
 | :--- | :--- | :--- |
 | `--input-dir <DIR>` | Source directory containing anime video releases | *Required* |
 | `--out-dir <DIR>` | Destination output directory for processed files | Remux: `<input-dir>/Output`<br>Extract: MKV directory |
+| `--fonts-dir <DIR>` | Explicit fonts directory override | None (auto-discovered) |
+| `--assets-dir <DIR>` | Fallback directory for external subtitle/chapter/cover assets | None |
 | `--preset <PROFILE>` | Named preset profile (`balanced`, `fast`, `hifi`, `custom`) | `balanced` |
 | `--assignments <FILE>` | Path to JSON file mapping episode IDs to track paths | None |
+| `--sub-assignments <FILE>` | Deprecated alias for `--assignments` | None |
+| `--selected-item <PATH>` | Select a specific video file to process (repeatable, literal path; safe for filenames with commas) | None (all discovered files) |
+| `--selected-items <LIST>` | Comma-separated list of video files to process (repeatable, trims whitespace) | None (all discovered files) |
 | `--sub-offset <SEC>` | Subtitle timestamp sync offset in seconds (e.g. `1.5`, `-0.5`) | `0.0` |
-| `--workers <N>` | Number of concurrent worker tasks | `4` |
-| `--io-jobs <N>` | Bounded disk I/O jobs concurrency limit (`0` for unbounded) | `2` |
-| `--ffmpeg-threads <N>` | CPU threads allocated per audio transcode job | `2` |
-| `--bitrate <RATE>` | Opus audio transcoding bitrate (e.g. `128k`, `192k`) | Profile default |
-| `--complexity <0-10>` | Opus compression complexity level | Profile default |
-| `--keep-fonts` | Retain extracted fonts directory | `false` |
+| `--workers <N>` | Number of concurrent worker tasks (1–64) | Auto: physical cores clamped to 1–16 |
+| `--io-jobs <N>` | Bounded disk I/O jobs concurrency limit (`0` for unbounded, max 64) | `2` |
+| `--ffmpeg-threads <N\|auto>` | CPU threads allocated per audio transcode job (1–32) | `auto`: `(physical_cores / workers)` clamped to 1–4 |
+| `--bitrate <RATE>` | Opus audio transcoding bitrate (e.g. `128k`, `192k`) | CLI/preset default `192k` |
+| `--complexity <0-10>` | Opus compression complexity level | Default `5` (`10` on `hifi`) |
+| `--keep-fonts` | Retain extracted fonts directory | `false` (`true` on `balanced`/`hifi` presets) |
 | `--extract` | Run batch extraction instead of remuxing | `false` |
+| `--remux` | Run batch remuxing (default mode; also default unless invoked as `mkv-extract`) | `true` |
 | `--plan` | Output Manifest v2 JSON for directory and exit | `false` |
 | `--dry-run` | Simulate batch processing without executing remux commands | `false` |
 | `--events` | Emit machine-readable NDJSON events (`@event: {...}`) | `false` |
@@ -143,9 +156,10 @@ Download `mkv-cli` from [GitHub Releases](https://github.com/sifahaz/mkvanimebat
 
 ### 3. Concurrency & Performance Tuning
 
-* **`--workers`**: Governs overall concurrency (number of episodes in flight).
-* **`--io-jobs`**: Enforces a strict disk I/O semaphore. Keeping `--io-jobs 2` prevents head thrashing on spinning hard drives (HDDs), while SSD/NVMe drives can scale to `4`–`8`.
-* **`--ffmpeg-threads`**: Allocates CPU cores per transcode task, avoiding CPU exhaustion when running concurrent audio conversions.
+* **`--workers`**: Governs overall concurrency (number of episodes in flight). Defaults to physical core count clamped to 1–16 (see `crates/mkv-core/src/cpu.rs`).
+* **`--io-jobs`**: Enforces a strict disk I/O semaphore. Keeping `--io-jobs 2` prevents head thrashing on spinning hard drives (HDDs), while SSD/NVMe drives can scale to `4`–`8`. `0` means unbounded.
+* **`--ffmpeg-threads`**: Defaults to `auto`, deriving per-job threads from CPU topology as `(physical_cores / workers)` clamped to 1–4 (ADR-0013). Set an explicit value to override the governor.
+* **Queue Scoping & Ordering**: Specifying `--selected-item` or `--selected-items` restricts execution to the selected episodes in the exact specified order, running up to `--workers` concurrently across the active selection (ADR-0011, ADR-0014).
 
 ---
 
@@ -217,7 +231,7 @@ cargo tauri build
 └─────────────────────────────────────────────────────────────┘
 ```
 
-See the architecture decision records in `docs/adr/` for complete architectural rationale:
+See the architecture decision records in `docs/adr/` (0001–0014) for complete architectural rationale:
 - [ADR-0005: Rust Engine Migration & Workspace Topology](docs/adr/0005-rust-engine-migration-and-workspace-topology.md)
 - [ADR-0006: Hybrid EBML Probing & Channel Streaming](docs/adr/0006-hybrid-ebml-probing-and-channel-streaming.md)
 - [ADR-0007: In-Process Engine Bridge & Sidecar Retirement](docs/adr/0007-in-process-engine-bridge.md)
@@ -226,6 +240,8 @@ See the architecture decision records in `docs/adr/` for complete architectural 
 - [ADR-0010: Mainline Rust Engine Cutover & Python Decommissioning](docs/adr/0010-mainline-rust-cutover-and-python-decommissioning.md)
 - [ADR-0011: Selected Items Queue & Concurrency Pipelining](docs/adr/0011-selected-items-queue-and-concurrency-pipelining.md)
 - [ADR-0012: Track Assignment Override Execution & Seam Unification](docs/adr/0012-track-assignment-override-execution-and-seam-unification.md)
+- [ADR-0013: Asynchronous Probing and Transcode Governance Performance Overhaul](docs/adr/0013-asynchronous-probing-and-transcode-governance-performance-overhaul.md)
+- [ADR-0014: CLI Selected Items Execution and Manifest Filtering](docs/adr/0014-cli-selected-items-execution-and-manifest-filtering.md)
 
 ---
 
@@ -259,15 +275,15 @@ mkvanimebatch/
 ├── AGENTS.md                # Agent guidelines & CI commit gate rules
 ├── crates/
 │   ├── mkv-core/            # Standalone media engine library crate
-│   │   ├── src/             # EBML parsing, domain heuristics, fonts, pipeline
-│   │   └── tests/           # 140+ unit and integration tests
+│   │   ├── src/             # EBML parsing, CPU topology, domain heuristics, fonts, pipeline
+│   │   └── tests/           # 8 integration suites (assets, domain, scan, remux, extract, fonts, pipeline, cross-regex)
 │   └── mkv-cli/             # Standalone CLI binary adapter
 │       └── src/             # CLI argument parsing, smoke validation
 ├── desktop-tauri/           # Desktop GUI application
-│   ├── ui/                  # Web frontend (Liquid Glass UI, Queue Tracker, tests)
+│   ├── ui/                  # Web frontend (Liquid Glass UI, Queue Tracker, 9 Node test suites)
 │   └── src-tauri/           # In-process Tauri Engine Bridge & telemetry
 ├── docs/
-│   └── adr/                 # System Architecture Decision Records (0001 - 0012)
+│   └── adr/                 # System Architecture Decision Records (0001 - 0014)
 └── .github/
     └── workflows/           # Consolidated CI matrix & Release workflows
 ```

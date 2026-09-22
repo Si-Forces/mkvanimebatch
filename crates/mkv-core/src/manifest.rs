@@ -1,5 +1,4 @@
-use std::collections::BTreeMap;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -164,6 +163,57 @@ pub struct InspectionManifest {
     pub items: Vec<ManifestItem>,
     #[serde(default, flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+impl InspectionManifest {
+    /// Filters and reorders items strictly matching the provided `selected_items`.
+    ///
+    /// Items can be matched by raw `item.id` or by its cleaned relative path representation.
+    /// Deduplicates items if multiple selectors resolve to the same item ID.
+    /// Prunes `subtitle_candidates` to only retain releases represented in the retained items.
+    pub fn filter_selected(&self, selected_items: &[String]) -> InspectionManifest {
+        let mut item_map: HashMap<String, &ManifestItem> =
+            HashMap::with_capacity(self.items.len() * 2);
+        for item in &self.items {
+            let clean = crate::request::clean_relative_path(&item.id);
+            item_map.insert(clean, item);
+            item_map.insert(item.id.clone(), item);
+        }
+
+        let mut filtered_items = Vec::with_capacity(selected_items.len());
+        let mut seen = HashSet::new();
+
+        for selected in selected_items {
+            let clean_selected = crate::request::clean_relative_path(selected);
+            if let Some(&item) = item_map
+                .get(clean_selected.as_str())
+                .or_else(|| item_map.get(selected.as_str()))
+            {
+                if seen.insert(item.id.as_str()) {
+                    filtered_items.push(item.clone());
+                }
+            }
+        }
+
+        let active_releases: HashSet<&str> = filtered_items
+            .iter()
+            .map(|item| item.release.as_str())
+            .collect();
+
+        let filtered_subtitles: BTreeMap<String, Vec<String>> = self
+            .subtitle_candidates
+            .iter()
+            .filter(|(rel, _)| active_releases.contains(rel.as_str()))
+            .map(|(rel, subs)| (rel.clone(), subs.clone()))
+            .collect();
+
+        InspectionManifest {
+            version: self.version,
+            subtitle_candidates: filtered_subtitles,
+            items: filtered_items,
+            extra: self.extra.clone(),
+        }
+    }
 }
 
 /// Extracts summarized video inspection metadata from an `InspectedVideo`.
@@ -637,5 +687,115 @@ mod tests {
         let res = generate_inspection_manifest(temp_dir.path(), None, Some(&token)).await;
         assert!(res.is_err());
         assert_eq!(res.unwrap_err(), "Inspection cancelled");
+    }
+
+    fn make_test_item(id: &str, name: &str, release: &str) -> ManifestItem {
+        ManifestItem {
+            id: id.to_string(),
+            name: name.to_string(),
+            release: release.to_string(),
+            metadata: InspectionMetadata::default(),
+            inspection_error: None,
+            extra: Default::default(),
+        }
+    }
+
+    #[test]
+    fn test_filter_selected_reorders_and_filters_items() {
+        let mut subtitle_candidates = BTreeMap::new();
+        subtitle_candidates.insert("Show".to_string(), vec!["sub.ass".to_string()]);
+
+        let items = vec![
+            make_test_item("ep01.mkv", "Episode 1", "Show"),
+            make_test_item("ep02.mkv", "Episode 2", "Show"),
+            make_test_item("ep03.mkv", "Episode 3", "Show"),
+        ];
+
+        let mut extra = serde_json::Map::new();
+        extra.insert("custom_key".to_string(), serde_json::Value::Bool(true));
+
+        let manifest = InspectionManifest {
+            version: MANIFEST_VERSION,
+            subtitle_candidates,
+            items,
+            extra,
+        };
+
+        // Select ep03 and ep01 in reverse order, using cleaned path for ep03
+        let selected = vec!["./ep03.mkv".to_string(), "ep01.mkv".to_string()];
+        let filtered = manifest.filter_selected(&selected);
+
+        assert_eq!(filtered.items.len(), 2);
+        assert_eq!(filtered.items[0].id, "ep03.mkv");
+        assert_eq!(filtered.items[1].id, "ep01.mkv");
+        assert_eq!(filtered.version, MANIFEST_VERSION);
+        assert_eq!(
+            filtered.subtitle_candidates.get("Show").unwrap(),
+            &vec!["sub.ass".to_string()]
+        );
+        assert_eq!(
+            filtered.extra.get("custom_key"),
+            Some(&serde_json::Value::Bool(true))
+        );
+    }
+
+    #[test]
+    fn test_filter_selected_prunes_subtitle_candidates() {
+        let mut subtitle_candidates = BTreeMap::new();
+        subtitle_candidates.insert("Season 1".to_string(), vec!["s1.ass".to_string()]);
+        subtitle_candidates.insert("Season 2".to_string(), vec!["s2.ass".to_string()]);
+
+        let items = vec![
+            make_test_item("season1/ep01.mkv", "S1E01", "Season 1"),
+            make_test_item("season2/ep01.mkv", "S2E01", "Season 2"),
+        ];
+
+        let manifest = InspectionManifest {
+            version: MANIFEST_VERSION,
+            subtitle_candidates,
+            items,
+            extra: Default::default(),
+        };
+
+        // Select only item from Season 2
+        let selected = vec!["season2/ep01.mkv".to_string()];
+        let filtered = manifest.filter_selected(&selected);
+
+        assert_eq!(filtered.items.len(), 1);
+        assert_eq!(filtered.items[0].id, "season2/ep01.mkv");
+        assert!(!filtered.subtitle_candidates.contains_key("Season 1"));
+        assert_eq!(
+            filtered.subtitle_candidates.get("Season 2").unwrap(),
+            &vec!["s2.ass".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_filter_selected_deduplicates_duplicate_keys() {
+        let items = vec![
+            make_test_item("ep01.mkv", "Episode 1", "Show"),
+            make_test_item("ep02.mkv", "Episode 2", "Show"),
+        ];
+
+        let manifest = InspectionManifest {
+            version: MANIFEST_VERSION,
+            subtitle_candidates: BTreeMap::new(),
+            items,
+            extra: Default::default(),
+        };
+
+        // Select ep01 multiple times (both exact and with relative path prefix), and ep02
+        let selected = vec![
+            "ep01.mkv".to_string(),
+            "./ep01.mkv".to_string(),
+            "ep01.mkv".to_string(),
+            "ep02.mkv".to_string(),
+            "ep01.mkv".to_string(),
+        ];
+        let filtered = manifest.filter_selected(&selected);
+
+        assert_eq!(filtered.items.len(), 2);
+        assert_eq!(filtered.items[0].id, "ep01.mkv");
+        assert_eq!(filtered.items[1].id, "ep02.mkv");
     }
 }

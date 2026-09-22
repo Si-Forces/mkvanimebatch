@@ -124,7 +124,7 @@ mkvanimebatch/
 ├── AGENTS.md                        # Agent workflow guidelines, CI gates, and review rules
 ├── README.md                        # User guide and CLI/GUI reference
 ├── docs/
-│   ├── adr/                         # Architectural Decision Records (0001 - 0013)
+│   ├── adr/                         # Architectural Decision Records (0001 - 0014)
 │   └── agents/                      # Domain modeling and issue tracker documentation
 ├── crates/
 │   ├── mkv-core/                    # Pure-Rust Core Domain & Batch Processing Engine
@@ -133,8 +133,9 @@ mkvanimebatch/
 │   │   ├── src/
 │   │   │   ├── lib.rs               # Library root re-exports
 │   │   │   ├── domain.rs            # Episode parsing, natural sort, track scoring, atomic file promotion
+│   │   │   ├── cpu.rs               # Physical core topology (/proc/cpuinfo) & transcode thread governor
 │   │   │   ├── ebml.rs              # Lightweight native EBML/Matroska container parser
-│   │   │   ├── scan.rs              # Asset discovery, video inspection, and PersistentInspectCache
+│   │   │   ├── scan.rs              # Asset discovery, video inspection, symlink-aware traversal, PersistentInspectCache
 │   │   │   ├── assets.rs            # AssetResolver, SubIndex, ChapterIndex, CoverIndex, ancestor traversal
 │   │   │   ├── fonts.rs             # FontRegistry, BLAKE2b deduplication, FontHashMemo, transactional staging
 │   │   │   ├── manifest.rs          # Preflight InspectionManifest generation and metadata summarization
@@ -143,8 +144,8 @@ mkvanimebatch/
 │   │   │   ├── remux.rs             # FFmpeg Opus transcoding, ASS sync shifting, mkvmerge execution
 │   │   │   ├── extract.rs           # mkvextract invocation for subtitles, chapters, covers, and fonts
 │   │   │   └── pipeline.rs          # BatchPipeline orchestration, tokio JoinSet, dual-channel streaming
-│   │   ├── benches/                 # Performance benchmarks (pipeline, inspection, validation)
-│   │   └── tests/                   # Comprehensive integration test suites
+│   │   ├── benches/                 # bench_pipeline.rs (validation throughput, dry-run, font dedup, event streaming)
+│   │   └── tests/                   # 8 integration suites: test_assets, test_cross_regex, test_domain, test_extract, test_fonts, test_pipeline, test_remux, test_scan
 │   └── mkv-cli/                     # Headless Standalone CLI Binary
 │       ├── Cargo.toml
 │       └── src/
@@ -333,8 +334,8 @@ The remux subsystem translates high-level planned jobs into optimized external t
    - When an audio stream is lossless FLAC (`A_FLAC`), the engine invokes `ffmpeg` with `libopus`:
      - Rate Control: Variable Bitrate (`-vbr on`)
      - Bitrate: Configured by `PresetProfile` or `--bitrate` override (e.g. `192k`)
-     - Compression Complexity: `0-10` (e.g. `5` for Balanced, `10` for HiFi)
-     - Threading: Configurable worker threads (`-threads N`)
+     - Compression Complexity: `0-10` (`5` default, `10` on HiFi; ADR-0013 downshifted the default from 10, saving ~40% CPU per episode)
+     - Threading: defaults to `auto` via the transcode governor (`cpu::transcode_governor_threads`: `(physical_cores / workers).clamp(1, 4)`); explicit `--ffmpeg-threads N` overrides it
      - Timeout: Guarded by 30-minute subprocess timeout (`SUBPROCESS_TIMEOUT`)
 2. **Subtitle Synchronization**:
    - Subtitle time shifts (`offset_ms` or global `sub_offset`) are applied via `mkvmerge --sync <track_id>:<offset_ms>`.
@@ -446,7 +447,7 @@ flowchart LR
 
 ### 5.1 In-Process Engine Bridge & Process Lifecycle (`process.rs`)
 
-The legacy Python PyInstaller sidecar architecture was superseded by the **in-process Engine Bridge** (ADR-0007, ADR-0008):
+The legacy Python PyInstaller sidecar architecture was superseded by the **in-process Engine Bridge** (ADR-0007, ADR-0008). Exposed Tauri commands: `inspect_directory`, `run_job`, `stop_job`, `clear_cache`, `pick_directory`, `pick_subtitle_file`, `get_preset_profiles`, `get_job_snapshot`, `get_system_telemetry`, plus window controls (`minimize_window`, `toggle_maximize`, `is_maximized`, `start_drag`, `start_resize`, `set_window_theme`) and shutdown orchestration (`begin_shutdown`, `cancel_shutdown`, `close_window`, `cleanup_owned_processes`).
 
 1. **Zero-IPC Overhead**: The Media Engine runs directly inside the desktop process. Communication uses in-memory Tokio MPSC channels rather than OS pipes or NDJSON streams.
 2. **Job Slot Arbitration & Panic Isolation**:
@@ -509,7 +510,9 @@ The `mkv-cli` crate provides headless automation for servers, continuous integra
    - **Preflight Planning (`--plan`)**: Generates and outputs the `InspectionManifest` JSON without performing modifications.
    - **NDJSON Stream (`--events`)**: Emits machine-readable lifecycle events prefixed with `@event: <json>` to stdout, enabling integration with external orchestrators.
 3. **CLI Arguments Contract**:
-   - Maps flags directly to `BatchRequest`: `--input-dir`, `--out-dir`, `--fonts-dir`, `--assets-dir`, `--preset`, `--bitrate`, `--complexity`, `--sub-offset`, `--workers`, `--io-jobs`, `--keep-fonts`, `--assignments`, and `--selected-items`.
+   - Maps flags directly to `BatchRequest`: `--input-dir`, `--out-dir`, `--fonts-dir`, `--assets-dir`, `--preset`, `--bitrate`, `--complexity`, `--sub-offset`, `--workers` (default: physical cores clamped 1–16), `--io-jobs`, `--ffmpeg-threads` (`auto` governor default), `--keep-fonts`, `--assignments` (plus deprecated `--sub-assignments` alias), `--selected-item`, `--selected-items`, `--dry-run`, `--no-cache`, `--clear-cache`, `--plan`, `--events`, `--extract` / `--remux`.
+   - `selected_items` queue scoping is supported via `--selected-item <PATH>` (repeatable, literal path without comma splitting, safe for anime filenames with commas) and `--selected-items <LIST>` (repeatable, comma-delimited with trimmed whitespace). Paths are normalized relative to `input_dir` with CWD-aware fallback, rejecting paths outside `input_dir`. In `--plan` mode, selected items filter the emitted `InspectionManifest` via `InspectionManifest::filter_selected()`.
+   - Fail-fast boundary validation (`workers` 1–64, `io_jobs` 0–64, `ffmpeg_threads` 1–32, `complexity` 0–10, bitrate format) is deferred to `BatchRequest::validate()` at runtime.
 
 ---
 
@@ -636,6 +639,7 @@ sequenceDiagram
 | **Inspection Caching** | Persistent mtime/size keyed cache | `~0.05ms` cache hit lookup |
 | **Font Extraction** | BLAKE2b deduplication + transactional claims | Eliminates up to 90% redundant font writes |
 | **Disk Contention** | Dual-governor `io_semaphore` throttling | Zero disk head thrashing on spinning disks or high-load SSDs |
+| **Transcode Oversubscription** | `cpu::transcode_governor_threads` auto-derivation | Per-job threads `(cores/workers)` clamped 1–4; complexity 5 saves ~40% CPU vs 10 |
 | **UI Responsiveness** | In-process channels + centralized heartbeat | Constant 60 FPS UI rendering; zero DOM timer thrashing |
 
 ---
@@ -671,7 +675,7 @@ Development and contribution workflows must satisfy rigorous quality gates enfor
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 
-# 2. Rust Workspace Test Execution (140+ unit and integration tests)
+# 2. Rust Workspace Test Execution (230+ unit and integration tests across mkv-core, mkv-cli, and desktop-tauri)
 cargo test --workspace
 
 # 3. Frontend UI Syntax & Contract Verification

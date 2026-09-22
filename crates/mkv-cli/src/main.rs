@@ -1,11 +1,11 @@
 //! CLI adapter for mkv-core batch processing engine.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use mkv_core::manifest::generate_inspection_manifest;
 use mkv_core::pipeline::{create_event_channel, BatchPipeline, CancellationToken, PipelineMode};
-use mkv_core::request::{parse_assignments_json, BatchRequest};
+use mkv_core::request::{clean_relative_path, parse_assignments_json, BatchRequest};
 use mkv_core::scan::PersistentInspectCache;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -65,6 +65,7 @@ where
     let mut has_input_dir = false;
     let mut assignments_path: Option<PathBuf> = None;
 
+    let mut raw_selected_items: Vec<String> = Vec::new();
     let mut it = raw_args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -76,6 +77,25 @@ where
                 let val = it.next().ok_or("Missing value for --input-dir")?;
                 request.input_dir = PathBuf::from(val);
                 has_input_dir = true;
+            }
+            "--selected-item" => {
+                let val = it.next().ok_or("Missing value for --selected-item")?;
+                if val.trim().is_empty() {
+                    return Err("Cannot specify empty --selected-item".to_string());
+                }
+                raw_selected_items.push(val.to_string());
+            }
+            "--selected-items" => {
+                let val = it.next().ok_or("Missing value for --selected-items")?;
+                let segments: Vec<String> = val
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if segments.is_empty() {
+                    return Err("Cannot specify empty --selected-items".to_string());
+                }
+                raw_selected_items.extend(segments);
             }
             "--out-dir" => {
                 let val = it.next().ok_or("Missing value for --out-dir")?;
@@ -180,6 +200,24 @@ where
         let assignments = parse_assignments_json(&content)?;
         request.assignments = Some(assignments);
     }
+    if !raw_selected_items.is_empty() {
+        if !has_input_dir {
+            return Err(
+                "Cannot specify --selected-item or --selected-items without --input-dir"
+                    .to_string(),
+            );
+        }
+        let mut normalized_items: Vec<String> = Vec::new();
+        for raw in &raw_selected_items {
+            if raw.trim().is_empty() {
+                continue;
+            }
+            if let Some(norm) = normalize_selected_item(raw, &request.input_dir)? {
+                normalized_items.push(norm);
+            }
+        }
+        request.selected_items = Some(normalized_items);
+    }
 
     Ok(CliArgs {
         request,
@@ -189,6 +227,155 @@ where
         help,
         has_input_dir,
     })
+}
+fn escapes_input_dir(input_dir: &Path, rel: &Path) -> bool {
+    if let (Ok(canon_in), Ok(canon_target)) = (
+        std::fs::canonicalize(input_dir),
+        std::fs::canonicalize(input_dir.join(rel)),
+    ) {
+        return canon_target.strip_prefix(&canon_in).is_err();
+    }
+
+    let mut depth: isize = 0;
+    for comp in rel.components() {
+        match comp {
+            std::path::Component::ParentDir => {
+                depth -= 1;
+                if depth < 0 {
+                    return true;
+                }
+            }
+            std::path::Component::Normal(_) => {
+                depth += 1;
+            }
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                return true;
+            }
+            std::path::Component::CurDir => {}
+        }
+    }
+    false
+}
+
+fn normalize_selected_item(raw: &str, input_dir: &Path) -> Result<Option<String>, String> {
+    if raw.trim().is_empty() {
+        return Ok(None);
+    }
+    let path = Path::new(raw);
+
+    // Direct prefix match: covers both absolute paths and relative paths matching input_dir
+    if let Ok(rel) = path.strip_prefix(input_dir) {
+        return Ok(Some(clean_relative_path(&rel.to_string_lossy())));
+    }
+
+    let canon_in = std::fs::canonicalize(input_dir).ok();
+    if let Some(canon_in) = &canon_in {
+        if let Ok(rel) = path.strip_prefix(canon_in) {
+            return Ok(Some(clean_relative_path(&rel.to_string_lossy())));
+        }
+    }
+
+    if path.is_absolute() {
+        if let Some(canon_in) = &canon_in {
+            if let Ok(canon_path) = std::fs::canonicalize(path) {
+                if let Ok(rel) = canon_path.strip_prefix(canon_in) {
+                    return Ok(Some(clean_relative_path(&rel.to_string_lossy())));
+                }
+            } else if let Some(parent) = path.parent() {
+                if let Ok(canon_parent) = std::fs::canonicalize(parent) {
+                    if let Ok(rel_parent) = canon_parent.strip_prefix(canon_in) {
+                        let file_name = path.file_name().unwrap_or_default();
+                        let clean =
+                            clean_relative_path(&rel_parent.join(file_name).to_string_lossy());
+                        return Ok(Some(clean));
+                    }
+                }
+            }
+        }
+        return Err(format!(
+            "Selected item '{raw}' is outside input directory '{}'",
+            input_dir.display()
+        ));
+    }
+
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+        && escapes_input_dir(input_dir, path)
+    {
+        return Err(format!(
+            "Selected item '{raw}' is outside input directory '{}'",
+            input_dir.display()
+        ));
+    }
+
+    let target = input_dir.join(path);
+    if target.exists() {
+        if let Some(canon_in) = &canon_in {
+            if let Ok(canon_target) = std::fs::canonicalize(&target) {
+                if let Ok(rel) = canon_target.strip_prefix(canon_in) {
+                    return Ok(Some(clean_relative_path(&rel.to_string_lossy())));
+                }
+                return Err(format!(
+                    "Selected item '{raw}' is outside input directory '{}'",
+                    input_dir.display()
+                ));
+            }
+        }
+        Ok(Some(clean_relative_path(
+            &path.to_string_lossy().replace('\\', "/"),
+        )))
+    } else if let Ok(cwd) = std::env::current_dir() {
+        let cwd_path = cwd.join(path);
+        if cwd_path.exists() {
+            if let (Ok(canon_cwd), Some(canon_in)) = (std::fs::canonicalize(&cwd_path), &canon_in) {
+                if let Ok(rel) = canon_cwd.strip_prefix(canon_in) {
+                    return Ok(Some(clean_relative_path(&rel.to_string_lossy())));
+                }
+            }
+            Err(format!(
+                "Selected item '{raw}' is outside input directory '{}'",
+                input_dir.display()
+            ))
+        } else {
+            Ok(Some(clean_relative_path(
+                &path.to_string_lossy().replace('\\', "/"),
+            )))
+        }
+    } else {
+        Ok(Some(clean_relative_path(
+            &path.to_string_lossy().replace('\\', "/"),
+        )))
+    }
+}
+
+async fn generate_plan_manifest(
+    args: &CliArgs,
+    cache: Option<&PersistentInspectCache>,
+    cancel_token: Option<&CancellationToken>,
+) -> Result<mkv_core::manifest::InspectionManifest, String> {
+    let mut manifest =
+        generate_inspection_manifest(&args.request.input_dir, cache, cancel_token).await?;
+    if let Some(selected) = &args.request.selected_items {
+        manifest = manifest.filter_selected(selected);
+        if manifest.items.is_empty() && !selected.is_empty() {
+            return Err(
+                "None of the selected items matched any discovered MKV files in the input directory"
+                    .into(),
+            );
+        }
+    }
+    Ok(manifest)
+}
+
+async fn generate_plan_json(
+    args: &CliArgs,
+    cache: Option<&PersistentInspectCache>,
+    cancel_token: Option<&CancellationToken>,
+) -> Result<String, String> {
+    let manifest = generate_plan_manifest(args, cache, cancel_token).await?;
+    serde_json::to_string_pretty(&manifest)
+        .map_err(|e| format!("Failed to serialize manifest: {e}"))
 }
 
 fn print_help() {
@@ -202,6 +389,8 @@ OPTIONS:
     --input-dir <DIR>          Source directory containing anime video releases
     --out-dir <DIR>            Destination output directory for processed files
     --preset <PROFILE>         Preset profile (balanced, fast, hifi, custom)
+    --selected-item <PATH>     Include a single release item (repeatable, preserves commas)
+    --selected-items <LIST>    Include comma-separated release items (repeatable)
     --assignments <FILE>       Path to JSON file mapping episode IDs to track paths
     --sub-assignments <FILE>   [Deprecated: use --assignments] Path to TrackAssignment JSON
     --fonts-dir <DIR>          Explicit fonts directory override
@@ -212,7 +401,7 @@ OPTIONS:
     --dry-run                  Simulate batch processing without executing remux commands
     --bitrate <RATE>           Opus audio transcoding bitrate (default: 192k)
     --complexity <0-10>        Opus compression complexity level (default: 5)
-    --workers <N>              Number of concurrent worker tasks (default: 4)
+    --workers <N>              Number of concurrent worker tasks (default: physical cores clamped 1-16)
     --io-jobs <N>              Bounded disk I/O jobs concurrency limit (default: 2)
     --ffmpeg-threads <N|auto>  CPU threads allocated per audio transcode job (default: auto)
     --sub-offset <SEC>         Subtitle timestamp offset in seconds
@@ -308,18 +497,9 @@ async fn run() -> Result<ExitCode, String> {
     };
 
     if args.plan {
-        let manifest =
-            generate_inspection_manifest(&args.request.input_dir, cache_opt, Some(&cancel_token))
-                .await?;
-        match serde_json::to_string_pretty(&manifest) {
-            Ok(json) => {
-                println!("{json}");
-                return Ok(ExitCode::SUCCESS);
-            }
-            Err(e) => {
-                return Err(format!("Failed to serialize manifest: {e}"));
-            }
-        }
+        let json = generate_plan_json(&args, cache_opt, Some(&cancel_token)).await?;
+        println!("{json}");
+        return Ok(ExitCode::SUCCESS);
     }
 
     let (event_sender, event_forwarder) = if args.events {
@@ -724,5 +904,313 @@ mod tests {
 
         let parsed_invalid = parse_args_from(["--input-dir", ".", "--ffmpeg-threads", "invalid"]);
         assert!(parsed_invalid.is_err());
+    }
+    #[test]
+    fn test_cli_selected_item_literal_comma_preserved() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("mkv_cli_test_literal_comma_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let filename = "[Group] Show - 01 [1080p, AAC].mkv";
+        let file_path = temp_dir.join(filename);
+        std::fs::write(&file_path, b"dummy").unwrap();
+
+        let parsed = parse_args_from([
+            "--input-dir",
+            temp_dir.to_str().unwrap(),
+            "--selected-item",
+            filename,
+        ])
+        .unwrap();
+
+        let items = parsed
+            .request
+            .selected_items
+            .expect("should have selected_items");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0], filename);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_cli_selected_items_comma_separated() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("mkv_cli_test_comma_sep_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let ep1 = temp_dir.join("ep01.mkv");
+        let ep2 = temp_dir.join("ep02.mkv");
+        let ep3 = temp_dir.join("ep03.mkv");
+        std::fs::write(&ep1, b"").unwrap();
+        std::fs::write(&ep2, b"").unwrap();
+        std::fs::write(&ep3, b"").unwrap();
+
+        let parsed = parse_args_from([
+            "--input-dir",
+            temp_dir.to_str().unwrap(),
+            "--selected-items",
+            "ep01.mkv,  ep02.mkv ,ep03.mkv ",
+        ])
+        .unwrap();
+
+        let items = parsed
+            .request
+            .selected_items
+            .expect("should have selected_items");
+        assert_eq!(items, vec!["ep01.mkv", "ep02.mkv", "ep03.mkv"]);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_cli_selected_item_missing_input_dir_fails() {
+        let err = parse_args_from(["--selected-item", "ep01.mkv"]).unwrap_err();
+        assert_eq!(
+            err,
+            "Cannot specify --selected-item or --selected-items without --input-dir"
+        );
+
+        let err2 = parse_args_from(["--selected-items", "ep01.mkv,ep02.mkv"]).unwrap_err();
+        assert_eq!(
+            err2,
+            "Cannot specify --selected-item or --selected-items without --input-dir"
+        );
+    }
+
+    #[test]
+    fn test_cli_selected_item_outside_input_dir_fails() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("mkv_cli_test_outside_{}", std::process::id()));
+        let input_dir = temp_dir.join("input");
+        let outside_dir = temp_dir.join("outside");
+        let _ = std::fs::create_dir_all(&input_dir);
+        let _ = std::fs::create_dir_all(&outside_dir);
+
+        let outside_file = outside_dir.join("secret.mkv");
+        std::fs::write(&outside_file, b"secret").unwrap();
+
+        // 1. Traversal relative path escapes input_dir
+        let err_traversal = parse_args_from([
+            "--input-dir",
+            input_dir.to_str().unwrap(),
+            "--selected-item",
+            "../outside/secret.mkv",
+        ])
+        .unwrap_err();
+        assert!(
+            err_traversal.contains("is outside input directory"),
+            "Error: {err_traversal}"
+        );
+
+        // 2. Absolute path outside input_dir
+        let err_abs = parse_args_from([
+            "--input-dir",
+            input_dir.to_str().unwrap(),
+            "--selected-item",
+            outside_file.to_str().unwrap(),
+        ])
+        .unwrap_err();
+        assert!(
+            err_abs.contains("is outside input directory"),
+            "Error: {err_abs}"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_cli_selected_item_cwd_relative_resolution() {
+        let rel_test_dir =
+            PathBuf::from("target").join(format!("test_cli_cwd_res_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&rel_test_dir);
+        let file_name = "ep01.mkv";
+        let file_path = rel_test_dir.join(file_name);
+        std::fs::write(&file_path, b"video").unwrap();
+
+        // Pass path relative to CWD: target/test_cli_cwd_res_.../ep01.mkv
+        let rel_path_from_cwd = file_path.to_string_lossy().to_string();
+
+        let parsed = parse_args_from([
+            "--input-dir",
+            rel_test_dir.to_str().unwrap(),
+            "--selected-item",
+            &rel_path_from_cwd,
+        ])
+        .unwrap();
+
+        let items = parsed
+            .request
+            .selected_items
+            .expect("should have selected_items");
+        assert_eq!(items, vec!["ep01.mkv"]);
+
+        let _ = std::fs::remove_dir_all(&rel_test_dir);
+    }
+    #[test]
+    fn test_cli_selected_item_relative_input_dir_prefix_stripped() {
+        let parsed = parse_args_from([
+            "--input-dir",
+            "media/anime",
+            "--selected-item",
+            "media/anime/Season 1/S01E01.mkv",
+        ])
+        .unwrap();
+
+        let items = parsed
+            .request
+            .selected_items
+            .expect("should have selected_items");
+        assert_eq!(items, vec!["Season 1/S01E01.mkv"]);
+    }
+
+    #[tokio::test]
+    async fn test_cli_plan_selected_items_filters_manifest() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("mkv_cli_test_plan_filter_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let ep1 = temp_dir.join("ep01.mkv");
+        let ep2 = temp_dir.join("ep02.mkv");
+        std::fs::write(&ep1, b"video 1").unwrap();
+        std::fs::write(&ep2, b"video 2").unwrap();
+
+        let parsed = parse_args_from([
+            "--input-dir",
+            temp_dir.to_str().unwrap(),
+            "--plan",
+            "--selected-item",
+            "ep02.mkv",
+        ])
+        .unwrap();
+
+        assert!(parsed.plan);
+        assert_eq!(
+            parsed.request.selected_items.as_deref(),
+            Some(&["ep02.mkv".to_string()][..])
+        );
+
+        let json = generate_plan_json(&parsed, None, None).await.unwrap();
+        let val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let items = val["items"].as_array().expect("manifest should have items");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["id"], "ep02.mkv");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_cli_selected_item_duplicate_fails_validation() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("mkv_cli_test_dup_sel_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let ep1 = temp_dir.join("ep01.mkv");
+        std::fs::write(&ep1, b"video").unwrap();
+
+        let parsed = parse_args_from([
+            "--input-dir",
+            temp_dir.to_str().unwrap(),
+            "--selected-item",
+            "ep01.mkv",
+            "--selected-item",
+            "ep01.mkv",
+        ])
+        .unwrap();
+
+        let err = parsed.request.validate().unwrap_err();
+        assert!(err.contains("Duplicate entry in selected_items: 'ep01.mkv'"));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_cli_selected_item_empty_flag_fails() {
+        assert_eq!(
+            parse_args_from(["--input-dir", ".", "--selected-item", ""]).unwrap_err(),
+            "Cannot specify empty --selected-item"
+        );
+        assert_eq!(
+            parse_args_from(["--input-dir", ".", "--selected-items", "  ,  "]).unwrap_err(),
+            "Cannot specify empty --selected-items"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_cli_selected_item_symlink_escape_fails() {
+        let outside_dir =
+            std::env::temp_dir().join(format!("mkv_cli_test_sym_out_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&outside_dir);
+        let secret = outside_dir.join("secret.mkv");
+        std::fs::write(&secret, b"secret video").unwrap();
+
+        let input_dir =
+            std::env::temp_dir().join(format!("mkv_cli_test_sym_in_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&input_dir);
+        let symlink_path = input_dir.join("leak.mkv");
+        std::os::unix::fs::symlink(&secret, &symlink_path).unwrap();
+
+        let err = parse_args_from([
+            "--input-dir",
+            input_dir.to_str().unwrap(),
+            "--selected-item",
+            "leak.mkv",
+        ])
+        .unwrap_err();
+
+        assert!(err.contains("is outside input directory"));
+        let _ = std::fs::remove_dir_all(&outside_dir);
+        let _ = std::fs::remove_dir_all(&input_dir);
+    }
+
+    #[test]
+    fn test_cli_selected_item_absolute_nonexistent_inside_reports_not_found() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("mkv_cli_test_abs_non_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let ghost = temp_dir.join("ghost.mkv");
+
+        let parsed = parse_args_from([
+            "--input-dir",
+            temp_dir.to_str().unwrap(),
+            "--selected-item",
+            ghost.to_str().unwrap(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            parsed.request.selected_items.as_deref(),
+            Some(&["ghost.mkv".to_string()][..])
+        );
+
+        let err = parsed.request.validate().unwrap_err();
+        assert!(
+            err.contains("Selected item does not exist:"),
+            "unexpected error message: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_cli_plan_selected_items_unmatched_fails() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("mkv_cli_test_unmatched_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let ep1 = temp_dir.join("ep01.mkv");
+        std::fs::write(&ep1, b"video 1").unwrap();
+
+        let ep_txt = temp_dir.join("readme.txt");
+        std::fs::write(&ep_txt, b"text").unwrap();
+
+        let parsed = parse_args_from([
+            "--input-dir",
+            temp_dir.to_str().unwrap(),
+            "--plan",
+            "--selected-item",
+            "readme.txt",
+        ])
+        .unwrap();
+
+        let err = generate_plan_manifest(&parsed, None, None)
+            .await
+            .unwrap_err();
+        assert!(err.contains("None of the selected items matched any discovered MKV files"));
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }
