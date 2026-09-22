@@ -362,7 +362,8 @@ pub async fn execute_remux_job(
         &temp_output,
         options.sub_offset,
     );
-
+    // ADR-0011 Dual-Governor: CPU-intensive Opus transcoding runs in worker slot;
+    // disk-intensive remux multiplexing (mkvmerge) is guarded by io_semaphore.
     let _io_permit = match io_semaphore {
         Some(sem) => sem.acquire().await.ok(),
         None => None,
@@ -392,7 +393,7 @@ pub async fn execute_remux_job(
         }
         stderr_bytes
     });
-
+    let stderr_abort = stderr_handle.abort_handle();
     let execution = async {
         let mut stdout_bytes = Vec::new();
         if let Some(out_stream) = stdout {
@@ -410,10 +411,12 @@ pub async fn execute_remux_job(
         match tokio::time::timeout(SUBPROCESS_TIMEOUT, execution).await {
             Ok(res) => res?,
             Err(_) => {
+                stderr_abort.abort();
+                let _ = std::fs::remove_file(&temp_output);
                 return Err(format!(
                     "mkvmerge timed out after {} seconds",
                     SUBPROCESS_TIMEOUT.as_secs()
-                ))
+                ));
             }
         };
 

@@ -736,19 +736,59 @@ impl BatchPipeline {
             });
         }
         let mut all_inspections: HashMap<PathBuf, InspectionResult> = HashMap::new();
-        while let Some(res) = probe_set.join_next().await {
-            if let Ok((path, probe_res)) = res {
-                match probe_res {
-                    Ok(meta) => {
-                        all_inspections.insert(path, InspectionResult::success(meta));
-                    }
-                    Err(e) => {
-                        all_inspections.insert(path, InspectionResult::failure(e));
+        loop {
+            tokio::select! {
+                _ = self.cancel_token.cancelled() => {
+                    probe_set.abort_all();
+                    break;
+                }
+                next_res = probe_set.join_next() => {
+                    match next_res {
+                        Some(Ok((path, probe_res))) => {
+                            match probe_res {
+                                Ok(meta) => {
+                                    all_inspections.insert(path, InspectionResult::success(meta));
+                                }
+                                Err(e) => {
+                                    all_inspections.insert(path, InspectionResult::failure(e));
+                                }
+                            }
+                        }
+                        Some(Err(join_err)) => {
+                            tracing::warn!("Bulk probe task failed: {join_err}");
+                        }
+                        None => break,
                     }
                 }
             }
         }
         cache.save_shared();
+
+        if self.cancel_token.is_cancelled() {
+            summary.cancelled = true;
+            for rem in &files {
+                let rem_id = get_item_id(&rem.path, &self.config.input_dir);
+                self.emit(JobEvent::ItemComplete {
+                    version: EVENT_VERSION,
+                    id: rem_id,
+                    file: rem.name.clone(),
+                    status: ItemOutcome::Cancelled,
+                    reason: Some("Operation cancelled".into()),
+                    error: None,
+                    duration_sec: None,
+                    extra: Default::default(),
+                })
+                .await;
+            }
+            self.emit(JobEvent::BatchComplete {
+                version: EVENT_VERSION,
+                success: false,
+                cancelled: true,
+                extra: Default::default(),
+            })
+            .await;
+            return Ok(summary);
+        }
 
         // Prepare release directory assets per release directory
         struct PreparedDir {

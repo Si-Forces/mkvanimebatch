@@ -461,7 +461,13 @@ pub fn scan_mkv_files(
 ) -> Vec<ParsedFile> {
     let mut results = Vec::new();
     let mut stack = vec![dir_path.to_path_buf()];
-
+    let mut visited_dirs = HashSet::new();
+    visited_dirs.insert(
+        dir_path
+            .canonicalize()
+            .unwrap_or_else(|_| dir_path.to_path_buf()),
+    );
+    let mut visited_files = HashSet::new();
     let resolved_ignores: HashSet<PathBuf> = ignore_paths
         .map(|set| {
             set.iter()
@@ -488,17 +494,23 @@ pub fn scan_mkv_files(
                 None => continue,
             };
 
-            if file_type.is_file() {
+            let is_file = file_type.is_file() || (file_type.is_symlink() && path.is_file());
+            let is_dir = file_type.is_dir() || (file_type.is_symlink() && path.is_dir());
+
+            if is_file {
                 if name.to_lowercase().ends_with(".mkv") {
-                    results.push(create_parsed_file(&path));
+                    let canon_file = path.canonicalize().unwrap_or_else(|_| path.clone());
+                    if visited_files.insert(canon_file) {
+                        results.push(create_parsed_file(&path));
+                    }
                 }
-            } else if file_type.is_dir() && recursive {
+            } else if is_dir && recursive {
                 let name_lower = name.to_lowercase();
                 if name_lower == "output" || FONT_DIR_NAMES.contains(&name_lower.as_str()) {
                     continue;
                 }
                 let canon = path.canonicalize().unwrap_or_else(|_| path.clone());
-                if resolved_ignores.contains(&canon) {
+                if resolved_ignores.contains(&canon) || !visited_dirs.insert(canon) {
                     continue;
                 }
                 stack.push(path);

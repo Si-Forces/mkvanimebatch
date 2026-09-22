@@ -172,6 +172,8 @@ export class JobController {
     if (cancelled) this.runtime.queueFor(this.mode).finalize(-1, true);
     this.running = false;
     this.launched = false;
+    this.jobId = null;
+    this.launchPromise = null;
     this.lifecycle = cancelled ? "cancelled" : "failed";
     this.runtime.updateWorkerChips(false);
     this.runtime.telemetryLoop.setJobActive(false);
@@ -331,10 +333,16 @@ export class JobController {
       }
     } catch (err) {
       this.runtime.appendLog(this.logEl, `[ERROR] ${err}`);
-      this.runtime.coordinator.isStopping = false;
-      this.lifecycle = "running";
-      this.renderStatus();
-      this.runtime.coordinator.syncControls();
+      if (this.jobId !== null) {
+        this.runtime.coordinator.isStopping = false;
+        this.lifecycle = "running";
+        this.renderStatus();
+        this.runtime.coordinator.syncControls();
+        return;
+      }
+    }
+    if (this.jobId === null) {
+      this.abortStart(true);
     }
   }
 
@@ -355,6 +363,7 @@ export class JobController {
   }
 
   onDone(code) {
+    if (!this.running || this.jobId === null) return;
     const tracker = this.runtime.queueFor(this.mode);
     const cancelled = this.runtime.coordinator.isStopping || tracker.state?.batchCancelled === true || code === 130;
     tracker.finalize(code, cancelled);

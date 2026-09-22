@@ -352,11 +352,24 @@ pub async fn generate_inspection_manifest(
             }
         }
 
-        let (inspected, inspection_error) =
-            match crate::scan::get_or_probe_video(&mkv.path, persistent_cache).await {
-                Ok(probed) => (Some(InspectedVideo::new(probed)), None),
-                Err(err) => (None, Some(err)),
-            };
+        let probe_res = if let Some(token) = cancel_token {
+            tokio::select! {
+                res = crate::scan::get_or_probe_video(&mkv.path, persistent_cache) => res,
+                _ = token.cancelled() => {
+                    if let Some(cache) = persistent_cache {
+                        cache.save_shared();
+                    }
+                    return Err("Inspection cancelled".into());
+                }
+            }
+        } else {
+            crate::scan::get_or_probe_video(&mkv.path, persistent_cache).await
+        };
+
+        let (inspected, inspection_error) = match probe_res {
+            Ok(probed) => (Some(InspectedVideo::new(probed)), None),
+            Err(err) => (None, Some(err)),
+        };
 
         let parent = mkv.path.parent().unwrap_or(input_dir);
         let release = release_by_dir
