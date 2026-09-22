@@ -297,6 +297,13 @@ pub async fn execute_remux_job(
     };
     summary.log.push(format!("Processing: {}", job.video_name));
 
+    let output_file_name = job.output_file.file_name().ok_or_else(|| {
+        format!(
+            "Output path has no file name: {}",
+            job.output_file.display()
+        )
+    })?;
+
     let out_dir = job.output_file.parent().unwrap_or(Path::new("."));
     if let Err(e) = std::fs::create_dir_all(out_dir) {
         return Err(format!(
@@ -346,9 +353,7 @@ pub async fn execute_remux_job(
         temp_opus_file = Some(temp_opus);
     }
 
-    let temp_output = scratch_dir
-        .path()
-        .join(job.output_file.file_name().unwrap());
+    let temp_output = scratch_dir.path().join(output_file_name);
     let mkvmerge_args = build_mkvmerge_args(
         job,
         selection,
