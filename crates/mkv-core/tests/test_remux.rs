@@ -600,3 +600,62 @@ fn test_custom_track_assignment_remux_args() {
     let args_fallback_zero = build_mkvmerge_args(&job, &selection, None, &fonts, &output_path, 0.0);
     assert!(!args_fallback_zero.contains(&"--sync".to_string()));
 }
+
+#[tokio::test]
+async fn test_execute_remux_job_no_file_name_returns_err() {
+    let dir = tempfile::tempdir().unwrap();
+    let video = dir.path().join("test.mkv");
+    std::fs::File::create(&video).unwrap();
+    // Path ending in ".." has no file_name(), but a valid writable parent
+    let out = dir.path().join("subdir").join("..");
+
+    let job = PlannedJob {
+        video: video.clone(),
+        video_name: "test.mkv".to_string(),
+        base: "test".to_string(),
+        output_file: out,
+        subtitle_file: None,
+        subtitle_label: String::new(),
+        subtitle_mkv_lang: String::new(),
+        chapter_file: None,
+        cover_file: None,
+        embedded_sub_id: None,
+        use_source_fonts: false,
+        release_dir: None,
+        item_id: "test.mkv".to_string(),
+        custom_offset_ms: None,
+        custom_language: None,
+        custom_title: None,
+    };
+
+    let selection = TrackSelection {
+        video_id: Some(0),
+        audio_id: Some(1),
+        audio_index: 0,
+        audio_codec: "aac".to_string(),
+        audio_channels: 2,
+        audio_lang: "jpn".to_string(),
+        audio_name: "Stereo".to_string(),
+        audio_reason: "test".to_string(),
+        has_source_chapters: false,
+        source_cover_id: None,
+        source_font_ids: vec![],
+    };
+
+    let fonts = FontInfo::default();
+    let options = mkv_core::remux::RemuxOptions {
+        opus_bitrate: "192k",
+        complexity: 10,
+        ffmpeg_threads: 1,
+        sub_offset: 0.0,
+    };
+
+    let res =
+        mkv_core::remux::execute_remux_job(&job, &selection, &fonts, &options, None, None).await;
+    assert!(res.is_err());
+    let err = res.unwrap_err();
+    assert!(
+        err.contains("Output path has no file name"),
+        "Unexpected error message: {err}"
+    );
+}
