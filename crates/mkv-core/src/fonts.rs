@@ -180,6 +180,7 @@ pub struct FontMemoEntry {
     pub hash: String,
 }
 
+#[derive(Debug)]
 pub struct FontHashMemo {
     pub memo_file: PathBuf,
     data: HashMap<String, FontMemoEntry>,

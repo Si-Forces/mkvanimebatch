@@ -475,3 +475,84 @@ fn test_prepare_release_directory() {
     assert_eq!(prepared.fonts_origin, FontsOrigin::Local);
     assert_eq!(prepared.videos.len(), 1);
 }
+
+#[test]
+fn test_sub_index_is_empty_and_has_subtitles() {
+    let mut sub_idx = SubIndex::new();
+    assert!(sub_idx.is_empty());
+
+    let resolver_empty = AssetResolver::new(
+        FontInfo::default(),
+        sub_idx.clone(),
+        ChapterIndex::new(),
+        CoverIndex::new(),
+        None,
+        None,
+        None,
+    );
+    assert!(!resolver_empty.has_subtitles());
+
+    let tmp = tempdir().unwrap();
+    let sub_file = tmp.path().join("Show_S01E01.ass");
+    fs::write(&sub_file, b"[Script Info]\n").unwrap();
+    sub_idx.add(make_video(&sub_file));
+    assert!(!sub_idx.is_empty());
+
+    let resolver_with_sub = AssetResolver::new(
+        FontInfo::default(),
+        sub_idx,
+        ChapterIndex::new(),
+        CoverIndex::new(),
+        None,
+        None,
+        None,
+    );
+    assert!(resolver_with_sub.has_subtitles());
+}
+
+#[test]
+fn test_resolve_for_skip_reason_when_no_subs_vs_unmatched() {
+    let tmp = tempdir().unwrap();
+    let vid_path = tmp.path().join("Show_S01E01.mkv");
+    fs::write(&vid_path, b"dummy").unwrap();
+    let vid = make_video(&vid_path);
+
+    // 1. Completely empty subtitles
+    let resolver_no_subs = AssetResolver::new(
+        FontInfo::default(),
+        SubIndex::new(),
+        ChapterIndex::new(),
+        CoverIndex::new(),
+        None,
+        None,
+        None,
+    );
+    let res_no_subs = resolver_no_subs.resolve_for(&vid, None, None, None);
+    assert!(!res_no_subs.matched_subtitle);
+    assert_eq!(
+        res_no_subs.skip_reason.as_deref(),
+        Some("no subtitle files found")
+    );
+
+    // 2. Subtitle present for E02 but video is E01
+    let mut sub_idx = SubIndex::new();
+    let sub_path = tmp.path().join("Show_S01E02.ass");
+    fs::write(&sub_path, b"[Script Info]\n").unwrap();
+    sub_idx.add(make_video(&sub_path));
+
+    let resolver_unmatched = AssetResolver::new(
+        FontInfo::default(),
+        sub_idx,
+        ChapterIndex::new(),
+        CoverIndex::new(),
+        None,
+        None,
+        None,
+    );
+    let res_unmatched = resolver_unmatched.resolve_for(&vid, None, None, None);
+    assert!(!res_unmatched.matched_subtitle);
+    assert_eq!(
+        res_unmatched.skip_reason.as_deref(),
+        Some("subtitle files found but none matched")
+    );
+}

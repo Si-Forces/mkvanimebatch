@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tempfile::tempdir;
 
 use mkv_core::domain::{MkvTrack, TrackProperties};
+use mkv_core::fonts::FontHashMemo;
 use mkv_core::pipeline::{
     create_event_channel, create_log_channel, BatchPipeline, CancellationToken, ItemOutcome,
     JobEvent, PipelineConfig, PipelineMode,
@@ -785,4 +786,61 @@ async fn test_pipeline_with_track_assignments_plans_override() {
     if let JobEvent::ItemComplete { file, .. } = complete_event {
         assert_eq!(file, "Episode - 01.mkv");
     }
+}
+
+#[tokio::test]
+async fn test_pipeline_extract_persists_font_hash_memo() {
+    let in_tmp = tempdir().unwrap();
+    let out_tmp = tempdir().unwrap();
+    let memo_file = out_tmp.path().join("test_font_memo.json");
+
+    let ep = in_tmp.path().join("Show - 01.mkv");
+    fs::write(&ep, b"dummy mkv content").unwrap();
+
+    // Create an existing font in the input's fonts directory
+    let fonts_dir = in_tmp.path().join("fonts");
+    fs::create_dir_all(&fonts_dir).unwrap();
+    let font_file = fonts_dir.join("CustomFont.ttf");
+    fs::write(&font_file, b"font binary data").unwrap();
+
+    let cache = Arc::new(PersistentInspectCache::new(None, false));
+    cache.put_path(&ep, sample_video_metadata());
+
+    let memo = Arc::new(parking_lot::Mutex::new(FontHashMemo::new(
+        memo_file.clone(),
+    )));
+
+    let config = PipelineConfig {
+        input_dir: in_tmp.path().to_path_buf(),
+        out_dir: Some(out_tmp.path().to_path_buf()),
+        fonts_dir: Some(fonts_dir.clone()),
+        mode: PipelineMode::Extract,
+        dry_run: false,
+        no_cache: false,
+        cache: Some(cache),
+        font_hash_memo: Some(memo.clone()),
+        ..Default::default()
+    };
+
+    let cancel_token = CancellationToken::new();
+    let (tx, _rx) = create_event_channel(32);
+    let pipeline = BatchPipeline::new(config, Some(tx), cancel_token);
+
+    let summary = pipeline.run().await.unwrap();
+    assert_eq!(summary.total, 1);
+
+    // Verify that the memo file was saved to disk
+    assert!(
+        memo_file.exists(),
+        "font hash memo file should be persisted to disk"
+    );
+
+    // Re-load the memo file from disk to confirm it contains the indexed font
+    let reloaded = FontHashMemo::new(memo_file);
+    let sig = mkv_core::scan::FileSignature::of(&font_file).unwrap();
+    let cached_hash = reloaded.get(&font_file, sig);
+    assert!(
+        cached_hash.is_some(),
+        "persisted memo must contain font hash"
+    );
 }

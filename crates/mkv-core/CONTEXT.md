@@ -26,6 +26,7 @@ Domain logic for parsing, indexing, scoring, probing, and executing anime fansub
 - **Transactional Font Deduplication**:
   - Identical fonts shared across episodes are deduplicated via BLAKE2b content hashes.
   - Font extraction follows a two-phase protocol (claim → stage → promote) arbitrated by `FontRegistry`.
+  - A persistent `FontHashMemo` caches font file signatures and content hashes to eliminate redundant cryptographic hashing of existing directory fonts across batch runs (ADR-0003).
   - An RAII `FontClaimsGuard` holds uncommitted font claims during task execution. If a task fails or cancellation occurs, uncommitted claims are cleanly defused and released, preventing corrupt destination files or deadlocked claim states (ADR-0003).
 - **Monotonic Item Duration**:
   - Wall-clock item execution duration is authoritatively measured by the media engine using monotonic time (`std::time::Instant`) from task start to termination.
@@ -55,6 +56,7 @@ Domain logic for parsing, indexing, scoring, probing, and executing anime fansub
 - **`EpisodeType`**: Closed enumeration classifying anime release episodes: `Episode`, `Part`, `Ova`, `Special`.
 - **`TrackSelectionModel`**: Heuristic scoring engine evaluating audio and subtitle streams based on language priority, track type (dialogue vs signage/songs/commentary), container flags, and codecs.
 - **`FontRegistry`**: Transactional aggregate root managing thread-safe font claims, BLAKE2b deduplication, temporary staging directories, and atomic destination promotion.
+- **`FontHashMemo`**: Thread-safe, disk-backed cache storing BLAKE2b-512 content hashes keyed by file path, size, and modification timestamp to bypass redundant font hashing across extraction runs.
 - **`BatchPipeline`**: Root execution aggregate coordinating end-to-end batch processing, dual-governor concurrency semaphores, preflight inspection, asset resolution, audio transcoding, and remuxing.
 - **`InspectionManifest`**: Structured immutable document produced by preflight inspection summarizing discovered video files, track metadata, container properties, and candidate external assets.
 - **`BatchItemInfo`**: Value object within an `InspectionManifest` describing an individual media file, its canonical root-relative ID, probe status, metadata, and subtitle candidate paths.
@@ -86,3 +88,4 @@ Domain logic for parsing, indexing, scoring, probing, and executing anime fansub
 | **Selected Items** | An ordered subset of canonical relative video paths or item IDs designated in a Batch Request to restrict and sequence pipeline execution. When omitted, all discovered media files execute in natural directory order. | Target filter, whitelist, item subset |
 | **Transcode Governor** | The dynamic calculation mechanism deriving FFmpeg worker thread concurrency from physical CPU core topology and active batch workers (`(total_physical_cores / workers).clamp(1, 4)`). | Thread scaler, core allocator |
 | **Zero-Copy Cache Persistence** | Direct-to-disk buffered streaming serialization of persistent inspection cache entries bypassing heap string allocations. | JSON dumper, cache writer |
+| **Font Hash Memo** | A disk-backed memoization store recording BLAKE2b font hashes and file signatures to eliminate redundant font hashing across batch runs. | Font hash cache, memo table, font db |
