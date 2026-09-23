@@ -801,6 +801,7 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
 .panel-body {
   padding: 14px;
   overflow-y: auto;
+  overflow-x: hidden;
   flex: 1;
 }
 
@@ -1446,6 +1447,7 @@ input[type="range"] {
   cursor: pointer;
   height: 28px;
   accent-color: var(--accent);
+  min-width: 0;
 }
 
 input[type="range"]:focus {
@@ -1503,46 +1505,40 @@ input[type="range"]::-moz-range-thumb:hover {
   background: var(--accent-hover);
 }
 
-/* ─── CLI Checkbox Flags Card Styling (2x2 Grid) ────────────────────────── */
+/* ─── CLI Checkbox Flags Card Styling ────────────────────────────────────── */
 .cli-flags-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 8px;
+  gap: 6px;
   margin-top: 4px;
-}
-
-.cli-flags-grid.tri-flags {
-  grid-template-columns: 1fr 1fr 1fr;
-  gap: 5px;
-}
-
-.cli-flags-grid.tri-flags .cli-flag-card {
-  padding: 7px 6px;
-  font-size: 11px;
-  gap: 5px;
-  justify-content: center;
-}
-
-.cli-flags-grid.tri-flags .cli-flag-card .flag-title {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .cli-flag-card {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 7px;
   background: var(--input-bg);
   border: 1px solid var(--input-border);
-  padding: 8px 10px;
+  padding: 7px 9px;
   border-radius: 8px;
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 600;
   color: var(--text-muted);
   cursor: pointer;
   transition: all var(--transition);
   user-select: none;
+  min-width: 0;
+}
+
+.cli-flag-card.cli-flag-card-full {
+  grid-column: 1 / -1;
+}
+
+.cli-flag-card .flag-title {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
 }
 
 .cli-flag-card:hover {
@@ -1926,6 +1922,14 @@ input[type="range"]::-moz-range-thumb:hover {
 @media (max-width: 800px) {
   .view-3col-layout {
     grid-template-columns: 220px minmax(0, 1fr) 210px;
+  }
+  .cli-flags-grid {
+    gap: 5px;
+  }
+  .cli-flag-card {
+    padding: 6px 5px;
+    font-size: 10.5px;
+    gap: 4px;
   }
   .titlebar-center { display: none; }
   .pipeline-tab-btn {
