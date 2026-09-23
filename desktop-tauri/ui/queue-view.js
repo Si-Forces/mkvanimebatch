@@ -145,7 +145,7 @@ export class QueueTracker {
           <div class="empty-state-desc">Inspecting MKV files and reading track metadata…</div>
         </div>`;
     }
-    if (this.countEl) this.countEl.textContent = "Scanning…";
+    this.setCountText("Scanning…");
     return token;
   }
 
@@ -187,7 +187,7 @@ export class QueueTracker {
         "↻ Choose Another Directory"
       );
     }
-    if (this.countEl) this.countEl.textContent = "Scan failed";
+    this.setCountText("Scan failed");
   }
 
   reset(title = "No Episodes Queued", description = "Choose an input release directory to scan MKV episodes into this batch.") {
@@ -198,7 +198,7 @@ export class QueueTracker {
     this.subtitleCandidates = {};
     this.state = createQueueState({ version: 2, items: [] }, { mode: this.mode });
     if (this.listEl) this.listEl.innerHTML = this.emptyStateMarkup(title, description);
-    if (this.countEl) this.countEl.textContent = "Ready";
+    this.setCountText("Ready");
   }
 
   populateFromInspection(manifest) {
@@ -560,15 +560,21 @@ export class QueueTracker {
     this.renderQueueCount();
   }
 
+  setCountText(text) {
+    if (!this.countEl) return;
+    this.countEl.textContent = text;
+    this.countEl.title = text;
+  }
+
   updateSelectionBadge() {
     if (!this.countEl) return;
     if (!this.state || this.state.totalCount === 0) {
-      this.countEl.textContent = "Ready";
+      this.setCountText("Ready");
       return;
     }
     const selected = getSelectedCount(this.state);
     const total = this.state.totalCount;
-    this.countEl.textContent = `${selected} / ${total} Selected`;
+    this.setCountText(`${selected} / ${total} Selected`);
   }
 
   getSelectedCount() {
@@ -640,9 +646,9 @@ export class QueueTracker {
       if (skippedCount > 0) parts.push(`${skippedCount} Skipped`);
       if (cancelledCount > 0) parts.push(`${cancelledCount} Cancelled`);
       if (errorCount > 0) parts.push(`${errorCount} Failed`);
-      this.countEl.textContent = `${parts.join(", ")} (${totalCount} Total)`;
+      this.setCountText(`${parts.join(", ")} (${totalCount} Total)`);
     } else {
-      this.countEl.textContent = `${processed} / ${totalCount} Processed`;
+      this.setCountText(`${processed} / ${totalCount} Processed`);
     }
   }
 }
