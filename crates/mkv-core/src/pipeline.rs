@@ -14,7 +14,7 @@ use crate::assets::{
 };
 use crate::domain::{output_stem, resolve_output_dir};
 use crate::extract::extract_mkv_file;
-use crate::fonts::{scan_fonts, FontInfo, FontRegistry};
+use crate::fonts::{scan_fonts, FontHashMemo, FontInfo, FontRegistry};
 use crate::manifest::get_item_id;
 use crate::remux::{execute_remux_job, select_tracks, PlannedJob, RemuxOptions, TrackSelection};
 use crate::request::{clean_relative_path, TrackAssignment};
@@ -125,6 +125,7 @@ pub struct PipelineConfig {
     pub no_cache: bool,
     pub cache: Option<Arc<PersistentInspectCache>>,
     pub cache_file: Option<PathBuf>,
+    pub font_hash_memo: Option<Arc<parking_lot::Mutex<FontHashMemo>>>,
     pub workers: usize,
     pub io_jobs: usize,
     pub bitrate: String,
@@ -152,6 +153,7 @@ impl Default for PipelineConfig {
             no_cache: false,
             cache: None,
             cache_file: None,
+            font_hash_memo: None,
             workers: 4,
             io_jobs: 2,
             bitrate: "192k".to_string(),
@@ -407,6 +409,15 @@ impl BatchPipeline {
         let mut join_set = tokio::task::JoinSet::new();
         let mut in_flight: HashMap<String, (String, std::time::Instant)> = HashMap::new();
         let mut font_registries: HashMap<PathBuf, Arc<FontRegistry>> = HashMap::new();
+        let font_memo: Option<Arc<parking_lot::Mutex<FontHashMemo>>> = if self.config.no_cache {
+            None
+        } else {
+            Some(self.config.font_hash_memo.clone().unwrap_or_else(|| {
+                Arc::new(parking_lot::Mutex::new(FontHashMemo::new(
+                    crate::scan::get_default_cache_dir().join("font_hash_memo.json"),
+                )))
+            }))
+        };
         let mut file_idx = 0;
 
         while file_idx < files.len() || !join_set.is_empty() {
@@ -434,9 +445,10 @@ impl BatchPipeline {
                     self.config.out_dir.as_deref(),
                     self.config.fonts_dir.as_deref(),
                 );
+                let memo_clone = font_memo.clone();
                 let font_registry = font_registries
                     .entry(fonts_dir.clone())
-                    .or_insert_with(|| Arc::new(FontRegistry::new(fonts_dir, None)))
+                    .or_insert_with(|| Arc::new(FontRegistry::new(fonts_dir, memo_clone)))
                     .clone();
                 let target_out_dir =
                     self.config.out_dir.as_deref().map(|out| {
@@ -632,6 +644,9 @@ impl BatchPipeline {
 
         for registry in font_registries.values() {
             registry.cleanup_staging();
+        }
+        if let Some(memo) = &font_memo {
+            memo.lock().save();
         }
 
         if !self.config.no_cache {
@@ -1013,7 +1028,6 @@ impl BatchPipeline {
             let res_assets = dir_prep.resolver.resolve_for(
                 video_file,
                 Some(&inspected),
-                None,
                 claimed_chapter,
                 assigned_sub,
             );
