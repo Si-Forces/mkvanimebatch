@@ -180,7 +180,7 @@
                     <polygon points="10 13.5 15 16.2 10 19" fill="currentColor"></polygon>
                   </svg>
                 </span>
-                Remux Parameters
+                <span class="panel-title-prefix-remux">Remux </span>Parameters
               </span>
               <span class="status-pill status-idle" id="remux-status">
                 <span class="status-dot"></span> Idle
@@ -349,26 +349,28 @@
 
           <!-- Col 2: Episode Batch Queue & Track Inspector -->
           <div class="glass-panel col-queue">
-            <div class="panel-header">
-              <span class="panel-title">
-                <span class="icon">
-                  <svg class="app-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M20.2 6 3 11l-.9-4.2L18 2l2.2 4z"></path>
-                    <line x1="7" y1="4.5" x2="8.5" y2="9.5"></line>
-                    <line x1="12" y1="3" x2="13.5" y2="8"></line>
-                    <rect x="2" y="10.5" width="20" height="11.5" rx="2.5"></rect>
-                    <polygon points="10 13.5 15 16.2 10 19" fill="currentColor"></polygon>
-                  </svg>
+            <div class="panel-header queue-panel-header">
+              <div class="queue-header-top">
+                <span class="panel-title">
+                  <span class="icon">
+                    <svg class="app-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M20.2 6 3 11l-.9-4.2L18 2l2.2 4z"></path>
+                      <line x1="7" y1="4.5" x2="8.5" y2="9.5"></line>
+                      <line x1="12" y1="3" x2="13.5" y2="8"></line>
+                      <rect x="2" y="10.5" width="20" height="11.5" rx="2.5"></rect>
+                      <polygon points="10 13.5 15 16.2 10 19" fill="currentColor"></polygon>
+                    </svg>
+                  </span>
+                  <span class="queue-title-prefix">Episode </span>Batch Queue
                 </span>
-                Episode Batch Queue
-              </span>
-              <span class="queue-header-right">
+                <span class="queue-count-badge" id="remux-queue-count">Ready</span>
+              </div>
+              <div class="queue-header-toolbar">
                 <div class="queue-bulk-actions" id="remux-queue-bulk">
                   <button type="button" class="btn btn-xs" id="remux-select-all">Select All</button>
                   <button type="button" class="btn btn-xs" id="remux-deselect-all">Deselect All</button>
                 </div>
-                <span class="queue-count-badge" id="remux-queue-count">Ready</span>
-              </span>
+              </div>
             </div>
             <div class="panel-body queue-body" id="remux-episode-list">
 
@@ -393,7 +395,7 @@
           <div class="glass-panel col-console">
             
             <div class="panel-header">
-              <span class="panel-title">📊 Resource Monitor &amp; Console</span>
+              <span class="panel-title">📊 Resource Monitor<span class="panel-title-suffix-console"> &amp; Console</span></span>
             </div>
 
             <!-- High-Contrast Prominent Resource Telemetry Card -->
@@ -480,7 +482,7 @@
                     <polyline points="9 19 12 22 15 19"></polyline>
                   </svg>
                 </span>
-                Extract Parameters
+                <span class="panel-title-prefix-extract">Extract </span>Parameters
               </span>
               <span class="status-pill status-idle" id="extract-status">
                 <span class="status-dot"></span> Idle
@@ -602,25 +604,27 @@
 
           <!-- Col 2: Extraction Queue -->
           <div class="glass-panel col-queue">
-            <div class="panel-header">
-              <span class="panel-title">
-                <span class="icon">
-                  <svg class="app-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
-                    <polyline points="2 12 12 17 22 12"></polyline>
-                    <path d="M12 17v5"></path>
-                    <polyline points="9 19 12 22 15 19"></polyline>
-                  </svg>
+            <div class="panel-header queue-panel-header">
+              <div class="queue-header-top">
+                <span class="panel-title">
+                  <span class="icon">
+                    <svg class="app-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
+                      <polyline points="2 12 12 17 22 12"></polyline>
+                      <path d="M12 17v5"></path>
+                      <polyline points="9 19 12 22 15 19"></polyline>
+                    </svg>
+                  </span>
+                  Extract Queue
                 </span>
-                Extract Queue
-              </span>
-              <span class="queue-header-right">
+                <span class="queue-count-badge" id="extract-queue-count">Ready</span>
+              </div>
+              <div class="queue-header-toolbar">
                 <div class="queue-bulk-actions" id="extract-queue-bulk">
                   <button type="button" class="btn btn-xs" id="extract-select-all">Select All</button>
                   <button type="button" class="btn btn-xs" id="extract-deselect-all">Deselect All</button>
                 </div>
-                <span class="queue-count-badge" id="extract-queue-count">Ready</span>
-              </span>
+              </div>
             </div>
             <div class="panel-body queue-body" id="extract-episode-list">
 
@@ -644,7 +648,7 @@
           <!-- Col 3: Prominent High-Contrast Resource Monitor & Console Stream -->
           <div class="glass-panel col-console">
             <div class="panel-header">
-              <span class="panel-title">📊 Resource Monitor &amp; Console</span>
+              <span class="panel-title">📊 Resource Monitor<span class="panel-title-suffix-console"> &amp; Console</span></span>
             </div>
 
             <!-- Prominent Resource Telemetry Card -->
