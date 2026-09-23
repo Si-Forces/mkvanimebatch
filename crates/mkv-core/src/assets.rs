@@ -241,6 +241,10 @@ impl SubIndex {
             .map(|(_, best)| (best.file.path.clone(), best.lang.clone()))
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.index.is_empty() && self.unparsed.is_empty()
+    }
+
     pub fn indexed_count(&self) -> usize {
         self.index.values().map(|v| v.len()).sum()
     }
@@ -277,7 +281,7 @@ impl SubIndex {
             }
         }
 
-        unique.sort_by_key(|a| natural_sort_key(&a.to_string_lossy()));
+        unique.sort_by_cached_key(|a| natural_sort_key(&a.to_string_lossy()));
         unique
     }
 }
@@ -562,8 +566,12 @@ impl AssetResolver {
         }
     }
 
-    pub fn all_subtitles(&self) -> Vec<PathBuf> {
-        self.sub_index.all_subtitles()
+    pub fn has_subtitles(&self) -> bool {
+        !self.sub_index.is_empty()
+            || self
+                .fallback_sub_index
+                .as_ref()
+                .is_some_and(|fb| !fb.is_empty())
     }
 
     pub fn use_source_fonts(&self) -> bool {
@@ -661,7 +669,6 @@ impl AssetResolver {
         video: &ParsedFile,
         parsed: &EpisodeInfo,
         inspected: Option<&InspectedVideo>,
-        all_subs: &[PathBuf],
         assigned_subtitle: Option<&Path>,
     ) -> SubResolution {
         // 1. Explicit human assignment overrides everything (ADR 0004),
@@ -698,10 +705,10 @@ impl AssetResolver {
         }
 
         // 5. No subtitle match found
-        let skip_reason = if all_subs.is_empty() {
-            "no subtitle files found"
-        } else {
+        let skip_reason = if self.has_subtitles() {
             "subtitle files found but none matched"
+        } else {
+            "no subtitle files found"
         };
         SubResolution::unmatched(skip_reason)
     }
@@ -743,26 +750,16 @@ impl AssetResolver {
         &self,
         video: &ParsedFile,
         inspected: Option<&InspectedVideo>,
-        all_subs: Option<&[PathBuf]>,
         claimed_chapter: Option<&Path>,
         assigned_subtitle: Option<&Path>,
     ) -> ResolvedAssets {
-        let owned_all_subs;
-        let subs_slice = match all_subs {
-            Some(s) => s,
-            None => {
-                owned_all_subs = self.all_subtitles();
-                &owned_all_subs
-            }
-        };
-
         let has_source_chapters = inspected.map(|i| i.has_chapters()).unwrap_or(false);
         let has_source_cover = inspected
             .map(|i| i.cover_attachment().is_some())
             .unwrap_or(false);
 
         let (sub_res, chapter_file, cover_file) = if let Some(parsed) = &video.parsed {
-            let sub = self.resolve_sub(video, parsed, inspected, subs_slice, assigned_subtitle);
+            let sub = self.resolve_sub(video, parsed, inspected, assigned_subtitle);
             let chap = self.resolve_chap(parsed, has_source_chapters, claimed_chapter);
             let cov = self.resolve_cov(parsed, has_source_cover);
             (sub, chap, cov)

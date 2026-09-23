@@ -320,7 +320,7 @@ sequenceDiagram
 1. **Transactional Arbitration**:
    - **Claim Phase**: Worker registers intent by `(font_name, size)`. If another worker holds an active claim or has promoted the font, duplicate extraction is suppressed.
    - **Staging Phase**: Extracted font binaries write into isolated scratch paths (`.font_staging/`).
-   - **Content Hash Verification**: Computes a BLAKE2b-512 hash (`hash_file`) of the staged binary. The hash is checked against `FontHashMemo` (persisted on-disk) to catch identical fonts named differently.
+   - **Content Hash Verification**: Computes a BLAKE2b-512 hash (`hash_file`) of the staged binary. The hash is checked against `FontHashMemo` (persisting signatures to `font_hash_memo.json` in the default cache dir or configured via `PipelineConfig` to bypass BLAKE2b hashing for existing and promoted fonts across batch extraction runs) to catch identical fonts named differently.
    - **Promote Phase**: Moves the staged font to the final destination directory with collision-free renaming.
    - **RAII Release Safety**: The `FontClaimsGuard` implements `Drop`. If a worker terminates, panics, or cancels before promotion, uncommitted claims are automatically revoked.
 
