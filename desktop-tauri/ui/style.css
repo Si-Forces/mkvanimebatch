@@ -749,7 +749,7 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
 
 .view-3col-layout {
   display: grid;
-  grid-template-columns: 320px 1fr 280px;
+  grid-template-columns: 290px minmax(0, 1fr) 260px;
   gap: 12px;
   height: 100%;
   overflow: hidden;
@@ -792,6 +792,10 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
   display: flex;
   align-items: center;
   gap: 6px;
+  white-space: nowrap;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .panel-body {
@@ -1066,6 +1070,33 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
   color: #475569 !important;
 }
 
+.queue-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  gap: 12px;
+}
+
+.queue-header-top {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.queue-panel-header .panel-title {
+  flex-shrink: 0;
+  min-width: 0;
+}
+
+.queue-header-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
 .queue-header-right {
   display: flex;
   align-items: center;
@@ -1079,6 +1110,11 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
   border-radius: 12px;
   background: rgba(99, 102, 241, 0.15);
   color: var(--accent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 60%;
+  flex-shrink: 1;
 }
 
 .tokyo-ep-card {
@@ -1755,15 +1791,15 @@ input[type="range"]::-moz-range-thumb:hover {
 }
 .queue-bulk-actions {
   display: inline-flex;
-  gap: 4px;
+  gap: 6px;
   align-items: center;
-  margin-right: 8px;
 }
 .btn-xs {
   font-size: 10px;
-  padding: 2px 7px;
+  padding: 2.5px 8px;
   border-radius: 4px;
   line-height: 1.2;
+  white-space: nowrap;
 }
 .ep-card-left {
   display: flex;
@@ -1841,10 +1877,33 @@ input[type="range"]::-moz-range-thumb:hover {
 .resize-handle.w { top: 0; left: 0; bottom: 0; width: 6px; cursor: ew-resize; }
 
 /* Keep the three-pane workflow usable at the window's compact size. */
+@media (max-width: 960px) {
+  .view-3col-layout {
+    grid-template-columns: 260px minmax(0, 1fr) 235px;
+  }
+  .queue-panel-header {
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px 14px;
+  }
+  .queue-header-top {
+    width: 100%;
+    justify-content: space-between;
+  }
+  .queue-header-toolbar {
+    width: 100%;
+    margin-left: 0;
+  }
+  .queue-title-prefix,
+  .panel-title-suffix-console {
+    display: none;
+  }
+}
+
 @media (max-width: 860px) {
   .content { padding: 10px; }
   .view-3col-layout {
-    grid-template-columns: 250px minmax(0, 1fr) 230px;
+    grid-template-columns: 240px minmax(0, 1fr) 220px;
     gap: 8px;
   }
   .titlebar {
@@ -1876,4 +1935,8 @@ input[type="range"]::-moz-range-thumb:hover {
   }
   .pipeline-tab-btn > span:not(.tab-icon) { display: none; }
   .preset-pill-btn { max-width: 150px; }
+  .panel-title-prefix-remux,
+  .panel-title-prefix-extract {
+    display: none;
+  }
 }
