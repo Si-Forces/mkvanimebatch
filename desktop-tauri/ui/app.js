@@ -19,42 +19,66 @@ const PRESETS = {
     name: "Balanced Anime (Opus 192k)",
     bitrate: "192k",
     complexity: "5",
-    keepFonts: true,
   },
   fast: {
     icon: "⚡",
     name: "Fast Muxing (128k)",
     bitrate: "128k",
     complexity: "5",
-    keepFonts: false,
   },
   hifi: {
     icon: "🎧",
     name: "Hi-Fi Master (320k)",
     bitrate: "320k",
     complexity: "10",
-    keepFonts: true,
   },
 };
 PRESETS.default = PRESETS.balanced;
 PRESETS.high_quality = PRESETS.hifi;
 
-async function restoreQueueFromSnapshot() {
-  try {
-    const snapshot = await invoke("get_job_snapshot");
-    if (!snapshot || !snapshot.job_id || !snapshot.items) return;
-    const mode = snapshot.mode || "remux";
-    const queue = queueFor(mode);
-    if (!queue || !queue.state) return;
+async function restoreQueueFromSnapshot(controllers) {
+  const buffered = [];
+  let active = null;
+  let unlistenEvent = null;
+  let unlistenDone = null;
+  JobCoordinator.isStarting = true;
+  JobCoordinator.syncControls();
+  const deliver = (type, payload) => {
+    if (active) active.handleSnapshotSignal(type, payload);
+    else buffered.push([type, payload]);
+  };
 
-    if (queue.state.items.size === 0 && Object.keys(snapshot.items).length > 0) {
-      queue.restoreFromSnapshot(snapshot);
-      if (mode && mode !== "remux") {
-        switchView(mode);
-      }
+  try {
+    unlistenEvent = await listen("job-event", e => deliver("event", e.payload));
+    unlistenDone = await listen("job-done", e => deliver("done", e.payload));
+    const snapshot = await invoke("get_job_snapshot");
+    if (!snapshot || snapshot.job_id == null || !snapshot.items || !controllers[snapshot.mode]) return;
+    const queue = queueFor(snapshot.mode);
+    if (snapshot.status !== "running" && queue.state.items.size > 0) return;
+
+    queue.restoreFromSnapshot(snapshot);
+    if (snapshot.mode === "extract") switchView("extract");
+    if (snapshot.status !== "running") {
+      controllers[snapshot.mode].restoreTerminalSnapshot(snapshot);
+      return;
+    }
+
+    active = controllers[snapshot.mode];
+    active.restoreActiveSnapshot(snapshot, unlistenEvent, unlistenDone);
+    unlistenEvent = null;
+    unlistenDone = null;
+    for (const [type, payload] of buffered) {
+      active.handleSnapshotSignal(type, payload, true);
     }
   } catch (_err) {
     // Graceful fallback for non-Tauri or initial run environments
+  } finally {
+    unlistenEvent?.();
+    unlistenDone?.();
+    if (JobCoordinator.isStarting) {
+      JobCoordinator.isStarting = false;
+      JobCoordinator.syncControls();
+    }
   }
 }
 
@@ -70,7 +94,6 @@ async function loadPresetProfiles() {
           name: p.name,
           bitrate: p.bitrate,
           complexity: String(p.complexity),
-          keepFonts: p.keep_fonts,
         };
       }
     }
@@ -117,9 +140,6 @@ function applyPreset(presetKey) {
   if (p.complexity !== undefined) {
     setVal("remux-complexity", p.complexity);
     setVal("remux-cplx-val", p.complexity);
-  }
-  if (p.keepFonts !== undefined) {
-    setChk("remux-keep-fonts", p.keepFonts);
   }
 }
 
@@ -880,7 +900,7 @@ function initApp() {
   }
 
   // Detect custom input modifications
-  ["remux-bitrate", "remux-complexity", "remux-cplx-val", "remux-ffmpeg-threads", "remux-sub-offset", "remux-keep-fonts", "remux-dry-run", "remux-no-cache"].forEach(id => {
+  ["remux-bitrate", "remux-complexity", "remux-cplx-val", "remux-ffmpeg-threads", "remux-sub-offset", "remux-dry-run", "remux-no-cache"].forEach(id => {
     const el = document.getElementById(id);
     if (el) {
       el.addEventListener("change", () => applyPreset("custom"));
@@ -902,12 +922,14 @@ function initApp() {
     telemetryLoop,
     updateWorkerChips,
   };
-  new JobController("remux", jobRuntime);
-  new JobController("extract", jobRuntime);
+  const controllers = {
+    remux: new JobController("remux", jobRuntime),
+    extract: new JobController("extract", jobRuntime),
+  };
   JobCoordinator.syncControls();
   telemetryLoop.start();
   loadPresetProfiles();
-  restoreQueueFromSnapshot();
+  restoreQueueFromSnapshot(controllers);
 
   if (window.matchMedia) {
     window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", e => {

@@ -1,4 +1,6 @@
 use std::fs;
+use std::path::Path;
+use std::process::Command;
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -68,7 +70,6 @@ async fn test_extract_dry_run_emits_planned_events() {
         complexity: 10,
         ffmpeg_threads: 2,
         sub_offset: 0.0,
-        keep_fonts: false,
         ..Default::default()
     };
 
@@ -143,7 +144,6 @@ async fn test_extract_dry_run_preserves_nested_output_directory() {
         complexity: 10,
         ffmpeg_threads: 1,
         sub_offset: 0.0,
-        keep_fonts: false,
         ..Default::default()
     };
 
@@ -210,7 +210,6 @@ async fn test_remux_dry_run_preserves_nested_output_directory() {
         complexity: 10,
         ffmpeg_threads: 2,
         sub_offset: 0.0,
-        keep_fonts: false,
         ..Default::default()
     };
     let cancel_token = CancellationToken::new();
@@ -282,7 +281,6 @@ async fn test_remux_skips_when_no_matching_subtitle() {
         complexity: 10,
         ffmpeg_threads: 2,
         sub_offset: 0.0,
-        keep_fonts: false,
         ..Default::default()
     };
     let cancel_token = CancellationToken::new();
@@ -334,7 +332,6 @@ async fn test_pipeline_cancellation_drains_items() {
         complexity: 10,
         ffmpeg_threads: 1,
         sub_offset: 0.0,
-        keep_fonts: false,
         ..Default::default()
     };
 
@@ -422,7 +419,6 @@ async fn test_pipeline_from_request_with_preset_and_overrides() {
         io_jobs: None,
         ffmpeg_threads: None,
         sub_offset: None,
-        keep_fonts: None,
         dry_run: Some(true),
         no_cache: None,
         assignments: None,
@@ -435,7 +431,6 @@ async fn test_pipeline_from_request_with_preset_and_overrides() {
     let pipeline = BatchPipeline::from_request(req, None, cancel_token).unwrap();
     assert_eq!(pipeline.config.bitrate, "256k"); // overridden from 192k
     assert_eq!(pipeline.config.complexity, 5); // baseline from balanced
-    assert!(pipeline.config.keep_fonts); // baseline from balanced
     assert_eq!(pipeline.config.workers, 6);
     assert!(pipeline.config.dry_run);
 }
@@ -471,7 +466,6 @@ async fn test_extract_emits_item_complete_duration_sec() {
         complexity: 10,
         ffmpeg_threads: 1,
         sub_offset: 0.0,
-        keep_fonts: false,
         ..Default::default()
     };
 
@@ -539,7 +533,6 @@ async fn test_extract_error_in_worker_emits_duration_sec() {
         complexity: 10,
         ffmpeg_threads: 1,
         sub_offset: 0.0,
-        keep_fonts: false,
         ..Default::default()
     };
 
@@ -610,7 +603,6 @@ async fn test_pipeline_in_flight_cancellation_emits_duration_sec() {
         complexity: 10,
         ffmpeg_threads: 1,
         sub_offset: 0.0,
-        keep_fonts: false,
         ..Default::default()
     };
 
@@ -720,6 +712,149 @@ async fn test_pipeline_selected_items_filters_and_orders_batch() {
     assert_eq!(items.len(), 2);
     assert_eq!(items[0].file, "[SubsPlease] Show - 03 (1080p).mkv");
     assert_eq!(items[1].file, "[SubsPlease] Show - 01 (1080p).mkv");
+}
+
+#[tokio::test]
+async fn test_pipeline_rejects_every_unmatched_selection_before_batch_start() {
+    let input = tempdir().unwrap();
+    let output = tempdir().unwrap();
+    fs::write(input.path().join("Show - 01.mkv"), b"video").unwrap();
+    fs::write(input.path().join("notes.txt"), b"text").unwrap();
+    fs::create_dir(input.path().join("Output")).unwrap();
+    fs::write(input.path().join("Output/hidden.mkv"), b"hidden").unwrap();
+
+    for mode in [PipelineMode::Extract, PipelineMode::Remux] {
+        let config = PipelineConfig {
+            mode,
+            input_dir: input.path().to_path_buf(),
+            out_dir: Some(output.path().to_path_buf()),
+            selected_items: Some(vec![
+                "Show - 01.mkv".into(),
+                "notes.txt".into(),
+                "Output/hidden.mkv".into(),
+                "ghost.mkv".into(),
+            ]),
+            ..Default::default()
+        };
+        let (tx, mut rx) = create_event_channel(16);
+        let pipeline = BatchPipeline::new(config, Some(tx), CancellationToken::new());
+        let err = pipeline.run().await.unwrap_err();
+        for unmatched in ["notes.txt", "Output/hidden.mkv", "ghost.mkv"] {
+            assert!(err.contains(unmatched), "{err}");
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "invalid selection must not start a batch"
+        );
+        assert_eq!(fs::read_dir(output.path()).unwrap().count(), 0);
+    }
+}
+
+#[tokio::test]
+async fn test_missing_assignment_aborts_entire_remux_plan() {
+    use mkv_core::request::{BatchRequest, TrackAssignment};
+
+    for (assigned_name, dry_run) in [("Show - 02.mkv", false), ("unparseable.mkv", true)] {
+        let input = tempdir().unwrap();
+        let output = tempdir().unwrap();
+        let first = input.path().join("Show - 01.mkv");
+        let assigned = input.path().join(assigned_name);
+        let manual = input.path().join("manual.ass");
+        fs::write(&first, b"first video").unwrap();
+        fs::write(&assigned, b"second video").unwrap();
+        fs::write(input.path().join("Show - 01.ass"), b"first subtitle").unwrap();
+        fs::write(input.path().join("Show - 02.ass"), b"automatic subtitle").unwrap();
+        fs::write(&manual, b"manual subtitle").unwrap();
+
+        let assignment = TrackAssignment {
+            target_video: assigned_name.into(),
+            asset_path: "manual.ass".into(),
+            track_type: Some("subtitle".into()),
+            language: Some("ind".into()),
+            title: Some("Manual".into()),
+            offset_ms: Some(-1250),
+        };
+        let request = BatchRequest {
+            input_dir: input.path().to_path_buf(),
+            assignments: Some(vec![assignment.clone()]),
+            selected_items: Some(vec!["Show - 01.mkv".into(), assigned_name.into()]),
+            ..Default::default()
+        };
+        request.validate().unwrap();
+        fs::remove_file(&manual).unwrap();
+
+        let cache = Arc::new(PersistentInspectCache::new(
+            Some(input.path().join("test_cache.json")),
+            true,
+        ));
+        cache.put_path(&first, sample_video_metadata());
+        cache.put_path(&assigned, sample_video_metadata());
+        cache.save();
+        let config = PipelineConfig {
+            input_dir: input.path().to_path_buf(),
+            out_dir: Some(output.path().to_path_buf()),
+            mode: PipelineMode::Remux,
+            dry_run,
+            cache: Some(cache),
+            track_assignments: Some(vec![assignment]),
+            selected_items: request.selected_items,
+            ..Default::default()
+        };
+        let (tx, mut rx) = create_event_channel(32);
+        let pipeline = BatchPipeline::new(config, Some(tx), CancellationToken::new());
+        let summary = pipeline.run().await.unwrap();
+        assert_eq!(
+            (
+                summary.total,
+                summary.completed,
+                summary.skipped,
+                summary.errors
+            ),
+            (2, 0, 0, 2)
+        );
+        assert!(!summary.cancelled);
+
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        assert!(matches!(
+            events.first(),
+            Some(JobEvent::BatchStart { total: 2, .. })
+        ));
+        let outcomes: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                JobEvent::ItemComplete {
+                    id, status, error, ..
+                } => Some((id.as_str(), status, error.as_deref())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(outcomes.len(), 2);
+        assert!(outcomes
+            .iter()
+            .all(|(_, status, _)| **status == ItemOutcome::Error));
+        assert!(outcomes.iter().any(|(id, _, err)| *id == assigned_name
+            && err.unwrap().contains(&manual.display().to_string())));
+        assert!(outcomes.iter().any(|(id, _, err)| *id == "Show - 01.mkv"
+            && err.unwrap().contains("Batch planning aborted")));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    JobEvent::BatchComplete {
+                        success: false,
+                        cancelled: false,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(fs::read_dir(output.path()).unwrap().count(), 0);
+    }
 }
 
 #[tokio::test]
@@ -843,4 +978,253 @@ async fn test_pipeline_extract_persists_font_hash_memo() {
         cached_hash.is_some(),
         "persisted memo must contain font hash"
     );
+}
+
+fn media_command(command: &mut Command) {
+    let output = command.output().expect("media tool must be installed");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+async fn remux_media_case(input: &Path, assets: &Path, output: &Path) -> (String, String, Vec<u8>) {
+    let pipeline = BatchPipeline::new(
+        PipelineConfig {
+            mode: PipelineMode::Remux,
+            input_dir: input.to_path_buf(),
+            out_dir: Some(output.to_path_buf()),
+            assets_dir: Some(assets.to_path_buf()),
+            no_cache: true,
+            ..Default::default()
+        },
+        None,
+        CancellationToken::new(),
+    );
+    let summary = pipeline.run().await.unwrap();
+    assert_eq!(
+        (summary.completed, summary.errors),
+        (1, 0),
+        "{:?}",
+        summary.log
+    );
+    let mkv = output.join("Season 01/Show - 01.mkv");
+    let metadata = mkv_core::scan::probe_video_mkvmerge(&mkv).await.unwrap();
+    let subtitle = metadata
+        .tracks
+        .iter()
+        .find(|track| track.track_type == "subtitles")
+        .unwrap();
+    let subtitle_id = subtitle.id.unwrap();
+    let subtitle_path = output.join("selected.srt");
+    media_command(
+        Command::new("mkvextract")
+            .arg("tracks")
+            .arg(&mkv)
+            .arg(format!("{subtitle_id}:{}", subtitle_path.display())),
+    );
+    let cover = metadata
+        .attachments
+        .iter()
+        .find(|attachment| {
+            attachment
+                .file_name
+                .as_deref()
+                .is_some_and(|name| name.starts_with("cover."))
+        })
+        .unwrap();
+    let extracted = output.join("selected-cover");
+    media_command(
+        Command::new("mkvextract")
+            .arg("attachments")
+            .arg(&mkv)
+            .arg(format!("{}:{}", cover.id.unwrap(), extracted.display())),
+    );
+    (
+        subtitle.properties.language.clone().unwrap(),
+        fs::read_to_string(subtitle_path).unwrap(),
+        fs::read(extracted).unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn test_real_remux_subtitle_ladder_and_advertised_cover_names() {
+    if ["ffmpeg", "mkvmerge", "mkvextract"]
+        .iter()
+        .any(|binary| Command::new(binary).arg("--version").output().is_err())
+    {
+        eprintln!("Skipping real-media regression: FFmpeg/MKVToolNix not installed");
+        return;
+    }
+    let tmp = tempdir().unwrap();
+    let input = tmp.path().join("input");
+    let season = input.join("Season 01");
+    let assets = tmp.path().join("assets");
+    fs::create_dir_all(&season).unwrap();
+    fs::create_dir_all(&assets).unwrap();
+    let video = season.join("Show - 01.mkv");
+    let embedded = tmp.path().join("embedded.srt");
+    fs::write(
+        &embedded,
+        b"1\n00:00:00,000 --> 00:00:00,900\nEMBEDDED INDONESIAN\n",
+    )
+    .unwrap();
+    let raw = tmp.path().join("raw.mkv");
+    media_command(
+        Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=16x16:r=1:d=1",
+                "-i",
+            ])
+            .arg(&embedded)
+            .args([
+                "-map",
+                "0:v",
+                "-map",
+                "1:s",
+                "-c:v",
+                "mpeg4",
+                "-c:s",
+                "srt",
+                "-metadata:s:s:0",
+                "language=ind",
+                "-y",
+            ])
+            .arg(&raw),
+    );
+    let source_art = tmp.path().join("source.png");
+    fs::write(&source_art, b"SOURCE COVER").unwrap();
+    let source_font = tmp.path().join("source.ttf");
+    fs::write(&source_font, b"SOURCE FONT").unwrap();
+    media_command(
+        Command::new("mkvmerge")
+            .arg("-o")
+            .arg(&video)
+            .args([
+                "--attachment-name",
+                "cover.png",
+                "--attachment-mime-type",
+                "image/png",
+                "--attach-file",
+            ])
+            .arg(&source_art)
+            .args([
+                "--attachment-name",
+                "Test.ttf",
+                "--attachment-mime-type",
+                "application/x-truetype-font",
+                "--attach-file",
+            ])
+            .arg(&source_font)
+            .arg(&raw),
+    );
+
+    let local = season.join("Show - 01.eng.srt");
+    let parent = input.join("Show - 01.eng.srt");
+    fs::write(&local, b"1\n00:00:00,000 --> 00:00:00,900\nLOCAL ENGLISH\n").unwrap();
+    fs::write(
+        &parent,
+        b"1\n00:00:00,000 --> 00:00:00,900\nPARENT ENGLISH\n",
+    )
+    .unwrap();
+    fs::write(assets.join("cover.jpg"), b"FALLBACK COVER").unwrap();
+    fs::write(
+        assets.join("Show - 01.eng.srt"),
+        b"1\n00:00:00,000 --> 00:00:00,900\nFALLBACK ENGLISH\n",
+    )
+    .unwrap();
+
+    for (idx, name) in [
+        "cover.jpg",
+        "folder.jpg",
+        "Show - 01_cover.jpg",
+        "Show - 01.cover.jpg",
+        "Show - 01.jpg",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let cover = season.join(name);
+        let expected = format!("LOCAL COVER {idx}");
+        fs::write(&cover, expected.as_bytes()).unwrap();
+        let output = tmp.path().join(format!("out-{idx}"));
+        let (language, subtitle, attachment) = remux_media_case(&input, &assets, &output).await;
+        assert_eq!(language, "eng");
+        assert!(subtitle.contains("LOCAL ENGLISH"));
+        assert_eq!(attachment, expected.as_bytes());
+        if idx == 0 {
+            let metadata =
+                mkv_core::scan::probe_video_mkvmerge(&output.join("Season 01/Show - 01.mkv"))
+                    .await
+                    .unwrap();
+            assert!(metadata
+                .attachments
+                .iter()
+                .any(|att| att.file_name.as_deref() == Some("Test.ttf")));
+        }
+        fs::remove_file(cover).unwrap();
+    }
+
+    let extract_out = tmp.path().join("extracted");
+    let font_out = extract_out.join("Season 01/fonts");
+    fs::create_dir_all(&font_out).unwrap();
+    let user_font = font_out.join("User.ttf");
+    fs::write(&user_font, b"USER FONT").unwrap();
+    let extract = BatchPipeline::new(
+        PipelineConfig {
+            mode: PipelineMode::Extract,
+            input_dir: input.clone(),
+            out_dir: Some(extract_out),
+            no_cache: true,
+            ..Default::default()
+        },
+        None,
+        CancellationToken::new(),
+    );
+    let extracted = extract.run().await.unwrap();
+    assert_eq!(
+        (extracted.completed, extracted.errors),
+        (1, 0),
+        "{:?}",
+        extracted.log
+    );
+    assert_eq!(fs::read(font_out.join("Test.ttf")).unwrap(), b"SOURCE FONT");
+    assert_eq!(fs::read(user_font).unwrap(), b"USER FONT");
+
+    fs::remove_file(&local).unwrap();
+    let ancestor_cover = input.join("folder.jpg");
+    fs::write(&ancestor_cover, b"ANCESTOR COVER").unwrap();
+    let (language, subtitle, attachment) =
+        remux_media_case(&input, &assets, &tmp.path().join("ancestor")).await;
+    assert_eq!(language, "ind");
+    assert!(subtitle.contains("EMBEDDED INDONESIAN"));
+    assert_eq!(attachment, b"ANCESTOR COVER");
+
+    fs::remove_file(ancestor_cover).unwrap();
+    let (language, subtitle, attachment) =
+        remux_media_case(&input, &assets, &tmp.path().join("embedded")).await;
+    assert_eq!(language, "ind");
+    assert!(subtitle.contains("EMBEDDED INDONESIAN"));
+    assert_eq!(attachment, b"SOURCE COVER");
+
+    let no_embedded = tmp.path().join("no-embedded.mkv");
+    media_command(
+        Command::new("mkvmerge")
+            .arg("-o")
+            .arg(&no_embedded)
+            .args(["--no-subtitles", "--no-attachments"])
+            .arg(&video),
+    );
+    fs::copy(no_embedded, &video).unwrap();
+    let (language, subtitle, attachment) =
+        remux_media_case(&input, &assets, &tmp.path().join("fallback")).await;
+    assert_eq!(language, "eng");
+    assert!(subtitle.contains("PARENT ENGLISH"));
+    assert_eq!(attachment, b"FALLBACK COVER");
 }

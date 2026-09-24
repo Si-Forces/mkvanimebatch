@@ -13,13 +13,13 @@ Domain logic for parsing, indexing, scoring, probing, and executing anime fansub
 ## Domain Invariants
 
 - **Precedence Ladder**:
-  - *Subtitle resolution*: Explicit human track assignments (`TrackAssignment`) take absolute precedence over local directory matches; local external subtitles residing in the release directory take precedence over embedded tracks in the MKV container; embedded tracks take precedence over external subtitles found in `--assets-dir` fallback paths.
-  - *Cover art resolution*: Episode-specific cover artwork (`<stem>.cover.jpg`, `<stem>.jpg`) takes precedence over directory-wide cover art (`cover.<ext>`, `folder.jpg`).
+  - *Subtitle resolution*: A human `TrackAssignment` takes precedence over an exact same-directory external subtitle, then an embedded track, then the nearest matching ancestor external subtitle, then an explicit `--assets-dir` fallback. Source precedence strictly beats language score across sources (e.g. an adjacent English subtitle beats an embedded Indonesian track, but a parent English subtitle cannot displace an embedded Indonesian subtitle; nearest matching ancestor outranks explicit `--assets-dir`).
+  - *Cover art resolution*: The nearest applicable directory wins before cover kind. Within a directory, candidates rank: episode `_cover` (`<video-stem>_cover.<ext>`) > `.cover` (`<video-stem>.cover.<ext>`) > exact adjacent bare stem (`<video-stem>.<ext>`) > directory `cover` (`cover.<ext>`) > directory `folder` (`folder.<ext>`). Equal tiers break ties using natural filename order then full filename. Inapplicable `*_cover` files are never treated as directory covers. Local and ancestor external covers supersede embedded artwork; explicit `--assets-dir` covers apply only when embedded art is absent.
   - *Audio track scoring*: Japanese dialogue tracks take strict precedence over foreign audio tracks, and dialogue tracks strictly supersede secondary commentary/audio-description (`ad`) tracks.
 - **Fail-Fast Preflight Validation**:
   - Every `BatchRequest` is validated synchronously before starting pipeline execution.
   - If any explicit `TrackAssignment` points to a non-existent file on disk, references an unselected or non-existent video, or violates path traversal constraints (`..` or absolute paths outside boundaries), preflight validation fails immediately with an error. No silent fallback to automatic track matching is permitted (ADR-0008).
-  - Non-existent input or output directories, worker counts less than 1, or unparseable audio bitrates fail preflight fast before execution locks are acquired.
+  - A non-existent input directory, an existing regular file at `out_dir`, worker counts less than 1, or unparseable audio bitrates fail preflight before execution locks are acquired. A non-existent `out_dir` is valid and is created only when execution writes output; planning and dry-run do not create media output directories.
 - **Dual-Governor Concurrency**:
   - Worker tasks execute across a unified global `tokio::task::JoinSet` bounded by `workers` semaphore permits.
   - CPU-bound operations (such as FFmpeg Opus audio transcoding) run within the worker slot, while disk-bound remux multiplexing (`mkvmerge`) is separately throttled by `io_semaphore` permits (defaulting to `io_jobs`). This prevents disk I/O thrashing and uncontrolled scratch disk space accumulation (ADR-0011).
@@ -28,6 +28,10 @@ Domain logic for parsing, indexing, scoring, probing, and executing anime fansub
   - Font extraction follows a two-phase protocol (claim → stage → promote) arbitrated by `FontRegistry`.
   - A persistent `FontHashMemo` caches font file signatures and content hashes to eliminate redundant cryptographic hashing of existing directory fonts across batch runs (ADR-0003).
   - An RAII `FontClaimsGuard` holds uncommitted font claims during task execution. If a task fails or cancellation occurs, uncommitted claims are cleanly defused and released, preventing corrupt destination files or deadlocked claim states (ADR-0003).
+- **Mode-Specific Font Handling**:
+  - Extract mode always retains extracted fonts as user output in the target destination directory.
+  - Remux mode discovers and embeds fonts into output Matroska files as container attachments.
+  - Staging directories (`.font_staging/`) are transactionally cleaned up without deleting pre-existing or user-supplied font directories. The inert `keep_fonts` setting has been removed across all request and configuration types.
 - **Monotonic Item Duration**:
   - Wall-clock item execution duration is authoritatively measured by the media engine using monotonic time (`std::time::Instant`) from task start to termination.
   - The measured elapsed duration in seconds is attached as `duration_sec: Option<f64>` on `JobEvent::ItemComplete` (or `None` if skipped/planned without running). Duration is never guessed or calculated using non-monotonic wall clocks (ADR-0009).
@@ -61,7 +65,7 @@ Domain logic for parsing, indexing, scoring, probing, and executing anime fansub
 - **`InspectionManifest`**: Structured immutable document produced by preflight inspection summarizing discovered video files, track metadata, container properties, and candidate external assets.
 - **`BatchItemInfo`**: Value object within an `InspectionManifest` describing an individual media file, its canonical root-relative ID, probe status, metadata, and subtitle candidate paths.
 - **`BatchRequest`**: Canonical serializable specification submitted across the Engine Bridge or constructed from CLI arguments configuring batch operations (input/output paths, preset, assignments, selected items, workers, io_jobs).
-- **`PresetProfile`**: Domain value entity defining an audio encoding quality preset (bitrate, Opus complexity, font retention flags), strictly decoupled from hardware worker counts.
+- **`PresetProfile`**: Domain value entity defining an audio encoding quality preset (bitrate and Opus complexity), strictly decoupled from hardware worker counts.
 - **`TrackAssignment`**: Entity defining an explicit track override for a specific video, carrying relative video path, asset path, track type, custom language tag, custom title, and millisecond time offset (`offset_ms`).
 - **`PlannedJob`**: Internal execution aggregate capturing all resolved parameters, source tracks, external asset paths, and audio transcode settings for an individual episode remux or extraction job.
 - **`PersistentInspectCache`**: Thread-safe, disk-backed cache storing EBML/mkvmerge probe results keyed by file path, size, and modification time to bypass redundant disk probing across runs.
@@ -73,8 +77,12 @@ Domain logic for parsing, indexing, scoring, probing, and executing anime fansub
 | **Release Directory** | A directory containing video files, subtitle files, chapter XMLs, cover images, and fonts belonging to an anime release. | Folder, package, album |
 | **Asset Resolver** | The domain service responsible for discovering, indexing, and matching external and embedded assets (subtitles, chapters, covers, fonts) to video files across ancestor directories. Local assets in the same release directory next to the MKV file take strict precedence over ancestor and fallback assets. | Asset finder, index manager, track matcher |
 | **Episode Info** | The canonical parsed identity of an episode comprising season, episode type (Episode, Part, OVA, Special), and episode number. | Episode tag, episode string |
+| **Subtitle Source** | A human Track Assignment, an external subtitle beside its video, an embedded subtitle track, an ancestor external subtitle, or an explicit fallback external subtitle. | Subtitle candidate pool |
+| **Episode Cover** | Artwork dedicated to an applicable video: `<video-stem>_cover.<ext>`, `<video-stem>.cover.<ext>`, or an exact adjacent `<video-stem>.<ext>`. An inapplicable `_cover` image is not a Directory Cover. | Series poster |
+| **Directory Cover** | Artwork shared by videos in a release directory or its descendants, named only `cover.<ext>` or `folder.<ext>`. The nearest applicable directory wins, with `cover` preceding `folder` at the same level. | Episode cover |
 | **Track Selection Model** | The heuristic scoring engine evaluating audio and subtitle streams based on language priority, track type (dialogue vs signage/commentary), container flags, and codecs. | Audio picker, stream filter, track sorter |
 | **Font Registry** | The transactional component managing font deduplication by content hash and promoting unique font attachments into batch targets. | Font cache, attachment pool |
+| **Extracted Font** | A font extracted from a media file and retained as user output. | Temporary font |
 | **Batch Pipeline** | The bounded execution engine orchestrating media inspection, asset extraction, audio transcoding, and MKV remuxing. | Batch runner, job worker, task loop |
 | **Inspection Manifest** | The structured document produced during preflight inspection summarizing discovered files, track metadata, and candidate external assets. | Execution plan, dry run report |
 | **Item Outcome** | The closed set of terminal statuses a batch item may reach: `completed`, `skipped`, `error`, `cancelled`, `planned`. | Status string, job state, result code |
@@ -83,7 +91,7 @@ Domain logic for parsing, indexing, scoring, probing, and executing anime fansub
 | **Fallback Inspector** | The secondary probing mechanism that delegates to `mkvmerge -J` when native EBML parsing encounters unhandled container extensions or malformed elements. | Backup scanner, external probe |
 | **Log Channel** | The dedicated auxiliary channel streaming real-time diagnostic console text from the media engine to frontend log observers. | Output stream, log buffer, console pipe |
 | **Batch Request** | The canonical serializable specification submitted across the Engine Bridge or constructed from CLI arguments to configure and initiate a Batch Pipeline execution. | Job spec, pipeline config, run arguments |
-| **Preset Profile** | A canonical named bundle of audio transcoding bitrate, encoder complexity, and container retention flags evaluated by the Media Engine for batch remuxing, decoupled from hardware worker concurrency. | Config preset, setting template, encoding profile |
+| **Preset Profile** | A canonical named bundle of audio transcoding bitrate and encoder complexity evaluated by the Media Engine for batch remuxing, decoupled from hardware worker concurrency. | Config preset, setting template, encoding profile |
 | **Track Assignment** | An explicit mapping attaching an external or embedded asset to a specific target video file with designated track type, language tag, and time offset. While the domain model anticipates multi-track stacking, current pipeline execution enforces 1:1 subtitle overrides (`track_type: "subtitle"`). | Sub assignment, manual override, track mapping |
 | **Selected Items** | An ordered subset of canonical relative video paths or item IDs designated in a Batch Request to restrict and sequence pipeline execution. When omitted, all discovered media files execute in natural directory order. | Target filter, whitelist, item subset |
 | **Transcode Governor** | The dynamic calculation mechanism deriving FFmpeg worker thread concurrency from physical CPU core topology and active batch workers (`(total_physical_cores / workers).clamp(1, 4)`). | Thread scaler, core allocator |

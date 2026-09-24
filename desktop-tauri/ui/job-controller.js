@@ -74,6 +74,38 @@ export class JobController {
     }
   }
 
+  restoreActiveSnapshot(snapshot, unlistenEvent, unlistenDone) {
+    this.unlistenEvent = unlistenEvent;
+    this.unlistenDone = unlistenDone;
+    this.jobId = snapshot.job_id;
+    this.launched = true;
+    this.lastExitCode = null;
+    this.runtime.coordinator.activeMode = this.mode;
+    this.runtime.coordinator.isStarting = false;
+    this.runtime.coordinator.isStopping = false;
+    this.setRunning(true);
+    this.runtime.updateWorkerChips(true);
+    this.runtime.telemetryLoop.setJobActive(true);
+  }
+
+  restoreTerminalSnapshot(snapshot) {
+    this.lifecycle = snapshot.status === "completed" ? "done" : snapshot.status === "cancelled" ? "cancelled" : "failed";
+    this.renderStatus();
+  }
+
+  handleSnapshotSignal(type, payload, replay = false) {
+    if (!this.running || payload?.job_id !== this.jobId || (payload.mode && payload.mode !== this.mode)) return;
+    if (type === "done") {
+      this.onDone(payload.code);
+    } else if (type === "event") {
+      const queue = this.runtime.queueFor(this.mode);
+      // A pre-fetch progress event may already be reflected in the snapshot.
+      if (replay && payload.type === "item_progress" && typeof payload.progress === "number" &&
+          payload.progress < (queue.state?.items?.get(payload.id)?.progress ?? -Infinity)) return;
+      queue.handleEvent(payload);
+    }
+  }
+
   cleanupListeners() {
     for (const key of ["unlistenLog", "unlistenEvent", "unlistenDone"]) {
       if (this[key]) {
@@ -122,7 +154,6 @@ export class JobController {
     let bitrate = null;
     let complexity = null;
     let ffmpegThreads = null;
-    let keepFonts = null;
 
     if (this.mode === "remux") {
       assetsDir = val("assets-dir") || null;
@@ -131,7 +162,6 @@ export class JobController {
       complexity = cplx ? parseInt(cplx, 10) : null;
       const ffmpegVal = val("ffmpeg-threads");
       ffmpegThreads = ffmpegVal ? parseInt(ffmpegVal, 10) : null;
-      keepFonts = chk("keep-fonts");
     }
 
     const activePresetEl = typeof document?.querySelector === "function"
@@ -160,7 +190,6 @@ export class JobController {
       io_jobs: ioJobs,
       ffmpeg_threads: ffmpegThreads,
       sub_offset: subOffset,
-      keep_fonts: keepFonts,
       dry_run: dryRun,
       no_cache: noCache,
       assignments: null,
@@ -193,7 +222,9 @@ export class JobController {
       return;
     }
     const generation = ++this.startGeneration;
-    const assignmentSnapshot = new Map(this.runtime.queueFor(this.mode).assignments);
+    const tracker = this.runtime.queueFor(this.mode);
+    const selectedIds = tracker.getSelectedOrderedItemIds();
+    const assignmentSnapshot = new Map(tracker.assignments);
     if (!this.runtime.coordinator.begin(this.mode)) return;
     this.runtime.closeSubAssignModal();
 
@@ -207,7 +238,8 @@ export class JobController {
     this.runtime.telemetryLoop.setJobActive(true);
 
     const inspected = await this.runtime.scanInputDirectory(inputDir, this.mode, { force: true, options });
-    if (generation !== this.startGeneration || !this.runtime.coordinator.isStarting) {
+    if (generation !== this.startGeneration) return;
+    if (!this.runtime.coordinator.isStarting) {
       this.runtime.appendLog(this.logEl, "[INFO] Start aborted by stop request.");
       this.abortStart(true);
       return;
@@ -218,42 +250,38 @@ export class JobController {
       return;
     }
 
-    const tracker = this.runtime.queueFor(this.mode);
-    let selectedIds = null;
-    if (typeof tracker?.getSelectedOrderedItemIds === "function") {
-      const totalItems = tracker.state?.totalCount ?? 0;
-      selectedIds = tracker.getSelectedOrderedItemIds();
-      if (totalItems > 0 && selectedIds.length === 0) {
-        this.runtime.appendLog(this.logEl, "[ERROR] No episodes selected in queue.");
-        this.abortStart();
-        return;
-      }
-      if (selectedIds.length > 0) {
-        batchRequest.selected_items = selectedIds;
-      }
+    if (selectedIds.length === 0) {
+      this.runtime.appendLog(this.logEl, "[ERROR] No episodes selected in queue.");
+      this.abortStart();
+      return;
     }
+    const discoveredIds = new Set(tracker.lastManifest?.items?.map(item => item.id) ?? []);
+    const missingIds = selectedIds.filter(id => !discoveredIds.has(id));
+    if (missingIds.length) {
+      this.runtime.appendLog(this.logEl, `[ERROR] Selected episodes disappeared during inspection: ${missingIds.join(", ")}. Job was not started.`);
+      this.abortStart();
+      return;
+    }
+    batchRequest.selected_items = selectedIds;
 
-    if (batchRequest && this.mode === "remux") {
+    if (this.mode === "remux") {
       const fullAssignments = buildTrackAssignmentsForManifest(assignmentSnapshot, tracker.lastManifest);
-      if (fullAssignments) {
-        if (selectedIds && selectedIds.length > 0) {
-          const selectedSet = new Set(selectedIds);
-          batchRequest.assignments = fullAssignments.filter(a => selectedSet.has(a.target_video));
-        } else {
-          batchRequest.assignments = fullAssignments;
-        }
-      } else {
-        batchRequest.assignments = null;
-      }
+      const selectedSet = new Set(selectedIds);
+      batchRequest.assignments = fullAssignments?.filter(a => selectedSet.has(a.target_video)) ?? null;
     }
     this.cleanupListeners();
 
     const earlyEvents = [];
     const earlyDone = [];
+    const unlisteners = [];
+    let launched = false;
 
     try {
-      this.unlistenLog = await this.runtime.listen("job-log", e => this.runtime.appendLog(this.logEl, e.payload));
-      this.unlistenEvent = await this.runtime.listen("job-event", e => {
+      unlisteners.push(await this.runtime.listen("job-log", e => {
+        if (generation === this.startGeneration || launched) this.runtime.appendLog(this.logEl, e.payload);
+      }));
+      unlisteners.push(await this.runtime.listen("job-event", e => {
+        if (generation !== this.startGeneration && !launched) return;
         if (this.jobId === null) {
           earlyEvents.push(e);
           return;
@@ -261,8 +289,9 @@ export class JobController {
         if (e.payload?.job_id === this.jobId && (!e.payload?.mode || e.payload.mode === this.mode)) {
           tracker.handleEvent(e.payload);
         }
-      });
-      this.unlistenDone = await this.runtime.listen("job-done", e => {
+      }));
+      unlisteners.push(await this.runtime.listen("job-done", e => {
+        if (generation !== this.startGeneration && !launched) return;
         const payload = e.payload;
         if (this.jobId === null) {
           earlyDone.push(e);
@@ -271,21 +300,25 @@ export class JobController {
         if (typeof payload === "object" && payload?.mode && payload.mode !== this.mode) return;
         if (payload?.job_id !== this.jobId) return;
         this.onDone(typeof payload === "object" ? payload.code : payload);
-      });
+      }));
     } catch (err) {
+      unlisteners.forEach(unlisten => unlisten());
+      if (generation !== this.startGeneration) return;
       this.runtime.appendLog(this.logEl, `[ERROR] Listeners failed: ${err}`);
       this.abortStart();
       return;
     }
 
     if (generation !== this.startGeneration || this.runtime.coordinator.isStopping) {
-      this.runtime.appendLog(this.logEl, "[INFO] Start aborted by stop request.");
-      this.abortStart(true);
+      unlisteners.forEach(unlisten => unlisten());
+      if (generation === this.startGeneration) this.abortStart(true);
       return;
     }
+    [this.unlistenLog, this.unlistenEvent, this.unlistenDone] = unlisteners;
 
     try {
       this.launched = true;
+      launched = true;
       this.runtime.coordinator.isStarting = false;
       this.launchPromise = this.runtime.invoke("run_job", {
         request: batchRequest,
@@ -316,7 +349,7 @@ export class JobController {
 
   async stop() {
     if (!this.running || this.runtime.coordinator.isStopping) return;
-    ++this.startGeneration;
+    const generation = ++this.startGeneration;
     this.runtime.coordinator.isStarting = false;
     this.runtime.coordinator.isStopping = true;
     this.lifecycle = "stopping";
@@ -325,13 +358,18 @@ export class JobController {
 
     try {
       if (this.launched && this.jobId === null && this.launchPromise) {
-        this.jobId = await this.launchPromise;
+        const jobId = await this.launchPromise;
+        if (!this.running || generation !== this.startGeneration) return;
+        this.jobId = jobId;
       }
-      await this.runtime.invoke("stop_job", { jobId: this.jobId });
+      const jobId = this.jobId;
+      await this.runtime.invoke("stop_job", { jobId });
+      if (!this.running || generation !== this.startGeneration || this.jobId !== jobId) return;
       if (this.launched) {
         this.runtime.appendLog(this.logEl, "[INFO] Stop requested; waiting for shutdown.");
       }
     } catch (err) {
+      if (!this.running || generation !== this.startGeneration) return;
       this.runtime.appendLog(this.logEl, `[ERROR] ${err}`);
       if (this.jobId !== null) {
         this.runtime.coordinator.isStopping = false;
@@ -392,8 +430,7 @@ export class JobController {
     const hasItems = (tracker?.state?.totalCount ?? 0) > 0;
     const selectedCount = tracker?.getSelectedCount?.() ?? 0;
     const selectionDisabled = hasItems && selectedCount === 0;
-
-    if (this.runBtn) this.runBtn.disabled = busy || selectionDisabled;
+    if (this.runBtn) this.runBtn.disabled = busy || this.runtime.coordinator.isStarting || selectionDisabled;
     for (const control of this.formControls) control.disabled = busy;
     document.querySelectorAll(`#view-${this.mode} .sub-assign-btn`).forEach(control => {
       control.disabled = busy;

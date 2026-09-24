@@ -132,7 +132,6 @@ pub struct PipelineConfig {
     pub complexity: u32,
     pub ffmpeg_threads: usize,
     pub sub_offset: f64,
-    pub keep_fonts: bool,
     #[deprecated(since = "1.0.0", note = "Use track_assignments instead")]
     pub sub_assignments: Option<HashMap<String, PathBuf>>,
     /// Canonical track assignments for multi-track or custom asset overrides.
@@ -160,7 +159,6 @@ impl Default for PipelineConfig {
             complexity: 5,
             ffmpeg_threads: 2,
             sub_offset: 0.0,
-            keep_fonts: false,
             track_assignments: None,
             sub_assignments: None,
             selected_items: None,
@@ -194,33 +192,39 @@ fn apply_selected_items(
     files: Vec<ParsedFile>,
     input_dir: &Path,
     selected_items: Option<&[String]>,
-) -> Vec<ParsedFile> {
+) -> Result<Vec<ParsedFile>, String> {
     let Some(selected) = selected_items else {
-        return files;
+        return Ok(files);
     };
-    let mut file_map: HashMap<String, ParsedFile> = HashMap::new();
-    for f in files {
-        let id = get_item_id(&f.path, input_dir);
-        let rel_path = f
-            .path
-            .strip_prefix(input_dir)
-            .map(|p| p.to_string_lossy().replace('\\', "/"))
-            .unwrap_or_else(|_| f.name.clone());
-        let clean_rel = crate::request::clean_relative_path(&rel_path);
-        file_map.insert(id, f.clone());
-        file_map.insert(clean_rel, f);
-    }
+    let mut file_map: HashMap<String, ParsedFile> = files
+        .into_iter()
+        .map(|file| {
+            (
+                clean_relative_path(&get_item_id(&file.path, input_dir)),
+                file,
+            )
+        })
+        .collect();
     let mut ordered = Vec::with_capacity(selected.len());
     let mut seen = HashSet::new();
+    let mut unmatched = Vec::new();
     for item in selected {
-        let norm = crate::request::clean_relative_path(item);
-        if let Some(f) = file_map.get(&norm).or_else(|| file_map.get(item)) {
-            if seen.insert(f.path.clone()) {
-                ordered.push(f.clone());
-            }
+        let norm = clean_relative_path(item);
+        if let Some(file) = file_map.remove(&norm) {
+            seen.insert(norm);
+            ordered.push(file);
+        } else if !seen.contains(&norm) {
+            unmatched.push(item.as_str());
         }
     }
-    ordered
+    if unmatched.is_empty() {
+        Ok(ordered)
+    } else {
+        Err(format!(
+            "Selected items not found among discovered MKV files: {}",
+            unmatched.join(", ")
+        ))
+    }
 }
 
 pub struct BatchPipeline {
@@ -293,7 +297,7 @@ impl BatchPipeline {
             files,
             &self.config.input_dir,
             self.config.selected_items.as_deref(),
-        );
+        )?;
         summary.total = files.len();
 
         let items: Vec<BatchItemInfo> = files
@@ -672,7 +676,7 @@ impl BatchPipeline {
             files,
             &self.config.input_dir,
             self.config.selected_items.as_deref(),
-        );
+        )?;
         summary.total = files.len();
 
         let items: Vec<BatchItemInfo> = files
@@ -863,6 +867,8 @@ impl BatchPipeline {
         }
 
         let mut all_planned_jobs: Vec<(PlannedJob, TrackSelection, FontInfo)> = Vec::new();
+        let mut planning_outcomes = Vec::new();
+        let mut planning_error: Option<(usize, String)> = None;
 
         // Sequence planned jobs strictly adhering to custom files ordering across directories
         let mut assignment_index: HashMap<String, &TrackAssignment> = HashMap::new();
@@ -904,7 +910,7 @@ impl BatchPipeline {
                 summary.cancelled = true;
                 for rem in &files[v_idx..] {
                     let rem_id = get_item_id(&rem.path, &self.config.input_dir);
-                    self.emit(JobEvent::ItemComplete {
+                    planning_outcomes.push(JobEvent::ItemComplete {
                         version: EVENT_VERSION,
                         id: rem_id,
                         file: rem.name.clone(),
@@ -913,8 +919,7 @@ impl BatchPipeline {
                         error: None,
                         duration_sec: None,
                         extra: Default::default(),
-                    })
-                    .await;
+                    });
                 }
                 break;
             }
@@ -929,13 +934,43 @@ impl BatchPipeline {
                 continue;
             };
 
+            let clean_rel = clean_relative_path(&item_id);
+            let rel_from_input = video_file
+                .path
+                .strip_prefix(&self.config.input_dir)
+                .ok()
+                .map(|p| clean_relative_path(&p.to_string_lossy()));
+
+            let matched_assignment = assignment_index
+                .get(&item_id)
+                .or_else(|| assignment_index.get(&clean_rel))
+                .or_else(|| {
+                    rel_from_input
+                        .as_deref()
+                        .and_then(|r| assignment_index.get(r))
+                })
+                .or_else(|| assignment_index.get(&video_file.name))
+                .copied();
+
+            let assigned_sub_path = matched_assignment.map(|a| {
+                a.resolve_asset_path(&self.config.input_dir, self.config.assets_dir.as_deref())
+            });
+            let assigned_sub = assigned_sub_path.as_deref();
+            if let Some(missing) = assigned_sub.filter(|path| !path.is_file()) {
+                planning_error = Some((
+                    v_idx,
+                    format!("Assigned subtitle '{}' no longer exists", missing.display()),
+                ));
+                break;
+            }
+
             let Some(parsed) = &video_file.parsed else {
                 summary.skipped += 1;
                 let reason = "Could not extract episode number from filename";
                 summary
                     .log
                     .push(format!("Skipping '{}': {reason}", video_file.name));
-                self.emit(JobEvent::ItemComplete {
+                planning_outcomes.push(JobEvent::ItemComplete {
                     version: EVENT_VERSION,
                     id: item_id,
                     file: video_file.name.clone(),
@@ -944,8 +979,7 @@ impl BatchPipeline {
                     error: None,
                     duration_sec: None,
                     extra: Default::default(),
-                })
-                .await;
+                });
                 continue;
             };
 
@@ -981,9 +1015,8 @@ impl BatchPipeline {
                         "  ERROR: Failed to probe '{}': {err}",
                         video_file.path.display()
                     );
-                    self.log(&msg).await;
                     summary.log.push(msg);
-                    self.emit(JobEvent::ItemComplete {
+                    planning_outcomes.push(JobEvent::ItemComplete {
                         version: EVENT_VERSION,
                         id: item_id,
                         file: video_file.name.clone(),
@@ -992,45 +1025,27 @@ impl BatchPipeline {
                         error: Some(err),
                         duration_sec: None,
                         extra: Default::default(),
-                    })
-                    .await;
+                    });
                     continue;
                 }
             };
-
-            let clean_rel = clean_relative_path(&item_id);
-            let rel_from_input = video_file
-                .path
-                .strip_prefix(&self.config.input_dir)
-                .ok()
-                .map(|p| clean_relative_path(&p.to_string_lossy()));
-
-            let matched_assignment = assignment_index
-                .get(&item_id)
-                .or_else(|| assignment_index.get(&clean_rel))
-                .or_else(|| {
-                    rel_from_input
-                        .as_deref()
-                        .and_then(|r| assignment_index.get(r))
-                })
-                .or_else(|| assignment_index.get(&video_file.name))
-                .copied();
-
-            let assigned_sub_path = matched_assignment.map(|a| {
-                a.resolve_asset_path(&self.config.input_dir, self.config.assets_dir.as_deref())
-            });
-            let assigned_sub = assigned_sub_path.as_deref();
 
             let claimed_chapter = dir_prep
                 .chapter_claims
                 .get(&video_file.path)
                 .map(|p| p.as_path());
-            let res_assets = dir_prep.resolver.resolve_for(
+            let res_assets = match dir_prep.resolver.resolve_for(
                 video_file,
                 Some(&inspected),
                 claimed_chapter,
                 assigned_sub,
-            );
+            ) {
+                Ok(assets) => assets,
+                Err(err) => {
+                    planning_error = Some((v_idx, err));
+                    break;
+                }
+            };
 
             if !res_assets.matched_subtitle {
                 summary.skipped += 1;
@@ -1038,9 +1053,8 @@ impl BatchPipeline {
                     .skip_reason
                     .unwrap_or_else(|| "No matching subtitle found".into());
                 let log_msg = format!("Skipping '{}': {reason}", video_file.name);
-                self.log(&log_msg).await;
                 summary.log.push(log_msg);
-                self.emit(JobEvent::ItemComplete {
+                planning_outcomes.push(JobEvent::ItemComplete {
                     version: EVENT_VERSION,
                     id: item_id,
                     file: video_file.name.clone(),
@@ -1049,11 +1063,12 @@ impl BatchPipeline {
                     error: None,
                     duration_sec: None,
                     extra: Default::default(),
-                })
-                .await;
+                });
                 continue;
             }
 
+            let matched_assignment =
+                matched_assignment.filter(|_| res_assets.subtitle_file.as_deref() == assigned_sub);
             let job = PlannedJob {
                 video: video_file.path.clone(),
                 video_name: video_file.name.clone(),
@@ -1081,9 +1096,8 @@ impl BatchPipeline {
                     video_file.name,
                     job.output_file.display()
                 );
-                self.log(&msg).await;
                 summary.log.push(msg);
-                self.emit(JobEvent::ItemComplete {
+                planning_outcomes.push(JobEvent::ItemComplete {
                     version: EVENT_VERSION,
                     id: item_id,
                     file: video_file.name.clone(),
@@ -1092,13 +1106,60 @@ impl BatchPipeline {
                     error: None,
                     duration_sec: None,
                     extra: Default::default(),
-                })
-                .await;
+                });
                 summary.completed += 1;
                 continue;
             }
 
             all_planned_jobs.push((job, selection, dir_prep.font_info.clone()));
+        }
+
+        if let Some((failed_idx, err)) = planning_error {
+            let aborted = format!(
+                "Batch planning aborted because '{}': {err}",
+                files[failed_idx].name
+            );
+            let msg = format!(
+                "  ERROR: Remux planning failed for '{}': {err}",
+                files[failed_idx].name
+            );
+            self.log(&msg).await;
+            summary = PipelineSummary {
+                total: files.len(),
+                errors: files.len(),
+                log: vec![msg],
+                ..Default::default()
+            };
+            for (idx, file) in files.iter().enumerate() {
+                self.emit(JobEvent::ItemComplete {
+                    version: EVENT_VERSION,
+                    id: get_item_id(&file.path, &self.config.input_dir),
+                    file: file.name.clone(),
+                    status: ItemOutcome::Error,
+                    reason: None,
+                    error: Some(if idx == failed_idx {
+                        err.clone()
+                    } else {
+                        aborted.clone()
+                    }),
+                    duration_sec: None,
+                    extra: Default::default(),
+                })
+                .await;
+            }
+            self.emit(JobEvent::BatchComplete {
+                version: EVENT_VERSION,
+                success: false,
+                cancelled: false,
+                extra: Default::default(),
+            })
+            .await;
+            return Ok(summary);
+        }
+
+        self.log_batch(&summary.log).await;
+        for outcome in planning_outcomes {
+            self.emit(outcome).await;
         }
 
         if !summary.cancelled && !all_planned_jobs.is_empty() {

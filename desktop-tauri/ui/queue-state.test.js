@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   createQueueState,
+  reconcileQueueSelection,
   reduceQueueEvent,
   finalizeQueueState,
   carryOverAssignments,
@@ -657,6 +658,7 @@ test("createQueueStateFromSnapshot constructs state and counts from JobSnapshot"
     mode: "extract",
     status: "completed",
     start_time_ms: 123456789,
+    ordered_item_ids: ["ep1.mkv", "ep2.mkv", "ep3.mkv", "ep4.mkv"],
     items: {
       "ep1.mkv": { id: "ep1.mkv", file: "Show - 01.mkv", status: "completed", duration_sec: 5.4 },
       "ep2.mkv": { id: "ep2.mkv", file: "Show - 02.mkv", status: "skipped", reason: "Already extracted" },
@@ -696,6 +698,7 @@ test("createQueueStateFromSnapshot resolves in-flight processing and queued item
     mode: "remux",
     status: "cancelled",
     start_time_ms: 123456789,
+    ordered_item_ids: ["ep1.mkv", "ep2.mkv", "ep3.mkv"],
     items: {
       "ep1.mkv": { id: "ep1.mkv", file: "Show - 01.mkv", status: "completed", duration_sec: 4.2 },
       "ep2.mkv": { id: "ep2.mkv", file: "Show - 02.mkv", status: "processing" },
@@ -722,6 +725,7 @@ test("createQueueStateFromSnapshot resolves in-flight processing and queued item
     mode: "extract",
     status: "error",
     start_time_ms: 123456789,
+    ordered_item_ids: ["ep1.mkv", "ep2.mkv", "ep3.mkv"],
     items: {
       "ep1.mkv": { id: "ep1.mkv", file: "Show - 01.mkv", status: "completed", duration_sec: 5.0 },
       "ep2.mkv": { id: "ep2.mkv", file: "Show - 02.mkv", status: "processing" },
@@ -748,6 +752,7 @@ test("createQueueStateFromSnapshot sets startTime for active in-flight processin
     mode: "remux",
     status: "running",
     start_time_ms: 123456789,
+    ordered_item_ids: ["ep1.mkv", "ep2.mkv"],
     items: {
       "ep1.mkv": { id: "ep1.mkv", file: "Show - 01.mkv", status: "processing" },
       "ep2.mkv": { id: "ep2.mkv", file: "Show - 02.mkv", status: "queued" },
@@ -761,6 +766,33 @@ test("createQueueStateFromSnapshot sets startTime for active in-flight processin
   assert.equal(state.items.get("ep1.mkv").startTime, fixedNow);
   assert.equal(state.items.get("ep2.mkv").status, "queued");
   assert.equal(state.items.get("ep2.mkv").startTime, null);
+});
+
+test("snapshot projects only ordered Active Batch items, saved progress and per-item elapsed start", () => {
+  const snapshot = {
+    status: "running",
+    start_time_ms: 100,
+    total_items: 3,
+    ordered_item_ids: ["02", "01", "missing"],
+    items: {
+      "01": { id: "01", file: "01.mkv", status: "queued" },
+      "03": { id: "03", file: "03.mkv", status: "queued" },
+      "02": { id: "02", file: "02.mkv", status: "processing", progress: 70, start_time_ms: 2000 },
+    },
+  };
+  const state = createQueueStateFromSnapshot(snapshot, { now: 30000 });
+  assert.deepEqual(state.order, ["02", "01"]);
+  assert.deepEqual([...state.items.keys()], ["02", "01"]);
+  assert.equal(state.totalCount, 2);
+  assert.equal(state.items.get("02").progress, 70);
+  assert.equal(state.items.get("02").startTime, 2000);
+
+  reduceQueueEvent(state, { version: 1, type: "item_complete", id: "02", status: "completed", duration_sec: 4.2 });
+  assert.equal(state.items.get("02").durationSec, 4.2);
+  assert.equal(state.items.get("02").status, "completed");
+
+  snapshot.items["02"].progress = 125;
+  assert.equal(createQueueStateFromSnapshot(snapshot).items.get("02").progress, 100);
 });
 
 test("formatOutcomeDuration formats null, existing formatted strings, and seconds thresholds", () => {
@@ -943,5 +975,18 @@ test("item selection and reordering helpers", () => {
   assert.deepEqual(state.order, ["e1", "e2", "e3"]);
   reorderItem(state, "e3", "down"); // at bottom, noop
   assert.deepEqual(state.order, ["e1", "e2", "e3"]);
+});
+
+test("reconcileQueueSelection keeps surviving choices and order, appending new IDs unselected", () => {
+  const manifest = ids => ({ version: 2, items: ids.map(id => ({ id, name: id })) });
+  const previous = createQueueState(manifest(["ep1", "ep2", "gone"]));
+  toggleItemSelection(previous, "ep1", false);
+  reorderItem(previous, "ep2", "up");
+
+  const replacement = reconcileQueueSelection(createQueueState(manifest(["ep1", "new", "ep2"])), previous);
+  assert.deepEqual(replacement.order, ["ep2", "ep1", "new"]);
+  assert.deepEqual(replacement.order.map(id => replacement.items.get(id).selected), [true, false, false]);
+  assert.equal(replacement.items.has("gone"), false);
+  assert.deepEqual(previous.order, ["ep2", "ep1", "gone"]);
 });
 

@@ -151,6 +151,23 @@ export function createQueueState(manifest, options = {}) {
 
   return state;
 }
+/** Preserve surviving selection and order; append newly inspected IDs unselected. */
+export function reconcileQueueSelection(state, previous) {
+  const order = [];
+  for (const id of previous.order) {
+    const item = state.items.get(id);
+    if (!item) continue;
+    item.selected = previous.items.get(id)?.selected !== false;
+    order.push(id);
+  }
+  for (const id of state.order) {
+    if (previous.items.has(id)) continue;
+    state.items.get(id).selected = false;
+    order.push(id);
+  }
+  state.order = order;
+  return state;
+}
 
 /**
  * Creates and initializes a queue state projection from an in-memory JobSnapshot.
@@ -176,13 +193,13 @@ export function createQueueStateFromSnapshot(snapshot, options = {}) {
     errorCount: 0,
   };
 
-  if (!snapshot || !snapshot.items) {
+  if (!snapshot || !snapshot.items || !Array.isArray(snapshot.ordered_item_ids)) {
     return state;
   }
 
-  for (const snapItem of Object.values(snapshot.items)) {
-    if (!snapItem || !snapItem.id) continue;
-    const id = String(snapItem.id);
+  for (const id of snapshot.ordered_item_ids) {
+    const snapItem = snapshot.items[id];
+    if (!snapItem || state.items.has(id)) continue;
     const name = String(snapItem.file || id);
     const status = snapItem.status || "queued";
 
@@ -198,8 +215,10 @@ export function createQueueStateFromSnapshot(snapshot, options = {}) {
       metadata: null,
       inspectionError: null,
       status: resolvedStatus,
-      startTime: resolvedStatus === "processing" ? (options.now ?? Date.now()) : null,
+      startTime: resolvedStatus === "processing" ? (snapItem.start_time_ms ?? options.now ?? Date.now()) : null,
       durationSec: snapItem.duration_sec ?? null,
+      progress: resolvedStatus === "processing" && typeof snapItem.progress === "number"
+        ? Math.min(100, Math.max(0, snapItem.progress)) : null,
       reason: snapItem.reason ?? null,
       error: snapItem.error ?? null,
       selected: true,
@@ -213,10 +232,6 @@ export function createQueueStateFromSnapshot(snapshot, options = {}) {
     else if (resolvedStatus === "skipped") state.skippedCount++;
     else if (resolvedStatus === "cancelled") state.cancelledCount++;
     else if (resolvedStatus === "error") state.errorCount++;
-  }
-
-  if (typeof snapshot.total_items === "number" && snapshot.total_items > state.totalCount) {
-    state.totalCount = snapshot.total_items;
   }
 
   return state;

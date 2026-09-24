@@ -70,13 +70,11 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Run Rust workspace unit and integration tests
-        shell: bash
-        run: |
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            cargo test -p mkv-core -p mkv-cli --verbose
-          else
-            cargo test --workspace --verbose
-          fi
+        run: cargo test --workspace --verbose
+
+      - name: Build Desktop App Binary (Windows Release)
+        if: runner.os == 'Windows'
+        run: cargo build --release -p mkv-anime-batch
 
   # ────────────────────────────────────────────────────────────────────────────
   # 2. Release Verification: Frontend UI State & Contract Tests

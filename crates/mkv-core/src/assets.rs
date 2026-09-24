@@ -3,20 +3,18 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
 
-use regex::Regex;
 use tracing::{info, warn};
 
 use crate::domain::{
     ancestor_dirs, detect_sub_lang, is_dialogue_track, lang_label, lang_mkv_tag, natural_sort_key,
     parse_episode, score_subtitle_category, seasons_match, select_best_subtitle_track, EpisodeInfo,
-    SUBTITLE_LANGS_FALLBACK_ORDER, SUBTITLE_LANGS_PRIMARY_ORDER,
+    NaturalSortToken, COVER_EXTENSIONS, SUBTITLE_LANGS_FALLBACK_ORDER,
+    SUBTITLE_LANGS_PRIMARY_ORDER,
 };
 use crate::fonts::{find_fonts_dir, scan_fonts, FontInfo};
 use crate::scan::{
-    is_chapter_xml, is_cover_filename, scan_assets, InspectedVideo, InspectionResult, ParsedFile,
-    ScanResults,
+    is_chapter_xml, scan_assets, InspectedVideo, InspectionResult, ParsedFile, ScanResults,
 };
 
 fn ep_key(info: &EpisodeInfo) -> String {
@@ -175,6 +173,7 @@ fn reject_duplicate(
 pub struct SubIndex {
     index: HashMap<String, Vec<SubEntry>>,
     index_paths: HashMap<String, HashSet<PathBuf>>,
+    directories: Vec<PathBuf>,
     unparsed: Vec<ParsedFile>,
     unparsed_paths: HashSet<PathBuf>,
 }
@@ -199,10 +198,45 @@ impl SubIndex {
             return;
         }
         paths.insert(sub_file.path.clone());
+        if let Some(dir) = sub_file.path.parent() {
+            if !self.directories.iter().any(|existing| existing == dir) {
+                self.directories.push(dir.to_path_buf());
+            }
+        }
         self.index
             .entry(key)
             .or_default()
             .push(make_sub_entry(sub_file));
+    }
+
+    fn lookup_ranked(
+        &self,
+        parsed: &EpisodeInfo,
+        rank: impl Fn(&Path) -> Option<usize>,
+    ) -> Option<(PathBuf, String)> {
+        let entries = self.index.get(&ep_key(parsed))?;
+        entries
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, entry)| {
+                let file_parsed = entry.file.parsed.as_ref()?;
+                if !seasons_match(&parsed.season, &file_parsed.season) {
+                    return None;
+                }
+                let distance = rank(entry.file.path.parent()?)?;
+                Some((
+                    (
+                        std::cmp::Reverse(distance),
+                        entry.category_score,
+                        entry.is_dialogue,
+                        std::cmp::Reverse(entry.file.name.len()),
+                        std::cmp::Reverse(idx),
+                    ),
+                    entry,
+                ))
+            })
+            .max_by_key(|(priority, _)| *priority)
+            .map(|(_, best)| (best.file.path.clone(), best.lang.clone()))
     }
 
     pub fn lookup(
@@ -210,35 +244,24 @@ impl SubIndex {
         parsed: &EpisodeInfo,
         local_dir: Option<&Path>,
     ) -> Option<(PathBuf, String)> {
-        let key = ep_key(parsed);
-        let entries = self.index.get(&key)?;
+        self.lookup_ranked(parsed, |dir| Some(usize::from(local_dir != Some(dir))))
+    }
 
-        let mut candidates = Vec::new();
-        for (idx, entry) in entries.iter().enumerate() {
-            if let Some(file_parsed) = &entry.file.parsed {
-                if seasons_match(&parsed.season, &file_parsed.season) {
-                    let is_local =
-                        if local_dir.is_some_and(|dir| entry.file.path.parent() == Some(dir)) {
-                            1
-                        } else {
-                            0
-                        };
-                    let priority = (
-                        is_local,
-                        entry.category_score,
-                        if entry.is_dialogue { 1 } else { 0 },
-                        -(entry.file.name.len() as i64),
-                        -(idx as i64),
-                    );
-                    candidates.push((priority, entry));
-                }
-            }
-        }
+    pub fn lookup_same_dir(&self, parsed: &EpisodeInfo, dir: &Path) -> Option<(PathBuf, String)> {
+        self.lookup_ranked(parsed, |candidate| (candidate == dir).then_some(0))
+    }
 
-        candidates
-            .into_iter()
-            .max_by_key(|c| c.0)
-            .map(|(_, best)| (best.file.path.clone(), best.lang.clone()))
+    pub fn lookup_ancestors(&self, parsed: &EpisodeInfo, dir: &Path) -> Option<(PathBuf, String)> {
+        self.lookup_ranked(parsed, |candidate| {
+            dir.ancestors()
+                .skip(1)
+                .position(|ancestor| ancestor == candidate)
+        })
+    }
+    pub fn lookup_fallback(&self, parsed: &EpisodeInfo) -> Option<(PathBuf, String)> {
+        self.lookup_ranked(parsed, |candidate| {
+            self.directories.iter().position(|dir| dir == candidate)
+        })
     }
 
     pub fn is_empty(&self) -> bool {
@@ -356,13 +379,27 @@ impl ChapterIndex {
 
 // ─── COVER INDEX ─────────────────────────────────────────────────────────────
 
-static COVER_FILE_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)^(?P<stem>.+)_cover$").unwrap());
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum CoverKind {
+    Underscore,
+    Dot,
+    Adjacent,
+    Cover,
+    Folder,
+}
+
+#[derive(Debug, Clone)]
+struct CoverEntry {
+    file: ParsedFile,
+    episode: Option<EpisodeInfo>,
+    kind: CoverKind,
+    natural_name: Vec<NaturalSortToken>,
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct CoverIndex {
-    index: HashMap<String, Vec<(PathBuf, String)>>,
-    pub global: Option<PathBuf>,
+    entries: Vec<CoverEntry>,
+    directories: Vec<PathBuf>,
 }
 
 impl CoverIndex {
@@ -371,77 +408,117 @@ impl CoverIndex {
     }
 
     pub fn add(&mut self, image_file: ParsedFile) {
-        let mut is_global = false;
-        let mut parsed = None;
-
-        if is_cover_filename(&image_file.name) {
-            is_global = true;
-        } else if let Some(caps) = COVER_FILE_RE.captures(&image_file.stem) {
-            let base_stem = caps.name("stem").unwrap().as_str();
-            parsed = parse_episode(base_stem);
-            if parsed.is_none() {
-                is_global = true;
-            }
+        let ext = image_file
+            .path
+            .extension()
+            .map(|e| format!(".{}", e.to_string_lossy().to_lowercase()))
+            .unwrap_or_default();
+        if !COVER_EXTENSIONS.contains(&ext.as_str()) {
+            return;
+        }
+        let stem = image_file.stem.to_lowercase();
+        let (kind, episode) = if stem == "cover" {
+            (CoverKind::Cover, None)
+        } else if stem == "folder" {
+            (CoverKind::Folder, None)
+        } else if stem.ends_with("_cover") || stem.ends_with(".cover") {
+            let episode = parse_episode(&image_file.stem[..image_file.stem.len() - 6]);
+            let kind = if episode.is_some() {
+                if stem.ends_with("_cover") {
+                    CoverKind::Underscore
+                } else {
+                    CoverKind::Dot
+                }
+            } else {
+                CoverKind::Adjacent
+            };
+            (kind, episode)
         } else {
-            return;
-        }
-
-        if is_global {
-            if self.global.is_none() {
-                self.global = Some(image_file.path);
-            } else if self.global.as_ref().and_then(|p| p.parent()) == image_file.path.parent() {
-                let parent_name = image_file
-                    .path
-                    .parent()
-                    .and_then(|p| p.file_name())
-                    .map(|s| s.to_string_lossy())
-                    .unwrap_or_default();
-                let global_name = self
-                    .global
-                    .as_ref()
-                    .and_then(|p| p.file_name())
-                    .map(|s| s.to_string_lossy())
-                    .unwrap_or_default();
-                warn!(
-                    "Duplicate global cover in '{parent_name}': keeping '{global_name}', ignoring '{}'",
-                    image_file.name
-                );
-            }
-            return;
-        }
-
-        let Some(p) = parsed else {
-            return;
+            (CoverKind::Adjacent, None)
         };
-
-        let key = ep_key(&p);
-        let existing = self.index.entry(key.clone()).or_default();
-        if reject_duplicate(
-            existing,
-            &image_file.path,
-            &p.season,
-            &key,
-            "Duplicate cover image",
-        ) {
+        if self
+            .entries
+            .iter()
+            .any(|entry| entry.file.path == image_file.path)
+        {
             return;
         }
-        existing.push((image_file.path, p.season));
+        if let Some(dir) = image_file.path.parent() {
+            if !self.directories.iter().any(|existing| existing == dir) {
+                self.directories.push(dir.to_path_buf());
+            }
+        }
+        self.entries.push(CoverEntry {
+            natural_name: natural_sort_key(&image_file.name),
+            file: image_file,
+            episode,
+            kind,
+        });
     }
 
-    pub fn lookup(&self, parsed: &EpisodeInfo) -> Option<PathBuf> {
-        let key = ep_key(parsed);
-        let matched = self
-            .index
-            .get(&key)
-            .and_then(|entries| find_matching_season_path(entries, &parsed.season));
-        matched.or_else(|| self.global.clone())
+    fn lookup_ranked(
+        &self,
+        video: &ParsedFile,
+        rank: impl Fn(&Path) -> Option<usize>,
+    ) -> Option<PathBuf> {
+        self.entries
+            .iter()
+            .filter_map(|entry| {
+                let applicable = match entry.kind {
+                    CoverKind::Underscore | CoverKind::Dot => {
+                        video.parsed.as_ref().is_some_and(|v| {
+                            entry.episode.as_ref().is_some_and(|c| {
+                                c.ep_type == v.ep_type
+                                    && c.ep == v.ep
+                                    && seasons_match(&v.season, &c.season)
+                            })
+                        })
+                    }
+                    CoverKind::Adjacent => entry.file.stem == video.stem,
+                    CoverKind::Cover | CoverKind::Folder => true,
+                };
+                if !applicable {
+                    return None;
+                }
+                Some((rank(entry.file.path.parent()?)?, entry))
+            })
+            .min_by(|(a_distance, a), (b_distance, b)| {
+                a_distance
+                    .cmp(b_distance)
+                    .then_with(|| a.kind.cmp(&b.kind))
+                    .then_with(|| a.natural_name.cmp(&b.natural_name))
+                    .then_with(|| a.file.path.cmp(&b.file.path))
+            })
+            .map(|(_, entry)| entry.file.path.clone())
     }
+
+    pub fn lookup(&self, video: &ParsedFile) -> Option<PathBuf> {
+        self.lookup_ranked(video, |candidate| {
+            video
+                .path
+                .parent()?
+                .ancestors()
+                .position(|dir| dir == candidate)
+        })
+    }
+
+    pub fn lookup_fallback(&self, video: &ParsedFile) -> Option<PathBuf> {
+        self.lookup_ranked(video, |candidate| {
+            self.directories.iter().position(|dir| dir == candidate)
+        })
+    }
+
     pub fn indexed_count(&self) -> usize {
-        self.index.values().map(|v| v.len()).sum()
+        self.entries
+            .iter()
+            .filter(|entry| !matches!(entry.kind, CoverKind::Cover | CoverKind::Folder))
+            .count()
     }
 
     pub fn has_global(&self) -> bool {
-        self.global.is_some()
+        self.entries
+            .iter()
+            .any(|entry| matches!(entry.kind, CoverKind::Cover | CoverKind::Folder))
     }
 }
 
@@ -671,20 +748,17 @@ impl AssetResolver {
         inspected: Option<&InspectedVideo>,
         assigned_subtitle: Option<&Path>,
     ) -> SubResolution {
-        // 1. Explicit human assignment overrides everything (ADR 0004),
-        // but a stale path at run time falls back to automatic matching (ADR 0001, ADR 0004).
+        // 1. Explicit human assignment overrides automatic matching (ADR 0004).
         if let Some(assigned) = assigned_subtitle {
-            if assigned.is_file() {
-                return SubResolution::from_assigned(assigned);
-            }
-            warn!(
-                "Assigned subtitle '{}' no longer exists — falling back to automatic matching",
-                assigned.display()
-            );
+            return SubResolution::from_assigned(assigned);
         }
 
-        // 2. Local subtitle from release directory / ancestor chain (ADR 0004)
-        if let Some((sub_path, lang)) = self.sub_index.lookup(parsed, video.path.parent()) {
+        // Same-directory external subtitles precede embedded tracks.
+        if let Some((sub_path, lang)) = video
+            .path
+            .parent()
+            .and_then(|dir| self.sub_index.lookup_same_dir(parsed, dir))
+        {
             return SubResolution::external(sub_path, lang);
         }
 
@@ -696,10 +770,18 @@ impl AssetResolver {
                 return SubResolution::embedded(track_id, lang);
             }
         }
+        // Matching ancestors follow embedded tracks, regardless of language score.
+        if let Some((sub_path, lang)) = video
+            .path
+            .parent()
+            .and_then(|dir| self.sub_index.lookup_ancestors(parsed, dir))
+        {
+            return SubResolution::external(sub_path, lang);
+        }
 
-        // 4. Fallback assets directory (ADR 0004)
+        // Explicit assets directory is the final subtitle source.
         if let Some(fb_sub) = &self.fallback_sub_index {
-            if let Some((sub_path, lang)) = fb_sub.lookup(parsed, video.path.parent()) {
+            if let Some((sub_path, lang)) = fb_sub.lookup_fallback(parsed) {
                 return SubResolution::external(sub_path, lang);
             }
         }
@@ -713,15 +795,15 @@ impl AssetResolver {
         SubResolution::unmatched(skip_reason)
     }
 
-    pub fn resolve_cov(&self, parsed: &EpisodeInfo, has_source_cover: bool) -> Option<PathBuf> {
-        if let Some(cov) = self.cover_index.lookup(parsed) {
+    pub fn resolve_cov(&self, video: &ParsedFile, has_source_cover: bool) -> Option<PathBuf> {
+        if let Some(cov) = self.cover_index.lookup(video) {
             return Some(cov);
         }
         if !has_source_cover {
             return self
                 .fallback_cover_index
                 .as_ref()
-                .and_then(|fb| fb.lookup(parsed));
+                .and_then(|fb| fb.lookup_fallback(video));
         }
         None
     }
@@ -752,7 +834,16 @@ impl AssetResolver {
         inspected: Option<&InspectedVideo>,
         claimed_chapter: Option<&Path>,
         assigned_subtitle: Option<&Path>,
-    ) -> ResolvedAssets {
+    ) -> Result<ResolvedAssets, String> {
+        if let Some(assigned) = assigned_subtitle {
+            if !assigned.is_file() {
+                return Err(format!(
+                    "Assigned subtitle '{}' no longer exists",
+                    assigned.display()
+                ));
+            }
+        }
+
         let has_source_chapters = inspected.map(|i| i.has_chapters()).unwrap_or(false);
         let has_source_cover = inspected
             .map(|i| i.cover_attachment().is_some())
@@ -761,25 +852,21 @@ impl AssetResolver {
         let (sub_res, chapter_file, cover_file) = if let Some(parsed) = &video.parsed {
             let sub = self.resolve_sub(video, parsed, inspected, assigned_subtitle);
             let chap = self.resolve_chap(parsed, has_source_chapters, claimed_chapter);
-            let cov = self.resolve_cov(parsed, has_source_cover);
+            let cov = self.resolve_cov(video, has_source_cover);
             (sub, chap, cov)
         } else {
             let sub = match assigned_subtitle {
                 Some(assigned) => SubResolution::from_assigned(assigned),
                 None => SubResolution::unmatched("unparsed episode"),
             };
-            let cov = if !has_source_cover {
-                self.cover_index.global.clone()
-            } else {
-                None
-            };
+            let cov = self.resolve_cov(video, has_source_cover);
             (sub, None, cov)
         };
 
         let subtitle_label = lang_label(&sub_res.lang).to_string();
         let subtitle_mkv_lang = lang_mkv_tag(&sub_res.lang).to_string();
 
-        ResolvedAssets {
+        Ok(ResolvedAssets {
             subtitle_file: sub_res.subtitle_file,
             embedded_sub_id: sub_res.embedded_sub_id,
             subtitle_lang: sub_res.lang,
@@ -790,7 +877,7 @@ impl AssetResolver {
             cover_file,
             fonts: self.fonts.clone(),
             skip_reason: sub_res.skip_reason,
-        }
+        })
     }
 }
 

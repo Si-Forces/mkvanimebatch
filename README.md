@@ -40,6 +40,7 @@ Available both as a standalone native **CLI binary (`mkv-cli`)** and as a self-c
 * **Language Priority**: Automatically detects and scores subtitle tracks, prioritizing Indonesian (`ind`, `id`) and fallback English (`eng`, `en`).
 * **Format & Track Type Scoring**: Prefers Advanced SubStation Alpha (`.ass` typesetting) over SubRip (`.srt`), prioritizing dialogue tracks over signs/titles or commentaries.
 * **Manual Track Assignments**: Supports precise per-episode subtitle overrides via `--assignments` with fail-fast preflight validation.
+* **Resolution Precedence Ladder**: Evaluates candidate subtitles in strict order: manual `TrackAssignment` > exact same-directory external subtitle > embedded subtitle track > nearest matching ancestor external subtitle > explicit `--assets-dir` fallback. Source precedence beats language score across sources.
 
 ### 10-Tier Audio Scoring & Opus Transcoding
 * **Dialogue Priority**: Automatically scores audio tracks, favoring Japanese stereo and multi-channel audio tracks.
@@ -51,7 +52,8 @@ Available both as a standalone native **CLI binary (`mkv-cli`)** and as a self-c
 * **Embedded Font Detection**: Identifies font attachments by MIME type and filename extensions before transactional extraction.
 * **BLAKE2b Hash Deduplication**: Deduplicates fonts across entire releases by content hash and font identity, avoiding redundant font attachments.
 * **RAII Claim Safety**: Uncommitted font claims in staging directories are safely defused or released on cancellation.
-* **Chapter & Cover Art Preservation**: Extracts and embeds XML chapter definitions and front cover art (`cover.jpg`, `cover.png`, `folder.jpg`).
+* **Mode-Specific Font Handling**: Extraction mode retains extracted fonts as user output, while remux mode discovers and embeds fonts into output Matroska files.
+* **Chapter & Cover Art Preservation**: Extracts and embeds XML chapter definitions and front cover art. Directory covers (`cover.<ext>`, `folder.<ext>`) and episode covers (`<video-stem>_cover.<ext>`, `<video-stem>.cover.<ext>`, `<video-stem>.<ext>`) resolve nearest applicable directory first (`_cover` > `.cover` > bare stem > `cover` > `folder`). Local and ancestor external covers supersede embedded artwork; explicit `--assets-dir` covers apply only when embedded art is absent.
 
 ### Crash-Resistant Output & Safe Recovery
 * **Atomic File Promotion**: Performs remuxing and extraction inside isolated temporary scratch directories, promoting files via atomic replacement with rollback protection across filesystem boundaries (`EXDEV`).
@@ -144,7 +146,6 @@ Download `mkv-cli` from [GitHub Releases](https://github.com/sifahaz/mkvanimebat
 | `--ffmpeg-threads <N\|auto>` | CPU threads allocated per audio transcode job (1–32) | `auto`: `(physical_cores / workers)` clamped to 1–4 |
 | `--bitrate <RATE>` | Opus audio transcoding bitrate (e.g. `128k`, `192k`) | CLI/preset default `192k` |
 | `--complexity <0-10>` | Opus compression complexity level | Default `5` (`10` on `hifi`) |
-| `--keep-fonts` | Retain extracted fonts directory | `false` (`true` on `balanced`/`hifi` presets) |
 | `--extract` | Run batch extraction instead of remuxing | `false` |
 | `--remux` | Run batch remuxing (default mode; also default unless invoked as `mkv-extract`) | `true` |
 | `--plan` | Output Manifest v2 JSON for directory and exit | `false` |

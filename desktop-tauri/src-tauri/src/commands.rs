@@ -10,8 +10,9 @@ pub use crate::telemetry::{get_system_telemetry, TelemetryState};
 pub use crate::window::{
     is_maximized, minimize_window, set_window_theme, start_drag, start_resize, toggle_maximize,
 };
-use mkv_core::pipeline::CancellationToken;
+use mkv_core::pipeline::{CancellationToken, EventReceiver, LogReceiver, PipelineSummary};
 use serde::Deserialize;
+use std::future::Future;
 use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -69,20 +70,14 @@ pub fn run_job<R: tauri::Runtime>(
 ) -> Result<u64, String> {
     request.validate()?;
 
-    let mut lock = reserve_job_slot(&state)?;
-
-    let mode_str = match request.mode {
+    let mode = match request.mode {
         mkv_core::pipeline::PipelineMode::Extract => "extract",
         mkv_core::pipeline::PipelineMode::Remux => "remux",
     }
     .to_string();
-
-    let job_id = state.next_id.fetch_add(1, Ordering::SeqCst);
     let cancel_token = CancellationToken::new();
-
-    let (event_tx, mut event_rx) = mkv_core::pipeline::create_event_channel(64);
-    let (log_tx, mut log_rx) = mkv_core::pipeline::create_log_channel(128);
-
+    let (event_tx, event_rx) = mkv_core::pipeline::create_event_channel(64);
+    let (log_tx, log_rx) = mkv_core::pipeline::create_log_channel(128);
     let pipeline = mkv_core::pipeline::BatchPipeline::from_request(
         request,
         Some(event_tx),
@@ -90,34 +85,95 @@ pub fn run_job<R: tauri::Runtime>(
     )?
     .with_log_sender(Some(log_tx));
 
+    start_supervised_job(
+        app,
+        &state,
+        mode,
+        cancel_token,
+        event_rx,
+        log_rx,
+        async move { pipeline.run().await },
+    )
+}
+fn bridge_terminal(cancelled: bool, problem: Option<(&str, String)>) -> JobEvent {
+    let mut extra = serde_json::Map::new();
+    if let Some((key, message)) = problem {
+        extra.insert(key.to_string(), message.into());
+    }
+    JobEvent::BatchComplete {
+        version: mkv_core::pipeline::EVENT_VERSION,
+        success: false,
+        cancelled,
+        extra,
+    }
+}
+
+fn start_supervised_job<R: tauri::Runtime, F>(
+    app: AppHandle<R>,
+    state: &JobState,
+    mode: String,
+    cancel_token: CancellationToken,
+    mut event_rx: EventReceiver,
+    mut log_rx: LogReceiver,
+    pipeline_future: F,
+) -> Result<u64, String>
+where
+    F: Future<Output = Result<PipelineSummary, String>> + Send + 'static,
+{
+    let mut lock = reserve_job_slot(state)?;
+    let job_id = state.next_id.fetch_add(1, Ordering::SeqCst);
+    state.begin_snapshot(job_id, &mode)?;
+
+    let pipeline_handle = tauri::async_runtime::spawn(pipeline_future);
+    let pipeline_abort = pipeline_handle.inner().abort_handle();
     let app_task = app.clone();
-    let mode_task = mode_str;
-    let task_handle = tauri::async_runtime::spawn(async move {
+    let abort_on_supervisor_drop = pipeline_abort.clone();
+    let cancel_for_supervisor = cancel_token.clone();
+    tauri::async_runtime::spawn(async move {
         struct JobSlotGuard<R: tauri::Runtime> {
             app: AppHandle<R>,
             job_id: u64,
         }
         impl<R: tauri::Runtime> Drop for JobSlotGuard<R> {
             fn drop(&mut self) {
-                let state = self.app.state::<JobState>();
-                state.release_slot(self.job_id);
-                state.cancel_snapshot_if_running();
+                self.app.state::<JobState>().release_slot(self.job_id);
             }
         }
-        let _guard = JobSlotGuard {
+        struct PipelineAbortGuard(tokio::task::AbortHandle);
+        impl Drop for PipelineAbortGuard {
+            fn drop(&mut self) {
+                self.0.abort();
+            }
+        }
+
+        let _slot_guard = JobSlotGuard {
             app: app_task.clone(),
             job_id,
         };
+        let _abort_guard = PipelineAbortGuard(abort_on_supervisor_drop);
 
         let app_event = app_task.clone();
-        let mode_event = mode_task.clone();
-        let state_for_event = app_task.state::<JobState>();
+        let mode_event = mode.clone();
         let event_task = async move {
+            let mut completion = None;
             while let Some(mut event) = event_rx.recv().await {
-                event.attach_context(&mode_event, job_id);
-                state_for_event.update_snapshot(&event, job_id, &mode_event);
-                let _ = app_event.emit("job-event", &event);
+                if matches!(event, JobEvent::BatchComplete { .. }) {
+                    // One supervisor owns one job ID. Defer its first terminal until worker exit;
+                    // an abort or panic can supersede a late cooperative completion.
+                    if completion.is_none() {
+                        completion = Some(event);
+                    }
+                    continue;
+                }
+                if completion.is_none() {
+                    event.attach_context(&mode_event, job_id);
+                    app_event
+                        .state::<JobState>()
+                        .update_snapshot(&event, job_id, &mode_event);
+                    let _ = app_event.emit("job-event", &event);
+                }
             }
+            completion
         };
         let app_log = app_task.clone();
         let log_task = async move {
@@ -129,8 +185,8 @@ pub fn run_job<R: tauri::Runtime>(
                 tokio::select! {
                     line = log_rx.recv() => {
                         match line {
-                            Some(l) => {
-                                batch.push(l);
+                            Some(line) => {
+                                batch.push(line);
                                 if batch.len() >= 25 {
                                     let _ = app_log.emit("job-log", &batch);
                                     batch.clear();
@@ -139,7 +195,6 @@ pub fn run_job<R: tauri::Runtime>(
                             None => {
                                 if !batch.is_empty() {
                                     let _ = app_log.emit("job-log", &batch);
-                                    batch.clear();
                                 }
                                 break;
                             }
@@ -155,91 +210,77 @@ pub fn run_job<R: tauri::Runtime>(
             }
         };
 
-        struct PipelineAbortGuard(tokio::task::AbortHandle);
-        impl Drop for PipelineAbortGuard {
-            fn drop(&mut self) {
-                self.0.abort();
-            }
-        }
-
-        let pipeline_handle = tokio::spawn(async move { pipeline.run().await });
-        let _abort_guard = PipelineAbortGuard(pipeline_handle.abort_handle());
-
-        let (pipeline_result, (), ()) = tokio::join!(pipeline_handle, event_task, log_task);
-
-        let code = match pipeline_result {
-            Ok(Ok(summary)) => {
+        let (pipeline_result, completion, ()) = tokio::join!(pipeline_handle, event_task, log_task);
+        let mut terminal = match pipeline_result {
+            Ok(Ok(summary)) => completion.unwrap_or_else(|| {
                 if summary.cancelled {
-                    -1
-                } else if summary.errors > 0 {
-                    1
+                    bridge_terminal(true, None)
                 } else {
-                    0
+                    bridge_terminal(
+                        false,
+                        Some((
+                            "error",
+                            "Pipeline ended without a batch completion event".to_string(),
+                        )),
+                    )
                 }
+            }),
+            Ok(Err(error)) => {
+                let _ = app_task.emit("job-log", vec![format!("[ERR] Pipeline failed: {error}")]);
+                bridge_terminal(false, Some(("error", error)))
             }
-            Ok(Err(e)) => {
-                let _ = app_task.emit("job-log", vec![format!("[ERR] Pipeline failed: {e}")]);
-                1
+            Err(tauri::Error::JoinError(join_error))
+                if join_error.is_cancelled() && cancel_for_supervisor.is_cancelled() =>
+            {
+                bridge_terminal(true, None)
             }
-            Err(join_err) => {
-                let panic_msg = if join_err.is_panic() {
-                    let panic_payload = join_err.into_panic();
-                    if let Some(s) = panic_payload.downcast_ref::<&str>() {
-                        s.to_string()
-                    } else if let Some(s) = panic_payload.downcast_ref::<String>() {
-                        s.clone()
-                    } else {
-                        "Unknown pipeline panic".to_string()
-                    }
-                } else {
-                    "Pipeline task cancelled or aborted".to_string()
-                };
-
-                let mut extra = serde_json::Map::new();
-                extra.insert(
-                    "mode".to_string(),
-                    serde_json::Value::String(mode_task.clone()),
-                );
-                extra.insert(
-                    "job_id".to_string(),
-                    serde_json::Value::Number(job_id.into()),
-                );
-                extra.insert(
-                    "panic".to_string(),
-                    serde_json::Value::String(panic_msg.clone()),
-                );
-
-                let event = JobEvent::BatchComplete {
-                    version: 1,
-                    success: false,
-                    cancelled: false,
-                    extra,
-                };
-                let state_for_panic = app_task.state::<JobState>();
-                state_for_panic.update_snapshot(&event, job_id, &mode_task);
-                let _ = app_task.emit("job-event", &event);
-                let _ = app_task.emit("job-log", vec![format!("[PANIC] {panic_msg}")]);
-                1
+            Err(tauri::Error::JoinError(join_error)) if join_error.is_panic() => {
+                let payload = join_error.into_panic();
+                let message = payload
+                    .downcast_ref::<&str>()
+                    .map(|value| (*value).to_string())
+                    .or_else(|| payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "Unknown pipeline panic".to_string());
+                let _ = app_task.emit("job-log", vec![format!("[PANIC] {message}")]);
+                bridge_terminal(false, Some(("panic", message)))
             }
+            Err(_) => bridge_terminal(
+                false,
+                Some(("error", "Pipeline task cancelled unexpectedly".to_string())),
+            ),
         };
-
+        terminal.attach_context(&mode, job_id);
+        let state = app_task.state::<JobState>();
+        state.update_snapshot(&terminal, job_id, &mode);
+        let code = state
+            .snapshot
+            .lock()
+            .ok()
+            .and_then(|snapshot| {
+                snapshot
+                    .as_ref()
+                    .filter(|item| item.job_id == job_id)
+                    .map(|item| item.status)
+            })
+            .map(|status| match status {
+                crate::process::BatchStatus::Completed => 0,
+                crate::process::BatchStatus::Cancelled => -1,
+                _ => 1,
+            })
+            .unwrap_or(1);
+        let _ = app_task.emit("job-event", &terminal);
         let _ = app_task.emit(
             "job-done",
-            serde_json::json!({
-                "mode": mode_task,
-                "job_id": job_id,
-                "code": code
-            }),
+            serde_json::json!({ "mode": mode, "job_id": job_id, "code": code }),
         );
     });
 
     *lock = Some(JobSlot {
         id: job_id,
         cancel_token,
-        task_handle,
+        pipeline_abort,
         stopping: false,
     });
-
     Ok(job_id)
 }
 
@@ -284,6 +325,94 @@ pub fn get_job_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::process::{stop_job_internal_with_timeout, BatchStatus};
+    use mkv_core::pipeline::BatchItemInfo;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+    use tauri::Listener;
+    type EventSink = Arc<Mutex<Vec<serde_json::Value>>>;
+
+    fn observed_app() -> (tauri::App<tauri::test::MockRuntime>, EventSink, EventSink) {
+        let app = tauri::test::mock_app();
+        app.manage(JobState::default());
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let dones = Arc::new(Mutex::new(Vec::new()));
+        let event_sink = Arc::clone(&events);
+        let done_sink = Arc::clone(&dones);
+        app.listen("job-event", move |event| {
+            event_sink
+                .lock()
+                .unwrap()
+                .push(serde_json::from_str(event.payload()).unwrap());
+        });
+        app.listen("job-done", move |event| {
+            done_sink
+                .lock()
+                .unwrap()
+                .push(serde_json::from_str(event.payload()).unwrap());
+        });
+        (app, events, dones)
+    }
+
+    fn batch_start() -> JobEvent {
+        JobEvent::BatchStart {
+            version: 1,
+            total: 2,
+            input_dir: "/anime".into(),
+            items: Some(vec![
+                BatchItemInfo {
+                    id: "ep2".into(),
+                    file: "02.mkv".into(),
+                },
+                BatchItemInfo {
+                    id: "ep1".into(),
+                    file: "01.mkv".into(),
+                },
+            ]),
+            extra: Default::default(),
+        }
+    }
+
+    fn terminal_events_for(events: &[serde_json::Value], job_id: u64) -> Vec<&serde_json::Value> {
+        events
+            .iter()
+            .filter(|event| event["type"] == "batch_complete" && event["job_id"] == job_id)
+            .collect()
+    }
+
+    fn done_events_for(events: &[serde_json::Value], job_id: u64) -> Vec<&serde_json::Value> {
+        events
+            .iter()
+            .filter(|event| event["job_id"] == job_id)
+            .collect()
+    }
+
+    fn wait_for_progress(state: &JobState, id: &str, target: f64) {
+        let start = Instant::now();
+        loop {
+            let progress = state
+                .snapshot
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|snapshot| snapshot.items.get(id))
+                .and_then(|item| item.progress);
+            if progress == Some(target) {
+                return;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(2),
+                "progress never reached {target}"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    async fn panicking_worker(
+        event_tx: mkv_core::pipeline::EventSender,
+    ) -> Result<PipelineSummary, String> {
+        event_tx.send(batch_start()).await.unwrap();
+        panic!("bridge worker panicked");
+    }
 
     #[test]
     fn test_inspect_options_deserialization() {
@@ -356,5 +485,238 @@ mod tests {
         assert!(verify_state
             .wait_until_released(job_id, std::time::Duration::from_secs(5))
             .is_ok());
+    }
+    #[test]
+    fn forced_stop_aborts_only_worker_and_settles_once() {
+        let (app, events, dones) = observed_app();
+        let state = app.state::<JobState>();
+        let token = CancellationToken::new();
+        let (event_tx, event_rx) = mkv_core::pipeline::create_event_channel(64);
+        let (_, log_rx) = mkv_core::pipeline::create_log_channel(8);
+        let worker = async move {
+            event_tx.send(batch_start()).await.unwrap();
+            event_tx
+                .send(JobEvent::ItemStart {
+                    version: 1,
+                    id: "ep2".into(),
+                    file: "02.mkv".into(),
+                    extra: Default::default(),
+                })
+                .await
+                .unwrap();
+            event_tx
+                .send(JobEvent::ItemProgress {
+                    version: 1,
+                    id: "ep2".into(),
+                    file: "02.mkv".into(),
+                    progress: 70.0,
+                    speed: None,
+                    eta: None,
+                    extra: Default::default(),
+                })
+                .await
+                .unwrap();
+            let mut extra = serde_json::Map::new();
+            extra.insert("source".to_string(), "cooperative".into());
+            event_tx
+                .send(JobEvent::BatchComplete {
+                    version: 1,
+                    success: false,
+                    cancelled: true,
+                    extra,
+                })
+                .await
+                .unwrap();
+            std::future::pending::<Result<PipelineSummary, String>>().await
+        };
+        let job_id = start_supervised_job(
+            app.handle().clone(),
+            &state,
+            "remux".into(),
+            token,
+            event_rx,
+            log_rx,
+            worker,
+        )
+        .unwrap();
+        wait_for_progress(&state, "ep2", 70.0);
+        stop_job_internal_with_timeout(&state, Some(job_id), Duration::from_millis(20)).unwrap();
+
+        assert!(!state.is_active());
+        let snapshot = state.snapshot.lock().unwrap().clone().unwrap();
+        assert_eq!(snapshot.status, BatchStatus::Cancelled);
+        assert_eq!(
+            snapshot.ordered_item_ids,
+            vec!["ep2".to_string(), "ep1".to_string()]
+        );
+        assert_eq!(snapshot.items.len(), 2);
+        assert_eq!(snapshot.completed_items, 2);
+        assert_eq!(snapshot.items["ep2"].progress, Some(70.0));
+        assert_eq!(snapshot.items["ep2"].status, ItemStatus::Cancelled);
+        assert_eq!(snapshot.items["ep1"].status, ItemStatus::Cancelled);
+        let events = events.lock().unwrap();
+        let terminals = terminal_events_for(&events, job_id);
+        assert_eq!(terminals.len(), 1);
+        assert_eq!(terminals[0]["cancelled"], true);
+        assert!(terminals[0]["source"].is_null());
+        let dones = dones.lock().unwrap();
+        let completions = done_events_for(&dones, job_id);
+        assert_eq!(completions.len(), 1);
+        assert_eq!(completions[0]["code"], -1);
+    }
+
+    #[test]
+    fn cooperative_stop_ignores_stale_id_and_duplicate_completion() {
+        let (app, events, dones) = observed_app();
+        let state = app.state::<JobState>();
+        let (previous_tx, previous_rx) = mkv_core::pipeline::create_event_channel(8);
+        let (_, previous_logs) = mkv_core::pipeline::create_log_channel(8);
+        let previous_worker = async move {
+            previous_tx
+                .send(JobEvent::BatchStart {
+                    version: 1,
+                    total: 0,
+                    input_dir: "/anime".into(),
+                    items: Some(Vec::new()),
+                    extra: Default::default(),
+                })
+                .await
+                .unwrap();
+            previous_tx
+                .send(JobEvent::BatchComplete {
+                    version: 1,
+                    success: true,
+                    cancelled: false,
+                    extra: Default::default(),
+                })
+                .await
+                .unwrap();
+            Ok(PipelineSummary::default())
+        };
+        let previous_id = start_supervised_job(
+            app.handle().clone(),
+            &state,
+            "remux".into(),
+            CancellationToken::new(),
+            previous_rx,
+            previous_logs,
+            previous_worker,
+        )
+        .unwrap();
+        state
+            .wait_until_released(previous_id, Duration::from_secs(2))
+            .unwrap();
+
+        let token = CancellationToken::new();
+        let worker_token = token.clone();
+        let (event_tx, event_rx) = mkv_core::pipeline::create_event_channel(64);
+        let (_, log_rx) = mkv_core::pipeline::create_log_channel(8);
+        let worker = async move {
+            event_tx.send(batch_start()).await.unwrap();
+            event_tx
+                .send(JobEvent::ItemStart {
+                    version: 1,
+                    id: "ep2".into(),
+                    file: "02.mkv".into(),
+                    extra: Default::default(),
+                })
+                .await
+                .unwrap();
+            event_tx
+                .send(JobEvent::ItemProgress {
+                    version: 1,
+                    id: "ep2".into(),
+                    file: "02.mkv".into(),
+                    progress: 70.0,
+                    speed: None,
+                    eta: None,
+                    extra: Default::default(),
+                })
+                .await
+                .unwrap();
+            worker_token.cancelled().await;
+            event_tx
+                .send(JobEvent::BatchComplete {
+                    version: 1,
+                    success: false,
+                    cancelled: true,
+                    extra: Default::default(),
+                })
+                .await
+                .unwrap();
+            event_tx
+                .send(JobEvent::BatchComplete {
+                    version: 1,
+                    success: true,
+                    cancelled: false,
+                    extra: Default::default(),
+                })
+                .await
+                .unwrap();
+            Ok(PipelineSummary {
+                cancelled: true,
+                ..Default::default()
+            })
+        };
+        let job_id = start_supervised_job(
+            app.handle().clone(),
+            &state,
+            "remux".into(),
+            token.clone(),
+            event_rx,
+            log_rx,
+            worker,
+        )
+        .unwrap();
+        wait_for_progress(&state, "ep2", 70.0);
+        stop_job_internal_with_timeout(&state, Some(previous_id), Duration::from_millis(10))
+            .unwrap();
+        assert!(!token.is_cancelled());
+        assert!(state.is_active());
+        stop_job_internal_with_timeout(&state, Some(job_id), Duration::from_secs(1)).unwrap();
+
+        let snapshot = state.snapshot.lock().unwrap().clone().unwrap();
+        assert_eq!(snapshot.status, BatchStatus::Cancelled);
+        assert_eq!(snapshot.completed_items, 2);
+        let events = events.lock().unwrap();
+        let terminals = terminal_events_for(&events, job_id);
+        assert_eq!(terminals.len(), 1);
+        assert_eq!(terminals[0]["cancelled"], true);
+        let dones = dones.lock().unwrap();
+        assert_eq!(done_events_for(&dones, job_id).len(), 1);
+    }
+
+    #[test]
+    fn worker_panic_unwinds_into_one_error_terminal() {
+        let (app, events, dones) = observed_app();
+        let state = app.state::<JobState>();
+        let (event_tx, event_rx) = mkv_core::pipeline::create_event_channel(8);
+        let (_, log_rx) = mkv_core::pipeline::create_log_channel(8);
+        let job_id = start_supervised_job(
+            app.handle().clone(),
+            &state,
+            "remux".into(),
+            CancellationToken::new(),
+            event_rx,
+            log_rx,
+            panicking_worker(event_tx),
+        )
+        .unwrap();
+        state
+            .wait_until_released(job_id, Duration::from_secs(2))
+            .unwrap();
+
+        let snapshot = state.snapshot.lock().unwrap().clone().unwrap();
+        assert_eq!(snapshot.status, BatchStatus::Error);
+        assert_eq!(snapshot.items["ep2"].status, ItemStatus::Error);
+        assert_eq!(snapshot.items["ep1"].status, ItemStatus::Error);
+        let events = events.lock().unwrap();
+        let terminals = terminal_events_for(&events, job_id);
+        assert_eq!(terminals.len(), 1);
+        assert_eq!(terminals[0]["panic"], "bridge worker panicked");
+        let dones = dones.lock().unwrap();
+        let completions = done_events_for(&dones, job_id);
+        assert_eq!(completions.len(), 1);
+        assert_eq!(completions[0]["code"], 1);
     }
 }

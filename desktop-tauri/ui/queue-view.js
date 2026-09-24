@@ -7,6 +7,7 @@ import {
   formatOutcomeDuration,
   getSelectedCount,
   reduceQueueEvent,
+  reconcileQueueSelection,
   reorderItem,
   selectAll,
   deselectAll,
@@ -32,6 +33,7 @@ export class QueueTracker {
     this.state = createQueueState({ version: 2, items: [] }, { mode });
     this.cards = new Map();
     this.scanToken = 0;
+    this.pendingRenderToken = null;
     this.lastScannedPath = null;
     this.lastManifest = null;
     // Track Assignment overrides (remux only): item id -> assignment payload
@@ -134,9 +136,8 @@ export class QueueTracker {
     this.stopHeartbeat();
     const token = ++this.scanToken;
     this.cards.clear();
-    // Assignments and candidates survive a rescan: populateFromInspection
-    // rebuilds candidates and carries over assignments whose items persist.
-    this.state = createQueueState({ version: 2, items: [] }, { mode: this.mode });
+    // Keep the prior queue state while scanning so the accepted manifest can
+    // reconcile selection and order only when its directory matches.
     if (this.listEl) {
       this.listEl.innerHTML = `
         <div class="empty-state-card scanning-state">
@@ -156,7 +157,7 @@ export class QueueTracker {
   reuseInspection(path) {
     if (this.lastScannedPath !== path) return false;
     this.scanToken++;
-    this.populateFromInspection(this.lastManifest);
+    this.populateFromInspection(this.lastManifest, true);
     return true;
   }
 
@@ -167,7 +168,7 @@ export class QueueTracker {
       this.lastScannedPath = null;
       return false;
     }
-    this.populateFromInspection(manifest);
+    this.populateFromInspection(manifest, this.lastScannedPath === path);
     this.lastScannedPath = path;
     return true;
   }
@@ -201,18 +202,19 @@ export class QueueTracker {
     this.setCountText("Ready");
   }
 
-  populateFromInspection(manifest) {
+  populateFromInspection(manifest, preserveSelection = false) {
     this.stopHeartbeat();
     this.lastManifest = manifest;
     this.cards.clear();
     if (this.listEl) this.listEl.innerHTML = "";
 
     const bitrate = this.getBitrate();
-    this.state = createQueueState(manifest, { mode: this.mode });
+    const nextState = createQueueState(manifest, { mode: this.mode });
+    this.state = preserveSelection ? reconcileQueueSelection(nextState, this.state) : nextState;
 
-    // Refresh candidate lists; keep assignments whose item still exists so a
-    // rescan right before Start does not silently drop manual selections.
-    this.assignments = carryOverAssignments(this.assignments, manifest);
+    // A different input directory starts a new batch; only a same-directory
+    // rescan carries assignments for IDs that are still present.
+    this.assignments = preserveSelection ? carryOverAssignments(this.assignments, manifest) : new Map();
     this.subtitleCandidates = manifest?.subtitle_candidates ?? {};
 
     if (!manifest || !manifest.items || manifest.items.length === 0) {
@@ -241,6 +243,7 @@ export class QueueTracker {
   // arrived before a card existed are reflected once it is created.
   renderCardsIncrementally(token, bitrate) {
     const order = this.state.order;
+    this.pendingRenderToken = token;
     let index = 0;
 
     const renderBatch = () => {
@@ -267,6 +270,7 @@ export class QueueTracker {
       } while (index < order.length && performance.now() < deadline);
       this.listEl.appendChild(frag);
       if (index < order.length) requestAnimationFrame(renderBatch);
+      else this.pendingRenderToken = null;
     };
 
     requestAnimationFrame(renderBatch);
@@ -335,7 +339,8 @@ export class QueueTracker {
       ? `<button type="button" class="sub-assign-btn" data-item-id="${safeId}" title="Manually assign a subtitle file">+ Sub</button>`
       : "";
 
-    const checkHtml = `<input type="checkbox" class="ep-select-check" checked data-item-id="${safeId}" title="Include in batch" />`;
+    const selected = this.state.items.get(id)?.selected !== false;
+    const checkHtml = `<input type="checkbox" class="ep-select-check" ${selected ? "checked " : ""}data-item-id="${safeId}" title="Include in batch" />`;
     const reorderHtml = `
       <div class="ep-reorder-group">
         <button type="button" class="ep-reorder-btn ep-up-btn" data-item-id="${safeId}" title="Move up">▲</button>
@@ -369,6 +374,7 @@ export class QueueTracker {
 
     const checkEl = el.querySelector(".ep-select-check");
     if (checkEl) checkEl.dataset.itemId = id;
+    if (checkEl) checkEl.checked = selected;
 
     const upBtn = el.querySelector(".ep-up-btn");
     if (upBtn) upBtn.dataset.itemId = id;
@@ -439,7 +445,7 @@ export class QueueTracker {
     if (event.id) {
       const item = this.state.items.get(event.id);
       let card = this.cards.get(event.id);
-      if (!card && item) {
+      if (!card && item && this.pendingRenderToken !== this.scanToken) {
         const index = this.cards.size + 1;
         card = this.createCardElement(item.id, item.name, index);
         this.cards.set(item.id, card);

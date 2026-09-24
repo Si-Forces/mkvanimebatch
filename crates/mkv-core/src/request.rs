@@ -112,9 +112,6 @@ pub struct BatchRequest {
     /// Global subtitle offset in seconds
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sub_offset: Option<f64>,
-    /// Whether to retain extracted/embedded source fonts
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub keep_fonts: Option<bool>,
     /// Whether to perform a dry run (plan without writing files)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dry_run: Option<bool>,
@@ -144,7 +141,6 @@ impl Default for BatchRequest {
             io_jobs: None,
             ffmpeg_threads: None,
             sub_offset: None,
-            keep_fonts: None,
             dry_run: None,
             no_cache: None,
             assignments: None,
@@ -355,6 +351,12 @@ impl BatchRequest {
                 if !seen_items.insert(clean.clone()) {
                     return Err(format!("Duplicate entry in selected_items: '{clean}'"));
                 }
+                if !clean
+                    .rsplit_once('.')
+                    .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case("mkv"))
+                {
+                    return Err(format!("Selected item is not an MKV file: '{clean}'"));
+                }
 
                 let full_path = self.input_dir.join(&clean);
                 if !full_path.is_file() {
@@ -383,20 +385,15 @@ impl BatchRequest {
     /// Converts the `BatchRequest` into internal `PipelineConfig`, applying
     /// preset profile baseline defaults and layering explicit parameter overrides.
     pub fn into_pipeline_config(self) -> Result<PipelineConfig, String> {
-        let (preset_bitrate, preset_complexity, preset_keep_fonts) =
-            if let Some(preset_id) = &self.preset {
-                if let Some(preset) = lookup_preset(preset_id) {
-                    (
-                        Some(preset.bitrate),
-                        Some(preset.complexity),
-                        Some(preset.keep_fonts),
-                    )
-                } else {
-                    return Err(format!("Unknown preset profile: '{preset_id}'"));
-                }
+        let (preset_bitrate, preset_complexity) = if let Some(preset_id) = &self.preset {
+            if let Some(preset) = lookup_preset(preset_id) {
+                (Some(preset.bitrate), Some(preset.complexity))
             } else {
-                (None, None, None)
-            };
+                return Err(format!("Unknown preset profile: '{preset_id}'"));
+            }
+        } else {
+            (None, None)
+        };
 
         let physical_cores = physical_core_count();
         let default_workers = physical_cores.clamp(1, 16);
@@ -414,7 +411,6 @@ impl BatchRequest {
                 .or(preset_bitrate)
                 .unwrap_or_else(|| "192k".to_string()),
             complexity: self.complexity.or(preset_complexity).unwrap_or(5),
-            keep_fonts: self.keep_fonts.or(preset_keep_fonts).unwrap_or(false),
             workers,
             io_jobs: self.io_jobs.unwrap_or(2),
             ffmpeg_threads: self.ffmpeg_threads.unwrap_or(default_ffmpeg_threads),
@@ -573,7 +569,6 @@ mod tests {
         req.complexity = Some(8);
         req.workers = Some(4);
         req.io_jobs = Some(2);
-        req.keep_fonts = Some(true);
         req.dry_run = Some(false);
         req.no_cache = Some(false);
         req.assignments = Some(vec![TrackAssignment {
@@ -590,7 +585,6 @@ mod tests {
         let config = req.into_pipeline_config().unwrap();
         assert_eq!(config.bitrate, "256k"); // overridden
         assert_eq!(config.complexity, 8); // overridden
-        assert!(config.keep_fonts); // preset + override match
         assert_eq!(config.workers, 4);
     }
 
@@ -1231,6 +1225,21 @@ mod tests {
 
         let mut req = minimal_request(dir.path());
         req.selected_items = Some(vec!["ep2.mkv".into(), "ep1.mkv".into()]);
+        assert!(req.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_selected_items_rejects_existing_non_mkv() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("ep1.mkv"), b"").unwrap();
+        std::fs::write(dir.path().join("notes.txt"), b"").unwrap();
+
+        let mut req = minimal_request(dir.path());
+        req.selected_items = Some(vec!["ep1.mkv".into(), "notes.txt".into()]);
+        assert!(req.validate().unwrap_err().contains("notes.txt"));
+
+        std::fs::write(dir.path().join("EP2.MKV"), b"").unwrap();
+        req.selected_items = Some(vec!["EP2.MKV".into()]);
         assert!(req.validate().is_ok());
     }
 
