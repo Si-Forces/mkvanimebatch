@@ -54,19 +54,28 @@ pub async fn inspect_directory(
     let no_cache = options.as_ref().and_then(|o| o.no_cache).unwrap_or(false);
     let cache = mkv_core::scan::PersistentInspectCache::default();
     let cache_opt = if no_cache { None } else { Some(&cache) };
-    let result =
+    let mut manifest =
         mkv_core::manifest::generate_inspection_manifest(&dir, cache_opt, Some(&cancel_token))
-            .await;
+            .await?;
+    let canonical = dir.to_string_lossy().to_string();
+    let clean_canonical = canonical
+        .strip_prefix(r"\\?\")
+        .unwrap_or(&canonical)
+        .to_string();
+    manifest.extra.insert(
+        "canonical_dir".to_string(),
+        serde_json::Value::String(clean_canonical),
+    );
 
     drop(registration);
-    result
+    Ok(manifest)
 }
 
 #[tauri::command]
 pub fn run_job<R: tauri::Runtime>(
     app: AppHandle<R>,
     state: State<'_, JobState>,
-    request: mkv_core::request::BatchRequest,
+    mut request: mkv_core::request::BatchRequest,
 ) -> Result<u64, String> {
     request.validate()?;
 
@@ -78,6 +87,15 @@ pub fn run_job<R: tauri::Runtime>(
     let cancel_token = CancellationToken::new();
     let (event_tx, event_rx) = mkv_core::pipeline::create_event_channel(64);
     let (log_tx, log_rx) = mkv_core::pipeline::create_log_channel(128);
+    let canonical_input =
+        std::fs::canonicalize(&request.input_dir).unwrap_or_else(|_| request.input_dir.clone());
+    let input_dir_raw = canonical_input.to_string_lossy().to_string();
+    let clean_canonical_input = input_dir_raw
+        .strip_prefix(r"\\?\")
+        .unwrap_or(&input_dir_raw)
+        .to_string();
+    request.input_dir = std::path::PathBuf::from(&clean_canonical_input);
+    let input_dir = Some(clean_canonical_input);
     let pipeline = mkv_core::pipeline::BatchPipeline::from_request(
         request,
         Some(event_tx),
@@ -85,15 +103,15 @@ pub fn run_job<R: tauri::Runtime>(
     )?
     .with_log_sender(Some(log_tx));
 
-    start_supervised_job(
-        app,
-        &state,
+    let config = SupervisedJobConfig {
         mode,
+        input_dir,
         cancel_token,
-        event_rx,
-        log_rx,
-        async move { pipeline.run().await },
-    )
+    };
+
+    start_supervised_job(app, &state, config, event_rx, log_rx, async move {
+        pipeline.run().await
+    })
 }
 fn bridge_terminal(cancelled: bool, problem: Option<(&str, String)>) -> JobEvent {
     let mut extra = serde_json::Map::new();
@@ -108,11 +126,16 @@ fn bridge_terminal(cancelled: bool, problem: Option<(&str, String)>) -> JobEvent
     }
 }
 
+struct SupervisedJobConfig {
+    mode: String,
+    input_dir: Option<String>,
+    cancel_token: CancellationToken,
+}
+
 fn start_supervised_job<R: tauri::Runtime, F>(
     app: AppHandle<R>,
     state: &JobState,
-    mode: String,
-    cancel_token: CancellationToken,
+    config: SupervisedJobConfig,
     mut event_rx: EventReceiver,
     mut log_rx: LogReceiver,
     pipeline_future: F,
@@ -122,13 +145,15 @@ where
 {
     let mut lock = reserve_job_slot(state)?;
     let job_id = state.next_id.fetch_add(1, Ordering::SeqCst);
-    state.begin_snapshot(job_id, &mode)?;
+    state.begin_snapshot(job_id, &config.mode, config.input_dir)?;
 
     let pipeline_handle = tauri::async_runtime::spawn(pipeline_future);
     let pipeline_abort = pipeline_handle.inner().abort_handle();
     let app_task = app.clone();
     let abort_on_supervisor_drop = pipeline_abort.clone();
-    let cancel_for_supervisor = cancel_token.clone();
+    let cancel_for_supervisor = config.cancel_token.clone();
+    let cancel_token = config.cancel_token;
+    let mode = config.mode;
     tauri::async_runtime::spawn(async move {
         struct JobSlotGuard<R: tauri::Runtime> {
             app: AppHandle<R>,
@@ -487,6 +512,46 @@ mod tests {
             .is_ok());
     }
     #[test]
+    fn test_run_job_canonicalizes_symlinked_input_dir() {
+        let (app, _events, _dones) = observed_app();
+        let target_dir = tempfile::tempdir().unwrap();
+        let parent_dir = tempfile::tempdir().unwrap();
+        let symlink_path = parent_dir.path().join("symlink_target");
+
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target_dir.path(), &symlink_path).unwrap();
+        #[cfg(windows)]
+        let _ = std::os::windows::fs::symlink_dir(target_dir.path(), &symlink_path);
+
+        if symlink_path.exists() {
+            let request = mkv_core::request::BatchRequest {
+                mode: mkv_core::pipeline::PipelineMode::Extract,
+                input_dir: symlink_path,
+                dry_run: Some(true),
+                ..Default::default()
+            };
+
+            let state = app.state::<JobState>();
+            let res = run_job(app.handle().clone(), state, request);
+            assert!(res.is_ok());
+            let job_id = res.unwrap();
+            let verify_state = app.state::<JobState>();
+            let _ = verify_state.wait_until_released(job_id, std::time::Duration::from_secs(5));
+
+            let snapshot = verify_state.snapshot.lock().unwrap().clone().unwrap();
+            let canonical_target = std::fs::canonicalize(target_dir.path()).unwrap();
+            let clean_canonical = canonical_target
+                .to_string_lossy()
+                .strip_prefix(r"\\?\")
+                .unwrap_or(&canonical_target.to_string_lossy())
+                .to_string();
+            assert_eq!(
+                snapshot.input_dir.as_deref(),
+                Some(clean_canonical.as_str())
+            );
+        }
+    }
+    #[test]
     fn forced_stop_aborts_only_worker_and_settles_once() {
         let (app, events, dones) = observed_app();
         let state = app.state::<JobState>();
@@ -532,8 +597,11 @@ mod tests {
         let job_id = start_supervised_job(
             app.handle().clone(),
             &state,
-            "remux".into(),
-            token,
+            SupervisedJobConfig {
+                mode: "remux".into(),
+                input_dir: Some("/anime".into()),
+                cancel_token: token,
+            },
             event_rx,
             log_rx,
             worker,
@@ -596,8 +664,11 @@ mod tests {
         let previous_id = start_supervised_job(
             app.handle().clone(),
             &state,
-            "remux".into(),
-            CancellationToken::new(),
+            SupervisedJobConfig {
+                mode: "remux".into(),
+                input_dir: Some("/anime".into()),
+                cancel_token: CancellationToken::new(),
+            },
             previous_rx,
             previous_logs,
             previous_worker,
@@ -661,8 +732,11 @@ mod tests {
         let job_id = start_supervised_job(
             app.handle().clone(),
             &state,
-            "remux".into(),
-            token.clone(),
+            SupervisedJobConfig {
+                mode: "remux".into(),
+                input_dir: Some("/anime".into()),
+                cancel_token: token.clone(),
+            },
             event_rx,
             log_rx,
             worker,
@@ -695,8 +769,11 @@ mod tests {
         let job_id = start_supervised_job(
             app.handle().clone(),
             &state,
-            "remux".into(),
-            CancellationToken::new(),
+            SupervisedJobConfig {
+                mode: "remux".into(),
+                input_dir: Some("/anime".into()),
+                cancel_token: CancellationToken::new(),
+            },
             event_rx,
             log_rx,
             panicking_worker(event_tx),

@@ -95,6 +95,78 @@ export function formatElapsedDuration(seconds) {
   }
   return `${Math.floor(sec / 60)}m ${Math.floor(sec % 60)}s`;
 }
+/**
+ * Normalizes a directory path string for canonical identity comparison.
+ * Trims whitespace, standardizes separators to '/', resolves '.' and '..' segments,
+ * normalizes Windows drive letters, collapses redundant slashes, and strips trailing slashes (except root).
+ * On Windows systems or paths with drive letters, normalizes casing.
+ *
+ * @param {string|null|undefined} path
+ * @returns {string}
+ */
+export function normalizeDirectoryPath(path) {
+  if (typeof path !== "string") return "";
+  let clean = path.trim().replace(/\\/g, "/");
+  if (!clean) return "";
+
+  // Strip Windows extended-length prefix (\\?\ or //?/) if present
+  clean = clean.replace(/^(\/\/|\?\/?)[?.]\//, "");
+
+  // Normalize Windows drive letter (e.g. C: -> c:)
+  const hasDrive = /^[a-zA-Z]:/.test(clean);
+  let drivePrefix = "";
+  if (hasDrive) {
+    drivePrefix = clean.slice(0, 2).toLowerCase();
+    clean = clean.slice(2);
+  }
+
+  const isAbsolute = clean.startsWith("/");
+  const segments = clean.split("/").filter(s => s.length > 0 && s !== ".");
+  const resolved = [];
+
+  for (const seg of segments) {
+    if (seg === "..") {
+      if (resolved.length > 0 && resolved[resolved.length - 1] !== "..") {
+        resolved.pop();
+      } else if (!isAbsolute && !hasDrive) {
+        resolved.push("..");
+      }
+    } else {
+      resolved.push(seg);
+    }
+  }
+
+  let result = (hasDrive ? drivePrefix : "") + (isAbsolute ? "/" : "") + resolved.join("/");
+  if (!result && isAbsolute) result = "/";
+  if (hasDrive && !resolved.length) result = drivePrefix + "/";
+
+  // Case normalization for Windows: on Windows, filesystems are case-insensitive
+  if (
+    hasDrive ||
+    (typeof navigator !== "undefined" &&
+      (navigator.platform?.includes("Win") || navigator.userAgent?.includes("Win"))) ||
+    (typeof process !== "undefined" && process.platform === "win32")
+  ) {
+    result = result.toLowerCase();
+  }
+
+  return result || "/";
+}
+
+/**
+ * Returns true if both directory paths represent the same canonical directory.
+ * An empty, null, or missing directory identity always returns false.
+ *
+ * @param {string|null|undefined} dirA
+ * @param {string|null|undefined} dirB
+ * @returns {boolean}
+ */
+export function isSameDirectory(dirA, dirB) {
+  if (!dirA || !dirB) return false;
+  const normA = normalizeDirectoryPath(dirA);
+  const normB = normalizeDirectoryPath(dirB);
+  return Boolean(normA && normB && normA === normB);
+}
 
 /**
  * @param {InspectionManifest} manifest
@@ -106,6 +178,7 @@ export function createQueueState(manifest, options = {}) {
   const state = {
     version: 1,
     mode,
+    inputDir: options.inputDir ? normalizeDirectoryPath(options.inputDir) : null,
     items: new Map(),
     order: [],
     batchStartTime: null,
@@ -180,6 +253,7 @@ export function createQueueStateFromSnapshot(snapshot, options = {}) {
   const state = {
     version: 1,
     mode,
+    inputDir: snapshot?.input_dir || null,
     items: new Map(),
     order: [],
     batchStartTime: snapshot?.start_time_ms ?? null,

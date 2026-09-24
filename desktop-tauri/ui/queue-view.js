@@ -6,6 +6,8 @@ import {
   formatElapsedDuration,
   formatOutcomeDuration,
   getSelectedCount,
+  isSameDirectory,
+  normalizeDirectoryPath,
   reduceQueueEvent,
   reconcileQueueSelection,
   reorderItem,
@@ -34,7 +36,10 @@ export class QueueTracker {
     this.cards = new Map();
     this.scanToken = 0;
     this.pendingRenderToken = null;
+    this.currentDirectory = null;
     this.lastScannedPath = null;
+    this.isScanning = false;
+    this.renderRafId = null;
     this.lastManifest = null;
     // Track Assignment overrides (remux only): item id -> assignment payload
     this.assignments = new Map();
@@ -60,6 +65,15 @@ export class QueueTracker {
         this.reorderCard(id, dir);
       });
     }
+  }
+  cancelRender() {
+    if (this.renderRafId) {
+      if (typeof cancelAnimationFrame === "function") {
+        cancelAnimationFrame(this.renderRafId);
+      }
+      this.renderRafId = null;
+    }
+    this.pendingRenderToken = null;
   }
 
   startHeartbeat() {
@@ -134,9 +148,10 @@ export class QueueTracker {
 
   startScan() {
     this.stopHeartbeat();
+    this.isScanning = true;
+    this.cancelRender();
     const token = ++this.scanToken;
     this.cards.clear();
-    // Keep the prior queue state while scanning so the accepted manifest can
     // reconcile selection and order only when its directory matches.
     if (this.listEl) {
       this.listEl.innerHTML = `
@@ -155,7 +170,7 @@ export class QueueTracker {
   }
 
   reuseInspection(path) {
-    if (this.lastScannedPath !== path) return false;
+    if (!isSameDirectory(this.lastScannedPath, path)) return false;
     this.scanToken++;
     this.populateFromInspection(this.lastManifest, true);
     return true;
@@ -163,18 +178,22 @@ export class QueueTracker {
 
   acceptInspection(token, path, manifest) {
     if (!this.isCurrentScan(token)) return false;
+    this.isScanning = false;
     if (manifest?.version !== 2 || !Array.isArray(manifest.items)) {
       this.showScanError(token);
       this.lastScannedPath = null;
       return false;
     }
-    this.populateFromInspection(manifest, this.lastScannedPath === path);
-    this.lastScannedPath = path;
+    const isSameDir = isSameDirectory(this.currentDirectory, path);
+    this.populateFromInspection(manifest, isSameDir);
+    this.currentDirectory = normalizeDirectoryPath(path);
+    this.lastScannedPath = normalizeDirectoryPath(path);
     return true;
   }
 
   rejectInspection(token) {
     if (!this.isCurrentScan(token)) return;
+    this.isScanning = false;
     this.showScanError(token);
     this.lastScannedPath = null;
   }
@@ -193,21 +212,25 @@ export class QueueTracker {
 
   reset(title = "No Episodes Queued", description = "Choose an input release directory to scan MKV episodes into this batch.") {
     this.stopHeartbeat();
+    this.isScanning = false;
+    this.cancelRender();
     this.scanToken++;
     this.cards.clear();
     this.assignments.clear();
     this.subtitleCandidates = {};
+    this.currentDirectory = null;
+    this.lastScannedPath = null;
     this.state = createQueueState({ version: 2, items: [] }, { mode: this.mode });
     if (this.listEl) this.listEl.innerHTML = this.emptyStateMarkup(title, description);
     this.setCountText("Ready");
   }
-
   populateFromInspection(manifest, preserveSelection = false) {
     this.stopHeartbeat();
+    this.isScanning = false;
+    this.cancelRender();
     this.lastManifest = manifest;
     this.cards.clear();
     if (this.listEl) this.listEl.innerHTML = "";
-
     const bitrate = this.getBitrate();
     const nextState = createQueueState(manifest, { mode: this.mode });
     this.state = preserveSelection ? reconcileQueueSelection(nextState, this.state) : nextState;
@@ -242,12 +265,25 @@ export class QueueTracker {
   // Cards render from the item's CURRENT reducer state, so events that
   // arrived before a card existed are reflected once it is created.
   renderCardsIncrementally(token, bitrate) {
-    const order = this.state.order;
+    const order = this.state?.order;
+    if (!order || order.length === 0) {
+      this.cancelRender();
+      return;
+    }
+
+    this.cancelRender();
+    this.cards.clear();
+    if (this.listEl) this.listEl.innerHTML = "";
+
     this.pendingRenderToken = token;
     let index = 0;
 
     const renderBatch = () => {
-      if (!this.isCurrentScan(token)) return;
+      this.renderRafId = null;
+      if (!this.isCurrentScan(token)) {
+        this.pendingRenderToken = null;
+        return;
+      }
       const frag = document.createDocumentFragment();
       const deadline = performance.now() + 8;
       do {
@@ -269,13 +305,15 @@ export class QueueTracker {
         frag.appendChild(card.el);
       } while (index < order.length && performance.now() < deadline);
       this.listEl.appendChild(frag);
-      if (index < order.length) requestAnimationFrame(renderBatch);
-      else this.pendingRenderToken = null;
+      if (index < order.length) {
+        this.renderRafId = requestAnimationFrame(renderBatch);
+      } else {
+        this.pendingRenderToken = null;
+      }
     };
 
-    requestAnimationFrame(renderBatch);
+    this.renderRafId = requestAnimationFrame(renderBatch);
   }
-
   applyMetadata(card, meta, bitrate) {
     if (!card || !card.el || !meta) return;
     if (card.codec) card.codec.textContent = meta.video_tag || "MKV";
@@ -420,6 +458,8 @@ export class QueueTracker {
 
   restoreFromSnapshot(snapshot) {
     this.stopHeartbeat();
+    this.isScanning = false;
+    this.cancelRender();
     if (!snapshot || !snapshot.items) return;
     this.scanToken++;
     this.cards.clear();
@@ -427,7 +467,10 @@ export class QueueTracker {
     if (this.listEl) this.listEl.innerHTML = "";
 
     this.state = createQueueStateFromSnapshot(snapshot, { mode: this.mode });
-
+    if (this.state?.inputDir) {
+      this.currentDirectory = normalizeDirectoryPath(this.state.inputDir);
+      this.lastScannedPath = normalizeDirectoryPath(this.state.inputDir);
+    }
     if (this.countEl) {
       this.renderQueueCount();
     }
@@ -442,6 +485,17 @@ export class QueueTracker {
     if (!this.state) return;
     this.state = reduceQueueEvent(this.state, event);
 
+    if (event.type === "batch_start") {
+      if (event.input_dir) {
+        this.currentDirectory = normalizeDirectoryPath(event.input_dir);
+        this.lastScannedPath = normalizeDirectoryPath(event.input_dir);
+      }
+      if (this.cards.size === 0 && this.pendingRenderToken === null && this.state.order.length > 0) {
+        if (this.listEl) this.listEl.innerHTML = "";
+        const bitrate = this.getBitrate();
+        this.renderCardsIncrementally(this.scanToken, bitrate);
+      }
+    }
     if (event.id) {
       const item = this.state.items.get(event.id);
       let card = this.cards.get(event.id);

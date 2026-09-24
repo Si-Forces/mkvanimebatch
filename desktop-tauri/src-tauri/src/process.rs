@@ -101,6 +101,7 @@ pub struct JobSnapshot {
     pub duration_sec: Option<f64>,
     pub total_items: usize,
     pub completed_items: usize,
+    pub input_dir: Option<String>,
     pub ordered_item_ids: Vec<String>,
     pub items: HashMap<String, ItemSnapshot>,
 }
@@ -223,7 +224,12 @@ impl JobState {
         })
     }
 
-    pub(crate) fn begin_snapshot(&self, job_id: u64, mode: &str) -> Result<(), String> {
+    pub(crate) fn begin_snapshot(
+        &self,
+        job_id: u64,
+        mode: &str,
+        input_dir: Option<String>,
+    ) -> Result<(), String> {
         *self.snapshot.lock().map_err(|error| error.to_string())? = Some(JobSnapshot {
             job_id,
             mode: mode.to_string(),
@@ -232,6 +238,7 @@ impl JobState {
             duration_sec: None,
             total_items: 0,
             completed_items: 0,
+            input_dir,
             ordered_item_ids: Vec::new(),
             items: HashMap::new(),
         });
@@ -250,7 +257,12 @@ impl JobState {
                 return;
             }
             match event {
-                JobEvent::BatchStart { total, items, .. } => {
+                JobEvent::BatchStart {
+                    total,
+                    items,
+                    input_dir,
+                    ..
+                } => {
                     let start_time_ms = snap
                         .as_ref()
                         .filter(|snapshot| snapshot.job_id == job_id)
@@ -288,6 +300,10 @@ impl JobState {
                         duration_sec: None,
                         total_items: *total,
                         completed_items: 0,
+                        input_dir: snap.as_ref().and_then(|s| s.input_dir.clone()).or_else(|| {
+                            let clean = input_dir.strip_prefix(r"\\?\").unwrap_or(input_dir);
+                            Some(clean.to_string())
+                        }),
                         ordered_item_ids,
                         items: snapshot_items,
                     });
@@ -831,7 +847,7 @@ mod tests {
         use mkv_core::pipeline::{BatchItemInfo, JobEvent};
 
         let state = JobState::default();
-        state.begin_snapshot(10, "remux").unwrap();
+        state.begin_snapshot(10, "remux", None).unwrap();
         let start_time_ms = state
             .snapshot
             .lock()
@@ -897,6 +913,7 @@ mod tests {
             vec!["ep2".to_string(), "ep1".to_string()]
         );
         assert_eq!(snapshot.items.len(), 2);
+        assert_eq!(snapshot.input_dir.as_deref(), Some("/anime"));
         assert!(!snapshot.items.contains_key("ep3"));
         assert_eq!(snapshot.items["ep2"].status, ItemStatus::Processing);
         assert!(snapshot.items["ep2"].start_time_ms.is_some());

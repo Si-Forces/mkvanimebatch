@@ -1,4 +1,4 @@
-import { buildTrackAssignmentsForManifest } from "./queue-state.js";
+import { buildTrackAssignmentsForManifest, isSameDirectory } from "./queue-state.js";
 
 
 export function extractInspectionOptions(argsOrRequest) {
@@ -223,8 +223,10 @@ export class JobController {
     }
     const generation = ++this.startGeneration;
     const tracker = this.runtime.queueFor(this.mode);
-    const selectedIds = tracker.getSelectedOrderedItemIds();
-    const assignmentSnapshot = new Map(tracker.assignments);
+    const capturedDir = tracker.currentDirectory || tracker.lastScannedPath;
+    const isSameDir = isSameDirectory(capturedDir, inputDir);
+    const selectedIds = isSameDir ? tracker.getSelectedOrderedItemIds() : null;
+    const assignmentSnapshot = isSameDir ? new Map(tracker.assignments) : null;
     if (!this.runtime.coordinator.begin(this.mode)) return;
     this.runtime.closeSubAssignModal();
 
@@ -250,23 +252,27 @@ export class JobController {
       return;
     }
 
-    if (selectedIds.length === 0) {
+    const effectiveSelectedIds = isSameDir ? selectedIds : tracker.getSelectedOrderedItemIds();
+    if (!effectiveSelectedIds || effectiveSelectedIds.length === 0) {
       this.runtime.appendLog(this.logEl, "[ERROR] No episodes selected in queue.");
       this.abortStart();
       return;
     }
     const discoveredIds = new Set(tracker.lastManifest?.items?.map(item => item.id) ?? []);
-    const missingIds = selectedIds.filter(id => !discoveredIds.has(id));
-    if (missingIds.length) {
-      this.runtime.appendLog(this.logEl, `[ERROR] Selected episodes disappeared during inspection: ${missingIds.join(", ")}. Job was not started.`);
-      this.abortStart();
-      return;
+    if (isSameDir) {
+      const missingIds = effectiveSelectedIds.filter(id => !discoveredIds.has(id));
+      if (missingIds.length) {
+        this.runtime.appendLog(this.logEl, `[ERROR] Selected episodes disappeared during inspection: ${missingIds.join(", ")}. Job was not started.`);
+        this.abortStart();
+        return;
+      }
     }
-    batchRequest.selected_items = selectedIds;
+    batchRequest.selected_items = effectiveSelectedIds;
 
     if (this.mode === "remux") {
-      const fullAssignments = buildTrackAssignmentsForManifest(assignmentSnapshot, tracker.lastManifest);
-      const selectedSet = new Set(selectedIds);
+      const effectiveAssignments = isSameDir ? assignmentSnapshot : tracker.assignments;
+      const fullAssignments = buildTrackAssignmentsForManifest(effectiveAssignments, tracker.lastManifest);
+      const selectedSet = new Set(effectiveSelectedIds);
       batchRequest.assignments = fullAssignments?.filter(a => selectedSet.has(a.target_video)) ?? null;
     }
     this.cleanupListeners();
@@ -430,7 +436,8 @@ export class JobController {
     const hasItems = (tracker?.state?.totalCount ?? 0) > 0;
     const selectedCount = tracker?.getSelectedCount?.() ?? 0;
     const selectionDisabled = hasItems && selectedCount === 0;
-    if (this.runBtn) this.runBtn.disabled = busy || this.runtime.coordinator.isStarting || selectionDisabled;
+    const isScanning = Boolean(tracker?.isScanning);
+    if (this.runBtn) this.runBtn.disabled = busy || this.runtime.coordinator.isStarting || isScanning || selectionDisabled;
     for (const control of this.formControls) control.disabled = busy;
     document.querySelectorAll(`#view-${this.mode} .sub-assign-btn`).forEach(control => {
       control.disabled = busy;

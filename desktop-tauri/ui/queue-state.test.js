@@ -16,6 +16,8 @@ import {
   deselectAll,
   reorderItem,
   getSelectedCount,
+  normalizeDirectoryPath,
+  isSameDirectory,
 } from "./queue-state.js";
 
 test("createQueueState initializes state from manifest v2", () => {
@@ -988,5 +990,31 @@ test("reconcileQueueSelection keeps surviving choices and order, appending new I
   assert.deepEqual(replacement.order.map(id => replacement.items.get(id).selected), [true, false, false]);
   assert.equal(replacement.items.has("gone"), false);
   assert.deepEqual(previous.order, ["ep2", "ep1", "gone"]);
+});
+test("normalizeDirectoryPath and isSameDirectory handle canonical, relative, and Windows paths", () => {
+  // Relative dot segments
+  assert.equal(normalizeDirectoryPath("/anime/x/../show"), "/anime/show");
+  assert.equal(normalizeDirectoryPath("/anime/./show/."), "/anime/show");
+  assert.equal(isSameDirectory("/anime/show", "/anime/x/../show"), true);
+  assert.equal(isSameDirectory("/anime/show/", "/anime/x/../show"), true);
+
+  // Trailing slash differences
+  assert.equal(isSameDirectory("/anime/show", "/anime/show/"), true);
+  assert.equal(isSameDirectory("/anime/show///", "/anime/show"), true);
+
+  // Windows drive letters and separators
+  assert.equal(normalizeDirectoryPath("C:\\Anime\\Show"), "c:/anime/show");
+  assert.equal(normalizeDirectoryPath("c:/anime/show/"), "c:/anime/show");
+  assert.equal(isSameDirectory("C:\\Anime\\Show", "c:/anime/show/"), true);
+  assert.equal(isSameDirectory("C:\\Anime\\x\\..\\Show", "c:/anime/show"), true);
+
+  // Missing or empty identities
+  assert.equal(isSameDirectory(null, "/anime/show"), false);
+  assert.equal(isSameDirectory("/anime/show", null), false);
+  assert.equal(isSameDirectory(undefined, undefined), false);
+  assert.equal(isSameDirectory("", "/anime/show"), false);
+
+  // Different directories
+  assert.equal(isSameDirectory("/anime/showA", "/anime/showB"), false);
 });
 

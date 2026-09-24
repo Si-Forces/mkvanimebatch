@@ -793,6 +793,240 @@ test("Start preserves selected order across real rescans and rejects vanished ID
   assert.equal(coordinator.activeMode, null);
   assert.ok(logs.some(message => message.includes(two) && message.includes("disappeared")));
 });
+test("Start with different input directory defaults to all-selected and drops previous directory assignments", async t => {
+  const elements = new Map([
+    ["remux-input-dir", new FakeElement("/anime/series-b")],
+    ["remux-out-dir", new FakeElement("")],
+    ["remux-fonts-dir", new FakeElement("")],
+    ["remux-assets-dir", new FakeElement("")],
+    ["remux-sub-offset", new FakeElement("0")],
+    ["remux-workers", new FakeElement("")],
+    ["remux-io-jobs", new FakeElement("")],
+    ["remux-ffmpeg-threads", new FakeElement("")],
+    ["remux-bitrate", new FakeElement("")],
+    ["remux-complexity", new FakeElement("")],
+    ["remux-dry-run", new FakeElement(false)],
+    ["remux-no-cache", new FakeElement(false)],
+    ["remux-run", new FakeElement()],
+    ["remux-stop", new FakeElement()],
+    ["remux-log", new FakeElement()],
+    ["remux-status", new FakeElement()],
+  ]);
+  const previousDocument = globalThis.document;
+  globalThis.document = {
+    getElementById: id => elements.get(id) ?? null,
+    querySelectorAll: () => [],
+    querySelector: () => null,
+  };
+  t.after(() => { globalThis.document = previousDocument; });
+
+  const calls = [];
+  const coordinator = createJobCoordinator();
+  // Queue currently holds state for series-a with only ep1 selected and an assignment
+  const tracker = {
+    currentDirectory: "/anime/series-a",
+    assignments: new Map([["01.mkv", "/subs/old.ass"]]),
+    getSelectedOrderedItemIds: () => ["01.mkv"],
+    lastManifest: {
+      version: 2,
+      items: [
+        { id: "01.mkv", name: "01.mkv" },
+        { id: "02.mkv", name: "02.mkv" },
+      ],
+    },
+    state: { totalCount: 2 },
+    handleEvent() {},
+    finalize() {},
+  };
+
+  const runtime = {
+    coordinator,
+    appendLog() {},
+    clearLog() {},
+    closeSubAssignModal() {},
+    queueFor: () => tracker,
+    safeAddListener() {},
+    scanInputDirectory: async (dir, mode, opts) => {
+      // Inspection of series-b completes: update tracker to series-b state
+      tracker.currentDirectory = dir;
+      tracker.assignments = new Map();
+      tracker.getSelectedOrderedItemIds = () => ["01.mkv", "02.mkv"]; // all selected default
+      tracker.lastManifest = {
+        version: 2,
+        items: [
+          { id: "01.mkv", name: "01.mkv" },
+          { id: "02.mkv", name: "02.mkv" },
+        ],
+      };
+      return true;
+    },
+    showModal: async () => true,
+    telemetryLoop: { setJobActive() {} },
+    updateWorkerChips() {},
+    async listen(event, callback) { return () => {}; },
+    async invoke(cmd, { request }) {
+      if (cmd === "run_job") {
+        calls.push(request);
+        return 101;
+      }
+      return null;
+    },
+  };
+
+  const controller = new JobController("remux", runtime);
+  await controller.start();
+
+  assert.equal(calls.length, 1);
+  // All items from series-b should be selected
+  assert.deepEqual(calls[0].selected_items, ["01.mkv", "02.mkv"]);
+  // No assignments carried over from series-a
+  assert.equal(calls[0].assignments, null);
+});
+test("Start from empty queue with unscanned first directory discovers and runs all items", async t => {
+  const elements = new Map([
+    ["remux-input-dir", new FakeElement("/anime/first-show")],
+    ["remux-out-dir", new FakeElement("")],
+    ["remux-fonts-dir", new FakeElement("")],
+    ["remux-assets-dir", new FakeElement("")],
+    ["remux-sub-offset", new FakeElement("0")],
+    ["remux-workers", new FakeElement("")],
+    ["remux-io-jobs", new FakeElement("")],
+    ["remux-ffmpeg-threads", new FakeElement("")],
+    ["remux-bitrate", new FakeElement("")],
+    ["remux-complexity", new FakeElement("")],
+    ["remux-dry-run", new FakeElement(false)],
+    ["remux-no-cache", new FakeElement(false)],
+    ["remux-run", new FakeElement()],
+    ["remux-stop", new FakeElement()],
+    ["remux-log", new FakeElement()],
+    ["remux-status", new FakeElement()],
+  ]);
+  const previousDocument = globalThis.document;
+  globalThis.document = {
+    getElementById: id => elements.get(id) ?? null,
+    querySelectorAll: () => [],
+    querySelector: () => null,
+  };
+  t.after(() => { globalThis.document = previousDocument; });
+
+  const calls = [];
+  const coordinator = createJobCoordinator();
+  // Queue starts completely empty and unscanned (currentDirectory is null)
+  const tracker = {
+    currentDirectory: null,
+    lastScannedPath: null,
+    assignments: new Map(),
+    getSelectedOrderedItemIds: () => [],
+    lastManifest: null,
+    state: { totalCount: 0 },
+    handleEvent() {},
+    finalize() {},
+  };
+
+  const runtime = {
+    coordinator,
+    appendLog() {},
+    clearLog() {},
+    closeSubAssignModal() {},
+    queueFor: () => tracker,
+    safeAddListener() {},
+    scanInputDirectory: async (dir, mode, opts) => {
+      // Inspection populates the newly scanned directory
+      tracker.currentDirectory = dir;
+      tracker.lastScannedPath = dir;
+      tracker.getSelectedOrderedItemIds = () => ["01.mkv", "02.mkv"];
+      tracker.lastManifest = {
+        version: 2,
+        items: [
+          { id: "01.mkv", name: "01.mkv" },
+          { id: "02.mkv", name: "02.mkv" },
+        ],
+      };
+      tracker.state.totalCount = 2;
+      return true;
+    },
+    showModal: async () => true,
+    telemetryLoop: { setJobActive() {} },
+    updateWorkerChips() {},
+    async listen(event, callback) { return () => {}; },
+    async invoke(cmd, { request }) {
+      if (cmd === "run_job") {
+        calls.push(request);
+        return 201;
+      }
+      return null;
+    },
+  };
+
+  const controller = new JobController("remux", runtime);
+  await controller.start();
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].selected_items, ["01.mkv", "02.mkv"]);
+});
+
+test("Start preserves selection across canonical directory representations with trailing slashes", async t => {
+  const elements = new Map([
+    ["remux-input-dir", new FakeElement("/anime/show/")] // Note trailing slash
+  ]);
+  const previousDocument = globalThis.document;
+  globalThis.document = {
+    getElementById: id => elements.get(id) ?? null,
+    querySelectorAll: () => [],
+    querySelector: () => null,
+  };
+  t.after(() => { globalThis.document = previousDocument; });
+
+  const calls = [];
+  const coordinator = createJobCoordinator();
+  // Queue was scanned without trailing slash, and user selected only 02.mkv
+  const tracker = {
+    currentDirectory: "/anime/show", // No trailing slash
+    lastScannedPath: "/anime/show",
+    assignments: new Map([["02.mkv", "/subs/02.ass"]]),
+    getSelectedOrderedItemIds: () => ["02.mkv"],
+    lastManifest: {
+      version: 2,
+      items: [
+        { id: "01.mkv", name: "01.mkv" },
+        { id: "02.mkv", name: "02.mkv" },
+      ],
+    },
+    state: { totalCount: 2 },
+    handleEvent() {},
+    finalize() {},
+  };
+
+  const runtime = {
+    coordinator,
+    appendLog() {},
+    clearLog() {},
+    closeSubAssignModal() {},
+    queueFor: () => tracker,
+    safeAddListener() {},
+    scanInputDirectory: async () => true,
+    showModal: async () => true,
+    telemetryLoop: { setJobActive() {} },
+    updateWorkerChips() {},
+    async listen() { return () => {}; },
+    async invoke(cmd, { request }) {
+      if (cmd === "run_job") {
+        calls.push(request);
+        return 202;
+      }
+      return null;
+    },
+  };
+
+  const controller = new JobController("remux", runtime);
+  await controller.start();
+
+  assert.equal(calls.length, 1);
+  // Preserves exact user selection because /anime/show and /anime/show/ are canonically identical
+  assert.deepEqual(calls[0].selected_items, ["02.mkv"]);
+  assert.equal(calls[0].assignments.length, 1);
+  assert.equal(calls[0].assignments[0].target_video, "02.mkv");
+});
 
 test("job controller aborts start if episodes exist in queue but zero are selected", async t => {
   const elements = new Map([
@@ -851,6 +1085,42 @@ test("job controller aborts start if episodes exist in queue but zero are select
 
   assert.equal(controller.running, false);
   assert.ok(logs.some(l => l.includes("No episodes selected in queue")));
+});
+test("job controller disables run button while queue tracker isScanning", () => {
+  const runBtn = new FakeElement();
+  const elements = new Map([
+    ["remux-run", runBtn],
+    ["remux-stop", new FakeElement()],
+    ["remux-status", new FakeElement()],
+  ]);
+  const previousDocument = globalThis.document;
+  globalThis.document = {
+    getElementById: id => elements.get(id) ?? null,
+    querySelectorAll: () => [],
+    querySelector: () => null,
+  };
+  const coordinator = createJobCoordinator();
+  const tracker = {
+    isScanning: true,
+    state: { totalCount: 2 },
+    getSelectedCount: () => 2,
+  };
+  const runtime = {
+    coordinator,
+    queueFor: () => tracker,
+    safeAddListener() {},
+  };
+  try {
+    const controller = new JobController("remux", runtime);
+    controller.syncGlobalControls();
+    assert.equal(runBtn.disabled, true);
+
+    tracker.isScanning = false;
+    controller.syncGlobalControls();
+    assert.equal(runBtn.disabled, false);
+  } finally {
+    globalThis.document = previousDocument;
+  }
 });
 
 test("job controller onDone is ignored when jobId is null or not running", t => {

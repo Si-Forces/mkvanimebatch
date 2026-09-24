@@ -550,6 +550,226 @@ test("QueueTracker reconciles same-directory replacements, cached reuse, stale s
   assert.equal(tracker.cards.get("Other/04.mkv").checkbox.checked, true);
   assert.equal(tracker.assignments.size, 0);
 });
+test("QueueTracker preserves same-directory selection after failed scan and snapshot reload", t => {
+  const { elements } = setupMockEnvironment(t);
+  const frames = [];
+  globalThis.requestAnimationFrame = callback => frames.push(callback);
+  const renderFrames = () => { while (frames.length) frames.shift()(); };
+  const manifest = ids => ({ version: 2, items: ids.map(id => ({ id, name: id })) });
+  const tracker = new QueueTracker("remux");
+  const dir = "/input/show";
+
+  // Initial scan of /input/show
+  assert.equal(tracker.acceptInspection(tracker.startScan(), dir, manifest(["01.mkv", "02.mkv", "03.mkv"])), true);
+  renderFrames();
+  tracker.reorderCard("02.mkv", "up");
+  tracker.state.items.get("01.mkv").selected = false;
+  tracker.assignments.set("02.mkv", "02.ass");
+
+  // Scan fails (e.g. invalid manifest or rejection)
+  const failedScan = tracker.startScan();
+  tracker.rejectInspection(failedScan);
+  assert.equal(tracker.currentDirectory, dir);
+
+  // Subsequent scan of the same directory must preserve surviving selection and order
+  assert.equal(tracker.acceptInspection(tracker.startScan(), dir, manifest(["01.mkv", "02.mkv", "04.mkv"])), true);
+  renderFrames();
+  assert.deepEqual(tracker.state.order, ["02.mkv", "01.mkv", "04.mkv"]);
+  assert.deepEqual(tracker.getSelectedOrderedItemIds(), ["02.mkv"]);
+  assert.deepEqual([...tracker.assignments.keys()], ["02.mkv"]);
+
+  // Snapshot restore carries directory identity
+  tracker.restoreFromSnapshot({
+    job_id: 1,
+    mode: "remux",
+    status: "completed",
+    input_dir: dir,
+    ordered_item_ids: ["02.mkv", "01.mkv"],
+    items: {
+      "02.mkv": { id: "02.mkv", file: "02.mkv", status: "completed" },
+      "01.mkv": { id: "01.mkv", file: "01.mkv", status: "completed" },
+    },
+  });
+  assert.equal(tracker.currentDirectory, dir);
+
+  // Re-scanning same directory after snapshot reload preserves selection
+  assert.equal(tracker.acceptInspection(tracker.startScan(), dir, manifest(["01.mkv", "02.mkv", "05.mkv"])), true);
+  renderFrames();
+  assert.deepEqual(tracker.state.order, ["02.mkv", "01.mkv", "05.mkv"]);
+  assert.deepEqual(tracker.getSelectedOrderedItemIds(), ["02.mkv", "01.mkv"]);
+});
+
+test("QueueTracker renders cards when BatchStart arrives after restoring empty running snapshot", t => {
+  const { elements } = setupMockEnvironment(t);
+  const frames = [];
+  globalThis.requestAnimationFrame = callback => frames.push(callback);
+  const renderFrames = () => { while (frames.length) frames.shift()(); };
+  const tracker = new QueueTracker("remux");
+
+  // Reload before BatchStart arrives: running snapshot is empty
+  tracker.restoreFromSnapshot({
+    job_id: 99,
+    mode: "remux",
+    status: "running",
+    input_dir: "/anime/show",
+    ordered_item_ids: [],
+    items: {},
+  });
+  renderFrames();
+  assert.equal(tracker.cards.size, 0);
+
+  // BatchStart arrives with items
+  tracker.handleEvent({
+    version: 1,
+    type: "batch_start",
+    total: 2,
+    input_dir: "/anime/show",
+    items: [
+      { id: "02.mkv", file: "02.mkv" },
+      { id: "01.mkv", file: "01.mkv" },
+    ],
+  });
+  renderFrames();
+
+  // Cards must be rendered from the ordered state
+  assert.equal(tracker.cards.size, 2);
+  assert.ok(tracker.cards.has("02.mkv"));
+  assert.ok(tracker.cards.has("01.mkv"));
+  assert.deepEqual(tracker.state.order, ["02.mkv", "01.mkv"]);
+});
+test("QueueTracker does not render duplicate cards when BatchStart arrives before initial snapshot frame flushes", t => {
+  const { elements } = setupMockEnvironment(t);
+  const frames = [];
+  globalThis.requestAnimationFrame = callback => {
+    frames.push(callback);
+    return frames.length;
+  };
+  globalThis.cancelAnimationFrame = id => {
+    const idx = id - 1;
+    if (frames[idx]) {
+      frames[idx] = () => {};
+    }
+  };
+  const renderFrames = () => {
+    while (frames.length) frames.shift()();
+  };
+  const tracker = new QueueTracker("remux");
+
+  // Restore running snapshot with 0 items without flushing frames yet
+  tracker.restoreFromSnapshot({
+    job_id: 100,
+    mode: "remux",
+    status: "running",
+    input_dir: "/anime/show",
+    ordered_item_ids: [],
+    items: {},
+  });
+
+  // BatchStart arrives immediately while initial restore frame is still pending
+  tracker.handleEvent({
+    version: 1,
+    type: "batch_start",
+    total: 2,
+    input_dir: "/anime/show",
+    items: [
+      { id: "02.mkv", file: "02.mkv" },
+      { id: "01.mkv", file: "01.mkv" },
+    ],
+  });
+
+  // Now flush all queued animation frames
+  renderFrames();
+
+  // Exactly two cards must exist in tracker.cards and in the DOM list, with no duplicates
+  const listEl = elements.get("remux-episode-list");
+  assert.equal(tracker.cards.size, 2);
+  assert.equal(listEl.children.length, 2);
+  assert.ok(tracker.cards.has("02.mkv"));
+  assert.ok(tracker.cards.has("01.mkv"));
+});
+test("QueueTracker preserves selection across symlinked directory rescan and BatchStart", t => {
+  const { elements } = setupMockEnvironment(t);
+  const frames = [];
+  globalThis.requestAnimationFrame = callback => frames.push(callback);
+  const renderFrames = () => { while (frames.length) frames.shift()(); };
+  const tracker = new QueueTracker("remux");
+
+  // In real runtime, a symlink alias resolves to the canonical directory on disk
+  const realDir = "/var/media/anime/show";
+
+  // Initial scan passes canonical_dir as realDir
+  const manifest = ids => ({
+    version: 2,
+    canonical_dir: realDir,
+    items: ids.map(id => ({ id, name: id })),
+  });
+
+  // User scanned via symlink alias; acceptedPath was resolved to realDir
+  assert.equal(tracker.acceptInspection(tracker.startScan(), realDir, manifest(["01.mkv", "02.mkv"])), true);
+  renderFrames();
+
+  // User reorders and deselects 01.mkv
+  tracker.reorderCard("02.mkv", "up");
+  tracker.state.items.get("01.mkv").selected = false;
+  assert.deepEqual(tracker.getSelectedOrderedItemIds(), ["02.mkv"]);
+
+  // BatchStart arrives carrying the canonical input_dir
+  tracker.handleEvent({
+    version: 1,
+    type: "batch_start",
+    total: 2,
+    input_dir: realDir,
+    items: [
+      { id: "02.mkv", file: "02.mkv" },
+      { id: "01.mkv", file: "01.mkv" },
+    ],
+  });
+  assert.equal(tracker.currentDirectory, realDir);
+
+  // Subsequent rescan with newly discovered item 03.mkv
+  assert.equal(
+    tracker.acceptInspection(
+      tracker.startScan(),
+      realDir,
+      manifest(["01.mkv", "02.mkv", "03.mkv"])
+    ),
+    true
+  );
+  renderFrames();
+
+  // Order and selection preserved across BatchStart: 02.mkv first (selected), 01.mkv (unselected), 03.mkv (appended unselected)
+  assert.deepEqual(tracker.state.order, ["02.mkv", "01.mkv", "03.mkv"]);
+  assert.deepEqual(tracker.getSelectedOrderedItemIds(), ["02.mkv"]);
+  assert.equal(tracker.state.items.get("01.mkv").selected, false);
+  assert.equal(tracker.state.items.get("03.mkv").selected, false);
+
+  // Snapshot restore carries canonical directory identity
+  tracker.restoreFromSnapshot({
+    job_id: 10,
+    mode: "remux",
+    status: "completed",
+    input_dir: realDir,
+    ordered_item_ids: ["02.mkv", "01.mkv"],
+    items: {
+      "02.mkv": { id: "02.mkv", file: "02.mkv", status: "completed" },
+      "01.mkv": { id: "01.mkv", file: "01.mkv", status: "completed" },
+    },
+  });
+  assert.equal(tracker.currentDirectory, realDir);
+
+  // Rescan after snapshot restore preserves directory identity and appends new items unselected
+  assert.equal(
+    tracker.acceptInspection(
+      tracker.startScan(),
+      realDir,
+      manifest(["01.mkv", "02.mkv", "04.mkv"])
+    ),
+    true
+  );
+  renderFrames();
+  assert.deepEqual(tracker.state.order, ["02.mkv", "01.mkv", "04.mkv"]);
+  assert.equal(tracker.state.items.get("04.mkv").selected, false);
+});
 
 test("escapeAttr escapes &, \", ', <, and >", () => {
   assert.equal(escapeAttr("hello"), "hello");

@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// A named configuration profile for audio transcoding and container retention.
+/// A named configuration profile for audio transcoding.
 /// Concurrency and hardware parameters (workers, io_jobs) are deliberately decoupled
 /// from encoding presets per ADR-0008.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -22,7 +22,7 @@ pub fn get_preset_profiles() -> Vec<PresetProfile> {
             id: "balanced".to_string(),
             name: "Balanced Anime (Opus 192k)".to_string(),
             icon: "🌸".to_string(),
-            description: "Opus 192k • Keep Fonts • Complexity 5".to_string(),
+            description: "Opus 192k • Complexity 5".to_string(),
             bitrate: "192k".to_string(),
             complexity: 5,
         },
@@ -38,7 +38,7 @@ pub fn get_preset_profiles() -> Vec<PresetProfile> {
             id: "hifi".to_string(),
             name: "Hi-Fi Master (320k)".to_string(),
             icon: "🎧".to_string(),
-            description: "Opus 320k • Keep Fonts • Complexity 10".to_string(),
+            description: "Opus 320k • Complexity 10".to_string(),
             bitrate: "320k".to_string(),
             complexity: 10,
         },
