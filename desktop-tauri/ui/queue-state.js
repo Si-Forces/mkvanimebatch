@@ -187,6 +187,7 @@ export function createQueueState(manifest, options = {}) {
     order: [],
     batchStartTime: null,
     batchItemIds: null,
+    vanishedSelectedIds: [],
     batchCompleted: false,
     batchSuccess: null,
     batchCancelled: false,
@@ -229,21 +230,27 @@ export function createQueueState(manifest, options = {}) {
 
   return state;
 }
-/** Preserve surviving selection and order; append newly inspected IDs unselected. */
+/** Preserve surviving selection and order, remember vanished selected IDs, and append newly inspected IDs unselected. */
 export function reconcileQueueSelection(state, previous) {
+  const priorVanished = new Set(previous.vanishedSelectedIds);
+  const vanished = new Set([...priorVanished].filter(id => !state.items.has(id)));
   const order = [];
   for (const id of previous.order) {
     const item = state.items.get(id);
-    if (!item) continue;
+    if (!item) {
+      if (previous.items.get(id)?.selected !== false) vanished.add(id);
+      continue;
+    }
     item.selected = previous.items.get(id)?.selected !== false;
     order.push(id);
   }
   for (const id of state.order) {
     if (previous.items.has(id)) continue;
-    state.items.get(id).selected = false;
+    state.items.get(id).selected = priorVanished.has(id);
     order.push(id);
   }
   state.order = order;
+  state.vanishedSelectedIds = [...vanished];
   return state;
 }
 
@@ -263,6 +270,7 @@ export function createQueueStateFromSnapshot(snapshot, options = {}) {
     order: [],
     batchStartTime: snapshot?.start_time_ms ?? null,
     batchItemIds: null,
+    vanishedSelectedIds: [],
     batchCompleted: snapshot?.status === "completed" || snapshot?.status === "cancelled" || snapshot?.status === "error",
     batchSuccess: snapshot?.status === "completed",
     batchCancelled: snapshot?.status === "cancelled",
@@ -551,6 +559,7 @@ export function toggleItemSelection(state, id, selected) {
   const item = state.items.get(id);
   if (!item) return;
   item.selected = typeof selected === "boolean" ? selected : !item.selected;
+  state.vanishedSelectedIds = [];
 }
 
 /**
@@ -561,6 +570,7 @@ export function selectAll(state) {
   for (const item of state.items.values()) {
     item.selected = true;
   }
+  state.vanishedSelectedIds = [];
 }
 
 /**
@@ -571,6 +581,7 @@ export function deselectAll(state) {
   for (const item of state.items.values()) {
     item.selected = false;
   }
+  state.vanishedSelectedIds = [];
 }
 
 /**

@@ -1083,3 +1083,38 @@ test("UNC shares keep a distinct identity from root-relative paths", () => {
   assert.equal(normalizeDirectoryPath("\\\\?\\C:\\Anime"), "c:/anime");
 });
 
+test("rescan remembers vanished selected ids until selection changes", () => {
+  const manifest = ids => ({ version: 2, items: ids.map(id => ({ id, name: id })) });
+  const previous = createQueueState(manifest(["ep1", "ep2", "ep3"]));
+  toggleItemSelection(previous, "ep3", false);
+  const next = reconcileQueueSelection(createQueueState(manifest(["ep1"])), previous);
+  assert.deepEqual(next.vanishedSelectedIds, ["ep2"]);
+
+  const again = reconcileQueueSelection(createQueueState(manifest(["ep1"])), next);
+  assert.deepEqual(again.vanishedSelectedIds, ["ep2"]);
+
+  toggleItemSelection(again, "ep1", true);
+  assert.deepEqual(again.vanishedSelectedIds, []);
+});
+
+test("a vanished selected id that reappears is restored selected", () => {
+  const manifest = ids => ({ version: 2, items: ids.map(id => ({ id, name: id })) });
+  const previous = createQueueState(manifest(["ep1", "ep2"]));
+  const gone = reconcileQueueSelection(createQueueState(manifest(["ep1"])), previous);
+  const back = reconcileQueueSelection(createQueueState(manifest(["ep1", "ep2"])), gone);
+  assert.equal(back.items.get("ep2").selected, true);
+  assert.deepEqual(back.vanishedSelectedIds, []);
+});
+
+test("selectAll and deselectAll clear vanished selected ids", () => {
+  const manifest = ids => ({ version: 2, items: ids.map(id => ({ id, name: id })) });
+  const state = createQueueState(manifest(["ep1"]));
+  state.vanishedSelectedIds = ["x"];
+  selectAll(state);
+  assert.deepEqual(state.vanishedSelectedIds, []);
+
+  state.vanishedSelectedIds = ["x"];
+  deselectAll(state);
+  assert.deepEqual(state.vanishedSelectedIds, []);
+});
+

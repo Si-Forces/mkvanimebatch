@@ -241,10 +241,17 @@ export class QueueTracker {
     this.subtitleCandidates = manifest?.subtitle_candidates ?? {};
 
     if (!manifest || !manifest.items || manifest.items.length === 0) {
+      const { currentDirectory, lastScannedPath } = this;
+      const { vanishedSelectedIds } = this.state;
       this.reset(
         "No MKV files found",
         "This release directory does not contain any MKV episodes. Choose another input directory to continue."
       );
+      if (preserveSelection) {
+        this.currentDirectory = currentDirectory;
+        this.lastScannedPath = lastScannedPath;
+        this.state.vanishedSelectedIds = vanishedSelectedIds;
+      }
       return;
     }
 

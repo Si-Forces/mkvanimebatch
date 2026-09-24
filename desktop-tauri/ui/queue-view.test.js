@@ -830,3 +830,29 @@ test("subset batch progress counts only batch participants", t => {
   assert.ok(countEl.textContent.includes("1 Completed"));
 });
 
+test("same-directory empty inspection keeps directory identity and vanished selections", t => {
+  const { elements } = setupMockEnvironment(t);
+  const frames = [];
+  globalThis.requestAnimationFrame = callback => frames.push(callback);
+  const renderFrames = () => { while (frames.length) frames.shift()(); };
+  const manifest = ids => ({ version: 2, items: ids.map(id => ({ id, name: id })) });
+  const tracker = new QueueTracker("remux");
+  const dir = "/anime/show";
+
+  assert.equal(tracker.acceptInspection(tracker.startScan(), dir, manifest(["ep1", "ep2"])), true);
+  renderFrames();
+
+  assert.equal(tracker.acceptInspection(tracker.startScan(), dir, { version: 2, items: [] }), true);
+  renderFrames();
+  assert.equal(tracker.reuseInspection(dir), true);
+  renderFrames();
+
+  assert.equal(tracker.currentDirectory, dir);
+  assert.equal(tracker.lastScannedPath, dir);
+  assert.deepEqual(tracker.state.vanishedSelectedIds, ["ep1", "ep2"]);
+
+  assert.equal(tracker.acceptInspection(tracker.startScan(), dir, manifest(["ep1", "ep2"])), true);
+  renderFrames();
+  assert.deepEqual(tracker.getSelectedOrderedItemIds(), ["ep1", "ep2"]);
+});
+

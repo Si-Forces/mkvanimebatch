@@ -225,6 +225,7 @@ export class JobController {
     const tracker = this.runtime.queueFor(this.mode);
     const capturedDir = tracker.currentDirectory || tracker.lastScannedPath;
     const selectedIds = capturedDir ? tracker.getSelectedOrderedItemIds() : null;
+    const vanishedBeforeScan = capturedDir ? [...(tracker.state?.vanishedSelectedIds ?? [])] : [];
     const assignmentSnapshot = capturedDir ? new Map(tracker.assignments) : null;
     if (!this.runtime.coordinator.begin(this.mode)) return;
     this.runtime.closeSubAssignModal();
@@ -260,9 +261,13 @@ export class JobController {
     }
     const discoveredIds = new Set(tracker.lastManifest?.items?.map(item => item.id) ?? []);
     if (isSameDir) {
-      const missingIds = effectiveSelectedIds.filter(id => !discoveredIds.has(id));
+      const missingIds = [...new Set([
+        ...effectiveSelectedIds.filter(id => !discoveredIds.has(id)),
+        ...(tracker.state?.vanishedSelectedIds ?? []),
+        ...vanishedBeforeScan,
+      ])];
       if (missingIds.length) {
-        this.runtime.appendLog(this.logEl, `[ERROR] Selected episodes disappeared during inspection: ${missingIds.join(", ")}. Job was not started.`);
+        this.runtime.appendLog(this.logEl, `[ERROR] Selected episodes disappeared from the input directory: ${missingIds.join(", ")}. Change the queue selection to continue; job was not started.`);
         this.abortStart();
         return;
       }
