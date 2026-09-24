@@ -1018,3 +1018,68 @@ test("normalizeDirectoryPath and isSameDirectory handle canonical, relative, and
   assert.equal(isSameDirectory("/anime/showA", "/anime/showB"), false);
 });
 
+test("bare dot is a relative identity, not root", () => {
+  assert.equal(normalizeDirectoryPath("."), ".");
+  assert.equal(isSameDirectory(".", "/"), false);
+  assert.equal(normalizeDirectoryPath("/"), "/");
+});
+
+test("finalization leaves non-participants queued and keeps a successful subset batch successful", () => {
+  let state = createQueueState({
+    version: 2,
+    items: [
+      { id: "ep1", name: "ep1" },
+      { id: "ep2", name: "ep2" },
+    ],
+  });
+  state = reduceQueueEvent(state, {
+    version: 1,
+    type: "batch_start",
+    total: 1,
+    input_dir: "/x",
+    items: [{ id: "ep1", file: "ep1" }],
+  });
+  state = reduceQueueEvent(state, {
+    version: 1,
+    type: "item_start",
+    id: "ep1",
+  });
+  state = reduceQueueEvent(state, {
+    version: 1,
+    type: "item_complete",
+    id: "ep1",
+    status: "completed",
+  });
+  state = reduceQueueEvent(state, {
+    version: 1,
+    type: "batch_complete",
+    success: true,
+  });
+  const finalState = finalizeQueueState(state, 0);
+  assert.equal(finalState.batchSuccess, true);
+  assert.equal(finalState.items.get("ep1").status, "completed");
+  assert.equal(finalState.items.get("ep2").status, "queued");
+});
+
+test("finalization without batch_start skips deselected items", () => {
+  const state = createQueueState({
+    version: 2,
+    items: [
+      { id: "ep1", name: "ep1" },
+      { id: "ep2", name: "ep2" },
+    ],
+  });
+  toggleItemSelection(state, "ep2", false);
+  const finalState = finalizeQueueState(state, -1);
+  assert.equal(finalState.items.get("ep1").status, "error");
+  assert.equal(finalState.items.get("ep2").status, "queued");
+});
+
+test("UNC shares keep a distinct identity from root-relative paths", () => {
+  assert.equal(normalizeDirectoryPath("\\\\Server\\Share\\Show"), "//server/share/show");
+  assert.equal(normalizeDirectoryPath("\\\\?\\UNC\\Server\\Share\\Show"), "//server/share/show");
+  assert.equal(isSameDirectory("\\\\server\\share\\Show", "\\server\\share\\Show"), false);
+  assert.equal(isSameDirectory("\\\\server\\share\\Show\\", "//server/share/Show"), true);
+  assert.equal(normalizeDirectoryPath("\\\\?\\C:\\Anime"), "c:/anime");
+});
+

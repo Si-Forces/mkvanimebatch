@@ -110,7 +110,9 @@ export function normalizeDirectoryPath(path) {
   if (!clean) return "";
 
   // Strip Windows extended-length prefix (\\?\ or //?/) if present
+  const hadExtendedPrefix = /^\/\/[?.]\//.test(clean);
   clean = clean.replace(/^(\/\/|\?\/?)[?.]\//, "");
+  if (hadExtendedPrefix) clean = clean.replace(/^UNC\//i, "//");
 
   // Normalize Windows drive letter (e.g. C: -> c:)
   const hasDrive = /^[a-zA-Z]:/.test(clean);
@@ -120,6 +122,7 @@ export function normalizeDirectoryPath(path) {
     clean = clean.slice(2);
   }
 
+  const isUnc = !hasDrive && /^\/\/[^/]/.test(clean);
   const isAbsolute = clean.startsWith("/");
   const segments = clean.split("/").filter(s => s.length > 0 && s !== ".");
   const resolved = [];
@@ -136,12 +139,13 @@ export function normalizeDirectoryPath(path) {
     }
   }
 
-  let result = (hasDrive ? drivePrefix : "") + (isAbsolute ? "/" : "") + resolved.join("/");
+  let result = (hasDrive ? drivePrefix : "") + (isUnc ? "//" : isAbsolute ? "/" : "") + resolved.join("/");
   if (!result && isAbsolute) result = "/";
   if (hasDrive && !resolved.length) result = drivePrefix + "/";
 
   // Case normalization for Windows: on Windows, filesystems are case-insensitive
   if (
+    isUnc ||
     hasDrive ||
     (typeof navigator !== "undefined" &&
       (navigator.platform?.includes("Win") || navigator.userAgent?.includes("Win"))) ||
@@ -150,7 +154,7 @@ export function normalizeDirectoryPath(path) {
     result = result.toLowerCase();
   }
 
-  return result || "/";
+  return result || ".";
 }
 
 /**
@@ -182,6 +186,7 @@ export function createQueueState(manifest, options = {}) {
     items: new Map(),
     order: [],
     batchStartTime: null,
+    batchItemIds: null,
     batchCompleted: false,
     batchSuccess: null,
     batchCancelled: false,
@@ -257,6 +262,7 @@ export function createQueueStateFromSnapshot(snapshot, options = {}) {
     items: new Map(),
     order: [],
     batchStartTime: snapshot?.start_time_ms ?? null,
+    batchItemIds: null,
     batchCompleted: snapshot?.status === "completed" || snapshot?.status === "cancelled" || snapshot?.status === "error",
     batchSuccess: snapshot?.status === "completed",
     batchCancelled: snapshot?.status === "cancelled",
@@ -375,6 +381,7 @@ export function reduceQueueEvent(state, event, now = Date.now()) {
         state.expectedTotal = event.total;
       }
       if (Array.isArray(event.items)) {
+        state.batchItemIds = event.items.filter(it => it && it.id).map(it => it.id);
         for (const it of event.items) {
           if (!it || !it.id || state.items.has(it.id)) continue;
           state.items.set(it.id, {
@@ -499,7 +506,9 @@ export function finalizeQueueState(state, exitCode, cancelled = false) {
   let addedErrors = 0;
   let addedCancelled = 0;
 
+  const participants = Array.isArray(state.batchItemIds) ? new Set(state.batchItemIds) : null;
   for (const [id, item] of state.items.entries()) {
+    if (participants ? !participants.has(id) : item.selected === false) continue;
     if (!isTerminal(item.status)) {
       if (nextItems === state.items) {
         nextItems = new Map(state.items);

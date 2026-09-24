@@ -224,9 +224,8 @@ export class JobController {
     const generation = ++this.startGeneration;
     const tracker = this.runtime.queueFor(this.mode);
     const capturedDir = tracker.currentDirectory || tracker.lastScannedPath;
-    const isSameDir = isSameDirectory(capturedDir, inputDir);
-    const selectedIds = isSameDir ? tracker.getSelectedOrderedItemIds() : null;
-    const assignmentSnapshot = isSameDir ? new Map(tracker.assignments) : null;
+    const selectedIds = capturedDir ? tracker.getSelectedOrderedItemIds() : null;
+    const assignmentSnapshot = capturedDir ? new Map(tracker.assignments) : null;
     if (!this.runtime.coordinator.begin(this.mode)) return;
     this.runtime.closeSubAssignModal();
 
@@ -251,6 +250,7 @@ export class JobController {
       this.abortStart();
       return;
     }
+    const isSameDir = Boolean(capturedDir) && isSameDirectory(capturedDir, tracker.currentDirectory || tracker.lastScannedPath);
 
     const effectiveSelectedIds = isSameDir ? selectedIds : tracker.getSelectedOrderedItemIds();
     if (!effectiveSelectedIds || effectiveSelectedIds.length === 0) {

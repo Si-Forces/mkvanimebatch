@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { QueueTracker, escapeAttr } from "./queue-view.js";
-import { createQueueState } from "./queue-state.js";
+import { createQueueState, toggleItemSelection } from "./queue-state.js";
 
 class FakeElement {
   constructor(value = "") {
@@ -777,5 +777,56 @@ test("escapeAttr escapes &, \", ', <, and >", () => {
     escapeAttr('"><script>alert(1)</script><input attr=\'evil\'&'),
     '&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;&lt;input attr=&#39;evil&#39;&amp;'
   );
+});
+
+test("subset batch progress counts only batch participants", t => {
+  const { elements } = setupMockEnvironment(t);
+  const tracker = new QueueTracker("remux");
+  const countEl = elements.get("remux-queue-count");
+  const inputDir = "/anime/show";
+
+  const manifest = {
+    version: 2,
+    items: [
+      { id: "ep1", name: "01.mkv" },
+      { id: "ep2", name: "02.mkv" },
+      { id: "ep3", name: "03.mkv" },
+    ],
+  };
+
+  tracker.populateFromInspection(manifest);
+  toggleItemSelection(tracker.state, "ep2", false);
+  toggleItemSelection(tracker.state, "ep3", false);
+
+  tracker.handleEvent({
+    version: 1,
+    type: "batch_start",
+    total: 1,
+    input_dir: inputDir,
+    items: [{ id: "ep1", file: "ep1" }],
+  });
+  assert.ok(countEl.textContent.includes("0 / 1 Processed"));
+
+  tracker.handleEvent({
+    version: 1,
+    type: "item_start",
+    id: "ep1",
+  });
+  tracker.handleEvent({
+    version: 1,
+    type: "item_complete",
+    id: "ep1",
+    status: "completed",
+    duration_sec: 14.8,
+  });
+  tracker.handleEvent({
+    version: 1,
+    type: "batch_complete",
+    success: true,
+  });
+  tracker.finalize(0);
+
+  assert.ok(countEl.textContent.includes("(1 Total)"));
+  assert.ok(countEl.textContent.includes("1 Completed"));
 });
 

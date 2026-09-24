@@ -57,11 +57,7 @@ pub async fn inspect_directory(
     let mut manifest =
         mkv_core::manifest::generate_inspection_manifest(&dir, cache_opt, Some(&cancel_token))
             .await?;
-    let canonical = dir.to_string_lossy().to_string();
-    let clean_canonical = canonical
-        .strip_prefix(r"\\?\")
-        .unwrap_or(&canonical)
-        .to_string();
+    let clean_canonical = display_canonical_path(&dir.to_string_lossy());
     manifest.extra.insert(
         "canonical_dir".to_string(),
         serde_json::Value::String(clean_canonical),
@@ -89,11 +85,7 @@ pub fn run_job<R: tauri::Runtime>(
     let (log_tx, log_rx) = mkv_core::pipeline::create_log_channel(128);
     let canonical_input =
         std::fs::canonicalize(&request.input_dir).unwrap_or_else(|_| request.input_dir.clone());
-    let input_dir_raw = canonical_input.to_string_lossy().to_string();
-    let clean_canonical_input = input_dir_raw
-        .strip_prefix(r"\\?\")
-        .unwrap_or(&input_dir_raw)
-        .to_string();
+    let clean_canonical_input = display_canonical_path(&canonical_input.to_string_lossy());
     request.input_dir = std::path::PathBuf::from(&clean_canonical_input);
     let input_dir = Some(clean_canonical_input);
     let pipeline = mkv_core::pipeline::BatchPipeline::from_request(
@@ -113,6 +105,15 @@ pub fn run_job<R: tauri::Runtime>(
         pipeline.run().await
     })
 }
+
+fn display_canonical_path(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else {
+        path.strip_prefix(r"\\?\").unwrap_or(path).to_string()
+    }
+}
+
 fn bridge_terminal(cancelled: bool, problem: Option<(&str, String)>) -> JobEvent {
     let mut extra = serde_json::Map::new();
     if let Some((key, message)) = problem {
@@ -540,11 +541,7 @@ mod tests {
 
             let snapshot = verify_state.snapshot.lock().unwrap().clone().unwrap();
             let canonical_target = std::fs::canonicalize(target_dir.path()).unwrap();
-            let clean_canonical = canonical_target
-                .to_string_lossy()
-                .strip_prefix(r"\\?\")
-                .unwrap_or(&canonical_target.to_string_lossy())
-                .to_string();
+            let clean_canonical = display_canonical_path(&canonical_target.to_string_lossy());
             assert_eq!(
                 snapshot.input_dir.as_deref(),
                 Some(clean_canonical.as_str())
@@ -795,5 +792,18 @@ mod tests {
         let completions = done_events_for(&dones, job_id);
         assert_eq!(completions.len(), 1);
         assert_eq!(completions[0]["code"], 1);
+    }
+
+    #[test]
+    fn display_canonical_path_preserves_unc_and_drive_paths() {
+        assert_eq!(
+            display_canonical_path(r"\\?\C:\Anime\Show"),
+            r"C:\Anime\Show"
+        );
+        assert_eq!(
+            display_canonical_path(r"\\?\UNC\server\share\Show"),
+            r"\\server\share\Show"
+        );
+        assert_eq!(display_canonical_path("/home/user/show"), "/home/user/show");
     }
 }

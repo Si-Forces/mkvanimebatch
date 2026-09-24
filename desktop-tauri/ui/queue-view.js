@@ -699,6 +699,7 @@ export class QueueTracker {
       return;
     }
     const { totalCount, completedCount, skippedCount, cancelledCount = 0, errorCount, batchCompleted } = this.state;
+    const total = Array.isArray(this.state.batchItemIds) ? this.state.batchItemIds.length : totalCount;
     const processed = completedCount + skippedCount + cancelledCount + errorCount;
 
     if (batchCompleted) {
@@ -706,9 +707,9 @@ export class QueueTracker {
       if (skippedCount > 0) parts.push(`${skippedCount} Skipped`);
       if (cancelledCount > 0) parts.push(`${cancelledCount} Cancelled`);
       if (errorCount > 0) parts.push(`${errorCount} Failed`);
-      this.setCountText(`${parts.join(", ")} (${totalCount} Total)`);
+      this.setCountText(`${parts.join(", ")} (${total} Total)`);
     } else {
-      this.setCountText(`${processed} / ${totalCount} Processed`);
+      this.setCountText(`${processed} / ${total} Processed`);
     }
   }
 }
