@@ -856,6 +856,68 @@ async fn test_missing_assignment_aborts_entire_remux_plan() {
 }
 
 #[tokio::test]
+async fn test_valid_assignment_plans_unparsed_video() {
+    use mkv_core::request::{BatchRequest, TrackAssignment};
+
+    let input = tempdir().unwrap();
+    let output = tempdir().unwrap();
+    let unparsed = input.path().join("unparseable_video.mkv");
+    let manual = input.path().join("manual.ass");
+    fs::write(&unparsed, b"unparsed video").unwrap();
+    fs::write(&manual, b"manual subtitle").unwrap();
+
+    let assignment = TrackAssignment {
+        target_video: "unparseable_video.mkv".into(),
+        asset_path: "manual.ass".into(),
+        track_type: Some("subtitle".into()),
+        language: Some("eng".into()),
+        title: Some("Manual".into()),
+        offset_ms: None,
+    };
+    let request = BatchRequest {
+        input_dir: input.path().to_path_buf(),
+        assignments: Some(vec![assignment.clone()]),
+        selected_items: Some(vec!["unparseable_video.mkv".into()]),
+        ..Default::default()
+    };
+    request.validate().unwrap();
+
+    let cache = Arc::new(PersistentInspectCache::new(None, true));
+    cache.put_path(&unparsed, sample_video_metadata());
+
+    let config = PipelineConfig {
+        input_dir: input.path().to_path_buf(),
+        out_dir: Some(output.path().to_path_buf()),
+        mode: PipelineMode::Remux,
+        dry_run: true,
+        cache: Some(cache),
+        track_assignments: Some(vec![assignment]),
+        selected_items: request.selected_items,
+        ..Default::default()
+    };
+    let (tx, mut rx) = create_event_channel(32);
+    let pipeline = BatchPipeline::new(config, Some(tx), CancellationToken::new());
+    let summary = pipeline.run().await.unwrap();
+
+    assert_eq!(summary.total, 1);
+    assert_eq!(summary.completed, 1);
+    assert_eq!(summary.skipped, 0);
+    assert_eq!(summary.errors, 0);
+
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(event);
+    }
+    assert!(events.iter().any(|e| matches!(
+        e,
+        JobEvent::ItemComplete {
+            status: ItemOutcome::Planned,
+            ..
+        }
+    )));
+}
+
+#[tokio::test]
 async fn test_pipeline_with_track_assignments_plans_override() {
     let dir = tempfile::tempdir().unwrap();
     let video_path = dir.path().join("Episode - 01.mkv");

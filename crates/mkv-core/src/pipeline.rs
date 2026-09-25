@@ -964,7 +964,7 @@ impl BatchPipeline {
                 break;
             }
 
-            let Some(parsed) = &video_file.parsed else {
+            if video_file.parsed.is_none() && matched_assignment.is_none() {
                 summary.skipped += 1;
                 let reason = "Could not extract episode number from filename";
                 summary
@@ -981,14 +981,17 @@ impl BatchPipeline {
                     extra: Default::default(),
                 });
                 continue;
-            };
+            }
 
             let base = video_file
                 .path
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "video".to_string());
-            let out_stem = output_stem(&base, &parsed.ep_type, &parsed.ep);
+            let out_stem = match &video_file.parsed {
+                Some(parsed) => output_stem(&base, &parsed.ep_type, &parsed.ep),
+                None => base.clone(),
+            };
             let out_dir = resolve_output_dir(
                 &video_file.path,
                 &self.config.input_dir,

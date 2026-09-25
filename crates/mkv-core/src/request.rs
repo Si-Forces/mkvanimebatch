@@ -69,9 +69,13 @@ impl TrackAssignment {
     /// Returns true if the asset path is relative to the release/input directory
     /// (i.e. not absolute, not root-relative, and not a drive-prefixed path).
     pub fn is_relative_asset(&self) -> bool {
-        let path = &self.asset_path;
-        let s = path.to_string_lossy();
-        !is_drive_prefix(&s) && path.is_relative() && !path.has_root()
+        let s = self.asset_path.to_string_lossy().replace('\\', "/");
+        let path = Path::new(&s);
+        !is_drive_prefix(&s)
+            && !s.starts_with('/')
+            && !s.starts_with("//")
+            && path.is_relative()
+            && !path.has_root()
     }
 }
 
@@ -265,9 +269,11 @@ impl BatchRequest {
                 let asset_str = assignment.asset_path.to_string_lossy().replace('\\', "/");
                 let asset_norm_path = Path::new(&asset_str);
                 if is_rel_asset
-                    && asset_norm_path
-                        .components()
-                        .any(|c| matches!(c, std::path::Component::ParentDir))
+                    && (asset_str.starts_with('/')
+                        || asset_norm_path.has_root()
+                        || asset_norm_path
+                            .components()
+                            .any(|c| matches!(c, std::path::Component::ParentDir)))
                 {
                     return Err(format!(
                         "Invalid relative asset path: '{}'",
@@ -467,13 +473,6 @@ pub fn assignments_to_track_map(
     }
     map
 }
-
-/// Backward-compatible alias for `assignments_to_track_map`.
-#[deprecated(
-    since = "1.0.0",
-    note = "Use assignments_to_track_map or TrackAssignment methods instead"
-)]
-pub use assignments_to_track_map as assignments_to_sub_map;
 
 /// Parse track assignments from JSON, supporting both `Vec<TrackAssignment>` and
 /// legacy `{ "video.mkv": "sub.ass" }` map format.
@@ -768,6 +767,18 @@ mod tests {
             req.validate().unwrap_err(),
             r"Invalid relative asset path: 'sub\..\..\outside.ass'"
         );
+
+        // 5. Root-relative backslash asset (must not bypass root containment)
+        let mut req = minimal_request(dir.path());
+        req.assignments = Some(vec![TrackAssignment {
+            target_video: "ep01.mkv".into(),
+            asset_path: PathBuf::from(r"\nonexistent\outside.ass"),
+            track_type: Some("subtitle".into()),
+            language: None,
+            title: None,
+            offset_ms: None,
+        }]);
+        assert!(req.validate().is_err());
     }
 
     #[test]
@@ -1114,14 +1125,41 @@ mod tests {
                 title: None,
                 offset_ms: None,
             },
+            TrackAssignment {
+                target_video: "ep06.mkv".into(),
+                asset_path: PathBuf::from(r"\abs\ep06.ass"),
+                track_type: Some("subtitle".into()),
+                language: None,
+                title: None,
+                offset_ms: None,
+            },
+            TrackAssignment {
+                target_video: "ep07.mkv".into(),
+                asset_path: PathBuf::from(r"\\server\share\ep07.ass"),
+                track_type: Some("subtitle".into()),
+                language: None,
+                title: None,
+                offset_ms: None,
+            },
+            TrackAssignment {
+                target_video: "ep08.mkv".into(),
+                asset_path: PathBuf::from(r"subs\ep08.ass"),
+                track_type: Some("subtitle".into()),
+                language: None,
+                title: None,
+                offset_ms: None,
+            },
         ];
         assert!(assignments[0].is_relative_asset());
         assert!(assignments[1].is_relative_asset());
         assert!(!assignments[2].is_relative_asset());
         assert!(!assignments[3].is_relative_asset());
         assert!(!assignments[4].is_relative_asset());
+        assert!(!assignments[5].is_relative_asset());
+        assert!(!assignments[6].is_relative_asset());
+        assert!(assignments[7].is_relative_asset());
 
-        let map = assignments_to_sub_map(&assignments, dir.path(), None);
+        let map = assignments_to_track_map(&assignments, dir.path(), None);
         assert_eq!(map.get("ep01.mkv"), Some(&dir.path().join("ep01.ass")));
         assert_eq!(
             map.get("Season 1/ep02.mkv"),
@@ -1154,7 +1192,7 @@ mod tests {
                 offset_ms: None,
             },
         ];
-        let ms_map = assignments_to_sub_map(&multi_season, dir.path(), None);
+        let ms_map = assignments_to_track_map(&multi_season, dir.path(), None);
         assert_eq!(
             ms_map.get("Season 1/ep01.mkv"),
             Some(&dir.path().join("s01e01.ass"))

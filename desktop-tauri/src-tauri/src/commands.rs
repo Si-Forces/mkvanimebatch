@@ -57,8 +57,7 @@ pub async fn inspect_directory(
     let mut manifest =
         mkv_core::manifest::generate_inspection_manifest(&dir, cache_opt, Some(&cancel_token))
             .await?;
-    let canonical_dir = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
-    let clean_canonical = display_canonical_path(&canonical_dir.to_string_lossy());
+    let clean_canonical = display_canonical_path(&dir.to_string_lossy());
     manifest.extra.insert(
         "canonical_dir".to_string(),
         serde_json::Value::String(clean_canonical),
@@ -74,6 +73,11 @@ pub fn run_job<R: tauri::Runtime>(
     state: State<'_, JobState>,
     mut request: mkv_core::request::BatchRequest,
 ) -> Result<u64, String> {
+    let canonical_input =
+        std::fs::canonicalize(&request.input_dir).unwrap_or_else(|_| request.input_dir.clone());
+    let clean_canonical_input = display_canonical_path(&canonical_input.to_string_lossy());
+    request.input_dir = std::path::PathBuf::from(&clean_canonical_input);
+
     request.validate()?;
 
     let mode = match request.mode {
@@ -84,10 +88,6 @@ pub fn run_job<R: tauri::Runtime>(
     let cancel_token = CancellationToken::new();
     let (event_tx, event_rx) = mkv_core::pipeline::create_event_channel(64);
     let (log_tx, log_rx) = mkv_core::pipeline::create_log_channel(128);
-    let canonical_input =
-        std::fs::canonicalize(&request.input_dir).unwrap_or_else(|_| request.input_dir.clone());
-    let clean_canonical_input = display_canonical_path(&canonical_input.to_string_lossy());
-    request.input_dir = std::path::PathBuf::from(&clean_canonical_input);
     let input_dir = Some(clean_canonical_input);
     let pipeline = mkv_core::pipeline::BatchPipeline::from_request(
         request,
