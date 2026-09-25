@@ -599,6 +599,26 @@ test("QueueTracker preserves same-directory selection after failed scan and snap
   assert.deepEqual(tracker.getSelectedOrderedItemIds(), ["02.mkv", "01.mkv"]);
 });
 
+test("QueueTracker.reuseInspection returns false after restoreFromSnapshot when lastManifest is null", t => {
+  setupMockEnvironment(t);
+  const tracker = new QueueTracker("remux");
+  const dir = "/input/show";
+  tracker.restoreFromSnapshot({
+    job_id: 1,
+    mode: "remux",
+    status: "running",
+    input_dir: dir,
+    ordered_item_ids: ["01.mkv"],
+    items: {
+      "01.mkv": { id: "01.mkv", file: "01.mkv", status: "processing" },
+    },
+  });
+  assert.equal(tracker.cards.size, 1);
+  assert.equal(tracker.lastManifest, null);
+  assert.equal(tracker.reuseInspection(dir), false);
+  assert.equal(tracker.cards.size, 1);
+});
+
 test("QueueTracker renders cards when BatchStart arrives after restoring empty running snapshot", t => {
   const { elements } = setupMockEnvironment(t);
   const frames = [];

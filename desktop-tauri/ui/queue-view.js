@@ -170,7 +170,7 @@ export class QueueTracker {
   }
 
   reuseInspection(path) {
-    if (!isSameDirectory(this.lastScannedPath, path)) return false;
+    if (!this.lastManifest || !isSameDirectory(this.lastScannedPath, path)) return false;
     this.scanToken++;
     this.populateFromInspection(this.lastManifest, true);
     return true;

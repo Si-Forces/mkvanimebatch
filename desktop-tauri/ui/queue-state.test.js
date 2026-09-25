@@ -1106,6 +1106,22 @@ test("a vanished selected id that reappears is restored selected", () => {
   assert.deepEqual(back.vanishedSelectedIds, []);
 });
 
+test("a vanished selected id that reappears preserves its previous relative order", () => {
+  const manifest = ids => ({ version: 2, items: ids.map(id => ({ id, name: id })) });
+  const initial = createQueueState(manifest(["ep1", "ep2", "ep3"]));
+  reorderItem(initial, "ep2", "up");
+  assert.deepEqual(initial.order, ["ep2", "ep1", "ep3"]);
+
+  const gone = reconcileQueueSelection(createQueueState(manifest(["ep1", "ep3"])), initial);
+  assert.deepEqual(gone.order, ["ep1", "ep3"]);
+  assert.deepEqual(gone.vanishedSelectedIds, ["ep2"]);
+
+  const back = reconcileQueueSelection(createQueueState(manifest(["ep1", "ep2", "ep3"])), gone);
+  assert.deepEqual(back.order, ["ep2", "ep1", "ep3"]);
+  assert.equal(back.items.get("ep2").selected, true);
+  assert.deepEqual(back.vanishedSelectedIds, []);
+});
+
 test("selectAll and deselectAll clear vanished selected ids", () => {
   const manifest = ids => ({ version: 2, items: ids.map(id => ({ id, name: id })) });
   const state = createQueueState(manifest(["ep1"]));

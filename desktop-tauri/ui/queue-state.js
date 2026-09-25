@@ -185,6 +185,7 @@ export function createQueueState(manifest, options = {}) {
     inputDir: options.inputDir ? normalizeDirectoryPath(options.inputDir) : null,
     items: new Map(),
     order: [],
+    knownOrder: [],
     batchStartTime: null,
     batchItemIds: null,
     vanishedSelectedIds: [],
@@ -227,6 +228,7 @@ export function createQueueState(manifest, options = {}) {
     state.order.push(id);
     state.totalCount++;
   }
+  state.knownOrder = [...state.order];
 
   return state;
 }
@@ -234,22 +236,39 @@ export function createQueueState(manifest, options = {}) {
 export function reconcileQueueSelection(state, previous) {
   const priorVanished = new Set(previous.vanishedSelectedIds);
   const vanished = new Set([...priorVanished].filter(id => !state.items.has(id)));
+  const baseOrder = Array.isArray(previous.knownOrder) ? previous.knownOrder : (previous.order || []);
+  const baseSet = new Set(baseOrder);
   const order = [];
-  for (const id of previous.order) {
+  const knownOrder = [];
+
+  for (const id of baseOrder) {
     const item = state.items.get(id);
     if (!item) {
-      if (previous.items.get(id)?.selected !== false) vanished.add(id);
+      if (previous.items?.get(id)?.selected !== false && (previous.items?.has(id) || priorVanished.has(id))) {
+        vanished.add(id);
+      }
+      knownOrder.push(id);
       continue;
     }
-    item.selected = previous.items.get(id)?.selected !== false;
+    const prevItem = previous.items?.get(id);
+    if (prevItem) {
+      item.selected = prevItem.selected !== false;
+    } else {
+      item.selected = priorVanished.has(id);
+    }
     order.push(id);
+    knownOrder.push(id);
   }
+
   for (const id of state.order) {
-    if (previous.items.has(id)) continue;
+    if (baseSet.has(id)) continue;
     state.items.get(id).selected = priorVanished.has(id);
     order.push(id);
+    knownOrder.push(id);
   }
+
   state.order = order;
+  state.knownOrder = knownOrder;
   state.vanishedSelectedIds = [...vanished];
   return state;
 }
@@ -268,6 +287,7 @@ export function createQueueStateFromSnapshot(snapshot, options = {}) {
     inputDir: snapshot?.input_dir || null,
     items: new Map(),
     order: [],
+    knownOrder: [],
     batchStartTime: snapshot?.start_time_ms ?? null,
     batchItemIds: null,
     vanishedSelectedIds: [],
@@ -322,6 +342,7 @@ export function createQueueStateFromSnapshot(snapshot, options = {}) {
     else if (resolvedStatus === "error") state.errorCount++;
   }
 
+  state.knownOrder = [...state.order];
   return state;
 }
 
@@ -591,10 +612,16 @@ export function reorderItem(state, id, direction) {
   if (!state || !Array.isArray(state.order)) return;
   const idx = state.order.indexOf(id);
   if (idx === -1) return;
-  if (direction === "up" && idx > 0) {
-    [state.order[idx - 1], state.order[idx]] = [state.order[idx], state.order[idx - 1]];
-  } else if (direction === "down" && idx < state.order.length - 1) {
-    [state.order[idx + 1], state.order[idx]] = [state.order[idx], state.order[idx + 1]];
+  const targetIdx = direction === "up" ? idx - 1 : idx + 1;
+  if (targetIdx < 0 || targetIdx >= state.order.length) return;
+  const otherId = state.order[targetIdx];
+  [state.order[idx], state.order[targetIdx]] = [state.order[targetIdx], state.order[idx]];
+  if (Array.isArray(state.knownOrder)) {
+    const kIdx = state.knownOrder.indexOf(id);
+    const kTarget = state.knownOrder.indexOf(otherId);
+    if (kIdx !== -1 && kTarget !== -1) {
+      [state.knownOrder[kIdx], state.knownOrder[kTarget]] = [state.knownOrder[kTarget], state.knownOrder[kIdx]];
+    }
   }
 }
 

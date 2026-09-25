@@ -57,7 +57,8 @@ pub async fn inspect_directory(
     let mut manifest =
         mkv_core::manifest::generate_inspection_manifest(&dir, cache_opt, Some(&cancel_token))
             .await?;
-    let clean_canonical = display_canonical_path(&dir.to_string_lossy());
+    let canonical_dir = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+    let clean_canonical = display_canonical_path(&canonical_dir.to_string_lossy());
     manifest.extra.insert(
         "canonical_dir".to_string(),
         serde_json::Value::String(clean_canonical),
