@@ -406,6 +406,9 @@ impl JobState {
     }
 
     pub fn clear_snapshot(&self) {
+        if self.is_active() {
+            return;
+        }
         if let Ok(mut snap) = self.snapshot.lock() {
             *snap = None;
         }
@@ -1051,6 +1054,15 @@ mod job_tests {
         assert!(!slot.stopping);
         slot.stopping = true;
         assert!(slot.stopping);
+    }
+
+    #[test]
+    fn test_clear_snapshot_ignored_while_job_is_active() {
+        let state = JobState::default();
+        *state.slot.lock().unwrap() = Some(dummy_slot(42, false));
+        state.begin_snapshot(42, "remux", None).unwrap();
+        state.clear_snapshot();
+        assert!(state.snapshot.lock().unwrap().is_some());
     }
 
     #[test]

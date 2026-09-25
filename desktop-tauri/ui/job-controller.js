@@ -436,7 +436,7 @@ export class JobController {
   }
 
   syncGlobalControls() {
-    const busy = this.runtime.coordinator.activeMode !== null;
+    const busy = this.runtime.coordinator.activeMode !== null || Boolean(this.runtime.coordinator.isStarting);
     const tracker = this.runtime.queueFor?.(this.mode);
     const hasItems = (tracker?.state?.totalCount ?? 0) > 0;
     const selectedCount = tracker?.getSelectedCount?.() ?? 0;

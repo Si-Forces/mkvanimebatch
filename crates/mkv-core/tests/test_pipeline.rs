@@ -722,30 +722,38 @@ async fn test_pipeline_rejects_every_unmatched_selection_before_batch_start() {
     fs::create_dir(input.path().join("Output")).unwrap();
     fs::write(input.path().join("Output/hidden.mkv"), b"hidden").unwrap();
 
-    for mode in [PipelineMode::Extract, PipelineMode::Remux] {
-        let config = PipelineConfig {
-            mode,
-            input_dir: input.path().to_path_buf(),
-            out_dir: Some(output.path().to_path_buf()),
-            selected_items: Some(vec![
+    for (selected, expected_err_parts) in [
+        (
+            vec![
                 "Show - 01.mkv".into(),
                 "notes.txt".into(),
                 "Output/hidden.mkv".into(),
                 "ghost.mkv".into(),
-            ]),
-            ..Default::default()
-        };
-        let (tx, mut rx) = create_event_channel(16);
-        let pipeline = BatchPipeline::new(config, Some(tx), CancellationToken::new());
-        let err = pipeline.run().await.unwrap_err();
-        for unmatched in ["notes.txt", "Output/hidden.mkv", "ghost.mkv"] {
-            assert!(err.contains(unmatched), "{err}");
+            ],
+            vec!["notes.txt", "Output/hidden.mkv", "ghost.mkv"],
+        ),
+        (vec!["Output/hidden.mkv".into()], vec!["Output/hidden.mkv"]),
+    ] {
+        for mode in [PipelineMode::Extract, PipelineMode::Remux] {
+            let config = PipelineConfig {
+                mode,
+                input_dir: input.path().to_path_buf(),
+                out_dir: Some(output.path().to_path_buf()),
+                selected_items: Some(selected.clone()),
+                ..Default::default()
+            };
+            let (tx, mut rx) = create_event_channel(16);
+            let pipeline = BatchPipeline::new(config, Some(tx), CancellationToken::new());
+            let err = pipeline.run().await.unwrap_err();
+            for unmatched in &expected_err_parts {
+                assert!(err.contains(unmatched), "{err}");
+            }
+            assert!(
+                rx.try_recv().is_err(),
+                "invalid selection must not start a batch"
+            );
+            assert_eq!(fs::read_dir(output.path()).unwrap().count(), 0);
         }
-        assert!(
-            rx.try_recv().is_err(),
-            "invalid selection must not start a batch"
-        );
-        assert_eq!(fs::read_dir(output.path()).unwrap().count(), 0);
     }
 }
 
