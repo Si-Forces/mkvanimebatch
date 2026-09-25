@@ -949,7 +949,6 @@ impl BatchPipeline {
                         .as_deref()
                         .and_then(|r| assignment_index.get(r))
                 })
-                .or_else(|| assignment_index.get(&video_file.name))
                 .copied();
 
             let assigned_sub_path = matched_assignment.map(|a| {

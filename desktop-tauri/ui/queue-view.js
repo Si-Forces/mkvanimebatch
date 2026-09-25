@@ -242,7 +242,7 @@ export class QueueTracker {
 
     if (!manifest || !manifest.items || manifest.items.length === 0) {
       const { currentDirectory, lastScannedPath } = this;
-      const { vanishedSelectedIds } = this.state;
+      const { vanishedSelectedIds, knownOrder } = this.state;
       this.reset(
         "No MKV files found",
         "This release directory does not contain any MKV episodes. Choose another input directory to continue."
@@ -251,6 +251,7 @@ export class QueueTracker {
         this.currentDirectory = currentDirectory;
         this.lastScannedPath = lastScannedPath;
         this.state.vanishedSelectedIds = vanishedSelectedIds;
+        this.state.knownOrder = knownOrder;
       }
       return;
     }

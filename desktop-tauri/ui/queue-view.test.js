@@ -850,7 +850,7 @@ test("subset batch progress counts only batch participants", t => {
   assert.ok(countEl.textContent.includes("1 Completed"));
 });
 
-test("same-directory empty inspection keeps directory identity and vanished selections", t => {
+test("same-directory empty inspection keeps directory identity, vanished selections, and order", t => {
   const { elements } = setupMockEnvironment(t);
   const frames = [];
   globalThis.requestAnimationFrame = callback => frames.push(callback);
@@ -861,6 +861,7 @@ test("same-directory empty inspection keeps directory identity and vanished sele
 
   assert.equal(tracker.acceptInspection(tracker.startScan(), dir, manifest(["ep1", "ep2"])), true);
   renderFrames();
+  tracker.reorderCard("ep2", "up");
 
   assert.equal(tracker.acceptInspection(tracker.startScan(), dir, { version: 2, items: [] }), true);
   renderFrames();
@@ -869,10 +870,10 @@ test("same-directory empty inspection keeps directory identity and vanished sele
 
   assert.equal(tracker.currentDirectory, dir);
   assert.equal(tracker.lastScannedPath, dir);
-  assert.deepEqual(tracker.state.vanishedSelectedIds, ["ep1", "ep2"]);
+  assert.deepEqual(tracker.state.vanishedSelectedIds, ["ep2", "ep1"]);
 
   assert.equal(tracker.acceptInspection(tracker.startScan(), dir, manifest(["ep1", "ep2"])), true);
   renderFrames();
-  assert.deepEqual(tracker.getSelectedOrderedItemIds(), ["ep1", "ep2"]);
+  assert.deepEqual(tracker.getSelectedOrderedItemIds(), ["ep2", "ep1"]);
 });
 

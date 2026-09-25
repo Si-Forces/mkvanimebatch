@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -915,6 +916,64 @@ async fn test_valid_assignment_plans_unparsed_video() {
             ..
         }
     )));
+}
+
+#[tokio::test]
+async fn test_root_assignment_does_not_match_nested_unparsed_video_with_same_name() {
+    use mkv_core::request::TrackAssignment;
+
+    let input = tempdir().unwrap();
+    let output = tempdir().unwrap();
+    let season = input.path().join("Season 01");
+    fs::create_dir_all(&season).unwrap();
+    let root_video = input.path().join("unparseable_video.mkv");
+    let nested_video = season.join("unparseable_video.mkv");
+    fs::write(&root_video, b"root video").unwrap();
+    fs::write(&nested_video, b"nested video").unwrap();
+    fs::write(input.path().join("manual.ass"), b"manual subtitle").unwrap();
+
+    let cache = Arc::new(PersistentInspectCache::new(None, true));
+    cache.put_path(&root_video, sample_video_metadata());
+    cache.put_path(&nested_video, sample_video_metadata());
+
+    let config = PipelineConfig {
+        input_dir: input.path().to_path_buf(),
+        out_dir: Some(output.path().to_path_buf()),
+        mode: PipelineMode::Remux,
+        dry_run: true,
+        cache: Some(cache),
+        track_assignments: Some(vec![TrackAssignment {
+            target_video: "unparseable_video.mkv".into(),
+            asset_path: "manual.ass".into(),
+            track_type: Some("subtitle".into()),
+            language: Some("eng".into()),
+            title: Some("Manual".into()),
+            offset_ms: None,
+        }]),
+        ..Default::default()
+    };
+    let (tx, mut rx) = create_event_channel(32);
+    let pipeline = BatchPipeline::new(config, Some(tx), CancellationToken::new());
+    let summary = pipeline.run().await.unwrap();
+
+    assert_eq!(summary.completed, 1);
+    assert_eq!(summary.skipped, 1);
+    assert_eq!(summary.errors, 0);
+
+    let mut outcomes = HashMap::new();
+    while let Ok(event) = rx.try_recv() {
+        if let JobEvent::ItemComplete { id, status, .. } = event {
+            outcomes.insert(id, status);
+        }
+    }
+    assert!(matches!(
+        outcomes.get("unparseable_video.mkv"),
+        Some(ItemOutcome::Planned)
+    ));
+    assert!(matches!(
+        outcomes.get("Season 01/unparseable_video.mkv"),
+        Some(ItemOutcome::Skipped)
+    ));
 }
 
 #[tokio::test]

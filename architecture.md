@@ -461,7 +461,7 @@ The legacy Python PyInstaller sidecar architecture was superseded by the **in-pr
 3. **Two-Phase Teardown Protocol (ADR-0007)**:
    - When a user stops a job or closes the window during execution:
      - **Phase 1 (Cooperative)**: Fires `cancel_token.cancel()`. Waits up to 2.0 seconds (`STOP_TIMEOUT`) for active child processes (`ffmpeg`, `mkvmerge`) to exit and temporary files to be cleaned up.
-     - **Phase 2 (Hard Abort)**: If the worker fails to exit within 2.0 seconds, `slot.task_handle.abort()` is invoked as an emergency safety valve.
+     - **Phase 2 (Hard Abort)**: If the worker fails to exit within 2.0 seconds, only the pipeline worker is aborted via `slot.pipeline_abort.abort()`. The supervisor task survives to publish the cancelled terminal snapshot and `job-done`, then release the slot.
 4. **Real-Time `JobSnapshot` Projection (ADR-0008, ADR-0009)**:
    - The bridge reduces incoming `JobEvent` streams into an in-memory `JobSnapshot`.
    - The webview queries `get_job_snapshot()` upon initialization to immediately restore completed cards, execution outcomes, and exact run durations across reloads.
@@ -493,8 +493,8 @@ The frontend avoids heavy framework bloat (React/Vue), implementing a high-speed
    - `reduceQueueEvent(state, event)` updates item state records in place ($O(1)$ per event) without allocating new trees.
    - Supports queue reordering (`▲` / `▼`) and selective execution (`selected_items`).
 2. **Incremental Manifest Card & Event Rendering (`queue-view.js`, `app.js`)**:
-   - Initial Inspection Manifest cards are created in `requestAnimationFrame` batches under a best-effort ~8 ms deadline (`queue-view.js:242-269`) so large manifests do not block the main thread.
-   - Live progress updates render synchronously upon event receipt, and terminal log batches are flushed in a single animation frame; neither has a hard per-update frame budget or a constant 60 FPS guarantee.
+   - Initial Inspection Manifest cards are created in `requestAnimationFrame` batches under a best-effort ~8 ms deadline (`QueueTracker.renderCardsIncrementally` in `queue-view.js`) so large manifests do not block the main thread.
+   - Live progress updates render synchronously on mounted cards when the event arrives; cards not yet mounted render from the item's current reducer state when created. Terminal log batches are flushed in a single animation frame. Neither has a hard per-update frame budget or a constant 60 FPS guarantee.
 3. **Hybrid Visual Progress Lifecycle (ADR-0009)**:
    - **Indeterminate Shimmer**: Displayed during initialization, EBML probing, and audio transcoding when exact byte progress is unavailable.
    - **Determinate Progress Bar**: Transitions immediately upon receiving the first `ItemProgress { progress, speed, eta }` event from `mkvmerge`, mapping to a determinate percentage fill.
