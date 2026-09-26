@@ -1,6 +1,6 @@
 # 0004. Resolution Precedence and Naming Conventions
 
-> **Status**: Amended by ADR-0008
+> **Status**: Accepted; amended by ADR-0008 and revised 2026-09-24 (implemented)
 > **Date**: 2026-03-15
 > **Context**: Media Engine Context
 
@@ -11,19 +11,19 @@ a settled design decision; recording them prevents re-litigation.
 
 ## Decision
 
-### 1. Subtitle source precedence: local index → embedded track → fallback assets
+### 1. Subtitle sources: manual → adjacent external → embedded → ancestor external → explicit fallback
 
 > [!IMPORTANT]
-> **AMENDED BY ADR-0008**: Explicit track assignments that cannot be resolved on disk now fail preflight fast instead of silently falling back to automatic matching.
+> **AMENDED BY ADR-0008**: A missing explicit track assignment fails both preflight validation and later resolution; it never falls back to automatic matching.
 
-`AssetResolver._resolve_sub` tries sources in a fixed order: an external
-subtitle matched from the release directory / ancestor chain first, then the
-best embedded subtitle track in the video itself, then external subtitles
-from `--assets-dir` fallbacks last. An explicit human assignment (GUI/CLI)
-overrides everything. Rationale: assets shipped alongside a release express
-its authors' intent; embedded tracks travel with the file; fallback
-directories are a recovery path of last resort. Do not reorder without a
-product-level reason.
+A human Track Assignment takes precedence over a matching external subtitle
+beside the video. An embedded subtitle outranks a matching subtitle in a parent
+directory; the nearest matching ancestor outranks an explicit `--assets-dir`
+fallback. Source precedence wins before language scoring across sources: an
+adjacent English subtitle beats an embedded Indonesian track, but a parent
+English subtitle does not. This revises the former ancestor-before-embedded
+rule: adjacent assets express a direct choice for that video, whereas an
+embedded track is more specific than a directory-wide ancestor asset.
 
 ### 2. Episode-number fractional suffixes pass through unvalidated
 
@@ -40,12 +40,22 @@ inside larger words ("Advent", "Mad"). Known trade-off: non-English track
 names using "ad" as an ordinary word would be misclassified; no real-world
 case has been observed. Change requires a concrete misclassification.
 
-### 4. Stem `cover` means a directory-wide cover
+### 4. Cover names and resolution
 
-A file named `cover.<ext>` (stem exactly "cover") is by convention the
-poster for the whole Release Directory and is offered to every episode via
-`CoverIndex.lookup`'s global fallback. Per-episode covers must use the
-`<episode-stem>_cover.<ext>` pattern. This split is intentional.
+Only `cover.<ext>` and `folder.<ext>` are directory-wide covers. An Episode
+Cover may use `<video-stem>_cover.<ext>`, `<video-stem>.cover.<ext>`, or
+`<video-stem>.<ext>`; the bare-stem form requires an adjacent video with that
+exact stem. An inapplicable `*_cover` image is never reclassified as a
+directory-wide cover.
+
+The nearest applicable directory wins before cover-name specificity. Within
+one directory, episode covers rank `_cover` before `.cover` before an exact
+bare stem, then directory covers rank `cover` before `folder`. Equal-tier
+candidates use natural filename order and then full filename to break ties.
+External covers in the video directory or an ancestor directory supersede
+embedded artwork; an explicit `--assets-dir` cover is only a fallback when
+there is no embedded cover. This replaces the former `cover`/`_cover`-only
+rule while excluding unrelated images from episode matching.
 
 ### 5. Font directories resolve first-match-wins
 

@@ -1,6 +1,6 @@
 # 0008. Typed Engine Bridge, Preset Profiles, and Track Assignment Domain
 
-> **Status**: Accepted (Extended by ADR-0011, ADR-0012)
+> **Status**: Accepted (Extended by ADR-0011, ADR-0012; amended 2026-09-24, implemented)
 > **Date**: 2026-05-15
 > **Context**: Media Engine Context & Desktop Application Bridge
 > **Amends**: ADR-0004, ADR-0007
@@ -11,7 +11,7 @@ Following the in-process Engine Bridge cutover (ADR-0007), the desktop integrati
 ## Decision
 We decided to establish a strongly-typed domain contract across the Media Engine and Desktop Application contexts:
 1. **Canonical `BatchRequest` Contract**: `mkv-core` defines `BatchRequest` as the single serializable execution contract consumed directly by Tauri's `run_job` and constructed by `mkv-cli` from CLI flags. Preflight validation (`BatchRequest::validate`) runs synchronously before acquiring desktop `JobSlot` locks, returning immediate errors for invalid directories, worker limits, or unparseable bitrates.
-2. **Domain-Driven `PresetProfile`**: Encoding presets (`Balanced`, `Fast`, `HiFi`, `Custom`) are modeled in `mkv-core` containing audio transcode parameters (`bitrate`, `complexity`, `keep_fonts`) and exposed to desktop UI via `get_preset_profiles()`. Hardware concurrency (`workers`, `io_jobs`) is strictly decoupled from presets and determined by system hardware detection. Explicit parameters on `BatchRequest` layer over preset baselines.
+2. **Domain-Driven `PresetProfile`**: Encoding presets (`Balanced`, `Fast`, `HiFi`, `Custom`) are modeled in `mkv-core` containing audio transcode parameters (`bitrate`, `complexity`, `keep_fonts` — *historical; superseded by 2026-09-24 amendment*) and exposed to desktop UI via `get_preset_profiles()`. Hardware concurrency (`workers`, `io_jobs`) is strictly decoupled from presets and determined by system hardware detection. Explicit parameters on `BatchRequest` layer over preset baselines.
 3. **`TrackAssignment` Domain Entity & Fail-Fast Preflight**: Manual track overrides are modeled as structured `TrackAssignment` entities keyed by relative video path (`Season 1/S01E01.mkv`). While the `TrackAssignment` entity structure anticipates multi-track stacking (e.g. dialogue and signs/songs), the current execution engine enforces 1:1 subtitle overrides (`track_type: "subtitle"`) until multi-track muxing is implemented in `remux.rs`. If an assigned asset or target video is missing on disk at preflight, or if path traversal or multiple assignments targeting the same video are detected, the engine fails fast and rejects the batch immediately (amending Section 1 of ADR-0004).
 4. **Real-Time `JobSnapshot` Projection**: `JobState` in the desktop engine bridge reduces incoming `JobEvent` streams into an in-memory `JobSnapshot`, queryable via `get_job_snapshot()` to restore queue presentation across UI reloads until superseded by a new scan or job run.
 
@@ -25,3 +25,23 @@ We decided to establish a strongly-typed domain contract across the Media Engine
 - Supersedes ADR-0007 Considered Option ("Typed Frontend IPC Overhaul").
 - Guarantees complete schema parity between GUI invocations and headless CLI batch scripts.
 - Eliminates DOM string-splitting overhead in `job-controller.js`.
+
+## Amendment — 2026-09-24
+
+`keep_fonts` in Decision 2 was an inert setting, not a font-deletion policy.
+Remove it from presets, requests, pipeline configuration, the CLI flag, and
+the desktop UI in one documented breaking cutover. Extracted fonts remain
+user output; do not delete pre-existing or user-supplied fonts. Implementing
+a deletion policy instead was rejected because it would risk user data.
+
+Decision 3 also applies at resolution time: if a Track Assignment disappears
+after validation, abort the entire batch before media output. The affected
+and other queued items end as `error` with distinct reasons, followed by one
+failed batch completion and snapshot. Never select an automatic subtitle or
+apply the missing assignment's language, title, or offset to another track.
+
+Decision 4 restores an Active Batch across reloads, not every item from the
+last Inspection Manifest. A Job Snapshot contains only participating items
+in submitted order, their latest progress, and their outcomes; the restored
+controller retains the active job ID and Stop capability. Unselected items
+are not silently re-inspected during an active job.

@@ -14,6 +14,19 @@ test("coordinator permits only one active pipeline", () => {
   assert.equal(coordinator.begin("extract"), true);
 });
 
+test("a startup snapshot restore blocks a start without claiming the batch", () => {
+  const coordinator = createJobCoordinator();
+
+  coordinator.isRestoring = true;
+  assert.equal(coordinator.begin("remux"), false, "a restore in flight must block a concurrent start");
+  assert.equal(coordinator.isStarting, false, "a restore is not a job start");
+  assert.equal(coordinator.activeMode, null, "a restore does not own the batch");
+
+  coordinator.isRestoring = false;
+  assert.equal(coordinator.begin("remux"), true);
+  coordinator.finish();
+});
+
 test("coordinator synchronizes registered controls through lifecycle changes", () => {
   let updates = 0;
   const coordinator = createJobCoordinator();

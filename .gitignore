@@ -34,3 +34,7 @@ graphify-out/
 # Windows Zone Identifier metadata
 *:Zone.Identifier
 *Zone.Identifier*
+
+# LSP server
+jsconfig.json
+lsp.json

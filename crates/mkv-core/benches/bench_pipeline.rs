@@ -104,7 +104,6 @@ fn bench_validation(runs: usize) {
         io_jobs: Some(2),
         ffmpeg_threads: Some(2),
         sub_offset: Some(0.0),
-        keep_fonts: Some(true),
         dry_run: Some(true),
         no_cache: Some(false),
         assignments: Some(vec![TrackAssignment {
@@ -160,7 +159,6 @@ async fn bench_batch_pipeline(count: usize, workers: usize) {
         complexity: 5,
         ffmpeg_threads: 2,
         sub_offset: 0.0,
-        keep_fonts: true,
         ..Default::default()
     };
 

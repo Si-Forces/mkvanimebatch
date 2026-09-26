@@ -95,6 +95,100 @@ export function formatElapsedDuration(seconds) {
   }
   return `${Math.floor(sec / 60)}m ${Math.floor(sec % 60)}s`;
 }
+/**
+ * Normalizes a directory path string for canonical identity comparison.
+ * Trims surrounding whitespace, resolves dot segments and redundant separators,
+ * and strips trailing slashes (except root). Windows paths also normalize case
+ * and trailing dots/spaces; verbatim `\\?\` paths keep them significant.
+ *
+ * @param {string|null|undefined} path
+ * @returns {string}
+ */
+export function normalizeDirectoryPath(path) {
+  if (typeof path !== "string") return "";
+  const leadingTrimmed = path.trimStart();
+  const hadExtendedPrefix =
+    leadingTrimmed.startsWith("\\\\?\\") ||
+    leadingTrimmed.startsWith("\\\\.\\") ||
+    leadingTrimmed.startsWith("//?/") ||
+    leadingTrimmed.startsWith("//./");
+  let clean = hadExtendedPrefix ? leadingTrimmed : path.trim();
+  if (!clean) return "";
+
+  // A backslash is a legal POSIX filename byte, so translating it unconditionally
+  // collapses distinct directories. Reuse the OS class from os-detect.js; only
+  // normalize separators on Windows or Windows-shaped paths.
+  const windowsHost =
+    (typeof document !== "undefined" &&
+      document.documentElement?.classList?.contains("is-windows")) ||
+    (typeof process !== "undefined" && process.platform === "win32");
+  const windowsPath =
+    /^\\\\/.test(clean) || /^[a-zA-Z]:/.test(clean) || /^\/\/[?.][\\/]/.test(clean);
+  if (windowsHost || windowsPath) {
+    clean = clean.replace(/\\/g, "/");
+  }
+  if (!clean) return "";
+
+  // Strip Windows extended-length prefix (\\?\ or //?/) if present
+  clean = clean.replace(/^(\/\/|\?\/?)[?.]\//, "");
+  if (hadExtendedPrefix) clean = clean.replace(/^UNC\//i, "//");
+
+  // Normalize Windows drive letter (e.g. C: -> c:)
+  const hasDrive = /^[a-zA-Z]:/.test(clean);
+  let drivePrefix = "";
+  if (hasDrive) {
+    drivePrefix = clean.slice(0, 2).toLowerCase();
+    clean = clean.slice(2);
+  }
+
+  const isUnc = !hasDrive && /^\/\/[^/]/.test(clean);
+  const isAbsolute = clean.startsWith("/");
+  const trimWindowsSegments = (windowsHost || windowsPath || isUnc || hasDrive) && !hadExtendedPrefix;
+  const segments = clean.split("/").filter(s => s.length > 0);
+  const resolved = [];
+
+  for (const rawSegment of segments) {
+    const seg = trimWindowsSegments && rawSegment !== ".."
+      ? rawSegment.replace(/[ .]+$/g, "")
+      : rawSegment;
+    if (!seg || seg === ".") continue;
+    if (seg === "..") {
+      if (resolved.length > 0 && resolved[resolved.length - 1] !== "..") {
+        resolved.pop();
+      } else if (!isAbsolute && !hasDrive) {
+        resolved.push("..");
+      }
+    } else {
+      resolved.push(seg);
+    }
+  }
+
+  let result = (hasDrive ? drivePrefix : "") + (isUnc ? "//" : isAbsolute ? "/" : "") + resolved.join("/");
+  if (!result && isAbsolute) result = "/";
+  if (hasDrive && !resolved.length) result = drivePrefix + "/";
+
+  // Case normalization for Windows: on Windows, filesystems are case-insensitive
+  if (windowsHost || isUnc || hasDrive) {
+    result = result.toLowerCase();
+  }
+
+  return result || ".";
+}
+
+/**
+ * Returns true if both directory paths represent the same canonical directory.
+ * An empty, null, or missing directory identity always returns false.
+ *
+ * @param {string|null|undefined} dirA
+ * @param {string|null|undefined} dirB
+ * @returns {boolean}
+ */
+export function isSameDirectory(dirA, dirB) {
+  if (!dirA || !dirB) return false;
+  const normA = normalizeDirectoryPath(dirA);
+  const normB = normalizeDirectoryPath(dirB);
+  return Boolean(normA && normB && normA === normB);
+}
 
 /**
  * @param {InspectionManifest} manifest
@@ -106,9 +200,13 @@ export function createQueueState(manifest, options = {}) {
   const state = {
     version: 1,
     mode,
+    inputDir: null,
     items: new Map(),
     order: [],
+    knownOrder: [],
     batchStartTime: null,
+    batchItemIds: null,
+    vanishedSelectedIds: [],
     batchCompleted: false,
     batchSuccess: null,
     batchCancelled: false,
@@ -148,7 +246,48 @@ export function createQueueState(manifest, options = {}) {
     state.order.push(id);
     state.totalCount++;
   }
+  state.knownOrder = [...state.order];
 
+  return state;
+}
+/** Preserve surviving selection and order, remember vanished selected IDs, and append newly inspected IDs unselected. */
+export function reconcileQueueSelection(state, previous) {
+  const priorVanished = new Set(previous.vanishedSelectedIds);
+  const vanished = new Set([...priorVanished].filter(id => !state.items.has(id)));
+  const baseOrder = Array.isArray(previous.knownOrder) ? previous.knownOrder : (previous.order || []);
+  const baseSet = new Set(baseOrder);
+  const order = [];
+  const knownOrder = [];
+
+  for (const id of baseOrder) {
+    const item = state.items.get(id);
+    if (!item) {
+      if (previous.items?.get(id)?.selected !== false && (previous.items?.has(id) || priorVanished.has(id))) {
+        vanished.add(id);
+      }
+      knownOrder.push(id);
+      continue;
+    }
+    const prevItem = previous.items?.get(id);
+    if (prevItem) {
+      item.selected = prevItem.selected !== false;
+    } else {
+      item.selected = priorVanished.has(id);
+    }
+    order.push(id);
+    knownOrder.push(id);
+  }
+
+  for (const id of state.order) {
+    if (baseSet.has(id)) continue;
+    state.items.get(id).selected = priorVanished.has(id);
+    order.push(id);
+    knownOrder.push(id);
+  }
+
+  state.order = order;
+  state.knownOrder = knownOrder;
+  state.vanishedSelectedIds = [...vanished];
   return state;
 }
 
@@ -163,9 +302,13 @@ export function createQueueStateFromSnapshot(snapshot, options = {}) {
   const state = {
     version: 1,
     mode,
+    inputDir: snapshot?.input_dir || null,
     items: new Map(),
     order: [],
+    knownOrder: [],
     batchStartTime: snapshot?.start_time_ms ?? null,
+    batchItemIds: null,
+    vanishedSelectedIds: [],
     batchCompleted: snapshot?.status === "completed" || snapshot?.status === "cancelled" || snapshot?.status === "error",
     batchSuccess: snapshot?.status === "completed",
     batchCancelled: snapshot?.status === "cancelled",
@@ -176,13 +319,13 @@ export function createQueueStateFromSnapshot(snapshot, options = {}) {
     errorCount: 0,
   };
 
-  if (!snapshot || !snapshot.items) {
+  if (!snapshot || !snapshot.items || !Array.isArray(snapshot.ordered_item_ids)) {
     return state;
   }
 
-  for (const snapItem of Object.values(snapshot.items)) {
-    if (!snapItem || !snapItem.id) continue;
-    const id = String(snapItem.id);
+  for (const id of snapshot.ordered_item_ids) {
+    const snapItem = snapshot.items[id];
+    if (!snapItem || state.items.has(id)) continue;
     const name = String(snapItem.file || id);
     const status = snapItem.status || "queued";
 
@@ -198,8 +341,10 @@ export function createQueueStateFromSnapshot(snapshot, options = {}) {
       metadata: null,
       inspectionError: null,
       status: resolvedStatus,
-      startTime: resolvedStatus === "processing" ? (options.now ?? Date.now()) : null,
+      startTime: resolvedStatus === "processing" ? (snapItem.start_time_ms ?? options.now ?? Date.now()) : null,
       durationSec: snapItem.duration_sec ?? null,
+      progress: resolvedStatus === "processing" && typeof snapItem.progress === "number"
+        ? Math.min(100, Math.max(0, snapItem.progress)) : null,
       reason: snapItem.reason ?? null,
       error: snapItem.error ?? null,
       selected: true,
@@ -215,10 +360,7 @@ export function createQueueStateFromSnapshot(snapshot, options = {}) {
     else if (resolvedStatus === "error") state.errorCount++;
   }
 
-  if (typeof snapshot.total_items === "number" && snapshot.total_items > state.totalCount) {
-    state.totalCount = snapshot.total_items;
-  }
-
+  state.knownOrder = [...state.order];
   return state;
 }
 
@@ -286,27 +428,41 @@ export function reduceQueueEvent(state, event, now = Date.now()) {
         state.expectedTotal = event.total;
       }
       if (Array.isArray(event.items)) {
+        state.batchItemIds = event.items.filter(it => it && it.id).map(it => it.id);
+        // order and knownOrder are tracked with independent membership sets: a
+        // snapshot restore can hand back a knownOrder that no longer matches
+        // order, and the submitter's BatchStart order is authoritative for both.
+        const inOrder = new Set(state.order);
+        const inKnown = new Set(state.knownOrder);
         for (const it of event.items) {
-          if (!it || !it.id || state.items.has(it.id)) continue;
-          state.items.set(it.id, {
-            id: it.id,
-            name: it.file || it.id,
-            release: ".",
-            metadata: null,
-            inspectionError: null,
-            status: "queued",
-            startTime: null,
-            durationSec: null,
-            durationFormatted: null,
-            progress: null,
-            speed: null,
-            eta: null,
-            reason: null,
-            error: null,
-            outcome: null,
-          });
-          if (!state.order.includes(it.id)) {
+          if (!it || !it.id) continue;
+          if (!state.items.has(it.id)) {
+            state.items.set(it.id, {
+              id: it.id,
+              name: it.file || it.id,
+              release: ".",
+              metadata: null,
+              inspectionError: null,
+              status: "queued",
+              startTime: null,
+              durationSec: null,
+              durationFormatted: null,
+              progress: null,
+              speed: null,
+              eta: null,
+              reason: null,
+              error: null,
+              outcome: null,
+            });
+          }
+          // Submitter order is authoritative: append each participant once.
+          if (!inOrder.has(it.id)) {
             state.order.push(it.id);
+            inOrder.add(it.id);
+          }
+          if (!inKnown.has(it.id)) {
+            state.knownOrder.push(it.id);
+            inKnown.add(it.id);
           }
         }
         state.totalCount = state.items.size;
@@ -410,7 +566,9 @@ export function finalizeQueueState(state, exitCode, cancelled = false) {
   let addedErrors = 0;
   let addedCancelled = 0;
 
+  const participants = Array.isArray(state.batchItemIds) ? new Set(state.batchItemIds) : null;
   for (const [id, item] of state.items.entries()) {
+    if (participants ? !participants.has(id) : item.selected === false) continue;
     if (!isTerminal(item.status)) {
       if (nextItems === state.items) {
         nextItems = new Map(state.items);
@@ -453,6 +611,7 @@ export function toggleItemSelection(state, id, selected) {
   const item = state.items.get(id);
   if (!item) return;
   item.selected = typeof selected === "boolean" ? selected : !item.selected;
+  state.vanishedSelectedIds = [];
 }
 
 /**
@@ -463,6 +622,7 @@ export function selectAll(state) {
   for (const item of state.items.values()) {
     item.selected = true;
   }
+  state.vanishedSelectedIds = [];
 }
 
 /**
@@ -473,6 +633,7 @@ export function deselectAll(state) {
   for (const item of state.items.values()) {
     item.selected = false;
   }
+  state.vanishedSelectedIds = [];
 }
 
 /**
@@ -482,10 +643,16 @@ export function reorderItem(state, id, direction) {
   if (!state || !Array.isArray(state.order)) return;
   const idx = state.order.indexOf(id);
   if (idx === -1) return;
-  if (direction === "up" && idx > 0) {
-    [state.order[idx - 1], state.order[idx]] = [state.order[idx], state.order[idx - 1]];
-  } else if (direction === "down" && idx < state.order.length - 1) {
-    [state.order[idx + 1], state.order[idx]] = [state.order[idx], state.order[idx + 1]];
+  const targetIdx = direction === "up" ? idx - 1 : idx + 1;
+  if (targetIdx < 0 || targetIdx >= state.order.length) return;
+  const otherId = state.order[targetIdx];
+  [state.order[idx], state.order[targetIdx]] = [state.order[targetIdx], state.order[idx]];
+  if (Array.isArray(state.knownOrder)) {
+    const kIdx = state.knownOrder.indexOf(id);
+    const kTarget = state.knownOrder.indexOf(otherId);
+    if (kIdx !== -1 && kTarget !== -1) {
+      [state.knownOrder[kIdx], state.knownOrder[kTarget]] = [state.knownOrder[kTarget], state.knownOrder[kIdx]];
+    }
   }
 }
 

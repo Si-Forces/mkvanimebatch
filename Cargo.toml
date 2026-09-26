@@ -19,7 +19,6 @@ unsafe_code = "forbid"
 incremental = true
 
 [profile.release]
-panic = "abort"
 codegen-units = 1
 lto = true
 opt-level = "s"

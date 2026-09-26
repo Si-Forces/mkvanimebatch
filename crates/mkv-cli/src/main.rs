@@ -32,31 +32,40 @@ impl Default for CliArgs {
     }
 }
 
-fn parse_args() -> Result<CliArgs, String> {
-    let mut args = parse_args_from(std::env::args().skip(1))?;
-
-    let exe_name = std::env::args()
-        .next()
-        .and_then(|p| {
-            PathBuf::from(p)
-                .file_name()
-                .map(|s| s.to_string_lossy().to_string())
-        })
-        .unwrap_or_default();
-    if exe_name.contains("mkv-extract") {
-        args.request.mode = PipelineMode::Extract;
-    }
-
-    Ok(args)
+fn is_mkv_extract_exe(exe: &str) -> bool {
+    let file_name = exe.rsplit(['/', '\\']).next().unwrap_or(exe);
+    let lower = file_name.to_ascii_lowercase();
+    let stem = lower.strip_suffix(".exe").unwrap_or(&lower);
+    stem == "mkv-extract"
 }
 
+fn parse_args() -> Result<CliArgs, String> {
+    let mut env_args = std::env::args();
+    let exe = env_args.next();
+    parse_args_with_exe(exe.as_deref(), env_args)
+}
+
+#[cfg(test)]
 fn parse_args_from<I, T>(iter: I) -> Result<CliArgs, String>
+where
+    I: IntoIterator<Item = T>,
+    T: AsRef<str>,
+{
+    parse_args_with_exe(None, iter)
+}
+
+fn parse_args_with_exe<I, T>(exe: Option<&str>, iter: I) -> Result<CliArgs, String>
 where
     I: IntoIterator<Item = T>,
     T: AsRef<str>,
 {
     let raw_args: Vec<String> = iter.into_iter().map(|s| s.as_ref().to_string()).collect();
     let mut request = BatchRequest::default();
+    if let Some(exe_str) = exe {
+        if is_mkv_extract_exe(exe_str) {
+            request.mode = PipelineMode::Extract;
+        }
+    }
 
     let mut plan = false;
     let mut events = false;
@@ -136,9 +145,6 @@ where
             }
             "--no-cache" => {
                 request.no_cache = Some(true);
-            }
-            "--keep-fonts" => {
-                request.keep_fonts = Some(true);
             }
             "--sub-offset" => {
                 let val = it.next().ok_or("Missing value for --sub-offset")?;
@@ -357,13 +363,23 @@ async fn generate_plan_manifest(
     let mut manifest =
         generate_inspection_manifest(&args.request.input_dir, cache, cancel_token).await?;
     if let Some(selected) = &args.request.selected_items {
-        manifest = manifest.filter_selected(selected);
-        if manifest.items.is_empty() && !selected.is_empty() {
-            return Err(
-                "None of the selected items matched any discovered MKV files in the input directory"
-                    .into(),
-            );
+        let discovered: std::collections::HashSet<String> = manifest
+            .items
+            .iter()
+            .map(|item| clean_relative_path(&item.id))
+            .collect();
+        let unmatched: Vec<&str> = selected
+            .iter()
+            .filter(|item| !discovered.contains(&clean_relative_path(item)))
+            .map(String::as_str)
+            .collect();
+        if !unmatched.is_empty() {
+            return Err(format!(
+                "Selected items not found among discovered MKV files: {}",
+                unmatched.join(", ")
+            ));
         }
+        manifest = manifest.filter_selected(selected);
     }
     Ok(manifest)
 }
@@ -397,6 +413,7 @@ OPTIONS:
     --assets-dir <DIR>         Fallback asset directory
     --plan                     Generate structured inspection manifest JSON for queue hydration
     --events                   Emit machine-readable NDJSON events prefixed with '@event: '
+    --remux                    Process batch in remux mode (default for mkv-cli)
     --extract                  Extract best-match subtitles, fonts, chapters, and covers
     --dry-run                  Simulate batch processing without executing remux commands
     --bitrate <RATE>           Opus audio transcoding bitrate (default: 192k)
@@ -405,7 +422,6 @@ OPTIONS:
     --io-jobs <N>              Bounded disk I/O jobs concurrency limit (default: 2)
     --ffmpeg-threads <N|auto>  CPU threads allocated per audio transcode job (default: auto)
     --sub-offset <SEC>         Subtitle timestamp offset in seconds
-    --keep-fonts               Retain extracted fonts directory
     --no-cache                 Bypass persistent inspect cache
     --clear-cache              Clear persistent inspection cache and exit
     -h, --help                 Show this help message
@@ -1078,20 +1094,23 @@ mod tests {
             "--plan",
             "--selected-item",
             "ep02.mkv",
+            "--selected-item",
+            "ep01.mkv",
         ])
         .unwrap();
 
         assert!(parsed.plan);
         assert_eq!(
             parsed.request.selected_items.as_deref(),
-            Some(&["ep02.mkv".to_string()][..])
+            Some(&["ep02.mkv".to_string(), "ep01.mkv".to_string()][..])
         );
 
         let json = generate_plan_json(&parsed, None, None).await.unwrap();
         let val: serde_json::Value = serde_json::from_str(&json).unwrap();
         let items = val["items"].as_array().expect("manifest should have items");
-        assert_eq!(items.len(), 1);
+        assert_eq!(items.len(), 2);
         assert_eq!(items[0]["id"], "ep02.mkv");
+        assert_eq!(items[1]["id"], "ep01.mkv");
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
@@ -1192,25 +1211,119 @@ mod tests {
         let temp_dir =
             std::env::temp_dir().join(format!("mkv_cli_test_unmatched_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&temp_dir);
-        let ep1 = temp_dir.join("ep01.mkv");
-        std::fs::write(&ep1, b"video 1").unwrap();
+        std::fs::write(temp_dir.join("ep01.mkv"), b"video 1").unwrap();
+        std::fs::write(temp_dir.join("notes.txt"), b"text").unwrap();
+        std::fs::create_dir_all(temp_dir.join("Output")).unwrap();
+        std::fs::write(temp_dir.join("Output/hidden.mkv"), b"video 2").unwrap();
 
-        let ep_txt = temp_dir.join("readme.txt");
-        std::fs::write(&ep_txt, b"text").unwrap();
-
-        let parsed = parse_args_from([
+        let mut parsed = parse_args_from([
             "--input-dir",
             temp_dir.to_str().unwrap(),
             "--plan",
             "--selected-item",
-            "readme.txt",
+            "ep01.mkv",
+            "--selected-item",
+            "notes.txt",
+            "--selected-item",
+            "Output/hidden.mkv",
         ])
         .unwrap();
-
+        assert!(parsed.request.validate().unwrap_err().contains("notes.txt"));
         let err = generate_plan_manifest(&parsed, None, None)
             .await
             .unwrap_err();
-        assert!(err.contains("None of the selected items matched any discovered MKV files"));
+        assert!(
+            err.contains("notes.txt") && err.contains("Output/hidden.mkv"),
+            "{err}"
+        );
+
+        parsed.request.selected_items = Some(vec!["Output/hidden.mkv".into()]);
+        assert!(parsed.request.validate().is_ok());
+        assert!(generate_plan_manifest(&parsed, None, None)
+            .await
+            .unwrap_err()
+            .contains("Output/hidden.mkv"));
+
+        parsed.request.selected_items = None;
+        std::fs::remove_file(temp_dir.join("ep01.mkv")).unwrap();
+        let plan = generate_plan_manifest(&parsed, None, None).await.unwrap();
+        assert!(plan.items.is_empty());
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_is_mkv_extract_exe() {
+        assert!(is_mkv_extract_exe("mkv-extract"));
+        assert!(is_mkv_extract_exe("/usr/bin/mkv-extract"));
+        assert!(is_mkv_extract_exe("./mkv-extract"));
+        assert!(is_mkv_extract_exe("mkv-extract.exe"));
+        assert!(is_mkv_extract_exe("MKV-EXTRACT.EXE"));
+        assert!(is_mkv_extract_exe("mkv-extract.Exe"));
+        assert!(is_mkv_extract_exe(r"C:\tools\mkv-extract.exe"));
+        assert!(is_mkv_extract_exe(
+            r"C:\Program Files\MKVAnimeBatch\MKV-EXTRACT.EXE"
+        ));
+
+        assert!(!is_mkv_extract_exe("mkv-cli"));
+        assert!(!is_mkv_extract_exe("/usr/bin/mkv-cli"));
+        assert!(!is_mkv_extract_exe("mkv-cli.exe"));
+        assert!(!is_mkv_extract_exe("MKV-CLI.EXE"));
+        assert!(!is_mkv_extract_exe(r"C:\bin\mkv-cli.exe"));
+        assert!(!is_mkv_extract_exe("other-mkv-extract.exe"));
+        assert!(!is_mkv_extract_exe(""));
+    }
+
+    #[test]
+    fn test_exe_name_mode_default_and_overrides() {
+        // 1. mkv-cli default is Remux
+        let args = parse_args_with_exe(Some("mkv-cli"), ["--input-dir", "."]).unwrap();
+        assert_eq!(args.request.mode, PipelineMode::Remux);
+
+        // 2. mkv-cli overridden by --extract
+        let args = parse_args_with_exe(Some("mkv-cli"), ["--input-dir", ".", "--extract"]).unwrap();
+        assert_eq!(args.request.mode, PipelineMode::Extract);
+
+        // 3. mkv-extract defaults to Extract
+        let args = parse_args_with_exe(Some("mkv-extract"), ["--input-dir", "."]).unwrap();
+        assert_eq!(args.request.mode, PipelineMode::Extract);
+
+        // 4. mkv-extract overridden by --remux
+        let args =
+            parse_args_with_exe(Some("mkv-extract"), ["--input-dir", ".", "--remux"]).unwrap();
+        assert_eq!(args.request.mode, PipelineMode::Remux);
+
+        // 5. mkv-extract --remux --dry-run reports Remux and dry-run
+        let args = parse_args_with_exe(
+            Some("mkv-extract"),
+            ["--input-dir", ".", "--remux", "--dry-run"],
+        )
+        .unwrap();
+        assert_eq!(args.request.mode, PipelineMode::Remux);
+        assert_eq!(args.request.dry_run, Some(true));
+
+        // 6. Windows case variants default to Extract and are overridden by --remux
+        let args_win = parse_args_with_exe(
+            Some(r"C:\Program Files\MKVAnimeBatch\MKV-EXTRACT.EXE"),
+            ["--input-dir", "."],
+        )
+        .unwrap();
+        assert_eq!(args_win.request.mode, PipelineMode::Extract);
+
+        let args_win_remux = parse_args_with_exe(
+            Some(r"C:\Program Files\MKVAnimeBatch\MKV-EXTRACT.EXE"),
+            ["--input-dir", ".", "--remux"],
+        )
+        .unwrap();
+        assert_eq!(args_win_remux.request.mode, PipelineMode::Remux);
+
+        // 7. Normal parse_args_from defaults to Remux and respects flags
+        let normal = parse_args_from(["--input-dir", "."]).unwrap();
+        assert_eq!(normal.request.mode, PipelineMode::Remux);
+
+        let normal_extract = parse_args_from(["--input-dir", ".", "--extract"]).unwrap();
+        assert_eq!(normal_extract.request.mode, PipelineMode::Extract);
+
+        let normal_remux = parse_args_from(["--input-dir", ".", "--remux"]).unwrap();
+        assert_eq!(normal_remux.request.mode, PipelineMode::Remux);
     }
 }
