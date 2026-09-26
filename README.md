@@ -283,11 +283,11 @@ mkvanimebatch/
 ├── crates/
 │   ├── mkv-core/            # Standalone media engine library crate
 │   │   ├── src/             # EBML parsing, CPU topology, domain heuristics, fonts, pipeline
-│   │   └── tests/           # 10 integration suites (assets, domain, scan, remux, extract, fonts, pipeline, pipeline-assignment-args, cross-regex, real-remux)
+│   │   └── tests/           # 11 integration suites (assets, domain, scan, remux, extract, fonts, pipeline, pipeline-assignments, pipeline-assignment-args, cross-regex, real-remux)
 │   └── mkv-cli/             # Standalone CLI binary adapter
 │       └── src/             # CLI argument parsing, smoke validation
 ├── desktop-tauri/           # Desktop GUI application
-│   ├── ui/                  # Web frontend (Liquid Glass UI, Queue Tracker, 9 Node test suites)
+│   ├── ui/                  # Web frontend (Liquid Glass UI, Queue Tracker, 10 Node test suites)
 │   └── src-tauri/           # In-process Tauri Engine Bridge & telemetry
 ├── docs/
 │   └── adr/                 # System Architecture Decision Records (0001 - 0014)

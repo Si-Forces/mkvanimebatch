@@ -1072,6 +1072,28 @@ test("normalizeDirectoryPath and isSameDirectory handle canonical, relative, and
   assert.equal(isSameDirectory("C:\\Anime\\Show", "c:/anime/show/"), true);
   assert.equal(isSameDirectory("C:\\Anime\\x\\..\\Show", "c:/anime/show"), true);
 
+  // Win32 trims trailing dots/spaces on ordinary path segments, but verbatim
+  // paths keep them significant. The Engine Bridge strips `\\?\` before any
+  // identity reaches the Queue Tracker (see the Canonical Directory Identity
+  // invariant in desktop-tauri/CONTEXT.md), so a verbatim form is a
+  // defence-in-depth case here, not a normal input.
+  assert.equal(normalizeDirectoryPath("C:/Videos/Show. /Episode"), "c:/videos/show/episode");
+  assert.equal(
+    normalizeDirectoryPath(String.raw`\\?\C:\Videos\Show.`),
+    "c:/videos/show.",
+  );
+  assert.equal(normalizeDirectoryPath(String.raw`\\?\C:\Videos\Show `), "c:/videos/show ");
+  assert.equal(
+    normalizeDirectoryPath(String.raw`\\?\UNC\server\share\Show`),
+    "//server/share/show",
+  );
+
+  // On POSIX, backslash is a filename character, not a path separator.
+  if (process.platform !== "win32") {
+    assert.equal(normalizeDirectoryPath("/anime/My\\\\Show"), "/anime/My\\\\Show");
+    assert.equal(isSameDirectory("/anime/My\\\\Show", "/anime/My/Show"), false);
+  }
+
   // Missing or empty identities
   assert.equal(isSameDirectory(null, "/anime/show"), false);
   assert.equal(isSameDirectory("/anime/show", null), false);

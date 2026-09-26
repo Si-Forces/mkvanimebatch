@@ -279,13 +279,17 @@ export class JobController {
     }
     const discoveredIds = new Set(tracker.lastManifest?.items?.map(item => item.id) ?? []);
     if (isSameDir) {
+      const reappearedIds = vanishedBeforeScan.filter(id => discoveredIds.has(id));
       const missingIds = [...new Set([
         ...effectiveSelectedIds.filter(id => !discoveredIds.has(id)),
         ...(tracker.state?.vanishedSelectedIds ?? []),
         ...vanishedBeforeScan,
       ])];
       if (missingIds.length) {
-        this.runtime.appendLog(this.logEl, `[ERROR] Selected episodes disappeared from the input directory: ${missingIds.join(", ")}. Change the queue selection to continue; job was not started.`);
+        const message = reappearedIds.length
+          ? `Queue selection changed during inspection; previously missing selected episodes reappeared: ${reappearedIds.join(", ")}. Review the queue and press Run again; job was not started.`
+          : `Selected episodes disappeared from the input directory: ${missingIds.join(", ")}. Change the queue selection to continue; job was not started.`;
+        this.runtime.appendLog(this.logEl, `[ERROR] ${message}`);
         this.abortStart();
         return;
       }
@@ -497,13 +501,14 @@ export class JobController {
   }
 
   syncGlobalControls() {
-    const busy = this.runtime.coordinator.activeMode !== null || Boolean(this.runtime.coordinator.isStarting);
+    const canStart = this.runtime.coordinator.canStart();
+    const busy = this.isJobActive();
     const tracker = this.runtime.queueFor?.(this.mode);
     const hasItems = (tracker?.state?.totalCount ?? 0) > 0;
     const selectedCount = tracker?.getSelectedCount?.() ?? 0;
     const selectionDisabled = hasItems && selectedCount === 0;
     const isScanning = Boolean(tracker?.isScanning);
-    if (this.runBtn) this.runBtn.disabled = busy || isScanning || selectionDisabled;
+    if (this.runBtn) this.runBtn.disabled = !canStart || isScanning || selectionDisabled;
     for (const control of this.formControls) control.disabled = busy;
     // Selection stays frozen for the whole preflight/run window: the request
     // captured this queue's selection before the forced scan, so a click now

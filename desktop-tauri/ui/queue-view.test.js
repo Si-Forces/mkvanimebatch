@@ -97,6 +97,15 @@ test("a fresh QueueTracker initialises its empty state, not just undefined", t =
   assert.strictEqual(tracker.lastScannedPath, null);
   assert.strictEqual(tracker.heartbeatTimer, null);
   assert.strictEqual(tracker.selectionLocked, false);
+
+  // setDirectory is the single writer for both identity fields; every path that
+  // used to assign them inline must keep them in agreement.
+  tracker.setDirectory("/anime/show/");
+  assert.strictEqual(tracker.currentDirectory, "/anime/show");
+  assert.strictEqual(tracker.lastScannedPath, "/anime/show");
+  tracker.setDirectory("/other/release");
+  assert.strictEqual(tracker.currentDirectory, "/other/release");
+  assert.strictEqual(tracker.lastScannedPath, "/other/release");
 });
 
 test("restoreFromSnapshot handles null or empty snapshot gracefully", t => {

@@ -76,7 +76,7 @@ pub fn run_job<R: tauri::Runtime>(
     let canonical_input =
         std::fs::canonicalize(&request.input_dir).unwrap_or_else(|_| request.input_dir.clone());
     let clean_canonical_input = display_canonical_path(&canonical_input.to_string_lossy());
-    request.input_dir = std::path::PathBuf::from(&clean_canonical_input);
+    request.input_dir = canonical_input;
 
     request.validate()?;
 
@@ -182,6 +182,7 @@ where
         let app_event = app_task.clone();
         let mode_event = mode.clone();
         let event_task = async move {
+            let state = app_event.state::<JobState>();
             let mut completion = None;
             while let Some(mut event) = event_rx.recv().await {
                 if matches!(event, JobEvent::BatchComplete { .. }) {
@@ -193,10 +194,15 @@ where
                     continue;
                 }
                 if completion.is_none() {
+                    // The engine reports the raw canonical input path, which is
+                    // verbatim (`\\?\`) on Windows. Normalize it to the same display
+                    // form the Inspection Manifest uses so both sides of the Queue
+                    // Tracker's directory-identity comparison agree.
+                    if let JobEvent::BatchStart { input_dir, .. } = &mut event {
+                        *input_dir = display_canonical_path(input_dir);
+                    }
                     event.attach_context(&mode_event, job_id);
-                    app_event
-                        .state::<JobState>()
-                        .update_snapshot(&event, job_id, &mode_event);
+                    state.update_snapshot(&event, job_id, &mode_event);
                     let _ = app_event.emit("job-event", &event);
                 }
             }
@@ -313,7 +319,6 @@ where
         id: job_id,
         cancel_token,
         pipeline_abort,
-        stopping: false,
     });
     Ok(job_id)
 }
@@ -501,6 +506,39 @@ mod tests {
         assert!(serde_json::from_str::<InspectOptions>(r#"{"noCache": "true"}"#).is_err());
     }
 
+    /// The Engine Bridge can only unwind a task panic because the release profile
+    /// does not abort. A behaviour test runs under the dev profile, where the panic
+    /// strategy is always unwind, so nothing else pins this.
+    #[test]
+    fn release_profile_does_not_abort_on_panic() {
+        let manifest = include_str!("../../../Cargo.toml");
+        let release = manifest
+            .split("[profile.release]")
+            .nth(1)
+            .expect("workspace Cargo.toml must define [profile.release]");
+        let profile = &release[..release.find('[').unwrap_or(release.len())];
+        let sets_panic_abort = |profile: &str| {
+            profile.lines().any(|line| {
+                let line = line.split('#').next().unwrap_or_default();
+                let Some((key, value)) = line.split_once('=') else {
+                    return false;
+                };
+                key.trim() == "panic" && matches!(value.trim(), "\"abort\"" | "'abort'")
+            })
+        };
+        assert!(
+            !sets_panic_abort(profile),
+            "[profile.release] sets a quoted panic = abort value; a panicking task kills the \
+             process before the supervisor can emit a terminal event or release the job \
+             slot to unwind a task panic"
+        );
+        assert!(sets_panic_abort("panic = 'abort' # ignored comment"));
+        assert!(sets_panic_abort(
+            "  panic \t=\t \"abort\"   # ignored comment"
+        ));
+        assert!(!sets_panic_abort("# panic = 'abort'"));
+    }
+
     #[test]
     fn test_get_and_clear_job_snapshot() {
         let app = tauri::test::mock_app();
@@ -518,6 +556,9 @@ mod tests {
             items: None,
             extra: Default::default(),
         };
+        state
+            .begin_snapshot(101, "remux", Some("/test".to_string()))
+            .unwrap();
         state.update_snapshot(&start_event, 101, "remux");
 
         let state = app.state::<JobState>();
@@ -527,6 +568,7 @@ mod tests {
         assert_eq!(snap.job_id, 101);
         assert_eq!(snap.mode, "remux");
         assert_eq!(snap.total_items, 2);
+        assert_eq!(snap.input_dir.as_deref(), Some("/test"));
 
         let state = app.state::<JobState>();
         state.clear_snapshot();
@@ -559,8 +601,8 @@ mod tests {
             .is_ok());
     }
     #[test]
-    fn test_run_job_canonicalizes_symlinked_input_dir() {
-        let (app, _events, _dones) = observed_app();
+    fn test_run_job_canonicalizes_linked_input_dir() {
+        let (app, events, _dones) = observed_app();
         let target_dir = tempfile::tempdir().unwrap();
         let parent_dir = tempfile::tempdir().unwrap();
         let symlink_path = parent_dir.path().join("symlink_target");
@@ -568,31 +610,106 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(target_dir.path(), &symlink_path).unwrap();
         #[cfg(windows)]
-        let _ = std::os::windows::fs::symlink_dir(target_dir.path(), &symlink_path);
-
-        if symlink_path.exists() {
-            let request = mkv_core::request::BatchRequest {
-                mode: mkv_core::pipeline::PipelineMode::Extract,
-                input_dir: symlink_path,
-                dry_run: Some(true),
-                ..Default::default()
-            };
-
-            let state = app.state::<JobState>();
-            let res = run_job(app.handle().clone(), state, request);
-            assert!(res.is_ok());
-            let job_id = res.unwrap();
-            let verify_state = app.state::<JobState>();
-            let _ = verify_state.wait_until_released(job_id, std::time::Duration::from_secs(5));
-
-            let snapshot = verify_state.snapshot.lock().unwrap().clone().unwrap();
-            let canonical_target = std::fs::canonicalize(target_dir.path()).unwrap();
-            let clean_canonical = display_canonical_path(&canonical_target.to_string_lossy());
-            assert_eq!(
-                snapshot.input_dir.as_deref(),
-                Some(clean_canonical.as_str())
+        {
+            let output = std::process::Command::new("cmd.exe")
+                .args(["/C", "mklink", "/J"])
+                .arg(&symlink_path)
+                .arg(target_dir.path())
+                .output()
+                .expect("cmd.exe must be available to create a directory junction");
+            assert!(
+                output.status.success(),
+                "mklink /J failed: {}",
+                String::from_utf8_lossy(&output.stderr)
             );
         }
+
+        assert!(
+            symlink_path.exists(),
+            "link creation failed; run_job input_dir canonicalization is untested"
+        );
+        let linked_input_dir = symlink_path.to_string_lossy().into_owned();
+        let request = mkv_core::request::BatchRequest {
+            mode: mkv_core::pipeline::PipelineMode::Extract,
+            input_dir: symlink_path,
+            dry_run: Some(true),
+            ..Default::default()
+        };
+
+        let state = app.state::<JobState>();
+        let res = run_job(app.handle().clone(), state, request);
+        assert!(res.is_ok());
+        let job_id = res.unwrap();
+        let verify_state = app.state::<JobState>();
+        verify_state
+            .wait_until_released(job_id, std::time::Duration::from_secs(5))
+            .unwrap();
+
+        let snapshot = verify_state.snapshot.lock().unwrap().clone().unwrap();
+        let snapshot_input_dir = snapshot
+            .input_dir
+            .expect("snapshot should preserve input path");
+        let canonical_target = std::fs::canonicalize(target_dir.path()).unwrap();
+        assert_ne!(snapshot_input_dir, linked_input_dir);
+        assert_eq!(
+            std::fs::canonicalize(&snapshot_input_dir).unwrap(),
+            canonical_target
+        );
+
+        // Canonical Directory Identity: the emitted BatchStart must carry the same
+        // display form as the snapshot and the Inspection Manifest's `canonical_dir`.
+        // A Windows verbatim `\\?\` prefix surviving here splits directory identity
+        // and silently drops Queue Selection on the next same-directory rescan.
+        let emitted = events.lock().unwrap();
+        let start = emitted
+            .iter()
+            .find(|event| event["type"] == "batch_start")
+            .expect("a batch must emit BatchStart");
+        let emitted_input_dir = start["input_dir"].as_str().unwrap();
+        assert_eq!(emitted_input_dir, snapshot_input_dir);
+        assert!(
+            !emitted_input_dir.starts_with(r"\\?\"),
+            "BatchStart.input_dir leaked a verbatim prefix: {emitted_input_dir}"
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn test_run_job_preserves_non_utf8_canonical_input_path() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let app = tauri::test::mock_app();
+        app.manage(JobState::default());
+        let target_dir = tempfile::tempdir().unwrap();
+        let parent_dir = tempfile::tempdir().unwrap();
+        let non_utf8_target = target_dir
+            .path()
+            .join(std::ffi::OsString::from_vec(vec![b'd', 0xff, b'r']));
+        std::fs::create_dir(&non_utf8_target).unwrap();
+        let symlink_path = parent_dir.path().join("input-link");
+        std::os::unix::fs::symlink(&non_utf8_target, &symlink_path).unwrap();
+        let request = mkv_core::request::BatchRequest {
+            mode: mkv_core::pipeline::PipelineMode::Extract,
+            input_dir: symlink_path,
+            dry_run: Some(true),
+            ..Default::default()
+        };
+
+        let state = app.state::<JobState>();
+        let job_id = run_job(app.handle().clone(), state, request)
+            .expect("non-UTF-8 canonical path must validate as its real directory");
+        let verify_state = app.state::<JobState>();
+        verify_state
+            .wait_until_released(job_id, std::time::Duration::from_secs(5))
+            .unwrap();
+        let snapshot = verify_state.snapshot.lock().unwrap();
+        let expected_display = std::fs::canonicalize(non_utf8_target)
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        assert_eq!(
+            snapshot.as_ref().unwrap().input_dir.as_deref(),
+            Some(expected_display.as_str())
+        );
     }
     #[test]
     fn forced_stop_aborts_only_worker_and_settles_once() {

@@ -1,12 +1,14 @@
-//! Proves that a manual `TrackAssignment`'s language, title, and sync offset
-//! survive the full remux pipeline into the argv handed to `mkvmerge`.
+//! Proves that manual `TrackAssignment` language, title, and sync offsets survive
+//! the full remux pipeline into the argv handed to `mkvmerge`.
 //!
 //! This lives in its own integration binary on purpose. Capturing mkvmerge's
 //! arguments means putting a stub script ahead of the real one on `PATH`, and
 //! `PATH` is process-global: in a shared binary every other test that can reach
 //! a probe or a remux would race it for the same variable. One test per process
 //! makes the mutation harmless, so no lock is needed and no unrelated test has
-//! to be serialized behind this one.
+//! to be serialized behind this one. It is Unix-only because the harness uses a
+//! POSIX shell script and Unix executable permissions; consequently this argv
+//! contract has no Windows coverage.
 
 #![cfg(unix)]
 
@@ -70,11 +72,13 @@ fn video_metadata() -> MkvmergeMetadata {
 }
 
 #[tokio::test]
-async fn assigned_language_title_and_offset_reach_the_mkvmerge_argv() {
+async fn assigned_language_title_and_both_offset_signs_reach_the_mkvmerge_argv() {
     let dir = tempdir().unwrap();
     let bin_dir = tempdir().unwrap();
     let video_path = dir.path().join("Episode - 01.mkv");
+    let second_video_path = dir.path().join("Episode - 02.mkv");
     fs::write(&video_path, b"dummy mkv content").unwrap();
+    fs::write(&second_video_path, b"dummy mkv content").unwrap();
     fs::write(
         dir.path().join("custom.ass"),
         b"[Script Info]\nTitle: Custom\n",
@@ -87,7 +91,7 @@ async fn assigned_language_title_and_offset_reach_the_mkvmerge_argv() {
     let script = bin_dir.path().join("mkvmerge");
     fs::write(
         &script,
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$MKV_ARGS_FILE\"\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"-o\" ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nmkdir -p \"$(dirname \"$out\")\"\nprintf 'fake mkv' > \"$out\"\n",
+        "#!/bin/sh\nprintf '__CALL__\\n' >> \"$MKV_ARGS_FILE\"\nprintf '%s\\n' \"$@\" >> \"$MKV_ARGS_FILE\"\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"-o\" ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nmkdir -p \"$(dirname \"$out\")\"\nprintf 'fake mkv' > \"$out\"\n",
     )
     .unwrap();
     fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
@@ -102,23 +106,33 @@ async fn assigned_language_title_and_offset_reach_the_mkvmerge_argv() {
 
     let cache = Arc::new(PersistentInspectCache::new(None, true));
     cache.put_path(&video_path, video_metadata());
+    cache.put_path(&second_video_path, video_metadata());
     let config = PipelineConfig {
         mode: PipelineMode::Remux,
         input_dir: dir.path().to_path_buf(),
         out_dir: Some(dir.path().join("out")),
         cache: Some(cache),
-        track_assignments: Some(vec![TrackAssignment {
-            target_video: "Episode - 01.mkv".into(),
-            asset_path: "custom.ass".into(),
-            track_type: Some("subtitle".into()),
-            language: Some("ind".into()),
-            title: Some("Bahasa Indonesia".into()),
-            offset_ms: Some(1250),
-        }]),
-        // Scoped to a selection so this one run proves both halves of the
-        // contract: the assignment resolves to exactly the selected item, and
-        // its language/title/offset reach the argv.
-        selected_items: Some(vec!["Episode - 01.mkv".into()]),
+        track_assignments: Some(vec![
+            TrackAssignment {
+                target_video: "Episode - 01.mkv".into(),
+                asset_path: "custom.ass".into(),
+                track_type: Some("subtitle".into()),
+                language: Some("ind".into()),
+                title: Some("Bahasa Indonesia".into()),
+                offset_ms: Some(1250),
+            },
+            TrackAssignment {
+                target_video: "Episode - 02.mkv".into(),
+                asset_path: "custom.ass".into(),
+                track_type: Some("subtitle".into()),
+                language: Some("ind".into()),
+                title: Some("Bahasa Indonesia".into()),
+                offset_ms: Some(-1250),
+            },
+        ]),
+        // The selected batch proves that both assignments resolve to the
+        // requested items and that both offset signs reach the argv.
+        selected_items: Some(vec!["Episode - 01.mkv".into(), "Episode - 02.mkv".into()]),
         workers: 1,
         io_jobs: 1,
         ..Default::default()
@@ -130,8 +144,8 @@ async fn assigned_language_title_and_offset_reach_the_mkvmerge_argv() {
         .unwrap();
     assert_eq!(
         (summary.completed, summary.errors),
-        (1, 0),
-        "the assigned subtitle must be muxed, not skipped"
+        (2, 0),
+        "the assigned subtitles must be muxed, not skipped"
     );
 
     let args: Vec<String> = fs::read_to_string(&args_file)
@@ -141,7 +155,11 @@ async fn assigned_language_title_and_offset_reach_the_mkvmerge_argv() {
         .collect();
     assert!(
         args.windows(2).any(|pair| pair == ["--sync", "0:1250"]),
-        "offset_ms must reach mkvmerge: {args:?}"
+        "positive offset_ms must reach mkvmerge: {args:?}"
+    );
+    assert!(
+        args.windows(2).any(|pair| pair == ["--sync", "0:-1250"]),
+        "negative offset_ms must reach mkvmerge: {args:?}"
     );
     assert!(
         args.windows(2).any(|pair| pair == ["--language", "0:ind"]),

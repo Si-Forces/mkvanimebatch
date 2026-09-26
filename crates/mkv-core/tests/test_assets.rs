@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use mkv_core::assets::{
     claim_leftover_chapters, prepare_release_directory, AssetResolver, ChapterIndex, CoverIndex,
-    FontsOrigin, ReleasePreparationOptions, SubIndex,
+    FontsOrigin, ReleasePreparationOptions, ResolvedAssets, SubIndex,
 };
 use mkv_core::domain::{ancestor_dirs, EpisodeInfo};
 use mkv_core::fonts::FontInfo;
@@ -16,6 +16,42 @@ use tempfile::tempdir;
 
 fn make_video(path: &Path) -> ParsedFile {
     create_parsed_file(path)
+}
+
+fn make_video_with_episode(path: &Path, parsed: EpisodeInfo) -> ParsedFile {
+    let mut video = make_video(path);
+    video.parsed = Some(parsed);
+    video
+}
+
+fn resolve_subtitle(index: SubIndex, video_path: PathBuf, parsed: EpisodeInfo) -> ResolvedAssets {
+    let name = video_path
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let stem = video_path
+        .file_stem()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let video = ParsedFile {
+        path: video_path,
+        name,
+        stem,
+        parsed: Some(parsed),
+    };
+    AssetResolver::new(
+        FontInfo::default(),
+        index,
+        ChapterIndex::new(),
+        CoverIndex::new(),
+        None,
+        None,
+        None,
+    )
+    .resolve_for(&video, None, None, None)
+    .unwrap()
 }
 
 #[test]
@@ -87,7 +123,6 @@ fn test_cover_index_single_digit_cover_filename() {
 
     let matched = cover_idx.lookup(&make_video(&tmp.path().join("Show 1.mkv")));
     assert_eq!(matched, Some(cover_path));
-    assert!(!cover_idx.has_global());
 }
 
 #[test]
@@ -170,7 +205,7 @@ fn test_resolve_cover_fallback_used_when_no_source_cover() {
 }
 
 #[test]
-fn test_sub_index_other_language_matching() {
+fn test_resolver_matches_other_language_subtitle() {
     let mut sub_index = SubIndex::new();
     let sub_file = ParsedFile {
         path: PathBuf::from("episode_01(ts).ass"),
@@ -178,91 +213,96 @@ fn test_sub_index_other_language_matching() {
         stem: "episode_01(ts)".to_string(),
         parsed: Some(EpisodeInfo::new("", "E", "01")),
     };
-
     sub_index.add(sub_file);
 
-    let result = sub_index.lookup(&EpisodeInfo::new("", "E", "01"), None);
-    assert!(result.is_some());
-    let (path, lang) = result.unwrap();
-    assert_eq!(path, PathBuf::from("episode_01(ts).ass"));
-    assert_eq!(lang, "ts");
-}
-
-#[test]
-fn test_sub_index_different_languages_not_duplicates() {
-    let mut sub_index = SubIndex::new();
-    let sub_eng = ParsedFile {
-        path: PathBuf::from("episode_01.eng.ass"),
-        name: "episode_01.eng.ass".to_string(),
-        stem: "episode_01.eng".to_string(),
-        parsed: Some(EpisodeInfo::new("", "E", "01")),
-    };
-    let sub_ind = ParsedFile {
-        path: PathBuf::from("episode_01.ind.ass"),
-        name: "episode_01.ind.ass".to_string(),
-        stem: "episode_01.ind".to_string(),
-        parsed: Some(EpisodeInfo::new("", "E", "01")),
-    };
-
-    sub_index.add(sub_eng);
-    sub_index.add(sub_ind);
-
-    let result = sub_index.lookup(&EpisodeInfo::new("", "E", "01"), None);
-    assert!(result.is_some());
-    let (path, lang) = result.unwrap();
-    assert_eq!(path, PathBuf::from("episode_01.ind.ass"));
-    assert_eq!(lang, "ind");
-}
-
-#[test]
-fn test_sub_index_different_formats_not_duplicates() {
-    let mut sub_index = SubIndex::new();
-    let sub_srt = ParsedFile {
-        path: PathBuf::from("episode_01.ind.srt"),
-        name: "episode_01.ind.srt".to_string(),
-        stem: "episode_01.ind".to_string(),
-        parsed: Some(EpisodeInfo::new("", "E", "01")),
-    };
-    let sub_ass = ParsedFile {
-        path: PathBuf::from("episode_01.ind.ass"),
-        name: "episode_01.ind.ass".to_string(),
-        stem: "episode_01.ind".to_string(),
-        parsed: Some(EpisodeInfo::new("", "E", "01")),
-    };
-
-    sub_index.add(sub_srt);
-    sub_index.add(sub_ass);
-
-    let result = sub_index.lookup(&EpisodeInfo::new("", "E", "01"), None);
-    assert!(result.is_some());
-    let (path, lang) = result.unwrap();
-    assert_eq!(path, PathBuf::from("episode_01.ind.ass"));
-    assert_eq!(lang, "ind");
-}
-
-#[test]
-fn test_sub_index_prefers_dialogue_candidate_same_lang() {
-    let mut sub_index = SubIndex::new();
-    let plain = ParsedFile {
-        path: PathBuf::from("episode_01.ass"),
-        name: "episode_01.ass".to_string(),
-        stem: "episode_01".to_string(),
-        parsed: Some(EpisodeInfo::new("", "E", "01")),
-    };
-    let dialogue = ParsedFile {
-        path: PathBuf::from("episode_01_dialogue.ass"),
-        name: "episode_01_dialogue.ass".to_string(),
-        stem: "episode_01_dialogue".to_string(),
-        parsed: Some(EpisodeInfo::new("", "E", "01")),
-    };
-
-    sub_index.add(plain);
-    sub_index.add(dialogue.clone());
-
-    assert_eq!(
-        sub_index.lookup(&EpisodeInfo::new("", "E", "01"), None),
-        Some((dialogue.path, "und".to_string()))
+    let result = resolve_subtitle(
+        sub_index,
+        PathBuf::from("episode_01.mkv"),
+        EpisodeInfo::new("", "E", "01"),
     );
+    assert_eq!(
+        result.subtitle_file,
+        Some(PathBuf::from("episode_01(ts).ass"))
+    );
+    assert_eq!(result.subtitle_lang, "ts");
+}
+
+#[test]
+fn test_resolver_keeps_different_subtitle_languages_distinct() {
+    let mut sub_index = SubIndex::new();
+    for (path, stem) in [
+        ("episode_01.eng.ass", "episode_01.eng"),
+        ("episode_01.ind.ass", "episode_01.ind"),
+    ] {
+        sub_index.add(ParsedFile {
+            path: PathBuf::from(path),
+            name: path.to_string(),
+            stem: stem.to_string(),
+            parsed: Some(EpisodeInfo::new("", "E", "01")),
+        });
+    }
+
+    let result = resolve_subtitle(
+        sub_index,
+        PathBuf::from("episode_01.mkv"),
+        EpisodeInfo::new("", "E", "01"),
+    );
+    assert_eq!(
+        result.subtitle_file,
+        Some(PathBuf::from("episode_01.ind.ass"))
+    );
+    assert_eq!(result.subtitle_lang, "ind");
+}
+
+#[test]
+fn test_resolver_prefers_ass_over_srt_for_same_subtitle() {
+    let mut sub_index = SubIndex::new();
+    for path in ["episode_01.ind.srt", "episode_01.ind.ass"] {
+        sub_index.add(ParsedFile {
+            path: PathBuf::from(path),
+            name: path.to_string(),
+            stem: "episode_01.ind".to_string(),
+            parsed: Some(EpisodeInfo::new("", "E", "01")),
+        });
+    }
+
+    let result = resolve_subtitle(
+        sub_index,
+        PathBuf::from("episode_01.mkv"),
+        EpisodeInfo::new("", "E", "01"),
+    );
+    assert_eq!(
+        result.subtitle_file,
+        Some(PathBuf::from("episode_01.ind.ass"))
+    );
+    assert_eq!(result.subtitle_lang, "ind");
+}
+
+#[test]
+fn test_resolver_prefers_dialogue_candidate_for_same_language() {
+    let mut sub_index = SubIndex::new();
+    for (path, stem) in [
+        ("episode_01.ass", "episode_01"),
+        ("episode_01_dialogue.ass", "episode_01_dialogue"),
+    ] {
+        sub_index.add(ParsedFile {
+            path: PathBuf::from(path),
+            name: path.to_string(),
+            stem: stem.to_string(),
+            parsed: Some(EpisodeInfo::new("", "E", "01")),
+        });
+    }
+
+    let result = resolve_subtitle(
+        sub_index,
+        PathBuf::from("episode_01.mkv"),
+        EpisodeInfo::new("", "E", "01"),
+    );
+    assert_eq!(
+        result.subtitle_file,
+        Some(PathBuf::from("episode_01_dialogue.ass"))
+    );
+    assert_eq!(result.subtitle_lang, "und");
 }
 
 #[test]
@@ -284,17 +324,18 @@ fn test_ancestor_asset_override_precedence() {
     let resolver =
         AssetResolver::discover(&search_dirs, &season_dir.join("fonts"), None, None, None);
 
-    let matched_sub = resolver
-        .sub_index
-        .lookup(&EpisodeInfo::new("1", "E", "01"), None);
-    assert!(matched_sub.is_some());
-    let (sub_path, lang) = matched_sub.unwrap();
-    assert_eq!(sub_path, season_dir.join("Show - 01.ind.ass"));
-    assert_eq!(lang, "ind");
+    let video = make_video_with_episode(
+        &season_dir.join("Show - 01.mkv"),
+        EpisodeInfo::new("1", "E", "01"),
+    );
+    let resolved = resolver.resolve_for(&video, None, None, None).unwrap();
+    assert_eq!(
+        resolved.subtitle_file,
+        Some(season_dir.join("Show - 01.ind.ass"))
+    );
+    assert_eq!(resolved.subtitle_lang, "ind");
 
-    let matched_cover = resolver
-        .cover_index
-        .lookup(&make_video(&season_dir.join("Show - 01.mkv")));
+    let matched_cover = resolver.cover_index.lookup(&video);
     assert_eq!(matched_cover, Some(season_dir.join("Show - 01_cover.jpg")));
 }
 
@@ -313,11 +354,10 @@ fn test_local_subtitle_next_to_mkv_wins_over_ancestor() {
     let resolver =
         AssetResolver::discover(&search_dirs, &season_dir.join("fonts"), None, None, None);
 
-    let matched = resolver
-        .sub_index
-        .lookup(&EpisodeInfo::new("1", "E", "01"), Some(&season_dir));
-    assert!(matched.is_some());
-    assert_eq!(matched.unwrap().0, local_sub);
+    let video_path = season_dir.join("[SuperLongFansubGroup] Anime Title - 01 [1080p FLAC BD].mkv");
+    let video = make_video_with_episode(&video_path, EpisodeInfo::new("1", "E", "01"));
+    let resolved = resolver.resolve_for(&video, None, None, None).unwrap();
+    assert_eq!(resolved.subtitle_file, Some(local_sub));
 }
 
 #[test]
@@ -342,8 +382,11 @@ fn test_assets_dir_multi_level_fallback_hierarchy() {
     );
 
     assert_eq!(resolver.fonts.count, 1);
-    assert!(resolver.fallback_cover_index.is_some());
-    assert!(resolver.fallback_cover_index.as_ref().unwrap().has_global());
+    let video = make_video(&season_dir.join("Show - 01.mkv"));
+    assert_eq!(
+        resolver.resolve_cov(&video, false),
+        Some(assets_override.join("cover.jpg"))
+    );
 }
 
 #[test]

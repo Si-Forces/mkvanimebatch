@@ -13,7 +13,6 @@ pub struct JobSlot {
     pub(crate) id: u64,
     pub(crate) cancel_token: CancellationToken,
     pub(crate) pipeline_abort: tokio::task::AbortHandle,
-    pub(crate) stopping: bool,
 }
 
 pub(crate) fn reserve_job_slot(
@@ -257,12 +256,7 @@ impl JobState {
                 return;
             }
             match event {
-                JobEvent::BatchStart {
-                    total,
-                    items,
-                    input_dir,
-                    ..
-                } => {
+                JobEvent::BatchStart { total, items, .. } => {
                     let start_time_ms = snap
                         .as_ref()
                         .filter(|snapshot| snapshot.job_id == job_id)
@@ -300,10 +294,7 @@ impl JobState {
                         duration_sec: None,
                         total_items: *total,
                         completed_items: 0,
-                        input_dir: snap.as_ref().and_then(|s| s.input_dir.clone()).or_else(|| {
-                            let clean = input_dir.strip_prefix(r"\\?\").unwrap_or(input_dir);
-                            Some(clean.to_string())
-                        }),
+                        input_dir: snap.as_ref().and_then(|s| s.input_dir.clone()),
                         ordered_item_ids,
                         items: snapshot_items,
                     });
@@ -373,6 +364,15 @@ impl JobState {
                             .or_else(|| extra.get("panic"))
                             .and_then(|value| value.as_str())
                             .unwrap_or("Batch failed");
+                        if !*cancelled
+                            && *success
+                            && snapshot
+                                .items
+                                .values()
+                                .any(|item| !item.status.is_terminal())
+                        {
+                            snapshot.status = BatchStatus::Error;
+                        }
                         for item in snapshot.items.values_mut() {
                             if item.status.is_terminal() {
                                 continue;
@@ -386,7 +386,6 @@ impl JobState {
                                 item.status = ItemStatus::Error;
                                 item.outcome = Some(ItemOutcome::Error);
                                 item.error = Some(if *success {
-                                    snapshot.status = BatchStatus::Error;
                                     "Protocol error: missing completion event".to_string()
                                 } else {
                                     error_message.to_string()
@@ -491,7 +490,6 @@ pub(crate) fn stop_job_internal_with_timeout(
         match &mut *lock {
             Some(slot) if expected_id.is_some_and(|id| id != slot.id) => return Ok(()),
             Some(slot) => {
-                slot.stopping = true;
                 slot.cancel_token.cancel();
                 Some(slot.id)
             }
@@ -570,7 +568,6 @@ pub fn begin_shutdown(job_state: &JobState, scan_state: &ScanState) -> bool {
     scan_state.accepting_starts.store(false, Ordering::SeqCst);
     if let Ok(mut lock) = job_state.slot.lock() {
         if let Some(slot) = lock.as_mut() {
-            slot.stopping = true;
             slot.cancel_token.cancel();
         }
     }
@@ -850,7 +847,9 @@ mod tests {
         use mkv_core::pipeline::{BatchItemInfo, JobEvent};
 
         let state = JobState::default();
-        state.begin_snapshot(10, "remux", None).unwrap();
+        state
+            .begin_snapshot(10, "remux", Some("/anime".into()))
+            .unwrap();
         let start_time_ms = state
             .snapshot
             .lock()
@@ -1038,28 +1037,18 @@ mod job_tests {
     use super::*;
     use std::sync::Arc;
 
-    pub(crate) fn dummy_slot(id: u64, stopping: bool) -> JobSlot {
+    pub(crate) fn dummy_slot(id: u64) -> JobSlot {
         JobSlot {
             id,
             cancel_token: CancellationToken::new(),
             pipeline_abort: tauri::async_runtime::spawn(async {}).inner().abort_handle(),
-            stopping,
         }
-    }
-
-    #[test]
-    fn test_job_slot_transitions() {
-        let mut slot = dummy_slot(42, false);
-        assert_eq!(slot.id, 42);
-        assert!(!slot.stopping);
-        slot.stopping = true;
-        assert!(slot.stopping);
     }
 
     #[test]
     fn test_clear_snapshot_ignored_while_job_is_active() {
         let state = JobState::default();
-        *state.slot.lock().unwrap() = Some(dummy_slot(42, false));
+        *state.slot.lock().unwrap() = Some(dummy_slot(42));
         state.begin_snapshot(42, "remux", None).unwrap();
         state.clear_snapshot();
         assert!(state.snapshot.lock().unwrap().is_some());
@@ -1068,7 +1057,7 @@ mod job_tests {
     #[test]
     fn test_wait_for_job_slot_release_waits_for_cleanup() {
         let state = Arc::new(JobState::default());
-        *state.slot.lock().unwrap() = Some(dummy_slot(42, true));
+        *state.slot.lock().unwrap() = Some(dummy_slot(42));
 
         let cleanup_state = Arc::clone(&state);
         let cleanup = thread::spawn(move || {
@@ -1085,7 +1074,7 @@ mod job_tests {
     #[test]
     fn test_wait_for_job_slot_release_times_out_while_owned() {
         let state = JobState::default();
-        *state.slot.lock().unwrap() = Some(dummy_slot(42, true));
+        *state.slot.lock().unwrap() = Some(dummy_slot(42));
 
         let result = state.wait_until_released(42, std::time::Duration::from_millis(10));
         assert!(result.unwrap_err().contains("Timed out"));
@@ -1097,7 +1086,7 @@ mod job_tests {
         let job_state = JobState::default();
         let scan_state = ScanState::default();
 
-        *job_state.slot.lock().unwrap() = Some(dummy_slot(7, false));
+        *job_state.slot.lock().unwrap() = Some(dummy_slot(7));
 
         *scan_state.active.lock().unwrap() = Some(ActiveScan {
             id: 1,
@@ -1138,17 +1127,16 @@ mod job_tests {
         .join();
 
         let job_state = JobState::default();
-        *job_state.slot.lock().unwrap() = Some(dummy_slot(7, false));
+        *job_state.slot.lock().unwrap() = Some(dummy_slot(7));
 
         let error = stop_job_inner(&job_state, &scan_state, Some(7)).unwrap_err();
         assert!(error.contains("poisoned"));
-        // The job stop still ran despite the scan failure: the slot is stopping.
         assert!(job_state
             .slot
             .lock()
             .unwrap()
             .as_ref()
-            .is_some_and(|slot| slot.stopping));
+            .is_some_and(|slot| slot.cancel_token.is_cancelled()));
 
         let _ = job_state.slot.lock().unwrap().take();
     }
@@ -1156,7 +1144,7 @@ mod job_tests {
     #[test]
     fn test_stop_job_internal_reports_unreleased_slot() {
         let state = JobState::default();
-        *state.slot.lock().unwrap() = Some(dummy_slot(42, true));
+        *state.slot.lock().unwrap() = Some(dummy_slot(42));
 
         let result =
             stop_job_internal_with_timeout(&state, None, std::time::Duration::from_millis(50));
@@ -1226,7 +1214,7 @@ mod cleanup_tests {
         let job_state = JobState::default();
         let scan_state = ScanState::default();
 
-        *job_state.slot.lock().unwrap() = Some(job_tests::dummy_slot(42, true));
+        *job_state.slot.lock().unwrap() = Some(job_tests::dummy_slot(42));
 
         let error = cleanup_owned_processes_with_timeout(
             &job_state,

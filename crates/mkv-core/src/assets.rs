@@ -9,8 +9,7 @@ use tracing::{info, warn};
 use crate::domain::{
     ancestor_dirs, detect_sub_lang, is_dialogue_track, lang_label, lang_mkv_tag, natural_sort_key,
     parse_episode, score_subtitle_category, seasons_match, select_best_subtitle_track, EpisodeInfo,
-    NaturalSortToken, COVER_EXTENSIONS, SUBTITLE_LANGS_FALLBACK_ORDER,
-    SUBTITLE_LANGS_PRIMARY_ORDER,
+    NaturalSortToken, COVER_EXTENSIONS,
 };
 use crate::fonts::{find_fonts_dir, scan_fonts, FontInfo};
 use crate::scan::{
@@ -239,14 +238,6 @@ impl SubIndex {
             .map(|(_, best)| (best.file.path.clone(), best.lang.clone()))
     }
 
-    pub fn lookup(
-        &self,
-        parsed: &EpisodeInfo,
-        local_dir: Option<&Path>,
-    ) -> Option<(PathBuf, String)> {
-        self.lookup_ranked(parsed, |dir| Some(usize::from(local_dir != Some(dir))))
-    }
-
     pub fn lookup_same_dir(&self, parsed: &EpisodeInfo, dir: &Path) -> Option<(PathBuf, String)> {
         self.lookup_ranked(parsed, |candidate| (candidate == dir).then_some(0))
     }
@@ -258,6 +249,7 @@ impl SubIndex {
                 .position(|ancestor| ancestor == candidate)
         })
     }
+
     pub fn lookup_fallback(&self, parsed: &EpisodeInfo) -> Option<(PathBuf, String)> {
         self.lookup_ranked(parsed, |candidate| {
             self.directories.iter().position(|dir| dir == candidate)
@@ -266,26 +258,6 @@ impl SubIndex {
 
     pub fn is_empty(&self) -> bool {
         self.index.is_empty() && self.unparsed.is_empty()
-    }
-
-    pub fn indexed_count(&self) -> usize {
-        self.index.values().map(|v| v.len()).sum()
-    }
-
-    pub fn primary_count(&self) -> usize {
-        self.index
-            .values()
-            .flat_map(|v| v.iter())
-            .filter(|e| SUBTITLE_LANGS_PRIMARY_ORDER.contains(&e.lang.as_str()))
-            .count()
-    }
-
-    pub fn fallback_count(&self) -> usize {
-        self.index
-            .values()
-            .flat_map(|v| v.iter())
-            .filter(|e| SUBTITLE_LANGS_FALLBACK_ORDER.contains(&e.lang.as_str()))
-            .count()
     }
 
     pub fn all_subtitles(&self) -> Vec<PathBuf> {
@@ -323,7 +295,6 @@ fn find_matching_season_path(
 pub struct ChapterIndex {
     index: HashMap<String, Vec<(PathBuf, String)>>,
     unmatched: Vec<PathBuf>,
-    rejected: usize,
 }
 
 impl ChapterIndex {
@@ -333,7 +304,6 @@ impl ChapterIndex {
 
     pub fn add(&mut self, xml_file: ParsedFile) {
         if !is_chapter_xml(&xml_file.path) {
-            self.rejected += 1;
             return;
         }
 
@@ -364,14 +334,6 @@ impl ChapterIndex {
         self.lookup(parsed).is_some()
     }
 
-    pub fn indexed_count(&self) -> usize {
-        self.index.values().map(|v| v.len()).sum()
-    }
-
-    pub fn rejected_count(&self) -> usize {
-        self.rejected
-    }
-
     pub fn unmatched(&self) -> &[PathBuf] {
         &self.unmatched
     }
@@ -396,10 +358,30 @@ struct CoverEntry {
     natural_name: Vec<NaturalSortToken>,
 }
 
+fn compare_ranked_covers(
+    a_rank: usize,
+    a: &CoverEntry,
+    b_rank: usize,
+    b: &CoverEntry,
+) -> std::cmp::Ordering {
+    a_rank
+        .cmp(&b_rank)
+        .then_with(|| a.kind.cmp(&b.kind))
+        .then_with(|| a.natural_name.cmp(&b.natural_name))
+        .then_with(|| a.file.path.cmp(&b.file.path))
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct CoverIndex {
     entries: Vec<CoverEntry>,
-    directories: Vec<PathBuf>,
+    paths: HashSet<PathBuf>,
+    directory_ranks: HashMap<PathBuf, usize>,
+    episode_entries:
+        HashMap<crate::domain::EpisodeType, HashMap<String, HashMap<PathBuf, Vec<usize>>>>,
+    adjacent_entries: HashMap<PathBuf, HashMap<String, Vec<usize>>>,
+    directory_entries: HashMap<PathBuf, Vec<usize>>,
+    // (first-seen fallback directory rank, entry index)
+    directory_winner: Option<(usize, usize)>,
 }
 
 impl CoverIndex {
@@ -413,9 +395,11 @@ impl CoverIndex {
             .extension()
             .map(|e| format!(".{}", e.to_string_lossy().to_lowercase()))
             .unwrap_or_default();
-        if !COVER_EXTENSIONS.contains(&ext.as_str()) {
+        if !COVER_EXTENSIONS.contains(&ext.as_str()) || !self.paths.insert(image_file.path.clone())
+        {
             return;
         }
+
         let stem = image_file.stem.to_lowercase();
         let (kind, episode) = if stem == "cover" {
             (CoverKind::Cover, None)
@@ -436,16 +420,40 @@ impl CoverIndex {
         } else {
             (CoverKind::Adjacent, None)
         };
-        if self
-            .entries
-            .iter()
-            .any(|entry| entry.file.path == image_file.path)
-        {
-            return;
-        }
+
+        let entry_index = self.entries.len();
+        let mut directory_rank = None;
         if let Some(dir) = image_file.path.parent() {
-            if !self.directories.iter().any(|existing| existing == dir) {
-                self.directories.push(dir.to_path_buf());
+            let dir = dir.to_path_buf();
+            let next_rank = self.directory_ranks.len();
+            directory_rank = Some(*self.directory_ranks.entry(dir.clone()).or_insert(next_rank));
+            match kind {
+                CoverKind::Underscore | CoverKind::Dot => {
+                    if let Some(episode) = &episode {
+                        self.episode_entries
+                            .entry(episode.ep_type)
+                            .or_default()
+                            .entry(episode.ep.clone())
+                            .or_default()
+                            .entry(dir.clone())
+                            .or_default()
+                            .push(entry_index);
+                    }
+                }
+                CoverKind::Adjacent => {
+                    self.adjacent_entries
+                        .entry(dir)
+                        .or_default()
+                        .entry(image_file.stem.clone())
+                        .or_default()
+                        .push(entry_index);
+                }
+                CoverKind::Cover | CoverKind::Folder => {
+                    self.directory_entries
+                        .entry(dir)
+                        .or_default()
+                        .push(entry_index);
+                }
             }
         }
         self.entries.push(CoverEntry {
@@ -454,77 +462,107 @@ impl CoverIndex {
             episode,
             kind,
         });
+        if matches!(kind, CoverKind::Cover | CoverKind::Folder) {
+            if let Some(rank) = directory_rank {
+                let candidate = &self.entries[entry_index];
+                let is_best = self.directory_winner.is_none_or(|(best_rank, best_index)| {
+                    compare_ranked_covers(rank, candidate, best_rank, &self.entries[best_index])
+                        == std::cmp::Ordering::Less
+                });
+                if is_best {
+                    self.directory_winner = Some((rank, entry_index));
+                }
+            }
+        }
     }
 
     fn lookup_ranked(
         &self,
         video: &ParsedFile,
-        rank: impl Fn(&Path) -> Option<usize>,
+        candidates: impl Iterator<Item = (usize, usize)>,
     ) -> Option<PathBuf> {
-        self.entries
-            .iter()
-            .filter_map(|entry| {
-                let applicable = match entry.kind {
-                    CoverKind::Underscore | CoverKind::Dot => {
-                        video.parsed.as_ref().is_some_and(|v| {
-                            entry.episode.as_ref().is_some_and(|c| {
-                                c.ep_type == v.ep_type
-                                    && c.ep == v.ep
-                                    && seasons_match(&v.season, &c.season)
-                            })
+        candidates
+            .filter_map(|(index, distance)| {
+                let entry = &self.entries[index];
+                if matches!(entry.kind, CoverKind::Underscore | CoverKind::Dot) {
+                    let applies = video.parsed.as_ref().is_some_and(|target| {
+                        entry.episode.as_ref().is_some_and(|candidate| {
+                            seasons_match(&target.season, &candidate.season)
                         })
+                    });
+                    if !applies {
+                        return None;
                     }
-                    // Adjacency is relative to the target video, including when this
-                    // index came from --assets-dir: a bare file in an unrelated
-                    // assets directory is not an episode cover.
-                    CoverKind::Adjacent => {
-                        entry.file.stem == video.stem
-                            && entry.file.path.parent() == video.path.parent()
-                    }
-                    CoverKind::Cover | CoverKind::Folder => true,
-                };
-                if !applicable {
-                    return None;
                 }
-                Some((rank(entry.file.path.parent()?)?, entry))
+                Some((distance, entry))
             })
-            .min_by(|(a_distance, a), (b_distance, b)| {
-                a_distance
-                    .cmp(b_distance)
-                    .then_with(|| a.kind.cmp(&b.kind))
-                    .then_with(|| a.natural_name.cmp(&b.natural_name))
-                    .then_with(|| a.file.path.cmp(&b.file.path))
-            })
+            .min_by(|(a_rank, a), (b_rank, b)| compare_ranked_covers(*a_rank, a, *b_rank, b))
             .map(|(_, entry)| entry.file.path.clone())
     }
 
     pub fn lookup(&self, video: &ParsedFile) -> Option<PathBuf> {
-        self.lookup_ranked(video, |candidate| {
-            video
-                .path
-                .parent()?
-                .ancestors()
-                .position(|dir| dir == candidate)
-        })
+        let parent = video.path.parent()?;
+        let parsed = video.parsed.as_ref();
+        let directory_candidates = parent
+            .ancestors()
+            .enumerate()
+            .flat_map(|(distance, dir)| {
+                let episodes = parsed.and_then(|parsed| {
+                    self.episode_entries
+                        .get(&parsed.ep_type)?
+                        .get(&parsed.ep)?
+                        .get(dir)
+                });
+                let covers = self.directory_entries.get(dir);
+                episodes
+                    .into_iter()
+                    .flat_map(move |indices| {
+                        indices.iter().copied().map(move |index| (index, distance))
+                    })
+                    .chain(covers.into_iter().flat_map(move |indices| {
+                        indices.iter().copied().map(move |index| (index, distance))
+                    }))
+            })
+            .chain(
+                self.adjacent_entries
+                    .get(parent)
+                    .and_then(|entries| entries.get(video.stem.as_str()))
+                    .into_iter()
+                    .flat_map(|indices| indices.iter().copied().map(|index| (index, 0))),
+            );
+        self.lookup_ranked(video, directory_candidates)
     }
 
     pub fn lookup_fallback(&self, video: &ParsedFile) -> Option<PathBuf> {
-        self.lookup_ranked(video, |candidate| {
-            self.directories.iter().position(|dir| dir == candidate)
-        })
-    }
-
-    pub fn indexed_count(&self) -> usize {
-        self.entries
-            .iter()
-            .filter(|entry| !matches!(entry.kind, CoverKind::Cover | CoverKind::Folder))
-            .count()
-    }
-
-    pub fn has_global(&self) -> bool {
-        self.entries
-            .iter()
-            .any(|entry| matches!(entry.kind, CoverKind::Cover | CoverKind::Folder))
+        let episode_candidates = video
+            .parsed
+            .as_ref()
+            .and_then(|parsed| {
+                self.episode_entries
+                    .get(&parsed.ep_type)
+                    .and_then(|entries| entries.get(&parsed.ep))
+            })
+            .into_iter()
+            .flat_map(|entries| entries.values())
+            .flat_map(|indices| indices.iter().copied());
+        let adjacent_candidates = video
+            .path
+            .parent()
+            .and_then(|dir| self.adjacent_entries.get(dir))
+            .and_then(|entries| entries.get(video.stem.as_str()))
+            .into_iter()
+            .flat_map(|indices| indices.iter().copied());
+        let candidates = episode_candidates
+            .chain(adjacent_candidates)
+            .filter_map(|index| {
+                let entry = &self.entries[index];
+                self.directory_ranks
+                    .get(entry.file.path.parent()?)
+                    .copied()
+                    .map(|rank| (index, rank))
+            })
+            .chain(self.directory_winner);
+        self.lookup_ranked(video, candidates)
     }
 }
 
@@ -661,23 +699,6 @@ impl AssetResolver {
         self.fonts.count == 0
     }
 
-    pub fn has_local_subtitle(&self, parsed: &EpisodeInfo, local_dir: Option<&Path>) -> bool {
-        self.sub_index.lookup(parsed, local_dir).is_some()
-    }
-
-    pub fn count_unmatched_chapter_videos(&self, videos: &[ParsedFile]) -> usize {
-        videos
-            .iter()
-            .filter(|v| {
-                if let Some(parsed) = &v.parsed {
-                    !self.chap_index.has_match(parsed)
-                } else {
-                    false
-                }
-            })
-            .count()
-    }
-
     pub fn discover(
         search_dirs: &[PathBuf],
         fonts_dir: &Path,
@@ -754,7 +775,7 @@ impl AssetResolver {
         inspected: Option<&InspectedVideo>,
         assigned_subtitle: Option<&Path>,
     ) -> SubResolution {
-        // 1. Explicit human assignment overrides automatic matching (ADR 0004).
+        // Explicit human assignment overrides automatic matching (ADR 0004).
         if let Some(assigned) = assigned_subtitle {
             return SubResolution::from_assigned(assigned);
         }
@@ -768,7 +789,7 @@ impl AssetResolver {
             return SubResolution::external(sub_path, lang);
         }
 
-        // 3. Embedded track from source video (ADR 0004)
+        // Embedded track from source video (ADR 0004).
         if let Some(insp) = inspected {
             if let Some((track_id, lang, _)) =
                 select_best_subtitle_track(&insp.subtitle_tracks(), None)
@@ -792,7 +813,7 @@ impl AssetResolver {
             }
         }
 
-        // 5. No subtitle match found
+        // No subtitle match found.
         let skip_reason = if self.has_subtitles() {
             "subtitle files found but none matched"
         } else {

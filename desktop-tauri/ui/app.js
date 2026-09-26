@@ -131,10 +131,6 @@ function applyPreset(presetKey) {
     const el = document.getElementById(id);
     if (el) el.value = val;
   };
-  const setChk = (id, val) => {
-    const el = document.getElementById(id);
-    if (el) el.checked = val;
-  };
 
   if (p.bitrate !== undefined) setVal("remux-bitrate", p.bitrate);
   if (p.complexity !== undefined) {

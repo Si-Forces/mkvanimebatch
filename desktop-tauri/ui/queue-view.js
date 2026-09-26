@@ -183,6 +183,12 @@ export class QueueTracker {
     return token === this.scanToken;
   }
 
+  setDirectory(path) {
+    const directory = normalizeDirectoryPath(path);
+    this.currentDirectory = directory;
+    this.lastScannedPath = directory;
+  }
+
   reuseInspection(path) {
     if (!this.lastManifest || !isSameDirectory(this.lastScannedPath, path)) return false;
     this.scanToken++;
@@ -200,8 +206,8 @@ export class QueueTracker {
     }
     const isSameDir = isSameDirectory(this.currentDirectory, path);
     this.populateFromInspection(manifest, isSameDir);
-    this.currentDirectory = normalizeDirectoryPath(path);
-    this.lastScannedPath = normalizeDirectoryPath(path);
+    this.setDirectory(path);
+
     return true;
   }
 
@@ -244,7 +250,6 @@ export class QueueTracker {
     this.cancelRender();
     this.lastManifest = manifest;
     this.cards.clear();
-    if (this.listEl) this.listEl.innerHTML = "";
     const bitrate = this.getBitrate();
     const nextState = createQueueState(manifest, { mode: this.mode });
     this.state = preserveSelection ? reconcileQueueSelection(nextState, this.state) : nextState;
@@ -255,15 +260,16 @@ export class QueueTracker {
     this.subtitleCandidates = manifest?.subtitle_candidates ?? {};
 
     if (!manifest || !manifest.items || manifest.items.length === 0) {
-      const { currentDirectory, lastScannedPath } = this;
+      const directory = this.currentDirectory || this.lastScannedPath;
+
       const { vanishedSelectedIds, knownOrder } = this.state;
       this.reset(
         "No MKV files found",
         "This release directory does not contain any MKV episodes. Choose another input directory to continue."
       );
       if (preserveSelection) {
-        this.currentDirectory = currentDirectory;
-        this.lastScannedPath = lastScannedPath;
+        if (directory) this.setDirectory(directory);
+
         this.state.vanishedSelectedIds = vanishedSelectedIds;
         this.state.knownOrder = knownOrder;
       }
@@ -490,8 +496,8 @@ export class QueueTracker {
 
     this.state = createQueueStateFromSnapshot(snapshot, { mode: this.mode });
     if (this.state?.inputDir) {
-      this.currentDirectory = normalizeDirectoryPath(this.state.inputDir);
-      this.lastScannedPath = normalizeDirectoryPath(this.state.inputDir);
+      this.setDirectory(this.state.inputDir);
+
     }
     if (this.countEl) {
       this.renderQueueCount();
@@ -509,11 +515,9 @@ export class QueueTracker {
 
     if (event.type === "batch_start") {
       if (event.input_dir) {
-        this.currentDirectory = normalizeDirectoryPath(event.input_dir);
-        this.lastScannedPath = normalizeDirectoryPath(event.input_dir);
+        this.setDirectory(event.input_dir);
       }
       if (this.cards.size === 0 && this.pendingRenderToken === null && this.state.order.length > 0) {
-        if (this.listEl) this.listEl.innerHTML = "";
         const bitrate = this.getBitrate();
         this.renderCardsIncrementally(this.scanToken, bitrate);
       }

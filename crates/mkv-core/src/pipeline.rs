@@ -195,17 +195,38 @@ fn apply_selected_items(
     selected_items: Option<&[String]>,
 ) -> Result<Vec<ParsedFile>, String> {
     let Some(selected) = selected_items else {
+        let mut ids = HashMap::with_capacity(files.len());
+        for file in &files {
+            let id = clean_relative_path(&get_item_id(&file.path, input_dir));
+            match ids.entry(id) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(());
+                }
+                std::collections::hash_map::Entry::Occupied(entry) => {
+                    return Err(format!(
+                        "Discovered MKV files share canonical ID '{}'",
+                        entry.key()
+                    ));
+                }
+            }
+        }
         return Ok(files);
     };
-    let mut file_map: HashMap<String, ParsedFile> = files
-        .into_iter()
-        .map(|file| {
-            (
-                clean_relative_path(&get_item_id(&file.path, input_dir)),
-                file,
-            )
-        })
-        .collect();
+    let mut file_map = HashMap::with_capacity(files.len());
+    for file in files {
+        let id = clean_relative_path(&get_item_id(&file.path, input_dir));
+        match file_map.entry(id) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(file);
+            }
+            std::collections::hash_map::Entry::Occupied(entry) => {
+                return Err(format!(
+                    "Discovered MKV files share canonical ID '{}'",
+                    entry.key()
+                ));
+            }
+        }
+    }
     let mut ordered = Vec::with_capacity(selected.len());
     let mut seen = HashSet::new();
     let mut unmatched = Vec::new();
@@ -276,10 +297,11 @@ fn validate_assignment_targets(
             .or_default() += 1;
     }
 
-    let mut unmatched: Vec<String> = Vec::new();
+    let mut unmatched_seen = HashSet::with_capacity(assignments.len());
+    let mut unmatched = Vec::new();
     for assignment in assignments {
         let target = canonical_assignment_target_id(&assignment.target_video);
-        if discovered.get(target.as_str()) != Some(&1) && !unmatched.contains(&target) {
+        if discovered.get(target.as_str()) != Some(&1) && unmatched_seen.insert(target.clone()) {
             unmatched.push(target);
         }
     }
@@ -298,6 +320,39 @@ fn validate_assignment_targets(
     ))
 }
 
+fn settle_cancelled_planning_items(
+    files: &[ParsedFile],
+    input_dir: &Path,
+    outcomes: Vec<JobEvent>,
+) -> Vec<JobEvent> {
+    let mut outcomes_by_id = HashMap::with_capacity(outcomes.len());
+    for outcome in outcomes {
+        let id = match &outcome {
+            JobEvent::ItemComplete { id, .. } => id.clone(),
+            _ => unreachable!("planning outcomes are item completions"),
+        };
+        outcomes_by_id.insert(id, outcome);
+    }
+
+    files
+        .iter()
+        .map(|file| {
+            let id = get_item_id(&file.path, input_dir);
+            outcomes_by_id
+                .remove(&id)
+                .unwrap_or_else(|| JobEvent::ItemComplete {
+                    version: EVENT_VERSION,
+                    id,
+                    file: file.name.clone(),
+                    status: ItemOutcome::Cancelled,
+                    reason: Some("Operation cancelled".into()),
+                    error: None,
+                    duration_sec: None,
+                    extra: Default::default(),
+                })
+        })
+        .collect()
+}
 pub struct BatchPipeline {
     pub config: PipelineConfig,
     pub event_sender: Option<EventSender>,
@@ -740,6 +795,68 @@ impl BatchPipeline {
         Ok(summary)
     }
 
+    async fn settle_planning_failure(
+        &self,
+        files: &[ParsedFile],
+        failed_idx: usize,
+        err: String,
+    ) -> PipelineSummary {
+        let msg = format!(
+            "  ERROR: Remux planning failed for '{}': {err}",
+            files[failed_idx].name
+        );
+        self.log(&msg).await;
+
+        let cancelled = self.cancel_token.is_cancelled();
+        let aborted = if cancelled {
+            None
+        } else {
+            Some(format!(
+                "Batch planning aborted because '{}': {err}",
+                files[failed_idx].name
+            ))
+        };
+
+        let summary = PipelineSummary {
+            total: files.len(),
+            errors: if cancelled { 0 } else { files.len() },
+            cancelled,
+            log: vec![msg],
+            ..Default::default()
+        };
+        for (idx, file) in files.iter().enumerate() {
+            self.emit(JobEvent::ItemComplete {
+                version: EVENT_VERSION,
+                id: get_item_id(&file.path, &self.config.input_dir),
+                file: file.name.clone(),
+                status: if cancelled {
+                    ItemOutcome::Cancelled
+                } else {
+                    ItemOutcome::Error
+                },
+                reason: cancelled.then(|| "Operation cancelled".into()),
+                error: if cancelled {
+                    None
+                } else if idx == failed_idx {
+                    Some(err.clone())
+                } else {
+                    aborted.clone()
+                },
+                duration_sec: None,
+                extra: Default::default(),
+            })
+            .await;
+        }
+        self.emit(JobEvent::BatchComplete {
+            version: EVENT_VERSION,
+            success: false,
+            cancelled,
+            extra: Default::default(),
+        })
+        .await;
+        summary
+    }
+
     async fn run_remux(&self) -> Result<PipelineSummary, String> {
         let mut summary = PipelineSummary::default();
         let files = scan_mkv_files(&self.config.input_dir, true, None);
@@ -964,19 +1081,6 @@ impl BatchPipeline {
         for (v_idx, video_file) in files.iter().enumerate() {
             if self.cancel_token.is_cancelled() {
                 summary.cancelled = true;
-                for rem in &files[v_idx..] {
-                    let rem_id = get_item_id(&rem.path, &self.config.input_dir);
-                    planning_outcomes.push(JobEvent::ItemComplete {
-                        version: EVENT_VERSION,
-                        id: rem_id,
-                        file: rem.name.clone(),
-                        status: ItemOutcome::Cancelled,
-                        reason: Some("Operation cancelled".into()),
-                        error: None,
-                        duration_sec: None,
-                        extra: Default::default(),
-                    });
-                }
                 break;
             }
 
@@ -1162,46 +1266,12 @@ impl BatchPipeline {
         }
 
         if let Some((failed_idx, err)) = planning_error {
-            let aborted = format!(
-                "Batch planning aborted because '{}': {err}",
-                files[failed_idx].name
-            );
-            let msg = format!(
-                "  ERROR: Remux planning failed for '{}': {err}",
-                files[failed_idx].name
-            );
-            self.log(&msg).await;
-            summary = PipelineSummary {
-                total: files.len(),
-                errors: files.len(),
-                log: vec![msg],
-                ..Default::default()
-            };
-            for (idx, file) in files.iter().enumerate() {
-                self.emit(JobEvent::ItemComplete {
-                    version: EVENT_VERSION,
-                    id: get_item_id(&file.path, &self.config.input_dir),
-                    file: file.name.clone(),
-                    status: ItemOutcome::Error,
-                    reason: None,
-                    error: Some(if idx == failed_idx {
-                        err.clone()
-                    } else {
-                        aborted.clone()
-                    }),
-                    duration_sec: None,
-                    extra: Default::default(),
-                })
-                .await;
-            }
-            self.emit(JobEvent::BatchComplete {
-                version: EVENT_VERSION,
-                success: false,
-                cancelled: false,
-                extra: Default::default(),
-            })
-            .await;
-            return Ok(summary);
+            return Ok(self.settle_planning_failure(&files, failed_idx, err).await);
+        }
+
+        if summary.cancelled {
+            planning_outcomes =
+                settle_cancelled_planning_items(&files, &self.config.input_dir, planning_outcomes);
         }
 
         self.log_batch(&summary.log).await;
@@ -1449,5 +1519,157 @@ mod tests {
         // 3. Default joins mkv_dir / "fonts"
         let res3 = fonts_dir_for(mkv_dir, input_dir, None, None);
         assert_eq!(res3, PathBuf::from("/anime/Season 1/fonts"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn planning_failure_after_stop_settles_every_item_as_cancelled() {
+        let cancel_token = CancellationToken::new();
+        let cancel_for_test = cancel_token.clone();
+        let (event_sender, mut event_receiver) = create_event_channel(8);
+        let (log_sender, mut log_receiver) = create_log_channel(1);
+        log_sender.try_send("barrier".into()).unwrap();
+        let pipeline = BatchPipeline::new(
+            PipelineConfig {
+                input_dir: PathBuf::from("/anime"),
+                ..Default::default()
+            },
+            Some(event_sender),
+            cancel_token,
+        )
+        .with_log_sender(Some(log_sender));
+        let files = [
+            ParsedFile {
+                path: PathBuf::from("/anime/one.mkv"),
+                name: "one.mkv".into(),
+                stem: "one".into(),
+                parsed: None,
+            },
+            ParsedFile {
+                path: PathBuf::from("/anime/two.mkv"),
+                name: "two.mkv".into(),
+                stem: "two".into(),
+                parsed: None,
+            },
+        ];
+        let (started_sender, started_receiver) = tokio::sync::oneshot::channel();
+        let settlement = tokio::spawn(async move {
+            let _ = started_sender.send(());
+            pipeline
+                .settle_planning_failure(&files, 0, "assignment disappeared".into())
+                .await
+        });
+
+        started_receiver.await.unwrap();
+        assert_eq!(log_receiver.recv().await.as_deref(), Some("barrier"));
+        cancel_for_test.cancel();
+        assert!(log_receiver
+            .recv()
+            .await
+            .unwrap()
+            .contains("assignment disappeared"));
+
+        let summary = settlement.await.unwrap();
+        let mut events = Vec::new();
+        while let Ok(event) = event_receiver.try_recv() {
+            events.push(event);
+        }
+
+        assert!(summary.cancelled);
+        assert_eq!(summary.errors, 0);
+        assert_eq!(summary.total, 2);
+        assert!(summary.log[0].contains("assignment disappeared"));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, JobEvent::ItemComplete { .. }))
+                .count(),
+            2
+        );
+        assert!(events
+            .iter()
+            .filter(|event| matches!(event, JobEvent::ItemComplete { .. }))
+            .all(|event| matches!(
+                event,
+                JobEvent::ItemComplete {
+                    status: ItemOutcome::Cancelled,
+                    reason: Some(reason),
+                    error: None,
+                    ..
+                } if reason == "Operation cancelled"
+            )));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, JobEvent::BatchComplete { .. }))
+                .count(),
+            1
+        );
+        assert!(matches!(
+            events.last(),
+            Some(JobEvent::BatchComplete {
+                success: false,
+                cancelled: true,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn cancellation_settles_unplanned_items_and_preserves_prior_outcomes() {
+        let files = [
+            ParsedFile {
+                path: PathBuf::from("/anime/one.mkv"),
+                name: "one.mkv".into(),
+                stem: "one".into(),
+                parsed: None,
+            },
+            ParsedFile {
+                path: PathBuf::from("/anime/two.mkv"),
+                name: "two.mkv".into(),
+                stem: "two".into(),
+                parsed: None,
+            },
+            ParsedFile {
+                path: PathBuf::from("/anime/three.mkv"),
+                name: "three.mkv".into(),
+                stem: "three".into(),
+                parsed: None,
+            },
+        ];
+        let resolved = JobEvent::ItemComplete {
+            version: EVENT_VERSION,
+            id: "two.mkv".into(),
+            file: "two.mkv".into(),
+            status: ItemOutcome::Skipped,
+            reason: Some("No subtitle match".into()),
+            error: None,
+            duration_sec: None,
+            extra: Default::default(),
+        };
+
+        let events = settle_cancelled_planning_items(&files, Path::new("/anime"), vec![resolved]);
+        let ids: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                JobEvent::ItemComplete { id, .. } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
+        let statuses: Vec<ItemOutcome> = events
+            .iter()
+            .filter_map(|event| match event {
+                JobEvent::ItemComplete { status, .. } => Some(status.to_owned()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids, ["one.mkv", "two.mkv", "three.mkv"]);
+        assert_eq!(
+            statuses,
+            [
+                ItemOutcome::Cancelled,
+                ItemOutcome::Skipped,
+                ItemOutcome::Cancelled
+            ]
+        );
     }
 }

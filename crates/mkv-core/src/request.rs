@@ -81,11 +81,7 @@ impl TrackAssignment {
     pub fn is_relative_asset(&self) -> bool {
         let s = self.asset_path.to_string_lossy().replace('\\', "/");
         let path = Path::new(&s);
-        !is_drive_prefix(&s)
-            && !s.starts_with('/')
-            && !s.starts_with("//")
-            && path.is_relative()
-            && !path.has_root()
+        !is_drive_prefix(&s) && !path.has_root()
     }
 }
 
@@ -285,12 +281,14 @@ impl BatchRequest {
                 }
 
                 let is_rel_asset = assignment.is_relative_asset();
-                let asset_str = assignment.asset_path.to_string_lossy().replace('\\', "/");
+                let raw_asset = assignment.asset_path.to_string_lossy();
+                let asset_str = raw_asset.replace('\\', "/");
                 let asset_norm_path = Path::new(&asset_str);
-                if is_rel_asset
-                    && (asset_str.starts_with('/')
-                        || asset_norm_path.has_root()
-                        || asset_norm_path
+                let root_relative_backslash =
+                    raw_asset.starts_with('\\') && !raw_asset.starts_with("\\\\");
+                if root_relative_backslash
+                    || (is_rel_asset
+                        && asset_norm_path
                             .components()
                             .any(|c| matches!(c, std::path::Component::ParentDir)))
                 {
@@ -797,7 +795,10 @@ mod tests {
             title: None,
             offset_ms: None,
         }]);
-        assert!(req.validate().is_err());
+        assert_eq!(
+            req.validate().unwrap_err(),
+            r"Invalid relative asset path: '\nonexistent\outside.ass'"
+        );
     }
 
     #[test]

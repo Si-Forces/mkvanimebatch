@@ -97,20 +97,39 @@ export function formatElapsedDuration(seconds) {
 }
 /**
  * Normalizes a directory path string for canonical identity comparison.
- * Trims whitespace, standardizes separators to '/', resolves '.' and '..' segments,
- * normalizes Windows drive letters, collapses redundant slashes, and strips trailing slashes (except root).
- * On Windows systems or paths with drive letters, normalizes casing.
+ * Trims surrounding whitespace, resolves dot segments and redundant separators,
+ * and strips trailing slashes (except root). Windows paths also normalize case
+ * and trailing dots/spaces; verbatim `\\?\` paths keep them significant.
  *
  * @param {string|null|undefined} path
  * @returns {string}
  */
 export function normalizeDirectoryPath(path) {
   if (typeof path !== "string") return "";
-  let clean = path.trim().replace(/\\/g, "/");
+  const leadingTrimmed = path.trimStart();
+  const hadExtendedPrefix =
+    leadingTrimmed.startsWith("\\\\?\\") ||
+    leadingTrimmed.startsWith("\\\\.\\") ||
+    leadingTrimmed.startsWith("//?/") ||
+    leadingTrimmed.startsWith("//./");
+  let clean = hadExtendedPrefix ? leadingTrimmed : path.trim();
+  if (!clean) return "";
+
+  // A backslash is a legal POSIX filename byte, so translating it unconditionally
+  // collapses distinct directories. Reuse the OS class from os-detect.js; only
+  // normalize separators on Windows or Windows-shaped paths.
+  const windowsHost =
+    (typeof document !== "undefined" &&
+      document.documentElement?.classList?.contains("is-windows")) ||
+    (typeof process !== "undefined" && process.platform === "win32");
+  const windowsPath =
+    /^\\\\/.test(clean) || /^[a-zA-Z]:/.test(clean) || /^\/\/[?.][\\/]/.test(clean);
+  if (windowsHost || windowsPath) {
+    clean = clean.replace(/\\/g, "/");
+  }
   if (!clean) return "";
 
   // Strip Windows extended-length prefix (\\?\ or //?/) if present
-  const hadExtendedPrefix = /^\/\/[?.]\//.test(clean);
   clean = clean.replace(/^(\/\/|\?\/?)[?.]\//, "");
   if (hadExtendedPrefix) clean = clean.replace(/^UNC\//i, "//");
 
@@ -124,10 +143,15 @@ export function normalizeDirectoryPath(path) {
 
   const isUnc = !hasDrive && /^\/\/[^/]/.test(clean);
   const isAbsolute = clean.startsWith("/");
-  const segments = clean.split("/").filter(s => s.length > 0 && s !== ".");
+  const trimWindowsSegments = (windowsHost || windowsPath || isUnc || hasDrive) && !hadExtendedPrefix;
+  const segments = clean.split("/").filter(s => s.length > 0);
   const resolved = [];
 
-  for (const seg of segments) {
+  for (const rawSegment of segments) {
+    const seg = trimWindowsSegments && rawSegment !== ".."
+      ? rawSegment.replace(/[ .]+$/g, "")
+      : rawSegment;
+    if (!seg || seg === ".") continue;
     if (seg === "..") {
       if (resolved.length > 0 && resolved[resolved.length - 1] !== "..") {
         resolved.pop();
@@ -144,13 +168,7 @@ export function normalizeDirectoryPath(path) {
   if (hasDrive && !resolved.length) result = drivePrefix + "/";
 
   // Case normalization for Windows: on Windows, filesystems are case-insensitive
-  if (
-    isUnc ||
-    hasDrive ||
-    (typeof navigator !== "undefined" &&
-      (navigator.platform?.includes("Win") || navigator.userAgent?.includes("Win"))) ||
-    (typeof process !== "undefined" && process.platform === "win32")
-  ) {
+  if (windowsHost || isUnc || hasDrive) {
     result = result.toLowerCase();
   }
 
@@ -182,7 +200,7 @@ export function createQueueState(manifest, options = {}) {
   const state = {
     version: 1,
     mode,
-    inputDir: options.inputDir ? normalizeDirectoryPath(options.inputDir) : null,
+    inputDir: null,
     items: new Map(),
     order: [],
     knownOrder: [],
