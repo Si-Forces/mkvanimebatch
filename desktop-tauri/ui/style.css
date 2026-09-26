@@ -1530,10 +1530,6 @@ input[type="range"]::-moz-range-thumb:hover {
   min-width: 0;
 }
 
-.cli-flag-card.cli-flag-card-full {
-  grid-column: 1 / -1;
-}
-
 .cli-flag-card .flag-title {
   white-space: nowrap;
   overflow: hidden;

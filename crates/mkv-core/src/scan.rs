@@ -160,15 +160,15 @@ fn path_stem_lower(path: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// Returns true if the file stem is "cover" (case-insensitive) and the extension
-/// is in `COVER_EXTENSIONS`.
+/// Returns true if the file stem is "cover" or "folder" (case-insensitive) and the
+/// extension is in `COVER_EXTENSIONS`.
 pub fn is_cover_filename(file_name: &str) -> bool {
     let p = Path::new(file_name);
     let ext = path_ext_lower(p);
     if !COVER_EXTENSIONS.contains(&ext.as_str()) {
         return false;
     }
-    path_stem_lower(p) == "cover"
+    matches!(path_stem_lower(p).as_str(), "cover" | "folder")
 }
 
 /// Returns true if the attachment filename or content-type indicates a cover image.
@@ -391,7 +391,7 @@ pub struct ScanResults {
 }
 
 /// Scans directory entries, grouping files into videos (.mkv), subs (.ass, .srt),
-/// chapters (.xml verified via `is_chapter_xml`), and covers (cover stem or ending in `_cover`).
+/// chapters (.xml verified via `is_chapter_xml`), and applicable cover images.
 pub fn scan_assets(
     dir: &Path,
     mut cache: Option<&mut HashMap<PathBuf, ScanResults>>,
@@ -407,6 +407,7 @@ pub fn scan_assets(
     let mut subs = Vec::new();
     let mut chapters = Vec::new();
     let mut covers = Vec::new();
+    let mut cover_candidates = Vec::new();
 
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
@@ -426,11 +427,24 @@ pub fn scan_assets(
             } else if ext == ".xml" && is_chapter_xml(&path) {
                 chapters.push(create_parsed_file(&path));
             } else if COVER_EXTENSIONS.contains(&ext.as_str()) {
-                let stem = path_stem_lower(&path);
-                if stem == "cover" || stem.ends_with("_cover") {
-                    covers.push(create_parsed_file(&path));
-                }
+                cover_candidates.push(path);
             }
+        }
+    }
+    let video_stems: HashSet<&str> = videos.iter().map(|v| v.stem.as_str()).collect();
+    for path in cover_candidates {
+        let Some(stem) = path.file_stem().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let lower = stem.to_lowercase();
+        if video_stems.contains(stem)
+            || matches!(lower.as_str(), "cover" | "folder")
+            || lower
+                .strip_suffix("_cover")
+                .or_else(|| lower.strip_suffix(".cover"))
+                .is_some_and(|episode| parse_episode(episode).is_some())
+        {
+            covers.push(create_parsed_file(path));
         }
     }
 

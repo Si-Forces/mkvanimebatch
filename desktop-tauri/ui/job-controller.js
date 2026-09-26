@@ -1,5 +1,23 @@
-import { buildTrackAssignmentsForManifest } from "./queue-state.js";
+import { buildTrackAssignmentsForManifest, isSameDirectory } from "./queue-state.js";
 
+
+/**
+ * The four queue bulk-selection buttons, each with the selection it applies.
+ *
+ * Every controller touches all of them because ownership of *any* mode freezes
+ * selection in *both* queues, and `app.js` wires the click handlers from this
+ * same list — so a button cannot end up disabled with no handler behind it, nor
+ * enabled with a handler that silently refuses.
+ */
+export const BULK_SELECTION_CONTROLS = [
+  { id: "remux-select-all", mode: "remux", select: true },
+  { id: "remux-deselect-all", mode: "remux", select: false },
+  { id: "extract-select-all", mode: "extract", select: true },
+  { id: "extract-deselect-all", mode: "extract", select: false },
+];
+
+// Derived, not restated: the mode set is exactly the modes named above.
+const QUEUE_MODES = [...new Set(BULK_SELECTION_CONTROLS.map(control => control.mode))];
 
 export function extractInspectionOptions(argsOrRequest) {
   const req = argsOrRequest || {};
@@ -74,6 +92,38 @@ export class JobController {
     }
   }
 
+  restoreActiveSnapshot(snapshot, unlistenEvent, unlistenDone) {
+    this.unlistenEvent = unlistenEvent;
+    this.unlistenDone = unlistenDone;
+    this.jobId = snapshot.job_id;
+    this.launched = true;
+    this.lastExitCode = null;
+    this.runtime.coordinator.activeMode = this.mode;
+    this.runtime.coordinator.isStarting = false;
+    this.runtime.coordinator.isStopping = false;
+    this.setRunning(true);
+    this.runtime.updateWorkerChips(true);
+    this.runtime.telemetryLoop.setJobActive(true);
+  }
+
+  restoreTerminalSnapshot(snapshot) {
+    this.lifecycle = snapshot.status === "completed" ? "done" : snapshot.status === "cancelled" ? "cancelled" : "failed";
+    this.renderStatus();
+  }
+
+  handleSnapshotSignal(type, payload, replay = false) {
+    if (!this.running || payload?.job_id !== this.jobId || (payload.mode && payload.mode !== this.mode)) return;
+    if (type === "done") {
+      this.onDone(payload.code);
+    } else if (type === "event") {
+      const queue = this.runtime.queueFor(this.mode);
+      // A pre-fetch progress event may already be reflected in the snapshot.
+      if (replay && payload.type === "item_progress" && typeof payload.progress === "number" &&
+          payload.progress < (queue.state?.items?.get(payload.id)?.progress ?? -Infinity)) return;
+      queue.handleEvent(payload);
+    }
+  }
+
   cleanupListeners() {
     for (const key of ["unlistenLog", "unlistenEvent", "unlistenDone"]) {
       if (this[key]) {
@@ -122,7 +172,6 @@ export class JobController {
     let bitrate = null;
     let complexity = null;
     let ffmpegThreads = null;
-    let keepFonts = null;
 
     if (this.mode === "remux") {
       assetsDir = val("assets-dir") || null;
@@ -131,7 +180,6 @@ export class JobController {
       complexity = cplx ? parseInt(cplx, 10) : null;
       const ffmpegVal = val("ffmpeg-threads");
       ffmpegThreads = ffmpegVal ? parseInt(ffmpegVal, 10) : null;
-      keepFonts = chk("keep-fonts");
     }
 
     const activePresetEl = typeof document?.querySelector === "function"
@@ -160,7 +208,6 @@ export class JobController {
       io_jobs: ioJobs,
       ffmpeg_threads: ffmpegThreads,
       sub_offset: subOffset,
-      keep_fonts: keepFonts,
       dry_run: dryRun,
       no_cache: noCache,
       assignments: null,
@@ -193,7 +240,11 @@ export class JobController {
       return;
     }
     const generation = ++this.startGeneration;
-    const assignmentSnapshot = new Map(this.runtime.queueFor(this.mode).assignments);
+    const tracker = this.runtime.queueFor(this.mode);
+    const capturedDir = tracker.currentDirectory || tracker.lastScannedPath;
+    const selectedIds = capturedDir ? tracker.getSelectedOrderedItemIds() : null;
+    const vanishedBeforeScan = capturedDir ? [...(tracker.state?.vanishedSelectedIds ?? [])] : [];
+    const assignmentSnapshot = capturedDir ? new Map(tracker.assignments) : null;
     if (!this.runtime.coordinator.begin(this.mode)) return;
     this.runtime.closeSubAssignModal();
 
@@ -207,7 +258,8 @@ export class JobController {
     this.runtime.telemetryLoop.setJobActive(true);
 
     const inspected = await this.runtime.scanInputDirectory(inputDir, this.mode, { force: true, options });
-    if (generation !== this.startGeneration || !this.runtime.coordinator.isStarting) {
+    if (generation !== this.startGeneration) return;
+    if (!this.runtime.coordinator.isStarting) {
       this.runtime.appendLog(this.logEl, "[INFO] Start aborted by stop request.");
       this.abortStart(true);
       return;
@@ -217,43 +269,52 @@ export class JobController {
       this.abortStart();
       return;
     }
+    const isSameDir = Boolean(capturedDir) && isSameDirectory(capturedDir, tracker.currentDirectory || tracker.lastScannedPath);
 
-    const tracker = this.runtime.queueFor(this.mode);
-    let selectedIds = null;
-    if (typeof tracker?.getSelectedOrderedItemIds === "function") {
-      const totalItems = tracker.state?.totalCount ?? 0;
-      selectedIds = tracker.getSelectedOrderedItemIds();
-      if (totalItems > 0 && selectedIds.length === 0) {
-        this.runtime.appendLog(this.logEl, "[ERROR] No episodes selected in queue.");
+    const effectiveSelectedIds = isSameDir ? selectedIds : tracker.getSelectedOrderedItemIds();
+    if (!effectiveSelectedIds || effectiveSelectedIds.length === 0) {
+      this.runtime.appendLog(this.logEl, "[ERROR] No episodes selected in queue.");
+      this.abortStart();
+      return;
+    }
+    const discoveredIds = new Set(tracker.lastManifest?.items?.map(item => item.id) ?? []);
+    if (isSameDir) {
+      const reappearedIds = vanishedBeforeScan.filter(id => discoveredIds.has(id));
+      const missingIds = [...new Set([
+        ...effectiveSelectedIds.filter(id => !discoveredIds.has(id)),
+        ...(tracker.state?.vanishedSelectedIds ?? []),
+        ...vanishedBeforeScan,
+      ])];
+      if (missingIds.length) {
+        const message = reappearedIds.length
+          ? `Queue selection changed during inspection; previously missing selected episodes reappeared: ${reappearedIds.join(", ")}. Review the queue and press Run again; job was not started.`
+          : `Selected episodes disappeared from the input directory: ${missingIds.join(", ")}. Change the queue selection to continue; job was not started.`;
+        this.runtime.appendLog(this.logEl, `[ERROR] ${message}`);
         this.abortStart();
         return;
       }
-      if (selectedIds.length > 0) {
-        batchRequest.selected_items = selectedIds;
-      }
     }
+    batchRequest.selected_items = effectiveSelectedIds;
 
-    if (batchRequest && this.mode === "remux") {
-      const fullAssignments = buildTrackAssignmentsForManifest(assignmentSnapshot, tracker.lastManifest);
-      if (fullAssignments) {
-        if (selectedIds && selectedIds.length > 0) {
-          const selectedSet = new Set(selectedIds);
-          batchRequest.assignments = fullAssignments.filter(a => selectedSet.has(a.target_video));
-        } else {
-          batchRequest.assignments = fullAssignments;
-        }
-      } else {
-        batchRequest.assignments = null;
-      }
+    if (this.mode === "remux") {
+      const effectiveAssignments = isSameDir ? assignmentSnapshot : tracker.assignments;
+      const fullAssignments = buildTrackAssignmentsForManifest(effectiveAssignments, tracker.lastManifest);
+      const selectedSet = new Set(effectiveSelectedIds);
+      batchRequest.assignments = fullAssignments?.filter(a => selectedSet.has(a.target_video)) ?? null;
     }
     this.cleanupListeners();
 
     const earlyEvents = [];
     const earlyDone = [];
+    const unlisteners = [];
+    let launched = false;
 
     try {
-      this.unlistenLog = await this.runtime.listen("job-log", e => this.runtime.appendLog(this.logEl, e.payload));
-      this.unlistenEvent = await this.runtime.listen("job-event", e => {
+      unlisteners.push(await this.runtime.listen("job-log", e => {
+        if (generation === this.startGeneration || launched) this.runtime.appendLog(this.logEl, e.payload);
+      }));
+      unlisteners.push(await this.runtime.listen("job-event", e => {
+        if (generation !== this.startGeneration && !launched) return;
         if (this.jobId === null) {
           earlyEvents.push(e);
           return;
@@ -261,8 +322,9 @@ export class JobController {
         if (e.payload?.job_id === this.jobId && (!e.payload?.mode || e.payload.mode === this.mode)) {
           tracker.handleEvent(e.payload);
         }
-      });
-      this.unlistenDone = await this.runtime.listen("job-done", e => {
+      }));
+      unlisteners.push(await this.runtime.listen("job-done", e => {
+        if (generation !== this.startGeneration && !launched) return;
         const payload = e.payload;
         if (this.jobId === null) {
           earlyDone.push(e);
@@ -271,21 +333,25 @@ export class JobController {
         if (typeof payload === "object" && payload?.mode && payload.mode !== this.mode) return;
         if (payload?.job_id !== this.jobId) return;
         this.onDone(typeof payload === "object" ? payload.code : payload);
-      });
+      }));
     } catch (err) {
+      unlisteners.forEach(unlisten => unlisten());
+      if (generation !== this.startGeneration) return;
       this.runtime.appendLog(this.logEl, `[ERROR] Listeners failed: ${err}`);
       this.abortStart();
       return;
     }
 
     if (generation !== this.startGeneration || this.runtime.coordinator.isStopping) {
-      this.runtime.appendLog(this.logEl, "[INFO] Start aborted by stop request.");
-      this.abortStart(true);
+      unlisteners.forEach(unlisten => unlisten());
+      if (generation === this.startGeneration) this.abortStart(true);
       return;
     }
+    [this.unlistenLog, this.unlistenEvent, this.unlistenDone] = unlisteners;
 
     try {
       this.launched = true;
+      launched = true;
       this.runtime.coordinator.isStarting = false;
       this.launchPromise = this.runtime.invoke("run_job", {
         request: batchRequest,
@@ -316,7 +382,7 @@ export class JobController {
 
   async stop() {
     if (!this.running || this.runtime.coordinator.isStopping) return;
-    ++this.startGeneration;
+    const generation = ++this.startGeneration;
     this.runtime.coordinator.isStarting = false;
     this.runtime.coordinator.isStopping = true;
     this.lifecycle = "stopping";
@@ -325,13 +391,18 @@ export class JobController {
 
     try {
       if (this.launched && this.jobId === null && this.launchPromise) {
-        this.jobId = await this.launchPromise;
+        const jobId = await this.launchPromise;
+        if (!this.running || generation !== this.startGeneration) return;
+        this.jobId = jobId;
       }
-      await this.runtime.invoke("stop_job", { jobId: this.jobId });
+      const jobId = this.jobId;
+      await this.runtime.invoke("stop_job", { jobId });
+      if (!this.running || generation !== this.startGeneration || this.jobId !== jobId) return;
       if (this.launched) {
         this.runtime.appendLog(this.logEl, "[INFO] Stop requested; waiting for shutdown.");
       }
     } catch (err) {
+      if (!this.running || generation !== this.startGeneration) return;
       this.runtime.appendLog(this.logEl, `[ERROR] ${err}`);
       if (this.jobId !== null) {
         this.runtime.coordinator.isStopping = false;
@@ -386,15 +457,72 @@ export class JobController {
     this.renderStatus();
   }
 
+  /**
+   * True while a job owns the batch: starting, running, or stopping.
+   *
+   * `start()` captures the ordered selected IDs *before* the forced inspection,
+   * so a selection action landing during preflight would change what the user
+   * believes they are running without changing the request. That freeze covers
+   * every mode: the captured request belongs to the owning mode, and the other
+   * queue is not what is being run.
+   *
+   * The startup snapshot restore is deliberately excluded. It raises
+   * `isRestoring` to block a concurrent start, but no job owns a batch then,
+   * and the user must still be able to adjust a restored queue before running.
+   */
+  isJobActive() {
+    const coordinator = this.runtime.coordinator;
+    return coordinator.activeMode !== null || Boolean(coordinator.isStarting);
+  }
+
+  /**
+   * True while `mode`'s selection may still be mutated by the user.
+   *
+   * Beyond an active job, a queue is only locked against *its own* inspection:
+   * a background rescan of one tab must not disable the other tab's selection
+   * controls while the coordinator is idle.
+   */
+  canMutateQueueSelection(mode) {
+    if (this.isJobActive()) return false;
+    return !this.runtime.queueFor?.(mode)?.isScanning;
+  }
+
+  /**
+   * Sealed Select All / Deselect All action behind the bulk buttons.
+   * Returns true only when the selection was actually mutated.
+   */
+  applyBulkSelection(mode, select) {
+    if (!this.canMutateQueueSelection(mode)) return false;
+    const tracker = this.runtime.queueFor?.(mode);
+    if (!tracker) return false;
+    if (select) tracker.selectAll();
+    else tracker.deselectAll();
+    return true;
+  }
+
   syncGlobalControls() {
-    const busy = this.runtime.coordinator.activeMode !== null;
+    const canStart = this.runtime.coordinator.canStart();
+    const busy = this.isJobActive();
     const tracker = this.runtime.queueFor?.(this.mode);
     const hasItems = (tracker?.state?.totalCount ?? 0) > 0;
     const selectedCount = tracker?.getSelectedCount?.() ?? 0;
     const selectionDisabled = hasItems && selectedCount === 0;
-
-    if (this.runBtn) this.runBtn.disabled = busy || selectionDisabled;
+    const isScanning = Boolean(tracker?.isScanning);
+    if (this.runBtn) this.runBtn.disabled = !canStart || isScanning || selectionDisabled;
     for (const control of this.formControls) control.disabled = busy;
+    // Selection stays frozen for the whole preflight/run window: the request
+    // captured this queue's selection before the forced scan, so a click now
+    // could only desynchronize the UI from the batch. The tracker enforces the
+    // same predicate on every mutation, so a card re-rendered after this sync
+    // cannot slip an unguarded change through either.
+    for (const { id, mode } of BULK_SELECTION_CONTROLS) {
+      const control = document.getElementById(id);
+      if (control) control.disabled = !this.canMutateQueueSelection(mode);
+    }
+    for (const mode of QUEUE_MODES) {
+      const queue = this.runtime.queueFor?.(mode);
+      if (queue) queue.selectionLocked = !this.canMutateQueueSelection(mode);
+    }
     document.querySelectorAll(`#view-${this.mode} .sub-assign-btn`).forEach(control => {
       control.disabled = busy;
     });
@@ -402,7 +530,7 @@ export class JobController {
       control.disabled = busy;
     });
     document.querySelectorAll(`#view-${this.mode} .ep-select-check, #view-${this.mode} .ep-reorder-btn`).forEach(control => {
-      control.disabled = busy;
+      control.disabled = !this.canMutateQueueSelection(this.mode);
     });
     if (this.stopBtn) {
       this.stopBtn.disabled = this.runtime.coordinator.activeMode !== this.mode || this.runtime.coordinator.isStopping;

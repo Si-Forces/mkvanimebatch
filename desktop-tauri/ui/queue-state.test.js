@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   createQueueState,
+  reconcileQueueSelection,
   reduceQueueEvent,
   finalizeQueueState,
   carryOverAssignments,
@@ -15,6 +16,8 @@ import {
   deselectAll,
   reorderItem,
   getSelectedCount,
+  normalizeDirectoryPath,
+  isSameDirectory,
 } from "./queue-state.js";
 
 test("createQueueState initializes state from manifest v2", () => {
@@ -657,6 +660,7 @@ test("createQueueStateFromSnapshot constructs state and counts from JobSnapshot"
     mode: "extract",
     status: "completed",
     start_time_ms: 123456789,
+    ordered_item_ids: ["ep1.mkv", "ep2.mkv", "ep3.mkv", "ep4.mkv"],
     items: {
       "ep1.mkv": { id: "ep1.mkv", file: "Show - 01.mkv", status: "completed", duration_sec: 5.4 },
       "ep2.mkv": { id: "ep2.mkv", file: "Show - 02.mkv", status: "skipped", reason: "Already extracted" },
@@ -696,6 +700,7 @@ test("createQueueStateFromSnapshot resolves in-flight processing and queued item
     mode: "remux",
     status: "cancelled",
     start_time_ms: 123456789,
+    ordered_item_ids: ["ep1.mkv", "ep2.mkv", "ep3.mkv"],
     items: {
       "ep1.mkv": { id: "ep1.mkv", file: "Show - 01.mkv", status: "completed", duration_sec: 4.2 },
       "ep2.mkv": { id: "ep2.mkv", file: "Show - 02.mkv", status: "processing" },
@@ -722,6 +727,7 @@ test("createQueueStateFromSnapshot resolves in-flight processing and queued item
     mode: "extract",
     status: "error",
     start_time_ms: 123456789,
+    ordered_item_ids: ["ep1.mkv", "ep2.mkv", "ep3.mkv"],
     items: {
       "ep1.mkv": { id: "ep1.mkv", file: "Show - 01.mkv", status: "completed", duration_sec: 5.0 },
       "ep2.mkv": { id: "ep2.mkv", file: "Show - 02.mkv", status: "processing" },
@@ -748,6 +754,7 @@ test("createQueueStateFromSnapshot sets startTime for active in-flight processin
     mode: "remux",
     status: "running",
     start_time_ms: 123456789,
+    ordered_item_ids: ["ep1.mkv", "ep2.mkv"],
     items: {
       "ep1.mkv": { id: "ep1.mkv", file: "Show - 01.mkv", status: "processing" },
       "ep2.mkv": { id: "ep2.mkv", file: "Show - 02.mkv", status: "queued" },
@@ -761,6 +768,33 @@ test("createQueueStateFromSnapshot sets startTime for active in-flight processin
   assert.equal(state.items.get("ep1.mkv").startTime, fixedNow);
   assert.equal(state.items.get("ep2.mkv").status, "queued");
   assert.equal(state.items.get("ep2.mkv").startTime, null);
+});
+
+test("snapshot projects only ordered Active Batch items, saved progress and per-item elapsed start", () => {
+  const snapshot = {
+    status: "running",
+    start_time_ms: 100,
+    total_items: 3,
+    ordered_item_ids: ["02", "01", "missing"],
+    items: {
+      "01": { id: "01", file: "01.mkv", status: "queued" },
+      "03": { id: "03", file: "03.mkv", status: "queued" },
+      "02": { id: "02", file: "02.mkv", status: "processing", progress: 70, start_time_ms: 2000 },
+    },
+  };
+  const state = createQueueStateFromSnapshot(snapshot, { now: 30000 });
+  assert.deepEqual(state.order, ["02", "01"]);
+  assert.deepEqual([...state.items.keys()], ["02", "01"]);
+  assert.equal(state.totalCount, 2);
+  assert.equal(state.items.get("02").progress, 70);
+  assert.equal(state.items.get("02").startTime, 2000);
+
+  reduceQueueEvent(state, { version: 1, type: "item_complete", id: "02", status: "completed", duration_sec: 4.2 });
+  assert.equal(state.items.get("02").durationSec, 4.2);
+  assert.equal(state.items.get("02").status, "completed");
+
+  snapshot.items["02"].progress = 125;
+  assert.equal(createQueueStateFromSnapshot(snapshot).items.get("02").progress, 100);
 });
 
 test("formatOutcomeDuration formats null, existing formatted strings, and seconds thresholds", () => {
@@ -897,6 +931,70 @@ test("reduceQueueEvent populates items from batch_start when provided", () => {
   assert.equal(state.items.get("e2").name, "Episode 2.mkv");
 });
 
+test("BatchStart from an empty snapshot stays the ordered, selected base for the next same-directory rescan", () => {
+  const manifest = ids => ({ version: 2, items: ids.map(id => ({ id, name: id })) });
+
+  // Reload lands before any BatchStart, so nothing but the engine knows the batch.
+  let state = createQueueState({ version: 2, items: [] });
+  state = reduceQueueEvent(state, {
+    version: 1,
+    type: "batch_start",
+    total: 2,
+    items: [{ id: "02", file: "Episode 02.mkv" }, { id: "01", file: "Episode 01.mkv" }],
+  });
+  assert.deepEqual(state.order, ["02", "01"]);
+  assert.deepEqual(state.knownOrder, ["02", "01"]);
+
+  // A later rescan of the same directory discovers one more episode.
+  const previous = state;
+  state = reconcileQueueSelection(createQueueState(manifest(["02", "01", "03"])), previous);
+
+  assert.deepEqual(state.order, ["02", "01", "03"]);
+  assert.deepEqual(state.knownOrder, ["02", "01", "03"]);
+  assert.equal(state.items.get("02").selected, true);
+  assert.equal(state.items.get("01").selected, true);
+  assert.equal(state.items.get("03").selected, false);
+});
+
+test("BatchStart records each participant once even when its item list repeats an ID", () => {
+  const state = createQueueState({ version: 2, items: [] });
+
+  // Every producer keeps order and knownOrder in step, so the reducer cannot be
+  // fed a state that repairs one and not the other. What it can be fed is a
+  // malformed item list, which must not corrupt either projection.
+  reduceQueueEvent(state, {
+    version: 1,
+    type: "batch_start",
+    total: 2,
+    items: [{ id: "01" }, { id: "02" }, { id: "01" }],
+  });
+
+  assert.deepEqual(state.order, ["01", "02"]);
+  assert.deepEqual(state.knownOrder, ["01", "02"]);
+  assert.equal(state.items.size, 2);
+});
+
+test("reduceQueueEvent hydrates 10,000 BatchStart items into an empty state in linear time", () => {
+  const total = 10000;
+  const items = [];
+  for (let i = 0; i < total; i++) {
+    items.push({ id: `ep${i}.mkv`, file: `Episode ${i}.mkv` });
+  }
+  const state = createQueueState({ version: 2, items: [] });
+
+  const begin = performance.now();
+  reduceQueueEvent(state, { version: 1, type: "batch_start", total, items }, 0);
+  const elapsedMs = performance.now() - begin;
+
+  assert.equal(state.items.size, total);
+  assert.equal(state.order.length, total);
+  assert.equal(new Set(state.order).size, total);
+  assert.deepEqual(state.knownOrder, state.order);
+  assert.deepEqual(state.batchItemIds.length, total);
+  // A repeated linear state.order.includes per item would be quadratic here.
+  assert.ok(elapsedMs < 2000, `empty-state BatchStart hydration took ${elapsedMs.toFixed(0)}ms (expected < 2000ms)`);
+});
+
 test("item selection and reordering helpers", () => {
   const manifest = {
     version: 2,
@@ -943,5 +1041,182 @@ test("item selection and reordering helpers", () => {
   assert.deepEqual(state.order, ["e1", "e2", "e3"]);
   reorderItem(state, "e3", "down"); // at bottom, noop
   assert.deepEqual(state.order, ["e1", "e2", "e3"]);
+});
+
+test("reconcileQueueSelection keeps surviving choices and order, appending new IDs unselected", () => {
+  const manifest = ids => ({ version: 2, items: ids.map(id => ({ id, name: id })) });
+  const previous = createQueueState(manifest(["ep1", "ep2", "gone"]));
+  toggleItemSelection(previous, "ep1", false);
+  reorderItem(previous, "ep2", "up");
+
+  const replacement = reconcileQueueSelection(createQueueState(manifest(["ep1", "new", "ep2"])), previous);
+  assert.deepEqual(replacement.order, ["ep2", "ep1", "new"]);
+  assert.deepEqual(replacement.order.map(id => replacement.items.get(id).selected), [true, false, false]);
+  assert.equal(replacement.items.has("gone"), false);
+  assert.deepEqual(previous.order, ["ep2", "ep1", "gone"]);
+});
+test("normalizeDirectoryPath and isSameDirectory handle canonical, relative, and Windows paths", () => {
+  // Relative dot segments
+  assert.equal(normalizeDirectoryPath("/anime/x/../show"), "/anime/show");
+  assert.equal(normalizeDirectoryPath("/anime/./show/."), "/anime/show");
+  assert.equal(isSameDirectory("/anime/show", "/anime/x/../show"), true);
+  assert.equal(isSameDirectory("/anime/show/", "/anime/x/../show"), true);
+
+  // Trailing slash differences
+  assert.equal(isSameDirectory("/anime/show", "/anime/show/"), true);
+  assert.equal(isSameDirectory("/anime/show///", "/anime/show"), true);
+
+  // Windows drive letters and separators
+  assert.equal(normalizeDirectoryPath("C:\\Anime\\Show"), "c:/anime/show");
+  assert.equal(normalizeDirectoryPath("c:/anime/show/"), "c:/anime/show");
+  assert.equal(isSameDirectory("C:\\Anime\\Show", "c:/anime/show/"), true);
+  assert.equal(isSameDirectory("C:\\Anime\\x\\..\\Show", "c:/anime/show"), true);
+
+  // Win32 trims trailing dots/spaces on ordinary path segments, but verbatim
+  // paths keep them significant. The Engine Bridge strips `\\?\` before any
+  // identity reaches the Queue Tracker (see the Canonical Directory Identity
+  // invariant in desktop-tauri/CONTEXT.md), so a verbatim form is a
+  // defence-in-depth case here, not a normal input.
+  assert.equal(normalizeDirectoryPath("C:/Videos/Show. /Episode"), "c:/videos/show/episode");
+  assert.equal(
+    normalizeDirectoryPath(String.raw`\\?\C:\Videos\Show.`),
+    "c:/videos/show.",
+  );
+  assert.equal(normalizeDirectoryPath(String.raw`\\?\C:\Videos\Show `), "c:/videos/show ");
+  assert.equal(
+    normalizeDirectoryPath(String.raw`\\?\UNC\server\share\Show`),
+    "//server/share/show",
+  );
+
+  // On POSIX, backslash is a filename character, not a path separator.
+  if (process.platform !== "win32") {
+    assert.equal(normalizeDirectoryPath("/anime/My\\\\Show"), "/anime/My\\\\Show");
+    assert.equal(isSameDirectory("/anime/My\\\\Show", "/anime/My/Show"), false);
+  }
+
+  // Missing or empty identities
+  assert.equal(isSameDirectory(null, "/anime/show"), false);
+  assert.equal(isSameDirectory("/anime/show", null), false);
+  assert.equal(isSameDirectory(undefined, undefined), false);
+  assert.equal(isSameDirectory("", "/anime/show"), false);
+
+  // Different directories
+  assert.equal(isSameDirectory("/anime/showA", "/anime/showB"), false);
+});
+
+test("bare dot is a relative identity, not root", () => {
+  assert.equal(normalizeDirectoryPath("."), ".");
+  assert.equal(isSameDirectory(".", "/"), false);
+  assert.equal(normalizeDirectoryPath("/"), "/");
+});
+
+test("finalization leaves non-participants queued and keeps a successful subset batch successful", () => {
+  let state = createQueueState({
+    version: 2,
+    items: [
+      { id: "ep1", name: "ep1" },
+      { id: "ep2", name: "ep2" },
+    ],
+  });
+  state = reduceQueueEvent(state, {
+    version: 1,
+    type: "batch_start",
+    total: 1,
+    input_dir: "/x",
+    items: [{ id: "ep1", file: "ep1" }],
+  });
+  state = reduceQueueEvent(state, {
+    version: 1,
+    type: "item_start",
+    id: "ep1",
+  });
+  state = reduceQueueEvent(state, {
+    version: 1,
+    type: "item_complete",
+    id: "ep1",
+    status: "completed",
+  });
+  state = reduceQueueEvent(state, {
+    version: 1,
+    type: "batch_complete",
+    success: true,
+  });
+  const finalState = finalizeQueueState(state, 0);
+  assert.equal(finalState.batchSuccess, true);
+  assert.equal(finalState.items.get("ep1").status, "completed");
+  assert.equal(finalState.items.get("ep2").status, "queued");
+});
+
+test("finalization without batch_start skips deselected items", () => {
+  const state = createQueueState({
+    version: 2,
+    items: [
+      { id: "ep1", name: "ep1" },
+      { id: "ep2", name: "ep2" },
+    ],
+  });
+  toggleItemSelection(state, "ep2", false);
+  const finalState = finalizeQueueState(state, -1);
+  assert.equal(finalState.items.get("ep1").status, "error");
+  assert.equal(finalState.items.get("ep2").status, "queued");
+});
+
+test("UNC shares keep a distinct identity from root-relative paths", () => {
+  assert.equal(normalizeDirectoryPath("\\\\Server\\Share\\Show"), "//server/share/show");
+  assert.equal(normalizeDirectoryPath("\\\\?\\UNC\\Server\\Share\\Show"), "//server/share/show");
+  assert.equal(isSameDirectory("\\\\server\\share\\Show", "\\server\\share\\Show"), false);
+  assert.equal(isSameDirectory("\\\\server\\share\\Show\\", "//server/share/Show"), true);
+  assert.equal(normalizeDirectoryPath("\\\\?\\C:\\Anime"), "c:/anime");
+});
+
+test("rescan remembers vanished selected ids until selection changes", () => {
+  const manifest = ids => ({ version: 2, items: ids.map(id => ({ id, name: id })) });
+  const previous = createQueueState(manifest(["ep1", "ep2", "ep3"]));
+  toggleItemSelection(previous, "ep3", false);
+  const next = reconcileQueueSelection(createQueueState(manifest(["ep1"])), previous);
+  assert.deepEqual(next.vanishedSelectedIds, ["ep2"]);
+
+  const again = reconcileQueueSelection(createQueueState(manifest(["ep1"])), next);
+  assert.deepEqual(again.vanishedSelectedIds, ["ep2"]);
+
+  toggleItemSelection(again, "ep1", true);
+  assert.deepEqual(again.vanishedSelectedIds, []);
+});
+
+test("a vanished selected id that reappears is restored selected", () => {
+  const manifest = ids => ({ version: 2, items: ids.map(id => ({ id, name: id })) });
+  const previous = createQueueState(manifest(["ep1", "ep2"]));
+  const gone = reconcileQueueSelection(createQueueState(manifest(["ep1"])), previous);
+  const back = reconcileQueueSelection(createQueueState(manifest(["ep1", "ep2"])), gone);
+  assert.equal(back.items.get("ep2").selected, true);
+  assert.deepEqual(back.vanishedSelectedIds, []);
+});
+
+test("a vanished selected id that reappears preserves its previous relative order", () => {
+  const manifest = ids => ({ version: 2, items: ids.map(id => ({ id, name: id })) });
+  const initial = createQueueState(manifest(["ep1", "ep2", "ep3"]));
+  reorderItem(initial, "ep2", "up");
+  assert.deepEqual(initial.order, ["ep2", "ep1", "ep3"]);
+
+  const gone = reconcileQueueSelection(createQueueState(manifest(["ep1", "ep3"])), initial);
+  assert.deepEqual(gone.order, ["ep1", "ep3"]);
+  assert.deepEqual(gone.vanishedSelectedIds, ["ep2"]);
+
+  const back = reconcileQueueSelection(createQueueState(manifest(["ep1", "ep2", "ep3"])), gone);
+  assert.deepEqual(back.order, ["ep2", "ep1", "ep3"]);
+  assert.equal(back.items.get("ep2").selected, true);
+  assert.deepEqual(back.vanishedSelectedIds, []);
+});
+
+test("selectAll and deselectAll clear vanished selected ids", () => {
+  const manifest = ids => ({ version: 2, items: ids.map(id => ({ id, name: id })) });
+  const state = createQueueState(manifest(["ep1"]));
+  state.vanishedSelectedIds = ["x"];
+  selectAll(state);
+  assert.deepEqual(state.vanishedSelectedIds, []);
+
+  state.vanishedSelectedIds = ["x"];
+  deselectAll(state);
+  assert.deepEqual(state.vanishedSelectedIds, []);
 });
 
