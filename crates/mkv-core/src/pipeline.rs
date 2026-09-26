@@ -1,5 +1,6 @@
 //! Batch pipeline execution, event streams, and cancellation coordination.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -17,7 +18,7 @@ use crate::extract::extract_mkv_file;
 use crate::fonts::{scan_fonts, FontHashMemo, FontInfo, FontRegistry};
 use crate::manifest::get_item_id;
 use crate::remux::{execute_remux_job, select_tracks, PlannedJob, RemuxOptions, TrackSelection};
-use crate::request::{clean_relative_path, TrackAssignment};
+use crate::request::{canonical_assignment_target_id, clean_relative_path, TrackAssignment};
 use crate::scan::{
     get_or_probe_video, scan_mkv_files, InspectedVideo, InspectionResult, ParsedFile,
     PersistentInspectCache, ScanResults,
@@ -225,6 +226,76 @@ fn apply_selected_items(
             unmatched.join(", ")
         ))
     }
+}
+
+/// Returns the effective track assignments for a run, converting the deprecated
+/// `sub_assignments` map into `TrackAssignment`s when no canonical `track_assignments` exist.
+#[allow(deprecated)]
+fn effective_track_assignments(config: &PipelineConfig) -> Option<Cow<'_, [TrackAssignment]>> {
+    if let Some(assignments) = config.track_assignments.as_deref() {
+        return Some(Cow::Borrowed(assignments));
+    }
+    config.sub_assignments.as_ref().map(|legacy| {
+        Cow::Owned(
+            legacy
+                .iter()
+                .map(|(target, path)| TrackAssignment {
+                    target_video: target.clone(),
+                    asset_path: path.clone(),
+                    track_type: Some("subtitle".into()),
+                    language: None,
+                    title: None,
+                    offset_ms: None,
+                })
+                .collect(),
+        )
+    })
+}
+
+/// Requires every effective assignment target to match exactly one discovered canonical MKV ID.
+///
+/// A manual assignment that cannot be consumed fails closed: it is never silently dropped in
+/// favor of automatic resolution. The check runs after discovery and selection, so the later
+/// per-asset existence check only has to cover assets that disappear after preflight.
+fn validate_assignment_targets(
+    assignments: &[TrackAssignment],
+    files: &[ParsedFile],
+    input_dir: &Path,
+    selected_items: Option<&[String]>,
+) -> Result<(), String> {
+    if assignments.is_empty() {
+        return Ok(());
+    }
+
+    let mut discovered: HashMap<String, usize> = HashMap::with_capacity(files.len());
+    for file in files {
+        *discovered
+            .entry(canonical_assignment_target_id(&get_item_id(
+                &file.path, input_dir,
+            )))
+            .or_default() += 1;
+    }
+
+    let mut unmatched: Vec<String> = Vec::new();
+    for assignment in assignments {
+        let target = canonical_assignment_target_id(&assignment.target_video);
+        if discovered.get(target.as_str()) != Some(&1) && !unmatched.contains(&target) {
+            unmatched.push(target);
+        }
+    }
+    if unmatched.is_empty() {
+        return Ok(());
+    }
+
+    let scope = if selected_items.is_some() {
+        "the active batch selection"
+    } else {
+        "the discovered MKV files"
+    };
+    Err(format!(
+        "Track assignment targets do not match exactly one video in {scope}: {}",
+        unmatched.join(", ")
+    ))
 }
 
 pub struct BatchPipeline {
@@ -677,6 +748,16 @@ impl BatchPipeline {
             &self.config.input_dir,
             self.config.selected_items.as_deref(),
         )?;
+
+        // Fail closed before any batch or media work: a supplied assignment that no discovered
+        // item can consume aborts the run instead of falling back to automatic resolution.
+        let effective_assignments = effective_track_assignments(&self.config);
+        validate_assignment_targets(
+            effective_assignments.as_deref().unwrap_or_default(),
+            &files,
+            &self.config.input_dir,
+            self.config.selected_items.as_deref(),
+        )?;
         summary.total = files.len();
 
         let items: Vec<BatchItemInfo> = files
@@ -870,39 +951,14 @@ impl BatchPipeline {
         let mut planning_outcomes = Vec::new();
         let mut planning_error: Option<(usize, String)> = None;
 
-        // Sequence planned jobs strictly adhering to custom files ordering across directories
+        // Sequence planned jobs strictly adhering to custom files ordering across directories.
+        // Every target was already proven to match exactly one discovered canonical item ID.
         let mut assignment_index: HashMap<String, &TrackAssignment> = HashMap::new();
-        #[allow(deprecated)]
-        let legacy_converted: Option<Vec<TrackAssignment>> =
-            if self.config.track_assignments.is_none() {
-                self.config.sub_assignments.as_ref().map(|m| {
-                    m.iter()
-                        .map(|(target, path)| TrackAssignment {
-                            target_video: target.clone(),
-                            asset_path: path.clone(),
-                            track_type: Some("subtitle".into()),
-                            language: None,
-                            title: None,
-                            offset_ms: None,
-                        })
-                        .collect()
-                })
-            } else {
-                None
-            };
-
-        let effective_assignments = self
-            .config
-            .track_assignments
-            .as_ref()
-            .or(legacy_converted.as_ref());
-
-        if let Some(assignments) = effective_assignments {
-            for a in assignments {
-                let clean_target = a.clean_target_video();
-                assignment_index.insert(a.target_video.clone(), a);
-                assignment_index.insert(clean_target, a);
-            }
+        for assignment in effective_assignments.as_deref().unwrap_or_default() {
+            assignment_index.insert(
+                canonical_assignment_target_id(&assignment.target_video),
+                assignment,
+            );
         }
 
         for (v_idx, video_file) in files.iter().enumerate() {
@@ -934,21 +990,10 @@ impl BatchPipeline {
                 continue;
             };
 
-            let clean_rel = clean_relative_path(&item_id);
-            let rel_from_input = video_file
-                .path
-                .strip_prefix(&self.config.input_dir)
-                .ok()
-                .map(|p| clean_relative_path(&p.to_string_lossy()));
-
+            // `clean_rel` is the same canonical key the discovery-time check validated, so a
+            // supplied assignment either resolves to this item or was rejected before planning.
             let matched_assignment = assignment_index
-                .get(&item_id)
-                .or_else(|| assignment_index.get(&clean_rel))
-                .or_else(|| {
-                    rel_from_input
-                        .as_deref()
-                        .and_then(|r| assignment_index.get(r))
-                })
+                .get(clean_relative_path(&item_id).as_str())
                 .copied();
 
             let assigned_sub_path = matched_assignment.map(|a| {

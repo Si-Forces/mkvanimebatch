@@ -474,7 +474,13 @@ impl CoverIndex {
                             })
                         })
                     }
-                    CoverKind::Adjacent => entry.file.stem == video.stem,
+                    // Adjacency is relative to the target video, including when this
+                    // index came from --assets-dir: a bare file in an unrelated
+                    // assets directory is not an episode cover.
+                    CoverKind::Adjacent => {
+                        entry.file.stem == video.stem
+                            && entry.file.path.parent() == video.path.parent()
+                    }
                     CoverKind::Cover | CoverKind::Folder => true,
                 };
                 if !applicable {

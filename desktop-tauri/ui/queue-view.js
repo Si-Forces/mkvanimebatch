@@ -41,6 +41,14 @@ export class QueueTracker {
     this.isScanning = false;
     this.renderRafId = null;
     this.lastManifest = null;
+    // Set by the owning JobController. While true, every user-driven selection
+    // or order mutation is refused: `start()` snapshots the ordered selected IDs
+    // before its forced inspection, so a click landing afterwards would change
+    // what the user believes they are running without changing the request.
+    // Disabling the controls is not the invariant — a card re-rendered after
+    // the last sync carries a fresh, enabled checkbox — so the guard lives on
+    // the mutation itself.
+    this.selectionLocked = false;
     // Track Assignment overrides (remux only): item id -> assignment payload
     this.assignments = new Map();
     // v2 manifest: candidates are stored once per release directory.
@@ -49,16 +57,22 @@ export class QueueTracker {
     if (this.listEl) {
       this.listEl.addEventListener("change", (e) => {
         const check = e.target?.closest?.(".ep-select-check");
-        if (check?.dataset?.itemId) {
-          toggleItemSelection(this.state, check.dataset.itemId, check.checked);
-          this.updateSelectionBadge();
-          this.onSelectionChange?.();
+        if (!check?.dataset?.itemId) return;
+        if (this.selectionLocked) {
+          // Put the DOM back in step with the state the request was built from.
+          const item = this.state.items.get(check.dataset.itemId);
+          check.checked = item ? item.selected !== false : false;
+          return;
         }
+        toggleItemSelection(this.state, check.dataset.itemId, check.checked);
+        this.updateSelectionBadge();
+        this.onSelectionChange?.();
       });
 
       this.listEl.addEventListener("click", (e) => {
         const btn = e.target?.closest?.(".ep-reorder-btn");
         if (!btn?.dataset?.itemId) return;
+        if (this.selectionLocked) return;
         const id = btn.dataset.itemId;
         const isUp = btn.classList?.contains?.("ep-up-btn");
         const dir = isUp ? "up" : "down";
@@ -658,6 +672,7 @@ export class QueueTracker {
   }
 
   selectAll() {
+    if (this.selectionLocked) return;
     selectAll(this.state);
     for (const card of this.cards.values()) {
       if (card.checkbox) card.checkbox.checked = true;
@@ -667,6 +682,7 @@ export class QueueTracker {
   }
 
   deselectAll() {
+    if (this.selectionLocked) return;
     deselectAll(this.state);
     for (const card of this.cards.values()) {
       if (card.checkbox) card.checkbox.checked = false;
@@ -676,6 +692,7 @@ export class QueueTracker {
   }
 
   reorderCard(id, dir) {
+    if (this.selectionLocked) return;
     reorderItem(this.state, id, dir);
     const card = this.cards.get(id);
     if (card?.el) {

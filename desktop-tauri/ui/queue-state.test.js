@@ -931,6 +931,70 @@ test("reduceQueueEvent populates items from batch_start when provided", () => {
   assert.equal(state.items.get("e2").name, "Episode 2.mkv");
 });
 
+test("BatchStart from an empty snapshot stays the ordered, selected base for the next same-directory rescan", () => {
+  const manifest = ids => ({ version: 2, items: ids.map(id => ({ id, name: id })) });
+
+  // Reload lands before any BatchStart, so nothing but the engine knows the batch.
+  let state = createQueueState({ version: 2, items: [] });
+  state = reduceQueueEvent(state, {
+    version: 1,
+    type: "batch_start",
+    total: 2,
+    items: [{ id: "02", file: "Episode 02.mkv" }, { id: "01", file: "Episode 01.mkv" }],
+  });
+  assert.deepEqual(state.order, ["02", "01"]);
+  assert.deepEqual(state.knownOrder, ["02", "01"]);
+
+  // A later rescan of the same directory discovers one more episode.
+  const previous = state;
+  state = reconcileQueueSelection(createQueueState(manifest(["02", "01", "03"])), previous);
+
+  assert.deepEqual(state.order, ["02", "01", "03"]);
+  assert.deepEqual(state.knownOrder, ["02", "01", "03"]);
+  assert.equal(state.items.get("02").selected, true);
+  assert.equal(state.items.get("01").selected, true);
+  assert.equal(state.items.get("03").selected, false);
+});
+
+test("BatchStart records each participant once even when its item list repeats an ID", () => {
+  const state = createQueueState({ version: 2, items: [] });
+
+  // Every producer keeps order and knownOrder in step, so the reducer cannot be
+  // fed a state that repairs one and not the other. What it can be fed is a
+  // malformed item list, which must not corrupt either projection.
+  reduceQueueEvent(state, {
+    version: 1,
+    type: "batch_start",
+    total: 2,
+    items: [{ id: "01" }, { id: "02" }, { id: "01" }],
+  });
+
+  assert.deepEqual(state.order, ["01", "02"]);
+  assert.deepEqual(state.knownOrder, ["01", "02"]);
+  assert.equal(state.items.size, 2);
+});
+
+test("reduceQueueEvent hydrates 10,000 BatchStart items into an empty state in linear time", () => {
+  const total = 10000;
+  const items = [];
+  for (let i = 0; i < total; i++) {
+    items.push({ id: `ep${i}.mkv`, file: `Episode ${i}.mkv` });
+  }
+  const state = createQueueState({ version: 2, items: [] });
+
+  const begin = performance.now();
+  reduceQueueEvent(state, { version: 1, type: "batch_start", total, items }, 0);
+  const elapsedMs = performance.now() - begin;
+
+  assert.equal(state.items.size, total);
+  assert.equal(state.order.length, total);
+  assert.equal(new Set(state.order).size, total);
+  assert.deepEqual(state.knownOrder, state.order);
+  assert.deepEqual(state.batchItemIds.length, total);
+  // A repeated linear state.order.includes per item would be quadratic here.
+  assert.ok(elapsedMs < 2000, `empty-state BatchStart hydration took ${elapsedMs.toFixed(0)}ms (expected < 2000ms)`);
+});
+
 test("item selection and reordering helpers", () => {
   const manifest = {
     version: 2,

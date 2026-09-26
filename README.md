@@ -53,7 +53,7 @@ Available both as a standalone native **CLI binary (`mkv-cli`)** and as a self-c
 * **BLAKE2b Hash Deduplication**: Deduplicates fonts across entire releases by content hash and font identity, avoiding redundant font attachments.
 * **RAII Claim Safety**: Uncommitted font claims in staging directories are safely defused or released on cancellation.
 * **Mode-Specific Font Handling**: Extraction mode retains extracted fonts as user output, while remux mode discovers and embeds fonts into output Matroska files.
-* **Chapter & Cover Art Preservation**: Extracts and embeds XML chapter definitions and front cover art. Directory covers (`cover.<ext>`, `folder.<ext>`) and episode covers (`<video-stem>_cover.<ext>`, `<video-stem>.cover.<ext>`, `<video-stem>.<ext>`) resolve nearest applicable directory first (`_cover` > `.cover` > bare stem > `cover` > `folder`). Local and ancestor external covers supersede embedded artwork; explicit `--assets-dir` covers apply only when embedded art is absent.
+* **Chapter & Cover Art Preservation**: Extracts and embeds XML chapter definitions and front cover art. Directory covers (`cover.<ext>`, `folder.<ext>`) and episode covers (`<video-stem>_cover.<ext>`, `<video-stem>.cover.<ext>`, `<video-stem>.<ext>`) resolve nearest applicable directory first (`_cover` > `.cover` > bare stem > `cover` > `folder`). The bare-stem form only matches a video in the same directory, so an `--assets-dir` cover meant for a video elsewhere must use one of the other four forms. Local and ancestor external covers supersede embedded artwork; explicit `--assets-dir` covers apply only when embedded art is absent.
 
 ### Crash-Resistant Output & Safe Recovery
 * **Atomic File Promotion**: Performs remuxing and extraction inside isolated temporary scratch directories, promoting files via atomic replacement with rollback protection across filesystem boundaries (`EXDEV`).
@@ -265,6 +265,12 @@ node --check desktop-tauri/ui/app.js
 node --test desktop-tauri/ui/*.test.js
 ```
 
+`crates/mkv-core/tests/test_real_remux.rs` drives real `ffmpeg`, `mkvmerge`, and `mkvextract` binaries and is skipped when they are unavailable. Required verification (CI and the release gate) sets `MKV_REQUIRE_MEDIA_TOOLS=1`, which turns a missing tool into a test failure:
+
+```bash
+MKV_REQUIRE_MEDIA_TOOLS=1 cargo test -p mkv-core --test test_real_remux
+```
+
 ---
 
 ## Project Layout
@@ -277,7 +283,7 @@ mkvanimebatch/
 ├── crates/
 │   ├── mkv-core/            # Standalone media engine library crate
 │   │   ├── src/             # EBML parsing, CPU topology, domain heuristics, fonts, pipeline
-│   │   └── tests/           # 8 integration suites (assets, domain, scan, remux, extract, fonts, pipeline, cross-regex)
+│   │   └── tests/           # 10 integration suites (assets, domain, scan, remux, extract, fonts, pipeline, pipeline-assignment-args, cross-regex, real-remux)
 │   └── mkv-cli/             # Standalone CLI binary adapter
 │       └── src/             # CLI argument parsing, smoke validation
 ├── desktop-tauri/           # Desktop GUI application

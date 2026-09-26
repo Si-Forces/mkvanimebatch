@@ -85,6 +85,20 @@ function setupMockEnvironment(t) {
   return { elements };
 }
 
+test("a fresh QueueTracker initialises its empty state, not just undefined", t => {
+  setupMockEnvironment(t);
+  const tracker = new QueueTracker("remux");
+
+  // `lastManifest` is read by falsy/optional checks in several places, so an
+  // uninitialised field is easy to miss until a strict comparison sees it.
+  assert.strictEqual(tracker.lastManifest, null);
+  assert.strictEqual(tracker.isScanning, false);
+  assert.strictEqual(tracker.currentDirectory, null);
+  assert.strictEqual(tracker.lastScannedPath, null);
+  assert.strictEqual(tracker.heartbeatTimer, null);
+  assert.strictEqual(tracker.selectionLocked, false);
+});
+
 test("restoreFromSnapshot handles null or empty snapshot gracefully", t => {
   setupMockEnvironment(t);
   const tracker = new QueueTracker("remux");
@@ -789,6 +803,66 @@ test("QueueTracker preserves selection across symlinked directory rescan and Bat
   renderFrames();
   assert.deepEqual(tracker.state.order, ["02.mkv", "01.mkv", "04.mkv"]);
   assert.equal(tracker.state.items.get("04.mkv").selected, false);
+});
+
+test("QueueTracker keeps a reload-then-BatchStart Active Batch as the ordered, selected base for the next same-directory rescan", t => {
+  setupMockEnvironment(t);
+  const frames = [];
+  globalThis.requestAnimationFrame = callback => frames.push(callback);
+  const renderFrames = () => { while (frames.length) frames.shift()(); };
+  const tracker = new QueueTracker("remux");
+  const dir = "/anime/show";
+  const manifest = ids => ({ version: 2, items: ids.map(id => ({ id, name: id })) });
+
+  // Reload lands before BatchStart, so the snapshot knows nothing about the batch.
+  tracker.restoreFromSnapshot({
+    job_id: 7,
+    mode: "remux",
+    status: "running",
+    input_dir: dir,
+    ordered_item_ids: [],
+    items: {},
+  });
+  renderFrames();
+  assert.equal(tracker.state.order.length, 0);
+
+  tracker.handleEvent({
+    version: 1,
+    type: "batch_start",
+    total: 2,
+    input_dir: dir,
+    items: [
+      { id: "02.mkv", file: "02.mkv" },
+      { id: "01.mkv", file: "01.mkv" },
+    ],
+  });
+  renderFrames();
+  assert.deepEqual(tracker.state.order, ["02.mkv", "01.mkv"]);
+  assert.deepEqual(tracker.state.knownOrder, ["02.mkv", "01.mkv"]);
+
+  // The batch settles, then the same directory is rescanned with one more episode.
+  tracker.handleEvent({
+    version: 1,
+    type: "batch_complete",
+    total: 2,
+    success: true,
+    cancelled: false,
+  });
+  assert.equal(
+    tracker.acceptInspection(
+      tracker.startScan(),
+      dir,
+      manifest(["01.mkv", "02.mkv", "03.mkv"])
+    ),
+    true
+  );
+  renderFrames();
+
+  // Submitter order survives, both participants stay selected, the newcomer does not.
+  assert.deepEqual(tracker.state.order, ["02.mkv", "01.mkv", "03.mkv"]);
+  assert.deepEqual(tracker.state.knownOrder, ["02.mkv", "01.mkv", "03.mkv"]);
+  assert.deepEqual(tracker.getSelectedOrderedItemIds(), ["02.mkv", "01.mkv"]);
+  assert.equal(tracker.state.items.get("03.mkv").selected, false);
 });
 
 test("escapeAttr escapes &, \", ', <, and >", () => {

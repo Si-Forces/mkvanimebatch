@@ -252,9 +252,16 @@ where
                     )
                 }
             }),
+            // Stop wins over an incidental worker error: the job was already
+            // cancelled, so the terminal must stay cancelled. Either way the
+            // error is still surfaced in the job log.
             Ok(Err(error)) => {
                 let _ = app_task.emit("job-log", vec![format!("[ERR] Pipeline failed: {error}")]);
-                bridge_terminal(false, Some(("error", error)))
+                if cancel_for_supervisor.is_cancelled() {
+                    bridge_terminal(true, None)
+                } else {
+                    bridge_terminal(false, Some(("error", error)))
+                }
             }
             Err(tauri::Error::JoinError(join_error))
                 if join_error.is_cancelled() && cancel_for_supervisor.is_cancelled() =>
@@ -358,14 +365,22 @@ mod tests {
     use std::time::{Duration, Instant};
     use tauri::Listener;
     type EventSink = Arc<Mutex<Vec<serde_json::Value>>>;
+    type LogSink = Arc<Mutex<Vec<String>>>;
 
-    fn observed_app() -> (tauri::App<tauri::test::MockRuntime>, EventSink, EventSink) {
+    fn observed_app_with_logs() -> (
+        tauri::App<tauri::test::MockRuntime>,
+        EventSink,
+        EventSink,
+        LogSink,
+    ) {
         let app = tauri::test::mock_app();
         app.manage(JobState::default());
         let events = Arc::new(Mutex::new(Vec::new()));
         let dones = Arc::new(Mutex::new(Vec::new()));
+        let logs = Arc::new(Mutex::new(Vec::new()));
         let event_sink = Arc::clone(&events);
         let done_sink = Arc::clone(&dones);
+        let log_sink = Arc::clone(&logs);
         app.listen("job-event", move |event| {
             event_sink
                 .lock()
@@ -378,6 +393,17 @@ mod tests {
                 .unwrap()
                 .push(serde_json::from_str(event.payload()).unwrap());
         });
+        app.listen("job-log", move |event| {
+            log_sink
+                .lock()
+                .unwrap()
+                .extend(serde_json::from_str::<Vec<String>>(event.payload()).unwrap());
+        });
+        (app, events, dones, logs)
+    }
+
+    fn observed_app() -> (tauri::App<tauri::test::MockRuntime>, EventSink, EventSink) {
+        let (app, events, dones, _logs) = observed_app_with_logs();
         (app, events, dones)
     }
 
@@ -434,6 +460,25 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
     }
+
+    fn wait_for_job_done(dones: &EventSink, job_id: u64) {
+        let start = Instant::now();
+        loop {
+            let settled = {
+                let events = dones.lock().unwrap();
+                done_events_for(&events, job_id).len() == 1
+            };
+            if settled {
+                return;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(2),
+                "job {job_id} never reported a completion"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     async fn panicking_worker(
         event_tx: mkv_core::pipeline::EventSender,
     ) -> Result<PipelineSummary, String> {
@@ -629,6 +674,125 @@ mod tests {
         let completions = done_events_for(&dones, job_id);
         assert_eq!(completions.len(), 1);
         assert_eq!(completions[0]["code"], -1);
+    }
+
+    #[test]
+    fn worker_error_after_stop_settles_as_cancelled() {
+        let (app, events, dones, logs) = observed_app_with_logs();
+        let state = app.state::<JobState>();
+        let token = CancellationToken::new();
+        let worker_token = token.clone();
+        let (event_tx, event_rx) = mkv_core::pipeline::create_event_channel(64);
+        let (log_tx, log_rx) = mkv_core::pipeline::create_log_channel(8);
+        let worker = async move {
+            event_tx.send(batch_start()).await.unwrap();
+            log_tx.send("probing batch".to_string()).await.unwrap();
+            event_tx
+                .send(JobEvent::ItemStart {
+                    version: 1,
+                    id: "ep2".into(),
+                    file: "02.mkv".into(),
+                    extra: Default::default(),
+                })
+                .await
+                .unwrap();
+            event_tx
+                .send(JobEvent::ItemProgress {
+                    version: 1,
+                    id: "ep2".into(),
+                    file: "02.mkv".into(),
+                    progress: 40.0,
+                    speed: None,
+                    eta: None,
+                    extra: Default::default(),
+                })
+                .await
+                .unwrap();
+            worker_token.cancelled().await;
+            Err("scan failed after stop".to_string())
+        };
+        let job_id = start_supervised_job(
+            app.handle().clone(),
+            &state,
+            SupervisedJobConfig {
+                mode: "remux".into(),
+                input_dir: Some("/anime".into()),
+                cancel_token: token,
+            },
+            event_rx,
+            log_rx,
+            worker,
+        )
+        .unwrap();
+        wait_for_progress(&state, "ep2", 40.0);
+        stop_job_internal_with_timeout(&state, Some(job_id), Duration::from_secs(1)).unwrap();
+
+        let snapshot = state.snapshot.lock().unwrap().clone().unwrap();
+        assert_eq!(snapshot.status, BatchStatus::Cancelled);
+        assert_eq!(snapshot.completed_items, 2);
+        assert_eq!(snapshot.items["ep2"].status, ItemStatus::Cancelled);
+        assert_eq!(snapshot.items["ep1"].status, ItemStatus::Cancelled);
+        let events = events.lock().unwrap();
+        let terminals = terminal_events_for(&events, job_id);
+        assert_eq!(terminals.len(), 1);
+        assert_eq!(terminals[0]["cancelled"], true);
+        assert!(terminals[0]["error"].is_null());
+        let dones = dones.lock().unwrap();
+        let completions = done_events_for(&dones, job_id);
+        assert_eq!(completions.len(), 1);
+        assert_eq!(completions[0]["code"], -1);
+        let logs = logs.lock().unwrap();
+        assert!(
+            logs.iter()
+                .any(|line| line.contains("scan failed after stop")),
+            "worker error must stay in the job log: {logs:?}"
+        );
+    }
+
+    #[test]
+    fn worker_error_without_stop_settles_as_failed_with_the_error() {
+        let (app, events, dones, logs) = observed_app_with_logs();
+        let state = app.state::<JobState>();
+        let token = CancellationToken::new();
+        let (event_tx, event_rx) = mkv_core::pipeline::create_event_channel(16);
+        let (log_tx, log_rx) = mkv_core::pipeline::create_log_channel(8);
+        let worker = async move {
+            event_tx.send(batch_start()).await.unwrap();
+            log_tx.send("probing batch".to_string()).await.unwrap();
+            // No Stop was requested, so the failure must surface as a failed
+            // terminal carrying the error rather than a cancelled one.
+            Err("scan failed before any stop".to_string())
+        };
+        let job_id = start_supervised_job(
+            app.handle().clone(),
+            &state,
+            SupervisedJobConfig {
+                mode: "remux".into(),
+                input_dir: Some("/anime".into()),
+                cancel_token: token,
+            },
+            event_rx,
+            log_rx,
+            worker,
+        )
+        .unwrap();
+        wait_for_job_done(&dones, job_id);
+
+        let events = events.lock().unwrap();
+        let terminals = terminal_events_for(&events, job_id);
+        assert_eq!(terminals.len(), 1);
+        assert_eq!(terminals[0]["cancelled"], false);
+        assert_eq!(terminals[0]["error"], "scan failed before any stop");
+        let dones = dones.lock().unwrap();
+        let completions = done_events_for(&dones, job_id);
+        assert_eq!(completions.len(), 1);
+        assert_ne!(completions[0]["code"], -1);
+        let logs = logs.lock().unwrap();
+        assert!(
+            logs.iter()
+                .any(|line| line.contains("scan failed before any stop")),
+            "worker error must reach the job log: {logs:?}"
+        );
     }
 
     #[test]

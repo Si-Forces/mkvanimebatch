@@ -69,7 +69,11 @@ jobs:
       - name: Run Clippy linter
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # `MKV_REQUIRE_MEDIA_TOOLS=1` makes the real-media regression fail instead of
+      # skipping when FFmpeg/MKVToolNix are missing. Windows keeps the local skip.
       - name: Run Rust workspace unit and integration tests
+        env:
+          MKV_REQUIRE_MEDIA_TOOLS: ${{ matrix.os == 'ubuntu-24.04' && '1' || '' }}
         run: cargo test --workspace --verbose
 
       - name: Build Standalone mkv-cli Binary (Release)

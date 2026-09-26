@@ -4,7 +4,7 @@
 
 "use strict";
 
-import { JobController } from "./job-controller.js";
+import { BULK_SELECTION_CONTROLS, JobController } from "./job-controller.js";
 import { QueueTracker } from "./queue-view.js";
 import { classifyLine } from "./log-classify.js";
 import { createTelemetryLoop } from "./telemetry.js";
@@ -41,7 +41,7 @@ async function restoreQueueFromSnapshot(controllers) {
   let active = null;
   let unlistenEvent = null;
   let unlistenDone = null;
-  JobCoordinator.isStarting = true;
+  JobCoordinator.isRestoring = true;
   JobCoordinator.syncControls();
   const deliver = (type, payload) => {
     if (active) active.handleSnapshotSignal(type, payload);
@@ -75,8 +75,8 @@ async function restoreQueueFromSnapshot(controllers) {
   } finally {
     unlistenEvent?.();
     unlistenDone?.();
-    if (JobCoordinator.isStarting) {
-      JobCoordinator.isStarting = false;
+    if (JobCoordinator.isRestoring) {
+      JobCoordinator.isRestoring = false;
       JobCoordinator.syncControls();
     }
   }
@@ -822,10 +822,11 @@ function initApp() {
     if (customPathInput) customPathInput.value = "";
   });
 
-  safeAddListener("remux-select-all", "click", () => remuxQueue.selectAll());
-  safeAddListener("remux-deselect-all", "click", () => remuxQueue.deselectAll());
-  safeAddListener("extract-select-all", "click", () => extractQueue.selectAll());
-  safeAddListener("extract-deselect-all", "click", () => extractQueue.deselectAll());
+  // The controllers are declared further down in initApp; these handlers run
+  // after initialization, so the reference is resolved at click time.
+  for (const { id, mode, select } of BULK_SELECTION_CONTROLS) {
+    safeAddListener(id, "click", () => controllers[mode]?.applyBulkSelection(mode, select));
+  }
 
   // ─── Active Profile Dropdown Menu Handlers ────────────────────────────────
   const profileBtn = document.getElementById("active-profile-btn");

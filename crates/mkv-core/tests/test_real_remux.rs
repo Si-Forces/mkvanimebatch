@@ -1,3 +1,4 @@
+use std::env;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -12,6 +13,37 @@ fn media_command(command: &mut Command) {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// Media binaries this suite drives for real.
+const MEDIA_TOOLS: [&str; 3] = ["ffmpeg", "mkvmerge", "mkvextract"];
+
+/// Returns `false` when the real-media regression may be skipped.
+///
+/// Required verification (CI and the release gate) sets
+/// `MKV_REQUIRE_MEDIA_TOOLS=1`, which turns a missing binary into a failure so
+/// a release cannot publish with this regression silently skipped. Developer-local
+/// runs without the variable keep the documented skip behaviour.
+fn media_tools_available() -> bool {
+    let missing: Vec<&str> = MEDIA_TOOLS
+        .iter()
+        .copied()
+        .filter(|binary| Command::new(binary).arg("--version").output().is_err())
+        .collect();
+    if missing.is_empty() {
+        return true;
+    }
+    assert_ne!(
+        env::var("MKV_REQUIRE_MEDIA_TOOLS").as_deref(),
+        Ok("1"),
+        "required media tools are unavailable: {}",
+        missing.join(", ")
+    );
+    eprintln!(
+        "Skipping real-media regression: install {} to run it",
+        missing.join(", ")
+    );
+    false
 }
 
 async fn remux_media_case(input: &Path, assets: &Path, output: &Path) -> (String, String, Vec<u8>) {
@@ -75,11 +107,7 @@ async fn remux_media_case(input: &Path, assets: &Path, output: &Path) -> (String
 
 #[tokio::test]
 async fn test_real_remux_subtitle_ladder_and_advertised_cover_names() {
-    if ["ffmpeg", "mkvmerge", "mkvextract"]
-        .iter()
-        .any(|binary| Command::new(binary).arg("--version").output().is_err())
-    {
-        eprintln!("Skipping real-media regression: FFmpeg/MKVToolNix not installed");
+    if !media_tools_available() {
         return;
     }
     let tmp = tempdir().unwrap();

@@ -569,6 +569,68 @@ fn test_cover_nearest_directory_then_kind_and_natural_ties() {
 }
 
 #[test]
+fn test_bare_cover_must_be_adjacent_sibling_of_video() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let season = root.join("Season 01");
+    fs::create_dir_all(&season).unwrap();
+    let root_video = make_video(&root.join("Show - 01.mkv"));
+    let nested_video = make_video(&season.join("Show - 01.mkv"));
+    let root_bare = root.join("Show - 01.jpg");
+    for path in [&root_video.path, &nested_video.path, &root_bare] {
+        fs::write(path, b"media").unwrap();
+    }
+    let source = InspectedVideo::new(MkvmergeMetadata {
+        attachments: vec![MkvAttachment {
+            file_name: Some("cover.jpg".into()),
+            content_type: Some("image/jpeg".into()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    let dirs = ancestor_dirs(&season, &root);
+    let discover = || AssetResolver::discover(&dirs, &season.join("fonts"), None, None, None);
+
+    // An exact sibling bare cover still satisfies the adjacent form.
+    assert_eq!(
+        discover()
+            .resolve_for(&root_video, None, None, None)
+            .unwrap()
+            .cover_file,
+        Some(root_bare.clone())
+    );
+    // A nested same-stem video keeps its embedded art instead of the root bare cover.
+    assert_eq!(
+        discover()
+            .resolve_for(&nested_video, Some(&source), None, None)
+            .unwrap()
+            .cover_file,
+        None
+    );
+    // Episode-aware ancestor matching is unaffected by the adjacency rule.
+    let ancestor_episode = root.join("Show - 01_cover.jpg");
+    fs::write(&ancestor_episode, b"image").unwrap();
+    assert_eq!(
+        discover()
+            .resolve_for(&nested_video, Some(&source), None, None)
+            .unwrap()
+            .cover_file,
+        Some(ancestor_episode.clone())
+    );
+    // Directory-wide `cover`/`folder` ancestors still apply to the nested video.
+    fs::remove_file(&ancestor_episode).unwrap();
+    let ancestor_cover = root.join("cover.jpg");
+    fs::write(&ancestor_cover, b"image").unwrap();
+    assert_eq!(
+        discover()
+            .resolve_for(&nested_video, Some(&source), None, None)
+            .unwrap()
+            .cover_file,
+        Some(ancestor_cover)
+    );
+}
+
+#[test]
 fn test_unparsed_cover_and_source_art_fallback_boundary() {
     let tmp = tempdir().unwrap();
     let root = tmp.path().join("root");

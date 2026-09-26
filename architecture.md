@@ -145,7 +145,7 @@ mkvanimebatch/
 │   │   │   ├── extract.rs           # mkvextract invocation for subtitles, chapters, covers, and fonts
 │   │   │   └── pipeline.rs          # BatchPipeline orchestration, tokio JoinSet, dual-channel streaming
 │   │   ├── benches/                 # bench_pipeline.rs (validation throughput, dry-run, font dedup, event streaming)
-│   │   └── tests/                   # 8 integration suites: test_assets, test_cross_regex, test_domain, test_extract, test_fonts, test_pipeline, test_remux, test_scan
+│   │   └── tests/                   # 10 integration suites: test_assets, test_cross_regex, test_domain, test_extract, test_fonts, test_pipeline, test_pipeline_assignment_args, test_real_remux, test_remux, test_scan
 │   └── mkv-cli/                     # Headless Standalone CLI Binary
 │       ├── Cargo.toml
 │       └── src/
@@ -286,7 +286,7 @@ flowchart TD
 
 5. **Chapter & Cover Matching Conventions (ADR-0004)**:
    - Chapters: Matches episode-named XML chapters (`<ep>_chapters.xml`). Leftover unassociated XML chapters in the release directory are automatically claimed only if exactly one unmatched chapter file and one eligible un-chaptered video exist (`claim_leftover_chapters`). Ambiguous groups of multiple unmatched chapters or un-chaptered videos remain unclaimed; no arbitrary natural sort pairing is performed.
-   - Covers: Directory covers are strictly `cover.<ext>` and `folder.<ext>`. Episode covers support `<video-stem>_cover.<ext>`, `<video-stem>.cover.<ext>`, and exact adjacent `<video-stem>.<ext>`. Inapplicable `*_cover` files are never treated as directory covers. Nearest applicable directory wins before cover kind. Within a directory, ranking follows: episode `_cover` > `.cover` > exact adjacent bare stem > directory `cover` > `folder`. Equal-tier candidates break ties by natural filename order then full filename. Local and ancestor external covers supersede embedded artwork; explicit `--assets-dir` covers apply only when embedded art is absent.
+   - Covers: Directory covers are strictly `cover.<ext>` and `folder.<ext>`. Episode covers support `<video-stem>_cover.<ext>`, `<video-stem>.cover.<ext>`, and exact adjacent `<video-stem>.<ext>`. Inapplicable `*_cover` files are never treated as directory covers. Nearest applicable directory wins before cover kind. Within a directory, ranking follows: episode `_cover` > `.cover` > exact adjacent bare stem > directory `cover` > `folder`. The bare-stem form additionally requires the identical parent directory, so a root bare cover never attaches to a nested same-stem video. Because the fallback index ranks by the assets directory's own layout rather than the video's ancestors, this also means a bare-stem cover inside `--assets-dir` only matches a video that lives in that same directory; use the `cover.<ext>`/`folder.<ext>` or `_cover`/`.cover` forms for cross-directory `--assets-dir` covers. Equal-tier candidates break ties by natural filename order then full filename. Local and ancestor external covers supersede embedded artwork; explicit `--assets-dir` covers apply only when embedded art is absent.
 
 ---
 
@@ -667,7 +667,7 @@ The system architecture represents the cumulative implementation of 14 formal Ar
 | [**0007**](docs/adr/0007-in-process-engine-bridge.md) | In-Process Engine Bridge | Retired subprocess sidecars; connected Tauri directly to `mkv-core` with panic isolation and two-phase teardown. Implemented. | `commands.rs`, `process.rs` |
 | [**0008**](docs/adr/0008-typed-engine-bridge-and-track-assignment-model.md) | Typed Engine Bridge & Track Assignments | Replaced string CLI args with typed `BatchRequest`, fail-fast preflight validation, and `JobSnapshot` projection. Includes [2026-09-24 amendment](docs/adr/0008-typed-engine-bridge-and-track-assignment-model.md#amendment--2026-09-24) (implemented runtime contracts: S03 resolution fail-closed abort, S05 active batch snapshot restore across reloads, S08 breaking cutover removing `keep_fonts`). | `request.rs`, `preset.rs`, `process.rs` |
 | [**0009**](docs/adr/0009-streaming-card-progress-and-item-duration-model.md) | Streaming Card Progress & Item Duration | Authoritative engine-owned `duration_sec`, indeterminate-to-determinate card transitions, 1Hz presentation heartbeat. Implemented. | `pipeline.rs`, `queue-state.js`, `queue-view.js` |
-| [**0010**](docs/adr/0010-mainline-rust-cutover-and-python-decommissioning.md) | Mainline Rust Engine Cutover | Decommissioned legacy Python codebase; established unified 1.0.0 semantic versioning and CI status gate. Implemented. | Root `Cargo.toml`, `.github/workflows/ci.yml` |
+| [**0010**](docs/adr/0010-mainline-rust-cutover-and-python-decommissioning.md) | Mainline Rust Engine Cutover | Decommissioned legacy Python codebase; established unified 1.0.0 semantic versioning and CI/release status gates. Implemented. | Root `Cargo.toml`, `.github/workflows/ci.yml`, `.github/workflows/release.yml` |
 | [**0011**](docs/adr/0011-selected-items-queue-and-concurrency-pipelining.md) | Selected Items Queue & Concurrency Pipelining | Global Tokio JoinSet, dual-governor I/O semaphore, parallel probing, enriched 1:1 track assignment modal. Implemented. | `pipeline.rs`, `request.rs`, `app.js` |
 | [**0012**](docs/adr/0012-track-assignment-override-execution-and-seam-unification.md) | Track Assignment Override Execution and Seam Unification | Unified full TrackAssignment execution into mkvmerge args (offset, language, title); eliminated sub_assignments flattening. Implemented. | `pipeline.rs`, `remux.rs`, `mkv-cli` |
 | [**0013**](docs/adr/0013-asynchronous-probing-and-transcode-governance-performance-overhaul.md) | Asynchronous Probing and Transcode Governance Performance Overhaul | Asynchronous mkvmerge fallback probing, transcode thread governor, downshifted complexity (5), fine-grained font seeding lock, zero-copy cache serialization. Accepted and implemented. | `scan.rs`, `request.rs`, `fonts.rs`, `pipeline.rs` |
@@ -692,4 +692,6 @@ node --check desktop-tauri/ui/app.js
 node --test desktop-tauri/ui/*.test.js
 ```
 
-All pull requests and releases are gated by the consolidated `.github/workflows/ci.yml` workflow, requiring the `ci-status` aggregation check to pass across both Ubuntu and Windows runner environments.
+The `mkv-core` integration suite `test_real_remux` drives real FFmpeg/MKVToolNix binaries. Developer-local `cargo test` runs skip it when the tools are absent; required CI and release verification set `MKV_REQUIRE_MEDIA_TOOLS=1`, which makes a missing `ffmpeg`, `mkvmerge`, or `mkvextract` a hard failure on the Ubuntu runner.
+
+Releases additionally require `.github/workflows/release.yml`, whose `ci-status` gate depends on the `workspace-checks` job that runs the non-skipping real-media regression.

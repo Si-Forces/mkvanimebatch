@@ -846,19 +846,30 @@ async fn test_missing_assignment_aborts_entire_remux_plan() {
             && err.unwrap().contains(&manual.display().to_string())));
         assert!(outcomes.iter().any(|(id, _, err)| *id == "Show - 01.mkv"
             && err.unwrap().contains("Batch planning aborted")));
-        assert_eq!(
-            events
-                .iter()
-                .filter(|event| matches!(
-                    event,
-                    JobEvent::BatchComplete {
-                        success: false,
-                        cancelled: false,
-                        ..
-                    }
-                ))
-                .count(),
-            1
+        let terminal_count = events
+            .iter()
+            .filter(|event| matches!(event, JobEvent::BatchComplete { .. }))
+            .count();
+        assert_eq!(terminal_count, 1, "batch must settle exactly once");
+        let terminal_index = events
+            .iter()
+            .position(|event| matches!(event, JobEvent::BatchComplete { .. }))
+            .expect("expected a terminal event");
+        assert!(matches!(
+            events[terminal_index],
+            JobEvent::BatchComplete {
+                success: false,
+                cancelled: false,
+                ..
+            }
+        ));
+        let last_item_event = events
+            .iter()
+            .rposition(|event| matches!(event, JobEvent::ItemComplete { .. }))
+            .expect("planning failure must settle every selected item");
+        assert!(
+            last_item_event < terminal_index,
+            "the single terminal must follow every item error"
         );
         assert_eq!(fs::read_dir(output.path()).unwrap().count(), 0);
     }
@@ -1105,4 +1116,186 @@ async fn test_pipeline_extract_persists_font_hash_memo() {
         cached_hash.is_some(),
         "persisted memo must contain font hash"
     );
+}
+
+fn manual_subtitle_assignment(target: &str, asset: &str) -> mkv_core::request::TrackAssignment {
+    mkv_core::request::TrackAssignment {
+        target_video: target.into(),
+        asset_path: asset.into(),
+        track_type: Some("subtitle".into()),
+        language: Some("ind".into()),
+        title: Some("Bahasa Indonesia".into()),
+        offset_ms: Some(1250),
+    }
+}
+
+#[tokio::test]
+async fn test_assignment_target_excluded_from_discovery_fails_closed() {
+    let input = tempdir().unwrap();
+    let output = tempdir().unwrap();
+    fs::create_dir(input.path().join("Output")).unwrap();
+    let discovered = input.path().join("Show - 01.mkv");
+    fs::write(&discovered, b"video").unwrap();
+    fs::write(input.path().join("Output/hidden.mkv"), b"hidden video").unwrap();
+    fs::write(input.path().join("Show - 01.ass"), b"automatic subtitle").unwrap();
+    fs::write(input.path().join("manual.ass"), b"manual subtitle").unwrap();
+
+    let config = PipelineConfig {
+        mode: PipelineMode::Remux,
+        input_dir: input.path().to_path_buf(),
+        out_dir: Some(output.path().to_path_buf()),
+        dry_run: true,
+        track_assignments: Some(vec![manual_subtitle_assignment(
+            "Output/hidden.mkv",
+            "manual.ass",
+        )]),
+        ..Default::default()
+    };
+    let (tx, mut rx) = create_event_channel(16);
+    let pipeline = BatchPipeline::new(config, Some(tx), CancellationToken::new());
+
+    let err = pipeline.run().await.unwrap_err();
+    assert!(err.contains("Output/hidden.mkv"), "{err}");
+    assert!(
+        rx.try_recv().is_err(),
+        "an unusable assignment must abort before BatchStart"
+    );
+    assert_eq!(fs::read_dir(output.path()).unwrap().count(), 0);
+}
+
+#[tokio::test]
+async fn test_assignment_target_outside_active_selection_fails_closed() {
+    let input = tempdir().unwrap();
+    let output = tempdir().unwrap();
+    let selected = input.path().join("Show - 01.mkv");
+    let excluded = input.path().join("Show - 02.mkv");
+    fs::write(&selected, b"first video").unwrap();
+    fs::write(&excluded, b"second video").unwrap();
+    fs::write(input.path().join("Show - 01.ass"), b"automatic subtitle").unwrap();
+    fs::write(input.path().join("manual.ass"), b"manual subtitle").unwrap();
+
+    let config = PipelineConfig {
+        mode: PipelineMode::Remux,
+        input_dir: input.path().to_path_buf(),
+        out_dir: Some(output.path().to_path_buf()),
+        dry_run: true,
+        track_assignments: Some(vec![manual_subtitle_assignment(
+            "Show - 02.mkv",
+            "manual.ass",
+        )]),
+        selected_items: Some(vec!["Show - 01.mkv".into()]),
+        ..Default::default()
+    };
+    let (tx, mut rx) = create_event_channel(16);
+    let pipeline = BatchPipeline::new(config, Some(tx), CancellationToken::new());
+
+    let err = pipeline.run().await.unwrap_err();
+    assert!(err.contains("Show - 02.mkv"), "{err}");
+    assert!(rx.try_recv().is_err(), "{err}");
+    assert_eq!(fs::read_dir(output.path()).unwrap().count(), 0);
+}
+
+#[tokio::test]
+async fn test_every_unmatched_assignment_target_fails_in_one_error() {
+    let input = tempdir().unwrap();
+    let output = tempdir().unwrap();
+    fs::create_dir(input.path().join("Output")).unwrap();
+    fs::write(input.path().join("Show - 01.mkv"), b"video").unwrap();
+    fs::write(input.path().join("Output/hidden.mkv"), b"hidden video").unwrap();
+    fs::write(input.path().join("Show - 01.ass"), b"automatic subtitle").unwrap();
+    fs::write(input.path().join("manual.ass"), b"manual subtitle").unwrap();
+
+    let config = PipelineConfig {
+        mode: PipelineMode::Remux,
+        input_dir: input.path().to_path_buf(),
+        out_dir: Some(output.path().to_path_buf()),
+        dry_run: true,
+        track_assignments: Some(vec![
+            manual_subtitle_assignment("Output/hidden.mkv", "manual.ass"),
+            manual_subtitle_assignment("ghost.mkv", "manual.ass"),
+            manual_subtitle_assignment("Season 02/Show - 02.mkv", "manual.ass"),
+        ]),
+        ..Default::default()
+    };
+    let (tx, mut rx) = create_event_channel(16);
+    let pipeline = BatchPipeline::new(config, Some(tx), CancellationToken::new());
+
+    let err = pipeline.run().await.unwrap_err();
+    for target in ["Output/hidden.mkv", "ghost.mkv", "Season 02/Show - 02.mkv"] {
+        assert!(err.contains(target), "{target} missing from: {err}");
+    }
+    assert!(rx.try_recv().is_err(), "{err}");
+    assert_eq!(fs::read_dir(output.path()).unwrap().count(), 0);
+}
+
+#[tokio::test]
+async fn test_valid_assignments_still_resolve_within_the_active_selection() {
+    let input = tempdir().unwrap();
+    let output = tempdir().unwrap();
+    let unparsed = input.path().join("raw_capture.mkv");
+    let automatic = input.path().join("Show - 01.mkv");
+    fs::write(&unparsed, b"unparsed video").unwrap();
+    fs::write(&automatic, b"video").unwrap();
+    fs::write(input.path().join("Show - 01.ass"), b"automatic subtitle").unwrap();
+    fs::write(input.path().join("manual.ass"), b"manual subtitle").unwrap();
+
+    let cache = Arc::new(PersistentInspectCache::new(None, true));
+    cache.put_path(&unparsed, sample_video_metadata());
+    cache.put_path(&automatic, sample_video_metadata());
+
+    let selected = vec!["raw_capture.mkv".into(), "Show - 01.mkv".into()];
+    let config = PipelineConfig {
+        mode: PipelineMode::Remux,
+        input_dir: input.path().to_path_buf(),
+        out_dir: Some(output.path().to_path_buf()),
+        dry_run: true,
+        cache: Some(cache),
+        track_assignments: Some(vec![manual_subtitle_assignment(
+            "raw_capture.mkv",
+            "manual.ass",
+        )]),
+        selected_items: Some(selected.clone()),
+        ..Default::default()
+    };
+    let (tx, mut rx) = create_event_channel(32);
+    let pipeline = BatchPipeline::new(config, Some(tx), CancellationToken::new());
+
+    let summary = pipeline.run().await.unwrap();
+    assert_eq!(
+        (
+            summary.total,
+            summary.completed,
+            summary.skipped,
+            summary.errors
+        ),
+        (2, 2, 0, 0)
+    );
+
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(event);
+    }
+    let items = events
+        .iter()
+        .find_map(|event| match event {
+            JobEvent::BatchStart { items, .. } => items.clone(),
+            _ => None,
+        })
+        .expect("expected BatchStart event");
+    assert_eq!(
+        items
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>(),
+        selected
+    );
+    let outcomes: HashMap<_, _> = events
+        .iter()
+        .filter_map(|event| match event {
+            JobEvent::ItemComplete { id, status, .. } => Some((id.as_str(), *status)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(outcomes.get("raw_capture.mkv"), Some(&ItemOutcome::Planned));
+    assert_eq!(outcomes.get("Show - 01.mkv"), Some(&ItemOutcome::Planned));
 }

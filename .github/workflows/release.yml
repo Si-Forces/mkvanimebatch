@@ -49,7 +49,9 @@ jobs:
             libwebkit2gtk-4.1-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
-            patchelf
+            patchelf \
+            ffmpeg \
+            mkvtoolnix
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -69,7 +71,12 @@ jobs:
       - name: Run Clippy linter
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # `MKV_REQUIRE_MEDIA_TOOLS=1` makes the real-media regression fail instead of
+      # skipping when FFmpeg/MKVToolNix are missing, so a release cannot publish
+      # with real media output unverified. Windows keeps the local skip behaviour.
       - name: Run Rust workspace unit and integration tests
+        env:
+          MKV_REQUIRE_MEDIA_TOOLS: ${{ matrix.os == 'ubuntu-24.04' && '1' || '' }}
         run: cargo test --workspace --verbose
 
       - name: Build Desktop App Binary (Windows Release)
@@ -98,6 +105,8 @@ jobs:
 
   # ────────────────────────────────────────────────────────────────────────────
   # 3. Release Verification Gate
+  # Depends on `workspace-checks`, which runs the Rust suites including the
+  # non-skipping real-media regression (FFmpeg/MKVToolNix installed, required).
   # ────────────────────────────────────────────────────────────────────────────
   ci-status:
     name: Release Verification Gate

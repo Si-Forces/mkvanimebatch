@@ -411,27 +411,40 @@ export function reduceQueueEvent(state, event, now = Date.now()) {
       }
       if (Array.isArray(event.items)) {
         state.batchItemIds = event.items.filter(it => it && it.id).map(it => it.id);
+        // order and knownOrder are tracked with independent membership sets: a
+        // snapshot restore can hand back a knownOrder that no longer matches
+        // order, and the submitter's BatchStart order is authoritative for both.
+        const inOrder = new Set(state.order);
+        const inKnown = new Set(state.knownOrder);
         for (const it of event.items) {
-          if (!it || !it.id || state.items.has(it.id)) continue;
-          state.items.set(it.id, {
-            id: it.id,
-            name: it.file || it.id,
-            release: ".",
-            metadata: null,
-            inspectionError: null,
-            status: "queued",
-            startTime: null,
-            durationSec: null,
-            durationFormatted: null,
-            progress: null,
-            speed: null,
-            eta: null,
-            reason: null,
-            error: null,
-            outcome: null,
-          });
-          if (!state.order.includes(it.id)) {
+          if (!it || !it.id) continue;
+          if (!state.items.has(it.id)) {
+            state.items.set(it.id, {
+              id: it.id,
+              name: it.file || it.id,
+              release: ".",
+              metadata: null,
+              inspectionError: null,
+              status: "queued",
+              startTime: null,
+              durationSec: null,
+              durationFormatted: null,
+              progress: null,
+              speed: null,
+              eta: null,
+              reason: null,
+              error: null,
+              outcome: null,
+            });
+          }
+          // Submitter order is authoritative: append each participant once.
+          if (!inOrder.has(it.id)) {
             state.order.push(it.id);
+            inOrder.add(it.id);
+          }
+          if (!inKnown.has(it.id)) {
+            state.knownOrder.push(it.id);
+            inKnown.add(it.id);
           }
         }
         state.totalCount = state.items.size;

@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { createJobCoordinator } from "./job-coordinator.js";
-import { JobController, extractInspectionOptions } from "./job-controller.js";
+import { BULK_SELECTION_CONTROLS, JobController, extractInspectionOptions } from "./job-controller.js";
 import { QueueTracker } from "./queue-view.js";
 
 class FakeElement {
@@ -411,6 +411,7 @@ test("job controller forwards snapshotted execution args incl zero io-jobs and n
 });
 
 test("deferred preflight stop releases ownership, finalizes cancelled queue, and avoids run_job for option-bearing preflight", async t => {
+  const bulkButtons = BULK_SELECTION_CONTROLS.map(({ id }) => [id, new FakeElement()]);
   const elements = new Map([
     ["remux-input-dir", new FakeElement("/my-anime")],
     ["remux-workers", new FakeElement("4")],
@@ -420,6 +421,7 @@ test("deferred preflight stop releases ownership, finalizes cancelled queue, and
     ["remux-stop", new FakeElement()],
     ["remux-log", new FakeElement()],
     ["remux-status", new FakeElement()],
+    ...bulkButtons,
   ]);
   const previousDocument = globalThis.document;
   globalThis.document = {
@@ -476,6 +478,8 @@ test("deferred preflight stop releases ownership, finalizes cancelled queue, and
   assert.equal(coordinator.activeMode, "remux");
   assert.equal(scanCalls.length, 1);
   assert.deepEqual(scanCalls[0].opts.options, { workers: 4, ioJobs: 2, noCache: true });
+  for (const [, button] of bulkButtons) assert.equal(button.disabled, true, "bulk control must be disabled while preflight is pending");
+  assert.equal(controller.applyBulkSelection("remux", false), false);
 
   await controller.stop();
 
@@ -489,6 +493,7 @@ test("deferred preflight stop releases ownership, finalizes cancelled queue, and
   assert.equal(tracker.state.batchCancelled, true);
   assert.equal(controller.lifecycle, "cancelled");
   assert.equal(controller.running, false);
+  for (const [, button] of bulkButtons) assert.equal(button.disabled, false, "bulk control must return after abort");
 });
 
 test("job controller fails immediately when workers or io-jobs are invalid", async t => {
@@ -793,6 +798,205 @@ test("Start preserves selected order across real rescans and rejects vanished ID
   assert.equal(coordinator.activeMode, null);
   assert.ok(logs.some(message => message.includes(two) && message.includes("disappeared")));
 });
+
+test("Start freezes bulk selection for the whole preflight and submits only the captured IDs", async t => {
+  const bulkButtons = BULK_SELECTION_CONTROLS.map(({ id }) => [id, new FakeElement()]);
+  const elements = new Map([
+    ["remux-input-dir", new FakeElement("/anime/series")],
+    ["remux-episode-list", new FakeElement()],
+    ["remux-queue-count", new FakeElement()],
+    ["remux-run", new FakeElement()],
+    ["remux-stop", new FakeElement()],
+    ["remux-log", new FakeElement()],
+    ["remux-status", new FakeElement()],
+    ...bulkButtons,
+  ]);
+  const previousDocument = globalThis.document;
+  const previousRaf = globalThis.requestAnimationFrame;
+  globalThis.document = {
+    getElementById: id => elements.get(id) ?? null,
+    querySelectorAll: () => [],
+    querySelector: () => null,
+    createElement: () => new FakeElement(),
+    createDocumentFragment: () => new FakeElement(),
+  };
+  globalThis.requestAnimationFrame = callback => callback();
+  t.after(() => {
+    globalThis.document = previousDocument;
+    globalThis.requestAnimationFrame = previousRaf;
+  });
+
+  const manifest = (...ids) => ({ version: 2, items: ids.map(id => ({ id, name: id })) });
+  const tracker = new QueueTracker("remux");
+  const one = "Series/01.mkv";
+  const two = "Series/02.mkv";
+  const three = "Series/03.mkv";
+  assert.equal(tracker.acceptInspection(tracker.startScan(), "/anime/series", manifest(one, two)), true);
+  tracker.reorderCard(two, "up");
+  assert.deepEqual(tracker.getSelectedOrderedItemIds(), [two, one]);
+
+  let resolveScan;
+  const scanGate = new Promise(resolve => {
+    resolveScan = resolve;
+  });
+  const requests = [];
+  const listeners = new Map();
+  const coordinator = createJobCoordinator();
+  const runtime = {
+    coordinator,
+    appendLog() {},
+    clearLog() {},
+    closeSubAssignModal() {},
+    queueFor: () => tracker,
+    safeAddListener() {},
+    scanInputDirectory: async (path, mode, { force }) => {
+      assert.equal(path, "/anime/series");
+      assert.equal(mode, "remux");
+      assert.equal(force, true);
+      return scanGate;
+    },
+    updateWorkerChips() {},
+    telemetryLoop: { setJobActive() {} },
+    async listen(event, callback) { listeners.set(event, callback); return () => listeners.delete(event); },
+    async invoke(command, args) {
+      if (command === "run_job") { requests.push(args.request); return 77; }
+      throw new Error(`Unexpected command ${command}`);
+    },
+  };
+  const controller = new JobController("remux", runtime);
+
+  // A queue mid-inspection is not editable either, with no coordinator involved.
+  const scanningToken = tracker.startScan();
+  assert.equal(controller.applyBulkSelection("remux", false), false);
+  assert.deepEqual(tracker.state.order, [two, one]);
+  assert.equal(tracker.acceptInspection(scanningToken, "/anime/series", manifest(one, two)), true);
+
+  const startPromise = controller.start();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(coordinator.activeMode, "remux");
+  assert.equal(requests.length, 0);
+  for (const [, button] of bulkButtons) assert.equal(button.disabled, true, "bulk control must be disabled during preflight");
+
+  // The user clicks both bulk buttons mid-preflight: neither may reach the queue.
+  assert.equal(controller.applyBulkSelection("remux", false), false);
+  assert.equal(controller.applyBulkSelection("remux", true), false);
+  assert.deepEqual(tracker.getSelectedOrderedItemIds(), [two, one]);
+
+  // Card-level controls must obey the same freeze. The guard lives on the
+  // mutation, not on the disabled attribute: the forced scan below re-renders
+  // the cards, and a freshly mounted checkbox arrives enabled.
+  const list = elements.get("remux-episode-list");
+  assert.equal(tracker.selectionLocked, true, "tracker must refuse selection mutations during preflight");
+  const checkbox = { dataset: { itemId: one }, checked: false };
+  list.handlers.get("change")({ target: { closest: () => checkbox } });
+  assert.equal(tracker.state.items.get(one).selected, true, "card checkbox must not deselect during preflight");
+  assert.equal(checkbox.checked, true, "a refused checkbox click must be reverted in the DOM");
+  const reorderBtn = { dataset: { itemId: one }, classList: { contains: () => false } };
+  list.handlers.get("click")({ target: { closest: () => reorderBtn } });
+  tracker.selectAll();
+  tracker.deselectAll();
+  assert.deepEqual(tracker.state.order, [two, one], "card reorder must not change order during preflight");
+  assert.deepEqual(tracker.getSelectedOrderedItemIds(), [two, one], "card controls must not change selection during preflight");
+
+  tracker.acceptInspection(tracker.startScan(), "/anime/series", manifest(one, two, three));
+  assert.equal(tracker.selectionLocked, true, "a re-rendered card must not escape the freeze");
+  list.handlers.get("change")({ target: { closest: () => ({ dataset: { itemId: one }, checked: false }) } });
+  assert.deepEqual(tracker.getSelectedOrderedItemIds(), [two, one]);
+
+  tracker.acceptInspection(tracker.startScan(), "/anime/series", manifest(one, two, three));
+  resolveScan(true);
+  await startPromise;
+
+  assert.deepEqual(requests.map(request => request.selected_items), [[two, one]]);
+  assert.deepEqual(tracker.getSelectedOrderedItemIds(), [two, one]);
+  assert.equal(tracker.state.items.get(three).selected, false);
+  assert.equal(controller.jobId, 77);
+
+  listeners.get("job-done")({ payload: { mode: "remux", job_id: 77, code: 0 } });
+  assert.equal(coordinator.activeMode, null);
+  assert.equal(tracker.selectionLocked, false, "the card freeze must lift when the job releases ownership");
+  list.handlers.get("change")({ target: { closest: () => ({ dataset: { itemId: one }, checked: false }) } });
+  assert.equal(tracker.state.items.get(one).selected, false, "card selection must work again once idle");
+  for (const [, button] of bulkButtons) assert.equal(button.disabled, false, "bulk control must return after completion");
+  assert.equal(controller.applyBulkSelection("remux", false), true);
+  assert.deepEqual(tracker.getSelectedOrderedItemIds(), []);
+});
+
+test("An idle coordinator freezes only the queue that is scanning, not the other tab", t => {
+  const bulkButtons = BULK_SELECTION_CONTROLS.map(({ id }) => [id, new FakeElement()]);
+  const elements = new Map([
+    ["remux-episode-list", new FakeElement()],
+    ["remux-queue-count", new FakeElement()],
+    ["remux-run", new FakeElement()],
+    ["remux-stop", new FakeElement()],
+    ["remux-log", new FakeElement()],
+    ["remux-status", new FakeElement()],
+    ["extract-episode-list", new FakeElement()],
+    ["extract-queue-count", new FakeElement()],
+    ["extract-run", new FakeElement()],
+    ["extract-stop", new FakeElement()],
+    ["extract-log", new FakeElement()],
+    ["extract-status", new FakeElement()],
+    ...bulkButtons,
+  ]);
+  const previousDocument = globalThis.document;
+  const previousRaf = globalThis.requestAnimationFrame;
+  globalThis.document = {
+    getElementById: id => elements.get(id) ?? null,
+    querySelectorAll: () => [],
+    querySelector: () => null,
+    createElement: () => new FakeElement(),
+    createDocumentFragment: () => new FakeElement(),
+  };
+  globalThis.requestAnimationFrame = callback => callback();
+  t.after(() => {
+    globalThis.document = previousDocument;
+    globalThis.requestAnimationFrame = previousRaf;
+  });
+
+  const manifest = (...ids) => ({ version: 2, items: ids.map(id => ({ id, name: id })) });
+  const queues = { remux: new QueueTracker("remux"), extract: new QueueTracker("extract") };
+  for (const mode of Object.keys(queues)) {
+    const tracker = queues[mode];
+    assert.equal(tracker.acceptInspection(tracker.startScan(), `/anime/${mode}`, manifest(`${mode}.mkv`)), true);
+  }
+  const coordinator = createJobCoordinator();
+  const runtime = {
+    coordinator,
+    appendLog() {},
+    clearLog() {},
+    closeSubAssignModal() {},
+    queueFor: mode => queues[mode],
+    safeAddListener() {},
+    scanInputDirectory: async () => true,
+    updateWorkerChips() {},
+    telemetryLoop: { setJobActive() {} },
+    async listen() { return () => {}; },
+    async invoke() { return 1; },
+  };
+  const remuxController = new JobController("remux", runtime);
+  new JobController("extract", runtime);
+
+  // The remux queue is mid-rescan while the coordinator is idle.
+  const rescanToken = queues.remux.startScan();
+  coordinator.syncControls();
+
+  assert.equal(coordinator.activeMode, null, "no job is running");
+  for (const { id, mode } of BULK_SELECTION_CONTROLS) {
+    // The scanning queue is frozen; the idle one keeps its controls live.
+    assert.equal(elements.get(id).disabled, mode === "remux", `${id} must follow its own queue's scan state`);
+  }
+  assert.equal(queues.remux.selectionLocked, true, "the scanning queue is frozen");
+  assert.equal(queues.extract.selectionLocked, false, "an idle extract queue must stay editable");
+  assert.equal(remuxController.applyBulkSelection("extract", false), true, "the other tab must accept bulk selection");
+
+  // Once the rescan lands, both queues are editable again.
+  queues.remux.acceptInspection(rescanToken, "/anime/remux", manifest("remux.mkv"));
+  coordinator.syncControls();
+  for (const { id } of BULK_SELECTION_CONTROLS) assert.equal(elements.get(id).disabled, false);
+  assert.equal(queues.remux.selectionLocked, false);
+});
+
 test("Start with different input directory defaults to all-selected and drops previous directory assignments", async t => {
   const elements = new Map([
     ["remux-input-dir", new FakeElement("/anime/series-b")],

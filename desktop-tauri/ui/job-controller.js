@@ -1,6 +1,24 @@
 import { buildTrackAssignmentsForManifest, isSameDirectory } from "./queue-state.js";
 
 
+/**
+ * The four queue bulk-selection buttons, each with the selection it applies.
+ *
+ * Every controller touches all of them because ownership of *any* mode freezes
+ * selection in *both* queues, and `app.js` wires the click handlers from this
+ * same list — so a button cannot end up disabled with no handler behind it, nor
+ * enabled with a handler that silently refuses.
+ */
+export const BULK_SELECTION_CONTROLS = [
+  { id: "remux-select-all", mode: "remux", select: true },
+  { id: "remux-deselect-all", mode: "remux", select: false },
+  { id: "extract-select-all", mode: "extract", select: true },
+  { id: "extract-deselect-all", mode: "extract", select: false },
+];
+
+// Derived, not restated: the mode set is exactly the modes named above.
+const QUEUE_MODES = [...new Set(BULK_SELECTION_CONTROLS.map(control => control.mode))];
+
 export function extractInspectionOptions(argsOrRequest) {
   const req = argsOrRequest || {};
   const options = {};
@@ -435,6 +453,49 @@ export class JobController {
     this.renderStatus();
   }
 
+  /**
+   * True while a job owns the batch: starting, running, or stopping.
+   *
+   * `start()` captures the ordered selected IDs *before* the forced inspection,
+   * so a selection action landing during preflight would change what the user
+   * believes they are running without changing the request. That freeze covers
+   * every mode: the captured request belongs to the owning mode, and the other
+   * queue is not what is being run.
+   *
+   * The startup snapshot restore is deliberately excluded. It raises
+   * `isRestoring` to block a concurrent start, but no job owns a batch then,
+   * and the user must still be able to adjust a restored queue before running.
+   */
+  isJobActive() {
+    const coordinator = this.runtime.coordinator;
+    return coordinator.activeMode !== null || Boolean(coordinator.isStarting);
+  }
+
+  /**
+   * True while `mode`'s selection may still be mutated by the user.
+   *
+   * Beyond an active job, a queue is only locked against *its own* inspection:
+   * a background rescan of one tab must not disable the other tab's selection
+   * controls while the coordinator is idle.
+   */
+  canMutateQueueSelection(mode) {
+    if (this.isJobActive()) return false;
+    return !this.runtime.queueFor?.(mode)?.isScanning;
+  }
+
+  /**
+   * Sealed Select All / Deselect All action behind the bulk buttons.
+   * Returns true only when the selection was actually mutated.
+   */
+  applyBulkSelection(mode, select) {
+    if (!this.canMutateQueueSelection(mode)) return false;
+    const tracker = this.runtime.queueFor?.(mode);
+    if (!tracker) return false;
+    if (select) tracker.selectAll();
+    else tracker.deselectAll();
+    return true;
+  }
+
   syncGlobalControls() {
     const busy = this.runtime.coordinator.activeMode !== null || Boolean(this.runtime.coordinator.isStarting);
     const tracker = this.runtime.queueFor?.(this.mode);
@@ -442,8 +503,21 @@ export class JobController {
     const selectedCount = tracker?.getSelectedCount?.() ?? 0;
     const selectionDisabled = hasItems && selectedCount === 0;
     const isScanning = Boolean(tracker?.isScanning);
-    if (this.runBtn) this.runBtn.disabled = busy || this.runtime.coordinator.isStarting || isScanning || selectionDisabled;
+    if (this.runBtn) this.runBtn.disabled = busy || isScanning || selectionDisabled;
     for (const control of this.formControls) control.disabled = busy;
+    // Selection stays frozen for the whole preflight/run window: the request
+    // captured this queue's selection before the forced scan, so a click now
+    // could only desynchronize the UI from the batch. The tracker enforces the
+    // same predicate on every mutation, so a card re-rendered after this sync
+    // cannot slip an unguarded change through either.
+    for (const { id, mode } of BULK_SELECTION_CONTROLS) {
+      const control = document.getElementById(id);
+      if (control) control.disabled = !this.canMutateQueueSelection(mode);
+    }
+    for (const mode of QUEUE_MODES) {
+      const queue = this.runtime.queueFor?.(mode);
+      if (queue) queue.selectionLocked = !this.canMutateQueueSelection(mode);
+    }
     document.querySelectorAll(`#view-${this.mode} .sub-assign-btn`).forEach(control => {
       control.disabled = busy;
     });
@@ -451,7 +525,7 @@ export class JobController {
       control.disabled = busy;
     });
     document.querySelectorAll(`#view-${this.mode} .ep-select-check, #view-${this.mode} .ep-reorder-btn`).forEach(control => {
-      control.disabled = busy;
+      control.disabled = !this.canMutateQueueSelection(this.mode);
     });
     if (this.stopBtn) {
       this.stopBtn.disabled = this.runtime.coordinator.activeMode !== this.mode || this.runtime.coordinator.isStopping;

@@ -59,12 +59,22 @@ pub fn clean_relative_path(s: &str) -> String {
     }
 }
 
+/// Canonical root-relative item ID for a track assignment target.
+///
+/// Callers must run *both* sides of a comparison through this: `get_item_id`
+/// only strips the root and swaps separators, so a discovered ID matches an
+/// assignment target solely because the pipeline canonicalizes each of them
+/// here before comparing.
+pub fn canonical_assignment_target_id(target_video: &str) -> String {
+    clean_relative_path(target_video)
+}
+
 impl TrackAssignment {
     /// Returns the normalized target video path relative to input directory,
     /// with backslashes converted to forward slashes, redundant separators collapsed,
     /// and relative `.` (`CurDir`) components stripped.
     pub fn clean_target_video(&self) -> String {
-        clean_relative_path(&self.target_video)
+        canonical_assignment_target_id(&self.target_video)
     }
     /// Returns true if the asset path is relative to the release/input directory
     /// (i.e. not absolute, not root-relative, and not a drive-prefixed path).
@@ -262,6 +272,15 @@ impl BatchRequest {
                     return Err(format!(
                         "Invalid relative target video path: '{}'",
                         assignment.target_video
+                    ));
+                }
+
+                if !clean
+                    .rsplit_once('.')
+                    .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case("mkv"))
+                {
+                    return Err(format!(
+                        "Assigned target video is not an MKV file: '{clean}'"
                     ));
                 }
 
@@ -1356,5 +1375,36 @@ mod tests {
         assert!(
             err.contains("Track assignment targets video 'ep2.mkv' which is not in selected_items")
         );
+    }
+
+    #[test]
+    fn test_validate_assignment_rejects_existing_non_mkv_target() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("ep1.mkv"), b"").unwrap();
+        std::fs::write(dir.path().join("notes.txt"), b"").unwrap();
+        std::fs::write(dir.path().join("ep1.ass"), b"").unwrap();
+
+        let mut req = minimal_request(dir.path());
+        req.assignments = Some(vec![TrackAssignment {
+            target_video: "notes.txt".into(),
+            asset_path: PathBuf::from("ep1.ass"),
+            track_type: Some("subtitle".into()),
+            language: None,
+            title: None,
+            offset_ms: None,
+        }]);
+        let err = req.validate().unwrap_err();
+        assert_eq!(err, "Assigned target video is not an MKV file: 'notes.txt'");
+
+        std::fs::write(dir.path().join("EP2.MKV"), b"").unwrap();
+        req.assignments = Some(vec![TrackAssignment {
+            target_video: "EP2.MKV".into(),
+            asset_path: PathBuf::from("ep1.ass"),
+            track_type: Some("subtitle".into()),
+            language: None,
+            title: None,
+            offset_ms: None,
+        }]);
+        assert!(req.validate().is_ok());
     }
 }
