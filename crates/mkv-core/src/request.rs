@@ -59,19 +59,29 @@ pub fn clean_relative_path(s: &str) -> String {
     }
 }
 
+/// Canonical root-relative item ID for a track assignment target.
+///
+/// Callers must run *both* sides of a comparison through this: `get_item_id`
+/// only strips the root and swaps separators, so a discovered ID matches an
+/// assignment target solely because the pipeline canonicalizes each of them
+/// here before comparing.
+pub fn canonical_assignment_target_id(target_video: &str) -> String {
+    clean_relative_path(target_video)
+}
+
 impl TrackAssignment {
     /// Returns the normalized target video path relative to input directory,
     /// with backslashes converted to forward slashes, redundant separators collapsed,
     /// and relative `.` (`CurDir`) components stripped.
     pub fn clean_target_video(&self) -> String {
-        clean_relative_path(&self.target_video)
+        canonical_assignment_target_id(&self.target_video)
     }
     /// Returns true if the asset path is relative to the release/input directory
     /// (i.e. not absolute, not root-relative, and not a drive-prefixed path).
     pub fn is_relative_asset(&self) -> bool {
-        let path = &self.asset_path;
-        let s = path.to_string_lossy();
-        !is_drive_prefix(&s) && path.is_relative() && !path.has_root()
+        let s = self.asset_path.to_string_lossy().replace('\\', "/");
+        let path = Path::new(&s);
+        !is_drive_prefix(&s) && !path.has_root()
     }
 }
 
@@ -112,9 +122,6 @@ pub struct BatchRequest {
     /// Global subtitle offset in seconds
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sub_offset: Option<f64>,
-    /// Whether to retain extracted/embedded source fonts
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub keep_fonts: Option<bool>,
     /// Whether to perform a dry run (plan without writing files)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dry_run: Option<bool>,
@@ -144,7 +151,6 @@ impl Default for BatchRequest {
             io_jobs: None,
             ffmpeg_threads: None,
             sub_offset: None,
-            keep_fonts: None,
             dry_run: None,
             no_cache: None,
             assignments: None,
@@ -265,13 +271,26 @@ impl BatchRequest {
                     ));
                 }
 
+                if !clean
+                    .rsplit_once('.')
+                    .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case("mkv"))
+                {
+                    return Err(format!(
+                        "Assigned target video is not an MKV file: '{clean}'"
+                    ));
+                }
+
                 let is_rel_asset = assignment.is_relative_asset();
-                let asset_str = assignment.asset_path.to_string_lossy().replace('\\', "/");
+                let raw_asset = assignment.asset_path.to_string_lossy();
+                let asset_str = raw_asset.replace('\\', "/");
                 let asset_norm_path = Path::new(&asset_str);
-                if is_rel_asset
-                    && asset_norm_path
-                        .components()
-                        .any(|c| matches!(c, std::path::Component::ParentDir))
+                let root_relative_backslash =
+                    raw_asset.starts_with('\\') && !raw_asset.starts_with("\\\\");
+                if root_relative_backslash
+                    || (is_rel_asset
+                        && asset_norm_path
+                            .components()
+                            .any(|c| matches!(c, std::path::Component::ParentDir)))
                 {
                     return Err(format!(
                         "Invalid relative asset path: '{}'",
@@ -355,6 +374,12 @@ impl BatchRequest {
                 if !seen_items.insert(clean.clone()) {
                     return Err(format!("Duplicate entry in selected_items: '{clean}'"));
                 }
+                if !clean
+                    .rsplit_once('.')
+                    .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case("mkv"))
+                {
+                    return Err(format!("Selected item is not an MKV file: '{clean}'"));
+                }
 
                 let full_path = self.input_dir.join(&clean);
                 if !full_path.is_file() {
@@ -383,20 +408,15 @@ impl BatchRequest {
     /// Converts the `BatchRequest` into internal `PipelineConfig`, applying
     /// preset profile baseline defaults and layering explicit parameter overrides.
     pub fn into_pipeline_config(self) -> Result<PipelineConfig, String> {
-        let (preset_bitrate, preset_complexity, preset_keep_fonts) =
-            if let Some(preset_id) = &self.preset {
-                if let Some(preset) = lookup_preset(preset_id) {
-                    (
-                        Some(preset.bitrate),
-                        Some(preset.complexity),
-                        Some(preset.keep_fonts),
-                    )
-                } else {
-                    return Err(format!("Unknown preset profile: '{preset_id}'"));
-                }
+        let (preset_bitrate, preset_complexity) = if let Some(preset_id) = &self.preset {
+            if let Some(preset) = lookup_preset(preset_id) {
+                (Some(preset.bitrate), Some(preset.complexity))
             } else {
-                (None, None, None)
-            };
+                return Err(format!("Unknown preset profile: '{preset_id}'"));
+            }
+        } else {
+            (None, None)
+        };
 
         let physical_cores = physical_core_count();
         let default_workers = physical_cores.clamp(1, 16);
@@ -414,7 +434,6 @@ impl BatchRequest {
                 .or(preset_bitrate)
                 .unwrap_or_else(|| "192k".to_string()),
             complexity: self.complexity.or(preset_complexity).unwrap_or(5),
-            keep_fonts: self.keep_fonts.or(preset_keep_fonts).unwrap_or(false),
             workers,
             io_jobs: self.io_jobs.unwrap_or(2),
             ffmpeg_threads: self.ffmpeg_threads.unwrap_or(default_ffmpeg_threads),
@@ -471,13 +490,6 @@ pub fn assignments_to_track_map(
     }
     map
 }
-
-/// Backward-compatible alias for `assignments_to_track_map`.
-#[deprecated(
-    since = "1.0.0",
-    note = "Use assignments_to_track_map or TrackAssignment methods instead"
-)]
-pub use assignments_to_track_map as assignments_to_sub_map;
 
 /// Parse track assignments from JSON, supporting both `Vec<TrackAssignment>` and
 /// legacy `{ "video.mkv": "sub.ass" }` map format.
@@ -573,7 +585,6 @@ mod tests {
         req.complexity = Some(8);
         req.workers = Some(4);
         req.io_jobs = Some(2);
-        req.keep_fonts = Some(true);
         req.dry_run = Some(false);
         req.no_cache = Some(false);
         req.assignments = Some(vec![TrackAssignment {
@@ -590,7 +601,6 @@ mod tests {
         let config = req.into_pipeline_config().unwrap();
         assert_eq!(config.bitrate, "256k"); // overridden
         assert_eq!(config.complexity, 8); // overridden
-        assert!(config.keep_fonts); // preset + override match
         assert_eq!(config.workers, 4);
     }
 
@@ -773,6 +783,21 @@ mod tests {
         assert_eq!(
             req.validate().unwrap_err(),
             r"Invalid relative asset path: 'sub\..\..\outside.ass'"
+        );
+
+        // 5. Root-relative backslash asset (must not bypass root containment)
+        let mut req = minimal_request(dir.path());
+        req.assignments = Some(vec![TrackAssignment {
+            target_video: "ep01.mkv".into(),
+            asset_path: PathBuf::from(r"\nonexistent\outside.ass"),
+            track_type: Some("subtitle".into()),
+            language: None,
+            title: None,
+            offset_ms: None,
+        }]);
+        assert_eq!(
+            req.validate().unwrap_err(),
+            r"Invalid relative asset path: '\nonexistent\outside.ass'"
         );
     }
 
@@ -1120,14 +1145,41 @@ mod tests {
                 title: None,
                 offset_ms: None,
             },
+            TrackAssignment {
+                target_video: "ep06.mkv".into(),
+                asset_path: PathBuf::from(r"\abs\ep06.ass"),
+                track_type: Some("subtitle".into()),
+                language: None,
+                title: None,
+                offset_ms: None,
+            },
+            TrackAssignment {
+                target_video: "ep07.mkv".into(),
+                asset_path: PathBuf::from(r"\\server\share\ep07.ass"),
+                track_type: Some("subtitle".into()),
+                language: None,
+                title: None,
+                offset_ms: None,
+            },
+            TrackAssignment {
+                target_video: "ep08.mkv".into(),
+                asset_path: PathBuf::from(r"subs\ep08.ass"),
+                track_type: Some("subtitle".into()),
+                language: None,
+                title: None,
+                offset_ms: None,
+            },
         ];
         assert!(assignments[0].is_relative_asset());
         assert!(assignments[1].is_relative_asset());
         assert!(!assignments[2].is_relative_asset());
         assert!(!assignments[3].is_relative_asset());
         assert!(!assignments[4].is_relative_asset());
+        assert!(!assignments[5].is_relative_asset());
+        assert!(!assignments[6].is_relative_asset());
+        assert!(assignments[7].is_relative_asset());
 
-        let map = assignments_to_sub_map(&assignments, dir.path(), None);
+        let map = assignments_to_track_map(&assignments, dir.path(), None);
         assert_eq!(map.get("ep01.mkv"), Some(&dir.path().join("ep01.ass")));
         assert_eq!(
             map.get("Season 1/ep02.mkv"),
@@ -1160,7 +1212,7 @@ mod tests {
                 offset_ms: None,
             },
         ];
-        let ms_map = assignments_to_sub_map(&multi_season, dir.path(), None);
+        let ms_map = assignments_to_track_map(&multi_season, dir.path(), None);
         assert_eq!(
             ms_map.get("Season 1/ep01.mkv"),
             Some(&dir.path().join("s01e01.ass"))
@@ -1231,6 +1283,21 @@ mod tests {
 
         let mut req = minimal_request(dir.path());
         req.selected_items = Some(vec!["ep2.mkv".into(), "ep1.mkv".into()]);
+        assert!(req.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_selected_items_rejects_existing_non_mkv() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("ep1.mkv"), b"").unwrap();
+        std::fs::write(dir.path().join("notes.txt"), b"").unwrap();
+
+        let mut req = minimal_request(dir.path());
+        req.selected_items = Some(vec!["ep1.mkv".into(), "notes.txt".into()]);
+        assert!(req.validate().unwrap_err().contains("notes.txt"));
+
+        std::fs::write(dir.path().join("EP2.MKV"), b"").unwrap();
+        req.selected_items = Some(vec!["EP2.MKV".into()]);
         assert!(req.validate().is_ok());
     }
 
@@ -1309,5 +1376,36 @@ mod tests {
         assert!(
             err.contains("Track assignment targets video 'ep2.mkv' which is not in selected_items")
         );
+    }
+
+    #[test]
+    fn test_validate_assignment_rejects_existing_non_mkv_target() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("ep1.mkv"), b"").unwrap();
+        std::fs::write(dir.path().join("notes.txt"), b"").unwrap();
+        std::fs::write(dir.path().join("ep1.ass"), b"").unwrap();
+
+        let mut req = minimal_request(dir.path());
+        req.assignments = Some(vec![TrackAssignment {
+            target_video: "notes.txt".into(),
+            asset_path: PathBuf::from("ep1.ass"),
+            track_type: Some("subtitle".into()),
+            language: None,
+            title: None,
+            offset_ms: None,
+        }]);
+        let err = req.validate().unwrap_err();
+        assert_eq!(err, "Assigned target video is not an MKV file: 'notes.txt'");
+
+        std::fs::write(dir.path().join("EP2.MKV"), b"").unwrap();
+        req.assignments = Some(vec![TrackAssignment {
+            target_video: "EP2.MKV".into(),
+            asset_path: PathBuf::from("ep1.ass"),
+            track_type: Some("subtitle".into()),
+            language: None,
+            title: None,
+            offset_ms: None,
+        }]);
+        assert!(req.validate().is_ok());
     }
 }

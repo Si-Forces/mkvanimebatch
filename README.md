@@ -40,6 +40,7 @@ Available both as a standalone native **CLI binary (`mkv-cli`)** and as a self-c
 * **Language Priority**: Automatically detects and scores subtitle tracks, prioritizing Indonesian (`ind`, `id`) and fallback English (`eng`, `en`).
 * **Format & Track Type Scoring**: Prefers Advanced SubStation Alpha (`.ass` typesetting) over SubRip (`.srt`), prioritizing dialogue tracks over signs/titles or commentaries.
 * **Manual Track Assignments**: Supports precise per-episode subtitle overrides via `--assignments` with fail-fast preflight validation.
+* **Resolution Precedence Ladder**: Evaluates candidate subtitles in strict order: manual `TrackAssignment` > exact same-directory external subtitle > embedded subtitle track > nearest matching ancestor external subtitle > explicit `--assets-dir` fallback. Source precedence beats language score across sources.
 
 ### 10-Tier Audio Scoring & Opus Transcoding
 * **Dialogue Priority**: Automatically scores audio tracks, favoring Japanese stereo and multi-channel audio tracks.
@@ -51,7 +52,8 @@ Available both as a standalone native **CLI binary (`mkv-cli`)** and as a self-c
 * **Embedded Font Detection**: Identifies font attachments by MIME type and filename extensions before transactional extraction.
 * **BLAKE2b Hash Deduplication**: Deduplicates fonts across entire releases by content hash and font identity, avoiding redundant font attachments.
 * **RAII Claim Safety**: Uncommitted font claims in staging directories are safely defused or released on cancellation.
-* **Chapter & Cover Art Preservation**: Extracts and embeds XML chapter definitions and front cover art (`cover.jpg`, `cover.png`, `folder.jpg`).
+* **Mode-Specific Font Handling**: Extraction mode retains extracted fonts as user output, while remux mode discovers and embeds fonts into output Matroska files.
+* **Chapter & Cover Art Preservation**: Extracts and embeds XML chapter definitions and front cover art. Directory covers (`cover.<ext>`, `folder.<ext>`) and episode covers (`<video-stem>_cover.<ext>`, `<video-stem>.cover.<ext>`, `<video-stem>.<ext>`) resolve nearest applicable directory first (`_cover` > `.cover` > bare stem > `cover` > `folder`). The bare-stem form only matches a video in the same directory, so an `--assets-dir` cover meant for a video elsewhere must use one of the other four forms. Local and ancestor external covers supersede embedded artwork; explicit `--assets-dir` covers apply only when embedded art is absent.
 
 ### Crash-Resistant Output & Safe Recovery
 * **Atomic File Promotion**: Performs remuxing and extraction inside isolated temporary scratch directories, promoting files via atomic replacement with rollback protection across filesystem boundaries (`EXDEV`).
@@ -144,7 +146,6 @@ Download `mkv-cli` from [GitHub Releases](https://github.com/sifahaz/mkvanimebat
 | `--ffmpeg-threads <N\|auto>` | CPU threads allocated per audio transcode job (1–32) | `auto`: `(physical_cores / workers)` clamped to 1–4 |
 | `--bitrate <RATE>` | Opus audio transcoding bitrate (e.g. `128k`, `192k`) | CLI/preset default `192k` |
 | `--complexity <0-10>` | Opus compression complexity level | Default `5` (`10` on `hifi`) |
-| `--keep-fonts` | Retain extracted fonts directory | `false` (`true` on `balanced`/`hifi` presets) |
 | `--extract` | Run batch extraction instead of remuxing | `false` |
 | `--remux` | Run batch remuxing (default mode; also default unless invoked as `mkv-extract`) | `true` |
 | `--plan` | Output Manifest v2 JSON for directory and exit | `false` |
@@ -264,6 +265,12 @@ node --check desktop-tauri/ui/app.js
 node --test desktop-tauri/ui/*.test.js
 ```
 
+`crates/mkv-core/tests/test_real_remux.rs` drives real `ffmpeg`, `mkvmerge`, and `mkvextract` binaries and is skipped when they are unavailable. Required verification (CI and the release gate) sets `MKV_REQUIRE_MEDIA_TOOLS=1`, which turns a missing tool into a test failure:
+
+```bash
+MKV_REQUIRE_MEDIA_TOOLS=1 cargo test -p mkv-core --test test_real_remux
+```
+
 ---
 
 ## Project Layout
@@ -276,11 +283,11 @@ mkvanimebatch/
 ├── crates/
 │   ├── mkv-core/            # Standalone media engine library crate
 │   │   ├── src/             # EBML parsing, CPU topology, domain heuristics, fonts, pipeline
-│   │   └── tests/           # 8 integration suites (assets, domain, scan, remux, extract, fonts, pipeline, cross-regex)
+│   │   └── tests/           # 11 integration suites (assets, domain, scan, remux, extract, fonts, pipeline, pipeline-assignments, pipeline-assignment-args, cross-regex, real-remux)
 │   └── mkv-cli/             # Standalone CLI binary adapter
 │       └── src/             # CLI argument parsing, smoke validation
 ├── desktop-tauri/           # Desktop GUI application
-│   ├── ui/                  # Web frontend (Liquid Glass UI, Queue Tracker, 9 Node test suites)
+│   ├── ui/                  # Web frontend (Liquid Glass UI, Queue Tracker, 10 Node test suites)
 │   └── src-tauri/           # In-process Tauri Engine Bridge & telemetry
 ├── docs/
 │   └── adr/                 # System Architecture Decision Records (0001 - 0014)

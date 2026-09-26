@@ -7,7 +7,7 @@ How the engineering skills should consume this repo's domain documentation when 
 - **`CONTEXT-MAP.md`** at the repo root — it points to bounded contexts across the workspace. Read each context file relevant to the task:
   - [`crates/mkv-core/CONTEXT.md`](../../crates/mkv-core/CONTEXT.md) for media probing, scoring, asset resolution, font extraction, and batch remuxing.
   - [`desktop-tauri/CONTEXT.md`](../../desktop-tauri/CONTEXT.md) for desktop GUI, queue state projection, and the in-process Engine Bridge.
-- **`docs/adr/`** — read ADRs that touch the area you're about to work in (`0001` through `0012`).
+- **`docs/adr/`** — read ADRs that touch the area you're about to work in (`0001` through `0014`, noting the 2026-09-24 ratified amendments to ADR-0004 for subtitle/cover precedence and ADR-0008 for font retention removal and typed track assignments).
 
 If any of these files don't exist, **proceed silently**. Don't flag their absence; don't suggest creating them upfront. The `/domain-modeling` skill (reached via `/grill-with-docs` and `/improve-codebase-architecture`) creates them lazily when terms or decisions actually get resolved.
 
@@ -18,7 +18,7 @@ This repository follows a multi-context layout governed by `CONTEXT-MAP.md`:
 ```
 /
 ├── CONTEXT-MAP.md                     ← Bounded context map and relationships
-├── docs/adr/                          ← System-wide and bridge architecture decisions (0001 - 0012)
+├── docs/adr/                          ← System-wide and bridge architecture decisions (0001 - 0014)
 ├── crates/
 │   └── mkv-core/
 │       └── CONTEXT.md                 ← Media Engine Context

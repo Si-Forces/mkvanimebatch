@@ -6,7 +6,10 @@ import {
   formatElapsedDuration,
   formatOutcomeDuration,
   getSelectedCount,
+  isSameDirectory,
+  normalizeDirectoryPath,
   reduceQueueEvent,
+  reconcileQueueSelection,
   reorderItem,
   selectAll,
   deselectAll,
@@ -32,8 +35,20 @@ export class QueueTracker {
     this.state = createQueueState({ version: 2, items: [] }, { mode });
     this.cards = new Map();
     this.scanToken = 0;
+    this.pendingRenderToken = null;
+    this.currentDirectory = null;
     this.lastScannedPath = null;
+    this.isScanning = false;
+    this.renderRafId = null;
     this.lastManifest = null;
+    // Set by the owning JobController. While true, every user-driven selection
+    // or order mutation is refused: `start()` snapshots the ordered selected IDs
+    // before its forced inspection, so a click landing afterwards would change
+    // what the user believes they are running without changing the request.
+    // Disabling the controls is not the invariant — a card re-rendered after
+    // the last sync carries a fresh, enabled checkbox — so the guard lives on
+    // the mutation itself.
+    this.selectionLocked = false;
     // Track Assignment overrides (remux only): item id -> assignment payload
     this.assignments = new Map();
     // v2 manifest: candidates are stored once per release directory.
@@ -42,22 +57,37 @@ export class QueueTracker {
     if (this.listEl) {
       this.listEl.addEventListener("change", (e) => {
         const check = e.target?.closest?.(".ep-select-check");
-        if (check?.dataset?.itemId) {
-          toggleItemSelection(this.state, check.dataset.itemId, check.checked);
-          this.updateSelectionBadge();
-          this.onSelectionChange?.();
+        if (!check?.dataset?.itemId) return;
+        if (this.selectionLocked) {
+          // Put the DOM back in step with the state the request was built from.
+          const item = this.state.items.get(check.dataset.itemId);
+          check.checked = item ? item.selected !== false : false;
+          return;
         }
+        toggleItemSelection(this.state, check.dataset.itemId, check.checked);
+        this.updateSelectionBadge();
+        this.onSelectionChange?.();
       });
 
       this.listEl.addEventListener("click", (e) => {
         const btn = e.target?.closest?.(".ep-reorder-btn");
         if (!btn?.dataset?.itemId) return;
+        if (this.selectionLocked) return;
         const id = btn.dataset.itemId;
         const isUp = btn.classList?.contains?.("ep-up-btn");
         const dir = isUp ? "up" : "down";
         this.reorderCard(id, dir);
       });
     }
+  }
+  cancelRender() {
+    if (this.renderRafId) {
+      if (typeof cancelAnimationFrame === "function") {
+        cancelAnimationFrame(this.renderRafId);
+      }
+      this.renderRafId = null;
+    }
+    this.pendingRenderToken = null;
   }
 
   startHeartbeat() {
@@ -132,11 +162,11 @@ export class QueueTracker {
 
   startScan() {
     this.stopHeartbeat();
+    this.isScanning = true;
+    this.cancelRender();
     const token = ++this.scanToken;
     this.cards.clear();
-    // Assignments and candidates survive a rescan: populateFromInspection
-    // rebuilds candidates and carries over assignments whose items persist.
-    this.state = createQueueState({ version: 2, items: [] }, { mode: this.mode });
+    // reconcile selection and order only when its directory matches.
     if (this.listEl) {
       this.listEl.innerHTML = `
         <div class="empty-state-card scanning-state">
@@ -153,27 +183,37 @@ export class QueueTracker {
     return token === this.scanToken;
   }
 
+  setDirectory(path) {
+    const directory = normalizeDirectoryPath(path);
+    this.currentDirectory = directory;
+    this.lastScannedPath = directory;
+  }
+
   reuseInspection(path) {
-    if (this.lastScannedPath !== path) return false;
+    if (!this.lastManifest || !isSameDirectory(this.lastScannedPath, path)) return false;
     this.scanToken++;
-    this.populateFromInspection(this.lastManifest);
+    this.populateFromInspection(this.lastManifest, true);
     return true;
   }
 
   acceptInspection(token, path, manifest) {
     if (!this.isCurrentScan(token)) return false;
+    this.isScanning = false;
     if (manifest?.version !== 2 || !Array.isArray(manifest.items)) {
       this.showScanError(token);
       this.lastScannedPath = null;
       return false;
     }
-    this.populateFromInspection(manifest);
-    this.lastScannedPath = path;
+    const isSameDir = isSameDirectory(this.currentDirectory, path);
+    this.populateFromInspection(manifest, isSameDir);
+    this.setDirectory(path);
+
     return true;
   }
 
   rejectInspection(token) {
     if (!this.isCurrentScan(token)) return;
+    this.isScanning = false;
     this.showScanError(token);
     this.lastScannedPath = null;
   }
@@ -192,34 +232,47 @@ export class QueueTracker {
 
   reset(title = "No Episodes Queued", description = "Choose an input release directory to scan MKV episodes into this batch.") {
     this.stopHeartbeat();
+    this.isScanning = false;
+    this.cancelRender();
     this.scanToken++;
     this.cards.clear();
     this.assignments.clear();
     this.subtitleCandidates = {};
+    this.currentDirectory = null;
+    this.lastScannedPath = null;
     this.state = createQueueState({ version: 2, items: [] }, { mode: this.mode });
     if (this.listEl) this.listEl.innerHTML = this.emptyStateMarkup(title, description);
     this.setCountText("Ready");
   }
-
-  populateFromInspection(manifest) {
+  populateFromInspection(manifest, preserveSelection = false) {
     this.stopHeartbeat();
+    this.isScanning = false;
+    this.cancelRender();
     this.lastManifest = manifest;
     this.cards.clear();
-    if (this.listEl) this.listEl.innerHTML = "";
-
     const bitrate = this.getBitrate();
-    this.state = createQueueState(manifest, { mode: this.mode });
+    const nextState = createQueueState(manifest, { mode: this.mode });
+    this.state = preserveSelection ? reconcileQueueSelection(nextState, this.state) : nextState;
 
-    // Refresh candidate lists; keep assignments whose item still exists so a
-    // rescan right before Start does not silently drop manual selections.
-    this.assignments = carryOverAssignments(this.assignments, manifest);
+    // A different input directory starts a new batch; only a same-directory
+    // rescan carries assignments for IDs that are still present.
+    this.assignments = preserveSelection ? carryOverAssignments(this.assignments, manifest) : new Map();
     this.subtitleCandidates = manifest?.subtitle_candidates ?? {};
 
     if (!manifest || !manifest.items || manifest.items.length === 0) {
+      const directory = this.currentDirectory || this.lastScannedPath;
+
+      const { vanishedSelectedIds, knownOrder } = this.state;
       this.reset(
         "No MKV files found",
         "This release directory does not contain any MKV episodes. Choose another input directory to continue."
       );
+      if (preserveSelection) {
+        if (directory) this.setDirectory(directory);
+
+        this.state.vanishedSelectedIds = vanishedSelectedIds;
+        this.state.knownOrder = knownOrder;
+      }
       return;
     }
 
@@ -240,11 +293,25 @@ export class QueueTracker {
   // Cards render from the item's CURRENT reducer state, so events that
   // arrived before a card existed are reflected once it is created.
   renderCardsIncrementally(token, bitrate) {
-    const order = this.state.order;
+    const order = this.state?.order;
+    if (!order || order.length === 0) {
+      this.cancelRender();
+      return;
+    }
+
+    this.cancelRender();
+    this.cards.clear();
+    if (this.listEl) this.listEl.innerHTML = "";
+
+    this.pendingRenderToken = token;
     let index = 0;
 
     const renderBatch = () => {
-      if (!this.isCurrentScan(token)) return;
+      this.renderRafId = null;
+      if (!this.isCurrentScan(token)) {
+        this.pendingRenderToken = null;
+        return;
+      }
       const frag = document.createDocumentFragment();
       const deadline = performance.now() + 8;
       do {
@@ -266,12 +333,15 @@ export class QueueTracker {
         frag.appendChild(card.el);
       } while (index < order.length && performance.now() < deadline);
       this.listEl.appendChild(frag);
-      if (index < order.length) requestAnimationFrame(renderBatch);
+      if (index < order.length) {
+        this.renderRafId = requestAnimationFrame(renderBatch);
+      } else {
+        this.pendingRenderToken = null;
+      }
     };
 
-    requestAnimationFrame(renderBatch);
+    this.renderRafId = requestAnimationFrame(renderBatch);
   }
-
   applyMetadata(card, meta, bitrate) {
     if (!card || !card.el || !meta) return;
     if (card.codec) card.codec.textContent = meta.video_tag || "MKV";
@@ -335,7 +405,8 @@ export class QueueTracker {
       ? `<button type="button" class="sub-assign-btn" data-item-id="${safeId}" title="Manually assign a subtitle file">+ Sub</button>`
       : "";
 
-    const checkHtml = `<input type="checkbox" class="ep-select-check" checked data-item-id="${safeId}" title="Include in batch" />`;
+    const selected = this.state.items.get(id)?.selected !== false;
+    const checkHtml = `<input type="checkbox" class="ep-select-check" ${selected ? "checked " : ""}data-item-id="${safeId}" title="Include in batch" />`;
     const reorderHtml = `
       <div class="ep-reorder-group">
         <button type="button" class="ep-reorder-btn ep-up-btn" data-item-id="${safeId}" title="Move up">▲</button>
@@ -369,6 +440,7 @@ export class QueueTracker {
 
     const checkEl = el.querySelector(".ep-select-check");
     if (checkEl) checkEl.dataset.itemId = id;
+    if (checkEl) checkEl.checked = selected;
 
     const upBtn = el.querySelector(".ep-up-btn");
     if (upBtn) upBtn.dataset.itemId = id;
@@ -414,6 +486,8 @@ export class QueueTracker {
 
   restoreFromSnapshot(snapshot) {
     this.stopHeartbeat();
+    this.isScanning = false;
+    this.cancelRender();
     if (!snapshot || !snapshot.items) return;
     this.scanToken++;
     this.cards.clear();
@@ -421,7 +495,10 @@ export class QueueTracker {
     if (this.listEl) this.listEl.innerHTML = "";
 
     this.state = createQueueStateFromSnapshot(snapshot, { mode: this.mode });
+    if (this.state?.inputDir) {
+      this.setDirectory(this.state.inputDir);
 
+    }
     if (this.countEl) {
       this.renderQueueCount();
     }
@@ -436,10 +513,19 @@ export class QueueTracker {
     if (!this.state) return;
     this.state = reduceQueueEvent(this.state, event);
 
+    if (event.type === "batch_start") {
+      if (event.input_dir) {
+        this.setDirectory(event.input_dir);
+      }
+      if (this.cards.size === 0 && this.pendingRenderToken === null && this.state.order.length > 0) {
+        const bitrate = this.getBitrate();
+        this.renderCardsIncrementally(this.scanToken, bitrate);
+      }
+    }
     if (event.id) {
       const item = this.state.items.get(event.id);
       let card = this.cards.get(event.id);
-      if (!card && item) {
+      if (!card && item && this.pendingRenderToken !== this.scanToken) {
         const index = this.cards.size + 1;
         card = this.createCardElement(item.id, item.name, index);
         this.cards.set(item.id, card);
@@ -590,6 +676,7 @@ export class QueueTracker {
   }
 
   selectAll() {
+    if (this.selectionLocked) return;
     selectAll(this.state);
     for (const card of this.cards.values()) {
       if (card.checkbox) card.checkbox.checked = true;
@@ -599,6 +686,7 @@ export class QueueTracker {
   }
 
   deselectAll() {
+    if (this.selectionLocked) return;
     deselectAll(this.state);
     for (const card of this.cards.values()) {
       if (card.checkbox) card.checkbox.checked = false;
@@ -608,6 +696,7 @@ export class QueueTracker {
   }
 
   reorderCard(id, dir) {
+    if (this.selectionLocked) return;
     reorderItem(this.state, id, dir);
     const card = this.cards.get(id);
     if (card?.el) {
@@ -639,6 +728,7 @@ export class QueueTracker {
       return;
     }
     const { totalCount, completedCount, skippedCount, cancelledCount = 0, errorCount, batchCompleted } = this.state;
+    const total = Array.isArray(this.state.batchItemIds) ? this.state.batchItemIds.length : totalCount;
     const processed = completedCount + skippedCount + cancelledCount + errorCount;
 
     if (batchCompleted) {
@@ -646,9 +736,9 @@ export class QueueTracker {
       if (skippedCount > 0) parts.push(`${skippedCount} Skipped`);
       if (cancelledCount > 0) parts.push(`${cancelledCount} Cancelled`);
       if (errorCount > 0) parts.push(`${errorCount} Failed`);
-      this.setCountText(`${parts.join(", ")} (${totalCount} Total)`);
+      this.setCountText(`${parts.join(", ")} (${total} Total)`);
     } else {
-      this.setCountText(`${processed} / ${totalCount} Processed`);
+      this.setCountText(`${processed} / ${total} Processed`);
     }
   }
 }

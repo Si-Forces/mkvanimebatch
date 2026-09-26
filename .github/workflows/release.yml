@@ -49,7 +49,9 @@ jobs:
             libwebkit2gtk-4.1-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
-            patchelf
+            patchelf \
+            ffmpeg \
+            mkvtoolnix
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -69,14 +71,17 @@ jobs:
       - name: Run Clippy linter
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # `MKV_REQUIRE_MEDIA_TOOLS=1` makes the real-media regression fail instead of
+      # skipping when FFmpeg/MKVToolNix are missing, so a release cannot publish
+      # with real media output unverified. Windows keeps the local skip behaviour.
       - name: Run Rust workspace unit and integration tests
-        shell: bash
-        run: |
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            cargo test -p mkv-core -p mkv-cli --verbose
-          else
-            cargo test --workspace --verbose
-          fi
+        env:
+          MKV_REQUIRE_MEDIA_TOOLS: ${{ runner.os == 'Linux' && '1' || '' }}
+        run: cargo test --workspace --verbose
+
+      - name: Build Desktop App Binary (Windows Release)
+        if: runner.os == 'Windows'
+        run: cargo build --release -p mkv-anime-batch
 
   # ────────────────────────────────────────────────────────────────────────────
   # 2. Release Verification: Frontend UI State & Contract Tests
@@ -100,6 +105,8 @@ jobs:
 
   # ────────────────────────────────────────────────────────────────────────────
   # 3. Release Verification Gate
+  # Depends on `workspace-checks`, which runs the Rust suites including the
+  # non-skipping real-media regression (FFmpeg/MKVToolNix installed, required).
   # ────────────────────────────────────────────────────────────────────────────
   ci-status:
     name: Release Verification Gate

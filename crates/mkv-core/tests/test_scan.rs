@@ -29,6 +29,7 @@ fn test_is_cover_filename() {
     assert!(is_cover_filename("cover.jpg"));
     assert!(is_cover_filename("COVER.PNG"));
     assert!(is_cover_filename("Cover.webp"));
+    assert!(is_cover_filename("folder.jpg"));
     assert!(!is_cover_filename("other.jpg"));
     assert!(!is_cover_filename("cover.txt"));
 }
@@ -301,6 +302,49 @@ fn test_scan_assets_grouping() {
 
     assert_eq!(scan.covers.len(), 1);
     assert_eq!(scan.covers[0].name, "cover.jpg");
+}
+
+#[test]
+fn test_scan_assets_cover_names_require_applicable_video() {
+    let tmp = tempdir().unwrap();
+    let dir = tmp.path();
+    for name in [
+        "Show - 01.mkv",
+        "unknown.MKV",
+        "cover.jpg",
+        "folder.PNG",
+        "Show - 01_cover.jpg",
+        "Show - 01.cover.webp",
+        "Show - 01.jpeg",
+        "unknown.png",
+        "other.jpeg",
+        "logo_cover.jpg",
+        "poster.png",
+        "Show - 02.cover.jpg",
+        "Show - 01_cover.txt",
+    ] {
+        fs::write(dir.join(name), b"sample").unwrap();
+    }
+    let scan = scan_assets(dir, None);
+    let names: std::collections::HashSet<&str> = scan
+        .covers
+        .iter()
+        .map(|cover| cover.name.as_str())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "cover.jpg",
+            "folder.PNG",
+            "Show - 01_cover.jpg",
+            "Show - 01.cover.webp",
+            "Show - 01.jpeg",
+            "unknown.png",
+            "Show - 02.cover.jpg"
+        ]
+        .into_iter()
+        .collect()
+    );
 }
 
 #[test]
