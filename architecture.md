@@ -85,31 +85,12 @@ flowchart TD
 
 ### Ubiquitous Language & Core Terminology
 
-| Term | Context | Definition | Explicit Synonyms to AVOID |
-| :--- | :--- | :--- | :--- |
-| **Release Directory** | Media Engine | A directory containing video files, subtitle files, chapter XMLs, cover images, and fonts belonging to an anime release. | *Folder, package, album* |
-| **Asset Resolver** | Media Engine | Domain service that discovers, indexes, and matches external and embedded assets across ancestor and fallback directories. | *Asset finder, index manager, track matcher* |
-| **Episode Info** | Media Engine | Canonical parsed identity of an episode consisting of season, episode type (`Episode`, `Part`, `OVA`, `Special`), and episode number. | *Episode tag, episode string* |
-| **Track Selection Model** | Media Engine | Heuristic scoring engine evaluating audio and subtitle streams based on language priority, track type, container flags, and codecs. | *Audio picker, stream filter, track sorter* |
-| **Font Registry** | Media Engine | Transactional component managing font deduplication by content hash and promoting unique font attachments into batch targets. | *Font cache, attachment pool* |
-| **Batch Pipeline** | Media Engine | Bounded execution engine orchestrating media inspection, asset extraction, audio transcoding, and MKV remuxing. | *Batch runner, job worker, task loop* |
-| **Inspection Manifest** | Shared | Structured document produced during preflight inspection summarizing discovered files, track metadata, and candidate external assets. | *Execution plan, dry run report* |
-| **Batch Request** | Shared | The canonical serializable specification submitted across the Engine Bridge or CLI to configure and initiate a Batch Pipeline run. | *Job spec, pipeline config, run arguments* |
-| **Preset Profile** | Shared | Named bundle of audio transcoding bitrate and encoder complexity, decoupled from hardware worker concurrency. | *Config preset, setting template, encoding profile* |
-| **Track Assignment** | Shared | Explicit mapping attaching an external or embedded asset to a specific target video file with designated track type, language, and offset. | *Sub assignment, manual override, track mapping* |
-| **Selected Items** | Shared | Ordered subset of relative video paths or item IDs designated in a `BatchRequest` to restrict and sequence pipeline execution. | *Target filter, whitelist, item subset* |
-| **Item Outcome** | Media Engine | Closed set of terminal statuses an item may reach: `completed`, `skipped`, `error`, `cancelled`, `planned`. | *Status string, job state, result code* |
-| **Item Duration** | Shared | Authoritative wall-clock duration in seconds measured by the Batch Pipeline (`Instant::now()`) from item start to completion. | *Execution time, run clock, process timing* |
-| **Job Event** | Shared | Strongly-typed lifecycle event emitted across an in-process channel (`BatchStart`, `ItemStart`, `ItemProgress`, `ItemComplete`, `BatchComplete`). | *Progress message, notification, log line* |
-| **Fallback Inspector** | Media Engine | Secondary probing mechanism delegating to `mkvmerge -J` when native EBML parsing encounters unhandled quirks or malformed elements. | *Backup scanner, external probe* |
-| **Log Channel** | Shared | Dedicated auxiliary MPSC channel streaming real-time diagnostic console text from the media engine to frontend log observers. | *Output stream, log buffer, console pipe* |
-| **Queue Tracker** | Desktop App | Frontend state machine managing batch item lifecycles strictly keyed by item ID. | *Task list, item manager* |
-| **Engine Bridge** | Desktop App | In-process Rust integration layer connecting Tauri commands and channels to the Media Engine's Batch Pipeline. | *Wrapper, helper, controller* |
-| **Job Snapshot** | Desktop App | In-memory projection maintained in real-time by the Engine Bridge summarizing active or last-completed batch runs across UI reloads. | *Job state, queue cache, execution status* |
-| **Card Progress** | Desktop App | Visual representation of an active episode's execution: indeterminate shimmer sweep transitioning to determinate percentage fill. | *Loading bar, queue spinner, progress gauge* |
-| **Queue Selection** | Desktop App | Interactive subset and custom ordering of scanned manifest items marked by the user for active execution within the Queue Tracker. | *Checked items, run list, active batch* |
-| **Transcode Governor** | Media Engine | The dynamic calculation mechanism deriving FFmpeg worker thread concurrency from physical CPU core topology and active batch workers (`(total_physical_cores / workers).clamp(1, 4)`). | *Thread scaler, core allocator* |
-| **Zero-Copy Cache Persistence** | Media Engine | Direct-to-disk buffered streaming serialization of persistent inspection cache entries bypassing heap string allocations. | *JSON dumper, cache writer* |
+The canonical vocabulary for this system lives with the context that owns it, not here:
+
+- [Media Engine Context](./crates/mkv-core/CONTEXT.md) — 21 terms covering release discovery, asset resolution, track scoring, fonts, and the execution model.
+- [Desktop Application Context](./desktop-tauri/CONTEXT.md) — 10 terms covering queue projection, the Engine Bridge, and the desktop coordinators.
+
+Terms both contexts use are defined **once**, by the context that produces them, and linked from the consumer. That is deliberate: this section previously held a third copy of the glossary which had already drifted from both sources — it omitted six desktop terms and carried a truncated Track Assignment definition. A definition with no owner is a definition that will drift again.
 
 ---
 
@@ -399,7 +380,7 @@ flowchart TD
 3. **Cooperative Cancellation (`CancellationToken`)**:
    - Checked at every major pipeline boundary: preflight inspection, before task launch, between transcode and muxing, and inside stream readers.
    - On cancellation, active child processes (`kill_on_drop(true)`) are terminated immediately, and staging files are cleaned up.
-4. **Authoritative Wall-Clock Item Duration (ADR-0009)**:
+4. **Authoritative Monotonic Item Duration (ADR-0009)**:
    - The engine captures `let start = Instant::now()` at task entry and calculates `start.elapsed().as_secs_f64()` upon completion. This value is embedded into `JobEvent::ItemComplete { duration_sec: Some(f64), .. }`.
 
 ---
@@ -640,6 +621,7 @@ sequenceDiagram
 2. **Fail-Fast Input Validation (`BatchRequest::validate`)**:
    - Rejects path traversal attempts (`..`) and absolute path injection within `selected_items` and `TrackAssignment`.
    - Validates that workers, bitrates, and presets conform strictly to expected ranges before acquiring runtime locks.
+   - **Two distinct failure points** ([ADR-0008](./docs/adr/0008-typed-engine-bridge-and-track-assignment-model.md#amendment--2026-09-26)). A validation failure raised **before** `BatchStart` — an assignment target that matches no discovered item — settles **no** items and emits **no** `BatchComplete`: the run returns an error, writes no media, and the Engine Bridge supervisor settles the job exactly once as failed with an empty snapshot. A planning failure raised **after** `BatchStart` — an assignment whose asset disappeared between validation and resolution — settles the affected item and every remaining queued item as `error` with distinct reasons, followed by exactly one failed `BatchComplete`. Both fail closed; only the second produces per-item outcomes.
 3. **Task-Level Panic Containment**:
    - Engine workers execute within Tokio task boundaries. Any unexpected panic is caught at `JoinHandle` resolution, preventing desktop application crashes and releasing locks cleanly.
 
@@ -665,15 +647,15 @@ The system architecture represents the cumulative implementation of 14 formal Ar
 | [**0001**](docs/adr/0001-sidecar-contract-and-structured-planning.md) | Sidecar Contract and Structured Planning | Established canonical manifest v2 schema and structured lifecycle events. Implemented. | `manifest.rs`, `pipeline.rs` |
 | [**0002**](docs/adr/0002-unified-asset-resolver-and-batch-runner.md) | Asset Resolver and Runner Architecture | Consolidated asset discovery into `AssetResolver`; decoupled remux and extract runners. Implemented. | `assets.rs`, `remux.rs`, `extract.rs` |
 | [**0003**](docs/adr/0003-transactional-font-extraction.md) | Transactional Font Extraction | Implemented two-phase claim/promote font management with BLAKE2b deduplication. Implemented. | `fonts.rs` |
-| [**0004**](docs/adr/0004-resolution-precedence-and-conventions.md) | Resolution Precedence and Conventions | Formalized subtitle precedence ladder (Manual → Same-Directory → Embedded → Ancestor → Fallback), cover ranking rules, fractional episode passthrough. Includes [2026-09-24 amendment](docs/adr/0004-resolution-precedence-and-conventions.md) (implemented runtime contracts: ancestor subtitle priority, cover art ranking). | `assets.rs`, `domain.rs` |
+| [**0004**](docs/adr/0004-resolution-precedence-and-conventions.md) | Resolution Precedence and Conventions | Formalized subtitle precedence ladder (Manual → Same-Directory → Embedded → Ancestor → Fallback), cover ranking rules, fractional episode passthrough. Includes [2026-09-24 amendment](docs/adr/0004-resolution-precedence-and-conventions.md#amendment--2026-09-24) (implemented runtime contracts: embedded-before-ancestor subtitle ordering, cover art ranking). | `assets.rs`, `domain.rs` |
 | [**0005**](docs/adr/0005-rust-engine-migration-and-workspace-topology.md) | Rust Media Engine Migration | Established root workspace topology, split into Media Engine and Desktop contexts. Implemented. | `Cargo.toml`, `CONTEXT-MAP.md` |
 | [**0006**](docs/adr/0006-hybrid-ebml-probing-and-channel-streaming.md) | Hybrid EBML Probing & Channel Streaming | Built native Rust EBML parser with `mkvmerge -J` fallback and Tokio MPSC event channels. Implemented. | `ebml.rs`, `scan.rs`, `pipeline.rs` |
 | [**0007**](docs/adr/0007-in-process-engine-bridge.md) | In-Process Engine Bridge | Retired subprocess sidecars; connected Tauri directly to `mkv-core` with panic isolation and two-phase teardown. Implemented. | `commands.rs`, `process.rs` |
-| [**0008**](docs/adr/0008-typed-engine-bridge-and-track-assignment-model.md) | Typed Engine Bridge & Track Assignments | Replaced string CLI args with typed `BatchRequest`, fail-fast preflight validation, and `JobSnapshot` projection. Includes [2026-09-24 amendment](docs/adr/0008-typed-engine-bridge-and-track-assignment-model.md#amendment--2026-09-24) (implemented runtime contracts: resolution fail-closed abort, active batch snapshot restore across reloads, breaking cutover removing `keep_fonts`). | `request.rs`, `preset.rs`, `process.rs` |
+| [**0008**](docs/adr/0008-typed-engine-bridge-and-track-assignment-model.md) | Typed Engine Bridge & Track Assignments | Replaced string CLI args with typed `BatchRequest`, fail-fast preflight validation, and `JobSnapshot` projection. Includes [2026-09-24](docs/adr/0008-typed-engine-bridge-and-track-assignment-model.md#amendment--2026-09-24) and [2026-09-26](docs/adr/0008-typed-engine-bridge-and-track-assignment-model.md#amendment--2026-09-26) amendments (implemented runtime contracts: resolution fail-closed abort, the two distinct preflight failure points, active batch snapshot restore across reloads, breaking cutover removing `keep_fonts`). | `request.rs`, `preset.rs`, `process.rs` |
 | [**0009**](docs/adr/0009-streaming-card-progress-and-item-duration-model.md) | Streaming Card Progress & Item Duration | Authoritative engine-owned `duration_sec`, indeterminate-to-determinate card transitions, 1Hz presentation heartbeat. Implemented. | `pipeline.rs`, `queue-state.js`, `queue-view.js` |
 | [**0010**](docs/adr/0010-mainline-rust-cutover-and-python-decommissioning.md) | Mainline Rust Engine Cutover | Decommissioned legacy Python codebase; established unified 1.0.0 semantic versioning and CI/release status gates. Implemented. | Root `Cargo.toml`, `.github/workflows/ci.yml`, `.github/workflows/release.yml` |
 | [**0011**](docs/adr/0011-selected-items-queue-and-concurrency-pipelining.md) | Selected Items Queue & Concurrency Pipelining | Global Tokio JoinSet, dual-governor I/O semaphore, parallel probing, enriched 1:1 track assignment modal. Implemented. | `pipeline.rs`, `request.rs`, `app.js` |
-| [**0012**](docs/adr/0012-track-assignment-override-execution-and-seam-unification.md) | Track Assignment Override Execution and Seam Unification | Unified full TrackAssignment execution into mkvmerge args (offset, language, title); eliminated sub_assignments flattening. Implemented. | `pipeline.rs`, `remux.rs`, `mkv-cli` |
+| [**0012**](docs/adr/0012-track-assignment-override-execution-and-seam-unification.md) | Track Assignment Override Execution and Seam Unification | Unified full TrackAssignment execution into mkvmerge args (offset, language, title); eliminated sub_assignments flattening. Includes [2026-09-26 amendment](docs/adr/0012-track-assignment-override-execution-and-seam-unification.md#amendment--2026-09-26) (offset contract: override-not-additive, explicit zero means unshifted, milliseconds throughout). Implemented. | `pipeline.rs`, `remux.rs`, `mkv-cli` |
 | [**0013**](docs/adr/0013-asynchronous-probing-and-transcode-governance-performance-overhaul.md) | Asynchronous Probing and Transcode Governance Performance Overhaul | Asynchronous mkvmerge fallback probing, transcode thread governor, downshifted complexity (5), fine-grained font seeding lock, zero-copy cache serialization. Accepted and implemented. | `scan.rs`, `request.rs`, `fonts.rs`, `pipeline.rs` |
 | [**0014**](docs/adr/0014-cli-selected-items-execution-and-manifest-filtering.md) | CLI Selected Items Execution and Manifest Filtering | Dual CLI selection flags (`--selected-item` and `--selected-items`), path normalization with CWD fallback, and preflight planning manifest filtering (`InspectionManifest::filter_selected`). Accepted and implemented. | `mkv-cli`, `manifest.rs`, `pipeline.rs` |
 
