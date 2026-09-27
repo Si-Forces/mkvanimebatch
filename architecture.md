@@ -451,10 +451,10 @@ The legacy Python PyInstaller sidecar architecture was superseded by the **in-pr
    - This applies to the Inspection Manifest's `canonical_dir`, the Job Snapshot's `input_dir`, and `JobEvent::BatchStart.input_dir`. The engine still receives and uses the real `PathBuf` for filesystem work; only the projected form is normalized, in the bridge.
    - The three must agree because Queue Tracker directory identity is a string comparison. A mismatch — for example a raw verbatim `BatchStart.input_dir` against a stripped `canonical_dir` — silently drops Queue Selection and Active Batch ordering on the next same-directory rescan, because a release directory whose name ends in `.` or a space normalizes differently in each form.
 6. **Linux Desktop Environment Hardening (`lib.rs`, ADR-0015)**:
-   - Enforces `GDK_BACKEND=x11,wayland` to avoid `EGL_BAD_PARAMETER` aborts under native Wayland.
+   - Defaults `GDK_BACKEND=x11,wayland` to avoid `EGL_BAD_PARAMETER` aborts under native Wayland.
    - Inside AppImages on modern Linux distributions (Fedora, Arch, Ubuntu 24+), dynamically injects host `libwayland-client.so.0` via `LD_PRELOAD` to resolve ABI symbol conflicts between bundled and host graphics drivers, and disables WebKitGTK DMABUF rendering (`WEBKIT_DISABLE_DMABUF_RENDERER=1`) to prevent Mesa EGL exit segfaults (`SkiaGLContext` teardown race condition).
    - The DMABUF workaround is scoped to AppImage deliberately and must not be widened to Native Packages (RPM/DEB). On those installs running WebKitGTK 2.54+, disabling DMABUF drops Skia to CPU shared-memory rendering; the window is `transparent: true`, so only pointer-damaged regions recomposite and the rest of the window shows the desktop through it. Native Packages therefore keep DMABUF enabled. See [ADR-0015](docs/adr/0015-per-package-webkitgtk-dmabuf-renderer-scoping.md) for the full rationale.
-   - `init_linux_env()` only ever *defaults* these variables; an operator who exported `WEBKIT_DISABLE_DMABUF_RENDERER=1` to work around the original shutdown segfault keeps that override and so keeps the rendering bug. The fix for that operator is to unset the variable, not to widen the default.
+   - `init_linux_env()` only ever *defaults* `GDK_BACKEND` and `WEBKIT_DISABLE_DMABUF_RENDERER`; both are `is_none()`-guarded, so an operator who exported `WEBKIT_DISABLE_DMABUF_RENDERER=1` to work around the original shutdown segfault keeps that override and so keeps the rendering bug. The fix for that operator is to unset the variable, not to widen the default. The `libwayland-client` preload is the one exception, and it behaves differently in both directions: it is guarded by a `contains()` check, so it *defers* to an operator who has already preloaded a `libwayland-client`, and *prepends* to whatever unrelated value is already there rather than replacing it.
 
 ---
 
@@ -641,7 +641,7 @@ sequenceDiagram
 
 ## 9. Architectural Decision Records (ADR) Traceability Matrix
 
-The system architecture represents the cumulative implementation of 14 formal Architectural Decision Records:
+The system architecture represents the cumulative implementation of 15 formal Architectural Decision Records:
 
 | ADR | Title | Core Architectural Impact | Primary Code Location |
 | :---: | :--- | :--- | :--- |
@@ -659,6 +659,7 @@ The system architecture represents the cumulative implementation of 14 formal Ar
 | [**0012**](docs/adr/0012-track-assignment-override-execution-and-seam-unification.md) | Track Assignment Override Execution and Seam Unification | Unified full TrackAssignment execution into mkvmerge args (offset, language, title); eliminated sub_assignments flattening. Includes [2026-09-26 amendment](docs/adr/0012-track-assignment-override-execution-and-seam-unification.md#amendment--2026-09-26) (offset contract: override-not-additive, explicit zero means unshifted, milliseconds throughout). Implemented. | `pipeline.rs`, `remux.rs`, `mkv-cli` |
 | [**0013**](docs/adr/0013-asynchronous-probing-and-transcode-governance-performance-overhaul.md) | Asynchronous Probing and Transcode Governance Performance Overhaul | Asynchronous mkvmerge fallback probing, transcode thread governor, downshifted complexity (5), fine-grained font seeding lock, zero-copy cache serialization. Accepted and implemented. | `scan.rs`, `request.rs`, `fonts.rs`, `pipeline.rs` |
 | [**0014**](docs/adr/0014-cli-selected-items-execution-and-manifest-filtering.md) | CLI Selected Items Execution and Manifest Filtering | Dual CLI selection flags (`--selected-item` and `--selected-items`), path normalization with CWD fallback, and preflight planning manifest filtering (`InspectionManifest::filter_selected`). Accepted and implemented. | `mkv-cli`, `manifest.rs`, `pipeline.rs` |
+| [**0015**](docs/adr/0015-per-package-webkitgtk-dmabuf-renderer-scoping.md) | Per-Package WebKitGTK DMABUF Renderer Scoping | Scoped the `WEBKIT_DISABLE_DMABUF_RENDERER` workaround to the AppImage packaging boundary via the `APPIMAGE`/`APPDIR` env markers, so Native Packages keep hardware-accelerated damage tracking on transparent windows. Accepted. | `lib.rs` |
 
 ---
 
