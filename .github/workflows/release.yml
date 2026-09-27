@@ -352,10 +352,15 @@ jobs:
           # carries no greppable version string. Fail loudly rather than shipping
           # a manifest with a blank version.
           #
-          # libdir is deliberately not named APPDIR: APPIMAGE/APPDIR are the env
-          # vars init_linux_env() keys the DMABUF scoping off (ADR-0015), and a
-          # shell variable of that name in this step reads as if it fed that check.
-          libdir=/tmp/appimage-contents/squashfs-root/usr/lib
+          # `appdir` here is the extracted AppImage's root, not the AppImage
+          # runtime's own APPDIR env var, which init_linux_env() keys the DMABUF
+          # scoping off (ADR-0015). The two are unrelated; keep them apart.
+          appdir=/tmp/appimage-contents/squashfs-root
+          libdir=$appdir/usr/lib
+          if [ ! -d "$appdir" ]; then
+            echo "::error::AppDir $appdir does not exist; the AppImage did not extract"
+            exit 1
+          fi
           manifest=/tmp/linux-release/APPIMAGE-RUNTIME.txt
 
           {
@@ -383,7 +388,12 @@ jobs:
             soname="${rest%%:*}"
             output="${rest##*:}"
 
-            if [ -e "$libdir/$soname" ]; then
+            # Search the whole AppDir rather than one hardcoded libdir: the
+            # bundler's layout is not this file's to predict, and a wrong guess
+            # here would fail a release that is actually fine, for a reason that
+            # has nothing to do with the runtime it is trying to record.
+            if [ -e "$libdir/$soname" ] ||
+               [ -n "$(find "$appdir" -name "$soname" -print -quit 2>/dev/null)" ]; then
               bundled=yes
             else
               bundled=NO
