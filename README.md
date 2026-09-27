@@ -232,7 +232,7 @@ cargo tauri build
 └─────────────────────────────────────────────────────────────┘
 ```
 
-See the architecture decision records in `docs/adr/` (0001–0014) for complete architectural rationale:
+See the architecture decision records in `docs/adr/` (0001–0015) for complete architectural rationale:
 - [ADR-0005: Rust Engine Migration & Workspace Topology](docs/adr/0005-rust-engine-migration-and-workspace-topology.md)
 - [ADR-0006: Hybrid EBML Probing & Channel Streaming](docs/adr/0006-hybrid-ebml-probing-and-channel-streaming.md)
 - [ADR-0007: In-Process Engine Bridge & Sidecar Retirement](docs/adr/0007-in-process-engine-bridge.md)
@@ -243,6 +243,7 @@ See the architecture decision records in `docs/adr/` (0001–0014) for complete 
 - [ADR-0012: Track Assignment Override Execution & Seam Unification](docs/adr/0012-track-assignment-override-execution-and-seam-unification.md)
 - [ADR-0013: Asynchronous Probing and Transcode Governance Performance Overhaul](docs/adr/0013-asynchronous-probing-and-transcode-governance-performance-overhaul.md)
 - [ADR-0014: CLI Selected Items Execution and Manifest Filtering](docs/adr/0014-cli-selected-items-execution-and-manifest-filtering.md)
+- [ADR-0015: Per-Package WebKitGTK DMABUF Renderer Scoping](docs/adr/0015-per-package-webkitgtk-dmabuf-renderer-scoping.md)
 
 ---
 
@@ -290,7 +291,7 @@ mkvanimebatch/
 │   ├── ui/                  # Web frontend (Liquid Glass UI, Queue Tracker, 10 Node test suites)
 │   └── src-tauri/           # In-process Tauri Engine Bridge & telemetry
 ├── docs/
-│   └── adr/                 # System Architecture Decision Records (0001 - 0014)
+│   └── adr/                 # System Architecture Decision Records (0001 - 0015)
 └── .github/
     └── workflows/           # Consolidated CI matrix & Release workflows
 ```
