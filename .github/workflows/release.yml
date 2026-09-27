@@ -230,49 +230,16 @@ jobs:
             echo "tag=$REF_NAME" >> "$GITHUB_OUTPUT"
           fi
 
+      # Uploads assets only. The release's name and body are owned solely by
+      # build-linux (see "Publish Linux bundles to release"). These two jobs run
+      # in parallel on the same tag, so whichever set a body last would win —
+      # that race is why the body used to be duplicated here, and why editing
+      # one copy silently did nothing. Leaving name/body unset keeps whatever
+      # the owner publishes.
       - name: Publish Windows files to release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.release-tag.outputs.tag }}
-          name: "MKV Anime Batch ${{ steps.release-tag.outputs.tag }}"
-          body: |
-            ## 🪟 Windows
-
-            | File | Description |
-            |------|-------------|
-            | `mkv-anime-batch.exe` | Single self-contained standalone desktop GUI executable |
-            | `MKV_Anime_Batch_Portable_win64.zip` | Portable Zip package (self-contained GUI) |
-            | `mkv-cli-x86_64-pc-windows-msvc.zip` | Standalone native CLI executable (includes `.sha256`) |
-
-            ---
-
-            ## 🐧 Linux
-
-            | File | Description |
-            |------|-------------|
-            | `MKV_Anime_Batch_*_amd64.AppImage` | Universal AppImage — works on any modern Linux distro |
-            | `MKV_Anime_Batch_*_amd64.deb` | Debian / Ubuntu package |
-            | `MKV_Anime_Batch_*_x86_64.rpm` | Fedora / RedHat / SUSE package |
-            | `mkv-cli-x86_64-unknown-linux-gnu.tar.gz` | Standalone native CLI executable (includes `.sha256`) |
-
-            ---
-
-            ### 🚀 Quick Start (CLI)
-
-            ```bash
-            # Inspect releases and generate Manifest v2 JSON
-            ./mkv-cli --input-dir "/path/to/anime/series" --plan
-
-            # Dry-run batch remuxing simulation
-            ./mkv-cli --input-dir "/path/to/anime/series" --dry-run
-            ```
-
-            ---
-
-            ### ⚙️ External Prerequisites
-            Ensure the following command-line tools are installed and in your `PATH`:
-            - `mkvmerge` & `mkvextract` (from [MKVToolNix](https://mkvtoolnix.download/))
-            - `ffmpeg` (for Opus audio transcoding, from [ffmpeg.org](https://ffmpeg.org/))
           files: |
             windows-artifacts/mkv-anime-batch.exe
             windows-artifacts/MKV_Anime_Batch_Portable_win64.zip
@@ -354,7 +321,9 @@ jobs:
           find target desktop-tauri -type f -name "*.deb" -exec cp {} /tmp/linux-release/ \;
           find target desktop-tauri -type f -name "*.rpm" -exec cp {} /tmp/linux-release/ \;
 
-      - name: Verify Linux packages
+      - name: Verify Linux packages and record AppImage runtime
+        id: verify-linux
+        shell: bash
         run: |
           DEB="$(find /tmp/linux-release -name '*.deb' -print -quit)"
           RPM="$(find /tmp/linux-release -name '*.rpm' -print -quit)"
@@ -372,6 +341,76 @@ jobs:
           (cd /tmp/appimage-contents && "$APPIMAGE" --appimage-extract >/dev/null)
           find /tmp/appimage-contents/squashfs-root -name 'mkv-anime-batch' -type f -print -quit | grep -q .
 
+          # The AppImage bundles its own GTK/WebKitGTK, copied off this runner,
+          # so its rendering behaviour is decided by the runner image rather than
+          # by this repo. See ADR-0015: an AppImage whose WebKitGTK reaches the
+          # 2.54 transparent-window behaviour inherits a rendering bug that the
+          # DMABUF workaround itself causes. Record what we actually bundled so a
+          # bad release is diagnosable instead of mysterious.
+          #
+          # Versions come from dpkg, not from the .so: the bundled libwebkit2gtk
+          # carries no greppable version string. Fail loudly rather than shipping
+          # a manifest with a blank version.
+          APPDIR=/tmp/appimage-contents/squashfs-root/usr/lib
+          manifest=/tmp/linux-release/APPIMAGE-RUNTIME.txt
+          webkit_version=""
+          gtk_version=""
+
+          {
+            echo "AppImage bundled runtime"
+            echo "recorded: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "see docs/adr/0015-per-package-webkitgtk-dmabuf-renderer-scoping.md"
+            echo
+            printf '%-30s %-24s %s\n' SONAME VERSION BUNDLED
+          } > "$manifest"
+
+          for entry in \
+            "libwebkit2gtk-4.1:libwebkit2gtk-4.1.so.0" \
+            "libjavascriptcoregtk-4.1:libjavascriptcoregtk-4.1.so.0" \
+            "libgtk-3-0t64:libgtk-3.so.0"; do
+            pkg="${entry%%:*}"
+            soname="${entry##*:}"
+
+            if [ -e "$APPDIR/$soname" ]; then
+              bundled=yes
+            else
+              bundled=NO
+            fi
+
+            version="$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null || true)"
+            # GTK3 moved to a t64 package name in Ubuntu 24.04; accept either.
+            if [ -z "$version" ] && [ "${pkg%t64}" != "$pkg" ]; then
+              version="$(dpkg-query -W -f='${Version}' "${pkg%t64}" 2>/dev/null || true)"
+            fi
+            if [ -z "$version" ]; then
+              echo "::error::could not determine the version of $pkg on the build runner"
+              exit 1
+            fi
+
+            printf '%-30s %-24s %s\n' "$soname" "$version" "$bundled" >> "$manifest"
+
+            # A missing bundle is not cosmetic. Without its own WebKitGTK the
+            # AppImage falls back to the host's, and on a host carrying the 2.54
+            # transparent-window behaviour the DMABUF workaround this packaging
+            # relies on becomes the cause of ADR-0015's rendering bug. Fail the
+            # release rather than shipping that silently.
+            if [ "$bundled" = "NO" ]; then
+              echo "::error::$soname is not bundled in the AppImage; it would fall back to the host runtime"
+              exit 1
+            fi
+
+            if [ "$soname" = "libwebkit2gtk-4.1.so.0" ]; then
+              webkit_version="$version"
+            fi
+            if [ "$soname" = "libgtk-3.so.0" ]; then
+              gtk_version="$version"
+            fi
+          done
+
+          cat "$manifest"
+          echo "webkit_version=$webkit_version" >> "$GITHUB_OUTPUT"
+          echo "gtk_version=$gtk_version" >> "$GITHUB_OUTPUT"
+
       - name: Resolve Release Tag
         id: release-tag
         shell: bash
@@ -386,7 +425,13 @@ jobs:
             echo "tag=$REF_NAME" >> "$GITHUB_OUTPUT"
           fi
 
+      # Sole owner of the release's name and body. The body documents both
+      # platforms because one release carries both platforms' assets, and it
+      # embeds the AppImage runtime versions that only this job can compute.
+      # build-windows runs in parallel and uploads assets without touching the
+      # body, so the outcome does not depend on which job finishes first.
       - name: Publish Linux bundles to release
+        id: publish-linux
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.release-tag.outputs.tag }}
@@ -410,6 +455,18 @@ jobs:
             | `MKV_Anime_Batch_*_amd64.deb` | Debian / Ubuntu package |
             | `MKV_Anime_Batch_*_x86_64.rpm` | Fedora / RedHat / SUSE package |
             | `mkv-cli-x86_64-unknown-linux-gnu.tar.gz` | Standalone native CLI executable (includes `.sha256`) |
+            | `APPIMAGE-RUNTIME.txt` | GTK/WebKitGTK versions bundled into the AppImage |
+
+            #### 📦 AppImage Bundled Runtime
+
+            The AppImage ships its own GTK and WebKitGTK rather than the host's, so this
+            is the runtime that governs its window rendering — see
+            [ADR-0015](https://github.com/sifahaz/mkvanimebatch/blob/main/docs/adr/0015-per-package-webkitgtk-dmabuf-renderer-scoping.md).
+
+            | Library | Version |
+            |---------|---------|
+            | `libwebkit2gtk-4.1.so.0` | `${{ steps.verify-linux.outputs.webkit_version }}` |
+            | `libgtk-3.so.0` | `${{ steps.verify-linux.outputs.gtk_version }}` |
 
             ---
 
@@ -433,6 +490,7 @@ jobs:
             /tmp/linux-release/*.AppImage
             /tmp/linux-release/*.deb
             /tmp/linux-release/*.rpm
+            /tmp/linux-release/APPIMAGE-RUNTIME.txt
             mkv-cli-x86_64-unknown-linux-gnu.tar.gz
             mkv-cli-x86_64-unknown-linux-gnu.tar.gz.sha256
           draft: false
