@@ -12,6 +12,7 @@ pub use tokio_util::sync::CancellationToken;
 
 use crate::assets::{
     claim_leftover_chapters, prepare_release_directory, ReleasePreparationOptions,
+    SubClassification,
 };
 use crate::domain::{output_stem, resolve_output_dir};
 use crate::extract::extract_mkv_file;
@@ -927,6 +928,9 @@ impl BatchPipeline {
         let mut scan_cache: HashMap<PathBuf, ScanResults> = HashMap::new();
         let mut fonts_dir_cache: HashMap<PathBuf, PathBuf> = HashMap::new();
         let mut font_cache: HashMap<PathBuf, FontInfo> = HashMap::new();
+        // Release directories re-index the same shared ancestor assets, so the
+        // per-file subtitle classification is derived once and reused.
+        let mut sub_classification_cache: HashMap<PathBuf, SubClassification> = HashMap::new();
 
         let max_workers = self.config.workers.max(1);
         let io_limit = if self.config.io_jobs > 0 {
@@ -1047,6 +1051,7 @@ impl BatchPipeline {
                 scan_cache: Some(&mut scan_cache),
                 fonts_dir_cache: Some(&mut fonts_dir_cache),
                 font_cache: Some(&mut font_cache),
+                sub_classification_cache: Some(&mut sub_classification_cache),
             };
             let prepared =
                 prepare_release_directory(mkv_dir, &self.config.input_dir, dir_videos, prep_opts);

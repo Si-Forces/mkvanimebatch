@@ -999,3 +999,157 @@ fn test_stale_assigned_subtitle_fails_closed_for_parsed_and_unparsed_videos() {
         );
     }
 }
+
+#[test]
+fn test_sub_classification_cache_populates_and_reuses_across_release_directories() {
+    use mkv_core::assets::SubClassification;
+
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("Anime");
+    let season1 = root.join("Season 01");
+    let season2 = root.join("Season 02");
+    fs::create_dir_all(&season1).unwrap();
+    fs::create_dir_all(&season2).unwrap();
+
+    let sub_s01e01 = root.join("Show - S01E01.ind.ass");
+    let sub_s02e01 = root.join("Show - S02E01.eng.ass");
+    fs::write(&sub_s01e01, b"[Script Info]\nTitle: Test S1\n").unwrap();
+    fs::write(&sub_s02e01, b"[Script Info]\nTitle: Test S2\n").unwrap();
+
+    let ep_s1 = season1.join("Show - S01E01.mkv");
+    let ep_s2 = season2.join("Show - S02E01.mkv");
+    fs::write(&ep_s1, b"vid1").unwrap();
+    fs::write(&ep_s2, b"vid2").unwrap();
+
+    let mut sub_classification_cache: HashMap<PathBuf, SubClassification> = HashMap::new();
+
+    let prep1 = prepare_release_directory(
+        &season1,
+        &root,
+        &[make_video(&ep_s1)],
+        ReleasePreparationOptions {
+            sub_classification_cache: Some(&mut sub_classification_cache),
+            ..Default::default()
+        },
+    );
+
+    // Cache should now hold derived classifications for root subtitles.
+    assert!(sub_classification_cache.contains_key(&sub_s01e01));
+    assert!(sub_classification_cache.contains_key(&sub_s02e01));
+    assert_eq!(
+        sub_classification_cache.get(&sub_s01e01).unwrap().lang,
+        "ind"
+    );
+    assert_eq!(
+        sub_classification_cache.get(&sub_s02e01).unwrap().lang,
+        "eng"
+    );
+
+    let resolved1 = prep1
+        .resolver
+        .resolve_for(&make_video(&ep_s1), None, None, None)
+        .unwrap();
+    assert_eq!(resolved1.subtitle_file, Some(sub_s01e01.clone()));
+    assert_eq!(resolved1.subtitle_lang, "ind");
+
+    let count_before = sub_classification_cache.len();
+
+    // Second release directory reuses the populated cache without extra entries.
+    let prep2 = prepare_release_directory(
+        &season2,
+        &root,
+        &[make_video(&ep_s2)],
+        ReleasePreparationOptions {
+            sub_classification_cache: Some(&mut sub_classification_cache),
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(sub_classification_cache.len(), count_before);
+    let resolved2 = prep2
+        .resolver
+        .resolve_for(&make_video(&ep_s2), None, None, None)
+        .unwrap();
+    assert_eq!(resolved2.subtitle_file, Some(sub_s02e01.clone()));
+    assert_eq!(resolved2.subtitle_lang, "eng");
+}
+
+#[test]
+fn test_unparsed_subtitles_bypass_classification_cache() {
+    use mkv_core::assets::SubClassification;
+
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("Anime");
+    let season = root.join("Season 01");
+    fs::create_dir_all(&season).unwrap();
+
+    let unparsed_sub1 = season.join("credits_roll.ass");
+    let unparsed_sub2 = season.join("extras.srt");
+    fs::write(&unparsed_sub1, b"[Script Info]\n").unwrap();
+    fs::write(&unparsed_sub2, b"1\n00:00:01 --> 00:00:02\nExtra\n").unwrap();
+
+    let ep = season.join("Show - 01.mkv");
+    fs::write(&ep, b"video").unwrap();
+
+    let mut sub_classification_cache: HashMap<PathBuf, SubClassification> = HashMap::new();
+
+    let prep = prepare_release_directory(
+        &season,
+        &root,
+        &[make_video(&ep)],
+        ReleasePreparationOptions {
+            sub_classification_cache: Some(&mut sub_classification_cache),
+            ..Default::default()
+        },
+    );
+
+    // Unparsed subtitles must NOT be eagerly classified or inserted into the cache.
+    assert!(sub_classification_cache.is_empty());
+    // But they must still be tracked in unparsed index for all_subtitles discovery.
+    let all_subs = prep.resolver.sub_index.all_subtitles();
+    assert!(all_subs.contains(&unparsed_sub1));
+    assert!(all_subs.contains(&unparsed_sub2));
+}
+
+#[test]
+fn test_sub_classification_cache_preserves_resolution_identity() {
+    use mkv_core::assets::SubClassification;
+
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("Anime");
+    let season = root.join("Season 01");
+    fs::create_dir_all(&season).unwrap();
+
+    let sub_path = root.join("Show - 01.ass");
+    fs::write(&sub_path, b"[Script Info]\n").unwrap();
+    let vid_path = season.join("Show - 01.mkv");
+    fs::write(&vid_path, b"video").unwrap();
+    let vid = make_video(&vid_path);
+
+    // 1. Without cache
+    let uncached = prepare_release_directory(
+        &season,
+        &root,
+        std::slice::from_ref(&vid),
+        ReleasePreparationOptions::default(),
+    );
+    let uncached_res = uncached
+        .resolver
+        .resolve_for(&vid, None, None, None)
+        .unwrap();
+
+    // 2. With cache
+    let mut cache: HashMap<PathBuf, SubClassification> = HashMap::new();
+    let cached = prepare_release_directory(
+        &season,
+        &root,
+        std::slice::from_ref(&vid),
+        ReleasePreparationOptions {
+            sub_classification_cache: Some(&mut cache),
+            ..Default::default()
+        },
+    );
+    let cached_res = cached.resolver.resolve_for(&vid, None, None, None).unwrap();
+
+    assert_eq!(uncached_res, cached_res);
+}
