@@ -351,10 +351,12 @@ jobs:
           # Versions come from dpkg, not from the .so: the bundled libwebkit2gtk
           # carries no greppable version string. Fail loudly rather than shipping
           # a manifest with a blank version.
-          APPDIR=/tmp/appimage-contents/squashfs-root/usr/lib
+          #
+          # libdir is deliberately not named APPDIR: APPIMAGE/APPDIR are the env
+          # vars init_linux_env() keys the DMABUF scoping off (ADR-0015), and a
+          # shell variable of that name in this step reads as if it fed that check.
+          libdir=/tmp/appimage-contents/squashfs-root/usr/lib
           manifest=/tmp/linux-release/APPIMAGE-RUNTIME.txt
-          webkit_version=""
-          gtk_version=""
 
           {
             echo "AppImage bundled runtime"
@@ -364,24 +366,30 @@ jobs:
             printf '%-30s %-24s %s\n' SONAME VERSION BUNDLED
           } > "$manifest"
 
+          # Each entry is dpkg-package-name:soname. These are different namespaces:
+          # the soname is what we assert is bundled, the package name is what
+          # dpkg can report a version for. They are not interchangeable -- the
+          # soname base of libwebkit2gtk is `libwebkit2gtk-4.1`, but its Ubuntu
+          # 24.04 package is `libwebkit2gtk-4.1-0`, and `dpkg-query` on the
+          # former returns nothing at all rather than erroring. The third field
+          # names the step output this entry feeds, so the loop never has to
+          # re-derive identity from a soname after the fact.
           for entry in \
-            "libwebkit2gtk-4.1:libwebkit2gtk-4.1.so.0" \
-            "libjavascriptcoregtk-4.1:libjavascriptcoregtk-4.1.so.0" \
-            "libgtk-3-0t64:libgtk-3.so.0"; do
+            "libwebkit2gtk-4.1-0:libwebkit2gtk-4.1.so.0:webkit_version" \
+            "libjavascriptcoregtk-4.1-0:libjavascriptcoregtk-4.1.so.0:jsc_version" \
+            "libgtk-3-0t64:libgtk-3.so.0:gtk_version"; do
             pkg="${entry%%:*}"
-            soname="${entry##*:}"
+            rest="${entry#*:}"
+            soname="${rest%%:*}"
+            output="${rest##*:}"
 
-            if [ -e "$APPDIR/$soname" ]; then
+            if [ -e "$libdir/$soname" ]; then
               bundled=yes
             else
               bundled=NO
             fi
 
             version="$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null || true)"
-            # GTK3 moved to a t64 package name in Ubuntu 24.04; accept either.
-            if [ -z "$version" ] && [ "${pkg%t64}" != "$pkg" ]; then
-              version="$(dpkg-query -W -f='${Version}' "${pkg%t64}" 2>/dev/null || true)"
-            fi
             if [ -z "$version" ]; then
               echo "::error::could not determine the version of $pkg on the build runner"
               exit 1
@@ -399,17 +407,10 @@ jobs:
               exit 1
             fi
 
-            if [ "$soname" = "libwebkit2gtk-4.1.so.0" ]; then
-              webkit_version="$version"
-            fi
-            if [ "$soname" = "libgtk-3.so.0" ]; then
-              gtk_version="$version"
-            fi
+            echo "$output=$version" >> "$GITHUB_OUTPUT"
           done
 
           cat "$manifest"
-          echo "webkit_version=$webkit_version" >> "$GITHUB_OUTPUT"
-          echo "gtk_version=$gtk_version" >> "$GITHUB_OUTPUT"
 
       - name: Resolve Release Tag
         id: release-tag
@@ -431,7 +432,6 @@ jobs:
       # build-windows runs in parallel and uploads assets without touching the
       # body, so the outcome does not depend on which job finishes first.
       - name: Publish Linux bundles to release
-        id: publish-linux
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.release-tag.outputs.tag }}
@@ -457,7 +457,7 @@ jobs:
             | `mkv-cli-x86_64-unknown-linux-gnu.tar.gz` | Standalone native CLI executable (includes `.sha256`) |
             | `APPIMAGE-RUNTIME.txt` | GTK/WebKitGTK versions bundled into the AppImage |
 
-            #### 📦 AppImage Bundled Runtime
+            ### 📦 AppImage Bundled Runtime
 
             The AppImage ships its own GTK and WebKitGTK rather than the host's, so this
             is the runtime that governs its window rendering — see
@@ -466,6 +466,7 @@ jobs:
             | Library | Version |
             |---------|---------|
             | `libwebkit2gtk-4.1.so.0` | `${{ steps.verify-linux.outputs.webkit_version }}` |
+            | `libjavascriptcoregtk-4.1.so.0` | `${{ steps.verify-linux.outputs.jsc_version }}` |
             | `libgtk-3.so.0` | `${{ steps.verify-linux.outputs.gtk_version }}` |
 
             ---
