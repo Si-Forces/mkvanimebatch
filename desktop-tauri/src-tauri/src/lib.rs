@@ -152,18 +152,18 @@ mod tests {
 
         // AppImage: keep the shutdown-SEGV workaround. Both env markers the
         // runtime sets are exercised, so neither arm of the detection can be
-        // dropped without this failing.
+        // dropped without this failing. Results are collected rather than
+        // asserted here, and asserted after the restore below, so that a failing
+        // assertion cannot leave APPIMAGE/APPDIR/GDK_BACKEND set for whatever
+        // test runs next. (This closes the panic path only. The vars are still
+        // process-global while this test runs, so a sibling test touching them
+        // concurrently would still race -- nothing in the crate does.)
+        let mut markers: Vec<(&str, Option<String>)> = Vec::new();
         for marker in ["APPIMAGE", "APPDIR"] {
             reset();
             std::env::set_var(marker, "1");
             super::init_linux_env();
-            assert_eq!(
-                std::env::var("WEBKIT_DISABLE_DMABUF_RENDERER")
-                    .ok()
-                    .as_deref(),
-                Some("1"),
-                "{marker} must keep DMABUF disabled"
-            );
+            markers.push((marker, std::env::var("WEBKIT_DISABLE_DMABUF_RENDERER").ok()));
         }
 
         // The libwayland-client preload must survive alongside the DMABUF
@@ -181,6 +181,13 @@ mod tests {
         }
 
         assert_eq!(native, None, "native packages must keep DMABUF enabled");
+        for (marker, value) in &markers {
+            assert_eq!(
+                value.as_deref(),
+                Some("1"),
+                "{marker} must keep DMABUF disabled"
+            );
+        }
         if has_candidate {
             assert!(
                 preload.is_some_and(|value| value.contains("libwayland-client")),
