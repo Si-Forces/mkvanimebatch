@@ -64,3 +64,13 @@ an explicit `--fonts-dir` override, then the nearest ancestor fonts
 directory, then `--assets-dir` fallbacks. The first candidate containing
 fonts wins (guarded by `fonts.count == 0` checks) — consistent with how
 asset indices give precedence to earlier-indexed, more specific entries.
+
+## Amendment — 2026-09-24
+
+This section exists because the status line above advertised a revision the body did not carry, and because **Sections 1 and 4 were rewritten in place** to their post-revision text — which predates this repository's convention that an ADR body is never edited after ratification. The superseded rules are recorded here so the reversal is not lost.
+
+**Section 1 — subtitle sources.** The former rule ranked a nearest-ancestor external subtitle *above* an embedded track. Reversed: an embedded subtitle outranks a matching subtitle in a parent directory. Adjacent assets express a direct choice for that video, whereas an embedded track is more specific than a directory-wide ancestor asset. Source precedence still wins before language scoring — a parent English subtitle does not displace an embedded Indonesian track.
+
+**Section 4 — cover names.** The former rule accepted only `cover.<ext>` and `_cover.<ext>`. Replaced by the three episode-cover forms and the two directory-cover forms now in the body, with nearest-directory precedence resolved *before* name specificity, natural-then-full-filename tie-breaking, and an exact-sibling requirement for the bare-stem form. An inapplicable `*_cover` image is never reclassified as a directory-wide cover.
+
+Both revisions are implemented. The ordering stated in the body is shipped behaviour, not an intention.

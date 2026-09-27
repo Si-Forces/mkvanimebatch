@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::assets::SubIndex;
 use crate::domain::{ancestor_dirs, MkvTrack};
 use crate::scan::{
     scan_assets, scan_mkv_files, InspectedVideo, PersistentInspectCache, ScanResults,
@@ -337,6 +336,9 @@ pub async fn generate_inspection_manifest(
 ) -> Result<InspectionManifest, String> {
     if let Some(token) = cancel_token {
         if token.is_cancelled() {
+            if let Some(cache) = persistent_cache {
+                cache.save_shared();
+            }
             return Err("Inspection cancelled".into());
         }
     }
@@ -365,56 +367,122 @@ pub async fn generate_inspection_manifest(
     let mut release_by_dir = HashMap::<PathBuf, String>::new();
     let mut subtitle_candidates = BTreeMap::<String, Vec<String>>::new();
 
+    // Derive every shared subtitle exactly once. Ancestor chains overlap heavily across
+    // releases, so building one index per release re-runs per-file language/dialogue
+    // detection and re-sorts the ancestor candidate set for every release directory.
+    let mut all_ancestor_dirs: HashSet<PathBuf> = HashSet::new();
+    for mkv_dir in videos_by_dir.keys() {
+        for ancestor in ancestor_dirs(mkv_dir, input_dir) {
+            all_ancestor_dirs.insert(ancestor);
+        }
+    }
+    let mut subs_by_dir: HashMap<PathBuf, Vec<String>> = HashMap::new();
+    for directory in &all_ancestor_dirs {
+        let assets = scan_assets(directory, Some(&mut scan_cache));
+        let ids: Vec<String> = assets
+            .subs
+            .iter()
+            .map(|s| get_item_id(&s.path, input_dir))
+            .collect();
+        if !ids.is_empty() {
+            subs_by_dir.insert(directory.clone(), ids);
+        }
+    }
+
     for mkv_dir in videos_by_dir.keys() {
         let release = get_item_id(mkv_dir, input_dir);
         release_by_dir.insert(mkv_dir.clone(), release.clone());
 
-        let mut sub_index = SubIndex::new();
-        let mut ancestors = ancestor_dirs(mkv_dir, input_dir);
-        ancestors.reverse();
-
-        for directory in ancestors {
-            let assets = scan_assets(&directory, Some(&mut scan_cache));
-            for subtitle in assets.subs {
-                sub_index.add(subtitle);
+        let mut candidates: Vec<String> = Vec::new();
+        for directory in ancestor_dirs(mkv_dir, input_dir) {
+            if let Some(dir_subs) = subs_by_dir.get(&directory) {
+                candidates.extend(dir_subs.iter().cloned());
             }
         }
-
-        let candidates: Vec<String> = sub_index
-            .all_subtitles()
-            .iter()
-            .map(|path| get_item_id(path, input_dir))
-            .collect();
+        candidates.sort_by_cached_key(|a| crate::domain::natural_sort_key(a));
 
         if !candidates.is_empty() {
             subtitle_candidates.insert(release, candidates);
         }
     }
 
-    let mut items = Vec::with_capacity(all_mkvs.len());
-    for mkv in &all_mkvs {
-        if let Some(token) = cancel_token {
-            if token.is_cancelled() {
-                if let Some(cache) = persistent_cache {
-                    cache.save_shared();
-                }
-                return Err("Inspection cancelled".into());
-            }
-        }
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2);
+    let probe_limit = (workers * 2).clamp(2, 16);
+    let probe_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(probe_limit));
+    let mut probe_set = tokio::task::JoinSet::new();
 
-        let probe_res = if let Some(token) = cancel_token {
+    let mut probe_results: HashMap<PathBuf, Result<crate::scan::MkvmergeMetadata, String>> =
+        HashMap::new();
+
+    for mkv in &all_mkvs {
+        if let Some(cached) = persistent_cache.and_then(|c| c.get_path(&mkv.path)) {
+            probe_results.insert(mkv.path.clone(), Ok(cached));
+        }
+    }
+
+    if let Some(token) = cancel_token {
+        if token.is_cancelled() {
+            if let Some(cache) = persistent_cache {
+                cache.save_shared();
+            }
+            return Err("Inspection cancelled".into());
+        }
+    }
+
+    for mkv in &all_mkvs {
+        if probe_results.contains_key(&mkv.path) {
+            continue;
+        }
+        let path = mkv.path.clone();
+        let sem = std::sync::Arc::clone(&probe_sem);
+        probe_set.spawn(async move {
+            let Ok(_permit) = sem.acquire().await else {
+                return (path, Err("Probe semaphore closed".into()));
+            };
+            let res = crate::scan::probe_video(&path).await;
+            (path, res)
+        });
+    }
+
+    while !probe_set.is_empty() {
+        let next_res = if let Some(token) = cancel_token {
             tokio::select! {
-                res = crate::scan::get_or_probe_video(&mkv.path, persistent_cache) => res,
                 _ = token.cancelled() => {
+                    probe_set.abort_all();
                     if let Some(cache) = persistent_cache {
                         cache.save_shared();
                     }
                     return Err("Inspection cancelled".into());
                 }
+                next = probe_set.join_next() => next,
             }
         } else {
-            crate::scan::get_or_probe_video(&mkv.path, persistent_cache).await
+            probe_set.join_next().await
         };
+
+        match next_res {
+            Some(Ok((path, probe_res))) => {
+                if let Ok(meta) = &probe_res {
+                    if let Some(cache) = persistent_cache {
+                        cache.put_path(&path, meta.clone());
+                    }
+                }
+                probe_results.insert(path, probe_res);
+            }
+            Some(Err(join_err)) => {
+                tracing::warn!("Preflight probe task failed: {join_err}");
+            }
+            None => break,
+        }
+    }
+
+    let mut items = Vec::with_capacity(all_mkvs.len());
+    for mkv in &all_mkvs {
+        let probe_res = probe_results
+            .remove(&mkv.path)
+            .unwrap_or_else(|| Err("Probe result missing".into()));
 
         let (inspected, inspection_error) = match probe_res {
             Ok(probed) => (Some(InspectedVideo::new(probed)), None),
@@ -797,5 +865,62 @@ mod tests {
         assert_eq!(filtered.items.len(), 2);
         assert_eq!(filtered.items[0].id, "ep01.mkv");
         assert_eq!(filtered.items[1].id, "ep02.mkv");
+    }
+
+    #[tokio::test]
+    async fn test_subtitle_candidates_natural_sort_ordering() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let input_dir = temp_dir.path();
+        std::fs::write(input_dir.join("ep1.mkv"), b"video").unwrap();
+        std::fs::write(input_dir.join("ep1.ass"), b"sub").unwrap();
+        std::fs::write(input_dir.join("ep2.ass"), b"sub").unwrap();
+        std::fs::write(input_dir.join("ep10.ass"), b"sub").unwrap();
+
+        let manifest = generate_inspection_manifest(input_dir, None, None)
+            .await
+            .unwrap();
+
+        let subs = manifest.subtitle_candidates.get(".").unwrap();
+        // Natural sort order expects ep1.ass, ep2.ass, ep10.ass
+        // Ascii sort order would produce ep1.ass, ep10.ass, ep2.ass
+        assert_eq!(
+            subs,
+            &vec![
+                "ep1.ass".to_string(),
+                "ep2.ass".to_string(),
+                "ep10.ass".to_string()
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generate_inspection_manifest_concurrent_probe() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let input_dir = temp_dir.path();
+        for i in 1..=5 {
+            std::fs::write(input_dir.join(format!("ep{:02}.mkv", i)), b"video content").unwrap();
+        }
+
+        let cache = PersistentInspectCache::default();
+        cache.put_path(&input_dir.join("ep01.mkv"), MkvmergeMetadata::default());
+
+        let manifest = generate_inspection_manifest(input_dir, Some(&cache), None)
+            .await
+            .unwrap();
+
+        assert_eq!(manifest.items.len(), 5);
+        assert!(manifest.items[0].inspection_error.is_none());
+        for (idx, item) in manifest.items.iter().enumerate() {
+            assert_eq!(item.id, format!("ep{:02}.mkv", idx + 1));
+        }
+
+        // Second pass should hit cache for all items where cache was populated and maintain ordering
+        let manifest2 = generate_inspection_manifest(input_dir, Some(&cache), None)
+            .await
+            .unwrap();
+        assert_eq!(manifest2.items.len(), 5);
+        for (idx, item) in manifest2.items.iter().enumerate() {
+            assert_eq!(item.id, format!("ep{:02}.mkv", idx + 1));
+        }
     }
 }

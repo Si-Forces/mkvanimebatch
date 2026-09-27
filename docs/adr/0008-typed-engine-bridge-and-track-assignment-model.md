@@ -1,6 +1,6 @@
 # 0008. Typed Engine Bridge, Preset Profiles, and Track Assignment Domain
 
-> **Status**: Accepted (Extended by ADR-0011, ADR-0012; amended 2026-09-24, implemented)
+> **Status**: Accepted (Extended by ADR-0011, ADR-0012; amended 2026-09-24 and 2026-09-26, implemented)
 > **Date**: 2026-05-15
 > **Context**: Media Engine Context & Desktop Application Bridge
 > **Amends**: ADR-0004, ADR-0007
@@ -45,3 +45,14 @@ last Inspection Manifest. A Job Snapshot contains only participating items
 in submitted order, their latest progress, and their outcomes; the restored
 controller retains the active job ID and Stop capability. Unselected items
 are not silently re-inspected during an active job.
+
+## Amendment — 2026-09-26
+
+Decision 3's fail-fast rule has **two** failure points. The 2026-09-24 amendment above recorded only the second. Both are recorded together here; that earlier text stands unedited.
+
+- **Before `BatchStart` — a validation failure.** An assignment target that matches no discovered item fails the run outright. It settles **no** items and emits **no** `BatchComplete`. The run returns an error, writes no media, and the Engine Bridge supervisor settles the job exactly once as failed with an empty snapshot.
+- **After `BatchStart` — a planning failure.** An assignment whose asset disappeared between validation and resolution settles the affected item and every remaining queued item as `error` with distinct reasons, followed by exactly one failed `BatchComplete`.
+
+Both fail closed, and neither may ever substitute an automatically selected subtitle. Only the second produces per-item outcomes, because before `BatchStart` there is no run to report on.
+
+This rule previously appeared in exactly one place in the repository — the Media Engine `CONTEXT.md` glossary — and in neither this ADR nor `architecture.md`, despite belonging here. It is now stated in `architecture.md` §8.1 as well, with this ADR as canonical owner.
