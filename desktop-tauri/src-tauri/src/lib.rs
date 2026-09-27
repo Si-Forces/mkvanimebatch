@@ -9,20 +9,24 @@ use tauri::{Emitter, Manager};
 
 #[cfg(target_os = "linux")]
 pub fn init_linux_env() {
-    // Workaround for upstream WebKitGTK / Mesa EGL race condition crash on shutdown.
-    // Disabling the DMABUF renderer prevents SkiaGLContext / __eglFini SEGV upon exit.
-    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
-        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
-    }
     // Prefer X11/XWayland backend by default to prevent WebKitWebProcess EGL_BAD_PARAMETER abort on Wayland
     if std::env::var_os("GDK_BACKEND").is_none() {
         std::env::set_var("GDK_BACKEND", "x11,wayland");
     }
 
-    // Fix for WebKitWebProcess EGL_BAD_PARAMETER crash inside AppImage on modern Linux (Fedora/Arch/Ubuntu 24+).
-    // AppImage bundles an older libwayland-client.so.0 that conflicts with host Mesa EGL drivers.
-    // Preloading the host system's native libwayland-client.so.0 resolves the ABI/symbol mismatch.
+    // Fixes for bundled WebKitGTK inside AppImage on modern Linux (Fedora/Arch/Ubuntu 24+):
     if std::env::var_os("APPIMAGE").is_some() || std::env::var_os("APPDIR").is_some() {
+        // Workaround for upstream WebKitGTK 2.44 / Mesa EGL race condition crash on shutdown in AppImage.
+        // Disabling the DMABUF renderer prevents SkiaGLContext / __eglFini SEGV upon exit.
+        // Note: Do NOT set this on native packages (RPM/DEB) with WebKitGTK 2.54+, where disabling
+        // DMABUF drops Skia to CPU shared-memory rendering on transparent windows and causes
+        // regions outside pointer damage to vanish.
+        if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+            std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+        }
+
+        // AppImage bundles an older libwayland-client.so.0 that conflicts with host Mesa EGL drivers.
+        // Preloading the host system's native libwayland-client.so.0 resolves the ABI/symbol mismatch.
         let current_preload = std::env::var("LD_PRELOAD").unwrap_or_default();
         if !current_preload.contains("libwayland-client") {
             const CANDIDATES: &[&str] = &[
@@ -104,4 +108,31 @@ pub fn run() {
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_init_linux_env_preserves_dmabuf_on_native() {
+        std::env::remove_var("APPIMAGE");
+        std::env::remove_var("APPDIR");
+        std::env::remove_var("WEBKIT_DISABLE_DMABUF_RENDERER");
+        super::init_linux_env();
+        assert_eq!(std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER"), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_init_linux_env_disables_dmabuf_in_appimage() {
+        std::env::set_var("APPIMAGE", "1");
+        std::env::remove_var("WEBKIT_DISABLE_DMABUF_RENDERER");
+        super::init_linux_env();
+        assert_eq!(
+            std::env::var("WEBKIT_DISABLE_DMABUF_RENDERER").as_deref(),
+            Ok("1")
+        );
+        std::env::remove_var("APPIMAGE");
+        std::env::remove_var("WEBKIT_DISABLE_DMABUF_RENDERER");
+    }
 }
