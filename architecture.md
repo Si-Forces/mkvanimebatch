@@ -105,7 +105,7 @@ mkvanimebatch/
 ├── AGENTS.md                        # Agent workflow guidelines, CI gates, and review rules
 ├── README.md                        # User guide and CLI/GUI reference
 ├── docs/
-│   ├── adr/                         # Architectural Decision Records (0001 - 0014)
+│   ├── adr/                         # Architectural Decision Records (0001 - 0015)
 │   └── agents/                      # Domain modeling and issue tracker documentation
 ├── crates/
 │   ├── mkv-core/                    # Pure-Rust Core Domain & Batch Processing Engine
@@ -450,10 +450,10 @@ The legacy Python PyInstaller sidecar architecture was superseded by the **in-pr
    - Every directory identity crossing the bridge into the Queue Tracker is the **display form** of the canonical path: a Windows verbatim (`\\?\`) prefix is stripped and `\\?\UNC\` is rewritten to `\\` (`commands.rs`, `display_canonical_path`).
    - This applies to the Inspection Manifest's `canonical_dir`, the Job Snapshot's `input_dir`, and `JobEvent::BatchStart.input_dir`. The engine still receives and uses the real `PathBuf` for filesystem work; only the projected form is normalized, in the bridge.
    - The three must agree because Queue Tracker directory identity is a string comparison. A mismatch — for example a raw verbatim `BatchStart.input_dir` against a stripped `canonical_dir` — silently drops Queue Selection and Active Batch ordering on the next same-directory rescan, because a release directory whose name ends in `.` or a space normalizes differently in each form.
-6. **Linux Desktop Environment Hardening (`lib.rs`)**:
+6. **Linux Desktop Environment Hardening (`lib.rs`, ADR-0015)**:
    - Enforces `GDK_BACKEND=x11,wayland` to avoid `EGL_BAD_PARAMETER` aborts under native Wayland.
    - Inside AppImages on modern Linux distributions (Fedora, Arch, Ubuntu 24+), dynamically injects host `libwayland-client.so.0` via `LD_PRELOAD` to resolve ABI symbol conflicts between bundled and host graphics drivers, and disables WebKitGTK DMABUF rendering (`WEBKIT_DISABLE_DMABUF_RENDERER=1`) to prevent Mesa EGL exit segfaults (`SkiaGLContext` teardown race condition).
-   - The DMABUF workaround is scoped to AppImage deliberately and must not be widened to native packages. On RPM/DEB installs running WebKitGTK 2.54+, disabling DMABUF drops Skia to CPU shared-memory rendering; the window is `transparent: true`, so only pointer-damaged regions recomposite and the rest of the window shows the desktop through it. Native packages therefore keep DMABUF enabled.
+   - The DMABUF workaround is scoped to AppImage deliberately and must not be widened to Native Packages (RPM/DEB). On those installs running WebKitGTK 2.54+, disabling DMABUF drops Skia to CPU shared-memory rendering; the window is `transparent: true`, so only pointer-damaged regions recomposite and the rest of the window shows the desktop through it. Native Packages therefore keep DMABUF enabled. See [ADR-0015](docs/adr/0015-per-package-webkitgtk-dmabuf-renderer-scoping.md) for the full rationale.
    - `init_linux_env()` only ever *defaults* these variables; an operator who exported `WEBKIT_DISABLE_DMABUF_RENDERER=1` to work around the original shutdown segfault keeps that override and so keeps the rendering bug. The fix for that operator is to unset the variable, not to widen the default.
 
 ---

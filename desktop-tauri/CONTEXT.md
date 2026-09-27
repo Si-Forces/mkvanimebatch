@@ -18,3 +18,5 @@ The desktop GUI host for anime fansub collections: it presents the queue, drives
 | **Active Batch** | The ordered Queue Selection submitted for one execution, excluding every unselected manifest item. | Entire scanned queue |
 
 **Inspection Manifest**, **Preset Profile**, and **Item Duration** are owned by the [Media Engine context](../crates/mkv-core/CONTEXT.md) and consumed here. This context deliberately holds no second definition of them — see [ADR-0008](../docs/adr/0008-typed-engine-bridge-and-track-assignment-model.md) for why one owner, not two, keeps them honest.
+
+**Native Package** and **AppImage** are packaging formats rather than components of this context, so they are deliberately kept out of the table above. They are load-bearing here — the split between them decides which GTK/WebKitGTK stack the process loads, and therefore which rendering workarounds apply — but the vocabulary and its rationale live in [ADR-0015](../docs/adr/0015-per-package-webkitgtk-dmabuf-renderer-scoping.md).
