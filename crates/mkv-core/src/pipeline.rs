@@ -417,7 +417,9 @@ impl BatchPipeline {
         }
     }
 
-    async fn run_extract(&self) -> Result<PipelineSummary, String> {
+    async fn prepare_batch_and_emit_start(
+        &self,
+    ) -> Result<(Vec<ParsedFile>, PipelineSummary), String> {
         let mut summary = PipelineSummary::default();
         let files = scan_mkv_files(&self.config.input_dir, true, None);
         let files = apply_selected_items(
@@ -425,6 +427,18 @@ impl BatchPipeline {
             &self.config.input_dir,
             self.config.selected_items.as_deref(),
         )?;
+
+        if self.config.mode == PipelineMode::Remux {
+            // Fail closed before any batch or media work: a supplied assignment that no discovered
+            // item can consume aborts the run instead of falling back to automatic resolution.
+            let effective_assignments = effective_track_assignments(&self.config);
+            validate_assignment_targets(
+                effective_assignments.as_deref().unwrap_or_default(),
+                &files,
+                &self.config.input_dir,
+                self.config.selected_items.as_deref(),
+            )?;
+        }
         summary.total = files.len();
 
         let items: Vec<BatchItemInfo> = files
@@ -458,6 +472,14 @@ impl BatchPipeline {
                 extra: Default::default(),
             })
             .await;
+        }
+
+        Ok((files, summary))
+    }
+
+    async fn run_extract(&self) -> Result<PipelineSummary, String> {
+        let (files, mut summary) = self.prepare_batch_and_emit_start().await?;
+        if files.is_empty() {
             return Ok(summary);
         }
 
@@ -859,59 +881,12 @@ impl BatchPipeline {
     }
 
     async fn run_remux(&self) -> Result<PipelineSummary, String> {
-        let mut summary = PipelineSummary::default();
-        let files = scan_mkv_files(&self.config.input_dir, true, None);
-        let files = apply_selected_items(
-            files,
-            &self.config.input_dir,
-            self.config.selected_items.as_deref(),
-        )?;
-
-        // Fail closed before any batch or media work: a supplied assignment that no discovered
-        // item can consume aborts the run instead of falling back to automatic resolution.
-        let effective_assignments = effective_track_assignments(&self.config);
-        validate_assignment_targets(
-            effective_assignments.as_deref().unwrap_or_default(),
-            &files,
-            &self.config.input_dir,
-            self.config.selected_items.as_deref(),
-        )?;
-        summary.total = files.len();
-
-        let items: Vec<BatchItemInfo> = files
-            .iter()
-            .map(|f| BatchItemInfo {
-                id: get_item_id(&f.path, &self.config.input_dir),
-                file: f.name.clone(),
-            })
-            .collect();
-        let input_dir_str = self.config.input_dir.to_string_lossy().to_string();
-        self.emit(JobEvent::BatchStart {
-            version: EVENT_VERSION,
-            total: summary.total,
-            input_dir: input_dir_str,
-            items: Some(items),
-            extra: Default::default(),
-        })
-        .await;
-
+        let (files, mut summary) = self.prepare_batch_and_emit_start().await?;
         if files.is_empty() {
-            let msg = format!(
-                "No MKV files found in '{}'",
-                self.config.input_dir.display()
-            );
-            self.log(&msg).await;
-            summary.log.push(msg);
-            self.emit(JobEvent::BatchComplete {
-                version: EVENT_VERSION,
-                success: true,
-                cancelled: false,
-                extra: Default::default(),
-            })
-            .await;
             return Ok(summary);
         }
 
+        let effective_assignments = effective_track_assignments(&self.config);
         let mut videos_by_dir: BTreeMap<PathBuf, Vec<ParsedFile>> = BTreeMap::new();
         for file in &files {
             let parent = file.path.parent().unwrap_or(Path::new(".")).to_path_buf();
