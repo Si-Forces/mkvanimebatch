@@ -47,6 +47,7 @@ pub struct ReleasePreparationOptions<'a> {
     pub scan_cache: Option<&'a mut HashMap<PathBuf, ScanResults>>,
     pub fonts_dir_cache: Option<&'a mut HashMap<PathBuf, PathBuf>>,
     pub font_cache: Option<&'a mut HashMap<PathBuf, FontInfo>>,
+    pub sub_classification_cache: Option<&'a mut HashMap<PathBuf, SubClassification>>,
 }
 
 pub fn prepare_release_directory(
@@ -86,12 +87,13 @@ pub fn prepare_release_directory(
         let exact_local = mkv_dir.join("fonts");
         resolved.unwrap_or((exact_local, FontsOrigin::Default))
     };
-    let resolver = AssetResolver::discover(
+    let resolver = AssetResolver::discover_with_caches(
         &search_dirs,
         &fonts_dir,
         options.assets_dir,
         options.scan_cache,
         options.font_cache,
+        options.sub_classification_cache,
     );
     PreparedRelease {
         mkv_dir: mkv_dir.to_path_buf(),
@@ -107,12 +109,22 @@ pub fn prepare_release_directory(
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SubEntry {
     file: ParsedFile,
-    lang: String,
-    category_score: i32,
-    is_dialogue: bool,
+    classification: SubClassification,
 }
 
-fn make_sub_entry(sub_file: ParsedFile) -> SubEntry {
+/// Subtitle scoring fields derived purely from one file's stem and extension.
+///
+/// Every release directory re-indexes the same shared ancestor assets, so these
+/// are derived once per file and memoized in a run-wide cache rather than
+/// recomputed for each (asset, release directory) pair.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubClassification {
+    pub lang: String,
+    pub category_score: i32,
+    pub is_dialogue: bool,
+}
+
+fn classify_sub(sub_file: &ParsedFile) -> SubClassification {
     let lang = detect_sub_lang(&sub_file.stem);
     let is_ass = sub_file
         .path
@@ -121,11 +133,17 @@ fn make_sub_entry(sub_file: ParsedFile) -> SubEntry {
         .unwrap_or(false);
     let category_score = score_subtitle_category(&lang, is_ass);
     let is_dialogue = is_dialogue_track(Some(&sub_file.stem));
-    SubEntry {
-        file: sub_file,
+    SubClassification {
         lang,
         category_score,
         is_dialogue,
+    }
+}
+
+fn make_sub_entry(sub_file: ParsedFile, classification: SubClassification) -> SubEntry {
+    SubEntry {
+        file: sub_file,
+        classification,
     }
 }
 
@@ -183,6 +201,12 @@ impl SubIndex {
     }
 
     pub fn add(&mut self, sub_file: ParsedFile) {
+        self.add_classified(sub_file, None);
+    }
+
+    /// Adds a subtitle, reusing `classification` from the run-wide memo when the caller
+    /// has one. Pass `None` to derive the classification on the spot.
+    fn add_classified(&mut self, sub_file: ParsedFile, classification: Option<SubClassification>) {
         let Some(parsed) = &sub_file.parsed else {
             if !self.unparsed_paths.contains(&sub_file.path) {
                 self.unparsed_paths.insert(sub_file.path.clone());
@@ -202,10 +226,11 @@ impl SubIndex {
                 self.directories.push(dir.to_path_buf());
             }
         }
+        let classification = classification.unwrap_or_else(|| classify_sub(&sub_file));
         self.index
             .entry(key)
             .or_default()
-            .push(make_sub_entry(sub_file));
+            .push(make_sub_entry(sub_file, classification));
     }
 
     fn lookup_ranked(
@@ -226,8 +251,8 @@ impl SubIndex {
                 Some((
                     (
                         std::cmp::Reverse(distance),
-                        entry.category_score,
-                        entry.is_dialogue,
+                        entry.classification.category_score,
+                        entry.classification.is_dialogue,
                         std::cmp::Reverse(entry.file.name.len()),
                         std::cmp::Reverse(idx),
                     ),
@@ -235,7 +260,7 @@ impl SubIndex {
                 ))
             })
             .max_by_key(|(priority, _)| *priority)
-            .map(|(_, best)| (best.file.path.clone(), best.lang.clone()))
+            .map(|(_, best)| (best.file.path.clone(), best.classification.lang.clone()))
     }
 
     pub fn lookup_same_dir(&self, parsed: &EpisodeInfo, dir: &Path) -> Option<(PathBuf, String)> {
@@ -643,9 +668,23 @@ fn populate_indices(
     sub_index: &mut SubIndex,
     chap_index: &mut ChapterIndex,
     cover_index: &mut CoverIndex,
+    mut sub_classification_cache: Option<&mut HashMap<PathBuf, SubClassification>>,
 ) {
     for sub in assets.subs {
-        sub_index.add(sub);
+        let classification = if sub.parsed.is_some() {
+            sub_classification_cache.as_deref_mut().map(|cache| {
+                if let Some(hit) = cache.get(&sub.path) {
+                    hit.clone()
+                } else {
+                    let fresh = classify_sub(&sub);
+                    cache.insert(sub.path.clone(), fresh.clone());
+                    fresh
+                }
+            })
+        } else {
+            None
+        };
+        sub_index.add_classified(sub, classification);
     }
     for chap in assets.chapters {
         chap_index.add(chap);
@@ -703,8 +742,26 @@ impl AssetResolver {
         search_dirs: &[PathBuf],
         fonts_dir: &Path,
         assets_dir: Option<&Path>,
+        scan_cache: Option<&mut HashMap<PathBuf, ScanResults>>,
+        font_cache: Option<&mut HashMap<PathBuf, FontInfo>>,
+    ) -> Self {
+        Self::discover_with_caches(
+            search_dirs,
+            fonts_dir,
+            assets_dir,
+            scan_cache,
+            font_cache,
+            None,
+        )
+    }
+
+    pub fn discover_with_caches(
+        search_dirs: &[PathBuf],
+        fonts_dir: &Path,
+        assets_dir: Option<&Path>,
         mut scan_cache: Option<&mut HashMap<PathBuf, ScanResults>>,
         font_cache: Option<&mut HashMap<PathBuf, FontInfo>>,
+        mut sub_classification_cache: Option<&mut HashMap<PathBuf, SubClassification>>,
     ) -> Self {
         let mut fonts = scan_fonts(fonts_dir, font_cache);
         let mut sub_index = SubIndex::new();
@@ -717,6 +774,7 @@ impl AssetResolver {
                 &mut sub_index,
                 &mut chap_index,
                 &mut cover_index,
+                sub_classification_cache.as_deref_mut(),
             );
         }
 
@@ -749,6 +807,7 @@ impl AssetResolver {
                     &mut fb_sub,
                     &mut fb_chap,
                     &mut fb_cov,
+                    sub_classification_cache.as_deref_mut(),
                 );
             }
 
