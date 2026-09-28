@@ -1,9 +1,10 @@
+use std::collections::HashSet;
 use std::fs;
 
 use mkv_core::domain::{AudioTrack, MkvTrack, TrackProperties};
 use mkv_core::scan::{
     is_chapter_xml, is_cover_attachment, is_cover_filename, is_font_attachment, scan_assets,
-    scan_mkv_files, InspectedVideo, MkvAttachment, MkvChapter, MkvmergeMetadata,
+    scan_mkv_files, FileSignature, InspectedVideo, MkvAttachment, MkvChapter, MkvmergeMetadata,
     PersistentInspectCache,
 };
 use tempfile::tempdir;
@@ -591,5 +592,251 @@ fn test_scan_mkv_files_symlink_file_duplicate() {
         results[0].name == "ep01.mkv" || results[0].name == "ep01_link.mkv",
         "Unexpected name: {}",
         results[0].name
+    );
+}
+
+/// Reachable only through a symlinked walk root. This is the exact condition macOS
+/// imposes for free: `tempfile::TempDir` uses `/tmp`, which is a symlink to
+/// `/private/tmp`, so every root this repo's own tests walk is non-canonical there.
+/// Symlink-alias dedup must survive it, or the same episode is discovered twice and
+/// both copies reach the Batch Pipeline.
+#[cfg(unix)]
+#[test]
+fn test_scan_mkv_files_symlink_dedup_under_non_canonical_root() {
+    use std::os::unix::fs::symlink;
+
+    let base = tempdir().unwrap();
+    let real = base.path().join("real");
+    let season = real.join("Season 1");
+    fs::create_dir_all(&season).unwrap();
+    fs::write(season.join("ep01.mkv"), b"dummy").unwrap();
+    fs::create_dir(season.join("extras")).unwrap();
+    fs::write(season.join("extras/extra.mkv"), b"dummy").unwrap();
+    symlink(season.join("extras"), season.join("link_extras")).unwrap();
+
+    // A symlink to the tree root, as a caller holding a symlinked path would supply.
+    let aliased_root = base.path().join("aliased_root");
+    symlink(&real, &aliased_root).unwrap();
+    assert_ne!(
+        aliased_root.canonicalize().unwrap(),
+        aliased_root,
+        "precondition: the walk root must not already be canonical"
+    );
+
+    let results = scan_mkv_files(&aliased_root, true, None);
+    assert_eq!(results.len(), 2, "duplicate episodes leaked: {results:?}");
+}
+
+/// `ignore_paths` holds canonicalized paths, so it only matches entries the walk spells
+/// canonically. A walk root that is not its own canonical path -- a relative CLI root
+/// (`-i ./Anime`) or one reached through a symlinked mount -- must not silently disable it.
+#[cfg(unix)]
+#[test]
+fn test_scan_mkv_files_honors_ignore_paths_under_non_canonical_root() {
+    let base = tempdir().unwrap();
+    let real = base.path().join("real");
+    fs::create_dir_all(real.join("keep")).unwrap();
+    fs::create_dir_all(real.join("skip")).unwrap();
+    fs::write(real.join("keep/keep.mkv"), b"dummy").unwrap();
+    fs::write(real.join("skip/skip.mkv"), b"dummy").unwrap();
+
+    let ignore = HashSet::from([real.join("skip")]);
+
+    // Two spellings of the same tree that are both non-canonical: a symlinked root, and a
+    // root carrying a `..` segment. Neither may defeat the ignore set.
+    let aliased = base.path().join("aliased");
+    std::os::unix::fs::symlink(&real, &aliased).unwrap();
+    let with_dotdot = base.path().join("real/..").join("real");
+
+    for (label, root) in [("symlinked root", aliased), ("dot-dot root", with_dotdot)] {
+        assert_ne!(
+            root.canonicalize().unwrap(),
+            root,
+            "precondition: {label} must not already be canonical"
+        );
+        let results = scan_mkv_files(&root, true, Some(&ignore));
+        assert_eq!(
+            results.len(),
+            1,
+            "ignore_paths silently ignored under {label}: {results:?}"
+        );
+        assert_eq!(results[0].name, "keep.mkv");
+    }
+}
+
+/// `ignore_paths` is compared against the walk's own spelling of each directory. The walk
+/// records a symlinked directory under its unresolved path, so every directory beneath one is
+/// non-canonical -- and a non-canonical spelling never matches the canonicalized ignore set.
+#[cfg(unix)]
+#[test]
+fn test_scan_mkv_files_honors_ignore_paths_under_symlinked_subdirectory() {
+    let base = tempdir().unwrap();
+    let root = base.path().join("root");
+    let outside = base.path().join("outside");
+    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(outside.join("keep")).unwrap();
+    fs::create_dir_all(outside.join("skip")).unwrap();
+    fs::write(outside.join("keep/keep.mkv"), b"dummy").unwrap();
+    fs::write(outside.join("skip/skip.mkv"), b"dummy").unwrap();
+    std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+
+    let ignore = HashSet::from([outside.join("skip")]);
+    let results = scan_mkv_files(&root, true, Some(&ignore));
+    assert_eq!(
+        results.len(),
+        1,
+        "ignore_paths silently ignored beneath a symlinked directory: {results:?}"
+    );
+    assert_eq!(results[0].name, "keep.mkv");
+}
+
+/// `ignore_paths` must also match individual files, not just directories.
+#[test]
+fn test_scan_mkv_files_honors_ignore_paths_for_individual_files() {
+    let base = tempdir().unwrap();
+    let file1 = base.path().join("ep01.mkv");
+    let file2 = base.path().join("ep02.mkv");
+    fs::write(&file1, b"dummy1").unwrap();
+    fs::write(&file2, b"dummy2").unwrap();
+
+    let ignore = HashSet::from([file2]);
+    let results = scan_mkv_files(base.path(), false, Some(&ignore));
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].name, "ep01.mkv");
+}
+
+/// The walk root is resolved once, so `scan_mkv_files` reports the resolved spelling of a file
+/// even when the caller passed a symlinked, relative, or `..`-bearing root. That path reaches
+/// mkvmerge and the manifest, so it is part of the traversal's contract.
+#[cfg(unix)]
+#[test]
+fn test_scan_mkv_files_reports_resolved_paths_under_non_canonical_root() {
+    let base = tempdir().unwrap();
+    let real = base.path().join("real");
+    fs::create_dir_all(&real).unwrap();
+    fs::write(real.join("ep01.mkv"), b"dummy").unwrap();
+    let aliased = base.path().join("aliased_root");
+    std::os::unix::fs::symlink(&real, &aliased).unwrap();
+
+    let results = scan_mkv_files(&aliased, true, None);
+    assert_eq!(results.len(), 1);
+    assert_eq!(
+        results[0].path,
+        real.join("ep01.mkv"),
+        "scan must report the resolved path, not the caller's spelling"
+    );
+}
+
+/// `of_dir_entry` derives a signature from a `DirEntry` without re-`stat`ing it: it must agree
+/// with `FileSignature::of` for a regular entry, must report a symlink under its resolved
+/// signature, and must keep working once the entry's file is gone. That a symlink's own size and
+/// mtime really do differ is pinned by `test_file_signature_resolved_differs_from_symlink_own_metadata`.
+#[cfg(unix)]
+#[test]
+fn test_file_signature_of_dir_entry_matches_resolved_of() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempdir().unwrap();
+    let target = tmp.path().join("a-fairly-long-target-name.ttf");
+    fs::write(&target, vec![b'x'; 4096]).unwrap();
+    let link = tmp.path().join("l.ttf");
+    symlink(&target, &link).unwrap();
+
+    let entries: Vec<_> = fs::read_dir(tmp.path())
+        .unwrap()
+        .map(|e| e.unwrap())
+        .collect();
+    let target_entry = entries.iter().find(|e| e.path() == target).unwrap();
+    let link_entry = entries.iter().find(|e| e.path() == link).unwrap();
+
+    let target_meta = target_entry.metadata().unwrap();
+    let expected_target = FileSignature::of(&target).unwrap();
+    assert_eq!(
+        FileSignature::of_dir_entry(target_entry, &target_meta).unwrap(),
+        expected_target,
+        "a regular entry must sign the file the caller read"
+    );
+    let link_meta = link_entry.metadata().unwrap();
+    assert!(
+        link_meta.is_symlink(),
+        "precondition: lstat must not follow the link"
+    );
+    assert_eq!(
+        FileSignature::of_dir_entry(link_entry, &link_meta).unwrap(),
+        FileSignature::of(&link).unwrap(),
+        "a symlinked entry must be reported under its resolved signature"
+    );
+
+    // The constructor must reuse the metadata it was handed rather than `stat` the entry
+    // again: `DirEntry::metadata` is uncached, so a second read is a second syscall, and
+    // one issued after the file is gone would fail and silently unseed the font.
+    fs::remove_file(&target).unwrap();
+    assert_eq!(
+        FileSignature::of_dir_entry(target_entry, &target_meta),
+        Some(expected_target),
+        "of_dir_entry must reuse the caller's metadata, not re-stat the entry"
+    );
+}
+
+/// `canonicalize` resolves a realpath, which cannot detect hardlinks. Pinning this
+/// documents *why* the traversal only resolves symlinks: a hardlink pair is two
+/// directory entries pointing at one inode, and realpath reports both identically,
+/// so the traversal has always returned both and must keep doing so.
+#[cfg(unix)]
+#[test]
+fn test_scan_mkv_files_hardlink_aliases_are_both_discovered() {
+    let tmp = tempdir().unwrap();
+    let original = tmp.path().join("ep01.mkv");
+    fs::write(&original, b"dummy").unwrap();
+    let hardlink = tmp.path().join("ep01_hard.mkv");
+    fs::hard_link(&original, &hardlink).unwrap();
+
+    let results = scan_mkv_files(tmp.path(), false, None);
+    assert_eq!(results.len(), 2);
+}
+
+/// `FileSignature::from_metadata` exists so `FileSignature::of_dir_entry` can reuse the
+/// `DirEntry` metadata a caller already holds. `DirEntry::metadata` is `lstat`-equivalent
+/// while `FileSignature::of` resolves symlinks, so the two must agree for a regular file --
+/// that agreement is what makes skipping the second `stat` safe.
+#[test]
+fn test_file_signature_from_dirent_metadata_matches_resolved_of() {
+    let tmp = tempdir().unwrap();
+    let file = tmp.path().join("font.ttf");
+    fs::write(&file, b"not-a-real-font").unwrap();
+
+    let dirent_meta = fs::read_dir(tmp.path())
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .metadata()
+        .unwrap();
+    assert!(!dirent_meta.is_symlink());
+    assert_eq!(
+        FileSignature::from_metadata(&dirent_meta),
+        FileSignature::of(&file).unwrap()
+    );
+}
+
+/// A symlink's own metadata (`lstat`) must differ from its resolved signature, which is why
+/// `FileSignature::of_dir_entry` reads the entry's file type to decide whether to re-resolve.
+/// If a platform ever made these equal, that branch would be dead and this test would say so.
+#[cfg(unix)]
+#[test]
+fn test_file_signature_resolved_differs_from_symlink_own_metadata() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempdir().unwrap();
+    let target = tmp.path().join("a-fairly-long-target-name.ttf");
+    fs::write(&target, b"content").unwrap();
+    let link = tmp.path().join("l.ttf");
+    symlink(&target, &link).unwrap();
+
+    let link_own_meta = fs::symlink_metadata(&link).unwrap();
+    assert!(link_own_meta.is_symlink());
+    assert_ne!(
+        FileSignature::from_metadata(&link_own_meta),
+        FileSignature::of(&link).unwrap()
     );
 }

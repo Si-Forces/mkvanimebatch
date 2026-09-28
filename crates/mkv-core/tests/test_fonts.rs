@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
 
@@ -184,6 +185,118 @@ fn test_seed_existing_fonts() {
     assert!(mgr.promote(&mut claim).is_none());
 }
 
+/// `seed_existing` now derives each font's signature from the `DirEntry` metadata it
+/// already holds instead of issuing a second `stat`. The signature it records must be
+/// byte-identical to what a symlink-resolving `FileSignature::of` computes, otherwise
+/// every later memo lookup would miss and fonts would be re-hashed on each run.
+#[test]
+fn test_seed_existing_records_memo_signature_matching_resolved_lookup() {
+    let tmp = tempdir().unwrap();
+    let fonts_dir = tmp.path().join("fonts");
+    fs::create_dir_all(&fonts_dir).unwrap();
+
+    let font = fonts_dir.join("Real.otf");
+    fs::write(&font, b"real font content").unwrap();
+
+    let memo = Arc::new(parking_lot::Mutex::new(FontHashMemo::new(
+        tmp.path().join("memo.json"),
+    )));
+
+    let _mgr = FontRegistry::new(fonts_dir, Some(Arc::clone(&memo)));
+
+    let expected = hash_file(&font).unwrap();
+    let resolved_sig = FileSignature::of(&font).unwrap();
+    assert_eq!(
+        memo.lock().get(&font, resolved_sig),
+        Some(expected),
+        "seeded signature must match a symlink-resolving FileSignature::of lookup"
+    );
+}
+
+/// A symlinked font must be seeded under its *resolved* signature. `DirEntry::metadata`
+/// reports the link itself, so `FileSignature::of_dir_entry` re-resolves the entry's path.
+#[cfg(unix)]
+#[test]
+fn test_seed_existing_symlinked_font_uses_resolved_signature() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempdir().unwrap();
+    let fonts_dir = tmp.path().join("fonts");
+    fs::create_dir_all(&fonts_dir).unwrap();
+
+    let real = fonts_dir.join("Real.otf");
+    fs::write(&real, b"real font content").unwrap();
+    let link = fonts_dir.join("Linked.otf");
+    symlink(&real, &link).unwrap();
+
+    let memo = Arc::new(parking_lot::Mutex::new(FontHashMemo::new(
+        tmp.path().join("memo.json"),
+    )));
+
+    let _mgr = FontRegistry::new(fonts_dir, Some(Arc::clone(&memo)));
+
+    let expected = hash_file(&real).unwrap();
+    let resolved_sig = FileSignature::of(&link).unwrap();
+    let link_own_meta = fs::symlink_metadata(&link).unwrap();
+    assert_ne!(
+        resolved_sig,
+        FileSignature::from_metadata(&link_own_meta),
+        "precondition: link-own metadata must differ from the resolved signature"
+    );
+    assert_eq!(
+        memo.lock().get(&link, resolved_sig),
+        Some(expected),
+        "a symlinked font must be memoized under its resolved signature"
+    );
+}
+
+/// A symlinked font must be recorded in `claimed_name_size` under its *resolved* file size,
+/// not the byte length of the symlink target path. Otherwise, `claim` with the real font size
+/// fails to deduplicate and allows duplicate extraction staging.
+#[cfg(unix)]
+#[test]
+fn test_seed_existing_symlinked_font_prevents_claim() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempdir().unwrap();
+    let fonts_dir = tmp.path().join("fonts");
+    fs::create_dir_all(&fonts_dir).unwrap();
+
+    let real = fonts_dir.join("Real.otf");
+    let font_data = b"simulated font payload exceeding target name length";
+    fs::write(&real, font_data).unwrap();
+    let link = fonts_dir.join("Linked.otf");
+    symlink(&real, &link).unwrap();
+
+    let mgr = FontRegistry::new(fonts_dir, None);
+
+    assert!(
+        mgr.claim("Linked.otf", font_data.len() as u64).is_none(),
+        "symlinked font must be recognized in claimed_name_size under its real file size"
+    );
+}
+
+/// A broken symlink in fonts_dir has no signature and must not be seeded into `claimed_name_size`.
+#[cfg(unix)]
+#[test]
+fn test_seed_existing_broken_symlink_does_not_poison_claim() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempdir().unwrap();
+    let fonts_dir = tmp.path().join("fonts");
+    fs::create_dir_all(&fonts_dir).unwrap();
+
+    let link = fonts_dir.join("Broken.otf");
+    symlink(fonts_dir.join("Nonexistent.otf"), &link).unwrap();
+
+    let mgr = FontRegistry::new(fonts_dir, None);
+
+    assert!(
+        mgr.claim("Broken.otf", 500).is_some(),
+        "broken symlink must not poison claimed_name_size"
+    );
+}
+
 #[test]
 fn test_cleanup_staging() {
     let tmp = tempdir().unwrap();
@@ -231,6 +344,95 @@ fn test_font_hash_memo() {
         assert_eq!(memo.get(&tmp.path().join("f1.ttf"), sig_diff_mtime), None);
         assert_eq!(memo.get(&tmp.path().join("f2.ttf"), sig), None);
     }
+}
+
+/// `FontHashMemo::save` streams through a `BufWriter`, so a memo small enough to fit the
+/// buffer never exercises a mid-stream flush. This pins that a memo far larger than the
+/// 8 KiB buffer still serializes completely and round-trips.
+#[test]
+fn test_font_hash_memo_large_save_round_trips_through_buffered_writer() {
+    let tmp = tempdir().unwrap();
+    let memo_file = tmp.path().join("font_memo.json");
+    const ENTRIES: usize = 500;
+
+    let sig = FileSignature {
+        size: 100,
+        mtime_ns: 12345,
+    };
+    {
+        let mut memo = FontHashMemo::new(memo_file.clone());
+        for i in 0..ENTRIES {
+            let path = tmp
+                .path()
+                .join(format!("font-with-a-longish-name-{i:04}.ttf"));
+            memo.put(&path, sig, format!("{:064x}", i));
+        }
+        memo.save();
+    }
+
+    assert!(
+        fs::metadata(&memo_file).unwrap().len() > 8192,
+        "precondition: the memo must exceed the BufWriter capacity"
+    );
+    let memo = FontHashMemo::new(memo_file);
+    for i in 0..ENTRIES {
+        let path = tmp
+            .path()
+            .join(format!("font-with-a-longish-name-{i:04}.ttf"));
+        assert_eq!(
+            memo.get(&path, sig),
+            Some(format!("{:064x}", i)),
+            "entry {i} did not survive the buffered save"
+        );
+    }
+}
+
+/// A memo with no pending changes must not rewrite its file. Comparing bytes cannot prove
+/// this -- a rewrite of identical data produces identical bytes -- so compare inodes, which
+/// a `persist` necessarily replaces.
+#[cfg(unix)]
+#[test]
+fn test_font_hash_memo_save_is_noop_when_not_dirty() {
+    use std::os::unix::fs::MetadataExt;
+
+    let tmp = tempdir().unwrap();
+    let memo_file = tmp.path().join("font_memo.json");
+    let sig = FileSignature {
+        size: 100,
+        mtime_ns: 12345,
+    };
+
+    let mut memo = FontHashMemo::new(memo_file.clone());
+    memo.put(&tmp.path().join("f1.ttf"), sig, "hash123".to_string());
+    memo.save();
+    let inode_after_first = fs::metadata(&memo_file).unwrap().ino();
+
+    // Re-saving without a new put must leave the file untouched.
+    memo.save();
+    assert_eq!(
+        fs::metadata(&memo_file).unwrap().ino(),
+        inode_after_first,
+        "a clean save must not rewrite the memo file"
+    );
+}
+
+/// `FontHashMemo::save` with a bare filename (no directory component) must save to the current
+/// working directory without `ENOENT`.
+#[test]
+fn test_font_hash_memo_save_bare_filename() {
+    let filename = format!("test_bare_font_memo_{}.json", std::process::id());
+    let path = PathBuf::from(&filename);
+    let mut memo = FontHashMemo::new(path.clone());
+    let sig = FileSignature {
+        size: 100,
+        mtime_ns: 12345,
+    };
+    memo.put(Path::new("dummy.ttf"), sig, "hash123".to_string());
+    memo.save();
+
+    let exists = path.exists();
+    let _ = fs::remove_file(&path);
+    assert!(exists, "saving bare filename should succeed without ENOENT");
 }
 
 #[test]
