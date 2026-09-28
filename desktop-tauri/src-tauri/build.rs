@@ -7,6 +7,9 @@ fn main() {
     )
     .expect("failed to run tauri-build");
 
+    // tauri-build's resource-embedded manifest only reaches the app binary. Embed the
+    // Common-Controls v6 manifest through the linker instead so test binaries, which
+    // link the same comctl32 v6 imports, load too.
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let target_env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
     if target_os == "windows" && target_env == "msvc" {

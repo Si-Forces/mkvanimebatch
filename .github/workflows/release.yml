@@ -105,8 +105,6 @@ jobs:
 
   # ────────────────────────────────────────────────────────────────────────────
   # 3. Release Verification Gate
-  # Depends on `workspace-checks`, which runs the Rust suites including the
-  # non-skipping real-media regression (FFmpeg/MKVToolNix installed, required).
   # ────────────────────────────────────────────────────────────────────────────
   ci-status:
     name: Release Verification Gate
@@ -230,12 +228,9 @@ jobs:
             echo "tag=$REF_NAME" >> "$GITHUB_OUTPUT"
           fi
 
-      # Uploads assets only. The release's name and body are owned solely by
-      # build-linux (see "Publish Linux bundles to release"). These two jobs run
-      # in parallel on the same tag, so whichever set a body last would win —
-      # that race is why the body used to be duplicated here, and why editing
-      # one copy silently did nothing. Leaving name/body unset keeps whatever
-      # the owner publishes.
+      # Uploads assets only. build-linux runs in parallel on the same tag and is
+      # the sole owner of the release name and body (see "Publish Linux bundles
+      # to release"), so leaving them unset here avoids a last-writer-wins race.
       - name: Publish Windows files to release
         uses: softprops/action-gh-release@v2
         with:
@@ -296,6 +291,8 @@ jobs:
           EMPTY="$(mktemp -d)"
           trap 'rm -rf "$EMPTY"' EXIT
           "$CLI" --plan --no-cache --input-dir "$EMPTY" > "$EMPTY/manifest.json"
+          grep -q '"version": 2' "$EMPTY/manifest.json"
+          grep -q '"items": \[\]' "$EMPTY/manifest.json"
 
       - name: Package Linux CLI Archive
         run: |
@@ -309,9 +306,10 @@ jobs:
       - name: Install tauri-cli
         run: cargo install tauri-cli --version "^2" --locked
 
+      # tauri.linux.conf.json is merged automatically when building on Linux.
       - name: Build Tauri app
         working-directory: desktop-tauri
-        run: cargo tauri build --config src-tauri/tauri.linux.conf.json --bundles appimage,deb,rpm
+        run: cargo tauri build --bundles appimage,deb,rpm
 
       # ── Flatten + Collect Bundles ────────────────────────────────────────────
       - name: Collect Linux bundles
@@ -447,7 +445,7 @@ jobs:
           tag_name: ${{ steps.release-tag.outputs.tag }}
           name: "MKV Anime Batch ${{ steps.release-tag.outputs.tag }}"
           body: |
-            ## 🪟 Windows
+            ## Windows
 
             | File | Description |
             |------|-------------|
@@ -457,7 +455,7 @@ jobs:
 
             ---
 
-            ## 🐧 Linux
+            ## Linux
 
             | File | Description |
             |------|-------------|
@@ -467,7 +465,7 @@ jobs:
             | `mkv-cli-x86_64-unknown-linux-gnu.tar.gz` | Standalone native CLI executable (includes `.sha256`) |
             | `APPIMAGE-RUNTIME.txt` | GTK/WebKitGTK versions bundled into the AppImage |
 
-            ### 📦 AppImage Bundled Runtime
+            ### AppImage Bundled Runtime
 
             The AppImage ships its own GTK and WebKitGTK rather than the host's, so this
             is the runtime that governs its window rendering — see
@@ -481,7 +479,7 @@ jobs:
 
             ---
 
-            ### 🚀 Quick Start (CLI)
+            ### Quick Start (CLI)
 
             ```bash
             # Inspect releases and generate Manifest v2 JSON
@@ -493,7 +491,7 @@ jobs:
 
             ---
 
-            ### ⚙️ External Prerequisites
+            ### External Prerequisites
             Ensure the following command-line tools are installed and in your `PATH`:
             - `mkvmerge` & `mkvextract` (from [MKVToolNix](https://mkvtoolnix.download/))
             - `ffmpeg` (for Opus audio transcoding, from [ffmpeg.org](https://ffmpeg.org/))

@@ -1,7 +1,7 @@
 //! Core domain and batch pipeline for anime fansub collections.
 
 pub mod assets;
-pub mod cpu;
+mod cpu;
 pub mod domain;
 pub mod ebml;
 pub mod extract;

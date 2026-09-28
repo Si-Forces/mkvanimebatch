@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { createJobCoordinator } from "./job-coordinator.js";
-import { BULK_SELECTION_CONTROLS, JobController, extractInspectionOptions } from "./job-controller.js";
+import { BULK_SELECTION_CONTROLS, JobController, validateConcurrency } from "./job-controller.js";
 
 class FakeElement {
   constructor(value = "") {
@@ -13,74 +13,98 @@ class FakeElement {
     this.className = "";
     this.innerHTML = "";
     this.dataset = {};
-    this.style = {};
-    this.children = [];
     this.classList = { add() {}, remove() {} };
   }
 
   addEventListener(type, handler) { (this.handlers ??= new Map()).set(type, handler); }
-  appendChild(child) { this.children.push(child); return child; }
-  querySelector(selector) {
-    const el = new FakeElement();
-    if (selector === ".ep-select-check") el.checked = this.innerHTML.includes('class="ep-select-check" checked ');
-    return el;
-  }
   focus() {}
 }
 
-test("job controller completes inspect-run-event lifecycle and restores controls", async t => {
-  const elements = new Map([
-    ["remux-input-dir", new FakeElement("/input")],
-    ["remux-workers", new FakeElement("4")],
-    ["remux-io-jobs", new FakeElement("2")],
-    ["remux-run", new FakeElement()],
-    ["remux-stop", new FakeElement()],
-    ["remux-log", new FakeElement()],
-    ["remux-status", new FakeElement()],
-  ]);
-  const previousDocument = globalThis.document;
+const checkedBox = () => Object.assign(new FakeElement(), { checked: true });
+
+/** A manual subtitle assignment in the shape app.js stores in `QueueTracker.assignments`. */
+const subtitle = (id, path) => ({
+  target_video: id,
+  asset_path: path,
+  track_type: "subtitle",
+  language: "ind",
+  title: null,
+  offset_ms: null,
+});
+
+/** Remux controls every controller looks up, plus `values` keyed by id suffix. */
+function remuxElements(values = {}) {
+  const elements = new Map(["run", "stop", "log", "status"].map(id => [`remux-${id}`, new FakeElement()]));
+  for (const [id, value] of Object.entries(values)) {
+    elements.set(`remux-${id}`, value instanceof FakeElement ? value : new FakeElement(value));
+  }
+  return elements;
+}
+
+function installDocument(t, elements, overrides = {}) {
+  const previous = globalThis.document;
   globalThis.document = {
     getElementById: id => elements.get(id) ?? null,
     querySelectorAll: () => [],
+    querySelector: () => null,
+    ...overrides,
   };
-  t.after(() => { globalThis.document = previousDocument; });
+  t.after(() => { globalThis.document = previous; });
+}
+
+function makeTracker(overrides = {}) {
+  return {
+    assignments: new Map(),
+    lastManifest: { version: 2, items: [{ id: "ep1.mkv", name: "ep1.mkv" }] },
+    state: { batchCancelled: false, batchSuccess: false },
+    getSelectedOrderedItemIds: () => ["ep1.mkv"],
+    handleEvent() {},
+    finalize(code, cancelled = false) {
+      this.state = { batchCancelled: cancelled, batchSuccess: !cancelled && code === 0 };
+    },
+    ...overrides,
+  };
+}
+
+function makeRuntime(tracker, overrides = {}) {
+  return {
+    coordinator: createJobCoordinator(),
+    appendLog() {},
+    clearLog() {},
+    closeSubAssignModal() {},
+    queueFor: () => tracker,
+    safeAddListener: (el, event, handler) => el?.addEventListener(event, handler),
+    scanInputDirectory: async () => true,
+    showModal: async () => true,
+    telemetryLoop: { setJobActive() {} },
+    updateWorkerChips() {},
+    listen: async () => () => {},
+    invoke: async () => null,
+    ...overrides,
+  };
+}
+
+const tick = () => new Promise(resolve => setTimeout(resolve, 0));
+
+test("job controller completes inspect-run-event lifecycle and restores controls", async t => {
+  const elements = remuxElements({ "input-dir": "/input", workers: "4", "io-jobs": "2" });
+  installDocument(t, elements);
 
   const handlers = new Map();
   let removedListeners = 0;
   const invocations = [];
   const handledEvents = [];
-  const tracker = {
-    assignments: new Map(),
-    lastManifest: { version: 2, items: [{ id: "ep1.mkv", name: "ep1.mkv" }] },
-    state: { batchCancelled: false, batchSuccess: false },
-    getSelectedOrderedItemIds: () => ["ep1.mkv"],
-    handleEvent: event => handledEvents.push(event),
-    finalize(code) {
-      this.state = { batchCancelled: false, batchSuccess: code === 0 };
-    },
-  };
-  const coordinator = createJobCoordinator();
-  const runtime = {
-    coordinator,
-    appendLog() {},
-    clearLog() {},
-    closeSubAssignModal() {},
-    queueFor: () => tracker,
-    safeAddListener() {},
-    scanInputDirectory: async () => true,
-    showModal: async () => true,
-    telemetryLoop: { setJobActive() {} },
-    updateWorkerChips() {},
+  const tracker = makeTracker({ handleEvent: event => handledEvents.push(event) });
+  const runtime = makeRuntime(tracker, {
     async listen(event, handler) {
       handlers.set(event, handler);
       return () => { removedListeners++; };
     },
     async invoke(command, args) {
       invocations.push([command, args]);
-      if (command === "run_job") return 7;
-      return null;
+      return command === "run_job" ? 7 : null;
     },
-  };
+  });
 
   const controller = new JobController("remux", runtime);
   await controller.start();
@@ -93,316 +117,143 @@ test("job controller completes inspect-run-event lifecycle and restores controls
 
   handlers.get("job-done")({ payload: { mode: "remux", job_id: 7, code: 0 } });
   assert.equal(controller.lifecycle, "done");
-  assert.equal(coordinator.activeMode, null);
+  assert.equal(runtime.coordinator.activeMode, null);
   assert.equal(elements.get("remux-run").disabled, false);
   assert.equal(removedListeners, 3);
 });
 
 test("job controller buffers early events and filters stale events while run_job is in flight", async t => {
-  const elements = new Map([
-    ["remux-input-dir", new FakeElement("/input")],
-    ["remux-workers", new FakeElement("4")],
-    ["remux-io-jobs", new FakeElement("2")],
-    ["remux-run", new FakeElement()],
-    ["remux-stop", new FakeElement()],
-    ["remux-log", new FakeElement()],
-    ["remux-status", new FakeElement()],
-  ]);
-  const previousDocument = globalThis.document;
-  globalThis.document = {
-    getElementById: id => elements.get(id) ?? null,
-    querySelectorAll: () => [],
-  };
-  t.after(() => { globalThis.document = previousDocument; });
+  installDocument(t, remuxElements({ "input-dir": "/input", workers: "4", "io-jobs": "2" }));
 
   const handlers = new Map();
-  let removedListeners = 0;
   const handledEvents = [];
   let resolveRunJob;
-  const runJobPromise = new Promise(resolve => {
-    resolveRunJob = resolve;
-  });
-
-  const tracker = {
-    assignments: new Map(),
-    lastManifest: { version: 2, items: [{ id: "ep1.mkv", name: "ep1.mkv" }] },
-    state: { batchCancelled: false, batchSuccess: false },
-    getSelectedOrderedItemIds: () => ["ep1.mkv"],
-    handleEvent: event => handledEvents.push(event),
-    finalize(code) {
-      this.state = { batchCancelled: false, batchSuccess: code === 0 };
-    },
-  };
-  const coordinator = createJobCoordinator();
-  const runtime = {
-    coordinator,
-    appendLog() {},
-    clearLog() {},
-    closeSubAssignModal() {},
-    queueFor: () => tracker,
-    safeAddListener() {},
-    scanInputDirectory: async () => true,
-    showModal: async () => true,
-    telemetryLoop: { setJobActive() {} },
-    updateWorkerChips() {},
+  const runJobPromise = new Promise(resolve => { resolveRunJob = resolve; });
+  const runtime = makeRuntime(makeTracker({ handleEvent: event => handledEvents.push(event) }), {
     async listen(event, handler) {
       handlers.set(event, handler);
-      return () => { removedListeners++; };
+      return () => {};
     },
-    async invoke(command, args) {
-      if (command === "run_job") return runJobPromise;
-      return null;
-    },
-  };
+    invoke: async command => (command === "run_job" ? runJobPromise : null),
+  });
 
   const controller = new JobController("remux", runtime);
   const startPromise = controller.start();
-
-  await new Promise(resolve => setTimeout(resolve, 0));
+  await tick();
 
   assert.equal(controller.lifecycle, "running");
   assert.equal(controller.jobId, null);
 
-  // 1. Stale event and stale job-done from an earlier job (job_id: 6) arrive while run_job is in flight
+  // A stale event and job-done from an earlier job arrive while run_job is in flight,
+  // followed by an early event for the job being launched.
   handlers.get("job-event")({ payload: { version: 1, type: "item_start", mode: "remux", job_id: 6 } });
   handlers.get("job-done")({ payload: { mode: "remux", job_id: 6, code: 0 } });
-
-  // 2. Early event for current job (job_id: 7) arrives while run_job is in flight
   handlers.get("job-event")({ payload: { version: 1, type: "item_start", mode: "remux", job_id: 7 } });
 
-  // Neither stale nor early events should be dispatched to tracker while jobId is null,
-  // and stale job-done must NOT complete the new job.
+  // Nothing is dispatched while the job ID is unknown, and the stale done must not complete the job.
   assert.equal(handledEvents.length, 0);
   assert.equal(controller.lifecycle, "running");
 
-  // 3. run_job resolves with job_id: 7
   resolveRunJob(7);
   await startPromise;
 
   assert.equal(controller.jobId, 7);
   assert.equal(controller.lifecycle, "running");
-  // Stale event (job 6) is filtered out; early event (job 7) is replayed to tracker
+  // Only the current job's buffered event is replayed.
   assert.equal(handledEvents.length, 1);
   assert.equal(handledEvents[0].job_id, 7);
 
-  // 4. Stale event or done from job 6 arriving after launch are ignored
   handlers.get("job-event")({ payload: { version: 1, type: "item_complete", mode: "remux", job_id: 6 } });
   handlers.get("job-done")({ payload: { mode: "remux", job_id: 6, code: 0 } });
   assert.equal(handledEvents.length, 1);
   assert.equal(controller.lifecycle, "running");
 
-  // 5. Valid job-done for job 7 completes the job
   handlers.get("job-done")({ payload: { mode: "remux", job_id: 7, code: 0 } });
   assert.equal(controller.lifecycle, "done");
   assert.equal(controller.jobId, null);
-  assert.equal(coordinator.activeMode, null);
+  assert.equal(runtime.coordinator.activeMode, null);
 });
 
 test("job controller replays early job-done arriving while run_job is in flight", async t => {
-  const elements = new Map([
-    ["remux-input-dir", new FakeElement("/input")],
-    ["remux-workers", new FakeElement("4")],
-    ["remux-io-jobs", new FakeElement("2")],
-    ["remux-run", new FakeElement()],
-    ["remux-stop", new FakeElement()],
-    ["remux-log", new FakeElement()],
-    ["remux-status", new FakeElement()],
-  ]);
-  const previousDocument = globalThis.document;
-  globalThis.document = {
-    getElementById: id => elements.get(id) ?? null,
-    querySelectorAll: () => [],
-  };
-  t.after(() => { globalThis.document = previousDocument; });
+  installDocument(t, remuxElements({ "input-dir": "/input", workers: "4", "io-jobs": "2" }));
 
   const handlers = new Map();
   let resolveRunJob;
-  const runJobPromise = new Promise(resolve => {
-    resolveRunJob = resolve;
-  });
-
-  const tracker = {
-    assignments: new Map(),
-    lastManifest: { version: 2, items: [{ id: "ep1.mkv", name: "ep1.mkv" }] },
-    state: { batchCancelled: false, batchSuccess: false },
-    getSelectedOrderedItemIds: () => ["ep1.mkv"],
-    handleEvent() {},
-    finalize(code) {
-      this.state = { batchCancelled: false, batchSuccess: code === 0 };
-    },
-  };
-  const coordinator = createJobCoordinator();
-  const runtime = {
-    coordinator,
-    appendLog() {},
-    clearLog() {},
-    closeSubAssignModal() {},
-    queueFor: () => tracker,
-    safeAddListener() {},
-    scanInputDirectory: async () => true,
-    showModal: async () => true,
-    telemetryLoop: { setJobActive() {} },
-    updateWorkerChips() {},
+  const runJobPromise = new Promise(resolve => { resolveRunJob = resolve; });
+  const runtime = makeRuntime(makeTracker(), {
     async listen(event, handler) {
       handlers.set(event, handler);
       return () => {};
     },
-    async invoke(command, args) {
-      if (command === "run_job") return runJobPromise;
-      return null;
-    },
-  };
+    invoke: async command => (command === "run_job" ? runJobPromise : null),
+  });
 
   const controller = new JobController("remux", runtime);
   const startPromise = controller.start();
+  await tick();
 
-  await new Promise(resolve => setTimeout(resolve, 0));
-
-  // Early job-done for job 8 arrives while run_job is in flight
   handlers.get("job-done")({ payload: { mode: "remux", job_id: 8, code: 0 } });
-
   assert.equal(controller.lifecycle, "running");
 
-  // run_job resolves with job_id: 8
   resolveRunJob(8);
   await startPromise;
 
-  // Early done should be replayed and complete the job
   assert.equal(controller.lifecycle, "done");
   assert.equal(controller.jobId, null);
-  assert.equal(coordinator.activeMode, null);
+  assert.equal(runtime.coordinator.activeMode, null);
 });
 
-test("extractInspectionOptions parses valid options, preserves 0, and rejects invalid values", () => {
-  // Valid combined - snake_case
-  const res1 = extractInspectionOptions({ workers: 4, io_jobs: 2, no_cache: true });
-  assert.deepEqual(res1.options, { workers: 4, ioJobs: 2, noCache: true });
-  assert.equal(res1.error, undefined);
-
-  // Valid combined - camelCase
-  const res2 = extractInspectionOptions({ workers: 4, ioJobs: 2, noCache: true });
-  assert.deepEqual(res2.options, { workers: 4, ioJobs: 2, noCache: true });
-  assert.equal(res2.error, undefined);
-
-  // Preserves 0 for io_jobs and ioJobs
-  assert.equal(extractInspectionOptions({ io_jobs: 0 }).options.ioJobs, 0);
-  assert.equal(extractInspectionOptions({ ioJobs: 0 }).options.ioJobs, 0);
-
-  // Defaults on empty / null / undefined fields
-  assert.deepEqual(extractInspectionOptions({}).options, {});
-  assert.deepEqual(extractInspectionOptions(null).options, {});
-  assert.deepEqual(extractInspectionOptions({ workers: null, io_jobs: null, no_cache: false }).options, {});
-  assert.deepEqual(extractInspectionOptions({ workers: null, ioJobs: null, noCache: false }).options, {});
-
-  // Boundary workers
-  assert.equal(extractInspectionOptions({ workers: 1 }).options.workers, 1);
-  assert.equal(extractInspectionOptions({ workers: 64 }).options.workers, 64);
-  assert.ok(extractInspectionOptions({ workers: 0 }).error);
-  assert.ok(extractInspectionOptions({ workers: -1 }).error);
-  assert.ok(extractInspectionOptions({ workers: 65 }).error);
-  assert.ok(extractInspectionOptions({ workers: "abc" }).error);
-  assert.ok(extractInspectionOptions({ workers: 4.5 }).error);
-  assert.ok(extractInspectionOptions({ workers: NaN }).error);
-
-  // Boundary io-jobs (snake_case and camelCase)
-  assert.equal(extractInspectionOptions({ io_jobs: 64 }).options.ioJobs, 64);
-  assert.equal(extractInspectionOptions({ ioJobs: 64 }).options.ioJobs, 64);
-  assert.ok(extractInspectionOptions({ io_jobs: -1 }).error);
-  assert.ok(extractInspectionOptions({ ioJobs: -1 }).error);
-  assert.ok(extractInspectionOptions({ io_jobs: 65 }).error);
-  assert.ok(extractInspectionOptions({ ioJobs: 65 }).error);
-  assert.ok(extractInspectionOptions({ io_jobs: "abc" }).error);
-  assert.ok(extractInspectionOptions({ ioJobs: "abc" }).error);
-  assert.ok(extractInspectionOptions({ io_jobs: 1.5 }).error);
-  assert.ok(extractInspectionOptions({ ioJobs: 1.5 }).error);
-  assert.ok(extractInspectionOptions({ io_jobs: NaN }).error);
-  assert.ok(extractInspectionOptions({ ioJobs: NaN }).error);
-
-  // noCache / no_cache
-  assert.equal(extractInspectionOptions({ no_cache: true }).options.noCache, true);
-  assert.equal(extractInspectionOptions({ no_cache: false }).options.noCache, undefined);
-  assert.equal(extractInspectionOptions({ noCache: true }).options.noCache, true);
-  assert.equal(extractInspectionOptions({ noCache: false }).options.noCache, undefined);
+test("validateConcurrency accepts the documented bounds, preserves 0 io-jobs, and rejects everything else", () => {
+  assert.equal(validateConcurrency({}), null);
+  assert.equal(validateConcurrency({ workers: null, io_jobs: null }), null);
+  assert.equal(validateConcurrency({ workers: 1, io_jobs: 0 }), null);
+  assert.equal(validateConcurrency({ workers: 64, io_jobs: 64 }), null);
+  for (const workers of [0, -1, 65, "abc", 4.5, NaN]) {
+    assert.ok(validateConcurrency({ workers }), `workers ${workers} must be rejected`);
+  }
+  for (const ioJobs of [-1, 65, "abc", 1.5, NaN]) {
+    assert.ok(validateConcurrency({ io_jobs: ioJobs }), `io_jobs ${ioJobs} must be rejected`);
+  }
 });
 
 test("job controller forwards snapshotted execution args incl zero io-jobs and no-cache, ignoring subsequent DOM mutations", async t => {
-  const elements = new Map([
-    ["remux-input-dir", new FakeElement("/my-anime")],
-    ["remux-workers", new FakeElement("6")],
-    ["remux-io-jobs", new FakeElement("0")],
-    ["remux-no-cache", Object.assign(new FakeElement(), { checked: true })],
-    ["remux-run", new FakeElement()],
-    ["remux-stop", new FakeElement()],
-    ["remux-log", new FakeElement()],
-    ["remux-status", new FakeElement()],
-  ]);
-  const previousDocument = globalThis.document;
-  globalThis.document = {
-    getElementById: id => elements.get(id) ?? null,
-    querySelectorAll: () => [],
-  };
-  t.after(() => { globalThis.document = previousDocument; });
+  const elements = remuxElements({ "input-dir": "/my-anime", workers: "6", "io-jobs": "0", "no-cache": checkedBox() });
+  installDocument(t, elements);
 
   const scanCalls = [];
   const workerChipCalls = [];
   const invocations = [];
-  const tracker = {
-    assignments: new Map(),
-    lastManifest: { version: 2, items: [{ id: "ep1.mkv", name: "ep1.mkv" }] },
-    state: { batchCancelled: false, batchSuccess: false },
-    getSelectedOrderedItemIds: () => ["ep1.mkv"],
-    handleEvent() {},
-    finalize() {},
-  };
-  const coordinator = createJobCoordinator();
-  const runtime = {
-    coordinator,
-    appendLog() {},
-    clearLog() {},
-    closeSubAssignModal() {},
-    queueFor: () => tracker,
-    safeAddListener() {},
+  const runtime = makeRuntime(makeTracker(), {
     scanInputDirectory: async (path, mode, opts) => {
       scanCalls.push({ path, mode, opts });
-      // Mutate DOM during in-flight scan to ensure snapshot is used
+      // The DOM changes while the forced scan is in flight; the request must not follow it.
       elements.get("remux-workers").value = "32";
       elements.get("remux-io-jobs").value = "16";
       elements.get("remux-input-dir").value = "/tampered";
       return true;
     },
-    showModal: async () => true,
-    telemetryLoop: { setJobActive() {} },
-    updateWorkerChips: (...args) => {
-      workerChipCalls.push(args);
-    },
-    async listen() {
-      return () => {};
-    },
+    updateWorkerChips: (...args) => workerChipCalls.push(args),
     async invoke(command, args) {
       invocations.push([command, args]);
-      if (command === "run_job") return 10;
-      return null;
+      return command === "run_job" ? 10 : null;
     },
-  };
+  });
 
   const controller = new JobController("remux", runtime);
   await controller.start();
 
-  // Verify scanInputDirectory received snapshotted options with workers=6, ioJobs=0, noCache=true
   assert.equal(scanCalls.length, 1);
   assert.equal(scanCalls[0].path, "/my-anime");
   assert.equal(scanCalls[0].mode, "remux");
   assert.deepEqual(scanCalls[0].opts, {
     force: true,
-    options: { workers: 6, ioJobs: 0, noCache: true },
+    options: { noCache: true },
   });
 
-  // Verify worker chips received (true, 6, 0) - 0 is not coerced!
+  // io-jobs 0 reaches the chips uncoerced.
   assert.deepEqual(workerChipCalls[0], [true, 6, 0]);
 
-  // Verify run_job request still reflects original snapshot, not mutated DOM
-  const runJobCall = invocations.find(([cmd]) => cmd === "run_job");
-  const runJobReq = runJobCall[1].request;
+  const runJobReq = invocations.find(([cmd]) => cmd === "run_job")[1].request;
   assert.equal(runJobReq.input_dir, "/my-anime");
   assert.equal(runJobReq.workers, 6);
   assert.equal(runJobReq.io_jobs, 0);
@@ -411,72 +262,42 @@ test("job controller forwards snapshotted execution args incl zero io-jobs and n
 
 test("deferred preflight stop releases ownership, finalizes cancelled queue, and avoids run_job for option-bearing preflight", async t => {
   const bulkButtons = BULK_SELECTION_CONTROLS.map(({ id }) => [id, new FakeElement()]);
-  const elements = new Map([
-    ["remux-input-dir", new FakeElement("/my-anime")],
-    ["remux-workers", new FakeElement("4")],
-    ["remux-io-jobs", new FakeElement("2")],
-    ["remux-no-cache", Object.assign(new FakeElement(), { checked: true })],
-    ["remux-run", new FakeElement()],
-    ["remux-stop", new FakeElement()],
-    ["remux-log", new FakeElement()],
-    ["remux-status", new FakeElement()],
-    ...bulkButtons,
-  ]);
-  const previousDocument = globalThis.document;
-  globalThis.document = {
-    getElementById: id => elements.get(id) ?? null,
-    querySelectorAll: () => [],
-  };
-  t.after(() => { globalThis.document = previousDocument; });
+  const elements = remuxElements({ "input-dir": "/my-anime", workers: "4", "io-jobs": "2", "no-cache": checkedBox() });
+  for (const [id, button] of bulkButtons) elements.set(id, button);
+  installDocument(t, elements);
 
   let resolveScan;
-  const scanPromise = new Promise(resolve => {
-    resolveScan = resolve;
-  });
+  const scanPromise = new Promise(resolve => { resolveScan = resolve; });
   const scanCalls = [];
   const invocations = [];
   let finalizedWith = null;
 
-  const tracker = {
-    assignments: new Map(),
+  const tracker = makeTracker({
     lastManifest: { version: 2, items: [] },
-    state: { batchCancelled: false, batchSuccess: false },
-    getSelectedOrderedItemIds: () => ["ep1.mkv"],
-    handleEvent() {},
     finalize(code, cancelled = false) {
       finalizedWith = { code, cancelled };
       this.state = { batchCancelled: cancelled, batchSuccess: !cancelled && code === 0 };
     },
-  };
-  const coordinator = createJobCoordinator();
-  const runtime = {
-    coordinator,
-    appendLog() {},
-    clearLog() {},
-    closeSubAssignModal() {},
-    queueFor: () => tracker,
-    safeAddListener() {},
+  });
+  const runtime = makeRuntime(tracker, {
     scanInputDirectory: async (path, mode, opts) => {
       scanCalls.push({ path, mode, opts });
       return scanPromise;
     },
-    showModal: async () => true,
-    telemetryLoop: { setJobActive() {} },
-    updateWorkerChips() {},
-    async listen() { return () => {}; },
     async invoke(command, args) {
       invocations.push([command, args]);
       return null;
     },
-  };
+  });
+  const { coordinator } = runtime;
 
   const controller = new JobController("remux", runtime);
   const startPromise = controller.start();
 
-  await new Promise(resolve => setTimeout(resolve, 0));
+  await tick();
   assert.equal(coordinator.activeMode, "remux");
   assert.equal(scanCalls.length, 1);
-  assert.deepEqual(scanCalls[0].opts.options, { workers: 4, ioJobs: 2, noCache: true });
+  assert.deepEqual(scanCalls[0].opts.options, { noCache: true });
   for (const [, button] of bulkButtons) assert.equal(button.disabled, true, "bulk control must be disabled while preflight is pending");
   assert.equal(controller.applyBulkSelection("remux", false), false);
 
@@ -496,120 +317,57 @@ test("deferred preflight stop releases ownership, finalizes cancelled queue, and
 });
 
 test("job controller fails immediately when workers or io-jobs are invalid", async t => {
-  const elements = new Map([
-    ["remux-input-dir", new FakeElement("/input")],
-    ["remux-workers", new FakeElement("0")], // invalid worker count
-    ["remux-io-jobs", new FakeElement("2")],
-    ["remux-run", new FakeElement()],
-    ["remux-stop", new FakeElement()],
-    ["remux-log", new FakeElement()],
-    ["remux-status", new FakeElement()],
-  ]);
-  const previousDocument = globalThis.document;
-  globalThis.document = {
-    getElementById: id => elements.get(id) ?? null,
-    querySelectorAll: () => [],
-  };
-  t.after(() => { globalThis.document = previousDocument; });
+  installDocument(t, remuxElements({ "input-dir": "/input", workers: "0", "io-jobs": "2" }));
 
-  const errorLogs = [];
+  const logs = [];
   let scanCalled = false;
-  const coordinator = createJobCoordinator();
-  const runtime = {
-    coordinator,
-    appendLog(el, msg) {
-      errorLogs.push(msg);
-    },
-    clearLog() {},
-    closeSubAssignModal() {},
-    queueFor: () => ({ assignments: new Map() }),
-    safeAddListener() {},
+  const runtime = makeRuntime({ assignments: new Map() }, {
+    appendLog: (_el, msg) => logs.push(msg),
     scanInputDirectory: async () => {
       scanCalled = true;
       return true;
     },
-    showModal: async () => true,
-    telemetryLoop: { setJobActive() {} },
-    updateWorkerChips() {},
-    async listen() { return () => {}; },
-    async invoke() { return null; },
-  };
+  });
 
   const controller = new JobController("remux", runtime);
   await controller.start();
 
   assert.equal(scanCalled, false);
   assert.equal(controller.running, false);
-  assert.ok(errorLogs.some(msg => msg.includes("Invalid workers value '0'")));
+  assert.ok(logs.some(msg => msg.includes("Invalid workers value '0'")));
 });
 
 test("job controller passes typed BatchRequest with track assignments to run_job", async t => {
-  const elements = new Map([
-    ["remux-input-dir", new FakeElement("/anime/series")],
-    ["remux-out-dir", new FakeElement("/anime/out")],
-    ["remux-fonts-dir", new FakeElement("/anime/fonts")],
-    ["remux-bitrate", new FakeElement("256k")],
-    ["remux-complexity", new FakeElement("8")],
-    ["remux-workers", new FakeElement("6")],
-    ["remux-io-jobs", new FakeElement("3")],
-    ["remux-ffmpeg-threads", new FakeElement("4")],
-    ["remux-sub-offset", new FakeElement("1.5")],
-    ["remux-dry-run", Object.assign(new FakeElement(), { checked: false })],
-    ["remux-no-cache", Object.assign(new FakeElement(), { checked: true })],
-    ["remux-run", new FakeElement()],
-    ["remux-stop", new FakeElement()],
-    ["remux-log", new FakeElement()],
-    ["remux-status", new FakeElement()],
-  ]);
-  const previousDocument = globalThis.document;
-  globalThis.document = {
-    getElementById: id => elements.get(id) ?? null,
-    querySelectorAll: () => [],
-    querySelector: sel => {
-      if (sel === ".profile-option-item.active") {
-        return { dataset: { preset: "balanced" } };
-      }
-      return null;
-    },
-  };
-  t.after(() => { globalThis.document = previousDocument; });
+  installDocument(t, remuxElements({
+    "input-dir": "/anime/series",
+    "out-dir": "/anime/out",
+    "fonts-dir": "/anime/fonts",
+    bitrate: "256k",
+    complexity: "8",
+    workers: "6",
+    "io-jobs": "3",
+    "ffmpeg-threads": "4",
+    "sub-offset": "1.5",
+    "dry-run": new FakeElement(),
+    "no-cache": checkedBox(),
+  }), {
+    querySelector: sel => (sel === ".profile-option-item.active" ? { dataset: { preset: "balanced" } } : null),
+  });
 
   const invocations = [];
-  const coordinator = createJobCoordinator();
-  const queue = {
-    assignments: new Map([["ep1.mkv", "/subs/ep1.ass"]]),
-    lastManifest: { version: 2, items: [{ id: "ep1.mkv", name: "ep1.mkv" }] },
-    getSelectedOrderedItemIds: () => ["ep1.mkv"],
-    handleEvent() {},
-    finalize() {},
-  };
-  const runtime = {
-    coordinator,
-    appendLog() {},
-    clearLog() {},
-    closeSubAssignModal() {},
-    queueFor: () => queue,
-    safeAddListener() {},
-    scanInputDirectory: async () => true,
-    showModal: async () => true,
-    telemetryLoop: { setJobActive() {} },
-    updateWorkerChips() {},
-    async listen() { return () => {}; },
+  const queue = makeTracker({ assignments: new Map([["ep1.mkv", subtitle("ep1.mkv", "/subs/ep1.ass")]]) });
+  const runtime = makeRuntime(queue, {
     async invoke(command, args) {
       invocations.push([command, args]);
-      if (command === "run_job") return 42;
-      return null;
+      return command === "run_job" ? 42 : null;
     },
-  };
+  });
 
   const controller = new JobController("remux", runtime);
   await controller.start();
 
   assert.equal(controller.jobId, 42);
-  const runJobCall = invocations.find(([cmd]) => cmd === "run_job");
-  assert.ok(runJobCall);
-  const req = runJobCall[1].request;
-  assert.ok(req);
+  const req = invocations.find(([cmd]) => cmd === "run_job")[1].request;
   assert.equal(req.mode, "remux");
   assert.equal(req.input_dir, "/anime/series");
   assert.equal(req.out_dir, "/anime/out");
@@ -620,65 +378,18 @@ test("job controller passes typed BatchRequest with track assignments to run_job
   assert.equal(req.io_jobs, 3);
   assert.equal(req.ffmpeg_threads, 4);
   assert.equal(req.sub_offset, 1.5);
+  assert.equal(req.dry_run, false);
   assert.equal(req.no_cache, true);
   assert.equal(req.preset, "balanced");
-  assert.ok(Array.isArray(req.assignments));
-  assert.equal(req.assignments.length, 1);
-  assert.equal(req.assignments[0].target_video, "ep1.mkv");
-  assert.equal(req.assignments[0].asset_path, "/subs/ep1.ass");
+  assert.deepEqual(req.assignments.map(a => [a.target_video, a.asset_path]), [["ep1.mkv", "/subs/ep1.ass"]]);
 });
 
 test("job controller aborts start if episodes exist in queue but zero are selected", async t => {
-  const elements = new Map([
-    ["remux-input-dir", new FakeElement("/anime/series")],
-    ["remux-out-dir", new FakeElement("")],
-    ["remux-fonts-dir", new FakeElement("")],
-    ["remux-assets-dir", new FakeElement("")],
-    ["remux-sub-offset", new FakeElement("0")],
-    ["remux-workers", new FakeElement("")],
-    ["remux-io-jobs", new FakeElement("")],
-    ["remux-ffmpeg-threads", new FakeElement("")],
-    ["remux-bitrate", new FakeElement("")],
-    ["remux-complexity", new FakeElement("")],
-    ["remux-dry-run", new FakeElement(false)],
-    ["remux-no-cache", new FakeElement(false)],
-    ["remux-run", new FakeElement()],
-    ["remux-stop", new FakeElement()],
-    ["remux-log", new FakeElement()],
-    ["remux-status", new FakeElement()],
-  ]);
-  const previousDocument = globalThis.document;
-  globalThis.document = {
-    getElementById: id => elements.get(id) ?? null,
-    querySelectorAll: () => [],
-    querySelector: () => null,
-  };
-  t.after(() => { globalThis.document = previousDocument; });
+  installDocument(t, remuxElements({ "input-dir": "/anime/series", "sub-offset": "0" }));
 
   const logs = [];
-  const coordinator = createJobCoordinator();
-  const queue = {
-    assignments: new Map(),
-    lastManifest: { version: 2, items: [{ id: "ep1.mkv", name: "ep1.mkv" }] },
-    state: { totalCount: 1 },
-    getSelectedOrderedItemIds: () => [],
-    handleEvent() {},
-    finalize() {},
-  };
-  const runtime = {
-    coordinator,
-    appendLog(el, msg) { logs.push(msg); },
-    clearLog() {},
-    closeSubAssignModal() {},
-    queueFor: () => queue,
-    safeAddListener() {},
-    scanInputDirectory: async () => true,
-    showModal: async () => true,
-    telemetryLoop: { setJobActive() {} },
-    updateWorkerChips() {},
-    async listen() { return () => {}; },
-    async invoke() { return null; },
-  };
+  const queue = makeTracker({ state: { totalCount: 1 }, getSelectedOrderedItemIds: () => [] });
+  const runtime = makeRuntime(queue, { appendLog: (_el, msg) => logs.push(msg) });
 
   const controller = new JobController("remux", runtime);
   await controller.start();
@@ -686,124 +397,55 @@ test("job controller aborts start if episodes exist in queue but zero are select
   assert.equal(controller.running, false);
   assert.ok(logs.some(l => l.includes("No episodes selected in queue")));
 });
-test("job controller disables Run while scanning or snapshot restore blocks start", () => {
-  const runBtn = new FakeElement();
-  const elements = new Map([
-    ["remux-run", runBtn],
-    ["remux-stop", new FakeElement()],
-    ["remux-status", new FakeElement()],
-  ]);
-  const previousDocument = globalThis.document;
-  globalThis.document = {
-    getElementById: id => elements.get(id) ?? null,
-    querySelectorAll: () => [],
-    querySelector: () => null,
-  };
-  const coordinator = createJobCoordinator();
-  const tracker = {
-    isScanning: true,
-    state: { totalCount: 2 },
-    getSelectedCount: () => 2,
-  };
-  const runtime = {
-    coordinator,
-    queueFor: () => tracker,
-    safeAddListener() {},
-  };
-  try {
-    const controller = new JobController("remux", runtime);
-    controller.syncGlobalControls();
-    assert.equal(runBtn.disabled, true);
 
-    tracker.isScanning = false;
+test("job controller disables Run while scanning or snapshot restore blocks start", t => {
+  const elements = remuxElements();
+  installDocument(t, elements);
+  const tracker = { isScanning: true, state: { totalCount: 2 }, getSelectedCount: () => 2 };
+  const runtime = makeRuntime(tracker);
+  const runBtn = elements.get("remux-run");
 
-    coordinator.isRestoring = true;
-    controller.syncGlobalControls();
-    assert.equal(runBtn.disabled, true);
+  const controller = new JobController("remux", runtime);
+  controller.syncGlobalControls();
+  assert.equal(runBtn.disabled, true);
 
-    coordinator.isRestoring = false;
-    controller.syncGlobalControls();
-    assert.equal(runBtn.disabled, false);
-  } finally {
-    globalThis.document = previousDocument;
-  }
+  tracker.isScanning = false;
+  runtime.coordinator.isRestoring = true;
+  controller.syncGlobalControls();
+  assert.equal(runBtn.disabled, true);
+
+  runtime.coordinator.isRestoring = false;
+  controller.syncGlobalControls();
+  assert.equal(runBtn.disabled, false);
 });
 
 test("job controller onDone is ignored when jobId is null or not running", t => {
-  const elements = new Map([
-    ["remux-stop", new FakeElement()],
-    ["remux-run", new FakeElement()],
-    ["remux-status", new FakeElement()],
-    ["remux-log", new FakeElement()],
-  ]);
-  const previousDocument = globalThis.document;
-  globalThis.document = {
-    getElementById: id => elements.get(id) ?? null,
-    querySelectorAll: () => [],
-    querySelector: () => null,
-  };
-  t.after(() => { globalThis.document = previousDocument; });
+  installDocument(t, remuxElements());
 
   let finalized = false;
-  const queue = {
-    assignments: new Map(),
-    finalize() { finalized = true; },
-  };
-  const runtime = {
-    coordinator: createJobCoordinator(),
-    queueFor: () => queue,
-    safeAddListener() {},
-    updateWorkerChips() {},
-    telemetryLoop: { setJobActive() {} },
-  };
-  const controller = new JobController("remux", runtime);
+  const controller = new JobController("remux", makeRuntime({ finalize() { finalized = true; } }));
   controller.running = false;
   controller.jobId = null;
-
   controller.onDone(0);
   assert.equal(finalized, false);
 
   controller.running = true;
-  controller.jobId = null;
   controller.onDone(0);
   assert.equal(finalized, false);
 });
 
 test("job controller stop transitions lifecycle to cancelled when aborted before launch", async t => {
-  const elements = new Map([
-    ["remux-stop", new FakeElement()],
-    ["remux-run", new FakeElement()],
-    ["remux-status", new FakeElement()],
-    ["remux-log", new FakeElement()],
-  ]);
-  const previousDocument = globalThis.document;
-  globalThis.document = {
-    getElementById: id => elements.get(id) ?? null,
-    querySelectorAll: () => [],
-    querySelector: () => null,
-  };
-  t.after(() => { globalThis.document = previousDocument; });
+  installDocument(t, remuxElements());
 
   let finalizedCancelled = null;
-  const queue = {
-    assignments: new Map(),
-    finalize(code, cancelled) { finalizedCancelled = cancelled; },
-  };
-  const coordinator = createJobCoordinator();
-  coordinator.begin("remux");
   let invokedCommand = null;
-  const runtime = {
-    coordinator,
-    appendLog() {},
-    queueFor: () => queue,
-    safeAddListener() {},
-    updateWorkerChips() {},
-    telemetryLoop: { setJobActive() {} },
-    invoke: async (cmd, args) => {
+  const runtime = makeRuntime({ finalize(_code, cancelled) { finalizedCancelled = cancelled; } }, {
+    invoke: async cmd => {
       invokedCommand = cmd;
-      return null; // Normal successful resolve
+      return null;
     },
-  };
+  });
+  runtime.coordinator.begin("remux");
 
   const controller = new JobController("remux", runtime);
   controller.running = true;
@@ -817,16 +459,8 @@ test("job controller stop transitions lifecycle to cancelled when aborted before
 });
 
 test("restored controller filters IDs, targets Stop, and releases controls on completion", async t => {
-  const elements = new Map([
-    ["remux-run", new FakeElement()], ["remux-stop", new FakeElement()],
-    ["remux-log", new FakeElement()], ["remux-status", new FakeElement()],
-  ]);
-  const previousDocument = globalThis.document;
-  globalThis.document = {
-    getElementById: id => elements.get(id) ?? null,
-    querySelectorAll: () => [],
-  };
-  t.after(() => { globalThis.document = previousDocument; });
+  const elements = remuxElements();
+  installDocument(t, elements);
 
   const signals = [];
   const invokes = [];
@@ -837,16 +471,13 @@ test("restored controller filters IDs, targets Stop, and releases controls on co
     handleEvent: event => signals.push(event),
     finalize(code, cancelled) { this.state.batchSuccess = code === 0 && !cancelled; },
   };
-  const coordinator = createJobCoordinator();
-  const controller = new JobController("remux", {
-    coordinator,
-    queueFor: () => tracker,
-    safeAddListener: (el, event, handler) => el.addEventListener(event, handler),
+  const runtime = makeRuntime(tracker, {
     updateWorkerChips: active => { telemetry.push(active); },
     telemetryLoop: { setJobActive: active => { telemetry.push(active); } },
-    appendLog() {},
     invoke: async (command, args) => { invokes.push([command, args]); },
   });
+  const { coordinator } = runtime;
+  const controller = new JobController("remux", runtime);
   controller.restoreActiveSnapshot({ job_id: 42, status: "running" }, () => removed++, () => removed++);
   assert.equal(controller.lifecycle, "running");
   assert.equal(coordinator.activeMode, "remux");
@@ -877,24 +508,23 @@ test("restored controller filters IDs, targets Stop, and releases controls on co
   assert.equal(removed, 2);
 });
 
-test("a rejected Stop with no terminal yet reports the job as still running, then settles on job-done", async t => {
-  const previousDocument = globalThis.document;
-  globalThis.document = { getElementById: () => null, querySelectorAll: () => [] };
-  t.after(() => { globalThis.document = previousDocument; });
+/** A controller restored onto running job 24 whose `stop_job` call rejects on demand. */
+function restoredControllerWithPendingStop(t) {
+  installDocument(t, new Map());
   let rejectStop;
   const stopPromise = new Promise((_, reject) => { rejectStop = reject; });
   const tracker = {
     state: { items: new Map(), batchSuccess: false },
     finalize(code, cancelled) { this.state.batchSuccess = code === 0 && !cancelled; },
   };
-  const coordinator = createJobCoordinator();
-  const controller = new JobController("remux", {
-    coordinator, queueFor: () => tracker, safeAddListener() {},
-    updateWorkerChips() {}, telemetryLoop: { setJobActive() {} }, appendLog() {},
-    invoke: async () => stopPromise,
-  });
+  const runtime = makeRuntime(tracker, { invoke: async () => stopPromise });
+  const controller = new JobController("remux", runtime);
   controller.restoreActiveSnapshot({ job_id: 24, status: "running" }, () => {}, () => {});
-  const stopping = controller.stop();
+  return { controller, tracker, coordinator: runtime.coordinator, stopping: controller.stop(), rejectStop };
+}
+
+test("a rejected Stop with no terminal yet reports the job as still running, then settles on job-done", async t => {
+  const { controller, coordinator, stopping, rejectStop } = restoredControllerWithPendingStop(t);
 
   // stop_job only rejects while the Engine Bridge still owns the job slot, so the
   // job really is still running and the controller must say so rather than leave the
@@ -911,23 +541,7 @@ test("a rejected Stop with no terminal yet reports the job as still running, the
 });
 
 test("completion during a pending Stop preserves the terminal state if Stop rejects", async t => {
-  const previousDocument = globalThis.document;
-  globalThis.document = { getElementById: () => null, querySelectorAll: () => [] };
-  t.after(() => { globalThis.document = previousDocument; });
-  let rejectStop;
-  const stopPromise = new Promise((_, reject) => { rejectStop = reject; });
-  const tracker = {
-    state: { items: new Map(), batchSuccess: false },
-    finalize(code, cancelled) { this.state.batchSuccess = code === 0 && !cancelled; },
-  };
-  const coordinator = createJobCoordinator();
-  const controller = new JobController("remux", {
-    coordinator, queueFor: () => tracker, safeAddListener() {},
-    updateWorkerChips() {}, telemetryLoop: { setJobActive() {} }, appendLog() {},
-    invoke: async () => stopPromise,
-  });
-  controller.restoreActiveSnapshot({ job_id: 24, status: "running" }, () => {}, () => {});
-  const stopping = controller.stop();
+  const { controller, tracker, coordinator, stopping, rejectStop } = restoredControllerWithPendingStop(t);
   controller.handleSnapshotSignal("done", { job_id: 24, mode: "remux", code: 130 });
   rejectStop(new Error("already finished"));
   await stopping;

@@ -588,18 +588,6 @@
     false,
     false
   ],
-  "commentary_names": [
-    true,
-    true,
-    true,
-    true,
-    true,
-    false,
-    false,
-    false,
-    false,
-    false
-  ],
   "sorted_outputs": [
     "EP1",
     "EP2",
@@ -628,39 +616,5 @@
     false,
     false,
     false
-  ],
-  "cover_stem_results": [
-    "Show - 01",
-    "Show S01E02",
-    "Movie",
-    null,
-    null,
-    null,
-    null
-  ],
-  "bitrate_results": [
-    [
-      128,
-      "k"
-    ],
-    [
-      192,
-      "k"
-    ],
-    [
-      1,
-      "M"
-    ],
-    [
-      320,
-      ""
-    ],
-    null,
-    null,
-    null,
-    null,
-    null,
-    null,
-    null
   ]
 }

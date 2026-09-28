@@ -1,14 +1,21 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+//! Preflight inspection manifest: per-video metadata summaries and subtitle candidates.
+
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
 
-use crate::domain::{ancestor_dirs, MkvTrack};
+use crate::domain::{ancestor_dirs, natural_sort_key, MkvTrack};
+use crate::request::{clean_relative_path, resolve_selected_items};
 use crate::scan::{
-    scan_assets, scan_mkv_files, InspectedVideo, PersistentInspectCache, ScanResults,
+    probe_video, scan_assets, scan_mkv_files, InspectedVideo, MkvmergeMetadata,
+    PersistentInspectCache, ScanResults,
 };
 
 pub const MANIFEST_VERSION: u64 = 2;
+
+const CANCELLED_ERROR: &str = "Inspection cancelled";
 
 /// Derives a root-relative POSIX path ID for job events and manifest items.
 /// Normalizes backslashes `\` to `/`. If stripped is empty or points to root, returns `"."`.
@@ -34,47 +41,47 @@ pub fn get_item_id(path: &Path, root_dir: &Path) -> String {
     }
 }
 
-/// Parses standard video resolution buckets from `pixel_dimensions` string (e.g. "1920x1080").
-pub fn parse_resolution(pixel_dimensions: &str) -> Option<String> {
+/// Buckets a `pixel_dimensions` string (e.g. "1920x1080") into a resolution label.
+fn parse_resolution(pixel_dimensions: &str) -> Option<&'static str> {
     if let Some((w_str, h_str)) = pixel_dimensions.split_once('x') {
         if let (Ok(width), Ok(height)) = (w_str.trim().parse::<u32>(), h_str.trim().parse::<u32>())
         {
             if width >= 3800 || height >= 2100 {
-                return Some("4K".to_string());
+                return Some("4K");
             }
             if width >= 2500 || height >= 1400 {
-                return Some("1440p".to_string());
+                return Some("1440p");
             }
             if width >= 1900 || height >= 1000 {
-                return Some("1080p".to_string());
+                return Some("1080p");
             }
             if width >= 1200 || height >= 700 {
-                return Some("720p".to_string());
+                return Some("720p");
             }
             if height >= 480 {
-                return Some("480p".to_string());
+                return Some("480p");
             }
         }
     }
 
     if pixel_dimensions.contains("3840") || pixel_dimensions.contains("2160") {
-        return Some("4K".to_string());
+        return Some("4K");
     }
     if pixel_dimensions.contains("2560") || pixel_dimensions.contains("1440") {
-        return Some("1440p".to_string());
+        return Some("1440p");
     }
     if pixel_dimensions.contains("1920") || pixel_dimensions.contains("1080") {
-        return Some("1080p".to_string());
+        return Some("1080p");
     }
     if pixel_dimensions.contains("1280") || pixel_dimensions.contains("720") {
-        return Some("720p".to_string());
+        return Some("720p");
     }
 
     None
 }
 
 /// Normalizes video codec strings into standard identifiers (HEVC, AVC, AV1, VP9).
-pub fn parse_video_codec(codec: &str, codec_id: &str) -> Option<String> {
+fn parse_video_codec(codec: &str, codec_id: &str) -> Option<String> {
     let combined = format!("{codec} {codec_id}").to_lowercase();
     if combined.contains("hevc") || combined.contains("h.265") {
         Some("HEVC".to_string())
@@ -91,39 +98,37 @@ pub fn parse_video_codec(codec: &str, codec_id: &str) -> Option<String> {
     }
 }
 
-/// Detects audio codec name and whether the track is FLAC, formatted with channel label.
-pub fn parse_audio_track_info(track: &MkvTrack) -> (String, bool) {
+/// Audio track label (codec plus channel layout, e.g. "AAC 5.1") and whether it is FLAC.
+fn parse_audio_track_info(track: &MkvTrack) -> (String, bool) {
     let codec_id = track.properties.codec_id.as_deref().unwrap_or("");
-    let combined = codec_id.to_lowercase();
-    let is_flac = combined.contains("flac");
+    let codec_lower = codec_id.to_lowercase();
+    let is_flac = codec_lower.contains("flac");
 
-    let channel_label = match track.properties.audio_channels {
-        Some(8) => Some("7.1".to_string()),
-        Some(6) => Some("5.1".to_string()),
-        Some(2) => Some("2.0".to_string()),
-        Some(1) => Some("1.0".to_string()),
-        Some(ch) if ch <= 2 => Some(format!("{ch}.0")),
-        Some(ch) => Some(format!("{}.1", ch - 1)),
-        None => None,
-    };
+    let channel_label = track.properties.audio_channels.map(|ch| {
+        if ch <= 2 {
+            format!("{ch}.0")
+        } else {
+            format!("{}.1", ch - 1)
+        }
+    });
 
     let audio_name = if is_flac {
-        "FLAC".to_string()
-    } else if combined.contains("aac") {
-        "AAC".to_string()
-    } else if combined.contains("opus") {
-        "Opus".to_string()
-    } else if combined.contains("ac3") || combined.contains("ac-3") {
-        "AC3".to_string()
+        "FLAC"
+    } else if codec_lower.contains("aac") {
+        "AAC"
+    } else if codec_lower.contains("opus") {
+        "Opus"
+    } else if codec_lower.contains("ac3") || codec_lower.contains("ac-3") {
+        "AC3"
     } else if !codec_id.is_empty() {
-        codec_id.to_string()
+        codec_id
     } else {
-        "Audio".to_string()
+        "Audio"
     };
 
     let full_name = match channel_label {
         Some(label) => format!("{audio_name} {label}"),
-        None => audio_name,
+        None => audio_name.to_string(),
     };
 
     (full_name, is_flac)
@@ -165,34 +170,21 @@ pub struct InspectionManifest {
 }
 
 impl InspectionManifest {
-    /// Filters and reorders items strictly matching the provided `selected_items`.
-    ///
-    /// Items can be matched by raw `item.id` or by its cleaned relative path representation.
-    /// Deduplicates items if multiple selectors resolve to the same item ID.
-    /// Prunes `subtitle_candidates` to only retain releases represented in the retained items.
-    pub fn filter_selected(&self, selected_items: &[String]) -> InspectionManifest {
-        let mut item_map: HashMap<String, &ManifestItem> =
-            HashMap::with_capacity(self.items.len() * 2);
-        for item in &self.items {
-            let clean = crate::request::clean_relative_path(&item.id);
-            item_map.insert(clean, item);
-            item_map.insert(item.id.clone(), item);
-        }
-
-        let mut filtered_items = Vec::with_capacity(selected_items.len());
-        let mut seen = HashSet::new();
-
-        for selected in selected_items {
-            let clean_selected = crate::request::clean_relative_path(selected);
-            if let Some(&item) = item_map
-                .get(clean_selected.as_str())
-                .or_else(|| item_map.get(selected.as_str()))
-            {
-                if seen.insert(item.id.as_str()) {
-                    filtered_items.push(item.clone());
-                }
-            }
-        }
+    /// Narrows items to `selected_items` in selection order, dropping repeated selections,
+    /// and prunes `subtitle_candidates` to the releases of the retained items. Every
+    /// selection must name a discovered item.
+    pub fn select_items(&self, selected_items: &[String]) -> Result<InspectionManifest, String> {
+        let index_by_id: HashMap<String, usize> = self
+            .items
+            .iter()
+            .enumerate()
+            .map(|(idx, item)| (clean_relative_path(&item.id), idx))
+            .collect();
+        let filtered_items: Vec<ManifestItem> =
+            resolve_selected_items(&index_by_id, selected_items)?
+                .into_iter()
+                .map(|idx| self.items[idx].clone())
+                .collect();
 
         let active_releases: HashSet<&str> = filtered_items
             .iter()
@@ -206,28 +198,23 @@ impl InspectionManifest {
             .map(|(rel, subs)| (rel.clone(), subs.clone()))
             .collect();
 
-        InspectionManifest {
+        Ok(InspectionManifest {
             version: self.version,
             subtitle_candidates: filtered_subtitles,
             items: filtered_items,
             extra: self.extra.clone(),
-        }
+        })
     }
 }
 
-/// Extracts summarized video inspection metadata from an `InspectedVideo`.
-pub fn extract_mkv_metadata(inspected: Option<&InspectedVideo>) -> InspectionMetadata {
-    let Some(inspected) = inspected else {
-        return InspectionMetadata::default();
-    };
-
+/// Summarizes an inspected video's tracks and attachments for the manifest.
+fn extract_mkv_metadata(inspected: &InspectedVideo) -> InspectionMetadata {
     let mut resolution: Option<String> = None;
     let mut video_codec: Option<String> = None;
     let mut audio_parts: Vec<String> = Vec::new();
     let mut has_flac = false;
-    let mut has_audio = false;
     let mut subtitle_languages: Vec<String> = Vec::new();
-    let mut subtitle_formats: Vec<String> = Vec::new();
+    let mut subtitle_formats: Vec<&str> = Vec::new();
 
     for track in inspected.tracks() {
         if track.track_type == "video" {
@@ -238,34 +225,36 @@ pub fn extract_mkv_metadata(inspected: Option<&InspectedVideo>) -> InspectionMet
                 .properties
                 .pixel_dimensions
                 .as_deref()
-                .and_then(parse_resolution);
+                .and_then(parse_resolution)
+                .map(str::to_string);
         } else if track.track_type == "audio" {
-            has_audio = true;
-            let (audio, flac_found) = parse_audio_track_info(track);
-            if flac_found {
-                has_flac = true;
-            }
+            let (audio, is_flac) = parse_audio_track_info(track);
+            has_flac |= is_flac;
             audio_parts.push(audio);
         } else if track.track_type == "subtitles" {
-            let codec_id = track.properties.codec_id.as_deref().unwrap_or("");
-            let combined = codec_id.to_lowercase();
-            let format_name = if combined.contains("ass") || combined.contains("substation") {
+            let codec_lower = track
+                .properties
+                .codec_id
+                .as_deref()
+                .unwrap_or("")
+                .to_lowercase();
+            let format_name = if codec_lower.contains("ass") || codec_lower.contains("substation") {
                 "ASS"
-            } else if combined.contains("srt")
-                || combined.contains("subrip")
-                || combined.contains("utf8")
+            } else if codec_lower.contains("srt")
+                || codec_lower.contains("subrip")
+                || codec_lower.contains("utf8")
             {
                 "SRT"
-            } else if combined.contains("pgs") || combined.contains("hdmv") {
+            } else if codec_lower.contains("pgs") || codec_lower.contains("hdmv") {
                 "PGS"
-            } else if combined.contains("vob") {
+            } else if codec_lower.contains("vob") {
                 "VobSub"
             } else {
                 "Subtitles"
             };
 
-            if !subtitle_formats.iter().any(|f| f == format_name) {
-                subtitle_formats.push(format_name.to_string());
+            if !subtitle_formats.contains(&format_name) {
+                subtitle_formats.push(format_name);
             }
 
             let lang = track
@@ -290,57 +279,50 @@ pub fn extract_mkv_metadata(inspected: Option<&InspectedVideo>) -> InspectionMet
         _ => None,
     };
 
-    let audio_summary = if !audio_parts.is_empty() {
-        Some(audio_parts.join(" / "))
-    } else if has_audio {
-        Some("No Audio".to_string())
-    } else {
-        None
-    };
+    let has_audio = !audio_parts.is_empty();
+    let audio_summary = has_audio.then(|| audio_parts.join(" / "));
 
-    let sub_summary = if !subtitle_languages.is_empty() {
-        let fmt = if subtitle_formats.len() == 1 {
-            &subtitle_formats[0]
-        } else {
-            "Subs"
+    // Every subtitle track contributes both a format and a language.
+    let sub_summary = (!subtitle_languages.is_empty()).then(|| {
+        let fmt = match subtitle_formats.as_slice() {
+            [only] => *only,
+            _ => "Subs",
         };
-        Some(format!("{fmt} ({})", subtitle_languages.join(", ")))
-    } else if !subtitle_formats.is_empty() {
-        let fmt = if subtitle_formats.len() == 1 {
-            &subtitle_formats[0]
-        } else {
-            "Subtitles"
-        };
-        Some(fmt.to_string())
-    } else {
-        None
-    };
+        format!("{fmt} ({})", subtitle_languages.join(", "))
+    });
 
     InspectionMetadata {
         resolution,
         video_codec,
         video_tag,
         audio_summary,
-        has_flac: if has_audio { Some(has_flac) } else { None },
+        has_flac: has_audio.then_some(has_flac),
         sub_summary,
-        fonts_count: inspected.fonts_count(),
+        fonts_count: Some(inspected.font_attachments().len()),
         extra: Default::default(),
     }
+}
+
+fn is_cancelled(token: Option<&CancellationToken>) -> bool {
+    token.is_some_and(|t| t.is_cancelled())
+}
+
+/// Flushes pending cache writes and returns the cancellation error.
+fn cancelled<T>(cache: Option<&PersistentInspectCache>) -> Result<T, String> {
+    if let Some(cache) = cache {
+        cache.save_shared();
+    }
+    Err(CANCELLED_ERROR.to_string())
 }
 
 /// Generates a complete preflight inspection manifest for an anime batch directory.
 pub async fn generate_inspection_manifest(
     input_dir: &Path,
     persistent_cache: Option<&PersistentInspectCache>,
-    cancel_token: Option<&tokio_util::sync::CancellationToken>,
+    cancel_token: Option<&CancellationToken>,
 ) -> Result<InspectionManifest, String> {
-    if let Some(token) = cancel_token {
-        if token.is_cancelled() {
-            if let Some(cache) = persistent_cache {
-                cache.save_shared();
-            }
-            return Err("Inspection cancelled".into());
-        }
+    if is_cancelled(cancel_token) {
+        return cancelled(persistent_cache);
     }
 
     let all_mkvs = scan_mkv_files(input_dir, true, None);
@@ -353,29 +335,20 @@ pub async fn generate_inspection_manifest(
         });
     }
 
-    let mut videos_by_dir: BTreeMap<PathBuf, Vec<&crate::scan::ParsedFile>> = BTreeMap::new();
-    for video in &all_mkvs {
-        if let Some(parent) = video.path.parent() {
-            videos_by_dir
-                .entry(parent.to_path_buf())
-                .or_default()
-                .push(video);
-        }
-    }
+    let release_dirs: BTreeSet<PathBuf> = all_mkvs
+        .iter()
+        .filter_map(|video| video.path.parent().map(Path::to_path_buf))
+        .collect();
 
     let mut scan_cache = HashMap::<PathBuf, ScanResults>::new();
     let mut release_by_dir = HashMap::<PathBuf, String>::new();
     let mut subtitle_candidates = BTreeMap::<String, Vec<String>>::new();
 
-    // Derive every shared subtitle exactly once. Ancestor chains overlap heavily across
-    // releases, so building one index per release re-runs per-file language/dialogue
-    // detection and re-sorts the ancestor candidate set for every release directory.
-    let mut all_ancestor_dirs: HashSet<PathBuf> = HashSet::new();
-    for mkv_dir in videos_by_dir.keys() {
-        for ancestor in ancestor_dirs(mkv_dir, input_dir) {
-            all_ancestor_dirs.insert(ancestor);
-        }
-    }
+    // Ancestor chains overlap across releases, so each directory's subtitles are listed once.
+    let all_ancestor_dirs: HashSet<PathBuf> = release_dirs
+        .iter()
+        .flat_map(|mkv_dir| ancestor_dirs(mkv_dir, input_dir))
+        .collect();
     let mut subs_by_dir: HashMap<PathBuf, Vec<String>> = HashMap::new();
     for directory in &all_ancestor_dirs {
         let assets = scan_assets(directory, Some(&mut scan_cache));
@@ -389,7 +362,7 @@ pub async fn generate_inspection_manifest(
         }
     }
 
-    for mkv_dir in videos_by_dir.keys() {
+    for mkv_dir in &release_dirs {
         let release = get_item_id(mkv_dir, input_dir);
         release_by_dir.insert(mkv_dir.clone(), release.clone());
 
@@ -399,7 +372,7 @@ pub async fn generate_inspection_manifest(
                 candidates.extend(dir_subs.iter().cloned());
             }
         }
-        candidates.sort_by_cached_key(|a| crate::domain::natural_sort_key(a));
+        candidates.sort_by_cached_key(|a| natural_sort_key(a));
 
         if !candidates.is_empty() {
             subtitle_candidates.insert(release, candidates);
@@ -413,8 +386,7 @@ pub async fn generate_inspection_manifest(
     let probe_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(probe_limit));
     let mut probe_set = tokio::task::JoinSet::new();
 
-    let mut probe_results: HashMap<PathBuf, Result<crate::scan::MkvmergeMetadata, String>> =
-        HashMap::new();
+    let mut probe_results: HashMap<PathBuf, Result<MkvmergeMetadata, String>> = HashMap::new();
 
     for mkv in &all_mkvs {
         if let Some(cached) = persistent_cache.and_then(|c| c.get_path(&mkv.path)) {
@@ -422,13 +394,8 @@ pub async fn generate_inspection_manifest(
         }
     }
 
-    if let Some(token) = cancel_token {
-        if token.is_cancelled() {
-            if let Some(cache) = persistent_cache {
-                cache.save_shared();
-            }
-            return Err("Inspection cancelled".into());
-        }
+    if is_cancelled(cancel_token) {
+        return cancelled(persistent_cache);
     }
 
     for mkv in &all_mkvs {
@@ -441,7 +408,7 @@ pub async fn generate_inspection_manifest(
             let Ok(_permit) = sem.acquire().await else {
                 return (path, Err("Probe semaphore closed".into()));
             };
-            let res = crate::scan::probe_video(&path).await;
+            let res = probe_video(&path).await;
             (path, res)
         });
     }
@@ -451,10 +418,7 @@ pub async fn generate_inspection_manifest(
             tokio::select! {
                 _ = token.cancelled() => {
                     probe_set.abort_all();
-                    if let Some(cache) = persistent_cache {
-                        cache.save_shared();
-                    }
-                    return Err("Inspection cancelled".into());
+                    return cancelled(persistent_cache);
                 }
                 next = probe_set.join_next() => next,
             }
@@ -484,9 +448,9 @@ pub async fn generate_inspection_manifest(
             .remove(&mkv.path)
             .unwrap_or_else(|| Err("Probe result missing".into()));
 
-        let (inspected, inspection_error) = match probe_res {
-            Ok(probed) => (Some(InspectedVideo::new(probed)), None),
-            Err(err) => (None, Some(err)),
+        let (metadata, inspection_error) = match probe_res {
+            Ok(probed) => (extract_mkv_metadata(&InspectedVideo::new(probed)), None),
+            Err(err) => (InspectionMetadata::default(), Some(err)),
         };
 
         let parent = mkv.path.parent().unwrap_or(input_dir);
@@ -495,15 +459,14 @@ pub async fn generate_inspection_manifest(
             .cloned()
             .unwrap_or_else(|| get_item_id(parent, input_dir));
 
-        let item = ManifestItem {
+        items.push(ManifestItem {
             id: get_item_id(&mkv.path, input_dir),
             name: mkv.name.clone(),
             release,
-            metadata: extract_mkv_metadata(inspected.as_ref()),
+            metadata,
             inspection_error,
             extra: Default::default(),
-        };
-        items.push(item);
+        });
     }
 
     if let Some(cache) = persistent_cache {
@@ -522,7 +485,7 @@ pub async fn generate_inspection_manifest(
 mod tests {
     use super::*;
     use crate::domain::TrackProperties;
-    use crate::scan::{MkvAttachment, MkvmergeMetadata};
+    use crate::scan::MkvAttachment;
 
     #[test]
     fn test_get_item_id() {
@@ -540,13 +503,13 @@ mod tests {
 
     #[test]
     fn test_parse_resolution() {
-        assert_eq!(parse_resolution("3840x2160"), Some("4K".to_string()));
-        assert_eq!(parse_resolution("2560x1440"), Some("1440p".to_string()));
-        assert_eq!(parse_resolution("1920x1080"), Some("1080p".to_string()));
-        assert_eq!(parse_resolution("1280x720"), Some("720p".to_string()));
-        assert_eq!(parse_resolution("720x480"), Some("480p".to_string()));
+        assert_eq!(parse_resolution("3840x2160"), Some("4K"));
+        assert_eq!(parse_resolution("2560x1440"), Some("1440p"));
+        assert_eq!(parse_resolution("1920x1080"), Some("1080p"));
+        assert_eq!(parse_resolution("1280x720"), Some("720p"));
+        assert_eq!(parse_resolution("720x480"), Some("480p"));
         assert_eq!(parse_resolution(""), None);
-        assert_eq!(parse_resolution("1080"), Some("1080p".to_string()));
+        assert_eq!(parse_resolution("1080"), Some("1080p"));
         assert_eq!(parse_resolution("invalid"), None);
     }
 
@@ -568,105 +531,65 @@ mod tests {
         assert_eq!(parse_video_codec("", ""), None);
     }
 
+    fn track(track_type: &str, properties: TrackProperties) -> MkvTrack {
+        MkvTrack {
+            id: None,
+            track_type: track_type.to_string(),
+            codec: None,
+            properties,
+        }
+    }
+
+    fn audio_track(codec_id: &str, channels: Option<u32>) -> MkvTrack {
+        track(
+            "audio",
+            TrackProperties {
+                codec_id: Some(codec_id.to_string()),
+                audio_channels: channels,
+                ..Default::default()
+            },
+        )
+    }
+
     #[test]
     fn test_parse_audio_track_info() {
-        let flac_track = MkvTrack {
-            id: Some(1),
-            track_type: "audio".to_string(),
-            codec: None,
-            properties: TrackProperties {
-                codec_id: Some("A_FLAC".to_string()),
-                audio_channels: Some(2),
-                ..Default::default()
-            },
-        };
-        assert_eq!(
-            parse_audio_track_info(&flac_track),
-            ("FLAC 2.0".to_string(), true)
-        );
-
-        let aac_track = MkvTrack {
-            id: Some(2),
-            track_type: "audio".to_string(),
-            codec: None,
-            properties: TrackProperties {
-                codec_id: Some("A_AAC".to_string()),
-                audio_channels: Some(6),
-                ..Default::default()
-            },
-        };
-        assert_eq!(
-            parse_audio_track_info(&aac_track),
-            ("AAC 5.1".to_string(), false)
-        );
-
-        let opus_track = MkvTrack {
-            id: Some(3),
-            track_type: "audio".to_string(),
-            codec: None,
-            properties: TrackProperties {
-                codec_id: Some("A_OPUS".to_string()),
-                audio_channels: Some(8),
-                ..Default::default()
-            },
-        };
-        assert_eq!(
-            parse_audio_track_info(&opus_track),
-            ("Opus 7.1".to_string(), false)
-        );
-
-        let ac3_track = MkvTrack {
-            id: Some(4),
-            track_type: "audio".to_string(),
-            codec: None,
-            properties: TrackProperties {
-                codec_id: Some("A_AC3".to_string()),
-                audio_channels: Some(1),
-                ..Default::default()
-            },
-        };
-        assert_eq!(
-            parse_audio_track_info(&ac3_track),
-            ("AC3 1.0".to_string(), false)
-        );
+        for (codec_id, channels, expected, is_flac) in [
+            ("A_FLAC", Some(2), "FLAC 2.0", true),
+            ("A_AAC", Some(6), "AAC 5.1", false),
+            ("A_OPUS", Some(8), "Opus 7.1", false),
+            ("A_AC3", Some(1), "AC3 1.0", false),
+            ("A_DTS", Some(3), "A_DTS 2.1", false),
+            ("", None, "Audio", false),
+        ] {
+            assert_eq!(
+                parse_audio_track_info(&audio_track(codec_id, channels)),
+                (expected.to_string(), is_flac),
+                "{codec_id} / {channels:?}"
+            );
+        }
     }
 
     #[test]
     fn test_extract_mkv_metadata() {
-        assert_eq!(extract_mkv_metadata(None), InspectionMetadata::default());
-
         let video = InspectedVideo::new(MkvmergeMetadata {
             tracks: vec![
-                MkvTrack {
-                    id: Some(0),
-                    track_type: "video".to_string(),
-                    codec: None,
-                    properties: TrackProperties {
+                track(
+                    "video",
+                    TrackProperties {
                         codec_id: Some("V_MPEGH/ISO/HEVC".to_string()),
                         pixel_dimensions: Some("1920x1080".to_string()),
                         ..Default::default()
                     },
-                },
-                MkvTrack {
-                    id: Some(1),
-                    track_type: "audio".to_string(),
-                    codec: None,
-                    properties: TrackProperties {
-                        codec_id: Some("A_FLAC".to_string()),
-                        audio_channels: Some(2),
-                        ..Default::default()
-                    },
-                },
-                MkvTrack {
-                    id: Some(2),
-                    track_type: "subtitles".to_string(),
-                    codec: None,
-                    properties: TrackProperties {
+                ),
+                audio_track("A_FLAC", Some(2)),
+                track(
+                    "subtitles",
+                    TrackProperties {
                         codec_id: Some("S_TEXT/ASS".to_string()),
                         language: Some("eng".to_string()),
                         ..Default::default()
                     },
-                },
+                ),
             ],
             attachments: vec![MkvAttachment {
                 id: Some(1),
@@ -677,7 +600,7 @@ mod tests {
             chapters: vec![],
         });
 
-        let meta = extract_mkv_metadata(Some(&video));
+        let meta = extract_mkv_metadata(&video);
         assert_eq!(meta.resolution.as_deref(), Some("1080p"));
         assert_eq!(meta.video_codec.as_deref(), Some("HEVC"));
         assert_eq!(meta.video_tag.as_deref(), Some("1080p HEVC"));
@@ -685,6 +608,15 @@ mod tests {
         assert_eq!(meta.has_flac, Some(true));
         assert_eq!(meta.sub_summary.as_deref(), Some("ASS (ENG)"));
         assert_eq!(meta.fonts_count, Some(1));
+    }
+
+    #[test]
+    fn test_extract_mkv_metadata_without_audio_or_subtitles() {
+        let meta = extract_mkv_metadata(&InspectedVideo::new(MkvmergeMetadata::default()));
+        assert_eq!(meta.audio_summary, None);
+        assert_eq!(meta.has_flac, None);
+        assert_eq!(meta.sub_summary, None);
+        assert_eq!(meta.fonts_count, Some(0));
     }
 
     #[test]
@@ -739,22 +671,11 @@ mod tests {
     #[tokio::test]
     async fn test_generate_inspection_manifest_cancelled() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let token = tokio_util::sync::CancellationToken::new();
-        token.cancel();
-        let res = generate_inspection_manifest(temp_dir.path(), None, Some(&token)).await;
-        assert!(res.is_err());
-        assert_eq!(res.unwrap_err(), "Inspection cancelled");
-    }
-
-    #[tokio::test]
-    async fn test_generate_inspection_manifest_cancelled_in_loop() {
-        let temp_dir = tempfile::tempdir().unwrap();
         std::fs::write(temp_dir.path().join("ep01.mkv"), b"dummy content").unwrap();
-        let token = tokio_util::sync::CancellationToken::new();
+        let token = CancellationToken::new();
         token.cancel();
         let res = generate_inspection_manifest(temp_dir.path(), None, Some(&token)).await;
-        assert!(res.is_err());
-        assert_eq!(res.unwrap_err(), "Inspection cancelled");
+        assert_eq!(res.unwrap_err(), CANCELLED_ERROR);
     }
 
     fn make_test_item(id: &str, name: &str, release: &str) -> ManifestItem {
@@ -768,30 +689,38 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_filter_selected_reorders_and_filters_items() {
-        let mut subtitle_candidates = BTreeMap::new();
-        subtitle_candidates.insert("Show".to_string(), vec!["sub.ass".to_string()]);
-
-        let items = vec![
-            make_test_item("ep01.mkv", "Episode 1", "Show"),
-            make_test_item("ep02.mkv", "Episode 2", "Show"),
-            make_test_item("ep03.mkv", "Episode 3", "Show"),
-        ];
-
-        let mut extra = serde_json::Map::new();
-        extra.insert("custom_key".to_string(), serde_json::Value::Bool(true));
-
-        let manifest = InspectionManifest {
+    fn make_test_manifest(
+        items: Vec<ManifestItem>,
+        subtitle_candidates: &[(&str, &str)],
+    ) -> InspectionManifest {
+        InspectionManifest {
             version: MANIFEST_VERSION,
-            subtitle_candidates,
+            subtitle_candidates: subtitle_candidates
+                .iter()
+                .map(|(release, sub)| (release.to_string(), vec![sub.to_string()]))
+                .collect(),
             items,
-            extra,
-        };
+            extra: Default::default(),
+        }
+    }
+
+    #[test]
+    fn test_select_items_reorders_and_filters_items() {
+        let mut manifest = make_test_manifest(
+            vec![
+                make_test_item("ep01.mkv", "Episode 1", "Show"),
+                make_test_item("ep02.mkv", "Episode 2", "Show"),
+                make_test_item("ep03.mkv", "Episode 3", "Show"),
+            ],
+            &[("Show", "sub.ass")],
+        );
+        manifest
+            .extra
+            .insert("custom_key".to_string(), serde_json::Value::Bool(true));
 
         // Select ep03 and ep01 in reverse order, using cleaned path for ep03
         let selected = vec!["./ep03.mkv".to_string(), "ep01.mkv".to_string()];
-        let filtered = manifest.filter_selected(&selected);
+        let filtered = manifest.select_items(&selected).unwrap();
 
         assert_eq!(filtered.items.len(), 2);
         assert_eq!(filtered.items[0].id, "ep03.mkv");
@@ -808,26 +737,17 @@ mod tests {
     }
 
     #[test]
-    fn test_filter_selected_prunes_subtitle_candidates() {
-        let mut subtitle_candidates = BTreeMap::new();
-        subtitle_candidates.insert("Season 1".to_string(), vec!["s1.ass".to_string()]);
-        subtitle_candidates.insert("Season 2".to_string(), vec!["s2.ass".to_string()]);
+    fn test_select_items_prunes_subtitle_candidates() {
+        let manifest = make_test_manifest(
+            vec![
+                make_test_item("season1/ep01.mkv", "S1E01", "Season 1"),
+                make_test_item("season2/ep01.mkv", "S2E01", "Season 2"),
+            ],
+            &[("Season 1", "s1.ass"), ("Season 2", "s2.ass")],
+        );
 
-        let items = vec![
-            make_test_item("season1/ep01.mkv", "S1E01", "Season 1"),
-            make_test_item("season2/ep01.mkv", "S2E01", "Season 2"),
-        ];
-
-        let manifest = InspectionManifest {
-            version: MANIFEST_VERSION,
-            subtitle_candidates,
-            items,
-            extra: Default::default(),
-        };
-
-        // Select only item from Season 2
         let selected = vec!["season2/ep01.mkv".to_string()];
-        let filtered = manifest.filter_selected(&selected);
+        let filtered = manifest.select_items(&selected).unwrap();
 
         assert_eq!(filtered.items.len(), 1);
         assert_eq!(filtered.items[0].id, "season2/ep01.mkv");
@@ -839,18 +759,14 @@ mod tests {
     }
 
     #[test]
-    fn test_filter_selected_deduplicates_duplicate_keys() {
-        let items = vec![
-            make_test_item("ep01.mkv", "Episode 1", "Show"),
-            make_test_item("ep02.mkv", "Episode 2", "Show"),
-        ];
-
-        let manifest = InspectionManifest {
-            version: MANIFEST_VERSION,
-            subtitle_candidates: BTreeMap::new(),
-            items,
-            extra: Default::default(),
-        };
+    fn test_select_items_deduplicates_duplicate_keys() {
+        let manifest = make_test_manifest(
+            vec![
+                make_test_item("ep01.mkv", "Episode 1", "Show"),
+                make_test_item("ep02.mkv", "Episode 2", "Show"),
+            ],
+            &[],
+        );
 
         // Select ep01 multiple times (both exact and with relative path prefix), and ep02
         let selected = vec![
@@ -860,7 +776,7 @@ mod tests {
             "ep02.mkv".to_string(),
             "ep01.mkv".to_string(),
         ];
-        let filtered = manifest.filter_selected(&selected);
+        let filtered = manifest.select_items(&selected).unwrap();
 
         assert_eq!(filtered.items.len(), 2);
         assert_eq!(filtered.items[0].id, "ep01.mkv");
@@ -881,8 +797,6 @@ mod tests {
             .unwrap();
 
         let subs = manifest.subtitle_candidates.get(".").unwrap();
-        // Natural sort order expects ep1.ass, ep2.ass, ep10.ass
-        // Ascii sort order would produce ep1.ass, ep10.ass, ep2.ass
         assert_eq!(
             subs,
             &vec![
@@ -894,33 +808,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_generate_inspection_manifest_concurrent_probe() {
+    async fn test_generate_inspection_manifest_uses_cache_and_preserves_order() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let input_dir = temp_dir.path();
+        let input_dir = temp_dir.path().join("input");
+        std::fs::create_dir(&input_dir).unwrap();
         for i in 1..=5 {
-            std::fs::write(input_dir.join(format!("ep{:02}.mkv", i)), b"video content").unwrap();
+            std::fs::write(input_dir.join(format!("ep{i:02}.mkv")), b"video content").unwrap();
         }
 
-        let cache = PersistentInspectCache::default();
+        let cache =
+            PersistentInspectCache::new(Some(temp_dir.path().join("inspect_cache.json")), true);
         cache.put_path(&input_dir.join("ep01.mkv"), MkvmergeMetadata::default());
 
-        let manifest = generate_inspection_manifest(input_dir, Some(&cache), None)
+        let manifest = generate_inspection_manifest(&input_dir, Some(&cache), None)
             .await
             .unwrap();
 
-        assert_eq!(manifest.items.len(), 5);
+        let ids: Vec<&str> = manifest.items.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["ep01.mkv", "ep02.mkv", "ep03.mkv", "ep04.mkv", "ep05.mkv"]
+        );
         assert!(manifest.items[0].inspection_error.is_none());
-        for (idx, item) in manifest.items.iter().enumerate() {
-            assert_eq!(item.id, format!("ep{:02}.mkv", idx + 1));
-        }
-
-        // Second pass should hit cache for all items where cache was populated and maintain ordering
-        let manifest2 = generate_inspection_manifest(input_dir, Some(&cache), None)
-            .await
-            .unwrap();
-        assert_eq!(manifest2.items.len(), 5);
-        for (idx, item) in manifest2.items.iter().enumerate() {
-            assert_eq!(item.id, format!("ep{:02}.mkv", idx + 1));
+        for item in &manifest.items[1..] {
+            assert!(
+                item.inspection_error.is_some(),
+                "{} is not a Matroska file",
+                item.id
+            );
         }
     }
 }

@@ -1,9 +1,10 @@
 //! Strongly-typed batch execution requests and track assignments.
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::cpu::{physical_core_count, transcode_governor_threads};
 use crate::pipeline::{PipelineConfig, PipelineMode};
@@ -35,53 +36,92 @@ fn is_drive_prefix(s: &str) -> bool {
     s.len() >= 2 && s.as_bytes()[1] == b':' && s.as_bytes()[0].is_ascii_alphabetic()
 }
 
-/// Normalizes a relative path string by converting backslashes to forward slashes,
-/// collapsing redundant separators, and stripping relative `.` (`CurDir`) components.
-pub fn clean_relative_path(s: &str) -> String {
-    let norm = s.trim().replace('\\', "/");
-    let path = Path::new(&norm);
-    let mut parts = Vec::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::Normal(c) => {
-                parts.push(c.to_string_lossy().to_string());
-            }
-            std::path::Component::CurDir => {}
-            _ => {
-                parts.push(component.as_os_str().to_string_lossy().to_string());
-            }
-        }
-    }
-    if parts.is_empty() {
-        String::new()
-    } else {
-        parts.join("/")
-    }
+/// True when a forward-slash-normalized path stays inside the directory it is joined to:
+/// no root, no drive prefix, no `..` component.
+fn is_contained_relative_path(norm: &str) -> bool {
+    let path = Path::new(norm);
+    !path.has_root()
+        && !is_drive_prefix(norm)
+        && !path.components().any(|c| matches!(c, Component::ParentDir))
 }
 
-/// Canonical root-relative item ID for a track assignment target.
+fn has_mkv_extension(path: &str) -> bool {
+    path.rsplit_once('.')
+        .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case("mkv"))
+}
+
+/// Normalizes a relative path string by converting backslashes to forward slashes,
+/// collapsing redundant separators, and stripping relative `.` (`CurDir`) components.
 ///
-/// Callers must run *both* sides of a comparison through this: `get_item_id`
-/// only strips the root and swaps separators, so a discovered ID matches an
-/// assignment target solely because the pipeline canonicalizes each of them
-/// here before comparing.
-pub fn canonical_assignment_target_id(target_video: &str) -> String {
-    clean_relative_path(target_video)
+/// This is the canonical form for comparing item IDs, selected items, and assignment
+/// targets; both sides of a comparison must go through it.
+pub fn clean_relative_path(s: &str) -> String {
+    let norm = s.trim().replace('\\', "/");
+    let parts: Vec<_> = Path::new(&norm)
+        .components()
+        .filter(|c| !matches!(c, Component::CurDir))
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect();
+    parts.join("/")
+}
+
+/// Maps each selection to the index its canonical ID has in `index_by_id` (keyed by
+/// [`clean_relative_path`] IDs), in selection order with repeats dropped. Fails naming every
+/// selection that matches no discovered item.
+pub(crate) fn resolve_selected_items(
+    index_by_id: &HashMap<String, usize>,
+    selected: &[String],
+) -> Result<Vec<usize>, String> {
+    let mut seen = HashSet::with_capacity(selected.len());
+    let mut ordered = Vec::with_capacity(selected.len());
+    let mut unmatched = Vec::new();
+    for item in selected {
+        match index_by_id.get(&clean_relative_path(item)) {
+            Some(&idx) => {
+                if seen.insert(idx) {
+                    ordered.push(idx);
+                }
+            }
+            None => unmatched.push(item.as_str()),
+        }
+    }
+    if unmatched.is_empty() {
+        Ok(ordered)
+    } else {
+        Err(format!(
+            "Selected items not found among discovered MKV files: {}",
+            unmatched.join(", ")
+        ))
+    }
 }
 
 impl TrackAssignment {
-    /// Returns the normalized target video path relative to input directory,
-    /// with backslashes converted to forward slashes, redundant separators collapsed,
-    /// and relative `.` (`CurDir`) components stripped.
-    pub fn clean_target_video(&self) -> String {
-        canonical_assignment_target_id(&self.target_video)
+    fn clean_target_video(&self) -> String {
+        clean_relative_path(&self.target_video)
     }
-    /// Returns true if the asset path is relative to the release/input directory
-    /// (i.e. not absolute, not root-relative, and not a drive-prefixed path).
-    pub fn is_relative_asset(&self) -> bool {
+
+    /// True if the asset path is relative to the release/input directory
+    /// (not absolute, not root-relative, and not drive-prefixed).
+    fn is_relative_asset(&self) -> bool {
         let s = self.asset_path.to_string_lossy().replace('\\', "/");
-        let path = Path::new(&s);
-        !is_drive_prefix(&s) && !path.has_root()
+        !is_drive_prefix(&s) && !Path::new(&s).has_root()
+    }
+
+    /// Resolves a relative asset path against `input_dir`, then `assets_dir`, falling back
+    /// to the `input_dir` candidate when neither exists; absolute paths are returned as-is.
+    pub fn resolve_asset_path(&self, input_dir: &Path, assets_dir: Option<&Path>) -> PathBuf {
+        if !self.is_relative_asset() {
+            return self.asset_path.clone();
+        }
+        let clean_asset = PathBuf::from(self.asset_path.to_string_lossy().replace('\\', "/"));
+        let from_input = input_dir.join(&clean_asset);
+        if from_input.is_file() {
+            return from_input;
+        }
+        assets_dir
+            .map(|assets| assets.join(&clean_asset))
+            .filter(|from_assets| from_assets.is_file())
+            .unwrap_or(from_input)
     }
 }
 
@@ -247,51 +287,28 @@ impl BatchRequest {
 
             for assignment in assignments {
                 let clean = assignment.clean_target_video();
-                if clean.is_empty() {
-                    return Err(format!(
-                        "Invalid relative target video path: '{}'",
-                        assignment.target_video
-                    ));
-                }
-
                 let target_norm = assignment.target_video.trim().replace('\\', "/");
-                let target_path = Path::new(&target_norm);
-                let is_target_drive = is_drive_prefix(&target_norm);
-                if target_norm.starts_with('/')
-                    || target_path.has_root()
-                    || is_target_drive
-                    || !target_path.is_relative()
-                    || target_path
-                        .components()
-                        .any(|c| matches!(c, std::path::Component::ParentDir))
-                {
+                if clean.is_empty() || !is_contained_relative_path(&target_norm) {
                     return Err(format!(
                         "Invalid relative target video path: '{}'",
                         assignment.target_video
                     ));
                 }
 
-                if !clean
-                    .rsplit_once('.')
-                    .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case("mkv"))
-                {
+                if !has_mkv_extension(&clean) {
                     return Err(format!(
                         "Assigned target video is not an MKV file: '{clean}'"
                     ));
                 }
 
-                let is_rel_asset = assignment.is_relative_asset();
                 let raw_asset = assignment.asset_path.to_string_lossy();
-                let asset_str = raw_asset.replace('\\', "/");
-                let asset_norm_path = Path::new(&asset_str);
                 let root_relative_backslash =
                     raw_asset.starts_with('\\') && !raw_asset.starts_with("\\\\");
-                if root_relative_backslash
-                    || (is_rel_asset
-                        && asset_norm_path
-                            .components()
-                            .any(|c| matches!(c, std::path::Component::ParentDir)))
-                {
+                let escapes_root = assignment.is_relative_asset()
+                    && Path::new(&raw_asset.replace('\\', "/"))
+                        .components()
+                        .any(|c| matches!(c, Component::ParentDir));
+                if root_relative_backslash || escapes_root {
                     return Err(format!(
                         "Invalid relative asset path: '{}'",
                         assignment.asset_path.display()
@@ -306,15 +323,14 @@ impl BatchRequest {
                     }
                 }
 
-                if !seen_videos.insert(clean.to_string()) {
+                let target_full = self.input_dir.join(&clean);
+                if !seen_videos.insert(clean) {
                     return Err(format!(
                         "Multiple track assignments for target video '{}' are not supported; multi-track muxing is deferred",
                         assignment.target_video
                     ));
                 }
 
-                // Check that the target video file exists
-                let target_full = self.input_dir.join(clean);
                 if !target_full.is_file() {
                     return Err(format!(
                         "Assigned target video file does not exist: '{}'",
@@ -322,28 +338,13 @@ impl BatchRequest {
                     ));
                 }
 
-                // Fail-fast preflight validation per ADR-0008: assigned asset must exist on disk
-                // Checks relative to input_dir, or relative to assets_dir if configured.
-                let asset_exists = if is_rel_asset {
-                    let in_input = self.input_dir.join(asset_norm_path);
-                    in_input.is_file()
-                        || self
-                            .assets_dir
-                            .as_ref()
-                            .map(|d| d.join(asset_norm_path).is_file())
-                            .unwrap_or(false)
-                } else {
-                    assignment.asset_path.is_file()
-                };
-
-                if !asset_exists {
+                // Fail-fast preflight per ADR-0008: the assigned asset must exist on disk.
+                let asset =
+                    assignment.resolve_asset_path(&self.input_dir, self.assets_dir.as_deref());
+                if !asset.is_file() {
                     return Err(format!(
                         "Assigned asset file does not exist: '{}'",
-                        if is_rel_asset {
-                            self.input_dir.join(asset_norm_path).display().to_string()
-                        } else {
-                            assignment.asset_path.display().to_string()
-                        }
+                        asset.display()
                     ));
                 }
             }
@@ -357,16 +358,7 @@ impl BatchRequest {
             let mut seen_items: HashSet<String> = HashSet::new();
             for item in items {
                 let norm = item.trim().replace('\\', "/");
-                let path = Path::new(&norm);
-                if norm.is_empty()
-                    || norm.starts_with('/')
-                    || path.has_root()
-                    || is_drive_prefix(&norm)
-                    || !path.is_relative()
-                    || path
-                        .components()
-                        .any(|c| matches!(c, std::path::Component::ParentDir))
-                {
+                if norm.is_empty() || !is_contained_relative_path(&norm) {
                     return Err(format!("Invalid relative path in selected_items: '{item}'"));
                 }
 
@@ -374,13 +366,9 @@ impl BatchRequest {
                 if !seen_items.insert(clean.clone()) {
                     return Err(format!("Duplicate entry in selected_items: '{clean}'"));
                 }
-                if !clean
-                    .rsplit_once('.')
-                    .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case("mkv"))
-                {
+                if !has_mkv_extension(&clean) {
                     return Err(format!("Selected item is not an MKV file: '{clean}'"));
                 }
-
                 let full_path = self.input_dir.join(&clean);
                 if !full_path.is_file() {
                     return Err(format!(
@@ -408,154 +396,91 @@ impl BatchRequest {
     /// Converts the `BatchRequest` into internal `PipelineConfig`, applying
     /// preset profile baseline defaults and layering explicit parameter overrides.
     pub fn into_pipeline_config(self) -> Result<PipelineConfig, String> {
-        let (preset_bitrate, preset_complexity) = if let Some(preset_id) = &self.preset {
-            if let Some(preset) = lookup_preset(preset_id) {
-                (Some(preset.bitrate), Some(preset.complexity))
-            } else {
-                return Err(format!("Unknown preset profile: '{preset_id}'"));
-            }
-        } else {
-            (None, None)
+        let preset = self
+            .preset
+            .as_deref()
+            .map(|id| lookup_preset(id).ok_or_else(|| format!("Unknown preset profile: '{id}'")))
+            .transpose()?;
+        let (preset_bitrate, preset_complexity) = match preset {
+            Some(p) => (Some(p.bitrate), Some(p.complexity)),
+            None => (None, None),
         };
 
         let physical_cores = physical_core_count();
-        let default_workers = physical_cores.clamp(1, 16);
-        let workers = self.workers.unwrap_or(default_workers);
-        let default_ffmpeg_threads = transcode_governor_threads(physical_cores, workers);
+        let workers = self.workers.unwrap_or(physical_cores.clamp(1, 16));
+        let defaults = PipelineConfig::default();
 
-        let mut config = PipelineConfig {
+        Ok(PipelineConfig {
             mode: self.mode,
-            input_dir: self.input_dir.clone(),
+            input_dir: self.input_dir,
             out_dir: self.out_dir,
             fonts_dir: self.fonts_dir,
-            assets_dir: self.assets_dir.clone(),
-            bitrate: self
-                .bitrate
-                .or(preset_bitrate)
-                .unwrap_or_else(|| "192k".to_string()),
-            complexity: self.complexity.or(preset_complexity).unwrap_or(5),
+            assets_dir: self.assets_dir,
+            bitrate: self.bitrate.or(preset_bitrate).unwrap_or(defaults.bitrate),
+            complexity: self
+                .complexity
+                .or(preset_complexity)
+                .unwrap_or(defaults.complexity),
             workers,
-            io_jobs: self.io_jobs.unwrap_or(2),
-            ffmpeg_threads: self.ffmpeg_threads.unwrap_or(default_ffmpeg_threads),
-            sub_offset: self.sub_offset.unwrap_or(0.0),
-            dry_run: self.dry_run.unwrap_or(false),
-            no_cache: self.no_cache.unwrap_or(false),
+            io_jobs: self.io_jobs.unwrap_or(defaults.io_jobs),
+            ffmpeg_threads: self
+                .ffmpeg_threads
+                .unwrap_or_else(|| transcode_governor_threads(physical_cores, workers)),
+            sub_offset: self.sub_offset.unwrap_or(defaults.sub_offset),
+            dry_run: self.dry_run.unwrap_or(defaults.dry_run),
+            no_cache: self.no_cache.unwrap_or(defaults.no_cache),
+            track_assignments: self.assignments,
             selected_items: self.selected_items,
-            ..Default::default()
-        };
-
-        config.track_assignments = self.assignments.clone();
-
-        Ok(config)
+            ..defaults
+        })
     }
 }
 
-impl TrackAssignment {
-    /// Resolves relative asset path against input_dir (or assets_dir fallback),
-    /// or returns the absolute asset path unchanged.
-    pub fn resolve_asset_path(&self, input_dir: &Path, assets_dir: Option<&Path>) -> PathBuf {
-        if self.is_relative_asset() {
-            let clean_asset = PathBuf::from(self.asset_path.to_string_lossy().replace('\\', "/"));
-            let from_input = input_dir.join(&clean_asset);
-            if from_input.is_file() {
-                from_input
-            } else if let Some(assets) = assets_dir {
-                let from_assets = assets.join(&clean_asset);
-                if from_assets.is_file() {
-                    from_assets
-                } else {
-                    from_input
-                }
-            } else {
-                from_input
-            }
-        } else {
-            self.asset_path.clone()
-        }
-    }
-}
-
-/// Helper to convert a list of `TrackAssignment`s into a lookup map keyed by normalized
-/// relative target path, resolving relative asset paths against input_dir (or assets_dir fallback).
-pub fn assignments_to_track_map(
-    assignments: &[TrackAssignment],
-    input_dir: &Path,
-    assets_dir: Option<&Path>,
-) -> HashMap<String, PathBuf> {
-    let mut map = HashMap::new();
-    for a in assignments {
-        let resolved = a.resolve_asset_path(input_dir, assets_dir);
-        let clean = a.clean_target_video();
-        map.insert(clean, resolved);
-    }
-    map
-}
-
-/// Parse track assignments from JSON, supporting both `Vec<TrackAssignment>` and
-/// legacy `{ "video.mkv": "sub.ass" }` map format.
+/// Parses track assignments from JSON: a `Vec<TrackAssignment>` array, an object whose
+/// `assignments` key holds such an array or a map, or a legacy flat
+/// `{ "video.mkv": "sub.ass" }` map of subtitle assignments.
 pub fn parse_assignments_json(json_str: &str) -> Result<Vec<TrackAssignment>, String> {
     let trimmed = json_str.trim();
     if trimmed.is_empty() {
         return Ok(Vec::new());
     }
 
-    let parsed_val: serde_json::Value =
+    let value: Value =
         serde_json::from_str(trimmed).map_err(|e| format!("Invalid assignments JSON: {e}"))?;
 
-    // Format 1: Direct JSON array of TrackAssignment
-    if parsed_val.is_array() {
-        if let Ok(vec) = serde_json::from_value::<Vec<TrackAssignment>>(parsed_val) {
-            return Ok(vec);
-        }
-        return Err("Unrecognized assignments JSON schema".into());
-    }
-
-    // Format 2: Object with "assignments" key
-    if let Some(obj_val) = parsed_val.get("assignments") {
-        if obj_val.is_array() {
-            if let Ok(vec) = serde_json::from_value::<Vec<TrackAssignment>>(obj_val.clone()) {
-                return Ok(vec);
+    match value {
+        Value::Array(_) => serde_json::from_value(value)
+            .map_err(|_| "Unrecognized assignments JSON schema".to_string()),
+        Value::Object(obj) => match obj.get("assignments") {
+            Some(Value::Object(inner)) => legacy_assignment_map(inner),
+            Some(inner @ Value::Array(_)) => {
+                serde_json::from_value(inner.clone()).or_else(|_| legacy_assignment_map(&obj))
             }
-        }
-        if let Some(map) = obj_val.as_object() {
-            let mut list = Vec::new();
-            for (k, v) in map {
-                let p = v
-                    .as_str()
-                    .ok_or_else(|| format!("Expected string asset path for '{k}', got {v}"))?;
-                list.push(TrackAssignment {
-                    target_video: k.clone(),
-                    asset_path: PathBuf::from(p),
-                    track_type: Some("subtitle".into()),
-                    language: None,
-                    title: None,
-                    offset_ms: None,
-                });
-            }
-            return Ok(list);
-        }
+            _ => legacy_assignment_map(&obj),
+        },
+        _ => Err("Unrecognized assignments JSON schema".into()),
     }
+}
 
-    // Format 3: Flat legacy map: { "video.mkv": "sub.ass" }
-    if let Some(map) = parsed_val.as_object() {
-        let mut list = Vec::new();
-        for (k, v) in map {
-            let p = v
-                .as_str()
-                .ok_or_else(|| format!("Expected string asset path for '{k}', got {v}"))?;
-            list.push(TrackAssignment {
-                target_video: k.clone(),
-                asset_path: PathBuf::from(p),
+/// Parses a flat legacy map (`{ "video.mkv": "sub.ass" }`) into subtitle assignments.
+fn legacy_assignment_map(
+    map: &serde_json::Map<String, Value>,
+) -> Result<Vec<TrackAssignment>, String> {
+    map.iter()
+        .map(|(target_video, asset)| match asset {
+            Value::String(asset_path) => Ok(TrackAssignment {
+                target_video: target_video.clone(),
+                asset_path: PathBuf::from(asset_path),
                 track_type: Some("subtitle".into()),
                 language: None,
                 title: None,
                 offset_ms: None,
-            });
-        }
-        return Ok(list);
-    }
-
-    Err("Unrecognized assignments JSON schema".into())
+            }),
+            other => Err(format!(
+                "Expected string asset path for '{target_video}', got {other}"
+            )),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -570,14 +495,36 @@ mod tests {
         }
     }
 
+    fn subtitle(target_video: &str, asset_path: impl Into<PathBuf>) -> TrackAssignment {
+        TrackAssignment {
+            target_video: target_video.into(),
+            asset_path: asset_path.into(),
+            track_type: Some("subtitle".into()),
+            language: None,
+            title: None,
+            offset_ms: None,
+        }
+    }
+
+    /// Creates an empty file at `rel` under `dir`, including parent directories.
+    fn touch(dir: &Path, rel: &str) -> PathBuf {
+        let path = dir.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"").unwrap();
+        path
+    }
+
+    fn validate_with(dir: &Path, assignments: Vec<TrackAssignment>) -> Result<(), String> {
+        let mut req = minimal_request(dir);
+        req.assignments = Some(assignments);
+        req.validate()
+    }
+
     #[test]
     fn test_batch_request_validation_success() {
         let dir = tempdir().unwrap();
-        let video_path = dir.path().join("ep01.mkv");
-        std::fs::write(&video_path, b"dummy video").unwrap();
-
-        let sub_path = dir.path().join("ep01.ass");
-        std::fs::write(&sub_path, b"dummy subtitle").unwrap();
+        touch(dir.path(), "ep01.mkv");
+        let sub_path = touch(dir.path(), "ep01.ass");
 
         let mut req = minimal_request(dir.path());
         req.preset = Some("balanced".into());
@@ -585,57 +532,42 @@ mod tests {
         req.complexity = Some(8);
         req.workers = Some(4);
         req.io_jobs = Some(2);
-        req.dry_run = Some(false);
-        req.no_cache = Some(false);
         req.assignments = Some(vec![TrackAssignment {
-            target_video: "ep01.mkv".into(),
-            asset_path: sub_path,
-            track_type: Some("subtitle".into()),
             language: Some("ind".into()),
-            title: None,
-            offset_ms: None,
+            ..subtitle("ep01.mkv", sub_path)
         }]);
-
         assert!(req.validate().is_ok());
 
         let config = req.into_pipeline_config().unwrap();
-        assert_eq!(config.bitrate, "256k"); // overridden
-        assert_eq!(config.complexity, 8); // overridden
+        assert_eq!(config.bitrate, "256k");
+        assert_eq!(config.complexity, 8);
         assert_eq!(config.workers, 4);
+        assert_eq!(config.track_assignments.map(|a| a.len()), Some(1));
     }
 
     #[test]
-    fn test_batch_request_validation_workers() {
+    fn test_into_pipeline_config_layers_overrides_over_preset() {
         let dir = tempdir().unwrap();
         let mut req = minimal_request(dir.path());
+        req.preset = Some("hifi".into());
+        let config = req.clone().into_pipeline_config().unwrap();
+        assert!(!config.dry_run);
+        assert_eq!(config.bitrate, "320k");
+        assert_eq!(config.complexity, 10);
 
-        req.workers = Some(0);
-        assert_eq!(
-            req.validate().unwrap_err(),
-            "Worker thread count must be between 1 and 64"
-        );
-
-        req.workers = Some(65);
-        assert_eq!(
-            req.validate().unwrap_err(),
-            "Worker thread count must be between 1 and 64"
-        );
-
-        req.workers = Some(1);
-        assert!(req.validate().is_ok());
-
-        req.workers = Some(64);
-        assert!(req.validate().is_ok());
+        req.bitrate = Some("256k".into());
+        req.dry_run = Some(true);
+        let config = req.into_pipeline_config().unwrap();
+        assert_eq!(config.bitrate, "256k");
+        assert_eq!(config.complexity, 10);
+        assert!(config.dry_run);
     }
 
     #[test]
     fn test_into_pipeline_config_default_workers_hardware_concurrency() {
         let dir = tempdir().unwrap();
-        let req = minimal_request(dir.path());
-        assert!(req.workers.is_none());
-        let config = req.into_pipeline_config().unwrap();
-        // Workers and ffmpeg_threads must be within their valid ranges and
-        // derived from physical core count — verify invariants, not the formula itself.
+        let config = minimal_request(dir.path()).into_pipeline_config().unwrap();
+        // Derived from the host's physical core count, so check the ranges, not the values.
         assert!(
             (1..=16).contains(&config.workers),
             "workers out of range: {}",
@@ -650,17 +582,31 @@ mod tests {
     }
 
     #[test]
+    fn test_batch_request_validation_workers() {
+        let dir = tempdir().unwrap();
+        let mut req = minimal_request(dir.path());
+        for bad in [0, 65] {
+            req.workers = Some(bad);
+            assert_eq!(
+                req.validate().unwrap_err(),
+                "Worker thread count must be between 1 and 64"
+            );
+        }
+        for ok in [1, 64] {
+            req.workers = Some(ok);
+            assert!(req.validate().is_ok());
+        }
+    }
+
+    #[test]
     fn test_batch_request_validation_io_jobs() {
         let dir = tempdir().unwrap();
         let mut req = minimal_request(dir.path());
-
-        // io_jobs == Some(0) succeeds validation (unbounded I/O)
-        req.io_jobs = Some(0);
-        assert!(req.validate().is_ok());
-
-        req.io_jobs = Some(64);
-        assert!(req.validate().is_ok());
-
+        // 0 means unbounded I/O.
+        for ok in [0, 64] {
+            req.io_jobs = Some(ok);
+            assert!(req.validate().is_ok());
+        }
         req.io_jobs = Some(65);
         assert_eq!(
             req.validate().unwrap_err(),
@@ -672,265 +618,327 @@ mod tests {
     fn test_batch_request_validation_ffmpeg_threads() {
         let dir = tempdir().unwrap();
         let mut req = minimal_request(dir.path());
-
-        req.ffmpeg_threads = Some(0);
-        assert_eq!(
-            req.validate().unwrap_err(),
-            "FFmpeg thread count must be between 1 and 32"
-        );
-
-        req.ffmpeg_threads = Some(33);
-        assert_eq!(
-            req.validate().unwrap_err(),
-            "FFmpeg thread count must be between 1 and 32"
-        );
-
-        req.ffmpeg_threads = Some(1);
-        assert!(req.validate().is_ok());
-
-        req.ffmpeg_threads = Some(32);
-        assert!(req.validate().is_ok());
+        for bad in [0, 33] {
+            req.ffmpeg_threads = Some(bad);
+            assert_eq!(
+                req.validate().unwrap_err(),
+                "FFmpeg thread count must be between 1 and 32"
+            );
+        }
+        for ok in [1, 32] {
+            req.ffmpeg_threads = Some(ok);
+            assert!(req.validate().is_ok());
+        }
     }
 
     #[test]
     fn test_batch_request_validation_complexity() {
         let dir = tempdir().unwrap();
         let mut req = minimal_request(dir.path());
+        for ok in [0, 10] {
+            req.complexity = Some(ok);
+            assert!(req.validate().is_ok());
+        }
+        req.complexity = Some(11);
+        assert_eq!(
+            req.validate().unwrap_err(),
+            "Encoder complexity must be between 0 and 10, got 11"
+        );
+    }
 
-        // complexity = 0 is the newly-allowed lower boundary (was previously rejected)
-        req.complexity = Some(0);
-        assert!(req.validate().is_ok());
+    #[test]
+    fn test_batch_request_validation_bitrate() {
+        let dir = tempdir().unwrap();
+        let mut req = minimal_request(dir.path());
+        for ok in ["192k", " 320K ", "1M", "96000"] {
+            req.bitrate = Some(ok.into());
+            assert!(req.validate().is_ok(), "bitrate {ok:?} should be valid");
+        }
+        for bad in ["", "k", "0k", "12.5k", "-192k", "192kb"] {
+            req.bitrate = Some(bad.into());
+            assert_eq!(
+                req.validate().unwrap_err(),
+                format!("Invalid audio bitrate format: '{bad}'")
+            );
+        }
     }
 
     #[test]
     fn test_batch_request_validation_path_traversal() {
         let dir = tempdir().unwrap();
-        let video_path = dir.path().join("ep01.mkv");
-        std::fs::write(&video_path, b"dummy video").unwrap();
+        touch(dir.path(), "ep01.mkv");
+        let sub_path = touch(dir.path(), "ep01.ass");
 
-        let sub_path = dir.path().join("ep01.ass");
-        std::fs::write(&sub_path, b"dummy sub").unwrap();
+        let cases = [
+            (
+                subtitle("../outside.mkv", &sub_path),
+                "Invalid relative target video path: '../outside.mkv'",
+            ),
+            (
+                subtitle("/absolute/path.mkv", &sub_path),
+                "Invalid relative target video path: '/absolute/path.mkv'",
+            ),
+            (
+                subtitle(r"..\outside.mkv", &sub_path),
+                r"Invalid relative target video path: '..\outside.mkv'",
+            ),
+            (
+                subtitle("ep01.mkv", "../outside.ass"),
+                "Invalid relative asset path: '../outside.ass'",
+            ),
+            (
+                subtitle("ep01.mkv", r"sub\..\..\outside.ass"),
+                r"Invalid relative asset path: 'sub\..\..\outside.ass'",
+            ),
+            // A root-relative backslash asset must not bypass root containment.
+            (
+                subtitle("ep01.mkv", r"\nonexistent\outside.ass"),
+                r"Invalid relative asset path: '\nonexistent\outside.ass'",
+            ),
+        ];
+        for (assignment, expected) in cases {
+            assert_eq!(
+                validate_with(dir.path(), vec![assignment]).unwrap_err(),
+                expected
+            );
+        }
+    }
 
-        // 1. Target video with parent directory traversal
-        let mut req = minimal_request(dir.path());
-        req.assignments = Some(vec![TrackAssignment {
-            target_video: "../outside.mkv".into(),
-            asset_path: sub_path.clone(),
-            track_type: Some("subtitle".into()),
-            language: None,
-            title: None,
-            offset_ms: None,
-        }]);
-        assert_eq!(
-            req.validate().unwrap_err(),
-            "Invalid relative target video path: '../outside.mkv'"
-        );
+    #[test]
+    fn test_batch_request_validation_root_escape() {
+        let dir = tempdir().unwrap();
+        let sub_path = touch(dir.path(), "ep01.ass");
 
-        // 2. Target video with absolute path
-        let mut req = minimal_request(dir.path());
-        req.assignments = Some(vec![TrackAssignment {
-            target_video: "/absolute/path.mkv".into(),
-            asset_path: sub_path.clone(),
-            track_type: Some("subtitle".into()),
-            language: None,
-            title: None,
-            offset_ms: None,
-        }]);
-        assert_eq!(
-            req.validate().unwrap_err(),
-            "Invalid relative target video path: '/absolute/path.mkv'"
-        );
-
-        // 3. Asset path relative traversal
-        let mut req = minimal_request(dir.path());
-        req.assignments = Some(vec![TrackAssignment {
-            target_video: "ep01.mkv".into(),
-            asset_path: PathBuf::from("../outside.ass"),
-            track_type: Some("subtitle".into()),
-            language: None,
-            title: None,
-            offset_ms: None,
-        }]);
-        assert_eq!(
-            req.validate().unwrap_err(),
-            "Invalid relative asset path: '../outside.ass'"
-        );
-
-        // 4. Backslash parent traversal (cross-platform check)
-        let mut req = minimal_request(dir.path());
-        req.assignments = Some(vec![TrackAssignment {
-            target_video: r"..\outside.mkv".into(),
-            asset_path: sub_path.clone(),
-            track_type: Some("subtitle".into()),
-            language: None,
-            title: None,
-            offset_ms: None,
-        }]);
-        assert_eq!(
-            req.validate().unwrap_err(),
-            r"Invalid relative target video path: '..\outside.mkv'"
-        );
-
-        let mut req = minimal_request(dir.path());
-        req.assignments = Some(vec![TrackAssignment {
-            target_video: "ep01.mkv".into(),
-            asset_path: PathBuf::from(r"sub\..\..\outside.ass"),
-            track_type: Some("subtitle".into()),
-            language: None,
-            title: None,
-            offset_ms: None,
-        }]);
-        assert_eq!(
-            req.validate().unwrap_err(),
-            r"Invalid relative asset path: 'sub\..\..\outside.ass'"
-        );
-
-        // 5. Root-relative backslash asset (must not bypass root containment)
-        let mut req = minimal_request(dir.path());
-        req.assignments = Some(vec![TrackAssignment {
-            target_video: "ep01.mkv".into(),
-            asset_path: PathBuf::from(r"\nonexistent\outside.ass"),
-            track_type: Some("subtitle".into()),
-            language: None,
-            title: None,
-            offset_ms: None,
-        }]);
-        assert_eq!(
-            req.validate().unwrap_err(),
-            r"Invalid relative asset path: '\nonexistent\outside.ass'"
-        );
+        for bad_target in ["/ep01.mkv", r"\ep01.mkv", "", "./", r".\", "././"] {
+            let err = validate_with(dir.path(), vec![subtitle(bad_target, &sub_path)]).unwrap_err();
+            assert!(
+                err.contains("Invalid relative target video path"),
+                "expected error for '{bad_target}', got '{err}'"
+            );
+        }
     }
 
     #[test]
     fn test_batch_request_validation_track_type() {
         let dir = tempdir().unwrap();
-        let video_path = dir.path().join("ep01.mkv");
-        std::fs::write(&video_path, b"dummy video").unwrap();
+        touch(dir.path(), "ep01.mkv");
+        let sub_path = touch(dir.path(), "ep01.ass");
+        let with_type = |track_type: Option<&str>| TrackAssignment {
+            track_type: track_type.map(Into::into),
+            ..subtitle("ep01.mkv", &sub_path)
+        };
 
-        let sub_path = dir.path().join("ep01.ass");
-        std::fs::write(&sub_path, b"dummy sub").unwrap();
-
-        // Unsupported track type "audio"
-        let mut req = minimal_request(dir.path());
-        req.assignments = Some(vec![TrackAssignment {
-            target_video: "ep01.mkv".into(),
-            asset_path: sub_path.clone(),
-            track_type: Some("audio".into()),
-            language: None,
-            title: None,
-            offset_ms: None,
-        }]);
         assert_eq!(
-            req.validate().unwrap_err(),
+            validate_with(dir.path(), vec![with_type(Some("audio"))]).unwrap_err(),
             "Only 'subtitle' track assignments are currently supported"
         );
+        // Case-insensitive; an absent type means subtitle.
+        for ok in [Some("subtitle"), Some("SUBTITLE"), None] {
+            assert!(validate_with(dir.path(), vec![with_type(ok)]).is_ok());
+        }
+    }
 
-        // Valid "subtitle"
-        let mut req = minimal_request(dir.path());
-        req.assignments = Some(vec![TrackAssignment {
-            target_video: "ep01.mkv".into(),
-            asset_path: sub_path.clone(),
-            track_type: Some("subtitle".into()),
-            language: None,
-            title: None,
-            offset_ms: None,
-        }]);
-        assert!(req.validate().is_ok());
+    #[test]
+    fn test_validate_assignment_rejects_existing_non_mkv_target() {
+        let dir = tempdir().unwrap();
+        touch(dir.path(), "notes.txt");
+        touch(dir.path(), "ep1.ass");
 
-        // Valid "SUBTITLE" (case-insensitive)
-        let mut req = minimal_request(dir.path());
-        req.assignments = Some(vec![TrackAssignment {
-            target_video: "ep01.mkv".into(),
-            asset_path: sub_path.clone(),
-            track_type: Some("SUBTITLE".into()),
-            language: None,
-            title: None,
-            offset_ms: None,
-        }]);
-        assert!(req.validate().is_ok());
+        assert_eq!(
+            validate_with(dir.path(), vec![subtitle("notes.txt", "ep1.ass")]).unwrap_err(),
+            "Assigned target video is not an MKV file: 'notes.txt'"
+        );
 
-        // Valid None (defaults to subtitle)
+        touch(dir.path(), "EP2.MKV");
+        assert!(validate_with(dir.path(), vec![subtitle("EP2.MKV", "ep1.ass")]).is_ok());
+    }
+
+    #[test]
+    fn test_batch_request_fail_fast_missing_target_and_asset() {
+        let dir = tempdir().unwrap();
+        let sub_path = touch(dir.path(), "ep01.ass");
+        let err = validate_with(dir.path(), vec![subtitle("ghost.mkv", &sub_path)]).unwrap_err();
+        assert!(
+            err.contains("Assigned target video file does not exist"),
+            "{err}"
+        );
+
+        touch(dir.path(), "ep01.mkv");
+        let missing = dir.path().join("missing_sub.ass");
+        let err = validate_with(dir.path(), vec![subtitle("ep01.mkv", missing)]).unwrap_err();
+        assert!(err.contains("Assigned asset file does not exist"), "{err}");
+    }
+
+    #[test]
+    fn test_batch_request_asset_in_assets_dir() {
+        let dir = tempdir().unwrap();
+        let assets_dir = tempdir().unwrap();
+        touch(dir.path(), "ep01.mkv");
+        touch(assets_dir.path(), "ep01.ass");
+
         let mut req = minimal_request(dir.path());
-        req.assignments = Some(vec![TrackAssignment {
-            target_video: "ep01.mkv".into(),
-            asset_path: sub_path,
-            track_type: None,
-            language: None,
-            title: None,
-            offset_ms: None,
-        }]);
+        req.assets_dir = Some(assets_dir.path().to_path_buf());
+        req.assignments = Some(vec![subtitle("ep01.mkv", "ep01.ass")]);
         assert!(req.validate().is_ok());
     }
 
     #[test]
-    fn test_batch_request_fail_fast_missing_asset() {
+    fn test_batch_request_duplicate_assignment_after_normalization() {
         let dir = tempdir().unwrap();
-        let video_path = dir.path().join("ep01.mkv");
-        std::fs::write(&video_path, b"dummy video").unwrap();
+        touch(dir.path(), "ep01.mkv");
+        touch(dir.path(), "ep02.mkv");
+        touch(dir.path(), "Season 1/ep01.mkv");
+        let sub_path = touch(dir.path(), "ep01.ass");
 
-        let mut req = minimal_request(dir.path());
-        req.assignments = Some(vec![TrackAssignment {
-            target_video: "ep01.mkv".into(),
-            asset_path: dir.path().join("missing_sub.ass"),
-            track_type: Some("subtitle".into()),
-            language: None,
-            title: None,
-            offset_ms: None,
-        }]);
+        // Leading `./` and `.\` are accepted.
+        assert!(validate_with(
+            dir.path(),
+            vec![
+                subtitle("./ep01.mkv", &sub_path),
+                subtitle(r".\ep02.mkv", &sub_path),
+            ],
+        )
+        .is_ok());
 
-        let err = req.validate().unwrap_err();
-        assert!(err.contains("Assigned asset file does not exist"));
+        for (first, second) in [
+            ("ep01.mkv", "ep01.mkv"),
+            ("./ep01.mkv", "ep01.mkv"),
+            ("./ep01.mkv", r".\ep01.mkv"),
+            ("Season 1/ep01.mkv", "Season 1/./ep01.mkv"),
+        ] {
+            let err = validate_with(
+                dir.path(),
+                vec![subtitle(first, &sub_path), subtitle(second, &sub_path)],
+            )
+            .unwrap_err();
+            assert_eq!(
+                err,
+                format!(
+                    "Multiple track assignments for target video '{second}' are not supported; multi-track muxing is deferred"
+                )
+            );
+        }
     }
 
     #[test]
-    fn test_batch_request_duplicate_assignment_error() {
+    fn test_track_assignment_asset_path_resolution() {
         let dir = tempdir().unwrap();
-        let video_path = dir.path().join("ep01.mkv");
-        std::fs::write(&video_path, b"dummy video").unwrap();
+        let assets_dir = tempdir().unwrap();
+        touch(dir.path(), "ep01.ass");
+        touch(assets_dir.path(), "subs/ep08.ass");
 
-        let sub_path = dir.path().join("ep01.ass");
-        std::fs::write(&sub_path, b"dummy sub").unwrap();
+        for relative in ["ep01.ass", r"subs\ep08.ass", "missing.ass"] {
+            assert!(
+                subtitle("v.mkv", relative).is_relative_asset(),
+                "{relative}"
+            );
+        }
+        for absolute in [
+            "/abs/ep03.ass",
+            "C:/ep04.ass",
+            r"D:\subs\ep05.ass",
+            r"\abs\ep06.ass",
+            r"\\server\share\ep07.ass",
+        ] {
+            let assignment = subtitle("v.mkv", absolute);
+            assert!(!assignment.is_relative_asset(), "{absolute}");
+            assert_eq!(
+                assignment.resolve_asset_path(dir.path(), Some(assets_dir.path())),
+                PathBuf::from(absolute)
+            );
+        }
 
-        let mut req = minimal_request(dir.path());
-        req.assignments = Some(vec![
-            TrackAssignment {
-                target_video: "ep01.mkv".into(),
-                asset_path: sub_path.clone(),
-                track_type: Some("subtitle".into()),
-                language: None,
-                title: None,
-                offset_ms: None,
-            },
-            TrackAssignment {
-                target_video: "ep01.mkv".into(),
-                asset_path: sub_path,
-                track_type: Some("subtitle".into()),
-                language: None,
-                title: None,
-                offset_ms: None,
-            },
-        ]);
-
-        let err = req.validate().unwrap_err();
-        assert!(err.contains(
-            "Multiple track assignments for target video 'ep01.mkv' are not supported; multi-track muxing is deferred"
-        ));
+        let resolve = |asset: &str| {
+            subtitle("v.mkv", asset).resolve_asset_path(dir.path(), Some(assets_dir.path()))
+        };
+        assert_eq!(resolve("ep01.ass"), dir.path().join("ep01.ass"));
+        assert_eq!(
+            resolve(r"subs\ep08.ass"),
+            assets_dir.path().join("subs/ep08.ass")
+        );
+        // Neither location has it: report the input_dir candidate.
+        assert_eq!(resolve("missing.ass"), dir.path().join("missing.ass"));
     }
 
     #[test]
     fn test_parse_assignments_json_formats() {
-        // Format 1: Vec<TrackAssignment>
-        let json1 = r#"[{"target_video": "ep01.mkv", "asset_path": "/tmp/ep01.ass", "track_type": "subtitle"}]"#;
-        let res1 = parse_assignments_json(json1).unwrap();
-        assert_eq!(res1.len(), 1);
-        assert_eq!(res1[0].target_video, "ep01.mkv");
+        assert!(parse_assignments_json("  ").unwrap().is_empty());
 
-        // Format 2: Flat map
-        let json2 = r#"{"ep02.mkv": "/tmp/ep02.ass"}"#;
-        let res2 = parse_assignments_json(json2).unwrap();
-        assert_eq!(res2.len(), 1);
-        assert_eq!(res2[0].target_video, "ep02.mkv");
-        assert_eq!(res2[0].asset_path, PathBuf::from("/tmp/ep02.ass"));
+        let array =
+            r#"[{"target_video": "ep01.mkv", "asset_path": "/tmp/ep01.ass", "offset_ms": 250}]"#;
+        let parsed = parse_assignments_json(array).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].target_video, "ep01.mkv");
+        assert_eq!(parsed[0].offset_ms, Some(250));
+        assert_eq!(parsed[0].track_type, None);
+
+        let wrapped_array = format!(r#"{{"assignments": {array}}}"#);
+        assert_eq!(parse_assignments_json(&wrapped_array).unwrap(), parsed);
+
+        let legacy = vec![subtitle("ep02.mkv", "/tmp/ep02.ass")];
+        assert_eq!(
+            parse_assignments_json(r#"{"ep02.mkv": "/tmp/ep02.ass"}"#).unwrap(),
+            legacy
+        );
+        assert_eq!(
+            parse_assignments_json(r#"{"assignments": {"ep02.mkv": "/tmp/ep02.ass"}}"#).unwrap(),
+            legacy
+        );
+        assert_eq!(
+            parse_assignments_json(r#"{"assignments": "x.ass"}"#).unwrap(),
+            vec![subtitle("assignments", "x.ass")]
+        );
+
+        for unrecognized in [r#"[{"asset_path": "x.ass"}]"#, "42"] {
+            assert_eq!(
+                parse_assignments_json(unrecognized).unwrap_err(),
+                "Unrecognized assignments JSON schema",
+                "{unrecognized}"
+            );
+        }
+        for (json, expected) in [
+            (
+                r#"{"assignments": 1}"#,
+                "Expected string asset path for 'assignments', got 1",
+            ),
+            (
+                r#"{"assignments": [{"asset_path": "x.ass"}]}"#,
+                r#"Expected string asset path for 'assignments', got [{"asset_path":"x.ass"}]"#,
+            ),
+        ] {
+            assert_eq!(
+                parse_assignments_json(json).unwrap_err(),
+                expected,
+                "{json}"
+            );
+        }
+        assert!(parse_assignments_json("{")
+            .unwrap_err()
+            .starts_with("Invalid assignments JSON:"));
+    }
+
+    #[test]
+    fn test_parse_assignments_json_reject_non_string() {
+        for (json, expected) in [
+            (
+                r#"{"assignments": {"ep01.mkv": 123}}"#,
+                "Expected string asset path for 'ep01.mkv', got 123",
+            ),
+            (
+                r#"{"assignments": {"ep02.mkv": false}}"#,
+                "Expected string asset path for 'ep02.mkv', got false",
+            ),
+            (
+                r#"{"ep01.mkv": 456}"#,
+                "Expected string asset path for 'ep01.mkv', got 456",
+            ),
+            (
+                r#"{"ep01.mkv": {"sub": "ep01.ass"}}"#,
+                r#"Expected string asset path for 'ep01.mkv', got {"sub":"ep01.ass"}"#,
+            ),
+        ] {
+            assert_eq!(parse_assignments_json(json).unwrap_err(), expected);
+        }
     }
 
     #[test]
@@ -941,321 +949,16 @@ mod tests {
         assert!(req.validate().is_ok());
 
         req.preset = Some("non_existent_preset".into());
-        let err = req.validate().unwrap_err();
-        assert!(err.contains("Unknown preset profile: 'non_existent_preset'"));
-    }
-
-    #[test]
-    fn test_batch_request_asset_in_assets_dir() {
-        let dir = tempdir().unwrap();
-        let assets_dir = tempdir().unwrap();
-        let video_path = dir.path().join("ep01.mkv");
-        std::fs::write(&video_path, b"dummy video").unwrap();
-
-        // Subtitle exists in assets_dir instead of input_dir
-        let sub_path = assets_dir.path().join("ep01.ass");
-        std::fs::write(&sub_path, b"dummy sub").unwrap();
-
-        let mut req = minimal_request(dir.path());
-        req.assets_dir = Some(assets_dir.path().to_path_buf());
-        req.assignments = Some(vec![TrackAssignment {
-            target_video: "ep01.mkv".into(),
-            asset_path: PathBuf::from("ep01.ass"),
-            track_type: Some("subtitle".into()),
-            language: None,
-            title: None,
-            offset_ms: None,
-        }]);
-
-        assert!(req.validate().is_ok());
-    }
-
-    #[test]
-    fn test_batch_request_validation_root_escape() {
-        let dir = tempdir().unwrap();
-        let sub_path = dir.path().join("ep01.ass");
-        std::fs::write(&sub_path, b"dummy sub").unwrap();
-
-        for bad_target in ["/ep01.mkv", r"\ep01.mkv", "", "./", r".\", "././"] {
-            let mut req = minimal_request(dir.path());
-            req.assignments = Some(vec![TrackAssignment {
-                target_video: bad_target.into(),
-                asset_path: sub_path.clone(),
-                track_type: Some("subtitle".into()),
-                language: None,
-                title: None,
-                offset_ms: None,
-            }]);
-            let err = req.validate().unwrap_err();
-            assert!(
-                err.contains("Invalid relative target video path"),
-                "expected error for '{bad_target}', got '{err}'"
-            );
-        }
-    }
-
-    #[test]
-    fn test_batch_request_target_video_normalization() {
-        let dir = tempdir().unwrap();
-        let video_path1 = dir.path().join("ep01.mkv");
-        let video_path2 = dir.path().join("ep02.mkv");
-        let sub_path1 = dir.path().join("ep01.ass");
-        let sub_path2 = dir.path().join("ep02.ass");
-        std::fs::write(&video_path1, b"dummy video 1").unwrap();
-        std::fs::write(&video_path2, b"dummy video 2").unwrap();
-        std::fs::write(&sub_path1, b"dummy sub 1").unwrap();
-        std::fs::write(&sub_path2, b"dummy sub 2").unwrap();
-
-        // 1. Validation passes with leading ./ and .\ prefixes
-        let mut req = minimal_request(dir.path());
-        req.assignments = Some(vec![
-            TrackAssignment {
-                target_video: "./ep01.mkv".into(),
-                asset_path: sub_path1.clone(),
-                track_type: Some("subtitle".into()),
-                language: None,
-                title: None,
-                offset_ms: None,
-            },
-            TrackAssignment {
-                target_video: r".\ep02.mkv".into(),
-                asset_path: sub_path2.clone(),
-                track_type: Some("subtitle".into()),
-                language: None,
-                title: None,
-                offset_ms: None,
-            },
-        ]);
-        assert!(req.validate().is_ok());
-
-        // 2. Duplicate detection catches normalized collisions between ./ep01.mkv and ep01.mkv
-        let mut dup_req = minimal_request(dir.path());
-        dup_req.assignments = Some(vec![
-            TrackAssignment {
-                target_video: "./ep01.mkv".into(),
-                asset_path: sub_path1.clone(),
-                track_type: Some("subtitle".into()),
-                language: None,
-                title: None,
-                offset_ms: None,
-            },
-            TrackAssignment {
-                target_video: "ep01.mkv".into(),
-                asset_path: sub_path1.clone(),
-                track_type: Some("subtitle".into()),
-                language: None,
-                title: None,
-                offset_ms: None,
-            },
-        ]);
-        let err = dup_req.validate().unwrap_err();
-        assert!(err
-            .contains("Multiple track assignments for target video 'ep01.mkv' are not supported"));
-
-        // 3. Duplicate detection catches normalized collisions between .\ep01.mkv and ./ep01.mkv
-        let mut dup_req2 = minimal_request(dir.path());
-        dup_req2.assignments = Some(vec![
-            TrackAssignment {
-                target_video: "./ep01.mkv".into(),
-                asset_path: sub_path1.clone(),
-                track_type: Some("subtitle".into()),
-                language: None,
-                title: None,
-                offset_ms: None,
-            },
-            TrackAssignment {
-                target_video: r".\ep01.mkv".into(),
-                asset_path: sub_path1.clone(),
-                track_type: Some("subtitle".into()),
-                language: None,
-                title: None,
-                offset_ms: None,
-            },
-        ]);
-        let err2 = dup_req2.validate().unwrap_err();
-        assert!(err2.contains(
-            r"Multiple track assignments for target video '.\ep01.mkv' are not supported"
-        ));
-        // 4. Duplicate detection catches normalized collisions with internal relative segments
-        std::fs::create_dir_all(dir.path().join("Season 1")).unwrap();
-        std::fs::write(dir.path().join("Season 1/ep01.mkv"), b"dummy s1 video").unwrap();
-        let mut dup_req3 = minimal_request(dir.path());
-        dup_req3.assignments = Some(vec![
-            TrackAssignment {
-                target_video: "Season 1/ep01.mkv".into(),
-                asset_path: sub_path1.clone(),
-                track_type: Some("subtitle".into()),
-                language: None,
-                title: None,
-                offset_ms: None,
-            },
-            TrackAssignment {
-                target_video: "Season 1/./ep01.mkv".into(),
-                asset_path: sub_path1.clone(),
-                track_type: Some("subtitle".into()),
-                language: None,
-                title: None,
-                offset_ms: None,
-            },
-        ]);
-        let err3 = dup_req3.validate().unwrap_err();
-        assert!(err3.contains(
-            r"Multiple track assignments for target video 'Season 1/./ep01.mkv' are not supported"
-        ));
-
-        // 5. assignments_to_sub_map normalizes ./ and .\ and keys strictly by relative path
-        let assignments = vec![
-            TrackAssignment {
-                target_video: "././ep01.mkv".into(),
-                asset_path: PathBuf::from("ep01.ass"),
-                track_type: Some("subtitle".into()),
-                language: None,
-                title: None,
-                offset_ms: None,
-            },
-            TrackAssignment {
-                target_video: r".\Season 1\ep02.mkv".into(),
-                asset_path: PathBuf::from("ep02.ass"),
-                track_type: Some("subtitle".into()),
-                language: None,
-                title: None,
-                offset_ms: None,
-            },
-            TrackAssignment {
-                target_video: "ep03.mkv".into(),
-                asset_path: PathBuf::from("/abs/ep03.ass"),
-                track_type: Some("subtitle".into()),
-                language: None,
-                title: None,
-                offset_ms: None,
-            },
-            TrackAssignment {
-                target_video: "ep04.mkv".into(),
-                asset_path: PathBuf::from("C:/ep04.ass"),
-                track_type: Some("subtitle".into()),
-                language: None,
-                title: None,
-                offset_ms: None,
-            },
-            TrackAssignment {
-                target_video: "ep05.mkv".into(),
-                asset_path: PathBuf::from(r"D:\subs\ep05.ass"),
-                track_type: Some("subtitle".into()),
-                language: None,
-                title: None,
-                offset_ms: None,
-            },
-            TrackAssignment {
-                target_video: "ep06.mkv".into(),
-                asset_path: PathBuf::from(r"\abs\ep06.ass"),
-                track_type: Some("subtitle".into()),
-                language: None,
-                title: None,
-                offset_ms: None,
-            },
-            TrackAssignment {
-                target_video: "ep07.mkv".into(),
-                asset_path: PathBuf::from(r"\\server\share\ep07.ass"),
-                track_type: Some("subtitle".into()),
-                language: None,
-                title: None,
-                offset_ms: None,
-            },
-            TrackAssignment {
-                target_video: "ep08.mkv".into(),
-                asset_path: PathBuf::from(r"subs\ep08.ass"),
-                track_type: Some("subtitle".into()),
-                language: None,
-                title: None,
-                offset_ms: None,
-            },
-        ];
-        assert!(assignments[0].is_relative_asset());
-        assert!(assignments[1].is_relative_asset());
-        assert!(!assignments[2].is_relative_asset());
-        assert!(!assignments[3].is_relative_asset());
-        assert!(!assignments[4].is_relative_asset());
-        assert!(!assignments[5].is_relative_asset());
-        assert!(!assignments[6].is_relative_asset());
-        assert!(assignments[7].is_relative_asset());
-
-        let map = assignments_to_track_map(&assignments, dir.path(), None);
-        assert_eq!(map.get("ep01.mkv"), Some(&dir.path().join("ep01.ass")));
         assert_eq!(
-            map.get("Season 1/ep02.mkv"),
-            Some(&dir.path().join("ep02.ass"))
-        );
-        // Does NOT insert bare filename 'ep02.mkv', preventing cross-directory collisions
-        assert_eq!(map.get("ep02.mkv"), None);
-        assert_eq!(map.get("ep03.mkv"), Some(&PathBuf::from("/abs/ep03.ass")));
-        assert_eq!(map.get("ep04.mkv"), Some(&PathBuf::from("C:/ep04.ass")));
-        assert_eq!(
-            map.get("ep05.mkv"),
-            Some(&PathBuf::from(r"D:\subs\ep05.ass"))
-        );
-        // 6. Multi-season assignments do not collide or overwrite root/peer entries
-        let multi_season = vec![
-            TrackAssignment {
-                target_video: "Season 1/ep01.mkv".into(),
-                asset_path: PathBuf::from("s01e01.ass"),
-                track_type: Some("subtitle".into()),
-                language: None,
-                title: None,
-                offset_ms: None,
-            },
-            TrackAssignment {
-                target_video: "Season 2/ep01.mkv".into(),
-                asset_path: PathBuf::from("s02e01.ass"),
-                track_type: Some("subtitle".into()),
-                language: None,
-                title: None,
-                offset_ms: None,
-            },
-        ];
-        let ms_map = assignments_to_track_map(&multi_season, dir.path(), None);
-        assert_eq!(
-            ms_map.get("Season 1/ep01.mkv"),
-            Some(&dir.path().join("s01e01.ass"))
-        );
-        assert_eq!(
-            ms_map.get("Season 2/ep01.mkv"),
-            Some(&dir.path().join("s02e01.ass"))
-        );
-        assert_eq!(ms_map.get("ep01.mkv"), None);
-    }
-
-    #[test]
-    fn test_parse_assignments_json_reject_non_string() {
-        // Format 2: Object with assignments key
-        let json_fmt2_int = r#"{"assignments": {"ep01.mkv": 123}}"#;
-        let err2 = parse_assignments_json(json_fmt2_int).unwrap_err();
-        assert_eq!(err2, "Expected string asset path for 'ep01.mkv', got 123");
-
-        let json_fmt2_bool = r#"{"assignments": {"ep02.mkv": false}}"#;
-        let err2_bool = parse_assignments_json(json_fmt2_bool).unwrap_err();
-        assert_eq!(
-            err2_bool,
-            "Expected string asset path for 'ep02.mkv', got false"
-        );
-
-        // Format 3: Flat legacy map
-        let json_fmt3_int = r#"{"ep01.mkv": 456}"#;
-        let err3 = parse_assignments_json(json_fmt3_int).unwrap_err();
-        assert_eq!(err3, "Expected string asset path for 'ep01.mkv', got 456");
-
-        let json_fmt3_obj = r#"{"ep01.mkv": {"sub": "ep01.ass"}}"#;
-        let err3_obj = parse_assignments_json(json_fmt3_obj).unwrap_err();
-        assert_eq!(
-            err3_obj,
-            r#"Expected string asset path for 'ep01.mkv', got {"sub":"ep01.ass"}"#
+            req.validate().unwrap_err(),
+            "Unknown preset profile: 'non_existent_preset'"
         );
     }
 
     #[test]
     fn test_batch_request_auxiliary_directory_validation() {
         let dir = tempdir().unwrap();
-        let file_path = dir.path().join("dummy.txt");
-        std::fs::write(&file_path, b"not a dir").unwrap();
+        let file_path = touch(dir.path(), "dummy.txt");
 
         let mut req = minimal_request(dir.path());
         req.fonts_dir = Some(dir.path().join("non_existent_fonts"));
@@ -1274,138 +977,55 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_selected_items_success() {
+    fn test_validate_selected_items() {
         let dir = tempdir().unwrap();
-        let ep1 = dir.path().join("ep1.mkv");
-        let ep2 = dir.path().join("ep2.mkv");
-        std::fs::write(&ep1, b"").unwrap();
-        std::fs::write(&ep2, b"").unwrap();
-
+        for name in ["ep1.mkv", "ep2.mkv", "EP3.MKV", "notes.txt"] {
+            touch(dir.path(), name);
+        }
         let mut req = minimal_request(dir.path());
-        req.selected_items = Some(vec!["ep2.mkv".into(), "ep1.mkv".into()]);
+
+        req.selected_items = Some(vec!["ep2.mkv".into(), "ep1.mkv".into(), "EP3.MKV".into()]);
         assert!(req.validate().is_ok());
-    }
 
-    #[test]
-    fn test_validate_selected_items_rejects_existing_non_mkv() {
-        let dir = tempdir().unwrap();
-        std::fs::write(dir.path().join("ep1.mkv"), b"").unwrap();
-        std::fs::write(dir.path().join("notes.txt"), b"").unwrap();
-
-        let mut req = minimal_request(dir.path());
-        req.selected_items = Some(vec!["ep1.mkv".into(), "notes.txt".into()]);
-        assert!(req.validate().unwrap_err().contains("notes.txt"));
-
-        std::fs::write(dir.path().join("EP2.MKV"), b"").unwrap();
-        req.selected_items = Some(vec!["EP2.MKV".into()]);
-        assert!(req.validate().is_ok());
-    }
-
-    #[test]
-    fn test_validate_selected_items_empty_fails() {
-        let dir = tempdir().unwrap();
-        let mut req = minimal_request(dir.path());
-        req.selected_items = Some(vec![]);
-        let err = req.validate().unwrap_err();
-        assert_eq!(err, "selected_items cannot be empty when specified");
-    }
-
-    #[test]
-    fn test_validate_selected_items_duplicate_fails() {
-        let dir = tempdir().unwrap();
-        let ep1 = dir.path().join("ep1.mkv");
-        std::fs::write(&ep1, b"").unwrap();
-
-        let mut req = minimal_request(dir.path());
-        req.selected_items = Some(vec!["ep1.mkv".into(), "ep1.mkv".into()]);
-        let err = req.validate().unwrap_err();
-        assert!(err.contains("Duplicate entry in selected_items: 'ep1.mkv'"));
-    }
-
-    #[test]
-    fn test_validate_selected_items_traversal_fails() {
-        let dir = tempdir().unwrap();
-        let mut req = minimal_request(dir.path());
-        req.selected_items = Some(vec!["../secret.mkv".into()]);
-        let err = req.validate().unwrap_err();
-        assert!(err.contains("Invalid relative path in selected_items: '../secret.mkv'"));
-    }
-
-    #[test]
-    fn test_validate_selected_items_nonexistent_fails() {
-        let dir = tempdir().unwrap();
-        let mut req = minimal_request(dir.path());
-        req.selected_items = Some(vec!["ghost.mkv".into()]);
-        let err = req.validate().unwrap_err();
-        assert!(err.contains("Selected item does not exist:"));
+        let cases: [(&[&str], &str); 5] = [
+            (&[], "selected_items cannot be empty when specified"),
+            (
+                &["ep1.mkv", "./ep1.mkv"],
+                "Duplicate entry in selected_items: 'ep1.mkv'",
+            ),
+            (
+                &["../secret.mkv"],
+                "Invalid relative path in selected_items: '../secret.mkv'",
+            ),
+            (
+                &["ep1.mkv", "notes.txt"],
+                "Selected item is not an MKV file: 'notes.txt'",
+            ),
+            (&["ghost.mkv"], "Selected item does not exist:"),
+        ];
+        for (items, expected) in cases {
+            req.selected_items = Some(items.iter().map(|s| s.to_string()).collect());
+            let err = req.validate().unwrap_err();
+            assert!(err.starts_with(expected), "{items:?}: {err}");
+        }
     }
 
     #[test]
     fn test_validate_assignment_not_in_selected_items_fails() {
         let dir = tempdir().unwrap();
-        let ep1 = dir.path().join("ep1.mkv");
-        let ep2 = dir.path().join("ep2.mkv");
-        let sub1 = dir.path().join("ep1.ass");
-        let sub2 = dir.path().join("ep2.ass");
-        std::fs::write(&ep1, b"").unwrap();
-        std::fs::write(&ep2, b"").unwrap();
-        std::fs::write(&sub1, b"").unwrap();
-        std::fs::write(&sub2, b"").unwrap();
+        for name in ["ep1.mkv", "ep2.mkv", "ep1.ass", "ep2.ass"] {
+            touch(dir.path(), name);
+        }
 
         let mut req = minimal_request(dir.path());
         req.selected_items = Some(vec!["ep1.mkv".into()]);
         req.assignments = Some(vec![
-            TrackAssignment {
-                target_video: "ep1.mkv".into(),
-                asset_path: PathBuf::from("ep1.ass"),
-                track_type: Some("subtitle".into()),
-                language: None,
-                title: None,
-                offset_ms: None,
-            },
-            TrackAssignment {
-                target_video: "ep2.mkv".into(),
-                asset_path: PathBuf::from("ep2.ass"),
-                track_type: Some("subtitle".into()),
-                language: None,
-                title: None,
-                offset_ms: None,
-            },
+            subtitle("ep1.mkv", "ep1.ass"),
+            subtitle("ep2.mkv", "ep2.ass"),
         ]);
-        let err = req.validate().unwrap_err();
-        assert!(
-            err.contains("Track assignment targets video 'ep2.mkv' which is not in selected_items")
+        assert_eq!(
+            req.validate().unwrap_err(),
+            "Track assignment targets video 'ep2.mkv' which is not in selected_items"
         );
-    }
-
-    #[test]
-    fn test_validate_assignment_rejects_existing_non_mkv_target() {
-        let dir = tempdir().unwrap();
-        std::fs::write(dir.path().join("ep1.mkv"), b"").unwrap();
-        std::fs::write(dir.path().join("notes.txt"), b"").unwrap();
-        std::fs::write(dir.path().join("ep1.ass"), b"").unwrap();
-
-        let mut req = minimal_request(dir.path());
-        req.assignments = Some(vec![TrackAssignment {
-            target_video: "notes.txt".into(),
-            asset_path: PathBuf::from("ep1.ass"),
-            track_type: Some("subtitle".into()),
-            language: None,
-            title: None,
-            offset_ms: None,
-        }]);
-        let err = req.validate().unwrap_err();
-        assert_eq!(err, "Assigned target video is not an MKV file: 'notes.txt'");
-
-        std::fs::write(dir.path().join("EP2.MKV"), b"").unwrap();
-        req.assignments = Some(vec![TrackAssignment {
-            target_video: "EP2.MKV".into(),
-            asset_path: PathBuf::from("ep1.ass"),
-            track_type: Some("subtitle".into()),
-            language: None,
-            title: None,
-            offset_ms: None,
-        }]);
-        assert!(req.validate().is_ok());
     }
 }

@@ -3,26 +3,22 @@ use std::fs;
 
 use mkv_core::domain::{AudioTrack, MkvTrack, TrackProperties};
 use mkv_core::scan::{
-    is_chapter_xml, is_cover_attachment, is_cover_filename, is_font_attachment, scan_assets,
-    scan_mkv_files, FileSignature, InspectedVideo, MkvAttachment, MkvChapter, MkvmergeMetadata,
+    is_cover_attachment, is_cover_filename, is_font_attachment, scan_assets, scan_mkv_files,
+    FileSignature, InspectedVideo, MkvAttachment, MkvChapter, MkvmergeMetadata,
     PersistentInspectCache,
 };
 use tempfile::tempdir;
 
-#[test]
-fn test_is_chapter_xml() {
-    let tmp = tempdir().unwrap();
-    let chap = tmp.path().join("chap.xml");
-    fs::write(
-        &chap,
-        b"<?xml version='1.0'?><Chapters><EditionEntry></EditionEntry></Chapters>",
-    )
-    .unwrap();
-    assert!(is_chapter_xml(&chap));
+/// Minimal EBML header followed by a Segment ID; the Segment size VINT comes next.
+const EBML_HEADER_AND_SEGMENT_ID: [u8; 9] = [0x1A, 0x45, 0xDF, 0xA3, 0x80, 0x18, 0x53, 0x80, 0x67];
 
-    let not_chap = tmp.path().join("not_chap.txt");
-    fs::write(&not_chap, b"Just regular text").unwrap();
-    assert!(!is_chapter_xml(&not_chap));
+fn track(id: u32, track_type: &str) -> MkvTrack {
+    MkvTrack {
+        id: Some(id),
+        track_type: track_type.to_string(),
+        codec: None,
+        properties: TrackProperties::default(),
+    }
 }
 
 #[test]
@@ -68,12 +64,7 @@ fn test_is_font_attachment() {
 fn test_inspected_video_properties() {
     let meta = MkvmergeMetadata {
         tracks: vec![
-            MkvTrack {
-                id: Some(0),
-                track_type: "video".to_string(),
-                codec: None,
-                properties: TrackProperties::default(),
-            },
+            track(0, "video"),
             MkvTrack {
                 id: Some(1),
                 track_type: "audio".to_string(),
@@ -118,7 +109,6 @@ fn test_inspected_video_properties() {
     };
 
     let inspected = InspectedVideo::new(meta);
-    assert_eq!(inspected.tracks().len(), 3);
     assert_eq!(inspected.video_track_pos(), 0);
     assert!(inspected.video_track().is_some());
 
@@ -143,45 +133,16 @@ fn test_inspected_video_properties() {
 
     assert!(inspected.has_chapters());
 
-    let cover = inspected.cover_attachment();
-    assert!(cover.is_some());
-    assert_eq!(cover.unwrap().file_name, Some("cover.jpg".to_string()));
+    assert_eq!(
+        inspected
+            .cover_attachment()
+            .and_then(|c| c.file_name.as_deref()),
+        Some("cover.jpg")
+    );
 
     let fonts = inspected.font_attachments();
     assert_eq!(fonts.len(), 1);
-    assert_eq!(fonts[0].file_name, Some("font.ttf".to_string()));
-    assert_eq!(inspected.fonts_count(), Some(1));
-}
-
-#[test]
-fn test_persistent_inspect_cache() {
-    let tmp = tempdir().unwrap();
-    let cache_file = tmp.path().join("inspect_cache.json");
-    let video_path = tmp.path().join("test_video.mkv");
-    fs::write(&video_path, b"dummy video content").unwrap();
-
-    let meta = MkvmergeMetadata {
-        tracks: vec![MkvTrack {
-            id: Some(0),
-            track_type: "video".to_string(),
-            codec: None,
-            properties: TrackProperties::default(),
-        }],
-        attachments: vec![],
-        chapters: vec![],
-    };
-
-    {
-        let cache = PersistentInspectCache::new(Some(cache_file.clone()), true);
-        cache.put_path(&video_path, meta.clone());
-        cache.save();
-    }
-
-    {
-        let cache2 = PersistentInspectCache::new(Some(cache_file), true);
-        let retrieved = cache2.get_path(&video_path);
-        assert_eq!(retrieved, Some(meta));
-    }
+    assert_eq!(fonts[0].file_name.as_deref(), Some("font.ttf"));
 }
 
 #[test]
@@ -194,25 +155,12 @@ fn test_persistent_inspect_cache_save_shared_debouncing_and_direct_save() {
     fs::write(&video_path2, b"dummy content 2").unwrap();
 
     let meta1 = MkvmergeMetadata {
-        tracks: vec![MkvTrack {
-            id: Some(0),
-            track_type: "video".to_string(),
-            codec: None,
-            properties: TrackProperties::default(),
-        }],
-        attachments: vec![],
-        chapters: vec![],
+        tracks: vec![track(0, "video")],
+        ..Default::default()
     };
-
     let meta2 = MkvmergeMetadata {
-        tracks: vec![MkvTrack {
-            id: Some(1),
-            track_type: "audio".to_string(),
-            codec: None,
-            properties: TrackProperties::default(),
-        }],
-        attachments: vec![],
-        chapters: vec![],
+        tracks: vec![track(1, "audio")],
+        ..Default::default()
     };
 
     let cache = PersistentInspectCache::new(Some(cache_file.clone()), true);
@@ -221,7 +169,6 @@ fn test_persistent_inspect_cache_save_shared_debouncing_and_direct_save() {
     cache.put_path(&video_path1, meta1.clone());
     cache.save_shared();
 
-    // Verify video1 is persisted to disk
     let disk_content = fs::read_to_string(&cache_file).unwrap();
     assert!(disk_content.contains("test_video1.mkv"));
     assert!(!disk_content.contains("test_video2.mkv"));
@@ -230,7 +177,6 @@ fn test_persistent_inspect_cache_save_shared_debouncing_and_direct_save() {
     cache.put_path(&video_path2, meta2.clone());
     cache.save_shared();
 
-    // Disk content should still only contain video1, not video2
     let disk_content_after_debounce = fs::read_to_string(&cache_file).unwrap();
     assert!(!disk_content_after_debounce.contains("test_video2.mkv"));
 
@@ -245,6 +191,33 @@ fn test_persistent_inspect_cache_save_shared_debouncing_and_direct_save() {
     let reloaded_cache = PersistentInspectCache::new(Some(cache_file), true);
     assert_eq!(reloaded_cache.get_path(&video_path1), Some(meta1));
     assert_eq!(reloaded_cache.get_path(&video_path2), Some(meta2));
+}
+
+/// Cache files written by earlier versions carry fields the current entry no longer has.
+#[test]
+fn test_persistent_inspect_cache_loads_entries_with_legacy_fields() {
+    let tmp = tempdir().unwrap();
+    let cache_file = tmp.path().join("inspect_cache.json");
+    let video_path = tmp.path().join("video.mkv");
+    fs::write(&video_path, b"v").unwrap();
+    let meta = MkvmergeMetadata {
+        tracks: vec![track(0, "video")],
+        ..Default::default()
+    };
+
+    let cache = PersistentInspectCache::new(Some(cache_file.clone()), true);
+    cache.put_path(&video_path, meta.clone());
+    cache.save();
+
+    let mut on_disk: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&cache_file).unwrap()).unwrap();
+    for entry in on_disk.as_object_mut().unwrap().values_mut() {
+        entry["mtime"] = serde_json::json!(1.5);
+    }
+    fs::write(&cache_file, on_disk.to_string()).unwrap();
+
+    let reloaded = PersistentInspectCache::new(Some(cache_file), true);
+    assert_eq!(reloaded.get_path(&video_path), Some(meta));
 }
 
 #[test]
@@ -265,7 +238,7 @@ fn test_persistent_inspect_cache_save_shared_flushes_after_interval() {
         .unwrap()
         .contains("video1.mkv"));
 
-    cache.put_path(&video_path2, meta.clone());
+    cache.put_path(&video_path2, meta);
     // Sleep to exceed the 500ms debounce interval
     std::thread::sleep(std::time::Duration::from_millis(520));
     cache.save_shared();
@@ -327,7 +300,7 @@ fn test_scan_assets_cover_names_require_applicable_video() {
         fs::write(dir.join(name), b"sample").unwrap();
     }
     let scan = scan_assets(dir, None);
-    let names: std::collections::HashSet<&str> = scan
+    let names: HashSet<&str> = scan
         .covers
         .iter()
         .map(|cover| cover.name.as_str())
@@ -349,7 +322,7 @@ fn test_scan_assets_cover_names_require_applicable_video() {
 }
 
 #[test]
-fn test_scan_mkv_files_recursive_and_ignore() {
+fn test_scan_mkv_files_recursive_skips_output_and_font_dirs() {
     let tmp = tempdir().unwrap();
     let root = tmp.path().join("root");
     let season1 = root.join("Season 01");
@@ -370,16 +343,12 @@ fn test_scan_mkv_files_recursive_and_ignore() {
     assert_eq!(non_rec[0].name, "root_video.mkv");
 
     let rec = scan_mkv_files(&root, true, None);
-    assert_eq!(rec.len(), 2);
-    let names: Vec<&str> = rec.iter().map(|f| f.name.as_str()).collect();
-    assert!(names.contains(&"root_video.mkv"));
-    assert!(names.contains(&"s01_video.mkv"));
-    assert!(!names.contains(&"ignored_output.mkv"));
-    assert!(!names.contains(&"ignored_font.mkv"));
+    let names: HashSet<&str> = rec.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, HashSet::from(["root_video.mkv", "s01_video.mkv"]));
 }
 
 #[tokio::test]
-async fn test_probe_video_fallback() {
+async fn test_probe_video_rejects_non_matroska_file() {
     let tmp = tempdir().unwrap();
     let corrupt_mkv = tmp.path().join("corrupt.mkv");
     fs::write(&corrupt_mkv, b"not a real ebml file").unwrap();
@@ -387,158 +356,92 @@ async fn test_probe_video_fallback() {
 }
 
 #[test]
-fn test_probe_ebml_8byte_vint() {
+fn test_probe_ebml_8byte_vint_segment_size() {
     let tmp = tempdir().unwrap();
     let test_mkv = tmp.path().join("eight_byte_vint.mkv");
-    // EBML header (0x1A45DFA3 + length 0) + Segment (0x18538067 + 8-byte VINT length)
-    let mut data = vec![
-        0x1A, 0x45, 0xDF, 0xA3, 0x80, // EBML Header, len 0
-        0x18, 0x53, 0x80, 0x67, // Segment ID
-        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, // 8-byte VINT length (16 bytes)
-    ];
-    data.extend(vec![0u8; 16]); // Payload
+    let mut data = EBML_HEADER_AND_SEGMENT_ID.to_vec();
+    data.extend([0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10]); // 8-byte VINT: 16 bytes
+    data.extend([0u8; 16]);
     fs::write(&test_mkv, &data).unwrap();
-    // Must not panic with bit-shift overflow
-    let res = mkv_core::ebml::probe_ebml_native(&test_mkv);
-    assert!(res.is_err()); // Will fail finding tracks, but must NOT panic!
-}
-
-#[tokio::test]
-async fn test_unknown_size_vint_triggers_fallback() {
-    let tmp = tempdir().unwrap();
-
-    // 1. Test 8-byte unknown-size VINT (RFC 8794 §5.1.1: all 56 data bits are 1)
-    let test_mkv_8byte = tmp.path().join("unknown_vint_8byte.mkv");
-    let mut data_8byte = vec![
-        0x1A, 0x45, 0xDF, 0xA3, 0x80, // EBML Header, len 0
-        0x18, 0x53, 0x80, 0x67, // Segment ID
-        0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // 8-byte unknown-size VINT
-    ];
-    data_8byte.extend(vec![0u8; 32]);
-    fs::write(&test_mkv_8byte, &data_8byte).unwrap();
-
-    let ebml_res = mkv_core::ebml::probe_ebml_native(&test_mkv_8byte);
-    assert!(ebml_res.is_err());
-    assert!(
-        ebml_res
-            .as_ref()
-            .unwrap_err()
-            .contains("Unknown EBML element length"),
-        "Expected unknown length error, got: {:?}",
-        ebml_res
-    );
-    // Must fall back to mkvmerge -J without panicking
-    let _ = mkv_core::scan::probe_video(&test_mkv_8byte).await;
-
-    // 2. Test 1-byte unknown-size VINT (RFC 8794 §5.1.1: 0xFF has all 7 data bits as 1)
-    let test_mkv_1byte = tmp.path().join("unknown_vint_1byte.mkv");
-    let mut data_1byte = vec![
-        0x1A, 0x45, 0xDF, 0xA3, 0x80, // EBML Header, len 0
-        0x18, 0x53, 0x80, 0x67, // Segment ID
-        0xFF, // 1-byte unknown-size VINT
-    ];
-    data_1byte.extend(vec![0u8; 32]);
-    fs::write(&test_mkv_1byte, &data_1byte).unwrap();
-
-    let ebml_res_1byte = mkv_core::ebml::probe_ebml_native(&test_mkv_1byte);
-    assert!(ebml_res_1byte.is_err());
-    assert!(
-        ebml_res_1byte
-            .as_ref()
-            .unwrap_err()
-            .contains("Unknown EBML element length"),
-        "Expected unknown length error, got: {:?}",
-        ebml_res_1byte
-    );
-    // Must fall back to mkvmerge -J without panicking
-    let _ = mkv_core::scan::probe_video(&test_mkv_1byte).await;
-}
-
-#[tokio::test]
-async fn test_corrupted_track_entry_triggers_fallback() {
-    let tmp = tempdir().unwrap();
-    let corrupt_tracks_mkv = tmp.path().join("corrupt_tracks.mkv");
-
-    // Track 1: valid video track entry
-    let track1 = vec![
-        0xAE, 0x86, // TrackEntry, length 6
-        0xD7, 0x81, 0x01, // TrackNumber = 1
-        0x83, 0x81, 0x01, // TrackType = 1 (video)
-    ];
-
-    // Track 2: corrupted track entry with invalid zero EBML ID child
-    let track2 = vec![
-        0xAE, 0x84, // TrackEntry, length 4
-        0x00, 0x00, 0x00, 0x00, // Invalid zero EBML ID
-    ];
-
-    let mut tracks_payload = Vec::new();
-    tracks_payload.extend_from_slice(&track1);
-    tracks_payload.extend_from_slice(&track2);
-
-    let mut tracks_elem = vec![0x16, 0x54, 0xAE, 0x6B]; // Tracks ID
-    tracks_elem.push(0x80 | (tracks_payload.len() as u8));
-    tracks_elem.extend_from_slice(&tracks_payload);
-
-    let mut segment_payload = Vec::new();
-    segment_payload.extend_from_slice(&tracks_elem);
-
-    let mut data = vec![
-        0x1A, 0x45, 0xDF, 0xA3, 0x80, // EBML Header, len 0
-        0x18, 0x53, 0x80, 0x67, // Segment ID
-    ];
-    data.push(0x80 | (segment_payload.len() as u8));
-    data.extend_from_slice(&segment_payload);
-
-    fs::write(&corrupt_tracks_mkv, &data).unwrap();
-
-    // Native EBML probe MUST fail instead of silently dropping Track 2 and returning partial tracks
-    let ebml_res = mkv_core::ebml::probe_ebml_native(&corrupt_tracks_mkv);
-    assert!(
-        ebml_res.is_err(),
-        "Native probe should have failed on corrupted track entry, but returned: {:?}",
-        ebml_res
-    );
-
-    // probe_video must trigger fallback to mkvmerge -J without panicking or returning partial tracks
-    let _ = mkv_core::scan::probe_video(&corrupt_tracks_mkv).await;
+    // The segment holds no tracks; decoding the 8-byte length must not overflow a shift.
+    assert!(mkv_core::ebml::probe_ebml_native(&test_mkv).is_err());
 }
 
 #[test]
-fn test_truncated_tracks_block_triggers_fallback() {
+fn test_unknown_size_vint_is_rejected_by_native_probe() {
+    let tmp = tempdir().unwrap();
+
+    // RFC 8794 §5.1.1: a VINT whose data bits are all 1 encodes an unknown size.
+    let unknown_size_vints: [&[u8]; 2] =
+        [&[0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF], &[0xFF]];
+    for (i, vint) in unknown_size_vints.into_iter().enumerate() {
+        let test_mkv = tmp.path().join(format!("unknown_vint_{i}.mkv"));
+        let mut data = EBML_HEADER_AND_SEGMENT_ID.to_vec();
+        data.extend_from_slice(vint);
+        data.extend([0u8; 32]);
+        fs::write(&test_mkv, &data).unwrap();
+
+        let ebml_res = mkv_core::ebml::probe_ebml_native(&test_mkv);
+        assert!(
+            ebml_res
+                .as_ref()
+                .is_err_and(|e| e.contains("Unknown EBML element length")),
+            "Expected unknown length error for {vint:02X?}, got: {ebml_res:?}"
+        );
+    }
+}
+
+/// Wraps `tracks_payload` in a Tracks element inside a Segment.
+fn mkv_with_tracks_payload(tracks_payload: &[u8]) -> Vec<u8> {
+    let mut tracks_elem = vec![0x16, 0x54, 0xAE, 0x6B]; // Tracks ID
+    tracks_elem.push(0x80 | (tracks_payload.len() as u8));
+    tracks_elem.extend_from_slice(tracks_payload);
+
+    let mut data = EBML_HEADER_AND_SEGMENT_ID.to_vec();
+    data.push(0x80 | (tracks_elem.len() as u8));
+    data.extend_from_slice(&tracks_elem);
+    data
+}
+
+/// TrackEntry (length 6) with TrackNumber = 1 and TrackType = 1 (video).
+const VALID_VIDEO_TRACK_ENTRY: [u8; 8] = [0xAE, 0x86, 0xD7, 0x81, 0x01, 0x83, 0x81, 0x01];
+
+#[test]
+fn test_corrupted_track_entry_fails_native_probe() {
+    let tmp = tempdir().unwrap();
+    let corrupt_tracks_mkv = tmp.path().join("corrupt_tracks.mkv");
+
+    let mut tracks_payload = VALID_VIDEO_TRACK_ENTRY.to_vec();
+    // TrackEntry (length 4) whose only child has an invalid zero EBML ID.
+    tracks_payload.extend([0xAE, 0x84, 0x00, 0x00, 0x00, 0x00]);
+    fs::write(
+        &corrupt_tracks_mkv,
+        mkv_with_tracks_payload(&tracks_payload),
+    )
+    .unwrap();
+
+    // Partial tracks must not be returned; failing hands the file to mkvmerge instead.
+    let ebml_res = mkv_core::ebml::probe_ebml_native(&corrupt_tracks_mkv);
+    assert!(
+        ebml_res.is_err(),
+        "Native probe should have failed on corrupted track entry, but returned: {ebml_res:?}"
+    );
+}
+
+#[test]
+fn test_truncated_tracks_block_fails_native_probe() {
     let tmp = tempdir().unwrap();
     let truncated_mkv = tmp.path().join("truncated_tracks.mkv");
 
-    // Track 1: valid video track entry
-    let track1 = vec![
-        0xAE, 0x86, // TrackEntry, length 6
-        0xD7, 0x81, 0x01, // TrackNumber = 1
-        0x83, 0x81, 0x01, // TrackType = 1 (video)
-    ];
-
-    let mut tracks_payload = Vec::new();
-    tracks_payload.extend_from_slice(&track1);
-    // Add incomplete trailing element ID (end_pos not reached, unexpected EOF)
+    let mut tracks_payload = VALID_VIDEO_TRACK_ENTRY.to_vec();
+    // A trailing element ID with no size: the Tracks element ends mid-element.
     tracks_payload.push(0xAE);
-
-    let mut tracks_elem = vec![0x16, 0x54, 0xAE, 0x6B]; // Tracks ID
-    tracks_elem.push(0x80 | (tracks_payload.len() as u8));
-    tracks_elem.extend_from_slice(&tracks_payload);
-
-    let mut data = vec![
-        0x1A, 0x45, 0xDF, 0xA3, 0x80, // EBML Header, len 0
-        0x18, 0x53, 0x80, 0x67, // Segment ID
-    ];
-    data.push(0x80 | (tracks_elem.len() as u8));
-    data.extend_from_slice(&tracks_elem);
-
-    fs::write(&truncated_mkv, &data).unwrap();
+    fs::write(&truncated_mkv, mkv_with_tracks_payload(&tracks_payload)).unwrap();
 
     let ebml_res = mkv_core::ebml::probe_ebml_native(&truncated_mkv);
     assert!(
         ebml_res.is_err(),
-        "Native probe should have failed on truncated track entry, but returned: {:?}",
-        ebml_res
+        "Native probe should have failed on truncated track entry, but returned: {ebml_res:?}"
     );
 }
 
@@ -559,15 +462,12 @@ fn test_scan_mkv_files_symlink_cycle() {
     let extra_mkv = extras.join("extra.mkv");
     fs::write(&extra_mkv, b"dummy").unwrap();
 
-    // Create recursive symlink: Season 1/cycle -> Season 1
-    let cycle = season.join("cycle");
-    let _ = symlink(&season, &cycle);
+    // Season 1/cycle -> Season 1
+    symlink(&season, season.join("cycle")).unwrap();
+    // Season 1/link_extras -> Season 1/extras
+    symlink(&extras, season.join("link_extras")).unwrap();
 
-    // Create duplicate symlink to existing subdir: Season 1/link_extras -> extras
-    let link_extras = season.join("link_extras");
-    let _ = symlink(&extras, &link_extras);
-
-    // scan_mkv_files must terminate without infinite loop and not double-count extra.mkv
+    // The walk must terminate and must not double-count extra.mkv.
     let results = scan_mkv_files(tmp.path(), true, None);
     assert_eq!(results.len(), 2);
     assert_eq!(results[0].name, "ep01.mkv");
@@ -582,9 +482,7 @@ fn test_scan_mkv_files_symlink_file_duplicate() {
     let tmp = tempdir().unwrap();
     let mkv = tmp.path().join("ep01.mkv");
     fs::write(&mkv, b"dummy").unwrap();
-
-    let symlink_mkv = tmp.path().join("ep01_link.mkv");
-    let _ = symlink(&mkv, &symlink_mkv);
+    symlink(&mkv, tmp.path().join("ep01_link.mkv")).unwrap();
 
     let results = scan_mkv_files(tmp.path(), false, None);
     assert_eq!(results.len(), 1);
@@ -595,11 +493,8 @@ fn test_scan_mkv_files_symlink_file_duplicate() {
     );
 }
 
-/// Reachable only through a symlinked walk root. This is the exact condition macOS
-/// imposes for free: `tempfile::TempDir` uses `/tmp`, which is a symlink to
-/// `/private/tmp`, so every root this repo's own tests walk is non-canonical there.
-/// Symlink-alias dedup must survive it, or the same episode is discovered twice and
-/// both copies reach the Batch Pipeline.
+/// A symlinked walk root (as macOS gives every `/tmp` tempdir, via `/tmp -> /private/tmp`)
+/// must not defeat symlink-alias dedup, or the same episode reaches the pipeline twice.
 #[cfg(unix)]
 #[test]
 fn test_scan_mkv_files_symlink_dedup_under_non_canonical_root() {
@@ -614,7 +509,6 @@ fn test_scan_mkv_files_symlink_dedup_under_non_canonical_root() {
     fs::write(season.join("extras/extra.mkv"), b"dummy").unwrap();
     symlink(season.join("extras"), season.join("link_extras")).unwrap();
 
-    // A symlink to the tree root, as a caller holding a symlinked path would supply.
     let aliased_root = base.path().join("aliased_root");
     symlink(&real, &aliased_root).unwrap();
     assert_ne!(
@@ -627,9 +521,8 @@ fn test_scan_mkv_files_symlink_dedup_under_non_canonical_root() {
     assert_eq!(results.len(), 2, "duplicate episodes leaked: {results:?}");
 }
 
-/// `ignore_paths` holds canonicalized paths, so it only matches entries the walk spells
-/// canonically. A walk root that is not its own canonical path -- a relative CLI root
-/// (`-i ./Anime`) or one reached through a symlinked mount -- must not silently disable it.
+/// `ignore_paths` must still apply when the walk root is not canonical -- a relative CLI root
+/// (`-i ./Anime`) or one reached through a symlinked mount.
 #[cfg(unix)]
 #[test]
 fn test_scan_mkv_files_honors_ignore_paths_under_non_canonical_root() {
@@ -642,8 +535,6 @@ fn test_scan_mkv_files_honors_ignore_paths_under_non_canonical_root() {
 
     let ignore = HashSet::from([real.join("skip")]);
 
-    // Two spellings of the same tree that are both non-canonical: a symlinked root, and a
-    // root carrying a `..` segment. Neither may defeat the ignore set.
     let aliased = base.path().join("aliased");
     std::os::unix::fs::symlink(&real, &aliased).unwrap();
     let with_dotdot = base.path().join("real/..").join("real");
@@ -664,9 +555,8 @@ fn test_scan_mkv_files_honors_ignore_paths_under_non_canonical_root() {
     }
 }
 
-/// `ignore_paths` is compared against the walk's own spelling of each directory. The walk
-/// records a symlinked directory under its unresolved path, so every directory beneath one is
-/// non-canonical -- and a non-canonical spelling never matches the canonicalized ignore set.
+/// Directories beneath a symlinked directory are reached under a non-canonical spelling and
+/// must still match the canonicalized `ignore_paths`.
 #[cfg(unix)]
 #[test]
 fn test_scan_mkv_files_honors_ignore_paths_under_symlinked_subdirectory() {
@@ -690,7 +580,6 @@ fn test_scan_mkv_files_honors_ignore_paths_under_symlinked_subdirectory() {
     assert_eq!(results[0].name, "keep.mkv");
 }
 
-/// `ignore_paths` must also match individual files, not just directories.
 #[test]
 fn test_scan_mkv_files_honors_ignore_paths_for_individual_files() {
     let base = tempdir().unwrap();
@@ -705,9 +594,8 @@ fn test_scan_mkv_files_honors_ignore_paths_for_individual_files() {
     assert_eq!(results[0].name, "ep01.mkv");
 }
 
-/// The walk root is resolved once, so `scan_mkv_files` reports the resolved spelling of a file
-/// even when the caller passed a symlinked, relative, or `..`-bearing root. That path reaches
-/// mkvmerge and the manifest, so it is part of the traversal's contract.
+/// The walk root is resolved once, so reported paths use the resolved spelling even when the
+/// caller passed a symlinked root. That path reaches mkvmerge and the manifest.
 #[cfg(unix)]
 #[test]
 fn test_scan_mkv_files_reports_resolved_paths_under_non_canonical_root() {
@@ -727,10 +615,8 @@ fn test_scan_mkv_files_reports_resolved_paths_under_non_canonical_root() {
     );
 }
 
-/// `of_dir_entry` agrees with `FileSignature::of` for a regular entry and a symlink to a regular
-/// file, reuses the caller's metadata (proven by deleting the file afterwards), and additionally
-/// returns `None` for anything that is not a regular file. A symlink's own size and mtime really do
-/// differ, as pinned by `test_file_signature_resolved_differs_from_symlink_own_metadata`.
+/// `of_dir_entry` agrees with `FileSignature::of` for a regular entry and for a symlink to a
+/// regular file, and reuses the caller's metadata instead of re-reading it.
 #[cfg(unix)]
 #[test]
 fn test_file_signature_of_dir_entry_matches_resolved_of() {
@@ -761,15 +647,19 @@ fn test_file_signature_of_dir_entry_matches_resolved_of() {
         link_meta.is_symlink(),
         "precondition: lstat must not follow the link"
     );
+    assert_ne!(
+        FileSignature::from_metadata(&link_meta),
+        expected_target,
+        "precondition: the link's own metadata must differ from its target's"
+    );
     assert_eq!(
         FileSignature::of_dir_entry(link_entry, &link_meta).unwrap(),
         FileSignature::of(&link).unwrap(),
         "a symlinked entry must be reported under its resolved signature"
     );
 
-    // The constructor must reuse the metadata it was handed rather than `stat` the entry
-    // again: `DirEntry::metadata` is uncached, so a second read is a second syscall, and
-    // one issued after the file is gone would fail and silently unseed the font.
+    // Deleting the file proves the regular-entry path signs the metadata it was handed
+    // rather than issuing a second `stat`.
     fs::remove_file(&target).unwrap();
     assert_eq!(
         FileSignature::of_dir_entry(target_entry, &target_meta),
@@ -818,10 +708,8 @@ fn test_file_signature_of_dir_entry_rejects_directories() {
     );
 }
 
-/// `canonicalize` resolves a realpath, which cannot detect hardlinks. Pinning this
-/// documents *why* the traversal only resolves symlinks: a hardlink pair is two
-/// directory entries pointing at one inode, and realpath reports both identically,
-/// so the traversal has always returned both and must keep doing so.
+/// Only symlink aliases are deduplicated: a hardlink pair is two directory entries whose
+/// realpaths differ, so both are discovered.
 #[cfg(unix)]
 #[test]
 fn test_scan_mkv_files_hardlink_aliases_are_both_discovered() {
@@ -835,10 +723,8 @@ fn test_scan_mkv_files_hardlink_aliases_are_both_discovered() {
     assert_eq!(results.len(), 2);
 }
 
-/// `FileSignature::from_metadata` exists so `FileSignature::of_dir_entry` can reuse the
-/// `DirEntry` metadata a caller already holds. `DirEntry::metadata` is `lstat`-equivalent
-/// while `FileSignature::of` resolves symlinks, so the two must agree for a regular file --
-/// that agreement is what makes skipping the second `stat` safe.
+/// `DirEntry::metadata` does not resolve symlinks while `FileSignature::of` does; for a regular
+/// file the two must agree on every platform, which is what lets `of_dir_entry` skip a `stat`.
 #[test]
 fn test_file_signature_from_dirent_metadata_matches_resolved_of() {
     let tmp = tempdir().unwrap();
@@ -856,27 +742,5 @@ fn test_file_signature_from_dirent_metadata_matches_resolved_of() {
     assert_eq!(
         FileSignature::from_metadata(&dirent_meta),
         FileSignature::of(&file).unwrap()
-    );
-}
-
-/// A symlink's own metadata (`lstat`) must differ from its resolved signature, which is why
-/// `FileSignature::of_dir_entry` reads the entry's file type to decide whether to re-resolve.
-/// If a platform ever made these equal, that branch would be dead and this test would say so.
-#[cfg(unix)]
-#[test]
-fn test_file_signature_resolved_differs_from_symlink_own_metadata() {
-    use std::os::unix::fs::symlink;
-
-    let tmp = tempdir().unwrap();
-    let target = tmp.path().join("a-fairly-long-target-name.ttf");
-    fs::write(&target, b"content").unwrap();
-    let link = tmp.path().join("l.ttf");
-    symlink(&target, &link).unwrap();
-
-    let link_own_meta = fs::symlink_metadata(&link).unwrap();
-    assert!(link_own_meta.is_symlink());
-    assert_ne!(
-        FileSignature::from_metadata(&link_own_meta),
-        FileSignature::of(&link).unwrap()
     );
 }

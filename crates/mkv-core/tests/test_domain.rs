@@ -1,9 +1,12 @@
 use mkv_core::domain::{
-    detect_sub_lang, ep_type_label, format_ep, is_dialogue_track, natural_sort_key, parse_episode,
-    score_subtitle_category, seasons_match, select_audio_track, select_best_subtitle_track,
-    AudioTrack, EpisodeInfo, EpisodeType, MkvTrack, TrackProperties,
+    detect_sub_lang, is_dialogue_track, natural_sort_key, output_stem, parse_episode, promote_file,
+    resolve_output_dir, safe_filename, score_subtitle_category, seasons_match, select_audio_track,
+    select_best_subtitle_track, unique_file_token, AudioTrack, EpisodeInfo, EpisodeType,
+    ItemOutcome, MkvTrack, TrackProperties,
 };
 use std::collections::HashSet;
+use std::path::Path;
+use tempfile::tempdir;
 
 fn track(id: u32, lang: &str, codec: &str, name: &str) -> MkvTrack {
     MkvTrack {
@@ -46,246 +49,50 @@ fn audio(lang: &str, channels: u32, name: &str, pos: u32, codec: &str) -> AudioT
 // ─── EPISODE PARSER TESTS ────────────────────────────────────────────────────
 
 #[test]
-fn test_dash_episode_basic() {
-    assert_eq!(
-        parse_episode("[Group] Show - 01 [1080p]"),
-        Some(EpisodeInfo::new("", "E", "01"))
-    );
-}
-
-#[test]
-fn test_dash_episode_two_digits() {
-    assert_eq!(
-        parse_episode("Show - 12"),
-        Some(EpisodeInfo::new("", "E", "12"))
-    );
-}
-
-#[test]
-fn test_dash_episode_three_digits() {
-    assert_eq!(
-        parse_episode("Show - 100"),
-        Some(EpisodeInfo::new("", "E", "100"))
-    );
-}
-
-#[test]
-fn test_dash_episode_leading_spaces() {
-    assert_eq!(
-        parse_episode("Show  -  05"),
-        Some(EpisodeInfo::new("", "E", "05"))
-    );
-}
-
-#[test]
-fn test_sxxexx_season_and_episode() {
-    assert_eq!(
-        parse_episode("Show S02E10"),
-        Some(EpisodeInfo::new("2", "E", "10"))
-    );
-}
-
-#[test]
-fn test_sxxexx_season_one() {
-    assert_eq!(
-        parse_episode("Show S01E03"),
-        Some(EpisodeInfo::new("1", "E", "03"))
-    );
-}
-
-#[test]
-fn test_sxxexx_large_episode() {
-    assert_eq!(
-        parse_episode("Show S03E125"),
-        Some(EpisodeInfo::new("3", "E", "125"))
-    );
-}
-
-#[test]
-fn test_sxxexx_version_suffix() {
-    assert_eq!(
-        parse_episode("Show S01E05v2"),
-        Some(EpisodeInfo::new("1", "E", "05"))
-    );
-}
-
-#[test]
-fn test_bracket_episode() {
-    assert_eq!(
-        parse_episode("Show [07] [720p]"),
-        Some(EpisodeInfo::new("", "E", "07"))
-    );
-}
-
-#[test]
-fn test_paren_episode() {
-    assert_eq!(
-        parse_episode("Show (13)"),
-        Some(EpisodeInfo::new("", "E", "13"))
-    );
-}
-
-#[test]
-fn test_ep_keyword() {
-    assert_eq!(
-        parse_episode("Show EP03"),
-        Some(EpisodeInfo::new("", "E", "03"))
-    );
-}
-
-#[test]
-fn test_episode_keyword_long() {
-    assert_eq!(
-        parse_episode("Show Episode 07"),
-        Some(EpisodeInfo::new("", "E", "07"))
-    );
-}
-
-#[test]
-fn test_decimal_episode() {
-    let res = parse_episode("Show - 12.5");
-    assert!(res.is_some());
-    let info = res.unwrap();
-    assert_eq!(info.ep_type, EpisodeType::Episode);
-    assert!(info.ep.starts_with("12."));
-}
-
-#[test]
-fn test_ova_numbered() {
-    assert_eq!(
-        parse_episode("Show OVA 3"),
-        Some(EpisodeInfo::new("", "OVA", "03"))
-    );
-}
-
-#[test]
-fn test_ova_no_space() {
-    assert_eq!(
-        parse_episode("Show OVA3"),
-        Some(EpisodeInfo::new("", "OVA", "03"))
-    );
-}
-
-#[test]
-fn test_oad() {
-    let res = parse_episode("Show OAD 01");
-    assert!(res.is_some());
-    assert_eq!(res.unwrap().ep_type, EpisodeType::Ova);
-}
-
-#[test]
-fn test_sp_numbered() {
-    assert_eq!(
-        parse_episode("Show SP01"),
-        Some(EpisodeInfo::new("", "SP", "01"))
-    );
-}
-
-#[test]
-fn test_special_keyword() {
-    assert_eq!(
-        parse_episode("Show Special 02"),
-        Some(EpisodeInfo::new("", "SP", "02"))
-    );
-}
-
-#[test]
-fn test_end_marker() {
-    assert_eq!(
-        parse_episode("Show - 12 END"),
-        Some(EpisodeInfo::new("", "E", "12"))
-    );
-}
-
-#[test]
-fn test_underscores_treated_as_spaces() {
-    assert_eq!(
-        parse_episode("Show_-_01"),
-        Some(EpisodeInfo::new("", "E", "01"))
-    );
-}
-
-#[test]
-fn test_no_episode_returns_none() {
-    assert_eq!(parse_episode("Random Movie Title"), None);
-}
-
-#[test]
-fn test_empty_string_returns_none() {
-    assert_eq!(parse_episode(""), None);
-}
-
-#[test]
-fn test_parse_episode_strips_offset_suffix() {
-    assert_eq!(
-        parse_episode("Show - 01.[+5s]"),
-        Some(EpisodeInfo::new("", "E", "01"))
-    );
-    assert_eq!(
-        parse_episode("Show - 02.[-3s]"),
-        Some(EpisodeInfo::new("", "E", "02"))
-    );
-    assert_eq!(
-        parse_episode("Show - 03.[+1.5s]"),
-        Some(EpisodeInfo::new("", "E", "03"))
-    );
-    assert_eq!(
-        parse_episode("Show - 04.[-0.25s]"),
-        Some(EpisodeInfo::new("", "E", "04"))
-    );
-}
-
-#[test]
-fn test_single_digit_zero_padded() {
-    assert_eq!(
-        parse_episode("Show - 5"),
-        Some(EpisodeInfo::new("", "E", "05"))
-    );
-}
-
-#[test]
-fn test_double_digit_unchanged() {
-    assert_eq!(
-        parse_episode("Show - 15"),
-        Some(EpisodeInfo::new("", "E", "15"))
-    );
-}
-
-#[test]
-fn test_release_year_guard_ignores_dash_years() {
-    assert_eq!(
-        parse_episode("Frieren - 2023 - 05"),
-        Some(EpisodeInfo::new("", "E", "05"))
-    );
-    assert_eq!(
-        parse_episode("One Piece - 1999 - 12"),
-        Some(EpisodeInfo::new("", "E", "12"))
-    );
-    assert_eq!(
-        parse_episode("Demon Lord 2099 - 01"),
-        Some(EpisodeInfo::new("", "E", "01"))
-    );
-    assert_eq!(
-        parse_episode("Demon Lord 2099 - 2024 - 01"),
-        Some(EpisodeInfo::new("", "E", "01"))
-    );
-    assert_eq!(
-        parse_episode("Show - 1234"),
-        Some(EpisodeInfo::new("", "E", "1234"))
-    );
-    assert_eq!(
-        parse_episode("Show - 2150"),
-        Some(EpisodeInfo::new("", "E", "2150"))
-    );
-    assert_eq!(
-        parse_episode("Show - EP2023"),
-        Some(EpisodeInfo::new("", "E", "2023"))
-    );
-}
-
-#[test]
-fn test_complex_episode_filenames() {
-    let cases = vec![
+fn test_parse_episode_cases() {
+    let cases = [
+        // Dash-separated numbers
+        ("[Group] Show - 01 [1080p]", ("", "E", "01")),
+        ("Show - 12", ("", "E", "12")),
+        ("Show - 100", ("", "E", "100")),
+        ("Show  -  05", ("", "E", "05")),
+        ("Show - 5", ("", "E", "05")),
+        ("Show - 12 END", ("", "E", "12")),
+        ("Show_-_01", ("", "E", "01")),
+        // SxxExx
+        ("Show S02E10", ("2", "E", "10")),
+        ("Show S01E03", ("1", "E", "03")),
+        ("Show S03E125", ("3", "E", "125")),
+        ("Show S01E05v2", ("1", "E", "05")),
+        // Bracketed, parenthesised, and keyword numbers
+        ("Show [07] [720p]", ("", "E", "07")),
+        ("Show (13)", ("", "E", "13")),
+        ("Show EP03", ("", "E", "03")),
+        ("Show Episode 07", ("", "E", "07")),
+        // Decimal episodes
+        ("Show - 12.5", ("", "E", "12.5")),
+        ("Show - 12.5.mkv", ("", "E", "12.5")),
+        ("Show - 0.5.mkv", ("", "E", "00.5")),
+        // OVA / Special
+        ("Show OVA 3", ("", "OVA", "03")),
+        ("Show OVA3", ("", "OVA", "03")),
+        ("Show OAD 01", ("", "OVA", "01")),
+        ("Show SP01", ("", "SP", "01")),
+        ("Show Special 02", ("", "SP", "02")),
+        // Subtitle offset suffixes are ignored
+        ("Show - 01.[+5s]", ("", "E", "01")),
+        ("Show - 02.[-3s]", ("", "E", "02")),
+        ("Show - 03.[+1.5s]", ("", "E", "03")),
+        ("Show - 04.[-0.25s]", ("", "E", "04")),
+        // Release years are not episode numbers
+        ("Frieren - 2023 - 05", ("", "E", "05")),
+        ("One Piece - 1999 - 12", ("", "E", "12")),
+        ("Demon Lord 2099 - 01", ("", "E", "01")),
+        ("Demon Lord 2099 - 2024 - 01", ("", "E", "01")),
+        ("Show - 1234", ("", "E", "1234")),
+        ("Show - 2150", ("", "E", "2150")),
+        ("Show - EP2023", ("", "E", "2023")),
+        // Real-world release names
         ("[Group] 葬送のフリーレン - 05 [1080p].mkv", ("", "E", "05")),
         ("【推しの子】 第01話 (1080p).mkv", ("", "E", "01")),
         ("SPY×FAMILY - 12 [1080p].mkv", ("", "E", "12")),
@@ -294,19 +101,22 @@ fn test_complex_episode_filenames() {
         ("One Piece - 1089 [1080p].mkv", ("", "E", "1089")),
         ("Detective Conan - 1100.mkv", ("", "E", "1100")),
         ("Mob Psycho 100 II - 03.mkv", ("", "E", "03")),
-        ("Demon Lord 2099 - 01.mkv", ("", "E", "01")),
         ("Show 4k 60fps - 02.mkv", ("", "E", "02")),
-        ("Show - 12.5.mkv", ("", "E", "12.5")),
-        ("Show - 0.5.mkv", ("", "E", "00.5")),
     ];
 
-    for (filename, (s, ep_type, ep)) in cases {
+    for (filename, (season, ep_type, ep)) in cases {
         assert_eq!(
             parse_episode(filename),
-            Some(EpisodeInfo::new(s, ep_type, ep)),
+            Some(EpisodeInfo::new(season, ep_type, ep)),
             "Failed on filename: {filename}"
         );
     }
+}
+
+#[test]
+fn test_parse_episode_without_number_returns_none() {
+    assert_eq!(parse_episode("Random Movie Title"), None);
+    assert_eq!(parse_episode(""), None);
 }
 
 // ─── SUBTITLE LANGUAGE DETECTION TESTS ───────────────────────────────────────
@@ -361,14 +171,14 @@ fn test_detect_sub_lang_offset_suffix() {
 
 #[test]
 fn test_ep_type_label() {
-    assert_eq!(ep_type_label(&EpisodeType::Episode, false), "EP");
-    assert_eq!(ep_type_label(&EpisodeType::Episode, true), "Episode");
-    assert_eq!(ep_type_label(&EpisodeType::Part, false), "Part");
-    assert_eq!(ep_type_label(&EpisodeType::Part, true), "Part");
-    assert_eq!(ep_type_label(&EpisodeType::Ova, false), "OVA");
-    assert_eq!(ep_type_label(&EpisodeType::Ova, true), "OVA");
-    assert_eq!(ep_type_label(&EpisodeType::Special, false), "SP");
-    assert_eq!(ep_type_label(&EpisodeType::Special, true), "Special");
+    assert_eq!(EpisodeType::Episode.label(false), "EP");
+    assert_eq!(EpisodeType::Episode.label(true), "Episode");
+    assert_eq!(EpisodeType::Part.label(false), "Part");
+    assert_eq!(EpisodeType::Part.label(true), "Part");
+    assert_eq!(EpisodeType::Ova.label(false), "OVA");
+    assert_eq!(EpisodeType::Ova.label(true), "OVA");
+    assert_eq!(EpisodeType::Special.label(false), "SP");
+    assert_eq!(EpisodeType::Special.label(true), "Special");
 }
 
 #[test]
@@ -384,270 +194,223 @@ fn test_seasons_match() {
 
 #[test]
 fn test_is_dialogue_track() {
-    assert!(is_dialogue_track(Some("Full Dialogue")));
-    assert!(is_dialogue_track(Some("Main")));
-    assert!(is_dialogue_track(Some("Indo Sub")));
-    assert!(is_dialogue_track(Some("Indonesia")));
-    assert!(is_dialogue_track(Some("Complete")));
-    assert!(!is_dialogue_track(Some("Signs & Songs")));
-    assert!(!is_dialogue_track(None));
-    assert!(!is_dialogue_track(Some("")));
-    assert!(!is_dialogue_track(Some("Subtitles Track 1")));
+    assert!(is_dialogue_track("Full Dialogue"));
+    assert!(is_dialogue_track("Main"));
+    assert!(is_dialogue_track("Indo Sub"));
+    assert!(is_dialogue_track("Indonesia"));
+    assert!(is_dialogue_track("Complete"));
+    assert!(!is_dialogue_track("Signs & Songs"));
+    assert!(!is_dialogue_track(""));
+    assert!(!is_dialogue_track("Subtitles Track 1"));
 }
 
 // ─── SUBTITLE TRACK SELECTION TESTS ──────────────────────────────────────────
 
 #[test]
-fn test_select_best_subtitle_track_empty() {
+fn test_select_best_subtitle_track_ignores_non_subtitles() {
     assert_eq!(select_best_subtitle_track(&[], None), None);
-}
-
-#[test]
-fn test_select_best_subtitle_track_only_audio() {
-    let tracks = vec![non_sub_track(1, "jpn")];
-    assert_eq!(select_best_subtitle_track(&tracks, None), None);
-}
-
-#[test]
-fn test_select_best_subtitle_track_picks_ind_over_eng() {
-    let tracks = vec![
-        track(1, "eng", "s_text/ass", ""),
-        track(2, "ind", "s_text/ass", ""),
-    ];
-    let (tid, lang, _) = select_best_subtitle_track(&tracks, None).unwrap();
-    assert_eq!(tid, 2);
-    assert_eq!(lang, "ind");
-}
-
-#[test]
-fn test_select_best_subtitle_track_picks_id_as_primary() {
-    let tracks = vec![
-        track(1, "eng", "s_text/ass", ""),
-        track(2, "id", "s_text/ass", ""),
-    ];
-    let (tid, lang, _) = select_best_subtitle_track(&tracks, None).unwrap();
-    assert_eq!(tid, 2);
-    assert_eq!(lang, "id");
-}
-
-#[test]
-fn test_select_best_subtitle_track_picks_und_over_eng() {
-    let tracks = vec![
-        track(1, "eng", "s_text/ass", ""),
-        track(2, "und", "s_text/ass", ""),
-    ];
-    let (tid, lang, _) = select_best_subtitle_track(&tracks, None).unwrap();
-    assert_eq!(tid, 2);
-    assert_eq!(lang, "und");
-}
-
-#[test]
-fn test_select_best_subtitle_track_prefers_dialogue_same_lang() {
-    let tracks = vec![
-        track(1, "ind", "s_text/ass", "Signs"),
-        track(2, "ind", "s_text/ass", "Full Dialogue"),
-    ];
-    let (tid, lang, is_diag) = select_best_subtitle_track(&tracks, None).unwrap();
-    assert_eq!(tid, 2);
-    assert_eq!(lang, "ind");
-    assert!(is_diag);
-}
-
-#[test]
-fn test_select_best_subtitle_track_english_fallback() {
-    let tracks = vec![
-        track(1, "eng", "s_text/ass", ""),
-        track(2, "jpn", "s_text/ass", ""),
-    ];
-    let (tid, lang, _) = select_best_subtitle_track(&tracks, None).unwrap();
-    assert_eq!(tid, 1);
-    assert_eq!(lang, "eng");
-}
-
-#[test]
-fn test_select_best_subtitle_track_last_resort_unrecognised_lang() {
-    let tracks = vec![
-        track(1, "zho", "s_text/ass", ""),
-        track(2, "kor", "s_text/ass", ""),
-    ];
-    let (tid, lang, _) = select_best_subtitle_track(&tracks, None).unwrap();
-    assert_eq!(tid, 1);
-    assert_eq!(lang, "zho");
-}
-
-#[test]
-fn test_select_best_subtitle_track_last_resort_prefers_dialogue() {
-    let tracks = vec![
-        track(1, "zho", "s_text/ass", "Signs"),
-        track(2, "kor", "s_text/ass", "Full Dialogue"),
-    ];
-    let (tid, lang, is_diag) = select_best_subtitle_track(&tracks, None).unwrap();
-    assert_eq!(tid, 2);
-    assert_eq!(lang, "kor");
-    assert!(is_diag);
-}
-
-#[test]
-fn test_select_best_subtitle_track_last_resort_prefers_ass() {
-    let tracks = vec![
-        track(1, "zho", "s_text/utf8", ""),
-        track(2, "tso", "s_text/ass", ""),
-    ];
-    let (tid, lang, _) = select_best_subtitle_track(&tracks, None).unwrap();
-    assert_eq!(tid, 2);
-    assert_eq!(lang, "tso");
-}
-
-#[test]
-fn test_select_best_subtitle_track_codec_filter() {
-    let mut filter = HashSet::new();
-    filter.insert("s_text/ass".to_string());
-
-    let tracks = vec![track(1, "ind", "s_text/utf8", "")];
-    assert_eq!(select_best_subtitle_track(&tracks, Some(&filter)), None);
-
-    let tracks2 = vec![track(1, "ind", "s_text/ass", "")];
-    let (tid, _, _) = select_best_subtitle_track(&tracks2, Some(&filter)).unwrap();
-    assert_eq!(tid, 1);
-}
-
-#[test]
-fn test_select_best_subtitle_track_order_precedence() {
-    let tracks = vec![
-        track(1, "id", "s_text/ass", ""),
-        track(2, "ind", "s_text/ass", ""),
-    ];
-    let (tid, lang, _) = select_best_subtitle_track(&tracks, None).unwrap();
-    assert_eq!(tid, 2);
-    assert_eq!(lang, "ind");
-
-    let tracks2 = vec![
-        track(1, "en", "s_text/ass", ""),
-        track(2, "eng", "s_text/ass", ""),
-    ];
-    let (tid2, lang2, _) = select_best_subtitle_track(&tracks2, None).unwrap();
-    assert_eq!(tid2, 2);
-    assert_eq!(lang2, "eng");
-}
-
-// ─── AUDIO PICKER TESTS ──────────────────────────────────────────────────────
-
-#[test]
-fn test_audio_prefers_japanese_stereo() {
-    let tracks = vec![
-        audio("eng", 2, "", 1, "A_AAC"),
-        audio("jpn", 2, "", 2, "A_AAC"),
-    ];
-    let (track, _) = select_audio_track(&tracks, 0);
-    let track = track.unwrap();
-    assert_eq!(track.lang, "jpn");
-    assert_eq!(track.pos, 2);
-}
-
-#[test]
-fn test_audio_prefers_japanese_stereo_dialogue() {
-    let tracks = vec![
-        audio("jpn", 2, "Commentary", 1, "A_AAC"),
-        audio("jpn", 2, "Full Dialogue", 2, "A_AAC"),
-    ];
-    let (track, _) = select_audio_track(&tracks, 0);
-    let track = track.unwrap();
-    assert_eq!(track.pos, 2);
-}
-
-#[test]
-fn test_audio_skips_commentary_track() {
-    let tracks = vec![
-        audio("jpn", 2, "Audio Commentary", 1, "A_AAC"),
-        audio("jpn", 2, "Main Audio", 2, "A_AAC"),
-    ];
-    let (track, _) = select_audio_track(&tracks, 0);
-    let track = track.unwrap();
-    assert_eq!(track.pos, 2);
-}
-
-#[test]
-fn test_audio_prefers_stereo_over_surround() {
-    let tracks = vec![
-        audio("jpn", 6, "", 1, "A_AAC"),
-        audio("jpn", 2, "", 2, "A_AAC"),
-    ];
-    let (track, _) = select_audio_track(&tracks, 0);
-    let track = track.unwrap();
-    assert_eq!(track.channels, 2);
-    assert_eq!(track.pos, 2);
-}
-
-#[test]
-fn test_audio_und_stereo_fallback() {
-    let tracks = vec![audio("und", 2, "", 1, "A_AAC")];
-    let (track, _) = select_audio_track(&tracks, 0);
-    assert_eq!(track.unwrap().pos, 1);
-}
-
-#[test]
-fn test_audio_stereo_fallback_no_japanese() {
-    let tracks = vec![
-        audio("eng", 2, "", 1, "A_AAC"),
-        audio("eng", 6, "", 2, "A_AAC"),
-    ];
-    let (track, _) = select_audio_track(&tracks, 0);
-    assert_eq!(track.unwrap().channels, 2);
-}
-
-#[test]
-fn test_audio_empty_tracks_returns_none() {
-    let (track, reason) = select_audio_track(&[], 0);
-    assert!(track.is_none());
-    assert_eq!(reason, "");
-}
-
-#[test]
-fn test_audio_all_commentary_falls_back_to_japanese() {
-    let tracks = vec![audio("jpn", 2, "Director Commentary", 1, "A_AAC")];
-    let (track, reason) = select_audio_track(&tracks, 0);
-    assert!(track.is_some());
-    assert!(
-        reason.contains("Japanese") || reason.contains("fallback") || reason.contains("commentary")
+    assert_eq!(
+        select_best_subtitle_track(&[non_sub_track(1, "jpn")], None),
+        None
     );
 }
 
 #[test]
-fn test_audio_first_audio_after_video_as_last_resort() {
-    let tracks = vec![audio("xyz", 6, "Some Audio", 5, "A_AAC")];
-    let (track, _) = select_audio_track(&tracks, 0);
-    assert!(track.is_some());
-}
-
-#[test]
-fn test_audio_japanese_preferred_over_undetermined() {
-    let tracks = vec![
-        audio("und", 2, "", 1, "A_AAC"),
-        audio("jpn", 2, "", 2, "A_AAC"),
+fn test_select_best_subtitle_track_language_precedence() {
+    let cases = [
+        (("eng", "ind"), (2, "ind")),
+        (("eng", "id"), (2, "id")),
+        (("eng", "und"), (2, "und")),
+        (("id", "ind"), (2, "ind")),
+        (("en", "eng"), (2, "eng")),
+        (("eng", "jpn"), (1, "eng")),
+        // Unrecognised languages tie; the lower track ID wins.
+        (("zho", "kor"), (1, "zho")),
     ];
-    let (track, _) = select_audio_track(&tracks, 0);
-    assert_eq!(track.unwrap().pos, 2);
+    for ((first, second), (tid, lang)) in cases {
+        let tracks = [
+            track(1, first, "s_text/ass", ""),
+            track(2, second, "s_text/ass", ""),
+        ];
+        assert_eq!(
+            select_best_subtitle_track(&tracks, None),
+            Some((tid, lang.to_string())),
+            "{first} vs {second}"
+        );
+    }
 }
 
 #[test]
-fn test_audio_non_commentary_preferred_over_commentary_even_if_commentary_is_japanese() {
-    let tracks = vec![
-        audio("jpn", 2, "Audio Commentary", 1, "A_AAC"),
-        audio("eng", 2, "English Stereo", 2, "A_AC3"),
+fn test_select_best_subtitle_track_prefers_dialogue_within_category() {
+    for lang in ["ind", "kor"] {
+        let tracks = [
+            track(1, lang, "s_text/ass", "Signs"),
+            track(2, lang, "s_text/ass", "Full Dialogue"),
+        ];
+        assert_eq!(
+            select_best_subtitle_track(&tracks, None),
+            Some((2, lang.to_string()))
+        );
+    }
+}
+
+#[test]
+fn test_select_best_subtitle_track_prefers_ass_over_language() {
+    let tracks = [
+        track(1, "ind", "s_text/utf8", ""),
+        track(2, "tso", "s_text/ass", ""),
     ];
-    let (track, reason) = select_audio_track(&tracks, 0);
-    let track = track.unwrap();
-    assert_eq!(track.id, 2);
-    assert!(reason.contains("Stereo fallback"));
+    assert_eq!(
+        select_best_subtitle_track(&tracks, None),
+        Some((2, "tso".to_string()))
+    );
 }
 
 #[test]
-fn test_format_ep() {
-    assert_eq!(format_ep("1"), "01");
-    assert_eq!(format_ep("05"), "05");
-    assert_eq!(format_ep("12.5"), "12.5");
-    assert_eq!(format_ep("0.5"), "00.5");
+fn test_select_best_subtitle_track_codec_filter() {
+    let filter = HashSet::from(["s_text/ass".to_string()]);
+
+    let tracks = [track(1, "ind", "s_text/utf8", "")];
+    assert_eq!(select_best_subtitle_track(&tracks, Some(&filter)), None);
+
+    let tracks = [track(1, "ind", "S_TEXT/ASS", "")];
+    assert_eq!(
+        select_best_subtitle_track(&tracks, Some(&filter)),
+        Some((1, "ind".to_string()))
+    );
 }
+
+#[test]
+fn test_score_subtitle_category_ranking() {
+    let ranked = [
+        ("ind", true),
+        ("id", true),
+        ("und", true),
+        ("eng", true),
+        ("en", true),
+        ("zho", true),
+        ("ind", false),
+        ("id", false),
+        ("und", false),
+        ("eng", false),
+        ("en", false),
+        ("zho", false),
+    ];
+    let scores: Vec<i32> = ranked
+        .iter()
+        .map(|&(lang, is_ass)| score_subtitle_category(lang, is_ass))
+        .collect();
+    assert!(
+        scores.windows(2).all(|w| w[0] > w[1]),
+        "scores must strictly decrease in rank order: {scores:?}"
+    );
+}
+
+// ─── AUDIO PICKER TESTS ──────────────────────────────────────────────────────
+
+fn selected_pos(tracks: &[AudioTrack], video_pos: u32) -> u32 {
+    select_audio_track(tracks, video_pos)
+        .expect("a track must be selected")
+        .pos
+}
+
+#[test]
+fn test_audio_empty_tracks_returns_none() {
+    assert!(select_audio_track(&[], 0).is_none());
+}
+
+#[test]
+fn test_audio_ranking() {
+    let cases = [
+        (
+            "japanese stereo over english stereo",
+            vec![
+                audio("eng", 2, "", 1, "A_AAC"),
+                audio("jpn", 2, "", 2, "A_AAC"),
+            ],
+            2,
+        ),
+        (
+            "dialogue over commentary",
+            vec![
+                audio("jpn", 2, "Commentary", 1, "A_AAC"),
+                audio("jpn", 2, "Full Dialogue", 2, "A_AAC"),
+            ],
+            2,
+        ),
+        (
+            "commentary track skipped",
+            vec![
+                audio("jpn", 2, "Audio Commentary", 1, "A_AAC"),
+                audio("jpn", 2, "Main Audio", 2, "A_AAC"),
+            ],
+            2,
+        ),
+        (
+            "stereo over surround",
+            vec![
+                audio("jpn", 6, "", 1, "A_AAC"),
+                audio("jpn", 2, "", 2, "A_AAC"),
+            ],
+            2,
+        ),
+        (
+            "japanese over undetermined",
+            vec![
+                audio("und", 2, "", 1, "A_AAC"),
+                audio("jpn", 2, "", 2, "A_AAC"),
+            ],
+            2,
+        ),
+        (
+            "stereo fallback without japanese",
+            vec![
+                audio("eng", 6, "", 1, "A_AAC"),
+                audio("eng", 2, "", 2, "A_AAC"),
+            ],
+            2,
+        ),
+        (
+            "non-commentary english over japanese commentary",
+            vec![
+                audio("jpn", 2, "Audio Commentary", 1, "A_AAC"),
+                audio("eng", 2, "English Stereo", 2, "A_AC3"),
+            ],
+            2,
+        ),
+        (
+            "earliest of equal tracks",
+            vec![
+                audio("und", 2, "", 1, "A_AAC"),
+                audio("und", 2, "", 2, "A_AAC"),
+            ],
+            1,
+        ),
+    ];
+    for (label, tracks, expected_pos) in cases {
+        assert_eq!(selected_pos(&tracks, 0), expected_pos, "{label}");
+    }
+}
+
+#[test]
+fn test_audio_first_track_after_video_as_last_resort() {
+    let tracks = [
+        audio("xyz", 6, "Some Audio", 1, "A_AAC"),
+        audio("xyz", 6, "Some Audio", 3, "A_AAC"),
+    ];
+    assert_eq!(selected_pos(&tracks, 2), 3);
+}
+
+#[test]
+fn test_audio_all_commentary_still_ranks_japanese_first() {
+    let tracks = [
+        audio("eng", 2, "Commentary", 1, "A_AAC"),
+        audio("jpn", 6, "Director Commentary", 2, "A_AAC"),
+    ];
+    assert_eq!(selected_pos(&tracks, 0), 2);
+}
+
+// ─── NAMING & PATH HELPER TESTS ──────────────────────────────────────────────
 
 #[test]
 fn test_natural_sort_key() {
@@ -657,27 +420,7 @@ fn test_natural_sort_key() {
 }
 
 #[test]
-fn test_score_subtitle_category() {
-    assert_eq!(score_subtitle_category("ind", true), 12);
-    assert_eq!(score_subtitle_category("id", true), 11);
-    assert_eq!(score_subtitle_category("und", true), 10);
-    assert_eq!(score_subtitle_category("eng", true), 9);
-    assert_eq!(score_subtitle_category("en", true), 8);
-    assert_eq!(score_subtitle_category("other", true), 7);
-
-    assert_eq!(score_subtitle_category("ind", false), 6);
-    assert_eq!(score_subtitle_category("id", false), 5);
-    assert_eq!(score_subtitle_category("und", false), 4);
-    assert_eq!(score_subtitle_category("eng", false), 3);
-    assert_eq!(score_subtitle_category("en", false), 2);
-    assert_eq!(score_subtitle_category("other", false), 1);
-}
-
-#[test]
 fn test_resolve_output_dir() {
-    use mkv_core::domain::resolve_output_dir;
-    use std::path::Path;
-
     let mkv = Path::new("/anime/season01/ep01.mkv");
     let input = Path::new("/anime");
     let out = Path::new("/output");
@@ -690,36 +433,28 @@ fn test_resolve_output_dir() {
         resolve_output_dir(mkv, input, None),
         Path::new("/anime/season01")
     );
+    // Outside the input tree: flatten into the override.
+    assert_eq!(
+        resolve_output_dir(Path::new("/elsewhere/ep01.mkv"), input, Some(out)),
+        Path::new("/output")
+    );
 }
 
 #[test]
-fn test_item_outcome_variants() {
-    use mkv_core::domain::ItemOutcome;
-    assert_eq!(
-        serde_json::to_string(&ItemOutcome::Completed).unwrap(),
-        "\"completed\""
-    );
-    assert_eq!(
-        serde_json::to_string(&ItemOutcome::Skipped).unwrap(),
-        "\"skipped\""
-    );
-    assert_eq!(
-        serde_json::to_string(&ItemOutcome::Error).unwrap(),
-        "\"error\""
-    );
-    assert_eq!(
-        serde_json::to_string(&ItemOutcome::Cancelled).unwrap(),
-        "\"cancelled\""
-    );
-    assert_eq!(
-        serde_json::to_string(&ItemOutcome::Planned).unwrap(),
-        "\"planned\""
-    );
+fn test_item_outcome_wire_format() {
+    for (outcome, wire) in [
+        (ItemOutcome::Completed, "\"completed\""),
+        (ItemOutcome::Skipped, "\"skipped\""),
+        (ItemOutcome::Error, "\"error\""),
+        (ItemOutcome::Cancelled, "\"cancelled\""),
+        (ItemOutcome::Planned, "\"planned\""),
+    ] {
+        assert_eq!(serde_json::to_string(&outcome).unwrap(), wire);
+    }
 }
 
 #[test]
 fn test_safe_filename_traversal_prevention() {
-    use mkv_core::domain::safe_filename;
     assert_eq!(safe_filename(".."), "unnamed");
     assert_eq!(safe_filename("."), "unnamed");
     assert_eq!(safe_filename(""), "unnamed");
@@ -730,54 +465,40 @@ fn test_safe_filename_traversal_prevention() {
 
 #[test]
 fn test_safe_filename_windows_reserved_names() {
-    use mkv_core::domain::safe_filename;
-
-    // Classic DOS devices with extension
-    assert_eq!(safe_filename("con.ass"), "_con.ass");
-    assert_eq!(safe_filename("CON.ass"), "_CON.ass");
-    assert_eq!(safe_filename("prn.txt"), "_prn.txt");
-    assert_eq!(safe_filename("aux.ttf"), "_aux.ttf");
-    assert_eq!(safe_filename("nul.otf"), "_nul.otf");
-
-    // Classic DOS devices without extension
-    assert_eq!(safe_filename("NUL"), "_NUL");
-    assert_eq!(safe_filename("con"), "_con");
-    assert_eq!(safe_filename("AUX"), "_AUX");
-    assert_eq!(safe_filename("prn"), "_prn");
-
-    // COM1 - COM9
-    for i in 1..=9 {
-        let com_lower = format!("com{i}.ass");
-        let com_upper = format!("COM{i}.ass");
-        assert_eq!(safe_filename(&com_lower), format!("_{com_lower}"));
-        assert_eq!(safe_filename(&com_upper), format!("_{com_upper}"));
-        assert_eq!(safe_filename(&format!("com{i}")), format!("_com{i}"));
+    for device in ["con", "CON", "prn", "aux", "NUL"] {
+        assert_eq!(safe_filename(device), format!("_{device}"));
+        assert_eq!(
+            safe_filename(&format!("{device}.ass")),
+            format!("_{device}.ass")
+        );
     }
-
-    // LPT1 - LPT9
     for i in 1..=9 {
-        let lpt_lower = format!("lpt{i}.ass");
-        let lpt_upper = format!("LPT{i}.ass");
-        assert_eq!(safe_filename(&lpt_lower), format!("_{lpt_lower}"));
-        assert_eq!(safe_filename(&lpt_upper), format!("_{lpt_upper}"));
-        assert_eq!(safe_filename(&format!("lpt{i}")), format!("_lpt{i}"));
+        for name in [
+            format!("com{i}"),
+            format!("COM{i}.ass"),
+            format!("lpt{i}"),
+            format!("LPT{i}.ass"),
+        ] {
+            assert_eq!(safe_filename(&name), format!("_{name}"));
+        }
     }
-
-    // Mixed-case
     assert_eq!(safe_filename("CoM1.sub"), "_CoM1.sub");
     assert_eq!(safe_filename("LpT3.ttf"), "_LpT3.ttf");
 
-    // Non-reserved names that contain reserved words as substrings
-    assert_eq!(safe_filename("context.ass"), "context.ass");
-    assert_eq!(safe_filename("auxiliary.ttf"), "auxiliary.ttf");
-    assert_eq!(safe_filename("my_con.ass"), "my_con.ass");
-    assert_eq!(safe_filename("com10.txt"), "com10.txt");
-    assert_eq!(safe_filename("lpt0.txt"), "lpt0.txt");
+    // Reserved words as substrings, or out-of-range device numbers, are fine.
+    for name in [
+        "context.ass",
+        "auxiliary.ttf",
+        "my_con.ass",
+        "com10.txt",
+        "lpt0.txt",
+    ] {
+        assert_eq!(safe_filename(name), name);
+    }
 }
 
 #[test]
 fn test_output_stem_restores_base() {
-    use mkv_core::domain::output_stem;
     assert_eq!(
         output_stem("[Group] Title - OVA 01", &EpisodeType::Ova, "01"),
         "OVA01_[Group] Title - OVA 01"
@@ -792,11 +513,10 @@ fn test_output_stem_restores_base() {
     );
 }
 
+// ─── FILE PROMOTION TESTS ────────────────────────────────────────────────────
+
 #[test]
 fn test_promote_file_basic_and_overwrite() {
-    use mkv_core::domain::promote_file;
-    use tempfile::tempdir;
-
     let tmp = tempdir().unwrap();
     let staged = tmp.path().join("staged.txt");
     let dest = tmp.path().join("sub_dir").join("final.txt");
@@ -806,7 +526,6 @@ fn test_promote_file_basic_and_overwrite() {
     assert!(!staged.exists());
     assert_eq!(std::fs::read(&dest).unwrap(), b"initial content");
 
-    // Overwrite existing final destination
     let staged2 = tmp.path().join("staged2.txt");
     std::fs::write(&staged2, b"updated content").unwrap();
     assert!(promote_file(&staged2, &dest).is_ok());
@@ -814,23 +533,14 @@ fn test_promote_file_basic_and_overwrite() {
     assert_eq!(std::fs::read(&dest).unwrap(), b"updated content");
 }
 
-/// A missing `staged` makes the opening `rename` fail `NotFound`, so promotion returns that
-/// error and creates no destination. This is the `NotFound` half of the "a refused promotion
-/// leaves nothing behind" invariant; on Unix,
-/// `test_promote_file_readonly_source_parent_returns_error` pins the `PermissionDenied` half.
-///
-/// It cannot show whether the copy fallback ran: `std::fs::copy` opens the source before the
-/// destination, so a missing source fails it with the same `NotFound`. The gate's one
-/// observable consequence is the read-only-source case.
+/// A missing `staged` fails the opening `rename` with `NotFound` and creates no destination.
+/// `std::fs::copy` would fail the same way, so this cannot show whether the copy fallback
+/// ran; `test_promote_file_readonly_source_parent_returns_error` covers the gate itself.
 #[test]
 fn test_promote_file_missing_source_creates_no_destination() {
-    use mkv_core::domain::promote_file;
-    use tempfile::tempdir;
-
     let tmp = tempdir().unwrap();
-    let dest_dir = tmp.path().join("out");
     let staged = tmp.path().join("does_not_exist.bin");
-    let dest = dest_dir.join("final.bin");
+    let dest = tmp.path().join("out").join("final.bin");
 
     let err = promote_file(&staged, &dest).expect_err("missing staged file must not promote");
     assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
@@ -840,28 +550,17 @@ fn test_promote_file_missing_source_creates_no_destination() {
     );
 }
 
-/// Pins the one case where gating the fallback on a device boundary changes the *outcome*,
-/// so the trade is deliberate rather than an accident of the refactor.
+/// The one case where gating the copy fallback on a device boundary changes the outcome.
 ///
-/// `rename(2)` requires write permission on both parents. With the staged file's own
-/// directory read-only and the destination writable, the rename fails `PermissionDenied`
-/// while the payload stays perfectly readable — and the copy path would have succeeded:
-/// it reads the source, writes a temporary sibling into the writable destination, and
-/// renames within that single directory. Before the gate this promoted; now it errors.
+/// `rename(2)` requires write permission on both parents. With the staged file's directory
+/// read-only, the rename fails `PermissionDenied` although a copy could still read the
+/// payload; `promote_file` deliberately reports the error instead of copying.
 ///
-/// No caller in this crate is affected — `extract` and `remux` stage into
-/// `tempdir_in(<destination>)` and font promotion into `<fonts_dir>/.font_staging`, all
-/// created by this process — but `promote_file` is public, so a future caller staging
-/// elsewhere meets this.
-///
-/// Root bypasses the mode bits, which would let the rename succeed and make the assertion
-/// meaningless, so the test skips there.
+/// Root bypasses the mode bits, which would let the rename succeed, so the test skips there.
 #[cfg(unix)]
 #[test]
 fn test_promote_file_readonly_source_parent_returns_error() {
-    use mkv_core::domain::promote_file;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
-    use tempfile::tempdir;
 
     if std::fs::metadata("/proc/self").is_ok_and(|m| m.uid() == 0) {
         eprintln!("skipped: root bypasses directory permissions");
@@ -878,7 +577,7 @@ fn test_promote_file_readonly_source_parent_returns_error() {
     let dest = tmp.path().join("final.bin");
     let err = promote_file(&staged, &dest).expect_err("a read-only source parent must not promote");
 
-    // Restore write permission so the tempdir can be torn down on every platform.
+    // Restore write permission so the tempdir can be torn down.
     std::fs::set_permissions(&staged_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
@@ -888,15 +587,13 @@ fn test_promote_file_readonly_source_parent_returns_error() {
     );
 }
 
-/// Covers the copy fallback on the path that can still reach it, so the gate added to
-/// `promote_file` cannot be over-narrowed into deleting the copy outright. Skips where the
-/// host offers no second filesystem, which is the only portable way to force `EXDEV`.
+/// Covers the copy fallback for a genuine `EXDEV`. Skips where the host offers no second
+/// filesystem, which is the only portable way to force one.
 #[cfg(unix)]
 #[test]
 fn test_promote_file_cross_device_copy() {
-    use mkv_core::domain::promote_file;
     use std::os::unix::fs::MetadataExt;
-    use tempfile::{tempdir, Builder};
+    use tempfile::Builder;
 
     let src_dir = tempdir().unwrap();
     let src_dev = std::fs::metadata(src_dir.path()).unwrap().dev();
@@ -921,12 +618,8 @@ fn test_promote_file_cross_device_copy() {
     assert_eq!(std::fs::read(&dest).unwrap(), b"cross-device payload");
     assert!(!staged.exists(), "the copy path consumes the staged file");
 
-    // The copy writes a temporary sibling into the destination directory and renames it over
-    // the target. A sibling left behind would sit unnoticed in whatever that directory holds in
-    // production, so assert the directory is left holding only the promoted file. Naming the
-    // sibling here would re-hardcode the prefix in `promote_file`; if it were renamed, a filter
-    // on the old prefix would pass for the wrong reason. Counting entries also catches a
-    // leaked `.bak.` backup, which no prefix filter for one scheme would see.
+    // Count entries rather than filtering on a prefix, so a leaked temporary sibling or
+    // `.bak.` backup is caught whatever it is named.
     let leftovers: Vec<_> = std::fs::read_dir(dest_dir.path())
         .unwrap()
         .filter_map(Result::ok)
@@ -941,15 +634,6 @@ fn test_promote_file_cross_device_copy() {
 
 #[test]
 fn test_unique_file_token_distinct() {
-    use mkv_core::domain::unique_file_token;
-
-    let t1 = unique_file_token();
-    let t2 = unique_file_token();
-    assert_ne!(t1, t2);
-
-    let parts: Vec<&str> = t1.split('.').collect();
-    assert_eq!(parts.len(), 3);
-    assert_eq!(parts[0], std::process::id().to_string());
-    assert!(parts[1].parse::<u128>().is_ok());
-    assert!(parts[2].parse::<u64>().is_ok());
+    let tokens: HashSet<String> = (0..64).map(|_| unique_file_token()).collect();
+    assert_eq!(tokens.len(), 64);
 }

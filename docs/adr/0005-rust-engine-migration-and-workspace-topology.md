@@ -1,6 +1,6 @@
 # 0005. Rust Media Engine Migration and Workspace Topology
 
-> **Status**: Accepted (Completed in ADR-0010)
+> **Status**: Accepted (Completed in ADR-0010; amended 2026-09-28)
 > **Date**: 2026-04-01
 > **Context**: System Workspace Topology
 
@@ -21,3 +21,8 @@ We decided to migrate the Python engine to Rust within a unified root Cargo work
 - PyInstaller sidecar build steps (`build-sidecars.sh` / `build-sidecars.ps1`) will be eliminated once migration completes.
 - In-process execution couples desktop GUI stability to engine stability; memory leaks or unexpected panics in `mkv-core` could crash the desktop process. `mkv-core` must be panic-free and use strict `Result` propagation.
 - External MKVToolNix and FFmpeg binaries remain hard runtime requirements for remuxing and transcoding.
+
+## Amendment — 2026-09-28
+
+- **Sidecar build steps are gone.** The migration completed (ADR-0010); `build-sidecars.*` no longer exist and the desktop host consumes `mkv-core` in-process.
+- **Panic containment, not panic freedom.** `mkv-core` still propagates errors as `Result`, but the runtime no longer relies on it never panicking: a panicking worker task completes its item as `error` while the batch continues, and a panic escaping the pipeline is caught at the desktop bridge's join boundary (ADR-0007). Both require the release profile to unwind; `[profile.release]` must never set `panic = "abort"`.

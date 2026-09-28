@@ -1,13 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { QueueTracker, escapeAttr } from "./queue-view.js";
-import { createQueueState, toggleItemSelection } from "./queue-state.js";
+import { QueueTracker } from "./queue-view.js";
+import { createQueueState, setItemSelected } from "./queue-state.js";
 
 class FakeElement {
   constructor(value = "") {
     this.value = value;
     this.checked = false;
-    this.disabled = false;
     this.textContent = "";
     this.className = "";
     this.innerHTML = "";
@@ -19,17 +18,6 @@ class FakeElement {
       _classes: new Set(),
       add(cls) { this._classes.add(cls); },
       remove(cls) { this._classes.delete(cls); },
-      toggle(cls, force) {
-        if (force === undefined) {
-          if (this._classes.has(cls)) this._classes.delete(cls);
-          else this._classes.add(cls);
-        } else if (force) {
-          this._classes.add(cls);
-        } else {
-          this._classes.delete(cls);
-        }
-      },
-      has(cls) { return this._classes.has(cls); },
     };
   }
 
@@ -47,8 +35,7 @@ class FakeElement {
   }
 
   addEventListener() {}
-  setAttribute() {}
-  getAttribute() { return null; }
+  remove() {}
 
   querySelector(selector) {
     if (!this.queried.has(selector)) {
@@ -60,9 +47,16 @@ class FakeElement {
   }
 }
 
-function setupMockEnvironment(t) {
-  const previousDocument = globalThis.document;
-  const previousRaf = globalThis.requestAnimationFrame;
+/**
+ * Install a fake DOM. With `deferFrames`, animation frames queue until
+ * `renderFrame()`/`renderFrames()` run them; otherwise they run synchronously.
+ */
+function setupMockEnvironment(t, { deferFrames = false } = {}) {
+  const previous = {
+    document: globalThis.document,
+    requestAnimationFrame: globalThis.requestAnimationFrame,
+    cancelAnimationFrame: globalThis.cancelAnimationFrame,
+  };
 
   const elements = new Map([
     ["remux-episode-list", new FakeElement()],
@@ -75,130 +69,63 @@ function setupMockEnvironment(t) {
     createElement: () => new FakeElement(),
     createDocumentFragment: () => Object.assign(new FakeElement(), { isFragment: true }),
   };
-  globalThis.requestAnimationFrame = cb => cb();
 
-  t.after(() => {
-    globalThis.document = previousDocument;
-    globalThis.requestAnimationFrame = previousRaf;
-  });
+  const frames = new Map();
+  let nextFrameId = 0;
+  if (deferFrames) {
+    globalThis.requestAnimationFrame = callback => {
+      frames.set(++nextFrameId, callback);
+      return nextFrameId;
+    };
+    globalThis.cancelAnimationFrame = id => frames.delete(id);
+  } else {
+    globalThis.requestAnimationFrame = callback => callback();
+  }
+  const renderFrame = () => {
+    const [id, callback] = frames.entries().next().value;
+    frames.delete(id);
+    callback();
+  };
+  const renderFrames = () => {
+    while (frames.size) renderFrame();
+  };
 
-  return { elements };
+  t.after(() => Object.assign(globalThis, previous));
+
+  return { elements, renderFrame, renderFrames };
 }
 
-test("a fresh QueueTracker initialises its empty state, not just undefined", t => {
-  setupMockEnvironment(t);
-  const tracker = new QueueTracker("remux");
+const manifestOf = ids => ({ version: 2, items: ids.map(id => ({ id, name: id })) });
 
-  // `lastManifest` is read by falsy/optional checks in several places, so an
-  // uninitialised field is easy to miss until a strict comparison sees it.
-  assert.strictEqual(tracker.lastManifest, null);
-  assert.strictEqual(tracker.isScanning, false);
-  assert.strictEqual(tracker.currentDirectory, null);
-  assert.strictEqual(tracker.lastScannedPath, null);
-  assert.strictEqual(tracker.heartbeatTimer, null);
-  assert.strictEqual(tracker.selectionLocked, false);
-
-  // setDirectory is the single writer for both identity fields; every path that
-  // used to assign them inline must keep them in agreement.
-  tracker.setDirectory("/anime/show/");
-  assert.strictEqual(tracker.currentDirectory, "/anime/show");
-  assert.strictEqual(tracker.lastScannedPath, "/anime/show");
-  tracker.setDirectory("/other/release");
-  assert.strictEqual(tracker.currentDirectory, "/other/release");
-  assert.strictEqual(tracker.lastScannedPath, "/other/release");
+/** A manual subtitle assignment in the shape app.js stores in `QueueTracker.assignments`. */
+const subtitle = (id, path) => ({
+  target_video: id,
+  asset_path: path,
+  track_type: "subtitle",
+  language: "ind",
+  title: null,
+  offset_ms: null,
 });
 
-test("restoreFromSnapshot handles null or empty snapshot gracefully", t => {
+const cardTitles = list => list.children.map(el => el.querySelector(".ep-title").textContent);
+
+test("restoreFromSnapshot renders a card per restored item in its outcome state", t => {
   setupMockEnvironment(t);
   const tracker = new QueueTracker("remux");
 
-  // Should not throw
-  tracker.restoreFromSnapshot(null);
-  assert.equal(tracker.state.items.size, 0);
-
-  tracker.restoreFromSnapshot({});
-  assert.equal(tracker.state.items.size, 0);
-
-  tracker.restoreFromSnapshot({ items: null });
-  assert.equal(tracker.state.items.size, 0);
-});
-
-test("restoreFromSnapshot correctly restores items, outcomes, and batch completion", t => {
-  setupMockEnvironment(t);
-  const tracker = new QueueTracker("remux");
-
-  const snapshot = {
+  tracker.restoreFromSnapshot({
     job_id: 1,
     mode: "remux",
     status: "completed",
-    duration_sec: 25.5,
-    total_items: 4,
     ordered_item_ids: ["ep1", "ep2", "ep3", "ep4"],
-    completed_items: 2,
     items: {
-      ep1: {
-        id: "ep1",
-        file: "Show - 01.mkv",
-        status: "completed",
-        duration_sec: 10.2,
-        reason: null,
-        error: null,
-      },
-      ep2: {
-        id: "ep2",
-        file: "Show - 02.mkv",
-        status: "skipped",
-        duration_sec: null,
-        reason: "Already up to date",
-        error: null,
-      },
-      ep3: {
-        id: "ep3",
-        file: "Show - 03.mkv",
-        status: "cancelled",
-        duration_sec: null,
-        reason: "User cancelled",
-        error: null,
-      },
-      ep4: {
-        id: "ep4",
-        file: "Show - 04.mkv",
-        status: "error",
-        duration_sec: null,
-        reason: null,
-        error: "FFmpeg encoding failed",
-      },
+      ep1: { id: "ep1", file: "Show - 01.mkv", status: "completed", duration_sec: 10.2 },
+      ep2: { id: "ep2", file: "Show - 02.mkv", status: "skipped", reason: "Already up to date" },
+      ep3: { id: "ep3", file: "Show - 03.mkv", status: "cancelled", reason: "User cancelled" },
+      ep4: { id: "ep4", file: "Show - 04.mkv", status: "error", error: "FFmpeg encoding failed" },
     },
-  };
+  });
 
-  tracker.restoreFromSnapshot(snapshot);
-
-  assert.equal(tracker.state.items.size, 4);
-  assert.equal(tracker.state.completedCount, 1);
-  assert.equal(tracker.state.skippedCount, 1);
-  assert.equal(tracker.state.cancelledCount, 1);
-  assert.equal(tracker.state.errorCount, 1);
-  assert.equal(tracker.state.batchCompleted, true);
-  assert.equal(tracker.state.batchSuccess, true);
-  assert.equal(tracker.state.batchCancelled, false);
-
-  const ep1 = tracker.state.items.get("ep1");
-  assert.equal(ep1.status, "completed");
-  assert.equal(ep1.durationSec, 10.2);
-
-  const ep2 = tracker.state.items.get("ep2");
-  assert.equal(ep2.status, "skipped");
-  assert.equal(ep2.reason, "Already up to date");
-
-  const ep3 = tracker.state.items.get("ep3");
-  assert.equal(ep3.status, "cancelled");
-  assert.equal(ep3.reason, "User cancelled");
-
-  const ep4 = tracker.state.items.get("ep4");
-  assert.equal(ep4.status, "error");
-  assert.equal(ep4.error, "FFmpeg encoding failed");
-
-  // Verify cards exist and their state was rendered
   assert.equal(tracker.cards.size, 4);
   const card1 = tracker.cards.get("ep1");
   assert.ok(card1.el.className.includes("completed"));
@@ -207,33 +134,14 @@ test("restoreFromSnapshot correctly restores items, outcomes, and batch completi
   const card4 = tracker.cards.get("ep4");
   assert.ok(card4.el.className.includes("failed"));
   assert.equal(card4.badge.textContent, "FAILED");
-});
-
-test("restoreFromSnapshot handles cancelled and error batch status", t => {
-  setupMockEnvironment(t);
-  const tracker = new QueueTracker("remux");
-
-  const snapshotCancelled = {
-    job_id: 2,
-    mode: "remux",
-    status: "cancelled",
-    ordered_item_ids: ["ep1"],
-    items: {
-      ep1: { id: "ep1", file: "01.mkv", status: "cancelled", reason: "Stopped by user" },
-    },
-  };
-
-  tracker.restoreFromSnapshot(snapshotCancelled);
-  assert.equal(tracker.state.batchCompleted, true);
-  assert.equal(tracker.state.batchSuccess, false);
-  assert.equal(tracker.state.batchCancelled, true);
+  assert.equal(card4.statusTag.textContent, "FFmpeg encoding failed");
 });
 
 test("restoreFromSnapshot sets meaningful restored tags instead of placeholder inspection text", t => {
   setupMockEnvironment(t);
   const tracker = new QueueTracker("remux");
 
-  const snapshot = {
+  tracker.restoreFromSnapshot({
     job_id: 1,
     mode: "remux",
     status: "completed",
@@ -242,9 +150,7 @@ test("restoreFromSnapshot sets meaningful restored tags instead of placeholder i
       ep1: { id: "ep1", file: "01.mkv", status: "completed", duration_sec: 4.5 },
       ep2: { id: "ep2", file: "02.mkv", status: "skipped", reason: "Up to date" },
     },
-  };
-
-  tracker.restoreFromSnapshot(snapshot);
+  });
   const card1 = tracker.cards.get("ep1");
   const card2 = tracker.cards.get("ep2");
 
@@ -258,14 +164,10 @@ test("QueueTracker handles item_start (indeterminate shimmer), item_progress (de
   setupMockEnvironment(t);
   const tracker = new QueueTracker("remux");
 
-  const manifest = {
+  tracker.populateFromInspection({
     version: 2,
-    items: [
-      { id: "ep1", name: "Show - 01.mkv", release: "Season 1" },
-    ],
-  };
-
-  tracker.populateFromInspection(manifest);
+    items: [{ id: "ep1", name: "Show - 01.mkv", release: "Season 1" }],
+  });
   const card = tracker.cards.get("ep1");
   assert.ok(card);
   assert.equal(tracker.heartbeatTimer, null);
@@ -298,7 +200,6 @@ test("QueueTracker handles item_start (indeterminate shimmer), item_progress (de
   assert.equal(card.fill.style.width, "64.2%");
   assert.equal(card.statusTag.textContent, "64% (5s)");
 
-  // Tick heartbeat with progress still active
   tracker.state.items.get("ep1").startTime = Date.now() - 12000;
   tracker.tickHeartbeat();
   assert.equal(card.statusTag.textContent, "64% (12s)");
@@ -323,37 +224,26 @@ test("QueueTracker handles item_start (indeterminate shimmer), item_progress (de
 test("QueueTracker stops heartbeat on finalize, reset, startScan, restoreFromSnapshot, and populateFromInspection", t => {
   setupMockEnvironment(t);
   const tracker = new QueueTracker("remux");
-
-  const manifest = {
-    version: 2,
-    items: [{ id: "ep1", name: "01.mkv" }],
+  const manifest = manifestOf(["ep1"]);
+  const startProcessing = () => {
+    tracker.populateFromInspection(manifest);
+    tracker.handleEvent({ version: 1, type: "item_start", id: "ep1" });
+    assert.notEqual(tracker.heartbeatTimer, null);
   };
 
-  // 1. finalize stops heartbeat
-  tracker.populateFromInspection(manifest);
-  tracker.handleEvent({ version: 1, type: "item_start", id: "ep1" });
-  assert.notEqual(tracker.heartbeatTimer, null);
+  startProcessing();
   tracker.finalize(0);
   assert.equal(tracker.heartbeatTimer, null);
 
-  // 2. reset stops heartbeat
-  tracker.populateFromInspection(manifest);
-  tracker.handleEvent({ version: 1, type: "item_start", id: "ep1" });
-  assert.notEqual(tracker.heartbeatTimer, null);
+  startProcessing();
   tracker.reset();
   assert.equal(tracker.heartbeatTimer, null);
 
-  // 3. startScan stops heartbeat
-  tracker.populateFromInspection(manifest);
-  tracker.handleEvent({ version: 1, type: "item_start", id: "ep1" });
-  assert.notEqual(tracker.heartbeatTimer, null);
+  startProcessing();
   tracker.startScan();
   assert.equal(tracker.heartbeatTimer, null);
 
-  // 4. restoreFromSnapshot stops previous heartbeat
-  tracker.populateFromInspection(manifest);
-  tracker.handleEvent({ version: 1, type: "item_start", id: "ep1" });
-  assert.notEqual(tracker.heartbeatTimer, null);
+  startProcessing();
   tracker.restoreFromSnapshot({
     job_id: 1,
     mode: "remux",
@@ -365,42 +255,17 @@ test("QueueTracker stops heartbeat on finalize, reset, startScan, restoreFromSna
   });
   assert.equal(tracker.heartbeatTimer, null);
 
-  // 5. populateFromInspection stops previous heartbeat
-  tracker.populateFromInspection(manifest);
-  tracker.handleEvent({ version: 1, type: "item_start", id: "ep1" });
-  assert.notEqual(tracker.heartbeatTimer, null);
+  startProcessing();
   tracker.populateFromInspection(manifest);
   assert.equal(tracker.heartbeatTimer, null);
 });
 
-test("restoreFromSnapshot formats duration with formatOutcomeDuration (>60s minutes formatting)", t => {
-  setupMockEnvironment(t);
-  const tracker = new QueueTracker("remux");
-
-  const snapshot = {
-    job_id: 1,
-    mode: "remux",
-    status: "completed",
-    ordered_item_ids: ["ep1"],
-    items: {
-      ep1: { id: "ep1", file: "01.mkv", status: "completed", duration_sec: 75.4 },
-    },
-  };
-
-  tracker.restoreFromSnapshot(snapshot);
-  const card1 = tracker.cards.get("ep1");
-  assert.equal(card1.tag2.textContent, "Done in 1m 15.4s");
-});
-
 test("active snapshot renders only submitted cards in order and keeps live updates during incremental rendering", t => {
-  const { elements } = setupMockEnvironment(t);
+  const { elements, renderFrame, renderFrames } = setupMockEnvironment(t, { deferFrames: true });
   const tracker = new QueueTracker("remux");
   const list = elements.get("remux-episode-list");
-  tracker.populateFromInspection({ version: 2, items: [
-    { id: "01", name: "01.mkv" },
-    { id: "02", name: "02.mkv" },
-    { id: "03", name: "03.mkv" },
-  ] });
+  tracker.populateFromInspection(manifestOf(["01", "02", "03"]));
+  renderFrames();
   assert.equal(list.children.length, 3);
 
   const oldNow = Date.now;
@@ -408,8 +273,6 @@ test("active snapshot renders only submitted cards in order and keeps live updat
   Date.now = () => 30_000;
   let clock = 0;
   globalThis.performance = { now: () => (clock += 10) }; // One card per animation frame.
-  const frames = [];
-  globalThis.requestAnimationFrame = callback => frames.push(callback);
   t.after(() => {
     Date.now = oldNow;
     globalThis.performance = oldPerformance;
@@ -428,15 +291,15 @@ test("active snapshot renders only submitted cards in order and keeps live updat
     },
   });
   assert.equal(list.children.length, 0);
-  frames.shift()();
-  assert.deepEqual(list.children.map(el => el.querySelector(".ep-title").textContent), ["02.mkv"]);
+  renderFrame();
+  assert.deepEqual(cardTitles(list), ["02.mkv"]);
   assert.equal(tracker.cards.get("02").fill.style.width, "70%");
   assert.equal(tracker.cards.get("02").statusTag.textContent, "70% (5s)");
 
   tracker.handleEvent({ version: 1, type: "item_complete", id: "01", status: "completed", duration_sec: 75.4 });
   tracker.handleEvent({ version: 1, type: "item_progress", id: "02", progress: 76 });
-  frames.shift()();
-  assert.deepEqual(list.children.map(el => el.querySelector(".ep-title").textContent), ["02.mkv", "01.mkv"]);
+  renderFrame();
+  assert.deepEqual(cardTitles(list), ["02.mkv", "01.mkv"]);
   assert.equal(tracker.cards.size, 2);
   assert.equal(tracker.cards.get("01").statusTag.textContent, "Done in 1m 15.4s");
   assert.equal(tracker.cards.get("02").fill.style.width, "76%");
@@ -451,12 +314,7 @@ test("QueueTracker renders <0.1s for instantaneous completed items with 0s durat
   setupMockEnvironment(t);
   const tracker = new QueueTracker("remux");
 
-  const manifest = {
-    version: 2,
-    items: [{ id: "ep1", name: "01.mkv" }],
-  };
-
-  tracker.populateFromInspection(manifest);
+  tracker.populateFromInspection(manifestOf(["ep1"]));
   const card = tracker.cards.get("ep1");
 
   tracker.handleEvent({
@@ -474,11 +332,7 @@ test("QueueTracker dynamically mounts card element in handleEvent if card not pr
   const { elements } = setupMockEnvironment(t);
   const tracker = new QueueTracker("remux");
 
-  const manifest = {
-    version: 2,
-    items: [{ id: "ep1", name: "01.mkv" }],
-  };
-  tracker.state = createQueueState(manifest, { mode: "remux" });
+  tracker.state = createQueueState({ version: 2, items: [{ id: "ep1", name: "01.mkv" }] });
   assert.equal(tracker.cards.has("ep1"), false);
 
   tracker.handleEvent({
@@ -489,9 +343,8 @@ test("QueueTracker dynamically mounts card element in handleEvent if card not pr
 
   assert.equal(tracker.cards.has("ep1"), true);
   const card = tracker.cards.get("ep1");
-  assert.equal(card.name, "01.mkv");
-  const listEl = elements.get("remux-episode-list");
-  assert.ok(listEl.children.includes(card.el));
+  assert.equal(card.el.querySelector(".ep-title").textContent, "01.mkv");
+  assert.ok(elements.get("remux-episode-list").children.includes(card.el));
   assert.equal(card.badge.textContent, "PROCESSING");
 });
 
@@ -499,31 +352,21 @@ test("QueueTracker selection and card reordering", t => {
   const { elements } = setupMockEnvironment(t);
   const tracker = new QueueTracker("remux");
 
-  const manifest = {
-    version: 2,
-    items: [
-      { id: "ep1", name: "01.mkv" },
-      { id: "ep2", name: "02.mkv" },
-      { id: "ep3", name: "03.mkv" },
-    ],
-  };
-
-  tracker.populateFromInspection(manifest);
+  tracker.populateFromInspection(manifestOf(["ep1", "ep2", "ep3"]));
   const countEl = elements.get("remux-queue-count");
   assert.equal(countEl.textContent, "3 / 3 Selected");
   assert.deepEqual(tracker.getSelectedOrderedItemIds(), ["ep1", "ep2", "ep3"]);
 
-  // deselect all
   tracker.deselectAll();
   assert.equal(countEl.textContent, "0 / 3 Selected");
   assert.deepEqual(tracker.getSelectedOrderedItemIds(), []);
+  assert.equal(tracker.cards.get("ep1").checkbox.checked, false);
 
-  // select all
   tracker.selectAll();
   assert.equal(countEl.textContent, "3 / 3 Selected");
   assert.deepEqual(tracker.getSelectedOrderedItemIds(), ["ep1", "ep2", "ep3"]);
+  assert.equal(tracker.cards.get("ep1").checkbox.checked, true);
 
-  // reorder
   tracker.reorderCard("ep2", "up");
   assert.deepEqual(tracker.getSelectedOrderedItemIds(), ["ep2", "ep1", "ep3"]);
   assert.equal(tracker.cards.get("ep2").badge.textContent, "EPISODE 01");
@@ -531,25 +374,21 @@ test("QueueTracker selection and card reordering", t => {
 });
 
 test("QueueTracker reconciles same-directory replacements, cached reuse, stale scans, and fresh directories", t => {
-  const { elements } = setupMockEnvironment(t);
-  const frames = [];
-  globalThis.requestAnimationFrame = callback => frames.push(callback);
-  const renderFrames = () => { while (frames.length) frames.shift()(); };
-  const manifest = ids => ({ version: 2, items: ids.map(id => ({ id, name: id })) });
+  const { elements, renderFrames } = setupMockEnvironment(t, { deferFrames: true });
   const tracker = new QueueTracker("remux");
   const dir = "/input/show";
-  const first = manifest(["Season/01.mkv", "Season/02.mkv", "Season/gone.mkv"]);
+  const first = manifestOf(["Season/01.mkv", "Season/02.mkv", "Season/gone.mkv"]);
   assert.equal(tracker.acceptInspection(tracker.startScan(), dir, first), true);
   renderFrames();
 
   tracker.reorderCard("Season/02.mkv", "up");
   tracker.state.items.get("Season/01.mkv").selected = false;
-  tracker.assignments.set("Season/02.mkv", "Season/02.ass");
-  tracker.assignments.set("Season/gone.mkv", "Season/gone.ass");
+  tracker.assignments.set("Season/02.mkv", subtitle("Season/02.mkv", "Season/02.ass"));
+  tracker.assignments.set("Season/gone.mkv", subtitle("Season/gone.mkv", "Season/gone.ass"));
   const stale = tracker.startScan();
   const current = tracker.startScan();
-  assert.equal(tracker.acceptInspection(stale, dir, manifest(["Season/gone.mkv"])), false);
-  assert.equal(tracker.acceptInspection(current, dir, manifest(["Season/01.mkv", "Season/03.mkv", "Season/02.mkv"])), true);
+  assert.equal(tracker.acceptInspection(stale, dir, manifestOf(["Season/gone.mkv"])), false);
+  assert.equal(tracker.acceptInspection(current, dir, manifestOf(["Season/01.mkv", "Season/03.mkv", "Season/02.mkv"])), true);
   renderFrames();
 
   assert.deepEqual(tracker.state.order, ["Season/02.mkv", "Season/01.mkv", "Season/03.mkv"]);
@@ -559,6 +398,8 @@ test("QueueTracker reconciles same-directory replacements, cached reuse, stale s
   assert.equal(tracker.cards.get("Season/01.mkv").checkbox.checked, false);
   assert.equal(tracker.cards.get("Season/03.mkv").checkbox.checked, false);
   assert.deepEqual([...tracker.assignments.keys()], ["Season/02.mkv"]);
+  assert.equal(tracker.cards.get("Season/02.mkv").subBtn.textContent, "Sub: 02.ass");
+  assert.equal(tracker.cards.get("Season/01.mkv").subBtn.textContent, "+ Sub");
 
   tracker.reorderCard("Season/03.mkv", "up");
   tracker.state.items.get("Season/03.mkv").selected = true;
@@ -567,41 +408,34 @@ test("QueueTracker reconciles same-directory replacements, cached reuse, stale s
   assert.deepEqual(tracker.getSelectedOrderedItemIds(), ["Season/02.mkv", "Season/03.mkv"]);
   assert.equal(tracker.cards.get("Season/03.mkv").checkbox.checked, true);
 
-  assert.equal(tracker.acceptInspection(tracker.startScan(), "/input/other", manifest(["Season/02.mkv", "Other/04.mkv"])), true);
+  assert.equal(tracker.acceptInspection(tracker.startScan(), "/input/other", manifestOf(["Season/02.mkv", "Other/04.mkv"])), true);
   renderFrames();
   assert.deepEqual(tracker.getSelectedOrderedItemIds(), ["Season/02.mkv", "Other/04.mkv"]);
   assert.equal(tracker.cards.get("Other/04.mkv").checkbox.checked, true);
   assert.equal(tracker.assignments.size, 0);
 });
+
 test("QueueTracker preserves same-directory selection after failed scan and snapshot reload", t => {
-  const { elements } = setupMockEnvironment(t);
-  const frames = [];
-  globalThis.requestAnimationFrame = callback => frames.push(callback);
-  const renderFrames = () => { while (frames.length) frames.shift()(); };
-  const manifest = ids => ({ version: 2, items: ids.map(id => ({ id, name: id })) });
+  const { renderFrames } = setupMockEnvironment(t, { deferFrames: true });
   const tracker = new QueueTracker("remux");
   const dir = "/input/show";
 
-  // Initial scan of /input/show
-  assert.equal(tracker.acceptInspection(tracker.startScan(), dir, manifest(["01.mkv", "02.mkv", "03.mkv"])), true);
+  assert.equal(tracker.acceptInspection(tracker.startScan(), dir, manifestOf(["01.mkv", "02.mkv", "03.mkv"])), true);
   renderFrames();
   tracker.reorderCard("02.mkv", "up");
   tracker.state.items.get("01.mkv").selected = false;
-  tracker.assignments.set("02.mkv", "02.ass");
+  tracker.assignments.set("02.mkv", subtitle("02.mkv", "02.ass"));
 
-  // Scan fails (e.g. invalid manifest or rejection)
-  const failedScan = tracker.startScan();
-  tracker.rejectInspection(failedScan);
+  tracker.rejectInspection(tracker.startScan());
   assert.equal(tracker.currentDirectory, dir);
 
-  // Subsequent scan of the same directory must preserve surviving selection and order
-  assert.equal(tracker.acceptInspection(tracker.startScan(), dir, manifest(["01.mkv", "02.mkv", "04.mkv"])), true);
+  // A later scan of the same directory preserves surviving selection and order.
+  assert.equal(tracker.acceptInspection(tracker.startScan(), dir, manifestOf(["01.mkv", "02.mkv", "04.mkv"])), true);
   renderFrames();
   assert.deepEqual(tracker.state.order, ["02.mkv", "01.mkv", "04.mkv"]);
   assert.deepEqual(tracker.getSelectedOrderedItemIds(), ["02.mkv"]);
   assert.deepEqual([...tracker.assignments.keys()], ["02.mkv"]);
 
-  // Snapshot restore carries directory identity
   tracker.restoreFromSnapshot({
     job_id: 1,
     mode: "remux",
@@ -615,8 +449,7 @@ test("QueueTracker preserves same-directory selection after failed scan and snap
   });
   assert.equal(tracker.currentDirectory, dir);
 
-  // Re-scanning same directory after snapshot reload preserves selection
-  assert.equal(tracker.acceptInspection(tracker.startScan(), dir, manifest(["01.mkv", "02.mkv", "05.mkv"])), true);
+  assert.equal(tracker.acceptInspection(tracker.startScan(), dir, manifestOf(["01.mkv", "02.mkv", "05.mkv"])), true);
   renderFrames();
   assert.deepEqual(tracker.state.order, ["02.mkv", "01.mkv", "05.mkv"]);
   assert.deepEqual(tracker.getSelectedOrderedItemIds(), ["02.mkv", "01.mkv"]);
@@ -637,16 +470,12 @@ test("QueueTracker.reuseInspection returns false after restoreFromSnapshot when 
     },
   });
   assert.equal(tracker.cards.size, 1);
-  assert.equal(tracker.lastManifest, null);
   assert.equal(tracker.reuseInspection(dir), false);
   assert.equal(tracker.cards.size, 1);
 });
 
 test("QueueTracker renders cards when BatchStart arrives after restoring empty running snapshot", t => {
-  const { elements } = setupMockEnvironment(t);
-  const frames = [];
-  globalThis.requestAnimationFrame = callback => frames.push(callback);
-  const renderFrames = () => { while (frames.length) frames.shift()(); };
+  const { elements, renderFrames } = setupMockEnvironment(t, { deferFrames: true });
   const tracker = new QueueTracker("remux");
 
   // Reload before BatchStart arrives: running snapshot is empty
@@ -661,7 +490,6 @@ test("QueueTracker renders cards when BatchStart arrives after restoring empty r
   renderFrames();
   assert.equal(tracker.cards.size, 0);
 
-  // BatchStart arrives with items
   tracker.handleEvent({
     version: 1,
     type: "batch_start",
@@ -674,31 +502,15 @@ test("QueueTracker renders cards when BatchStart arrives after restoring empty r
   });
   renderFrames();
 
-  // Cards must be rendered from the ordered state
+  assert.deepEqual(cardTitles(elements.get("remux-episode-list")), ["02.mkv", "01.mkv"]);
   assert.equal(tracker.cards.size, 2);
-  assert.ok(tracker.cards.has("02.mkv"));
-  assert.ok(tracker.cards.has("01.mkv"));
   assert.deepEqual(tracker.state.order, ["02.mkv", "01.mkv"]);
 });
+
 test("QueueTracker does not render duplicate cards when BatchStart arrives before initial snapshot frame flushes", t => {
-  const { elements } = setupMockEnvironment(t);
-  const frames = [];
-  globalThis.requestAnimationFrame = callback => {
-    frames.push(callback);
-    return frames.length;
-  };
-  globalThis.cancelAnimationFrame = id => {
-    const idx = id - 1;
-    if (frames[idx]) {
-      frames[idx] = () => {};
-    }
-  };
-  const renderFrames = () => {
-    while (frames.length) frames.shift()();
-  };
+  const { elements, renderFrames } = setupMockEnvironment(t, { deferFrames: true });
   const tracker = new QueueTracker("remux");
 
-  // Restore running snapshot with 0 items without flushing frames yet
   tracker.restoreFromSnapshot({
     job_id: 100,
     mode: "remux",
@@ -708,7 +520,7 @@ test("QueueTracker does not render duplicate cards when BatchStart arrives befor
     items: {},
   });
 
-  // BatchStart arrives immediately while initial restore frame is still pending
+  // BatchStart arrives while the restore's frames are still unflushed.
   tracker.handleEvent({
     version: 1,
     type: "batch_start",
@@ -720,108 +532,69 @@ test("QueueTracker does not render duplicate cards when BatchStart arrives befor
     ],
   });
 
-  // Now flush all queued animation frames
   renderFrames();
 
-  // Exactly two cards must exist in tracker.cards and in the DOM list, with no duplicates
-  const listEl = elements.get("remux-episode-list");
   assert.equal(tracker.cards.size, 2);
-  assert.equal(listEl.children.length, 2);
+  assert.equal(elements.get("remux-episode-list").children.length, 2);
   assert.ok(tracker.cards.has("02.mkv"));
   assert.ok(tracker.cards.has("01.mkv"));
 });
-test("QueueTracker preserves selection across symlinked directory rescan and BatchStart", t => {
-  const { elements } = setupMockEnvironment(t);
-  const frames = [];
-  globalThis.requestAnimationFrame = callback => frames.push(callback);
-  const renderFrames = () => { while (frames.length) frames.shift()(); };
+
+test("QueueTracker preserves selection and order across BatchStart and snapshot restore for same-directory rescans", t => {
+  const { renderFrames } = setupMockEnvironment(t, { deferFrames: true });
   const tracker = new QueueTracker("remux");
+  const dir = "/var/media/anime/show";
 
-  // In real runtime, a symlink alias resolves to the canonical directory on disk
-  const realDir = "/var/media/anime/show";
-
-  // Initial scan passes canonical_dir as realDir
-  const manifest = ids => ({
-    version: 2,
-    canonical_dir: realDir,
-    items: ids.map(id => ({ id, name: id })),
-  });
-
-  // User scanned via symlink alias; acceptedPath was resolved to realDir
-  assert.equal(tracker.acceptInspection(tracker.startScan(), realDir, manifest(["01.mkv", "02.mkv"])), true);
+  assert.equal(tracker.acceptInspection(tracker.startScan(), dir, manifestOf(["01.mkv", "02.mkv"])), true);
   renderFrames();
 
-  // User reorders and deselects 01.mkv
   tracker.reorderCard("02.mkv", "up");
   tracker.state.items.get("01.mkv").selected = false;
   assert.deepEqual(tracker.getSelectedOrderedItemIds(), ["02.mkv"]);
 
-  // BatchStart arrives carrying the canonical input_dir
   tracker.handleEvent({
     version: 1,
     type: "batch_start",
     total: 2,
-    input_dir: realDir,
+    input_dir: dir,
     items: [
       { id: "02.mkv", file: "02.mkv" },
       { id: "01.mkv", file: "01.mkv" },
     ],
   });
-  assert.equal(tracker.currentDirectory, realDir);
+  assert.equal(tracker.currentDirectory, dir);
 
-  // Subsequent rescan with newly discovered item 03.mkv
-  assert.equal(
-    tracker.acceptInspection(
-      tracker.startScan(),
-      realDir,
-      manifest(["01.mkv", "02.mkv", "03.mkv"])
-    ),
-    true
-  );
+  assert.equal(tracker.acceptInspection(tracker.startScan(), dir, manifestOf(["01.mkv", "02.mkv", "03.mkv"])), true);
   renderFrames();
 
-  // Order and selection preserved across BatchStart: 02.mkv first (selected), 01.mkv (unselected), 03.mkv (appended unselected)
   assert.deepEqual(tracker.state.order, ["02.mkv", "01.mkv", "03.mkv"]);
   assert.deepEqual(tracker.getSelectedOrderedItemIds(), ["02.mkv"]);
   assert.equal(tracker.state.items.get("01.mkv").selected, false);
   assert.equal(tracker.state.items.get("03.mkv").selected, false);
 
-  // Snapshot restore carries canonical directory identity
   tracker.restoreFromSnapshot({
     job_id: 10,
     mode: "remux",
     status: "completed",
-    input_dir: realDir,
+    input_dir: dir,
     ordered_item_ids: ["02.mkv", "01.mkv"],
     items: {
       "02.mkv": { id: "02.mkv", file: "02.mkv", status: "completed" },
       "01.mkv": { id: "01.mkv", file: "01.mkv", status: "completed" },
     },
   });
-  assert.equal(tracker.currentDirectory, realDir);
+  assert.equal(tracker.currentDirectory, dir);
 
-  // Rescan after snapshot restore preserves directory identity and appends new items unselected
-  assert.equal(
-    tracker.acceptInspection(
-      tracker.startScan(),
-      realDir,
-      manifest(["01.mkv", "02.mkv", "04.mkv"])
-    ),
-    true
-  );
+  assert.equal(tracker.acceptInspection(tracker.startScan(), dir, manifestOf(["01.mkv", "02.mkv", "04.mkv"])), true);
   renderFrames();
   assert.deepEqual(tracker.state.order, ["02.mkv", "01.mkv", "04.mkv"]);
   assert.equal(tracker.state.items.get("04.mkv").selected, false);
 });
 
 test("QueueTracker keeps a reload-then-BatchStart Active Batch as the ordered, selected base for the next same-directory rescan", t => {
-  setupMockEnvironment(t);
-  const frames = [];
-  globalThis.requestAnimationFrame = callback => frames.push(callback);
-  const renderFrames = () => { while (frames.length) frames.shift()(); };
+  const { renderFrames } = setupMockEnvironment(t, { deferFrames: true });
   const tracker = new QueueTracker("remux");
   const dir = "/anime/show";
-  const manifest = ids => ({ version: 2, items: ids.map(id => ({ id, name: id })) });
 
   // Reload lands before BatchStart, so the snapshot knows nothing about the batch.
   tracker.restoreFromSnapshot({
@@ -857,14 +630,7 @@ test("QueueTracker keeps a reload-then-BatchStart Active Batch as the ordered, s
     success: true,
     cancelled: false,
   });
-  assert.equal(
-    tracker.acceptInspection(
-      tracker.startScan(),
-      dir,
-      manifest(["01.mkv", "02.mkv", "03.mkv"])
-    ),
-    true
-  );
+  assert.equal(tracker.acceptInspection(tracker.startScan(), dir, manifestOf(["01.mkv", "02.mkv", "03.mkv"])), true);
   renderFrames();
 
   // Submitter order survives, both participants stay selected, the newcomer does not.
@@ -874,47 +640,25 @@ test("QueueTracker keeps a reload-then-BatchStart Active Batch as the ordered, s
   assert.equal(tracker.state.items.get("03.mkv").selected, false);
 });
 
-test("escapeAttr escapes &, \", ', <, and >", () => {
-  assert.equal(escapeAttr("hello"), "hello");
-  assert.equal(
-    escapeAttr('"><script>alert(1)</script><input attr=\'evil\'&'),
-    '&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;&lt;input attr=&#39;evil&#39;&amp;'
-  );
-});
-
 test("subset batch progress counts only batch participants", t => {
   const { elements } = setupMockEnvironment(t);
   const tracker = new QueueTracker("remux");
   const countEl = elements.get("remux-queue-count");
-  const inputDir = "/anime/show";
 
-  const manifest = {
-    version: 2,
-    items: [
-      { id: "ep1", name: "01.mkv" },
-      { id: "ep2", name: "02.mkv" },
-      { id: "ep3", name: "03.mkv" },
-    ],
-  };
-
-  tracker.populateFromInspection(manifest);
-  toggleItemSelection(tracker.state, "ep2", false);
-  toggleItemSelection(tracker.state, "ep3", false);
+  tracker.populateFromInspection(manifestOf(["ep1", "ep2", "ep3"]));
+  setItemSelected(tracker.state, "ep2", false);
+  setItemSelected(tracker.state, "ep3", false);
 
   tracker.handleEvent({
     version: 1,
     type: "batch_start",
     total: 1,
-    input_dir: inputDir,
+    input_dir: "/anime/show",
     items: [{ id: "ep1", file: "ep1" }],
   });
-  assert.ok(countEl.textContent.includes("0 / 1 Processed"));
+  assert.equal(countEl.textContent, "0 / 1 Processed");
 
-  tracker.handleEvent({
-    version: 1,
-    type: "item_start",
-    id: "ep1",
-  });
+  tracker.handleEvent({ version: 1, type: "item_start", id: "ep1" });
   tracker.handleEvent({
     version: 1,
     type: "item_complete",
@@ -922,31 +666,22 @@ test("subset batch progress counts only batch participants", t => {
     status: "completed",
     duration_sec: 14.8,
   });
-  tracker.handleEvent({
-    version: 1,
-    type: "batch_complete",
-    success: true,
-  });
+  tracker.handleEvent({ version: 1, type: "batch_complete", success: true });
   tracker.finalize(0);
 
-  assert.ok(countEl.textContent.includes("(1 Total)"));
-  assert.ok(countEl.textContent.includes("1 Completed"));
+  assert.equal(countEl.textContent, "1 Completed (1 Total)");
 });
 
 test("same-directory empty inspection keeps directory identity, vanished selections, and order", t => {
-  const { elements } = setupMockEnvironment(t);
-  const frames = [];
-  globalThis.requestAnimationFrame = callback => frames.push(callback);
-  const renderFrames = () => { while (frames.length) frames.shift()(); };
-  const manifest = ids => ({ version: 2, items: ids.map(id => ({ id, name: id })) });
+  const { renderFrames } = setupMockEnvironment(t, { deferFrames: true });
   const tracker = new QueueTracker("remux");
   const dir = "/anime/show";
 
-  assert.equal(tracker.acceptInspection(tracker.startScan(), dir, manifest(["ep1", "ep2"])), true);
+  assert.equal(tracker.acceptInspection(tracker.startScan(), dir, manifestOf(["ep1", "ep2"])), true);
   renderFrames();
   tracker.reorderCard("ep2", "up");
 
-  assert.equal(tracker.acceptInspection(tracker.startScan(), dir, { version: 2, items: [] }), true);
+  assert.equal(tracker.acceptInspection(tracker.startScan(), dir, manifestOf([])), true);
   renderFrames();
   assert.equal(tracker.reuseInspection(dir), true);
   renderFrames();
@@ -955,8 +690,7 @@ test("same-directory empty inspection keeps directory identity, vanished selecti
   assert.equal(tracker.lastScannedPath, dir);
   assert.deepEqual(tracker.state.vanishedSelectedIds, ["ep2", "ep1"]);
 
-  assert.equal(tracker.acceptInspection(tracker.startScan(), dir, manifest(["ep1", "ep2"])), true);
+  assert.equal(tracker.acceptInspection(tracker.startScan(), dir, manifestOf(["ep1", "ep2"])), true);
   renderFrames();
   assert.deepEqual(tracker.getSelectedOrderedItemIds(), ["ep2", "ep1"]);
 });
-

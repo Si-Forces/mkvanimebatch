@@ -12,16 +12,16 @@
 
 #![cfg(unix)]
 
+mod common;
+
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::sync::Arc;
 
 use tempfile::tempdir;
 
-use mkv_core::domain::{MkvTrack, TrackProperties};
-use mkv_core::pipeline::{BatchPipeline, CancellationToken, PipelineConfig, PipelineMode};
+use common::{run_batch, seeded_cache, video_metadata};
+use mkv_core::pipeline::{CancellationToken, PipelineConfig, PipelineMode};
 use mkv_core::request::TrackAssignment;
-use mkv_core::scan::{MkvmergeMetadata, PersistentInspectCache};
 
 /// Restores the process environment it displaced, so a failing assertion cannot
 /// leak a mutated `PATH` into the rest of the run.
@@ -37,37 +37,6 @@ impl Drop for EnvReset {
             Some(value) => std::env::set_var("MKV_ARGS_FILE", value),
             None => std::env::remove_var("MKV_ARGS_FILE"),
         }
-    }
-}
-
-fn video_metadata() -> MkvmergeMetadata {
-    MkvmergeMetadata {
-        tracks: vec![
-            MkvTrack {
-                id: Some(0),
-                track_type: "video".to_string(),
-                codec: Some("V_MPEGH/ISO/HEVC".to_string()),
-                properties: TrackProperties {
-                    codec_id: Some("V_MPEGH/ISO/HEVC".to_string()),
-                    pixel_dimensions: Some("1920x1080".to_string()),
-                    ..Default::default()
-                },
-            },
-            MkvTrack {
-                id: Some(1),
-                track_type: "audio".to_string(),
-                codec: Some("A_AAC".to_string()),
-                properties: TrackProperties {
-                    language: Some("jpn".to_string()),
-                    track_name: Some("Stereo".to_string()),
-                    audio_channels: Some(2),
-                    codec_id: Some("A_AAC".to_string()),
-                    ..Default::default()
-                },
-            },
-        ],
-        attachments: vec![],
-        chapters: vec![],
     }
 }
 
@@ -104,9 +73,12 @@ async fn assigned_language_title_and_both_offset_signs_reach_the_mkvmerge_argv()
     std::env::set_var("PATH", format!("{}:{old_path}", bin_dir.path().display()));
     std::env::set_var("MKV_ARGS_FILE", &args_file);
 
-    let cache = Arc::new(PersistentInspectCache::new(None, true));
-    cache.put_path(&video_path, video_metadata());
-    cache.put_path(&second_video_path, video_metadata());
+    // AAC audio is muxed as-is, so the run never needs a real ffmpeg.
+    let cache = seeded_cache(
+        dir.path(),
+        &[&video_path, &second_video_path],
+        &video_metadata("A_AAC"),
+    );
     let config = PipelineConfig {
         mode: PipelineMode::Remux,
         input_dir: dir.path().to_path_buf(),
@@ -138,10 +110,8 @@ async fn assigned_language_title_and_both_offset_signs_reach_the_mkvmerge_argv()
         ..Default::default()
     };
 
-    let summary = BatchPipeline::new(config, None, CancellationToken::new())
-        .run()
-        .await
-        .unwrap();
+    let (summary, _events) = run_batch(config, CancellationToken::new()).await;
+    let summary = summary.unwrap();
     assert_eq!(
         (summary.completed, summary.errors),
         (2, 0),
