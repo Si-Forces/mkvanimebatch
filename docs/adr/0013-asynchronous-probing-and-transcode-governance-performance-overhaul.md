@@ -229,9 +229,8 @@ above rather than retracted, and no benchmark was re-run.
 `test_seed_existing_directory_named_like_a_font_does_not_poison_claim` pin the directory
 half of the seeding rule. The FIFO half is the same `is_file` predicate on the same branch
 and is not tested separately, because creating a FIFO from a Rust test would mean shelling
-out to `mkfifo`. `test_scan_mkv_files_honors_ignore_paths_for_individual_files` and
-`test_scan_mkv_files_reports_resolved_paths_under_non_canonical_root` pin the two traversal
-contracts above.
+out to `mkfifo`. `test_scan_mkv_files_honors_ignore_paths_for_individual_files` pins the
+`ignore_paths` contract above. The path-spelling contract is reversed by Amendment 5.
 
 ## Amendment 4 — 2026-09-28 (current-state corrections)
 
@@ -257,3 +256,23 @@ spelled it (`to_string_lossy`), which is absolute only when the fonts directory 
 unreadable, or fails to parse, not only on a parse failure. `put` marks the memo dirty whenever
 an entry changes, so a save also happens when an already-memoized font's size, mtime, or hash
 changes, not only when a font is added.
+
+## Amendment 5 — 2026-09-28 (traversal path spelling reversed)
+
+Amendment 3's first contract — "reported paths change spelling" — is withdrawn.
+`scan_mkv_files` again reports every `ParsedFile::path` in the spelling of the root the caller
+passed. Resolved paths broke subtitle pairing: the Asset Resolver derives its search
+directories from the caller's `input_dir`, so a video reported under a resolved spelling never
+equals the directory of the subtitle beside it, and same-directory subtitles were skipped as
+"subtitle files found but none matched". Any input whose spelling differs from its canonical
+path triggered it — a symlinked or relative root on every platform, and on Windows every root,
+because `canonicalize` adds the `\\?\` verbatim prefix and expands 8.3 short names.
+
+The traversal keeps its `realpath` savings. Each stack entry carries its directory's canonical
+path when known, and entries beneath it derive their dedup and `ignore_paths` keys by joining
+their name onto it; only symlinks and entries beneath a root that failed to resolve pay a
+`realpath`. The "root that fails to resolve" rule of Amendment 3 is unchanged in effect.
+
+**Coverage.** `test_scan_mkv_files_keeps_caller_spelling_under_non_canonical_root` pins the
+spelling, and `test_remux_dry_run_matches_subtitles_through_symlinked_input_dir` pins the
+subtitle pairing it protects.

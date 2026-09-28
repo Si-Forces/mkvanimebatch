@@ -445,30 +445,26 @@ pub fn scan_mkv_files(
     ignore_paths: Option<&HashSet<PathBuf>>,
 ) -> Vec<ParsedFile> {
     let mut results = Vec::new();
-    // Dedup keys and `ignore_paths` matching compare canonical paths. Paths built beneath a
-    // canonical directory are canonical without a `realpath`; anything reached through a
-    // symlink, or beneath a root that failed to resolve, is not and must be resolved per entry.
-    let (root, root_is_canonical) = match dir_path.canonicalize() {
-        Ok(canonical) => (canonical, true),
-        Err(_) => (dir_path.to_path_buf(), false),
-    };
-    let mut stack = vec![(root.clone(), root_is_canonical)];
+    // Reported paths keep the spelling of `dir_path`, so they compare equal to the asset
+    // directories derived from the same input. Dedup keys and `ignore_paths` matching use
+    // canonical paths instead: each stack entry carries its directory's canonical spelling when
+    // it is known, so entries beneath it need no `realpath`. Anything reached through a
+    // symlink, or beneath a directory that failed to resolve, is resolved per entry.
+    let root_canonical = dir_path.canonicalize().ok();
     let mut visited_dirs = HashSet::new();
-    visited_dirs.insert(root);
+    visited_dirs.insert(
+        root_canonical
+            .clone()
+            .unwrap_or_else(|| dir_path.to_path_buf()),
+    );
+    let mut stack = vec![(dir_path.to_path_buf(), root_canonical)];
     let mut visited_files = HashSet::new();
     let resolved_ignores: HashSet<PathBuf> = ignore_paths
         .map(|set| set.iter().map(|p| canonical_or_self(p)).collect())
         .unwrap_or_default();
     let is_ignored = |p: &Path| -> bool { resolved_ignores.iter().any(|ig| p.starts_with(ig)) };
-    let resolve = |path: &Path, is_canonical: bool| -> PathBuf {
-        if is_canonical {
-            path.to_path_buf()
-        } else {
-            canonical_or_self(path)
-        }
-    };
 
-    while let Some((current_dir, dir_is_canonical)) = stack.pop() {
+    while let Some((current_dir, current_canonical)) = stack.pop() {
         let entries = match std::fs::read_dir(&current_dir) {
             Ok(e) => e,
             Err(_) => continue,
@@ -486,7 +482,12 @@ pub fn scan_mkv_files(
                 None => continue,
             };
 
-            let entry_is_canonical = dir_is_canonical && !file_type.is_symlink();
+            // A symlink names its target through a second spelling, so its canonical path is
+            // never the parent's canonical path joined with its name.
+            let derived_canonical = current_canonical
+                .as_ref()
+                .filter(|_| !file_type.is_symlink())
+                .map(|dir| dir.join(name));
 
             let is_file = file_type.is_file() || (file_type.is_symlink() && path.is_file());
             let is_dir = file_type.is_dir() || (file_type.is_symlink() && path.is_dir());
@@ -496,7 +497,7 @@ pub fn scan_mkv_files(
                     .extension()
                     .is_some_and(|e| e.eq_ignore_ascii_case("mkv"))
                 {
-                    let key = resolve(&path, entry_is_canonical);
+                    let key = derived_canonical.unwrap_or_else(|| canonical_or_self(&path));
                     if !is_ignored(&key) && visited_files.insert(key) {
                         results.push(create_parsed_file(&path));
                     }
@@ -507,13 +508,12 @@ pub fn scan_mkv_files(
                 {
                     continue;
                 }
-                let canon = resolve(&path, entry_is_canonical);
-                if is_ignored(&canon) || !visited_dirs.insert(canon) {
+                let canonical = derived_canonical.or_else(|| path.canonicalize().ok());
+                let key = canonical.clone().unwrap_or_else(|| path.clone());
+                if is_ignored(&key) || !visited_dirs.insert(key) {
                     continue;
                 }
-                // Descend through `path`, not `canon`, so reported paths keep the spelling the
-                // directory was reached through; children inherit its canonicality.
-                stack.push((path, entry_is_canonical));
+                stack.push((path, canonical));
             }
         }
     }
