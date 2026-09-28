@@ -594,11 +594,11 @@ fn test_scan_mkv_files_honors_ignore_paths_for_individual_files() {
     assert_eq!(results[0].name, "ep01.mkv");
 }
 
-/// The walk root is resolved once, so reported paths use the resolved spelling even when the
-/// caller passed a symlinked root. That path reaches mkvmerge and the manifest.
+/// Reported paths keep the caller's spelling even when the root is a symlink; only dedup keys
+/// use the resolved path. Asset directories are derived from the same spelling.
 #[cfg(unix)]
 #[test]
-fn test_scan_mkv_files_reports_resolved_paths_under_non_canonical_root() {
+fn test_scan_mkv_files_keeps_caller_spelling_under_non_canonical_root() {
     let base = tempdir().unwrap();
     let real = base.path().join("real");
     fs::create_dir_all(&real).unwrap();
@@ -610,8 +610,8 @@ fn test_scan_mkv_files_reports_resolved_paths_under_non_canonical_root() {
     assert_eq!(results.len(), 1);
     assert_eq!(
         results[0].path,
-        real.join("ep01.mkv"),
-        "scan must report the resolved path, not the caller's spelling"
+        aliased.join("ep01.mkv"),
+        "scan must report paths in the caller's spelling so they match asset directories"
     );
 }
 
