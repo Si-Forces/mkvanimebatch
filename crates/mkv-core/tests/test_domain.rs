@@ -814,6 +814,113 @@ fn test_promote_file_basic_and_overwrite() {
     assert_eq!(std::fs::read(&dest).unwrap(), b"updated content");
 }
 
+/// A missing `staged` makes the opening `rename` fail with `NotFound`, which is not a
+/// device boundary, so promotion returns that error and creates no destination.
+///
+/// Deliberately does *not* claim the copy was skipped: `std::fs::copy` opens the source
+/// before the destination, so a missing source fails it with the same `NotFound` and this
+/// assertion held before the fallback was gated too. The gate's one observable consequence
+/// is pinned by `test_promote_file_readonly_source_parent_returns_error`.
+#[test]
+fn test_promote_file_missing_source_is_not_copied() {
+    use mkv_core::domain::promote_file;
+    use tempfile::tempdir;
+
+    let tmp = tempdir().unwrap();
+    let dest_dir = tmp.path().join("out");
+    let staged = tmp.path().join("does_not_exist.bin");
+    let dest = dest_dir.join("final.bin");
+
+    let err = promote_file(&staged, &dest).expect_err("missing staged file must not promote");
+    assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    assert!(
+        !dest.exists(),
+        "failed promotion must not create the destination"
+    );
+}
+
+/// Pins the one case where gating the fallback on a device boundary changes the *outcome*,
+/// so the trade is deliberate rather than an accident of the refactor.
+///
+/// `rename(2)` requires write permission on both parents. With the staged file's own
+/// directory read-only and the destination writable, the rename fails `PermissionDenied`
+/// while the payload stays perfectly readable — and the copy path would have succeeded:
+/// it reads the source, writes a temporary sibling into the writable destination, and
+/// renames within that single directory. Before the gate this promoted; now it errors.
+///
+/// No caller in this crate is affected — `extract` and `remux` stage into
+/// `tempdir_in(<destination>)` and font promotion into `<fonts_dir>/.font_staging`, all
+/// created by this process — but `promote_file` is public, so a future caller staging
+/// elsewhere meets this.
+///
+/// Root bypasses the mode bits, which would let the rename succeed and make the assertion
+/// meaningless, so the test skips there.
+#[cfg(unix)]
+#[test]
+fn test_promote_file_readonly_source_parent_returns_error() {
+    use mkv_core::domain::promote_file;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use tempfile::tempdir;
+
+    if std::fs::metadata("/proc/self").is_ok_and(|m| m.uid() == 0) {
+        eprintln!("skipped: root bypasses directory permissions");
+        return;
+    }
+
+    let tmp = tempdir().unwrap();
+    let staged_dir = tmp.path().join("staged_dir");
+    std::fs::create_dir(&staged_dir).unwrap();
+    let staged = staged_dir.join("payload.bin");
+    std::fs::write(&staged, b"payload").unwrap();
+    std::fs::set_permissions(&staged_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    let dest = tmp.path().join("final.bin");
+    let err = promote_file(&staged, &dest).expect_err("a read-only source parent must not promote");
+
+    // Restore write permission so the tempdir can be torn down on every platform.
+    std::fs::set_permissions(&staged_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+    assert!(
+        !dest.exists(),
+        "a refused promotion must not create the destination"
+    );
+}
+
+/// Covers the copy fallback on the path that can still reach it, so the gate added to
+/// `promote_file` cannot be over-narrowed into deleting the copy outright. Skips where the
+/// host offers no second filesystem, which is the only portable way to force `EXDEV`.
+#[cfg(unix)]
+#[test]
+fn test_promote_file_cross_device_copy() {
+    use mkv_core::domain::promote_file;
+    use std::os::unix::fs::MetadataExt;
+    use tempfile::{tempdir, Builder};
+
+    let src_dir = tempdir().unwrap();
+    let src_dev = std::fs::metadata(src_dir.path()).unwrap().dev();
+    let other_fs = ["/var/tmp", "/dev/shm", "/run"]
+        .into_iter()
+        .map(std::path::PathBuf::from)
+        .find(|p| p.is_dir() && std::fs::metadata(p).is_ok_and(|m| m.dev() != src_dev));
+    let Some(other_fs) = other_fs else {
+        eprintln!("skipped: no second filesystem available to force a cross-device rename");
+        return;
+    };
+
+    let staged = src_dir.path().join("staged.bin");
+    std::fs::write(&staged, b"cross-device payload").unwrap();
+    let dest_dir = Builder::new()
+        .prefix("mkvcore_test_")
+        .tempdir_in(&other_fs)
+        .unwrap();
+    let dest = dest_dir.path().join("final.bin");
+
+    promote_file(&staged, &dest).expect("a genuine EXDEV must fall through to the copy");
+    assert_eq!(std::fs::read(&dest).unwrap(), b"cross-device payload");
+    assert!(!staged.exists(), "the copy path consumes the staged file");
+}
+
 #[test]
 fn test_unique_file_token_distinct() {
     use mkv_core::domain::unique_file_token;
