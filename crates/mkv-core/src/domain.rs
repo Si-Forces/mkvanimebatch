@@ -779,9 +779,8 @@ pub fn select_audio_track(
     (Some(best_track), reason.to_string())
 }
 
-/// Promotes a staged file to its final destination path atomically and safely.
-/// Ensures the parent directory exists. If destination exists (e.g. on Windows where
-/// rename fails on existing targets), a temporary backup is used with rollback support.
+/// Builds the error returned when a promotion's rollback rename fails, naming both paths
+/// so the orphaned backup can be located by hand.
 fn rollback_error(
     final_path: &Path,
     backup_path: &Path,
@@ -806,6 +805,38 @@ pub fn unique_file_token() -> String {
     format!("{pid}.{nanos}.{seq}")
 }
 
+/// True when a failed `rename` means the two paths sit on different devices, which is the
+/// main condition under which a copy can succeed where the rename did not.
+///
+/// Recognises `ErrorKind::CrossesDevices` plus the raw code for `EXDEV` (18, Linux/BSD) and
+/// `ERROR_NOT_SAME_DEVICE` (17, Windows), which not every platform surfaces as a typed
+/// kind. The codes are platform-scoped: 18 is `ERROR_NO_MORE_FILES` on Windows, and 17 is
+/// not a device error off it.
+///
+/// This is a heuristic about the *error*, not a proof that a copy would help. A copy can
+/// still rescue a failure that only affects the source side — see `promote_file`.
+fn is_cross_device_rename(err: &std::io::Error) -> bool {
+    err.kind() == std::io::ErrorKind::CrossesDevices
+        || (cfg!(not(windows)) && err.raw_os_error() == Some(18))
+        || (cfg!(windows) && err.raw_os_error() == Some(17))
+}
+
+/// Atomically moves `staged` onto `final_path`, replacing an existing destination via a
+/// backup-and-rollback rename where the platform requires one. Ensures the parent directory
+/// exists.
+///
+/// The copy fallback is reached only for what looks like a device boundary, so the common
+/// failures return the rename error instead of duplicating a multi-gigabyte payload to fail
+/// the same way: a missing source, or a destination locked by an antivirus or indexer.
+///
+/// This is a deliberate trade, not a proof. `rename(2)` needs write permission on *both*
+/// parents, so a staged file in a read-only or foreign-owned directory fails the rename while
+/// remaining perfectly readable — and the copy would have succeeded, since it reads the
+/// source, writes a temporary sibling into the writable destination, and renames within
+/// that one directory. Such a promotion now returns the error instead. No caller in this
+/// crate does that: `extract` and `remux` stage into `tempdir_in(<destination>)` and font
+/// promotion into `<fonts_dir>/.font_staging`, all created by this process. `promote_file`
+/// is public, so a future caller staging elsewhere would meet it. See ADR-0013's amendment.
 pub fn promote_file(staged: &Path, final_path: &Path) -> Result<(), std::io::Error> {
     let parent = final_path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)?;
@@ -815,24 +846,24 @@ pub fn promote_file(staged: &Path, final_path: &Path) -> Result<(), std::io::Err
         Err(err) => err,
     };
 
-    let is_cross_device = rename_err.kind() == std::io::ErrorKind::CrossesDevices
-        || rename_err.raw_os_error() == Some(18)
-        || (cfg!(windows) && rename_err.raw_os_error() == Some(17));
-
-    // Rename failed. If not cross-device and destination already exists (typical on Windows), use backup-and-rollback
-    if !is_cross_device && final_path.exists() {
-        let backup_path = final_path.with_extension(format!("bak.{}", unique_file_token()));
-        if std::fs::rename(final_path, &backup_path).is_ok() {
-            if std::fs::rename(staged, final_path).is_ok() {
-                let _ = std::fs::remove_file(&backup_path);
-                return Ok(());
-            } else {
-                // Rollback: restore backup
-                if let Err(rb_err) = std::fs::rename(&backup_path, final_path) {
+    if !is_cross_device_rename(&rename_err) {
+        // Destination already exists (typical on Windows, where rename refuses to replace):
+        // move it aside, put `staged` in its place, and roll the backup back if that fails.
+        if final_path.exists() {
+            let backup_path = final_path.with_extension(format!("bak.{}", unique_file_token()));
+            if std::fs::rename(final_path, &backup_path).is_ok() {
+                if std::fs::rename(staged, final_path).is_ok() {
+                    let _ = std::fs::remove_file(&backup_path);
+                    return Ok(());
+                } else if let Err(rb_err) = std::fs::rename(&backup_path, final_path) {
                     return Err(rollback_error(final_path, &backup_path, &rb_err));
                 }
             }
         }
+        // Not a device boundary. A copy usually could not do better, and on the common
+        // failures would duplicate the whole payload to fail identically, so report the
+        // real error. It can still rescue a source-side-only failure; see the doc comment.
+        return Err(rename_err);
     }
 
     // Fallback across filesystem boundaries: copy to a temporary sibling file in final_path's
@@ -924,4 +955,61 @@ pub async fn read_progress_stream<R: tokio::io::AsyncRead + Unpin>(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pins which rename failures are eligible for the copy fallback.
+    ///
+    /// The control flow that consults this is not observable from an integration test (see
+    /// `test_promote_file_cross_device_copy`), so this is where a widening or narrowing of
+    /// the rule would surface: an unrelated `ErrorKind` admitted here would send every
+    /// such failure to a whole-payload copy.
+    #[test]
+    fn test_is_cross_device_rename_classifies_only_device_boundaries() {
+        let raw = std::io::Error::from_raw_os_error;
+
+        // Device boundaries, each raw code scoped to the platform that defines it: 18 is
+        // EXDEV on Linux/BSD but ERROR_NO_MORE_FILES on Windows, and 17 is
+        // ERROR_NOT_SAME_DEVICE on Windows but unrelated elsewhere.
+        if cfg!(windows) {
+            assert!(is_cross_device_rename(&raw(17)));
+            assert!(
+                !is_cross_device_rename(&raw(18)),
+                "ERROR_NO_MORE_FILES must not trigger a whole-payload copy"
+            );
+        } else {
+            assert!(is_cross_device_rename(&raw(18)));
+            assert!(
+                !is_cross_device_rename(&raw(17)),
+                "ERROR_NOT_SAME_DEVICE must not count off Windows"
+            );
+        }
+        assert!(is_cross_device_rename(&std::io::Error::from(
+            std::io::ErrorKind::CrossesDevices,
+        )));
+
+        // Failures a copy generally cannot rescue, by raw code and by kind. ENOENT and
+        // ENOTDIR are source-side, and `fs::copy` opens the source first. EACCES and EPERM
+        // are the locked-destination case that motivated the gate.
+        for code in [2, 20, 13, 1] {
+            assert!(
+                !is_cross_device_rename(&raw(code)),
+                "raw OS error {code} must not reach the copy fallback"
+            );
+        }
+        for kind in [
+            std::io::ErrorKind::NotFound,
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::AlreadyExists,
+            std::io::ErrorKind::InvalidInput,
+        ] {
+            assert!(
+                !is_cross_device_rename(&std::io::Error::from(kind)),
+                "{kind:?} must not reach the copy fallback"
+            );
+        }
+    }
 }
