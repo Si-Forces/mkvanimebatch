@@ -1,18 +1,18 @@
 //! Track, font, chapter, and cover extraction using mkvextract.
 
 use std::path::{Path, PathBuf};
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 use crate::domain::{
-    ep_type_label, parse_episode, promote_file, read_progress_stream, safe_filename,
-    select_best_subtitle_track, EpisodeInfo, COVER_EXTENSIONS, SUBPROCESS_TIMEOUT,
+    parse_episode, promote_file, read_progress_stream, safe_filename, select_best_subtitle_track,
+    EpisodeInfo, COVER_EXTENSIONS, SUBPROCESS_TIMEOUT,
 };
 use crate::fonts::{FontClaimsGuard, FontRegistry};
-use crate::scan::InspectedVideo;
+use crate::scan::{path_ext_lower, InspectedVideo};
 
 #[derive(Debug, Default, Clone)]
 pub struct ExtractSummary {
-    pub mkv_path: PathBuf,
     pub extracted_sub: Option<PathBuf>,
     pub extracted_chapters: Option<PathBuf>,
     pub extracted_cover: Option<PathBuf>,
@@ -20,9 +20,11 @@ pub struct ExtractSummary {
     pub log: Vec<String>,
 }
 
-fn episode_suffix(parsed: Option<&EpisodeInfo>, file_stem: &str) -> String {
+/// Stem shared by extracted subtitle and chapter files: `{stem}_{EpLabel}{ep}` when the
+/// episode parses, otherwise the bare file stem.
+fn sidecar_stem(file_stem: &str, parsed: Option<&EpisodeInfo>) -> String {
     match parsed {
-        Some(info) => format!("{}{}", ep_type_label(&info.ep_type, false), info.ep),
+        Some(info) => format!("{file_stem}_{}{}", info.ep_type.label(false), info.ep),
         None => file_stem.to_string(),
     }
 }
@@ -37,45 +39,59 @@ pub fn select_subtitle_for_extraction(
     let supported = ["s_text/ass".to_string(), "s_text/ssa".to_string()]
         .into_iter()
         .collect();
-    let result = select_best_subtitle_track(&inspected.subtitle_tracks(), Some(&supported));
-    let (track_id, language, _) = result?;
+    let (track_id, language) =
+        select_best_subtitle_track(&inspected.subtitle_tracks(), Some(&supported))?;
 
-    let ep_suffix = episode_suffix(parsed, file_stem);
+    let stem = sidecar_stem(file_stem, parsed);
     let safe_lang = safe_filename(&language);
-    let sub_path = file_dir.join(format!(
-        "{file_stem}_{ep_suffix}_{safe_lang}_track{track_id}.ass"
-    ));
+    let sub_path = file_dir.join(format!("{stem}_{safe_lang}_track{track_id}.ass"));
     Some((track_id, sub_path))
 }
 
-/// Builds command-line arguments for `mkvextract` invocation.
-pub fn build_mkvextract_args(
-    mkv_file: &Path,
-    cmd_type: &str,
-    items: &[(u32, PathBuf)],
-) -> Vec<String> {
-    let mut args = vec![mkv_file.to_string_lossy().to_string(), cmd_type.to_string()];
-    for (id, path) in items {
-        args.push(format!("{id}:{}", path.to_string_lossy()));
+/// Whether mkvextract left a non-empty regular file at `path`.
+fn has_content(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.len() > 0)
+}
+
+/// Promotes an artifact whose failure must not fail the file: a failed promotion is logged
+/// as a warning and yields `None`.
+fn promote_optional(
+    staged: &Path,
+    final_path: PathBuf,
+    label: &str,
+    log: &mut Vec<String>,
+) -> Option<PathBuf> {
+    if !has_content(staged) {
+        return None;
     }
-    args
+    match promote_file(staged, &final_path) {
+        Ok(()) => {
+            log.push(format!("   -> {label}: {}", final_path.display()));
+            Some(final_path)
+        }
+        Err(e) => {
+            log.push(format!(
+                "   -> WARNING: Failed to promote {} to '{}': {e}",
+                label.to_ascii_lowercase(),
+                final_path.display()
+            ));
+            None
+        }
+    }
 }
 
 /// Extracts best-match subtitles, chapters, cover images, and new fonts from an MKV file.
 pub async fn extract_mkv_file(
     mkv_path: &Path,
     inspected: &InspectedVideo,
-    font_manager: &FontRegistry,
+    font_registry: &FontRegistry,
     out_dir: Option<&Path>,
     on_progress: Option<&(dyn Fn(f64) + Send + Sync)>,
 ) -> Result<ExtractSummary, String> {
     let mut summary = ExtractSummary {
-        mkv_path: mkv_path.to_path_buf(),
+        log: vec![format!("Processing: {}", mkv_path.display())],
         ..Default::default()
     };
-    summary
-        .log
-        .push(format!("Processing: {}", mkv_path.display()));
 
     let file_stem = mkv_path
         .file_stem()
@@ -90,49 +106,33 @@ pub async fn extract_mkv_file(
     }
 
     let parsed = parse_episode(&file_stem);
-    let chapter_stem = if let Some(p) = &parsed {
-        format!("{file_stem}_{}", episode_suffix(Some(p), &file_stem))
-    } else {
-        file_stem.clone()
-    };
+    let chapter_stem = sidecar_stem(&file_stem, parsed.as_ref());
     let sub_target =
         select_subtitle_for_extraction(inspected, &file_stem, dest_dir, parsed.as_ref());
-    let chapter_target = if inspected.has_chapters() {
-        Some(dest_dir.join(format!("{chapter_stem}_chapters.xml")))
-    } else {
-        None
-    };
+    let chapter_target = inspected
+        .has_chapters()
+        .then(|| dest_dir.join(format!("{chapter_stem}_chapters.xml")));
 
-    let cover_target = if let Some(cover) = inspected.cover_attachment() {
-        let raw_ext = cover
+    let cover_target = inspected.cover_attachment().and_then(|cover| {
+        let ext = cover
             .file_name
-            .as_ref()
-            .and_then(|f| {
-                Path::new(f)
-                    .extension()
-                    .map(|e| format!(".{}", e.to_string_lossy().to_lowercase()))
-            })
+            .as_deref()
+            .map(|f| path_ext_lower(Path::new(f)))
+            .filter(|e| COVER_EXTENSIONS.contains(&e.as_str()))
             .unwrap_or_else(|| ".jpg".to_string());
-        let ext = if COVER_EXTENSIONS.contains(&raw_ext.as_str()) {
-            raw_ext
-        } else {
-            ".jpg".to_string()
-        };
         let final_cover = dest_dir.join(format!("{file_stem}_cover{ext}"));
         if final_cover.exists() {
             None
         } else {
             cover.id.map(|id| (id, final_cover))
         }
-    } else {
-        None
-    };
+    });
 
-    let mut font_claims = FontClaimsGuard::new(font_manager);
+    let mut font_claims = FontClaimsGuard::new(font_registry);
     for attachment in inspected.font_attachments() {
         if let (Some(id), Some(file_name)) = (attachment.id, attachment.file_name.as_ref()) {
             let size = attachment.size.unwrap_or(0);
-            if let Some(claim) = font_manager.claim(file_name, size) {
+            if let Some(claim) = font_registry.claim(file_name, size) {
                 font_claims.push(id, claim);
             }
         }
@@ -149,6 +149,8 @@ pub async fn extract_mkv_file(
         return Ok(summary);
     }
 
+    // Subtitle, chapter, and cover staging lives here, so dropping it on any early return
+    // removes them; font staging is released by the `FontClaimsGuard`.
     let temp_dir = tempfile::Builder::new()
         .prefix(".tmp_extract_")
         .tempdir_in(dest_dir)
@@ -194,7 +196,7 @@ pub async fn extract_mkv_file(
 
     let mut cmd = Command::new("mkvextract");
     #[cfg(windows)]
-    cmd.creation_flags(0x08000000);
+    cmd.creation_flags(crate::domain::CREATE_NO_WINDOW);
     cmd.kill_on_drop(true);
     cmd.args(&extract_args);
     cmd.stdout(std::process::Stdio::piped());
@@ -207,19 +209,18 @@ pub async fn extract_mkv_file(
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
 
-    let mut stderr_bytes = Vec::new();
     let stderr_handle = tokio::spawn(async move {
+        let mut bytes = Vec::new();
         if let Some(mut stream) = stderr {
-            use tokio::io::AsyncReadExt;
-            let _ = stream.read_to_end(&mut stderr_bytes).await;
+            let _ = stream.read_to_end(&mut bytes).await;
         }
-        stderr_bytes
+        bytes
     });
     let stderr_abort = stderr_handle.abort_handle();
     let execution = async {
         let mut stdout_bytes = Vec::new();
         if let Some(out_stream) = stdout {
-            let _ = read_progress_stream(out_stream, on_progress, Some(&mut stdout_bytes)).await;
+            let _ = read_progress_stream(out_stream, on_progress, &mut stdout_bytes).await;
         }
         let status = child
             .wait()
@@ -234,9 +235,6 @@ pub async fn extract_mkv_file(
             Ok(res) => res?,
             Err(_) => {
                 stderr_abort.abort();
-                if let Some((staged, _)) = staged_cover {
-                    let _ = std::fs::remove_file(staged);
-                }
                 return Err(format!(
                     "mkvextract timed out after {} seconds",
                     SUBPROCESS_TIMEOUT.as_secs()
@@ -244,32 +242,32 @@ pub async fn extract_mkv_file(
             }
         };
 
+    // mkvextract exits 1 when it completed with warnings.
     let is_success = matches!(status.code(), Some(0) | Some(1));
     if !is_success {
         let stderr = String::from_utf8_lossy(&stderr_output).trim().to_string();
         let stdout = String::from_utf8_lossy(&stdout_bytes).trim().to_string();
-        let code_str = status
-            .code()
-            .map(|c| format!("exit code {c}"))
-            .unwrap_or_else(|| "terminated by signal".into());
         let err_msg = if !stderr.is_empty() {
             stderr
         } else if !stdout.is_empty() {
             stdout
         } else {
-            code_str
+            status
+                .code()
+                .map(|c| format!("exit code {c}"))
+                .unwrap_or_else(|| "terminated by signal".into())
         };
         return Err(format!("mkvextract failed: {err_msg}"));
     }
 
     if let Some((staged, final_path)) = staged_sub {
-        if staged.is_file() && staged.metadata().map(|m| m.len() > 0).unwrap_or(false) {
-            if let Err(e) = promote_file(&staged, &final_path) {
-                return Err(format!(
+        if has_content(&staged) {
+            promote_file(&staged, &final_path).map_err(|e| {
+                format!(
                     "Failed to promote subtitle to '{}': {e}",
                     final_path.display()
-                ));
-            }
+                )
+            })?;
             summary
                 .log
                 .push(format!("   -> Subtitle: {}", final_path.display()));
@@ -278,49 +276,19 @@ pub async fn extract_mkv_file(
     }
 
     if let Some((staged, final_path)) = staged_chapters {
-        if staged.is_file() && staged.metadata().map(|m| m.len() > 0).unwrap_or(false) {
-            match promote_file(&staged, &final_path) {
-                Ok(()) => {
-                    summary
-                        .log
-                        .push(format!("   -> Chapters: {}", final_path.display()));
-                    summary.extracted_chapters = Some(final_path);
-                }
-                Err(e) => {
-                    summary.log.push(format!(
-                        "   -> WARNING: Failed to promote chapters to '{}': {e}",
-                        final_path.display()
-                    ));
-                }
-            }
-        }
+        summary.extracted_chapters =
+            promote_optional(&staged, final_path, "Chapters", &mut summary.log);
     }
 
     if let Some((staged, final_path)) = staged_cover {
-        if staged.is_file() && staged.metadata().map(|m| m.len() > 0).unwrap_or(false) {
-            match promote_file(&staged, &final_path) {
-                Ok(()) => {
-                    summary
-                        .log
-                        .push(format!("   -> Cover: {}", final_path.display()));
-                    summary.extracted_cover = Some(final_path);
-                }
-                Err(e) => {
-                    summary.log.push(format!(
-                        "   -> WARNING: Failed to promote cover to '{}': {e}",
-                        final_path.display()
-                    ));
-                }
-            }
-        }
+        summary.extracted_cover = promote_optional(&staged, final_path, "Cover", &mut summary.log);
     }
 
     while let Some((_, mut claim)) = font_claims.pop() {
-        if font_manager.promote(&mut claim).is_some() {
+        if font_registry.promote(&mut claim).is_some() {
             summary.extracted_fonts += 1;
         }
     }
-    font_claims.defuse();
 
     if summary.extracted_fonts > 0 {
         summary.log.push(format!(

@@ -1,6 +1,6 @@
 # 0008. Typed Engine Bridge, Preset Profiles, and Track Assignment Domain
 
-> **Status**: Accepted (Extended by ADR-0011, ADR-0012; amended 2026-09-24 and 2026-09-26, implemented)
+> **Status**: Accepted (Extended by ADR-0011, ADR-0012; amended by ADR-0013; amended 2026-09-24, 2026-09-26 and 2026-09-28, implemented)
 > **Date**: 2026-05-15
 > **Context**: Media Engine Context & Desktop Application Bridge
 > **Amends**: ADR-0004, ADR-0007
@@ -56,3 +56,8 @@ Decision 3's fail-fast rule has **two** failure points. The 2026-09-24 amendment
 Both fail closed, and neither may ever substitute an automatically selected subtitle. Only the second produces per-item outcomes, because before `BatchStart` there is no run to report on.
 
 This rule previously appeared in exactly one place in the repository — the Media Engine `CONTEXT.md` glossary — and in neither this ADR nor `architecture.md`, despite belonging here. It is now stated in `architecture.md` §8.1 as well, with this ADR as canonical owner.
+
+## Amendment — 2026-09-28
+
+- **Terminal event before `BatchStart`.** "Emits no `BatchComplete`" in the 2026-09-26 amendment describes the engine's event channel. The Engine Bridge supervisor still settles such a job by emitting its own `BatchComplete` with `success: false` and the run's error, then `job-done` with code `1`. The UI therefore always receives exactly one terminal event per job.
+- **Preset payload.** `PresetProfile` carries `id`, `name`, `icon`, `bitrate`, and `complexity`; `get_preset_profiles()` returns exactly those fields. The unused `description` field was removed.

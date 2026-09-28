@@ -1,22 +1,3 @@
-/* ─── Local Fonts & Fallback ─────────────────────────────────────────────────── */
-@font-face {
-  font-family: 'Plus Jakarta Sans';
-  font-style: normal;
-  font-weight: 500 900;
-  font-display: swap;
-  src: local('Plus Jakarta Sans'),
-       url('fonts/PlusJakartaSans.woff2') format('woff2');
-}
-
-@font-face {
-  font-family: 'JetBrains Mono';
-  font-style: normal;
-  font-weight: 500 800;
-  font-display: swap;
-  src: local('JetBrains Mono'),
-       url('fonts/JetBrainsMono.woff2') format('woff2');
-}
-
 /* ─── Reset & Base ──────────────────────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -41,14 +22,12 @@ button:disabled {
   opacity: 0.55;
 }
 
-[data-theme="dark"] html, [data-theme="dark"] body {
+[data-theme="dark"] body {
   background: #0b0d14 !important;
-  background-color: #0b0d14 !important;
 }
 
-[data-theme="light"] html, [data-theme="light"] body {
+[data-theme="light"] body {
   background: #f8fafc !important;
-  background-color: #f8fafc !important;
 }
 
 /* Hide native browser up/down number spin buttons completely across all browsers */
@@ -68,18 +47,15 @@ input[type="number"] {
 
 /* ─── Theme Variables ─────────────────────────────────────────────────────── */
 :root {
-  --font-sans: 'Plus Jakarta Sans', system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-  --font-mono: 'JetBrains Mono', ui-monospace, 'Cascadia Code', 'Consolas', 'Courier New', monospace;
+  --font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, 'Noto Sans', Cantarell, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', 'Cascadia Code', Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace;
   --window-radius: 12px;
   --radius: 16px;
   --radius-sm: 10px;
-  --radius-lg: 24px;
   --transition: 0.22s cubic-bezier(0.4, 0, 0.2, 1);
   --shadow-lg: 0 30px 70px rgba(0,0,0,0.5), 0 10px 30px rgba(0,0,0,0.35);
-  --shadow-sm: 0 4px 15px rgba(0,0,0,0.25);
   --accent-indigo: #6366f1;
   --accent-pink: #ec4899;
-  --accent-purple: #8b5cf6;
   --accent-gradient: linear-gradient(135deg, #6366f1, #ec4899);
 }
 
@@ -90,7 +66,6 @@ input[type="number"] {
                  #0b0e17;
   --glass-bg: rgba(255, 255, 255, 0.04);
   --glass-bg-hover: rgba(255, 255, 255, 0.08);
-  --glass-bg-active: rgba(255, 255, 255, 0.14);
   --glass-panel-bg: rgba(20, 24, 38, 0.85);
   --glass-border: rgba(255, 255, 255, 0.10);
   --glass-specular: rgba(255, 255, 255, 0.12);
@@ -110,13 +85,9 @@ input[type="number"] {
   --input-border: rgba(255, 255, 255, 0.12);
   --input-focus: rgba(99, 102, 241, 0.7);
   --btn-primary: linear-gradient(135deg, #6366f1, #ec4899);
-  --btn-primary-hover: linear-gradient(135deg, #4f46e5, #db2777);
   --btn-danger: linear-gradient(135deg, #ef4444, #b91c1c);
   --log-bg: rgba(7, 9, 15, 0.96);
   --log-border: rgba(255, 255, 255, 0.1);
-  --scrollbar: rgba(255, 255, 255, 0.18);
-  --titlebar-bg: rgba(15, 18, 30, 0.95);
-  --sub-header-bg: rgba(12, 16, 28, 0.85);
   --res-card-bg: rgba(12, 16, 28, 0.92);
   --res-card-border: rgba(255, 255, 255, 0.1);
   --log-ok: #34d399;
@@ -133,7 +104,6 @@ input[type="number"] {
                  #f1f5f9;
   --glass-bg: rgba(255, 255, 255, 0.65);
   --glass-bg-hover: rgba(255, 255, 255, 0.85);
-  --glass-bg-active: rgba(255, 255, 255, 0.95);
   --glass-panel-bg: rgba(255, 255, 255, 0.92);
   --glass-border: rgba(0, 0, 0, 0.1);
   --glass-specular: rgba(255, 255, 255, 0.4);
@@ -153,13 +123,9 @@ input[type="number"] {
   --input-border: rgba(0, 0, 0, 0.15);
   --input-focus: rgba(79, 70, 229, 0.6);
   --btn-primary: linear-gradient(135deg, #4f46e5, #db2777);
-  --btn-primary-hover: linear-gradient(135deg, #4338ca, #be185d);
   --btn-danger: linear-gradient(135deg, #ef4444, #dc2626);
   --log-bg: #ffffff;
   --log-border: rgba(0, 0, 0, 0.12);
-  --scrollbar: rgba(0, 0, 0, 0.2);
-  --titlebar-bg: rgba(248, 250, 252, 0.95);
-  --sub-header-bg: rgba(241, 245, 249, 0.9);
   --res-card-bg: rgba(241, 245, 249, 0.95);
   --res-card-border: rgba(0, 0, 0, 0.1);
   --log-ok: #059669;
@@ -169,34 +135,16 @@ input[type="number"] {
   --log-done: #7c3aed;
 }
 
-/* ─── App Shell (Frameless Flush Desktop Window) ─────────────────────────── */
+/* ─── App Shell (frameless window) ───────────────────────────────────────── */
 #app {
   width: 100%; height: 100%;
   background: var(--bg-gradient);
   backdrop-filter: blur(24px);
   -webkit-backdrop-filter: blur(24px);
-  border-radius: 0 !important;
-  border: none !important;
-  box-shadow: none !important;
-  clip-path: none !important;
-  -webkit-clip-path: none !important;
   display: flex;
   flex-direction: column;
   position: relative;
   overflow: hidden;
-}
-
-html, body,
-html.is-linux, body.is-linux, .is-linux #app,
-html.is-windows, body.is-windows, .is-windows #app,
-html.is-mac, body.is-mac, .is-mac #app {
-  padding: 0 !important;
-  margin: 0 !important;
-  border-radius: 0 !important;
-  border: none !important;
-  box-shadow: none !important;
-  clip-path: none !important;
-  -webkit-clip-path: none !important;
 }
 
 /* ─── Linux: rounded window corners ─────────────────────────────────────────
@@ -240,7 +188,7 @@ html.is-linux.is-maximized .modal-overlay {
   border-radius: 0 !important;
 }
 
-/* ─── Single Unified Top Header ────────────────────────────────────────── */
+/* ─── Titlebar ───────────────────────────────────────────────────────── */
 .titlebar {
   height: 48px;
   background: rgba(255, 255, 255, 0.03);
@@ -268,12 +216,12 @@ html.is-linux.is-maximized .modal-overlay {
   user-select: none;
 }
 
-button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-btn, .theme-toggle, .btn {
+button, input, select, textarea, a, label {
   -webkit-app-region: no-drag !important;
   pointer-events: auto !important;
 }
 
-/* ─── Sleek Floating Circular Traffic Lights (Top-Left) ─────────────────── */
+/* ─── Window Controls (traffic lights) ───────────────────────────────── */
 .traffic-lights {
   display: flex;
   align-items: center;
@@ -457,7 +405,7 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
   flex-shrink: 0;
 }
 
-/* ─── Premium Glassmorphic Theme Toggle Switch ────────────────────────── */
+/* ─── Theme Toggle Switch ─────────────────────────────────────────────── */
 .theme-toggle-switch {
   width: 52px;
   height: 26px;
@@ -755,11 +703,9 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
   overflow: hidden;
 }
 
-.col-options { display: flex; flex-direction: column; overflow: hidden; }
-.col-queue { display: flex; flex-direction: column; overflow: hidden; }
-.col-console { display: flex; flex-direction: column; overflow: hidden; }
+.col-options, .col-queue, .col-console { display: flex; flex-direction: column; overflow: hidden; }
 
-/* ─── Glass Panel (Corner Clipping & Backdrop Blur Fix) ─────────────────── */
+/* ─── Glass Panel ───────────────────────────────────────────────────────── */
 .glass-panel {
   background: var(--glass-panel-bg);
   border: 1px solid var(--glass-border);
@@ -805,7 +751,7 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
   flex: 1;
 }
 
-/* ─── Parameters Action Buttons Footer (Bottom of Parameters Panel) ─────── */
+/* ─── Parameters Panel Run/Stop Footer ─────────────────────────────────── */
 .param-actions-footer {
   margin-top: 12px;
   padding-top: 12px;
@@ -815,7 +761,10 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
   gap: 8px;
 }
 
-/* ─── PROMINENT HIGH-CONTRAST RESOURCE TELEMETRY CARD ────────────────── */
+.param-actions-footer .btn-gradient { flex: 2; }
+.param-actions-footer .btn-stop { flex: 1; }
+
+/* ─── Resource Telemetry Card ─────────────────────────────────────────── */
 .prominent-resource-card {
   background: var(--res-card-bg);
   border-bottom: 1px solid var(--res-card-border);
@@ -871,7 +820,6 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
 }
 
 .metric-val.green { color: var(--success); }
-.metric-val.cyan { color: var(--log-info); }
 .metric-val.purple { color: var(--log-done); }
 .metric-val.muted { color: var(--text-dim); }
 
@@ -936,7 +884,7 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
   color: var(--log-done);
 }
 
-/* ─── Tokyo Detailed Episode Cards ───────────────────────────────────────── */
+/* ─── Episode Queue ─────────────────────────────────────────────────────── */
 .queue-body {
   display: flex;
   flex-direction: column;
@@ -944,8 +892,8 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
   padding: 12px;
 }
 
-/* ─── Empty State Glass Placeholder & Legacy Fallback ───────────────────────── */
-.empty-state-card, .empty-log {
+/* ─── Empty Queue Placeholder ───────────────────────────────────────────── */
+.empty-state-card {
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -962,7 +910,7 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
   color: var(--text) !important;
 }
 
-.empty-state-card:hover, .empty-log:hover {
+.empty-state-card:hover {
   border-color: var(--accent);
   background: var(--glass-bg-hover);
 }
@@ -981,13 +929,6 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
   box-shadow: 0 0 20px rgba(99, 102, 241, 0.15);
 }
 
-.empty-icon-glow.magenta {
-  background: rgba(168, 85, 247, 0.12);
-  border-color: rgba(168, 85, 247, 0.28);
-  color: var(--accent-magenta);
-  box-shadow: 0 0 20px rgba(168, 85, 247, 0.15);
-}
-
 .empty-state-title {
   font-size: 13.5px;
   font-weight: 700;
@@ -996,7 +937,7 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
   letter-spacing: -0.01em;
 }
 
-.empty-state-desc, .empty-log span {
+.empty-state-desc {
   font-size: 11.5px;
   font-weight: 500;
   color: var(--text-dim) !important;
@@ -1029,18 +970,16 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
 }
 
 [data-theme="dark"] .empty-state-title { color: #f8fafc !important; }
-[data-theme="dark"] .empty-state-desc,
-[data-theme="dark"] .empty-log span {
+[data-theme="dark"] .empty-state-desc {
   color: #94a3b8 !important;
 }
 
 [data-theme="light"] .empty-state-title { color: #0f172a !important; }
-[data-theme="light"] .empty-state-desc,
-[data-theme="light"] .empty-log span {
+[data-theme="light"] .empty-state-desc {
   color: #334155 !important;
 }
 
-/* ─── Developer Terminal Prompt Console Empty State ──────────────────────── */
+/* ─── Console Empty Prompt ─────────────────────────────────────────────── */
 .console-empty-prompt {
   display: flex;
   align-items: center;
@@ -1096,12 +1035,6 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
   align-items: center;
   gap: 8px;
   margin-left: auto;
-}
-
-.queue-header-right {
-  display: flex;
-  align-items: center;
-  gap: 8px;
 }
 
 .queue-count-badge {
@@ -1198,7 +1131,6 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
 .ep-duration-tag.cyan   { background: rgba(6, 182, 212, 0.15); color: var(--accent-cyan); }
 .ep-duration-tag.grey   { background: rgba(100, 116, 139, 0.15); color: var(--text-dim); }
 .ep-duration-tag.red    { background: rgba(239, 68, 68, 0.15); color: var(--error); }
-.ep-progress-fill.cyan  { background: linear-gradient(90deg, var(--accent-cyan), #38bdf8); }
 
 .ep-title {
   font-size: 12.5px;
@@ -1226,7 +1158,6 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
 
 .track-tag.cyan { background: rgba(56, 189, 248, 0.15); color: var(--log-info); }
 .track-tag.magenta { background: rgba(236, 72, 153, 0.15); color: var(--accent-pink); }
-.track-tag.green { background: rgba(52, 211, 153, 0.15); color: var(--success); }
 
 .ep-progress-bar {
   height: 5px;
@@ -1254,9 +1185,11 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
   background: var(--text-dim);
 }
 
-/* Honest indeterminate progress: shimmer sweep shown while a job is running
-   but the backend has not yet emitted a real percentage. Replaces the old
-   random-walk fake progress. */
+.ep-progress-fill.cyan {
+  background: linear-gradient(90deg, var(--accent-cyan), #38bdf8);
+}
+
+/* Shimmer sweep while an item is processing but has not reported a percentage yet. */
 .ep-progress-fill.indeterminate {
   width: 40% !important;
   transition: none !important;
@@ -1289,6 +1222,19 @@ button, input, select, textarea, a, label, .pipeline-tab-btn, .browse-btn, .tl-b
   letter-spacing: 0.02em;
 }
 .form-label .required { color: var(--error); margin-left: 2px; }
+
+.form-label.compact {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 9.5px;
+}
+
+.info-tip {
+  cursor: help;
+  opacity: 0.85;
+  font-size: 10px;
+}
 
 .form-label-row {
   display: flex;
@@ -1331,14 +1277,14 @@ input[type="text"]:focus, input[type="number"]:focus, select:focus {
   box-shadow: 0 0 0 3px var(--accent-glow);
 }
 
-/* Inline validation state (replaces native alert()) */
+/* Inline validation state set by JobController.flagInputError */
 .input-error {
   border-color: var(--error) !important;
   box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.25) !important;
 }
 .input-error::placeholder { color: var(--error); }
 
-/* Dropdown Arrow Fix (Prevents duplicate inner/outer arrows) */
+/* Custom dropdown arrow; the native one is hidden to avoid a double arrow. */
 select {
   -webkit-appearance: none !important;
   -moz-appearance: none !important;
@@ -1366,13 +1312,14 @@ select::-ms-expand { display: none; }
 
 .browse-btn:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
 
-/* ─── Number Stepper & Complexity Stepper Fix ────────────────────────────── */
+/* ─── Number Steppers ───────────────────────────────────────────────────── */
 .number-stepper {
   display: flex;
   align-items: center;
   background: var(--input-bg);
   border: 1px solid var(--input-border);
   border-radius: var(--radius-sm);
+  width: 100%;
   height: 28px;
   overflow: hidden;
 }
@@ -1395,25 +1342,14 @@ select::-ms-expand { display: none; }
 }
 
 .pill-stepper {
-  background: var(--input-bg);
-  border: 1px solid var(--input-border);
-  border-radius: var(--radius-sm);
   height: 32px;
-  width: 80px !important;
-  min-width: 80px !important;
-  display: flex;
-  align-items: center;
+  width: 80px;
+  min-width: 80px;
 }
 
 .pill-stepper input[type="number"] {
   width: 36px !important;
   font-size: 13px !important;
-  font-weight: 800 !important;
-  color: var(--text) !important;
-  background: transparent !important;
-  border: none !important;
-  outline: none !important;
-  text-align: center !important;
 }
 
 .stepper-btn {
@@ -1586,6 +1522,8 @@ input[type="range"]::-moz-range-thumb:hover {
   font-weight: 700;
   cursor: pointer;
   transition: all var(--transition);
+  margin-top: 6px;
+  width: 100%;
 }
 
 .clear-cache-btn:hover {
@@ -1653,11 +1591,10 @@ input[type="range"]::-moz-range-thumb:hover {
 
 .status-dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
 
-/* ─── OLED Pro Log Console Inside Right Panel ────────────────────────────── */
+/* ─── Log Console ───────────────────────────────────────────────────────── */
 .log-console {
   flex: 1;
   background: var(--log-bg);
-  border-top: 1px solid var(--log-border);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -1699,6 +1636,7 @@ input[type="range"]::-moz-range-thumb:hover {
 .log-line.line-warn { color: var(--log-warn); }
 .log-line.line-info { color: var(--log-info); }
 .log-line.line-done { color: var(--log-done); font-weight: bold; }
+.log-line.line-skip { color: var(--text-muted); }
 
 /* ─── Modal Overlay ────────────────────────────────────────────────────────── */
 .modal-overlay {
@@ -1725,8 +1663,6 @@ input[type="range"]::-moz-range-thumb:hover {
 .modal-actions { display: flex; gap: 12px; }
 
 /* ─── GUI Manual Subtitle Selection ──────────────────────────────────────── */
-.sub-assign-card { text-align: center; }
-
 .sub-assign-btn {
   align-self: center;
   font: inherit; font-size: 10px; font-weight: 600;
@@ -1867,6 +1803,11 @@ input[type="range"]::-moz-range-thumb:hover {
 .resize-handle.s { bottom: 0; left: 0; right: 0; height: 6px; cursor: ns-resize; }
 .resize-handle.e { top: 0; right: 0; bottom: 0; width: 6px; cursor: ew-resize; }
 .resize-handle.w { top: 0; left: 0; bottom: 0; width: 6px; cursor: ew-resize; }
+.resize-handle.ne, .resize-handle.nw, .resize-handle.se, .resize-handle.sw { width: 10px; height: 10px; z-index: 10000; }
+.resize-handle.ne { top: 0; right: 0; cursor: nesw-resize; }
+.resize-handle.nw { top: 0; left: 0; cursor: nwse-resize; }
+.resize-handle.se { bottom: 0; right: 0; cursor: nwse-resize; }
+.resize-handle.sw { bottom: 0; left: 0; cursor: nesw-resize; }
 
 /* Keep the three-pane workflow usable at the window's compact size. */
 @media (max-width: 960px) {

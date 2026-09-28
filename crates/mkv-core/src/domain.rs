@@ -1,5 +1,6 @@
 //! Domain logic for episode identity, track scoring, language mapping, and fansub heuristics.
 
+use std::cmp::Reverse;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -10,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 // ─── DOMAIN TYPES ────────────────────────────────────────────────────────────
 
-/// Canonical parsed identity of an episode: season tag, type key, number.
+/// Kind of numbered release an episode belongs to; `as_str` is its identity key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum EpisodeType {
     #[default]
@@ -41,7 +42,7 @@ impl EpisodeType {
         }
     }
 
-    pub fn is_special_or_ova(&self) -> bool {
+    fn is_special_or_ova(&self) -> bool {
         matches!(self, Self::Ova | Self::Special)
     }
 }
@@ -63,6 +64,7 @@ impl From<&str> for EpisodeType {
     }
 }
 
+/// Canonical parsed identity of an episode: season tag, type key, number.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EpisodeInfo {
     pub season: String,
@@ -167,36 +169,23 @@ pub fn natural_sort_key(text: &str) -> Vec<NaturalSortToken> {
 
 // ─── LANGUAGE AND MIME CONFIG ────────────────────────────────────────────────
 
-pub const SUBTITLE_LANGS_PRIMARY_ORDER: &[&str] = &["ind", "id", "und"];
-pub const SUBTITLE_LANGS_FALLBACK_ORDER: &[&str] = &["eng", "en"];
+const DIALOGUE_KEYWORDS: &[&str] = &[
+    "full",
+    "dialogue",
+    "dialog",
+    "main",
+    "complete",
+    "indo",
+    "indonesia",
+    "indonesian",
+];
 
-pub static DIALOGUE_KEYWORDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
-    [
-        "full",
-        "dialogue",
-        "dialog",
-        "main",
-        "complete",
-        "indo",
-        "indonesia",
-        "indonesian",
-    ]
-    .into_iter()
-    .collect()
-});
+const KNOWN_LANG_TOKENS: &[&str] = &[
+    "ind", "id", "eng", "en", "jpn", "ja", "und", "zho", "zh", "kor", "ko", "ara", "ar", "por",
+    "pt", "spa", "es", "fra", "fr", "deu", "de", "ita", "it", "rus", "ru", "tha", "th", "vie",
+    "vi", "msa", "ms",
+];
 
-pub static KNOWN_LANG_TOKENS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
-    [
-        "ind", "id", "eng", "en", "jpn", "ja", "und", "zho", "zh", "kor", "ko", "ara", "ar", "por",
-        "pt", "spa", "es", "fra", "fr", "deu", "de", "ita", "it", "rus", "ru", "tha", "th", "vie",
-        "vi", "msa", "ms",
-    ]
-    .into_iter()
-    .collect()
-});
-
-pub const SUBTITLE_EXTENSIONS: &[&str] = &[".ass", ".srt"];
-pub const CHAPTER_EXT: &str = ".xml";
 pub const COVER_EXTENSIONS: &[&str] = &[".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif"];
 pub const FONT_EXTENSIONS: &[&str] = &[".ttf", ".ttc", ".otf", ".woff", ".woff2", ".eot"];
 
@@ -269,33 +258,15 @@ pub fn score_subtitle_category(language: &str, is_ass: bool) -> i32 {
 
 static UNSAFE_FN_CHARS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"[/:*?"<>|\\]"#).unwrap());
 
-pub fn is_windows_reserved_device(stem: &str) -> bool {
-    let s = stem.to_ascii_uppercase();
-    matches!(
-        s.as_str(),
-        "CON"
-            | "PRN"
-            | "AUX"
-            | "NUL"
-            | "COM1"
-            | "COM2"
-            | "COM3"
-            | "COM4"
-            | "COM5"
-            | "COM6"
-            | "COM7"
-            | "COM8"
-            | "COM9"
-            | "LPT1"
-            | "LPT2"
-            | "LPT3"
-            | "LPT4"
-            | "LPT5"
-            | "LPT6"
-            | "LPT7"
-            | "LPT8"
-            | "LPT9"
-    )
+const WINDOWS_RESERVED_DEVICES: &[&str] = &[
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+fn is_windows_reserved_device(stem: &str) -> bool {
+    WINDOWS_RESERVED_DEVICES
+        .iter()
+        .any(|device| device.eq_ignore_ascii_case(stem))
 }
 
 pub fn safe_filename(name: &str) -> String {
@@ -318,7 +289,12 @@ pub fn safe_filename(name: &str) -> String {
     }
 }
 
+/// Upper bound on any single mkvmerge/mkvextract/ffmpeg invocation.
 pub const SUBPROCESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1800);
+
+/// Windows process creation flag that keeps child tools from opening a console window.
+#[cfg(windows)]
+pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 pub fn output_stem(base: &str, ep_type: &EpisodeType, ep: &str) -> String {
     if ep_type.is_special_or_ova() {
@@ -326,6 +302,16 @@ pub fn output_stem(base: &str, ep_type: &EpisodeType, ep: &str) -> String {
     } else {
         base.to_string()
     }
+}
+
+/// `path` relative to `root`, compared lexically first and then by canonical form.
+fn relative_to(path: &Path, root: &Path) -> Option<PathBuf> {
+    if let Ok(rel) = path.strip_prefix(root) {
+        return Some(rel.to_path_buf());
+    }
+    let path = path.canonicalize().ok()?;
+    let root = root.canonicalize().ok()?;
+    path.strip_prefix(&root).ok().map(Path::to_path_buf)
 }
 
 pub fn resolve_output_dir(
@@ -337,15 +323,10 @@ pub fn resolve_output_dir(
     let Some(out_override) = out_override else {
         return parent.to_path_buf();
     };
-    if let Ok(rel) = parent.strip_prefix(input_dir) {
-        return out_override.join(rel);
+    match relative_to(parent, input_dir) {
+        Some(rel) => out_override.join(rel),
+        None => out_override.to_path_buf(),
     }
-    if let (Ok(p_canon), Ok(in_canon)) = (parent.canonicalize(), input_dir.canonicalize()) {
-        if let Ok(rel) = p_canon.strip_prefix(&in_canon) {
-            return out_override.join(rel);
-        }
-    }
-    out_override.to_path_buf()
 }
 
 pub fn seasons_match(mkv_season: &str, sub_season: &str) -> bool {
@@ -357,21 +338,7 @@ pub fn seasons_match(mkv_season: &str, sub_season: &str) -> bool {
 }
 
 pub fn ancestor_dirs(mkv_dir: &Path, root_input_dir: &Path) -> Vec<PathBuf> {
-    let rel_buf: Option<PathBuf> = mkv_dir
-        .strip_prefix(root_input_dir)
-        .map(|p| p.to_path_buf())
-        .ok()
-        .or_else(|| {
-            if let (Ok(m_canon), Ok(r_canon)) =
-                (mkv_dir.canonicalize(), root_input_dir.canonicalize())
-            {
-                m_canon.strip_prefix(&r_canon).map(|p| p.to_path_buf()).ok()
-            } else {
-                None
-            }
-        });
-
-    let Some(rel) = rel_buf else {
+    let Some(rel) = relative_to(mkv_dir, root_input_dir) else {
         return vec![mkv_dir.to_path_buf()];
     };
 
@@ -429,7 +396,7 @@ pub fn detect_sub_lang(sub_stem: &str) -> String {
         if let Some(caps) = re.captures(&cleaned) {
             if let Some(mat) = caps.get(1) {
                 let token = mat.as_str().to_lowercase();
-                if !require_known || KNOWN_LANG_TOKENS.contains(token.as_str()) {
+                if !require_known || KNOWN_LANG_TOKENS.contains(&token.as_str()) {
                     return token;
                 }
             }
@@ -488,7 +455,7 @@ static SEASON_PATTERNS: LazyLock<Vec<FancyRegex>> = LazyLock::new(|| {
 static TYPED_EP_GLUED: LazyLock<FancyRegex> =
     LazyLock::new(|| FancyRegex::new(r"^\s*(\d{1,4}(?:\.\d{1,2}(?![0-9pib]))?)").unwrap());
 
-pub fn format_ep(val: &str) -> String {
+fn format_ep(val: &str) -> String {
     if let Some((int_part, frac_part)) = val.split_once('.') {
         let int_val: u32 = int_part.parse().unwrap_or(0);
         format!("{:02}.{}", int_val, frac_part)
@@ -602,7 +569,7 @@ pub fn parse_episode(name: &str) -> Option<EpisodeInfo> {
         return Some(EpisodeInfo::new(s_num.to_string(), EpisodeType::Part, ep));
     }
 
-    if let Ok(Some(caps)) = EP_NUM_MARKER_RE.captures(&normalized[..]) {
+    if let Ok(Some(caps)) = EP_NUM_MARKER_RE.captures(normalized.as_str()) {
         if let Some(val) = first_captured_group(&caps) {
             return Some(EpisodeInfo::new(
                 season,
@@ -623,160 +590,89 @@ pub fn parse_episode(name: &str) -> Option<EpisodeInfo> {
     None
 }
 
-pub fn ep_type_label(ep_type: &EpisodeType, long: bool) -> &str {
-    ep_type.label(long)
-}
-
 // ─── TRACK SELECTION & HEURISTICS ────────────────────────────────────────────
 
 static SPLIT_WORDS_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[\s\-_]+").unwrap());
 
-pub fn is_dialogue_track(name: Option<&str>) -> bool {
-    let Some(name) = name else {
-        return false;
-    };
-    if name.is_empty() {
-        return false;
-    }
+pub fn is_dialogue_track(name: &str) -> bool {
     let lower = name.to_lowercase();
-    for token in SPLIT_WORDS_RE.split(&lower) {
-        if DIALOGUE_KEYWORDS.contains(token) {
-            return true;
-        }
-    }
-    false
+    SPLIT_WORDS_RE
+        .split(&lower)
+        .any(|token| DIALOGUE_KEYWORDS.contains(&token))
 }
 
+/// Picks the embedded subtitle track to use, returning its track ID and language.
 pub fn select_best_subtitle_track(
     tracks: &[MkvTrack],
     codec_filter: Option<&HashSet<String>>,
-) -> Option<(u32, String, bool)> {
-    let mut candidates = Vec::new();
-
-    for t in tracks {
-        if t.track_type != "subtitles" {
-            continue;
-        }
-        let Some(tid) = t.id else {
-            continue;
-        };
-
-        let codec_id = t
-            .properties
-            .codec_id
-            .as_deref()
-            .unwrap_or("")
-            .to_lowercase();
-        let language = t.properties.language.as_deref().unwrap_or("und");
-        let name = t.properties.track_name.as_deref().unwrap_or("");
-
-        if let Some(filter) = codec_filter {
-            if !filter.contains(&codec_id) {
-                continue;
+) -> Option<(u32, String)> {
+    tracks
+        .iter()
+        .filter(|t| t.track_type == "subtitles")
+        .filter_map(|t| {
+            let tid = t.id?;
+            let codec_id = t
+                .properties
+                .codec_id
+                .as_deref()
+                .unwrap_or("")
+                .to_lowercase();
+            if codec_filter.is_some_and(|filter| !filter.contains(&codec_id)) {
+                return None;
             }
-        }
-
-        let is_diag = is_dialogue_track(Some(name));
-        let is_ass = codec_id == "s_text/ass";
-        let category_score = score_subtitle_category(language, is_ass);
-
-        let priority_key = (category_score, if is_diag { 1 } else { 0 }, -(tid as i64));
-        candidates.push((priority_key, tid, language.to_string(), is_diag));
-    }
-
-    candidates
-        .into_iter()
-        .max_by_key(|c| c.0)
-        .map(|(_, tid, language, is_diag)| (tid, language, is_diag))
+            let language = t.properties.language.as_deref().unwrap_or("und");
+            let is_dialogue = is_dialogue_track(t.properties.track_name.as_deref().unwrap_or(""));
+            let score = score_subtitle_category(language, codec_id == "s_text/ass");
+            Some(((score, is_dialogue, Reverse(tid)), tid, language))
+        })
+        .max_by_key(|(key, ..)| *key)
+        .map(|(_, tid, language)| (tid, language.to_string()))
 }
 
 static COMMENTARY_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b(commentary|comment|audio\s+description|ad|extension)\b").unwrap()
 });
 
-pub fn select_audio_track(
-    audio_tracks: &[AudioTrack],
-    video_pos: u32,
-) -> (Option<AudioTrack>, String) {
-    if audio_tracks.is_empty() {
-        return (None, String::new());
-    }
+/// Ranks an audio track for `select_audio_track`; higher is better.
+fn audio_score(track: &AudioTrack, video_pos: u32) -> i32 {
+    let is_ja = track.lang.starts_with("ja") || track.lang.starts_with("jpn");
+    let is_und = track.lang == "und";
+    let is_stereo = track.channels == 2;
+    let is_dialogue = is_dialogue_track(&track.name);
 
-    let primary_tracks: Vec<AudioTrack> = audio_tracks
-        .iter()
-        .filter(|t| !COMMENTARY_RE.is_match(&t.name))
-        .cloned()
-        .collect();
-
-    let (pool_to_use, is_fallback_pool) = if !primary_tracks.is_empty() {
-        (primary_tracks, false)
+    if is_ja && is_stereo && is_dialogue {
+        10
+    } else if is_ja && is_stereo {
+        9
+    } else if is_ja {
+        8
+    } else if is_und && is_stereo && is_dialogue {
+        7
+    } else if is_und && is_stereo {
+        6
+    } else if is_und {
+        5
+    } else if is_stereo {
+        4
+    } else if track.pos > video_pos {
+        3
     } else {
-        (audio_tracks.to_vec(), true)
-    };
-
-    let mut candidates: Vec<((i32, i64), AudioTrack)> = Vec::new();
-
-    for track in pool_to_use {
-        let is_ja = track.lang.starts_with("ja") || track.lang.starts_with("jpn");
-        let is_und = track.lang == "und";
-        let is_stereo = track.channels == 2;
-        let is_diag = is_dialogue_track(Some(&track.name));
-
-        let mut score = 0;
-        if is_ja && is_stereo && is_diag {
-            score = 10;
-        } else if is_ja && is_stereo {
-            score = 9;
-        } else if is_ja {
-            score = 8;
-        } else if is_und && is_stereo && is_diag {
-            score = 7;
-        } else if is_und && is_stereo {
-            score = 6;
-        } else if is_und {
-            score = 5;
-        } else if is_stereo {
-            score = 4;
-        } else if track.pos > video_pos {
-            score = 3;
-        }
-
-        if score == 0 {
-            score = if is_ja { 2 } else { 1 };
-        }
-
-        let priority_key = (score, -(track.pos as i64));
-        candidates.push((priority_key, track));
+        1
     }
+}
 
-    let (priority_key, best_track) = candidates.into_iter().max_by_key(|c| c.0).unwrap();
-    let score = priority_key.0;
+/// Picks the audio track to keep, preferring Japanese, then undetermined, then stereo.
+///
+/// Commentary tracks are considered only when every track looks like commentary.
+pub fn select_audio_track(audio_tracks: &[AudioTrack], video_pos: u32) -> Option<AudioTrack> {
+    let is_primary = |t: &AudioTrack| !COMMENTARY_RE.is_match(&t.name);
+    let is_fallback_pool = !audio_tracks.iter().any(is_primary);
 
-    if is_fallback_pool {
-        if best_track.lang.starts_with("ja") || best_track.lang.starts_with("jpn") {
-            return (
-                Some(best_track),
-                "Japanese audio fallback (commentary-possible)".to_string(),
-            );
-        }
-        return (Some(best_track), "First audio (last resort)".to_string());
-    }
-
-    let reason = match score {
-        10 => "Japanese stereo (dialogue-priority)",
-        9 => "Japanese stereo",
-        8 => "Japanese multi-channel (no stereo available)",
-        7 => "Undetermined stereo (dialogue-priority, likely Japanese)",
-        6 => "Undetermined stereo (likely Japanese)",
-        5 => "Undetermined multi-channel (likely Japanese)",
-        4 => "Stereo fallback (no Japanese audio)",
-        3 => "First audio after video",
-        2 => "Japanese audio fallback (commentary-possible)",
-        1 => "First audio (last resort)",
-        _ => "Selected audio",
-    };
-
-    (Some(best_track), reason.to_string())
+    audio_tracks
+        .iter()
+        .filter(|&t| is_fallback_pool || is_primary(t))
+        .max_by_key(|t| (audio_score(t, video_pos), Reverse(t.pos)))
+        .cloned()
 }
 
 /// Builds the error returned when a promotion's rollback rename fails, naming both paths
@@ -793,6 +689,7 @@ fn rollback_error(
     ))
 }
 
+/// Process-unique token for naming temporary and backup files.
 pub fn unique_file_token() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -821,22 +718,20 @@ fn is_cross_device_rename(err: &std::io::Error) -> bool {
         || (cfg!(windows) && err.raw_os_error() == Some(17))
 }
 
-/// Atomically moves `staged` onto `final_path`, replacing an existing destination via a
-/// backup-and-rollback rename where the platform requires one. Ensures the parent directory
-/// exists.
+/// Atomically moves `staged` onto `final_path`, creating the parent directory. An existing
+/// destination is replaced via a backup-and-rollback rename where the platform's `rename`
+/// refuses to overwrite.
 ///
-/// The copy fallback is reached only for what looks like a device boundary, so the common
-/// failures return the rename error instead of duplicating a multi-gigabyte payload to fail
-/// the same way: a missing source, or a destination locked by an antivirus or indexer.
+/// Only a device-boundary failure (see `is_cross_device_rename`) falls back to copying into
+/// a temporary sibling of `final_path` and renaming it into place. Other rename failures —
+/// a missing source, a destination locked by an antivirus or indexer — return the rename
+/// error rather than duplicating a multi-gigabyte payload to fail the same way.
 ///
-/// This is a deliberate trade, not a proof. `rename(2)` needs write permission on *both*
-/// parents, so a staged file in a read-only or foreign-owned directory fails the rename while
-/// remaining perfectly readable — and the copy would have succeeded, since it reads the
-/// source, writes a temporary sibling into the writable destination, and renames within
-/// that one directory. Such a promotion now returns the error instead. No caller in this
-/// crate does that: `extract` and `remux` stage into `tempdir_in(<destination>)` and font
-/// promotion into `<fonts_dir>/.font_staging`, all created by this process. `promote_file`
-/// is public, so a future caller staging elsewhere would meet it. See ADR-0013's amendment.
+/// Consequence: `rename(2)` needs write permission on *both* parents, so a staged file in a
+/// read-only directory is refused even though a copy could have read it. Callers stage
+/// inside directories this process creates: `extract` and `remux` use
+/// `tempdir_in(<destination>)`, font promotion `<fonts_dir>/.font_staging`. See ADR-0013's
+/// amendment.
 pub fn promote_file(staged: &Path, final_path: &Path) -> Result<(), std::io::Error> {
     let parent = final_path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)?;
@@ -860,9 +755,8 @@ pub fn promote_file(staged: &Path, final_path: &Path) -> Result<(), std::io::Err
                 }
             }
         }
-        // Not a device boundary. A copy usually could not do better, and on the common
-        // failures would duplicate the whole payload to fail identically, so report the
-        // real error. It can still rescue a source-side-only failure; see the doc comment.
+        // Not a device boundary: a copy would usually fail the same way, so report the
+        // rename error.
         return Err(rename_err);
     }
 
@@ -911,23 +805,26 @@ pub fn promote_file(staged: &Path, final_path: &Path) -> Result<(), std::io::Err
     rename_result
 }
 
-/// Parses standard mkvmerge/mkvextract "Progress: XX%" output strings.
-pub fn parse_progress_percentage(line: &str) -> Option<f64> {
-    if let Some(rest) = line.trim().strip_prefix("Progress:") {
-        let p = rest.trim().trim_end_matches('%').trim();
-        p.parse::<f64>().ok()
-    } else {
-        None
-    }
+/// Parses mkvmerge/mkvextract "Progress: XX%" output lines.
+fn parse_progress_percentage(line: &str) -> Option<f64> {
+    let rest = line.trim().strip_prefix("Progress:")?;
+    rest.trim().trim_end_matches('%').trim().parse::<f64>().ok()
 }
 
-/// Reads an asynchronous byte stream, splitting on '\r' or '\n', and dispatches progress updates.
+/// Drains `stream` into `stdout_bytes`, reporting each `\r`- or `\n`-terminated progress line
+/// to `on_progress`.
 pub async fn read_progress_stream<R: tokio::io::AsyncRead + Unpin>(
     mut stream: R,
     on_progress: Option<&(dyn Fn(f64) + Send + Sync)>,
-    mut on_bytes: Option<&mut Vec<u8>>,
+    stdout_bytes: &mut Vec<u8>,
 ) -> Result<(), std::io::Error> {
     use tokio::io::AsyncReadExt;
+
+    let report = |line: &str| {
+        if let (Some(cb), Some(pct)) = (on_progress, parse_progress_percentage(line)) {
+            cb(pct);
+        }
+    };
     let mut buf = [0u8; 1024];
     let mut pending = String::new();
     loop {
@@ -935,25 +832,14 @@ pub async fn read_progress_stream<R: tokio::io::AsyncRead + Unpin>(
         if n == 0 {
             break;
         }
-        if let Some(b) = &mut on_bytes {
-            b.extend_from_slice(&buf[..n]);
-        }
+        stdout_bytes.extend_from_slice(&buf[..n]);
         pending.push_str(&String::from_utf8_lossy(&buf[..n]));
         while let Some(pos) = pending.find(['\r', '\n']) {
-            let line = &pending[..pos];
-            if let Some(pct) = parse_progress_percentage(line) {
-                if let Some(cb) = on_progress {
-                    cb(pct);
-                }
-            }
+            report(&pending[..pos]);
             pending.drain(..=pos);
         }
     }
-    if let Some(pct) = parse_progress_percentage(&pending) {
-        if let Some(cb) = on_progress {
-            cb(pct);
-        }
-    }
+    report(&pending);
     Ok(())
 }
 

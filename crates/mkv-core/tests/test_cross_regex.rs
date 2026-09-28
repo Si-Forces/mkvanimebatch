@@ -1,31 +1,17 @@
-//! Regression verification test: Rust (mkv-core) vs reference fixture snapshot (ADR-0010).
-//!
-//! Ensures regex matching, episode parsing, language detection, filename sanitization,
-//! natural sorting, track classification, chapter XML sniffing, and cover pattern matching
-//! retain 100% fidelity against the verified canonical reference snapshot.
+//! Regression test pinning episode parsing, subtitle language detection, filename
+//! sanitization, dialogue-track detection, natural sorting, and chapter XML sniffing against
+//! the reference snapshot in `fixtures/cross_regex_reference.json` (ADR-0010).
+
+use std::fs;
 
 use mkv_core::domain::{
     detect_sub_lang, is_dialogue_track, natural_sort_key, parse_episode, safe_filename,
     EpisodeInfo, EpisodeType,
 };
-use regex::bytes::Regex as BytesRegex;
-use regex::Regex;
-use serde::{Deserialize, Serialize};
-use std::sync::LazyLock;
+use mkv_core::scan::is_chapter_xml;
+use serde::Deserialize;
 
-static COMMENTARY_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b(commentary|comment|audio\s+description|ad|extension)\b").unwrap()
-});
-
-static CHAPTER_TAG_RE: LazyLock<BytesRegex> =
-    LazyLock::new(|| BytesRegex::new(r"(?i)<Chapters[ >]").unwrap());
-
-static COVER_FILE_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)^(?P<stem>.+)_cover$").unwrap());
-
-static BITRATE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d+)([kM]?)$").unwrap());
-
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Deserialize, PartialEq, Eq)]
 struct ParsedResult {
     season: String,
     ep_type: String,
@@ -47,341 +33,297 @@ impl From<EpisodeInfo> for ParsedResult {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct CrossCheckPayload {
-    episodes: Vec<String>,
-    sub_stems: Vec<String>,
-    safe_names: Vec<String>,
-    track_names: Vec<String>,
-    commentary_names: Vec<String>,
-    sort_inputs: Vec<String>,
-    chapter_xml_samples: Vec<String>,
-    cover_stems: Vec<String>,
-    bitrate_strings: Vec<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct CrossCheckResponse {
+/// Expected outputs, index-aligned with the input lists below.
+#[derive(Deserialize)]
+struct Reference {
     episodes: Vec<Option<ParsedResult>>,
     sub_stems: Vec<String>,
     safe_names: Vec<String>,
     track_names: Vec<bool>,
-    commentary_names: Vec<bool>,
     sorted_outputs: Vec<String>,
     chapter_xml_results: Vec<bool>,
-    cover_stem_results: Vec<Option<String>>,
-    bitrate_results: Vec<Option<(u64, String)>>,
 }
 
-fn load_reference_response() -> CrossCheckResponse {
-    let fixture_str = include_str!("fixtures/cross_regex_reference.json");
-    serde_json::from_str(fixture_str).expect("deserialize cross regex reference fixture")
+const EPISODES: &[&str] = &[
+    // Basic dashes
+    "[Group] Show - 01 [1080p]",
+    "Show - 12",
+    "Show - 100",
+    "Show  -  05",
+    "Show - 01v2",
+    "Show - 01-02",
+    "Show - 01 - 02",
+    "Show - 001",
+    "Show - 0005",
+    // Seasons & SxxExx
+    "Show S02E10",
+    "Show S01E03",
+    "Show S03E125",
+    "Show S01E05v2",
+    "Show S1E1",
+    "Show s01e05",
+    "Show S01E01-E02",
+    "Show S01P01",
+    "Show S02P05v2",
+    "Show Season 2 - 01",
+    "Show season 2 - 01",
+    "Show SEASON 2 - 01",
+    "Show Season 01 - 05",
+    "Show S2 - 05",
+    "Show S02 - 05",
+    "Show 2 Part - 01",
+    // Keywords
+    "Show EP03",
+    "Show ep03",
+    "Show Ep. 03",
+    "Show Episode 07",
+    "Show episode 07",
+    "Show EPISODE 07",
+    // Brackets & Parens
+    "Show [07] [720p]",
+    "Show (13)",
+    // Decimals
+    "Show - 12.5",
+    "Show - 0.5",
+    "Show - 1.25",
+    "Show - 00.5",
+    "Show EP 12.5",
+    "Show - 1.5",
+    "Show - 01.5",
+    // Typed (OVA, Special)
+    "Show OVA 3",
+    "Show OVA3",
+    "Show ova 3",
+    "Show OAD 01",
+    "Show ONA 01",
+    "Show SP01",
+    "Show SP 01",
+    "Show Special 02",
+    "Show Specials 02",
+    "Show SPECIAL 02",
+    "Show OVA",
+    "Show Special",
+    // CJK / Unicode
+    "[Group] 葬送のフリーレン - 05 [1080p]",
+    "【推しの子】 第01話 (1080p)",
+    "SPY×FAMILY - 12 [1080p]",
+    "第12.5話",
+    "第03話",
+    "第 04 話",
+    "第100話",
+    // Year guard & edge numbers
+    "Frieren - 2023 - 05",
+    "One Piece - 1999 - 12",
+    "Demon Lord 2099 - 01",
+    "Demon Lord 2099 - 2024 - 01",
+    "Show - 1234",
+    "Show - 2150",
+    "Show - EP2023",
+    "One Piece - 1089 [1080p]",
+    "Detective Conan - 1100",
+    "Mob Psycho 100 II - 03",
+    "Show 4k 60fps - 02",
+    "Show (2020) - 01",
+    "Show [2021] - 02",
+    "Show 2022 - 03",
+    "Tokyo 2040 - 01",
+    "2001 Nights - 01",
+    // End markers
+    "Show - 12 END",
+    "Show - 12 FIN",
+    "Show - 12 FINAL",
+    "Show - 24 (End)",
+    "Show - 24 [END]",
+    // Delimiters
+    "Show_-_01",
+    "Show.01.1080p.mkv",
+    "Show..01.mkv",
+    "...Show...01...",
+    "Dr. Stone - 01",
+    "Fate.Zero - 01",
+    "Steins.Gate.01.mkv",
+    // Resolution & Codec guards
+    "Show 720p - 01",
+    "Show 1080p - 01",
+    "Show 2160p - 01",
+    "Show 480p - 01",
+    "Show 10bit - 01",
+    "Show FLAC - 01",
+    "Show AAC 2.0 - 01",
+    "Show x264 - 01",
+    "Show x265 - 01",
+    "Show HEVC - 01",
+    // Subtitle offsets
+    "Show - 01.[+5s]",
+    "Show - 02.[-3s]",
+    "Show - 03.[+1.5s]",
+    "Show - 04.[-0.25s]",
+    // Non-episodes
+    "Random Movie Title",
+    "Movie (2020)",
+    "",
+    "Trailer",
+    "OST",
+    "Show Complete Series",
+    "Show Batch",
+    "Show Season 1",
+    "Show Movie",
+    "Show NCED",
+    "Show NCOP",
+    "Show Menu",
+    "Show PV",
+];
+
+const SUB_STEMS: &[&str] = &[
+    "EP01[ID]",
+    "EP01[id]",
+    "EP01[Ind]",
+    "EP01[Indonesian]",
+    "Show - 01 [Indo]",
+    "Show - 01 [indo]",
+    "EP01[INDONESIAN]",
+    "EP01[English]",
+    "EP01[ENG]",
+    "EP01[en]",
+    "EP01[eng]",
+    "EP01[Japanese]",
+    "EP01[ja]",
+    "EP01[jpn]",
+    "Show_01_ind_track2",
+    "Show_01_track2.ind",
+    "Show_01_tso_track2",
+    "Show_01_track2.ts",
+    "Show - 01.ind",
+    "Show - 01_eng",
+    "Show - 01 (ind)",
+    "Show - 01",
+    "Show - 01.xyz",
+    "episode_01.ind.[+5s]",
+    "episode_01.eng.[-3s]",
+    "episode_01.jpn.[+2.5s]",
+    "episode_01.[+5s].ind",
+];
+
+const SAFE_NAMES: &[&str] = &[
+    "foo/bar",
+    "foo:bar",
+    "foo*bar",
+    "foo?bar",
+    "foo\"bar",
+    "foo<bar",
+    "foo>bar",
+    "foo|bar",
+    "foo\\bar",
+    "  hello world  ",
+    "/:*?\"<>|\\",
+    "",
+    "   ",
+    ".hidden",
+    "..",
+    ".",
+    "CON",
+    "prn.txt",
+    "aux",
+    "NUL.tar.gz",
+    "normal_name-123",
+];
+
+const TRACK_NAMES: &[&str] = &[
+    "Dialogue",
+    "dialogue",
+    "DIALOGUE",
+    "Main Audio",
+    "Full Subtitles",
+    "Sign & Song",
+    "Signs/Songs",
+    "Signs",
+    "Songs",
+    "Complete",
+    "Indonesian Dialogue",
+    "Indo Sub",
+    "English",
+    "Commentary",
+    "Audio Description",
+];
+
+const SORT_INPUTS: &[&str] = &[
+    "EP10",
+    "EP2",
+    "EP1",
+    "Show - 01.mkv",
+    "Show - 1.mkv",
+    "Show - 2.mkv",
+    "Show - 10.mkv",
+    "Show - 1.5.mkv",
+    "Show - 01v2.mkv",
+    "Show - 01v1.mkv",
+    "Episode 100",
+    "Episode 99",
+    "Episode 02",
+    "Season 1/EP1",
+    "Season 10/EP1",
+    "Season 2/EP1",
+];
+
+const CHAPTER_XML_SAMPLES: &[&str] = &[
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Chapters>\n  <EditionEntry>\n",
+    "<chapters>",
+    "<Chapters >",
+    "<CHAPTERS>",
+    "<Chapters xmlns=\"http://www.matroska.org\">",
+    "<ChapterAtom>",
+    "<other xml>",
+    "no xml at all",
+    "",
+];
+
+/// Pairs each input with its expected output, failing loudly if the fixture is out of step.
+fn paired<'a, T>(
+    section: &str,
+    inputs: &'a [&'a str],
+    expected: &'a [T],
+) -> impl Iterator<Item = (&'a str, &'a T)> {
+    assert_eq!(
+        inputs.len(),
+        expected.len(),
+        "fixture section `{section}` does not match its input list"
+    );
+    inputs.iter().copied().zip(expected)
 }
 
 #[test]
 fn test_reference_regression() {
-    let payload = CrossCheckPayload {
-        episodes: vec![
-            // Basic dashes
-            "[Group] Show - 01 [1080p]".to_string(),
-            "Show - 12".to_string(),
-            "Show - 100".to_string(),
-            "Show  -  05".to_string(),
-            "Show - 01v2".to_string(),
-            "Show - 01-02".to_string(),
-            "Show - 01 - 02".to_string(),
-            "Show - 001".to_string(),
-            "Show - 0005".to_string(),
-            // Seasons & SxxExx
-            "Show S02E10".to_string(),
-            "Show S01E03".to_string(),
-            "Show S03E125".to_string(),
-            "Show S01E05v2".to_string(),
-            "Show S1E1".to_string(),
-            "Show s01e05".to_string(),
-            "Show S01E01-E02".to_string(),
-            "Show S01P01".to_string(),
-            "Show S02P05v2".to_string(),
-            "Show Season 2 - 01".to_string(),
-            "Show season 2 - 01".to_string(),
-            "Show SEASON 2 - 01".to_string(),
-            "Show Season 01 - 05".to_string(),
-            "Show S2 - 05".to_string(),
-            "Show S02 - 05".to_string(),
-            "Show 2 Part - 01".to_string(),
-            // Keywords
-            "Show EP03".to_string(),
-            "Show ep03".to_string(),
-            "Show Ep. 03".to_string(),
-            "Show Episode 07".to_string(),
-            "Show episode 07".to_string(),
-            "Show EPISODE 07".to_string(),
-            // Brackets & Parens
-            "Show [07] [720p]".to_string(),
-            "Show (13)".to_string(),
-            // Decimals
-            "Show - 12.5".to_string(),
-            "Show - 0.5".to_string(),
-            "Show - 1.25".to_string(),
-            "Show - 00.5".to_string(),
-            "Show EP 12.5".to_string(),
-            "Show - 1.5".to_string(),
-            "Show - 01.5".to_string(),
-            // Typed (OVA, Special)
-            "Show OVA 3".to_string(),
-            "Show OVA3".to_string(),
-            "Show ova 3".to_string(),
-            "Show OAD 01".to_string(),
-            "Show ONA 01".to_string(),
-            "Show SP01".to_string(),
-            "Show SP 01".to_string(),
-            "Show Special 02".to_string(),
-            "Show Specials 02".to_string(),
-            "Show SPECIAL 02".to_string(),
-            "Show OVA".to_string(),
-            "Show Special".to_string(),
-            // CJK / Unicode
-            "[Group] 葬送のフリーレン - 05 [1080p]".to_string(),
-            "【推しの子】 第01話 (1080p)".to_string(),
-            "SPY×FAMILY - 12 [1080p]".to_string(),
-            "第12.5話".to_string(),
-            "第03話".to_string(),
-            "第 04 話".to_string(),
-            "第100話".to_string(),
-            // Year guard & edge numbers
-            "Frieren - 2023 - 05".to_string(),
-            "One Piece - 1999 - 12".to_string(),
-            "Demon Lord 2099 - 01".to_string(),
-            "Demon Lord 2099 - 2024 - 01".to_string(),
-            "Show - 1234".to_string(),
-            "Show - 2150".to_string(),
-            "Show - EP2023".to_string(),
-            "One Piece - 1089 [1080p]".to_string(),
-            "Detective Conan - 1100".to_string(),
-            "Mob Psycho 100 II - 03".to_string(),
-            "Show 4k 60fps - 02".to_string(),
-            "Show (2020) - 01".to_string(),
-            "Show [2021] - 02".to_string(),
-            "Show 2022 - 03".to_string(),
-            "Tokyo 2040 - 01".to_string(),
-            "2001 Nights - 01".to_string(),
-            // End markers
-            "Show - 12 END".to_string(),
-            "Show - 12 FIN".to_string(),
-            "Show - 12 FINAL".to_string(),
-            "Show - 24 (End)".to_string(),
-            "Show - 24 [END]".to_string(),
-            // Delimiters
-            "Show_-_01".to_string(),
-            "Show.01.1080p.mkv".to_string(),
-            "Show..01.mkv".to_string(),
-            "...Show...01...".to_string(),
-            "Dr. Stone - 01".to_string(),
-            "Fate.Zero - 01".to_string(),
-            "Steins.Gate.01.mkv".to_string(),
-            // Resolution & Codec guards
-            "Show 720p - 01".to_string(),
-            "Show 1080p - 01".to_string(),
-            "Show 2160p - 01".to_string(),
-            "Show 480p - 01".to_string(),
-            "Show 10bit - 01".to_string(),
-            "Show FLAC - 01".to_string(),
-            "Show AAC 2.0 - 01".to_string(),
-            "Show x264 - 01".to_string(),
-            "Show x265 - 01".to_string(),
-            "Show HEVC - 01".to_string(),
-            // Subtitle offsets
-            "Show - 01.[+5s]".to_string(),
-            "Show - 02.[-3s]".to_string(),
-            "Show - 03.[+1.5s]".to_string(),
-            "Show - 04.[-0.25s]".to_string(),
-            // Non-episodes
-            "Random Movie Title".to_string(),
-            "Movie (2020)".to_string(),
-            "".to_string(),
-            "Trailer".to_string(),
-            "OST".to_string(),
-            "Show Complete Series".to_string(),
-            "Show Batch".to_string(),
-            "Show Season 1".to_string(),
-            "Show Movie".to_string(),
-            "Show NCED".to_string(),
-            "Show NCOP".to_string(),
-            "Show Menu".to_string(),
-            "Show PV".to_string(),
-        ],
-        sub_stems: vec![
-            "EP01[ID]".to_string(),
-            "EP01[id]".to_string(),
-            "EP01[Ind]".to_string(),
-            "EP01[Indonesian]".to_string(),
-            "Show - 01 [Indo]".to_string(),
-            "Show - 01 [indo]".to_string(),
-            "EP01[INDONESIAN]".to_string(),
-            "EP01[English]".to_string(),
-            "EP01[ENG]".to_string(),
-            "EP01[en]".to_string(),
-            "EP01[eng]".to_string(),
-            "EP01[Japanese]".to_string(),
-            "EP01[ja]".to_string(),
-            "EP01[jpn]".to_string(),
-            "Show_01_ind_track2".to_string(),
-            "Show_01_track2.ind".to_string(),
-            "Show_01_tso_track2".to_string(),
-            "Show_01_track2.ts".to_string(),
-            "Show - 01.ind".to_string(),
-            "Show - 01_eng".to_string(),
-            "Show - 01 (ind)".to_string(),
-            "Show - 01".to_string(),
-            "Show - 01.xyz".to_string(),
-            "episode_01.ind.[+5s]".to_string(),
-            "episode_01.eng.[-3s]".to_string(),
-            "episode_01.jpn.[+2.5s]".to_string(),
-            "episode_01.[+5s].ind".to_string(),
-        ],
-        safe_names: vec![
-            "foo/bar".to_string(),
-            "foo:bar".to_string(),
-            "foo*bar".to_string(),
-            "foo?bar".to_string(),
-            "foo\"bar".to_string(),
-            "foo<bar".to_string(),
-            "foo>bar".to_string(),
-            "foo|bar".to_string(),
-            "foo\\bar".to_string(),
-            "  hello world  ".to_string(),
-            "/:*?\"<>|\\".to_string(),
-            "".to_string(),
-            "   ".to_string(),
-            ".hidden".to_string(),
-            "..".to_string(),
-            ".".to_string(),
-            "CON".to_string(),
-            "prn.txt".to_string(),
-            "aux".to_string(),
-            "NUL.tar.gz".to_string(),
-            "normal_name-123".to_string(),
-        ],
-        track_names: vec![
-            "Dialogue".to_string(),
-            "dialogue".to_string(),
-            "DIALOGUE".to_string(),
-            "Main Audio".to_string(),
-            "Full Subtitles".to_string(),
-            "Sign & Song".to_string(),
-            "Signs/Songs".to_string(),
-            "Signs".to_string(),
-            "Songs".to_string(),
-            "Complete".to_string(),
-            "Indonesian Dialogue".to_string(),
-            "Indo Sub".to_string(),
-            "English".to_string(),
-            "Commentary".to_string(),
-            "Audio Description".to_string(),
-        ],
-        commentary_names: vec![
-            "Audio Commentary".to_string(),
-            "Director's Comment".to_string(),
-            "audio description".to_string(),
-            "ad".to_string(),
-            "extension".to_string(),
-            "broadcast".to_string(),
-            "main".to_string(),
-            "Japanese Stereo".to_string(),
-            "broadcasting".to_string(),
-            "addition".to_string(),
-        ],
-        sort_inputs: vec![
-            "EP10".to_string(),
-            "EP2".to_string(),
-            "EP1".to_string(),
-            "Show - 01.mkv".to_string(),
-            "Show - 1.mkv".to_string(),
-            "Show - 2.mkv".to_string(),
-            "Show - 10.mkv".to_string(),
-            "Show - 1.5.mkv".to_string(),
-            "Show - 01v2.mkv".to_string(),
-            "Show - 01v1.mkv".to_string(),
-            "Episode 100".to_string(),
-            "Episode 99".to_string(),
-            "Episode 02".to_string(),
-            "Season 1/EP1".to_string(),
-            "Season 10/EP1".to_string(),
-            "Season 2/EP1".to_string(),
-        ],
-        chapter_xml_samples: vec![
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Chapters>\n  <EditionEntry>\n"
-                .to_string(),
-            "<chapters>".to_string(),
-            "<Chapters >".to_string(),
-            "<CHAPTERS>".to_string(),
-            "<Chapters xmlns=\"http://www.matroska.org\">".to_string(),
-            "<ChapterAtom>".to_string(),
-            "<other xml>".to_string(),
-            "no xml at all".to_string(),
-            "".to_string(),
-        ],
-        cover_stems: vec![
-            "Show - 01_cover".to_string(),
-            "Show S01E02_cover".to_string(),
-            "Movie_cover".to_string(),
-            "cover".to_string(),
-            "COVER".to_string(),
-            "not_a_cov".to_string(),
-            "just_a_stem".to_string(),
-        ],
-        bitrate_strings: vec![
-            "128k".to_string(),
-            "192k".to_string(),
-            "1M".to_string(),
-            "320".to_string(),
-            "0k".to_string(),
-            "0".to_string(),
-            "128kbps".to_string(),
-            "-128k".to_string(),
-            "128K".to_string(),
-            "abc".to_string(),
-            "".to_string(),
-        ],
-    };
-
-    let reference_response = load_reference_response();
-
-    // 1. Verify episode parsing
+    let reference: Reference =
+        serde_json::from_str(include_str!("fixtures/cross_regex_reference.json"))
+            .expect("deserialize cross regex reference fixture");
     let mut mismatches = Vec::new();
-    for (i, name) in payload.episodes.iter().enumerate() {
-        let rust_res = parse_episode(name).map(ParsedResult::from);
-        let expected = &reference_response.episodes[i];
-        if rust_res != *expected {
+
+    for (name, expected) in paired("episodes", EPISODES, &reference.episodes) {
+        let actual = parse_episode(name).map(ParsedResult::from);
+        if actual != *expected {
             mismatches.push(format!(
-                "Filename: '{name}'\n  Rust:   {:?}\n  Expected: {:?}",
-                rust_res, expected
+                "Filename: '{name}'\n  Actual:   {actual:?}\n  Expected: {expected:?}"
             ));
         }
     }
 
-    // 2. Verify sub language detection
-    for (i, stem) in payload.sub_stems.iter().enumerate() {
-        let rust_res = detect_sub_lang(stem);
-        let expected = &reference_response.sub_stems[i];
-        if rust_res != *expected {
+    for (stem, expected) in paired("sub_stems", SUB_STEMS, &reference.sub_stems) {
+        let actual = detect_sub_lang(stem);
+        if actual != *expected {
             mismatches.push(format!(
-                "Sub stem: '{stem}'\n  Rust:   {:?}\n  Expected: {:?}",
-                rust_res, expected
+                "Sub stem: '{stem}'\n  Actual:   {actual:?}\n  Expected: {expected:?}"
             ));
         }
     }
 
-    // 3. Verify safe filename
-    for (i, name) in payload.safe_names.iter().enumerate() {
-        let rust_res = safe_filename(name);
-        let expected_fixture = &reference_response.safe_names[i];
+    for (name, expected_fixture) in paired("safe_names", SAFE_NAMES, &reference.safe_names) {
+        let actual = safe_filename(name);
 
         // On Windows, backslash is a path separator: the final component of `foo\bar` is
         // `bar` and trailing backslashes are stripped. On POSIX/Linux, backslash is not a
         // separator, so `foo\bar` remains a single filename.
         #[cfg(windows)]
-        let expected = match name.as_str() {
+        let expected = match name {
             "foo\\bar" => "bar",
             "/:*?\"<>|\\" => "_______",
             _ => expected_fixture.as_str(),
@@ -389,101 +331,53 @@ fn test_reference_regression() {
         #[cfg(not(windows))]
         let expected = expected_fixture.as_str();
 
-        if rust_res != expected {
+        if actual != expected {
             mismatches.push(format!(
-                "Safe filename: '{name}'\n  Rust:     {:?}\n  Expected: {:?}",
-                rust_res, expected
+                "Safe filename: '{name}'\n  Actual:   {actual:?}\n  Expected: {expected:?}"
             ));
         }
     }
 
-    // 4. Verify is_dialogue_track
-    for (i, name) in payload.track_names.iter().enumerate() {
-        let rust_res = is_dialogue_track(Some(name));
-        let expected = reference_response.track_names[i];
-        if rust_res != expected {
+    for (name, expected) in paired("track_names", TRACK_NAMES, &reference.track_names) {
+        let actual = is_dialogue_track(name);
+        if actual != *expected {
             mismatches.push(format!(
-                "Track name: '{name}'\n  Rust:   {:?}\n  Expected: {:?}",
-                rust_res, expected
+                "Track name: '{name}'\n  Actual:   {actual:?}\n  Expected: {expected:?}"
             ));
         }
     }
 
-    // 5. Verify commentary detection
-    for (i, name) in payload.commentary_names.iter().enumerate() {
-        let rust_res = COMMENTARY_RE.is_match(name);
-        let expected = reference_response.commentary_names[i];
-        if rust_res != expected {
-            mismatches.push(format!(
-                "Commentary name: '{name}'\n  Rust:   {:?}\n  Expected: {:?}",
-                rust_res, expected
-            ));
-        }
-    }
-
-    // 6. Verify natural sort ordering
-    let mut rust_sorted = payload.sort_inputs.clone();
-    rust_sorted.sort_by_key(|s| natural_sort_key(s));
-    if rust_sorted != reference_response.sorted_outputs {
+    let mut sorted = SORT_INPUTS.to_vec();
+    sorted.sort_by_key(|s| natural_sort_key(s));
+    if sorted != reference.sorted_outputs {
         mismatches.push(format!(
-            "Natural sort mismatch:\n  Rust:   {:?}\n  Expected: {:?}",
-            rust_sorted, reference_response.sorted_outputs
+            "Natural sort mismatch:\n  Actual:   {sorted:?}\n  Expected: {:?}",
+            reference.sorted_outputs
         ));
     }
 
-    // 7. Verify chapter XML sniffing
-    for (i, sample) in payload.chapter_xml_samples.iter().enumerate() {
-        let rust_res = CHAPTER_TAG_RE.is_match(sample.as_bytes());
-        let expected = reference_response.chapter_xml_results[i];
-        if rust_res != expected {
+    let tmp = tempfile::tempdir().unwrap();
+    for (i, (sample, expected)) in paired(
+        "chapter_xml_results",
+        CHAPTER_XML_SAMPLES,
+        &reference.chapter_xml_results,
+    )
+    .enumerate()
+    {
+        let path = tmp.path().join(format!("sample_{i}.xml"));
+        fs::write(&path, sample).unwrap();
+        let actual = is_chapter_xml(&path);
+        if actual != *expected {
             mismatches.push(format!(
-                "Chapter XML sample: '{sample}'\n  Rust:   {:?}\n  Expected: {:?}",
-                rust_res, expected
+                "Chapter XML sample: '{sample}'\n  Actual:   {actual:?}\n  Expected: {expected:?}"
             ));
         }
     }
 
-    // 8. Verify cover file pattern matching
-    for (i, stem) in payload.cover_stems.iter().enumerate() {
-        let rust_res = COVER_FILE_RE
-            .captures(stem)
-            .and_then(|c| c.name("stem").map(|m| m.as_str().to_string()));
-        let expected = &reference_response.cover_stem_results[i];
-        if rust_res != *expected {
-            mismatches.push(format!(
-                "Cover stem: '{stem}'\n  Rust:   {:?}\n  Expected: {:?}",
-                rust_res, expected
-            ));
-        }
-    }
-
-    // 9. Verify bitrate regex validation
-    for (i, b) in payload.bitrate_strings.iter().enumerate() {
-        let rust_res = BITRATE_RE.captures(b).and_then(|caps| {
-            let num: u64 = caps.get(1).map_or("", |m| m.as_str()).parse().unwrap_or(0);
-            if num == 0 {
-                None
-            } else {
-                let unit = caps.get(2).map_or("", |m| m.as_str()).to_string();
-                Some((num, unit))
-            }
-        });
-        let expected = reference_response.bitrate_results[i]
-            .as_ref()
-            .map(|(n, u)| (*n, u.clone()));
-        if rust_res != expected {
-            mismatches.push(format!(
-                "Bitrate string: '{b}'\n  Rust:   {:?}\n  Expected: {:?}",
-                rust_res, expected
-            ));
-        }
-    }
-
-    if !mismatches.is_empty() {
-        panic!(
-            "Reference regression mismatches found ({}):\n{}",
-            mismatches.len(),
-            mismatches.join("\n\n")
-        );
-    }
+    assert!(
+        mismatches.is_empty(),
+        "Reference regression mismatches found ({}):\n{}",
+        mismatches.len(),
+        mismatches.join("\n\n")
+    );
 }

@@ -1,4 +1,4 @@
-export function createJobCoordinator(onChange = () => {}) {
+export function createJobCoordinator() {
   const controllers = new Set();
 
   return {
@@ -28,7 +28,6 @@ export function createJobCoordinator(onChange = () => {}) {
 
     syncControls() {
       for (const controller of controllers) controller.syncGlobalControls();
-      onChange(this);
     },
 
     finish() {

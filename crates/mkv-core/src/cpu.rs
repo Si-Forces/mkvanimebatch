@@ -1,7 +1,7 @@
-/// Parses physical CPU core topology from `/proc/cpuinfo` string content.
-/// Returns the number of unique (physical_id, core_id) pairs, i.e. physical cores.
-/// Returns 0 when no `core id` fields are found (ARM, VM without exposed topology).
-pub fn parse_cpuinfo_topology(content: &str) -> usize {
+/// Counts physical cores in `/proc/cpuinfo` content as unique (physical id, core id) pairs.
+/// Returns 0 when no `core id` fields are present (ARM, VMs without exposed topology).
+#[cfg(any(target_os = "linux", test))]
+fn parse_cpuinfo_topology(content: &str) -> usize {
     let mut cores = std::collections::HashSet::new();
     let mut current_physical_id = "";
     let mut current_core_id = None;
@@ -36,7 +36,7 @@ pub fn parse_cpuinfo_topology(content: &str) -> usize {
 /// On Linux, parses `/proc/cpuinfo` topology (tracking physical ID and core ID pairs).
 /// On Windows, macOS, or virtualized/container environments without exposed topology,
 /// falls back to `std::thread::available_parallelism()`.
-pub fn physical_core_count() -> usize {
+pub(crate) fn physical_core_count() -> usize {
     #[cfg(target_os = "linux")]
     {
         if let Ok(cpuinfo) = std::fs::read_to_string("/proc/cpuinfo") {
@@ -51,10 +51,9 @@ pub fn physical_core_count() -> usize {
         .unwrap_or(4)
 }
 
-/// Derives the FFmpeg worker thread concurrency from physical CPU core topology
-/// and active batch workers per ADR-0013.
-#[inline]
-pub fn transcode_governor_threads(cores: usize, workers: usize) -> usize {
+/// Derives the per-job FFmpeg thread count from physical cores and active batch workers
+/// per ADR-0013.
+pub(crate) fn transcode_governor_threads(cores: usize, workers: usize) -> usize {
     (cores / workers.max(1)).clamp(1, 4)
 }
 

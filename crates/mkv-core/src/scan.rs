@@ -6,7 +6,7 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use regex::bytes::Regex as BytesRegex;
@@ -50,24 +50,29 @@ pub struct MkvmergeMetadata {
     pub chapters: Vec<MkvChapter>,
 }
 
+const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Probes MKV metadata using `mkvmerge -J` subprocess.
 pub async fn probe_video_mkvmerge(path: &Path) -> Result<MkvmergeMetadata, String> {
     let mut cmd = tokio::process::Command::new("mkvmerge");
     #[cfg(windows)]
-    cmd.creation_flags(0x08000000);
+    cmd.creation_flags(crate::domain::CREATE_NO_WINDOW);
     cmd.kill_on_drop(true);
-    let output = tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        cmd.arg("-J").arg(path).output(),
-    )
-    .await
-    .map_err(|_| "mkvmerge probe timed out after 30 seconds".to_string())?
-    .map_err(|e| format!("Failed to execute mkvmerge: {e}"))?;
+    let output = tokio::time::timeout(PROBE_TIMEOUT, cmd.arg("-J").arg(path).output())
+        .await
+        .map_err(|_| {
+            format!(
+                "mkvmerge probe timed out after {} seconds",
+                PROBE_TIMEOUT.as_secs()
+            )
+        })?
+        .map_err(|e| format!("Failed to execute mkvmerge: {e}"))?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!(
-            "mkvmerge exit code {:?}: {stderr}",
-            output.status.code()
+            "mkvmerge exit code {:?}: {}",
+            output.status.code(),
+            stderr.trim()
         ));
     }
 
@@ -84,18 +89,17 @@ pub async fn probe_video_mkvmerge(path: &Path) -> Result<MkvmergeMetadata, Strin
     serde_json::from_value(val).map_err(|e| format!("Failed to parse mkvmerge metadata: {e}"))
 }
 
-/// Probes MKV container headers, tracks, attachments, and chapters using hybrid native EBML
-/// parsing with automatic fallback to `mkvmerge -J` (ADR 0006).
+/// Probes MKV container headers, tracks, attachments, and chapters with the native EBML
+/// parser, falling back to `mkvmerge -J` when native parsing fails (ADR 0006).
 pub async fn probe_video(path: &Path) -> Result<MkvmergeMetadata, String> {
-    // 1. Fast path: native EBML probe directly in pure Rust (< 1ms)
     if let Ok(meta) = crate::ebml::probe_ebml_native(path) {
         return Ok(meta);
     }
-    // 2. Safe fallback: shell out to mkvmerge -J for non-standard containers or quirks (ADR 0006)
     probe_video_mkvmerge(path).await
 }
 
-/// Looks up cached inspection metadata or probes the video with `mkvmerge`, caching on success.
+/// Looks up cached inspection metadata or probes the video with [`probe_video`], caching on
+/// success.
 pub async fn get_or_probe_video(
     path: &Path,
     cache: Option<&PersistentInspectCache>,
@@ -115,40 +119,33 @@ pub async fn get_or_probe_video(
 static CHAPTER_TAG_RE: LazyLock<BytesRegex> =
     LazyLock::new(|| BytesRegex::new(r"(?i)<Chapters[ >]").unwrap());
 
-pub static COVER_LIKE_STEMS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
-    [
-        "cover",
-        "cover_land",
-        "small_cover",
-        "small_cover_land",
-        "poster",
-        "thumbnail",
-        "thumb",
-        "fanart",
-    ]
-    .into_iter()
-    .collect()
-});
+/// Leading bytes of a file inspected by [`is_chapter_xml`].
+const CHAPTER_SNIFF_BYTES: usize = 4096;
+
+const COVER_LIKE_STEMS: &[&str] = &[
+    "cover",
+    "cover_land",
+    "small_cover",
+    "small_cover_land",
+    "poster",
+    "thumbnail",
+    "thumb",
+    "fanart",
+];
 
 /// Sniff whether a file is MKV chapter XML by reading up to 4096 bytes and checking
 /// case-insensitively for `<Chapters[ >]`.
 pub fn is_chapter_xml(path: &Path) -> bool {
-    let mut file = match File::open(path) {
-        Ok(f) => f,
-        Err(_) => return false,
-    };
-    let mut buf = [0u8; 4096];
-    let n = match file.read(&mut buf) {
-        Ok(n) => n,
-        Err(_) => return false,
-    };
-    if n == 0 {
+    let Ok(mut file) = File::open(path) else {
         return false;
-    }
-    CHAPTER_TAG_RE.is_match(&buf[..n])
+    };
+    let mut buf = [0u8; CHAPTER_SNIFF_BYTES];
+    file.read(&mut buf)
+        .is_ok_and(|n| CHAPTER_TAG_RE.is_match(&buf[..n]))
 }
 
-fn path_ext_lower(path: &Path) -> String {
+/// Lowercased extension with its leading dot (`".mkv"`), or `""` when there is none.
+pub(crate) fn path_ext_lower(path: &Path) -> String {
     path.extension()
         .map(|e| format!(".{}", e.to_string_lossy().to_lowercase()))
         .unwrap_or_default()
@@ -158,6 +155,11 @@ fn path_stem_lower(path: &Path) -> String {
     path.file_stem()
         .map(|s| s.to_string_lossy().to_lowercase())
         .unwrap_or_default()
+}
+
+/// The canonical spelling of `path`, or `path` itself when it cannot be resolved.
+pub(crate) fn canonical_or_self(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Returns true if the file stem is "cover" or "folder" (case-insensitive) and the
@@ -180,7 +182,7 @@ pub fn is_cover_attachment(file_name: &str, content_type: &str) -> bool {
         return false;
     }
     let stem = path_stem_lower(Path::new(file_name));
-    COVER_LIKE_STEMS.contains(stem.as_str())
+    COVER_LIKE_STEMS.contains(&stem.as_str())
 }
 
 /// Returns true if the attachment filename extension or content-type indicates a font.
@@ -193,32 +195,19 @@ pub fn is_font_attachment(file_name: &str, content_type: &str) -> bool {
     ct_lower.contains("font") || ct_lower.contains("truetype") || ct_lower.contains("opentype")
 }
 
-/// Parse attachments once, returning the first cover attachment and all font attachments.
-pub fn parse_attachments(
-    attachments: &[MkvAttachment],
-) -> (Option<MkvAttachment>, Vec<MkvAttachment>) {
-    let mut cover = None;
-    let mut fonts = Vec::new();
-    for att in attachments {
-        let file_name = match &att.file_name {
-            Some(f) => f,
-            None => continue,
-        };
-        let content_type = att.content_type.as_deref().unwrap_or("");
-        if cover.is_none() && is_cover_attachment(file_name, content_type) {
-            cover = Some(att.clone());
-        }
-        if is_font_attachment(file_name, content_type) {
-            fonts.push(att.clone());
-        }
-    }
-    (cover, fonts)
+/// `(file_name, content_type)` of an attachment; attachments without a file name are never
+/// classified.
+fn attachment_names(att: &MkvAttachment) -> Option<(&str, &str)> {
+    Some((
+        att.file_name.as_deref()?,
+        att.content_type.as_deref().unwrap_or(""),
+    ))
 }
 
 // ─── INSPECTED VIDEO ─────────────────────────────────────────────────────────
 
 /// Typed wrapper around raw `mkvmerge -J` metadata providing normalized schema access.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InspectedVideo {
     data: MkvmergeMetadata,
 }
@@ -228,20 +217,8 @@ impl InspectedVideo {
         Self { data }
     }
 
-    pub fn metadata(&self) -> &MkvmergeMetadata {
-        &self.data
-    }
-
-    pub fn into_metadata(self) -> MkvmergeMetadata {
-        self.data
-    }
-
     pub fn tracks(&self) -> &[MkvTrack] {
         &self.data.tracks
-    }
-
-    pub fn attachments(&self) -> &[MkvAttachment] {
-        &self.data.attachments
     }
 
     pub fn video_track(&self) -> Option<&MkvTrack> {
@@ -305,30 +282,27 @@ impl InspectedVideo {
             .any(|c| c.num_entries.unwrap_or(0) > 0)
     }
 
-    pub fn cover_attachment(&self) -> Option<MkvAttachment> {
-        let (cover, _) = parse_attachments(&self.data.attachments);
-        cover
+    /// The first attachment classified as cover art.
+    pub fn cover_attachment(&self) -> Option<&MkvAttachment> {
+        self.data.attachments.iter().find(|att| {
+            attachment_names(att).is_some_and(|(name, ct)| is_cover_attachment(name, ct))
+        })
     }
 
-    pub fn font_attachments(&self) -> Vec<MkvAttachment> {
-        let (_, fonts) = parse_attachments(&self.data.attachments);
-        fonts
-    }
-
-    pub fn fonts_count(&self) -> Option<usize> {
-        Some(self.font_attachments().len())
-    }
-}
-
-impl From<MkvmergeMetadata> for InspectedVideo {
-    fn from(data: MkvmergeMetadata) -> Self {
-        Self::new(data)
+    pub fn font_attachments(&self) -> Vec<&MkvAttachment> {
+        self.data
+            .attachments
+            .iter()
+            .filter(|att| {
+                attachment_names(att).is_some_and(|(name, ct)| is_font_attachment(name, ct))
+            })
+            .collect()
     }
 }
 
 // ─── INSPECTION RESULT ────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InspectionResult {
     pub video: Option<InspectedVideo>,
     pub error: Option<String>,
@@ -347,10 +321,6 @@ impl InspectionResult {
             video: None,
             error: Some(error.into()),
         }
-    }
-
-    pub fn is_success(&self) -> bool {
-        self.video.is_some()
     }
 }
 
@@ -382,6 +352,7 @@ pub fn create_parsed_file(path: impl Into<PathBuf>) -> ParsedFile {
         parsed,
     }
 }
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ScanResults {
     pub videos: Vec<ParsedFile>,
@@ -396,7 +367,7 @@ pub fn scan_assets(
     dir: &Path,
     mut cache: Option<&mut HashMap<PathBuf, ScanResults>>,
 ) -> ScanResults {
-    let canonical = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    let canonical = canonical_or_self(dir);
     if let Some(c) = &cache {
         if let Some(hit) = c.get(&canonical) {
             return hit.clone();
@@ -474,32 +445,28 @@ pub fn scan_mkv_files(
     ignore_paths: Option<&HashSet<PathBuf>>,
 ) -> Vec<ParsedFile> {
     let mut results = Vec::new();
-    // Resolve the root exactly once, and record whether that resolution succeeded. The walk
-    // below keys its dedup sets and its `ignore_paths` comparison against paths spelled relative
-    // to this root, so the root itself must be canonical: a relative or symlinked entry point
-    // would otherwise be compared as-is against the canonicalized `resolved_ignores` and never
-    // match. A root that failed to resolve is not canonical either, and the flag is what stops
-    // every descendant from inheriting that.
+    // Dedup keys and `ignore_paths` matching compare canonical paths. Paths built beneath a
+    // canonical directory are canonical without a `realpath`; anything reached through a
+    // symlink, or beneath a root that failed to resolve, is not and must be resolved per entry.
     let (root, root_is_canonical) = match dir_path.canonicalize() {
         Ok(canonical) => (canonical, true),
         Err(_) => (dir_path.to_path_buf(), false),
     };
-    // Each stack entry records whether its directory path is already canonical. A path built
-    // beneath a canonical root is canonical, but a symlinked directory is recorded under its
-    // unresolved spelling, so everything beneath one is non-canonical too and must still be
-    // resolved. Symlink-free trees keep skipping `realpath` entirely.
     let mut stack = vec![(root.clone(), root_is_canonical)];
     let mut visited_dirs = HashSet::new();
     visited_dirs.insert(root);
     let mut visited_files = HashSet::new();
     let resolved_ignores: HashSet<PathBuf> = ignore_paths
-        .map(|set| {
-            set.iter()
-                .map(|p| p.canonicalize().unwrap_or_else(|_| p.clone()))
-                .collect()
-        })
+        .map(|set| set.iter().map(|p| canonical_or_self(p)).collect())
         .unwrap_or_default();
     let is_ignored = |p: &Path| -> bool { resolved_ignores.iter().any(|ig| p.starts_with(ig)) };
+    let resolve = |path: &Path, is_canonical: bool| -> PathBuf {
+        if is_canonical {
+            path.to_path_buf()
+        } else {
+            canonical_or_self(path)
+        }
+    };
 
     while let Some((current_dir, dir_is_canonical)) = stack.pop() {
         let entries = match std::fs::read_dir(&current_dir) {
@@ -519,9 +486,6 @@ pub fn scan_mkv_files(
                 None => continue,
             };
 
-            // A regular entry beneath an already-canonical directory needs no `realpath` — the
-            // walk built its path from a canonical prefix. A symlink names its target through a
-            // second spelling, so it is never canonical however it was reached.
             let entry_is_canonical = dir_is_canonical && !file_type.is_symlink();
 
             let is_file = file_type.is_file() || (file_type.is_symlink() && path.is_file());
@@ -532,11 +496,7 @@ pub fn scan_mkv_files(
                     .extension()
                     .is_some_and(|e| e.eq_ignore_ascii_case("mkv"))
                 {
-                    let key = if entry_is_canonical {
-                        path.clone()
-                    } else {
-                        path.canonicalize().unwrap_or_else(|_| path.clone())
-                    };
+                    let key = resolve(&path, entry_is_canonical);
                     if !is_ignored(&key) && visited_files.insert(key) {
                         results.push(create_parsed_file(&path));
                     }
@@ -547,19 +507,12 @@ pub fn scan_mkv_files(
                 {
                     continue;
                 }
-                let canon = if entry_is_canonical {
-                    path.clone()
-                } else {
-                    path.canonicalize().unwrap_or_else(|_| path.clone())
-                };
+                let canon = resolve(&path, entry_is_canonical);
                 if is_ignored(&canon) || !visited_dirs.insert(canon) {
                     continue;
                 }
-                // Push `path`, never `canon`: the reported `ParsedFile::path` keeps the spelling
-                // the directory was reached through, which is what the pre-762cebb walk reported
-                // for symlinked directories. `entry_is_canonical` is the flag to carry forward —
-                // a directory reached canonically hands canonicality to its children, and one
-                // reached through a symlink hands down `false`.
+                // Descend through `path`, not `canon`, so reported paths keep the spelling the
+                // directory was reached through; children inherit its canonicality.
                 stack.push((path, entry_is_canonical));
             }
         }
@@ -571,15 +524,14 @@ pub fn scan_mkv_files(
 
 // ─── PERSISTENT INSPECT CACHE ────────────────────────────────────────────────
 
+/// On-disk cache record.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct InspectCacheEntry {
-    pub size: u64,
+struct InspectCacheEntry {
+    size: u64,
     #[serde(default)]
-    pub mtime_ns: u128,
-    #[serde(default)]
-    pub mtime: Option<f64>,
+    mtime_ns: u128,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub json_data: Option<MkvmergeMetadata>,
+    json_data: Option<MkvmergeMetadata>,
 }
 
 #[derive(Debug, Default)]
@@ -605,11 +557,11 @@ pub fn get_default_cache_dir() -> PathBuf {
     PathBuf::from(".cache").join("mkvanimebatch")
 }
 
-pub fn get_default_cache_file() -> PathBuf {
+fn get_default_cache_file() -> PathBuf {
     get_default_cache_dir().join("inspect_cache.json")
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FileSignature {
     pub size: u64,
     pub mtime_ns: u128,
@@ -621,13 +573,9 @@ impl FileSignature {
         Some(Self::from_metadata(&meta))
     }
 
-    /// Derives a signature from already-fetched metadata so a caller holding a
-    /// `std::fs::Metadata` does not pay a second `stat` for the same entry.
-    ///
-    /// The metadata must have been obtained with symlink *resolution* to match
-    /// [`FileSignature::of`]. `fs::DirEntry::metadata` does not resolve symlinks;
-    /// use [`FileSignature::of_dir_entry`] when the metadata came from a
-    /// `DirEntry`.
+    /// Signature from already-fetched metadata. It matches [`FileSignature::of`] only when
+    /// `meta` was obtained with symlink resolution; for `DirEntry` metadata use
+    /// [`FileSignature::of_dir_entry`].
     pub fn from_metadata(meta: &std::fs::Metadata) -> Self {
         let size = meta.len();
         let mtime_ns = meta
@@ -642,26 +590,12 @@ impl FileSignature {
     /// Signature for a directory entry, or `None` when the entry does not resolve to a
     /// regular file.
     ///
-    /// The symlink decision is taken from `entry`, never from `meta`, so a caller that already
-    /// resolved the metadata still gets the resolved signature for a link. A symlinked entry
-    /// costs the second `stat` that `DirEntry::metadata`'s `lstat`-equivalence forces. A regular
-    /// one costs no syscall beyond the type the entry already carries.
-    ///
-    /// `meta` is an argument because `DirEntry::metadata` is not cached, so reading it inside
-    /// this function would `lstat` an entry the caller has already stat'ed. It must be the value
-    /// `entry.metadata()` returned for `entry`: any other value signs a different file, and
-    /// the mismatch is silent, because matching a memo is this type's entire job.
-    ///
-    /// A symlink is resolved before the test, because `meta` reports the link itself and so
-    /// cannot answer whether the *target* is a regular file. The test is `is_file`, not
-    /// `!is_dir`: anything that is not a regular file — a directory, a FIFO, a socket, a
-    /// device node — carries a `len()` describing the object rather than its content, and
-    /// signing one misreports a size and, for a FIFO, blocks a reader in `File::open`.
+    /// `meta` must be the value `entry.metadata()` returned; it is taken as an argument so a
+    /// caller that already read it pays no second `lstat`. A symlinked entry is re-resolved
+    /// because `meta` describes the link itself. Only regular files are signed: a directory,
+    /// FIFO, socket, or device reports a `len()` unrelated to content, and opening a FIFO
+    /// blocks.
     pub fn of_dir_entry(entry: &std::fs::DirEntry, meta: &std::fs::Metadata) -> Option<Self> {
-        // An entry whose type cannot be read at all falls through to the second arm and signs
-        // whatever `meta` the caller read. That arm is not unconditional, though: it still
-        // tests the caller's metadata, so an unreadable type costs a `stat`, not a blind
-        // signature.
         if entry.file_type().is_ok_and(|t| t.is_symlink()) {
             let resolved = entry.path().metadata().ok()?;
             resolved.is_file().then(|| Self::from_metadata(&resolved))
@@ -674,8 +608,8 @@ impl FileSignature {
 /// Thread-safe persistent JSON cache for mkvmerge inspection metadata keyed on (path, size, mtime).
 #[derive(Debug)]
 pub struct PersistentInspectCache {
-    pub cache_file: PathBuf,
-    pub enabled: bool,
+    cache_file: PathBuf,
+    enabled: bool,
     state: Mutex<CacheState>,
 }
 
@@ -695,40 +629,25 @@ impl PersistentInspectCache {
 
     fn cache_key(&self, path: &Path) -> String {
         let raw = path.to_string_lossy().into_owned();
-        {
-            let state = self.state.lock();
-            if let Some(k) = state.resolved_keys.get(&raw) {
-                return k.clone();
-            }
+        if let Some(k) = self.state.lock().resolved_keys.get(&raw) {
+            return k.clone();
         }
+        let resolved = canonical_or_self(path).to_string_lossy().into_owned();
         #[cfg(windows)]
-        let mut resolved = path
-            .canonicalize()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| raw.clone());
-        #[cfg(windows)]
-        {
-            if let Some(stripped) = resolved.strip_prefix(r"\\?\") {
-                resolved = stripped.to_string();
-            }
-        }
-        #[cfg(not(windows))]
-        let resolved = path
-            .canonicalize()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| raw.clone());
-        let mut state = self.state.lock();
-        state.resolved_keys.insert(raw, resolved.clone());
+        let resolved = match resolved.strip_prefix(r"\\?\") {
+            Some(stripped) => stripped.to_string(),
+            None => resolved,
+        };
+        self.state
+            .lock()
+            .resolved_keys
+            .insert(raw, resolved.clone());
         resolved
     }
 
     fn load(&self) {
-        if !self.cache_file.exists() {
+        let Ok(file) = File::open(&self.cache_file) else {
             return;
-        }
-        let file = match File::open(&self.cache_file) {
-            Ok(f) => f,
-            Err(_) => return,
         };
         let reader = std::io::BufReader::new(file);
         match serde_json::from_reader::<_, HashMap<String, InspectCacheEntry>>(reader) {
@@ -739,18 +658,19 @@ impl PersistentInspectCache {
             }
             Err(e) => {
                 warn!(
-                    "Failed to parse inspect cache from {}: {}",
-                    self.cache_file.display(),
-                    e
+                    "Failed to parse inspect cache from {}: {e}",
+                    self.cache_file.display()
                 );
             }
         }
     }
 
-    pub fn get(&self, path: &Path, sig: FileSignature) -> Option<MkvmergeMetadata> {
+    /// Cached metadata for `path`, if its current size and mtime match the cached entry.
+    pub fn get_path(&self, path: &Path) -> Option<MkvmergeMetadata> {
         if !self.enabled {
             return None;
         }
+        let sig = FileSignature::of(path)?;
         let key = self.cache_key(path);
         let state = self.state.lock();
         let entry = state.data.get(&key)?;
@@ -761,46 +681,39 @@ impl PersistentInspectCache {
         }
     }
 
-    pub fn get_path(&self, path: &Path) -> Option<MkvmergeMetadata> {
-        let sig = FileSignature::of(path)?;
-        self.get(path, sig)
-    }
-
-    pub fn put(&self, path: &Path, sig: FileSignature, data: MkvmergeMetadata) {
+    /// Records `data` for `path` under its current size and mtime.
+    pub fn put_path(&self, path: &Path, data: MkvmergeMetadata) {
         if !self.enabled {
             return;
         }
+        let Some(sig) = FileSignature::of(path) else {
+            return;
+        };
         let key = self.cache_key(path);
         let entry = InspectCacheEntry {
             size: sig.size,
             mtime_ns: sig.mtime_ns,
-            mtime: Some(sig.mtime_ns as f64 / 1_000_000_000.0),
             json_data: Some(data),
         };
         let mut state = self.state.lock();
         if state.data.get(&key) != Some(&entry) {
-            let data = Arc::make_mut(&mut state.data);
-            data.insert(key, entry);
+            Arc::make_mut(&mut state.data).insert(key, entry);
             state.dirty = true;
             state.revision += 1;
         }
     }
 
-    pub fn put_path(&self, path: &Path, data: MkvmergeMetadata) {
-        if let Some(sig) = FileSignature::of(path) {
-            self.put(path, sig, data);
-        }
-    }
-
+    /// Writes pending changes to disk immediately.
     pub fn save(&self) {
-        self.save_internal(std::time::Duration::ZERO);
+        self.save_internal(Duration::ZERO);
     }
 
+    /// Writes pending changes unless the previous write was under 500 ms ago.
     pub fn save_shared(&self) {
-        self.save_internal(std::time::Duration::from_millis(500));
+        self.save_internal(Duration::from_millis(500));
     }
 
-    fn save_internal(&self, min_interval: std::time::Duration) {
+    fn save_internal(&self, min_interval: Duration) {
         if !self.enabled {
             return;
         }
@@ -810,12 +723,12 @@ impl PersistentInspectCache {
             if !state.dirty {
                 return;
             }
-            if !min_interval.is_zero() {
-                if let Some(last) = state.last_save_ts {
-                    if last.elapsed() < min_interval {
-                        return;
-                    }
-                }
+            if !min_interval.is_zero()
+                && state
+                    .last_save_ts
+                    .is_some_and(|last| last.elapsed() < min_interval)
+            {
+                return;
             }
             (Arc::clone(&state.data), state.revision)
         };
@@ -828,50 +741,56 @@ impl PersistentInspectCache {
             _ => Path::new("."),
         };
 
-        match NamedTempFile::new_in(parent) {
-            Ok(mut temp_file) => {
-                let mut writer = std::io::BufWriter::new(&mut temp_file);
-                if let Err(e) = serde_json::to_writer(&mut writer, &*data_snapshot) {
-                    warn!(
-                        "Failed to stream serialize inspect cache to {}: {e}",
-                        parent.display()
-                    );
-                    return;
-                }
-                if let Err(e) = writer.flush() {
-                    warn!(
-                        "Failed to flush inspect cache stream in {}: {e}",
-                        parent.display()
-                    );
-                    return;
-                }
-                drop(writer);
-                if let Ok(_persisted) = temp_file.persist(&self.cache_file) {
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        let _ = _persisted.set_permissions(std::fs::Permissions::from_mode(0o644));
-                    }
-                    let mut state = self.state.lock();
-                    if state.revision == saved_revision {
-                        state.dirty = false;
-                    }
-                    state.last_save_ts = Some(Instant::now());
-                } else {
-                    warn!(
-                        "Failed to atomically replace inspect cache at {}",
-                        self.cache_file.display()
-                    );
-                }
-            }
+        let mut temp_file = match NamedTempFile::new_in(parent) {
+            Ok(f) => f,
             Err(e) => {
                 warn!(
-                    "Failed to create tempfile for inspect cache save in {}: {}",
-                    parent.display(),
-                    e
+                    "Failed to create tempfile for inspect cache save in {}: {e}",
+                    parent.display()
                 );
+                return;
             }
+        };
+        let mut writer = std::io::BufWriter::new(&mut temp_file);
+        if let Err(e) = serde_json::to_writer(&mut writer, &*data_snapshot) {
+            warn!(
+                "Failed to stream serialize inspect cache to {}: {e}",
+                parent.display()
+            );
+            return;
         }
+        if let Err(e) = writer.flush() {
+            warn!(
+                "Failed to flush inspect cache stream in {}: {e}",
+                parent.display()
+            );
+            return;
+        }
+        drop(writer);
+        let persisted = match temp_file.persist(&self.cache_file) {
+            Ok(f) => f,
+            Err(e) => {
+                warn!(
+                    "Failed to atomically replace inspect cache at {}: {e}",
+                    self.cache_file.display()
+                );
+                return;
+            }
+        };
+        // `NamedTempFile` creates files as 0600; the cache is an ordinary user file.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = persisted.set_permissions(std::fs::Permissions::from_mode(0o644));
+        }
+        #[cfg(not(unix))]
+        drop(persisted);
+
+        let mut state = self.state.lock();
+        if state.revision == saved_revision {
+            state.dirty = false;
+        }
+        state.last_save_ts = Some(Instant::now());
     }
 
     pub fn clear(&self) {
@@ -880,9 +799,7 @@ impl PersistentInspectCache {
         state.dirty = false;
         state.revision = 0;
         state.last_save_ts = None;
-        if self.cache_file.exists() {
-            let _ = std::fs::remove_file(&self.cache_file);
-        }
+        let _ = std::fs::remove_file(&self.cache_file);
     }
 }
 

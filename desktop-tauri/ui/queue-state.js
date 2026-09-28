@@ -1,7 +1,7 @@
 /**
  * queue-state.js
- * Queue state factory, event reducer, and Engine Bridge event stream handler
- * for MKV Anime Batch UI.
+ * Queue state factories, the engine JobEvent reducer, and the selection and
+ * order helpers behind the Queue Tracker.
  *
  * Ownership contract: the state object returned by createQueueState is
  * exclusively owned by a single Queue Tracker. reduceQueueEvent advances
@@ -37,7 +37,9 @@
  * @property {number} version
  * @property {string} type
  * @property {string=} id
- * @property {string=} file
+ * @property {string=} input_dir
+ * @property {{id: string, file: string}[]=} items
+ * @property {number=} progress
  * @property {ItemOutcome=} status
  * @property {string=} reason
  * @property {string=} error
@@ -46,55 +48,52 @@
  * @property {boolean=} cancelled
  */
 
+/** Terminal item status -> the state counter it increments. */
+const OUTCOME_COUNTERS = new Map([
+  ["completed", "completedCount"],
+  ["planned", "completedCount"],
+  ["skipped", "skippedCount"],
+  ["cancelled", "cancelledCount"],
+  ["error", "errorCount"],
+]);
+
 function isTerminal(status) {
-  return status === "completed" || status === "skipped" || status === "planned" || status === "error" || status === "cancelled";
+  return OUTCOME_COUNTERS.has(status);
+}
+
+function clampPercent(value) {
+  return Math.min(100, Math.max(0, value));
+}
+
+function swap(list, i, j) {
+  [list[i], list[j]] = [list[j], list[i]];
 }
 
 /**
- * Format a duration outcome for display in cards and tags.
+ * Format a measured item duration for cards and tags (e.g. <0.1s, 4.2s, 1m 15.4s).
  *
- * @param {number|string|null|undefined} seconds
- * @returns {string|null}
+ * @param {number} seconds
+ * @returns {string}
  */
 export function formatOutcomeDuration(seconds) {
-  if (seconds == null) return null;
-  if (typeof seconds === "string") {
-    if (seconds.endsWith("s")) return seconds;
-    if (seconds.startsWith("<")) return `${seconds}s`;
-  }
-
-  const num = typeof seconds === "number" ? seconds : parseFloat(seconds);
-  if (Number.isNaN(num)) return null;
-
-  const rawSec = Math.max(0, num);
-  if (rawSec < 0.1) return "<0.1s";
-
-  const rounded = Math.round(rawSec * 10) / 10;
-  if (rounded < 60) {
-    return `${rounded.toFixed(1)}s`;
-  }
-
-  const mins = Math.floor(rounded / 60);
-  const secs = (rounded % 60).toFixed(1);
-  return `${mins}m ${secs}s`;
+  if (seconds < 0.1) return "<0.1s";
+  const rounded = Math.round(seconds * 10) / 10;
+  if (rounded < 60) return `${rounded.toFixed(1)}s`;
+  return `${Math.floor(rounded / 60)}m ${(rounded % 60).toFixed(1)}s`;
 }
 
 /**
- * Format an elapsed seconds counter as an in-flight duration string (e.g. 5s, 1m 15s).
+ * Format an in-flight elapsed time in whole seconds (e.g. 5s, 1m 15s).
  *
  * @param {number} seconds
  * @returns {string}
  */
 export function formatElapsedDuration(seconds) {
-  let sec = Number(seconds);
-  if (Number.isNaN(sec) || sec < 0) {
-    sec = 0;
-  }
-  if (sec < 60) {
-    return `${Math.floor(sec)}s`;
-  }
+  const sec = Math.max(0, seconds);
+  if (sec < 60) return `${Math.floor(sec)}s`;
   return `${Math.floor(sec / 60)}m ${Math.floor(sec % 60)}s`;
 }
+
 /**
  * Normalizes a directory path string for canonical identity comparison.
  * Trims surrounding whitespace, resolves dot segments and redundant separators,
@@ -127,10 +126,9 @@ export function normalizeDirectoryPath(path) {
   if (windowsHost || windowsPath) {
     clean = clean.replace(/\\/g, "/");
   }
-  if (!clean) return "";
 
-  // Strip Windows extended-length prefix (\\?\ or //?/) if present
-  clean = clean.replace(/^(\/\/|\?\/?)[?.]\//, "");
+  // Strip the Windows verbatim/device prefix (`//?/` or `//./`) if present
+  clean = clean.replace(/^\/\/[?.]\//, "");
   if (hadExtendedPrefix) clean = clean.replace(/^UNC\//i, "//");
 
   // Normalize Windows drive letter (e.g. C: -> c:)
@@ -163,11 +161,11 @@ export function normalizeDirectoryPath(path) {
     }
   }
 
-  let result = (hasDrive ? drivePrefix : "") + (isUnc ? "//" : isAbsolute ? "/" : "") + resolved.join("/");
+  let result = drivePrefix + (isUnc ? "//" : isAbsolute ? "/" : "") + resolved.join("/");
   if (!result && isAbsolute) result = "/";
   if (hasDrive && !resolved.length) result = drivePrefix + "/";
 
-  // Case normalization for Windows: on Windows, filesystems are case-insensitive
+  // Windows filesystems are case-insensitive.
   if (windowsHost || isUnc || hasDrive) {
     result = result.toLowerCase();
   }
@@ -186,21 +184,11 @@ export function normalizeDirectoryPath(path) {
 export function isSameDirectory(dirA, dirB) {
   if (!dirA || !dirB) return false;
   const normA = normalizeDirectoryPath(dirA);
-  const normB = normalizeDirectoryPath(dirB);
-  return Boolean(normA && normB && normA === normB);
+  return normA !== "" && normA === normalizeDirectoryPath(dirB);
 }
 
-/**
- * @param {InspectionManifest} manifest
- * @param {{mode?: string}} [options]
- */
-export function createQueueState(manifest, options = {}) {
-  const mode = options.mode || "remux";
-
-  const state = {
-    version: 1,
-    mode,
-    inputDir: null,
+function emptyQueueState() {
+  return {
     items: new Map(),
     order: [],
     knownOrder: [],
@@ -216,66 +204,63 @@ export function createQueueState(manifest, options = {}) {
     cancelledCount: 0,
     errorCount: 0,
   };
+}
 
-  if (!manifest || manifest.version !== 2 || !Array.isArray(manifest.items)) {
-    return state;
-  }
+function createItem(id, name, fields) {
+  return {
+    id,
+    name,
+    release: ".",
+    metadata: null,
+    inspectionError: null,
+    status: "queued", // "queued" | "processing" | a terminal ItemOutcome
+    startTime: null,
+    durationSec: null,
+    progress: null,
+    reason: null,
+    error: null,
+    selected: true,
+    ...fields,
+  };
+}
 
+/** @param {InspectionManifest} manifest */
+export function createQueueState(manifest) {
+  const state = emptyQueueState();
   for (const entry of manifest.items) {
     if (!entry || !entry.id) continue;
     const id = String(entry.id);
-    const name = String(entry.name || id);
-    const release = typeof entry.release === "string" ? entry.release : ".";
-    const metadata = entry.metadata || null;
-
-    const item = {
-      id,
-      name,
-      release,
-      metadata,
+    state.items.set(id, createItem(id, String(entry.name || id), {
+      release: typeof entry.release === "string" ? entry.release : ".",
+      metadata: entry.metadata || null,
       inspectionError: entry.inspection_error || null,
-      status: "queued", // 'queued' | 'processing' | 'completed' | 'skipped' | 'planned' | 'error'
-      startTime: null,
-      durationSec: null,
-      reason: null,
-      error: null,
-      selected: true,
-    };
-
-    state.items.set(id, item);
+    }));
     state.order.push(id);
     state.totalCount++;
   }
   state.knownOrder = [...state.order];
-
   return state;
 }
+
 /** Preserve surviving selection and order, remember vanished selected IDs, and append newly inspected IDs unselected. */
 export function reconcileQueueSelection(state, previous) {
   const priorVanished = new Set(previous.vanishedSelectedIds);
   const vanished = new Set([...priorVanished].filter(id => !state.items.has(id)));
-  const baseOrder = Array.isArray(previous.knownOrder) ? previous.knownOrder : (previous.order || []);
-  const baseSet = new Set(baseOrder);
+  const baseSet = new Set(previous.knownOrder);
   const order = [];
   const knownOrder = [];
 
-  for (const id of baseOrder) {
+  for (const id of previous.knownOrder) {
+    knownOrder.push(id);
+    const prevItem = previous.items.get(id);
+    const wasSelected = prevItem ? prevItem.selected !== false : priorVanished.has(id);
     const item = state.items.get(id);
     if (!item) {
-      if (previous.items?.get(id)?.selected !== false && (previous.items?.has(id) || priorVanished.has(id))) {
-        vanished.add(id);
-      }
-      knownOrder.push(id);
+      if (wasSelected) vanished.add(id);
       continue;
     }
-    const prevItem = previous.items?.get(id);
-    if (prevItem) {
-      item.selected = prevItem.selected !== false;
-    } else {
-      item.selected = priorVanished.has(id);
-    }
+    item.selected = wasSelected;
     order.push(id);
-    knownOrder.push(id);
   }
 
   for (const id of state.order) {
@@ -292,72 +277,43 @@ export function reconcileQueueSelection(state, previous) {
 }
 
 /**
- * Creates and initializes a queue state projection from an in-memory JobSnapshot.
+ * Project an Engine Bridge JobSnapshot into queue state. Items still queued or
+ * processing in a finished batch resolve to cancelled (cancelled batch) or error.
  *
  * @param {Object} snapshot
- * @param {{mode?: string}} [options]
+ * @param {number} [now] start time for processing items the snapshot has none for
  */
-export function createQueueStateFromSnapshot(snapshot, options = {}) {
-  const mode = snapshot?.mode || options.mode || "remux";
-  const state = {
-    version: 1,
-    mode,
-    inputDir: snapshot?.input_dir || null,
-    items: new Map(),
-    order: [],
-    knownOrder: [],
-    batchStartTime: snapshot?.start_time_ms ?? null,
-    batchItemIds: null,
-    vanishedSelectedIds: [],
-    batchCompleted: snapshot?.status === "completed" || snapshot?.status === "cancelled" || snapshot?.status === "error",
-    batchSuccess: snapshot?.status === "completed",
-    batchCancelled: snapshot?.status === "cancelled",
-    completedCount: 0,
-    totalCount: 0,
-    skippedCount: 0,
-    cancelledCount: 0,
-    errorCount: 0,
-  };
-
-  if (!snapshot || !snapshot.items || !Array.isArray(snapshot.ordered_item_ids)) {
-    return state;
-  }
+export function createQueueStateFromSnapshot(snapshot, now = Date.now()) {
+  const state = emptyQueueState();
+  state.batchStartTime = snapshot.start_time_ms ?? null;
+  state.batchCompleted = snapshot.status === "completed" || snapshot.status === "cancelled" || snapshot.status === "error";
+  state.batchSuccess = snapshot.status === "completed";
+  state.batchCancelled = snapshot.status === "cancelled";
 
   for (const id of snapshot.ordered_item_ids) {
     const snapItem = snapshot.items[id];
     if (!snapItem || state.items.has(id)) continue;
-    const name = String(snapItem.file || id);
-    const status = snapItem.status || "queued";
 
-    let resolvedStatus = status;
+    let status = snapItem.status || "queued";
     if (state.batchCompleted && (status === "processing" || status === "queued")) {
-      resolvedStatus = state.batchCancelled ? "cancelled" : "error";
+      status = state.batchCancelled ? "cancelled" : "error";
     }
+    const processing = status === "processing";
 
-    const item = {
-      id,
-      name,
+    state.items.set(id, createItem(id, String(snapItem.file || id), {
       release: "",
-      metadata: null,
-      inspectionError: null,
-      status: resolvedStatus,
-      startTime: resolvedStatus === "processing" ? (snapItem.start_time_ms ?? options.now ?? Date.now()) : null,
+      status,
+      startTime: processing ? (snapItem.start_time_ms ?? now) : null,
       durationSec: snapItem.duration_sec ?? null,
-      progress: resolvedStatus === "processing" && typeof snapItem.progress === "number"
-        ? Math.min(100, Math.max(0, snapItem.progress)) : null,
+      progress: processing && typeof snapItem.progress === "number" ? clampPercent(snapItem.progress) : null,
       reason: snapItem.reason ?? null,
       error: snapItem.error ?? null,
-      selected: true,
-    };
-
-    state.items.set(id, item);
+    }));
     state.order.push(id);
     state.totalCount++;
 
-    if (resolvedStatus === "completed" || resolvedStatus === "planned") state.completedCount++;
-    else if (resolvedStatus === "skipped") state.skippedCount++;
-    else if (resolvedStatus === "cancelled") state.cancelledCount++;
-    else if (resolvedStatus === "error") state.errorCount++;
+    const counter = OUTCOME_COUNTERS.get(status);
+    if (counter) state[counter]++;
   }
 
   state.knownOrder = [...state.order];
@@ -371,43 +327,28 @@ export function createQueueStateFromSnapshot(snapshot, options = {}) {
 export function carryOverAssignments(previousAssignments, manifest) {
   const carried = new Map();
   for (const entry of manifest?.items ?? []) {
-    if (entry && previousAssignments.has(entry.id)) {
+    if (previousAssignments.has(entry.id)) {
       carried.set(entry.id, previousAssignments.get(entry.id));
     }
   }
   return carried;
 }
 
-export function serializeAssignmentsForManifest(assignments, manifest) {
-  const carried = carryOverAssignments(assignments, manifest);
-  return carried.size > 0
-    ? JSON.stringify({ version: 1, assignments: Object.fromEntries(carried) })
-    : null;
-}
-
+/**
+ * Build the batch request's Track Assignment list from the manual assignments
+ * that survive in `manifest`. Returns null when nothing survives.
+ */
 export function buildTrackAssignmentsForManifest(assignments, manifest) {
   const carried = carryOverAssignments(assignments, manifest);
   if (carried.size === 0) return null;
-  const list = [];
-  for (const [targetVideo, val] of carried.entries()) {
-    if (typeof val === "object" && val !== null) {
-      list.push({
-        target_video: targetVideo,
-        asset_path: val.asset_path || val.path,
-        track_type: val.track_type || "subtitle",
-        language: val.language || null,
-        title: val.title || null,
-        offset_ms: typeof val.offset_ms === "number" ? val.offset_ms : null,
-      });
-    } else {
-      list.push({
-        target_video: targetVideo,
-        asset_path: val,
-        track_type: "subtitle",
-      });
-    }
-  }
-  return list;
+  return [...carried].map(([targetVideo, val]) => ({
+    target_video: targetVideo,
+    asset_path: val.asset_path,
+    track_type: val.track_type || "subtitle",
+    language: val.language || null,
+    title: val.title || null,
+    offset_ms: typeof val.offset_ms === "number" ? val.offset_ms : null,
+  }));
 }
 
 /**
@@ -417,45 +358,23 @@ export function buildTrackAssignmentsForManifest(assignments, manifest) {
  * @param {JobEvent} event
  */
 export function reduceQueueEvent(state, event, now = Date.now()) {
-  if (!state || !event || typeof event !== "object" || event.version !== 1) {
-    return state;
-  }
+  if (event?.version !== 1) return state;
 
   switch (event.type) {
     case "batch_start": {
-      state.batchStartTime = state.batchStartTime || now;
-      if (typeof event.total === "number") {
-        state.expectedTotal = event.total;
-      }
+      state.batchStartTime ||= now;
       if (Array.isArray(event.items)) {
-        state.batchItemIds = event.items.filter(it => it && it.id).map(it => it.id);
-        // order and knownOrder are tracked with independent membership sets: a
-        // snapshot restore can hand back a knownOrder that no longer matches
-        // order, and the submitter's BatchStart order is authoritative for both.
+        state.batchItemIds = [];
+        // Append participants missing from either list. knownOrder also keeps
+        // vanished IDs that order omits, so each list gets its own membership set.
         const inOrder = new Set(state.order);
         const inKnown = new Set(state.knownOrder);
         for (const it of event.items) {
-          if (!it || !it.id) continue;
+          if (!it?.id) continue;
+          state.batchItemIds.push(it.id);
           if (!state.items.has(it.id)) {
-            state.items.set(it.id, {
-              id: it.id,
-              name: it.file || it.id,
-              release: ".",
-              metadata: null,
-              inspectionError: null,
-              status: "queued",
-              startTime: null,
-              durationSec: null,
-              durationFormatted: null,
-              progress: null,
-              speed: null,
-              eta: null,
-              reason: null,
-              error: null,
-              outcome: null,
-            });
+            state.items.set(it.id, createItem(it.id, it.file || it.id));
           }
-          // Submitter order is authoritative: append each participant once.
           if (!inOrder.has(it.id)) {
             state.order.push(it.id);
             inOrder.add(it.id);
@@ -471,79 +390,55 @@ export function reduceQueueEvent(state, event, now = Date.now()) {
     }
 
     case "item_start": {
-      if (!event.id || !state.items.has(event.id)) return state;
       const item = state.items.get(event.id);
-      if (isTerminal(item.status)) return state;
-
+      if (!item || isTerminal(item.status)) return state;
       item.status = "processing";
-      item.startTime = item.startTime || now;
+      item.startTime ||= now;
       return state;
     }
 
     case "item_progress": {
-      if (!event.id || !state.items.has(event.id)) return state;
       const item = state.items.get(event.id);
-      if (isTerminal(item.status)) return state;
-
+      if (!item || isTerminal(item.status)) return state;
       if (typeof event.progress === "number") {
-        item.progress = Math.min(100, Math.max(0, event.progress));
-      }
-      if (typeof event.speed === "string") {
-        item.speed = event.speed;
-      }
-      if (typeof event.eta === "string") {
-        item.eta = event.eta;
+        item.progress = clampPercent(event.progress);
       }
       return state;
     }
 
     case "item_complete": {
-      if (!event.id || !state.items.has(event.id)) return state;
       const item = state.items.get(event.id);
-      if (isTerminal(item.status)) return state;
+      if (!item || isTerminal(item.status)) return state;
 
-      // Completion status -> item patch plus which counters it increments.
-      const outcomes = {
-        completed: { status: "completed", completed: 1 },
-        planned: { status: "planned", completed: 1 },
-        skipped: { status: "skipped", reason: event.reason || "Skipped", skipped: 1 },
-        cancelled: { status: "cancelled", reason: event.reason || "Cancelled", cancelledCount: 1 },
-        error: { status: "error", error: event.error || "Failed", failed: 1 },
-      };
-      const outcome = outcomes[event.status] ?? {
-        status: "error",
-        error: `Unknown status: ${event.status}`,
-        failed: 1,
-      };
-      const { completed = 0, skipped = 0, cancelledCount = 0, failed = 0, ...itemPatch } = outcome;
+      const known = OUTCOME_COUNTERS.has(event.status);
+      const status = known ? event.status : "error";
 
-      // Only measured work gets a duration: skips, dry-run plans, and
-      // items that error before starting have no item_start, so falling
-      // back to batch-elapsed time would report a meaningless number.
-      // Items that had started still report how long they ran. Sub-second
-      // jobs render as "<0.1" so fast extractions don't display as "0.0s".
-      let dur = null;
+      // Only measured work gets a duration: skips, dry-run plans, and items
+      // that end without an item_start would otherwise report batch-elapsed
+      // time. Items that had started report how long they ran.
+      let durationSec = null;
       if (event.duration_sec != null) {
         const d = Number(event.duration_sec);
-        dur = Number.isNaN(d) ? null : Math.max(0, d);
+        durationSec = Number.isNaN(d) ? null : Math.max(0, d);
       } else if (
         item.startTime !== null &&
-        (outcome.status === "completed" ||
-         outcome.status === "error" ||
-         outcome.status === "cancelled")
+        (status === "completed" || status === "error" || status === "cancelled")
       ) {
-        dur = Math.max(0, (now - item.startTime) / 1000);
+        durationSec = Math.max(0, (now - item.startTime) / 1000);
       }
 
-      item.durationSec = dur;
+      item.status = status;
+      item.durationSec = durationSec;
       item.reason = null;
       item.error = null;
-      Object.assign(item, itemPatch);
-
-      state.completedCount += completed;
-      state.skippedCount += skipped;
-      state.cancelledCount = (state.cancelledCount || 0) + cancelledCount;
-      state.errorCount += failed;
+      if (status === "skipped") {
+        item.reason = event.reason || "Skipped";
+      } else if (status === "cancelled") {
+        item.reason = event.reason || "Cancelled";
+      } else if (status === "error") {
+        item.error = known ? event.error || "Failed" : `Unknown status: ${event.status}`;
+      }
+      state[OUTCOME_COUNTERS.get(status)]++;
       return state;
     }
 
@@ -559,38 +454,40 @@ export function reduceQueueEvent(state, event, now = Date.now()) {
   }
 }
 
+/**
+ * Settle the batch after the engine process exits: every participant without
+ * a terminal outcome becomes cancelled (stop) or errored. Returns a new state
+ * object. The batch succeeds only if the engine reported success, the process
+ * exited 0, and no item failed.
+ */
 export function finalizeQueueState(state, exitCode, cancelled = false) {
-  if (!state) return state;
-
   let nextItems = state.items;
   let addedErrors = 0;
   let addedCancelled = 0;
 
-  const participants = Array.isArray(state.batchItemIds) ? new Set(state.batchItemIds) : null;
-  for (const [id, item] of state.items.entries()) {
+  const participants = state.batchItemIds ? new Set(state.batchItemIds) : null;
+  for (const [id, item] of state.items) {
     if (participants ? !participants.has(id) : item.selected === false) continue;
-    if (!isTerminal(item.status)) {
-      if (nextItems === state.items) {
-        nextItems = new Map(state.items);
-      }
-      nextItems.set(id, {
-        ...item,
-        status: cancelled ? "cancelled" : "error",
-        reason: cancelled ? "Cancelled" : null,
-        error: cancelled
-          ? null
-          : exitCode === 0
-            ? "Protocol error: missing completion event"
-            : `Aborted (exit ${exitCode})`,
-      });
-      if (cancelled) addedCancelled++;
-      else addedErrors++;
+    if (isTerminal(item.status)) continue;
+    if (nextItems === state.items) {
+      nextItems = new Map(state.items);
     }
+    nextItems.set(id, {
+      ...item,
+      status: cancelled ? "cancelled" : "error",
+      reason: cancelled ? "Cancelled" : null,
+      error: cancelled
+        ? null
+        : exitCode === 0
+          ? "Protocol error: missing completion event"
+          : `Aborted (exit ${exitCode})`,
+    });
+    if (cancelled) addedCancelled++;
+    else addedErrors++;
   }
 
   const finalErrorCount = state.errorCount + addedErrors;
-  const receivedBatchComplete = state.batchSuccess === true;
-  const finalBatchSuccess = receivedBatchComplete && exitCode === 0 && finalErrorCount === 0;
+  const engineReportedSuccess = state.batchSuccess === true;
 
   return {
     ...state,
@@ -599,68 +496,42 @@ export function finalizeQueueState(state, exitCode, cancelled = false) {
     cancelledCount: state.cancelledCount + addedCancelled,
     batchCompleted: true,
     batchCancelled: state.batchCancelled || cancelled,
-    batchSuccess: finalBatchSuccess,
+    batchSuccess: engineReportedSuccess && exitCode === 0 && finalErrorCount === 0,
   };
 }
 
-/**
- * Toggles or sets item selection in queue state.
- */
-export function toggleItemSelection(state, id, selected) {
-  if (!state || !state.items) return;
+/** Set one item's selection; an explicit choice forgets remembered vanished selections. */
+export function setItemSelected(state, id, selected) {
   const item = state.items.get(id);
   if (!item) return;
-  item.selected = typeof selected === "boolean" ? selected : !item.selected;
+  item.selected = selected;
   state.vanishedSelectedIds = [];
 }
 
-/**
- * Selects all items in queue state.
- */
-export function selectAll(state) {
-  if (!state || !state.items) return;
+/** Set every item's selection; forgets remembered vanished selections. */
+export function setAllSelected(state, selected) {
   for (const item of state.items.values()) {
-    item.selected = true;
+    item.selected = selected;
   }
   state.vanishedSelectedIds = [];
 }
 
-/**
- * Deselects all items in queue state.
- */
-export function deselectAll(state) {
-  if (!state || !state.items) return;
-  for (const item of state.items.values()) {
-    item.selected = false;
-  }
-  state.vanishedSelectedIds = [];
-}
-
-/**
- * Reorders an item within state.order earlier or later.
- */
+/** Swap an item with its neighbour in `order` ("up" = earlier) and mirror the swap in `knownOrder`. */
 export function reorderItem(state, id, direction) {
-  if (!state || !Array.isArray(state.order)) return;
   const idx = state.order.indexOf(id);
   if (idx === -1) return;
   const targetIdx = direction === "up" ? idx - 1 : idx + 1;
   if (targetIdx < 0 || targetIdx >= state.order.length) return;
   const otherId = state.order[targetIdx];
-  [state.order[idx], state.order[targetIdx]] = [state.order[targetIdx], state.order[idx]];
-  if (Array.isArray(state.knownOrder)) {
-    const kIdx = state.knownOrder.indexOf(id);
-    const kTarget = state.knownOrder.indexOf(otherId);
-    if (kIdx !== -1 && kTarget !== -1) {
-      [state.knownOrder[kIdx], state.knownOrder[kTarget]] = [state.knownOrder[kTarget], state.knownOrder[kIdx]];
-    }
+  swap(state.order, idx, targetIdx);
+  const kIdx = state.knownOrder.indexOf(id);
+  const kTarget = state.knownOrder.indexOf(otherId);
+  if (kIdx !== -1 && kTarget !== -1) {
+    swap(state.knownOrder, kIdx, kTarget);
   }
 }
 
-/**
- * Returns the count of selected items in state.
- */
 export function getSelectedCount(state) {
-  if (!state || !state.items) return 0;
   let count = 0;
   for (const item of state.items.values()) {
     if (item.selected !== false) count++;

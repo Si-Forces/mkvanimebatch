@@ -19,6 +19,8 @@ unsafe_code = "forbid"
 incremental = true
 
 [profile.release]
+# Keep the default `panic = "unwind"`: engine workers and the desktop bridge isolate panics as
+# task `JoinError`s, which `panic = "abort"` would turn into process exits.
 codegen-units = 1
 lto = true
 opt-level = "s"

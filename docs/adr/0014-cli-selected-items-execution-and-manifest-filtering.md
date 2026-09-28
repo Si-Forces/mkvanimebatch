@@ -1,6 +1,6 @@
 # 0014. CLI Selected Items Execution and Manifest Filtering
 
-> **Status**: Accepted
+> **Status**: Accepted (amended 2026-09-28)
 > **Date**: 2026-09-22
 > **Context**: Media Engine Context & Standalone CLI Adapter
 > **Amends**: ADR-0011
@@ -48,3 +48,11 @@ We decided to establish first-class selected item execution and manifest filteri
 - Robust, escape-free support for arbitrary anime filenames containing commas, brackets, spaces, and Unicode characters.
 - Headless scripts and CI runners can generate scoped planning manifests (`--plan`) and execute targeted remux/extract jobs without directory isolation workarounds.
 - 100% backward compatibility: omitting selection flags continues to discover and process all directory files in natural directory order.
+
+## Amendment — 2026-09-28
+
+Decision 3's API was replaced; the filtering rules it describes stand.
+
+- **`filter_selected` is now `select_items`.** `InspectionManifest::select_items(&self, selected_items: &[String]) -> Result<InspectionManifest, String>` replaces the infallible `filter_selected`. It keeps items in selection order, drops repeated selections, and prunes `subtitle_candidates` to the releases of the retained items.
+- **`--plan` fails on unmatched selections before filtering.** `BatchRequest::validate` first rejects a selected item that is missing (`Selected item does not exist: …`) or not an MKV (`Selected item is not an MKV file: …`). If an existing MKV selection names no discovered MKV file (for example one under `Output/`), `select_items` returns `Selected items not found among discovered MKV files: <items>` and `mkv-cli --plan` exits with that error instead of printing a manifest. Nothing is filtered or reordered in that case. This is the fail-fast rule of the "Silent Dropping" option applied to planning.
+- **One matcher for planning and execution.** `select_items` and the pipeline's own selection step both resolve selections through `request::resolve_selected_items` (crate-private), so `--plan` and a real run match selections to discovered items the same way and report unmatched ones with the same message.
