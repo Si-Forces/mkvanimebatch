@@ -140,6 +140,45 @@ async fn test_remux_dry_run_preserves_nested_output_directory() {
     )));
 }
 
+/// An input directory reached through a different spelling than its canonical path (a symlink
+/// here; an 8.3 short name or verbatim prefix on Windows) must still pair each video with the
+/// subtitle beside it.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_remux_dry_run_matches_subtitles_through_symlinked_input_dir() {
+    let tmp = tempdir().unwrap();
+    let release = tmp.path().join("release");
+    let season_dir = release.join("Season 01");
+    fs::create_dir_all(&season_dir).unwrap();
+    let ep1 = season_dir.join("Show - 01.mkv");
+    fs::write(&ep1, b"dummy mkv").unwrap();
+    fs::write(
+        season_dir.join("Show - 01.ass"),
+        b"[Script Info]\nTitle: Test Sub",
+    )
+    .unwrap();
+    let link = tmp.path().join("link");
+    std::os::unix::fs::symlink(&release, &link).unwrap();
+
+    let (summary, _) = run_batch(
+        PipelineConfig {
+            dry_run: true,
+            cache: Some(seeded_cache(tmp.path(), &[&ep1], &video_metadata("A_FLAC"))),
+            ..config(PipelineMode::Remux, &link)
+        },
+        CancellationToken::new(),
+    )
+    .await;
+    let summary = summary.unwrap();
+
+    assert_eq!(
+        (summary.completed, summary.skipped),
+        (1, 0),
+        "{:#?}",
+        summary.log
+    );
+}
+
 #[tokio::test]
 async fn test_remux_skips_when_no_matching_subtitle() {
     let in_tmp = tempdir().unwrap();
