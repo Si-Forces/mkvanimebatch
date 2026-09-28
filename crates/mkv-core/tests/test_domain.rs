@@ -814,15 +814,16 @@ fn test_promote_file_basic_and_overwrite() {
     assert_eq!(std::fs::read(&dest).unwrap(), b"updated content");
 }
 
-/// A missing `staged` makes the opening `rename` fail with `NotFound`, which is not a
-/// device boundary, so promotion returns that error and creates no destination.
+/// A missing `staged` makes the opening `rename` fail `NotFound`, so promotion returns that
+/// error and creates no destination. This is the `NotFound` half of the "a refused promotion
+/// leaves nothing behind" invariant; on Unix,
+/// `test_promote_file_readonly_source_parent_returns_error` pins the `PermissionDenied` half.
 ///
-/// Deliberately does *not* claim the copy was skipped: `std::fs::copy` opens the source
-/// before the destination, so a missing source fails it with the same `NotFound` and this
-/// assertion held before the fallback was gated too. The gate's one observable consequence
-/// is pinned by `test_promote_file_readonly_source_parent_returns_error`.
+/// It cannot show whether the copy fallback ran: `std::fs::copy` opens the source before the
+/// destination, so a missing source fails it with the same `NotFound`. The gate's one
+/// observable consequence is the read-only-source case.
 #[test]
-fn test_promote_file_missing_source_is_not_copied() {
+fn test_promote_file_missing_source_creates_no_destination() {
     use mkv_core::domain::promote_file;
     use tempfile::tempdir;
 
@@ -919,6 +920,23 @@ fn test_promote_file_cross_device_copy() {
     promote_file(&staged, &dest).expect("a genuine EXDEV must fall through to the copy");
     assert_eq!(std::fs::read(&dest).unwrap(), b"cross-device payload");
     assert!(!staged.exists(), "the copy path consumes the staged file");
+
+    // The copy writes a temporary sibling into the destination directory and renames it over
+    // the target. A sibling left behind would sit unnoticed in whatever that directory holds in
+    // production, so assert the directory is left holding only the promoted file. Naming the
+    // sibling here would re-hardcode the prefix in `promote_file`; if it were renamed, a filter
+    // on the old prefix would pass for the wrong reason. Counting entries also catches a
+    // leaked `.bak.` backup, which no prefix filter for one scheme would see.
+    let leftovers: Vec<_> = std::fs::read_dir(dest_dir.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name())
+        .filter(|name| name != "final.bin")
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "promotion must leave only 'final.bin', found: {leftovers:?}"
+    );
 }
 
 #[test]
