@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -253,28 +253,46 @@ impl FontHashMemo {
             return;
         }
 
-        let parent = self.memo_file.parent().unwrap_or_else(|| Path::new("."));
-        let _ = fs::create_dir_all(parent);
+        let parent = match self.memo_file.parent() {
+            Some(p) if !p.as_os_str().is_empty() => {
+                let _ = fs::create_dir_all(p);
+                p
+            }
+            _ => Path::new("."),
+        };
 
-        let serialized = match serde_json::to_string(&self.data) {
-            Ok(s) => s,
+        // Stream straight into the temp file, as `PersistentInspectCache` does (ADR-0013
+        // Decision 4). Building one `String` first would hold the entire memo in the heap
+        // in addition to the file being written.
+        let mut temp_file = match NamedTempFile::new_in(parent) {
+            Ok(f) => f,
             Err(e) => {
-                warn!("Failed to serialize font hash memo: {e}");
+                warn!(
+                    "Failed to create tempfile for font hash memo save in {}: {e}",
+                    parent.display()
+                );
                 return;
             }
         };
 
-        if let Ok(mut temp_file) = NamedTempFile::new_in(parent) {
-            if temp_file.write_all(serialized.as_bytes()).is_ok() && temp_file.flush().is_ok() {
-                if temp_file.persist(&self.memo_file).is_ok() {
-                    self.dirty = false;
-                } else {
-                    warn!(
-                        "Failed to atomically replace font hash memo at {}",
-                        self.memo_file.display()
-                    );
-                }
+        {
+            let mut writer = BufWriter::new(&mut temp_file);
+            if let Err(e) = serde_json::to_writer(&mut writer, &self.data) {
+                warn!("Failed to write font hash memo: {e}");
+                return;
             }
+            if let Err(e) = writer.flush() {
+                warn!("Failed to flush font hash memo stream: {e}");
+                return;
+            }
+        }
+
+        match temp_file.persist(&self.memo_file) {
+            Ok(_) => self.dirty = false,
+            Err(e) => warn!(
+                "Failed to atomically replace font hash memo at {}: {e}",
+                self.memo_file.display()
+            ),
         }
     }
 }
@@ -341,23 +359,23 @@ impl FontRegistry {
 
         for entry in entries.flatten() {
             let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-            let ext = path
-                .extension()
-                .map(|e| format!(".{}", e.to_string_lossy().to_lowercase()))
-                .unwrap_or_default();
-            if !FONT_EXTENSIONS.contains(&ext.as_str()) {
+            let is_font = path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+                FONT_EXTENSIONS
+                    .iter()
+                    .any(|f| f.strip_prefix('.').unwrap_or(f).eq_ignore_ascii_case(e))
+            });
+            if !is_font {
                 continue;
             }
 
             if let Ok(meta) = entry.metadata() {
-                let size = meta.len();
+                if meta.is_dir() {
+                    continue;
+                }
                 let file_name = entry.file_name().to_string_lossy().into_owned();
-                discovered_name_sizes.push((file_name, size));
 
-                if let Some(sig) = FileSignature::of(&path) {
+                if let Some(sig) = FileSignature::of_dir_entry(&entry, &meta) {
+                    discovered_name_sizes.push((file_name, sig.size));
                     let mut file_hash = None;
                     if let Some(memo_arc) = &self.hash_memo {
                         let memo = memo_arc.lock();

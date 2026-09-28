@@ -42,7 +42,50 @@ We decided to execute a coordinated performance overhaul across the Media Engine
 - Eliminates font registry lock contention during pipeline startup.
 - Cuts cache serialization latency by 75% and eliminates intermediate heap memory allocations.
 
-## Amendment — 2026-09-28
+## Amendment 1 — 2026-09-28 (memo persistence)
+
+### Decision 4 extended to the font hash memo
+
+Decision 4 removed the "serialize to a heap `String` before writing" pattern from
+`PersistentInspectCache`. `FontHashMemo::save` was missed: it still called
+`serde_json::to_string` over the whole map and then wrote those bytes, so every save
+materialized the entire memo in the heap in addition to the file being written. It now
+uses the same `BufWriter` + `serde_json::to_writer` + `persist` shape.
+
+**Why this needed recording rather than a quiet fix.** Decision 4 names only
+`PersistentInspectCache`, so a reader taking the ADR at its word would conclude the
+zero-copy property held for every persistent cache in the system. It did not. The two are
+not otherwise identical — `save_internal` also sets `0o644` on the persisted file and
+re-checks a revision counter before clearing `dirty`, neither of which the memo does —
+so this amendment widens Decision 4 to the memo's *serialization* path specifically.
+
+**How large the memo gets, stated honestly.** The memo is keyed by absolute font path and
+is never pruned: entries are only ever inserted, and `data` is cleared solely when the
+memo file fails to parse. So it grows monotonically with every distinct font path the
+process has ever hashed. In the common layout — one `fonts/` directory shared by a whole
+release, which is what `find_fonts_dir` resolves to — that is one entry per font file and
+stays small. In a layout giving each episode directory its own `fonts/`, `fonts_dir_for`
+resolves a different directory per episode, each seeds its own registry, and the entry
+count multiplies by the episode count. The payload is therefore unbounded in the size of
+the library's history rather than fixed, which is the part worth acting on: the saving is
+one full-payload heap copy per write, not a constant.
+
+**What it does not change.** The `dirty` flag still short-circuits the write when nothing
+changed, so the copy was already paid only when a font was genuinely added. No other
+decision and no measured figure in this ADR is affected; Decision 3's `seed_existing`
+lock-hold numbers are untouched. Two latent defects in the old `save` were fixed in passing
+because the rewrite made them visible: `temp_file.flush()` was a `std::fs::File::flush`,
+which is a no-op that always returns `Ok`, making that error check vacuous; and
+`NamedTempFile::new_in` failure was silently ignored, leaving no diagnostic at all.
+
+**Coverage.** `test_font_hash_memo_large_save_round_trips_through_buffered_writer` writes
+500 entries producing a ~78 KB payload, so the mid-stream flush path is genuinely taken
+rather than fitting the 8 KiB buffer, and every entry is checked for truncation.
+`test_font_hash_memo_save_is_noop_when_not_dirty` pins the early return by inode, which a
+byte-comparison cannot distinguish from a rewrite that happened to produce identical
+output.
+
+## Amendment 2 — 2026-09-28 (spawn_blocking scope)
 
 - Adds to ADR-0013 "Decision": the copy fallback in `promote_file` is restricted to genuine
   device boundaries, and the blanket `spawn_blocking` proposal below is rejected. The
