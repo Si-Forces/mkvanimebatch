@@ -618,7 +618,7 @@ sequenceDiagram
    - Temporary outputs write to hidden scratch directories (`.tmp_remux_*` or `.font_staging/`).
    - Promotion uses atomic filesystem renames (`fs::rename`).
    - If destination exists (e.g. Windows filesystem semantics), creates a timestamped backup before replacement. If replacement fails, rolls back the backup.
-   - If crossing device boundaries (`EXDEV`, OS error 18 or Windows error 17), copies to a temporary sibling file within the destination parent directory before renaming over the target, preserving atomicity.
+   - If crossing device boundaries (a typed `CrossesDevices` kind, `EXDEV`/18 off Windows, `ERROR_NOT_SAME_DEVICE`/17 on Windows), copies to a temporary sibling file within the destination parent directory before renaming over the target, preserving atomicity.
    - **That copy is reached only for a device boundary** ([ADR-0013 amendment](./docs/adr/0013-asynchronous-probing-and-transcode-governance-performance-overhaul.md#amendment--2026-09-28)). Any other rename failure — missing source, locked destination, permissions — returns the rename error rather than duplicating a multi-gigabyte payload to fail the same way. `promote_file` is synchronous throughout; promotion is not offloaded to Tokio's blocking pool, which would let a cancelled item detach a still-running copy.
 2. **Fail-Fast Input Validation (`BatchRequest::validate`)**:
    - Rejects path traversal attempts (`..`) and absolute path injection within `selected_items` and `TrackAssignment`.
