@@ -1,7 +1,8 @@
 //! Remux track selection, command construction, and argument generation.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+
+use tokio::sync::Semaphore;
 
 use crate::domain::{
     cover_mime, promote_file, read_progress_stream, select_audio_track, SUBPROCESS_TIMEOUT,
@@ -13,7 +14,6 @@ use crate::scan::InspectedVideo;
 pub struct PlannedJob {
     pub video: PathBuf,
     pub video_name: String,
-    pub base: String,
     pub output_file: PathBuf,
     pub subtitle_file: Option<PathBuf>,
     pub subtitle_label: String,
@@ -22,7 +22,6 @@ pub struct PlannedJob {
     pub cover_file: Option<PathBuf>,
     pub embedded_sub_id: Option<u32>,
     pub use_source_fonts: bool,
-    pub release_dir: Option<PathBuf>,
     pub item_id: String,
     pub custom_offset_ms: Option<i64>,
     pub custom_language: Option<String>,
@@ -35,18 +34,14 @@ pub struct TrackSelection {
     pub audio_id: Option<u32>,
     pub audio_index: usize,
     pub audio_codec: String,
-    pub audio_channels: u32,
     pub audio_lang: String,
     pub audio_name: String,
-    pub audio_reason: String,
-    pub has_source_chapters: bool,
     pub source_cover_id: Option<u32>,
     pub source_font_ids: Vec<u32>,
 }
 
-/// Selects video, audio, chapter, cover, and font tracks from an inspected MKV.
+/// Selects the video and audio tracks and the source cover and font attachments of an MKV.
 pub fn select_tracks(inspected: &InspectedVideo) -> TrackSelection {
-    let has_source_chapters = inspected.has_chapters();
     let source_cover_id = inspected.cover_attachment().and_then(|c| c.id);
     let source_font_ids: Vec<u32> = inspected
         .font_attachments()
@@ -54,26 +49,14 @@ pub fn select_tracks(inspected: &InspectedVideo) -> TrackSelection {
         .filter_map(|att| att.id)
         .collect();
 
-    let video_track = inspected.video_track();
-    let video_id = video_track.and_then(|v| v.id);
-    let video_pos = inspected.video_track_pos();
-
-    let audio_tracks = inspected.audio_tracks();
-    let (audio, reason) = select_audio_track(
-        &audio_tracks,
-        if video_pos >= 0 { video_pos as u32 } else { 0 },
-    );
+    let video_id = inspected.video_track().and_then(|v| v.id);
+    let video_pos = u32::try_from(inspected.video_track_pos()).unwrap_or(0);
+    let audio = select_audio_track(&inspected.audio_tracks(), video_pos);
 
     let audio_id = audio.as_ref().map(|a| a.id);
-    let (audio_index, audio_codec, audio_channels, audio_lang, audio_name) = match &audio {
-        Some(a) => (
-            a.audio_idx,
-            a.codec.clone(),
-            a.channels,
-            a.lang.clone(),
-            a.name.clone(),
-        ),
-        None => (0, String::new(), 0, String::new(), String::new()),
+    let (audio_index, audio_codec, audio_lang, audio_name) = match audio {
+        Some(a) => (a.audio_idx, a.codec, a.lang, a.name),
+        None => (0, String::new(), String::new(), String::new()),
     };
 
     TrackSelection {
@@ -81,11 +64,8 @@ pub fn select_tracks(inspected: &InspectedVideo) -> TrackSelection {
         audio_id,
         audio_index,
         audio_codec,
-        audio_channels,
         audio_lang,
         audio_name,
-        audio_reason: reason,
-        has_source_chapters,
         source_cover_id,
         source_font_ids,
     }
@@ -109,7 +89,7 @@ pub fn build_mkvmerge_args(
     output_path: &Path,
     sub_offset: f64,
 ) -> Vec<String> {
-    let mut args: Vec<String> = vec!["-o".to_string(), output_path.to_string_lossy().to_string()];
+    let mut args: Vec<String> = vec!["-o".to_string(), output_path.to_string_lossy().into_owned()];
 
     if job.chapter_file.is_some() {
         args.push("--no-chapters".to_string());
@@ -159,7 +139,7 @@ pub fn build_mkvmerge_args(
         args.push("--no-video".to_string());
     }
 
-    args.push(job.video.to_string_lossy().to_string());
+    args.push(job.video.to_string_lossy().into_owned());
 
     if let Some(opus) = temp_opus {
         args.push("--no-chapters".to_string());
@@ -171,7 +151,7 @@ pub fn build_mkvmerge_args(
             args.push("--track-name".to_string());
             args.push(format!("0:{}", selection.audio_name));
         }
-        args.push(opus.to_string_lossy().to_string());
+        args.push(opus.to_string_lossy().into_owned());
     }
 
     if let Some(sub_file) = &job.subtitle_file {
@@ -184,19 +164,16 @@ pub fn build_mkvmerge_args(
             args.extend(format_sync_args(0, sub_offset));
         }
 
-        let lang = match &job.custom_language {
-            Some(lang) => lang.as_str(),
-            None => job.subtitle_mkv_lang.as_str(),
-        };
+        let lang = job
+            .custom_language
+            .as_deref()
+            .unwrap_or(&job.subtitle_mkv_lang);
         if !lang.is_empty() {
             args.push("--language".to_string());
             args.push(format!("0:{lang}"));
         }
 
-        let title = match &job.custom_title {
-            Some(title) => title.as_str(),
-            None => job.subtitle_label.as_str(),
-        };
+        let title = job.custom_title.as_deref().unwrap_or(&job.subtitle_label);
         if !title.is_empty() {
             args.push("--track-name".to_string());
             args.push(format!("0:{title}"));
@@ -204,12 +181,12 @@ pub fn build_mkvmerge_args(
 
         args.push("--default-track-flag".to_string());
         args.push("0:yes".to_string());
-        args.push(sub_file.to_string_lossy().to_string());
+        args.push(sub_file.to_string_lossy().into_owned());
     }
 
     if let Some(chapter_file) = &job.chapter_file {
         args.push("--chapters".to_string());
-        args.push(chapter_file.to_string_lossy().to_string());
+        args.push(chapter_file.to_string_lossy().into_owned());
     }
 
     if let Some(cover_file) = &job.cover_file {
@@ -223,10 +200,10 @@ pub fn build_mkvmerge_args(
         args.push("--attachment-mime-type".to_string());
         args.push(mime.to_string());
         args.push("--attach-file".to_string());
-        args.push(cover_file.to_string_lossy().to_string());
+        args.push(cover_file.to_string_lossy().into_owned());
     }
 
-    args.extend(fonts.args.clone());
+    args.extend_from_slice(&fonts.args);
     args
 }
 
@@ -250,7 +227,7 @@ pub fn build_ffmpeg_args(
         "-threads".to_string(),
         ffmpeg_threads.to_string(),
         "-i".to_string(),
-        video.to_string_lossy().to_string(),
+        video.to_string_lossy().into_owned(),
         "-map".to_string(),
         format!("0:a:{audio_index}"),
         "-c:a".to_string(),
@@ -263,15 +240,8 @@ pub fn build_ffmpeg_args(
         complexity.to_string(),
         "-application".to_string(),
         "audio".to_string(),
-        temp_opus.to_string_lossy().to_string(),
+        temp_opus.to_string_lossy().into_owned(),
     ]
-}
-
-#[derive(Debug, Default, Clone)]
-pub struct RemuxSummary {
-    pub video_path: PathBuf,
-    pub output_file: PathBuf,
-    pub log: Vec<String>,
 }
 
 pub struct RemuxOptions<'a> {
@@ -281,21 +251,28 @@ pub struct RemuxOptions<'a> {
     pub sub_offset: f64,
 }
 
-/// Executes audio transcoding (if required) and remuxing via `mkvmerge` into `job.output_file`.
+/// Joins trimmed subprocess stderr and stdout, omitting whichever is empty.
+fn combined_output(stderr: &[u8], stdout: &[u8]) -> String {
+    let stderr = String::from_utf8_lossy(stderr);
+    let stdout = String::from_utf8_lossy(stdout);
+    match (stderr.trim(), stdout.trim()) {
+        ("", out) => out.to_owned(),
+        (err, "") => err.to_owned(),
+        (err, out) => format!("{err}\n{out}"),
+    }
+}
+
+/// Executes audio transcoding (if required) and remuxing via `mkvmerge` into `job.output_file`,
+/// returning the job's log lines.
 pub async fn execute_remux_job(
     job: &PlannedJob,
     selection: &TrackSelection,
     fonts: &FontInfo,
     options: &RemuxOptions<'_>,
     on_progress: Option<&(dyn Fn(f64) + Send + Sync)>,
-    io_semaphore: Option<&Arc<tokio::sync::Semaphore>>,
-) -> Result<RemuxSummary, String> {
-    let mut summary = RemuxSummary {
-        video_path: job.video.clone(),
-        output_file: job.output_file.clone(),
-        log: Vec::new(),
-    };
-    summary.log.push(format!("Processing: {}", job.video_name));
+    io_semaphore: Option<&Semaphore>,
+) -> Result<Vec<String>, String> {
+    let mut log = vec![format!("Processing: {}", job.video_name)];
 
     let output_file_name = job.output_file.file_name().ok_or_else(|| {
         format!(
@@ -305,12 +282,12 @@ pub async fn execute_remux_job(
     })?;
 
     let out_dir = job.output_file.parent().unwrap_or(Path::new("."));
-    if let Err(e) = std::fs::create_dir_all(out_dir) {
-        return Err(format!(
+    std::fs::create_dir_all(out_dir).map_err(|e| {
+        format!(
             "Failed to create output directory '{}': {e}",
             out_dir.display()
-        ));
-    }
+        )
+    })?;
 
     let scratch_dir = tempfile::Builder::new()
         .prefix(".tmp_remux_")
@@ -328,12 +305,10 @@ pub async fn execute_remux_job(
             options.complexity,
             options.ffmpeg_threads,
         );
-        summary
-            .log
-            .push("  Transcoding audio to Opus with ffmpeg...".into());
+        log.push("  Transcoding audio to Opus with ffmpeg...".into());
         let mut ffmpeg_cmd = tokio::process::Command::new("ffmpeg");
         #[cfg(windows)]
-        ffmpeg_cmd.creation_flags(0x08000000);
+        ffmpeg_cmd.creation_flags(crate::domain::CREATE_NO_WINDOW);
         ffmpeg_cmd.kill_on_drop(true);
         ffmpeg_cmd.args(&ffmpeg_args);
         let ffmpeg_out = match tokio::time::timeout(SUBPROCESS_TIMEOUT, ffmpeg_cmd.output()).await {
@@ -369,10 +344,10 @@ pub async fn execute_remux_job(
         None => None,
     };
 
-    summary.log.push("  Running mkvmerge...".into());
+    log.push("  Running mkvmerge...".into());
     let mut mkvmerge_cmd = tokio::process::Command::new("mkvmerge");
     #[cfg(windows)]
-    mkvmerge_cmd.creation_flags(0x08000000);
+    mkvmerge_cmd.creation_flags(crate::domain::CREATE_NO_WINDOW);
     mkvmerge_cmd.kill_on_drop(true);
     mkvmerge_cmd.args(&mkvmerge_args);
     mkvmerge_cmd.stdout(std::process::Stdio::piped());
@@ -385,8 +360,8 @@ pub async fn execute_remux_job(
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
 
-    let mut stderr_bytes = Vec::new();
     let stderr_handle = tokio::spawn(async move {
+        let mut stderr_bytes = Vec::new();
         if let Some(mut stream) = stderr {
             use tokio::io::AsyncReadExt;
             let _ = stream.read_to_end(&mut stderr_bytes).await;
@@ -397,7 +372,7 @@ pub async fn execute_remux_job(
     let execution = async {
         let mut stdout_bytes = Vec::new();
         if let Some(out_stream) = stdout {
-            let _ = read_progress_stream(out_stream, on_progress, Some(&mut stdout_bytes)).await;
+            let _ = read_progress_stream(out_stream, on_progress, &mut stdout_bytes).await;
         }
         let status = child
             .wait()
@@ -420,55 +395,41 @@ pub async fn execute_remux_job(
             }
         };
 
-    let is_success = matches!(status.code(), Some(0) | Some(1));
-    if !is_success {
-        let _ = std::fs::remove_file(&temp_output);
-        let stderr = String::from_utf8_lossy(&stderr_output).trim().to_string();
-        let stdout = String::from_utf8_lossy(&stdout_bytes).trim().to_string();
-        let code_str = status
-            .code()
-            .map(|c| format!("exit code {c}"))
-            .unwrap_or_else(|| "terminated by signal".into());
-        let err_msg = if !stderr.is_empty() && !stdout.is_empty() {
-            format!("{stderr}\n{stdout}")
-        } else if !stderr.is_empty() {
-            stderr
-        } else if !stdout.is_empty() {
-            stdout
-        } else {
-            code_str.clone()
-        };
-        return Err(format!("mkvmerge failed ({code_str}): {err_msg}"));
-    }
-
-    if status.code() == Some(1) {
-        let stderr = String::from_utf8_lossy(&stderr_output).trim().to_string();
-        let stdout = String::from_utf8_lossy(&stdout_bytes).trim().to_string();
-        let warning_output = if !stderr.is_empty() && !stdout.is_empty() {
-            format!("{stderr}\n{stdout}")
-        } else if !stderr.is_empty() {
-            stderr
-        } else {
-            stdout
-        };
-        if !warning_output.is_empty() {
-            if warning_output.to_lowercase().starts_with("warning") {
-                summary.log.push(format!("  {warning_output}"));
-            } else {
-                summary.log.push(format!("  Warning: {warning_output}"));
+    // mkvmerge exits 1 when it finished with warnings.
+    match status.code() {
+        Some(0) => {}
+        Some(1) => {
+            let warning_output = combined_output(&stderr_output, &stdout_bytes);
+            if !warning_output.is_empty() {
+                if warning_output.to_lowercase().starts_with("warning") {
+                    log.push(format!("  {warning_output}"));
+                } else {
+                    log.push(format!("  Warning: {warning_output}"));
+                }
             }
+        }
+        code => {
+            let _ = std::fs::remove_file(&temp_output);
+            let code_str = code
+                .map(|c| format!("exit code {c}"))
+                .unwrap_or_else(|| "terminated by signal".into());
+            let output = combined_output(&stderr_output, &stdout_bytes);
+            let err_msg = if output.is_empty() {
+                &code_str
+            } else {
+                &output
+            };
+            return Err(format!("mkvmerge failed ({code_str}): {err_msg}"));
         }
     }
 
-    if !temp_output.exists() || temp_output.metadata().map(|m| m.len() == 0).unwrap_or(true) {
+    if !temp_output.metadata().is_ok_and(|m| m.len() > 0) {
         return Err("mkvmerge succeeded but output file was not created or is empty".into());
     }
 
     promote_file(&temp_output, &job.output_file)
         .map_err(|e| format!("Failed to promote remuxed file to final destination: {e}"))?;
 
-    summary
-        .log
-        .push(format!("  Completed -> {}", job.output_file.display()));
-    Ok(summary)
+    log.push(format!("  Completed -> {}", job.output_file.display()));
+    Ok(log)
 }

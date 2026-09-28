@@ -9,11 +9,12 @@ use tracing::{info, warn};
 use crate::domain::{
     ancestor_dirs, detect_sub_lang, is_dialogue_track, lang_label, lang_mkv_tag, natural_sort_key,
     parse_episode, score_subtitle_category, seasons_match, select_best_subtitle_track, EpisodeInfo,
-    NaturalSortToken, COVER_EXTENSIONS,
+    EpisodeType, NaturalSortToken, COVER_EXTENSIONS,
 };
 use crate::fonts::{find_fonts_dir, scan_fonts, FontInfo};
 use crate::scan::{
-    is_chapter_xml, scan_assets, InspectedVideo, InspectionResult, ParsedFile, ScanResults,
+    is_chapter_xml, path_ext_lower, scan_assets, InspectedVideo, InspectionResult, ParsedFile,
+    ScanResults,
 };
 
 fn ep_key(info: &EpisodeInfo) -> String {
@@ -22,21 +23,9 @@ fn ep_key(info: &EpisodeInfo) -> String {
 
 // ─── RELEASE PREPARATION ─────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FontsOrigin {
-    Override,
-    Local,
-    RootFallback,
-    ParentFallback,
-    Default,
-}
-
 #[derive(Debug, Clone)]
 pub struct PreparedRelease {
-    pub mkv_dir: PathBuf,
-    pub videos: Vec<ParsedFile>,
     pub fonts_dir: PathBuf,
-    pub fonts_origin: FontsOrigin,
     pub resolver: AssetResolver,
 }
 
@@ -50,44 +39,34 @@ pub struct ReleasePreparationOptions<'a> {
     pub sub_classification_cache: Option<&'a mut HashMap<PathBuf, SubClassification>>,
 }
 
+/// Resolves the fonts directory for `mkv_dir` and indexes the assets of every directory from
+/// `root_input_dir` down to it.
+///
+/// Fonts come from `fonts_override`, else the nearest directory (from `mkv_dir` upwards) whose
+/// fonts directory holds fonts, else the assets directory, else `mkv_dir/fonts`.
 pub fn prepare_release_directory(
     mkv_dir: &Path,
     root_input_dir: &Path,
-    videos: &[ParsedFile],
     mut options: ReleasePreparationOptions<'_>,
 ) -> PreparedRelease {
     let search_dirs = ancestor_dirs(mkv_dir, root_input_dir);
-    let (fonts_dir, fonts_origin) = if let Some(over) = options.fonts_override {
-        (over.to_path_buf(), FontsOrigin::Override)
-    } else {
-        let mut resolved = None;
-        for d in search_dirs.iter().rev() {
-            let candidate = find_fonts_dir(d, None, options.fonts_dir_cache.as_deref_mut());
-            let scanned = scan_fonts(&candidate, options.font_cache.as_deref_mut());
-            if scanned.count > 0 {
-                let origin = if d == mkv_dir {
-                    FontsOrigin::Local
-                } else {
-                    FontsOrigin::ParentFallback
-                };
-                resolved = Some((candidate, origin));
-                break;
-            }
-        }
-        if resolved.is_none() {
-            if let Some(assets) = options.assets_dir {
-                let candidate =
-                    find_fonts_dir(assets, None, options.fonts_dir_cache.as_deref_mut());
+    let fonts_dir = match options.fonts_override {
+        Some(over) => over.to_path_buf(),
+        None => {
+            let mut fonts_dir_with_fonts = |dir: &Path| -> Option<PathBuf> {
+                let candidate = find_fonts_dir(dir, None, options.fonts_dir_cache.as_deref_mut());
                 let scanned = scan_fonts(&candidate, options.font_cache.as_deref_mut());
-                if scanned.count > 0 {
-                    resolved = Some((candidate, FontsOrigin::RootFallback));
-                }
-            }
+                (scanned.count > 0).then_some(candidate)
+            };
+            search_dirs
+                .iter()
+                .rev()
+                .find_map(|d| fonts_dir_with_fonts(d))
+                .or_else(|| options.assets_dir.and_then(&mut fonts_dir_with_fonts))
+                .unwrap_or_else(|| mkv_dir.join("fonts"))
         }
-        let exact_local = mkv_dir.join("fonts");
-        resolved.unwrap_or((exact_local, FontsOrigin::Default))
     };
-    let resolver = AssetResolver::discover_with_caches(
+    let resolver = AssetResolver::discover(
         &search_dirs,
         &fonts_dir,
         options.assets_dir,
@@ -96,10 +75,7 @@ pub fn prepare_release_directory(
         options.sub_classification_cache,
     );
     PreparedRelease {
-        mkv_dir: mkv_dir.to_path_buf(),
-        videos: videos.to_vec(),
         fonts_dir,
-        fonts_origin,
         resolver,
     }
 }
@@ -129,10 +105,9 @@ fn classify_sub(sub_file: &ParsedFile) -> SubClassification {
     let is_ass = sub_file
         .path
         .extension()
-        .map(|e| e.to_string_lossy().eq_ignore_ascii_case("ass"))
-        .unwrap_or(false);
+        .is_some_and(|e| e.eq_ignore_ascii_case("ass"));
     let category_score = score_subtitle_category(&lang, is_ass);
-    let is_dialogue = is_dialogue_track(Some(&sub_file.stem));
+    let is_dialogue = is_dialogue_track(&sub_file.stem);
     SubClassification {
         lang,
         category_score,
@@ -140,50 +115,44 @@ fn classify_sub(sub_file: &ParsedFile) -> SubClassification {
     }
 }
 
-fn make_sub_entry(sub_file: ParsedFile, classification: SubClassification) -> SubEntry {
-    SubEntry {
-        file: sub_file,
-        classification,
-    }
-}
-
-fn reject_duplicate(
+/// Whether `path` duplicates an already indexed chapter of the same season. The first file
+/// indexed wins; the rejection is logged.
+fn is_duplicate_chapter(
     existing: &[(PathBuf, String)],
     path: &Path,
     season: &str,
     key: &str,
-    warning: &str,
 ) -> bool {
-    for (existing_path, existing_season) in existing {
-        if existing_season != season {
-            continue;
-        }
-        let parent_name = path
-            .parent()
-            .and_then(|p| p.file_name())
-            .map(|s| s.to_string_lossy())
-            .unwrap_or_default();
-        let existing_name = existing_path
-            .file_name()
-            .map(|s| s.to_string_lossy())
-            .unwrap_or_default();
-        let path_name = path
-            .file_name()
-            .map(|s| s.to_string_lossy())
-            .unwrap_or_default();
+    let Some((existing_path, _)) = existing
+        .iter()
+        .find(|(_, existing_season)| existing_season == season)
+    else {
+        return false;
+    };
+    let parent_name = path
+        .parent()
+        .and_then(|p| p.file_name())
+        .map(|s| s.to_string_lossy())
+        .unwrap_or_default();
+    let existing_name = existing_path
+        .file_name()
+        .map(|s| s.to_string_lossy())
+        .unwrap_or_default();
+    let path_name = path
+        .file_name()
+        .map(|s| s.to_string_lossy())
+        .unwrap_or_default();
 
-        if existing_path.parent() == path.parent() {
-            warn!("{warning}: key {key} in '{parent_name}': keeping '{existing_name}', ignoring '{path_name}'");
-        } else {
-            let parent_display = path
-                .parent()
-                .map(|p| p.display().to_string())
-                .unwrap_or_default();
-            info!("Duplicate asset for key {key} also found in '{parent_name}': keeping '{existing_name}', ignoring '{path_name}' from '{parent_display}'");
-        }
-        return true;
+    if existing_path.parent() == path.parent() {
+        warn!("Duplicate chapter file: key {key} in '{parent_name}': keeping '{existing_name}', ignoring '{path_name}'");
+    } else {
+        let parent_display = path
+            .parent()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        info!("Duplicate asset for key {key} also found in '{parent_name}': keeping '{existing_name}', ignoring '{path_name}' from '{parent_display}'");
     }
-    false
+    true
 }
 
 #[derive(Debug, Clone, Default)]
@@ -191,8 +160,7 @@ pub struct SubIndex {
     index: HashMap<String, Vec<SubEntry>>,
     index_paths: HashMap<String, HashSet<PathBuf>>,
     directories: Vec<PathBuf>,
-    unparsed: Vec<ParsedFile>,
-    unparsed_paths: HashSet<PathBuf>,
+    has_unparsed: bool,
 }
 
 impl SubIndex {
@@ -208,10 +176,7 @@ impl SubIndex {
     /// has one. Pass `None` to derive the classification on the spot.
     fn add_classified(&mut self, sub_file: ParsedFile, classification: Option<SubClassification>) {
         let Some(parsed) = &sub_file.parsed else {
-            if !self.unparsed_paths.contains(&sub_file.path) {
-                self.unparsed_paths.insert(sub_file.path.clone());
-                self.unparsed.push(sub_file);
-            }
+            self.has_unparsed = true;
             return;
         };
 
@@ -227,10 +192,10 @@ impl SubIndex {
             }
         }
         let classification = classification.unwrap_or_else(|| classify_sub(&sub_file));
-        self.index
-            .entry(key)
-            .or_default()
-            .push(make_sub_entry(sub_file, classification));
+        self.index.entry(key).or_default().push(SubEntry {
+            file: sub_file,
+            classification,
+        });
     }
 
     fn lookup_ranked(
@@ -263,11 +228,11 @@ impl SubIndex {
             .map(|(_, best)| (best.file.path.clone(), best.classification.lang.clone()))
     }
 
-    pub fn lookup_same_dir(&self, parsed: &EpisodeInfo, dir: &Path) -> Option<(PathBuf, String)> {
+    fn lookup_same_dir(&self, parsed: &EpisodeInfo, dir: &Path) -> Option<(PathBuf, String)> {
         self.lookup_ranked(parsed, |candidate| (candidate == dir).then_some(0))
     }
 
-    pub fn lookup_ancestors(&self, parsed: &EpisodeInfo, dir: &Path) -> Option<(PathBuf, String)> {
+    fn lookup_ancestors(&self, parsed: &EpisodeInfo, dir: &Path) -> Option<(PathBuf, String)> {
         self.lookup_ranked(parsed, |candidate| {
             dir.ancestors()
                 .skip(1)
@@ -275,47 +240,19 @@ impl SubIndex {
         })
     }
 
-    pub fn lookup_fallback(&self, parsed: &EpisodeInfo) -> Option<(PathBuf, String)> {
+    fn lookup_fallback(&self, parsed: &EpisodeInfo) -> Option<(PathBuf, String)> {
         self.lookup_ranked(parsed, |candidate| {
             self.directories.iter().position(|dir| dir == candidate)
         })
     }
 
     pub fn is_empty(&self) -> bool {
-        self.index.is_empty() && self.unparsed.is_empty()
-    }
-
-    pub fn all_subtitles(&self) -> Vec<PathBuf> {
-        let mut discovered: Vec<PathBuf> = self.unparsed.iter().map(|f| f.path.clone()).collect();
-        for list in self.index.values() {
-            for entry in list {
-                discovered.push(entry.file.path.clone());
-            }
-        }
-
-        let mut unique = Vec::new();
-        let mut seen = HashSet::new();
-        for p in discovered {
-            if seen.insert(p.clone()) {
-                unique.push(p);
-            }
-        }
-
-        unique.sort_by_cached_key(|a| natural_sort_key(&a.to_string_lossy()));
-        unique
+        self.index.is_empty() && !self.has_unparsed
     }
 }
 
 // ─── CHAPTER INDEX ───────────────────────────────────────────────────────────
 
-fn find_matching_season_path(
-    entries: &[(PathBuf, String)],
-    target_season: &str,
-) -> Option<PathBuf> {
-    entries
-        .iter()
-        .find_map(|(path, season)| seasons_match(target_season, season).then(|| path.clone()))
-}
 #[derive(Debug, Clone, Default)]
 pub struct ChapterIndex {
     index: HashMap<String, Vec<(PathBuf, String)>>,
@@ -335,13 +272,7 @@ impl ChapterIndex {
         if let Some(parsed) = &xml_file.parsed {
             let key = ep_key(parsed);
             let existing = self.index.entry(key.clone()).or_default();
-            if reject_duplicate(
-                existing,
-                &xml_file.path,
-                &parsed.season,
-                &key,
-                "Duplicate chapter file",
-            ) {
+            if is_duplicate_chapter(existing, &xml_file.path, &parsed.season, &key) {
                 return;
             }
             existing.push((xml_file.path, parsed.season.clone()));
@@ -351,14 +282,13 @@ impl ChapterIndex {
     }
 
     pub fn lookup(&self, parsed: &EpisodeInfo) -> Option<PathBuf> {
-        let key = ep_key(parsed);
-        find_matching_season_path(self.index.get(&key)?, &parsed.season)
+        self.index
+            .get(&ep_key(parsed))?
+            .iter()
+            .find_map(|(path, season)| seasons_match(&parsed.season, season).then(|| path.clone()))
     }
 
-    pub fn has_match(&self, parsed: &EpisodeInfo) -> bool {
-        self.lookup(parsed).is_some()
-    }
-
+    /// Chapter files whose names carry no episode number.
     pub fn unmatched(&self) -> &[PathBuf] {
         &self.unmatched
     }
@@ -401,8 +331,7 @@ pub struct CoverIndex {
     entries: Vec<CoverEntry>,
     paths: HashSet<PathBuf>,
     directory_ranks: HashMap<PathBuf, usize>,
-    episode_entries:
-        HashMap<crate::domain::EpisodeType, HashMap<String, HashMap<PathBuf, Vec<usize>>>>,
+    episode_entries: HashMap<EpisodeType, HashMap<String, HashMap<PathBuf, Vec<usize>>>>,
     adjacent_entries: HashMap<PathBuf, HashMap<String, Vec<usize>>>,
     directory_entries: HashMap<PathBuf, Vec<usize>>,
     // (first-seen fallback directory rank, entry index)
@@ -415,11 +344,7 @@ impl CoverIndex {
     }
 
     pub fn add(&mut self, image_file: ParsedFile) {
-        let ext = image_file
-            .path
-            .extension()
-            .map(|e| format!(".{}", e.to_string_lossy().to_lowercase()))
-            .unwrap_or_default();
+        let ext = path_ext_lower(&image_file.path);
         if !COVER_EXTENSIONS.contains(&ext.as_str()) || !self.paths.insert(image_file.path.clone())
         {
             return;
@@ -431,7 +356,8 @@ impl CoverIndex {
         } else if stem == "folder" {
             (CoverKind::Folder, None)
         } else if stem.ends_with("_cover") || stem.ends_with(".cover") {
-            let episode = parse_episode(&image_file.stem[..image_file.stem.len() - 6]);
+            let episode_stem = &image_file.stem[..image_file.stem.len() - "_cover".len()];
+            let episode = parse_episode(episode_stem);
             let kind = if episode.is_some() {
                 if stem.ends_with("_cover") {
                     CoverKind::Underscore
@@ -558,7 +484,7 @@ impl CoverIndex {
         self.lookup_ranked(video, directory_candidates)
     }
 
-    pub fn lookup_fallback(&self, video: &ParsedFile) -> Option<PathBuf> {
+    fn lookup_fallback(&self, video: &ParsedFile) -> Option<PathBuf> {
         let episode_candidates = video
             .parsed
             .as_ref()
@@ -622,14 +548,7 @@ impl SubResolution {
             .file_stem()
             .map(|s| s.to_string_lossy())
             .unwrap_or_default();
-        let sub_lang = detect_sub_lang(&stem);
-        Self {
-            subtitle_file: Some(assigned.to_path_buf()),
-            embedded_sub_id: None,
-            lang: sub_lang,
-            matched: true,
-            skip_reason: None,
-        }
+        Self::external(assigned.to_path_buf(), detect_sub_lang(&stem))
     }
 
     fn external(path: PathBuf, lang: String) -> Self {
@@ -694,7 +613,7 @@ fn populate_indices(
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct AssetResolver {
     pub fonts: FontInfo,
     pub sub_index: SubIndex,
@@ -706,26 +625,6 @@ pub struct AssetResolver {
 }
 
 impl AssetResolver {
-    pub fn new(
-        fonts: FontInfo,
-        sub_index: SubIndex,
-        chap_index: ChapterIndex,
-        cover_index: CoverIndex,
-        fallback_sub_index: Option<SubIndex>,
-        fallback_chap_index: Option<ChapterIndex>,
-        fallback_cover_index: Option<CoverIndex>,
-    ) -> Self {
-        Self {
-            fonts,
-            sub_index,
-            chap_index,
-            cover_index,
-            fallback_sub_index,
-            fallback_chap_index,
-            fallback_cover_index,
-        }
-    }
-
     pub fn has_subtitles(&self) -> bool {
         !self.sub_index.is_empty()
             || self
@@ -738,24 +637,10 @@ impl AssetResolver {
         self.fonts.count == 0
     }
 
+    /// Indexes the assets of `search_dirs` (ordered root first, indexed deepest first) and,
+    /// when given, of `assets_dir` and its parent as the fallback indices. When `fonts_dir`
+    /// holds no fonts, the first fallback directory with fonts supplies them.
     pub fn discover(
-        search_dirs: &[PathBuf],
-        fonts_dir: &Path,
-        assets_dir: Option<&Path>,
-        scan_cache: Option<&mut HashMap<PathBuf, ScanResults>>,
-        font_cache: Option<&mut HashMap<PathBuf, FontInfo>>,
-    ) -> Self {
-        Self::discover_with_caches(
-            search_dirs,
-            fonts_dir,
-            assets_dir,
-            scan_cache,
-            font_cache,
-            None,
-        )
-    }
-
-    pub fn discover_with_caches(
         search_dirs: &[PathBuf],
         fonts_dir: &Path,
         assets_dir: Option<&Path>,
@@ -850,7 +735,7 @@ impl AssetResolver {
 
         // Embedded track from source video (ADR 0004).
         if let Some(insp) = inspected {
-            if let Some((track_id, lang, _)) =
+            if let Some((track_id, lang)) =
                 select_best_subtitle_track(&insp.subtitle_tracks(), None)
             {
                 return SubResolution::embedded(track_id, lang);
@@ -872,7 +757,6 @@ impl AssetResolver {
             }
         }
 
-        // No subtitle match found.
         let skip_reason = if self.has_subtitles() {
             "subtitle files found but none matched"
         } else {
@@ -881,6 +765,8 @@ impl AssetResolver {
         SubResolution::unmatched(skip_reason)
     }
 
+    /// Release-tree cover for `video`; the assets-directory fallback applies only when the
+    /// source carries no cover of its own.
     pub fn resolve_cov(&self, video: &ParsedFile, has_source_cover: bool) -> Option<PathBuf> {
         if let Some(cov) = self.cover_index.lookup(video) {
             return Some(cov);
@@ -894,7 +780,7 @@ impl AssetResolver {
         None
     }
 
-    pub fn resolve_chap(
+    fn resolve_chap(
         &self,
         parsed: &EpisodeInfo,
         has_source_chapters: bool,
@@ -930,24 +816,21 @@ impl AssetResolver {
             }
         }
 
-        let has_source_chapters = inspected.map(|i| i.has_chapters()).unwrap_or(false);
-        let has_source_cover = inspected
-            .map(|i| i.cover_attachment().is_some())
-            .unwrap_or(false);
+        let has_source_chapters = inspected.is_some_and(|i| i.has_chapters());
+        let has_source_cover = inspected.is_some_and(|i| i.cover_attachment().is_some());
 
-        let (sub_res, chapter_file, cover_file) = if let Some(parsed) = &video.parsed {
+        let (sub_res, chapter_file) = if let Some(parsed) = &video.parsed {
             let sub = self.resolve_sub(video, parsed, inspected, assigned_subtitle);
             let chap = self.resolve_chap(parsed, has_source_chapters, claimed_chapter);
-            let cov = self.resolve_cov(video, has_source_cover);
-            (sub, chap, cov)
+            (sub, chap)
         } else {
             let sub = match assigned_subtitle {
                 Some(assigned) => SubResolution::from_assigned(assigned),
                 None => SubResolution::unmatched("unparsed episode"),
             };
-            let cov = self.resolve_cov(video, has_source_cover);
-            (sub, None, cov)
+            (sub, None)
         };
+        let cover_file = self.resolve_cov(video, has_source_cover);
 
         let subtitle_label = lang_label(&sub_res.lang).to_string();
         let subtitle_mkv_lang = lang_mkv_tag(&sub_res.lang).to_string();
@@ -967,40 +850,30 @@ impl AssetResolver {
     }
 }
 
+/// Assigns the release's only episode-less chapter file to its only episode that has neither a
+/// matching chapter file nor embedded chapters. Any ambiguity leaves it unclaimed.
 pub fn claim_leftover_chapters(
     videos: &[ParsedFile],
     inspection_results: &HashMap<PathBuf, InspectionResult>,
     resolver: &AssetResolver,
 ) -> HashMap<PathBuf, PathBuf> {
-    if resolver.chap_index.unmatched().len() != 1 {
+    let [sole_chapter] = resolver.chap_index.unmatched() else {
         return HashMap::new();
-    }
+    };
 
-    let sole_chapter = resolver.chap_index.unmatched()[0].clone();
-
-    let mut candidate_videos: Vec<&ParsedFile> = Vec::new();
-    for video in videos {
+    let mut candidates = videos.iter().filter(|video| {
         let Some(parsed) = &video.parsed else {
-            continue;
+            return false;
         };
-        if resolver.chap_index.has_match(parsed) {
-            continue;
-        }
-        let has_embedded_chapters = inspection_results
-            .get(&video.path)
-            .and_then(|r| r.video.as_ref())
-            .map(|v| v.has_chapters())
-            .unwrap_or(false);
-        if !has_embedded_chapters {
-            candidate_videos.push(video);
-        }
-    }
+        resolver.chap_index.lookup(parsed).is_none()
+            && !inspection_results
+                .get(&video.path)
+                .and_then(|r| r.video.as_ref())
+                .is_some_and(|v| v.has_chapters())
+    });
 
-    if candidate_videos.len() != 1 {
-        return HashMap::new();
+    match (candidates.next(), candidates.next()) {
+        (Some(video), None) => HashMap::from([(video.path.clone(), sole_chapter.clone())]),
+        _ => HashMap::new(),
     }
-
-    let mut claims = HashMap::new();
-    claims.insert(candidate_videos[0].path.clone(), sole_chapter);
-    claims
 }

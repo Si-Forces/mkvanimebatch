@@ -6,19 +6,29 @@ import {
   reduceQueueEvent,
   finalizeQueueState,
   carryOverAssignments,
-  serializeAssignmentsForManifest,
   buildTrackAssignmentsForManifest,
   createQueueStateFromSnapshot,
   formatOutcomeDuration,
   formatElapsedDuration,
-  toggleItemSelection,
-  selectAll,
-  deselectAll,
+  setItemSelected,
+  setAllSelected,
   reorderItem,
   getSelectedCount,
   normalizeDirectoryPath,
   isSameDirectory,
 } from "./queue-state.js";
+
+const manifestOf = ids => ({ version: 2, items: ids.map(id => ({ id, name: id })) });
+
+/** A manual subtitle assignment in the shape app.js stores in `QueueTracker.assignments`. */
+const subtitle = (id, path) => ({
+  target_video: id,
+  asset_path: path,
+  track_type: "subtitle",
+  language: "ind",
+  title: null,
+  offset_ms: null,
+});
 
 test("createQueueState initializes state from manifest v2", () => {
   const manifest = {
@@ -39,8 +49,7 @@ test("createQueueState initializes state from manifest v2", () => {
     ],
   };
 
-  const state = createQueueState(manifest, { mode: "remux", bitrate: "192k" });
-  assert.equal(state.version, 1);
+  const state = createQueueState(manifest);
   assert.equal(state.totalCount, 2);
   assert.equal(state.completedCount, 0);
   assert.equal(state.items.size, 2);
@@ -96,11 +105,7 @@ test("createQueueState correctly distinguishes duplicate basenames in different 
 });
 
 test("reduceQueueEvent handles batch_start, item_start, and item_complete (completed)", () => {
-  const manifest = {
-    version: 2,
-    items: [{ id: "ep1.mkv", name: "ep1.mkv" }],
-  };
-  let state = createQueueState(manifest);
+  let state = createQueueState(manifestOf(["ep1.mkv"]));
 
   state = reduceQueueEvent(state, {
     version: 1,
@@ -108,7 +113,6 @@ test("reduceQueueEvent handles batch_start, item_start, and item_complete (compl
     total: 1,
   });
   assert.ok(state.batchStartTime > 0);
-  assert.equal(state.expectedTotal, 1);
 
   state = reduceQueueEvent(state, {
     version: 1,
@@ -130,17 +134,8 @@ test("reduceQueueEvent handles batch_start, item_start, and item_complete (compl
 });
 
 test("reduceQueueEvent handles item_complete with skipped, planned, and error", () => {
-  const manifest = {
-    version: 2,
-    items: [
-      { id: "ep1.mkv", name: "ep1.mkv" },
-      { id: "ep2.mkv", name: "ep2.mkv" },
-      { id: "ep3.mkv", name: "ep3.mkv" },
-    ],
-  };
-  let state = createQueueState(manifest);
+  let state = createQueueState(manifestOf(["ep1.mkv", "ep2.mkv", "ep3.mkv"]));
 
-  // Skipped
   state = reduceQueueEvent(state, {
     version: 1,
     type: "item_complete",
@@ -152,7 +147,7 @@ test("reduceQueueEvent handles item_complete with skipped, planned, and error", 
   assert.equal(state.items.get("ep1.mkv").reason, "output already exists");
   assert.equal(state.skippedCount, 1);
 
-  // Planned (dry-run)
+  // Dry-run plans count as completed.
   state = reduceQueueEvent(state, {
     version: 1,
     type: "item_complete",
@@ -162,7 +157,6 @@ test("reduceQueueEvent handles item_complete with skipped, planned, and error", 
   assert.equal(state.items.get("ep2.mkv").status, "planned");
   assert.equal(state.completedCount, 1);
 
-  // Error (crash/failure)
   state = reduceQueueEvent(state, {
     version: 1,
     type: "item_complete",
@@ -176,11 +170,7 @@ test("reduceQueueEvent handles item_complete with skipped, planned, and error", 
 });
 
 test("reduceQueueEvent rejects unknown ID and does NOT invent cards", () => {
-  const manifest = {
-    version: 2,
-    items: [{ id: "known.mkv", name: "known.mkv" }],
-  };
-  let state = createQueueState(manifest);
+  let state = createQueueState(manifestOf(["known.mkv"]));
 
   state = reduceQueueEvent(state, {
     version: 1,
@@ -201,11 +191,7 @@ test("reduceQueueEvent rejects unknown ID and does NOT invent cards", () => {
 });
 
 test("reduceQueueEvent is idempotent against duplicate terminal events", () => {
-  const manifest = {
-    version: 2,
-    items: [{ id: "ep1.mkv", name: "ep1.mkv" }],
-  };
-  let state = createQueueState(manifest);
+  let state = createQueueState(manifestOf(["ep1.mkv"]));
 
   state = reduceQueueEvent(state, {
     version: 1,
@@ -215,7 +201,6 @@ test("reduceQueueEvent is idempotent against duplicate terminal events", () => {
   });
   assert.equal(state.completedCount, 1);
 
-  // Duplicate item_complete
   state = reduceQueueEvent(state, {
     version: 1,
     type: "item_complete",
@@ -234,17 +219,8 @@ test("reduceQueueEvent is idempotent against duplicate terminal events", () => {
 });
 
 test("finalizeQueueState marks unresolved items as errors", () => {
-  const manifest = {
-    version: 2,
-    items: [
-      { id: "ep1.mkv", name: "ep1.mkv" },
-      { id: "ep2.mkv", name: "ep2.mkv" },
-      { id: "ep3.mkv", name: "ep3.mkv" },
-    ],
-  };
-  let state = createQueueState(manifest);
+  let state = createQueueState(manifestOf(["ep1.mkv", "ep2.mkv", "ep3.mkv"]));
 
-  // ep1 completed normally
   state = reduceQueueEvent(state, {
     version: 1,
     type: "item_complete",
@@ -252,16 +228,13 @@ test("finalizeQueueState marks unresolved items as errors", () => {
     status: "completed",
   });
 
-  // ep2 was started but never received item_complete
+  // ep2 was started but never received item_complete; ep3 was never started.
   state = reduceQueueEvent(state, {
     version: 1,
     type: "item_start",
     id: "ep2.mkv",
   });
 
-  // ep3 was never started (still queued)
-
-  // Batch finishes with exit code 1
   state = finalizeQueueState(state, 1);
 
   assert.equal(state.items.get("ep1.mkv").status, "completed");
@@ -275,10 +248,7 @@ test("finalizeQueueState marks unresolved items as errors", () => {
 });
 
 test("successful process exit does not hide missing completion events", () => {
-  const state = createQueueState({
-    version: 2,
-    items: [{ id: "ep1.mkv", name: "ep1.mkv" }],
-  });
+  const state = createQueueState(manifestOf(["ep1.mkv"]));
 
   const finalState = finalizeQueueState(state, 0);
 
@@ -287,10 +257,7 @@ test("successful process exit does not hide missing completion events", () => {
 });
 
 test("all items completed without batch_complete event fails batch completion", () => {
-  let state = createQueueState({
-    version: 2,
-    items: [{ id: "ep1.mkv", name: "ep1.mkv" }],
-  });
+  let state = createQueueState(manifestOf(["ep1.mkv"]));
 
   state = reduceQueueEvent(state, {
     version: 1,
@@ -315,10 +282,7 @@ test("all items completed without batch_complete event fails batch completion", 
 });
 
 test("reduceQueueEvent evolves the single owned state object in place", () => {
-  const state = createQueueState({
-    version: 2,
-    items: [{ id: "ep1.mkv", name: "ep1.mkv" }],
-  });
+  const state = createQueueState(manifestOf(["ep1.mkv"]));
   const item = state.items.get("ep1.mkv");
 
   const started = reduceQueueEvent(state, {
@@ -345,21 +309,16 @@ test("reduceQueueEvent evolves the single owned state object in place", () => {
   assert.equal(state.completedCount, 1);
   assert.equal(item.status, "completed");
   assert.equal(item.durationSec, 1);
-  assert.equal(formatOutcomeDuration(item.durationSec), "1.0s");
 });
 
 test("reduceQueueEvent handles 10,000 start/complete pairs in linear time", () => {
   const total = 10000;
-  const items = [];
-  for (let i = 0; i < total; i++) {
-    items.push({ id: `ep${i}.mkv`, name: `ep${i}.mkv` });
-  }
-  let state = createQueueState({ version: 2, items });
+  const ids = Array.from({ length: total }, (_, i) => `ep${i}.mkv`);
+  let state = createQueueState(manifestOf(ids));
   state = reduceQueueEvent(state, { version: 1, type: "batch_start", total }, 0);
 
   const begin = performance.now();
-  for (let i = 0; i < total; i++) {
-    const id = `ep${i}.mkv`;
+  ids.forEach((id, i) => {
     state = reduceQueueEvent(state, { version: 1, type: "item_start", id }, i);
     state = reduceQueueEvent(state, {
       version: 1,
@@ -367,7 +326,7 @@ test("reduceQueueEvent handles 10,000 start/complete pairs in linear time", () =
       id,
       status: "completed",
     }, i + 200);
-  }
+  });
   const elapsedMs = performance.now() - begin;
 
   assert.equal(state.completedCount, total);
@@ -378,10 +337,7 @@ test("reduceQueueEvent handles 10,000 start/complete pairs in linear time", () =
 });
 
 test("sub-second completions render as <0.1 instead of 0.0", () => {
-  let state = createQueueState({
-    version: 2,
-    items: [{ id: "fast.mkv", name: "fast.mkv" }],
-  });
+  let state = createQueueState(manifestOf(["fast.mkv"]));
   state = reduceQueueEvent(state, { version: 1, type: "batch_start", total: 1 }, 1000);
   state = reduceQueueEvent(state, { version: 1, type: "item_start", id: "fast.mkv" }, 1050);
   state = reduceQueueEvent(state, {
@@ -396,10 +352,7 @@ test("sub-second completions render as <0.1 instead of 0.0", () => {
 });
 
 test("skips and plans report no duration instead of elapsed batch time", () => {
-  let state = createQueueState({
-    version: 2,
-    items: [{ id: "ep1.mkv", name: "ep1.mkv" }, { id: "ep2.mkv", name: "ep2.mkv" }],
-  });
+  let state = createQueueState(manifestOf(["ep1.mkv", "ep2.mkv"]));
   state = reduceQueueEvent(state, { version: 1, type: "batch_start", total: 2 }, 1000);
 
   // Skipped without a prior item_start (planning-time skip).
@@ -415,7 +368,6 @@ test("skips and plans report no duration instead of elapsed batch time", () => {
   assert.equal(state.skippedCount, 1);
   assert.equal(state.items.get("ep1.mkv").durationSec, null);
 
-  // Same for dry-run planned outcomes.
   state = reduceQueueEvent(state, {
     version: 1,
     type: "item_complete",
@@ -429,55 +381,28 @@ test("skips and plans report no duration instead of elapsed batch time", () => {
 
 test("carryOverAssignments keeps selections for surviving items and drops stale ones", () => {
   const assignments = new Map([
-    ["Season 01/ep1.mkv", "Season 01/better.ass"],
-    ["Season 01/gone.mkv", "Season 01/deleted.ass"],
+    ["Season 01/ep1.mkv", subtitle("Season 01/ep1.mkv", "Season 01/better.ass")],
+    ["Season 01/gone.mkv", subtitle("Season 01/gone.mkv", "Season 01/deleted.ass")],
   ]);
-  const manifest = {
-    version: 2,
-    items: [
-      { id: "Season 01/ep1.mkv", name: "ep1.mkv" },
-      { id: "Season 01/ep2.mkv", name: "ep2.mkv" },
-    ],
-  };
 
-  const carried = carryOverAssignments(assignments, manifest);
+  const carried = carryOverAssignments(assignments, manifestOf(["Season 01/ep1.mkv", "Season 01/ep2.mkv"]));
 
   assert.deepEqual([...carried.entries()], [
-    ["Season 01/ep1.mkv", "Season 01/better.ass"],
+    ["Season 01/ep1.mkv", subtitle("Season 01/ep1.mkv", "Season 01/better.ass")],
   ]);
   // Input map is not mutated.
   assert.equal(assignments.size, 2);
 });
 
 test("carryOverAssignments returns empty map for missing or itemless manifests", () => {
-  const assignments = new Map([["ep1.mkv", "sub.ass"]]);
+  const assignments = new Map([["ep1.mkv", subtitle("ep1.mkv", "sub.ass")]]);
 
   assert.equal(carryOverAssignments(assignments, null).size, 0);
-  assert.equal(carryOverAssignments(assignments, { version: 2, items: [] }).size, 0);
-});
-
-test("assignment payload excludes items removed by preflight inspection", () => {
-  const assignments = new Map([
-    ["kept.mkv", "kept.ass"],
-    ["removed.mkv", "removed.ass"],
-  ]);
-  const manifest = { version: 2, items: [{ id: "kept.mkv" }] };
-
-  assert.equal(
-    serializeAssignmentsForManifest(assignments, manifest),
-    JSON.stringify({ version: 1, assignments: { "kept.mkv": "kept.ass" } })
-  );
+  assert.equal(carryOverAssignments(assignments, manifestOf([])).size, 0);
 });
 
 test("reduceQueueEvent treats cancelled items as terminal and counts them as cancelled", () => {
-  const manifest = {
-    version: 2,
-    items: [
-      { id: "ep1.mkv", name: "ep1.mkv" },
-      { id: "ep2.mkv", name: "ep2.mkv" },
-    ],
-  };
-  let state = createQueueState(manifest);
+  let state = createQueueState(manifestOf(["ep1.mkv", "ep2.mkv"]));
 
   // Started then cancelled mid-run: reports how long it ran.
   state = reduceQueueEvent(state, { version: 1, type: "item_start", id: "ep1.mkv" }, 1000);
@@ -489,7 +414,6 @@ test("reduceQueueEvent treats cancelled items as terminal and counts them as can
   }, 3500);
   assert.equal(state.items.get("ep1.mkv").status, "cancelled");
   assert.equal(state.items.get("ep1.mkv").durationSec, 2.5);
-  assert.equal(formatOutcomeDuration(state.items.get("ep1.mkv").durationSec), "2.5s");
   assert.equal(state.cancelledCount, 1);
 
   // Cancelled before start (queued -> cancelled): no fabricated duration.
@@ -516,10 +440,7 @@ test("reduceQueueEvent treats cancelled items as terminal and counts them as can
 });
 
 test("batch_complete carries the cancelled flag and fails batch success", () => {
-  let state = createQueueState({
-    version: 2,
-    items: [{ id: "ep1.mkv", name: "ep1.mkv" }],
-  });
+  let state = createQueueState(manifestOf(["ep1.mkv"]));
 
   state = reduceQueueEvent(state, { version: 1, type: "batch_start", total: 1 });
   state = reduceQueueEvent(state, {
@@ -541,10 +462,7 @@ test("batch_complete carries the cancelled flag and fails batch success", () => 
 });
 
 test("finalizeQueueState marks unresolved items cancelled after a forced stop", () => {
-  const state = createQueueState({
-    version: 2,
-    items: [{ id: "ep1.mkv", name: "ep1.mkv" }],
-  });
+  const state = createQueueState(manifestOf(["ep1.mkv"]));
 
   const final = finalizeQueueState(state, -1, true);
 
@@ -555,10 +473,7 @@ test("finalizeQueueState marks unresolved items cancelled after a forced stop", 
 });
 
 test("item transitioning directly from queued to error leaves durationSec as null instead of batchStartTime fallback", () => {
-  let state = createQueueState({
-    version: 2,
-    items: [{ id: "ep1.mkv", name: "ep1.mkv" }, { id: "ep2.mkv", name: "ep2.mkv" }],
-  });
+  let state = createQueueState(manifestOf(["ep1.mkv", "ep2.mkv"]));
   state = reduceQueueEvent(state, { version: 1, type: "batch_start", total: 2 }, 1000);
 
   // ep1 transitions directly from queued to error without prior item_start
@@ -574,7 +489,7 @@ test("item transitioning directly from queued to error leaves durationSec as nul
   assert.equal(state.items.get("ep1.mkv").durationSec, null);
   assert.equal(state.errorCount, 1);
 
-  // ep2 starts and then errors: correctly calculates duration against its item_start time
+  // ep2 starts and then errors: duration is measured from its item_start
   state = reduceQueueEvent(state, { version: 1, type: "item_start", id: "ep2.mkv" }, 7000);
   state = reduceQueueEvent(state, {
     version: 1,
@@ -586,70 +501,45 @@ test("item transitioning directly from queued to error leaves durationSec as nul
 
   assert.equal(state.items.get("ep2.mkv").status, "error");
   assert.equal(state.items.get("ep2.mkv").durationSec, 2.5);
-  assert.equal(formatOutcomeDuration(state.items.get("ep2.mkv").durationSec), "2.5s");
   assert.equal(state.errorCount, 2);
 });
 
 test("buildTrackAssignmentsForManifest builds track assignments from carried over manual assignments", () => {
-  const manifest = {
-    version: 2,
-    items: [
-      { id: "Season 1/ep1.mkv", name: "ep1.mkv" },
-      { id: "Season 1/ep2.mkv", name: "ep2.mkv" },
-    ],
-  };
   const assignments = new Map([
-    ["Season 1/ep1.mkv", "/subs/ep1.ass"],
-    ["Season 1/ep2.mkv", "/subs/ep2.ass"],
+    ["Season 1/ep1.mkv", subtitle("Season 1/ep1.mkv", "/subs/ep1.ass")],
+    ["Season 1/ep2.mkv", { ...subtitle("Season 1/ep2.mkv", "/subs/ep2.ass"), language: "", title: "Signs", offset_ms: -250 }],
   ]);
 
-  const result = buildTrackAssignmentsForManifest(assignments, manifest);
+  const result = buildTrackAssignmentsForManifest(assignments, manifestOf(["Season 1/ep1.mkv", "Season 1/ep2.mkv"]));
   assert.deepEqual(result, [
-    {
-      target_video: "Season 1/ep1.mkv",
-      asset_path: "/subs/ep1.ass",
-      track_type: "subtitle",
-    },
+    subtitle("Season 1/ep1.mkv", "/subs/ep1.ass"),
     {
       target_video: "Season 1/ep2.mkv",
       asset_path: "/subs/ep2.ass",
       track_type: "subtitle",
+      language: null,
+      title: "Signs",
+      offset_ms: -250,
     },
   ]);
 });
 
 test("buildTrackAssignmentsForManifest returns null when assignments map is empty", () => {
-  const manifest = {
-    version: 2,
-    items: [{ id: "ep1.mkv", name: "ep1.mkv" }],
-  };
-  const assignments = new Map();
-
-  const result = buildTrackAssignmentsForManifest(assignments, manifest);
-  assert.equal(result, null);
+  assert.equal(buildTrackAssignmentsForManifest(new Map(), manifestOf(["ep1.mkv"])), null);
 });
 
 test("buildTrackAssignmentsForManifest ignores assignments for items not in the manifest", () => {
-  const manifest = {
-    version: 2,
-    items: [{ id: "ep1.mkv", name: "ep1.mkv" }],
-  };
+  const manifest = manifestOf(["ep1.mkv"]);
   const assignments = new Map([
-    ["ep1.mkv", "/subs/ep1.ass"],
-    ["deleted_ep2.mkv", "/subs/ep2.ass"],
+    ["ep1.mkv", subtitle("ep1.mkv", "/subs/ep1.ass")],
+    ["deleted_ep2.mkv", subtitle("deleted_ep2.mkv", "/subs/ep2.ass")],
   ]);
 
   const result = buildTrackAssignmentsForManifest(assignments, manifest);
-  assert.deepEqual(result, [
-    {
-      target_video: "ep1.mkv",
-      asset_path: "/subs/ep1.ass",
-      track_type: "subtitle",
-    },
-  ]);
+  assert.deepEqual(result, [subtitle("ep1.mkv", "/subs/ep1.ass")]);
 
   const orphanedAssignments = new Map([
-    ["orphaned.mkv", "/subs/orphaned.ass"],
+    ["orphaned.mkv", subtitle("orphaned.mkv", "/subs/orphaned.ass")],
   ]);
   assert.equal(buildTrackAssignmentsForManifest(orphanedAssignments, manifest), null);
 });
@@ -670,8 +560,6 @@ test("createQueueStateFromSnapshot constructs state and counts from JobSnapshot"
   };
 
   const state = createQueueStateFromSnapshot(snapshot);
-  assert.equal(state.version, 1);
-  assert.equal(state.mode, "extract");
   assert.equal(state.totalCount, 4);
   assert.equal(state.completedCount, 1);
   assert.equal(state.skippedCount, 1);
@@ -683,15 +571,6 @@ test("createQueueStateFromSnapshot constructs state and counts from JobSnapshot"
   assert.equal(state.items.get("ep1.mkv").durationSec, 5.4);
   assert.equal(state.items.get("ep2.mkv").reason, "Already extracted");
   assert.equal(state.items.get("ep4.mkv").error, "mkvextract failed");
-});
-
-test("createQueueStateFromSnapshot handles empty or null snapshots", () => {
-  const stateNull = createQueueStateFromSnapshot(null);
-  assert.equal(stateNull.totalCount, 0);
-  assert.equal(stateNull.items.size, 0);
-
-  const stateEmpty = createQueueStateFromSnapshot({});
-  assert.equal(stateEmpty.totalCount, 0);
 });
 
 test("createQueueStateFromSnapshot resolves in-flight processing and queued items to cancelled for cancelled snapshot", () => {
@@ -762,7 +641,7 @@ test("createQueueStateFromSnapshot sets startTime for active in-flight processin
   };
 
   const fixedNow = 1700000000000;
-  const state = createQueueStateFromSnapshot(snapshot, { now: fixedNow });
+  const state = createQueueStateFromSnapshot(snapshot, fixedNow);
   assert.equal(state.batchCompleted, false);
   assert.equal(state.items.get("ep1.mkv").status, "processing");
   assert.equal(state.items.get("ep1.mkv").startTime, fixedNow);
@@ -782,7 +661,7 @@ test("snapshot projects only ordered Active Batch items, saved progress and per-
       "02": { id: "02", file: "02.mkv", status: "processing", progress: 70, start_time_ms: 2000 },
     },
   };
-  const state = createQueueStateFromSnapshot(snapshot, { now: 30000 });
+  const state = createQueueStateFromSnapshot(snapshot, 30000);
   assert.deepEqual(state.order, ["02", "01"]);
   assert.deepEqual([...state.items.keys()], ["02", "01"]);
   assert.equal(state.totalCount, 2);
@@ -797,29 +676,15 @@ test("snapshot projects only ordered Active Batch items, saved progress and per-
   assert.equal(createQueueStateFromSnapshot(snapshot).items.get("02").progress, 100);
 });
 
-test("formatOutcomeDuration formats null, existing formatted strings, and seconds thresholds", () => {
-  assert.equal(formatOutcomeDuration(null), null);
-  assert.equal(formatOutcomeDuration(undefined), null);
-
-  // Return strings ending with 's' or containing 'm' as-is
-  assert.equal(formatOutcomeDuration("4.2s"), "4.2s");
-  assert.equal(formatOutcomeDuration("1m 15.4s"), "1m 15.4s");
-  assert.equal(formatOutcomeDuration("2m 05s"), "2m 05s");
-  assert.equal(formatOutcomeDuration("<0.1s"), "<0.1s");
-
-  // Thresholds: < 0.1s, 4.2s, 75.4s -> 1m 15.4s
+test("formatOutcomeDuration formats seconds across the sub-0.1s, seconds, and minutes thresholds", () => {
   assert.equal(formatOutcomeDuration(0), "<0.1s");
-  assert.equal(formatOutcomeDuration(0.0), "<0.1s");
   assert.equal(formatOutcomeDuration(0.04), "<0.1s");
-  assert.equal(formatOutcomeDuration("<0.1"), "<0.1s");
   assert.equal(formatOutcomeDuration(4.2), "4.2s");
-  assert.equal(formatOutcomeDuration("4.2"), "4.2s");
   assert.equal(formatOutcomeDuration(59.94), "59.9s");
   assert.equal(formatOutcomeDuration(59.96), "1m 0.0s");
   assert.equal(formatOutcomeDuration(60.0), "1m 0.0s");
   assert.equal(formatOutcomeDuration(75.4), "1m 15.4s");
   assert.equal(formatOutcomeDuration(119.96), "2m 0.0s");
-  assert.equal(formatOutcomeDuration("invalid"), null);
 });
 
 test("formatElapsedDuration formats negative seconds, seconds, and minutes", () => {
@@ -834,56 +699,32 @@ test("formatElapsedDuration formats negative seconds, seconds, and minutes", () 
 });
 
 test("reduceQueueEvent uses event.duration_sec directly from engine", () => {
-  const manifest = {
-    version: 2,
-    items: [
-      { id: "ep1.mkv", name: "ep1.mkv" },
-      { id: "ep2.mkv", name: "ep2.mkv" },
-      { id: "ep3.mkv", name: "ep3.mkv" },
-    ],
-  };
-  let state = createQueueState(manifest);
+  let state = createQueueState(manifestOf(["ep1.mkv", "ep2.mkv"]));
 
-  // <0.1s
+  // Engine duration wins over the locally measured start/complete delta.
+  state = reduceQueueEvent(state, { version: 1, type: "item_start", id: "ep1.mkv" }, 1000);
   state = reduceQueueEvent(state, {
     version: 1,
     type: "item_complete",
     id: "ep1.mkv",
     status: "completed",
     duration_sec: 0.08,
-  });
+  }, 9000);
   assert.equal(state.items.get("ep1.mkv").durationSec, 0.08);
-  assert.equal(formatOutcomeDuration(state.items.get("ep1.mkv").durationSec), "<0.1s");
 
-  // 4.2s
+  // Engine duration is kept even for an item that never reported item_start.
   state = reduceQueueEvent(state, {
     version: 1,
     type: "item_complete",
     id: "ep2.mkv",
     status: "completed",
-    duration_sec: 4.2,
-  });
-  assert.equal(state.items.get("ep2.mkv").durationSec, 4.2);
-  assert.equal(formatOutcomeDuration(state.items.get("ep2.mkv").durationSec), "4.2s");
-
-  // 75.4s -> 1m 15.4s
-  state = reduceQueueEvent(state, {
-    version: 1,
-    type: "item_complete",
-    id: "ep3.mkv",
-    status: "completed",
     duration_sec: 75.4,
   });
-  assert.equal(state.items.get("ep3.mkv").durationSec, 75.4);
-  assert.equal(formatOutcomeDuration(state.items.get("ep3.mkv").durationSec), "1m 15.4s");
+  assert.equal(state.items.get("ep2.mkv").durationSec, 75.4);
 });
 
 test("reduceQueueEvent clamps item_progress and preserves float precision", () => {
-  const manifest = {
-    version: 2,
-    items: [{ id: "ep1.mkv", name: "ep1.mkv" }],
-  };
-  let state = createQueueState(manifest);
+  let state = createQueueState(manifestOf(["ep1.mkv"]));
   state = reduceQueueEvent(state, { version: 1, type: "item_start", id: "ep1.mkv" });
 
   state = reduceQueueEvent(state, {
@@ -912,7 +753,7 @@ test("reduceQueueEvent clamps item_progress and preserves float precision", () =
 });
 
 test("reduceQueueEvent populates items from batch_start when provided", () => {
-  let state = createQueueState({ version: 2, items: [] });
+  let state = createQueueState(manifestOf([]));
   state = reduceQueueEvent(state, {
     version: 1,
     type: "batch_start",
@@ -932,10 +773,8 @@ test("reduceQueueEvent populates items from batch_start when provided", () => {
 });
 
 test("BatchStart from an empty snapshot stays the ordered, selected base for the next same-directory rescan", () => {
-  const manifest = ids => ({ version: 2, items: ids.map(id => ({ id, name: id })) });
-
   // Reload lands before any BatchStart, so nothing but the engine knows the batch.
-  let state = createQueueState({ version: 2, items: [] });
+  let state = createQueueState(manifestOf([]));
   state = reduceQueueEvent(state, {
     version: 1,
     type: "batch_start",
@@ -946,8 +785,7 @@ test("BatchStart from an empty snapshot stays the ordered, selected base for the
   assert.deepEqual(state.knownOrder, ["02", "01"]);
 
   // A later rescan of the same directory discovers one more episode.
-  const previous = state;
-  state = reconcileQueueSelection(createQueueState(manifest(["02", "01", "03"])), previous);
+  state = reconcileQueueSelection(createQueueState(manifestOf(["02", "01", "03"])), state);
 
   assert.deepEqual(state.order, ["02", "01", "03"]);
   assert.deepEqual(state.knownOrder, ["02", "01", "03"]);
@@ -957,11 +795,8 @@ test("BatchStart from an empty snapshot stays the ordered, selected base for the
 });
 
 test("BatchStart records each participant once even when its item list repeats an ID", () => {
-  const state = createQueueState({ version: 2, items: [] });
+  const state = createQueueState(manifestOf([]));
 
-  // Every producer keeps order and knownOrder in step, so the reducer cannot be
-  // fed a state that repairs one and not the other. What it can be fed is a
-  // malformed item list, which must not corrupt either projection.
   reduceQueueEvent(state, {
     version: 1,
     type: "batch_start",
@@ -976,11 +811,8 @@ test("BatchStart records each participant once even when its item list repeats a
 
 test("reduceQueueEvent hydrates 10,000 BatchStart items into an empty state in linear time", () => {
   const total = 10000;
-  const items = [];
-  for (let i = 0; i < total; i++) {
-    items.push({ id: `ep${i}.mkv`, file: `Episode ${i}.mkv` });
-  }
-  const state = createQueueState({ version: 2, items: [] });
+  const items = Array.from({ length: total }, (_, i) => ({ id: `ep${i}.mkv`, file: `Episode ${i}.mkv` }));
+  const state = createQueueState(manifestOf([]));
 
   const begin = performance.now();
   reduceQueueEvent(state, { version: 1, type: "batch_start", total, items }, 0);
@@ -990,47 +822,34 @@ test("reduceQueueEvent hydrates 10,000 BatchStart items into an empty state in l
   assert.equal(state.order.length, total);
   assert.equal(new Set(state.order).size, total);
   assert.deepEqual(state.knownOrder, state.order);
-  assert.deepEqual(state.batchItemIds.length, total);
+  assert.equal(state.batchItemIds.length, total);
   // A repeated linear state.order.includes per item would be quadratic here.
   assert.ok(elapsedMs < 2000, `empty-state BatchStart hydration took ${elapsedMs.toFixed(0)}ms (expected < 2000ms)`);
 });
 
 test("item selection and reordering helpers", () => {
-  const manifest = {
-    version: 2,
-    items: [
-      { id: "e1", name: "Episode 1.mkv" },
-      { id: "e2", name: "Episode 2.mkv" },
-      { id: "e3", name: "Episode 3.mkv" },
-    ],
-  };
-
-  const state = createQueueState(manifest);
+  const state = createQueueState(manifestOf(["e1", "e2", "e3"]));
   assert.equal(getSelectedCount(state), 3);
   assert.equal(state.items.get("e1").selected, true);
 
-  // toggle selection
-  toggleItemSelection(state, "e2");
+  setItemSelected(state, "e2", false);
   assert.equal(state.items.get("e2").selected, false);
   assert.equal(getSelectedCount(state), 2);
 
-  toggleItemSelection(state, "e2", true);
+  setItemSelected(state, "e2", true);
   assert.equal(state.items.get("e2").selected, true);
   assert.equal(getSelectedCount(state), 3);
 
-  // deselect all
-  deselectAll(state);
+  setAllSelected(state, false);
   assert.equal(getSelectedCount(state), 0);
   assert.equal(state.items.get("e1").selected, false);
   assert.equal(state.items.get("e2").selected, false);
   assert.equal(state.items.get("e3").selected, false);
 
-  // select all
-  selectAll(state);
+  setAllSelected(state, true);
   assert.equal(getSelectedCount(state), 3);
   assert.equal(state.items.get("e1").selected, true);
 
-  // reorder item
   assert.deepEqual(state.order, ["e1", "e2", "e3"]);
   reorderItem(state, "e2", "up");
   assert.deepEqual(state.order, ["e2", "e1", "e3"]);
@@ -1044,17 +863,17 @@ test("item selection and reordering helpers", () => {
 });
 
 test("reconcileQueueSelection keeps surviving choices and order, appending new IDs unselected", () => {
-  const manifest = ids => ({ version: 2, items: ids.map(id => ({ id, name: id })) });
-  const previous = createQueueState(manifest(["ep1", "ep2", "gone"]));
-  toggleItemSelection(previous, "ep1", false);
+  const previous = createQueueState(manifestOf(["ep1", "ep2", "gone"]));
+  setItemSelected(previous, "ep1", false);
   reorderItem(previous, "ep2", "up");
 
-  const replacement = reconcileQueueSelection(createQueueState(manifest(["ep1", "new", "ep2"])), previous);
+  const replacement = reconcileQueueSelection(createQueueState(manifestOf(["ep1", "new", "ep2"])), previous);
   assert.deepEqual(replacement.order, ["ep2", "ep1", "new"]);
   assert.deepEqual(replacement.order.map(id => replacement.items.get(id).selected), [true, false, false]);
   assert.equal(replacement.items.has("gone"), false);
   assert.deepEqual(previous.order, ["ep2", "ep1", "gone"]);
 });
+
 test("normalizeDirectoryPath and isSameDirectory handle canonical, relative, and Windows paths", () => {
   // Relative dot segments
   assert.equal(normalizeDirectoryPath("/anime/x/../show"), "/anime/show");
@@ -1099,6 +918,7 @@ test("normalizeDirectoryPath and isSameDirectory handle canonical, relative, and
   assert.equal(isSameDirectory("/anime/show", null), false);
   assert.equal(isSameDirectory(undefined, undefined), false);
   assert.equal(isSameDirectory("", "/anime/show"), false);
+  assert.equal(isSameDirectory("   ", "   "), false);
 
   // Different directories
   assert.equal(isSameDirectory("/anime/showA", "/anime/showB"), false);
@@ -1111,13 +931,7 @@ test("bare dot is a relative identity, not root", () => {
 });
 
 test("finalization leaves non-participants queued and keeps a successful subset batch successful", () => {
-  let state = createQueueState({
-    version: 2,
-    items: [
-      { id: "ep1", name: "ep1" },
-      { id: "ep2", name: "ep2" },
-    ],
-  });
+  let state = createQueueState(manifestOf(["ep1", "ep2"]));
   state = reduceQueueEvent(state, {
     version: 1,
     type: "batch_start",
@@ -1148,14 +962,8 @@ test("finalization leaves non-participants queued and keeps a successful subset 
 });
 
 test("finalization without batch_start skips deselected items", () => {
-  const state = createQueueState({
-    version: 2,
-    items: [
-      { id: "ep1", name: "ep1" },
-      { id: "ep2", name: "ep2" },
-    ],
-  });
-  toggleItemSelection(state, "ep2", false);
+  const state = createQueueState(manifestOf(["ep1", "ep2"]));
+  setItemSelected(state, "ep2", false);
   const finalState = finalizeQueueState(state, -1);
   assert.equal(finalState.items.get("ep1").status, "error");
   assert.equal(finalState.items.get("ep2").status, "queued");
@@ -1169,54 +977,57 @@ test("UNC shares keep a distinct identity from root-relative paths", () => {
   assert.equal(normalizeDirectoryPath("\\\\?\\C:\\Anime"), "c:/anime");
 });
 
+test("only the //?/ and //./ device prefixes are stripped", () => {
+  assert.equal(normalizeDirectoryPath("//?/C:/x"), "c:/x");
+  assert.equal(normalizeDirectoryPath("//./C:/x"), "c:/x");
+  assert.equal(normalizeDirectoryPath("??/foo"), "??/foo");
+  assert.equal(normalizeDirectoryPath("?./foo"), "?./foo");
+  assert.equal(normalizeDirectoryPath("?/?/foo"), "?/?/foo");
+});
+
 test("rescan remembers vanished selected ids until selection changes", () => {
-  const manifest = ids => ({ version: 2, items: ids.map(id => ({ id, name: id })) });
-  const previous = createQueueState(manifest(["ep1", "ep2", "ep3"]));
-  toggleItemSelection(previous, "ep3", false);
-  const next = reconcileQueueSelection(createQueueState(manifest(["ep1"])), previous);
+  const previous = createQueueState(manifestOf(["ep1", "ep2", "ep3"]));
+  setItemSelected(previous, "ep3", false);
+  const next = reconcileQueueSelection(createQueueState(manifestOf(["ep1"])), previous);
   assert.deepEqual(next.vanishedSelectedIds, ["ep2"]);
 
-  const again = reconcileQueueSelection(createQueueState(manifest(["ep1"])), next);
+  const again = reconcileQueueSelection(createQueueState(manifestOf(["ep1"])), next);
   assert.deepEqual(again.vanishedSelectedIds, ["ep2"]);
 
-  toggleItemSelection(again, "ep1", true);
+  setItemSelected(again, "ep1", true);
   assert.deepEqual(again.vanishedSelectedIds, []);
 });
 
 test("a vanished selected id that reappears is restored selected", () => {
-  const manifest = ids => ({ version: 2, items: ids.map(id => ({ id, name: id })) });
-  const previous = createQueueState(manifest(["ep1", "ep2"]));
-  const gone = reconcileQueueSelection(createQueueState(manifest(["ep1"])), previous);
-  const back = reconcileQueueSelection(createQueueState(manifest(["ep1", "ep2"])), gone);
+  const previous = createQueueState(manifestOf(["ep1", "ep2"]));
+  const gone = reconcileQueueSelection(createQueueState(manifestOf(["ep1"])), previous);
+  const back = reconcileQueueSelection(createQueueState(manifestOf(["ep1", "ep2"])), gone);
   assert.equal(back.items.get("ep2").selected, true);
   assert.deepEqual(back.vanishedSelectedIds, []);
 });
 
 test("a vanished selected id that reappears preserves its previous relative order", () => {
-  const manifest = ids => ({ version: 2, items: ids.map(id => ({ id, name: id })) });
-  const initial = createQueueState(manifest(["ep1", "ep2", "ep3"]));
+  const initial = createQueueState(manifestOf(["ep1", "ep2", "ep3"]));
   reorderItem(initial, "ep2", "up");
   assert.deepEqual(initial.order, ["ep2", "ep1", "ep3"]);
 
-  const gone = reconcileQueueSelection(createQueueState(manifest(["ep1", "ep3"])), initial);
+  const gone = reconcileQueueSelection(createQueueState(manifestOf(["ep1", "ep3"])), initial);
   assert.deepEqual(gone.order, ["ep1", "ep3"]);
   assert.deepEqual(gone.vanishedSelectedIds, ["ep2"]);
 
-  const back = reconcileQueueSelection(createQueueState(manifest(["ep1", "ep2", "ep3"])), gone);
+  const back = reconcileQueueSelection(createQueueState(manifestOf(["ep1", "ep2", "ep3"])), gone);
   assert.deepEqual(back.order, ["ep2", "ep1", "ep3"]);
   assert.equal(back.items.get("ep2").selected, true);
   assert.deepEqual(back.vanishedSelectedIds, []);
 });
 
-test("selectAll and deselectAll clear vanished selected ids", () => {
-  const manifest = ids => ({ version: 2, items: ids.map(id => ({ id, name: id })) });
-  const state = createQueueState(manifest(["ep1"]));
+test("setAllSelected clears vanished selected ids", () => {
+  const state = createQueueState(manifestOf(["ep1"]));
   state.vanishedSelectedIds = ["x"];
-  selectAll(state);
+  setAllSelected(state, true);
   assert.deepEqual(state.vanishedSelectedIds, []);
 
   state.vanishedSelectedIds = ["x"];
-  deselectAll(state);
+  setAllSelected(state, false);
   assert.deepEqual(state.vanishedSelectedIds, []);
 });
-

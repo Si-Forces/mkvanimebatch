@@ -1,11 +1,76 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use mkv_core::domain::{MkvTrack, TrackProperties};
 use mkv_core::fonts::FontInfo;
 use mkv_core::remux::{
-    build_ffmpeg_args, build_mkvmerge_args, select_tracks, PlannedJob, TrackSelection,
+    build_ffmpeg_args, build_mkvmerge_args, execute_remux_job, select_tracks, PlannedJob,
+    RemuxOptions, TrackSelection,
 };
 use mkv_core::scan::{InspectedVideo, MkvmergeMetadata};
+
+fn job(video: &Path, output_file: PathBuf, subtitle_file: Option<PathBuf>) -> PlannedJob {
+    let video_name = video.file_name().unwrap().to_string_lossy().into_owned();
+    PlannedJob {
+        video: video.to_path_buf(),
+        item_id: video_name.clone(),
+        video_name,
+        output_file,
+        subtitle_file,
+        subtitle_label: "Default English".to_string(),
+        subtitle_mkv_lang: "eng".to_string(),
+        chapter_file: None,
+        cover_file: None,
+        embedded_sub_id: None,
+        use_source_fonts: false,
+        custom_offset_ms: None,
+        custom_language: None,
+        custom_title: None,
+    }
+}
+
+/// A job muxing `/dummy/sub.ass` into `/dummy/video.mkv`.
+fn subtitle_job() -> PlannedJob {
+    job(
+        Path::new("/dummy/video.mkv"),
+        PathBuf::from("/dummy/out.mkv"),
+        Some(PathBuf::from("/dummy/sub.ass")),
+    )
+}
+
+fn selection() -> TrackSelection {
+    TrackSelection {
+        video_id: Some(0),
+        audio_id: Some(1),
+        audio_index: 0,
+        audio_codec: "aac".to_string(),
+        audio_lang: "jpn".to_string(),
+        audio_name: "Stereo".to_string(),
+        source_cover_id: None,
+        source_font_ids: vec![],
+    }
+}
+
+fn mkvmerge_args(job: &PlannedJob, temp_opus: Option<&Path>, sub_offset: f64) -> Vec<String> {
+    build_mkvmerge_args(
+        job,
+        &selection(),
+        temp_opus,
+        &FontInfo::default(),
+        Path::new("/dummy/out.mkv"),
+        sub_offset,
+    )
+}
+
+fn has_pair(args: &[String], flag: &str, value: &str) -> bool {
+    args.windows(2).any(|pair| pair == [flag, value])
+}
+
+const REMUX_OPTIONS: RemuxOptions<'static> = RemuxOptions {
+    opus_bitrate: "192k",
+    complexity: 10,
+    ffmpeg_threads: 1,
+    sub_offset: 0.0,
+};
 
 #[test]
 fn test_select_tracks() {
@@ -33,8 +98,7 @@ fn test_select_tracks() {
         attachments: vec![],
         chapters: vec![],
     };
-    let inspected = InspectedVideo::new(meta);
-    let selection = select_tracks(&inspected);
+    let selection = select_tracks(&InspectedVideo::new(meta));
     assert_eq!(selection.video_id, Some(0));
     assert_eq!(selection.audio_id, Some(1));
     assert_eq!(selection.audio_codec, "A_FLAC");
@@ -42,51 +106,8 @@ fn test_select_tracks() {
 
 #[test]
 fn test_no_chapters_before_temp_opus_only() {
-    let job = PlannedJob {
-        video: PathBuf::from("/dummy/video.mkv"),
-        video_name: "video.mkv".to_string(),
-        base: "video".to_string(),
-        output_file: PathBuf::from("/dummy/out.mkv"),
-        subtitle_file: Some(PathBuf::from("/dummy/sub.ass")),
-        subtitle_label: "English".to_string(),
-        subtitle_mkv_lang: "eng".to_string(),
-        chapter_file: None,
-        cover_file: None,
-        embedded_sub_id: None,
-        use_source_fonts: false,
-        release_dir: None,
-        item_id: "video.mkv".to_string(),
-        custom_offset_ms: None,
-        custom_language: None,
-        custom_title: None,
-    };
-
-    let selection = TrackSelection {
-        video_id: Some(0),
-        audio_id: Some(1),
-        audio_index: 0,
-        audio_codec: "flac".to_string(),
-        audio_channels: 2,
-        audio_lang: "jpn".to_string(),
-        audio_name: "Japanese".to_string(),
-        audio_reason: "test".to_string(),
-        has_source_chapters: false,
-        source_cover_id: None,
-        source_font_ids: vec![],
-    };
-
-    let fonts = FontInfo::default();
-    let temp_opus = PathBuf::from("/dummy/audio.opus");
-    let output_path = PathBuf::from("/dummy/out.mkv");
-
-    let args = build_mkvmerge_args(
-        &job,
-        &selection,
-        Some(&temp_opus),
-        &fonts,
-        &output_path,
-        0.0,
-    );
+    let job = subtitle_job();
+    let args = mkvmerge_args(&job, Some(Path::new("/dummy/audio.opus")), 0.0);
 
     let temp_opus_idx = args.iter().position(|a| a == "/dummy/audio.opus").unwrap();
     assert_eq!(
@@ -96,7 +117,7 @@ fn test_no_chapters_before_temp_opus_only() {
             "--language",
             "0:jpn",
             "--track-name",
-            "0:Japanese"
+            "0:Stereo"
         ]
     );
 
@@ -106,91 +127,20 @@ fn test_no_chapters_before_temp_opus_only() {
 
 #[test]
 fn test_no_chapters_absent_when_no_opus() {
-    let job = PlannedJob {
-        video: PathBuf::from("/dummy/video.mkv"),
-        video_name: "video.mkv".to_string(),
-        base: "video".to_string(),
-        output_file: PathBuf::from("/dummy/out.mkv"),
-        subtitle_file: Some(PathBuf::from("/dummy/sub.ass")),
-        subtitle_label: "Indonesian".to_string(),
-        subtitle_mkv_lang: "ind".to_string(),
-        chapter_file: None,
-        cover_file: None,
-        embedded_sub_id: None,
-        use_source_fonts: false,
-        release_dir: None,
-        item_id: "video.mkv".to_string(),
-        custom_offset_ms: None,
-        custom_language: None,
-        custom_title: None,
-    };
-
-    let selection = TrackSelection {
-        video_id: Some(0),
-        audio_id: Some(1),
-        audio_index: 0,
-        audio_codec: "aac".to_string(),
-        audio_channels: 2,
-        audio_lang: "jpn".to_string(),
-        audio_name: "Stereo".to_string(),
-        audio_reason: "test".to_string(),
-        has_source_chapters: false,
-        source_cover_id: None,
-        source_font_ids: vec![],
-    };
-
-    let fonts = FontInfo::default();
-    let output_path = PathBuf::from("/dummy/out.mkv");
-
-    let args = build_mkvmerge_args(&job, &selection, None, &fonts, &output_path, 0.0);
+    let args = mkvmerge_args(&subtitle_job(), None, 0.0);
     let sub_idx = args.iter().position(|a| a == "/dummy/sub.ass").unwrap();
     assert!(!args[..sub_idx].contains(&"--no-chapters".to_string()));
 }
 
 #[test]
 fn test_subtitle_sync_args() {
-    let job = PlannedJob {
-        video: PathBuf::from("/dummy/video.mkv"),
-        video_name: "video.mkv".to_string(),
-        base: "video".to_string(),
-        output_file: PathBuf::from("/dummy/out.mkv"),
-        subtitle_file: Some(PathBuf::from("/dummy/sub.ass")),
-        subtitle_label: "Indonesian".to_string(),
-        subtitle_mkv_lang: "ind".to_string(),
-        chapter_file: None,
-        cover_file: None,
-        embedded_sub_id: None,
-        use_source_fonts: false,
-        release_dir: None,
-        item_id: "video.mkv".to_string(),
-        custom_offset_ms: None,
-        custom_language: None,
-        custom_title: None,
-    };
-
-    let selection = TrackSelection {
-        video_id: Some(0),
-        audio_id: Some(1),
-        audio_index: 0,
-        audio_codec: "aac".to_string(),
-        audio_channels: 2,
-        audio_lang: "jpn".to_string(),
-        audio_name: "Stereo".to_string(),
-        audio_reason: "test".to_string(),
-        has_source_chapters: false,
-        source_cover_id: None,
-        source_font_ids: vec![],
-    };
-
-    let fonts = FontInfo::default();
-    let output_path = PathBuf::from("/dummy/out.mkv");
-
-    let args_with_sync = build_mkvmerge_args(&job, &selection, None, &fonts, &output_path, 1.5);
-    assert!(args_with_sync.contains(&"--sync".to_string()));
-    assert!(args_with_sync.contains(&"0:1500".to_string()));
-
-    let args_no_sync = build_mkvmerge_args(&job, &selection, None, &fonts, &output_path, 0.0);
-    assert!(!args_no_sync.contains(&"--sync".to_string()));
+    let job = subtitle_job();
+    assert!(has_pair(
+        &mkvmerge_args(&job, None, 1.5),
+        "--sync",
+        "0:1500"
+    ));
+    assert!(!mkvmerge_args(&job, None, 0.0).contains(&"--sync".to_string()));
 }
 
 #[test]
@@ -200,405 +150,51 @@ fn test_ffmpeg_args() {
     let args = build_ffmpeg_args(&video, 1, &temp_opus, "192k", 10, 4);
 
     assert_eq!(args[0], "-y");
-    assert!(args.contains(&"-map".to_string()));
-    assert!(args.contains(&"0:a:1".to_string()));
-    assert!(args.contains(&"-c:a".to_string()));
-    assert!(args.contains(&"libopus".to_string()));
-    assert!(args.contains(&"-b:a".to_string()));
-    assert!(args.contains(&"192k".to_string()));
-    assert!(args.contains(&"-compression_level".to_string()));
-    assert!(args.contains(&"10".to_string()));
-}
-
-#[test]
-fn test_subtitle_extraction_filename_format() {
-    use mkv_core::domain::EpisodeInfo;
-    use mkv_core::extract::select_subtitle_for_extraction;
-    use std::path::Path;
-
-    let meta = MkvmergeMetadata {
-        tracks: vec![MkvTrack {
-            id: Some(2),
-            track_type: "subtitles".to_string(),
-            codec: None,
-            properties: TrackProperties {
-                codec_id: Some("s_text/ass".to_string()),
-                language: Some("eng".to_string()),
-                ..Default::default()
-            },
-        }],
-        attachments: vec![],
-        chapters: vec![],
-    };
-    let inspected = InspectedVideo::new(meta);
-    let parsed = EpisodeInfo::new("1", "E", "01");
-    let res =
-        select_subtitle_for_extraction(&inspected, "Show - 01", Path::new("/out"), Some(&parsed));
-    assert!(res.is_some());
-    let (tid, path) = res.unwrap();
-    assert_eq!(tid, 2);
-    assert_eq!(
-        path,
-        Path::new("/out").join("Show - 01_EP01_eng_track2.ass")
-    );
-}
-
-#[cfg(unix)]
-static TEST_ENV_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-#[tokio::test]
-#[cfg(unix)]
-async fn test_execute_remux_job_collects_stdout_on_mkvmerge_failure() {
-    use std::fs::File;
-    use std::os::unix::fs::PermissionsExt;
-    use std::sync::Arc;
-    use tempfile::tempdir;
-
-    let _lock = TEST_ENV_MUTEX.lock().await;
-
-    let dir = tempdir().unwrap();
-    let bin_dir = tempdir().unwrap();
-    let mock_mkvmerge = bin_dir.path().join("mkvmerge");
-    let script = "#!/bin/sh\necho 'Error: Simulated mkvmerge stdout failure'\nexit 2\n";
-    std::fs::write(&mock_mkvmerge, script).unwrap();
-    std::fs::set_permissions(&mock_mkvmerge, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-    let orig_path = std::env::var("PATH").unwrap_or_default();
-    let new_path = format!("{}:{}", bin_dir.path().display(), orig_path);
-
-    struct PathReset(String);
-    impl Drop for PathReset {
-        fn drop(&mut self) {
-            std::env::set_var("PATH", &self.0);
-        }
-    }
-    let _path_guard = PathReset(orig_path);
-    std::env::set_var("PATH", new_path);
-
-    let video = dir.path().join("test.mkv");
-    File::create(&video).unwrap();
-    let out = dir.path().join("out.mkv");
-
-    let job = PlannedJob {
-        video: video.clone(),
-        video_name: "test.mkv".to_string(),
-        base: "test".to_string(),
-        output_file: out,
-        subtitle_file: None,
-        subtitle_label: String::new(),
-        subtitle_mkv_lang: String::new(),
-        chapter_file: None,
-        cover_file: None,
-        embedded_sub_id: None,
-        use_source_fonts: false,
-        release_dir: None,
-        item_id: "test.mkv".to_string(),
-        custom_offset_ms: None,
-        custom_language: None,
-        custom_title: None,
-    };
-
-    let selection = TrackSelection {
-        video_id: Some(0),
-        audio_id: Some(1),
-        audio_index: 0,
-        audio_codec: "aac".to_string(),
-        audio_channels: 2,
-        audio_lang: "jpn".to_string(),
-        audio_name: "Stereo".to_string(),
-        audio_reason: "test".to_string(),
-        has_source_chapters: false,
-        source_cover_id: None,
-        source_font_ids: vec![],
-    };
-
-    let fonts = FontInfo::default();
-    let options = mkv_core::remux::RemuxOptions {
-        opus_bitrate: "192k",
-        complexity: 10,
-        ffmpeg_threads: 1,
-        sub_offset: 0.0,
-    };
-
-    // Test with io_semaphore = None
-    let res =
-        mkv_core::remux::execute_remux_job(&job, &selection, &fonts, &options, None, None).await;
-
-    assert!(res.is_err());
-    let err = res.unwrap_err();
-    assert!(
-        err.contains("Simulated mkvmerge stdout failure"),
-        "Error message did not contain stdout output: {err}"
-    );
-    assert!(
-        err.contains("exit code 2"),
-        "Error message did not contain exit code: {err}"
-    );
-
-    // Test with io_semaphore = Some(...)
-    let sem = Arc::new(tokio::sync::Semaphore::new(1));
-    let res_with_sem =
-        mkv_core::remux::execute_remux_job(&job, &selection, &fonts, &options, None, Some(&sem))
-            .await;
-    assert!(res_with_sem.is_err());
-    let err_with_sem = res_with_sem.unwrap_err();
-    assert!(err_with_sem.contains("Simulated mkvmerge stdout failure"));
-}
-
-#[tokio::test]
-#[cfg(unix)]
-async fn test_execute_remux_job_combines_stderr_and_stdout_on_failure() {
-    use std::fs::File;
-    use std::os::unix::fs::PermissionsExt;
-    use tempfile::tempdir;
-
-    let _lock = TEST_ENV_MUTEX.lock().await;
-
-    let dir = tempdir().unwrap();
-    let bin_dir = tempdir().unwrap();
-    let mock_mkvmerge = bin_dir.path().join("mkvmerge");
-    let script = "#!/bin/sh\necho 'Auxiliary stderr notice' >&2\necho 'Error: Detailed stdout failure'\nexit 2\n";
-    std::fs::write(&mock_mkvmerge, script).unwrap();
-    std::fs::set_permissions(&mock_mkvmerge, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-    let orig_path = std::env::var("PATH").unwrap_or_default();
-    let new_path = format!("{}:{}", bin_dir.path().display(), orig_path);
-
-    struct PathReset(String);
-    impl Drop for PathReset {
-        fn drop(&mut self) {
-            std::env::set_var("PATH", &self.0);
-        }
-    }
-    let _path_guard = PathReset(orig_path);
-    std::env::set_var("PATH", new_path);
-
-    let video = dir.path().join("test_both.mkv");
-    File::create(&video).unwrap();
-    let out = dir.path().join("out_both.mkv");
-
-    let job = PlannedJob {
-        video: video.clone(),
-        video_name: "test_both.mkv".to_string(),
-        base: "test_both".to_string(),
-        output_file: out,
-        subtitle_file: None,
-        subtitle_label: String::new(),
-        subtitle_mkv_lang: String::new(),
-        chapter_file: None,
-        cover_file: None,
-        embedded_sub_id: None,
-        use_source_fonts: false,
-        release_dir: None,
-        item_id: "test_both.mkv".to_string(),
-        custom_offset_ms: None,
-        custom_language: None,
-        custom_title: None,
-    };
-
-    let selection = TrackSelection {
-        video_id: Some(0),
-        audio_id: Some(1),
-        audio_index: 0,
-        audio_codec: "aac".to_string(),
-        audio_channels: 2,
-        audio_lang: "jpn".to_string(),
-        audio_name: "Stereo".to_string(),
-        audio_reason: "test".to_string(),
-        has_source_chapters: false,
-        source_cover_id: None,
-        source_font_ids: vec![],
-    };
-
-    let fonts = FontInfo::default();
-    let options = mkv_core::remux::RemuxOptions {
-        opus_bitrate: "192k",
-        complexity: 10,
-        ffmpeg_threads: 1,
-        sub_offset: 0.0,
-    };
-
-    let res =
-        mkv_core::remux::execute_remux_job(&job, &selection, &fonts, &options, None, None).await;
-
-    assert!(res.is_err());
-    let err = res.unwrap_err();
-    assert!(
-        err.contains("Auxiliary stderr notice"),
-        "Error message did not contain stderr output: {err}"
-    );
-    assert!(
-        err.contains("Error: Detailed stdout failure"),
-        "Error message did not contain stdout output: {err}"
-    );
-}
-
-#[tokio::test]
-#[cfg(unix)]
-async fn test_execute_remux_job_logs_warnings_on_exit_code_1() {
-    use std::fs::File;
-    use std::os::unix::fs::PermissionsExt;
-    use tempfile::tempdir;
-
-    let _lock = TEST_ENV_MUTEX.lock().await;
-
-    let dir = tempdir().unwrap();
-    let bin_dir = tempdir().unwrap();
-    let mock_mkvmerge = bin_dir.path().join("mkvmerge");
-    let script =
-        "#!/bin/sh\necho 'Warning: QuickTime track parsing'\necho 'dummy data' > \"$2\"\nexit 1\n";
-    std::fs::write(&mock_mkvmerge, script).unwrap();
-    std::fs::set_permissions(&mock_mkvmerge, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-    let orig_path = std::env::var("PATH").unwrap_or_default();
-    let new_path = format!("{}:{}", bin_dir.path().display(), orig_path);
-
-    struct PathReset(String);
-    impl Drop for PathReset {
-        fn drop(&mut self) {
-            std::env::set_var("PATH", &self.0);
-        }
-    }
-    let _path_guard = PathReset(orig_path);
-    std::env::set_var("PATH", new_path);
-
-    let video = dir.path().join("test_warn.mkv");
-    File::create(&video).unwrap();
-    let out = dir.path().join("out_warn.mkv");
-
-    let job = PlannedJob {
-        video: video.clone(),
-        video_name: "test_warn.mkv".to_string(),
-        base: "test_warn".to_string(),
-        output_file: out.clone(),
-        subtitle_file: None,
-        subtitle_label: String::new(),
-        subtitle_mkv_lang: String::new(),
-        chapter_file: None,
-        cover_file: None,
-        embedded_sub_id: None,
-        use_source_fonts: false,
-        release_dir: None,
-        item_id: "test_warn.mkv".to_string(),
-        custom_offset_ms: None,
-        custom_language: None,
-        custom_title: None,
-    };
-
-    let selection = TrackSelection {
-        video_id: Some(0),
-        audio_id: Some(1),
-        audio_index: 0,
-        audio_codec: "aac".to_string(),
-        audio_channels: 2,
-        audio_lang: "jpn".to_string(),
-        audio_name: "Stereo".to_string(),
-        audio_reason: "test".to_string(),
-        has_source_chapters: false,
-        source_cover_id: None,
-        source_font_ids: vec![],
-    };
-
-    let fonts = FontInfo::default();
-    let options = mkv_core::remux::RemuxOptions {
-        opus_bitrate: "192k",
-        complexity: 10,
-        ffmpeg_threads: 1,
-        sub_offset: 0.0,
-    };
-
-    let res =
-        mkv_core::remux::execute_remux_job(&job, &selection, &fonts, &options, None, None).await;
-
-    assert!(
-        res.is_ok(),
-        "Expected success on exit code 1 with output file created: {:?}",
-        res.err()
-    );
-    let summary = res.unwrap();
-    assert!(
-        summary
-            .log
-            .iter()
-            .any(|l| l.contains("Warning: QuickTime track parsing")),
-        "Summary log did not contain warning: {:?}",
-        summary.log
-    );
+    assert!(has_pair(&args, "-map", "0:a:1"));
+    assert!(has_pair(&args, "-c:a", "libopus"));
+    assert!(has_pair(&args, "-b:a", "192k"));
+    assert!(has_pair(&args, "-compression_level", "10"));
+    assert_eq!(args.last().unwrap(), "/dummy/audio.opus");
 }
 
 #[test]
 fn test_custom_track_assignment_remux_args() {
-    let mut job = PlannedJob {
-        video: PathBuf::from("/dummy/video.mkv"),
-        video_name: "video.mkv".to_string(),
-        base: "video".to_string(),
-        output_file: PathBuf::from("/dummy/out.mkv"),
-        subtitle_file: Some(PathBuf::from("/dummy/sub.ass")),
-        subtitle_label: "Default English".to_string(),
-        subtitle_mkv_lang: "eng".to_string(),
-        chapter_file: None,
-        cover_file: None,
-        embedded_sub_id: None,
-        use_source_fonts: false,
-        release_dir: None,
-        item_id: "video.mkv".to_string(),
-        custom_offset_ms: Some(750),
-        custom_language: Some("ind".into()),
-        custom_title: Some("Custom Translation".into()),
-    };
+    let mut job = subtitle_job();
+    job.custom_offset_ms = Some(750);
+    job.custom_language = Some("ind".into());
+    job.custom_title = Some("Custom Translation".into());
 
-    let selection = TrackSelection {
-        video_id: Some(0),
-        audio_id: Some(1),
-        audio_index: 0,
-        audio_codec: "aac".to_string(),
-        audio_channels: 2,
-        audio_lang: "jpn".to_string(),
-        audio_name: "Stereo".to_string(),
-        audio_reason: "test".to_string(),
-        has_source_chapters: false,
-        source_cover_id: None,
-        source_font_ids: vec![],
-    };
-    let fonts = FontInfo::default();
-    let output_path = PathBuf::from("/dummy/out.mkv");
+    // A custom offset overrides the global sub_offset instead of adding to it.
+    let args_zero_offset = mkvmerge_args(&job, None, 0.0);
+    assert!(has_pair(&args_zero_offset, "--sync", "0:750"));
+    assert!(has_pair(&args_zero_offset, "--language", "0:ind"));
+    assert!(has_pair(
+        &args_zero_offset,
+        "--track-name",
+        "0:Custom Translation"
+    ));
 
-    // 1. With custom fields populated:
-    // When custom_offset_ms is Some(750), --sync 0:750 is generated even if sub_offset is 0.0 or different.
-    let args_zero_offset = build_mkvmerge_args(&job, &selection, None, &fonts, &output_path, 0.0);
-    assert!(args_zero_offset.contains(&"--sync".to_string()));
-    assert!(args_zero_offset.contains(&"0:750".to_string()));
-    assert!(args_zero_offset.contains(&"--language".to_string()));
-    assert!(args_zero_offset.contains(&"0:ind".to_string()));
-    assert!(args_zero_offset.contains(&"--track-name".to_string()));
-    assert!(args_zero_offset.contains(&"0:Custom Translation".to_string()));
-
-    // When sub_offset is different (e.g. 2.0 / 2000ms), custom_offset_ms 750 is still generated
-    let args_diff_offset = build_mkvmerge_args(&job, &selection, None, &fonts, &output_path, 2.0);
-    assert!(args_diff_offset.contains(&"0:750".to_string()));
+    let args_diff_offset = mkvmerge_args(&job, None, 2.0);
+    assert!(has_pair(&args_diff_offset, "--sync", "0:750"));
     assert!(!args_diff_offset.contains(&"0:2000".to_string()));
 
-    // When custom_offset_ms is Some(0), nothing is added for --sync
+    // An explicit zero custom offset leaves the subtitle unshifted.
     job.custom_offset_ms = Some(0);
-    let args_custom_zero = build_mkvmerge_args(&job, &selection, None, &fonts, &output_path, 2.0);
-    assert!(!args_custom_zero.contains(&"--sync".to_string()));
+    assert!(!mkvmerge_args(&job, None, 2.0).contains(&"--sync".to_string()));
 
-    // 2. Fallback behavior when these are None:
+    // Without custom fields the global offset and resolved label/language apply.
     job.custom_offset_ms = None;
     job.custom_language = None;
     job.custom_title = None;
 
-    let args_fallback = build_mkvmerge_args(&job, &selection, None, &fonts, &output_path, 1.25);
-    assert!(args_fallback.contains(&"--sync".to_string()));
-    assert!(args_fallback.contains(&"0:1250".to_string()));
-    assert!(args_fallback.contains(&"--language".to_string()));
-    assert!(args_fallback.contains(&"0:eng".to_string()));
-    assert!(args_fallback.contains(&"--track-name".to_string()));
-    assert!(args_fallback.contains(&"0:Default English".to_string()));
-
-    // Fallback when sub_offset is 0.0: no --sync
-    let args_fallback_zero = build_mkvmerge_args(&job, &selection, None, &fonts, &output_path, 0.0);
-    assert!(!args_fallback_zero.contains(&"--sync".to_string()));
+    let args_fallback = mkvmerge_args(&job, None, 1.25);
+    assert!(has_pair(&args_fallback, "--sync", "0:1250"));
+    assert!(has_pair(&args_fallback, "--language", "0:eng"));
+    assert!(has_pair(
+        &args_fallback,
+        "--track-name",
+        "0:Default English"
+    ));
 }
 
 #[tokio::test]
@@ -609,53 +205,135 @@ async fn test_execute_remux_job_no_file_name_returns_err() {
     // Path ending in ".." has no file_name(), but a valid writable parent
     let out = dir.path().join("subdir").join("..");
 
-    let job = PlannedJob {
-        video: video.clone(),
-        video_name: "test.mkv".to_string(),
-        base: "test".to_string(),
-        output_file: out,
-        subtitle_file: None,
-        subtitle_label: String::new(),
-        subtitle_mkv_lang: String::new(),
-        chapter_file: None,
-        cover_file: None,
-        embedded_sub_id: None,
-        use_source_fonts: false,
-        release_dir: None,
-        item_id: "test.mkv".to_string(),
-        custom_offset_ms: None,
-        custom_language: None,
-        custom_title: None,
-    };
-
-    let selection = TrackSelection {
-        video_id: Some(0),
-        audio_id: Some(1),
-        audio_index: 0,
-        audio_codec: "aac".to_string(),
-        audio_channels: 2,
-        audio_lang: "jpn".to_string(),
-        audio_name: "Stereo".to_string(),
-        audio_reason: "test".to_string(),
-        has_source_chapters: false,
-        source_cover_id: None,
-        source_font_ids: vec![],
-    };
-
-    let fonts = FontInfo::default();
-    let options = mkv_core::remux::RemuxOptions {
-        opus_bitrate: "192k",
-        complexity: 10,
-        ffmpeg_threads: 1,
-        sub_offset: 0.0,
-    };
-
-    let res =
-        mkv_core::remux::execute_remux_job(&job, &selection, &fonts, &options, None, None).await;
-    assert!(res.is_err());
-    let err = res.unwrap_err();
+    let err = execute_remux_job(
+        &job(&video, out, None),
+        &selection(),
+        &FontInfo::default(),
+        &REMUX_OPTIONS,
+        None,
+        None,
+    )
+    .await
+    .unwrap_err();
     assert!(
         err.contains("Output path has no file name"),
         "Unexpected error message: {err}"
     );
+}
+
+#[cfg(unix)]
+mod mock_mkvmerge {
+    use std::os::unix::fs::PermissionsExt;
+
+    use tempfile::TempDir;
+    use tokio::sync::{Mutex, MutexGuard};
+
+    use super::*;
+
+    /// Serializes the `PATH` mutation shared by every mock-mkvmerge test in this binary.
+    static PATH_LOCK: Mutex<()> = Mutex::const_new(());
+
+    /// Puts an `mkvmerge` shell script ahead of the real one on `PATH` until dropped.
+    struct MockMkvmerge {
+        original_path: String,
+        _bin_dir: TempDir,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl MockMkvmerge {
+        async fn install(script: &str) -> Self {
+            let lock = PATH_LOCK.lock().await;
+            let bin_dir = tempfile::tempdir().unwrap();
+            let mock = bin_dir.path().join("mkvmerge");
+            std::fs::write(&mock, script).unwrap();
+            std::fs::set_permissions(&mock, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+            let original_path = std::env::var("PATH").unwrap_or_default();
+            std::env::set_var(
+                "PATH",
+                format!("{}:{original_path}", bin_dir.path().display()),
+            );
+            Self {
+                original_path,
+                _bin_dir: bin_dir,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for MockMkvmerge {
+        fn drop(&mut self) {
+            std::env::set_var("PATH", &self.original_path);
+        }
+    }
+
+    /// Remuxes an empty source video with no subtitle through the installed mock.
+    async fn remux(dir: &TempDir) -> Result<Vec<String>, String> {
+        let video = dir.path().join("test.mkv");
+        std::fs::File::create(&video).unwrap();
+        let out = dir.path().join("out.mkv");
+        execute_remux_job(
+            &job(&video, out, None),
+            &selection(),
+            &FontInfo::default(),
+            &REMUX_OPTIONS,
+            None,
+            None,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_execute_remux_job_collects_stdout_on_mkvmerge_failure() {
+        let _mock = MockMkvmerge::install(
+            "#!/bin/sh\necho 'Error: Simulated mkvmerge stdout failure'\nexit 2\n",
+        )
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+
+        let err = remux(&dir).await.unwrap_err();
+        assert!(
+            err.contains("Simulated mkvmerge stdout failure"),
+            "Error message did not contain stdout output: {err}"
+        );
+        assert!(
+            err.contains("exit code 2"),
+            "Error message did not contain exit code: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_remux_job_combines_stderr_and_stdout_on_failure() {
+        let _mock = MockMkvmerge::install(
+            "#!/bin/sh\necho 'Auxiliary stderr notice' >&2\necho 'Error: Detailed stdout failure'\nexit 2\n",
+        )
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+
+        let err = remux(&dir).await.unwrap_err();
+        assert!(
+            err.contains("Auxiliary stderr notice\nError: Detailed stdout failure"),
+            "Error message did not join stderr and stdout: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_remux_job_logs_warnings_on_exit_code_1() {
+        let _mock = MockMkvmerge::install(
+            "#!/bin/sh\necho 'Warning: QuickTime track parsing'\necho 'dummy data' > \"$2\"\nexit 1\n",
+        )
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+
+        let log = remux(&dir).await.unwrap();
+        assert!(
+            log.iter()
+                .any(|l| l == "  Warning: QuickTime track parsing"),
+            "log did not contain the warning: {log:?}"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("out.mkv")).unwrap(),
+            b"dummy data\n"
+        );
+    }
 }

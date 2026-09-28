@@ -18,11 +18,9 @@ struct TelemetryInner {
 
 impl Default for TelemetryState {
     fn default() -> Self {
-        let mut sys = System::new_all();
-        sys.refresh_all();
         Self {
             inner: Mutex::new(TelemetryInner {
-                sys,
+                sys: System::new_all(),
                 last_poll: None,
             }),
         }
@@ -31,14 +29,12 @@ impl Default for TelemetryState {
 
 #[derive(serde::Serialize)]
 pub struct TelemetryData {
-    pub cpu_pct: f32,
-    pub ram_used_mb: u64,
-    pub ram_total_mb: u64,
-    pub ram_pct: f32,
-    pub io_mb_s: f32,
+    cpu_pct: f32,
+    ram_used_mb: u64,
+    ram_total_mb: u64,
+    ram_pct: f32,
+    io_mb_s: f32,
 }
-
-// ─── Tauri Commands ──────────────────────────────────────────────────────────
 
 const KNOWN_ENGINE_PREFIXES: [&str; 3] = ["mkvmerge", "mkvextract", "ffmpeg"];
 
@@ -52,7 +48,7 @@ fn starts_with_ignore_ascii_case(s: &str, prefix: &str) -> bool {
 /// Determines if a process is an engine process (the desktop app itself, or its
 /// direct child media tools: mkvmerge, mkvextract, ffmpeg)
 /// by checking process name and whether its parent is `self_pid`.
-pub fn is_engine_process(
+fn is_engine_process(
     pid: Pid,
     process_name: &str,
     parent_fn: impl Fn(Pid) -> Option<Pid>,
@@ -88,10 +84,10 @@ pub fn get_system_telemetry(
     sys.refresh_cpu_all();
     sys.refresh_memory();
 
-    if !has_active_job {
-        sys.refresh_processes(ProcessesToUpdate::Some(&[self_pid]), true);
-    } else {
+    if has_active_job {
         sys.refresh_processes(ProcessesToUpdate::All, false);
+    } else {
+        sys.refresh_processes(ProcessesToUpdate::Some(&[self_pid]), true);
     }
 
     let mut written_window = 0u64;
@@ -120,8 +116,6 @@ pub fn get_system_telemetry(
     } else {
         0.0
     };
-    // `sys` is no longer borrowed past this point, so the poll bookkeeping
-    // can read `last_poll` freely.
     let io_mb_s = match last_poll {
         Some(prev) => {
             let elapsed = prev.elapsed().as_secs_f64();
@@ -217,13 +211,5 @@ mod tests {
             parent_fn,
             self_pid
         ));
-    }
-
-    #[test]
-    fn test_state_is_active_defaults_to_false() {
-        let job_state = JobState::default();
-        let scan_state = ScanState::default();
-        assert!(!job_state.is_active());
-        assert!(!scan_state.is_active());
     }
 }

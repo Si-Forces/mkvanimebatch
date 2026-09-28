@@ -1,6 +1,6 @@
 # 0001. Sidecar Contract and Structured Planning
 
-> **Status**: Superseded by ADR-0007, ADR-0008, ADR-0010
+> **Status**: Superseded by ADR-0007, ADR-0008, ADR-0010 (amended 2026-09-28)
 > **Date**: 2026-03-01
 > **Context**: Media Engine Context & Desktop Application Bridge
 
@@ -58,3 +58,11 @@ Inspection Manifest version 2 replaces per-item candidate copies with release-le
 2. **Consumers**: Rust validates `version == 2` (rejecting both older and newer versions), types `release` and `subtitle_candidates`, and still preserves unknown additive fields at every level. The frontend resolves an item's candidate list as `subtitle_candidates[item.release]` when the assignment UI opens; candidate-selection behavior and precedence are unchanged.
 3. **Clean cutover, no dual support**: neither the engine nor any consumer emits or accepts v1 manifests. This is deliberate — the sidecar and desktop shell ship and upgrade together, so a compatibility window would be dead code.
 4. **Scope**: only the Inspection Manifest is versioned to 2. The `@event:` job-event stream remains version 1, and the manual-assignment payload remains `{"version": 1, "assignments": {...}}` with root-relative POSIX paths.
+
+## Amendment — 2026-09-28
+
+The supersession warning above removes slightly more than was removed, and three parts of this record still read as current. The historical decisions stand as written.
+
+- **The `@event:` NDJSON stream is still live — in the CLI.** Only the desktop's use of it was retired. `mkv-cli --events` still prints each `JobEvent` as a JSON line prefixed `@event: `, and the event vocabulary is still version 1. The desktop host receives the same typed `JobEvent`s in-process and forwards them as `job-event` payloads without any stdout parsing (ADR-0006, ADR-0007).
+- **The manual-assignment payload is gone.** There is no `{"version": 1, "assignments": {...}}` document, no temp file, and no `--sub-assignments` flag: the desktop sends a typed `BatchRequest` whose `assignments` is a `TrackAssignment` array (ADR-0008), and `mkv-cli` accepts only `--assignments`. `parse_assignments_json` still reads the legacy flat `{video: subtitle}` map through that flag (ADR-0012). A missing assigned subtitle fails the batch instead of falling back to automatic matching (ADR-0004, ADR-0008). The desktop also offers an arbitrary subtitle-file picker, so a manual pick is no longer limited to the input-root candidates.
+- **Manifest version enforcement moved to the UI.** `mkv-core` always emits `version: 2` but does not reject other versions when deserializing; the Queue Tracker rejects any manifest whose `version` is not `2`.

@@ -1,13 +1,12 @@
-use mkv_core::pipeline::CancellationToken;
-use serde::{Deserialize, Serialize};
+use mkv_core::pipeline::{CancellationToken, ItemOutcome, JobEvent};
+use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::thread;
+use std::time::Duration;
 
 use tauri::State;
-
-// ─── App State ──────────────────────────────────────────────────────────────
 
 pub struct JobSlot {
     pub(crate) id: u64,
@@ -28,17 +27,16 @@ pub(crate) fn reserve_job_slot(
     Ok(lock)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BatchStatus {
-    Queued,
     Running,
     Completed,
     Cancelled,
     Error,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ItemStatus {
     Queued,
@@ -51,9 +49,8 @@ pub enum ItemStatus {
 }
 
 impl ItemStatus {
-    /// Returns true if the status represents a finished/terminal item outcome.
-    /// Note: `Planned` is a terminal dry-run outcome emitted upon completion
-    /// (pipeline.rs:375, 1040), never a queued or pending state.
+    /// Whether the item has a final outcome. `Planned` is the dry-run outcome,
+    /// not a pending state.
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
@@ -66,24 +63,24 @@ impl ItemStatus {
     }
 }
 
-impl From<mkv_core::pipeline::ItemOutcome> for ItemStatus {
-    fn from(outcome: mkv_core::pipeline::ItemOutcome) -> Self {
+impl From<ItemOutcome> for ItemStatus {
+    fn from(outcome: ItemOutcome) -> Self {
         match outcome {
-            mkv_core::pipeline::ItemOutcome::Completed => ItemStatus::Completed,
-            mkv_core::pipeline::ItemOutcome::Skipped => ItemStatus::Skipped,
-            mkv_core::pipeline::ItemOutcome::Error => ItemStatus::Error,
-            mkv_core::pipeline::ItemOutcome::Cancelled => ItemStatus::Cancelled,
-            mkv_core::pipeline::ItemOutcome::Planned => ItemStatus::Planned,
+            ItemOutcome::Completed => ItemStatus::Completed,
+            ItemOutcome::Skipped => ItemStatus::Skipped,
+            ItemOutcome::Error => ItemStatus::Error,
+            ItemOutcome::Cancelled => ItemStatus::Cancelled,
+            ItemOutcome::Planned => ItemStatus::Planned,
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ItemSnapshot {
     pub id: String,
     pub file: String,
     pub status: ItemStatus,
-    pub outcome: Option<mkv_core::pipeline::ItemOutcome>,
+    pub outcome: Option<ItemOutcome>,
     pub progress: Option<f64>,
     pub start_time_ms: Option<u64>,
     pub duration_sec: Option<f64>,
@@ -91,7 +88,7 @@ pub struct ItemSnapshot {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct JobSnapshot {
     pub job_id: u64,
     pub mode: String,
@@ -108,14 +105,24 @@ pub struct JobSnapshot {
 pub struct JobState {
     pub slot: Mutex<Option<JobSlot>>,
     pub next_id: AtomicU64,
-    pub snapshot: std::sync::Mutex<Option<JobSnapshot>>,
+    pub snapshot: Mutex<Option<JobSnapshot>>,
     accepting_starts: AtomicBool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl Default for JobState {
+    fn default() -> Self {
+        Self {
+            slot: Mutex::new(None),
+            next_id: AtomicU64::new(1),
+            snapshot: Mutex::new(None),
+            accepting_starts: AtomicBool::new(true),
+        }
+    }
+}
+
 pub(crate) struct ActiveScan {
     pub(crate) id: u64,
-    pub(crate) cancel_token: Option<CancellationToken>,
+    pub(crate) cancel_token: CancellationToken,
 }
 
 pub struct ScanState {
@@ -149,7 +156,7 @@ impl ScanState {
         }
     }
 
-    fn wait_until_empty(&self, timeout: std::time::Duration) -> Result<(), String> {
+    fn wait_until_empty(&self, timeout: Duration) -> Result<(), String> {
         wait_until(timeout, "directory inspection", || {
             Ok(self.active.lock().map_err(|e| e.to_string())?.is_none())
         })
@@ -167,17 +174,6 @@ impl Drop for ScanRegistration<'_> {
             if active.as_ref().is_some_and(|scan| scan.id == self.id) {
                 *active = None;
             }
-        }
-    }
-}
-
-impl Default for JobState {
-    fn default() -> Self {
-        Self {
-            slot: Mutex::new(None),
-            next_id: AtomicU64::new(1),
-            snapshot: std::sync::Mutex::new(None),
-            accepting_starts: AtomicBool::new(true),
         }
     }
 }
@@ -205,7 +201,7 @@ impl JobState {
     pub(crate) fn wait_until_released(
         &self,
         target_id: u64,
-        timeout: std::time::Duration,
+        timeout: Duration,
     ) -> Result<(), String> {
         wait_until(timeout, "job", || {
             Ok(!self
@@ -217,7 +213,7 @@ impl JobState {
         })
     }
 
-    fn wait_until_empty(&self, timeout: std::time::Duration) -> Result<(), String> {
+    fn wait_until_empty(&self, timeout: Duration) -> Result<(), String> {
         wait_until(timeout, "job", || {
             Ok(self.slot.lock().map_err(|e| e.to_string())?.is_none())
         })
@@ -227,7 +223,7 @@ impl JobState {
         &self,
         job_id: u64,
         mode: &str,
-        input_dir: Option<String>,
+        input_dir: String,
     ) -> Result<(), String> {
         *self.snapshot.lock().map_err(|error| error.to_string())? = Some(JobSnapshot {
             job_id,
@@ -237,16 +233,14 @@ impl JobState {
             duration_sec: None,
             total_items: 0,
             completed_items: 0,
-            input_dir,
+            input_dir: Some(input_dir),
             ordered_item_ids: Vec::new(),
             items: HashMap::new(),
         });
         Ok(())
     }
 
-    pub fn update_snapshot(&self, event: &mkv_core::pipeline::JobEvent, job_id: u64, mode: &str) {
-        use mkv_core::pipeline::{ItemOutcome, JobEvent};
-
+    pub fn update_snapshot(&self, event: &JobEvent, job_id: u64, mode: &str) {
         if let Ok(mut snap) = self.snapshot.lock() {
             if !matches!(event, JobEvent::BatchStart { .. })
                 && !snap.as_ref().is_some_and(|snapshot| {
@@ -413,8 +407,9 @@ impl JobState {
         }
     }
 }
+
 /// Default bound on waiting for owned-process teardown to finish.
-const STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+const STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
 fn combine_errors(errors: impl IntoIterator<Item = Option<String>>) -> Result<(), String> {
     let errors: Vec<String> = errors.into_iter().flatten().collect();
@@ -425,7 +420,7 @@ fn combine_errors(errors: impl IntoIterator<Item = Option<String>>) -> Result<()
     }
 }
 
-pub(crate) fn stop_job_inner(
+fn stop_job_inner(
     state: &JobState,
     scan_state: &ScanState,
     job_id: Option<u64>,
@@ -438,8 +433,8 @@ pub(crate) fn stop_job_inner(
         }
     }
     // Stopping the job must proceed even if scan teardown fails; report both.
-    let scan_error = stop_scan_internal(scan_state).err();
-    let job_error = stop_job_internal(state, job_id).err();
+    let scan_error = stop_scan(scan_state).err();
+    let job_error = stop_job_internal(state, job_id, STOP_TIMEOUT).err();
     combine_errors([scan_error, job_error])
 }
 
@@ -452,38 +447,23 @@ pub fn stop_job(
     stop_job_inner(&state, &scan_state, job_id)
 }
 
-pub fn stop_scan_internal(state: &ScanState) -> Result<(), String> {
+fn stop_scan(state: &ScanState) -> Result<(), String> {
     let _start_lock = state.start_lock.lock().map_err(|e| e.to_string())?;
     stop_registered_scan(state)
-}
-
-/// In-process scan cancellation is immediate via `CancellationToken`; `_timeout` is retained
-/// for uniform shutdown orchestration in `cleanup_owned_processes_with_timeout`.
-pub(crate) fn stop_scan_internal_with_timeout(
-    state: &ScanState,
-    _timeout: std::time::Duration,
-) -> Result<(), String> {
-    stop_scan_internal(state)
 }
 
 pub(crate) fn stop_registered_scan(state: &ScanState) -> Result<(), String> {
     let mut active = state.active.lock().map_err(|e| e.to_string())?;
     if let Some(scan) = active.take() {
-        if let Some(token) = scan.cancel_token {
-            token.cancel();
-        }
+        scan.cancel_token.cancel();
     }
     Ok(())
 }
 
-pub fn stop_job_internal(state: &JobState, expected_id: Option<u64>) -> Result<(), String> {
-    stop_job_internal_with_timeout(state, expected_id, STOP_TIMEOUT)
-}
-
-pub(crate) fn stop_job_internal_with_timeout(
+pub(crate) fn stop_job_internal(
     state: &JobState,
     expected_id: Option<u64>,
-    timeout: std::time::Duration,
+    timeout: Duration,
 ) -> Result<(), String> {
     let target = {
         let mut lock = state.slot.lock().map_err(|e| e.to_string())?;
@@ -508,13 +488,13 @@ pub(crate) fn stop_job_internal_with_timeout(
             slot.pipeline_abort.abort();
         }
         drop(lock);
-        return state.wait_until_released(target_id, std::time::Duration::from_secs(1));
+        return state.wait_until_released(target_id, Duration::from_secs(1));
     }
     Ok(())
 }
 
 fn wait_until(
-    timeout: std::time::Duration,
+    timeout: Duration,
     operation: &str,
     released: impl Fn() -> Result<bool, String>,
 ) -> Result<(), String> {
@@ -528,7 +508,7 @@ fn wait_until(
                 "Timed out waiting for {operation} cleanup to finish."
             ));
         }
-        thread::sleep(std::time::Duration::from_millis(50));
+        thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -539,18 +519,18 @@ pub fn cleanup_owned_processes(job_state: &JobState, scan_state: &ScanState) -> 
 pub(crate) fn cleanup_owned_processes_with_timeout(
     job_state: &JobState,
     scan_state: &ScanState,
-    timeout: std::time::Duration,
+    timeout: Duration,
 ) -> Result<(), String> {
     // Both stops run before either wait; a failed stop already reports why, so skip its wait.
-    let scan_stop = stop_scan_internal_with_timeout(scan_state, timeout);
-    let job_stop = stop_job_internal_with_timeout(job_state, None, timeout);
+    let scan_stop = stop_scan(scan_state);
+    let job_stop = stop_job_internal(job_state, None, timeout);
     let scan_error = scan_stop
         .and_then(|()| scan_state.wait_until_empty(timeout))
         .err();
     let job_error = job_stop
         .and_then(|()| {
             if job_state.is_active() {
-                job_state.wait_until_empty(std::time::Duration::from_millis(50))
+                job_state.wait_until_empty(Duration::from_millis(50))
             } else {
                 Ok(())
             }
@@ -566,16 +546,14 @@ pub(crate) fn cleanup_owned_processes_with_timeout(
 pub fn begin_shutdown(job_state: &JobState, scan_state: &ScanState) -> bool {
     job_state.accepting_starts.store(false, Ordering::SeqCst);
     scan_state.accepting_starts.store(false, Ordering::SeqCst);
-    if let Ok(mut lock) = job_state.slot.lock() {
-        if let Some(slot) = lock.as_mut() {
+    if let Ok(lock) = job_state.slot.lock() {
+        if let Some(slot) = lock.as_ref() {
             slot.cancel_token.cancel();
         }
     }
-    if let Ok(mut lock) = scan_state.active.lock() {
-        if let Some(scan) = lock.as_mut() {
-            if let Some(token) = &scan.cancel_token {
-                token.cancel();
-            }
+    if let Ok(lock) = scan_state.active.lock() {
+        if let Some(scan) = lock.as_ref() {
+            scan.cancel_token.cancel();
         }
     }
     let scan_starting = scan_state.start_lock.try_lock().is_err();
@@ -586,6 +564,7 @@ pub fn cancel_shutdown(job_state: &JobState, scan_state: &ScanState) {
     job_state.accepting_starts.store(true, Ordering::SeqCst);
     scan_state.accepting_starts.store(true, Ordering::SeqCst);
 }
+
 #[tauri::command]
 pub fn close_window(
     window: tauri::Window,
@@ -604,109 +583,132 @@ pub fn close_window(
 }
 
 #[cfg(test)]
+pub(crate) mod test_support {
+    use super::JobSlot;
+    use mkv_core::pipeline::{BatchItemInfo, CancellationToken, ItemOutcome, JobEvent};
+
+    pub(crate) fn dummy_slot(id: u64) -> JobSlot {
+        JobSlot {
+            id,
+            cancel_token: CancellationToken::new(),
+            pipeline_abort: tauri::async_runtime::spawn(async {}).inner().abort_handle(),
+        }
+    }
+
+    /// A `BatchStart` listing `ids` in engine order; each item's file is `<id>.mkv`.
+    pub(crate) fn batch_start(ids: &[&str]) -> JobEvent {
+        JobEvent::BatchStart {
+            version: 1,
+            total: ids.len(),
+            input_dir: "/anime".into(),
+            items: Some(
+                ids.iter()
+                    .map(|id| BatchItemInfo {
+                        id: (*id).into(),
+                        file: format!("{id}.mkv"),
+                    })
+                    .collect(),
+            ),
+            extra: Default::default(),
+        }
+    }
+
+    pub(crate) fn item_start(id: &str) -> JobEvent {
+        JobEvent::ItemStart {
+            version: 1,
+            id: id.into(),
+            file: format!("{id}.mkv"),
+            extra: Default::default(),
+        }
+    }
+
+    pub(crate) fn item_progress(id: &str, progress: f64) -> JobEvent {
+        JobEvent::ItemProgress {
+            version: 1,
+            id: id.into(),
+            file: format!("{id}.mkv"),
+            progress,
+            speed: None,
+            eta: None,
+            extra: Default::default(),
+        }
+    }
+
+    pub(crate) fn item_complete(id: &str, duration_sec: f64) -> JobEvent {
+        JobEvent::ItemComplete {
+            version: 1,
+            id: id.into(),
+            file: format!("{id}.mkv"),
+            status: ItemOutcome::Completed,
+            reason: None,
+            error: None,
+            duration_sec: Some(duration_sec),
+            extra: Default::default(),
+        }
+    }
+
+    pub(crate) fn batch_complete(success: bool, cancelled: bool) -> JobEvent {
+        JobEvent::BatchComplete {
+            version: 1,
+            success,
+            cancelled,
+            extra: Default::default(),
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    use super::test_support::*;
     use super::*;
 
-    #[test]
-    fn test_job_state_initialization_and_increment() {
-        let state = JobState::default();
-        assert!(state.slot.lock().unwrap().is_none());
-        assert!(state.snapshot.lock().unwrap().is_none());
-        assert_eq!(state.next_id.load(Ordering::SeqCst), 1);
-        let id1 = state.next_id.fetch_add(1, Ordering::SeqCst);
-        let id2 = state.next_id.fetch_add(1, Ordering::SeqCst);
-        assert_eq!(id1, 1);
-        assert_eq!(id2, 2);
-        assert_eq!(state.next_id.load(Ordering::SeqCst), 3);
+    fn snapshot(state: &JobState) -> JobSnapshot {
+        state.snapshot.lock().unwrap().clone().unwrap()
+    }
+
+    fn poison<T: Send>(mutex: &Mutex<T>) {
+        let _ = thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let _guard = mutex.lock().unwrap();
+                    panic!("poison {}", std::any::type_name::<T>());
+                })
+                .join()
+        });
     }
 
     #[test]
     fn test_job_state_snapshot_lifecycle() {
         let state = JobState::default();
-        assert!(state.snapshot.lock().unwrap().is_none());
+        state.update_snapshot(&batch_start(&["ep1"]), 10, "remux");
+        let snap = snapshot(&state);
+        assert_eq!(snap.job_id, 10);
+        assert_eq!(snap.mode, "remux");
+        assert_eq!(snap.status, BatchStatus::Running);
+        assert_eq!(snap.total_items, 1);
+        assert_eq!(snap.completed_items, 0);
+        assert_eq!(snap.ordered_item_ids, vec!["ep1".to_string()]);
 
-        let start_event = mkv_core::pipeline::JobEvent::BatchStart {
-            version: 1,
-            total: 1,
-            input_dir: "/test".to_string(),
-            items: Some(vec![mkv_core::pipeline::BatchItemInfo {
-                id: "ep1".to_string(),
-                file: "ep1.mkv".to_string(),
-            }]),
-            extra: Default::default(),
-        };
-        state.update_snapshot(&start_event, 10, "remux");
-        {
-            let snap_guard = state.snapshot.lock().unwrap();
-            let snap = snap_guard.as_ref().unwrap();
-            assert_eq!(snap.job_id, 10);
-            assert_eq!(snap.mode, "remux");
-            assert_eq!(snap.status, BatchStatus::Running);
-            assert_eq!(snap.total_items, 1);
-            assert_eq!(snap.completed_items, 0);
-            assert_eq!(snap.ordered_item_ids, vec!["ep1".to_string()]);
-        }
+        state.update_snapshot(&item_start("ep1"), 10, "remux");
+        assert_eq!(snapshot(&state).items["ep1"].status, ItemStatus::Processing);
 
-        let item_start = mkv_core::pipeline::JobEvent::ItemStart {
-            version: 1,
-            id: "ep1".to_string(),
-            file: "ep1.mkv".to_string(),
-            extra: Default::default(),
-        };
-        state.update_snapshot(&item_start, 10, "remux");
-        {
-            let snap_guard = state.snapshot.lock().unwrap();
-            let snap = snap_guard.as_ref().unwrap();
-            assert_eq!(snap.items.len(), 1);
-            let item = snap.items.get("ep1").unwrap();
-            assert_eq!(item.status, ItemStatus::Processing);
-        }
+        let complete = item_complete("ep1", 42.5);
+        state.update_snapshot(&complete, 10, "remux");
+        let snap = snapshot(&state);
+        assert_eq!(snap.completed_items, 1);
+        let item = &snap.items["ep1"];
+        assert_eq!(item.status, ItemStatus::Completed);
+        assert_eq!(item.duration_sec, Some(42.5));
+        assert_eq!(item.outcome, Some(ItemOutcome::Completed));
 
-        let item_complete = mkv_core::pipeline::JobEvent::ItemComplete {
-            version: 1,
-            id: "ep1".to_string(),
-            file: "ep1.mkv".to_string(),
-            status: mkv_core::pipeline::ItemOutcome::Completed,
-            reason: None,
-            error: None,
-            duration_sec: Some(42.5),
-            extra: Default::default(),
-        };
-        state.update_snapshot(&item_complete, 10, "remux");
-        {
-            let snap_guard = state.snapshot.lock().unwrap();
-            let snap = snap_guard.as_ref().unwrap();
-            assert_eq!(snap.completed_items, 1);
-            let item = snap.items.get("ep1").unwrap();
-            assert_eq!(item.status, ItemStatus::Completed);
-            assert_eq!(item.duration_sec, Some(42.5));
-            assert_eq!(
-                item.outcome,
-                Some(mkv_core::pipeline::ItemOutcome::Completed)
-            );
-        }
+        // A duplicate completion must not count the item twice.
+        state.update_snapshot(&complete, 10, "remux");
+        assert_eq!(snapshot(&state).completed_items, 1);
 
-        // Duplicate completion event must not increment completed_items beyond 1
-        state.update_snapshot(&item_complete, 10, "remux");
-        {
-            let snap_guard = state.snapshot.lock().unwrap();
-            let snap = snap_guard.as_ref().unwrap();
-            assert_eq!(snap.completed_items, 1);
-        }
-
-        let batch_complete = mkv_core::pipeline::JobEvent::BatchComplete {
-            version: 1,
-            success: true,
-            cancelled: false,
-            extra: Default::default(),
-        };
-        state.update_snapshot(&batch_complete, 10, "remux");
-        {
-            let snap_guard = state.snapshot.lock().unwrap();
-            let snap = snap_guard.as_ref().unwrap();
-            assert_eq!(snap.status, BatchStatus::Completed);
-            assert_eq!(snap.duration_sec, None);
-        }
+        state.update_snapshot(&batch_complete(true, false), 10, "remux");
+        let snap = snapshot(&state);
+        assert_eq!(snap.status, BatchStatus::Completed);
+        assert_eq!(snap.duration_sec, None);
 
         state.clear_snapshot();
         assert!(state.snapshot.lock().unwrap().is_none());
@@ -715,50 +717,14 @@ mod tests {
     #[test]
     fn test_batch_complete_success_transitions_lingering_queued_items_to_error() {
         let state = JobState::default();
-        let start_event = mkv_core::pipeline::JobEvent::BatchStart {
-            version: 1,
-            total: 2,
-            input_dir: "/test".to_string(),
-            items: Some(vec![
-                mkv_core::pipeline::BatchItemInfo {
-                    id: "ep1".to_string(),
-                    file: "ep1.mkv".to_string(),
-                },
-                mkv_core::pipeline::BatchItemInfo {
-                    id: "ep2".to_string(),
-                    file: "ep2.mkv".to_string(),
-                },
-            ]),
-            extra: Default::default(),
-        };
-        state.update_snapshot(&start_event, 10, "remux");
+        state.update_snapshot(&batch_start(&["ep1", "ep2"]), 10, "remux");
+        state.update_snapshot(&item_complete("ep1", 10.0), 10, "remux");
+        state.update_snapshot(&batch_complete(true, false), 10, "remux");
 
-        let item_complete = mkv_core::pipeline::JobEvent::ItemComplete {
-            version: 1,
-            id: "ep1".to_string(),
-            file: "ep1.mkv".to_string(),
-            status: mkv_core::pipeline::ItemOutcome::Completed,
-            reason: None,
-            error: None,
-            duration_sec: Some(10.0),
-            extra: Default::default(),
-        };
-        state.update_snapshot(&item_complete, 10, "remux");
-
-        // ep2 was left in Queued state!
-        let batch_complete = mkv_core::pipeline::JobEvent::BatchComplete {
-            version: 1,
-            success: true,
-            cancelled: false,
-            extra: Default::default(),
-        };
-        state.update_snapshot(&batch_complete, 10, "remux");
-
-        let snap_guard = state.snapshot.lock().unwrap();
-        let snap = snap_guard.as_ref().unwrap();
+        let snap = snapshot(&state);
         assert_eq!(snap.status, BatchStatus::Error);
-        assert_eq!(snap.items.get("ep1").unwrap().status, ItemStatus::Completed);
-        let ep2 = snap.items.get("ep2").unwrap();
+        assert_eq!(snap.items["ep1"].status, ItemStatus::Completed);
+        let ep2 = &snap.items["ep2"];
         assert_eq!(ep2.status, ItemStatus::Error);
         assert_eq!(
             ep2.error.as_deref(),
@@ -767,148 +733,48 @@ mod tests {
     }
 
     #[test]
-    fn test_item_status_serde_and_from() {
+    fn test_item_status_wire_names() {
+        let statuses = [
+            ItemStatus::Queued,
+            ItemStatus::Processing,
+            ItemStatus::Completed,
+            ItemStatus::Skipped,
+            ItemStatus::Error,
+            ItemStatus::Cancelled,
+            ItemStatus::Planned,
+        ];
         assert_eq!(
-            serde_json::to_string(&ItemStatus::Queued).unwrap(),
-            "\"queued\""
+            serde_json::to_value(statuses).unwrap(),
+            serde_json::json!([
+                "queued",
+                "processing",
+                "completed",
+                "skipped",
+                "error",
+                "cancelled",
+                "planned"
+            ])
         );
-        assert_eq!(
-            serde_json::to_string(&ItemStatus::Processing).unwrap(),
-            "\"processing\""
-        );
-        assert_eq!(
-            serde_json::to_string(&ItemStatus::Completed).unwrap(),
-            "\"completed\""
-        );
-        assert_eq!(
-            serde_json::to_string(&ItemStatus::Skipped).unwrap(),
-            "\"skipped\""
-        );
-        assert_eq!(
-            serde_json::to_string(&ItemStatus::Error).unwrap(),
-            "\"error\""
-        );
-        assert_eq!(
-            serde_json::to_string(&ItemStatus::Cancelled).unwrap(),
-            "\"cancelled\""
-        );
-        assert_eq!(
-            serde_json::to_string(&ItemStatus::Planned).unwrap(),
-            "\"planned\""
-        );
-
-        assert_eq!(
-            ItemStatus::from(mkv_core::pipeline::ItemOutcome::Completed),
-            ItemStatus::Completed
-        );
-        assert_eq!(
-            ItemStatus::from(mkv_core::pipeline::ItemOutcome::Skipped),
-            ItemStatus::Skipped
-        );
-        assert_eq!(
-            ItemStatus::from(mkv_core::pipeline::ItemOutcome::Error),
-            ItemStatus::Error
-        );
-        assert_eq!(
-            ItemStatus::from(mkv_core::pipeline::ItemOutcome::Cancelled),
-            ItemStatus::Cancelled
-        );
-        assert_eq!(
-            ItemStatus::from(mkv_core::pipeline::ItemOutcome::Planned),
-            ItemStatus::Planned
-        );
-    }
-
-    #[test]
-    fn test_clear_snapshot_safely_clears_without_panic() {
-        let state = JobState::default();
-        // Clearing when already None does not panic
-        state.clear_snapshot();
-        assert!(state.snapshot.lock().unwrap().is_none());
-
-        // Populate a snapshot
-        let start_event = mkv_core::pipeline::JobEvent::BatchStart {
-            version: 1,
-            total: 1,
-            input_dir: "/test".to_string(),
-            items: None,
-            extra: Default::default(),
-        };
-        state.update_snapshot(&start_event, 42, "remux");
-        assert!(state.snapshot.lock().unwrap().is_some());
-
-        // Clear existing snapshot safely
-        state.clear_snapshot();
-        assert!(state.snapshot.lock().unwrap().is_none());
     }
 
     #[test]
     fn test_live_snapshot_retains_only_active_order_and_clamped_progress() {
-        use mkv_core::pipeline::{BatchItemInfo, JobEvent};
-
         let state = JobState::default();
-        state
-            .begin_snapshot(10, "remux", Some("/anime".into()))
-            .unwrap();
-        let start_time_ms = state
-            .snapshot
-            .lock()
-            .unwrap()
-            .as_ref()
-            .unwrap()
-            .start_time_ms;
-        state.update_snapshot(
-            &JobEvent::BatchStart {
-                version: 1,
-                total: 2,
-                input_dir: "/anime".to_string(),
-                items: Some(vec![
-                    BatchItemInfo {
-                        id: "ep2".into(),
-                        file: "02.mkv".into(),
-                    },
-                    BatchItemInfo {
-                        id: "ep1".into(),
-                        file: "01.mkv".into(),
-                    },
-                ]),
-                extra: Default::default(),
-            },
-            10,
-            "remux",
-        );
+        state.begin_snapshot(10, "remux", "/anime".into()).unwrap();
+        let start_time_ms = snapshot(&state).start_time_ms;
+        state.update_snapshot(&batch_start(&["ep2", "ep1"]), 10, "remux");
         for id in ["ep3", "ep2"] {
-            state.update_snapshot(
-                &JobEvent::ItemStart {
-                    version: 1,
-                    id: id.to_string(),
-                    file: format!("{id}.mkv"),
-                    extra: Default::default(),
-                },
-                10,
-                "remux",
-            );
+            state.update_snapshot(&item_start(id), 10, "remux");
         }
         for progress in [150.0, -8.0, 70.0] {
-            state.update_snapshot(
-                &JobEvent::ItemProgress {
-                    version: 1,
-                    id: "ep2".into(),
-                    file: "02.mkv".into(),
-                    progress,
-                    speed: None,
-                    eta: None,
-                    extra: Default::default(),
-                },
-                10,
-                "remux",
+            state.update_snapshot(&item_progress("ep2", progress), 10, "remux");
+            assert_eq!(
+                snapshot(&state).items["ep2"].progress,
+                Some(progress.clamp(0.0, 100.0))
             );
-            let expected = progress.clamp(0.0, 100.0);
-            let snap = state.snapshot.lock().unwrap();
-            assert_eq!(snap.as_ref().unwrap().items["ep2"].progress, Some(expected));
         }
 
-        let snapshot = state.snapshot.lock().unwrap().clone().unwrap();
+        let snapshot = snapshot(&state);
         assert_eq!(snapshot.start_time_ms, start_time_ms);
         assert_eq!(
             snapshot.ordered_item_ids,
@@ -919,6 +785,8 @@ mod tests {
         assert!(!snapshot.items.contains_key("ep3"));
         assert_eq!(snapshot.items["ep2"].status, ItemStatus::Processing);
         assert!(snapshot.items["ep2"].start_time_ms.is_some());
+        assert_eq!(snapshot.items["ep1"].status, ItemStatus::Queued);
+        assert_eq!(snapshot.items["ep1"].file, "ep1.mkv");
         assert_eq!(snapshot.items["ep1"].start_time_ms, None);
         let value = serde_json::to_value(snapshot).unwrap();
         assert_eq!(value["ordered_item_ids"], serde_json::json!(["ep2", "ep1"]));
@@ -928,147 +796,61 @@ mod tests {
 
     #[test]
     fn test_update_snapshot_batch_complete_transitions_processing_items() {
-        // Test cancelled batch complete
-        let state = JobState::default();
-        let start_event = mkv_core::pipeline::JobEvent::BatchStart {
-            version: 1,
-            total: 1,
-            input_dir: "/test".to_string(),
-            items: Some(vec![mkv_core::pipeline::BatchItemInfo {
-                id: "ep1".to_string(),
-                file: "ep1.mkv".to_string(),
-            }]),
-            extra: Default::default(),
-        };
-        state.update_snapshot(&start_event, 1, "remux");
-        let item_start = mkv_core::pipeline::JobEvent::ItemStart {
-            version: 1,
-            id: "ep1".to_string(),
-            file: "ep1.mkv".to_string(),
-            extra: Default::default(),
-        };
-        state.update_snapshot(&item_start, 1, "remux");
-
-        let batch_cancel = mkv_core::pipeline::JobEvent::BatchComplete {
-            version: 1,
-            success: false,
-            cancelled: true,
-            extra: Default::default(),
-        };
-        state.update_snapshot(&batch_cancel, 1, "remux");
-
-        {
-            let snap = state.snapshot.lock().unwrap();
-            let snap = snap.as_ref().unwrap();
-            assert_eq!(snap.status, BatchStatus::Cancelled);
-            let ep1 = snap.items.get("ep1").unwrap();
-            assert_eq!(ep1.status, ItemStatus::Cancelled);
-            assert_eq!(ep1.reason.as_deref(), Some("Operation cancelled"));
-        }
-
-        // Test error batch complete
-        let state2 = JobState::default();
-        state2.update_snapshot(&start_event, 2, "remux");
-        state2.update_snapshot(&item_start, 2, "remux");
-        let mut err_extra = serde_json::Map::new();
-        err_extra.insert(
-            "error".to_string(),
-            serde_json::Value::String("Fatal error".to_string()),
+        let cancelled = JobState::default();
+        cancelled.update_snapshot(&batch_start(&["ep1"]), 1, "remux");
+        cancelled.update_snapshot(&item_start("ep1"), 1, "remux");
+        cancelled.update_snapshot(&batch_complete(false, true), 1, "remux");
+        let snap = snapshot(&cancelled);
+        assert_eq!(snap.status, BatchStatus::Cancelled);
+        assert_eq!(snap.items["ep1"].status, ItemStatus::Cancelled);
+        assert_eq!(
+            snap.items["ep1"].reason.as_deref(),
+            Some("Operation cancelled")
         );
-        err_extra.insert("duration_sec".to_string(), serde_json::json!(18.25));
-        let batch_err = mkv_core::pipeline::JobEvent::BatchComplete {
+
+        let failed = JobState::default();
+        failed.update_snapshot(&batch_start(&["ep1"]), 2, "remux");
+        failed.update_snapshot(&item_start("ep1"), 2, "remux");
+        let mut extra = serde_json::Map::new();
+        extra.insert("error".into(), "Fatal error".into());
+        extra.insert("duration_sec".into(), serde_json::json!(18.25));
+        let batch_err = JobEvent::BatchComplete {
             version: 1,
             success: false,
             cancelled: false,
-            extra: err_extra,
+            extra,
         };
-        state2.update_snapshot(&batch_err, 2, "remux");
-
-        {
-            let snap = state2.snapshot.lock().unwrap();
-            let snap = snap.as_ref().unwrap();
-            assert_eq!(snap.status, BatchStatus::Error);
-            assert_eq!(snap.duration_sec, Some(18.25));
-            let ep1 = snap.items.get("ep1").unwrap();
-            assert_eq!(ep1.status, ItemStatus::Error);
-            assert_eq!(ep1.error.as_deref(), Some("Fatal error"));
-        }
-    }
-
-    #[test]
-    fn test_update_snapshot_batch_start_populates_queued_items() {
-        let state = JobState::default();
-        let items = vec![
-            mkv_core::pipeline::BatchItemInfo {
-                id: "ep1".to_string(),
-                file: "Episode 1.mkv".to_string(),
-            },
-            mkv_core::pipeline::BatchItemInfo {
-                id: "ep2".to_string(),
-                file: "Episode 2.mkv".to_string(),
-            },
-        ];
-        let start_event = mkv_core::pipeline::JobEvent::BatchStart {
-            version: 1,
-            total: 2,
-            input_dir: "/anime".to_string(),
-            items: Some(items),
-            extra: Default::default(),
-        };
-        state.update_snapshot(&start_event, 5, "remux");
-
-        let snap_guard = state.snapshot.lock().unwrap();
-        let snap = snap_guard.as_ref().unwrap();
-        assert_eq!(snap.total_items, 2);
-        assert_eq!(snap.items.len(), 2);
-
-        let ep1 = snap.items.get("ep1").unwrap();
-        assert_eq!(ep1.file, "Episode 1.mkv");
-        assert_eq!(ep1.status, ItemStatus::Queued);
-
-        let ep2 = snap.items.get("ep2").unwrap();
-        assert_eq!(ep2.file, "Episode 2.mkv");
-        assert_eq!(ep2.status, ItemStatus::Queued);
-    }
-}
-
-#[cfg(test)]
-mod job_tests {
-    use super::*;
-    use std::sync::Arc;
-
-    pub(crate) fn dummy_slot(id: u64) -> JobSlot {
-        JobSlot {
-            id,
-            cancel_token: CancellationToken::new(),
-            pipeline_abort: tauri::async_runtime::spawn(async {}).inner().abort_handle(),
-        }
+        failed.update_snapshot(&batch_err, 2, "remux");
+        let snap = snapshot(&failed);
+        assert_eq!(snap.status, BatchStatus::Error);
+        assert_eq!(snap.duration_sec, Some(18.25));
+        assert_eq!(snap.items["ep1"].status, ItemStatus::Error);
+        assert_eq!(snap.items["ep1"].error.as_deref(), Some("Fatal error"));
     }
 
     #[test]
     fn test_clear_snapshot_ignored_while_job_is_active() {
         let state = JobState::default();
         *state.slot.lock().unwrap() = Some(dummy_slot(42));
-        state.begin_snapshot(42, "remux", None).unwrap();
+        state.begin_snapshot(42, "remux", "/anime".into()).unwrap();
         state.clear_snapshot();
         assert!(state.snapshot.lock().unwrap().is_some());
     }
 
     #[test]
     fn test_wait_for_job_slot_release_waits_for_cleanup() {
-        let state = Arc::new(JobState::default());
+        let state = JobState::default();
         *state.slot.lock().unwrap() = Some(dummy_slot(42));
 
-        let cleanup_state = Arc::clone(&state);
-        let cleanup = thread::spawn(move || {
-            thread::sleep(std::time::Duration::from_millis(100));
-            let _ = cleanup_state.slot.lock().unwrap().take();
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                thread::sleep(Duration::from_millis(100));
+                state.slot.lock().unwrap().take();
+            });
+            assert!(state
+                .wait_until_released(42, Duration::from_secs(1))
+                .is_ok());
         });
-
-        assert!(state
-            .wait_until_released(42, std::time::Duration::from_secs(1))
-            .is_ok());
-        cleanup.join().unwrap();
     }
 
     #[test]
@@ -1076,55 +858,32 @@ mod job_tests {
         let state = JobState::default();
         *state.slot.lock().unwrap() = Some(dummy_slot(42));
 
-        let result = state.wait_until_released(42, std::time::Duration::from_millis(10));
+        let result = state.wait_until_released(42, Duration::from_millis(10));
         assert!(result.unwrap_err().contains("Timed out"));
-        let _ = state.slot.lock().unwrap().take();
     }
 
     #[test]
     fn test_stale_stop_job_does_not_stop_active_scan() {
-        let job_state = JobState::default();
         let scan_state = ScanState::default();
-
-        *job_state.slot.lock().unwrap() = Some(dummy_slot(7));
-
+        let token = CancellationToken::new();
         *scan_state.active.lock().unwrap() = Some(ActiveScan {
             id: 1,
-            cancel_token: None,
+            cancel_token: token.clone(),
         });
 
-        let result = stop_job_inner(&job_state, &scan_state, Some(99));
-        assert!(result.is_ok());
-        assert_eq!(
-            *scan_state.active.lock().unwrap(),
-            Some(ActiveScan {
-                id: 1,
-                cancel_token: None,
-            })
-        );
+        let job_state = JobState::default();
+        *job_state.slot.lock().unwrap() = Some(dummy_slot(7));
+        assert!(stop_job_inner(&job_state, &scan_state, Some(99)).is_ok());
+        assert!(stop_job_inner(&JobState::default(), &scan_state, Some(99)).is_ok());
 
-        let empty_job_state = JobState::default();
-        let result_empty = stop_job_inner(&empty_job_state, &scan_state, Some(99));
-        assert!(result_empty.is_ok());
-        assert_eq!(
-            *scan_state.active.lock().unwrap(),
-            Some(ActiveScan {
-                id: 1,
-                cancel_token: None,
-            })
-        );
-
-        let _ = job_state.slot.lock().unwrap().take();
+        assert!(scan_state.is_active());
+        assert!(!token.is_cancelled());
     }
+
     #[test]
     fn test_stop_job_proceeds_when_scan_teardown_fails() {
-        let scan_state = Arc::new(ScanState::default());
-        let poison_scan = Arc::clone(&scan_state);
-        let _ = thread::spawn(move || {
-            let _lock = poison_scan.start_lock.lock().unwrap();
-            panic!("poison scan teardown");
-        })
-        .join();
+        let scan_state = ScanState::default();
+        poison(&scan_state.start_lock);
 
         let job_state = JobState::default();
         *job_state.slot.lock().unwrap() = Some(dummy_slot(7));
@@ -1137,8 +896,6 @@ mod job_tests {
             .unwrap()
             .as_ref()
             .is_some_and(|slot| slot.cancel_token.is_cancelled()));
-
-        let _ = job_state.slot.lock().unwrap().take();
     }
 
     #[test]
@@ -1146,38 +903,17 @@ mod job_tests {
         let state = JobState::default();
         *state.slot.lock().unwrap() = Some(dummy_slot(42));
 
-        let result =
-            stop_job_internal_with_timeout(&state, None, std::time::Duration::from_millis(50));
+        let result = stop_job_internal(&state, None, Duration::from_millis(50));
         assert!(result.unwrap_err().contains("Timed out"));
         assert!(state.is_active());
-
-        let _ = state.slot.lock().unwrap().take();
     }
-}
-
-#[cfg(test)]
-mod cleanup_tests {
-    use super::*;
-
-    use std::sync::Arc;
 
     #[test]
     fn test_cleanup_attempts_scan_and_job_teardown() {
-        let scan_state = Arc::new(ScanState::default());
-        let poison_scan = Arc::clone(&scan_state);
-        let _ = thread::spawn(move || {
-            let _lock = poison_scan.start_lock.lock().unwrap();
-            panic!("poison scan cleanup");
-        })
-        .join();
-
-        let job_state = Arc::new(JobState::default());
-        let poison_job = Arc::clone(&job_state);
-        let _ = thread::spawn(move || {
-            let _lock = poison_job.slot.lock().unwrap();
-            panic!("poison job cleanup");
-        })
-        .join();
+        let scan_state = ScanState::default();
+        poison(&scan_state.start_lock);
+        let job_state = JobState::default();
+        poison(&job_state.slot);
 
         let error = cleanup_owned_processes(&job_state, &scan_state).unwrap_err();
         assert!(error.contains("Directory inspection cleanup failed"));
@@ -1213,20 +949,17 @@ mod cleanup_tests {
     fn test_cleanup_fails_if_job_slot_not_released() {
         let job_state = JobState::default();
         let scan_state = ScanState::default();
-
-        *job_state.slot.lock().unwrap() = Some(job_tests::dummy_slot(42));
+        *job_state.slot.lock().unwrap() = Some(dummy_slot(42));
 
         let error = cleanup_owned_processes_with_timeout(
             &job_state,
             &scan_state,
-            std::time::Duration::from_millis(50),
+            Duration::from_millis(50),
         )
         .unwrap_err();
 
         assert!(error.contains("Timed out"));
         assert!(error.contains("Job cleanup failed"));
-
-        let _ = job_state.slot.lock().unwrap().take();
     }
 
     #[test]
@@ -1235,10 +968,9 @@ mod cleanup_tests {
         let token = CancellationToken::new();
         *state.active.lock().unwrap() = Some(ActiveScan {
             id: 1,
-            cancel_token: Some(token.clone()),
+            cancel_token: token.clone(),
         });
 
-        assert!(!token.is_cancelled());
         assert!(stop_registered_scan(&state).is_ok());
         assert!(token.is_cancelled());
         assert!(!state.is_active());
@@ -1250,15 +982,13 @@ mod cleanup_tests {
         let token = CancellationToken::new();
         *state.active.lock().unwrap() = Some(ActiveScan {
             id: 1,
-            cancel_token: Some(token.clone()),
+            cancel_token: token.clone(),
         });
 
-        {
-            let _registration = ScanRegistration {
-                state: &state,
-                id: 1,
-            };
-        }
+        drop(ScanRegistration {
+            state: &state,
+            id: 1,
+        });
 
         assert!(!state.is_active());
         assert!(!token.is_cancelled());

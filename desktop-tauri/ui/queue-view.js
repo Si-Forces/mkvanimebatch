@@ -11,28 +11,51 @@ import {
   reduceQueueEvent,
   reconcileQueueSelection,
   reorderItem,
-  selectAll,
-  deselectAll,
-  toggleItemSelection,
+  setAllSelected,
+  setItemSelected,
 } from "./queue-state.js";
 
-export function escapeAttr(str) {
-  return String(str)
-    .replace(/&/g, "&amp;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
+const EMPTY_MANIFEST = { version: 2, items: [] };
+
+/** Card presentation per terminal item status. */
+const TERMINAL_CARD_STYLES = {
+  completed: { card: "completed", color: "green", badge: "COMPLETED", text: item => doneText(item, "Done") },
+  skipped: { card: "skipped", color: "grey", badge: "SKIPPED", text: item => item.reason || "Skipped" },
+  cancelled: { card: "skipped", color: "grey", badge: "CANCELLED", text: item => item.reason || "Cancelled" },
+  planned: { card: "dry-run", color: "cyan", badge: "DRY RUN", text: () => "Planned (Dry Run)" },
+  error: { card: "failed", color: "red", badge: "FAILED", text: item => item.error || "Failed" },
+};
+
+function doneText(item, fallback) {
+  return item.durationSec != null ? `Done in ${formatOutcomeDuration(item.durationSec)}` : fallback;
 }
 
-// ─── Real-Time Episode Queue & Progress/Duration Tracker ───────────────────
+function episodeBadgeText(epNum) {
+  return `EPISODE ${String(epNum).padStart(2, "0")}`;
+}
+
+/** Track tags for a card restored from a JobSnapshot, which carries no inspection metadata. */
+function restoredTagText(item) {
+  switch (item.status) {
+    case "completed":
+      return ["Processed", doneText(item, "Complete")];
+    case "skipped":
+      return ["Skipped", item.reason || "Already processed"];
+    case "cancelled":
+      return ["Cancelled", item.reason || "Cancelled"];
+    case "error":
+      return ["Failed", item.error || "Error"];
+    default:
+      return ["Queued", ""];
+  }
+}
 
 export class QueueTracker {
   constructor(mode) {
     this.mode = mode;
     this.listEl = document.getElementById(`${mode}-episode-list`);
     this.countEl = document.getElementById(`${mode}-queue-count`);
-    this.state = createQueueState({ version: 2, items: [] }, { mode });
+    this.state = createQueueState(EMPTY_MANIFEST);
     this.cards = new Map();
     this.scanToken = 0;
     this.pendingRenderToken = null;
@@ -55,31 +78,29 @@ export class QueueTracker {
     this.subtitleCandidates = {};
     this.heartbeatTimer = null;
     if (this.listEl) {
-      this.listEl.addEventListener("change", (e) => {
-        const check = e.target?.closest?.(".ep-select-check");
-        if (!check?.dataset?.itemId) return;
+      this.listEl.addEventListener("change", e => {
+        const check = e.target.closest(".ep-select-check");
+        const id = check?.dataset.itemId;
+        if (!id) return;
         if (this.selectionLocked) {
           // Put the DOM back in step with the state the request was built from.
-          const item = this.state.items.get(check.dataset.itemId);
+          const item = this.state.items.get(id);
           check.checked = item ? item.selected !== false : false;
           return;
         }
-        toggleItemSelection(this.state, check.dataset.itemId, check.checked);
+        setItemSelected(this.state, id, check.checked);
         this.updateSelectionBadge();
         this.onSelectionChange?.();
       });
 
-      this.listEl.addEventListener("click", (e) => {
-        const btn = e.target?.closest?.(".ep-reorder-btn");
-        if (!btn?.dataset?.itemId) return;
-        if (this.selectionLocked) return;
-        const id = btn.dataset.itemId;
-        const isUp = btn.classList?.contains?.("ep-up-btn");
-        const dir = isUp ? "up" : "down";
-        this.reorderCard(id, dir);
+      this.listEl.addEventListener("click", e => {
+        const btn = e.target.closest(".ep-reorder-btn");
+        if (!btn?.dataset.itemId) return;
+        this.reorderCard(btn.dataset.itemId, btn.classList.contains("ep-up-btn") ? "up" : "down");
       });
     }
   }
+
   cancelRender() {
     if (this.renderRafId) {
       if (typeof cancelAnimationFrame === "function") {
@@ -91,12 +112,10 @@ export class QueueTracker {
   }
 
   startHeartbeat() {
-    if (this.heartbeatTimer === null) {
-      this.heartbeatTimer = setInterval(() => this.tickHeartbeat(), 1000);
-      if (typeof this.heartbeatTimer?.unref === "function") {
-        this.heartbeatTimer.unref();
-      }
-    }
+    if (this.heartbeatTimer !== null) return;
+    this.heartbeatTimer = setInterval(() => this.tickHeartbeat(), 1000);
+    // Node timers keep the process (and test runner) alive unless unref'd.
+    this.heartbeatTimer.unref?.();
   }
 
   stopHeartbeat() {
@@ -107,31 +126,26 @@ export class QueueTracker {
   }
 
   hasProcessingItems() {
-    if (!this.state?.items) return false;
     for (const item of this.state.items.values()) {
-      if (item.status === "processing") {
-        return true;
-      }
+      if (item.status === "processing") return true;
     }
     return false;
   }
 
   formatProcessingTag(item) {
-    const elapsed = Math.floor((Date.now() - (item.startTime || Date.now())) / 1000);
-    if (typeof item.progress === "number") {
-      return `${Math.round(item.progress)}% (${formatElapsedDuration(elapsed)})`;
-    }
-    return `Processing (${formatElapsedDuration(elapsed)})`;
+    const elapsed = formatElapsedDuration((Date.now() - item.startTime) / 1000);
+    return typeof item.progress === "number"
+      ? `${Math.round(item.progress)}% (${elapsed})`
+      : `Processing (${elapsed})`;
   }
 
   tickHeartbeat() {
     let hasProcessing = false;
-    for (const [id, card] of this.cards.entries()) {
-      const item = this.state?.items?.get(id);
-      if (item && item.status === "processing" && card.statusTag) {
-        hasProcessing = true;
-        card.statusTag.textContent = this.formatProcessingTag(item);
-      }
+    for (const [id, card] of this.cards) {
+      const item = this.state.items.get(id);
+      if (item?.status !== "processing") continue;
+      hasProcessing = true;
+      card.statusTag.textContent = this.formatProcessingTag(item);
     }
     if (!hasProcessing && !this.hasProcessingItems()) {
       this.stopHeartbeat();
@@ -166,7 +180,6 @@ export class QueueTracker {
     this.cancelRender();
     const token = ++this.scanToken;
     this.cards.clear();
-    // reconcile selection and order only when its directory matches.
     if (this.listEl) {
       this.listEl.innerHTML = `
         <div class="empty-state-card scanning-state">
@@ -198,28 +211,22 @@ export class QueueTracker {
 
   acceptInspection(token, path, manifest) {
     if (!this.isCurrentScan(token)) return false;
-    this.isScanning = false;
     if (manifest?.version !== 2 || !Array.isArray(manifest.items)) {
-      this.showScanError(token);
-      this.lastScannedPath = null;
+      this.failScan();
       return false;
     }
-    const isSameDir = isSameDirectory(this.currentDirectory, path);
-    this.populateFromInspection(manifest, isSameDir);
+    this.populateFromInspection(manifest, isSameDirectory(this.currentDirectory, path));
     this.setDirectory(path);
-
     return true;
   }
 
   rejectInspection(token) {
-    if (!this.isCurrentScan(token)) return;
-    this.isScanning = false;
-    this.showScanError(token);
-    this.lastScannedPath = null;
+    if (this.isCurrentScan(token)) this.failScan();
   }
 
-  showScanError(token) {
-    if (!this.isCurrentScan(token)) return;
+  failScan() {
+    this.isScanning = false;
+    this.lastScannedPath = null;
     if (this.listEl) {
       this.listEl.innerHTML = this.emptyStateMarkup(
         "Scan failed",
@@ -230,7 +237,7 @@ export class QueueTracker {
     this.setCountText("Scan failed");
   }
 
-  reset(title = "No Episodes Queued", description = "Choose an input release directory to scan MKV episodes into this batch.") {
+  reset(title = "No Episodes Queued", description = "Choose an input directory to scan MKV episodes into this batch.") {
     this.stopHeartbeat();
     this.isScanning = false;
     this.cancelRender();
@@ -240,28 +247,27 @@ export class QueueTracker {
     this.subtitleCandidates = {};
     this.currentDirectory = null;
     this.lastScannedPath = null;
-    this.state = createQueueState({ version: 2, items: [] }, { mode: this.mode });
+    this.state = createQueueState(EMPTY_MANIFEST);
     if (this.listEl) this.listEl.innerHTML = this.emptyStateMarkup(title, description);
     this.setCountText("Ready");
   }
+
   populateFromInspection(manifest, preserveSelection = false) {
     this.stopHeartbeat();
     this.isScanning = false;
     this.cancelRender();
     this.lastManifest = manifest;
     this.cards.clear();
-    const bitrate = this.getBitrate();
-    const nextState = createQueueState(manifest, { mode: this.mode });
+    const nextState = createQueueState(manifest);
     this.state = preserveSelection ? reconcileQueueSelection(nextState, this.state) : nextState;
 
     // A different input directory starts a new batch; only a same-directory
     // rescan carries assignments for IDs that are still present.
     this.assignments = preserveSelection ? carryOverAssignments(this.assignments, manifest) : new Map();
-    this.subtitleCandidates = manifest?.subtitle_candidates ?? {};
+    this.subtitleCandidates = manifest.subtitle_candidates ?? {};
 
-    if (!manifest || !manifest.items || manifest.items.length === 0) {
+    if (manifest.items.length === 0) {
       const directory = this.currentDirectory || this.lastScannedPath;
-
       const { vanishedSelectedIds, knownOrder } = this.state;
       this.reset(
         "No MKV files found",
@@ -269,7 +275,6 @@ export class QueueTracker {
       );
       if (preserveSelection) {
         if (directory) this.setDirectory(directory);
-
         this.state.vanishedSelectedIds = vanishedSelectedIds;
         this.state.knownOrder = knownOrder;
       }
@@ -277,10 +282,7 @@ export class QueueTracker {
     }
 
     this.updateSelectionBadge();
-
-    if (this.state && this.listEl) {
-      this.renderCardsIncrementally(this.scanToken, bitrate);
-    }
+    this.renderCardsIncrementally();
   }
 
   getBitrate() {
@@ -292,17 +294,15 @@ export class QueueTracker {
   // when scanToken has moved on (reset/startScan/reuseInspection bump it).
   // Cards render from the item's CURRENT reducer state, so events that
   // arrived before a card existed are reflected once it is created.
-  renderCardsIncrementally(token, bitrate) {
-    const order = this.state?.order;
-    if (!order || order.length === 0) {
-      this.cancelRender();
-      return;
-    }
-
+  renderCardsIncrementally() {
     this.cancelRender();
-    this.cards.clear();
-    if (this.listEl) this.listEl.innerHTML = "";
+    const order = this.state.order;
+    if (!this.listEl || order.length === 0) return;
 
+    const token = this.scanToken;
+    const bitrate = this.getBitrate();
+    this.cards.clear();
+    this.listEl.innerHTML = "";
     this.pendingRenderToken = token;
     let index = 0;
 
@@ -315,20 +315,10 @@ export class QueueTracker {
       const frag = document.createDocumentFragment();
       const deadline = performance.now() + 8;
       do {
-        const id = order[index];
-        const item = this.state.items.get(id);
+        const item = this.state.items.get(order[index]);
         index++;
         if (!item) continue;
-        const card = this.createCardElement(item.id, item.name, index);
-        this.cards.set(id, card);
-        this.applyAssignmentToCard(id);
-        if (item.inspectionError) {
-          this.applyInspectionError(card, item.inspectionError);
-        } else if (item.metadata) {
-          this.applyMetadata(card, item.metadata, bitrate);
-        } else {
-          this.applyRestoredTags(card, item);
-        }
+        const card = this.mountCard(item, index, bitrate);
         this.renderCardState(card, item);
         frag.appendChild(card.el);
       } while (index < order.length && performance.now() < deadline);
@@ -342,92 +332,71 @@ export class QueueTracker {
 
     this.renderRafId = requestAnimationFrame(renderBatch);
   }
-  applyMetadata(card, meta, bitrate) {
-    if (!card || !card.el || !meta) return;
-    if (card.codec) card.codec.textContent = meta.video_tag || "MKV";
 
-    if (this.mode === "remux") {
-      if (card.tag1) {
-        card.tag1.textContent = meta.has_flac
-          ? `${meta.audio_summary || "Audio"} → Opus ${bitrate}`
-          : (meta.audio_summary ? `${meta.audio_summary} (Passthrough)` : "No Audio");
-      }
-      if (card.tag2) {
-        card.tag2.textContent = meta.fonts_count > 0
-          ? `${meta.sub_summary || "No Subs"} + ${meta.fonts_count} Fonts`
-          : (meta.sub_summary || "No Subs");
-      }
+  /** Create and register a card for `item` with its track tags; the caller attaches it and renders its state. */
+  mountCard(item, epNum, bitrate) {
+    const card = this.createCardElement(item, epNum);
+    this.cards.set(item.id, card);
+    this.applyAssignmentToCard(item.id);
+    if (item.inspectionError) {
+      this.applyInspectionError(card, item.inspectionError);
+    } else if (item.metadata) {
+      this.applyMetadata(card, item.metadata, bitrate);
     } else {
-      if (card.tag1) card.tag1.textContent = meta.sub_summary || "No Subs";
-      if (card.tag2) card.tag2.textContent = `${meta.fonts_count || 0} Attached Fonts`;
+      this.applyRestoredTags(card, item);
+    }
+    return card;
+  }
+
+  applyMetadata(card, meta, bitrate) {
+    card.codec.textContent = meta.video_tag || "MKV";
+    if (this.mode === "remux") {
+      card.tag1.textContent = meta.has_flac
+        ? `${meta.audio_summary || "Audio"} → Opus ${bitrate}`
+        : (meta.audio_summary ? `${meta.audio_summary} (Passthrough)` : "No Audio");
+      card.tag2.textContent = meta.fonts_count > 0
+        ? `${meta.sub_summary || "No Subs"} + ${meta.fonts_count} Fonts`
+        : (meta.sub_summary || "No Subs");
+    } else {
+      card.tag1.textContent = meta.sub_summary || "No Subs";
+      card.tag2.textContent = `${meta.fonts_count || 0} Attached Fonts`;
     }
   }
 
   applyInspectionError(card, error) {
-    if (!card?.el) return;
-    card.el.classList.add("inspection-failed");
-    if (card.codec) card.codec.textContent = "Inspection Failed";
-    if (card.tag1) card.tag1.textContent = "Metadata unavailable";
-    if (card.tag2) card.tag2.textContent = error;
+    card.codec.textContent = "Inspection Failed";
+    card.tag1.textContent = "Metadata unavailable";
+    card.tag2.textContent = error;
   }
 
   applyRestoredTags(card, item) {
-    if (!card || !card.el || !item) return;
-    if (card.codec) card.codec.textContent = "MKV";
-    if (item.status === "completed") {
-      if (card.tag1) card.tag1.textContent = "Processed";
-      if (card.tag2) card.tag2.textContent = item.durationSec != null ? `Done in ${formatOutcomeDuration(item.durationSec)}` : "Complete";
-    } else if (item.status === "skipped") {
-      if (card.tag1) card.tag1.textContent = "Skipped";
-      if (card.tag2) card.tag2.textContent = item.reason || "Already processed";
-    } else if (item.status === "cancelled") {
-      if (card.tag1) card.tag1.textContent = "Cancelled";
-      if (card.tag2) card.tag2.textContent = item.reason || "Cancelled";
-    } else if (item.status === "error") {
-      if (card.tag1) card.tag1.textContent = "Failed";
-      if (card.tag2) card.tag2.textContent = item.error || "Error";
-    } else {
-      if (card.tag1) card.tag1.textContent = "Queued";
-      if (card.tag2) card.tag2.textContent = "";
-    }
+    const [tag1, tag2] = restoredTagText(item);
+    card.codec.textContent = "MKV";
+    card.tag1.textContent = tag1;
+    card.tag2.textContent = tag2;
   }
 
-  createCardElement(id, name, epNum = 1) {
+  createCardElement(item, epNum) {
     const el = document.createElement("div");
     el.className = "tokyo-ep-card";
-    const numStr = String(epNum).padStart(2, "0");
-
-    const codecTag = "MKV";
-    const trackTag1 = "Inspecting tracks...";
-    const trackTag2 = "Reading headers...";
-    const safeId = escapeAttr(id);
-    const subAssignBtn = this.mode === "remux"
-      ? `<button type="button" class="sub-assign-btn" data-item-id="${safeId}" title="Manually assign a subtitle file">+ Sub</button>`
-      : "";
-
-    const selected = this.state.items.get(id)?.selected !== false;
-    const checkHtml = `<input type="checkbox" class="ep-select-check" ${selected ? "checked " : ""}data-item-id="${safeId}" title="Include in batch" />`;
-    const reorderHtml = `
-      <div class="ep-reorder-group">
-        <button type="button" class="ep-reorder-btn ep-up-btn" data-item-id="${safeId}" title="Move up">▲</button>
-        <button type="button" class="ep-reorder-btn ep-down-btn" data-item-id="${safeId}" title="Move down">▼</button>
-      </div>
-    `;
-
+    const subAssignBtn = this.mode === "remux" ? `<button type="button" class="sub-assign-btn"></button>` : "";
     el.innerHTML = `
       <div class="ep-card-top">
         <div class="ep-card-left">
-          ${checkHtml}
-          ${reorderHtml}
-          <div class="ep-badge">EPISODE ${numStr}</div>
+          <input type="checkbox" class="ep-select-check" title="Include in batch" />
+          <div class="ep-reorder-group">
+            <button type="button" class="ep-reorder-btn ep-up-btn" title="Move up">▲</button>
+            <button type="button" class="ep-reorder-btn ep-down-btn" title="Move down">▼</button>
+          </div>
+          <div class="ep-badge">${episodeBadgeText(epNum)}</div>
         </div>
-        <span class="ep-codec">${codecTag}</span>
+        <span class="ep-codec"></span>
         <span class="ep-duration-tag status-tag">Queued</span>
       </div>
       <div class="ep-title"></div>
       <div class="ep-tracks">
-        <span class="track-tag cyan">${trackTag1}</span>
-        <span class="track-tag magenta">${trackTag2}</span>
+        <span class="track-tag cyan"></span>
+        <span class="track-tag magenta"></span>
         ${subAssignBtn}
       </div>
       <div class="ep-progress-bar">
@@ -435,36 +404,23 @@ export class QueueTracker {
       </div>
     `;
 
-    const titleEl = el.querySelector(".ep-title");
-    if (titleEl) titleEl.textContent = name;
-
-    const checkEl = el.querySelector(".ep-select-check");
-    if (checkEl) checkEl.dataset.itemId = id;
-    if (checkEl) checkEl.checked = selected;
-
-    const upBtn = el.querySelector(".ep-up-btn");
-    if (upBtn) upBtn.dataset.itemId = id;
-
-    const downBtn = el.querySelector(".ep-down-btn");
-    if (downBtn) downBtn.dataset.itemId = id;
-
-    const subBtn = el.querySelector(".sub-assign-btn");
-    if (subBtn) subBtn.dataset.itemId = id;
-    return {
+    const card = {
       el,
-      id,
-      name,
       statusTag: el.querySelector(".status-tag"),
       badge: el.querySelector(".ep-badge"),
       fill: el.querySelector(".ep-progress-fill"),
       codec: el.querySelector(".ep-codec"),
       tag1: el.querySelector(".track-tag.cyan"),
       tag2: el.querySelector(".track-tag.magenta"),
-      subBtn,
+      subBtn: el.querySelector(".sub-assign-btn"),
       checkbox: el.querySelector(".ep-select-check"),
-      upBtn: el.querySelector(".ep-up-btn"),
-      downBtn: el.querySelector(".ep-down-btn"),
     };
+    el.querySelector(".ep-title").textContent = item.name;
+    card.checkbox.checked = item.selected !== false;
+    for (const control of [card.checkbox, el.querySelector(".ep-up-btn"), el.querySelector(".ep-down-btn"), card.subBtn]) {
+      if (control) control.dataset.itemId = item.id;
+    }
+    return card;
   }
 
   applyAssignmentToCard(id) {
@@ -472,7 +428,7 @@ export class QueueTracker {
     if (!card?.subBtn) return;
     const assigned = this.assignments.get(id);
     if (assigned) {
-      const assetPath = typeof assigned === "string" ? assigned : (assigned.asset_path || "");
+      const assetPath = assigned.asset_path || "";
       const base = assetPath.split("/").pop().split("\\").pop();
       card.subBtn.textContent = `Sub: ${base}`;
       card.subBtn.classList.add("assigned");
@@ -488,161 +444,83 @@ export class QueueTracker {
     this.stopHeartbeat();
     this.isScanning = false;
     this.cancelRender();
-    if (!snapshot || !snapshot.items) return;
     this.scanToken++;
     this.cards.clear();
     this.lastManifest = null;
     if (this.listEl) this.listEl.innerHTML = "";
 
-    this.state = createQueueStateFromSnapshot(snapshot, { mode: this.mode });
-    if (this.state?.inputDir) {
-      this.setDirectory(this.state.inputDir);
-
-    }
-    if (this.countEl) {
-      this.renderQueueCount();
-    }
-
-    if (this.state && this.listEl) {
-      const bitrate = this.getBitrate();
-      this.renderCardsIncrementally(this.scanToken, bitrate);
-    }
+    this.state = createQueueStateFromSnapshot(snapshot);
+    if (snapshot.input_dir) this.setDirectory(snapshot.input_dir);
+    this.renderQueueCount();
+    this.renderCardsIncrementally();
   }
 
   handleEvent(event) {
-    if (!this.state) return;
     this.state = reduceQueueEvent(this.state, event);
 
     if (event.type === "batch_start") {
-      if (event.input_dir) {
-        this.setDirectory(event.input_dir);
-      }
+      if (event.input_dir) this.setDirectory(event.input_dir);
       if (this.cards.size === 0 && this.pendingRenderToken === null && this.state.order.length > 0) {
-        const bitrate = this.getBitrate();
-        this.renderCardsIncrementally(this.scanToken, bitrate);
+        this.renderCardsIncrementally();
       }
     }
-    if (event.id) {
-      const item = this.state.items.get(event.id);
-      let card = this.cards.get(event.id);
-      if (!card && item && this.pendingRenderToken !== this.scanToken) {
-        const index = this.cards.size + 1;
-        card = this.createCardElement(item.id, item.name, index);
-        this.cards.set(item.id, card);
-        this.applyAssignmentToCard(item.id);
-        if (item.inspectionError) {
-          this.applyInspectionError(card, item.inspectionError);
-        } else if (item.metadata) {
-          this.applyMetadata(card, item.metadata, this.getBitrate());
-        } else {
-          this.applyRestoredTags(card, item);
-        }
+
+    const item = this.state.items.get(event.id);
+    if (item) {
+      let card = this.cards.get(item.id);
+      // While an incremental render is pending it will mount this card from current state.
+      if (!card && this.pendingRenderToken !== this.scanToken) {
+        card = this.mountCard(item, this.cards.size + 1, this.getBitrate());
         if (this.listEl) {
-          const empty = this.listEl.querySelector(".empty-state-card");
-          if (empty && typeof empty.remove === "function") {
-            empty.remove();
-          }
+          this.listEl.querySelector(".empty-state-card")?.remove();
           this.listEl.appendChild(card.el);
         }
       }
-      if (item && card) {
-        this.renderCardState(card, item);
-      }
+      if (card) this.renderCardState(card, item);
     }
 
     this.renderQueueCount();
   }
 
   renderCardState(card, item) {
-    if (!card || !card.el || !item) return;
-
-    switch (item.status) {
-      case "processing": {
-        card.el.className = "tokyo-ep-card processing";
-        card.badge.className = "ep-badge purple";
-        card.badge.textContent = "PROCESSING";
-        card.statusTag.className = "ep-duration-tag yellow status-tag";
-        card.statusTag.textContent = this.formatProcessingTag(item);
-        if (typeof item.progress === "number") {
-          card.fill.className = "ep-progress-fill";
-          card.fill.style.width = `${Math.min(100, Math.max(0, item.progress))}%`;
-        } else {
-          card.fill.className = "ep-progress-fill indeterminate";
-          card.fill.style.width = "";
-        }
-        break;
+    if (item.status === "processing") {
+      card.el.className = "tokyo-ep-card processing";
+      card.badge.className = "ep-badge purple";
+      card.badge.textContent = "PROCESSING";
+      card.statusTag.className = "ep-duration-tag yellow status-tag";
+      card.statusTag.textContent = this.formatProcessingTag(item);
+      if (typeof item.progress === "number") {
+        card.fill.className = "ep-progress-fill";
+        card.fill.style.width = `${item.progress}%`;
+      } else {
+        card.fill.className = "ep-progress-fill indeterminate";
+        card.fill.style.width = "";
       }
-      case "completed": {
-        card.el.className = "tokyo-ep-card completed";
-        card.badge.className = "ep-badge green";
-        card.badge.textContent = "COMPLETED";
-        card.statusTag.className = "ep-duration-tag green status-tag";
-        card.statusTag.textContent = item.durationSec != null ? `Done in ${formatOutcomeDuration(item.durationSec)}` : "Done";
-        card.fill.className = "ep-progress-fill green";
-        card.fill.style.width = "100%";
-        break;
-      }
-      case "skipped": {
-        card.el.className = "tokyo-ep-card skipped";
-        card.badge.className = "ep-badge grey";
-        card.badge.textContent = "SKIPPED";
-        card.statusTag.className = "ep-duration-tag grey status-tag";
-        card.statusTag.textContent = item.reason || "Skipped";
-        card.fill.className = "ep-progress-fill grey";
-        card.fill.style.width = "100%";
-        break;
-      }
-      case "cancelled": {
-        card.el.className = "tokyo-ep-card skipped";
-        card.badge.className = "ep-badge grey";
-        card.badge.textContent = "CANCELLED";
-        card.statusTag.className = "ep-duration-tag grey status-tag";
-        card.statusTag.textContent = item.reason || "Cancelled";
-        card.fill.className = "ep-progress-fill grey";
-        card.fill.style.width = "100%";
-        break;
-      }
-      case "planned": {
-        card.el.className = "tokyo-ep-card dry-run";
-        card.badge.className = "ep-badge cyan";
-        card.badge.textContent = "DRY RUN";
-        card.statusTag.className = "ep-duration-tag cyan status-tag";
-        card.statusTag.textContent = "Planned (Dry Run)";
-        card.fill.className = "ep-progress-fill cyan";
-        card.fill.style.width = "100%";
-        break;
-      }
-      case "error": {
-        card.el.className = "tokyo-ep-card failed";
-        card.badge.className = "ep-badge red";
-        card.badge.textContent = "FAILED";
-        card.statusTag.className = "ep-duration-tag red status-tag";
-        card.statusTag.textContent = item.error || "Failed";
-        card.fill.className = "ep-progress-fill red";
-        card.fill.style.width = "100%";
-        break;
-      }
+      this.startHeartbeat();
+      return;
     }
 
-    if (item.status === "processing") {
-      this.startHeartbeat();
-    } else if (!this.hasProcessingItems()) {
+    const style = TERMINAL_CARD_STYLES[item.status];
+    if (style) {
+      card.el.className = `tokyo-ep-card ${style.card}`;
+      card.badge.className = `ep-badge ${style.color}`;
+      card.badge.textContent = style.badge;
+      card.statusTag.className = `ep-duration-tag ${style.color} status-tag`;
+      card.statusTag.textContent = style.text(item);
+      card.fill.className = `ep-progress-fill ${style.color}`;
+      card.fill.style.width = "100%";
+    }
+    if (!this.hasProcessingItems()) {
       this.stopHeartbeat();
     }
   }
 
   finalize(exitCode, cancelled = false) {
     this.stopHeartbeat();
-    if (!this.state) return;
     this.state = finalizeQueueState(this.state, exitCode, cancelled);
-
-    for (const [id, item] of this.state.items.entries()) {
-      const card = this.cards.get(id);
-      if (card) {
-        this.renderCardState(card, item);
-      }
+    for (const [id, card] of this.cards) {
+      this.renderCardState(card, this.state.items.get(id));
     }
-
     this.renderQueueCount();
   }
 
@@ -653,14 +531,8 @@ export class QueueTracker {
   }
 
   updateSelectionBadge() {
-    if (!this.countEl) return;
-    if (!this.state || this.state.totalCount === 0) {
-      this.setCountText("Ready");
-      return;
-    }
-    const selected = getSelectedCount(this.state);
     const total = this.state.totalCount;
-    this.setCountText(`${selected} / ${total} Selected`);
+    this.setCountText(total === 0 ? "Ready" : `${getSelectedCount(this.state)} / ${total} Selected`);
   }
 
   getSelectedCount() {
@@ -668,28 +540,22 @@ export class QueueTracker {
   }
 
   getSelectedOrderedItemIds() {
-    if (!this.state) return [];
-    return this.state.order.filter(id => {
-      const item = this.state.items.get(id);
-      return item && item.selected !== false;
-    });
+    return this.state.order.filter(id => this.state.items.get(id).selected !== false);
   }
 
   selectAll() {
-    if (this.selectionLocked) return;
-    selectAll(this.state);
-    for (const card of this.cards.values()) {
-      if (card.checkbox) card.checkbox.checked = true;
-    }
-    this.updateSelectionBadge();
-    this.onSelectionChange?.();
+    this.bulkSelect(true);
   }
 
   deselectAll() {
+    this.bulkSelect(false);
+  }
+
+  bulkSelect(selected) {
     if (this.selectionLocked) return;
-    deselectAll(this.state);
+    setAllSelected(this.state, selected);
     for (const card of this.cards.values()) {
-      if (card.checkbox) card.checkbox.checked = false;
+      card.checkbox.checked = selected;
     }
     this.updateSelectionBadge();
     this.onSelectionChange?.();
@@ -699,7 +565,7 @@ export class QueueTracker {
     if (this.selectionLocked) return;
     reorderItem(this.state, id, dir);
     const card = this.cards.get(id);
-    if (card?.el) {
+    if (card) {
       if (dir === "up" && card.el.previousElementSibling) {
         card.el.previousElementSibling.before(card.el);
       } else if (dir === "down" && card.el.nextElementSibling) {
@@ -711,25 +577,20 @@ export class QueueTracker {
   }
 
   updateEpisodeBadges() {
-    if (!this.state?.order) return;
     this.state.order.forEach((id, idx) => {
       const card = this.cards.get(id);
-      if (card?.badge) {
-        const numStr = String(idx + 1).padStart(2, "0");
-        card.badge.textContent = `EPISODE ${numStr}`;
-      }
+      if (card) card.badge.textContent = episodeBadgeText(idx + 1);
     });
   }
 
   renderQueueCount() {
-    if (!this.countEl || !this.state) return;
+    if (!this.countEl) return;
     if (this.state.batchStartTime === null && !this.state.batchCompleted) {
       this.updateSelectionBadge();
       return;
     }
-    const { totalCount, completedCount, skippedCount, cancelledCount = 0, errorCount, batchCompleted } = this.state;
-    const total = Array.isArray(this.state.batchItemIds) ? this.state.batchItemIds.length : totalCount;
-    const processed = completedCount + skippedCount + cancelledCount + errorCount;
+    const { totalCount, completedCount, skippedCount, cancelledCount, errorCount, batchCompleted, batchItemIds } = this.state;
+    const total = batchItemIds?.length ?? totalCount;
 
     if (batchCompleted) {
       const parts = [`${completedCount} Completed`];
@@ -738,6 +599,7 @@ export class QueueTracker {
       if (errorCount > 0) parts.push(`${errorCount} Failed`);
       this.setCountText(`${parts.join(", ")} (${total} Total)`);
     } else {
+      const processed = completedCount + skippedCount + cancelledCount + errorCount;
       this.setCountText(`${processed} / ${total} Processed`);
     }
   }

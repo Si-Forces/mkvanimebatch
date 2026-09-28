@@ -1,6 +1,6 @@
 # 0012. Track Assignment Override Execution and Seam Unification
 
-> **Status**: Accepted (amended 2026-09-26)
+> **Status**: Accepted (amended 2026-09-26 and 2026-09-28)
 > **Date**: 2026-09-20
 > **Context**: Media Engine Context & Desktop Application Bridge
 > **Amends**: ADR-0008, ADR-0011
@@ -53,3 +53,9 @@ Decision 3 established that `custom_offset_ms` supersedes the global `sub_offset
 > The `if ms != 0` guard in `build_mkvmerge_args` reads like an off-by-one bug. It is not. The guard is precisely what gives an explicit zero its meaning. Do not "fix" it.
 
 This also closes a reachability gap. The desktop controller normalised a literal `"0"` to `null`, so the engine's explicit-zero capability could not be exercised from the GUI at all — a decision recorded in the Media Engine glossary was unreachable from the only interface most users have. The controller now sends `0`. The unit normalisation, the rename, and the controller change ship together: split apart, they leave a window in which the UI emits a value the engine reads differently than intended.
+
+## Amendment — 2026-09-28
+
+- **Decision 4 completed: `--sub-assignments` removed.** The deprecated alias no longer exists; `mkv-cli` rejects it with `Unknown argument: --sub-assignments`. `--assignments` is the only assignment flag. `parse_assignments_json` still accepts a `TrackAssignment` array, an object whose `assignments` key holds an array or a map, and the legacy flat `{video: subtitle}` map, so legacy JSON keeps working through `--assignments`. Scripts that passed `--sub-assignments` must switch flags; this ends the CLI backward compatibility ADR-0011 claimed for them.
+- **Decision 1 completed.** `PipelineConfig` no longer has a `sub_assignments` field; `track_assignments: Option<Vec<TrackAssignment>>` is the only assignment input.
+- **The unit change and controller change in the 2026-09-26 amendment are not implemented yet** (tracked as issue #19). The global offset is still `sub_offset: f64` in seconds on `BatchRequest`, `PipelineConfig`, and `--sub-offset`; `build_mkvmerge_args` converts it to milliseconds by rounding `sub_offset * 1000`. No `default_sub_offset_ms` exists, and `job-controller.js` still sends a batch-global `"0"` as `null`. The per-assignment `offset_ms` is integer milliseconds, and the assignment editor already sends an entered `0` as `0`. The override rule and the explicit-zero guard are implemented as that amendment states.

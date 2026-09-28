@@ -1,8 +1,3 @@
-/**
- * log-classify.test.js
- * Pins the display-vocabulary mapping between engine log wording and
- * console CSS classes. Cosmetic contract only — see log-classify.js.
- */
 import test from "node:test";
 import assert from "node:assert/strict";
 import { classifyLine, stripLogPrefix } from "./log-classify.js";

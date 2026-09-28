@@ -1,6 +1,6 @@
 # 0004. Resolution Precedence and Naming Conventions
 
-> **Status**: Accepted; amended by ADR-0008 and revised 2026-09-24 (implemented)
+> **Status**: Accepted; amended by ADR-0008, revised 2026-09-24 and amended 2026-09-28 (implemented)
 > **Date**: 2026-03-15
 > **Context**: Media Engine Context
 
@@ -74,3 +74,9 @@ This section exists because the status line above advertised a revision the body
 **Section 4 — cover names.** The former rule accepted only `cover.<ext>` and `_cover.<ext>`. Replaced by the three episode-cover forms and the two directory-cover forms now in the body, with nearest-directory precedence resolved *before* name specificity, natural-then-full-filename tie-breaking, and an exact-sibling requirement for the bare-stem form. An inapplicable `*_cover` image is never reclassified as a directory-wide cover.
 
 Both revisions are implemented. The ordering stated in the body is shipped behaviour, not an intention.
+
+## Amendment — 2026-09-28
+
+**Section 2 — fractional suffixes are narrower than stated.** The Rust `domain::format_ep` still zero-pads the integer part and copies the fractional part verbatim, but `parse_episode` only captures a fraction of one or two digits (`01.5`, `02.25`), and it first replaces every `.` not between two digits with a space. A non-numeric suffix such as `00.CM` therefore never reaches `format_ep`; `.CM` is lost before parsing. The rule "only the integer half may be validated" holds for numeric fractions only.
+
+**Section 3 — symbol name.** The regex is `domain::COMMENTARY_RE` in Rust, still case-insensitive and word-bounded, still matching a standalone `ad`. It applies to audio selection only; subtitle scoring does not consult it.

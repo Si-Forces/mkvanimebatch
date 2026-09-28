@@ -1,6 +1,5 @@
 import { buildTrackAssignmentsForManifest, isSameDirectory } from "./queue-state.js";
 
-
 /**
  * The four queue bulk-selection buttons, each with the selection it applies.
  *
@@ -16,80 +15,81 @@ export const BULK_SELECTION_CONTROLS = [
   { id: "extract-deselect-all", mode: "extract", select: false },
 ];
 
-// Derived, not restated: the mode set is exactly the modes named above.
 const QUEUE_MODES = [...new Set(BULK_SELECTION_CONTROLS.map(control => control.mode))];
 
-export function extractInspectionOptions(argsOrRequest) {
-  const req = argsOrRequest || {};
-  const options = {};
+const STATUS_PILLS = {
+  idle: ["status-idle", "Idle"],
+  running: ["status-running", "Running"],
+  stopping: ["status-running", "Stopping"],
+  cancelled: ["status-cancelled", "Cancelled"],
+  done: ["status-success", "Done"],
+  failed: ["status-error", "Failed"],
+};
 
-  if (req.workers !== null && req.workers !== undefined) {
-    const w = req.workers;
-    if (typeof w !== "number" || !Number.isInteger(w) || w < 1 || w > 64) {
-      return { error: `Invalid workers value '${w}': must be an integer between 1 and 64.` };
-    }
-    options.workers = w;
+const TERMINAL_LIFECYCLE = { completed: "done", cancelled: "cancelled" };
+
+const isIntegerInRange = (value, min, max) => Number.isInteger(value) && value >= min && value <= max;
+
+/**
+ * Rejects out-of-range concurrency values before the forced preflight
+ * inspection starts. Returns the error message, or null when the request is valid.
+ */
+export function validateConcurrency(request) {
+  if (request.workers != null && !isIntegerInRange(request.workers, 1, 64)) {
+    return `Invalid workers value '${request.workers}': must be an integer between 1 and 64.`;
   }
-
-  const ioJobs = req.ioJobs ?? req.io_jobs;
-  if (ioJobs !== null && ioJobs !== undefined) {
-    if (typeof ioJobs !== "number" || !Number.isInteger(ioJobs) || ioJobs < 0 || ioJobs > 64) {
-      return { error: `Invalid io-jobs value '${ioJobs}': must be an integer between 0 and 64.` };
-    }
-    options.ioJobs = ioJobs;
+  if (request.io_jobs != null && !isIntegerInRange(request.io_jobs, 0, 64)) {
+    return `Invalid io-jobs value '${request.io_jobs}': must be an integer between 0 and 64.`;
   }
-
-  if (req.noCache || req.no_cache) {
-    options.noCache = true;
-  }
-
-  return { options };
+  return null;
 }
 
 export class JobController {
   constructor(mode, runtime) {
-    this.mode     = mode;
+    this.mode = mode;
     this.runtime = runtime;
-    this.running  = false;
+    this.running = false;
     this.unlistenLog = null;
     this.unlistenEvent = null;
     this.unlistenDone = null;
-
-    this.logEl     = document.getElementById(`${mode}-log`);
-    this.statusEl  = document.getElementById(`${mode}-status`);
-    this.lastExitCode = null;
     this.lifecycle = "idle";
     this.startGeneration = 0;
     this.launched = false;
     this.jobId = null;
     this.launchPromise = null;
-    this.runBtn    = document.getElementById(`${mode}-run`);
-    this.stopBtn   = document.getElementById(`${mode}-stop`);
+
+    this.logEl = document.getElementById(`${mode}-log`);
+    this.statusEl = document.getElementById(`${mode}-status`);
+    this.runBtn = document.getElementById(`${mode}-run`);
+    this.stopBtn = document.getElementById(`${mode}-stop`);
     this.formControls = document.querySelectorAll(
       `#view-${mode} input, #view-${mode} select, #view-${mode} .browse-btn, #view-${mode} .clear-cache-btn`
     );
+    this.runtime.clearLog(this.logEl);
 
     this.runtime.coordinator.register(this);
-    const tracker = this.runtime.queueFor?.(mode);
-    if (tracker) {
-      tracker.onSelectionChange = () => this.syncGlobalControls();
-    }
+    this.runtime.queueFor(mode).onSelectionChange = () => this.syncGlobalControls();
 
-
-    if (this.runBtn)  this.runtime.safeAddListener(this.runBtn,  "click", () => this.start());
-    if (this.stopBtn) this.runtime.safeAddListener(this.stopBtn, "click", () => this.stop());
-
-    const clearLogBtn = document.getElementById(`${mode}-clear-log`);
-    if (clearLogBtn) this.runtime.safeAddListener(clearLogBtn, "click", () => this.runtime.clearLog(this.logEl));
-
-    const clearCacheBtn = document.getElementById(`${mode}-clear-cache`);
-    if (clearCacheBtn) this.runtime.safeAddListener(clearCacheBtn, "click", () => this.clearCache());
+    this.runtime.safeAddListener(this.runBtn, "click", () => this.start());
+    this.runtime.safeAddListener(this.stopBtn, "click", () => this.stop());
+    this.runtime.safeAddListener(
+      document.getElementById(`${mode}-clear-log`),
+      "click",
+      () => this.runtime.clearLog(this.logEl)
+    );
+    this.runtime.safeAddListener(document.getElementById(`${mode}-clear-cache`), "click", () => this.clearCache());
 
     const inputDirEl = document.getElementById(`${mode}-input-dir`);
     if (inputDirEl) {
-      inputDirEl.addEventListener("change", () => this.runtime.scanInputDirectory(inputDirEl.value.trim(), mode));
-      inputDirEl.addEventListener("blur", () => this.runtime.scanInputDirectory(inputDirEl.value.trim(), mode));
+      const rescan = () => this.runtime.scanInputDirectory(inputDirEl.value.trim(), mode);
+      inputDirEl.addEventListener("change", rescan);
+      inputDirEl.addEventListener("blur", rescan);
     }
+  }
+
+  /** True when a `job-event` / `job-done` payload belongs to this controller's current job. */
+  isOwnSignal(payload) {
+    return payload?.job_id === this.jobId && (!payload?.mode || payload.mode === this.mode);
   }
 
   restoreActiveSnapshot(snapshot, unlistenEvent, unlistenDone) {
@@ -97,7 +97,6 @@ export class JobController {
     this.unlistenDone = unlistenDone;
     this.jobId = snapshot.job_id;
     this.launched = true;
-    this.lastExitCode = null;
     this.runtime.coordinator.activeMode = this.mode;
     this.runtime.coordinator.isStarting = false;
     this.runtime.coordinator.isStopping = false;
@@ -107,12 +106,12 @@ export class JobController {
   }
 
   restoreTerminalSnapshot(snapshot) {
-    this.lifecycle = snapshot.status === "completed" ? "done" : snapshot.status === "cancelled" ? "cancelled" : "failed";
+    this.lifecycle = TERMINAL_LIFECYCLE[snapshot.status] ?? "failed";
     this.renderStatus();
   }
 
   handleSnapshotSignal(type, payload, replay = false) {
-    if (!this.running || payload?.job_id !== this.jobId || (payload.mode && payload.mode !== this.mode)) return;
+    if (!this.running || !this.isOwnSignal(payload)) return;
     if (type === "done") {
       this.onDone(payload.code);
     } else if (type === "event") {
@@ -145,10 +144,7 @@ export class JobController {
     this.runtime.appendLog(this.logEl, `[ERROR] ${message}`);
   }
 
-
   buildBatchRequest() {
-    if (this.mode !== "remux" && this.mode !== "extract") return null;
-
     const val = id => document.getElementById(`${this.mode}-${id}`)?.value?.trim() ?? "";
     const chk = id => document.getElementById(`${this.mode}-${id}`)?.checked ?? false;
 
@@ -157,16 +153,9 @@ export class JobController {
       this.flagInputError("input-dir", "Input directory is required.");
       return null;
     }
-    const outDir = val("out-dir") || null;
-    const fontsDir = val("fonts-dir") || null;
     const offset = val("sub-offset");
-    const subOffset = offset && offset !== "0" ? parseFloat(offset) : null;
     const workersVal = val("workers");
-    const workers = workersVal ? parseInt(workersVal, 10) : null;
     const ioJobsVal = val("io-jobs");
-    const ioJobs = ioJobsVal !== "" ? parseInt(ioJobsVal, 10) : null;
-    const dryRun = chk("dry-run");
-    const noCache = chk("no-cache");
 
     let assetsDir = null;
     let bitrate = null;
@@ -182,34 +171,21 @@ export class JobController {
       ffmpegThreads = ffmpegVal ? parseInt(ffmpegVal, 10) : null;
     }
 
-    const activePresetEl = typeof document?.querySelector === "function"
-      ? document.querySelector(".profile-option-item.active")
-      : null;
-    const presetKey = activePresetEl?.dataset?.preset;
-    let preset = null;
-    if (presetKey === "default" || presetKey === "balanced") {
-      preset = "balanced";
-    } else if (presetKey === "hifi" || presetKey === "high_quality") {
-      preset = "hifi";
-    } else if (presetKey) {
-      preset = presetKey;
-    }
-
     return {
       mode: this.mode,
       input_dir: inputDir,
-      out_dir: outDir,
-      fonts_dir: fontsDir,
+      out_dir: val("out-dir") || null,
+      fonts_dir: val("fonts-dir") || null,
       assets_dir: assetsDir,
-      preset,
+      preset: document.querySelector(".profile-option-item.active")?.dataset.preset || null,
       bitrate,
       complexity,
-      workers,
-      io_jobs: ioJobs,
+      workers: workersVal ? parseInt(workersVal, 10) : null,
+      io_jobs: ioJobsVal !== "" ? parseInt(ioJobsVal, 10) : null,
       ffmpeg_threads: ffmpegThreads,
-      sub_offset: subOffset,
-      dry_run: dryRun,
-      no_cache: noCache,
+      sub_offset: offset && offset !== "0" ? parseFloat(offset) : null,
+      dry_run: chk("dry-run"),
+      no_cache: chk("no-cache"),
       assignments: null,
       selected_items: null,
     };
@@ -234,9 +210,9 @@ export class JobController {
     const batchRequest = this.buildBatchRequest();
     if (!batchRequest) return;
     const inputDir = batchRequest.input_dir;
-    const { options, error: optionsError } = extractInspectionOptions(batchRequest);
-    if (optionsError) {
-      this.runtime.appendLog(this.logEl, `[ERROR] ${optionsError}`);
+    const concurrencyError = validateConcurrency(batchRequest);
+    if (concurrencyError) {
+      this.runtime.appendLog(this.logEl, `[ERROR] ${concurrencyError}`);
       return;
     }
     const generation = ++this.startGeneration;
@@ -250,14 +226,14 @@ export class JobController {
 
     this.setRunning(true);
     this.runtime.clearLog(this.logEl);
-    this.lastExitCode = null;
 
-    const workers = options.workers ?? 8;
-    const ioJobs  = options.ioJobs ?? 2;
-    this.runtime.updateWorkerChips(true, workers, ioJobs);
+    this.runtime.updateWorkerChips(true, batchRequest.workers ?? 8, batchRequest.io_jobs ?? 2);
     this.runtime.telemetryLoop.setJobActive(true);
 
-    const inspected = await this.runtime.scanInputDirectory(inputDir, this.mode, { force: true, options });
+    const inspected = await this.runtime.scanInputDirectory(inputDir, this.mode, {
+      force: true,
+      options: { noCache: batchRequest.no_cache },
+    });
     if (generation !== this.startGeneration) return;
     if (!this.runtime.coordinator.isStarting) {
       this.runtime.appendLog(this.logEl, "[INFO] Start aborted by stop request.");
@@ -316,23 +292,18 @@ export class JobController {
       unlisteners.push(await this.runtime.listen("job-event", e => {
         if (generation !== this.startGeneration && !launched) return;
         if (this.jobId === null) {
-          earlyEvents.push(e);
+          earlyEvents.push(e.payload);
           return;
         }
-        if (e.payload?.job_id === this.jobId && (!e.payload?.mode || e.payload.mode === this.mode)) {
-          tracker.handleEvent(e.payload);
-        }
+        if (this.isOwnSignal(e.payload)) tracker.handleEvent(e.payload);
       }));
       unlisteners.push(await this.runtime.listen("job-done", e => {
         if (generation !== this.startGeneration && !launched) return;
-        const payload = e.payload;
         if (this.jobId === null) {
-          earlyDone.push(e);
+          earlyDone.push(e.payload);
           return;
         }
-        if (typeof payload === "object" && payload?.mode && payload.mode !== this.mode) return;
-        if (payload?.job_id !== this.jobId) return;
-        this.onDone(typeof payload === "object" ? payload.code : payload);
+        if (this.isOwnSignal(e.payload)) this.onDone(e.payload.code);
       }));
     } catch (err) {
       unlisteners.forEach(unlisten => unlisten());
@@ -353,29 +324,19 @@ export class JobController {
       this.launched = true;
       launched = true;
       this.runtime.coordinator.isStarting = false;
-      this.launchPromise = this.runtime.invoke("run_job", {
-        request: batchRequest,
-      });
+      this.launchPromise = this.runtime.invoke("run_job", { request: batchRequest });
       const jobId = await this.launchPromise;
       if (this.running) {
         this.jobId = jobId;
-        for (const e of earlyEvents) {
-          if (e.payload?.job_id === this.jobId && (!e.payload?.mode || e.payload.mode === this.mode)) {
-            tracker.handleEvent(e.payload);
-          }
+        for (const payload of earlyEvents) {
+          if (this.isOwnSignal(payload)) tracker.handleEvent(payload);
         }
-        for (const e of earlyDone) {
-          const payload = e.payload;
-          if (typeof payload === "object" && payload?.job_id === this.jobId && (!payload?.mode || payload.mode === this.mode)) {
-            this.onDone(typeof payload === "object" ? payload.code : payload);
-            break;
-          }
-        }
+        const done = earlyDone.find(payload => this.isOwnSignal(payload));
+        if (done) this.onDone(done.code);
       }
     } catch (err) {
       this.runtime.appendLog(this.logEl, `[ERROR] ${err}`);
       tracker.finalize(-1);
-      this.lastExitCode = -1;
       this.abortStart();
     }
   }
@@ -420,13 +381,13 @@ export class JobController {
   async clearCache() {
     const confirmed = await this.runtime.showModal(
       "Clear Inspection Cache",
-      `Are you sure you want to clear the persistent inspection cache for ${this.mode}?`,
+      "Are you sure you want to clear the persistent inspection cache?",
       { confirmLabel: "Clear Cache" }
     );
     if (!confirmed) return;
 
     try {
-      const msg = await this.runtime.invoke("clear_cache", { mode: this.mode });
+      const msg = await this.runtime.invoke("clear_cache");
       this.runtime.appendLog(this.logEl, `[CACHE] ${msg || "Cache cleared."}`);
     } catch (err) {
       this.runtime.appendLog(this.logEl, `[ERROR] ${err}`);
@@ -438,8 +399,8 @@ export class JobController {
     const tracker = this.runtime.queueFor(this.mode);
     const cancelled = this.runtime.coordinator.isStopping || tracker.state?.batchCancelled === true || code === 130;
     tracker.finalize(code, cancelled);
-    this.lastExitCode = tracker.state?.batchSuccess ? code : -1;
-    this.lifecycle = cancelled ? "cancelled" : (this.lastExitCode === 0 ? "done" : "failed");
+    const succeeded = Boolean(tracker.state?.batchSuccess) && code === 0;
+    this.lifecycle = cancelled ? "cancelled" : (succeeded ? "done" : "failed");
     this.launched = false;
     this.jobId = null;
     this.launchPromise = null;
@@ -452,7 +413,7 @@ export class JobController {
 
   setRunning(running) {
     this.running = running;
-    this.lifecycle = running ? "running" : this.lifecycle;
+    if (running) this.lifecycle = "running";
     this.runtime.coordinator.syncControls();
     this.renderStatus();
   }
@@ -471,8 +432,7 @@ export class JobController {
    * and the user must still be able to adjust a restored queue before running.
    */
   isJobActive() {
-    const coordinator = this.runtime.coordinator;
-    return coordinator.activeMode !== null || Boolean(coordinator.isStarting);
+    return this.runtime.coordinator.activeMode !== null;
   }
 
   /**
@@ -484,31 +444,28 @@ export class JobController {
    */
   canMutateQueueSelection(mode) {
     if (this.isJobActive()) return false;
-    return !this.runtime.queueFor?.(mode)?.isScanning;
+    return !this.runtime.queueFor(mode).isScanning;
   }
 
   /**
-   * Sealed Select All / Deselect All action behind the bulk buttons.
+   * Select All / Deselect All action behind the bulk buttons.
    * Returns true only when the selection was actually mutated.
    */
   applyBulkSelection(mode, select) {
     if (!this.canMutateQueueSelection(mode)) return false;
-    const tracker = this.runtime.queueFor?.(mode);
-    if (!tracker) return false;
+    const tracker = this.runtime.queueFor(mode);
     if (select) tracker.selectAll();
     else tracker.deselectAll();
     return true;
   }
 
   syncGlobalControls() {
-    const canStart = this.runtime.coordinator.canStart();
+    const coordinator = this.runtime.coordinator;
     const busy = this.isJobActive();
-    const tracker = this.runtime.queueFor?.(this.mode);
-    const hasItems = (tracker?.state?.totalCount ?? 0) > 0;
-    const selectedCount = tracker?.getSelectedCount?.() ?? 0;
-    const selectionDisabled = hasItems && selectedCount === 0;
-    const isScanning = Boolean(tracker?.isScanning);
-    if (this.runBtn) this.runBtn.disabled = !canStart || isScanning || selectionDisabled;
+    const tracker = this.runtime.queueFor(this.mode);
+    const hasItems = (tracker.state?.totalCount ?? 0) > 0;
+    const selectionDisabled = hasItems && (tracker.getSelectedCount?.() ?? 0) === 0;
+    if (this.runBtn) this.runBtn.disabled = !coordinator.canStart() || Boolean(tracker.isScanning) || selectionDisabled;
     for (const control of this.formControls) control.disabled = busy;
     // Selection stays frozen for the whole preflight/run window: the request
     // captured this queue's selection before the forced scan, so a click now
@@ -520,48 +477,26 @@ export class JobController {
       if (control) control.disabled = !this.canMutateQueueSelection(mode);
     }
     for (const mode of QUEUE_MODES) {
-      const queue = this.runtime.queueFor?.(mode);
-      if (queue) queue.selectionLocked = !this.canMutateQueueSelection(mode);
+      this.runtime.queueFor(mode).selectionLocked = !this.canMutateQueueSelection(mode);
     }
-    document.querySelectorAll(`#view-${this.mode} .sub-assign-btn`).forEach(control => {
+    document.querySelectorAll(`#view-${this.mode} .sub-assign-btn, #view-${this.mode} .empty-state-action`).forEach(control => {
       control.disabled = busy;
     });
-    document.querySelectorAll(`#view-${this.mode} .empty-state-action`).forEach(control => {
-      control.disabled = busy;
-    });
+    const selectionFrozen = !this.canMutateQueueSelection(this.mode);
     document.querySelectorAll(`#view-${this.mode} .ep-select-check, #view-${this.mode} .ep-reorder-btn`).forEach(control => {
-      control.disabled = !this.canMutateQueueSelection(this.mode);
+      control.disabled = selectionFrozen;
     });
     if (this.stopBtn) {
-      this.stopBtn.disabled = this.runtime.coordinator.activeMode !== this.mode || this.runtime.coordinator.isStopping;
-      this.stopBtn.textContent = this.runtime.coordinator.isStopping && this.runtime.coordinator.activeMode === this.mode
-        ? "Stopping..."
-        : "■ Stop";
+      const stopping = coordinator.isStopping && coordinator.activeMode === this.mode;
+      this.stopBtn.disabled = coordinator.activeMode !== this.mode || coordinator.isStopping;
+      this.stopBtn.textContent = stopping ? "Stopping..." : "■ Stop";
     }
   }
 
   renderStatus() {
-    const el = this.statusEl;
-    if (!el) return;
-    let statusClass = "status-idle";
-    let statusLabel = "Idle";
-    if (this.lifecycle === "running") {
-      statusClass = "status-running";
-      statusLabel = "Running";
-    } else if (this.lifecycle === "stopping") {
-      statusClass = "status-running";
-      statusLabel = "Stopping";
-    } else if (this.lifecycle === "cancelled") {
-      statusClass = "status-cancelled";
-      statusLabel = "Cancelled";
-    } else if (this.lifecycle === "done") {
-      statusClass = "status-success";
-      statusLabel = "Done";
-    } else if (this.lifecycle === "failed") {
-      statusClass = "status-error";
-      statusLabel = "Failed";
-    }
-    el.className = "status-pill " + statusClass;
-    el.innerHTML = `<span class="status-dot"></span> ${statusLabel}`;
+    if (!this.statusEl) return;
+    const [statusClass, statusLabel] = STATUS_PILLS[this.lifecycle] ?? STATUS_PILLS.idle;
+    this.statusEl.className = `status-pill ${statusClass}`;
+    this.statusEl.innerHTML = `<span class="status-dot"></span> ${statusLabel}`;
   }
 }

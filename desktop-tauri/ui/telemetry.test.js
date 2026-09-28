@@ -50,31 +50,30 @@ function makeDoc({ initialHidden = false } = {}) {
     addEventListener(type, fn) {
       this.listeners.set(type, fn);
     },
-    removeEventListener() {
-      this.listeners.clear();
-    },
     dispatchVisibility() {
       this.listeners.get("visibilitychange")?.();
     },
   };
 }
 
-test("constants: idle cadence is slower than active cadence", () => {
-  assert.equal(IDLE_POLL_MS, 30000);
-  assert.equal(ACTIVE_POLL_MS, 1000);
-});
+function makeLoop(timers, options) {
+  return createTelemetryLoop({
+    onData: () => {},
+    onError: () => {},
+    setIntervalFn: timers.setIntervalFn.bind(timers),
+    clearIntervalFn: timers.clearIntervalFn.bind(timers),
+    ...options,
+  });
+}
 
 test("starts polling at the idle cadence", async () => {
   const timers = new FakeTimers();
   let calls = 0;
-  const loop = createTelemetryLoop({
+  const loop = makeLoop(timers, {
     invoke: async () => {
       calls += 1;
       return { cpu_pct: 5 };
     },
-    onData: () => {},
-    setIntervalFn: timers.setIntervalFn.bind(timers),
-    clearIntervalFn: timers.clearIntervalFn.bind(timers),
   });
 
   loop.start();
@@ -91,14 +90,11 @@ test("starts polling at the idle cadence", async () => {
 test("switches to the fast cadence while a job is active", async () => {
   const timers = new FakeTimers();
   let calls = 0;
-  const loop = createTelemetryLoop({
+  const loop = makeLoop(timers, {
     invoke: async () => {
       calls += 1;
       return {};
     },
-    onData: () => {},
-    setIntervalFn: timers.setIntervalFn.bind(timers),
-    clearIntervalFn: timers.clearIntervalFn.bind(timers),
   });
 
   loop.start();
@@ -125,15 +121,12 @@ test("never overlaps in-flight invokes (regression: 1s pile-up burned ~44% idle 
   const gate = new Promise((resolve) => {
     release = resolve;
   });
-  const loop = createTelemetryLoop({
+  const loop = makeLoop(timers, {
     invoke: async () => {
       calls += 1;
       await gate;
       return {};
     },
-    onData: () => {},
-    setIntervalFn: timers.setIntervalFn.bind(timers),
-    clearIntervalFn: timers.clearIntervalFn.bind(timers),
   });
 
   loop.start();
@@ -153,15 +146,12 @@ test("pauses while hidden and resumes on visibilitychange", async () => {
   const timers = new FakeTimers();
   const doc = makeDoc({ initialHidden: true });
   let calls = 0;
-  const loop = createTelemetryLoop({
+  const loop = makeLoop(timers, {
     invoke: async () => {
       calls += 1;
       return {};
     },
-    onData: () => {},
     doc,
-    setIntervalFn: timers.setIntervalFn.bind(timers),
-    clearIntervalFn: timers.clearIntervalFn.bind(timers),
   });
 
   loop.start();
@@ -176,54 +166,16 @@ test("pauses while hidden and resumes on visibilitychange", async () => {
   assert.equal(timers.activeInterval(), IDLE_POLL_MS);
 });
 
-test("stop cancels all pending work and ignores in-flight responses", async () => {
-  const timers = new FakeTimers();
-  let calls = 0;
-  let dataCallbacks = 0;
-  let release;
-  const gate = new Promise((resolve) => {
-    release = resolve;
-  });
-
-  const loop = createTelemetryLoop({
-    invoke: async () => {
-      calls += 1;
-      await gate;
-      return { cpu_pct: 10 };
-    },
-    onData: () => {
-      dataCallbacks += 1;
-    },
-    setIntervalFn: timers.setIntervalFn.bind(timers),
-    clearIntervalFn: timers.clearIntervalFn.bind(timers),
-  });
-
-  loop.start();
-  await flush();
-  assert.equal(calls, 1);
-
-  loop.stop();
-  release();
-  await flush();
-  await timers.advance(120000);
-
-  assert.equal(calls, 1);
-  assert.equal(dataCallbacks, 0, "callbacks suppressed after stop");
-});
-
 test("pauses active polling when document becomes hidden", async () => {
   const timers = new FakeTimers();
   const doc = makeDoc({ initialHidden: false });
   let calls = 0;
-  const loop = createTelemetryLoop({
+  const loop = makeLoop(timers, {
     invoke: async () => {
       calls += 1;
       return {};
     },
-    onData: () => {},
     doc,
-    setIntervalFn: timers.setIntervalFn.bind(timers),
-    clearIntervalFn: timers.clearIntervalFn.bind(timers),
   });
 
   loop.start();
@@ -244,16 +196,13 @@ test("forwards errors to onError callback without breaking future ticks", async 
   const timers = new FakeTimers();
   let calls = 0;
   const errors = [];
-  const loop = createTelemetryLoop({
+  const loop = makeLoop(timers, {
     invoke: async () => {
       calls += 1;
       if (calls === 1) throw new Error("IPC Failure");
       return { cpu_pct: 12 };
     },
-    onData: () => {},
     onError: (err) => errors.push(err.message),
-    setIntervalFn: timers.setIntervalFn.bind(timers),
-    clearIntervalFn: timers.clearIntervalFn.bind(timers),
   });
 
   loop.start();

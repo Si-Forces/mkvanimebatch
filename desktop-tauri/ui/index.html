@@ -20,11 +20,11 @@
   <div class="resize-handle se" data-direction="se"></div>
   <div class="resize-handle sw" data-direction="sw"></div>
 
-  <!-- ─── Single Unified Top Header ────────────────────────────────────────── -->
+  <!-- ─── Titlebar ───────────────────────────────────────────────────────── -->
   <div class="titlebar">
     <div class="titlebar-drag-region" data-tauri-drag-region></div>
 
-    <!-- Left: Window Control Dots & Navigation Tabs -->
+    <!-- Left: window controls & view tabs -->
     <div class="titlebar-left">
       <div class="traffic-lights">
         <button class="tl-btn tl-close" id="btn-close" title="Close" type="button">
@@ -45,9 +45,8 @@
         </button>
       </div>
 
-      <!-- Elevated Segmented Navigation Tabs (Left Side) -->
-      <nav class="pipeline-tab-group">
-        <button class="pipeline-tab-btn active" data-view="remux" id="nav-remux" aria-label="Batch Remux">
+      <nav class="pipeline-tab-group" role="tablist">
+        <button class="pipeline-tab-btn active" data-view="remux" id="nav-remux" role="tab" aria-selected="true" aria-label="Batch Remux">
           <span class="tab-icon">
             <svg class="app-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M20.2 6 3 11l-.9-4.2L18 2l2.2 4z"></path>
@@ -59,7 +58,7 @@
           </span>
           <span>Batch Remux</span>
         </button>
-        <button class="pipeline-tab-btn" data-view="extract" id="nav-extract" aria-label="Subtitle and Fonts Extractor">
+        <button class="pipeline-tab-btn" data-view="extract" id="nav-extract" role="tab" aria-selected="false" aria-label="Subtitle and Fonts Extractor">
           <span class="tab-icon">
             <svg class="app-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
@@ -73,7 +72,7 @@
       </nav>
     </div>
 
-    <!-- Center: App Brand & Custom Vector Logo Badge (Mathematically Centered) -->
+    <!-- Center: app brand -->
     <div class="titlebar-center">
       <div class="titlebar-brand">
         <div class="titlebar-logo-badge">
@@ -86,7 +85,7 @@
       </div>
     </div>
 
-    <!-- Right Header Actions (Profile & Theme Toggle) -->
+    <!-- Right: preset profile & theme toggle -->
     <div class="titlebar-actions">
       <div class="profile-dropdown-wrapper" id="profile-dropdown-wrapper">
         <button class="preset-pill-btn" id="active-profile-btn" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="profile-dropdown-menu">
@@ -126,7 +125,7 @@
 
       <div class="header-mode-badge" id="extract-header-badge" style="display: none;">
         <span class="mode-badge-dot"></span>
-        <span class="mode-badge-text">
+        <span>
           <svg class="app-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
             <polyline points="2 12 12 17 22 12"></polyline>
@@ -159,19 +158,19 @@
     </div>
   </div>
 
-  <!-- ─── Main Workspace (3-Column Layout) ────────────────────────────────── -->
+  <!-- ─── Workspace ──────────────────────────────────────────────────────── -->
   <div class="layout">
     <div class="content">
 
-      <!-- ─── Remux View (3-Column Layout) ─────────────────────────────── -->
+      <!-- ─── Remux View ─────────────────────────────────────────────────── -->
       <div class="view active" id="view-remux">
         <div class="view-3col-layout">
 
-          <!-- Col 1: Parameters Glass Panel with Run/Stop at Bottom -->
+          <!-- Col 1: parameters, Run/Stop -->
           <div class="glass-panel col-options">
             <div class="panel-header">
               <span class="panel-title">
-                <span class="icon">
+                <span>
                   <svg class="app-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                     <path d="M20.2 6 3 11l-.9-4.2L18 2l2.2 4z"></path>
                     <line x1="7" y1="4.5" x2="8.5" y2="9.5"></line>
@@ -253,15 +252,15 @@
                   </select>
                 </div>
 
-                <!-- Complexity Level (Placed directly below Audio Bitrate) -->
+                <!-- Complexity Level -->
                 <div class="form-group full">
                   <div class="form-label-row">
-                    <label class="form-label">Complexity Level <span title="libopus encoding complexity (10 = maximum quality / psychoacoustics, 0 = fastest)" style="cursor:help;opacity:0.85;font-size:10px;">ⓘ</span></label>
+                    <label class="form-label">Complexity Level <span title="libopus encoding complexity (10 = maximum quality / psychoacoustics, 0 = fastest)" class="info-tip">ⓘ</span></label>
                     <span class="field-hint">0 (Fast) → 10 (Max)</span>
                   </div>
                   <div style="display:flex;align-items:center;gap:10px; height: 32px;">
                     <input type="range" id="remux-complexity" value="5" min="0" max="10" step="1" aria-label="Complexity Level Slider" style="flex:1; margin: 0;" />
-                    <div class="number-stepper pill-stepper" style="height: 32px; width: 80px; min-width: 80px;">
+                    <div class="number-stepper pill-stepper">
                       <button type="button" class="stepper-btn minus" aria-label="Decrease complexity">−</button>
                       <input type="number" id="remux-cplx-val" value="5" min="0" max="10" aria-label="Complexity Level Value" />
                       <button type="button" class="stepper-btn plus" aria-label="Increase complexity">+</button>
@@ -269,52 +268,52 @@
                   </div>
                 </div>
 
-                <!-- Subtitle Timestamp Offset (Full Width Dedicated Row) -->
+                <!-- Subtitle Timestamp Offset -->
                 <div class="form-group full">
                   <div class="form-label-row">
-                    <label class="form-label">Subtitle Timestamp Offset <span title="Shift subtitle timestamps by seconds (+ delay, − advance)" style="cursor:help;opacity:0.85;font-size:10px;">ⓘ</span></label>
+                    <label class="form-label">Subtitle Timestamp Offset <span title="Shift subtitle timestamps by seconds (+ delay, − advance)" class="info-tip">ⓘ</span></label>
                     <span class="field-hint">Seconds (±)</span>
                   </div>
-                  <div class="number-stepper" style="width:100%;">
+                  <div class="number-stepper">
                     <button type="button" class="stepper-btn minus" aria-label="Decrease offset">−</button>
                     <input type="number" id="remux-sub-offset" value="0" step="0.5" placeholder="0.0" />
                     <button type="button" class="stepper-btn plus" aria-label="Increase offset">+</button>
                   </div>
                 </div>
 
-                <!-- 3-Column Hardware / Concurrency Tuning: Workers, Disk I/O Jobs, FFmpeg Threads -->
+                <!-- Concurrency: Workers, Disk I/O Jobs, FFmpeg Threads -->
                 <div class="form-group full" style="margin-bottom: 2px;">
                   <div class="form-grid-3col">
-                    <div class="form-group" style="margin-bottom: 0;">
-                      <label class="form-label" style="display:flex;align-items:center;gap:2px;font-size:9.5px;">Workers <span title="Concurrent files to process (1-64)" style="cursor:help;opacity:0.85;font-size:10px;">ⓘ</span></label>
-                      <div class="number-stepper" style="width:100%;">
+                    <div class="form-group">
+                      <label class="form-label compact">Workers <span title="Concurrent files to process (1-64)" class="info-tip">ⓘ</span></label>
+                      <div class="number-stepper">
                         <button type="button" class="stepper-btn minus" aria-label="Decrease workers">−</button>
                         <input type="number" id="remux-workers" value="8" min="1" max="64" />
                         <button type="button" class="stepper-btn plus" aria-label="Increase workers">+</button>
                       </div>
                     </div>
 
-                    <div class="form-group" style="margin-bottom: 0;">
-                      <label class="form-label" style="display:flex;align-items:center;gap:2px;font-size:9.5px;">Disk I/O <span title="Max concurrent disk I/O streams (0 = unlimited)" style="cursor:help;opacity:0.85;font-size:10px;">ⓘ</span></label>
-                      <div class="number-stepper" style="width:100%;">
+                    <div class="form-group">
+                      <label class="form-label compact">Disk I/O <span title="Max concurrent disk I/O streams (0-64; 0 = same as Workers)" class="info-tip">ⓘ</span></label>
+                      <div class="number-stepper">
                         <button type="button" class="stepper-btn minus" aria-label="Decrease IO jobs">−</button>
-                        <input type="number" id="remux-io-jobs" value="2" min="0" max="32" />
+                        <input type="number" id="remux-io-jobs" value="2" min="0" max="64" />
                         <button type="button" class="stepper-btn plus" aria-label="Increase IO jobs">+</button>
                       </div>
                     </div>
 
-                    <div class="form-group" style="margin-bottom: 0;">
-                      <label class="form-label" style="display:flex;align-items:center;gap:2px;font-size:9.5px;">FFmpeg Thds <span title="Max CPU threads per Opus transcode job (empty = auto capped at 8)" style="cursor:help;opacity:0.85;font-size:10px;">ⓘ</span></label>
-                      <div class="number-stepper" style="width:100%;">
+                    <div class="form-group">
+                      <label class="form-label compact">FFmpeg Thds <span title="Max CPU threads per Opus transcode job (1-32; empty = auto)" class="info-tip">ⓘ</span></label>
+                      <div class="number-stepper">
                         <button type="button" class="stepper-btn minus" aria-label="Decrease FFmpeg threads">−</button>
-                        <input type="number" id="remux-ffmpeg-threads" placeholder="auto" min="1" max="64" />
+                        <input type="number" id="remux-ffmpeg-threads" placeholder="auto" min="1" max="32" />
                         <button type="button" class="stepper-btn plus" aria-label="Increase FFmpeg threads">+</button>
                       </div>
                     </div>
                   </div>
                 </div>
 
-                <!-- CLI Execution Flags & Maintenance -->
+                <!-- Flags & cache maintenance -->
                 <div class="form-group full" style="margin-top: 2px;">
                   <label class="form-label">CLI Flags &amp; Cache</label>
                   <div class="cli-flags-grid">
@@ -327,28 +326,27 @@
                       <span class="flag-title">Bypass Cache</span>
                     </label>
                   </div>
-                  <button class="clear-cache-btn" id="remux-clear-cache" type="button" title="Delete inspection cache" style="margin-top: 6px; width: 100%;">
+                  <button class="clear-cache-btn" id="remux-clear-cache" type="button" title="Delete inspection cache">
                     🗑 Clear Inspection Cache
                   </button>
                 </div>
 
               </div>
 
-              <!-- Action Execution Buttons at Bottom of Parameters Panel -->
               <div class="param-actions-footer">
-                <button class="btn btn-primary btn-gradient" id="remux-run" style="flex:2;">▶ Run Batch Remux</button>
-                <button class="btn btn-stop" id="remux-stop" disabled style="flex:1;">■ Stop</button>
+                <button class="btn btn-gradient" id="remux-run">▶ Run Batch Remux</button>
+                <button class="btn btn-stop" id="remux-stop" disabled>■ Stop</button>
               </div>
 
             </div>
           </div>
 
-          <!-- Col 2: Episode Batch Queue & Track Inspector -->
+          <!-- Col 2: episode queue -->
           <div class="glass-panel col-queue">
             <div class="panel-header queue-panel-header">
               <div class="queue-header-top">
                 <span class="panel-title">
-                  <span class="icon">
+                  <span>
                     <svg class="app-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                       <path d="M20.2 6 3 11l-.9-4.2L18 2l2.2 4z"></path>
                       <line x1="7" y1="4.5" x2="8.5" y2="9.5"></line>
@@ -362,7 +360,7 @@
                 <span class="queue-count-badge" id="remux-queue-count">Ready</span>
               </div>
               <div class="queue-header-toolbar">
-                <div class="queue-bulk-actions" id="remux-queue-bulk">
+                <div class="queue-bulk-actions">
                   <button type="button" class="btn btn-xs" id="remux-select-all">Select All</button>
                   <button type="button" class="btn btn-xs" id="remux-deselect-all">Deselect All</button>
                 </div>
@@ -370,7 +368,6 @@
             </div>
             <div class="panel-body queue-body" id="remux-episode-list">
 
-              <!-- Clean Empty Queue Placeholder -->
               <div class="empty-state-card">
                 <div class="empty-icon-glow">
                   <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -387,74 +384,67 @@
             </div>
           </div>
 
-          <!-- Col 3: Prominent High-Contrast OLED Pro Resource Monitor & Console Stream -->
+          <!-- Col 3: resource monitor & console -->
           <div class="glass-panel col-console">
-            
             <div class="panel-header">
               <span class="panel-title">📊 Resource Monitor<span class="panel-title-suffix-console"> &amp; Console</span></span>
             </div>
 
-            <!-- High-Contrast Prominent Resource Telemetry Card -->
             <div class="prominent-resource-card">
               <div class="res-card-title">
                 <span>🖥️ SYSTEM HARDWARE TELEMETRY</span>
                 <span class="res-status-dot green"></span>
               </div>
 
-              <!-- Metric 1: CPU Load -->
+              <!-- CPU -->
               <div class="metric-block">
                 <div class="metric-header">
                   <span class="metric-name">CPU UTILIZATION</span>
-                  <span class="metric-val green metric-cpu-val" id="cpu-telemetry-val">0%</span>
+                  <span class="metric-val green metric-cpu-val">0%</span>
                 </div>
                 <div class="metric-bar-bg">
-                  <div class="metric-bar-fill green metric-cpu-fill" id="cpu-telemetry-fill" style="width: 0%;"></div>
+                  <div class="metric-bar-fill green metric-cpu-fill" style="width: 0%;"></div>
                 </div>
               </div>
 
-              <!-- Metric 2: Disk IO -->
-              <div class="metric-block" title="Disk I/O requires platform elevated metrics or extended counters">
+              <!-- Disk I/O -->
+              <div class="metric-block" title="System-wide disk I/O is not measured; batch disk concurrency is limited by the Disk I/O Jobs (--io-jobs) setting">
                 <div class="metric-header">
-                  <span class="metric-name">DISK I/O <span title="Disk I/O requires platform elevated metrics or extended counters" style="cursor:help;opacity:0.85;font-size:10px;">ⓘ</span></span>
-                  <span class="metric-val muted metric-io-val" id="io-telemetry-val" title="Disk I/O requires platform elevated metrics or extended counters">Not measured</span>
+                  <span class="metric-name">DISK I/O <span class="info-tip">ⓘ</span></span>
+                  <span class="metric-val muted metric-io-val">Not measured</span>
                 </div>
                 <div class="metric-bar-bg">
-                  <div class="metric-bar-fill cyan metric-io-fill unavailable" id="io-telemetry-fill" style="width: 0%;" title="Disk I/O requires platform elevated metrics or extended counters"></div>
+                  <div class="metric-bar-fill cyan metric-io-fill unavailable" style="width: 0%;"></div>
                 </div>
               </div>
 
-              <!-- Metric 3: RAM Usage (Moved up top inside main metrics list) -->
+              <!-- RAM -->
               <div class="metric-block">
                 <div class="metric-header">
                   <span class="metric-name">RAM MEMORY USAGE</span>
-                  <span class="metric-val purple metric-ram-val" id="ram-telemetry-val">0 MB</span>
+                  <span class="metric-val purple metric-ram-val">0 MB</span>
                 </div>
                 <div class="metric-bar-bg">
-                  <div class="metric-bar-fill purple metric-ram-fill" id="ram-telemetry-fill" style="width: 0%;"></div>
+                  <div class="metric-bar-fill purple metric-ram-fill" style="width: 0%;"></div>
                 </div>
               </div>
 
-              <!-- Metric Badges Row (Workers & IO Jobs) -->
+              <!-- Workers & I/O jobs -->
               <div class="metric-badges-row">
-                <div class="metric-pill metric-workers-chip" id="workers-telemetry-chip">⚡ Standby (8 Workers)</div>
-                <div class="metric-pill purple metric-iojobs-chip" id="iojobs-telemetry-chip">🔀 Idle (2 IO Jobs)</div>
+                <div class="metric-pill metric-workers-chip">⚡ Standby (8 Workers)</div>
+                <div class="metric-pill purple metric-iojobs-chip">🔀 Idle (2 IO Jobs)</div>
               </div>
             </div>
 
-            <!-- OLED Log Console Stream -->
-            <div class="log-console" style="margin:0;border:none;border-radius:0;flex:1;">
+            <!-- Log console -->
+            <div class="log-console">
               <div class="log-header">
                 <span class="log-title">📟 Transcode Stream Output</span>
-                <div class="log-actions">
+                <div>
                   <button class="btn btn-ghost" id="remux-clear-log">Clear Stream</button>
                 </div>
               </div>
-              <div class="log-body" id="remux-log">
-                <div class="console-empty-prompt">
-                  <span class="prompt-arrow">&gt;_</span>
-                  <span class="prompt-text">Console output stream initialized. Ready for batch execution...</span>
-                </div>
-              </div>
+              <div class="log-body" id="remux-log" aria-live="polite"></div>
             </div>
 
           </div>
@@ -462,15 +452,15 @@
         </div>
       </div><!-- /view-remux -->
 
-      <!-- ─── Extract View (3-Column Layout) ────────────────────────────── -->
+      <!-- ─── Extract View ───────────────────────────────────────────────── -->
       <div class="view" id="view-extract">
         <div class="view-3col-layout">
 
-          <!-- Col 1: Parameters Glass Panel with Run/Stop at Bottom -->
+          <!-- Col 1: parameters, Run/Stop -->
           <div class="glass-panel col-options">
             <div class="panel-header">
               <span class="panel-title">
-                <span class="icon">
+                <span>
                   <svg class="app-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                     <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
                     <polyline points="2 12 12 17 22 12"></polyline>
@@ -487,7 +477,7 @@
 
             <div class="panel-body" style="display:flex; flex-direction:column; gap: 10px;">
 
-              <!-- Scope Card: Pipeline Targets Overview -->
+              <!-- Extract targets -->
               <div class="extract-scope-card">
                 <div class="extract-scope-header">
                   <span class="scope-label">EXTRACT TARGETS</span>
@@ -550,10 +540,10 @@
                   </div>
                 </div>
 
-                <!-- 2-Column Hardware / Concurrency Tuning: Workers & Disk I/O Jobs -->
+                <!-- Concurrency: Workers, Disk I/O Jobs -->
                 <div class="form-group">
-                  <label class="form-label" style="display:flex;align-items:center;gap:2px;font-size:9.5px;">Workers <span title="Concurrent files to process (1-32)" style="cursor:help;opacity:0.85;font-size:10px;">ⓘ</span></label>
-                  <div class="number-stepper" style="width:100%;">
+                  <label class="form-label compact">Workers <span title="Concurrent files to process (1-64)" class="info-tip">ⓘ</span></label>
+                  <div class="number-stepper">
                     <button type="button" class="stepper-btn minus" aria-label="Decrease workers">−</button>
                     <input type="number" id="extract-workers" value="8" min="1" max="64" />
                     <button type="button" class="stepper-btn plus" aria-label="Increase workers">+</button>
@@ -561,15 +551,15 @@
                 </div>
 
                 <div class="form-group">
-                  <label class="form-label" style="display:flex;align-items:center;gap:2px;font-size:9.5px;">Disk I/O Jobs <span title="Max concurrent disk I/O streams (0 = unlimited)" style="cursor:help;opacity:0.85;font-size:10px;">ⓘ</span></label>
-                  <div class="number-stepper" style="width:100%;">
+                  <label class="form-label compact">Disk I/O Jobs <span title="Max concurrent disk I/O streams (0-64; 0 = same as Workers)" class="info-tip">ⓘ</span></label>
+                  <div class="number-stepper">
                     <button type="button" class="stepper-btn minus" aria-label="Decrease IO jobs">−</button>
-                    <input type="number" id="extract-io-jobs" value="2" min="0" max="32" />
+                    <input type="number" id="extract-io-jobs" value="2" min="0" max="64" />
                     <button type="button" class="stepper-btn plus" aria-label="Increase IO jobs">+</button>
                   </div>
                 </div>
 
-                <!-- CLI Execution Flags & Maintenance -->
+                <!-- Flags & cache maintenance -->
                 <div class="form-group full" style="margin-top: 2px;">
                   <label class="form-label">CLI Flags &amp; Cache</label>
                   <div class="cli-flags-grid">
@@ -582,28 +572,27 @@
                       <span class="flag-title">Bypass Cache</span>
                     </label>
                   </div>
-                  <button class="clear-cache-btn" id="extract-clear-cache" type="button" title="Delete inspection cache" style="margin-top: 6px; width: 100%;">
+                  <button class="clear-cache-btn" id="extract-clear-cache" type="button" title="Delete inspection cache">
                     🗑 Clear Inspection Cache
                   </button>
                 </div>
 
               </div>
 
-              <!-- Action Execution Buttons at Bottom of Parameters Panel -->
               <div class="param-actions-footer">
-                <button class="btn btn-primary btn-gradient" id="extract-run" style="flex:2;">▶ Run Extraction</button>
-                <button class="btn btn-stop" id="extract-stop" disabled style="flex:1;">■ Stop</button>
+                <button class="btn btn-gradient" id="extract-run">▶ Run Extraction</button>
+                <button class="btn btn-stop" id="extract-stop" disabled>■ Stop</button>
               </div>
 
             </div>
           </div>
 
-          <!-- Col 2: Extraction Queue -->
+          <!-- Col 2: episode queue -->
           <div class="glass-panel col-queue">
             <div class="panel-header queue-panel-header">
               <div class="queue-header-top">
                 <span class="panel-title">
-                  <span class="icon">
+                  <span>
                     <svg class="app-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                       <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
                       <polyline points="2 12 12 17 22 12"></polyline>
@@ -616,7 +605,7 @@
                 <span class="queue-count-badge" id="extract-queue-count">Ready</span>
               </div>
               <div class="queue-header-toolbar">
-                <div class="queue-bulk-actions" id="extract-queue-bulk">
+                <div class="queue-bulk-actions">
                   <button type="button" class="btn btn-xs" id="extract-select-all">Select All</button>
                   <button type="button" class="btn btn-xs" id="extract-deselect-all">Deselect All</button>
                 </div>
@@ -624,7 +613,6 @@
             </div>
             <div class="panel-body queue-body" id="extract-episode-list">
 
-              <!-- Clean Empty Queue Placeholder -->
               <div class="empty-state-card">
                 <div class="empty-icon-glow">
                   <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -641,20 +629,19 @@
             </div>
           </div>
 
-          <!-- Col 3: Prominent High-Contrast Resource Monitor & Console Stream -->
+          <!-- Col 3: resource monitor & console -->
           <div class="glass-panel col-console">
             <div class="panel-header">
               <span class="panel-title">📊 Resource Monitor<span class="panel-title-suffix-console"> &amp; Console</span></span>
             </div>
 
-            <!-- Prominent Resource Telemetry Card -->
             <div class="prominent-resource-card">
               <div class="res-card-title">
                 <span>🖥️ SYSTEM HARDWARE TELEMETRY</span>
                 <span class="res-status-dot green"></span>
               </div>
 
-              <!-- Metric 1: CPU Load -->
+              <!-- CPU -->
               <div class="metric-block">
                 <div class="metric-header">
                   <span class="metric-name">CPU UTILIZATION</span>
@@ -665,18 +652,18 @@
                 </div>
               </div>
 
-              <!-- Metric 2: Disk IO -->
-              <div class="metric-block" title="Disk I/O requires platform elevated metrics or extended counters">
+              <!-- Disk I/O -->
+              <div class="metric-block" title="System-wide disk I/O is not measured; batch disk concurrency is limited by the Disk I/O Jobs (--io-jobs) setting">
                 <div class="metric-header">
-                  <span class="metric-name">DISK I/O <span title="Disk I/O requires platform elevated metrics or extended counters" style="cursor:help;opacity:0.85;font-size:10px;">ⓘ</span></span>
-                  <span class="metric-val muted metric-io-val" title="Disk I/O requires platform elevated metrics or extended counters">Not measured</span>
+                  <span class="metric-name">DISK I/O <span class="info-tip">ⓘ</span></span>
+                  <span class="metric-val muted metric-io-val">Not measured</span>
                 </div>
                 <div class="metric-bar-bg">
-                  <div class="metric-bar-fill cyan metric-io-fill unavailable" style="width: 0%;" title="Disk I/O requires platform elevated metrics or extended counters"></div>
+                  <div class="metric-bar-fill cyan metric-io-fill unavailable" style="width: 0%;"></div>
                 </div>
               </div>
 
-              <!-- Metric 3: RAM Usage (Moved up top inside main metrics list) -->
+              <!-- RAM -->
               <div class="metric-block">
                 <div class="metric-header">
                   <span class="metric-name">RAM MEMORY USAGE</span>
@@ -687,27 +674,22 @@
                 </div>
               </div>
 
-              <!-- Metric Badges Row (Workers & IO Jobs) -->
+              <!-- Workers & I/O jobs -->
               <div class="metric-badges-row">
                 <div class="metric-pill metric-workers-chip">⚡ Standby (8 Workers)</div>
                 <div class="metric-pill purple metric-iojobs-chip">🔀 Idle (2 IO Jobs)</div>
               </div>
             </div>
 
-            <!-- Log Console Stream -->
-            <div class="log-console" style="margin:0;border:none;border-radius:0;flex:1;">
+            <!-- Log console -->
+            <div class="log-console">
               <div class="log-header">
                 <span class="log-title">📟 Active Extract Stream</span>
-                <div class="log-actions">
+                <div>
                   <button class="btn btn-ghost" id="extract-clear-log">Clear</button>
                 </div>
               </div>
-              <div class="log-body" id="extract-log">
-                <div class="console-empty-prompt">
-                  <span class="prompt-arrow">&gt;_</span>
-                  <span class="prompt-text">Extract console stream initialized. Ready for execution...</span>
-                </div>
-              </div>
+              <div class="log-body" id="extract-log" aria-live="polite"></div>
             </div>
 
           </div>
@@ -721,20 +703,20 @@
 
 </div><!-- /#app -->
 
-<!-- Modal Overlay -->
-<div class="modal-overlay" id="confirm-modal">
+<!-- Confirmation modal -->
+<div class="modal-overlay" id="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
   <div class="modal-card">
     <div class="modal-icon">⚠️</div>
     <h3 class="modal-title" id="modal-title">Clear Inspection Cache</h3>
     <p class="modal-desc" id="modal-desc">Are you sure you want to clear the persistent inspection cache?</p>
     <div class="modal-actions">
       <button class="btn btn-ghost" id="modal-cancel" type="button">Cancel</button>
-      <button class="btn btn-danger" id="modal-confirm" type="button">Clear Cache</button>
+      <button class="btn" id="modal-confirm" type="button">Clear Cache</button>
     </div>
   </div>
 </div>
 
-<!-- Subtitle Assignment Modal (GUI manual selection & track assignment) -->
+<!-- Subtitle assignment modal -->
 <div class="modal-overlay" id="sub-assign-modal" role="dialog" aria-modal="true" aria-labelledby="sub-assign-title">
   <div class="modal-card sub-assign-card">
     <div class="modal-icon">💬</div>
@@ -746,31 +728,31 @@
 
     <div class="sub-assign-section-label">Custom Subtitle File</div>
     <div class="sub-assign-custom-row">
-      <input type="text" id="sub-custom-path" class="input-text" readonly placeholder="Choose custom subtitle file..." />
-      <button type="button" id="sub-browse-btn" class="btn btn-sm">📁 Browse...</button>
+      <input type="text" id="sub-custom-path" readonly placeholder="Choose custom subtitle file..." />
+      <button type="button" id="sub-browse-btn" class="btn">📁 Browse...</button>
     </div>
 
     <div class="sub-assign-params-grid">
-      <div class="field-group">
-        <label for="sub-lang-select" class="field-label">Language</label>
+      <div>
+        <label for="sub-lang-select">Language</label>
         <div class="sub-lang-inputs">
-          <select id="sub-lang-select" class="input-select">
+          <select id="sub-lang-select">
             <option value="ind">Indonesian (ind)</option>
             <option value="eng">English (eng)</option>
             <option value="jpn">Japanese (jpn)</option>
             <option value="custom">Custom tag...</option>
           </select>
-          <input type="text" id="sub-lang-custom" class="input-text" placeholder="ISO-639-2 tag" style="display: none;" maxlength="3" />
+          <input type="text" id="sub-lang-custom" placeholder="ISO-639-2 tag" style="display: none;" maxlength="3" />
         </div>
       </div>
-      <div class="field-group">
-        <label for="sub-title-input" class="field-label">Track Title</label>
-        <input type="text" id="sub-title-input" class="input-text" placeholder="e.g. Dialogue" />
+      <div>
+        <label for="sub-title-input">Track Title</label>
+        <input type="text" id="sub-title-input" placeholder="e.g. Dialogue" />
       </div>
-      <div class="field-group">
-        <label for="sub-offset-input" class="field-label">Time Offset</label>
+      <div>
+        <label for="sub-offset-input">Time Offset</label>
         <div class="sub-offset-input-wrap">
-          <input type="number" id="sub-offset-input" class="input-text" step="100" placeholder="0" />
+          <input type="number" id="sub-offset-input" step="100" placeholder="0" />
           <span class="sub-offset-unit">ms</span>
         </div>
       </div>

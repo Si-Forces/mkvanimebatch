@@ -1,6 +1,6 @@
 # 0007. In-Process Engine Bridge and Sidecar Retirement
 
-> **Status**: Accepted (Partially superseded by ADR-0008)
+> **Status**: Accepted (Partially superseded by ADR-0008; amended 2026-09-28)
 > **Date**: 2026-05-01
 > **Context**: Desktop Application Bridge
 
@@ -28,3 +28,12 @@ We decided to cut over `desktop-tauri` entirely to an in-process **Engine Bridge
 - Inter-process serialization, PID tracking, and process tree killing logic in `desktop-tauri` are eliminated.
 - Single source of truth for CLI argument validation is established in `mkv-core::pipeline`.
 - `mkvmerge`, `mkvextract`, and `ffmpeg` remain external binaries executed directly by `mkv-core`.
+
+## Amendment — 2026-09-28
+
+The entry points and validation home named above no longer exist under those names. The decision itself stands.
+
+- **Engine entry point.** `run_job` receives a typed `BatchRequest` (ADR-0008), validates it, builds `BatchPipeline::from_request`, and awaits `BatchPipeline::run()`. There is no `mkv-core::pipeline::execute_pipeline` and no `PipelineConfig::from_args`; request-to-config conversion is `BatchRequest::into_pipeline_config`.
+- **Validation home.** The single source of request validation is `BatchRequest::validate` in `mkv-core::request`, not `mkv-core::pipeline`. The CLI still rejects unknown flags and checks `--preset` and `--bitrate` while parsing, before `validate` runs.
+- **Log destination.** `job-log` batches are shown in each view's log console panel; there is no drawer.
+- **Panic isolation has two layers.** A panic inside one worker task is caught by the pipeline's worker `JoinSet` and completes that item as `error` (`worker panicked: ...`) while the batch continues. A panic that escapes the pipeline task is still caught at the bridge's join boundary as Decision 3 describes. Both depend on the release profile unwinding: `[profile.release]` must never set `panic = "abort"`.

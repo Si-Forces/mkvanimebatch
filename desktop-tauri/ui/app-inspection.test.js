@@ -24,7 +24,7 @@ test("app forwards preflight options to Tauri while browse uses defaults", async
   assert.equal(await scanInputDirectory("/release", "remux"), true);
   assert.deepEqual(calls[0], ["inspect_directory", { path: "/release", options: undefined }]);
 
-  const options = { workers: 6, ioJobs: 0, noCache: true };
+  const options = { noCache: true };
   assert.equal(await scanInputDirectory("/release", "remux", { force: true, options }), true);
   assert.deepEqual(calls[1], ["inspect_directory", { path: "/release", options }]);
 });
@@ -89,8 +89,8 @@ function bootstrapHarness(t) {
     getElementById: id => elements.get(id) ?? null,
     querySelector: () => null,
     querySelectorAll: selector => {
-      if (selector === ".metric-workers-chip, #workers-telemetry-chip") return [workerChip];
-      if (selector === ".metric-iojobs-chip, #iojobs-telemetry-chip") return [ioChip];
+      if (selector === ".metric-workers-chip") return [workerChip];
+      if (selector === ".metric-iojobs-chip") return [ioChip];
       return [];
     },
     createElement: () => new BootElement(),
@@ -211,12 +211,13 @@ test("terminal snapshot restores presentation only and leaves no eager job liste
   assert.equal(ipc.elements.get("remux-episode-list").children[1].querySelector(".track-tag.magenta").textContent, "Done in 8.4s");
   assert.equal(ipc.calls.some(([command]) => command === "inspect_directory"), false);
 });
+
 test("no snapshot preserves pre-run selection and cleans up bootstrap listeners", async t => {
   const ipc = bootstrapHarness(t);
   const app = await ipc.mount("no-snapshot");
   assert.equal(await app.scanInputDirectory("/release", "remux"), true);
   const list = ipc.elements.get("remux-episode-list");
-  list.handlers.get("change")({ target: { checked: false, closest: () => ({ dataset: { itemId: "two" } }) } });
+  list.handlers.get("change")({ target: { closest: () => ({ dataset: { itemId: "two" }, checked: false }) } });
   ipc.resolveSnapshot(null);
   await ipc.flush();
   assert.equal(ipc.elements.get("remux-queue-count").textContent, "2 / 3 Selected");

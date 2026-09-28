@@ -10,7 +10,6 @@ pub struct PresetProfile {
     pub id: String,
     pub name: String,
     pub icon: String,
-    pub description: String,
     pub bitrate: String,
     pub complexity: u32,
 }
@@ -22,7 +21,6 @@ pub fn get_preset_profiles() -> Vec<PresetProfile> {
             id: "balanced".to_string(),
             name: "Balanced Anime (Opus 192k)".to_string(),
             icon: "🌸".to_string(),
-            description: "Opus 192k • Complexity 5".to_string(),
             bitrate: "192k".to_string(),
             complexity: 5,
         },
@@ -30,7 +28,6 @@ pub fn get_preset_profiles() -> Vec<PresetProfile> {
             id: "fast".to_string(),
             name: "Fast Muxing (128k)".to_string(),
             icon: "⚡".to_string(),
-            description: "Opus 128k • Complexity 5".to_string(),
             bitrate: "128k".to_string(),
             complexity: 5,
         },
@@ -38,7 +35,6 @@ pub fn get_preset_profiles() -> Vec<PresetProfile> {
             id: "hifi".to_string(),
             name: "Hi-Fi Master (320k)".to_string(),
             icon: "🎧".to_string(),
-            description: "Opus 320k • Complexity 10".to_string(),
             bitrate: "320k".to_string(),
             complexity: 10,
         },
@@ -46,24 +42,22 @@ pub fn get_preset_profiles() -> Vec<PresetProfile> {
             id: "custom".to_string(),
             name: "Custom Configuration".to_string(),
             icon: "🛠️".to_string(),
-            description: "Custom user configuration".to_string(),
             bitrate: "192k".to_string(),
             complexity: 5,
         },
     ]
 }
 
-/// Lookup a preset by case-insensitive identifier (supporting 'high_quality' alias for 'hifi').
+/// Looks up a built-in preset by case-insensitive id, accepting `default` for `balanced` and
+/// `high_quality` / `high-quality` for `hifi`.
 pub fn lookup_preset(id: &str) -> Option<PresetProfile> {
     let normalized = id.trim().to_ascii_lowercase();
     let target = match normalized.as_str() {
-        "default" | "balanced" => "balanced",
-        "high_quality" | "high-quality" | "hifi" => "hifi",
+        "default" => "balanced",
+        "high_quality" | "high-quality" => "hifi",
         other => other,
     };
-    get_preset_profiles()
-        .into_iter()
-        .find(|p| p.id.to_ascii_lowercase() == target)
+    get_preset_profiles().into_iter().find(|p| p.id == target)
 }
 
 #[cfg(test)]
@@ -71,29 +65,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_preset_catalog() {
-        let presets = get_preset_profiles();
-        assert_eq!(presets.len(), 4);
-        assert!(presets.iter().any(|p| p.id == "balanced"));
-        assert!(presets.iter().any(|p| p.id == "fast"));
-        assert!(presets.iter().any(|p| p.id == "hifi"));
-        assert!(presets.iter().any(|p| p.id == "custom"));
-    }
-
-    #[test]
-    fn test_lookup_preset_case_insensitive() {
-        let preset = lookup_preset("BALANCED").expect("should find balanced preset");
-        assert_eq!(preset.bitrate, "192k");
-        assert_eq!(preset.complexity, 5);
-
+    fn test_lookup_preset_ids_and_aliases() {
+        for (query, id) in [
+            ("BALANCED", "balanced"),
+            (" default ", "balanced"),
+            ("fast", "fast"),
+            ("HiFi", "hifi"),
+            ("high_quality", "hifi"),
+            ("High-Quality", "hifi"),
+            ("custom", "custom"),
+        ] {
+            let preset = lookup_preset(query).unwrap_or_else(|| panic!("no preset for {query:?}"));
+            assert_eq!(preset.id, id, "query {query:?}");
+        }
         assert!(lookup_preset("non_existent").is_none());
-    }
-
-    #[test]
-    fn test_lookup_preset_default_alias() {
-        let preset = lookup_preset("default").expect("should find balanced preset for 'default'");
-        assert_eq!(preset.id, "balanced");
-        assert_eq!(preset.bitrate, "192k");
-        assert_eq!(preset.complexity, 5);
     }
 }

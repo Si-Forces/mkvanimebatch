@@ -1,4 +1,4 @@
-// Prevents additional console window on Windows, DO NOT REMOVE!!
+// Prevents an extra console window on Windows.
 #![windows_subsystem = "windows"]
 
 fn main() {

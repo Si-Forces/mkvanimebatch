@@ -1,6 +1,6 @@
 # 0006. Hybrid EBML Probing and Channel-First Event Streaming
 
-> **Status**: Accepted
+> **Status**: Accepted (amended by ADR-0013; amended 2026-09-28)
 > **Date**: 2026-04-15
 > **Context**: Media Engine Context
 
@@ -18,3 +18,10 @@ During preflight inspection, probing anime fansub MKVs using `mkvmerge -J` subpr
 - Preflight inspection achieves high performance for standard MKVs while retaining 100% compatibility for edge-case releases.
 - In-process event handling avoids JSON string formatting overhead in the GUI.
 - MKVToolNix remains required at runtime as both a fallback inspector and the primary remuxer.
+
+## Amendment — 2026-09-28
+
+Decision 1 and the first consequence overstate the fallback.
+
+- **Fallback runs only when the native probe returns an error.** `probe_video` calls `probe_ebml_native` and invokes `mkvmerge -J` only if that returns `Err`. Some malformed input does not: a malformed SeekHead entry ends the SeekHead scan early and the probe returns what it found, with no fallback.
+- **Not a compatibility guarantee.** The fallback itself can fail or time out; the Inspection Manifest then carries the error as the item's `inspection_error`, and a remux run ends that item as `error`. "100% compatibility for edge-case releases" should read as "a second probe for files the native parser rejects".

@@ -19,8 +19,11 @@ tracing = "0.1"
 blake2 = "0.10"
 parking_lot = "0.12"
 tempfile = "3"
-tokio = { version = "1", features = ["sync", "rt-multi-thread", "process", "fs", "macros", "io-util", "time"] }
+tokio = { version = "1", features = ["sync", "rt", "process", "macros", "io-util", "time"] }
 tokio-util = "0.7"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread"] }
 
 [[bench]]
 name = "bench_pipeline"

@@ -4,68 +4,62 @@ use std::path::{Path, PathBuf};
 
 use mkv_core::assets::{
     claim_leftover_chapters, prepare_release_directory, AssetResolver, ChapterIndex, CoverIndex,
-    FontsOrigin, ReleasePreparationOptions, ResolvedAssets, SubIndex,
+    ReleasePreparationOptions, ResolvedAssets, SubClassification, SubIndex,
 };
-use mkv_core::domain::{ancestor_dirs, EpisodeInfo};
-use mkv_core::fonts::FontInfo;
+use mkv_core::domain::{ancestor_dirs, EpisodeInfo, MkvTrack, TrackProperties};
 use mkv_core::scan::{
     create_parsed_file, InspectedVideo, InspectionResult, MkvAttachment, MkvChapter,
     MkvmergeMetadata, ParsedFile,
 };
 use tempfile::tempdir;
 
-fn make_video(path: &Path) -> ParsedFile {
-    create_parsed_file(path)
+const CHAPTER_XML: &[u8] =
+    b"<?xml version='1.0'?><Chapters><EditionEntry></EditionEntry></Chapters>";
+
+fn with_episode(path: impl Into<PathBuf>, parsed: EpisodeInfo) -> ParsedFile {
+    let mut file = create_parsed_file(path);
+    file.parsed = Some(parsed);
+    file
 }
 
-fn make_video_with_episode(path: &Path, parsed: EpisodeInfo) -> ParsedFile {
-    let mut video = make_video(path);
-    video.parsed = Some(parsed);
-    video
+fn discover(search_dirs: &[PathBuf], fonts_dir: &Path, assets_dir: Option<&Path>) -> AssetResolver {
+    AssetResolver::discover(search_dirs, fonts_dir, assets_dir, None, None, None)
 }
 
-fn resolve_subtitle(index: SubIndex, video_path: PathBuf, parsed: EpisodeInfo) -> ResolvedAssets {
-    let name = video_path
-        .file_name()
-        .unwrap()
-        .to_string_lossy()
-        .to_string();
-    let stem = video_path
-        .file_stem()
-        .unwrap()
-        .to_string_lossy()
-        .to_string();
-    let video = ParsedFile {
-        path: video_path,
-        name,
-        stem,
-        parsed: Some(parsed),
-    };
-    AssetResolver::new(
-        FontInfo::default(),
-        index,
-        ChapterIndex::new(),
-        CoverIndex::new(),
-        None,
-        None,
-        None,
-    )
-    .resolve_for(&video, None, None, None)
+/// Resolves `episode_01.mkv` against subtitles that all index as episode 01.
+fn resolve_episode_01_subtitle(sub_paths: &[&str]) -> ResolvedAssets {
+    let episode = || EpisodeInfo::new("", "E", "01");
+    let mut sub_index = SubIndex::new();
+    for path in sub_paths {
+        sub_index.add(with_episode(*path, episode()));
+    }
+    AssetResolver {
+        sub_index,
+        ..Default::default()
+    }
+    .resolve_for(&with_episode("episode_01.mkv", episode()), None, None, None)
     .unwrap()
+}
+
+fn source_with_embedded_cover() -> InspectedVideo {
+    InspectedVideo::new(MkvmergeMetadata {
+        attachments: vec![MkvAttachment {
+            file_name: Some("cover.jpg".into()),
+            content_type: Some("image/jpeg".into()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    })
 }
 
 #[test]
 fn test_chap_index_lookup() {
     let tmp = tempdir().unwrap();
     let xml_path = tmp.path().join("Show_S01E01_chapters.xml");
-    fs::write(
-        &xml_path,
-        b"<?xml version='1.0'?><Chapters><EditionEntry></EditionEntry></Chapters>",
-    )
-    .unwrap();
+    fs::write(&xml_path, CHAPTER_XML).unwrap();
 
     let mut chap_idx = ChapterIndex::new();
-    chap_idx.add(make_video(&xml_path));
+    chap_idx.add(create_parsed_file(&xml_path));
 
     let matched = chap_idx.lookup(&EpisodeInfo::new("1", "E", "01"));
     assert_eq!(matched, Some(xml_path));
@@ -82,16 +76,12 @@ fn test_chap_index_cross_dir_duplicate_kept_first() {
     let first = specific_dir.join("Show_S01E01_chapters.xml");
     let second = shared_dir.join("Show_S01E01_chapters.xml");
     for p in [&first, &second] {
-        fs::write(
-            p,
-            b"<?xml version='1.0'?><Chapters><EditionEntry></EditionEntry></Chapters>",
-        )
-        .unwrap();
+        fs::write(p, CHAPTER_XML).unwrap();
     }
 
     let mut chap_idx = ChapterIndex::new();
-    chap_idx.add(make_video(&first));
-    chap_idx.add(make_video(&second));
+    chap_idx.add(create_parsed_file(&first));
+    chap_idx.add(create_parsed_file(&second));
 
     assert_eq!(
         chap_idx.lookup(&EpisodeInfo::new("1", "E", "01")),
@@ -100,15 +90,14 @@ fn test_chap_index_cross_dir_duplicate_kept_first() {
 }
 
 #[test]
-fn test_cover_index_global_fallback() {
+fn test_cover_index_directory_cover() {
     let tmp = tempdir().unwrap();
     let cover_path = tmp.path().join("cover.jpg");
-    fs::write(&cover_path, b"img").unwrap();
 
     let mut cover_idx = CoverIndex::new();
-    cover_idx.add(make_video(&cover_path));
+    cover_idx.add(create_parsed_file(&cover_path));
 
-    let matched = cover_idx.lookup(&make_video(&tmp.path().join("Show - 05.mkv")));
+    let matched = cover_idx.lookup(&create_parsed_file(tmp.path().join("Show - 05.mkv")));
     assert_eq!(matched, Some(cover_path));
 }
 
@@ -116,110 +105,42 @@ fn test_cover_index_global_fallback() {
 fn test_cover_index_single_digit_cover_filename() {
     let tmp = tempdir().unwrap();
     let cover_path = tmp.path().join("Show 1_cover.jpg");
-    fs::write(&cover_path, b"img").unwrap();
 
     let mut cover_idx = CoverIndex::new();
-    cover_idx.add(make_video(&cover_path));
+    cover_idx.add(create_parsed_file(&cover_path));
 
-    let matched = cover_idx.lookup(&make_video(&tmp.path().join("Show 1.mkv")));
+    let matched = cover_idx.lookup(&create_parsed_file(tmp.path().join("Show 1.mkv")));
     assert_eq!(matched, Some(cover_path));
 }
 
 #[test]
-fn test_resolve_cover_local_overrides_all() {
+fn test_resolve_cover_local_first_then_fallback_gated_by_source_cover() {
     let tmp = tempdir().unwrap();
     let local_cover = tmp.path().join("Show 01_cover.jpg");
-    fs::write(&local_cover, b"local").unwrap();
-    let fallback_cover = tmp.path().join("fallback_cover.jpg");
-    fs::write(&fallback_cover, b"fb").unwrap();
-
-    let mut cover_idx = CoverIndex::new();
-    cover_idx.add(make_video(&local_cover));
+    let fallback_cover = tmp.path().join("assets").join("cover.jpg");
+    let video = create_parsed_file(tmp.path().join("Show 01.mkv"));
 
     let mut fallback_idx = CoverIndex::new();
-    fallback_idx.add(make_video(&fallback_cover));
+    fallback_idx.add(create_parsed_file(&fallback_cover));
+    let mut resolver = AssetResolver {
+        fallback_cover_index: Some(fallback_idx),
+        ..Default::default()
+    };
 
-    let video = make_video(&tmp.path().join("Show 01.mkv"));
-    let resolver = AssetResolver::new(
-        FontInfo::default(),
-        SubIndex::new(),
-        ChapterIndex::new(),
-        cover_idx,
-        None,
-        None,
-        Some(fallback_idx),
+    assert_eq!(resolver.resolve_cov(&video, false), Some(fallback_cover));
+    assert_eq!(resolver.resolve_cov(&video, true), None);
+
+    resolver.cover_index.add(create_parsed_file(&local_cover));
+    assert_eq!(
+        resolver.resolve_cov(&video, false),
+        Some(local_cover.clone())
     );
-
-    let result = resolver.resolve_cov(&video, true);
-    assert_eq!(result, Some(local_cover));
-}
-
-#[test]
-fn test_resolve_cover_source_cover_gates_fallback() {
-    let tmp = tempdir().unwrap();
-    let fallback_cover = tmp.path().join("cover.jpg");
-    fs::write(&fallback_cover, b"fb").unwrap();
-
-    let cover_idx = CoverIndex::new();
-    let mut fallback_idx = CoverIndex::new();
-    fallback_idx.add(make_video(&fallback_cover));
-
-    let video = make_video(&tmp.path().join("Show - 01.mkv"));
-    let resolver = AssetResolver::new(
-        FontInfo::default(),
-        SubIndex::new(),
-        ChapterIndex::new(),
-        cover_idx,
-        None,
-        None,
-        Some(fallback_idx),
-    );
-
-    let result = resolver.resolve_cov(&video, true);
-    assert_eq!(result, None);
-}
-
-#[test]
-fn test_resolve_cover_fallback_used_when_no_source_cover() {
-    let tmp = tempdir().unwrap();
-    let fallback_cover = tmp.path().join("cover.jpg");
-    fs::write(&fallback_cover, b"fb").unwrap();
-
-    let cover_idx = CoverIndex::new();
-    let mut fallback_idx = CoverIndex::new();
-    fallback_idx.add(make_video(&fallback_cover));
-
-    let video = make_video(&tmp.path().join("Show - 01.mkv"));
-    let resolver = AssetResolver::new(
-        FontInfo::default(),
-        SubIndex::new(),
-        ChapterIndex::new(),
-        cover_idx,
-        None,
-        None,
-        Some(fallback_idx),
-    );
-
-    let result = resolver.resolve_cov(&video, false);
-    assert_eq!(result, Some(fallback_cover));
+    assert_eq!(resolver.resolve_cov(&video, true), Some(local_cover));
 }
 
 #[test]
 fn test_resolver_matches_other_language_subtitle() {
-    let mut sub_index = SubIndex::new();
-    let sub_file = ParsedFile {
-        path: PathBuf::from("episode_01(ts).ass"),
-        name: "episode_01(ts).ass".to_string(),
-        stem: "episode_01(ts)".to_string(),
-        parsed: Some(EpisodeInfo::new("", "E", "01")),
-    };
-    sub_index.add(sub_file);
-
-    let result = resolve_subtitle(
-        sub_index,
-        PathBuf::from("episode_01.mkv"),
-        EpisodeInfo::new("", "E", "01"),
-    );
+    let result = resolve_episode_01_subtitle(&["episode_01(ts).ass"]);
     assert_eq!(
         result.subtitle_file,
         Some(PathBuf::from("episode_01(ts).ass"))
@@ -229,24 +150,7 @@ fn test_resolver_matches_other_language_subtitle() {
 
 #[test]
 fn test_resolver_keeps_different_subtitle_languages_distinct() {
-    let mut sub_index = SubIndex::new();
-    for (path, stem) in [
-        ("episode_01.eng.ass", "episode_01.eng"),
-        ("episode_01.ind.ass", "episode_01.ind"),
-    ] {
-        sub_index.add(ParsedFile {
-            path: PathBuf::from(path),
-            name: path.to_string(),
-            stem: stem.to_string(),
-            parsed: Some(EpisodeInfo::new("", "E", "01")),
-        });
-    }
-
-    let result = resolve_subtitle(
-        sub_index,
-        PathBuf::from("episode_01.mkv"),
-        EpisodeInfo::new("", "E", "01"),
-    );
+    let result = resolve_episode_01_subtitle(&["episode_01.eng.ass", "episode_01.ind.ass"]);
     assert_eq!(
         result.subtitle_file,
         Some(PathBuf::from("episode_01.ind.ass"))
@@ -256,21 +160,7 @@ fn test_resolver_keeps_different_subtitle_languages_distinct() {
 
 #[test]
 fn test_resolver_prefers_ass_over_srt_for_same_subtitle() {
-    let mut sub_index = SubIndex::new();
-    for path in ["episode_01.ind.srt", "episode_01.ind.ass"] {
-        sub_index.add(ParsedFile {
-            path: PathBuf::from(path),
-            name: path.to_string(),
-            stem: "episode_01.ind".to_string(),
-            parsed: Some(EpisodeInfo::new("", "E", "01")),
-        });
-    }
-
-    let result = resolve_subtitle(
-        sub_index,
-        PathBuf::from("episode_01.mkv"),
-        EpisodeInfo::new("", "E", "01"),
-    );
+    let result = resolve_episode_01_subtitle(&["episode_01.ind.srt", "episode_01.ind.ass"]);
     assert_eq!(
         result.subtitle_file,
         Some(PathBuf::from("episode_01.ind.ass"))
@@ -280,24 +170,7 @@ fn test_resolver_prefers_ass_over_srt_for_same_subtitle() {
 
 #[test]
 fn test_resolver_prefers_dialogue_candidate_for_same_language() {
-    let mut sub_index = SubIndex::new();
-    for (path, stem) in [
-        ("episode_01.ass", "episode_01"),
-        ("episode_01_dialogue.ass", "episode_01_dialogue"),
-    ] {
-        sub_index.add(ParsedFile {
-            path: PathBuf::from(path),
-            name: path.to_string(),
-            stem: stem.to_string(),
-            parsed: Some(EpisodeInfo::new("", "E", "01")),
-        });
-    }
-
-    let result = resolve_subtitle(
-        sub_index,
-        PathBuf::from("episode_01.mkv"),
-        EpisodeInfo::new("", "E", "01"),
-    );
+    let result = resolve_episode_01_subtitle(&["episode_01.ass", "episode_01_dialogue.ass"]);
     assert_eq!(
         result.subtitle_file,
         Some(PathBuf::from("episode_01_dialogue.ass"))
@@ -321,11 +194,10 @@ fn test_ancestor_asset_override_precedence() {
     let search_dirs = ancestor_dirs(&season_dir, &root_dir);
     assert_eq!(search_dirs, vec![root_dir.clone(), season_dir.clone()]);
 
-    let resolver =
-        AssetResolver::discover(&search_dirs, &season_dir.join("fonts"), None, None, None);
+    let resolver = discover(&search_dirs, &season_dir.join("fonts"), None);
 
-    let video = make_video_with_episode(
-        &season_dir.join("Show - 01.mkv"),
+    let video = with_episode(
+        season_dir.join("Show - 01.mkv"),
         EpisodeInfo::new("1", "E", "01"),
     );
     let resolved = resolver.resolve_for(&video, None, None, None).unwrap();
@@ -334,9 +206,10 @@ fn test_ancestor_asset_override_precedence() {
         Some(season_dir.join("Show - 01.ind.ass"))
     );
     assert_eq!(resolved.subtitle_lang, "ind");
-
-    let matched_cover = resolver.cover_index.lookup(&video);
-    assert_eq!(matched_cover, Some(season_dir.join("Show - 01_cover.jpg")));
+    assert_eq!(
+        resolved.cover_file,
+        Some(season_dir.join("Show - 01_cover.jpg"))
+    );
 }
 
 #[test]
@@ -351,11 +224,10 @@ fn test_local_subtitle_next_to_mkv_wins_over_ancestor() {
     fs::write(&local_sub, b"local_long").unwrap();
 
     let search_dirs = ancestor_dirs(&season_dir, &root_dir);
-    let resolver =
-        AssetResolver::discover(&search_dirs, &season_dir.join("fonts"), None, None, None);
+    let resolver = discover(&search_dirs, &season_dir.join("fonts"), None);
 
     let video_path = season_dir.join("[SuperLongFansubGroup] Anime Title - 01 [1080p FLAC BD].mkv");
-    let video = make_video_with_episode(&video_path, EpisodeInfo::new("1", "E", "01"));
+    let video = with_episode(video_path, EpisodeInfo::new("1", "E", "01"));
     let resolved = resolver.resolve_for(&video, None, None, None).unwrap();
     assert_eq!(resolved.subtitle_file, Some(local_sub));
 }
@@ -373,16 +245,14 @@ fn test_assets_dir_multi_level_fallback_hierarchy() {
     fs::write(assets_override.join("cover.jpg"), b"root_cover").unwrap();
 
     let search_dirs = ancestor_dirs(&season_dir, &root_dir);
-    let resolver = AssetResolver::discover(
+    let resolver = discover(
         &search_dirs,
         &season_dir.join("fonts"),
         Some(&assets_override.join("Season 01")),
-        None,
-        None,
     );
 
     assert_eq!(resolver.fonts.count, 1);
-    let video = make_video(&season_dir.join("Show - 01.mkv"));
+    let video = create_parsed_file(season_dir.join("Show - 01.mkv"));
     assert_eq!(
         resolver.resolve_cov(&video, false),
         Some(assets_override.join("cover.jpg"))
@@ -404,21 +274,19 @@ fn test_assets_dir_subtitle_source_beats_parent_language_score() {
     fs::write(parent_dir.join("Show - 01.ind.ass"), b"parent_copy").unwrap();
 
     let search_dirs = ancestor_dirs(&season_dir, &root_dir);
-    let resolver = AssetResolver::discover(
-        &search_dirs,
-        &season_dir.join("fonts"),
-        Some(&assets_dir),
-        None,
-        None,
-    );
+    let resolver = discover(&search_dirs, &season_dir.join("fonts"), Some(&assets_dir));
 
-    let matched = resolver
-        .fallback_sub_index
-        .as_ref()
-        .unwrap()
-        .lookup_fallback(&EpisodeInfo::new("1", "E", "01"));
-    assert!(matched.is_some());
-    assert_eq!(matched.unwrap().0, assets_dir.join("Show - 01.eng.ass"));
+    let video = with_episode(
+        season_dir.join("Show - 01.mkv"),
+        EpisodeInfo::new("1", "E", "01"),
+    );
+    assert_eq!(
+        resolver
+            .resolve_for(&video, None, None, None)
+            .unwrap()
+            .subtitle_file,
+        Some(assets_dir.join("Show - 01.eng.ass"))
+    );
 }
 
 #[test]
@@ -433,22 +301,18 @@ fn test_cover_assets_directory_beats_parent_episode_name() {
     let parent = assets.parent().unwrap().join("Show - 01_cover.jpg");
     fs::write(&local, b"local").unwrap();
     fs::write(&parent, b"parent").unwrap();
-    let resolver = AssetResolver::discover(
+    let resolver = discover(
         &ancestor_dirs(&season, &root),
         &season.join("fonts"),
         Some(&assets),
-        None,
-        None,
     );
-    let video = make_video(&season.join("Show - 01.mkv"));
+    let video = create_parsed_file(season.join("Show - 01.mkv"));
     assert_eq!(resolver.resolve_cov(&video, false), Some(local));
     assert_eq!(resolver.resolve_cov(&video, true), None);
 }
 
 #[test]
 fn test_subtitle_source_ladder_uses_embedded_before_ancestors() {
-    use mkv_core::domain::{MkvTrack, TrackProperties};
-
     let tmp = tempdir().unwrap();
     let root = tmp.path().join("root");
     let parent = root.join("parent");
@@ -456,7 +320,7 @@ fn test_subtitle_source_ladder_uses_embedded_before_ancestors() {
     let fallback = tmp.path().join("assets");
     fs::create_dir_all(&season).unwrap();
     fs::create_dir_all(&fallback).unwrap();
-    let video = make_video(&season.join("Show - 01.mkv"));
+    let video = create_parsed_file(season.join("Show - 01.mkv"));
     let local = season.join("Show - 01.eng.ass");
     let near = parent.join("Show - 01.eng.ass");
     let far = root.join("Show - 01.ind.ass");
@@ -466,8 +330,11 @@ fn test_subtitle_source_ladder_uses_embedded_before_ancestors() {
         fs::write(path, b"subtitle").unwrap();
     }
     let dirs = ancestor_dirs(&season, &root);
-    let discover =
-        || AssetResolver::discover(&dirs, &season.join("fonts"), Some(&fallback), None, None);
+    let resolve = |inspected: Option<&InspectedVideo>, assigned: Option<&Path>| {
+        discover(&dirs, &season.join("fonts"), Some(&fallback))
+            .resolve_for(&video, inspected, None, assigned)
+            .unwrap()
+    };
     let embedded = InspectedVideo::new(MkvmergeMetadata {
         tracks: vec![MkvTrack {
             id: Some(2),
@@ -481,45 +348,25 @@ fn test_subtitle_source_ladder_uses_embedded_before_ancestors() {
         ..Default::default()
     });
 
-    let result = discover()
-        .resolve_for(&video, Some(&embedded), None, None)
-        .unwrap();
+    let result = resolve(Some(&embedded), None);
     assert_eq!(result.subtitle_file.as_ref(), Some(&local));
     assert_eq!(result.subtitle_lang, "eng");
     assert_eq!(
-        discover()
-            .resolve_for(&video, Some(&embedded), None, Some(&manual))
-            .unwrap()
-            .subtitle_file,
-        Some(manual)
+        resolve(Some(&embedded), Some(manual.as_path())).subtitle_file,
+        Some(manual.clone())
     );
 
     fs::remove_file(&local).unwrap();
-    let result = discover()
-        .resolve_for(&video, Some(&embedded), None, None)
-        .unwrap();
+    let result = resolve(Some(&embedded), None);
     assert_eq!(result.embedded_sub_id, Some(2));
     assert_eq!(result.subtitle_file, None);
     assert_eq!(result.subtitle_lang, "ind");
 
-    let result = discover().resolve_for(&video, None, None, None).unwrap();
-    assert_eq!(result.subtitle_file, Some(near.clone()));
+    assert_eq!(resolve(None, None).subtitle_file, Some(near.clone()));
     fs::remove_file(&near).unwrap();
-    assert_eq!(
-        discover()
-            .resolve_for(&video, None, None, None)
-            .unwrap()
-            .subtitle_file,
-        Some(far.clone())
-    );
+    assert_eq!(resolve(None, None).subtitle_file, Some(far.clone()));
     fs::remove_file(&far).unwrap();
-    assert_eq!(
-        discover()
-            .resolve_for(&video, None, None, None)
-            .unwrap()
-            .subtitle_file,
-        Some(backup)
-    );
+    assert_eq!(resolve(None, None).subtitle_file, Some(backup));
 }
 
 #[test]
@@ -528,7 +375,7 @@ fn test_cover_nearest_directory_then_kind_and_natural_ties() {
     let root = tmp.path().join("root");
     let season = root.join("Season 01");
     fs::create_dir_all(&season).unwrap();
-    let video = make_video(&season.join("Show - 01.mkv"));
+    let video = create_parsed_file(season.join("Show - 01.mkv"));
     fs::write(&video.path, b"video").unwrap();
     let ancestor_episode = root.join("Show - 01_cover.jpg");
     let local_folder = season.join("folder.jpg");
@@ -547,22 +394,21 @@ fn test_cover_nearest_directory_then_kind_and_natural_ties() {
         fs::write(path, b"cover").unwrap();
     }
     let dirs = ancestor_dirs(&season, &root);
-    let discover = || AssetResolver::discover(&dirs, &season.join("fonts"), None, None, None);
-    assert_eq!(
-        discover()
+    let cover = || {
+        discover(&dirs, &season.join("fonts"), None)
             .resolve_for(&video, None, None, None)
             .unwrap()
-            .cover_file,
-        Some(numbered[2].clone())
-    );
+            .cover_file
+    };
+    assert_eq!(cover(), Some(numbered[2].clone()));
 
     let mut forward = CoverIndex::new();
     let mut reverse = CoverIndex::new();
     for path in &numbered {
-        forward.add(make_video(path));
+        forward.add(create_parsed_file(path));
     }
     for path in numbered.iter().rev() {
-        reverse.add(make_video(path));
+        reverse.add(create_parsed_file(path));
     }
     assert_eq!(forward.lookup(&video), Some(numbered[2].clone()));
     assert_eq!(reverse.lookup(&video), Some(numbered[2].clone()));
@@ -570,45 +416,12 @@ fn test_cover_nearest_directory_then_kind_and_natural_ties() {
     for path in &numbered {
         fs::remove_file(path).unwrap();
     }
-    assert_eq!(
-        discover()
-            .resolve_for(&video, None, None, None)
-            .unwrap()
-            .cover_file,
-        Some(dot.clone())
-    );
-    fs::remove_file(&dot).unwrap();
-    assert_eq!(
-        discover()
-            .resolve_for(&video, None, None, None)
-            .unwrap()
-            .cover_file,
-        Some(bare.clone())
-    );
-    fs::remove_file(&bare).unwrap();
-    assert_eq!(
-        discover()
-            .resolve_for(&video, None, None, None)
-            .unwrap()
-            .cover_file,
-        Some(local_cover.clone())
-    );
-    fs::remove_file(&local_cover).unwrap();
-    assert_eq!(
-        discover()
-            .resolve_for(&video, None, None, None)
-            .unwrap()
-            .cover_file,
-        Some(local_folder.clone())
-    );
-    fs::remove_file(&local_folder).unwrap();
-    assert_eq!(
-        discover()
-            .resolve_for(&video, None, None, None)
-            .unwrap()
-            .cover_file,
-        Some(ancestor_episode)
-    );
+    // Each removal exposes the next-ranked candidate.
+    for expected in [&dot, &bare, &local_cover, &local_folder] {
+        assert_eq!(cover().as_ref(), Some(expected));
+        fs::remove_file(expected).unwrap();
+    }
+    assert_eq!(cover(), Some(ancestor_episode));
 }
 
 #[test]
@@ -617,60 +430,37 @@ fn test_bare_cover_must_be_adjacent_sibling_of_video() {
     let root = tmp.path().join("root");
     let season = root.join("Season 01");
     fs::create_dir_all(&season).unwrap();
-    let root_video = make_video(&root.join("Show - 01.mkv"));
-    let nested_video = make_video(&season.join("Show - 01.mkv"));
+    let root_video = create_parsed_file(root.join("Show - 01.mkv"));
+    let nested_video = create_parsed_file(season.join("Show - 01.mkv"));
     let root_bare = root.join("Show - 01.jpg");
     for path in [&root_video.path, &nested_video.path, &root_bare] {
         fs::write(path, b"media").unwrap();
     }
-    let source = InspectedVideo::new(MkvmergeMetadata {
-        attachments: vec![MkvAttachment {
-            file_name: Some("cover.jpg".into()),
-            content_type: Some("image/jpeg".into()),
-            ..Default::default()
-        }],
-        ..Default::default()
-    });
+    let source = source_with_embedded_cover();
     let dirs = ancestor_dirs(&season, &root);
-    let discover = || AssetResolver::discover(&dirs, &season.join("fonts"), None, None, None);
+    let cover = |video: &ParsedFile, inspected: Option<&InspectedVideo>| {
+        discover(&dirs, &season.join("fonts"), None)
+            .resolve_for(video, inspected, None, None)
+            .unwrap()
+            .cover_file
+    };
 
     // An exact sibling bare cover still satisfies the adjacent form.
-    assert_eq!(
-        discover()
-            .resolve_for(&root_video, None, None, None)
-            .unwrap()
-            .cover_file,
-        Some(root_bare.clone())
-    );
+    assert_eq!(cover(&root_video, None), Some(root_bare.clone()));
     // A nested same-stem video keeps its embedded art instead of the root bare cover.
-    assert_eq!(
-        discover()
-            .resolve_for(&nested_video, Some(&source), None, None)
-            .unwrap()
-            .cover_file,
-        None
-    );
+    assert_eq!(cover(&nested_video, Some(&source)), None);
     // Episode-aware ancestor matching is unaffected by the adjacency rule.
     let ancestor_episode = root.join("Show - 01_cover.jpg");
     fs::write(&ancestor_episode, b"image").unwrap();
     assert_eq!(
-        discover()
-            .resolve_for(&nested_video, Some(&source), None, None)
-            .unwrap()
-            .cover_file,
+        cover(&nested_video, Some(&source)),
         Some(ancestor_episode.clone())
     );
     // Directory-wide `cover`/`folder` ancestors still apply to the nested video.
     fs::remove_file(&ancestor_episode).unwrap();
     let ancestor_cover = root.join("cover.jpg");
     fs::write(&ancestor_cover, b"image").unwrap();
-    assert_eq!(
-        discover()
-            .resolve_for(&nested_video, Some(&source), None, None)
-            .unwrap()
-            .cover_file,
-        Some(ancestor_cover)
-    );
+    assert_eq!(cover(&nested_video, Some(&source)), Some(ancestor_cover));
 }
 
 #[test]
@@ -681,7 +471,7 @@ fn test_unparsed_cover_and_source_art_fallback_boundary() {
     let assets = tmp.path().join("assets");
     fs::create_dir_all(&local).unwrap();
     fs::create_dir_all(&assets).unwrap();
-    let video = make_video(&local.join("unknown.mkv"));
+    let video = create_parsed_file(local.join("unknown.mkv"));
     fs::write(&video.path, b"video").unwrap();
     let fallback = assets.join("folder.png");
     let ancestor = root.join("folder.jpg");
@@ -689,58 +479,26 @@ fn test_unparsed_cover_and_source_art_fallback_boundary() {
     for path in [&fallback, &ancestor, &bare] {
         fs::write(path, b"image").unwrap();
     }
-    let source = InspectedVideo::new(MkvmergeMetadata {
-        attachments: vec![MkvAttachment {
-            file_name: Some("cover.jpg".into()),
-            content_type: Some("image/jpeg".into()),
-            ..Default::default()
-        }],
-        ..Default::default()
-    });
+    let source = source_with_embedded_cover();
     let dirs = ancestor_dirs(&local, &root);
-    let discover =
-        || AssetResolver::discover(&dirs, &local.join("fonts"), Some(&assets), None, None);
-    assert_eq!(
-        discover()
-            .resolve_for(&video, Some(&source), None, None)
+    let cover = |video: &ParsedFile, inspected: Option<&InspectedVideo>| {
+        discover(&dirs, &local.join("fonts"), Some(&assets))
+            .resolve_for(video, inspected, None, None)
             .unwrap()
-            .cover_file,
-        Some(bare.clone())
-    );
+            .cover_file
+    };
+    assert_eq!(cover(&video, Some(&source)), Some(bare.clone()));
     fs::remove_file(&bare).unwrap();
-    assert_eq!(
-        discover()
-            .resolve_for(&video, Some(&source), None, None)
-            .unwrap()
-            .cover_file,
-        Some(ancestor.clone())
-    );
+    assert_eq!(cover(&video, Some(&source)), Some(ancestor.clone()));
     fs::remove_file(&ancestor).unwrap();
-    assert_eq!(
-        discover()
-            .resolve_for(&video, Some(&source), None, None)
-            .unwrap()
-            .cover_file,
-        None
-    );
-    assert_eq!(
-        discover()
-            .resolve_for(&video, None, None, None)
-            .unwrap()
-            .cover_file,
-        Some(fallback)
-    );
-    let suffix_video = make_video(&local.join("logo_cover.mkv"));
+    assert_eq!(cover(&video, Some(&source)), None);
+    assert_eq!(cover(&video, None), Some(fallback));
+
+    let suffix_video = create_parsed_file(local.join("logo_cover.mkv"));
     fs::write(&suffix_video.path, b"video").unwrap();
     let suffix_bare = local.join("logo_cover.jpg");
     fs::write(&suffix_bare, b"image").unwrap();
-    assert_eq!(
-        discover()
-            .resolve_for(&suffix_video, Some(&source), None, None)
-            .unwrap()
-            .cover_file,
-        Some(suffix_bare)
-    );
+    assert_eq!(cover(&suffix_video, Some(&source)), Some(suffix_bare));
 }
 
 #[test]
@@ -748,156 +506,96 @@ fn test_two_ambiguous_chapters_remain_unclaimed() {
     let tmp = tempdir().unwrap();
     let videos: Vec<_> = ["Show - 01.mkv", "Show - 02.mkv"]
         .iter()
-        .map(|name| make_video(&tmp.path().join(name)))
+        .map(|name| create_parsed_file(tmp.path().join(name)))
         .collect();
     for name in ["chapters_a.xml", "chapters_b.xml"] {
-        fs::write(
-            tmp.path().join(name),
-            b"<Chapters><EditionEntry/></Chapters>",
-        )
-        .unwrap();
+        fs::write(tmp.path().join(name), CHAPTER_XML).unwrap();
     }
-    let resolver = AssetResolver::discover(
-        &[tmp.path().to_path_buf()],
-        &tmp.path().join("fonts"),
-        None,
-        None,
-        None,
-    );
+    let resolver = discover(&[tmp.path().to_path_buf()], &tmp.path().join("fonts"), None);
     assert_eq!(resolver.chap_index.unmatched().len(), 2);
     assert!(claim_leftover_chapters(&videos, &HashMap::new(), &resolver).is_empty());
 }
 
 #[test]
-fn test_sole_leftover_claimed_by_first_eligible_video() {
+fn test_sole_leftover_claimed_by_only_eligible_video() {
     let tmp = tempdir().unwrap();
     let chap_xml = tmp.path().join("chapters.xml");
-    fs::write(
-        &chap_xml,
-        b"<?xml version='1.0'?><Chapters><EditionEntry></EditionEntry></Chapters>",
-    )
-    .unwrap();
+    fs::write(&chap_xml, CHAPTER_XML).unwrap();
+    // Episode 01 has its own chapter file, leaving episode 02 as the only candidate.
+    fs::write(tmp.path().join("Show - 01.xml"), CHAPTER_XML).unwrap();
 
     let ep1 = tmp.path().join("Show - 01.mkv");
     let ep2 = tmp.path().join("Show - 02.mkv");
-    let videos = vec![make_video(&ep1), make_video(&ep2)];
+    let videos = vec![create_parsed_file(&ep1), create_parsed_file(&ep2)];
 
-    let ext_chap1 = tmp.path().join("Show - 01.xml");
-    fs::write(
-        &ext_chap1,
-        b"<?xml version='1.0'?><Chapters><EditionEntry></EditionEntry></Chapters>",
-    )
-    .unwrap();
-
-    let mut resolver = AssetResolver::discover(
-        &[tmp.path().to_path_buf()],
-        &tmp.path().join("fonts"),
-        None,
-        None,
-        None,
-    );
-    resolver.chap_index.add(make_video(&ext_chap1));
+    let resolver = discover(&[tmp.path().to_path_buf()], &tmp.path().join("fonts"), None);
 
     let claims = claim_leftover_chapters(&videos, &HashMap::new(), &resolver);
-    assert_eq!(claims.get(&ep2), Some(&chap_xml));
+    assert_eq!(claims, HashMap::from([(ep2, chap_xml)]));
 }
 
 #[test]
 fn test_no_claim_when_candidate_has_source_chapters() {
     let tmp = tempdir().unwrap();
-    let chap_xml = tmp.path().join("chapters.xml");
-    fs::write(
-        &chap_xml,
-        b"<?xml version='1.0'?><Chapters><EditionEntry></EditionEntry></Chapters>",
-    )
-    .unwrap();
+    fs::write(tmp.path().join("chapters.xml"), CHAPTER_XML).unwrap();
 
     let ep1 = tmp.path().join("Show - 01.mkv");
-    let videos = vec![make_video(&ep1)];
+    let videos = vec![create_parsed_file(&ep1)];
 
-    let resolver = AssetResolver::discover(
-        &[tmp.path().to_path_buf()],
-        &tmp.path().join("fonts"),
-        None,
-        None,
-        None,
-    );
+    let resolver = discover(&[tmp.path().to_path_buf()], &tmp.path().join("fonts"), None);
 
-    let mut inspections = HashMap::new();
-    let inspected = InspectedVideo::new(MkvmergeMetadata {
-        tracks: vec![],
-        attachments: vec![],
-        chapters: vec![MkvChapter {
-            num_entries: Some(5),
-        }],
-    });
-    inspections.insert(
-        ep1.clone(),
-        InspectionResult {
-            video: Some(inspected),
-            error: None,
-        },
-    );
+    let inspections = HashMap::from([(
+        ep1,
+        InspectionResult::success(MkvmergeMetadata {
+            chapters: vec![MkvChapter {
+                num_entries: Some(5),
+            }],
+            ..Default::default()
+        }),
+    )]);
 
     let claims = claim_leftover_chapters(&videos, &inspections, &resolver);
     assert!(claims.is_empty());
 }
 
 #[test]
-fn test_prepare_release_directory() {
+fn test_prepare_release_directory_uses_nearest_fonts_dir_with_fonts() {
     let tmp = tempdir().unwrap();
     let root = tmp.path().join("root");
     let season = root.join("Season 01");
-    fs::create_dir_all(&season).unwrap();
-    fs::create_dir_all(season.join("fonts")).unwrap();
-    fs::write(season.join("fonts").join("f.ttf"), b"font").unwrap();
+    for dir in [&root, &season] {
+        fs::create_dir_all(dir.join("fonts")).unwrap();
+        fs::write(dir.join("fonts").join("f.ttf"), b"font").unwrap();
+    }
+    let fonts_dir = || {
+        prepare_release_directory(&season, &root, ReleasePreparationOptions::default()).fonts_dir
+    };
 
-    let ep1 = season.join("Show - 01.mkv");
-    fs::write(&ep1, b"vid").unwrap();
-    let videos = vec![make_video(&ep1)];
-
-    let prepared = prepare_release_directory(
-        &season,
-        &root,
-        &videos,
-        ReleasePreparationOptions::default(),
-    );
-
-    assert_eq!(prepared.fonts_origin, FontsOrigin::Local);
-    assert_eq!(prepared.videos.len(), 1);
+    assert_eq!(fonts_dir(), season.join("fonts"));
+    fs::remove_dir_all(season.join("fonts")).unwrap();
+    assert_eq!(fonts_dir(), root.join("fonts"));
 }
 
 #[test]
 fn test_sub_index_is_empty_and_has_subtitles() {
     let mut sub_idx = SubIndex::new();
     assert!(sub_idx.is_empty());
-
-    let resolver_empty = AssetResolver::new(
-        FontInfo::default(),
-        sub_idx.clone(),
-        ChapterIndex::new(),
-        CoverIndex::new(),
-        None,
-        None,
-        None,
-    );
+    let resolver_empty = AssetResolver {
+        sub_index: sub_idx.clone(),
+        ..Default::default()
+    };
     assert!(!resolver_empty.has_subtitles());
 
     let tmp = tempdir().unwrap();
     let sub_file = tmp.path().join("Show_S01E01.ass");
     fs::write(&sub_file, b"[Script Info]\n").unwrap();
-    sub_idx.add(make_video(&sub_file));
+    sub_idx.add(create_parsed_file(&sub_file));
     assert!(!sub_idx.is_empty());
 
-    let resolver_with_sub = AssetResolver::new(
-        FontInfo::default(),
-        sub_idx,
-        ChapterIndex::new(),
-        CoverIndex::new(),
-        None,
-        None,
-        None,
-    );
+    let resolver_with_sub = AssetResolver {
+        sub_index: sub_idx,
+        ..Default::default()
+    };
     assert!(resolver_with_sub.has_subtitles());
 }
 
@@ -906,19 +604,9 @@ fn test_resolve_for_skip_reason_when_no_subs_vs_unmatched() {
     let tmp = tempdir().unwrap();
     let vid_path = tmp.path().join("Show_S01E01.mkv");
     fs::write(&vid_path, b"dummy").unwrap();
-    let vid = make_video(&vid_path);
+    let vid = create_parsed_file(&vid_path);
 
-    // 1. Completely empty subtitles
-    let resolver_no_subs = AssetResolver::new(
-        FontInfo::default(),
-        SubIndex::new(),
-        ChapterIndex::new(),
-        CoverIndex::new(),
-        None,
-        None,
-        None,
-    );
-    let res_no_subs = resolver_no_subs
+    let res_no_subs = AssetResolver::default()
         .resolve_for(&vid, None, None, None)
         .unwrap();
     assert!(!res_no_subs.matched_subtitle);
@@ -927,24 +615,18 @@ fn test_resolve_for_skip_reason_when_no_subs_vs_unmatched() {
         Some("no subtitle files found")
     );
 
-    // 2. Subtitle present for E02 but video is E01
+    // Subtitle present for E02 but video is E01
     let mut sub_idx = SubIndex::new();
     let sub_path = tmp.path().join("Show_S01E02.ass");
     fs::write(&sub_path, b"[Script Info]\n").unwrap();
-    sub_idx.add(make_video(&sub_path));
+    sub_idx.add(create_parsed_file(&sub_path));
 
-    let resolver_unmatched = AssetResolver::new(
-        FontInfo::default(),
-        sub_idx,
-        ChapterIndex::new(),
-        CoverIndex::new(),
-        None,
-        None,
-        None,
-    );
-    let res_unmatched = resolver_unmatched
-        .resolve_for(&vid, None, None, None)
-        .unwrap();
+    let res_unmatched = AssetResolver {
+        sub_index: sub_idx,
+        ..Default::default()
+    }
+    .resolve_for(&vid, None, None, None)
+    .unwrap();
     assert!(!res_unmatched.matched_subtitle);
     assert_eq!(
         res_unmatched.skip_reason.as_deref(),
@@ -962,18 +644,13 @@ fn test_stale_assigned_subtitle_fails_closed_for_parsed_and_unparsed_videos() {
     let stale = tmp.path().join("deleted_manual.ass");
 
     let mut sub_index = SubIndex::new();
-    sub_index.add(make_video(&automatic));
-    let resolver = AssetResolver::new(
-        FontInfo::default(),
+    sub_index.add(create_parsed_file(&automatic));
+    let resolver = AssetResolver {
         sub_index,
-        ChapterIndex::new(),
-        CoverIndex::new(),
-        None,
-        None,
-        None,
-    );
+        ..Default::default()
+    };
 
-    let parsed = make_video(&tmp.path().join("Show_S01E01.mkv"));
+    let parsed = create_parsed_file(tmp.path().join("Show_S01E01.mkv"));
     assert!(parsed.parsed.is_some());
     assert_eq!(
         resolver
@@ -982,7 +659,7 @@ fn test_stale_assigned_subtitle_fails_closed_for_parsed_and_unparsed_videos() {
             .subtitle_file,
         Some(automatic.clone())
     );
-    let unparsed = make_video(&tmp.path().join("unknown.mkv"));
+    let unparsed = create_parsed_file(tmp.path().join("unknown.mkv"));
     assert!(unparsed.parsed.is_none());
 
     for video in [&parsed, &unparsed] {
@@ -1002,8 +679,6 @@ fn test_stale_assigned_subtitle_fails_closed_for_parsed_and_unparsed_videos() {
 
 #[test]
 fn test_sub_classification_cache_populates_and_reuses_across_release_directories() {
-    use mkv_core::assets::SubClassification;
-
     let tmp = tempdir().unwrap();
     let root = tmp.path().join("Anime");
     let season1 = root.join("Season 01");
@@ -1026,7 +701,6 @@ fn test_sub_classification_cache_populates_and_reuses_across_release_directories
     let prep1 = prepare_release_directory(
         &season1,
         &root,
-        &[make_video(&ep_s1)],
         ReleasePreparationOptions {
             sub_classification_cache: Some(&mut sub_classification_cache),
             ..Default::default()
@@ -1034,20 +708,12 @@ fn test_sub_classification_cache_populates_and_reuses_across_release_directories
     );
 
     // Cache should now hold derived classifications for root subtitles.
-    assert!(sub_classification_cache.contains_key(&sub_s01e01));
-    assert!(sub_classification_cache.contains_key(&sub_s02e01));
-    assert_eq!(
-        sub_classification_cache.get(&sub_s01e01).unwrap().lang,
-        "ind"
-    );
-    assert_eq!(
-        sub_classification_cache.get(&sub_s02e01).unwrap().lang,
-        "eng"
-    );
+    assert_eq!(sub_classification_cache[&sub_s01e01].lang, "ind");
+    assert_eq!(sub_classification_cache[&sub_s02e01].lang, "eng");
 
     let resolved1 = prep1
         .resolver
-        .resolve_for(&make_video(&ep_s1), None, None, None)
+        .resolve_for(&create_parsed_file(&ep_s1), None, None, None)
         .unwrap();
     assert_eq!(resolved1.subtitle_file, Some(sub_s01e01.clone()));
     assert_eq!(resolved1.subtitle_lang, "ind");
@@ -1058,7 +724,6 @@ fn test_sub_classification_cache_populates_and_reuses_across_release_directories
     let prep2 = prepare_release_directory(
         &season2,
         &root,
-        &[make_video(&ep_s2)],
         ReleasePreparationOptions {
             sub_classification_cache: Some(&mut sub_classification_cache),
             ..Default::default()
@@ -1068,7 +733,7 @@ fn test_sub_classification_cache_populates_and_reuses_across_release_directories
     assert_eq!(sub_classification_cache.len(), count_before);
     let resolved2 = prep2
         .resolver
-        .resolve_for(&make_video(&ep_s2), None, None, None)
+        .resolve_for(&create_parsed_file(&ep_s2), None, None, None)
         .unwrap();
     assert_eq!(resolved2.subtitle_file, Some(sub_s02e01.clone()));
     assert_eq!(resolved2.subtitle_lang, "eng");
@@ -1076,45 +741,37 @@ fn test_sub_classification_cache_populates_and_reuses_across_release_directories
 
 #[test]
 fn test_unparsed_subtitles_bypass_classification_cache() {
-    use mkv_core::assets::SubClassification;
-
     let tmp = tempdir().unwrap();
     let root = tmp.path().join("Anime");
     let season = root.join("Season 01");
     fs::create_dir_all(&season).unwrap();
 
-    let unparsed_sub1 = season.join("credits_roll.ass");
-    let unparsed_sub2 = season.join("extras.srt");
-    fs::write(&unparsed_sub1, b"[Script Info]\n").unwrap();
-    fs::write(&unparsed_sub2, b"1\n00:00:01 --> 00:00:02\nExtra\n").unwrap();
-
-    let ep = season.join("Show - 01.mkv");
-    fs::write(&ep, b"video").unwrap();
+    fs::write(season.join("credits_roll.ass"), b"[Script Info]\n").unwrap();
+    fs::write(
+        season.join("extras.srt"),
+        b"1\n00:00:01 --> 00:00:02\nExtra\n",
+    )
+    .unwrap();
 
     let mut sub_classification_cache: HashMap<PathBuf, SubClassification> = HashMap::new();
 
     let prep = prepare_release_directory(
         &season,
         &root,
-        &[make_video(&ep)],
         ReleasePreparationOptions {
             sub_classification_cache: Some(&mut sub_classification_cache),
             ..Default::default()
         },
     );
 
-    // Unparsed subtitles must NOT be eagerly classified or inserted into the cache.
+    // Unparsed subtitles must NOT be eagerly classified or inserted into the cache,
+    // but they still count as discovered subtitles.
     assert!(sub_classification_cache.is_empty());
-    // But they must still be tracked in unparsed index for all_subtitles discovery.
-    let all_subs = prep.resolver.sub_index.all_subtitles();
-    assert!(all_subs.contains(&unparsed_sub1));
-    assert!(all_subs.contains(&unparsed_sub2));
+    assert!(prep.resolver.has_subtitles());
 }
 
 #[test]
 fn test_sub_classification_cache_preserves_resolution_identity() {
-    use mkv_core::assets::SubClassification;
-
     let tmp = tempdir().unwrap();
     let root = tmp.path().join("Anime");
     let season = root.join("Season 01");
@@ -1124,26 +781,18 @@ fn test_sub_classification_cache_preserves_resolution_identity() {
     fs::write(&sub_path, b"[Script Info]\n").unwrap();
     let vid_path = season.join("Show - 01.mkv");
     fs::write(&vid_path, b"video").unwrap();
-    let vid = make_video(&vid_path);
+    let vid = create_parsed_file(&vid_path);
 
-    // 1. Without cache
-    let uncached = prepare_release_directory(
-        &season,
-        &root,
-        std::slice::from_ref(&vid),
-        ReleasePreparationOptions::default(),
-    );
+    let uncached = prepare_release_directory(&season, &root, ReleasePreparationOptions::default());
     let uncached_res = uncached
         .resolver
         .resolve_for(&vid, None, None, None)
         .unwrap();
 
-    // 2. With cache
     let mut cache: HashMap<PathBuf, SubClassification> = HashMap::new();
     let cached = prepare_release_directory(
         &season,
         &root,
-        std::slice::from_ref(&vid),
         ReleasePreparationOptions {
             sub_classification_cache: Some(&mut cache),
             ..Default::default()

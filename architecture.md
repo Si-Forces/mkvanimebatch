@@ -1,42 +1,42 @@
 # System Architecture Specification (`mkvanimebatch`)
 
 > **Version**: 1.0.0  
-> **Status**: Production / Active  
-> **Topology**: Pure Rust Workspace (Crates + Tauri v2 Desktop GUI + Standalone CLI)  
+> **Topology**: Rust workspace (engine library + Tauri v2 desktop app + CLI)  
 > **Reference Contexts**: [Context Map](./CONTEXT-MAP.md) · [Media Engine](./crates/mkv-core/CONTEXT.md) · [Desktop Application](./desktop-tauri/CONTEXT.md)
 
 ---
 
-## 1. Executive Summary & System Vision
+## 1. Executive Summary
 
-**`mkvanimebatch`** is a high-performance, automated batch processing engine and desktop application purpose-built for anime fansub collections. Managing fansub releases involves significant domain complexity: multi-track Matroska containers, fragmented external subtitle revisions, complex multi-directory season arrangements, duplicate font attachments across episodes, disparate audio encodings, and subtitle time synchronization offsets.
+**`mkvanimebatch`** batch-processes anime fansub collections: it remuxes Matroska episodes with the best matching subtitle, chapters, cover, fonts, and a single audio track (FLAC transcoded to Opus), or extracts subtitles, chapters, covers, and fonts from them. Releases are often split across season directories, carry external subtitle revisions next to or above the video, repeat the same fonts in every episode, and need subtitle timing offsets.
 
-Traditional workflows rely on fragile shell scripts or manual interaction with GUI tools like MKVToolNix GUI. `mkvanimebatch` provides an end-to-end, resilient system that addresses these challenges through:
+The system provides:
 
-1. **Hybrid EBML Inspection**: Ultra-fast pure-Rust Matroska container probing (`<1ms` per file) with transparent fallback to `mkvmerge -J` when encountering container quirks.
-2. **Domain-Specific Fansub Heuristics**: Automatic episode identification, 10-tier audio scoring (favoring Japanese stereo dialogue while isolating commentary tracks), and language-aware subtitle selection (prioritizing Indonesian and English ASS typesetting).
-3. **Transactional Font Registry**: BLAKE2b content-hash deduplication and two-phase font staging (`claim` → `stage` → `promote`/`release`) that completely prevents font collision and redundant container bloat.
-4. **Dual-Governor Concurrency Pipeline**: Fine-grained asynchronous pipelining balancing CPU-intensive audio transcoding (Opus via FFmpeg) with disk-I/O-throttled multiplexing (`mkvmerge`).
-5. **Crash-Resistant Atomic Execution**: Isolated temporary scratch directories, atomic file promotion across filesystem boundaries (`EXDEV` resilience), and automatic cleanup of interrupted operations.
-6. **Unified Dual-Context Topology**: A shared, pure-Rust domain engine (`crates/mkv-core`) consumed directly in-process by a native Tauri v2 desktop GUI (`desktop-tauri`) and a standalone terminal CLI (`crates/mkv-cli`).
+1. **Hybrid inspection**: a native Rust EBML parser reads track, attachment, and chapter metadata; `mkvmerge -J` is the fallback when native parsing fails.
+2. **Fansub heuristics**: episode identity parsing, audio track ranking (Japanese, then undetermined, then stereo; commentary tracks only as a last resort), and subtitle ranking (Indonesian, then undetermined, then English; ASS above other formats).
+3. **Transactional font extraction**: fonts are claimed by `(name, size)`, staged, deduplicated by BLAKE2b-512 content hash, then promoted or released (`claim` → stage → `promote`/`release`).
+4. **Two concurrency limits**: `workers` bounds concurrently processed items; the `io_jobs` semaphore bounds the muxing (`mkvmerge`) and extraction (`mkvextract`) phases, so Opus transcoding overlaps with muxing.
+5. **Atomic outputs**: work is staged in temporary directories inside the destination and moved into place with `promote_file`, which copies only across device boundaries. Scratch directories are removed when dropped, including on error and cancellation.
+6. **One engine, two front-ends**: `crates/mkv-core` runs in-process inside the Tauri v2 desktop app (`desktop-tauri`) and the terminal CLI (`crates/mkv-cli`).
 
 ---
 
 ## 2. Context Map & Domain Language
 
-The system is partitioned into two distinct **Bounded Contexts** connected via an in-process integration layer, following Domain-Driven Design (DDD) principles.
+The system has two bounded contexts connected by an in-process integration layer.
 
 ```mermaid
 flowchart TD
     subgraph DesktopContext["Desktop Application Context (desktop-tauri)"]
-        UI["Vanilla JS / CSS UI\n(Liquid Glass Theme)"]
+        UI["Plain JS / CSS UI\n(app.js)"]
         QT["Queue Tracker\n(queue-state.js / queue-view.js)"]
-        JC["Job Controller & Coordinators\n(job-controller.js / inspection-coordinator.js)"]
+        JC["Job Controller & Coordinators\n(job-controller.js / job-coordinator.js / inspection-coordinator.js)"]
         EB["Engine Bridge\n(desktop-tauri/src-tauri)"]
-        TS["System Telemetry\n(sysinfo provider)"]
+        TS["System Telemetry\n(sysinfo)"]
     end
 
     subgraph MediaEngineContext["Media Engine Context (crates/mkv-core)"]
+        MAN["Inspection Manifest\n(manifest.rs)"]
         BP["Batch Pipeline\n(pipeline.rs)"]
         AR["Asset Resolver\n(assets.rs)"]
         FR["Font Registry\n(fonts.rs)"]
@@ -53,22 +53,26 @@ flowchart TD
         FFMPEG["ffmpeg (libopus)"]
     end
 
-    subgraph StandaloneCLI["Standalone CLI Adapter"]
+    subgraph StandaloneCLI["CLI Adapter"]
         CLI["mkv-cli\n(crates/mkv-cli)"]
     end
 
     UI --> QT
-    QT --> JC
+    UI --> JC
+    JC --> QT
     JC -->|Tauri IPC Commands| EB
+    EB -->|inspect_directory| MAN
     EB -->|BatchRequest / CancellationToken| BP
-    BP -->|JobEvent MPSC Channel| EB
-    BP -->|Log Channel MPSC Channel| EB
-    EB -->|Tauri Webview Events| UI
+    BP -->|JobEvent mpsc channel| EB
+    BP -->|Log line mpsc channel| EB
+    EB -->|Tauri webview events| JC
     EB --> TS
 
     CLI -->|BatchRequest| BP
-    BP -->|Stream Events/Logs| CLI
+    CLI -->|plan mode| MAN
+    BP -->|JobEvent channel in events mode, PipelineSummary| CLI
 
+    MAN --> EBML
     BP --> AR
     BP --> FR
     BP --> TSM
@@ -80,97 +84,97 @@ flowchart TD
     EBML -.->|Fallback Probe| MKVMERGE
     RX -->|Transcode Audio| FFMPEG
     RX -->|Multiplex Container| MKVMERGE
-    EX -->|Extract Streams/Attachments| MKVEXTRACT
+    EX -->|Extract Tracks/Chapters/Attachments| MKVEXTRACT
 ```
 
 ### Ubiquitous Language & Core Terminology
 
-The canonical vocabulary for this system lives with the context that owns it, not here:
+The vocabulary lives with the context that owns it:
 
-- [Media Engine Context](./crates/mkv-core/CONTEXT.md) — 21 terms covering release discovery, asset resolution, track scoring, fonts, and the execution model.
-- [Desktop Application Context](./desktop-tauri/CONTEXT.md) — 10 terms covering queue projection, the Engine Bridge, and the desktop coordinators.
+- [Media Engine Context](./crates/mkv-core/CONTEXT.md): release discovery, asset resolution, track scoring, fonts, and the execution model.
+- [Desktop Application Context](./desktop-tauri/CONTEXT.md): queue projection, the Engine Bridge, and the desktop coordinators.
 
-Terms both contexts use are defined **once**, by the context that produces them, and linked from the consumer. That is deliberate: this section previously held a third copy of the glossary which had already drifted from both sources — it omitted six desktop terms and carried a truncated Track Assignment definition. A definition with no owner is a definition that will drift again.
+A term used by both contexts is defined once, by the context that produces it, and linked from the consumer.
 
 ---
 
 ## 3. Workspace Topology & Module Organization
 
-The codebase is organized as a Cargo workspace with unified versioning (`1.0.0`) under edition 2021:
+The Cargo workspace shares one version (`1.0.0`) and edition 2021:
 
 ```
 mkvanimebatch/
 ├── Cargo.toml                       # Workspace root manifest (crates/mkv-core, crates/mkv-cli, desktop-tauri/src-tauri)
-├── CONTEXT-MAP.md                   # System-wide context boundaries and relationships
-├── AGENTS.md                        # Agent workflow guidelines, CI gates, and review rules
+├── CONTEXT-MAP.md                   # Context boundaries and relationships
+├── AGENTS.md                        # Agent workflow rules, CI gate, agent skills
 ├── README.md                        # User guide and CLI/GUI reference
 ├── docs/
 │   ├── adr/                         # Architectural Decision Records (0001 - 0015)
-│   └── agents/                      # Domain modeling and issue tracker documentation
+│   └── agents/                      # Domain docs, issue tracker, and triage label conventions
 ├── crates/
-│   ├── mkv-core/                    # Pure-Rust Core Domain & Batch Processing Engine
+│   ├── mkv-core/                    # Engine library
 │   │   ├── Cargo.toml
-│   │   ├── CONTEXT.md               # Media Engine Bounded Context definition
+│   │   ├── CONTEXT.md               # Media Engine bounded context
 │   │   ├── src/
-│   │   │   ├── lib.rs               # Library root re-exports
-│   │   │   ├── domain.rs            # Episode parsing, natural sort, track scoring, atomic file promotion
-│   │   │   ├── cpu.rs               # Physical core topology (/proc/cpuinfo) & transcode thread governor
-│   │   │   ├── ebml.rs              # Lightweight native EBML/Matroska container parser
-│   │   │   ├── scan.rs              # Asset discovery, video inspection, symlink-aware traversal, PersistentInspectCache
-│   │   │   ├── assets.rs            # AssetResolver, SubIndex, ChapterIndex, CoverIndex, ancestor traversal
-│   │   │   ├── fonts.rs             # FontRegistry, BLAKE2b deduplication, FontHashMemo, transactional staging
-│   │   │   ├── manifest.rs          # Preflight InspectionManifest generation and metadata summarization
-│   │   │   ├── preset.rs            # PresetProfile definitions and catalog lookups
-│   │   │   ├── request.rs           # BatchRequest, TrackAssignment validation, path sanitization
-│   │   │   ├── remux.rs             # FFmpeg Opus transcoding, ASS sync shifting, mkvmerge execution
+│   │   │   ├── lib.rs               # Module declarations
+│   │   │   ├── domain.rs            # Episode parsing, natural sort, language detection, track scoring, output naming, promote_file
+│   │   │   ├── cpu.rs               # Crate-private: physical core count (/proc/cpuinfo on Linux) and transcode thread governor
+│   │   │   ├── ebml.rs              # Native EBML/Matroska metadata parser
+│   │   │   ├── scan.rs              # MKV and asset discovery, mkvmerge -J fallback probe, PersistentInspectCache
+│   │   │   ├── assets.rs            # AssetResolver, SubIndex, ChapterIndex, CoverIndex, release preparation
+│   │   │   ├── fonts.rs             # Fonts directory lookup, FontRegistry, FontHashMemo, FontClaimsGuard
+│   │   │   ├── manifest.rs          # InspectionManifest generation and metadata summaries
+│   │   │   ├── preset.rs            # PresetProfile catalog and lookup
+│   │   │   ├── request.rs           # BatchRequest, TrackAssignment, validation, assignments JSON parsing
+│   │   │   ├── remux.rs             # Track selection, ffmpeg/mkvmerge argument building, remux execution
 │   │   │   ├── extract.rs           # mkvextract invocation for subtitles, chapters, covers, and fonts
-│   │   │   └── pipeline.rs          # BatchPipeline orchestration, tokio JoinSet, dual-channel streaming
-│   │   ├── benches/                 # bench_pipeline.rs (validation throughput, dry-run, font dedup, event streaming)
+│   │   │   └── pipeline.rs          # BatchPipeline, JobEvent and log channels, tokio JoinSet scheduling
+│   │   ├── benches/                 # bench_pipeline.rs (BatchRequest::validate throughput, warm-cache remux/extract dry runs)
 │   │   └── tests/                   # 11 integration suites: test_assets, test_cross_regex, test_domain, test_extract, test_fonts, test_pipeline, test_pipeline_assignments, test_pipeline_assignment_args, test_real_remux, test_remux, test_scan
-│   └── mkv-cli/                     # Headless Standalone CLI Binary
+│   └── mkv-cli/                     # CLI binary
 │       ├── Cargo.toml
 │       └── src/
-│           └── main.rs              # CLI entry point, arg parsing, terminal formatting, symlink dispatch
-└── desktop-tauri/                   # Desktop GUI Application (Tauri v2 + Webview)
-    ├── CONTEXT.md                   # Desktop Application Bounded Context definition
+│           └── main.rs              # Argument parsing, executable-name mode default, --plan, --events, signal handling
+└── desktop-tauri/                   # Desktop app (Tauri v2 + webview)
+    ├── CONTEXT.md                   # Desktop Application bounded context
     ├── src-tauri/
     │   ├── Cargo.toml
-    │   ├── tauri.conf.json          # Tauri v2 application configuration
-    │   ├── capabilities/            # Security capabilities & IPC permission schemas
+    │   ├── tauri.conf.json          # Tauri application configuration
+    │   ├── tauri.linux.conf.json    # Linux overrides (transparent window)
+    │   ├── capabilities/            # Tauri capability definitions
     │   └── src/
-    │       ├── lib.rs               # Application entry point, Linux Wayland/WebKitGTK mitigations
-    │       ├── main.rs              # Binary bootstrap
-    │       ├── commands.rs          # Tauri command handlers (run_job, stop_job, inspect_directory, etc.)
-    │       ├── contract.rs          # Serialization types matching mkv-core contracts
-    │       ├── process.rs           # Engine Bridge state management, panic isolation, JobSnapshot projection
-    │       ├── telemetry.rs         # sysinfo hardware telemetry (CPU, RAM, engine child process I/O)
-    │       └── window.rs            # Frameless window controls, resize/drag operations, theme persistence
-    └── ui/                          # Frontend Presentation Layer (Vanilla ECMAScript & CSS)
-        ├── index.html               # Application shell, layout, modals, drawers
-        ├── style.css                # Liquid Glass styling, layout grid, typography, cards
-        ├── os-detect.js             # Platform OS detection (CSP-safe external script)
-        ├── app.js                   # Main application initialization and tab lifecycle
-        ├── queue-state.js           # QueueTracker state machine and JobEvent reduction
-        ├── queue-view.js            # Virtualized DOM rendering of episode cards and controls
-        ├── job-controller.js        # Form validation, run/stop trigger, and preset synchronization
-        ├── job-coordinator.js       # Cross-mode job concurrency coordinator
-        ├── inspection-coordinator.js# Debounced directory scanning and manifest loading
-        ├── telemetry.js             # Live hardware telemetry ticker and gauge rendering
-        ├── log-classify.js          # Terminal drawer line classification (stdout, stderr, info, warn, err)
-        └── *.test.js                # Node test suites for frontend modules
+    │       ├── lib.rs               # Tauri builder, command registration, exit handling, Linux environment defaults
+    │       ├── main.rs              # Binary entry point
+    │       ├── commands.rs          # inspect_directory, run_job, clear_cache, pickers, presets, snapshot; job supervisor
+    │       ├── process.rs           # JobState/ScanState, job slot, stop and shutdown, JobSnapshot projection
+    │       ├── telemetry.rs         # sysinfo CPU, RAM, and engine process write-rate sampling
+    │       └── window.rs            # Frameless window controls, drag/resize, native window theme
+    └── ui/                          # Webview frontend (plain ES modules and CSS)
+        ├── index.html               # Application shell, views, modals
+        ├── style.css                # Layout, cards, light/dark themes, system font stacks
+        ├── os-detect.js             # Adds an is-windows/is-mac/is-linux class to <html> (classic script)
+        ├── app.js                   # Startup, presets, theme, telemetry gauges, log console, subtitle assignment modal, window controls
+        ├── queue-state.js           # Queue state factories, JobEvent reducer, selection and order helpers
+        ├── queue-view.js            # QueueTracker: episode card rendering, selection, reordering, heartbeat
+        ├── job-controller.js        # BatchRequest from the form, concurrency validation, preflight, run/stop, job event routing
+        ├── job-coordinator.js       # Allows one active job across the Remux and Extract views
+        ├── inspection-coordinator.js# Shares in-flight inspect_directory calls per (path, noCache)
+        ├── telemetry.js             # Polls get_system_telemetry (1 s during a job, 30 s idle, paused while hidden)
+        ├── log-classify.js          # Maps log lines to console classes (line-err, line-skip, line-ok, line-warn, line-info, line-done)
+        └── *.test.js                # node:test suites for the frontend modules
 ```
 
 ---
 
-## 4. Media Engine Deep Dive (`crates/mkv-core`)
+## 4. Media Engine (`crates/mkv-core`)
 
-The `mkv-core` crate is a self-contained, panic-free library that models all domain rules and executes fansub pipelines.
+The `mkv-core` crate holds the domain rules and runs the batch pipelines.
 
-### 4.1 Hybrid EBML Probing & Inspection Subsystem
+### 4.1 Hybrid EBML Probing & Inspection
 
 ```mermaid
 flowchart TD
-    Start([Probe Video Request]) --> CacheCheck{Inspect Cache Hit?}
+    Start([Probe Video Request]) --> CacheCheck{Inspect Cache Entry?}
     CacheCheck -- Yes --> ValidateSig{FileSignature Match?\nsize & mtime_ns}
     ValidateSig -- Yes --> ReturnCache[Return Cached Metadata]
     ValidateSig -- No --> NativeProbe[Native EBML Probe\nebml::probe_ebml_native]
@@ -180,229 +184,224 @@ flowchart TD
     CheckSuccess -- Yes --> StoreCache[Store in PersistentInspectCache]
     CheckSuccess -- No --> Fallback[Fallback Inspector\nmkvmerge -J subprocess]
 
-    Fallback --> CheckMKS{Valid Matroska\nOutput?}
+    Fallback --> CheckMKS{Exit 0 and container\nrecognized?}
     CheckMKS -- Yes --> StoreCache
     CheckMKS -- No --> ReturnErr[Return Error]
 
     StoreCache --> ReturnMeta[Return MkvmergeMetadata]
 ```
 
-1. **Native Pure-Rust Parser (`ebml.rs`)**:
-   - Parses EBML Header (`0x1A45DFA3`) and Matroska Segment (`0x18538067`).
-   - Traverses the `SeekHead` index (`0x114D9B74`) to locate `Tracks` (`0x1654AE6B`), `Attachments` (`0x1941A469`), and `Chapters` (`0x1043A770`).
-   - Decodes EBML Variable Size Integers (VINT) with safe zero-check validations.
-   - Extracts track properties: `TrackNumber`, `TrackType` (video, audio, subtitle), `CodecID`, `Language` (including BCP-47 `LanguageIETF`), `Name`, `PixelWidth`, `PixelHeight`, and `AudioChannels`.
-   - Extracts attachment metadata: `FileName`, `FileMimeType`, and file data size.
-   - **Performance**: Completes in `<1.0ms` per file, eliminating process spawning overhead for directory scans.
+1. **Native parser (`ebml.rs`)**:
+   - Requires an EBML Header (`0x1A45DFA3`) followed by a Segment (`0x18538067`).
+   - Scans top-level elements up to the first Cluster, reading `Tracks` (`0x1654AE6B`) and `Attachments` (`0x1941A469`) and noting `Chapters` (`0x1043A770`). Elements placed after the clusters are reached through the `SeekHead` (`0x114D9B74`); a file with clusters but no SeekHead before them fails over to `mkvmerge -J`.
+   - Reads track `TrackType` (video, audio, subtitles), `CodecID`, `Language` (falling back to the primary subtag of `LanguageIETF`), `Name`, `PixelWidth`/`PixelHeight`, and audio `Channels` (default 1 when absent). `TrackNumber`, `FlagDefault`, and `FlagForced` are only validated; track IDs are assigned sequentially in file order, as mkvmerge numbers them.
+   - Reads attachment `FileName`, `FileMimeType`, and `FileData` size. Chapters are recorded only as present or absent.
+   - Fails (and so triggers the fallback) only when the probe returns an error: missing EBML header or Segment, a malformed top-level element, clusters with no SeekHead before them, or no track found. A malformed SeekHead entry or a truncated tail ends the scan without failing. ADR-0013 measured the warm native probe at 0.091 ms.
 
-2. **Transparent Fallback Inspector (`scan.rs`)**:
-   - If native parsing fails (e.g. unknown proprietary container extensions, corrupted cluster headers, missing SeekHead with trailing clusters), the probe seamlessly falls back to `mkvmerge -J`.
-   - On Windows, `mkvmerge` is executed with `CREATE_NO_WINDOW` (`0x08000000`) to prevent console window flicker.
+2. **Fallback inspector (`scan.rs`)**:
+   - Runs `mkvmerge -J` with a 30-second timeout and rejects output whose `container.recognized` is `false`.
+   - On Windows every child tool (`mkvmerge`, `mkvextract`, `ffmpeg`) is spawned with `CREATE_NO_WINDOW` (`0x08000000`).
 
-3. **Persistent Inspection Cache (`PersistentInspectCache`)**:
-   - Keyed on normalized file path and verified against `FileSignature { size: u64, mtime_ns: u128 }`.
-   - Thread-safe storage guarded by `parking_lot::Mutex`.
-   - Persists to OS-appropriate directory (`$LOCALAPPDATA/mkvanimebatch/inspect_cache.json` on Windows, `~/.cache/mkvanimebatch/inspect_cache.json` on Linux) using atomic replacement via `NamedTempFile` to avoid cache corruption.
+3. **Persistent inspection cache (`PersistentInspectCache`)**:
+   - Keyed on the canonical file path (Windows `\\?\` prefix stripped) and valid while `FileSignature { size: u64, mtime_ns: u128 }` matches.
+   - State is guarded by a `parking_lot::Mutex`.
+   - Stored at `inspect_cache.json` under `$LOCALAPPDATA/mkvanimebatch` when `LOCALAPPDATA` is set, else `$HOME/.cache/mkvanimebatch`, else `./.cache/mkvanimebatch`. Writes go to a `NamedTempFile` that is persisted over the cache file. `save()` writes immediately; `save_shared()` skips the write if the previous one was under 500 ms ago.
 
 ---
 
 ### 4.2 Asset Resolution & Fansub Heuristics
 
-Anime releases often distribute external subtitle revisions (`.ass`), XML chapters, and posters across parent directories. The `AssetResolver` implements strict discovery and matching rules:
+A release's search directories are the input root and every directory down to the video's directory. External subtitles, XML chapters, and covers are indexed from those directories and, when `--assets-dir` is given, from the assets directory (the subdirectory mirroring the release's position when it exists, else the assets root) and its parent as fallback indices.
 
 ```mermaid
 flowchart TD
-    Video[Target MKV Video] --> HumanAssign{Explicit TrackAssignment\nProvided?}
+    Video[Target MKV Video] --> HumanAssign{TrackAssignment\nfor this video?}
     HumanAssign -- Yes & Exists --> UseAssigned[Use Assigned Subtitle\nTrackAssignment.asset_path]
-    HumanAssign -- Yes & Missing --> FailFast[Fail-Fast Preflight Validation Error\nADR-0008]
-    HumanAssign -- No --> LocalSearch{Exact Same-Directory\nExternal Subtitle?}
+    HumanAssign -- Yes & Missing --> FailFast[Fail-Fast Error\nADR-0008]
+    HumanAssign -- No --> LocalSearch{Matching External Subtitle\nin the Video's Directory?}
     LocalSearch -- Yes --> MatchLocal[Match Same-Directory Subtitle\nvia SubIndex Lookup]
     LocalSearch -- No --> EmbeddedSearch{Embedded Subtitle Track\nin Source Video?}
 
     EmbeddedSearch -- Yes --> MatchEmbedded[Select Best Embedded Track\nselect_best_subtitle_track]
-    EmbeddedSearch -- No --> AncestorSearch{Nearest Matching Ancestor\nExternal Subtitle?}
+    EmbeddedSearch -- No --> AncestorSearch{Matching External Subtitle\nin an Ancestor Directory?}
 
-    AncestorSearch -- Yes --> MatchAncestor[Match Ancestor Subtitle\nvia SubIndex Lookup]
-    AncestorSearch -- No --> FallbackSearch{Explicit Fallback Subtitle\nfrom --assets-dir?}
+    AncestorSearch -- Yes --> MatchAncestor[Match Nearest Ancestor Subtitle\nvia SubIndex Lookup]
+    AncestorSearch -- No --> FallbackSearch{Matching Subtitle\nin --assets-dir?}
 
     FallbackSearch -- Yes --> MatchFallback[Match Fallback Subtitle\nfrom --assets-dir]
-    FallbackSearch -- No --> NoSub[No Subtitle Matched]
+    FallbackSearch -- No --> NoSub[No Subtitle Matched\nItem Skipped]
 ```
 
-1. **Resolution Precedence Ladder (ADR-0004 & ADR-0008)**:
-   - **Tier 1 (Manual Assignment)**: Explicit `TrackAssignment` submitted by the user. If the file is missing or invalid on disk, preflight **fails fast** immediately.
-   - **Tier 2 (Same-Directory External)**: Exact same-directory external subtitle beside the video matching the episode identity.
-   - **Tier 3 (Embedded Track)**: Best embedded subtitle track inside the MKV container.
-   - **Tier 4 (Nearest Ancestor External)**: External subtitle found in the nearest matching ancestor directory.
-   - **Tier 5 (Explicit Assets Fallback)**: External subtitle from explicit `--assets-dir` fallback directory.
-   - *Source Precedence Principle*: Source hierarchy strictly beats language score across sources (e.g. an adjacent English subtitle beats an embedded Indonesian track, but a parent English subtitle does not displace an embedded Indonesian track; nearest matching ancestor outranks explicit `--assets-dir`).
+1. **Resolution precedence (ADR-0004, ADR-0008)**:
+   - **Tier 1 (Manual Assignment)**: the user's `TrackAssignment`. A missing target video or asset fails `BatchRequest::validate`; an asset that disappears before planning fails the batch (see §8.1).
+   - **Tier 2 (Same-Directory External)**: an external subtitle in the video's own directory with the same episode identity.
+   - **Tier 3 (Embedded Track)**: the best embedded subtitle track.
+   - **Tier 4 (Nearest Ancestor External)**: an external subtitle in the nearest ancestor directory that has a match.
+   - **Tier 5 (Assets Fallback)**: an external subtitle from the `--assets-dir` indices, assets directory before its parent.
+   - Source tier beats language score: an adjacent English subtitle beats an embedded Indonesian track, and an embedded Indonesian track beats a parent-directory English subtitle. Within a tier, external candidates rank by nearest directory, category score, dialogue keyword, shorter file name, then index order. An external subtitle matches when its episode type and number are equal and the seasons are equal or either is unknown.
+   - A video with no match is skipped. A video whose name has no episode number is skipped unless it has a manual assignment.
 
-2. **Episode Identity Parsing (`parse_episode`)**:
-   - Evaluates multi-pattern regexes for standard notation (`S01E02`, `S1E2`), season markers (`Season 1`), type qualifiers (`OVA`, `OAD`, `ONA`, `Special`, `SP`), and fansub delimiter brackets (`[02]`, `- 02`).
-   - Supports fractional episode numbers (`01.5`, `02.5`, `00.CM`) without truncation (ADR-0004).
+2. **Episode identity parsing (`parse_episode`)**:
+   - Recognises `S01E02`/`S1E2`, `S01P02` parts, season markers (`Season 1`, standalone `S1`), type qualifiers (`OVA`, `OAD`, `ONA`, `Special`, `SP`), and episode markers (`- 02`, `[02]`, `(02)`, `EP02`, `Episode 2`, `第02話`), with a bare-number fallback. `.[±N.Ns]` offset tags are ignored.
+   - Keeps fractional episode numbers (`01.5`, `02.5`) without truncation (ADR-0004).
 
-3. **Subtitle Scoring Model (`score_subtitle_category`)**:
-   - Format: Advanced SubStation Alpha (`.ass` / `.ssa`) is strictly preferred over SubRip (`.srt`) or bitmap formats (PGS/VobSub).
-   - Language Tiering:
-     - Indonesian (`ind`, `id`) ASS: **12 / 11** | SRT: **6 / 5**
-     - Undetermined (`und`) ASS: **10** | SRT: **4**
-     - English (`eng`, `en`) ASS: **9 / 8** | SRT: **3 / 2**
-     - Other languages ASS: **7** | SRT: **1**
-   - Dialogue vs Commentary: Tracks containing dialogue keywords (`full`, `dialogue`, `main`, `complete`, `indo`) gain priority; commentary keywords (`commentary`, `ad`, `audio description`) are filtered out.
+3. **Subtitle scoring (`score_subtitle_category`)**:
+   - Format: only ASS counts as ASS: codec `S_TEXT/ASS` for embedded tracks, the `.ass` extension for external files. Everything else (including SSA and SRT) gets the lower non-ASS score.
+   - Language (from the track's `Language`, or for external files detected from the file name):
+     - Indonesian (`ind` / `id`) ASS: **12 / 11** | non-ASS: **6 / 5**
+     - Undetermined (`und`) ASS: **10** | non-ASS: **4**
+     - English (`eng` / `en`) ASS: **9 / 8** | non-ASS: **3 / 2**
+     - Other languages ASS: **7** | non-ASS: **1**
+   - Dialogue: a track name or file stem containing one of the words `full`, `dialogue`, `dialog`, `main`, `complete`, `indo`, `indonesia`, `indonesian` breaks score ties. Embedded ties then go to the lower track ID.
 
-4. **10-Tier Audio Selection Model (`select_audio_track`)**:
-   - Commentary tracks (`\b(commentary|comment|audio\s+description|ad|extension)\b`) are quarantined into a fallback pool.
-   - Primary Pool Scoring:
-     - **Tier 10**: Japanese Stereo Dialogue (`ja`/`jpn` + 2ch + dialogue name)
-     - **Tier 9**: Japanese Stereo (`ja`/`jpn` + 2ch)
-     - **Tier 8**: Japanese Multi-Channel (`ja`/`jpn` > 2ch)
-     - **Tier 7**: Undetermined Stereo Dialogue (`und` + 2ch + dialogue name)
-     - **Tier 6**: Undetermined Stereo (`und` + 2ch)
-     - **Tier 5**: Undetermined Multi-Channel (`und` > 2ch)
-     - **Tier 4**: Non-Japanese Stereo Fallback
-     - **Tier 3**: First Audio Stream After Video Track
-     - **Tier 2**: Japanese Commentary Fallback
-     - **Tier 1**: First Audio Stream (Last Resort)
-   - Tie-breaking: Evaluates `-(track.pos as i64)`, guaranteeing that earlier container streams win ties deterministically.
+4. **Audio selection (`select_audio_track`)**:
+   - Tracks whose name matches `\b(commentary|comment|audio\s+description|ad|extension)\b` (case-insensitive) are excluded. Only when every track matches is the whole set ranked instead.
+   - Scores:
+     - **10**: Japanese (`ja`/`jpn` prefix), stereo, dialogue name
+     - **9**: Japanese, stereo
+     - **8**: Japanese, any other channel count
+     - **7**: Undetermined (`und`), stereo, dialogue name
+     - **6**: Undetermined, stereo
+     - **5**: Undetermined, any other channel count
+     - **4**: Any other stereo track
+     - **3**: Any other track positioned after the video track
+     - **1**: Anything else
+   - Ties go to the earlier track in the container (`Reverse(track.pos)`).
+   - Only a FLAC (`A_FLAC`) selection is transcoded; any other codec is copied.
 
-5. **Chapter & Cover Matching Conventions (ADR-0004)**:
-   - Chapters: Matches episode-named XML chapters (`<ep>_chapters.xml`). Leftover unassociated XML chapters in the release directory are automatically claimed only if exactly one unmatched chapter file and one eligible un-chaptered video exist (`claim_leftover_chapters`). Ambiguous groups of multiple unmatched chapters or un-chaptered videos remain unclaimed; no arbitrary natural sort pairing is performed.
-   - Covers: Directory covers are strictly `cover.<ext>` and `folder.<ext>`. Episode covers support `<video-stem>_cover.<ext>`, `<video-stem>.cover.<ext>`, and exact adjacent `<video-stem>.<ext>`. Inapplicable `*_cover` files are never treated as directory covers. Nearest applicable directory wins before cover kind. Within a directory, ranking follows: episode `_cover` > `.cover` > exact adjacent bare stem > directory `cover` > `folder`. The bare-stem form additionally requires the identical parent directory, so a root bare cover never attaches to a nested same-stem video. Because the fallback index ranks by the assets directory's own layout rather than the video's ancestors, this also means a bare-stem cover inside `--assets-dir` only matches a video that lives in that same directory; use the `cover.<ext>`/`folder.<ext>` or `_cover`/`.cover` forms for cross-directory `--assets-dir` covers. Equal-tier candidates break ties by natural filename order then full filename. Local and ancestor external covers supersede embedded artwork; explicit `--assets-dir` covers apply only when embedded art is absent.
+5. **Chapter & cover conventions (ADR-0004)**:
+   - Chapters: any `.xml` file whose first 4 KiB contain `<Chapters` followed by a space or `>` (case-insensitive) is a chapter file. It matches a video when its file stem parses to the same episode, with a compatible season; no `_chapters` suffix is required. For duplicates with the same episode and season, the file in the nearest directory wins. A chapter file with no episode number is claimed only when it is the release's only such file and exactly one parsed video has neither a matching chapter file nor embedded chapters (`claim_leftover_chapters`); otherwise it stays unclaimed. Claimed and `--assets-dir` chapters apply only to videos without embedded chapters.
+   - Covers: directory covers are `cover.<ext>` and `folder.<ext>`. Episode covers are `<name>_cover.<ext>` and `<name>.cover.<ext>` where `<name>` parses to the video's episode, plus an exact adjacent `<video-stem>.<ext>`. A `*_cover` file whose name does not parse to an episode is never a directory cover. The nearest applicable directory wins before cover kind. Within a directory, ranking is episode `_cover` > `.cover` > exact adjacent bare stem > directory `cover` > `folder`. The bare-stem form requires the identical parent directory, so a root bare cover never attaches to a nested same-stem video. Because the fallback index ranks by the assets directory's own layout rather than the video's ancestors, a bare-stem cover inside `--assets-dir` only matches a video in that same directory; use `cover.<ext>`/`folder.<ext>` or the `_cover`/`.cover` forms for cross-directory `--assets-dir` covers. Equal-tier candidates break ties by natural file-name order, then full path. Release-tree covers supersede embedded artwork; `--assets-dir` covers apply only when the source has no cover attachment.
 
 ---
 
 ### 4.3 Transactional Font Registry & Deduplication (`fonts.rs`)
 
-When remuxing anime series (12–24 episodes), multiple episodes share identical subtitle fonts. Re-extracting and re-embedding fonts redundantly causes severe disk I/O bottlenecks and bloats files.
+Episodes of a series usually embed the same fonts. In extract mode, `FontRegistry` makes sure each font is written to the fonts directory once.
 
 ```mermaid
 sequenceDiagram
-    participant Worker as Pipeline Worker Task
+    participant Worker as Extract Item Task
     participant FR as FontRegistry
-    participant Staging as .font_staging/
-    participant Target as Destination / Output
+    participant Staging as fonts_dir/.font_staging/
+    participant Target as fonts_dir
 
-    Worker->>FR: claim(font_name, size)
-    alt Font already promoted or claimed
-        FR-->>Worker: Claim Rejected (Duplicate Skipped)
-    else Font is unique
-        FR->>Staging: Reserve isolated staging path
+    Worker->>FR: claim(file_name, size)
+    alt (name, size) already claimed, promoted, or present in fonts_dir
+        FR-->>Worker: None (not extracted)
+    else New (name, size)
         FR-->>Worker: FontClaim { staging_path, ... }
-        Worker->>Staging: Extract font attachment via mkvextract
-        Worker->>FR: hash_file(staging_path) [BLAKE2b-512]
-        FR->>FR: Check FontHashMemo & claimed_hashes
-        alt Duplicate content hash found
+        Worker->>Staging: mkvextract writes the attachment
+        Worker->>FR: promote(claim)
+        FR->>FR: hash_file(staging_path) [BLAKE2b-512]
+        alt Hash already in claimed_hashes
             FR->>Staging: Delete staged duplicate
-            FR-->>Worker: Font Deduplicated
-        else Unique content hash
-            FR->>Target: promote(claim) -> Atomic Move
-            FR-->>Worker: Font Promoted Successfully
+            FR-->>Worker: None (content duplicate)
+        else New content
+            FR->>Target: promote_file to a vacant name
+            FR-->>Worker: Some(final_path)
         end
     end
-    Note over Worker,FR: If worker fails or cancels, FontClaimsGuard releases unpromoted claims
+    Note over Worker,FR: FontClaimsGuard releases every claim not taken out with pop() when it drops
 ```
 
-1. **Transactional Arbitration**:
-   - **Claim Phase**: Worker registers intent by `(font_name, size)`. If another worker holds an active claim or has promoted the font, duplicate extraction is suppressed.
-   - **Staging Phase**: Extracted font binaries write into isolated scratch paths (`.font_staging/`).
-   - **Content Hash Verification**: Computes a BLAKE2b-512 hash (`hash_file`) of the staged binary. The hash is checked against `FontHashMemo` (persisting signatures to `font_hash_memo.json` in the default cache dir or configured via `PipelineConfig` to bypass BLAKE2b hashing for existing and promoted fonts across batch extraction runs) to catch identical fonts named differently.
-   - **Promote Phase**: Moves the staged font to the final destination directory with collision-free renaming.
-   - **RAII Release Safety**: The `FontClaimsGuard` implements `Drop`. If a worker terminates, panics, or cancels before promotion, uncommitted claims are automatically revoked.
-   - **Mode-Specific Font Handling**: Extraction mode (`extract.rs`) extracts and retains fonts as user output in the target destination. Remux mode (`remux.rs`) discovers and attaches fonts into output Matroska files. Staging directories are transactionally cleaned up (`FontRegistry::cleanup_staging()`), and deduplication prevents redundant font extraction. The inert `keep_fonts` setting has been removed across the system.
+1. **Claim**: a claim reserves the sanitized file name and attachment size. Creating a registry seeds the reservations and content hashes of the regular font files already in the fonts directory, so existing fonts are not extracted again.
+2. **Stage**: `mkvextract` writes claimed fonts to `.tmp_<token>_<name>` files in `<fonts_dir>/.font_staging/`.
+3. **Hash**: `promote` computes a BLAKE2b-512 hash of the staged file. An empty or unreadable file releases the claim. A hash already in `claimed_hashes` drops the staged file but keeps the `(name, size)` reservation, so later episodes skip that attachment. `FontHashMemo` (`font_hash_memo.json` in the cache directory, or `PipelineConfig::font_hash_memo`; disabled by `no_cache`) caches the hashes of existing and promoted fonts by path and `FileSignature`, so seeding does not rehash unchanged files.
+4. **Promote**: `promote_file` moves the staged font to `<fonts_dir>/<name>`, or to `<stem>_<hash8><ext>` (plus a counter if needed) when that name is taken.
+5. **Release on drop**: `FontClaimsGuard` holds the claims of one extraction. Claims taken out with `pop()` are promoted; any still held when the guard drops (error, cancellation, or panic) are released and their staging files deleted. After the batch each registry removes its staging directory if empty (`cleanup_staging`).
+6. **Mode split**: extraction (`extract.rs`) writes new fonts to the fonts directory (`--fonts-dir`, else `fonts` under the resolved output directory). Remux (`remux.rs`) does not extract fonts: it attaches every font file in the release's fonts directory, sorted naturally, and keeps the source's own font attachments only when that directory has none. The remux fonts directory is `--fonts-dir`, else the nearest directory from the video up to the input root whose `fonts` directory (or `font`/`attachments`, ASCII case-insensitive) contains fonts, else the assets directory's, else `<video dir>/fonts`.
+7. **Extraction outputs**: each extraction runs one `mkvextract` call into a `.tmp_extract_*` directory, then promotes into the video's directory (or its mirror under `--out-dir`): the best ASS/SSA subtitle as `{stem}_{EpLabel}{ep}_{lang}_track{id}.ass`, chapters as `{stem}_{EpLabel}{ep}_chapters.xml`, and the cover as `{stem}_cover{ext}` (skipped when that file already exists). `{EpLabel}{ep}` is omitted when the file name has no parsable episode.
 
 ---
 
 ### 4.4 Remux & Transcode Orchestration (`remux.rs`)
 
-The remux subsystem translates high-level planned jobs into optimized external tool executions.
-
-1. **Audio Transcoding (FLAC to Opus)**:
-   - When an audio stream is lossless FLAC (`A_FLAC`), the engine invokes `ffmpeg` with `libopus`:
-     - Rate Control: Variable Bitrate (`-vbr on`)
-     - Bitrate: Configured by `PresetProfile` or `--bitrate` override (e.g. `192k`)
-     - Compression Complexity: `0-10` (`5` default, `10` on HiFi; ADR-0013 downshifted the default from 10, saving ~40% CPU per episode)
-     - Threading: defaults to `auto` via the transcode governor (`cpu::transcode_governor_threads`: `(physical_cores / workers).clamp(1, 4)`); explicit `--ffmpeg-threads N` overrides it
-     - Timeout: Guarded by 30-minute subprocess timeout (`SUBPROCESS_TIMEOUT`)
-2. **Subtitle Synchronization**:
-   - Subtitle time shifts (`offset_ms` or global `sub_offset`) are applied via `mkvmerge --sync <track_id>:<offset_ms>`.
-   - Precedence: Per-item `custom_offset_ms` from `TrackAssignment` overrides global `sub_offset`.
-   - Negative and positive millisecond offsets are passed directly to mkvmerge container-level track synchronization.
-3. **MKVMerge Argument Generation (`build_mkvmerge_args`)**:
-   - Maps video track (`--video-tracks <id>`), transcoded or untouched audio (`--audio-tracks <id>`), and external/embedded subtitles (`--subtitle-tracks <id>`).
-   - Injects track language tags (`--language <id>:<iso639-2>`), default flags (`--default-track-flag`), and track titles.
-   - Attaches deduplicated fonts with MIME types (`--attachment-mime-type`, `--attach-file`).
-   - Attaches front cover art (`--attach-file <cover>`).
-   - Injects XML chapter definitions (`--chapters <file>`).
+1. **Audio transcoding (FLAC to Opus)**:
+   - When the selected audio track is `A_FLAC`, `ffmpeg` encodes it to `audio.opus` in the item's scratch directory: `-c:a libopus -b:a <bitrate> -vbr on -compression_level <complexity> -application audio -threads <n>`.
+     - Bitrate: preset or `--bitrate` (default `192k`).
+     - Complexity: `0-10` (default `5`; `10` in the Hi-Fi preset). ADR-0013 lowered the default from 10.
+     - Threads: without `--ffmpeg-threads`, the governor default `(physical_cores / workers).clamp(1, 4)`.
+     - Timeout: 30 minutes (`SUBPROCESS_TIMEOUT`), which also applies to `mkvmerge` and `mkvextract`.
+2. **Subtitle synchronization**:
+   - External subtitle: `--sync 0:<ms>`, where `<ms>` is the assignment's `offset_ms` when it has one (an explicit `0` means unshifted), else the global `sub_offset` seconds × 1000, rounded.
+   - Embedded subtitle: `--sync <track_id>:<ms>` from the global `sub_offset` only.
+   - Negative and positive offsets are passed to mkvmerge unchanged.
+3. **mkvmerge arguments (`build_mkvmerge_args`)**, writing to a temporary file in the scratch directory:
+   - Source file: `--video-tracks <id>`; `--audio-tracks <id>` when the audio is copied, `--no-audio` when it is transcoded; `--subtitle-tracks <id>` for an embedded subtitle, else `--no-subtitles`; `--no-chapters` when an external chapter file is used; `--attachments <ids>` keeps the source cover (when no external cover is used) and the source fonts (when the release has none), else `--no-attachments`.
+   - Transcoded audio: the Opus file as a second input with the source track's `--language` and `--track-name`.
+   - External subtitle: `--language` (assignment language, else the detected language), `--track-name` (assignment title, else the language label), `--default-track-flag 0:yes`.
+   - `--chapters <file>` for an external chapter file.
+   - External cover: `--attachment-name cover<ext> --attachment-mime-type <mime> --attach-file <cover>`.
+   - Fonts: `--attachment-mime-type <mime> --attach-file <font>` for each font in the fonts directory.
+4. **Completion**: exit code 1 (warnings) counts as success. The output must exist and be non-empty; it is then moved to its final path with `promote_file`. By default the output goes to `Output/<stem>.mkv` beside the source; with `--out-dir` it goes to the mirrored directory under the output root. OVA and special episodes get an `OVA<ep>_` / `SP<ep>_` prefix.
 
 ---
 
 ### 4.5 Batch Pipeline Concurrency & Execution (`pipeline.rs`)
 
-`BatchPipeline` manages execution scheduling across entire release trees.
+`BatchPipeline` runs one batch across a whole release tree. Remux mode:
 
 ```mermaid
 flowchart TD
-    Req[BatchRequest] --> Val[Synchronous Validation\nBatchRequest::validate]
-    Val --> Prep[Prepare Releases & Discover Assets]
-    Prep --> Probe[Parallel Video Probing\nBounded by workers * 2 semaphore]
-    Probe --> Plan[Construct PlannedJobs List]
-    Plan --> Filter{Selected Items\nSpecified?}
+    Req["BatchRequest\n(validated by the caller: BatchRequest::validate)"] --> Config["BatchPipeline::from_request\ninto_pipeline_config"]
+    Config --> Discover["scan_mkv_files (recursive, natural order,\nskips Output and fonts/font/attachments dirs)"]
+    Discover --> Select["apply_selected_items\nselection order, unmatched selection fails"]
+    Select --> Targets["validate_assignment_targets\neach target matches exactly one video"]
+    Targets --> Start["Emit JobEvent::BatchStart"]
+    Start --> Probe["Probe all videos concurrently\n(workers * 2).clamp(2, 16) semaphore"]
+    Probe --> Prep["Per release directory:\nprepare_release_directory, scan_fonts,\nclaim_leftover_chapters"]
+    Prep --> Plan["Plan in batch order:\nemit skipped / error / planned outcomes,\ncollect PlannedJobs"]
+    Plan --> Schedule["run_items: tokio JoinSet\nat most `workers` tasks in flight"]
 
-    Filter -- Yes --> ApplyFilter[Filter & Reorder Jobs\nstrictly matching Selected Items]
-    Filter -- No --> KeepAll[Retain Natural Directory Order]
-
-    ApplyFilter --> Schedule[Schedule Global Tokio JoinSet]
-    KeepAll --> Schedule
-
-    subgraph WorkerPool["Dual-Governor Worker Execution (tokio::task::JoinSet)"]
+    subgraph ItemTask["Per-item task"]
         direction TB
-        AcquireWorker[Acquire Worker Slot\nworker_semaphore.acquire] --> StartTimer[Record Monotonic Instant::now]
-        StartTimer --> EmitStart[Emit JobEvent::ItemStart]
-        EmitStart --> Transcode[CPU Phase: FFmpeg Opus Transcode\nBounded by worker slot]
-        Transcode --> AcquireIO[Acquire I/O Permit\nio_semaphore.acquire]
-        AcquireIO --> Mux[Disk I/O Phase: mkvmerge Remux\nStream Progress Callbacks]
-        Mux --> ReleaseIO[Drop I/O Permit]
-        ReleaseIO --> Promote[Atomic Promotion to Final Path\npromote_file with EXDEV fallback]
-        Promote --> StopTimer[Measure Elapsed Duration\nelapsed.as_secs_f64]
-        StopTimer --> EmitDone[Emit JobEvent::ItemComplete\nwith duration_sec]
-        EmitDone --> ReleaseWorker[Drop Worker Slot]
+        StartTimer["Instant::now, emit JobEvent::ItemStart"] --> Transcode["ffmpeg Opus transcode\nwhen audio is A_FLAC"]
+        Transcode --> AcquireIO["Acquire I/O permit\nio_semaphore.acquire"]
+        AcquireIO --> Mux["mkvmerge remux\nprogress → ItemProgress"]
+        Mux --> Promote["promote_file to the final path"]
+        Promote --> ReleaseIO["Drop I/O permit"]
+        ReleaseIO --> EmitDone["Emit JobEvent::ItemComplete\nwith duration_sec"]
     end
 
-    Schedule --> WorkerPool
-    WorkerPool --> BatchDone[Emit JobEvent::BatchComplete]
+    Schedule --> ItemTask
+    ItemTask --> BatchDone["Emit JobEvent::BatchComplete"]
 ```
 
-1. **Dual-Governor Resource Throttling (ADR-0011)**:
-   - **Worker Concurrency (`workers`)**: Bounds the total number of simultaneous episode pipelines running in Tokio async tasks.
-   - **I/O Semaphore (`io_jobs`)**: Bounds the number of concurrent processes performing heavy disk writing (`mkvmerge` / `mkvextract`). Audio transcoding proceeds in parallel across worker slots, but muxing waits for an I/O permit, preventing disk head thrashing and scratch space exhaustion.
-2. **Global Work Pipelining (ADR-0011)**:
-   - Planned jobs across all release subdirectories are flattened into a single global queue, eliminating worker starvation at directory boundaries while preserving directory-scoped asset resolution.
-3. **Cooperative Cancellation (`CancellationToken`)**:
-   - Checked at every major pipeline boundary: preflight inspection, before task launch, between transcode and muxing, and inside stream readers.
-   - On cancellation, active child processes (`kill_on_drop(true)`) are terminated immediately, and staging files are cleaned up.
-4. **Authoritative Monotonic Item Duration (ADR-0009)**:
-   - The engine captures `let start = Instant::now()` at task entry and calculates `start.elapsed().as_secs_f64()` upon completion. This value is embedded into `JobEvent::ItemComplete { duration_sec: Some(f64), .. }`.
+Extract mode skips probing and planning up front: each item task probes its video, acquires an I/O permit, and runs one `mkvextract` call plus promotions while holding it.
+
+1. **Two concurrency limits (ADR-0011)**:
+   - **`workers`**: `run_items` keeps at most `workers` item tasks in its `JoinSet`. The default is the physical core count clamped to 1–16.
+   - **`io_jobs`**: a semaphore bounds the item phases that write heavily to disk: `mkvmerge` plus promotion in remux, the whole `mkvextract` run plus promotions in extract. Transcoding runs before the permit is requested, so it overlaps with other items' muxing. The default is 2; `0` means the same limit as `workers`.
+2. **Global work queue (ADR-0011)**:
+   - Planned jobs from every release directory form one queue in batch order, so workers do not idle at directory boundaries. Asset resolution stays per directory.
+3. **Cooperative cancellation (`CancellationToken`)**:
+   - Checked while probing, after probing, before planning each item, and before each task launch. Each item's work future races the token in a `tokio::select!`, so a stop drops the in-flight work at its next await point.
+   - Child processes are spawned with `kill_on_drop(true)`, and scratch directories are `TempDir`s, so dropping the work kills the tools and removes staged files. After a stop, `run_items` aborts the remaining tasks and settles every in-flight and unstarted item as `cancelled`.
+4. **Item duration (ADR-0009)**:
+   - The engine takes `Instant::now()` when it starts an item and puts `elapsed().as_secs_f64()` in `JobEvent::ItemComplete { duration_sec: Some(..) }` for every started item, whether it completed, failed, or was cancelled.
+5. **Panicking items**: a task that panics settles its item as `error` (`worker panicked: ...`); the rest of the batch continues.
 
 ---
 
 ## 5. Desktop Application Architecture (`desktop-tauri`)
 
-The desktop application is built with Tauri v2, pairing a Rust backend host with a webview frontend styled in a custom **Liquid Glass** dark aesthetic.
+The desktop app pairs a Rust host (Tauri v2) with a webview frontend in plain JavaScript and CSS.
 
 ```mermaid
 flowchart LR
     subgraph Frontend["Webview Frontend (desktop-tauri/ui)"]
-        UIApp["app.js\nInit & Tabs"]
-        UIQueue["queue-state.js\nQueue Tracker"]
-        UIView["queue-view.js\nDOM Rendering"]
-        UIJob["job-controller.js\nIPC Trigger"]
-        UITel["telemetry.js\nHardware Gauges"]
+        UIApp["app.js\nStartup, Presets, Snapshot Restore"]
+        UIJob["job-controller.js\nRun / Stop"]
+        UIQueue["queue-state.js\nQueue State"]
+        UIView["queue-view.js\nQueueTracker"]
+        UITel["telemetry.js\nPolling"]
     end
 
     subgraph RustBridge["Engine Bridge (src-tauri/src/)"]
-        Cmds["commands.rs\nTauri Commands"]
-        Proc["process.rs\nJobState & ScanState"]
-        Telem["telemetry.rs\nsysinfo Collector"]
+        Cmds["commands.rs\nCommands & Job Supervisor"]
+        Proc["process.rs\nJobState, ScanState, Stop"]
+        Telem["telemetry.rs\nsysinfo Sampling"]
         Win["window.rs\nFrameless Window"]
     end
 
@@ -412,107 +411,107 @@ flowchart LR
     end
 
     UIApp --> UIJob
-    UIJob -->|inspect_directory| Cmds
-    UIJob -->|run_job(BatchRequest)| Cmds
-    UIJob -->|stop_job| Cmds
-    UITel -->|get_system_telemetry| Cmds
+    UIApp -->|inspect_directory| Cmds
+    UIJob -->|inspect_directory preflight| Cmds
+    UIJob -->|run_job BatchRequest| Cmds
+    UIJob -->|stop_job| Proc
+    UITel -->|get_system_telemetry| Telem
+    UIApp -->|window commands| Win
 
     Cmds --> Proc
-    Cmds --> Telem
-    Cmds --> Win
-
     Cmds -->|async .await| CoreScan
-    Proc -->|tokio::spawn| CorePipe
+    Cmds -->|async_runtime::spawn| CorePipe
 
-    CorePipe -->|JobEvent MPSC| Proc
-    CorePipe -->|Log Line MPSC| Proc
-    Proc -->|emit job-event| UIQueue
-    Proc -->|emit job-log| UIApp
-    UIQueue --> UIView
+    CorePipe -->|JobEvent mpsc| Cmds
+    CorePipe -->|Log line mpsc| Cmds
+    Cmds -->|emit job-event / job-done| UIJob
+    Cmds -->|emit job-log| UIJob
+    UIJob --> UIView
+    UIView --> UIQueue
 ```
 
-### 5.1 In-Process Engine Bridge & Process Lifecycle (`process.rs`)
+### 5.1 In-Process Engine Bridge (`commands.rs`, `process.rs`)
 
-The legacy Python PyInstaller sidecar architecture was superseded by the **in-process Engine Bridge** (ADR-0007, ADR-0008). Exposed Tauri commands: `inspect_directory`, `run_job`, `stop_job`, `clear_cache`, `pick_directory`, `pick_subtitle_file`, `get_preset_profiles`, `get_job_snapshot`, `get_system_telemetry`, plus window controls (`minimize_window`, `toggle_maximize`, `is_maximized`, `start_drag`, `start_resize`, `set_window_theme`) and shutdown orchestration (`begin_shutdown`, `cancel_shutdown`, `close_window`, `cleanup_owned_processes`).
+The engine runs inside the desktop process (ADR-0007, ADR-0008). Registered Tauri commands: `inspect_directory`, `run_job`, `stop_job`, `clear_cache`, `pick_directory`, `pick_subtitle_file`, `get_preset_profiles`, `get_job_snapshot`, `get_system_telemetry`, `close_window`, and the window controls `minimize_window`, `toggle_maximize`, `is_maximized`, `start_drag`, `start_resize`, `set_window_theme`. Events emitted to the webview: `job-event` (a `JobEvent` plus `mode` and `job_id`), `job-log` (a batch of log lines), `job-done` (`{mode, job_id, code}`, code `0` completed, `-1` cancelled, `1` otherwise), and `cleanup-error`.
 
-1. **Zero-IPC Overhead**: The Media Engine runs directly inside the desktop process. Communication uses in-memory Tokio MPSC channels rather than OS pipes or NDJSON streams.
-2. **Job Slot Arbitration & Panic Isolation**:
-   - `JobState` enforces mutual exclusion via `JobSlot`: only one active batch execution can run at a time.
-   - Pipeline execution is isolated inside `tauri::async_runtime::spawn`. An unexpected panic within the engine is intercepted at the `JoinHandle` boundary, preventing desktop application crashes and releasing the slot safely.
-3. **Two-Phase Teardown Protocol (ADR-0007)**:
-   - When a user stops a job or closes the window during execution:
-     - **Phase 1 (Cooperative)**: Fires `cancel_token.cancel()`. Waits up to 2.0 seconds (`STOP_TIMEOUT`) for active child processes (`ffmpeg`, `mkvmerge`) to exit and temporary files to be cleaned up.
-     - **Phase 2 (Hard Abort)**: If the worker fails to exit within 2.0 seconds, only the pipeline worker is aborted via `slot.pipeline_abort.abort()`. The supervisor task survives to publish the cancelled terminal snapshot and `job-done`, then release the slot.
-4. **Real-Time `JobSnapshot` Projection (ADR-0008, ADR-0009)**:
-   - The bridge reduces incoming `JobEvent` streams into an in-memory `JobSnapshot`.
-   - The webview queries `get_job_snapshot()` upon initialization to immediately restore completed cards, execution outcomes, and exact run durations across reloads.
-5. **Canonical Directory Identity**:
+1. **In-memory channels**: the engine sends `JobEvent`s and log lines over Tokio mpsc channels. The supervisor forwards log lines in batches of up to 25 lines or every 25 ms.
+2. **Job slot & panic isolation**:
+   - `JobState` holds at most one `JobSlot`; `run_job` fails while a job is running or stopping, and after shutdown has begun.
+   - `run_job` validates the request, then spawns the pipeline with `tauri::async_runtime::spawn` and a supervisor task. The supervisor holds back the engine's `BatchComplete` until the pipeline future returns, then publishes one terminal `job-event` and `job-done` and releases the slot. A pipeline error or panic caught at the `JoinHandle` becomes a failed terminal event (with `error` or `panic`) instead of crashing the app. This depends on the release profile unwinding on panic; the root `Cargo.toml` must never set `panic = "abort"`.
+3. **Two-phase stop (ADR-0007)** (`stop_job`, and `close_window`/app exit for every owned job and scan):
+   - **Phase 1 (cooperative)**: cancels the job's `CancellationToken` and waits up to 2 seconds (`STOP_TIMEOUT`) for the supervisor to release the slot.
+   - **Phase 2 (abort)**: if the slot is still held, aborts only the pipeline task (`slot.pipeline_abort.abort()`) and waits up to 1 more second. The supervisor survives to publish the cancelled terminal event and `job-done`, then releases the slot.
+   - `close_window` and the `ExitRequested` handler first stop new jobs and scans from starting (`begin_shutdown`), then run both stops (`cleanup_owned_processes`). If cleanup fails, starts are allowed again (`cancel_shutdown`) and the error is returned, or emitted as `cleanup-error`.
+4. **`JobSnapshot` projection (ADR-0008, ADR-0009)**:
+   - The supervisor reduces every forwarded `JobEvent` into an in-memory `JobSnapshot` (status, input directory, item order, per-item status, progress, reason, error, and duration).
+   - On startup the webview calls `get_job_snapshot()` and rebuilds the queue from it, so a reload keeps the running or finished batch, its outcomes, and its durations. Starting a new inspection clears the snapshot unless a job is active.
+5. **Canonical directory identity**:
    - Every directory identity crossing the bridge into the Queue Tracker is the **display form** of the canonical path: a Windows verbatim (`\\?\`) prefix is stripped and `\\?\UNC\` is rewritten to `\\` (`commands.rs`, `display_canonical_path`).
    - This applies to the Inspection Manifest's `canonical_dir`, the Job Snapshot's `input_dir`, and `JobEvent::BatchStart.input_dir`. The engine still receives and uses the real `PathBuf` for filesystem work; only the projected form is normalized, in the bridge.
-   - The three must agree because Queue Tracker directory identity is a string comparison. A mismatch — for example a raw verbatim `BatchStart.input_dir` against a stripped `canonical_dir` — silently drops Queue Selection and Active Batch ordering on the next same-directory rescan, because a release directory whose name ends in `.` or a space normalizes differently in each form.
-6. **Linux Desktop Environment Hardening (`lib.rs`, ADR-0015)**:
+   - The three must agree because Queue Tracker directory identity is a string comparison. A mismatch, for example a raw verbatim `BatchStart.input_dir` against a stripped `canonical_dir`, silently drops Queue Selection and Active Batch ordering on the next same-directory rescan, because a release directory whose name ends in `.` or a space normalizes differently in each form.
+6. **Linux desktop environment defaults (`lib.rs`, ADR-0015)**:
    - Defaults `GDK_BACKEND=x11,wayland` to avoid `EGL_BAD_PARAMETER` aborts under native Wayland.
-   - Inside AppImages on modern Linux distributions (Fedora, Arch, Ubuntu 24+), dynamically injects host `libwayland-client.so.0` via `LD_PRELOAD` to resolve ABI symbol conflicts between bundled and host graphics drivers, and disables WebKitGTK DMABUF rendering (`WEBKIT_DISABLE_DMABUF_RENDERER=1`) to prevent Mesa EGL exit segfaults (`SkiaGLContext` teardown race condition).
-   - The DMABUF workaround is scoped to AppImage deliberately and must not be widened to Native Packages (RPM/DEB). On those installs running WebKitGTK 2.54+, disabling DMABUF drops Skia to CPU shared-memory rendering; the window is `transparent: true`, so only pointer-damaged regions recomposite and the rest of the window shows the desktop through it. Native Packages therefore keep DMABUF enabled. See [ADR-0015](docs/adr/0015-per-package-webkitgtk-dmabuf-renderer-scoping.md) for the full rationale.
+   - Inside an AppImage (`APPIMAGE` or `APPDIR` set), preloads the host `libwayland-client.so.0` via `LD_PRELOAD` to avoid ABI conflicts between the bundled library and host Mesa drivers, and disables WebKitGTK DMABUF rendering (`WEBKIT_DISABLE_DMABUF_RENDERER=1`) to avoid the Mesa EGL segfault on exit (`SkiaGLContext` teardown).
+   - The DMABUF workaround is scoped to AppImage deliberately and must not be widened to Native Packages (RPM/DEB). On those installs running WebKitGTK 2.54+, disabling DMABUF drops Skia to CPU shared-memory rendering; the Linux window is `transparent: true` (`tauri.linux.conf.json`), so only pointer-damaged regions recomposite and the rest of the window shows the desktop through it. Native Packages therefore keep DMABUF enabled. See [ADR-0015](docs/adr/0015-per-package-webkitgtk-dmabuf-renderer-scoping.md) for the full rationale.
    - `init_linux_env()` only ever *defaults* `GDK_BACKEND` and `WEBKIT_DISABLE_DMABUF_RENDERER`; both are `is_none()`-guarded, so an operator who exported `WEBKIT_DISABLE_DMABUF_RENDERER=1` to work around the original shutdown segfault keeps that override and so keeps the rendering bug. The fix for that operator is to unset the variable, not to widen the default. The `libwayland-client` preload is the one exception, and it behaves differently in both directions: it is guarded by a `contains()` check, so it *defers* to an operator who has already preloaded a `libwayland-client`, and *prepends* to whatever unrelated value is already there rather than replacing it.
 
 ---
 
-### 5.2 System Telemetry Engine (`telemetry.rs`)
+### 5.2 System Telemetry (`telemetry.rs`, `telemetry.js`)
 
-A background polling service provides live hardware metrics at 1-second intervals:
+The webview polls `get_system_telemetry` every second while a job is active and every 30 seconds otherwise, skipping ticks while a request is in flight and pausing while the page is hidden.
 
-1. **Targeted Process Inspection**:
-   - Uses `sysinfo::System`. When an engine task is running, inspects all processes to compute aggregated CPU and disk I/O metrics.
-   - **Parent PID Filtering**: Specifically isolates CPU and disk write rates (`io_mb_s`) generated by the application process and its direct child media tools (`is_engine_process` matching `mkvmerge`, `mkvextract`, `ffmpeg`), filtering out background system noise.
-2. **Minimal Overhead**:
-   - When idle, process inspection refreshes only the host PID (`ProcessesToUpdate::Some(&[self_pid])`).
+1. **Per-poll sampling** (`sysinfo::System`): overall CPU percentage, RAM used/total, and `io_mb_s`, the bytes written since the previous poll by the app process and its direct child `mkvmerge`, `mkvextract`, and `ffmpeg` processes (`is_engine_process`), divided by the time between polls.
+2. **Idle cost**: when no job or scan is active, only the app's own process is refreshed (`ProcessesToUpdate::Some(&[self_pid])`); otherwise all processes are refreshed to find the children.
 
 ---
 
-### 5.3 Presentation & Queue State Architecture (`ui/`)
+### 5.3 Presentation & Queue State (`ui/`)
 
-The frontend avoids heavy framework bloat (React/Vue), implementing a high-speed, modular vanilla ECMAScript architecture:
+The frontend is plain ES modules with no framework.
 
-1. **State Machine (`queue-state.js`)**:
-   - `createQueueState(manifest)` initializes state records strictly keyed by `item.id`.
-   - `reduceQueueEvent(state, event)` updates item state records in place ($O(1)$ per event) without allocating new trees.
-   - Supports queue reordering (`▲` / `▼`) and selective execution (`selected_items`).
-2. **Incremental Manifest Card & Event Rendering (`queue-view.js`, `app.js`)**:
-   - Initial Inspection Manifest cards are created in `requestAnimationFrame` batches under a best-effort ~8 ms deadline (`QueueTracker.renderCardsIncrementally` in `queue-view.js`) so large manifests do not block the main thread.
-   - Live progress updates render synchronously on mounted cards when the event arrives; cards not yet mounted render from the item's current reducer state when created. Terminal log batches are flushed in a single animation frame. Neither has a hard per-update frame budget or a constant 60 FPS guarantee.
-3. **Hybrid Visual Progress Lifecycle (ADR-0009)**:
-   - **Indeterminate Shimmer**: Displayed during initialization, EBML probing, and audio transcoding when exact byte progress is unavailable.
-   - **Determinate Progress Bar**: Transitions immediately upon receiving the first `ItemProgress { progress, speed, eta }` event from `mkvmerge`, mapping to a determinate percentage fill.
-   - **Terminal State**: Settles to 100% on `ItemComplete` with success, error, or cancelled styling.
-4. **Centralized Presentation Heartbeat (ADR-0009)**:
-   - A single 1Hz timer in `QueueTracker` coordinates elapsed duration tickers across all active in-flight cards, eliminating per-card `setInterval` drift and DOM thrashing.
-   - Stops ticking when no items are active.
-5. **Enriched Track Assignment Modal (ADR-0011, ADR-0012)**:
-   - Provides full override control: browse external subtitle files (`rfd` native dialog), select candidate tracks, configure ISO-639-2 language codes, track titles, and millisecond sync offsets (`offset_ms`). Override parameters are preserved across the engine seam and applied directly to `mkvmerge` command invocations.
+1. **Queue state (`queue-state.js`)**:
+   - `createQueueState(manifest)` creates item records keyed by `item.id`.
+   - `reduceQueueEvent(state, event)` updates the owned item records and counters in place ($O(1)$ per event) and returns the same state object.
+   - Order and selection helpers back queue reordering (`▲` / `▼`) and selective execution (`selected_items`).
+2. **Card rendering (`queue-view.js`)**:
+   - `QueueTracker.renderCardsIncrementally` creates every card in `requestAnimationFrame` batches, each running until a best-effort ~8 ms deadline, so large manifests do not block the main thread.
+   - Events update mounted cards synchronously; a card created later renders from the item's current reducer state. Log lines are queued and flushed once per animation frame, keeping the last 2000 lines.
+3. **Card progress (ADR-0009)**:
+   - **Indeterminate shimmer**: from `ItemStart` until the item reports numeric progress (probing, transcoding).
+   - **Determinate bar**: filled from `ItemProgress.progress`, parsed from `mkvmerge`/`mkvextract` `Progress: N%` output.
+   - **Terminal state**: `ItemComplete` fills the bar to 100% with the completed, skipped, error, cancelled, or planned styling.
+4. **Presentation heartbeat (ADR-0009)**:
+   - One 1 Hz timer in `QueueTracker` updates the elapsed time of every processing card, and stops when no item is processing.
+5. **Subtitle assignment modal (ADR-0011, ADR-0012)**:
+   - Per remux item: choose a subtitle from the manifest's `subtitle_candidates` for the release, or a custom path (browse via `pick_subtitle_file`, an `rfd` native dialog); set the language (`ind`, `eng`, `jpn`, or a custom code), track title, and offset in milliseconds (`offset_ms`). The resulting `TrackAssignment` is sent in `BatchRequest.assignments` and applied to the `mkvmerge` arguments (§4.4).
+6. **Theme**: follows `prefers-color-scheme` live until the user toggles the theme; the choice is then stored in `localStorage` (`mkv-theme`) and pinned on the native window via `set_window_theme`.
 
 ---
 
-## 6. Standalone CLI Adapter (`crates/mkv-cli`)
+## 6. CLI Adapter (`crates/mkv-cli`)
 
-The `mkv-cli` crate provides headless automation for servers, continuous integration pipelines, and terminal power users:
+`mkv-cli` runs the same engine from a terminal.
 
-1. **Symlink Dispatch**:
-   - Dispatches operational mode based on the executable name: if invoked as `mkv-extract` (or via symlink), defaults to `PipelineMode::Extract`; otherwise defaults to `PipelineMode::Remux`.
-2. **Execution Modes**:
-   - **Standard Execution**: Runs the batch with formatted ANSI terminal output, live spinners, and progress summaries.
-   - **Preflight Planning (`--plan`)**: Generates and outputs the `InspectionManifest` JSON without performing modifications.
-   - **NDJSON Stream (`--events`)**: Emits machine-readable lifecycle events prefixed with `@event: <json>` to stdout, enabling integration with external orchestrators.
-3. **CLI Arguments Contract**:
-   - Maps flags directly to `BatchRequest`: `--input-dir`, `--out-dir`, `--fonts-dir`, `--assets-dir`, `--preset`, `--bitrate`, `--complexity`, `--sub-offset`, `--workers` (default: physical cores clamped 1–16), `--io-jobs`, `--ffmpeg-threads` (`auto` governor default), `--assignments` (plus deprecated `--sub-assignments` alias), `--selected-item`, `--selected-items`, `--dry-run`, `--no-cache`, `--clear-cache`, `--plan`, `--events`, `--extract` / `--remux`.
-   - `selected_items` queue scoping is supported via `--selected-item <PATH>` (repeatable, literal path without comma splitting, safe for anime filenames with commas) and `--selected-items <LIST>` (repeatable, comma-delimited with trimmed whitespace). Paths are normalized relative to `input_dir` with CWD-aware fallback, rejecting paths outside `input_dir`. In `--plan` mode, selected items filter the emitted `InspectionManifest` via `InspectionManifest::filter_selected()`.
-   - Fail-fast boundary validation (`workers` 1–64, `io_jobs` 0–64, `ffmpeg_threads` 1–32, `complexity` 0–10, bitrate format) is deferred to `BatchRequest::validate()` at runtime.
+1. **Executable-name mode default**:
+   - When the executable is named `mkv-extract` (case-insensitive, optional `.exe`), the default mode is `PipelineMode::Extract`; otherwise `PipelineMode::Remux`. `--extract` / `--remux` override it (the last one wins). Cargo builds only `mkv-cli`; the `mkv-extract` name comes from renaming or linking the binary.
+2. **Execution modes**:
+   - **Run**: executes the batch, then prints the summary log lines and a totals line (`Finished. Processed N file(s) ...`).
+   - **Preflight planning (`--plan`)**: prints the pretty-printed `InspectionManifest` JSON and exits without writing media.
+   - **NDJSON stream (`--events`)**: prints each `JobEvent` as `@event: <json>` on stdout and suppresses the summary output.
+   - **`--clear-cache`**: clears the inspection cache and exits.
+3. **Arguments**:
+   - Maps flags to `BatchRequest`: `--input-dir`, `--out-dir`, `--fonts-dir`, `--assets-dir`, `--preset`, `--bitrate`, `--complexity`, `--sub-offset`, `--workers` (default: physical cores clamped 1–16), `--io-jobs`, `--ffmpeg-threads` (`auto` = governor default), `--assignments`, `--selected-item`, `--selected-items`, `--dry-run`, `--no-cache`, plus `--plan`, `--events`, `--clear-cache`, `--extract` / `--remux`, `-h`/`--help`. Any other argument fails with `Unknown argument: <arg>`.
+   - `--assignments <FILE>` is read with `parse_assignments_json`: a `TrackAssignment` array, `{"assignments": [...] | {video: asset}}`, or a flat `{video: asset}` map (maps become subtitle assignments).
+   - Selection: `--selected-item <PATH>` (repeatable, literal, commas kept) and `--selected-items <LIST>` (repeatable, comma-separated, whitespace trimmed, empty segments dropped); both require `--input-dir`. Paths are normalized relative to `input_dir`, with a working-directory fallback, and anything resolving outside `input_dir` is rejected. In `--plan` mode, `InspectionManifest::select_items` fails if a selection names no discovered MKV, then keeps the selected items in selection order.
+   - Validation: `--preset`, `--bitrate` (positive integer with an optional `k` or `M` suffix), and numeric parsing are checked while parsing; ranges (`workers` 1–64, `io_jobs` 0–64, `ffmpeg_threads` 1–32, `complexity` 0–10) and paths are checked by `BatchRequest::validate()` before anything runs.
+4. **Exit codes**: `0` on success; `1` on argument or validation errors, when any item failed, or on a fatal pipeline error; `130` when cancelled by SIGINT (or SIGTERM on Unix).
 
 ---
 
 ## 7. End-to-End Execution Lifecycles
 
-### 7.1 Preflight Inspection & Manifest Generation Flow
+### 7.1 Preflight Inspection & Manifest Generation
 
 ```mermaid
 sequenceDiagram
@@ -520,167 +519,169 @@ sequenceDiagram
     actor User
     participant UI as Desktop UI (app.js)
     participant Cmd as commands::inspect_directory
-    participant Proc as ScanState
+    participant Scan as ScanState
     participant Core as manifest::generate_inspection_manifest
     participant EBML as ebml::probe_ebml_native
     participant Cache as PersistentInspectCache
 
     User->>UI: Selects Release Directory
-    UI->>Cmd: inspect_directory(path, options)
-    Cmd->>Proc: Acquire start_lock & register ActiveScan
-    Cmd->>Core: generate_inspection_manifest(input_dir, cache, cancel_token).await
+    UI->>Cmd: inspect_directory(path, {noCache})
+    Cmd->>Scan: Lock start_lock, cancel any previous scan, register ActiveScan
+    Cmd->>Cmd: Clear JobSnapshot (unless a job is active)
+    Cmd->>Core: generate_inspection_manifest(dir, cache, cancel_token).await
     Core->>Core: scan_mkv_files(recursive)
-    loop For each MKV file
-        Core->>Cache: Check FileSignature (size, mtime_ns)
-        alt Cache Hit
-            Cache-->>Core: Return cached metadata
-        else Cache Miss
-            Core->>EBML: probe_ebml_native(file)
-            alt Native Probe OK (<1ms)
-                EBML-->>Core: MkvmergeMetadata
-            else Quirks / Fallback
-                Core->>Core: Fallback mkvmerge -J subprocess
-            end
-            Core->>Cache: Store result
+    Core->>Core: List subtitle candidates per release (release dir and ancestors)
+    Core->>Cache: get_path for every MKV (size, mtime_ns)
+    loop Each cache miss, concurrently (bounded semaphore)
+        Core->>EBML: probe_ebml_native(file)
+        alt Native probe OK
+            EBML-->>Core: MkvmergeMetadata
+        else Native probe failed
+            Core->>Core: mkvmerge -J fallback
         end
+        Core->>Cache: put_path on success
     end
-    Core->>Core: Match Subtitle Candidates & Summarize
-    Core-->>Cmd: InspectionManifest { items, candidates, ... }
-    Cmd-->>UI: InspectionManifest JSON
-    UI->>UI: Hydrate Queue Tracker & Render Episode Cards
+    Core->>Core: Summarize metadata per item
+    Core->>Cache: save()
+    Core-->>Cmd: InspectionManifest { version, subtitle_candidates, items }
+    Cmd-->>UI: Manifest with canonical_dir
+    UI->>UI: Populate Queue Tracker & render episode cards
 ```
 
 ---
 
-### 7.2 Batch Remux Execution Flow
+### 7.2 Batch Remux Execution
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor User
-    participant UI as Desktop UI
-    participant Cmd as commands::run_job
+    participant UI as Desktop UI (job-controller.js)
+    participant Cmd as commands::run_job / supervisor
     participant Proc as JobState
     participant Pipe as pipeline::BatchPipeline
     participant RX as remux::execute_remux_job
     participant FF as ffmpeg (libopus)
     participant MKV as mkvmerge
 
-    User->>UI: Clicks "Run Batch"
+    User->>UI: Clicks Run
+    UI->>Cmd: inspect_directory(path, {noCache}) (forced preflight)
     UI->>Cmd: run_job(BatchRequest)
-    Cmd->>Cmd: BatchRequest::validate() (Fail-Fast)
-    Cmd->>Proc: reserve_job_slot()
-    Cmd->>Pipe: from_request() & spawn Tokio task
-    Pipe-->>Cmd: Emit JobEvent::BatchStart
-    Cmd-->>UI: Tauri Event: job-event (BatchStart)
+    Cmd->>Cmd: BatchRequest::validate() (fail fast)
+    Cmd->>Proc: reserve_job_slot(), begin_snapshot()
+    Cmd->>Pipe: from_request(), spawn pipeline + supervisor
+    Cmd-->>UI: job_id
+    Pipe-->>Cmd: JobEvent::BatchStart
+    Cmd-->>UI: job-event (BatchStart)
 
-    loop For each selected episode (bounded by workers)
-        Pipe-->>Cmd: Emit JobEvent::ItemStart
-        Cmd-->>UI: Tauri Event: job-event (ItemStart -> Card Shimmer)
+    Note over Pipe: Probe, prepare release directories, plan
+    Pipe-->>Cmd: ItemComplete for skipped / failed-probe items
+    Cmd-->>UI: job-event (settled cards)
 
-        alt FLAC Audio Present
-            Pipe->>RX: Transcode Audio
+    loop Each planned item (at most `workers` concurrently)
+        Pipe-->>Cmd: JobEvent::ItemStart
+        Cmd-->>UI: job-event (ItemStart → shimmer)
+
+        alt Selected audio is A_FLAC
+            Pipe->>RX: execute_remux_job
             RX->>FF: Spawn ffmpeg (Opus VBR)
-            FF-->>RX: audio.opus in .tmp_remux/
+            FF-->>RX: audio.opus in .tmp_remux_*/
         end
 
-        Pipe->>RX: Execute Remux
         RX->>RX: Acquire io_semaphore permit
-        RX->>MKV: Spawn mkvmerge (Stream stdout)
-        loop Progress Stream
-            MKV-->>RX: Progress: X%
+        RX->>MKV: Spawn mkvmerge (read stdout)
+        loop Progress lines
+            MKV-->>RX: Progress: N%
             RX-->>Pipe: on_progress callback
-            Pipe-->>Cmd: Emit JobEvent::ItemProgress
-            Cmd-->>UI: Tauri Event: job-event (ItemProgress -> Determinate Bar)
+            Pipe-->>Cmd: JobEvent::ItemProgress
+            Cmd-->>UI: job-event (ItemProgress → determinate bar)
         end
-        MKV-->>RX: Remux Succeeded
-        RX->>RX: Release io_semaphore permit
-        RX->>RX: promote_file (Atomic rename / EXDEV copy)
-        RX-->>Pipe: RemuxSummary
+        MKV-->>RX: Exit 0 or 1
+        RX->>RX: promote_file (rename, or copy across devices)
+        RX-->>Pipe: Log lines (permit released on return)
 
-        Pipe->>Pipe: Stop item timer (start_instant.elapsed)
-        Pipe-->>Cmd: Emit JobEvent::ItemComplete { duration_sec }
-        Cmd-->>UI: Tauri Event: job-event (ItemComplete -> Settled Card)
+        Pipe-->>Cmd: JobEvent::ItemComplete { duration_sec }
+        Cmd-->>UI: job-event (ItemComplete → settled card)
     end
 
-    Pipe-->>Cmd: Emit JobEvent::BatchComplete { success: true }
-    Cmd-->>UI: Tauri Event: job-event (BatchComplete)
+    Pipe-->>Cmd: JobEvent::BatchComplete (held until the pipeline returns)
+    Cmd->>Proc: update_snapshot(terminal)
+    Cmd-->>UI: job-event (BatchComplete), job-done {mode, job_id, code}
     Cmd->>Proc: release_slot()
 ```
 
 ---
 
-## 8. Cross-Cutting Engineering Concerns
+## 8. Cross-Cutting Concerns
 
 ### 8.1 Safety, Reliability & Error Recovery
 
-1. **Atomic File Promotion (`promote_file`)**:
-   - Temporary outputs write to hidden scratch directories (`.tmp_remux_*` or `.font_staging/`).
-   - Promotion uses atomic filesystem renames (`fs::rename`).
-   - If destination exists (e.g. Windows filesystem semantics), creates a timestamped backup before replacement. If replacement fails, rolls back the backup.
-   - If crossing device boundaries (a typed `CrossesDevices` kind, `EXDEV`/18 off Windows, `ERROR_NOT_SAME_DEVICE`/17 on Windows), copies to a temporary sibling file within the destination parent directory before renaming over the target, preserving atomicity.
-   - **That copy is reached only for a device boundary** ([ADR-0013 amendment 2](./docs/adr/0013-asynchronous-probing-and-transcode-governance-performance-overhaul.md#amendment-2--2026-09-28-spawn_blocking-scope)). Any other rename failure — missing source, locked destination, permissions — returns the rename error rather than duplicating a multi-gigabyte payload to fail the same way. `promote_file` is synchronous throughout; promotion is not offloaded to Tokio's blocking pool, which would let a cancelled item detach a still-running copy.
-2. **Fail-Fast Input Validation (`BatchRequest::validate`)**:
-   - Rejects path traversal attempts (`..`) and absolute path injection within `selected_items` and `TrackAssignment`.
-   - Validates that workers, bitrates, and presets conform strictly to expected ranges before acquiring runtime locks.
-   - **Two distinct failure points** ([ADR-0008](./docs/adr/0008-typed-engine-bridge-and-track-assignment-model.md#amendment--2026-09-26)). A validation failure raised **before** `BatchStart` — an assignment target that matches no discovered item — settles **no** items and emits **no** `BatchComplete`: the run returns an error, writes no media, and the Engine Bridge supervisor settles the job exactly once as failed with an empty snapshot. A planning failure raised **after** `BatchStart` — an assignment whose asset disappeared between validation and resolution — settles the affected item and every remaining queued item as `error` with distinct reasons, followed by exactly one failed `BatchComplete`. Both fail closed; only the second produces per-item outcomes.
-3. **Task-Level Panic Containment**:
-   - Engine workers execute within Tokio task boundaries. Any unexpected panic is caught at `JoinHandle` resolution, preventing desktop application crashes and releasing locks cleanly.
+1. **Atomic file promotion (`promote_file`)**:
+   - Outputs are staged in temporary directories created inside the destination: `.tmp_remux_*` and `.tmp_extract_*` (via `tempdir_in`) and `<fonts_dir>/.font_staging/`.
+   - Promotion is a filesystem rename (`fs::rename`).
+   - If the rename fails and the destination exists (Windows `rename` refuses to replace), the destination is moved to a `<name>.bak.<token>` backup, the staged file is renamed into place, and the backup is removed; if that rename fails, the backup is renamed back.
+   - If the rename crosses devices (a typed `CrossesDevices` kind, `EXDEV`/18 off Windows, `ERROR_NOT_SAME_DEVICE`/17 on Windows), the file is copied to a temporary sibling in the destination directory and then renamed over the target.
+   - **That copy is reached only for a device boundary** ([ADR-0013 amendment 2](./docs/adr/0013-asynchronous-probing-and-transcode-governance-performance-overhaul.md#amendment-2--2026-09-28-spawn_blocking-scope)). Any other rename failure (missing source, locked destination, permissions) returns the rename error rather than duplicating a multi-gigabyte payload to fail the same way. `promote_file` is synchronous throughout; promotion is not offloaded to Tokio's blocking pool, which would let a cancelled item detach a still-running copy.
+2. **Fail-fast input validation (`BatchRequest::validate`)**:
+   - Checks that the input, fonts, and assets directories exist and that the output path is not a file.
+   - Rejects assignment targets and `selected_items` that are absolute, drive-prefixed, contain `..`, are not `.mkv`, or do not exist; rejects relative asset paths containing `..`, duplicate targets or selections, non-subtitle assignments, missing assets, and assignments whose target is not selected.
+   - Checks `workers`, `io_jobs`, `ffmpeg_threads`, `complexity`, bitrate format, and preset before the desktop host reserves the job slot or the CLI starts the pipeline.
+   - **Two distinct failure points** ([ADR-0008](./docs/adr/0008-typed-engine-bridge-and-track-assignment-model.md#amendment--2026-09-26)). A validation failure raised **before** `BatchStart` (a selection or an assignment target that matches no discovered item) settles **no** items and emits **no** `BatchComplete`: the run returns an error, writes no media, and the Engine Bridge supervisor settles the job exactly once as failed with an empty snapshot. A planning failure raised **after** `BatchStart` (an assignment whose asset disappeared between validation and resolution) settles the affected item and every remaining queued item as `error` with distinct reasons, followed by exactly one failed `BatchComplete`. Both fail closed; only the second produces per-item outcomes.
+3. **Panic containment**:
+   - A panic inside an item task settles that item as `error` and the batch continues (§4.5). A panic in the pipeline future itself is caught by the desktop supervisor at the `JoinHandle` (§5.1). Both need unwinding panics: the release profile in the root `Cargo.toml` must never set `panic = "abort"`.
 
-### 8.2 Performance & Scalability Design
+### 8.2 Performance Design
 
-| Concern | Architectural Mechanism | Measured / Target Performance |
-| :--- | :--- | :--- |
-| **Media Probing** | Native pure-Rust EBML parser | `<1.0ms` per file (vs ~45ms for subprocess `mkvmerge -J`) |
-| **Inspection Caching** | Persistent mtime/size keyed cache | `~0.05ms` cache hit lookup |
-| **Font Extraction** | BLAKE2b deduplication + transactional claims | Eliminates up to 90% redundant font writes |
-| **Disk Contention** | Dual-governor `io_semaphore` throttling | Zero disk head thrashing on spinning disks or high-load SSDs |
-| **Transcode Oversubscription** | `cpu::transcode_governor_threads` auto-derivation | Per-job threads `(cores/workers)` clamped 1–4; complexity 5 saves ~40% CPU vs 10 |
-| **UI Responsiveness** | In-process channels + centralized heartbeat + chunked rendering | Best-effort ~8ms chunks for initial cards; synchronous event updates; batched log flush in one rAF; zero DOM timer thrashing (no constant 60 FPS guarantee) |
+| Concern | Mechanism |
+| :--- | :--- |
+| **Media probing** | Native EBML parser that stops at the first Cluster and spawns no process; `mkvmerge -J` only when it fails. ADR-0013 measured 0.091 ms per warm native probe. |
+| **Inspection caching** | Persistent cache keyed on canonical path and validated by size + `mtime_ns`; unchanged files are not probed again. |
+| **Font extraction** | `(name, size)` claims skip re-extraction; BLAKE2b-512 hashes drop content duplicates; `FontHashMemo` avoids rehashing unchanged fonts when seeding (ADR-0013: 364 ms cold → 2.1 ms warm). |
+| **Disk contention** | `io_semaphore` bounds concurrent `mkvmerge`/`mkvextract` phases (`io_jobs`, default 2). |
+| **Transcode oversubscription** | Default ffmpeg threads per job `(physical_cores / workers).clamp(1, 4)`; default complexity 5 (ADR-0013 reports ~40% less transcode CPU than 10). |
+| **UI responsiveness** | In-process channels; host log batching (25 lines / 25 ms); cards created in ~8 ms `requestAnimationFrame` batches; one log flush per animation frame; one 1 Hz heartbeat instead of per-card timers. |
 
 ---
 
 ## 9. Architectural Decision Records (ADR) Traceability Matrix
 
-The system architecture represents the cumulative implementation of 15 formal Architectural Decision Records:
-
 | ADR | Title | Core Architectural Impact | Primary Code Location |
 | :---: | :--- | :--- | :--- |
-| [**0001**](docs/adr/0001-sidecar-contract-and-structured-planning.md) | Sidecar Contract and Structured Planning | Established canonical manifest v2 schema and structured lifecycle events. Implemented. | `manifest.rs`, `pipeline.rs` |
-| [**0002**](docs/adr/0002-unified-asset-resolver-and-batch-runner.md) | Asset Resolver and Runner Architecture | Consolidated asset discovery into `AssetResolver`; decoupled remux and extract runners. Implemented. | `assets.rs`, `remux.rs`, `extract.rs` |
-| [**0003**](docs/adr/0003-transactional-font-extraction.md) | Transactional Font Extraction | Implemented two-phase claim/promote font management with BLAKE2b deduplication. Implemented. | `fonts.rs` |
-| [**0004**](docs/adr/0004-resolution-precedence-and-conventions.md) | Resolution Precedence and Conventions | Formalized subtitle precedence ladder (Manual → Same-Directory → Embedded → Ancestor → Fallback), cover ranking rules, fractional episode passthrough. Includes [2026-09-24 amendment](docs/adr/0004-resolution-precedence-and-conventions.md#amendment--2026-09-24) (implemented runtime contracts: embedded-before-ancestor subtitle ordering, cover art ranking). | `assets.rs`, `domain.rs` |
-| [**0005**](docs/adr/0005-rust-engine-migration-and-workspace-topology.md) | Rust Media Engine Migration | Established root workspace topology, split into Media Engine and Desktop contexts. Implemented. | `Cargo.toml`, `CONTEXT-MAP.md` |
-| [**0006**](docs/adr/0006-hybrid-ebml-probing-and-channel-streaming.md) | Hybrid EBML Probing & Channel Streaming | Built native Rust EBML parser with `mkvmerge -J` fallback and Tokio MPSC event channels. Implemented. | `ebml.rs`, `scan.rs`, `pipeline.rs` |
-| [**0007**](docs/adr/0007-in-process-engine-bridge.md) | In-Process Engine Bridge | Retired subprocess sidecars; connected Tauri directly to `mkv-core` with panic isolation and two-phase teardown. Implemented. | `commands.rs`, `process.rs` |
-| [**0008**](docs/adr/0008-typed-engine-bridge-and-track-assignment-model.md) | Typed Engine Bridge & Track Assignments | Replaced string CLI args with typed `BatchRequest`, fail-fast preflight validation, and `JobSnapshot` projection. Includes [2026-09-24](docs/adr/0008-typed-engine-bridge-and-track-assignment-model.md#amendment--2026-09-24) and [2026-09-26](docs/adr/0008-typed-engine-bridge-and-track-assignment-model.md#amendment--2026-09-26) amendments (implemented runtime contracts: resolution fail-closed abort, the two distinct preflight failure points, active batch snapshot restore across reloads, breaking cutover removing `keep_fonts`). | `request.rs`, `preset.rs`, `process.rs` |
-| [**0009**](docs/adr/0009-streaming-card-progress-and-item-duration-model.md) | Streaming Card Progress & Item Duration | Authoritative engine-owned `duration_sec`, indeterminate-to-determinate card transitions, 1Hz presentation heartbeat. Implemented. | `pipeline.rs`, `queue-state.js`, `queue-view.js` |
-| [**0010**](docs/adr/0010-mainline-rust-cutover-and-python-decommissioning.md) | Mainline Rust Engine Cutover | Decommissioned legacy Python codebase; established unified 1.0.0 semantic versioning and CI/release status gates. Implemented. | Root `Cargo.toml`, `.github/workflows/ci.yml`, `.github/workflows/release.yml` |
-| [**0011**](docs/adr/0011-selected-items-queue-and-concurrency-pipelining.md) | Selected Items Queue & Concurrency Pipelining | Global Tokio JoinSet, dual-governor I/O semaphore, parallel probing, enriched 1:1 track assignment modal. Implemented. | `pipeline.rs`, `request.rs`, `app.js` |
-| [**0012**](docs/adr/0012-track-assignment-override-execution-and-seam-unification.md) | Track Assignment Override Execution and Seam Unification | Unified full TrackAssignment execution into mkvmerge args (offset, language, title); eliminated sub_assignments flattening. Includes [2026-09-26 amendment](docs/adr/0012-track-assignment-override-execution-and-seam-unification.md#amendment--2026-09-26) (offset contract: override-not-additive, explicit zero means unshifted, milliseconds throughout). Implemented. | `pipeline.rs`, `remux.rs`, `mkv-cli` |
-| [**0013**](docs/adr/0013-asynchronous-probing-and-transcode-governance-performance-overhaul.md) | Asynchronous Probing and Transcode Governance Performance Overhaul | Asynchronous mkvmerge fallback probing, transcode thread governor, downshifted complexity (5), fine-grained font seeding lock, zero-copy cache serialization, plus a restriction of `promote_file`'s copy fallback to genuine device boundaries ([2026-09-28 amendment 2](docs/adr/0013-asynchronous-probing-and-transcode-governance-performance-overhaul.md#amendment-2--2026-09-28-spawn_blocking-scope), [amendment 3](docs/adr/0013-asynchronous-probing-and-transcode-governance-performance-overhaul.md#amendment-3--2026-09-28-traversal-path-contract)). Accepted and implemented. | `scan.rs`, `request.rs`, `fonts.rs`, `pipeline.rs`, `domain.rs` |
-| [**0014**](docs/adr/0014-cli-selected-items-execution-and-manifest-filtering.md) | CLI Selected Items Execution and Manifest Filtering | Dual CLI selection flags (`--selected-item` and `--selected-items`), path normalization with CWD fallback, and preflight planning manifest filtering (`InspectionManifest::filter_selected`). Accepted and implemented. | `mkv-cli`, `manifest.rs`, `pipeline.rs` |
-| [**0015**](docs/adr/0015-per-package-webkitgtk-dmabuf-renderer-scoping.md) | Per-Package WebKitGTK DMABUF Renderer Scoping | Scoped the `WEBKIT_DISABLE_DMABUF_RENDERER` workaround to the AppImage packaging boundary via the `APPIMAGE`/`APPDIR` env markers, so Native Packages keep hardware-accelerated damage tracking on transparent windows. Accepted. | `lib.rs` |
+| [**0001**](docs/adr/0001-sidecar-contract-and-structured-planning.md) | Sidecar Contract and Structured Planning | Established the manifest v2 schema and structured lifecycle events. Implemented. | `manifest.rs`, `pipeline.rs` |
+| [**0002**](docs/adr/0002-unified-asset-resolver-and-batch-runner.md) | Asset Resolver and Runner Architecture | Consolidated asset discovery into `AssetResolver`; separated remux and extract runners. Implemented. | `assets.rs`, `remux.rs`, `extract.rs` |
+| [**0003**](docs/adr/0003-transactional-font-extraction.md) | Transactional Font Extraction | Two-phase claim/promote font management with BLAKE2b deduplication. Implemented. | `fonts.rs` |
+| [**0004**](docs/adr/0004-resolution-precedence-and-conventions.md) | Resolution Precedence and Conventions | Subtitle precedence ladder (Manual → Same-Directory → Embedded → Ancestor → Fallback), cover ranking rules, fractional episode passthrough. Includes the [2026-09-24 amendment](docs/adr/0004-resolution-precedence-and-conventions.md#amendment--2026-09-24) (embedded-before-ancestor subtitle ordering, cover ranking). | `assets.rs`, `domain.rs` |
+| [**0005**](docs/adr/0005-rust-engine-migration-and-workspace-topology.md) | Rust Media Engine Migration | Root workspace topology split into Media Engine and Desktop contexts. Implemented. | `Cargo.toml`, `CONTEXT-MAP.md` |
+| [**0006**](docs/adr/0006-hybrid-ebml-probing-and-channel-streaming.md) | Hybrid EBML Probing & Channel Streaming | Native EBML parser with `mkvmerge -J` fallback; Tokio mpsc event channels. Implemented. | `ebml.rs`, `scan.rs`, `pipeline.rs` |
+| [**0007**](docs/adr/0007-in-process-engine-bridge.md) | In-Process Engine Bridge | Retired subprocess sidecars; Tauri calls `mkv-core` directly with panic isolation and two-phase stop. Implemented. | `commands.rs`, `process.rs` |
+| [**0008**](docs/adr/0008-typed-engine-bridge-and-track-assignment-model.md) | Typed Engine Bridge & Track Assignments | Typed `BatchRequest`, fail-fast preflight validation, and `JobSnapshot` projection. Includes the [2026-09-24](docs/adr/0008-typed-engine-bridge-and-track-assignment-model.md#amendment--2026-09-24) and [2026-09-26](docs/adr/0008-typed-engine-bridge-and-track-assignment-model.md#amendment--2026-09-26) amendments (fail-closed resolution, the two preflight failure points, active batch restore across reloads, removal of `keep_fonts`). | `request.rs`, `preset.rs`, `process.rs` |
+| [**0009**](docs/adr/0009-streaming-card-progress-and-item-duration-model.md) | Streaming Card Progress & Item Duration | Engine-owned `duration_sec`, indeterminate-to-determinate card progress, 1 Hz presentation heartbeat. Implemented. | `pipeline.rs`, `queue-state.js`, `queue-view.js` |
+| [**0010**](docs/adr/0010-mainline-rust-cutover-and-python-decommissioning.md) | Mainline Rust Engine Cutover | Removed the Python codebase; unified 1.0.0 versioning and CI/release status gates. Implemented. | Root `Cargo.toml`, `.github/workflows/ci.yml`, `.github/workflows/release.yml` |
+| [**0011**](docs/adr/0011-selected-items-queue-and-concurrency-pipelining.md) | Selected Items Queue & Concurrency Pipelining | Global Tokio JoinSet, I/O semaphore, parallel probing, per-item track assignment modal. Implemented. | `pipeline.rs`, `request.rs`, `app.js` |
+| [**0012**](docs/adr/0012-track-assignment-override-execution-and-seam-unification.md) | Track Assignment Override Execution and Seam Unification | Full `TrackAssignment` (offset, language, title) applied to mkvmerge arguments; `sub_assignments` flattening removed. Includes the [2026-09-26 amendment](docs/adr/0012-track-assignment-override-execution-and-seam-unification.md#amendment--2026-09-26) (offset overrides rather than adds, explicit zero means unshifted, milliseconds throughout). The override rule and explicit-zero guard are implemented; the millisecond normalization and the GUI explicit-zero change are pending ([2026-09-28 amendment](docs/adr/0012-track-assignment-override-execution-and-seam-unification.md#amendment--2026-09-28), issue #19). | `pipeline.rs`, `remux.rs`, `mkv-cli` |
+| [**0013**](docs/adr/0013-asynchronous-probing-and-transcode-governance-performance-overhaul.md) | Asynchronous Probing and Transcode Governance Performance Overhaul | Asynchronous mkvmerge fallback probing, transcode thread governor, default complexity 5, font seeding outside the registry lock, cache serialization without intermediate copies, and `promote_file`'s copy fallback limited to device boundaries ([2026-09-28 amendment 2](docs/adr/0013-asynchronous-probing-and-transcode-governance-performance-overhaul.md#amendment-2--2026-09-28-spawn_blocking-scope), [amendment 3](docs/adr/0013-asynchronous-probing-and-transcode-governance-performance-overhaul.md#amendment-3--2026-09-28-traversal-path-contract)). Implemented. | `scan.rs`, `request.rs`, `fonts.rs`, `pipeline.rs`, `domain.rs` |
+| [**0014**](docs/adr/0014-cli-selected-items-execution-and-manifest-filtering.md) | CLI Selected Items Execution and Manifest Filtering | `--selected-item` and `--selected-items`, path normalization with working-directory fallback, and `--plan` manifest selection (`InspectionManifest::select_items`). Implemented. | `mkv-cli`, `manifest.rs`, `pipeline.rs` |
+| [**0015**](docs/adr/0015-per-package-webkitgtk-dmabuf-renderer-scoping.md) | Per-Package WebKitGTK DMABUF Renderer Scoping | `WEBKIT_DISABLE_DMABUF_RENDERER` scoped to AppImage via the `APPIMAGE`/`APPDIR` markers, so Native Packages keep hardware-accelerated damage tracking on transparent windows. Accepted. | `lib.rs` |
 
 ---
 
 ## 10. Verification & Quality Gates
 
-Development and contribution workflows must satisfy rigorous quality gates enforced in local workflows and GitHub Actions:
+Local work and GitHub Actions run the same checks:
 
 ```bash
-# 1. Rust Workspace Formatting & Lint Verification
+# 1. Rust formatting & lint
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 
-# 2. Rust Workspace Test Execution (230+ unit and integration tests across mkv-core, mkv-cli, and desktop-tauri)
+# 2. Rust unit and integration tests (mkv-core, mkv-cli, desktop-tauri)
 cargo test --workspace
 
-# 3. Frontend UI Syntax & Contract Verification
+# 3. Frontend syntax check and node:test suites
 node --check desktop-tauri/ui/app.js
 node --test desktop-tauri/ui/*.test.js
 ```
 
-The `mkv-core` integration suite `test_real_remux` drives real FFmpeg/MKVToolNix binaries. Developer-local `cargo test` runs skip it when the tools are absent; required CI and release verification set `MKV_REQUIRE_MEDIA_TOOLS=1`, which makes a missing `ffmpeg`, `mkvmerge`, or `mkvextract` a hard failure on the Ubuntu runner.
+CI (`.github/workflows/ci.yml`) runs the Rust checks on Ubuntu 24.04 and Windows, the UI tests, and `cargo audit`. The `mkv-core` integration suite `test_real_remux` drives real FFmpeg/MKVToolNix binaries. Developer-local `cargo test` runs skip it when the tools are absent; CI and release verification set `MKV_REQUIRE_MEDIA_TOOLS=1` on the Ubuntu runner, which makes a missing `ffmpeg`, `mkvmerge`, or `mkvextract` a hard failure.
 
-Releases additionally require `.github/workflows/release.yml`, whose `ci-status` gate depends on the `workspace-checks` job that runs the non-skipping real-media regression.
+Releases (`.github/workflows/release.yml`) build only after the `ci-status` gate, which requires the `workspace-checks` job (including the non-skipping real-media regression) and the `ui-tests` job to pass.

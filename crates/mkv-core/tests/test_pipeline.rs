@@ -1,43 +1,23 @@
+mod common;
+
 use std::fs;
+use std::path::Path;
 use std::sync::Arc;
+
 use tempfile::tempdir;
 
-use mkv_core::domain::{MkvTrack, TrackProperties};
+use common::{run_batch, seeded_cache, video_metadata};
 use mkv_core::fonts::FontHashMemo;
 use mkv_core::pipeline::{
     create_event_channel, create_log_channel, BatchPipeline, CancellationToken, ItemOutcome,
     JobEvent, PipelineConfig, PipelineMode,
 };
-use mkv_core::scan::{MkvmergeMetadata, PersistentInspectCache};
 
-fn sample_video_metadata() -> MkvmergeMetadata {
-    MkvmergeMetadata {
-        tracks: vec![
-            MkvTrack {
-                id: Some(0),
-                track_type: "video".to_string(),
-                codec: Some("V_MPEGH/ISO/HEVC".to_string()),
-                properties: TrackProperties {
-                    codec_id: Some("V_MPEGH/ISO/HEVC".to_string()),
-                    pixel_dimensions: Some("1920x1080".to_string()),
-                    ..Default::default()
-                },
-            },
-            MkvTrack {
-                id: Some(1),
-                track_type: "audio".to_string(),
-                codec: Some("A_FLAC".to_string()),
-                properties: TrackProperties {
-                    language: Some("jpn".to_string()),
-                    track_name: Some("Stereo".to_string()),
-                    audio_channels: Some(2),
-                    codec_id: Some("A_FLAC".to_string()),
-                    ..Default::default()
-                },
-            },
-        ],
-        attachments: vec![],
-        chapters: vec![],
+fn config(mode: PipelineMode, input_dir: &Path) -> PipelineConfig {
+    PipelineConfig {
+        mode,
+        input_dir: input_dir.to_path_buf(),
+        ..Default::default()
     }
 }
 
@@ -46,47 +26,26 @@ async fn test_extract_dry_run_emits_planned_events() {
     let tmp = tempdir().unwrap();
     let season_dir = tmp.path().join("Season 01");
     fs::create_dir_all(&season_dir).unwrap();
+    fs::write(tmp.path().join("Show - 01.mkv"), b"dummy content 1").unwrap();
+    fs::write(season_dir.join("Show - 02.mkv"), b"dummy content 2").unwrap();
 
-    let ep1 = tmp.path().join("Show - 01.mkv");
-    let ep2 = season_dir.join("Show - 02.mkv");
-    fs::write(&ep1, b"dummy content 1").unwrap();
-    fs::write(&ep2, b"dummy content 2").unwrap();
-
-    let config = PipelineConfig {
-        input_dir: tmp.path().to_path_buf(),
-        out_dir: None,
-        fonts_dir: None,
-        assets_dir: None,
-        mode: PipelineMode::Extract,
-        dry_run: true,
-        no_cache: false,
-        cache: None,
-        cache_file: None,
-        workers: 2,
-        io_jobs: 1,
-        bitrate: "192k".to_string(),
-        complexity: 10,
-        ffmpeg_threads: 2,
-        sub_offset: 0.0,
-        ..Default::default()
-    };
-
-    let cancel_token = CancellationToken::new();
-    let (event_sender, mut event_receiver) = create_event_channel(64);
-
-    let pipeline = BatchPipeline::new(config, Some(event_sender), cancel_token);
-    let summary = pipeline.run().await.unwrap();
+    let (summary, events) = run_batch(
+        PipelineConfig {
+            dry_run: true,
+            workers: 2,
+            io_jobs: 1,
+            ..config(PipelineMode::Extract, tmp.path())
+        },
+        CancellationToken::new(),
+    )
+    .await;
+    let summary = summary.unwrap();
 
     assert_eq!(summary.total, 2);
     assert_eq!(summary.completed, 2);
     assert_eq!(summary.skipped, 0);
     assert_eq!(summary.errors, 0);
     assert!(!summary.cancelled);
-
-    let mut events = Vec::new();
-    while let Ok(event) = event_receiver.try_recv() {
-        events.push(event);
-    }
 
     assert!(events
         .iter()
@@ -100,75 +59,20 @@ async fn test_extract_dry_run_emits_planned_events() {
         }
     )));
 
-    let planned_items: Vec<String> = events
+    let planned_items: Vec<&str> = events
         .iter()
         .filter_map(|e| match e {
-            JobEvent::ItemComplete { id, status, .. } if *status == ItemOutcome::Planned => {
-                Some(id.clone())
-            }
+            JobEvent::ItemComplete {
+                id,
+                status: ItemOutcome::Planned,
+                ..
+            } => Some(id.as_str()),
             _ => None,
         })
         .collect();
-
     assert_eq!(planned_items.len(), 2);
-    assert!(planned_items.contains(&"Show - 01.mkv".to_string()));
-    assert!(planned_items.contains(&"Season 01/Show - 02.mkv".to_string()));
-}
-
-#[tokio::test]
-async fn test_extract_dry_run_preserves_nested_output_directory() {
-    let in_tmp = tempdir().unwrap();
-    let out_tmp = tempdir().unwrap();
-
-    let season_dir = in_tmp.path().join("Season 03");
-    fs::create_dir_all(&season_dir).unwrap();
-
-    let ep1 = season_dir.join("Show - 01.mkv");
-    fs::write(&ep1, b"dummy mkv").unwrap();
-
-    let config = PipelineConfig {
-        input_dir: in_tmp.path().to_path_buf(),
-        out_dir: Some(out_tmp.path().to_path_buf()),
-        fonts_dir: None,
-        assets_dir: None,
-        mode: PipelineMode::Extract,
-        dry_run: true,
-        no_cache: false,
-        cache: None,
-        cache_file: None,
-        workers: 1,
-        io_jobs: 1,
-        bitrate: "192k".to_string(),
-        complexity: 10,
-        ffmpeg_threads: 1,
-        sub_offset: 0.0,
-        ..Default::default()
-    };
-
-    let cancel_token = CancellationToken::new();
-    let (event_sender, mut event_receiver) = create_event_channel(64);
-
-    let pipeline = BatchPipeline::new(config, Some(event_sender), cancel_token);
-    let summary = pipeline.run().await.unwrap();
-
-    assert_eq!(summary.total, 1);
-    assert_eq!(summary.completed, 1);
-    assert_eq!(summary.errors, 0);
-
-    let mut events = Vec::new();
-    while let Ok(event) = event_receiver.try_recv() {
-        events.push(event);
-    }
-
-    assert!(events.iter().any(|e| matches!(
-        e,
-        JobEvent::ItemComplete {
-            id,
-            status: ItemOutcome::Planned,
-            duration_sec: None,
-            ..
-        } if id == "Season 03/Show - 01.mkv"
-    )));
+    assert!(planned_items.contains(&"Show - 01.mkv"));
+    assert!(planned_items.contains(&"Season 01/Show - 02.mkv"));
 }
 
 #[tokio::test]
@@ -178,45 +82,31 @@ async fn test_remux_dry_run_preserves_nested_output_directory() {
 
     let season_dir = in_tmp.path().join("Season 02");
     fs::create_dir_all(&season_dir).unwrap();
-
     let ep1 = season_dir.join("Show - 01.mkv");
-    let sub1 = season_dir.join("Show - 01.ass");
     fs::write(&ep1, b"dummy mkv").unwrap();
-    fs::write(&sub1, b"[Script Info]\nTitle: Test Sub").unwrap();
-
-    // Seed inspection cache so probe succeeds without external mkvmerge
-    let cache = Arc::new(PersistentInspectCache::new(
-        Some(in_tmp.path().join("test_cache.json")),
-        true,
-    ));
-    cache.put_path(&ep1, sample_video_metadata());
-    cache.save();
+    fs::write(
+        season_dir.join("Show - 01.ass"),
+        b"[Script Info]\nTitle: Test Sub",
+    )
+    .unwrap();
 
     // A non-existent out_dir is valid input, and a dry run must not create it.
     let out_dir = out_tmp.path().join("not-yet-created");
-    let config = PipelineConfig {
-        input_dir: in_tmp.path().to_path_buf(),
-        out_dir: Some(out_dir.clone()),
-        fonts_dir: None,
-        assets_dir: None,
-        mode: PipelineMode::Remux,
-        dry_run: true,
-        no_cache: false,
-        cache: Some(cache.clone()),
-        cache_file: None,
-        workers: 2,
-        io_jobs: 1,
-        bitrate: "192k".to_string(),
-        complexity: 10,
-        ffmpeg_threads: 2,
-        sub_offset: 0.0,
-        ..Default::default()
-    };
-    let cancel_token = CancellationToken::new();
-    let (event_sender, mut event_receiver) = create_event_channel(64);
-
-    let pipeline = BatchPipeline::new(config, Some(event_sender), cancel_token);
-    let summary = pipeline.run().await.unwrap();
+    let (summary, events) = run_batch(
+        PipelineConfig {
+            out_dir: Some(out_dir.clone()),
+            dry_run: true,
+            cache: Some(seeded_cache(
+                in_tmp.path(),
+                &[&ep1],
+                &video_metadata("A_FLAC"),
+            )),
+            ..config(PipelineMode::Remux, in_tmp.path())
+        },
+        CancellationToken::new(),
+    )
+    .await;
+    let summary = summary.unwrap();
 
     assert_eq!(summary.total, 1);
     assert_eq!(summary.completed, 1);
@@ -227,25 +117,18 @@ async fn test_remux_dry_run_preserves_nested_output_directory() {
         out_dir.display()
     );
 
-    // Verify output path preserved Season 02 subdirectory
     let expected_nested_path = out_dir.join("Season 02").join("Show - 01.mkv");
-    let expected_nested_str = expected_nested_path.to_string_lossy().to_string();
+    let expected_nested_str = expected_nested_path.to_string_lossy().into_owned();
     let expected_nested_slash = expected_nested_str.replace('\\', "/");
-    let log_contains_expected_output = summary
-        .log
-        .iter()
-        .any(|line| line.contains(&expected_nested_str) || line.contains(&expected_nested_slash));
     assert!(
-        log_contains_expected_output,
+        summary.log.iter().any(
+            |line| line.contains(&expected_nested_str) || line.contains(&expected_nested_slash)
+        ),
         "Log should contain preserved nested output path '{}'. Actual log:\n{:#?}",
         expected_nested_path.display(),
         summary.log
     );
 
-    let mut events = Vec::new();
-    while let Ok(event) = event_receiver.try_recv() {
-        events.push(event);
-    }
     assert!(events.iter().any(|e| matches!(
         e,
         JobEvent::ItemComplete {
@@ -263,46 +146,25 @@ async fn test_remux_skips_when_no_matching_subtitle() {
     let ep = in_tmp.path().join("Show - 01.mkv");
     fs::write(&ep, b"dummy mkv").unwrap();
 
-    let cache = Arc::new(PersistentInspectCache::new(
-        Some(in_tmp.path().join("test_cache.json")),
-        true,
-    ));
-    cache.put_path(&ep, sample_video_metadata());
-    cache.save();
-
-    let config = PipelineConfig {
-        input_dir: in_tmp.path().to_path_buf(),
-        out_dir: None,
-        fonts_dir: None,
-        assets_dir: None,
-        mode: PipelineMode::Remux,
-        dry_run: true,
-        no_cache: false,
-        cache: Some(cache.clone()),
-        cache_file: None,
-        workers: 2,
-        io_jobs: 1,
-        bitrate: "192k".to_string(),
-        complexity: 10,
-        ffmpeg_threads: 2,
-        sub_offset: 0.0,
-        ..Default::default()
-    };
-    let cancel_token = CancellationToken::new();
-    let (event_sender, mut event_receiver) = create_event_channel(64);
-
-    let pipeline = BatchPipeline::new(config, Some(event_sender), cancel_token);
-    let summary = pipeline.run().await.unwrap();
+    let (summary, events) = run_batch(
+        PipelineConfig {
+            dry_run: true,
+            cache: Some(seeded_cache(
+                in_tmp.path(),
+                &[&ep],
+                &video_metadata("A_FLAC"),
+            )),
+            ..config(PipelineMode::Remux, in_tmp.path())
+        },
+        CancellationToken::new(),
+    )
+    .await;
+    let summary = summary.unwrap();
 
     assert_eq!(summary.total, 1);
     assert_eq!(summary.completed, 0);
     assert_eq!(summary.skipped, 1);
     assert_eq!(summary.errors, 0);
-
-    let mut events = Vec::new();
-    while let Ok(event) = event_receiver.try_recv() {
-        events.push(event);
-    }
     assert!(events.iter().any(|e| matches!(
         e,
         JobEvent::ItemComplete {
@@ -316,45 +178,22 @@ async fn test_remux_skips_when_no_matching_subtitle() {
 #[tokio::test]
 async fn test_pipeline_cancellation_drains_items() {
     let tmp = tempdir().unwrap();
-    let ep1 = tmp.path().join("Show - 01.mkv");
-    let ep2 = tmp.path().join("Show - 02.mkv");
-    fs::write(&ep1, b"dummy mkv 1").unwrap();
-    fs::write(&ep2, b"dummy mkv 2").unwrap();
-
-    let config = PipelineConfig {
-        input_dir: tmp.path().to_path_buf(),
-        out_dir: None,
-        fonts_dir: None,
-        assets_dir: None,
-        mode: PipelineMode::Extract,
-        dry_run: true,
-        no_cache: false,
-        cache: None,
-        cache_file: None,
-        workers: 1,
-        io_jobs: 1,
-        bitrate: "192k".to_string(),
-        complexity: 10,
-        ffmpeg_threads: 1,
-        sub_offset: 0.0,
-        ..Default::default()
-    };
+    fs::write(tmp.path().join("Show - 01.mkv"), b"dummy mkv 1").unwrap();
+    fs::write(tmp.path().join("Show - 02.mkv"), b"dummy mkv 2").unwrap();
 
     let cancel_token = CancellationToken::new();
-    // Cancel immediately before running
     cancel_token.cancel();
+    let (summary, events) = run_batch(
+        PipelineConfig {
+            dry_run: true,
+            workers: 1,
+            ..config(PipelineMode::Extract, tmp.path())
+        },
+        cancel_token,
+    )
+    .await;
 
-    let (event_sender, mut event_receiver) = create_event_channel(64);
-    let pipeline = BatchPipeline::new(config, Some(event_sender), cancel_token);
-    let summary = pipeline.run().await.unwrap();
-
-    assert!(summary.cancelled);
-
-    let mut events = Vec::new();
-    while let Ok(event) = event_receiver.try_recv() {
-        events.push(event);
-    }
-
+    assert!(summary.unwrap().cancelled);
     assert!(events.iter().any(|e| matches!(
         e,
         JobEvent::BatchComplete {
@@ -363,7 +202,6 @@ async fn test_pipeline_cancellation_drains_items() {
             ..
         }
     )));
-
     let cancelled_count = events
         .iter()
         .filter(|e| {
@@ -383,240 +221,126 @@ async fn test_pipeline_cancellation_drains_items() {
 #[tokio::test]
 async fn test_pipeline_with_log_sender() {
     let dir = tempdir().unwrap();
-    let config = PipelineConfig {
-        input_dir: dir.path().to_path_buf(),
-        mode: PipelineMode::Extract,
-        ..Default::default()
-    };
-
-    let (event_sender, _event_receiver) = create_event_channel(64);
     let (log_sender, mut log_receiver) = create_log_channel(64);
-    let cancel_token = CancellationToken::new();
-
-    let pipeline = BatchPipeline::new(config, Some(event_sender), cancel_token)
-        .with_log_sender(Some(log_sender));
+    let pipeline = BatchPipeline::new(
+        config(PipelineMode::Extract, dir.path()),
+        None,
+        CancellationToken::new(),
+    )
+    .with_log_sender(log_sender);
 
     let summary = pipeline.run().await.unwrap();
     assert_eq!(summary.total, 0);
 
-    let mut logs = Vec::new();
-    while let Ok(msg) = log_receiver.try_recv() {
-        logs.push(msg);
-    }
-
-    assert!(!logs.is_empty());
-    assert!(logs[0].contains("No MKV files found in"));
-}
-
-#[tokio::test]
-async fn test_pipeline_from_request_with_preset_and_overrides() {
-    let dir = tempdir().unwrap();
-    let req = mkv_core::request::BatchRequest {
-        mode: PipelineMode::Remux,
-        input_dir: dir.path().to_path_buf(),
-        out_dir: None,
-        fonts_dir: None,
-        assets_dir: None,
-        preset: Some("balanced".into()),
-        bitrate: Some("256k".into()),
-        complexity: None,
-        workers: Some(6),
-        io_jobs: None,
-        ffmpeg_threads: None,
-        sub_offset: None,
-        dry_run: Some(true),
-        no_cache: None,
-        assignments: None,
-        selected_items: None,
-    };
-
-    assert!(req.validate().is_ok());
-
-    let cancel_token = CancellationToken::new();
-    let pipeline = BatchPipeline::from_request(req, None, cancel_token).unwrap();
-    assert_eq!(pipeline.config.bitrate, "256k"); // overridden from 192k
-    assert_eq!(pipeline.config.complexity, 5); // baseline from balanced
-    assert_eq!(pipeline.config.workers, 6);
-    assert!(pipeline.config.dry_run);
+    let first_log = log_receiver.try_recv().expect("expected a log line");
+    assert!(first_log.contains("No MKV files found in"), "{first_log}");
 }
 
 #[tokio::test]
 async fn test_extract_emits_item_complete_duration_sec() {
     let in_tmp = tempdir().unwrap();
     let out_tmp = tempdir().unwrap();
-
     let ep1 = in_tmp.path().join("Show - 01.mkv");
     fs::write(&ep1, b"dummy mkv").unwrap();
 
-    let cache = Arc::new(PersistentInspectCache::new(
-        Some(in_tmp.path().join("test_cache.json")),
-        true,
-    ));
-    cache.put_path(&ep1, sample_video_metadata());
-    cache.save();
-
-    let config = PipelineConfig {
-        input_dir: in_tmp.path().to_path_buf(),
-        out_dir: Some(out_tmp.path().to_path_buf()),
-        fonts_dir: None,
-        assets_dir: None,
-        mode: PipelineMode::Extract,
-        dry_run: false,
-        no_cache: false,
-        cache: Some(cache.clone()),
-        cache_file: None,
-        workers: 1,
-        io_jobs: 1,
-        bitrate: "192k".to_string(),
-        complexity: 10,
-        ffmpeg_threads: 1,
-        sub_offset: 0.0,
-        ..Default::default()
-    };
-
-    let cancel_token = CancellationToken::new();
-    let (event_sender, mut event_receiver) = create_event_channel(64);
-
-    let pipeline = BatchPipeline::new(config, Some(event_sender), cancel_token);
-    let summary = pipeline.run().await.unwrap();
+    let (summary, events) = run_batch(
+        PipelineConfig {
+            out_dir: Some(out_tmp.path().to_path_buf()),
+            cache: Some(seeded_cache(
+                in_tmp.path(),
+                &[&ep1],
+                &video_metadata("A_FLAC"),
+            )),
+            workers: 1,
+            io_jobs: 1,
+            ..config(PipelineMode::Extract, in_tmp.path())
+        },
+        CancellationToken::new(),
+    )
+    .await;
+    let summary = summary.unwrap();
 
     assert_eq!(summary.total, 1);
     assert_eq!(summary.completed, 1);
     assert_eq!(summary.errors, 0);
-
-    let mut events = Vec::new();
-    while let Ok(event) = event_receiver.try_recv() {
-        events.push(event);
-    }
 
     let complete_events: Vec<&JobEvent> = events
         .iter()
         .filter(|e| matches!(e, JobEvent::ItemComplete { .. }))
         .collect();
     assert_eq!(complete_events.len(), 1);
-
-    match complete_events[0] {
-        JobEvent::ItemComplete {
-            id,
-            status,
-            duration_sec,
-            ..
-        } => {
-            assert_eq!(id, "Show - 01.mkv");
-            assert_eq!(*status, ItemOutcome::Completed);
-            assert!(
-                duration_sec.is_some(),
-                "duration_sec should be Some(...) on completed item"
-            );
-            let d = duration_sec.unwrap();
-            assert!(d >= 0.0, "duration_sec should be non-negative, got {d}");
-        }
-        _ => panic!("Expected ItemComplete event"),
-    }
+    assert!(
+        matches!(
+            complete_events[0],
+            JobEvent::ItemComplete {
+                id,
+                status: ItemOutcome::Completed,
+                duration_sec: Some(d),
+                ..
+            } if id == "Show - 01.mkv" && *d >= 0.0
+        ),
+        "{:?}",
+        complete_events[0]
+    );
 }
 
 #[tokio::test]
 async fn test_extract_error_in_worker_emits_duration_sec() {
     let tmp = tempdir().unwrap();
-    // Create a non-MKV corrupt file that fails probing in the worker
-    let ep = tmp.path().join("Corrupt - 01.mkv");
-    fs::write(&ep, b"not a real mkv file").unwrap();
+    // Not a real MKV, so probing fails inside the worker.
+    fs::write(tmp.path().join("Corrupt - 01.mkv"), b"not a real mkv file").unwrap();
 
-    let config = PipelineConfig {
-        input_dir: tmp.path().to_path_buf(),
-        out_dir: None,
-        fonts_dir: None,
-        assets_dir: None,
-        mode: PipelineMode::Extract,
-        dry_run: false,
-        no_cache: true,
-        cache: None,
-        cache_file: None,
-        workers: 1,
-        io_jobs: 1,
-        bitrate: "192k".to_string(),
-        complexity: 10,
-        ffmpeg_threads: 1,
-        sub_offset: 0.0,
-        ..Default::default()
-    };
-
-    let cancel_token = CancellationToken::new();
-    let (event_sender, mut event_receiver) = create_event_channel(64);
-
-    let pipeline = BatchPipeline::new(config, Some(event_sender), cancel_token);
-    let summary = pipeline.run().await.unwrap();
+    let (summary, events) = run_batch(
+        PipelineConfig {
+            no_cache: true,
+            workers: 1,
+            io_jobs: 1,
+            ..config(PipelineMode::Extract, tmp.path())
+        },
+        CancellationToken::new(),
+    )
+    .await;
+    let summary = summary.unwrap();
 
     assert_eq!(summary.total, 1);
     assert_eq!(summary.errors, 1);
-
-    let mut events = Vec::new();
-    while let Ok(event) = event_receiver.try_recv() {
-        events.push(event);
-    }
-
-    let error_event = events
-        .iter()
-        .find(|e| {
-            matches!(
-                e,
-                JobEvent::ItemComplete {
-                    status: ItemOutcome::Error,
-                    ..
-                }
-            )
-        })
-        .expect("Expected ItemComplete with Error status");
-
-    match error_event {
-        JobEvent::ItemComplete {
-            id, duration_sec, ..
-        } => {
-            assert_eq!(id, "Corrupt - 01.mkv");
-            assert!(
-                duration_sec.is_some(),
-                "duration_sec should be Some(...) even on worker error"
-            );
-            assert!(duration_sec.unwrap() >= 0.0);
-        }
-        _ => unreachable!(),
-    }
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            JobEvent::ItemComplete {
+                id,
+                status: ItemOutcome::Error,
+                duration_sec: Some(d),
+                ..
+            } if id == "Corrupt - 01.mkv" && *d >= 0.0
+        )),
+        "expected an Error completion carrying duration_sec: {events:?}"
+    );
 }
 
 #[tokio::test]
 async fn test_pipeline_in_flight_cancellation_emits_duration_sec() {
     let tmp = tempdir().unwrap();
-    let cache = Arc::new(PersistentInspectCache::new(None, false));
     for i in 1..=20 {
-        let ep = tmp.path().join(format!("Show - {i:02}.mkv"));
-        fs::write(&ep, b"dummy mkv").unwrap();
-        cache.put_path(&ep, sample_video_metadata());
+        fs::write(tmp.path().join(format!("Show - {i:02}.mkv")), b"dummy mkv").unwrap();
     }
-    let config = PipelineConfig {
-        input_dir: tmp.path().to_path_buf(),
-        out_dir: None,
-        fonts_dir: None,
-        assets_dir: None,
-        mode: PipelineMode::Extract,
-        dry_run: false,
-        no_cache: false,
-        cache: Some(cache),
-        cache_file: None,
+    let batch_config = PipelineConfig {
+        no_cache: true,
         workers: 1,
         io_jobs: 1,
-        bitrate: "192k".to_string(),
-        complexity: 10,
-        ffmpeg_threads: 1,
-        sub_offset: 0.0,
-        ..Default::default()
+        ..config(PipelineMode::Extract, tmp.path())
     };
 
+    // A one-slot channel parks the pipeline on its first `ItemStart` while that item is
+    // already in flight, so the stop below lands mid-item.
     let cancel_token = CancellationToken::new();
     let (event_sender, mut event_receiver) = create_event_channel(1);
     let cancel_token_clone = cancel_token.clone();
     let runner = tokio::spawn(async move {
-        let pipeline = BatchPipeline::new(config, Some(event_sender), cancel_token);
-        pipeline.run().await.unwrap()
+        BatchPipeline::new(batch_config, Some(event_sender), cancel_token)
+            .run()
+            .await
+            .unwrap()
     });
 
     let mut events = Vec::new();
@@ -624,99 +348,71 @@ async fn test_pipeline_in_flight_cancellation_emits_duration_sec() {
         if matches!(event, JobEvent::BatchStart { .. }) {
             cancel_token_clone.cancel();
         }
+        let is_terminal = matches!(event, JobEvent::BatchComplete { .. });
         events.push(event);
-        if matches!(events.last(), Some(JobEvent::BatchComplete { .. })) {
+        if is_terminal {
             break;
         }
     }
 
-    let summary = runner.await.unwrap();
-    assert!(summary.cancelled);
-
-    let cancelled_events: Vec<&JobEvent> = events
-        .iter()
-        .filter(|e| {
-            matches!(
-                e,
-                JobEvent::ItemComplete {
-                    status: ItemOutcome::Cancelled,
-                    ..
-                }
-            )
-        })
-        .collect();
-
-    assert!(!cancelled_events.is_empty());
-
-    let in_flight_cancelled = cancelled_events
-        .iter()
-        .find(|e| {
-            matches!(
-                e,
-                JobEvent::ItemComplete {
-                    duration_sec: Some(_),
-                    ..
-                }
-            )
-        })
-        .expect("Expected at least one in-flight cancelled item with duration_sec");
-
-    if let JobEvent::ItemComplete {
-        duration_sec: Some(d),
-        ..
-    } = in_flight_cancelled
-    {
-        assert!(*d >= 0.0, "duration_sec must be non-negative");
-    }
+    assert!(runner.await.unwrap().cancelled);
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            JobEvent::ItemComplete {
+                status: ItemOutcome::Cancelled,
+                duration_sec: Some(d),
+                ..
+            } if *d >= 0.0
+        )),
+        "expected an in-flight cancelled item with duration_sec: {events:?}"
+    );
 }
 
 #[tokio::test]
 async fn test_pipeline_selected_items_filters_and_orders_batch() {
     let dir = tempdir().unwrap();
-    let ep1 = dir.path().join("[SubsPlease] Show - 01 (1080p).mkv");
-    let ep2 = dir.path().join("[SubsPlease] Show - 02 (1080p).mkv");
-    let ep3 = dir.path().join("[SubsPlease] Show - 03 (1080p).mkv");
-    std::fs::write(&ep1, b"dummy1").unwrap();
-    std::fs::write(&ep2, b"dummy2").unwrap();
-    std::fs::write(&ep3, b"dummy3").unwrap();
+    for ep in 1..=3 {
+        fs::write(
+            dir.path()
+                .join(format!("[SubsPlease] Show - 0{ep} (1080p).mkv")),
+            b"dummy",
+        )
+        .unwrap();
+    }
 
-    let config = PipelineConfig {
-        mode: PipelineMode::Extract,
-        input_dir: dir.path().to_path_buf(),
-        dry_run: true,
-        selected_items: Some(vec![
-            "[SubsPlease] Show - 03 (1080p).mkv".into(),
-            "[SubsPlease] Show - 01 (1080p).mkv".into(),
-        ]),
-        ..Default::default()
-    };
-
-    let (tx, mut rx) = create_event_channel(32);
-    let cancel_token = CancellationToken::new();
-    let pipeline = BatchPipeline::new(config, Some(tx), cancel_token);
-
-    let summary = pipeline.run().await.unwrap();
+    let (summary, events) = run_batch(
+        PipelineConfig {
+            dry_run: true,
+            selected_items: Some(vec![
+                "[SubsPlease] Show - 03 (1080p).mkv".into(),
+                "[SubsPlease] Show - 01 (1080p).mkv".into(),
+            ]),
+            ..config(PipelineMode::Extract, dir.path())
+        },
+        CancellationToken::new(),
+    )
+    .await;
+    let summary = summary.unwrap();
     assert_eq!(summary.total, 2);
     assert_eq!(summary.completed, 2);
 
-    let mut events = Vec::new();
-    while let Ok(event) = rx.try_recv() {
-        events.push(event);
-    }
-
-    let start_event = events
+    let (total, items) = events
         .iter()
         .find_map(|e| match e {
             JobEvent::BatchStart { total, items, .. } => Some((*total, items.clone())),
             _ => None,
         })
         .expect("Expected BatchStart event");
-
-    assert_eq!(start_event.0, 2);
-    let items = start_event.1.unwrap();
-    assert_eq!(items.len(), 2);
-    assert_eq!(items[0].file, "[SubsPlease] Show - 03 (1080p).mkv");
-    assert_eq!(items[1].file, "[SubsPlease] Show - 01 (1080p).mkv");
+    assert_eq!(total, 2);
+    let files: Vec<String> = items.unwrap().into_iter().map(|item| item.file).collect();
+    assert_eq!(
+        files,
+        [
+            "[SubsPlease] Show - 03 (1080p).mkv",
+            "[SubsPlease] Show - 01 (1080p).mkv"
+        ]
+    );
 }
 
 // Unix-only by construction, not by convenience: a canonical-ID collision needs two
@@ -733,25 +429,21 @@ async fn test_batch_rejects_colliding_canonical_ids_before_batch_start() {
     fs::write(input.path().join("Show/Season 1.mkv"), b"nested video").unwrap();
 
     for selected_items in [Some(vec!["Show/Season 1.mkv".to_owned()]), None] {
-        let config = PipelineConfig {
-            mode: PipelineMode::Extract,
-            input_dir: input.path().to_path_buf(),
-            out_dir: Some(output.path().to_path_buf()),
-            selected_items,
-            ..Default::default()
-        };
-        let (tx, mut rx) = create_event_channel(16);
-        let pipeline = BatchPipeline::new(config, Some(tx), CancellationToken::new());
+        let (result, events) = run_batch(
+            PipelineConfig {
+                out_dir: Some(output.path().to_path_buf()),
+                selected_items,
+                ..config(PipelineMode::Extract, input.path())
+            },
+            CancellationToken::new(),
+        )
+        .await;
 
-        let err = pipeline.run().await.unwrap_err();
         assert_eq!(
-            err,
+            result.unwrap_err(),
             "Discovered MKV files share canonical ID 'Show/Season 1.mkv'"
         );
-        assert!(
-            rx.try_recv().is_err(),
-            "collision must abort before BatchStart"
-        );
+        assert!(events.is_empty(), "collision must abort before BatchStart");
         assert_eq!(fs::read_dir(output.path()).unwrap().count(), 0);
     }
 }
@@ -778,21 +470,21 @@ async fn test_pipeline_rejects_every_unmatched_selection_before_batch_start() {
         (vec!["Output/hidden.mkv".into()], vec!["Output/hidden.mkv"]),
     ] {
         for mode in [PipelineMode::Extract, PipelineMode::Remux] {
-            let config = PipelineConfig {
-                mode,
-                input_dir: input.path().to_path_buf(),
-                out_dir: Some(output.path().to_path_buf()),
-                selected_items: Some(selected.clone()),
-                ..Default::default()
-            };
-            let (tx, mut rx) = create_event_channel(16);
-            let pipeline = BatchPipeline::new(config, Some(tx), CancellationToken::new());
-            let err = pipeline.run().await.unwrap_err();
+            let (result, events) = run_batch(
+                PipelineConfig {
+                    out_dir: Some(output.path().to_path_buf()),
+                    selected_items: Some(selected.clone()),
+                    ..config(mode, input.path())
+                },
+                CancellationToken::new(),
+            )
+            .await;
+            let err = result.unwrap_err();
             for unmatched in &expected_err_parts {
                 assert!(err.contains(unmatched), "{err}");
             }
             assert!(
-                rx.try_recv().is_err(),
+                events.is_empty(),
                 "invalid selection must not start a batch"
             );
             assert_eq!(fs::read_dir(output.path()).unwrap().count(), 0);
@@ -809,50 +501,35 @@ async fn test_pipeline_extract_persists_font_hash_memo() {
     let ep = in_tmp.path().join("Show - 01.mkv");
     fs::write(&ep, b"dummy mkv content").unwrap();
 
-    // Create an existing font in the input's fonts directory
     let fonts_dir = in_tmp.path().join("fonts");
     fs::create_dir_all(&fonts_dir).unwrap();
     let font_file = fonts_dir.join("CustomFont.ttf");
     fs::write(&font_file, b"font binary data").unwrap();
 
-    let cache = Arc::new(PersistentInspectCache::new(None, false));
-    cache.put_path(&ep, sample_video_metadata());
-
     let memo = Arc::new(parking_lot::Mutex::new(FontHashMemo::new(
         memo_file.clone(),
     )));
+    let (summary, _events) = run_batch(
+        PipelineConfig {
+            out_dir: Some(out_tmp.path().to_path_buf()),
+            fonts_dir: Some(fonts_dir),
+            cache: Some(seeded_cache(
+                in_tmp.path(),
+                &[&ep],
+                &video_metadata("A_FLAC"),
+            )),
+            font_hash_memo: Some(memo),
+            ..config(PipelineMode::Extract, in_tmp.path())
+        },
+        CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(summary.unwrap().total, 1);
 
-    let config = PipelineConfig {
-        input_dir: in_tmp.path().to_path_buf(),
-        out_dir: Some(out_tmp.path().to_path_buf()),
-        fonts_dir: Some(fonts_dir.clone()),
-        mode: PipelineMode::Extract,
-        dry_run: false,
-        no_cache: false,
-        cache: Some(cache),
-        font_hash_memo: Some(memo.clone()),
-        ..Default::default()
-    };
-
-    let cancel_token = CancellationToken::new();
-    let (tx, _rx) = create_event_channel(32);
-    let pipeline = BatchPipeline::new(config, Some(tx), cancel_token);
-
-    let summary = pipeline.run().await.unwrap();
-    assert_eq!(summary.total, 1);
-
-    // Verify that the memo file was saved to disk
-    assert!(
-        memo_file.exists(),
-        "font hash memo file should be persisted to disk"
-    );
-
-    // Re-load the memo file from disk to confirm it contains the indexed font
     let reloaded = FontHashMemo::new(memo_file);
     let sig = mkv_core::scan::FileSignature::of(&font_file).unwrap();
-    let cached_hash = reloaded.get(&font_file, sig);
     assert!(
-        cached_hash.is_some(),
+        reloaded.get(&font_file, sig).is_some(),
         "persisted memo must contain font hash"
     );
 }

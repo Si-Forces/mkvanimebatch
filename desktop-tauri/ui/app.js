@@ -1,8 +1,5 @@
-/* ─── MKV Anime Batch — Frontend App (Tokyo Glass + OLED Pro Hybrid) ───────
-   Uses window.__TAURI__ (withGlobalTauri: true in tauri.conf.json)
-──────────────────────────────────────────────────────────────────────────── */
-
-"use strict";
+/* MKV Anime Batch desktop frontend.
+   Talks to the Tauri host through window.__TAURI__ (withGlobalTauri: true in tauri.conf.json). */
 
 import { BULK_SELECTION_CONTROLS, JobController } from "./job-controller.js";
 import { QueueTracker } from "./queue-view.js";
@@ -13,6 +10,7 @@ import { createInspectionCoordinator } from "./inspection-coordinator.js";
 
 // ─── Preset Configurations ──────────────────────────────────────────────────
 
+// Fallback catalog; `get_preset_profiles` overwrites it at startup.
 const PRESETS = {
   balanced: {
     icon: "🌸",
@@ -33,16 +31,14 @@ const PRESETS = {
     complexity: "10",
   },
 };
-PRESETS.default = PRESETS.balanced;
-PRESETS.high_quality = PRESETS.hifi;
 
 async function restoreQueueFromSnapshot(controllers) {
   const buffered = [];
   let active = null;
   let unlistenEvent = null;
   let unlistenDone = null;
-  JobCoordinator.isRestoring = true;
-  JobCoordinator.syncControls();
+  jobCoordinator.isRestoring = true;
+  jobCoordinator.syncControls();
   const deliver = (type, payload) => {
     if (active) active.handleSnapshotSignal(type, payload);
     else buffered.push([type, payload]);
@@ -70,14 +66,14 @@ async function restoreQueueFromSnapshot(controllers) {
     for (const [type, payload] of buffered) {
       active.handleSnapshotSignal(type, payload, true);
     }
-  } catch (_err) {
-    // Graceful fallback for non-Tauri or initial run environments
+  } catch (err) {
+    console.error("[get_job_snapshot] restore failed:", err);
   } finally {
     unlistenEvent?.();
     unlistenDone?.();
-    if (JobCoordinator.isRestoring) {
-      JobCoordinator.isRestoring = false;
-      JobCoordinator.syncControls();
+    if (jobCoordinator.isRestoring) {
+      jobCoordinator.isRestoring = false;
+      jobCoordinator.syncControls();
     }
   }
 }
@@ -85,29 +81,24 @@ async function restoreQueueFromSnapshot(controllers) {
 async function loadPresetProfiles() {
   try {
     const profiles = await invoke("get_preset_profiles");
-    if (Array.isArray(profiles) && profiles.length > 0) {
-      for (const p of profiles) {
-        const existing = PRESETS[p.id] || {};
-        PRESETS[p.id] = {
-          ...existing,
-          icon: p.icon,
-          name: p.name,
-          bitrate: p.bitrate,
-          complexity: String(p.complexity),
-        };
-      }
+    for (const p of profiles ?? []) {
+      PRESETS[p.id] = {
+        icon: p.icon,
+        name: p.name,
+        bitrate: p.bitrate,
+        complexity: String(p.complexity),
+      };
     }
-  } catch (_err) {
-    // Graceful fallback for non-Tauri test environments
+  } catch (err) {
+    console.error("[get_preset_profiles] failed:", err);
   }
 }
 
 function setActiveProfileOption(presetKey) {
-  if (typeof document?.querySelectorAll !== "function") return;
   document.querySelectorAll(".profile-option-item").forEach(item => {
-    const active = item.dataset?.preset === presetKey;
-    item.classList?.toggle("active", active);
-    item.setAttribute?.("aria-pressed", active ? "true" : "false");
+    const active = item.dataset.preset === presetKey;
+    item.classList.toggle("active", active);
+    item.setAttribute("aria-pressed", active ? "true" : "false");
   });
 }
 
@@ -141,38 +132,28 @@ function applyPreset(presetKey) {
 
 // ─── Tauri API helpers ──────────────────────────────────────────────────────
 
-const JobCoordinator = createJobCoordinator();
+const jobCoordinator = createJobCoordinator();
 const inspectDirectory = createInspectionCoordinator((path, options) => invoke("inspect_directory", { path, options }));
 
-
 async function invoke(cmd, args = {}) {
-  const fn = window.__TAURI__?.core?.invoke
-    || window.__TAURI__?.tauri?.invoke
-    || window.__TAURI__?.invoke
-    || window.__TAURI_INTERNALS__?.invoke;
-
-  if (fn) {
-    return await fn(cmd, args);
-  }
-  throw new Error(`Failed to invoke ${cmd}: Tauri API is unavailable.`);
+  const fn = window.__TAURI__?.core?.invoke;
+  if (!fn) throw new Error(`Failed to invoke ${cmd}: Tauri API is unavailable.`);
+  return fn(cmd, args);
 }
 
 async function listen(event, handler) {
-  const fn = window.__TAURI__?.event?.listen || window.__TAURI__?.listen;
-  if (fn) {
-    return await fn(event, handler);
-  }
-  throw new Error(`Failed to register ${event} listener: Tauri API is unavailable.`);
+  const fn = window.__TAURI__?.event?.listen;
+  if (!fn) throw new Error(`Failed to register ${event} listener: Tauri API is unavailable.`);
+  return fn(event, handler);
 }
 
 function safeAddListener(idOrEl, event, handler) {
   const el = typeof idOrEl === "string" ? document.getElementById(idOrEl) : idOrEl;
-  if (el) {
-    el.addEventListener(event, handler);
-  }
+  el?.addEventListener(event, handler);
 }
 
 // ─── Number Stepper Helper ──────────────────────────────────────────────────
+
 function stepNumber(btn, dir) {
   const input = btn.parentElement.querySelector('input[type="number"]');
   if (!input) return;
@@ -218,56 +199,59 @@ function initSteppers() {
 
 const THEME_KEY = "mkv-theme";
 
-function applyTheme(theme) {
+function setDocumentTheme(theme) {
   document.documentElement.setAttribute("data-theme", theme);
-  try {
-    localStorage.setItem(THEME_KEY, theme);
-  } catch (e) {}
-  invoke("set_window_theme", { theme: theme });
 }
 
-function initTheme() {
-  let saved = null;
-  try {
-    saved = localStorage.getItem(THEME_KEY);
-  } catch (e) {}
+/** An explicit choice also pins the native window theme; following the OS leaves it unpinned. */
+function applyChosenTheme(theme) {
+  setDocumentTheme(theme);
+  invoke("set_window_theme", { theme });
+}
 
+function storedTheme() {
+  try {
+    return localStorage.getItem(THEME_KEY);
+  } catch {
+    return null;
+  }
+}
+
+/** Applies the user's stored theme, or follows the OS colour scheme live until they pick one. */
+function initTheme() {
+  const saved = storedTheme();
   if (saved) {
-    applyTheme(saved);
+    applyChosenTheme(saved);
     return;
   }
-  const prefersDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
-  applyTheme(prefersDark ? "dark" : "light");
+  const darkScheme = window.matchMedia?.("(prefers-color-scheme: dark)");
+  const follow = dark => {
+    if (!storedTheme()) setDocumentTheme(dark ? "dark" : "light");
+  };
+  follow(darkScheme?.matches ?? true);
+  darkScheme?.addEventListener("change", e => follow(e.matches));
+}
+
+function toggleTheme() {
+  const theme = document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark";
+  try {
+    localStorage.setItem(THEME_KEY, theme);
+  } catch {}
+  applyChosenTheme(theme);
 }
 
 // ─── Navigation ──────────────────────────────────────────────────────────────
 
-function syncTabAria({ includeRole = false } = {}) {
-  document.querySelectorAll(".pipeline-tab-btn[data-view]").forEach(btn => {
-    if (includeRole) btn.setAttribute("role", "tab");
-    btn.setAttribute("aria-selected", btn.classList.contains("active") ? "true" : "false");
-  });
-}
-
-function toggleTheme() {
-  const current = document.documentElement.getAttribute("data-theme");
-  applyTheme(current === "dark" ? "light" : "dark");
-}
-
 function switchView(viewId) {
   document.querySelectorAll(".view").forEach(v => v.classList.remove("active"));
-  document.querySelectorAll(".pipeline-tab-btn, .nav-item, .top-tab-item").forEach(n => n.classList.remove("active"));
-  const view = document.getElementById(`view-${viewId}`);
-  const nav  = document.getElementById(`nav-${viewId}`);
-  if (view) {
-    view.classList.add("active");
-  }
-  if (nav) {
-    nav.classList.add("active");
-  }
-  syncTabAria();
+  document.querySelectorAll(".pipeline-tab-btn").forEach(btn => btn.classList.remove("active"));
+  document.getElementById(`view-${viewId}`)?.classList.add("active");
+  document.getElementById(`nav-${viewId}`)?.classList.add("active");
+  document.querySelectorAll(".pipeline-tab-btn[data-view]").forEach(btn => {
+    btn.setAttribute("aria-selected", btn.classList.contains("active") ? "true" : "false");
+  });
 
-  // Toggle titlebar context controls between Remux Profiles and Extract Mode Badge
+  // The titlebar shows the Remux profile picker or the Extract mode badge.
   const profileDropdown = document.getElementById("profile-dropdown-wrapper");
   const extractBadge = document.getElementById("extract-header-badge");
   if (profileDropdown) {
@@ -278,34 +262,27 @@ function switchView(viewId) {
   }
 }
 
-// ─── Real System Hardware Telemetry & Monitor ─────────────────────────────
+// ─── System Telemetry ───────────────────────────────────────────────────────
+
+// Engine write throughput that fills the Disk I/O bar completely.
+const IO_BAR_FULL_SCALE_MB_S = 300;
 
 function updateWorkerChips(isJobActive = false, workersCount = 8, ioJobsCount = 2) {
-  const workerChips = document.querySelectorAll(".metric-workers-chip, #workers-telemetry-chip");
-  const ioJobChips = document.querySelectorAll(".metric-iojobs-chip, #iojobs-telemetry-chip");
-
-  workerChips.forEach(chip => {
+  document.querySelectorAll(".metric-workers-chip").forEach(chip => {
     chip.innerText = isJobActive ? `⚡ ${workersCount} Workers Active` : `⚡ Standby (${workersCount} Workers)`;
   });
-  ioJobChips.forEach(chip => {
+  document.querySelectorAll(".metric-iojobs-chip").forEach(chip => {
     chip.innerText = isJobActive ? `🔀 ${ioJobsCount} IO Jobs Active` : `🔀 Idle (${ioJobsCount} IO Jobs)`;
   });
 }
 
 function applyTelemetryData(data) {
-  const cpuFills = document.querySelectorAll(".metric-cpu-fill, #cpu-telemetry-fill");
-  const cpuVals = document.querySelectorAll(".metric-cpu-val, #cpu-telemetry-val");
-  const ioFills = document.querySelectorAll(".metric-io-fill, #io-telemetry-fill");
-  const ioVals = document.querySelectorAll(".metric-io-val, #io-telemetry-val");
-  const ramFills = document.querySelectorAll(".metric-ram-fill, #ram-telemetry-fill");
-  const ramVals = document.querySelectorAll(".metric-ram-val, #ram-telemetry-val");
-
   const cpu = Math.round(data.cpu_pct || 0);
   const ramUsed = data.ram_used_mb || 0;
   const ramTotal = data.ram_total_mb || 16384;
   const ramPct = Math.round(data.ram_pct || 0);
-  // The backend currently exposes CPU/RAM only; keep an unmeasured disk
-  // metric visibly neutral instead of presenting a hard-coded zero.
+  // `io_mb_s` is the write throughput of the engine's own processes, so it is
+  // zero whenever no batch is writing; show that as neutral rather than "0 MB/s".
   const ioMb = typeof data.io_mb_s === "number" && data.io_mb_s > 0
     ? data.io_mb_s
     : null;
@@ -321,23 +298,23 @@ function applyTelemetryData(data) {
     if (el.textContent !== text) el.textContent = text;
   };
 
-  cpuFills.forEach(fill => setWidth(fill, `${cpu}%`));
-  cpuVals.forEach(el => setText(el, `${cpu}%`));
+  document.querySelectorAll(".metric-cpu-fill").forEach(fill => setWidth(fill, `${cpu}%`));
+  document.querySelectorAll(".metric-cpu-val").forEach(el => setText(el, `${cpu}%`));
 
-  ramFills.forEach(fill => setWidth(fill, `${ramPct}%`));
-  ramVals.forEach(el => setText(el, `${ramUsed} MB / ${(ramTotal/1024).toFixed(0)} GB`));
+  document.querySelectorAll(".metric-ram-fill").forEach(fill => setWidth(fill, `${ramPct}%`));
+  document.querySelectorAll(".metric-ram-val").forEach(el => setText(el, `${ramUsed} MB / ${(ramTotal / 1024).toFixed(0)} GB`));
 
-  const ioWidth = ioMb === null ? "0%" : `${Math.min(100, (ioMb / 300) * 100)}%`;
+  const ioWidth = ioMb === null ? "0%" : `${Math.min(100, (ioMb / IO_BAR_FULL_SCALE_MB_S) * 100)}%`;
   const ioText = ioMb === null ? "Not measured" : `${ioMb.toFixed(1)} MB/s`;
 
-  ioFills.forEach(fill => {
+  document.querySelectorAll(".metric-io-fill").forEach(fill => {
     setWidth(fill, ioWidth);
     if (fill.classList.contains("unavailable") !== (ioMb === null)) {
       fill.classList.toggle("unavailable", ioMb === null);
     }
     if (fill.title !== ioTooltip) fill.title = ioTooltip;
   });
-  ioVals.forEach(val => {
+  document.querySelectorAll(".metric-io-val").forEach(val => {
     setText(val, ioText);
     if (val.classList.contains("muted") !== (ioMb === null)) {
       val.classList.toggle("muted", ioMb === null);
@@ -353,7 +330,6 @@ const telemetryLoop = createTelemetryLoop({
   doc: document,
 });
 
-
 const remuxQueue = new QueueTracker("remux");
 const extractQueue = new QueueTracker("extract");
 
@@ -363,73 +339,45 @@ function queueFor(mode) {
 
 // ─── GUI Manual Subtitle Selection ──────────────────────────────────────────
 
+const PRESET_SUBTITLE_LANGUAGES = ["ind", "eng", "jpn"];
+
 let subAssignModalItemId = null;
 
 function openSubAssignModal(itemId) {
-  const tracker = remuxQueue;
-  const item = tracker.state?.items.get(itemId);
-  const candidates = tracker.candidatesForItem(itemId);
+  const item = remuxQueue.state.items.get(itemId);
   if (!item) return;
+  const candidates = remuxQueue.candidatesForItem(itemId);
 
   subAssignModalItemId = itemId;
   const titleEl = document.getElementById("sub-assign-episode");
   if (titleEl) titleEl.textContent = item.name;
 
-  const currentAssignment = tracker.assignments.get(itemId) || null;
-  const currentPath = typeof currentAssignment === "object" && currentAssignment !== null
-    ? currentAssignment.asset_path
-    : currentAssignment;
-
+  const assignment = remuxQueue.assignments.get(itemId) ?? null;
+  const currentPath = assignment?.asset_path ?? null;
   renderSubAssignList(candidates, currentPath);
 
   const customPathInput = document.getElementById("sub-custom-path");
-  const langSelect = document.getElementById("sub-lang-select");
-  const langCustom = document.getElementById("sub-lang-custom");
-  const titleInput = document.getElementById("sub-title-input");
-  const offsetInput = document.getElementById("sub-offset-input");
-
-  const isCandidate = candidates.includes(currentPath);
   if (customPathInput) {
-    customPathInput.value = (!isCandidate && currentPath) ? currentPath : "";
+    customPathInput.value = currentPath && !candidates.includes(currentPath) ? currentPath : "";
   }
 
-  const currentLang = (typeof currentAssignment === "object" && currentAssignment !== null)
-    ? currentAssignment.language
-    : "ind";
-  const currentTitle = (typeof currentAssignment === "object" && currentAssignment !== null)
-    ? currentAssignment.title || ""
-    : "";
-  const currentOffset = (typeof currentAssignment === "object" && currentAssignment !== null && typeof currentAssignment.offset_ms === "number")
-    ? currentAssignment.offset_ms
-    : "";
-
-  if (langSelect) {
-    if (["ind", "eng", "jpn"].includes(currentLang)) {
-      langSelect.value = currentLang;
-      if (langCustom) {
-        langCustom.value = "";
-        langCustom.style.display = "none";
-      }
-    } else if (currentLang) {
-      langSelect.value = "custom";
-      if (langCustom) {
-        langCustom.value = currentLang;
-        langCustom.style.display = "block";
-      }
-    } else {
-      langSelect.value = "ind";
-      if (langCustom) {
-        langCustom.value = "";
-        langCustom.style.display = "none";
-      }
-    }
+  const lang = assignment ? assignment.language : "ind";
+  const isPresetLang = PRESET_SUBTITLE_LANGUAGES.includes(lang);
+  const customLang = !isPresetLang && lang ? lang : "";
+  const langSelect = document.getElementById("sub-lang-select");
+  if (langSelect) langSelect.value = isPresetLang ? lang : (customLang ? "custom" : "ind");
+  const langCustom = document.getElementById("sub-lang-custom");
+  if (langCustom) {
+    langCustom.value = customLang;
+    langCustom.style.display = customLang ? "block" : "none";
   }
 
-  if (titleInput) titleInput.value = currentTitle;
-  if (offsetInput) offsetInput.value = currentOffset !== "" ? currentOffset : "";
+  const titleInput = document.getElementById("sub-title-input");
+  if (titleInput) titleInput.value = assignment?.title || "";
+  const offsetInput = document.getElementById("sub-offset-input");
+  if (offsetInput) offsetInput.value = typeof assignment?.offset_ms === "number" ? assignment.offset_ms : "";
 
-  const modal = document.getElementById("sub-assign-modal");
-  if (modal) modal.classList.add("active");
+  document.getElementById("sub-assign-modal")?.classList.add("active");
 }
 
 function renderSubAssignList(candidates, assignedPath) {
@@ -443,20 +391,17 @@ function renderSubAssignList(candidates, assignedPath) {
   }
 
   for (const candidate of candidates) {
-    const base = candidate.split("/").pop();
-    const dirHint = candidate.includes("/")
-      ? candidate.slice(0, candidate.lastIndexOf("/"))
-      : "";
+    const slash = candidate.lastIndexOf("/");
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "sub-assign-option" + (candidate === assignedPath ? " selected" : "");
     btn.dataset.path = candidate;
     const nameSpan = document.createElement("span");
     nameSpan.className = "sub-assign-name";
-    nameSpan.textContent = base;
+    nameSpan.textContent = candidate.slice(slash + 1);
     const dirSpan = document.createElement("span");
     dirSpan.className = "sub-assign-dir";
-    dirSpan.textContent = dirHint || "(input root)";
+    dirSpan.textContent = slash > 0 ? candidate.slice(0, slash) : "(input root)";
     btn.append(nameSpan, dirSpan);
     listEl.appendChild(btn);
   }
@@ -464,8 +409,39 @@ function renderSubAssignList(candidates, assignedPath) {
 
 function closeSubAssignModal() {
   subAssignModalItemId = null;
-  const modal = document.getElementById("sub-assign-modal");
-  if (modal) modal.classList.remove("active");
+  document.getElementById("sub-assign-modal")?.classList.remove("active");
+}
+
+function clearSubAssignOptionSelection() {
+  document.querySelectorAll("#sub-assign-list .sub-assign-option").forEach(btn => {
+    btn.classList.remove("selected");
+  });
+}
+
+function saveSubAssignment() {
+  const itemId = subAssignModalItemId;
+  const customPath = document.getElementById("sub-custom-path")?.value?.trim() || "";
+  const candidatePath = document.querySelector("#sub-assign-list .sub-assign-option.selected")?.dataset.path || "";
+  const chosenPath = customPath || candidatePath;
+
+  if (!chosenPath) {
+    remuxQueue.assignments.delete(itemId);
+  } else {
+    let language = document.getElementById("sub-lang-select")?.value || "ind";
+    if (language === "custom") {
+      language = document.getElementById("sub-lang-custom")?.value?.trim() || null;
+    }
+    const offsetMs = parseInt(document.getElementById("sub-offset-input")?.value ?? "", 10);
+    remuxQueue.assignments.set(itemId, {
+      target_video: itemId,
+      asset_path: chosenPath,
+      track_type: "subtitle",
+      language,
+      title: document.getElementById("sub-title-input")?.value?.trim() || null,
+      offset_ms: Number.isNaN(offsetMs) ? null : offsetMs,
+    });
+  }
+  remuxQueue.applyAssignmentToCard(itemId);
 }
 
 export async function scanInputDirectory(path, mode, { force = false, options } = {}) {
@@ -475,14 +451,14 @@ export async function scanInputDirectory(path, mode, { force = false, options } 
   if (!path) {
     tracker.reset();
     tracker.lastScannedPath = null;
-    JobCoordinator.syncControls();
+    jobCoordinator.syncControls();
     return false;
   }
   try {
     if (!force && tracker.reuseInspection(path)) return true;
 
     scanToken = tracker.startScan();
-    JobCoordinator.syncControls();
+    jobCoordinator.syncControls();
     const manifest = await inspectDirectory(path, { force, options });
     const acceptedPath = manifest?.canonical_dir || path;
     return tracker.acceptInspection(scanToken, acceptedPath, manifest);
@@ -491,14 +467,14 @@ export async function scanInputDirectory(path, mode, { force = false, options } 
     if (scanToken !== null) tracker.rejectInspection(scanToken);
     return false;
   } finally {
-    JobCoordinator.syncControls();
+    jobCoordinator.syncControls();
   }
 }
 
 async function chooseInputDirectory(targetId) {
-  if (JobCoordinator.activeMode !== null) return;
+  if (jobCoordinator.activeMode !== null) return;
   const directory = await invoke("pick_directory");
-  if (!directory || JobCoordinator.activeMode !== null) return;
+  if (!directory || jobCoordinator.activeMode !== null) return;
 
   const input = document.getElementById(targetId);
   if (!input) return;
@@ -516,26 +492,17 @@ const MAX_LOG_LINES = 2000;
 const _logQueues = new WeakMap();
 const _logRafIds = new WeakMap();
 
+/** Queues one line or a `job-log` batch and flushes it on the next animation frame. */
 function appendLog(logEl, text) {
   if (!logEl) return;
-
-  if (Array.isArray(text)) {
-    for (const line of text) {
-      appendLog(logEl, line);
-    }
-    return;
-  }
-
-  if (typeof text === "string" && text.startsWith("@event:")) {
-    return;
-  }
 
   let queue = _logQueues.get(logEl);
   if (!queue) {
     queue = [];
     _logQueues.set(logEl, queue);
   }
-  queue.push(text);
+  if (Array.isArray(text)) queue.push(...text);
+  else queue.push(text);
 
   if (!_logRafIds.has(logEl)) {
     const rafId = requestAnimationFrame(() => {
@@ -544,8 +511,7 @@ function appendLog(logEl, text) {
       if (!pending || pending.length === 0) return;
       _logQueues.set(logEl, []);
 
-      const placeholder = logEl.querySelector(".empty-state-card, .empty-log, .console-empty-prompt");
-      if (placeholder) placeholder.remove();
+      logEl.querySelector(".console-empty-prompt")?.remove();
 
       const frag = document.createDocumentFragment();
       for (const lineText of pending) {
@@ -572,7 +538,7 @@ function clearLog(logEl) {
   logEl.innerHTML = `
     <div class="console-empty-prompt">
       <span class="prompt-arrow">&gt;_</span>
-      <span class="prompt-text">Console stream output ready. Waiting for job execution...</span>
+      <span class="prompt-text">Console output stream initialized. Ready for batch execution...</span>
     </div>`;
 }
 
@@ -580,29 +546,17 @@ function clearLog(logEl) {
 
 let modalChain = Promise.resolve();
 
+/** Shows `#confirm-modal`; calls queue so a second dialog waits for the first to close. */
 function showModal(title, message, { confirmLabel = "Confirm", showCancel = true } = {}) {
   const run = () =>
     new Promise(resolve => {
       const modal = document.getElementById("confirm-modal");
-      const titleEl = document.getElementById("modal-title");
-      const descEl = document.getElementById("modal-desc");
       const cancelBtn = document.getElementById("modal-cancel");
       const confirmBtn = document.getElementById("modal-confirm");
 
-      if (!modal || !cancelBtn || !confirmBtn) {
-        if (!showCancel) {
-          alert(message);
-          resolve(true);
-        } else {
-          resolve(confirm(message));
-        }
-        return;
-      }
-
-      if (titleEl) titleEl.textContent = title;
-      if (descEl) descEl.textContent = message;
+      document.getElementById("modal-title").textContent = title;
+      document.getElementById("modal-desc").textContent = message;
       confirmBtn.textContent = confirmLabel;
-      cancelBtn.textContent = "Cancel";
       cancelBtn.hidden = !showCancel;
 
       modal.classList.add("active");
@@ -634,8 +588,8 @@ function showCleanupError(error) {
     `MKV Anime Batch is still open because process cleanup failed: ${error}`,
     { confirmLabel: "OK", showCancel: false }
   );
-
 }
+
 // ─── Initialization ──────────────────────────────────────────────────────────
 
 // The Linux window is transparent with CSS-drawn rounded corners, which must
@@ -652,10 +606,6 @@ async function syncMaximizedState() {
 function initApp() {
   initTheme();
 
-  // NOTE: OS-class detection (is-windows / is-mac / is-linux) lives in
-  // os-detect.js in <head> so it runs before first paint; we do
-  // not duplicate it here.
-
   safeAddListener("btn-theme", "click", toggleTheme);
   initSteppers();
 
@@ -670,8 +620,8 @@ function initApp() {
   syncMaximizedState();
 
   document.querySelectorAll("[data-tauri-drag-region]").forEach(el => {
-    safeAddListener(el, "mousedown", (e) => {
-      if (e.target.closest('button, .no-drag, input, a, select, textarea, .resize-handle')) {
+    el.addEventListener("mousedown", (e) => {
+      if (e.target.closest('button, input, a, select, textarea, .resize-handle')) {
         return;
       }
       if (e.buttons === 1) {
@@ -681,35 +631,23 @@ function initApp() {
   });
 
   document.querySelectorAll(".resize-handle").forEach(el => {
-    safeAddListener(el, "mousedown", (e) => {
+    el.addEventListener("mousedown", (e) => {
       if (e.buttons === 1 && el.dataset.direction) {
         invoke("start_resize", { direction: el.dataset.direction });
       }
     });
   });
 
-  document.querySelectorAll(".pipeline-tab-btn[data-view], .nav-item[data-view], .top-tab-item[data-view]").forEach(btn => {
-    safeAddListener(btn, "click", () => switchView(btn.dataset.view));
+  document.querySelectorAll(".pipeline-tab-btn[data-view]").forEach(btn => {
+    btn.addEventListener("click", () => switchView(btn.dataset.view));
   });
 
-  // ─── Low-cost accessibility wiring ──────────────────────────────────────
-  document.querySelectorAll(".stepper-btn").forEach(btn => {
-    if (!btn.hasAttribute("aria-label")) {
-      btn.setAttribute("aria-label", btn.classList.contains("minus") ? "Decrease" : "Increase");
-    }
-  });
-  document.querySelectorAll(".log-body").forEach(el => el.setAttribute("aria-live", "polite"));
-  const modal = document.getElementById("confirm-modal");
-  if (modal) { modal.setAttribute("role", "dialog"); modal.setAttribute("aria-modal", "true"); }
   listen("cleanup-error", event => showCleanupError(event.payload)).catch(error => {
     console.error("[cleanup-error] listener failed:", error);
   });
-  const tabGroup = document.querySelector(".pipeline-tab-group");
-  if (tabGroup) tabGroup.setAttribute("role", "tablist");
-  syncTabAria({ includeRole: true });
 
   document.querySelectorAll(".browse-btn[data-target]").forEach(btn => {
-    safeAddListener(btn, "click", () => chooseInputDirectory(btn.dataset.target));
+    btn.addEventListener("click", () => chooseInputDirectory(btn.dataset.target));
   });
   document.addEventListener("click", e => {
     const emptyAction = e.target.closest(".empty-state-action[data-target]");
@@ -717,60 +655,19 @@ function initApp() {
   });
 
   // ─── GUI Manual Subtitle Selection ────────────────────────────────────────
-  const remuxList = document.getElementById("remux-episode-list");
-  if (remuxList) {
-    remuxList.addEventListener("click", e => {
-      const btn = e.target.closest(".sub-assign-btn");
-      if (btn?.dataset.itemId) openSubAssignModal(btn.dataset.itemId);
-    });
-  }
+  safeAddListener("remux-episode-list", "click", e => {
+    const btn = e.target.closest(".sub-assign-btn");
+    if (btn?.dataset.itemId) openSubAssignModal(btn.dataset.itemId);
+  });
   safeAddListener("sub-assign-save", "click", () => {
-    if (JobCoordinator.activeMode !== null) return;
-    if (!subAssignModalItemId) {
-      closeSubAssignModal();
-      return;
-    }
-    const customPath = document.getElementById("sub-custom-path")?.value?.trim() || "";
-    const selectedBtn = document.querySelector("#sub-assign-list .sub-assign-option.selected");
-    const candidatePath = selectedBtn?.dataset?.path || "";
-    const chosenPath = customPath || candidatePath;
-
-    if (!chosenPath) {
-      remuxQueue.assignments.delete(subAssignModalItemId);
-      remuxQueue.applyAssignmentToCard(subAssignModalItemId);
-      closeSubAssignModal();
-      return;
-    }
-
-    const langSelect = document.getElementById("sub-lang-select");
-    const langCustom = document.getElementById("sub-lang-custom");
-    const titleInput = document.getElementById("sub-title-input");
-    const offsetInput = document.getElementById("sub-offset-input");
-
-    let lang = langSelect?.value || "ind";
-    if (lang === "custom") {
-      lang = langCustom?.value?.trim() || null;
-    }
-    const title = titleInput?.value?.trim() || null;
-    const offsetVal = offsetInput?.value?.trim();
-    const offsetMs = offsetVal && !isNaN(parseInt(offsetVal, 10)) ? parseInt(offsetVal, 10) : null;
-
-    remuxQueue.assignments.set(subAssignModalItemId, {
-      target_video: subAssignModalItemId,
-      asset_path: chosenPath,
-      track_type: "subtitle",
-      language: lang || null,
-      title: title || null,
-      offset_ms: offsetMs,
-    });
-    remuxQueue.applyAssignmentToCard(subAssignModalItemId);
+    if (jobCoordinator.activeMode !== null) return;
+    if (subAssignModalItemId) saveSubAssignment();
     closeSubAssignModal();
   });
 
   safeAddListener("sub-assign-cancel", "click", closeSubAssignModal);
-  safeAddListener("sub-assign-close", "click", closeSubAssignModal);
   safeAddListener("sub-assign-clear", "click", () => {
-    if (JobCoordinator.activeMode !== null) return;
+    if (jobCoordinator.activeMode !== null) return;
     if (subAssignModalItemId) {
       remuxQueue.assignments.delete(subAssignModalItemId);
       remuxQueue.applyAssignmentToCard(subAssignModalItemId);
@@ -779,15 +676,13 @@ function initApp() {
   });
 
   safeAddListener("sub-browse-btn", "click", async () => {
-    if (JobCoordinator.activeMode !== null) return;
+    if (jobCoordinator.activeMode !== null) return;
     try {
       const picked = await invoke("pick_subtitle_file");
       if (picked) {
         const customPathInput = document.getElementById("sub-custom-path");
         if (customPathInput) customPathInput.value = picked;
-        document.querySelectorAll("#sub-assign-list .sub-assign-option").forEach(btn => {
-          btn.classList.remove("selected");
-        });
+        clearSubAssignOptionSelection();
       }
     } catch (e) {
       console.error("Failed to pick subtitle file:", e);
@@ -807,22 +702,14 @@ function initApp() {
   });
 
   safeAddListener("sub-assign-list", "click", e => {
-    if (JobCoordinator.activeMode !== null) return;
+    if (jobCoordinator.activeMode !== null) return;
     const option = e.target.closest(".sub-assign-option");
     if (!option?.dataset.path) return;
-    document.querySelectorAll("#sub-assign-list .sub-assign-option").forEach(btn => {
-      btn.classList.remove("selected");
-    });
+    clearSubAssignOptionSelection();
     option.classList.add("selected");
     const customPathInput = document.getElementById("sub-custom-path");
     if (customPathInput) customPathInput.value = "";
   });
-
-  // The controllers are declared further down in initApp; these handlers run
-  // after initialization, so the reference is resolved at click time.
-  for (const { id, mode, select } of BULK_SELECTION_CONTROLS) {
-    safeAddListener(id, "click", () => controllers[mode]?.applyBulkSelection(mode, select));
-  }
 
   // ─── Active Profile Dropdown Menu Handlers ────────────────────────────────
   const profileBtn = document.getElementById("active-profile-btn");
@@ -872,23 +759,19 @@ function initApp() {
   const cplxSlider = document.getElementById("remux-complexity");
   const cplxNumber = document.getElementById("remux-cplx-val");
   if (cplxSlider && cplxNumber) {
+    const clamp = v => Math.min(Number(cplxSlider.max), Math.max(Number(cplxSlider.min), v));
     const syncFromSlider = () => {
       cplxNumber.value = cplxSlider.value;
     };
     const syncFromNumber = () => {
-      let v = parseInt(cplxNumber.value, 10);
-      if (!isNaN(v)) {
-        if (v < 0) v = 0;
-        if (v > 10) v = 10;
-        cplxSlider.value = String(v);
-      }
+      const v = parseInt(cplxNumber.value, 10);
+      if (!isNaN(v)) cplxSlider.value = String(clamp(v));
     };
     const normalizeNumber = () => {
-      let v = parseInt(cplxNumber.value, 10);
-      if (isNaN(v) || v < 0) v = 0;
-      else if (v > 10) v = 10;
-      cplxNumber.value = String(v);
-      cplxSlider.value = String(v);
+      const v = parseInt(cplxNumber.value, 10);
+      const normalized = String(isNaN(v) ? Number(cplxSlider.min) : clamp(v));
+      cplxNumber.value = normalized;
+      cplxSlider.value = normalized;
     };
 
     cplxSlider.addEventListener("input", syncFromSlider);
@@ -898,17 +781,14 @@ function initApp() {
     cplxNumber.addEventListener("blur", normalizeNumber);
   }
 
-  // Detect custom input modifications
+  // Editing any encoding field by hand leaves the selected preset.
   ["remux-bitrate", "remux-complexity", "remux-cplx-val", "remux-ffmpeg-threads", "remux-sub-offset", "remux-dry-run", "remux-no-cache"].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) {
-      el.addEventListener("change", () => applyPreset("custom"));
-      el.addEventListener("input", () => applyPreset("custom"));
-    }
+    safeAddListener(id, "change", () => applyPreset("custom"));
+    safeAddListener(id, "input", () => applyPreset("custom"));
   });
 
   const jobRuntime = {
-    coordinator: JobCoordinator,
+    coordinator: jobCoordinator,
     appendLog,
     clearLog,
     closeSubAssignModal,
@@ -925,18 +805,13 @@ function initApp() {
     remux: new JobController("remux", jobRuntime),
     extract: new JobController("extract", jobRuntime),
   };
-  JobCoordinator.syncControls();
+  for (const { id, mode, select } of BULK_SELECTION_CONTROLS) {
+    safeAddListener(id, "click", () => controllers[mode].applyBulkSelection(mode, select));
+  }
+  jobCoordinator.syncControls();
   telemetryLoop.start();
   loadPresetProfiles();
   restoreQueueFromSnapshot(controllers);
-
-  if (window.matchMedia) {
-    window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", e => {
-      try {
-        if (!localStorage.getItem(THEME_KEY)) applyTheme(e.matches ? "dark" : "light");
-      } catch (err) {}
-    });
-  }
 
   document.addEventListener("keydown", e => {
     if ((e.ctrlKey || e.metaKey) && e.key === "t") {

@@ -1,8 +1,13 @@
+/**
+ * Wraps `inspect(path, options)` so concurrent requests for the same path and
+ * `noCache` share one in-flight call. `force` always starts a fresh call, which
+ * later same-key requests then share.
+ */
 export function createInspectionCoordinator(inspect) {
   const activeByKey = new Map();
 
   return async (path, { force = false, options } = {}) => {
-    const key = JSON.stringify([path, options?.workers ?? null, options?.ioJobs ?? null, options?.noCache ?? false]);
+    const key = JSON.stringify([path, options?.noCache ?? false]);
     if (!force && activeByKey.has(key)) return activeByKey.get(key);
 
     const promise = Promise.resolve().then(() => inspect(path, options));

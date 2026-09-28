@@ -2194,8 +2194,8 @@ name = "mkv-cli"
 version = "1.0.0"
 dependencies = [
  "mkv-core",
- "serde",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 

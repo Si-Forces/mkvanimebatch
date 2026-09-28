@@ -1,10 +1,9 @@
 mod commands;
-pub mod contract;
 mod process;
 mod telemetry;
 mod window;
 
-pub use commands::*;
+use process::{begin_shutdown, cancel_shutdown, cleanup_owned_processes, JobState, ScanState};
 use tauri::{Emitter, Manager};
 
 /// Host `libwayland-client.so.0` locations to preload inside an AppImage.
@@ -19,7 +18,7 @@ const HOST_WAYLAND_CLIENT_CANDIDATES: &[&str] = &[
 ];
 
 #[cfg(target_os = "linux")]
-pub fn init_linux_env() {
+fn init_linux_env() {
     // Prefer X11/XWayland backend by default to prevent WebKitWebProcess EGL_BAD_PARAMETER abort on Wayland
     if std::env::var_os("GDK_BACKEND").is_none() {
         std::env::set_var("GDK_BACKEND", "x11,wayland");
@@ -45,7 +44,7 @@ pub fn init_linux_env() {
                     let new_preload = if current_preload.is_empty() {
                         candidate.to_string()
                     } else {
-                        format!("{}:{}", candidate, current_preload)
+                        format!("{candidate}:{current_preload}")
                     };
                     std::env::set_var("LD_PRELOAD", new_preload);
                     break;
@@ -55,7 +54,6 @@ pub fn init_linux_env() {
     }
 }
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(target_os = "linux")]
     init_linux_env();
@@ -63,31 +61,25 @@ pub fn run() {
     tauri::Builder::default()
         .manage(JobState::default())
         .manage(ScanState::default())
-        .manage(TelemetryState::default())
+        .manage(telemetry::TelemetryState::default())
         .invoke_handler(tauri::generate_handler![
-            run_job,
-            stop_job,
-            clear_cache,
-            pick_directory,
-            pick_subtitle_file,
-            inspect_directory,
-            get_system_telemetry,
-            close_window,
-            minimize_window,
-            toggle_maximize,
-            is_maximized,
-            start_drag,
-            start_resize,
-            set_window_theme,
-            get_preset_profiles,
-            get_job_snapshot,
+            commands::run_job,
+            process::stop_job,
+            commands::clear_cache,
+            commands::pick_directory,
+            commands::pick_subtitle_file,
+            commands::inspect_directory,
+            telemetry::get_system_telemetry,
+            process::close_window,
+            window::minimize_window,
+            window::toggle_maximize,
+            window::is_maximized,
+            window::start_drag,
+            window::start_resize,
+            window::set_window_theme,
+            commands::get_preset_profiles,
+            commands::get_job_snapshot,
         ])
-        .setup(|app| {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.set_theme(Some(tauri::Theme::Dark));
-            }
-            Ok(())
-        })
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
@@ -126,10 +118,8 @@ mod tests {
         "WEBKIT_DISABLE_DMABUF_RENDERER",
     ];
 
-    // This lives in one test on purpose: init_linux_env() mutates
-    // process-global env while cargo runs tests on parallel threads, so
-    // splitting the cases into separate tests made them clobber each other's
-    // APPIMAGE/var state and fail at random.
+    // One test on purpose: init_linux_env() mutates process-global env, and
+    // cargo runs tests on parallel threads, so split cases would race.
     #[test]
     fn test_init_linux_env_scopes_dmabuf_workaround_to_appimage() {
         let saved: Vec<(&str, Option<OsString>)> = TOUCHED
@@ -152,12 +142,9 @@ mod tests {
 
         // AppImage: keep the shutdown-SEGV workaround. Both env markers the
         // runtime sets are exercised, so neither arm of the detection can be
-        // dropped without this failing. Results are collected rather than
-        // asserted here, and asserted after the restore below, so that a failing
-        // assertion cannot leave APPIMAGE/APPDIR/GDK_BACKEND set for whatever
-        // test runs next. (This closes the panic path only. The vars are still
-        // process-global while this test runs, so a sibling test touching them
-        // concurrently would still race -- nothing in the crate does.)
+        // dropped without this failing. Results are asserted only after the
+        // restore below, so a failing assertion cannot leak the vars into
+        // later tests.
         let mut markers: Vec<(&str, Option<String>)> = Vec::new();
         for marker in ["APPIMAGE", "APPDIR"] {
             reset();

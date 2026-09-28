@@ -1,7 +1,4 @@
-/**
- * log-classify.js
- * Classification of engine log lines for console styling.
- */
+// Maps engine log lines to console CSS classes. Cosmetic only: no behaviour keys off these classes.
 
 export function stripLogPrefix(text) {
   return text.replace(/^(\[ERR\]\s*)?\d{4}-\d{2}-\d{2}[ T][\d:]+[.,]\d+\s+\[\w+\]\s+/, "$1");

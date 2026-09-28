@@ -1,6 +1,6 @@
 # 0009. Streaming Card Progress, Centralized Heartbeat, and Authoritative Item Duration Model
 
-> **Status**: Accepted
+> **Status**: Accepted (amended 2026-09-28)
 > **Date**: 2026-06-01
 > **Context**: Desktop Application Context
 
@@ -45,3 +45,10 @@ We decided to adopt a unified, authoritative progress and duration architecture 
 - Eliminates timer memory leaks and reduces webview CPU overhead during batch processing.
 - Preserves full backward-compatible serialization on `JobEvent::ItemComplete` using `#[serde(default, skip_serializing_if = "Option::is_none")]`.
 - Ensures queue item snapshots reflect authoritative wall-clock duration without fragile JSON metadata side-channels.
+
+## Amendment — 2026-09-28
+
+Two statements above overstate the implementation.
+
+- **Engine ownership has a client fallback.** When an `ItemComplete` for an item the UI saw start (`completed`, `error`, or `cancelled`) arrives without `duration_sec`, the queue reducer uses the time since its own `item_start`. The engine sends `duration_sec` for every item a worker ran, including one whose worker panicked; the fallback covers only events that lack it. Skipped and planned items never get a duration.
+- **Durations survive UI reloads, not host restarts.** The Job Snapshot lives in the Tauri host's memory. A webview reload restores it from `get_job_snapshot()`; restarting the application discards it. The measured durations come from a monotonic clock, not a wall clock.

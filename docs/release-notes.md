@@ -7,8 +7,37 @@
 - **Removal of `--keep-fonts` CLI Flag**: The `--keep-fonts` command-line option has been removed from `mkv-cli`. Invoking `mkv-cli` with `--keep-fonts` will now result in an unknown flag error.
 - **Removal of `keep_fonts` from Typed Contracts & IPC**: The `keep_fonts` field has been removed from `BatchRequest`, `PresetProfile`, `PipelineConfig`, and desktop Tauri IPC command schemas (`run_job`, `get_preset_profiles`). Desktop presets and UI controls no longer expose a font-retention toggle. No compatibility alias is retained.
 - **Public `mkv-core` API removals**: Removed `SubIndex::{lookup, indexed_count, primary_count, fallback_count}`, `ChapterIndex::{indexed_count, rejected_count}`, `CoverIndex::{indexed_count, has_global}`, and `AssetResolver::{has_local_subtitle, count_unmatched_chapter_videos}`. Downstream code calling these helpers must migrate; the methods are no longer available.
+- **`mkv-core` public API narrowed to what the workspace uses**: The `cpu` module is now crate-private. Removed or no longer public, by module:
+  - `assets`: `FontsOrigin`; `PreparedRelease::{mkv_dir, videos, fonts_origin}`; `AssetResolver::{new, discover_with_caches, resolve_chap}` (`discover` takes the former `discover_with_caches` arguments); `SubIndex::{all_subtitles, lookup_same_dir, lookup_ancestors, lookup_fallback}`; `ChapterIndex::has_match`; `CoverIndex::lookup_fallback`. `prepare_release_directory` drops its `videos` parameter.
+  - `domain`: `SUBTITLE_LANGS_PRIMARY_ORDER`, `SUBTITLE_LANGS_FALLBACK_ORDER`, `SUBTITLE_EXTENSIONS`, `CHAPTER_EXT`, `DIALOGUE_KEYWORDS`, `KNOWN_LANG_TOKENS`, `ep_type_label`, `format_ep`, `parse_progress_percentage`, `is_windows_reserved_device`, `EpisodeType::is_special_or_ova`. `is_dialogue_track` takes `&str`; `select_best_subtitle_track` returns `Option<(u32, String)>`; `select_audio_track` returns `Option<AudioTrack>`; `read_progress_stream` takes `&mut Vec<u8>`.
+  - `extract`: `build_mkvextract_args`, `ExtractSummary::mkv_path`.
+  - `fonts`: `FONT_DIR_NAMES`, `FontMemoEntry`, `FontHashMemo::memo_file`, `FontRegistry::fonts_dir`, `FontClaim::{name, size, identity}` fields (use `FontClaim::name()`), `FontClaimsGuard::{defuse, len, drain_claims}`.
+  - `manifest`: `parse_resolution`, `parse_video_codec`, `parse_audio_track_info`, `extract_mkv_metadata`.
+  - `pipeline`: `PipelineConfig::cache_file`, the `BatchPipeline` fields; `with_log_sender` takes a `LogSender`.
+  - `remux`: `RemuxSummary` (`execute_remux_job` returns the log lines), `PlannedJob::{base, release_dir}`, `TrackSelection::{audio_channels, audio_reason, has_source_chapters}`.
+  - `request`: `assignments_to_track_map`, `canonical_assignment_target_id` (use `clean_relative_path`), `TrackAssignment::{clean_target_video, is_relative_asset}`.
+  - `scan`: `COVER_LIKE_STEMS`, `parse_attachments`, `InspectCacheEntry`, `get_default_cache_file`, `InspectedVideo::{metadata, into_metadata, attachments, fonts_count}`, `InspectionResult::is_success`, `PersistentInspectCache::{get, put}` (use `get_path`/`put_path`) and its fields. `cover_attachment`/`font_attachments` return references.
 - **Release profile no longer aborts on panic**: `[profile.release]` no longer sets `panic = "abort"`. This is what lets the Engine Bridge intercept a task panic, emit a terminal failure event, and release the job slot instead of the whole desktop process dying. Expect a larger packaged binary; crash containment takes priority over size.
 - **`BatchStart` / `JobSnapshot` `input_dir` is now the display path form**: On Windows these fields no longer carry a verbatim (`\\?\`) prefix, and `\\?\UNC\` is rewritten to `\\`. Consumers that compare the path against a raw `std::fs::canonicalize` result must strip the prefix themselves. This matches the form the Inspection Manifest's `canonical_dir` already used; see *Canonical Directory Identity* in `architecture.md` §5.1.
+- **Removal of `--sub-assignments` CLI Flag**: The deprecated `--sub-assignments` alias has been removed from `mkv-cli`; passing it now fails with `Unknown argument: --sub-assignments`. Use `--assignments`, which still accepts the legacy flat `{"video.mkv": "sub.ass"}` map as well as `TrackAssignment` arrays.
+- **`PresetProfile.description` removed**: The `description` field is gone from `PresetProfile` and from the `get_preset_profiles` payload.
+- **Inspection cache entries drop `mtime`**: `inspect_cache.json` entries no longer store the unused `mtime` field; freshness is still checked by size and `mtime_ns`. Existing cache files keep loading.
+- **`InspectionManifest::filter_selected` replaced by `select_items`**: `select_items(&[String])` returns `Result<InspectionManifest, String>`, failing with `Selected items not found among discovered MKV files: ...` when a selection names no discovered item. It keeps selection order and drops repeated selections.
+
+### Worker Panic Reporting
+
+- A worker task that panics now completes its item with outcome `error` and the message `worker panicked: ...`. Previously that item never received an `ItemComplete` event.
+
+### Extracted Subtitle Naming
+
+- When a file name does not parse as an episode, its extracted subtitle is named `{stem}_{lang}_track{id}.ass` instead of repeating the stem (`{stem}_{stem}_{lang}_track{id}.ass`). Parsed episodes are unchanged: `{stem}_{EpLabel}{ep}_{lang}_track{id}.ass`.
+
+### Desktop Application
+
+- The theme follows the system light/dark preference, live, until the user toggles it; only an explicit toggle is stored and applied to the native window.
+- The window's corner resize handles now have a usable size and a diagonal resize cursor.
+- Stepper limits match the engine's validation: workers 1–64, Disk I/O jobs 0–64, FFmpeg threads 1–32.
+- The UI uses the system font stacks; bundled web fonts are no longer loaded.
 
 ### Queue Selection Freeze
 
@@ -34,9 +63,9 @@
 
 ### Font Handling Behavior
 
-- **Extract Mode**: Always retains extracted font attachments in user output within the destination directory.
+- **Extract Mode**: Always retains extracted font attachments as user output in a `fonts/` directory under the destination directory (or in `--fonts-dir` when given).
 - **Remux Mode**: Discovers and embeds fonts into output Matroska files as container attachments.
-- **Transactional Staging**: Scratch directories (`.font_staging/`) are transactionally cleaned up via `FontRegistry::cleanup_staging()`, and BLAKE2b content-hash deduplication is preserved without modifying or deleting pre-existing or user-supplied font directories.
+- **Transactional Staging**: Fonts are staged in `<fonts_dir>/.font_staging/`, which `FontRegistry::cleanup_staging()` removes once it is empty. BLAKE2b content-hash deduplication is preserved without modifying or deleting pre-existing or user-supplied font files.
 
 ### Subtitle Resolution Precedence Ladder
 

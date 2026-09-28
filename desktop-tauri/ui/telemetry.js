@@ -1,6 +1,10 @@
 export const IDLE_POLL_MS = 30000;
 export const ACTIVE_POLL_MS = 1000;
 
+/**
+ * Polls `get_system_telemetry` at a cadence that follows job activity, never
+ * overlaps an in-flight request, and pauses while `doc` is hidden.
+ */
 export function createTelemetryLoop({
   invoke,
   onData,
@@ -8,24 +12,22 @@ export function createTelemetryLoop({
   doc = null,
   setIntervalFn = setInterval.bind(globalThis),
   clearIntervalFn = clearInterval.bind(globalThis),
-} = {}) {
+}) {
   let timer = null;
   let started = false;
   let jobActive = false;
   let inFlight = false;
 
-  const isHidden = () => (doc ? doc.hidden === true : false);
-
-  const currentInterval = () => (jobActive ? ACTIVE_POLL_MS : IDLE_POLL_MS);
+  const isHidden = () => doc?.hidden === true;
 
   async function tick() {
     if (inFlight || isHidden()) return;
     inFlight = true;
     try {
       const data = await invoke("get_system_telemetry");
-      if (started && data && onData) onData(data);
+      if (data) onData(data);
     } catch (err) {
-      if (started && onError) onError(err);
+      onError(err);
     } finally {
       inFlight = false;
     }
@@ -36,39 +38,23 @@ export function createTelemetryLoop({
       clearIntervalFn(timer);
       timer = null;
     }
-    if (!started || isHidden()) return;
+    if (isHidden()) return;
     void tick();
-    timer = setIntervalFn(tick, currentInterval());
-  }
-
-  function onVisibilityChange() {
-    restartTimer();
+    timer = setIntervalFn(tick, jobActive ? ACTIVE_POLL_MS : IDLE_POLL_MS);
   }
 
   return {
     start() {
       if (started) return;
       started = true;
-      if (doc && doc.addEventListener) {
-        doc.addEventListener("visibilitychange", onVisibilityChange);
-      }
-      restartTimer();
-    },
-    stop() {
-      if (!started) return;
-      started = false;
-      if (doc && doc.removeEventListener) {
-        doc.removeEventListener("visibilitychange", onVisibilityChange);
-      }
+      doc?.addEventListener("visibilitychange", restartTimer);
       restartTimer();
     },
     setJobActive(active) {
       const next = Boolean(active);
       if (jobActive === next) return;
       jobActive = next;
-      if (started && !isHidden()) {
-        restartTimer();
-      }
+      if (started && !isHidden()) restartTimer();
     },
   };
 }

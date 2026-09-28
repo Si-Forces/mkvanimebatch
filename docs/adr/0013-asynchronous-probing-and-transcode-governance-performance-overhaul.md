@@ -232,3 +232,28 @@ and is not tested separately, because creating a FIFO from a Rust test would mea
 out to `mkfifo`. `test_scan_mkv_files_honors_ignore_paths_for_individual_files` and
 `test_scan_mkv_files_reports_resolved_paths_under_non_canonical_root` pin the two traversal
 contracts above.
+
+## Amendment 4 — 2026-09-28 (current-state corrections)
+
+The decisions stand; these statements above overstate or misname what the code does.
+
+**Probing still blocks on the native path.** Consequence 1 ("completely eliminates Tokio
+async reactor thread stalls") holds only for the `mkvmerge -J` fallback, which runs through
+`tokio::process::Command`. `probe_video` first calls `probe_ebml_native`, which reads the file
+through a synchronous `std::fs::File` + `BufReader` on the calling worker thread. Amendment 2's
+0.091 ms warm figure is why this was left in place; a cold read can still block a worker.
+Tracked as issue #20.
+
+**The governor is crate-private.** `cpu` is a private module of `mkv-core`;
+`physical_core_count` and `transcode_governor_threads` are `pub(crate)` and are reachable only
+through `BatchRequest::into_pipeline_config`, which applies Decision 2's formula when
+`ffmpeg_threads` is unset. "Physical cores" means unique `(physical id, core id)` pairs from
+`/proc/cpuinfo` on Linux; elsewhere, or when that file exposes no topology, it is
+`std::thread::available_parallelism()`.
+
+**Memo keys and growth (Amendment 1).** The memo is keyed by the font path as the caller
+spelled it (`to_string_lossy`), which is absolute only when the fonts directory is; a relative
+`--fonts-dir` produces relative keys. `data` starts empty when the memo file is missing,
+unreadable, or fails to parse, not only on a parse failure. `put` marks the memo dirty whenever
+an entry changes, so a save also happens when an already-memoized font's size, mtime, or hash
+changes, not only when a font is added.

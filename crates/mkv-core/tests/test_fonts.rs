@@ -8,7 +8,34 @@ use mkv_core::fonts::{
     find_fonts_dir, hash_file, scan_fonts, FontClaimsGuard, FontHashMemo, FontRegistry,
 };
 use mkv_core::scan::FileSignature;
-use tempfile::tempdir;
+use tempfile::{tempdir, TempDir};
+
+const SIG: FileSignature = FileSignature {
+    size: 100,
+    mtime_ns: 12345,
+};
+
+/// A registry over `<tmp>/fonts`, which does not exist yet.
+fn fresh_registry() -> (TempDir, PathBuf, FontRegistry) {
+    let tmp = tempdir().unwrap();
+    let fonts_dir = tmp.path().join("fonts");
+    let registry = FontRegistry::new(fonts_dir.clone(), None);
+    (tmp, fonts_dir, registry)
+}
+
+/// An existing, empty `<tmp>/fonts` to populate before constructing a registry over it.
+fn existing_fonts_dir() -> (TempDir, PathBuf) {
+    let tmp = tempdir().unwrap();
+    let fonts_dir = tmp.path().join("fonts");
+    fs::create_dir_all(&fonts_dir).unwrap();
+    (tmp, fonts_dir)
+}
+
+fn shared_memo(tmp: &TempDir) -> Arc<parking_lot::Mutex<FontHashMemo>> {
+    Arc::new(parking_lot::Mutex::new(FontHashMemo::new(
+        tmp.path().join("memo.json"),
+    )))
+}
 
 #[test]
 fn test_hash_file() {
@@ -22,12 +49,10 @@ fn test_hash_file() {
 
 #[test]
 fn test_claim_and_promote() {
-    let tmp = tempdir().unwrap();
-    let fonts_dir = tmp.path().join("fonts");
-    let mgr = FontRegistry::new(fonts_dir.clone(), None);
+    let (_tmp, fonts_dir, mgr) = fresh_registry();
 
     let mut claim = mgr.claim("Arial.ttf", 100).expect("claim should succeed");
-    assert_eq!(claim.name, "Arial.ttf");
+    assert_eq!(claim.name(), "Arial.ttf");
     assert_eq!(
         claim.staging_path.parent().unwrap().file_name().unwrap(),
         ".font_staging"
@@ -44,34 +69,23 @@ fn test_claim_and_promote() {
 
 #[test]
 fn test_claim_duplicate_name_size_rejected() {
-    let tmp = tempdir().unwrap();
-    let fonts_dir = tmp.path().join("fonts");
-    let mgr = FontRegistry::new(fonts_dir, None);
+    let (_tmp, _fonts_dir, mgr) = fresh_registry();
 
-    let claim1 = mgr.claim("Arial.ttf", 100);
-    assert!(claim1.is_some());
-
-    let claim2 = mgr.claim("Arial.ttf", 100);
-    assert!(claim2.is_none());
+    assert!(mgr.claim("Arial.ttf", 100).is_some());
+    assert!(mgr.claim("Arial.ttf", 100).is_none());
 }
 
 #[test]
 fn test_claim_different_size_allowed() {
-    let tmp = tempdir().unwrap();
-    let fonts_dir = tmp.path().join("fonts");
-    let mgr = FontRegistry::new(fonts_dir, None);
+    let (_tmp, _fonts_dir, mgr) = fresh_registry();
 
-    let claim1 = mgr.claim("Arial.ttf", 100);
-    let claim2 = mgr.claim("Arial.ttf", 200);
-    assert!(claim1.is_some());
-    assert!(claim2.is_some());
+    assert!(mgr.claim("Arial.ttf", 100).is_some());
+    assert!(mgr.claim("Arial.ttf", 200).is_some());
 }
 
 #[test]
 fn test_release_allows_reclaim() {
-    let tmp = tempdir().unwrap();
-    let fonts_dir = tmp.path().join("fonts");
-    let mgr = FontRegistry::new(fonts_dir, None);
+    let (_tmp, _fonts_dir, mgr) = fresh_registry();
 
     let mut claim1 = mgr.claim("Arial.ttf", 100).unwrap();
     fs::write(&claim1.staging_path, b"temp").unwrap();
@@ -80,76 +94,39 @@ fn test_release_allows_reclaim() {
     assert!(!claim1.staging_path.exists());
     assert!(claim1.is_released());
 
-    // Should be re-claimable now
-    let claim2 = mgr.claim("Arial.ttf", 100);
-    assert!(claim2.is_some());
-}
-
-#[test]
-fn test_promote_hash_deduplication() {
-    let tmp = tempdir().unwrap();
-    let fonts_dir = tmp.path().join("fonts");
-    let mgr = FontRegistry::new(fonts_dir.clone(), None);
-
-    // First font
-    let mut claim1 = mgr.claim("FontA.ttf", 100).unwrap();
-    fs::write(&claim1.staging_path, b"identical font content").unwrap();
-    let promoted1 = mgr.promote(&mut claim1);
-    assert_eq!(promoted1, Some(fonts_dir.join("FontA.ttf")));
-
-    // Second font with different name and size but same content
-    let mut claim2 = mgr.claim("FontB.ttf", 200).unwrap();
-    fs::write(&claim2.staging_path, b"identical font content").unwrap();
-    let promoted2 = mgr.promote(&mut claim2);
-
-    // Content duplicate should be deduplicated (return None, staging file cleaned up)
-    assert!(promoted2.is_none());
-    assert!(!claim2.staging_path.exists());
-    assert!(!fonts_dir.join("FontB.ttf").exists());
+    assert!(mgr.claim("Arial.ttf", 100).is_some());
 }
 
 #[test]
 fn test_promote_hash_deduplication_preserves_name_size_claim() {
-    let tmp = tempdir().unwrap();
-    let fonts_dir = tmp.path().join("fonts");
-    let mgr = FontRegistry::new(fonts_dir.clone(), None);
+    let (_tmp, fonts_dir, mgr) = fresh_registry();
 
-    // First font
     let mut claim1 = mgr.claim("FontA.ttf", 100).unwrap();
     fs::write(&claim1.staging_path, b"shared font data").unwrap();
-    let promoted1 = mgr.promote(&mut claim1);
-    assert_eq!(promoted1, Some(fonts_dir.join("FontA.ttf")));
+    assert_eq!(mgr.promote(&mut claim1), Some(fonts_dir.join("FontA.ttf")));
 
-    // Second font with different name/size but same content
+    // Different name and size, identical content.
     let mut claim2 = mgr.claim("FontB.ttf", 200).unwrap();
     fs::write(&claim2.staging_path, b"shared font data").unwrap();
-    let promoted2 = mgr.promote(&mut claim2);
-
-    // Should be deduplicated
-    assert!(promoted2.is_none());
+    assert!(mgr.promote(&mut claim2).is_none());
     assert!(!claim2.staging_path.exists());
     assert!(!fonts_dir.join("FontB.ttf").exists());
 
-    // Preserves (name, size) in claimed_name_size so subsequent episodes skip extraction
-    let claim3 = mgr.claim("FontB.ttf", 200);
     assert!(
-        claim3.is_none(),
+        mgr.claim("FontB.ttf", 200).is_none(),
         "subsequent claim of hash-deduplicated font should be skipped via claimed_name_size"
     );
 }
 
 #[test]
 fn test_collision_safe_target_allocation() {
-    let tmp = tempdir().unwrap();
-    let fonts_dir = tmp.path().join("fonts");
-    fs::create_dir_all(&fonts_dir).unwrap();
-
+    let (_tmp, fonts_dir) = existing_fonts_dir();
     let existing_font = fonts_dir.join("Arial.ttf");
     fs::write(&existing_font, b"existing content").unwrap();
 
-    let mgr = FontRegistry::new(fonts_dir.clone(), None);
+    let mgr = FontRegistry::new(fonts_dir, None);
 
-    // New font with same filename but different content and size
+    // Same filename, different content and size.
     let mut claim = mgr.claim("Arial.ttf", 999).unwrap();
     fs::write(&claim.staging_path, b"new different content").unwrap();
 
@@ -160,48 +137,35 @@ fn test_collision_safe_target_allocation() {
     assert!(promoted_name.ends_with(".ttf"));
     assert_eq!(fs::read(&promoted).unwrap(), b"new different content");
 
-    // Original file is preserved untouched
     assert_eq!(fs::read(&existing_font).unwrap(), b"existing content");
 }
 
 #[test]
 fn test_seed_existing_fonts() {
-    let tmp = tempdir().unwrap();
-    let fonts_dir = tmp.path().join("fonts");
-    fs::create_dir_all(&fonts_dir).unwrap();
-
+    let (_tmp, fonts_dir) = existing_fonts_dir();
     let existing_font = fonts_dir.join("Existing.otf");
     fs::write(&existing_font, b"pre-existing content").unwrap();
     let size = fs::metadata(&existing_font).unwrap().len();
 
     let mgr = FontRegistry::new(fonts_dir, None);
 
-    // Name and size should already be reserved
     assert!(mgr.claim("Existing.otf", size).is_none());
 
-    // Content duplicate should also be rejected upon promote
     let mut claim = mgr.claim("Other.otf", 50).unwrap();
     fs::write(&claim.staging_path, b"pre-existing content").unwrap();
     assert!(mgr.promote(&mut claim).is_none());
 }
 
-/// `seed_existing` now derives each font's signature from the `DirEntry` metadata it
-/// already holds instead of issuing a second `stat`. The signature it records must be
-/// byte-identical to what a symlink-resolving `FileSignature::of` computes, otherwise
-/// every later memo lookup would miss and fonts would be re-hashed on each run.
+/// `seed_existing` derives each font's signature from the `DirEntry` metadata it already
+/// holds. That signature must equal what a symlink-resolving `FileSignature::of` computes,
+/// otherwise every later memo lookup would miss and fonts would be re-hashed on each run.
 #[test]
 fn test_seed_existing_records_memo_signature_matching_resolved_lookup() {
-    let tmp = tempdir().unwrap();
-    let fonts_dir = tmp.path().join("fonts");
-    fs::create_dir_all(&fonts_dir).unwrap();
-
+    let (tmp, fonts_dir) = existing_fonts_dir();
     let font = fonts_dir.join("Real.otf");
     fs::write(&font, b"real font content").unwrap();
 
-    let memo = Arc::new(parking_lot::Mutex::new(FontHashMemo::new(
-        tmp.path().join("memo.json"),
-    )));
-
+    let memo = shared_memo(&tmp);
     let _mgr = FontRegistry::new(fonts_dir, Some(Arc::clone(&memo)));
 
     let expected = hash_file(&font).unwrap();
@@ -220,19 +184,13 @@ fn test_seed_existing_records_memo_signature_matching_resolved_lookup() {
 fn test_seed_existing_symlinked_font_uses_resolved_signature() {
     use std::os::unix::fs::symlink;
 
-    let tmp = tempdir().unwrap();
-    let fonts_dir = tmp.path().join("fonts");
-    fs::create_dir_all(&fonts_dir).unwrap();
-
+    let (tmp, fonts_dir) = existing_fonts_dir();
     let real = fonts_dir.join("Real.otf");
     fs::write(&real, b"real font content").unwrap();
     let link = fonts_dir.join("Linked.otf");
     symlink(&real, &link).unwrap();
 
-    let memo = Arc::new(parking_lot::Mutex::new(FontHashMemo::new(
-        tmp.path().join("memo.json"),
-    )));
-
+    let memo = shared_memo(&tmp);
     let _mgr = FontRegistry::new(fonts_dir, Some(Arc::clone(&memo)));
 
     let expected = hash_file(&real).unwrap();
@@ -258,10 +216,7 @@ fn test_seed_existing_symlinked_font_uses_resolved_signature() {
 fn test_seed_existing_symlinked_font_prevents_claim() {
     use std::os::unix::fs::symlink;
 
-    let tmp = tempdir().unwrap();
-    let fonts_dir = tmp.path().join("fonts");
-    fs::create_dir_all(&fonts_dir).unwrap();
-
+    let (_tmp, fonts_dir) = existing_fonts_dir();
     let real = fonts_dir.join("Real.otf");
     let font_data = b"simulated font payload exceeding target name length";
     fs::write(&real, font_data).unwrap();
@@ -282,10 +237,7 @@ fn test_seed_existing_symlinked_font_prevents_claim() {
 fn test_seed_existing_broken_symlink_does_not_poison_claim() {
     use std::os::unix::fs::symlink;
 
-    let tmp = tempdir().unwrap();
-    let fonts_dir = tmp.path().join("fonts");
-    fs::create_dir_all(&fonts_dir).unwrap();
-
+    let (_tmp, fonts_dir) = existing_fonts_dir();
     let link = fonts_dir.join("Broken.otf");
     symlink(fonts_dir.join("Nonexistent.otf"), &link).unwrap();
 
@@ -305,10 +257,7 @@ fn test_seed_existing_broken_symlink_does_not_poison_claim() {
 fn test_seed_existing_directory_named_like_a_font_does_not_poison_claim() {
     use std::os::unix::fs::symlink;
 
-    let tmp = tempdir().unwrap();
-    let fonts_dir = tmp.path().join("fonts");
-    fs::create_dir_all(&fonts_dir).unwrap();
-
+    let (_tmp, fonts_dir) = existing_fonts_dir();
     let real_dir = fonts_dir.join("RealDir.otf");
     fs::create_dir_all(&real_dir).unwrap();
     let link = fonts_dir.join("Linked.otf");
@@ -329,17 +278,14 @@ fn test_seed_existing_directory_named_like_a_font_does_not_poison_claim() {
 
 #[test]
 fn test_cleanup_staging() {
-    let tmp = tempdir().unwrap();
-    let fonts_dir = tmp.path().join("fonts");
-    let mgr = FontRegistry::new(fonts_dir.clone(), None);
+    let (_tmp, fonts_dir, mgr) = fresh_registry();
 
     let mut claim = mgr.claim("Test.ttf", 100).unwrap();
     fs::write(&claim.staging_path, b"abc").unwrap();
     mgr.promote(&mut claim).unwrap();
 
-    let staging_dir = fonts_dir.join(".font_staging");
     mgr.cleanup_staging();
-    assert!(!staging_dir.exists());
+    assert!(!fonts_dir.join(".font_staging").exists());
 }
 
 #[test]
@@ -349,31 +295,21 @@ fn test_font_hash_memo() {
 
     {
         let mut memo = FontHashMemo::new(memo_file.clone());
-        let sig = FileSignature {
-            size: 100,
-            mtime_ns: 12345,
-        };
-        memo.put(&tmp.path().join("f1.ttf"), sig, "hash123".to_string());
+        memo.put(&tmp.path().join("f1.ttf"), SIG, "hash123".to_string());
         memo.save();
     }
 
-    {
-        let memo = FontHashMemo::new(memo_file);
-        let sig = FileSignature {
-            size: 100,
-            mtime_ns: 12345,
-        };
-        let sig_diff_mtime = FileSignature {
-            size: 100,
-            mtime_ns: 99999,
-        };
-        assert_eq!(
-            memo.get(&tmp.path().join("f1.ttf"), sig),
-            Some("hash123".to_string())
-        );
-        assert_eq!(memo.get(&tmp.path().join("f1.ttf"), sig_diff_mtime), None);
-        assert_eq!(memo.get(&tmp.path().join("f2.ttf"), sig), None);
-    }
+    let memo = FontHashMemo::new(memo_file);
+    let sig_diff_mtime = FileSignature {
+        mtime_ns: 99999,
+        ..SIG
+    };
+    assert_eq!(
+        memo.get(&tmp.path().join("f1.ttf"), SIG),
+        Some("hash123".to_string())
+    );
+    assert_eq!(memo.get(&tmp.path().join("f1.ttf"), sig_diff_mtime), None);
+    assert_eq!(memo.get(&tmp.path().join("f2.ttf"), SIG), None);
 }
 
 /// `FontHashMemo::save` streams through a `BufWriter`, so a memo small enough to fit the
@@ -381,21 +317,18 @@ fn test_font_hash_memo() {
 /// 8 KiB buffer still serializes completely and round-trips.
 #[test]
 fn test_font_hash_memo_large_save_round_trips_through_buffered_writer() {
+    const ENTRIES: usize = 500;
     let tmp = tempdir().unwrap();
     let memo_file = tmp.path().join("font_memo.json");
-    const ENTRIES: usize = 500;
-
-    let sig = FileSignature {
-        size: 100,
-        mtime_ns: 12345,
+    let font_path = |i: usize| {
+        tmp.path()
+            .join(format!("font-with-a-longish-name-{i:04}.ttf"))
     };
+
     {
         let mut memo = FontHashMemo::new(memo_file.clone());
         for i in 0..ENTRIES {
-            let path = tmp
-                .path()
-                .join(format!("font-with-a-longish-name-{i:04}.ttf"));
-            memo.put(&path, sig, format!("{:064x}", i));
+            memo.put(&font_path(i), SIG, format!("{i:064x}"));
         }
         memo.save();
     }
@@ -406,12 +339,9 @@ fn test_font_hash_memo_large_save_round_trips_through_buffered_writer() {
     );
     let memo = FontHashMemo::new(memo_file);
     for i in 0..ENTRIES {
-        let path = tmp
-            .path()
-            .join(format!("font-with-a-longish-name-{i:04}.ttf"));
         assert_eq!(
-            memo.get(&path, sig),
-            Some(format!("{:064x}", i)),
+            memo.get(&font_path(i), SIG),
+            Some(format!("{i:064x}")),
             "entry {i} did not survive the buffered save"
         );
     }
@@ -427,17 +357,12 @@ fn test_font_hash_memo_save_is_noop_when_not_dirty() {
 
     let tmp = tempdir().unwrap();
     let memo_file = tmp.path().join("font_memo.json");
-    let sig = FileSignature {
-        size: 100,
-        mtime_ns: 12345,
-    };
 
     let mut memo = FontHashMemo::new(memo_file.clone());
-    memo.put(&tmp.path().join("f1.ttf"), sig, "hash123".to_string());
+    memo.put(&tmp.path().join("f1.ttf"), SIG, "hash123".to_string());
     memo.save();
     let inode_after_first = fs::metadata(&memo_file).unwrap().ino();
 
-    // Re-saving without a new put must leave the file untouched.
     memo.save();
     assert_eq!(
         fs::metadata(&memo_file).unwrap().ino(),
@@ -460,15 +385,10 @@ impl Drop for RemoveOnDrop {
 /// working directory without `ENOENT`.
 #[test]
 fn test_font_hash_memo_save_bare_filename() {
-    let filename = format!("test_bare_font_memo_{}.json", std::process::id());
-    let path = PathBuf::from(&filename);
+    let path = PathBuf::from(format!("test_bare_font_memo_{}.json", std::process::id()));
     let _cleanup = RemoveOnDrop(path.clone());
     let mut memo = FontHashMemo::new(path.clone());
-    let sig = FileSignature {
-        size: 100,
-        mtime_ns: 12345,
-    };
-    memo.put(Path::new("dummy.ttf"), sig, "hash123".to_string());
+    memo.put(Path::new("dummy.ttf"), SIG, "hash123".to_string());
     memo.save();
 
     assert!(
@@ -479,10 +399,7 @@ fn test_font_hash_memo_save_bare_filename() {
 
 #[test]
 fn test_scan_fonts() {
-    let tmp = tempdir().unwrap();
-    let fonts_dir = tmp.path().join("fonts");
-    fs::create_dir_all(&fonts_dir).unwrap();
-
+    let (_tmp, fonts_dir) = existing_fonts_dir();
     fs::write(fonts_dir.join("b_font.ttf"), b"b").unwrap();
     fs::write(fonts_dir.join("a_font.otf"), b"a").unwrap();
     fs::write(fonts_dir.join("readme.txt"), b"ignore").unwrap();
@@ -502,36 +419,49 @@ fn test_find_fonts_dir() {
     let input_dir = tmp.path().join("release");
     let fonts = input_dir.join("fonts");
     fs::create_dir_all(&fonts).unwrap();
+    // An exact `fonts` directory beats an alternative name.
+    fs::create_dir_all(input_dir.join("attachments")).unwrap();
 
     let mut cache = HashMap::new();
-    let found = find_fonts_dir(&input_dir, None, Some(&mut cache));
-    assert_eq!(found, fonts);
+    assert_eq!(find_fonts_dir(&input_dir, None, Some(&mut cache)), fonts);
 
-    // Override takes precedence
     let override_dir = tmp.path().join("custom_fonts");
-    let found_override = find_fonts_dir(&input_dir, Some(&override_dir), None);
-    assert_eq!(found_override, override_dir);
+    assert_eq!(
+        find_fonts_dir(&input_dir, Some(&override_dir), None),
+        override_dir
+    );
+
+    // Without `fonts`, alternative names match regardless of ASCII case, and a same-named
+    // file is skipped even though it sorts first.
+    let alt_dir = tmp.path().join("alt");
+    fs::create_dir_all(alt_dir.join("FONT")).unwrap();
+    fs::write(alt_dir.join("Attachments"), b"a file, not a directory").unwrap();
+    assert_eq!(find_fonts_dir(&alt_dir, None, None), alt_dir.join("FONT"));
+
+    // With no candidate at all, `fonts` is returned even though it does not exist.
+    let bare_dir = tmp.path().join("bare");
+    fs::create_dir_all(&bare_dir).unwrap();
+    assert_eq!(
+        find_fonts_dir(&bare_dir, None, None),
+        bare_dir.join("fonts")
+    );
 }
 
 #[test]
 fn test_concurrent_font_claims_and_promotions() {
     let tmp = tempdir().unwrap();
-    let fonts_dir = tmp.path().join("fonts");
-    let mgr = Arc::new(FontRegistry::new(fonts_dir.clone(), None));
+    let mgr = Arc::new(FontRegistry::new(tmp.path().join("fonts"), None));
 
-    let mut handles = Vec::new();
-    for i in 0..10 {
-        let mgr_clone = Arc::clone(&mgr);
-        handles.push(thread::spawn(move || {
-            let font_name = format!("Font_{i}.ttf");
-            if let Some(mut claim) = mgr_clone.claim(&font_name, 100) {
-                let content = format!("content {i}");
-                fs::write(&claim.staging_path, content.as_bytes()).unwrap();
-                let res = mgr_clone.promote(&mut claim);
-                assert!(res.is_some());
-            }
-        }));
-    }
+    let handles: Vec<_> = (0..10)
+        .map(|i| {
+            let mgr = Arc::clone(&mgr);
+            thread::spawn(move || {
+                let mut claim = mgr.claim(&format!("Font_{i}.ttf"), 100).unwrap();
+                fs::write(&claim.staging_path, format!("content {i}")).unwrap();
+                assert!(mgr.promote(&mut claim).is_some());
+            })
+        })
+        .collect();
 
     for h in handles {
         h.join().unwrap();
@@ -542,105 +472,50 @@ fn test_concurrent_font_claims_and_promotions() {
 
 #[test]
 fn test_font_claims_guard_drop_releases_and_deletes() {
-    let tmp = tempdir().unwrap();
-    let fonts_dir = tmp.path().join("fonts");
-    let mgr = FontRegistry::new(fonts_dir, None);
+    let (_tmp, _fonts_dir, mgr) = fresh_registry();
 
     let staging_path_1;
     let staging_path_2;
 
     {
         let mut guard = FontClaimsGuard::new(&mgr);
-        assert!(guard.is_empty());
-        assert_eq!(guard.len(), 0);
 
         let claim1 = mgr.claim("GuardFont1.ttf", 500).unwrap();
         staging_path_1 = claim1.staging_path.clone();
         fs::write(&staging_path_1, b"font 1 data").unwrap();
-        assert!(staging_path_1.exists());
         guard.push(1, claim1);
 
         let claim2 = mgr.claim("GuardFont2.otf", 700).unwrap();
         staging_path_2 = claim2.staging_path.clone();
         fs::write(&staging_path_2, b"font 2 data").unwrap();
-        assert!(staging_path_2.exists());
         guard.push(2, claim2);
 
-        assert!(!guard.is_empty());
-        assert_eq!(guard.len(), 2);
-        assert_eq!(guard.claims().len(), 2);
-
-        // Name and size are reserved while claim is active
+        // Reserved while the guard holds the claims.
         assert!(mgr.claim("GuardFont1.ttf", 500).is_none());
         assert!(mgr.claim("GuardFont2.otf", 700).is_none());
-
-        // Guard dropped here without calling defuse()
     }
 
-    // After drop without defuse():
-    // 1. Reservations in claimed_name_size must be released (can be re-claimed)
-    let reclaim1 = mgr.claim("GuardFont1.ttf", 500);
-    assert!(reclaim1.is_some());
-    let reclaim2 = mgr.claim("GuardFont2.otf", 700);
-    assert!(reclaim2.is_some());
-
-    // 2. Staging files must be deleted
+    assert!(mgr.claim("GuardFont1.ttf", 500).is_some());
+    assert!(mgr.claim("GuardFont2.otf", 700).is_some());
     assert!(!staging_path_1.exists());
     assert!(!staging_path_2.exists());
 }
 
 #[test]
-fn test_font_claims_guard_defuse_preserves_claims() {
-    let tmp = tempdir().unwrap();
-    let fonts_dir = tmp.path().join("fonts");
-    let mgr = FontRegistry::new(fonts_dir, None);
+fn test_font_claims_guard_keeps_claims_taken_out_before_drop() {
+    let (_tmp, _fonts_dir, mgr) = fresh_registry();
 
-    let staging_path;
-
-    {
+    let (_, claim) = {
         let mut guard = FontClaimsGuard::new(&mgr);
-        let claim = mgr.claim("PreservedFont.ttf", 300).unwrap();
-        staging_path = claim.staging_path.clone();
-        fs::write(&staging_path, b"preserved data").unwrap();
+        let claim = mgr.claim("PoppedFont.ttf", 300).unwrap();
+        fs::write(&claim.staging_path, b"popped data").unwrap();
         guard.push(1, claim);
+        guard.pop().unwrap()
+    };
 
-        guard.defuse();
-        // Guard dropped with defuse() called
-    }
-
-    // Staging file should still exist and reservation should NOT be released
-    assert!(staging_path.exists());
-    assert!(mgr.claim("PreservedFont.ttf", 300).is_none());
-}
-
-#[test]
-fn test_font_claims_guard_drain_claims() {
-    let tmp = tempdir().unwrap();
-    let fonts_dir = tmp.path().join("fonts");
-    let mgr = FontRegistry::new(fonts_dir, None);
-
-    let mut guard = FontClaimsGuard::new(&mgr);
-    let claim = mgr.claim("DrainedFont.ttf", 400).unwrap();
-    guard.push(1, claim);
-
-    let drained: Vec<_> = guard.drain_claims().collect();
-    assert_eq!(drained.len(), 1);
-    assert!(guard.is_empty());
-}
-
-#[test]
-fn test_font_claims_guard_pop() {
-    let tmp = tempdir().unwrap();
-    let fonts_dir = tmp.path().join("fonts");
-    let mgr = FontRegistry::new(fonts_dir, None);
-
-    let mut guard = FontClaimsGuard::new(&mgr);
-    let claim = mgr.claim("PopFont.ttf", 400).unwrap();
-    guard.push(1, claim);
-
-    let popped = guard.pop();
-    assert!(popped.is_some());
-    assert_eq!(popped.unwrap().0, 1);
-    assert!(guard.is_empty());
-    assert!(guard.pop().is_none());
+    assert!(
+        mgr.claim("PoppedFont.ttf", 300).is_none(),
+        "dropping the guard must not release a claim already popped from it"
+    );
+    assert!(claim.staging_path.exists());
 }

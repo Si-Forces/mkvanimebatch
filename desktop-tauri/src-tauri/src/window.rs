@@ -1,5 +1,3 @@
-use tauri::{AppHandle, Manager};
-
 #[tauri::command]
 pub fn minimize_window(window: tauri::Window) {
     let _ = window.minimize();
@@ -26,11 +24,11 @@ pub fn start_drag(window: tauri::Window) {
     let _ = window.start_dragging();
 }
 
-fn parse_dir_for<T: serde::de::DeserializeOwned>(
-    _f: impl FnOnce(&tauri::Window, T) -> tauri::Result<()>,
-    dir_str: &str,
-) -> Option<T> {
-    let name = match dir_str {
+/// Maps a resize-handle code (`n`, `se`, ...) to Tauri's resize direction.
+/// Tauri does not re-export `ResizeDirection`, so the value is built through its
+/// `Deserialize` impl and the type is inferred from `start_resize_dragging`.
+fn resize_direction<D: serde::de::DeserializeOwned>(code: &str) -> Option<D> {
+    let name = match code {
         "n" => "North",
         "s" => "South",
         "e" => "East",
@@ -41,41 +39,45 @@ fn parse_dir_for<T: serde::de::DeserializeOwned>(
         "sw" => "SouthWest",
         _ => return None,
     };
-    serde_json::from_value(serde_json::Value::String(name.to_string())).ok()
+    serde_json::from_value(name.into()).ok()
 }
 
 #[tauri::command]
 pub fn start_resize(window: tauri::Window, direction: String) {
-    if let Some(dir) = parse_dir_for(tauri::Window::start_resize_dragging, &direction) {
-        let _ = window.start_resize_dragging(dir);
+    if let Some(direction) = resize_direction(&direction) {
+        let _ = window.start_resize_dragging(direction);
     }
 }
 
 #[tauri::command]
-pub fn set_window_theme(app: AppHandle, theme: String) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window("main") {
-        let tauri_theme = match theme.as_str() {
-            "light" => tauri::Theme::Light,
-            _ => tauri::Theme::Dark,
-        };
-        let _ = window.set_theme(Some(tauri_theme));
-    }
-    Ok(())
+pub fn set_window_theme(window: tauri::Window, theme: String) {
+    let theme = match theme.as_str() {
+        "light" => tauri::Theme::Light,
+        _ => tauri::Theme::Dark,
+    };
+    let _ = window.set_theme(Some(theme));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Pins `D` to the parameter type of `start_resize_dragging`.
+    fn direction_for<D: serde::de::DeserializeOwned>(
+        _resize: impl FnOnce(&tauri::Window, D) -> tauri::Result<()>,
+        code: &str,
+    ) -> Option<D> {
+        resize_direction(code)
+    }
+
     #[test]
-    fn test_parse_dir_for_all_valid_directions() {
-        for dir in ["n", "s", "e", "w", "ne", "nw", "se", "sw"] {
+    fn resize_codes_name_real_tauri_directions() {
+        for code in ["n", "s", "e", "w", "ne", "nw", "se", "sw"] {
             assert!(
-                parse_dir_for(tauri::Window::start_resize_dragging, dir).is_some(),
-                "Direction '{dir}' should parse successfully"
+                direction_for(tauri::Window::start_resize_dragging, code).is_some(),
+                "resize code '{code}' must map to a ResizeDirection"
             );
         }
-        assert!(parse_dir_for(tauri::Window::start_resize_dragging, "invalid").is_none());
-        assert!(parse_dir_for(tauri::Window::start_resize_dragging, "").is_none());
+        assert!(direction_for(tauri::Window::start_resize_dragging, "invalid").is_none());
     }
 }
