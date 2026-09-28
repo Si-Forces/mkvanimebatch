@@ -178,3 +178,57 @@ portably is not practical. And a source-side rename failure is indistinguishable
 one, because `std::fs::copy` opens the source before the destination and fails it the same
 way — only the source-parent case above changes the outcome, and that is what the gate test
 covers. The classification itself is unit-tested in `domain.rs`.
+
+## Amendment 3 — 2026-09-28 (traversal path contract)
+
+The scan traversal and font-seeding work in one commit changed three externally visible
+contracts without recording any of them, and introduced a fourth rule it got wrong. This
+amendment records all four.
+
+**The walk root is resolved once, so reported paths change spelling.**
+`scan_mkv_files` now canonicalizes its root and builds every entry path beneath that
+resolved prefix. A caller that passed a relative root, a root containing a `..` segment,
+or a root reached through a symlink therefore receives absolute, resolved
+`ParsedFile::path` values where it previously received paths spelled the way it spelled
+them. Item identity is unaffected: `manifest::get_item_id` already falls back to
+canonicalizing both operands when `strip_prefix` fails, so relative IDs are unchanged.
+The cost is that fallback firing — for a relative `--input-dir`, which `mkv-cli` stores
+verbatim, each `get_item_id` call costs two `realpath` calls, and the pipeline calls it
+repeatedly per file. That partly offsets the `realpath` the traversal itself now skips, so
+the −25% scan-time figure should be read as applying to an absolute root.
+
+**`ignore_paths` matches prefixes, not just exact directories.** An entry is ignored when
+its resolved path starts with an ignore entry, and the match now also applies to individual
+files rather than only directories. An ignore entry naming a directory therefore excludes
+its whole subtree. No production caller passes this parameter today —
+`generate_inspection_manifest` and the pipeline both pass `None` — so the change is
+contract-tightening on an unused parameter, not a behavior change in the running system.
+
+**A root that fails to resolve is not treated as canonical.** `scan_mkv_files` records
+whether `canonicalize` succeeded and hands that flag down the traversal stack. It used to
+unconditionally claim the root was canonical, which would have suppressed the `realpath`
+that the dedup sets and the `ignore_paths` comparison both assume.
+
+**`FileSignature::of_dir_entry` signs only regular files.** This rule the commit did not
+have. It replaced a symlink-resolving `path.is_file()` with an `lstat`-equivalent
+`entry.metadata()` plus a `meta.is_dir()` test, which cannot see through a link. A directory
+named `Something.otf` — or a symlink to one — was signed with the directory's own byte
+length, entered `claimed_name_size`, and silently denied any later `claim()` of that name
+and size. A FIFO, socket, or device node named `*.otf` was worse: it passed the same test,
+entered `claimed_name_size` with `len() == 0`, and then blocked forever in `hash_file`'s
+`File::open`, inside the `FontRegistry::new` constructor, on input taken from a directory
+listing. The rule now lives in the one function that owns symlink policy and tests
+`is_file` on the resolved target.
+
+**What it does not change.** No other decision and no other measured figure in this ADR is
+affected. The memo-persistence accounting in Amendment 1 and the `promote_file`
+device-boundary rule in Amendment 2 are untouched. The −25% figure itself is qualified
+above rather than retracted, and no benchmark was re-run.
+
+**Coverage.** `test_file_signature_of_dir_entry_rejects_directories` and
+`test_seed_existing_directory_named_like_a_font_does_not_poison_claim` pin the directory
+half of the seeding rule. The FIFO half is the same `is_file` predicate on the same branch
+and is not tested separately, because creating a FIFO from a Rust test would mean shelling
+out to `mkfifo`. `test_scan_mkv_files_honors_ignore_paths_for_individual_files` and
+`test_scan_mkv_files_reports_resolved_paths_under_non_canonical_root` pin the two traversal
+contracts above.

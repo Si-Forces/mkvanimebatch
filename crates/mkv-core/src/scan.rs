@@ -474,18 +474,21 @@ pub fn scan_mkv_files(
     ignore_paths: Option<&HashSet<PathBuf>>,
 ) -> Vec<ParsedFile> {
     let mut results = Vec::new();
-    // Resolve the root exactly once. The walk below keys its dedup sets and its
-    // `ignore_paths` comparison against paths spelled relative to this root, so the root
-    // itself must be canonical: a relative or symlinked entry point would otherwise be
-    // compared as-is against the canonicalized `resolved_ignores` and never match.
-    let root = dir_path
-        .canonicalize()
-        .unwrap_or_else(|_| dir_path.to_path_buf());
+    // Resolve the root exactly once, and record whether that resolution succeeded. The walk
+    // below keys its dedup sets and its `ignore_paths` comparison against paths spelled relative
+    // to this root, so the root itself must be canonical: a relative or symlinked entry point
+    // would otherwise be compared as-is against the canonicalized `resolved_ignores` and never
+    // match. A root that failed to resolve is not canonical either, and the flag is what stops
+    // every descendant from inheriting that.
+    let (root, root_is_canonical) = match dir_path.canonicalize() {
+        Ok(canonical) => (canonical, true),
+        Err(_) => (dir_path.to_path_buf(), false),
+    };
     // Each stack entry records whether its directory path is already canonical. A path built
     // beneath a canonical root is canonical, but a symlinked directory is recorded under its
     // unresolved spelling, so everything beneath one is non-canonical too and must still be
     // resolved. Symlink-free trees keep skipping `realpath` entirely.
-    let mut stack = vec![(root.clone(), true)];
+    let mut stack = vec![(root.clone(), root_is_canonical)];
     let mut visited_dirs = HashSet::new();
     visited_dirs.insert(root);
     let mut visited_files = HashSet::new();
@@ -496,11 +499,7 @@ pub fn scan_mkv_files(
                 .collect()
         })
         .unwrap_or_default();
-    let is_ignored = |p: &Path| -> bool {
-        resolved_ignores
-            .iter()
-            .any(|ig| p == ig || p.starts_with(ig))
-    };
+    let is_ignored = |p: &Path| -> bool { resolved_ignores.iter().any(|ig| p.starts_with(ig)) };
 
     while let Some((current_dir, dir_is_canonical)) = stack.pop() {
         let entries = match std::fs::read_dir(&current_dir) {
@@ -521,19 +520,9 @@ pub fn scan_mkv_files(
             };
 
             // A regular entry beneath an already-canonical directory needs no `realpath` — the
-            // walk built its path from a canonical prefix. Everything else does: a symlink names
-            // its target through a second spelling, and `dir_is_canonical` is false for
-            // everything beneath a symlinked directory, which is recorded under its unresolved
-            // spelling. Symlink-free trees keep skipping `realpath` entirely.
+            // walk built its path from a canonical prefix. A symlink names its target through a
+            // second spelling, so it is never canonical however it was reached.
             let entry_is_canonical = dir_is_canonical && !file_type.is_symlink();
-
-            let resolve_entry = |p: &Path| -> PathBuf {
-                if entry_is_canonical {
-                    p.to_path_buf()
-                } else {
-                    p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
-                }
-            };
 
             let is_file = file_type.is_file() || (file_type.is_symlink() && path.is_file());
             let is_dir = file_type.is_dir() || (file_type.is_symlink() && path.is_dir());
@@ -543,7 +532,11 @@ pub fn scan_mkv_files(
                     .extension()
                     .is_some_and(|e| e.eq_ignore_ascii_case("mkv"))
                 {
-                    let key = resolve_entry(&path);
+                    let key = if entry_is_canonical {
+                        path.clone()
+                    } else {
+                        path.canonicalize().unwrap_or_else(|_| path.clone())
+                    };
                     if !is_ignored(&key) && visited_files.insert(key) {
                         results.push(create_parsed_file(&path));
                     }
@@ -554,7 +547,11 @@ pub fn scan_mkv_files(
                 {
                     continue;
                 }
-                let canon = resolve_entry(&path);
+                let canon = if entry_is_canonical {
+                    path.clone()
+                } else {
+                    path.canonicalize().unwrap_or_else(|_| path.clone())
+                };
                 if is_ignored(&canon) || !visited_dirs.insert(canon) {
                     continue;
                 }
@@ -642,28 +639,34 @@ impl FileSignature {
         Self { size, mtime_ns }
     }
 
-    /// Signature for a directory entry, equal to [`FileSignature::of`] on the entry's path.
+    /// Signature for a directory entry, or `None` when the entry does not resolve to a
+    /// regular file.
     ///
     /// The symlink decision is taken from `entry`, never from `meta`, so a caller that already
     /// resolved the metadata still gets the resolved signature for a link. A symlinked entry
     /// costs the second `stat` that `DirEntry::metadata`'s `lstat`-equivalence forces. A regular
-    /// one costs no syscall beyond the type the entry already carries -- see the note on that
-    /// lookup below.
+    /// one costs no syscall beyond the type the entry already carries.
     ///
     /// `meta` is an argument because `DirEntry::metadata` is not cached, so reading it inside
     /// this function would `lstat` an entry the caller has already stat'ed. It must be the value
-    /// `entry.metadata()` returned for `entry`: any other value signs a different file, and the
-    /// mismatch is silent, because matching a memo is this type's entire job.
+    /// `entry.metadata()` returned for `entry`: any other value signs a different file, and
+    /// the mismatch is silent, because matching a memo is this type's entire job.
+    ///
+    /// A symlink is resolved before the test, because `meta` reports the link itself and so
+    /// cannot answer whether the *target* is a regular file. The test is `is_file`, not
+    /// `!is_dir`: anything that is not a regular file — a directory, a FIFO, a socket, a
+    /// device node — carries a `len()` describing the object rather than its content, and
+    /// signing one misreports a size and, for a FIFO, blocks a reader in `File::open`.
     pub fn of_dir_entry(entry: &std::fs::DirEntry, meta: &std::fs::Metadata) -> Option<Self> {
-        // The type comes from the directory entry itself, so a regular entry is not re-`lstat`ed
-        // for it. Where a filesystem reports no type in the dirent, std answers this from a
-        // `lstat`. A type that cannot be read at all falls through to the regular arm and signs
-        // whatever `meta` the caller read; the branch this replaces could not fail that way,
-        // because it branched on metadata the caller already held.
+        // An entry whose type cannot be read at all falls through to the second arm and signs
+        // whatever `meta` the caller read. That arm is not unconditional, though: it still
+        // tests the caller's metadata, so an unreadable type costs a `stat`, not a blind
+        // signature.
         if entry.file_type().is_ok_and(|t| t.is_symlink()) {
-            Self::of(&entry.path())
+            let resolved = entry.path().metadata().ok()?;
+            resolved.is_file().then(|| Self::from_metadata(&resolved))
         } else {
-            Some(Self::from_metadata(meta))
+            meta.is_file().then(|| Self::from_metadata(meta))
         }
     }
 }
