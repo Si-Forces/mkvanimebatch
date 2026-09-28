@@ -360,6 +360,8 @@ impl FontRegistry {
         for entry in entries.flatten() {
             let path = entry.path();
             let is_font = path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+                // `FONT_EXTENSIONS` is dot-prefixed and `Path::extension` is not. `strip_prefix`
+                // borrows a subslice rather than formatting, so this costs no allocation.
                 FONT_EXTENSIONS
                     .iter()
                     .any(|f| f.strip_prefix('.').unwrap_or(f).eq_ignore_ascii_case(e))
@@ -369,9 +371,6 @@ impl FontRegistry {
             }
 
             if let Ok(meta) = entry.metadata() {
-                if meta.is_dir() {
-                    continue;
-                }
                 let file_name = entry.file_name().to_string_lossy().into_owned();
 
                 if let Some(sig) = FileSignature::of_dir_entry(&entry, &meta) {

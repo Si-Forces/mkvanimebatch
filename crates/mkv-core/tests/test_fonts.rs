@@ -297,6 +297,36 @@ fn test_seed_existing_broken_symlink_does_not_poison_claim() {
     );
 }
 
+/// A directory carrying a font extension, and a symlink to one, are not fonts. Neither may
+/// enter `claimed_name_size`, and the directory's own `Metadata::len()` is the size that
+/// would poison it — so a claim of exactly that name and length must still be granted.
+#[cfg(unix)]
+#[test]
+fn test_seed_existing_directory_named_like_a_font_does_not_poison_claim() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempdir().unwrap();
+    let fonts_dir = tmp.path().join("fonts");
+    fs::create_dir_all(&fonts_dir).unwrap();
+
+    let real_dir = fonts_dir.join("RealDir.otf");
+    fs::create_dir_all(&real_dir).unwrap();
+    let link = fonts_dir.join("Linked.otf");
+    symlink(&real_dir, &link).unwrap();
+
+    let mgr = FontRegistry::new(fonts_dir, None);
+
+    let dir_len = fs::metadata(&real_dir).unwrap().len();
+    assert!(
+        mgr.claim("Linked.otf", dir_len).is_some(),
+        "a symlink to a directory must not deny a claim of its name and the directory's byte length"
+    );
+    assert!(
+        mgr.claim("RealDir.otf", dir_len).is_some(),
+        "a directory must not deny a claim of its name and its own byte length"
+    );
+}
+
 #[test]
 fn test_cleanup_staging() {
     let tmp = tempdir().unwrap();
@@ -416,12 +446,23 @@ fn test_font_hash_memo_save_is_noop_when_not_dirty() {
     );
 }
 
+/// Removes the memo on every exit path, including a failed assertion, so a red test never
+/// strands a file in the crate directory.
+struct RemoveOnDrop(PathBuf);
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
 /// `FontHashMemo::save` with a bare filename (no directory component) must save to the current
 /// working directory without `ENOENT`.
 #[test]
 fn test_font_hash_memo_save_bare_filename() {
     let filename = format!("test_bare_font_memo_{}.json", std::process::id());
     let path = PathBuf::from(&filename);
+    let _cleanup = RemoveOnDrop(path.clone());
     let mut memo = FontHashMemo::new(path.clone());
     let sig = FileSignature {
         size: 100,
@@ -430,9 +471,10 @@ fn test_font_hash_memo_save_bare_filename() {
     memo.put(Path::new("dummy.ttf"), sig, "hash123".to_string());
     memo.save();
 
-    let exists = path.exists();
-    let _ = fs::remove_file(&path);
-    assert!(exists, "saving bare filename should succeed without ENOENT");
+    assert!(
+        path.exists(),
+        "saving bare filename should succeed without ENOENT"
+    );
 }
 
 #[test]

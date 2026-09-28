@@ -727,10 +727,10 @@ fn test_scan_mkv_files_reports_resolved_paths_under_non_canonical_root() {
     );
 }
 
-/// `of_dir_entry` derives a signature from a `DirEntry` without re-`stat`ing it: it must agree
-/// with `FileSignature::of` for a regular entry, must report a symlink under its resolved
-/// signature, and must keep working once the entry's file is gone. That a symlink's own size and
-/// mtime really do differ is pinned by `test_file_signature_resolved_differs_from_symlink_own_metadata`.
+/// `of_dir_entry` agrees with `FileSignature::of` for a regular entry and a symlink to a regular
+/// file, reuses the caller's metadata (proven by deleting the file afterwards), and additionally
+/// returns `None` for anything that is not a regular file. A symlink's own size and mtime really do
+/// differ, as pinned by `test_file_signature_resolved_differs_from_symlink_own_metadata`.
 #[cfg(unix)]
 #[test]
 fn test_file_signature_of_dir_entry_matches_resolved_of() {
@@ -775,6 +775,46 @@ fn test_file_signature_of_dir_entry_matches_resolved_of() {
         FileSignature::of_dir_entry(target_entry, &target_meta),
         Some(expected_target),
         "of_dir_entry must reuse the caller's metadata, not re-stat the entry"
+    );
+}
+
+/// A directory named with a font extension, or a symlink to one, must never be signed,
+/// because its `Metadata::len()` is the directory's own byte length rather than any file size.
+#[cfg(unix)]
+#[test]
+fn test_file_signature_of_dir_entry_rejects_directories() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempdir().unwrap();
+    let dir = tmp.path().join("dir.otf");
+    fs::create_dir(&dir).unwrap();
+    let link = tmp.path().join("link.otf");
+    symlink(&dir, &link).unwrap();
+
+    let entries = fs::read_dir(tmp.path())
+        .unwrap()
+        .map(|e| e.unwrap())
+        .collect::<Vec<_>>();
+    let link_entry = entries.iter().find(|e| e.path() == link).unwrap();
+    let link_meta = link_entry.metadata().unwrap();
+    assert!(
+        link_meta.is_symlink(),
+        "precondition: DirEntry::metadata must not follow the link"
+    );
+    assert!(
+        FileSignature::of_dir_entry(link_entry, &link_meta).is_none(),
+        "a symlink to a directory must not produce a font signature"
+    );
+
+    let dir_entry = entries.iter().find(|e| e.path() == dir).unwrap();
+    let dir_meta = dir_entry.metadata().unwrap();
+    assert!(
+        dir_meta.is_dir(),
+        "precondition: a real directory entry must report a directory"
+    );
+    assert!(
+        FileSignature::of_dir_entry(dir_entry, &dir_meta).is_none(),
+        "a real directory must not produce a font signature"
     );
 }
 
