@@ -318,7 +318,7 @@ sequenceDiagram
 ### 4.4 Remux & Transcode Orchestration (`remux.rs`)
 
 1. **Audio transcoding (FLAC to Opus)**:
-   - When the selected audio track is `A_FLAC`, `ffmpeg` encodes it to `audio.opus` in the item's scratch directory: `-c:a libopus -b:a <bitrate> -vbr on -compression_level <complexity> -application audio -threads <n>`.
+   - When the selected audio track is `A_FLAC`, `ffmpeg` encodes it to `audio.opus` in the item's scratch directory: `-y -analyzeduration 0 -probesize 1M -v warning -threads <n> -i <video> -map 0:a:<index> -c:a libopus -b:a <bitrate> -vbr on -compression_level <complexity> -application audio <output>` (`-threads` is an input option, so it precedes `-i`).
      - Bitrate: preset or `--bitrate` (default `192k`).
      - Complexity: `0-10` (default `5`; `10` in the Hi-Fi preset). ADR-0013 lowered the default from 10.
      - Threads: without `--ffmpeg-threads`, the governor default `(physical_cores / workers).clamp(1, 4)`.
@@ -619,7 +619,7 @@ sequenceDiagram
 1. **Atomic file promotion (`promote_file`)**:
    - Outputs are staged in temporary directories created inside the destination: `.tmp_remux_*` and `.tmp_extract_*` (via `tempdir_in`) and `<fonts_dir>/.font_staging/`.
    - Promotion is a filesystem rename (`fs::rename`).
-   - If the rename fails and the destination exists (Windows `rename` refuses to replace), the destination is moved to a `<name>.bak.<token>` backup, the staged file is renamed into place, and the backup is removed; if that rename fails, the backup is renamed back.
+   - If the rename fails and the destination exists (Windows `rename` refuses to replace), the destination is moved to a backup beside it whose extension is replaced by `bak.<token>` — `Path::with_extension` drops the original, so `Ep01.mkv` becomes `Ep01.bak.<token>`. The staged file is then renamed into place and the backup is removed; if that rename fails, the backup is renamed back.
    - If the rename crosses devices (a typed `CrossesDevices` kind, `EXDEV`/18 off Windows, `ERROR_NOT_SAME_DEVICE`/17 on Windows), the file is copied to a temporary sibling in the destination directory and then renamed over the target.
    - **That copy is reached only for a device boundary** ([ADR-0013 amendment 2](./docs/adr/0013-asynchronous-probing-and-transcode-governance-performance-overhaul.md#amendment-2--2026-09-28-spawn_blocking-scope)). Any other rename failure (missing source, locked destination, permissions) returns the rename error rather than duplicating a multi-gigabyte payload to fail the same way. `promote_file` is synchronous throughout; promotion is not offloaded to Tokio's blocking pool, which would let a cancelled item detach a still-running copy.
 2. **Fail-fast input validation (`BatchRequest::validate`)**:

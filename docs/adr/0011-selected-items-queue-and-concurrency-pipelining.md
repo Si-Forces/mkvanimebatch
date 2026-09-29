@@ -1,6 +1,6 @@
 # 0011. Selected Items Execution Queue, Concurrency Pipelining, and Enriched Track Assignment
 
-> **Status**: Accepted (Amended by ADR-0012, ADR-0013, ADR-0014)
+> **Status**: Accepted (Amended by ADR-0012, ADR-0013, ADR-0014; amended 2026-09-29)
 > **Date**: 2026-08-01
 > **Context**: Media Engine Context & Desktop Application Bridge
 > **Amends**: ADR-0008
@@ -36,3 +36,14 @@ We decided to establish an explicit execution queue contract, a unified global c
 - Allows desktop users to prioritize, reorder, or selectively remux specific episodes.
 - Gives users full control over external subtitle synchronization and metadata tagging.
 - Preserves 100% backward compatibility for headless CLI invocations and existing presets.
+
+## Amendment — 2026-09-29 (CLI backward compatibility consequence)
+
+The "Preserves 100% backward compatibility for headless CLI invocations and existing presets"
+consequence above no longer holds. The deprecated `--sub-assignments` alias was removed from
+`mkv-cli` in the 2026-09-28 cleanup; passing it now fails with
+`Unknown argument: --sub-assignments` (`--assignments` still accepts the legacy flat map). ADR-0012
+Decision 4 records that removal.
+
+The contract this ADR defines is unchanged: `selected_items`, the unified global queue, the
+dual governor, and 1:1 subtitle overrides behave as specified above.
