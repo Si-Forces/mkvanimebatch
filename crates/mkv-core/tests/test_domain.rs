@@ -620,21 +620,24 @@ fn test_promote_file_cross_device_copy() {
 
     let src_dir = tempdir().unwrap();
     let src_dev = std::fs::metadata(src_dir.path()).unwrap().dev();
-    let other_fs = ["/var/tmp", "/dev/shm", "/run"]
+    let dest_dir = ["/var/tmp", "/dev/shm", "/run"]
         .into_iter()
         .map(std::path::PathBuf::from)
-        .find(|p| p.is_dir() && std::fs::metadata(p).is_ok_and(|m| m.dev() != src_dev));
-    let Some(other_fs) = other_fs else {
-        eprintln!("skipped: no second filesystem available to force a cross-device rename");
+        .find_map(|p| {
+            if !p.is_dir() || !std::fs::metadata(&p).is_ok_and(|m| m.dev() != src_dev) {
+                return None;
+            }
+            Builder::new().prefix("mkvcore_test_").tempdir_in(&p).ok()
+        });
+    let Some(dest_dir) = dest_dir else {
+        eprintln!(
+            "skipped: no writable second filesystem available to force a cross-device rename"
+        );
         return;
     };
 
     let staged = src_dir.path().join("staged.bin");
     std::fs::write(&staged, b"cross-device payload").unwrap();
-    let dest_dir = Builder::new()
-        .prefix("mkvcore_test_")
-        .tempdir_in(&other_fs)
-        .unwrap();
     let dest = dest_dir.path().join("final.bin");
 
     promote_file(&staged, &dest).expect("a genuine EXDEV must fall through to the copy");

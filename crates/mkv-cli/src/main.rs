@@ -138,7 +138,7 @@ where
             }
             "--bitrate" => {
                 let val = next_value(&mut it, flag)?;
-                let digits = val.strip_suffix(['k', 'M']).unwrap_or(&val);
+                let digits = val.strip_suffix(['k', 'K', 'm', 'M']).unwrap_or(&val);
                 if !digits.parse::<u32>().is_ok_and(|n| n > 0) {
                     return Err(format!(
                         "Invalid bitrate format: '{val}'. Must be a positive value like 128k, 192k, 1M."
@@ -500,6 +500,8 @@ mod tests {
 
         assert!(parse_args_from(["--bitrate", "128k"]).is_ok());
         assert!(parse_args_from(["--bitrate", "192k"]).is_ok());
+        assert!(parse_args_from(["--bitrate", "192K"]).is_ok());
+        assert!(parse_args_from(["--bitrate", "1m"]).is_ok());
         assert!(parse_args_from(["--bitrate", "1M"]).is_ok());
     }
 

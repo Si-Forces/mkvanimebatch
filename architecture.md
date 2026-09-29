@@ -152,6 +152,7 @@ mkvanimebatch/
     └── ui/                          # Webview frontend (plain ES modules and CSS)
         ├── index.html               # Application shell, views, modals
         ├── style.css                # Layout, cards, light/dark themes, system font stacks
+        ├── theme-init.js            # Early stored or OS theme application before stylesheet (classic script)
         ├── os-detect.js             # Adds an is-windows/is-mac/is-linux class to <html> (classic script)
         ├── app.js                   # Startup, presets, theme, telemetry gauges, log console, subtitle assignment modal, window controls
         ├── queue-state.js           # Queue state factories, JobEvent reducer, selection and order helpers
