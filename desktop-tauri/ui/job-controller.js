@@ -400,7 +400,7 @@ export class JobController {
   onDone(code) {
     if (!this.running || this.jobId === null) return;
     const tracker = this.runtime.queueFor(this.mode);
-    // `job-done` codes: 0 completed, -1 cancelled, 1 otherwise (architecture.md 5.1, Job Event Payloads).
+    // `job-done` codes: 0 completed, -1 cancelled, 1 otherwise (architecture.md §5.1).
     const cancelled = this.runtime.coordinator.isStopping || tracker.state?.batchCancelled === true || code === -1;
     tracker.finalize(code, cancelled);
     const succeeded = Boolean(tracker.state?.batchSuccess) && code === 0;
