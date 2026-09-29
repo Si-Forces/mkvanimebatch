@@ -299,7 +299,7 @@ USAGE:
 OPTIONS:
     --input-dir <DIR>          Source directory containing anime video releases
     --out-dir <DIR>            Destination output directory for processed files
-    --preset <PROFILE>         Preset profile (balanced, fast, hifi, custom)
+    --preset <PROFILE>         Preset profile (balanced, fast, hifi, custom; also default, high_quality/high-quality)
     --selected-item <PATH>     Include a single release item (repeatable, preserves commas)
     --selected-items <LIST>    Include comma-separated release items (repeatable)
     --assignments <FILE>       Path to JSON file mapping episode IDs to track paths
@@ -311,10 +311,10 @@ OPTIONS:
     --extract                  Extract best-match subtitles, fonts, chapters, and covers
     --dry-run                  Simulate batch processing without executing remux commands
     --bitrate <RATE>           Opus audio transcoding bitrate (default: 192k)
-    --complexity <0-10>        Opus compression complexity level (default: 5)
-    --workers <N>              Number of concurrent worker tasks (default: physical cores clamped 1-16)
-    --io-jobs <N>              Bounded disk I/O jobs concurrency limit (default: 2)
-    --ffmpeg-threads <N|auto>  CPU threads allocated per audio transcode job (default: auto)
+    --complexity <0-10>        Opus compression complexity level, 0-10 (default: 5)
+    --workers <N>              Number of concurrent worker tasks, 1-64 (default: physical cores clamped 1-16)
+    --io-jobs <N>              Disk I/O jobs concurrency limit, 0-64 (0 uses the worker count) (default: 2)
+    --ffmpeg-threads <N|auto>  CPU threads allocated per audio transcode job, 1-32 (default: auto)
     --sub-offset <SEC>         Subtitle timestamp offset in seconds
     --no-cache                 Bypass persistent inspect cache
     --clear-cache              Clear persistent inspection cache and exit
