@@ -199,6 +199,9 @@ function initSteppers() {
 
 const THEME_KEY = "mkv-theme";
 
+// The last explicitly chosen theme; a blocked or full storage must not lose the choice.
+let chosenTheme = null;
+
 function setDocumentTheme(theme) {
   document.documentElement.setAttribute("data-theme", theme);
 }
@@ -226,7 +229,7 @@ function initTheme() {
   }
   const darkScheme = window.matchMedia?.("(prefers-color-scheme: dark)");
   const follow = dark => {
-    if (!storedTheme()) setDocumentTheme(dark ? "dark" : "light");
+    if (!chosenTheme && !storedTheme()) setDocumentTheme(dark ? "dark" : "light");
   };
   follow(darkScheme?.matches ?? true);
   darkScheme?.addEventListener("change", e => follow(e.matches));
@@ -234,6 +237,7 @@ function initTheme() {
 
 function toggleTheme() {
   const theme = document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark";
+  chosenTheme = theme;
   try {
     localStorage.setItem(THEME_KEY, theme);
   } catch {}

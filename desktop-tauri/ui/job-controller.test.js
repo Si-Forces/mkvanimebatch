@@ -205,14 +205,19 @@ test("job controller replays early job-done arriving while run_job is in flight"
 
 test("validateConcurrency accepts the documented bounds, preserves 0 io-jobs, and rejects everything else", () => {
   assert.equal(validateConcurrency({}), null);
-  assert.equal(validateConcurrency({ workers: null, io_jobs: null }), null);
+  assert.equal(validateConcurrency({ workers: null, io_jobs: null, ffmpeg_threads: null }), null);
   assert.equal(validateConcurrency({ workers: 1, io_jobs: 0 }), null);
   assert.equal(validateConcurrency({ workers: 64, io_jobs: 64 }), null);
+  assert.equal(validateConcurrency({ ffmpeg_threads: 1 }), null);
+  assert.equal(validateConcurrency({ ffmpeg_threads: 32 }), null);
   for (const workers of [0, -1, 65, "abc", 4.5, NaN]) {
     assert.ok(validateConcurrency({ workers }), `workers ${workers} must be rejected`);
   }
   for (const ioJobs of [-1, 65, "abc", 1.5, NaN]) {
     assert.ok(validateConcurrency({ io_jobs: ioJobs }), `io_jobs ${ioJobs} must be rejected`);
+  }
+  for (const ffmpegThreads of [0, -1, 33, "abc", 2.5, NaN]) {
+    assert.ok(validateConcurrency({ ffmpeg_threads: ffmpegThreads }), `ffmpeg_threads ${ffmpegThreads} must be rejected`);
   }
 });
 
@@ -498,13 +503,13 @@ test("restored controller filters IDs, targets Stop, and releases controls on co
   assert.equal(elements.get("remux-stop").disabled, true);
   controller.handleSnapshotSignal("done", { job_id: 41, mode: "remux", code: 0 });
   assert.equal(controller.lifecycle, "stopping");
-  controller.handleSnapshotSignal("done", { job_id: 42, mode: "remux", code: 130 });
+  controller.handleSnapshotSignal("done", { job_id: 42, mode: "remux", code: -1 });
   assert.equal(controller.lifecycle, "cancelled");
   assert.equal(controller.jobId, null);
   assert.equal(coordinator.activeMode, null);
   assert.equal(removed, 2);
   assert.deepEqual(telemetry, [true, true, false, false]);
-  controller.handleSnapshotSignal("done", { job_id: 42, mode: "remux", code: 130 });
+  controller.handleSnapshotSignal("done", { job_id: 42, mode: "remux", code: -1 });
   assert.equal(removed, 2);
 });
 
@@ -535,14 +540,14 @@ test("a rejected Stop with no terminal yet reports the job as still running, the
   assert.equal(coordinator.isStopping, false);
   assert.equal(coordinator.activeMode, "remux");
 
-  controller.handleSnapshotSignal("done", { job_id: 24, mode: "remux", code: 130 });
+  controller.handleSnapshotSignal("done", { job_id: 24, mode: "remux", code: -1 });
   assert.equal(controller.lifecycle, "cancelled");
   assert.equal(coordinator.activeMode, null);
 });
 
 test("completion during a pending Stop preserves the terminal state if Stop rejects", async t => {
   const { controller, tracker, coordinator, stopping, rejectStop } = restoredControllerWithPendingStop(t);
-  controller.handleSnapshotSignal("done", { job_id: 24, mode: "remux", code: 130 });
+  controller.handleSnapshotSignal("done", { job_id: 24, mode: "remux", code: -1 });
   rejectStop(new Error("already finished"));
   await stopping;
   assert.equal(controller.lifecycle, "cancelled");

@@ -172,7 +172,7 @@ test("bootstrap binds IPC before snapshot, restores active subset and targets St
   await ipc.elements.get("remux-stop").handlers.get("click")();
   assert.deepEqual(ipc.calls.find(([command]) => command === "stop_job"), ["stop_job", { jobId: 42 }]);
   ipc.emit("job-event", { version: 1, type: "batch_complete", job_id: 42, mode: "remux", success: false, cancelled: true });
-  ipc.emit("job-done", { job_id: 42, mode: "remux", code: 130 });
+  ipc.emit("job-done", { job_id: 42, mode: "remux", code: -1 });
   assert.match(ipc.elements.get("remux-status").innerHTML, /Cancelled/);
   assert.equal(ipc.elements.get("remux-stop").disabled, true);
   assert.deepEqual(ipc.removed.filter(name => name === "job-event" || name === "job-done").sort(), ["job-done", "job-event"]);
@@ -226,4 +226,29 @@ test("no snapshot preserves pre-run selection and cleans up bootstrap listeners"
   assert.equal(ipc.handlers.has("job-event"), false);
   assert.equal(ipc.handlers.has("job-done"), false);
   assert.equal(ipc.calls.filter(([command]) => command === "inspect_directory").length, 1);
+});
+
+test("explicit toggle survives a failed storage write when the OS scheme changes", async t => {
+  const ipc = bootstrapHarness(t);
+  const priorStorage = globalThis.localStorage;
+  const attributes = new Map();
+  const schemeHandlers = [];
+  globalThis.localStorage = { getItem: () => null, setItem: () => { throw new Error("storage blocked"); } };
+  globalThis.document.documentElement = {
+    setAttribute: (name, value) => attributes.set(name, value),
+    getAttribute: name => attributes.get(name) ?? null,
+    classList: { toggle() {} },
+  };
+  globalThis.window.matchMedia = () => ({ matches: false, addEventListener: (name, handler) => schemeHandlers.push(handler) });
+  const themeButton = new BootElement();
+  ipc.elements.set("btn-theme", themeButton);
+  t.after(() => { globalThis.localStorage = priorStorage; });
+
+  await ipc.mount("sticky-theme");
+  assert.equal(attributes.get("data-theme"), "light");
+  themeButton.handlers.get("click")();
+  assert.equal(attributes.get("data-theme"), "dark");
+
+  schemeHandlers.forEach(handler => handler({ matches: false }));
+  assert.equal(attributes.get("data-theme"), "dark");
 });
