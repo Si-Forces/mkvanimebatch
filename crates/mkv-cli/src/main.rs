@@ -6,7 +6,9 @@ use std::str::FromStr;
 
 use mkv_core::manifest::{generate_inspection_manifest, InspectionManifest};
 use mkv_core::pipeline::{create_event_channel, BatchPipeline, CancellationToken, PipelineMode};
-use mkv_core::request::{clean_relative_path, parse_assignments_json, BatchRequest};
+use mkv_core::request::{
+    clean_relative_path, is_valid_bitrate, parse_assignments_json, BatchRequest,
+};
 use mkv_core::scan::PersistentInspectCache;
 
 #[derive(Debug)]
@@ -138,10 +140,9 @@ where
             }
             "--bitrate" => {
                 let val = next_value(&mut it, flag)?;
-                let digits = val.strip_suffix(['k', 'K', 'm', 'M']).unwrap_or(&val);
-                if !digits.parse::<u32>().is_ok_and(|n| n > 0) {
+                if !is_valid_bitrate(&val) {
                     return Err(format!(
-                        "Invalid bitrate format: '{val}'. Must be a positive value like 128k, 192k, 1M."
+                        "Invalid bitrate format: '{val}'. Must be a positive integer with an optional k/K/M suffix, like 128k or 192k."
                     ));
                 }
                 request.bitrate = Some(val);
@@ -501,8 +502,8 @@ mod tests {
         assert!(parse_args_from(["--bitrate", "128k"]).is_ok());
         assert!(parse_args_from(["--bitrate", "192k"]).is_ok());
         assert!(parse_args_from(["--bitrate", "192K"]).is_ok());
-        assert!(parse_args_from(["--bitrate", "1m"]).is_ok());
         assert!(parse_args_from(["--bitrate", "1M"]).is_ok());
+        assert!(parse_args_from(["--bitrate", "1m"]).is_err());
     }
 
     #[test]
