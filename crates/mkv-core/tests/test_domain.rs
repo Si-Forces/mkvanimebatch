@@ -410,6 +410,29 @@ fn test_audio_all_commentary_still_ranks_japanese_first() {
     assert_eq!(selected_pos(&tracks, 0), 2);
 }
 
+#[test]
+fn test_audio_commentary_word_matching() {
+    // Both tracks are identical apart from the candidate name, so the earliest-position
+    // tie-break only applies when the candidate is NOT excluded as commentary.
+    let cases = [
+        ("Commentary", 2),
+        ("Producer Comment", 2),
+        ("Audio Description", 2),
+        ("AD", 2),
+        ("Extension", 2),
+        ("Broadcast", 1),
+        ("Addition", 1),
+        ("Commentaries", 1),
+    ];
+    for (name, expected_pos) in cases {
+        let tracks = [
+            audio("eng", 2, name, 1, "A_AAC"),
+            audio("eng", 2, "Main Audio", 2, "A_AAC"),
+        ];
+        assert_eq!(selected_pos(&tracks, 0), expected_pos, "{name:?}");
+    }
+}
+
 // ─── NAMING & PATH HELPER TESTS ──────────────────────────────────────────────
 
 #[test]
