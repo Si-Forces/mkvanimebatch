@@ -143,7 +143,7 @@ Download `mkv-cli` from [GitHub Releases](https://github.com/sifahaz/mkvanimebat
 | `--workers <N>` | Number of concurrent worker tasks (1–64) | Core count clamped to 1–16 |
 | `--io-jobs <N>` | Concurrency limit for disk-heavy work (0–64; `0` uses the worker count) | `2` |
 | `--ffmpeg-threads <N\|auto>` | CPU threads per audio transcode job (1–32); `auto` is case-insensitive | `auto`: `(cores / workers)` clamped to 1–4 |
-| `--bitrate <RATE>` | Opus bitrate: a positive integer with an optional `k`/`K` or `m`/`M` suffix (e.g. `128k`, `192K`, `1M`) | Preset bitrate, else `192k` |
+| `--bitrate <RATE>` | Opus bitrate: a positive integer with an optional `k`/`K` or `M` suffix (e.g. `128k`, `192K`); lowercase `m` is rejected | Preset bitrate, else `192k` |
 | `--complexity <0-10>` | Opus encoder complexity | Preset complexity, else `5` |
 | `--extract` | Run batch extraction instead of remuxing | Off |
 | `--remux` | Run batch remuxing | On, unless the executable is named `mkv-extract` |

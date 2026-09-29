@@ -51,6 +51,17 @@ fn has_mkv_extension(path: &str) -> bool {
         .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case("mkv"))
 }
 
+/// A positive integer with an optional `k`/`K` or `M` suffix, as ffmpeg's `-b:a` reads it.
+/// Lowercase `m` is rejected: ffmpeg treats it as milli, so `1m` would silently encode at the
+/// encoder's floor instead of failing.
+pub fn is_valid_bitrate(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    let digits = trimmed.strip_suffix(['k', 'K', 'M']).unwrap_or(trimmed);
+    !digits.is_empty()
+        && digits.bytes().all(|b| b.is_ascii_digit())
+        && digits.parse::<u64>().is_ok_and(|n| n > 0)
+}
+
 /// Normalizes a relative path string by converting backslashes to forward slashes,
 /// collapsing redundant separators, and stripping relative `.` (`CurDir`) components.
 ///
@@ -256,17 +267,8 @@ impl BatchRequest {
             }
         }
 
-        if let Some(b) = &self.bitrate {
-            let trimmed = b.trim();
-            let digits = trimmed
-                .strip_suffix(['k', 'K', 'm', 'M'])
-                .unwrap_or(trimmed);
-            if digits.is_empty()
-                || !digits.chars().all(|c| c.is_ascii_digit())
-                || digits.parse::<u64>().unwrap_or(0) == 0
-            {
-                return Err(format!("Invalid audio bitrate format: '{b}'"));
-            }
+        if let Some(b) = self.bitrate.as_deref().filter(|b| !is_valid_bitrate(b)) {
+            return Err(format!("Invalid audio bitrate format: '{b}'"));
         }
 
         if let Some(c) = self.complexity {
@@ -416,7 +418,11 @@ impl BatchRequest {
             out_dir: self.out_dir,
             fonts_dir: self.fonts_dir,
             assets_dir: self.assets_dir,
-            bitrate: self.bitrate.or(preset_bitrate).unwrap_or(defaults.bitrate),
+            bitrate: self
+                .bitrate
+                .map(|b| b.trim().to_owned())
+                .or(preset_bitrate)
+                .unwrap_or(defaults.bitrate),
             complexity: self
                 .complexity
                 .or(preset_complexity)
@@ -564,6 +570,14 @@ mod tests {
     }
 
     #[test]
+    fn test_into_pipeline_config_forwards_trimmed_bitrate() {
+        let dir = tempdir().unwrap();
+        let mut req = minimal_request(dir.path());
+        req.bitrate = Some(" 320K ".into());
+        assert_eq!(req.into_pipeline_config().unwrap().bitrate, "320K");
+    }
+
+    #[test]
     fn test_into_pipeline_config_default_workers_hardware_concurrency() {
         let dir = tempdir().unwrap();
         let config = minimal_request(dir.path()).into_pipeline_config().unwrap();
@@ -654,7 +668,7 @@ mod tests {
             req.bitrate = Some(ok.into());
             assert!(req.validate().is_ok(), "bitrate {ok:?} should be valid");
         }
-        for bad in ["", "k", "0k", "12.5k", "-192k", "192kb"] {
+        for bad in ["", "k", "0k", "12.5k", "-192k", "192kb", "1m"] {
             req.bitrate = Some(bad.into());
             assert_eq!(
                 req.validate().unwrap_err(),
@@ -800,18 +814,21 @@ mod tests {
         )
         .is_ok());
 
-        for (first, second) in [
-            ("ep01.mkv", "ep01.mkv"),
-            ("./ep01.mkv", "ep01.mkv"),
-            ("./ep01.mkv", r".\ep01.mkv"),
-            ("Season 1/ep01.mkv", "Season 1/./ep01.mkv"),
+        for (first, second, expected) in [
+            ("ep01.mkv", "ep01.mkv", "ep01.mkv"),
+            ("./ep01.mkv", "ep01.mkv", "ep01.mkv"),
+            ("./ep01.mkv", r".\ep01.mkv", "ep01.mkv"),
+            (
+                "Season 1/ep01.mkv",
+                "Season 1/./ep01.mkv",
+                "Season 1/ep01.mkv",
+            ),
         ] {
             let err = validate_with(
                 dir.path(),
                 vec![subtitle(first, &sub_path), subtitle(second, &sub_path)],
             )
             .unwrap_err();
-            let expected = clean_relative_path(second);
             assert_eq!(
                 err,
                 format!(
