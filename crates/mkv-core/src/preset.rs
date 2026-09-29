@@ -80,4 +80,24 @@ mod tests {
         }
         assert!(lookup_preset("non_existent").is_none());
     }
+
+    #[test]
+    fn test_preset_serialized_shape_excludes_description() {
+        let preset = lookup_preset("balanced").expect("built-in preset");
+        let value = serde_json::to_value(&preset).expect("preset serializes");
+        let object = value.as_object().expect("preset serializes as an object");
+
+        let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["bitrate", "complexity", "icon", "id", "name"],
+            "PresetProfile's serialized key set is an IPC contract with the desktop UI"
+        );
+        assert!(
+            object["complexity"].is_u64(),
+            "complexity must stay a JSON number, got {}",
+            object["complexity"]
+        );
+    }
 }

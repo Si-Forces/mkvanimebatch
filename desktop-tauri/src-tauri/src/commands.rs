@@ -595,6 +595,44 @@ mod tests {
     }
 
     #[test]
+    fn emitted_job_event_carries_top_level_mode_and_job_id() {
+        let (app, events, _, _) = observed_app();
+        let (event_tx, event_rx) = mkv_core::pipeline::create_event_channel(8);
+        let (_, log_rx) = mkv_core::pipeline::create_log_channel(8);
+        let worker = async move {
+            // An engine-supplied `extra` entry doubles as the flattening probe: if
+            // `extra` stops being lifted, it nests and `mode` never reaches the top level.
+            let mut extra = serde_json::Map::new();
+            extra.insert("source".to_string(), "engine".into());
+            event_tx
+                .send(JobEvent::BatchStart {
+                    version: 1,
+                    total: 1,
+                    input_dir: "/anime".into(),
+                    items: None,
+                    extra,
+                })
+                .await
+                .unwrap();
+            event_tx.send(batch_complete(true, false)).await.unwrap();
+            Ok(PipelineSummary::default())
+        };
+        let job_id = start_remux(&app, CancellationToken::new(), event_rx, log_rx, worker);
+        app.state::<JobState>()
+            .wait_until_released(job_id, Duration::from_secs(2))
+            .unwrap();
+
+        let emitted = events.lock().unwrap();
+        let start = emitted
+            .iter()
+            .find(|event| event["type"] == "batch_start")
+            .expect("a batch must emit BatchStart");
+        assert_eq!(start["mode"], "remux");
+        assert_eq!(start["job_id"], job_id);
+        assert_eq!(start["source"], "engine");
+    }
+
+    #[test]
     fn forced_stop_aborts_only_worker_and_settles_once() {
         let (app, events, dones, _) = observed_app();
         let (event_tx, event_rx) = mkv_core::pipeline::create_event_channel(64);
