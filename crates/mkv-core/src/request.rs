@@ -17,7 +17,8 @@ pub struct TrackAssignment {
     pub target_video: String,
     /// Absolute or relative path to the asset file (e.g. subtitles or audio)
     pub asset_path: PathBuf,
-    /// Track type / role (e.g. "subtitle", "audio", "signs_songs"). Defaults to "subtitle".
+    /// Track type / role. Only `"subtitle"` is accepted; any other value fails validation.
+    /// Defaults to "subtitle".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub track_type: Option<String>,
     /// Optional ISO-639-2 language tag (e.g. "ind", "eng", "jpn")
@@ -324,10 +325,9 @@ impl BatchRequest {
                 }
 
                 let target_full = self.input_dir.join(&clean);
-                if !seen_videos.insert(clean) {
+                if !seen_videos.insert(clean.clone()) {
                     return Err(format!(
-                        "Multiple track assignments for target video '{}' are not supported; multi-track muxing is deferred",
-                        assignment.target_video
+                        "Multiple track assignments for target video '{clean}' are not supported; multi-track muxing is deferred"
                     ));
                 }
 
@@ -811,10 +811,11 @@ mod tests {
                 vec![subtitle(first, &sub_path), subtitle(second, &sub_path)],
             )
             .unwrap_err();
+            let expected = clean_relative_path(second);
             assert_eq!(
                 err,
                 format!(
-                    "Multiple track assignments for target video '{second}' are not supported; multi-track muxing is deferred"
+                    "Multiple track assignments for target video '{expected}' are not supported; multi-track muxing is deferred"
                 )
             );
         }
