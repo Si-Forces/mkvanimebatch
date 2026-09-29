@@ -41,6 +41,9 @@ export function validateConcurrency(request) {
   if (request.io_jobs != null && !isIntegerInRange(request.io_jobs, 0, 64)) {
     return `Invalid io-jobs value '${request.io_jobs}': must be an integer between 0 and 64.`;
   }
+  if (request.ffmpeg_threads != null && !isIntegerInRange(request.ffmpeg_threads, 1, 32)) {
+    return `Invalid ffmpeg-threads value '${request.ffmpeg_threads}': must be an integer between 1 and 32.`;
+  }
   return null;
 }
 
@@ -397,7 +400,8 @@ export class JobController {
   onDone(code) {
     if (!this.running || this.jobId === null) return;
     const tracker = this.runtime.queueFor(this.mode);
-    const cancelled = this.runtime.coordinator.isStopping || tracker.state?.batchCancelled === true || code === 130;
+    // `job-done` codes: 0 completed, -1 cancelled, 1 otherwise (architecture.md 5.1, Job Event Payloads).
+    const cancelled = this.runtime.coordinator.isStopping || tracker.state?.batchCancelled === true || code === -1;
     tracker.finalize(code, cancelled);
     const succeeded = Boolean(tracker.state?.batchSuccess) && code === 0;
     this.lifecycle = cancelled ? "cancelled" : (succeeded ? "done" : "failed");
