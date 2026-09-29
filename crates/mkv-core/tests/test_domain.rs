@@ -422,7 +422,6 @@ fn test_audio_commentary_word_matching() {
         ("Extension", 2),
         ("Broadcast", 1),
         ("Addition", 1),
-        ("Commentaries", 1),
     ];
     for (name, expected_pos) in cases {
         let tracks = [

@@ -1,3 +1,5 @@
+// Applies data-theme before the stylesheet paints. Mirrors initTheme() in app.js (same key and
+// OS-default rule). Must stay an external classic script: the CSP is `script-src 'self'`.
 (function () {
   const stored = (() => {
     try {
