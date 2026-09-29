@@ -4,13 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>MKV Anime Batch</title>
-  <!-- Applies data-theme before the stylesheet so the first paint is not a dark flash; app.js owns the real theme logic. This inline script runs only because the Tauri build hashes inline scripts into the csp in tauri.conf.json - tightening script-src by hand would break it silently. -->
-  <script>
-    const stored = (() => { try { return localStorage.getItem("mkv-theme"); } catch { return null; } })();
-    const osDark = window.matchMedia?.("(prefers-color-scheme: dark)")?.matches;
-    document.documentElement.dataset.theme =
-      stored === "light" || stored === "dark" ? stored : osDark === false ? "light" : "dark";
-  </script>
+  <script src="./theme-init.js"></script>
   <script src="./os-detect.js"></script>
   <link rel="stylesheet" href="style.css" />
 </head>
