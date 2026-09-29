@@ -783,6 +783,21 @@ mod tests {
         assert_eq!(filtered.items[1].id, "ep02.mkv");
     }
 
+    #[test]
+    fn test_select_items_rejects_unknown_selection() {
+        let manifest = make_test_manifest(
+            vec![make_test_item("ep01.mkv", "Episode 1", "Show")],
+            &[("Show", "sub.ass")],
+        );
+
+        let selected = vec!["ep01.mkv".to_string(), "missing.mkv".to_string()];
+
+        assert_eq!(
+            manifest.select_items(&selected).unwrap_err(),
+            "Selected items not found among discovered MKV files: missing.mkv"
+        );
+    }
+
     #[tokio::test]
     async fn test_subtitle_candidates_natural_sort_ordering() {
         let temp_dir = tempfile::tempdir().unwrap();

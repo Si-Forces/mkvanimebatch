@@ -10,21 +10,26 @@ use mkv_core::pipeline::{
 };
 use mkv_core::scan::{MkvmergeMetadata, PersistentInspectCache};
 
-/// Runs a batch to its end and returns its result with every event it emitted. The event
-/// buffer holds every event a small test batch emits, so no concurrent consumer is needed.
+/// Runs a batch to its end and returns its result with every event it emitted. The events are
+/// drained while the batch runs, so a batch emitting more events than the channel buffers can
+/// never park its sender.
 pub async fn run_batch(
     config: PipelineConfig,
     cancel_token: CancellationToken,
 ) -> (Result<PipelineSummary, String>, Vec<JobEvent>) {
     let (tx, mut rx) = create_event_channel(64);
-    let result = BatchPipeline::new(config, Some(tx), cancel_token)
-        .run()
-        .await;
+    let runner = tokio::spawn(async move {
+        BatchPipeline::new(config, Some(tx), cancel_token)
+            .run()
+            .await
+    });
+
     let mut events = Vec::new();
-    while let Ok(event) = rx.try_recv() {
+    while let Some(event) = rx.recv().await {
         events.push(event);
     }
-    (result, events)
+
+    (runner.await.expect("batch task panicked"), events)
 }
 
 /// One HEVC video track plus one Japanese stereo audio track. An `A_FLAC` audio codec makes a
