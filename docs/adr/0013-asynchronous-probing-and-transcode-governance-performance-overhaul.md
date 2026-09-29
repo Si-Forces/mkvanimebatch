@@ -185,6 +185,9 @@ The scan traversal and font-seeding work in one commit changed three externally 
 contracts without recording any of them, and introduced a fourth rule it got wrong. This
 amendment records all four.
 
+> **Partially withdrawn.** The first contract below — "reported paths change spelling" — was reversed
+> by Amendment 5. The other three stand.
+
 **The walk root is resolved once, so reported paths change spelling.**
 `scan_mkv_files` now canonicalizes its root and builds every entry path beneath that
 resolved prefix. A caller that passed a relative root, a root containing a `..` segment,
