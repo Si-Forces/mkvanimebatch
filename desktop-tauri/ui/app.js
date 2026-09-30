@@ -214,7 +214,8 @@ function applyChosenTheme(theme) {
 
 function storedTheme() {
   try {
-    return localStorage.getItem(THEME_KEY);
+    const theme = localStorage.getItem(THEME_KEY);
+    return theme === "light" || theme === "dark" ? theme : null;
   } catch {
     return null;
   }
