@@ -252,3 +252,27 @@ test("explicit toggle survives a failed storage write when the OS scheme changes
   schemeHandlers.forEach(handler => handler({ matches: false }));
   assert.equal(attributes.get("data-theme"), "dark");
 });
+
+test("an unrecognized stored theme follows the OS scheme live", async t => {
+  const ipc = bootstrapHarness(t);
+  const priorStorage = globalThis.localStorage;
+  const attributes = new Map();
+  const schemeHandlers = [];
+  globalThis.localStorage = { getItem: () => "blue" };
+  globalThis.document.documentElement = {
+    setAttribute: (name, value) => attributes.set(name, value),
+    getAttribute: name => attributes.get(name) ?? null,
+    classList: { toggle() {} },
+  };
+  globalThis.window.matchMedia = () => ({ matches: false, addEventListener: (name, handler) => schemeHandlers.push(handler) });
+  t.after(() => { globalThis.localStorage = priorStorage; });
+
+  await ipc.mount("invalid-stored-theme");
+  assert.equal(attributes.get("data-theme"), "light");
+  assert.equal(ipc.calls.some(([command]) => command === "set_window_theme"), false);
+
+  schemeHandlers.forEach(handler => handler({ matches: true }));
+  assert.equal(attributes.get("data-theme"), "dark");
+  ipc.resolveSnapshot(null);
+  await ipc.flush();
+});

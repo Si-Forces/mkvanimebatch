@@ -4,6 +4,7 @@
 
 ### Breaking Changes
 
+- **Lowercase `m` bitrate suffix rejected**: CLI and desktop requests now reject rates such as `2m`, which ffmpeg interprets as milli rather than mega. Use uppercase `M` for mega; `k` and `K` remain accepted. Surrounding whitespace is trimmed before encoding.
 - **Removal of `--keep-fonts` CLI Flag**: The `--keep-fonts` command-line option has been removed from `mkv-cli`. Invoking `mkv-cli` with `--keep-fonts` will now result in an unknown flag error.
 - **Removal of `keep_fonts` from Typed Contracts & IPC**: The `keep_fonts` field has been removed from `BatchRequest`, `PresetProfile`, `PipelineConfig`, and desktop Tauri IPC command schemas (`run_job`, `get_preset_profiles`). Desktop presets and UI controls no longer expose a font-retention toggle. No compatibility alias is retained.
 - **Public `mkv-core` API removals**: Removed `SubIndex::{lookup, indexed_count, primary_count, fallback_count}`, `ChapterIndex::{indexed_count, rejected_count}`, `CoverIndex::{indexed_count, has_global}`, and `AssetResolver::{has_local_subtitle, count_unmatched_chapter_videos}`. Downstream code calling these helpers must migrate; the methods are no longer available.
@@ -26,6 +27,10 @@
 - **Inspection cache entries drop `mtime`**: `inspect_cache.json` entries no longer store the unused `mtime` field; freshness is still checked by size and `mtime_ns`. Existing cache files keep loading.
 - **`InspectionManifest::filter_selected` replaced by `select_items`**: `select_items(&[String])` returns `Result<InspectionManifest, String>`, failing with `Selected items not found among discovered MKV files: ...` when a selection names no discovered item. It keeps selection order and drops repeated selections.
 
+### Core Scanning
+
+- Recursive MKV scanning skips canonical-key path allocations for non-MKV files and directories excluded by the output/font-directory name filters. Canonical keys are still derived for candidates that need ignore-path or deduplication checks.
+
 ### Worker Panic Reporting
 
 - A worker task that panics now completes its item with outcome `error` and the message `worker panicked: ...`. Previously that item never received an `ItemComplete` event.
@@ -36,9 +41,9 @@
 
 ### Desktop Application
 
-- The theme follows the system light/dark preference, live, until the user toggles it; only an explicit toggle is stored and applied to the native window.
+- The theme follows the system light/dark preference, live, until the user toggles it; only an explicit toggle is stored and applied to the native window. Unrecognized stored themes are ignored, consistently with the early theme bootstrap.
 - The window's corner resize handles now have a usable size and a diagonal resize cursor.
-- Stepper limits match the engine's validation: workers 1–64, Disk I/O jobs 0–64, FFmpeg threads 1–32.
+- Stepper limits match the engine's validation: workers 1–64, Disk I/O jobs 0–64, FFmpeg threads 1–32. Fractional, out-of-range, and non-numeric values in those three fields are rejected before inspection instead of being truncated to integers.
 - The UI uses the system font stacks; bundled web fonts are no longer loaded.
 
 ### Queue Selection Freeze
