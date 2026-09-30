@@ -171,7 +171,7 @@ export class JobController {
       const cplx = val("complexity") || val("cplx-val");
       complexity = cplx ? parseInt(cplx, 10) : null;
       const ffmpegVal = val("ffmpeg-threads");
-      ffmpegThreads = ffmpegVal ? parseInt(ffmpegVal, 10) : null;
+      ffmpegThreads = ffmpegVal ? Number(ffmpegVal) : null;
     }
 
     return {
@@ -183,8 +183,8 @@ export class JobController {
       preset: document.querySelector(".profile-option-item.active")?.dataset.preset || null,
       bitrate,
       complexity,
-      workers: workersVal ? parseInt(workersVal, 10) : null,
-      io_jobs: ioJobsVal !== "" ? parseInt(ioJobsVal, 10) : null,
+      workers: workersVal ? Number(workersVal) : null,
+      io_jobs: ioJobsVal !== "" ? Number(ioJobsVal) : null,
       ffmpeg_threads: ffmpegThreads,
       sub_offset: offset && offset !== "0" ? parseFloat(offset) : null,
       dry_run: chk("dry-run"),

@@ -484,10 +484,12 @@ pub fn scan_mkv_files(
 
             // A symlink names its target through a second spelling, so its canonical path is
             // never the parent's canonical path joined with its name.
-            let derived_canonical = current_canonical
-                .as_ref()
-                .filter(|_| !file_type.is_symlink())
-                .map(|dir| dir.join(name));
+            let derived_canonical = || {
+                current_canonical
+                    .as_ref()
+                    .filter(|_| !file_type.is_symlink())
+                    .map(|dir| dir.join(name))
+            };
 
             let is_file = file_type.is_file() || (file_type.is_symlink() && path.is_file());
             let is_dir = file_type.is_dir() || (file_type.is_symlink() && path.is_dir());
@@ -497,7 +499,7 @@ pub fn scan_mkv_files(
                     .extension()
                     .is_some_and(|e| e.eq_ignore_ascii_case("mkv"))
                 {
-                    let key = derived_canonical.unwrap_or_else(|| canonical_or_self(&path));
+                    let key = derived_canonical().unwrap_or_else(|| canonical_or_self(&path));
                     if !is_ignored(&key) && visited_files.insert(key) {
                         results.push(create_parsed_file(&path));
                     }
@@ -508,7 +510,7 @@ pub fn scan_mkv_files(
                 {
                     continue;
                 }
-                let canonical = derived_canonical.or_else(|| path.canonicalize().ok());
+                let canonical = derived_canonical().or_else(|| path.canonicalize().ok());
                 let key = canonical.clone().unwrap_or_else(|| path.clone());
                 if is_ignored(&key) || !visited_dirs.insert(key) {
                     continue;

@@ -48,6 +48,11 @@ test("theme-init: follows OS preference when no theme is stored", () => {
   assert.equal(runThemeInit({ storedTheme: null, prefersDark: true }), "dark");
 });
 
+test("theme-init: ignores an unrecognized stored theme", () => {
+  assert.equal(runThemeInit({ storedTheme: "blue", prefersDark: false }), "light");
+  assert.equal(runThemeInit({ storedTheme: "blue", prefersDark: true }), "dark");
+});
+
 test("theme-init: handles localStorage error and falls back to OS preference", () => {
   assert.equal(runThemeInit({ storageThrows: true, prefersDark: false }), "light");
   assert.equal(runThemeInit({ storageThrows: true, prefersDark: true }), "dark");

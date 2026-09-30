@@ -321,25 +321,37 @@ test("deferred preflight stop releases ownership, finalizes cancelled queue, and
   for (const [, button] of bulkButtons) assert.equal(button.disabled, false, "bulk control must return after abort");
 });
 
-test("job controller fails immediately when workers or io-jobs are invalid", async t => {
-  installDocument(t, remuxElements({ "input-dir": "/input", workers: "0", "io-jobs": "2" }));
+test("job controller rejects invalid concurrency field values before preflight", async t => {
+  for (const [field, value] of [
+    ["workers", "0"],
+    ["workers", "1.5"],
+    ["io-jobs", "64.9"],
+    ["ffmpeg-threads", "33"],
+    ["ffmpeg-threads", "1.5"],
+    ["ffmpeg-threads", "32.9"],
+    ["ffmpeg-threads", "1e2"],
+  ]) {
+    await t.test(`${field}=${value}`, async t => {
+      installDocument(t, remuxElements({ "input-dir": "/input", [field]: value }));
+      const logs = [];
+      let scanCalled = false;
+      const runtime = makeRuntime(makeTracker(), {
+        appendLog: (_el, msg) => logs.push(msg),
+        scanInputDirectory: async () => {
+          scanCalled = true;
+          return true;
+        },
+      });
 
-  const logs = [];
-  let scanCalled = false;
-  const runtime = makeRuntime({ assignments: new Map() }, {
-    appendLog: (_el, msg) => logs.push(msg),
-    scanInputDirectory: async () => {
-      scanCalled = true;
-      return true;
-    },
-  });
+      const controller = new JobController("remux", runtime);
+      await controller.start();
 
-  const controller = new JobController("remux", runtime);
-  await controller.start();
-
-  assert.equal(scanCalled, false);
-  assert.equal(controller.running, false);
-  assert.ok(logs.some(msg => msg.includes("Invalid workers value '0'")));
+      assert.equal(scanCalled, false);
+      assert.equal(controller.running, false);
+      assert.equal(runtime.coordinator.activeMode, null);
+      assert.ok(logs.some(msg => msg.includes(`Invalid ${field} value`)));
+    });
+  }
 });
 
 test("job controller passes typed BatchRequest with track assignments to run_job", async t => {
