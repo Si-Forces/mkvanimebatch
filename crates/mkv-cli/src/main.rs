@@ -311,8 +311,8 @@ OPTIONS:
     --remux                    Process batch in remux mode (default for mkv-cli)
     --extract                  Extract best-match subtitles, fonts, chapters, and covers
     --dry-run                  Simulate batch processing without executing remux commands
-    --bitrate <RATE>           Opus audio transcoding bitrate (default: 192k)
-    --complexity <0-10>        Opus compression complexity level, 0-10 (default: 5)
+    --bitrate <RATE>           Opus audio transcoding bitrate with optional k/K/M suffix (default: preset bitrate, else 192k)
+    --complexity <0-10>        Opus compression complexity level, 0-10 (default: preset complexity, else 5)
     --workers <N>              Number of concurrent worker tasks, 1-64 (default: physical cores clamped 1-16)
     --io-jobs <N>              Disk I/O jobs concurrency limit, 0-64 (0 uses the worker count) (default: 2)
     --ffmpeg-threads <N|auto>  CPU threads allocated per audio transcode job, 1-32 (default: auto)
