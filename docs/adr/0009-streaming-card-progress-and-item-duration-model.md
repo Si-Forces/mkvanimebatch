@@ -43,7 +43,7 @@ We decided to adopt a unified, authoritative progress and duration architecture 
 ## Consequences
 - Guarantees exact, drift-free execution timing for all batch operations across engine restarts and UI reloads.
 - Eliminates timer memory leaks and reduces webview CPU overhead during batch processing.
-- Preserves the serialized shape of `JobEvent::ItemComplete` using `#[serde(skip_serializing_if = "Option::is_none")]`. The `default` half of that attribute pair was removed with the `Deserialize` derive, which nothing in-tree exercises: the emitted wire contract is unchanged, but an external `@event:` consumer must now supply its own deserializer. `skip_serializing_if` is load-bearing on the write path and is retained.
+- Preserves full backward-compatible serialization on `JobEvent::ItemComplete` using `#[serde(default, skip_serializing_if = "Option::is_none")]`.
 - Ensures queue item snapshots reflect authoritative wall-clock duration without fragile JSON metadata side-channels.
 
 ## Amendment — 2026-09-28
@@ -52,3 +52,16 @@ Two statements above overstate the implementation.
 
 - **Engine ownership has a client fallback.** When an `ItemComplete` for an item the UI saw start (`completed`, `error`, or `cancelled`) arrives without `duration_sec`, the queue reducer uses the time since its own `item_start`. The engine sends `duration_sec` for every item a worker ran, including one whose worker panicked; the fallback covers only events that lack it. Skipped and planned items never get a duration.
 - **Durations survive UI reloads, not host restarts.** The Job Snapshot lives in the Tauri host's memory. A webview reload restores it from `get_job_snapshot()`; restarting the application discards it. The measured durations come from a monotonic clock, not a wall clock.
+
+## Amendment — 2026-10-01
+
+The `JobEvent::ItemComplete` serialization bullet above names a `default` that no longer
+exists, and describes read compatibility the crate no longer offers.
+
+- **`Deserialize` was removed from `JobEvent` and `BatchItemInfo`.** The only reader in the
+  workspace was `parse_job_event` in the retired sidecar contract module, so dropping the
+  derive changes no in-tree behaviour and the emitted JSON is byte-identical.
+  `skip_serializing_if` is load-bearing on the write path and is retained; only the `default`
+  half of the attribute pair is gone. ADR-0001 declares the `@event:` stream a version-1
+  external contract, so an external consumer parsing that stream must now supply its own
+  deserializer. Recorded as a breaking change in the release notes.
