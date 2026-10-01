@@ -22,8 +22,8 @@ fn with_episode(path: impl Into<PathBuf>, parsed: EpisodeInfo) -> ParsedFile {
     file
 }
 
-fn discover(search_dirs: &[PathBuf], fonts_dir: &Path, assets_dir: Option<&Path>) -> AssetResolver {
-    AssetResolver::discover(search_dirs, fonts_dir, assets_dir, None, None, None)
+fn discover(search_dirs: &[PathBuf], assets_dir: Option<&Path>) -> AssetResolver {
+    AssetResolver::discover(search_dirs, assets_dir, None, None)
 }
 
 /// Resolves `episode_01.mkv` against subtitles that all index as episode 01.
@@ -194,7 +194,7 @@ fn test_ancestor_asset_override_precedence() {
     let search_dirs = ancestor_dirs(&season_dir, &root_dir);
     assert_eq!(search_dirs, vec![root_dir.clone(), season_dir.clone()]);
 
-    let resolver = discover(&search_dirs, &season_dir.join("fonts"), None);
+    let resolver = discover(&search_dirs, None);
 
     let video = with_episode(
         season_dir.join("Show - 01.mkv"),
@@ -224,7 +224,7 @@ fn test_local_subtitle_next_to_mkv_wins_over_ancestor() {
     fs::write(&local_sub, b"local_long").unwrap();
 
     let search_dirs = ancestor_dirs(&season_dir, &root_dir);
-    let resolver = discover(&search_dirs, &season_dir.join("fonts"), None);
+    let resolver = discover(&search_dirs, None);
 
     let video_path = season_dir.join("[SuperLongFansubGroup] Anime Title - 01 [1080p FLAC BD].mkv");
     let video = with_episode(video_path, EpisodeInfo::new("1", "E", "01"));
@@ -245,11 +245,7 @@ fn test_assets_dir_multi_level_fallback_hierarchy() {
     fs::write(assets_override.join("cover.jpg"), b"root_cover").unwrap();
 
     let search_dirs = ancestor_dirs(&season_dir, &root_dir);
-    let resolver = discover(
-        &search_dirs,
-        &season_dir.join("fonts"),
-        Some(&assets_override.join("Season 01")),
-    );
+    let resolver = discover(&search_dirs, Some(&assets_override.join("Season 01")));
 
     let video = create_parsed_file(season_dir.join("Show - 01.mkv"));
     assert_eq!(
@@ -273,7 +269,7 @@ fn test_assets_dir_subtitle_source_beats_parent_language_score() {
     fs::write(parent_dir.join("Show - 01.ind.ass"), b"parent_copy").unwrap();
 
     let search_dirs = ancestor_dirs(&season_dir, &root_dir);
-    let resolver = discover(&search_dirs, &season_dir.join("fonts"), Some(&assets_dir));
+    let resolver = discover(&search_dirs, Some(&assets_dir));
 
     let video = with_episode(
         season_dir.join("Show - 01.mkv"),
@@ -300,11 +296,7 @@ fn test_cover_assets_directory_beats_parent_episode_name() {
     let parent = assets.parent().unwrap().join("Show - 01_cover.jpg");
     fs::write(&local, b"local").unwrap();
     fs::write(&parent, b"parent").unwrap();
-    let resolver = discover(
-        &ancestor_dirs(&season, &root),
-        &season.join("fonts"),
-        Some(&assets),
-    );
+    let resolver = discover(&ancestor_dirs(&season, &root), Some(&assets));
     let video = create_parsed_file(season.join("Show - 01.mkv"));
     assert_eq!(resolver.resolve_cov(&video, false), Some(local));
     assert_eq!(resolver.resolve_cov(&video, true), None);
@@ -330,7 +322,7 @@ fn test_subtitle_source_ladder_uses_embedded_before_ancestors() {
     }
     let dirs = ancestor_dirs(&season, &root);
     let resolve = |inspected: Option<&InspectedVideo>, assigned: Option<&Path>| {
-        discover(&dirs, &season.join("fonts"), Some(&fallback))
+        discover(&dirs, Some(&fallback))
             .resolve_for(&video, inspected, None, assigned)
             .unwrap()
     };
@@ -394,7 +386,7 @@ fn test_cover_nearest_directory_then_kind_and_natural_ties() {
     }
     let dirs = ancestor_dirs(&season, &root);
     let cover = || {
-        discover(&dirs, &season.join("fonts"), None)
+        discover(&dirs, None)
             .resolve_for(&video, None, None, None)
             .unwrap()
             .cover_file
@@ -438,7 +430,7 @@ fn test_bare_cover_must_be_adjacent_sibling_of_video() {
     let source = source_with_embedded_cover();
     let dirs = ancestor_dirs(&season, &root);
     let cover = |video: &ParsedFile, inspected: Option<&InspectedVideo>| {
-        discover(&dirs, &season.join("fonts"), None)
+        discover(&dirs, None)
             .resolve_for(video, inspected, None, None)
             .unwrap()
             .cover_file
@@ -481,7 +473,7 @@ fn test_unparsed_cover_and_source_art_fallback_boundary() {
     let source = source_with_embedded_cover();
     let dirs = ancestor_dirs(&local, &root);
     let cover = |video: &ParsedFile, inspected: Option<&InspectedVideo>| {
-        discover(&dirs, &local.join("fonts"), Some(&assets))
+        discover(&dirs, Some(&assets))
             .resolve_for(video, inspected, None, None)
             .unwrap()
             .cover_file
@@ -510,7 +502,7 @@ fn test_two_ambiguous_chapters_remain_unclaimed() {
     for name in ["chapters_a.xml", "chapters_b.xml"] {
         fs::write(tmp.path().join(name), CHAPTER_XML).unwrap();
     }
-    let resolver = discover(&[tmp.path().to_path_buf()], &tmp.path().join("fonts"), None);
+    let resolver = discover(&[tmp.path().to_path_buf()], None);
     assert_eq!(resolver.chap_index.unmatched().len(), 2);
     assert!(claim_leftover_chapters(&videos, &HashMap::new(), &resolver).is_empty());
 }
@@ -527,7 +519,7 @@ fn test_sole_leftover_claimed_by_only_eligible_video() {
     let ep2 = tmp.path().join("Show - 02.mkv");
     let videos = vec![create_parsed_file(&ep1), create_parsed_file(&ep2)];
 
-    let resolver = discover(&[tmp.path().to_path_buf()], &tmp.path().join("fonts"), None);
+    let resolver = discover(&[tmp.path().to_path_buf()], None);
 
     let claims = claim_leftover_chapters(&videos, &HashMap::new(), &resolver);
     assert_eq!(claims, HashMap::from([(ep2, chap_xml)]));
@@ -541,7 +533,7 @@ fn test_no_claim_when_candidate_has_source_chapters() {
     let ep1 = tmp.path().join("Show - 01.mkv");
     let videos = vec![create_parsed_file(&ep1)];
 
-    let resolver = discover(&[tmp.path().to_path_buf()], &tmp.path().join("fonts"), None);
+    let resolver = discover(&[tmp.path().to_path_buf()], None);
 
     let inspections = HashMap::from([(
         ep1,
