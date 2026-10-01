@@ -21,15 +21,21 @@ install_one() {
 echo "Installing hooks into $dst"
 install_one pre-commit
 install_one pre-push-slow-gates
-
 # Both push-time hooks read git's ref-update stream on stdin, so the wrapper captures
 # it once and replays it to each. Chaining them naively let the first hook drain stdin
 # and the second see EOF, silently skipping the review gate.
+#
+# An empty stream is passed through untouched. Replaying it with `printf '%s\n'` would
+# synthesise one blank ref-update line, which the slow-gates hook reads as a push and
+# would run the whole test suite for a no-op push.
 cat > "$dst/pre-push" <<'WRAPPER'
 #!/usr/bin/env bash
 set -euo pipefail
 root=$(git rev-parse --show-toplevel)
 updates=$(cat)
+if [ -z "${updates//[[:space:]]/}" ]; then
+  exit 0
+fi
 rc=0
 printf '%s\n' "$updates" | "$root/.git/hooks/pre-push-slow-gates" "$@" || rc=$?
 printf '%s\n' "$updates" | bash "$root/scripts/hooks/pre-push" "$@" || rc=$?
