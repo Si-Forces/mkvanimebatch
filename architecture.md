@@ -256,7 +256,7 @@ flowchart TD
    - Dialogue: a track name or file stem containing one of the words `full`, `dialogue`, `dialog`, `main`, `complete`, `indo`, `indonesia`, `indonesian` breaks score ties. Embedded ties then go to the lower track ID.
 
 4. **Audio selection (`select_audio_track`)**:
-   - Tracks whose name matches `\b(commentary|comment|audio\s+description|ad|extension)\b` (case-insensitive) are excluded. Only when every track matches is the whole set ranked instead.
+   - Tracks whose name matches `\b(comment(?:s|ary|aries)?|audio\s+description|ad|extension)\b` (case-insensitive) are excluded, so plural forms such as `Comments` and `Commentaries` no longer outrank the feature audio. Only when every track matches is the whole set ranked instead.
    - Scores:
      - **10**: Japanese (`ja`/`jpn` prefix), stereo, dialogue name
      - **9**: Japanese, stereo

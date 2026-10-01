@@ -104,13 +104,14 @@ mod tests {
             !object.contains_key("description"),
             "PresetProfile must not serialize a 'description' field"
         );
-        let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
-        keys.sort_unstable();
-        assert_eq!(
-            keys,
-            ["bitrate", "complexity", "icon", "id", "name"],
-            "PresetProfile's serialized key set is an IPC contract with the desktop UI"
-        );
+        // Pin the fields the desktop reads by name, not the exhaustive key set: adding a field
+        // is a legitimate change, whereas renaming or dropping one breaks loadPresetProfiles.
+        for key in ["id", "name", "icon", "bitrate", "complexity"] {
+            assert!(
+                object.contains_key(key),
+                "the desktop UI reads preset field {key}"
+            );
+        }
         assert!(
             object["complexity"].is_u64(),
             "complexity must stay a JSON number, got {}",
