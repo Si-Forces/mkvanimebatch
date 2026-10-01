@@ -1,5 +1,7 @@
 //! Canonical preset profiles for audio transcoding and container remuxing.
 
+use std::sync::LazyLock;
+
 use serde::{Deserialize, Serialize};
 
 /// A named configuration profile for audio transcoding.
@@ -14,8 +16,7 @@ pub struct PresetProfile {
     pub complexity: u32,
 }
 
-/// Returns the standard catalog of built-in preset profiles.
-pub fn get_preset_profiles() -> Vec<PresetProfile> {
+static PRESETS: LazyLock<Vec<PresetProfile>> = LazyLock::new(|| {
     vec![
         PresetProfile {
             id: "balanced".to_string(),
@@ -46,18 +47,30 @@ pub fn get_preset_profiles() -> Vec<PresetProfile> {
             complexity: 5,
         },
     ]
+});
+
+/// Returns the standard catalog of built-in preset profiles.
+pub fn get_preset_profiles() -> Vec<PresetProfile> {
+    PRESETS.clone()
 }
 
 /// Looks up a built-in preset by case-insensitive id, accepting `default` for `balanced` and
 /// `high_quality` / `high-quality` for `hifi`.
 pub fn lookup_preset(id: &str) -> Option<PresetProfile> {
-    let normalized = id.trim().to_ascii_lowercase();
-    let target = match normalized.as_str() {
-        "default" => "balanced",
-        "high_quality" | "high-quality" => "hifi",
-        other => other,
+    let trimmed = id.trim();
+    let target = if trimmed.eq_ignore_ascii_case("default") {
+        "balanced"
+    } else if trimmed.eq_ignore_ascii_case("high_quality")
+        || trimmed.eq_ignore_ascii_case("high-quality")
+    {
+        "hifi"
+    } else {
+        trimmed
     };
-    get_preset_profiles().into_iter().find(|p| p.id == target)
+    PRESETS
+        .iter()
+        .find(|p| p.id.eq_ignore_ascii_case(target))
+        .cloned()
 }
 
 #[cfg(test)]
@@ -87,6 +100,10 @@ mod tests {
         let value = serde_json::to_value(&preset).expect("preset serializes");
         let object = value.as_object().expect("preset serializes as an object");
 
+        assert!(
+            !object.contains_key("description"),
+            "PresetProfile must not serialize a 'description' field"
+        );
         let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
         keys.sort_unstable();
         assert_eq!(
