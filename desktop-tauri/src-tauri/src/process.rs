@@ -345,51 +345,12 @@ impl JobState {
                     ..
                 } => {
                     if let Some(snapshot) = snap.as_mut() {
-                        snapshot.status = if *cancelled {
-                            BatchStatus::Cancelled
-                        } else if *success {
-                            BatchStatus::Completed
-                        } else {
-                            BatchStatus::Error
-                        };
-                        let error_message = extra
-                            .get("error")
-                            .or_else(|| extra.get("reason"))
-                            .or_else(|| extra.get("panic"))
-                            .and_then(|value| value.as_str())
-                            .unwrap_or("Batch failed");
-                        if !*cancelled
-                            && *success
-                            && snapshot
-                                .items
-                                .values()
-                                .any(|item| !item.status.is_terminal())
-                        {
-                            snapshot.status = BatchStatus::Error;
-                        }
-                        for item in snapshot.items.values_mut() {
-                            if item.status.is_terminal() {
-                                continue;
-                            }
-                            snapshot.completed_items += 1;
-                            if *cancelled {
-                                item.status = ItemStatus::Cancelled;
-                                item.outcome = Some(ItemOutcome::Cancelled);
-                                item.reason = Some("Operation cancelled".to_string());
-                            } else {
-                                item.status = ItemStatus::Error;
-                                item.outcome = Some(ItemOutcome::Error);
-                                item.error = Some(if *success {
-                                    "Protocol error: missing completion event".to_string()
-                                } else {
-                                    error_message.to_string()
-                                });
-                                item.reason = extra
-                                    .get("reason")
-                                    .and_then(|value| value.as_str())
-                                    .map(ToString::to_string);
-                            }
-                        }
+                        let has_non_terminal = snapshot
+                            .items
+                            .values()
+                            .any(|item| !item.status.is_terminal());
+                        snapshot.status = terminal_status(*success, *cancelled, has_non_terminal);
+                        settle_open_items(snapshot, *success, *cancelled, extra);
                         snapshot.duration_sec =
                             extra.get("duration_sec").and_then(|value| value.as_f64());
                     }
@@ -404,6 +365,53 @@ impl JobState {
         }
         if let Ok(mut snap) = self.snapshot.lock() {
             *snap = None;
+        }
+    }
+}
+
+fn terminal_status(success: bool, cancelled: bool, has_non_terminal_items: bool) -> BatchStatus {
+    if cancelled {
+        BatchStatus::Cancelled
+    } else if success && !has_non_terminal_items {
+        BatchStatus::Completed
+    } else {
+        BatchStatus::Error
+    }
+}
+
+fn settle_open_items(
+    snapshot: &mut JobSnapshot,
+    success: bool,
+    cancelled: bool,
+    extra: &serde_json::Map<String, serde_json::Value>,
+) {
+    let error_message = extra
+        .get("error")
+        .or_else(|| extra.get("reason"))
+        .or_else(|| extra.get("panic"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("Batch failed");
+    for item in snapshot.items.values_mut() {
+        if item.status.is_terminal() {
+            continue;
+        }
+        snapshot.completed_items += 1;
+        if cancelled {
+            item.status = ItemStatus::Cancelled;
+            item.outcome = Some(ItemOutcome::Cancelled);
+            item.reason = Some("Operation cancelled".to_string());
+        } else {
+            item.status = ItemStatus::Error;
+            item.outcome = Some(ItemOutcome::Error);
+            item.error = Some(if success {
+                "Protocol error: missing completion event".to_string()
+            } else {
+                error_message.to_string()
+            });
+            item.reason = extra
+                .get("reason")
+                .and_then(|value| value.as_str())
+                .map(ToString::to_string);
         }
     }
 }
@@ -826,6 +834,25 @@ mod tests {
         assert_eq!(snap.duration_sec, Some(18.25));
         assert_eq!(snap.items["ep1"].status, ItemStatus::Error);
         assert_eq!(snap.items["ep1"].error.as_deref(), Some("Fatal error"));
+    }
+
+    #[test]
+    fn test_terminal_status() {
+        // Cancelled takes precedence over success and non-terminal items
+        assert_eq!(terminal_status(false, true, false), BatchStatus::Cancelled);
+        assert_eq!(terminal_status(true, true, false), BatchStatus::Cancelled);
+        assert_eq!(terminal_status(true, true, true), BatchStatus::Cancelled);
+        assert_eq!(terminal_status(false, true, true), BatchStatus::Cancelled);
+
+        // Success with complete items
+        assert_eq!(terminal_status(true, false, false), BatchStatus::Completed);
+
+        // Success with uncompleted items (downgraded to error)
+        assert_eq!(terminal_status(true, false, true), BatchStatus::Error);
+
+        // Failure
+        assert_eq!(terminal_status(false, false, false), BatchStatus::Error);
+        assert_eq!(terminal_status(false, false, true), BatchStatus::Error);
     }
 
     #[test]
