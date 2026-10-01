@@ -8,7 +8,7 @@
 //! `mkvmerge -J` (ADR 0006).
 
 use std::fs::File;
-use std::io::{self, BufReader, Read, Seek, SeekFrom};
+use std::io::{self, BufReader, Read, Seek};
 use std::path::Path;
 
 use crate::domain::{lang_mkv_tag, MkvTrack, TrackProperties};
@@ -57,20 +57,57 @@ fn with_context(e: io::Error, context: &str) -> io::Error {
     io::Error::new(e.kind(), format!("{context}: {e}"))
 }
 
-/// Absolute end offset of an element whose `len`-byte payload starts at the reader's position.
-fn element_end<R: Seek>(reader: &mut R, len: u64, overflow_msg: &'static str) -> io::Result<u64> {
-    reader
-        .stream_position()?
-        .checked_add(len)
-        .ok_or_else(|| invalid_data(overflow_msg))
+/// Reader wrapper that preserves `BufReader`'s buffer on intra-buffer seeks via `seek_relative`
+/// and tracks stream position in memory, eliminating kernel `lseek` loop guards.
+struct EbmlReader<R> {
+    inner: BufReader<R>,
+    pos: u64,
 }
 
-/// Seeks forward by `len` bytes, rejecting lengths that do not fit a non-negative `i64`.
-fn seek_forward<R: Read + Seek>(reader: &mut R, len: u64) -> io::Result<()> {
-    let offset =
-        i64::try_from(len).map_err(|_| invalid_data("EBML element length exceeds i64::MAX"))?;
-    reader.seek(SeekFrom::Current(offset))?;
-    Ok(())
+impl<R: Read + Seek> EbmlReader<R> {
+    fn new(reader: R) -> Self {
+        Self {
+            inner: BufReader::new(reader),
+            pos: 0,
+        }
+    }
+
+    fn pos(&self) -> u64 {
+        self.pos
+    }
+
+    fn skip(&mut self, len: u64) -> io::Result<()> {
+        let target = self.element_end(len, "EBML element length exceeds u64::MAX")?;
+        self.seek_to(target)
+    }
+
+    fn seek_to(&mut self, target: u64) -> io::Result<()> {
+        let target_i64 =
+            i64::try_from(target).map_err(|_| invalid_data("EBML seek target exceeds i64::MAX"))?;
+        let pos_i64 = i64::try_from(self.pos)
+            .map_err(|_| invalid_data("EBML current pos exceeds i64::MAX"))?;
+        let offset = target_i64 - pos_i64;
+        self.inner.seek_relative(offset)?;
+        self.pos = target;
+        Ok(())
+    }
+
+    fn element_end(&self, len: u64, overflow_msg: &'static str) -> io::Result<u64> {
+        self.pos
+            .checked_add(len)
+            .ok_or_else(|| invalid_data(overflow_msg))
+    }
+}
+
+impl<R: Read> Read for EbmlReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.pos = self
+            .pos
+            .checked_add(n as u64)
+            .ok_or_else(|| invalid_data("EBML reader position overflow"))?;
+        Ok(n)
+    }
 }
 
 /// Reads an EBML Element ID as a raw u32.
@@ -88,10 +125,12 @@ fn read_element_id<R: Read>(reader: &mut R) -> io::Result<u32> {
     }
 
     let mut id = b as u32;
-    for _ in 1..len {
-        let mut next = [0u8; 1];
-        reader.read_exact(&mut next)?;
-        id = (id << 8) | (next[0] as u32);
+    if len > 1 {
+        let mut rem = [0u8; 3];
+        reader.read_exact(&mut rem[..len - 1])?;
+        for &next in &rem[..len - 1] {
+            id = (id << 8) | (next as u32);
+        }
     }
     Ok(id)
 }
@@ -108,10 +147,12 @@ fn read_vint_length<R: Read>(reader: &mut R) -> io::Result<u64> {
     let len = b.leading_zeros() as usize + 1;
     let mask = if len == 8 { 0 } else { 0xFF >> len };
     let mut value = (b & mask) as u64;
-    for _ in 1..len {
-        let mut next = [0u8; 1];
-        reader.read_exact(&mut next)?;
-        value = (value << 8) | (next[0] as u64);
+    if len > 1 {
+        let mut rem = [0u8; 7];
+        reader.read_exact(&mut rem[..len - 1])?;
+        for &next in &rem[..len - 1] {
+            value = (value << 8) | (next as u64);
+        }
     }
     let unknown_mask = if len == 8 {
         0x00FF_FFFF_FFFF_FFFF
@@ -128,11 +169,12 @@ fn read_uint<R: Read>(reader: &mut R, size: u64) -> io::Result<u64> {
     if size > 8 {
         return Err(invalid_data("Uint size > 8"));
     }
+    let mut buf = [0u8; 8];
+    let len = size as usize;
+    reader.read_exact(&mut buf[..len])?;
     let mut val = 0u64;
-    for _ in 0..size {
-        let mut b = [0u8; 1];
-        reader.read_exact(&mut b)?;
-        val = (val << 8) | (b[0] as u64);
+    for &b in &buf[..len] {
+        val = (val << 8) | (b as u64);
     }
     Ok(val)
 }
@@ -167,19 +209,19 @@ struct SeekTargets {
 }
 
 fn probe(path: &Path) -> io::Result<MkvmergeMetadata> {
-    let mut reader = BufReader::new(File::open(path)?);
+    let mut reader = EbmlReader::new(File::open(path)?);
 
     if read_element_id(&mut reader)? != ID_EBML_HEADER {
         return Err(invalid_data("Not an EBML file"));
     }
     let ebml_len = read_vint_length(&mut reader)?;
-    seek_forward(&mut reader, ebml_len)?;
+    reader.skip(ebml_len)?;
 
     if read_element_id(&mut reader)? != ID_SEGMENT {
         return Err(invalid_data("Segment element not found after EBML header"));
     }
     let _segment_len = read_vint_length(&mut reader)?;
-    let segment_data_start = reader.stream_position()?;
+    let segment_data_start = reader.pos();
 
     let mut tracks = Vec::new();
     let mut attachments = Vec::new();
@@ -203,23 +245,25 @@ fn probe(path: &Path) -> io::Result<MkvmergeMetadata> {
         match elem_id {
             ID_SEEK_HEAD => {
                 has_seek_head = true;
-                let end = element_end(&mut reader, elem_len, "SeekHead element length overflow")?;
+                let end = reader.element_end(elem_len, "SeekHead element length overflow")?;
                 read_seek_head(&mut reader, end, &mut seek_targets)?;
-                let _ = reader.seek(SeekFrom::Start(end));
+                reader.seek_to(end)?;
             }
             ID_TRACKS => {
-                let end = element_end(&mut reader, elem_len, "Tracks block length overflow")?;
+                let end = reader.element_end(elem_len, "Tracks block length overflow")?;
                 parse_tracks_block(&mut reader, elem_len, &mut tracks)?;
-                reader.seek(SeekFrom::Start(end))?;
+                reader.seek_to(end)?;
             }
             ID_ATTACHMENTS => {
-                let end = element_end(&mut reader, elem_len, "Attachments block length overflow")?;
+                let end = reader.element_end(elem_len, "Attachments block length overflow")?;
                 parse_attachments_block(&mut reader, elem_len, &mut attachments)?;
-                reader.seek(SeekFrom::Start(end))?;
+                reader.seek_to(end)?;
             }
             ID_CHAPTERS => {
                 has_chapters = true;
-                let _ = seek_forward(&mut reader, elem_len);
+                if reader.skip(elem_len).is_err() {
+                    break;
+                }
             }
             ID_CLUSTER => {
                 // Anything after the clusters is reachable only through a SeekHead.
@@ -231,7 +275,9 @@ fn probe(path: &Path) -> io::Result<MkvmergeMetadata> {
                 break;
             }
             _ => {
-                let _ = seek_forward(&mut reader, elem_len);
+                if reader.skip(elem_len).is_err() {
+                    break;
+                }
             }
         }
     }
@@ -286,11 +332,11 @@ fn probe(path: &Path) -> io::Result<MkvmergeMetadata> {
 /// Records the SeekHead's Tracks and Attachments positions and whether it lists Chapters.
 /// A malformed entry ends the scan early instead of failing the probe.
 fn read_seek_head<R: Read + Seek>(
-    reader: &mut R,
+    reader: &mut EbmlReader<R>,
     end: u64,
     targets: &mut SeekTargets,
 ) -> io::Result<()> {
-    while reader.stream_position()? < end {
+    while reader.pos() < end {
         let Ok(entry_id) = read_element_id(reader) else {
             break;
         };
@@ -298,27 +344,35 @@ fn read_seek_head<R: Read + Seek>(
             break;
         };
         if entry_id != ID_SEEK {
-            let _ = seek_forward(reader, entry_len);
+            if reader.skip(entry_len).is_err() {
+                break;
+            }
             continue;
         }
 
-        let entry_end = element_end(reader, entry_len, "Seek entry length overflow")?;
+        let Ok(entry_end) = reader.element_end(entry_len, "Seek entry length overflow") else {
+            break;
+        };
         let mut target_id: Option<u32> = None;
         let mut target_pos: Option<u64> = None;
-        while reader.stream_position()? < entry_end {
+        while reader.pos() < entry_end {
             let Ok(child) = read_element_id(reader) else {
                 break;
             };
             let Ok(child_len) = read_vint_length(reader) else {
                 break;
             };
-            let child_end = element_end(reader, child_len, "Seek child length overflow")?;
+            let Ok(child_end) = reader.element_end(child_len, "Seek child length overflow") else {
+                break;
+            };
             match child {
                 ID_SEEK_ID => target_id = read_element_id(reader).ok(),
                 ID_SEEK_POSITION => target_pos = read_uint(reader, child_len).ok(),
                 _ => {}
             }
-            let _ = reader.seek(SeekFrom::Start(child_end));
+            if reader.seek_to(child_end).is_err() {
+                break;
+            }
         }
         if let (Some(id), Some(pos)) = (target_id, target_pos) {
             match id {
@@ -328,14 +382,16 @@ fn read_seek_head<R: Read + Seek>(
                 _ => {}
             }
         }
-        let _ = reader.seek(SeekFrom::Start(entry_end));
+        if reader.seek_to(entry_end).is_err() {
+            break;
+        }
     }
     Ok(())
 }
 
 /// Seeks to the element `pos` bytes into the Segment payload and reads its header.
 fn element_at<R: Read + Seek>(
-    reader: &mut R,
+    reader: &mut EbmlReader<R>,
     segment_data_start: u64,
     pos: u64,
     overflow_msg: &'static str,
@@ -343,59 +399,59 @@ fn element_at<R: Read + Seek>(
     let target = segment_data_start
         .checked_add(pos)
         .ok_or_else(|| invalid_data(overflow_msg))?;
-    reader.seek(SeekFrom::Start(target))?;
+    reader.seek_to(target)?;
     Ok((read_element_id(reader)?, read_vint_length(reader)?))
 }
 
 /// Appends each TrackEntry, numbered sequentially from `tracks.len()` as mkvmerge does.
 fn parse_tracks_block<R: Read + Seek>(
-    reader: &mut R,
+    reader: &mut EbmlReader<R>,
     len: u64,
     tracks: &mut Vec<MkvTrack>,
 ) -> io::Result<()> {
-    let end = element_end(reader, len, "Tracks block length overflow")?;
+    let end = reader.element_end(len, "Tracks block length overflow")?;
     let mut track_idx = tracks.len() as u32;
-    while reader.stream_position()? < end {
+    while reader.pos() < end {
         let entry_id = read_element_id(reader)?;
         let entry_len = read_vint_length(reader)?;
-        let entry_end = element_end(reader, entry_len, "Track entry length overflow")?;
+        let entry_end = reader.element_end(entry_len, "Track entry length overflow")?;
         if entry_id == ID_TRACK_ENTRY {
             let mut track = parse_track_entry(reader, entry_len)?;
             track.id = Some(track_idx);
             track_idx += 1;
             tracks.push(track);
         }
-        reader.seek(SeekFrom::Start(entry_end))?;
+        reader.seek_to(entry_end)?;
     }
     Ok(())
 }
 
 /// Appends each AttachedFile, numbered sequentially from 1 as mkvmerge does.
 fn parse_attachments_block<R: Read + Seek>(
-    reader: &mut R,
+    reader: &mut EbmlReader<R>,
     len: u64,
     attachments: &mut Vec<MkvAttachment>,
 ) -> io::Result<()> {
-    let end = element_end(reader, len, "Attachments block length overflow")?;
+    let end = reader.element_end(len, "Attachments block length overflow")?;
     let mut att_id = (attachments.len() + 1) as u32;
-    while reader.stream_position()? < end {
+    while reader.pos() < end {
         let file_id = read_element_id(reader)?;
         let file_len = read_vint_length(reader)?;
-        let entry_end = element_end(reader, file_len, "Attached file length overflow")?;
+        let entry_end = reader.element_end(file_len, "Attached file length overflow")?;
         if file_id == ID_ATTACHED_FILE {
             let mut att = parse_attached_file(reader, file_len)?;
             att.id = Some(att_id);
             att_id += 1;
             attachments.push(att);
         }
-        reader.seek(SeekFrom::Start(entry_end))?;
+        reader.seek_to(entry_end)?;
     }
     Ok(())
 }
 
 /// Parses one TrackEntry. The returned track has no `id`; the caller numbers it.
-fn parse_track_entry<R: Read + Seek>(reader: &mut R, len: u64) -> io::Result<MkvTrack> {
-    let end = element_end(reader, len, "Track entry length overflow")?;
+fn parse_track_entry<R: Read + Seek>(reader: &mut EbmlReader<R>, len: u64) -> io::Result<MkvTrack> {
+    let end = reader.element_end(len, "Track entry length overflow")?;
 
     let mut track_type_num: Option<u64> = None;
     let mut codec_id: Option<String> = None;
@@ -406,7 +462,7 @@ fn parse_track_entry<R: Read + Seek>(reader: &mut R, len: u64) -> io::Result<Mkv
     let mut pixel_height: Option<u32> = None;
     let mut channels: Option<u32> = None;
 
-    while reader.stream_position()? < end {
+    while reader.pos() < end {
         let child_id = read_element_id(reader)?;
         let child_len = read_vint_length(reader)?;
 
@@ -431,8 +487,8 @@ fn parse_track_entry<R: Read + Seek>(reader: &mut R, len: u64) -> io::Result<Mkv
                 read_uint(reader, child_len)?;
             }
             ID_VIDEO => {
-                let v_end = element_end(reader, child_len, "Video element length overflow")?;
-                while reader.stream_position()? < v_end {
+                let v_end = reader.element_end(child_len, "Video element length overflow")?;
+                while reader.pos() < v_end {
                     let vid_child = read_element_id(reader)?;
                     let vid_len = read_vint_length(reader)?;
                     match vid_child {
@@ -443,15 +499,15 @@ fn parse_track_entry<R: Read + Seek>(reader: &mut R, len: u64) -> io::Result<Mkv
                             pixel_height = Some(read_uint(reader, vid_len)? as u32);
                         }
                         _ => {
-                            seek_forward(reader, vid_len)?;
+                            reader.skip(vid_len)?;
                         }
                     }
                 }
             }
             ID_AUDIO => {
                 let mut explicit_channels: Option<u32> = None;
-                let a_end = element_end(reader, child_len, "Audio element length overflow")?;
-                while reader.stream_position()? < a_end {
+                let a_end = reader.element_end(child_len, "Audio element length overflow")?;
+                while reader.pos() < a_end {
                     let aud_child = read_element_id(reader)?;
                     let aud_len = read_vint_length(reader)?;
                     match aud_child {
@@ -459,7 +515,7 @@ fn parse_track_entry<R: Read + Seek>(reader: &mut R, len: u64) -> io::Result<Mkv
                             explicit_channels = Some(read_uint(reader, aud_len)? as u32);
                         }
                         _ => {
-                            seek_forward(reader, aud_len)?;
+                            reader.skip(aud_len)?;
                         }
                     }
                 }
@@ -467,7 +523,7 @@ fn parse_track_entry<R: Read + Seek>(reader: &mut R, len: u64) -> io::Result<Mkv
                 channels = Some(explicit_channels.unwrap_or(1));
             }
             _ => {
-                seek_forward(reader, child_len)?;
+                reader.skip(child_len)?;
             }
         }
     }
@@ -508,14 +564,17 @@ fn parse_track_entry<R: Read + Seek>(reader: &mut R, len: u64) -> io::Result<Mkv
     })
 }
 
-fn parse_attached_file<R: Read + Seek>(reader: &mut R, len: u64) -> io::Result<MkvAttachment> {
-    let end = element_end(reader, len, "Attached file length overflow")?;
+fn parse_attached_file<R: Read + Seek>(
+    reader: &mut EbmlReader<R>,
+    len: u64,
+) -> io::Result<MkvAttachment> {
+    let end = reader.element_end(len, "Attached file length overflow")?;
 
     let mut file_name: Option<String> = None;
     let mut content_type: Option<String> = None;
     let mut size: Option<u64> = None;
 
-    while reader.stream_position()? < end {
+    while reader.pos() < end {
         let child_id = read_element_id(reader)?;
         let child_len = read_vint_length(reader)?;
 
@@ -528,10 +587,10 @@ fn parse_attached_file<R: Read + Seek>(reader: &mut R, len: u64) -> io::Result<M
             }
             ID_FILE_DATA => {
                 size = Some(child_len);
-                seek_forward(reader, child_len)?;
+                reader.skip(child_len)?;
             }
             _ => {
-                seek_forward(reader, child_len)?;
+                reader.skip(child_len)?;
             }
         }
     }
@@ -550,7 +609,8 @@ mod tests {
     use std::io::Cursor;
 
     fn parse(buf: &[u8]) -> MkvTrack {
-        parse_track_entry(&mut Cursor::new(buf), buf.len() as u64).unwrap()
+        let mut reader = EbmlReader::new(Cursor::new(buf));
+        parse_track_entry(&mut reader, buf.len() as u64).unwrap()
     }
 
     fn make_track_buf(lang: Option<&str>, lang_ietf: Option<&str>) -> Vec<u8> {
@@ -611,5 +671,213 @@ mod tests {
         // No Audio element at all.
         let subtitle = parse(&make_track_buf(None, None));
         assert_eq!(subtitle.properties.audio_channels, None);
+    }
+
+    struct TrackingReader<R> {
+        inner: R,
+        reads: usize,
+        seeks: usize,
+    }
+
+    impl<R: Read> Read for TrackingReader<R> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.reads += 1;
+            self.inner.read(buf)
+        }
+    }
+
+    impl<R: Seek> Seek for TrackingReader<R> {
+        fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
+            self.seeks += 1;
+            self.inner.seek(pos)
+        }
+    }
+
+    #[test]
+    fn test_ebml_reader_retains_buffer_on_intra_buffer_skips() {
+        let data = vec![0x42u8; 1024];
+        let tracker = TrackingReader {
+            inner: Cursor::new(data),
+            reads: 0,
+            seeks: 0,
+        };
+        let mut reader = EbmlReader::new(tracker);
+
+        let mut buf = [0u8; 4];
+        reader.read_exact(&mut buf).unwrap();
+        assert_eq!(reader.pos(), 4);
+        assert_eq!(reader.inner.get_ref().reads, 1);
+        assert_eq!(reader.inner.get_ref().seeks, 0);
+
+        // Relative skip forward by 10 bytes within the 8KB buffer
+        reader.skip(10).unwrap();
+        assert_eq!(reader.pos(), 14);
+        // Intra-buffer skip must NOT issue an underlying read or seek
+        assert_eq!(reader.inner.get_ref().reads, 1);
+        assert_eq!(reader.inner.get_ref().seeks, 0);
+
+        // Read next 4 bytes: served directly from memory buffer
+        reader.read_exact(&mut buf).unwrap();
+        assert_eq!(reader.pos(), 18);
+        assert_eq!(reader.inner.get_ref().reads, 1);
+        assert_eq!(reader.inner.get_ref().seeks, 0);
+
+        // seek_to forward to 50
+        reader.seek_to(50).unwrap();
+        assert_eq!(reader.pos(), 50);
+        assert_eq!(reader.inner.get_ref().reads, 1);
+        assert_eq!(reader.inner.get_ref().seeks, 0);
+    }
+
+    fn make_synthetic_mkv_multitrack() -> Vec<u8> {
+        let mut data = Vec::new();
+        data.extend_from_slice(&[0x1A, 0x45, 0xDF, 0xA3, 0x84, 0x42, 0x82, 0x84, 0x6D]);
+        data.extend_from_slice(&[
+            0x18, 0x53, 0x80, 0x67, 0x01, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+        ]);
+        // Top-level SeekHead element before clusters
+        data.extend_from_slice(&[0x11, 0x4D, 0x9B, 0x74, 0x80]);
+
+        let mut tracks_payload = Vec::new();
+        for t in 0..6 {
+            let mut track_entry = Vec::new();
+            track_entry.extend_from_slice(&[0xD7, 0x81, (t + 1) as u8]);
+            track_entry.extend_from_slice(&[0x73, 0xC5, 0x84, 1, 2, 3, 4]);
+            let tt = if t == 0 {
+                1
+            } else if t < 4 {
+                2
+            } else {
+                17
+            };
+            track_entry.extend_from_slice(&[0x83, 0x81, tt]);
+            track_entry.extend_from_slice(&[0x88, 0x81, 1]);
+            track_entry.extend_from_slice(&[0x55, 0xAA, 0x81, 0]);
+            track_entry.extend_from_slice(&[0x9C, 0x81, 0]);
+            let codec = if t == 0 {
+                "V_MPEGH/HEVC"
+            } else if t < 4 {
+                "A_OPUS"
+            } else {
+                "S_TEXT/ASS"
+            };
+            track_entry.extend_from_slice(&[0x86, 0x80 | (codec.len() as u8)]);
+            track_entry.extend_from_slice(codec.as_bytes());
+            track_entry.extend_from_slice(&[0x63, 0xA2, 0x80 | 20]);
+            track_entry.extend_from_slice(&[0u8; 20]);
+            track_entry.extend_from_slice(&[0x22, 0xB5, 0x9C, 0x83, b'j', b'p', b'n']);
+            let name = format!("Track {:02}", t);
+            track_entry.extend_from_slice(&[0x53, 0x6E, 0x80 | (name.len() as u8)]);
+            track_entry.extend_from_slice(name.as_bytes());
+
+            if t == 0 {
+                let mut vid = Vec::new();
+                vid.extend_from_slice(&[0xB0, 0x82, 0x07, 0x80]);
+                vid.extend_from_slice(&[0xBA, 0x82, 0x04, 0x38]);
+                vid.extend_from_slice(&[0x54, 0xB0, 0x82, 0x07, 0x80]);
+                track_entry.extend_from_slice(&[0xE0, 0x80 | (vid.len() as u8)]);
+                track_entry.extend_from_slice(&vid);
+            } else if t < 4 {
+                let mut aud = Vec::new();
+                aud.extend_from_slice(&[0xB5, 0x84, 0x47, 0x3B, 0x80, 0x00]);
+                aud.extend_from_slice(&[0x9F, 0x81, 2]);
+                track_entry.extend_from_slice(&[0xE1, 0x80 | (aud.len() as u8)]);
+                track_entry.extend_from_slice(&aud);
+            }
+
+            tracks_payload.push(0xAE);
+            let len = track_entry.len();
+            if len < 127 {
+                tracks_payload.push(0x80 | (len as u8));
+            } else {
+                tracks_payload.push(0x40 | ((len >> 8) as u8));
+                tracks_payload.push((len & 0xFF) as u8);
+            }
+            tracks_payload.extend_from_slice(&track_entry);
+        }
+
+        data.extend_from_slice(&[0x16, 0x54, 0xAE, 0x6B]);
+        let tlen = tracks_payload.len();
+        data.push(0x40 | ((tlen >> 8) as u8));
+        data.push((tlen & 0xFF) as u8);
+        data.extend_from_slice(&tracks_payload);
+
+        data.extend_from_slice(&[0x1F, 0x43, 0xB6, 0x75, 0x84, 0, 0, 0, 0]);
+        data
+    }
+
+    #[test]
+    fn test_synthetic_multitrack_mkv_native_probe_and_buffer_retention() {
+        let mkv_bytes = make_synthetic_mkv_multitrack();
+
+        // 1. Verify probe_ebml_native parses the synthetic file correctly from disk
+        use std::io::Write;
+        let mut temp = tempfile::NamedTempFile::new().unwrap();
+        temp.write_all(&mkv_bytes).unwrap();
+        let meta = probe_ebml_native(temp.path()).unwrap();
+        assert_eq!(meta.tracks.len(), 6);
+
+        // 2. Verify tracking reader verifies buffer retention on intra-buffer skips
+        let tracker = TrackingReader {
+            inner: Cursor::new(mkv_bytes),
+            reads: 0,
+            seeks: 0,
+        };
+        let mut reader = EbmlReader::new(tracker);
+
+        assert_eq!(read_element_id(&mut reader).unwrap(), ID_EBML_HEADER);
+        let ebml_len = read_vint_length(&mut reader).unwrap();
+        reader.skip(ebml_len).unwrap();
+
+        assert_eq!(read_element_id(&mut reader).unwrap(), ID_SEGMENT);
+        let _ = read_vint_length(&mut reader).unwrap();
+
+        let mut tracks = Vec::new();
+        loop {
+            let elem_id = read_element_id(&mut reader).unwrap();
+            let elem_len = read_vint_length(&mut reader).unwrap();
+            match elem_id {
+                ID_TRACKS => {
+                    let end = reader.element_end(elem_len, "overflow").unwrap();
+                    parse_tracks_block(&mut reader, elem_len, &mut tracks).unwrap();
+                    reader.seek_to(end).unwrap();
+                }
+                ID_CLUSTER => break,
+                _ => {
+                    if reader.skip(elem_len).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+
+        assert_eq!(tracks.len(), 6);
+        let raw = reader.inner.into_inner();
+        assert_eq!(raw.reads, 1, "Expected single read buffer fill (<8 KiB)");
+        assert_eq!(
+            raw.seeks, 0,
+            "Expected 0 seek calls during intra-buffer parse"
+        );
+    }
+
+    #[test]
+    fn test_ebml_reader_multi_buffer_reads() {
+        // Create 12 KiB payload: crosses 8 KiB BufReader boundary
+        let data = vec![0x7Au8; 12 * 1024];
+        let tracker = TrackingReader {
+            inner: Cursor::new(data),
+            reads: 0,
+            seeks: 0,
+        };
+        let mut reader = EbmlReader::new(tracker);
+
+        let mut buf = [0u8; 100];
+        reader.read_exact(&mut buf).unwrap();
+        assert_eq!(reader.inner.get_ref().reads, 1);
+
+        // Skip to 9 KiB (across 8 KiB boundary)
+        reader.skip(9 * 1024).unwrap();
+        reader.read_exact(&mut buf).unwrap();
+        assert_eq!(reader.inner.get_ref().reads, 2);
     }
 }

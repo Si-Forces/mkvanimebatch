@@ -867,7 +867,7 @@ impl BatchPipeline {
         let mut sub_classification_cache: HashMap<PathBuf, SubClassification> = HashMap::new();
 
         // Probe every batch video concurrently, across release directories, before planning.
-        let probe_limit = (self.max_workers() * 2).clamp(2, 16);
+        let probe_limit = crate::cpu::probe_concurrency(self.max_workers());
         let probe_sem = Arc::new(Semaphore::new(probe_limit));
         let mut probe_set = tokio::task::JoinSet::new();
         for file in &files {

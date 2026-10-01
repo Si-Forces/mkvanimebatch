@@ -379,10 +379,7 @@ pub async fn generate_inspection_manifest(
         }
     }
 
-    let workers = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(2);
-    let probe_limit = (workers * 2).clamp(2, 16);
+    let probe_limit = crate::cpu::probe_concurrency(crate::cpu::default_workers());
     let probe_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(probe_limit));
     let mut probe_set = tokio::task::JoinSet::new();
 

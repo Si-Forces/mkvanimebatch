@@ -409,7 +409,7 @@ impl BatchRequest {
         };
 
         let physical_cores = physical_core_count();
-        let workers = self.workers.unwrap_or(physical_cores.clamp(1, 16));
+        let workers = self.workers.unwrap_or_else(crate::cpu::default_workers);
         let defaults = PipelineConfig::default();
 
         Ok(PipelineConfig {
