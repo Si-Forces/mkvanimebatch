@@ -38,3 +38,6 @@ graphify-out/
 # LSP server
 jsconfig.json
 lsp.json
+
+# Local review-gate ledger (per-clone, not shared)
+.review-ledger.jsonl
