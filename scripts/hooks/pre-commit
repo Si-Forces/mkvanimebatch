@@ -28,9 +28,12 @@ if printf '%s\n' "$staged" | grep -qE '\.rs$'; then
   fi
 fi
 
-if printf '%s\n' "$staged" | grep -qE 'desktop-tauri/ui/.*\.js$'; then
+if printf '%s\n' "$staged" | grep -qE '^desktop-tauri/ui/.*\.js$'; then
   echo "[pre-commit] node --check on staged UI modules..."
+  # Filter to UI JavaScript only. Iterating every staged path made `node --check`
+  # reject unrelated files such as README.md with ERR_UNKNOWN_FILE_EXTENSION.
   while read -r f; do
+    case "$f" in desktop-tauri/ui/*.js) ;; *) continue ;; esac
     [ -f "$f" ] || continue
     if ! node --check "$f"; then
       echo ""; echo "❌ [pre-commit] node --check failed: $f"; echo ""
