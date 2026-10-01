@@ -242,15 +242,19 @@ The decisions stand; these statements above overstate or misname what the code d
 **Probing still blocks on the native path.** Consequence 1 ("completely eliminates Tokio
 async reactor thread stalls") holds only for the `mkvmerge -J` fallback, which runs through
 `tokio::process::Command`. `probe_video` first calls `probe_ebml_native`, which reads the file
-through a synchronous `std::fs::File` + `BufReader` on the calling worker thread. Amendment 2's
-0.091 ms warm figure is why this was left in place; a cold read can still block a worker.
-Tracked as issue #20.
+through a synchronous `std::fs::File` + `BufReader` on the calling worker thread. The rationale
+for leaving it in place was Amendment 2's 0.091 ms warm figure. Amendment 6 removed the
+buffer-discarding seeks and loop-guard `lseek` calls behind that figure, but the read itself is
+still synchronous, so a cold read can still block a worker. Tracked as issue #20.
 
 **The governor is crate-private.** `cpu` is a private module of `mkv-core`;
 `transcode_governor_threads` is `pub(crate)` and reachable only through
-`BatchRequest::into_pipeline_config`. `physical_core_count`, `default_workers`,
-and `probe_concurrency` are `pub(crate)` and called by `into_pipeline_config` and
-`manifest::generate_inspection_manifest` (Amendment 6). "Physical cores" means
+`BatchRequest::into_pipeline_config`.
+`physical_core_count`, `default_workers`, and `probe_concurrency` are `pub(crate)`.
+`physical_core_count` is called by `default_workers` and by
+`BatchRequest::into_pipeline_config`; `default_workers` by `into_pipeline_config` and by
+`manifest::generate_inspection_manifest`; `probe_concurrency` by
+`manifest::generate_inspection_manifest` and by `pipeline.rs` (Amendment 6). "Physical cores" means
 unique `(physical id, core id)` pairs from `/proc/cpuinfo` on Linux; elsewhere, or
 when that file exposes no topology, it is `std::thread::available_parallelism()`.
 Note that `/proc/cpuinfo` reflects host topology without detecting cgroup quota limits;
@@ -309,6 +313,18 @@ position in memory (`pos: u64`), converts loop guards and `element_end` to in-me
 comparisons, uses `seek_relative` for intra-buffer skips without flushing, and batch-reads
 element IDs, VINT lengths, and uints into small stack arrays.
 
+Finding 2's premise ("read_exact is a memcpy") is refuted by inspection of `Seek for
+BufReader`, which discards the buffer on every `seek`, combined with a counted walk:
+`test_synthetic_multitrack_mkv_native_probe_and_buffer_retention` drives the top-level element
+walk of a 6-track container through `TrackingReader` and observes 1 buffer fill and 0 seeks,
+against the dozens of `read` and hundreds of `lseek` calls the old `seek_forward` /
+`stream_position()` path issued. That test re-implements the walk rather than instrumenting
+`probe_ebml_native`, which opens its own `File` from a path, so it pins `EbmlReader`'s syscall
+behaviour as a proxy for the production parser — the parser's own count is not measured.
+What is claimed here is the syscall reduction, not a wall-clock speedup: Amendment 2's 0.091 ms
+warm measurement was taken on the pre-amendment parser and has not been retaken, and the probe
+was already inside its <1 ms budget.
+
 ### Probe concurrency alignment
 
 Preflight inspection (`manifest.rs`) derived probe concurrency from
@@ -316,14 +332,15 @@ Preflight inspection (`manifest.rs`) derived probe concurrency from
 on a 4-physical/8-logical machine. Pipeline execution (`pipeline.rs`) derives probe
 concurrency from `(self.max_workers() * 2).clamp(2, 16)`, which defaults to physical
 cores (`physical_core_count()`) via `request.rs` when unspecified (yielding 8 permits
-on that machine). Preflight and pipeline probe limits are now structurally aligned via
+on that machine). Preflight and pipeline probe limits now derive from the same pair,
 `cpu::default_workers()` and `cpu::probe_concurrency(workers)`.
 
 The two paths agree only when `--workers` is unset. `generate_inspection_manifest` does not
 receive the Batch Request, so it passes `cpu::default_workers()` where the pipeline passes
-`max_workers()`; an explicit `--workers 2` therefore yields 4 execution permits against 16
+`max_workers()`; an explicit `--workers 2` therefore yields 4 execution permits against 8
 preflight permits. `generate_plan_manifest` (`mkv-cli/src/main.rs`) has the request in hand and
-could thread the configured worker count through, but that widens this amendment's scope.
+could thread the configured worker count through, but that widens this amendment's scope and is
+not done here.
 `--workers` remains the lever for callers who need the two to match exactly.
 
 **Coverage.** `test_ebml_reader_retains_buffer_on_intra_buffer_skips` and
@@ -331,6 +348,7 @@ could thread the configured worker count through, but that widens this amendment
 and `seek_to()` advance the tracked position without issuing underlying `read` or `seek`
 calls, and multi-buffer reads refill predictably.
 `test_synthetic_multitrack_mkv_native_probe_and_buffer_retention` pins that `probe_ebml_native`
-successfully parses a 6-track synthetic MKV from disk, and `TrackingReader` verifies the
-parse completes in 1 buffer read and 0 seeks. Live-media cold-cache syscall tracing in
-production environments is not measured in CI and remains tracked under Issue #20.
+successfully parses a 6-track synthetic MKV from disk, and its counted walk — a proxy for the
+parser, which `probe_ebml_native` does not instrument — completes in 1 buffer fill and 0 seeks.
+Wall-clock is not re-measured; cold-cache behaviour on live media remains tracked under
+Issue #20.

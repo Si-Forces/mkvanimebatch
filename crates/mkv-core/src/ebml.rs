@@ -77,7 +77,7 @@ impl<R: Read + Seek> EbmlReader<R> {
     }
 
     fn skip(&mut self, len: u64) -> io::Result<()> {
-        let target = self.element_end(len, "EBML element length exceeds u64::MAX")?;
+        let target = self.element_end(len, "EBML element end overflow")?;
         self.seek_to(target)
     }
 
