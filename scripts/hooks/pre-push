@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Refuses to push commits that have no recorded Standards+Spec review.
+# Canonical copy lives at scripts/hooks/pre-push; install with:
+#   scripts/install-git-hooks.sh
+set -euo pipefail
+
+[ "${SKIP_REVIEW_GATE:-0}" = "1" ] && { echo "[review-gate] SKIP_REVIEW_GATE=1 — pushing unreviewed."; exit 0; }
+
+ZERO=0000000000000000000000000000000000000000
+while read -r _local_ref _local_sha _remote_ref _remote_sha; do
+  # Only gate pushes that actually advance a branch.
+  [ "$_local_sha" = "$ZERO" ] && continue
+  [ "$_remote_sha" = "$ZERO" ] || :   # new branch: still gate, base falls back inside the script
+  repo_root=$(git rev-parse --show-toplevel)
+  if [ -x "$repo_root/scripts/review-gate.sh" ]; then
+    "$repo_root/scripts/review-gate.sh" verify origin/main
+  else
+    echo "[review-gate] scripts/review-gate.sh missing; cannot verify reviews." >&2
+    exit 1
+  fi
+done
+exit 0

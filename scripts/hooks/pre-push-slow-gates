@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Slow CI gates, run at push time rather than commit time so small commits stay fast.
+# Canonical copy lives at scripts/hooks/pre-push-slow-gates; install with:
+#   scripts/install-git-hooks.sh
+set -euo pipefail
+
+ZEROSHA=0000000000000000000000000000000000000000
+pushing=0
+while read -r _lr _ls _rr _rs; do [ "$_ls" = "$ZEROSHA" ] || pushing=1; done
+[ "$pushing" -eq 1 ] || exit 0
+
+if [ "${SKIP_SLOW_GATES:-0}" = "1" ]; then
+  echo "[pre-push] SKIP_SLOW_GATES=1 — skipping test suites."
+  exit 0
+fi
+
+echo "[pre-push] cargo test --workspace..."
+cargo test --workspace || { echo ""; echo "❌ [pre-push] cargo test failed."; echo ""; exit 1; }
+
+if compgen -G "$(git rev-parse --show-toplevel)/desktop-tauri/ui/*.test.js" > /dev/null; then
+  echo "[pre-push] node --test desktop-tauri/ui/*.test.js..."
+  node --test "$(git rev-parse --show-toplevel)"/desktop-tauri/ui/*.test.js \
+    || { echo ""; echo "❌ [pre-push] node --test failed."; echo ""; exit 1; }
+fi
