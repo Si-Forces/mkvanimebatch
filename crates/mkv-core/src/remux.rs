@@ -142,7 +142,6 @@ pub fn build_mkvmerge_args(
     args.push(job.video.to_string_lossy().into_owned());
 
     if let Some(opus) = temp_opus {
-        args.push("--no-chapters".to_string());
         if !selection.audio_lang.is_empty() {
             args.push("--language".to_string());
             args.push(format!("0:{}", selection.audio_lang));

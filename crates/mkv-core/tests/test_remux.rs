@@ -105,24 +105,42 @@ fn test_select_tracks() {
 }
 
 #[test]
-fn test_no_chapters_before_temp_opus_only() {
-    let job = subtitle_job();
-    let args = mkvmerge_args(&job, Some(Path::new("/dummy/audio.opus")), 0.0);
+fn test_no_chapters_binding() {
+    let mut job_with_chapters = subtitle_job();
+    job_with_chapters.chapter_file = Some(PathBuf::from("/dummy/chapters.xml"));
 
-    let temp_opus_idx = args.iter().position(|a| a == "/dummy/audio.opus").unwrap();
-    assert_eq!(
-        &args[temp_opus_idx - 5..temp_opus_idx],
-        &[
-            "--no-chapters",
-            "--language",
-            "0:jpn",
-            "--track-name",
-            "0:Stereo"
-        ]
+    let args_with_chapters = mkvmerge_args(
+        &job_with_chapters,
+        Some(Path::new("/dummy/audio.opus")),
+        0.0,
     );
+    let no_chapters_count = args_with_chapters
+        .iter()
+        .filter(|&a| a == "--no-chapters")
+        .count();
+    assert_eq!(no_chapters_count, 1);
 
-    let sub_idx = args.iter().position(|a| a == "/dummy/sub.ass").unwrap();
-    assert!(!args[sub_idx - 6..sub_idx].contains(&"--no-chapters".to_string()));
+    let no_chapters_idx = args_with_chapters
+        .iter()
+        .position(|a| a == "--no-chapters")
+        .unwrap();
+    let video_idx = args_with_chapters
+        .iter()
+        .position(|a| a == job_with_chapters.video.to_str().unwrap())
+        .unwrap();
+    assert!(no_chapters_idx < video_idx);
+
+    let job_without_chapters = subtitle_job();
+    let args_without_chapters = mkvmerge_args(
+        &job_without_chapters,
+        Some(Path::new("/dummy/audio.opus")),
+        0.0,
+    );
+    let no_chapters_count_absent = args_without_chapters
+        .iter()
+        .filter(|&a| a == "--no-chapters")
+        .count();
+    assert_eq!(no_chapters_count_absent, 0);
 }
 
 #[test]
