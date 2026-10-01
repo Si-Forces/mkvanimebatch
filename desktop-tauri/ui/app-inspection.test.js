@@ -277,6 +277,30 @@ test("an unrecognized stored theme follows the OS scheme live", async t => {
   await ipc.flush();
 });
 
+test("app.js never re-derives the boot theme from localStorage when the bootstrap is absent", async t => {
+  const ipc = bootstrapHarness(t);
+  const priorStorage = globalThis.localStorage;
+  const storageReads = [];
+  const attributes = new Map();
+  globalThis.localStorage = {
+    getItem: key => { storageReads.push(key); return "dark"; },
+    setItem: () => {},
+  };
+  // theme-init.js published nothing, so the bootstrap never ran. The stored theme must be
+  // resolved by theme-init.js alone; app.js may only fall back to the live OS scheme.
+  globalThis.document.documentElement.dataset = {};
+  globalThis.document.documentElement.setAttribute = (name, value) => attributes.set(name, value);
+  globalThis.document.documentElement.getAttribute = name => attributes.get(name) ?? null;
+  t.after(() => { globalThis.localStorage = priorStorage; });
+
+  await ipc.mount("trusts-published-theme");
+
+  assert.deepEqual(storageReads, [], "app.js must not re-derive the boot theme from localStorage");
+  assert.equal(attributes.get("data-theme"), "light", "without a published theme the OS scheme wins");
+  assert.equal(ipc.calls.some(([command]) => command === "set_window_theme"), false,
+    "following the OS must leave the native window unpinned");
+});
+
 for (const { label, input, expected } of [
   { label: "empty string", input: "", expected: null },
   { label: "whitespace string", input: "   ", expected: null },

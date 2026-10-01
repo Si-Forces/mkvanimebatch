@@ -212,21 +212,13 @@ function applyChosenTheme(theme) {
   invoke("set_window_theme", { theme });
 }
 
+// Reads the theme `theme-init.js` published at bootstrap. It is the sole resolver: this must
+// never re-derive the theme from localStorage or matchMedia, or the two copies drift again.
+// Returns null when the user has made no explicit choice, meaning "follow the OS".
 function storedTheme() {
   const dataset = document.documentElement?.dataset;
-  if (dataset?.themeExplicit === "true") {
-    const theme = dataset.theme;
-    return theme === "light" || theme === "dark" ? theme : null;
-  }
-  if (dataset?.themeExplicit === "false") {
-    return null;
-  }
-  try {
-    const theme = localStorage.getItem(THEME_KEY);
-    return theme === "light" || theme === "dark" ? theme : null;
-  } catch {
-    return null;
-  }
+  if (dataset?.themeExplicit !== "true") return null;
+  return dataset.theme === "light" || dataset.theme === "dark" ? dataset.theme : null;
 }
 
 /** Applies the user's stored theme, or follows the OS colour scheme live until they pick one. */
