@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Installs the tracked git hooks into .git/hooks, preserving any unrelated hooks.
+# Installs the tracked git hooks into .git/hooks, preserving unrelated hooks.
 # Run once per clone:  scripts/install-git-hooks.sh
+#
+# Idempotent: re-running must not dirty .gitignore or duplicate entries. The first
+# version appended the ledger ignore line on every run.
 set -euo pipefail
 
 root=$(git rev-parse --show-toplevel)
@@ -17,35 +20,43 @@ install_one() {
 
 echo "Installing hooks into $dst"
 install_one pre-commit
-install_one pre-push
+install_one pre-push-slow-gates
 
-# Chain the slow gates ahead of the review-gate check rather than replacing the hook.
-if [ ! -f "$dst/pre-push-slow-gates" ]; then
-  install_one pre-push-slow-gates
-fi
-
+# Both push-time hooks read git's ref-update stream on stdin, so the wrapper captures
+# it once and replays it to each. Chaining them naively let the first hook drain stdin
+# and the second see EOF, silently skipping the review gate.
 cat > "$dst/pre-push" <<'WRAPPER'
 #!/usr/bin/env bash
 set -euo pipefail
 root=$(git rev-parse --show-toplevel)
-"$root/.git/hooks/pre-push-slow-gates"
-exec "$root/scripts/hooks/pre-push" "$@"
+updates=$(cat)
+rc=0
+printf '%s\n' "$updates" | "$root/.git/hooks/pre-push-slow-gates" "$@" || rc=$?
+printf '%s\n' "$updates" | bash "$root/scripts/hooks/pre-push" "$@" || rc=$?
+exit "$rc"
 WRAPPER
 chmod +x "$dst/pre-push"
+echo "  installed .git/hooks/pre-push (chains slow gates + review gate)"
 
-cat >> "$root/.gitignore" <<'IGN'
+# scripts/hooks/pre-push is invoked through `bash` above, so it needs no executable
+# bit in the index. scripts/review-gate.sh IS invoked directly and must be executable
+# in a fresh clone, so record the mode in git rather than relying on the filesystem.
+chmod +x "$root/scripts/review-gate.sh" "$root/scripts/install-git-hooks.sh"
+git update-index --chmod=+x scripts/review-gate.sh scripts/install-git-hooks.sh 2>/dev/null || true
 
-# Local review-gate ledger (per-clone, not shared)
-.review-ledger.jsonl
-IGN
+# The ledger ignore lives in the committed .gitignore; do not append it here.
+if ! grep -qx '.review-ledger.jsonl' "$root/.gitignore"; then
+  echo "⚠  .gitignore has no .review-ledger.jsonl entry; add it once by hand." >&2
+fi
 
-echo ""
-echo "Done. Gates now enforced:"
-echo "  pre-commit : cargo fmt --check + clippy -D warnings (whole workspace), node --check on staged UI"
-echo "  pre-push   : cargo test --workspace, node --test, then the review-gate ledger check"
-echo ""
-echo "Review a range with the code-review skill (Standards + Spec, parallel"
-echo "sub-agents), then record it before pushing:"
-echo "  scripts/review-gate.sh record \"Standards+Spec over origin/main..HEAD, findings fixed\""
-echo ""
-echo "Check what is still unreviewed:  scripts/review-gate.sh status"
+cat <<'MSG'
+Done. Gates now enforced:
+  pre-commit : cargo fmt --check + clippy -D warnings (whole workspace), node --check on staged UI
+  pre-push   : cargo test --workspace, node --test, then the review-gate ledger check
+
+Review a range with the code-review skill (Standards + Spec, parallel
+sub-agents), then record it before pushing:
+  scripts/review-gate.sh record-range <base> <head> "Standards+Spec over <base>..<head>, findings fixed"
+
+Check what is still unreviewed:  scripts/review-gate.sh status
+MSG
