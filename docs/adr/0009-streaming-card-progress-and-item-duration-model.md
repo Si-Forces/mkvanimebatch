@@ -43,7 +43,7 @@ We decided to adopt a unified, authoritative progress and duration architecture 
 ## Consequences
 - Guarantees exact, drift-free execution timing for all batch operations across engine restarts and UI reloads.
 - Eliminates timer memory leaks and reduces webview CPU overhead during batch processing.
-- Preserves full backward-compatible serialization on `JobEvent::ItemComplete` using `#[serde(default, skip_serializing_if = "Option::is_none")]`.
+- Preserves the serialized shape of `JobEvent::ItemComplete` using `#[serde(skip_serializing_if = "Option::is_none")]`. The `default` half of that attribute pair was removed with the `Deserialize` derive (ADR-0008 amendment, 2026-10-01); nothing deserializes a `JobEvent` in-tree, so the emitted wire contract is unchanged but an external `@event:` consumer must now supply its own deserializer.
 - Ensures queue item snapshots reflect authoritative wall-clock duration without fragile JSON metadata side-channels.
 
 ## Amendment — 2026-09-28
