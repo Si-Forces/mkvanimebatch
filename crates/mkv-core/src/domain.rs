@@ -31,14 +31,12 @@ impl EpisodeType {
         }
     }
 
-    pub fn label(&self, long: bool) -> &'static str {
-        match (self, long) {
-            (Self::Episode, false) => "EP",
-            (Self::Episode, true) => "Episode",
-            (Self::Part, _) => "Part",
-            (Self::Ova, _) => "OVA",
-            (Self::Special, false) => "SP",
-            (Self::Special, true) => "Special",
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Episode => "EP",
+            Self::Part => "Part",
+            Self::Ova => "OVA",
+            Self::Special => "SP",
         }
     }
 
