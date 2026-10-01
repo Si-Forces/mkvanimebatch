@@ -2,21 +2,41 @@
 # Refuses to push commits that have no recorded Standards+Spec review.
 # Canonical copy lives at scripts/hooks/pre-push; install with:
 #   scripts/install-git-hooks.sh
+#
+# Verifies the revisions git actually supplied on stdin rather than the checked-out
+# HEAD, so pushing a side branch cannot be waved through by having main reviewed.
 set -euo pipefail
 
 [ "${SKIP_REVIEW_GATE:-0}" = "1" ] && { echo "[review-gate] SKIP_REVIEW_GATE=1 — pushing unreviewed."; exit 0; }
 
 ZERO=0000000000000000000000000000000000000000
-while read -r _local_ref _local_sha _remote_ref _remote_sha; do
-  # Only gate pushes that actually advance a branch.
-  [ "$_local_sha" = "$ZERO" ] && continue
-  [ "$_remote_sha" = "$ZERO" ] || :   # new branch: still gate, base falls back inside the script
-  repo_root=$(git rev-parse --show-toplevel)
-  if [ -x "$repo_root/scripts/review-gate.sh" ]; then
-    "$repo_root/scripts/review-gate.sh" verify origin/main
+root=$(git rev-parse --show-toplevel)
+
+if [ ! -x "$root/scripts/review-gate.sh" ]; then
+  echo "❌ [review-gate] scripts/review-gate.sh is missing or not executable." >&2
+  echo "   Run: scripts/install-git-hooks.sh" >&2
+  exit 1
+fi
+
+while read -r _local_ref local_sha _remote_ref remote_sha; do
+  # The chaining wrapper prints a trailing newline, so empty stdin yields one blank line.
+  # Without this guard that blank line reads as an update with empty refs and the gate
+  # fails with a confusing "unknown ref".
+  [ -z "$local_sha" ] && continue
+  # Deleting a ref pushes the zero sha; nothing to review.
+  [ "$local_sha" = "$ZERO" ] && continue
+
+  if [ "$remote_sha" = "$ZERO" ]; then
+    # New branch: review only what is not already on origin/main.
+    if git rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
+      base=$(git merge-base origin/main "$local_sha")
+    else
+      echo "[review-gate] no origin/main and no remote tip; cannot determine a review base." >&2
+      exit 1
+    fi
   else
-    echo "[review-gate] scripts/review-gate.sh missing; cannot verify reviews." >&2
-    exit 1
+    base="$remote_sha"
   fi
+
+  "$root/scripts/review-gate.sh" verify-range "$base" "$local_sha"
 done
-exit 0
