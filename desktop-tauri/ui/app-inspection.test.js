@@ -235,6 +235,7 @@ test("explicit toggle survives a failed storage write when the OS scheme changes
   const schemeHandlers = [];
   globalThis.localStorage = { getItem: () => null, setItem: () => { throw new Error("storage blocked"); } };
   globalThis.document.documentElement = {
+    dataset: {},
     setAttribute: (name, value) => attributes.set(name, value),
     getAttribute: name => attributes.get(name) ?? null,
     classList: { toggle() {} },
@@ -248,6 +249,9 @@ test("explicit toggle survives a failed storage write when the OS scheme changes
   assert.equal(attributes.get("data-theme"), "light");
   themeButton.handlers.get("click")();
   assert.equal(attributes.get("data-theme"), "dark");
+  // The DOM is the single source of truth after a toggle: an explicit choice must be
+  // published to dataset.themeExplicit, or storage and the dataset disagree again.
+  assert.equal(globalThis.document.documentElement.dataset.themeExplicit, "true");
 
   schemeHandlers.forEach(handler => handler({ matches: false }));
   assert.equal(attributes.get("data-theme"), "dark");
