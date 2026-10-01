@@ -31,6 +31,11 @@
 
 - Recursive MKV scanning skips canonical-key path allocations for non-MKV files and directories excluded by the output/font-directory name filters. Canonical keys are still derived for candidates that need ignore-path or deduplication checks.
 
+### Core Performance & Probing
+
+- `probe_ebml_native` preserves `BufReader` buffers across intra-buffer element skips using relative seeking and tracks stream positions in memory, eliminating redundant kernel `lseek` loop guards and reducing probe I/O from hundreds of syscalls to roughly one buffer read per 8 KiB of header scanned.
+- Preflight inspection default probe concurrency is now calculated from physical core count via `cpu::probe_concurrency(cpu::default_workers())`, aligning with pipeline execution's default. Previously it used logical cores (`available_parallelism()`), which allowed up to 16 concurrent probes on machines with 4 physical and 8 logical cores.
+
 ### Worker Panic Reporting
 
 - A worker task that panics now completes its item with outcome `error` and the message `worker panicked: ...`. Previously that item never received an `ItemComplete` event.

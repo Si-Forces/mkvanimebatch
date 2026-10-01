@@ -57,6 +57,16 @@ pub(crate) fn transcode_governor_threads(cores: usize, workers: usize) -> usize 
     (cores / workers.max(1)).clamp(1, 4)
 }
 
+/// Default batch worker count derived from physical CPU cores, clamped to [1, 16].
+pub(crate) fn default_workers() -> usize {
+    physical_core_count().clamp(1, 16)
+}
+
+/// Derives preflight or execution probe semaphore concurrency from active/default workers.
+pub(crate) fn probe_concurrency(workers: usize) -> usize {
+    (workers * 2).clamp(2, 16)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -81,6 +91,15 @@ mod tests {
         // high core to worker ratios (clamped to 4)
         assert_eq!(transcode_governor_threads(32, 2), 4);
         assert_eq!(transcode_governor_threads(64, 4), 4);
+    }
+
+    #[test]
+    fn test_probe_concurrency_clamps() {
+        assert_eq!(probe_concurrency(0), 2);
+        assert_eq!(probe_concurrency(1), 2);
+        assert_eq!(probe_concurrency(4), 8);
+        assert_eq!(probe_concurrency(8), 16);
+        assert_eq!(probe_concurrency(32), 16);
     }
 
     #[test]
