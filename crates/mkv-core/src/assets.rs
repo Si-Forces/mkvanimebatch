@@ -529,7 +529,6 @@ pub struct ResolvedAssets {
     pub matched_subtitle: bool,
     pub chapter_file: Option<PathBuf>,
     pub cover_file: Option<PathBuf>,
-    pub fonts: FontInfo,
     pub skip_reason: Option<String>,
 }
 
@@ -615,7 +614,6 @@ fn populate_indices(
 
 #[derive(Debug, Clone, Default)]
 pub struct AssetResolver {
-    pub fonts: FontInfo,
     pub sub_index: SubIndex,
     pub chap_index: ChapterIndex,
     pub cover_index: CoverIndex,
@@ -633,22 +631,17 @@ impl AssetResolver {
                 .is_some_and(|fb| !fb.is_empty())
     }
 
-    pub fn use_source_fonts(&self) -> bool {
-        self.fonts.count == 0
-    }
-
     /// Indexes the assets of `search_dirs` (ordered root first, indexed deepest first) and,
-    /// when given, of `assets_dir` and its parent as the fallback indices. When `fonts_dir`
-    /// holds no fonts, the first fallback directory with fonts supplies them.
+    /// when given, of `assets_dir` and its parent as the fallback indices. Directory-level
+    /// font resolution is owned by `prepare_release_directory`.
     pub fn discover(
         search_dirs: &[PathBuf],
-        fonts_dir: &Path,
+        _fonts_dir: &Path,
         assets_dir: Option<&Path>,
         mut scan_cache: Option<&mut HashMap<PathBuf, ScanResults>>,
-        font_cache: Option<&mut HashMap<PathBuf, FontInfo>>,
+        _font_cache: Option<&mut HashMap<PathBuf, FontInfo>>,
         mut sub_classification_cache: Option<&mut HashMap<PathBuf, SubClassification>>,
     ) -> Self {
-        let mut fonts = scan_fonts(fonts_dir, font_cache);
         let mut sub_index = SubIndex::new();
         let mut chap_index = ChapterIndex::new();
         let mut cover_index = CoverIndex::new();
@@ -680,13 +673,6 @@ impl AssetResolver {
             }
 
             for fb_dir in fallback_dirs {
-                if fonts.count == 0 {
-                    let fb_fonts_dir = find_fonts_dir(&fb_dir, None, None);
-                    let scanned_fb_fonts = scan_fonts(&fb_fonts_dir, None);
-                    if scanned_fb_fonts.count > 0 {
-                        fonts = scanned_fb_fonts;
-                    }
-                }
                 populate_indices(
                     scan_assets(&fb_dir, scan_cache.as_deref_mut()),
                     &mut fb_sub,
@@ -702,7 +688,6 @@ impl AssetResolver {
         }
 
         Self {
-            fonts,
             sub_index,
             chap_index,
             cover_index,
@@ -844,7 +829,6 @@ impl AssetResolver {
             matched_subtitle: sub_res.matched,
             chapter_file,
             cover_file,
-            fonts: self.fonts.clone(),
             skip_reason: sub_res.skip_reason,
         })
     }

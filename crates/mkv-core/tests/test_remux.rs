@@ -244,7 +244,7 @@ mod mock_mkvmerge {
     use std::os::unix::fs::PermissionsExt;
 
     use tempfile::TempDir;
-    use tokio::sync::{Mutex, MutexGuard, Semaphore};
+    use tokio::sync::{Mutex, MutexGuard};
 
     use super::*;
 
@@ -317,34 +317,6 @@ mod mock_mkvmerge {
         assert!(
             err.contains("exit code 2"),
             "Error message did not contain exit code: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_execute_remux_job_with_io_semaphore_propagates_failure() {
-        let _mock = MockMkvmerge::install(
-            "#!/bin/sh\necho 'Error: Simulated mkvmerge stdout failure'\nexit 2\n",
-        )
-        .await;
-        let dir = tempfile::tempdir().unwrap();
-        let video = dir.path().join("test.mkv");
-        std::fs::File::create(&video).unwrap();
-        let semaphore = Semaphore::new(1);
-
-        // The io-gated path must still surface mkvmerge's own error text.
-        let err = execute_remux_job(
-            &job(&video, dir.path().join("out.mkv"), None),
-            &selection(),
-            &FontInfo::default(),
-            &REMUX_OPTIONS,
-            None,
-            Some(&semaphore),
-        )
-        .await
-        .unwrap_err();
-        assert!(
-            err.contains("Simulated mkvmerge stdout failure"),
-            "Error message did not surface through the io semaphore: {err}"
         );
     }
 

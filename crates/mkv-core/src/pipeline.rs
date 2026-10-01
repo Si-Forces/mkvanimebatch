@@ -32,29 +32,29 @@ pub const EVENT_VERSION: u64 = 1;
 /// `reason` of every item settled by a stop request.
 const CANCELLED_REASON: &str = "Operation cancelled";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BatchItemInfo {
     pub id: String,
     pub file: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum JobEvent {
     BatchStart {
         version: u64,
         total: usize,
         input_dir: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none")]
         items: Option<Vec<BatchItemInfo>>,
-        #[serde(default, flatten)]
+        #[serde(flatten)]
         extra: serde_json::Map<String, serde_json::Value>,
     },
     ItemStart {
         version: u64,
         id: String,
         file: String,
-        #[serde(default, flatten)]
+        #[serde(flatten)]
         extra: serde_json::Map<String, serde_json::Value>,
     },
     ItemProgress {
@@ -62,11 +62,11 @@ pub enum JobEvent {
         id: String,
         file: String,
         progress: f64,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none")]
         speed: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none")]
         eta: Option<String>,
-        #[serde(default, flatten)]
+        #[serde(flatten)]
         extra: serde_json::Map<String, serde_json::Value>,
     },
     ItemComplete {
@@ -74,21 +74,20 @@ pub enum JobEvent {
         id: String,
         file: String,
         status: ItemOutcome,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none")]
         duration_sec: Option<f64>,
-        #[serde(default, flatten)]
+        #[serde(flatten)]
         extra: serde_json::Map<String, serde_json::Value>,
     },
     BatchComplete {
         version: u64,
         success: bool,
-        #[serde(default)]
         cancelled: bool,
-        #[serde(default, flatten)]
+        #[serde(flatten)]
         extra: serde_json::Map<String, serde_json::Value>,
     },
 }

@@ -171,14 +171,10 @@ fn test_detect_sub_lang_offset_suffix() {
 
 #[test]
 fn test_ep_type_label() {
-    assert_eq!(EpisodeType::Episode.label(false), "EP");
-    assert_eq!(EpisodeType::Episode.label(true), "Episode");
-    assert_eq!(EpisodeType::Part.label(false), "Part");
-    assert_eq!(EpisodeType::Part.label(true), "Part");
-    assert_eq!(EpisodeType::Ova.label(false), "OVA");
-    assert_eq!(EpisodeType::Ova.label(true), "OVA");
-    assert_eq!(EpisodeType::Special.label(false), "SP");
-    assert_eq!(EpisodeType::Special.label(true), "Special");
+    assert_eq!(EpisodeType::Episode.label(), "EP");
+    assert_eq!(EpisodeType::Part.label(), "Part");
+    assert_eq!(EpisodeType::Ova.label(), "OVA");
+    assert_eq!(EpisodeType::Special.label(), "SP");
 }
 
 #[test]

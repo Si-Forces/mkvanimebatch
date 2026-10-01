@@ -251,7 +251,6 @@ fn test_assets_dir_multi_level_fallback_hierarchy() {
         Some(&assets_override.join("Season 01")),
     );
 
-    assert_eq!(resolver.fonts.count, 1);
     let video = create_parsed_file(season_dir.join("Show - 01.mkv"));
     assert_eq!(
         resolver.resolve_cov(&video, false),
