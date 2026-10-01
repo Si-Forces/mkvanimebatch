@@ -96,7 +96,7 @@ pub fn run() {
                             Ok(()) => app.exit(0),
                             Err(error) => {
                                 cancel_shutdown(&state, &scan_state);
-                                let _ = app.emit("cleanup-error", error);
+                                let _ = app.emit(commands::CLEANUP_ERROR, error);
                             }
                         }
                     });

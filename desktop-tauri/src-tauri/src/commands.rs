@@ -15,6 +15,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 const JOB_EVENT: &str = "job-event";
 const JOB_LOG: &str = "job-log";
 const JOB_DONE: &str = "job-done";
+pub(crate) const CLEANUP_ERROR: &str = "cleanup-error";
 /// Log lines are forwarded to the UI in batches of at most this many lines...
 const LOG_BATCH_MAX_LINES: usize = 25;
 /// ...or whenever this interval elapses with lines pending.
