@@ -446,14 +446,16 @@ function saveSubAssignment() {
     if (language === "custom") {
       language = document.getElementById("sub-lang-custom")?.value?.trim() || null;
     }
-    const offsetMs = parseInt(document.getElementById("sub-offset-input")?.value ?? "", 10);
+    const raw = document.getElementById("sub-offset-input")?.value?.trim() ?? "";
+    const n = Number(raw);
+    const offsetMs = raw !== "" && Number.isFinite(n) ? Math.trunc(n) : null;
     remuxQueue.assignments.set(itemId, {
       target_video: itemId,
       asset_path: chosenPath,
       track_type: "subtitle",
       language,
       title: document.getElementById("sub-title-input")?.value?.trim() || null,
-      offset_ms: Number.isNaN(offsetMs) ? null : offsetMs,
+      offset_ms: offsetMs,
     });
   }
   remuxQueue.applyAssignmentToCard(itemId);
