@@ -206,9 +206,15 @@ function setDocumentTheme(theme) {
   document.documentElement.setAttribute("data-theme", theme);
 }
 
-/** An explicit choice also pins the native window theme; following the OS leaves it unpinned. */
+/**
+ * An explicit choice also pins the native window theme; following the OS leaves it unpinned.
+ * Updates `dataset.themeExplicit` as well as `data-theme`, so the DOM stays the single source
+ * of truth after a toggle. Without it the dataset would still read "false" while storage holds
+ * an explicit choice -- the two-copies split that 856c040 removed.
+ */
 function applyChosenTheme(theme) {
   setDocumentTheme(theme);
+  document.documentElement.dataset.themeExplicit = "true";
   invoke("set_window_theme", { theme });
 }
 
