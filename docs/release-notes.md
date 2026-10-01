@@ -58,6 +58,7 @@
 - The window's corner resize handles now have a usable size and a diagonal resize cursor.
 - Stepper limits match the engine's validation: workers 1–64, Disk I/O jobs 0–64, FFmpeg threads 1–32. Fractional, out-of-range, and non-numeric values in those three fields are rejected before inspection instead of being truncated to integers.
 - The UI uses the system font stacks; bundled web fonts are no longer loaded.
+- The `set_window_theme` IPC command no longer coerces an unrecognized theme name to Dark. An unknown value now leaves the native window following the system preference instead of pinning it dark. The webview already only sends `light` or `dark`, so this affects a caller that bypasses the UI.
 
 ### Queue Selection Freeze
 

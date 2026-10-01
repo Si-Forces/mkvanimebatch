@@ -49,14 +49,22 @@ pub fn start_resize(window: tauri::Window, direction: String) {
     }
 }
 
+/// Maps a theme name from the webview to Tauri's theme, or `None` for anything
+/// unrecognized. An unknown value leaves the window following the OS rather than
+/// pinning it, mirroring how `start_resize` ignores codes it does not know.
+fn window_theme(theme: &str) -> Option<tauri::Theme> {
+    match theme {
+        "light" => Some(tauri::Theme::Light),
+        "dark" => Some(tauri::Theme::Dark),
+        _ => None,
+    }
+}
+
 #[tauri::command]
 pub fn set_window_theme(window: tauri::Window, theme: String) {
-    let theme = match theme.as_str() {
-        "light" => tauri::Theme::Light,
-        "dark" => tauri::Theme::Dark,
-        _ => return,
-    };
-    let _ = window.set_theme(Some(theme));
+    if let Some(theme) = window_theme(&theme) {
+        let _ = window.set_theme(Some(theme));
+    }
 }
 
 #[cfg(test)]
@@ -80,5 +88,30 @@ mod tests {
             );
         }
         assert!(direction_for(tauri::Window::start_resize_dragging, "invalid").is_none());
+    }
+
+    /// `set_window_theme` changed from coercing every unrecognized name to Dark to
+    /// leaving the window unpinned. That is user-visible native chrome on a Tauri
+    /// command, so the three-way mapping is pinned here rather than only through
+    /// the webview's negative "was not invoked" assertions.
+    #[test]
+    fn theme_names_map_to_tauri_themes_and_unknown_names_to_none() {
+        for (name, expected) in [
+            ("light", Some(tauri::Theme::Light)),
+            ("dark", Some(tauri::Theme::Dark)),
+        ] {
+            assert_eq!(
+                window_theme(name),
+                expected,
+                "theme '{name}' must map to {expected:?}"
+            );
+        }
+        for name in ["", "blue", "Light", "DARK", " system"] {
+            assert_eq!(
+                window_theme(name),
+                None,
+                "unrecognized theme '{name}' must leave the window following the OS"
+            );
+        }
     }
 }
