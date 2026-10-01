@@ -1,5 +1,7 @@
-// Applies data-theme before the stylesheet paints. Mirrors initTheme() in app.js (same key and
-// OS-default rule). Must stay an external classic script: the CSP is `script-src 'self'`.
+// Sole resolver of the initial theme, applied before the stylesheet paints. app.js does NOT
+// re-derive this: it reads the `dataset.theme` / `dataset.themeExplicit` published below, so
+// this file is the only place that reads `localStorage` or `matchMedia` for the boot theme.
+// Must stay an external classic script: the CSP is `script-src 'self'`.
 (function () {
   const stored = (() => {
     try {
