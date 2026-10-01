@@ -416,9 +416,14 @@ fn test_audio_commentary_word_matching() {
     // tie-break only applies when the candidate is NOT excluded as commentary.
     let cases = [
         ("Commentary", 2),
+        ("Commentaries", 2),
+        ("Comments", 2),
+        ("commentary", 2),
         ("Producer Comment", 2),
+        ("producer comments", 2),
         ("Audio Description", 2),
         ("AD", 2),
+        ("ad", 2),
         ("Extension", 2),
         ("Broadcast", 1),
         ("Addition", 1),

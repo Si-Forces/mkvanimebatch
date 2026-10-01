@@ -630,7 +630,7 @@ pub fn select_best_subtitle_track(
 }
 
 static COMMENTARY_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b(commentary|comment|audio\s+description|ad|extension)\b").unwrap()
+    Regex::new(r"(?i)\b(comment(?:s|ary|aries)?|audio\s+description|ad|extension)\b").unwrap()
 });
 
 /// Ranks an audio track for `select_audio_track`; higher is better.
