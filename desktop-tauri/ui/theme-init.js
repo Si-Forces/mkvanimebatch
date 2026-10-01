@@ -9,6 +9,8 @@
     }
   })();
   const osDark = window.matchMedia?.("(prefers-color-scheme: dark)")?.matches;
+  const isExplicit = stored === "light" || stored === "dark";
   document.documentElement.dataset.theme =
-    stored === "light" || stored === "dark" ? stored : osDark === false ? "light" : "dark";
+    isExplicit ? stored : osDark === false ? "light" : "dark";
+  document.documentElement.dataset.themeExplicit = isExplicit ? "true" : "false";
 })();

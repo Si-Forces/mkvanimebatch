@@ -213,6 +213,14 @@ function applyChosenTheme(theme) {
 }
 
 function storedTheme() {
+  const dataset = document.documentElement?.dataset;
+  if (dataset?.themeExplicit === "true") {
+    const theme = dataset.theme;
+    return theme === "light" || theme === "dark" ? theme : null;
+  }
+  if (dataset?.themeExplicit === "false") {
+    return null;
+  }
   try {
     const theme = localStorage.getItem(THEME_KEY);
     return theme === "light" || theme === "dark" ? theme : null;
@@ -232,7 +240,9 @@ function initTheme() {
   const follow = dark => {
     if (!chosenTheme && !storedTheme()) setDocumentTheme(dark ? "dark" : "light");
   };
-  follow(darkScheme?.matches ?? true);
+  if (!document.documentElement?.dataset?.theme) {
+    follow(darkScheme?.matches ?? true);
+  }
   darkScheme?.addEventListener("change", e => follow(e.matches));
 }
 

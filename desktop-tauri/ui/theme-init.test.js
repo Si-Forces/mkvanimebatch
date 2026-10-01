@@ -57,3 +57,19 @@ test("theme-init: handles localStorage error and falls back to OS preference", (
   assert.equal(runThemeInit({ storageThrows: true, prefersDark: false }), "light");
   assert.equal(runThemeInit({ storageThrows: true, prefersDark: true }), "dark");
 });
+
+test("index.html CSP invariant: every script tag carries a src attribute", () => {
+  const indexHtml = fs.readFileSync(
+    path.join(import.meta.dirname, "index.html"),
+    "utf8"
+  );
+  const scriptTags = indexHtml.match(/<script\b[^>]*>/gi) ?? [];
+  assert.ok(scriptTags.length > 0, "expected script tags in index.html");
+  for (const tag of scriptTags) {
+    assert.match(
+      tag,
+      /\bsrc=["'][^"']+["']/,
+      `script tag ${tag} must have a non-empty src attribute to satisfy script-src 'self' CSP`
+    );
+  }
+});
