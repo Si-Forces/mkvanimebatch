@@ -53,7 +53,8 @@ pub fn start_resize(window: tauri::Window, direction: String) {
 pub fn set_window_theme(window: tauri::Window, theme: String) {
     let theme = match theme.as_str() {
         "light" => tauri::Theme::Light,
-        _ => tauri::Theme::Dark,
+        "dark" => tauri::Theme::Dark,
+        _ => return,
     };
     let _ = window.set_theme(Some(theme));
 }
