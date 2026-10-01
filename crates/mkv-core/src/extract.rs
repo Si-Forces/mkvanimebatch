@@ -24,7 +24,7 @@ pub struct ExtractSummary {
 /// episode parses, otherwise the bare file stem.
 fn sidecar_stem(file_stem: &str, parsed: Option<&EpisodeInfo>) -> String {
     match parsed {
-        Some(info) => format!("{file_stem}_{}{}", info.ep_type.label(false), info.ep),
+        Some(info) => format!("{file_stem}_{}{}", info.ep_type.label(), info.ep),
         None => file_stem.to_string(),
     }
 }

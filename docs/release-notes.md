@@ -4,6 +4,9 @@
 
 ### Breaking Changes
 
+- **`JobEvent` and `BatchItemInfo` drop `Deserialize`**: `JobEvent` and `BatchItemInfo` in `mkv-core::pipeline` no longer derive `Deserialize`, and unused `#[serde(default...)]` annotations were removed from `JobEvent` variants.
+- **`EpisodeType::label()` parameter dropped**: `EpisodeType::label(&self)` no longer accepts `long: bool`; it always returns the standard short label (`EP`, `Part`, `OVA`, `SP`).
+- **Asset font fields and `use_source_fonts()` removed**: Removed write-only `fonts: FontInfo` from `ResolvedAssets` and `AssetResolver`, removed unused `AssetResolver::use_source_fonts()`, and eliminated redundant font fallback scanning in `AssetResolver::discover`. Directory-level font resolution is owned by `prepare_release_directory`.
 - **Non-finite subtitle offset rejected**: CLI and batch requests now validate that `--sub-offset` is a finite number, rejecting non-finite values such as `inf`, `-inf`, or `NaN`.
 - **Lowercase `m` bitrate suffix rejected**: CLI and desktop requests now reject rates such as `2m`, which ffmpeg interprets as milli rather than mega. Use uppercase `M` for mega; `k` and `K` remain accepted. Surrounding whitespace is trimmed before encoding.
 - **Removal of `--keep-fonts` CLI Flag**: The `--keep-fonts` command-line option has been removed from `mkv-cli`. Invoking `mkv-cli` with `--keep-fonts` will now result in an unknown flag error.
