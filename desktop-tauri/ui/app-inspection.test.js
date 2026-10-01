@@ -276,3 +276,50 @@ test("an unrecognized stored theme follows the OS scheme live", async t => {
   ipc.resolveSnapshot(null);
   await ipc.flush();
 });
+
+for (const { label, input, expected } of [
+  { label: "empty string", input: "", expected: null },
+  { label: "whitespace string", input: "   ", expected: null },
+  { label: "exponential notation 1e3", input: "1e3", expected: 1000 },
+]) {
+  test(`track-assignment offset parsing: ${label} produces ${expected}`, async t => {
+    const ipc = bootstrapHarness(t);
+    const modal = new BootElement();
+    const saveBtn = new BootElement();
+    const customPath = new BootElement();
+    const offsetInput = new BootElement();
+    const langSelect = new BootElement("ind");
+    const titleInput = new BootElement();
+    const subOffset = new BootElement("2.5");
+    ipc.elements.set("sub-assign-modal", modal);
+    ipc.elements.set("sub-assign-save", saveBtn);
+    ipc.elements.set("sub-custom-path", customPath);
+    ipc.elements.set("sub-offset-input", offsetInput);
+    ipc.elements.set("sub-lang-select", langSelect);
+    ipc.elements.set("sub-title-input", titleInput);
+    ipc.elements.set("remux-sub-offset", subOffset);
+
+    const app = await ipc.mount(`sub-offset-${label.replace(/\s+/g, "-")}`);
+    assert.equal(await app.scanInputDirectory("/release", "remux"), true);
+    ipc.elements.get("remux-input-dir").value = "/release";
+    ipc.resolveSnapshot(null);
+    await ipc.flush();
+
+    const list = ipc.elements.get("remux-episode-list");
+    list.handlers.get("click")({
+      target: { closest: () => ({ dataset: { itemId: "one" } }) },
+    });
+    customPath.value = "/custom/sub.ass";
+    offsetInput.value = input;
+    saveBtn.handlers.get("click")();
+
+    await ipc.elements.get("remux-run").handlers.get("click")();
+    await ipc.flush();
+
+    const runCall = ipc.calls.find(([command]) => command === "run_job");
+    assert.ok(runCall, "run_job was invoked");
+    assert.equal(runCall[1].request.sub_offset, 2.5, "global sub_offset configured");
+    const assignment = runCall[1].request.assignments.find(a => a.target_video === "one");
+    assert.equal(assignment.offset_ms, expected);
+  });
+}
