@@ -279,6 +279,14 @@ impl BatchRequest {
             }
         }
 
+        if let Some(offset) = self.sub_offset {
+            if !offset.is_finite() {
+                return Err(format!(
+                    "Subtitle offset must be a finite number, got {offset}"
+                ));
+            }
+        }
+
         if let Some(p) = &self.preset {
             if lookup_preset(p).is_none() {
                 return Err(format!("Unknown preset profile: '{p}'"));
@@ -658,6 +666,27 @@ mod tests {
             req.validate().unwrap_err(),
             "Encoder complexity must be between 0 and 10, got 11"
         );
+    }
+
+    #[test]
+    fn test_batch_request_validation_sub_offset_finite() {
+        let dir = tempdir().unwrap();
+        let mut req = minimal_request(dir.path());
+        for valid_offset in [0.0, -1.5, 100.25] {
+            req.sub_offset = Some(valid_offset);
+            assert!(
+                req.validate().is_ok(),
+                "sub_offset {valid_offset:?} should be valid"
+            );
+        }
+        for non_finite in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            req.sub_offset = Some(non_finite);
+            let err = req.validate().unwrap_err();
+            assert!(
+                err.contains("finite"),
+                "expected error containing 'finite', got {err:?}"
+            );
+        }
     }
 
     #[test]
