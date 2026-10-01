@@ -68,10 +68,8 @@ pub fn prepare_release_directory(
     };
     let resolver = AssetResolver::discover(
         &search_dirs,
-        &fonts_dir,
         options.assets_dir,
         options.scan_cache,
-        options.font_cache,
         options.sub_classification_cache,
     );
     PreparedRelease {
@@ -636,10 +634,8 @@ impl AssetResolver {
     /// font resolution is owned by `prepare_release_directory`.
     pub fn discover(
         search_dirs: &[PathBuf],
-        _fonts_dir: &Path,
         assets_dir: Option<&Path>,
         mut scan_cache: Option<&mut HashMap<PathBuf, ScanResults>>,
-        _font_cache: Option<&mut HashMap<PathBuf, FontInfo>>,
         mut sub_classification_cache: Option<&mut HashMap<PathBuf, SubClassification>>,
     ) -> Self {
         let mut sub_index = SubIndex::new();
