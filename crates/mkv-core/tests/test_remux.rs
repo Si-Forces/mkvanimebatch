@@ -286,7 +286,13 @@ mod mock_mkvmerge {
     }
 
     /// Remuxes an empty source video with no subtitle through the installed mock.
-    async fn remux(dir: &TempDir) -> Result<Vec<String>, String> {
+    ///
+    /// `io_semaphore` is threaded through rather than hardcoded so both sides of the ADR-0011
+    /// dual-governor branch are exercised: the product only ever passes `Some`.
+    async fn remux_with(
+        dir: &TempDir,
+        io_semaphore: Option<&tokio::sync::Semaphore>,
+    ) -> Result<Vec<String>, String> {
         let video = dir.path().join("test.mkv");
         std::fs::File::create(&video).unwrap();
         let out = dir.path().join("out.mkv");
@@ -296,9 +302,13 @@ mod mock_mkvmerge {
             &FontInfo::default(),
             &REMUX_OPTIONS,
             None,
-            None,
+            io_semaphore,
         )
         .await
+    }
+
+    async fn remux(dir: &TempDir) -> Result<Vec<String>, String> {
+        remux_with(dir, None).await
     }
 
     #[tokio::test]
@@ -353,5 +363,41 @@ mod mock_mkvmerge {
             std::fs::read(dir.path().join("out.mkv")).unwrap(),
             b"dummy data\n"
         );
+    }
+
+    /// The product always passes `Some(&io_semaphore)` (pipeline.rs), so the governor's
+    /// acquire branch is the one that runs in production. It needs its own coverage: the
+    /// `None` path every other test takes exercises a different arm of the same match.
+    #[tokio::test]
+    async fn test_execute_remux_job_runs_under_the_io_governor() {
+        let _mock = MockMkvmerge::install("#!/bin/sh\necho 'dummy data' > \"$2\"\nexit 0\n").await;
+        let dir = tempfile::tempdir().unwrap();
+        let semaphore = tokio::sync::Semaphore::new(1);
+
+        let log = remux_with(&dir, Some(&semaphore)).await.unwrap();
+
+        assert_eq!(
+            std::fs::read(dir.path().join("out.mkv")).unwrap(),
+            b"dummy data\n"
+        );
+        // The permit must be released when the job finishes, not held until the semaphore drops.
+        assert_eq!(
+            semaphore.available_permits(),
+            1,
+            "I/O permit leaked: {log:?}"
+        );
+    }
+
+    /// A closed governor is an invariant violation, not a "carry on unguarded" case.
+    /// Bypassing it would silently remove the ADR-0011 disk-write limit mid-batch.
+    #[tokio::test]
+    #[should_panic(expected = "io semaphore closed")]
+    async fn test_execute_remux_job_refuses_a_closed_io_governor() {
+        let _mock = MockMkvmerge::install("#!/bin/sh\nexit 0\n").await;
+        let dir = tempfile::tempdir().unwrap();
+        let semaphore = tokio::sync::Semaphore::new(1);
+        semaphore.close();
+
+        let _ = remux_with(&dir, Some(&semaphore)).await;
     }
 }
