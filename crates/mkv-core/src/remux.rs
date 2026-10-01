@@ -339,7 +339,11 @@ pub async fn execute_remux_job(
     // ADR-0011 Dual-Governor: CPU-intensive Opus transcoding runs in worker slot;
     // disk-intensive remux multiplexing (mkvmerge) is guarded by io_semaphore.
     let _io_permit = match io_semaphore {
-        Some(sem) => sem.acquire().await.ok(),
+        Some(sem) => Some(
+            sem.acquire()
+                .await
+                .expect("io semaphore closed mid-remux; the I/O governor cannot be bypassed"),
+        ),
         None => None,
     };
 
