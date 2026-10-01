@@ -4,6 +4,7 @@
 
 ### Breaking Changes
 
+- **Non-finite subtitle offset rejected**: CLI and batch requests now validate that `--sub-offset` is a finite number, rejecting non-finite values such as `inf`, `-inf`, or `NaN`.
 - **Lowercase `m` bitrate suffix rejected**: CLI and desktop requests now reject rates such as `2m`, which ffmpeg interprets as milli rather than mega. Use uppercase `M` for mega; `k` and `K` remain accepted. Surrounding whitespace is trimmed before encoding.
 - **Removal of `--keep-fonts` CLI Flag**: The `--keep-fonts` command-line option has been removed from `mkv-cli`. Invoking `mkv-cli` with `--keep-fonts` will now result in an unknown flag error.
 - **Removal of `keep_fonts` from Typed Contracts & IPC**: The `keep_fonts` field has been removed from `BatchRequest`, `PresetProfile`, `PipelineConfig`, and desktop Tauri IPC command schemas (`run_job`, `get_preset_profiles`). Desktop presets and UI controls no longer expose a font-retention toggle. No compatibility alias is retained.
