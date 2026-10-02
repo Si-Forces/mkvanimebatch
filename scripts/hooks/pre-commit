@@ -1,45 +1,47 @@
 #!/usr/bin/env bash
-# Fast CI gates on every commit. Canonical copy lives at scripts/hooks/pre-commit;
-# install with: scripts/install-git-hooks.sh
-#
-# Covers the whole Rust workspace, not just src-tauri. The hook this replaced only
-# ran `cargo fmt` when desktop-tauri files were staged, so a formatting error in
-# crates/mkv-core reached a commit unblocked.
-#
-# The slow gates (cargo test, node --test) run in pre-push instead, so nothing
-# reaches origin/main without them.
+# Fast gates on every commit; the slow test suites run in pre-push.
+# Enabled per clone by scripts/install-git-hooks.sh.
 set -euo pipefail
 
-staged=$(git diff --cached --name-only)
-if [ -z "$staged" ]; then exit 0; fi
+# -z keeps non-ASCII paths unquoted. Deletions are included: removing a .rs file can
+# break the build as surely as editing one.
+mapfile -d '' staged < <(git diff --cached --name-only -z)
+wait $! # a process substitution's failure is otherwise ignored
+
+rust=0
+ui_js=()
+for f in "${staged[@]}"; do
+  case "$f" in
+    *.rs | Cargo.toml | */Cargo.toml | Cargo.lock) rust=1 ;;
+    desktop-tauri/ui/*.js) ui_js+=("$f") ;;
+  esac
+done
 
 fail=0
 
-if printf '%s\n' "$staged" | grep -qE '\.rs$'; then
+if [ "$rust" -eq 1 ]; then
+  # cargo reads the working tree, so it must hold exactly what is being committed.
+  unstaged=$(git diff --name-only -- '*.rs' '*Cargo.toml' Cargo.lock)
+  untracked=$(git ls-files --others --exclude-standard -- '*.rs' '*Cargo.toml')
+  if [ -n "$unstaged$untracked" ]; then
+    echo "❌ [pre-commit] these Rust/Cargo files differ from the index, so cargo would not check the commit:" >&2
+    printf '%s\n%s\n' "$unstaged" "$untracked" | sed '/^$/d; s/^/   /' >&2
+    echo "   Stage them, or set them aside with: git stash push --keep-index --include-untracked" >&2
+    exit 1
+  fi
   echo "[pre-commit] cargo fmt --check (workspace)..."
-  if ! cargo fmt --all -- --check; then
-    echo ""; echo "❌ [pre-commit] cargo fmt failed. Run: cargo fmt --all"; echo ""
-    fail=1
-  fi
+  cargo fmt --all -- --check || { echo "❌ [pre-commit] cargo fmt failed. Run: cargo fmt --all" >&2; fail=1; }
   echo "[pre-commit] cargo clippy -D warnings (workspace, all targets)..."
-  if ! cargo clippy --workspace --all-targets -- -D warnings; then
-    echo ""; echo "❌ [pre-commit] clippy failed."; echo ""
-    fail=1
-  fi
+  cargo clippy --workspace --all-targets -- -D warnings || { echo "❌ [pre-commit] clippy failed." >&2; fail=1; }
 fi
 
-if printf '%s\n' "$staged" | grep -qE '^desktop-tauri/ui/.*\.js$'; then
-  echo "[pre-commit] node --check on staged UI modules..."
-  # Filter to UI JavaScript only. Iterating every staged path made `node --check`
-  # reject unrelated files such as README.md with ERR_UNKNOWN_FILE_EXTENSION.
-  while read -r f; do
-    case "$f" in desktop-tauri/ui/*.js) ;; *) continue ;; esac
-    [ -f "$f" ] || continue
-    if ! node --check "$f"; then
-      echo ""; echo "❌ [pre-commit] node --check failed: $f"; echo ""
-      fail=1
-    fi
-  done <<< "$staged"
-fi
+# Checks the staged blob itself, so unstaged edits cannot hide a syntax error.
+for f in "${ui_js[@]}"; do
+  git cat-file -e ":$f" 2> /dev/null || continue # staged deletion
+  # theme-init.js must stay a classic script (CSP, see its header); the rest are modules.
+  case "$f" in */theme-init.js) input_type=commonjs ;; *) input_type=module ;; esac
+  git show ":$f" | node --check --input-type="$input_type" ||
+    { echo "❌ [pre-commit] node --check failed: $f" >&2; fail=1; }
+done
 
-exit $fail
+exit "$fail"

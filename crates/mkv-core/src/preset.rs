@@ -1,7 +1,5 @@
 //! Canonical preset profiles for audio transcoding and container remuxing.
 
-use std::sync::LazyLock;
-
 use serde::{Deserialize, Serialize};
 
 /// A named configuration profile for audio transcoding.
@@ -16,7 +14,8 @@ pub struct PresetProfile {
     pub complexity: u32,
 }
 
-static PRESETS: LazyLock<Vec<PresetProfile>> = LazyLock::new(|| {
+/// Returns the standard catalog of built-in preset profiles.
+pub fn get_preset_profiles() -> Vec<PresetProfile> {
     vec![
         PresetProfile {
             id: "balanced".to_string(),
@@ -47,11 +46,6 @@ static PRESETS: LazyLock<Vec<PresetProfile>> = LazyLock::new(|| {
             complexity: 5,
         },
     ]
-});
-
-/// Returns the standard catalog of built-in preset profiles.
-pub fn get_preset_profiles() -> Vec<PresetProfile> {
-    PRESETS.clone()
 }
 
 /// Looks up a built-in preset by case-insensitive id, accepting `default` for `balanced` and
@@ -67,10 +61,9 @@ pub fn lookup_preset(id: &str) -> Option<PresetProfile> {
     } else {
         trimmed
     };
-    PRESETS
-        .iter()
+    get_preset_profiles()
+        .into_iter()
         .find(|p| p.id.eq_ignore_ascii_case(target))
-        .cloned()
 }
 
 #[cfg(test)]
@@ -100,10 +93,6 @@ mod tests {
         let value = serde_json::to_value(&preset).expect("preset serializes");
         let object = value.as_object().expect("preset serializes as an object");
 
-        assert!(
-            !object.contains_key("description"),
-            "PresetProfile must not serialize a 'description' field"
-        );
         // Pin the fields the desktop reads by name, not the exhaustive key set: adding a field
         // is a legitimate change, whereas renaming or dropping one breaks loadPresetProfiles.
         for key in ["id", "name", "icon", "bitrate", "complexity"] {

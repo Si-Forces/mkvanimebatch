@@ -281,3 +281,96 @@ async fn test_real_remux_subtitle_ladder_and_advertised_cover_names() {
     assert!(subtitle.contains("PARENT ENGLISH"));
     assert_eq!(attachment, b"FALLBACK COVER");
 }
+
+/// ffmpeg copies the source chapters into the temporary Opus file. If mkvmerge reads them
+/// from both inputs, every chapter appears twice in the output.
+#[tokio::test]
+async fn test_real_remux_transcoded_flac_keeps_chapters_once() {
+    if !media_tools_available() {
+        return;
+    }
+    let tmp = tempdir().unwrap();
+    let input = tmp.path().join("input");
+    fs::create_dir_all(&input).unwrap();
+    let chapters = tmp.path().join("chapters.txt");
+    fs::write(
+        &chapters,
+        ";FFMETADATA1\n\
+         [CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=500\ntitle=Opening\n\
+         [CHAPTER]\nTIMEBASE=1/1000\nSTART=500\nEND=1000\ntitle=Part A\n",
+    )
+    .unwrap();
+    media_command(
+        Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=16x16:r=1:d=1",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=d=1",
+                "-i",
+            ])
+            .arg(&chapters)
+            .args([
+                "-map",
+                "0:v",
+                "-map",
+                "1:a",
+                "-map_chapters",
+                "2",
+                "-c:v",
+                "mpeg4",
+                "-c:a",
+                "flac",
+                "-y",
+            ])
+            .arg(input.join("Show - 01.mkv")),
+    );
+    // Remux skips a video with no subtitle to add.
+    fs::write(
+        input.join("Show - 01.eng.srt"),
+        b"1\n00:00:00,000 --> 00:00:00,900\nENGLISH\n",
+    )
+    .unwrap();
+
+    let output = tmp.path().join("out");
+    let summary = BatchPipeline::new(
+        PipelineConfig {
+            mode: PipelineMode::Remux,
+            input_dir: input,
+            out_dir: Some(output.clone()),
+            no_cache: true,
+            ..Default::default()
+        },
+        None,
+        CancellationToken::new(),
+    )
+    .run()
+    .await
+    .unwrap();
+    assert_eq!(
+        (summary.completed, summary.errors),
+        (1, 0),
+        "{:?}",
+        summary.log
+    );
+
+    let metadata = mkv_core::scan::probe_video_mkvmerge(&output.join("Show - 01.mkv"))
+        .await
+        .unwrap();
+    assert!(metadata
+        .tracks
+        .iter()
+        .any(|track| track.properties.codec_id.as_deref() == Some("A_OPUS")));
+    let entries: u32 = metadata
+        .chapters
+        .iter()
+        .filter_map(|chapter| chapter.num_entries)
+        .sum();
+    assert_eq!(entries, 2, "{:?}", summary.log);
+}

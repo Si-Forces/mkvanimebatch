@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use tokio::sync::Semaphore;
 
 use crate::domain::{
-    cover_mime, promote_file, read_progress_stream, select_audio_track, SUBPROCESS_TIMEOUT,
+    cover_mime, promote_file, read_progress_stream, select_audio_track, IO_GOVERNOR_CLOSED,
+    SUBPROCESS_TIMEOUT,
 };
 use crate::fonts::FontInfo;
 use crate::scan::InspectedVideo;
@@ -142,6 +143,9 @@ pub fn build_mkvmerge_args(
     args.push(job.video.to_string_lossy().into_owned());
 
     if let Some(opus) = temp_opus {
+        // ffmpeg copies the source chapters into the Ogg file, so without this the
+        // output carries every chapter twice, or mixes them into an external chapter file.
+        args.push("--no-chapters".to_string());
         if !selection.audio_lang.is_empty() {
             args.push("--language".to_string());
             args.push(format!("0:{}", selection.audio_lang));
@@ -269,7 +273,7 @@ pub async fn execute_remux_job(
     fonts: &FontInfo,
     options: &RemuxOptions<'_>,
     on_progress: Option<&(dyn Fn(f64) + Send + Sync)>,
-    io_semaphore: Option<&Semaphore>,
+    io_semaphore: &Semaphore,
 ) -> Result<Vec<String>, String> {
     let mut log = vec![format!("Processing: {}", job.video_name)];
 
@@ -338,14 +342,10 @@ pub async fn execute_remux_job(
     );
     // ADR-0011 Dual-Governor: CPU-intensive Opus transcoding runs in worker slot;
     // disk-intensive remux multiplexing (mkvmerge) is guarded by io_semaphore.
-    let _io_permit = match io_semaphore {
-        Some(sem) => Some(
-            sem.acquire()
-                .await
-                .expect("io semaphore closed mid-remux; the I/O governor cannot be bypassed"),
-        ),
-        None => None,
-    };
+    let _io_permit = io_semaphore
+        .acquire()
+        .await
+        .map_err(|_| IO_GOVERNOR_CLOSED.to_string())?;
 
     log.push("  Running mkvmerge...".into());
     let mut mkvmerge_cmd = tokio::process::Command::new("mkvmerge");

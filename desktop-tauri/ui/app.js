@@ -1,7 +1,7 @@
 /* MKV Anime Batch desktop frontend.
    Talks to the Tauri host through window.__TAURI__ (withGlobalTauri: true in tauri.conf.json). */
 
-import { BULK_SELECTION_CONTROLS, JobController } from "./job-controller.js";
+import { BULK_SELECTION_CONTROLS, JOB_DONE, JOB_EVENT, JobController } from "./job-controller.js";
 import { QueueTracker } from "./queue-view.js";
 import { classifyLine } from "./log-classify.js";
 import { createTelemetryLoop } from "./telemetry.js";
@@ -45,8 +45,8 @@ async function restoreQueueFromSnapshot(controllers) {
   };
 
   try {
-    unlistenEvent = await listen("job-event", e => deliver("event", e.payload));
-    unlistenDone = await listen("job-done", e => deliver("done", e.payload));
+    unlistenEvent = await listen(JOB_EVENT, e => deliver("event", e.payload));
+    unlistenDone = await listen(JOB_DONE, e => deliver("done", e.payload));
     const snapshot = await invoke("get_job_snapshot");
     if (!snapshot || snapshot.job_id == null || !snapshot.items || !controllers[snapshot.mode]) return;
     const queue = queueFor(snapshot.mode);
@@ -210,7 +210,7 @@ function setDocumentTheme(theme) {
  * An explicit choice also pins the native window theme; following the OS leaves it unpinned.
  * Updates `dataset.themeExplicit` as well as `data-theme`, so the DOM stays the single source
  * of truth after a toggle. Without it the dataset would still read "false" while storage holds
- * an explicit choice -- the two-copies split that 856c040 removed.
+ * an explicit choice, and the two copies of the theme would disagree.
  */
 function applyChosenTheme(theme) {
   setDocumentTheme(theme);
@@ -218,8 +218,8 @@ function applyChosenTheme(theme) {
   invoke("set_window_theme", { theme });
 }
 
-// Reads the theme `theme-init.js` published at bootstrap. It is the sole resolver: this must
-// never re-derive the theme from localStorage or matchMedia, or the two copies drift again.
+// Reads the theme `theme-init.js` published at bootstrap. It is the sole resolver of the stored
+// choice: this must never re-read localStorage, or the two copies could disagree.
 // Returns null when the user has made no explicit choice, meaning "follow the OS".
 function storedTheme() {
   const dataset = document.documentElement?.dataset;
@@ -444,9 +444,12 @@ function saveSubAssignment() {
     if (language === "custom") {
       language = document.getElementById("sub-lang-custom")?.value?.trim() || null;
     }
+    // `offset_ms` is an i64 and serde rejects a float, so a fraction is truncated. An
+    // empty field must stay null (Number("") is 0, which would suppress the global offset),
+    // and a value beyond the safe-integer range would fail the whole run_job request.
     const raw = document.getElementById("sub-offset-input")?.value?.trim() ?? "";
-    const n = Number(raw);
-    const offsetMs = raw !== "" && Number.isFinite(n) ? Math.trunc(n) : null;
+    const truncatedMs = Math.trunc(Number(raw));
+    const offsetMs = raw !== "" && Number.isSafeInteger(truncatedMs) ? truncatedMs : null;
     remuxQueue.assignments.set(itemId, {
       target_video: itemId,
       asset_path: chosenPath,
