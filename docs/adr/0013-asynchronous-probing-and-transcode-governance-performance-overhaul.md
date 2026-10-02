@@ -361,11 +361,12 @@ This reverses, for this one call, the rejected option "Retain Synchronous Probin
 `spawn_blocking` Wrappers", Consequence 1's stall claim for the native path, and Amendment 2
 Finding 1's reason for keeping it inline. That finding's 3.2x figure was dispatch cost on
 sub-millisecond metadata calls that never wait on the device. A cold header read does wait on
-the device, and probes fan out up to 16 at a time (`cpu::probe_concurrency`) against a runtime
-whose default worker count is the logical CPU count, so a batch of cold probes can pin every
-worker. The `mkvmerge -J` fallback stays on `tokio::process::Command`. The change sits inside
-`probe_video`, so pipeline probing, preflight inspection (`manifest.rs`) and
-`get_or_probe_video` all take it.
+the device. Preflight and bulk-plan probes fan out to `cpu::probe_concurrency`, at most 16;
+execution-path probes are bounded only by `max_workers`, up to 64 (`--workers` or the request's
+`workers`). Either way the fan-out can match a runtime whose default worker count is the
+logical CPU count, so a batch of cold probes can pin every worker. The `mkvmerge -J` fallback
+stays on `tokio::process::Command`. The change sits inside `probe_video`, so pipeline probing,
+preflight inspection (`manifest.rs`) and `get_or_probe_video` all take it.
 
 **Measurement.** `probe_ebml_native`, 20 probes per run (20 files on the HDD), real 1080p BD
 releases. The page cache was evicted per file with `dd if=FILE iflag=nocache count=0` (no root
@@ -391,17 +392,21 @@ waits for it, so a read on a hung mount delays exit; before, the same read pinne
 worker. No `shutdown_timeout` is added.
 
 One thing is worse than before. The probe permit belongs to the async task, so aborting it
-releases the permit while the detached read keeps running, where an inline read held its
-permit until it returned. Reads orphaned by a cancel, at most `probe_concurrency` per cancel,
-are counted by no permit, so a job started right after a stop can briefly run more reads than
-its probe limit; repeated stop-and-start cycles on a hung mount can accumulate them. In
-exchange, cancellation is no longer delayed when cold reads pin the workers. The permit is not
-moved into the blocking task: each job builds its own semaphore, so holding the old one would
-not bound the next job.
+releases the permit while the detached read keeps running, where an inline read held its permit
+until it returned. Reads orphaned by a cancel are counted by no permit: per cancel, at most
+`probe_concurrency` on the preflight and bulk-plan paths, or `max_workers` (up to 64) on the
+execution path, which holds no probe permit. A job started right after a stop can therefore
+briefly run more reads than its probe limit. Repeated stop-and-start cycles on a hung mount
+accumulate them up to Tokio's default 512-thread blocking pool; nothing in the repo sets
+`max_blocking_threads`. In exchange, cancellation is no longer delayed when cold reads pin the
+workers. The permit is not moved into the blocking task: each job builds its own semaphore, so
+holding the old one would not bound the next job.
 
 **Out of scope.** Per-directory synchronous I/O inside `async fn` (`prepare_release_directory`,
 `scan_fonts`, `claim_leftover_chapters`, `is_chapter_xml`, the `scan_mkv_files` walk) runs once
-per directory rather than fanning out. It is tracked as #23.
+per directory rather than fanning out. It is tracked as #23. The inspect-cache lookup and
+store around each probe (`get_path` / `put_path`, a `metadata()` stat) also stay inline, in
+`get_or_probe_video` and preflight.
 
 **Coverage.** `test_probe_video_stalled_native_read_does_not_block_runtime` points
 `probe_video` at a FIFO, whose `open()` blocks until a writer appears. It asserts that a timer
