@@ -407,9 +407,10 @@ mod mock_mkvmerge {
         semaphore.close();
 
         let err = remux_with(dir.path(), &semaphore).await.unwrap_err();
-        assert!(
-            err.contains("I/O governor closed"),
-            "unexpected error: {err}"
+        // Pins the exact wording users see in the item error.
+        assert_eq!(
+            err,
+            "I/O governor closed; refusing to run without the disk-write limit"
         );
         assert!(!dir.path().join("out.mkv").exists());
     }
