@@ -1,0 +1,107 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+@AGENTS.md
+
+AGENTS.md (imported above) holds the binding workflow rules: run the Standards + Spec code review before every commit, and run the formatting/lint/test gate whenever Rust or UI files change.
+
+## Commands
+
+```bash
+# Rust gate (what CI and the pre-commit/pre-push hooks run)
+cargo fmt --all
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+
+# One package / one integration suite / one test
+cargo test -p mkv-core
+cargo test -p mkv-core --test test_assets
+cargo test -p mkv-core --test test_domain <test_name_substring>
+
+# Real-media regression: drives real ffmpeg/mkvmerge/mkvextract and skips when they are missing.
+# CI on Linux sets MKV_REQUIRE_MEDIA_TOOLS=1 so a missing tool fails the test instead.
+MKV_REQUIRE_MEDIA_TOOLS=1 cargo test -p mkv-core --test test_real_remux
+
+# Frontend (Node 20+, node:test, no package.json/npm)
+node --check desktop-tauri/ui/app.js
+node --test desktop-tauri/ui/*.test.js
+node --test desktop-tauri/ui/queue-state.test.js
+
+# Builds
+cargo build --release -p mkv-cli                  # CLI
+cargo build --release -p mkv-anime-batch          # desktop crate (no bundle)
+(cd desktop-tauri && cargo tauri build)           # desktop app; needs `cargo install tauri-cli --version "^2" --locked`
+
+# CLI smoke test used by CI
+./target/release/mkv-cli --plan --no-cache --input-dir <empty-dir>   # emits manifest {"version": 2, "items": []}
+```
+
+`cargo audit` also runs in CI. Ignored advisories, each with its reason, are in `.cargo/audit.toml`.
+
+### Git hooks and the review ledger
+
+Install the tracked hooks once per clone with `scripts/install-git-hooks.sh`. pre-commit runs fmt and clippy across the whole workspace, plus `node --check` on staged UI files. pre-push runs `cargo test`, `node --test`, and then the **review-gate ledger** check. The ledger blocks a push to main if any commit has no recorded review. After running the code-review skill, record the review:
+
+```bash
+scripts/review-gate.sh record-range <base> <head> "Standards+Spec over <base>..<head>, findings fixed"
+scripts/review-gate.sh status    # unpushed commits that still lack a review
+```
+
+The ledger keys on tree SHA, so it survives rebases. Repo scripts use `node`, not Python: ADR-0010 removed Python from dev and CI environments.
+
+## Architecture
+
+A Cargo workspace with three members that share one version:
+
+- `crates/mkv-core`: the media engine library, which holds all the domain logic.
+- `crates/mkv-cli`: a thin CLI adapter (`main.rs`). If the binary is renamed to `mkv-extract`, it defaults to extract mode.
+- `desktop-tauri/src-tauri` (package `mkv-anime-batch`): a Tauri v2 host that runs `mkv-core` **in-process** (no sidecar, ADR-0007), with a plain-ES-module frontend in `desktop-tauri/ui` (no framework, no bundler).
+
+External tools are invoked as subprocesses: `mkvmerge`, `mkvextract`, and `ffmpeg` (libopus).
+
+### Engine flow (`mkv-core`)
+
+`BatchRequest` (`request.rs`, validated by `BatchRequest::validate`) → `BatchPipeline` (`pipeline.rs`):
+
+1. Discovery (`scan.rs`).
+2. Selected-items filtering.
+3. Probing. A native EBML parser (`ebml.rs`) runs first and falls back to `mkvmerge -J`. Results are cached in `PersistentInspectCache`, keyed by path plus size and mtime.
+4. Per-directory asset resolution (`assets.rs`).
+5. Planning.
+6. Execution through a tokio `JoinSet` of planned jobs drawn from one global queue. Remux execution is in `remux.rs` and extraction in `extract.rs`.
+
+Concurrency has two limits (ADR-0011):
+
+- `workers` caps how many items are in flight.
+- The `io_jobs` semaphore covers only the mkvmerge/mkvextract and promotion phases, so FLAC→Opus transcoding overlaps with other items' muxing.
+
+Invariants to preserve:
+
+- **Subtitle precedence ladder (ADR-0004/0008)**: manual `TrackAssignment` > same-directory external > embedded > nearest-ancestor external > `--assets-dir`. Source tier beats language score. The scoring rules live in `domain.rs`.
+- **Atomic outputs**: work is staged in `TempDir`s inside the destination and moved into place with `promote_file`. Child processes use `kill_on_drop(true)`, so cancellation (`CancellationToken`, raced with `tokio::select!`) cleans up by dropping.
+- **Font registry (`fonts.rs`)**: claim → stage → BLAKE2b dedup → promote/release. `FontClaimsGuard` releases any unpromoted claim on drop.
+- **Panics are isolated**: a panicking item task becomes an `error` outcome, and the desktop supervisor catches pipeline panics at the `JoinHandle`. **Never set `panic = "abort"`** in the release profile.
+- `unsafe_code = "forbid"` is set across the workspace.
+
+### Engine ↔ desktop bridge
+
+`commands.rs` and `process.rs` define the Tauri commands (`inspect_directory`, `run_job`, `stop_job`, `get_job_snapshot`, …). The engine streams `JobEvent`s and log lines over two tokio mpsc channels. A supervisor task forwards them to the webview as `job-event`, `job-log` (batched), and `job-done`. It also reduces the events into a `JobSnapshot`, so a webview reload can rebuild the queue.
+
+Only one job runs at a time. Stopping is two-phase: a cooperative cancel with a 2 s wait, then an abort of the pipeline task.
+
+Directory identities that cross the bridge must use the display form of the canonical path, with the `\\?\` prefix stripped (`display_canonical_path`). The Queue Tracker matches directories by string comparison, so a mismatch silently breaks selection and ordering.
+
+On the frontend:
+
+- `queue-state.js` holds a pure reducer that applies `JobEvent`s to queue state.
+- `queue-view.js` renders the cards.
+- `job-controller.js` builds the `BatchRequest` and starts and stops runs.
+- The coordinators allow one active job across the Remux and Extract views, and deduplicate in-flight inspections.
+
+Linux-only env defaults are set in `lib.rs` (`init_linux_env`, ADR-0015). The WebKitGTK DMABUF workaround is scoped to the AppImage on purpose. Don't extend it to deb/rpm.
+
+## Domain docs
+
+Before working in an area, read `CONTEXT-MAP.md` → `crates/mkv-core/CONTEXT.md` / `desktop-tauri/CONTEXT.md` (the glossary; use its terms) and the relevant ADRs in `docs/adr/`. If a change contradicts an ADR, say so explicitly; don't override it silently. `architecture.md` is the detailed system spec. `README.md` has the full CLI options table. Issues are tracked on GitHub (`sifahaz/mkvanimebatch`); see `docs/agents/`.
