@@ -1,6 +1,6 @@
 # 0009. Streaming Card Progress, Centralized Heartbeat, and Authoritative Item Duration Model
 
-> **Status**: Accepted (amended 2026-09-28)
+> **Status**: Accepted (amended 2026-09-28, 2026-10-01)
 > **Date**: 2026-06-01
 > **Context**: Desktop Application Context
 

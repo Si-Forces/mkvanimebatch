@@ -4,17 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 @AGENTS.md
 
-AGENTS.md (imported above) holds the binding workflow rules: run the Standards + Spec code review before every commit, and run the formatting/lint/test gate whenever Rust or UI files change.
-
 ## Commands
 
-```bash
-# Rust gate (what CI and the pre-commit/pre-push hooks run)
-cargo fmt --all
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+The fmt/clippy/test gate commands are listed in AGENTS.md.
 
+```bash
 # One package / one integration suite / one test
 cargo test -p mkv-core
 cargo test -p mkv-core --test test_assets
@@ -24,9 +18,7 @@ cargo test -p mkv-core --test test_domain <test_name_substring>
 # CI on Linux sets MKV_REQUIRE_MEDIA_TOOLS=1 so a missing tool fails the test instead.
 MKV_REQUIRE_MEDIA_TOOLS=1 cargo test -p mkv-core --test test_real_remux
 
-# Frontend (Node 20+, node:test, no package.json/npm)
-node --check desktop-tauri/ui/app.js
-node --test desktop-tauri/ui/*.test.js
+# One frontend suite (Node 20+, node:test, no package.json/npm)
 node --test desktop-tauri/ui/queue-state.test.js
 
 # Builds
@@ -42,14 +34,19 @@ cargo build --release -p mkv-anime-batch          # desktop crate (no bundle)
 
 ### Git hooks and the review ledger
 
-Install the tracked hooks once per clone with `scripts/install-git-hooks.sh`. pre-commit runs fmt and clippy across the whole workspace, plus `node --check` on staged UI files. pre-push runs `cargo test`, `node --test`, and then the **review-gate ledger** check. The ledger blocks a push to main if any commit has no recorded review. After running the code-review skill, record the review:
+Enable the tracked hooks once per clone with `scripts/install-git-hooks.sh`, which sets `core.hooksPath` to `scripts/hooks` (worktrees share it):
+
+- pre-commit runs workspace fmt and clippy when Rust or Cargo files are staged, and `node --check` on staged UI files. It refuses to run cargo while any of those files differs from the index, so the check matches the commit.
+- pre-push runs the **review-gate ledger** check on every pushed ref, refusing the push if any pushed commit has no recorded review. It then runs `cargo test` and `node --test`, which need a clean checkout of the commit being pushed (or `SKIP_SLOW_GATES=1`).
+
+After running the code-review skill, record the review:
 
 ```bash
 scripts/review-gate.sh record-range <base> <head> "Standards+Spec over <base>..<head>, findings fixed"
-scripts/review-gate.sh status    # unpushed commits that still lack a review
+scripts/review-gate.sh status    # commits since origin/main that still lack a review
 ```
 
-The ledger keys on tree SHA, so it survives rebases. Repo scripts use `node`, not Python: ADR-0010 removed Python from dev and CI environments.
+The ledger keys each commit on the `git patch-id` of its diff, so a review survives a rebase or amend that leaves the diff unchanged. Repo scripts use `node`, not Python: ADR-0010 removed Python from dev and CI environments.
 
 ## Architecture
 
@@ -104,4 +101,4 @@ Linux-only env defaults are set in `lib.rs` (`init_linux_env`, ADR-0015). The We
 
 ## Domain docs
 
-Before working in an area, read `CONTEXT-MAP.md` → `crates/mkv-core/CONTEXT.md` / `desktop-tauri/CONTEXT.md` (the glossary; use its terms) and the relevant ADRs in `docs/adr/`. If a change contradicts an ADR, say so explicitly; don't override it silently. `architecture.md` is the detailed system spec. `README.md` has the full CLI options table. Issues are tracked on GitHub (`sifahaz/mkvanimebatch`); see `docs/agents/`.
+Before working in an area, read `CONTEXT-MAP.md` → `crates/mkv-core/CONTEXT.md` / `desktop-tauri/CONTEXT.md` (the glossary; use its terms) and the relevant ADRs in `docs/adr/`. If a change contradicts an ADR, say so explicitly; don't override it silently. `architecture.md` is the detailed system spec. `README.md` has the full CLI options table.

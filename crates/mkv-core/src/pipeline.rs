@@ -16,7 +16,7 @@ use crate::assets::{
     claim_leftover_chapters, prepare_release_directory, AssetResolver, ReleasePreparationOptions,
     SubClassification,
 };
-use crate::domain::{output_stem, resolve_output_dir};
+use crate::domain::{output_stem, resolve_output_dir, IO_GOVERNOR_CLOSED};
 use crate::extract::extract_mkv_file;
 use crate::fonts::{scan_fonts, FontHashMemo, FontInfo, FontRegistry};
 use crate::manifest::get_item_id;
@@ -30,7 +30,7 @@ use crate::scan::{
 pub const EVENT_VERSION: u64 = 1;
 
 /// `reason` of every item settled by a stop request.
-const CANCELLED_REASON: &str = "Operation cancelled";
+pub const CANCELLED_REASON: &str = "Operation cancelled";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BatchItemInfo {
@@ -759,7 +759,8 @@ impl BatchPipeline {
                     let _io_permit = tokio::select! {
                         biased;
                         _ = cancel_token.cancelled() => return Err(ItemFailure::Cancelled),
-                        permit = io_semaphore.acquire() => permit.ok(),
+                        permit = io_semaphore.acquire() => permit
+                            .map_err(|_| ItemFailure::Failed(IO_GOVERNOR_CLOSED.into()))?,
                     };
 
                     let on_progress = |pct: f64| progress.report(pct);
@@ -1184,7 +1185,7 @@ impl BatchPipeline {
                                 &font_info,
                                 &options,
                                 Some(&on_progress),
-                                Some(&io_semaphore),
+                                &io_semaphore,
                             ) => res.map_err(ItemFailure::Failed),
                         }
                     }

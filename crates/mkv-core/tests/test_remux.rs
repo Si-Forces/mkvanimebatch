@@ -65,6 +65,17 @@ fn has_pair(args: &[String], flag: &str, value: &str) -> bool {
     args.windows(2).any(|pair| pair == [flag, value])
 }
 
+/// Whether `--no-chapters` applies to `input`. mkvmerge file options bind to the next input
+/// file, so only the options between the previous `/dummy/` path and `input` count.
+fn chapters_dropped_from(args: &[String], input: &str) -> bool {
+    let at = args.iter().position(|a| a == input).unwrap();
+    args[..at]
+        .iter()
+        .rev()
+        .take_while(|a| !a.starts_with("/dummy/"))
+        .any(|a| a == "--no-chapters")
+}
+
 const REMUX_OPTIONS: RemuxOptions<'static> = RemuxOptions {
     opus_bitrate: "192k",
     complexity: 10,
@@ -104,50 +115,27 @@ fn test_select_tracks() {
     assert_eq!(selection.audio_codec, "A_FLAC");
 }
 
+/// ffmpeg copies the source chapters into the transcoded Ogg file, so the Opus input always
+/// drops them; the source drops its own only when an external chapter file replaces them.
 #[test]
-fn test_no_chapters_binding() {
-    let mut job_with_chapters = subtitle_job();
-    job_with_chapters.chapter_file = Some(PathBuf::from("/dummy/chapters.xml"));
+fn test_no_chapters_on_transcoded_audio_and_replaced_source_chapters() {
+    let opus = Some(Path::new("/dummy/audio.opus"));
 
-    let args_with_chapters = mkvmerge_args(
-        &job_with_chapters,
-        Some(Path::new("/dummy/audio.opus")),
-        0.0,
-    );
-    let no_chapters_count = args_with_chapters
-        .iter()
-        .filter(|&a| a == "--no-chapters")
-        .count();
-    assert_eq!(no_chapters_count, 1);
+    let args = mkvmerge_args(&subtitle_job(), opus, 0.0);
+    assert!(!chapters_dropped_from(&args, "/dummy/video.mkv"));
+    assert!(chapters_dropped_from(&args, "/dummy/audio.opus"));
 
-    let no_chapters_idx = args_with_chapters
-        .iter()
-        .position(|a| a == "--no-chapters")
-        .unwrap();
-    let video_idx = args_with_chapters
-        .iter()
-        .position(|a| a == job_with_chapters.video.to_str().unwrap())
-        .unwrap();
-    assert!(no_chapters_idx < video_idx);
-
-    let job_without_chapters = subtitle_job();
-    let args_without_chapters = mkvmerge_args(
-        &job_without_chapters,
-        Some(Path::new("/dummy/audio.opus")),
-        0.0,
-    );
-    let no_chapters_count_absent = args_without_chapters
-        .iter()
-        .filter(|&a| a == "--no-chapters")
-        .count();
-    assert_eq!(no_chapters_count_absent, 0);
+    let mut job = subtitle_job();
+    job.chapter_file = Some(PathBuf::from("/dummy/chapters.xml"));
+    let args = mkvmerge_args(&job, opus, 0.0);
+    assert!(chapters_dropped_from(&args, "/dummy/video.mkv"));
+    assert!(chapters_dropped_from(&args, "/dummy/audio.opus"));
 }
 
 #[test]
-fn test_no_chapters_absent_when_no_opus() {
+fn test_source_chapters_kept_without_external_chapters() {
     let args = mkvmerge_args(&subtitle_job(), None, 0.0);
-    let sub_idx = args.iter().position(|a| a == "/dummy/sub.ass").unwrap();
-    assert!(!args[..sub_idx].contains(&"--no-chapters".to_string()));
+    assert!(!args.contains(&"--no-chapters".to_string()));
 }
 
 #[test]
@@ -229,7 +217,7 @@ async fn test_execute_remux_job_no_file_name_returns_err() {
         &FontInfo::default(),
         &REMUX_OPTIONS,
         None,
-        None,
+        &tokio::sync::Semaphore::new(1),
     )
     .await
     .unwrap_err();
@@ -288,12 +276,10 @@ mod mock_mkvmerge {
     /// Remuxes an empty source video with no subtitle through the installed mock.
     ///
     /// Takes a `&Path` rather than a `&TempDir` so callers can move the directory into a
-    /// spawned task. `io_semaphore` is threaded through rather than hardcoded so both sides
-    /// of the ADR-0011 dual-governor branch are exercised: the product only ever passes
-    /// `Some`.
+    /// spawned task.
     async fn remux_with(
         dir: &Path,
-        io_semaphore: Option<&tokio::sync::Semaphore>,
+        io_semaphore: &tokio::sync::Semaphore,
     ) -> Result<Vec<String>, String> {
         let video = dir.join("test.mkv");
         std::fs::File::create(&video).unwrap();
@@ -309,8 +295,9 @@ mod mock_mkvmerge {
         .await
     }
 
+    /// Remuxes with an uncontended I/O governor.
     async fn remux(dir: &TempDir) -> Result<Vec<String>, String> {
-        remux_with(dir.path(), None).await
+        remux_with(dir.path(), &tokio::sync::Semaphore::new(1)).await
     }
 
     #[tokio::test]
@@ -367,32 +354,34 @@ mod mock_mkvmerge {
         );
     }
 
-    /// The product always passes `Some(&io_semaphore)` (pipeline.rs), so the governor's
-    /// acquire branch is the one that runs in production. It needs coverage that would fail
-    /// if acquisition were skipped: simply passing `Some` and checking the result is not
-    /// enough, because an ignored semaphore still produces the output and still reports an
-    /// untouched permit count. So the governor is exhausted first and the mock is observed
-    /// not running until a permit is released.
+    /// An ignored semaphore still produces the output and leaves the permit count untouched,
+    /// so the governor is exhausted first and the mock must not start until a permit is
+    /// released. The mock's first action is to touch a marker, so the 200 ms window only has
+    /// to cover a process spawn.
     #[tokio::test]
     async fn test_execute_remux_job_waits_for_an_io_governor_permit() {
-        let _mock = MockMkvmerge::install("#!/bin/sh\necho 'dummy data' > \"$2\"\nexit 0\n").await;
         let dir = tempfile::tempdir().unwrap();
+        let started = dir.path().join("mkvmerge-started");
+        let _mock = MockMkvmerge::install(&format!(
+            "#!/bin/sh\ntouch '{}'\necho 'dummy data' > \"$2\"\nexit 0\n",
+            started.display()
+        ))
+        .await;
         let dir_path = dir.path().to_path_buf();
         let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
         let job_semaphore = std::sync::Arc::clone(&semaphore);
 
-        let mut job =
-            tokio::spawn(async move { remux_with(&dir_path, Some(&job_semaphore)).await });
+        let mut job = tokio::spawn(async move { remux_with(&dir_path, &job_semaphore).await });
 
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(200), &mut job)
                 .await
                 .is_err(),
-            "mkvmerge ran while the I/O governor had no permits available"
+            "remux finished while the I/O governor had no permits available"
         );
         assert!(
-            !dir.path().join("out.mkv").exists(),
-            "mkvmerge wrote its output before acquiring an I/O permit"
+            !started.exists(),
+            "mkvmerge started before acquiring an I/O permit"
         );
 
         semaphore.add_permits(1);
@@ -409,16 +398,19 @@ mod mock_mkvmerge {
         );
     }
 
-    /// A closed governor is an invariant violation, not a "carry on unguarded" case.
-    /// Bypassing it would silently remove the ADR-0011 disk-write limit mid-batch.
+    /// Bypassing a closed governor would silently remove the ADR-0011 disk-write limit.
     #[tokio::test]
-    #[should_panic(expected = "io semaphore closed")]
     async fn test_execute_remux_job_refuses_a_closed_io_governor() {
-        let _mock = MockMkvmerge::install("#!/bin/sh\nexit 0\n").await;
+        let _mock = MockMkvmerge::install("#!/bin/sh\necho 'dummy data' > \"$2\"\nexit 0\n").await;
         let dir = tempfile::tempdir().unwrap();
         let semaphore = tokio::sync::Semaphore::new(1);
         semaphore.close();
 
-        let _ = remux_with(dir.path(), Some(&semaphore)).await;
+        let err = remux_with(dir.path(), &semaphore).await.unwrap_err();
+        assert!(
+            err.contains("I/O governor closed"),
+            "unexpected error: {err}"
+        );
+        assert!(!dir.path().join("out.mkv").exists());
     }
 }

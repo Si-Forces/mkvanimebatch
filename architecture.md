@@ -330,7 +330,7 @@ sequenceDiagram
    - Negative and positive offsets are passed to mkvmerge unchanged.
 3. **mkvmerge arguments (`build_mkvmerge_args`)**, writing to a temporary file in the scratch directory:
    - Source file: `--video-tracks <id>`; `--audio-tracks <id>` when the audio is copied, `--no-audio` when it is transcoded; `--subtitle-tracks <id>` for an embedded subtitle, else `--no-subtitles`; `--no-chapters` when an external chapter file is used; `--attachments <ids>` keeps the source cover (when no external cover is used) and the source fonts (when the release has none), else `--no-attachments`.
-   - Transcoded audio: the Opus file as a second input with the source track's `--language` and `--track-name`.
+   - Transcoded audio: the Opus file as a second input with `--no-chapters` (ffmpeg copies the source chapters into it) and the source track's `--language` and `--track-name`.
    - External subtitle: `--language` (assignment language, else the detected language), `--track-name` (assignment title, else the language label), `--default-track-flag 0:yes`.
    - `--chapters <file>` for an external chapter file.
    - External cover: `--attachment-name cover<ext> --attachment-mime-type <mime> --attach-file <cover>`.
@@ -485,7 +485,7 @@ The frontend is plain ES modules with no framework.
 4. **Presentation heartbeat (ADR-0009)**:
    - One 1 Hz timer in `QueueTracker` updates the elapsed time of every processing card, and stops when no item is processing.
 5. **Subtitle assignment modal (ADR-0011, ADR-0012)**:
-   - Per remux item: choose a subtitle from the manifest's `subtitle_candidates` for the release, or a custom path (browse via `pick_subtitle_file`, an `rfd` native dialog); set the language (`ind`, `eng`, `jpn`, or a custom code), track title, and offset in milliseconds (`offset_ms`). The resulting `TrackAssignment` is sent in `BatchRequest.assignments` and applied to the `mkvmerge` arguments (§4.4).
+   - Per remux item: choose a subtitle from the manifest's `subtitle_candidates` for the release, or a custom path (browse via `pick_subtitle_file`, an `rfd` native dialog); set the language (`ind`, `eng`, `jpn`, or a custom code), track title, and offset in milliseconds (`offset_ms`; a fraction is truncated, and an empty or out-of-range value leaves the global offset in effect). The resulting `TrackAssignment` is sent in `BatchRequest.assignments` and applied to the `mkvmerge` arguments (§4.4).
 6. **Theme**: follows `prefers-color-scheme` live until the user toggles the theme; the choice is then stored in `localStorage` (`mkv-theme`) and pinned on the native window via `set_window_theme`.
 
 ---
