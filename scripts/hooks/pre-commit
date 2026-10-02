@@ -23,9 +23,15 @@ if [ "$rust" -eq 1 ]; then
   # cargo reads the working tree, so it must hold exactly what is being committed.
   unstaged=$(git diff --name-only -- '*.rs' '*Cargo.toml' Cargo.lock)
   untracked=$(git ls-files --others --exclude-standard -- '*.rs' '*Cargo.toml')
-  if [ -n "$unstaged$untracked" ]; then
-    echo "❌ [pre-commit] these Rust/Cargo files differ from the index, so cargo would not check the commit:" >&2
+  # git diff skips assume-unchanged and skip-worktree entries, so it cannot vouch for them.
+  hidden=$(git ls-files -v -- '*.rs' '*Cargo.toml' Cargo.lock | sed -n 's/^[a-zS] //p')
+  if [ -n "$unstaged$untracked$hidden" ]; then
+    echo "❌ [pre-commit] these Rust/Cargo files may differ from the index, so cargo would not check the commit:" >&2
     printf '%s\n%s\n' "$unstaged" "$untracked" | sed '/^$/d; s/^/   /' >&2
+    if [ -n "$hidden" ]; then
+      printf '%s\n' "$hidden" | sed 's/^/   (assume-unchanged or skip-worktree) /' >&2
+      echo "   Clear the bits with: git update-index --no-assume-unchanged --no-skip-worktree <path>" >&2
+    fi
     echo "   Stage them, or set them aside with: git stash push --keep-index --include-untracked" >&2
     exit 1
   fi

@@ -88,7 +88,7 @@ mod tests {
     }
 
     #[test]
-    fn test_preset_serialized_shape_excludes_description() {
+    fn test_preset_serialized_shape_keeps_desktop_fields() {
         let preset = lookup_preset("balanced").expect("built-in preset");
         let value = serde_json::to_value(&preset).expect("preset serializes");
         let object = value.as_object().expect("preset serializes as an object");

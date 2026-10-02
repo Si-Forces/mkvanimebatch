@@ -4,6 +4,7 @@ import { buildTrackAssignmentsForManifest, isSameDirectory } from "./queue-state
 export const JOB_EVENT = "job-event";
 export const JOB_LOG = "job-log";
 export const JOB_DONE = "job-done";
+export const CLEANUP_ERROR = "cleanup-error";
 
 /**
  * The four queue bulk-selection buttons, each with the selection it applies.

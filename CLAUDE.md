@@ -37,7 +37,9 @@ cargo build --release -p mkv-anime-batch          # desktop crate (no bundle)
 Enable the tracked hooks once per clone with `scripts/install-git-hooks.sh`, which sets `core.hooksPath` to `scripts/hooks` (worktrees share it):
 
 - pre-commit runs workspace fmt and clippy when Rust or Cargo files are staged, and `node --check` on staged UI files. It refuses to run cargo while any of those files differs from the index, so the check matches the commit.
-- pre-push runs the **review-gate ledger** check on every pushed ref, refusing the push if any pushed commit has no recorded review. It then runs `cargo test` and `node --test`, which need a clean checkout of the commit being pushed (or `SKIP_SLOW_GATES=1`).
+- pre-push runs the **review-gate ledger** check on every pushed ref, refusing the push if any pushed commit has no recorded review. When HEAD is one of the pushed tips, it then runs `cargo test` and `node --test`, refusing if the working tree differs from HEAD (skip them with `SKIP_SLOW_GATES=1`). Other pushed tips, such as a second branch or an older tag, get a warning that the local suites did not cover them.
+
+The hooks run straight from the working tree, so an uncommitted edit to `scripts/hooks/` or `scripts/review-gate.sh` changes the gates at once.
 
 After running the code-review skill, record the review:
 

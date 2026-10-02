@@ -231,6 +231,7 @@ async fn test_execute_remux_job_no_file_name_returns_err() {
 mod mock_mkvmerge {
     use std::os::unix::fs::PermissionsExt;
 
+    use mkv_core::domain::IO_GOVERNOR_CLOSED;
     use tempfile::TempDir;
     use tokio::sync::{Mutex, MutexGuard};
 
@@ -407,10 +408,7 @@ mod mock_mkvmerge {
         semaphore.close();
 
         let err = remux_with(dir.path(), &semaphore).await.unwrap_err();
-        assert!(
-            err.contains("I/O governor closed"),
-            "unexpected error: {err}"
-        );
+        assert_eq!(err, IO_GOVERNOR_CLOSED);
         assert!(!dir.path().join("out.mkv").exists());
     }
 }

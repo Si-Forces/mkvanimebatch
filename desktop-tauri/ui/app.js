@@ -1,7 +1,7 @@
 /* MKV Anime Batch desktop frontend.
    Talks to the Tauri host through window.__TAURI__ (withGlobalTauri: true in tauri.conf.json). */
 
-import { BULK_SELECTION_CONTROLS, JOB_DONE, JOB_EVENT, JobController } from "./job-controller.js";
+import { BULK_SELECTION_CONTROLS, CLEANUP_ERROR, JOB_DONE, JOB_EVENT, JobController } from "./job-controller.js";
 import { QueueTracker } from "./queue-view.js";
 import { classifyLine } from "./log-classify.js";
 import { createTelemetryLoop } from "./telemetry.js";
@@ -660,7 +660,7 @@ function initApp() {
     btn.addEventListener("click", () => switchView(btn.dataset.view));
   });
 
-  listen("cleanup-error", event => showCleanupError(event.payload)).catch(error => {
+  listen(CLEANUP_ERROR, event => showCleanupError(event.payload)).catch(error => {
     console.error("[cleanup-error] listener failed:", error);
   });
 

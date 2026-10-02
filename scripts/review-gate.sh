@@ -54,9 +54,11 @@ record_commit() { # <commit> <note-json> -> 1 when the diff is empty and nothing
   # Callers test this in an `if`, where set -e is off.
   patch=$(patch_id_of "$sha") || die "cannot compute the patch id of $sha"
   [ -n "$patch" ] || return 1
-  mkdir -p "$(dirname "$LEDGER")"
+  # Dies rather than returns: a failed write must not read as an empty diff.
+  mkdir -p "$(dirname "$LEDGER")" || die "cannot create the directory for $LEDGER"
   printf '{"commit":"%s","patch":"%s","at":"%s","note":%s}\n' \
-    "$sha" "$patch" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$2" >> "$LEDGER"
+    "$sha" "$patch" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$2" >> "$LEDGER" ||
+    die "cannot write the review ledger at $LEDGER"
 }
 
 is_reviewed() { # <commit> -> 0 if reviewed
