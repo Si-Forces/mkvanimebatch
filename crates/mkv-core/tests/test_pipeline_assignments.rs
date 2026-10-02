@@ -8,13 +8,13 @@ use tempfile::tempdir;
 
 use common::{run_batch, seeded_cache, video_metadata};
 use mkv_core::pipeline::{CancellationToken, ItemOutcome, JobEvent, PipelineConfig, PipelineMode};
-use mkv_core::request::{BatchRequest, TrackAssignment};
+use mkv_core::request::{AssignmentKind, BatchRequest, TrackAssignment};
 
 fn manual_subtitle_assignment(target: &str, asset: &str) -> TrackAssignment {
     TrackAssignment {
         target_video: target.into(),
         asset_path: asset.into(),
-        track_type: Some("subtitle".into()),
+        track_type: AssignmentKind::Subtitle,
         language: Some("ind".into()),
         title: Some("Bahasa Indonesia".into()),
         offset_ms: Some(1250),

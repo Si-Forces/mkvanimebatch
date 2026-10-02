@@ -669,6 +669,27 @@ mod tests {
     }
 
     #[test]
+    fn test_assignments_reject_non_subtitle_track_type() {
+        let dir = tempdir().unwrap();
+        let entry =
+            r#"[{"target_video": "ep01.mkv", "asset_path": "ep01.ass", "track_type": "audio"}]"#;
+        for json in [entry.to_string(), format!(r#"{{"assignments": {entry}}}"#)] {
+            let assign_file = write_assignments(dir.path(), "assignments.json", &json);
+            let err = parse_args_from([
+                "--input-dir",
+                path_arg(dir.path()),
+                "--assignments",
+                path_arg(&assign_file),
+            ])
+            .unwrap_err();
+            assert!(
+                err.starts_with("Invalid track assignment: unknown variant `audio`"),
+                "{json}: {err}"
+            );
+        }
+    }
+
+    #[test]
     fn test_request_validate_preflight() {
         let dir = tempdir().unwrap();
         write_files(dir.path(), &["ep01.mkv", "ep01.ass"]);

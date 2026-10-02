@@ -10,7 +10,7 @@ use mkv_core::domain::{MkvTrack, TrackProperties};
 use mkv_core::pipeline::{
     create_event_channel, BatchPipeline, CancellationToken, PipelineConfig, PipelineMode,
 };
-use mkv_core::request::{BatchRequest, TrackAssignment};
+use mkv_core::request::{AssignmentKind, BatchRequest, TrackAssignment};
 use mkv_core::scan::{MkvmergeMetadata, PersistentInspectCache};
 use tempfile::tempdir;
 
@@ -92,7 +92,7 @@ fn bench_validation(runs: usize) {
         assignments: Some(vec![TrackAssignment {
             target_video: "ep01.mkv".to_string(),
             asset_path: sub_path,
-            track_type: Some("subtitle".to_string()),
+            track_type: AssignmentKind::Subtitle,
             language: Some("ind".to_string()),
             title: None,
             offset_ms: None,
