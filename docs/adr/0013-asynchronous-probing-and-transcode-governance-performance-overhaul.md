@@ -1,6 +1,6 @@
 # 0013. Asynchronous Probing and Transcode Governance Performance Overhaul
 
-> **Status**: Accepted (amended 2026-09-30)
+> **Status**: Accepted (amended 2026-10-02)
 > **Date**: 2026-09-21
 > **Context**: Media Engine Context & In-Process Engine Bridge
 > **Amends**: ADR-0006, ADR-0008, ADR-0011
@@ -245,7 +245,8 @@ async reactor thread stalls") holds only for the `mkvmerge -J` fallback, which r
 through a synchronous `std::fs::File` + `BufReader` on the calling worker thread. The rationale
 for leaving it in place was Amendment 2's 0.091 ms warm figure. Amendment 6 removed the
 buffer-discarding seeks and loop-guard `lseek` calls behind that figure, but the read itself is
-still synchronous, so a cold read can still block a worker. Tracked as issue #20.
+still synchronous, so a cold read can still block a worker. Tracked as issue #20; resolved by
+Amendment 7.
 
 **The governor is crate-private.** `cpu` is a private module of `mkv-core`;
 `transcode_governor_threads` is `pub(crate)` and reachable only through
@@ -350,5 +351,65 @@ calls, and multi-buffer reads refill predictably.
 `test_synthetic_multitrack_mkv_native_probe_and_buffer_retention` pins that `probe_ebml_native`
 successfully parses a 6-track synthetic MKV from disk, and its counted walk — a proxy for the
 parser, which `probe_ebml_native` does not instrument — completes in 1 buffer fill and 0 seeks.
-Wall-clock is not re-measured; cold-cache behaviour on live media remains tracked under
-Issue #20.
+Wall-clock is not re-measured here; Amendment 7 measures cold-cache behaviour on live media
+(issue #20).
+
+## Amendment 7 — 2026-10-02 (native probe on the blocking pool)
+
+**Decision.** `probe_video` runs `probe_ebml_native` through `tokio::task::spawn_blocking`.
+This reverses, for this one call, the rejected option "Retain Synchronous Probing with
+`spawn_blocking` Wrappers", Consequence 1's stall claim for the native path, and Amendment 2
+Finding 1's reason for keeping it inline. That finding's 3.2x figure was dispatch cost on
+sub-millisecond metadata calls that never wait on the device. A cold header read does wait on
+the device. Preflight and bulk-plan probes fan out to `cpu::probe_concurrency`, at most 16;
+execution-path probes are bounded only by `max_workers`, up to 64 (`--workers` or the request's
+`workers`). Either way the fan-out can match a runtime whose default worker count is the
+logical CPU count, so a batch of cold probes can pin every worker. The `mkvmerge -J` fallback
+stays on `tokio::process::Command`. The change sits inside `probe_video`, so pipeline probing,
+preflight inspection (`manifest.rs`) and `get_or_probe_video` all take it.
+
+**Measurement.** `probe_ebml_native`, 20 probes per run (20 files on the HDD), real 1080p BD
+releases. The page cache was evicted per file with `dd if=FILE iflag=nocache count=0` (no root
+needed); each cold probe was followed by a warm one.
+
+| Media | Cold p50 | Cold p99 / max | Warm p50 |
+|---|---|---|---|
+| USB HDD, first run (drive idle) | 139 ms | 2619 ms | 0.50 ms |
+| USB HDD, second run (drive cache warm) | 1.49 ms | 1.69 ms | 0.19 ms |
+| SATA SSD, btrfs (5 files x 4) | 15.8 ms | 17.4 ms | 0.18 ms |
+
+Every cold figure exceeds the <1 ms budget. This resolves Amendment 4's "probing still blocks
+on the native path", Amendment 2 Finding 1's "it stays for now", and Amendment 6's #20 pointer.
+`dd iflag=nocache` evicts only the page cache, not the drive's own cache, which is why the
+second HDD run is fast. No network mount was measured.
+
+**Failure.** If the blocking task panics, the `JoinError` is logged with `tracing::warn!` and
+the probe falls back to `mkvmerge -J`, as for any other native failure (ADR-0006).
+
+**Cancellation limit.** A blocking task cannot be aborted. After a cancel, `abort_all`, or
+`stop_job`, an in-flight native probe reads until it finishes. In the CLI, dropping the runtime
+waits for it, so a read on a hung mount delays exit; before, the same read pinned a reactor
+worker. No `shutdown_timeout` is added.
+
+One thing is worse than before. The probe permit belongs to the async task, so aborting it
+releases the permit while the detached read keeps running, where an inline read held its permit
+until it returned. Reads orphaned by a cancel are counted by no permit: per cancel, at most
+`probe_concurrency` on the preflight and bulk-plan paths, or `max_workers` (up to 64) on the
+execution path, which holds no probe permit. A job started right after a stop can therefore
+briefly run more reads than its probe limit. Repeated stop-and-start cycles on a hung mount
+accumulate them up to Tokio's default 512-thread blocking pool; nothing in the repo sets
+`max_blocking_threads`. In exchange, cancellation is no longer delayed when cold reads pin the
+workers. The permit is not moved into the blocking task: each job builds its own semaphore, so
+holding the old one would not bound the next job.
+
+**Out of scope.** Per-directory synchronous I/O inside `async fn` (`prepare_release_directory`,
+`scan_fonts`, `claim_leftover_chapters`, `is_chapter_xml`, the `scan_mkv_files` walk) runs once
+per directory rather than fanning out. It is tracked as #23. The inspect-cache lookup and
+store around each probe (`get_path` / `put_path`, a `metadata()` stat) also stay inline, in
+`get_or_probe_video` and preflight.
+
+**Coverage.** `test_probe_video_stalled_native_read_does_not_block_runtime` points
+`probe_video` at a FIFO, whose `open()` blocks until a writer appears. It asserts that a timer
+on a `current_thread` runtime still fires. It fails without the offload and passes with it.
+Because this test shells out to `mkfifo`, the reason Amendment 3's **Coverage.** gives for not
+testing the FIFO half of the seeding rule no longer holds; that test is still not written.
