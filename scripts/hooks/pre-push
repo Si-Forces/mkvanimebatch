@@ -18,9 +18,15 @@ root=$(git rev-parse --show-toplevel)
 if [ "${SKIP_REVIEW_GATE:-0}" = "1" ]; then
   echo "[review-gate] SKIP_REVIEW_GATE=1 — pushing unreviewed."
 else
+  gate="$root/scripts/review-gate.sh"
+  if [ ! -x "$gate" ]; then
+    echo "❌ [review-gate] scripts/review-gate.sh is missing or not executable." >&2
+    echo "   Run: chmod +x scripts/review-gate.sh  (or git checkout -- scripts/review-gate.sh if it was deleted)" >&2
+    exit 1
+  fi
   for update in "${updates[@]}"; do
     read -r remote_sha local_sha <<< "$update"
-    "$root/scripts/review-gate.sh" verify-push "$remote_sha" "$local_sha"
+    "$gate" verify-push "$remote_sha" "$local_sha"
   done
 fi
 
@@ -29,20 +35,36 @@ if [ "${SKIP_SLOW_GATES:-0}" = "1" ]; then
   exit 0
 fi
 
-# The suites run on the working tree, so it must be the commit being pushed.
+# The suites run on the working tree, so they can only vouch for HEAD. Other pushed tips
+# (a second branch, an older tag) go through untested here rather than being refused.
 head=$(git rev-parse HEAD)
+pushes_head=0
 for update in "${updates[@]}"; do
   read -r _ local_sha <<< "$update"
   commit=$(git rev-parse "$local_sha^{commit}")
-  if [ "$commit" != "$head" ]; then
-    echo "❌ [pre-push] the tests run on the checkout, but $(git rev-parse --short "$commit") is not HEAD." >&2
-    echo "   Check it out and push again, or skip the suites with SKIP_SLOW_GATES=1." >&2
-    exit 1
+  if [ "$commit" = "$head" ]; then
+    pushes_head=1
+  else
+    echo "⚠  [pre-push] $(git rev-parse --short "$commit") is not HEAD; the local test suites do not cover it." >&2
   fi
 done
-if ! git diff --quiet HEAD; then
-  echo "❌ [pre-push] tracked files differ from HEAD, so the tests would not run on the pushed commit." >&2
-  echo "   Commit or stash them first." >&2
+[ "$pushes_head" -eq 1 ] || exit 0
+
+# The suites read the working tree, so it must hold exactly HEAD. Untracked files count
+# only where the suites would pick them up (an untracked module can satisfy a tracked mod).
+helper="$(dirname "$0")/hidden-changes.sh"
+source "$helper" || { echo "❌ [pre-push] cannot load $helper. Restore it: git checkout -- scripts/hooks/hidden-changes.sh" >&2; exit 1; }
+hidden=$(hidden_changes) || { echo "❌ [pre-push] cannot list the index to check for hidden edits." >&2; exit 1; }
+dirty=$(git diff --name-only HEAD)
+untracked=$(git ls-files --others --exclude-standard -- '*.rs' '*Cargo.toml' 'desktop-tauri/ui/*')
+if [ -n "$dirty$untracked$hidden" ]; then
+  echo "❌ [pre-push] the working tree differs from HEAD, so the tests would not run on the pushed commit." >&2
+  if [ -n "$dirty$untracked" ]; then
+    printf '%s\n%s\n' "$dirty" "$untracked" | sed '/^$/d; s/^/     /' >&2
+    echo "   Commit, stash or remove them." >&2
+  fi
+  [ -z "$hidden" ] || explain_hidden_changes "$hidden"
+  echo "   To push without the test suites: SKIP_SLOW_GATES=1 git push" >&2
   exit 1
 fi
 

@@ -37,7 +37,11 @@ cargo build --release -p mkv-anime-batch          # desktop crate (no bundle)
 Enable the tracked hooks once per clone with `scripts/install-git-hooks.sh`, which sets `core.hooksPath` to `scripts/hooks` (worktrees share it):
 
 - pre-commit runs workspace fmt and clippy when Rust or Cargo files are staged, and `node --check` on staged UI files. It refuses to run cargo while any of those files differs from the index, so the check matches the commit.
-- pre-push runs the **review-gate ledger** check on every pushed ref, refusing the push if any pushed commit has no recorded review. It then runs `cargo test` and `node --test`, which need a clean checkout of the commit being pushed (or `SKIP_SLOW_GATES=1`).
+- pre-push runs the **review-gate ledger** check on every pushed ref, refusing the push if any pushed commit has no recorded review. When HEAD is one of the pushed tips, it then runs `cargo test` and `node --test`, refusing if the working tree differs from HEAD, untracked Rust, Cargo or UI files included (skip them with `SKIP_SLOW_GATES=1`). Other pushed tips, such as a second branch or an older tag, get only a warning. If HEAD is not pushed at all, that warning is the whole local test coverage.
+
+Both dirty-tree checks also refuse while an assume-unchanged or skip-worktree file is missing or differs from the index, since git diff cannot see that. A flagged file that still matches the index passes. The refusal says how to fix it. To bypass, use `git commit --no-verify`, which skips all of pre-commit, or `SKIP_SLOW_GATES=1`. In a sparse checkout the out-of-cone files are missing, so pre-push always refuses, and pre-commit refuses when any of them are Rust or Cargo files. Those refusals hold only while `scripts/` is in the cone: outside it the hooks are missing too, and git runs no gate at all.
+
+The hooks run straight from the working tree, so an uncommitted edit to `scripts/hooks/` or `scripts/review-gate.sh` changes the gates at once.
 
 After running the code-review skill, record the review:
 
