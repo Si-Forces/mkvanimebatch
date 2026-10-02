@@ -23,5 +23,5 @@ During preflight inspection, probing anime fansub MKVs using `mkvmerge -J` subpr
 
 Decision 1 and the first consequence overstate the fallback.
 
-- **Fallback runs only when the native probe returns an error.** `probe_video` calls `probe_ebml_native` and invokes `mkvmerge -J` only if that returns `Err`. Some malformed input does not: a malformed SeekHead entry ends the SeekHead scan early and the probe returns what it found, with no fallback.
+- **Fallback runs only when the native probe returns an error.** `probe_video` calls `probe_ebml_native` and invokes `mkvmerge -J` only if that returns `Err` or, since ADR-0013 Amendment 7, if the blocking task running it panics. Some malformed input does not: a malformed SeekHead entry ends the SeekHead scan early and the probe returns what it found, with no fallback.
 - **Not a compatibility guarantee.** The fallback itself can fail or time out; the Inspection Manifest then carries the error as the item's `inspection_error`, and a remux run ends that item as `error`. "100% compatibility for edge-case releases" should read as "a second probe for files the native parser rejects".
