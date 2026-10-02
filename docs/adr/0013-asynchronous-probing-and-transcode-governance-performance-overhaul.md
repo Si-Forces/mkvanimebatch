@@ -381,9 +381,8 @@ on the native path", Amendment 2 Finding 1's "it stays for now", and Amendment 6
 `dd iflag=nocache` evicts only the page cache, not the drive's own cache, which is why the
 second HDD run is fast. No network mount was measured.
 
-**Failure.** If the blocking task fails (a panic, or a cancel at runtime shutdown), the
-`JoinError` is logged with `tracing::warn!` and the probe falls back to `mkvmerge -J`, as for
-any other native failure (ADR-0006).
+**Failure.** If the blocking task panics, the `JoinError` is logged with `tracing::warn!` and
+the probe falls back to `mkvmerge -J`, as for any other native failure (ADR-0006).
 
 **Cancellation limit.** A blocking task cannot be aborted. After a cancel, `abort_all`, or
 `stop_job`, an in-flight native probe reads until it finishes. In the CLI, dropping the runtime
@@ -392,8 +391,10 @@ read used to pin a reactor worker. No `shutdown_timeout` is added.
 
 **Out of scope.** Per-directory synchronous I/O inside `async fn` (`prepare_release_directory`,
 `scan_fonts`, `claim_leftover_chapters`, `is_chapter_xml`, the `scan_mkv_files` walk) runs once
-per directory rather than fanning out. It is tracked as a separate issue.
+per directory rather than fanning out. It is tracked as #23.
 
 **Coverage.** `test_probe_video_stalled_native_read_does_not_block_runtime` points
 `probe_video` at a FIFO, whose `open()` blocks until a writer appears. It asserts that a timer
-on a `current_thread` runtime still fires. It fails without the offload and passes with it. 
+on a `current_thread` runtime still fires. It fails without the offload and passes with it.
+Because this test shells out to `mkfifo`, the reason Amendment 3's **Coverage.** gives for not
+testing the FIFO half of the seeding rule no longer holds; that test is still not written.
