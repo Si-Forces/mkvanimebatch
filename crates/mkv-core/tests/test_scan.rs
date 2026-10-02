@@ -355,6 +355,63 @@ async fn test_probe_video_rejects_non_matroska_file() {
     assert!(mkv_core::scan::probe_video(&corrupt_mkv).await.is_err());
 }
 
+/// A stalled native read must not block the runtime (#20). `open()` on a FIFO blocks until a
+/// writer appears, standing in for a cold or hung device.
+#[cfg(unix)]
+#[test]
+fn test_probe_video_stalled_native_read_does_not_block_runtime() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let tmp = tempdir().unwrap();
+    let fifo = tmp.path().join("stalled.mkv");
+    let status = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("run mkfifo");
+    assert!(status.success());
+
+    // The runtime runs on its own thread so this thread can watchdog it: an inline blocking
+    // probe would stall the runtime and a #[tokio::test] would hang rather than fail.
+    let (tx, rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let probe_path = fifo.clone();
+    let worker = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let _probe =
+                tokio::spawn(async move { mkv_core::scan::probe_video(&probe_path).await });
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            tx.send(()).unwrap();
+        });
+        // Keep the runtime alive until the writer has opened: shutting it down would cancel a
+        // blocking probe that has not started yet.
+        let _ = release_rx.recv();
+    });
+
+    let ticked = rx.recv_timeout(Duration::from_secs(5)).is_ok();
+    // Unblock the reader so the probe thread exits either way. The writer's open() returns only
+    // once the probe holds the read end, so it also proves the native read was reached.
+    let (opened_tx, opened_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let writer = fs::OpenOptions::new().write(true).open(&fifo);
+        opened_tx.send(writer.map(drop)).unwrap();
+    });
+    opened_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("probe_video never opened the FIFO, so the stall was not exercised")
+        .unwrap();
+    drop(release_tx);
+    worker.join().unwrap();
+    assert!(
+        ticked,
+        "runtime timer stalled behind a blocked native probe"
+    );
+}
+
 #[test]
 fn test_probe_ebml_8byte_vint_segment_size() {
     let tmp = tempdir().unwrap();

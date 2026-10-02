@@ -90,10 +90,20 @@ pub async fn probe_video_mkvmerge(path: &Path) -> Result<MkvmergeMetadata, Strin
 }
 
 /// Probes MKV container headers, tracks, attachments, and chapters with the native EBML
-/// parser, falling back to `mkvmerge -J` when native parsing fails (ADR 0006).
+/// parser, falling back to `mkvmerge -J` when native parsing fails or its task panics
+/// (ADR 0006).
+///
+/// The native probe runs on the blocking pool so a cold or network read cannot stall a reactor
+/// worker (ADR 0013 Amendment 7). Once started it is not cancellable and reads to completion.
 pub async fn probe_video(path: &Path) -> Result<MkvmergeMetadata, String> {
-    if let Ok(meta) = crate::ebml::probe_ebml_native(path) {
-        return Ok(meta);
+    let native_path = path.to_path_buf();
+    match tokio::task::spawn_blocking(move || crate::ebml::probe_ebml_native(&native_path)).await {
+        Ok(Ok(meta)) => return Ok(meta),
+        Ok(Err(_)) => {}
+        Err(join_err) => warn!(
+            "Native probe task failed for {}: {join_err}",
+            path.display()
+        ),
     }
     probe_video_mkvmerge(path).await
 }
