@@ -292,7 +292,7 @@ pub const SUBPROCESS_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 
 /// Item error when the ADR-0011 I/O semaphore is closed: the item fails rather than
 /// running without the disk-write limit.
-pub const IO_GOVERNOR_CLOSED: &str =
+pub(crate) const IO_GOVERNOR_CLOSED: &str =
     "I/O governor closed; refusing to run without the disk-write limit";
 
 /// Windows process creation flag that keeps child tools from opening a console window.

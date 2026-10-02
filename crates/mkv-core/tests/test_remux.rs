@@ -231,7 +231,6 @@ async fn test_execute_remux_job_no_file_name_returns_err() {
 mod mock_mkvmerge {
     use std::os::unix::fs::PermissionsExt;
 
-    use mkv_core::domain::IO_GOVERNOR_CLOSED;
     use tempfile::TempDir;
     use tokio::sync::{Mutex, MutexGuard};
 
@@ -408,7 +407,11 @@ mod mock_mkvmerge {
         semaphore.close();
 
         let err = remux_with(dir.path(), &semaphore).await.unwrap_err();
-        assert_eq!(err, IO_GOVERNOR_CLOSED);
+        // Pins the exact wording users see in the item error.
+        assert_eq!(
+            err,
+            "I/O governor closed; refusing to run without the disk-write limit"
+        );
         assert!(!dir.path().join("out.mkv").exists());
     }
 }

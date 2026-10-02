@@ -7,13 +7,21 @@ set -euo pipefail
 
 root=$(git rev-parse --show-toplevel)
 
-# git silently skips a missing or non-executable hook, so check before claiming anything.
+# git ignores a missing or non-executable hook (at most with a hint), so check before
+# claiming anything.
 for f in scripts/hooks/pre-commit scripts/hooks/pre-push scripts/review-gate.sh; do
   if [ ! -x "$root/$f" ]; then
     echo "$f is missing or not executable; refusing to enable the hooks." >&2
+    echo "Run: chmod +x $f  (or git checkout -- $f if it was deleted)" >&2
     exit 1
   fi
 done
+# Sourced by both hooks rather than run, so it only has to exist.
+if [ ! -f "$root/scripts/hooks/hidden-changes.sh" ]; then
+  echo "scripts/hooks/hidden-changes.sh is missing; refusing to enable the hooks." >&2
+  echo "Run: git checkout -- scripts/hooks/hidden-changes.sh" >&2
+  exit 1
+fi
 
 current=$(git config --get core.hooksPath || true)
 if [ -n "$current" ] && [ "$current" != "scripts/hooks" ]; then
@@ -37,7 +45,11 @@ Hooks enabled (core.hooksPath = scripts/hooks):
   pre-commit : cargo fmt --check + clippy -D warnings when Rust or Cargo files are staged,
                node --check on staged UI modules
   pre-push   : the review-gate ledger check, then cargo test --workspace and node --test
-               when HEAD is pushed
+               when HEAD is pushed (other pushed tips only get a warning)
+
+Both also refuse while an assume-unchanged or skip-worktree file differs from the index,
+since git diff cannot see that edit. The refusal lists the files and how to clear the bits.
+To bypass: git commit --no-verify (skips all of pre-commit), SKIP_SLOW_GATES=1 git push.
 
 Review a range with the code-review skill (Standards + Spec, parallel
 sub-agents), then record it before pushing:
