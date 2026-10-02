@@ -597,8 +597,11 @@ impl FileSignature {
     /// because `meta` describes the link itself. Only regular files are signed: a directory,
     /// FIFO, socket, or device reports a `len()` unrelated to content, and opening a FIFO
     /// blocks.
+    ///
+    /// The symlink test reads `meta` rather than `entry.file_type()`, which on Unix costs
+    /// its own `lstat` on filesystems that report `DT_UNKNOWN`.
     pub fn of_dir_entry(entry: &std::fs::DirEntry, meta: &std::fs::Metadata) -> Option<Self> {
-        if entry.file_type().is_ok_and(|t| t.is_symlink()) {
+        if meta.is_symlink() {
             let resolved = entry.path().metadata().ok()?;
             resolved.is_file().then(|| Self::from_metadata(&resolved))
         } else {
