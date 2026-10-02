@@ -245,7 +245,8 @@ async reactor thread stalls") holds only for the `mkvmerge -J` fallback, which r
 through a synchronous `std::fs::File` + `BufReader` on the calling worker thread. The rationale
 for leaving it in place was Amendment 2's 0.091 ms warm figure. Amendment 6 removed the
 buffer-discarding seeks and loop-guard `lseek` calls behind that figure, but the read itself is
-still synchronous, so a cold read can still block a worker. Tracked as issue #20.
+still synchronous, so a cold read can still block a worker. Tracked as issue #20; resolved by
+Amendment 7.
 
 **The governor is crate-private.** `cpu` is a private module of `mkv-core`;
 `transcode_governor_threads` is `pub(crate)` and reachable only through
@@ -350,8 +351,8 @@ calls, and multi-buffer reads refill predictably.
 `test_synthetic_multitrack_mkv_native_probe_and_buffer_retention` pins that `probe_ebml_native`
 successfully parses a 6-track synthetic MKV from disk, and its counted walk — a proxy for the
 parser, which `probe_ebml_native` does not instrument — completes in 1 buffer fill and 0 seeks.
-Wall-clock is not re-measured; cold-cache behaviour on live media remains tracked under
-Issue #20.
+Wall-clock is not re-measured here; Amendment 7 measures cold-cache behaviour on live media
+(issue #20).
 
 ## Amendment 7 — 2026-10-02 (native probe on the blocking pool)
 
@@ -386,8 +387,17 @@ the probe falls back to `mkvmerge -J`, as for any other native failure (ADR-0006
 
 **Cancellation limit.** A blocking task cannot be aborted. After a cancel, `abort_all`, or
 `stop_job`, an in-flight native probe reads until it finishes. In the CLI, dropping the runtime
-waits for it, so a read on a hung mount delays exit. This is no worse than before: the same
-read used to pin a reactor worker. No `shutdown_timeout` is added.
+waits for it, so a read on a hung mount delays exit; before, the same read pinned a reactor
+worker. No `shutdown_timeout` is added.
+
+One thing is worse than before. The probe permit belongs to the async task, so aborting it
+releases the permit while the detached read keeps running, where an inline read held its
+permit until it returned. Reads orphaned by a cancel, at most `probe_concurrency` per cancel,
+are counted by no permit, so a job started right after a stop can briefly run more reads than
+its probe limit; repeated stop-and-start cycles on a hung mount can accumulate them. In
+exchange, cancellation is no longer delayed when cold reads pin the workers. The permit is not
+moved into the blocking task: each job builds its own semaphore, so holding the old one would
+not bound the next job.
 
 **Out of scope.** Per-directory synchronous I/O inside `async fn` (`prepare_release_directory`,
 `scan_fonts`, `claim_leftover_chapters`, `is_chapter_xml`, the `scan_mkv_files` walk) runs once
