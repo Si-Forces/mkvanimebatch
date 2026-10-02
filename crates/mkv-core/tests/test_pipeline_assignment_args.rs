@@ -21,7 +21,7 @@ use tempfile::tempdir;
 
 use common::{run_batch, seeded_cache, video_metadata};
 use mkv_core::pipeline::{CancellationToken, PipelineConfig, PipelineMode};
-use mkv_core::request::TrackAssignment;
+use mkv_core::request::{AssignmentKind, TrackAssignment};
 
 /// Restores the process environment it displaced, so a failing assertion cannot
 /// leak a mutated `PATH` into the rest of the run.
@@ -88,7 +88,7 @@ async fn assigned_language_title_and_both_offset_signs_reach_the_mkvmerge_argv()
             TrackAssignment {
                 target_video: "Episode - 01.mkv".into(),
                 asset_path: "custom.ass".into(),
-                track_type: Some("subtitle".into()),
+                track_type: AssignmentKind::Subtitle,
                 language: Some("ind".into()),
                 title: Some("Bahasa Indonesia".into()),
                 offset_ms: Some(1250),
@@ -96,7 +96,7 @@ async fn assigned_language_title_and_both_offset_signs_reach_the_mkvmerge_argv()
             TrackAssignment {
                 target_video: "Episode - 02.mkv".into(),
                 asset_path: "custom.ass".into(),
-                track_type: Some("subtitle".into()),
+                track_type: AssignmentKind::Subtitle,
                 language: Some("ind".into()),
                 title: Some("Bahasa Indonesia".into()),
                 offset_ms: Some(-1250),

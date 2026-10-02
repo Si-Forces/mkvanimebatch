@@ -10,17 +10,25 @@ use crate::cpu::{physical_core_count, transcode_governor_threads};
 use crate::pipeline::{PipelineConfig, PipelineMode};
 use crate::preset::lookup_preset;
 
+/// The kind of track a [`TrackAssignment`] attaches. Only subtitles are supported; the enum keeps
+/// the `track_type` wire field typed, so any value other than `"subtitle"` fails deserialization.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AssignmentKind {
+    #[default]
+    Subtitle,
+}
+
 /// Explicit manual track assignment attaching an asset to a target video.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrackAssignment {
     /// Target video file path, relative to `input_dir` (e.g. "Season 1/Ep01.mkv")
     pub target_video: String,
-    /// Absolute or relative path to the asset file (e.g. subtitles or audio)
+    /// Absolute or relative path to the subtitle file
     pub asset_path: PathBuf,
-    /// Track type / role. Only `"subtitle"` is accepted; any other value fails validation.
-    /// Defaults to "subtitle".
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub track_type: Option<String>,
+    /// Track kind; defaults to subtitle when absent.
+    #[serde(default)]
+    pub track_type: AssignmentKind,
     /// Optional ISO-639-2 language tag (e.g. "ind", "eng", "jpn")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
@@ -326,14 +334,6 @@ impl BatchRequest {
                     ));
                 }
 
-                if let Some(tt) = &assignment.track_type {
-                    if !tt.trim().eq_ignore_ascii_case("subtitle") {
-                        return Err(
-                            "Only 'subtitle' track assignments are currently supported".into()
-                        );
-                    }
-                }
-
                 let target_full = self.input_dir.join(&clean);
                 if !seen_videos.insert(clean.clone()) {
                     return Err(format!(
@@ -463,17 +463,19 @@ pub fn parse_assignments_json(json_str: &str) -> Result<Vec<TrackAssignment>, St
         serde_json::from_str(trimmed).map_err(|e| format!("Invalid assignments JSON: {e}"))?;
 
     match value {
-        Value::Array(_) => serde_json::from_value(value)
-            .map_err(|_| "Unrecognized assignments JSON schema".to_string()),
+        Value::Array(_) => assignment_array(value),
         Value::Object(obj) => match obj.get("assignments") {
             Some(Value::Object(inner)) => legacy_assignment_map(inner),
-            Some(inner @ Value::Array(_)) => {
-                serde_json::from_value(inner.clone()).or_else(|_| legacy_assignment_map(&obj))
-            }
+            Some(inner @ Value::Array(_)) => assignment_array(inner.clone()),
             _ => legacy_assignment_map(&obj),
         },
         _ => Err("Unrecognized assignments JSON schema".into()),
     }
+}
+
+/// Deserializes a `Vec<TrackAssignment>` array, reporting serde's reason on failure.
+fn assignment_array(value: Value) -> Result<Vec<TrackAssignment>, String> {
+    serde_json::from_value(value).map_err(|e| format!("Invalid track assignment: {e}"))
 }
 
 /// Parses a flat legacy map (`{ "video.mkv": "sub.ass" }`) into subtitle assignments.
@@ -485,7 +487,7 @@ fn legacy_assignment_map(
             Value::String(asset_path) => Ok(TrackAssignment {
                 target_video: target_video.clone(),
                 asset_path: PathBuf::from(asset_path),
-                track_type: Some("subtitle".into()),
+                track_type: AssignmentKind::Subtitle,
                 language: None,
                 title: None,
                 offset_ms: None,
@@ -513,7 +515,7 @@ mod tests {
         TrackAssignment {
             target_video: target_video.into(),
             asset_path: asset_path.into(),
-            track_type: Some("subtitle".into()),
+            track_type: AssignmentKind::Subtitle,
             language: None,
             title: None,
             offset_ms: None,
@@ -762,26 +764,6 @@ mod tests {
     }
 
     #[test]
-    fn test_batch_request_validation_track_type() {
-        let dir = tempdir().unwrap();
-        touch(dir.path(), "ep01.mkv");
-        let sub_path = touch(dir.path(), "ep01.ass");
-        let with_type = |track_type: Option<&str>| TrackAssignment {
-            track_type: track_type.map(Into::into),
-            ..subtitle("ep01.mkv", &sub_path)
-        };
-
-        assert_eq!(
-            validate_with(dir.path(), vec![with_type(Some("audio"))]).unwrap_err(),
-            "Only 'subtitle' track assignments are currently supported"
-        );
-        // Case-insensitive; an absent type means subtitle.
-        for ok in [Some("subtitle"), Some("SUBTITLE"), None] {
-            assert!(validate_with(dir.path(), vec![with_type(ok)]).is_ok());
-        }
-    }
-
-    #[test]
     fn test_validate_assignment_rejects_existing_non_mkv_target() {
         let dir = tempdir().unwrap();
         touch(dir.path(), "notes.txt");
@@ -917,7 +899,7 @@ mod tests {
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].target_video, "ep01.mkv");
         assert_eq!(parsed[0].offset_ms, Some(250));
-        assert_eq!(parsed[0].track_type, None);
+        assert_eq!(parsed[0].track_type, AssignmentKind::Subtitle);
 
         let wrapped_array = format!(r#"{{"assignments": {array}}}"#);
         assert_eq!(parse_assignments_json(&wrapped_array).unwrap(), parsed);
@@ -936,32 +918,58 @@ mod tests {
             vec![subtitle("assignments", "x.ass")]
         );
 
-        for unrecognized in [r#"[{"asset_path": "x.ass"}]"#, "42"] {
-            assert_eq!(
-                parse_assignments_json(unrecognized).unwrap_err(),
-                "Unrecognized assignments JSON schema",
-                "{unrecognized}"
+        assert_eq!(
+            parse_assignments_json("42").unwrap_err(),
+            "Unrecognized assignments JSON schema"
+        );
+        assert_eq!(
+            parse_assignments_json(r#"{"assignments": 1}"#).unwrap_err(),
+            "Expected string asset path for 'assignments', got 1"
+        );
+        // A `TrackAssignment` array, bare or wrapped, surfaces its serde error, with no legacy-map fallback.
+        for json in [
+            r#"[{"asset_path": "x.ass"}]"#,
+            r#"{"assignments": [{"asset_path": "x.ass"}]}"#,
+        ] {
+            let err = parse_assignments_json(json).unwrap_err();
+            assert!(
+                err.starts_with("Invalid track assignment: missing field `target_video`"),
+                "{json}: {err}"
             );
         }
-        for (json, expected) in [
-            (
-                r#"{"assignments": 1}"#,
-                "Expected string asset path for 'assignments', got 1",
-            ),
-            (
-                r#"{"assignments": [{"asset_path": "x.ass"}]}"#,
-                r#"Expected string asset path for 'assignments', got [{"asset_path":"x.ass"}]"#,
-            ),
+        // Only lowercase "subtitle" is a valid track_type.
+        for (track_type, reason) in [
+            (r#""audio""#, "unknown variant `audio`"),
+            (r#""Subtitle""#, "unknown variant `Subtitle`"),
+            (r#"" subtitle ""#, "unknown variant ` subtitle `"),
+            ("null", "invalid type: null"),
         ] {
-            assert_eq!(
-                parse_assignments_json(json).unwrap_err(),
-                expected,
-                "{json}"
+            let json = format!(
+                r#"[{{"target_video": "a.mkv", "asset_path": "a.ass", "track_type": {track_type}}}]"#
+            );
+            let err = parse_assignments_json(&json).unwrap_err();
+            assert!(
+                err.starts_with(&format!("Invalid track assignment: {reason}")),
+                "{json}: {err}"
             );
         }
         assert!(parse_assignments_json("{")
             .unwrap_err()
             .starts_with("Invalid assignments JSON:"));
+    }
+
+    #[test]
+    fn test_track_assignment_wire_format_round_trips() {
+        let canonical = r#"[{"target_video":"Season 1/ep01.mkv","asset_path":"subs/ep01.ass","track_type":"subtitle","language":"ind","title":"Indonesian","offset_ms":-250}]"#;
+        let parsed = parse_assignments_json(canonical).unwrap();
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), canonical);
+
+        // Omitted fields take their defaults; track_type is always written back.
+        let minimal = r#"[{"target_video":"ep01.mkv","asset_path":"ep01.ass"}]"#;
+        assert_eq!(
+            serde_json::to_string(&parse_assignments_json(minimal).unwrap()).unwrap(),
+            r#"[{"target_video":"ep01.mkv","asset_path":"ep01.ass","track_type":"subtitle"}]"#
+        );
     }
 
     #[test]
