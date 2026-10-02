@@ -6,7 +6,8 @@
 
 - **`JobEvent` and `BatchItemInfo` drop `Deserialize`**: `JobEvent` and `BatchItemInfo` in `mkv-core::pipeline` no longer derive `Deserialize`, and unused `#[serde(default...)]` annotations were removed from `JobEvent` variants.
 - **`EpisodeType::label()` parameter dropped**: `EpisodeType::label(&self)` no longer accepts `long: bool`; it always returns the standard short label (`EP`, `Part`, `OVA`, `SP`).
-- **Asset font fields and `use_source_fonts()` removed**: Removed write-only `fonts: FontInfo` from `ResolvedAssets` and `AssetResolver`, removed unused `AssetResolver::use_source_fonts()`, and eliminated redundant font fallback scanning in `AssetResolver::discover`. Directory-level font resolution is owned by `prepare_release_directory`.
+- **Asset font fields and `use_source_fonts()` removed**: Removed write-only `fonts: FontInfo` from `ResolvedAssets` and `AssetResolver`, removed unused `AssetResolver::use_source_fonts()`, and eliminated redundant font fallback scanning in `AssetResolver::discover`, which drops its `fonts_dir` and `font_cache` parameters. Directory-level font resolution is owned by `prepare_release_directory`.
+- **`execute_remux_job` requires the I/O governor**: its `io_semaphore` parameter is now `&Semaphore` instead of `Option<&Semaphore>`. A closed semaphore fails the item instead of running it without the ADR-0011 disk-write limit, in both remux and extract.
 - **Non-finite subtitle offset rejected**: CLI and batch requests now validate that `--sub-offset` is a finite number, rejecting non-finite values such as `inf`, `-inf`, or `NaN`.
 - **Lowercase `m` bitrate suffix rejected**: CLI and desktop requests now reject rates such as `2m`, which ffmpeg interprets as milli rather than mega. Use uppercase `M` for mega; `k` and `K` remain accepted. Surrounding whitespace is trimmed before encoding.
 - **Removal of `--keep-fonts` CLI Flag**: The `--keep-fonts` command-line option has been removed from `mkv-cli`. Invoking `mkv-cli` with `--keep-fonts` will now result in an unknown flag error.
@@ -58,6 +59,7 @@
 - The window's corner resize handles now have a usable size and a diagonal resize cursor.
 - Stepper limits match the engine's validation: workers 1–64, Disk I/O jobs 0–64, FFmpeg threads 1–32. Fractional, out-of-range, and non-numeric values in those three fields are rejected before inspection instead of being truncated to integers.
 - The UI uses the system font stacks; bundled web fonts are no longer loaded.
+- The per-item subtitle offset reads exponent notation correctly (`1e3` is 1000 ms; it was 1 ms). A value beyond the safe-integer range now leaves the global offset in effect instead of failing the run.
 - The `set_window_theme` IPC command no longer coerces an unrecognized theme name to Dark. An unrecognized name is now ignored and leaves the native window exactly as it was, including any pin set by an earlier explicit choice. The webview only ever sends `light` or `dark`, so this affects a caller that bypasses the UI.
 
 ### Queue Selection Freeze

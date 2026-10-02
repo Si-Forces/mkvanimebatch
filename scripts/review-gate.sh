@@ -1,163 +1,164 @@
 #!/usr/bin/env bash
 # Review-gate ledger for AGENTS.md's "always review before committing" rule.
 #
-# A git hook cannot run the two-axis Standards+Spec review itself: that needs the
-# agent runtime. What it CAN enforce is that no commit reaches origin/main without a
-# review having been recorded for it. This keeps the decision at push time instead of
-# trusting the author's judgement at commit time, which is where the rule kept getting
-# skipped: every skip was "this diff is too small to need a review", and small diffs
-# are exactly what slip through.
+# A git hook cannot run the Standards+Spec review itself: that needs the agent runtime.
+# What it CAN enforce is that no commit is pushed without a review recorded for it, which
+# moves the check to push time, where "this diff is too small to review" cannot skip it.
 #
-# Entries are keyed by TREE sha, not commit sha, so the ledger survives rebases and
-# amend-only changes that move commits without changing content.
+# Entries are keyed by `git patch-id` of the commit's diff against its first parent. A
+# review survives a rebase or amend that leaves the diff unchanged, but a different change
+# that happens to land on a reviewed tree (a revert, say) still needs its own review. A
+# commit with an empty diff has nothing to review and always passes.
 #
-# Uses node, not python: ADR-0010 records that Python is no longer required in
-# development environments or CI runners. JSON.parse also rejects NaN/Infinity,
-# which Python's json.loads accepts -- so the stricter parser closes a bypass for free.
+# Uses node, not python (ADR-0010). JSON.parse also rejects NaN/Infinity.
 #
 # Usage:
-#   scripts/review-gate.sh record "<note>"                 record HEAD
-#   scripts/review-gate.sh record-range <base> <head> "…"  record base..head (base excluded)
-#   scripts/review-gate.sh status                           show unpushed commits lacking review
-#   scripts/review-gate.sh verify-range <base> <head>      exit non-zero if any is unreviewed
+#   scripts/review-gate.sh record "<note>"                   record HEAD
+#   scripts/review-gate.sh record-range <base> <head> "…"    record base..head (base excluded)
+#   scripts/review-gate.sh status                             commits not on origin/main lacking a review
+#   scripts/review-gate.sh verify-push <remote-sha> <local-sha>   the pre-push check
 #
-# Limitation, stated plainly: this catches forgetting, not dishonesty. `record` writes
-# whatever it is told. It is a forcing function, not an oracle.
+# This catches forgetting, not dishonesty: `record` writes whatever it is told.
 
 set -euo pipefail
 
-LEDGER="${REVIEW_LEDGER:-$(git rev-parse --show-toplevel)/.git/review-ledger.jsonl}"
-CMD="${1:-status}"
-
 die() { echo "[review-gate] $*" >&2; exit 1; }
 
-tree_of() { git rev-parse "$1^{tree}"; }
+command -v node > /dev/null || die "node is required"
 
-note_json() {
-  printf '%s' "$*" |
-    node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.stringify(s)+"\n"))'
+# The common git dir is shared by every worktree of this clone.
+LEDGER="${REVIEW_LEDGER:-$(git rev-parse --path-format=absolute --git-common-dir)/review-ledger.jsonl}"
+
+require_commit() {
+  git rev-parse --verify --quiet "$1^{commit}" ||
+    die "$1 does not resolve to a commit (fetch first, or the remote tip is unknown)"
 }
 
-append_entry() { # <sha> <note-json>
+patch_id_of() { # <commit> -> patch id, empty when the commit changes nothing
+  local parent
+  parent=$(git rev-parse --verify --quiet "$1^") || parent=$(git hash-object -t tree /dev/null)
+  git diff-tree -p --binary "$parent" "$1" | git patch-id --verbatim | cut -d' ' -f1
+}
+
+# Fork point from origin/main: where the commits that still need a review start.
+review_base() { # <commit>
+  git rev-parse --verify --quiet origin/main > /dev/null ||
+    die "no origin/main; cannot determine a review base (fetch first)"
+  git merge-base origin/main "$1" ||
+    die "$1 shares no history with origin/main"
+}
+
+record_commit() { # <commit> <note-json> -> 1 when the diff is empty and nothing is recorded
+  local sha patch
+  sha=$(require_commit "$1") || exit 1
+  # Callers test this in an `if`, where set -e is off.
+  patch=$(patch_id_of "$sha") || die "cannot compute the patch id of $sha"
+  [ -n "$patch" ] || return 1
   mkdir -p "$(dirname "$LEDGER")"
-  printf '{"head":"%s","tree":"%s","at":"%s","note":%s}\n' \
-    "$1" "$(tree_of "$1")" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$2" >> "$LEDGER"
+  printf '{"commit":"%s","patch":"%s","at":"%s","note":%s}\n' \
+    "$sha" "$patch" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$2" >> "$LEDGER"
 }
 
-# Membership test for one tree sha, done entirely in a single process.
-#
-# Three earlier implementations were wrong:
-#   * `sed` scraping the tree field accepted an unterminated `{"tree":"<hash>`, so a
-#     truncated ledger satisfied the gate for a commit that was never reviewed.
-#   * piping that into `grep -qx` made the gate NON-DETERMINISTIC: grep exits on the
-#     first match and closes the pipe, the reader then dies with EPIPE/BrokenPipeError,
-#     and under `set -o pipefail` the verdict depends on timing. The same push was
-#     blocked on one run and allowed on the next.
-#   * python's json.loads accepts NaN and Infinity, which are not valid JSON.
-is_recorded() { # <tree-sha> -> 0 if recorded
+is_reviewed() { # <commit> -> 0 if reviewed
+  local patch
+  # Callers test this in an `if`, where set -e is off: a failed patch-id must not read as
+  # an empty diff and pass.
+  patch=$(patch_id_of "$1") || return 1
+  [ -n "$patch" ] || return 0
   [ -f "$LEDGER" ] || return 1
+  # One node process per check: a malformed line is skipped, so it can never satisfy the gate.
   node -e '
-const fs = require("fs");
 const want = process.argv[2];
-let data;
-try { data = fs.readFileSync(process.argv[1], "utf8"); } catch { process.exit(1); }
-for (const line of data.split("\n")) {
-  const trimmed = line.trim();
-  if (!trimmed) continue;
-  let record;
-  try { record = JSON.parse(trimmed); } catch { continue; }  // malformed cannot satisfy the gate
-  if (record && typeof record === "object" && record.tree === want) process.exit(0);
+for (const line of require("fs").readFileSync(process.argv[1], "utf8").split("\n")) {
+  let entry;
+  try { entry = JSON.parse(line); } catch { continue; }
+  if (entry && entry.patch === want) process.exit(0);
 }
 process.exit(1);
-' "$LEDGER" "$1"
+' "$LEDGER" "$patch"
+}
+
+note_json() {
+  # `--` stops node from reading a note such as "--version" as its own option.
+  node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' -- "$1"
 }
 
 record() {
   [ $# -ge 2 ] || die 'usage: review-gate.sh record "<note>"'
-  append_entry HEAD "$(note_json "$2")"
-  echo "[review-gate] recorded review for HEAD $(git rev-parse --short HEAD) (tree $(tree_of HEAD | cut -c1-7))"
+  local note
+  note=$(note_json "$2")
+  if record_commit HEAD "$note"; then
+    echo "[review-gate] recorded review for HEAD $(git rev-parse --short HEAD)"
+  else
+    echo "[review-gate] HEAD has an empty diff; nothing to record"
+  fi
 }
 
-# A range review covers every commit in the reviewed diff. `base` is NOT recorded: its
-# changes are not part of base..head, which is what the review actually saw. This
-# matches git's own A..B semantics; the first implementation used A~1..B and silently
-# stamped one commit beyond the reviewed range.
+# Records base..head with git's own A..B semantics: base itself was not part of the diff
+# the review saw, so it is not recorded.
 record_range() {
   [ $# -ge 4 ] || die 'usage: review-gate.sh record-range <base> <head> "<note>"'
-  local base="$2" head="$3" n=0 sha
-  local note; note="$(note_json "$4")"
-  resolve_commits "$base" "$head" > /dev/null
-  while read -r sha; do
-    append_entry "$sha" "$note"
-    n=$((n + 1))
-  done < <(git rev-list --reverse "$base".."$head")
-  echo "[review-gate] recorded review for $n commit(s) in $base..$head"
-}
-
-# Both endpoints must resolve to real commits, and the range must enumerate. A
-# non-existent remote tip previously made `git rev-list` fail, the loop saw nothing,
-# and the gate reported success -- failing OPEN, which is the one direction a gate
-# must never fail.
-resolve_commits() {
-  git rev-parse --verify --quiet "$1^{commit}" > /dev/null ||
-    die "$1 does not resolve to a commit (fetch first, or the remote tip is unknown)"
-  git rev-parse --verify --quiet "$2^{commit}" > /dev/null ||
-    die "$2 does not resolve to a commit"
+  local base head note commits sha n=0
+  base=$(require_commit "$2")
+  head=$(require_commit "$3")
+  note=$(note_json "$4")
+  commits=$(git rev-list --reverse "$base..$head")
+  for sha in $commits; do
+    if record_commit "$sha" "$note"; then n=$((n + 1)); fi
+  done
+  echo "[review-gate] recorded review for $n commit(s) in $2..$3 (empty diffs need none)"
 }
 
 status() {
-  local base unreviewed=0 sha tree mark short
-  if git rev-parse --verify --quiet origin/main > /dev/null 2>&1; then
-    base=$(git rev-parse origin/main)
-  else
-    base=$(git rev-parse HEAD~1)
-  fi
-  printf 'unpushed commits vs %s:\n' "$(git rev-parse --short "$base")"
-  while read -r sha; do
-    tree=$(tree_of "$sha"); short=$(git rev-parse --short "$sha")
-    if is_recorded "$tree"; then mark="reviewed"; else mark="NO REVIEW"; unreviewed=$((unreviewed + 1)); fi
-    printf '  %-9s %-10s %s\n' "$short" "$mark" "$(git log -1 --format=%s "$sha")"
-  done < <(git rev-list --reverse "$base"..HEAD)
+  local base commits sha mark unreviewed=0
+  base=$(review_base HEAD)
+  commits=$(git rev-list --reverse "$base..HEAD")
+  printf 'commits since the fork point with origin/main (%s):\n' "$(git rev-parse --short "$base")"
+  for sha in $commits; do
+    if is_reviewed "$sha"; then mark="reviewed"; else mark="NO REVIEW"; unreviewed=$((unreviewed + 1)); fi
+    printf '  %-9s %-10s %s\n' "$(git rev-parse --short "$sha")" "$mark" "$(git log -1 --format=%s "$sha")"
+  done
   if [ "$unreviewed" -ne 0 ]; then
     printf '\n[review-gate] %d commit(s) unreviewed. Run the Standards+Spec review, then:\n' "$unreviewed"
-    echo "  scripts/review-gate.sh record-range $(git rev-parse --short "$base") $(git rev-parse --short HEAD) \"<what you reviewed>\""
+    echo "  scripts/review-gate.sh record-range $(git rev-parse --short "$base") HEAD \"<what you reviewed>\""
   fi
 }
 
-# Verifies the commits in base..head -- the range git is actually pushing -- rather
-# than the checked-out HEAD, so pushing a side branch cannot be waved through by
-# having main reviewed. Fails closed on any endpoint it cannot resolve.
-verify_range() {
-  local base="$1" head="$2" sha tree list
-  resolve_commits "$base" "$head"
-  list=$(git rev-list "$base".."$head") ||
-    die "cannot enumerate $base..$head"
-  while read -r sha; do
-    [ -n "$sha" ] || continue
-    tree=$(tree_of "$sha")
-    if ! is_recorded "$tree"; then
+# Checks the commits git is actually pushing, not the checked-out HEAD, so pushing a side
+# branch cannot be waved through by having main reviewed. A new remote branch (all-zero
+# remote sha) is checked from its fork point with origin/main. Fails closed on any
+# endpoint it cannot resolve.
+verify_push() { # <remote-sha> <local-sha>
+  local base head commits sha n=0
+  head=$(require_commit "$2")
+  if [[ "$1" =~ ^0+$ ]]; then base=$(review_base "$head"); else base=$(require_commit "$1"); fi
+  # An assignment, not a for-list substitution, so a failed rev-list trips set -e.
+  commits=$(git rev-list "$base..$head")
+  for sha in $commits; do
+    if ! is_reviewed "$sha"; then
       {
         echo ""
         echo "❌ [review-gate] refusing to push: $(git rev-parse --short "$sha") has no recorded review."
         echo "   $(git log -1 --format=%s "$sha")"
         echo ""
         echo "   Run the code-review skill (Standards + Spec, parallel sub-agents) over"
-        echo "   $base..$head, fix or explicitly accept the findings, then:"
+        echo "   $(git rev-parse --short "$base")..$(git rev-parse --short "$head"), fix or explicitly accept the findings, then:"
         echo "     scripts/review-gate.sh record-range $(git rev-parse --short "$base") $(git rev-parse --short "$head") \"<what you reviewed>\""
         echo ""
         echo "   Emergency override: SKIP_REVIEW_GATE=1 git push"
       } >&2
       exit 1
     fi
-  done <<< "$list"
-  echo "[review-gate] all $(printf '%s\n' "$list" | grep -c . || true) pushed commit(s) reviewed"
+    n=$((n + 1))
+  done
+  echo "[review-gate] all $n pushed commit(s) reviewed"
 }
 
-case "$CMD" in
+case "${1:-status}" in
   record)       record "$@" ;;
   record-range) record_range "$@" ;;
   status)       status ;;
-  verify-range) [ $# -ge 3 ] || die 'usage: review-gate.sh verify-range <base> <head>'
-                verify_range "$2" "$3" ;;
-  *)            die 'usage: review-gate.sh {record "<note>" | record-range <base> <head> "<note>" | status | verify-range <base> <head>}' ;;
+  verify-push)  [ $# -ge 3 ] || die 'usage: review-gate.sh verify-push <remote-sha> <local-sha>'
+                verify_push "$2" "$3" ;;
+  *)            die 'usage: review-gate.sh {record "<note>" | record-range <base> <head> "<note>" | status | verify-push <remote-sha> <local-sha>}' ;;
 esac

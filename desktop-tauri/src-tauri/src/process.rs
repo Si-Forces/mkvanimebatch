@@ -1,4 +1,4 @@
-use mkv_core::pipeline::{CancellationToken, ItemOutcome, JobEvent};
+use mkv_core::pipeline::{CancellationToken, ItemOutcome, JobEvent, CANCELLED_REASON};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -385,11 +385,11 @@ fn settle_open_items(
     cancelled: bool,
     extra: &serde_json::Map<String, serde_json::Value>,
 ) {
-    let error_message = extra
-        .get("error")
-        .or_else(|| extra.get("reason"))
-        .or_else(|| extra.get("panic"))
-        .and_then(|value| value.as_str())
+    let text = |key: &str| extra.get(key).and_then(|value| value.as_str());
+    let reason = text("reason");
+    let error_message = text("error")
+        .or(reason)
+        .or_else(|| text("panic"))
         .unwrap_or("Batch failed");
     for item in snapshot.items.values_mut() {
         if item.status.is_terminal() {
@@ -399,7 +399,7 @@ fn settle_open_items(
         if cancelled {
             item.status = ItemStatus::Cancelled;
             item.outcome = Some(ItemOutcome::Cancelled);
-            item.reason = Some("Operation cancelled".to_string());
+            item.reason = Some(CANCELLED_REASON.to_string());
         } else {
             item.status = ItemStatus::Error;
             item.outcome = Some(ItemOutcome::Error);
@@ -408,10 +408,7 @@ fn settle_open_items(
             } else {
                 error_message.to_string()
             });
-            item.reason = extra
-                .get("reason")
-                .and_then(|value| value.as_str())
-                .map(ToString::to_string);
+            item.reason = reason.map(ToString::to_string);
         }
     }
 }
@@ -811,10 +808,7 @@ mod tests {
         let snap = snapshot(&cancelled);
         assert_eq!(snap.status, BatchStatus::Cancelled);
         assert_eq!(snap.items["ep1"].status, ItemStatus::Cancelled);
-        assert_eq!(
-            snap.items["ep1"].reason.as_deref(),
-            Some("Operation cancelled")
-        );
+        assert_eq!(snap.items["ep1"].reason.as_deref(), Some(CANCELLED_REASON));
 
         let failed = JobState::default();
         failed.update_snapshot(&batch_start(&["ep1"]), 2, "remux");

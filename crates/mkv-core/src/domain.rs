@@ -290,6 +290,11 @@ pub fn safe_filename(name: &str) -> String {
 /// Upper bound on any single mkvmerge/mkvextract/ffmpeg invocation.
 pub const SUBPROCESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1800);
 
+/// Item error when the ADR-0011 I/O semaphore is closed: the item fails rather than
+/// running without the disk-write limit.
+pub(crate) const IO_GOVERNOR_CLOSED: &str =
+    "I/O governor closed; refusing to run without the disk-write limit";
+
 /// Windows process creation flag that keeps child tools from opening a console window.
 #[cfg(windows)]
 pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;

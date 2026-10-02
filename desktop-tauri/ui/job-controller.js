@@ -1,5 +1,10 @@
 import { buildTrackAssignmentsForManifest, isSameDirectory } from "./queue-state.js";
 
+/** Webview event names emitted by the engine bridge; must match `commands.rs`. */
+export const JOB_EVENT = "job-event";
+export const JOB_LOG = "job-log";
+export const JOB_DONE = "job-done";
+
 /**
  * The four queue bulk-selection buttons, each with the selection it applies.
  *
@@ -289,10 +294,10 @@ export class JobController {
     let launched = false;
 
     try {
-      unlisteners.push(await this.runtime.listen("job-log", e => {
+      unlisteners.push(await this.runtime.listen(JOB_LOG, e => {
         if (generation === this.startGeneration || launched) this.runtime.appendLog(this.logEl, e.payload);
       }));
-      unlisteners.push(await this.runtime.listen("job-event", e => {
+      unlisteners.push(await this.runtime.listen(JOB_EVENT, e => {
         if (generation !== this.startGeneration && !launched) return;
         if (this.jobId === null) {
           earlyEvents.push(e.payload);
@@ -300,7 +305,7 @@ export class JobController {
         }
         if (this.isOwnSignal(e.payload)) tracker.handleEvent(e.payload);
       }));
-      unlisteners.push(await this.runtime.listen("job-done", e => {
+      unlisteners.push(await this.runtime.listen(JOB_DONE, e => {
         if (generation !== this.startGeneration && !launched) return;
         if (this.jobId === null) {
           earlyDone.push(e.payload);

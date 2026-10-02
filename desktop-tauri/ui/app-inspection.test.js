@@ -309,6 +309,8 @@ for (const { label, input, expected } of [
   { label: "empty string", input: "", expected: null },
   { label: "whitespace string", input: "   ", expected: null },
   { label: "exponential notation 1e3", input: "1e3", expected: 1000 },
+  { label: "negative fraction -250.9", input: "-250.9", expected: -250 },
+  { label: "beyond the safe-integer range 1e20", input: "1e20", expected: null },
 ]) {
   test(`track-assignment offset parsing: ${label} produces ${expected}`, async t => {
     const ipc = bootstrapHarness(t);
@@ -318,14 +320,12 @@ for (const { label, input, expected } of [
     const offsetInput = new BootElement();
     const langSelect = new BootElement("ind");
     const titleInput = new BootElement();
-    const subOffset = new BootElement("2.5");
     ipc.elements.set("sub-assign-modal", modal);
     ipc.elements.set("sub-assign-save", saveBtn);
     ipc.elements.set("sub-custom-path", customPath);
     ipc.elements.set("sub-offset-input", offsetInput);
     ipc.elements.set("sub-lang-select", langSelect);
     ipc.elements.set("sub-title-input", titleInput);
-    ipc.elements.set("remux-sub-offset", subOffset);
 
     const app = await ipc.mount(`sub-offset-${label.replace(/\s+/g, "-")}`);
     assert.equal(await app.scanInputDirectory("/release", "remux"), true);
@@ -346,7 +346,6 @@ for (const { label, input, expected } of [
 
     const runCall = ipc.calls.find(([command]) => command === "run_job");
     assert.ok(runCall, "run_job was invoked");
-    assert.equal(runCall[1].request.sub_offset, 2.5, "global sub_offset configured");
     const assignment = runCall[1].request.assignments.find(a => a.target_video === "one");
     assert.equal(assignment.offset_ms, expected);
   });

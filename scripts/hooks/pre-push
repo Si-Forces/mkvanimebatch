@@ -1,42 +1,52 @@
 #!/usr/bin/env bash
-# Refuses to push commits that have no recorded Standards+Spec review.
-# Canonical copy lives at scripts/hooks/pre-push; install with:
-#   scripts/install-git-hooks.sh
-#
-# Verifies the revisions git actually supplied on stdin rather than the checked-out
-# HEAD, so pushing a side branch cannot be waved through by having main reviewed.
+# Push-time gates: the review-gate ledger for each pushed ref, then the slow test suites.
+# Enabled per clone by scripts/install-git-hooks.sh.
 set -euo pipefail
 
-[ "${SKIP_REVIEW_GATE:-0}" = "1" ] && { echo "[review-gate] SKIP_REVIEW_GATE=1 — pushing unreviewed."; exit 0; }
+# git writes one "<local ref> <local sha> <remote ref> <remote sha>" line per ref.
+# Deleting a ref pushes an all-zero local sha: nothing to test or review.
+updates=()
+while read -r _local_ref local_sha _remote_ref remote_sha; do
+  [[ -z "$local_sha" || "$local_sha" =~ ^0+$ ]] && continue
+  updates+=("$remote_sha $local_sha")
+done
+[ "${#updates[@]}" -gt 0 ] || exit 0
 
-ZERO=0000000000000000000000000000000000000000
 root=$(git rev-parse --show-toplevel)
 
-if [ ! -x "$root/scripts/review-gate.sh" ]; then
-  echo "❌ [review-gate] scripts/review-gate.sh is missing or not executable." >&2
-  echo "   Run: scripts/install-git-hooks.sh" >&2
+# The ledger check is cheap, so it runs before the test suites.
+if [ "${SKIP_REVIEW_GATE:-0}" = "1" ]; then
+  echo "[review-gate] SKIP_REVIEW_GATE=1 — pushing unreviewed."
+else
+  for update in "${updates[@]}"; do
+    read -r remote_sha local_sha <<< "$update"
+    "$root/scripts/review-gate.sh" verify-push "$remote_sha" "$local_sha"
+  done
+fi
+
+if [ "${SKIP_SLOW_GATES:-0}" = "1" ]; then
+  echo "[pre-push] SKIP_SLOW_GATES=1 — skipping test suites."
+  exit 0
+fi
+
+# The suites run on the working tree, so it must be the commit being pushed.
+head=$(git rev-parse HEAD)
+for update in "${updates[@]}"; do
+  read -r _ local_sha <<< "$update"
+  commit=$(git rev-parse "$local_sha^{commit}")
+  if [ "$commit" != "$head" ]; then
+    echo "❌ [pre-push] the tests run on the checkout, but $(git rev-parse --short "$commit") is not HEAD." >&2
+    echo "   Check it out and push again, or skip the suites with SKIP_SLOW_GATES=1." >&2
+    exit 1
+  fi
+done
+if ! git diff --quiet HEAD; then
+  echo "❌ [pre-push] tracked files differ from HEAD, so the tests would not run on the pushed commit." >&2
+  echo "   Commit or stash them first." >&2
   exit 1
 fi
 
-while read -r _local_ref local_sha _remote_ref remote_sha; do
-  # The chaining wrapper prints a trailing newline, so empty stdin yields one blank line.
-  # Without this guard that blank line reads as an update with empty refs and the gate
-  # fails with a confusing "unknown ref".
-  [ -z "$local_sha" ] && continue
-  # Deleting a ref pushes the zero sha; nothing to review.
-  [ "$local_sha" = "$ZERO" ] && continue
-
-  if [ "$remote_sha" = "$ZERO" ]; then
-    # New branch: review only what is not already on origin/main.
-    if git rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
-      base=$(git merge-base origin/main "$local_sha")
-    else
-      echo "[review-gate] no origin/main and no remote tip; cannot determine a review base." >&2
-      exit 1
-    fi
-  else
-    base="$remote_sha"
-  fi
-
-  "$root/scripts/review-gate.sh" verify-range "$base" "$local_sha"
-done
+echo "[pre-push] cargo test --workspace..."
+cargo test --workspace || { echo "❌ [pre-push] cargo test failed." >&2; exit 1; }
+echo "[pre-push] node --test desktop-tauri/ui/*.test.js..."
+node --test "$root"/desktop-tauri/ui/*.test.js || { echo "❌ [pre-push] node --test failed." >&2; exit 1; }
