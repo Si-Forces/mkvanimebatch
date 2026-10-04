@@ -7,7 +7,7 @@ Parses, indexes, scores, probes, and executes anime fansub batch extraction and 
 | Canonical Domain Term | Definition | Prohibited Synonyms (Explicitly Avoid) |
 | :--- | :--- | :--- |
 | **Release Directory** | A directory containing video files, subtitle files, chapter XMLs, cover images, and fonts belonging to one anime release. | Folder, package, album |
-| **Asset Resolver** | The service that discovers, indexes, and matches external and embedded assets — subtitles, chapters, covers — to video files across a release and its ancestors. Directory-level font resolution is owned by release preparation. Assets beside the video take strict precedence over ancestor and fallback assets. | Asset finder, index manager, track matcher |
+| **Asset Resolver** | The service that discovers, indexes, and matches external and embedded assets — subtitles, chapters, covers — to video files across a release and its ancestors. It does not choose a release's fonts directory. Assets beside the video take strict precedence over ancestor and fallback assets. | Asset finder, index manager, track matcher |
 | **Episode Info** | The canonical parsed identity of an episode: season, Episode Type, and episode number, with fractional suffixes preserved verbatim. | Episode tag, episode string |
 | **Episode Type** | The closed classification of an episode's place in a release: `Episode`, `Part`, `Ova`, or `Special`. | Kind, category, release type |
 | **Batch Item Info** | The identity of one item participating in a batch — its canonical item ID and file name — as listed in the `BatchStart` Job Event. | File row, item record |
