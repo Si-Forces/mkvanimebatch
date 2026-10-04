@@ -32,6 +32,7 @@ async fn test_extract_dry_run_emits_planned_events() {
     let (summary, events) = run_batch(
         PipelineConfig {
             dry_run: true,
+            no_cache: true,
             workers: 2,
             io_jobs: 1,
             ..config(PipelineMode::Extract, tmp.path())
@@ -225,6 +226,7 @@ async fn test_pipeline_cancellation_drains_items() {
     let (summary, events) = run_batch(
         PipelineConfig {
             dry_run: true,
+            no_cache: true,
             workers: 1,
             ..config(PipelineMode::Extract, tmp.path())
         },
@@ -262,7 +264,11 @@ async fn test_pipeline_with_log_sender() {
     let dir = tempdir().unwrap();
     let (log_sender, mut log_receiver) = create_log_channel(64);
     let pipeline = BatchPipeline::new(
-        config(PipelineMode::Extract, dir.path()),
+        // Explicit, so the test stays off the user's cache even if the empty-batch return moves.
+        PipelineConfig {
+            no_cache: true,
+            ..config(PipelineMode::Extract, dir.path())
+        },
         None,
         CancellationToken::new(),
     )
@@ -290,6 +296,10 @@ async fn test_extract_emits_item_complete_duration_sec() {
                 &[&ep1],
                 &video_metadata("A_FLAC"),
             )),
+            // Keeps the run off the user's default font hash memo.
+            font_hash_memo: Some(Arc::new(parking_lot::Mutex::new(FontHashMemo::new(
+                in_tmp.path().join("font_hash_memo.json"),
+            )))),
             workers: 1,
             io_jobs: 1,
             ..config(PipelineMode::Extract, in_tmp.path())
@@ -423,6 +433,7 @@ async fn test_pipeline_selected_items_filters_and_orders_batch() {
     let (summary, events) = run_batch(
         PipelineConfig {
             dry_run: true,
+            no_cache: true,
             selected_items: Some(vec![
                 "[SubsPlease] Show - 03 (1080p).mkv".into(),
                 "[SubsPlease] Show - 01 (1080p).mkv".into(),
