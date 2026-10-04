@@ -3,6 +3,7 @@
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use mkv_core::manifest::{generate_inspection_manifest, InspectionManifest};
 use mkv_core::pipeline::{create_event_channel, BatchPipeline, CancellationToken, PipelineMode};
@@ -280,7 +281,7 @@ fn normalize_selected_item(raw: &str, input_dir: &Path) -> Result<String, String
 /// Builds the `--plan` manifest, restricted to and ordered by `selected_items` when set.
 async fn generate_plan_manifest(
     request: &BatchRequest,
-    cache: Option<&PersistentInspectCache>,
+    cache: Option<Arc<PersistentInspectCache>>,
     cancel_token: Option<&CancellationToken>,
 ) -> Result<InspectionManifest, String> {
     let manifest = generate_inspection_manifest(&request.input_dir, cache, cancel_token).await?;
@@ -389,7 +390,7 @@ async fn run() -> Result<ExitCode, String> {
     let cache_opt = if args.request.no_cache.unwrap_or(false) {
         None
     } else {
-        Some(&cache)
+        Some(Arc::new(cache))
     };
 
     if args.plan {
