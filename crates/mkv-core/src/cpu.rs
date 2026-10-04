@@ -41,23 +41,32 @@ fn effective_core_count(topology: usize, available: usize) -> usize {
     }
 }
 
+/// Counts the `/proc/cpuinfo` topology, or 0 when the file can't be read or exposes none.
+#[cfg(target_os = "linux")]
+fn topology_core_count() -> usize {
+    std::fs::read_to_string("/proc/cpuinfo")
+        .map(|cpuinfo| parse_cpuinfo_topology(&cpuinfo))
+        .unwrap_or(0)
+}
+
+/// Off Linux there is no topology source.
+#[cfg(not(target_os = "linux"))]
+fn topology_core_count() -> usize {
+    0
+}
+
 /// Returns the number of physical CPU cores the process may use.
 ///
 /// On Linux, counts `/proc/cpuinfo` topology (physical ID and core ID pairs) and caps it at
-/// `std::thread::available_parallelism()`, which honours affinity masks and cgroup quotas.
+/// `std::thread::available_parallelism()`, which accounts for affinity masks and cgroup quotas
+/// where it can read them.
 /// On Windows, macOS, or virtualized/container environments without exposed topology,
 /// returns `available_parallelism()` alone.
 pub(crate) fn physical_core_count() -> usize {
-    #[cfg(target_os = "linux")]
-    let topology = std::fs::read_to_string("/proc/cpuinfo")
-        .map(|cpuinfo| parse_cpuinfo_topology(&cpuinfo))
-        .unwrap_or(0);
-    #[cfg(not(target_os = "linux"))]
-    let topology = 0;
     let available = std::thread::available_parallelism()
         .map(|p| p.get())
         .unwrap_or(4);
-    effective_core_count(topology, available)
+    effective_core_count(topology_core_count(), available)
 }
 
 /// Derives the per-job FFmpeg thread count from physical cores and active batch workers

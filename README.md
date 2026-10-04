@@ -46,7 +46,7 @@ Available both as a standalone **CLI binary (`mkv-cli`)** and as a **Tauri v2 de
 * **Dialogue Priority**: Scores audio tracks, preferring Japanese (stereo dialogue, then stereo, then any channel layout), then undetermined-language tracks, then other stereo tracks.
 * **Commentary Track Isolation**: Tracks whose names look like commentary or audio description are considered only when every audio track looks like one.
 * **FLAC to Opus**: A selected FLAC audio track is transcoded to Opus with FFmpeg; other codecs are kept as-is. Preset Profiles (`balanced`, `fast`, `hifi`, `custom`) set the Opus bitrate and complexity.
-* **Automatic Thread Governance**: Per-job FFmpeg threads default to `auto`: `(cores / workers)` clamped to 1–4, where cores are physical cores from `/proc/cpuinfo` on Linux, capped at the available parallelism (which honours cgroup CPU quotas and affinity); the available parallelism elsewhere (ADR-0013).
+* **Automatic Thread Governance**: Per-job FFmpeg threads default to `auto`: `(cores / workers)` clamped to 1–4, where cores are physical cores from `/proc/cpuinfo` on Linux, capped at the available parallelism (which accounts for cgroup CPU quotas and affinity where it can read them); the available parallelism elsewhere (ADR-0013).
 
 ### Transactional Font Registry & Asset Deduplication
 * **Embedded Font Detection**: Identifies font attachments by filename extension or MIME type.
@@ -140,7 +140,7 @@ Download `mkv-cli` from [GitHub Releases](https://github.com/sifahaz/mkvanimebat
 | `--selected-item <PATH>` | Select one video file to process (repeatable, literal path; safe for filenames with commas) | None (all discovered files) |
 | `--selected-items <LIST>` | Comma-separated list of video files to process (repeatable; trims whitespace and drops empty segments) | None (all discovered files) |
 | `--sub-offset <SEC>` | Subtitle timestamp sync offset in seconds (e.g. `1.5`, `-0.5`) | `0.0` |
-| `--workers <N>` | Number of concurrent worker tasks (1–64) | Core count clamped to 1–16 |
+| `--workers <N>` | Number of concurrent worker tasks (1–64) | Physical cores, capped at the available parallelism, clamped to 1–16 |
 | `--io-jobs <N>` | Concurrency limit for disk-heavy work (0–64; `0` uses the worker count) | `2` |
 | `--ffmpeg-threads <N\|auto>` | CPU threads per audio transcode job (1–32); `auto` is case-insensitive | `auto`: `(cores / workers)` clamped to 1–4 |
 | `--bitrate <RATE>` | Opus bitrate: a positive integer with an optional `k`/`K` or `M` suffix (e.g. `128k`, `192K`); lowercase `m` is rejected | Preset bitrate, else `192k` |
@@ -160,7 +160,7 @@ Exit codes: `0` on success; `1` on an argument or validation error, when any fil
 
 ### 3. Concurrency & Performance Tuning
 
-* **`--workers`**: Governs overall concurrency (number of episodes in flight). Defaults to the core count clamped to 1–16: physical cores from `/proc/cpuinfo` on Linux, capped at the available parallelism (which honours cgroup CPU quotas and affinity); the available parallelism elsewhere (see `crates/mkv-core/src/cpu.rs`).
+* **`--workers`**: Governs overall concurrency (number of episodes in flight). Defaults to the core count clamped to 1–16: physical cores from `/proc/cpuinfo` on Linux, capped at the available parallelism (which accounts for cgroup CPU quotas and affinity where it can read them); the available parallelism elsewhere (see `crates/mkv-core/src/cpu.rs`).
 * **`--io-jobs`**: Caps how many workers run disk-heavy work at once. Keeping `--io-jobs 2` prevents head thrashing on spinning hard drives (HDDs), while SSD/NVMe drives can scale to `4`–`8`. `0` sets the cap to the worker count.
 * **`--ffmpeg-threads`**: Defaults to `auto`, deriving per-job threads as `(cores / workers)` clamped to 1–4 (ADR-0013). Set an explicit value to override the governor.
 * **Queue Scoping & Ordering**: Specifying `--selected-item` or `--selected-items` restricts execution to the selected episodes in the exact specified order, running up to `--workers` concurrently across the active selection (ADR-0011, ADR-0014). Every selected item must be a discovered MKV file, otherwise the whole run fails.
