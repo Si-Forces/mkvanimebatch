@@ -6,7 +6,7 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 
-use tauri::State;
+use tauri::{AppHandle, Manager, Runtime};
 
 pub struct JobSlot {
     pub(crate) id: u64,
@@ -425,7 +425,7 @@ fn combine_errors(errors: impl IntoIterator<Item = Option<String>>) -> Result<()
     }
 }
 
-fn stop_job_inner(
+pub(crate) fn stop_job_inner(
     state: &JobState,
     scan_state: &ScanState,
     job_id: Option<u64>,
@@ -444,12 +444,25 @@ fn stop_job_inner(
 }
 
 #[tauri::command]
-pub fn stop_job(
-    state: State<'_, JobState>,
-    scan_state: State<'_, ScanState>,
-    job_id: Option<u64>,
+pub async fn stop_job(app: AppHandle, job_id: Option<u64>) -> Result<(), String> {
+    run_teardown(app, move |state, scan_state| {
+        stop_job_inner(state, scan_state, job_id)
+    })
+    .await
+}
+
+/// Runs a sync teardown on the blocking pool. A sync command would run it on the main thread and
+/// freeze the window; a plain async one would park a Tokio worker the supervisor needs. The
+/// states are read through `app` because `State<'_>` is not `'static`.
+pub(crate) async fn run_teardown<R: Runtime>(
+    app: AppHandle<R>,
+    teardown: impl FnOnce(&JobState, &ScanState) -> Result<(), String> + Send + 'static,
 ) -> Result<(), String> {
-    stop_job_inner(&state, &scan_state, job_id)
+    tauri::async_runtime::spawn_blocking(move || {
+        teardown(&app.state::<JobState>(), &app.state::<ScanState>())
+    })
+    .await
+    .map_err(|error| format!("Async runtime error: {error}"))?
 }
 
 fn stop_scan(state: &ScanState) -> Result<(), String> {
@@ -570,21 +583,19 @@ pub fn cancel_shutdown(job_state: &JobState, scan_state: &ScanState) {
     scan_state.accepting_starts.store(true, Ordering::SeqCst);
 }
 
+/// Allowed while a Stop is pending: both cancel the same token and wait on the same slot, and a
+/// second abort is a no-op.
 #[tauri::command]
-pub fn close_window(
-    window: tauri::Window,
-    state: State<'_, JobState>,
-    scan_state: State<'_, ScanState>,
-) -> Result<(), String> {
+pub async fn close_window(window: tauri::Window, app: AppHandle) -> Result<(), String> {
+    // Refuse starts before the blocking-pool hop, so a `run_job` that lands while the pool
+    // schedules the teardown is refused instead of starting a job the teardown then cancels. One
+    // async hop remains: this body runs on a Tokio task, not at dispatch.
+    let (state, scan_state) = (app.state::<JobState>(), app.state::<ScanState>());
     begin_shutdown(&state, &scan_state);
-    if let Err(error) = cleanup_owned_processes(&state, &scan_state) {
-        cancel_shutdown(&state, &scan_state);
-        return Err(error);
-    }
-    window.close().map_err(|error| {
-        cancel_shutdown(&state, &scan_state);
-        error.to_string()
-    })
+    run_teardown(app.clone(), cleanup_owned_processes)
+        .await
+        .and_then(|()| window.close().map_err(|error| error.to_string()))
+        .inspect_err(|_| cancel_shutdown(&state, &scan_state))
 }
 
 #[cfg(test)]
@@ -981,6 +992,38 @@ mod tests {
 
         assert!(error.contains("Timed out"));
         assert!(error.contains("Job cleanup failed"));
+    }
+
+    #[test]
+    fn test_teardown_leaves_the_calling_runtime_free_while_it_waits() {
+        let app = tauri::test::mock_app();
+        app.manage(JobState::default());
+        app.manage(ScanState::default());
+        // Nothing releases this slot, so the teardown waits out both phases.
+        *app.state::<JobState>().slot.lock().unwrap() = Some(dummy_slot(42));
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let result = runtime.block_on(async {
+            let mut teardown =
+                std::pin::pin!(run_teardown(app.handle().clone(), |state, scan_state| {
+                    cleanup_owned_processes_with_timeout(
+                        state,
+                        scan_state,
+                        Duration::from_millis(200),
+                    )
+                }));
+            // A teardown that blocked this thread would return before the timer could fire.
+            tokio::select! {
+                _ = &mut teardown => panic!("teardown returned before the runtime's timer fired"),
+                () = tokio::time::sleep(Duration::from_millis(50)) => {}
+            }
+            teardown.await
+        });
+
+        assert!(result.unwrap_err().contains("Timed out"));
     }
 
     #[test]

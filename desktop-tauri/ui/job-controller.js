@@ -366,11 +366,12 @@ export class JobController {
         this.jobId = jobId;
       }
       const jobId = this.jobId;
-      await this.runtime.invoke("stop_job", { jobId });
-      if (!this.running || generation !== this.startGeneration || this.jobId !== jobId) return;
+      // stop_job resolves only once teardown is over, so announce the wait first.
       if (this.launched) {
         this.runtime.appendLog(this.logEl, "[INFO] Stop requested; waiting for shutdown.");
       }
+      await this.runtime.invoke("stop_job", { jobId });
+      if (!this.running || generation !== this.startGeneration || this.jobId !== jobId) return;
     } catch (err) {
       if (!this.running || generation !== this.startGeneration) return;
       this.runtime.appendLog(this.logEl, `[ERROR] ${err}`);

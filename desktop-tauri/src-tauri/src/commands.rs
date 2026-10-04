@@ -434,9 +434,11 @@ pub fn get_job_snapshot(state: State<'_, JobState>) -> Result<Option<JobSnapshot
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::process::stop_job_internal;
     use crate::process::test_support::{batch_complete, batch_start, item_progress, item_start};
     use crate::process::ItemStatus;
+    use crate::process::{
+        cleanup_owned_processes_with_timeout, run_teardown, stop_job_inner, stop_job_internal,
+    };
     use serde_json::Value;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
@@ -755,6 +757,39 @@ mod tests {
         let terminal = terminal_for(&events, job_id);
         assert_eq!(terminal["cancelled"], true);
         assert!(terminal["source"].is_null());
+        assert_eq!(done_for(&dones, job_id)["code"], -1);
+    }
+
+    #[test]
+    fn close_during_a_pending_stop_settles_the_job_once() {
+        let (app, events, dones, _) = observed_app();
+        app.manage(ScanState::default());
+        let (event_tx, event_rx) = mkv_core::pipeline::create_event_channel(64);
+        let (_, log_rx) = mkv_core::pipeline::create_log_channel(8);
+        // Ignores its cancel token, so only an abort ends it.
+        let worker = async move {
+            event_tx.send(batch_start(&["ep1"])).await.unwrap();
+            std::future::pending::<Result<PipelineSummary, String>>().await
+        };
+        let token = CancellationToken::new();
+        let job_id = start_remux(&app, token.clone(), event_rx, log_rx, worker);
+
+        let start = Instant::now();
+        let stop = tauri::async_runtime::spawn(run_teardown(
+            app.handle().clone(),
+            move |state, scan_state| stop_job_inner(state, scan_state, Some(job_id)),
+        ));
+        poll_until("Stop never cancelled the job", || token.is_cancelled());
+        let close = run_teardown(app.handle().clone(), |state, scan_state| {
+            cleanup_owned_processes_with_timeout(state, scan_state, Duration::from_millis(200))
+        });
+
+        assert_eq!(tauri::async_runtime::block_on(close), Ok(()));
+        assert_eq!(tauri::async_runtime::block_on(stop).unwrap(), Ok(()));
+        // Close's abort, not Stop's own deadline, ended the wait for both.
+        assert!(start.elapsed() < Duration::from_secs(2));
+        assert!(!app.state::<JobState>().is_active());
+        assert_eq!(terminal_for(&events, job_id)["cancelled"], true);
         assert_eq!(done_for(&dones, job_id)["code"], -1);
     }
 
