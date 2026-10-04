@@ -90,6 +90,24 @@ fn test_chap_index_cross_dir_duplicate_kept_first() {
 }
 
 #[test]
+fn test_discover_scan_cache_hit_keeps_chapter_without_resniffing() {
+    let tmp = tempdir().unwrap();
+    let xml_path = tmp.path().join("Show - 01_chapters.xml");
+    fs::write(&xml_path, CHAPTER_XML).unwrap();
+    let search_dirs = [tmp.path().to_path_buf()];
+    let episode = EpisodeInfo::new("", "E", "01");
+    let mut scan_cache = HashMap::new();
+
+    let first = AssetResolver::discover(&search_dirs, None, Some(&mut scan_cache), None);
+    assert_eq!(first.chap_index.lookup(&episode), Some(xml_path.clone()));
+
+    // The file no longer sniffs as chapter XML; a cache hit must not read it again.
+    fs::write(&xml_path, b"<?xml version='1.0'?><Tags></Tags>").unwrap();
+    let second = AssetResolver::discover(&search_dirs, None, Some(&mut scan_cache), None);
+    assert_eq!(second.chap_index.lookup(&episode), Some(xml_path));
+}
+
+#[test]
 fn test_cover_index_directory_cover() {
     let tmp = tempdir().unwrap();
     let cover_path = tmp.path().join("cover.jpg");
