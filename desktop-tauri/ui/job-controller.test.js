@@ -525,6 +525,27 @@ test("restored controller filters IDs, targets Stop, and releases controls on co
   assert.equal(removed, 2);
 });
 
+test("Stop logs the shutdown wait before stop_job resolves", async t => {
+  installDocument(t, new Map());
+  const logs = [];
+  let resolveStop;
+  const tracker = { state: { items: new Map() }, finalize() {} };
+  const runtime = makeRuntime(tracker, {
+    appendLog: (_el, line) => logs.push(line),
+    invoke: () => new Promise(resolve => { resolveStop = resolve; }),
+  });
+  const controller = new JobController("remux", runtime);
+  controller.restoreActiveSnapshot({ job_id: 24, status: "running" }, () => {}, () => {});
+
+  const stopping = controller.stop();
+  assert.equal(typeof resolveStop, "function", "stop_job must be pending");
+  assert.deepEqual(logs, ["[INFO] Stop requested; waiting for shutdown."]);
+
+  resolveStop();
+  await stopping;
+  assert.equal(logs.length, 1);
+});
+
 /** A controller restored onto running job 24 whose `stop_job` call rejects on demand. */
 function restoredControllerWithPendingStop(t) {
   installDocument(t, new Map());
