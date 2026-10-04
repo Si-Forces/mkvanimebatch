@@ -46,7 +46,7 @@ Available both as a standalone **CLI binary (`mkv-cli`)** and as a **Tauri v2 de
 * **Dialogue Priority**: Scores audio tracks, preferring Japanese (stereo dialogue, then stereo, then any channel layout), then undetermined-language tracks, then other stereo tracks.
 * **Commentary Track Isolation**: Tracks whose names look like commentary or audio description are considered only when every audio track looks like one.
 * **FLAC to Opus**: A selected FLAC audio track is transcoded to Opus with FFmpeg; other codecs are kept as-is. Preset Profiles (`balanced`, `fast`, `hifi`, `custom`) set the Opus bitrate and complexity.
-* **Automatic Thread Governance**: Per-job FFmpeg threads default to `auto`: `(cores / workers)` clamped to 1–4, where cores are physical cores from `/proc/cpuinfo` on Linux, capped at the available parallelism (which honours cgroup CPU quotas and affinity), and the available parallelism elsewhere (ADR-0013).
+* **Automatic Thread Governance**: Per-job FFmpeg threads default to `auto`: `(cores / workers)` clamped to 1–4, where cores are physical cores from `/proc/cpuinfo` on Linux, capped at the available parallelism (which honours cgroup CPU quotas and affinity); the available parallelism elsewhere (ADR-0013).
 
 ### Transactional Font Registry & Asset Deduplication
 * **Embedded Font Detection**: Identifies font attachments by filename extension or MIME type.

@@ -1,6 +1,6 @@
 # 0013. Asynchronous Probing and Transcode Governance Performance Overhaul
 
-> **Status**: Accepted (amended 2026-10-02)
+> **Status**: Accepted (amended 2026-10-02, 2026-10-04)
 > **Date**: 2026-09-21
 > **Context**: Media Engine Context & In-Process Engine Bridge
 > **Amends**: ADR-0006, ADR-0008, ADR-0011
@@ -256,10 +256,11 @@ Amendment 7.
 `BatchRequest::into_pipeline_config`; `default_workers` by `into_pipeline_config` and by
 `manifest::generate_inspection_manifest`; `probe_concurrency` by
 `manifest::generate_inspection_manifest` and by `pipeline.rs` (Amendment 6). "Physical cores" means
-unique `(physical id, core id)` pairs from `/proc/cpuinfo` on Linux, capped at
-`std::thread::available_parallelism()` so cgroup CPU quotas and affinity masks lower it;
-elsewhere, or when that file exposes no topology, it is `available_parallelism()` alone.
-(Resolved 2026-10-04, #29.)
+unique `(physical id, core id)` pairs from `/proc/cpuinfo` on Linux; elsewhere, or
+when that file exposes no topology, it is `std::thread::available_parallelism()`.
+Note that `/proc/cpuinfo` reflects host topology without detecting cgroup quota limits;
+containers with fractional or restricted CPU quotas may run with higher concurrency
+defaults unless `--workers` is explicitly specified. Resolved by Amendment 8 (#29).
 
 **Memo keys and growth (Amendment 1).** The memo is keyed by the font path as the caller
 spelled it (`to_string_lossy`), which is absolute only when the fonts directory is; a relative
@@ -412,3 +413,27 @@ store around each probe (`get_path` / `put_path`, a `metadata()` stat) also stay
 on a `current_thread` runtime still fires. It fails without the offload and passes with it.
 Because this test shells out to `mkfifo`, the reason Amendment 3's **Coverage.** gives for not
 testing the FIFO half of the seeding rule no longer holds; that test is still not written.
+
+## Amendment 8 — 2026-10-04 (physical cores capped at available parallelism)
+
+**Decision.** "Physical cores" (`cpu::physical_core_count`) is the number of unique `(physical
+id, core id)` pairs from `/proc/cpuinfo` on Linux, capped at
+`std::thread::available_parallelism()`; elsewhere, or when that file cannot be read or exposes
+no topology, it is `available_parallelism()` alone. If `available_parallelism()` fails, 4 stands
+in for it in both cases. This replaces Amendment 4's definition and resolves its cgroup caveat.
+On Linux, `available_parallelism()` takes the cgroup v1/v2 CPU quota and the `sched_getaffinity`
+mask into account where it can read them, so on a host with 16 physical cores a 2-CPU container,
+or `taskset -c 0,1`, now counts 2 instead of 16. On an unconstrained host the count is
+unchanged, so the sizing intent of the transcode governor and of `default_workers` holds. Every
+default derived from it follows: `--workers` when unset, `auto` FFmpeg threads, and probe
+concurrency in preflight and, when workers are defaulted, in execution. The desktop app sets
+workers itself (8, #35), so there only the FFmpeg threads and preflight probe concurrency
+follow.
+
+**Accepted imprecision.** Pinned to two hyperthread siblings of one core, the count is 2.
+Counting only the physical cores inside the affinity mask would need a new crate to read it
+(`unsafe_code` is forbidden), and would still need the cap for cgroup quotas.
+
+**Coverage.** `test_effective_core_count_caps_topology_at_available` covers the pure
+`effective_core_count(topology, available)`: (16, 2) → 2, (8, 16) → 8, (0, 4) → 4.
+`physical_core_count` only reads the host and calls it, so it has no test of its own.
