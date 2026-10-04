@@ -262,11 +262,10 @@ fn test_scan_assets_grouping() {
     )
     .unwrap();
     fs::write(dir.join("cover.jpg"), b"cover").unwrap();
+    fs::write(dir.join("Show - 01.png"), b"episode cover").unwrap();
     fs::write(dir.join("ignored.txt"), b"ignored").unwrap();
 
     let scan = scan_assets(&dir, None);
-    assert_eq!(scan.videos.len(), 1);
-    assert_eq!(scan.videos[0].name, "Show - 01.mkv");
 
     assert_eq!(scan.subs.len(), 1);
     assert_eq!(scan.subs[0].name, "Show - 01.ass");
@@ -274,8 +273,10 @@ fn test_scan_assets_grouping() {
     assert_eq!(scan.chapters.len(), 1);
     assert_eq!(scan.chapters[0].name, "Show - 01_chapters.xml");
 
-    assert_eq!(scan.covers.len(), 1);
+    // Videos are not reported, but the video's stem makes its bare-stem image an Episode Cover.
+    assert_eq!(scan.covers.len(), 2);
     assert_eq!(scan.covers[0].name, "cover.jpg");
+    assert_eq!(scan.covers[1].name, "Show - 01.png");
 }
 
 #[test]

@@ -365,7 +365,6 @@ pub fn create_parsed_file(path: impl Into<PathBuf>) -> ParsedFile {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ScanResults {
-    pub videos: Vec<ParsedFile>,
     pub subs: Vec<ParsedFile>,
     pub chapters: Vec<ParsedFile>,
     pub covers: Vec<ParsedFile>,
@@ -382,8 +381,8 @@ pub struct ScanCache {
     results: HashMap<PathBuf, Arc<ScanResults>>,
 }
 
-/// Scans directory entries, grouping files into videos (.mkv), subs (.ass, .srt),
-/// chapters (.xml verified via `is_chapter_xml`), and applicable cover images.
+/// Scans directory entries, grouping files into subs (.ass, .srt), chapters (.xml verified
+/// via `is_chapter_xml`), and cover images applicable to the directory's videos (.mkv).
 pub fn scan_assets(dir: &Path, mut cache: Option<&mut ScanCache>) -> Arc<ScanResults> {
     let canonical = match cache.as_deref_mut() {
         Some(c) => {
@@ -406,7 +405,8 @@ pub fn scan_assets(dir: &Path, mut cache: Option<&mut ScanCache>) -> Arc<ScanRes
         None => None,
     };
 
-    let mut videos = Vec::new();
+    // Videos only decide which bare-stem images are Episode Covers, so only their stems are kept.
+    let mut video_stems = HashSet::new();
     let mut subs = Vec::new();
     let mut chapters = Vec::new();
     let mut covers = Vec::new();
@@ -428,7 +428,9 @@ pub fn scan_assets(dir: &Path, mut cache: Option<&mut ScanCache>) -> Arc<ScanRes
             let ext = path_ext_lower(&path);
 
             if ext == ".mkv" {
-                videos.push(create_parsed_file(&path));
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    video_stems.insert(stem.to_owned());
+                }
             } else if ext == ".ass" || ext == ".srt" {
                 subs.push(create_parsed_file(&path));
             } else if ext == ".xml" && is_chapter_xml(&path) {
@@ -438,7 +440,6 @@ pub fn scan_assets(dir: &Path, mut cache: Option<&mut ScanCache>) -> Arc<ScanRes
             }
         }
     }
-    let video_stems: HashSet<&str> = videos.iter().map(|v| v.stem.as_str()).collect();
     for path in cover_candidates {
         let Some(stem) = path.file_stem().and_then(|name| name.to_str()) else {
             continue;
@@ -455,13 +456,11 @@ pub fn scan_assets(dir: &Path, mut cache: Option<&mut ScanCache>) -> Arc<ScanRes
         }
     }
 
-    videos.sort_by_cached_key(|a| natural_sort_key(&a.name));
     subs.sort_by_cached_key(|a| natural_sort_key(&a.name));
     chapters.sort_by_cached_key(|a| natural_sort_key(&a.name));
     covers.sort_by_cached_key(|a| natural_sort_key(&a.name));
 
     let result = Arc::new(ScanResults {
-        videos,
         subs,
         chapters,
         covers,
