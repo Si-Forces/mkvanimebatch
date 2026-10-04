@@ -316,6 +316,33 @@ fn cancelled<T>(cache: Option<&PersistentInspectCache>) -> Result<T, String> {
     Err(CANCELLED_ERROR.to_string())
 }
 
+/// Lists the subtitle IDs of each directory that has any. The scan is synchronous file I/O with
+/// no `.await`, so `cancel_token` is checked before each directory; returns `None` once it is
+/// cancelled.
+fn list_subtitles_by_dir(
+    directories: &HashSet<PathBuf>,
+    input_dir: &Path,
+    cancel_token: Option<&CancellationToken>,
+) -> Option<HashMap<PathBuf, Vec<String>>> {
+    let mut scan_cache = ScanCache::default();
+    let mut subs_by_dir = HashMap::new();
+    for directory in directories {
+        if is_cancelled(cancel_token) {
+            return None;
+        }
+        let assets = scan_assets(directory, Some(&mut scan_cache));
+        let ids: Vec<String> = assets
+            .subs
+            .iter()
+            .map(|s| get_item_id(&s.path, input_dir))
+            .collect();
+        if !ids.is_empty() {
+            subs_by_dir.insert(directory.clone(), ids);
+        }
+    }
+    Some(subs_by_dir)
+}
+
 /// Generates a complete preflight inspection manifest for an anime batch directory.
 pub async fn generate_inspection_manifest(
     input_dir: &Path,
@@ -341,7 +368,6 @@ pub async fn generate_inspection_manifest(
         .filter_map(|video| video.path.parent().map(Path::to_path_buf))
         .collect();
 
-    let mut scan_cache = ScanCache::default();
     let mut release_by_dir = HashMap::<PathBuf, String>::new();
     let mut subtitle_candidates = BTreeMap::<String, Vec<String>>::new();
 
@@ -350,18 +376,10 @@ pub async fn generate_inspection_manifest(
         .iter()
         .flat_map(|mkv_dir| ancestor_dirs(mkv_dir, input_dir))
         .collect();
-    let mut subs_by_dir: HashMap<PathBuf, Vec<String>> = HashMap::new();
-    for directory in &all_ancestor_dirs {
-        let assets = scan_assets(directory, Some(&mut scan_cache));
-        let ids: Vec<String> = assets
-            .subs
-            .iter()
-            .map(|s| get_item_id(&s.path, input_dir))
-            .collect();
-        if !ids.is_empty() {
-            subs_by_dir.insert(directory.clone(), ids);
-        }
-    }
+    let Some(subs_by_dir) = list_subtitles_by_dir(&all_ancestor_dirs, input_dir, cancel_token)
+    else {
+        return cancelled(persistent_cache.as_deref());
+    };
 
     for mkv_dir in &release_dirs {
         let release = get_item_id(mkv_dir, input_dir);
@@ -663,6 +681,24 @@ mod tests {
         token.cancel();
         let res = generate_inspection_manifest(temp_dir.path(), None, Some(&token)).await;
         assert_eq!(res.unwrap_err(), CANCELLED_ERROR);
+    }
+
+    #[test]
+    fn test_subtitle_listing_stops_before_a_directory_once_cancelled() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let input_dir = temp_dir.path();
+        std::fs::write(input_dir.join("ep01.ass"), b"sub").unwrap();
+        let directories = HashSet::from([input_dir.to_path_buf()]);
+        let token = CancellationToken::new();
+
+        let subs = list_subtitles_by_dir(&directories, input_dir, Some(&token));
+        assert_eq!(
+            subs.and_then(|mut by_dir| by_dir.remove(input_dir)),
+            Some(vec!["ep01.ass".to_string()])
+        );
+
+        token.cancel();
+        assert!(list_subtitles_by_dir(&directories, input_dir, Some(&token)).is_none());
     }
 
     fn make_test_item(id: &str, name: &str, release: &str) -> ManifestItem {
