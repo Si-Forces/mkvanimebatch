@@ -1,6 +1,9 @@
 use std::sync::Mutex;
 
-use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+use sysinfo::{
+    CpuRefreshKind, MemoryRefreshKind, Pid, ProcessRefreshKind, ProcessesToUpdate, RefreshKind,
+    System,
+};
 use tauri::{AppHandle, Manager};
 
 pub struct TelemetryState {
@@ -18,7 +21,13 @@ impl Default for TelemetryState {
     fn default() -> Self {
         Self {
             inner: Mutex::new(TelemetryInner {
-                sys: System::new_all(),
+                // CPU usage needs a baseline for the first poll to diff against; the process
+                // map fills on the first poll, which runs off the main thread.
+                sys: System::new_with_specifics(
+                    RefreshKind::nothing()
+                        .with_cpu(CpuRefreshKind::everything())
+                        .with_memory(MemoryRefreshKind::everything()),
+                ),
                 last_poll: None,
             }),
         }
