@@ -256,11 +256,10 @@ Amendment 7.
 `BatchRequest::into_pipeline_config`; `default_workers` by `into_pipeline_config` and by
 `manifest::generate_inspection_manifest`; `probe_concurrency` by
 `manifest::generate_inspection_manifest` and by `pipeline.rs` (Amendment 6). "Physical cores" means
-unique `(physical id, core id)` pairs from `/proc/cpuinfo` on Linux; elsewhere, or
-when that file exposes no topology, it is `std::thread::available_parallelism()`.
-Note that `/proc/cpuinfo` reflects host topology without detecting cgroup quota limits;
-containers with fractional or restricted CPU quotas may run with higher concurrency
-defaults unless `--workers` is explicitly specified.
+unique `(physical id, core id)` pairs from `/proc/cpuinfo` on Linux, capped at
+`std::thread::available_parallelism()` so cgroup CPU quotas and affinity masks lower it;
+elsewhere, or when that file exposes no topology, it is `available_parallelism()` alone.
+(Resolved 2026-10-04, #29.)
 
 **Memo keys and growth (Amendment 1).** The memo is keyed by the font path as the caller
 spelled it (`to_string_lossy`), which is absolute only when the fonts directory is; a relative

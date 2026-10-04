@@ -46,7 +46,7 @@ Available both as a standalone **CLI binary (`mkv-cli`)** and as a **Tauri v2 de
 * **Dialogue Priority**: Scores audio tracks, preferring Japanese (stereo dialogue, then stereo, then any channel layout), then undetermined-language tracks, then other stereo tracks.
 * **Commentary Track Isolation**: Tracks whose names look like commentary or audio description are considered only when every audio track looks like one.
 * **FLAC to Opus**: A selected FLAC audio track is transcoded to Opus with FFmpeg; other codecs are kept as-is. Preset Profiles (`balanced`, `fast`, `hifi`, `custom`) set the Opus bitrate and complexity.
-* **Automatic Thread Governance**: Per-job FFmpeg threads default to `auto`: `(cores / workers)` clamped to 1–4, where cores are physical cores from `/proc/cpuinfo` on Linux and the available parallelism elsewhere (ADR-0013).
+* **Automatic Thread Governance**: Per-job FFmpeg threads default to `auto`: `(cores / workers)` clamped to 1–4, where cores are physical cores from `/proc/cpuinfo` on Linux, capped at the available parallelism (which honours cgroup CPU quotas and affinity), and the available parallelism elsewhere (ADR-0013).
 
 ### Transactional Font Registry & Asset Deduplication
 * **Embedded Font Detection**: Identifies font attachments by filename extension or MIME type.
@@ -160,7 +160,7 @@ Exit codes: `0` on success; `1` on an argument or validation error, when any fil
 
 ### 3. Concurrency & Performance Tuning
 
-* **`--workers`**: Governs overall concurrency (number of episodes in flight). Defaults to the core count clamped to 1–16: physical cores from `/proc/cpuinfo` on Linux, the available parallelism elsewhere (see `crates/mkv-core/src/cpu.rs`).
+* **`--workers`**: Governs overall concurrency (number of episodes in flight). Defaults to the core count clamped to 1–16: physical cores from `/proc/cpuinfo` on Linux, capped at the available parallelism (which honours cgroup CPU quotas and affinity); the available parallelism elsewhere (see `crates/mkv-core/src/cpu.rs`).
 * **`--io-jobs`**: Caps how many workers run disk-heavy work at once. Keeping `--io-jobs 2` prevents head thrashing on spinning hard drives (HDDs), while SSD/NVMe drives can scale to `4`–`8`. `0` sets the cap to the worker count.
 * **`--ffmpeg-threads`**: Defaults to `auto`, deriving per-job threads as `(cores / workers)` clamped to 1–4 (ADR-0013). Set an explicit value to override the governor.
 * **Queue Scoping & Ordering**: Specifying `--selected-item` or `--selected-items` restricts execution to the selected episodes in the exact specified order, running up to `--workers` concurrently across the active selection (ADR-0011, ADR-0014). Every selected item must be a discovered MKV file, otherwise the whole run fails.
