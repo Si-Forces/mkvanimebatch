@@ -525,19 +525,43 @@ test("restored controller filters IDs, targets Stop, and releases controls on co
   assert.equal(removed, 2);
 });
 
-/** A controller restored onto running job 24 whose `stop_job` call rejects on demand. */
-function restoredControllerWithPendingStop(t) {
+test("Stop logs the shutdown wait before stop_job resolves", async t => {
+  const logs = [];
+  const { stopping, resolveStop } = restoredControllerWithPendingStop(t, {
+    appendLog: (_el, line) => logs.push(line),
+  });
+
+  assert.deepEqual(logs, ["[INFO] Stop requested; waiting for shutdown."]);
+
+  resolveStop();
+  await stopping;
+  assert.equal(logs.length, 1);
+});
+
+/** A controller restored onto running job 24 whose `stop_job` call settles on demand. */
+function restoredControllerWithPendingStop(t, runtimeOverrides = {}) {
   installDocument(t, new Map());
+  let resolveStop;
   let rejectStop;
-  const stopPromise = new Promise((_, reject) => { rejectStop = reject; });
+  const stopPromise = new Promise((resolve, reject) => {
+    resolveStop = resolve;
+    rejectStop = reject;
+  });
   const tracker = {
     state: { items: new Map(), batchSuccess: false },
     finalize(code, cancelled) { this.state.batchSuccess = code === 0 && !cancelled; },
   };
-  const runtime = makeRuntime(tracker, { invoke: async () => stopPromise });
+  const runtime = makeRuntime(tracker, { invoke: async () => stopPromise, ...runtimeOverrides });
   const controller = new JobController("remux", runtime);
   controller.restoreActiveSnapshot({ job_id: 24, status: "running" }, () => {}, () => {});
-  return { controller, tracker, coordinator: runtime.coordinator, stopping: controller.stop(), rejectStop };
+  return {
+    controller,
+    tracker,
+    coordinator: runtime.coordinator,
+    stopping: controller.stop(),
+    resolveStop,
+    rejectStop,
+  };
 }
 
 test("a rejected Stop with no terminal yet reports the job as still running, then settles on job-done", async t => {
