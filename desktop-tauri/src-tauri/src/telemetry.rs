@@ -1,9 +1,10 @@
 use std::sync::Mutex;
 
-use sysinfo::{Pid, ProcessesToUpdate, System};
-use tauri::State;
-
-use crate::process::{JobState, ScanState};
+use sysinfo::{
+    CpuRefreshKind, MemoryRefreshKind, Pid, ProcessRefreshKind, ProcessesToUpdate, RefreshKind,
+    System,
+};
+use tauri::{AppHandle, Manager};
 
 pub struct TelemetryState {
     inner: Mutex<TelemetryInner>,
@@ -20,7 +21,13 @@ impl Default for TelemetryState {
     fn default() -> Self {
         Self {
             inner: Mutex::new(TelemetryInner {
-                sys: System::new_all(),
+                // CPU usage needs a baseline for the first poll to diff against; the process
+                // map fills on the first poll, which runs off the main thread.
+                sys: System::new_with_specifics(
+                    RefreshKind::nothing()
+                        .with_cpu(CpuRefreshKind::everything())
+                        .with_memory(MemoryRefreshKind::everything()),
+                ),
                 last_poll: None,
             }),
         }
@@ -69,26 +76,35 @@ fn is_engine_process(
     parent_fn(pid) == Some(self_pid)
 }
 
+/// Runs the poll on the blocking pool: a sync command would walk every process on the main
+/// thread, and a plain async one would block a Tokio worker the engine's tasks run on. The state
+/// is read through `app` because `State<'_>` is not `'static`.
 #[tauri::command]
-pub fn get_system_telemetry(
-    state: State<'_, TelemetryState>,
-    job_state: State<'_, JobState>,
-    scan_state: State<'_, ScanState>,
-) -> Result<TelemetryData, String> {
-    let mut guard = state.inner.lock().map_err(|e| e.to_string())?;
-    let TelemetryInner { sys, last_poll } = &mut *guard;
-    let self_pid = Pid::from_u32(std::process::id());
+pub async fn get_system_telemetry(app: AppHandle) -> Result<TelemetryData, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<TelemetryState>();
+        let mut guard = state.inner.lock().map_err(|e| e.to_string())?;
+        Ok(poll(&mut guard, Pid::from_u32(std::process::id())))
+    })
+    .await
+    .map_err(|error| format!("Async runtime error: {error}"))?
+}
 
-    let has_active_job = job_state.is_active() || scan_state.is_active();
+/// Samples CPU, memory, and the engine write rate since the previous poll.
+fn poll(inner: &mut TelemetryInner, self_pid: Pid) -> TelemetryData {
+    let TelemetryInner { sys, last_poll } = inner;
 
     sys.refresh_cpu_all();
     sys.refresh_memory();
 
-    if has_active_job {
-        sys.refresh_processes(ProcessesToUpdate::All, false);
-    } else {
-        sys.refresh_processes(ProcessesToUpdate::Some(&[self_pid]), true);
-    }
+    // Every poll refreshes all processes, but only their disk usage: name and parent are set
+    // without asking. Dead processes are dropped, or an exited child would stay in the map and
+    // its last write delta would be counted again on every poll.
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing().with_disk_usage(),
+    );
 
     let mut written_window = 0u64;
     for (pid, process) in sys.processes() {
@@ -129,13 +145,13 @@ pub fn get_system_telemetry(
     };
     *last_poll = Some(std::time::Instant::now());
 
-    Ok(TelemetryData {
+    TelemetryData {
         cpu_pct,
         ram_used_mb: ram_used,
         ram_total_mb: ram_total,
         ram_pct,
         io_mb_s,
-    })
+    }
 }
 
 #[cfg(test)]
@@ -211,5 +227,67 @@ mod tests {
             parent_fn,
             self_pid
         ));
+    }
+
+    /// An exited child must leave the process map once reaped, or its last write delta would be
+    /// counted on every later poll and the map would grow with every media tool a batch runs.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_poll_drops_reaped_child_processes() {
+        let mut inner = TelemetryInner {
+            sys: System::new(),
+            last_poll: None,
+        };
+        let self_pid = Pid::from_u32(std::process::id());
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let child_pid = Pid::from_u32(child.id());
+
+        // Not reaped yet, so /proc still lists the child: running, or a zombie once it exits.
+        poll(&mut inner, self_pid);
+        assert!(inner.sys.process(child_pid).is_some());
+
+        child.wait().unwrap();
+        poll(&mut inner, self_pid);
+        assert!(inner.sys.process(child_pid).is_none());
+    }
+
+    /// The poll asks sysinfo for disk usage only, but `is_engine_process` matches children by name
+    /// and parent. Both must stay populated on every platform, or the write rate would quietly
+    /// count only the app itself.
+    #[test]
+    fn test_poll_keeps_the_name_and_parent_of_a_live_child() {
+        let mut inner = TelemetryInner {
+            sys: System::new(),
+            last_poll: None,
+        };
+        let self_pid = Pid::from_u32(std::process::id());
+        let (program, args, expected_name): (&str, &[&str], &str) = if cfg!(windows) {
+            ("ping", &["-n", "30", "127.0.0.1"], "ping")
+        } else {
+            ("sleep", &["30"], "sleep")
+        };
+        let mut child = std::process::Command::new(program)
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+
+        poll(&mut inner, self_pid);
+        let listed = inner.sys.process(Pid::from_u32(child.id())).map(|process| {
+            (
+                process.name().to_string_lossy().into_owned(),
+                process.parent(),
+            )
+        });
+        // Stop the child before asserting, so a failure does not leave it running.
+        child.kill().unwrap();
+        child.wait().unwrap();
+
+        let (listed_name, parent) = listed.expect("the live child is missing from the map");
+        assert!(
+            starts_with_ignore_ascii_case(&listed_name, expected_name),
+            "{listed_name}"
+        );
+        assert_eq!(parent, Some(self_pid));
     }
 }
