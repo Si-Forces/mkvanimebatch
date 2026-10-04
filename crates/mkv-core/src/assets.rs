@@ -167,12 +167,12 @@ impl SubIndex {
     }
 
     pub fn add(&mut self, sub_file: ParsedFile) {
-        self.add_classified(&sub_file, None);
+        self.add_classified(sub_file, None);
     }
 
     /// Adds a subtitle, reusing `classification` from the run-wide memo when the caller
     /// has one. Pass `None` to derive the classification on the spot.
-    fn add_classified(&mut self, sub_file: &ParsedFile, classification: Option<SubClassification>) {
+    fn add_classified(&mut self, sub_file: ParsedFile, classification: Option<SubClassification>) {
         let Some(parsed) = &sub_file.parsed else {
             self.has_unparsed = true;
             return;
@@ -189,9 +189,9 @@ impl SubIndex {
                 self.directories.push(dir.to_path_buf());
             }
         }
-        let classification = classification.unwrap_or_else(|| classify_sub(sub_file));
+        let classification = classification.unwrap_or_else(|| classify_sub(&sub_file));
         self.index.entry(key).or_default().push(SubEntry {
-            file: sub_file.clone(),
+            file: sub_file,
             classification,
         });
     }
@@ -598,7 +598,7 @@ fn populate_indices(
         } else {
             None
         };
-        sub_index.add_classified(sub, classification);
+        sub_index.add_classified(sub.clone(), classification);
     }
     for chap in &assets.chapters {
         chap_index.add(chap);
