@@ -78,6 +78,7 @@
 - The UI uses the system font stacks; bundled web fonts are no longer loaded.
 - The per-item subtitle offset reads exponent notation correctly (`1e3` is 1000 ms; it was 1 ms). A value beyond the safe-integer range now leaves the global offset in effect instead of failing the run.
 - Stop and Close no longer freeze the window while a job shuts down. Their teardown runs off the main thread, so the log and queue keep updating, including when the cooperative cancel misses its 2 s deadline and the job is aborted. The "Stop requested; waiting for shutdown." log line now appears when Stop is pressed instead of after the job has stopped.
+- The disk write rate no longer stays up after a batch. Exited media tools are now removed from the telemetry process list, where their last write rate was counted again on every poll for the rest of the session. Each telemetry poll refreshes only disk usage per process and runs off the main thread, and startup no longer takes a full process snapshot.
 - The `set_window_theme` IPC command no longer coerces an unrecognized theme name to Dark. An unrecognized name is now ignored and leaves the native window exactly as it was, including any pin set by an earlier explicit choice. The webview only ever sends `light` or `dark`, so this affects a caller that bypasses the UI.
 
 ### Queue Selection Freeze
