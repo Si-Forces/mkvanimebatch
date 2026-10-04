@@ -339,6 +339,62 @@ fn settle_cancelled_planning_items(
         .collect()
 }
 
+struct PreparedDir {
+    resolver: AssetResolver,
+    font_info: FontInfo,
+    chapter_claims: HashMap<PathBuf, PathBuf>,
+}
+
+/// Runs the Asset Resolver and font scan over each Release Directory. The pass is synchronous
+/// file I/O with no `.await`, so `cancel_token` is checked before each directory; returns
+/// `None` once it is cancelled.
+fn prepare_release_dirs<'a>(
+    videos_by_dir: &BTreeMap<&'a Path, Vec<ParsedFile>>,
+    all_inspections: &HashMap<PathBuf, InspectionResult>,
+    config: &PipelineConfig,
+    cancel_token: &CancellationToken,
+) -> Option<HashMap<&'a Path, PreparedDir>> {
+    let mut scan_cache = ScanCache::default();
+    let mut fonts_dir_cache: HashMap<PathBuf, PathBuf> = HashMap::new();
+    let mut font_cache: HashMap<PathBuf, FontInfo> = HashMap::new();
+    // Release directories re-index the same shared ancestor assets, so the
+    // per-file subtitle classification is derived once and reused.
+    let mut sub_classification_cache: HashMap<PathBuf, SubClassification> = HashMap::new();
+
+    let mut prepared_dirs = HashMap::with_capacity(videos_by_dir.len());
+    for (&mkv_dir, dir_videos) in videos_by_dir {
+        if cancel_token.is_cancelled() {
+            return None;
+        }
+        let resolved_assets_dir = config
+            .assets_dir
+            .as_deref()
+            .map(|assets| release_assets_dir(assets, mkv_dir, &config.input_dir));
+        let prep_opts = ReleasePreparationOptions {
+            fonts_override: config.fonts_dir.as_deref(),
+            assets_dir: resolved_assets_dir.as_deref(),
+            scan_cache: Some(&mut scan_cache),
+            fonts_dir_cache: Some(&mut fonts_dir_cache),
+            font_cache: Some(&mut font_cache),
+            sub_classification_cache: Some(&mut sub_classification_cache),
+        };
+        let prepared = prepare_release_directory(mkv_dir, &config.input_dir, prep_opts);
+        let font_info = scan_fonts(&prepared.fonts_dir, Some(&mut font_cache));
+        let chapter_claims =
+            claim_leftover_chapters(dir_videos, all_inspections, &prepared.resolver);
+
+        prepared_dirs.insert(
+            mkv_dir,
+            PreparedDir {
+                resolver: prepared.resolver,
+                font_info,
+                chapter_claims,
+            },
+        );
+    }
+    Some(prepared_dirs)
+}
+
 /// Why a spawned batch item did not complete.
 enum ItemFailure {
     Cancelled,
@@ -845,6 +901,21 @@ impl BatchPipeline {
         summary
     }
 
+    /// Settles every item as cancelled after a stop that lands before planning.
+    async fn cancel_before_planning(
+        &self,
+        files: &[ParsedFile],
+        mut summary: PipelineSummary,
+    ) -> PipelineSummary {
+        summary.cancelled = true;
+        for file in files {
+            let id = get_item_id(&file.path, &self.config.input_dir);
+            self.emit(cancelled_item(id, file.name.clone(), None)).await;
+        }
+        self.emit_batch_complete(false, true).await;
+        summary
+    }
+
     async fn run_remux(&self) -> Result<PipelineSummary, String> {
         let (files, mut summary) = self.prepare_batch_and_emit_start().await?;
         if files.is_empty() {
@@ -858,13 +929,6 @@ impl BatchPipeline {
         }
 
         let cache = self.inspect_cache();
-
-        let mut scan_cache = ScanCache::default();
-        let mut fonts_dir_cache: HashMap<PathBuf, PathBuf> = HashMap::new();
-        let mut font_cache: HashMap<PathBuf, FontInfo> = HashMap::new();
-        // Release directories re-index the same shared ancestor assets, so the
-        // per-file subtitle classification is derived once and reused.
-        let mut sub_classification_cache: HashMap<PathBuf, SubClassification> = HashMap::new();
 
         // Probe every batch video concurrently, across release directories, before planning.
         let probe_limit = crate::cpu::probe_concurrency(self.max_workers());
@@ -909,49 +973,17 @@ impl BatchPipeline {
         cache.save_shared();
 
         if self.cancel_token.is_cancelled() {
-            summary.cancelled = true;
-            for file in &files {
-                let id = get_item_id(&file.path, &self.config.input_dir);
-                self.emit(cancelled_item(id, file.name.clone(), None)).await;
-            }
-            self.emit_batch_complete(false, true).await;
-            return Ok(summary);
+            return Ok(self.cancel_before_planning(&files, summary).await);
         }
 
-        struct PreparedDir {
-            resolver: AssetResolver,
-            font_info: FontInfo,
-            chapter_claims: HashMap<PathBuf, PathBuf>,
-        }
-        let mut prepared_dirs: HashMap<&Path, PreparedDir> = HashMap::new();
-        for (&mkv_dir, dir_videos) in &videos_by_dir {
-            let resolved_assets_dir = self
-                .config
-                .assets_dir
-                .as_deref()
-                .map(|assets| release_assets_dir(assets, mkv_dir, &self.config.input_dir));
-            let prep_opts = ReleasePreparationOptions {
-                fonts_override: self.config.fonts_dir.as_deref(),
-                assets_dir: resolved_assets_dir.as_deref(),
-                scan_cache: Some(&mut scan_cache),
-                fonts_dir_cache: Some(&mut fonts_dir_cache),
-                font_cache: Some(&mut font_cache),
-                sub_classification_cache: Some(&mut sub_classification_cache),
-            };
-            let prepared = prepare_release_directory(mkv_dir, &self.config.input_dir, prep_opts);
-            let font_info = scan_fonts(&prepared.fonts_dir, Some(&mut font_cache));
-            let chapter_claims =
-                claim_leftover_chapters(dir_videos, &all_inspections, &prepared.resolver);
-
-            prepared_dirs.insert(
-                mkv_dir,
-                PreparedDir {
-                    resolver: prepared.resolver,
-                    font_info,
-                    chapter_claims,
-                },
-            );
-        }
+        let Some(prepared_dirs) = prepare_release_dirs(
+            &videos_by_dir,
+            &all_inspections,
+            &self.config,
+            &self.cancel_token,
+        ) else {
+            return Ok(self.cancel_before_planning(&files, summary).await);
+        };
 
         let mut all_planned_jobs: Vec<(PlannedJob, TrackSelection, FontInfo)> = Vec::new();
         let mut planning_outcomes = Vec::new();
@@ -1235,6 +1267,27 @@ mod tests {
         // 3. Default joins mkv_dir / "fonts"
         let res3 = fonts_dir_for(mkv_dir, input_dir, None, None);
         assert_eq!(res3, PathBuf::from("/anime/Season 1/fonts"));
+    }
+
+    #[test]
+    fn release_dir_preparation_stops_before_a_directory_once_cancelled() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = PipelineConfig {
+            input_dir: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let mut video = parsed_file("ep01.mkv");
+        video.path = temp_dir.path().join("ep01.mkv");
+        let videos_by_dir = BTreeMap::from([(temp_dir.path(), vec![video])]);
+        let inspections = HashMap::new();
+        let cancel_token = CancellationToken::new();
+
+        let prepared = prepare_release_dirs(&videos_by_dir, &inspections, &config, &cancel_token);
+        assert_eq!(prepared.map(|dirs| dirs.len()), Some(1));
+
+        cancel_token.cancel();
+        let prepared = prepare_release_dirs(&videos_by_dir, &inspections, &config, &cancel_token);
+        assert!(prepared.is_none());
     }
 
     #[tokio::test(flavor = "current_thread")]
