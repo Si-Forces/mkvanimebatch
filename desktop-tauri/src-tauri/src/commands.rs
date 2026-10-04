@@ -6,12 +6,15 @@ use mkv_core::manifest::InspectionManifest;
 use mkv_core::pipeline::{
     CancellationToken, EventReceiver, JobEvent, LogReceiver, PipelineMode, PipelineSummary,
 };
+use mkv_core::scan::PersistentInspectCache;
 use serde::Deserialize;
 use std::future::Future;
+use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
+use tokio::sync::OnceCell;
 
 const JOB_EVENT: &str = "job-event";
 const JOB_LOG: &str = "job-log";
@@ -28,10 +31,70 @@ pub struct InspectOptions {
     no_cache: Option<bool>,
 }
 
+/// The one Persistent Inspect Cache of an app session, shared by every Inspect and Run. The
+/// first Inspect or Run that wants a cache loads it; a `noCache` request never does.
+#[derive(Clone, Default)]
+pub struct InspectCacheState {
+    cell: Arc<OnceCell<Arc<PersistentInspectCache>>>,
+    /// `None` is the default cache file.
+    cache_file: Option<PathBuf>,
+}
+
+impl InspectCacheState {
+    /// The session cache, parsed on the blocking pool by whichever caller gets here first.
+    async fn shared(&self) -> Result<Arc<PersistentInspectCache>, String> {
+        self.cell
+            .get_or_try_init(|| {
+                let cache_file = self.cache_file.clone();
+                async move {
+                    tauri::async_runtime::spawn_blocking(move || {
+                        Arc::new(PersistentInspectCache::new(cache_file, true))
+                    })
+                    .await
+                    .map_err(|e| format!("Async runtime error: {e}"))
+                }
+            })
+            .await
+            .cloned()
+    }
+
+    /// Empties the session cache and deletes its file. When the cache is not loaded yet, the
+    /// file is deleted unparsed and the session starts from an empty cache. A load already in
+    /// progress is awaited and then cleared, so it cannot bring the deleted entries back.
+    async fn clear(&self) -> Result<(), String> {
+        let mut loaded = true;
+        let cache = self
+            .cell
+            .get_or_try_init(|| {
+                loaded = false;
+                let cache_file = self.cache_file.clone();
+                async move {
+                    tauri::async_runtime::spawn_blocking(move || {
+                        // A disabled instance deletes the file without parsing it, which
+                        // leaves the session's instance nothing to load.
+                        PersistentInspectCache::new(cache_file.clone(), false).clear();
+                        Arc::new(PersistentInspectCache::new(cache_file, true))
+                    })
+                    .await
+                    .map_err(|e| format!("Async runtime error: {e}"))
+                }
+            })
+            .await?;
+        if loaded {
+            let cache = Arc::clone(cache);
+            tauri::async_runtime::spawn_blocking(move || cache.clear())
+                .await
+                .map_err(|e| format!("Async runtime error: {e}"))?;
+        }
+        Ok(())
+    }
+}
+
 #[tauri::command]
 pub async fn inspect_directory(
     app: AppHandle,
     state: State<'_, ScanState>,
+    cache_state: State<'_, InspectCacheState>,
     path: String,
     options: Option<InspectOptions>,
 ) -> Result<InspectionManifest, String> {
@@ -57,7 +120,11 @@ pub async fn inspect_directory(
     };
 
     let no_cache = options.and_then(|o| o.no_cache).unwrap_or(false);
-    let cache = (!no_cache).then(|| Arc::new(mkv_core::scan::PersistentInspectCache::default()));
+    let cache = if no_cache {
+        None
+    } else {
+        Some(cache_state.shared().await?)
+    };
     let mut manifest =
         mkv_core::manifest::generate_inspection_manifest(&dir, cache, Some(&cancel_token)).await?;
     manifest.extra.insert(
@@ -71,6 +138,7 @@ pub async fn inspect_directory(
 pub fn run_job<R: tauri::Runtime>(
     app: AppHandle<R>,
     state: State<'_, JobState>,
+    cache_state: State<'_, InspectCacheState>,
     mut request: mkv_core::request::BatchRequest,
 ) -> Result<u64, String> {
     request.input_dir =
@@ -85,12 +153,9 @@ pub fn run_job<R: tauri::Runtime>(
     let cancel_token = CancellationToken::new();
     let (event_tx, event_rx) = mkv_core::pipeline::create_event_channel(64);
     let (log_tx, log_rx) = mkv_core::pipeline::create_log_channel(128);
-    let pipeline = mkv_core::pipeline::BatchPipeline::from_request(
-        request,
-        Some(event_tx),
-        cancel_token.clone(),
-    )?
-    .with_log_sender(log_tx);
+    let mut pipeline_config = request.into_pipeline_config()?;
+    let session_cache = (!pipeline_config.no_cache).then(|| cache_state.inner().clone());
+    let pipeline_cancel = cancel_token.clone();
 
     let config = SupervisedJobConfig {
         mode,
@@ -98,7 +163,14 @@ pub fn run_job<R: tauri::Runtime>(
         cancel_token,
     };
     start_supervised_job(app, &state, config, event_rx, log_rx, async move {
-        pipeline.run().await
+        // Loaded inside the job, so the first Run of a session never blocks the command.
+        if let Some(session_cache) = session_cache {
+            pipeline_config.cache = Some(session_cache.shared().await?);
+        }
+        mkv_core::pipeline::BatchPipeline::new(pipeline_config, Some(event_tx), pipeline_cancel)
+            .with_log_sender(log_tx)
+            .run()
+            .await
     })
 }
 
@@ -330,13 +402,11 @@ where
 }
 
 #[tauri::command]
-pub async fn clear_cache() -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(|| {
-        mkv_core::scan::PersistentInspectCache::default().clear()
-    })
-    .await
-    .map(|()| "Persistent inspection cache cleared.".to_string())
-    .map_err(|e| format!("Async runtime error: {e}"))
+pub async fn clear_cache(cache_state: State<'_, InspectCacheState>) -> Result<String, String> {
+    // Clearing a separate instance would not stick: the shared one's next save would write
+    // the cleared entries back.
+    cache_state.clear().await?;
+    Ok("Persistent inspection cache cleared.".to_string())
 }
 
 #[tauri::command]
@@ -396,6 +466,8 @@ mod tests {
     fn observed_app() -> (App, Sink<Value>, Sink<Value>, Sink<Vec<String>>) {
         let app = tauri::test::mock_app();
         app.manage(JobState::default());
+        // Never loaded: the runs these tests start all set `no_cache`.
+        app.manage(InspectCacheState::default());
         let events = record(&app, JOB_EVENT);
         let dones = record(&app, JOB_DONE);
         let logs = record(&app, JOB_LOG);
@@ -429,16 +501,27 @@ mod tests {
         .unwrap()
     }
 
-    /// Runs a dry-run extract of `input_dir` to completion and returns its snapshot.
+    /// Runs a dry-run extract of `input_dir`, without the inspect cache, to completion and
+    /// returns its snapshot.
     fn run_dry_extract(app: &App, input_dir: PathBuf) -> JobSnapshot {
+        run_dry_extract_with_cache(app, input_dir, false)
+    }
+
+    fn run_dry_extract_with_cache(app: &App, input_dir: PathBuf, cache: bool) -> JobSnapshot {
         let request = mkv_core::request::BatchRequest {
             mode: PipelineMode::Extract,
             input_dir,
             dry_run: Some(true),
+            no_cache: Some(!cache),
             ..Default::default()
         };
-        let job_id = run_job(app.handle().clone(), app.state::<JobState>(), request)
-            .expect("dry-run extract must start");
+        let job_id = run_job(
+            app.handle().clone(),
+            app.state::<JobState>(),
+            app.state::<InspectCacheState>(),
+            request,
+        )
+        .expect("dry-run extract must start");
         let state = app.state::<JobState>();
         state
             .wait_until_released(job_id, Duration::from_secs(5))
@@ -833,5 +916,92 @@ mod tests {
             r"\\server\share\Show"
         );
         assert_eq!(display_canonical_path("/home/user/show"), "/home/user/show");
+    }
+
+    /// A session cache backed by `dir/inspect_cache.json`, whose file already holds an entry
+    /// for `dir/video.mkv`. Returns the state and the video path.
+    fn session_cache_with_saved_entry(dir: &std::path::Path) -> (InspectCacheState, PathBuf) {
+        let cache_file = dir.join("inspect_cache.json");
+        let video = dir.join("video.mkv");
+        std::fs::write(&video, b"video").unwrap();
+        let writer = PersistentInspectCache::new(Some(cache_file.clone()), true);
+        writer.put_path(&video, Default::default());
+        writer.save();
+        let state = InspectCacheState {
+            cache_file: Some(cache_file),
+            ..Default::default()
+        };
+        (state, video)
+    }
+
+    #[test]
+    fn session_cache_reads_its_file_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, video) = session_cache_with_saved_entry(tmp.path());
+
+        let first = tauri::async_runtime::block_on(state.shared()).unwrap();
+        assert!(first.get_path(&video).is_some());
+        std::fs::write(tmp.path().join("inspect_cache.json"), b"{}").unwrap();
+        let second = tauri::async_runtime::block_on(state.shared()).unwrap();
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(
+            second.get_path(&video).is_some(),
+            "a second caller must not reload the file"
+        );
+    }
+
+    #[test]
+    fn clear_before_load_deletes_the_file_without_loading_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, video) = session_cache_with_saved_entry(tmp.path());
+
+        tauri::async_runtime::block_on(state.clear()).unwrap();
+
+        assert!(!tmp.path().join("inspect_cache.json").exists());
+        let cache = tauri::async_runtime::block_on(state.shared()).unwrap();
+        assert_eq!(cache.get_path(&video), None, "the cleared file was loaded");
+    }
+
+    #[test]
+    fn clear_after_load_empties_the_shared_instance() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, video) = session_cache_with_saved_entry(tmp.path());
+        let loaded = tauri::async_runtime::block_on(state.shared()).unwrap();
+
+        tauri::async_runtime::block_on(state.clear()).unwrap();
+
+        assert!(!tmp.path().join("inspect_cache.json").exists());
+        let after = tauri::async_runtime::block_on(state.shared()).unwrap();
+        assert!(Arc::ptr_eq(&loaded, &after));
+        assert_eq!(after.get_path(&video), None);
+        after.save();
+        assert!(
+            !tmp.path().join("inspect_cache.json").exists(),
+            "a later save must not restore cleared entries"
+        );
+    }
+
+    #[test]
+    fn run_job_shares_the_session_cache_unless_no_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("input");
+        std::fs::create_dir(&input).unwrap();
+        std::fs::write(input.join("Show - 01.mkv"), b"video").unwrap();
+        let app = tauri::test::mock_app();
+        app.manage(JobState::default());
+        app.manage(InspectCacheState {
+            cache_file: Some(tmp.path().join("inspect_cache.json")),
+            ..Default::default()
+        });
+        let cell = || app.state::<InspectCacheState>().cell.get().cloned();
+
+        run_dry_extract(&app, input.clone());
+        assert!(cell().is_none(), "a noCache run must not load the cache");
+
+        run_dry_extract_with_cache(&app, input, true);
+        let used = cell().expect("a cached run loads the session cache");
+        let shared = tauri::async_runtime::block_on(app.state::<InspectCacheState>().shared());
+        assert!(Arc::ptr_eq(&used, &shared.unwrap()));
     }
 }
