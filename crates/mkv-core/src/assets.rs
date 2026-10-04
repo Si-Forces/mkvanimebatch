@@ -263,13 +263,8 @@ impl ChapterIndex {
     }
 
     /// Indexes `xml_file` as chapter XML without re-reading it: `scan_assets` is the only
-    /// place a file is sniffed for chapter content.
-    pub fn add(&mut self, xml_file: ParsedFile) {
-        self.add_borrowed(&xml_file);
-    }
-
-    /// Like [`Self::add`], cloning only the path and season the index keeps.
-    fn add_borrowed(&mut self, xml_file: &ParsedFile) {
+    /// place a file is sniffed for chapter content. Only the path and season are kept.
+    pub fn add(&mut self, xml_file: &ParsedFile) {
         if let Some(parsed) = &xml_file.parsed {
             let key = ep_key(parsed);
             let existing = self.index.entry(key.clone()).or_default();
@@ -606,7 +601,7 @@ fn populate_indices(
         sub_index.add_classified(sub, classification);
     }
     for chap in &assets.chapters {
-        chap_index.add_borrowed(chap);
+        chap_index.add(chap);
     }
     for cov in &assets.covers {
         cover_index.add(cov.clone());

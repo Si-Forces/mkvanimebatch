@@ -381,27 +381,37 @@ pub struct ScanCache {
     results: HashMap<PathBuf, Arc<ScanResults>>,
 }
 
+impl ScanCache {
+    /// The cached results for `dir`, or the canonical path a fresh scan is stored under. A new
+    /// spelling's canonical path is memoized even on a miss.
+    fn lookup(&mut self, dir: &Path) -> Result<Arc<ScanResults>, PathBuf> {
+        if let Some(hit) = self
+            .canonical_by_spelling
+            .get(dir)
+            .and_then(|canonical| self.results.get(canonical))
+        {
+            return Ok(Arc::clone(hit));
+        }
+        // A new spelling may still name a directory another spelling already scanned.
+        let canonical = canonical_or_self(dir);
+        self.canonical_by_spelling
+            .insert(dir.to_path_buf(), canonical.clone());
+        self.results.get(&canonical).cloned().ok_or(canonical)
+    }
+}
+
+/// Whether a directory entry is, or is a symlink to, a regular file. On most platforms only a
+/// symlink costs a stat.
+fn is_file_entry(file_type: std::fs::FileType, path: &Path) -> bool {
+    file_type.is_file() || (file_type.is_symlink() && path.is_file())
+}
+
 /// Scans directory entries, grouping files into subs (.ass, .srt), chapters (.xml verified
 /// via `is_chapter_xml`), and cover images applicable to the directory's videos (.mkv).
 pub fn scan_assets(dir: &Path, mut cache: Option<&mut ScanCache>) -> Arc<ScanResults> {
-    let canonical = match cache.as_deref_mut() {
-        Some(c) => {
-            if let Some(hit) = c
-                .canonical_by_spelling
-                .get(dir)
-                .and_then(|canonical| c.results.get(canonical))
-            {
-                return Arc::clone(hit);
-            }
-            // A new spelling may still name a directory another spelling already scanned.
-            let canonical = canonical_or_self(dir);
-            c.canonical_by_spelling
-                .insert(dir.to_path_buf(), canonical.clone());
-            if let Some(hit) = c.results.get(&canonical) {
-                return Arc::clone(hit);
-            }
-            Some(canonical)
-        }
+    let canonical = match cache.as_deref_mut().map(|c| c.lookup(dir)) {
+        Some(Ok(hit)) => return hit,
+        Some(Err(canonical)) => Some(canonical),
         None => None,
     };
 
@@ -415,11 +425,10 @@ pub fn scan_assets(dir: &Path, mut cache: Option<&mut ScanCache>) -> Arc<ScanRes
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            // The entry's own type needs no stat on most platforms; only a symlink is resolved.
             let Ok(file_type) = entry.file_type() else {
                 continue;
             };
-            if !(file_type.is_file() || (file_type.is_symlink() && path.is_file())) {
+            if !is_file_entry(file_type, &path) {
                 continue;
             }
             if path.file_name().and_then(|s| s.to_str()).is_none() {
@@ -526,7 +535,7 @@ pub fn scan_mkv_files(
                     .map(|dir| dir.join(name))
             };
 
-            let is_file = file_type.is_file() || (file_type.is_symlink() && path.is_file());
+            let is_file = is_file_entry(file_type, &path);
             let is_dir = file_type.is_dir() || (file_type.is_symlink() && path.is_dir());
 
             if is_file {

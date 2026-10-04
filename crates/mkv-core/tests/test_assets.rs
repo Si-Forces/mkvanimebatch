@@ -59,7 +59,7 @@ fn test_chap_index_lookup() {
     fs::write(&xml_path, CHAPTER_XML).unwrap();
 
     let mut chap_idx = ChapterIndex::new();
-    chap_idx.add(create_parsed_file(&xml_path));
+    chap_idx.add(&create_parsed_file(&xml_path));
 
     let matched = chap_idx.lookup(&EpisodeInfo::new("1", "E", "01"));
     assert_eq!(matched, Some(xml_path));
@@ -80,8 +80,8 @@ fn test_chap_index_cross_dir_duplicate_kept_first() {
     }
 
     let mut chap_idx = ChapterIndex::new();
-    chap_idx.add(create_parsed_file(&first));
-    chap_idx.add(create_parsed_file(&second));
+    chap_idx.add(&create_parsed_file(&first));
+    chap_idx.add(&create_parsed_file(&second));
 
     assert_eq!(
         chap_idx.lookup(&EpisodeInfo::new("1", "E", "01")),
