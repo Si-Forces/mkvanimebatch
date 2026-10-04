@@ -48,6 +48,15 @@
 - Preflight inspection default probe concurrency is now calculated from physical core count via `cpu::probe_concurrency(cpu::default_workers())`, aligning with pipeline execution's default. Previously it used logical cores (`available_parallelism()`), which allowed up to 16 concurrent probes on machines with 4 physical and 8 logical cores.
 - Preflight inspection looks up and stores each file's inspect-cache entry inside its probe task, as the pipeline does, instead of checking every file in one serial pass before the first probe starts. Lookups now run alongside probing, and pending ones are aborted with the probes on cancel. On high-latency storage (network shares, USB HDDs) the first probe starts sooner, and an all-hit re-Inspect is no longer fully serial.
 
+### Inspect Cache Lifetime
+
+- A completed preflight inspection prunes the inspect cache: `generate_inspection_manifest` drops the entries under the input directory whose file the scan did not discover (new `PersistentInspectCache::prune_undiscovered`), so the cache follows the current library instead of every file ever probed. Entries outside the input directory are kept, and a cancelled inspection prunes nothing. Output and font directories are never discovered, so inspecting their parent drops their entries; they are re-probed if inspected later.
+- The cache file is read with one `fs::read` and parsed with `serde_json::from_slice` instead of streamed through `serde_json::from_reader`.
+- `PersistentInspectCache::clear` now discards a save already in flight, which could otherwise write the cleared entries back.
+- Desktop: one inspect cache per app session. The first Inspect or Run that wants it loads the file, and later Inspects and Runs share it, so an Inspect followed by a Run reads the file once instead of twice. Entries written meanwhile by the CLI or a second app instance are not picked up, and the session's next save overwrites them.
+- Desktop: "Clear cache" clears the session's cache, so a later save no longer restores the cleared entries, and it no longer parses the file just to delete it. It works during a running job.
+- CLI: `--no-cache` no longer parses the default cache file, and neither does a batch run (its pipeline loads its own). `--clear-cache` deletes the file without parsing it.
+
 ### Audio Track Selection
 
 - Tracks named `Comments`, `Commentaries`, and lowercase variants are excluded from primary audio selection so they are not transcoded over feature audio.
