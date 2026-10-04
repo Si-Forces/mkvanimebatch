@@ -1,7 +1,7 @@
 use std::sync::Mutex;
 
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
-use tauri::State;
+use tauri::{AppHandle, Manager};
 
 pub struct TelemetryState {
     inner: Mutex<TelemetryInner>,
@@ -67,10 +67,17 @@ fn is_engine_process(
     parent_fn(pid) == Some(self_pid)
 }
 
+/// Runs the poll on the blocking pool: a sync command would walk every process on the main
+/// thread. The state is read through `app` because `State<'_>` is not `'static`.
 #[tauri::command]
-pub fn get_system_telemetry(state: State<'_, TelemetryState>) -> Result<TelemetryData, String> {
-    let mut guard = state.inner.lock().map_err(|e| e.to_string())?;
-    Ok(poll(&mut guard, Pid::from_u32(std::process::id())))
+pub async fn get_system_telemetry(app: AppHandle) -> Result<TelemetryData, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<TelemetryState>();
+        let mut guard = state.inner.lock().map_err(|e| e.to_string())?;
+        Ok(poll(&mut guard, Pid::from_u32(std::process::id())))
+    })
+    .await
+    .map_err(|error| format!("Async runtime error: {error}"))?
 }
 
 /// Samples CPU, memory, and the engine write rate since the previous poll.
