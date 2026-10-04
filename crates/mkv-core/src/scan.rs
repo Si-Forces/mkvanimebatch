@@ -393,7 +393,11 @@ pub fn scan_assets(
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if !path.is_file() {
+            // The entry's own type needs no stat on most platforms; only a symlink is resolved.
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !(file_type.is_file() || (file_type.is_symlink() && path.is_file())) {
                 continue;
             }
             if path.file_name().and_then(|s| s.to_str()).is_none() {
