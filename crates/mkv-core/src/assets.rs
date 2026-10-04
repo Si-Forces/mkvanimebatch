@@ -13,7 +13,7 @@ use crate::domain::{
 };
 use crate::fonts::{find_fonts_dir, scan_fonts, FontInfo};
 use crate::scan::{
-    is_chapter_xml, path_ext_lower, scan_assets, InspectedVideo, InspectionResult, ParsedFile,
+    path_ext_lower, scan_assets, InspectedVideo, InspectionResult, ParsedFile, ScanCache,
     ScanResults,
 };
 
@@ -33,7 +33,7 @@ pub struct PreparedRelease {
 pub struct ReleasePreparationOptions<'a> {
     pub fonts_override: Option<&'a Path>,
     pub assets_dir: Option<&'a Path>,
-    pub scan_cache: Option<&'a mut HashMap<PathBuf, ScanResults>>,
+    pub scan_cache: Option<&'a mut ScanCache>,
     pub fonts_dir_cache: Option<&'a mut HashMap<PathBuf, PathBuf>>,
     pub font_cache: Option<&'a mut HashMap<PathBuf, FontInfo>>,
     pub sub_classification_cache: Option<&'a mut HashMap<PathBuf, SubClassification>>,
@@ -262,20 +262,18 @@ impl ChapterIndex {
         Self::default()
     }
 
-    pub fn add(&mut self, xml_file: ParsedFile) {
-        if !is_chapter_xml(&xml_file.path) {
-            return;
-        }
-
+    /// Indexes `xml_file` as chapter XML without re-reading it: `scan_assets` is the only
+    /// place a file is sniffed for chapter content. Only the path and season are kept.
+    pub fn add(&mut self, xml_file: &ParsedFile) {
         if let Some(parsed) = &xml_file.parsed {
             let key = ep_key(parsed);
             let existing = self.index.entry(key.clone()).or_default();
             if is_duplicate_chapter(existing, &xml_file.path, &parsed.season, &key) {
                 return;
             }
-            existing.push((xml_file.path, parsed.season.clone()));
+            existing.push((xml_file.path.clone(), parsed.season.clone()));
         } else {
-            self.unmatched.push(xml_file.path);
+            self.unmatched.push(xml_file.path.clone());
         }
     }
 
@@ -580,19 +578,19 @@ impl SubResolution {
 }
 
 fn populate_indices(
-    assets: ScanResults,
+    assets: &ScanResults,
     sub_index: &mut SubIndex,
     chap_index: &mut ChapterIndex,
     cover_index: &mut CoverIndex,
     mut sub_classification_cache: Option<&mut HashMap<PathBuf, SubClassification>>,
 ) {
-    for sub in assets.subs {
+    for sub in &assets.subs {
         let classification = if sub.parsed.is_some() {
             sub_classification_cache.as_deref_mut().map(|cache| {
                 if let Some(hit) = cache.get(&sub.path) {
                     hit.clone()
                 } else {
-                    let fresh = classify_sub(&sub);
+                    let fresh = classify_sub(sub);
                     cache.insert(sub.path.clone(), fresh.clone());
                     fresh
                 }
@@ -600,13 +598,13 @@ fn populate_indices(
         } else {
             None
         };
-        sub_index.add_classified(sub, classification);
+        sub_index.add_classified(sub.clone(), classification);
     }
-    for chap in assets.chapters {
+    for chap in &assets.chapters {
         chap_index.add(chap);
     }
-    for cov in assets.covers {
-        cover_index.add(cov);
+    for cov in &assets.covers {
+        cover_index.add(cov.clone());
     }
 }
 
@@ -635,7 +633,7 @@ impl AssetResolver {
     pub fn discover(
         search_dirs: &[PathBuf],
         assets_dir: Option<&Path>,
-        mut scan_cache: Option<&mut HashMap<PathBuf, ScanResults>>,
+        mut scan_cache: Option<&mut ScanCache>,
         mut sub_classification_cache: Option<&mut HashMap<PathBuf, SubClassification>>,
     ) -> Self {
         let mut sub_index = SubIndex::new();
@@ -644,7 +642,7 @@ impl AssetResolver {
 
         for d in search_dirs.iter().rev() {
             populate_indices(
-                scan_assets(d, scan_cache.as_deref_mut()),
+                &scan_assets(d, scan_cache.as_deref_mut()),
                 &mut sub_index,
                 &mut chap_index,
                 &mut cover_index,
@@ -670,7 +668,7 @@ impl AssetResolver {
 
             for fb_dir in fallback_dirs {
                 populate_indices(
-                    scan_assets(&fb_dir, scan_cache.as_deref_mut()),
+                    &scan_assets(&fb_dir, scan_cache.as_deref_mut()),
                     &mut fb_sub,
                     &mut fb_chap,
                     &mut fb_cov,
