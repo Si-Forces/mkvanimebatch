@@ -1,7 +1,9 @@
 //! Real-media remux bench for the execution phase (issue #31). It measures two audit
 //! observations: ffmpeg reads the source outside the io governor, so up to `workers` readers hit
 //! the disk at once; and no-transcode items hold a worker slot while they wait on `io_jobs`.
-//! Never run in CI: it needs a real corpus and takes minutes per cell.
+//! CI never runs a cell: it needs a real corpus and takes minutes per cell. CI only runs the bench
+//! with no corpus (`cargo test -p mkv-core --bench bench_real_media`), so the self-check asserts
+//! run, then it skips.
 //!
 //! # How to run
 //!
@@ -21,7 +23,8 @@
 //!   so the engine's own default applies), which replaces any explicit cell, all-FLAC or mixed,
 //!   equal to d. The HDD cells only mean something when the corpus is on the HDD, so copy it there
 //!   and run again with `hdd`.
-//! - `MKV_BENCH_BATCH` (optional): `flac` or `mixed`, to run only that batch kind.
+//! - `MKV_BENCH_BATCH` (optional): `flac` or `mixed`, to run only that batch kind. `mixed` with
+//!   `hdd` selects no cells, so the bench exits with an error.
 //!
 //! Corpus layout: 6 real releases, one subdirectory each (`corpus/<release>/<episode>.mkv`), some
 //! with FLAC audio and some with AAC. Every episode needs a subtitle, embedded or beside it, or
@@ -30,10 +33,12 @@
 //! smaller group has.
 //!
 //! Each cell evicts every corpus file from the page cache (`dd iflag=nocache count=0`, no root
-//! needed; it does not clear the drive's own cache). It then runs the remux into the default
-//! `<release>/Output/`, on the same disk as the sources, and deletes everything the cell created:
-//! the `Output/` files, and the fonts the registry adds to `<release>/fonts/` with its
-//! `.font_staging/`. The bench refuses to start if any release already has an `Output/`
+//! needed; it does not clear the drive's own cache, and on a network filesystem it may not clear
+//! the client's cache either, without failing, so check that the first cell reads cold). It then
+//! runs the remux into the default `<release>/Output/`, on the same disk as the sources, and
+//! deletes everything the cell created. Remux writes only `Output/` (the episodes and their
+//! `.tmp_remux_*` staging); the cleanup still removes any other new entry, so it does not depend
+//! on that. The bench refuses to start if any release already has an `Output/`
 //! directory, because remux would overwrite files there; if the corpus contains a symlink, because
 //! sources behind one would not be evicted and outputs written behind one would not be deleted; or
 //! if anything under the corpus cannot be read (such as a root-owned `lost+found` at the top of a
@@ -129,6 +134,12 @@ mod real_media {
                 kind,
                 workers: None,
             });
+        }
+        if cells.is_empty() {
+            return Err(format!(
+                "MKV_BENCH_DISK={disk} has no {} cells",
+                only.map_or("", BatchKind::label)
+            ));
         }
         Ok(cells)
     }
@@ -230,7 +241,7 @@ mod real_media {
             .unwrap()
             .iter()
             .all(|c| c.kind == BatchKind::AllFlac));
-        assert!(grid("hdd", Some(BatchKind::Mixed), 12).unwrap().is_empty());
+        assert!(grid("hdd", Some(BatchKind::Mixed), 12).is_err());
         assert!(grid("nas", None, 12).is_err());
     }
 
