@@ -13,8 +13,7 @@ use crate::domain::{
 };
 use crate::fonts::{find_fonts_dir, scan_fonts, FontInfo};
 use crate::scan::{
-    is_chapter_xml, path_ext_lower, scan_assets, InspectedVideo, InspectionResult, ParsedFile,
-    ScanResults,
+    path_ext_lower, scan_assets, InspectedVideo, InspectionResult, ParsedFile, ScanResults,
 };
 
 fn ep_key(info: &EpisodeInfo) -> String {
@@ -262,11 +261,9 @@ impl ChapterIndex {
         Self::default()
     }
 
+    /// Indexes `xml_file` as chapter XML without re-reading it: `scan_assets` is the only
+    /// place a file is sniffed for chapter content.
     pub fn add(&mut self, xml_file: ParsedFile) {
-        if !is_chapter_xml(&xml_file.path) {
-            return;
-        }
-
         if let Some(parsed) = &xml_file.parsed {
             let key = ep_key(parsed);
             let existing = self.index.entry(key.clone()).or_default();
