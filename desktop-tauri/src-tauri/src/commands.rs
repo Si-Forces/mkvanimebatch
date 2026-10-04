@@ -31,29 +31,36 @@ pub struct InspectOptions {
     no_cache: Option<bool>,
 }
 
-/// The one Persistent Inspect Cache of an app session, shared by every Inspect and Run. The
-/// first Inspect or Run that wants a cache loads it; a `noCache` request never does.
+/// The one inspect cache of an app session, shared by every Inspect and Run. The first Inspect
+/// or Run that wants a cache loads it; a `noCache` request never does.
 #[derive(Clone, Default)]
 pub struct InspectCacheState {
     cell: Arc<OnceCell<Arc<PersistentInspectCache>>>,
-    /// `None` is the default cache file.
+    /// `None` is the default cache file; only tests set a temporary one.
     cache_file: Option<PathBuf>,
+}
+
+/// Loads the cache on the blocking pool. With `delete_first`, a disabled instance first deletes
+/// the file without parsing it, which leaves the loaded instance nothing to read.
+async fn load_cache(
+    cache_file: Option<PathBuf>,
+    delete_first: bool,
+) -> Result<Arc<PersistentInspectCache>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if delete_first {
+            PersistentInspectCache::new(cache_file.clone(), false).clear();
+        }
+        Arc::new(PersistentInspectCache::new(cache_file, true))
+    })
+    .await
+    .map_err(|e| format!("Async runtime error: {e}"))
 }
 
 impl InspectCacheState {
     /// The session cache, parsed on the blocking pool by whichever caller gets here first.
     async fn shared(&self) -> Result<Arc<PersistentInspectCache>, String> {
         self.cell
-            .get_or_try_init(|| {
-                let cache_file = self.cache_file.clone();
-                async move {
-                    tauri::async_runtime::spawn_blocking(move || {
-                        Arc::new(PersistentInspectCache::new(cache_file, true))
-                    })
-                    .await
-                    .map_err(|e| format!("Async runtime error: {e}"))
-                }
-            })
+            .get_or_try_init(|| load_cache(self.cache_file.clone(), false))
             .await
             .cloned()
     }
@@ -67,17 +74,7 @@ impl InspectCacheState {
             .cell
             .get_or_try_init(|| {
                 loaded = false;
-                let cache_file = self.cache_file.clone();
-                async move {
-                    tauri::async_runtime::spawn_blocking(move || {
-                        // A disabled instance deletes the file without parsing it, which
-                        // leaves the session's instance nothing to load.
-                        PersistentInspectCache::new(cache_file.clone(), false).clear();
-                        Arc::new(PersistentInspectCache::new(cache_file, true))
-                    })
-                    .await
-                    .map_err(|e| format!("Async runtime error: {e}"))
-                }
+                load_cache(self.cache_file.clone(), true)
             })
             .await?;
         if loaded {

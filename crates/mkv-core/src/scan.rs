@@ -756,7 +756,7 @@ impl PersistentInspectCache {
 
     /// Drops the entries for files under `root` that are not in `discovered`, which must be
     /// every file a completed scan of `root` found. Entries outside `root` are untouched.
-    pub fn prune_undiscovered<'a>(
+    pub(crate) fn prune_undiscovered<'a>(
         &self,
         root: &Path,
         discovered: impl IntoIterator<Item = &'a Path>,
