@@ -32,10 +32,12 @@
 - **`PresetProfile.description` removed**: The `description` field is gone from `PresetProfile` and from the `get_preset_profiles` payload.
 - **Inspection cache entries drop `mtime`**: `inspect_cache.json` entries no longer store the unused `mtime` field; freshness is still checked by size and `mtime_ns`. Existing cache files keep loading.
 - **`InspectionManifest::filter_selected` replaced by `select_items`**: `select_items(&[String])` returns `Result<InspectionManifest, String>`, failing with `Selected items not found among discovered MKV files: ...` when a selection names no discovered item. It keeps selection order and drops repeated selections.
+- **Asset scan cache is a `ScanCache`; `ScanResults.videos` removed**: `scan_assets` takes `Option<&mut ScanCache>` instead of a `HashMap<PathBuf, ScanResults>` and returns `Arc<ScanResults>`; `ReleasePreparationOptions.scan_cache` and `AssetResolver::discover` take `ScanCache` too. `ScanResults` no longer has a `videos` field, so its serialized form drops that key. `ChapterIndex::add` takes `&ParsedFile` and no longer checks that the file is chapter XML: `scan_assets` is the only place a file is sniffed for chapter content.
 
 ### Core Scanning
 
 - Recursive MKV scanning skips canonical-key path allocations for non-MKV files and directories excluded by the output/font-directory name filters. Canonical keys are still derived for candidates that need ignore-path or deduplication checks.
+- Asset discovery stops repeating work for directories shared by many Release Directories (ancestors and the `--assets-dir` fallback): chapter XMLs are sniffed once per directory per run instead of on every index build, a repeated spelling of a scanned directory skips the `realpath`, a cache hit no longer deep-copies the scan results, and directory entries are classified from `read_dir` file types instead of a resolving `stat` each.
 
 ### Core Performance & Probing
 
