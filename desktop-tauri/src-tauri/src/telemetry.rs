@@ -1,9 +1,7 @@
 use std::sync::Mutex;
 
-use sysinfo::{Pid, ProcessesToUpdate, System};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 use tauri::State;
-
-use crate::process::{JobState, ScanState};
 
 pub struct TelemetryState {
     inner: Mutex<TelemetryInner>,
@@ -70,25 +68,26 @@ fn is_engine_process(
 }
 
 #[tauri::command]
-pub fn get_system_telemetry(
-    state: State<'_, TelemetryState>,
-    job_state: State<'_, JobState>,
-    scan_state: State<'_, ScanState>,
-) -> Result<TelemetryData, String> {
+pub fn get_system_telemetry(state: State<'_, TelemetryState>) -> Result<TelemetryData, String> {
     let mut guard = state.inner.lock().map_err(|e| e.to_string())?;
-    let TelemetryInner { sys, last_poll } = &mut *guard;
-    let self_pid = Pid::from_u32(std::process::id());
+    Ok(poll(&mut guard, Pid::from_u32(std::process::id())))
+}
 
-    let has_active_job = job_state.is_active() || scan_state.is_active();
+/// Samples CPU, memory, and the engine write rate since the previous poll.
+fn poll(inner: &mut TelemetryInner, self_pid: Pid) -> TelemetryData {
+    let TelemetryInner { sys, last_poll } = inner;
 
     sys.refresh_cpu_all();
     sys.refresh_memory();
 
-    if has_active_job {
-        sys.refresh_processes(ProcessesToUpdate::All, false);
-    } else {
-        sys.refresh_processes(ProcessesToUpdate::Some(&[self_pid]), true);
-    }
+    // Every poll refreshes all processes, but only their disk usage: name and parent are set
+    // without asking. Dead processes are dropped, or an exited child would stay in the map and
+    // its last write delta would be counted again on every poll.
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing().with_disk_usage(),
+    );
 
     let mut written_window = 0u64;
     for (pid, process) in sys.processes() {
@@ -129,13 +128,13 @@ pub fn get_system_telemetry(
     };
     *last_poll = Some(std::time::Instant::now());
 
-    Ok(TelemetryData {
+    TelemetryData {
         cpu_pct,
         ram_used_mb: ram_used,
         ram_total_mb: ram_total,
         ram_pct,
         io_mb_s,
-    })
+    }
 }
 
 #[cfg(test)]
@@ -211,5 +210,27 @@ mod tests {
             parent_fn,
             self_pid
         ));
+    }
+
+    /// An exited child must leave the process map once reaped, or its last write delta would be
+    /// counted on every later poll and the map would grow with every media tool a batch runs.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_poll_drops_reaped_child_processes() {
+        let mut inner = TelemetryInner {
+            sys: System::new(),
+            last_poll: None,
+        };
+        let self_pid = Pid::from_u32(std::process::id());
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let child_pid = Pid::from_u32(child.id());
+
+        // Not yet reaped, so the child is still listed, as a zombie once it exits.
+        poll(&mut inner, self_pid);
+        assert!(inner.sys.process(child_pid).is_some());
+
+        child.wait().unwrap();
+        poll(&mut inner, self_pid);
+        assert!(inner.sys.process(child_pid).is_none());
     }
 }
