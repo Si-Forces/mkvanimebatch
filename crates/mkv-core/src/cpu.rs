@@ -31,24 +31,42 @@ fn parse_cpuinfo_topology(content: &str) -> usize {
     cores.len()
 }
 
-/// Returns the number of physical CPU cores, falling back to hardware concurrency.
-///
-/// On Linux, parses `/proc/cpuinfo` topology (tracking physical ID and core ID pairs).
-/// On Windows, macOS, or virtualized/container environments without exposed topology,
-/// falls back to `std::thread::available_parallelism()`.
-pub(crate) fn physical_core_count() -> usize {
-    #[cfg(target_os = "linux")]
-    {
-        if let Ok(cpuinfo) = std::fs::read_to_string("/proc/cpuinfo") {
-            let count = parse_cpuinfo_topology(&cpuinfo);
-            if count > 0 {
-                return count;
-            }
-        }
+/// Caps the topology core count at the parallelism the process may use.
+/// A `topology` of 0 means no topology was found, so `available` is used as is.
+fn effective_core_count(topology: usize, available: usize) -> usize {
+    if topology > 0 {
+        topology.min(available)
+    } else {
+        available
     }
-    std::thread::available_parallelism()
+}
+
+/// Counts the `/proc/cpuinfo` topology, or 0 when the file can't be read or exposes none.
+#[cfg(target_os = "linux")]
+fn topology_core_count() -> usize {
+    std::fs::read_to_string("/proc/cpuinfo")
+        .map(|cpuinfo| parse_cpuinfo_topology(&cpuinfo))
+        .unwrap_or(0)
+}
+
+/// Off Linux there is no topology source.
+#[cfg(not(target_os = "linux"))]
+fn topology_core_count() -> usize {
+    0
+}
+
+/// Returns the number of physical CPU cores the process may use.
+///
+/// On Linux, counts `/proc/cpuinfo` topology (physical ID and core ID pairs) and caps it at
+/// `std::thread::available_parallelism()`, which accounts for affinity masks and cgroup quotas
+/// where it can read them.
+/// On Windows, macOS, or virtualized/container environments without exposed topology,
+/// returns `available_parallelism()` alone.
+pub(crate) fn physical_core_count() -> usize {
+    let available = std::thread::available_parallelism()
         .map(|p| p.get())
-        .unwrap_or(4)
+        .unwrap_or(4);
+    effective_core_count(topology_core_count(), available)
 }
 
 /// Derives the per-job FFmpeg thread count from physical cores and active batch workers
@@ -91,6 +109,16 @@ mod tests {
         // high core to worker ratios (clamped to 4)
         assert_eq!(transcode_governor_threads(32, 2), 4);
         assert_eq!(transcode_governor_threads(64, 4), 4);
+    }
+
+    #[test]
+    fn test_effective_core_count_caps_topology_at_available() {
+        // Container quota or affinity below the host topology.
+        assert_eq!(effective_core_count(16, 2), 2);
+        // Unconstrained host: physical cores, not hyperthreads.
+        assert_eq!(effective_core_count(8, 16), 8);
+        // No topology exposed.
+        assert_eq!(effective_core_count(0, 4), 4);
     }
 
     #[test]
