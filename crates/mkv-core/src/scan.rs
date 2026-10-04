@@ -754,6 +754,37 @@ impl PersistentInspectCache {
         }
     }
 
+    /// Drops the entries for files under `root` that are not in `discovered`, which must be
+    /// every file a completed scan of `root` found. Entries outside `root` are untouched.
+    pub fn prune_undiscovered<'a>(
+        &self,
+        root: &Path,
+        discovered: impl IntoIterator<Item = &'a Path>,
+    ) {
+        if !self.enabled {
+            return;
+        }
+        // Both sides go through `cache_key`, so they share the stored keys' canonical form.
+        let root = PathBuf::from(self.cache_key(root));
+        let keep: HashSet<String> = discovered.into_iter().map(|p| self.cache_key(p)).collect();
+        let mut state = self.state.lock();
+        let stale: Vec<String> = state
+            .data
+            .keys()
+            .filter(|key| Path::new(key.as_str()).starts_with(&root) && !keep.contains(*key))
+            .cloned()
+            .collect();
+        if stale.is_empty() {
+            return;
+        }
+        let data = Arc::make_mut(&mut state.data);
+        for key in &stale {
+            data.remove(key);
+        }
+        state.dirty = true;
+        state.revision += 1;
+    }
+
     /// Writes pending changes to disk immediately.
     pub fn save(&self) {
         self.save_internal(Duration::ZERO);

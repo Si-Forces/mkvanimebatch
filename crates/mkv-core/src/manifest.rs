@@ -343,6 +343,19 @@ fn list_subtitles_by_dir(
     Some(subs_by_dir)
 }
 
+/// Prunes the entries of files no longer under `input_dir` and saves the cache. Only a
+/// completed inspection may call this: `discovered` must be the scan's full file list.
+fn finish_cache(
+    cache: Option<&PersistentInspectCache>,
+    input_dir: &Path,
+    discovered: &[crate::scan::ParsedFile],
+) {
+    if let Some(cache) = cache {
+        cache.prune_undiscovered(input_dir, discovered.iter().map(|f| f.path.as_path()));
+        cache.save();
+    }
+}
+
 /// Generates a complete preflight inspection manifest for an anime batch directory.
 pub async fn generate_inspection_manifest(
     input_dir: &Path,
@@ -355,6 +368,7 @@ pub async fn generate_inspection_manifest(
 
     let all_mkvs = scan_mkv_files(input_dir, true, None);
     if all_mkvs.is_empty() {
+        finish_cache(persistent_cache.as_deref(), input_dir, &all_mkvs);
         return Ok(InspectionManifest {
             version: MANIFEST_VERSION,
             subtitle_candidates: BTreeMap::new(),
@@ -474,9 +488,7 @@ pub async fn generate_inspection_manifest(
         });
     }
 
-    if let Some(cache) = &persistent_cache {
-        cache.save();
-    }
+    finish_cache(persistent_cache.as_deref(), input_dir, &all_mkvs);
 
     Ok(InspectionManifest {
         version: MANIFEST_VERSION,
