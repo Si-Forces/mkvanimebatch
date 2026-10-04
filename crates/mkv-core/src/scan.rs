@@ -662,6 +662,10 @@ pub struct PersistentInspectCache {
     cache_file: PathBuf,
     enabled: bool,
     state: Mutex<CacheState>,
+    /// Test seam: runs after a save writes its temp file and before the locked rename, the window a
+    /// `clear` can hit.
+    #[cfg(test)]
+    before_rename: Option<fn(&PersistentInspectCache)>,
 }
 
 impl PersistentInspectCache {
@@ -671,6 +675,8 @@ impl PersistentInspectCache {
             cache_file,
             enabled,
             state: Mutex::new(CacheState::default()),
+            #[cfg(test)]
+            before_rename: None,
         };
         if enabled {
             cache.load();
@@ -849,6 +855,10 @@ impl PersistentInspectCache {
             return;
         }
         drop(writer);
+        #[cfg(test)]
+        if let Some(hook) = self.before_rename {
+            hook(self);
+        }
         // The rename runs under the lock so a `clear` cannot slip in between: a snapshot taken
         // before a clear is discarded instead of restoring the cleared entries.
         let mut state = self.state.lock();
@@ -881,7 +891,8 @@ impl PersistentInspectCache {
     }
 
     /// Empties the cache and deletes its file. A save already in flight is discarded, and later
-    /// puts persist as usual.
+    /// puts persist as usual. Unlike the other methods it acts on a disabled instance too, so
+    /// `PersistentInspectCache::new(file, false).clear()` deletes the file without parsing it.
     pub fn clear(&self) {
         let mut state = self.state.lock();
         state.data = Arc::default();
@@ -896,5 +907,45 @@ impl PersistentInspectCache {
 impl Default for PersistentInspectCache {
     fn default() -> Self {
         Self::new(None, true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `clear` landing while a save is in flight must neither let that save restore the
+    /// cleared entries nor let it mark a put made after the clear as already saved.
+    #[test]
+    fn test_clear_discards_a_save_in_flight() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_file = tmp.path().join("inspect_cache.json");
+        std::fs::write(tmp.path().join("before.mkv"), b"v1").unwrap();
+        std::fs::write(tmp.path().join("after.mkv"), b"v2").unwrap();
+
+        let mut cache = PersistentInspectCache::new(Some(cache_file.clone()), true);
+        cache.put_path(&tmp.path().join("before.mkv"), MkvmergeMetadata::default());
+        cache.before_rename = Some(|c| {
+            c.clear();
+            c.put_path(
+                &c.cache_file.with_file_name("after.mkv"),
+                MkvmergeMetadata::default(),
+            );
+        });
+        cache.save();
+        assert!(
+            !cache_file.exists(),
+            "the in-flight snapshot was renamed into place"
+        );
+
+        cache.before_rename = None;
+        cache.save();
+        let saved: HashMap<String, InspectCacheEntry> =
+            serde_json::from_slice(&std::fs::read(&cache_file).unwrap()).unwrap();
+        let names: Vec<_> = saved
+            .keys()
+            .filter_map(|k| Path::new(k).file_name())
+            .collect();
+        assert_eq!(names, ["after.mkv"]);
     }
 }

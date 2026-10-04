@@ -357,6 +357,9 @@ fn prune_and_save_cache(
 }
 
 /// Generates a complete preflight inspection manifest for an anime batch directory.
+///
+/// After a completed inspection it also prunes `persistent_cache` of the entries under
+/// `input_dir` whose file was not discovered, then saves it; a cancelled inspection prunes nothing.
 pub async fn generate_inspection_manifest(
     input_dir: &Path,
     persistent_cache: Option<Arc<PersistentInspectCache>>,

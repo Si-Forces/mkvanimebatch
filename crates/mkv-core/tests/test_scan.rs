@@ -269,7 +269,7 @@ fn cached_file_names(cache_file: &Path) -> HashSet<String> {
 }
 
 #[test]
-fn test_persistent_inspect_cache_clear_is_not_restored_by_later_saves() {
+fn test_persistent_inspect_cache_save_after_clear_keeps_only_new_entries() {
     let tmp = tempdir().unwrap();
     let cache_file = tmp.path().join("inspect_cache.json");
     let before = tmp.path().join("before.mkv");

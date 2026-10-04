@@ -264,7 +264,11 @@ async fn test_pipeline_with_log_sender() {
     let dir = tempdir().unwrap();
     let (log_sender, mut log_receiver) = create_log_channel(64);
     let pipeline = BatchPipeline::new(
-        config(PipelineMode::Extract, dir.path()),
+        // Explicit, so the test stays off the user's cache even if the empty-batch return moves.
+        PipelineConfig {
+            no_cache: true,
+            ..config(PipelineMode::Extract, dir.path())
+        },
         None,
         CancellationToken::new(),
     )
