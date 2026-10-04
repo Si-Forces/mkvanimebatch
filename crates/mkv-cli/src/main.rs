@@ -344,10 +344,9 @@ async fn run() -> Result<ExitCode, String> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    let cache = PersistentInspectCache::default();
-
     if args.clear_cache {
-        cache.clear();
+        // A disabled instance deletes the file without parsing it first.
+        PersistentInspectCache::new(None, false).clear();
         println!("Persistent inspection cache cleared.");
         return Ok(ExitCode::SUCCESS);
     }
@@ -387,13 +386,10 @@ async fn run() -> Result<ExitCode, String> {
         }
     });
 
-    let cache_opt = if args.request.no_cache.unwrap_or(false) {
-        None
-    } else {
-        Some(Arc::new(cache))
-    };
-
     if args.plan {
+        // Only `--plan` uses this cache; a batch run loads its own unless `--no-cache` is set.
+        let cache_opt = (!args.request.no_cache.unwrap_or(false))
+            .then(|| Arc::new(PersistentInspectCache::default()));
         let manifest =
             generate_plan_manifest(&args.request, cache_opt, Some(&cancel_token)).await?;
         let json = serde_json::to_string_pretty(&manifest)

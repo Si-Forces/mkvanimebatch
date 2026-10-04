@@ -1,7 +1,11 @@
 use std::collections::HashSet;
 use std::fs;
+use std::path::Path;
+use std::sync::Arc;
 
 use mkv_core::domain::{AudioTrack, MkvTrack, TrackProperties};
+use mkv_core::manifest::generate_inspection_manifest;
+use mkv_core::pipeline::CancellationToken;
 use mkv_core::scan::{
     is_cover_attachment, is_cover_filename, is_font_attachment, scan_assets, scan_mkv_files,
     FileSignature, InspectedVideo, MkvAttachment, MkvChapter, MkvmergeMetadata,
@@ -246,6 +250,142 @@ fn test_persistent_inspect_cache_save_shared_flushes_after_interval() {
     let disk_content = fs::read_to_string(&cache_file).unwrap();
     assert!(disk_content.contains("video1.mkv"));
     assert!(disk_content.contains("video2.mkv"));
+}
+
+/// The file names keyed in a saved cache file.
+fn cached_file_names(cache_file: &Path) -> HashSet<String> {
+    let on_disk: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_slice(&fs::read(cache_file).unwrap()).unwrap();
+    on_disk
+        .keys()
+        .map(|key| {
+            Path::new(key)
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect()
+}
+
+#[test]
+fn test_persistent_inspect_cache_save_after_clear_keeps_only_new_entries() {
+    let tmp = tempdir().unwrap();
+    let cache_file = tmp.path().join("inspect_cache.json");
+    let before = tmp.path().join("before.mkv");
+    let after = tmp.path().join("after.mkv");
+    fs::write(&before, b"v1").unwrap();
+    fs::write(&after, b"v2").unwrap();
+
+    let cache = PersistentInspectCache::new(Some(cache_file.clone()), true);
+    cache.put_path(&before, MkvmergeMetadata::default());
+    cache.save();
+    cache.clear();
+    assert!(!cache_file.exists());
+    assert_eq!(cache.get_path(&before), None);
+
+    cache.put_path(&after, MkvmergeMetadata::default());
+    cache.save();
+    assert_eq!(
+        cached_file_names(&cache_file),
+        HashSet::from(["after.mkv".to_string()])
+    );
+}
+
+/// A cache saved to `root/inspect_cache.json` holding `kept.mkv` and `deleted.mkv` under
+/// `root/input`, and `outside.mkv` under the sibling `root/input-extra`, whose name extends the
+/// input directory's. `deleted.mkv` is then removed from disk.
+fn cache_with_a_deleted_input_file(root: &Path) -> Arc<PersistentInspectCache> {
+    let input = root.join("input");
+    let sibling = root.join("input-extra");
+    fs::create_dir_all(&input).unwrap();
+    fs::create_dir_all(&sibling).unwrap();
+    let files = [
+        input.join("kept.mkv"),
+        input.join("deleted.mkv"),
+        sibling.join("outside.mkv"),
+    ];
+    let cache = Arc::new(PersistentInspectCache::new(
+        Some(root.join("inspect_cache.json")),
+        true,
+    ));
+    for file in &files {
+        fs::write(file, b"video").unwrap();
+        cache.put_path(file, MkvmergeMetadata::default());
+    }
+    cache.save();
+    fs::remove_file(&files[1]).unwrap();
+    cache
+}
+
+async fn assert_completed_inspection_prunes_deleted_files(input_spelling: &Path, root: &Path) {
+    let cache = cache_with_a_deleted_input_file(root);
+    generate_inspection_manifest(input_spelling, Some(Arc::clone(&cache)), None)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        cached_file_names(&root.join("inspect_cache.json")),
+        HashSet::from(["kept.mkv".to_string(), "outside.mkv".to_string()])
+    );
+}
+
+#[tokio::test]
+async fn test_completed_inspection_prunes_deleted_files_under_input_dir() {
+    let tmp = tempdir().unwrap();
+    assert_completed_inspection_prunes_deleted_files(&tmp.path().join("input"), tmp.path()).await;
+}
+
+/// Cache keys are canonical, so an input directory inspected through a symlink still prunes.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_completed_inspection_prunes_through_symlinked_input_dir() {
+    let tmp = tempdir().unwrap();
+    let link = tmp.path().join("link");
+    std::os::unix::fs::symlink(tmp.path().join("input"), &link).unwrap();
+    assert_completed_inspection_prunes_deleted_files(&link, tmp.path()).await;
+}
+
+#[tokio::test]
+async fn test_completed_inspection_of_an_emptied_input_dir_prunes_its_entries() {
+    let tmp = tempdir().unwrap();
+    let cache = cache_with_a_deleted_input_file(tmp.path());
+    fs::remove_file(tmp.path().join("input/kept.mkv")).unwrap();
+    let manifest = generate_inspection_manifest(&tmp.path().join("input"), Some(cache), None)
+        .await
+        .unwrap();
+
+    assert!(manifest.items.is_empty());
+    assert_eq!(
+        cached_file_names(&tmp.path().join("inspect_cache.json")),
+        HashSet::from(["outside.mkv".to_string()])
+    );
+}
+
+#[tokio::test]
+async fn test_cancelled_inspection_prunes_nothing() {
+    let tmp = tempdir().unwrap();
+    let cache = cache_with_a_deleted_input_file(tmp.path());
+    let token = CancellationToken::new();
+    token.cancel();
+    generate_inspection_manifest(
+        &tmp.path().join("input"),
+        Some(Arc::clone(&cache)),
+        Some(&token),
+    )
+    .await
+    .unwrap_err();
+
+    // A pruned entry would make the cache dirty, and this save would drop it from disk.
+    cache.save();
+    assert_eq!(
+        cached_file_names(&tmp.path().join("inspect_cache.json")),
+        HashSet::from([
+            "kept.mkv".to_string(),
+            "deleted.mkv".to_string(),
+            "outside.mkv".to_string()
+        ])
+    );
 }
 
 #[test]

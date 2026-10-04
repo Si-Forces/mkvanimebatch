@@ -586,6 +586,8 @@ struct CacheState {
     dirty: bool,
     revision: u64,
     last_save_ts: Option<Instant>,
+    /// Bumped by `clear`, so a save that snapshotted the data before it can tell.
+    clears: u64,
     resolved_keys: HashMap<String, String>,
 }
 
@@ -660,6 +662,10 @@ pub struct PersistentInspectCache {
     cache_file: PathBuf,
     enabled: bool,
     state: Mutex<CacheState>,
+    /// Test seam: runs after a save writes its temp file and before the locked rename, the window a
+    /// `clear` can hit.
+    #[cfg(test)]
+    before_rename: Option<fn(&PersistentInspectCache)>,
 }
 
 impl PersistentInspectCache {
@@ -669,6 +675,8 @@ impl PersistentInspectCache {
             cache_file,
             enabled,
             state: Mutex::new(CacheState::default()),
+            #[cfg(test)]
+            before_rename: None,
         };
         if enabled {
             cache.load();
@@ -695,11 +703,11 @@ impl PersistentInspectCache {
     }
 
     fn load(&self) {
-        let Ok(file) = File::open(&self.cache_file) else {
+        // One read plus `from_slice` parses faster than `from_reader` over a `BufReader`.
+        let Ok(bytes) = std::fs::read(&self.cache_file) else {
             return;
         };
-        let reader = std::io::BufReader::new(file);
-        match serde_json::from_reader::<_, HashMap<String, InspectCacheEntry>>(reader) {
+        match serde_json::from_slice::<HashMap<String, InspectCacheEntry>>(&bytes) {
             Ok(loaded) => {
                 let mut state = self.state.lock();
                 state.data = Arc::new(loaded);
@@ -752,6 +760,37 @@ impl PersistentInspectCache {
         }
     }
 
+    /// Drops the entries for files under `root` that are not in `discovered`, which must be
+    /// every file a completed scan of `root` found. Entries outside `root` are untouched.
+    pub(crate) fn prune_undiscovered<'a>(
+        &self,
+        root: &Path,
+        discovered: impl IntoIterator<Item = &'a Path>,
+    ) {
+        if !self.enabled {
+            return;
+        }
+        // Both sides go through `cache_key`, so they share the stored keys' canonical form.
+        let root = PathBuf::from(self.cache_key(root));
+        let keep: HashSet<String> = discovered.into_iter().map(|p| self.cache_key(p)).collect();
+        let mut state = self.state.lock();
+        let stale: Vec<String> = state
+            .data
+            .keys()
+            .filter(|key| Path::new(key.as_str()).starts_with(&root) && !keep.contains(*key))
+            .cloned()
+            .collect();
+        if stale.is_empty() {
+            return;
+        }
+        let data = Arc::make_mut(&mut state.data);
+        for key in &stale {
+            data.remove(key);
+        }
+        state.dirty = true;
+        state.revision += 1;
+    }
+
     /// Writes pending changes to disk immediately.
     pub fn save(&self) {
         self.save_internal(Duration::ZERO);
@@ -767,7 +806,7 @@ impl PersistentInspectCache {
             return;
         }
 
-        let (data_snapshot, saved_revision) = {
+        let (data_snapshot, saved_revision, saved_clears) = {
             let state = self.state.lock();
             if !state.dirty {
                 return;
@@ -779,7 +818,7 @@ impl PersistentInspectCache {
             {
                 return;
             }
-            (Arc::clone(&state.data), state.revision)
+            (Arc::clone(&state.data), state.revision, state.clears)
         };
 
         let parent = match self.cache_file.parent() {
@@ -816,6 +855,16 @@ impl PersistentInspectCache {
             return;
         }
         drop(writer);
+        #[cfg(test)]
+        if let Some(hook) = self.before_rename {
+            hook(self);
+        }
+        // The rename runs under the lock so a `clear` cannot slip in between: a snapshot taken
+        // before a clear is discarded instead of restoring the cleared entries.
+        let mut state = self.state.lock();
+        if state.clears != saved_clears {
+            return;
+        }
         let persisted = match temp_file.persist(&self.cache_file) {
             Ok(f) => f,
             Err(e) => {
@@ -835,18 +884,21 @@ impl PersistentInspectCache {
         #[cfg(not(unix))]
         drop(persisted);
 
-        let mut state = self.state.lock();
         if state.revision == saved_revision {
             state.dirty = false;
         }
         state.last_save_ts = Some(Instant::now());
     }
 
+    /// Empties the cache and deletes its file. A save already in flight is discarded, and later
+    /// puts persist as usual. Unlike the other methods it acts on a disabled instance too, so
+    /// `PersistentInspectCache::new(file, false).clear()` deletes the file without parsing it.
     pub fn clear(&self) {
         let mut state = self.state.lock();
         state.data = Arc::default();
         state.dirty = false;
         state.revision = 0;
+        state.clears += 1;
         state.last_save_ts = None;
         let _ = std::fs::remove_file(&self.cache_file);
     }
@@ -855,5 +907,45 @@ impl PersistentInspectCache {
 impl Default for PersistentInspectCache {
     fn default() -> Self {
         Self::new(None, true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `clear` landing while a save is in flight must neither let that save restore the
+    /// cleared entries nor let it mark a put made after the clear as already saved.
+    #[test]
+    fn test_clear_discards_a_save_in_flight() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_file = tmp.path().join("inspect_cache.json");
+        std::fs::write(tmp.path().join("before.mkv"), b"v1").unwrap();
+        std::fs::write(tmp.path().join("after.mkv"), b"v2").unwrap();
+
+        let mut cache = PersistentInspectCache::new(Some(cache_file.clone()), true);
+        cache.put_path(&tmp.path().join("before.mkv"), MkvmergeMetadata::default());
+        cache.before_rename = Some(|c| {
+            c.clear();
+            c.put_path(
+                &c.cache_file.with_file_name("after.mkv"),
+                MkvmergeMetadata::default(),
+            );
+        });
+        cache.save();
+        assert!(
+            !cache_file.exists(),
+            "the in-flight snapshot was renamed into place"
+        );
+
+        cache.before_rename = None;
+        cache.save();
+        let saved: HashMap<String, InspectCacheEntry> =
+            serde_json::from_slice(&std::fs::read(&cache_file).unwrap()).unwrap();
+        let names: Vec<_> = saved
+            .keys()
+            .filter_map(|k| Path::new(k).file_name())
+            .collect();
+        assert_eq!(names, ["after.mkv"]);
     }
 }

@@ -207,6 +207,11 @@ flowchart TD
    - Keyed on the canonical file path (Windows `\\?\` prefix stripped) and valid while `FileSignature { size: u64, mtime_ns: u128 }` matches.
    - State is guarded by a `parking_lot::Mutex`.
    - Stored at `inspect_cache.json` under `$LOCALAPPDATA/mkvanimebatch` when `LOCALAPPDATA` is set, else `$HOME/.cache/mkvanimebatch`, else `./.cache/mkvanimebatch`. Writes go to a `NamedTempFile` that is persisted over the cache file. `save()` writes immediately; `save_shared()` skips the write if the previous one was under 500 ms ago.
+   - Loaded with one `fs::read` and `serde_json::from_slice` when an enabled instance is built; never re-read after that.
+   - **Lifetime**: the desktop app keeps one instance per app session (`InspectCacheState` in `commands.rs`, a `tokio::sync::OnceCell`). The first Inspect or Run that wants a cache loads it on the blocking pool, and every later Inspect and Run shares it (`run_job` sets it as `PipelineConfig.cache`), so the file is read once per session. A `noCache` request never loads it. The CLI builds one only for `--plan` without `--no-cache`; a batch run's pipeline builds its own unless `no_cache` is set. The path memo (canonical key per spelling) lives as long as the instance; a retargeted symlink can leave a stale memo entry. The size/mtime check turns it into a re-probe, unless the new target's file has the same size and mtime as the old one, in which case the old target's metadata is served.
+   - **External writers**: an instance does not see entries written by another process after it loaded (the CLI, a second app instance), and its next save overwrites them. The cost is a re-probe.
+   - **Pruning**: after a completed preflight inspection, `generate_inspection_manifest` drops the entries keyed under the canonical input directory whose file the scan did not discover (`prune_undiscovered`), then saves. Entries outside the input directory are untouched. A cancelled inspection prunes nothing, and the pipeline never prunes: its file list is filtered by `selected_items`. Output and font directories are never discovered, so inspecting their parent prunes their entries. Pruning trusts the scan: anything the scan skips (an unreadable directory, the input directory included, an entry it cannot stat, or a non-UTF-8 name) counts as not discovered, so its entries are dropped. Desktop Runs are covered by their forced Inspect; the CLI prunes on `--plan`.
+   - **Clearing**: `clear()` empties the instance and deletes the file, and discards a save in flight so it cannot restore the cleared entries. The desktop `clear_cache` clears the session instance when it is loaded; otherwise it deletes the file unparsed and starts the session from an empty instance. It is allowed during a running job; later puts persist. `--clear-cache` deletes the file without parsing it.
 
 ---
 
@@ -500,7 +505,7 @@ The frontend is plain ES modules with no framework.
    - **Run**: executes the batch, then prints the summary log lines and a totals line (`Finished. Processed N file(s) ...`).
    - **Preflight planning (`--plan`)**: prints the pretty-printed `InspectionManifest` JSON and exits without writing media.
    - **NDJSON stream (`--events`)**: prints each `JobEvent` as `@event: <json>` on stdout and suppresses the summary output.
-   - **`--clear-cache`**: clears the inspection cache and exits.
+   - **`--clear-cache`**: deletes the inspection cache file, without parsing it, and exits.
 3. **Arguments**:
    - Maps flags to `BatchRequest`: `--input-dir`, `--out-dir`, `--fonts-dir`, `--assets-dir`, `--preset`, `--bitrate`, `--complexity`, `--sub-offset`, `--workers` (default: physical cores clamped 1–16), `--io-jobs`, `--ffmpeg-threads` (`auto` = governor default), `--assignments`, `--selected-item`, `--selected-items`, `--dry-run`, `--no-cache`, plus `--plan`, `--events`, `--clear-cache`, `--extract` / `--remux`, `-h`/`--help`. Any other argument fails with `Unknown argument: <arg>`.
    - `--assignments <FILE>` is read with `parse_assignments_json`: a `TrackAssignment` array, `{"assignments": [...] | {video: asset}}`, or a flat `{video: asset}` map (maps become subtitle assignments).
@@ -529,6 +534,7 @@ sequenceDiagram
     UI->>Cmd: inspect_directory(path, {noCache})
     Cmd->>Scan: Lock start_lock, cancel any previous scan, register ActiveScan
     Cmd->>Cmd: Clear JobSnapshot (unless a job is active)
+    Cmd->>Cache: Session cache, loaded on first use (none with noCache)
     Cmd->>Core: generate_inspection_manifest(dir, cache, cancel_token).await
     Core->>Core: scan_mkv_files(recursive)
     Core->>Core: List subtitle candidates per release (release dir and ancestors)
@@ -545,7 +551,7 @@ sequenceDiagram
         end
     end
     Core->>Core: Summarize metadata per item
-    Core->>Cache: save()
+    Core->>Cache: prune_undiscovered(dir, discovered files), save()
     Core-->>Cmd: InspectionManifest { version, subtitle_candidates, items }
     Cmd-->>UI: Manifest with canonical_dir
     UI->>UI: Populate Queue Tracker & render episode cards
@@ -572,7 +578,7 @@ sequenceDiagram
     UI->>Cmd: run_job(BatchRequest)
     Cmd->>Cmd: BatchRequest::validate() (fail fast)
     Cmd->>Proc: reserve_job_slot(), begin_snapshot()
-    Cmd->>Pipe: from_request(), spawn pipeline + supervisor
+    Cmd->>Pipe: into_pipeline_config(), spawn pipeline (with the session cache) + supervisor
     Cmd-->>UI: job_id
     Pipe-->>Cmd: JobEvent::BatchStart
     Cmd-->>UI: job-event (BatchStart)

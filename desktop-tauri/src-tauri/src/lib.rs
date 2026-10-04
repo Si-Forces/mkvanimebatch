@@ -61,6 +61,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(JobState::default())
         .manage(ScanState::default())
+        .manage(commands::InspectCacheState::default())
         .manage(telemetry::TelemetryState::default())
         .invoke_handler(tauri::generate_handler![
             commands::run_job,
