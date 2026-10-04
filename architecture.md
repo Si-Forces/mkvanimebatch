@@ -377,7 +377,7 @@ Extract mode skips probing and planning up front: each item task probes its vide
 2. **Global work queue (ADR-0011)**:
    - Planned jobs from every release directory form one queue in batch order, so workers do not idle at directory boundaries. Asset resolution stays per directory.
 3. **Cooperative cancellation (`CancellationToken`)**:
-   - Checked while probing, after probing, before planning each item, and before each task launch. Each item's work future races the token in a `tokio::select!`, so a stop drops the in-flight work at its next await point.
+   - Checked while probing, after probing, before each Release Directory's asset pass, before planning each item, and before each task launch. Preflight inspection also checks it before each directory of its subtitle pass. A directory's pass already under way runs to completion. Each item's work future races the token in a `tokio::select!`, so a stop drops the in-flight work at its next await point.
    - Child processes are spawned with `kill_on_drop(true)`, and scratch directories are `TempDir`s, so dropping the work kills the tools and removes staged files. After a stop, `run_items` aborts the remaining tasks and settles every in-flight and unstarted item as `cancelled`.
 4. **Item duration (ADR-0009)**:
    - The engine takes `Instant::now()` when it starts an item and puts `elapsed().as_secs_f64()` in `JobEvent::ItemComplete { duration_sec: Some(..) }` for every started item, whether it completed, failed, or was cancelled.

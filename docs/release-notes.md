@@ -39,6 +39,7 @@
 
 - Recursive MKV scanning skips canonical-key path allocations for non-MKV files and directories excluded by the output/font-directory name filters. Canonical keys are still derived for candidates that need ignore-path or deduplication checks.
 - Asset discovery stops repeating work for directories shared by many Release Directories (ancestors and the `--assets-dir` fallback): chapter XMLs are sniffed once per directory per run instead of on every index build, a repeated spelling of a scanned directory skips the `realpath`, a cache hit no longer deep-copies the scan results, and directory entries are classified from `read_dir` file types instead of a resolving `stat` each.
+- A stop during the per-directory asset pass takes effect after the directory being scanned, instead of only once planning starts. Remux checks before each Release Directory and settles every item as `cancelled`; preflight inspection checks before each directory whose subtitles it lists and fails with `Inspection cancelled`. A directory scan already underway still runs to completion.
 
 ### Core Performance & Probing
 
