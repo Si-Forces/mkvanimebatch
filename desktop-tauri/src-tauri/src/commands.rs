@@ -9,6 +9,7 @@ use mkv_core::pipeline::{
 use serde::Deserialize;
 use std::future::Future;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -56,10 +57,9 @@ pub async fn inspect_directory(
     };
 
     let no_cache = options.and_then(|o| o.no_cache).unwrap_or(false);
-    let cache = (!no_cache).then(mkv_core::scan::PersistentInspectCache::default);
+    let cache = (!no_cache).then(|| Arc::new(mkv_core::scan::PersistentInspectCache::default()));
     let mut manifest =
-        mkv_core::manifest::generate_inspection_manifest(&dir, cache.as_ref(), Some(&cancel_token))
-            .await?;
+        mkv_core::manifest::generate_inspection_manifest(&dir, cache, Some(&cancel_token)).await?;
     manifest.extra.insert(
         "canonical_dir".to_string(),
         display_canonical_path(&dir.to_string_lossy()).into(),

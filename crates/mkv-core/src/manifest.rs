@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
@@ -9,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use crate::domain::{ancestor_dirs, natural_sort_key, MkvTrack};
 use crate::request::{clean_relative_path, resolve_selected_items};
 use crate::scan::{
-    probe_video, scan_assets, scan_mkv_files, InspectedVideo, MkvmergeMetadata,
+    get_or_probe_video, scan_assets, scan_mkv_files, InspectedVideo, MkvmergeMetadata,
     PersistentInspectCache, ScanCache,
 };
 
@@ -318,11 +319,11 @@ fn cancelled<T>(cache: Option<&PersistentInspectCache>) -> Result<T, String> {
 /// Generates a complete preflight inspection manifest for an anime batch directory.
 pub async fn generate_inspection_manifest(
     input_dir: &Path,
-    persistent_cache: Option<&PersistentInspectCache>,
+    persistent_cache: Option<Arc<PersistentInspectCache>>,
     cancel_token: Option<&CancellationToken>,
 ) -> Result<InspectionManifest, String> {
     if is_cancelled(cancel_token) {
-        return cancelled(persistent_cache);
+        return cancelled(persistent_cache.as_deref());
     }
 
     let all_mkvs = scan_mkv_files(input_dir, true, None);
@@ -380,32 +381,26 @@ pub async fn generate_inspection_manifest(
     }
 
     let probe_limit = crate::cpu::probe_concurrency(crate::cpu::default_workers());
-    let probe_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(probe_limit));
+    let probe_sem = Arc::new(tokio::sync::Semaphore::new(probe_limit));
     let mut probe_set = tokio::task::JoinSet::new();
 
     let mut probe_results: HashMap<PathBuf, Result<MkvmergeMetadata, String>> = HashMap::new();
 
-    for mkv in &all_mkvs {
-        if let Some(cached) = persistent_cache.and_then(|c| c.get_path(&mkv.path)) {
-            probe_results.insert(mkv.path.clone(), Ok(cached));
-        }
-    }
-
     if is_cancelled(cancel_token) {
-        return cancelled(persistent_cache);
+        return cancelled(persistent_cache.as_deref());
     }
 
+    // The cache lookup and store run inside each probe task, so they overlap with probing
+    // and are aborted with it on cancel.
     for mkv in &all_mkvs {
-        if probe_results.contains_key(&mkv.path) {
-            continue;
-        }
         let path = mkv.path.clone();
-        let sem = std::sync::Arc::clone(&probe_sem);
+        let cache = persistent_cache.clone();
+        let sem = Arc::clone(&probe_sem);
         probe_set.spawn(async move {
             let Ok(_permit) = sem.acquire().await else {
                 return (path, Err("Probe semaphore closed".into()));
             };
-            let res = probe_video(&path).await;
+            let res = get_or_probe_video(&path, cache.as_deref()).await;
             (path, res)
         });
     }
@@ -415,7 +410,7 @@ pub async fn generate_inspection_manifest(
             tokio::select! {
                 _ = token.cancelled() => {
                     probe_set.abort_all();
-                    return cancelled(persistent_cache);
+                    return cancelled(persistent_cache.as_deref());
                 }
                 next = probe_set.join_next() => next,
             }
@@ -425,11 +420,6 @@ pub async fn generate_inspection_manifest(
 
         match next_res {
             Some(Ok((path, probe_res))) => {
-                if let Ok(meta) = &probe_res {
-                    if let Some(cache) = persistent_cache {
-                        cache.put_path(&path, meta.clone());
-                    }
-                }
                 probe_results.insert(path, probe_res);
             }
             Some(Err(join_err)) => {
@@ -466,7 +456,7 @@ pub async fn generate_inspection_manifest(
         });
     }
 
-    if let Some(cache) = persistent_cache {
+    if let Some(cache) = &persistent_cache {
         cache.save();
     }
 
@@ -832,7 +822,7 @@ mod tests {
             PersistentInspectCache::new(Some(temp_dir.path().join("inspect_cache.json")), true);
         cache.put_path(&input_dir.join("ep01.mkv"), MkvmergeMetadata::default());
 
-        let manifest = generate_inspection_manifest(&input_dir, Some(&cache), None)
+        let manifest = generate_inspection_manifest(&input_dir, Some(Arc::new(cache)), None)
             .await
             .unwrap();
 

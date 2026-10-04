@@ -532,15 +532,17 @@ sequenceDiagram
     Cmd->>Core: generate_inspection_manifest(dir, cache, cancel_token).await
     Core->>Core: scan_mkv_files(recursive)
     Core->>Core: List subtitle candidates per release (release dir and ancestors)
-    Core->>Cache: get_path for every MKV (size, mtime_ns)
-    loop Each cache miss, concurrently (bounded semaphore)
-        Core->>EBML: probe_ebml_native(file)
-        alt Native probe OK
-            EBML-->>Core: MkvmergeMetadata
-        else Native probe failed
-            Core->>Core: mkvmerge -J fallback
+    loop Each MKV, concurrently (bounded semaphore)
+        Core->>Cache: get_path (size, mtime_ns)
+        opt Cache miss
+            Core->>EBML: probe_ebml_native(file)
+            alt Native probe OK
+                EBML-->>Core: MkvmergeMetadata
+            else Native probe failed
+                Core->>Core: mkvmerge -J fallback
+            end
+            Core->>Cache: put_path on success
         end
-        Core->>Cache: put_path on success
     end
     Core->>Core: Summarize metadata per item
     Core->>Cache: save()
