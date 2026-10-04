@@ -587,13 +587,15 @@ pub fn cancel_shutdown(job_state: &JobState, scan_state: &ScanState) {
 /// second abort is a no-op.
 #[tauri::command]
 pub async fn close_window(window: tauri::Window, app: AppHandle) -> Result<(), String> {
-    run_teardown(app.clone(), |state, scan_state| {
-        begin_shutdown(state, scan_state);
-        cleanup_owned_processes(state, scan_state)
-    })
-    .await
-    .and_then(|()| window.close().map_err(|error| error.to_string()))
-    .inspect_err(|_| cancel_shutdown(&app.state::<JobState>(), &app.state::<ScanState>()))
+    // Refuse starts before the blocking-pool hop, so a `run_job` that lands while the pool
+    // schedules the teardown is refused instead of starting a job the teardown then cancels. One
+    // async hop remains: this body runs on a Tokio task, not at dispatch.
+    let (state, scan_state) = (app.state::<JobState>(), app.state::<ScanState>());
+    begin_shutdown(&state, &scan_state);
+    run_teardown(app.clone(), cleanup_owned_processes)
+        .await
+        .and_then(|()| window.close().map_err(|error| error.to_string()))
+        .inspect_err(|_| cancel_shutdown(&state, &scan_state))
 }
 
 #[cfg(test)]
