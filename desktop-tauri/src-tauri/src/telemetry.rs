@@ -77,7 +77,8 @@ fn is_engine_process(
 }
 
 /// Runs the poll on the blocking pool: a sync command would walk every process on the main
-/// thread. The state is read through `app` because `State<'_>` is not `'static`.
+/// thread, and a plain async one would block a Tokio worker the engine's tasks run on. The state
+/// is read through `app` because `State<'_>` is not `'static`.
 #[tauri::command]
 pub async fn get_system_telemetry(app: AppHandle) -> Result<TelemetryData, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -241,12 +242,52 @@ mod tests {
         let mut child = std::process::Command::new("true").spawn().unwrap();
         let child_pid = Pid::from_u32(child.id());
 
-        // Not yet reaped, so the child is still listed, as a zombie once it exits.
+        // Not reaped yet, so /proc still lists the child: running, or a zombie once it exits.
         poll(&mut inner, self_pid);
         assert!(inner.sys.process(child_pid).is_some());
 
         child.wait().unwrap();
         poll(&mut inner, self_pid);
         assert!(inner.sys.process(child_pid).is_none());
+    }
+
+    /// The poll asks sysinfo for disk usage only, but `is_engine_process` matches children by name
+    /// and parent. Both must stay populated on every platform, or the write rate would quietly
+    /// count only the app itself.
+    #[test]
+    fn test_poll_keeps_the_name_and_parent_of_a_live_child() {
+        let mut inner = TelemetryInner {
+            sys: System::new(),
+            last_poll: None,
+        };
+        let self_pid = Pid::from_u32(std::process::id());
+        let (program, args, expected_name): (&str, &[&str], &str) = if cfg!(windows) {
+            ("ping", &["-n", "30", "127.0.0.1"], "ping")
+        } else {
+            ("sleep", &["30"], "sleep")
+        };
+        let mut child = std::process::Command::new(program)
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+
+        poll(&mut inner, self_pid);
+        let listed = inner.sys.process(Pid::from_u32(child.id())).map(|process| {
+            (
+                process.name().to_string_lossy().into_owned(),
+                process.parent(),
+            )
+        });
+        // Stop the child before asserting, so a failure does not leave it running.
+        child.kill().unwrap();
+        child.wait().unwrap();
+
+        let (listed_name, parent) = listed.expect("the live child is missing from the map");
+        assert!(
+            starts_with_ignore_ascii_case(&listed_name, expected_name),
+            "{listed_name}"
+        );
+        assert_eq!(parent, Some(self_pid));
     }
 }
