@@ -10,7 +10,7 @@ use crate::domain::{ancestor_dirs, natural_sort_key, MkvTrack};
 use crate::request::{clean_relative_path, resolve_selected_items};
 use crate::scan::{
     probe_video, scan_assets, scan_mkv_files, InspectedVideo, MkvmergeMetadata,
-    PersistentInspectCache, ScanResults,
+    PersistentInspectCache, ScanCache,
 };
 
 pub const MANIFEST_VERSION: u64 = 2;
@@ -340,7 +340,7 @@ pub async fn generate_inspection_manifest(
         .filter_map(|video| video.path.parent().map(Path::to_path_buf))
         .collect();
 
-    let mut scan_cache = HashMap::<PathBuf, ScanResults>::new();
+    let mut scan_cache = ScanCache::default();
     let mut release_by_dir = HashMap::<PathBuf, String>::new();
     let mut subtitle_candidates = BTreeMap::<String, Vec<String>>::new();
 

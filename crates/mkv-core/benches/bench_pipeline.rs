@@ -1,5 +1,6 @@
 //! Benchmarks for the batch pipeline: preflight validation throughput and warm-cache
-//! dry-run batch execution with event streaming, across scaled synthetic workloads.
+//! dry-run batch execution with event streaming, across scaled synthetic workloads: one with
+//! per-release subtitles, one with chapters and subtitles shared at the root.
 
 use std::fs;
 use std::path::Path;
@@ -71,6 +72,36 @@ fn populate_synthetic_workload(root: &Path, count: usize, cache: &PersistentInsp
     cache.save();
 }
 
+/// Writes `count` placeholder episodes across season directories, with their chapter XMLs
+/// and subtitles all at the root, so every release directory indexes the same shared
+/// ancestor assets. Seeds `cache` with the video metadata.
+fn populate_shared_assets_workload(root: &Path, count: usize, cache: &PersistentInspectCache) {
+    let seasons = 4.max(count / 25);
+    for i in 0..count {
+        let season_idx = i % seasons;
+        let season_dir = root.join(format!("Season {season_idx:02}"));
+        fs::create_dir_all(&season_dir).unwrap();
+
+        let ep_num = (i / seasons) + 1;
+        let stem = format!("Show - S{season_idx:02}E{ep_num:03}");
+        let video_path = season_dir.join(format!("{stem}.mkv"));
+        fs::write(&video_path, b"mock mkv container").unwrap();
+        fs::write(
+            root.join(format!("{stem}_chapters.xml")),
+            b"<?xml version='1.0'?><Chapters><EditionEntry></EditionEntry></Chapters>",
+        )
+        .unwrap();
+        fs::write(
+            root.join(format!("{stem}.ass")),
+            b"[Script Info]\nTitle: Benchmark Subtitle\n",
+        )
+        .unwrap();
+
+        cache.put_path(&video_path, mock_video_metadata());
+    }
+    cache.save();
+}
+
 fn bench_validation(runs: usize) {
     let tmp = tempdir().unwrap();
     fs::write(tmp.path().join("ep01.mkv"), b"dummy").unwrap();
@@ -114,14 +145,20 @@ fn bench_validation(runs: usize) {
     );
 }
 
-/// Times a warm-cache dry run of `count` synthetic items while a consumer drains events.
-async fn bench_dry_run(mode: PipelineMode, count: usize, workers: usize) {
+/// Times a warm-cache dry run of `count` synthetic items, laid out by `populate`, while a
+/// consumer drains events.
+async fn bench_dry_run(
+    populate: fn(&Path, usize, &PersistentInspectCache),
+    mode: PipelineMode,
+    count: usize,
+    workers: usize,
+) {
     let tmp = tempdir().unwrap();
     let cache = Arc::new(PersistentInspectCache::new(
         Some(tmp.path().join("inspect_cache.json")),
         true,
     ));
-    populate_synthetic_workload(tmp.path(), count, &cache);
+    populate(tmp.path(), count, &cache);
 
     let config = PipelineConfig {
         input_dir: tmp.path().to_path_buf(),
@@ -170,12 +207,36 @@ async fn main() {
 
     println!("--- 2. Batch Remux Pipeline Scaling (Warm Cache) ---");
     for count in WORKLOAD_SIZES {
-        bench_dry_run(PipelineMode::Remux, count, concurrency).await;
+        bench_dry_run(
+            populate_synthetic_workload,
+            PipelineMode::Remux,
+            count,
+            concurrency,
+        )
+        .await;
     }
     println!();
 
     println!("--- 3. Batch Extract Pipeline Scaling (Warm Cache) ---");
     for count in WORKLOAD_SIZES {
-        bench_dry_run(PipelineMode::Extract, count, concurrency).await;
+        bench_dry_run(
+            populate_synthetic_workload,
+            PipelineMode::Extract,
+            count,
+            concurrency,
+        )
+        .await;
+    }
+    println!();
+
+    println!("--- 4. Batch Remux Pipeline, Shared Root Assets (Warm Cache) ---");
+    for count in WORKLOAD_SIZES {
+        bench_dry_run(
+            populate_shared_assets_workload,
+            PipelineMode::Remux,
+            count,
+            concurrency,
+        )
+        .await;
     }
 }

@@ -9,7 +9,7 @@ use mkv_core::assets::{
 use mkv_core::domain::{ancestor_dirs, EpisodeInfo, MkvTrack, TrackProperties};
 use mkv_core::scan::{
     create_parsed_file, InspectedVideo, InspectionResult, MkvAttachment, MkvChapter,
-    MkvmergeMetadata, ParsedFile,
+    MkvmergeMetadata, ParsedFile, ScanCache,
 };
 use tempfile::tempdir;
 
@@ -59,7 +59,7 @@ fn test_chap_index_lookup() {
     fs::write(&xml_path, CHAPTER_XML).unwrap();
 
     let mut chap_idx = ChapterIndex::new();
-    chap_idx.add(create_parsed_file(&xml_path));
+    chap_idx.add(&create_parsed_file(&xml_path));
 
     let matched = chap_idx.lookup(&EpisodeInfo::new("1", "E", "01"));
     assert_eq!(matched, Some(xml_path));
@@ -80,13 +80,31 @@ fn test_chap_index_cross_dir_duplicate_kept_first() {
     }
 
     let mut chap_idx = ChapterIndex::new();
-    chap_idx.add(create_parsed_file(&first));
-    chap_idx.add(create_parsed_file(&second));
+    chap_idx.add(&create_parsed_file(&first));
+    chap_idx.add(&create_parsed_file(&second));
 
     assert_eq!(
         chap_idx.lookup(&EpisodeInfo::new("1", "E", "01")),
         Some(first)
     );
+}
+
+#[test]
+fn test_discover_scan_cache_hit_keeps_chapter_without_resniffing() {
+    let tmp = tempdir().unwrap();
+    let xml_path = tmp.path().join("Show - 01_chapters.xml");
+    fs::write(&xml_path, CHAPTER_XML).unwrap();
+    let search_dirs = [tmp.path().to_path_buf()];
+    let episode = EpisodeInfo::new("", "E", "01");
+    let mut scan_cache = ScanCache::default();
+
+    let first = AssetResolver::discover(&search_dirs, None, Some(&mut scan_cache), None);
+    assert_eq!(first.chap_index.lookup(&episode), Some(xml_path.clone()));
+
+    // The file no longer sniffs as chapter XML; a cache hit must not read it again.
+    fs::write(&xml_path, b"<?xml version='1.0'?><Tags></Tags>").unwrap();
+    let second = AssetResolver::discover(&search_dirs, None, Some(&mut scan_cache), None);
+    assert_eq!(second.chap_index.lookup(&episode), Some(xml_path));
 }
 
 #[test]
