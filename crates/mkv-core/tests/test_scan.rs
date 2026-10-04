@@ -262,11 +262,10 @@ fn test_scan_assets_grouping() {
     )
     .unwrap();
     fs::write(dir.join("cover.jpg"), b"cover").unwrap();
+    fs::write(dir.join("Show - 01.png"), b"episode cover").unwrap();
     fs::write(dir.join("ignored.txt"), b"ignored").unwrap();
 
     let scan = scan_assets(&dir, None);
-    assert_eq!(scan.videos.len(), 1);
-    assert_eq!(scan.videos[0].name, "Show - 01.mkv");
 
     assert_eq!(scan.subs.len(), 1);
     assert_eq!(scan.subs[0].name, "Show - 01.ass");
@@ -274,8 +273,55 @@ fn test_scan_assets_grouping() {
     assert_eq!(scan.chapters.len(), 1);
     assert_eq!(scan.chapters[0].name, "Show - 01_chapters.xml");
 
-    assert_eq!(scan.covers.len(), 1);
+    // Videos are not reported, but the video's stem makes its bare-stem image an Episode Cover.
+    assert_eq!(scan.covers.len(), 2);
     assert_eq!(scan.covers[0].name, "cover.jpg");
+    assert_eq!(scan.covers[1].name, "Show - 01.png");
+}
+
+/// A directory reached through a second spelling gets the first spelling's results back, so
+/// asset paths, and the subtitle IDs derived from them, keep that spelling (#32).
+#[cfg(unix)]
+#[test]
+fn test_scan_assets_cache_keeps_first_spelling() {
+    use mkv_core::scan::ScanCache;
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempdir().unwrap();
+    let real = tmp.path().join("assets");
+    fs::create_dir_all(&real).unwrap();
+    fs::write(real.join("Show - 01.ass"), b"sub").unwrap();
+    let link = tmp.path().join("assets_link");
+    symlink(&real, &link).unwrap();
+
+    let mut cache = ScanCache::default();
+    let first = scan_assets(&real, Some(&mut cache));
+    let second = scan_assets(&link, Some(&mut cache));
+
+    assert_eq!(first.subs[0].path, real.join("Show - 01.ass"));
+    assert_eq!(second.subs[0].path, real.join("Show - 01.ass"));
+}
+
+/// Entries are kept when they are, or link to, a regular file; a symlink to a directory and a
+/// broken symlink are skipped.
+#[cfg(unix)]
+#[test]
+fn test_scan_assets_symlink_entries() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempdir().unwrap();
+    let dir = tmp.path().join("release");
+    let elsewhere = tmp.path().join("elsewhere");
+    fs::create_dir_all(&dir).unwrap();
+    fs::create_dir_all(elsewhere.join("Show - 02.ass")).unwrap();
+    fs::write(elsewhere.join("Show - 01.ass"), b"sub").unwrap();
+    symlink(elsewhere.join("Show - 01.ass"), dir.join("Show - 01.ass")).unwrap();
+    symlink(elsewhere.join("Show - 02.ass"), dir.join("Show - 02.ass")).unwrap();
+    symlink(elsewhere.join("missing.ass"), dir.join("Show - 03.ass")).unwrap();
+
+    let scan = scan_assets(&dir, None);
+    let names: Vec<_> = scan.subs.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, ["Show - 01.ass"]);
 }
 
 #[test]
