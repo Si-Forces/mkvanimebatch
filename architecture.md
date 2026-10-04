@@ -469,7 +469,8 @@ The engine runs inside the desktop process (ADR-0007, ADR-0008). Registered Taur
 The webview polls `get_system_telemetry` every second while a job is active and every 30 seconds otherwise, skipping ticks while a request is in flight and pausing while the page is hidden.
 
 1. **Per-poll sampling** (`sysinfo::System`): overall CPU percentage, RAM used/total, and `io_mb_s`, the bytes written since the previous poll by the app process and its direct child `mkvmerge`, `mkvextract`, and `ffmpeg` processes (`is_engine_process`), divided by the time between polls.
-2. **Idle cost**: when no job or scan is active, only the app's own process is refreshed (`ProcessesToUpdate::Some(&[self_pid])`); otherwise all processes are refreshed to find the children.
+2. **One refresh per poll**: every poll refreshes all processes, requesting only disk usage (name and parent are always populated), and removes dead ones. An exited child therefore leaves the map once reaped instead of having its last write delta counted on every later poll. With no job running there are no children, so only the app's own writes are counted.
+3. **Off the main thread**: `get_system_telemetry` is an async command that runs the poll (`poll`) on Tokio's blocking pool. The `System` is built with CPU and memory only; the process map fills on the first poll.
 
 ---
 
