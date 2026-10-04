@@ -15,10 +15,12 @@
 //! - `MKV_BENCH_CORPUS`: the corpus directory. When it is unset the bench skips.
 //! - `MKV_BENCH_DISK`: `hdd` or `ssd`, the disk the corpus sits on. It labels each row and picks
 //!   the grid. `hdd` runs all-FLAC with `workers` in {2, 4, 8}. `ssd` runs the same all-FLAC cells
-//!   as a control, plus a mixed batch with `workers` in {cores/2, cores, 2 x cores}. Every cell uses
-//!   `io_jobs = 2`, and each batch kind ends with a default cell (`workers` unset, so the engine's
-//!   own default applies). The HDD cells only mean something when the corpus is on the HDD, so
-//!   copy it there and run again with `hdd`.
+//!   as a control, plus a mixed batch with `workers` in {d/2, d, 2 x d}, where d is the engine's
+//!   default worker count (physical cores capped at the available parallelism, clamped to 1-16).
+//!   Every cell uses `io_jobs = 2`, and each batch kind ends with a default cell (`workers` unset,
+//!   so the engine's own default applies), which replaces any explicit cell, all-FLAC or mixed,
+//!   equal to d. The HDD cells only mean something when the corpus is on the HDD, so copy it there
+//!   and run again with `hdd`.
 //! - `MKV_BENCH_BATCH` (optional): `flac` or `mixed`, to run only that batch kind.
 //!
 //! Corpus layout: 6 real releases, one subdirectory each (`corpus/<release>/<episode>.mkv`), some
@@ -29,10 +31,17 @@
 //!
 //! Each cell evicts every corpus file from the page cache (`dd iflag=nocache count=0`, no root
 //! needed; it does not clear the drive's own cache). It then runs the remux into the default
-//! `<release>/Output/`, on the same disk as the sources, and deletes everything the cell created.
-//! The bench refuses to start if any release already has an `Output/` directory, because remux
-//! would overwrite files there. A run killed mid-cell leaves `Output/` behind; remove it before
-//! you run again.
+//! `<release>/Output/`, on the same disk as the sources, and deletes everything the cell created:
+//! the `Output/` files, and the fonts the registry adds to `<release>/fonts/` with its
+//! `.font_staging/`. The bench refuses to start if any release already has an `Output/`
+//! directory, because remux would overwrite files there; if the corpus contains a symlink, because
+//! sources behind one would not be evicted and outputs written behind one would not be deleted; or
+//! if anything under the corpus cannot be read (such as a root-owned `lost+found` at the top of a
+//! mount), because the bench could not tell its outputs from the sources. A run killed mid-cell
+//! leaves `Output/` behind; remove it before you run again.
+//!
+//! `ffmpeg_threads` follows `workers` through the ADR-0013 governor (the `ffmpeg_t` column), so
+//! the all-FLAC cells change both at once.
 
 fn main() {
     #[cfg(target_os = "linux")]
@@ -85,8 +94,13 @@ mod real_media {
         workers: Option<usize>,
     }
 
-    /// The cells for `disk` (`hdd` or `ssd`), restricted to `only` when set.
-    fn grid(disk: &str, only: Option<BatchKind>, cores: usize) -> Result<Vec<Cell>, String> {
+    /// The cells for `disk` (`hdd` or `ssd`), restricted to `only` when set. `default_workers` is
+    /// the engine's default; the default cell stands in for an explicit cell of that size.
+    fn grid(
+        disk: &str,
+        only: Option<BatchKind>,
+        default_workers: usize,
+    ) -> Result<Vec<Cell>, String> {
         let kinds: &[BatchKind] = match disk {
             "hdd" => &[BatchKind::AllFlac],
             "ssd" => &[BatchKind::AllFlac, BatchKind::Mixed],
@@ -100,12 +114,13 @@ mod real_media {
         for &kind in kinds.iter().filter(|&&k| only.is_none_or(|o| o == k)) {
             let mut workers = match kind {
                 BatchKind::AllFlac => FLAC_WORKERS.to_vec(),
-                BatchKind::Mixed => vec![(cores / 2).max(1), cores, cores * 2],
+                BatchKind::Mixed => vec![default_workers / 2, default_workers, default_workers * 2],
             };
             workers
                 .iter_mut()
                 .for_each(|w| *w = (*w).clamp(1, MAX_WORKERS));
             workers.dedup();
+            workers.retain(|&w| w != default_workers);
             cells.extend(workers.into_iter().map(|w| Cell {
                 kind,
                 workers: Some(w),
@@ -200,13 +215,16 @@ mod real_media {
             workers(ssd.clone(), BatchKind::AllFlac),
             [Some(2), Some(4), Some(8), None]
         );
+        assert_eq!(workers(ssd, BatchKind::Mixed), [Some(6), Some(24), None]);
+        let ssd = grid("ssd", None, 4).unwrap();
         assert_eq!(
-            workers(ssd, BatchKind::Mixed),
-            [Some(6), Some(12), Some(24), None]
+            workers(ssd.clone(), BatchKind::AllFlac),
+            [Some(2), Some(8), None]
         );
+        assert_eq!(workers(ssd, BatchKind::Mixed), [Some(2), Some(8), None]);
         assert_eq!(
             workers(grid("ssd", None, 1).unwrap(), BatchKind::Mixed),
-            [Some(1), Some(2), None]
+            [Some(2), None]
         );
         assert!(grid("hdd", None, 12)
             .unwrap()
@@ -216,25 +234,41 @@ mod real_media {
         assert!(grid("nas", None, 12).is_err());
     }
 
-    /// Every entry under `root`, symlinks not followed.
-    fn walk(root: &Path) -> Vec<(PathBuf, FileType)> {
+    /// The entries under a directory, symlinks not followed.
+    struct Walk {
+        entries: Vec<(PathBuf, FileType)>,
+        /// Directories or entries that could not be read, and so are missing from `entries`.
+        unreadable: usize,
+    }
+
+    /// Walks `root`, counting what it cannot read instead of failing.
+    fn walk(root: &Path) -> Walk {
         let mut entries = Vec::new();
+        let mut unreadable = 0;
         let mut stack = vec![root.to_path_buf()];
         while let Some(dir) = stack.pop() {
             let Ok(read) = fs::read_dir(&dir) else {
+                unreadable += 1;
                 continue;
             };
-            for entry in read.flatten() {
-                let Ok(file_type) = entry.file_type() else {
+            for entry in read {
+                let Some((path, file_type)) = entry
+                    .ok()
+                    .and_then(|e| e.file_type().ok().map(|t| (e.path(), t)))
+                else {
+                    unreadable += 1;
                     continue;
                 };
                 if file_type.is_dir() {
-                    stack.push(entry.path());
+                    stack.push(path.clone());
                 }
-                entries.push((entry.path(), file_type));
+                entries.push((path, file_type));
             }
         }
-        entries
+        Walk {
+            entries,
+            unreadable,
+        }
     }
 
     /// Records the corpus before a cell; on drop, deletes every entry that appeared since.
@@ -246,9 +280,20 @@ mod real_media {
     }
 
     impl CellOutputs {
-        /// Snapshots `root` and returns its regular files for eviction.
-        fn snapshot(root: &Path) -> (Self, Vec<PathBuf>) {
-            let entries = walk(root);
+        /// Snapshots `root` and returns its regular files for eviction. The snapshot must be
+        /// complete: an entry it missed would look created at drop time and be deleted, so any
+        /// unreadable directory or entry refuses the cell instead.
+        fn snapshot(root: &Path) -> Result<(Self, Vec<PathBuf>), String> {
+            let Walk {
+                entries,
+                unreadable,
+            } = walk(root);
+            if unreadable > 0 {
+                return Err(format!(
+                    "{unreadable} unreadable directories or entries under '{}'",
+                    root.display()
+                ));
+            }
             let files = entries
                 .iter()
                 .filter(|(_, t)| t.is_file())
@@ -259,13 +304,16 @@ mod real_media {
                 root: root.to_path_buf(),
                 before,
             };
-            (guard, files)
+            Ok((guard, files))
         }
     }
 
     impl Drop for CellOutputs {
         fn drop(&mut self) {
+            // The unreadable count is ignored: an entry this walk cannot read is only left in
+            // place, never wrongly deleted.
             let created: Vec<(PathBuf, FileType)> = walk(&self.root)
+                .entries
                 .into_iter()
                 .filter(|(p, _)| !self.before.contains(p))
                 .collect();
@@ -384,7 +432,13 @@ mod real_media {
         let ffmpeg_threads = config.ffmpeg_threads;
 
         // Declared before the run, so the outputs go even if the run fails or panics.
-        let (_outputs, files) = CellOutputs::snapshot(&corpus.root);
+        let (_outputs, files) = match CellOutputs::snapshot(&corpus.root) {
+            Ok(snapshot) => snapshot,
+            Err(e) => {
+                eprintln!("  cell skipped, corpus snapshot incomplete: {e}");
+                return;
+            }
+        };
         evict_page_cache(&files);
 
         let pipeline = BatchPipeline::new(config, None, CancellationToken::new());
@@ -452,15 +506,44 @@ mod real_media {
                 std::process::exit(2);
             }
         };
-        // `cpu::physical_core_count` is crate-private, so cores come from available_parallelism,
-        // as in bench_pipeline.rs. On an SMT machine that is logical CPUs, not physical cores.
-        let cores = std::thread::available_parallelism().map_or(4, |p| p.get());
-        let cells = grid(&disk, only, cores).unwrap_or_else(|e| {
+        if !root.is_dir() {
+            eprintln!("MKV_BENCH_CORPUS is not a directory: '{}'", root.display());
+            std::process::exit(2);
+        }
+        // The engine's default worker count (physical cores from the crate-private `cpu`, clamped
+        // to 1-16), read through the public request API. The second observation in the header is
+        // about filling those default slots.
+        let default_workers = match (BatchRequest {
+            mode: PipelineMode::Remux,
+            input_dir: root.clone(),
+            ..Default::default()
+        })
+        .into_pipeline_config()
+        {
+            Ok(config) => config.workers,
+            Err(e) => {
+                eprintln!("Could not read the engine's default worker count: {e}");
+                std::process::exit(2);
+            }
+        };
+        let cells = grid(&disk, only, default_workers).unwrap_or_else(|e| {
             eprintln!("{e}");
             std::process::exit(2);
         });
-        if !root.is_dir() {
-            eprintln!("MKV_BENCH_CORPUS is not a directory: '{}'", root.display());
+        let corpus_walk = walk(&root);
+        if corpus_walk.unreadable > 0 {
+            eprintln!(
+                "Refusing to run: {} unreadable directories or entries under '{}'",
+                corpus_walk.unreadable,
+                root.display()
+            );
+            std::process::exit(2);
+        }
+        if let Some((link, _)) = corpus_walk.entries.iter().find(|(_, t)| t.is_symlink()) {
+            eprintln!(
+                "Refusing to run: '{}' is a symlink; copy the sources into the corpus instead",
+                link.display()
+            );
             std::process::exit(2);
         }
         if let Some(out) = existing_output_dir(&root) {
@@ -475,7 +558,7 @@ mod real_media {
         let corpus = classify(&rt, &root);
         let mixed = interleave(&corpus.flac, &corpus.passthrough);
         println!(
-            "Logical CPUs: {cores}; FLAC items: {}; passthrough items: {}; mixed batch: {} items",
+            "Default workers: {default_workers}; FLAC items: {}; passthrough items: {}; mixed batch: {} items",
             corpus.flac.len(),
             corpus.passthrough.len(),
             mixed.len()
