@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::fs;
+use std::path::Path;
 
 use mkv_core::domain::{AudioTrack, MkvTrack, TrackProperties};
 use mkv_core::scan::{
@@ -246,6 +247,46 @@ fn test_persistent_inspect_cache_save_shared_flushes_after_interval() {
     let disk_content = fs::read_to_string(&cache_file).unwrap();
     assert!(disk_content.contains("video1.mkv"));
     assert!(disk_content.contains("video2.mkv"));
+}
+
+/// The file names keyed in a saved cache file.
+fn cached_file_names(cache_file: &Path) -> HashSet<String> {
+    let on_disk: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_slice(&fs::read(cache_file).unwrap()).unwrap();
+    on_disk
+        .keys()
+        .map(|key| {
+            Path::new(key)
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect()
+}
+
+#[test]
+fn test_persistent_inspect_cache_clear_is_not_restored_by_later_saves() {
+    let tmp = tempdir().unwrap();
+    let cache_file = tmp.path().join("inspect_cache.json");
+    let before = tmp.path().join("before.mkv");
+    let after = tmp.path().join("after.mkv");
+    fs::write(&before, b"v1").unwrap();
+    fs::write(&after, b"v2").unwrap();
+
+    let cache = PersistentInspectCache::new(Some(cache_file.clone()), true);
+    cache.put_path(&before, MkvmergeMetadata::default());
+    cache.save();
+    cache.clear();
+    assert!(!cache_file.exists());
+    assert_eq!(cache.get_path(&before), None);
+
+    cache.put_path(&after, MkvmergeMetadata::default());
+    cache.save();
+    assert_eq!(
+        cached_file_names(&cache_file),
+        HashSet::from(["after.mkv".to_string()])
+    );
 }
 
 #[test]

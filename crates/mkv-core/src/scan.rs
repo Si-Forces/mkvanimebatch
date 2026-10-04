@@ -586,6 +586,8 @@ struct CacheState {
     dirty: bool,
     revision: u64,
     last_save_ts: Option<Instant>,
+    /// Bumped by `clear`, so a save that snapshotted the data before it can tell.
+    clears: u64,
     resolved_keys: HashMap<String, String>,
 }
 
@@ -767,7 +769,7 @@ impl PersistentInspectCache {
             return;
         }
 
-        let (data_snapshot, saved_revision) = {
+        let (data_snapshot, saved_revision, saved_clears) = {
             let state = self.state.lock();
             if !state.dirty {
                 return;
@@ -779,7 +781,7 @@ impl PersistentInspectCache {
             {
                 return;
             }
-            (Arc::clone(&state.data), state.revision)
+            (Arc::clone(&state.data), state.revision, state.clears)
         };
 
         let parent = match self.cache_file.parent() {
@@ -816,6 +818,12 @@ impl PersistentInspectCache {
             return;
         }
         drop(writer);
+        // The rename runs under the lock so a `clear` cannot slip in between: a snapshot taken
+        // before a clear is discarded instead of restoring the cleared entries.
+        let mut state = self.state.lock();
+        if state.clears != saved_clears {
+            return;
+        }
         let persisted = match temp_file.persist(&self.cache_file) {
             Ok(f) => f,
             Err(e) => {
@@ -835,18 +843,20 @@ impl PersistentInspectCache {
         #[cfg(not(unix))]
         drop(persisted);
 
-        let mut state = self.state.lock();
         if state.revision == saved_revision {
             state.dirty = false;
         }
         state.last_save_ts = Some(Instant::now());
     }
 
+    /// Empties the cache and deletes its file. A save already in flight is discarded, and later
+    /// puts persist as usual.
     pub fn clear(&self) {
         let mut state = self.state.lock();
         state.data = Arc::default();
         state.dirty = false;
         state.revision = 0;
+        state.clears += 1;
         state.last_save_ts = None;
         let _ = std::fs::remove_file(&self.cache_file);
     }
