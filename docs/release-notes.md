@@ -33,6 +33,7 @@
 - **Inspection cache entries drop `mtime`**: `inspect_cache.json` entries no longer store the unused `mtime` field; freshness is still checked by size and `mtime_ns`. Existing cache files keep loading.
 - **`InspectionManifest::filter_selected` replaced by `select_items`**: `select_items(&[String])` returns `Result<InspectionManifest, String>`, failing with `Selected items not found among discovered MKV files: ...` when a selection names no discovered item. It keeps selection order and drops repeated selections.
 - **Asset scan cache is a `ScanCache`; `ScanResults.videos` removed**: `scan_assets` takes `Option<&mut ScanCache>` instead of a `HashMap<PathBuf, ScanResults>` and returns `Arc<ScanResults>`; `ReleasePreparationOptions.scan_cache` and `AssetResolver::discover` take `ScanCache` too. `ScanResults` no longer has a `videos` field. `ChapterIndex::add` takes `&ParsedFile` and no longer checks that the file is chapter XML: `scan_assets` is the only place a file is sniffed for chapter content.
+- **`generate_inspection_manifest` takes an `Arc` cache**: its `persistent_cache` parameter is now `Option<Arc<PersistentInspectCache>>` instead of `Option<&PersistentInspectCache>`, matching `PipelineConfig.cache`, because each spawned probe task holds the cache. Callers wrap their cache in an `Arc`.
 
 ### Core Scanning
 
@@ -44,6 +45,7 @@
 - The native EBML probe runs on Tokio's blocking pool. Concurrent probes reading cold or slow media (cold-read latency measured on a USB HDD and an SSD) no longer stall the async runtime, which froze progress events and NDJSON output for the CLI and desktop app. Once started, a native probe is not cancellable and reads to completion after a stop.
 - `probe_ebml_native` preserves `BufReader` buffers across intra-buffer element skips using relative seeking and tracks stream positions in memory, eliminating redundant kernel `lseek` loop guards and reducing probe I/O from hundreds of syscalls to roughly one buffer read per 8 KiB of header scanned.
 - Preflight inspection default probe concurrency is now calculated from physical core count via `cpu::probe_concurrency(cpu::default_workers())`, aligning with pipeline execution's default. Previously it used logical cores (`available_parallelism()`), which allowed up to 16 concurrent probes on machines with 4 physical and 8 logical cores.
+- Preflight inspection looks up and stores each file's inspect-cache entry inside its probe task, as the pipeline does, instead of checking every file in one serial pass before the first probe starts. Lookups now run alongside probing, and pending ones are aborted with the probes on cancel. On high-latency storage (network shares, USB HDDs) the first probe starts sooner, and an all-hit re-Inspect is no longer fully serial.
 
 ### Audio Track Selection
 
