@@ -9,7 +9,7 @@ use mkv_core::assets::{
 use mkv_core::domain::{ancestor_dirs, EpisodeInfo, MkvTrack, TrackProperties};
 use mkv_core::scan::{
     create_parsed_file, InspectedVideo, InspectionResult, MkvAttachment, MkvChapter,
-    MkvmergeMetadata, ParsedFile,
+    MkvmergeMetadata, ParsedFile, ScanCache,
 };
 use tempfile::tempdir;
 
@@ -96,7 +96,7 @@ fn test_discover_scan_cache_hit_keeps_chapter_without_resniffing() {
     fs::write(&xml_path, CHAPTER_XML).unwrap();
     let search_dirs = [tmp.path().to_path_buf()];
     let episode = EpisodeInfo::new("", "E", "01");
-    let mut scan_cache = HashMap::new();
+    let mut scan_cache = ScanCache::default();
 
     let first = AssetResolver::discover(&search_dirs, None, Some(&mut scan_cache), None);
     assert_eq!(first.chap_index.lookup(&episode), Some(xml_path.clone()));

@@ -24,7 +24,7 @@ use crate::remux::{execute_remux_job, select_tracks, PlannedJob, RemuxOptions, T
 use crate::request::{clean_relative_path, resolve_selected_items, TrackAssignment};
 use crate::scan::{
     get_or_probe_video, scan_mkv_files, InspectedVideo, InspectionResult, ParsedFile,
-    PersistentInspectCache, ScanResults,
+    PersistentInspectCache, ScanCache,
 };
 
 pub const EVENT_VERSION: u64 = 1;
@@ -859,7 +859,7 @@ impl BatchPipeline {
 
         let cache = self.inspect_cache();
 
-        let mut scan_cache: HashMap<PathBuf, ScanResults> = HashMap::new();
+        let mut scan_cache = ScanCache::default();
         let mut fonts_dir_cache: HashMap<PathBuf, PathBuf> = HashMap::new();
         let mut font_cache: HashMap<PathBuf, FontInfo> = HashMap::new();
         // Release directories re-index the same shared ancestor assets, so the

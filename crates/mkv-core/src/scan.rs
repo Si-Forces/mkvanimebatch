@@ -371,18 +371,40 @@ pub struct ScanResults {
     pub covers: Vec<ParsedFile>,
 }
 
+/// Run-wide memo of [`scan_assets`] results, keyed by canonical directory.
+///
+/// A hit returns the results of the first spelling that reached the directory, so their paths
+/// keep that caller's spelling. Each spelling's canonical path is memoized too, so a repeated
+/// spelling skips the `realpath`.
+#[derive(Debug, Default)]
+pub struct ScanCache {
+    canonical_by_spelling: HashMap<PathBuf, PathBuf>,
+    results: HashMap<PathBuf, Arc<ScanResults>>,
+}
+
 /// Scans directory entries, grouping files into videos (.mkv), subs (.ass, .srt),
 /// chapters (.xml verified via `is_chapter_xml`), and applicable cover images.
-pub fn scan_assets(
-    dir: &Path,
-    mut cache: Option<&mut HashMap<PathBuf, ScanResults>>,
-) -> ScanResults {
-    let canonical = canonical_or_self(dir);
-    if let Some(c) = &cache {
-        if let Some(hit) = c.get(&canonical) {
-            return hit.clone();
+pub fn scan_assets(dir: &Path, mut cache: Option<&mut ScanCache>) -> Arc<ScanResults> {
+    let canonical = match cache.as_deref_mut() {
+        Some(c) => {
+            if let Some(hit) = c
+                .canonical_by_spelling
+                .get(dir)
+                .and_then(|canonical| c.results.get(canonical))
+            {
+                return Arc::clone(hit);
+            }
+            // A new spelling may still name a directory another spelling already scanned.
+            let canonical = canonical_or_self(dir);
+            c.canonical_by_spelling
+                .insert(dir.to_path_buf(), canonical.clone());
+            if let Some(hit) = c.results.get(&canonical) {
+                return Arc::clone(hit);
+            }
+            Some(canonical)
         }
-    }
+        None => None,
+    };
 
     let mut videos = Vec::new();
     let mut subs = Vec::new();
@@ -438,15 +460,15 @@ pub fn scan_assets(
     chapters.sort_by_cached_key(|a| natural_sort_key(&a.name));
     covers.sort_by_cached_key(|a| natural_sort_key(&a.name));
 
-    let result = ScanResults {
+    let result = Arc::new(ScanResults {
         videos,
         subs,
         chapters,
         covers,
-    };
+    });
 
-    if let Some(c) = &mut cache {
-        c.insert(canonical, result.clone());
+    if let (Some(c), Some(canonical)) = (cache, canonical) {
+        c.results.insert(canonical, Arc::clone(&result));
     }
 
     result
