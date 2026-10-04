@@ -18,6 +18,10 @@ cargo test -p mkv-core --test test_domain <test_name_substring>
 # CI on Linux sets MKV_REQUIRE_MEDIA_TOOLS=1 so a missing tool fails the test instead.
 MKV_REQUIRE_MEDIA_TOOLS=1 cargo test -p mkv-core --test test_real_remux
 
+# Real-media bench: local only, see its header. It runs its self-check, then skips when
+# MKV_BENCH_CORPUS is unset; CI on Linux runs this, which `cargo test --workspace` (and pre-push) does not build.
+cargo test -p mkv-core --bench bench_real_media
+
 # One frontend suite (Node 20+, node:test, no package.json/npm)
 node --test desktop-tauri/ui/queue-state.test.js
 

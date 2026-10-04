@@ -76,6 +76,12 @@ jobs:
           MKV_REQUIRE_MEDIA_TOOLS: ${{ runner.os == 'Linux' && '1' || '' }}
         run: cargo test --workspace --verbose
 
+      # The real-media bench never runs a cell here: it runs its self-check asserts, then skips
+      # because MKV_BENCH_CORPUS is unset. `cargo test --workspace` does not build bench targets.
+      - name: Self-check the real-media bench (Linux only)
+        if: runner.os == 'Linux'
+        run: cargo test -p mkv-core --bench bench_real_media
+
       - name: Build Standalone mkv-cli Binary (Release)
         run: cargo build --release -p mkv-cli
 

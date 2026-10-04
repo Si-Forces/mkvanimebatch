@@ -129,7 +129,7 @@ mkvanimebatch/
 │   │   │   ├── remux.rs             # Track selection, ffmpeg/mkvmerge argument building, remux execution
 │   │   │   ├── extract.rs           # mkvextract invocation for subtitles, chapters, covers, and fonts
 │   │   │   └── pipeline.rs          # BatchPipeline, JobEvent and log channels, tokio JoinSet scheduling
-│   │   ├── benches/                 # bench_pipeline.rs (BatchRequest::validate throughput, warm-cache remux/extract dry runs)
+│   │   ├── benches/                 # bench_pipeline.rs (BatchRequest::validate throughput, warm-cache remux/extract dry runs); bench_real_media.rs (cold-cache remux of a real corpus across worker counts at io_jobs = 2, local only; CI runs only its self-check)
 │   │   └── tests/                   # 11 integration suites: test_assets, test_cross_regex, test_domain, test_extract, test_fonts, test_pipeline, test_pipeline_assignments, test_pipeline_assignment_args, test_real_remux, test_remux, test_scan
 │   └── mkv-cli/                     # CLI binary
 │       ├── Cargo.toml
