@@ -1,6 +1,6 @@
 # 0007. In-Process Engine Bridge and Sidecar Retirement
 
-> **Status**: Accepted (Partially superseded by ADR-0008; amended 2026-09-28)
+> **Status**: Accepted (Partially superseded by ADR-0008; amended 2026-09-28, 2026-10-04)
 > **Date**: 2026-05-01
 > **Context**: Desktop Application Bridge
 
@@ -37,3 +37,7 @@ The entry points and validation home named above no longer exist under those nam
 - **Validation home.** The single source of request validation is `BatchRequest::validate` in `mkv-core::request`, not `mkv-core::pipeline`. The CLI still rejects unknown flags and checks `--preset` and `--bitrate` while parsing, before `validate` runs.
 - **Log destination.** `job-log` batches are shown in each view's log console panel; there is no drawer.
 - **Panic isolation has two layers.** A panic inside one worker task is caught by the pipeline's worker `JoinSet` and completes that item as `error` (`worker panicked: ...`) while the batch continues. A panic that escapes the pipeline task is still caught at the bridge's join boundary as Decision 3 describes. Both depend on the release profile unwinding: `[profile.release]` must never set `panic = "abort"`.
+
+## Amendment — 2026-10-04
+
+- **Desktop entry point (#27).** `run_job` no longer calls `BatchPipeline::from_request`. It converts the request with `BatchRequest::into_pipeline_config`, sets `PipelineConfig.cache` to the app session's shared inspect cache (unless the request asks for no cache), and builds the pipeline with `BatchPipeline::new`. `from_request` performs the same two steps without a cache and remains the CLI's entry point. The decision itself stands.
