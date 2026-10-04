@@ -695,11 +695,11 @@ impl PersistentInspectCache {
     }
 
     fn load(&self) {
-        let Ok(file) = File::open(&self.cache_file) else {
+        // One read plus `from_slice` parses faster than `from_reader` over a `BufReader`.
+        let Ok(bytes) = std::fs::read(&self.cache_file) else {
             return;
         };
-        let reader = std::io::BufReader::new(file);
-        match serde_json::from_reader::<_, HashMap<String, InspectCacheEntry>>(reader) {
+        match serde_json::from_slice::<HashMap<String, InspectCacheEntry>>(&bytes) {
             Ok(loaded) => {
                 let mut state = self.state.lock();
                 state.data = Arc::new(loaded);
