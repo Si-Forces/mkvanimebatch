@@ -762,13 +762,15 @@ test("a same-directory re-inspection with an identical manifest keeps every card
 
   // Every Run forces a re-inspection of the shown directory; a deep-equal copy arrives.
   const token = tracker.startScan(`${dir}/`);
-  assert.deepEqual(list.children, elementsBefore);
+  elementsBefore.forEach((el, i) => assert.equal(list.children[i], el));
+  assert.equal(list.children.length, elementsBefore.length);
   assert.equal(elements.get("remux-queue-count").textContent, "Scanning…");
   assert.equal(tracker.acceptInspection(token, dir, structuredClone(detailedManifest(ids))), true);
   renderFrames();
 
   assert.deepEqual(listWrites, []);
-  assert.deepEqual(list.children, elementsBefore);
+  elementsBefore.forEach((el, i) => assert.equal(list.children[i], el));
+  assert.equal(list.children.length, elementsBefore.length);
   for (const id of ids) assert.equal(tracker.cards.get(id), cardsBefore.get(id));
   assert.equal(tracker.cards.get("02.mkv").checkbox.checked, false);
   // The re-inspected item is queued again, so its kept card is back to the queued look.
@@ -883,4 +885,11 @@ test("progress events on a processing card write only the fill width and the tag
   assert.equal(card.el.className, "tokyo-ep-card completed");
   assert.equal(card.badge.textContent, "COMPLETED");
   assert.equal(card.fill.style.width, "100%");
+
+  // Re-rendering the same terminal status, from a repeated item_complete (ignored by the
+  // reducer) or from finalize, writes nothing more, its tag text included.
+  recordWrites(card.statusTag, "tag", ["textContent"], writes);
+  tracker.handleEvent({ version: 1, type: "item_complete", id: "ep1", status: "completed", duration_sec: 3 });
+  tracker.finalize(0);
+  assert.deepEqual(writes, ["card.className", "badge.className", "badge.textContent", "tag.className", "fill.className"]);
 });

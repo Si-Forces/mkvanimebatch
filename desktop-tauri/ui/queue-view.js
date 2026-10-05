@@ -342,7 +342,6 @@ export class QueueTracker {
         return;
       }
       const fresh = this.mountCard(item, index + 1, bitrate);
-      this.renderCardState(fresh, item);
       card.el.replaceWith(fresh.el);
     });
   }
@@ -380,9 +379,7 @@ export class QueueTracker {
         const item = this.state.items.get(order[index]);
         index++;
         if (!item) continue;
-        const card = this.mountCard(item, index, bitrate);
-        this.renderCardState(card, item);
-        frag.appendChild(card.el);
+        frag.appendChild(this.mountCard(item, index, bitrate).el);
       } while (index < order.length && performance.now() < deadline);
       this.listEl.appendChild(frag);
       if (index < order.length) {
@@ -395,7 +392,7 @@ export class QueueTracker {
     this.renderRafId = requestAnimationFrame(renderBatch);
   }
 
-  /** Create and register a card for `item` with its track tags; the caller attaches it and renders its state. */
+  /** Create and register a card for `item` with its track tags and current state drawn; the caller attaches it. */
   mountCard(item, epNum, bitrate) {
     const card = this.createCardElement(item, epNum);
     card.bitrate = bitrate;
@@ -408,6 +405,7 @@ export class QueueTracker {
     } else {
       this.applyRestoredTags(card, item);
     }
+    this.renderCardState(card, item);
     return card;
   }
 
@@ -478,8 +476,8 @@ export class QueueTracker {
       subBtn: el.querySelector(".sub-assign-btn"),
       checkbox: el.querySelector(".ep-select-check"),
       epNum,
-      // The status renderCardState last drew. None yet: every mount is followed by a
-      // renderCardState call, so the queued look is drawn only in renderCardState.
+      // The status renderCardState last drew. None yet: mountCard draws the first status,
+      // so the queued look is drawn only in renderCardState.
       renderedStatus: null,
     };
     el.querySelector(".ep-title").textContent = item.name;
@@ -534,16 +532,18 @@ export class QueueTracker {
 
     const item = this.state.items.get(event.id);
     if (item) {
-      let card = this.cards.get(item.id);
-      // While an incremental render is pending it will mount this card from current state.
-      if (!card && this.pendingRenderToken !== this.scanToken) {
-        card = this.mountCard(item, this.cards.size + 1, this.getBitrate());
+      const card = this.cards.get(item.id);
+      // A missing card is mounted here unless an incremental render is pending, which will
+      // mount it from current state.
+      if (card) {
+        this.renderCardState(card, item);
+      } else if (this.pendingRenderToken !== this.scanToken) {
+        const mounted = this.mountCard(item, this.cards.size + 1, this.getBitrate());
         if (this.listEl) {
           this.listEl.querySelector(".empty-state-card")?.remove();
-          this.listEl.appendChild(card.el);
+          this.listEl.appendChild(mounted.el);
         }
       }
-      if (card) this.renderCardState(card, item);
     }
 
     this.renderQueueCount();
