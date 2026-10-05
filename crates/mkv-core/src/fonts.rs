@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use blake2::{Blake2b512, Digest};
-use parking_lot::Mutex;
+use parking_lot::{Mutex, MutexGuard};
 use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 use tracing::{error, warn};
@@ -340,7 +340,7 @@ impl FontRegistry {
 
     /// Reserves the name and resolved size of every regular font file already in
     /// `fonts_dir`, so extraction does not re-stage them, and files each one by size for
-    /// [`Self::hash_seeded_of_size`]. Nothing is hashed here: identical content implies
+    /// [`Self::lock_with_seeded_hashes`]. Nothing is hashed here: identical content implies
     /// identical size, so a seeded font is hashed only when a staged font of its size is
     /// promoted.
     fn seed_existing(&self) {
@@ -387,13 +387,21 @@ impl FontRegistry {
             }));
     }
 
-    /// Hashes of the seeded fonts of `size` not yet in `claimed_hashes`, computed without the
-    /// registry lock held. The caller inserts them and drops the bucket under the lock. Each
-    /// goes through [`Self::memoized_hash`] with its seed-time signature: without a memo or on a
-    /// memo miss, a font that changed since seeding is hashed as found and one that vanished is
-    /// skipped, while a memo hit returns the stored hash without opening the file.
-    fn hash_seeded_of_size(&self, size: u64) -> Option<Vec<String>> {
-        let bucket = self.state.lock().unhashed_seeded.get(&size).cloned()?;
+    /// Locks the registry with every seeded font of `size` hashed into `claimed_hashes`, so a
+    /// duplicate check made under the returned guard sees them all. The hashing runs without the
+    /// registry lock held, and the bucket leaves the map in the critical section that inserts its
+    /// hashes. Each font goes through [`Self::memoized_hash`] with its seed-time signature:
+    /// without a memo or on a memo miss, a font that changed since seeding is hashed as found and
+    /// one that vanished is skipped, while a memo hit returns the stored hash without opening the
+    /// file.
+    fn lock_with_seeded_hashes(&self, size: u64) -> MutexGuard<'_, FontRegistryState> {
+        // Two statements on purpose: the temporary guard drops at the end of the first, before
+        // the lock is taken again below; folding them into one `let else` would self-deadlock.
+        let bucket = self.state.lock().unhashed_seeded.get(&size).cloned();
+        let Some(bucket) = bucket else {
+            // Never seeded, or already absorbed: `claimed_hashes` only grows.
+            return self.state.lock();
+        };
         // `OnceLock` runs the hashing once; a concurrent caller blocks until it is done. A
         // panicking initializer leaves the cell empty for the next caller to retry.
         let hashes = bucket.hashes.get_or_init(|| {
@@ -403,7 +411,10 @@ impl FontRegistry {
                 .filter_map(|(path, sig)| self.memoized_hash(path, *sig))
                 .collect()
         });
-        Some(hashes.clone())
+        let mut state = self.state.lock();
+        state.unhashed_seeded.remove(&size);
+        state.claimed_hashes.extend(hashes.iter().cloned());
+        state
     }
 
     /// Content hash of `path`, served from the memo when `sig` matches. Hashing runs without
@@ -460,18 +471,13 @@ impl FontRegistry {
             _ => None,
         };
         let Some((file_hash, size)) = staged else {
-            release_locked(&mut self.state.lock(), claim);
+            let mut state = self.state.lock();
+            release_locked(&mut state, claim);
             return None;
         };
 
         // Only a seeded font of the staged file's size can share its content.
-        let seeded_hashes = self.hash_seeded_of_size(size);
-
-        let mut state = self.state.lock();
-        if let Some(seeded_hashes) = seeded_hashes {
-            state.unhashed_seeded.remove(&size);
-            state.claimed_hashes.extend(seeded_hashes);
-        }
+        let mut state = self.lock_with_seeded_hashes(size);
 
         // A content duplicate keeps its (name, size) reservation, so later files carrying the
         // same attachment skip extracting it.

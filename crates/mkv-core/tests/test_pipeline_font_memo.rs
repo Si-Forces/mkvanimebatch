@@ -16,22 +16,10 @@ use std::sync::Arc;
 
 use tempfile::tempdir;
 
-use common::{run_batch, seeded_cache, video_metadata};
+use common::{run_batch, seeded_cache, video_metadata, EnvReset};
 use mkv_core::fonts::{hash_file, FontHashMemo};
 use mkv_core::pipeline::{CancellationToken, PipelineConfig, PipelineMode};
 use mkv_core::scan::{FileSignature, MkvAttachment};
-
-/// Restores the `PATH` it displaced, so a failing assertion cannot leak the stub directory
-/// into the rest of the run.
-struct EnvReset {
-    path: String,
-}
-
-impl Drop for EnvReset {
-    fn drop(&mut self) {
-        std::env::set_var("PATH", &self.path);
-    }
-}
 
 #[tokio::test]
 async fn extract_run_memoizes_a_seeded_font_hashed_by_a_same_size_promote() {
@@ -64,10 +52,8 @@ async fn extract_run_memoizes_a_seeded_font_hashed_by_a_same_size_promote() {
     .unwrap();
     fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
 
+    let _env_guard = EnvReset::capture(&["PATH"]);
     let old_path = std::env::var("PATH").unwrap_or_default();
-    let _env_guard = EnvReset {
-        path: old_path.clone(),
-    };
     std::env::set_var("PATH", format!("{}:{old_path}", bin_dir.path().display()));
 
     // One font attachment under another name, so the run claims, stages and promotes it.

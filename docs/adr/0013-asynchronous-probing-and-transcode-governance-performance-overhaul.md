@@ -26,6 +26,10 @@ We decided to execute a coordinated performance overhaul across the Media Engine
 3. **Fine-Grained Font Seeding**:
    Refactor `FontRegistry::seed_existing` to compute BLAKE2b hashes for uncached files outside the mutex lock, taking the lock only for final batch insertion to reduce lock hold duration from ~160ms to < 15µs.
 
+   > [!NOTE]
+   > **AMENDED BY AMENDMENT 9 (#33)**: `seed_existing` no longer hashes; a seeded font is hashed
+   > only when a staged font of its size is promoted.
+
 4. **Zero-Copy Streaming Cache Persistence**:
    Serialize `PersistentInspectCache` disk snapshots directly into `std::io::BufWriter` with `serde_json::to_writer`, eliminating temporary heap string allocations and collection copies.
 
@@ -459,12 +463,14 @@ that waits on another's hashing blocks its thread, a Tokio worker on the extract
 the staged file in `promote` already does; the hashing never awaits, so the wait cannot deadlock.
 
 A seeded font is hashed through `memoized_hash` with its seed-time `FileSignature`, as before.
-Without a memo, or on a memo miss, one that changed since seeding is hashed as found and one that
-vanished is skipped. On a memo hit its stored hash is used without opening the file, so a font
-changed or deleted since seeding keeps its old hash; that window now runs until the first promote
-of its size instead of closing at seeding. The seed is metadata-only, so it stays inline, without
-`spawn_blocking`, as #23's per-directory passes do until that issue's cold-media measurement
-lands. `claimed_hashes()` returns the hashes computed so far.
+Without a memo, or on a memo miss, one that changed since seeding is hashed as found and one
+that vanished is skipped. On a memo hit its stored hash is used without opening the file, so a
+font changed or deleted since seeding keeps its old hash; that window now runs until the first
+promote of its size instead of closing at seeding. A seeded font whose size changed after
+seeding also stays filed under its seed-time size, so a staged font matching its new size misses
+it unless a promote of the seed-time size has already hashed it. The seed is metadata-only, so
+it stays inline, without `spawn_blocking`, as #23's per-directory passes do until that issue's
+cold-media measurement lands. `claimed_hashes()` returns the hashes computed so far.
 
 **Why Amendment 2 Finding 6 did not cover this.** Finding 6 rejected parallelizing the seed
 because the memo cut it from 364 ms cold to 2.1 ms warm. The memo exists only with the cache on.
@@ -493,9 +499,10 @@ covers a content duplicate of a seeded font under a new name.
 `test_seed_existing_memo_signature_matches_resolved_lookup`,
 `test_seed_existing_symlinked_font_uses_resolved_signature` and
 `test_pipeline_extract_persists_font_hash_memo` relied on `new` filling the memo: the first two
-now promote a same-size font first, and the third leaves an unsaved entry for the run to persist.
-The third proves only that the run saves the configured memo, on every platform.
+now promote a same-size font first, and the third leaves an unsaved entry for the run to
+persist. The third proves only that the run saves the configured memo, on every platform.
 `test_pipeline_font_memo` (Unix-only, its own binary because it puts a stub `mkvextract` ahead
 on `PATH`) checks that `run_extract` hands its memo to `FontRegistry::new`: the stub writes one
 font attachment, as many bytes as a seeded font and under another name, which the run stages and
-promotes; after the run the persisted memo holds the seeded font's hash. It fails when the registry is built with `None`.
+promotes; after the run the persisted memo holds the seeded font's hash. It fails when the
+registry is built with `None`.

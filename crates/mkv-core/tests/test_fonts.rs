@@ -177,6 +177,7 @@ fn test_seed_existing_hashes_only_the_promoted_size() {
 
     let memo = shared_memo(&tmp);
     let mgr = FontRegistry::new(fonts_dir, Some(Arc::clone(&memo)));
+    assert!(mgr.claimed_hashes().is_empty(), "seeding must not hash");
     assert_eq!(
         memo.lock().get(&small, small_sig),
         None,
@@ -214,6 +215,8 @@ fn test_concurrent_promotes_of_a_seeded_size_all_find_their_duplicates() {
     fs::write(fonts_dir.join("B.otf"), contents[1]).unwrap();
 
     let mgr = Arc::new(FontRegistry::new(fonts_dir.clone(), None));
+    // Without a memo (the `--no-cache` case) seeding must still hash nothing.
+    assert!(mgr.claimed_hashes().is_empty(), "seeding must not hash");
     let barrier = Arc::new(std::sync::Barrier::new(THREADS));
     let handles: Vec<_> = (0..THREADS)
         .map(|i| {
