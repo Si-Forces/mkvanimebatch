@@ -48,7 +48,7 @@ fn parse_number<N: FromStr>(raw: &str, flag: &str, kind: &str) -> Result<N, Stri
         .map_err(|_| format!("Invalid {kind} for {flag}"))
 }
 
-/// Takes the next argument as the value of `flag` and parses it with `parse_number`.
+/// Takes the next argument as the value of `flag` and parses it as `kind` with `parse_number`.
 fn next_number<T: AsRef<str>, N: FromStr>(
     args: &mut impl Iterator<Item = T>,
     flag: &str,
