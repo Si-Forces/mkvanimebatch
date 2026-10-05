@@ -494,6 +494,8 @@ covers a content duplicate of a seeded font under a new name.
 `test_seed_existing_symlinked_font_uses_resolved_signature` and
 `test_pipeline_extract_persists_font_hash_memo` relied on `new` filling the memo: the first two
 now promote a same-size font first, and the third leaves an unsaved entry for the run to persist.
-So no pipeline-level test now checks that `run_extract` hands its memo to `FontRegistry::new`: the
-third proves only that the run saves the configured memo, because reaching a promote needs real
-`mkvextract` output.
+The third proves only that the run saves the configured memo, on every platform.
+`test_pipeline_font_memo` (Unix-only, its own binary because it puts a stub `mkvextract` ahead
+on `PATH`) checks that `run_extract` hands its memo to `FontRegistry::new`: the stub stages one
+font attachment of a seeded font's size under another name, and after the run the persisted memo
+holds the seeded font's hash. It fails when the registry is built with `None`.
