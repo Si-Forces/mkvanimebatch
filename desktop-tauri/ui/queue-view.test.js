@@ -109,6 +109,21 @@ const subtitle = (id, path) => ({
 
 const cardTitles = list => list.children.map(el => el.querySelector(".ep-title").textContent);
 
+/** Log the name of every write to `props` on `target`; reads keep returning the last value. */
+function recordWrites(target, label, props, log) {
+  for (const prop of props) {
+    let value = target[prop];
+    Object.defineProperty(target, prop, {
+      configurable: true,
+      get: () => value,
+      set: next => {
+        log.push(`${label}.${prop}`);
+        value = next;
+      },
+    });
+  }
+}
+
 test("restoreFromSnapshot renders a card per restored item in its outcome state", t => {
   setupMockEnvironment(t);
   const tracker = new QueueTracker("remux");
@@ -160,7 +175,7 @@ test("restoreFromSnapshot sets meaningful restored tags instead of placeholder i
   assert.equal(card2.tag2.textContent, "Up to date");
 });
 
-test("QueueTracker handles item_start (indeterminate shimmer), item_progress (determinate width), item_complete (green fill + stop heartbeat)", t => {
+test("QueueTracker handles item_start (indeterminate shimmer), item_progress (determinate width), item_complete (green fill; heartbeat stops on its next tick)", t => {
   setupMockEnvironment(t);
   const tracker = new QueueTracker("remux");
 
@@ -218,6 +233,9 @@ test("QueueTracker handles item_start (indeterminate shimmer), item_progress (de
   assert.equal(card.fill.className, "ep-progress-fill green");
   assert.equal(card.fill.style.width, "100%");
   assert.equal(card.statusTag.textContent, "Done in 14.8s");
+  // The heartbeat stops itself on its next tick once nothing is processing.
+  assert.notEqual(tracker.heartbeatTimer, null);
+  tracker.tickHeartbeat();
   assert.equal(tracker.heartbeatTimer, null);
 });
 
@@ -307,6 +325,7 @@ test("active snapshot renders only submitted cards in order and keeps live updat
   tracker.handleEvent({ version: 1, type: "item_complete", id: "02", status: "completed", duration_sec: 4.2 });
   assert.equal(tracker.cards.get("02").statusTag.textContent, "Done in 4.2s");
   assert.equal(tracker.cards.get("02").fill.style.width, "100%");
+  tracker.tickHeartbeat();
   assert.equal(tracker.heartbeatTimer, null);
 });
 
@@ -693,4 +712,34 @@ test("same-directory empty inspection keeps directory identity, vanished selecti
   assert.equal(tracker.acceptInspection(tracker.startScan(), dir, manifestOf(["ep1", "ep2"])), true);
   renderFrames();
   assert.deepEqual(tracker.getSelectedOrderedItemIds(), ["ep2", "ep1"]);
+});
+
+test("progress events on a processing card write only the fill width and the tag text", t => {
+  setupMockEnvironment(t);
+  const tracker = new QueueTracker("remux");
+  tracker.populateFromInspection(manifestOf(["ep1"]));
+  const card = tracker.cards.get("ep1");
+  tracker.handleEvent({ version: 1, type: "batch_start", total: 1 });
+  tracker.handleEvent({ version: 1, type: "item_start", id: "ep1" });
+  tracker.handleEvent({ version: 1, type: "item_progress", id: "ep1", progress: 10 });
+
+  const writes = [];
+  recordWrites(card.el, "card", ["className"], writes);
+  recordWrites(card.badge, "badge", ["className", "textContent"], writes);
+  recordWrites(card.statusTag, "tag", ["className"], writes);
+  recordWrites(card.fill, "fill", ["className"], writes);
+  for (const progress of [20, 30, 40]) {
+    tracker.handleEvent({ version: 1, type: "item_progress", id: "ep1", progress });
+  }
+
+  assert.deepEqual(writes, []);
+  assert.equal(card.fill.style.width, "40%");
+  assert.match(card.statusTag.textContent, /^40% \(\d+s\)$/);
+
+  // A status change after the run of same-status updates still writes classes and badge.
+  tracker.handleEvent({ version: 1, type: "item_complete", id: "ep1", status: "completed", duration_sec: 3 });
+  assert.deepEqual(writes, ["card.className", "badge.className", "badge.textContent", "tag.className", "fill.className"]);
+  assert.equal(card.el.className, "tokyo-ep-card completed");
+  assert.equal(card.badge.textContent, "COMPLETED");
+  assert.equal(card.fill.style.width, "100%");
 });

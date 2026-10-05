@@ -414,6 +414,8 @@ export class QueueTracker {
       tag2: el.querySelector(".track-tag.magenta"),
       subBtn: el.querySelector(".sub-assign-btn"),
       checkbox: el.querySelector(".ep-select-check"),
+      // The status renderCardState last drew; the markup above is the queued look.
+      renderedStatus: "queued",
     };
     el.querySelector(".ep-title").textContent = item.name;
     card.checkbox.checked = item.selected !== false;
@@ -482,23 +484,31 @@ export class QueueTracker {
     this.renderQueueCount();
   }
 
+  // Classes and badge are written only when the status differs from the one
+  // the card last drew, so the stream of progress events on a processing card
+  // writes just the fill and the tag text. The heartbeat is not stopped here:
+  // tickHeartbeat stops itself once nothing is processing.
   renderCardState(card, item) {
+    const statusChanged = card.renderedStatus !== item.status;
+    card.renderedStatus = item.status;
+
     if (item.status === "processing") {
-      card.el.className = "tokyo-ep-card processing";
-      card.badge.className = "ep-badge purple";
-      card.badge.textContent = "PROCESSING";
-      card.statusTag.className = "ep-duration-tag yellow status-tag";
-      card.statusTag.textContent = this.formatProcessingTag(item);
-      if (typeof item.progress === "number") {
-        card.fill.className = "ep-progress-fill";
-        card.fill.style.width = `${item.progress}%`;
-      } else {
-        card.fill.className = "ep-progress-fill indeterminate";
-        card.fill.style.width = "";
+      if (statusChanged) {
+        card.el.className = "tokyo-ep-card processing";
+        card.badge.className = "ep-badge purple";
+        card.badge.textContent = "PROCESSING";
+        card.statusTag.className = "ep-duration-tag yellow status-tag";
       }
+      card.statusTag.textContent = this.formatProcessingTag(item);
+      // Shimmer until the first progress value, then a determinate bar.
+      const determinate = typeof item.progress === "number";
+      const fillClass = determinate ? "ep-progress-fill" : "ep-progress-fill indeterminate";
+      if (card.fill.className !== fillClass) card.fill.className = fillClass;
+      card.fill.style.width = determinate ? `${item.progress}%` : "";
       this.startHeartbeat();
       return;
     }
+    if (!statusChanged) return;
 
     const style = TERMINAL_CARD_STYLES[item.status];
     if (style) {
@@ -509,9 +519,6 @@ export class QueueTracker {
       card.statusTag.textContent = style.text(item);
       card.fill.className = `ep-progress-fill ${style.color}`;
       card.fill.style.width = "100%";
-    }
-    if (!this.hasProcessingItems()) {
-      this.stopHeartbeat();
     }
   }
 
