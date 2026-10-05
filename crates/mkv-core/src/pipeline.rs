@@ -416,6 +416,15 @@ enum ItemFailure {
     Failed(String),
 }
 
+/// The per-item inputs to `execute_remux_job` for an item that planning cleared to run.
+/// The item's identity travels beside it as the `BatchItemInfo` that `run_items` pairs
+/// with it.
+struct RemuxWork {
+    job: PlannedJob,
+    selection: TrackSelection,
+    font_info: FontInfo,
+}
+
 /// Best-effort progress reporting for one item; a full event channel drops the update.
 struct ProgressSink {
     tx: Option<EventSender>,
@@ -986,8 +995,7 @@ impl BatchPipeline {
             return Ok(self.cancel_before_planning(&files, summary).await);
         };
 
-        let mut all_planned_jobs: Vec<(BatchItemInfo, (PlannedJob, TrackSelection, FontInfo))> =
-            Vec::new();
+        let mut remux_work: Vec<(BatchItemInfo, RemuxWork)> = Vec::new();
         let mut planning_outcomes = Vec::new();
         let mut planning_error: Option<(usize, String)> = None;
 
@@ -1155,14 +1163,17 @@ impl BatchPipeline {
                 cover_file: res_assets.cover_file,
                 embedded_sub_id: res_assets.embedded_sub_id,
                 use_source_fonts: dir_prep.font_info.count == 0,
-                item_id: item.id.clone(),
                 custom_offset_ms: matched_assignment.and_then(|a| a.offset_ms),
                 custom_language: matched_assignment.and_then(|a| a.language.clone()),
                 custom_title: matched_assignment.and_then(|a| a.title.clone()),
             };
-            all_planned_jobs.push((
+            remux_work.push((
                 item,
-                (job, select_tracks(inspected), dir_prep.font_info.clone()),
+                RemuxWork {
+                    job,
+                    selection: select_tracks(inspected),
+                    font_info: dir_prep.font_info.clone(),
+                },
             ));
         }
 
@@ -1180,7 +1191,7 @@ impl BatchPipeline {
             self.emit(outcome).await;
         }
 
-        if !summary.cancelled && !all_planned_jobs.is_empty() {
+        if !summary.cancelled && !remux_work.is_empty() {
             let io_semaphore = self.io_semaphore();
             let bitrate: Arc<str> = Arc::from(self.config.bitrate.as_str());
             let complexity = self.config.complexity;
@@ -1189,8 +1200,8 @@ impl BatchPipeline {
 
             self.run_items(
                 &mut summary,
-                all_planned_jobs,
-                |(job, selection, font_info), progress| {
+                remux_work,
+                |work, progress| {
                     let cancel_token = self.cancel_token.clone();
                     let io_semaphore = Arc::clone(&io_semaphore);
                     let bitrate = Arc::clone(&bitrate);
@@ -1207,9 +1218,9 @@ impl BatchPipeline {
                             biased;
                             _ = cancel_token.cancelled() => Err(ItemFailure::Cancelled),
                             res = execute_remux_job(
-                                &job,
-                                &selection,
-                                &font_info,
+                                &work.job,
+                                &work.selection,
+                                &work.font_info,
                                 &options,
                                 Some(&on_progress),
                                 &io_semaphore,
@@ -1417,11 +1428,6 @@ mod tests {
                 file: "【字幕】 Show - 01 ✓.mkv".into(),
             }
         );
-        // The canonical item ID and the name the scan produced, never a recomputed one.
-        assert_eq!(
-            (item.id, item.file),
-            (get_item_id(&file.path, input_dir), file.name)
-        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1469,7 +1475,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn item_events_report_each_items_id_and_file_name() {
+    async fn item_events_pair_each_item_id_with_its_file_name() {
         let input_dir = Path::new("/anime");
         let items: Vec<(BatchItemInfo, usize)> = [
             "Season 1/Show - 01.mkv",

@@ -23,7 +23,6 @@ pub struct PlannedJob {
     pub cover_file: Option<PathBuf>,
     pub embedded_sub_id: Option<u32>,
     pub use_source_fonts: bool,
-    pub item_id: String,
     pub custom_offset_ms: Option<i64>,
     pub custom_language: Option<String>,
     pub custom_title: Option<String>,
