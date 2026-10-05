@@ -83,6 +83,7 @@
 - Stop and Close no longer freeze the window while a job shuts down. Their teardown runs off the main thread, so the log and queue keep updating, including when the cooperative cancel misses its 2 s deadline and the job is aborted. The "Stop requested; waiting for shutdown." log line now appears when Stop is pressed instead of after the job has stopped.
 - Exited media tools are now removed from the telemetry process list. They used to stay in it for the rest of the session, and each one's last write rate was counted again on every poll, so the disk write rate could stay up after a batch. Each telemetry poll refreshes only disk usage per process and runs off the main thread, and startup no longer takes a full process snapshot.
 - The `set_window_theme` IPC command no longer coerces an unrecognized theme name to Dark. An unrecognized name is now ignored and leaves the native window exactly as it was, including any pin set by an earlier explicit choice. The webview only ever sends `light` or `dark`, so this affects a caller that bypasses the UI.
+- Starting a Run on the directory already shown no longer empties the queue list while it is re-inspected. Cards whose items are unchanged are kept, and only a changed item's card is rebuilt. A progress update now rewrites only a card's progress bar and status text, and the log lines waiting while the window is hidden are capped at the console's 2000-line limit.
 
 ### Queue Selection Freeze
 
