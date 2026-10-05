@@ -388,8 +388,10 @@ impl FontRegistry {
     }
 
     /// Hashes of the seeded fonts of `size` not yet in `claimed_hashes`, computed without the
-    /// registry lock held. The caller inserts them and drops the bucket under the lock. A
-    /// seeded font that changed since seeding is hashed as found; one that vanished is skipped.
+    /// registry lock held. The caller inserts them and drops the bucket under the lock. Each
+    /// goes through [`Self::memoized_hash`] with its seed-time signature: without a memo or on a
+    /// memo miss, a font that changed since seeding is hashed as found and one that vanished is
+    /// skipped, while a memo hit returns the stored hash without opening the file.
     fn hash_seeded_of_size(&self, size: u64) -> Option<Vec<String>> {
         let bucket = self.state.lock().unhashed_seeded.get(&size).cloned()?;
         // `OnceLock` runs the hashing once; a concurrent caller blocks until it is done. A

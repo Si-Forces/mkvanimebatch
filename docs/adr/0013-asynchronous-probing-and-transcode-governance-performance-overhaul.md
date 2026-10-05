@@ -454,10 +454,17 @@ Each size is hashed at most once. Its seeded fonts sit behind a `OnceLock`, so a
 promote of the same size waits for the first hashing instead of repeating it or checking before
 those hashes are in, and the size leaves the unhashed map in the critical section that inserts
 its hashes. There is no retry loop: the seeded set is fixed when the registry is built, and every
-promoted font's hash enters `claimed_hashes` in the critical section of its own check. A seeded
-font that changed since seeding is hashed as found; one that vanished is skipped. The seed is
-metadata-only, so like the per-directory passes of #23 it stays inline, without `spawn_blocking`.
-`claimed_hashes()` returns the hashes computed so far.
+promoted font's hash enters `claimed_hashes` in the critical section of its own check. A promote
+that waits on another's hashing blocks its thread, a Tokio worker on the extract path, as hashing
+the staged file in `promote` already does; the hashing never awaits, so the wait cannot deadlock.
+
+A seeded font is hashed through `memoized_hash` with its seed-time `FileSignature`, as before.
+Without a memo, or on a memo miss, one that changed since seeding is hashed as found and one that
+vanished is skipped. On a memo hit its stored hash is used without opening the file, so a font
+changed or deleted since seeding keeps its old hash; that window now runs until the first promote
+of its size instead of closing at seeding. The seed is metadata-only, so it stays inline, without
+`spawn_blocking`, as #23's per-directory passes do until that issue's cold-media measurement
+lands. `claimed_hashes()` returns the hashes computed so far.
 
 **Why Amendment 2 Finding 6 did not cover this.** Finding 6 rejected parallelizing the seed
 because the memo cut it from 364 ms cold to 2.1 ms warm. The memo exists only with the cache on.
@@ -483,7 +490,10 @@ when `seed_existing` hashes eagerly.
 promotes of copies of two seeded fonts and requires all to be rejected; a variant that takes a
 size without waiting for its hashes failed it in 18 of 20 runs. `test_seed_existing_fonts`
 covers a content duplicate of a seeded font under a new name.
-`test_seed_existing_records_memo_signature_matching_resolved_lookup`,
+`test_seed_existing_memo_signature_matches_resolved_lookup`,
 `test_seed_existing_symlinked_font_uses_resolved_signature` and
 `test_pipeline_extract_persists_font_hash_memo` relied on `new` filling the memo: the first two
 now promote a same-size font first, and the third leaves an unsaved entry for the run to persist.
+So no pipeline-level test now checks that `run_extract` hands its memo to `FontRegistry::new`: the
+third proves only that the run saves the configured memo, because reaching a promote needs real
+`mkvextract` output.

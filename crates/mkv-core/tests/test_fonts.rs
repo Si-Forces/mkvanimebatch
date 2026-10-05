@@ -221,7 +221,9 @@ fn test_concurrent_promotes_of_a_seeded_size_all_find_their_duplicates() {
             let barrier = Arc::clone(&barrier);
             let content = contents[i % 2];
             thread::spawn(move || {
-                let mut claim = mgr.claim(&format!("Copy_{i}.otf"), 16).unwrap();
+                let mut claim = mgr
+                    .claim(&format!("Copy_{i}.otf"), content.len() as u64)
+                    .unwrap();
                 fs::write(&claim.staging_path, content).unwrap();
                 barrier.wait();
                 mgr.promote(&mut claim)
@@ -240,7 +242,7 @@ fn test_concurrent_promotes_of_a_seeded_size_all_find_their_duplicates() {
 /// equal what a symlink-resolving `FileSignature::of` computes, otherwise every later memo
 /// lookup would miss and fonts would be re-hashed on each run.
 #[test]
-fn test_seed_existing_records_memo_signature_matching_resolved_lookup() {
+fn test_seed_existing_memo_signature_matches_resolved_lookup() {
     let (tmp, fonts_dir) = existing_fonts_dir();
     let font = fonts_dir.join("Real.otf");
     fs::write(&font, b"real font content").unwrap();
