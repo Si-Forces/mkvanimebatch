@@ -176,7 +176,8 @@ pub struct BatchRequest {
     /// Concurrency I/O jobs override
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub io_jobs: Option<usize>,
-    /// Per-job FFmpeg threads override
+    /// Per-job FFmpeg `-threads` override. It precedes `-i`, so it caps the FLAC decoder's threads;
+    /// libopus is single-threaded (ADR-0013, 2026-10-05 correction, #36).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ffmpeg_threads: Option<usize>,
     /// Global subtitle sync offset in whole milliseconds. `None` and `Some(0)` both mean no
