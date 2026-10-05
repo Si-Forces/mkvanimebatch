@@ -142,7 +142,7 @@ Download `mkv-cli` from [GitHub Releases](https://github.com/sifahaz/mkvanimebat
 | `--sub-offset <SEC>` | Subtitle timestamp sync offset in seconds (e.g. `1.5`, `-0.5`), rounded half away from zero to whole milliseconds; a value that is not finite, or whose milliseconds do not fit `i64`, is rejected. A Track Assignment's `offset_ms` replaces it | `0` |
 | `--workers <N>` | Number of concurrent worker tasks (1–64) | Physical cores, capped at the available parallelism, clamped to 1–16 |
 | `--io-jobs <N>` | Concurrency limit for disk-heavy work (0–64; `0` uses the worker count) | `2` |
-| `--ffmpeg-threads <N\|auto>` | FLAC decoder thread cap per audio transcode job (1–32); `auto` is case-insensitive. Opus encoding is single-threaded per transcode, so this does not speed it up | `auto`: `(cores / workers)` clamped to 1–4 |
+| `--ffmpeg-threads <N\|auto>` | FLAC decoder thread cap per audio transcode job (1–32); `auto` is case-insensitive. Opus encoding is single-threaded per transcode, so raising it rarely speeds up a transcode | `auto`: `(cores / workers)` clamped to 1–4 |
 | `--bitrate <RATE>` | Opus bitrate: a positive integer with an optional `k`/`K` or `M` suffix (e.g. `128k`, `192K`); lowercase `m` is rejected | Preset bitrate, else `192k` |
 | `--complexity <0-10>` | Opus encoder complexity | Preset complexity, else `5` |
 | `--extract` | Run batch extraction instead of remuxing | Off |

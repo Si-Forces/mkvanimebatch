@@ -216,7 +216,7 @@ pub fn build_mkvmerge_args(
 ///
 /// `-threads` sits before `-i`, making it an input option that caps the FLAC decoder's threads.
 /// Nothing after `-i` sets encoder threads, and libopus is single-threaded, so each transcode
-/// encodes on about one core whatever `ffmpeg_threads` is.
+/// encodes on about one core whatever `ffmpeg_threads` is (ADR-0013, 2026-10-05 correction, #36).
 pub fn build_ffmpeg_args(
     video: &Path,
     audio_index: usize,
@@ -256,6 +256,8 @@ pub fn build_ffmpeg_args(
 pub struct RemuxOptions<'a> {
     pub opus_bitrate: &'a str,
     pub complexity: u32,
+    /// The FLAC decoder thread cap, passed to `build_ffmpeg_args` as `-threads` (ADR-0013,
+    /// 2026-10-05 correction, #36).
     pub ffmpeg_threads: usize,
     pub default_sub_offset_ms: i64,
 }

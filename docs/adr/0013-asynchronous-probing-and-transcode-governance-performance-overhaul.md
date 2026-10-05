@@ -1,6 +1,6 @@
 # 0013. Asynchronous Probing and Transcode Governance Performance Overhaul
 
-> **Status**: Accepted (amended 2026-10-02, 2026-10-04, 2026-10-05)
+> **Status**: Accepted (amended 2026-10-02, 2026-10-04, 2026-10-05; Decision 2 rationale corrected 2026-10-05, #36)
 > **Date**: 2026-09-21
 > **Context**: Media Engine Context & In-Process Engine Bridge
 > **Amends**: ADR-0006, ADR-0008, ADR-0011
@@ -31,7 +31,9 @@ We decided to execute a coordinated performance overhaul across the Media Engine
    > "frame", ffmpeg 8.1.3), so each transcode encodes on about one core whatever `ffmpeg_threads`
    > is, and `workers` is the only lever on encode CPU use. The governor still has a purpose:
    > without `-threads`, ffmpeg sizes decoder threads to all cores per process, so
-   > `(cores / workers).clamp(1, 4)` prevents `workers × cores` mostly idle threads.
+   > `(cores / workers).clamp(1, 4)` prevents `workers × cores` mostly idle threads. This also
+   > corrects the second Consequence's "balances core utilization across parallel worker slots":
+   > `ffmpeg_threads` balances no encode work; only the worker count does.
 
 3. **Fine-Grained Font Seeding**:
    Refactor `FontRegistry::seed_existing` to compute BLAKE2b hashes for uncached files outside the mutex lock, taking the lock only for final batch insertion to reduce lock hold duration from ~160ms to < 15µs.
@@ -52,7 +54,7 @@ We decided to execute a coordinated performance overhaul across the Media Engine
 ## Consequences
 
 - Completely eliminates Tokio async reactor thread stalls during cold inspection.
-- Reduces total batch CPU transcode duration by ~40% and balances core utilization across parallel worker slots.
+- Reduces total batch CPU transcode duration by ~40% and balances core utilization across parallel worker slots. (Balancing rationale corrected under Decision 2, 2026-10-05, #36.)
 - Eliminates font registry lock contention during pipeline startup.
 - Cuts cache serialization latency by 75% and eliminates intermediate heap memory allocations.
 

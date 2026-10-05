@@ -147,6 +147,8 @@ pub struct PipelineConfig {
     pub io_jobs: usize,
     pub bitrate: String,
     pub complexity: u32,
+    /// ffmpeg `-threads` per transcode: the FLAC decoder thread cap (ADR-0013, 2026-10-05
+    /// correction, #36).
     pub ffmpeg_threads: usize,
     /// Global subtitle sync offset in milliseconds; a Track Assignment's `offset_ms` replaces it.
     pub default_sub_offset_ms: i64,
