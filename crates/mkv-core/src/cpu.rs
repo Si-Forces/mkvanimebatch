@@ -69,8 +69,12 @@ pub(crate) fn physical_core_count() -> usize {
     effective_core_count(topology_core_count(), available)
 }
 
-/// Derives the per-job FFmpeg thread count from physical cores and active batch workers
+/// Derives the per-job FFmpeg `-threads` value from physical cores and active batch workers
 /// per ADR-0013.
+///
+/// `-threads` precedes `-i`, so it caps the FLAC decoder's threads, not the encoder's: libopus is
+/// single-threaded. The cap keeps ffmpeg from sizing decoder threads to all cores in each of
+/// `workers` processes (ADR-0013, 2026-10-05 correction, #36).
 pub(crate) fn transcode_governor_threads(cores: usize, workers: usize) -> usize {
     (cores / workers.max(1)).clamp(1, 4)
 }
