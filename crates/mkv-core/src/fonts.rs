@@ -6,10 +6,10 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use blake2::{Blake2b512, Digest};
-use parking_lot::Mutex;
+use parking_lot::{Mutex, MutexGuard};
 use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 use tracing::{error, warn};
@@ -293,10 +293,22 @@ impl FontClaim {
     }
 }
 
+/// The seeded fonts of one size. They are hashed once, by the first promote of a staged font
+/// of that size; a concurrent promote of the same size waits on `hashes` instead of hashing
+/// them again or checking before their hashes are in.
+struct SeededSizeBucket {
+    fonts: Vec<(PathBuf, FileSignature)>,
+    hashes: OnceLock<Vec<String>>,
+}
+
 #[derive(Default)]
 struct FontRegistryState {
     claimed_hashes: HashSet<String>,
     claimed_name_size: HashSet<(String, u64)>,
+    /// Seeded fonts whose hashes are not yet in `claimed_hashes`, by size. A bucket leaves
+    /// the map in the critical section that inserts its hashes, so a promote that finds no
+    /// bucket for its size finds those hashes instead.
+    unhashed_seeded: HashMap<u64, Arc<SeededSizeBucket>>,
 }
 
 /// Drops `claim`'s (name, size) reservation and its staging file.
@@ -326,15 +338,18 @@ impl FontRegistry {
         registry
     }
 
-    /// Reserves the name, resolved size, and content hash of every regular font file already
-    /// in `fonts_dir`, so extraction neither re-stages nor duplicates them.
+    /// Reserves the name and resolved size of every regular font file already in
+    /// `fonts_dir`, so extraction does not re-stage them, and files each one by size for
+    /// [`Self::lock_with_seeded_hashes`]. Nothing is hashed here: identical content implies
+    /// identical size, so a seeded font is hashed only when a staged font of its size is
+    /// promoted.
     fn seed_existing(&self) {
         let Ok(entries) = fs::read_dir(&self.fonts_dir) else {
             return;
         };
 
         let mut discovered_name_sizes = Vec::new();
-        let mut discovered_hashes = Vec::new();
+        let mut by_size: HashMap<u64, Vec<(PathBuf, FileSignature)>> = HashMap::new();
 
         for entry in entries.flatten() {
             let path = entry.path();
@@ -356,14 +371,50 @@ impl FontRegistry {
             };
             let file_name = entry.file_name().to_string_lossy().into_owned();
             discovered_name_sizes.push((file_name, sig.size));
-            if let Some(hash) = self.memoized_hash(&path, sig) {
-                discovered_hashes.push(hash);
-            }
+            by_size.entry(sig.size).or_default().push((path, sig));
         }
 
         let mut state = self.state.lock();
         state.claimed_name_size.extend(discovered_name_sizes);
-        state.claimed_hashes.extend(discovered_hashes);
+        state
+            .unhashed_seeded
+            .extend(by_size.into_iter().map(|(size, fonts)| {
+                let bucket = SeededSizeBucket {
+                    fonts,
+                    hashes: OnceLock::new(),
+                };
+                (size, Arc::new(bucket))
+            }));
+    }
+
+    /// Locks the registry with every seeded font of `size` hashed into `claimed_hashes`, so a
+    /// duplicate check made under the returned guard sees them all. The hashing runs without the
+    /// registry lock held, and the bucket leaves the map in the critical section that inserts its
+    /// hashes. Each font goes through [`Self::memoized_hash`] with its seed-time signature:
+    /// without a memo or on a memo miss, a font that changed since seeding is hashed as found and
+    /// one that vanished is skipped, while a memo hit returns the stored hash without opening the
+    /// file.
+    fn lock_with_seeded_hashes(&self, size: u64) -> MutexGuard<'_, FontRegistryState> {
+        // Two statements on purpose: the temporary guard drops at the end of the first, before
+        // the lock is taken again below; folding them into one `let else` would self-deadlock.
+        let bucket = self.state.lock().unhashed_seeded.get(&size).cloned();
+        let Some(bucket) = bucket else {
+            // Never seeded, or already absorbed: `claimed_hashes` only grows.
+            return self.state.lock();
+        };
+        // `OnceLock` runs the hashing once; a concurrent caller blocks until it is done. A
+        // panicking initializer leaves the cell empty for the next caller to retry.
+        let hashes = bucket.hashes.get_or_init(|| {
+            bucket
+                .fonts
+                .iter()
+                .filter_map(|(path, sig)| self.memoized_hash(path, *sig))
+                .collect()
+        });
+        let mut state = self.state.lock();
+        state.unhashed_seeded.remove(&size);
+        state.claimed_hashes.extend(hashes.iter().cloned());
+        state
     }
 
     /// Content hash of `path`, served from the memo when `sig` matches. Hashing runs without
@@ -381,6 +432,9 @@ impl FontRegistry {
         Some(hash)
     }
 
+    /// The content hashes computed so far: every promoted font's, and those of the seeded
+    /// fonts whose size a promote has met. A seeded font is not hashed until a staged font of
+    /// its size is promoted, so until then its hash is absent here.
     pub fn claimed_hashes(&self) -> HashSet<String> {
         self.state.lock().claimed_hashes.clone()
     }
@@ -410,16 +464,20 @@ impl FontRegistry {
     /// If hash is duplicate or validation fails, staging file is removed and released.
     /// Returns the final promoted destination Path, or None if duplicate or failed.
     pub fn promote(&self, claim: &mut FontClaim) -> Option<PathBuf> {
-        let file_hash = match fs::metadata(&claim.staging_path) {
-            Ok(meta) if meta.is_file() && meta.len() > 0 => hash_file(&claim.staging_path).ok(),
+        let staged = match fs::metadata(&claim.staging_path) {
+            Ok(meta) if meta.is_file() && meta.len() > 0 => hash_file(&claim.staging_path)
+                .ok()
+                .map(|hash| (hash, meta.len())),
             _ => None,
         };
-
-        let mut state = self.state.lock();
-        let Some(file_hash) = file_hash else {
+        let Some((file_hash, size)) = staged else {
+            let mut state = self.state.lock();
             release_locked(&mut state, claim);
             return None;
         };
+
+        // Only a seeded font of the staged file's size can share its content.
+        let mut state = self.lock_with_seeded_hashes(size);
 
         // A content duplicate keeps its (name, size) reservation, so later files carrying the
         // same attachment skip extracting it.

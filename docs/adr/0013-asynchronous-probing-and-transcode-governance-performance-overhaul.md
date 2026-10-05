@@ -1,6 +1,6 @@
 # 0013. Asynchronous Probing and Transcode Governance Performance Overhaul
 
-> **Status**: Accepted (amended 2026-10-02, 2026-10-04)
+> **Status**: Accepted (amended 2026-10-02, 2026-10-04, 2026-10-05)
 > **Date**: 2026-09-21
 > **Context**: Media Engine Context & In-Process Engine Bridge
 > **Amends**: ADR-0006, ADR-0008, ADR-0011
@@ -25,6 +25,10 @@ We decided to execute a coordinated performance overhaul across the Media Engine
 
 3. **Fine-Grained Font Seeding**:
    Refactor `FontRegistry::seed_existing` to compute BLAKE2b hashes for uncached files outside the mutex lock, taking the lock only for final batch insertion to reduce lock hold duration from ~160ms to < 15µs.
+
+   > [!NOTE]
+   > **AMENDED BY AMENDMENT 9 (#33)**: `seed_existing` no longer hashes; a seeded font is hashed
+   > only when a staged font of its size is promoted.
 
 4. **Zero-Copy Streaming Cache Persistence**:
    Serialize `PersistentInspectCache` disk snapshots directly into `std::io::BufWriter` with `serde_json::to_writer`, eliminating temporary heap string allocations and collection copies.
@@ -105,7 +109,7 @@ Findings are numbered to match the original report so a reader holding it can cr
 | 3 | `Arc`-share `MkvmergeMetadata` across jobs | Each job probes its own file; `InspectedVideo::new` moves, never clones | Nothing is shared, so there is nothing to share |
 | 4 | Move CPU-bound work off the async runtime | all flagged CPU work totals 0.13ms vs a 60ms `mkvextract` | No meaningful load; ADR-0011's dual governor already covers subprocess scheduling |
 | 5 | Optimise the `parse_episode` regex pipeline | 38.9µs/file (~39ms per 1000-file season) | Irrelevant next to a ~60ms `mkvextract` invocation |
-| 6 | Parallelize `FontRegistry::seed_existing` | Cold 364ms -> warm 2.1ms via the existing `FontHashMemo` | Decision 3 above already removed 99% of it |
+| 6 | Parallelize `FontRegistry::seed_existing` | Cold 364ms -> warm 2.1ms via the existing `FontHashMemo` | Decision 3 above already removed 99% of it. Seed hashing is now lazy by size; see Amendment 9 (#33) |
 | 7 | Add micro-benchmarks for `parse_episode` / `probe_ebml_native` / `hash_file` / `promote_file` | measures 0.1–40ms operations against a 60ms subprocess | Not taken: the measurement that mattered here was the copy's wall-clock cost, taken directly rather than as a micro-benchmark |
 | 8 | Replace `fancy-regex` with `regex` | `fancy-regex` already delegates non-backtracking patterns to `regex` internally | ~0 gain; only the 3 lookbehind patterns genuinely need `fancy-regex` |
 | 9 | Enable tokio's `parking_lot` feature | `tokio::sync::Mutex` is used only in tests; production uses `Semaphore`/`mpsc` | The feature does not touch those primitives |
@@ -437,3 +441,68 @@ Counting only the physical cores inside the affinity mask would need a new crate
 **Coverage.** `test_effective_core_count_caps_topology_at_available` covers the pure
 `effective_core_count(topology, available)`: (16, 2) → 2, (8, 16) → 8, (0, 4) → 4.
 `physical_core_count` only reads the host and calls it, so it has no test of its own.
+
+## Amendment 9 — 2026-10-05 (seeded fonts hashed lazily by size)
+
+**Decision.** `FontRegistry::seed_existing` no longer hashes. It records each existing font's
+name, resolved size and path (`read_dir` plus a stat) and files the fonts by size. `promote`
+hashes the staged file outside the lock as before, then hashes the not-yet-hashed seeded fonts of
+the staged file's size, without the registry lock held and through `FontHashMemo` when there is
+one, and inserts their hashes in the critical section that runs its `claimed_hashes` check.
+Identical content implies identical size, so a seeded font of another size cannot be a content
+duplicate, and the `(name, size)` reservation still stops re-extraction without a hash. This
+supersedes Decision 3 for the seed: it now hashes nothing, so Decision 3's lock-hold figures
+describe the old path.
+
+Each size is hashed at most once. Its seeded fonts sit behind a `OnceLock`, so a concurrent
+promote of the same size waits for the first hashing instead of repeating it or checking before
+those hashes are in, and the size leaves the unhashed map in the critical section that inserts
+its hashes. There is no retry loop: the seeded set is fixed when the registry is built, and every
+promoted font's hash enters `claimed_hashes` in the critical section of its own check. A promote
+that waits on another's hashing blocks its thread, a Tokio worker on the extract path, as hashing
+the staged file in `promote` already does; the hashing never awaits, so the wait cannot deadlock.
+
+A seeded font is hashed through `memoized_hash` with its seed-time `FileSignature`, as before.
+Without a memo, or on a memo miss, one that changed since seeding is hashed as found and one
+that vanished is skipped. On a memo hit its stored hash is used without opening the file, so a
+font changed or deleted since seeding keeps its old hash; that window now runs until the first
+promote of its size instead of closing at seeding. A seeded font whose size changed after
+seeding also stays filed under its seed-time size, so a staged font matching its new size misses
+it unless a promote of the seed-time size has already hashed it. The seed is metadata-only, so
+it stays inline, without `spawn_blocking`, as #23's per-directory passes do until that issue's
+cold-media measurement lands. `claimed_hashes()` returns the hashes computed so far.
+
+**Why Amendment 2 Finding 6 did not cover this.** Finding 6 rejected parallelizing the seed
+because the memo cut it from 364 ms cold to 2.1 ms warm. The memo exists only with the cache on.
+Under `no_cache` (CLI `--no-cache`, the desktop "no cache" box) `run_extract` builds none, so
+every run paid the cold cost once per fonts dir, and once per release when `--out-dir` gives each
+release its own. The lazy path is not measured here; 364 ms is Finding 6's figure for the old one.
+
+**Not adopted.** Hashing the staged file only when a seeded or promoted font of its size exists.
+It needs a retry loop, since a concurrently promoted, unhashed font of the same size could land
+between the check and the promotion, and an on-demand hash in `vacant_target`, which names a
+collision `<stem>_<hash8><ext>`. A staged font was just written, so its pages are hot and the
+saving is small.
+
+**Unchanged.** ADR-0003's claim → stage → BLAKE2b dedup → promote still holds; only the moment a
+seeded font is hashed moved. The memo still caches seeded and promoted fonts by path and
+`FileSignature`, but gains a seeded font's entry only when a font of its size is promoted.
+
+**Coverage.** `test_seed_existing_hashes_only_the_promoted_size` builds a registry with a memo
+over two fonts of different sizes and checks the memo is empty after `new`; promoting a staged
+font of one size under another name adds that size's seeded entry and not the other's. It fails
+when `seed_existing` hashes eagerly.
+`test_concurrent_promotes_of_a_seeded_size_all_find_their_duplicates` races eight same-size
+promotes of copies of two seeded fonts and requires all to be rejected; a variant that takes a
+size without waiting for its hashes failed it in 18 of 20 runs. `test_seed_existing_fonts`
+covers a content duplicate of a seeded font under a new name.
+`test_seed_existing_memo_signature_matches_resolved_lookup`,
+`test_seed_existing_symlinked_font_uses_resolved_signature` and
+`test_pipeline_extract_persists_font_hash_memo` relied on `new` filling the memo: the first two
+now promote a same-size font first, and the third leaves an unsaved entry for the run to
+persist. The third proves only that the run saves the configured memo, on every platform.
+`test_pipeline_font_memo` (Unix-only, its own binary because it puts a stub `mkvextract` ahead
+on `PATH`) checks that `run_extract` hands its memo to `FontRegistry::new`: the stub writes one
+font attachment, as many bytes as a seeded font and under another name, which the run stages and
+promotes; after the run the persisted memo holds the seeded font's hash. It fails when the
+registry is built with `None`.
