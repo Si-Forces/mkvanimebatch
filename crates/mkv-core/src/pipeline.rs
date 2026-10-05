@@ -38,6 +38,18 @@ pub struct BatchItemInfo {
     pub file: String,
 }
 
+impl BatchItemInfo {
+    /// Identity of a discovered file: its canonical item ID under `input_dir` and its scanned
+    /// file name. Taking the `ParsedFile` reuses the name discovery already computed, so every
+    /// event reports exactly the name the scan produced.
+    pub(crate) fn new(file: &ParsedFile, input_dir: &Path) -> Self {
+        Self {
+            id: get_item_id(&file.path, input_dir),
+            file: file.name.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum JobEvent {
@@ -177,7 +189,8 @@ pub struct PipelineSummary {
     pub log: Vec<String>,
 }
 
-fn cancelled_item(id: String, file: String, duration_sec: Option<f64>) -> JobEvent {
+fn cancelled_item(item: BatchItemInfo, duration_sec: Option<f64>) -> JobEvent {
+    let BatchItemInfo { id, file } = item;
     JobEvent::ItemComplete {
         version: EVENT_VERSION,
         id,
@@ -190,7 +203,8 @@ fn cancelled_item(id: String, file: String, duration_sec: Option<f64>) -> JobEve
     }
 }
 
-fn planned_item(id: String, file: String) -> JobEvent {
+fn planned_item(item: BatchItemInfo) -> JobEvent {
+    let BatchItemInfo { id, file } = item;
     JobEvent::ItemComplete {
         version: EVENT_VERSION,
         id,
@@ -332,10 +346,10 @@ fn settle_cancelled_planning_items(
     files
         .iter()
         .map(|file| {
-            let id = get_item_id(&file.path, input_dir);
+            let item = BatchItemInfo::new(file, input_dir);
             outcomes_by_id
-                .remove(&id)
-                .unwrap_or_else(|| cancelled_item(id, file.name.clone(), None))
+                .remove(&item.id)
+                .unwrap_or_else(|| cancelled_item(item, None))
         })
         .collect()
 }
@@ -405,8 +419,7 @@ enum ItemFailure {
 /// Best-effort progress reporting for one item; a full event channel drops the update.
 struct ProgressSink {
     tx: Option<EventSender>,
-    id: String,
-    file: String,
+    item: BatchItemInfo,
 }
 
 impl ProgressSink {
@@ -414,8 +427,8 @@ impl ProgressSink {
         if let Some(tx) = &self.tx {
             let _ = tx.try_send(JobEvent::ItemProgress {
                 version: EVENT_VERSION,
-                id: self.id.clone(),
-                file: self.file.clone(),
+                id: self.item.id.clone(),
+                file: self.item.file.clone(),
                 progress,
                 speed: None,
                 eta: None,
@@ -550,10 +563,7 @@ impl BatchPipeline {
 
         let items: Vec<BatchItemInfo> = files
             .iter()
-            .map(|f| BatchItemInfo {
-                id: get_item_id(&f.path, &self.config.input_dir),
-                file: f.name.clone(),
-            })
+            .map(|f| BatchItemInfo::new(f, &self.config.input_dir))
             .collect();
         self.emit(JobEvent::BatchStart {
             version: EVENT_VERSION,
@@ -577,7 +587,7 @@ impl BatchPipeline {
         Ok((files, summary))
     }
 
-    /// Runs `items` as `(id, file, payload)` on at most `max_workers` concurrent tasks,
+    /// Runs `items` as `(item, payload)` on at most `max_workers` concurrent tasks,
     /// emitting each item's start and terminal events.
     ///
     /// `start` builds an item's work future, which observes `cancel_token` itself. Once a stop
@@ -588,7 +598,7 @@ impl BatchPipeline {
         summary: &mut PipelineSummary,
         // A Vec rather than `impl Iterator`: a borrowing `map` adapter held across the awaits
         // below makes the batch future fail the `Send` check callers spawn it under.
-        items: Vec<(String, String, T)>,
+        items: Vec<(BatchItemInfo, T)>,
         mut start: impl FnMut(T, ProgressSink) -> F,
         failure_label: &str,
     ) where
@@ -598,7 +608,7 @@ impl BatchPipeline {
         let mut pending = items.into_iter().peekable();
         let mut join_set = tokio::task::JoinSet::new();
         // Keyed by task id so a panicked task, whose output is lost, still resolves to its item.
-        let mut in_flight: HashMap<tokio::task::Id, (String, String, Instant)> = HashMap::new();
+        let mut in_flight: HashMap<tokio::task::Id, (BatchItemInfo, Instant)> = HashMap::new();
 
         while pending.peek().is_some() || !join_set.is_empty() {
             if self.cancel_token.is_cancelled() {
@@ -611,7 +621,7 @@ impl BatchPipeline {
                     summary.cancelled = true;
                     break;
                 }
-                let Some((id, file, payload)) = pending.next() else {
+                let Some((item, payload)) = pending.next() else {
                     break;
                 };
 
@@ -619,15 +629,14 @@ impl BatchPipeline {
                     payload,
                     ProgressSink {
                         tx: self.event_sender.clone(),
-                        id: id.clone(),
-                        file: file.clone(),
+                        item: item.clone(),
                     },
                 );
                 let started = Instant::now();
                 self.emit(JobEvent::ItemStart {
                     version: EVENT_VERSION,
-                    id: id.clone(),
-                    file: file.clone(),
+                    id: item.id.clone(),
+                    file: item.file.clone(),
                     extra: Default::default(),
                 })
                 .await;
@@ -641,7 +650,7 @@ impl BatchPipeline {
                     };
                     (outcome, started.elapsed().as_secs_f64())
                 });
-                in_flight.insert(task.id(), (id, file, started));
+                in_flight.insert(task.id(), (item, started));
             }
 
             let Some(joined) = join_set.join_next_with_id().await else {
@@ -651,7 +660,7 @@ impl BatchPipeline {
                 Ok((task_id, result)) => (task_id, Ok(result)),
                 Err(join_err) => (join_err.id(), Err(join_err)),
             };
-            let Some((id, file, started)) = in_flight.remove(&task_id) else {
+            let Some((item, started)) = in_flight.remove(&task_id) else {
                 continue;
             };
             let (outcome, duration) = joined.unwrap_or_else(|join_err| {
@@ -667,6 +676,7 @@ impl BatchPipeline {
                     summary.completed += 1;
                     self.log_batch(&logs).await;
                     summary.log.extend(logs);
+                    let BatchItemInfo { id, file } = item;
                     self.emit(JobEvent::ItemComplete {
                         version: EVENT_VERSION,
                         id,
@@ -681,10 +691,11 @@ impl BatchPipeline {
                 }
                 Err(ItemFailure::Cancelled) => {
                     summary.cancelled = true;
-                    self.emit(cancelled_item(id, file, Some(duration))).await;
+                    self.emit(cancelled_item(item, Some(duration))).await;
                 }
                 Err(ItemFailure::Failed(err)) => {
                     summary.errors += 1;
+                    let BatchItemInfo { id, file } = item;
                     let msg = format!("  ERROR: {failure_label} failed for '{file}': {err}");
                     self.log(&msg).await;
                     summary.log.push(msg);
@@ -706,16 +717,12 @@ impl BatchPipeline {
         if summary.cancelled {
             join_set.abort_all();
             while join_set.join_next().await.is_some() {}
-            for (_, (id, file, started)) in in_flight.drain() {
-                self.emit(cancelled_item(
-                    id,
-                    file,
-                    Some(started.elapsed().as_secs_f64()),
-                ))
-                .await;
+            for (_, (item, started)) in in_flight.drain() {
+                self.emit(cancelled_item(item, Some(started.elapsed().as_secs_f64())))
+                    .await;
             }
-            for (id, file, _) in pending {
-                self.emit(cancelled_item(id, file, None)).await;
+            for (item, _) in pending {
+                self.emit(cancelled_item(item, None)).await;
             }
         }
     }
@@ -733,9 +740,8 @@ impl BatchPipeline {
                 if self.cancel_token.is_cancelled() {
                     summary.cancelled = true;
                     for rem in &files[idx..] {
-                        let rem_id = get_item_id(&rem.path, &self.config.input_dir);
-                        self.emit(cancelled_item(rem_id, rem.name.clone(), None))
-                            .await;
+                        let item = BatchItemInfo::new(rem, &self.config.input_dir);
+                        self.emit(cancelled_item(item, None)).await;
                     }
                     break;
                 }
@@ -746,10 +752,10 @@ impl BatchPipeline {
                 );
                 self.log(&msg).await;
                 summary.log.push(msg);
-                self.emit(planned_item(
-                    get_item_id(&file.path, &self.config.input_dir),
-                    file.name.clone(),
-                ))
+                self.emit(planned_item(BatchItemInfo::new(
+                    file,
+                    &self.config.input_dir,
+                )))
                 .await;
                 summary.completed += 1;
             }
@@ -773,13 +779,7 @@ impl BatchPipeline {
 
         let items: Vec<_> = files
             .iter()
-            .map(|file| {
-                (
-                    get_item_id(&file.path, &self.config.input_dir),
-                    file.name.clone(),
-                    file,
-                )
-            })
+            .map(|file| (BatchItemInfo::new(file, &self.config.input_dir), file))
             .collect();
         self.run_items(
             &mut summary,
@@ -877,14 +877,14 @@ impl BatchPipeline {
             ..Default::default()
         };
         for (idx, file) in files.iter().enumerate() {
-            let id = get_item_id(&file.path, &self.config.input_dir);
+            let item = BatchItemInfo::new(file, &self.config.input_dir);
             let event = if cancelled {
-                cancelled_item(id, file.name.clone(), None)
+                cancelled_item(item, None)
             } else {
                 JobEvent::ItemComplete {
                     version: EVENT_VERSION,
-                    id,
-                    file: file.name.clone(),
+                    id: item.id,
+                    file: item.file,
                     status: ItemOutcome::Error,
                     reason: None,
                     error: Some(if idx == failed_idx {
@@ -910,8 +910,8 @@ impl BatchPipeline {
     ) -> PipelineSummary {
         summary.cancelled = true;
         for file in files {
-            let id = get_item_id(&file.path, &self.config.input_dir);
-            self.emit(cancelled_item(id, file.name.clone(), None)).await;
+            let item = BatchItemInfo::new(file, &self.config.input_dir);
+            self.emit(cancelled_item(item, None)).await;
         }
         self.emit_batch_complete(false, true).await;
         summary
@@ -986,7 +986,8 @@ impl BatchPipeline {
             return Ok(self.cancel_before_planning(&files, summary).await);
         };
 
-        let mut all_planned_jobs: Vec<(PlannedJob, TrackSelection, FontInfo)> = Vec::new();
+        let mut all_planned_jobs: Vec<(BatchItemInfo, (PlannedJob, TrackSelection, FontInfo))> =
+            Vec::new();
         let mut planning_outcomes = Vec::new();
         let mut planning_error: Option<(usize, String)> = None;
 
@@ -1007,14 +1008,14 @@ impl BatchPipeline {
                 break;
             }
 
-            let item_id = get_item_id(&video_file.path, &self.config.input_dir);
+            let item = BatchItemInfo::new(video_file, &self.config.input_dir);
             let mkv_dir = video_file.path.parent().unwrap_or(Path::new("."));
             let Some(dir_prep) = prepared_dirs.get(mkv_dir) else {
                 continue;
             };
 
             let matched_assignment = assignment_index
-                .get(&clean_relative_path(&item_id))
+                .get(&clean_relative_path(&item.id))
                 .copied();
             let assigned_sub = matched_assignment.map(|a| {
                 a.resolve_asset_path(&self.config.input_dir, self.config.assets_dir.as_deref())
@@ -1036,8 +1037,8 @@ impl BatchPipeline {
                     .push(format!("Skipping '{}': {reason}", video_file.name));
                 planning_outcomes.push(JobEvent::ItemComplete {
                     version: EVENT_VERSION,
-                    id: item_id,
-                    file: video_file.name.clone(),
+                    id: item.id,
+                    file: item.file,
                     status: ItemOutcome::Skipped,
                     reason: Some(reason.into()),
                     error: None,
@@ -1079,8 +1080,8 @@ impl BatchPipeline {
                 ));
                 planning_outcomes.push(JobEvent::ItemComplete {
                     version: EVENT_VERSION,
-                    id: item_id,
-                    file: video_file.name.clone(),
+                    id: item.id,
+                    file: item.file,
                     status: ItemOutcome::Error,
                     reason: None,
                     error: Some(err),
@@ -1117,8 +1118,8 @@ impl BatchPipeline {
                     .push(format!("Skipping '{}': {reason}", video_file.name));
                 planning_outcomes.push(JobEvent::ItemComplete {
                     version: EVENT_VERSION,
-                    id: item_id,
-                    file: video_file.name.clone(),
+                    id: item.id,
+                    file: item.file,
                     status: ItemOutcome::Skipped,
                     reason: Some(reason),
                     error: None,
@@ -1134,7 +1135,7 @@ impl BatchPipeline {
                     video_file.name,
                     output_file.display()
                 ));
-                planning_outcomes.push(planned_item(item_id, video_file.name.clone()));
+                planning_outcomes.push(planned_item(item));
                 summary.completed += 1;
                 continue;
             }
@@ -1154,12 +1155,15 @@ impl BatchPipeline {
                 cover_file: res_assets.cover_file,
                 embedded_sub_id: res_assets.embedded_sub_id,
                 use_source_fonts: dir_prep.font_info.count == 0,
-                item_id,
+                item_id: item.id.clone(),
                 custom_offset_ms: matched_assignment.and_then(|a| a.offset_ms),
                 custom_language: matched_assignment.and_then(|a| a.language.clone()),
                 custom_title: matched_assignment.and_then(|a| a.title.clone()),
             };
-            all_planned_jobs.push((job, select_tracks(inspected), dir_prep.font_info.clone()));
+            all_planned_jobs.push((
+                item,
+                (job, select_tracks(inspected), dir_prep.font_info.clone()),
+            ));
         }
 
         if let Some((failed_idx, err)) = planning_error {
@@ -1183,19 +1187,9 @@ impl BatchPipeline {
             let ffmpeg_threads = self.config.ffmpeg_threads;
             let default_sub_offset_ms = self.config.default_sub_offset_ms;
 
-            let items: Vec<_> = all_planned_jobs
-                .into_iter()
-                .map(|planned| {
-                    (
-                        planned.0.item_id.clone(),
-                        planned.0.video_name.clone(),
-                        planned,
-                    )
-                })
-                .collect();
             self.run_items(
                 &mut summary,
-                items,
+                all_planned_jobs,
                 |(job, selection, font_info), progress| {
                     let cancel_token = self.cancel_token.clone();
                     let io_semaphore = Arc::clone(&io_semaphore);
@@ -1239,6 +1233,7 @@ impl BatchPipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scan::create_parsed_file;
 
     fn parsed_file(name: &str) -> ParsedFile {
         let path = Path::new("/anime").join(name);
@@ -1363,9 +1358,13 @@ mod tests {
             Some(event_sender),
             CancellationToken::new(),
         );
+        let input_dir = Path::new("/anime");
         let items = vec![
-            ("one.mkv".to_string(), "one.mkv".to_string(), true),
-            ("two.mkv".to_string(), "two.mkv".to_string(), false),
+            (BatchItemInfo::new(&parsed_file("one.mkv"), input_dir), true),
+            (
+                BatchItemInfo::new(&parsed_file("two.mkv"), input_dir),
+                false,
+            ),
         ];
         let mut summary = PipelineSummary::default();
         pipeline
@@ -1404,6 +1403,153 @@ mod tests {
         );
         assert_eq!((summary.completed, summary.errors), (1, 1));
         assert!(summary.log[0].contains("worker panicked"));
+    }
+
+    #[test]
+    fn batch_item_info_pairs_canonical_id_with_scanned_name() {
+        let input_dir = Path::new("/anime");
+        let file = create_parsed_file(input_dir.join("Season 1").join("【字幕】 Show - 01 ✓.mkv"));
+        let item = BatchItemInfo::new(&file, input_dir);
+        assert_eq!(
+            item,
+            BatchItemInfo {
+                id: "Season 1/【字幕】 Show - 01 ✓.mkv".into(),
+                file: "【字幕】 Show - 01 ✓.mkv".into(),
+            }
+        );
+        // The canonical item ID and the name the scan produced, never a recomputed one.
+        assert_eq!(
+            (item.id, item.file),
+            (get_item_id(&file.path, input_dir), file.name)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn planning_failure_errors_pair_each_nested_id_with_its_file_name() {
+        let input_dir = Path::new("/anime");
+        let (event_sender, mut event_receiver) = create_event_channel(8);
+        let pipeline = BatchPipeline::new(
+            PipelineConfig {
+                input_dir: input_dir.to_path_buf(),
+                ..Default::default()
+            },
+            Some(event_sender),
+            CancellationToken::new(),
+        );
+        let files = ["Season 1/one.mkv", "Season 2/two.mkv"]
+            .map(|rel| create_parsed_file(input_dir.join(rel)));
+        pipeline
+            .settle_planning_failure(&files, 0, "assignment disappeared".into())
+            .await;
+
+        let mut outcomes = Vec::new();
+        while let Ok(event) = event_receiver.try_recv() {
+            if let JobEvent::ItemComplete {
+                id, file, status, ..
+            } = event
+            {
+                outcomes.push((id, file, status));
+            }
+        }
+        assert_eq!(
+            outcomes,
+            [
+                (
+                    "Season 1/one.mkv".to_string(),
+                    "one.mkv".to_string(),
+                    ItemOutcome::Error
+                ),
+                (
+                    "Season 2/two.mkv".to_string(),
+                    "two.mkv".to_string(),
+                    ItemOutcome::Error
+                ),
+            ]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn item_events_report_each_items_id_and_file_name() {
+        let input_dir = Path::new("/anime");
+        let items: Vec<(BatchItemInfo, usize)> = [
+            "Season 1/Show - 01.mkv",
+            "Season 1/Show - 02.mkv",
+            "Season 2/Show - 03.mkv",
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(idx, rel)| {
+            let file = create_parsed_file(input_dir.join(rel));
+            (BatchItemInfo::new(&file, input_dir), idx)
+        })
+        .collect();
+        // Nested IDs never equal their file names, so a swapped pair misses this map.
+        let expected: HashMap<String, String> = items
+            .iter()
+            .map(|(item, _)| (item.id.clone(), item.file.clone()))
+            .collect();
+
+        let (event_sender, mut event_receiver) = create_event_channel(64);
+        let pipeline = BatchPipeline::new(
+            PipelineConfig::default(),
+            Some(event_sender),
+            CancellationToken::new(),
+        );
+        let mut summary = PipelineSummary::default();
+        pipeline
+            .run_items(
+                &mut summary,
+                items,
+                |idx, progress| async move {
+                    progress.report(50.0);
+                    match idx {
+                        0 => Ok(Vec::new()),
+                        1 => Err(ItemFailure::Failed("bad".into())),
+                        _ => Err(ItemFailure::Cancelled),
+                    }
+                },
+                "Remux",
+            )
+            .await;
+
+        let mut seen = Vec::new();
+        while let Ok(event) = event_receiver.try_recv() {
+            let (kind, id, file) = match event {
+                JobEvent::ItemStart { id, file, .. } => ("start", id, file),
+                JobEvent::ItemProgress { id, file, .. } => ("progress", id, file),
+                JobEvent::ItemComplete {
+                    id, file, status, ..
+                } => {
+                    let kind = match status {
+                        ItemOutcome::Completed => "completed",
+                        ItemOutcome::Error => "error",
+                        ItemOutcome::Cancelled => "cancelled",
+                        other => panic!("unexpected outcome {other:?}"),
+                    };
+                    (kind, id, file)
+                }
+                other => panic!("unexpected event {other:?}"),
+            };
+            assert_eq!(expected.get(&id), Some(&file), "{kind} event for '{id}'");
+            seen.push((id, kind));
+        }
+        seen.sort();
+        let seen: Vec<(&str, &str)> = seen.iter().map(|(id, k)| (id.as_str(), *k)).collect();
+        assert_eq!(
+            seen,
+            [
+                ("Season 1/Show - 01.mkv", "completed"),
+                ("Season 1/Show - 01.mkv", "progress"),
+                ("Season 1/Show - 01.mkv", "start"),
+                ("Season 1/Show - 02.mkv", "error"),
+                ("Season 1/Show - 02.mkv", "progress"),
+                ("Season 1/Show - 02.mkv", "start"),
+                ("Season 2/Show - 03.mkv", "cancelled"),
+                ("Season 2/Show - 03.mkv", "progress"),
+                ("Season 2/Show - 03.mkv", "start"),
+            ]
+        );
+        assert!(summary.log[0].contains("failed for 'Show - 02.mkv'"));
     }
 
     #[test]
