@@ -57,14 +57,18 @@ fn next_number<T: AsRef<str>, N: FromStr>(
 
 /// Converts `--sub-offset` seconds to the engine's whole milliseconds, rounding half away
 /// from zero. Rejects a value that is not finite or whose milliseconds do not fit `i64`.
-fn seconds_to_ms(flag: &str, seconds: f64) -> Result<i64, String> {
+/// The range error quotes `raw` as typed, since the parsed `f64` may already be rounded.
+fn parse_seconds_as_ms(flag: &str, raw: &str) -> Result<i64, String> {
+    let seconds: f64 = raw
+        .parse()
+        .map_err(|_| format!("Invalid number for {flag}"))?;
     let ms = (seconds * 1000.0).round();
     // `as` saturates silently, so check the range first; 2^63 itself does not fit.
     if ms >= i64::MIN as f64 && ms < i64::MAX as f64 {
         Ok(ms as i64)
     } else {
         Err(format!(
-            "Invalid {flag}: {seconds} seconds is not a finite offset that fits in whole milliseconds"
+            "Invalid {flag}: {raw} seconds is not a finite offset that fits in whole milliseconds"
         ))
     }
 }
@@ -139,8 +143,8 @@ where
             "--dry-run" => request.dry_run = Some(true),
             "--no-cache" => request.no_cache = Some(true),
             "--sub-offset" => {
-                let seconds = next_number(&mut it, flag, "number")?;
-                request.default_sub_offset_ms = Some(seconds_to_ms(flag, seconds)?);
+                let raw = next_value(&mut it, flag)?;
+                request.default_sub_offset_ms = Some(parse_seconds_as_ms(flag, &raw)?);
             }
             "--workers" => request.workers = Some(next_number(&mut it, flag, "integer")?),
             "--io-jobs" => request.io_jobs = Some(next_number(&mut it, flag, "integer")?),
@@ -622,13 +626,27 @@ mod tests {
             assert_eq!(ms(sec), Ok(Some(expected)), "{sec}");
         }
 
-        for bad in ["inf", "-inf", "NaN", "1e300", "-1e300"] {
+        // The last value parses to exactly 2^63 ms, one past `i64::MAX`; the error quotes it
+        // as typed rather than as the rounded `f64`.
+        for bad in [
+            "inf",
+            "-inf",
+            "NaN",
+            "1e300",
+            "-1e300",
+            "9223372036854775.807",
+        ] {
             let err = ms(bad).unwrap_err();
             assert!(
-                err.starts_with("Invalid --sub-offset:") && err.contains("whole milliseconds"),
+                err.starts_with(&format!("Invalid --sub-offset: {bad} seconds "))
+                    && err.contains("whole milliseconds"),
                 "{bad}: {err}"
             );
         }
+        assert_eq!(
+            ms("abc"),
+            Err("Invalid number for --sub-offset".to_string())
+        );
     }
 
     #[test]

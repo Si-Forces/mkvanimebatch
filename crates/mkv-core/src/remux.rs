@@ -73,6 +73,9 @@ pub fn select_tracks(inspected: &InspectedVideo) -> TrackSelection {
 }
 
 /// `--sync <track_id>:<offset_ms>`, or nothing for a zero offset.
+///
+/// This is the only zero guard for both subtitle branches. It is what makes a Track
+/// Assignment's explicit `offset_ms = 0` mean unshifted (ADR-0012), not an off-by-one.
 fn format_sync_args(track_id: u32, offset_ms: i64) -> Vec<String> {
     if offset_ms != 0 {
         vec!["--sync".to_string(), format!("{track_id}:{offset_ms}")]
@@ -161,14 +164,11 @@ pub fn build_mkvmerge_args(
     }
 
     if let Some(sub_file) = &job.subtitle_file {
-        if let Some(ms) = job.custom_offset_ms {
-            if ms != 0 {
-                args.push("--sync".to_string());
-                args.push(format!("0:{ms}"));
-            }
-        } else {
-            args.extend(format_sync_args(0, default_sub_offset_ms));
-        }
+        // A custom offset replaces the default; `Some(0)` therefore emits no `--sync`.
+        args.extend(format_sync_args(
+            0,
+            job.custom_offset_ms.unwrap_or(default_sub_offset_ms),
+        ));
 
         let lang = job
             .custom_language

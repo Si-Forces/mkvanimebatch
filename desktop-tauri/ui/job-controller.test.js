@@ -432,7 +432,8 @@ test("job controller sends the seconds offset as whole milliseconds, keeping an 
 });
 
 test("job controller rejects a sub-offset that is not a number of seconds", async t => {
-  for (const value of ["abc", "1e400", "1e300"]) {
+  // 1e15 s is 1e18 ms: it fits i64, so the CLI accepts it, but it is not a safe JS integer.
+  for (const value of ["abc", "1e400", "1e300", "1e15", "-1e15"]) {
     await t.test(value, async t => {
       installDocument(t, remuxElements({ "input-dir": "/input", "sub-offset": value }));
       const logs = [];

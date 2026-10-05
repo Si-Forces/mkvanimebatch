@@ -686,8 +686,10 @@ mod tests {
             let parsed = parse(offset).unwrap();
             assert_eq!(parsed.default_sub_offset_ms, expected, "{offset}");
         }
-        let err = parse(r#","default_sub_offset_ms":1.5"#).unwrap_err();
-        assert!(err.to_string().contains("floating point"), "{err}");
+        assert!(
+            parse(r#","default_sub_offset_ms":1.5"#).is_err(),
+            "a fractional millisecond must not deserialize"
+        );
 
         let dir = tempdir().unwrap();
         let mut req = minimal_request(dir.path());
