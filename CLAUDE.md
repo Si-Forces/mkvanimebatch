@@ -61,7 +61,7 @@ The ledger keys each commit on the `git patch-id` of its diff, so a review survi
 A Cargo workspace with three members that share one version:
 
 - `crates/mkv-core`: the media engine library, which holds all the domain logic.
-- `crates/mkv-cli`: a thin CLI adapter (`main.rs`). If the binary is renamed to `mkv-extract`, it defaults to extract mode.
+- `crates/mkv-cli`: a thin CLI adapter (`args.rs` parses the flags, `main.rs` runs the batch or `--plan`). If the binary is renamed to `mkv-extract`, it defaults to extract mode.
 - `desktop-tauri/src-tauri` (package `mkv-anime-batch`): a Tauri v2 host that runs `mkv-core` **in-process** (no sidecar, ADR-0007), with a plain-ES-module frontend in `desktop-tauri/ui` (no framework, no bundler).
 
 External tools are invoked as subprocesses: `mkvmerge`, `mkvextract`, and `ffmpeg` (libopus).
