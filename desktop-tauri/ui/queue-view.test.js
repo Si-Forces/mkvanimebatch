@@ -29,9 +29,17 @@ class FakeElement {
   get innerHTML() { return this._innerHTML; }
 
   appendChild(child) {
-    if (child.isFragment) this.children.push(...child.children);
-    else this.children.push(child);
+    const added = child.isFragment ? child.children : [child];
+    for (const el of added) el.parent = this;
+    this.children.push(...added);
     return child;
+  }
+
+  replaceWith(other) {
+    const siblings = this.parent.children;
+    siblings[siblings.indexOf(this)] = other;
+    other.parent = this.parent;
+    this.parent = null;
   }
 
   addEventListener() {}
@@ -108,6 +116,26 @@ const subtitle = (id, path) => ({
 });
 
 const cardTitles = list => list.children.map(el => el.querySelector(".ep-title").textContent);
+
+/** A manifest whose items carry the track metadata a card renders. */
+const detailedManifest = ids => ({
+  version: 2,
+  subtitle_candidates: {},
+  items: ids.map(id => ({
+    id,
+    name: `Show - ${id}`,
+    release: ".",
+    metadata: {
+      resolution: "1920x1080",
+      video_codec: "HEVC",
+      video_tag: "1080p HEVC",
+      audio_summary: "FLAC 2.0",
+      has_flac: true,
+      sub_summary: "ASS (ind)",
+      fonts_count: 3,
+    },
+  })),
+});
 
 /** Log the name of every write to `props` on `target`; reads keep returning the last value. */
 function recordWrites(target, label, props, log) {
@@ -712,6 +740,102 @@ test("same-directory empty inspection keeps directory identity, vanished selecti
   assert.equal(tracker.acceptInspection(tracker.startScan(), dir, manifestOf(["ep1", "ep2"])), true);
   renderFrames();
   assert.deepEqual(tracker.getSelectedOrderedItemIds(), ["ep2", "ep1"]);
+});
+
+test("a same-directory re-inspection with an identical manifest keeps every card and never shows the scanning placeholder", t => {
+  const { elements, renderFrames } = setupMockEnvironment(t, { deferFrames: true });
+  const tracker = new QueueTracker("remux");
+  const list = elements.get("remux-episode-list");
+  const dir = "/anime/show";
+  const ids = ["01.mkv", "02.mkv", "03.mkv"];
+  assert.equal(tracker.acceptInspection(tracker.startScan(dir), dir, detailedManifest(ids)), true);
+  renderFrames();
+
+  // A finished batch leaves a terminal card; a deselected card shows its checkbox off.
+  tracker.handleEvent({ version: 1, type: "item_complete", id: "01.mkv", status: "completed", duration_sec: 4.2 });
+  tracker.cards.get("02.mkv").checkbox.checked = false;
+  tracker.state.items.get("02.mkv").selected = false;
+  const cardsBefore = new Map(tracker.cards);
+  const elementsBefore = [...list.children];
+  const listWrites = [];
+  recordWrites(list, "list", ["innerHTML"], listWrites);
+
+  // Every Run forces a re-inspection of the shown directory; a deep-equal copy arrives.
+  const token = tracker.startScan(`${dir}/`);
+  assert.deepEqual(list.children, elementsBefore);
+  assert.equal(elements.get("remux-queue-count").textContent, "Scanning…");
+  assert.equal(tracker.acceptInspection(token, dir, structuredClone(detailedManifest(ids))), true);
+  renderFrames();
+
+  assert.deepEqual(listWrites, []);
+  assert.deepEqual(list.children, elementsBefore);
+  for (const id of ids) assert.equal(tracker.cards.get(id), cardsBefore.get(id));
+  assert.equal(tracker.cards.get("02.mkv").checkbox.checked, false);
+  // The re-inspected item is queued again, so its kept card is back to the queued look.
+  const card1 = tracker.cards.get("01.mkv");
+  assert.equal(card1.el.className, "tokyo-ep-card");
+  assert.equal(card1.badge.className, "ep-badge");
+  assert.equal(card1.badge.textContent, "EPISODE 01");
+  assert.equal(card1.statusTag.textContent, "Queued");
+  assert.equal(card1.fill.style.width, "0%");
+});
+
+test("a same-directory re-inspection remounts only the card whose manifest entry changed, in place", t => {
+  const { elements, renderFrames } = setupMockEnvironment(t, { deferFrames: true });
+  const tracker = new QueueTracker("remux");
+  const list = elements.get("remux-episode-list");
+  const dir = "/anime/show";
+  const ids = ["01.mkv", "02.mkv", "03.mkv"];
+  assert.equal(tracker.acceptInspection(tracker.startScan(dir), dir, detailedManifest(ids)), true);
+  renderFrames();
+  const cardsBefore = new Map(tracker.cards);
+
+  const changed = detailedManifest(ids);
+  changed.items[1].metadata.fonts_count = 5;
+  assert.equal(tracker.acceptInspection(tracker.startScan(dir), dir, changed), true);
+  renderFrames();
+
+  assert.equal(tracker.cards.get("01.mkv"), cardsBefore.get("01.mkv"));
+  assert.equal(tracker.cards.get("03.mkv"), cardsBefore.get("03.mkv"));
+  const fresh = tracker.cards.get("02.mkv");
+  assert.notEqual(fresh, cardsBefore.get("02.mkv"));
+  assert.equal(fresh.tag2.textContent, "ASS (ind) + 5 Fonts");
+  assert.deepEqual(list.children, [cardsBefore.get("01.mkv").el, fresh.el, cardsBefore.get("03.mkv").el]);
+});
+
+test("a same-directory re-inspection with a different ID set rebuilds every card", t => {
+  const { elements, renderFrames } = setupMockEnvironment(t, { deferFrames: true });
+  const tracker = new QueueTracker("remux");
+  const dir = "/anime/show";
+  assert.equal(tracker.acceptInspection(tracker.startScan(dir), dir, detailedManifest(["01.mkv", "02.mkv"])), true);
+  renderFrames();
+  const cardsBefore = new Map(tracker.cards);
+
+  assert.equal(tracker.acceptInspection(tracker.startScan(dir), dir, detailedManifest(["01.mkv", "02.mkv", "03.mkv"])), true);
+  renderFrames();
+
+  assert.equal(tracker.cards.size, 3);
+  for (const [id, card] of cardsBefore) assert.notEqual(tracker.cards.get(id), card);
+  assert.deepEqual(cardTitles(elements.get("remux-episode-list")), ["Show - 01.mkv", "Show - 02.mkv", "Show - 03.mkv"]);
+});
+
+test("a failed re-inspection that kept its cards drops them, and the next scan rebuilds", t => {
+  const { elements, renderFrames } = setupMockEnvironment(t, { deferFrames: true });
+  const tracker = new QueueTracker("remux");
+  const dir = "/anime/show";
+  const ids = ["01.mkv", "02.mkv"];
+  assert.equal(tracker.acceptInspection(tracker.startScan(dir), dir, detailedManifest(ids)), true);
+  renderFrames();
+  const cardsBefore = new Map(tracker.cards);
+
+  tracker.rejectInspection(tracker.startScan(dir));
+  assert.equal(tracker.cards.size, 0);
+  assert.equal(elements.get("remux-queue-count").textContent, "Scan failed");
+
+  assert.equal(tracker.acceptInspection(tracker.startScan(dir), dir, detailedManifest(ids)), true);
+  renderFrames();
+  assert.equal(elements.get("remux-episode-list").children.length, 2);
+  for (const [id, card] of cardsBefore) assert.notEqual(tracker.cards.get(id), card);
 });
 
 test("progress events on a processing card write only the fill width and the tag text", t => {

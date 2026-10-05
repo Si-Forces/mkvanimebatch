@@ -475,7 +475,7 @@ export async function scanInputDirectory(path, mode, { force = false, options } 
   try {
     if (!force && tracker.reuseInspection(path)) return true;
 
-    scanToken = tracker.startScan();
+    scanToken = tracker.startScan(path);
     jobCoordinator.syncControls();
     const manifest = await inspectDirectory(path, { force, options });
     const acceptedPath = manifest?.canonical_dir || path;
