@@ -12,7 +12,6 @@ fn job(video: &Path, output_file: PathBuf, subtitle_file: Option<PathBuf>) -> Pl
     let video_name = video.file_name().unwrap().to_string_lossy().into_owned();
     PlannedJob {
         video: video.to_path_buf(),
-        item_id: video_name.clone(),
         video_name,
         output_file,
         subtitle_file,
