@@ -216,6 +216,66 @@ async fn test_remux_skips_when_no_matching_subtitle() {
 }
 
 #[tokio::test]
+async fn test_remux_planning_outcomes_pair_nested_id_with_file_name() {
+    let in_tmp = tempdir().unwrap();
+    let season_dir = in_tmp.path().join("Season 01");
+    fs::create_dir_all(&season_dir).unwrap();
+    // Probes from the seeded cache but has no subtitle: skipped by the Asset Resolver.
+    let no_sub = season_dir.join("Show - 01.mkv");
+    // Not seeded and not a real MKV: its probe fails.
+    let corrupt = season_dir.join("Show - 02.mkv");
+    // No episode number: skipped before probing.
+    let unparsed = season_dir.join("Extras.mkv");
+    for video in [&no_sub, &corrupt, &unparsed] {
+        fs::write(video, b"dummy mkv").unwrap();
+    }
+
+    let (summary, events) = run_batch(
+        PipelineConfig {
+            dry_run: true,
+            cache: Some(seeded_cache(
+                in_tmp.path(),
+                &[&no_sub],
+                &video_metadata("A_FLAC"),
+            )),
+            ..config(PipelineMode::Remux, in_tmp.path())
+        },
+        CancellationToken::new(),
+    )
+    .await;
+    let summary = summary.unwrap();
+    assert_eq!((summary.skipped, summary.errors), (2, 1));
+
+    // A nested ID never equals its file name, so a swapped pair fails here.
+    let mut outcomes: Vec<(&str, &str, ItemOutcome)> = events
+        .iter()
+        .filter_map(|e| match e {
+            JobEvent::ItemComplete {
+                id, file, status, ..
+            } => Some((id.as_str(), file.as_str(), *status)),
+            _ => None,
+        })
+        .collect();
+    outcomes.sort_by_key(|(id, ..)| *id);
+    assert_eq!(
+        outcomes,
+        [
+            ("Season 01/Extras.mkv", "Extras.mkv", ItemOutcome::Skipped),
+            (
+                "Season 01/Show - 01.mkv",
+                "Show - 01.mkv",
+                ItemOutcome::Skipped
+            ),
+            (
+                "Season 01/Show - 02.mkv",
+                "Show - 02.mkv",
+                ItemOutcome::Error
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn test_pipeline_cancellation_drains_items() {
     let tmp = tempdir().unwrap();
     fs::write(tmp.path().join("Show - 01.mkv"), b"dummy mkv 1").unwrap();
