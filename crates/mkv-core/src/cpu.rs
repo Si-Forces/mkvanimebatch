@@ -76,7 +76,10 @@ pub(crate) fn transcode_governor_threads(cores: usize, workers: usize) -> usize 
 }
 
 /// Default batch worker count derived from physical CPU cores, clamped to [1, 16].
-pub(crate) fn default_workers() -> usize {
+///
+/// `BatchRequest::into_pipeline_config` uses exactly this when `workers` is `None`. The crate
+/// root re-exports it so the desktop can show it as "auto (N)" (ADR-0013 Amendment 10).
+pub fn default_workers() -> usize {
     physical_core_count().clamp(1, 16)
 }
 

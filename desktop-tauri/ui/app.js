@@ -7,6 +7,7 @@ import { classifyLine, pushCapped } from "./log-classify.js";
 import { createTelemetryLoop } from "./telemetry.js";
 import { createJobCoordinator } from "./job-coordinator.js";
 import { createInspectionCoordinator } from "./inspection-coordinator.js";
+import { nextStepValue } from "./stepper.js";
 
 // ─── Preset Configurations ──────────────────────────────────────────────────
 
@@ -94,6 +95,35 @@ async function loadPresetProfiles() {
   }
 }
 
+/**
+ * The engine's default worker count: `null` until `get_default_workers` answers, or when it
+ * fails. An empty workers field sends `workers: null`, which the engine resolves to this.
+ */
+let defaultWorkers = null;
+
+const WORKERS_INPUT_IDS = ["remux-workers", "extract-workers"];
+
+async function loadDefaultWorkers() {
+  try {
+    const workers = await invoke("get_default_workers");
+    if (!Number.isInteger(workers) || workers < 1) {
+      throw new Error(`unexpected value ${JSON.stringify(workers)}`);
+    }
+    defaultWorkers = workers;
+    for (const id of WORKERS_INPUT_IDS) {
+      const input = document.getElementById(id);
+      if (!input) continue;
+      input.placeholder = `auto (${workers})`;
+      input.dataset.autoValue = String(workers);
+    }
+    // Leave the chips alone while a job owns them; they show that job's own count.
+    if (jobCoordinator.activeMode === null) updateWorkerChips(false);
+  } catch (err) {
+    // The placeholder stays "auto" and the chips keep falling back to 8.
+    console.error("[get_default_workers] failed:", err);
+  }
+}
+
 function setActiveProfileOption(presetKey) {
   document.querySelectorAll(".profile-option-item").forEach(item => {
     const active = item.dataset.preset === presetKey;
@@ -161,13 +191,10 @@ function stepNumber(btn, dir) {
   const step = parseFloat(input.getAttribute('step') || '1');
   const min = parseFloat(input.getAttribute('min'));
   const max = parseFloat(input.getAttribute('max'));
-  let val = parseFloat(input.value) || 0;
+  // Set only on inputs whose empty state means "auto" and whose resolved value is known.
+  const autoValue = parseFloat(input.dataset.autoValue);
 
-  val += dir * step;
-  if (!isNaN(min) && val < min) val = min;
-  if (!isNaN(max) && val > max) val = max;
-
-  input.value = parseFloat(val.toPrecision(10));
+  input.value = nextStepValue(input.value, autoValue, dir, step, min, max);
   input.dispatchEvent(new Event('input'));
 }
 
@@ -280,7 +307,7 @@ function switchView(viewId) {
 // Engine write throughput that fills the Disk I/O bar completely.
 const IO_BAR_FULL_SCALE_MB_S = 300;
 
-function updateWorkerChips(isJobActive = false, workersCount = 8, ioJobsCount = 2) {
+function updateWorkerChips(isJobActive = false, workersCount = defaultWorkers ?? 8, ioJobsCount = 2) {
   document.querySelectorAll(".metric-workers-chip").forEach(chip => {
     chip.innerText = isJobActive ? `⚡ ${workersCount} Workers Active` : `⚡ Standby (${workersCount} Workers)`;
   });
@@ -827,6 +854,7 @@ function initApp() {
   jobCoordinator.syncControls();
   telemetryLoop.start();
   loadPresetProfiles();
+  loadDefaultWorkers();
   restoreQueueFromSnapshot(controllers);
 
   document.addEventListener("keydown", e => {
