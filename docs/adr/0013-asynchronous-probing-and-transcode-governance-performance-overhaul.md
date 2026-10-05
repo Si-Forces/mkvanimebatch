@@ -496,6 +496,6 @@ covers a content duplicate of a seeded font under a new name.
 now promote a same-size font first, and the third leaves an unsaved entry for the run to persist.
 The third proves only that the run saves the configured memo, on every platform.
 `test_pipeline_font_memo` (Unix-only, its own binary because it puts a stub `mkvextract` ahead
-on `PATH`) checks that `run_extract` hands its memo to `FontRegistry::new`: the stub stages one
-font attachment of a seeded font's size under another name, and after the run the persisted memo
-holds the seeded font's hash. It fails when the registry is built with `None`.
+on `PATH`) checks that `run_extract` hands its memo to `FontRegistry::new`: the stub writes one
+font attachment, as many bytes as a seeded font and under another name, which the run stages and
+promotes; after the run the persisted memo holds the seeded font's hash. It fails when the registry is built with `None`.

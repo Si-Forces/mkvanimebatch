@@ -47,11 +47,12 @@ async fn extract_run_memoizes_a_seeded_font_hashed_by_a_same_size_promote() {
     fs::write(&ep, b"dummy mkv content").unwrap();
     let fonts_dir = out_tmp.path().join("fonts");
     fs::create_dir_all(&fonts_dir).unwrap();
-    let seeded = fonts_dir.join("Seeded.ttf");
-    fs::write(&seeded, SEEDED).unwrap();
+    let seeded_path = fonts_dir.join("Seeded.ttf");
+    fs::write(&seeded_path, SEEDED).unwrap();
 
     // Writes STAGED to every `<id>:<path>` destination it is given, as mkvextract writes
-    // each requested attachment.
+    // each requested attachment. STAGED is spliced into a single-quoted `printf` format, so it
+    // must hold no `'` or `%`.
     let script = bin_dir.path().join("mkvextract");
     fs::write(
         &script,
@@ -69,8 +70,9 @@ async fn extract_run_memoizes_a_seeded_font_hashed_by_a_same_size_promote() {
     };
     std::env::set_var("PATH", format!("{}:{old_path}", bin_dir.path().display()));
 
-    // One font attachment of the seeded font's size under another name, so the run claims
-    // it, stages it, and reaches `promote` with that size.
+    // One font attachment under another name, so the run claims, stages and promotes it.
+    // `promote` buckets by the staged file's real length, which the precondition above makes
+    // the seeded font's size; the declared `size` only has to be free for `claim`.
     let mut metadata = video_metadata("A_AAC");
     metadata.attachments = vec![MkvAttachment {
         id: Some(1),
@@ -101,10 +103,10 @@ async fn extract_run_memoizes_a_seeded_font_hashed_by_a_same_size_promote() {
     assert_eq!(fs::read(fonts_dir.join("Incoming.ttf")).unwrap(), STAGED);
 
     let reloaded = FontHashMemo::new(memo_file);
-    let sig = FileSignature::of(&seeded).unwrap();
+    let sig = FileSignature::of(&seeded_path).unwrap();
     assert_eq!(
-        reloaded.get(&seeded, sig),
-        Some(hash_file(&seeded).unwrap()),
+        reloaded.get(&seeded_path, sig),
+        Some(hash_file(&seeded_path).unwrap()),
         "the seeded font, hashed by the same-size promote, must reach the run's memo"
     );
 }
