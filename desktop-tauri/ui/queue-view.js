@@ -451,10 +451,10 @@ export class QueueTracker {
             <button type="button" class="ep-reorder-btn ep-up-btn" title="Move up">▲</button>
             <button type="button" class="ep-reorder-btn ep-down-btn" title="Move down">▼</button>
           </div>
-          <div class="ep-badge">${episodeBadgeText(epNum)}</div>
+          <div class="ep-badge"></div>
         </div>
         <span class="ep-codec"></span>
-        <span class="ep-duration-tag status-tag">Queued</span>
+        <span class="ep-duration-tag status-tag"></span>
       </div>
       <div class="ep-title"></div>
       <div class="ep-tracks">
@@ -463,7 +463,7 @@ export class QueueTracker {
         ${subAssignBtn}
       </div>
       <div class="ep-progress-bar">
-        <div class="ep-progress-fill" style="width: 0%;"></div>
+        <div class="ep-progress-fill"></div>
       </div>
     `;
 
@@ -478,8 +478,9 @@ export class QueueTracker {
       subBtn: el.querySelector(".sub-assign-btn"),
       checkbox: el.querySelector(".ep-select-check"),
       epNum,
-      // The status renderCardState last drew; the markup above is the queued look.
-      renderedStatus: "queued",
+      // The status renderCardState last drew. None yet: every mount is followed by a
+      // renderCardState call, so the queued look is drawn only in renderCardState.
+      renderedStatus: null,
     };
     el.querySelector(".ep-title").textContent = item.name;
     card.checkbox.checked = item.selected !== false;
@@ -575,7 +576,7 @@ export class QueueTracker {
     if (!statusChanged) return;
 
     if (item.status === "queued") {
-      // The freshly created look, for a card kept across a re-inspection.
+      // A new card's look, and a kept card's after a re-inspection.
       card.el.className = "tokyo-ep-card";
       card.badge.className = "ep-badge";
       card.badge.textContent = episodeBadgeText(card.epNum);

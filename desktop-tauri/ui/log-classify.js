@@ -30,8 +30,9 @@ export function classifyLine(text) {
 
 /**
  * Returns `queue` with `lines` (one line or a batch) appended, keeping only the
- * newest `max` lines. `queue` itself is left unchanged.
+ * newest `max` lines; a `max` of 0 or less keeps none. `queue` itself is left
+ * unchanged.
  */
 export function pushCapped(queue, lines, max) {
-  return queue.concat(lines).slice(-max);
+  return max > 0 ? queue.concat(lines).slice(-max) : [];
 }

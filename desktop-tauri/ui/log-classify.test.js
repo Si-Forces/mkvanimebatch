@@ -63,6 +63,9 @@ test("pushCapped keeps the newest max lines across single and batch pushes", () 
   // A batch larger than the cap keeps only its own newest lines.
   queue = pushCapped(queue, ["g", "h", "i", "j", "k"], 4);
   assert.deepEqual(queue, ["h", "i", "j", "k"]);
+
+  // A cap of 0 keeps nothing (slice(-0) would have kept everything).
+  assert.deepEqual(pushCapped(["a"], ["b"], 0), []);
 });
 
 test("pushCapped leaves the queue it was given unchanged", () => {

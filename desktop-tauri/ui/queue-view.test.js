@@ -780,6 +780,23 @@ test("a same-directory re-inspection with an identical manifest keeps every card
   assert.equal(card1.fill.style.width, "0%");
 });
 
+test("a freshly mounted card is drawn in the queued look by its first renderCardState", t => {
+  const { renderFrames } = setupMockEnvironment(t, { deferFrames: true });
+  const tracker = new QueueTracker("remux");
+  const dir = "/anime/show";
+  assert.equal(tracker.acceptInspection(tracker.startScan(dir), dir, detailedManifest(["01.mkv", "02.mkv"])), true);
+  renderFrames();
+
+  const card = tracker.cards.get("02.mkv");
+  assert.equal(card.renderedStatus, "queued");
+  assert.equal(card.el.className, "tokyo-ep-card");
+  assert.equal(card.badge.className, "ep-badge");
+  assert.equal(card.badge.textContent, "EPISODE 02");
+  assert.equal(card.statusTag.className, "ep-duration-tag status-tag");
+  assert.equal(card.statusTag.textContent, "Queued");
+  assert.equal(card.fill.style.width, "0%");
+});
+
 test("a same-directory re-inspection remounts only the card whose manifest entry changed, in place", t => {
   const { elements, renderFrames } = setupMockEnvironment(t, { deferFrames: true });
   const tracker = new QueueTracker("remux");
