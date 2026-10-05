@@ -136,7 +136,8 @@ pub struct PipelineConfig {
     pub bitrate: String,
     pub complexity: u32,
     pub ffmpeg_threads: usize,
-    pub sub_offset: f64,
+    /// Global subtitle sync offset in milliseconds; a Track Assignment's `offset_ms` replaces it.
+    pub default_sub_offset_ms: i64,
     /// Track Assignments for Remux; every target must match exactly one discovered item.
     pub track_assignments: Option<Vec<TrackAssignment>>,
     pub selected_items: Option<Vec<String>>,
@@ -159,7 +160,7 @@ impl Default for PipelineConfig {
             bitrate: "192k".to_string(),
             complexity: 5,
             ffmpeg_threads: 2,
-            sub_offset: 0.0,
+            default_sub_offset_ms: 0,
             track_assignments: None,
             selected_items: None,
         }
@@ -1180,7 +1181,7 @@ impl BatchPipeline {
             let bitrate: Arc<str> = Arc::from(self.config.bitrate.as_str());
             let complexity = self.config.complexity;
             let ffmpeg_threads = self.config.ffmpeg_threads;
-            let sub_offset = self.config.sub_offset;
+            let default_sub_offset_ms = self.config.default_sub_offset_ms;
 
             let items: Vec<_> = all_planned_jobs
                 .into_iter()
@@ -1205,7 +1206,7 @@ impl BatchPipeline {
                             opus_bitrate: &bitrate,
                             complexity,
                             ffmpeg_threads,
-                            sub_offset,
+                            default_sub_offset_ms,
                         };
                         let on_progress = |pct: f64| progress.report(pct);
                         tokio::select! {
