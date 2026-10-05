@@ -81,3 +81,33 @@ pub fn seeded_cache(
     }
     cache
 }
+
+/// Restores the environment variables it captured when dropped, so a failing assertion cannot
+/// leak a mutated `PATH` (or a stub's own variable) into the rest of the run. Only the binaries
+/// that put a stub tool on `PATH` use it, one test per process because the environment is
+/// process-global; the others never construct it, hence the `dead_code` allowance.
+#[allow(dead_code)]
+pub struct EnvReset(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+#[allow(dead_code)]
+impl EnvReset {
+    /// Records the current value of each of `vars`, set or not, to restore on drop.
+    pub fn capture(vars: &[&'static str]) -> Self {
+        Self(
+            vars.iter()
+                .map(|&var| (var, std::env::var_os(var)))
+                .collect(),
+        )
+    }
+}
+
+impl Drop for EnvReset {
+    fn drop(&mut self) {
+        for (var, value) in &self.0 {
+            match value {
+                Some(value) => std::env::set_var(var, value),
+                None => std::env::remove_var(var),
+            }
+        }
+    }
+}

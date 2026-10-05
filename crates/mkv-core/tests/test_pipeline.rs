@@ -559,6 +559,11 @@ async fn test_pipeline_extract_persists_font_hash_memo() {
     let memo = Arc::new(parking_lot::Mutex::new(FontHashMemo::new(
         memo_file.clone(),
     )));
+    // Seeding hashes nothing (#33), and this dummy episode carries no font to promote, so the
+    // run itself adds no entry. Leave an unsaved one instead: the run must persist it.
+    let sig = mkv_core::scan::FileSignature::of(&font_file).unwrap();
+    let hash = mkv_core::fonts::hash_file(&font_file).unwrap();
+    memo.lock().put(&font_file, sig, hash);
     let (summary, _events) = run_batch(
         PipelineConfig {
             out_dir: Some(out_tmp.path().to_path_buf()),
@@ -577,7 +582,6 @@ async fn test_pipeline_extract_persists_font_hash_memo() {
     assert_eq!(summary.unwrap().total, 1);
 
     let reloaded = FontHashMemo::new(memo_file);
-    let sig = mkv_core::scan::FileSignature::of(&font_file).unwrap();
     assert!(
         reloaded.get(&font_file, sig).is_some(),
         "persisted memo must contain font hash"
