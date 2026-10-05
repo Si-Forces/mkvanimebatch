@@ -34,6 +34,16 @@ function episodeBadgeText(epNum) {
   return `EPISODE ${String(epNum).padStart(2, "0")}`;
 }
 
+/** Structural equality of two JSON-shaped values (an Inspection Manifest entry and its parts). */
+function sameJsonValue(a, b) {
+  if (a === b) return true;
+  if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  const keys = Object.keys(a);
+  if (keys.length !== Object.keys(b).length) return false;
+  return keys.every(key => Object.hasOwn(b, key) && sameJsonValue(a[key], b[key]));
+}
+
 /** Track tags for a card restored from a JobSnapshot, which carries no inspection metadata. */
 function restoredTagText(item) {
   switch (item.status) {
@@ -174,19 +184,25 @@ export class QueueTracker {
       </div>`;
   }
 
-  startScan() {
+  startScan(path) {
     this.stopHeartbeat();
     this.isScanning = true;
+    // Re-inspecting the directory already shown (every Run forces one) leaves
+    // its fully rendered cards on screen; populateFromInspection then reuses
+    // the unchanged ones instead of flashing the list empty.
+    const keepCards = this.cards.size > 0 && this.pendingRenderToken === null && isSameDirectory(this.currentDirectory, path);
     this.cancelRender();
     const token = ++this.scanToken;
-    this.cards.clear();
-    if (this.listEl) {
-      this.listEl.innerHTML = `
-        <div class="empty-state-card scanning-state">
-          <div class="scan-spinner" aria-hidden="true"></div>
-          <div class="empty-state-title">Scanning Directory</div>
-          <div class="empty-state-desc">Inspecting MKV files and reading track metadata…</div>
-        </div>`;
+    if (!keepCards) {
+      this.cards.clear();
+      if (this.listEl) {
+        this.listEl.innerHTML = `
+          <div class="empty-state-card scanning-state">
+            <div class="scan-spinner" aria-hidden="true"></div>
+            <div class="empty-state-title">Scanning Directory</div>
+            <div class="empty-state-desc">Inspecting MKV files and reading track metadata…</div>
+          </div>`;
+      }
     }
     this.setCountText("Scanning…");
     return token;
@@ -227,6 +243,9 @@ export class QueueTracker {
   failScan() {
     this.isScanning = false;
     this.lastScannedPath = null;
+    // A scan that kept its cards must not leave them registered once the
+    // failure markup replaces them.
+    this.cards.clear();
     if (this.listEl) {
       this.listEl.innerHTML = this.emptyStateMarkup(
         "Scan failed",
@@ -255,9 +274,12 @@ export class QueueTracker {
   populateFromInspection(manifest, preserveSelection = false) {
     this.stopHeartbeat();
     this.isScanning = false;
+    // Read before cancelRender clears it: a half-rendered list is never reused.
+    const cardsComplete = this.pendingRenderToken === null;
     this.cancelRender();
+    const previousManifest = this.lastManifest;
+    const previousOrder = this.state.order;
     this.lastManifest = manifest;
-    this.cards.clear();
     const nextState = createQueueState(manifest);
     this.state = preserveSelection ? reconcileQueueSelection(nextState, this.state) : nextState;
 
@@ -282,7 +304,46 @@ export class QueueTracker {
     }
 
     this.updateSelectionBadge();
-    this.renderCardsIncrementally();
+    if (preserveSelection && cardsComplete && previousManifest && this.cardsMatchOrder(previousOrder)) {
+      this.refreshCards(previousManifest, manifest);
+    } else {
+      this.cards.clear();
+      this.renderCardsIncrementally();
+    }
+  }
+
+  /** True when the mounted cards are exactly `previousOrder` and the new state keeps that order. */
+  cardsMatchOrder(previousOrder) {
+    const { order } = this.state;
+    return order.length > 0
+      && this.cards.size === order.length
+      && previousOrder.length === order.length
+      && order.every((id, index) => id === previousOrder[index] && this.cards.has(id));
+  }
+
+  // Updates the mounted cards in place for a same-directory manifest with the
+  // same IDs in the same order. A card keeps its element when its manifest
+  // entry is deep-equal to the previous one and it was rendered at the current
+  // bitrate, since those are everything mountCard renders from besides the
+  // selection and status re-applied here (a surviving ID keeps its assignment
+  // unchanged, so its button is already current). Any other card is remounted
+  // in place.
+  refreshCards(previousManifest, manifest) {
+    const entriesById = items => new Map(items.filter(entry => entry?.id).map(entry => [String(entry.id), entry]));
+    const previousEntries = entriesById(previousManifest.items);
+    const entries = entriesById(manifest.items);
+    const bitrate = this.getBitrate();
+    this.state.order.forEach((id, index) => {
+      const item = this.state.items.get(id);
+      const card = this.cards.get(id);
+      if (card.bitrate === bitrate && sameJsonValue(previousEntries.get(id), entries.get(id))) {
+        card.checkbox.checked = item.selected !== false;
+        this.renderCardState(card, item);
+        return;
+      }
+      const fresh = this.mountCard(item, index + 1, bitrate);
+      card.el.replaceWith(fresh.el);
+    });
   }
 
   getBitrate() {
@@ -318,9 +379,7 @@ export class QueueTracker {
         const item = this.state.items.get(order[index]);
         index++;
         if (!item) continue;
-        const card = this.mountCard(item, index, bitrate);
-        this.renderCardState(card, item);
-        frag.appendChild(card.el);
+        frag.appendChild(this.mountCard(item, index, bitrate).el);
       } while (index < order.length && performance.now() < deadline);
       this.listEl.appendChild(frag);
       if (index < order.length) {
@@ -333,9 +392,10 @@ export class QueueTracker {
     this.renderRafId = requestAnimationFrame(renderBatch);
   }
 
-  /** Create and register a card for `item` with its track tags; the caller attaches it and renders its state. */
+  /** Create and register a card for `item` with its track tags and current state drawn; the caller attaches it. */
   mountCard(item, epNum, bitrate) {
     const card = this.createCardElement(item, epNum);
+    card.bitrate = bitrate;
     this.cards.set(item.id, card);
     this.applyAssignmentToCard(item.id);
     if (item.inspectionError) {
@@ -345,6 +405,7 @@ export class QueueTracker {
     } else {
       this.applyRestoredTags(card, item);
     }
+    this.renderCardState(card, item);
     return card;
   }
 
@@ -388,10 +449,10 @@ export class QueueTracker {
             <button type="button" class="ep-reorder-btn ep-up-btn" title="Move up">▲</button>
             <button type="button" class="ep-reorder-btn ep-down-btn" title="Move down">▼</button>
           </div>
-          <div class="ep-badge">${episodeBadgeText(epNum)}</div>
+          <div class="ep-badge"></div>
         </div>
         <span class="ep-codec"></span>
-        <span class="ep-duration-tag status-tag">Queued</span>
+        <span class="ep-duration-tag status-tag"></span>
       </div>
       <div class="ep-title"></div>
       <div class="ep-tracks">
@@ -400,7 +461,7 @@ export class QueueTracker {
         ${subAssignBtn}
       </div>
       <div class="ep-progress-bar">
-        <div class="ep-progress-fill" style="width: 0%;"></div>
+        <div class="ep-progress-fill"></div>
       </div>
     `;
 
@@ -414,6 +475,10 @@ export class QueueTracker {
       tag2: el.querySelector(".track-tag.magenta"),
       subBtn: el.querySelector(".sub-assign-btn"),
       checkbox: el.querySelector(".ep-select-check"),
+      epNum,
+      // The status renderCardState last drew. None yet: mountCard draws the first status,
+      // so the queued look is drawn only in renderCardState.
+      renderedStatus: null,
     };
     el.querySelector(".ep-title").textContent = item.name;
     card.checkbox.checked = item.selected !== false;
@@ -467,36 +532,58 @@ export class QueueTracker {
 
     const item = this.state.items.get(event.id);
     if (item) {
-      let card = this.cards.get(item.id);
-      // While an incremental render is pending it will mount this card from current state.
-      if (!card && this.pendingRenderToken !== this.scanToken) {
-        card = this.mountCard(item, this.cards.size + 1, this.getBitrate());
+      const card = this.cards.get(item.id);
+      // A missing card is mounted here unless an incremental render is pending, which will
+      // mount it from current state.
+      if (card) {
+        this.renderCardState(card, item);
+      } else if (this.pendingRenderToken !== this.scanToken) {
+        const mounted = this.mountCard(item, this.cards.size + 1, this.getBitrate());
         if (this.listEl) {
           this.listEl.querySelector(".empty-state-card")?.remove();
-          this.listEl.appendChild(card.el);
+          this.listEl.appendChild(mounted.el);
         }
       }
-      if (card) this.renderCardState(card, item);
     }
 
     this.renderQueueCount();
   }
 
+  // Classes and badge are written only when the status differs from the one
+  // the card last drew, so the stream of progress events on a processing card
+  // writes just the fill and the tag text. The heartbeat is not stopped here:
+  // tickHeartbeat stops itself once nothing is processing.
   renderCardState(card, item) {
+    const statusChanged = card.renderedStatus !== item.status;
+    card.renderedStatus = item.status;
+
     if (item.status === "processing") {
-      card.el.className = "tokyo-ep-card processing";
-      card.badge.className = "ep-badge purple";
-      card.badge.textContent = "PROCESSING";
-      card.statusTag.className = "ep-duration-tag yellow status-tag";
-      card.statusTag.textContent = this.formatProcessingTag(item);
-      if (typeof item.progress === "number") {
-        card.fill.className = "ep-progress-fill";
-        card.fill.style.width = `${item.progress}%`;
-      } else {
-        card.fill.className = "ep-progress-fill indeterminate";
-        card.fill.style.width = "";
+      if (statusChanged) {
+        card.el.className = "tokyo-ep-card processing";
+        card.badge.className = "ep-badge purple";
+        card.badge.textContent = "PROCESSING";
+        card.statusTag.className = "ep-duration-tag yellow status-tag";
       }
+      card.statusTag.textContent = this.formatProcessingTag(item);
+      // Shimmer until the first progress value, then a determinate bar.
+      const determinate = typeof item.progress === "number";
+      const fillClass = determinate ? "ep-progress-fill" : "ep-progress-fill indeterminate";
+      if (card.fill.className !== fillClass) card.fill.className = fillClass;
+      card.fill.style.width = determinate ? `${item.progress}%` : "";
       this.startHeartbeat();
+      return;
+    }
+    if (!statusChanged) return;
+
+    if (item.status === "queued") {
+      // A new card's look, and a kept card's after a re-inspection.
+      card.el.className = "tokyo-ep-card";
+      card.badge.className = "ep-badge";
+      card.badge.textContent = episodeBadgeText(card.epNum);
+      card.statusTag.className = "ep-duration-tag status-tag";
+      card.statusTag.textContent = "Queued";
+      card.fill.className = "ep-progress-fill";
+      card.fill.style.width = "0%";
       return;
     }
 
@@ -509,9 +596,6 @@ export class QueueTracker {
       card.statusTag.textContent = style.text(item);
       card.fill.className = `ep-progress-fill ${style.color}`;
       card.fill.style.width = "100%";
-    }
-    if (!this.hasProcessingItems()) {
-      this.stopHeartbeat();
     }
   }
 
@@ -579,7 +663,9 @@ export class QueueTracker {
   updateEpisodeBadges() {
     this.state.order.forEach((id, idx) => {
       const card = this.cards.get(id);
-      if (card) card.badge.textContent = episodeBadgeText(idx + 1);
+      if (!card) return;
+      card.epNum = idx + 1;
+      card.badge.textContent = episodeBadgeText(card.epNum);
     });
   }
 

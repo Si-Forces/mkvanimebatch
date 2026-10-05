@@ -161,7 +161,7 @@ mkvanimebatch/
         ├── job-coordinator.js       # Allows one active job across the Remux and Extract views
         ├── inspection-coordinator.js# Shares in-flight inspect_directory calls per (path, noCache)
         ├── telemetry.js             # Polls get_system_telemetry (1 s during a job, 30 s idle, paused while hidden)
-        ├── log-classify.js          # Maps log lines to console classes (line-err, line-skip, line-ok, line-warn, line-info, line-done)
+        ├── log-classify.js          # Maps log lines to console classes (line-err, line-skip, line-ok, line-warn, line-info, line-done); caps the pending log queue
         └── *.test.js                # node:test suites for the frontend modules
 ```
 
@@ -484,13 +484,14 @@ The frontend is plain ES modules with no framework.
    - Order and selection helpers back queue reordering (`▲` / `▼`) and selective execution (`selected_items`).
 2. **Card rendering (`queue-view.js`)**:
    - `QueueTracker.renderCardsIncrementally` creates every card in `requestAnimationFrame` batches, each running until a best-effort ~8 ms deadline, so large manifests do not block the main thread.
-   - Events update mounted cards synchronously; a card created later renders from the item's current reducer state. Log lines are queued and flushed once per animation frame, keeping the last 2000 lines.
+   - The forced re-inspection of each Run keeps the cards of the directory already shown on screen instead of showing the scanning placeholder. If the manifest has the same item IDs in the same order, a card whose manifest entry is deep-equal to the previous one, and which was rendered at the current bitrate, keeps its element and gets only its status and checkbox re-applied; a changed item's card is remounted in place. Any other ID set or order rebuilds every card.
+   - Events update mounted cards synchronously; a card created later renders from the item's current reducer state. Each card remembers the status it last drew, so a progress event on a processing card writes only the fill width and the tag text. Log lines are queued and flushed once per animation frame, keeping the last 2000 lines; the pending queue is capped at the same limit, since no frame fires while the window is hidden and it would otherwise grow without bound.
 3. **Card progress (ADR-0009)**:
    - **Indeterminate shimmer**: from `ItemStart` until the item reports numeric progress (probing, transcoding).
    - **Determinate bar**: filled from `ItemProgress.progress`, parsed from `mkvmerge`/`mkvextract` `Progress: N%` output.
    - **Terminal state**: `ItemComplete` fills the bar to 100% with the completed, skipped, error, cancelled, or planned styling.
 4. **Presentation heartbeat (ADR-0009)**:
-   - One 1 Hz timer in `QueueTracker` updates the elapsed time of every processing card, and stops when no item is processing.
+   - One 1 Hz timer in `QueueTracker` updates the elapsed time of every processing card, and stops itself on the first tick that finds no item processing.
 5. **Subtitle assignment modal (ADR-0011, ADR-0012)**:
    - Per remux item: choose a subtitle from the manifest's `subtitle_candidates` for the release, or a custom path (browse via `pick_subtitle_file`, an `rfd` native dialog); set the language (`ind`, `eng`, `jpn`, or a custom code), track title, and offset in milliseconds (`offset_ms`; a fraction is truncated, and an empty or out-of-range value leaves the global offset in effect). The resulting `TrackAssignment` is sent in `BatchRequest.assignments` and applied to the `mkvmerge` arguments (§4.4).
 6. **Theme**: follows `prefers-color-scheme` live until the user toggles the theme; the choice is then stored in `localStorage` (`mkv-theme`) and pinned on the native window via `set_window_theme`.
