@@ -41,24 +41,27 @@ fn next_value<T: AsRef<str>>(
         .ok_or_else(|| format!("Missing value for {flag}"))
 }
 
-/// `kind` names the expected value in the error message ("integer", "number").
+/// Parses `raw` as `N`. The only place that formats the numeric parse error; `kind` names
+/// the expected value in it ("integer", "number").
+fn parse_number<N: FromStr>(raw: &str, flag: &str, kind: &str) -> Result<N, String> {
+    raw.parse()
+        .map_err(|_| format!("Invalid {kind} for {flag}"))
+}
+
+/// Takes the next argument as the value of `flag` and parses it as `kind` with `parse_number`.
 fn next_number<T: AsRef<str>, N: FromStr>(
     args: &mut impl Iterator<Item = T>,
     flag: &str,
     kind: &str,
 ) -> Result<N, String> {
-    next_value(args, flag)?
-        .parse()
-        .map_err(|_| format!("Invalid {kind} for {flag}"))
+    parse_number(&next_value(args, flag)?, flag, kind)
 }
 
 /// Converts `--sub-offset` seconds to the engine's whole milliseconds, rounding half away
 /// from zero. Rejects a value that is not finite or whose milliseconds do not fit `i64`.
 /// The range error quotes `raw` as typed, since the parsed `f64` may already be rounded.
 fn parse_seconds_as_ms(flag: &str, raw: &str) -> Result<i64, String> {
-    let seconds: f64 = raw
-        .parse()
-        .map_err(|_| format!("Invalid number for {flag}"))?;
+    let seconds: f64 = parse_number(raw, flag, "number")?;
     let ms = (seconds * 1000.0).round();
     // `as` saturates silently, so check the range first; 2^63 itself does not fit.
     if ms >= i64::MIN as f64 && ms < i64::MAX as f64 {
@@ -151,10 +154,7 @@ where
                 request.ffmpeg_threads = if val.eq_ignore_ascii_case("auto") {
                     None
                 } else {
-                    Some(
-                        val.parse()
-                            .map_err(|_| format!("Invalid integer for {flag}"))?,
-                    )
+                    Some(parse_number(&val, flag, "integer")?)
                 };
             }
             "--bitrate" => {
@@ -524,6 +524,23 @@ mod tests {
         let parsed =
             parse_args_from(["--ffmpeg-threads", "4", "--ffmpeg-threads", "AUTO"]).unwrap();
         assert_eq!(parsed.request.ffmpeg_threads, None);
+    }
+
+    #[test]
+    fn test_numeric_flag_parse_error_messages() {
+        for (flag, expected) in [
+            ("--workers", "Invalid integer for --workers"),
+            ("--io-jobs", "Invalid integer for --io-jobs"),
+            ("--complexity", "Invalid integer for --complexity"),
+            ("--ffmpeg-threads", "Invalid integer for --ffmpeg-threads"),
+            ("--sub-offset", "Invalid number for --sub-offset"),
+        ] {
+            assert_eq!(
+                parse_args_from([flag, "x"]).err().as_deref(),
+                Some(expected),
+                "{flag}"
+            );
+        }
     }
 
     #[test]
