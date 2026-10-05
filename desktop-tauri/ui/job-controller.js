@@ -37,6 +37,21 @@ const TERMINAL_LIFECYCLE = { completed: "done", cancelled: "cancelled" };
 const isIntegerInRange = (value, min, max) => Number.isInteger(value) && value >= min && value <= max;
 
 /**
+ * Converts the Remux view's seconds entry to the engine's `default_sub_offset_ms`, rounding
+ * half away from zero like the CLI's `--sub-offset`. An empty entry is `null`; an explicit
+ * "0" stays `0` (ADR-0012). Returns `NaN` when the entry is not a number or its milliseconds
+ * are not a safe integer, which serde could not read as an `i64`.
+ */
+export function subOffsetSecondsToMs(raw) {
+  if (raw === "") return null;
+  const seconds = Number(raw);
+  // Math.round sends -x.5 toward +Infinity, so round the magnitude and restore the sign.
+  const ms = Math.sign(seconds) * Math.round(Math.abs(seconds) * 1000);
+  // `+ 0` turns -0 into 0.
+  return Number.isSafeInteger(ms) ? ms + 0 : NaN;
+}
+
+/**
  * Rejects out-of-range concurrency values before the forced preflight
  * inspection starts. Returns the error message, or null when the request is valid.
  */
@@ -162,7 +177,12 @@ export class JobController {
       this.flagInputError("input-dir", "Input directory is required.");
       return null;
     }
-    const offset = val("sub-offset");
+    const offsetRaw = val("sub-offset");
+    const subOffsetMs = subOffsetSecondsToMs(offsetRaw);
+    if (Number.isNaN(subOffsetMs)) {
+      this.flagInputError("sub-offset", `Invalid sub-offset value '${offsetRaw}': must be a number of seconds within range.`);
+      return null;
+    }
     const workersVal = val("workers");
     const ioJobsVal = val("io-jobs");
 
@@ -192,7 +212,7 @@ export class JobController {
       workers: workersVal ? Number(workersVal) : null,
       io_jobs: ioJobsVal !== "" ? Number(ioJobsVal) : null,
       ffmpeg_threads: ffmpegThreads,
-      sub_offset: offset && offset !== "0" ? parseFloat(offset) : null,
+      default_sub_offset_ms: subOffsetMs,
       dry_run: chk("dry-run"),
       no_cache: chk("no-cache"),
       assignments: null,

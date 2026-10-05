@@ -1,6 +1,6 @@
 # 0012. Track Assignment Override Execution and Seam Unification
 
-> **Status**: Accepted (amended 2026-09-26 and 2026-09-28)
+> **Status**: Accepted (amended 2026-09-26, 2026-09-28 and 2026-10-05)
 > **Date**: 2026-09-20
 > **Context**: Media Engine Context & Desktop Application Bridge
 > **Amends**: ADR-0008, ADR-0011
@@ -58,4 +58,10 @@ This also closes a reachability gap. The desktop controller normalised a literal
 
 - **Decision 4 completed: `--sub-assignments` removed.** The deprecated alias no longer exists; `mkv-cli` rejects it with `Unknown argument: --sub-assignments`. `--assignments` is the only assignment flag. `parse_assignments_json` still accepts a `TrackAssignment` array, an object whose `assignments` key holds an array or a map, and the legacy flat `{video: subtitle}` map, so legacy JSON keeps working through `--assignments`. Scripts that passed `--sub-assignments` must switch flags; this ends the CLI backward compatibility ADR-0011 claimed for them.
 - **Decision 1 completed.** `PipelineConfig` no longer has a `sub_assignments` field; `track_assignments: Option<Vec<TrackAssignment>>` is the only assignment input.
-- **The unit change and controller change in the 2026-09-26 amendment are not implemented yet** (tracked as issue #19). The global offset is still `sub_offset: f64` in seconds on `BatchRequest`, `PipelineConfig`, and `--sub-offset`; `build_mkvmerge_args` converts it to milliseconds by rounding `sub_offset * 1000`. No `default_sub_offset_ms` exists, and `job-controller.js` still sends a batch-global `"0"` as `null`. The per-assignment `offset_ms` is integer milliseconds, and the assignment editor already sends an entered `0` as `0`. The override rule and the explicit-zero guard are implemented as that amendment states.
+- **The unit change and controller change in the 2026-09-26 amendment are not implemented yet** (tracked as issue #19). The global offset is still `sub_offset: f64` in seconds on `BatchRequest`, `PipelineConfig`, and `--sub-offset`; `build_mkvmerge_args` converts it to milliseconds by rounding `sub_offset * 1000`. No `default_sub_offset_ms` exists, and `job-controller.js` still sends a batch-global `"0"` as `null`. The per-assignment `offset_ms` is integer milliseconds, and the assignment editor already sends an entered `0` as `0`. The override rule and the explicit-zero guard are implemented as that amendment states. Implemented by the 2026-10-05 amendment.
+
+## Amendment — 2026-10-05
+
+- **The 2026-09-26 unit change landed (issue #19).** The global offset is `default_sub_offset_ms: i64` on `BatchRequest`, `PipelineConfig`, and `RemuxOptions`, and `build_mkvmerge_args` takes it as `i64`. No `f64` remains in the engine's offset path. The rename is breaking on the `run_job` IPC payload, with no alias for `sub_offset`. The override rule and the `if ms != 0` guard are unchanged.
+- **The human-facing inputs stay in seconds.** "Milliseconds everywhere" covers the engine's representation, not the unit a person types. `mkv-cli --sub-offset <SEC>` keeps its name and unit so existing scripts keep working. The Remux view keeps its seconds input with `step="0.5"`, which suits typical sub-second corrections. Both convert to whole milliseconds at the boundary and round half away from zero. The CLI rejects a value that is not finite or whose milliseconds do not fit `i64`. The desktop controller rejects an entry that is not a number, or whose milliseconds are not a safe JavaScript integer. Deprecating the seconds flag is a separate decision.
+- **The desktop controller sends an entered `0` as `0`** and an empty field as `null`. For the global offset the two resolve alike: `None` falls back to `PipelineConfig`'s `0`, and no `PresetProfile` carries an offset. Explicit zero changes the outcome only on a Track Assignment's `offset_ms`, where it suppresses the global offset.

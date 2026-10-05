@@ -1,5 +1,6 @@
 //! Proves that manual `TrackAssignment` language, title, and sync offsets survive
-//! the full remux pipeline into the argv handed to `mkvmerge`.
+//! the full remux pipeline into the argv handed to `mkvmerge`, and that an
+//! assignment's `offset_ms` replaces `default_sub_offset_ms` (ADR-0012).
 //!
 //! This lives in its own integration binary on purpose. Capturing mkvmerge's
 //! arguments means putting a stub script ahead of the real one on `PATH`, and
@@ -24,13 +25,19 @@ use mkv_core::pipeline::{CancellationToken, PipelineConfig, PipelineMode};
 use mkv_core::request::{AssignmentKind, TrackAssignment};
 
 #[tokio::test]
-async fn assigned_language_title_and_both_offset_signs_reach_the_mkvmerge_argv() {
+async fn assigned_language_title_and_offsets_reach_the_mkvmerge_argv() {
     let dir = tempdir().unwrap();
     let bin_dir = tempdir().unwrap();
-    let video_path = dir.path().join("Episode - 01.mkv");
-    let second_video_path = dir.path().join("Episode - 02.mkv");
-    fs::write(&video_path, b"dummy mkv content").unwrap();
-    fs::write(&second_video_path, b"dummy mkv content").unwrap();
+    let names = [
+        "Episode - 01.mkv",
+        "Episode - 02.mkv",
+        "Episode - 03.mkv",
+        "Episode - 04.mkv",
+    ];
+    let video_paths: Vec<_> = names.iter().map(|name| dir.path().join(name)).collect();
+    for path in &video_paths {
+        fs::write(path, b"dummy mkv content").unwrap();
+    }
     fs::write(
         dir.path().join("custom.ass"),
         b"[Script Info]\nTitle: Custom\n",
@@ -54,37 +61,36 @@ async fn assigned_language_title_and_both_offset_signs_reach_the_mkvmerge_argv()
     std::env::set_var("MKV_ARGS_FILE", &args_file);
 
     // AAC audio is muxed as-is, so the run never needs a real ffmpeg.
-    let cache = seeded_cache(
-        dir.path(),
-        &[&video_path, &second_video_path],
-        &video_metadata("A_AAC"),
-    );
+    let videos: Vec<_> = video_paths.iter().map(|p| p.as_path()).collect();
+    let cache = seeded_cache(dir.path(), &videos, &video_metadata("A_AAC"));
+    // One assignment per row of the ADR-0012 offset table: a nonzero offset of
+    // either sign replaces the default, an explicit zero suppresses it, and no
+    // offset inherits it.
+    let offsets = [Some(1250), Some(-1250), Some(0), None];
+    let assignment = |name: &str, offset_ms: Option<i64>| TrackAssignment {
+        target_video: name.into(),
+        asset_path: "custom.ass".into(),
+        track_type: AssignmentKind::Subtitle,
+        language: Some("ind".into()),
+        title: Some("Bahasa Indonesia".into()),
+        offset_ms,
+    };
     let config = PipelineConfig {
         mode: PipelineMode::Remux,
         input_dir: dir.path().to_path_buf(),
         out_dir: Some(dir.path().join("out")),
         cache: Some(cache),
-        track_assignments: Some(vec![
-            TrackAssignment {
-                target_video: "Episode - 01.mkv".into(),
-                asset_path: "custom.ass".into(),
-                track_type: AssignmentKind::Subtitle,
-                language: Some("ind".into()),
-                title: Some("Bahasa Indonesia".into()),
-                offset_ms: Some(1250),
-            },
-            TrackAssignment {
-                target_video: "Episode - 02.mkv".into(),
-                asset_path: "custom.ass".into(),
-                track_type: AssignmentKind::Subtitle,
-                language: Some("ind".into()),
-                title: Some("Bahasa Indonesia".into()),
-                offset_ms: Some(-1250),
-            },
-        ]),
-        // The selected batch proves that both assignments resolve to the
-        // requested items and that both offset signs reach the argv.
-        selected_items: Some(vec!["Episode - 01.mkv".into(), "Episode - 02.mkv".into()]),
+        track_assignments: Some(
+            names
+                .iter()
+                .zip(offsets)
+                .map(|(name, offset_ms)| assignment(name, offset_ms))
+                .collect(),
+        ),
+        default_sub_offset_ms: 3000,
+        // The selected batch proves that every assignment resolves to its
+        // requested item.
+        selected_items: Some(names.iter().map(|name| name.to_string()).collect()),
         workers: 1,
         io_jobs: 1,
         ..Default::default()
@@ -94,7 +100,7 @@ async fn assigned_language_title_and_both_offset_signs_reach_the_mkvmerge_argv()
     let summary = summary.unwrap();
     assert_eq!(
         (summary.completed, summary.errors),
-        (2, 0),
+        (4, 0),
         "the assigned subtitles must be muxed, not skipped"
     );
 
@@ -103,13 +109,39 @@ async fn assigned_language_title_and_both_offset_signs_reach_the_mkvmerge_argv()
         .lines()
         .map(str::to_owned)
         .collect();
-    assert!(
-        args.windows(2).any(|pair| pair == ["--sync", "0:1250"]),
-        "positive offset_ms must reach mkvmerge: {args:?}"
+    // Workers run in any order, so pair each mkvmerge call with its source video.
+    let calls: Vec<&[String]> = args
+        .split(|line| line == "__CALL__")
+        .filter(|call| !call.is_empty())
+        .collect();
+    let syncs_for = |name: &str| -> Vec<&String> {
+        let call = calls
+            .iter()
+            .find(|call| call.iter().any(|arg| arg.ends_with(name)))
+            .unwrap_or_else(|| panic!("no mkvmerge call for {name}: {args:?}"));
+        call.windows(2)
+            .filter(|pair| pair[0] == "--sync")
+            .map(|pair| &pair[1])
+            .collect()
+    };
+    assert_eq!(
+        syncs_for(names[0]),
+        ["0:1250"],
+        "positive offset_ms must replace the default"
+    );
+    assert_eq!(
+        syncs_for(names[1]),
+        ["0:-1250"],
+        "negative offset_ms must replace the default"
     );
     assert!(
-        args.windows(2).any(|pair| pair == ["--sync", "0:-1250"]),
-        "negative offset_ms must reach mkvmerge: {args:?}"
+        syncs_for(names[2]).is_empty(),
+        "an explicit zero offset_ms must suppress the default"
+    );
+    assert_eq!(
+        syncs_for(names[3]),
+        ["0:3000"],
+        "no offset_ms must inherit default_sub_offset_ms"
     );
     assert!(
         args.windows(2).any(|pair| pair == ["--language", "0:ind"]),

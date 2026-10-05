@@ -55,9 +55,23 @@ fn next_number<T: AsRef<str>, N: FromStr>(
         .map_err(|_| format!("Invalid {kind} for {flag}"))
 }
 
+/// Converts `--sub-offset` seconds to the engine's whole milliseconds, rounding half away
+/// from zero. Rejects a value that is not finite or whose milliseconds do not fit `i64`.
+fn seconds_to_ms(flag: &str, seconds: f64) -> Result<i64, String> {
+    let ms = (seconds * 1000.0).round();
+    // `as` saturates silently, so check the range first; 2^63 itself does not fit.
+    if ms >= i64::MIN as f64 && ms < i64::MAX as f64 {
+        Ok(ms as i64)
+    } else {
+        Err(format!(
+            "Invalid {flag}: {seconds} seconds is not a finite offset that fits in whole milliseconds"
+        ))
+    }
+}
+
 /// Parses CLI arguments (excluding the executable). An `exe` named `mkv-extract`
 /// defaults the mode to Extract. Numeric range checks are left to
-/// `BatchRequest::validate`.
+/// `BatchRequest::validate`, except that `--sub-offset` must convert to milliseconds.
 fn parse_args_with_exe<I, T>(exe: Option<&str>, iter: I) -> Result<CliArgs, String>
 where
     I: IntoIterator<Item = T>,
@@ -124,7 +138,10 @@ where
             "--remux" => request.mode = PipelineMode::Remux,
             "--dry-run" => request.dry_run = Some(true),
             "--no-cache" => request.no_cache = Some(true),
-            "--sub-offset" => request.sub_offset = Some(next_number(&mut it, flag, "number")?),
+            "--sub-offset" => {
+                let seconds = next_number(&mut it, flag, "number")?;
+                request.default_sub_offset_ms = Some(seconds_to_ms(flag, seconds)?);
+            }
             "--workers" => request.workers = Some(next_number(&mut it, flag, "integer")?),
             "--io-jobs" => request.io_jobs = Some(next_number(&mut it, flag, "integer")?),
             "--complexity" => request.complexity = Some(next_number(&mut it, flag, "integer")?),
@@ -317,7 +334,7 @@ OPTIONS:
     --workers <N>              Number of concurrent worker tasks, 1-64 (default: physical cores clamped 1-16)
     --io-jobs <N>              Disk I/O jobs concurrency limit, 0-64 (0 uses the worker count) (default: 2)
     --ffmpeg-threads <N|auto>  CPU threads allocated per audio transcode job, 1-32 (default: auto)
-    --sub-offset <SEC>         Subtitle timestamp offset in seconds
+    --sub-offset <SEC>         Subtitle timestamp offset in seconds, rounded half away from zero to whole milliseconds (default: 0)
     --no-cache                 Bypass persistent inspect cache
     --clear-cache              Clear persistent inspection cache and exit
     -h, --help                 Show this help message
@@ -582,7 +599,36 @@ mod tests {
         assert_eq!(parsed.workers, Some(0));
         assert_eq!(parsed.io_jobs, Some(65));
         assert_eq!(parsed.ffmpeg_threads, Some(0));
-        assert_eq!(parsed.sub_offset, Some(-1.5));
+        assert_eq!(parsed.default_sub_offset_ms, Some(-1500));
+    }
+
+    #[test]
+    fn test_sub_offset_seconds_round_to_whole_milliseconds() {
+        let ms = |sec: &str| {
+            parse_args_from(["--sub-offset", sec])
+                .map(|parsed| parsed.request.default_sub_offset_ms)
+        };
+        for (sec, expected) in [
+            ("0.5", 500),
+            ("-1.5", -1500),
+            ("0", 0),
+            ("-0", 0),
+            // Half a millisecond rounds away from zero, as the desktop controller does.
+            ("0.0005", 1),
+            ("-0.0005", -1),
+            ("0.0004", 0),
+            ("1.2344", 1234),
+        ] {
+            assert_eq!(ms(sec), Ok(Some(expected)), "{sec}");
+        }
+
+        for bad in ["inf", "-inf", "NaN", "1e300", "-1e300"] {
+            let err = ms(bad).unwrap_err();
+            assert!(
+                err.starts_with("Invalid --sub-offset:") && err.contains("whole milliseconds"),
+                "{bad}: {err}"
+            );
+        }
     }
 
     #[test]

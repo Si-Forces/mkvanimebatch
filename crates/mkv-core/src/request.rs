@@ -179,9 +179,10 @@ pub struct BatchRequest {
     /// Per-job FFmpeg threads override
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ffmpeg_threads: Option<usize>,
-    /// Global subtitle offset in seconds
+    /// Global subtitle sync offset in whole milliseconds. `None` and `Some(0)` both mean no
+    /// global shift; a Track Assignment's `offset_ms` replaces it (ADR-0012).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sub_offset: Option<f64>,
+    pub default_sub_offset_ms: Option<i64>,
     /// Whether to perform a dry run (plan without writing files)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dry_run: Option<bool>,
@@ -210,7 +211,7 @@ impl Default for BatchRequest {
             workers: None,
             io_jobs: None,
             ffmpeg_threads: None,
-            sub_offset: None,
+            default_sub_offset_ms: None,
             dry_run: None,
             no_cache: None,
             assignments: None,
@@ -283,14 +284,6 @@ impl BatchRequest {
             if c > 10 {
                 return Err(format!(
                     "Encoder complexity must be between 0 and 10, got {c}"
-                ));
-            }
-        }
-
-        if let Some(offset) = self.sub_offset {
-            if !offset.is_finite() {
-                return Err(format!(
-                    "Subtitle offset must be a finite number, got {offset}"
                 ));
             }
         }
@@ -440,7 +433,9 @@ impl BatchRequest {
             ffmpeg_threads: self
                 .ffmpeg_threads
                 .unwrap_or_else(|| transcode_governor_threads(physical_cores, workers)),
-            sub_offset: self.sub_offset.unwrap_or(defaults.sub_offset),
+            default_sub_offset_ms: self
+                .default_sub_offset_ms
+                .unwrap_or(defaults.default_sub_offset_ms),
             dry_run: self.dry_run.unwrap_or(defaults.dry_run),
             no_cache: self.no_cache.unwrap_or(defaults.no_cache),
             track_assignments: self.assignments,
@@ -670,24 +665,37 @@ mod tests {
         );
     }
 
+    /// The wire type is the only check: whole milliseconds deserialize, a fraction does
+    /// not, and the request resolves `None` to the same no-shift `0` as an explicit zero.
     #[test]
-    fn test_batch_request_validation_sub_offset_finite() {
+    fn test_default_sub_offset_ms_is_whole_milliseconds() {
+        let parse = |offset: &str| {
+            serde_json::from_str::<BatchRequest>(&format!(
+                r#"{{"mode":"remux","input_dir":"/a"{offset}}}"#
+            ))
+        };
+        for (offset, expected) in [
+            (r#","default_sub_offset_ms":1500"#, Some(1500)),
+            (r#","default_sub_offset_ms":-500"#, Some(-500)),
+            (r#","default_sub_offset_ms":0"#, Some(0)),
+            (r#","default_sub_offset_ms":null"#, None),
+            ("", None),
+            // No alias: the pre-rename key is an unknown field, so it is ignored.
+            (r#","sub_offset":1.5"#, None),
+        ] {
+            let parsed = parse(offset).unwrap();
+            assert_eq!(parsed.default_sub_offset_ms, expected, "{offset}");
+        }
+        let err = parse(r#","default_sub_offset_ms":1.5"#).unwrap_err();
+        assert!(err.to_string().contains("floating point"), "{err}");
+
         let dir = tempdir().unwrap();
         let mut req = minimal_request(dir.path());
-        for valid_offset in [0.0, -1.5, 100.25] {
-            req.sub_offset = Some(valid_offset);
-            assert!(
-                req.validate().is_ok(),
-                "sub_offset {valid_offset:?} should be valid"
-            );
-        }
-        for non_finite in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
-            req.sub_offset = Some(non_finite);
-            let err = req.validate().unwrap_err();
-            assert!(
-                err.contains("finite"),
-                "expected error containing 'finite', got {err:?}"
-            );
+        for (offset, resolved) in [(None, 0), (Some(0), 0), (Some(-1500), -1500)] {
+            req.default_sub_offset_ms = offset;
+            assert!(req.validate().is_ok(), "{offset:?}");
+            let config = req.clone().into_pipeline_config().unwrap();
+            assert_eq!(config.default_sub_offset_ms, resolved, "{offset:?}");
         }
     }
 

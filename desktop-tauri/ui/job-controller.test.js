@@ -394,11 +394,66 @@ test("job controller passes typed BatchRequest with track assignments to run_job
   assert.equal(req.workers, 6);
   assert.equal(req.io_jobs, 3);
   assert.equal(req.ffmpeg_threads, 4);
-  assert.equal(req.sub_offset, 1.5);
+  assert.equal(req.default_sub_offset_ms, 1500);
+  assert.equal("sub_offset" in req, false);
   assert.equal(req.dry_run, false);
   assert.equal(req.no_cache, true);
   assert.equal(req.preset, "balanced");
   assert.deepEqual(req.assignments.map(a => [a.target_video, a.asset_path]), [["ep1.mkv", "/subs/ep1.ass"]]);
+});
+
+test("job controller sends the seconds offset as whole milliseconds, keeping an explicit zero", async t => {
+  for (const [seconds, expected] of [
+    ["1.5", 1500],
+    ["-0.5", -500],
+    ["0", 0],
+    ["-0", 0],
+    ["", null],
+    // Half a millisecond rounds away from zero in both directions, matching the CLI.
+    ["0.0005", 1],
+    ["-0.0005", -1],
+  ]) {
+    await t.test(JSON.stringify(seconds), async t => {
+      installDocument(t, remuxElements({ "input-dir": "/anime/series", "sub-offset": seconds }));
+      const invocations = [];
+      const runtime = makeRuntime(makeTracker(), {
+        async invoke(command, args) {
+          invocations.push([command, args]);
+          return command === "run_job" ? 1 : null;
+        },
+      });
+
+      await new JobController("remux", runtime).start();
+
+      const req = invocations.find(([cmd]) => cmd === "run_job")[1].request;
+      assert.ok(Object.is(req.default_sub_offset_ms, expected), `got ${req.default_sub_offset_ms}`);
+    });
+  }
+});
+
+test("job controller rejects a sub-offset that is not a number of seconds", async t => {
+  for (const value of ["abc", "1e400", "1e300"]) {
+    await t.test(value, async t => {
+      installDocument(t, remuxElements({ "input-dir": "/input", "sub-offset": value }));
+      const logs = [];
+      let scanCalled = false;
+      const runtime = makeRuntime(makeTracker(), {
+        appendLog: (_el, msg) => logs.push(msg),
+        scanInputDirectory: async () => {
+          scanCalled = true;
+          return true;
+        },
+      });
+
+      const controller = new JobController("remux", runtime);
+      await controller.start();
+
+      assert.equal(scanCalled, false);
+      assert.equal(controller.running, false);
+      assert.equal(runtime.coordinator.activeMode, null);
+      assert.ok(logs.some(msg => msg.includes("Invalid sub-offset value")));
+    });
+  }
 });
 
 test("job controller aborts start if episodes exist in queue but zero are selected", async t => {

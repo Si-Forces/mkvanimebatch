@@ -72,9 +72,9 @@ pub fn select_tracks(inspected: &InspectedVideo) -> TrackSelection {
     }
 }
 
-fn format_sync_args(track_id: u32, sub_offset: f64) -> Vec<String> {
-    if sub_offset != 0.0 {
-        let offset_ms = (sub_offset * 1000.0).round() as i64;
+/// `--sync <track_id>:<offset_ms>`, or nothing for a zero offset.
+fn format_sync_args(track_id: u32, offset_ms: i64) -> Vec<String> {
+    if offset_ms != 0 {
         vec!["--sync".to_string(), format!("{track_id}:{offset_ms}")]
     } else {
         Vec::new()
@@ -82,13 +82,16 @@ fn format_sync_args(track_id: u32, sub_offset: f64) -> Vec<String> {
 }
 
 /// Builds complete command-line argument list for `mkvmerge`.
+///
+/// `default_sub_offset_ms` applies to an embedded subtitle, and to an external one whose
+/// `custom_offset_ms` is `None`. A custom offset replaces it, never adds to it.
 pub fn build_mkvmerge_args(
     job: &PlannedJob,
     selection: &TrackSelection,
     temp_opus: Option<&Path>,
     fonts: &FontInfo,
     output_path: &Path,
-    sub_offset: f64,
+    default_sub_offset_ms: i64,
 ) -> Vec<String> {
     let mut args: Vec<String> = vec!["-o".to_string(), output_path.to_string_lossy().into_owned()];
 
@@ -100,7 +103,7 @@ pub fn build_mkvmerge_args(
         (None, Some(sid)) => {
             args.push("--subtitle-tracks".to_string());
             args.push(sid.to_string());
-            args.extend(format_sync_args(sid, sub_offset));
+            args.extend(format_sync_args(sid, default_sub_offset_ms));
         }
         _ => args.push("--no-subtitles".to_string()),
     }
@@ -164,7 +167,7 @@ pub fn build_mkvmerge_args(
                 args.push(format!("0:{ms}"));
             }
         } else {
-            args.extend(format_sync_args(0, sub_offset));
+            args.extend(format_sync_args(0, default_sub_offset_ms));
         }
 
         let lang = job
@@ -251,7 +254,7 @@ pub struct RemuxOptions<'a> {
     pub opus_bitrate: &'a str,
     pub complexity: u32,
     pub ffmpeg_threads: usize,
-    pub sub_offset: f64,
+    pub default_sub_offset_ms: i64,
 }
 
 /// Joins trimmed subprocess stderr and stdout, omitting whichever is empty.
@@ -338,7 +341,7 @@ pub async fn execute_remux_job(
         temp_opus_file.as_deref(),
         fonts,
         &temp_output,
-        options.sub_offset,
+        options.default_sub_offset_ms,
     );
     // ADR-0011 Dual-Governor: CPU-intensive Opus transcoding runs in worker slot;
     // disk-intensive remux multiplexing (mkvmerge) is guarded by io_semaphore.
