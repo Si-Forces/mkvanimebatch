@@ -50,14 +50,18 @@ fn selection() -> TrackSelection {
     }
 }
 
-fn mkvmerge_args(job: &PlannedJob, temp_opus: Option<&Path>, sub_offset: f64) -> Vec<String> {
+fn mkvmerge_args(
+    job: &PlannedJob,
+    temp_opus: Option<&Path>,
+    default_sub_offset_ms: i64,
+) -> Vec<String> {
     build_mkvmerge_args(
         job,
         &selection(),
         temp_opus,
         &FontInfo::default(),
         Path::new("/dummy/out.mkv"),
-        sub_offset,
+        default_sub_offset_ms,
     )
 }
 
@@ -80,7 +84,7 @@ const REMUX_OPTIONS: RemuxOptions<'static> = RemuxOptions {
     opus_bitrate: "192k",
     complexity: 10,
     ffmpeg_threads: 1,
-    sub_offset: 0.0,
+    default_sub_offset_ms: 0,
 };
 
 #[test]
@@ -121,20 +125,20 @@ fn test_select_tracks() {
 fn test_no_chapters_on_transcoded_audio_and_replaced_source_chapters() {
     let opus = Some(Path::new("/dummy/audio.opus"));
 
-    let args = mkvmerge_args(&subtitle_job(), opus, 0.0);
+    let args = mkvmerge_args(&subtitle_job(), opus, 0);
     assert!(!chapters_dropped_from(&args, "/dummy/video.mkv"));
     assert!(chapters_dropped_from(&args, "/dummy/audio.opus"));
 
     let mut job = subtitle_job();
     job.chapter_file = Some(PathBuf::from("/dummy/chapters.xml"));
-    let args = mkvmerge_args(&job, opus, 0.0);
+    let args = mkvmerge_args(&job, opus, 0);
     assert!(chapters_dropped_from(&args, "/dummy/video.mkv"));
     assert!(chapters_dropped_from(&args, "/dummy/audio.opus"));
 }
 
 #[test]
 fn test_source_chapters_kept_without_external_chapters() {
-    let args = mkvmerge_args(&subtitle_job(), None, 0.0);
+    let args = mkvmerge_args(&subtitle_job(), None, 0);
     assert!(!args.contains(&"--no-chapters".to_string()));
 }
 
@@ -142,11 +146,33 @@ fn test_source_chapters_kept_without_external_chapters() {
 fn test_subtitle_sync_args() {
     let job = subtitle_job();
     assert!(has_pair(
-        &mkvmerge_args(&job, None, 1.5),
+        &mkvmerge_args(&job, None, 1500),
         "--sync",
         "0:1500"
     ));
-    assert!(!mkvmerge_args(&job, None, 0.0).contains(&"--sync".to_string()));
+    assert!(has_pair(
+        &mkvmerge_args(&job, None, -500),
+        "--sync",
+        "0:-500"
+    ));
+    assert!(!mkvmerge_args(&job, None, 0).contains(&"--sync".to_string()));
+}
+
+/// An embedded subtitle has no Track Assignment, so only the default offset can shift it,
+/// keyed by its source track id rather than `0`.
+#[test]
+fn test_embedded_subtitle_sync_args() {
+    let mut job = job(
+        Path::new("/dummy/video.mkv"),
+        PathBuf::from("/dummy/out.mkv"),
+        None,
+    );
+    job.embedded_sub_id = Some(3);
+
+    let args = mkvmerge_args(&job, None, 1500);
+    assert!(has_pair(&args, "--subtitle-tracks", "3"));
+    assert!(has_pair(&args, "--sync", "3:1500"));
+    assert!(!mkvmerge_args(&job, None, 0).contains(&"--sync".to_string()));
 }
 
 #[test]
@@ -170,8 +196,8 @@ fn test_custom_track_assignment_remux_args() {
     job.custom_language = Some("ind".into());
     job.custom_title = Some("Custom Translation".into());
 
-    // A custom offset overrides the global sub_offset instead of adding to it.
-    let args_zero_offset = mkvmerge_args(&job, None, 0.0);
+    // A custom offset overrides default_sub_offset_ms instead of adding to it.
+    let args_zero_offset = mkvmerge_args(&job, None, 0);
     assert!(has_pair(&args_zero_offset, "--sync", "0:750"));
     assert!(has_pair(&args_zero_offset, "--language", "0:ind"));
     assert!(has_pair(
@@ -180,20 +206,21 @@ fn test_custom_track_assignment_remux_args() {
         "0:Custom Translation"
     ));
 
-    let args_diff_offset = mkvmerge_args(&job, None, 2.0);
+    let args_diff_offset = mkvmerge_args(&job, None, 2000);
     assert!(has_pair(&args_diff_offset, "--sync", "0:750"));
     assert!(!args_diff_offset.contains(&"0:2000".to_string()));
+    assert!(!args_diff_offset.contains(&"0:2750".to_string()));
 
-    // An explicit zero custom offset leaves the subtitle unshifted.
+    // An explicit zero custom offset leaves the subtitle unshifted, even with a default set.
     job.custom_offset_ms = Some(0);
-    assert!(!mkvmerge_args(&job, None, 2.0).contains(&"--sync".to_string()));
+    assert!(!mkvmerge_args(&job, None, 2000).contains(&"--sync".to_string()));
 
     // Without custom fields the global offset and resolved label/language apply.
     job.custom_offset_ms = None;
     job.custom_language = None;
     job.custom_title = None;
 
-    let args_fallback = mkvmerge_args(&job, None, 1.25);
+    let args_fallback = mkvmerge_args(&job, None, 1250);
     assert!(has_pair(&args_fallback, "--sync", "0:1250"));
     assert!(has_pair(&args_fallback, "--language", "0:eng"));
     assert!(has_pair(

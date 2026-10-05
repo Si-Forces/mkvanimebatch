@@ -139,7 +139,7 @@ Download `mkv-cli` from [GitHub Releases](https://github.com/sifahaz/mkvanimebat
 | `--assignments <FILE>` | JSON file of subtitle Track Assignments: an array of `TrackAssignment` objects, an object whose `assignments` key holds such an array or a map, or a legacy `{"video.mkv": "sub.ass"}` map. If repeated, the last one wins | None |
 | `--selected-item <PATH>` | Select one video file to process (repeatable, literal path; safe for filenames with commas) | None (all discovered files) |
 | `--selected-items <LIST>` | Comma-separated list of video files to process (repeatable; trims whitespace and drops empty segments) | None (all discovered files) |
-| `--sub-offset <SEC>` | Subtitle timestamp sync offset in seconds (e.g. `1.5`, `-0.5`) | `0.0` |
+| `--sub-offset <SEC>` | Subtitle timestamp sync offset in seconds (e.g. `1.5`, `-0.5`), rounded half away from zero to whole milliseconds; a value that is not finite, or whose milliseconds do not fit `i64`, is rejected. A Track Assignment's `offset_ms` replaces it | `0` |
 | `--workers <N>` | Number of concurrent worker tasks (1–64) | Physical cores, capped at the available parallelism, clamped to 1–16 |
 | `--io-jobs <N>` | Concurrency limit for disk-heavy work (0–64; `0` uses the worker count) | `2` |
 | `--ffmpeg-threads <N\|auto>` | CPU threads per audio transcode job (1–32); `auto` is case-insensitive | `auto`: `(cores / workers)` clamped to 1–4 |

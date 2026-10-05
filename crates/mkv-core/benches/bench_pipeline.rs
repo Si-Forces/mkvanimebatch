@@ -117,7 +117,7 @@ fn bench_validation(runs: usize) {
         workers: Some(8),
         io_jobs: Some(2),
         ffmpeg_threads: Some(2),
-        sub_offset: Some(0.0),
+        default_sub_offset_ms: Some(0),
         dry_run: Some(true),
         no_cache: Some(false),
         assignments: Some(vec![TrackAssignment {
