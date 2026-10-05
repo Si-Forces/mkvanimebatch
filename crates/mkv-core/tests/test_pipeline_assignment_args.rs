@@ -19,26 +19,9 @@ use std::os::unix::fs::PermissionsExt;
 
 use tempfile::tempdir;
 
-use common::{run_batch, seeded_cache, video_metadata};
+use common::{run_batch, seeded_cache, video_metadata, EnvReset};
 use mkv_core::pipeline::{CancellationToken, PipelineConfig, PipelineMode};
 use mkv_core::request::{AssignmentKind, TrackAssignment};
-
-/// Restores the process environment it displaced, so a failing assertion cannot
-/// leak a mutated `PATH` into the rest of the run.
-struct EnvReset {
-    path: String,
-    args_file: Option<String>,
-}
-
-impl Drop for EnvReset {
-    fn drop(&mut self) {
-        std::env::set_var("PATH", &self.path);
-        match &self.args_file {
-            Some(value) => std::env::set_var("MKV_ARGS_FILE", value),
-            None => std::env::remove_var("MKV_ARGS_FILE"),
-        }
-    }
-}
 
 #[tokio::test]
 async fn assigned_language_title_and_both_offset_signs_reach_the_mkvmerge_argv() {
@@ -65,11 +48,8 @@ async fn assigned_language_title_and_both_offset_signs_reach_the_mkvmerge_argv()
     .unwrap();
     fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
 
+    let _env_guard = EnvReset::capture(&["PATH", "MKV_ARGS_FILE"]);
     let old_path = std::env::var("PATH").unwrap_or_default();
-    let _env_guard = EnvReset {
-        path: old_path.clone(),
-        args_file: std::env::var("MKV_ARGS_FILE").ok(),
-    };
     std::env::set_var("PATH", format!("{}:{old_path}", bin_dir.path().display()));
     std::env::set_var("MKV_ARGS_FILE", &args_file);
 
