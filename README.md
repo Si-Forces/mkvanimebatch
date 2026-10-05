@@ -46,7 +46,7 @@ Available both as a standalone **CLI binary (`mkv-cli`)** and as a **Tauri v2 de
 * **Dialogue Priority**: Scores audio tracks, preferring Japanese (stereo dialogue, then stereo, then any channel layout), then undetermined-language tracks, then other stereo tracks.
 * **Commentary Track Isolation**: Tracks whose names look like commentary or audio description are considered only when every audio track looks like one.
 * **FLAC to Opus**: A selected FLAC audio track is transcoded to Opus with FFmpeg; other codecs are kept as-is. Preset Profiles (`balanced`, `fast`, `hifi`, `custom`) set the Opus bitrate and complexity.
-* **Automatic Thread Governance**: Per-job FFmpeg threads default to `auto`: `(cores / workers)` clamped to 1–4, where cores are physical cores from `/proc/cpuinfo` on Linux, capped at the available parallelism (which accounts for cgroup CPU quotas and affinity where it can read them); the available parallelism elsewhere (ADR-0013).
+* **Automatic Thread Governance**: The FLAC decoder thread cap per transcode (`--ffmpeg-threads`) defaults to `auto`: `(cores / workers)` clamped to 1–4, where cores are physical cores from `/proc/cpuinfo` on Linux, capped at the available parallelism (which accounts for cgroup CPU quotas and affinity where it can read them); the available parallelism elsewhere (ADR-0013). Encoding is single-threaded per transcode (libopus), so the cap only limits decoder threads.
 
 ### Transactional Font Registry & Asset Deduplication
 * **Embedded Font Detection**: Identifies font attachments by filename extension or MIME type.
@@ -142,7 +142,7 @@ Download `mkv-cli` from [GitHub Releases](https://github.com/sifahaz/mkvanimebat
 | `--sub-offset <SEC>` | Subtitle timestamp sync offset in seconds (e.g. `1.5`, `-0.5`), rounded half away from zero to whole milliseconds; a value that is not finite, or whose milliseconds do not fit `i64`, is rejected. A Track Assignment's `offset_ms` replaces it | `0` |
 | `--workers <N>` | Number of concurrent worker tasks (1–64) | Physical cores, capped at the available parallelism, clamped to 1–16 |
 | `--io-jobs <N>` | Concurrency limit for disk-heavy work (0–64; `0` uses the worker count) | `2` |
-| `--ffmpeg-threads <N\|auto>` | CPU threads per audio transcode job (1–32); `auto` is case-insensitive | `auto`: `(cores / workers)` clamped to 1–4 |
+| `--ffmpeg-threads <N\|auto>` | FLAC decoder thread cap per audio transcode job (1–32); `auto` is case-insensitive. Opus encoding is single-threaded per transcode, so this does not speed it up | `auto`: `(cores / workers)` clamped to 1–4 |
 | `--bitrate <RATE>` | Opus bitrate: a positive integer with an optional `k`/`K` or `M` suffix (e.g. `128k`, `192K`); lowercase `m` is rejected | Preset bitrate, else `192k` |
 | `--complexity <0-10>` | Opus encoder complexity | Preset complexity, else `5` |
 | `--extract` | Run batch extraction instead of remuxing | Off |
@@ -162,7 +162,7 @@ Exit codes: `0` on success; `1` on an argument or validation error, when any fil
 
 * **`--workers`**: Governs overall concurrency (number of episodes in flight). Defaults to the core count clamped to 1–16: physical cores from `/proc/cpuinfo` on Linux, capped at the available parallelism (which accounts for cgroup CPU quotas and affinity where it can read them); the available parallelism elsewhere (see `crates/mkv-core/src/cpu.rs`).
 * **`--io-jobs`**: Caps how many workers run disk-heavy work at once. Keeping `--io-jobs 2` prevents head thrashing on spinning hard drives (HDDs), while SSD/NVMe drives can scale to `4`–`8`. `0` sets the cap to the worker count.
-* **`--ffmpeg-threads`**: Defaults to `auto`, deriving per-job threads as `(cores / workers)` clamped to 1–4 (ADR-0013). Set an explicit value to override the governor.
+* **`--ffmpeg-threads`**: Caps the FLAC decoder threads of each transcode (ffmpeg's `-threads`, an input option). Defaults to `auto`, deriving the cap as `(cores / workers)` clamped to 1–4 (ADR-0013), which keeps a batch from starting `workers × cores` mostly idle decoder threads. Set an explicit value to override the governor. Opus encoding (libopus) is single-threaded, so each transcode encodes on about one core whatever this is set to; `--workers` is the only lever on encode CPU use.
 * **Queue Scoping & Ordering**: Specifying `--selected-item` or `--selected-items` restricts execution to the selected episodes in the exact specified order, running up to `--workers` concurrently across the active selection (ADR-0011, ADR-0014). Every selected item must be a discovered MKV file, otherwise the whole run fails.
 
 ---

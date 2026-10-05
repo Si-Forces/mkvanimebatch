@@ -23,6 +23,16 @@ We decided to execute a coordinated performance overhaul across the Media Engine
 2. **Transcode Governor & Complexity Downshift**:
    Downshift standard transcoding algorithmic complexity from `10` to `5` across default pipeline configs (reducing CPU transcode time by ~40.6% with imperceptible acoustic difference). Dynamically calculate `ffmpeg_threads = (total_physical_cores / workers).clamp(1, 4)` during request resolution when unspecified by the caller.
 
+   > [!NOTE]
+   > **CORRECTED 2026-10-05 (#36)**: the decision stands; its rationale, dividing encoder cores
+   > among workers, was wrong. `build_ffmpeg_args` places `-threads N` before `-i`, so it is an
+   > input option: it caps the FLAC decoder's threads, not the encoder's. libopus has no threading
+   > (`ffmpeg -h encoder=libopus`: "Threading capabilities: none"; the FLAC decoder reports
+   > "frame", ffmpeg 8.1.3), so each transcode encodes on about one core whatever `ffmpeg_threads`
+   > is, and `workers` is the only lever on encode CPU use. The governor still has a purpose:
+   > without `-threads`, ffmpeg sizes decoder threads to all cores per process, so
+   > `(cores / workers).clamp(1, 4)` prevents `workers × cores` mostly idle threads.
+
 3. **Fine-Grained Font Seeding**:
    Refactor `FontRegistry::seed_existing` to compute BLAKE2b hashes for uncached files outside the mutex lock, taking the lock only for final batch insertion to reduce lock hold duration from ~160ms to < 15µs.
 

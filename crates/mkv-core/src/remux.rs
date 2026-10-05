@@ -213,6 +213,10 @@ pub fn build_mkvmerge_args(
 }
 
 /// Builds command-line argument list for audio transcoding via `ffmpeg`.
+///
+/// `-threads` sits before `-i`, making it an input option that caps the FLAC decoder's threads.
+/// Nothing after `-i` sets encoder threads, and libopus is single-threaded, so each transcode
+/// encodes on about one core whatever `ffmpeg_threads` is.
 pub fn build_ffmpeg_args(
     video: &Path,
     audio_index: usize,
