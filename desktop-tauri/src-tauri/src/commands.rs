@@ -426,6 +426,13 @@ pub fn get_preset_profiles() -> Vec<mkv_core::preset::PresetProfile> {
     mkv_core::preset::get_preset_profiles()
 }
 
+/// The worker count the engine uses when a `BatchRequest` leaves `workers` unset, for the
+/// UI's "auto (N)" display.
+#[tauri::command]
+pub fn get_default_workers() -> usize {
+    mkv_core::default_workers()
+}
+
 #[tauri::command]
 pub fn get_job_snapshot(state: State<'_, JobState>) -> Result<Option<JobSnapshot>, String> {
     Ok(state.snapshot.lock().map_err(|e| e.to_string())?.clone())
@@ -593,6 +600,17 @@ mod tests {
 
         let opts_default: InspectOptions = serde_json::from_str(r#"{}"#).unwrap();
         assert_eq!(opts_default.no_cache, None);
+    }
+
+    #[test]
+    fn test_get_default_workers_is_the_engine_default() {
+        let workers = get_default_workers();
+        assert_eq!(workers, mkv_core::default_workers());
+        // `BatchRequest::validate` accepts 1-64; the default is clamped to 1-16.
+        assert!(
+            (1..=16).contains(&workers),
+            "workers out of range: {workers}"
+        );
     }
 
     #[test]

@@ -256,7 +256,7 @@ export class JobController {
     this.setRunning(true);
     this.runtime.clearLog(this.logEl);
 
-    this.runtime.updateWorkerChips(true, batchRequest.workers ?? 8, batchRequest.io_jobs ?? 2);
+    this.runtime.updateWorkerChips(true, batchRequest.workers ?? this.runtime.resolvedDefaultWorkers(), batchRequest.io_jobs ?? 2);
     this.runtime.telemetryLoop.setJobActive(true);
 
     const inspected = await this.runtime.scanInputDirectory(inputDir, this.mode, {

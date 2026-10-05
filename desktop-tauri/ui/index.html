@@ -286,10 +286,10 @@
                 <div class="form-group full" style="margin-bottom: 2px;">
                   <div class="form-grid-3col">
                     <div class="form-group">
-                      <label class="form-label compact">Workers <span title="Concurrent files to process (1-64)" class="info-tip">ⓘ</span></label>
+                      <label class="form-label compact">Workers <span title="Concurrent files to process (1-64; empty = auto)" class="info-tip">ⓘ</span></label>
                       <div class="number-stepper">
                         <button type="button" class="stepper-btn minus" aria-label="Decrease workers">−</button>
-                        <input type="number" id="remux-workers" value="8" min="1" max="64" />
+                        <input type="number" id="remux-workers" placeholder="auto" min="1" max="64" />
                         <button type="button" class="stepper-btn plus" aria-label="Increase workers">+</button>
                       </div>
                     </div>
@@ -543,10 +543,10 @@
 
                 <!-- Concurrency: Workers, Disk I/O Jobs -->
                 <div class="form-group">
-                  <label class="form-label compact">Workers <span title="Concurrent files to process (1-64)" class="info-tip">ⓘ</span></label>
+                  <label class="form-label compact">Workers <span title="Concurrent files to process (1-64; empty = auto)" class="info-tip">ⓘ</span></label>
                   <div class="number-stepper">
                     <button type="button" class="stepper-btn minus" aria-label="Decrease workers">−</button>
-                    <input type="number" id="extract-workers" value="8" min="1" max="64" />
+                    <input type="number" id="extract-workers" placeholder="auto" min="1" max="64" />
                     <button type="button" class="stepper-btn plus" aria-label="Increase workers">+</button>
                   </div>
                 </div>
