@@ -1,4 +1,5 @@
 // Maps engine log lines to console CSS classes. Cosmetic only: no behaviour keys off these classes.
+// Also holds the DOM-free queue cap the console uses while it waits for a frame.
 
 export function stripLogPrefix(text) {
   return text.replace(/^(\[ERR\]\s*)?\d{4}-\d{2}-\d{2}[ T][\d:]+[.,]\d+\s+\[\w+\]\s+/, "$1");
@@ -25,4 +26,12 @@ export function classifyLine(text) {
     if (rule.startsWith && rule.startsWith.some((needle) => t.startsWith(needle))) return rule.class;
   }
   return "";
+}
+
+/**
+ * Returns `queue` with `lines` (one line or a batch) appended, keeping only the
+ * newest `max` lines. `queue` itself is left unchanged.
+ */
+export function pushCapped(queue, lines, max) {
+  return queue.concat(lines).slice(-max);
 }

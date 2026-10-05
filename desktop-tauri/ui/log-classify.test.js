@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { classifyLine, stripLogPrefix } from "./log-classify.js";
+import { classifyLine, pushCapped, stripLogPrefix } from "./log-classify.js";
 
 test("stripLogPrefix removes timestamp and level, keeps [ERR] marker", () => {
   assert.equal(stripLogPrefix("2026-08-23 10:12:01,123 [INFO] Remuxed: a.mkv"), "Remuxed: a.mkv");
@@ -47,4 +47,26 @@ test("cache wording classifies as line-done", () => {
 test("unrecognised lines classify to empty string", () => {
   assert.equal(classifyLine(""), "");
   assert.equal(classifyLine("random text with no keywords"), "");
+});
+
+test("pushCapped keeps the newest max lines across single and batch pushes", () => {
+  let queue = [];
+  for (const line of ["a", "b", "c"]) queue = pushCapped(queue, line, 4);
+  assert.deepEqual(queue, ["a", "b", "c"]);
+
+  queue = pushCapped(queue, ["d", "e"], 4);
+  assert.deepEqual(queue, ["b", "c", "d", "e"]);
+
+  queue = pushCapped(queue, "f", 4);
+  assert.deepEqual(queue, ["c", "d", "e", "f"]);
+
+  // A batch larger than the cap keeps only its own newest lines.
+  queue = pushCapped(queue, ["g", "h", "i", "j", "k"], 4);
+  assert.deepEqual(queue, ["h", "i", "j", "k"]);
+});
+
+test("pushCapped leaves the queue it was given unchanged", () => {
+  const queue = ["a", "b"];
+  assert.deepEqual(pushCapped(queue, ["c", "d"], 3), ["b", "c", "d"]);
+  assert.deepEqual(queue, ["a", "b"]);
 });

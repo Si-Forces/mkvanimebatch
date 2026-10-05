@@ -3,7 +3,7 @@
 
 import { BULK_SELECTION_CONTROLS, CLEANUP_ERROR, JOB_DONE, JOB_EVENT, JobController } from "./job-controller.js";
 import { QueueTracker } from "./queue-view.js";
-import { classifyLine } from "./log-classify.js";
+import { classifyLine, pushCapped } from "./log-classify.js";
 import { createTelemetryLoop } from "./telemetry.js";
 import { createJobCoordinator } from "./job-coordinator.js";
 import { createInspectionCoordinator } from "./inspection-coordinator.js";
@@ -510,17 +510,15 @@ const MAX_LOG_LINES = 2000;
 const _logQueues = new WeakMap();
 const _logRafIds = new WeakMap();
 
-/** Queues one line or a `job-log` batch and flushes it on the next animation frame. */
+/**
+ * Queues one line or a `job-log` batch and flushes it on the next animation frame.
+ * The queue keeps only the newest MAX_LOG_LINES: no frame fires while the window
+ * is hidden, and the console would drop the older lines on flush anyway.
+ */
 function appendLog(logEl, text) {
   if (!logEl) return;
 
-  let queue = _logQueues.get(logEl);
-  if (!queue) {
-    queue = [];
-    _logQueues.set(logEl, queue);
-  }
-  if (Array.isArray(text)) queue.push(...text);
-  else queue.push(text);
+  _logQueues.set(logEl, pushCapped(_logQueues.get(logEl) ?? [], text, MAX_LOG_LINES));
 
   if (!_logRafIds.has(logEl)) {
     const rafId = requestAnimationFrame(() => {
