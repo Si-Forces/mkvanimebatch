@@ -163,6 +163,78 @@ fn test_seed_existing_fonts() {
     assert!(mgr.promote(&mut claim).is_none());
 }
 
+/// Seeding reads metadata only (#33). A seeded font is hashed, through the memo, only when a
+/// staged font of its size is promoted; fonts of other sizes stay unhashed.
+#[test]
+fn test_seed_existing_hashes_only_the_promoted_size() {
+    let (tmp, fonts_dir) = existing_fonts_dir();
+    let small = fonts_dir.join("Small.otf");
+    fs::write(&small, b"small font").unwrap();
+    let large = fonts_dir.join("Large.otf");
+    fs::write(&large, b"a larger font payload").unwrap();
+    let small_sig = FileSignature::of(&small).unwrap();
+    let large_sig = FileSignature::of(&large).unwrap();
+
+    let memo = shared_memo(&tmp);
+    let mgr = FontRegistry::new(fonts_dir, Some(Arc::clone(&memo)));
+    assert_eq!(
+        memo.lock().get(&small, small_sig),
+        None,
+        "seeding must not hash"
+    );
+    assert_eq!(
+        memo.lock().get(&large, large_sig),
+        None,
+        "seeding must not hash"
+    );
+
+    // Same size as Small.otf, different name and content.
+    assert!(stage_and_promote(&mgr, "Incoming.otf", b"other font").is_some());
+
+    let small_hash = hash_file(&small).unwrap();
+    assert_eq!(memo.lock().get(&small, small_sig), Some(small_hash.clone()));
+    assert_eq!(
+        memo.lock().get(&large, large_sig),
+        None,
+        "a seeded font of another size must stay unhashed"
+    );
+    let claimed = mgr.claimed_hashes();
+    assert_eq!(claimed.len(), 2, "Small.otf's hash and the promoted font's");
+    assert!(claimed.contains(&small_hash));
+}
+
+/// Concurrent promotes of one size share a single hashing of that size's seeded fonts, and
+/// none of them checks for duplicates before those hashes are in.
+#[test]
+fn test_concurrent_promotes_of_a_seeded_size_all_find_their_duplicates() {
+    const THREADS: usize = 8;
+    let (_tmp, fonts_dir) = existing_fonts_dir();
+    let contents: [&[u8]; 2] = [b"seeded content A", b"seeded content B"];
+    fs::write(fonts_dir.join("A.otf"), contents[0]).unwrap();
+    fs::write(fonts_dir.join("B.otf"), contents[1]).unwrap();
+
+    let mgr = Arc::new(FontRegistry::new(fonts_dir.clone(), None));
+    let barrier = Arc::new(std::sync::Barrier::new(THREADS));
+    let handles: Vec<_> = (0..THREADS)
+        .map(|i| {
+            let mgr = Arc::clone(&mgr);
+            let barrier = Arc::clone(&barrier);
+            let content = contents[i % 2];
+            thread::spawn(move || {
+                let mut claim = mgr.claim(&format!("Copy_{i}.otf"), 16).unwrap();
+                fs::write(&claim.staging_path, content).unwrap();
+                barrier.wait();
+                mgr.promote(&mut claim)
+            })
+        })
+        .collect();
+
+    for h in handles {
+        assert_eq!(h.join().unwrap(), None, "a seeded duplicate was promoted");
+    }
+    assert_eq!(mgr.claimed_hashes().len(), 2);
+}
+
 /// `seed_existing` derives each font's signature from the `DirEntry` metadata it already
 /// holds, and a promote of the same size later hashes the font under it. That signature must
 /// equal what a symlink-resolving `FileSignature::of` computes, otherwise every later memo
