@@ -79,6 +79,7 @@ function makeRuntime(tracker, overrides = {}) {
     showModal: async () => true,
     telemetryLoop: { setJobActive() {} },
     updateWorkerChips() {},
+    resolvedDefaultWorkers: () => 8,
     listen: async () => () => {},
     invoke: async () => null,
     ...overrides,

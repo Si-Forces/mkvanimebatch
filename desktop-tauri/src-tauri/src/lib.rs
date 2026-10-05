@@ -79,6 +79,7 @@ pub fn run() {
             window::start_resize,
             window::set_window_theme,
             commands::get_preset_profiles,
+            commands::get_default_workers,
             commands::get_job_snapshot,
         ])
         .build(tauri::generate_context!())

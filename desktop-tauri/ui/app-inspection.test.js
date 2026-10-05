@@ -60,7 +60,7 @@ class BootElement {
   }
 }
 
-function bootstrapHarness(t) {
+function bootstrapHarness(t, commandResults = {}) {
   const prior = {
     document: globalThis.document,
     window: globalThis.window,
@@ -68,7 +68,7 @@ function bootstrapHarness(t) {
   };
   const elements = new Map();
   for (const mode of ["remux", "extract"]) {
-    for (const id of ["run", "stop", "status", "log", "episode-list", "queue-count", "input-dir"]) {
+    for (const id of ["run", "stop", "status", "log", "episode-list", "queue-count", "input-dir", "workers"]) {
       elements.set(`${mode}-${id}`, new BootElement());
     }
   }
@@ -105,6 +105,11 @@ function bootstrapHarness(t) {
     __TAURI__: {
       core: { invoke: async (command, args) => {
         calls.push([command, args]);
+        if (command in commandResults) {
+          const result = commandResults[command];
+          if (result instanceof Error) throw result;
+          return result;
+        }
         if (command === "get_job_snapshot") {
           snapshotRequested();
           return snapshotPromise;
@@ -226,6 +231,48 @@ test("no snapshot preserves pre-run selection and cleans up bootstrap listeners"
   assert.equal(ipc.handlers.has("job-event"), false);
   assert.equal(ipc.handlers.has("job-done"), false);
   assert.equal(ipc.calls.filter(([command]) => command === "inspect_directory").length, 1);
+});
+
+test("get_default_workers puts auto (N) on both workers inputs and N in the standby chip", async t => {
+  const ipc = bootstrapHarness(t, { get_default_workers: 6 });
+  await ipc.mount("default-workers");
+  ipc.resolveSnapshot(null);
+  await ipc.flush();
+  for (const mode of ["remux", "extract"]) {
+    const input = ipc.elements.get(`${mode}-workers`);
+    assert.equal(input.placeholder, "auto (6)");
+    assert.equal(input.dataset.autoValue, "6");
+  }
+  assert.equal(ipc.workerChip.innerText, "⚡ Standby (6 Workers)");
+});
+
+test("a failed get_default_workers leaves the inputs on plain auto and does not write the chip", async t => {
+  const ipc = bootstrapHarness(t, { get_default_workers: new Error("unavailable") });
+  const logged = [];
+  const priorError = console.error;
+  console.error = (...args) => logged.push(args);
+  t.after(() => { console.error = priorError; });
+  await ipc.mount("default-workers-failed");
+  ipc.resolveSnapshot(null);
+  await ipc.flush();
+  for (const mode of ["remux", "extract"]) {
+    const input = ipc.elements.get(`${mode}-workers`);
+    assert.equal(input.placeholder, undefined);
+    assert.equal("autoValue" in input.dataset, false);
+  }
+  assert.equal(ipc.workerChip.innerText, undefined);
+  assert.equal(logged.some(([label]) => label === "[get_default_workers] failed:"), true);
+});
+
+test("with get_default_workers failed, a restored active job's chip shows the fallback 8", async t => {
+  const ipc = bootstrapHarness(t, { get_default_workers: new Error("unavailable") });
+  const priorError = console.error;
+  console.error = () => {};
+  t.after(() => { console.error = priorError; });
+  await ipc.mount("default-workers-unknown-active");
+  ipc.resolveSnapshot(activeSnapshot());
+  await ipc.flush();
+  assert.equal(ipc.workerChip.innerText, "⚡ 8 Workers Active");
 });
 
 test("explicit toggle survives a failed storage write when the OS scheme changes", async t => {

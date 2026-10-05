@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 
 import { createJobCoordinator } from "./job-coordinator.js";
 import { BULK_SELECTION_CONTROLS, JobController, validateConcurrency } from "./job-controller.js";
@@ -78,6 +80,7 @@ function makeRuntime(tracker, overrides = {}) {
     showModal: async () => true,
     telemetryLoop: { setJobActive() {} },
     updateWorkerChips() {},
+    resolvedDefaultWorkers: () => 8,
     listen: async () => () => {},
     invoke: async () => null,
     ...overrides,
@@ -263,6 +266,46 @@ test("job controller forwards snapshotted execution args incl zero io-jobs and n
   assert.equal(runJobReq.workers, 6);
   assert.equal(runJobReq.io_jobs, 0);
   assert.equal(runJobReq.no_cache, true);
+});
+
+/** Starts a Remux run with the given workers field and runtime default; returns the sent request and chip calls. */
+async function startWithWorkersField(t, { workers, defaultWorkers }) {
+  installDocument(t, remuxElements({ "input-dir": "/input", workers, "io-jobs": "2" }));
+
+  const chipCalls = [];
+  const invocations = [];
+  const runtime = makeRuntime(makeTracker(), {
+    updateWorkerChips: (...args) => chipCalls.push(args),
+    resolvedDefaultWorkers: () => defaultWorkers,
+    async invoke(command, args) {
+      invocations.push([command, args]);
+      return command === "run_job" ? 11 : null;
+    },
+  });
+  await new JobController("remux", runtime).start();
+  return { request: invocations.find(([cmd]) => cmd === "run_job")[1].request, chipCalls };
+}
+
+test("an empty workers field sends workers null and the chip shows the runtime's default", async t => {
+  const { request, chipCalls } = await startWithWorkersField(t, { workers: "", defaultWorkers: 6 });
+  assert.equal(request.workers, null);
+  assert.deepEqual(chipCalls[0], [true, 6, 2]);
+});
+
+test("a typed workers value is sent as is and wins over the default in the chip", async t => {
+  const { request, chipCalls } = await startWithWorkersField(t, { workers: "3", defaultWorkers: 6 });
+  assert.equal(request.workers, 3);
+  assert.deepEqual(chipCalls[0], [true, 3, 2]);
+});
+
+test("index.html workers inputs default to auto, with no preset value", () => {
+  const html = fs.readFileSync(path.join(import.meta.dirname, "index.html"), "utf8");
+  for (const id of ["remux-workers", "extract-workers"]) {
+    const tag = html.match(new RegExp(`<input\\b[^>]*\\bid="${id}"[^>]*>`))?.[0];
+    assert.ok(tag, `${id} input is missing`);
+    assert.match(tag, /\bplaceholder="auto"/, `${id} must show the auto placeholder`);
+    assert.doesNotMatch(tag, /\svalue=/, `${id} must start empty so the request sends workers: null`);
+  }
 });
 
 test("deferred preflight stop releases ownership, finalizes cancelled queue, and avoids run_job for option-bearing preflight", async t => {

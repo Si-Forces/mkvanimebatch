@@ -255,7 +255,7 @@ Amendment 7.
 **The governor is crate-private.** `cpu` is a private module of `mkv-core`;
 `transcode_governor_threads` is `pub(crate)` and reachable only through
 `BatchRequest::into_pipeline_config`.
-`physical_core_count`, `default_workers`, and `probe_concurrency` are `pub(crate)`.
+`physical_core_count`, `default_workers`, and `probe_concurrency` are `pub(crate)`. Amendment 10 (#35) later made `default_workers` public.
 `physical_core_count` is called by `default_workers` and by
 `BatchRequest::into_pipeline_config`; `default_workers` by `into_pipeline_config` and by
 `manifest::generate_inspection_manifest`; `probe_concurrency` by
@@ -432,7 +432,7 @@ unchanged, so the sizing intent of the transcode governor and of `default_worker
 default derived from it follows: `--workers` when unset, `auto` FFmpeg threads, and probe
 concurrency in preflight and, when workers are defaulted, in execution. The desktop app sets
 workers itself (8, #35), so there only the FFmpeg threads and preflight probe concurrency
-follow.
+follow. Amendment 10 makes the desktop send the default.
 
 **Accepted imprecision.** Pinned to two hyperthread siblings of one core, the count is 2.
 Counting only the physical cores inside the affinity mask would need a new crate to read it
@@ -506,3 +506,33 @@ on `PATH`) checks that `run_extract` hands its memo to `FontRegistry::new`: the 
 font attachment, as many bytes as a seeded font and under another name, which the run stages and
 promotes; after the run the persisted memo holds the seeded font's hash. It fails when the
 registry is built with `None`.
+
+## Amendment 10 — 2026-10-05 (desktop shows and sends the engine's default workers)
+
+**Decision.** `cpu::default_workers` is now `pub` and re-exported from the crate root as
+`mkv_core::default_workers`, so the desktop can show the number the engine will use. The `cpu`
+module stays private, and `physical_core_count` and `probe_concurrency` stay `pub(crate)`. This
+reverses Amendment 4's "`default_workers` is `pub(crate)`" for that one function. The desktop's
+`get_default_workers` command returns it, and the Remux and Extract worker inputs show it as the
+placeholder `auto (N)`.
+
+The desktop now sends `workers: null` when the field is empty, so the engine default applies.
+Before, both inputs were pre-filled with 8 and the request always carried `workers: 8`. That
+overrode the default of Amendment 8 on every desktop run: a 4-core host or a 2-CPU container ran 8
+workers, and the governor's `auto` FFmpeg threads fell to `(cores / 8).clamp(1, 4)`. Amendment 8's
+statement that "the desktop app sets workers itself (8, #35)" no longer holds. With the field empty,
+workers, `auto` FFmpeg threads and execution probe concurrency follow `default_workers` in the
+desktop too; preflight probe concurrency already did. A typed number is still sent as is, and
+clearing the field returns to auto.
+
+The displayed N is the engine's own value because `BatchRequest::into_pipeline_config` resolves an
+unset `workers` through `crate::cpu::default_workers`, the function the re-export names. The UI
+reads it once at startup and does not refresh it, so it can go stale if the process's CPU quota or
+affinity changes while the app is open. If the call fails, the placeholder stays `auto` and the
+worker chips show 8.
+
+**Coverage.** `test_into_pipeline_config_default_workers_hardware_concurrency` pins that an unset
+`workers` resolves to `mkv_core::default_workers()`, and `test_get_default_workers_is_the_engine_default`
+pins that the command returns it, within 1–16. The frontend tests cover an empty field sending
+`workers: null`, the chip showing N (8 when none is known), the `auto (N)` placeholder, and the
+stepper starting from N.

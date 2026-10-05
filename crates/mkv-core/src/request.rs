@@ -586,6 +586,9 @@ mod tests {
     fn test_into_pipeline_config_default_workers_hardware_concurrency() {
         let dir = tempdir().unwrap();
         let config = minimal_request(dir.path()).into_pipeline_config().unwrap();
+        // The desktop shows `default_workers()` as "auto (N)" for an unset `workers`, so the
+        // engine must resolve it to the same value.
+        assert_eq!(config.workers, crate::default_workers());
         // Derived from the host's physical core count, so check the ranges, not the values.
         assert!(
             (1..=16).contains(&config.workers),
