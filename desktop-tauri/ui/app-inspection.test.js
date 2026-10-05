@@ -246,7 +246,7 @@ test("get_default_workers puts auto (N) on both workers inputs and N in the stan
   assert.equal(ipc.workerChip.innerText, "⚡ Standby (6 Workers)");
 });
 
-test("a failed get_default_workers leaves the inputs on plain auto and the chip on 8", async t => {
+test("a failed get_default_workers leaves the inputs on plain auto and does not write the chip", async t => {
   const ipc = bootstrapHarness(t, { get_default_workers: new Error("unavailable") });
   const logged = [];
   const priorError = console.error;
@@ -262,6 +262,17 @@ test("a failed get_default_workers leaves the inputs on plain auto and the chip 
   }
   assert.equal(ipc.workerChip.innerText, undefined);
   assert.equal(logged.some(([label]) => label === "[get_default_workers] failed:"), true);
+});
+
+test("with get_default_workers failed, a restored active job's chip shows the fallback 8", async t => {
+  const ipc = bootstrapHarness(t, { get_default_workers: new Error("unavailable") });
+  const priorError = console.error;
+  console.error = () => {};
+  t.after(() => { console.error = priorError; });
+  await ipc.mount("default-workers-unknown-active");
+  ipc.resolveSnapshot(activeSnapshot());
+  await ipc.flush();
+  assert.equal(ipc.workerChip.innerText, "⚡ 8 Workers Active");
 });
 
 test("explicit toggle survives a failed storage write when the OS scheme changes", async t => {

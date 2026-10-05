@@ -34,9 +34,6 @@ const STATUS_PILLS = {
 
 const TERMINAL_LIFECYCLE = { completed: "done", cancelled: "cancelled" };
 
-/** Chip count shown for an empty workers field while the engine's default is unknown. */
-const FALLBACK_WORKERS = 8;
-
 const isIntegerInRange = (value, min, max) => Number.isInteger(value) && value >= min && value <= max;
 
 /**
@@ -171,16 +168,6 @@ export class JobController {
     this.runtime.appendLog(this.logEl, `[ERROR] ${message}`);
   }
 
-  /**
-   * The worker count the engine runs when the workers field is empty: the N that `app.js` put on
-   * the input as `data-auto-value` from `get_default_workers`, or 8 when that call has not
-   * answered or failed. Only the chips use it; the request still sends `workers: null`.
-   */
-  autoWorkers() {
-    const resolved = Number(document.getElementById(`${this.mode}-workers`)?.dataset?.autoValue);
-    return isIntegerInRange(resolved, 1, 64) ? resolved : FALLBACK_WORKERS;
-  }
-
   buildBatchRequest() {
     const val = id => document.getElementById(`${this.mode}-${id}`)?.value?.trim() ?? "";
     const chk = id => document.getElementById(`${this.mode}-${id}`)?.checked ?? false;
@@ -269,7 +256,7 @@ export class JobController {
     this.setRunning(true);
     this.runtime.clearLog(this.logEl);
 
-    this.runtime.updateWorkerChips(true, batchRequest.workers ?? this.autoWorkers(), batchRequest.io_jobs ?? 2);
+    this.runtime.updateWorkerChips(true, batchRequest.workers ?? this.runtime.resolvedDefaultWorkers(), batchRequest.io_jobs ?? 2);
     this.runtime.telemetryLoop.setJobActive(true);
 
     const inspected = await this.runtime.scanInputDirectory(inputDir, this.mode, {

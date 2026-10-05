@@ -101,7 +101,13 @@ async function loadPresetProfiles() {
  */
 let defaultWorkers = null;
 
-const WORKERS_INPUT_IDS = ["remux-workers", "extract-workers"];
+/** Worker count the chips show for an empty workers field while the engine's default is unknown. */
+const FALLBACK_WORKERS = 8;
+
+/** The worker count the chips show for an empty workers field. */
+const resolvedDefaultWorkers = () => defaultWorkers ?? FALLBACK_WORKERS;
+
+const WORKERS_INPUT_IDS = ["remux", "extract"].map(mode => `${mode}-workers`);
 
 async function loadDefaultWorkers() {
   try {
@@ -119,7 +125,7 @@ async function loadDefaultWorkers() {
     // Leave the chips alone while a job owns them; they show that job's own count.
     if (jobCoordinator.activeMode === null) updateWorkerChips(false);
   } catch (err) {
-    // The placeholder stays "auto" and the chips keep falling back to 8.
+    // The placeholder stays "auto" and the chips keep showing FALLBACK_WORKERS.
     console.error("[get_default_workers] failed:", err);
   }
 }
@@ -307,7 +313,7 @@ function switchView(viewId) {
 // Engine write throughput that fills the Disk I/O bar completely.
 const IO_BAR_FULL_SCALE_MB_S = 300;
 
-function updateWorkerChips(isJobActive = false, workersCount = defaultWorkers ?? 8, ioJobsCount = 2) {
+function updateWorkerChips(isJobActive = false, workersCount = resolvedDefaultWorkers(), ioJobsCount = 2) {
   document.querySelectorAll(".metric-workers-chip").forEach(chip => {
     chip.innerText = isJobActive ? `⚡ ${workersCount} Workers Active` : `⚡ Standby (${workersCount} Workers)`;
   });
@@ -838,6 +844,7 @@ function initApp() {
     invoke,
     listen,
     queueFor,
+    resolvedDefaultWorkers,
     safeAddListener,
     scanInputDirectory,
     showModal,

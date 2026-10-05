@@ -255,7 +255,7 @@ Amendment 7.
 **The governor is crate-private.** `cpu` is a private module of `mkv-core`;
 `transcode_governor_threads` is `pub(crate)` and reachable only through
 `BatchRequest::into_pipeline_config`.
-`physical_core_count`, `default_workers`, and `probe_concurrency` are `pub(crate)`. `default_workers` is re-exported by Amendment 10 (#35).
+`physical_core_count`, `default_workers`, and `probe_concurrency` are `pub(crate)`. Amendment 10 (#35) later made `default_workers` public.
 `physical_core_count` is called by `default_workers` and by
 `BatchRequest::into_pipeline_config`; `default_workers` by `into_pipeline_config` and by
 `manifest::generate_inspection_manifest`; `probe_concurrency` by
