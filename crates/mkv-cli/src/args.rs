@@ -1,4 +1,5 @@
-//! Command-line argument parsing and help text for mkv-cli.
+//! Command-line argument parsing for mkv-cli: flags into a `BatchRequest`, `--selected-item`
+//! normalization against `--input-dir`, and the help text.
 
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
