@@ -37,6 +37,13 @@ fn shared_memo(tmp: &TempDir) -> Arc<parking_lot::Mutex<FontHashMemo>> {
     )))
 }
 
+/// Claims `name` at the length of `content`, stages `content`, and promotes it.
+fn stage_and_promote(registry: &FontRegistry, name: &str, content: &[u8]) -> Option<PathBuf> {
+    let mut claim = registry.claim(name, content.len() as u64)?;
+    fs::write(&claim.staging_path, content).unwrap();
+    registry.promote(&mut claim)
+}
+
 #[test]
 fn test_hash_file() {
     let tmp = tempdir().unwrap();
@@ -157,8 +164,9 @@ fn test_seed_existing_fonts() {
 }
 
 /// `seed_existing` derives each font's signature from the `DirEntry` metadata it already
-/// holds. That signature must equal what a symlink-resolving `FileSignature::of` computes,
-/// otherwise every later memo lookup would miss and fonts would be re-hashed on each run.
+/// holds, and a promote of the same size later hashes the font under it. That signature must
+/// equal what a symlink-resolving `FileSignature::of` computes, otherwise every later memo
+/// lookup would miss and fonts would be re-hashed on each run.
 #[test]
 fn test_seed_existing_records_memo_signature_matching_resolved_lookup() {
     let (tmp, fonts_dir) = existing_fonts_dir();
@@ -166,7 +174,9 @@ fn test_seed_existing_records_memo_signature_matching_resolved_lookup() {
     fs::write(&font, b"real font content").unwrap();
 
     let memo = shared_memo(&tmp);
-    let _mgr = FontRegistry::new(fonts_dir, Some(Arc::clone(&memo)));
+    let mgr = FontRegistry::new(fonts_dir, Some(Arc::clone(&memo)));
+    // Seeded fonts are hashed lazily (#33): promote one of the same size to hash it.
+    assert!(stage_and_promote(&mgr, "Other.otf", b"fake font content").is_some());
 
     let expected = hash_file(&font).unwrap();
     let resolved_sig = FileSignature::of(&font).unwrap();
@@ -191,7 +201,9 @@ fn test_seed_existing_symlinked_font_uses_resolved_signature() {
     symlink(&real, &link).unwrap();
 
     let memo = shared_memo(&tmp);
-    let _mgr = FontRegistry::new(fonts_dir, Some(Arc::clone(&memo)));
+    let mgr = FontRegistry::new(fonts_dir, Some(Arc::clone(&memo)));
+    // Seeded fonts are hashed lazily (#33): promote one of the same size to hash them.
+    assert!(stage_and_promote(&mgr, "Other.otf", b"fake font content").is_some());
 
     let expected = hash_file(&real).unwrap();
     let resolved_sig = FileSignature::of(&link).unwrap();
