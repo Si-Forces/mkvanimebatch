@@ -1,6 +1,6 @@
 # 0013. Asynchronous Probing and Transcode Governance Performance Overhaul
 
-> **Status**: Accepted (amended 2026-10-02, 2026-10-04, 2026-10-05; Decision 2 rationale corrected 2026-10-05, #36)
+> **Status**: Accepted (amended 2026-10-02, 2026-10-04, 2026-10-05, 2026-10-06; Decision 2 rationale corrected 2026-10-05, #36)
 > **Date**: 2026-09-21
 > **Context**: Media Engine Context & In-Process Engine Bridge
 > **Amends**: ADR-0006, ADR-0008, ADR-0011
@@ -267,7 +267,7 @@ Amendment 7.
 **The governor is crate-private.** `cpu` is a private module of `mkv-core`;
 `transcode_governor_threads` is `pub(crate)` and reachable only through
 `BatchRequest::into_pipeline_config`.
-`physical_core_count`, `default_workers`, and `probe_concurrency` are `pub(crate)`. Amendment 10 (#35) later made `default_workers` public.
+`physical_core_count`, `default_workers`, and `probe_concurrency` are `pub(crate)`. Amendment 10 (#35) later made `default_workers` public; Amendment 11 made it `pub(crate)` again.
 `physical_core_count` is called by `default_workers` and by
 `BatchRequest::into_pipeline_config`; `default_workers` by `into_pipeline_config` and by
 `manifest::generate_inspection_manifest`; `probe_concurrency` by
@@ -548,3 +548,38 @@ worker chips show 8.
 pins that the command returns it, within 1–16. The frontend tests cover an empty field sending
 `workers: null`, the chip showing N (8 when none is known), the `auto (N)` placeholder, and the
 stepper starting from N.
+
+## Amendment 11 — 2026-10-06 (the desktop reads Effective Settings, not the default worker count)
+
+**Decision.** This supersedes Amendment 10's mechanism, not its outcome. `cpu::default_workers` is
+`pub(crate)` again and the crate root no longer re-exports it, because nothing outside `mkv-core`
+needs it; Amendment 4's "`default_workers` is `pub(crate)`" holds once more. The desktop's
+`get_default_workers` command is deleted. `get_default_settings` replaces it and returns
+`EffectiveSettings::defaults()`: the `workers`, `io_jobs`, `ffmpeg_threads`, bitrate and complexity
+of a request that sets nothing (ADR-0008, amendment 2026-10-06), computed by the same code as
+`BatchRequest::resolve`. The Remux and Extract worker inputs still show `auto (N)`, with N the
+`workers` of those settings, and the idle chips show its `workers` and `io_jobs`. The Disk I/O
+inputs follow the same rule: they start empty instead of pre-filled with 2, send `io_jobs: null`
+when empty, and show `auto (N)` with N the settings' `io_jobs`.
+
+Amendment 10's other decisions stand: an empty field sends `workers: null`, a typed number is sent
+as is, and the stepper starts an empty field from N. So does its caveat that the UI reads the
+defaults once at startup and can go stale if the CPU quota or affinity changes while the app is
+open.
+
+**What changes.** The page no longer carries fallback numbers. Amendment 10 showed 8 workers on the
+chips when the call failed (`FALLBACK_WORKERS`), the chips began with a literal 8 workers and 2
+I/O jobs, and the Disk I/O inputs held a literal 2. While the defaults are unknown, because the call
+failed or has not answered, the placeholder stays `auto` and the chips name their state without a
+count. A run's chips show the
+Effective Settings that `resolve_batch_request` returned for its request, so an empty field, or an
+`io_jobs` of 0, shows the number the run uses; after a webview reload they show the Job Snapshot's
+`effective_settings` (ADR-0008, amendment 2026-10-06, desktop bridge).
+
+**Coverage.** `test_get_default_settings_match_a_resolved_empty_request` pins that the command and
+a resolved empty request agree, with `workers` within 1–16. `test_resolve_default_workers_hardware_concurrency`
+(replacing `test_into_pipeline_config_default_workers_hardware_concurrency`) pins that an unset
+`workers` resolves to `cpu::default_workers()`. The frontend tests cover the `auto (N)` placeholder
+on the workers and Disk I/O inputs, an empty Disk I/O field sending `io_jobs: null`, the idle
+chips, a restored job's chips, and the chips' neutral text (`Workers Active`, `Standby`, `Idle`)
+when no settings are known, whether `get_default_settings` failed or a snapshot carries none.

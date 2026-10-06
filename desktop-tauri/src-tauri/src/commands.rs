@@ -4,8 +4,10 @@ use crate::process::{
 };
 use mkv_core::manifest::InspectionManifest;
 use mkv_core::pipeline::{
-    CancellationToken, EventReceiver, JobEvent, LogReceiver, PipelineMode, PipelineSummary,
+    CancellationToken, EventReceiver, JobEvent, LogReceiver, PipelineConfig, PipelineMode,
+    PipelineSummary,
 };
+use mkv_core::request::{BatchRequest, EffectiveSettings};
 use mkv_core::scan::PersistentInspectCache;
 use serde::Deserialize;
 use std::future::Future;
@@ -131,17 +133,32 @@ pub async fn inspect_directory(
     Ok(manifest)
 }
 
+/// Resolves `request` into the config a Batch Pipeline runs, after canonicalizing its
+/// `input_dir`. A path that cannot be canonicalized stays as given, for `resolve` to reject.
+/// `run_job` and `resolve_batch_request` both go through it, so the UI's preview and the run
+/// agree on the directory and on every error.
+fn resolve_canonical(mut request: BatchRequest) -> Result<PipelineConfig, String> {
+    request.input_dir =
+        std::fs::canonicalize(&request.input_dir).unwrap_or_else(|_| request.input_dir.clone());
+    request.resolve()
+}
+
+/// The Effective Settings `run_job` would run `request` with, or the reason it would refuse it.
+/// Synchronous and slot-free, so the UI can check a request before it starts its preflight scan.
+#[tauri::command]
+pub fn resolve_batch_request(request: BatchRequest) -> Result<EffectiveSettings, String> {
+    resolve_canonical(request).map(|config| config.effective_settings())
+}
+
 #[tauri::command]
 pub fn run_job<R: tauri::Runtime>(
     app: AppHandle<R>,
     state: State<'_, JobState>,
     cache_state: State<'_, InspectCacheState>,
-    mut request: mkv_core::request::BatchRequest,
+    request: BatchRequest,
 ) -> Result<u64, String> {
-    request.input_dir =
-        std::fs::canonicalize(&request.input_dir).unwrap_or_else(|_| request.input_dir.clone());
-    let input_dir = display_canonical_path(&request.input_dir.to_string_lossy());
-    let mut pipeline_config = request.resolve()?;
+    let mut pipeline_config = resolve_canonical(request)?;
+    let input_dir = display_canonical_path(&pipeline_config.input_dir.to_string_lossy());
 
     let mode = match pipeline_config.mode {
         PipelineMode::Extract => "extract",
@@ -156,6 +173,7 @@ pub fn run_job<R: tauri::Runtime>(
     let config = SupervisedJobConfig {
         mode,
         input_dir,
+        effective_settings: pipeline_config.effective_settings(),
         cancel_token,
     };
     start_supervised_job(app, &state, config, event_rx, log_rx, async move {
@@ -208,6 +226,7 @@ fn bridge_terminal(cancelled: bool, problem: Option<(&str, String)>) -> JobEvent
 struct SupervisedJobConfig {
     mode: &'static str,
     input_dir: String,
+    effective_settings: EffectiveSettings,
     cancel_token: CancellationToken,
 }
 
@@ -225,11 +244,12 @@ where
     let SupervisedJobConfig {
         mode,
         input_dir,
+        effective_settings,
         cancel_token,
     } = config;
     let mut lock = reserve_job_slot(state)?;
     let job_id = state.next_id.fetch_add(1, Ordering::SeqCst);
-    state.begin_snapshot(job_id, mode, input_dir)?;
+    state.begin_snapshot(job_id, mode, input_dir, effective_settings)?;
 
     let pipeline_handle = tauri::async_runtime::spawn(pipeline_future);
     let pipeline_abort = pipeline_handle.inner().abort_handle();
@@ -425,11 +445,11 @@ pub fn get_preset_profiles() -> Vec<mkv_core::preset::PresetProfile> {
     mkv_core::preset::get_preset_profiles()
 }
 
-/// The worker count the engine uses when a `BatchRequest` leaves `workers` unset, for the
-/// UI's "auto (N)" display.
+/// The Effective Settings of a `BatchRequest` that leaves every setting unset, for the UI's
+/// "auto (N)" and idle displays.
 #[tauri::command]
-pub fn get_default_workers() -> usize {
-    mkv_core::default_workers()
+pub fn get_default_settings() -> EffectiveSettings {
+    EffectiveSettings::defaults()
 }
 
 #[tauri::command]
@@ -440,7 +460,9 @@ pub fn get_job_snapshot(state: State<'_, JobState>) -> Result<Option<JobSnapshot
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::process::test_support::{batch_complete, batch_start, item_progress, item_start};
+    use crate::process::test_support::{
+        batch_complete, batch_start, effective_settings, item_progress, item_start,
+    };
     use crate::process::ItemStatus;
     use crate::process::{
         cleanup_owned_processes_with_timeout, run_teardown, stop_job_inner, stop_job_internal,
@@ -492,6 +514,7 @@ mod tests {
         let config = SupervisedJobConfig {
             mode: "remux",
             input_dir: "/anime".into(),
+            effective_settings: effective_settings(),
             cancel_token,
         };
         let state = app.state::<JobState>();
@@ -513,13 +536,17 @@ mod tests {
     }
 
     fn run_dry_extract_with_cache(app: &App, input_dir: PathBuf, cache: bool) -> JobSnapshot {
-        let request = mkv_core::request::BatchRequest {
-            mode: PipelineMode::Extract,
-            input_dir,
-            dry_run: Some(true),
-            no_cache: Some(!cache),
-            ..Default::default()
-        };
+        run_to_completion(
+            app,
+            BatchRequest {
+                no_cache: Some(!cache),
+                ..dry_run_request(&input_dir)
+            },
+        )
+    }
+
+    /// Runs `request` through `run_job` to completion and returns its snapshot.
+    fn run_to_completion(app: &App, request: BatchRequest) -> JobSnapshot {
         let job_id = run_job(
             app.handle().clone(),
             app.state::<JobState>(),
@@ -601,15 +628,91 @@ mod tests {
         assert_eq!(opts_default.no_cache, None);
     }
 
+    /// A dry-run extract request of `input_dir` that sets nothing else.
+    fn dry_run_request(input_dir: &std::path::Path) -> BatchRequest {
+        BatchRequest {
+            mode: PipelineMode::Extract,
+            input_dir: input_dir.to_path_buf(),
+            dry_run: Some(true),
+            no_cache: Some(true),
+            ..Default::default()
+        }
+    }
+
     #[test]
-    fn test_get_default_workers_is_the_engine_default() {
-        let workers = get_default_workers();
-        assert_eq!(workers, mkv_core::default_workers());
+    fn test_get_default_settings_match_a_resolved_empty_request() {
+        let tmp = tempfile::tempdir().unwrap();
+        let defaults = get_default_settings();
+        assert_eq!(
+            resolve_batch_request(dry_run_request(tmp.path())),
+            Ok(defaults.clone())
+        );
         // `BatchRequest::resolve` accepts 1-64; the default is clamped to 1-16.
         assert!(
-            (1..=16).contains(&workers),
-            "workers out of range: {workers}"
+            (1..=16).contains(&defaults.workers),
+            "workers out of range: {}",
+            defaults.workers
         );
+    }
+
+    #[test]
+    fn test_resolve_batch_request_layers_explicit_values_over_the_defaults() {
+        let tmp = tempfile::tempdir().unwrap();
+        let settings = resolve_batch_request(BatchRequest {
+            workers: Some(3),
+            io_jobs: Some(0),
+            ffmpeg_threads: Some(2),
+            bitrate: Some(" 256k ".into()),
+            complexity: Some(8),
+            ..dry_run_request(tmp.path())
+        })
+        .unwrap();
+        // An explicit `io_jobs` of 0 is the worker count.
+        assert_eq!(
+            settings,
+            EffectiveSettings {
+                workers: 3,
+                io_jobs: 3,
+                ffmpeg_threads: 2,
+                bitrate: "256k".into(),
+                complexity: 8,
+            }
+        );
+    }
+
+    #[test]
+    fn test_resolve_batch_request_reports_the_first_validation_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let error = resolve_batch_request(BatchRequest {
+            workers: Some(0),
+            io_jobs: Some(65),
+            ..dry_run_request(tmp.path())
+        })
+        .unwrap_err();
+        assert_eq!(error, "Worker thread count must be between 1 and 64");
+
+        let missing = tmp.path().join("missing");
+        let error = resolve_batch_request(dry_run_request(&missing)).unwrap_err();
+        assert!(error.contains("Input directory does not exist"), "{error}");
+    }
+
+    #[test]
+    fn test_run_job_snapshot_carries_the_effective_settings() {
+        let (app, _, _, _) = observed_app();
+        let tmp = tempfile::tempdir().unwrap();
+        let request = BatchRequest {
+            workers: Some(3),
+            io_jobs: Some(0),
+            bitrate: Some("256k".into()),
+            ..dry_run_request(tmp.path())
+        };
+        let expected = resolve_batch_request(request.clone()).unwrap();
+
+        let snapshot = run_to_completion(&app, request);
+
+        // The snapshot is the finished job's, after BatchStart replaced the one `run_job` began.
+        assert_eq!(snapshot.effective_settings, Some(expected));
+        assert_eq!(snapshot.total_items, 0);
     }
 
     #[test]

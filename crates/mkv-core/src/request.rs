@@ -809,9 +809,9 @@ mod tests {
     fn test_resolve_default_workers_hardware_concurrency() {
         let dir = tempdir().unwrap();
         let config = minimal_request(dir.path()).resolve().unwrap();
-        // The desktop shows `default_workers()` as "auto (N)" for an unset `workers`, so the
-        // engine must resolve it to the same value.
-        assert_eq!(config.workers, crate::default_workers());
+        // The preflight probe sizes itself from `default_workers()`, so an unset `workers` must
+        // resolve to the same value.
+        assert_eq!(config.workers, crate::cpu::default_workers());
         // Derived from the host's physical core count, so check the ranges, not the values.
         assert!(
             (1..=16).contains(&config.workers),
@@ -923,6 +923,28 @@ mod tests {
             req.default_sub_offset_ms = offset;
             let config = resolved(&req).unwrap();
             assert_eq!(config.default_sub_offset_ms, expected, "{offset:?}");
+        }
+    }
+
+    /// The concurrency fields are `usize` on the wire, so a fraction or a negative number fails
+    /// to deserialize before `resolve` can check its range. The desktop relies on that: it has
+    /// no range check of its own (ADR-0008 Amendment 2026-10-06).
+    #[test]
+    fn test_concurrency_fields_are_whole_non_negative_numbers() {
+        let parse = |field: &str, value: &str| {
+            serde_json::from_str::<BatchRequest>(&format!(
+                r#"{{"mode":"remux","input_dir":"/a","{field}":{value}}}"#
+            ))
+        };
+        for field in ["workers", "io_jobs", "ffmpeg_threads"] {
+            for bad in ["1.5", "64.9", "-1"] {
+                assert!(
+                    parse(field, bad).is_err(),
+                    "{field}: {bad} must not deserialize"
+                );
+            }
+            // A whole number deserializes even when its range is wrong: `resolve` rejects that.
+            assert!(parse(field, "100").is_ok(), "{field}: 100");
         }
     }
 

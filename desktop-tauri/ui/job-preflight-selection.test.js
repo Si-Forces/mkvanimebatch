@@ -67,7 +67,11 @@ function installDom(t, elements, overrides = {}) {
   });
 }
 
-function makeRuntime(tracker, overrides = {}) {
+/** The Effective Settings `resolve_batch_request` answers with. */
+const SETTINGS = { workers: 8, io_jobs: 2, ffmpeg_threads: 1, bitrate: "192k", complexity: 5 };
+
+/** A runtime of fakes; `resolve_batch_request` answers `SETTINGS`, so `invoke` only sees the other commands. */
+function makeRuntime(tracker, { invoke = async () => null, ...overrides } = {}) {
   return {
     coordinator: createJobCoordinator(),
     appendLog() {},
@@ -79,9 +83,8 @@ function makeRuntime(tracker, overrides = {}) {
     showModal: async () => true,
     telemetryLoop: { setJobActive() {} },
     updateWorkerChips() {},
-    resolvedDefaultWorkers: () => 8,
     listen: async () => () => {},
-    invoke: async () => null,
+    invoke: (command, args) => (command === "resolve_batch_request" ? SETTINGS : invoke(command, args)),
     ...overrides,
   };
 }

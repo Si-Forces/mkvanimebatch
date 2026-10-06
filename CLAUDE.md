@@ -92,7 +92,7 @@ Invariants to preserve:
 
 ### Engine ↔ desktop bridge
 
-`commands.rs` and `process.rs` define the Tauri commands (`inspect_directory`, `run_job`, `stop_job`, `get_job_snapshot`, …). The engine streams `JobEvent`s and log lines over two tokio mpsc channels. A supervisor task forwards them to the webview as `job-event`, `job-log` (batched), and `job-done`. It also reduces the events into a `JobSnapshot`, so a webview reload can rebuild the queue.
+`commands.rs` and `process.rs` define the Tauri commands (`inspect_directory`, `resolve_batch_request`, `run_job`, `stop_job`, `get_default_settings`, `get_job_snapshot`, …). The engine streams `JobEvent`s and log lines over two tokio mpsc channels. A supervisor task forwards them to the webview as `job-event`, `job-log` (batched), and `job-done`. It also reduces the events into a `JobSnapshot`, which carries the job's Effective Settings, so a webview reload can rebuild the queue and the worker chips.
 
 Only one job runs at a time. Stopping is two-phase: a cooperative cancel with a 2 s wait, then an abort of the pipeline task.
 
