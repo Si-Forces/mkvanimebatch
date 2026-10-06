@@ -307,7 +307,7 @@ impl JobState {
                 JobEvent::ItemStart { id, file, .. } => {
                     if let Some(item) = snap
                         .as_mut()
-                        .and_then(|snapshot| snapshot.items.get_mut(id))
+                        .and_then(|snapshot| snapshot.items.get_mut(id.as_str()))
                     {
                         if !item.status.is_terminal() {
                             item.file = file.clone();
@@ -319,7 +319,7 @@ impl JobState {
                 JobEvent::ItemProgress { id, progress, .. } => {
                     if let Some(item) = snap
                         .as_mut()
-                        .and_then(|snapshot| snapshot.items.get_mut(id))
+                        .and_then(|snapshot| snapshot.items.get_mut(id.as_str()))
                     {
                         if item.status == ItemStatus::Processing && progress.is_finite() {
                             item.progress = Some(progress.clamp(0.0, 100.0));
@@ -336,7 +336,7 @@ impl JobState {
                     ..
                 } => {
                     if let Some(snapshot) = snap.as_mut() {
-                        if let Some(item) = snapshot.items.get_mut(id) {
+                        if let Some(item) = snapshot.items.get_mut(id.as_str()) {
                             if !item.status.is_terminal() {
                                 item.file = file.clone();
                                 item.status = (*status).into();
@@ -657,7 +657,7 @@ pub(crate) mod test_support {
     pub(crate) fn item_start(id: &str) -> JobEvent {
         JobEvent::ItemStart {
             version: 1,
-            id: id.into(),
+            id: ItemId::parse(id),
             file: format!("{id}.mkv"),
             extra: Default::default(),
         }
@@ -666,7 +666,7 @@ pub(crate) mod test_support {
     pub(crate) fn item_progress(id: &str, progress: f64) -> JobEvent {
         JobEvent::ItemProgress {
             version: 1,
-            id: id.into(),
+            id: ItemId::parse(id),
             file: format!("{id}.mkv"),
             progress,
             speed: None,
@@ -678,7 +678,7 @@ pub(crate) mod test_support {
     pub(crate) fn item_complete(id: &str, duration_sec: f64) -> JobEvent {
         JobEvent::ItemComplete {
             version: 1,
-            id: id.into(),
+            id: ItemId::parse(id),
             file: format!("{id}.mkv"),
             status: ItemOutcome::Completed,
             reason: None,

@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::domain::{ancestor_dirs, natural_sort_key, MkvTrack};
 use crate::inspect::inspect_videos;
-use crate::item_id::ItemId;
+use crate::item_id::{get_item_id, ItemId};
 use crate::request::resolve_selected_items;
 use crate::scan::{
     scan_assets, scan_mkv_files, InspectedVideo, ParsedFile, PersistentInspectCache, ScanCache,
@@ -18,32 +18,6 @@ use crate::scan::{
 pub const MANIFEST_VERSION: u64 = 2;
 
 const CANCELLED_ERROR: &str = "Inspection cancelled";
-
-/// Derives a root-relative POSIX path ID. The engine uses it for release directories and
-/// subtitle candidates; a discovered video's identity is an [`ItemId`], built with `ItemId::of`,
-/// which normalises this ID further.
-/// Normalizes backslashes `\` to `/`. If stripped is empty or points to root, returns `"."`.
-pub fn get_item_id(path: &Path, root_dir: &Path) -> String {
-    let rel = match path.strip_prefix(root_dir) {
-        Ok(p) => p.to_path_buf(),
-        Err(_) => {
-            if let (Ok(p), Ok(r)) = (path.canonicalize(), root_dir.canonicalize()) {
-                p.strip_prefix(&r)
-                    .map(|p| p.to_path_buf())
-                    .unwrap_or_else(|_| path.to_path_buf())
-            } else {
-                path.to_path_buf()
-            }
-        }
-    };
-
-    let s = rel.to_string_lossy().replace('\\', "/");
-    if s.is_empty() || s == "." {
-        ".".to_string()
-    } else {
-        s
-    }
-}
 
 /// Buckets a `pixel_dimensions` string (e.g. "1920x1080") into a resolution label.
 fn parse_resolution(pixel_dimensions: &str) -> Option<&'static str> {
@@ -473,20 +447,6 @@ mod tests {
     use super::*;
     use crate::domain::TrackProperties;
     use crate::scan::{MkvAttachment, MkvmergeMetadata};
-
-    #[test]
-    fn test_get_item_id() {
-        let root = Path::new("/anime/series");
-        assert_eq!(get_item_id(Path::new("/anime/series"), root), ".");
-        assert_eq!(
-            get_item_id(Path::new("/anime/series/ep01.mkv"), root),
-            "ep01.mkv"
-        );
-        assert_eq!(
-            get_item_id(Path::new("/anime/series/Season 1/ep01.mkv"), root),
-            "Season 1/ep01.mkv"
-        );
-    }
 
     #[test]
     fn test_parse_resolution() {

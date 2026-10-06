@@ -416,6 +416,8 @@ impl BatchRequest {
 
             for assignment in assignments {
                 let target_id = assignment.target_id();
+                // The containment and drive-prefix checks must see the raw spelling, since
+                // `ItemId::parse` reshapes a leading root or drive; the two forms are deliberate.
                 let target_norm = assignment.target_video.trim().replace('\\', "/");
                 if target_id.as_str().is_empty() || !is_contained_relative_path(&target_norm) {
                     return Err(format!(
@@ -477,6 +479,7 @@ impl BatchRequest {
 
             let mut seen_items: HashSet<ItemId> = HashSet::new();
             for item in items {
+                // Raw spelling for the containment check, as for `target_norm` above.
                 let norm = item.trim().replace('\\', "/");
                 if norm.is_empty() || !is_contained_relative_path(&norm) {
                     return Err(format!("Invalid relative path in selected_items: '{item}'"));

@@ -124,7 +124,7 @@ mkvanimebatch/
 │   │   │   ├── assets.rs            # AssetResolver, SubIndex, ChapterIndex, CoverIndex, release preparation
 │   │   │   ├── fonts.rs             # Fonts directory lookup, FontRegistry, FontHashMemo, FontClaimsGuard
 │   │   │   ├── inspect.rs           # Crate-private: inspect_videos, the one cancellable bulk probe fan-out behind Inspect and remux planning
-│   │   │   ├── item_id.rs           # ItemId, the canonical identity of a discovered video, built only normalised
+│   │   │   ├── item_id.rs           # ItemId, the canonical identity of a discovered video, built only normalised; plus get_item_id, the root-relative path ID of release directories and subtitle candidates
 │   │   │   ├── manifest.rs          # InspectionManifest generation and metadata summaries
 │   │   │   ├── media_tool.rs        # Media Tool invocation: MediaToolRunner port, SubprocessRunner adapter, run() with the exit-code policy
 │   │   │   ├── preset.rs            # PresetProfile catalog and lookup
@@ -385,7 +385,7 @@ flowchart TD
     ItemTask --> BatchDone["Emit JobEvent::BatchComplete"]
 ```
 
-A video's identity is an `ItemId` (`item_id.rs`): its path relative to the input directory, `/`-separated, with no `.` segments. Both constructors normalise (`ItemId::of` for a discovered file, `ItemId::parse` for a user-supplied spelling), so there is no un-normalised form to compare by mistake. `BatchItemInfo.id`, `ManifestItem.id`, `apply_selected_items`, `validate_assignment_targets`, `RemuxPlanner` and `InspectionManifest::select_items` all compare by type, as `ItemId`s. `selected_items` and a `TrackAssignment`'s `target_video` stay the caller's raw `String`, so validation errors can quote what was typed. On the wire an `ItemId` is a plain JSON string, and deserialising one normalises it.
+A video's identity is an `ItemId` (`item_id.rs`): its path relative to the input directory, `/`-separated, with no `.` segments. Both constructors normalise (`ItemId::of` for a discovered file, `ItemId::parse` for a user-supplied spelling), so there is no un-normalised form to compare by mistake. `BatchItemInfo.id`, `ManifestItem.id`, the `id` of the item `JobEvent`s, `apply_selected_items`, `validate_assignment_targets`, `RemuxPlanner` and `InspectionManifest::select_items` all compare by type, as `ItemId`s. `selected_items` and a `TrackAssignment`'s `target_video` stay the caller's raw `String`, so validation errors can quote what was typed. On the wire an `ItemId` is a plain JSON string, and deserialising one normalises it. `ItemId::of` trims surrounding whitespace, so two discovered files whose names differ only by leading or trailing whitespace share one `ItemId`: a run rejects them (`apply_selected_items` fails with `Discovered MKV files share canonical ID ...`), while `--plan` and Inspect list both rows under the same ID.
 
 Planning decides and the pipeline reports. `RemuxPlanner` (`remux_plan.rs`) takes one discovered video and returns a Remux Plan: `Skip` with a reason, `ProbeFailed` or `Internal` for that item, `Abort` for the whole batch, or `Planned` with the `PlannedJob`, its `TrackSelection`, and the release's shared `FontInfo`. A video whose Release Directory was not prepared is an `Internal` item error, logged as such rather than as a probe failure. Otherwise the planner works in this order:
 

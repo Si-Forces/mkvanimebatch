@@ -53,6 +53,8 @@ impl BatchItemInfo {
     }
 }
 
+/// One step of a run, streamed to the CLI and the desktop. Item events carry the item's
+/// [`ItemId`]; the desktop snapshot and the JS reducer key items by its string form.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum JobEvent {
@@ -67,14 +69,14 @@ pub enum JobEvent {
     },
     ItemStart {
         version: u64,
-        id: String,
+        id: ItemId,
         file: String,
         #[serde(flatten)]
         extra: serde_json::Map<String, serde_json::Value>,
     },
     ItemProgress {
         version: u64,
-        id: String,
+        id: ItemId,
         file: String,
         progress: f64,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -86,7 +88,7 @@ pub enum JobEvent {
     },
     ItemComplete {
         version: u64,
-        id: String,
+        id: ItemId,
         file: String,
         status: ItemOutcome,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -213,7 +215,7 @@ fn cancelled_item(item: BatchItemInfo, duration_sec: Option<f64>) -> JobEvent {
     let BatchItemInfo { id, file } = item;
     JobEvent::ItemComplete {
         version: EVENT_VERSION,
-        id: id.into(),
+        id,
         file,
         status: ItemOutcome::Cancelled,
         reason: Some(CANCELLED_REASON.into()),
@@ -228,7 +230,7 @@ fn skipped_item(item: BatchItemInfo, reason: String) -> JobEvent {
     let BatchItemInfo { id, file } = item;
     JobEvent::ItemComplete {
         version: EVENT_VERSION,
-        id: id.into(),
+        id,
         file,
         status: ItemOutcome::Skipped,
         reason: Some(reason),
@@ -243,7 +245,7 @@ fn errored_item(item: BatchItemInfo, message: String) -> JobEvent {
     let BatchItemInfo { id, file } = item;
     JobEvent::ItemComplete {
         version: EVENT_VERSION,
-        id: id.into(),
+        id,
         file,
         status: ItemOutcome::Error,
         reason: None,
@@ -257,7 +259,7 @@ fn planned_item(item: BatchItemInfo) -> JobEvent {
     let BatchItemInfo { id, file } = item;
     JobEvent::ItemComplete {
         version: EVENT_VERSION,
-        id: id.into(),
+        id,
         file,
         status: ItemOutcome::Planned,
         reason: None,
@@ -384,7 +386,6 @@ fn settle_cancelled_planning_items(
     input_dir: &Path,
     outcomes: Vec<JobEvent>,
 ) -> Vec<JobEvent> {
-    // Event IDs are `ItemId`s rendered by `BatchItemInfo::new`, so they match `item.id` by string.
     let mut outcomes_by_id = HashMap::with_capacity(outcomes.len());
     for outcome in outcomes {
         let id = match &outcome {
@@ -399,7 +400,7 @@ fn settle_cancelled_planning_items(
         .map(|file| {
             let item = BatchItemInfo::new(file, input_dir);
             outcomes_by_id
-                .remove(item.id.as_str())
+                .remove(&item.id)
                 .unwrap_or_else(|| cancelled_item(item, None))
         })
         .collect()
@@ -472,7 +473,7 @@ impl ProgressSink {
         if let Some(tx) = &self.tx {
             let _ = tx.try_send(JobEvent::ItemProgress {
                 version: EVENT_VERSION,
-                id: self.item.id.to_string(),
+                id: self.item.id.clone(),
                 file: self.item.file.clone(),
                 progress,
                 speed: None,
@@ -679,7 +680,7 @@ impl BatchPipeline {
                 let started = Instant::now();
                 self.emit(JobEvent::ItemStart {
                     version: EVENT_VERSION,
-                    id: item.id.to_string(),
+                    id: item.id.clone(),
                     file: item.file.clone(),
                     extra: Default::default(),
                 })
@@ -723,7 +724,7 @@ impl BatchPipeline {
                     let BatchItemInfo { id, file } = item;
                     self.emit(JobEvent::ItemComplete {
                         version: EVENT_VERSION,
-                        id: id.into(),
+                        id,
                         file,
                         status: ItemOutcome::Completed,
                         reason: None,
@@ -745,7 +746,7 @@ impl BatchPipeline {
                     summary.log.push(msg);
                     self.emit(JobEvent::ItemComplete {
                         version: EVENT_VERSION,
-                        id: id.into(),
+                        id,
                         file,
                         status: ItemOutcome::Error,
                         reason: None,
@@ -929,7 +930,7 @@ impl BatchPipeline {
             } else {
                 JobEvent::ItemComplete {
                     version: EVENT_VERSION,
-                    id: item.id.into(),
+                    id: item.id,
                     file: item.file,
                     status: ItemOutcome::Error,
                     reason: None,
@@ -1307,7 +1308,11 @@ mod tests {
             } = event
             {
                 assert!(duration_sec.is_some());
-                outcomes.push((id, status, error.is_some_and(|e| e.contains("boom"))));
+                outcomes.push((
+                    id.to_string(),
+                    status,
+                    error.is_some_and(|e| e.contains("boom")),
+                ));
             }
         }
         outcomes.sort_by(|a, b| a.0.cmp(&b.0));
@@ -1360,7 +1365,7 @@ mod tests {
                 id, file, status, ..
             } = event
             {
-                outcomes.push((id, file, status));
+                outcomes.push((id.to_string(), file, status));
             }
         }
         assert_eq!(
@@ -1396,9 +1401,9 @@ mod tests {
         })
         .collect();
         // Nested IDs never equal their file names, so a swapped pair misses this map.
-        let expected: HashMap<String, String> = items
+        let expected: HashMap<ItemId, String> = items
             .iter()
-            .map(|(item, _)| (item.id.to_string(), item.file.clone()))
+            .map(|(item, _)| (item.id.clone(), item.file.clone()))
             .collect();
 
         let (event_sender, mut event_receiver) = create_event_channel(64);
@@ -1443,7 +1448,7 @@ mod tests {
                 other => panic!("unexpected event {other:?}"),
             };
             assert_eq!(expected.get(&id), Some(&file), "{kind} event for '{id}'");
-            seen.push((id, kind));
+            seen.push((id.to_string(), kind));
         }
         seen.sort();
         let seen: Vec<(&str, &str)> = seen.iter().map(|(id, k)| (id.as_str(), *k)).collect();
@@ -1473,7 +1478,7 @@ mod tests {
         ];
         let resolved = JobEvent::ItemComplete {
             version: EVENT_VERSION,
-            id: "two.mkv".into(),
+            id: ItemId::parse("two.mkv"),
             file: "two.mkv".into(),
             status: ItemOutcome::Skipped,
             reason: Some("No subtitle match".into()),

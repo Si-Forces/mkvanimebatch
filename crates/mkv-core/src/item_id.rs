@@ -1,11 +1,11 @@
-//! The canonical identity of a discovered video, buildable only in its normalised form.
+//! The canonical identity of a discovered video, buildable only in its normalised form. The
+//! module also holds `get_item_id`, the raw root-relative path string used for release
+//! directories and subtitle candidates, which is not an `ItemId`.
 
 use std::fmt;
 use std::path::{Component, Path};
 
 use serde::{Deserialize, Deserializer, Serialize};
-
-use crate::manifest::get_item_id;
 
 /// The canonical identity of one discovered video: its path relative to the input directory,
 /// `/`-separated, with no `.` segments.
@@ -14,7 +14,10 @@ use crate::manifest::get_item_id;
 /// `ItemId`s. The field is private and every constructor normalises, so two spellings of one
 /// video are equal by type rather than by each call site remembering to normalise. It
 /// serialises as a plain string and normalises again when deserialised.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
+///
+/// Normalisation is the only invariant: an `ItemId` can be empty or name a path outside the
+/// input directory. `BatchRequest::resolve` judges validity.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
 pub struct ItemId(String);
 
@@ -41,6 +44,7 @@ impl ItemId {
         Self(parts.join("/"))
     }
 
+    /// The normalised, `/`-separated spelling.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -64,9 +68,48 @@ impl<'de> Deserialize<'de> for ItemId {
     }
 }
 
+/// Derives a root-relative POSIX path ID. The engine uses it for release directories and
+/// subtitle candidates.
+/// Normalizes backslashes `\` to `/`. If stripped is empty or points to root, returns `"."`.
+pub fn get_item_id(path: &Path, root_dir: &Path) -> String {
+    let rel = match path.strip_prefix(root_dir) {
+        Ok(p) => p.to_path_buf(),
+        Err(_) => {
+            if let (Ok(p), Ok(r)) = (path.canonicalize(), root_dir.canonicalize()) {
+                p.strip_prefix(&r)
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|_| path.to_path_buf())
+            } else {
+                path.to_path_buf()
+            }
+        }
+    };
+
+    let s = rel.to_string_lossy().replace('\\', "/");
+    if s.is_empty() || s == "." {
+        ".".to_string()
+    } else {
+        s
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_get_item_id() {
+        let root = Path::new("/anime/series");
+        assert_eq!(get_item_id(Path::new("/anime/series"), root), ".");
+        assert_eq!(
+            get_item_id(Path::new("/anime/series/ep01.mkv"), root),
+            "ep01.mkv"
+        );
+        assert_eq!(
+            get_item_id(Path::new("/anime/series/Season 1/ep01.mkv"), root),
+            "Season 1/ep01.mkv"
+        );
+    }
 
     #[test]
     fn of_and_parse_agree_across_spellings() {
