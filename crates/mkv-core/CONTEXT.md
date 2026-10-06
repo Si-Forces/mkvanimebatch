@@ -28,6 +28,7 @@ Parses, indexes, scores, probes, and executes anime fansub batch extraction and 
 | **Item Outcome** | The closed set of terminal statuses an item may reach: `completed`, `skipped`, `error`, `cancelled`, `planned`. | Status string, job state, result code |
 | **Job Event** | A strongly-typed lifecycle event describing real-time execution progress: `BatchStart`, `ItemStart`, `ItemProgress`, `ItemComplete`, `BatchComplete`. | Progress message, notification, log line |
 | **Item Duration** | The authoritative monotonic duration in seconds for one item, measured by the Batch Pipeline from item start to termination on a monotonic clock. Never derived from a wall clock. | Execution time, run clock, stopwatch |
+| **Media Tool** | An external program the engine runs as a child process: `mkvmerge`, `mkvextract`, or `ffmpeg`. Each tool family has one exit-code policy: for MKVToolNix tools exit 1 means success with warnings, for `ffmpeg` any non-zero exit is a failure. | Binary, external command, subprocess |
 | **Fallback Inspector** | The secondary probing mechanism that delegates to an external Matroska tool (`mkvmerge -J`) whenever native container parsing fails. | Backup scanner, external probe |
 
 Every term above is owned by this context. The Desktop Application consumes them across the Engine Bridge; see [CONTEXT-MAP.md](../../CONTEXT-MAP.md) for that relationship.

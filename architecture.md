@@ -124,6 +124,7 @@ mkvanimebatch/
 │   │   │   ├── assets.rs            # AssetResolver, SubIndex, ChapterIndex, CoverIndex, release preparation
 │   │   │   ├── fonts.rs             # Fonts directory lookup, FontRegistry, FontHashMemo, FontClaimsGuard
 │   │   │   ├── manifest.rs          # InspectionManifest generation and metadata summaries
+│   │   │   ├── media_tool.rs        # Media Tool invocation: MediaToolRunner port, SubprocessRunner adapter, run() with the exit-code policy
 │   │   │   ├── preset.rs            # PresetProfile catalog and lookup
 │   │   │   ├── request.rs           # BatchRequest, TrackAssignment, request resolution (validation, preset layering, defaults), EffectiveSettings, assignments JSON parsing
 │   │   │   ├── remux.rs             # Track selection, ffmpeg/mkvmerge argument building, remux execution
@@ -131,7 +132,7 @@ mkvanimebatch/
 │   │   │   ├── extract.rs           # mkvextract invocation for subtitles, chapters, covers, and fonts
 │   │   │   └── pipeline.rs          # BatchPipeline, JobEvent and log channels, tokio JoinSet scheduling
 │   │   ├── benches/                 # bench_pipeline.rs (BatchRequest::resolve throughput, warm-cache remux/extract dry runs); bench_real_media.rs (cold-cache remux of a real corpus across worker counts at io_jobs = 2, local only; CI runs only its self-check)
-│   │   └── tests/                   # 11 integration suites: test_assets, test_cross_regex, test_domain, test_extract, test_fonts, test_pipeline, test_pipeline_assignments, test_pipeline_font_memo, test_real_remux, test_remux, test_scan
+│   │   └── tests/                   # 12 integration suites: test_assets, test_cross_regex, test_domain, test_extract, test_fonts, test_media_tool, test_pipeline, test_pipeline_assignments, test_pipeline_font_memo, test_real_remux, test_remux, test_scan
 │   └── mkv-cli/                     # CLI binary
 │       ├── Cargo.toml
 │       └── src/
@@ -186,7 +187,7 @@ flowchart TD
 
     NativeProbe --> CheckSuccess{Native Parsing\nSucceeded?}
     CheckSuccess -- Yes --> StoreCache[Store in PersistentInspectCache]
-    CheckSuccess -- No --> Fallback[Fallback Inspector\nmkvmerge -J subprocess]
+    CheckSuccess -- No --> Fallback[Fallback Inspector\nmkvmerge -J]
 
     Fallback --> CheckMKS{Exit 0 and container\nrecognized?}
     CheckMKS -- Yes --> StoreCache
@@ -203,8 +204,8 @@ flowchart TD
    - Fails (and so triggers the fallback) only when the probe returns an error: missing EBML header or Segment, a malformed top-level element, clusters with no SeekHead before them, or no track found. A malformed SeekHead entry or a truncated tail ends the scan without failing. The parser tracks stream position in memory and preserves `BufReader` buffers across intra-buffer skips via relative seeking, eliminating loop guard `lseek` calls. ADR-0013 measured the original warm native probe at 0.091 ms.
 
 2. **Fallback inspector (`scan.rs`)**:
-   - Runs `mkvmerge -J` with a 30-second timeout and rejects output whose `container.recognized` is `false`.
-   - On Windows every child tool (`mkvmerge`, `mkvextract`, `ffmpeg`) is spawned with `CREATE_NO_WINDOW` (`0x08000000`).
+   - Runs `mkvmerge -J` through `SubprocessRunner` and the shared exit-code policy (§4.6) with a 30-second timeout (`PROBE_TIMEOUT`), so exit code 1 (warnings) with valid JSON still probes successfully. It rejects output whose `container.recognized` is `false`.
+   - On Windows every child tool (`mkvmerge`, `mkvextract`, `ffmpeg`) is spawned by `SubprocessRunner` with `CREATE_NO_WINDOW` (`0x08000000`).
 
 3. **Persistent inspection cache (`PersistentInspectCache`)**:
    - Keyed on the canonical file path (Windows `\\?\` prefix stripped) and valid while `FileSignature { size: u64, mtime_ns: u128 }` matches.
@@ -331,7 +332,7 @@ sequenceDiagram
      - Bitrate: preset or `--bitrate` (default `192k`).
      - Complexity: `0-10` (default `5`; `10` in the Hi-Fi preset). ADR-0013 lowered the default from 10.
      - Threads: `-threads` caps the FLAC decoder's threads; libopus is single-threaded, so each transcode encodes on about one core whatever the value, and `workers` is the only lever on encode CPU use. Without `--ffmpeg-threads`, the governor default is `(physical_cores / workers).clamp(1, 4)`, which keeps ffmpeg from sizing decoder threads to all cores in every process (ADR-0013, 2026-10-05 correction).
-     - Timeout: 30 minutes (`SUBPROCESS_TIMEOUT`), which also applies to `mkvmerge` and `mkvextract`.
+     - Timeout: 30 minutes (`SUBPROCESS_TIMEOUT`), which also applies to `mkvmerge` and `mkvextract` (§4.6).
 2. **Subtitle synchronization**:
    - External subtitle: `--sync 0:<ms>`, where `<ms>` is the assignment's `offset_ms` when it has one (an explicit `0` means unshifted), else the global `default_sub_offset_ms`. A zero offset emits no `--sync`.
    - Embedded subtitle: `--sync <track_id>:<ms>` from the global `default_sub_offset_ms` only.
@@ -343,7 +344,7 @@ sequenceDiagram
    - `--chapters <file>` for an external chapter file.
    - External cover: `--attachment-name cover<ext> --attachment-mime-type <mime> --attach-file <cover>`.
    - Fonts: `--attachment-mime-type <mime> --attach-file <font>` for each font in the fonts directory.
-4. **Completion**: exit code 1 (warnings) counts as success. The output must exist and be non-empty; it is then moved to its final path with `promote_file`. By default the output goes to `Output/<stem>.mkv` beside the source; with `--out-dir` it goes to the mirrored directory under the output root. OVA and special episodes get an `OVA<ep>_` / `SP<ep>_` prefix.
+4. **Completion**: exit code 1 (warnings) counts as success, and the warning is logged (§4.6). The output must exist and be non-empty; it is then moved to its final path with `promote_file`. By default the output goes to `Output/<stem>.mkv` beside the source; with `--out-dir` it goes to the mirrored directory under the output root. OVA and special episodes get an `OVA<ep>_` / `SP<ep>_` prefix.
 
 ---
 
@@ -396,10 +397,30 @@ Extract mode skips probing and planning up front: each item task probes its vide
    - Planned jobs from every release directory form one queue in batch order, so workers do not idle at directory boundaries. Asset resolution stays per directory.
 3. **Cooperative cancellation (`CancellationToken`)**:
    - Checked while probing, after probing, before each Release Directory's asset pass, before planning each item, and before each task launch. Preflight inspection also checks it before each directory of its subtitle pass. A directory's pass already under way runs to completion. Each item's work future races the token in a `tokio::select!`, so a stop drops the in-flight work at its next await point.
-   - Child processes are spawned with `kill_on_drop(true)`, and scratch directories are `TempDir`s, so dropping the work kills the tools and removes staged files. After a stop, `run_items` aborts the remaining tasks and settles every in-flight and unstarted item as `cancelled`.
+   - Child processes are spawned by `SubprocessRunner` (§4.6) with `kill_on_drop(true)`, and scratch directories are `TempDir`s, so dropping the work kills the tools and removes staged files. After a stop, `run_items` aborts the remaining tasks and settles every in-flight and unstarted item as `cancelled`.
 4. **Item duration (ADR-0009)**:
    - The engine takes `Instant::now()` when it starts an item and puts `elapsed().as_secs_f64()` in `JobEvent::ItemComplete { duration_sec: Some(..) }` for every started item, whether it completed, failed, or was cancelled.
 5. **Panicking items**: a task that panics settles its item as `error` (`worker panicked: ...`); the rest of the batch continues.
+
+---
+
+### 4.6 Media Tool Invocation (`media_tool.rs`)
+
+Every Media Tool run goes through one port and one policy, so remux, extract, and the fallback probe do not each hand-roll spawning, timeouts, and exit-code handling. This is a single tool invocation, not the runner loop ADR-0002 rejected: that was a `BatchRunner` over the remux and extract pipelines, which stay separate.
+
+1. **Port (`MediaToolRunner`)**: one method takes an `Invocation` (Media Tool, arguments, timeout, optional stdout-line sink) and returns the raw result, a `RawOutcome`: the tool exited (exit code, or none when a signal ended it, with its stdout and stderr bytes), failed to run (the I/O error text), or timed out. It classifies nothing.
+2. **Adapter (`SubprocessRunner`)**: the production runner. It spawns the tool with `tokio::process::Command` (`CREATE_NO_WINDOW`, `0x08000000`, on Windows), `kill_on_drop(true)`, stdin closed, and piped stdout and stderr; drains stderr in a task that is aborted on timeout; and streams stdout to the sink split on `\r` and `\n` while collecting its bytes. Dropping the future kills the child, which is how a stop (§4.5) ends a running tool.
+3. **Policy (`media_tool::run`)**: applied above the port, per tool family:
+
+   | Exit | MKVToolNix (`mkvmerge`, `mkvextract`) | `ffmpeg` |
+   | :--- | :--- | :--- |
+   | 0 | success | success |
+   | 1 | success with warnings (trimmed stderr and stdout, joined) | failure |
+   | 2 or more, or a signal | failure | failure |
+
+4. **Errors and progress**: failures read `Failed to run <tool>: <io error>`, `<tool> timed out after <N> seconds`, and `<tool> failed (exit code N | terminated by signal): <stderr and stdout>`, where a tool that printed nothing gives just `<tool> failed (exit code N | terminated by signal)`. Callers may prefix context, as the transcode does with `Audio transcode: `. `Progress: N%` stdout lines feed the caller's `on_progress`.
+5. **Callers**: `execute_remux_job` and `extract_mkv_file` take a `&dyn MediaToolRunner`, which `BatchPipeline` supplies (`SubprocessRunner` unless `with_media_tool_runner` replaces it). Both log a warning as `  <text>` when it starts with "warning", else `  Warning: <text>`. The fallback probe uses `SubprocessRunner` directly and drops the warning. Timeouts are constants passed per invocation: `SUBPROCESS_TIMEOUT` (30 minutes) and `PROBE_TIMEOUT` (30 seconds).
+6. **Testing**: `tests/common` holds `ScriptedRunner`, which records each invocation and answers with scripted outcomes, so the policy and the callers run on every platform without a tool on `PATH`. `ScriptedRunner` also binds each step to the tool it answers and records every invocation's timeout, so the tests pin which tool ran with which timeout. `SubprocessRunner` itself is covered by the real-tool tests in `test_real_remux.rs`: the remux cases, a timeout test that expects `TimedOut`, and a kill-on-drop test that aborts the task running it. They run where the tools are installed (Linux CI sets `MKV_REQUIRE_MEDIA_TOOLS=1`), and the check that the killed process is gone reads `/proc`, so it is Linux-only. The Windows leg of the CI matrix installs no Media Tools, so the real-tool tests skip there and `SubprocessRunner` has no coverage on Windows. Unit tests in `media_tool.rs` cover its stdout line splitting. `BatchPipeline::with_media_tool_runner` routes only the remux and extract invocations: the fallback probe still spawns `mkvmerge`, so a test that must not spawn seeds the inspection cache.
 
 ---
 
@@ -693,7 +714,7 @@ sequenceDiagram
 | [**0010**](docs/adr/0010-mainline-rust-cutover-and-python-decommissioning.md) | Mainline Rust Engine Cutover | Removed the Python codebase; unified 1.0.0 versioning and CI/release status gates. Implemented. | Root `Cargo.toml`, `.github/workflows/ci.yml`, `.github/workflows/release.yml` |
 | [**0011**](docs/adr/0011-selected-items-queue-and-concurrency-pipelining.md) | Selected Items Queue & Concurrency Pipelining | Global Tokio JoinSet, I/O semaphore, parallel probing, per-item track assignment modal. Implemented. | `pipeline.rs`, `request.rs`, `app.js` |
 | [**0012**](docs/adr/0012-track-assignment-override-execution-and-seam-unification.md) | Track Assignment Override Execution and Seam Unification | Full `TrackAssignment` (offset, language, title) applied to mkvmerge arguments; `sub_assignments` flattening removed. Includes the [2026-09-26 amendment](docs/adr/0012-track-assignment-override-execution-and-seam-unification.md#amendment--2026-09-26) (offset overrides rather than adds, explicit zero means unshifted, milliseconds throughout). The [2026-10-05 amendment](docs/adr/0012-track-assignment-override-execution-and-seam-unification.md#amendment--2026-10-05) (issue #19) records the global offset as `default_sub_offset_ms: i64`, with the CLI flag and GUI input kept in seconds and converted at the boundary, and the GUI sending an explicit `0`. Implemented. | `pipeline.rs`, `remux.rs`, `mkv-cli` |
-| [**0013**](docs/adr/0013-asynchronous-probing-and-transcode-governance-performance-overhaul.md) | Asynchronous Probing and Transcode Governance Performance Overhaul | Asynchronous mkvmerge fallback probing, transcode thread governor, default complexity 5, font seeding outside the registry lock, cache serialization without intermediate copies, and `promote_file`'s copy fallback limited to device boundaries ([2026-09-28 amendment 2](docs/adr/0013-asynchronous-probing-and-transcode-governance-performance-overhaul.md#amendment-2--2026-09-28-spawn_blocking-scope), [amendment 3](docs/adr/0013-asynchronous-probing-and-transcode-governance-performance-overhaul.md#amendment-3--2026-09-28-traversal-path-contract), [amendment 4](docs/adr/0013-asynchronous-probing-and-transcode-governance-performance-overhaul.md#amendment-4--2026-09-28-current-state-corrections), [amendment 5](docs/adr/0013-asynchronous-probing-and-transcode-governance-performance-overhaul.md#amendment-5--2026-09-28-traversal-path-spelling-reversed): scanned paths keep the caller's spelling, [amendment 6](docs/adr/0013-asynchronous-probing-and-transcode-governance-performance-overhaul.md#amendment-6--2026-09-30-native-ebml-buffer-retention-and-probe-concurrency-alignment), [amendment 7](docs/adr/0013-asynchronous-probing-and-transcode-governance-performance-overhaul.md#amendment-7--2026-10-02-native-probe-on-the-blocking-pool): native probe on the blocking pool, [amendment 8](docs/adr/0013-asynchronous-probing-and-transcode-governance-performance-overhaul.md#amendment-8--2026-10-04-physical-cores-capped-at-available-parallelism): physical cores capped at available parallelism, [amendment 9](docs/adr/0013-asynchronous-probing-and-transcode-governance-performance-overhaul.md#amendment-9--2026-10-05-seeded-fonts-hashed-lazily-by-size): seeded fonts hashed lazily by size, [amendment 10](docs/adr/0013-asynchronous-probing-and-transcode-governance-performance-overhaul.md#amendment-10--2026-10-05-desktop-shows-and-sends-the-engines-default-workers): the desktop sends `workers: null` and shows `auto (N)`, [amendment 11](docs/adr/0013-asynchronous-probing-and-transcode-governance-performance-overhaul.md#amendment-11--2026-10-06-the-desktop-reads-effective-settings-not-the-default-worker-count): from `get_default_settings` instead of an exported `default_workers`). Implemented. | `scan.rs`, `request.rs`, `fonts.rs`, `pipeline.rs`, `domain.rs` |
+| [**0013**](docs/adr/0013-asynchronous-probing-and-transcode-governance-performance-overhaul.md) | Asynchronous Probing and Transcode Governance Performance Overhaul | Asynchronous mkvmerge fallback probing, transcode thread governor, default complexity 5, font seeding outside the registry lock, cache serialization without intermediate copies, and `promote_file`'s copy fallback limited to device boundaries ([2026-09-28 amendment 2](docs/adr/0013-asynchronous-probing-and-transcode-governance-performance-overhaul.md#amendment-2--2026-09-28-spawn_blocking-scope), [amendment 3](docs/adr/0013-asynchronous-probing-and-transcode-governance-performance-overhaul.md#amendment-3--2026-09-28-traversal-path-contract), [amendment 4](docs/adr/0013-asynchronous-probing-and-transcode-governance-performance-overhaul.md#amendment-4--2026-09-28-current-state-corrections), [amendment 5](docs/adr/0013-asynchronous-probing-and-transcode-governance-performance-overhaul.md#amendment-5--2026-09-28-traversal-path-spelling-reversed): scanned paths keep the caller's spelling, [amendment 6](docs/adr/0013-asynchronous-probing-and-transcode-governance-performance-overhaul.md#amendment-6--2026-09-30-native-ebml-buffer-retention-and-probe-concurrency-alignment), [amendment 7](docs/adr/0013-asynchronous-probing-and-transcode-governance-performance-overhaul.md#amendment-7--2026-10-02-native-probe-on-the-blocking-pool): native probe on the blocking pool, [amendment 8](docs/adr/0013-asynchronous-probing-and-transcode-governance-performance-overhaul.md#amendment-8--2026-10-04-physical-cores-capped-at-available-parallelism): physical cores capped at available parallelism, [amendment 9](docs/adr/0013-asynchronous-probing-and-transcode-governance-performance-overhaul.md#amendment-9--2026-10-05-seeded-fonts-hashed-lazily-by-size): seeded fonts hashed lazily by size, [amendment 10](docs/adr/0013-asynchronous-probing-and-transcode-governance-performance-overhaul.md#amendment-10--2026-10-05-desktop-shows-and-sends-the-engines-default-workers): the desktop sends `workers: null` and shows `auto (N)`, [amendment 11](docs/adr/0013-asynchronous-probing-and-transcode-governance-performance-overhaul.md#amendment-11--2026-10-06-the-desktop-reads-effective-settings-not-the-default-worker-count): from `get_default_settings` instead of an exported `default_workers`, [amendment 12](docs/adr/0013-asynchronous-probing-and-transcode-governance-performance-overhaul.md#amendment-12--2026-10-06-media-tool-runner-replaces-the-path-stub): the font-memo test injects a scripted Media Tool runner). Implemented. | `scan.rs`, `request.rs`, `fonts.rs`, `pipeline.rs`, `domain.rs` |
 | [**0014**](docs/adr/0014-cli-selected-items-execution-and-manifest-filtering.md) | CLI Selected Items Execution and Manifest Filtering | `--selected-item` and `--selected-items`, path normalization with working-directory fallback, and `--plan` manifest selection (`InspectionManifest::select_items`). Implemented. | `mkv-cli`, `manifest.rs`, `pipeline.rs` |
 | [**0015**](docs/adr/0015-per-package-webkitgtk-dmabuf-renderer-scoping.md) | Per-Package WebKitGTK DMABUF Renderer Scoping | `WEBKIT_DISABLE_DMABUF_RENDERER` scoped to AppImage via the `APPIMAGE`/`APPDIR` markers, so Native Packages keep hardware-accelerated damage tracking on transparent windows. Accepted. | `lib.rs` |
 
