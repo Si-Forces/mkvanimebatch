@@ -513,12 +513,11 @@ covers a content duplicate of a seeded font under a new name.
 `test_pipeline_extract_persists_font_hash_memo` relied on `new` filling the memo: the first two
 now promote a same-size font first, and the third leaves an unsaved entry for the run to
 persist. The third proves only that the run saves the configured memo, on every platform.
-`test_pipeline_font_memo` (written Unix-only, with a stub `mkvextract` ahead on `PATH`; since
-2026-10-06 it injects a scripted Media Tool runner and runs on every platform) checks that
-`run_extract` hands its memo to `FontRegistry::new`: the stub writes one font attachment, as many
-bytes as a seeded font and under another name, which the run stages and promotes; after the run
-the persisted memo holds the seeded font's hash. It fails when the registry is built with
-`None`.
+`test_pipeline_font_memo` (Unix-only, its own binary because it puts a stub `mkvextract` ahead
+on `PATH`) checks that `run_extract` hands its memo to `FontRegistry::new`: the stub writes one
+font attachment, as many bytes as a seeded font and under another name, which the run stages and
+promotes; after the run the persisted memo holds the seeded font's hash. It fails when the
+registry is built with `None`.
 
 ## Amendment 10 — 2026-10-05 (desktop shows and sends the engine's default workers)
 
@@ -584,3 +583,12 @@ a resolved empty request agree, with `workers` within 1–16. `test_resolve_defa
 on the workers and Disk I/O inputs, an empty Disk I/O field sending `io_jobs: null`, the idle
 chips, a restored job's chips, and the chips' neutral text (`Workers Active`, `Standby`, `Idle`)
 when no settings are known, whether `get_default_settings` failed or a snapshot carries none.
+
+## Amendment 12 — 2026-10-06 (Media Tool runner replaces the PATH stub)
+
+**Correction.** Amendment 9 describes `test_pipeline_font_memo` as Unix-only because it put a stub
+`mkvextract` ahead on `PATH`. It is no longer Unix-only and no longer touches `PATH`: it injects a
+scripted Media Tool runner through `BatchPipeline::with_media_tool_runner` and runs on every
+platform. What it checks is unchanged: `run_extract` hands its memo to `FontRegistry::new`, so the
+memo persisted after the run holds the seeded font's hash. Amendment 9 is left as written; this
+supersedes only its description of the test.
