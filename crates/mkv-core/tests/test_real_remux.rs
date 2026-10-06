@@ -3,7 +3,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tempfile::tempdir;
 
 use mkv_core::media_tool::{Invocation, MediaTool, MediaToolRunner, RawOutcome, SubprocessRunner};
@@ -423,6 +423,8 @@ const MARKER_DEADLINE: Duration = Duration::from_secs(5);
 /// `MARKER_DEADLINE`.
 #[cfg(target_os = "linux")]
 async fn wait_for_marker(marker: &str, expected: bool) {
+    use std::time::Instant;
+
     let deadline = Instant::now() + MARKER_DEADLINE;
     while process_with_marker_exists(marker) != expected {
         assert!(
