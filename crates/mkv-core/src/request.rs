@@ -1,14 +1,30 @@
 //! Strongly-typed batch execution requests and track assignments.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt::Display;
+use std::ops::RangeInclusive;
 use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::cpu::{physical_core_count, transcode_governor_threads};
+use crate::cpu::{default_workers_for, physical_core_count, transcode_governor_threads};
 use crate::pipeline::{PipelineConfig, PipelineMode};
-use crate::preset::lookup_preset;
+use crate::preset::{lookup_preset, PresetProfile};
+
+/// Accepted explicit `workers` values.
+pub const WORKERS_RANGE: RangeInclusive<usize> = 1..=64;
+/// Accepted explicit `io_jobs` values; `0` resolves to the worker count.
+pub const IO_JOBS_RANGE: RangeInclusive<usize> = 0..=64;
+/// Accepted explicit `ffmpeg_threads` values.
+pub const FFMPEG_THREADS_RANGE: RangeInclusive<usize> = 1..=32;
+/// Accepted explicit Opus `complexity` values.
+pub const COMPLEXITY_RANGE: RangeInclusive<u32> = 0..=10;
+/// The `io_jobs` value a request that leaves it unset resolves to.
+pub const DEFAULT_IO_JOBS: usize = 2;
+/// The Preset Profile whose bitrate and complexity apply when a request sets neither a preset
+/// nor those values.
+pub const DEFAULT_PRESET_ID: &str = "balanced";
 
 /// The kind of track a [`TrackAssignment`] attaches. Only subtitles are supported; the enum keeps
 /// the `track_type` wire field typed, so any value other than `"subtitle"` fails deserialization.
@@ -68,6 +84,11 @@ pub fn is_valid_bitrate(raw: &str) -> bool {
     !digits.is_empty()
         && digits.bytes().all(|b| b.is_ascii_digit())
         && digits.parse::<u64>().is_ok_and(|n| n > 0)
+}
+
+/// Words a range for a validation error, e.g. `between 1 and 64`.
+fn between<T: Display>(range: &RangeInclusive<T>) -> String {
+    format!("between {} and {}", range.start(), range.end())
 }
 
 /// Normalizes a relative path string by converting backslashes to forward slashes,
@@ -221,10 +242,114 @@ impl Default for BatchRequest {
     }
 }
 
+/// The Effective Settings of a Batch Pipeline: the concurrency and audio transcoding values it
+/// runs with, after explicit request values are layered over the Preset Profile and the
+/// hardware-derived defaults.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EffectiveSettings {
+    pub workers: usize,
+    /// The effective limit: `BatchRequest::resolve` expands an explicit `0` to `workers`, so a
+    /// resolved config never holds `0`.
+    pub io_jobs: usize,
+    pub ffmpeg_threads: usize,
+    pub bitrate: String,
+    pub complexity: u32,
+}
+
+impl EffectiveSettings {
+    /// The Effective Settings of a request that leaves every setting unset, on this machine.
+    pub fn defaults() -> Self {
+        Self::defaults_with_cores(physical_core_count())
+    }
+
+    /// [`Self::defaults`] for `cores` physical cores, through the same layering as a resolved
+    /// request.
+    fn defaults_with_cores(cores: usize) -> Self {
+        let request = BatchRequest::default();
+        let preset = request
+            .preset_profile()
+            .expect("the default preset is built in");
+        request.layer_effective_settings(preset, cores)
+    }
+}
+
 impl BatchRequest {
-    /// Synchronously validate the batch request parameters and track assignments
-    /// before acquiring any locks or starting execution tasks.
-    pub fn validate(&self) -> Result<(), String> {
+    /// Validates the request, then converts it into the `PipelineConfig` a `BatchPipeline` runs:
+    /// explicit values layered over the Preset Profile and the hardware-derived defaults, the
+    /// Effective Settings. The first failure wins.
+    ///
+    /// This is the only production path from a request to a config. It is synchronous so a
+    /// caller can reject a bad request before it reserves a job slot or starts any task.
+    pub fn resolve(self) -> Result<PipelineConfig, String> {
+        self.resolve_with_cores(physical_core_count())
+    }
+
+    /// [`Self::resolve`] on a machine with `cores` physical cores, so tests can fix the
+    /// hardware-derived defaults.
+    fn resolve_with_cores(self, cores: usize) -> Result<PipelineConfig, String> {
+        let preset = self.validate()?;
+        let EffectiveSettings {
+            workers,
+            io_jobs,
+            ffmpeg_threads,
+            bitrate,
+            complexity,
+        } = self.layer_effective_settings(preset, cores);
+
+        Ok(PipelineConfig {
+            mode: self.mode,
+            input_dir: self.input_dir,
+            out_dir: self.out_dir,
+            fonts_dir: self.fonts_dir,
+            assets_dir: self.assets_dir,
+            bitrate,
+            complexity,
+            workers,
+            io_jobs,
+            ffmpeg_threads,
+            default_sub_offset_ms: self.default_sub_offset_ms.unwrap_or_default(),
+            dry_run: self.dry_run.unwrap_or_default(),
+            no_cache: self.no_cache.unwrap_or_default(),
+            cache: None,
+            font_hash_memo: None,
+            track_assignments: self.assignments,
+            selected_items: self.selected_items,
+        })
+    }
+
+    /// The Preset Profile the request names, else the `DEFAULT_PRESET_ID` one.
+    fn preset_profile(&self) -> Result<PresetProfile, String> {
+        let id = self.preset.as_deref().unwrap_or(DEFAULT_PRESET_ID);
+        lookup_preset(id).ok_or_else(|| format!("Unknown preset profile: '{id}'"))
+    }
+
+    /// Layers the explicit settings over `preset` and the defaults for a machine with `cores`
+    /// physical cores. With `preset_profile`, which picks the default preset, the one home of the
+    /// default rules; it does not check ranges, which `validate` does.
+    fn layer_effective_settings(&self, preset: PresetProfile, cores: usize) -> EffectiveSettings {
+        let workers = self.workers.unwrap_or_else(|| default_workers_for(cores));
+        let io_jobs = match self.io_jobs {
+            None => DEFAULT_IO_JOBS,
+            Some(0) => workers,
+            Some(io_jobs) => io_jobs,
+        };
+        EffectiveSettings {
+            workers,
+            io_jobs,
+            ffmpeg_threads: self
+                .ffmpeg_threads
+                .unwrap_or_else(|| transcode_governor_threads(cores, workers)),
+            bitrate: self
+                .bitrate
+                .as_deref()
+                .map_or(preset.bitrate, |b| b.trim().to_owned()),
+            complexity: self.complexity.unwrap_or(preset.complexity),
+        }
+    }
+
+    /// Checks the directories, numeric ranges, bitrate format, preset, track assignments and
+    /// selected items, in that order, and returns the Preset Profile it checked.
+    fn validate(&self) -> Result<PresetProfile, String> {
         if !self.input_dir.is_dir() {
             return Err(format!(
                 "Input directory does not exist or is not a directory: '{}'",
@@ -260,40 +385,45 @@ impl BatchRequest {
         }
 
         if let Some(w) = self.workers {
-            if !(1..=64).contains(&w) {
-                return Err("Worker thread count must be between 1 and 64".into());
-            }
-        }
-
-        if let Some(io) = self.io_jobs {
-            if io > 64 {
-                return Err("I/O job count must be between 0 and 64".into());
-            }
-        }
-
-        if let Some(t) = self.ffmpeg_threads {
-            if !(1..=32).contains(&t) {
-                return Err("FFmpeg thread count must be between 1 and 32".into());
-            }
-        }
-
-        if let Some(b) = self.bitrate.as_deref().filter(|b| !is_valid_bitrate(b)) {
-            return Err(format!("Invalid audio bitrate format: '{b}'"));
-        }
-
-        if let Some(c) = self.complexity {
-            if c > 10 {
+            if !WORKERS_RANGE.contains(&w) {
                 return Err(format!(
-                    "Encoder complexity must be between 0 and 10, got {c}"
+                    "Worker thread count must be {}",
+                    between(&WORKERS_RANGE)
                 ));
             }
         }
 
-        if let Some(p) = &self.preset {
-            if lookup_preset(p).is_none() {
-                return Err(format!("Unknown preset profile: '{p}'"));
+        if let Some(io) = self.io_jobs {
+            if !IO_JOBS_RANGE.contains(&io) {
+                return Err(format!("I/O job count must be {}", between(&IO_JOBS_RANGE)));
             }
         }
+
+        if let Some(t) = self.ffmpeg_threads {
+            if !FFMPEG_THREADS_RANGE.contains(&t) {
+                return Err(format!(
+                    "FFmpeg thread count must be {}",
+                    between(&FFMPEG_THREADS_RANGE)
+                ));
+            }
+        }
+
+        if let Some(b) = self.bitrate.as_deref().filter(|b| !is_valid_bitrate(b)) {
+            return Err(format!(
+                "Invalid bitrate format: '{b}'. Must be a positive integer with an optional k/K/M suffix, like 128k or 192k."
+            ));
+        }
+
+        if let Some(c) = self.complexity {
+            if !COMPLEXITY_RANGE.contains(&c) {
+                return Err(format!(
+                    "Encoder complexity must be {}, got {c}",
+                    between(&COMPLEXITY_RANGE)
+                ));
+            }
+        }
+
+        let preset = self.preset_profile()?;
 
         if let Some(assignments) = &self.assignments {
             let mut seen_videos: HashSet<String> = HashSet::new();
@@ -394,55 +524,7 @@ impl BatchRequest {
             }
         }
 
-        Ok(())
-    }
-
-    /// Converts the `BatchRequest` into internal `PipelineConfig`, applying
-    /// preset profile baseline defaults and layering explicit parameter overrides.
-    pub fn into_pipeline_config(self) -> Result<PipelineConfig, String> {
-        let preset = self
-            .preset
-            .as_deref()
-            .map(|id| lookup_preset(id).ok_or_else(|| format!("Unknown preset profile: '{id}'")))
-            .transpose()?;
-        let (preset_bitrate, preset_complexity) = match preset {
-            Some(p) => (Some(p.bitrate), Some(p.complexity)),
-            None => (None, None),
-        };
-
-        let physical_cores = physical_core_count();
-        let workers = self.workers.unwrap_or_else(crate::cpu::default_workers);
-        let defaults = PipelineConfig::default();
-
-        Ok(PipelineConfig {
-            mode: self.mode,
-            input_dir: self.input_dir,
-            out_dir: self.out_dir,
-            fonts_dir: self.fonts_dir,
-            assets_dir: self.assets_dir,
-            bitrate: self
-                .bitrate
-                .map(|b| b.trim().to_owned())
-                .or(preset_bitrate)
-                .unwrap_or(defaults.bitrate),
-            complexity: self
-                .complexity
-                .or(preset_complexity)
-                .unwrap_or(defaults.complexity),
-            workers,
-            io_jobs: self.io_jobs.unwrap_or(defaults.io_jobs),
-            ffmpeg_threads: self
-                .ffmpeg_threads
-                .unwrap_or_else(|| transcode_governor_threads(physical_cores, workers)),
-            default_sub_offset_ms: self
-                .default_sub_offset_ms
-                .unwrap_or(defaults.default_sub_offset_ms),
-            dry_run: self.dry_run.unwrap_or(defaults.dry_run),
-            no_cache: self.no_cache.unwrap_or(defaults.no_cache),
-            track_assignments: self.assignments,
-            selected_items: self.selected_items,
-            ..defaults
-        })
+        Ok(preset)
     }
 }
 
@@ -526,10 +608,21 @@ mod tests {
         path
     }
 
-    fn validate_with(dir: &Path, assignments: Vec<TrackAssignment>) -> Result<(), String> {
+    /// Physical cores of the machine `resolved` pretends to run on.
+    const CORES: usize = 4;
+
+    /// Resolves a copy of `req` as on a machine with `CORES` physical cores.
+    fn resolved(req: &BatchRequest) -> Result<PipelineConfig, String> {
+        req.clone().resolve_with_cores(CORES)
+    }
+
+    fn resolve_with_assignments(
+        dir: &Path,
+        assignments: Vec<TrackAssignment>,
+    ) -> Result<(), String> {
         let mut req = minimal_request(dir);
         req.assignments = Some(assignments);
-        req.validate()
+        resolved(&req).map(drop)
     }
 
     #[test]
@@ -548,45 +641,174 @@ mod tests {
             language: Some("ind".into()),
             ..subtitle("ep01.mkv", sub_path)
         }]);
-        assert!(req.validate().is_ok());
-
-        let config = req.into_pipeline_config().unwrap();
+        let config = resolved(&req).unwrap();
         assert_eq!(config.bitrate, "256k");
         assert_eq!(config.complexity, 8);
         assert_eq!(config.workers, 4);
+        assert_eq!(config.io_jobs, 2);
         assert_eq!(config.track_assignments.map(|a| a.len()), Some(1));
     }
 
     #[test]
-    fn test_into_pipeline_config_layers_overrides_over_preset() {
+    fn test_resolve_layers_overrides_over_preset() {
         let dir = tempdir().unwrap();
         let mut req = minimal_request(dir.path());
         req.preset = Some("hifi".into());
-        let config = req.clone().into_pipeline_config().unwrap();
+        let config = resolved(&req).unwrap();
         assert!(!config.dry_run);
         assert_eq!(config.bitrate, "320k");
         assert_eq!(config.complexity, 10);
 
         req.bitrate = Some("256k".into());
         req.dry_run = Some(true);
-        let config = req.into_pipeline_config().unwrap();
+        let config = resolved(&req).unwrap();
         assert_eq!(config.bitrate, "256k");
         assert_eq!(config.complexity, 10);
         assert!(config.dry_run);
+
+        req.complexity = Some(3);
+        assert_eq!(resolved(&req).unwrap().complexity, 3);
     }
 
     #[test]
-    fn test_into_pipeline_config_forwards_trimmed_bitrate() {
+    fn test_resolve_forwards_trimmed_bitrate() {
         let dir = tempdir().unwrap();
         let mut req = minimal_request(dir.path());
         req.bitrate = Some(" 320K ".into());
-        assert_eq!(req.into_pipeline_config().unwrap().bitrate, "320K");
+        assert_eq!(resolved(&req).unwrap().bitrate, "320K");
     }
 
     #[test]
-    fn test_into_pipeline_config_default_workers_hardware_concurrency() {
+    fn test_resolve_defaults_follow_the_core_count() {
         let dir = tempdir().unwrap();
-        let config = minimal_request(dir.path()).into_pipeline_config().unwrap();
+        // (cores, default workers, default ffmpeg_threads)
+        for (cores, workers, ffmpeg_threads) in [(1, 1, 1), (4, 4, 1), (32, 16, 2)] {
+            let config = minimal_request(dir.path())
+                .resolve_with_cores(cores)
+                .unwrap();
+            assert_eq!(config.workers, workers, "cores {cores}");
+            assert_eq!(config.ffmpeg_threads, ffmpeg_threads, "cores {cores}");
+            assert_eq!(config.io_jobs, DEFAULT_IO_JOBS, "cores {cores}");
+
+            // The governor follows an explicit worker count, not the default one.
+            let req = BatchRequest {
+                workers: Some(2),
+                ..minimal_request(dir.path())
+            };
+            let config = req.resolve_with_cores(cores).unwrap();
+            assert_eq!(config.workers, 2, "cores {cores}");
+            assert_eq!(
+                config.ffmpeg_threads,
+                (cores / 2).clamp(1, 4),
+                "cores {cores}"
+            );
+
+            let req = BatchRequest {
+                ffmpeg_threads: Some(7),
+                ..minimal_request(dir.path())
+            };
+            assert_eq!(req.resolve_with_cores(cores).unwrap().ffmpeg_threads, 7);
+        }
+    }
+
+    #[test]
+    fn test_resolve_io_jobs_is_the_effective_limit() {
+        let dir = tempdir().unwrap();
+        for cores in [1, 4, 32] {
+            let io_jobs = |io_jobs: Option<usize>, workers: Option<usize>| {
+                let req = BatchRequest {
+                    io_jobs,
+                    workers,
+                    ..minimal_request(dir.path())
+                };
+                req.resolve_with_cores(cores).unwrap().io_jobs
+            };
+            let default_workers = default_workers_for(cores);
+            assert_eq!(io_jobs(None, None), 2, "cores {cores}");
+            assert_eq!(io_jobs(Some(0), None), default_workers, "cores {cores}");
+            assert_eq!(io_jobs(Some(0), Some(6)), 6, "cores {cores}");
+            assert_eq!(io_jobs(Some(3), None), 3, "cores {cores}");
+            assert_eq!(io_jobs(Some(64), Some(6)), 64, "cores {cores}");
+        }
+    }
+
+    #[test]
+    fn test_resolve_defaults_equal_the_balanced_preset() {
+        let dir = tempdir().unwrap();
+        let balanced = lookup_preset(DEFAULT_PRESET_ID).unwrap();
+        let config = resolved(&minimal_request(dir.path())).unwrap();
+        assert_eq!(config.bitrate, balanced.bitrate);
+        assert_eq!(config.complexity, balanced.complexity);
+
+        let mut req = minimal_request(dir.path());
+        req.preset = Some(DEFAULT_PRESET_ID.into());
+        assert_eq!(
+            resolved(&req).unwrap().effective_settings(),
+            config.effective_settings()
+        );
+    }
+
+    #[test]
+    fn test_pipeline_config_fixture_matches_the_balanced_preset() {
+        let balanced = lookup_preset(DEFAULT_PRESET_ID).unwrap();
+        let fixture = PipelineConfig::default();
+        assert_eq!(fixture.bitrate, balanced.bitrate);
+        assert_eq!(fixture.complexity, balanced.complexity);
+    }
+
+    #[test]
+    fn test_effective_settings_defaults_match_a_resolved_minimal_request() {
+        let dir = tempdir().unwrap();
+        for cores in [1, 4, 32] {
+            let config = minimal_request(dir.path())
+                .resolve_with_cores(cores)
+                .unwrap();
+            assert_eq!(
+                EffectiveSettings::defaults_with_cores(cores),
+                config.effective_settings(),
+                "cores {cores}"
+            );
+        }
+        // On this host, through the public entry points.
+        assert_eq!(
+            EffectiveSettings::defaults(),
+            minimal_request(dir.path())
+                .resolve()
+                .unwrap()
+                .effective_settings()
+        );
+    }
+
+    #[test]
+    fn test_effective_settings_serde_shape() {
+        let settings = EffectiveSettings {
+            workers: 4,
+            io_jobs: 2,
+            ffmpeg_threads: 1,
+            bitrate: "192k".into(),
+            complexity: 5,
+        };
+        let json = serde_json::to_value(&settings).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "workers": 4,
+                "io_jobs": 2,
+                "ffmpeg_threads": 1,
+                "bitrate": "192k",
+                "complexity": 5,
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<EffectiveSettings>(json).unwrap(),
+            settings
+        );
+    }
+
+    #[test]
+    fn test_resolve_default_workers_hardware_concurrency() {
+        let dir = tempdir().unwrap();
+        let config = minimal_request(dir.path()).resolve().unwrap();
         // The desktop shows `default_workers()` as "auto (N)" for an unset `workers`, so the
         // engine must resolve it to the same value.
         assert_eq!(config.workers, crate::default_workers());
@@ -611,13 +833,13 @@ mod tests {
         for bad in [0, 65] {
             req.workers = Some(bad);
             assert_eq!(
-                req.validate().unwrap_err(),
+                resolved(&req).unwrap_err(),
                 "Worker thread count must be between 1 and 64"
             );
         }
         for ok in [1, 64] {
             req.workers = Some(ok);
-            assert!(req.validate().is_ok());
+            assert!(resolved(&req).is_ok());
         }
     }
 
@@ -625,14 +847,14 @@ mod tests {
     fn test_batch_request_validation_io_jobs() {
         let dir = tempdir().unwrap();
         let mut req = minimal_request(dir.path());
-        // 0 means unbounded I/O.
+        // 0 is accepted: it resolves to the worker count.
         for ok in [0, 64] {
             req.io_jobs = Some(ok);
-            assert!(req.validate().is_ok());
+            assert!(resolved(&req).is_ok());
         }
         req.io_jobs = Some(65);
         assert_eq!(
-            req.validate().unwrap_err(),
+            resolved(&req).unwrap_err(),
             "I/O job count must be between 0 and 64"
         );
     }
@@ -644,13 +866,13 @@ mod tests {
         for bad in [0, 33] {
             req.ffmpeg_threads = Some(bad);
             assert_eq!(
-                req.validate().unwrap_err(),
+                resolved(&req).unwrap_err(),
                 "FFmpeg thread count must be between 1 and 32"
             );
         }
         for ok in [1, 32] {
             req.ffmpeg_threads = Some(ok);
-            assert!(req.validate().is_ok());
+            assert!(resolved(&req).is_ok());
         }
     }
 
@@ -660,11 +882,11 @@ mod tests {
         let mut req = minimal_request(dir.path());
         for ok in [0, 10] {
             req.complexity = Some(ok);
-            assert!(req.validate().is_ok());
+            assert!(resolved(&req).is_ok());
         }
         req.complexity = Some(11);
         assert_eq!(
-            req.validate().unwrap_err(),
+            resolved(&req).unwrap_err(),
             "Encoder complexity must be between 0 and 10, got 11"
         );
     }
@@ -697,11 +919,10 @@ mod tests {
 
         let dir = tempdir().unwrap();
         let mut req = minimal_request(dir.path());
-        for (offset, resolved) in [(None, 0), (Some(0), 0), (Some(-1500), -1500)] {
+        for (offset, expected) in [(None, 0), (Some(0), 0), (Some(-1500), -1500)] {
             req.default_sub_offset_ms = offset;
-            assert!(req.validate().is_ok(), "{offset:?}");
-            let config = req.clone().into_pipeline_config().unwrap();
-            assert_eq!(config.default_sub_offset_ms, resolved, "{offset:?}");
+            let config = resolved(&req).unwrap();
+            assert_eq!(config.default_sub_offset_ms, expected, "{offset:?}");
         }
     }
 
@@ -711,13 +932,15 @@ mod tests {
         let mut req = minimal_request(dir.path());
         for ok in ["192k", " 320K ", "1M", "96000"] {
             req.bitrate = Some(ok.into());
-            assert!(req.validate().is_ok(), "bitrate {ok:?} should be valid");
+            assert!(resolved(&req).is_ok(), "bitrate {ok:?} should be valid");
         }
         for bad in ["", "k", "0k", "12.5k", "-192k", "192kb", "1m"] {
             req.bitrate = Some(bad.into());
             assert_eq!(
-                req.validate().unwrap_err(),
-                format!("Invalid audio bitrate format: '{bad}'")
+                resolved(&req).unwrap_err(),
+                format!(
+                    "Invalid bitrate format: '{bad}'. Must be a positive integer with an optional k/K/M suffix, like 128k or 192k."
+                )
             );
         }
     }
@@ -757,7 +980,7 @@ mod tests {
         ];
         for (assignment, expected) in cases {
             assert_eq!(
-                validate_with(dir.path(), vec![assignment]).unwrap_err(),
+                resolve_with_assignments(dir.path(), vec![assignment]).unwrap_err(),
                 expected
             );
         }
@@ -769,7 +992,8 @@ mod tests {
         let sub_path = touch(dir.path(), "ep01.ass");
 
         for bad_target in ["/ep01.mkv", r"\ep01.mkv", "", "./", r".\", "././"] {
-            let err = validate_with(dir.path(), vec![subtitle(bad_target, &sub_path)]).unwrap_err();
+            let err = resolve_with_assignments(dir.path(), vec![subtitle(bad_target, &sub_path)])
+                .unwrap_err();
             assert!(
                 err.contains("Invalid relative target video path"),
                 "expected error for '{bad_target}', got '{err}'"
@@ -784,19 +1008,21 @@ mod tests {
         touch(dir.path(), "ep1.ass");
 
         assert_eq!(
-            validate_with(dir.path(), vec![subtitle("notes.txt", "ep1.ass")]).unwrap_err(),
+            resolve_with_assignments(dir.path(), vec![subtitle("notes.txt", "ep1.ass")])
+                .unwrap_err(),
             "Assigned target video is not an MKV file: 'notes.txt'"
         );
 
         touch(dir.path(), "EP2.MKV");
-        assert!(validate_with(dir.path(), vec![subtitle("EP2.MKV", "ep1.ass")]).is_ok());
+        assert!(resolve_with_assignments(dir.path(), vec![subtitle("EP2.MKV", "ep1.ass")]).is_ok());
     }
 
     #[test]
     fn test_batch_request_fail_fast_missing_target_and_asset() {
         let dir = tempdir().unwrap();
         let sub_path = touch(dir.path(), "ep01.ass");
-        let err = validate_with(dir.path(), vec![subtitle("ghost.mkv", &sub_path)]).unwrap_err();
+        let err = resolve_with_assignments(dir.path(), vec![subtitle("ghost.mkv", &sub_path)])
+            .unwrap_err();
         assert!(
             err.contains("Assigned target video file does not exist"),
             "{err}"
@@ -804,7 +1030,8 @@ mod tests {
 
         touch(dir.path(), "ep01.mkv");
         let missing = dir.path().join("missing_sub.ass");
-        let err = validate_with(dir.path(), vec![subtitle("ep01.mkv", missing)]).unwrap_err();
+        let err =
+            resolve_with_assignments(dir.path(), vec![subtitle("ep01.mkv", missing)]).unwrap_err();
         assert!(err.contains("Assigned asset file does not exist"), "{err}");
     }
 
@@ -818,7 +1045,7 @@ mod tests {
         let mut req = minimal_request(dir.path());
         req.assets_dir = Some(assets_dir.path().to_path_buf());
         req.assignments = Some(vec![subtitle("ep01.mkv", "ep01.ass")]);
-        assert!(req.validate().is_ok());
+        assert!(resolved(&req).is_ok());
     }
 
     #[test]
@@ -830,7 +1057,7 @@ mod tests {
         let sub_path = touch(dir.path(), "ep01.ass");
 
         // Leading `./` and `.\` are accepted.
-        assert!(validate_with(
+        assert!(resolve_with_assignments(
             dir.path(),
             vec![
                 subtitle("./ep01.mkv", &sub_path),
@@ -849,7 +1076,7 @@ mod tests {
                 "Season 1/ep01.mkv",
             ),
         ] {
-            let err = validate_with(
+            let err = resolve_with_assignments(
                 dir.path(),
                 vec![subtitle(first, &sub_path), subtitle(second, &sub_path)],
             )
@@ -1015,13 +1242,26 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut req = minimal_request(dir.path());
         req.preset = Some("balanced".into());
-        assert!(req.validate().is_ok());
+        assert!(resolved(&req).is_ok());
 
         req.preset = Some("non_existent_preset".into());
         assert_eq!(
-            req.validate().unwrap_err(),
+            resolved(&req).unwrap_err(),
             "Unknown preset profile: 'non_existent_preset'"
         );
+
+        // The preset is checked after the numeric settings and before the assignments and
+        // selected items, so the first failure is the same as it was for `validate`.
+        req.assignments = Some(vec![subtitle("ghost.mkv", "ghost.ass")]);
+        req.selected_items = Some(vec![]);
+        assert_eq!(
+            resolved(&req).unwrap_err(),
+            "Unknown preset profile: 'non_existent_preset'"
+        );
+        req.complexity = Some(11);
+        assert!(resolved(&req)
+            .unwrap_err()
+            .starts_with("Encoder complexity must be"));
     }
 
     #[test]
@@ -1031,17 +1271,17 @@ mod tests {
 
         let mut req = minimal_request(dir.path());
         req.fonts_dir = Some(dir.path().join("non_existent_fonts"));
-        let err_fonts = req.validate().unwrap_err();
+        let err_fonts = resolved(&req).unwrap_err();
         assert!(err_fonts.contains("Fonts directory does not exist or is not a directory"));
 
         req.fonts_dir = None;
         req.assets_dir = Some(dir.path().join("non_existent_assets"));
-        let err_assets = req.validate().unwrap_err();
+        let err_assets = resolved(&req).unwrap_err();
         assert!(err_assets.contains("Assets directory does not exist or is not a directory"));
 
         req.assets_dir = None;
         req.out_dir = Some(file_path);
-        let err_out = req.validate().unwrap_err();
+        let err_out = resolved(&req).unwrap_err();
         assert!(err_out.contains("Output directory path points to an existing file"));
     }
 
@@ -1054,7 +1294,7 @@ mod tests {
         let mut req = minimal_request(dir.path());
 
         req.selected_items = Some(vec!["ep2.mkv".into(), "ep1.mkv".into(), "EP3.MKV".into()]);
-        assert!(req.validate().is_ok());
+        assert!(resolved(&req).is_ok());
 
         let cases: [(&[&str], &str); 5] = [
             (&[], "selected_items cannot be empty when specified"),
@@ -1074,7 +1314,7 @@ mod tests {
         ];
         for (items, expected) in cases {
             req.selected_items = Some(items.iter().map(|s| s.to_string()).collect());
-            let err = req.validate().unwrap_err();
+            let err = resolved(&req).unwrap_err();
             assert!(err.starts_with(expected), "{items:?}: {err}");
         }
     }
@@ -1093,7 +1333,7 @@ mod tests {
             subtitle("ep2.mkv", "ep2.ass"),
         ]);
         assert_eq!(
-            req.validate().unwrap_err(),
+            resolved(&req).unwrap_err(),
             "Track assignment targets video 'ep2.mkv' which is not in selected_items"
         );
     }

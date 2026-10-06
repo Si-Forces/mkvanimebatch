@@ -1,6 +1,6 @@
 # 0008. Typed Engine Bridge, Preset Profiles, and Track Assignment Domain
 
-> **Status**: Accepted (Extended by ADR-0011, ADR-0012; amended by ADR-0013; amended 2026-09-24, 2026-09-26 and 2026-09-28, implemented)
+> **Status**: Accepted (Extended by ADR-0011, ADR-0012; amended by ADR-0013; amended 2026-09-24, 2026-09-26, 2026-09-28 and 2026-10-06, implemented)
 > **Date**: 2026-05-15
 > **Context**: Media Engine Context & Desktop Application Bridge
 > **Amends**: ADR-0004, ADR-0007
@@ -61,3 +61,11 @@ This rule previously appeared in exactly one place in the repository — the Med
 
 - **Terminal event before `BatchStart`.** "Emits no `BatchComplete`" in the 2026-09-26 amendment describes the engine's event channel. The Engine Bridge supervisor still settles such a job by emitting its own `BatchComplete` with `success: false` and the run's error, then `job-done` with code `1`. The UI therefore always receives exactly one terminal event per job.
 - **Preset payload.** `PresetProfile` carries `id`, `name`, `icon`, `bitrate`, and `complexity`; `get_preset_profiles()` returns exactly those fields. The unused `description` field was removed.
+
+## Amendment — 2026-10-06
+
+- **`BatchRequest::resolve` replaces `validate`.** Decision 1's preflight validation, `BatchRequest::validate`, is now private. `BatchRequest::resolve` runs it and then the conversion to a `PipelineConfig` (formerly `into_pipeline_config`, removed) as one synchronous step: validation, Preset Profile layering, and defaulting. It is the only production path from a request to a config. It still runs before the desktop `JobSlot` is reserved, and the first failure still wins. The decision itself stands.
+- **Defaults are resolved there.** An unset bitrate and complexity come from the `balanced` Preset Profile (`DEFAULT_PRESET_ID`), not from `PipelineConfig::default`, which stays a fixed fixture for tests. An unset `workers` is `default_workers` and an unset `ffmpeg_threads` is the governor's value for those workers. An unset `io_jobs` resolves to 2 and an explicit `0` to the resolved worker count, so `PipelineConfig.io_jobs` is never 0 and the pipeline no longer reinterprets it. The ranges and the `io_jobs` default are named constants (`WORKERS_RANGE`, `IO_JOBS_RANGE`, `FFMPEG_THREADS_RANGE`, `COMPLEXITY_RANGE`, `DEFAULT_IO_JOBS`) shared by validation, its error messages, and the CLI help.
+- **Single check for preset and bitrate.** The CLI no longer rejects `--preset` or `--bitrate` while parsing; `resolve` reports both for the CLI and the desktop alike. The bitrate error now reads `Invalid bitrate format: '<value>'. Must be a positive integer with an optional k/K/M suffix, like 128k or 192k.`
+- **Effective Settings.** `EffectiveSettings` (`workers`, `io_jobs`, `ffmpeg_threads`, `bitrate`, `complexity`) is the serializable value a resolved config runs with, returned by `PipelineConfig::effective_settings`. `EffectiveSettings::defaults()` is that of a request that sets nothing, computed through the same code as `resolve`, so a client can show the defaults without a second copy of the rules.
+- **Superseded names.** This replaces `BatchRequest::validate` and `BatchRequest::into_pipeline_config` wherever ADR-0007, ADR-0011, ADR-0013 and ADR-0014 name them, including ADR-0013's `test_into_pipeline_config_default_workers_hardware_concurrency`, now `test_resolve_default_workers_hardware_concurrency`. It also ends ADR-0007's statement that the CLI checks `--preset` and `--bitrate` while parsing, and ADR-0007's 2026-10-04 statement that `BatchPipeline::from_request` remains the CLI's entry point: `from_request` is removed, and the CLI resolves once and calls `BatchPipeline::new`, as the desktop does.

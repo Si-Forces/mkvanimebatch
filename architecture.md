@@ -125,11 +125,11 @@ mkvanimebatch/
 │   │   │   ├── fonts.rs             # Fonts directory lookup, FontRegistry, FontHashMemo, FontClaimsGuard
 │   │   │   ├── manifest.rs          # InspectionManifest generation and metadata summaries
 │   │   │   ├── preset.rs            # PresetProfile catalog and lookup
-│   │   │   ├── request.rs           # BatchRequest, TrackAssignment, validation, assignments JSON parsing
+│   │   │   ├── request.rs           # BatchRequest, TrackAssignment, request resolution (validation, preset layering, defaults), EffectiveSettings, assignments JSON parsing
 │   │   │   ├── remux.rs             # Track selection, ffmpeg/mkvmerge argument building, remux execution
 │   │   │   ├── extract.rs           # mkvextract invocation for subtitles, chapters, covers, and fonts
 │   │   │   └── pipeline.rs          # BatchPipeline, JobEvent and log channels, tokio JoinSet scheduling
-│   │   ├── benches/                 # bench_pipeline.rs (BatchRequest::validate throughput, warm-cache remux/extract dry runs); bench_real_media.rs (cold-cache remux of a real corpus across worker counts at io_jobs = 2, local only; CI runs only its self-check)
+│   │   ├── benches/                 # bench_pipeline.rs (BatchRequest::resolve throughput, warm-cache remux/extract dry runs); bench_real_media.rs (cold-cache remux of a real corpus across worker counts at io_jobs = 2, local only; CI runs only its self-check)
 │   │   └── tests/                   # 12 integration suites: test_assets, test_cross_regex, test_domain, test_extract, test_fonts, test_pipeline, test_pipeline_assignments, test_pipeline_assignment_args, test_pipeline_font_memo, test_real_remux, test_remux, test_scan
 │   └── mkv-cli/                     # CLI binary
 │       ├── Cargo.toml
@@ -241,7 +241,7 @@ flowchart TD
 ```
 
 1. **Resolution precedence (ADR-0004, ADR-0008)**:
-   - **Tier 1 (Manual Assignment)**: the user's `TrackAssignment`. A missing target video or asset fails `BatchRequest::validate`; an asset that disappears before planning fails the batch (see §8.1).
+   - **Tier 1 (Manual Assignment)**: the user's `TrackAssignment`. A missing target video or asset fails `BatchRequest::resolve`; an asset that disappears before planning fails the batch (see §8.1).
    - **Tier 2 (Same-Directory External)**: an external subtitle in the video's own directory with the same episode identity.
    - **Tier 3 (Embedded Track)**: the best embedded subtitle track.
    - **Tier 4 (Nearest Ancestor External)**: an external subtitle in the nearest ancestor directory that has a match.
@@ -352,7 +352,7 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    Req["BatchRequest\n(validated by the caller: BatchRequest::validate)"] --> Config["BatchPipeline::from_request\ninto_pipeline_config"]
+    Req["BatchRequest"] --> Config["BatchRequest::resolve\nvalidation, preset layering, defaults\n(called by the CLI and the desktop before they build the pipeline)"]
     Config --> Discover["scan_mkv_files (recursive, natural order,\nskips Output and fonts/font/attachments dirs)"]
     Discover --> Select["apply_selected_items\nselection order, unmatched selection fails"]
     Select --> Targets["validate_assignment_targets\neach target matches exactly one video"]
@@ -380,7 +380,7 @@ Extract mode skips probing and planning up front: each item task probes its vide
 
 1. **Two concurrency limits (ADR-0011)**:
    - **`workers`**: `run_items` keeps at most `workers` item tasks in its `JoinSet`. The default is the physical core count (capped at the available parallelism, ADR-0013 Amendment 8) clamped to 1–16. It is exported as `mkv_core::default_workers` (ADR-0013 Amendment 10). The desktop's worker inputs start empty and send `workers: null`, so this default applies; they show it as `auto (N)` from `get_default_workers`.
-   - **`io_jobs`**: a semaphore bounds the item phases that write heavily to disk: `mkvmerge` plus promotion in remux, the whole `mkvextract` run plus promotions in extract. Transcoding runs before the permit is requested, so it overlaps with other items' muxing. The default is 2; `0` means the same limit as `workers`.
+   - **`io_jobs`**: a semaphore bounds the item phases that write heavily to disk: `mkvmerge` plus promotion in remux, the whole `mkvextract` run plus promotions in extract. Transcoding runs before the permit is requested, so it overlaps with other items' muxing. `BatchRequest::resolve` stores the effective limit in `PipelineConfig.io_jobs`: unset becomes 2 and `0` becomes the worker count, so it is never 0 after resolution.
 2. **Global work queue (ADR-0011)**:
    - Planned jobs from every release directory form one queue in batch order, so workers do not idle at directory boundaries. Asset resolution stays per directory.
 3. **Cooperative cancellation (`CancellationToken`)**:
@@ -516,7 +516,7 @@ The frontend is plain ES modules with no framework.
    - `args.rs` maps flags to `BatchRequest`: `--input-dir`, `--out-dir`, `--fonts-dir`, `--assets-dir`, `--preset`, `--bitrate`, `--complexity`, `--sub-offset` (seconds, converted to `default_sub_offset_ms`), `--workers` (default: physical cores, capped at the available parallelism, clamped 1–16), `--io-jobs`, `--ffmpeg-threads` (FLAC decoder thread cap; `auto` = governor default), `--assignments`, `--selected-item`, `--selected-items`, `--dry-run`, `--no-cache`, plus `--plan`, `--events`, `--clear-cache`, `--extract` / `--remux`, `-h`/`--help`. Any other argument fails with `Unknown argument: <arg>`.
    - `--assignments <FILE>` is read with `parse_assignments_json`: a `TrackAssignment` array, `{"assignments": [...] | {video: asset}}`, or a flat `{video: asset}` map (maps become subtitle assignments).
    - Selection: `--selected-item <PATH>` (repeatable, literal, commas kept) and `--selected-items <LIST>` (repeatable, comma-separated, whitespace trimmed, empty segments dropped); both require `--input-dir`. Paths are normalized relative to `input_dir`, with a working-directory fallback, and anything resolving outside `input_dir` is rejected. In `--plan` mode, `InspectionManifest::select_items` fails if a selection names no discovered MKV, then keeps the selected items in selection order.
-   - Validation: `--preset`, `--bitrate` (positive integer with an optional `k`/`K` or `M` suffix; lowercase `m` is rejected because ffmpeg reads it as milli), and numeric parsing are checked while parsing, as is `--sub-offset`, whose seconds must be finite and round (half away from zero) to whole milliseconds that fit `i64`; ranges (`workers` 1–64, `io_jobs` 0–64, `ffmpeg_threads` 1–32, `complexity` 0–10) and paths are checked by `BatchRequest::validate()` before anything runs.
+   - Validation: numeric syntax is checked while parsing, as is `--sub-offset`, whose seconds must be finite and round (half away from zero) to whole milliseconds that fit `i64`. `main.rs` then calls `BatchRequest::resolve()` once, before anything runs, `--plan` included, and a run keeps the resolved `PipelineConfig`. `resolve` checks `--preset`, `--bitrate` (positive integer with an optional `k`/`K` or `M` suffix; lowercase `m` is rejected because ffmpeg reads it as milli), the ranges (`workers` 1–64, `io_jobs` 0–64, `ffmpeg_threads` 1–32, `complexity` 0–10) and the paths. The `--help` ranges and the `--io-jobs` default are built from the same constants.
 4. **Exit codes**: `0` on success; `1` on argument or validation errors, when any item failed, or on a fatal pipeline error; `130` when cancelled by SIGINT (or SIGTERM on Unix).
 
 ---
@@ -582,9 +582,9 @@ sequenceDiagram
     User->>UI: Clicks Run
     UI->>Cmd: inspect_directory(path, {noCache}) (forced preflight)
     UI->>Cmd: run_job(BatchRequest)
-    Cmd->>Cmd: BatchRequest::validate() (fail fast)
+    Cmd->>Cmd: BatchRequest::resolve() (fail fast: validation, preset layering, defaults)
     Cmd->>Proc: reserve_job_slot(), begin_snapshot()
-    Cmd->>Pipe: into_pipeline_config(), spawn pipeline (with the session cache) + supervisor
+    Cmd->>Pipe: set the session cache on the config, spawn pipeline + supervisor
     Cmd-->>UI: job_id
     Pipe-->>Cmd: JobEvent::BatchStart
     Cmd-->>UI: job-event (BatchStart)
@@ -637,11 +637,14 @@ sequenceDiagram
    - If the rename fails and the destination exists (Windows `rename` refuses to replace), the destination is moved to a backup beside it whose extension is replaced by `bak.<token>` — `Path::with_extension` drops the original, so `Ep01.mkv` becomes `Ep01.bak.<token>`. The staged file is then renamed into place and the backup is removed; if that rename fails, the backup is renamed back.
    - If the rename crosses devices (a typed `CrossesDevices` kind, `EXDEV`/18 off Windows, `ERROR_NOT_SAME_DEVICE`/17 on Windows), the file is copied to a temporary sibling in the destination directory and then renamed over the target.
    - **That copy is reached only for a device boundary** ([ADR-0013 amendment 2](./docs/adr/0013-asynchronous-probing-and-transcode-governance-performance-overhaul.md#amendment-2--2026-09-28-spawn_blocking-scope)). Any other rename failure (missing source, locked destination, permissions) returns the rename error rather than duplicating a multi-gigabyte payload to fail the same way. `promote_file` is synchronous throughout; promotion is not offloaded to Tokio's blocking pool, which would let a cancelled item detach a still-running copy.
-2. **Fail-fast input validation (`BatchRequest::validate`)**:
+2. **Fail-fast request resolution (`BatchRequest::resolve`)**:
+   - `resolve` is the only production path from a `BatchRequest` to a `PipelineConfig`: it validates, then layers explicit values over the Preset Profile (the request's, else `balanced`) and the hardware-derived defaults. It is synchronous, so the desktop host and the CLI reject a bad request before reserving the job slot or starting any task; the first failure wins.
+   - The ranges and defaults are named constants in `request.rs` (`WORKERS_RANGE`, `IO_JOBS_RANGE`, `FFMPEG_THREADS_RANGE`, `COMPLEXITY_RANGE`, `DEFAULT_IO_JOBS`, `DEFAULT_PRESET_ID`). Default bitrate and complexity come from the `balanced` Preset Profile, not from `PipelineConfig::default`, which is a fixed fixture for tests.
+   - The values a run uses are the Effective Settings (`PipelineConfig::effective_settings`); `EffectiveSettings::defaults()` gives those of a request that sets nothing, through the same code as `resolve`.
    - Checks that the input, fonts, and assets directories exist and that the output path is not a file.
    - Rejects assignment targets and `selected_items` that are absolute, drive-prefixed, contain `..`, are not `.mkv`, or do not exist; rejects relative asset paths containing `..`, duplicate targets or selections, missing assets, and assignments whose target is not selected.
-   - Non-subtitle assignments never reach `validate`: `TrackAssignment.track_type` is an `AssignmentKind` enum whose only variant is `Subtitle`, so any other value fails deserialization (CLI `--assignments` parsing or the desktop `run_job` arguments).
-   - Checks `workers`, `io_jobs`, `ffmpeg_threads`, `complexity`, bitrate format, and preset before the desktop host reserves the job slot or the CLI starts the pipeline.
+   - Non-subtitle assignments never reach `resolve`: `TrackAssignment.track_type` is an `AssignmentKind` enum whose only variant is `Subtitle`, so any other value fails deserialization (CLI `--assignments` parsing or the desktop `run_job` arguments).
+   - Checks `workers`, `io_jobs`, `ffmpeg_threads`, `complexity`, bitrate format, and preset.
    - **Two distinct failure points** ([ADR-0008](./docs/adr/0008-typed-engine-bridge-and-track-assignment-model.md#amendment--2026-09-26)). A validation failure raised **before** `BatchStart` (a selection or an assignment target that matches no discovered item) settles **no** items and emits **no** `BatchComplete`: the run returns an error, writes no media, and the Engine Bridge supervisor settles the job exactly once as failed with an empty snapshot. A planning failure raised **after** `BatchStart` (an assignment whose asset disappeared between validation and resolution) settles the affected item and every remaining queued item as `error` with distinct reasons, followed by exactly one failed `BatchComplete`. Both fail closed; only the second produces per-item outcomes.
 3. **Panic containment**:
    - A panic inside an item task settles that item as `error` and the batch continues (§4.5). A panic in the pipeline future itself is caught by the desktop supervisor at the `JoinHandle` (§5.1). Both need unwinding panics: the release profile in the root `Cargo.toml` must never set `panic = "abort"`.
@@ -670,7 +673,7 @@ sequenceDiagram
 | [**0005**](docs/adr/0005-rust-engine-migration-and-workspace-topology.md) | Rust Media Engine Migration | Root workspace topology split into Media Engine and Desktop contexts. Implemented. | `Cargo.toml`, `CONTEXT-MAP.md` |
 | [**0006**](docs/adr/0006-hybrid-ebml-probing-and-channel-streaming.md) | Hybrid EBML Probing & Channel Streaming | Native EBML parser with `mkvmerge -J` fallback; Tokio mpsc event channels. Implemented. | `ebml.rs`, `scan.rs`, `pipeline.rs` |
 | [**0007**](docs/adr/0007-in-process-engine-bridge.md) | In-Process Engine Bridge | Retired subprocess sidecars; Tauri calls `mkv-core` directly with panic isolation and two-phase stop. Implemented. | `commands.rs`, `process.rs` |
-| [**0008**](docs/adr/0008-typed-engine-bridge-and-track-assignment-model.md) | Typed Engine Bridge & Track Assignments | Typed `BatchRequest`, fail-fast preflight validation, and `JobSnapshot` projection. Includes the [2026-09-24](docs/adr/0008-typed-engine-bridge-and-track-assignment-model.md#amendment--2026-09-24) and [2026-09-26](docs/adr/0008-typed-engine-bridge-and-track-assignment-model.md#amendment--2026-09-26) amendments (fail-closed resolution, the two preflight failure points, active batch restore across reloads, removal of `keep_fonts`). | `request.rs`, `preset.rs`, `process.rs` |
+| [**0008**](docs/adr/0008-typed-engine-bridge-and-track-assignment-model.md) | Typed Engine Bridge & Track Assignments | Typed `BatchRequest`, fail-fast preflight validation, and `JobSnapshot` projection. Includes the [2026-09-24](docs/adr/0008-typed-engine-bridge-and-track-assignment-model.md#amendment--2026-09-24) and [2026-09-26](docs/adr/0008-typed-engine-bridge-and-track-assignment-model.md#amendment--2026-09-26) amendments (fail-closed resolution, the two preflight failure points, active batch restore across reloads, removal of `keep_fonts`) and the [2026-10-06](docs/adr/0008-typed-engine-bridge-and-track-assignment-model.md#amendment--2026-10-06) amendment (`BatchRequest::resolve` replaces `validate`; Effective Settings). | `request.rs`, `preset.rs`, `process.rs` |
 | [**0009**](docs/adr/0009-streaming-card-progress-and-item-duration-model.md) | Streaming Card Progress & Item Duration | Engine-owned `duration_sec`, indeterminate-to-determinate card progress, 1 Hz presentation heartbeat. Implemented. | `pipeline.rs`, `queue-state.js`, `queue-view.js` |
 | [**0010**](docs/adr/0010-mainline-rust-cutover-and-python-decommissioning.md) | Mainline Rust Engine Cutover | Removed the Python codebase; unified 1.0.0 versioning and CI/release status gates. Implemented. | Root `Cargo.toml`, `.github/workflows/ci.yml`, `.github/workflows/release.yml` |
 | [**0011**](docs/adr/0011-selected-items-queue-and-concurrency-pipelining.md) | Selected Items Queue & Concurrency Pipelining | Global Tokio JoinSet, I/O semaphore, parallel probing, per-item track assignment modal. Implemented. | `pipeline.rs`, `request.rs`, `app.js` |
