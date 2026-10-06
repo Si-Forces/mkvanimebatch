@@ -5,10 +5,10 @@ use std::path::{Path, PathBuf};
 use tokio::sync::Semaphore;
 
 use crate::domain::{
-    cover_mime, promote_file, read_progress_stream, select_audio_track, IO_GOVERNOR_CLOSED,
-    SUBPROCESS_TIMEOUT,
+    cover_mime, promote_file, select_audio_track, IO_GOVERNOR_CLOSED, SUBPROCESS_TIMEOUT,
 };
 use crate::fonts::FontInfo;
+use crate::media_tool::{self, MediaTool, MediaToolRunner};
 use crate::scan::InspectedVideo;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -262,19 +262,8 @@ pub struct RemuxOptions<'a> {
     pub default_sub_offset_ms: i64,
 }
 
-/// Joins trimmed subprocess stderr and stdout, omitting whichever is empty.
-fn combined_output(stderr: &[u8], stdout: &[u8]) -> String {
-    let stderr = String::from_utf8_lossy(stderr);
-    let stdout = String::from_utf8_lossy(stdout);
-    match (stderr.trim(), stdout.trim()) {
-        ("", out) => out.to_owned(),
-        (err, "") => err.to_owned(),
-        (err, out) => format!("{err}\n{out}"),
-    }
-}
-
 /// Executes audio transcoding (if required) and remuxing via `mkvmerge` into `job.output_file`,
-/// returning the job's log lines.
+/// returning the job's log lines. Both Media Tools run through `runner`.
 pub async fn execute_remux_job(
     job: &PlannedJob,
     selection: &TrackSelection,
@@ -282,6 +271,7 @@ pub async fn execute_remux_job(
     options: &RemuxOptions<'_>,
     on_progress: Option<&(dyn Fn(f64) + Send + Sync)>,
     io_semaphore: &Semaphore,
+    runner: &dyn MediaToolRunner,
 ) -> Result<Vec<String>, String> {
     let mut log = vec![format!("Processing: {}", job.video_name)];
 
@@ -317,25 +307,15 @@ pub async fn execute_remux_job(
             options.ffmpeg_threads,
         );
         log.push("  Transcoding audio to Opus with ffmpeg...".into());
-        let mut ffmpeg_cmd = tokio::process::Command::new("ffmpeg");
-        #[cfg(windows)]
-        ffmpeg_cmd.creation_flags(crate::domain::CREATE_NO_WINDOW);
-        ffmpeg_cmd.kill_on_drop(true);
-        ffmpeg_cmd.args(&ffmpeg_args);
-        let ffmpeg_out = match tokio::time::timeout(SUBPROCESS_TIMEOUT, ffmpeg_cmd.output()).await {
-            Ok(Ok(out)) => out,
-            Ok(Err(e)) => return Err(format!("Failed to execute ffmpeg: {e}")),
-            Err(_) => {
-                return Err(format!(
-                    "ffmpeg audio transcode timed out after {} seconds",
-                    SUBPROCESS_TIMEOUT.as_secs()
-                ))
-            }
-        };
-        if !ffmpeg_out.status.success() {
-            let stderr = String::from_utf8_lossy(&ffmpeg_out.stderr);
-            return Err(format!("ffmpeg audio transcode failed: {stderr}"));
-        }
+        media_tool::run(
+            runner,
+            MediaTool::Ffmpeg,
+            &ffmpeg_args,
+            SUBPROCESS_TIMEOUT,
+            None,
+        )
+        .await
+        .map_err(|e| format!("Audio transcode: {e}"))?;
         temp_opus_file = Some(temp_opus);
     }
 
@@ -356,83 +336,18 @@ pub async fn execute_remux_job(
         .map_err(|_| IO_GOVERNOR_CLOSED.to_string())?;
 
     log.push("  Running mkvmerge...".into());
-    let mut mkvmerge_cmd = tokio::process::Command::new("mkvmerge");
-    #[cfg(windows)]
-    mkvmerge_cmd.creation_flags(crate::domain::CREATE_NO_WINDOW);
-    mkvmerge_cmd.kill_on_drop(true);
-    mkvmerge_cmd.args(&mkvmerge_args);
-    mkvmerge_cmd.stdout(std::process::Stdio::piped());
-    mkvmerge_cmd.stderr(std::process::Stdio::piped());
-
-    let mut child = mkvmerge_cmd
-        .spawn()
-        .map_err(|e| format!("Failed to spawn mkvmerge: {e}"))?;
-
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-
-    let stderr_handle = tokio::spawn(async move {
-        let mut stderr_bytes = Vec::new();
-        if let Some(mut stream) = stderr {
-            use tokio::io::AsyncReadExt;
-            let _ = stream.read_to_end(&mut stderr_bytes).await;
-        }
-        stderr_bytes
-    });
-    let stderr_abort = stderr_handle.abort_handle();
-    let execution = async {
-        let mut stdout_bytes = Vec::new();
-        if let Some(out_stream) = stdout {
-            let _ = read_progress_stream(out_stream, on_progress, &mut stdout_bytes).await;
-        }
-        let status = child
-            .wait()
-            .await
-            .map_err(|e| format!("Failed to wait on mkvmerge: {e}"))?;
-        let stderr_output = stderr_handle.await.unwrap_or_default();
-        Ok::<_, String>((status, stdout_bytes, stderr_output))
-    };
-
-    let (status, stdout_bytes, stderr_output) =
-        match tokio::time::timeout(SUBPROCESS_TIMEOUT, execution).await {
-            Ok(res) => res?,
-            Err(_) => {
-                stderr_abort.abort();
-                let _ = std::fs::remove_file(&temp_output);
-                return Err(format!(
-                    "mkvmerge timed out after {} seconds",
-                    SUBPROCESS_TIMEOUT.as_secs()
-                ));
-            }
-        };
-
-    // mkvmerge exits 1 when it finished with warnings.
-    match status.code() {
-        Some(0) => {}
-        Some(1) => {
-            let warning_output = combined_output(&stderr_output, &stdout_bytes);
-            if !warning_output.is_empty() {
-                if warning_output.to_lowercase().starts_with("warning") {
-                    log.push(format!("  {warning_output}"));
-                } else {
-                    log.push(format!("  Warning: {warning_output}"));
-                }
-            }
-        }
-        code => {
-            let _ = std::fs::remove_file(&temp_output);
-            let code_str = code
-                .map(|c| format!("exit code {c}"))
-                .unwrap_or_else(|| "terminated by signal".into());
-            let output = combined_output(&stderr_output, &stdout_bytes);
-            let err_msg = if output.is_empty() {
-                &code_str
-            } else {
-                &output
-            };
-            return Err(format!("mkvmerge failed ({code_str}): {err_msg}"));
-        }
-    }
+    let output = media_tool::run(
+        runner,
+        MediaTool::Mkvmerge,
+        &mkvmerge_args,
+        SUBPROCESS_TIMEOUT,
+        on_progress,
+    )
+    .await
+    .inspect_err(|_| {
+        let _ = std::fs::remove_file(&temp_output);
+    })?;
+    log.extend(output.warning_log_line());
 
     if !temp_output.metadata().is_ok_and(|m| m.len() > 0) {
         return Err("mkvmerge succeeded but output file was not created or is empty".into());

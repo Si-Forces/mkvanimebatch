@@ -1,9 +1,12 @@
 use std::env;
+use std::ffi::OsString;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+use std::time::Duration;
 use tempfile::tempdir;
 
+use mkv_core::media_tool::{Invocation, MediaTool, MediaToolRunner, RawOutcome, SubprocessRunner};
 use mkv_core::pipeline::{BatchPipeline, CancellationToken, PipelineConfig, PipelineMode};
 
 fn media_command(command: &mut Command) {
@@ -373,4 +376,125 @@ async fn test_real_remux_transcoded_flac_keeps_chapters_once() {
         .filter_map(|chapter| chapter.num_entries)
         .sum();
     assert_eq!(entries, 2, "{:?}", summary.log);
+}
+
+/// ffmpeg arguments that keep it running in real time for an hour (`-re` stops it rendering
+/// the silence at once), tagged with `marker` so a test can find the process by its command
+/// line.
+fn long_running_ffmpeg_args(marker: &str) -> Vec<OsString> {
+    [
+        "-hide_banner",
+        "-re",
+        "-f",
+        "lavfi",
+        "-i",
+        "anullsrc",
+        "-t",
+        // Long enough to outlive every test that waits on it, short enough that a kill that
+        // failed would not leave the tool running for long.
+        "120",
+        "-metadata",
+        &format!("comment={marker}"),
+        "-f",
+        "null",
+        "-",
+    ]
+    .map(OsString::from)
+    .to_vec()
+}
+
+/// Whether a live process has `marker` in its command line. A zombie has an empty command
+/// line, so a killed but unreaped child does not count.
+#[cfg(target_os = "linux")]
+fn process_with_marker_exists(marker: &str) -> bool {
+    fs::read_dir("/proc")
+        .unwrap()
+        .flatten()
+        // A process may exit between the listing and the read.
+        .filter_map(|entry| fs::read(entry.path().join("cmdline")).ok())
+        .any(|cmdline| String::from_utf8_lossy(&cmdline).contains(marker))
+}
+
+/// How long a process may take to appear after spawning, or to go after being killed.
+#[cfg(target_os = "linux")]
+const MARKER_DEADLINE: Duration = Duration::from_secs(5);
+
+/// Polls until `process_with_marker_exists(marker) == expected`, failing after
+/// `MARKER_DEADLINE`.
+#[cfg(target_os = "linux")]
+async fn wait_for_marker(marker: &str, expected: bool) {
+    use std::time::Instant;
+
+    let deadline = Instant::now() + MARKER_DEADLINE;
+    while process_with_marker_exists(marker) != expected {
+        assert!(
+            Instant::now() < deadline,
+            "process with marker {marker} {} within {MARKER_DEADLINE:?}",
+            if expected {
+                "never appeared"
+            } else {
+                "survived"
+            }
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// The timeout branch of `SubprocessRunner`: a tool still running when it elapses is killed and
+/// reported as `TimedOut`.
+#[tokio::test]
+async fn test_real_subprocess_runner_times_out_and_kills_the_tool() {
+    if !media_tools_available() {
+        return;
+    }
+    let marker = format!("timeout-test-{}", std::process::id());
+    let args = long_running_ffmpeg_args(&marker);
+
+    let task = tokio::spawn(async move {
+        SubprocessRunner
+            .run(Invocation {
+                tool: MediaTool::Ffmpeg,
+                args: &args,
+                timeout: Duration::from_secs(2),
+                on_stdout_line: None,
+            })
+            .await
+    });
+    // The tool must be seen running, so its absence below proves the timeout killed it.
+    #[cfg(target_os = "linux")]
+    wait_for_marker(&marker, true).await;
+
+    assert_eq!(task.await.unwrap(), RawOutcome::TimedOut);
+    #[cfg(target_os = "linux")]
+    wait_for_marker(&marker, false).await;
+}
+
+/// ADR-0006: dropping the runner future, as a stop does, kills the tool.
+#[tokio::test]
+async fn test_real_subprocess_runner_kills_the_tool_when_the_future_is_dropped() {
+    if !media_tools_available() {
+        return;
+    }
+    let marker = format!("drop-test-{}", std::process::id());
+    let args = long_running_ffmpeg_args(&marker);
+
+    let task = tokio::spawn(async move {
+        SubprocessRunner
+            .run(Invocation {
+                tool: MediaTool::Ffmpeg,
+                args: &args,
+                timeout: Duration::from_secs(60),
+                on_stdout_line: None,
+            })
+            .await
+    });
+    // Without /proc the drop below still runs, but nothing observes the process, so this
+    // test only checks that dropping the future does not hang or panic there.
+    #[cfg(target_os = "linux")]
+    wait_for_marker(&marker, true).await;
+
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    #[cfg(target_os = "linux")]
+    wait_for_marker(&marker, false).await;
 }

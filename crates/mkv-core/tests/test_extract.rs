@@ -1,9 +1,13 @@
+mod common;
+
 use std::fs;
 use tempfile::tempdir;
 
-use mkv_core::domain::{EpisodeInfo, MkvTrack, TrackProperties};
+use common::{ScriptedRunner, Step};
+use mkv_core::domain::{EpisodeInfo, MkvTrack, TrackProperties, SUBPROCESS_TIMEOUT};
 use mkv_core::extract::{extract_mkv_file, select_subtitle_for_extraction};
 use mkv_core::fonts::FontRegistry;
+use mkv_core::media_tool::MediaTool;
 use mkv_core::scan::{InspectedVideo, MkvmergeMetadata};
 
 fn video_track() -> MkvTrack {
@@ -37,6 +41,7 @@ async fn test_extract_mkv_file_no_work() {
         &font_mgr,
         None,
         None,
+        &ScriptedRunner::new([]),
     )
     .await
     .unwrap();
@@ -52,9 +57,8 @@ async fn test_extract_mkv_file_no_work() {
     assert_eq!(entries, ["Show - 01.mkv"]);
 }
 
-#[test]
-fn test_subtitle_extraction_filename_format() {
-    let subtitle = MkvTrack {
+fn ass_subtitle_track() -> MkvTrack {
+    MkvTrack {
         id: Some(2),
         track_type: "subtitles".to_string(),
         codec: None,
@@ -63,8 +67,92 @@ fn test_subtitle_extraction_filename_format() {
             language: Some("eng".to_string()),
             ..Default::default()
         },
-    };
-    let inspected = inspected(vec![video_track(), subtitle]);
+    }
+}
+
+/// mkvextract exits 1 when it finished with warnings: the extraction still succeeds, and the
+/// warning reaches the summary log.
+#[tokio::test]
+async fn test_extract_mkv_file_logs_mkvextract_warnings_on_exit_code_1() {
+    let dir = tempdir().unwrap();
+    let mkv_path = dir.path().join("Show - 01.mkv");
+    fs::File::create(&mkv_path).unwrap();
+    let font_mgr = FontRegistry::new(dir.path().join("fonts"), None);
+    let runner = ScriptedRunner::new([Step::exited(
+        MediaTool::Mkvextract,
+        1,
+        "Warning: Cluster out of order\n",
+        "",
+    )
+    .writes_extract_targets(b"[Script Info]\n")]);
+
+    let summary = extract_mkv_file(
+        &mkv_path,
+        &inspected(vec![video_track(), ass_subtitle_track()]),
+        &font_mgr,
+        None,
+        None,
+        &runner,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        summary
+            .log
+            .iter()
+            .any(|l| l == "  Warning: Cluster out of order"),
+        "log did not contain the warning: {:?}",
+        summary.log
+    );
+    let extracted = summary.extracted_sub.expect("subtitle was not promoted");
+    assert_eq!(fs::read(extracted).unwrap(), b"[Script Info]\n");
+    assert!(matches!(
+        runner.calls().as_slice(),
+        [(MediaTool::Mkvextract, _)]
+    ));
+    assert_eq!(runner.timeouts(), [SUBPROCESS_TIMEOUT]);
+}
+
+/// A failed mkvextract run fails the item and leaves nothing beside the video.
+#[tokio::test]
+async fn test_extract_mkv_file_fails_on_mkvextract_exit_code_2() {
+    let dir = tempdir().unwrap();
+    let mkv_path = dir.path().join("Show - 01.mkv");
+    fs::File::create(&mkv_path).unwrap();
+    let font_mgr = FontRegistry::new(dir.path().join("fonts"), None);
+    let runner = ScriptedRunner::new([Step::exited(
+        MediaTool::Mkvextract,
+        2,
+        "",
+        "Error: cannot open file\n",
+    )]);
+
+    let err = extract_mkv_file(
+        &mkv_path,
+        &inspected(vec![video_track(), ass_subtitle_track()]),
+        &font_mgr,
+        None,
+        None,
+        &runner,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(
+        err,
+        "mkvextract failed (exit code 2): Error: cannot open file"
+    );
+    let entries: Vec<_> = fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(entries, ["Show - 01.mkv"]);
+}
+
+#[test]
+fn test_subtitle_extraction_filename_format() {
+    let inspected = inspected(vec![video_track(), ass_subtitle_track()]);
     let out = std::path::Path::new("/out");
 
     let parsed = EpisodeInfo::new("1", "E", "01");

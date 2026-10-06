@@ -2,6 +2,7 @@
 //! and persistent inspection caching.
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -19,6 +20,7 @@ use crate::domain::{
     FONT_EXTENSIONS,
 };
 use crate::fonts::FONT_DIR_NAMES;
+use crate::media_tool::{self, MediaTool, SubprocessRunner};
 
 // ─── MKVMERGE METADATA TYPES ──────────────────────────────────────────────────
 
@@ -52,29 +54,17 @@ pub struct MkvmergeMetadata {
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Probes MKV metadata using `mkvmerge -J` subprocess.
+/// Probes MKV metadata by running `mkvmerge -J` as a Media Tool.
 pub async fn probe_video_mkvmerge(path: &Path) -> Result<MkvmergeMetadata, String> {
-    let mut cmd = tokio::process::Command::new("mkvmerge");
-    #[cfg(windows)]
-    cmd.creation_flags(crate::domain::CREATE_NO_WINDOW);
-    cmd.kill_on_drop(true);
-    let output = tokio::time::timeout(PROBE_TIMEOUT, cmd.arg("-J").arg(path).output())
-        .await
-        .map_err(|_| {
-            format!(
-                "mkvmerge probe timed out after {} seconds",
-                PROBE_TIMEOUT.as_secs()
-            )
-        })?
-        .map_err(|e| format!("Failed to execute mkvmerge: {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
-            "mkvmerge exit code {:?}: {}",
-            output.status.code(),
-            stderr.trim()
-        ));
-    }
+    let args = [OsStr::new("-J"), path.as_os_str()];
+    let output = media_tool::run(
+        &SubprocessRunner,
+        MediaTool::Mkvmerge,
+        &args,
+        PROBE_TIMEOUT,
+        None,
+    )
+    .await?;
 
     let val: serde_json::Value = serde_json::from_slice(&output.stdout)
         .map_err(|e| format!("Failed to parse mkvmerge JSON: {e}"))?;

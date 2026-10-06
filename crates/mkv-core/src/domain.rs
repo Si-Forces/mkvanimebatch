@@ -295,10 +295,6 @@ pub const SUBPROCESS_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 pub(crate) const IO_GOVERNOR_CLOSED: &str =
     "I/O governor closed; refusing to run without the disk-write limit";
 
-/// Windows process creation flag that keeps child tools from opening a console window.
-#[cfg(windows)]
-pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
 pub fn output_stem(base: &str, ep_type: &EpisodeType, ep: &str) -> String {
     if ep_type.is_special_or_ova() {
         format!("{}{ep}_{base}", ep_type.as_str())
@@ -806,44 +802,6 @@ pub fn promote_file(staged: &Path, final_path: &Path) -> Result<(), std::io::Err
         let _ = std::fs::remove_file(staged);
     }
     rename_result
-}
-
-/// Parses mkvmerge/mkvextract "Progress: XX%" output lines.
-fn parse_progress_percentage(line: &str) -> Option<f64> {
-    let rest = line.trim().strip_prefix("Progress:")?;
-    rest.trim().trim_end_matches('%').trim().parse::<f64>().ok()
-}
-
-/// Drains `stream` into `stdout_bytes`, reporting each `\r`- or `\n`-terminated progress line
-/// to `on_progress`.
-pub async fn read_progress_stream<R: tokio::io::AsyncRead + Unpin>(
-    mut stream: R,
-    on_progress: Option<&(dyn Fn(f64) + Send + Sync)>,
-    stdout_bytes: &mut Vec<u8>,
-) -> Result<(), std::io::Error> {
-    use tokio::io::AsyncReadExt;
-
-    let report = |line: &str| {
-        if let (Some(cb), Some(pct)) = (on_progress, parse_progress_percentage(line)) {
-            cb(pct);
-        }
-    };
-    let mut buf = [0u8; 1024];
-    let mut pending = String::new();
-    loop {
-        let n = stream.read(&mut buf).await?;
-        if n == 0 {
-            break;
-        }
-        stdout_bytes.extend_from_slice(&buf[..n]);
-        pending.push_str(&String::from_utf8_lossy(&buf[..n]));
-        while let Some(pos) = pending.find(['\r', '\n']) {
-            report(&pending[..pos]);
-            pending.drain(..=pos);
-        }
-    }
-    report(&pending);
-    Ok(())
 }
 
 #[cfg(test)]
