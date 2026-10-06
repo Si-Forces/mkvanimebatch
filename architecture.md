@@ -377,11 +377,11 @@ flowchart TD
     ItemTask --> BatchDone["Emit JobEvent::BatchComplete"]
 ```
 
-Planning decides and the pipeline reports. `RemuxPlanner` (`remux_plan.rs`) takes one discovered video and returns a Remux Plan: `Skip` with a reason, `Error` for that item, `Abort` for the whole batch, or `Planned` with the `PlannedJob`, its `TrackSelection`, and the release's `FontInfo`. A video whose Release Directory was not prepared is an internal item error. Otherwise the planner works in this order:
+Planning decides and the pipeline reports. `RemuxPlanner` (`remux_plan.rs`) takes one discovered video and returns a Remux Plan: `Skip` with a reason, `ProbeFailed` or `Internal` for that item, `Abort` for the whole batch, or `Planned` with the `PlannedJob`, its `TrackSelection`, and the release's shared `FontInfo`. A video whose Release Directory was not prepared is an `Internal` item error, logged as such rather than as a probe failure. Otherwise the planner works in this order:
 
 1. An assigned subtitle that no longer exists aborts the batch. This is the only place that check runs; `AssetResolver::resolve_for` takes the assigned subtitle as given.
 2. A video with no parsed episode number and no assignment is skipped.
-3. A video whose probe failed is an item error carrying the probe message.
+3. A video whose probe failed is a `ProbeFailed` item error carrying the probe message.
 4. `resolve_for` picks the assets; a video with no matching subtitle is skipped with the resolver's reason.
 5. Otherwise the job is planned. Its output path is `Output/<stem>.mkv` beside the source, or the mirrored directory under `--out-dir`. A Track Assignment's language, title, and offset apply only when the resolver chose the assigned subtitle, and `select_tracks` fills in the tracks.
 

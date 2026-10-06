@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::assets::AssetResolver;
 use crate::domain::{output_stem, resolve_output_dir};
@@ -16,7 +17,9 @@ use crate::scan::{InspectionResult, ParsedFile};
 /// leftover chapter files claimed for its videos.
 pub(crate) struct PreparedDir {
     pub(crate) resolver: AssetResolver,
-    pub(crate) font_info: FontInfo,
+    /// Shared with every `RemuxWork` of the directory, so planning an item never copies the
+    /// font list.
+    pub(crate) font_info: Arc<FontInfo>,
     pub(crate) chapter_claims: HashMap<PathBuf, PathBuf>,
 }
 
@@ -27,7 +30,7 @@ pub(crate) struct PreparedDir {
 pub(crate) struct RemuxWork {
     pub(crate) job: PlannedJob,
     pub(crate) selection: TrackSelection,
-    pub(crate) font_info: FontInfo,
+    pub(crate) font_info: Arc<FontInfo>,
 }
 
 /// The Remux Plan for one item.
@@ -35,10 +38,12 @@ pub(crate) struct RemuxWork {
 pub(crate) enum RemuxPlan {
     /// The item is not remuxed.
     Skip { reason: String },
-    /// The item fails; the rest of the batch goes on. The Batch Pipeline reports every `Error`
-    /// as a failed probe, though a video outside every prepared Release Directory (an internal
-    /// error) reaches it too.
-    Error { message: String },
+    /// The item's probe failed; the item fails and the rest of the batch goes on.
+    ProbeFailed { message: String },
+    /// The item lies outside every prepared Release Directory, which `run_remux` never lets
+    /// happen because it prepares the directory of every batch video; the item fails and the
+    /// rest of the batch goes on.
+    Internal { message: String },
     /// The whole batch fails closed before any media work.
     Abort { message: String },
     /// The item is ready to execute.
@@ -87,7 +92,7 @@ impl<'a> RemuxPlanner<'a> {
     pub(crate) fn plan(&self, file: &ParsedFile) -> RemuxPlan {
         let mkv_dir = file.path.parent().unwrap_or(Path::new("."));
         let Some(dir_prep) = self.prepared_dirs.get(mkv_dir) else {
-            return RemuxPlan::Error {
+            return RemuxPlan::Internal {
                 message: format!(
                     "Internal error: no prepared Release Directory for '{}'",
                     mkv_dir.display()
@@ -119,7 +124,7 @@ impl<'a> RemuxPlanner<'a> {
 
         let inspection = self.inspections.get(&file.path);
         let Some(inspected) = inspection.and_then(|r| r.video.as_ref()) else {
-            return RemuxPlan::Error {
+            return RemuxPlan::ProbeFailed {
                 message: inspection
                     .and_then(|r| r.error.clone())
                     .unwrap_or_else(|| "Failed to probe video".to_string()),
@@ -143,11 +148,12 @@ impl<'a> RemuxPlanner<'a> {
             };
         }
 
-        let assignment = assignment_for_subtitle(
-            assignment,
-            assigned_sub,
-            res_assets.subtitle_file.as_deref(),
-        );
+        // Assignment attributes only describe the assigned subtitle; they never restyle a
+        // subtitle the resolver chose instead. The resolver always picks the assigned subtitle
+        // first (ADR-0004), so the filter never drops one today.
+        let chose_assigned = res_assets.subtitle_file.as_deref() == assigned_sub;
+        debug_assert!(assignment.is_none() || chose_assigned);
+        let assignment = assignment.filter(|_| chose_assigned);
         RemuxPlan::Planned(Box::new(RemuxWork {
             job: PlannedJob {
                 video: file.path.clone(),
@@ -165,7 +171,7 @@ impl<'a> RemuxPlanner<'a> {
                 custom_title: assignment.and_then(|a| a.title.clone()),
             },
             selection: select_tracks(inspected),
-            font_info: dir_prep.font_info.clone(),
+            font_info: Arc::clone(&dir_prep.font_info),
         }))
     }
 
@@ -188,18 +194,6 @@ impl<'a> RemuxPlanner<'a> {
             out_dir.join(format!("{out_stem}.mkv"))
         }
     }
-}
-
-/// Assignment attributes only describe the assigned subtitle; they never restyle a subtitle the
-/// resolver chose instead. This is a defensive guard: the resolver always picks the assigned
-/// subtitle first (ADR-0004), so `plan` cannot reach the other branch and only a test of this
-/// function does.
-fn assignment_for_subtitle<'a>(
-    assignment: Option<&'a TrackAssignment>,
-    assigned_sub: Option<&Path>,
-    chosen_sub: Option<&Path>,
-) -> Option<&'a TrackAssignment> {
-    assignment.filter(|_| chosen_sub == assigned_sub)
 }
 
 #[cfg(test)]
@@ -263,17 +257,21 @@ mod tests {
         )])
     }
 
-    /// Plans `video` the way `run_remux` does: prepare its Release Directory, then plan.
-    fn plan_video(
+    /// Prepares the Release Directories of `videos` the way `run_remux` does, then hands the
+    /// planner and the prepared directories to `f`.
+    fn with_planner<T>(
         config: &PipelineConfig,
         inspections: &HashMap<PathBuf, InspectionResult>,
-        video: &ParsedFile,
-    ) -> RemuxPlan {
+        videos: &[ParsedFile],
+        f: impl FnOnce(&RemuxPlanner, &HashMap<&Path, PreparedDir>) -> T,
+    ) -> T {
         let mut videos_by_dir: BTreeMap<&Path, Vec<ParsedFile>> = BTreeMap::new();
-        videos_by_dir
-            .entry(video.path.parent().unwrap())
-            .or_default()
-            .push(video.clone());
+        for video in videos {
+            videos_by_dir
+                .entry(video.path.parent().unwrap())
+                .or_default()
+                .push(video.clone());
+        }
         let prepared_dirs = prepare_release_dirs(
             &videos_by_dir,
             inspections,
@@ -281,15 +279,28 @@ mod tests {
             &CancellationToken::new(),
         )
         .expect("planning is never cancelled in these tests");
-        RemuxPlanner::new(
+        let planner = RemuxPlanner::new(
             &config.input_dir,
             config.out_dir.as_deref(),
             config.assets_dir.as_deref(),
             config.track_assignments.as_deref().unwrap_or_default(),
             &prepared_dirs,
             inspections,
+        );
+        f(&planner, &prepared_dirs)
+    }
+
+    fn plan_video(
+        config: &PipelineConfig,
+        inspections: &HashMap<PathBuf, InspectionResult>,
+        video: &ParsedFile,
+    ) -> RemuxPlan {
+        with_planner(
+            config,
+            inspections,
+            std::slice::from_ref(video),
+            |planner, _| planner.plan(video),
         )
-        .plan(video)
     }
 
     fn planned(plan: RemuxPlan) -> RemuxWork {
@@ -343,30 +354,70 @@ mod tests {
         assert_eq!(job.custom_offset_ms, Some(-1250));
     }
 
-    // Tests the guard directly: `plan` cannot reach its narrowing branch, because the resolver
-    // always picks the assigned subtitle.
     #[test]
-    fn assignment_attributes_never_restyle_a_subtitle_the_resolver_chose_instead() {
-        let assigned = assignment("Show - 01.mkv", "custom.ass");
-        let custom = Path::new("/in/custom.ass");
+    fn each_video_of_a_batch_gets_its_own_assignment_and_its_directory_fonts() {
+        let dir = tempdir().unwrap();
+        let videos = [
+            create_parsed_file(dir.path().join("Show - 01.mkv")),
+            create_parsed_file(dir.path().join("Show - 02.mkv")),
+        ];
+        write_subtitle(&dir.path().join("one.ass"));
+        write_subtitle(&dir.path().join("two.ass"));
+        let second = TrackAssignment {
+            language: Some("eng".into()),
+            title: Some("English".into()),
+            offset_ms: Some(500),
+            ..assignment("Show - 02.mkv", "two.ass")
+        };
+        let config = PipelineConfig {
+            input_dir: dir.path().to_path_buf(),
+            track_assignments: Some(vec![assignment("Show - 01.mkv", "one.ass"), second]),
+            ..Default::default()
+        };
+        let inspections: HashMap<_, _> = videos
+            .iter()
+            .map(|video| {
+                (
+                    video.path.clone(),
+                    InspectionResult::success(video_metadata()),
+                )
+            })
+            .collect();
 
-        assert_eq!(
-            assignment_for_subtitle(Some(&assigned), Some(custom), Some(custom)),
-            Some(&assigned)
-        );
-        assert_eq!(
-            assignment_for_subtitle(
-                Some(&assigned),
-                Some(custom),
-                Some(Path::new("/in/auto.ass"))
-            ),
-            None
-        );
-        assert_eq!(
-            assignment_for_subtitle(Some(&assigned), Some(custom), None),
-            None
-        );
-        assert_eq!(assignment_for_subtitle(None, None, Some(custom)), None);
+        let works = with_planner(&config, &inspections, &videos, |planner, prepared_dirs| {
+            let fonts = &prepared_dirs[dir.path()].font_info;
+            videos
+                .iter()
+                .map(|video| {
+                    let work = planned(planner.plan(video));
+                    assert!(
+                        Arc::ptr_eq(&work.font_info, fonts),
+                        "shares its directory's fonts"
+                    );
+                    work
+                })
+                .collect::<Vec<_>>()
+        });
+
+        let expected = [
+            ("one.ass", "ind", "Bahasa Indonesia", -1250),
+            ("two.ass", "eng", "English", 500),
+        ];
+        assert_eq!(works.len(), expected.len());
+        for (work, (sub, language, title, offset)) in works.iter().zip(expected) {
+            let job = &work.job;
+            assert_eq!(job.subtitle_file, Some(dir.path().join(sub)));
+            assert_eq!(job.custom_language.as_deref(), Some(language));
+            assert_eq!(job.custom_title.as_deref(), Some(title));
+            assert_eq!(job.custom_offset_ms, Some(offset));
+            assert_eq!(job.chapter_file, None);
+            assert_eq!(job.cover_file, None);
+            // The directory has no fonts, so the source's own attachments are kept.
+            assert_eq!(work.font_info.count, 0);
+            assert!(job.use_source_fonts);
+            assert_eq!(work.selection.video_id, Some(0));
+            assert_eq!(work.selection.audio_id, Some(1));
+        }
     }
 
     #[test]
@@ -452,20 +503,45 @@ mod tests {
             ..Default::default()
         };
         let inspections = inspections_of(&video);
+        let plan_and_resolver_reason = || {
+            with_planner(
+                &config,
+                &inspections,
+                std::slice::from_ref(&video),
+                |planner, dirs| {
+                    // Resolve with the inspection `plan` passes, so the reasons are comparable.
+                    let inspected = inspections[&video.path].video.as_ref();
+                    let resolved = dirs[dir.path()]
+                        .resolver
+                        .resolve_for(&video, inspected, None, None);
+                    assert!(!resolved.matched_subtitle);
+                    (
+                        planner.plan(&video),
+                        resolved.skip_reason.expect("a reason"),
+                    )
+                },
+            )
+        };
 
+        let (plan, no_files) = plan_and_resolver_reason();
         assert_eq!(
-            plan_video(&config, &inspections, &video),
+            plan,
             RemuxPlan::Skip {
-                reason: "no subtitle files found".into()
+                reason: no_files.clone()
             }
         );
 
         write_subtitle(&dir.path().join("Show - 99.ass"));
+        let (plan, none_matched) = plan_and_resolver_reason();
         assert_eq!(
-            plan_video(&config, &inspections, &video),
+            plan,
             RemuxPlan::Skip {
-                reason: "subtitle files found but none matched".into()
+                reason: none_matched.clone()
             }
+        );
+        assert_ne!(
+            no_files, none_matched,
+            "each case keeps the resolver's own reason"
         );
     }
 
@@ -482,13 +558,13 @@ mod tests {
         let failed = HashMap::from([(video.path.clone(), InspectionResult::failure("bad header"))]);
         assert_eq!(
             plan_video(&config, &failed, &video),
-            RemuxPlan::Error {
+            RemuxPlan::ProbeFailed {
                 message: "bad header".into()
             }
         );
         assert_eq!(
             plan_video(&config, &HashMap::new(), &video),
-            RemuxPlan::Error {
+            RemuxPlan::ProbeFailed {
                 message: "Failed to probe video".into()
             }
         );
@@ -526,8 +602,8 @@ mod tests {
         let inspections = inspections_of(&video);
         let planner = RemuxPlanner::new(dir.path(), None, None, &[], &prepared_dirs, &inspections);
 
-        let RemuxPlan::Error { message } = planner.plan(&video) else {
-            panic!("expected an item error");
+        let RemuxPlan::Internal { message } = planner.plan(&video) else {
+            panic!("expected an internal item error");
         };
         assert!(message.starts_with("Internal error: "), "{message}");
         assert!(

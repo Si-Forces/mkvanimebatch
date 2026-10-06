@@ -223,6 +223,36 @@ fn cancelled_item(item: BatchItemInfo, duration_sec: Option<f64>) -> JobEvent {
     }
 }
 
+/// The terminal event of an item that planning skipped.
+fn skipped_item(item: BatchItemInfo, reason: String) -> JobEvent {
+    let BatchItemInfo { id, file } = item;
+    JobEvent::ItemComplete {
+        version: EVENT_VERSION,
+        id,
+        file,
+        status: ItemOutcome::Skipped,
+        reason: Some(reason),
+        error: None,
+        duration_sec: None,
+        extra: Default::default(),
+    }
+}
+
+/// The terminal event of an item that planning failed.
+fn errored_item(item: BatchItemInfo, message: String) -> JobEvent {
+    let BatchItemInfo { id, file } = item;
+    JobEvent::ItemComplete {
+        version: EVENT_VERSION,
+        id,
+        file,
+        status: ItemOutcome::Error,
+        reason: None,
+        error: Some(message),
+        duration_sec: None,
+        extra: Default::default(),
+    }
+}
+
 fn planned_item(item: BatchItemInfo) -> JobEvent {
     let BatchItemInfo { id, file } = item;
     JobEvent::ItemComplete {
@@ -416,7 +446,7 @@ pub(crate) fn prepare_release_dirs<'a>(
             mkv_dir,
             PreparedDir {
                 resolver: prepared.resolver,
-                font_info,
+                font_info: Arc::new(font_info),
                 chapter_claims,
             },
         );
@@ -1019,35 +1049,23 @@ impl BatchPipeline {
                     summary
                         .log
                         .push(format!("Skipping '{}': {reason}", video_file.name));
-                    planning_outcomes.push(JobEvent::ItemComplete {
-                        version: EVENT_VERSION,
-                        id: item.id,
-                        file: item.file,
-                        status: ItemOutcome::Skipped,
-                        reason: Some(reason),
-                        error: None,
-                        duration_sec: None,
-                        extra: Default::default(),
-                    });
+                    planning_outcomes.push(skipped_item(item, reason));
                 }
-                // The planner's only item errors are a failed probe and, never in practice, a
-                // missing prepared Release Directory; both log as a probe failure.
-                RemuxPlan::Error { message } => {
+                RemuxPlan::ProbeFailed { message } => {
                     summary.errors += 1;
                     summary.log.push(format!(
                         "  ERROR: Failed to probe '{}': {message}",
                         video_file.path.display()
                     ));
-                    planning_outcomes.push(JobEvent::ItemComplete {
-                        version: EVENT_VERSION,
-                        id: item.id,
-                        file: item.file,
-                        status: ItemOutcome::Error,
-                        reason: None,
-                        error: Some(message),
-                        duration_sec: None,
-                        extra: Default::default(),
-                    });
+                    planning_outcomes.push(errored_item(item, message));
+                }
+                RemuxPlan::Internal { message } => {
+                    summary.errors += 1;
+                    summary.log.push(format!(
+                        "  ERROR: '{}': {message}",
+                        video_file.path.display()
+                    ));
+                    planning_outcomes.push(errored_item(item, message));
                 }
                 RemuxPlan::Planned(work) if self.config.dry_run => {
                     summary.log.push(format!(
