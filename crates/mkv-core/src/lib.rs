@@ -6,6 +6,7 @@ pub mod domain;
 pub mod ebml;
 pub mod extract;
 pub mod fonts;
+mod inspect;
 pub mod manifest;
 pub mod media_tool;
 pub mod pipeline;
