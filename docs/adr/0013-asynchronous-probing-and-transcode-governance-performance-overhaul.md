@@ -610,7 +610,10 @@ or `None` once the token fires. It owns:
   never closed, so the "Probe semaphore closed" result is gone.
 - **Cancellation.** A cancel aborts the outstanding probe tasks and returns `None`. Preflight
   turns that into `Inspection cancelled`, and a remux run settles every item as `cancelled`, as
-  before. A token already cancelled on entry returns `None` too.
+  before. A token already cancelled on entry returns `None` too. The cancel arm is polled first,
+  so a token that fires after the last probe finishes, but before the module sees the empty task
+  set, still cancels. Preflight used to return the manifest in that window; `run_remux` already
+  re-checked the token after its loop, so the two now agree.
 - **A panicked probe task.** It becomes a failure result for its own file,
   `Probe task failed: <JoinError>`, found through the task's ID and logged once with
   `tracing::warn!`. This replaces the dropped entry that preflight reported as "Probe result

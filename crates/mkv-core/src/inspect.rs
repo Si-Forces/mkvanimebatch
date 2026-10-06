@@ -43,6 +43,8 @@ pub(crate) async fn inspect_videos(
         index_by_task.insert(task.id(), index);
     }
 
+    // Every task is spawned before the first join, so each joined ID is in the map.
+    let index_of = |id: &Id| *index_by_task.get(id).expect("probe task ID is in the map");
     let mut results: Vec<(usize, InspectionResult)> = Vec::with_capacity(files.len());
     let inspections = loop {
         let (id, result) = tokio::select! {
@@ -59,7 +61,7 @@ pub(crate) async fn inspect_videos(
                     let id = join_err.id();
                     warn!(
                         "Probe task failed for {}: {join_err}",
-                        files[index_by_task[&id]].path.display()
+                        files[index_of(&id)].path.display()
                     );
                     (id, InspectionResult::failure(format!("Probe task failed: {join_err}")))
                 }
@@ -70,7 +72,7 @@ pub(crate) async fn inspect_videos(
                 }
             },
         };
-        results.push((index_by_task[&id], result));
+        results.push((index_of(&id), result));
     };
 
     if let Some(cache) = cache {
