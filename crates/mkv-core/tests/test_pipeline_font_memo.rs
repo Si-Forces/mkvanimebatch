@@ -34,9 +34,13 @@ async fn extract_run_memoizes_a_seeded_font_hashed_by_a_same_size_promote() {
 
     // Writes STAGED to every `<id>:<path>` destination it is given, as mkvextract writes each
     // requested attachment.
-    let runner = Arc::new(ScriptedRunner::new([
-        Step::exited(0, "", "").writes_extract_targets(STAGED)
-    ]));
+    let runner = Arc::new(ScriptedRunner::new([Step::exited(
+        MediaTool::Mkvextract,
+        0,
+        "",
+        "",
+    )
+    .writes_extract_targets(STAGED)]));
 
     // One font attachment under another name, so the run claims, stages and promotes it.
     // `promote` buckets by the staged file's real length, which the precondition above makes

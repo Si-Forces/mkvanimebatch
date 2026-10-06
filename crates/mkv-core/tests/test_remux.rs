@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use common::{ScriptedRunner, Step};
-use mkv_core::domain::{MkvTrack, TrackProperties};
+use mkv_core::domain::{MkvTrack, TrackProperties, SUBPROCESS_TIMEOUT};
 use mkv_core::fonts::FontInfo;
 use mkv_core::media_tool::MediaTool;
 use mkv_core::remux::{
@@ -293,6 +293,7 @@ async fn remux(dir: &Path, runner: &ScriptedRunner) -> Result<Vec<String>, Strin
 async fn test_execute_remux_job_collects_stdout_on_mkvmerge_failure() {
     let dir = tempfile::tempdir().unwrap();
     let runner = ScriptedRunner::new([Step::exited(
+        MediaTool::Mkvmerge,
         2,
         "Error: Simulated mkvmerge stdout failure\n",
         "",
@@ -313,6 +314,7 @@ async fn test_execute_remux_job_collects_stdout_on_mkvmerge_failure() {
 async fn test_execute_remux_job_combines_stderr_and_stdout_on_failure() {
     let dir = tempfile::tempdir().unwrap();
     let runner = ScriptedRunner::new([Step::exited(
+        MediaTool::Mkvmerge,
         2,
         "Error: Detailed stdout failure\n",
         "Auxiliary stderr notice\n",
@@ -328,9 +330,13 @@ async fn test_execute_remux_job_combines_stderr_and_stdout_on_failure() {
 #[tokio::test]
 async fn test_execute_remux_job_logs_warnings_on_exit_code_1() {
     let dir = tempfile::tempdir().unwrap();
-    let runner =
-        ScriptedRunner::new([Step::exited(1, "Warning: QuickTime track parsing\n", "")
-            .writes_output(b"dummy data\n")]);
+    let runner = ScriptedRunner::new([Step::exited(
+        MediaTool::Mkvmerge,
+        1,
+        "Warning: QuickTime track parsing\n",
+        "",
+    )
+    .writes_output(b"dummy data\n")]);
 
     let log = remux(dir.path(), &runner).await.unwrap();
     assert!(
@@ -350,9 +356,13 @@ async fn test_execute_remux_job_logs_warnings_on_exit_code_1() {
 async fn test_execute_remux_job_waits_for_an_io_governor_permit() {
     let dir = tempfile::tempdir().unwrap();
     let dir_path = dir.path().to_path_buf();
-    let runner = Arc::new(ScriptedRunner::new([
-        Step::exited(0, "", "").writes_output(b"dummy data\n")
-    ]));
+    let runner = Arc::new(ScriptedRunner::new([Step::exited(
+        MediaTool::Mkvmerge,
+        0,
+        "",
+        "",
+    )
+    .writes_output(b"dummy data\n")]));
     let semaphore = Arc::new(tokio::sync::Semaphore::new(0));
 
     let mut job = tokio::spawn({
@@ -375,6 +385,7 @@ async fn test_execute_remux_job_waits_for_an_io_governor_permit() {
     let log = job.await.unwrap().unwrap();
 
     assert_eq!(runner.calls().len(), 1);
+    assert_eq!(runner.timeouts(), [SUBPROCESS_TIMEOUT]);
     assert_eq!(
         std::fs::read(dir.path().join("out.mkv")).unwrap(),
         b"dummy data\n"
@@ -390,7 +401,9 @@ async fn test_execute_remux_job_waits_for_an_io_governor_permit() {
 #[tokio::test]
 async fn test_execute_remux_job_refuses_a_closed_io_governor() {
     let dir = tempfile::tempdir().unwrap();
-    let runner = ScriptedRunner::new([Step::exited(0, "", "").writes_output(b"dummy data\n")]);
+    let runner = ScriptedRunner::new([
+        Step::exited(MediaTool::Mkvmerge, 0, "", "").writes_output(b"dummy data\n")
+    ]);
     let semaphore = tokio::sync::Semaphore::new(1);
     semaphore.close();
 
@@ -410,7 +423,12 @@ async fn test_execute_remux_job_refuses_a_closed_io_governor() {
 #[tokio::test]
 async fn test_execute_remux_job_stops_when_the_ffmpeg_transcode_fails() {
     let dir = tempfile::tempdir().unwrap();
-    let runner = ScriptedRunner::new([Step::exited(1, "", "Invalid data found\n")]);
+    let runner = ScriptedRunner::new([Step::exited(
+        MediaTool::Ffmpeg,
+        1,
+        "",
+        "Invalid data found\n",
+    )]);
     let flac = TrackSelection {
         audio_codec: "A_FLAC".to_string(),
         ..selection()
@@ -430,4 +448,5 @@ async fn test_execute_remux_job_stops_when_the_ffmpeg_transcode_fails() {
         "mkvmerge must not run after a failed transcode"
     );
     assert_eq!(calls[0].0, MediaTool::Ffmpeg);
+    assert_eq!(runner.timeouts(), [SUBPROCESS_TIMEOUT]);
 }

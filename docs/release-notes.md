@@ -78,8 +78,8 @@
 ### Media Tool Invocation
 
 - Extraction now logs mkvextract's exit-code-1 warnings in the item's log, as remux does for mkvmerge (`  Warning: <text>`). It discarded them before.
-- The `mkvmerge -J` fallback probe accepts exit code 1 (warnings) when the output is valid JSON. It failed with `mkvmerge exit code Some(1)` before.
-- `mkvmerge`, `mkvextract`, and `ffmpeg` failures share one wording: `Failed to run <tool>: <error>`, `<tool> timed out after <N> seconds`, and `<tool> failed (exit code N | terminated by signal): <stderr and stdout, else the code>`. A failed transcode reads `Audio transcode: ffmpeg failed (exit code N): ...` instead of `ffmpeg audio transcode failed: ...`.
+- The `mkvmerge -J` fallback probe accepts exit code 1 (warnings) when the output is valid JSON. It failed with `mkvmerge exit code Some(1)` before. No test covers this: the Fallback Inspector runs mkvmerge directly, so no scripted runner can reach it.
+- `mkvmerge`, `mkvextract`, and `ffmpeg` failures share one wording: `Failed to run <tool>: <error>`, `<tool> timed out after <N> seconds`, and `<tool> failed (exit code N | terminated by signal): <stderr and stdout>`. A tool that printed nothing now gives `<tool> failed (exit code N)`, without repeating the code after a colon. A failed transcode reads `Audio transcode: ffmpeg failed (exit code N): ...` instead of `ffmpeg audio transcode failed: ...`.
 - Every Media Tool starts with stdin closed; `mkvmerge` and `mkvextract` inherited it before.
 
 ### Extracted Subtitle Naming

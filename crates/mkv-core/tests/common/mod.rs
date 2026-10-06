@@ -7,6 +7,7 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use mkv_core::domain::{MkvTrack, TrackProperties};
 use mkv_core::media_tool::{Invocation, MediaTool, MediaToolRunner, RawOutcome};
@@ -93,29 +94,34 @@ pub fn seeded_cache(
 type SideEffect = Box<dyn Fn(&[String]) + Send + Sync>;
 
 /// One scripted Media Tool invocation: the stdout lines the runner feeds the sink, a file
-/// system side effect, then the outcome it reports.
+/// system side effect, then the outcome it reports. A step answers only its own `tool`.
 pub struct Step {
+    tool: MediaTool,
     outcome: RawOutcome,
     stdout_lines: Vec<String>,
     side_effect: Option<SideEffect>,
 }
 
 impl Step {
-    pub fn new(outcome: RawOutcome) -> Self {
+    pub fn new(tool: MediaTool, outcome: RawOutcome) -> Self {
         Self {
+            tool,
             outcome,
             stdout_lines: Vec::new(),
             side_effect: None,
         }
     }
 
-    /// The tool exits with `code`, having printed `stdout` and `stderr`.
-    pub fn exited(code: i32, stdout: &str, stderr: &str) -> Self {
-        Self::new(RawOutcome::Exited {
-            code: Some(code),
-            stdout: stdout.as_bytes().to_vec(),
-            stderr: stderr.as_bytes().to_vec(),
-        })
+    /// `tool` exits with `code`, having printed `stdout` and `stderr`.
+    pub fn exited(tool: MediaTool, code: i32, stdout: &str, stderr: &str) -> Self {
+        Self::new(
+            tool,
+            RawOutcome::Exited {
+                code: Some(code),
+                stdout: stdout.as_bytes().to_vec(),
+                stderr: stderr.as_bytes().to_vec(),
+            },
+        )
     }
 
     /// Feeds `lines` to the stdout sink, as the tool prints them while running.
@@ -155,11 +161,18 @@ impl Step {
     }
 }
 
+/// One recorded invocation of a [`ScriptedRunner`].
+struct Call {
+    tool: MediaTool,
+    args: Vec<String>,
+    timeout: Duration,
+}
+
 /// A [`MediaToolRunner`] that spawns nothing: it records each invocation and answers with the
-/// next scripted [`Step`], panicking when the script runs out.
+/// next scripted [`Step`], panicking when the script runs out or the step is for another tool.
 pub struct ScriptedRunner {
     steps: Mutex<VecDeque<Step>>,
-    calls: Mutex<Vec<(MediaTool, Vec<String>)>>,
+    calls: Mutex<Vec<Call>>,
 }
 
 impl ScriptedRunner {
@@ -172,7 +185,16 @@ impl ScriptedRunner {
 
     /// The tool and arguments of every invocation so far, in order.
     pub fn calls(&self) -> Vec<(MediaTool, Vec<String>)> {
-        self.calls.lock().clone()
+        self.calls
+            .lock()
+            .iter()
+            .map(|call| (call.tool, call.args.clone()))
+            .collect()
+    }
+
+    /// The timeout of every invocation so far, in order.
+    pub fn timeouts(&self) -> Vec<Duration> {
+        self.calls.lock().iter().map(|call| call.timeout).collect()
     }
 }
 
@@ -187,12 +209,23 @@ impl MediaToolRunner for ScriptedRunner {
                 .iter()
                 .map(|arg| arg.to_string_lossy().into_owned())
                 .collect();
-            self.calls.lock().push((invocation.tool, args.clone()));
+            self.calls.lock().push(Call {
+                tool: invocation.tool,
+                args: args.clone(),
+                timeout: invocation.timeout,
+            });
             let step = self
                 .steps
                 .lock()
                 .pop_front()
                 .expect("unscripted Media Tool invocation");
+            assert_eq!(
+                step.tool,
+                invocation.tool,
+                "{} invocation answered by a step scripted for {}",
+                invocation.tool.program(),
+                step.tool.program()
+            );
             if let Some(on_line) = invocation.on_stdout_line {
                 for line in &step.stdout_lines {
                     on_line(line);

@@ -272,12 +272,11 @@ pub async fn run(
                 .map(|c| format!("exit code {c}"))
                 .unwrap_or_else(|| "terminated by signal".into());
             let output = combined_output(&stderr, &stdout);
-            let detail = if output.is_empty() {
-                &code_text
+            Err(if output.is_empty() {
+                format!("{program} failed ({code_text})")
             } else {
-                &output
-            };
-            Err(format!("{program} failed ({code_text}): {detail}"))
+                format!("{program} failed ({code_text}): {output}")
+            })
         }
     }
 }

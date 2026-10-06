@@ -4,7 +4,7 @@ use std::fs;
 use tempfile::tempdir;
 
 use common::{ScriptedRunner, Step};
-use mkv_core::domain::{EpisodeInfo, MkvTrack, TrackProperties};
+use mkv_core::domain::{EpisodeInfo, MkvTrack, TrackProperties, SUBPROCESS_TIMEOUT};
 use mkv_core::extract::{extract_mkv_file, select_subtitle_for_extraction};
 use mkv_core::fonts::FontRegistry;
 use mkv_core::media_tool::MediaTool;
@@ -78,8 +78,13 @@ async fn test_extract_mkv_file_logs_mkvextract_warnings_on_exit_code_1() {
     let mkv_path = dir.path().join("Show - 01.mkv");
     fs::File::create(&mkv_path).unwrap();
     let font_mgr = FontRegistry::new(dir.path().join("fonts"), None);
-    let runner = ScriptedRunner::new([Step::exited(1, "Warning: Cluster out of order\n", "")
-        .writes_extract_targets(b"[Script Info]\n")]);
+    let runner = ScriptedRunner::new([Step::exited(
+        MediaTool::Mkvextract,
+        1,
+        "Warning: Cluster out of order\n",
+        "",
+    )
+    .writes_extract_targets(b"[Script Info]\n")]);
 
     let summary = extract_mkv_file(
         &mkv_path,
@@ -106,6 +111,7 @@ async fn test_extract_mkv_file_logs_mkvextract_warnings_on_exit_code_1() {
         runner.calls().as_slice(),
         [(MediaTool::Mkvextract, _)]
     ));
+    assert_eq!(runner.timeouts(), [SUBPROCESS_TIMEOUT]);
 }
 
 /// A failed mkvextract run fails the item and leaves nothing beside the video.
@@ -115,7 +121,12 @@ async fn test_extract_mkv_file_fails_on_mkvextract_exit_code_2() {
     let mkv_path = dir.path().join("Show - 01.mkv");
     fs::File::create(&mkv_path).unwrap();
     let font_mgr = FontRegistry::new(dir.path().join("fonts"), None);
-    let runner = ScriptedRunner::new([Step::exited(2, "", "Error: cannot open file\n")]);
+    let runner = ScriptedRunner::new([Step::exited(
+        MediaTool::Mkvextract,
+        2,
+        "",
+        "Error: cannot open file\n",
+    )]);
 
     let err = extract_mkv_file(
         &mkv_path,
