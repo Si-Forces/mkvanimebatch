@@ -1,4 +1,4 @@
-//! Benchmarks for the batch pipeline: preflight validation throughput and warm-cache
+//! Benchmarks for the batch pipeline: request resolution throughput and warm-cache
 //! dry-run batch execution with event streaming, across scaled synthetic workloads: one with
 //! per-release subtitles, one with chapters and subtitles shared at the root.
 
@@ -102,7 +102,9 @@ fn populate_shared_assets_workload(root: &Path, count: usize, cache: &Persistent
     cache.save();
 }
 
-fn bench_validation(runs: usize) {
+/// Times `BatchRequest::resolve`. Each run also clones the request and looks up the physical core
+/// count, so the figure is not comparable with the earlier `validate`-only numbers.
+fn bench_resolution(runs: usize) {
     let tmp = tempdir().unwrap();
     fs::write(tmp.path().join("ep01.mkv"), b"dummy").unwrap();
     let sub_path = tmp.path().join("ep01.ass");
@@ -133,14 +135,14 @@ fn bench_validation(runs: usize) {
 
     let start = Instant::now();
     for _ in 0..runs {
-        req.validate().unwrap();
+        req.clone().resolve().unwrap();
     }
     let elapsed = start.elapsed();
 
     let per_op = elapsed.as_secs_f64() / runs as f64;
     let ops_per_sec = runs as f64 / elapsed.as_secs_f64();
     println!(
-        "BatchRequest::validate: {runs} runs in {elapsed:.2?} ({:.2} µs/op, {ops_per_sec:.0} ops/sec)",
+        "BatchRequest::resolve: {runs} runs in {elapsed:.2?} ({:.2} µs/op, {ops_per_sec:.0} ops/sec)",
         per_op * 1_000_000.0,
     );
 }
@@ -201,8 +203,8 @@ async fn main() {
     println!("System hardware concurrency: {concurrency} cores/threads");
     println!();
 
-    println!("--- 1. Preflight Validation Throughput ---");
-    bench_validation(10_000);
+    println!("--- 1. Request Resolution Throughput ---");
+    bench_resolution(10_000);
     println!();
 
     println!("--- 2. Batch Remux Pipeline Scaling (Warm Cache) ---");

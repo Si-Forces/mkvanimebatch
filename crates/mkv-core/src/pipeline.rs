@@ -21,7 +21,9 @@ use crate::extract::extract_mkv_file;
 use crate::fonts::{scan_fonts, FontHashMemo, FontInfo, FontRegistry};
 use crate::manifest::get_item_id;
 use crate::remux::{execute_remux_job, select_tracks, PlannedJob, RemuxOptions, TrackSelection};
-use crate::request::{clean_relative_path, resolve_selected_items, TrackAssignment};
+use crate::request::{
+    clean_relative_path, resolve_selected_items, EffectiveSettings, TrackAssignment,
+};
 use crate::scan::{
     get_or_probe_video, scan_mkv_files, InspectedVideo, InspectionResult, ParsedFile,
     PersistentInspectCache, ScanCache,
@@ -157,6 +159,21 @@ pub struct PipelineConfig {
     pub selected_items: Option<Vec<String>>,
 }
 
+impl PipelineConfig {
+    /// The concurrency and audio transcoding values this config runs with.
+    pub fn effective_settings(&self) -> EffectiveSettings {
+        EffectiveSettings {
+            workers: self.workers,
+            io_jobs: self.io_jobs,
+            ffmpeg_threads: self.ffmpeg_threads,
+            bitrate: self.bitrate.clone(),
+            complexity: self.complexity,
+        }
+    }
+}
+
+/// A fixed, deterministic fixture for tests and benches, not the production defaults: those
+/// come from `BatchRequest::resolve`.
 impl Default for PipelineConfig {
     fn default() -> Self {
         Self {
@@ -470,12 +487,15 @@ impl BatchPipeline {
         }
     }
 
+    /// Resolves `request` and builds a pipeline from it: a convenience for library callers. The
+    /// CLI and the desktop call `BatchRequest::resolve` themselves, to reject a bad request before
+    /// they start any work.
     pub fn from_request(
         request: crate::request::BatchRequest,
         event_sender: Option<EventSender>,
         cancel_token: CancellationToken,
     ) -> Result<Self, String> {
-        let config = request.into_pipeline_config()?;
+        let config = request.resolve()?;
         Ok(Self::new(config, event_sender, cancel_token))
     }
 
@@ -532,14 +552,11 @@ impl BatchPipeline {
         self.config.workers.max(1)
     }
 
-    /// Bounds concurrent disk-heavy work; `io_jobs == 0` falls back to the worker count.
+    /// Bounds concurrent disk-heavy work to `io_jobs`. `BatchRequest::resolve` has already turned
+    /// a requested `0` into the worker count; the `max(1)` keeps a hand-built config's `0` from
+    /// creating a semaphore nothing can acquire.
     fn io_semaphore(&self) -> Arc<Semaphore> {
-        let limit = if self.config.io_jobs > 0 {
-            self.config.io_jobs
-        } else {
-            self.max_workers()
-        };
-        Arc::new(Semaphore::new(limit))
+        Arc::new(Semaphore::new(self.config.io_jobs.max(1)))
     }
 
     pub async fn run(&self) -> Result<PipelineSummary, String> {
@@ -1256,6 +1273,22 @@ mod tests {
             path,
             parsed: None,
         }
+    }
+
+    fn pipeline_with(io_jobs: usize, workers: usize) -> BatchPipeline {
+        let config = PipelineConfig {
+            io_jobs,
+            workers,
+            ..PipelineConfig::default()
+        };
+        BatchPipeline::new(config, None, CancellationToken::new())
+    }
+
+    #[test]
+    fn test_io_semaphore_uses_io_jobs() {
+        assert_eq!(pipeline_with(3, 4).io_semaphore().available_permits(), 3);
+        // `BatchRequest::resolve` never yields 0; a hand-built config's 0 still gets a permit.
+        assert_eq!(pipeline_with(0, 4).io_semaphore().available_permits(), 1);
     }
 
     #[test]
