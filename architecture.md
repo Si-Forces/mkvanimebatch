@@ -127,10 +127,11 @@ mkvanimebatch/
 │   │   │   ├── preset.rs            # PresetProfile catalog and lookup
 │   │   │   ├── request.rs           # BatchRequest, TrackAssignment, request resolution (validation, preset layering, defaults), EffectiveSettings, assignments JSON parsing
 │   │   │   ├── remux.rs             # Track selection, ffmpeg/mkvmerge argument building, remux execution
+│   │   │   ├── remux_plan.rs        # Crate-private: RemuxPlanner, the Remux Plan decided for each item before execution
 │   │   │   ├── extract.rs           # mkvextract invocation for subtitles, chapters, covers, and fonts
 │   │   │   └── pipeline.rs          # BatchPipeline, JobEvent and log channels, tokio JoinSet scheduling
 │   │   ├── benches/                 # bench_pipeline.rs (BatchRequest::resolve throughput, warm-cache remux/extract dry runs); bench_real_media.rs (cold-cache remux of a real corpus across worker counts at io_jobs = 2, local only; CI runs only its self-check)
-│   │   └── tests/                   # 12 integration suites: test_assets, test_cross_regex, test_domain, test_extract, test_fonts, test_pipeline, test_pipeline_assignments, test_pipeline_assignment_args, test_pipeline_font_memo, test_real_remux, test_remux, test_scan
+│   │   └── tests/                   # 11 integration suites: test_assets, test_cross_regex, test_domain, test_extract, test_fonts, test_pipeline, test_pipeline_assignments, test_pipeline_font_memo, test_real_remux, test_remux, test_scan
 │   └── mkv-cli/                     # CLI binary
 │       ├── Cargo.toml
 │       └── src/
@@ -359,7 +360,7 @@ flowchart TD
     Targets --> Start["Emit JobEvent::BatchStart"]
     Start --> Probe["Probe all videos concurrently\n(workers * 2).clamp(2, 16) semaphore"]
     Probe --> Prep["Per release directory:\nprepare_release_directory, scan_fonts,\nclaim_leftover_chapters"]
-    Prep --> Plan["Plan in batch order:\nemit skipped / error / planned outcomes,\ncollect PlannedJobs"]
+    Prep --> Plan["Plan in batch order:\nRemuxPlanner decides one Remux Plan per item,\nrun_remux emits skipped / error / planned outcomes\nand collects the planned jobs"]
     Plan --> Schedule["run_items: tokio JoinSet\nat most `workers` tasks in flight"]
 
     subgraph ItemTask["Per-item task"]
@@ -375,6 +376,16 @@ flowchart TD
     Schedule --> ItemTask
     ItemTask --> BatchDone["Emit JobEvent::BatchComplete"]
 ```
+
+Planning decides and the pipeline reports. `RemuxPlanner` (`remux_plan.rs`) takes one discovered video and returns a Remux Plan: `Skip` with a reason, `Error` for that item, `Abort` for the whole batch, or `Planned` with the `PlannedJob`, its `TrackSelection`, and the release's `FontInfo`. A video whose Release Directory was not prepared is an internal item error. Otherwise the planner works in this order:
+
+1. An assigned subtitle that no longer exists aborts the batch. This is the only place that check runs; `AssetResolver::resolve_for` takes the assigned subtitle as given.
+2. A video with no parsed episode number and no assignment is skipped.
+3. A video whose probe failed is an item error carrying the probe message.
+4. `resolve_for` picks the assets; a video with no matching subtitle is skipped with the resolver's reason.
+5. Otherwise the job is planned. Its output path is `Output/<stem>.mkv` beside the source, or the mirrored directory under `--out-dir`. A Track Assignment's language, title, and offset apply only when the resolver chose the assigned subtitle, and `select_tracks` fills in the tracks.
+
+The planner never sees `dry_run` or the cancellation token. `run_remux` walks the files in batch order, checks the token before each, turns every plan into its events, summary counts, and log lines, and settles an `Abort` through the planning-failure path (§8.1). In a dry run a `Planned` plan ends as a `planned` outcome instead of executing.
 
 Extract mode skips probing and planning up front: each item task probes its video, acquires an I/O permit, and runs one `mkvextract` call plus promotions while holding it.
 

@@ -644,49 +644,6 @@ fn test_resolve_for_skip_reason_when_no_subs_vs_unmatched() {
 }
 
 #[test]
-fn test_stale_assigned_subtitle_fails_closed_for_parsed_and_unparsed_videos() {
-    let tmp = tempdir().unwrap();
-    let automatic = tmp.path().join("Show_S01E01.ass");
-    fs::write(&automatic, b"[Script Info]\n").unwrap();
-    let manual = tmp.path().join("chosen_manual.ass");
-    fs::write(&manual, b"[Script Info]\n").unwrap();
-    let stale = tmp.path().join("deleted_manual.ass");
-
-    let mut sub_index = SubIndex::new();
-    sub_index.add(create_parsed_file(&automatic));
-    let resolver = AssetResolver {
-        sub_index,
-        ..Default::default()
-    };
-
-    let parsed = create_parsed_file(tmp.path().join("Show_S01E01.mkv"));
-    assert!(parsed.parsed.is_some());
-    assert_eq!(
-        resolver
-            .resolve_for(&parsed, None, None, None)
-            .unwrap()
-            .subtitle_file,
-        Some(automatic.clone())
-    );
-    let unparsed = create_parsed_file(tmp.path().join("unknown.mkv"));
-    assert!(unparsed.parsed.is_none());
-
-    for video in [&parsed, &unparsed] {
-        let error = resolver
-            .resolve_for(video, None, None, Some(&stale))
-            .unwrap_err();
-        assert!(error.contains(&stale.display().to_string()), "{error}");
-        assert_eq!(
-            resolver
-                .resolve_for(video, None, None, Some(&manual))
-                .unwrap()
-                .subtitle_file,
-            Some(manual.clone())
-        );
-    }
-}
-
-#[test]
 fn test_sub_classification_cache_populates_and_reuses_across_release_directories() {
     let tmp = tempdir().unwrap();
     let root = tmp.path().join("Anime");

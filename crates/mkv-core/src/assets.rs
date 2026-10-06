@@ -779,6 +779,9 @@ impl AssetResolver {
         None
     }
 
+    /// Resolves the assets of `video`. `assigned_subtitle` is taken as given: the Remux Plan has
+    /// already checked that it exists. It currently never returns `Err`; the `Result` stays so a
+    /// caller can fail the batch on a future resolver failure.
     pub fn resolve_for(
         &self,
         video: &ParsedFile,
@@ -786,15 +789,6 @@ impl AssetResolver {
         claimed_chapter: Option<&Path>,
         assigned_subtitle: Option<&Path>,
     ) -> Result<ResolvedAssets, String> {
-        if let Some(assigned) = assigned_subtitle {
-            if !assigned.is_file() {
-                return Err(format!(
-                    "Assigned subtitle '{}' no longer exists",
-                    assigned.display()
-                ));
-            }
-        }
-
         let has_source_chapters = inspected.is_some_and(|i| i.has_chapters());
         let has_source_cover = inspected.is_some_and(|i| i.cover_attachment().is_some());
 
