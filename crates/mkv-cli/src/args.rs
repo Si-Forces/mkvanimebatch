@@ -1,12 +1,16 @@
 //! Command-line argument parsing for mkv-cli: flags into a `BatchRequest`, `--selected-item`
 //! normalization against `--input-dir`, and the help text.
 
+use std::fmt::Display;
+use std::ops::RangeInclusive;
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 
 use mkv_core::pipeline::PipelineMode;
+use mkv_core::preset::lookup_preset;
 use mkv_core::request::{
-    clean_relative_path, is_valid_bitrate, parse_assignments_json, BatchRequest,
+    clean_relative_path, parse_assignments_json, BatchRequest, COMPLEXITY_RANGE, DEFAULT_IO_JOBS,
+    DEFAULT_PRESET_ID, FFMPEG_THREADS_RANGE, IO_JOBS_RANGE, WORKERS_RANGE,
 };
 
 #[derive(Debug)]
@@ -74,8 +78,9 @@ fn parse_seconds_as_ms(flag: &str, raw: &str) -> Result<i64, String> {
 }
 
 /// Parses CLI arguments (excluding the executable). An `exe` named `mkv-extract`
-/// defaults the mode to Extract. Numeric range checks are left to
-/// `BatchRequest::validate`, except that `--sub-offset` must convert to milliseconds.
+/// defaults the mode to Extract. Only the syntax of a value is checked here, including that
+/// `--sub-offset` converts to whole milliseconds; ranges, the preset, the bitrate and paths are
+/// left to `BatchRequest::resolve`.
 fn parse_args_with_exe<I, T>(exe: Option<&str>, iter: I) -> Result<CliArgs, String>
 where
     I: IntoIterator<Item = T>,
@@ -130,13 +135,7 @@ where
             "--assets-dir" => {
                 request.assets_dir = Some(PathBuf::from(next_value(&mut it, flag)?));
             }
-            "--preset" => {
-                let val = next_value(&mut it, flag)?;
-                if mkv_core::preset::lookup_preset(&val).is_none() {
-                    return Err(format!("Unknown preset profile: '{val}'"));
-                }
-                request.preset = Some(val);
-            }
+            "--preset" => request.preset = Some(next_value(&mut it, flag)?),
             "--assignments" => assignments_path = Some(PathBuf::from(next_value(&mut it, flag)?)),
             "--extract" => request.mode = PipelineMode::Extract,
             "--remux" => request.mode = PipelineMode::Remux,
@@ -157,15 +156,7 @@ where
                     Some(parse_number(&val, flag, "integer")?)
                 };
             }
-            "--bitrate" => {
-                let val = next_value(&mut it, flag)?;
-                if !is_valid_bitrate(&val) {
-                    return Err(format!(
-                        "Invalid bitrate format: '{val}'. Must be a positive integer with an optional k/K/M suffix, like 128k or 192k."
-                    ));
-                }
-                request.bitrate = Some(val);
-            }
+            "--bitrate" => request.bitrate = Some(next_value(&mut it, flag)?),
             other => return Err(format!("Unknown argument: {other}")),
         }
     }
@@ -256,7 +247,7 @@ fn normalize_selected_item(raw: &str, input_dir: &Path) -> Result<String, String
                 }
             } else if let Some(parent) = path.parent() {
                 // Nonexistent file under input_dir: resolve through its parent so
-                // `BatchRequest::validate` reports it as missing, not as outside.
+                // `BatchRequest::resolve` reports it as missing, not as outside.
                 if let Ok(canon_parent) = std::fs::canonicalize(parent) {
                     if let Ok(rel_parent) = canon_parent.strip_prefix(canon_in) {
                         let file_name = path.file_name().unwrap_or_default();
@@ -296,8 +287,23 @@ fn normalize_selected_item(raw: &str, input_dir: &Path) -> Result<String, String
     Ok(clean_relative_path(raw))
 }
 
-pub(crate) fn print_help() {
-    println!(
+/// Words a range for the help text, e.g. `1-64`.
+fn range_text<T: Display>(range: &RangeInclusive<T>) -> String {
+    format!("{}-{}", range.start(), range.end())
+}
+
+/// The `--help` text; its ranges, the `--io-jobs` default and the bitrate and complexity
+/// fallbacks come from the core constants and the default Preset Profile that
+/// `BatchRequest::resolve` applies.
+fn help_text() -> String {
+    let default_preset = lookup_preset(DEFAULT_PRESET_ID).expect("the default preset is built in");
+    let default_bitrate = default_preset.bitrate;
+    let default_complexity = default_preset.complexity;
+    let complexity = range_text(&COMPLEXITY_RANGE);
+    let workers = range_text(&WORKERS_RANGE);
+    let io_jobs = range_text(&IO_JOBS_RANGE);
+    let ffmpeg_threads = range_text(&FFMPEG_THREADS_RANGE);
+    format!(
         r#"mkv-cli - Batch MKV remux and extraction for anime releases
 
 USAGE:
@@ -317,17 +323,21 @@ OPTIONS:
     --remux                    Process batch in remux mode (default for mkv-cli)
     --extract                  Extract best-match subtitles, fonts, chapters, and covers
     --dry-run                  Simulate batch processing without executing remux commands
-    --bitrate <RATE>           Opus audio transcoding bitrate with optional k/K/M suffix (default: preset bitrate, else 192k)
-    --complexity <0-10>        Opus compression complexity level, 0-10 (default: preset complexity, else 5)
-    --workers <N>              Number of concurrent worker tasks, 1-64 (default: physical cores clamped 1-16)
-    --io-jobs <N>              Disk I/O jobs concurrency limit, 0-64 (0 uses the worker count) (default: 2)
-    --ffmpeg-threads <N|auto>  FLAC decoder threads per audio transcode job, 1-32 (default: auto; Opus encoding is single-threaded)
+    --bitrate <RATE>           Opus audio transcoding bitrate with optional k/K/M suffix (default: preset bitrate, else {default_bitrate})
+    --complexity <{complexity}>        Opus compression complexity level, {complexity} (default: preset complexity, else {default_complexity})
+    --workers <N>              Number of concurrent worker tasks, {workers} (default: physical cores clamped 1-16)
+    --io-jobs <N>              Disk I/O jobs concurrency limit, {io_jobs} (0 uses the worker count) (default: {DEFAULT_IO_JOBS})
+    --ffmpeg-threads <N|auto>  FLAC decoder threads per audio transcode job, {ffmpeg_threads} (default: auto; Opus encoding is single-threaded)
     --sub-offset <SEC>         Subtitle timestamp offset in seconds, rounded half away from zero to whole milliseconds (default: 0)
     --no-cache                 Bypass persistent inspect cache
     --clear-cache              Clear persistent inspection cache and exit
     -h, --help                 Show this help message
 "#
-    );
+    )
+}
+
+pub(crate) fn print_help() {
+    println!("{}", help_text());
 }
 
 /// Test helpers shared by this module's tests and `main.rs`'s plan-manifest tests.
@@ -362,6 +372,7 @@ pub(crate) mod test_support {
 mod tests {
     use super::test_support::*;
     use super::*;
+    use mkv_core::pipeline::PipelineConfig;
     use tempfile::tempdir;
 
     fn write_assignments(dir: &Path, file_name: &str, json: &str) -> PathBuf {
@@ -381,17 +392,28 @@ mod tests {
             .expect("selected_items should be set"))
     }
 
-    #[test]
-    fn test_bitrate_validation() {
-        assert!(parse_args_from(["--bitrate", "0"]).is_err());
-        assert!(parse_args_from(["--bitrate", "0k"]).is_err());
-        assert!(parse_args_from(["--bitrate", "invalid"]).is_err());
+    /// Parses `flags` after an `--input-dir` that exists, then resolves the request.
+    fn resolve_flags(flags: &[&str]) -> Result<PipelineConfig, String> {
+        let dir = tempdir().unwrap();
+        let mut args = vec!["--input-dir", path_arg(dir.path())];
+        args.extend(flags);
+        parse_args_from(args)?.request.resolve()
+    }
 
-        assert!(parse_args_from(["--bitrate", "128k"]).is_ok());
-        assert!(parse_args_from(["--bitrate", "192k"]).is_ok());
-        assert!(parse_args_from(["--bitrate", "192K"]).is_ok());
-        assert!(parse_args_from(["--bitrate", "1M"]).is_ok());
-        assert!(parse_args_from(["--bitrate", "1m"]).is_err());
+    #[test]
+    fn test_bitrate_is_checked_by_resolve() {
+        for bad in ["0", "0k", "invalid", "1m"] {
+            assert_eq!(
+                resolve_flags(&["--bitrate", bad]).unwrap_err(),
+                format!(
+                    "Invalid bitrate format: '{bad}'. Must be a positive integer with an optional k/K/M suffix, like 128k or 192k."
+                )
+            );
+        }
+        for (ok, expected) in [("128k", "128k"), ("192K", "192K"), ("1M", "1M")] {
+            let config = resolve_flags(&["--bitrate", ok]).unwrap();
+            assert_eq!(config.bitrate, expected);
+        }
     }
 
     #[test]
@@ -409,7 +431,7 @@ mod tests {
         let err = parse_args_from(args)
             .unwrap()
             .request
-            .validate()
+            .resolve()
             .unwrap_err();
         assert!(
             err.contains("Duplicate entry in selected_items: 'ep01.mkv'"),
@@ -454,7 +476,7 @@ mod tests {
             assert!(parse_args_from([flag, "invalid"]).is_err(), "{flag}");
         }
 
-        // Out-of-range values pass through; BatchRequest::validate owns the bounds.
+        // Out-of-range values pass through; BatchRequest::resolve owns the bounds.
         let parsed = parse_args_from([
             "--complexity",
             "11",
@@ -574,6 +596,37 @@ mod tests {
     }
 
     #[test]
+    fn test_help_ranges_come_from_the_core_constants() {
+        let help = help_text();
+        let balanced = lookup_preset(DEFAULT_PRESET_ID).unwrap();
+        for line in [
+            format!(
+                "--complexity <{0}>        Opus compression complexity level, {0} (default: preset complexity, else {1})",
+                range_text(&COMPLEXITY_RANGE),
+                balanced.complexity
+            ),
+            format!(
+                "--bitrate <RATE>           Opus audio transcoding bitrate with optional k/K/M suffix (default: preset bitrate, else {})",
+                balanced.bitrate
+            ),
+            format!(
+                "Number of concurrent worker tasks, {} ",
+                range_text(&WORKERS_RANGE)
+            ),
+            format!(
+                "Disk I/O jobs concurrency limit, {} (0 uses the worker count) (default: {DEFAULT_IO_JOBS})",
+                range_text(&IO_JOBS_RANGE)
+            ),
+            format!(
+                "FLAC decoder threads per audio transcode job, {} ",
+                range_text(&FFMPEG_THREADS_RANGE)
+            ),
+        ] {
+            assert!(help.contains(&line), "{line}");
+        }
+    }
+
+    #[test]
     fn test_unknown_flag() {
         assert!(parse_args_from(["--unknown-flag"]).is_err());
         assert_eq!(
@@ -590,7 +643,16 @@ mod tests {
         let parsed_fast = parse_args_from(["--preset", "fast"]).unwrap();
         assert_eq!(parsed_fast.request.preset.as_deref(), Some("fast"));
 
-        assert!(parse_args_from(["--preset", "unknown_profile"]).is_err());
+        // The preset is checked by `resolve`, not while parsing.
+        let parsed_unknown = parse_args_from(["--preset", "unknown_profile"]).unwrap();
+        assert_eq!(
+            parsed_unknown.request.preset.as_deref(),
+            Some("unknown_profile")
+        );
+        assert_eq!(
+            resolve_flags(&["--preset", "unknown_profile"]).unwrap_err(),
+            "Unknown preset profile: 'unknown_profile'"
+        );
     }
 
     #[test]
@@ -638,7 +700,7 @@ mod tests {
     }
 
     #[test]
-    fn test_request_validate_preflight() {
+    fn test_request_resolve_preflight() {
         let dir = tempdir().unwrap();
         write_files(dir.path(), &["ep01.mkv", "ep01.ass"]);
         let input_dir = path_arg(dir.path());
@@ -659,7 +721,7 @@ mod tests {
             "4",
         ])
         .unwrap();
-        assert!(parsed.request.validate().is_ok());
+        assert!(parsed.request.resolve().is_ok());
 
         let assign_missing_file = write_assignments(
             dir.path(),
@@ -673,7 +735,7 @@ mod tests {
             path_arg(&assign_missing_file),
         ])
         .unwrap();
-        assert!(parsed_missing.request.validate().is_err());
+        assert!(parsed_missing.request.resolve().is_err());
     }
 
     #[test]
@@ -796,7 +858,7 @@ mod tests {
             parsed.request.selected_items.as_deref(),
             Some(&["ghost.mkv".to_string()][..])
         );
-        let err = parsed.request.validate().unwrap_err();
+        let err = parsed.request.resolve().unwrap_err();
         assert!(
             err.contains("Selected item does not exist:"),
             "unexpected error message: {err}"

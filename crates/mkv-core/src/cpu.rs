@@ -79,12 +79,20 @@ pub(crate) fn transcode_governor_threads(cores: usize, workers: usize) -> usize 
     (cores / workers.max(1)).clamp(1, 4)
 }
 
+/// The default batch worker count for `cores` physical CPU cores, clamped to [1, 16].
+///
+/// The one home of the rule: `BatchRequest::resolve` applies it to its injected core count.
+pub(crate) fn default_workers_for(cores: usize) -> usize {
+    cores.clamp(1, 16)
+}
+
 /// Default batch worker count derived from physical CPU cores, clamped to [1, 16].
 ///
-/// `BatchRequest::into_pipeline_config` uses exactly this when `workers` is `None`. The crate
-/// root re-exports it so the desktop can show it as "auto (N)" (ADR-0013 Amendment 10).
+/// `BatchRequest::resolve` applies the same rule (`default_workers_for`) to its core count when
+/// `workers` is `None`. The crate root re-exports this so the desktop can show it as "auto (N)"
+/// (ADR-0013 Amendment 10).
 pub fn default_workers() -> usize {
-    physical_core_count().clamp(1, 16)
+    default_workers_for(physical_core_count())
 }
 
 /// Derives preflight or execution probe semaphore concurrency from active/default workers.
@@ -116,6 +124,15 @@ mod tests {
         // high core to worker ratios (clamped to 4)
         assert_eq!(transcode_governor_threads(32, 2), 4);
         assert_eq!(transcode_governor_threads(64, 4), 4);
+    }
+
+    #[test]
+    fn test_default_workers_for_clamps() {
+        assert_eq!(default_workers_for(0), 1);
+        assert_eq!(default_workers_for(1), 1);
+        assert_eq!(default_workers_for(4), 4);
+        assert_eq!(default_workers_for(16), 16);
+        assert_eq!(default_workers_for(32), 16);
     }
 
     #[test]

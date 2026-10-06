@@ -141,16 +141,15 @@ pub fn run_job<R: tauri::Runtime>(
     request.input_dir =
         std::fs::canonicalize(&request.input_dir).unwrap_or_else(|_| request.input_dir.clone());
     let input_dir = display_canonical_path(&request.input_dir.to_string_lossy());
-    request.validate()?;
+    let mut pipeline_config = request.resolve()?;
 
-    let mode = match request.mode {
+    let mode = match pipeline_config.mode {
         PipelineMode::Extract => "extract",
         PipelineMode::Remux => "remux",
     };
     let cancel_token = CancellationToken::new();
     let (event_tx, event_rx) = mkv_core::pipeline::create_event_channel(64);
     let (log_tx, log_rx) = mkv_core::pipeline::create_log_channel(128);
-    let mut pipeline_config = request.into_pipeline_config()?;
     let session_cache = (!pipeline_config.no_cache).then(|| cache_state.inner().clone());
     let pipeline_cancel = cancel_token.clone();
 
@@ -606,7 +605,7 @@ mod tests {
     fn test_get_default_workers_is_the_engine_default() {
         let workers = get_default_workers();
         assert_eq!(workers, mkv_core::default_workers());
-        // `BatchRequest::validate` accepts 1-64; the default is clamped to 1-16.
+        // `BatchRequest::resolve` accepts 1-64; the default is clamped to 1-16.
         assert!(
             (1..=16).contains(&workers),
             "workers out of range: {workers}"

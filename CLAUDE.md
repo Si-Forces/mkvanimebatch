@@ -68,7 +68,7 @@ External tools are invoked as subprocesses: `mkvmerge`, `mkvextract`, and `ffmpe
 
 ### Engine flow (`mkv-core`)
 
-`BatchRequest` (`request.rs`, validated by `BatchRequest::validate`) → `BatchPipeline` (`pipeline.rs`):
+`BatchRequest` (`request.rs`, resolved into a `PipelineConfig` by `BatchRequest::resolve`) → `BatchPipeline` (`pipeline.rs`):
 
 1. Discovery (`scan.rs`).
 2. Selected-items filtering.

@@ -67,15 +67,13 @@ mod real_media {
     use mkv_core::manifest::get_item_id;
     use mkv_core::pipeline::{BatchPipeline, CancellationToken, PipelineMode, PipelineSummary};
     use mkv_core::remux::select_tracks;
-    use mkv_core::request::BatchRequest;
+    use mkv_core::request::{BatchRequest, WORKERS_RANGE};
     use mkv_core::scan::{probe_video, scan_mkv_files, InspectedVideo};
     use tokio::runtime::Runtime;
 
     const IO_JOBS: usize = 2;
     const FLAC_WORKERS: [usize; 3] = [2, 4, 8];
     const MEDIA_TOOLS: [&str; 3] = ["ffmpeg", "mkvmerge", "mkvextract"];
-    /// `BatchRequest::validate` caps `workers` at 64.
-    const MAX_WORKERS: usize = 64;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum BatchKind {
@@ -123,7 +121,7 @@ mod real_media {
             };
             workers
                 .iter_mut()
-                .for_each(|w| *w = (*w).clamp(1, MAX_WORKERS));
+                .for_each(|w| *w = (*w).clamp(*WORKERS_RANGE.start(), *WORKERS_RANGE.end()));
             workers.dedup();
             workers.retain(|&w| w != default_workers);
             cells.extend(workers.into_iter().map(|w| Cell {
@@ -426,10 +424,7 @@ mod real_media {
             selected_items: Some(items.to_vec()),
             ..Default::default()
         };
-        let config = match request
-            .validate()
-            .and_then(|()| request.into_pipeline_config())
-        {
+        let config = match request.resolve() {
             Ok(config) => config,
             Err(e) => {
                 eprintln!("  cell skipped, invalid request: {e}");
@@ -529,7 +524,7 @@ mod real_media {
             input_dir: root.clone(),
             ..Default::default()
         })
-        .into_pipeline_config()
+        .resolve()
         {
             Ok(config) => config.workers,
             Err(e) => {

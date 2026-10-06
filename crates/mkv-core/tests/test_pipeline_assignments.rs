@@ -69,7 +69,7 @@ async fn test_missing_assignment_aborts_entire_remux_plan() {
             selected_items: Some(vec!["Show - 01.mkv".into(), assigned_name.into()]),
             ..Default::default()
         };
-        request.validate().unwrap();
+        request.clone().resolve().unwrap();
         fs::remove_file(&manual).unwrap();
 
         let (summary, events) = run_batch(

@@ -54,7 +54,9 @@ async fn run() -> Result<ExitCode, String> {
         return Err("--input-dir is required.".into());
     }
 
-    args.request.validate()?;
+    // Resolves before any work starts, so a bad request fails before `--plan` or a run begins.
+    // `--plan` still reads the request, so it resolves a copy.
+    let config = args.request.clone().resolve()?;
 
     let cancel_token = CancellationToken::new();
     let signal_token = cancel_token.clone();
@@ -110,7 +112,7 @@ async fn run() -> Result<ExitCode, String> {
         (None, None)
     };
 
-    let pipeline = BatchPipeline::from_request(args.request, event_sender, cancel_token)?;
+    let pipeline = BatchPipeline::new(config, event_sender, cancel_token);
 
     let result = pipeline.run().await;
     // Dropping the pipeline closes the event channel so the forwarder can drain and exit.
@@ -197,7 +199,12 @@ mod tests {
             "Output/hidden.mkv",
         ])
         .unwrap();
-        assert!(parsed.request.validate().unwrap_err().contains("notes.txt"));
+        assert!(parsed
+            .request
+            .clone()
+            .resolve()
+            .unwrap_err()
+            .contains("notes.txt"));
         let err = generate_plan_manifest(&parsed.request, None, None)
             .await
             .unwrap_err();
@@ -207,7 +214,7 @@ mod tests {
         );
 
         parsed.request.selected_items = Some(vec!["Output/hidden.mkv".into()]);
-        assert!(parsed.request.validate().is_ok());
+        assert!(parsed.request.clone().resolve().is_ok());
         assert!(generate_plan_manifest(&parsed.request, None, None)
             .await
             .unwrap_err()
