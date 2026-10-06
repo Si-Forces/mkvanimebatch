@@ -13,5 +13,3 @@ pub mod remux;
 mod remux_plan;
 pub mod request;
 pub mod scan;
-
-pub use cpu::default_workers;

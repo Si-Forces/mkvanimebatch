@@ -799,6 +799,19 @@ test("a freshly mounted card is drawn in the queued look by its first renderCard
   assert.equal(card.fill.style.width, "0%");
 });
 
+test("a Remux card names the bitrate control's value, and only that, for a FLAC track", t => {
+  const { elements } = setupMockEnvironment(t);
+  const tracker = new QueueTracker("remux");
+  const dir = "/anime/show";
+  assert.equal(tracker.acceptInspection(tracker.startScan(dir), dir, detailedManifest(["01.mkv"])), true);
+  assert.equal(tracker.cards.get("01.mkv").tag1.textContent, "FLAC 2.0 → Opus 192k");
+
+  // With no bitrate to show, the card omits it rather than assume one.
+  elements.get("remux-bitrate").value = "";
+  assert.equal(tracker.acceptInspection(tracker.startScan(dir), dir, detailedManifest(["01.mkv", "02.mkv"])), true);
+  assert.equal(tracker.cards.get("02.mkv").tag1.textContent, "FLAC 2.0 → Opus");
+});
+
 test("a same-directory re-inspection remounts only the card whose manifest entry changed, in place", t => {
   const { elements, renderFrames } = setupMockEnvironment(t, { deferFrames: true });
   const tracker = new QueueTracker("remux");

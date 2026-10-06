@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { createJobCoordinator } from "./job-coordinator.js";
-import { BULK_SELECTION_CONTROLS, JobController, validateConcurrency } from "./job-controller.js";
+import { BULK_SELECTION_CONTROLS, JobController } from "./job-controller.js";
 
 class FakeElement {
   constructor(value = "") {
@@ -68,7 +68,14 @@ function makeTracker(overrides = {}) {
   };
 }
 
-function makeRuntime(tracker, overrides = {}) {
+/** The Effective Settings `resolve_batch_request` answers with unless a test says otherwise. */
+const SETTINGS = { workers: 8, io_jobs: 2, ffmpeg_threads: 1, bitrate: "192k", complexity: 5 };
+
+/**
+ * A runtime of fakes. `resolve` answers `resolve_batch_request` (the request in, the Effective
+ * Settings out, or a rejection) so `invoke` only sees the other commands.
+ */
+function makeRuntime(tracker, { invoke = async () => null, resolve = async () => SETTINGS, ...overrides } = {}) {
   return {
     coordinator: createJobCoordinator(),
     appendLog() {},
@@ -80,9 +87,8 @@ function makeRuntime(tracker, overrides = {}) {
     showModal: async () => true,
     telemetryLoop: { setJobActive() {} },
     updateWorkerChips() {},
-    resolvedDefaultWorkers: () => 8,
     listen: async () => () => {},
-    invoke: async () => null,
+    invoke: (command, args) => (command === "resolve_batch_request" ? resolve(args.request) : invoke(command, args)),
     ...overrides,
   };
 }
@@ -206,24 +212,6 @@ test("job controller replays early job-done arriving while run_job is in flight"
   assert.equal(runtime.coordinator.activeMode, null);
 });
 
-test("validateConcurrency accepts the documented bounds, preserves 0 io-jobs, and rejects everything else", () => {
-  assert.equal(validateConcurrency({}), null);
-  assert.equal(validateConcurrency({ workers: null, io_jobs: null, ffmpeg_threads: null }), null);
-  assert.equal(validateConcurrency({ workers: 1, io_jobs: 0 }), null);
-  assert.equal(validateConcurrency({ workers: 64, io_jobs: 64 }), null);
-  assert.equal(validateConcurrency({ ffmpeg_threads: 1 }), null);
-  assert.equal(validateConcurrency({ ffmpeg_threads: 32 }), null);
-  for (const workers of [0, -1, 65, "abc", 4.5, NaN]) {
-    assert.ok(validateConcurrency({ workers }), `workers ${workers} must be rejected`);
-  }
-  for (const ioJobs of [-1, 65, "abc", 1.5, NaN]) {
-    assert.ok(validateConcurrency({ io_jobs: ioJobs }), `io_jobs ${ioJobs} must be rejected`);
-  }
-  for (const ffmpegThreads of [0, -1, 33, "abc", 2.5, NaN]) {
-    assert.ok(validateConcurrency({ ffmpeg_threads: ffmpegThreads }), `ffmpeg_threads ${ffmpegThreads} must be rejected`);
-  }
-});
-
 test("job controller forwards snapshotted execution args incl zero io-jobs and no-cache, ignoring subsequent DOM mutations", async t => {
   const elements = remuxElements({ "input-dir": "/my-anime", workers: "6", "io-jobs": "0", "no-cache": checkedBox() });
   installDocument(t, elements);
@@ -231,7 +219,10 @@ test("job controller forwards snapshotted execution args incl zero io-jobs and n
   const scanCalls = [];
   const workerChipCalls = [];
   const invocations = [];
+  // The engine expands an explicit io-jobs of 0 to the worker count.
+  const resolved = { ...SETTINGS, workers: 6, io_jobs: 6 };
   const runtime = makeRuntime(makeTracker(), {
+    resolve: async () => resolved,
     scanInputDirectory: async (path, mode, opts) => {
       scanCalls.push({ path, mode, opts });
       // The DOM changes while the forced scan is in flight; the request must not follow it.
@@ -258,8 +249,8 @@ test("job controller forwards snapshotted execution args incl zero io-jobs and n
     options: { noCache: true },
   });
 
-  // io-jobs 0 reaches the chips uncoerced.
-  assert.deepEqual(workerChipCalls[0], [true, 6, 0]);
+  // The chips show what the engine resolved, not the request's own 0.
+  assert.deepEqual(workerChipCalls[0], [true, resolved]);
 
   const runJobReq = invocations.find(([cmd]) => cmd === "run_job")[1].request;
   assert.equal(runJobReq.input_dir, "/my-anime");
@@ -268,43 +259,171 @@ test("job controller forwards snapshotted execution args incl zero io-jobs and n
   assert.equal(runJobReq.no_cache, true);
 });
 
-/** Starts a Remux run with the given workers field and runtime default; returns the sent request and chip calls. */
-async function startWithWorkersField(t, { workers, defaultWorkers }) {
-  installDocument(t, remuxElements({ "input-dir": "/input", workers, "io-jobs": "2" }));
+/** Starts a Remux run with the given workers and Disk I/O fields; returns the requests sent to the engine, in order, and the chip calls. */
+async function startWithWorkersField(t, { workers, ioJobs = "2", resolved }) {
+  installDocument(t, remuxElements({ "input-dir": "/input", workers, "io-jobs": ioJobs }));
 
+  const sent = [];
   const chipCalls = [];
-  const invocations = [];
   const runtime = makeRuntime(makeTracker(), {
     updateWorkerChips: (...args) => chipCalls.push(args),
-    resolvedDefaultWorkers: () => defaultWorkers,
+    async resolve(request) {
+      sent.push(["resolve_batch_request", request]);
+      return resolved;
+    },
     async invoke(command, args) {
-      invocations.push([command, args]);
+      if (command === "run_job") sent.push([command, args.request]);
       return command === "run_job" ? 11 : null;
     },
   });
   await new JobController("remux", runtime).start();
-  return { request: invocations.find(([cmd]) => cmd === "run_job")[1].request, chipCalls };
+  return { sent, chipCalls };
 }
 
-test("an empty workers field sends workers null and the chip shows the runtime's default", async t => {
-  const { request, chipCalls } = await startWithWorkersField(t, { workers: "", defaultWorkers: 6 });
-  assert.equal(request.workers, null);
-  assert.deepEqual(chipCalls[0], [true, 6, 2]);
+test("an empty workers field sends workers null and the chips show the Effective Settings the engine resolved", async t => {
+  const resolved = { ...SETTINGS, workers: 6, io_jobs: 2 };
+  const { sent, chipCalls } = await startWithWorkersField(t, { workers: "", resolved });
+  assert.deepEqual(sent.map(([command]) => command), ["resolve_batch_request", "run_job"]);
+  assert.equal(sent[0][1].workers, null);
+  assert.equal(sent[1][1].workers, null);
+  assert.deepEqual(chipCalls[0], [true, resolved]);
 });
 
-test("a typed workers value is sent as is and wins over the default in the chip", async t => {
-  const { request, chipCalls } = await startWithWorkersField(t, { workers: "3", defaultWorkers: 6 });
-  assert.equal(request.workers, 3);
-  assert.deepEqual(chipCalls[0], [true, 3, 2]);
+test("an empty Disk I/O field sends io_jobs null so the engine's default applies", async t => {
+  const resolved = { ...SETTINGS, workers: 4, io_jobs: 2 };
+  const { sent, chipCalls } = await startWithWorkersField(t, { workers: "4", ioJobs: "", resolved });
+  assert.equal(sent[0][1].io_jobs, null);
+  assert.equal(sent[1][1].io_jobs, null);
+  assert.deepEqual(chipCalls[0], [true, resolved]);
 });
 
-test("index.html workers inputs default to auto, with no preset value", () => {
+test("a typed workers value is sent as is to both the resolve and the run", async t => {
+  const resolved = { ...SETTINGS, workers: 3 };
+  const { sent, chipCalls } = await startWithWorkersField(t, { workers: "3", resolved });
+  assert.equal(sent[0][1].workers, 3);
+  assert.equal(sent[1][1].workers, 3);
+  assert.deepEqual(chipCalls[0], [true, resolved]);
+});
+
+test("start resolves the request before the forced scan, while selected_items and assignments are still unset", async t => {
+  installDocument(t, remuxElements({ "input-dir": "/input", workers: "4", "io-jobs": "2" }));
+
+  const order = [];
+  let resolvedRequest = null;
+  const runtime = makeRuntime(makeTracker(), {
+    async resolve(request) {
+      order.push("resolve");
+      resolvedRequest = structuredClone(request);
+      return SETTINGS;
+    },
+    clearLog: () => order.push("clear-log"),
+    async scanInputDirectory() {
+      order.push("scan");
+      return true;
+    },
+    async invoke(command) {
+      order.push(command);
+      return command === "run_job" ? 12 : null;
+    },
+  });
+
+  const controller = new JobController("remux", runtime);
+  order.length = 0; // the constructor clears the log once
+  await controller.start();
+
+  // The log is cleared once the request is accepted, not before.
+  assert.deepEqual(order, ["resolve", "clear-log", "scan", "run_job"]);
+  assert.equal(resolvedRequest.input_dir, "/input");
+  assert.equal(resolvedRequest.selected_items, null);
+  assert.equal(resolvedRequest.assignments, null);
+});
+
+test("a request the engine refuses is appended to the log, uncleared, and aborts the start before the scan", async t => {
+  installDocument(t, remuxElements({ "input-dir": "/input", workers: "0" }));
+  const logs = [];
+  const cleared = [];
+  const chipCalls = [];
+  const invocations = [];
+  let scanCalled = false;
+  const runtime = makeRuntime(makeTracker(), {
+    resolve: async () => { throw "Worker thread count must be between 1 and 64"; },
+    appendLog: (_el, msg) => logs.push(msg),
+    clearLog: () => cleared.push("clear"),
+    updateWorkerChips: (...args) => chipCalls.push(args),
+    scanInputDirectory: async () => {
+      scanCalled = true;
+      return true;
+    },
+    async invoke(command) {
+      invocations.push(command);
+      return null;
+    },
+  });
+
+  const controller = new JobController("remux", runtime);
+  cleared.length = 0; // the constructor clears the log once
+  await controller.start();
+
+  // The log of an earlier run stays, with the refusal appended to it.
+  assert.deepEqual(cleared, []);
+  assert.equal(scanCalled, false);
+  assert.deepEqual(invocations, []);
+  assert.equal(controller.running, false);
+  assert.equal(controller.lifecycle, "failed");
+  assert.equal(runtime.coordinator.activeMode, null);
+  assert.equal(runtime.coordinator.canStart(), true);
+  assert.deepEqual(logs, ["[ERROR] Worker thread count must be between 1 and 64"]);
+  // The chips were never switched to a running job.
+  assert.deepEqual(chipCalls, [[false]]);
+});
+
+test("Stop while the engine resolves the request ends the start without a scan or a run", async t => {
+  installDocument(t, remuxElements({ "input-dir": "/input" }));
+  let answer;
+  const answered = new Promise(resolve => { answer = resolve; });
+  const invocations = [];
+  let scanCalled = false;
+  const runtime = makeRuntime(makeTracker(), {
+    resolve: () => answered,
+    scanInputDirectory: async () => {
+      scanCalled = true;
+      return true;
+    },
+    async invoke(command) {
+      invocations.push(command);
+      return null;
+    },
+  });
+
+  const controller = new JobController("remux", runtime);
+  const starting = controller.start();
+  await tick();
+  assert.equal(runtime.coordinator.activeMode, "remux");
+
+  await controller.stop();
+  answer(SETTINGS);
+  await starting;
+
+  assert.equal(scanCalled, false);
+  assert.deepEqual(invocations, ["stop_job"]);
+  assert.equal(controller.lifecycle, "cancelled");
+  assert.equal(runtime.coordinator.activeMode, null);
+});
+
+test("index.html chips name their state without inventing a worker or I/O job count", () => {
   const html = fs.readFileSync(path.join(import.meta.dirname, "index.html"), "utf8");
-  for (const id of ["remux-workers", "extract-workers"]) {
+  const chips = [...html.matchAll(/<div\b[^>]*\bmetric-(?:workers|iojobs)-chip\b[^>]*>([^<]*)<\/div>/g)];
+  assert.equal(chips.length, 4, "a Workers and an I/O Jobs chip in each of the two views");
+  for (const [, text] of chips) assert.doesNotMatch(text, /\d/, `chip "${text}" shows a count before the engine reported one`);
+});
+
+test("index.html workers and Disk I/O inputs default to auto, with no preset value", () => {
+  const html = fs.readFileSync(path.join(import.meta.dirname, "index.html"), "utf8");
+  for (const id of ["remux-workers", "extract-workers", "remux-io-jobs", "extract-io-jobs"]) {
     const tag = html.match(new RegExp(`<input\\b[^>]*\\bid="${id}"[^>]*>`))?.[0];
     assert.ok(tag, `${id} input is missing`);
     assert.match(tag, /\bplaceholder="auto"/, `${id} must show the auto placeholder`);
-    assert.doesNotMatch(tag, /\svalue=/, `${id} must start empty so the request sends workers: null`);
+    assert.doesNotMatch(tag, /\svalue=/, `${id} must start empty so the request sends null and the engine's default applies`);
   }
 });
 
@@ -362,39 +481,6 @@ test("deferred preflight stop releases ownership, finalizes cancelled queue, and
   assert.equal(controller.lifecycle, "cancelled");
   assert.equal(controller.running, false);
   for (const [, button] of bulkButtons) assert.equal(button.disabled, false, "bulk control must return after abort");
-});
-
-test("job controller rejects invalid concurrency field values before preflight", async t => {
-  for (const [field, value] of [
-    ["workers", "0"],
-    ["workers", "1.5"],
-    ["io-jobs", "64.9"],
-    ["ffmpeg-threads", "33"],
-    ["ffmpeg-threads", "1.5"],
-    ["ffmpeg-threads", "32.9"],
-    ["ffmpeg-threads", "1e2"],
-  ]) {
-    await t.test(`${field}=${value}`, async t => {
-      installDocument(t, remuxElements({ "input-dir": "/input", [field]: value }));
-      const logs = [];
-      let scanCalled = false;
-      const runtime = makeRuntime(makeTracker(), {
-        appendLog: (_el, msg) => logs.push(msg),
-        scanInputDirectory: async () => {
-          scanCalled = true;
-          return true;
-        },
-      });
-
-      const controller = new JobController("remux", runtime);
-      await controller.start();
-
-      assert.equal(scanCalled, false);
-      assert.equal(controller.running, false);
-      assert.equal(runtime.coordinator.activeMode, null);
-      assert.ok(logs.some(msg => msg.includes(`Invalid ${field} value`)));
-    });
-  }
 });
 
 test("job controller passes typed BatchRequest with track assignments to run_job", async t => {
@@ -622,6 +708,22 @@ test("restored controller filters IDs, targets Stop, and releases controls on co
   assert.deepEqual(telemetry, [true, true, false, false]);
   controller.handleSnapshotSignal("done", { job_id: 42, mode: "remux", code: -1 });
   assert.equal(removed, 2);
+});
+
+test("a restored controller shows the snapshot's Effective Settings on the chips, or none when it has none", t => {
+  installDocument(t, remuxElements());
+  const chipCalls = [];
+  const restore = snapshot => {
+    const runtime = makeRuntime({}, { updateWorkerChips: (...args) => chipCalls.push(args) });
+    new JobController("remux", runtime).restoreActiveSnapshot({ job_id: 5, status: "running", ...snapshot }, () => {}, () => {});
+  };
+
+  const settings = { workers: 3, io_jobs: 5, ffmpeg_threads: 2, bitrate: "256k", complexity: 8 };
+  restore({ effective_settings: settings });
+  restore({ effective_settings: null });
+  restore({});
+
+  assert.deepEqual(chipCalls, [[true, settings], [true, null], [true, null]]);
 });
 
 test("Stop logs the shutdown wait before stop_job resolves", async t => {
