@@ -1,4 +1,5 @@
 use mkv_core::pipeline::{CancellationToken, ItemOutcome, JobEvent, CANCELLED_REASON};
+use mkv_core::request::EffectiveSettings;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -98,6 +99,9 @@ pub struct JobSnapshot {
     pub total_items: usize,
     pub completed_items: usize,
     pub input_dir: Option<String>,
+    /// What the job runs with, fixed when it starts. `None` only for a snapshot that no
+    /// `begin_snapshot` preceded.
+    pub effective_settings: Option<EffectiveSettings>,
     pub ordered_item_ids: Vec<String>,
     pub items: HashMap<String, ItemSnapshot>,
 }
@@ -224,6 +228,7 @@ impl JobState {
         job_id: u64,
         mode: &str,
         input_dir: String,
+        effective_settings: EffectiveSettings,
     ) -> Result<(), String> {
         *self.snapshot.lock().map_err(|error| error.to_string())? = Some(JobSnapshot {
             job_id,
@@ -234,6 +239,7 @@ impl JobState {
             total_items: 0,
             completed_items: 0,
             input_dir: Some(input_dir),
+            effective_settings: Some(effective_settings),
             ordered_item_ids: Vec::new(),
             items: HashMap::new(),
         });
@@ -289,6 +295,10 @@ impl JobState {
                         total_items: *total,
                         completed_items: 0,
                         input_dir: snap.as_ref().and_then(|s| s.input_dir.clone()),
+                        effective_settings: snap
+                            .as_ref()
+                            .filter(|snapshot| snapshot.job_id == job_id)
+                            .and_then(|snapshot| snapshot.effective_settings.clone()),
                         ordered_item_ids,
                         items: snapshot_items,
                     });
@@ -602,12 +612,25 @@ pub async fn close_window(window: tauri::Window, app: AppHandle) -> Result<(), S
 pub(crate) mod test_support {
     use super::JobSlot;
     use mkv_core::pipeline::{BatchItemInfo, CancellationToken, ItemOutcome, JobEvent};
+    use mkv_core::request::EffectiveSettings;
 
     pub(crate) fn dummy_slot(id: u64) -> JobSlot {
         JobSlot {
             id,
             cancel_token: CancellationToken::new(),
             pipeline_abort: tauri::async_runtime::spawn(async {}).inner().abort_handle(),
+        }
+    }
+
+    /// Effective Settings that differ from every default, so a test sees them pass through
+    /// unchanged.
+    pub(crate) fn effective_settings() -> EffectiveSettings {
+        EffectiveSettings {
+            workers: 3,
+            io_jobs: 5,
+            ffmpeg_threads: 2,
+            bitrate: "256k".into(),
+            complexity: 8,
         }
     }
 
@@ -731,6 +754,30 @@ mod tests {
     }
 
     #[test]
+    fn test_snapshot_carries_the_effective_settings_of_its_job() {
+        let state = JobState::default();
+        let settings = Some(effective_settings());
+        state
+            .begin_snapshot(7, "remux", "/anime".into(), effective_settings())
+            .unwrap();
+        assert_eq!(snapshot(&state).effective_settings, settings);
+
+        // Neither the engine's BatchStart nor the terminal event replaces them.
+        state.update_snapshot(&batch_start(&["ep1"]), 7, "remux");
+        assert_eq!(snapshot(&state).effective_settings, settings);
+        state.update_snapshot(&batch_complete(true, false), 7, "remux");
+        assert_eq!(snapshot(&state).effective_settings, settings);
+
+        let json = serde_json::to_value(snapshot(&state)).unwrap();
+        assert_eq!(json["effective_settings"]["io_jobs"], 5);
+        assert_eq!(json["effective_settings"]["bitrate"], "256k");
+
+        // A later job does not inherit them from the snapshot it replaces.
+        state.update_snapshot(&batch_start(&["ep1"]), 8, "remux");
+        assert_eq!(snapshot(&state).effective_settings, None);
+    }
+
+    #[test]
     fn test_batch_complete_success_transitions_lingering_queued_items_to_error() {
         let state = JobState::default();
         state.update_snapshot(&batch_start(&["ep1", "ep2"]), 10, "remux");
@@ -776,7 +823,9 @@ mod tests {
     #[test]
     fn test_live_snapshot_retains_only_active_order_and_clamped_progress() {
         let state = JobState::default();
-        state.begin_snapshot(10, "remux", "/anime".into()).unwrap();
+        state
+            .begin_snapshot(10, "remux", "/anime".into(), effective_settings())
+            .unwrap();
         let start_time_ms = snapshot(&state).start_time_ms;
         state.update_snapshot(&batch_start(&["ep2", "ep1"]), 10, "remux");
         for id in ["ep3", "ep2"] {
@@ -864,7 +913,9 @@ mod tests {
     fn test_clear_snapshot_ignored_while_job_is_active() {
         let state = JobState::default();
         *state.slot.lock().unwrap() = Some(dummy_slot(42));
-        state.begin_snapshot(42, "remux", "/anime".into()).unwrap();
+        state
+            .begin_snapshot(42, "remux", "/anime".into(), effective_settings())
+            .unwrap();
         state.clear_snapshot();
         assert!(state.snapshot.lock().unwrap().is_some());
     }

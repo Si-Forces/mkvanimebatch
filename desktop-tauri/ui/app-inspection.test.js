@@ -29,6 +29,9 @@ test("app forwards preflight options to Tauri while browse uses defaults", async
   assert.deepEqual(calls[1], ["inspect_directory", { path: "/release", options }]);
 });
 
+/** The Effective Settings the harness answers `get_default_settings` and `resolve_batch_request` with. */
+const DEFAULT_SETTINGS = { workers: 6, io_jobs: 2, ffmpeg_threads: 1, bitrate: "192k", complexity: 5 };
+
 class BootElement {
   constructor(value = "") {
     this.value = value;
@@ -110,6 +113,7 @@ function bootstrapHarness(t, commandResults = {}) {
           if (result instanceof Error) throw result;
           return result;
         }
+        if (command === "get_default_settings" || command === "resolve_batch_request") return DEFAULT_SETTINGS;
         if (command === "get_job_snapshot") {
           snapshotRequested();
           return snapshotPromise;
@@ -144,10 +148,14 @@ function bootstrapHarness(t, commandResults = {}) {
   };
 }
 
+/** What the running job of `activeSnapshot` runs with: nothing like `DEFAULT_SETTINGS`. */
+const JOB_SETTINGS = { workers: 3, io_jobs: 5, ffmpeg_threads: 2, bitrate: "256k", complexity: 8 };
+
 function activeSnapshot(status = "running") {
   return {
     job_id: 42, mode: "remux", status, start_time_ms: Date.now() - 2500,
     ordered_item_ids: ["two", "one"], total_items: 2, completed_items: 1,
+    effective_settings: JOB_SETTINGS,
     items: {
       one: { id: "one", file: "one.mkv", status: "processing", progress: 70, start_time_ms: Date.now() - 1500 },
       two: { id: "two", file: "two.mkv", status: "completed", duration_sec: 1.5 },
@@ -233,9 +241,9 @@ test("no snapshot preserves pre-run selection and cleans up bootstrap listeners"
   assert.equal(ipc.calls.filter(([command]) => command === "inspect_directory").length, 1);
 });
 
-test("get_default_workers puts auto (N) on both workers inputs and N in the standby chip", async t => {
-  const ipc = bootstrapHarness(t, { get_default_workers: 6 });
-  await ipc.mount("default-workers");
+test("get_default_settings puts auto (N) on both workers inputs and the defaults on the idle chips", async t => {
+  const ipc = bootstrapHarness(t, { get_default_settings: { ...DEFAULT_SETTINGS, workers: 6, io_jobs: 4 } });
+  await ipc.mount("default-settings");
   ipc.resolveSnapshot(null);
   await ipc.flush();
   for (const mode of ["remux", "extract"]) {
@@ -244,15 +252,16 @@ test("get_default_workers puts auto (N) on both workers inputs and N in the stan
     assert.equal(input.dataset.autoValue, "6");
   }
   assert.equal(ipc.workerChip.innerText, "⚡ Standby (6 Workers)");
+  assert.equal(ipc.ioChip.innerText, "🔀 Idle (4 IO Jobs)");
 });
 
-test("a failed get_default_workers leaves the inputs on plain auto and does not write the chip", async t => {
-  const ipc = bootstrapHarness(t, { get_default_workers: new Error("unavailable") });
+test("a failed get_default_settings leaves the inputs on plain auto and does not write the chips", async t => {
+  const ipc = bootstrapHarness(t, { get_default_settings: new Error("unavailable") });
   const logged = [];
   const priorError = console.error;
   console.error = (...args) => logged.push(args);
   t.after(() => { console.error = priorError; });
-  await ipc.mount("default-workers-failed");
+  await ipc.mount("default-settings-failed");
   ipc.resolveSnapshot(null);
   await ipc.flush();
   for (const mode of ["remux", "extract"]) {
@@ -261,18 +270,95 @@ test("a failed get_default_workers leaves the inputs on plain auto and does not 
     assert.equal("autoValue" in input.dataset, false);
   }
   assert.equal(ipc.workerChip.innerText, undefined);
-  assert.equal(logged.some(([label]) => label === "[get_default_workers] failed:"), true);
+  assert.equal(ipc.ioChip.innerText, undefined);
+  assert.equal(logged.some(([label]) => label === "[get_default_settings] failed:"), true);
 });
 
-test("with get_default_workers failed, a restored active job's chip shows the fallback 8", async t => {
-  const ipc = bootstrapHarness(t, { get_default_workers: new Error("unavailable") });
+test("a restored active job's chips show the snapshot's Effective Settings, not the defaults", async t => {
+  const ipc = bootstrapHarness(t);
+  await ipc.mount("restored-settings");
+  ipc.resolveSnapshot(activeSnapshot());
+  await ipc.flush();
+  assert.equal(ipc.workerChip.innerText, "⚡ 3 Workers Active");
+  assert.equal(ipc.ioChip.innerText, "🔀 5 IO Jobs Active");
+});
+
+test("with get_default_settings failed, a restored active job's chips still show its own settings", async t => {
+  const ipc = bootstrapHarness(t, { get_default_settings: new Error("unavailable") });
   const priorError = console.error;
   console.error = () => {};
   t.after(() => { console.error = priorError; });
-  await ipc.mount("default-workers-unknown-active");
+  await ipc.mount("restored-settings-unknown-defaults");
   ipc.resolveSnapshot(activeSnapshot());
   await ipc.flush();
-  assert.equal(ipc.workerChip.innerText, "⚡ 8 Workers Active");
+  assert.equal(ipc.workerChip.innerText, "⚡ 3 Workers Active");
+  assert.equal(ipc.ioChip.innerText, "🔀 5 IO Jobs Active");
+});
+
+test("with no settings known anywhere, the chips name their state and invent no counts", async t => {
+  const ipc = bootstrapHarness(t, { get_default_settings: new Error("unavailable") });
+  const priorError = console.error;
+  console.error = () => {};
+  t.after(() => { console.error = priorError; });
+  await ipc.mount("chips-without-settings");
+  // A snapshot no `run_job` began, so it carries no Effective Settings.
+  const { effective_settings: _omitted, ...withoutSettings } = activeSnapshot();
+  ipc.resolveSnapshot(withoutSettings);
+  await ipc.flush();
+  assert.equal(ipc.workerChip.innerText, "⚡ Workers Active");
+  assert.equal(ipc.ioChip.innerText, "🔀 IO Jobs Active");
+
+  ipc.emit("job-done", { job_id: 42, mode: "remux", code: 0 });
+  assert.equal(ipc.workerChip.innerText, "⚡ Standby");
+  assert.equal(ipc.ioChip.innerText, "🔀 Idle");
+});
+
+test("default settings that arrive after a job restored leave its chips alone, and idle chips return the defaults", async t => {
+  let answerDefaults;
+  const ipc = bootstrapHarness(t, { get_default_settings: new Promise(resolve => { answerDefaults = resolve; }) });
+  await ipc.mount("restored-before-defaults");
+  ipc.resolveSnapshot(activeSnapshot());
+  await ipc.flush();
+  answerDefaults({ ...DEFAULT_SETTINGS, workers: 6, io_jobs: 4 });
+  await ipc.flush();
+  assert.equal(ipc.workerChip.innerText, "⚡ 3 Workers Active");
+  assert.equal(ipc.elements.get("remux-workers").placeholder, "auto (6)");
+
+  ipc.emit("job-done", { job_id: 42, mode: "remux", code: 0 });
+  assert.equal(ipc.workerChip.innerText, "⚡ Standby (6 Workers)");
+  assert.equal(ipc.ioChip.innerText, "🔀 Idle (4 IO Jobs)");
+});
+
+test("the preset menu applies only what get_preset_profiles delivered", async t => {
+  const fast = { id: "fast", icon: "⚡", name: "Fast Muxing (128k)", bitrate: "128k", complexity: 3 };
+  const ipc = bootstrapHarness(t, { get_preset_profiles: [fast] });
+  const options = ["fast", "hifi"].map(preset => Object.assign(new BootElement(), { dataset: { preset } }));
+  for (const [id, value] of [["remux-bitrate", "192k"], ["remux-complexity", "5"], ["remux-cplx-val", "5"]]) {
+    ipc.elements.set(id, new BootElement(value));
+  }
+  const profileName = new BootElement();
+  const profileButton = Object.assign(new BootElement(), { focus() {} });
+  ipc.elements.set("active-profile-name", profileName);
+  ipc.elements.set("active-profile-btn", profileButton);
+  ipc.elements.set("profile-dropdown-menu", new BootElement());
+  const queryAll = globalThis.document.querySelectorAll;
+  globalThis.document.querySelectorAll = selector =>
+    selector === ".profile-option-item[data-preset]" ? options : queryAll(selector);
+
+  await ipc.mount("preset-catalog");
+  ipc.resolveSnapshot(null);
+  await ipc.flush();
+  const click = option => option.handlers.get("click")({ stopPropagation() {} });
+
+  // "hifi" is not in the catalog, and the page carries no copy of it to fall back on.
+  click(options[1]);
+  assert.equal(ipc.elements.get("remux-bitrate").value, "192k");
+  assert.equal(profileName.textContent, undefined);
+
+  click(options[0]);
+  assert.equal(ipc.elements.get("remux-bitrate").value, "128k");
+  assert.equal(ipc.elements.get("remux-complexity").value, "3");
+  assert.equal(profileName.textContent, "⚡ Fast Muxing (128k)");
 });
 
 test("explicit toggle survives a failed storage write when the OS scheme changes", async t => {

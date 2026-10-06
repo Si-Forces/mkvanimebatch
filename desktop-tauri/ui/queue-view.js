@@ -346,8 +346,9 @@ export class QueueTracker {
     });
   }
 
+  /** The bitrate control's value, or "" without one: the card never assumes a default. */
   getBitrate() {
-    return document.getElementById(`${this.mode}-bitrate`)?.value?.trim() || "192k";
+    return document.getElementById(`${this.mode}-bitrate`)?.value?.trim() ?? "";
   }
 
   // Creates card DOM in requestAnimationFrame batches under a ~8 ms frame
@@ -412,8 +413,9 @@ export class QueueTracker {
   applyMetadata(card, meta, bitrate) {
     card.codec.textContent = meta.video_tag || "MKV";
     if (this.mode === "remux") {
+      const opus = bitrate ? `Opus ${bitrate}` : "Opus";
       card.tag1.textContent = meta.has_flac
-        ? `${meta.audio_summary || "Audio"} → Opus ${bitrate}`
+        ? `${meta.audio_summary || "Audio"} → ${opus}`
         : (meta.audio_summary ? `${meta.audio_summary} (Passthrough)` : "No Audio");
       card.tag2.textContent = meta.fonts_count > 0
         ? `${meta.sub_summary || "No Subs"} + ${meta.fonts_count} Fonts`

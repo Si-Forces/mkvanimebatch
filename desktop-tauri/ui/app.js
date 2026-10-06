@@ -11,27 +11,8 @@ import { nextStepValue } from "./stepper.js";
 
 // ─── Preset Configurations ──────────────────────────────────────────────────
 
-// Fallback catalog; `get_preset_profiles` overwrites it at startup.
-const PRESETS = {
-  balanced: {
-    icon: "🌸",
-    name: "Balanced Anime (Opus 192k)",
-    bitrate: "192k",
-    complexity: "5",
-  },
-  fast: {
-    icon: "⚡",
-    name: "Fast Muxing (128k)",
-    bitrate: "128k",
-    complexity: "5",
-  },
-  hifi: {
-    icon: "🎧",
-    name: "Hi-Fi Master (320k)",
-    bitrate: "320k",
-    complexity: "10",
-  },
-};
+// The Preset Profile catalog, filled at startup by `get_preset_profiles`; the engine owns it.
+const PRESETS = {};
 
 async function restoreQueueFromSnapshot(controllers) {
   const buffered = [];
@@ -96,37 +77,32 @@ async function loadPresetProfiles() {
 }
 
 /**
- * The engine's default worker count: `null` until `get_default_workers` answers, or when it
- * fails. An empty workers field sends `workers: null`, which the engine resolves to this.
+ * The Effective Settings of a request that sets nothing: `null` until `get_default_settings`
+ * answers, or when it fails. An empty workers field sends `workers: null`, which the engine
+ * resolves to these.
  */
-let defaultWorkers = null;
-
-/** Worker count the chips show for an empty workers field while the engine's default is unknown. */
-const FALLBACK_WORKERS = 8;
-
-/** The worker count the chips show for an empty workers field. */
-const resolvedDefaultWorkers = () => defaultWorkers ?? FALLBACK_WORKERS;
+let defaultSettings = null;
 
 const WORKERS_INPUT_IDS = ["remux", "extract"].map(mode => `${mode}-workers`);
 
-async function loadDefaultWorkers() {
+async function loadDefaultSettings() {
   try {
-    const workers = await invoke("get_default_workers");
-    if (!Number.isInteger(workers) || workers < 1) {
-      throw new Error(`unexpected value ${JSON.stringify(workers)}`);
+    const settings = await invoke("get_default_settings");
+    if (!Number.isInteger(settings?.workers) || settings.workers < 1) {
+      throw new Error(`unexpected value ${JSON.stringify(settings)}`);
     }
-    defaultWorkers = workers;
+    defaultSettings = settings;
     for (const id of WORKERS_INPUT_IDS) {
       const input = document.getElementById(id);
       if (!input) continue;
-      input.placeholder = `auto (${workers})`;
-      input.dataset.autoValue = String(workers);
+      input.placeholder = `auto (${settings.workers})`;
+      input.dataset.autoValue = String(settings.workers);
     }
-    // Leave the chips alone while a job owns them; they show that job's own count.
+    // Leave the chips alone while a job owns them; they show that job's own settings.
     if (jobCoordinator.activeMode === null) updateWorkerChips(false);
   } catch (err) {
-    // The placeholder stays "auto" and the chips keep showing FALLBACK_WORKERS.
-    console.error("[get_default_workers] failed:", err);
+    // The placeholder stays "auto" and the chips name their state without a count.
+    console.error("[get_default_settings] failed:", err);
   }
 }
 
@@ -143,12 +119,14 @@ function applyPreset(presetKey) {
   const nameEl = document.getElementById("active-profile-name");
   const profileBtn = document.getElementById("active-profile-btn");
 
-  if (!p || presetKey === "custom") {
+  if (presetKey === "custom") {
     if (nameEl) nameEl.textContent = "🛠️ Custom Configuration";
     if (profileBtn) profileBtn.dataset.preset = "custom";
     setActiveProfileOption("custom");
     return;
   }
+  // Without its catalog entry there is nothing to apply.
+  if (!p) return;
 
   if (nameEl) nameEl.textContent = `${p.icon} ${p.name}`;
   if (profileBtn) profileBtn.dataset.preset = presetKey;
@@ -313,12 +291,23 @@ function switchView(viewId) {
 // Engine write throughput that fills the Disk I/O bar completely.
 const IO_BAR_FULL_SCALE_MB_S = 300;
 
-function updateWorkerChips(isJobActive = false, workersCount = resolvedDefaultWorkers(), ioJobsCount = 2) {
+/** A chip's text: `count` is shown when known, and otherwise left out rather than guessed. */
+function chipText(icon, isJobActive, idleWord, count, noun) {
+  const counted = count === undefined ? null : `${count} ${noun}`;
+  if (isJobActive) return `${icon} ${counted ?? noun} Active`;
+  return counted ? `${icon} ${idleWord} (${counted})` : `${icon} ${idleWord}`;
+}
+
+/**
+ * Shows `settings` (Effective Settings) on the worker and I/O job chips: the running job's while
+ * `isJobActive`, otherwise the defaults. `null` settings, not yet known, leave the counts out.
+ */
+function updateWorkerChips(isJobActive = false, settings = defaultSettings) {
   document.querySelectorAll(".metric-workers-chip").forEach(chip => {
-    chip.innerText = isJobActive ? `⚡ ${workersCount} Workers Active` : `⚡ Standby (${workersCount} Workers)`;
+    chip.innerText = chipText("⚡", isJobActive, "Standby", settings?.workers, "Workers");
   });
   document.querySelectorAll(".metric-iojobs-chip").forEach(chip => {
-    chip.innerText = isJobActive ? `🔀 ${ioJobsCount} IO Jobs Active` : `🔀 Idle (${ioJobsCount} IO Jobs)`;
+    chip.innerText = chipText("🔀", isJobActive, "Idle", settings?.io_jobs, "IO Jobs");
   });
 }
 
@@ -844,7 +833,6 @@ function initApp() {
     invoke,
     listen,
     queueFor,
-    resolvedDefaultWorkers,
     safeAddListener,
     scanInputDirectory,
     showModal,
@@ -861,7 +849,7 @@ function initApp() {
   jobCoordinator.syncControls();
   telemetryLoop.start();
   loadPresetProfiles();
-  loadDefaultWorkers();
+  loadDefaultSettings();
   restoreQueueFromSnapshot(controllers);
 
   document.addEventListener("keydown", e => {

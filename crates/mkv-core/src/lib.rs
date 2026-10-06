@@ -12,5 +12,3 @@ pub mod preset;
 pub mod remux;
 pub mod request;
 pub mod scan;
-
-pub use cpu::default_workers;

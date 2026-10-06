@@ -65,6 +65,7 @@ pub fn run() {
         .manage(telemetry::TelemetryState::default())
         .invoke_handler(tauri::generate_handler![
             commands::run_job,
+            commands::resolve_batch_request,
             process::stop_job,
             commands::clear_cache,
             commands::pick_directory,
@@ -79,7 +80,7 @@ pub fn run() {
             window::start_resize,
             window::set_window_theme,
             commands::get_preset_profiles,
-            commands::get_default_workers,
+            commands::get_default_settings,
             commands::get_job_snapshot,
         ])
         .build(tauri::generate_context!())
