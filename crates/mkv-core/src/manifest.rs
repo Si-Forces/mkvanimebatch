@@ -8,10 +8,10 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::domain::{ancestor_dirs, natural_sort_key, MkvTrack};
+use crate::inspect::inspect_videos;
 use crate::request::{clean_relative_path, resolve_selected_items};
 use crate::scan::{
-    get_or_probe_video, scan_assets, scan_mkv_files, InspectedVideo, MkvmergeMetadata, ParsedFile,
-    PersistentInspectCache, ScanCache,
+    scan_assets, scan_mkv_files, InspectedVideo, ParsedFile, PersistentInspectCache, ScanCache,
 };
 
 pub const MANIFEST_VERSION: u64 = 2;
@@ -415,64 +415,28 @@ pub async fn generate_inspection_manifest(
         }
     }
 
-    let probe_limit = crate::cpu::probe_concurrency(crate::cpu::default_workers());
-    let probe_sem = Arc::new(tokio::sync::Semaphore::new(probe_limit));
-    let mut probe_set = tokio::task::JoinSet::new();
-
-    let mut probe_results: HashMap<PathBuf, Result<MkvmergeMetadata, String>> = HashMap::new();
-
     if is_cancelled(cancel_token) {
         return cancelled(persistent_cache.as_deref());
     }
 
-    // The cache lookup and store run inside each probe task, so they overlap with probing
-    // and are aborted with it on cancel.
-    for mkv in &all_mkvs {
-        let path = mkv.path.clone();
-        let cache = persistent_cache.clone();
-        let sem = Arc::clone(&probe_sem);
-        probe_set.spawn(async move {
-            let Ok(_permit) = sem.acquire().await else {
-                return (path, Err("Probe semaphore closed".into()));
-            };
-            let res = get_or_probe_video(&path, cache.as_deref()).await;
-            (path, res)
-        });
-    }
-
-    while !probe_set.is_empty() {
-        let next_res = if let Some(token) = cancel_token {
-            tokio::select! {
-                _ = token.cancelled() => {
-                    probe_set.abort_all();
-                    return cancelled(persistent_cache.as_deref());
-                }
-                next = probe_set.join_next() => next,
-            }
-        } else {
-            probe_set.join_next().await
-        };
-
-        match next_res {
-            Some(Ok((path, probe_res))) => {
-                probe_results.insert(path, probe_res);
-            }
-            Some(Err(join_err)) => {
-                tracing::warn!("Preflight probe task failed: {join_err}");
-            }
-            None => break,
-        }
-    }
+    // `inspect_videos` flushes the cache on every exit, cancelled or not.
+    let token = cancel_token.cloned().unwrap_or_default();
+    let Some(inspections) = inspect_videos(
+        &all_mkvs,
+        persistent_cache.as_ref(),
+        crate::cpu::default_workers(),
+        &token,
+    )
+    .await
+    else {
+        return Err(CANCELLED_ERROR.to_string());
+    };
 
     let mut items = Vec::with_capacity(all_mkvs.len());
-    for mkv in &all_mkvs {
-        let probe_res = probe_results
-            .remove(&mkv.path)
-            .unwrap_or_else(|| Err("Probe result missing".into()));
-
-        let (metadata, inspection_error) = match probe_res {
-            Ok(probed) => (extract_mkv_metadata(&InspectedVideo::new(probed)), None),
-            Err(err) => (InspectionMetadata::default(), Some(err)),
+    for (mkv, inspection) in all_mkvs.iter().zip(inspections) {
+        let (metadata, inspection_error) = match inspection.video {
+            Some(video) => (extract_mkv_metadata(&video), None),
+            None => (InspectionMetadata::default(), inspection.error),
         };
 
         let parent = mkv.path.parent().unwrap_or(input_dir);
@@ -505,7 +469,7 @@ pub async fn generate_inspection_manifest(
 mod tests {
     use super::*;
     use crate::domain::TrackProperties;
-    use crate::scan::MkvAttachment;
+    use crate::scan::{MkvAttachment, MkvmergeMetadata};
 
     #[test]
     fn test_get_item_id() {

@@ -592,3 +592,52 @@ scripted Media Tool runner through `BatchPipeline::with_media_tool_runner` and r
 platform. What it checks is unchanged: `run_extract` hands its memo to `FontRegistry::new`, so the
 memo persisted after the run holds the seeded font's hash. Amendment 9 is left as written; this
 supersedes only its description of the test.
+
+## Amendment 13 — 2026-10-06 (bulk probing through one inspection module)
+
+**Decision.** Preflight inspection (`generate_inspection_manifest`) and remux planning
+(`run_remux`) each ran their own probe loop, and the two had drifted: different handling of a
+panicked probe task, a "semaphore closed" branch in one, a dropped result in both. Both now call
+`inspect::inspect_videos` (`inspect.rs`, crate-private). It takes the files, an optional cache, a
+worker count and a cancellation token, and returns one `InspectionResult` per file in input order,
+or `None` once the token fires. It owns:
+
+- **Concurrency.** The semaphore of `cpu::probe_concurrency(workers)` permits, and the cache
+  lookup and store inside each probe task, so they overlap with probing and are aborted with it.
+  Amendment 6's shared derivation now has a single call site, and the call sites for
+  `probe_concurrency` (`manifest.rs` and `pipeline.rs`) that Amendment 4's governor paragraph
+  lists, and Amendment 6 describes, read `inspect.rs`. The semaphore is local to the call and
+  never closed, so the "Probe semaphore closed" result is gone.
+- **Cancellation.** A cancel aborts the outstanding probe tasks and returns `None`. Preflight
+  turns that into `Inspection cancelled`, and a remux run settles every item as `cancelled`, as
+  before. A token already cancelled on entry returns `None` too.
+- **A panicked probe task.** It becomes a failure result for its own file,
+  `Probe task failed: <JoinError>`, found through the task's ID and logged once with
+  `tracing::warn!`. This replaces the dropped entry that preflight reported as "Probe result
+  missing" and the planner as "Failed to probe video". `RemuxPlanner` keeps that fallback as a
+  guard; `run_remux` can no longer reach it, since every file now has a result. Amendment 7's
+  panic of the blocking native probe is a different case: it still falls back to `mkvmerge -J`
+  inside `probe_video`.
+- **Saving the cache.** `save_shared` runs on every exit, cancelled or not, where each caller
+  saved on its own. `run_remux` passes no cache when `no_cache` is set, so it saves nothing then.
+  A completed preflight can write twice: `save_shared` here, then the pruning `save()` in
+  `prune_and_save_cache`, when fresh probes made the cache dirty and pruning removed stale entries.
+
+Pruning is not the module's job and stays with the manifest: only a completed scan of the input
+directory may prune, and the pipeline's file list is filtered by Selected Items.
+
+**Unchanged.** Amendment 6's gap stays open: an explicit `--workers` is not threaded into
+preflight, because `generate_inspection_manifest` has no Batch Request (the desktop's Inspect has
+none) and passes `cpu::default_workers()`, where `run_remux` passes `max_workers()`. Extract-mode
+probes (`run_extract` probes each item inside its own task) are not bulk probes and are untouched,
+as are `probe_video`, `get_or_probe_video` and the `PersistentInspectCache` API. Amendment 7's
+cancellation limit is unchanged: aborting a probe task still leaves an in-flight native read
+running to completion.
+
+**Coverage.** The tests in `inspect.rs` pin that a token cancelled before the call returns `None`
+and still saves the cache; that a seeded cache answers every file, none of which is Matroska;
+and that a missing or non-media file fails alone while its neighbours succeed, with every result
+at its input position even though the failing files finish after the cached ones. No test makes a
+probe task panic, because that needs a hook in production code.
+`test_generate_inspection_manifest_uses_cache_and_preserves_order` and the pipeline tests pass
+unchanged.
