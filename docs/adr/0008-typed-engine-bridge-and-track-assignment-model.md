@@ -69,3 +69,33 @@ This rule previously appeared in exactly one place in the repository — the Med
 - **Single check for preset and bitrate.** The CLI no longer rejects `--preset` or `--bitrate` while parsing; `resolve` reports both for the CLI and the desktop alike. The bitrate error now reads `Invalid bitrate format: '<value>'. Must be a positive integer with an optional k/K/M suffix, like 128k or 192k.`
 - **Effective Settings.** `EffectiveSettings` (`workers`, `io_jobs`, `ffmpeg_threads`, `bitrate`, `complexity`) is the serializable value a resolved config runs with, returned by `PipelineConfig::effective_settings`. `EffectiveSettings::defaults()` is that of a request that sets nothing, computed through the same code as `resolve`, so a client can show the defaults without a second copy of the rules.
 - **Superseded names.** This replaces `BatchRequest::validate` and `BatchRequest::into_pipeline_config` wherever ADR-0007, ADR-0011, ADR-0013 and ADR-0014 name them, including ADR-0013's `test_into_pipeline_config_default_workers_hardware_concurrency`, now `test_resolve_default_workers_hardware_concurrency`. It also ends ADR-0007's statement that the CLI checks `--preset` and `--bitrate` while parsing, and ADR-0007's 2026-10-04 statement that `BatchPipeline::from_request` remains the CLI's entry point: `from_request` is removed, and the CLI resolves once and calls `BatchPipeline::new`, as the desktop does.
+
+## Amendment — 2026-10-06 (desktop bridge)
+
+- **Decision 4 carries the Effective Settings.** `JobSnapshot` gains `effective_settings`, the
+  `EffectiveSettings` of the job's resolved config. `run_job` sets it once, when it begins the
+  snapshot, and it is serialized to the webview with the rest. No `JobEvent` changes it: the
+  `BatchStart` update keeps the settings of its own job and does not inherit another job's. It is
+  `null` only for a snapshot that no `run_job` began. A restored controller shows a running job's
+  worker and I/O job chips from it, so a reload no longer swaps the job's values for the defaults.
+- **Resolution before the scan.** The desktop adds `resolve_batch_request(request)`: it
+  canonicalizes `input_dir` with the helper `run_job` uses, calls `BatchRequest::resolve`, and returns
+  the Effective Settings or the first error. It is synchronous and reserves no `JobSlot`, so
+  Decision 1's ordering stands. The webview calls it with the request it built, before the forced
+  preflight scan, while `selected_items` and `assignments` are still unset; `run_job` resolves the
+  complete request after the scan. The webview's own concurrency range check
+  (`validateConcurrency`) is removed, so the ranges have one copy, in `mkv-core`. An out-of-range
+  whole number is refused with the engine's message. `workers`, `io_jobs` and `ffmpeg_threads` are
+  `usize` on the wire, so a fractional or negative entry never reaches `resolve`: it fails as the
+  command's arguments are deserialized, and the log shows that error text
+  (`test_concurrency_fields_are_whole_non_negative_numbers`). A refusal ends the start through
+  `abortStart`, like the other failures before the scan, so the status pill reads "failed": the
+  webview holds the Run coordinator across the call to keep a second Run out, which the old
+  synchronous check did not need. As that check did, it appends the error to the log without
+  clearing it; the log is cleared only once the request is accepted.
+- **Defaults.** `get_default_settings` returns `EffectiveSettings::defaults()` and replaces
+  `get_default_workers` (ADR-0013, Amendment 11).
+- **Preset catalog.** Decision 2 exposes the catalog through `get_preset_profiles()`, but the webview
+  kept a built-in copy as a fallback. It is deleted: the catalog comes only from
+  `get_preset_profiles`, and until it has loaded a preset click in the menu does nothing. The
+  desktop still sends the form's explicit bitrate and complexity; the preset id remains a label.

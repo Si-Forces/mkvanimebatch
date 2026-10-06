@@ -34,8 +34,6 @@ const STATUS_PILLS = {
 
 const TERMINAL_LIFECYCLE = { completed: "done", cancelled: "cancelled" };
 
-const isIntegerInRange = (value, min, max) => Number.isInteger(value) && value >= min && value <= max;
-
 /**
  * Converts the Remux view's seconds entry to the engine's `default_sub_offset_ms`, rounding
  * half away from zero like the CLI's `--sub-offset`. An empty entry is `null`; an explicit
@@ -49,23 +47,6 @@ export function subOffsetSecondsToMs(raw) {
   const ms = Math.sign(seconds) * Math.round(Math.abs(seconds) * 1000);
   // `+ 0` turns -0 into 0.
   return Number.isSafeInteger(ms) ? ms + 0 : NaN;
-}
-
-/**
- * Rejects out-of-range concurrency values before the forced preflight
- * inspection starts. Returns the error message, or null when the request is valid.
- */
-export function validateConcurrency(request) {
-  if (request.workers != null && !isIntegerInRange(request.workers, 1, 64)) {
-    return `Invalid workers value '${request.workers}': must be an integer between 1 and 64.`;
-  }
-  if (request.io_jobs != null && !isIntegerInRange(request.io_jobs, 0, 64)) {
-    return `Invalid io-jobs value '${request.io_jobs}': must be an integer between 0 and 64.`;
-  }
-  if (request.ffmpeg_threads != null && !isIntegerInRange(request.ffmpeg_threads, 1, 32)) {
-    return `Invalid ffmpeg-threads value '${request.ffmpeg_threads}': must be an integer between 1 and 32.`;
-  }
-  return null;
 }
 
 export class JobController {
@@ -125,7 +106,8 @@ export class JobController {
     this.runtime.coordinator.isStarting = false;
     this.runtime.coordinator.isStopping = false;
     this.setRunning(true);
-    this.runtime.updateWorkerChips(true);
+    // `null`, not undefined: a snapshot without settings must not fall back to the idle defaults.
+    this.runtime.updateWorkerChips(true, snapshot.effective_settings ?? null);
     this.runtime.telemetryLoop.setJobActive(true);
   }
 
@@ -239,11 +221,6 @@ export class JobController {
     const batchRequest = this.buildBatchRequest();
     if (!batchRequest) return;
     const inputDir = batchRequest.input_dir;
-    const concurrencyError = validateConcurrency(batchRequest);
-    if (concurrencyError) {
-      this.runtime.appendLog(this.logEl, `[ERROR] ${concurrencyError}`);
-      return;
-    }
     const generation = ++this.startGeneration;
     const tracker = this.runtime.queueFor(this.mode);
     const capturedDir = tracker.currentDirectory || tracker.lastScannedPath;
@@ -254,9 +231,26 @@ export class JobController {
     this.runtime.closeSubAssignModal();
 
     this.setRunning(true);
-    this.runtime.clearLog(this.logEl);
 
-    this.runtime.updateWorkerChips(true, batchRequest.workers ?? this.runtime.resolvedDefaultWorkers(), batchRequest.io_jobs ?? 2);
+    // The engine resolves the request before the scan, so a bad value fails here rather than
+    // after the scan, and the chips show the values it resolved. `run_job` resolves the
+    // complete request again once `selected_items` and `assignments` are set. The coordinator
+    // is held across the call so a second Run cannot start meanwhile, which makes a refusal end
+    // in `abortStart` (the pill reads "failed") like the other pre-scan failures; the message is
+    // appended to the log as it stands, which a refused request leaves uncleared.
+    let settings;
+    try {
+      settings = await this.runtime.invoke("resolve_batch_request", { request: batchRequest });
+    } catch (err) {
+      if (generation !== this.startGeneration) return;
+      this.runtime.appendLog(this.logEl, `[ERROR] ${err}`);
+      this.abortStart();
+      return;
+    }
+    if (generation !== this.startGeneration) return;
+
+    this.runtime.clearLog(this.logEl);
+    this.runtime.updateWorkerChips(true, settings);
     this.runtime.telemetryLoop.setJobActive(true);
 
     const inspected = await this.runtime.scanInputDirectory(inputDir, this.mode, {

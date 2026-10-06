@@ -89,9 +89,8 @@ pub(crate) fn default_workers_for(cores: usize) -> usize {
 /// Default batch worker count derived from physical CPU cores, clamped to [1, 16].
 ///
 /// `BatchRequest::resolve` applies the same rule (`default_workers_for`) to its core count when
-/// `workers` is `None`. The crate root re-exports this so the desktop can show it as "auto (N)"
-/// (ADR-0013 Amendment 10).
-pub fn default_workers() -> usize {
+/// `workers` is `None`.
+pub(crate) fn default_workers() -> usize {
     default_workers_for(physical_core_count())
 }
 
