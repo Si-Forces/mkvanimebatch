@@ -19,6 +19,7 @@ use crate::assets::{
 use crate::domain::{resolve_output_dir, IO_GOVERNOR_CLOSED};
 use crate::extract::extract_mkv_file;
 use crate::fonts::{scan_fonts, FontHashMemo, FontInfo, FontRegistry};
+use crate::inspect::inspect_videos;
 use crate::manifest::get_item_id;
 use crate::media_tool::{MediaToolRunner, SubprocessRunner};
 use crate::remux::{execute_remux_job, RemuxOptions};
@@ -978,50 +979,21 @@ impl BatchPipeline {
         let cache = self.inspect_cache();
 
         // Probe every batch video concurrently, across release directories, before planning.
-        let probe_limit = crate::cpu::probe_concurrency(self.max_workers());
-        let probe_sem = Arc::new(Semaphore::new(probe_limit));
-        let mut probe_set = tokio::task::JoinSet::new();
-        for file in &files {
-            let path = file.path.clone();
-            let cache = Arc::clone(&cache);
-            let no_cache = self.config.no_cache;
-            let sem = Arc::clone(&probe_sem);
-            probe_set.spawn(async move {
-                let _permit = sem.acquire().await.ok();
-                let cache = if no_cache { None } else { Some(&*cache) };
-                let res = get_or_probe_video(&path, cache).await;
-                (path, res)
-            });
-        }
-        let mut all_inspections: HashMap<PathBuf, InspectionResult> = HashMap::new();
-        loop {
-            tokio::select! {
-                _ = self.cancel_token.cancelled() => {
-                    probe_set.abort_all();
-                    break;
-                }
-                next_res = probe_set.join_next() => {
-                    match next_res {
-                        Some(Ok((path, probe_res))) => {
-                            let inspection = match probe_res {
-                                Ok(meta) => InspectionResult::success(meta),
-                                Err(err) => InspectionResult::failure(err),
-                            };
-                            all_inspections.insert(path, inspection);
-                        }
-                        Some(Err(join_err)) => {
-                            tracing::warn!("Bulk probe task failed: {join_err}");
-                        }
-                        None => break,
-                    }
-                }
-            }
-        }
-        cache.save_shared();
-
-        if self.cancel_token.is_cancelled() {
+        let Some(inspections) = inspect_videos(
+            &files,
+            (!self.config.no_cache).then_some(&cache),
+            self.max_workers(),
+            &self.cancel_token,
+        )
+        .await
+        else {
             return Ok(self.cancel_before_planning(&files, summary).await);
-        }
+        };
+        let all_inspections: HashMap<PathBuf, InspectionResult> = files
+            .iter()
+            .map(|file| file.path.clone())
+            .zip(inspections)
+            .collect();
 
         let Some(prepared_dirs) = prepare_release_dirs(
             &videos_by_dir,
