@@ -7,6 +7,7 @@ pub mod ebml;
 pub mod extract;
 pub mod fonts;
 pub mod manifest;
+pub mod media_tool;
 pub mod pipeline;
 pub mod preset;
 pub mod remux;

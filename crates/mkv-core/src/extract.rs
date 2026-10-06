@@ -1,14 +1,13 @@
 //! Track, font, chapter, and cover extraction using mkvextract.
 
 use std::path::{Path, PathBuf};
-use tokio::io::AsyncReadExt;
-use tokio::process::Command;
 
 use crate::domain::{
-    parse_episode, promote_file, read_progress_stream, safe_filename, select_best_subtitle_track,
-    EpisodeInfo, COVER_EXTENSIONS, SUBPROCESS_TIMEOUT,
+    parse_episode, promote_file, safe_filename, select_best_subtitle_track, EpisodeInfo,
+    COVER_EXTENSIONS, SUBPROCESS_TIMEOUT,
 };
 use crate::fonts::{FontClaimsGuard, FontRegistry};
+use crate::media_tool::{self, MediaTool, MediaToolRunner};
 use crate::scan::{path_ext_lower, InspectedVideo};
 
 #[derive(Debug, Default, Clone)]
@@ -80,13 +79,15 @@ fn promote_optional(
     }
 }
 
-/// Extracts best-match subtitles, chapters, cover images, and new fonts from an MKV file.
+/// Extracts best-match subtitles, chapters, cover images, and new fonts from an MKV file with
+/// one `mkvextract` run through `runner`.
 pub async fn extract_mkv_file(
     mkv_path: &Path,
     inspected: &InspectedVideo,
     font_registry: &FontRegistry,
     out_dir: Option<&Path>,
     on_progress: Option<&(dyn Fn(f64) + Send + Sync)>,
+    runner: &dyn MediaToolRunner,
 ) -> Result<ExtractSummary, String> {
     let mut summary = ExtractSummary {
         log: vec![format!("Processing: {}", mkv_path.display())],
@@ -194,71 +195,15 @@ pub async fn extract_mkv_file(
         }
     }
 
-    let mut cmd = Command::new("mkvextract");
-    #[cfg(windows)]
-    cmd.creation_flags(crate::domain::CREATE_NO_WINDOW);
-    cmd.kill_on_drop(true);
-    cmd.args(&extract_args);
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
-
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("Failed to run mkvextract: {e}"))?;
-
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-
-    let stderr_handle = tokio::spawn(async move {
-        let mut bytes = Vec::new();
-        if let Some(mut stream) = stderr {
-            let _ = stream.read_to_end(&mut bytes).await;
-        }
-        bytes
-    });
-    let stderr_abort = stderr_handle.abort_handle();
-    let execution = async {
-        let mut stdout_bytes = Vec::new();
-        if let Some(out_stream) = stdout {
-            let _ = read_progress_stream(out_stream, on_progress, &mut stdout_bytes).await;
-        }
-        let status = child
-            .wait()
-            .await
-            .map_err(|e| format!("Failed to wait on mkvextract: {e}"))?;
-        let stderr_output = stderr_handle.await.unwrap_or_default();
-        Ok::<_, String>((status, stdout_bytes, stderr_output))
-    };
-
-    let (status, stdout_bytes, stderr_output) =
-        match tokio::time::timeout(SUBPROCESS_TIMEOUT, execution).await {
-            Ok(res) => res?,
-            Err(_) => {
-                stderr_abort.abort();
-                return Err(format!(
-                    "mkvextract timed out after {} seconds",
-                    SUBPROCESS_TIMEOUT.as_secs()
-                ));
-            }
-        };
-
-    // mkvextract exits 1 when it completed with warnings.
-    let is_success = matches!(status.code(), Some(0) | Some(1));
-    if !is_success {
-        let stderr = String::from_utf8_lossy(&stderr_output).trim().to_string();
-        let stdout = String::from_utf8_lossy(&stdout_bytes).trim().to_string();
-        let err_msg = if !stderr.is_empty() {
-            stderr
-        } else if !stdout.is_empty() {
-            stdout
-        } else {
-            status
-                .code()
-                .map(|c| format!("exit code {c}"))
-                .unwrap_or_else(|| "terminated by signal".into())
-        };
-        return Err(format!("mkvextract failed: {err_msg}"));
-    }
+    let output = media_tool::run(
+        runner,
+        MediaTool::Mkvextract,
+        &extract_args,
+        SUBPROCESS_TIMEOUT,
+        on_progress,
+    )
+    .await?;
+    summary.log.extend(output.warning_log_line());
 
     if let Some((staged, final_path)) = staged_sub {
         if has_content(&staged) {
