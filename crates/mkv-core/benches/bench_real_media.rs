@@ -64,7 +64,7 @@ mod real_media {
     use std::process::{Command, Stdio};
     use std::time::Instant;
 
-    use mkv_core::manifest::get_item_id;
+    use mkv_core::item_id::ItemId;
     use mkv_core::pipeline::{BatchPipeline, CancellationToken, PipelineMode, PipelineSummary};
     use mkv_core::remux::select_tracks;
     use mkv_core::request::{BatchRequest, WORKERS_RANGE};
@@ -382,7 +382,7 @@ mod real_media {
         };
         let mut codecs: BTreeMap<String, usize> = BTreeMap::new();
         for file in scan_mkv_files(root, true, None) {
-            let id = get_item_id(&file.path, root);
+            let id = ItemId::of(&file.path, root).to_string();
             let selection = match rt.block_on(probe_video(&file.path)) {
                 Ok(meta) => select_tracks(&InspectedVideo::new(meta)),
                 Err(e) => {

@@ -266,14 +266,15 @@ impl JobState {
                     let mut ordered_item_ids = Vec::new();
                     if let Some(items) = items {
                         for item in items {
-                            if snapshot_items.contains_key(&item.id) {
+                            let id = item.id.to_string();
+                            if snapshot_items.contains_key(&id) {
                                 continue;
                             }
-                            ordered_item_ids.push(item.id.clone());
+                            ordered_item_ids.push(id.clone());
                             snapshot_items.insert(
-                                item.id.clone(),
+                                id.clone(),
                                 ItemSnapshot {
-                                    id: item.id.clone(),
+                                    id,
                                     file: item.file.clone(),
                                     status: ItemStatus::Queued,
                                     outcome: None,
@@ -306,7 +307,7 @@ impl JobState {
                 JobEvent::ItemStart { id, file, .. } => {
                     if let Some(item) = snap
                         .as_mut()
-                        .and_then(|snapshot| snapshot.items.get_mut(id))
+                        .and_then(|snapshot| snapshot.items.get_mut(id.as_str()))
                     {
                         if !item.status.is_terminal() {
                             item.file = file.clone();
@@ -318,7 +319,7 @@ impl JobState {
                 JobEvent::ItemProgress { id, progress, .. } => {
                     if let Some(item) = snap
                         .as_mut()
-                        .and_then(|snapshot| snapshot.items.get_mut(id))
+                        .and_then(|snapshot| snapshot.items.get_mut(id.as_str()))
                     {
                         if item.status == ItemStatus::Processing && progress.is_finite() {
                             item.progress = Some(progress.clamp(0.0, 100.0));
@@ -335,7 +336,7 @@ impl JobState {
                     ..
                 } => {
                     if let Some(snapshot) = snap.as_mut() {
-                        if let Some(item) = snapshot.items.get_mut(id) {
+                        if let Some(item) = snapshot.items.get_mut(id.as_str()) {
                             if !item.status.is_terminal() {
                                 item.file = file.clone();
                                 item.status = (*status).into();
@@ -611,6 +612,7 @@ pub async fn close_window(window: tauri::Window, app: AppHandle) -> Result<(), S
 #[cfg(test)]
 pub(crate) mod test_support {
     use super::JobSlot;
+    use mkv_core::item_id::ItemId;
     use mkv_core::pipeline::{BatchItemInfo, CancellationToken, ItemOutcome, JobEvent};
     use mkv_core::request::EffectiveSettings;
 
@@ -643,7 +645,7 @@ pub(crate) mod test_support {
             items: Some(
                 ids.iter()
                     .map(|id| BatchItemInfo {
-                        id: (*id).into(),
+                        id: ItemId::parse(id),
                         file: format!("{id}.mkv"),
                     })
                     .collect(),
@@ -655,7 +657,7 @@ pub(crate) mod test_support {
     pub(crate) fn item_start(id: &str) -> JobEvent {
         JobEvent::ItemStart {
             version: 1,
-            id: id.into(),
+            id: ItemId::parse(id),
             file: format!("{id}.mkv"),
             extra: Default::default(),
         }
@@ -664,7 +666,7 @@ pub(crate) mod test_support {
     pub(crate) fn item_progress(id: &str, progress: f64) -> JobEvent {
         JobEvent::ItemProgress {
             version: 1,
-            id: id.into(),
+            id: ItemId::parse(id),
             file: format!("{id}.mkv"),
             progress,
             speed: None,
@@ -676,7 +678,7 @@ pub(crate) mod test_support {
     pub(crate) fn item_complete(id: &str, duration_sec: f64) -> JobEvent {
         JobEvent::ItemComplete {
             version: 1,
-            id: id.into(),
+            id: ItemId::parse(id),
             file: format!("{id}.mkv"),
             status: ItemOutcome::Completed,
             reason: None,

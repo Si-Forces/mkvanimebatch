@@ -6,11 +6,12 @@ use std::ops::RangeInclusive;
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 
+use mkv_core::item_id::ItemId;
 use mkv_core::pipeline::PipelineMode;
 use mkv_core::preset::lookup_preset;
 use mkv_core::request::{
-    clean_relative_path, parse_assignments_json, BatchRequest, COMPLEXITY_RANGE, DEFAULT_IO_JOBS,
-    DEFAULT_PRESET_ID, FFMPEG_THREADS_RANGE, IO_JOBS_RANGE, WORKERS_RANGE,
+    parse_assignments_json, BatchRequest, COMPLEXITY_RANGE, DEFAULT_IO_JOBS, DEFAULT_PRESET_ID,
+    FFMPEG_THREADS_RANGE, IO_JOBS_RANGE, WORKERS_RANGE,
 };
 
 #[derive(Debug)]
@@ -226,7 +227,7 @@ fn normalize_selected_item(raw: &str, input_dir: &Path) -> Result<String, String
             input_dir.display()
         )
     };
-    let relative_id = |rel: &Path| clean_relative_path(&rel.to_string_lossy());
+    let relative_id = |rel: &Path| ItemId::parse(&rel.to_string_lossy()).to_string();
     let path = Path::new(raw);
 
     if let Ok(rel) = path.strip_prefix(input_dir) {
@@ -284,7 +285,7 @@ fn normalize_selected_item(raw: &str, input_dir: &Path) -> Result<String, String
             return Err(outside());
         }
     }
-    Ok(clean_relative_path(raw))
+    Ok(ItemId::parse(raw).to_string())
 }
 
 /// Words a range for the help text, e.g. `1-64`.

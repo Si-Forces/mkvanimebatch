@@ -9,7 +9,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::domain::{ancestor_dirs, natural_sort_key, MkvTrack};
 use crate::inspect::inspect_videos;
-use crate::request::{clean_relative_path, resolve_selected_items};
+use crate::item_id::{get_item_id, ItemId};
+use crate::request::resolve_selected_items;
 use crate::scan::{
     scan_assets, scan_mkv_files, InspectedVideo, ParsedFile, PersistentInspectCache, ScanCache,
 };
@@ -17,30 +18,6 @@ use crate::scan::{
 pub const MANIFEST_VERSION: u64 = 2;
 
 const CANCELLED_ERROR: &str = "Inspection cancelled";
-
-/// Derives a root-relative POSIX path ID for job events and manifest items.
-/// Normalizes backslashes `\` to `/`. If stripped is empty or points to root, returns `"."`.
-pub fn get_item_id(path: &Path, root_dir: &Path) -> String {
-    let rel = match path.strip_prefix(root_dir) {
-        Ok(p) => p.to_path_buf(),
-        Err(_) => {
-            if let (Ok(p), Ok(r)) = (path.canonicalize(), root_dir.canonicalize()) {
-                p.strip_prefix(&r)
-                    .map(|p| p.to_path_buf())
-                    .unwrap_or_else(|_| path.to_path_buf())
-            } else {
-                path.to_path_buf()
-            }
-        }
-    };
-
-    let s = rel.to_string_lossy().replace('\\', "/");
-    if s.is_empty() || s == "." {
-        ".".to_string()
-    } else {
-        s
-    }
-}
 
 /// Buckets a `pixel_dimensions` string (e.g. "1920x1080") into a resolution label.
 fn parse_resolution(pixel_dimensions: &str) -> Option<&'static str> {
@@ -150,7 +127,7 @@ pub struct InspectionMetadata {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ManifestItem {
-    pub id: String,
+    pub id: ItemId,
     pub name: String,
     pub release: String,
     pub metadata: InspectionMetadata,
@@ -175,11 +152,11 @@ impl InspectionManifest {
     /// and prunes `subtitle_candidates` to the releases of the retained items. Every
     /// selection must name a discovered item.
     pub fn select_items(&self, selected_items: &[String]) -> Result<InspectionManifest, String> {
-        let index_by_id: HashMap<String, usize> = self
+        let index_by_id: HashMap<ItemId, usize> = self
             .items
             .iter()
             .enumerate()
-            .map(|(idx, item)| (clean_relative_path(&item.id), idx))
+            .map(|(idx, item)| (item.id.clone(), idx))
             .collect();
         let filtered_items: Vec<ManifestItem> =
             resolve_selected_items(&index_by_id, selected_items)?
@@ -446,7 +423,7 @@ pub async fn generate_inspection_manifest(
             .unwrap_or_else(|| get_item_id(parent, input_dir));
 
         items.push(ManifestItem {
-            id: get_item_id(&mkv.path, input_dir),
+            id: ItemId::of(&mkv.path, input_dir),
             name: mkv.name.clone(),
             release,
             metadata,
@@ -470,20 +447,6 @@ mod tests {
     use super::*;
     use crate::domain::TrackProperties;
     use crate::scan::{MkvAttachment, MkvmergeMetadata};
-
-    #[test]
-    fn test_get_item_id() {
-        let root = Path::new("/anime/series");
-        assert_eq!(get_item_id(Path::new("/anime/series"), root), ".");
-        assert_eq!(
-            get_item_id(Path::new("/anime/series/ep01.mkv"), root),
-            "ep01.mkv"
-        );
-        assert_eq!(
-            get_item_id(Path::new("/anime/series/Season 1/ep01.mkv"), root),
-            "Season 1/ep01.mkv"
-        );
-    }
 
     #[test]
     fn test_parse_resolution() {
@@ -682,7 +645,7 @@ mod tests {
 
     fn make_test_item(id: &str, name: &str, release: &str) -> ManifestItem {
         ManifestItem {
-            id: id.to_string(),
+            id: ItemId::parse(id),
             name: name.to_string(),
             release: release.to_string(),
             metadata: InspectionMetadata::default(),
@@ -725,8 +688,8 @@ mod tests {
         let filtered = manifest.select_items(&selected).unwrap();
 
         assert_eq!(filtered.items.len(), 2);
-        assert_eq!(filtered.items[0].id, "ep03.mkv");
-        assert_eq!(filtered.items[1].id, "ep01.mkv");
+        assert_eq!(filtered.items[0].id.as_str(), "ep03.mkv");
+        assert_eq!(filtered.items[1].id.as_str(), "ep01.mkv");
         assert_eq!(filtered.version, MANIFEST_VERSION);
         assert_eq!(
             filtered.subtitle_candidates.get("Show").unwrap(),
@@ -752,7 +715,7 @@ mod tests {
         let filtered = manifest.select_items(&selected).unwrap();
 
         assert_eq!(filtered.items.len(), 1);
-        assert_eq!(filtered.items[0].id, "season2/ep01.mkv");
+        assert_eq!(filtered.items[0].id.as_str(), "season2/ep01.mkv");
         assert!(!filtered.subtitle_candidates.contains_key("Season 1"));
         assert_eq!(
             filtered.subtitle_candidates.get("Season 2").unwrap(),
@@ -781,8 +744,8 @@ mod tests {
         let filtered = manifest.select_items(&selected).unwrap();
 
         assert_eq!(filtered.items.len(), 2);
-        assert_eq!(filtered.items[0].id, "ep01.mkv");
-        assert_eq!(filtered.items[1].id, "ep02.mkv");
+        assert_eq!(filtered.items[0].id.as_str(), "ep01.mkv");
+        assert_eq!(filtered.items[1].id.as_str(), "ep02.mkv");
     }
 
     #[test]
