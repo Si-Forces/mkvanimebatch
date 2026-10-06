@@ -265,9 +265,11 @@ impl EffectiveSettings {
     /// [`Self::defaults`] for `cores` physical cores, through the same layering as a resolved
     /// request.
     fn defaults_with_cores(cores: usize) -> Self {
-        BatchRequest::default()
-            .effective_settings(cores)
-            .expect("the default preset is built in")
+        let request = BatchRequest::default();
+        let preset = request
+            .preset_profile()
+            .expect("the default preset is built in");
+        request.layer_effective_settings(preset, cores)
     }
 }
 
@@ -285,14 +287,14 @@ impl BatchRequest {
     /// [`Self::resolve`] on a machine with `cores` physical cores, so tests can fix the
     /// hardware-derived defaults.
     fn resolve_with_cores(self, cores: usize) -> Result<PipelineConfig, String> {
-        self.validate()?;
+        let preset = self.validate()?;
         let EffectiveSettings {
             workers,
             io_jobs,
             ffmpeg_threads,
             bitrate,
             complexity,
-        } = self.effective_settings(cores)?;
+        } = self.layer_effective_settings(preset, cores);
 
         Ok(PipelineConfig {
             mode: self.mode,
@@ -321,19 +323,17 @@ impl BatchRequest {
         lookup_preset(id).ok_or_else(|| format!("Unknown preset profile: '{id}'"))
     }
 
-    /// Layers the explicit settings over the preset profile and the defaults for a machine with
-    /// `cores` physical cores. The one home of the default rules; it does not check ranges,
-    /// which `validate` does.
-    fn effective_settings(&self, cores: usize) -> Result<EffectiveSettings, String> {
-        let preset = self.preset_profile()?;
-
+    /// Layers the explicit settings over `preset` and the defaults for a machine with `cores`
+    /// physical cores. With `preset_profile`, which picks the default preset, the one home of the
+    /// default rules; it does not check ranges, which `validate` does.
+    fn layer_effective_settings(&self, preset: PresetProfile, cores: usize) -> EffectiveSettings {
         let workers = self.workers.unwrap_or_else(|| default_workers_for(cores));
         let io_jobs = match self.io_jobs {
             None => DEFAULT_IO_JOBS,
             Some(0) => workers,
             Some(io_jobs) => io_jobs,
         };
-        Ok(EffectiveSettings {
+        EffectiveSettings {
             workers,
             io_jobs,
             ffmpeg_threads: self
@@ -344,12 +344,12 @@ impl BatchRequest {
                 .as_deref()
                 .map_or(preset.bitrate, |b| b.trim().to_owned()),
             complexity: self.complexity.unwrap_or(preset.complexity),
-        })
+        }
     }
 
     /// Checks the directories, numeric ranges, bitrate format, preset, track assignments and
-    /// selected items, in that order.
-    fn validate(&self) -> Result<(), String> {
+    /// selected items, in that order, and returns the Preset Profile it checked.
+    fn validate(&self) -> Result<PresetProfile, String> {
         if !self.input_dir.is_dir() {
             return Err(format!(
                 "Input directory does not exist or is not a directory: '{}'",
@@ -423,7 +423,7 @@ impl BatchRequest {
             }
         }
 
-        self.preset_profile()?;
+        let preset = self.preset_profile()?;
 
         if let Some(assignments) = &self.assignments {
             let mut seen_videos: HashSet<String> = HashSet::new();
@@ -524,7 +524,7 @@ impl BatchRequest {
             }
         }
 
-        Ok(())
+        Ok(preset)
     }
 }
 
@@ -746,6 +746,14 @@ mod tests {
             resolved(&req).unwrap().effective_settings(),
             config.effective_settings()
         );
+    }
+
+    #[test]
+    fn test_pipeline_config_fixture_matches_the_balanced_preset() {
+        let balanced = lookup_preset(DEFAULT_PRESET_ID).unwrap();
+        let fixture = PipelineConfig::default();
+        assert_eq!(fixture.bitrate, balanced.bitrate);
+        assert_eq!(fixture.complexity, balanced.complexity);
     }
 
     #[test]

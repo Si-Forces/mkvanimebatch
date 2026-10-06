@@ -487,18 +487,6 @@ impl BatchPipeline {
         }
     }
 
-    /// Resolves `request` and builds a pipeline from it: a convenience for library callers. The
-    /// CLI and the desktop call `BatchRequest::resolve` themselves, to reject a bad request before
-    /// they start any work.
-    pub fn from_request(
-        request: crate::request::BatchRequest,
-        event_sender: Option<EventSender>,
-        cancel_token: CancellationToken,
-    ) -> Result<Self, String> {
-        let config = request.resolve()?;
-        Ok(Self::new(config, event_sender, cancel_token))
-    }
-
     pub fn with_log_sender(mut self, log_sender: LogSender) -> Self {
         self.log_sender = Some(log_sender);
         self
