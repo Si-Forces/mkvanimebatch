@@ -780,15 +780,14 @@ impl AssetResolver {
     }
 
     /// Resolves the assets of `video`. `assigned_subtitle` is taken as given: the Remux Plan has
-    /// already checked that it exists. It currently never returns `Err`; the `Result` stays so a
-    /// caller can fail the batch on a future resolver failure.
+    /// already checked that it exists.
     pub fn resolve_for(
         &self,
         video: &ParsedFile,
         inspected: Option<&InspectedVideo>,
         claimed_chapter: Option<&Path>,
         assigned_subtitle: Option<&Path>,
-    ) -> Result<ResolvedAssets, String> {
+    ) -> ResolvedAssets {
         let has_source_chapters = inspected.is_some_and(|i| i.has_chapters());
         let has_source_cover = inspected.is_some_and(|i| i.cover_attachment().is_some());
 
@@ -808,7 +807,7 @@ impl AssetResolver {
         let subtitle_label = lang_label(&sub_res.lang).to_string();
         let subtitle_mkv_lang = lang_mkv_tag(&sub_res.lang).to_string();
 
-        Ok(ResolvedAssets {
+        ResolvedAssets {
             subtitle_file: sub_res.subtitle_file,
             embedded_sub_id: sub_res.embedded_sub_id,
             subtitle_lang: sub_res.lang,
@@ -818,7 +817,7 @@ impl AssetResolver {
             chapter_file,
             cover_file,
             skip_reason: sub_res.skip_reason,
-        })
+        }
     }
 }
 

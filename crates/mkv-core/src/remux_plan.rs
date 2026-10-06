@@ -130,17 +130,10 @@ impl<'a> RemuxPlanner<'a> {
             .chapter_claims
             .get(&file.path)
             .map(PathBuf::as_path);
-        let res_assets = match dir_prep.resolver.resolve_for(
-            file,
-            Some(inspected),
-            claimed_chapter,
-            assigned_sub,
-        ) {
-            Ok(assets) => assets,
-            // `resolve_for` never fails today; the arm keeps its `Result` contract (an `Err`
-            // fails the batch) and has no test because nothing can reach it.
-            Err(message) => return RemuxPlan::Abort { message },
-        };
+        let res_assets =
+            dir_prep
+                .resolver
+                .resolve_for(file, Some(inspected), claimed_chapter, assigned_sub);
 
         if !res_assets.matched_subtitle {
             return RemuxPlan::Skip {

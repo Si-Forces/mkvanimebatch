@@ -38,7 +38,6 @@ fn resolve_episode_01_subtitle(sub_paths: &[&str]) -> ResolvedAssets {
         ..Default::default()
     }
     .resolve_for(&with_episode("episode_01.mkv", episode()), None, None, None)
-    .unwrap()
 }
 
 fn source_with_embedded_cover() -> InspectedVideo {
@@ -218,7 +217,7 @@ fn test_ancestor_asset_override_precedence() {
         season_dir.join("Show - 01.mkv"),
         EpisodeInfo::new("1", "E", "01"),
     );
-    let resolved = resolver.resolve_for(&video, None, None, None).unwrap();
+    let resolved = resolver.resolve_for(&video, None, None, None);
     assert_eq!(
         resolved.subtitle_file,
         Some(season_dir.join("Show - 01.ind.ass"))
@@ -246,7 +245,7 @@ fn test_local_subtitle_next_to_mkv_wins_over_ancestor() {
 
     let video_path = season_dir.join("[SuperLongFansubGroup] Anime Title - 01 [1080p FLAC BD].mkv");
     let video = with_episode(video_path, EpisodeInfo::new("1", "E", "01"));
-    let resolved = resolver.resolve_for(&video, None, None, None).unwrap();
+    let resolved = resolver.resolve_for(&video, None, None, None);
     assert_eq!(resolved.subtitle_file, Some(local_sub));
 }
 
@@ -294,10 +293,7 @@ fn test_assets_dir_subtitle_source_beats_parent_language_score() {
         EpisodeInfo::new("1", "E", "01"),
     );
     assert_eq!(
-        resolver
-            .resolve_for(&video, None, None, None)
-            .unwrap()
-            .subtitle_file,
+        resolver.resolve_for(&video, None, None, None).subtitle_file,
         Some(assets_dir.join("Show - 01.eng.ass"))
     );
 }
@@ -340,9 +336,7 @@ fn test_subtitle_source_ladder_uses_embedded_before_ancestors() {
     }
     let dirs = ancestor_dirs(&season, &root);
     let resolve = |inspected: Option<&InspectedVideo>, assigned: Option<&Path>| {
-        discover(&dirs, Some(&fallback))
-            .resolve_for(&video, inspected, None, assigned)
-            .unwrap()
+        discover(&dirs, Some(&fallback)).resolve_for(&video, inspected, None, assigned)
     };
     let embedded = InspectedVideo::new(MkvmergeMetadata {
         tracks: vec![MkvTrack {
@@ -406,7 +400,6 @@ fn test_cover_nearest_directory_then_kind_and_natural_ties() {
     let cover = || {
         discover(&dirs, None)
             .resolve_for(&video, None, None, None)
-            .unwrap()
             .cover_file
     };
     assert_eq!(cover(), Some(numbered[2].clone()));
@@ -450,7 +443,6 @@ fn test_bare_cover_must_be_adjacent_sibling_of_video() {
     let cover = |video: &ParsedFile, inspected: Option<&InspectedVideo>| {
         discover(&dirs, None)
             .resolve_for(video, inspected, None, None)
-            .unwrap()
             .cover_file
     };
 
@@ -493,7 +485,6 @@ fn test_unparsed_cover_and_source_art_fallback_boundary() {
     let cover = |video: &ParsedFile, inspected: Option<&InspectedVideo>| {
         discover(&dirs, Some(&assets))
             .resolve_for(video, inspected, None, None)
-            .unwrap()
             .cover_file
     };
     assert_eq!(cover(&video, Some(&source)), Some(bare.clone()));
@@ -615,9 +606,7 @@ fn test_resolve_for_skip_reason_when_no_subs_vs_unmatched() {
     fs::write(&vid_path, b"dummy").unwrap();
     let vid = create_parsed_file(&vid_path);
 
-    let res_no_subs = AssetResolver::default()
-        .resolve_for(&vid, None, None, None)
-        .unwrap();
+    let res_no_subs = AssetResolver::default().resolve_for(&vid, None, None, None);
     assert!(!res_no_subs.matched_subtitle);
     assert_eq!(
         res_no_subs.skip_reason.as_deref(),
@@ -634,8 +623,7 @@ fn test_resolve_for_skip_reason_when_no_subs_vs_unmatched() {
         sub_index: sub_idx,
         ..Default::default()
     }
-    .resolve_for(&vid, None, None, None)
-    .unwrap();
+    .resolve_for(&vid, None, None, None);
     assert!(!res_unmatched.matched_subtitle);
     assert_eq!(
         res_unmatched.skip_reason.as_deref(),
@@ -679,8 +667,7 @@ fn test_sub_classification_cache_populates_and_reuses_across_release_directories
 
     let resolved1 = prep1
         .resolver
-        .resolve_for(&create_parsed_file(&ep_s1), None, None, None)
-        .unwrap();
+        .resolve_for(&create_parsed_file(&ep_s1), None, None, None);
     assert_eq!(resolved1.subtitle_file, Some(sub_s01e01.clone()));
     assert_eq!(resolved1.subtitle_lang, "ind");
 
@@ -699,8 +686,7 @@ fn test_sub_classification_cache_populates_and_reuses_across_release_directories
     assert_eq!(sub_classification_cache.len(), count_before);
     let resolved2 = prep2
         .resolver
-        .resolve_for(&create_parsed_file(&ep_s2), None, None, None)
-        .unwrap();
+        .resolve_for(&create_parsed_file(&ep_s2), None, None, None);
     assert_eq!(resolved2.subtitle_file, Some(sub_s02e01.clone()));
     assert_eq!(resolved2.subtitle_lang, "eng");
 }
@@ -750,10 +736,7 @@ fn test_sub_classification_cache_preserves_resolution_identity() {
     let vid = create_parsed_file(&vid_path);
 
     let uncached = prepare_release_directory(&season, &root, ReleasePreparationOptions::default());
-    let uncached_res = uncached
-        .resolver
-        .resolve_for(&vid, None, None, None)
-        .unwrap();
+    let uncached_res = uncached.resolver.resolve_for(&vid, None, None, None);
 
     let mut cache: HashMap<PathBuf, SubClassification> = HashMap::new();
     let cached = prepare_release_directory(
@@ -764,7 +747,7 @@ fn test_sub_classification_cache_preserves_resolution_identity() {
             ..Default::default()
         },
     );
-    let cached_res = cached.resolver.resolve_for(&vid, None, None, None).unwrap();
+    let cached_res = cached.resolver.resolve_for(&vid, None, None, None);
 
     assert_eq!(uncached_res, cached_res);
 }
