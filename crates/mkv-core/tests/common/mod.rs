@@ -83,9 +83,9 @@ pub fn seeded_cache(
 }
 
 /// Restores the environment variables it captured when dropped, so a failing assertion cannot
-/// leak a mutated `PATH` (or a stub's own variable) into the rest of the run. Only the binaries
-/// that put a stub tool on `PATH` use it, one test per process because the environment is
-/// process-global; the others never construct it, hence the `dead_code` allowance.
+/// leak a mutated `PATH` into the rest of the run. Only the binary that puts a stub tool on
+/// `PATH` uses it, one test per process because the environment is process-global; the others
+/// never construct it, hence the `dead_code` allowance.
 #[allow(dead_code)]
 pub struct EnvReset(Vec<(&'static str, Option<std::ffi::OsString>)>);
 

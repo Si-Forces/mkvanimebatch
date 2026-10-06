@@ -288,7 +288,7 @@ mkvanimebatch/
 ├── crates/
 │   ├── mkv-core/            # Standalone media engine library crate
 │   │   ├── src/             # EBML parsing, CPU topology, domain heuristics, fonts, pipeline
-│   │   └── tests/           # 12 integration suites (assets, domain, scan, remux, extract, fonts, pipeline, pipeline-assignments, pipeline-assignment-args, pipeline-font-memo, cross-regex, real-remux)
+│   │   └── tests/           # 11 integration suites (assets, domain, scan, remux, extract, fonts, pipeline, pipeline-assignments, pipeline-font-memo, cross-regex, real-remux)
 │   └── mkv-cli/             # Standalone CLI binary adapter
 │       └── src/             # CLI argument parsing and entry point
 ├── desktop-tauri/           # Desktop GUI application

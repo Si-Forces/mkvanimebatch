@@ -13,14 +13,15 @@ use tokio::sync::{mpsc, Semaphore};
 pub use tokio_util::sync::CancellationToken;
 
 use crate::assets::{
-    claim_leftover_chapters, prepare_release_directory, AssetResolver, ReleasePreparationOptions,
+    claim_leftover_chapters, prepare_release_directory, ReleasePreparationOptions,
     SubClassification,
 };
-use crate::domain::{output_stem, resolve_output_dir, IO_GOVERNOR_CLOSED};
+use crate::domain::{resolve_output_dir, IO_GOVERNOR_CLOSED};
 use crate::extract::extract_mkv_file;
 use crate::fonts::{scan_fonts, FontHashMemo, FontInfo, FontRegistry};
 use crate::manifest::get_item_id;
-use crate::remux::{execute_remux_job, select_tracks, PlannedJob, RemuxOptions, TrackSelection};
+use crate::remux::{execute_remux_job, RemuxOptions};
+use crate::remux_plan::{PreparedDir, RemuxPlan, RemuxPlanner, RemuxWork};
 use crate::request::{
     clean_relative_path, resolve_selected_items, EffectiveSettings, TrackAssignment,
 };
@@ -222,6 +223,36 @@ fn cancelled_item(item: BatchItemInfo, duration_sec: Option<f64>) -> JobEvent {
     }
 }
 
+/// The terminal event of an item that planning skipped.
+fn skipped_item(item: BatchItemInfo, reason: String) -> JobEvent {
+    let BatchItemInfo { id, file } = item;
+    JobEvent::ItemComplete {
+        version: EVENT_VERSION,
+        id,
+        file,
+        status: ItemOutcome::Skipped,
+        reason: Some(reason),
+        error: None,
+        duration_sec: None,
+        extra: Default::default(),
+    }
+}
+
+/// The terminal event of an item that planning failed.
+fn errored_item(item: BatchItemInfo, message: String) -> JobEvent {
+    let BatchItemInfo { id, file } = item;
+    JobEvent::ItemComplete {
+        version: EVENT_VERSION,
+        id,
+        file,
+        status: ItemOutcome::Error,
+        reason: None,
+        error: Some(message),
+        duration_sec: None,
+        extra: Default::default(),
+    }
+}
+
 fn planned_item(item: BatchItemInfo) -> JobEvent {
     let BatchItemInfo { id, file } = item;
     JobEvent::ItemComplete {
@@ -373,16 +404,10 @@ fn settle_cancelled_planning_items(
         .collect()
 }
 
-struct PreparedDir {
-    resolver: AssetResolver,
-    font_info: FontInfo,
-    chapter_claims: HashMap<PathBuf, PathBuf>,
-}
-
 /// Runs the Asset Resolver and font scan over each Release Directory. The pass is synchronous
 /// file I/O with no `.await`, so `cancel_token` is checked before each directory; returns
 /// `None` once it is cancelled.
-fn prepare_release_dirs<'a>(
+pub(crate) fn prepare_release_dirs<'a>(
     videos_by_dir: &BTreeMap<&'a Path, Vec<ParsedFile>>,
     all_inspections: &HashMap<PathBuf, InspectionResult>,
     config: &PipelineConfig,
@@ -421,7 +446,7 @@ fn prepare_release_dirs<'a>(
             mkv_dir,
             PreparedDir {
                 resolver: prepared.resolver,
-                font_info,
+                font_info: Arc::new(font_info),
                 chapter_claims,
             },
         );
@@ -433,15 +458,6 @@ fn prepare_release_dirs<'a>(
 enum ItemFailure {
     Cancelled,
     Failed(String),
-}
-
-/// The per-item inputs to `execute_remux_job` for an item that planning cleared to run.
-/// The item's identity travels beside it as the `BatchItemInfo` that `run_items` pairs
-/// with it.
-struct RemuxWork {
-    job: PlannedJob,
-    selection: TrackSelection,
-    font_info: FontInfo,
 }
 
 /// Best-effort progress reporting for one item; a full event channel drops the update.
@@ -1006,15 +1022,14 @@ impl BatchPipeline {
         let mut planning_outcomes = Vec::new();
         let mut planning_error: Option<(usize, String)> = None;
 
-        // Every target was already proven to match exactly one discovered canonical item ID.
-        let assignment_index: HashMap<String, &TrackAssignment> = self
-            .config
-            .track_assignments
-            .as_deref()
-            .unwrap_or_default()
-            .iter()
-            .map(|assignment| (clean_relative_path(&assignment.target_video), assignment))
-            .collect();
+        let planner = RemuxPlanner::new(
+            &self.config.input_dir,
+            self.config.out_dir.as_deref(),
+            self.config.assets_dir.as_deref(),
+            self.config.track_assignments.as_deref().unwrap_or_default(),
+            &prepared_dirs,
+            &all_inspections,
+        );
 
         // Planning follows batch order (selection order when selected), not directory order.
         for (file_idx, video_file) in files.iter().enumerate() {
@@ -1024,164 +1039,45 @@ impl BatchPipeline {
             }
 
             let item = BatchItemInfo::new(video_file, &self.config.input_dir);
-            let mkv_dir = video_file.path.parent().unwrap_or(Path::new("."));
-            let Some(dir_prep) = prepared_dirs.get(mkv_dir) else {
-                continue;
-            };
-
-            let matched_assignment = assignment_index
-                .get(&clean_relative_path(&item.id))
-                .copied();
-            let assigned_sub = matched_assignment.map(|a| {
-                a.resolve_asset_path(&self.config.input_dir, self.config.assets_dir.as_deref())
-            });
-            let assigned_sub = assigned_sub.as_deref();
-            if let Some(missing) = assigned_sub.filter(|path| !path.is_file()) {
-                planning_error = Some((
-                    file_idx,
-                    format!("Assigned subtitle '{}' no longer exists", missing.display()),
-                ));
-                break;
-            }
-
-            if video_file.parsed.is_none() && matched_assignment.is_none() {
-                summary.skipped += 1;
-                let reason = "Could not extract episode number from filename";
-                summary
-                    .log
-                    .push(format!("Skipping '{}': {reason}", video_file.name));
-                planning_outcomes.push(JobEvent::ItemComplete {
-                    version: EVENT_VERSION,
-                    id: item.id,
-                    file: item.file,
-                    status: ItemOutcome::Skipped,
-                    reason: Some(reason.into()),
-                    error: None,
-                    duration_sec: None,
-                    extra: Default::default(),
-                });
-                continue;
-            }
-
-            let base = video_file
-                .path
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "video".to_string());
-            let out_stem = match &video_file.parsed {
-                Some(parsed) => output_stem(&base, &parsed.ep_type, &parsed.ep),
-                None => base,
-            };
-            let out_dir = resolve_output_dir(
-                &video_file.path,
-                &self.config.input_dir,
-                self.config.out_dir.as_deref(),
-            );
-            let output_file = if self.config.out_dir.is_none() {
-                out_dir.join("Output").join(format!("{out_stem}.mkv"))
-            } else {
-                out_dir.join(format!("{out_stem}.mkv"))
-            };
-
-            let inspection = all_inspections.get(&video_file.path);
-            let Some(inspected) = inspection.and_then(|r| r.video.as_ref()) else {
-                summary.errors += 1;
-                let err = inspection
-                    .and_then(|r| r.error.clone())
-                    .unwrap_or_else(|| "Failed to probe video".to_string());
-                summary.log.push(format!(
-                    "  ERROR: Failed to probe '{}': {err}",
-                    video_file.path.display()
-                ));
-                planning_outcomes.push(JobEvent::ItemComplete {
-                    version: EVENT_VERSION,
-                    id: item.id,
-                    file: item.file,
-                    status: ItemOutcome::Error,
-                    reason: None,
-                    error: Some(err),
-                    duration_sec: None,
-                    extra: Default::default(),
-                });
-                continue;
-            };
-
-            let claimed_chapter = dir_prep
-                .chapter_claims
-                .get(&video_file.path)
-                .map(PathBuf::as_path);
-            let res_assets = match dir_prep.resolver.resolve_for(
-                video_file,
-                Some(inspected),
-                claimed_chapter,
-                assigned_sub,
-            ) {
-                Ok(assets) => assets,
-                Err(err) => {
-                    planning_error = Some((file_idx, err));
+            match planner.plan(video_file) {
+                RemuxPlan::Abort { message } => {
+                    planning_error = Some((file_idx, message));
                     break;
                 }
-            };
-
-            if !res_assets.matched_subtitle {
-                summary.skipped += 1;
-                let reason = res_assets
-                    .skip_reason
-                    .unwrap_or_else(|| "No matching subtitle found".into());
-                summary
-                    .log
-                    .push(format!("Skipping '{}': {reason}", video_file.name));
-                planning_outcomes.push(JobEvent::ItemComplete {
-                    version: EVENT_VERSION,
-                    id: item.id,
-                    file: item.file,
-                    status: ItemOutcome::Skipped,
-                    reason: Some(reason),
-                    error: None,
-                    duration_sec: None,
-                    extra: Default::default(),
-                });
-                continue;
+                RemuxPlan::Skip { reason } => {
+                    summary.skipped += 1;
+                    summary
+                        .log
+                        .push(format!("Skipping '{}': {reason}", video_file.name));
+                    planning_outcomes.push(skipped_item(item, reason));
+                }
+                RemuxPlan::ProbeFailed { message } => {
+                    summary.errors += 1;
+                    summary.log.push(format!(
+                        "  ERROR: Failed to probe '{}': {message}",
+                        video_file.path.display()
+                    ));
+                    planning_outcomes.push(errored_item(item, message));
+                }
+                RemuxPlan::Internal { message } => {
+                    summary.errors += 1;
+                    summary.log.push(format!(
+                        "  ERROR: '{}': {message}",
+                        video_file.path.display()
+                    ));
+                    planning_outcomes.push(errored_item(item, message));
+                }
+                RemuxPlan::Planned(work) if self.config.dry_run => {
+                    summary.log.push(format!(
+                        "[DRY-RUN] Would remux '{}' -> '{}'",
+                        video_file.name,
+                        work.job.output_file.display()
+                    ));
+                    planning_outcomes.push(planned_item(item));
+                    summary.completed += 1;
+                }
+                RemuxPlan::Planned(work) => remux_work.push((item, *work)),
             }
-
-            if self.config.dry_run {
-                summary.log.push(format!(
-                    "[DRY-RUN] Would remux '{}' -> '{}'",
-                    video_file.name,
-                    output_file.display()
-                ));
-                planning_outcomes.push(planned_item(item));
-                summary.completed += 1;
-                continue;
-            }
-
-            // Assignment attributes only describe the assigned subtitle; they never restyle a
-            // subtitle the resolver chose instead.
-            let matched_assignment =
-                matched_assignment.filter(|_| res_assets.subtitle_file.as_deref() == assigned_sub);
-            let job = PlannedJob {
-                video: video_file.path.clone(),
-                video_name: video_file.name.clone(),
-                output_file,
-                subtitle_file: res_assets.subtitle_file,
-                subtitle_label: res_assets.subtitle_label,
-                subtitle_mkv_lang: res_assets.subtitle_mkv_lang,
-                chapter_file: res_assets.chapter_file,
-                cover_file: res_assets.cover_file,
-                embedded_sub_id: res_assets.embedded_sub_id,
-                use_source_fonts: dir_prep.font_info.count == 0,
-                custom_offset_ms: matched_assignment.and_then(|a| a.offset_ms),
-                custom_language: matched_assignment.and_then(|a| a.language.clone()),
-                custom_title: matched_assignment.and_then(|a| a.title.clone()),
-            };
-            remux_work.push((
-                item,
-                RemuxWork {
-                    job,
-                    selection: select_tracks(inspected),
-                    font_info: dir_prep.font_info.clone(),
-                },
-            ));
         }
 
         if let Some((failed_idx, err)) = planning_error {
