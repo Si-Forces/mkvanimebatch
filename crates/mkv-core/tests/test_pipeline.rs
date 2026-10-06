@@ -137,7 +137,7 @@ async fn test_remux_dry_run_preserves_nested_output_directory() {
             status: ItemOutcome::Planned,
             duration_sec: None,
             ..
-        } if id == "Season 02/Show - 01.mkv"
+        } if id.as_str() == "Season 02/Show - 01.mkv"
     )));
 }
 
@@ -386,7 +386,7 @@ async fn test_extract_emits_item_complete_duration_sec() {
                 status: ItemOutcome::Completed,
                 duration_sec: Some(d),
                 ..
-            } if id == "Show - 01.mkv" && *d >= 0.0
+            } if id.as_str() == "Show - 01.mkv" && *d >= 0.0
         ),
         "{:?}",
         complete_events[0]
@@ -421,7 +421,7 @@ async fn test_extract_error_in_worker_emits_duration_sec() {
                 status: ItemOutcome::Error,
                 duration_sec: Some(d),
                 ..
-            } if id == "Corrupt - 01.mkv" && *d >= 0.0
+            } if id.as_str() == "Corrupt - 01.mkv" && *d >= 0.0
         )),
         "expected an Error completion carrying duration_sec: {events:?}"
     );
