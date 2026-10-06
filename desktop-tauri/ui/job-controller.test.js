@@ -259,9 +259,9 @@ test("job controller forwards snapshotted execution args incl zero io-jobs and n
   assert.equal(runJobReq.no_cache, true);
 });
 
-/** Starts a Remux run with the given workers field; returns the requests sent to the engine, in order, and the chip calls. */
-async function startWithWorkersField(t, { workers, resolved }) {
-  installDocument(t, remuxElements({ "input-dir": "/input", workers, "io-jobs": "2" }));
+/** Starts a Remux run with the given workers and Disk I/O fields; returns the requests sent to the engine, in order, and the chip calls. */
+async function startWithWorkersField(t, { workers, ioJobs = "2", resolved }) {
+  installDocument(t, remuxElements({ "input-dir": "/input", workers, "io-jobs": ioJobs }));
 
   const sent = [];
   const chipCalls = [];
@@ -286,6 +286,14 @@ test("an empty workers field sends workers null and the chips show the Effective
   assert.deepEqual(sent.map(([command]) => command), ["resolve_batch_request", "run_job"]);
   assert.equal(sent[0][1].workers, null);
   assert.equal(sent[1][1].workers, null);
+  assert.deepEqual(chipCalls[0], [true, resolved]);
+});
+
+test("an empty Disk I/O field sends io_jobs null so the engine's default applies", async t => {
+  const resolved = { ...SETTINGS, workers: 4, io_jobs: 2 };
+  const { sent, chipCalls } = await startWithWorkersField(t, { workers: "4", ioJobs: "", resolved });
+  assert.equal(sent[0][1].io_jobs, null);
+  assert.equal(sent[1][1].io_jobs, null);
   assert.deepEqual(chipCalls[0], [true, resolved]);
 });
 
@@ -409,13 +417,13 @@ test("index.html chips name their state without inventing a worker or I/O job co
   for (const [, text] of chips) assert.doesNotMatch(text, /\d/, `chip "${text}" shows a count before the engine reported one`);
 });
 
-test("index.html workers inputs default to auto, with no preset value", () => {
+test("index.html workers and Disk I/O inputs default to auto, with no preset value", () => {
   const html = fs.readFileSync(path.join(import.meta.dirname, "index.html"), "utf8");
-  for (const id of ["remux-workers", "extract-workers"]) {
+  for (const id of ["remux-workers", "extract-workers", "remux-io-jobs", "extract-io-jobs"]) {
     const tag = html.match(new RegExp(`<input\\b[^>]*\\bid="${id}"[^>]*>`))?.[0];
     assert.ok(tag, `${id} input is missing`);
     assert.match(tag, /\bplaceholder="auto"/, `${id} must show the auto placeholder`);
-    assert.doesNotMatch(tag, /\svalue=/, `${id} must start empty so the request sends workers: null`);
+    assert.doesNotMatch(tag, /\svalue=/, `${id} must start empty so the request sends null and the engine's default applies`);
   }
 });
 

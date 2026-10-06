@@ -286,6 +286,8 @@ impl JobState {
                             );
                         }
                     }
+                    // Only this job's own snapshot, begun by `run_job`, carries over.
+                    let own = snap.as_ref().filter(|snapshot| snapshot.job_id == job_id);
                     *snap = Some(JobSnapshot {
                         job_id,
                         mode: mode.to_string(),
@@ -294,10 +296,8 @@ impl JobState {
                         duration_sec: None,
                         total_items: *total,
                         completed_items: 0,
-                        input_dir: snap.as_ref().and_then(|s| s.input_dir.clone()),
-                        effective_settings: snap
-                            .as_ref()
-                            .filter(|snapshot| snapshot.job_id == job_id)
+                        input_dir: own.and_then(|snapshot| snapshot.input_dir.clone()),
+                        effective_settings: own
                             .and_then(|snapshot| snapshot.effective_settings.clone()),
                         ordered_item_ids,
                         items: snapshot_items,
@@ -772,9 +772,11 @@ mod tests {
         assert_eq!(json["effective_settings"]["io_jobs"], 5);
         assert_eq!(json["effective_settings"]["bitrate"], "256k");
 
-        // A later job does not inherit them from the snapshot it replaces.
+        // A later job inherits neither them nor the input directory from the snapshot it
+        // replaces.
         state.update_snapshot(&batch_start(&["ep1"]), 8, "remux");
         assert_eq!(snapshot(&state).effective_settings, None);
+        assert_eq!(snapshot(&state).input_dir, None);
     }
 
     #[test]

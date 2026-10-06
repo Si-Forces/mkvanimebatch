@@ -71,7 +71,7 @@ function bootstrapHarness(t, commandResults = {}) {
   };
   const elements = new Map();
   for (const mode of ["remux", "extract"]) {
-    for (const id of ["run", "stop", "status", "log", "episode-list", "queue-count", "input-dir", "workers"]) {
+    for (const id of ["run", "stop", "status", "log", "episode-list", "queue-count", "input-dir", "workers", "io-jobs"]) {
       elements.set(`${mode}-${id}`, new BootElement());
     }
   }
@@ -241,7 +241,7 @@ test("no snapshot preserves pre-run selection and cleans up bootstrap listeners"
   assert.equal(ipc.calls.filter(([command]) => command === "inspect_directory").length, 1);
 });
 
-test("get_default_settings puts auto (N) on both workers inputs and the defaults on the idle chips", async t => {
+test("get_default_settings puts auto (N) on the workers and Disk I/O inputs and the defaults on the idle chips", async t => {
   const ipc = bootstrapHarness(t, { get_default_settings: { ...DEFAULT_SETTINGS, workers: 6, io_jobs: 4 } });
   await ipc.mount("default-settings");
   ipc.resolveSnapshot(null);
@@ -250,6 +250,9 @@ test("get_default_settings puts auto (N) on both workers inputs and the defaults
     const input = ipc.elements.get(`${mode}-workers`);
     assert.equal(input.placeholder, "auto (6)");
     assert.equal(input.dataset.autoValue, "6");
+    const ioJobs = ipc.elements.get(`${mode}-io-jobs`);
+    assert.equal(ioJobs.placeholder, "auto (4)");
+    assert.equal(ioJobs.dataset.autoValue, "4");
   }
   assert.equal(ipc.workerChip.innerText, "⚡ Standby (6 Workers)");
   assert.equal(ipc.ioChip.innerText, "🔀 Idle (4 IO Jobs)");

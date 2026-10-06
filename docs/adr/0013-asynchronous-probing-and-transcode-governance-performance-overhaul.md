@@ -558,7 +558,9 @@ needs it; Amendment 4's "`default_workers` is `pub(crate)`" holds once more. The
 `EffectiveSettings::defaults()`: the `workers`, `io_jobs`, `ffmpeg_threads`, bitrate and complexity
 of a request that sets nothing (ADR-0008, amendment 2026-10-06), computed by the same code as
 `BatchRequest::resolve`. The Remux and Extract worker inputs still show `auto (N)`, with N the
-`workers` of those settings, and the idle chips show its `workers` and `io_jobs`.
+`workers` of those settings, and the idle chips show its `workers` and `io_jobs`. The Disk I/O
+inputs follow the same rule: they start empty instead of pre-filled with 2, send `io_jobs: null`
+when empty, and show `auto (N)` with N the settings' `io_jobs`.
 
 Amendment 10's other decisions stand: an empty field sends `workers: null`, a typed number is sent
 as is, and the stepper starts an empty field from N. So does its caveat that the UI reads the
@@ -566,9 +568,10 @@ defaults once at startup and can go stale if the CPU quota or affinity changes w
 open.
 
 **What changes.** The page no longer carries fallback numbers. Amendment 10 showed 8 workers on the
-chips when the call failed (`FALLBACK_WORKERS`), and the chips began with a literal 8 workers and 2
-I/O jobs. While the defaults are unknown, because the call failed or has not answered, the
-placeholder stays `auto` and the chips name their state without a count. A run's chips show the
+chips when the call failed (`FALLBACK_WORKERS`), the chips began with a literal 8 workers and 2
+I/O jobs, and the Disk I/O inputs held a literal 2. While the defaults are unknown, because the call
+failed or has not answered, the placeholder stays `auto` and the chips name their state without a
+count. A run's chips show the
 Effective Settings that `resolve_batch_request` returned for its request, so an empty field, or an
 `io_jobs` of 0, shows the number the run uses; after a webview reload they show the Job Snapshot's
 `effective_settings` (ADR-0008, amendment 2026-10-06, desktop bridge).
@@ -577,6 +580,6 @@ Effective Settings that `resolve_batch_request` returned for its request, so an 
 a resolved empty request agree, with `workers` within 1–16. `test_resolve_default_workers_hardware_concurrency`
 (replacing `test_into_pipeline_config_default_workers_hardware_concurrency`) pins that an unset
 `workers` resolves to `cpu::default_workers()`. The frontend tests cover the `auto (N)` placeholder
-and the idle chips, a restored job's chips, and the chips' neutral text (`Workers Active`,
-`Standby`, `Idle`) when no settings are known, whether `get_default_settings` failed or a snapshot
-carries none.
+on the workers and Disk I/O inputs, an empty Disk I/O field sending `io_jobs: null`, the idle
+chips, a restored job's chips, and the chips' neutral text (`Workers Active`, `Standby`, `Idle`)
+when no settings are known, whether `get_default_settings` failed or a snapshot carries none.

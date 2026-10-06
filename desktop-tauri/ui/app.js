@@ -83,7 +83,11 @@ async function loadPresetProfiles() {
  */
 let defaultSettings = null;
 
-const WORKERS_INPUT_IDS = ["remux", "extract"].map(mode => `${mode}-workers`);
+/** Inputs whose empty state means the engine's default, as [input id, Effective Settings key]. */
+const AUTO_INPUTS = ["remux", "extract"].flatMap(mode => [
+  [`${mode}-workers`, "workers"],
+  [`${mode}-io-jobs`, "io_jobs"],
+]);
 
 async function loadDefaultSettings() {
   try {
@@ -92,11 +96,11 @@ async function loadDefaultSettings() {
       throw new Error(`unexpected value ${JSON.stringify(settings)}`);
     }
     defaultSettings = settings;
-    for (const id of WORKERS_INPUT_IDS) {
+    for (const [id, key] of AUTO_INPUTS) {
       const input = document.getElementById(id);
       if (!input) continue;
-      input.placeholder = `auto (${settings.workers})`;
-      input.dataset.autoValue = String(settings.workers);
+      input.placeholder = `auto (${settings[key]})`;
+      input.dataset.autoValue = String(settings[key]);
     }
     // Leave the chips alone while a job owns them; they show that job's own settings.
     if (jobCoordinator.activeMode === null) updateWorkerChips(false);
@@ -293,7 +297,7 @@ const IO_BAR_FULL_SCALE_MB_S = 300;
 
 /** A chip's text: `count` is shown when known, and otherwise left out rather than guessed. */
 function chipText(icon, isJobActive, idleWord, count, noun) {
-  const counted = count === undefined ? null : `${count} ${noun}`;
+  const counted = count == null ? null : `${count} ${noun}`;
   if (isJobActive) return `${icon} ${counted ?? noun} Active`;
   return counted ? `${icon} ${idleWord} (${counted})` : `${icon} ${idleWord}`;
 }
