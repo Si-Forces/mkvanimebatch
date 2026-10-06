@@ -8,9 +8,9 @@ use std::sync::Arc;
 use crate::assets::AssetResolver;
 use crate::domain::{output_stem, resolve_output_dir};
 use crate::fonts::FontInfo;
-use crate::manifest::get_item_id;
+use crate::item_id::ItemId;
 use crate::remux::{select_tracks, PlannedJob, TrackSelection};
-use crate::request::{clean_relative_path, TrackAssignment};
+use crate::request::TrackAssignment;
 use crate::scan::{InspectionResult, ParsedFile};
 
 /// What planning prepared for one Release Directory: its Asset Resolver, its fonts, and the
@@ -57,9 +57,9 @@ pub(crate) struct RemuxPlanner<'a> {
     input_dir: &'a Path,
     out_dir: Option<&'a Path>,
     assets_dir: Option<&'a Path>,
-    /// Keyed by the target's canonical relative path. Every target was already proven to match
-    /// exactly one discovered item.
-    assignments: HashMap<String, &'a TrackAssignment>,
+    /// Keyed by the target's [`ItemId`]. Every target was already proven to match exactly one
+    /// discovered item.
+    assignments: HashMap<ItemId, &'a TrackAssignment>,
     prepared_dirs: &'a HashMap<&'a Path, PreparedDir>,
     inspections: &'a HashMap<PathBuf, InspectionResult>,
 }
@@ -79,7 +79,7 @@ impl<'a> RemuxPlanner<'a> {
             assets_dir,
             assignments: assignments
                 .iter()
-                .map(|assignment| (clean_relative_path(&assignment.target_video), assignment))
+                .map(|assignment| (assignment.target_id(), assignment))
                 .collect(),
             prepared_dirs,
             inspections,
@@ -102,10 +102,7 @@ impl<'a> RemuxPlanner<'a> {
 
         let assignment = self
             .assignments
-            .get(&clean_relative_path(&get_item_id(
-                &file.path,
-                self.input_dir,
-            )))
+            .get(&ItemId::of(&file.path, self.input_dir))
             .copied();
         let assigned_sub =
             assignment.map(|a| a.resolve_asset_path(self.input_dir, self.assets_dir));
@@ -334,7 +331,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let video = create_parsed_file(dir.path().join("Season 1").join("Show - 01.mkv"));
         write_subtitle(&dir.path().join("Season 1").join("custom.ass"));
-        // A Windows-style target still keys to the video's canonical item ID.
+        // A Windows-style target still keys to the video's `ItemId`.
         let config = PipelineConfig {
             input_dir: dir.path().to_path_buf(),
             track_assignments: Some(vec![assignment(

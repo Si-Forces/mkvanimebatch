@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::cpu::{default_workers_for, physical_core_count, transcode_governor_threads};
+use crate::item_id::ItemId;
 use crate::pipeline::{PipelineConfig, PipelineMode};
 use crate::preset::{lookup_preset, PresetProfile};
 
@@ -91,33 +92,17 @@ fn between<T: Display>(range: &RangeInclusive<T>) -> String {
     format!("between {} and {}", range.start(), range.end())
 }
 
-/// Normalizes a relative path string by converting backslashes to forward slashes,
-/// collapsing redundant separators, and stripping relative `.` (`CurDir`) components.
-///
-/// This is the canonical form for comparing item IDs, selected items, and assignment
-/// targets; both sides of a comparison must go through it.
-pub fn clean_relative_path(s: &str) -> String {
-    let norm = s.trim().replace('\\', "/");
-    let parts: Vec<_> = Path::new(&norm)
-        .components()
-        .filter(|c| !matches!(c, Component::CurDir))
-        .map(|c| c.as_os_str().to_string_lossy())
-        .collect();
-    parts.join("/")
-}
-
-/// Maps each selection to the index its canonical ID has in `index_by_id` (keyed by
-/// [`clean_relative_path`] IDs), in selection order with repeats dropped. Fails naming every
-/// selection that matches no discovered item.
+/// Maps each selection to the index its [`ItemId`] has in `index_by_id`, in selection order
+/// with repeats dropped. Fails naming every selection that matches no discovered item.
 pub(crate) fn resolve_selected_items(
-    index_by_id: &HashMap<String, usize>,
+    index_by_id: &HashMap<ItemId, usize>,
     selected: &[String],
 ) -> Result<Vec<usize>, String> {
     let mut seen = HashSet::with_capacity(selected.len());
     let mut ordered = Vec::with_capacity(selected.len());
     let mut unmatched = Vec::new();
     for item in selected {
-        match index_by_id.get(&clean_relative_path(item)) {
+        match index_by_id.get(&ItemId::parse(item)) {
             Some(&idx) => {
                 if seen.insert(idx) {
                     ordered.push(idx);
@@ -137,8 +122,9 @@ pub(crate) fn resolve_selected_items(
 }
 
 impl TrackAssignment {
-    fn clean_target_video(&self) -> String {
-        clean_relative_path(&self.target_video)
+    /// The [`ItemId`] of the video this assignment targets.
+    pub(crate) fn target_id(&self) -> ItemId {
+        ItemId::parse(&self.target_video)
     }
 
     /// True if the asset path is relative to the release/input directory
@@ -426,21 +412,21 @@ impl BatchRequest {
         let preset = self.preset_profile()?;
 
         if let Some(assignments) = &self.assignments {
-            let mut seen_videos: HashSet<String> = HashSet::new();
+            let mut seen_videos: HashSet<ItemId> = HashSet::new();
 
             for assignment in assignments {
-                let clean = assignment.clean_target_video();
+                let target_id = assignment.target_id();
                 let target_norm = assignment.target_video.trim().replace('\\', "/");
-                if clean.is_empty() || !is_contained_relative_path(&target_norm) {
+                if target_id.as_str().is_empty() || !is_contained_relative_path(&target_norm) {
                     return Err(format!(
                         "Invalid relative target video path: '{}'",
                         assignment.target_video
                     ));
                 }
 
-                if !has_mkv_extension(&clean) {
+                if !has_mkv_extension(target_id.as_str()) {
                     return Err(format!(
-                        "Assigned target video is not an MKV file: '{clean}'"
+                        "Assigned target video is not an MKV file: '{target_id}'"
                     ));
                 }
 
@@ -458,10 +444,10 @@ impl BatchRequest {
                     ));
                 }
 
-                let target_full = self.input_dir.join(&clean);
-                if !seen_videos.insert(clean.clone()) {
+                let target_full = self.input_dir.join(target_id.as_str());
+                if !seen_videos.insert(target_id.clone()) {
                     return Err(format!(
-                        "Multiple track assignments for target video '{clean}' are not supported; multi-track muxing is deferred"
+                        "Multiple track assignments for target video '{target_id}' are not supported; multi-track muxing is deferred"
                     ));
                 }
 
@@ -489,21 +475,21 @@ impl BatchRequest {
                 return Err("selected_items cannot be empty when specified".into());
             }
 
-            let mut seen_items: HashSet<String> = HashSet::new();
+            let mut seen_items: HashSet<ItemId> = HashSet::new();
             for item in items {
                 let norm = item.trim().replace('\\', "/");
                 if norm.is_empty() || !is_contained_relative_path(&norm) {
                     return Err(format!("Invalid relative path in selected_items: '{item}'"));
                 }
 
-                let clean = clean_relative_path(&norm);
-                if !seen_items.insert(clean.clone()) {
-                    return Err(format!("Duplicate entry in selected_items: '{clean}'"));
+                let item_id = ItemId::parse(item);
+                if !seen_items.insert(item_id.clone()) {
+                    return Err(format!("Duplicate entry in selected_items: '{item_id}'"));
                 }
-                if !has_mkv_extension(&clean) {
-                    return Err(format!("Selected item is not an MKV file: '{clean}'"));
+                if !has_mkv_extension(item_id.as_str()) {
+                    return Err(format!("Selected item is not an MKV file: '{item_id}'"));
                 }
-                let full_path = self.input_dir.join(&clean);
+                let full_path = self.input_dir.join(item_id.as_str());
                 if !full_path.is_file() {
                     return Err(format!(
                         "Selected item does not exist: '{}'",
@@ -514,10 +500,10 @@ impl BatchRequest {
 
             if let Some(assignments) = &self.assignments {
                 for assignment in assignments {
-                    let clean_target = assignment.clean_target_video();
-                    if !seen_items.contains(&clean_target) {
+                    let target_id = assignment.target_id();
+                    if !seen_items.contains(&target_id) {
                         return Err(format!(
-                            "Track assignment targets video '{clean_target}' which is not in selected_items"
+                            "Track assignment targets video '{target_id}' which is not in selected_items"
                         ));
                     }
                 }

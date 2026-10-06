@@ -124,6 +124,7 @@ mkvanimebatch/
 │   │   │   ├── assets.rs            # AssetResolver, SubIndex, ChapterIndex, CoverIndex, release preparation
 │   │   │   ├── fonts.rs             # Fonts directory lookup, FontRegistry, FontHashMemo, FontClaimsGuard
 │   │   │   ├── inspect.rs           # Crate-private: inspect_videos, the one cancellable bulk probe fan-out behind Inspect and remux planning
+│   │   │   ├── item_id.rs           # ItemId, the canonical identity of a discovered video, built only normalised
 │   │   │   ├── manifest.rs          # InspectionManifest generation and metadata summaries
 │   │   │   ├── media_tool.rs        # Media Tool invocation: MediaToolRunner port, SubprocessRunner adapter, run() with the exit-code policy
 │   │   │   ├── preset.rs            # PresetProfile catalog and lookup
@@ -384,6 +385,8 @@ flowchart TD
     ItemTask --> BatchDone["Emit JobEvent::BatchComplete"]
 ```
 
+A video's identity is an `ItemId` (`item_id.rs`): its path relative to the input directory, `/`-separated, with no `.` segments. Both constructors normalise (`ItemId::of` for a discovered file, `ItemId::parse` for a user-supplied spelling), so there is no un-normalised form to compare by mistake. `BatchItemInfo.id`, `ManifestItem.id`, `apply_selected_items`, `validate_assignment_targets`, `RemuxPlanner` and `InspectionManifest::select_items` all compare by type, as `ItemId`s. `selected_items` and a `TrackAssignment`'s `target_video` stay the caller's raw `String`, so validation errors can quote what was typed. On the wire an `ItemId` is a plain JSON string, and deserialising one normalises it.
+
 Planning decides and the pipeline reports. `RemuxPlanner` (`remux_plan.rs`) takes one discovered video and returns a Remux Plan: `Skip` with a reason, `ProbeFailed` or `Internal` for that item, `Abort` for the whole batch, or `Planned` with the `PlannedJob`, its `TrackSelection`, and the release's shared `FontInfo`. A video whose Release Directory was not prepared is an `Internal` item error, logged as such rather than as a probe failure. Otherwise the planner works in this order:
 
 1. An assigned subtitle that no longer exists aborts the batch. This is the only place that check runs; `AssetResolver::resolve_for` takes the assigned subtitle as given.
@@ -556,7 +559,7 @@ The frontend is plain ES modules with no framework.
 3. **Arguments**:
    - `args.rs` maps flags to `BatchRequest`: `--input-dir`, `--out-dir`, `--fonts-dir`, `--assets-dir`, `--preset`, `--bitrate`, `--complexity`, `--sub-offset` (seconds, converted to `default_sub_offset_ms`), `--workers` (default: physical cores, capped at the available parallelism, clamped 1–16), `--io-jobs`, `--ffmpeg-threads` (FLAC decoder thread cap; `auto` = governor default), `--assignments`, `--selected-item`, `--selected-items`, `--dry-run`, `--no-cache`, plus `--plan`, `--events`, `--clear-cache`, `--extract` / `--remux`, `-h`/`--help`. Any other argument fails with `Unknown argument: <arg>`.
    - `--assignments <FILE>` is read with `parse_assignments_json`: a `TrackAssignment` array, `{"assignments": [...] | {video: asset}}`, or a flat `{video: asset}` map (maps become subtitle assignments).
-   - Selection: `--selected-item <PATH>` (repeatable, literal, commas kept) and `--selected-items <LIST>` (repeatable, comma-separated, whitespace trimmed, empty segments dropped); both require `--input-dir`. Paths are normalized relative to `input_dir`, with a working-directory fallback, and anything resolving outside `input_dir` is rejected. In `--plan` mode, `InspectionManifest::select_items` fails if a selection names no discovered MKV, then keeps the selected items in selection order.
+   - Selection: `--selected-item <PATH>` (repeatable, literal, commas kept) and `--selected-items <LIST>` (repeatable, comma-separated, whitespace trimmed, empty segments dropped); both require `--input-dir`. Paths are normalized relative to `input_dir`, with a working-directory fallback, and anything resolving outside `input_dir` is rejected. Each is normalised with `ItemId::parse`. In `--plan` mode, `InspectionManifest::select_items` fails if a selection names no discovered MKV, then keeps the selected items in selection order.
    - Validation: numeric syntax is checked while parsing, as is `--sub-offset`, whose seconds must be finite and round (half away from zero) to whole milliseconds that fit `i64`. `main.rs` then calls `BatchRequest::resolve()` once, before anything runs, `--plan` included, and a run keeps the resolved `PipelineConfig`. `resolve` checks `--preset`, `--bitrate` (positive integer with an optional `k`/`K` or `M` suffix; lowercase `m` is rejected because ffmpeg reads it as milli), the ranges (`workers` 1–64, `io_jobs` 0–64, `ffmpeg_threads` 1–32, `complexity` 0–10) and the paths. The `--help` ranges and the `--io-jobs` default are built from the same constants.
 4. **Exit codes**: `0` on success; `1` on argument or validation errors, when any item failed, or on a fatal pipeline error; `130` when cancelled by SIGINT (or SIGTERM on Unix).
 

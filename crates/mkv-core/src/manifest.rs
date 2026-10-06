@@ -9,7 +9,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::domain::{ancestor_dirs, natural_sort_key, MkvTrack};
 use crate::inspect::inspect_videos;
-use crate::request::{clean_relative_path, resolve_selected_items};
+use crate::item_id::ItemId;
+use crate::request::resolve_selected_items;
 use crate::scan::{
     scan_assets, scan_mkv_files, InspectedVideo, ParsedFile, PersistentInspectCache, ScanCache,
 };
@@ -18,7 +19,9 @@ pub const MANIFEST_VERSION: u64 = 2;
 
 const CANCELLED_ERROR: &str = "Inspection cancelled";
 
-/// Derives a root-relative POSIX path ID for job events and manifest items.
+/// Derives a root-relative POSIX path ID. The engine uses it for release directories and
+/// subtitle candidates; a discovered video's identity is an [`ItemId`], built with `ItemId::of`,
+/// which normalises this ID further.
 /// Normalizes backslashes `\` to `/`. If stripped is empty or points to root, returns `"."`.
 pub fn get_item_id(path: &Path, root_dir: &Path) -> String {
     let rel = match path.strip_prefix(root_dir) {
@@ -150,7 +153,7 @@ pub struct InspectionMetadata {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ManifestItem {
-    pub id: String,
+    pub id: ItemId,
     pub name: String,
     pub release: String,
     pub metadata: InspectionMetadata,
@@ -175,11 +178,11 @@ impl InspectionManifest {
     /// and prunes `subtitle_candidates` to the releases of the retained items. Every
     /// selection must name a discovered item.
     pub fn select_items(&self, selected_items: &[String]) -> Result<InspectionManifest, String> {
-        let index_by_id: HashMap<String, usize> = self
+        let index_by_id: HashMap<ItemId, usize> = self
             .items
             .iter()
             .enumerate()
-            .map(|(idx, item)| (clean_relative_path(&item.id), idx))
+            .map(|(idx, item)| (item.id.clone(), idx))
             .collect();
         let filtered_items: Vec<ManifestItem> =
             resolve_selected_items(&index_by_id, selected_items)?
@@ -446,7 +449,7 @@ pub async fn generate_inspection_manifest(
             .unwrap_or_else(|| get_item_id(parent, input_dir));
 
         items.push(ManifestItem {
-            id: get_item_id(&mkv.path, input_dir),
+            id: ItemId::of(&mkv.path, input_dir),
             name: mkv.name.clone(),
             release,
             metadata,
@@ -682,7 +685,7 @@ mod tests {
 
     fn make_test_item(id: &str, name: &str, release: &str) -> ManifestItem {
         ManifestItem {
-            id: id.to_string(),
+            id: ItemId::parse(id),
             name: name.to_string(),
             release: release.to_string(),
             metadata: InspectionMetadata::default(),
@@ -725,8 +728,8 @@ mod tests {
         let filtered = manifest.select_items(&selected).unwrap();
 
         assert_eq!(filtered.items.len(), 2);
-        assert_eq!(filtered.items[0].id, "ep03.mkv");
-        assert_eq!(filtered.items[1].id, "ep01.mkv");
+        assert_eq!(filtered.items[0].id.as_str(), "ep03.mkv");
+        assert_eq!(filtered.items[1].id.as_str(), "ep01.mkv");
         assert_eq!(filtered.version, MANIFEST_VERSION);
         assert_eq!(
             filtered.subtitle_candidates.get("Show").unwrap(),
@@ -752,7 +755,7 @@ mod tests {
         let filtered = manifest.select_items(&selected).unwrap();
 
         assert_eq!(filtered.items.len(), 1);
-        assert_eq!(filtered.items[0].id, "season2/ep01.mkv");
+        assert_eq!(filtered.items[0].id.as_str(), "season2/ep01.mkv");
         assert!(!filtered.subtitle_candidates.contains_key("Season 1"));
         assert_eq!(
             filtered.subtitle_candidates.get("Season 2").unwrap(),
@@ -781,8 +784,8 @@ mod tests {
         let filtered = manifest.select_items(&selected).unwrap();
 
         assert_eq!(filtered.items.len(), 2);
-        assert_eq!(filtered.items[0].id, "ep01.mkv");
-        assert_eq!(filtered.items[1].id, "ep02.mkv");
+        assert_eq!(filtered.items[0].id.as_str(), "ep01.mkv");
+        assert_eq!(filtered.items[1].id.as_str(), "ep02.mkv");
     }
 
     #[test]

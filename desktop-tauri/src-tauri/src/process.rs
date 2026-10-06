@@ -266,14 +266,15 @@ impl JobState {
                     let mut ordered_item_ids = Vec::new();
                     if let Some(items) = items {
                         for item in items {
-                            if snapshot_items.contains_key(&item.id) {
+                            let id = item.id.to_string();
+                            if snapshot_items.contains_key(&id) {
                                 continue;
                             }
-                            ordered_item_ids.push(item.id.clone());
+                            ordered_item_ids.push(id.clone());
                             snapshot_items.insert(
-                                item.id.clone(),
+                                id.clone(),
                                 ItemSnapshot {
-                                    id: item.id.clone(),
+                                    id,
                                     file: item.file.clone(),
                                     status: ItemStatus::Queued,
                                     outcome: None,
@@ -611,6 +612,7 @@ pub async fn close_window(window: tauri::Window, app: AppHandle) -> Result<(), S
 #[cfg(test)]
 pub(crate) mod test_support {
     use super::JobSlot;
+    use mkv_core::item_id::ItemId;
     use mkv_core::pipeline::{BatchItemInfo, CancellationToken, ItemOutcome, JobEvent};
     use mkv_core::request::EffectiveSettings;
 
@@ -643,7 +645,7 @@ pub(crate) mod test_support {
             items: Some(
                 ids.iter()
                     .map(|id| BatchItemInfo {
-                        id: (*id).into(),
+                        id: ItemId::parse(id),
                         file: format!("{id}.mkv"),
                     })
                     .collect(),

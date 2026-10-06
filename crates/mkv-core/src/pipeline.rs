@@ -20,13 +20,11 @@ use crate::domain::{resolve_output_dir, IO_GOVERNOR_CLOSED};
 use crate::extract::extract_mkv_file;
 use crate::fonts::{scan_fonts, FontHashMemo, FontInfo, FontRegistry};
 use crate::inspect::inspect_videos;
-use crate::manifest::get_item_id;
+use crate::item_id::ItemId;
 use crate::media_tool::{MediaToolRunner, SubprocessRunner};
 use crate::remux::{execute_remux_job, RemuxOptions};
 use crate::remux_plan::{PreparedDir, RemuxPlan, RemuxPlanner, RemuxWork};
-use crate::request::{
-    clean_relative_path, resolve_selected_items, EffectiveSettings, TrackAssignment,
-};
+use crate::request::{resolve_selected_items, EffectiveSettings, TrackAssignment};
 use crate::scan::{
     get_or_probe_video, scan_mkv_files, InspectedVideo, InspectionResult, ParsedFile,
     PersistentInspectCache, ScanCache,
@@ -39,17 +37,17 @@ pub const CANCELLED_REASON: &str = "Operation cancelled";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BatchItemInfo {
-    pub id: String,
+    pub id: ItemId,
     pub file: String,
 }
 
 impl BatchItemInfo {
-    /// Identity of a discovered file: its canonical item ID under `input_dir` and its scanned
+    /// Identity of a discovered file: its [`ItemId`] under `input_dir` and its scanned
     /// file name. Taking the `ParsedFile` reuses the name discovery already computed, so every
     /// event reports exactly the name the scan produced.
     pub(crate) fn new(file: &ParsedFile, input_dir: &Path) -> Self {
         Self {
-            id: get_item_id(&file.path, input_dir),
+            id: ItemId::of(&file.path, input_dir),
             file: file.name.clone(),
         }
     }
@@ -215,7 +213,7 @@ fn cancelled_item(item: BatchItemInfo, duration_sec: Option<f64>) -> JobEvent {
     let BatchItemInfo { id, file } = item;
     JobEvent::ItemComplete {
         version: EVENT_VERSION,
-        id,
+        id: id.into(),
         file,
         status: ItemOutcome::Cancelled,
         reason: Some(CANCELLED_REASON.into()),
@@ -230,7 +228,7 @@ fn skipped_item(item: BatchItemInfo, reason: String) -> JobEvent {
     let BatchItemInfo { id, file } = item;
     JobEvent::ItemComplete {
         version: EVENT_VERSION,
-        id,
+        id: id.into(),
         file,
         status: ItemOutcome::Skipped,
         reason: Some(reason),
@@ -245,7 +243,7 @@ fn errored_item(item: BatchItemInfo, message: String) -> JobEvent {
     let BatchItemInfo { id, file } = item;
     JobEvent::ItemComplete {
         version: EVENT_VERSION,
-        id,
+        id: id.into(),
         file,
         status: ItemOutcome::Error,
         reason: None,
@@ -259,7 +257,7 @@ fn planned_item(item: BatchItemInfo) -> JobEvent {
     let BatchItemInfo { id, file } = item;
     JobEvent::ItemComplete {
         version: EVENT_VERSION,
-        id,
+        id: id.into(),
         file,
         status: ItemOutcome::Planned,
         reason: None,
@@ -302,7 +300,7 @@ fn release_assets_dir(assets: &Path, mkv_dir: &Path, input_dir: &Path) -> PathBu
     assets.to_path_buf()
 }
 
-/// Rejects discovered files that share a canonical item ID, then narrows the batch to
+/// Rejects discovered files that share an [`ItemId`], then narrows the batch to
 /// `selected_items` in selection order. Every selection must name a discovered file.
 fn apply_selected_items(
     files: Vec<ParsedFile>,
@@ -311,7 +309,7 @@ fn apply_selected_items(
 ) -> Result<Vec<ParsedFile>, String> {
     let mut index_by_id = HashMap::with_capacity(files.len());
     for (idx, file) in files.iter().enumerate() {
-        match index_by_id.entry(clean_relative_path(&get_item_id(&file.path, input_dir))) {
+        match index_by_id.entry(ItemId::of(&file.path, input_dir)) {
             Entry::Vacant(entry) => {
                 entry.insert(idx);
             }
@@ -335,7 +333,7 @@ fn apply_selected_items(
         .collect())
 }
 
-/// Requires every assignment target to match exactly one discovered canonical MKV ID.
+/// Requires every assignment target to match exactly one discovered video's [`ItemId`].
 ///
 /// A manual assignment that cannot be consumed fails closed: it is never silently dropped in
 /// favor of automatic resolution. The check runs after discovery and selection, so the later
@@ -350,19 +348,19 @@ fn validate_assignment_targets(
         return Ok(());
     }
 
-    let mut discovered: HashMap<String, usize> = HashMap::with_capacity(files.len());
+    let mut discovered: HashMap<ItemId, usize> = HashMap::with_capacity(files.len());
     for file in files {
         *discovered
-            .entry(clean_relative_path(&get_item_id(&file.path, input_dir)))
+            .entry(ItemId::of(&file.path, input_dir))
             .or_default() += 1;
     }
 
     let mut unmatched_seen = HashSet::with_capacity(assignments.len());
-    let mut unmatched = Vec::new();
+    let mut unmatched: Vec<String> = Vec::new();
     for assignment in assignments {
-        let target = clean_relative_path(&assignment.target_video);
+        let target = assignment.target_id();
         if discovered.get(&target) != Some(&1) && unmatched_seen.insert(target.clone()) {
-            unmatched.push(target);
+            unmatched.push(target.into());
         }
     }
     if unmatched.is_empty() {
@@ -386,6 +384,7 @@ fn settle_cancelled_planning_items(
     input_dir: &Path,
     outcomes: Vec<JobEvent>,
 ) -> Vec<JobEvent> {
+    // Event IDs are `ItemId`s rendered by `BatchItemInfo::new`, so they match `item.id` by string.
     let mut outcomes_by_id = HashMap::with_capacity(outcomes.len());
     for outcome in outcomes {
         let id = match &outcome {
@@ -400,7 +399,7 @@ fn settle_cancelled_planning_items(
         .map(|file| {
             let item = BatchItemInfo::new(file, input_dir);
             outcomes_by_id
-                .remove(&item.id)
+                .remove(item.id.as_str())
                 .unwrap_or_else(|| cancelled_item(item, None))
         })
         .collect()
@@ -473,7 +472,7 @@ impl ProgressSink {
         if let Some(tx) = &self.tx {
             let _ = tx.try_send(JobEvent::ItemProgress {
                 version: EVENT_VERSION,
-                id: self.item.id.clone(),
+                id: self.item.id.to_string(),
                 file: self.item.file.clone(),
                 progress,
                 speed: None,
@@ -680,7 +679,7 @@ impl BatchPipeline {
                 let started = Instant::now();
                 self.emit(JobEvent::ItemStart {
                     version: EVENT_VERSION,
-                    id: item.id.clone(),
+                    id: item.id.to_string(),
                     file: item.file.clone(),
                     extra: Default::default(),
                 })
@@ -724,7 +723,7 @@ impl BatchPipeline {
                     let BatchItemInfo { id, file } = item;
                     self.emit(JobEvent::ItemComplete {
                         version: EVENT_VERSION,
-                        id,
+                        id: id.into(),
                         file,
                         status: ItemOutcome::Completed,
                         reason: None,
@@ -746,7 +745,7 @@ impl BatchPipeline {
                     summary.log.push(msg);
                     self.emit(JobEvent::ItemComplete {
                         version: EVENT_VERSION,
-                        id,
+                        id: id.into(),
                         file,
                         status: ItemOutcome::Error,
                         reason: None,
@@ -930,7 +929,7 @@ impl BatchPipeline {
             } else {
                 JobEvent::ItemComplete {
                     version: EVENT_VERSION,
-                    id: item.id,
+                    id: item.id.into(),
                     file: item.file,
                     status: ItemOutcome::Error,
                     reason: None,
@@ -1331,7 +1330,7 @@ mod tests {
         assert_eq!(
             item,
             BatchItemInfo {
-                id: "Season 1/【字幕】 Show - 01 ✓.mkv".into(),
+                id: ItemId::parse("Season 1/【字幕】 Show - 01 ✓.mkv"),
                 file: "【字幕】 Show - 01 ✓.mkv".into(),
             }
         );
@@ -1399,7 +1398,7 @@ mod tests {
         // Nested IDs never equal their file names, so a swapped pair misses this map.
         let expected: HashMap<String, String> = items
             .iter()
-            .map(|(item, _)| (item.id.clone(), item.file.clone()))
+            .map(|(item, _)| (item.id.to_string(), item.file.clone()))
             .collect();
 
         let (event_sender, mut event_receiver) = create_event_channel(64);
