@@ -1,14 +1,21 @@
-//! Fixtures shared by the pipeline integration test binaries.
+//! Fixtures shared by the integration test binaries. Each binary uses a subset, hence the
+//! `dead_code` allowance.
+#![allow(dead_code)]
 
+use std::collections::VecDeque;
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use mkv_core::domain::{MkvTrack, TrackProperties};
+use mkv_core::media_tool::{Invocation, MediaTool, MediaToolRunner, RawOutcome};
 use mkv_core::pipeline::{
     create_event_channel, BatchPipeline, CancellationToken, JobEvent, PipelineConfig,
     PipelineSummary,
 };
 use mkv_core::scan::{MkvmergeMetadata, PersistentInspectCache};
+use parking_lot::Mutex;
 
 /// Runs a batch to its end and returns its result with every event it emitted. The events are
 /// drained while the batch runs, so a batch emitting more events than the channel buffers can
@@ -82,32 +89,119 @@ pub fn seeded_cache(
     cache
 }
 
-/// Restores the environment variables it captured when dropped, so a failing assertion cannot
-/// leak a mutated `PATH` into the rest of the run. Only the binary that puts a stub tool on
-/// `PATH` uses it, one test per process because the environment is process-global; the others
-/// never construct it, hence the `dead_code` allowance.
-#[allow(dead_code)]
-pub struct EnvReset(Vec<(&'static str, Option<std::ffi::OsString>)>);
+/// A file system effect of a scripted invocation, given the invocation's arguments.
+type SideEffect = Box<dyn Fn(&[String]) + Send + Sync>;
 
-#[allow(dead_code)]
-impl EnvReset {
-    /// Records the current value of each of `vars`, set or not, to restore on drop.
-    pub fn capture(vars: &[&'static str]) -> Self {
-        Self(
-            vars.iter()
-                .map(|&var| (var, std::env::var_os(var)))
-                .collect(),
-        )
+/// One scripted Media Tool invocation: the stdout lines the runner feeds the sink, a file
+/// system side effect, then the outcome it reports.
+pub struct Step {
+    outcome: RawOutcome,
+    stdout_lines: Vec<String>,
+    side_effect: Option<SideEffect>,
+}
+
+impl Step {
+    pub fn new(outcome: RawOutcome) -> Self {
+        Self {
+            outcome,
+            stdout_lines: Vec::new(),
+            side_effect: None,
+        }
+    }
+
+    /// The tool exits with `code`, having printed `stdout` and `stderr`.
+    pub fn exited(code: i32, stdout: &str, stderr: &str) -> Self {
+        Self::new(RawOutcome::Exited {
+            code: Some(code),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.as_bytes().to_vec(),
+        })
+    }
+
+    /// Feeds `lines` to the stdout sink, as the tool prints them while running.
+    pub fn stdout_lines(mut self, lines: &[&str]) -> Self {
+        self.stdout_lines = lines.iter().map(|line| line.to_string()).collect();
+        self
+    }
+
+    /// Runs `effect` on the invocation's arguments before the outcome is reported.
+    pub fn side_effect(mut self, effect: impl Fn(&[String]) + Send + Sync + 'static) -> Self {
+        self.side_effect = Some(Box::new(effect));
+        self
+    }
+
+    /// Writes `content` to the file named after `-o`, as mkvmerge writes its output.
+    pub fn writes_output(self, content: &'static [u8]) -> Self {
+        self.side_effect(move |args| {
+            let at = args
+                .iter()
+                .position(|arg| arg == "-o")
+                .expect("no -o argument");
+            std::fs::write(&args[at + 1], content).unwrap();
+        })
+    }
+
+    /// Writes `content` to every `<id>:<path>` argument, as mkvextract writes each target.
+    pub fn writes_extract_targets(self, content: &'static [u8]) -> Self {
+        self.side_effect(move |args| {
+            for arg in args {
+                if let Some((id, path)) = arg.split_once(':') {
+                    if id.parse::<u32>().is_ok() {
+                        std::fs::write(path, content).unwrap();
+                    }
+                }
+            }
+        })
     }
 }
 
-impl Drop for EnvReset {
-    fn drop(&mut self) {
-        for (var, value) in &self.0 {
-            match value {
-                Some(value) => std::env::set_var(var, value),
-                None => std::env::remove_var(var),
-            }
+/// A [`MediaToolRunner`] that spawns nothing: it records each invocation and answers with the
+/// next scripted [`Step`], panicking when the script runs out.
+pub struct ScriptedRunner {
+    steps: Mutex<VecDeque<Step>>,
+    calls: Mutex<Vec<(MediaTool, Vec<String>)>>,
+}
+
+impl ScriptedRunner {
+    pub fn new(steps: impl IntoIterator<Item = Step>) -> Self {
+        Self {
+            steps: Mutex::new(steps.into_iter().collect()),
+            calls: Mutex::new(Vec::new()),
         }
+    }
+
+    /// The tool and arguments of every invocation so far, in order.
+    pub fn calls(&self) -> Vec<(MediaTool, Vec<String>)> {
+        self.calls.lock().clone()
+    }
+}
+
+impl MediaToolRunner for ScriptedRunner {
+    fn run<'a>(
+        &'a self,
+        invocation: Invocation<'a>,
+    ) -> Pin<Box<dyn Future<Output = RawOutcome> + Send + 'a>> {
+        Box::pin(async move {
+            let args: Vec<String> = invocation
+                .args
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            self.calls.lock().push((invocation.tool, args.clone()));
+            let step = self
+                .steps
+                .lock()
+                .pop_front()
+                .expect("unscripted Media Tool invocation");
+            if let Some(on_line) = invocation.on_stdout_line {
+                for line in &step.stdout_lines {
+                    on_line(line);
+                }
+            }
+            if let Some(effect) = &step.side_effect {
+                effect(&args);
+            }
+            step.outcome
+        })
     }
 }

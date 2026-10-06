@@ -64,7 +64,7 @@ A Cargo workspace with three members that share one version:
 - `crates/mkv-cli`: a thin CLI adapter (`args.rs` parses the flags, `main.rs` runs the batch or `--plan`). If the binary is renamed to `mkv-extract`, it defaults to extract mode.
 - `desktop-tauri/src-tauri` (package `mkv-anime-batch`): a Tauri v2 host that runs `mkv-core` **in-process** (no sidecar, ADR-0007), with a plain-ES-module frontend in `desktop-tauri/ui` (no framework, no bundler).
 
-External tools are invoked as subprocesses: `mkvmerge`, `mkvextract`, and `ffmpeg` (libopus).
+Media Tools (`mkvmerge`, `mkvextract`, and `ffmpeg` with libopus) run as child processes. Every run goes through `media_tool.rs`: the `MediaToolRunner` port, `SubprocessRunner` as its adapter, and one exit-code policy per tool family (exit 1 is success with warnings for MKVToolNix, a failure for `ffmpeg`). Tests script the port with `ScriptedRunner` in `tests/common`.
 
 ### Engine flow (`mkv-core`)
 
@@ -85,7 +85,7 @@ Concurrency has two limits (ADR-0011):
 Invariants to preserve:
 
 - **Subtitle precedence ladder (ADR-0004/0008)**: manual `TrackAssignment` > same-directory external > embedded > nearest-ancestor external > `--assets-dir`. Source tier beats language score. The scoring rules live in `domain.rs`.
-- **Atomic outputs**: work is staged in `TempDir`s inside the destination and moved into place with `promote_file`. Child processes use `kill_on_drop(true)`, so cancellation (`CancellationToken`, raced with `tokio::select!`) cleans up by dropping.
+- **Atomic outputs**: work is staged in `TempDir`s inside the destination and moved into place with `promote_file`. `SubprocessRunner` spawns child processes with `kill_on_drop(true)`, so cancellation (`CancellationToken`, raced with `tokio::select!`) cleans up by dropping.
 - **Font registry (`fonts.rs`)**: claim → stage → BLAKE2b dedup → promote/release. `FontClaimsGuard` releases any unpromoted claim on drop.
 - **Panics are isolated**: a panicking item task becomes an `error` outcome, and the desktop supervisor catches pipeline panics at the `JoinHandle`. **Never set `panic = "abort"`** in the release profile.
 - `unsafe_code = "forbid"` is set across the workspace.

@@ -20,6 +20,7 @@ use crate::domain::{resolve_output_dir, IO_GOVERNOR_CLOSED};
 use crate::extract::extract_mkv_file;
 use crate::fonts::{scan_fonts, FontHashMemo, FontInfo, FontRegistry};
 use crate::manifest::get_item_id;
+use crate::media_tool::{MediaToolRunner, SubprocessRunner};
 use crate::remux::{execute_remux_job, RemuxOptions};
 use crate::remux_plan::{PreparedDir, RemuxPlan, RemuxPlanner, RemuxWork};
 use crate::request::{
@@ -486,6 +487,7 @@ pub struct BatchPipeline {
     config: PipelineConfig,
     event_sender: Option<EventSender>,
     log_sender: Option<LogSender>,
+    media_tool_runner: Arc<dyn MediaToolRunner>,
     cancel_token: CancellationToken,
 }
 
@@ -499,12 +501,22 @@ impl BatchPipeline {
             config,
             event_sender,
             log_sender: None,
+            media_tool_runner: Arc::new(SubprocessRunner),
             cancel_token,
         }
     }
 
     pub fn with_log_sender(mut self, log_sender: LogSender) -> Self {
         self.log_sender = Some(log_sender);
+        self
+    }
+
+    /// Runs the `ffmpeg`, `mkvmerge`, and `mkvextract` invocations of remux and extract items
+    /// through `runner` instead of spawning child processes. The Fallback Inspector's
+    /// `mkvmerge -J` is not routed through it, so a run that must not spawn a tool needs an
+    /// inspection cache that already holds every video.
+    pub fn with_media_tool_runner(mut self, runner: Arc<dyn MediaToolRunner>) -> Self {
+        self.media_tool_runner = runner;
         self
     }
 
@@ -835,6 +847,7 @@ impl BatchPipeline {
                 let file_path = file.path.clone();
                 let cancel_token = self.cancel_token.clone();
                 let io_semaphore = Arc::clone(&io_semaphore);
+                let runner = Arc::clone(&self.media_tool_runner);
                 let cache = Arc::clone(&cache);
                 let no_cache = self.config.no_cache;
 
@@ -862,6 +875,7 @@ impl BatchPipeline {
                             &font_registry,
                             target_out_dir.as_deref(),
                             Some(&on_progress),
+                            &*runner,
                         ) => res.map(|extracted| extracted.log).map_err(ItemFailure::Failed),
                     }
                 }
@@ -1107,6 +1121,7 @@ impl BatchPipeline {
                 |work, progress| {
                     let cancel_token = self.cancel_token.clone();
                     let io_semaphore = Arc::clone(&io_semaphore);
+                    let runner = Arc::clone(&self.media_tool_runner);
                     let bitrate = Arc::clone(&bitrate);
 
                     async move {
@@ -1127,6 +1142,7 @@ impl BatchPipeline {
                                 &options,
                                 Some(&on_progress),
                                 &io_semaphore,
+                                &*runner,
                             ) => res.map_err(ItemFailure::Failed),
                         }
                     }

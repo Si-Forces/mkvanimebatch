@@ -124,6 +124,7 @@ mkvanimebatch/
 │   │   │   ├── assets.rs            # AssetResolver, SubIndex, ChapterIndex, CoverIndex, release preparation
 │   │   │   ├── fonts.rs             # Fonts directory lookup, FontRegistry, FontHashMemo, FontClaimsGuard
 │   │   │   ├── manifest.rs          # InspectionManifest generation and metadata summaries
+│   │   │   ├── media_tool.rs        # Media Tool invocation: MediaToolRunner port, SubprocessRunner adapter, run() with the exit-code policy
 │   │   │   ├── preset.rs            # PresetProfile catalog and lookup
 │   │   │   ├── request.rs           # BatchRequest, TrackAssignment, request resolution (validation, preset layering, defaults), EffectiveSettings, assignments JSON parsing
 │   │   │   ├── remux.rs             # Track selection, ffmpeg/mkvmerge argument building, remux execution
@@ -131,7 +132,7 @@ mkvanimebatch/
 │   │   │   ├── extract.rs           # mkvextract invocation for subtitles, chapters, covers, and fonts
 │   │   │   └── pipeline.rs          # BatchPipeline, JobEvent and log channels, tokio JoinSet scheduling
 │   │   ├── benches/                 # bench_pipeline.rs (BatchRequest::resolve throughput, warm-cache remux/extract dry runs); bench_real_media.rs (cold-cache remux of a real corpus across worker counts at io_jobs = 2, local only; CI runs only its self-check)
-│   │   └── tests/                   # 11 integration suites: test_assets, test_cross_regex, test_domain, test_extract, test_fonts, test_pipeline, test_pipeline_assignments, test_pipeline_font_memo, test_real_remux, test_remux, test_scan
+│   │   └── tests/                   # 12 integration suites: test_assets, test_cross_regex, test_domain, test_extract, test_fonts, test_media_tool, test_pipeline, test_pipeline_assignments, test_pipeline_font_memo, test_real_remux, test_remux, test_scan
 │   └── mkv-cli/                     # CLI binary
 │       ├── Cargo.toml
 │       └── src/
@@ -186,7 +187,7 @@ flowchart TD
 
     NativeProbe --> CheckSuccess{Native Parsing\nSucceeded?}
     CheckSuccess -- Yes --> StoreCache[Store in PersistentInspectCache]
-    CheckSuccess -- No --> Fallback[Fallback Inspector\nmkvmerge -J subprocess]
+    CheckSuccess -- No --> Fallback[Fallback Inspector\nmkvmerge -J]
 
     Fallback --> CheckMKS{Exit 0 and container\nrecognized?}
     CheckMKS -- Yes --> StoreCache
@@ -203,8 +204,8 @@ flowchart TD
    - Fails (and so triggers the fallback) only when the probe returns an error: missing EBML header or Segment, a malformed top-level element, clusters with no SeekHead before them, or no track found. A malformed SeekHead entry or a truncated tail ends the scan without failing. The parser tracks stream position in memory and preserves `BufReader` buffers across intra-buffer skips via relative seeking, eliminating loop guard `lseek` calls. ADR-0013 measured the original warm native probe at 0.091 ms.
 
 2. **Fallback inspector (`scan.rs`)**:
-   - Runs `mkvmerge -J` with a 30-second timeout and rejects output whose `container.recognized` is `false`.
-   - On Windows every child tool (`mkvmerge`, `mkvextract`, `ffmpeg`) is spawned with `CREATE_NO_WINDOW` (`0x08000000`).
+   - Runs `mkvmerge -J` through `SubprocessRunner` and the shared exit-code policy (§4.6) with a 30-second timeout (`PROBE_TIMEOUT`), so exit code 1 (warnings) with valid JSON still probes successfully. It rejects output whose `container.recognized` is `false`.
+   - On Windows every child tool (`mkvmerge`, `mkvextract`, `ffmpeg`) is spawned by `SubprocessRunner` with `CREATE_NO_WINDOW` (`0x08000000`).
 
 3. **Persistent inspection cache (`PersistentInspectCache`)**:
    - Keyed on the canonical file path (Windows `\\?\` prefix stripped) and valid while `FileSignature { size: u64, mtime_ns: u128 }` matches.
@@ -331,7 +332,7 @@ sequenceDiagram
      - Bitrate: preset or `--bitrate` (default `192k`).
      - Complexity: `0-10` (default `5`; `10` in the Hi-Fi preset). ADR-0013 lowered the default from 10.
      - Threads: `-threads` caps the FLAC decoder's threads; libopus is single-threaded, so each transcode encodes on about one core whatever the value, and `workers` is the only lever on encode CPU use. Without `--ffmpeg-threads`, the governor default is `(physical_cores / workers).clamp(1, 4)`, which keeps ffmpeg from sizing decoder threads to all cores in every process (ADR-0013, 2026-10-05 correction).
-     - Timeout: 30 minutes (`SUBPROCESS_TIMEOUT`), which also applies to `mkvmerge` and `mkvextract`.
+     - Timeout: 30 minutes (`SUBPROCESS_TIMEOUT`), which also applies to `mkvmerge` and `mkvextract` (§4.6).
 2. **Subtitle synchronization**:
    - External subtitle: `--sync 0:<ms>`, where `<ms>` is the assignment's `offset_ms` when it has one (an explicit `0` means unshifted), else the global `default_sub_offset_ms`. A zero offset emits no `--sync`.
    - Embedded subtitle: `--sync <track_id>:<ms>` from the global `default_sub_offset_ms` only.
@@ -343,7 +344,7 @@ sequenceDiagram
    - `--chapters <file>` for an external chapter file.
    - External cover: `--attachment-name cover<ext> --attachment-mime-type <mime> --attach-file <cover>`.
    - Fonts: `--attachment-mime-type <mime> --attach-file <font>` for each font in the fonts directory.
-4. **Completion**: exit code 1 (warnings) counts as success. The output must exist and be non-empty; it is then moved to its final path with `promote_file`. By default the output goes to `Output/<stem>.mkv` beside the source; with `--out-dir` it goes to the mirrored directory under the output root. OVA and special episodes get an `OVA<ep>_` / `SP<ep>_` prefix.
+4. **Completion**: exit code 1 (warnings) counts as success, and the warning is logged (§4.6). The output must exist and be non-empty; it is then moved to its final path with `promote_file`. By default the output goes to `Output/<stem>.mkv` beside the source; with `--out-dir` it goes to the mirrored directory under the output root. OVA and special episodes get an `OVA<ep>_` / `SP<ep>_` prefix.
 
 ---
 
@@ -396,10 +397,30 @@ Extract mode skips probing and planning up front: each item task probes its vide
    - Planned jobs from every release directory form one queue in batch order, so workers do not idle at directory boundaries. Asset resolution stays per directory.
 3. **Cooperative cancellation (`CancellationToken`)**:
    - Checked while probing, after probing, before each Release Directory's asset pass, before planning each item, and before each task launch. Preflight inspection also checks it before each directory of its subtitle pass. A directory's pass already under way runs to completion. Each item's work future races the token in a `tokio::select!`, so a stop drops the in-flight work at its next await point.
-   - Child processes are spawned with `kill_on_drop(true)`, and scratch directories are `TempDir`s, so dropping the work kills the tools and removes staged files. After a stop, `run_items` aborts the remaining tasks and settles every in-flight and unstarted item as `cancelled`.
+   - Child processes are spawned by `SubprocessRunner` (§4.6) with `kill_on_drop(true)`, and scratch directories are `TempDir`s, so dropping the work kills the tools and removes staged files. After a stop, `run_items` aborts the remaining tasks and settles every in-flight and unstarted item as `cancelled`.
 4. **Item duration (ADR-0009)**:
    - The engine takes `Instant::now()` when it starts an item and puts `elapsed().as_secs_f64()` in `JobEvent::ItemComplete { duration_sec: Some(..) }` for every started item, whether it completed, failed, or was cancelled.
 5. **Panicking items**: a task that panics settles its item as `error` (`worker panicked: ...`); the rest of the batch continues.
+
+---
+
+### 4.6 Media Tool Invocation (`media_tool.rs`)
+
+Every Media Tool run goes through one port and one policy, so remux, extract, and the fallback probe do not each hand-roll spawning, timeouts, and exit-code handling. This is a single tool invocation, not the runner loop ADR-0002 rejected: that was a `BatchRunner` over the remux and extract pipelines, which stay separate.
+
+1. **Port (`MediaToolRunner`)**: one method takes an `Invocation` (Media Tool, arguments, timeout, optional stdout-line sink) and returns the raw result, a `RawOutcome`: the tool exited (exit code, or none when a signal ended it, with its stdout and stderr bytes), failed to run (the I/O error text), or timed out. It classifies nothing.
+2. **Adapter (`SubprocessRunner`)**: the production runner. It spawns the tool with `tokio::process::Command` (`CREATE_NO_WINDOW`, `0x08000000`, on Windows), `kill_on_drop(true)`, stdin closed, and piped stdout and stderr; drains stderr in a task that is aborted on timeout; and streams stdout to the sink split on `\r` and `\n` while collecting its bytes. Dropping the future kills the child, which is how a stop (§4.5) ends a running tool.
+3. **Policy (`media_tool::run`)**: applied above the port, per tool family:
+
+   | Exit | MKVToolNix (`mkvmerge`, `mkvextract`) | `ffmpeg` |
+   | :--- | :--- | :--- |
+   | 0 | success | success |
+   | 1 | success with warnings (trimmed stderr and stdout, joined) | failure |
+   | 2 or more, or a signal | failure | failure |
+
+4. **Errors and progress**: failures read `Failed to run <tool>: <io error>`, `<tool> timed out after <N> seconds`, and `<tool> failed (exit code N | terminated by signal): <stderr and stdout, else the code>`. Callers may prefix context, as the transcode does with `Audio transcode: `. `Progress: N%` stdout lines feed the caller's `on_progress`.
+5. **Callers**: `execute_remux_job` and `extract_mkv_file` take a `&dyn MediaToolRunner`, which `BatchPipeline` supplies (`SubprocessRunner` unless `with_media_tool_runner` replaces it). Both log a warning as `  <text>` when it starts with "warning", else `  Warning: <text>`. The fallback probe uses `SubprocessRunner` directly and drops the warning. Timeouts are constants passed per invocation: `SUBPROCESS_TIMEOUT` (30 minutes) and `PROBE_TIMEOUT` (30 seconds).
+6. **Testing**: `tests/common` holds `ScriptedRunner`, which records each invocation and answers with scripted outcomes, so the policy and the callers run on every platform without a tool on `PATH`. `test_real_remux` covers `SubprocessRunner` against the real tools, and unit tests in `media_tool.rs` cover its stdout line splitting. `BatchPipeline::with_media_tool_runner` routes only the remux and extract invocations: the fallback probe still spawns `mkvmerge`, so a test that must not spawn seeds the inspection cache.
 
 ---
 

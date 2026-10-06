@@ -40,6 +40,7 @@
 - **`generate_inspection_manifest` takes an `Arc` cache**: its `persistent_cache` parameter is now `Option<Arc<PersistentInspectCache>>` instead of `Option<&PersistentInspectCache>`, matching `PipelineConfig.cache`, because each spawned probe task holds the cache. Callers wrap their cache in an `Arc`.
 - **`BatchPipeline::from_request` removed**: it had no callers left once the CLI and the desktop both resolve the request themselves. Call `BatchRequest::resolve` and pass the config to `BatchPipeline::new`.
 - **`BatchRequest::resolve` replaces `validate` and `into_pipeline_config`**: `BatchRequest::validate` is now private and `into_pipeline_config` is removed; `BatchRequest::resolve(self) -> Result<PipelineConfig, String>` validates the request and converts it in one step, so a caller validates and converts with one call. The ranges and defaults are public constants (`WORKERS_RANGE`, `IO_JOBS_RANGE`, `FFMPEG_THREADS_RANGE`, `COMPLEXITY_RANGE`, `DEFAULT_IO_JOBS`, `DEFAULT_PRESET_ID`). An unset bitrate and complexity now come from the `balanced` Preset Profile rather than `PipelineConfig::default`, which is a fixed fixture for tests; the values are unchanged. `PipelineConfig.io_jobs` now holds the effective limit: a requested `0` resolves to the worker count, so it is never `0`, and a hand-built config with `io_jobs: 0` now runs with 1 I/O job instead of the worker count. The invalid-bitrate error now reads ``Invalid bitrate format: '<value>'. Must be a positive integer with an optional k/K/M suffix, like 128k or 192k.`` in the desktop too, and `mkv-cli` no longer rejects `--preset` or `--bitrate` while parsing: `resolve` reports them. New `EffectiveSettings` type, from `PipelineConfig::effective_settings()` and `EffectiveSettings::defaults()`, holds the workers, I/O jobs, FFmpeg threads, bitrate and complexity a run uses.
+- **Media Tool runner parameter on `execute_remux_job` and `extract_mkv_file`; `read_progress_stream` removed**: both take a trailing `runner: &dyn MediaToolRunner` (`mkv-core::media_tool`); pass `&SubprocessRunner` to spawn the real tools. `BatchPipeline::with_media_tool_runner` replaces the runner a pipeline uses, defaulting to `SubprocessRunner`. `domain::read_progress_stream` is gone: `media_tool::run` parses the "Progress: N%" lines.
 
 ### Core Scanning
 
@@ -73,6 +74,13 @@
 ### Worker Panic Reporting
 
 - A worker task that panics now completes its item with outcome `error` and the message `worker panicked: ...`. Previously that item never received an `ItemComplete` event.
+
+### Media Tool Invocation
+
+- Extraction now logs mkvextract's exit-code-1 warnings in the item's log, as remux does for mkvmerge (`  Warning: <text>`). It discarded them before.
+- The `mkvmerge -J` fallback probe accepts exit code 1 (warnings) when the output is valid JSON. It failed with `mkvmerge exit code Some(1)` before.
+- `mkvmerge`, `mkvextract`, and `ffmpeg` failures share one wording: `Failed to run <tool>: <error>`, `<tool> timed out after <N> seconds`, and `<tool> failed (exit code N | terminated by signal): <stderr and stdout, else the code>`. A failed transcode reads `Audio transcode: ffmpeg failed (exit code N): ...` instead of `ffmpeg audio transcode failed: ...`.
+- Every Media Tool starts with stdin closed; `mkvmerge` and `mkvextract` inherited it before.
 
 ### Extracted Subtitle Naming
 

@@ -1,7 +1,12 @@
-use std::path::{Path, PathBuf};
+mod common;
 
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use common::{ScriptedRunner, Step};
 use mkv_core::domain::{MkvTrack, TrackProperties};
 use mkv_core::fonts::FontInfo;
+use mkv_core::media_tool::MediaTool;
 use mkv_core::remux::{
     build_ffmpeg_args, build_mkvmerge_args, execute_remux_job, select_tracks, PlannedJob,
     RemuxOptions, TrackSelection,
@@ -244,6 +249,7 @@ async fn test_execute_remux_job_no_file_name_returns_err() {
         &REMUX_OPTIONS,
         None,
         &tokio::sync::Semaphore::new(1),
+        &ScriptedRunner::new([]),
     )
     .await
     .unwrap_err();
@@ -253,191 +259,175 @@ async fn test_execute_remux_job_no_file_name_returns_err() {
     );
 }
 
-#[cfg(unix)]
-mod mock_mkvmerge {
-    use std::os::unix::fs::PermissionsExt;
+/// Remuxes an empty source video through `runner`, with `selection` choosing the audio track.
+///
+/// Takes a `&Path` rather than a `&TempDir` so callers can move the directory into a spawned
+/// task.
+async fn remux_with(
+    dir: &Path,
+    selection: &TrackSelection,
+    io_semaphore: &tokio::sync::Semaphore,
+    runner: &ScriptedRunner,
+) -> Result<Vec<String>, String> {
+    let video = dir.join("test.mkv");
+    std::fs::File::create(&video).unwrap();
+    let out = dir.join("out.mkv");
+    execute_remux_job(
+        &job(&video, out, None),
+        selection,
+        &FontInfo::default(),
+        &REMUX_OPTIONS,
+        None,
+        io_semaphore,
+        runner,
+    )
+    .await
+}
 
-    use tempfile::TempDir;
-    use tokio::sync::{Mutex, MutexGuard};
+/// Remuxes a copied-audio source with an uncontended I/O governor.
+async fn remux(dir: &Path, runner: &ScriptedRunner) -> Result<Vec<String>, String> {
+    remux_with(dir, &selection(), &tokio::sync::Semaphore::new(1), runner).await
+}
 
-    use super::*;
+#[tokio::test]
+async fn test_execute_remux_job_collects_stdout_on_mkvmerge_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let runner = ScriptedRunner::new([Step::exited(
+        2,
+        "Error: Simulated mkvmerge stdout failure\n",
+        "",
+    )]);
 
-    /// Serializes the `PATH` mutation shared by every mock-mkvmerge test in this binary.
-    static PATH_LOCK: Mutex<()> = Mutex::const_new(());
+    let err = remux(dir.path(), &runner).await.unwrap_err();
+    assert!(
+        err.contains("Simulated mkvmerge stdout failure"),
+        "Error message did not contain stdout output: {err}"
+    );
+    assert!(
+        err.contains("exit code 2"),
+        "Error message did not contain exit code: {err}"
+    );
+}
 
-    /// Puts an `mkvmerge` shell script ahead of the real one on `PATH` until dropped.
-    struct MockMkvmerge {
-        original_path: String,
-        _bin_dir: TempDir,
-        _lock: MutexGuard<'static, ()>,
-    }
+#[tokio::test]
+async fn test_execute_remux_job_combines_stderr_and_stdout_on_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let runner = ScriptedRunner::new([Step::exited(
+        2,
+        "Error: Detailed stdout failure\n",
+        "Auxiliary stderr notice\n",
+    )]);
 
-    impl MockMkvmerge {
-        async fn install(script: &str) -> Self {
-            let lock = PATH_LOCK.lock().await;
-            let bin_dir = tempfile::tempdir().unwrap();
-            let mock = bin_dir.path().join("mkvmerge");
-            std::fs::write(&mock, script).unwrap();
-            std::fs::set_permissions(&mock, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let err = remux(dir.path(), &runner).await.unwrap_err();
+    assert!(
+        err.contains("Auxiliary stderr notice\nError: Detailed stdout failure"),
+        "Error message did not join stderr and stdout: {err}"
+    );
+}
 
-            let original_path = std::env::var("PATH").unwrap_or_default();
-            std::env::set_var(
-                "PATH",
-                format!("{}:{original_path}", bin_dir.path().display()),
-            );
-            Self {
-                original_path,
-                _bin_dir: bin_dir,
-                _lock: lock,
-            }
-        }
-    }
+#[tokio::test]
+async fn test_execute_remux_job_logs_warnings_on_exit_code_1() {
+    let dir = tempfile::tempdir().unwrap();
+    let runner =
+        ScriptedRunner::new([Step::exited(1, "Warning: QuickTime track parsing\n", "")
+            .writes_output(b"dummy data\n")]);
 
-    impl Drop for MockMkvmerge {
-        fn drop(&mut self) {
-            std::env::set_var("PATH", &self.original_path);
-        }
-    }
+    let log = remux(dir.path(), &runner).await.unwrap();
+    assert!(
+        log.iter()
+            .any(|l| l == "  Warning: QuickTime track parsing"),
+        "log did not contain the warning: {log:?}"
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("out.mkv")).unwrap(),
+        b"dummy data\n"
+    );
+}
 
-    /// Remuxes an empty source video with no subtitle through the installed mock.
-    ///
-    /// Takes a `&Path` rather than a `&TempDir` so callers can move the directory into a
-    /// spawned task.
-    async fn remux_with(
-        dir: &Path,
-        io_semaphore: &tokio::sync::Semaphore,
-    ) -> Result<Vec<String>, String> {
-        let video = dir.join("test.mkv");
-        std::fs::File::create(&video).unwrap();
-        let out = dir.join("out.mkv");
-        execute_remux_job(
-            &job(&video, out, None),
-            &selection(),
-            &FontInfo::default(),
-            &REMUX_OPTIONS,
-            None,
-            io_semaphore,
-        )
+/// The governor is exhausted first, so the runner must not be invoked until a permit is
+/// released. Once it is, the remux completes and gives the permit back.
+#[tokio::test]
+async fn test_execute_remux_job_waits_for_an_io_governor_permit() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir_path = dir.path().to_path_buf();
+    let runner = Arc::new(ScriptedRunner::new([
+        Step::exited(0, "", "").writes_output(b"dummy data\n")
+    ]));
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(0));
+
+    let mut job = tokio::spawn({
+        let (runner, semaphore) = (Arc::clone(&runner), Arc::clone(&semaphore));
+        async move { remux_with(&dir_path, &selection(), &semaphore, &runner).await }
+    });
+
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), &mut job)
+            .await
+            .is_err(),
+        "remux finished while the I/O governor had no permits available"
+    );
+    assert!(
+        runner.calls().is_empty(),
+        "mkvmerge started before acquiring an I/O permit"
+    );
+
+    semaphore.add_permits(1);
+    let log = job.await.unwrap().unwrap();
+
+    assert_eq!(runner.calls().len(), 1);
+    assert_eq!(
+        std::fs::read(dir.path().join("out.mkv")).unwrap(),
+        b"dummy data\n"
+    );
+    assert_eq!(
+        semaphore.available_permits(),
+        1,
+        "I/O permit leaked after completion: {log:?}"
+    );
+}
+
+/// Bypassing a closed governor would silently remove the ADR-0011 disk-write limit.
+#[tokio::test]
+async fn test_execute_remux_job_refuses_a_closed_io_governor() {
+    let dir = tempfile::tempdir().unwrap();
+    let runner = ScriptedRunner::new([Step::exited(0, "", "").writes_output(b"dummy data\n")]);
+    let semaphore = tokio::sync::Semaphore::new(1);
+    semaphore.close();
+
+    let err = remux_with(dir.path(), &selection(), &semaphore, &runner)
         .await
-    }
+        .unwrap_err();
+    // Pins the exact wording users see in the item error.
+    assert_eq!(
+        err,
+        "I/O governor closed; refusing to run without the disk-write limit"
+    );
+    assert!(runner.calls().is_empty());
+    assert!(!dir.path().join("out.mkv").exists());
+}
 
-    /// Remuxes with an uncontended I/O governor.
-    async fn remux(dir: &TempDir) -> Result<Vec<String>, String> {
-        remux_with(dir.path(), &tokio::sync::Semaphore::new(1)).await
-    }
+/// A FLAC track is transcoded by ffmpeg first; an ffmpeg failure ends the item before mkvmerge.
+#[tokio::test]
+async fn test_execute_remux_job_stops_when_the_ffmpeg_transcode_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let runner = ScriptedRunner::new([Step::exited(1, "", "Invalid data found\n")]);
+    let flac = TrackSelection {
+        audio_codec: "A_FLAC".to_string(),
+        ..selection()
+    };
 
-    #[tokio::test]
-    async fn test_execute_remux_job_collects_stdout_on_mkvmerge_failure() {
-        let _mock = MockMkvmerge::install(
-            "#!/bin/sh\necho 'Error: Simulated mkvmerge stdout failure'\nexit 2\n",
-        )
-        .await;
-        let dir = tempfile::tempdir().unwrap();
-
-        let err = remux(&dir).await.unwrap_err();
-        assert!(
-            err.contains("Simulated mkvmerge stdout failure"),
-            "Error message did not contain stdout output: {err}"
-        );
-        assert!(
-            err.contains("exit code 2"),
-            "Error message did not contain exit code: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_execute_remux_job_combines_stderr_and_stdout_on_failure() {
-        let _mock = MockMkvmerge::install(
-            "#!/bin/sh\necho 'Auxiliary stderr notice' >&2\necho 'Error: Detailed stdout failure'\nexit 2\n",
-        )
-        .await;
-        let dir = tempfile::tempdir().unwrap();
-
-        let err = remux(&dir).await.unwrap_err();
-        assert!(
-            err.contains("Auxiliary stderr notice\nError: Detailed stdout failure"),
-            "Error message did not join stderr and stdout: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_execute_remux_job_logs_warnings_on_exit_code_1() {
-        let _mock = MockMkvmerge::install(
-            "#!/bin/sh\necho 'Warning: QuickTime track parsing'\necho 'dummy data' > \"$2\"\nexit 1\n",
-        )
-        .await;
-        let dir = tempfile::tempdir().unwrap();
-
-        let log = remux(&dir).await.unwrap();
-        assert!(
-            log.iter()
-                .any(|l| l == "  Warning: QuickTime track parsing"),
-            "log did not contain the warning: {log:?}"
-        );
-        assert_eq!(
-            std::fs::read(dir.path().join("out.mkv")).unwrap(),
-            b"dummy data\n"
-        );
-    }
-
-    /// An ignored semaphore still produces the output and leaves the permit count untouched,
-    /// so the governor is exhausted first and the mock must not start until a permit is
-    /// released. The mock's first action is to touch a marker, so the 200 ms window only has
-    /// to cover a process spawn.
-    #[tokio::test]
-    async fn test_execute_remux_job_waits_for_an_io_governor_permit() {
-        let dir = tempfile::tempdir().unwrap();
-        let started = dir.path().join("mkvmerge-started");
-        let _mock = MockMkvmerge::install(&format!(
-            "#!/bin/sh\ntouch '{}'\necho 'dummy data' > \"$2\"\nexit 0\n",
-            started.display()
-        ))
-        .await;
-        let dir_path = dir.path().to_path_buf();
-        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
-        let job_semaphore = std::sync::Arc::clone(&semaphore);
-
-        let mut job = tokio::spawn(async move { remux_with(&dir_path, &job_semaphore).await });
-
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(200), &mut job)
-                .await
-                .is_err(),
-            "remux finished while the I/O governor had no permits available"
-        );
-        assert!(
-            !started.exists(),
-            "mkvmerge started before acquiring an I/O permit"
-        );
-
-        semaphore.add_permits(1);
-        let log = job.await.unwrap().unwrap();
-
-        assert_eq!(
-            std::fs::read(dir.path().join("out.mkv")).unwrap(),
-            b"dummy data\n"
-        );
-        assert_eq!(
-            semaphore.available_permits(),
-            1,
-            "I/O permit leaked after completion: {log:?}"
-        );
-    }
-
-    /// Bypassing a closed governor would silently remove the ADR-0011 disk-write limit.
-    #[tokio::test]
-    async fn test_execute_remux_job_refuses_a_closed_io_governor() {
-        let _mock = MockMkvmerge::install("#!/bin/sh\necho 'dummy data' > \"$2\"\nexit 0\n").await;
-        let dir = tempfile::tempdir().unwrap();
-        let semaphore = tokio::sync::Semaphore::new(1);
-        semaphore.close();
-
-        let err = remux_with(dir.path(), &semaphore).await.unwrap_err();
-        // Pins the exact wording users see in the item error.
-        assert_eq!(
-            err,
-            "I/O governor closed; refusing to run without the disk-write limit"
-        );
-        assert!(!dir.path().join("out.mkv").exists());
-    }
+    let err = remux_with(dir.path(), &flac, &tokio::sync::Semaphore::new(1), &runner)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        "Audio transcode: ffmpeg failed (exit code 1): Invalid data found"
+    );
+    let calls = runner.calls();
+    assert_eq!(
+        calls.len(),
+        1,
+        "mkvmerge must not run after a failed transcode"
+    );
+    assert_eq!(calls[0].0, MediaTool::Ffmpeg);
 }

@@ -513,11 +513,12 @@ covers a content duplicate of a seeded font under a new name.
 `test_pipeline_extract_persists_font_hash_memo` relied on `new` filling the memo: the first two
 now promote a same-size font first, and the third leaves an unsaved entry for the run to
 persist. The third proves only that the run saves the configured memo, on every platform.
-`test_pipeline_font_memo` (Unix-only, its own binary because it puts a stub `mkvextract` ahead
-on `PATH`) checks that `run_extract` hands its memo to `FontRegistry::new`: the stub writes one
-font attachment, as many bytes as a seeded font and under another name, which the run stages and
-promotes; after the run the persisted memo holds the seeded font's hash. It fails when the
-registry is built with `None`.
+`test_pipeline_font_memo` (written Unix-only, with a stub `mkvextract` ahead on `PATH`; since
+2026-10-06 it injects a scripted Media Tool runner and runs on every platform) checks that
+`run_extract` hands its memo to `FontRegistry::new`: the stub writes one font attachment, as many
+bytes as a seeded font and under another name, which the run stages and promotes; after the run
+the persisted memo holds the seeded font's hash. It fails when the registry is built with
+`None`.
 
 ## Amendment 10 — 2026-10-05 (desktop shows and sends the engine's default workers)
 
