@@ -1,10 +1,9 @@
 //! Proves that an extract run hands its font hash memo to the Font Registry, so a seeded font
 //! hashed lazily during the run (ADR-0013 Amendment 9) is memoized and persisted.
 //!
-//! This lives in its own integration binary for the reason `test_pipeline_assignment_args`
-//! does: the stub `mkvextract` goes ahead of the real one on `PATH`, and `PATH` is
-//! process-global, so one test per process keeps the mutation from racing other tests. It is
-//! Unix-only because the stub is a POSIX shell script.
+//! This lives in its own integration binary: the stub `mkvextract` goes ahead of the real one
+//! on `PATH`, and `PATH` is process-global, so one test per process keeps the mutation from
+//! racing other tests. It is Unix-only because the stub is a POSIX shell script.
 
 #![cfg(unix)]
 
