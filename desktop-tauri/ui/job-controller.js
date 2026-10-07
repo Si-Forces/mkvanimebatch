@@ -97,14 +97,12 @@ export class JobController {
     return payload?.job_id === this.jobId && (!payload?.mode || payload.mode === this.mode);
   }
 
+  /** Takes over a running job from `coordinator.restore()`, which has already attached the coordinator to it. */
   restoreActiveSnapshot(snapshot, unlistenEvent, unlistenDone) {
     this.unlistenEvent = unlistenEvent;
     this.unlistenDone = unlistenDone;
     this.jobId = snapshot.job_id;
     this.launched = true;
-    this.runtime.coordinator.activeMode = this.mode;
-    this.runtime.coordinator.isStarting = false;
-    this.runtime.coordinator.isStopping = false;
     this.setRunning(true);
     // `null`, not undefined: a snapshot without settings must not fall back to the idle defaults.
     this.runtime.updateWorkerChips(true, snapshot.effective_settings ?? null);
@@ -258,7 +256,7 @@ export class JobController {
       options: { noCache: batchRequest.no_cache },
     });
     if (generation !== this.startGeneration) return;
-    if (!this.runtime.coordinator.isStarting) {
+    if (this.runtime.coordinator.phase !== "starting") {
       this.runtime.appendLog(this.logEl, "[INFO] Start aborted by stop request.");
       this.abortStart(true);
       return;
@@ -346,7 +344,7 @@ export class JobController {
     try {
       this.launched = true;
       launched = true;
-      this.runtime.coordinator.isStarting = false;
+      this.runtime.coordinator.launched();
       this.launchPromise = this.runtime.invoke("run_job", { request: batchRequest });
       const jobId = await this.launchPromise;
       if (this.running) {
@@ -365,13 +363,11 @@ export class JobController {
   }
 
   async stop() {
-    if (!this.running || this.runtime.coordinator.isStopping) return;
+    if (!this.running) return;
+    if (!this.runtime.coordinator.requestStop()) return;
     const generation = ++this.startGeneration;
-    this.runtime.coordinator.isStarting = false;
-    this.runtime.coordinator.isStopping = true;
     this.lifecycle = "stopping";
     this.renderStatus();
-    this.syncGlobalControls();
 
     try {
       if (this.launched && this.jobId === null && this.launchPromise) {
@@ -390,10 +386,9 @@ export class JobController {
       if (!this.running || generation !== this.startGeneration) return;
       this.runtime.appendLog(this.logEl, `[ERROR] ${err}`);
       if (this.jobId !== null) {
-        this.runtime.coordinator.isStopping = false;
+        this.runtime.coordinator.stopFailed();
         this.lifecycle = "running";
         this.renderStatus();
-        this.runtime.coordinator.syncControls();
         return;
       }
     }
@@ -439,7 +434,6 @@ export class JobController {
   setRunning(running) {
     this.running = running;
     if (running) this.lifecycle = "running";
-    this.runtime.coordinator.syncControls();
     this.renderStatus();
   }
 
@@ -452,9 +446,10 @@ export class JobController {
    * every mode: the captured request belongs to the owning mode, and the other
    * queue is not what is being run.
    *
-   * The startup snapshot restore is deliberately excluded. It raises
-   * `isRestoring` to block a concurrent start, but no job owns a batch then,
-   * and the user must still be able to adjust a restored queue before running.
+   * The startup snapshot restore is deliberately excluded. It holds the
+   * coordinator in its `restoring` phase to block a concurrent start, but no
+   * job owns a batch then, and the user must still be able to adjust a
+   * restored queue before running.
    */
   isJobActive() {
     return this.runtime.coordinator.activeMode !== null;

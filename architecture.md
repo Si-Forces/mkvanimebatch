@@ -163,11 +163,12 @@ mkvanimebatch/
         ├── queue-state.js           # Queue state factories, JobEvent reducer, selection and order helpers
         ├── queue-view.js            # QueueTracker: episode card rendering, selection, reordering, heartbeat
         ├── job-controller.js        # BatchRequest from the form, engine resolve check, preflight, run/stop, job event routing
-        ├── job-coordinator.js       # Allows one active job across the Remux and Extract views
+        ├── job-coordinator.js       # Job lifecycle state machine (idle, restoring, starting, running, stopping): one active job across the Remux and Extract views, and the startup snapshot restore
         ├── inspection-coordinator.js# Shares in-flight inspect_directory calls per (path, noCache)
         ├── telemetry.js             # Polls get_system_telemetry (1 s during a job, 30 s idle, paused while hidden)
         ├── stepper.js               # nextStepValue: the number-input stepper's next value, starting an empty field from its data-auto-value
         ├── log-classify.js          # Maps log lines to console classes (line-err, line-skip, line-ok, line-warn, line-info, line-done); caps the pending log queue
+        ├── job-coordinator-fakes.js # Test support, not loaded by the app: fakes that drive coordinator.restore()
         └── *.test.js                # node:test suites for the frontend modules
 ```
 
@@ -440,7 +441,8 @@ The desktop app pairs a Rust host (Tauri v2) with a webview frontend in plain Ja
 ```mermaid
 flowchart LR
     subgraph Frontend["Webview Frontend (desktop-tauri/ui)"]
-        UIApp["app.js\nStartup, Presets, Snapshot Restore"]
+        UIApp["app.js\nStartup, Presets"]
+        UICoord["job-coordinator.js\nJob Lifecycle, Snapshot Restore"]
         UIJob["job-controller.js\nRun / Stop"]
         UIQueue["queue-state.js\nQueue State"]
         UIView["queue-view.js\nQueueTracker"]
@@ -460,6 +462,8 @@ flowchart LR
     end
 
     UIApp --> UIJob
+    UIApp --> UICoord
+    UICoord -->|get_job_snapshot| Cmds
     UIApp -->|inspect_directory| Cmds
     UIJob -->|inspect_directory preflight| Cmds
     UIJob -->|run_job BatchRequest| Cmds
@@ -496,7 +500,7 @@ The engine runs inside the desktop process (ADR-0007, ADR-0008). Registered Taur
 4. **`JobSnapshot` projection (ADR-0008, ADR-0009)**:
    - The supervisor reduces every forwarded `JobEvent` into an in-memory `JobSnapshot` (status, input directory, item order, per-item status, progress, reason, error, and duration).
    - The snapshot also holds the job's Effective Settings (`effective_settings`). `run_job` sets them once, from the resolved config, when it begins the snapshot; no event changes them.
-   - On startup the webview calls `get_job_snapshot()` and rebuilds the queue from it, so a reload keeps the running or finished batch, its outcomes, its durations, and, for a running job, the settings its worker chips show. Starting a new inspection clears the snapshot unless a job is active.
+   - On startup the webview's Job Coordinator calls `get_job_snapshot()` (§5.3, item 9) and rebuilds the queue from it, so a reload keeps the running or finished batch, its outcomes, its durations, and, for a running job, the settings its worker chips show. Starting a new inspection clears the snapshot unless a job is active.
 5. **Canonical directory identity**:
    - Every directory identity crossing the bridge into the Queue Tracker is the **display form** of the canonical path: a Windows verbatim (`\\?\`) prefix is stripped and `\\?\UNC\` is rewritten to `\\` (`commands.rs`, `display_canonical_path`).
    - This applies to the Inspection Manifest's `canonical_dir`, the Job Snapshot's `input_dir`, and `JobEvent::BatchStart.input_dir`. The engine still receives and uses the real `PathBuf` for filesystem work; only the projected form is normalized, in the bridge.
@@ -542,6 +546,11 @@ The frontend is plain ES modules with no framework.
 6. **Worker inputs and chips**: the workers and Disk I/O inputs start empty with the placeholder `auto`. At startup `app.js` calls `get_default_settings` once and, on success, sets `auto (N)` (N is the default `workers` or `io_jobs`) and `data-auto-value="N"` on them. An empty field sends `workers: null` or `io_jobs: null`. The worker and I/O job chips show the default settings while idle, the settings `resolve_batch_request` returned while a run starts, and a restored running job's `effective_settings` after a reload. Until the defaults are known, or when the call failed, the placeholder stays `auto` and the chips name their state (`Standby`, `Idle`) without a count. A stepper click on an empty field with a `data-auto-value` starts from N (`stepper.js`).
 7. **Preset catalog**: the preset menu applies only the profiles `get_preset_profiles` returned at startup; the webview holds no copy of them (ADR-0008, 2026-10-06 desktop amendment). The form's bitrate and complexity controls are what a run sends; the preset id is a label.
 8. **Theme**: follows `prefers-color-scheme` live until the user toggles the theme; the choice is then stored in `localStorage` (`mkv-theme`) and pinned on the native window via `set_window_theme`.
+9. **Job lifecycle (`job-coordinator.js`)**:
+   - `createJobCoordinator()` holds the one job the app runs at a time, across the Remux and Extract views, as a state machine: the phases `idle`, `restoring`, `starting`, `running` and `stopping`, plus the mode that owns the batch. The state is private. Controllers read `phase`, `activeMode`, `isStopping` and `canStart()`, and move it only through named transitions. `activeMode` is set while starting, running or stopping and stays `null` while restoring, so a restored queue can still be adjusted.
+   - The transitions are `begin(mode)` (`idle` to `starting`), `launched()` (`starting` to `running`), `requestStop()` (`starting` or `running` to `stopping`), `stopFailed()` (`stopping` back to `running`, when `stop_job` is rejected while the job still runs) and `finish()` (any phase to `idle`, idempotent). Each returns `true` when it applied. From any other phase it returns `false` and changes nothing. Every applied transition re-renders the registered controls itself; `syncControls()` stays public for changes the coordinator does not own: `app.js` calls it when an inspection scan starts, fails or ends, and once at startup.
+   - `restore()` owns the startup snapshot restore and holds `restoring` for its duration, which blocks `begin()`. It binds `job-event` and `job-done` first and buffers what they hear, then fetches `get_job_snapshot`. A finished job restores the queue and the status pill only and returns to `idle`. A running job moves the coordinator to `running` for its mode, hands the two listeners to the controller registered for that mode (`register()` keys controllers by `mode`), and replays the buffered signals in order. A failed fetch is logged and returns to `idle`. `app.js` calls it once at startup.
+   - `JobController` keeps the Batch Request, the preflight, the listeners and the job ID, and drives the transitions.
 
 ---
 
