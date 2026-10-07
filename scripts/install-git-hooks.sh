@@ -23,8 +23,12 @@ if [ ! -f "$root/scripts/hooks/hidden-changes.sh" ]; then
   exit 1
 fi
 
+# git records core.hooksPath verbatim, so the same directory comes back as a relative
+# "scripts/hooks" or as an absolute path (as `git config core.hooksPath scripts/hooks` left
+# it here, once another clone or tool wrote it in full). Both name this directory; anything
+# else is a hooks setup to preserve rather than overwrite.
 current=$(git config --get core.hooksPath || true)
-if [ -n "$current" ] && [ "$current" != "scripts/hooks" ]; then
+if [ -n "$current" ] && [ "$current" != "scripts/hooks" ] && [ "$current" != "$root/scripts/hooks" ]; then
   echo "core.hooksPath is already '$current'; refusing to replace it." >&2
   exit 1
 fi
