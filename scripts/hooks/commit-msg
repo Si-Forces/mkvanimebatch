@@ -19,16 +19,27 @@ set -euo pipefail
 msg=${1:?"[commit-msg] needs the path to the commit message file"}
 [ -r "$msg" ] || { echo "❌ [commit-msg] cannot read the commit message at $msg." >&2; exit 1; }
 
-# Match the agents that have actually co-authored here: Claude, Copilot, and the AI Bot
-# credit. A line naming a human is not matched, so it never trips this gate.
-ai='claude|copilot|ai[[:space:]]+bot'
-# An indented line is a continuation of the paragraph above it, not a trailer, so
-# interpret-trailers skips it and git would not read a co-author from it either.
-
-# Only a real trailer counts. git accepts whitespace before the colon, so allow it.
+# A trailer is a line of its own; git accepts whitespace before the colon, so allow it.
 trailer='^[[:space:]]*[Cc]o-[Aa]uthored-[Bb]y[[:space:]]*:'
-# A trailer is the last paragraph of a message, so take the final block git itself parses.
-trailers=$(git interpret-trailers --parse <"$msg" | grep -iE "$trailer.*($ai)" || true)
+
+# Identify each agent by the address it always signs with rather than by the name beside it,
+# so a human called Jean-Claude, or one at dev@copilot-firm.com, is not caught by a substring.
+# `AI Bot` carries no identifying address, so its exact two-word name is matched instead.
+address='noreply@anthropic\.com|\+copilot@users\.noreply\.github\.com'
+by_name='^[Cc]o-[Aa]uthored-[Bb]y[[:space:]]*:[[:space:]]*ai[[:space:]]+bot[[:space:]]*(<|$)'
+
+# --no-divider: without it git reads a `---` line as the end of the message, as it would in a
+# format-patch email, so a Markdown or YAML divider would hide every trailer below it.
+# An indented line stays accepted, and that matches git: it reads as paragraph continuation.
+# A message that is one bare trailer line has no trailer block, so git treats it as the
+# subject; GitHub reads it the same way, so there is no attribution to remove there.
+parsed=$(git interpret-trailers --no-divider --parse <"$msg" || true)
+trailers=$(
+  {
+    printf '%s\n' "$parsed" | grep -iE "$trailer.*($address)" || true
+    grep -iE "$by_name" "$msg" || true
+  } | sed '/^[[:space:]]*$/d'
+)
 
 if [ -n "$trailers" ]; then
   {
