@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   createQueueState,
   reconcileQueueSelection,
@@ -17,6 +18,18 @@ import {
   normalizeDirectoryPath,
   isSameDirectory,
 } from "./queue-state.js";
+
+/**
+ * The events the Rust Engine Bridge sends to settle a stopped job and a failed job whose terminal
+ * carries no error text, as the webview receives them: `{ stopped, failed }`, each
+ * `{ terminal, settled }`. A golden fixture, written by the Rust test
+ * `test_settlement_wording_matches_the_golden_fixture`.
+ */
+const fixture = JSON.parse(readFileSync(new URL("./fixtures/settlement-events.json", import.meta.url), "utf8"));
+
+// The wording the bridge settles with, read from the fixture so a change to it is one edit there.
+const CANCELLED_REASON = fixture.stopped.settled[0].reason;
+const BATCH_FAILED = fixture.failed.settled[0].error;
 
 const manifestOf = ids => ({ version: 2, items: ids.map(id => ({ id, name: id })) });
 
@@ -241,7 +254,7 @@ test("guardUnsettledItems settles open participants as errors with the bridge's 
   assert.equal(state.items.get("ep1.mkv").status, "completed");
   for (const id of ["ep2.mkv", "ep3.mkv"]) {
     assert.equal(state.items.get(id).status, "error");
-    assert.equal(state.items.get(id).error, "Batch failed");
+    assert.equal(state.items.get(id).error, BATCH_FAILED);
     assert.equal(state.items.get(id).reason, null);
   }
   assert.equal(state.completedCount, 1);
@@ -249,6 +262,25 @@ test("guardUnsettledItems settles open participants as errors with the bridge's 
   assert.equal(state.batchSuccess, false, "a run that broke the protocol is no success");
   assert.equal(warn.mock.callCount(), 1);
   assert.match(warn.mock.calls[0].arguments[0], /Item Settlement.*ep2\.mkv, ep3\.mkv/);
+});
+
+test("the guard settles with the wording the Engine Bridge sends, as the golden fixture pins it", t => {
+  t.mock.method(console, "warn", () => {});
+  // The guard exists for when bridge events were lost, so it cannot read its wording from them.
+  const guarded = cancelled => {
+    const state = reduceQueueEvent(createQueueState(manifestOf(["ep1"])), batchStartOf(["ep1"]));
+    guardUnsettledItems(state, cancelled);
+    return state.items.get("ep1");
+  };
+  const [stopped] = fixture.stopped.settled;
+  const [failed] = fixture.failed.settled;
+
+  const cancelled = guarded(true);
+  assert.equal(cancelled.status, stopped.status);
+  assert.equal(cancelled.reason, stopped.reason);
+  const errored = guarded(false);
+  assert.equal(errored.status, failed.status);
+  assert.equal(errored.error, failed.error);
 });
 
 test("a job that ended before batch_start leaves every queued item and selection alone", t => {
@@ -476,7 +508,7 @@ test("guardUnsettledItems settles open participants as cancelled with the engine
 
   const item = state.items.get("ep1.mkv");
   assert.equal(item.status, "cancelled");
-  assert.equal(item.reason, "Operation cancelled");
+  assert.equal(item.reason, CANCELLED_REASON);
   assert.equal(item.error, null);
   assert.equal(state.cancelledCount, 1);
   assert.equal(state.errorCount, 0);
@@ -609,7 +641,7 @@ test("createQueueStateFromSnapshot guards open items of a cancelled snapshot, se
   assert.equal(state.items.get("ep1.mkv").status, "completed");
   assert.equal(state.items.get("ep2.mkv").status, "cancelled");
   assert.equal(state.items.get("ep3.mkv").status, "cancelled");
-  assert.equal(state.items.get("ep3.mkv").reason, "Operation cancelled");
+  assert.equal(state.items.get("ep3.mkv").reason, CANCELLED_REASON);
   assert.equal(warn.mock.callCount(), 1);
 });
 
@@ -639,7 +671,7 @@ test("createQueueStateFromSnapshot guards open items of a failed snapshot, settl
   assert.equal(state.items.get("ep1.mkv").status, "completed");
   assert.equal(state.items.get("ep2.mkv").status, "error");
   assert.equal(state.items.get("ep3.mkv").status, "error");
-  assert.equal(state.items.get("ep3.mkv").error, "Batch failed");
+  assert.equal(state.items.get("ep3.mkv").error, BATCH_FAILED);
   assert.equal(warn.mock.callCount(), 1);
 });
 
@@ -665,7 +697,7 @@ test("a restored running snapshot makes its items the participants the guard set
   guardUnsettledItems(state, true);
 
   assert.equal(state.items.get("ep2.mkv").status, "cancelled");
-  assert.equal(state.items.get("ep2.mkv").reason, "Operation cancelled");
+  assert.equal(state.items.get("ep2.mkv").reason, CANCELLED_REASON);
   assert.equal(state.items.get("ep1.mkv").status, "completed");
   assert.equal(state.items.get("other.mkv").status, "queued");
   assert.equal(state.cancelledCount, 1);
@@ -705,50 +737,43 @@ function presentation(state) {
   };
 }
 
-const settledEvent = (id, fields) => ({ version: 1, type: "item_complete", id, status: "cancelled", ...fields });
-
 // Each scenario is the event sequence the Engine Bridge emits for a job ending with open items
 // (ep1 done by the engine, ep2 and ep3 started, ep4 never started; the bridge settles ep2..ep4 in
 // batch order before the terminal), and the JobSnapshot those events leave, written as Rust
-// serializes it.
+// serializes it. The terminal and the settling `item_complete` events are the Rust-produced ones
+// in the golden fixture; only the successful scenario, whose wording the guard never repeats,
+// overrides a field of the failed one.
 const SETTLED_JOBS = [
-  {
-    name: "stopped",
-    terminal: { version: 1, type: "batch_complete", success: false, cancelled: true },
-    outcome: { status: "cancelled", reason: "Operation cancelled" },
-    snapshotStatus: "cancelled",
-  },
-  {
-    name: "failed",
-    terminal: { version: 1, type: "batch_complete", success: false, cancelled: false, error: "pipeline broke" },
-    outcome: { status: "error", error: "pipeline broke" },
-    snapshotStatus: "error",
-  },
+  { name: "stopped", ...fixture.stopped, snapshotStatus: "cancelled" },
+  { name: "failed", ...fixture.failed, snapshotStatus: "error" },
   {
     // The engine called the batch a success but left items open; the bridge's snapshot status is
     // `error`, so a live batch with those errors is no success either.
     name: "successful with open items",
-    terminal: { version: 1, type: "batch_complete", success: true, cancelled: false },
-    outcome: { status: "error", error: "Protocol error: missing completion event" },
+    terminal: { ...fixture.failed.terminal, success: true },
+    settled: fixture.failed.settled.map(event => ({ ...event, error: "Protocol error: missing completion event" })),
     snapshotStatus: "error",
   },
 ];
 
-for (const { name, terminal, outcome, snapshotStatus } of SETTLED_JOBS) {
+for (const { name, terminal, settled: settledEvents, snapshotStatus } of SETTLED_JOBS) {
   test(`live ${name} job events and a reloaded snapshot present the same items`, t => {
     const warn = t.mock.method(console, "warn", () => {});
-    const ids = ["ep1.mkv", "ep2.mkv", "ep3.mkv", "ep4.mkv"];
+    const ids = ["ep1", "ep2", "ep3", "ep4"];
+    assert.deepEqual(settledEvents.map(event => event.id), ids.slice(1), "the fixture settles ep2..ep4 in batch order");
+    const [ep2, ep3, ep4] = settledEvents;
     const live = createQueueState(manifestOf([]));
     const events = [
       batchStartOf(ids),
-      { version: 1, type: "item_start", id: "ep1.mkv" },
-      { version: 1, type: "item_complete", id: "ep1.mkv", status: "completed", duration_sec: 4.2 },
-      { version: 1, type: "item_start", id: "ep2.mkv" },
-      { version: 1, type: "item_progress", id: "ep2.mkv", progress: 40 },
-      { version: 1, type: "item_start", id: "ep3.mkv" },
-      settledEvent("ep2.mkv", { ...outcome, duration_sec: 1.5 }),
-      settledEvent("ep3.mkv", { ...outcome, duration_sec: 0.7 }),
-      settledEvent("ep4.mkv", outcome),
+      { version: 1, type: "item_start", id: "ep1" },
+      { version: 1, type: "item_complete", id: "ep1", status: "completed", duration_sec: 4.2 },
+      { version: 1, type: "item_start", id: "ep2" },
+      { version: 1, type: "item_progress", id: "ep2", progress: 40 },
+      { version: 1, type: "item_start", id: "ep3" },
+      // The fixture holds no durations: the bridge measures them for an item that had started.
+      { ...ep2, duration_sec: 1.5 },
+      { ...ep3, duration_sec: 0.7 },
+      ep4,
       terminal,
     ];
     for (const event of events) reduceQueueEvent(live, event, 1_000);
@@ -757,16 +782,16 @@ for (const { name, terminal, outcome, snapshotStatus } of SETTLED_JOBS) {
       id, file: id, status: "queued", outcome: null, progress: null, start_time_ms: null,
       duration_sec: null, reason: null, error: null, ...fields,
     });
-    const settled = { status: outcome.status, outcome: outcome.status, reason: outcome.reason ?? null, error: outcome.error ?? null };
+    const settled = { status: ep2.status, outcome: ep2.status, reason: ep2.reason ?? null, error: ep2.error ?? null };
     const snapshot = {
       job_id: 7, mode: "remux", status: snapshotStatus, start_time_ms: 1_000, duration_sec: null,
       total_items: 4, completed_items: 4, input_dir: "/anime", effective_settings: null,
       ordered_item_ids: ids,
       items: {
-        "ep1.mkv": item("ep1.mkv", { status: "completed", outcome: "completed", start_time_ms: 1_000, duration_sec: 4.2 }),
-        "ep2.mkv": item("ep2.mkv", { ...settled, progress: 40, start_time_ms: 1_000, duration_sec: 1.5 }),
-        "ep3.mkv": item("ep3.mkv", { ...settled, start_time_ms: 1_000, duration_sec: 0.7 }),
-        "ep4.mkv": item("ep4.mkv", settled),
+        ep1: item("ep1", { status: "completed", outcome: "completed", start_time_ms: 1_000, duration_sec: 4.2 }),
+        ep2: item("ep2", { ...settled, progress: 40, start_time_ms: 1_000, duration_sec: 1.5 }),
+        ep3: item("ep3", { ...settled, start_time_ms: 1_000, duration_sec: 0.7 }),
+        ep4: item("ep4", settled),
       },
     };
 

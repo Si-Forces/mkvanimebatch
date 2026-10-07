@@ -199,7 +199,7 @@ fn display_canonical_path(path: &str) -> String {
 }
 
 /// Tags an engine event with the job that produced it so the UI can route it.
-fn attach_context(event: &mut JobEvent, mode: &str, job_id: u64) {
+pub(crate) fn attach_context(event: &mut JobEvent, mode: &str, job_id: u64) {
     let (JobEvent::BatchStart { extra, .. }
     | JobEvent::ItemStart { extra, .. }
     | JobEvent::ItemProgress { extra, .. }

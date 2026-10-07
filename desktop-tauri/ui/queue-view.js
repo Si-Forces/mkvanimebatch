@@ -604,8 +604,10 @@ export class QueueTracker {
   /**
    * Ends the batch's presentation on `job-done`. The Engine Bridge has settled every item, so
    * the Item Settlement guard only acts on a run that broke that protocol.
+   *
+   * @param {boolean} cancelled whether the job was stopped
    */
-  endBatch(cancelled = false) {
+  endBatch(cancelled) {
     this.stopHeartbeat();
     guardUnsettledItems(this.state, cancelled);
     for (const [id, card] of this.cards) {

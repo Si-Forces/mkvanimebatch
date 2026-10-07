@@ -61,7 +61,11 @@ function isTerminal(status) {
   return OUTCOME_COUNTERS.has(status);
 }
 
-/** The Engine Bridge's Item Settlement wording: `CANCELLED_REASON` mirrors mkv-core's, `BATCH_FAILED` is the bridge's fallback failure message. */
+/**
+ * The Engine Bridge's Item Settlement wording, for the guard below. A golden fixture pins both
+ * constants to what the bridge sends: `ui/fixtures/settlement-events.json`, written by the Rust
+ * test `test_settlement_wording_matches_the_golden_fixture` and asserted in `queue-state.test.js`.
+ */
 const CANCELLED_REASON = "Operation cancelled";
 const BATCH_FAILED = "Batch failed";
 

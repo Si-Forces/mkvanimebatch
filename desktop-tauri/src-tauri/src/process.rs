@@ -366,13 +366,14 @@ impl JobState {
                     ..
                 } => {
                     if let Some(snapshot) = snap.as_mut() {
-                        // The supervisor settles the open items first (`settlement_events`), so
-                        // none is open here. A batch the engine called a success is still failed
-                        // if the supervisor had to settle one of its items as an error.
-                        let has_failed_items = snapshot
-                            .items
-                            .values()
-                            .any(|item| item.status == ItemStatus::Error);
+                        // The flag trips on any error item, which fails a batch the engine called
+                        // a success (the supervisor settled one of its items as an error). As a
+                        // backstop it also trips on any item still open, which Item Settlement
+                        // (`settlement_events`) should have closed, so a success terminal can
+                        // never yield Completed (code 0) with open items.
+                        let has_failed_items = snapshot.items.values().any(|item| {
+                            item.status == ItemStatus::Error || !item.status.is_terminal()
+                        });
                         snapshot.status = terminal_status(*success, *cancelled, has_failed_items);
                         snapshot.duration_sec =
                             extra.get("duration_sec").and_then(|value| value.as_f64());
@@ -382,11 +383,16 @@ impl JobState {
         }
     }
 
+    /// The error of an item settled by a failed job whose terminal carries no error or panic text.
+    /// The webview's guard (`queue-state.js`) repeats it for a run that broke Item Settlement;
+    /// `test_settlement_wording_matches_the_golden_fixture` pins both to one fixture.
+    const BATCH_FAILED_ERROR: &'static str = "Batch failed";
+
     /// Item Settlement: the `ItemComplete` events that end every item of job `job_id` that the
     /// Batch Pipeline left open (queued or processing) when `terminal` ends the job, in batch
     /// order. They are cancelled when `terminal` is a stop, else errors carrying the run's own
-    /// failure: its error, else its panic, else "Batch failed". An item that had started reports
-    /// how long it ran, on a monotonic clock; one that never started has no duration.
+    /// failure: its error, else its panic, else `BATCH_FAILED_ERROR`. An item that had started
+    /// reports how long it ran, on a monotonic clock; one that never started has no duration.
     ///
     /// The supervisor applies and emits them before `terminal`, so the webview and a reloaded
     /// snapshot see the same events. Empty for a `terminal` that is not a `BatchComplete` and for
@@ -416,7 +422,7 @@ impl JobState {
         } else {
             text("error")
                 .or_else(|| text("panic"))
-                .unwrap_or("Batch failed")
+                .unwrap_or(Self::BATCH_FAILED_ERROR)
         };
         // The outcome is the same for every open item of the job.
         let (status, reason, error) = if *cancelled {
@@ -747,6 +753,7 @@ pub(crate) mod test_support {
 mod tests {
     use super::test_support::*;
     use super::*;
+    use crate::commands::attach_context;
     use serde_json::Value;
 
     fn snapshot(state: &JobState) -> JobSnapshot {
@@ -873,6 +880,21 @@ mod tests {
     }
 
     #[test]
+    fn test_success_terminal_with_an_open_item_and_no_settlement_is_an_error() {
+        let state = JobState::default();
+        state.update_snapshot(&batch_start(&["ep1", "ep2"]), 10, "remux");
+        state.update_snapshot(&item_complete("ep1", 10.0), 10, "remux");
+        state.update_snapshot(&item_start("ep2"), 10, "remux");
+
+        // The supervisor settles before the terminal; without it ep2 is still open.
+        state.update_snapshot(&batch_complete(true, false), 10, "remux");
+
+        let snap = snapshot(&state);
+        assert_eq!(snap.status, BatchStatus::Error);
+        assert_eq!(snap.items["ep2"].status, ItemStatus::Processing);
+    }
+
+    #[test]
     fn test_settlement_cancels_open_items_in_batch_order_with_a_duration_only_if_started() {
         let state = JobState::default();
         state.update_snapshot(&batch_start(&["ep3", "ep1", "ep2", "ep4"]), 10, "remux");
@@ -934,7 +956,7 @@ mod tests {
                 })),
                 "Pipeline ended without a batch completion event",
             ),
-            (batch_complete(false, false), "Batch failed"),
+            (batch_complete(false, false), JobState::BATCH_FAILED_ERROR),
             (
                 batch_complete(true, false),
                 "Protocol error: missing completion event",
@@ -972,6 +994,67 @@ mod tests {
         // Only a snapshot that is still running has items to settle.
         state.update_snapshot(&terminal, 10, "remux");
         assert!(state.settlement_events(10, &terminal).is_empty());
+    }
+
+    /// A job that ends with `ep1` done, `ep2` and `ep3` started and `ep4` never started: the
+    /// `terminal` and the `ItemComplete`s that settle `ep2` to `ep4`, serialized as the webview
+    /// receives them (tagged by `attach_context`) but without `duration_sec`, the one field that
+    /// differs from run to run.
+    fn settlement_scenario(mut terminal: JobEvent) -> Value {
+        let state = JobState::default();
+        state.update_snapshot(&batch_start(&["ep1", "ep2", "ep3", "ep4"]), 10, "remux");
+        state.update_snapshot(&item_start("ep1"), 10, "remux");
+        state.update_snapshot(&item_complete("ep1", 4.2), 10, "remux");
+        state.update_snapshot(&item_start("ep2"), 10, "remux");
+        state.update_snapshot(&item_start("ep3"), 10, "remux");
+
+        attach_context(&mut terminal, "remux", 10);
+        let settled: Vec<Value> = state
+            .settlement_events(10, &terminal)
+            .into_iter()
+            .map(|mut event| {
+                attach_context(&mut event, "remux", 10);
+                let mut event = serde_json::to_value(event).unwrap();
+                event.as_object_mut().unwrap().remove("duration_sec");
+                event
+            })
+            .collect();
+        serde_json::json!({ "terminal": terminal, "settled": settled })
+    }
+
+    /// Pins the Item Settlement wording across the language boundary. The fixture holds the
+    /// events Rust sends for a stopped job and for a failed job whose terminal has no error or
+    /// panic text; `queue-state.test.js` reads the same file and asserts that its guard, which
+    /// settles an item the bridge left open, uses the same `reason` and `error`.
+    ///
+    /// Set `UPDATE_SETTLEMENT_FIXTURE=1` to rewrite the file from the real code path instead of
+    /// comparing, then review the diff.
+    #[test]
+    fn test_settlement_wording_matches_the_golden_fixture() {
+        const FIXTURE: &str = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../ui/fixtures/settlement-events.json"
+        );
+        let built = serde_json::json!({
+            "stopped": settlement_scenario(batch_complete(false, true)),
+            "failed": settlement_scenario(batch_complete(false, false)),
+        });
+
+        if std::env::var("UPDATE_SETTLEMENT_FIXTURE").is_ok_and(|value| value == "1") {
+            let path = std::path::Path::new(FIXTURE);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, serde_json::to_string_pretty(&built).unwrap() + "\n").unwrap();
+            return;
+        }
+        let fixture: Value = serde_json::from_str(
+            &std::fs::read_to_string(FIXTURE)
+                .expect("read the settlement fixture; regenerate with UPDATE_SETTLEMENT_FIXTURE=1"),
+        )
+        .unwrap();
+        assert_eq!(
+            fixture, built,
+            "settlement wording changed; regenerate with UPDATE_SETTLEMENT_FIXTURE=1"
+        );
     }
 
     #[test]
@@ -1078,8 +1161,8 @@ mod tests {
         // Success with no failed item
         assert_eq!(terminal_status(true, false, false), BatchStatus::Completed);
 
-        // Success with a failed item, which only a settled protocol gap leaves (downgraded to
-        // error)
+        // Success with a failed item (a settled protocol gap) or one still open (the backstop):
+        // downgraded to error
         assert_eq!(terminal_status(true, false, true), BatchStatus::Error);
 
         // Failure

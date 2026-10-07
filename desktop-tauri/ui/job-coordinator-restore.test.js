@@ -44,19 +44,40 @@ for (const [label, answer] of [
   });
 }
 
-test("restore leaves a queue that already has items alone for a finished snapshot", async () => {
+test("restore leaves a queue that already has items alone for a finished snapshot, but still sets the pill", async () => {
+  for (const [label, answer] of [
+    ["without items", snapshot({ status: "completed" })],
+    ["with items", finishedWithItems("completed")],
+  ]) {
+    const coordinator = createJobCoordinator();
+    const { deps, calls, unlistened, restoredQueues, views } = makeRestore(coordinator, {
+      getSnapshot: async () => answer,
+      queue: { state: { items: new Map([["ep", {}]]) } },
+    });
+
+    await coordinator.restore(deps);
+
+    assert.equal(coordinator.phase, "idle", label);
+    assert.deepEqual(unlistened, ["job-event", "job-done"], label);
+    assert.deepEqual(calls, [["terminal", "remux", "completed"]], label);
+    assert.deepEqual(restoredQueues, [], label);
+    assert.deepEqual(views, [], label);
+  }
+});
+
+test("restore of a finished extract snapshot over a populated queue switches the view and leaves the queue alone", async () => {
   const coordinator = createJobCoordinator();
-  const { deps, calls, unlistened, restoredQueues } = makeRestore(coordinator, {
-    getSnapshot: async () => snapshot({ status: "completed" }),
+  const { deps, calls, restoredQueues, views } = makeRestore(coordinator, {
+    getSnapshot: async () => finishedWithItems("error", { mode: "extract" }),
     queue: { state: { items: new Map([["ep", {}]]) } },
   });
 
   await coordinator.restore(deps);
 
-  assert.equal(coordinator.phase, "idle");
-  assert.deepEqual(unlistened, ["job-event", "job-done"]);
-  assert.deepEqual(calls, []);
+  assert.deepEqual(views, ["extract"]);
+  assert.deepEqual(calls, [["terminal", "extract", "error"]]);
   assert.deepEqual(restoredQueues, []);
+  assert.equal(coordinator.phase, "idle");
 });
 
 test("restore of a finished snapshot restores presentation only and returns to idle", async () => {

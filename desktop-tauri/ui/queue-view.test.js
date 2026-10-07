@@ -281,7 +281,7 @@ test("QueueTracker stops heartbeat on endBatch, reset, startScan, restoreFromSna
   };
 
   startProcessing();
-  tracker.endBatch();
+  tracker.endBatch(false);
   assert.equal(tracker.heartbeatTimer, null);
   assert.equal(tracker.state.items.get("ep1").status, "error");
 
@@ -718,7 +718,7 @@ test("subset batch progress counts only batch participants", t => {
     duration_sec: 14.8,
   });
   tracker.handleEvent({ version: 1, type: "batch_complete", success: true });
-  tracker.endBatch();
+  tracker.endBatch(false);
 
   assert.equal(countEl.textContent, "1 Completed (1 Total)");
 });
@@ -925,6 +925,6 @@ test("progress events on a processing card write only the fill width and the tag
   // reducer) or from endBatch, writes nothing more, its tag text included.
   recordWrites(card.statusTag, "tag", ["textContent"], writes);
   tracker.handleEvent({ version: 1, type: "item_complete", id: "ep1", status: "completed", duration_sec: 3 });
-  tracker.endBatch();
+  tracker.endBatch(false);
   assert.deepEqual(writes, ["card.className", "badge.className", "badge.textContent", "tag.className", "fill.className"]);
 });
