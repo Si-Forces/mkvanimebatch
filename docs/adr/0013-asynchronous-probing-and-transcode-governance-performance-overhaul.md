@@ -1,6 +1,6 @@
 # 0013. Asynchronous Probing and Transcode Governance Performance Overhaul
 
-> **Status**: Accepted (amended 2026-10-02, 2026-10-04, 2026-10-05, 2026-10-06; Decision 2 rationale corrected 2026-10-05, #36)
+> **Status**: Accepted (amended 2026-09-28, 2026-09-30, 2026-10-02, 2026-10-04, 2026-10-05, 2026-10-06; Decision 2 rationale corrected 2026-10-05, #36)
 > **Date**: 2026-09-21
 > **Context**: Media Engine Context & In-Process Engine Bridge
 > **Amends**: ADR-0006, ADR-0008, ADR-0011
