@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { createJobCoordinator } from "./job-coordinator.js";
+import { makeRestore } from "./job-coordinator-fakes.js";
 import { BULK_SELECTION_CONTROLS, JobController } from "./job-controller.js";
 
 class FakeElement {
@@ -94,6 +95,16 @@ function makeRuntime(tracker, { invoke = async () => null, resolve = async () =>
 }
 
 const tick = () => new Promise(resolve => setTimeout(resolve, 0));
+
+/**
+ * Leaves the coordinator running `mode`, the state `coordinator.restore()` is in when it hands a job
+ * to its controller. It reproduces that end state only; the restore path itself is covered by
+ * `job-coordinator-restore.test.js` and by the real-controller restore test below.
+ */
+function attachRunning(coordinator, mode) {
+  coordinator.begin(mode);
+  coordinator.launched();
+}
 
 test("job controller completes inspect-run-event lifecycle and restores controls", async t => {
   const elements = remuxElements({ "input-dir": "/input", workers: "4", "io-jobs": "2" });
@@ -600,7 +611,7 @@ test("job controller aborts start if episodes exist in queue but zero are select
   assert.ok(logs.some(l => l.includes("No episodes selected in queue")));
 });
 
-test("job controller disables Run while scanning or snapshot restore blocks start", t => {
+test("job controller disables Run while scanning or snapshot restore blocks start", async t => {
   const elements = remuxElements();
   installDocument(t, elements);
   const tracker = { isScanning: true, state: { totalCount: 2 }, getSelectedCount: () => 2 };
@@ -612,11 +623,18 @@ test("job controller disables Run while scanning or snapshot restore blocks star
   assert.equal(runBtn.disabled, true);
 
   tracker.isScanning = false;
-  runtime.coordinator.isRestoring = true;
+  let answerSnapshot;
+  const { deps } = makeRestore(runtime.coordinator, {
+    getSnapshot: () => new Promise(resolve => { answerSnapshot = resolve; }),
+    registerControllers: false,
+  });
+  const restoring = runtime.coordinator.restore(deps);
+  await tick();
   controller.syncGlobalControls();
   assert.equal(runBtn.disabled, true);
 
-  runtime.coordinator.isRestoring = false;
+  answerSnapshot(null);
+  await restoring;
   controller.syncGlobalControls();
   assert.equal(runBtn.disabled, false);
 });
@@ -680,6 +698,7 @@ test("restored controller filters IDs, targets Stop, and releases controls on co
   });
   const { coordinator } = runtime;
   const controller = new JobController("remux", runtime);
+  attachRunning(coordinator, "remux");
   controller.restoreActiveSnapshot({ job_id: 42, status: "running" }, () => removed++, () => removed++);
   assert.equal(controller.lifecycle, "running");
   assert.equal(coordinator.activeMode, "remux");
@@ -708,6 +727,50 @@ test("restored controller filters IDs, targets Stop, and releases controls on co
   assert.deepEqual(telemetry, [true, true, false, false]);
   controller.handleSnapshotSignal("done", { job_id: 42, mode: "remux", code: -1 });
   assert.equal(removed, 2);
+});
+
+test("coordinator.restore() attaches a running job to a real controller, which the replayed done then releases", async t => {
+  const elements = remuxElements();
+  installDocument(t, elements);
+  const events = [];
+  const tracker = {
+    state: { items: new Map([["ep", { progress: 70 }]]), batchSuccess: false },
+    handleEvent: event => events.push(event),
+    finalize(code, cancelled) { this.state.batchSuccess = code === 0 && !cancelled; },
+  };
+  const runtime = makeRuntime(tracker);
+  const { coordinator } = runtime;
+  const controller = new JobController("remux", runtime);
+  let answerSnapshot;
+  // The real controller registered itself under "remux" when constructed; restore() attaches it.
+  const { deps, handlers, unlistened, restoredQueues } = makeRestore(coordinator, {
+    getSnapshot: () => new Promise(resolve => { answerSnapshot = resolve; }),
+    registerControllers: false,
+  });
+
+  const restoring = coordinator.restore(deps);
+  await tick();
+  assert.equal(coordinator.phase, "restoring");
+  assert.equal(elements.get("remux-run").disabled, true);
+  handlers.get("job-event")({ payload: { job_id: 42, mode: "remux", type: "item_progress", id: "ep", progress: 85 } });
+  answerSnapshot({ job_id: 42, mode: "remux", status: "running", items: {} });
+  await restoring;
+
+  assert.deepEqual(restoredQueues, [["remux", 42]]);
+  assert.equal(coordinator.phase, "running");
+  assert.equal(coordinator.activeMode, "remux");
+  assert.equal(controller.running, true);
+  assert.equal(controller.jobId, 42);
+  assert.equal(elements.get("remux-run").disabled, true);
+  assert.equal(elements.get("remux-stop").disabled, false);
+  assert.deepEqual(events.map(event => event.progress), [85], "the signal heard before the snapshot is replayed");
+  assert.deepEqual(unlistened, [], "the controller owns the listeners");
+
+  handlers.get("job-done")({ payload: { job_id: 42, mode: "remux", code: 0 } });
+  assert.equal(coordinator.phase, "idle");
+  assert.equal(controller.lifecycle, "done");
+  assert.equal(elements.get("remux-run").disabled, false);
+  assert.deepEqual(unlistened, ["job-event", "job-done"]);
 });
 
 test("a restored controller shows the snapshot's Effective Settings on the chips, or none when it has none", t => {
@@ -754,6 +817,7 @@ function restoredControllerWithPendingStop(t, runtimeOverrides = {}) {
   };
   const runtime = makeRuntime(tracker, { invoke: async () => stopPromise, ...runtimeOverrides });
   const controller = new JobController("remux", runtime);
+  attachRunning(runtime.coordinator, "remux");
   controller.restoreActiveSnapshot({ job_id: 24, status: "running" }, () => {}, () => {});
   return {
     controller,
