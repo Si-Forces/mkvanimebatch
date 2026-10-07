@@ -61,6 +61,10 @@ function isTerminal(status) {
   return OUTCOME_COUNTERS.has(status);
 }
 
+/** The Engine Bridge's Item Settlement wording: `CANCELLED_REASON` mirrors mkv-core's, `BATCH_FAILED` is the bridge's fallback failure message. */
+const CANCELLED_REASON = "Operation cancelled";
+const BATCH_FAILED = "Batch failed";
+
 function clampPercent(value) {
   return Math.min(100, Math.max(0, value));
 }
@@ -277,8 +281,8 @@ export function reconcileQueueSelection(state, previous) {
 }
 
 /**
- * Project an Engine Bridge JobSnapshot into queue state. Items still queued or
- * processing in a finished batch resolve to cancelled (cancelled batch) or error.
+ * Project an Engine Bridge JobSnapshot into queue state. The bridge settles every item of a
+ * finished batch, so the Item Settlement guard only acts on a snapshot that broke that protocol.
  *
  * @param {Object} snapshot
  * @param {number} [now] start time for processing items the snapshot has none for
@@ -294,10 +298,7 @@ export function createQueueStateFromSnapshot(snapshot, now = Date.now()) {
     const snapItem = snapshot.items[id];
     if (!snapItem || state.items.has(id)) continue;
 
-    let status = snapItem.status || "queued";
-    if (state.batchCompleted && (status === "processing" || status === "queued")) {
-      status = state.batchCancelled ? "cancelled" : "error";
-    }
+    const status = snapItem.status || "queued";
     const processing = status === "processing";
 
     state.items.set(id, createItem(id, String(snapItem.file || id), {
@@ -317,6 +318,9 @@ export function createQueueStateFromSnapshot(snapshot, now = Date.now()) {
   }
 
   state.knownOrder = [...state.order];
+  // A snapshot holds exactly the participants of its Active Batch.
+  state.batchItemIds = [...state.order];
+  if (state.batchCompleted) guardUnsettledItems(state, state.batchCancelled);
   return state;
 }
 
@@ -444,7 +448,9 @@ export function reduceQueueEvent(state, event, now = Date.now()) {
 
     case "batch_complete": {
       state.batchCompleted = true;
-      state.batchSuccess = event.success === true;
+      // The bridge settles items before this event, so an error count is one the engine's own
+      // `success` does not cover (a success with open items): the snapshot status is `error` then.
+      state.batchSuccess = event.success === true && state.errorCount === 0;
       state.batchCancelled = event.cancelled === true;
       return state;
     }
@@ -455,49 +461,35 @@ export function reduceQueueEvent(state, event, now = Date.now()) {
 }
 
 /**
- * Settle the batch after the engine process exits: every participant without
- * a terminal outcome becomes cancelled (stop) or errored. Returns a new state
- * object. The batch succeeds only if the engine reported success, the process
- * exited 0, and no item failed.
+ * The Item Settlement guard, for a finished job (live on `job-done`, or a restored snapshot).
+ * The Engine Bridge gives every item of the Active Batch a terminal outcome before it ends the
+ * job, so a participant still open here means the run broke that protocol. It gets the bridge's
+ * wording (cancelled when `cancelled`, else an error), the batch is no success, and one warning
+ * names the items. Only participants of a started batch (`batchItemIds`) are touched: a job
+ * that failed before `batch_start` leaves the queue as it was. Mutates `state` in place and
+ * returns it (see the ownership contract in the module header).
+ *
+ * @param {boolean} cancelled whether the job was stopped
  */
-export function finalizeQueueState(state, exitCode, cancelled = false) {
-  let nextItems = state.items;
-  let addedErrors = 0;
-  let addedCancelled = 0;
+export function guardUnsettledItems(state, cancelled) {
+  const open = (state.batchItemIds ?? []).filter(id => {
+    const item = state.items.get(id);
+    return item && !isTerminal(item.status);
+  });
+  if (open.length === 0) return state;
 
-  const participants = state.batchItemIds ? new Set(state.batchItemIds) : null;
-  for (const [id, item] of state.items) {
-    if (participants ? !participants.has(id) : item.selected === false) continue;
-    if (isTerminal(item.status)) continue;
-    if (nextItems === state.items) {
-      nextItems = new Map(state.items);
-    }
-    nextItems.set(id, {
-      ...item,
-      status: cancelled ? "cancelled" : "error",
-      reason: cancelled ? "Cancelled" : null,
-      error: cancelled
-        ? null
-        : exitCode === 0
-          ? "Protocol error: missing completion event"
-          : `Aborted (exit ${exitCode})`,
-    });
-    if (cancelled) addedCancelled++;
-    else addedErrors++;
+  console.warn(
+    `The run broke Item Settlement: ${open.length} item(s) were left open (${open.join(", ")}); settling them as ${cancelled ? "cancelled" : "error"}.`
+  );
+  for (const id of open) {
+    const item = state.items.get(id);
+    item.status = cancelled ? "cancelled" : "error";
+    item.reason = cancelled ? CANCELLED_REASON : null;
+    item.error = cancelled ? null : BATCH_FAILED;
+    state[OUTCOME_COUNTERS.get(item.status)]++;
   }
-
-  const finalErrorCount = state.errorCount + addedErrors;
-  const engineReportedSuccess = state.batchSuccess === true;
-
-  return {
-    ...state,
-    items: nextItems,
-    errorCount: finalErrorCount,
-    cancelledCount: state.cancelledCount + addedCancelled,
-    batchCompleted: true,
-    batchCancelled: state.batchCancelled || cancelled,
-    batchSuccess: engineReportedSuccess && exitCode === 0 && finalErrorCount === 0,
-  };
+  state.batchSuccess = false;
+  return state;
 }
 
 /** Set one item's selection; an explicit choice forgets remembered vanished selections. */

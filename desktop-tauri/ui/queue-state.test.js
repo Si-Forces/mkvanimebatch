@@ -4,7 +4,7 @@ import {
   createQueueState,
   reconcileQueueSelection,
   reduceQueueEvent,
-  finalizeQueueState,
+  guardUnsettledItems,
   carryOverAssignments,
   buildTrackAssignmentsForManifest,
   createQueueStateFromSnapshot,
@@ -19,6 +19,15 @@ import {
 } from "./queue-state.js";
 
 const manifestOf = ids => ({ version: 2, items: ids.map(id => ({ id, name: id })) });
+
+/** The `batch_start` event of an Active Batch of `ids`. */
+const batchStartOf = ids => ({
+  version: 1,
+  type: "batch_start",
+  total: ids.length,
+  input_dir: "/anime",
+  items: ids.map(id => ({ id, file: id })),
+});
 
 /** A manual subtitle assignment in the shape app.js stores in `QueueTracker.assignments`. */
 const subtitle = (id, path) => ({
@@ -218,45 +227,46 @@ test("reduceQueueEvent is idempotent against duplicate terminal events", () => {
   assert.equal(state.items.get("ep1.mkv").status, "completed");
 });
 
-test("finalizeQueueState marks unresolved items as errors", () => {
+test("guardUnsettledItems settles open participants as errors with the bridge's wording and warns", t => {
+  const warn = t.mock.method(console, "warn", () => {});
   let state = createQueueState(manifestOf(["ep1.mkv", "ep2.mkv", "ep3.mkv"]));
-
-  state = reduceQueueEvent(state, {
-    version: 1,
-    type: "item_complete",
-    id: "ep1.mkv",
-    status: "completed",
-  });
-
+  state = reduceQueueEvent(state, batchStartOf(["ep1.mkv", "ep2.mkv", "ep3.mkv"]));
+  state = reduceQueueEvent(state, { version: 1, type: "item_complete", id: "ep1.mkv", status: "completed" });
   // ep2 was started but never received item_complete; ep3 was never started.
-  state = reduceQueueEvent(state, {
-    version: 1,
-    type: "item_start",
-    id: "ep2.mkv",
-  });
+  state = reduceQueueEvent(state, { version: 1, type: "item_start", id: "ep2.mkv" });
+  state = reduceQueueEvent(state, { version: 1, type: "batch_complete", success: true });
 
-  state = finalizeQueueState(state, 1);
+  assert.equal(guardUnsettledItems(state, false), state, "the guard settles in place");
 
   assert.equal(state.items.get("ep1.mkv").status, "completed");
-  assert.equal(state.items.get("ep2.mkv").status, "error");
-  assert.equal(state.items.get("ep2.mkv").error, "Aborted (exit 1)");
-  assert.equal(state.items.get("ep3.mkv").status, "error");
-  assert.equal(state.items.get("ep3.mkv").error, "Aborted (exit 1)");
+  for (const id of ["ep2.mkv", "ep3.mkv"]) {
+    assert.equal(state.items.get(id).status, "error");
+    assert.equal(state.items.get(id).error, "Batch failed");
+    assert.equal(state.items.get(id).reason, null);
+  }
+  assert.equal(state.completedCount, 1);
   assert.equal(state.errorCount, 2);
-  assert.equal(state.batchCompleted, true);
-  assert.equal(state.batchSuccess, false);
+  assert.equal(state.batchSuccess, false, "a run that broke the protocol is no success");
+  assert.equal(warn.mock.callCount(), 1);
+  assert.match(warn.mock.calls[0].arguments[0], /Item Settlement.*ep2\.mkv, ep3\.mkv/);
 });
 
-test("successful process exit does not hide missing completion events", () => {
-  const state = createQueueState(manifestOf(["ep1.mkv"]));
+test("a job that ended before batch_start leaves every queued item and selection alone", t => {
+  const warn = t.mock.method(console, "warn", () => {});
+  const state = createQueueState(manifestOf(["ep1", "ep2"]));
+  setItemSelected(state, "ep2", false);
+  // The bridge's own terminal for a validation failure: no batch_start came before it.
+  reduceQueueEvent(state, { version: 1, type: "batch_complete", success: false, cancelled: false, error: "bad request" });
 
-  const finalState = finalizeQueueState(state, 0);
+  for (const cancelled of [false, true]) guardUnsettledItems(state, cancelled);
 
-  assert.equal(finalState.items.get("ep1.mkv").status, "error");
-  assert.equal(finalState.batchSuccess, false);
+  assert.deepEqual([...state.items.values()].map(item => item.status), ["queued", "queued"]);
+  assert.deepEqual([...state.items.values()].map(item => item.selected), [true, false]);
+  assert.equal(state.errorCount + state.cancelledCount, 0);
+  assert.equal(warn.mock.callCount(), 0);
 });
 
-test("all items completed without batch_complete event fails batch completion", () => {
+test("completion of every item does not mark the batch a success before batch_complete", () => {
   let state = createQueueState(manifestOf(["ep1.mkv"]));
 
   state = reduceQueueEvent(state, {
@@ -273,12 +283,8 @@ test("all items completed without batch_complete event fails batch completion", 
 
   assert.equal(state.completedCount, 1);
   assert.equal(state.errorCount, 0);
+  // No batch_complete yet: not a success.
   assert.equal(state.batchSuccess, null);
-
-  // Process exits 0, but no batch_complete was sent
-  const finalState = finalizeQueueState(state, 0);
-  assert.equal(finalState.batchCompleted, true);
-  assert.equal(finalState.batchSuccess, false);
 });
 
 test("reduceQueueEvent evolves the single owned state object in place", () => {
@@ -461,15 +467,19 @@ test("batch_complete carries the cancelled flag and fails batch success", () => 
   assert.equal(state.batchCancelled, true);
 });
 
-test("finalizeQueueState marks unresolved items cancelled after a forced stop", () => {
-  const state = createQueueState(manifestOf(["ep1.mkv"]));
+test("guardUnsettledItems settles open participants as cancelled with the engine's reason after a stop", t => {
+  t.mock.method(console, "warn", () => {});
+  let state = createQueueState(manifestOf(["ep1.mkv"]));
+  state = reduceQueueEvent(state, batchStartOf(["ep1.mkv"]));
 
-  const final = finalizeQueueState(state, -1, true);
+  guardUnsettledItems(state, true);
 
-  assert.equal(final.items.get("ep1.mkv").status, "cancelled");
-  assert.equal(final.cancelledCount, 1);
-  assert.equal(final.errorCount, 0);
-  assert.equal(final.batchCancelled, true);
+  const item = state.items.get("ep1.mkv");
+  assert.equal(item.status, "cancelled");
+  assert.equal(item.reason, "Operation cancelled");
+  assert.equal(item.error, null);
+  assert.equal(state.cancelledCount, 1);
+  assert.equal(state.errorCount, 0);
 });
 
 test("item transitioning directly from queued to error leaves durationSec as null instead of batchStartTime fallback", () => {
@@ -573,7 +583,8 @@ test("createQueueStateFromSnapshot constructs state and counts from JobSnapshot"
   assert.equal(state.items.get("ep4.mkv").error, "mkvextract failed");
 });
 
-test("createQueueStateFromSnapshot resolves in-flight processing and queued items to cancelled for cancelled snapshot", () => {
+test("createQueueStateFromSnapshot guards open items of a cancelled snapshot, settling them as cancelled with a warning", t => {
+  const warn = t.mock.method(console, "warn", () => {});
   const snapshot = {
     job_id: 101,
     mode: "remux",
@@ -598,9 +609,12 @@ test("createQueueStateFromSnapshot resolves in-flight processing and queued item
   assert.equal(state.items.get("ep1.mkv").status, "completed");
   assert.equal(state.items.get("ep2.mkv").status, "cancelled");
   assert.equal(state.items.get("ep3.mkv").status, "cancelled");
+  assert.equal(state.items.get("ep3.mkv").reason, "Operation cancelled");
+  assert.equal(warn.mock.callCount(), 1);
 });
 
-test("createQueueStateFromSnapshot resolves in-flight processing and queued items to error for error snapshot", () => {
+test("createQueueStateFromSnapshot guards open items of a failed snapshot, settling them as errors with a warning", t => {
+  const warn = t.mock.method(console, "warn", () => {});
   const snapshot = {
     job_id: 102,
     mode: "extract",
@@ -625,6 +639,37 @@ test("createQueueStateFromSnapshot resolves in-flight processing and queued item
   assert.equal(state.items.get("ep1.mkv").status, "completed");
   assert.equal(state.items.get("ep2.mkv").status, "error");
   assert.equal(state.items.get("ep3.mkv").status, "error");
+  assert.equal(state.items.get("ep3.mkv").error, "Batch failed");
+  assert.equal(warn.mock.callCount(), 1);
+});
+
+test("a restored running snapshot makes its items the participants the guard settles on job-done", t => {
+  const warn = t.mock.method(console, "warn", () => {});
+  const snapshot = {
+    job_id: 104,
+    mode: "remux",
+    status: "running",
+    start_time_ms: 123456789,
+    ordered_item_ids: ["ep2.mkv", "ep1.mkv"],
+    items: {
+      "ep1.mkv": { id: "ep1.mkv", file: "Show - 01.mkv", status: "completed", duration_sec: 3.1 },
+      "ep2.mkv": { id: "ep2.mkv", file: "Show - 02.mkv", status: "processing" },
+    },
+  };
+  const state = createQueueStateFromSnapshot(snapshot);
+  assert.deepEqual(state.batchItemIds, ["ep2.mkv", "ep1.mkv"]);
+  assert.equal(warn.mock.callCount(), 0, "a running snapshot has nothing to guard yet");
+
+  // An item outside the snapshot (a later scan's) is no participant, so the guard skips it.
+  state.items.set("other.mkv", { ...state.items.get("ep2.mkv"), id: "other.mkv", status: "queued" });
+  guardUnsettledItems(state, true);
+
+  assert.equal(state.items.get("ep2.mkv").status, "cancelled");
+  assert.equal(state.items.get("ep2.mkv").reason, "Operation cancelled");
+  assert.equal(state.items.get("ep1.mkv").status, "completed");
+  assert.equal(state.items.get("other.mkv").status, "queued");
+  assert.equal(state.cancelledCount, 1);
+  assert.equal(warn.mock.callCount(), 1);
 });
 
 test("createQueueStateFromSnapshot sets startTime for active in-flight processing items", () => {
@@ -648,6 +693,87 @@ test("createQueueStateFromSnapshot sets startTime for active in-flight processin
   assert.equal(state.items.get("ep2.mkv").status, "queued");
   assert.equal(state.items.get("ep2.mkv").startTime, null);
 });
+
+/**
+ * What a card shows of an item: the live reducer and a reloaded snapshot must agree on all of it.
+ */
+function presentation(state) {
+  return {
+    items: [...state.items.values()].map(({ id, name, status, reason, error, durationSec }) => ({ id, name, status, reason, error, durationSec })),
+    counts: [state.completedCount, state.skippedCount, state.cancelledCount, state.errorCount, state.totalCount],
+    flags: [state.batchCompleted, state.batchSuccess, state.batchCancelled],
+  };
+}
+
+const settledEvent = (id, fields) => ({ version: 1, type: "item_complete", id, status: "cancelled", ...fields });
+
+// Each scenario is the event sequence the Engine Bridge emits for a job ending with open items
+// (ep1 done by the engine, ep2 and ep3 started, ep4 never started; the bridge settles ep2..ep4 in
+// batch order before the terminal), and the JobSnapshot those events leave, written as Rust
+// serializes it.
+const SETTLED_JOBS = [
+  {
+    name: "stopped",
+    terminal: { version: 1, type: "batch_complete", success: false, cancelled: true },
+    outcome: { status: "cancelled", reason: "Operation cancelled" },
+    snapshotStatus: "cancelled",
+  },
+  {
+    name: "failed",
+    terminal: { version: 1, type: "batch_complete", success: false, cancelled: false, error: "pipeline broke" },
+    outcome: { status: "error", error: "pipeline broke" },
+    snapshotStatus: "error",
+  },
+  {
+    // The engine called the batch a success but left items open; the bridge's snapshot status is
+    // `error`, so a live batch with those errors is no success either.
+    name: "successful with open items",
+    terminal: { version: 1, type: "batch_complete", success: true, cancelled: false },
+    outcome: { status: "error", error: "Protocol error: missing completion event" },
+    snapshotStatus: "error",
+  },
+];
+
+for (const { name, terminal, outcome, snapshotStatus } of SETTLED_JOBS) {
+  test(`live ${name} job events and a reloaded snapshot present the same items`, t => {
+    const warn = t.mock.method(console, "warn", () => {});
+    const ids = ["ep1.mkv", "ep2.mkv", "ep3.mkv", "ep4.mkv"];
+    const live = createQueueState(manifestOf([]));
+    const events = [
+      batchStartOf(ids),
+      { version: 1, type: "item_start", id: "ep1.mkv" },
+      { version: 1, type: "item_complete", id: "ep1.mkv", status: "completed", duration_sec: 4.2 },
+      { version: 1, type: "item_start", id: "ep2.mkv" },
+      { version: 1, type: "item_progress", id: "ep2.mkv", progress: 40 },
+      { version: 1, type: "item_start", id: "ep3.mkv" },
+      settledEvent("ep2.mkv", { ...outcome, duration_sec: 1.5 }),
+      settledEvent("ep3.mkv", { ...outcome, duration_sec: 0.7 }),
+      settledEvent("ep4.mkv", outcome),
+      terminal,
+    ];
+    for (const event of events) reduceQueueEvent(live, event, 1_000);
+
+    const item = (id, fields) => ({
+      id, file: id, status: "queued", outcome: null, progress: null, start_time_ms: null,
+      duration_sec: null, reason: null, error: null, ...fields,
+    });
+    const settled = { status: outcome.status, outcome: outcome.status, reason: outcome.reason ?? null, error: outcome.error ?? null };
+    const snapshot = {
+      job_id: 7, mode: "remux", status: snapshotStatus, start_time_ms: 1_000, duration_sec: null,
+      total_items: 4, completed_items: 4, input_dir: "/anime", effective_settings: null,
+      ordered_item_ids: ids,
+      items: {
+        "ep1.mkv": item("ep1.mkv", { status: "completed", outcome: "completed", start_time_ms: 1_000, duration_sec: 4.2 }),
+        "ep2.mkv": item("ep2.mkv", { ...settled, progress: 40, start_time_ms: 1_000, duration_sec: 1.5 }),
+        "ep3.mkv": item("ep3.mkv", { ...settled, start_time_ms: 1_000, duration_sec: 0.7 }),
+        "ep4.mkv": item("ep4.mkv", settled),
+      },
+    };
+
+    assert.deepEqual(presentation(createQueueStateFromSnapshot(snapshot)), presentation(live));
+    assert.equal(warn.mock.callCount(), 0, "a settled run needs neither guard");
+  });
+}
 
 test("snapshot projects only ordered Active Batch items, saved progress and per-item elapsed start", () => {
   const snapshot = {
@@ -930,43 +1056,20 @@ test("bare dot is a relative identity, not root", () => {
   assert.equal(normalizeDirectoryPath("/"), "/");
 });
 
-test("finalization leaves non-participants queued and keeps a successful subset batch successful", () => {
+test("the guard leaves non-participants queued and keeps a successful subset batch successful", t => {
+  const warn = t.mock.method(console, "warn", () => {});
   let state = createQueueState(manifestOf(["ep1", "ep2"]));
-  state = reduceQueueEvent(state, {
-    version: 1,
-    type: "batch_start",
-    total: 1,
-    input_dir: "/x",
-    items: [{ id: "ep1", file: "ep1" }],
-  });
-  state = reduceQueueEvent(state, {
-    version: 1,
-    type: "item_start",
-    id: "ep1",
-  });
-  state = reduceQueueEvent(state, {
-    version: 1,
-    type: "item_complete",
-    id: "ep1",
-    status: "completed",
-  });
-  state = reduceQueueEvent(state, {
-    version: 1,
-    type: "batch_complete",
-    success: true,
-  });
-  const finalState = finalizeQueueState(state, 0);
-  assert.equal(finalState.batchSuccess, true);
-  assert.equal(finalState.items.get("ep1").status, "completed");
-  assert.equal(finalState.items.get("ep2").status, "queued");
-});
+  state = reduceQueueEvent(state, batchStartOf(["ep1"]));
+  state = reduceQueueEvent(state, { version: 1, type: "item_start", id: "ep1" });
+  state = reduceQueueEvent(state, { version: 1, type: "item_complete", id: "ep1", status: "completed" });
+  state = reduceQueueEvent(state, { version: 1, type: "batch_complete", success: true });
 
-test("finalization without batch_start skips deselected items", () => {
-  const state = createQueueState(manifestOf(["ep1", "ep2"]));
-  setItemSelected(state, "ep2", false);
-  const finalState = finalizeQueueState(state, -1);
-  assert.equal(finalState.items.get("ep1").status, "error");
-  assert.equal(finalState.items.get("ep2").status, "queued");
+  guardUnsettledItems(state, false);
+
+  assert.equal(state.batchSuccess, true);
+  assert.equal(state.items.get("ep1").status, "completed");
+  assert.equal(state.items.get("ep2").status, "queued");
+  assert.equal(warn.mock.callCount(), 0);
 });
 
 test("UNC shares keep a distinct identity from root-relative paths", () => {

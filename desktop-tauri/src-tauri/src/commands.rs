@@ -385,6 +385,13 @@ where
         };
         attach_context(&mut terminal, mode, job_id);
         let state = app.state::<JobState>();
+        // Item Settlement: every item the pipeline left open ends before the job does, through
+        // the same event the pipeline uses, so a live webview and a reloaded snapshot agree.
+        for mut event in state.settlement_events(job_id, &terminal) {
+            attach_context(&mut event, mode, job_id);
+            state.update_snapshot(&event, job_id, mode);
+            let _ = app.emit(JOB_EVENT, &event);
+        }
         state.update_snapshot(&terminal, job_id, mode);
         let code = state
             .snapshot
@@ -461,12 +468,13 @@ pub fn get_job_snapshot(state: State<'_, JobState>) -> Result<Option<JobSnapshot
 mod tests {
     use super::*;
     use crate::process::test_support::{
-        batch_complete, batch_start, effective_settings, item_progress, item_start,
+        batch_complete, batch_start, effective_settings, item_complete, item_progress, item_start,
     };
     use crate::process::ItemStatus;
     use crate::process::{
         cleanup_owned_processes_with_timeout, run_teardown, stop_job_inner, stop_job_internal,
     };
+    use mkv_core::pipeline::CANCELLED_REASON;
     use serde_json::Value;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
@@ -581,6 +589,30 @@ mod tests {
 
     fn done_for(dones: &Sink<Value>, job_id: u64) -> Value {
         only_one(dones, job_id, |_| true)
+    }
+
+    /// Every `job-event` payload of `job_id`, in the order the webview received them.
+    fn emitted_for(events: &Sink<Value>, job_id: u64) -> Vec<Value> {
+        let all = events.lock().unwrap();
+        all.iter()
+            .filter(|payload| payload["job_id"] == job_id)
+            .cloned()
+            .collect()
+    }
+
+    fn kinds(emitted: &[Value]) -> Vec<&str> {
+        emitted
+            .iter()
+            .map(|payload| payload["type"].as_str().unwrap())
+            .collect()
+    }
+
+    /// The `item_complete` payloads of `emitted`, in order.
+    fn item_completes(emitted: &[Value]) -> Vec<&Value> {
+        emitted
+            .iter()
+            .filter(|payload| payload["type"] == "item_complete")
+            .collect()
     }
 
     fn poll_until(what: &str, mut ready: impl FnMut() -> bool) {
@@ -878,6 +910,32 @@ mod tests {
         assert_eq!(terminal["cancelled"], true);
         assert!(terminal["source"].is_null());
         assert_eq!(done_for(&dones, job_id)["code"], -1);
+
+        // Item Settlement reached the webview before the terminal, in batch order, tagged like
+        // the engine's events. ep2 had started, so it reports how long it ran; ep1 had not.
+        let emitted = emitted_for(&events, job_id);
+        assert_eq!(
+            kinds(&emitted),
+            [
+                "batch_start",
+                "item_start",
+                "item_progress",
+                "item_complete",
+                "item_complete",
+                "batch_complete"
+            ]
+        );
+        let settled = item_completes(&emitted);
+        assert_eq!(settled[0]["id"], "ep2");
+        assert_eq!(settled[1]["id"], "ep1");
+        for item in &settled {
+            assert_eq!(item["status"], "cancelled");
+            assert_eq!(item["reason"], CANCELLED_REASON);
+            assert_eq!(item["mode"], "remux");
+        }
+        assert!(settled[0]["duration_sec"].is_number());
+        assert!(settled[1].get("duration_sec").is_none());
+        assert!(snapshot.items["ep2"].duration_sec.is_some());
     }
 
     #[test]
@@ -914,6 +972,31 @@ mod tests {
     }
 
     #[test]
+    fn worker_error_before_batch_start_settles_no_items() {
+        let (app, events, dones, _) = observed_app();
+        // The sender is dropped unused: the run fails before it announces a batch.
+        let (_, event_rx) = mkv_core::pipeline::create_event_channel(8);
+        let (_, log_rx) = mkv_core::pipeline::create_log_channel(8);
+        let worker = async move { Err::<PipelineSummary, String>("selected item vanished".into()) };
+        let job_id = start_remux(&app, CancellationToken::new(), event_rx, log_rx, worker);
+        let state = app.state::<JobState>();
+        state
+            .wait_until_released(job_id, Duration::from_secs(2))
+            .unwrap();
+
+        // Nothing is open, so the terminal is the only event.
+        assert_eq!(kinds(&emitted_for(&events, job_id)), ["batch_complete"]);
+        assert_eq!(
+            terminal_for(&events, job_id)["error"],
+            "selected item vanished"
+        );
+        let snapshot = state.snapshot.lock().unwrap().clone().unwrap();
+        assert_eq!(snapshot.status, BatchStatus::Error);
+        assert!(snapshot.items.is_empty());
+        assert_eq!(done_for(&dones, job_id)["code"], 1);
+    }
+
+    #[test]
     fn worker_error_after_stop_settles_as_cancelled() {
         let (app, events, dones, logs) = observed_app();
         let token = CancellationToken::new();
@@ -946,6 +1029,14 @@ mod tests {
             logged(&logs, "scan failed after stop"),
             "worker error must stay in the job log"
         );
+        // Cancelled, not failed: the stop wins over the incidental worker error.
+        let emitted = emitted_for(&events, job_id);
+        let settled = item_completes(&emitted);
+        assert_eq!(settled.len(), 2);
+        for item in settled {
+            assert_eq!(item["status"], "cancelled");
+            assert!(item["error"].is_null());
+        }
     }
 
     #[test]
@@ -975,6 +1066,101 @@ mod tests {
             logged(&logs, "scan failed before any stop"),
             "worker error must reach the job log"
         );
+        // No item ever started: each ends as an error carrying the run's own message, in batch
+        // order and before the terminal, with no duration.
+        let emitted = emitted_for(&events, job_id);
+        assert_eq!(
+            kinds(&emitted),
+            [
+                "batch_start",
+                "item_complete",
+                "item_complete",
+                "batch_complete"
+            ]
+        );
+        let settled = item_completes(&emitted);
+        assert_eq!(settled[0]["id"], "ep2");
+        assert_eq!(settled[1]["id"], "ep1");
+        for item in settled {
+            assert_eq!(item["status"], "error");
+            assert_eq!(item["error"], "scan failed before any stop");
+            assert!(item.get("duration_sec").is_none());
+        }
+    }
+
+    #[test]
+    fn success_that_leaves_items_open_settles_them_and_fails_the_job() {
+        let (app, events, dones, _) = observed_app();
+        let (event_tx, event_rx) = mkv_core::pipeline::create_event_channel(16);
+        let (_, log_rx) = mkv_core::pipeline::create_log_channel(8);
+        let worker = async move {
+            event_tx.send(batch_start(&["ep2", "ep1"])).await.unwrap();
+            event_tx.send(item_start("ep2")).await.unwrap();
+            event_tx.send(item_complete("ep2", 3.0)).await.unwrap();
+            event_tx.send(batch_complete(true, false)).await.unwrap();
+            Ok(PipelineSummary::default())
+        };
+        let job_id = start_remux(&app, CancellationToken::new(), event_rx, log_rx, worker);
+        let state = app.state::<JobState>();
+        state
+            .wait_until_released(job_id, Duration::from_secs(2))
+            .unwrap();
+
+        let emitted = emitted_for(&events, job_id);
+        assert_eq!(
+            kinds(&emitted),
+            [
+                "batch_start",
+                "item_start",
+                "item_complete",
+                "item_complete",
+                "batch_complete"
+            ]
+        );
+        assert_eq!(emitted[3]["id"], "ep1");
+        assert_eq!(emitted[3]["status"], "error");
+        assert_eq!(
+            emitted[3]["error"],
+            "Protocol error: missing completion event"
+        );
+        // The engine's own terminal is emitted unchanged, but the snapshot calls the job failed.
+        assert_eq!(terminal_for(&events, job_id)["success"], true);
+        let snapshot = state.snapshot.lock().unwrap().clone().unwrap();
+        assert_eq!(snapshot.status, BatchStatus::Error);
+        assert_eq!(done_for(&dones, job_id)["code"], 1);
+    }
+
+    #[test]
+    fn pipeline_returning_without_a_completion_settles_open_items_as_failed() {
+        let (app, events, dones, _) = observed_app();
+        let (event_tx, event_rx) = mkv_core::pipeline::create_event_channel(16);
+        let (_, log_rx) = mkv_core::pipeline::create_log_channel(8);
+        let worker = async move {
+            event_tx.send(batch_start(&["ep1"])).await.unwrap();
+            event_tx.send(item_start("ep1")).await.unwrap();
+            Ok(PipelineSummary::default())
+        };
+        let job_id = start_remux(&app, CancellationToken::new(), event_rx, log_rx, worker);
+        app.state::<JobState>()
+            .wait_until_released(job_id, Duration::from_secs(2))
+            .unwrap();
+
+        let message = "Pipeline ended without a batch completion event";
+        let emitted = emitted_for(&events, job_id);
+        assert_eq!(
+            kinds(&emitted),
+            [
+                "batch_start",
+                "item_start",
+                "item_complete",
+                "batch_complete"
+            ]
+        );
+        assert_eq!(emitted[2]["status"], "error");
+        assert_eq!(emitted[2]["error"], message);
+        assert!(emitted[2]["duration_sec"].is_number());
+        assert_eq!(terminal_for(&events, job_id)["error"], message);
+        assert_eq!(done_for(&dones, job_id)["code"], 1);
     }
 
     #[test]
@@ -1055,6 +1241,26 @@ mod tests {
             "bridge worker panicked"
         );
         assert_eq!(done_for(&dones, job_id)["code"], 1);
+
+        // Each open item ended as an error carrying the panic text, in batch order, before the
+        // terminal.
+        let emitted = emitted_for(&events, job_id);
+        assert_eq!(
+            kinds(&emitted),
+            [
+                "batch_start",
+                "item_complete",
+                "item_complete",
+                "batch_complete"
+            ]
+        );
+        let settled = item_completes(&emitted);
+        assert_eq!(settled[0]["id"], "ep2");
+        assert_eq!(settled[1]["id"], "ep1");
+        for item in settled {
+            assert_eq!(item["status"], "error");
+            assert_eq!(item["error"], "bridge worker panicked");
+        }
     }
 
     #[test]

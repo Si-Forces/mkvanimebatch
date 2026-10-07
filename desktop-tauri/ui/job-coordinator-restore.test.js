@@ -9,6 +9,10 @@ const tick = () => new Promise(resolve => setTimeout(resolve, 0));
 /** The snapshot shape `get_job_snapshot` answers with; `extra` overrides its fields. */
 const snapshot = (extra = {}) => ({ job_id: 42, mode: "remux", status: "running", items: {}, ...extra });
 
+/** A finished snapshot with one item, which is what a job that got as far as `BatchStart` leaves. */
+const finishedWithItems = (status, extra = {}) =>
+  snapshot({ status, ordered_item_ids: ["ep"], items: { ep: { id: "ep", file: "ep.mkv", status: "completed" } }, ...extra });
+
 test("restore with no snapshot returns to idle and releases both listeners", async () => {
   const coordinator = createJobCoordinator();
   const { deps, calls, unlistened, restoredQueues } = makeRestore(coordinator);
@@ -58,7 +62,7 @@ test("restore leaves a queue that already has items alone for a finished snapsho
 test("restore of a finished snapshot restores presentation only and returns to idle", async () => {
   const coordinator = createJobCoordinator();
   const { deps, calls, unlistened, restoredQueues, views } = makeRestore(coordinator, {
-    getSnapshot: async () => snapshot({ status: "completed" }),
+    getSnapshot: async () => finishedWithItems("completed"),
   });
 
   await coordinator.restore(deps);
@@ -69,6 +73,36 @@ test("restore of a finished snapshot restores presentation only and returns to i
   assert.equal(coordinator.phase, "idle");
   assert.equal(coordinator.activeMode, null);
   assert.deepEqual(unlistened, ["job-event", "job-done"]);
+});
+
+test("restore of a finished snapshot with no items leaves the queue alone but still sets the terminal pill", async () => {
+  // A job that failed before `BatchStart` has no items, and restoring none would empty the queue.
+  for (const status of ["error", "cancelled"]) {
+    const coordinator = createJobCoordinator();
+    const { deps, calls, unlistened, restoredQueues } = makeRestore(coordinator, {
+      getSnapshot: async () => snapshot({ status, ordered_item_ids: [] }),
+    });
+
+    await coordinator.restore(deps);
+
+    assert.deepEqual(restoredQueues, [], status);
+    assert.deepEqual(calls, [["terminal", "remux", status]], status);
+    assert.equal(coordinator.phase, "idle");
+    assert.deepEqual(unlistened, ["job-event", "job-done"]);
+  }
+});
+
+test("restore of a running snapshot with no items yet still rebuilds the queue and attaches", async () => {
+  const coordinator = createJobCoordinator();
+  const { deps, calls, restoredQueues } = makeRestore(coordinator, {
+    getSnapshot: async () => snapshot({ ordered_item_ids: [] }),
+  });
+
+  await coordinator.restore(deps);
+
+  assert.deepEqual(restoredQueues, [["remux", 42]]);
+  assert.equal(calls[0][0], "active");
+  assert.equal(coordinator.phase, "running");
 });
 
 test("restore of a finished extract snapshot switches to the extract view", async () => {

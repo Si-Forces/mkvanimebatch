@@ -37,8 +37,9 @@ export function createJobCoordinator() {
 
   /**
    * The startup snapshot restore: rebuilds the queue of a job that outlived a webview reload.
-   * A finished job only has its presentation restored; a running one is reattached, so the
-   * coordinator moves to `running` and the controller of its mode takes over the two listeners.
+   * A finished job only has its presentation restored, and leaves the queue alone if it ended
+   * before `BatchStart` and so has no items; a running one is reattached, so the coordinator
+   * moves to `running` and the controller of its mode takes over the two listeners.
    *
    * The listeners bind before the snapshot is fetched and buffer what they hear, so a signal that
    * lands in between is replayed (flagged `replay`) once the job is attached rather than lost.
@@ -63,11 +64,13 @@ export function createJobCoordinator() {
       const controller = controllers.get(snapshot?.mode);
       if (!snapshot || snapshot.job_id == null || !snapshot.items || !controller) return true;
       const queue = queueFor(snapshot.mode);
-      if (snapshot.status !== "running" && queue.state.items.size > 0) return true;
+      const finished = snapshot.status !== "running";
+      if (finished && queue.state.items.size > 0) return true;
 
-      queue.restoreFromSnapshot(snapshot);
+      // A job that failed before `BatchStart` has no items, and restoring none would empty the queue.
+      if (!finished || Object.keys(snapshot.items).length > 0) queue.restoreFromSnapshot(snapshot);
       if (snapshot.mode === "extract") switchView("extract");
-      if (snapshot.status !== "running") {
+      if (finished) {
         controller.restoreTerminalSnapshot(snapshot);
         return true;
       }
