@@ -59,12 +59,11 @@ function makeTracker(overrides = {}) {
   return {
     assignments: new Map(),
     lastManifest: { version: 2, items: [{ id: "ep1.mkv", name: "ep1.mkv" }] },
-    state: { batchCancelled: false, batchSuccess: false },
+    // What the Engine Bridge's terminal `batch_complete` leaves in the tracker before `job-done`.
+    state: { batchCancelled: false, batchSuccess: true },
     getSelectedOrderedItemIds: () => ["ep1.mkv"],
     handleEvent() {},
-    finalize(code, cancelled = false) {
-      this.state = { batchCancelled: cancelled, batchSuccess: !cancelled && code === 0 };
-    },
+    endBatch() {},
     ...overrides,
   };
 }
@@ -438,7 +437,7 @@ test("index.html workers and Disk I/O inputs default to auto, with no preset val
   }
 });
 
-test("deferred preflight stop releases ownership, finalizes cancelled queue, and avoids run_job for option-bearing preflight", async t => {
+test("deferred preflight stop releases ownership, leaves the queue untouched, and avoids run_job for option-bearing preflight", async t => {
   const bulkButtons = BULK_SELECTION_CONTROLS.map(({ id }) => [id, new FakeElement()]);
   const elements = remuxElements({ "input-dir": "/my-anime", workers: "4", "io-jobs": "2", "no-cache": checkedBox() });
   for (const [id, button] of bulkButtons) elements.set(id, button);
@@ -448,14 +447,11 @@ test("deferred preflight stop releases ownership, finalizes cancelled queue, and
   const scanPromise = new Promise(resolve => { resolveScan = resolve; });
   const scanCalls = [];
   const invocations = [];
-  let finalizedWith = null;
+  let ended = false;
 
   const tracker = makeTracker({
     lastManifest: { version: 2, items: [] },
-    finalize(code, cancelled = false) {
-      finalizedWith = { code, cancelled };
-      this.state = { batchCancelled: cancelled, batchSuccess: !cancelled && code === 0 };
-    },
+    endBatch() { ended = true; },
   });
   const runtime = makeRuntime(tracker, {
     scanInputDirectory: async (path, mode, opts) => {
@@ -487,8 +483,7 @@ test("deferred preflight stop releases ownership, finalizes cancelled queue, and
   assert.equal(invocations.filter(([cmd]) => cmd === "run_job").length, 0);
   assert.equal(coordinator.activeMode, null);
   assert.equal(coordinator.canStart(), true);
-  assert.deepEqual(finalizedWith, { code: -1, cancelled: true });
-  assert.equal(tracker.state.batchCancelled, true);
+  assert.equal(ended, false, "no batch started, so no item has an outcome to guard");
   assert.equal(controller.lifecycle, "cancelled");
   assert.equal(controller.running, false);
   for (const [, button] of bulkButtons) assert.equal(button.disabled, false, "bulk control must return after abort");
@@ -611,6 +606,29 @@ test("job controller aborts start if episodes exist in queue but zero are select
   assert.ok(logs.some(l => l.includes("No episodes selected in queue")));
 });
 
+test("a refused run_job reports failed and leaves the queue as it was", async t => {
+  installDocument(t, remuxElements({ "input-dir": "/input" }));
+  const logs = [];
+  let ended = false;
+  const runtime = makeRuntime(makeTracker({ endBatch() { ended = true; } }), {
+    appendLog: (_el, msg) => logs.push(msg),
+    invoke: async command => {
+      if (command === "run_job") throw new Error("Another job is already running");
+      return null;
+    },
+  });
+
+  const controller = new JobController("remux", runtime);
+  await controller.start();
+
+  // No job ran and no `job-done` follows, so no batch ends and no item gets an outcome.
+  assert.equal(ended, false);
+  assert.equal(controller.running, false);
+  assert.equal(controller.lifecycle, "failed");
+  assert.equal(runtime.coordinator.activeMode, null);
+  assert.ok(logs.some(msg => msg.includes("Another job is already running")));
+});
+
 test("job controller disables Run while scanning or snapshot restore blocks start", async t => {
   const elements = remuxElements();
   installDocument(t, elements);
@@ -642,24 +660,24 @@ test("job controller disables Run while scanning or snapshot restore blocks star
 test("job controller onDone is ignored when jobId is null or not running", t => {
   installDocument(t, remuxElements());
 
-  let finalized = false;
-  const controller = new JobController("remux", makeRuntime({ finalize() { finalized = true; } }));
+  let ended = false;
+  const controller = new JobController("remux", makeRuntime({ endBatch() { ended = true; } }));
   controller.running = false;
   controller.jobId = null;
   controller.onDone(0);
-  assert.equal(finalized, false);
+  assert.equal(ended, false);
 
   controller.running = true;
   controller.onDone(0);
-  assert.equal(finalized, false);
+  assert.equal(ended, false);
 });
 
 test("job controller stop transitions lifecycle to cancelled when aborted before launch", async t => {
   installDocument(t, remuxElements());
 
-  let finalizedCancelled = null;
+  let ended = false;
   let invokedCommand = null;
-  const runtime = makeRuntime({ finalize(_code, cancelled) { finalizedCancelled = cancelled; } }, {
+  const runtime = makeRuntime({ endBatch() { ended = true; } }, {
     invoke: async cmd => {
       invokedCommand = cmd;
       return null;
@@ -674,7 +692,7 @@ test("job controller stop transitions lifecycle to cancelled when aborted before
   await controller.stop();
   assert.equal(invokedCommand, "stop_job");
   assert.equal(controller.lifecycle, "cancelled");
-  assert.equal(finalizedCancelled, true);
+  assert.equal(ended, false);
   assert.equal(controller.running, false);
 });
 
@@ -689,7 +707,7 @@ test("restored controller filters IDs, targets Stop, and releases controls on co
   const tracker = {
     state: { items: new Map([["ep", { progress: 70 }]]), batchSuccess: false },
     handleEvent: event => signals.push(event),
-    finalize(code, cancelled) { this.state.batchSuccess = code === 0 && !cancelled; },
+    endBatch() {},
   };
   const runtime = makeRuntime(tracker, {
     updateWorkerChips: active => { telemetry.push(active); },
@@ -734,9 +752,9 @@ test("coordinator.restore() attaches a running job to a real controller, which t
   installDocument(t, elements);
   const events = [];
   const tracker = {
-    state: { items: new Map([["ep", { progress: 70 }]]), batchSuccess: false },
+    state: { items: new Map([["ep", { progress: 70 }]]), batchSuccess: true },
     handleEvent: event => events.push(event),
-    finalize(code, cancelled) { this.state.batchSuccess = code === 0 && !cancelled; },
+    endBatch() {},
   };
   const runtime = makeRuntime(tracker);
   const { coordinator } = runtime;
@@ -813,7 +831,7 @@ function restoredControllerWithPendingStop(t, runtimeOverrides = {}) {
   });
   const tracker = {
     state: { items: new Map(), batchSuccess: false },
-    finalize(code, cancelled) { this.state.batchSuccess = code === 0 && !cancelled; },
+    endBatch() {},
   };
   const runtime = makeRuntime(tracker, { invoke: async () => stopPromise, ...runtimeOverrides });
   const controller = new JobController("remux", runtime);
@@ -854,4 +872,45 @@ test("completion during a pending Stop preserves the terminal state if Stop reje
   assert.equal(controller.lifecycle, "cancelled");
   assert.equal(tracker.state.batchSuccess, false);
   assert.equal(coordinator.activeMode, null);
+});
+
+test("a Stop still pending when a job completes ends as done: only the terminal says cancelled", async t => {
+  const { controller, tracker, coordinator, stopping, rejectStop } = restoredControllerWithPendingStop(t);
+  const ended = [];
+  tracker.endBatch = cancelled => ended.push(cancelled);
+  // The terminal `batch_complete` of a job that finished before the Stop took effect.
+  tracker.state.batchSuccess = true;
+  assert.equal(coordinator.isStopping, true);
+
+  controller.handleSnapshotSignal("done", { job_id: 24, mode: "remux", code: 0 });
+
+  assert.equal(controller.lifecycle, "done");
+  assert.deepEqual(ended, [false]);
+  rejectStop(new Error("already finished"));
+  await stopping;
+  assert.equal(controller.lifecycle, "done");
+  assert.equal(coordinator.activeMode, null);
+});
+
+test("job-done ends as cancelled on the terminal's flag or code -1, as done only on success with code 0, else failed", t => {
+  installDocument(t, remuxElements());
+  for (const [state, code, lifecycle, cancelled] of [
+    [{ batchCancelled: true, batchSuccess: false }, 1, "cancelled", true],
+    [{ batchCancelled: false, batchSuccess: false }, -1, "cancelled", true],
+    [{ batchCancelled: false, batchSuccess: true }, 0, "done", false],
+    [{ batchCancelled: false, batchSuccess: true }, 1, "failed", false],
+    // A request the engine refused: the bridge's failed terminal, then code 1.
+    [{ batchCancelled: false, batchSuccess: false }, 1, "failed", false],
+  ]) {
+    const ended = [];
+    const runtime = makeRuntime({ state, endBatch: cancelled => ended.push(cancelled) });
+    const controller = new JobController("remux", runtime);
+    attachRunning(runtime.coordinator, "remux");
+    controller.restoreActiveSnapshot({ job_id: 9, status: "running" }, () => {}, () => {});
+
+    controller.handleSnapshotSignal("done", { job_id: 9, mode: "remux", code });
+
+    assert.equal(controller.lifecycle, lifecycle, JSON.stringify({ state, code }));
+    assert.deepEqual(ended, [cancelled], JSON.stringify({ state, code }));
+  }
 });

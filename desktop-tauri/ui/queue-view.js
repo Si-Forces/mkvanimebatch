@@ -2,10 +2,10 @@ import {
   carryOverAssignments,
   createQueueState,
   createQueueStateFromSnapshot,
-  finalizeQueueState,
   formatElapsedDuration,
   formatOutcomeDuration,
   getSelectedCount,
+  guardUnsettledItems,
   isSameDirectory,
   normalizeDirectoryPath,
   reduceQueueEvent,
@@ -601,9 +601,15 @@ export class QueueTracker {
     }
   }
 
-  finalize(exitCode, cancelled = false) {
+  /**
+   * Ends the batch's presentation on `job-done`. The Engine Bridge has settled every item, so
+   * the Item Settlement guard only acts on a run that broke that protocol.
+   *
+   * @param {boolean} cancelled whether the job was stopped
+   */
+  endBatch(cancelled) {
     this.stopHeartbeat();
-    this.state = finalizeQueueState(this.state, exitCode, cancelled);
+    guardUnsettledItems(this.state, cancelled);
     for (const [id, card] of this.cards) {
       this.renderCardState(card, this.state.items.get(id));
     }
@@ -673,7 +679,8 @@ export class QueueTracker {
 
   renderQueueCount() {
     if (!this.countEl) return;
-    if (this.state.batchStartTime === null && !this.state.batchCompleted) {
+    // A job that ended before `BatchStart` ran no batch, so it leaves the selection count.
+    if (this.state.batchStartTime === null) {
       this.updateSelectionBadge();
       return;
     }

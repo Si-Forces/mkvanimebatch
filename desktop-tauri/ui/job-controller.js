@@ -200,8 +200,8 @@ export class JobController {
     };
   }
 
+  /** Ends a start that ran no job. No batch started, so no item has an outcome and the queue stays as it was. */
   abortStart(cancelled = false) {
-    if (cancelled) this.runtime.queueFor(this.mode).finalize(-1, true);
     this.running = false;
     this.launched = false;
     this.jobId = null;
@@ -357,7 +357,6 @@ export class JobController {
       }
     } catch (err) {
       this.runtime.appendLog(this.logEl, `[ERROR] ${err}`);
-      tracker.finalize(-1);
       this.abortStart();
     }
   }
@@ -416,9 +415,10 @@ export class JobController {
   onDone(code) {
     if (!this.running || this.jobId === null) return;
     const tracker = this.runtime.queueFor(this.mode);
-    // `job-done` codes: 0 completed, -1 cancelled, 1 otherwise (architecture.md §5.1).
-    const cancelled = this.runtime.coordinator.isStopping || tracker.state?.batchCancelled === true || code === -1;
-    tracker.finalize(code, cancelled);
+    // `job-done` codes: 0 completed, -1 cancelled, 1 otherwise (architecture.md §5.1). A Stop
+    // that lost the race to a completed job is no cancellation: only the terminal says so.
+    const cancelled = tracker.state?.batchCancelled === true || code === -1;
+    tracker.endBatch(cancelled);
     const succeeded = Boolean(tracker.state?.batchSuccess) && code === 0;
     this.lifecycle = cancelled ? "cancelled" : (succeeded ? "done" : "failed");
     this.launched = false;

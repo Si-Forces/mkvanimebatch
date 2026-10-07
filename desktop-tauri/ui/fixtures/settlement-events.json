@@ -1,0 +1,86 @@
+{
+  "failed": {
+    "settled": [
+      {
+        "error": "Batch failed",
+        "file": "ep2.mkv",
+        "id": "ep2",
+        "job_id": 10,
+        "mode": "remux",
+        "status": "error",
+        "type": "item_complete",
+        "version": 1
+      },
+      {
+        "error": "Batch failed",
+        "file": "ep3.mkv",
+        "id": "ep3",
+        "job_id": 10,
+        "mode": "remux",
+        "status": "error",
+        "type": "item_complete",
+        "version": 1
+      },
+      {
+        "error": "Batch failed",
+        "file": "ep4.mkv",
+        "id": "ep4",
+        "job_id": 10,
+        "mode": "remux",
+        "status": "error",
+        "type": "item_complete",
+        "version": 1
+      }
+    ],
+    "terminal": {
+      "cancelled": false,
+      "job_id": 10,
+      "mode": "remux",
+      "success": false,
+      "type": "batch_complete",
+      "version": 1
+    }
+  },
+  "stopped": {
+    "settled": [
+      {
+        "file": "ep2.mkv",
+        "id": "ep2",
+        "job_id": 10,
+        "mode": "remux",
+        "reason": "Operation cancelled",
+        "status": "cancelled",
+        "type": "item_complete",
+        "version": 1
+      },
+      {
+        "file": "ep3.mkv",
+        "id": "ep3",
+        "job_id": 10,
+        "mode": "remux",
+        "reason": "Operation cancelled",
+        "status": "cancelled",
+        "type": "item_complete",
+        "version": 1
+      },
+      {
+        "file": "ep4.mkv",
+        "id": "ep4",
+        "job_id": 10,
+        "mode": "remux",
+        "reason": "Operation cancelled",
+        "status": "cancelled",
+        "type": "item_complete",
+        "version": 1
+      }
+    ],
+    "terminal": {
+      "cancelled": true,
+      "job_id": 10,
+      "mode": "remux",
+      "success": false,
+      "type": "batch_complete",
+      "version": 1
+    }
+  }
+}

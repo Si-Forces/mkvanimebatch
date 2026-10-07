@@ -16,6 +16,7 @@ The desktop GUI host for anime fansub collections: it presents the queue, drives
 | **Card Progress** | The visual state of one active item in the Queue Tracker: indeterminate while starting up or transcoding, determinate once streamed item progress arrives. | Loading bar, queue spinner, progress gauge |
 | **Queue Selection** | The user-marked subset and ordering of scanned manifest items chosen for execution. | Checked items, run list |
 | **Active Batch** | The ordered Queue Selection submitted for one execution, excluding every unselected manifest item. | Entire scanned queue |
+| **Item Settlement** | When a job ends, the Engine Bridge gives a terminal Item Outcome, through an ItemComplete, to every item of the Active Batch that the Batch Pipeline left open: cancelled when the job was stopped, otherwise error with the run's own failure message. Outcomes the Batch Pipeline itself gives (such as a planning failure, or an item it ends as cancelled on seeing a stop) are not Item Settlement. | Finalize, cleanup, close-out |
 
 **Inspection Manifest**, **Preset Profile**, **Effective Settings**, and **Item Duration** are owned by the [Media Engine context](../crates/mkv-core/CONTEXT.md) and consumed here. This context deliberately holds no second definition of them — see [ADR-0008](../docs/adr/0008-typed-engine-bridge-and-track-assignment-model.md) for why one owner, not two, keeps them honest.
 
