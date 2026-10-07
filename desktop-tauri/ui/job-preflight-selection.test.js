@@ -108,7 +108,7 @@ function scannedTracker(dir, ids, selected, overrides = {}) {
     lastManifest: manifest(...ids),
     state: { totalCount: ids.length },
     handleEvent() {},
-    finalize() {},
+    endBatch() {},
     ...overrides,
   };
 }

@@ -37,8 +37,11 @@ export function createJobCoordinator() {
 
   /**
    * The startup snapshot restore: rebuilds the queue of a job that outlived a webview reload.
-   * A finished job only has its presentation restored; a running one is reattached, so the
-   * coordinator moves to `running` and the controller of its mode takes over the two listeners.
+   * A finished job always has its status pill restored, and the extract view shown for an extract
+   * job, but its queue replaces the local one only when it has items and the local queue is empty
+   * (a job that ended before `BatchStart` has none). A running job always replaces the queue and
+   * is reattached, so the coordinator moves to `running` and the controller of its mode takes
+   * over the two listeners.
    *
    * The listeners bind before the snapshot is fetched and buffer what they hear, so a signal that
    * lands in between is replayed (flagged `replay`) once the job is attached rather than lost.
@@ -63,14 +66,18 @@ export function createJobCoordinator() {
       const controller = controllers.get(snapshot?.mode);
       if (!snapshot || snapshot.job_id == null || !snapshot.items || !controller) return true;
       const queue = queueFor(snapshot.mode);
-      if (snapshot.status !== "running" && queue.state.items.size > 0) return true;
-
-      queue.restoreFromSnapshot(snapshot);
+      const finished = snapshot.status !== "running";
+      // The pill follows a finished job, and the extract view the snapshot's mode, whatever the
+      // local queue holds.
+      if (finished) controller.restoreTerminalSnapshot(snapshot);
       if (snapshot.mode === "extract") switchView("extract");
-      if (snapshot.status !== "running") {
-        controller.restoreTerminalSnapshot(snapshot);
-        return true;
-      }
+
+      // The one queue decision. A finished job with no items ended before `BatchStart`, and
+      // restoring none would empty the queue; one that has items does not replace a queue that
+      // already has some.
+      const replaceQueue = !finished || (Object.keys(snapshot.items).length > 0 && queue.state.items.size === 0);
+      if (replaceQueue) queue.restoreFromSnapshot(snapshot);
+      if (finished) return true;
 
       active = controller;
       move(["restoring"], "running", snapshot.mode);

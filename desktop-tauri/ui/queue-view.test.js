@@ -267,19 +267,23 @@ test("QueueTracker handles item_start (indeterminate shimmer), item_progress (de
   assert.equal(tracker.heartbeatTimer, null);
 });
 
-test("QueueTracker stops heartbeat on finalize, reset, startScan, restoreFromSnapshot, and populateFromInspection", t => {
+test("QueueTracker stops heartbeat on endBatch, reset, startScan, restoreFromSnapshot, and populateFromInspection", t => {
   setupMockEnvironment(t);
+  // The item below is left open when endBatch runs, which the Item Settlement guard warns about.
+  t.mock.method(console, "warn", () => {});
   const tracker = new QueueTracker("remux");
   const manifest = manifestOf(["ep1"]);
   const startProcessing = () => {
     tracker.populateFromInspection(manifest);
+    tracker.handleEvent({ version: 1, type: "batch_start", total: 1, items: [{ id: "ep1", file: "ep1" }] });
     tracker.handleEvent({ version: 1, type: "item_start", id: "ep1" });
     assert.notEqual(tracker.heartbeatTimer, null);
   };
 
   startProcessing();
-  tracker.finalize(0);
+  tracker.endBatch(false);
   assert.equal(tracker.heartbeatTimer, null);
+  assert.equal(tracker.state.items.get("ep1").status, "error");
 
   startProcessing();
   tracker.reset();
@@ -714,9 +718,27 @@ test("subset batch progress counts only batch participants", t => {
     duration_sec: 14.8,
   });
   tracker.handleEvent({ version: 1, type: "batch_complete", success: true });
-  tracker.finalize(0);
+  tracker.endBatch(false);
 
   assert.equal(countEl.textContent, "1 Completed (1 Total)");
+});
+
+test("a job that fails before BatchStart leaves the queue's cards, selection and count as they were", t => {
+  const { elements } = setupMockEnvironment(t);
+  const warn = t.mock.method(console, "warn", () => {});
+  const tracker = new QueueTracker("remux");
+  const countEl = elements.get("remux-queue-count");
+  tracker.populateFromInspection(manifestOf(["ep1", "ep2"]));
+  setItemSelected(tracker.state, "ep2", false);
+
+  // The Engine Bridge's terminal for a request the engine refused, then the job's end.
+  tracker.handleEvent({ version: 1, type: "batch_complete", success: false, cancelled: false, error: "bad request" });
+  tracker.endBatch(false);
+
+  assert.deepEqual([...tracker.state.items.values()].map(item => item.status), ["queued", "queued"]);
+  assert.deepEqual(tracker.getSelectedOrderedItemIds(), ["ep1"]);
+  assert.equal(countEl.textContent, "1 / 2 Selected");
+  assert.equal(warn.mock.callCount(), 0);
 });
 
 test("same-directory empty inspection keeps directory identity, vanished selections, and order", t => {
@@ -900,9 +922,9 @@ test("progress events on a processing card write only the fill width and the tag
   assert.equal(card.fill.style.width, "100%");
 
   // Re-rendering the same terminal status, from a repeated item_complete (ignored by the
-  // reducer) or from finalize, writes nothing more, its tag text included.
+  // reducer) or from endBatch, writes nothing more, its tag text included.
   recordWrites(card.statusTag, "tag", ["textContent"], writes);
   tracker.handleEvent({ version: 1, type: "item_complete", id: "ep1", status: "completed", duration_sec: 3 });
-  tracker.finalize(0);
+  tracker.endBatch(false);
   assert.deepEqual(writes, ["card.className", "badge.className", "badge.textContent", "tag.className", "fill.className"]);
 });
