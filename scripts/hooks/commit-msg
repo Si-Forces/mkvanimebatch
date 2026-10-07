@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Drops AI co-author trailers from a commit message as it is written.
+#
+# Why a hook rather than a Claude Code setting: `attribution.commit: ""` in settings.json is
+# the documented lever, but there are open upstream bugs where it intermittently has no effect
+# and the trailer still lands. This hook is the hard guarantee: git refuses to record a message
+# that names an AI co-author, so the trailer cannot reach the object database at all.
+#
+# A co-author naming a human -- including `Co-authored-by: sifahaz <...@users.noreply.github.com>` --
+# is left alone; only AI agents are stripped. Enabled per clone by scripts/install-git-hooks.sh.
+set -euo pipefail
+
+msg=$1
+
+# git strips comments and trailing blank lines itself; only the trailer block needs checking.
+if grep -qiE '^[[:space:]]*co-authored-by:.*(claude|copilot|anthropic|ai[[:space:]]+bot|bot@example\.com)' "$msg"; then
+  {
+    echo ""
+    echo "❌ [commit-msg] refusing to commit an AI co-author trailer:"
+    grep -inE '^[[:space:]]*co-authored-by:' "$msg" | sed 's/^/     /'
+    echo ""
+    echo "   Remove the line above from the commit message. To keep a human"
+    echo "   co-author, name the person instead -- an AI line is never kept here."
+    echo "   Bypass: git commit --no-verify"
+    echo ""
+  } >&2
+  exit 1
+fi
+
+exit 0
