@@ -9,7 +9,7 @@ root=$(git rev-parse --show-toplevel)
 
 # git ignores a missing or non-executable hook (at most with a hint), so check before
 # claiming anything.
-for f in scripts/hooks/pre-commit scripts/hooks/pre-push scripts/review-gate.sh; do
+for f in scripts/hooks/commit-msg scripts/hooks/pre-commit scripts/hooks/pre-push scripts/review-gate.sh; do
   if [ ! -x "$root/$f" ]; then
     echo "$f is missing or not executable; refusing to enable the hooks." >&2
     echo "Run: chmod +x $f  (or git checkout -- $f if it was deleted)" >&2
@@ -42,14 +42,17 @@ fi
 
 cat <<'MSG'
 Hooks enabled (core.hooksPath = scripts/hooks):
+  commit-msg : refuses a message carrying an AI co-author trailer (Claude, Copilot, and
+               the like). A co-author naming a human is left alone.
   pre-commit : cargo fmt --check + clippy -D warnings when Rust or Cargo files are staged,
                node --check on staged UI modules
   pre-push   : the review-gate ledger check, then cargo test --workspace and node --test
                when HEAD is pushed (other pushed tips only get a warning)
 
-Both also refuse while an assume-unchanged or skip-worktree file differs from the index,
-since git diff cannot see that edit. The refusal lists the files and how to clear the bits.
-To bypass: git commit --no-verify (skips all of pre-commit), SKIP_SLOW_GATES=1 git push.
+pre-commit and pre-push also refuse while an assume-unchanged or skip-worktree file differs
+from the index, since git diff cannot see that edit. The refusal lists the files and how to
+clear the bits.
+To bypass: git commit --no-verify (skips commit-msg and pre-commit), SKIP_SLOW_GATES=1 git push.
 
 Review a range with the code-review skill (Standards + Spec, parallel
 sub-agents), then record it before pushing:
