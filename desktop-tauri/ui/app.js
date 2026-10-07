@@ -14,52 +14,6 @@ import { nextStepValue } from "./stepper.js";
 // The Preset Profile catalog, filled at startup by `get_preset_profiles`; the engine owns it.
 const PRESETS = {};
 
-async function restoreQueueFromSnapshot(controllers) {
-  const buffered = [];
-  let active = null;
-  let unlistenEvent = null;
-  let unlistenDone = null;
-  jobCoordinator.isRestoring = true;
-  jobCoordinator.syncControls();
-  const deliver = (type, payload) => {
-    if (active) active.handleSnapshotSignal(type, payload);
-    else buffered.push([type, payload]);
-  };
-
-  try {
-    unlistenEvent = await listen(JOB_EVENT, e => deliver("event", e.payload));
-    unlistenDone = await listen(JOB_DONE, e => deliver("done", e.payload));
-    const snapshot = await invoke("get_job_snapshot");
-    if (!snapshot || snapshot.job_id == null || !snapshot.items || !controllers[snapshot.mode]) return;
-    const queue = queueFor(snapshot.mode);
-    if (snapshot.status !== "running" && queue.state.items.size > 0) return;
-
-    queue.restoreFromSnapshot(snapshot);
-    if (snapshot.mode === "extract") switchView("extract");
-    if (snapshot.status !== "running") {
-      controllers[snapshot.mode].restoreTerminalSnapshot(snapshot);
-      return;
-    }
-
-    active = controllers[snapshot.mode];
-    active.restoreActiveSnapshot(snapshot, unlistenEvent, unlistenDone);
-    unlistenEvent = null;
-    unlistenDone = null;
-    for (const [type, payload] of buffered) {
-      active.handleSnapshotSignal(type, payload, true);
-    }
-  } catch (err) {
-    console.error("[get_job_snapshot] restore failed:", err);
-  } finally {
-    unlistenEvent?.();
-    unlistenDone?.();
-    if (jobCoordinator.isRestoring) {
-      jobCoordinator.isRestoring = false;
-      jobCoordinator.syncControls();
-    }
-  }
-}
-
 async function loadPresetProfiles() {
   try {
     const profiles = await invoke("get_preset_profiles");
@@ -854,7 +808,7 @@ function initApp() {
   telemetryLoop.start();
   loadPresetProfiles();
   loadDefaultSettings();
-  restoreQueueFromSnapshot(controllers);
+  jobCoordinator.restore({ listen, invoke, controllersByMode: controllers, queueFor, switchView, events: { JOB_EVENT, JOB_DONE } });
 
   document.addEventListener("keydown", e => {
     if ((e.ctrlKey || e.metaKey) && e.key === "t") {
