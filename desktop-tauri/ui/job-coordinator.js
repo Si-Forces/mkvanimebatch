@@ -1,3 +1,5 @@
+import { JOB_DONE, JOB_EVENT } from "./job-controller.js";
+
 /**
  * The lifecycle of the one job the app runs at a time, across the Remux and Extract views.
  *
@@ -10,16 +12,18 @@
  *
  * Each transition returns `true` when it applied and re-renders the registered controls itself.
  * From any other phase it returns `false` and changes nothing. The state is private: controllers
- * read it through the observers and move it only through the transitions.
+ * read it through the observers and move it only through the transitions. `restore()` likewise
+ * resolves `false` when refused, and `true` once it ran, whatever the snapshot held.
  */
 export function createJobCoordinator() {
-  const controllers = new Set();
+  // The registered controllers, keyed by mode, so `restore()` can find the one a snapshot names.
+  const controllers = new Map();
   let phase = "idle";
   // The mode that owns the batch while starting, running or stopping; `null` otherwise.
   let owner = null;
 
   function syncControls() {
-    for (const controller of controllers) controller.syncGlobalControls();
+    for (const controller of controllers.values()) controller.syncGlobalControls();
   }
 
   /** Moves from one of the `from` phases to `to`, keeping the owner unless `mode` replaces it. */
@@ -38,11 +42,11 @@ export function createJobCoordinator() {
    *
    * The listeners bind before the snapshot is fetched and buffer what they hear, so a signal that
    * lands in between is replayed (flagged `replay`) once the job is attached rather than lost.
-   * `controllersByMode` maps each mode to its `JobController` (the ones registered for re-rendering);
-   * `events` names the two bridge events.
+   * The controller is the one registered for the snapshot's mode. Resolves `false` when refused
+   * because the coordinator is not idle, else `true` once the restore has settled.
    */
-  async function restore({ listen, invoke, controllersByMode, queueFor, switchView, events }) {
-    if (!move(["idle"], "restoring")) return;
+  async function restore({ listen, invoke, queueFor, switchView }) {
+    if (!move(["idle"], "restoring")) return false;
     const buffered = [];
     let active = null;
     let unlistenEvent = null;
@@ -53,21 +57,22 @@ export function createJobCoordinator() {
     };
 
     try {
-      unlistenEvent = await listen(events.JOB_EVENT, e => deliver("event", e.payload));
-      unlistenDone = await listen(events.JOB_DONE, e => deliver("done", e.payload));
+      unlistenEvent = await listen(JOB_EVENT, e => deliver("event", e.payload));
+      unlistenDone = await listen(JOB_DONE, e => deliver("done", e.payload));
       const snapshot = await invoke("get_job_snapshot");
-      if (!snapshot || snapshot.job_id == null || !snapshot.items || !controllersByMode[snapshot.mode]) return;
+      const controller = controllers.get(snapshot?.mode);
+      if (!snapshot || snapshot.job_id == null || !snapshot.items || !controller) return true;
       const queue = queueFor(snapshot.mode);
-      if (snapshot.status !== "running" && queue.state.items.size > 0) return;
+      if (snapshot.status !== "running" && queue.state.items.size > 0) return true;
 
       queue.restoreFromSnapshot(snapshot);
       if (snapshot.mode === "extract") switchView("extract");
       if (snapshot.status !== "running") {
-        controllersByMode[snapshot.mode].restoreTerminalSnapshot(snapshot);
-        return;
+        controller.restoreTerminalSnapshot(snapshot);
+        return true;
       }
 
-      active = controllersByMode[snapshot.mode];
+      active = controller;
       move(["restoring"], "running", snapshot.mode);
       active.restoreActiveSnapshot(snapshot, unlistenEvent, unlistenDone);
       unlistenEvent = null;
@@ -83,6 +88,7 @@ export function createJobCoordinator() {
       // An attached job has already left `restoring`; this releases only the paths that did not attach.
       move(["restoring"], "idle");
     }
+    return true;
   }
 
   return {
@@ -127,11 +133,16 @@ export function createJobCoordinator() {
 
     restore,
 
+    /**
+     * Registers a controller under its `mode`: re-rendered on every transition, and attached by
+     * `restore()` for that mode. One controller per mode, so a second one for a mode throws.
+     */
     register(controller) {
-      controllers.add(controller);
+      if (controllers.has(controller.mode)) throw new Error(`A controller is already registered for mode "${controller.mode}"`);
+      controllers.set(controller.mode, controller);
     },
 
-    /** Re-renders every registered control, for a change the coordinator does not own, such as a selection. */
+    /** Re-renders every registered control, for a change the coordinator does not own, such as an inspection scan. */
     syncControls,
   };
 }

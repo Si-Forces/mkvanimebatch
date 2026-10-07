@@ -626,6 +626,7 @@ test("job controller disables Run while scanning or snapshot restore blocks star
   let answerSnapshot;
   const { deps } = makeRestore(runtime.coordinator, {
     getSnapshot: () => new Promise(resolve => { answerSnapshot = resolve; }),
+    registerControllers: false,
   });
   const restoring = runtime.coordinator.restore(deps);
   await tick();
@@ -741,11 +742,13 @@ test("coordinator.restore() attaches a running job to a real controller, which t
   const { coordinator } = runtime;
   const controller = new JobController("remux", runtime);
   let answerSnapshot;
+  // The real controller registered itself under "remux" when constructed; restore() attaches it.
   const { deps, handlers, unlistened, restoredQueues } = makeRestore(coordinator, {
     getSnapshot: () => new Promise(resolve => { answerSnapshot = resolve; }),
+    registerControllers: false,
   });
 
-  const restoring = coordinator.restore({ ...deps, controllersByMode: { remux: controller } });
+  const restoring = coordinator.restore(deps);
   await tick();
   assert.equal(coordinator.phase, "restoring");
   assert.equal(elements.get("remux-run").disabled, true);

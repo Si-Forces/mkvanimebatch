@@ -1,7 +1,7 @@
 /* MKV Anime Batch desktop frontend.
    Talks to the Tauri host through window.__TAURI__ (withGlobalTauri: true in tauri.conf.json). */
 
-import { BULK_SELECTION_CONTROLS, CLEANUP_ERROR, JOB_DONE, JOB_EVENT, JobController } from "./job-controller.js";
+import { BULK_SELECTION_CONTROLS, CLEANUP_ERROR, JobController } from "./job-controller.js";
 import { QueueTracker } from "./queue-view.js";
 import { classifyLine, pushCapped } from "./log-classify.js";
 import { createTelemetryLoop } from "./telemetry.js";
@@ -808,7 +808,7 @@ function initApp() {
   telemetryLoop.start();
   loadPresetProfiles();
   loadDefaultSettings();
-  jobCoordinator.restore({ listen, invoke, controllersByMode: controllers, queueFor, switchView, events: { JOB_EVENT, JOB_DONE } });
+  jobCoordinator.restore({ listen, invoke, queueFor, switchView });
 
   document.addEventListener("keydown", e => {
     if ((e.ctrlKey || e.metaKey) && e.key === "t") {

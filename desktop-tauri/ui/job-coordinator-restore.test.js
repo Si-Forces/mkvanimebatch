@@ -168,11 +168,11 @@ test("restore replays signals heard before the snapshot, in order, flagged as re
 test("a job that finishes during the replay leaves the coordinator idle, not restoring", async () => {
   const coordinator = createJobCoordinator();
   let answer;
-  const { deps, handlers } = makeRestore(coordinator, {
+  const { deps, controllers, handlers } = makeRestore(coordinator, {
     getSnapshot: () => new Promise(resolve => { answer = resolve; }),
   });
   // The restored controller ends the job on the buffered done, as `onDone` does.
-  deps.controllersByMode.remux.handleSnapshotSignal = type => {
+  controllers.remux.handleSnapshotSignal = type => {
     if (type === "done") coordinator.finish();
   };
 
@@ -239,7 +239,7 @@ test("a start is refused while the restore is in flight and allowed once it ends
 test("restore re-renders the controls on entering and leaving the restoring phase", async () => {
   const coordinator = createJobCoordinator();
   const phases = [];
-  coordinator.register({ syncGlobalControls: () => phases.push(coordinator.phase) });
+  coordinator.register({ mode: "observer", syncGlobalControls: () => phases.push(coordinator.phase) });
   const { deps } = makeRestore(coordinator);
 
   await coordinator.restore(deps);
@@ -250,7 +250,7 @@ test("restore re-renders the controls on entering and leaving the restoring phas
 test("restore of a running snapshot re-renders the controls on the attach, as each controller sees it", async () => {
   const coordinator = createJobCoordinator();
   const seen = [];
-  coordinator.register({ syncGlobalControls: () => seen.push([coordinator.phase, coordinator.activeMode]) });
+  coordinator.register({ mode: "observer", syncGlobalControls: () => seen.push([coordinator.phase, coordinator.activeMode]) });
   const { deps } = makeRestore(coordinator, { getSnapshot: async () => snapshot() });
 
   await coordinator.restore(deps);
@@ -263,9 +263,35 @@ test("restore is refused while a job already owns the coordinator", async () => 
   coordinator.begin("extract");
   const { deps, handlers } = makeRestore(coordinator, { getSnapshot: async () => snapshot() });
 
-  await coordinator.restore(deps);
+  assert.equal(await coordinator.restore(deps), false, "a refused restore resolves false");
 
   assert.equal(coordinator.phase, "starting");
   assert.equal(coordinator.activeMode, "extract");
   assert.equal(handlers.size, 0, "a refused restore binds no listeners");
+});
+
+test("restore resolves true once it ran, whatever the snapshot held", async () => {
+  for (const answer of [null, snapshot(), snapshot({ status: "completed" })]) {
+    const coordinator = createJobCoordinator();
+    const { deps } = makeRestore(coordinator, { getSnapshot: async () => answer });
+    assert.equal(await coordinator.restore(deps), true);
+  }
+  const failing = createJobCoordinator();
+  const { deps } = makeRestore(failing, { getSnapshot: async () => { throw new Error("bridge down"); } });
+  const originalError = console.error;
+  console.error = () => {};
+  try {
+    assert.equal(await failing.restore(deps), true);
+  } finally {
+    console.error = originalError;
+  }
+});
+
+test("restore attaches the controller registered for the snapshot's mode, not another one", async () => {
+  const coordinator = createJobCoordinator();
+  const { deps, calls } = makeRestore(coordinator, { getSnapshot: async () => snapshot({ mode: "extract" }) });
+
+  await coordinator.restore(deps);
+
+  assert.deepEqual(calls.filter(([kind]) => kind === "active").map(([, mode]) => mode), ["extract"]);
 });

@@ -8,7 +8,7 @@ import { makeRestore } from "./job-coordinator-fakes.js";
 function countedCoordinator() {
   const coordinator = createJobCoordinator();
   const counter = { syncs: 0 };
-  coordinator.register({ syncGlobalControls: () => counter.syncs++ });
+  coordinator.register({ mode: "observer", syncGlobalControls: () => counter.syncs++ });
   return { coordinator, counter };
 }
 
@@ -99,7 +99,7 @@ for (const { name, call, legalFrom } of GUARDED_TRANSITIONS) {
     test(`${name}() is refused from ${phase} and changes nothing`, () => {
       const coordinator = inPhase(phase);
       const counter = { syncs: 0 };
-      coordinator.register({ syncGlobalControls: () => counter.syncs++ });
+      coordinator.register({ mode: "observer", syncGlobalControls: () => counter.syncs++ });
       const mode = coordinator.activeMode;
 
       assert.equal(call(coordinator), false);
@@ -159,4 +159,10 @@ test("syncControls re-renders without a transition, for changes the coordinator 
 
   assert.equal(counter.syncs, 1);
   assert.equal(coordinator.phase, "idle");
+});
+
+test("a second controller for one mode is refused, so restore() never attaches the wrong one", () => {
+  const coordinator = createJobCoordinator();
+  coordinator.register({ mode: "remux", syncGlobalControls() {} });
+  assert.throws(() => coordinator.register({ mode: "remux", syncGlobalControls() {} }), /already registered for mode "remux"/);
 });

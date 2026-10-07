@@ -363,7 +363,8 @@ export class JobController {
   }
 
   async stop() {
-    if (!this.running || !this.runtime.coordinator.requestStop()) return;
+    if (!this.running) return;
+    if (!this.runtime.coordinator.requestStop()) return;
     const generation = ++this.startGeneration;
     this.lifecycle = "stopping";
     this.renderStatus();
