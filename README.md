@@ -292,7 +292,7 @@ mkvanimebatch/
 │   └── mkv-cli/             # Standalone CLI binary adapter
 │       └── src/             # CLI argument parsing and entry point
 ├── desktop-tauri/           # Desktop GUI application
-│   ├── ui/                  # Web frontend (Liquid Glass UI, Queue Tracker, 11 Node test suites)
+│   ├── ui/                  # Web frontend (Liquid Glass UI, Queue Tracker, 13 Node test suites)
 │   └── src-tauri/           # In-process Tauri Engine Bridge & telemetry
 ├── docs/
 │   ├── adr/                 # Architecture Decision Records (0001 - 0015)

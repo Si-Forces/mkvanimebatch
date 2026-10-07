@@ -323,7 +323,7 @@ OPTIONS:
     --events                   Emit machine-readable NDJSON events prefixed with '@event: '
     --remux                    Process batch in remux mode (default for mkv-cli)
     --extract                  Extract best-match subtitles, fonts, chapters, and covers
-    --dry-run                  Simulate batch processing without executing remux commands
+    --dry-run                  Simulate batch processing without executing remux or extract commands
     --bitrate <RATE>           Opus audio transcoding bitrate with optional k/K/M suffix (default: preset bitrate, else {default_bitrate})
     --complexity <{complexity}>        Opus compression complexity level, {complexity} (default: preset complexity, else {default_complexity})
     --workers <N>              Number of concurrent worker tasks, {workers} (default: physical cores clamped 1-16)
