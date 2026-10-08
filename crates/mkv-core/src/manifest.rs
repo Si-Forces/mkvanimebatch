@@ -140,6 +140,12 @@ pub struct ManifestItem {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InspectionManifest {
     pub version: u64,
+    /// External subtitles a human can assign to the items of each release, keyed by release and
+    /// listed as root-relative POSIX paths. A subtitle outside the input directory is never
+    /// listed, whatever `--assets-dir` says: only those in the Release Directory or an ancestor
+    /// up to the input root appear. `generate_inspection_manifest` takes no assets directory, so
+    /// an `--assets-dir` subtitle is resolved by the Asset Resolver's fallback but not listed. A
+    /// person can still assign it with a browsed path or a CLI `--assignments` path.
     #[serde(default)]
     pub subtitle_candidates: BTreeMap<String, Vec<String>>,
     pub items: Vec<ManifestItem>,
@@ -784,6 +790,29 @@ mod tests {
                 "ep2.ass".to_string(),
                 "ep10.ass".to_string()
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_subtitle_candidates_exclude_subtitles_outside_the_input_dir() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let input_dir = temp_dir.path().join("input");
+        let assets_dir = temp_dir.path().join("assets");
+        std::fs::create_dir_all(&input_dir).unwrap();
+        std::fs::create_dir_all(&assets_dir).unwrap();
+        std::fs::write(input_dir.join("ep1.mkv"), b"video").unwrap();
+        std::fs::write(input_dir.join("ep1.ass"), b"sub").unwrap();
+        // The manifest takes no assets directory, so a subtitle outside the input directory
+        // is not listed, though the Asset Resolver's fallback still resolves it.
+        std::fs::write(assets_dir.join("ep1.eng.ass"), b"sub").unwrap();
+
+        let manifest = generate_inspection_manifest(&input_dir, None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            manifest.subtitle_candidates,
+            BTreeMap::from([(".".to_string(), vec!["ep1.ass".to_string()])])
         );
     }
 

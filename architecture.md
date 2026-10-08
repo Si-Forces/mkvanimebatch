@@ -121,7 +121,7 @@ mkvanimebatch/
 │   │   │   ├── cpu.rs               # Crate-private: physical core count (/proc/cpuinfo on Linux, capped at available_parallelism) and transcode thread governor
 │   │   │   ├── ebml.rs              # Native EBML/Matroska metadata parser
 │   │   │   ├── scan.rs              # MKV and asset discovery, mkvmerge -J fallback probe, PersistentInspectCache
-│   │   │   ├── assets.rs            # AssetResolver, SubIndex, ChapterIndex, CoverIndex, release preparation
+│   │   │   ├── assets.rs            # AssetResolver, SubIndex, ChapterIndex, CoverIndex, ReleasePreparer (release preparation)
 │   │   │   ├── fonts.rs             # Fonts directory lookup, FontRegistry, FontHashMemo, FontClaimsGuard
 │   │   │   ├── inspect.rs           # Crate-private: inspect_videos, the one cancellable bulk probe fan-out behind Inspect and remux planning
 │   │   │   ├── item_id.rs           # ItemId, the canonical identity of a discovered video, built only normalised; plus get_item_id, the root-relative path ID of release directories and subtitle candidates
@@ -376,7 +376,7 @@ flowchart TD
     Select --> Targets["validate_assignment_targets\neach target matches exactly one video"]
     Targets --> Start["Emit JobEvent::BatchStart"]
     Start --> Probe["inspect_videos: probe all videos concurrently\n(workers * 2).clamp(2, 16) semaphore"]
-    Probe --> Prep["Per release directory:\nprepare_release_directory, scan_fonts,\nclaim_leftover_chapters"]
+    Probe --> Prep["Per release directory:\nReleasePreparer::prepare and ::fonts,\nclaim_leftover_chapters"]
     Prep --> Plan["Plan in batch order:\nRemuxPlanner decides one Remux Plan per item,\nrun_remux emits skipped / error / planned outcomes\nand collects the planned jobs"]
     Plan --> Schedule["run_items: tokio JoinSet\nat most `workers` tasks in flight"]
 
@@ -395,6 +395,8 @@ flowchart TD
 ```
 
 A video's identity is an `ItemId` (`item_id.rs`): its path relative to the input directory, `/`-separated, with no `.` segments. Both constructors normalise (`ItemId::of` for a discovered file, `ItemId::parse` for a user-supplied spelling), so there is no un-normalised form to compare by mistake. `BatchItemInfo.id`, `ManifestItem.id`, the `id` of the item `JobEvent`s, `apply_selected_items`, `validate_assignment_targets`, `RemuxPlanner` and `InspectionManifest::select_items` all compare by type, as `ItemId`s. `selected_items` and a `TrackAssignment`'s `target_video` stay the caller's raw `String`, so validation errors can quote what was typed. On the wire an `ItemId` is a plain JSON string, and deserialising one normalises it. `ItemId::of` trims surrounding whitespace, so two discovered files whose names differ only by leading or trailing whitespace share one `ItemId`: a run rejects them (`apply_selected_items` fails with `Discovered MKV files share canonical ID ...`), while `--plan` and Inspect list both rows under the same ID.
+
+Release Directory preparation is one `ReleasePreparer` per batch (`assets.rs`). `prepare` resolves a directory's fonts directory (the `--fonts-dir` override, else the nearest ancestor whose fonts directory holds fonts, else the one in `--assets-dir`, else `<dir>/fonts`) and builds its `AssetResolver`; `fonts` scans a fonts directory into the attachment arguments. The preparer owns the asset-scan, fonts-directory, font and subtitle-classification caches, so Release Directories that share ancestors do not repeat that file I/O. The caches are transparent: they only skip repeated scans and classification work, and a result equals a fresh preparer's up to the path spelling of each directory's first scan (`ScanCache`).
 
 Planning decides and the pipeline reports. `RemuxPlanner` (`remux_plan.rs`) takes one discovered video and returns a Remux Plan: `Skip` with a reason, `ProbeFailed` or `Internal` for that item, `Abort` for the whole batch, or `Planned` with the `PlannedJob`, its `TrackSelection`, and the release's shared `FontInfo`. A video whose Release Directory was not prepared is an `Internal` item error, logged as such rather than as a probe failure. Otherwise the planner works in this order:
 
@@ -570,7 +572,7 @@ The frontend is plain ES modules with no framework.
 4. **Presentation heartbeat (ADR-0009)**:
    - One 1 Hz timer in `QueueTracker` updates the elapsed time of every processing card, and stops itself on the first tick that finds no item processing.
 5. **Subtitle assignment modal (ADR-0011, ADR-0012)**:
-   - Per remux item: choose a subtitle from the manifest's `subtitle_candidates` for the release, or a custom path (browse via `pick_subtitle_file`, an `rfd` native dialog); set the language (`ind`, `eng`, `jpn`, or a custom code), track title, and offset in milliseconds (`offset_ms`; a fraction is truncated, and an empty or out-of-range value leaves the global offset in effect). The resulting `TrackAssignment` is sent in `BatchRequest.assignments` and applied to the `mkvmerge` arguments (§4.4).
+   - Per remux item: choose a subtitle from the manifest's `subtitle_candidates` for the release, or a custom path (browse via `pick_subtitle_file`, an `rfd` native dialog); set the language (`ind`, `eng`, `jpn`, or a custom code), track title, and offset in milliseconds (`offset_ms`; a fraction is truncated, and an empty or out-of-range value leaves the global offset in effect). The resulting `TrackAssignment` is sent in `BatchRequest.assignments` and applied to the `mkvmerge` arguments (§4.4). `subtitle_candidates` never lists a subtitle outside the input directory, and `generate_inspection_manifest` takes no assets directory: a subtitle in `--assets-dir` still resolves through the fallback tier but is not listed, so a person assigns it by browsing to it, or the CLI takes its path in `--assignments` (ADR-0001, 2026-10-08 amendment).
 6. **Worker inputs and chips**: the workers and Disk I/O inputs start empty with the placeholder `auto`. At startup `settings-chips.js` calls `get_default_settings` once and, on success, sets `auto (N)` (N is the default `workers` or `io_jobs`) and `data-auto-value="N"` on them. An empty field sends `workers: null` or `io_jobs: null`. The worker and I/O job chips show the default settings while idle, the settings `resolve_batch_request` returned while a run starts, and a restored running job's `effective_settings` after a reload. Until the defaults are known, or when the call failed, the placeholder stays `auto` and the chips name their state (`Standby`, `Idle`) without a count. A stepper click on an empty field with a `data-auto-value` starts from N (`stepper.js`).
 7. **Preset catalog**: the preset menu (`preset-menu.js`) applies only the profiles `get_preset_profiles` returned at startup; the webview holds no copy of them (ADR-0008, 2026-10-06 desktop amendment). The form's bitrate and complexity controls are what a run sends; the preset id is a label.
 8. **Theme** (`theme.js`): follows `prefers-color-scheme` live until the user toggles the theme; the choice is then stored in `localStorage` (`mkv-theme`) and pinned on the native window via `set_window_theme`. `theme-init.js` is the only reader of the stored choice: it publishes the theme in `dataset` before first paint, and `theme.js` applies that.
@@ -754,7 +756,7 @@ sequenceDiagram
 
 | ADR | Title | Core Architectural Impact | Primary Code Location |
 | :---: | :--- | :--- | :--- |
-| [**0001**](docs/adr/0001-sidecar-contract-and-structured-planning.md) | Sidecar Contract and Structured Planning | Established the manifest v2 schema and structured lifecycle events. Implemented. | `manifest.rs`, `pipeline.rs` |
+| [**0001**](docs/adr/0001-sidecar-contract-and-structured-planning.md) | Sidecar Contract and Structured Planning | Established the manifest v2 schema and structured lifecycle events. Implemented. The 2026-10-08 amendment pins that `subtitle_candidates` never list a subtitle outside the input directory. | `manifest.rs`, `pipeline.rs` |
 | [**0002**](docs/adr/0002-unified-asset-resolver-and-batch-runner.md) | Asset Resolver and Runner Architecture | Consolidated asset discovery into `AssetResolver`; separated remux and extract runners. Implemented. | `assets.rs`, `remux.rs`, `extract.rs` |
 | [**0003**](docs/adr/0003-transactional-font-extraction.md) | Transactional Font Extraction | Two-phase claim/promote font management with BLAKE2b deduplication. Implemented. | `fonts.rs` |
 | [**0004**](docs/adr/0004-resolution-precedence-and-conventions.md) | Resolution Precedence and Conventions | Subtitle precedence ladder (Manual → Same-Directory → Embedded → Ancestor → Fallback), cover ranking rules, fractional episode passthrough. Includes the [2026-09-24 amendment](docs/adr/0004-resolution-precedence-and-conventions.md#amendment--2026-09-24) (embedded-before-ancestor subtitle ordering, cover ranking). | `assets.rs`, `domain.rs` |

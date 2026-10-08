@@ -94,7 +94,8 @@ mod tests {
         let object = value.as_object().expect("preset serializes as an object");
 
         // Pin the fields the desktop reads by name, not the exhaustive key set: adding a field
-        // is a legitimate change, whereas renaming or dropping one breaks loadPresetProfiles.
+        // is a legitimate change, whereas renaming or dropping one breaks
+        // `createPresetMenu().load` in desktop-tauri/ui/preset-menu.js.
         for key in ["id", "name", "icon", "bitrate", "complexity"] {
             assert!(
                 object.contains_key(key),
