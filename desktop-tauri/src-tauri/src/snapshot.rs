@@ -374,9 +374,18 @@ impl SnapshotStore {
 
 #[cfg(test)]
 pub(crate) mod test_support {
+    use super::{JobSnapshot, SnapshotStore};
     use mkv_core::item_id::ItemId;
     use mkv_core::pipeline::{BatchItemInfo, ItemOutcome, JobEvent};
     use mkv_core::request::EffectiveSettings;
+    use std::sync::MutexGuard;
+
+    impl SnapshotStore {
+        /// Holds the snapshot lock; until the guard drops, every caller that takes it blocks.
+        pub(crate) fn hold(&self) -> MutexGuard<'_, Option<JobSnapshot>> {
+            self.0.lock().unwrap()
+        }
+    }
 
     /// Effective Settings that differ from every default, so a test sees them pass through
     /// unchanged.
