@@ -237,10 +237,15 @@ test("app.js wires the settings chips, the preset menu and the theme to their mo
   });
   const stored = [];
   const priorStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
-  Object.defineProperty(globalThis, "localStorage", {
-    configurable: true,
-    value: { setItem: (key, value) => stored.push([key, value]) },
-  });
+  // Like a real Storage, setItem refuses any other receiver ("Illegal invocation"), so passing
+  // the bare method as theme storage would silently stop saving the choice and fail here.
+  const fakeStorage = {
+    setItem(key, value) {
+      if (this !== fakeStorage) throw new TypeError("Illegal invocation");
+      stored.push([key, value]);
+    },
+  };
+  Object.defineProperty(globalThis, "localStorage", { configurable: true, value: fakeStorage });
   t.after(() => {
     if (priorStorage) Object.defineProperty(globalThis, "localStorage", priorStorage);
     else delete globalThis.localStorage;

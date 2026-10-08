@@ -1,7 +1,7 @@
 /**
  * The titlebar's Preset Profile menu: applies a profile's name, bitrate and complexity to the
- * form, or marks the form as hand-edited ("custom"). The engine owns the profile catalog and
- * `load()` fetches it; the page keeps no copy to fall back on.
+ * form, or marks the form as hand-edited ("custom"). The engine owns the Preset Profile catalog,
+ * and `load()` fills this module's copy from it; there is no hardcoded fallback copy.
  */
 export function createPresetMenu({ invoke, doc }) {
   // Keyed by profile id; empty until `load()` has an answer.

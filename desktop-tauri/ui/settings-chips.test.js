@@ -165,3 +165,12 @@ test("defaults that arrive while a job is active leave its chips alone, and idle
   assert.equal(page.workerChip.innerText, "⚡ Standby (6 Workers)");
   assert.equal(page.ioChip.innerText, "🔀 Idle (4 IO Jobs)");
 });
+
+test("loadDefaults skips an auto input the page does not have", async () => {
+  const page = chipsHarness(DEFAULTS);
+  page.inputs.delete("extract-io-jobs");
+  await page.chips.loadDefaults();
+  assert.equal(page.inputs.get("remux-io-jobs").placeholder, "auto (4)");
+  assert.equal(page.inputs.get("extract-workers").placeholder, "auto (6)");
+  assert.equal(page.workerChip.innerText, "⚡ Standby (6 Workers)");
+});

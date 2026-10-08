@@ -34,7 +34,9 @@ function themeHarness({ published = {}, osDark = false, storageBlocked = false }
   const storage = {
     // theme.js must not read the choice back: `theme-init.js` is its only reader.
     getItem: key => { reads.push(key); return "dark"; },
-    setItem: (key, value) => {
+    // A method, not an arrow: like a real Storage it refuses a call made without it as receiver.
+    setItem(key, value) {
+      if (this !== storage) throw new TypeError("Illegal invocation");
       if (storageBlocked) throw new Error("storage blocked");
       saved.push([key, value]);
     },
