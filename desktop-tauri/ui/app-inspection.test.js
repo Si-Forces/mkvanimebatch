@@ -13,6 +13,7 @@ test("app forwards preflight options to Tauri while browse uses defaults", async
   globalThis.window = {
     __TAURI__: { core: { invoke: async (command, args) => {
       calls.push([command, args]);
+      if (command === "canonical_directory") return args.path;
       return { version: 2, items: [], subtitle_candidates: {} };
     } } },
   };
@@ -22,11 +23,12 @@ test("app forwards preflight options to Tauri while browse uses defaults", async
   });
   const { scanInputDirectory } = await import("./app.js");
   assert.equal(await scanInputDirectory("/release", "remux"), true);
-  assert.deepEqual(calls[0], ["inspect_directory", { path: "/release", options: undefined }]);
+  assert.deepEqual(calls[0], ["canonical_directory", { path: "/release" }]);
+  assert.deepEqual(calls[1], ["inspect_directory", { path: "/release", options: undefined }]);
 
   const options = { noCache: true };
   assert.equal(await scanInputDirectory("/release", "remux", { force: true, options }), true);
-  assert.deepEqual(calls[1], ["inspect_directory", { path: "/release", options }]);
+  assert.deepEqual(calls[3], ["inspect_directory", { path: "/release", options }]);
 });
 
 /** The Effective Settings the harness answers `get_default_settings` and `resolve_batch_request` with. */
@@ -111,8 +113,10 @@ function bootstrapHarness(t, commandResults = {}) {
         if (command in commandResults) {
           const result = commandResults[command];
           if (result instanceof Error) throw result;
-          return result;
+          return typeof result === "function" ? result(args) : result;
         }
+        // A typed path resolves to itself unless a test says otherwise.
+        if (command === "canonical_directory") return args.path;
         if (command === "get_default_settings" || command === "resolve_batch_request") return DEFAULT_SETTINGS;
         if (command === "get_job_snapshot") {
           snapshotRequested();
@@ -239,6 +243,127 @@ test("no snapshot preserves pre-run selection and cleans up bootstrap listeners"
   assert.equal(ipc.handlers.has("job-event"), false);
   assert.equal(ipc.handlers.has("job-done"), false);
   assert.equal(ipc.calls.filter(([command]) => command === "inspect_directory").length, 1);
+});
+
+/** The harness's `canonical_directory` for a folder whose `/release/` and `/release/.` spellings are one. */
+const trimDotSpellings = ({ path }) => path.replace(/\/\.?$/, "");
+
+test("two spellings that resolve to one folder reuse the inspection and keep the cards", async t => {
+  const ipc = bootstrapHarness(t, { canonical_directory: trimDotSpellings });
+  const app = await ipc.mount("one-folder-two-spellings");
+  ipc.resolveSnapshot(null);
+  await ipc.flush();
+  const inspected = () => ipc.calls.filter(([command]) => command === "inspect_directory");
+  const resolved = () => ipc.calls.filter(([command]) => command === "canonical_directory");
+
+  assert.equal(await app.scanInputDirectory(" /release ", "remux"), true);
+  assert.equal(await app.scanInputDirectory("/release/", "remux"), true);
+  assert.equal(await app.scanInputDirectory("/release/.", "remux"), true);
+
+  // The typed path is trimmed, then resolved; the inspection runs once, on the identity.
+  assert.deepEqual(resolved().map(([, args]) => args), [{ path: "/release" }, { path: "/release/" }, { path: "/release/." }]);
+  assert.deepEqual(inspected(), [["inspect_directory", { path: "/release", options: undefined }]]);
+
+  // A forced rescan through another spelling keeps the shown cards instead of the scanning placeholder.
+  const list = ipc.elements.get("remux-episode-list");
+  const writes = [];
+  Object.defineProperty(list, "innerHTML", { configurable: true, get: () => "", set: markup => writes.push(markup) });
+  assert.equal(await app.scanInputDirectory("/release/.", "remux", { force: true }), true);
+  assert.equal(inspected().length, 2);
+  assert.equal(writes.some(markup => markup.includes("Scanning Directory")), false);
+
+  // Another folder is a new scan: the list shows the placeholder.
+  assert.equal(await app.scanInputDirectory("/other", "remux", { force: true }), true);
+  assert.equal(writes.some(markup => markup.includes("Scanning Directory")), true);
+
+  // An empty path resets the queue without asking the bridge.
+  const resolvedBefore = resolved().length;
+  assert.equal(await app.scanInputDirectory("   ", "remux"), false);
+  assert.equal(resolved().length, resolvedBefore);
+});
+
+test("concurrent scans of two spellings inspect the identity once, and the newer request is the one accepted", async t => {
+  const ipc = bootstrapHarness(t, { canonical_directory: trimDotSpellings });
+  const app = await ipc.mount("concurrent-spellings");
+  ipc.resolveSnapshot(null);
+  await ipc.flush();
+
+  const results = await Promise.all([app.scanInputDirectory("/release/", "remux"), app.scanInputDirectory("/release/.", "remux")]);
+
+  assert.deepEqual(results, [false, true]);
+  const inspected = ipc.calls.filter(([command]) => command === "inspect_directory");
+  assert.deepEqual(inspected, [["inspect_directory", { path: "/release", options: undefined }]]);
+  assert.equal(ipc.elements.get("remux-queue-count").textContent, "3 / 3 Selected");
+});
+
+/** A harness whose `canonical_directory` answers `/slow` only once `release()` is called. */
+function slowCanonicalHarness(t) {
+  let release;
+  const slow = new Promise(resolve => { release = () => resolve("/slow"); });
+  const ipc = bootstrapHarness(t, { canonical_directory: ({ path }) => (path === "/slow" ? slow : path) });
+  const inspected = () => ipc.calls.filter(([command]) => command === "inspect_directory").map(([, args]) => args.path);
+  return { ipc, release, inspected };
+}
+
+test("a scan whose canonicalization answers late does not overtake a newer request", async t => {
+  const { ipc, release, inspected } = slowCanonicalHarness(t);
+  const app = await ipc.mount("late-canonicalization");
+  ipc.resolveSnapshot(null);
+  await ipc.flush();
+
+  const overtaken = app.scanInputDirectory("/slow", "remux");
+  assert.equal(await app.scanInputDirectory("/fast", "remux"), true);
+  release();
+
+  assert.equal(await overtaken, false);
+  assert.deepEqual(inspected(), ["/fast"]);
+});
+
+test("clearing the input cancels a scan still waiting for its canonicalization", async t => {
+  const { ipc, release, inspected } = slowCanonicalHarness(t);
+  const app = await ipc.mount("cleared-while-canonicalizing");
+  ipc.resolveSnapshot(null);
+  await ipc.flush();
+
+  const pending = app.scanInputDirectory("/slow", "remux");
+  assert.equal(await app.scanInputDirectory("   ", "remux"), false);
+  release();
+
+  assert.equal(await pending, false);
+  assert.deepEqual(inspected(), []);
+});
+
+test("a pending scan of one view is not cancelled by a scan of the other", async t => {
+  const { ipc, release, inspected } = slowCanonicalHarness(t);
+  const app = await ipc.mount("one-queue-per-view");
+  ipc.resolveSnapshot(null);
+  await ipc.flush();
+
+  const remux = app.scanInputDirectory("/slow", "remux");
+  assert.equal(await app.scanInputDirectory("/fast", "extract"), true);
+  release();
+
+  assert.equal(await remux, true);
+  assert.deepEqual(inspected().sort(), ["/fast", "/slow"]);
+});
+
+test("a path the bridge cannot resolve is inspected as typed and fails as before", async t => {
+  const failure = new Error("Invalid directory path: No such file or directory (os error 2)");
+  const ipc = bootstrapHarness(t, { canonical_directory: failure, inspect_directory: failure });
+  const logged = t.mock.method(console, "log", () => {});
+  const app = await ipc.mount("unresolvable-path");
+  ipc.resolveSnapshot(null);
+  await ipc.flush();
+
+  assert.equal(await app.scanInputDirectory("/gone/", "remux"), false);
+
+  assert.deepEqual(
+    ipc.calls.filter(([command]) => command === "inspect_directory"),
+    [["inspect_directory", { path: "/gone/", options: undefined }]],
+  );
+  assert.deepEqual(logged.mock.calls.at(-1).arguments, ["[inspect_directory] failed:", failure]);
+  assert.match(ipc.elements.get("remux-episode-list").innerHTML, /Scan failed/);
+  assert.equal(ipc.elements.get("remux-queue-count").textContent, "Scan failed");
 });
 
 test("get_default_settings puts auto (N) on the workers and Disk I/O inputs and the defaults on the idle chips", async t => {

@@ -151,7 +151,7 @@ mkvanimebatch/
     │   └── src/
     │       ├── lib.rs               # Tauri builder, command registration, exit handling, Linux environment defaults
     │       ├── main.rs              # Binary entry point
-    │       ├── commands.rs          # inspect_directory, resolve_batch_request, run_job (`launch`), clear_cache, pickers, presets, default settings, get_job_snapshot
+    │       ├── commands.rs          # inspect_directory, canonical_directory, resolve_batch_request, run_job (`launch`), clear_cache, pickers, presets, default settings, get_job_snapshot
     │       ├── job.rs               # JobState (Job Slot, supervisor, two-phase stop, start gate), JobSink seam and its Tauri adapter
     │       ├── snapshot.rs          # Job Snapshot types and SnapshotStore: event reduction and Item Settlement
     │       ├── process.rs           # ScanState, job and scan teardown, shutdown, close_window
@@ -167,7 +167,7 @@ mkvanimebatch/
         ├── queue-view.js            # QueueTracker: episode card rendering, selection, reordering, heartbeat
         ├── job-controller.js        # BatchRequest from the form, engine resolve check, preflight, run/stop, job event routing
         ├── job-coordinator.js       # Job lifecycle state machine (idle, restoring, starting, running, stopping): one active job across the Remux and Extract views, and the startup snapshot restore
-        ├── inspection-coordinator.js# Shares in-flight inspect_directory calls per (path, noCache)
+        ├── inspection-coordinator.js# Shares in-flight inspect_directory calls per (Directory Identity, noCache)
         ├── telemetry.js             # Polls get_system_telemetry (1 s during a job, 30 s idle, paused while hidden)
         ├── stepper.js               # nextStepValue: the number-input stepper's next value, starting an empty field from its data-auto-value
         ├── log-classify.js          # Maps log lines to console classes (line-err, line-skip, line-ok, line-warn, line-info, line-done); caps the pending log queue
@@ -470,6 +470,7 @@ flowchart LR
     UIApp --> UIJob
     UIApp --> UICoord
     UICoord -->|get_job_snapshot| Cmds
+    UIApp -->|canonical_directory| Cmds
     UIApp -->|inspect_directory| Cmds
     UIJob -->|inspect_directory preflight| Cmds
     UIJob -->|run_job BatchRequest| Cmds
@@ -494,7 +495,7 @@ flowchart LR
 
 ### 5.1 In-Process Engine Bridge (`commands.rs`, `job.rs`, `snapshot.rs`, `process.rs`)
 
-The engine runs inside the desktop process (ADR-0007, ADR-0008). `commands.rs` keeps the Tauri commands thin. `job.rs` is the active-job module: `JobState` owns the Job Slot, the supervisor, the two-phase stop of the job, and the gate that refuses starts once shutdown begins. `snapshot.rs` owns the Job Snapshot. `process.rs` owns the directory-scan registry and the teardown that stops the job and the scan together. The supervisor reports through a `JobSink` seam (`event`, `logs`, `done`): the `AppHandle` adapter emits the three events below, and a test records them, so a job runs without a Tauri app. Registered Tauri commands: `inspect_directory`, `resolve_batch_request`, `run_job`, `stop_job`, `clear_cache`, `pick_directory`, `pick_subtitle_file`, `get_preset_profiles`, `get_default_settings`, `get_job_snapshot`, `get_system_telemetry`, `close_window`, and the window controls `minimize_window`, `toggle_maximize`, `is_maximized`, `start_drag`, `start_resize`, `set_window_theme`. Events emitted to the webview: `job-event` (a `JobEvent` plus `mode` and `job_id`), `job-log` (a batch of log lines), `job-done` (`{mode, job_id, code}`, code `0` completed, `-1` cancelled, `1` otherwise), and `cleanup-error`.
+The engine runs inside the desktop process (ADR-0007, ADR-0008). `commands.rs` keeps the Tauri commands thin. `job.rs` is the active-job module: `JobState` owns the Job Slot, the supervisor, the two-phase stop of the job, and the gate that refuses starts once shutdown begins. `snapshot.rs` owns the Job Snapshot. `process.rs` owns the directory-scan registry and the teardown that stops the job and the scan together. The supervisor reports through a `JobSink` seam (`event`, `logs`, `done`): the `AppHandle` adapter emits the three events below, and a test records them, so a job runs without a Tauri app. Registered Tauri commands: `inspect_directory`, `canonical_directory`, `resolve_batch_request`, `run_job`, `stop_job`, `clear_cache`, `pick_directory`, `pick_subtitle_file`, `get_preset_profiles`, `get_default_settings`, `get_job_snapshot`, `get_system_telemetry`, `close_window`, and the window controls `minimize_window`, `toggle_maximize`, `is_maximized`, `start_drag`, `start_resize`, `set_window_theme`. Events emitted to the webview: `job-event` (a `JobEvent` plus `mode` and `job_id`), `job-log` (a batch of log lines), `job-done` (`{mode, job_id, code}`, code `0` completed, `-1` cancelled, `1` otherwise), and `cleanup-error`.
 
 1. **In-memory channels**: the engine sends `JobEvent`s and log lines over Tokio mpsc channels. The supervisor forwards log lines to the sink in batches of up to 25 lines or every 25 ms.
 2. **Job slot & panic isolation**:
@@ -511,10 +512,11 @@ The engine runs inside the desktop process (ADR-0007, ADR-0008). `commands.rs` k
    - The supervisor reduces every forwarded `JobEvent`, the settlement `ItemComplete`s included, into an in-memory `JobSnapshot`, held by `SnapshotStore` (status, input directory, item order, per-item status, progress, reason, error, and Item Duration). `BatchComplete` writes no item outcome: no item is open by then, and a success terminal that still finds one open (or an error item) leaves the snapshot `error`.
    - The snapshot also holds the job's Effective Settings (`effective_settings`). `JobState::start` sets them once, from the config `run_job` resolved, when it begins the snapshot; no event changes them.
    - On startup the webview's Job Coordinator calls `get_job_snapshot()` (§5.3, item 9) and rebuilds the queue from it, so a reload keeps the running or finished batch, its outcomes, its durations, and, for a running job, the settings its worker chips show. Starting a new inspection clears the snapshot unless a job is active.
-5. **Canonical directory identity**:
-   - Every directory identity crossing the bridge into the Queue Tracker is the **display form** of the canonical path: a Windows verbatim (`\\?\`) prefix is stripped and `\\?\UNC\` is rewritten to `\\` (`job.rs`, `display_canonical_path`).
-   - This applies to the Inspection Manifest's `canonical_dir`, the Job Snapshot's `input_dir`, and `JobEvent::BatchStart.input_dir`. The engine still receives and uses the real `PathBuf` for filesystem work; only the projected form is normalized, in the bridge.
-   - The three must agree because Queue Tracker directory identity is a string comparison. A mismatch, for example a raw verbatim `BatchStart.input_dir` against a stripped `canonical_dir`, silently drops Queue Selection and Active Batch ordering on the next same-directory rescan, because a release directory whose name ends in `.` or a space normalizes differently in each form.
+5. **Directory Identity** (the canonical form of a directory):
+   - Every Directory Identity crossing the bridge into the Queue Tracker is the **display form** of the canonical path: a Windows verbatim (`\\?\`) prefix is stripped and `\\?\UNC\` is rewritten to `\\` (`job.rs`, `display_canonical_path`).
+   - This applies to the `canonical_directory` command's result, the Inspection Manifest's `canonical_dir`, the Job Snapshot's `input_dir`, and `JobEvent::BatchStart.input_dir`. The engine still receives and uses the real `PathBuf` for filesystem work; only the projected form is normalized, in the bridge. `canonical_directory` and `inspect_directory` share one helper (`canonicalize_directory`), so they cannot disagree.
+   - `scanInputDirectory` resolves the typed path through `canonical_directory` before it compares or inspects anything; a path the command rejects stays as typed, and `inspect_directory` reports the error. The UI never normalizes a path itself: the Queue Tracker compares identities with `===` (`isSameDirectory`).
+   - The four must agree because that comparison is byte for byte. A mismatch, for example a raw verbatim `BatchStart.input_dir` against a stripped `canonical_dir`, silently drops Queue Selection and Active Batch ordering on the next same-directory rescan. The UI once normalized paths itself, and a release directory whose name ends in `.` or a space then normalized differently in each form.
 6. **Linux desktop environment defaults (`lib.rs`, ADR-0015)**:
    - Defaults `GDK_BACKEND=x11,wayland` to avoid `EGL_BAD_PARAMETER` aborts under native Wayland.
    - Inside an AppImage (`APPIMAGE` or `APPDIR` set), preloads the host `libwayland-client.so.0` via `LD_PRELOAD` to avoid ABI conflicts between the bundled library and host Mesa drivers, and disables WebKitGTK DMABUF rendering (`WEBKIT_DISABLE_DMABUF_RENDERER=1`) to avoid the Mesa EGL segfault on exit (`SkiaGLContext` teardown).
@@ -594,14 +596,16 @@ sequenceDiagram
     autonumber
     actor User
     participant UI as Desktop UI (app.js)
-    participant Cmd as commands::inspect_directory
+    participant Cmd as commands::inspect_directory / canonical_directory
     participant Scan as ScanState
     participant Core as manifest::generate_inspection_manifest
     participant EBML as ebml::probe_ebml_native
     participant Cache as PersistentInspectCache
 
     User->>UI: Selects Release Directory
-    UI->>Cmd: inspect_directory(path, {noCache})
+    UI->>Cmd: canonical_directory(path)
+    Cmd-->>UI: Directory Identity
+    UI->>Cmd: inspect_directory(identity, {noCache})
     Cmd->>Scan: Lock start_lock, cancel any previous scan, register ActiveScan
     Cmd->>Cmd: Clear JobSnapshot (unless a job is active)
     Cmd->>Cache: Session cache, loaded on first use (none with noCache)
@@ -645,7 +649,7 @@ sequenceDiagram
 
     User->>UI: Clicks Run
     UI->>Cmd: resolve_batch_request(BatchRequest) (fail fast; the chips show the Effective Settings)
-    UI->>Cmd: inspect_directory(path, {noCache}) (forced preflight)
+    UI->>Cmd: canonical_directory(path), then inspect_directory(identity, {noCache}) (forced preflight)
     UI->>Cmd: run_job(BatchRequest)
     Cmd->>Cmd: BatchRequest::resolve() (fail fast: validation, preset layering, defaults)
     Cmd->>Proc: JobState::start: reserve the Job Slot, begin the Job Snapshot (with the Effective Settings)

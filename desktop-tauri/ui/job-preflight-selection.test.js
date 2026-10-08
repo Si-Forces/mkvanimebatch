@@ -384,11 +384,13 @@ test("Start from empty queue with unscanned first directory discovers and runs a
   assert.deepEqual(requests[0].selected_items, ["01.mkv", "02.mkv"]);
 });
 
-test("Start preserves selection across canonical directory representations with trailing slashes", async t => {
+test("Start preserves selection whatever spelling the input field holds", async t => {
   installDom(t, new Map([["remux-input-dir", new FakeElement("/anime/show/")]]));
 
   const requests = [];
-  // Scanned without the trailing slash; the user kept only 02 selected.
+  // The tracker holds the scanned Directory Identity; Start compares it with itself after the
+  // forced rescan and never with the field (app-inspection.test.js covers the typed spelling).
+  // The user kept only 02 selected.
   const tracker = scannedTracker("/anime/show", ["01.mkv", "02.mkv"], ["02.mkv"], {
     assignments: new Map([["02.mkv", subtitle("02.mkv", "/subs/02.ass")]]),
   });

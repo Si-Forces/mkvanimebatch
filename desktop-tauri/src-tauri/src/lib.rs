@@ -74,6 +74,7 @@ pub fn run() {
             commands::pick_directory,
             commands::pick_subtitle_file,
             commands::inspect_directory,
+            commands::canonical_directory,
             telemetry::get_system_telemetry,
             process::close_window,
             window::minimize_window,

@@ -76,9 +76,24 @@ impl InspectCacheState {
     }
 }
 
+/// Canonicalizes `path` and pairs the result with its Directory Identity: the display form
+/// of the canonical path, which is the only spelling the UI compares directories by.
+fn canonicalize_directory(path: &str) -> Result<(PathBuf, String), String> {
+    let dir = std::fs::canonicalize(path).map_err(|e| format!("Invalid directory path: {e}"))?;
+    let identity = display_canonical_path(&dir.to_string_lossy());
+    Ok((dir, identity))
+}
+
+/// The Directory Identity of `path`: what `inspect_directory` reports as the manifest's
+/// `canonical_dir`. The UI resolves a typed path through it before comparing directories.
 #[tauri::command]
-pub async fn inspect_directory(
-    app: AppHandle,
+pub async fn canonical_directory(path: String) -> Result<String, String> {
+    canonicalize_directory(&path).map(|(_, identity)| identity)
+}
+
+#[tauri::command]
+pub async fn inspect_directory<R: tauri::Runtime>(
+    app: AppHandle<R>,
     state: State<'_, ScanState>,
     cache_state: State<'_, InspectCacheState>,
     path: String,
@@ -86,7 +101,7 @@ pub async fn inspect_directory(
 ) -> Result<InspectionManifest, String> {
     let start_lock = state.start_lock.lock().map_err(|e| e.to_string())?;
     state.ensure_accepting_starts()?;
-    let dir = std::fs::canonicalize(&path).map_err(|e| format!("Invalid directory path: {e}"))?;
+    let (dir, identity) = canonicalize_directory(&path)?;
     if !dir.is_dir() {
         return Err("Directory does not exist or is not a directory".into());
     }
@@ -113,10 +128,9 @@ pub async fn inspect_directory(
     };
     let mut manifest =
         mkv_core::manifest::generate_inspection_manifest(&dir, cache, Some(&cancel_token)).await?;
-    manifest.extra.insert(
-        "canonical_dir".to_string(),
-        display_canonical_path(&dir.to_string_lossy()).into(),
-    );
+    manifest
+        .extra
+        .insert("canonical_dir".to_string(), identity.into());
     Ok(manifest)
 }
 
@@ -350,6 +364,79 @@ mod tests {
         let missing = tmp.path().join("missing");
         let error = resolve_batch_request(dry_run_request(&missing)).unwrap_err();
         assert!(error.contains("Input directory does not exist"), "{error}");
+    }
+
+    #[test]
+    fn test_canonical_directory_is_the_display_form_of_the_canonical_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A dotted spelling of the directory.
+        let spelled = tmp.path().join(".");
+        let expected =
+            display_canonical_path(&std::fs::canonicalize(tmp.path()).unwrap().to_string_lossy());
+
+        let identity = tauri::async_runtime::block_on(canonical_directory(
+            spelled.to_string_lossy().into_owned(),
+        ))
+        .unwrap();
+
+        assert_eq!(identity, expected);
+    }
+
+    #[test]
+    fn test_inspect_directory_reports_the_identity_canonical_directory_returns() {
+        let app = tauri::test::mock_app();
+        app.manage(JobState::default());
+        app.manage(ScanState::default());
+        app.manage(InspectCacheState::default());
+        let tmp = tempfile::tempdir().unwrap();
+        let spelled = tmp.path().join(".").to_string_lossy().into_owned();
+
+        let manifest = tauri::async_runtime::block_on(inspect_directory(
+            app.handle().clone(),
+            app.state(),
+            app.state(),
+            spelled.clone(),
+            Some(InspectOptions {
+                no_cache: Some(true),
+            }),
+        ))
+        .unwrap();
+        let identity = tauri::async_runtime::block_on(canonical_directory(spelled)).unwrap();
+
+        assert_eq!(
+            manifest.extra["canonical_dir"].as_str(),
+            Some(identity.as_str())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_canonical_directory_resolves_a_symlink_to_its_target() {
+        let target = tempfile::tempdir().unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let link = parent.path().join("link");
+        std::os::unix::fs::symlink(target.path(), &link).unwrap();
+
+        let identity = tauri::async_runtime::block_on(canonical_directory(
+            link.to_string_lossy().into_owned(),
+        ))
+        .unwrap();
+
+        let expected = std::fs::canonicalize(target.path()).unwrap();
+        assert_eq!(identity, expected.to_string_lossy());
+    }
+
+    #[test]
+    fn test_canonical_directory_rejects_a_missing_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("missing");
+
+        let error = tauri::async_runtime::block_on(canonical_directory(
+            missing.to_string_lossy().into_owned(),
+        ))
+        .unwrap_err();
+
+        assert!(error.starts_with("Invalid directory path: "), "{error}");
     }
 
     #[test]

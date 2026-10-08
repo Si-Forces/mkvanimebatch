@@ -103,96 +103,16 @@ export function formatElapsedDuration(seconds) {
 }
 
 /**
- * Normalizes a directory path string for canonical identity comparison.
- * Trims surrounding whitespace, resolves dot segments and redundant separators,
- * and strips trailing slashes (except root). Windows paths also normalize case
- * and trailing dots/spaces; verbatim `\\?\` paths keep them significant.
- *
- * @param {string|null|undefined} path
- * @returns {string}
- */
-export function normalizeDirectoryPath(path) {
-  if (typeof path !== "string") return "";
-  const leadingTrimmed = path.trimStart();
-  const hadExtendedPrefix =
-    leadingTrimmed.startsWith("\\\\?\\") ||
-    leadingTrimmed.startsWith("\\\\.\\") ||
-    leadingTrimmed.startsWith("//?/") ||
-    leadingTrimmed.startsWith("//./");
-  let clean = hadExtendedPrefix ? leadingTrimmed : path.trim();
-  if (!clean) return "";
-
-  // A backslash is a legal POSIX filename byte, so translating it unconditionally
-  // collapses distinct directories. Reuse the OS class from os-detect.js; only
-  // normalize separators on Windows or Windows-shaped paths.
-  const windowsHost =
-    (typeof document !== "undefined" &&
-      document.documentElement?.classList?.contains("is-windows")) ||
-    (typeof process !== "undefined" && process.platform === "win32");
-  const windowsPath =
-    /^\\\\/.test(clean) || /^[a-zA-Z]:/.test(clean) || /^\/\/[?.][\\/]/.test(clean);
-  if (windowsHost || windowsPath) {
-    clean = clean.replace(/\\/g, "/");
-  }
-
-  // Strip the Windows verbatim/device prefix (`//?/` or `//./`) if present
-  clean = clean.replace(/^\/\/[?.]\//, "");
-  if (hadExtendedPrefix) clean = clean.replace(/^UNC\//i, "//");
-
-  // Normalize Windows drive letter (e.g. C: -> c:)
-  const hasDrive = /^[a-zA-Z]:/.test(clean);
-  let drivePrefix = "";
-  if (hasDrive) {
-    drivePrefix = clean.slice(0, 2).toLowerCase();
-    clean = clean.slice(2);
-  }
-
-  const isUnc = !hasDrive && /^\/\/[^/]/.test(clean);
-  const isAbsolute = clean.startsWith("/");
-  const trimWindowsSegments = (windowsHost || windowsPath || isUnc || hasDrive) && !hadExtendedPrefix;
-  const segments = clean.split("/").filter(s => s.length > 0);
-  const resolved = [];
-
-  for (const rawSegment of segments) {
-    const seg = trimWindowsSegments && rawSegment !== ".."
-      ? rawSegment.replace(/[ .]+$/g, "")
-      : rawSegment;
-    if (!seg || seg === ".") continue;
-    if (seg === "..") {
-      if (resolved.length > 0 && resolved[resolved.length - 1] !== "..") {
-        resolved.pop();
-      } else if (!isAbsolute && !hasDrive) {
-        resolved.push("..");
-      }
-    } else {
-      resolved.push(seg);
-    }
-  }
-
-  let result = drivePrefix + (isUnc ? "//" : isAbsolute ? "/" : "") + resolved.join("/");
-  if (!result && isAbsolute) result = "/";
-  if (hasDrive && !resolved.length) result = drivePrefix + "/";
-
-  // Windows filesystems are case-insensitive.
-  if (windowsHost || isUnc || hasDrive) {
-    result = result.toLowerCase();
-  }
-
-  return result || ".";
-}
-
-/**
- * Returns true if both directory paths represent the same canonical directory.
- * An empty, null, or missing directory identity always returns false.
+ * Returns true if both Directory Identities name the same directory. The Engine Bridge
+ * produces every identity in display-canonical form, so the UI compares them byte for byte
+ * and never normalizes a path itself. An empty, null, or missing identity is never the same.
  *
  * @param {string|null|undefined} dirA
  * @param {string|null|undefined} dirB
  * @returns {boolean}
  */
 export function isSameDirectory(dirA, dirB) {
-  if (!dirA || !dirB) return false;
-  const normA = normalizeDirectoryPath(dirA);
-  return normA !== "" && normA === normalizeDirectoryPath(dirB);
+  return Boolean(dirA) && dirA === dirB;
 }
 
 function emptyQueueState() {
