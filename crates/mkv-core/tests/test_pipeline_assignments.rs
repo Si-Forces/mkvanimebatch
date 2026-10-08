@@ -3,10 +3,12 @@ mod common;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
 use tempfile::tempdir;
 
 use common::{run_batch, seeded_cache, video_metadata};
+use mkv_core::manifest::generate_inspection_manifest;
 use mkv_core::pipeline::{CancellationToken, ItemOutcome, JobEvent, PipelineConfig, PipelineMode};
 use mkv_core::request::{AssignmentKind, BatchRequest, TrackAssignment};
 
@@ -424,4 +426,53 @@ async fn test_valid_assignments_still_resolve_within_the_active_selection() {
     let outcomes = item_outcomes(&events);
     assert_eq!(outcomes.get("raw_capture.mkv"), Some(&ItemOutcome::Planned));
     assert_eq!(outcomes.get("Show - 01.mkv"), Some(&ItemOutcome::Planned));
+}
+
+// Surrounding whitespace is part of a name (#61): a top-level folder that starts with a space
+// must list, select and assign under the ID it has on disk.
+#[tokio::test]
+async fn test_item_under_a_leading_space_folder_is_listed_selected_and_assigned() {
+    let input = tempdir().unwrap();
+    let output = tempdir().unwrap();
+    let id = " Season 1/01.mkv";
+    let video = input.path().join(id);
+    fs::create_dir_all(video.parent().unwrap()).unwrap();
+    fs::write(&video, b"video").unwrap();
+    fs::write(input.path().join("manual.ass"), b"manual subtitle").unwrap();
+    let cache = seeded_cache(input.path(), &[&video], &video_metadata("A_FLAC"));
+
+    let manifest = generate_inspection_manifest(input.path(), Some(Arc::clone(&cache)), None)
+        .await
+        .unwrap();
+    let ids: Vec<_> = manifest.items.iter().map(|item| item.id.as_str()).collect();
+    assert_eq!(ids, [id]);
+
+    let request = BatchRequest {
+        input_dir: input.path().to_path_buf(),
+        out_dir: Some(output.path().to_path_buf()),
+        dry_run: Some(true),
+        assignments: Some(vec![manual_subtitle_assignment(id, "manual.ass")]),
+        selected_items: Some(vec![id.into()]),
+        ..Default::default()
+    };
+    let (summary, events) = run_batch(
+        PipelineConfig {
+            cache: Some(cache),
+            ..request.resolve().unwrap()
+        },
+        CancellationToken::new(),
+    )
+    .await;
+    let summary = summary.unwrap();
+
+    assert_eq!(
+        (
+            summary.total,
+            summary.completed,
+            summary.skipped,
+            summary.errors
+        ),
+        (1, 1, 0, 0)
+    );
+    assert_eq!(item_outcomes(&events).get(id), Some(&ItemOutcome::Planned));
 }

@@ -558,6 +558,50 @@ async fn test_batch_rejects_colliding_canonical_ids_before_batch_start() {
     }
 }
 
+// Leading whitespace is part of a name (#61), so " a.mkv" and "a.mkv" are two items rather than
+// one shared ID. Unlike the backslash collision above, this is representable on every platform.
+#[tokio::test]
+async fn test_files_differing_by_leading_space_are_two_items() {
+    let tmp = tempdir().unwrap();
+    fs::write(tmp.path().join(" a.mkv"), b"spaced video").unwrap();
+    fs::write(tmp.path().join("a.mkv"), b"plain video").unwrap();
+
+    for (selected_items, expected_ids) in [
+        (None, vec![" a.mkv", "a.mkv"]),
+        (Some(vec![" a.mkv".to_owned()]), vec![" a.mkv"]),
+    ] {
+        let (summary, events) = run_batch(
+            PipelineConfig {
+                dry_run: true,
+                no_cache: true,
+                selected_items,
+                ..config(PipelineMode::Extract, tmp.path())
+            },
+            CancellationToken::new(),
+        )
+        .await;
+        let summary = summary.unwrap();
+        assert_eq!(
+            (summary.total, summary.completed, summary.errors),
+            (expected_ids.len(), expected_ids.len(), 0)
+        );
+
+        let mut planned: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                JobEvent::ItemComplete {
+                    id,
+                    status: ItemOutcome::Planned,
+                    ..
+                } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
+        planned.sort_unstable();
+        assert_eq!(planned, expected_ids);
+    }
+}
+
 #[tokio::test]
 async fn test_pipeline_rejects_every_unmatched_selection_before_batch_start() {
     let input = tempdir().unwrap();
