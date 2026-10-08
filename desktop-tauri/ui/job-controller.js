@@ -256,11 +256,6 @@ export class JobController {
       options: { noCache: batchRequest.no_cache },
     });
     if (generation !== this.startGeneration) return;
-    if (this.runtime.coordinator.phase !== "starting") {
-      this.runtime.appendLog(this.logEl, "[INFO] Start aborted by stop request.");
-      this.abortStart(true);
-      return;
-    }
     if (!inspected) {
       this.runtime.appendLog(this.logEl, "[ERROR] Input inspection failed; job was not started.");
       this.abortStart();
@@ -334,9 +329,8 @@ export class JobController {
       return;
     }
 
-    if (generation !== this.startGeneration || this.runtime.coordinator.isStopping) {
+    if (generation !== this.startGeneration) {
       unlisteners.forEach(unlisten => unlisten());
-      if (generation === this.startGeneration) this.abortStart(true);
       return;
     }
     [this.unlistenLog, this.unlistenEvent, this.unlistenDone] = unlisteners;
@@ -364,6 +358,9 @@ export class JobController {
   async stop() {
     if (!this.running) return;
     if (!this.runtime.coordinator.requestStop()) return;
+    // Bumped in the same tick as `requestStop`, so a `start()` still before `run_job` sees a stale
+    // generation at its next checkpoint and returns; this Stop ends it (`abortStart` below). Once
+    // `run_job` is launched, `job-done` ends the job.
     const generation = ++this.startGeneration;
     this.lifecycle = "stopping";
     this.renderStatus();

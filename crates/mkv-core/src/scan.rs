@@ -20,7 +20,7 @@ use crate::domain::{
     FONT_EXTENSIONS,
 };
 use crate::fonts::FONT_DIR_NAMES;
-use crate::media_tool::{self, MediaTool, SubprocessRunner};
+use crate::media_tool::{self, MediaTool, MediaToolRunner, SubprocessRunner};
 
 // ─── MKVMERGE METADATA TYPES ──────────────────────────────────────────────────
 
@@ -56,15 +56,29 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Probes MKV metadata by running `mkvmerge -J` as a Media Tool.
 pub async fn probe_video_mkvmerge(path: &Path) -> Result<MkvmergeMetadata, String> {
+    probe_video_mkvmerge_with(&SubprocessRunner, path).await
+}
+
+/// [`probe_video_mkvmerge`] through `runner`, so a test can script the `mkvmerge -J` run.
+///
+/// Exit code 1 (success with warnings) still parses the JSON; its warning text is logged.
+pub async fn probe_video_mkvmerge_with(
+    runner: &dyn MediaToolRunner,
+    path: &Path,
+) -> Result<MkvmergeMetadata, String> {
     let args = [OsStr::new("-J"), path.as_os_str()];
-    let output = media_tool::run(
-        &SubprocessRunner,
-        MediaTool::Mkvmerge,
-        &args,
-        PROBE_TIMEOUT,
-        None,
-    )
-    .await?;
+    let output = media_tool::run(runner, MediaTool::Mkvmerge, &args, PROBE_TIMEOUT, None).await?;
+    let warning = output
+        .warning
+        .as_deref()
+        .map(|warning| probe_warning_text(warning, &output.stdout))
+        .filter(|text| !text.is_empty());
+    if let Some(warning) = warning {
+        warn!(
+            "mkvmerge -J reported warnings for {}: {warning}",
+            path.display()
+        );
+    }
 
     let val: serde_json::Value = serde_json::from_slice(&output.stdout)
         .map_err(|e| format!("Failed to parse mkvmerge JSON: {e}"))?;
@@ -77,6 +91,18 @@ pub async fn probe_video_mkvmerge(path: &Path) -> Result<MkvmergeMetadata, Strin
     }
 
     serde_json::from_value(val).map_err(|e| format!("Failed to parse mkvmerge metadata: {e}"))
+}
+
+/// The warning text of an exit-1 `mkvmerge -J` run, without the JSON document.
+///
+/// `ToolOutput::warning` is the run's stderr followed by its stdout, and the stdout here is the
+/// whole probe document, which a log line must not repeat.
+fn probe_warning_text<'a>(warning: &'a str, stdout: &[u8]) -> &'a str {
+    let document = String::from_utf8_lossy(stdout);
+    warning
+        .strip_suffix(document.trim())
+        .unwrap_or(warning)
+        .trim_end()
 }
 
 /// Probes MKV container headers, tracks, attachments, and chapters with the native EBML
@@ -903,6 +929,17 @@ impl Default for PersistentInspectCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_probe_warning_text_leaves_out_the_json_document() {
+        let stdout = b"{\"tracks\": []}\n";
+        assert_eq!(
+            probe_warning_text("Warning: skipped\n{\"tracks\": []}", stdout),
+            "Warning: skipped"
+        );
+        // Nothing on stderr: the combined output is the document alone.
+        assert_eq!(probe_warning_text("{\"tracks\": []}", stdout), "");
+    }
 
     /// A `clear` landing while a save is in flight must neither let that save restore the
     /// cleared entries nor let it mark a put made after the clear as already saved.
