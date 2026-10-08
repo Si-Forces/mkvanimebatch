@@ -1,6 +1,6 @@
 # 0008. Typed Engine Bridge, Preset Profiles, and Track Assignment Domain
 
-> **Status**: Accepted (Extended by ADR-0011, ADR-0012; amended by ADR-0013; amended 2026-09-24, 2026-09-26, 2026-09-28, 2026-10-06 and 2026-10-07, implemented)
+> **Status**: Accepted (Extended by ADR-0011, ADR-0012; amended by ADR-0013; amended 2026-09-24, 2026-09-26, 2026-09-28, 2026-10-06, 2026-10-07 and 2026-10-08, implemented)
 > **Date**: 2026-05-15
 > **Context**: Media Engine Context & Desktop Application Bridge
 > **Amends**: ADR-0004, ADR-0007
@@ -113,3 +113,11 @@ This rule previously appeared in exactly one place in the repository — the Med
   - **(B) A map of settled outcomes on `BatchComplete`.** Rejected: it adds a second vocabulary for item outcomes to a terminal event and makes the snapshot and the webview each expand it into item states, which recreates the divergence between live and reload that this change removes.
   - **(C) Merge `job-done` into `BatchComplete`.** Rejected: it would reverse the 2026-09-28 rule that the UI receives one terminal event and then `job-done`, change the contract of every controller that listens to either, and still leave the item outcomes to be settled somewhere.
 - **Known gap.** The job-level `duration_sec` of the Job Snapshot is read from the terminal's `extra`, which no producer sets, so it stays `None`. This amendment does not change it.
+
+## Amendment — 2026-10-08 (Job Snapshot drops the job-level duration)
+
+- **Closes the 2026-10-07 known gap by removal.** `JobSnapshot.duration_sec` is removed, along with the reducer line that read it from the terminal `BatchComplete`'s `extra`. No producer set that key, so the field was always `null`, and no consumer read it: the webview restores the batch start from `start_time_ms` and per-item times from each item's `duration_sec` (ADR-0009), and shows no total job time.
+- **Wire effect.** The Job Snapshot returned by `get_job_snapshot` no longer has a top-level `duration_sec`. Item Duration on `ItemSnapshot` and on `ItemComplete` is unchanged.
+- **Options considered.**
+  - **(A) Remove the field (chosen).** It holds no value and nothing reads it.
+  - **(B) Have the bridge measure the job.** A monotonic clock from the start of the snapshot to the terminal. Rejected as a value with no consumer. If a total job time is ever shown, measure it then on a monotonic clock, as the bridge does for the Item Duration of a settled item.
