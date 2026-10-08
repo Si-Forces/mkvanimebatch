@@ -613,14 +613,12 @@ pub(crate) mod test_support {
 mod tests {
     use super::test_support::*;
     use super::*;
-    use crate::process::{cleanup_owned_processes_with_timeout, stop_job_inner, ScanState};
     use crate::snapshot::test_support::{
         batch_complete, batch_start, effective_settings, item_complete, item_progress, item_start,
     };
     use crate::snapshot::ItemStatus;
     use mkv_core::pipeline::CANCELLED_REASON;
     use serde_json::Value;
-    use std::time::Instant;
     use tauri::test::MockRuntime;
     use tauri::Listener;
 
@@ -983,44 +981,6 @@ mod tests {
         assert!(settled[0]["duration_sec"].is_number());
         assert!(settled[1].get("duration_sec").is_none());
         assert!(snapshot.items["ep2"].duration_sec.is_some());
-    }
-
-    #[test]
-    fn close_during_a_pending_stop_settles_the_job_once() {
-        let (job, sink) = observed();
-        let (event_tx, event_rx) = mkv_core::pipeline::create_event_channel(64);
-        let (_, log_rx) = mkv_core::pipeline::create_log_channel(8);
-        // Ignores its cancel token, so only an abort ends it.
-        let worker = async move {
-            event_tx.send(batch_start(&["ep1"])).await.unwrap();
-            std::future::pending::<Result<PipelineSummary, String>>().await
-        };
-        let token = CancellationToken::new();
-        let job_id = start_remux(&job, &sink, token.clone(), event_rx, log_rx, worker);
-
-        let start = Instant::now();
-        let stop = {
-            let job = job.clone();
-            thread::spawn(move || stop_job_inner(&job, &ScanState::default(), Some(job_id)))
-        };
-        tauri::async_runtime::block_on(async {
-            tokio::time::timeout(Duration::from_secs(2), token.cancelled())
-                .await
-                .expect("Stop never cancelled the job")
-        });
-        let close = cleanup_owned_processes_with_timeout(
-            &job,
-            &ScanState::default(),
-            Duration::from_millis(200),
-        );
-
-        assert_eq!(close, Ok(()));
-        assert_eq!(stop.join().unwrap(), Ok(()));
-        // Close's abort, not Stop's own deadline, ended the wait for both.
-        assert!(start.elapsed() < Duration::from_secs(2));
-        assert!(!job.is_active());
-        assert_eq!(terminal_for(&sink, job_id)["cancelled"], true);
-        assert_eq!(done_for(&sink, job_id)["code"], -1);
     }
 
     #[test]

@@ -319,7 +319,7 @@ mod tests {
 
     /// Stop and Close race on one Job Slot through `run_teardown`, the route the commands take.
     #[test]
-    fn test_close_during_a_pending_stop_settles_the_job_once_through_the_teardown() {
+    fn close_during_a_pending_stop_settles_the_job_once() {
         let app = tauri::test::mock_app();
         app.manage(JobState::default());
         app.manage(ScanState::default());
