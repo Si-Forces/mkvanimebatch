@@ -437,7 +437,9 @@ async fn forward_logs(sink: &impl JobSink, mut log_rx: LogReceiver, flush_every:
         }
     };
     let mut batch = Vec::with_capacity(LOG_BATCH_MAX_LINES);
-    let mut interval = tokio::time::interval(flush_every);
+    // `interval` would tick at once; the first flush is due one period from now.
+    let mut interval =
+        tokio::time::interval_at(tokio::time::Instant::now() + flush_every, flush_every);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
