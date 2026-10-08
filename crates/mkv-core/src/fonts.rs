@@ -45,12 +45,10 @@ pub struct FontInfo {
     pub count: usize,
 }
 
-/// Build attachment arguments for all fonts found in `fonts_dir`.
-pub fn scan_fonts(
-    fonts_dir: &Path,
-    font_cache: Option<&mut HashMap<PathBuf, FontInfo>>,
-) -> FontInfo {
-    if let Some(info) = font_cache.as_ref().and_then(|cache| cache.get(fonts_dir)) {
+/// Build attachment arguments for all fonts found in `fonts_dir`, serving and filling
+/// `font_cache`.
+pub fn scan_fonts(fonts_dir: &Path, font_cache: &mut HashMap<PathBuf, FontInfo>) -> FontInfo {
+    if let Some(info) = font_cache.get(fonts_dir) {
         return info.clone();
     }
 
@@ -91,39 +89,26 @@ pub fn scan_fonts(
     }
 
     let info = FontInfo { args, count };
-    if let Some(cache) = font_cache {
-        cache.insert(fonts_dir.to_path_buf(), info.clone());
-    }
+    font_cache.insert(fonts_dir.to_path_buf(), info.clone());
     info
 }
 
 /// Resolve which directory to use for fonts, in priority order:
-///   1. `override_dir` (e.g. from `--fonts-dir`)
-///   2. `input_dir/fonts`, when it is a directory
-///   3. the first (by path order) child directory of `input_dir` named `fonts`, `font`, or
+///   1. `input_dir/fonts`, when it is a directory
+///   2. the first (by path order) child directory of `input_dir` named `fonts`, `font`, or
 ///      `attachments`, ignoring ASCII case
-///   4. `input_dir/fonts`, even though it does not exist
+///   3. `input_dir/fonts`, even though it is not a directory
+///
+/// An explicit fonts directory (`--fonts-dir`) outranks all of these: the caller
+/// (`ReleasePreparer`) applies it before consulting this function.
 pub fn find_fonts_dir(
     input_dir: &Path,
-    override_dir: Option<&Path>,
-    fonts_dir_cache: Option<&mut HashMap<PathBuf, PathBuf>>,
+    fonts_dir_cache: &mut HashMap<PathBuf, PathBuf>,
 ) -> PathBuf {
-    if let Some(over) = override_dir {
-        return over.to_path_buf();
-    }
-
-    if let Some(cached) = fonts_dir_cache
-        .as_ref()
-        .and_then(|cache| cache.get(input_dir))
-    {
-        return cached.clone();
-    }
-
-    let resolved = locate_fonts_dir(input_dir);
-    if let Some(cache) = fonts_dir_cache {
-        cache.insert(input_dir.to_path_buf(), resolved.clone());
-    }
-    resolved
+    fonts_dir_cache
+        .entry(input_dir.to_path_buf())
+        .or_insert_with(|| locate_fonts_dir(input_dir))
+        .clone()
 }
 
 fn locate_fonts_dir(input_dir: &Path) -> PathBuf {

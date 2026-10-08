@@ -493,13 +493,44 @@ fn test_scan_fonts() {
     fs::write(fonts_dir.join("a_font.otf"), b"a").unwrap();
     fs::write(fonts_dir.join("readme.txt"), b"ignore").unwrap();
 
-    let info = scan_fonts(&fonts_dir, None);
+    let info = scan_fonts(&fonts_dir, &mut HashMap::new());
     assert_eq!(info.count, 2);
     // natural sort order: a_font.otf before b_font.ttf
     assert_eq!(info.args[0], "--attachment-mime-type");
     assert_eq!(info.args[1], "application/vnd.ms-opentype");
     assert_eq!(info.args[2], "--attach-file");
     assert!(info.args[3].ends_with("a_font.otf"));
+}
+
+/// A fonts directory that does not exist yet is not cached, so a later scan, once extraction
+/// has created it, finds the fonts.
+#[test]
+fn test_scan_fonts_does_not_cache_a_missing_dir() {
+    let tmp = tempdir().unwrap();
+    let fonts_dir = tmp.path().join("fonts");
+    let mut cache = HashMap::new();
+
+    assert_eq!(scan_fonts(&fonts_dir, &mut cache).count, 0);
+    assert!(!cache.contains_key(&fonts_dir));
+
+    fs::create_dir_all(&fonts_dir).unwrap();
+    fs::write(fonts_dir.join("a.ttf"), b"a").unwrap();
+    assert_eq!(scan_fonts(&fonts_dir, &mut cache).count, 1);
+}
+
+/// A scanned directory is served from the cache rather than re-read; only a fresh cache sees
+/// a font added afterwards.
+#[test]
+fn test_scan_fonts_serves_a_scanned_dir_from_the_cache() {
+    let (_tmp, fonts_dir) = existing_fonts_dir();
+    fs::write(fonts_dir.join("a.ttf"), b"a").unwrap();
+    let mut cache = HashMap::new();
+    let first = scan_fonts(&fonts_dir, &mut cache);
+    assert_eq!(first.count, 1);
+
+    fs::write(fonts_dir.join("b.ttf"), b"b").unwrap();
+    assert_eq!(scan_fonts(&fonts_dir, &mut cache), first);
+    assert_eq!(scan_fonts(&fonts_dir, &mut HashMap::new()).count, 2);
 }
 
 #[test]
@@ -512,27 +543,41 @@ fn test_find_fonts_dir() {
     fs::create_dir_all(input_dir.join("attachments")).unwrap();
 
     let mut cache = HashMap::new();
-    assert_eq!(find_fonts_dir(&input_dir, None, Some(&mut cache)), fonts);
-
-    let override_dir = tmp.path().join("custom_fonts");
-    assert_eq!(
-        find_fonts_dir(&input_dir, Some(&override_dir), None),
-        override_dir
-    );
+    assert_eq!(find_fonts_dir(&input_dir, &mut cache), fonts);
 
     // Without `fonts`, alternative names match regardless of ASCII case, and a same-named
     // file is skipped even though it sorts first.
     let alt_dir = tmp.path().join("alt");
     fs::create_dir_all(alt_dir.join("FONT")).unwrap();
     fs::write(alt_dir.join("Attachments"), b"a file, not a directory").unwrap();
-    assert_eq!(find_fonts_dir(&alt_dir, None, None), alt_dir.join("FONT"));
+    assert_eq!(find_fonts_dir(&alt_dir, &mut cache), alt_dir.join("FONT"));
 
     // With no candidate at all, `fonts` is returned even though it does not exist.
     let bare_dir = tmp.path().join("bare");
     fs::create_dir_all(&bare_dir).unwrap();
     assert_eq!(
-        find_fonts_dir(&bare_dir, None, None),
+        find_fonts_dir(&bare_dir, &mut cache),
         bare_dir.join("fonts")
+    );
+}
+
+/// A resolved directory is served from the cache rather than searched again; only a fresh
+/// cache sees the layout change.
+#[test]
+fn test_find_fonts_dir_serves_a_resolved_dir_from_the_cache() {
+    let tmp = tempdir().unwrap();
+    let input_dir = tmp.path().join("release");
+    let fonts = input_dir.join("fonts");
+    fs::create_dir_all(&fonts).unwrap();
+    fs::create_dir_all(input_dir.join("attachments")).unwrap();
+    let mut cache = HashMap::new();
+    assert_eq!(find_fonts_dir(&input_dir, &mut cache), fonts);
+
+    fs::remove_dir(&fonts).unwrap();
+    assert_eq!(find_fonts_dir(&input_dir, &mut cache), fonts);
+    assert_eq!(
+        find_fonts_dir(&input_dir, &mut HashMap::new()),
+        input_dir.join("attachments")
     );
 }
 

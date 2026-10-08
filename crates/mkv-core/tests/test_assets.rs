@@ -595,6 +595,22 @@ fn test_release_preparer_uses_nearest_fonts_dir_with_fonts() {
 }
 
 #[test]
+fn test_release_preparer_fonts_override_beats_release_and_ancestor_fonts() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let season = root.join("Season 01");
+    for dir in [&root, &season] {
+        fs::create_dir_all(dir.join("fonts")).unwrap();
+        fs::write(dir.join("fonts").join("f.ttf"), b"font").unwrap();
+    }
+    let override_dir = tmp.path().join("custom_fonts");
+
+    let prepared = ReleasePreparer::default().prepare(&season, &root, Some(&override_dir), None);
+
+    assert_eq!(prepared.fonts_dir, override_dir);
+}
+
+#[test]
 fn test_sub_index_is_empty_and_has_subtitles() {
     let mut sub_idx = SubIndex::new();
     assert!(sub_idx.is_empty());
