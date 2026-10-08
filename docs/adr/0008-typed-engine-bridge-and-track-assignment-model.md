@@ -117,7 +117,7 @@ This rule previously appeared in exactly one place in the repository — the Med
 ## Amendment — 2026-10-08 (Job Snapshot drops the job-level duration)
 
 - **Closes the 2026-10-07 known gap by removal.** `JobSnapshot.duration_sec` is removed, along with the reducer line that read it from the terminal `BatchComplete`'s `extra`. No producer set that key, so the field was always `null`, and no consumer read it: the webview restores the batch start from `start_time_ms` and per-item times from each item's `duration_sec` (ADR-0009), and shows no total job time.
-- **Wire effect.** The snapshot `get_job_snapshot` returns no longer has a top-level `duration_sec`. Item Duration on `ItemSnapshot` and on `ItemComplete` is unchanged.
+- **Wire effect.** The Job Snapshot returned by `get_job_snapshot` no longer has a top-level `duration_sec`. Item Duration on `ItemSnapshot` and on `ItemComplete` is unchanged.
 - **Options considered.**
   - **(A) Remove the field (chosen).** It holds no value and nothing reads it.
   - **(B) Have the bridge measure the job.** A monotonic clock from the start of the snapshot to the terminal. Rejected as a value with no consumer. If a total job time is ever shown, measure it then on a monotonic clock, as the bridge does for the Item Duration of a settled item.
