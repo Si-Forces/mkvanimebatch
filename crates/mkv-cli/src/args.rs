@@ -750,6 +750,21 @@ mod tests {
     }
 
     #[test]
+    fn test_cli_selected_item_keeps_leading_space() {
+        let dir = tempdir().unwrap();
+        let items = [" 01.mkv", " Season 1/02.mkv"];
+        write_files(dir.path(), &items);
+        let input_dir = path_arg(dir.path());
+        assert_eq!(selected_items_for(input_dir, &items).unwrap(), items);
+
+        let mut args = vec!["--input-dir", input_dir];
+        for item in items {
+            args.extend(["--selected-item", item]);
+        }
+        parse_args_from(args).unwrap().request.resolve().unwrap();
+    }
+
+    #[test]
     fn test_cli_selected_items_comma_separated() {
         let dir = tempdir().unwrap();
         write_files(dir.path(), &["ep01.mkv", "ep02.mkv", "ep03.mkv"]);

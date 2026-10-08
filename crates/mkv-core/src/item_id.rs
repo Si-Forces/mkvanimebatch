@@ -8,7 +8,8 @@ use std::path::{Component, Path};
 use serde::{Deserialize, Deserializer, Serialize};
 
 /// The canonical identity of one discovered video: its path relative to the input directory,
-/// `/`-separated, with no `.` segments.
+/// `/`-separated, with no `.` segments. Whitespace in the path is part of the name and is kept:
+/// trimming it would name a different file.
 ///
 /// Event IDs, manifest item IDs, Selected Items and Track Assignment targets all compare as
 /// `ItemId`s. The field is private and every constructor normalises, so two spellings of one
@@ -24,18 +25,19 @@ pub struct ItemId(String);
 impl ItemId {
     /// The ID of a discovered file under `input_dir`. A path outside `input_dir` keeps its full
     /// spelling, as [`get_item_id`] reports it, then normalises as [`ItemId::parse`] does, so
-    /// surrounding whitespace in the path is trimmed.
+    /// surrounding whitespace in the path is kept.
     pub fn of(path: &Path, input_dir: &Path) -> Self {
         Self::parse(&get_item_id(path, input_dir))
     }
 
-    /// The ID a user-supplied relative spelling names: surrounding whitespace trimmed,
-    /// backslashes read as separators, `.` segments dropped and repeated separators collapsed.
+    /// The ID a user-supplied relative spelling names: backslashes read as separators, `.`
+    /// segments dropped and repeated separators collapsed. Surrounding whitespace is kept, as
+    /// it names a different file.
     ///
     /// Infallible: whether the spelling is empty, contained, an `.mkv` file or present on disk
     /// is for `BatchRequest::resolve` to judge, because its errors quote the raw spelling.
     pub fn parse(spelling: &str) -> Self {
-        let norm = spelling.trim().replace('\\', "/");
+        let norm = spelling.replace('\\', "/");
         let parts: Vec<_> = Path::new(&norm)
             .components()
             .filter(|c| !matches!(c, Component::CurDir))
@@ -116,15 +118,20 @@ mod tests {
         let root = Path::new("/anime");
         let id = ItemId::of(&root.join("a").join("b.mkv"), root);
         assert_eq!(id.as_str(), "a/b.mkv");
-        for spelling in [
-            "./a/b.mkv",
-            "a//b.mkv",
-            "a\\b.mkv",
-            " a/b.mkv ",
-            "a/./b.mkv",
-        ] {
+        for spelling in ["./a/b.mkv", "a//b.mkv", "a\\b.mkv", "a/./b.mkv"] {
             assert_eq!(ItemId::parse(spelling), id, "spelling {spelling:?}");
         }
+    }
+
+    #[test]
+    fn surrounding_whitespace_is_part_of_the_name() {
+        let id = ItemId::parse(" Season 1/01.mkv");
+        assert_eq!(id.as_str(), " Season 1/01.mkv");
+        assert_eq!(ItemId::parse(" a/b.mkv ").as_str(), " a/b.mkv ");
+
+        let root = Path::new("/anime");
+        assert_eq!(ItemId::of(&root.join(" Season 1").join("01.mkv"), root), id);
+        assert_ne!(ItemId::parse(" a.mkv"), ItemId::parse("a.mkv"));
     }
 
     #[test]

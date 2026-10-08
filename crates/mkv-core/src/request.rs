@@ -418,8 +418,13 @@ impl BatchRequest {
                 let target_id = assignment.target_id();
                 // The containment and drive-prefix checks must see the raw spelling, since
                 // `ItemId::parse` reshapes a leading root or drive; the two forms are deliberate.
-                let target_norm = assignment.target_video.trim().replace('\\', "/");
-                if target_id.as_str().is_empty() || !is_contained_relative_path(&target_norm) {
+                // Whitespace is part of a name, so a spelling is blank only when all of it is
+                // whitespace.
+                let target_norm = assignment.target_video.replace('\\', "/");
+                if target_id.as_str().is_empty()
+                    || target_norm.trim().is_empty()
+                    || !is_contained_relative_path(&target_norm)
+                {
                     return Err(format!(
                         "Invalid relative target video path: '{}'",
                         assignment.target_video
@@ -480,8 +485,8 @@ impl BatchRequest {
             let mut seen_items: HashSet<ItemId> = HashSet::new();
             for item in items {
                 // Raw spelling for the containment check, as for `target_norm` above.
-                let norm = item.trim().replace('\\', "/");
-                if norm.is_empty() || !is_contained_relative_path(&norm) {
+                let norm = item.replace('\\', "/");
+                if norm.trim().is_empty() || !is_contained_relative_path(&norm) {
                     return Err(format!("Invalid relative path in selected_items: '{item}'"));
                 }
 
@@ -1328,6 +1333,60 @@ mod tests {
             let err = resolved(&req).unwrap_err();
             assert!(err.starts_with(expected), "{items:?}: {err}");
         }
+    }
+
+    #[test]
+    fn test_validate_keeps_whitespace_in_selections_and_targets() {
+        let dir = tempdir().unwrap();
+        touch(dir.path(), " Season 1/ep1.mkv");
+        touch(dir.path(), "ep2.mkv");
+        let sub_path = touch(dir.path(), "ep1.ass");
+
+        // A spelling with leading whitespace names exactly the file that has it.
+        let mut req = minimal_request(dir.path());
+        req.selected_items = Some(vec![" Season 1/ep1.mkv".into()]);
+        req.assignments = Some(vec![subtitle(" Season 1/ep1.mkv", &sub_path)]);
+        assert!(resolved(&req).is_ok());
+
+        // It is not trimmed to name another file: " ep2.mkv" is not "ep2.mkv".
+        req.assignments = None;
+        req.selected_items = Some(vec![" ep2.mkv".into()]);
+        let err = resolved(&req).unwrap_err();
+        assert!(err.starts_with("Selected item does not exist:"), "{err}");
+        req.selected_items = None;
+        req.assignments = Some(vec![subtitle(" ep2.mkv", &sub_path)]);
+        let err = resolved(&req).unwrap_err();
+        assert!(
+            err.starts_with("Assigned target video file does not exist:"),
+            "{err}"
+        );
+
+        // Containment sees the raw spelling: " .." is an ordinary folder name, not a parent
+        // reference, so the entry reaches the existence check instead of the escape check.
+        req.assignments = None;
+        req.selected_items = Some(vec![" ../ep1.mkv".into()]);
+        let err = resolved(&req).unwrap_err();
+        assert!(err.starts_with("Selected item does not exist:"), "{err}");
+        req.selected_items = None;
+        req.assignments = Some(vec![subtitle(" ../ep1.mkv", &sub_path)]);
+        let err = resolved(&req).unwrap_err();
+        assert!(
+            err.starts_with("Assigned target video file does not exist:"),
+            "{err}"
+        );
+
+        // An entry of nothing but whitespace names no file at all.
+        req.assignments = Some(vec![subtitle("   ", &sub_path)]);
+        assert_eq!(
+            resolved(&req).unwrap_err(),
+            "Invalid relative target video path: '   '"
+        );
+        req.assignments = None;
+        req.selected_items = Some(vec!["   ".into()]);
+        assert_eq!(
+            resolved(&req).unwrap_err(),
+            "Invalid relative path in selected_items: '   '"
+        );
     }
 
     #[test]
