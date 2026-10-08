@@ -6,7 +6,7 @@ import { QueueTracker } from "./queue-view.js";
 import { classifyLine, pushCapped } from "./log-classify.js";
 import { createTelemetryLoop } from "./telemetry.js";
 import { createJobCoordinator } from "./job-coordinator.js";
-import { createInspectionCoordinator } from "./inspection-coordinator.js";
+import { createDirectoryScanner } from "./directory-scan.js";
 import { nextStepValue } from "./stepper.js";
 
 // ─── Preset Configurations ──────────────────────────────────────────────────
@@ -105,7 +105,6 @@ function applyPreset(presetKey) {
 // ─── Tauri API helpers ──────────────────────────────────────────────────────
 
 const jobCoordinator = createJobCoordinator();
-const inspectDirectory = createInspectionCoordinator((path, options) => invoke("inspect_directory", { path, options }));
 
 async function invoke(cmd, args = {}) {
   const fn = window.__TAURI__?.core?.invoke;
@@ -442,37 +441,11 @@ function saveSubAssignment() {
   remuxQueue.applyAssignmentToCard(itemId);
 }
 
-export async function scanInputDirectory(path, mode, { force = false, options } = {}) {
-  const tracker = queueFor(mode);
-  const request = tracker.beginScanRequest();
-  let scanToken = null;
-  path = path.trim();
-  if (!path) {
-    tracker.reset();
-    jobCoordinator.syncControls();
-    return false;
-  }
-  // The UI compares directories byte for byte, so the typed spelling becomes its Directory
-  // Identity first. A path the bridge cannot resolve stays as typed, and `inspect_directory`
-  // then reports why.
-  const directory = await invoke("canonical_directory", { path }).catch(() => path);
-  if (!tracker.isNewestScanRequest(request)) return false;
-  try {
-    if (!force && tracker.reuseInspection(directory)) return true;
-
-    scanToken = tracker.startScan(directory);
-    jobCoordinator.syncControls();
-    const manifest = await inspectDirectory(directory, { force, options });
-    const acceptedPath = manifest?.canonical_dir || directory;
-    return tracker.acceptInspection(scanToken, acceptedPath, manifest);
-  } catch (err) {
-    console.log("[inspect_directory] failed:", err);
-    if (scanToken !== null) tracker.rejectInspection(scanToken);
-    return false;
-  } finally {
-    jobCoordinator.syncControls();
-  }
-}
+const scanInputDirectory = createDirectoryScanner({
+  invoke,
+  queueFor,
+  onSettled: () => jobCoordinator.syncControls(),
+});
 
 async function chooseInputDirectory(targetId) {
   if (jobCoordinator.activeMode !== null) return;

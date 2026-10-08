@@ -804,6 +804,34 @@ test("a same-directory re-inspection with an identical manifest keeps every card
   assert.equal(card1.fill.style.width, "0%");
 });
 
+test("startScan keeps the cards of the same Directory Identity and clears them for any other", t => {
+  const { elements, renderFrames } = setupMockEnvironment(t, { deferFrames: true });
+  const list = elements.get("remux-episode-list");
+  const dir = "/anime/show";
+  const showing = () => {
+    const tracker = new QueueTracker("remux");
+    assert.equal(tracker.acceptInspection(tracker.startScan(dir), dir, detailedManifest(["01.mkv", "02.mkv"])), true);
+    renderFrames();
+    return tracker;
+  };
+
+  const same = showing();
+  const cardsBefore = [...list.children];
+  same.startScan(dir);
+  assert.equal(same.cards.size, 2);
+  assert.equal(list.children.length, cardsBefore.length);
+  cardsBefore.forEach((el, i) => assert.equal(list.children[i], el));
+
+  // Identities compare byte for byte: another spelling of the folder is another directory.
+  for (const other of ["/anime/other", "/anime/show/"]) {
+    const tracker = showing();
+    tracker.startScan(other);
+    assert.equal(tracker.cards.size, 0);
+    assert.equal(list.children.length, 0);
+    assert.match(list.innerHTML, /Scanning Directory/);
+  }
+});
+
 test("a freshly mounted card is drawn in the queued look by its first renderCardState", t => {
   const { renderFrames } = setupMockEnvironment(t, { deferFrames: true });
   const tracker = new QueueTracker("remux");
@@ -885,6 +913,7 @@ test("a failed re-inspection that kept its cards drops them, and the next scan r
   tracker.rejectInspection(tracker.startScan(dir));
   assert.equal(tracker.cards.size, 0);
   assert.equal(elements.get("remux-queue-count").textContent, "Scan failed");
+  assert.match(elements.get("remux-episode-list").innerHTML, /Scan failed/);
 
   assert.equal(tracker.acceptInspection(tracker.startScan(dir), dir, detailedManifest(ids)), true);
   renderFrames();
