@@ -8,99 +8,9 @@ import { createTelemetryLoop } from "./telemetry.js";
 import { createJobCoordinator } from "./job-coordinator.js";
 import { createDirectoryScanner } from "./directory-scan.js";
 import { nextStepValue } from "./stepper.js";
-
-// ─── Preset Configurations ──────────────────────────────────────────────────
-
-// The Preset Profile catalog, filled at startup by `get_preset_profiles`; the engine owns it.
-const PRESETS = {};
-
-async function loadPresetProfiles() {
-  try {
-    const profiles = await invoke("get_preset_profiles");
-    for (const p of profiles ?? []) {
-      PRESETS[p.id] = {
-        icon: p.icon,
-        name: p.name,
-        bitrate: p.bitrate,
-        complexity: String(p.complexity),
-      };
-    }
-  } catch (err) {
-    console.error("[get_preset_profiles] failed:", err);
-  }
-}
-
-/**
- * The Effective Settings of a request that sets nothing: `null` until `get_default_settings`
- * answers, or when it fails. An empty workers field sends `workers: null`, which the engine
- * resolves to these.
- */
-let defaultSettings = null;
-
-/** Inputs whose empty state means the engine's default, as [input id, Effective Settings key]. */
-const AUTO_INPUTS = ["remux", "extract"].flatMap(mode => [
-  [`${mode}-workers`, "workers"],
-  [`${mode}-io-jobs`, "io_jobs"],
-]);
-
-async function loadDefaultSettings() {
-  try {
-    const settings = await invoke("get_default_settings");
-    if (!Number.isInteger(settings?.workers) || settings.workers < 1) {
-      throw new Error(`unexpected value ${JSON.stringify(settings)}`);
-    }
-    defaultSettings = settings;
-    for (const [id, key] of AUTO_INPUTS) {
-      const input = document.getElementById(id);
-      if (!input) continue;
-      input.placeholder = `auto (${settings[key]})`;
-      input.dataset.autoValue = String(settings[key]);
-    }
-    // Leave the chips alone while a job owns them; they show that job's own settings.
-    if (jobCoordinator.activeMode === null) updateWorkerChips(false);
-  } catch (err) {
-    // The placeholder stays "auto" and the chips name their state without a count.
-    console.error("[get_default_settings] failed:", err);
-  }
-}
-
-function setActiveProfileOption(presetKey) {
-  document.querySelectorAll(".profile-option-item").forEach(item => {
-    const active = item.dataset.preset === presetKey;
-    item.classList.toggle("active", active);
-    item.setAttribute("aria-pressed", active ? "true" : "false");
-  });
-}
-
-function applyPreset(presetKey) {
-  const p = PRESETS[presetKey];
-  const nameEl = document.getElementById("active-profile-name");
-  const profileBtn = document.getElementById("active-profile-btn");
-
-  if (presetKey === "custom") {
-    if (nameEl) nameEl.textContent = "🛠️ Custom Configuration";
-    if (profileBtn) profileBtn.dataset.preset = "custom";
-    setActiveProfileOption("custom");
-    return;
-  }
-  // Without its catalog entry there is nothing to apply.
-  if (!p) return;
-
-  if (nameEl) nameEl.textContent = `${p.icon} ${p.name}`;
-  if (profileBtn) profileBtn.dataset.preset = presetKey;
-  setActiveProfileOption(presetKey);
-
-  const setVal = (id, val) => {
-    const el = document.getElementById(id);
-    if (el) el.value = val;
-  };
-
-  if (p.bitrate !== undefined) setVal("remux-bitrate", p.bitrate);
-  if (p.complexity !== undefined) {
-    setVal("remux-complexity", p.complexity);
-    setVal("remux-cplx-val", p.complexity);
-  }
-}
+import { createSettingsChips } from "./settings-chips.js";
+import { createPresetMenu } from "./preset-menu.js";
+import { createTheme } from "./theme.js";
 
 // ─── Tauri API helpers ──────────────────────────────────────────────────────
 
@@ -122,6 +32,24 @@ function safeAddListener(idOrEl, event, handler) {
   const el = typeof idOrEl === "string" ? document.getElementById(idOrEl) : idOrEl;
   el?.addEventListener(event, handler);
 }
+
+// ─── Worker Chips, Presets and Theme ────────────────────────────────────────
+
+const chips = createSettingsChips({
+  invoke,
+  doc: document,
+  // A running job owns the chips; they show its own settings, not the defaults.
+  isJobActive: () => jobCoordinator.activeMode !== null,
+});
+const presets = createPresetMenu({ invoke, doc: document });
+const theme = createTheme({
+  doc: document,
+  win: window,
+  // `localStorage` can throw on access, not only on write, so it is read inside the call, where
+  // the theme's own try/catch covers it.
+  storage: { setItem: (key, value) => localStorage.setItem(key, value) },
+  invoke,
+});
 
 // ─── Number Stepper Helper ──────────────────────────────────────────────────
 
@@ -163,64 +91,6 @@ function initSteppers() {
   });
 }
 
-// ─── Theme ──────────────────────────────────────────────────────────────────
-
-const THEME_KEY = "mkv-theme";
-
-// The last explicitly chosen theme; a blocked or full storage must not lose the choice.
-let chosenTheme = null;
-
-function setDocumentTheme(theme) {
-  document.documentElement.setAttribute("data-theme", theme);
-}
-
-/**
- * An explicit choice also pins the native window theme; following the OS leaves it unpinned.
- * Updates `dataset.themeExplicit` as well as `data-theme`, so the DOM stays the single source
- * of truth after a toggle. Without it the dataset would still read "false" while storage holds
- * an explicit choice, and the two copies of the theme would disagree.
- */
-function applyChosenTheme(theme) {
-  setDocumentTheme(theme);
-  document.documentElement.dataset.themeExplicit = "true";
-  invoke("set_window_theme", { theme });
-}
-
-// Reads the theme `theme-init.js` published at bootstrap. It is the sole resolver of the stored
-// choice: this must never re-read localStorage, or the two copies could disagree.
-// Returns null when the user has made no explicit choice, meaning "follow the OS".
-function storedTheme() {
-  const dataset = document.documentElement?.dataset;
-  if (dataset?.themeExplicit !== "true") return null;
-  return dataset.theme === "light" || dataset.theme === "dark" ? dataset.theme : null;
-}
-
-/** Applies the user's stored theme, or follows the OS colour scheme live until they pick one. */
-function initTheme() {
-  const saved = storedTheme();
-  if (saved) {
-    applyChosenTheme(saved);
-    return;
-  }
-  const darkScheme = window.matchMedia?.("(prefers-color-scheme: dark)");
-  const follow = dark => {
-    if (!chosenTheme && !storedTheme()) setDocumentTheme(dark ? "dark" : "light");
-  };
-  if (!document.documentElement?.dataset?.theme) {
-    follow(darkScheme?.matches ?? true);
-  }
-  darkScheme?.addEventListener("change", e => follow(e.matches));
-}
-
-function toggleTheme() {
-  const theme = document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark";
-  chosenTheme = theme;
-  try {
-    localStorage.setItem(THEME_KEY, theme);
-  } catch {}
-  applyChosenTheme(theme);
-}
-
 // ─── Navigation ──────────────────────────────────────────────────────────────
 
 function switchView(viewId) {
@@ -247,26 +117,6 @@ function switchView(viewId) {
 
 // Engine write throughput that fills the Disk I/O bar completely.
 const IO_BAR_FULL_SCALE_MB_S = 300;
-
-/** A chip's text: `count` is shown when known, and otherwise left out rather than guessed. */
-function chipText(icon, isJobActive, idleWord, count, noun) {
-  const counted = count == null ? null : `${count} ${noun}`;
-  if (isJobActive) return `${icon} ${counted ?? noun} Active`;
-  return counted ? `${icon} ${idleWord} (${counted})` : `${icon} ${idleWord}`;
-}
-
-/**
- * Shows `settings` (Effective Settings) on the worker and I/O job chips: the running job's while
- * `isJobActive`, otherwise the defaults. `null` settings, not yet known, leave the counts out.
- */
-function updateWorkerChips(isJobActive = false, settings = defaultSettings) {
-  document.querySelectorAll(".metric-workers-chip").forEach(chip => {
-    chip.innerText = chipText("⚡", isJobActive, "Standby", settings?.workers, "Workers");
-  });
-  document.querySelectorAll(".metric-iojobs-chip").forEach(chip => {
-    chip.innerText = chipText("🔀", isJobActive, "Idle", settings?.io_jobs, "IO Jobs");
-  });
-}
 
 function applyTelemetryData(data) {
   const cpu = Math.round(data.cpu_pct || 0);
@@ -580,9 +430,9 @@ async function syncMaximizedState() {
 }
 
 function initApp() {
-  initTheme();
+  theme.init();
 
-  safeAddListener("btn-theme", "click", toggleTheme);
+  safeAddListener("btn-theme", "click", theme.toggle);
   initSteppers();
 
   safeAddListener("btn-close", "click", () => invoke("close_window").catch(showCleanupError));
@@ -724,7 +574,7 @@ function initApp() {
     document.querySelectorAll(".profile-option-item[data-preset]").forEach(item => {
       item.addEventListener("click", (e) => {
         e.stopPropagation();
-        applyPreset(item.dataset.preset);
+        presets.apply(item.dataset.preset);
         setProfileMenuOpen(false);
         profileBtn.focus();
       });
@@ -759,8 +609,8 @@ function initApp() {
 
   // Editing any encoding field by hand leaves the selected preset.
   ["remux-bitrate", "remux-complexity", "remux-cplx-val", "remux-ffmpeg-threads", "remux-sub-offset", "remux-dry-run", "remux-no-cache"].forEach(id => {
-    safeAddListener(id, "change", () => applyPreset("custom"));
-    safeAddListener(id, "input", () => applyPreset("custom"));
+    safeAddListener(id, "change", () => presets.apply("custom"));
+    safeAddListener(id, "input", () => presets.apply("custom"));
   });
 
   const jobRuntime = {
@@ -775,7 +625,7 @@ function initApp() {
     scanInputDirectory,
     showModal,
     telemetryLoop,
-    updateWorkerChips,
+    updateWorkerChips: chips.update,
   };
   const controllers = {
     remux: new JobController("remux", jobRuntime),
@@ -786,14 +636,14 @@ function initApp() {
   }
   jobCoordinator.syncControls();
   telemetryLoop.start();
-  loadPresetProfiles();
-  loadDefaultSettings();
+  presets.load();
+  chips.loadDefaults();
   jobCoordinator.restore({ listen, invoke, queueFor, switchView });
 
   document.addEventListener("keydown", e => {
     if ((e.ctrlKey || e.metaKey) && e.key === "t") {
       e.preventDefault();
-      toggleTheme();
+      theme.toggle();
     }
   });
 }

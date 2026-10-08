@@ -35,7 +35,8 @@ class BootElement {
   }
 }
 
-function bootstrapHarness(t, commandResults = {}) {
+/** `answers` overrides what a command returns; a promise holds the answer back until the test settles it. */
+function bootstrapHarness(t, answers = {}) {
   const prior = {
     document: globalThis.document,
     window: globalThis.window,
@@ -80,11 +81,7 @@ function bootstrapHarness(t, commandResults = {}) {
     __TAURI__: {
       core: { invoke: async (command, args) => {
         calls.push([command, args]);
-        if (command in commandResults) {
-          const result = commandResults[command];
-          if (result instanceof Error) throw result;
-          return result;
-        }
+        if (command in answers) return answers[command];
         // A typed path resolves to itself unless a test says otherwise.
         if (command === "canonical_directory") return args.path;
         if (command === "get_default_settings" || command === "resolve_batch_request") return DEFAULT_SETTINGS;
@@ -220,204 +217,73 @@ test("no snapshot preserves pre-run selection and cleans up bootstrap listeners"
   assert.equal(ipc.calls.filter(([command]) => command === "inspect_directory").length, 1);
 });
 
-test("get_default_settings puts auto (N) on the workers and Disk I/O inputs and the defaults on the idle chips", async t => {
-  const ipc = bootstrapHarness(t, { get_default_settings: { ...DEFAULT_SETTINGS, workers: 6, io_jobs: 4 } });
-  await ipc.mount("default-settings");
-  ipc.resolveSnapshot(null);
-  await ipc.flush();
-  for (const mode of ["remux", "extract"]) {
-    const input = ipc.elements.get(`${mode}-workers`);
-    assert.equal(input.placeholder, "auto (6)");
-    assert.equal(input.dataset.autoValue, "6");
-    const ioJobs = ipc.elements.get(`${mode}-io-jobs`);
-    assert.equal(ioJobs.placeholder, "auto (4)");
-    assert.equal(ioJobs.dataset.autoValue, "4");
-  }
-  assert.equal(ipc.workerChip.innerText, "⚡ Standby (6 Workers)");
-  assert.equal(ipc.ioChip.innerText, "🔀 Idle (4 IO Jobs)");
-});
-
-test("a failed get_default_settings leaves the inputs on plain auto and does not write the chips", async t => {
-  const ipc = bootstrapHarness(t, { get_default_settings: new Error("unavailable") });
-  const logged = [];
-  const priorError = console.error;
-  console.error = (...args) => logged.push(args);
-  t.after(() => { console.error = priorError; });
-  await ipc.mount("default-settings-failed");
-  ipc.resolveSnapshot(null);
-  await ipc.flush();
-  for (const mode of ["remux", "extract"]) {
-    const input = ipc.elements.get(`${mode}-workers`);
-    assert.equal(input.placeholder, undefined);
-    assert.equal("autoValue" in input.dataset, false);
-  }
-  assert.equal(ipc.workerChip.innerText, undefined);
-  assert.equal(ipc.ioChip.innerText, undefined);
-  assert.equal(logged.some(([label]) => label === "[get_default_settings] failed:"), true);
-});
-
-test("a restored active job's chips show the snapshot's Effective Settings, not the defaults", async t => {
-  const ipc = bootstrapHarness(t);
-  await ipc.mount("restored-settings");
-  ipc.resolveSnapshot(activeSnapshot());
-  await ipc.flush();
-  assert.equal(ipc.workerChip.innerText, "⚡ 3 Workers Active");
-  assert.equal(ipc.ioChip.innerText, "🔀 5 IO Jobs Active");
-});
-
-test("with get_default_settings failed, a restored active job's chips still show its own settings", async t => {
-  const ipc = bootstrapHarness(t, { get_default_settings: new Error("unavailable") });
-  const priorError = console.error;
-  console.error = () => {};
-  t.after(() => { console.error = priorError; });
-  await ipc.mount("restored-settings-unknown-defaults");
-  ipc.resolveSnapshot(activeSnapshot());
-  await ipc.flush();
-  assert.equal(ipc.workerChip.innerText, "⚡ 3 Workers Active");
-  assert.equal(ipc.ioChip.innerText, "🔀 5 IO Jobs Active");
-});
-
-test("with no settings known anywhere, the chips name their state and invent no counts", async t => {
-  const ipc = bootstrapHarness(t, { get_default_settings: new Error("unavailable") });
-  const priorError = console.error;
-  console.error = () => {};
-  t.after(() => { console.error = priorError; });
-  await ipc.mount("chips-without-settings");
-  // A snapshot no `run_job` began, so it carries no Effective Settings.
-  const { effective_settings: _omitted, ...withoutSettings } = activeSnapshot();
-  ipc.resolveSnapshot(withoutSettings);
-  await ipc.flush();
-  assert.equal(ipc.workerChip.innerText, "⚡ Workers Active");
-  assert.equal(ipc.ioChip.innerText, "🔀 IO Jobs Active");
-
-  ipc.emit("job-done", { job_id: 42, mode: "remux", code: 0 });
-  assert.equal(ipc.workerChip.innerText, "⚡ Standby");
-  assert.equal(ipc.ioChip.innerText, "🔀 Idle");
-});
-
-test("default settings that arrive after a job restored leave its chips alone, and idle chips return the defaults", async t => {
+// Wiring only: the chips', the preset menu's and the theme's own rules are tested in
+// settings-chips.test.js, preset-menu.test.js and theme.test.js. Each assertion below fails when
+// app.js drops the call or listener that connects its module.
+test("app.js wires the settings chips, the preset menu and the theme to their modules", async t => {
   let answerDefaults;
-  const ipc = bootstrapHarness(t, { get_default_settings: new Promise(resolve => { answerDefaults = resolve; }) });
-  await ipc.mount("restored-before-defaults");
-  ipc.resolveSnapshot(activeSnapshot());
-  await ipc.flush();
-  answerDefaults({ ...DEFAULT_SETTINGS, workers: 6, io_jobs: 4 });
-  await ipc.flush();
-  assert.equal(ipc.workerChip.innerText, "⚡ 3 Workers Active");
-  assert.equal(ipc.elements.get("remux-workers").placeholder, "auto (6)");
-
-  ipc.emit("job-done", { job_id: 42, mode: "remux", code: 0 });
-  assert.equal(ipc.workerChip.innerText, "⚡ Standby (6 Workers)");
-  assert.equal(ipc.ioChip.innerText, "🔀 Idle (4 IO Jobs)");
-});
-
-test("the preset menu applies only what get_preset_profiles delivered", async t => {
   const fast = { id: "fast", icon: "⚡", name: "Fast Muxing (128k)", bitrate: "128k", complexity: 3 };
-  const ipc = bootstrapHarness(t, { get_preset_profiles: [fast] });
-  const options = ["fast", "hifi"].map(preset => Object.assign(new BootElement(), { dataset: { preset } }));
+  const ipc = bootstrapHarness(t, {
+    get_default_settings: new Promise(resolve => { answerDefaults = resolve; }),
+    get_preset_profiles: [fast],
+  });
+
+  // theme-init.js published a stored dark choice, and localStorage records what the toggle saves.
+  const attributes = new Map();
+  Object.assign(globalThis.document.documentElement, {
+    dataset: { theme: "dark", themeExplicit: "true" },
+    setAttribute: (name, value) => attributes.set(name, value),
+    getAttribute: name => attributes.get(name) ?? null,
+  });
+  const stored = [];
+  const priorStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    value: { setItem: (key, value) => stored.push([key, value]) },
+  });
+  t.after(() => {
+    if (priorStorage) Object.defineProperty(globalThis, "localStorage", priorStorage);
+    else delete globalThis.localStorage;
+  });
+  const themeButton = new BootElement();
+  ipc.elements.set("btn-theme", themeButton);
+  const pinnedThemes = () => ipc.calls.filter(([command]) => command === "set_window_theme").map(([, args]) => args.theme);
+
+  // The titlebar's profile picker and the fields a profile fills.
+  const fastOption = Object.assign(new BootElement(), { dataset: { preset: "fast" } });
   for (const [id, value] of [["remux-bitrate", "192k"], ["remux-complexity", "5"], ["remux-cplx-val", "5"]]) {
     ipc.elements.set(id, new BootElement(value));
   }
-  const profileName = new BootElement();
-  const profileButton = Object.assign(new BootElement(), { focus() {} });
-  ipc.elements.set("active-profile-name", profileName);
-  ipc.elements.set("active-profile-btn", profileButton);
+  ipc.elements.set("active-profile-name", new BootElement());
+  ipc.elements.set("active-profile-btn", Object.assign(new BootElement(), { focus() {} }));
   ipc.elements.set("profile-dropdown-menu", new BootElement());
   const queryAll = globalThis.document.querySelectorAll;
   globalThis.document.querySelectorAll = selector =>
-    selector === ".profile-option-item[data-preset]" ? options : queryAll(selector);
+    selector === ".profile-option-item[data-preset]" ? [fastOption] : queryAll(selector);
 
-  await ipc.mount("preset-catalog");
-  ipc.resolveSnapshot(null);
+  await ipc.mount("module-wiring");
+  assert.deepEqual(pinnedThemes(), ["dark"], "startup applies and pins the published choice");
+
+  // A restored active job owns the chips, and the defaults answer only after it restored.
+  ipc.resolveSnapshot(activeSnapshot());
   await ipc.flush();
-  const click = option => option.handlers.get("click")({ stopPropagation() {} });
+  answerDefaults(DEFAULT_SETTINGS);
+  await ipc.flush();
+  assert.equal(ipc.workerChip.innerText, "⚡ 3 Workers Active");
+  assert.equal(ipc.ioChip.innerText, "🔀 5 IO Jobs Active");
+  assert.equal(ipc.elements.get("remux-workers").placeholder, "auto (6)");
+  // The defaults reached the same chips: they fall back to them when the job ends.
+  ipc.emit("job-done", { job_id: 42, mode: "remux", code: 0 });
+  assert.equal(ipc.workerChip.innerText, "⚡ Standby (6 Workers)");
+  assert.equal(ipc.ioChip.innerText, "🔀 Idle (2 IO Jobs)");
 
-  // "hifi" is not in the catalog, and the page carries no copy of it to fall back on.
-  click(options[1]);
-  assert.equal(ipc.elements.get("remux-bitrate").value, "192k");
-  assert.equal(profileName.textContent, undefined);
-
-  click(options[0]);
-  assert.equal(ipc.elements.get("remux-bitrate").value, "128k");
-  assert.equal(ipc.elements.get("remux-complexity").value, "3");
-  assert.equal(profileName.textContent, "⚡ Fast Muxing (128k)");
-});
-
-test("explicit toggle survives a failed storage write when the OS scheme changes", async t => {
-  const ipc = bootstrapHarness(t);
-  const priorStorage = globalThis.localStorage;
-  const attributes = new Map();
-  const schemeHandlers = [];
-  globalThis.localStorage = { getItem: () => null, setItem: () => { throw new Error("storage blocked"); } };
-  globalThis.document.documentElement = {
-    dataset: {},
-    setAttribute: (name, value) => attributes.set(name, value),
-    getAttribute: name => attributes.get(name) ?? null,
-    classList: { toggle() {} },
-  };
-  globalThis.window.matchMedia = () => ({ matches: false, addEventListener: (name, handler) => schemeHandlers.push(handler) });
-  const themeButton = new BootElement();
-  ipc.elements.set("btn-theme", themeButton);
-  t.after(() => { globalThis.localStorage = priorStorage; });
-
-  await ipc.mount("sticky-theme");
-  assert.equal(attributes.get("data-theme"), "light");
   themeButton.handlers.get("click")();
-  assert.equal(attributes.get("data-theme"), "dark");
-  // The DOM is the single source of truth after a toggle: an explicit choice must be
-  // published to dataset.themeExplicit, or storage and the dataset disagree again.
-  assert.equal(globalThis.document.documentElement.dataset.themeExplicit, "true");
-
-  schemeHandlers.forEach(handler => handler({ matches: false }));
-  assert.equal(attributes.get("data-theme"), "dark");
-});
-
-test("an unrecognized stored theme follows the OS scheme live", async t => {
-  const ipc = bootstrapHarness(t);
-  const priorStorage = globalThis.localStorage;
-  const attributes = new Map();
-  const schemeHandlers = [];
-  globalThis.localStorage = { getItem: () => "blue" };
-  globalThis.document.documentElement = {
-    setAttribute: (name, value) => attributes.set(name, value),
-    getAttribute: name => attributes.get(name) ?? null,
-    classList: { toggle() {} },
-  };
-  globalThis.window.matchMedia = () => ({ matches: false, addEventListener: (name, handler) => schemeHandlers.push(handler) });
-  t.after(() => { globalThis.localStorage = priorStorage; });
-
-  await ipc.mount("invalid-stored-theme");
   assert.equal(attributes.get("data-theme"), "light");
-  assert.equal(ipc.calls.some(([command]) => command === "set_window_theme"), false);
+  assert.deepEqual(stored, [["mkv-theme", "light"]]);
+  assert.deepEqual(pinnedThemes(), ["dark", "light"]);
 
-  schemeHandlers.forEach(handler => handler({ matches: true }));
-  assert.equal(attributes.get("data-theme"), "dark");
-  ipc.resolveSnapshot(null);
-  await ipc.flush();
-});
-
-test("app.js never re-derives the boot theme from localStorage when the bootstrap is absent", async t => {
-  const ipc = bootstrapHarness(t);
-  const priorStorage = globalThis.localStorage;
-  const storageReads = [];
-  const attributes = new Map();
-  globalThis.localStorage = {
-    getItem: key => { storageReads.push(key); return "dark"; },
-    setItem: () => {},
-  };
-  // theme-init.js published nothing, so the bootstrap never ran. The stored theme must be
-  // resolved by theme-init.js alone; app.js may only fall back to the live OS scheme.
-  globalThis.document.documentElement.dataset = {};
-  globalThis.document.documentElement.setAttribute = (name, value) => attributes.set(name, value);
-  globalThis.document.documentElement.getAttribute = name => attributes.get(name) ?? null;
-  t.after(() => { globalThis.localStorage = priorStorage; });
-
-  await ipc.mount("trusts-published-theme");
-
-  assert.deepEqual(storageReads, [], "app.js must not re-derive the boot theme from localStorage");
-  assert.equal(attributes.get("data-theme"), "light", "without a published theme the OS scheme wins");
-  assert.equal(ipc.calls.some(([command]) => command === "set_window_theme"), false,
-    "following the OS must leave the native window unpinned");
+  fastOption.handlers.get("click")({ stopPropagation() {} });
+  assert.equal(ipc.elements.get("remux-bitrate").value, "128k");
 });
 
 for (const { label, input, expected } of [
