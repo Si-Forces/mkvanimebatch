@@ -441,6 +441,8 @@ function saveSubAssignment() {
   remuxQueue.applyAssignmentToCard(itemId);
 }
 
+// ─── Directory Scan ─────────────────────────────────────────────────────────
+
 const scanInputDirectory = createDirectoryScanner({
   invoke,
   queueFor,

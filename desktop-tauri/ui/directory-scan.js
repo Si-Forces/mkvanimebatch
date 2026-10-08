@@ -5,6 +5,9 @@ import { createInspectionCoordinator } from "./inspection-coordinator.js";
  * inspects it through one Inspection Coordinator, and drives the mode's Queue Tracker through
  * the scan. `queueFor(mode)` gives that tracker; `onSettled()` runs whenever a scan has changed
  * the state the page controls depend on.
+ *
+ * Build one scanner for the app, not one per mode: its Inspection Coordinator is what lets the
+ * Remux and Extract views share one inspection of the same directory.
  */
 export function createDirectoryScanner({ invoke, queueFor, onSettled }) {
   // One coordinator for every scan, so concurrent scans of one directory share one inspection.

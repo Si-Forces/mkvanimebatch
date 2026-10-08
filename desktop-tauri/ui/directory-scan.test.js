@@ -17,9 +17,10 @@ const trimDotSpellings = ({ path }) => path.replace(/\/\.?$/, "");
 /**
  * A Queue Tracker with only the scan methods the scanner calls. Calls go to `log` as
  * `[mode, method, ...args]`. Request numbers count as in the real tracker, and `reset()`
- * leaves them alone.
+ * leaves them alone. `accepts` answers `acceptInspection`, as the real tracker refuses a
+ * superseded token or a manifest it cannot use.
  */
-function fakeTracker(mode, log, reuses) {
+function fakeTracker(mode, log, reuses, accepts) {
   let request = 0;
   let token = 0;
   return {
@@ -36,7 +37,7 @@ function fakeTracker(mode, log, reuses) {
     },
     acceptInspection(scanToken, directory, manifest) {
       log.push([mode, "acceptInspection", scanToken, directory, manifest]);
-      return true;
+      return accepts(scanToken, directory, manifest);
     },
     rejectInspection: scanToken => log.push([mode, "rejectInspection", scanToken]),
   };
@@ -51,6 +52,7 @@ function scannerHarness({
   canonical = ({ path }) => path,
   inspect = ({ path }) => ({ version: 2, items: [], canonical_dir: path }),
   reuses = () => false,
+  accepts = () => true,
 } = {}) {
   const calls = [];
   const log = [];
@@ -60,7 +62,10 @@ function scannerHarness({
     if (command === "inspect_directory") return inspect(args);
     throw new Error(`unexpected command: ${command}`);
   };
-  const trackers = { remux: fakeTracker("remux", log, reuses), extract: fakeTracker("extract", log, reuses) };
+  const trackers = {
+    remux: fakeTracker("remux", log, reuses, accepts),
+    extract: fakeTracker("extract", log, reuses, accepts),
+  };
   const scan = createDirectoryScanner({
     invoke,
     queueFor: mode => trackers[mode],
@@ -252,4 +257,13 @@ test("onSettled runs when a scan starts and again when it ends, and not for an o
   release();
   assert.equal(await overtaken, false);
   assert.equal(settledCount(), afterNewer);
+});
+
+test("a scan the tracker refuses to accept answers false, so Start does not run on it", async () => {
+  // The Job Controller reads `true` as a successful preflight; a superseded token or an unusable
+  // manifest must not report one.
+  const { scan, logged, log } = scannerHarness({ accepts: () => false });
+  assert.equal(await scan("/release", "remux"), false);
+  assert.equal(logged("acceptInspection").length, 1);
+  assert.deepEqual(log.at(-1), ["settled"]);
 });
