@@ -81,7 +81,6 @@ pub struct JobSnapshot {
     pub mode: String,
     pub status: BatchStatus,
     pub start_time_ms: u64,
-    pub duration_sec: Option<f64>,
     pub total_items: usize,
     pub completed_items: usize,
     pub input_dir: Option<String>,
@@ -138,7 +137,6 @@ impl SnapshotStore {
             mode: mode.to_string(),
             status: BatchStatus::Running,
             start_time_ms: timestamp_ms(),
-            duration_sec: None,
             total_items: 0,
             completed_items: 0,
             input_dir: Some(input_dir),
@@ -198,7 +196,6 @@ impl SnapshotStore {
                         mode: mode.to_string(),
                         status: BatchStatus::Running,
                         start_time_ms,
-                        duration_sec: None,
                         total_items: *total,
                         completed_items: 0,
                         input_dir: own.and_then(|snapshot| snapshot.input_dir.clone()),
@@ -255,10 +252,7 @@ impl SnapshotStore {
                     }
                 }
                 JobEvent::BatchComplete {
-                    success,
-                    cancelled,
-                    extra,
-                    ..
+                    success, cancelled, ..
                 } => {
                     if let Some(snapshot) = snap.as_mut() {
                         // The flag trips on any error item, which fails a batch the engine called
@@ -270,8 +264,6 @@ impl SnapshotStore {
                             item.status == ItemStatus::Error || !item.status.is_terminal()
                         });
                         snapshot.status = terminal_status(*success, *cancelled, has_failed_items);
-                        snapshot.duration_sec =
-                            extra.get("duration_sec").and_then(|value| value.as_f64());
                     }
                 }
             }
@@ -502,7 +494,6 @@ mod tests {
         store.update(&batch_complete(true, false), 10, "remux");
         let snap = snapshot(&store);
         assert_eq!(snap.status, BatchStatus::Completed);
-        assert_eq!(snap.duration_sec, None);
 
         store.clear();
         assert!(store.get().unwrap().is_none());
@@ -842,13 +833,11 @@ mod tests {
         failed.update(&item_start("ep1"), 2, "remux");
         let terminal = failed_with(serde_json::json!({
             "error": "Fatal error",
-            "duration_sec": 18.25,
         }));
         settle(&failed, 2, &terminal);
         failed.update(&terminal, 2, "remux");
         let snap = snapshot(&failed);
         assert_eq!(snap.status, BatchStatus::Error);
-        assert_eq!(snap.duration_sec, Some(18.25));
         assert_eq!(snap.items["ep1"].status, ItemStatus::Error);
         assert_eq!(snap.items["ep1"].error.as_deref(), Some("Fatal error"));
     }
