@@ -1,6 +1,6 @@
-// Sole resolver of the initial theme, applied before the stylesheet paints. app.js does NOT
+// Sole resolver of the initial theme, applied before the stylesheet paints. theme.js does NOT
 // re-derive this: it reads the `dataset.theme` / `dataset.themeExplicit` published below, so
-// this file is the only place that reads `localStorage` for the theme. app.js reads
+// this file is the only place that reads `localStorage` for the theme. theme.js reads
 // `matchMedia` only to follow live OS changes, or if this script never ran.
 // Must stay an external classic script: the CSP is `script-src 'self'`.
 (function () {

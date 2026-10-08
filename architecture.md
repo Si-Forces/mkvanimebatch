@@ -162,7 +162,10 @@ mkvanimebatch/
         ├── style.css                # Layout, cards, light/dark themes, system font stacks
         ├── theme-init.js            # Early stored or OS theme application before stylesheet (classic script)
         ├── os-detect.js             # Adds an is-windows/is-mac/is-linux class to <html> (classic script)
-        ├── app.js                   # Startup, presets, theme, telemetry gauges, log console, subtitle assignment modal, window controls
+        ├── app.js                   # Startup and wiring, telemetry gauges, log console, subtitle assignment modal, window controls
+        ├── settings-chips.js        # createSettingsChips: get_default_settings, the `auto (N)` hints on the workers and Disk I/O inputs, and the worker and I/O job chips
+        ├── preset-menu.js           # createPresetMenu: the Preset Profile catalog from get_preset_profiles, and applying a profile (or "custom") to the form
+        ├── theme.js                 # createTheme: applies the theme theme-init.js published, follows the OS live, toggles and stores the choice
         ├── queue-state.js           # Queue state factories, JobEvent reducer, selection and order helpers
         ├── queue-view.js            # QueueTracker: episode card rendering, selection, reordering, heartbeat
         ├── job-controller.js        # BatchRequest from the form, engine resolve check, preflight, run/stop, job event routing
@@ -446,7 +449,10 @@ The desktop app pairs a Rust host (Tauri v2) with a webview frontend in plain Ja
 ```mermaid
 flowchart LR
     subgraph Frontend["Webview Frontend (desktop-tauri/ui)"]
-        UIApp["app.js\nStartup, Presets"]
+        UIApp["app.js\nStartup, Wiring"]
+        UIChips["settings-chips.js\nWorker Chips, Default Settings"]
+        UIPreset["preset-menu.js\nPreset Menu"]
+        UITheme["theme.js\nTheme"]
         UICoord["job-coordinator.js\nJob Lifecycle, Snapshot Restore"]
         UIJob["job-controller.js\nRun / Stop"]
         UIScan["directory-scan.js\nDirectory Scan"]
@@ -472,6 +478,12 @@ flowchart LR
     UIApp --> UIJob
     UIApp --> UICoord
     UIApp --> UIScan
+    UIApp --> UIChips
+    UIApp --> UIPreset
+    UIApp --> UITheme
+    UIChips -->|get_default_settings| Cmds
+    UIPreset -->|get_preset_profiles| Cmds
+    UITheme -->|set_window_theme| Win
     UICoord -->|get_job_snapshot| Cmds
     UIScan -->|canonical_directory| Cmds
     UIScan -->|inspect_directory| Cmds
@@ -559,9 +571,9 @@ The frontend is plain ES modules with no framework.
    - One 1 Hz timer in `QueueTracker` updates the elapsed time of every processing card, and stops itself on the first tick that finds no item processing.
 5. **Subtitle assignment modal (ADR-0011, ADR-0012)**:
    - Per remux item: choose a subtitle from the manifest's `subtitle_candidates` for the release, or a custom path (browse via `pick_subtitle_file`, an `rfd` native dialog); set the language (`ind`, `eng`, `jpn`, or a custom code), track title, and offset in milliseconds (`offset_ms`; a fraction is truncated, and an empty or out-of-range value leaves the global offset in effect). The resulting `TrackAssignment` is sent in `BatchRequest.assignments` and applied to the `mkvmerge` arguments (§4.4).
-6. **Worker inputs and chips**: the workers and Disk I/O inputs start empty with the placeholder `auto`. At startup `app.js` calls `get_default_settings` once and, on success, sets `auto (N)` (N is the default `workers` or `io_jobs`) and `data-auto-value="N"` on them. An empty field sends `workers: null` or `io_jobs: null`. The worker and I/O job chips show the default settings while idle, the settings `resolve_batch_request` returned while a run starts, and a restored running job's `effective_settings` after a reload. Until the defaults are known, or when the call failed, the placeholder stays `auto` and the chips name their state (`Standby`, `Idle`) without a count. A stepper click on an empty field with a `data-auto-value` starts from N (`stepper.js`).
-7. **Preset catalog**: the preset menu applies only the profiles `get_preset_profiles` returned at startup; the webview holds no copy of them (ADR-0008, 2026-10-06 desktop amendment). The form's bitrate and complexity controls are what a run sends; the preset id is a label.
-8. **Theme**: follows `prefers-color-scheme` live until the user toggles the theme; the choice is then stored in `localStorage` (`mkv-theme`) and pinned on the native window via `set_window_theme`.
+6. **Worker inputs and chips**: the workers and Disk I/O inputs start empty with the placeholder `auto`. At startup `settings-chips.js` calls `get_default_settings` once and, on success, sets `auto (N)` (N is the default `workers` or `io_jobs`) and `data-auto-value="N"` on them. An empty field sends `workers: null` or `io_jobs: null`. The worker and I/O job chips show the default settings while idle, the settings `resolve_batch_request` returned while a run starts, and a restored running job's `effective_settings` after a reload. Until the defaults are known, or when the call failed, the placeholder stays `auto` and the chips name their state (`Standby`, `Idle`) without a count. A stepper click on an empty field with a `data-auto-value` starts from N (`stepper.js`).
+7. **Preset catalog**: the preset menu (`preset-menu.js`) applies only the profiles `get_preset_profiles` returned at startup; the webview holds no copy of them (ADR-0008, 2026-10-06 desktop amendment). The form's bitrate and complexity controls are what a run sends; the preset id is a label.
+8. **Theme** (`theme.js`): follows `prefers-color-scheme` live until the user toggles the theme; the choice is then stored in `localStorage` (`mkv-theme`) and pinned on the native window via `set_window_theme`. `theme-init.js` is the only reader of the stored choice: it publishes the theme in `dataset` before first paint, and `theme.js` applies that.
 9. **Job lifecycle (`job-coordinator.js`)**:
    - `createJobCoordinator()` holds the one job the app runs at a time, across the Remux and Extract views, as a state machine: the phases `idle`, `restoring`, `starting`, `running` and `stopping`, plus the mode that owns the batch. The state is private. Controllers read `phase`, `activeMode`, `isStopping` and `canStart()`, and move it only through named transitions. `activeMode` is set while starting, running or stopping and stays `null` while restoring, so a restored queue can still be adjusted.
    - The transitions are `begin(mode)` (`idle` to `starting`), `launched()` (`starting` to `running`), `requestStop()` (`starting` or `running` to `stopping`), `stopFailed()` (`stopping` back to `running`, when `stop_job` is rejected while the job still runs) and `finish()` (any phase to `idle`, idempotent). Each returns `true` when it applied. From any other phase it returns `false` and changes nothing. Every applied transition re-renders the registered controls itself; `syncControls()` stays public for changes the coordinator does not own: `app.js` calls it when an inspection scan starts, fails or ends (as the `onSettled` it hands `directory-scan.js`), and once at startup.
