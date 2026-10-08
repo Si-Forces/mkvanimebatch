@@ -784,7 +784,7 @@ for (const { name, terminal, settled: settledEvents, snapshotStatus } of SETTLED
     });
     const settled = { status: ep2.status, outcome: ep2.status, reason: ep2.reason ?? null, error: ep2.error ?? null };
     const snapshot = {
-      job_id: 7, mode: "remux", status: snapshotStatus, start_time_ms: 1_000, duration_sec: null,
+      job_id: 7, mode: "remux", status: snapshotStatus, start_time_ms: 1_000,
       total_items: 4, completed_items: 4, input_dir: "/anime", effective_settings: null,
       ordered_item_ids: ids,
       items: {
