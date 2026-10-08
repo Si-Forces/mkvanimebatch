@@ -67,6 +67,7 @@ export class QueueTracker {
     this.state = createQueueState(EMPTY_MANIFEST);
     this.cards = new Map();
     this.scanToken = 0;
+    this.scanRequest = 0;
     this.pendingRenderToken = null;
     this.currentDirectory = null;
     this.lastScannedPath = null;
@@ -209,6 +210,19 @@ export class QueueTracker {
 
   isCurrentScan(token) {
     return token === this.scanToken;
+  }
+
+  // A scan request begins when the user asks for a scan, before `canonical_directory` has
+  // answered. The newest request of a queue wins, whatever order the answers come back in:
+  // an older one must not start a scan, as a later `startScan` supersedes an earlier one.
+  // `reset()` leaves the counter alone, so the request an empty path begins still cancels
+  // one pending in this queue.
+  beginScanRequest() {
+    return ++this.scanRequest;
+  }
+
+  isNewestScanRequest(request) {
+    return request === this.scanRequest;
   }
 
   setDirectory(directory) {

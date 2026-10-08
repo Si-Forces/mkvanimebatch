@@ -76,10 +76,14 @@ impl InspectCacheState {
     }
 }
 
-/// Canonicalizes `path` and pairs the result with its Directory Identity: the display form
-/// of the canonical path, which is the only spelling the UI compares directories by.
-fn canonicalize_directory(path: &str) -> Result<(PathBuf, String), String> {
-    let dir = std::fs::canonicalize(path).map_err(|e| format!("Invalid directory path: {e}"))?;
+/// Canonicalizes `path` on the blocking pool and pairs the result with its Directory Identity:
+/// the display form of the canonical path, which is the only spelling the UI compares
+/// directories by.
+async fn canonicalize_directory(path: String) -> Result<(PathBuf, String), String> {
+    let dir = tauri::async_runtime::spawn_blocking(move || std::fs::canonicalize(path))
+        .await
+        .map_err(|e| format!("Async runtime error: {e}"))?
+        .map_err(|e| format!("Invalid directory path: {e}"))?;
     let identity = display_canonical_path(&dir.to_string_lossy());
     Ok((dir, identity))
 }
@@ -88,7 +92,9 @@ fn canonicalize_directory(path: &str) -> Result<(PathBuf, String), String> {
 /// `canonical_dir`. The UI resolves a typed path through it before comparing directories.
 #[tauri::command]
 pub async fn canonical_directory(path: String) -> Result<String, String> {
-    canonicalize_directory(&path).map(|(_, identity)| identity)
+    canonicalize_directory(path)
+        .await
+        .map(|(_, identity)| identity)
 }
 
 #[tauri::command]
@@ -99,9 +105,13 @@ pub async fn inspect_directory<R: tauri::Runtime>(
     path: String,
     options: Option<InspectOptions>,
 ) -> Result<InspectionManifest, String> {
+    // A closing app refuses before it touches the path, as it did when the check came first.
+    // Canonicalizing runs before the start lock, whose guard is not `Send` and so cannot be held
+    // across this await; the check repeats under the lock for a shutdown that began meanwhile.
+    state.ensure_accepting_starts()?;
+    let (dir, identity) = canonicalize_directory(path).await?;
     let start_lock = state.start_lock.lock().map_err(|e| e.to_string())?;
     state.ensure_accepting_starts()?;
-    let (dir, identity) = canonicalize_directory(&path)?;
     if !dir.is_dir() {
         return Err("Directory does not exist or is not a directory".into());
     }
@@ -371,15 +381,24 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         // A dotted spelling of the directory.
         let spelled = tmp.path().join(".");
-        let expected =
-            display_canonical_path(&std::fs::canonicalize(tmp.path()).unwrap().to_string_lossy());
 
         let identity = tauri::async_runtime::block_on(canonical_directory(
             spelled.to_string_lossy().into_owned(),
         ))
         .unwrap();
 
-        assert_eq!(identity, expected);
+        // The identity names the same real directory, in the display form.
+        assert_eq!(
+            std::fs::canonicalize(&identity).unwrap(),
+            std::fs::canonicalize(tmp.path()).unwrap()
+        );
+        assert!(!identity.starts_with(r"\\?\"), "{identity}");
+        // Only Windows has a verbatim prefix to strip, so elsewhere the canonical path is the identity.
+        #[cfg(not(windows))]
+        assert_eq!(
+            identity,
+            std::fs::canonicalize(tmp.path()).unwrap().to_string_lossy()
+        );
     }
 
     #[test]
@@ -498,7 +517,7 @@ mod tests {
             canonical_target
         );
 
-        // Canonical Directory Identity: the emitted BatchStart must carry the same
+        // Directory Identity: the emitted BatchStart must carry the same
         // display form as the snapshot and the Inspection Manifest's `canonical_dir`.
         // A Windows verbatim `\\?\` prefix surviving here splits directory identity
         // and silently drops Queue Selection on the next same-directory rescan.

@@ -442,20 +442,13 @@ function saveSubAssignment() {
   remuxQueue.applyAssignmentToCard(itemId);
 }
 
-// The newest scan request of each queue. `canonical_directory` answers in IPC order, so a
-// request overtaken before its answer arrives must not start a scan, as a later `startScan`
-// supersedes an earlier one.
-const latestScanRequest = new Map();
-
 export async function scanInputDirectory(path, mode, { force = false, options } = {}) {
   const tracker = queueFor(mode);
-  const request = (latestScanRequest.get(tracker) ?? 0) + 1;
-  latestScanRequest.set(tracker, request);
+  const request = tracker.beginScanRequest();
   let scanToken = null;
   path = path.trim();
   if (!path) {
     tracker.reset();
-    tracker.lastScannedPath = null;
     jobCoordinator.syncControls();
     return false;
   }
@@ -463,7 +456,7 @@ export async function scanInputDirectory(path, mode, { force = false, options } 
   // Identity first. A path the bridge cannot resolve stays as typed, and `inspect_directory`
   // then reports why.
   const directory = await invoke("canonical_directory", { path }).catch(() => path);
-  if (latestScanRequest.get(tracker) !== request) return false;
+  if (!tracker.isNewestScanRequest(request)) return false;
   try {
     if (!force && tracker.reuseInspection(directory)) return true;
 

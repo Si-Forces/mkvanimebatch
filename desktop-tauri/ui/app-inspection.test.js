@@ -22,13 +22,14 @@ test("app forwards preflight options to Tauri while browse uses defaults", async
     globalThis.window = previousWindow;
   });
   const { scanInputDirectory } = await import("./app.js");
+  const inspected = () => calls.filter(([command]) => command === "inspect_directory");
   assert.equal(await scanInputDirectory("/release", "remux"), true);
   assert.deepEqual(calls[0], ["canonical_directory", { path: "/release" }]);
-  assert.deepEqual(calls[1], ["inspect_directory", { path: "/release", options: undefined }]);
+  assert.deepEqual(inspected(), [["inspect_directory", { path: "/release", options: undefined }]]);
 
   const options = { noCache: true };
   assert.equal(await scanInputDirectory("/release", "remux", { force: true, options }), true);
-  assert.deepEqual(calls[3], ["inspect_directory", { path: "/release", options }]);
+  assert.deepEqual(inspected().at(-1), ["inspect_directory", { path: "/release", options }]);
 });
 
 /** The Effective Settings the harness answers `get_default_settings` and `resolve_batch_request` with. */
