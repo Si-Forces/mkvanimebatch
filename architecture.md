@@ -30,7 +30,7 @@ flowchart TD
     subgraph DesktopContext["Desktop Application Context (desktop-tauri)"]
         UI["Plain JS / CSS UI\n(app.js)"]
         QT["Queue Tracker\n(queue-state.js / queue-view.js)"]
-        JC["Job Controller & Coordinators\n(job-controller.js / job-coordinator.js / inspection-coordinator.js)"]
+        JC["Job Controller & Coordinators\n(job-controller.js / job-coordinator.js / inspection-coordinator.js / directory-scan.js)"]
         EB["Engine Bridge\n(desktop-tauri/src-tauri)"]
         TS["System Telemetry\n(sysinfo)"]
     end
@@ -168,6 +168,7 @@ mkvanimebatch/
         ├── job-controller.js        # BatchRequest from the form, engine resolve check, preflight, run/stop, job event routing
         ├── job-coordinator.js       # Job lifecycle state machine (idle, restoring, starting, running, stopping): one active job across the Remux and Extract views, and the startup snapshot restore
         ├── inspection-coordinator.js# Shares in-flight inspect_directory calls per (Directory Identity, noCache)
+        ├── directory-scan.js        # scanInputDirectory: resolves the typed path to its Directory Identity, inspects it through the one Inspection Coordinator, and drives the mode's Queue Tracker
         ├── telemetry.js             # Polls get_system_telemetry (1 s during a job, 30 s idle, paused while hidden)
         ├── stepper.js               # nextStepValue: the number-input stepper's next value, starting an empty field from its data-auto-value
         ├── log-classify.js          # Maps log lines to console classes (line-err, line-skip, line-ok, line-warn, line-info, line-done); caps the pending log queue
@@ -448,6 +449,7 @@ flowchart LR
         UIApp["app.js\nStartup, Presets"]
         UICoord["job-coordinator.js\nJob Lifecycle, Snapshot Restore"]
         UIJob["job-controller.js\nRun / Stop"]
+        UIScan["directory-scan.js\nDirectory Scan"]
         UIQueue["queue-state.js\nQueue State"]
         UIView["queue-view.js\nQueueTracker"]
         UITel["telemetry.js\nPolling"]
@@ -469,10 +471,11 @@ flowchart LR
 
     UIApp --> UIJob
     UIApp --> UICoord
+    UIApp --> UIScan
     UICoord -->|get_job_snapshot| Cmds
-    UIApp -->|canonical_directory| Cmds
-    UIApp -->|inspect_directory| Cmds
-    UIJob -->|inspect_directory preflight| Cmds
+    UIScan -->|canonical_directory| Cmds
+    UIScan -->|inspect_directory| Cmds
+    UIJob -->|preflight scan| UIScan
     UIJob -->|run_job BatchRequest| Cmds
     UIJob -->|stop_job| Proc
     UITel -->|get_system_telemetry| Telem
@@ -515,7 +518,7 @@ The engine runs inside the desktop process (ADR-0007, ADR-0008). `commands.rs` k
 5. **Directory Identity** (the canonical form of a directory):
    - Every Directory Identity crossing the bridge into the Queue Tracker is the **display form** of the canonical path: a Windows verbatim (`\\?\`) prefix is stripped and `\\?\UNC\` is rewritten to `\\` (`job.rs`, `display_canonical_path`).
    - This applies to the `canonical_directory` command's result, the Inspection Manifest's `canonical_dir`, the Job Snapshot's `input_dir`, and `JobEvent::BatchStart.input_dir`. The engine still receives and uses the real `PathBuf` for filesystem work; only the projected form is normalized, in the bridge. `canonical_directory` and `inspect_directory` share one helper (`canonicalize_directory`), so they cannot disagree.
-   - `scanInputDirectory` resolves the typed path through `canonical_directory` before it compares or inspects anything; a path the command rejects stays as typed, and `inspect_directory` reports the error. The UI never normalizes a path itself: the Queue Tracker compares identities with `===` (`isSameDirectory`).
+   - `scanInputDirectory` (`directory-scan.js`) resolves the typed path through `canonical_directory` before it compares or inspects anything; a path the command rejects stays as typed, and `inspect_directory` reports the error. The UI never normalizes a path itself: the Queue Tracker compares identities with `===` (`isSameDirectory`).
    - The four must agree because that comparison is byte for byte. A mismatch, for example a raw verbatim `BatchStart.input_dir` against a stripped `canonical_dir`, silently drops Queue Selection and Active Batch ordering on the next same-directory rescan. The UI once normalized paths itself, and a release directory whose name ends in `.` or a space then normalized differently in each form.
 6. **Linux desktop environment defaults (`lib.rs`, ADR-0015)**:
    - Defaults `GDK_BACKEND=x11,wayland` to avoid `EGL_BAD_PARAMETER` aborts under native Wayland.
@@ -561,7 +564,7 @@ The frontend is plain ES modules with no framework.
 8. **Theme**: follows `prefers-color-scheme` live until the user toggles the theme; the choice is then stored in `localStorage` (`mkv-theme`) and pinned on the native window via `set_window_theme`.
 9. **Job lifecycle (`job-coordinator.js`)**:
    - `createJobCoordinator()` holds the one job the app runs at a time, across the Remux and Extract views, as a state machine: the phases `idle`, `restoring`, `starting`, `running` and `stopping`, plus the mode that owns the batch. The state is private. Controllers read `phase`, `activeMode`, `isStopping` and `canStart()`, and move it only through named transitions. `activeMode` is set while starting, running or stopping and stays `null` while restoring, so a restored queue can still be adjusted.
-   - The transitions are `begin(mode)` (`idle` to `starting`), `launched()` (`starting` to `running`), `requestStop()` (`starting` or `running` to `stopping`), `stopFailed()` (`stopping` back to `running`, when `stop_job` is rejected while the job still runs) and `finish()` (any phase to `idle`, idempotent). Each returns `true` when it applied. From any other phase it returns `false` and changes nothing. Every applied transition re-renders the registered controls itself; `syncControls()` stays public for changes the coordinator does not own: `app.js` calls it when an inspection scan starts, fails or ends, and once at startup.
+   - The transitions are `begin(mode)` (`idle` to `starting`), `launched()` (`starting` to `running`), `requestStop()` (`starting` or `running` to `stopping`), `stopFailed()` (`stopping` back to `running`, when `stop_job` is rejected while the job still runs) and `finish()` (any phase to `idle`, idempotent). Each returns `true` when it applied. From any other phase it returns `false` and changes nothing. Every applied transition re-renders the registered controls itself; `syncControls()` stays public for changes the coordinator does not own: `app.js` calls it when an inspection scan starts, fails or ends (as the `onSettled` it hands `directory-scan.js`), and once at startup.
    - `restore()` owns the startup snapshot restore and holds `restoring` for its duration, which blocks `begin()`. It binds `job-event` and `job-done` first and buffers what they hear, then fetches `get_job_snapshot`. A finished job always sets the status pill (and shows the extract view for an extract job) and returns to `idle`, but its queue replaces the local one only when it has items and the local queue is empty; a finished job with no items ended before `BatchStart`. A running job moves the coordinator to `running` for its mode, hands the two listeners to the controller registered for that mode (`register()` keys controllers by `mode`), and replays the buffered signals in order. A failed fetch is logged and returns to `idle`. `app.js` calls it once at startup.
    - `JobController` keeps the Batch Request, the preflight, the listeners and the job ID, and drives the transitions. On `job-done` the pill is `cancelled` only when the terminal `batch_complete` said so or the code is `-1`, and `done` only when it said success and the code is `0`; a Stop still pending does not make a completed job `cancelled`.
 
@@ -595,7 +598,7 @@ The frontend is plain ES modules with no framework.
 sequenceDiagram
     autonumber
     actor User
-    participant UI as Desktop UI (app.js)
+    participant UI as Desktop UI (app.js, directory-scan.js)
     participant Cmd as commands::inspect_directory / canonical_directory
     participant Scan as ScanState
     participant Core as manifest::generate_inspection_manifest
