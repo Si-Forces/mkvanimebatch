@@ -1,6 +1,6 @@
 import { buildTrackAssignmentsForManifest, isSameDirectory } from "./queue-state.js";
 
-/** Webview event names emitted by the engine bridge; must match `commands.rs`. */
+/** Webview event names emitted by the engine bridge; must match `job.rs`. */
 export const JOB_EVENT = "job-event";
 export const JOB_LOG = "job-log";
 export const JOB_DONE = "job-done";

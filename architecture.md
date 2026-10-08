@@ -151,8 +151,10 @@ mkvanimebatch/
     │   └── src/
     │       ├── lib.rs               # Tauri builder, command registration, exit handling, Linux environment defaults
     │       ├── main.rs              # Binary entry point
-    │       ├── commands.rs          # inspect_directory, resolve_batch_request, run_job, clear_cache, pickers, presets, default settings, snapshot; job supervisor
-    │       ├── process.rs           # JobState/ScanState, job slot, stop and shutdown, JobSnapshot projection
+    │       ├── commands.rs          # inspect_directory, resolve_batch_request, run_job (`launch`), clear_cache, pickers, presets, default settings, get_job_snapshot
+    │       ├── job.rs               # JobState (Job Slot, supervisor, two-phase stop, start gate), JobSink seam and its Tauri adapter
+    │       ├── snapshot.rs          # Job Snapshot types and SnapshotStore: event reduction and Item Settlement
+    │       ├── process.rs           # ScanState, job and scan teardown, shutdown, close_window
     │       ├── telemetry.rs         # sysinfo CPU, RAM, and engine process write-rate sampling
     │       └── window.rs            # Frameless window controls, drag/resize, native window theme
     └── ui/                          # Webview frontend (plain ES modules and CSS)
@@ -452,8 +454,10 @@ flowchart LR
     end
 
     subgraph RustBridge["Engine Bridge (src-tauri/src/)"]
-        Cmds["commands.rs\nCommands & Job Supervisor"]
-        Proc["process.rs\nJobState, ScanState, Stop"]
+        Cmds["commands.rs\nTauri Commands"]
+        Job["job.rs\nJobState, Job Supervisor, JobSink"]
+        Snap["snapshot.rs\nJob Snapshot"]
+        Proc["process.rs\nScanState, Stop & Shutdown"]
         Telem["telemetry.rs\nsysinfo Sampling"]
         Win["window.rs\nFrameless Window"]
     end
@@ -474,38 +478,41 @@ flowchart LR
     UIApp -->|window commands| Win
 
     Cmds --> Proc
+    Cmds --> Job
+    Proc --> Job
+    Job --> Snap
     Cmds -->|async .await| CoreScan
-    Cmds -->|async_runtime::spawn| CorePipe
+    Job -->|async_runtime::spawn| CorePipe
 
-    CorePipe -->|JobEvent mpsc| Cmds
-    CorePipe -->|Log line mpsc| Cmds
-    Cmds -->|emit job-event / job-done| UIJob
-    Cmds -->|emit job-log| UIJob
+    CorePipe -->|JobEvent mpsc| Job
+    CorePipe -->|Log line mpsc| Job
+    Job -->|JobSink: emit job-event / job-done| UIJob
+    Job -->|JobSink: emit job-log| UIJob
     UIJob --> UIView
     UIView --> UIQueue
 ```
 
-### 5.1 In-Process Engine Bridge (`commands.rs`, `process.rs`)
+### 5.1 In-Process Engine Bridge (`commands.rs`, `job.rs`, `snapshot.rs`, `process.rs`)
 
-The engine runs inside the desktop process (ADR-0007, ADR-0008). Registered Tauri commands: `inspect_directory`, `resolve_batch_request`, `run_job`, `stop_job`, `clear_cache`, `pick_directory`, `pick_subtitle_file`, `get_preset_profiles`, `get_default_settings`, `get_job_snapshot`, `get_system_telemetry`, `close_window`, and the window controls `minimize_window`, `toggle_maximize`, `is_maximized`, `start_drag`, `start_resize`, `set_window_theme`. Events emitted to the webview: `job-event` (a `JobEvent` plus `mode` and `job_id`), `job-log` (a batch of log lines), `job-done` (`{mode, job_id, code}`, code `0` completed, `-1` cancelled, `1` otherwise), and `cleanup-error`.
+The engine runs inside the desktop process (ADR-0007, ADR-0008). `commands.rs` keeps the Tauri commands thin. `job.rs` is the active-job module: `JobState` owns the Job Slot, the supervisor, the two-phase stop of the job, and the gate that refuses starts once shutdown begins. `snapshot.rs` owns the Job Snapshot. `process.rs` owns the directory-scan registry and the teardown that stops the job and the scan together. The supervisor reports through a `JobSink` seam (`event`, `logs`, `done`): the `AppHandle` adapter emits the three events below, and a test records them, so a job runs without a Tauri app. Registered Tauri commands: `inspect_directory`, `resolve_batch_request`, `run_job`, `stop_job`, `clear_cache`, `pick_directory`, `pick_subtitle_file`, `get_preset_profiles`, `get_default_settings`, `get_job_snapshot`, `get_system_telemetry`, `close_window`, and the window controls `minimize_window`, `toggle_maximize`, `is_maximized`, `start_drag`, `start_resize`, `set_window_theme`. Events emitted to the webview: `job-event` (a `JobEvent` plus `mode` and `job_id`), `job-log` (a batch of log lines), `job-done` (`{mode, job_id, code}`, code `0` completed, `-1` cancelled, `1` otherwise), and `cleanup-error`.
 
-1. **In-memory channels**: the engine sends `JobEvent`s and log lines over Tokio mpsc channels. The supervisor forwards log lines in batches of up to 25 lines or every 25 ms.
+1. **In-memory channels**: the engine sends `JobEvent`s and log lines over Tokio mpsc channels. The supervisor forwards log lines to the sink in batches of up to 25 lines or every 25 ms.
 2. **Job slot & panic isolation**:
-   - `JobState` holds at most one `JobSlot`; `run_job` fails while a job is running or stopping, and after shutdown has begun.
+   - `JobState` holds the Job Slot, which holds at most one job; `run_job` fails while a job is running or stopping, and after shutdown has begun. Only the job's supervisor releases the slot, after `job-done`.
    - `resolve_batch_request` runs the same `resolve_canonical` and returns the request's Effective Settings, or its first validation error, without touching the slot. The webview calls it before the preflight scan, while `selected_items` and `assignments` are still unset.
-   - `run_job` resolves the request (`resolve_canonical`: canonicalize `input_dir`, then `BatchRequest::resolve`), then spawns the pipeline with `tauri::async_runtime::spawn` and a supervisor task. The supervisor holds back the engine's `BatchComplete` until the pipeline future returns, then settles the items the pipeline left open (below), publishes one terminal `job-event` and `job-done`, and releases the slot. A pipeline error or panic caught at the `JoinHandle` becomes a failed terminal event (with `error` or `panic`) instead of crashing the app. This depends on the release profile unwinding on panic; the root `Cargo.toml` must never set `panic = "abort"`.
-   - **Item Settlement ([ADR-0008](./docs/adr/0008-typed-engine-bridge-and-track-assignment-model.md#amendment--2026-10-07-item-settlement))**: before it applies the terminal, the supervisor asks `JobState::settlement_events` for one `ItemComplete` per item of the snapshot that is still queued or processing, in batch order. Each is applied through `update_snapshot` and emitted as a `job-event` with the `mode` and `job_id` of every other event, so the webview and a reloaded snapshot see the same events. A stop settles them as `cancelled` with the reason `Operation cancelled`; otherwise they are `error`s carrying the terminal's `error`, else its `panic` text, else `Batch failed`, or `Protocol error: missing completion event` when the engine reported success with items open. An item that had started reports a `duration_sec` measured from the monotonic `Instant` recorded on its `ItemStart` (not serialized); one that never started has none. The terminal is then applied and emitted as before, and `job-done` keeps its codes; a success terminal that needed settling leaves the snapshot `error`, so its code is `1`.
-3. **Two-phase stop (ADR-0007)** (`stop_job`, and `close_window`/app exit for every owned job and scan):
+   - `run_job` resolves the request (`resolve_canonical`: canonicalize `input_dir`, then `BatchRequest::resolve`), then hands the pipeline future to `JobState::start`, which reserves the slot, begins the Job Snapshot, and spawns the pipeline with `tauri::async_runtime::spawn` and a supervisor task. The supervisor holds back the engine's `BatchComplete` until the pipeline future returns, then settles the items the pipeline left open (below), publishes one terminal `job-event` and `job-done`, and releases the slot. A pipeline error or panic caught at the `JoinHandle` becomes a failed terminal event (with `error` or `panic`) instead of crashing the app. This depends on the release profile unwinding on panic; the root `Cargo.toml` must never set `panic = "abort"`.
+   - **Item Settlement ([ADR-0008](./docs/adr/0008-typed-engine-bridge-and-track-assignment-model.md#amendment--2026-10-07-item-settlement))**: before it applies the terminal, the supervisor asks `SnapshotStore::settlement_events` for one `ItemComplete` per item of the snapshot that is still queued or processing, in batch order. Each is applied through `SnapshotStore::update` and emitted as a `job-event` with the `mode` and `job_id` of every other event, so the webview and a reloaded snapshot see the same events. A stop settles them as `cancelled` with the reason `Operation cancelled`; otherwise they are `error`s carrying the terminal's `error`, else its `panic` text, else `Batch failed`, or `Protocol error: missing completion event` when the engine reported success with items open. An item that had started reports a `duration_sec` measured from the monotonic `Instant` recorded on its `ItemStart` (not serialized); one that never started has none. The terminal is then applied and emitted as before, and `job-done` keeps its codes; a success terminal that needed settling leaves the snapshot `error`, so its code is `1`.
+3. **Two-phase stop (ADR-0007)** (`JobState::stop` for the job; `stop_job`, and `close_window`/app exit through `process.rs` for every owned job and scan):
    - **Phase 1 (cooperative)**: cancels the job's `CancellationToken` and waits up to 2 seconds (`STOP_TIMEOUT`) for the supervisor to release the slot.
    - **Phase 2 (abort)**: if the slot is still held, aborts only the pipeline task (`slot.pipeline_abort.abort()`) and waits up to 1 more second. The supervisor survives to publish the cancelled terminal event and `job-done`, then releases the slot.
    - `close_window` and the `ExitRequested` handler first stop new jobs and scans from starting (`begin_shutdown`), then run both stops (`cleanup_owned_processes`). If cleanup fails, starts are allowed again (`cancel_shutdown`) and the error is returned, or emitted as `cleanup-error`. A Close while a Stop is pending is allowed: both cancel the same token and wait on the same slot, and a second abort is a no-op.
    - The waits are synchronous and never run on the main thread. `stop_job` and `close_window` are async commands that hand the teardown to Tokio's blocking pool (`run_teardown`), not to a Tokio worker the supervisor needs; `ExitRequested` runs it on its own thread. The window keeps painting and taking input while it waits. `stop_job` still resolves only after teardown, or with the timeout error.
 4. **`JobSnapshot` projection (ADR-0008, ADR-0009)**:
-   - The supervisor reduces every forwarded `JobEvent`, the settlement `ItemComplete`s included, into an in-memory `JobSnapshot` (status, input directory, item order, per-item status, progress, reason, error, and duration). `BatchComplete` writes no item outcome: no item is open by then, and a success terminal that still finds one open (or an error item) leaves the snapshot `error`.
-   - The snapshot also holds the job's Effective Settings (`effective_settings`). `run_job` sets them once, from the resolved config, when it begins the snapshot; no event changes them.
+   - The supervisor reduces every forwarded `JobEvent`, the settlement `ItemComplete`s included, into an in-memory `JobSnapshot`, held by `SnapshotStore` (status, input directory, item order, per-item status, progress, reason, error, and duration). `BatchComplete` writes no item outcome: no item is open by then, and a success terminal that still finds one open (or an error item) leaves the snapshot `error`.
+   - The snapshot also holds the job's Effective Settings (`effective_settings`). `JobState::start` sets them once, from the config `run_job` resolved, when it begins the snapshot; no event changes them.
    - On startup the webview's Job Coordinator calls `get_job_snapshot()` (§5.3, item 9) and rebuilds the queue from it, so a reload keeps the running or finished batch, its outcomes, its durations, and, for a running job, the settings its worker chips show. Starting a new inspection clears the snapshot unless a job is active.
 5. **Canonical directory identity**:
-   - Every directory identity crossing the bridge into the Queue Tracker is the **display form** of the canonical path: a Windows verbatim (`\\?\`) prefix is stripped and `\\?\UNC\` is rewritten to `\\` (`commands.rs`, `display_canonical_path`).
+   - Every directory identity crossing the bridge into the Queue Tracker is the **display form** of the canonical path: a Windows verbatim (`\\?\`) prefix is stripped and `\\?\UNC\` is rewritten to `\\` (`job.rs`, `display_canonical_path`).
    - This applies to the Inspection Manifest's `canonical_dir`, the Job Snapshot's `input_dir`, and `JobEvent::BatchStart.input_dir`. The engine still receives and uses the real `PathBuf` for filesystem work; only the projected form is normalized, in the bridge.
    - The three must agree because Queue Tracker directory identity is a string comparison. A mismatch, for example a raw verbatim `BatchStart.input_dir` against a stripped `canonical_dir`, silently drops Queue Selection and Active Batch ordering on the next same-directory rescan, because a release directory whose name ends in `.` or a space normalizes differently in each form.
 6. **Linux desktop environment defaults (`lib.rs`, ADR-0015)**:
@@ -629,8 +636,8 @@ sequenceDiagram
     autonumber
     actor User
     participant UI as Desktop UI (job-controller.js)
-    participant Cmd as commands::run_job / supervisor
-    participant Proc as JobState
+    participant Cmd as commands::run_job / job supervisor
+    participant Proc as JobState / SnapshotStore
     participant Pipe as pipeline::BatchPipeline
     participant RX as remux::execute_remux_job
     participant FF as ffmpeg (libopus)
@@ -641,7 +648,7 @@ sequenceDiagram
     UI->>Cmd: inspect_directory(path, {noCache}) (forced preflight)
     UI->>Cmd: run_job(BatchRequest)
     Cmd->>Cmd: BatchRequest::resolve() (fail fast: validation, preset layering, defaults)
-    Cmd->>Proc: reserve_job_slot(), begin_snapshot() (with the Effective Settings)
+    Cmd->>Proc: JobState::start: reserve the Job Slot, begin the Job Snapshot (with the Effective Settings)
     Cmd->>Pipe: set the session cache on the config, spawn pipeline + supervisor
     Cmd-->>UI: job_id
     Pipe-->>Cmd: JobEvent::BatchStart
@@ -679,10 +686,10 @@ sequenceDiagram
 
     Pipe-->>Cmd: JobEvent::BatchComplete (held until the pipeline returns)
     opt Items still queued or processing (stop, error, panic)
-        Cmd->>Proc: settlement_events(terminal), update_snapshot(ItemComplete) per open item
+        Cmd->>Proc: settlement_events(terminal), update(ItemComplete) per open item
         Cmd-->>UI: job-event (ItemComplete → settled card), before the terminal
     end
-    Cmd->>Proc: update_snapshot(terminal)
+    Cmd->>Proc: update(terminal)
     Cmd-->>UI: job-event (BatchComplete), job-done {mode, job_id, code}
     Cmd->>Proc: release_slot()
 ```
@@ -734,8 +741,8 @@ sequenceDiagram
 | [**0004**](docs/adr/0004-resolution-precedence-and-conventions.md) | Resolution Precedence and Conventions | Subtitle precedence ladder (Manual → Same-Directory → Embedded → Ancestor → Fallback), cover ranking rules, fractional episode passthrough. Includes the [2026-09-24 amendment](docs/adr/0004-resolution-precedence-and-conventions.md#amendment--2026-09-24) (embedded-before-ancestor subtitle ordering, cover ranking). | `assets.rs`, `domain.rs` |
 | [**0005**](docs/adr/0005-rust-engine-migration-and-workspace-topology.md) | Rust Media Engine Migration | Root workspace topology split into Media Engine and Desktop contexts. Implemented. | `Cargo.toml`, `CONTEXT-MAP.md` |
 | [**0006**](docs/adr/0006-hybrid-ebml-probing-and-channel-streaming.md) | Hybrid EBML Probing & Channel Streaming | Native EBML parser with `mkvmerge -J` fallback; Tokio mpsc event channels. Implemented. | `ebml.rs`, `scan.rs`, `pipeline.rs` |
-| [**0007**](docs/adr/0007-in-process-engine-bridge.md) | In-Process Engine Bridge | Retired subprocess sidecars; Tauri calls `mkv-core` directly with panic isolation and two-phase stop. Implemented. | `commands.rs`, `process.rs` |
-| [**0008**](docs/adr/0008-typed-engine-bridge-and-track-assignment-model.md) | Typed Engine Bridge & Track Assignments | Typed `BatchRequest`, fail-fast preflight validation, and `JobSnapshot` projection. Includes the [2026-09-24](docs/adr/0008-typed-engine-bridge-and-track-assignment-model.md#amendment--2026-09-24) and [2026-09-26](docs/adr/0008-typed-engine-bridge-and-track-assignment-model.md#amendment--2026-09-26) amendments (fail-closed resolution, the two preflight failure points, active batch restore across reloads, removal of `keep_fonts`), the [2026-10-06](docs/adr/0008-typed-engine-bridge-and-track-assignment-model.md#amendment--2026-10-06) amendment (`BatchRequest::resolve` replaces `validate`; Effective Settings), and the [2026-10-06 desktop amendment](docs/adr/0008-typed-engine-bridge-and-track-assignment-model.md#amendment--2026-10-06-desktop-bridge) (the Job Snapshot carries the Effective Settings; `resolve_batch_request`; the preset catalog comes only from `get_preset_profiles`), and the [2026-10-07 amendment](docs/adr/0008-typed-engine-bridge-and-track-assignment-model.md#amendment--2026-10-07-item-settlement) (Item Settlement: the Engine Bridge gives a terminal `ItemComplete` to every item the Batch Pipeline left open). | `request.rs`, `preset.rs`, `process.rs` |
+| [**0007**](docs/adr/0007-in-process-engine-bridge.md) | In-Process Engine Bridge | Retired subprocess sidecars; Tauri calls `mkv-core` directly with panic isolation and two-phase stop. Implemented. | `commands.rs`, `job.rs`, `process.rs` |
+| [**0008**](docs/adr/0008-typed-engine-bridge-and-track-assignment-model.md) | Typed Engine Bridge & Track Assignments | Typed `BatchRequest`, fail-fast preflight validation, and `JobSnapshot` projection. Includes the [2026-09-24](docs/adr/0008-typed-engine-bridge-and-track-assignment-model.md#amendment--2026-09-24) and [2026-09-26](docs/adr/0008-typed-engine-bridge-and-track-assignment-model.md#amendment--2026-09-26) amendments (fail-closed resolution, the two preflight failure points, active batch restore across reloads, removal of `keep_fonts`), the [2026-10-06](docs/adr/0008-typed-engine-bridge-and-track-assignment-model.md#amendment--2026-10-06) amendment (`BatchRequest::resolve` replaces `validate`; Effective Settings), and the [2026-10-06 desktop amendment](docs/adr/0008-typed-engine-bridge-and-track-assignment-model.md#amendment--2026-10-06-desktop-bridge) (the Job Snapshot carries the Effective Settings; `resolve_batch_request`; the preset catalog comes only from `get_preset_profiles`), and the [2026-10-07 amendment](docs/adr/0008-typed-engine-bridge-and-track-assignment-model.md#amendment--2026-10-07-item-settlement) (Item Settlement: the Engine Bridge gives a terminal `ItemComplete` to every item the Batch Pipeline left open). | `request.rs`, `preset.rs`, `job.rs`, `snapshot.rs` |
 | [**0009**](docs/adr/0009-streaming-card-progress-and-item-duration-model.md) | Streaming Card Progress & Item Duration | Engine-owned `duration_sec`, indeterminate-to-determinate card progress, 1 Hz presentation heartbeat. Implemented. | `pipeline.rs`, `queue-state.js`, `queue-view.js` |
 | [**0010**](docs/adr/0010-mainline-rust-cutover-and-python-decommissioning.md) | Mainline Rust Engine Cutover | Removed the Python codebase; unified 1.0.0 versioning and CI/release status gates. Implemented. | Root `Cargo.toml`, `.github/workflows/ci.yml`, `.github/workflows/release.yml` |
 | [**0011**](docs/adr/0011-selected-items-queue-and-concurrency-pipelining.md) | Selected Items Queue & Concurrency Pipelining | Global Tokio JoinSet, I/O semaphore, parallel probing, per-item track assignment modal. Implemented. | `pipeline.rs`, `request.rs`, `app.js` |
