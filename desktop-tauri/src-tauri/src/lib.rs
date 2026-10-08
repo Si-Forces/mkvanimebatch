@@ -1,9 +1,12 @@
 mod commands;
+mod job;
 mod process;
+mod snapshot;
 mod telemetry;
 mod window;
 
-use process::{begin_shutdown, cancel_shutdown, cleanup_owned_processes, JobState, ScanState};
+use job::JobState;
+use process::{begin_shutdown, cancel_shutdown, cleanup_owned_processes, ScanState};
 use tauri::{Emitter, Manager};
 
 /// Host `libwayland-client.so.0` locations to preload inside an AppImage.
