@@ -113,6 +113,7 @@ impl JobState {
             effective_settings,
             cancel_token,
         } = config;
+        // Slot, then snapshot: the lock order `clear_snapshot` relies on.
         let mut lock = self.reserve()?;
         let job_id = self.0.next_id.fetch_add(1, Ordering::SeqCst);
         self.0
@@ -265,9 +266,12 @@ impl JobState {
         self.0.snapshot.get()
     }
 
-    /// Drops the Job Snapshot unless a job is active.
+    /// Drops the Job Snapshot unless a job holds the Job Slot; a poisoned slot lock counts as no
+    /// job. Holds the slot lock across the clear, in the slot-then-snapshot order `start` takes,
+    /// so a start cannot reserve the slot and begin its snapshot between the check and the clear.
     pub(crate) fn clear_snapshot(&self) {
-        if self.is_active() {
+        let lock = self.0.slot.lock();
+        if lock.as_ref().is_ok_and(|slot| slot.is_some()) {
             return;
         }
         self.0.snapshot.clear();
@@ -437,7 +441,9 @@ async fn forward_logs(sink: &impl JobSink, mut log_rx: LogReceiver, flush_every:
         }
     };
     let mut batch = Vec::with_capacity(LOG_BATCH_MAX_LINES);
-    let mut interval = tokio::time::interval(flush_every);
+    // `interval` would tick at once; the first flush is due one period from now.
+    let mut interval =
+        tokio::time::interval_at(tokio::time::Instant::now() + flush_every, flush_every);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
@@ -488,7 +494,7 @@ pub(crate) mod test_support {
     use super::*;
     use crate::snapshot::test_support::effective_settings;
     use serde_json::Value;
-    use std::sync::Condvar;
+    use std::sync::{Condvar, TryLockError};
 
     fn dummy_slot(id: u64) -> JobSlot {
         JobSlot {
@@ -541,6 +547,16 @@ pub(crate) mod test_support {
                 .unwrap()
                 .as_ref()
                 .is_some_and(|slot| slot.cancel_token.is_cancelled())
+        }
+
+        /// Whether another thread holds the slot lock right now.
+        pub(crate) fn slot_is_locked(&self) -> bool {
+            matches!(self.0.slot.try_lock(), Err(TryLockError::WouldBlock))
+        }
+
+        /// Holds the Job Snapshot lock; see `SnapshotStore::hold`.
+        pub(crate) fn hold_snapshot(&self) -> MutexGuard<'_, Option<JobSnapshot>> {
+            self.0.snapshot.hold()
         }
     }
 
@@ -805,6 +821,31 @@ mod tests {
             *dones.lock().unwrap(),
             [serde_json::json!({ "mode": "remux", "job_id": 7, "code": -1 })]
         );
+    }
+
+    #[test]
+    fn a_partial_batch_flushes_when_the_interval_elapses() {
+        let sink = RecordingSink::default();
+        let (log_tx, log_rx) = mkv_core::pipeline::create_log_channel(64);
+        let forwarder = {
+            let sink = sink.clone();
+            tauri::async_runtime::spawn(async move {
+                forward_logs(&sink, log_rx, Duration::from_millis(20)).await
+            })
+        };
+
+        log_tx.try_send("a".to_string()).unwrap();
+        log_tx.try_send("b".to_string()).unwrap();
+        // The channel is still open and the batch is not full, so only the interval can flush.
+        assert!(
+            sink.wait_until(Duration::from_secs(2), |recorded| recorded.logs.len() == 1),
+            "a partial batch waited for a full one"
+        );
+        assert_eq!(sink.log_batches()[0], ["a", "b"]);
+
+        drop(log_tx);
+        tauri::async_runtime::block_on(forwarder).unwrap();
+        assert_eq!(sink.log_batches().len(), 1);
     }
 
     #[test]
@@ -1314,6 +1355,47 @@ mod tests {
         assert!(state.snapshot().unwrap().is_some());
 
         state.clear_snapshot();
+        assert!(state.snapshot().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_clear_snapshot_drops_the_snapshot_when_the_slot_is_poisoned() {
+        let state = JobState::default();
+        state.poison_slot();
+        state.begin_snapshot(42);
+
+        state.clear_snapshot();
+        assert!(state.snapshot().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_clear_snapshot_holds_the_slot_until_it_has_cleared() {
+        let state = JobState::default();
+        state.begin_snapshot(42);
+        let guard = state.hold_snapshot();
+
+        // The closure owns the snapshot guard, so a failed assert drops it while unwinding and the
+        // scope can join the blocked clear instead of hanging.
+        thread::scope(|scope| {
+            let clear = scope.spawn(|| state.clear_snapshot());
+            // The clear now waits for the snapshot lock. A start must not get the slot meanwhile:
+            // it would begin a snapshot that the clear then wipes.
+            let waited = std::time::Instant::now();
+            while !state.slot_is_locked() {
+                assert!(
+                    waited.elapsed() < Duration::from_secs(2),
+                    "clear_snapshot never held the slot"
+                );
+                thread::sleep(Duration::from_millis(5));
+            }
+            thread::sleep(Duration::from_millis(50));
+            assert!(
+                state.slot_is_locked(),
+                "clear_snapshot let go of the slot before it cleared"
+            );
+            drop(guard);
+            clear.join().unwrap();
+        });
         assert!(state.snapshot().unwrap().is_none());
     }
 
