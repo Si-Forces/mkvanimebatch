@@ -444,21 +444,26 @@ function saveSubAssignment() {
 
 export async function scanInputDirectory(path, mode, { force = false, options } = {}) {
   const tracker = queueFor(mode);
+  const request = tracker.beginScanRequest();
   let scanToken = null;
   path = path.trim();
   if (!path) {
     tracker.reset();
-    tracker.lastScannedPath = null;
     jobCoordinator.syncControls();
     return false;
   }
+  // The UI compares directories byte for byte, so the typed spelling becomes its Directory
+  // Identity first. A path the bridge cannot resolve stays as typed, and `inspect_directory`
+  // then reports why.
+  const directory = await invoke("canonical_directory", { path }).catch(() => path);
+  if (!tracker.isNewestScanRequest(request)) return false;
   try {
-    if (!force && tracker.reuseInspection(path)) return true;
+    if (!force && tracker.reuseInspection(directory)) return true;
 
-    scanToken = tracker.startScan(path);
+    scanToken = tracker.startScan(directory);
     jobCoordinator.syncControls();
-    const manifest = await inspectDirectory(path, { force, options });
-    const acceptedPath = manifest?.canonical_dir || path;
+    const manifest = await inspectDirectory(directory, { force, options });
+    const acceptedPath = manifest?.canonical_dir || directory;
     return tracker.acceptInspection(scanToken, acceptedPath, manifest);
   } catch (err) {
     console.log("[inspect_directory] failed:", err);

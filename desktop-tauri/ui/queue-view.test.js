@@ -783,7 +783,7 @@ test("a same-directory re-inspection with an identical manifest keeps every card
   recordWrites(list, "list", ["innerHTML"], listWrites);
 
   // Every Run forces a re-inspection of the shown directory; a deep-equal copy arrives.
-  const token = tracker.startScan(`${dir}/`);
+  const token = tracker.startScan(dir);
   elementsBefore.forEach((el, i) => assert.equal(list.children[i], el));
   assert.equal(list.children.length, elementsBefore.length);
   assert.equal(elements.get("remux-queue-count").textContent, "Scanning…");

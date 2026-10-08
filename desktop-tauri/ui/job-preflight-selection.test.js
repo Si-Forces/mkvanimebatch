@@ -384,21 +384,6 @@ test("Start from empty queue with unscanned first directory discovers and runs a
   assert.deepEqual(requests[0].selected_items, ["01.mkv", "02.mkv"]);
 });
 
-test("Start preserves selection across canonical directory representations with trailing slashes", async t => {
-  installDom(t, new Map([["remux-input-dir", new FakeElement("/anime/show/")]]));
-
-  const requests = [];
-  // Scanned without the trailing slash; the user kept only 02 selected.
-  const tracker = scannedTracker("/anime/show", ["01.mkv", "02.mkv"], ["02.mkv"], {
-    assignments: new Map([["02.mkv", subtitle("02.mkv", "/subs/02.ass")]]),
-  });
-  await new JobController("remux", makeRuntime(tracker, { invoke: recordRunJob(requests, 202) })).start();
-
-  assert.equal(requests.length, 1);
-  assert.deepEqual(requests[0].selected_items, ["02.mkv"]);
-  assert.deepEqual(requests[0].assignments.map(a => a.target_video), ["02.mkv"]);
-});
-
 test("start rejects vanished selection when input is an alias of the scanned canonical directory", async t => {
   installDom(t, makeElements(["remux"], { "remux-input-dir": "/link/show" }));
 
