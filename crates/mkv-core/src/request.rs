@@ -71,6 +71,18 @@ fn is_contained_relative_path(norm: &str) -> bool {
         && !path.components().any(|c| matches!(c, Component::ParentDir))
 }
 
+/// True when a raw relative spelling names no file inside the directory it is joined to: empty
+/// or all whitespace, nothing but `.` segments, or a root, drive prefix or `..` component.
+/// Whitespace is part of a name, so only an empty or all-whitespace spelling is blank.
+/// Containment reads the backslash-folded raw spelling, since `ItemId::parse` reshapes a leading
+/// root or drive.
+fn names_no_contained_path(raw: &str) -> bool {
+    let folded = raw.replace('\\', "/");
+    folded.trim().is_empty()
+        || ItemId::parse(raw).as_str().is_empty()
+        || !is_contained_relative_path(&folded)
+}
+
 fn has_mkv_extension(path: &str) -> bool {
     path.rsplit_once('.')
         .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case("mkv"))
@@ -416,10 +428,7 @@ impl BatchRequest {
 
             for assignment in assignments {
                 let target_id = assignment.target_id();
-                // The containment and drive-prefix checks must see the raw spelling, since
-                // `ItemId::parse` reshapes a leading root or drive; the two forms are deliberate.
-                let target_norm = assignment.target_video.trim().replace('\\', "/");
-                if target_id.as_str().is_empty() || !is_contained_relative_path(&target_norm) {
+                if names_no_contained_path(&assignment.target_video) {
                     return Err(format!(
                         "Invalid relative target video path: '{}'",
                         assignment.target_video
@@ -479,9 +488,7 @@ impl BatchRequest {
 
             let mut seen_items: HashSet<ItemId> = HashSet::new();
             for item in items {
-                // Raw spelling for the containment check, as for `target_norm` above.
-                let norm = item.trim().replace('\\', "/");
-                if norm.is_empty() || !is_contained_relative_path(&norm) {
+                if names_no_contained_path(item) {
                     return Err(format!("Invalid relative path in selected_items: '{item}'"));
                 }
 
@@ -1307,7 +1314,7 @@ mod tests {
         req.selected_items = Some(vec!["ep2.mkv".into(), "ep1.mkv".into(), "EP3.MKV".into()]);
         assert!(resolved(&req).is_ok());
 
-        let cases: [(&[&str], &str); 5] = [
+        let cases: [(&[&str], &str); 9] = [
             (&[], "selected_items cannot be empty when specified"),
             (
                 &["ep1.mkv", "./ep1.mkv"],
@@ -1322,12 +1329,74 @@ mod tests {
                 "Selected item is not an MKV file: 'notes.txt'",
             ),
             (&["ghost.mkv"], "Selected item does not exist:"),
+            (&[""], "Invalid relative path in selected_items: ''"),
+            (&["."], "Invalid relative path in selected_items: '.'"),
+            (&["./"], "Invalid relative path in selected_items: './'"),
+            // Whitespace is kept, so a trailing space leaves the spelling without `.mkv`.
+            (
+                &["ep1.mkv "],
+                "Selected item is not an MKV file: 'ep1.mkv '",
+            ),
         ];
         for (items, expected) in cases {
             req.selected_items = Some(items.iter().map(|s| s.to_string()).collect());
             let err = resolved(&req).unwrap_err();
             assert!(err.starts_with(expected), "{items:?}: {err}");
         }
+    }
+
+    #[test]
+    fn test_validate_keeps_whitespace_in_selections_and_targets() {
+        let dir = tempdir().unwrap();
+        touch(dir.path(), " Season 1/ep1.mkv");
+        touch(dir.path(), "ep2.mkv");
+        let sub_path = touch(dir.path(), "ep1.ass");
+
+        // A spelling with leading whitespace names exactly the file that has it.
+        let mut req = minimal_request(dir.path());
+        req.selected_items = Some(vec![" Season 1/ep1.mkv".into()]);
+        req.assignments = Some(vec![subtitle(" Season 1/ep1.mkv", &sub_path)]);
+        assert!(resolved(&req).is_ok());
+
+        // It is not trimmed to name another file: " ep2.mkv" is not "ep2.mkv".
+        req.assignments = None;
+        req.selected_items = Some(vec![" ep2.mkv".into()]);
+        let err = resolved(&req).unwrap_err();
+        assert!(err.starts_with("Selected item does not exist:"), "{err}");
+        req.selected_items = None;
+        req.assignments = Some(vec![subtitle(" ep2.mkv", &sub_path)]);
+        let err = resolved(&req).unwrap_err();
+        assert!(
+            err.starts_with("Assigned target video file does not exist:"),
+            "{err}"
+        );
+
+        // Containment sees the raw spelling: " .." is an ordinary folder name, not a parent
+        // reference, so the entry reaches the existence check instead of the escape check.
+        req.assignments = None;
+        req.selected_items = Some(vec![" ../ep1.mkv".into()]);
+        let err = resolved(&req).unwrap_err();
+        assert!(err.starts_with("Selected item does not exist:"), "{err}");
+        req.selected_items = None;
+        req.assignments = Some(vec![subtitle(" ../ep1.mkv", &sub_path)]);
+        let err = resolved(&req).unwrap_err();
+        assert!(
+            err.starts_with("Assigned target video file does not exist:"),
+            "{err}"
+        );
+
+        // An entry of nothing but whitespace names no file at all.
+        req.assignments = Some(vec![subtitle("   ", &sub_path)]);
+        assert_eq!(
+            resolved(&req).unwrap_err(),
+            "Invalid relative target video path: '   '"
+        );
+        req.assignments = None;
+        req.selected_items = Some(vec!["   ".into()]);
+        assert_eq!(
+            resolved(&req).unwrap_err(),
+            "Invalid relative path in selected_items: '   '"
+        );
     }
 
     #[test]
