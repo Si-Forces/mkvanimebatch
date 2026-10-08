@@ -7,7 +7,6 @@ import {
   getSelectedCount,
   guardUnsettledItems,
   isSameDirectory,
-  normalizeDirectoryPath,
   reduceQueueEvent,
   reconcileQueueSelection,
   reorderItem,
@@ -68,6 +67,7 @@ export class QueueTracker {
     this.state = createQueueState(EMPTY_MANIFEST);
     this.cards = new Map();
     this.scanToken = 0;
+    this.scanRequest = 0;
     this.pendingRenderToken = null;
     this.currentDirectory = null;
     this.lastScannedPath = null;
@@ -184,13 +184,13 @@ export class QueueTracker {
       </div>`;
   }
 
-  startScan(path) {
+  startScan(directory) {
     this.stopHeartbeat();
     this.isScanning = true;
     // Re-inspecting the directory already shown (every Run forces one) leaves
     // its fully rendered cards on screen; populateFromInspection then reuses
     // the unchanged ones instead of flashing the list empty.
-    const keepCards = this.cards.size > 0 && this.pendingRenderToken === null && isSameDirectory(this.currentDirectory, path);
+    const keepCards = this.cards.size > 0 && this.pendingRenderToken === null && isSameDirectory(this.currentDirectory, directory);
     this.cancelRender();
     const token = ++this.scanToken;
     if (!keepCards) {
@@ -212,27 +212,39 @@ export class QueueTracker {
     return token === this.scanToken;
   }
 
-  setDirectory(path) {
-    const directory = normalizeDirectoryPath(path);
+  // A scan request begins when the user asks for a scan, before `canonical_directory` has
+  // answered. The newest request of a queue wins, whatever order the answers come back in:
+  // an older one must not start a scan, as a later `startScan` supersedes an earlier one.
+  // `reset()` leaves the counter alone, so the request an empty path begins still cancels
+  // one pending in this queue.
+  beginScanRequest() {
+    return ++this.scanRequest;
+  }
+
+  isNewestScanRequest(request) {
+    return request === this.scanRequest;
+  }
+
+  setDirectory(directory) {
     this.currentDirectory = directory;
     this.lastScannedPath = directory;
   }
 
-  reuseInspection(path) {
-    if (!this.lastManifest || !isSameDirectory(this.lastScannedPath, path)) return false;
+  reuseInspection(directory) {
+    if (!this.lastManifest || !isSameDirectory(this.lastScannedPath, directory)) return false;
     this.scanToken++;
     this.populateFromInspection(this.lastManifest, true);
     return true;
   }
 
-  acceptInspection(token, path, manifest) {
+  acceptInspection(token, directory, manifest) {
     if (!this.isCurrentScan(token)) return false;
     if (manifest?.version !== 2 || !Array.isArray(manifest.items)) {
       this.failScan();
       return false;
     }
-    this.populateFromInspection(manifest, isSameDirectory(this.currentDirectory, path));
-    this.setDirectory(path);
+    this.populateFromInspection(manifest, isSameDirectory(this.currentDirectory, directory));
+    this.setDirectory(directory);
     return true;
   }
 

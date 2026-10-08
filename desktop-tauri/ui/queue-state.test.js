@@ -15,7 +15,6 @@ import {
   setAllSelected,
   reorderItem,
   getSelectedCount,
-  normalizeDirectoryPath,
   isSameDirectory,
 } from "./queue-state.js";
 
@@ -1025,60 +1024,24 @@ test("reconcileQueueSelection keeps surviving choices and order, appending new I
   assert.deepEqual(previous.order, ["ep2", "ep1", "gone"]);
 });
 
-test("normalizeDirectoryPath and isSameDirectory handle canonical, relative, and Windows paths", () => {
-  // Relative dot segments
-  assert.equal(normalizeDirectoryPath("/anime/x/../show"), "/anime/show");
-  assert.equal(normalizeDirectoryPath("/anime/./show/."), "/anime/show");
-  assert.equal(isSameDirectory("/anime/show", "/anime/x/../show"), true);
-  assert.equal(isSameDirectory("/anime/show/", "/anime/x/../show"), true);
+test("isSameDirectory compares Directory Identities byte for byte", () => {
+  assert.equal(isSameDirectory("/anime/show", "/anime/show"), true);
+  assert.equal(isSameDirectory("C:\\Anime\\Show", "C:\\Anime\\Show"), true);
 
-  // Trailing slash differences
-  assert.equal(isSameDirectory("/anime/show", "/anime/show/"), true);
-  assert.equal(isSameDirectory("/anime/show///", "/anime/show"), true);
+  // The UI never normalizes: the Engine Bridge resolves every spelling to one identity first.
+  assert.equal(isSameDirectory("/anime/show", "/anime/show/"), false);
+  assert.equal(isSameDirectory("/anime/show", "/anime/x/../show"), false);
+  assert.equal(isSameDirectory("/anime/Show", "/anime/show"), false);
+  assert.equal(isSameDirectory("C:\\Anime\\Show", "c:/anime/show"), false);
+  assert.equal(isSameDirectory("/anime/showA", "/anime/showB"), false);
 
-  // Windows drive letters and separators
-  assert.equal(normalizeDirectoryPath("C:\\Anime\\Show"), "c:/anime/show");
-  assert.equal(normalizeDirectoryPath("c:/anime/show/"), "c:/anime/show");
-  assert.equal(isSameDirectory("C:\\Anime\\Show", "c:/anime/show/"), true);
-  assert.equal(isSameDirectory("C:\\Anime\\x\\..\\Show", "c:/anime/show"), true);
-
-  // Win32 trims trailing dots/spaces on ordinary path segments, but verbatim
-  // paths keep them significant. The Engine Bridge strips `\\?\` before any
-  // identity reaches the Queue Tracker (see the Canonical Directory Identity
-  // invariant in desktop-tauri/CONTEXT.md), so a verbatim form is a
-  // defence-in-depth case here, not a normal input.
-  assert.equal(normalizeDirectoryPath("C:/Videos/Show. /Episode"), "c:/videos/show/episode");
-  assert.equal(
-    normalizeDirectoryPath(String.raw`\\?\C:\Videos\Show.`),
-    "c:/videos/show.",
-  );
-  assert.equal(normalizeDirectoryPath(String.raw`\\?\C:\Videos\Show `), "c:/videos/show ");
-  assert.equal(
-    normalizeDirectoryPath(String.raw`\\?\UNC\server\share\Show`),
-    "//server/share/show",
-  );
-
-  // On POSIX, backslash is a filename character, not a path separator.
-  if (process.platform !== "win32") {
-    assert.equal(normalizeDirectoryPath("/anime/My\\\\Show"), "/anime/My\\\\Show");
-    assert.equal(isSameDirectory("/anime/My\\\\Show", "/anime/My/Show"), false);
-  }
-
-  // Missing or empty identities
+  // Missing or empty identities are never the same, even against themselves.
   assert.equal(isSameDirectory(null, "/anime/show"), false);
   assert.equal(isSameDirectory("/anime/show", null), false);
+  assert.equal(isSameDirectory(null, null), false);
   assert.equal(isSameDirectory(undefined, undefined), false);
   assert.equal(isSameDirectory("", "/anime/show"), false);
-  assert.equal(isSameDirectory("   ", "   "), false);
-
-  // Different directories
-  assert.equal(isSameDirectory("/anime/showA", "/anime/showB"), false);
-});
-
-test("bare dot is a relative identity, not root", () => {
-  assert.equal(normalizeDirectoryPath("."), ".");
-  assert.equal(isSameDirectory(".", "/"), false);
-  assert.equal(normalizeDirectoryPath("/"), "/");
+  assert.equal(isSameDirectory("", ""), false);
 });
 
 test("the guard leaves non-participants queued and keeps a successful subset batch successful", t => {
@@ -1095,22 +1058,6 @@ test("the guard leaves non-participants queued and keeps a successful subset bat
   assert.equal(state.items.get("ep1").status, "completed");
   assert.equal(state.items.get("ep2").status, "queued");
   assert.equal(warn.mock.callCount(), 0);
-});
-
-test("UNC shares keep a distinct identity from root-relative paths", () => {
-  assert.equal(normalizeDirectoryPath("\\\\Server\\Share\\Show"), "//server/share/show");
-  assert.equal(normalizeDirectoryPath("\\\\?\\UNC\\Server\\Share\\Show"), "//server/share/show");
-  assert.equal(isSameDirectory("\\\\server\\share\\Show", "\\server\\share\\Show"), false);
-  assert.equal(isSameDirectory("\\\\server\\share\\Show\\", "//server/share/Show"), true);
-  assert.equal(normalizeDirectoryPath("\\\\?\\C:\\Anime"), "c:/anime");
-});
-
-test("only the //?/ and //./ device prefixes are stripped", () => {
-  assert.equal(normalizeDirectoryPath("//?/C:/x"), "c:/x");
-  assert.equal(normalizeDirectoryPath("//./C:/x"), "c:/x");
-  assert.equal(normalizeDirectoryPath("??/foo"), "??/foo");
-  assert.equal(normalizeDirectoryPath("?./foo"), "?./foo");
-  assert.equal(normalizeDirectoryPath("?/?/foo"), "?/?/foo");
 });
 
 test("rescan remembers vanished selected ids until selection changes", () => {
