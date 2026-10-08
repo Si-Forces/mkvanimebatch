@@ -46,13 +46,15 @@ pub struct FontInfo {
 }
 
 /// Build attachment arguments for all fonts found in `fonts_dir`, serving and filling
-/// `font_cache`.
+/// `font_cache`. A `fonts_dir` that is not a directory is not cached, so the first scan made
+/// once it is one sees its fonts. An existing directory is cached on its first scan, even
+/// when it is empty.
 pub fn scan_fonts(fonts_dir: &Path, font_cache: &mut HashMap<PathBuf, FontInfo>) -> FontInfo {
     if let Some(info) = font_cache.get(fonts_dir) {
         return info.clone();
     }
 
-    // Intentionally do not cache negative (non-existent) results: if extraction creates
+    // Intentionally do not cache a path that is not a directory: if extraction creates
     // fonts_dir later in the run, subsequent scans must discover it.
     if !fonts_dir.is_dir() {
         return FontInfo::default();
@@ -105,10 +107,12 @@ pub fn find_fonts_dir(
     input_dir: &Path,
     fonts_dir_cache: &mut HashMap<PathBuf, PathBuf>,
 ) -> PathBuf {
-    fonts_dir_cache
-        .entry(input_dir.to_path_buf())
-        .or_insert_with(|| locate_fonts_dir(input_dir))
-        .clone()
+    if let Some(cached) = fonts_dir_cache.get(input_dir) {
+        return cached.clone();
+    }
+    let resolved = locate_fonts_dir(input_dir);
+    fonts_dir_cache.insert(input_dir.to_path_buf(), resolved.clone());
+    resolved
 }
 
 fn locate_fonts_dir(input_dir: &Path) -> PathBuf {

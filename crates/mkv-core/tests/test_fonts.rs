@@ -502,8 +502,8 @@ fn test_scan_fonts() {
     assert!(info.args[3].ends_with("a_font.otf"));
 }
 
-/// A fonts directory that does not exist yet is not cached, so a later scan, once extraction
-/// has created it, finds the fonts.
+/// A fonts directory that does not exist yet is not cached, so the first scan made once it
+/// exists sees its fonts.
 #[test]
 fn test_scan_fonts_does_not_cache_a_missing_dir() {
     let tmp = tempdir().unwrap();

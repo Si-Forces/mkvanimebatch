@@ -605,9 +605,16 @@ fn test_release_preparer_fonts_override_beats_release_and_ancestor_fonts() {
     }
     let override_dir = tmp.path().join("custom_fonts");
 
-    let prepared = ReleasePreparer::default().prepare(&season, &root, Some(&override_dir), None);
-
+    // The override wins even before it exists: prepare() never scans it.
+    let mut preparer = ReleasePreparer::default();
+    let prepared = preparer.prepare(&season, &root, Some(&override_dir), None);
     assert_eq!(prepared.fonts_dir, override_dir);
+
+    fs::create_dir_all(&override_dir).unwrap();
+    fs::write(override_dir.join("custom.otf"), b"font").unwrap();
+    let fonts = preparer.fonts(&prepared.fonts_dir);
+    assert_eq!(fonts.count, 1);
+    assert!(fonts.args[3].ends_with("custom.otf"));
 }
 
 #[test]
