@@ -140,6 +140,12 @@ pub struct ManifestItem {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InspectionManifest {
     pub version: u64,
+    /// External subtitles a human can assign to the items of each release, keyed by release and
+    /// listed as root-relative POSIX paths. A subtitle outside the input directory is never
+    /// listed, whatever `--assets-dir` says: only those in the Release Directory or an ancestor
+    /// up to the input root appear. `generate_inspection_manifest` takes no assets directory, so
+    /// an `--assets-dir` subtitle is resolved by the Asset Resolver's fallback but not listed. A
+    /// person can still assign it with a browsed path or a CLI `--assignments` path.
     #[serde(default)]
     pub subtitle_candidates: BTreeMap<String, Vec<String>>,
     pub items: Vec<ManifestItem>,
@@ -784,6 +790,71 @@ mod tests {
                 "ep2.ass".to_string(),
                 "ep10.ass".to_string()
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_subtitle_candidates_list_the_ancestor_chain_not_the_assets_dir() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let input_dir = temp_dir.path().join("input");
+        let season_dir = input_dir.join("Season 1");
+        let inside_assets = input_dir.join("extras");
+        let outside_assets = temp_dir.path().join("assets");
+        for dir in [&season_dir, &inside_assets, &outside_assets] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        for ep in ["01", "02", "03"] {
+            std::fs::write(input_dir.join(format!("Show - {ep}.mkv")), b"video").unwrap();
+        }
+        std::fs::write(season_dir.join("Show - 04.mkv"), b"video").unwrap();
+        std::fs::write(input_dir.join("Show - 01.ass"), b"sub").unwrap();
+        std::fs::write(season_dir.join("Show - 04.ass"), b"sub").unwrap();
+        std::fs::write(inside_assets.join("Show - 02.eng.ass"), b"sub").unwrap();
+        std::fs::write(outside_assets.join("Show - 03.eng.ass"), b"sub").unwrap();
+
+        let manifest = generate_inspection_manifest(&input_dir, None, None)
+            .await
+            .unwrap();
+
+        // Each release lists its own directory and its ancestors up to the input root. The
+        // manifest takes no assets directory, so `extras/`, which holds no video and is on no
+        // release's ancestor chain, is not listed even though it serves as one below.
+        assert_eq!(
+            manifest.subtitle_candidates,
+            BTreeMap::from([
+                (".".to_string(), vec!["Show - 01.ass".to_string()]),
+                (
+                    "Season 1".to_string(),
+                    vec![
+                        "Season 1/Show - 04.ass".to_string(),
+                        "Show - 01.ass".to_string()
+                    ]
+                ),
+            ])
+        );
+
+        // The Asset Resolver's fallback tier resolves the unlisted subtitles, and only with
+        // the assets directory given.
+        let videos = scan_mkv_files(&input_dir, true, None);
+        let resolved_with = |assets_dir: Option<&Path>, episode: &str| {
+            let resolver = crate::assets::ReleasePreparer::default()
+                .prepare(&input_dir, &input_dir, None, assets_dir)
+                .resolver;
+            let video = videos
+                .iter()
+                .find(|v| v.path.ends_with(format!("Show - {episode}.mkv")))
+                .unwrap();
+            resolver.resolve_for(video, None, None, None).subtitle_file
+        };
+        assert_eq!(resolved_with(None, "02"), None);
+        assert_eq!(resolved_with(None, "03"), None);
+        assert_eq!(
+            resolved_with(Some(&inside_assets), "02"),
+            Some(inside_assets.join("Show - 02.eng.ass"))
+        );
+        assert_eq!(
+            resolved_with(Some(&outside_assets), "03"),
+            Some(outside_assets.join("Show - 03.eng.ass"))
         );
     }
 

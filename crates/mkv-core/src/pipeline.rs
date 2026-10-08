@@ -12,13 +12,10 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Semaphore};
 pub use tokio_util::sync::CancellationToken;
 
-use crate::assets::{
-    claim_leftover_chapters, prepare_release_directory, ReleasePreparationOptions,
-    SubClassification,
-};
+use crate::assets::{claim_leftover_chapters, ReleasePreparer};
 use crate::domain::{resolve_output_dir, IO_GOVERNOR_CLOSED};
 use crate::extract::extract_mkv_file;
-use crate::fonts::{scan_fonts, FontHashMemo, FontInfo, FontRegistry};
+use crate::fonts::{FontHashMemo, FontRegistry};
 use crate::inspect::inspect_videos;
 use crate::item_id::ItemId;
 use crate::media_tool::{MediaToolRunner, SubprocessRunner};
@@ -27,7 +24,7 @@ use crate::remux_plan::{PreparedDir, RemuxPlan, RemuxPlanner, RemuxWork};
 use crate::request::{resolve_selected_items, EffectiveSettings, TrackAssignment};
 use crate::scan::{
     get_or_probe_video, scan_mkv_files, InspectedVideo, InspectionResult, ParsedFile,
-    PersistentInspectCache, ScanCache,
+    PersistentInspectCache,
 };
 
 pub const EVENT_VERSION: u64 = 1;
@@ -415,13 +412,7 @@ pub(crate) fn prepare_release_dirs<'a>(
     config: &PipelineConfig,
     cancel_token: &CancellationToken,
 ) -> Option<HashMap<&'a Path, PreparedDir>> {
-    let mut scan_cache = ScanCache::default();
-    let mut fonts_dir_cache: HashMap<PathBuf, PathBuf> = HashMap::new();
-    let mut font_cache: HashMap<PathBuf, FontInfo> = HashMap::new();
-    // Release directories re-index the same shared ancestor assets, so the
-    // per-file subtitle classification is derived once and reused.
-    let mut sub_classification_cache: HashMap<PathBuf, SubClassification> = HashMap::new();
-
+    let mut preparer = ReleasePreparer::default();
     let mut prepared_dirs = HashMap::with_capacity(videos_by_dir.len());
     for (&mkv_dir, dir_videos) in videos_by_dir {
         if cancel_token.is_cancelled() {
@@ -431,16 +422,13 @@ pub(crate) fn prepare_release_dirs<'a>(
             .assets_dir
             .as_deref()
             .map(|assets| release_assets_dir(assets, mkv_dir, &config.input_dir));
-        let prep_opts = ReleasePreparationOptions {
-            fonts_override: config.fonts_dir.as_deref(),
-            assets_dir: resolved_assets_dir.as_deref(),
-            scan_cache: Some(&mut scan_cache),
-            fonts_dir_cache: Some(&mut fonts_dir_cache),
-            font_cache: Some(&mut font_cache),
-            sub_classification_cache: Some(&mut sub_classification_cache),
-        };
-        let prepared = prepare_release_directory(mkv_dir, &config.input_dir, prep_opts);
-        let font_info = scan_fonts(&prepared.fonts_dir, Some(&mut font_cache));
+        let prepared = preparer.prepare(
+            mkv_dir,
+            &config.input_dir,
+            config.fonts_dir.as_deref(),
+            resolved_assets_dir.as_deref(),
+        );
+        let font_info = preparer.fonts(&prepared.fonts_dir);
         let chapter_claims =
             claim_leftover_chapters(dir_videos, all_inspections, &prepared.resolver);
 

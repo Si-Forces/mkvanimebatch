@@ -1,6 +1,6 @@
 # 0001. Sidecar Contract and Structured Planning
 
-> **Status**: Superseded by ADR-0007, ADR-0008, ADR-0010 (amended 2026-09-28)
+> **Status**: Superseded by ADR-0007, ADR-0008, ADR-0010 (amended 2026-09-28, 2026-10-08)
 > **Date**: 2026-03-01
 > **Context**: Media Engine Context & Desktop Application Bridge
 
@@ -66,3 +66,15 @@ The supersession warning above removes slightly more than was removed, and three
 - **The `@event:` NDJSON stream is still live — in the CLI.** Only the desktop's use of it was retired. `mkv-cli --events` still prints each `JobEvent` as a JSON line prefixed `@event: `, and the event vocabulary is still version 1. The desktop host receives the same typed `JobEvent`s in-process and forwards them as `job-event` payloads without any stdout parsing (ADR-0006, ADR-0007).
 - **The manual-assignment payload is gone.** There is no `{"version": 1, "assignments": {...}}` document, no temp file, and no `--sub-assignments` flag: the desktop sends a typed `BatchRequest` whose `assignments` is a `TrackAssignment` array (ADR-0008), and `mkv-cli` accepts only `--assignments`. `parse_assignments_json` still reads the legacy flat `{video: subtitle}` map through that flag (ADR-0012). A missing assigned subtitle fails the batch instead of falling back to automatic matching (ADR-0004, ADR-0008). The desktop also offers an arbitrary subtitle-file picker, so a manual pick is no longer limited to the input-root candidates.
 - **Manifest version enforcement moved to the UI.** `mkv-core` always emits `version: 2` but does not reject other versions when deserializing; the Queue Tracker rejects any manifest whose `version` is not `2`.
+
+## Amendment — 2026-10-08 (Subtitle candidates and --assets-dir)
+
+The GUI addendum limited candidates to the input-root ancestor chain (item 4 of "GUI Manual Subtitle Selection"), and Manifest v2 kept their content. Neither says what that means for `--assets-dir`, which the Asset Resolver uses as the last fallback tier. This amendment states it.
+
+- **A subtitle outside the input directory is never in `subtitle_candidates`, whatever `--assets-dir` says.** For each release the list holds the subtitles of the Release Directory and of its ancestors up to the input root, as root-relative POSIX paths. A subtitle inside the input directory is listed by where it sits, not by whether it is also an assets directory.
+- **A subtitle in an `--assets-dir` outside the input directory is resolved but not listed.** The Asset Resolver still picks it through its fallback tier (ADR-0004, ADR-0008). `generate_inspection_manifest` and the desktop's `inspect_directory` take no assets directory, so the manifest cannot offer one. A person can still assign such a subtitle with the desktop's Browse (`pick_subtitle_file`) or a path in the CLI's `--assignments`: a relative path resolves against the input directory, then the assets directory, and an absolute path is used as given.
+- **No schema change.** The manifest stays version 2, and resolution and the precedence ladder are unchanged.
+
+Options considered:
+- **(A) Document the boundary.** *Chosen*: no schema or behavior change.
+- **(B) Manifest v3 with out-of-root candidates.** *Rejected*: it breaks the `--plan` output and the desktop, and inspection would depend on a form field.
