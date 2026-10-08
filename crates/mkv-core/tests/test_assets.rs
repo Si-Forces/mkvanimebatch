@@ -3,8 +3,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use mkv_core::assets::{
-    claim_leftover_chapters, prepare_release_directory, AssetResolver, ChapterIndex, CoverIndex,
-    ReleasePreparationOptions, ResolvedAssets, SubClassification, SubIndex,
+    claim_leftover_chapters, AssetResolver, ChapterIndex, CoverIndex, ReleasePreparer,
+    ResolvedAssets, SubIndex,
 };
 use mkv_core::domain::{ancestor_dirs, EpisodeInfo, MkvTrack, TrackProperties};
 use mkv_core::scan::{
@@ -23,7 +23,12 @@ fn with_episode(path: impl Into<PathBuf>, parsed: EpisodeInfo) -> ParsedFile {
 }
 
 fn discover(search_dirs: &[PathBuf], assets_dir: Option<&Path>) -> AssetResolver {
-    AssetResolver::discover(search_dirs, assets_dir, None, None)
+    AssetResolver::discover(
+        search_dirs,
+        assets_dir,
+        &mut ScanCache::default(),
+        &mut HashMap::new(),
+    )
 }
 
 /// Resolves `episode_01.mkv` against subtitles that all index as episode 01.
@@ -96,13 +101,24 @@ fn test_discover_scan_cache_hit_keeps_chapter_without_resniffing() {
     let search_dirs = [tmp.path().to_path_buf()];
     let episode = EpisodeInfo::new("", "E", "01");
     let mut scan_cache = ScanCache::default();
+    let mut sub_classification_cache = HashMap::new();
 
-    let first = AssetResolver::discover(&search_dirs, None, Some(&mut scan_cache), None);
+    let first = AssetResolver::discover(
+        &search_dirs,
+        None,
+        &mut scan_cache,
+        &mut sub_classification_cache,
+    );
     assert_eq!(first.chap_index.lookup(&episode), Some(xml_path.clone()));
 
     // The file no longer sniffs as chapter XML; a cache hit must not read it again.
     fs::write(&xml_path, b"<?xml version='1.0'?><Tags></Tags>").unwrap();
-    let second = AssetResolver::discover(&search_dirs, None, Some(&mut scan_cache), None);
+    let second = AssetResolver::discover(
+        &search_dirs,
+        None,
+        &mut scan_cache,
+        &mut sub_classification_cache,
+    );
     assert_eq!(second.chap_index.lookup(&episode), Some(xml_path));
 }
 
@@ -559,7 +575,7 @@ fn test_no_claim_when_candidate_has_source_chapters() {
 }
 
 #[test]
-fn test_prepare_release_directory_uses_nearest_fonts_dir_with_fonts() {
+fn test_release_preparer_uses_nearest_fonts_dir_with_fonts() {
     let tmp = tempdir().unwrap();
     let root = tmp.path().join("root");
     let season = root.join("Season 01");
@@ -568,7 +584,9 @@ fn test_prepare_release_directory_uses_nearest_fonts_dir_with_fonts() {
         fs::write(dir.join("fonts").join("f.ttf"), b"font").unwrap();
     }
     let fonts_dir = || {
-        prepare_release_directory(&season, &root, ReleasePreparationOptions::default()).fonts_dir
+        ReleasePreparer::default()
+            .prepare(&season, &root, None, None)
+            .fonts_dir
     };
 
     assert_eq!(fonts_dir(), season.join("fonts"));
@@ -632,7 +650,7 @@ fn test_resolve_for_skip_reason_when_no_subs_vs_unmatched() {
 }
 
 #[test]
-fn test_sub_classification_cache_populates_and_reuses_across_release_directories() {
+fn test_release_preparer_resolves_each_release_directory_from_shared_ancestor_subtitles() {
     let tmp = tempdir().unwrap();
     let root = tmp.path().join("Anime");
     let season1 = root.join("Season 01");
@@ -650,41 +668,19 @@ fn test_sub_classification_cache_populates_and_reuses_across_release_directories
     fs::write(&ep_s1, b"vid1").unwrap();
     fs::write(&ep_s2, b"vid2").unwrap();
 
-    let mut sub_classification_cache: HashMap<PathBuf, SubClassification> = HashMap::new();
+    // One preparer serves both seasons, so the second reuses the root subtitles' classification.
+    // The cache itself is asserted in the `assets` unit tests.
+    let mut preparer = ReleasePreparer::default();
 
-    let prep1 = prepare_release_directory(
-        &season1,
-        &root,
-        ReleasePreparationOptions {
-            sub_classification_cache: Some(&mut sub_classification_cache),
-            ..Default::default()
-        },
-    );
-
-    // Cache should now hold derived classifications for root subtitles.
-    assert_eq!(sub_classification_cache[&sub_s01e01].lang, "ind");
-    assert_eq!(sub_classification_cache[&sub_s02e01].lang, "eng");
-
-    let resolved1 = prep1
+    let prepared1 = preparer.prepare(&season1, &root, None, None);
+    let resolved1 = prepared1
         .resolver
         .resolve_for(&create_parsed_file(&ep_s1), None, None, None);
     assert_eq!(resolved1.subtitle_file, Some(sub_s01e01.clone()));
     assert_eq!(resolved1.subtitle_lang, "ind");
 
-    let count_before = sub_classification_cache.len();
-
-    // Second release directory reuses the populated cache without extra entries.
-    let prep2 = prepare_release_directory(
-        &season2,
-        &root,
-        ReleasePreparationOptions {
-            sub_classification_cache: Some(&mut sub_classification_cache),
-            ..Default::default()
-        },
-    );
-
-    assert_eq!(sub_classification_cache.len(), count_before);
-    let resolved2 = prep2
+    let prepared2 = preparer.prepare(&season2, &root, None, None);
+    let resolved2 = prepared2
         .resolver
         .resolve_for(&create_parsed_file(&ep_s2), None, None, None);
     assert_eq!(resolved2.subtitle_file, Some(sub_s02e01.clone()));
@@ -692,7 +688,7 @@ fn test_sub_classification_cache_populates_and_reuses_across_release_directories
 }
 
 #[test]
-fn test_unparsed_subtitles_bypass_classification_cache() {
+fn test_release_preparer_discovers_unparsed_subtitles() {
     let tmp = tempdir().unwrap();
     let root = tmp.path().join("Anime");
     let season = root.join("Season 01");
@@ -705,21 +701,10 @@ fn test_unparsed_subtitles_bypass_classification_cache() {
     )
     .unwrap();
 
-    let mut sub_classification_cache: HashMap<PathBuf, SubClassification> = HashMap::new();
-
-    let prep = prepare_release_directory(
-        &season,
-        &root,
-        ReleasePreparationOptions {
-            sub_classification_cache: Some(&mut sub_classification_cache),
-            ..Default::default()
-        },
-    );
-
-    // Unparsed subtitles must NOT be eagerly classified or inserted into the cache,
+    // They are not eagerly classified (the `assets` unit tests assert the cache stays empty),
     // but they still count as discovered subtitles.
-    assert!(sub_classification_cache.is_empty());
-    assert!(prep.resolver.has_subtitles());
+    let prepared = ReleasePreparer::default().prepare(&season, &root, None, None);
+    assert!(prepared.resolver.has_subtitles());
 }
 
 #[test]
@@ -735,19 +720,74 @@ fn test_sub_classification_cache_preserves_resolution_identity() {
     fs::write(&vid_path, b"video").unwrap();
     let vid = create_parsed_file(&vid_path);
 
-    let uncached = prepare_release_directory(&season, &root, ReleasePreparationOptions::default());
+    let uncached = ReleasePreparer::default().prepare(&season, &root, None, None);
     let uncached_res = uncached.resolver.resolve_for(&vid, None, None, None);
 
-    let mut cache: HashMap<PathBuf, SubClassification> = HashMap::new();
-    let cached = prepare_release_directory(
-        &season,
-        &root,
-        ReleasePreparationOptions {
-            sub_classification_cache: Some(&mut cache),
-            ..Default::default()
-        },
-    );
+    // A preparer that already prepared a sibling Release Directory holds the root subtitle's
+    // classification, so this run reads it from the cache.
+    let sibling = root.join("Season 02");
+    fs::create_dir_all(&sibling).unwrap();
+    let mut preparer = ReleasePreparer::default();
+    preparer.prepare(&sibling, &root, None, None);
+    let cached = preparer.prepare(&season, &root, None, None);
     let cached_res = cached.resolver.resolve_for(&vid, None, None, None);
 
     assert_eq!(uncached_res, cached_res);
+}
+
+#[test]
+fn test_release_preparer_reuse_across_shared_ancestor_matches_fresh_preparers() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("Anime");
+    let season1 = root.join("Season 01");
+    let season2 = root.join("Season 02");
+    let assets = tmp.path().join("assets");
+    for dir in [&season1, &season2, &assets] {
+        fs::create_dir_all(dir).unwrap();
+    }
+    // Both seasons share the root fonts and root subtitles; season 2 has nearer fonts of its own.
+    for fonts in [root.join("fonts"), season2.join("fonts")] {
+        fs::create_dir_all(&fonts).unwrap();
+        fs::write(fonts.join("f.ttf"), b"font").unwrap();
+    }
+    let root_sub_s1 = root.join("Show - S01E01.ind.ass");
+    let root_sub_s2 = root.join("Show - S02E01.eng.ass");
+    let fallback_sub = assets.join("Show - S01E02.eng.ass");
+    for sub in [&root_sub_s1, &root_sub_s2, &fallback_sub] {
+        fs::write(sub, b"[Script Info]\n").unwrap();
+    }
+    let s1_videos = [
+        season1.join("Show - S01E01.mkv"),
+        season1.join("Show - S01E02.mkv"),
+    ];
+    let s2_videos = [season2.join("Show - S02E01.mkv")];
+
+    let prepare = |preparer: &mut ReleasePreparer, dir: &Path, videos: &[PathBuf]| {
+        let prepared = preparer.prepare(dir, &root, None, Some(&assets));
+        let fonts = preparer.fonts(&prepared.fonts_dir);
+        let resolved: Vec<ResolvedAssets> = videos
+            .iter()
+            .map(|video| {
+                prepared
+                    .resolver
+                    .resolve_for(&create_parsed_file(video), None, None, None)
+            })
+            .collect();
+        (prepared.fonts_dir, fonts, resolved)
+    };
+
+    let mut shared = ReleasePreparer::default();
+    let shared_s1 = prepare(&mut shared, &season1, &s1_videos);
+    let shared_s2 = prepare(&mut shared, &season2, &s2_videos);
+    let fresh_s1 = prepare(&mut ReleasePreparer::default(), &season1, &s1_videos);
+    let fresh_s2 = prepare(&mut ReleasePreparer::default(), &season2, &s2_videos);
+
+    assert_eq!(shared_s1, fresh_s1);
+    assert_eq!(shared_s2, fresh_s2);
+    // The comparison above is not vacuous: each season resolved its own fonts and subtitles.
+    assert_eq!(shared_s1.0, root.join("fonts"));
+    assert_eq!(shared_s2.0, season2.join("fonts"));
+    assert_eq!(shared_s1.2[0].subtitle_file, Some(root_sub_s1));
+    assert_eq!(shared_s1.2[1].subtitle_file, Some(fallback_sub));
+    assert_eq!(shared_s2.2[0].subtitle_file, Some(root_sub_s2));
 }

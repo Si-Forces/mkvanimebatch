@@ -29,52 +29,65 @@ pub struct PreparedRelease {
     pub resolver: AssetResolver,
 }
 
-#[derive(Default)]
-pub struct ReleasePreparationOptions<'a> {
-    pub fonts_override: Option<&'a Path>,
-    pub assets_dir: Option<&'a Path>,
-    pub scan_cache: Option<&'a mut ScanCache>,
-    pub fonts_dir_cache: Option<&'a mut HashMap<PathBuf, PathBuf>>,
-    pub font_cache: Option<&'a mut HashMap<PathBuf, FontInfo>>,
-    pub sub_classification_cache: Option<&'a mut HashMap<PathBuf, SubClassification>>,
+/// Prepares the Release Directories of one batch: resolves each one's fonts directory and
+/// indexes its assets. Use one preparer per batch. Release Directories sharing ancestors
+/// re-scan and re-classify the same files, so the preparer keeps those results. The caches are
+/// transparent: they only skip repeated scans and classification work, and a result equals the
+/// one a fresh preparer would return, except that a directory reached through a second spelling
+/// keeps the path spelling of its first scan (see [`ScanCache`]).
+#[derive(Debug, Default)]
+pub struct ReleasePreparer {
+    scan_cache: ScanCache,
+    fonts_dir_cache: HashMap<PathBuf, PathBuf>,
+    font_cache: HashMap<PathBuf, FontInfo>,
+    sub_classification_cache: HashMap<PathBuf, SubClassification>,
 }
 
-/// Resolves the fonts directory for `mkv_dir` and indexes the assets of every directory from
-/// `root_input_dir` down to it.
-///
-/// Fonts come from `fonts_override`, else the nearest directory (from `mkv_dir` upwards) whose
-/// fonts directory holds fonts, else the assets directory, else `mkv_dir/fonts`.
-pub fn prepare_release_directory(
-    mkv_dir: &Path,
-    root_input_dir: &Path,
-    mut options: ReleasePreparationOptions<'_>,
-) -> PreparedRelease {
-    let search_dirs = ancestor_dirs(mkv_dir, root_input_dir);
-    let fonts_dir = match options.fonts_override {
-        Some(over) => over.to_path_buf(),
-        None => {
-            let mut fonts_dir_with_fonts = |dir: &Path| -> Option<PathBuf> {
-                let candidate = find_fonts_dir(dir, None, options.fonts_dir_cache.as_deref_mut());
-                let scanned = scan_fonts(&candidate, options.font_cache.as_deref_mut());
-                (scanned.count > 0).then_some(candidate)
-            };
-            search_dirs
-                .iter()
-                .rev()
-                .find_map(|d| fonts_dir_with_fonts(d))
-                .or_else(|| options.assets_dir.and_then(&mut fonts_dir_with_fonts))
-                .unwrap_or_else(|| mkv_dir.join("fonts"))
+impl ReleasePreparer {
+    /// Resolves the fonts directory for `mkv_dir` and indexes the assets of every directory
+    /// from `root_input_dir` down to it.
+    ///
+    /// Fonts come from `fonts_override`, else the nearest directory (from `mkv_dir` upwards)
+    /// whose fonts directory holds fonts, else the assets directory, else `mkv_dir/fonts`.
+    pub fn prepare(
+        &mut self,
+        mkv_dir: &Path,
+        root_input_dir: &Path,
+        fonts_override: Option<&Path>,
+        assets_dir: Option<&Path>,
+    ) -> PreparedRelease {
+        let search_dirs = ancestor_dirs(mkv_dir, root_input_dir);
+        let fonts_dir = match fonts_override {
+            Some(over) => over.to_path_buf(),
+            None => {
+                let mut fonts_dir_with_fonts = |dir: &Path| -> Option<PathBuf> {
+                    let candidate = find_fonts_dir(dir, None, Some(&mut self.fonts_dir_cache));
+                    let scanned = scan_fonts(&candidate, Some(&mut self.font_cache));
+                    (scanned.count > 0).then_some(candidate)
+                };
+                search_dirs
+                    .iter()
+                    .rev()
+                    .find_map(|d| fonts_dir_with_fonts(d))
+                    .or_else(|| assets_dir.and_then(&mut fonts_dir_with_fonts))
+                    .unwrap_or_else(|| mkv_dir.join("fonts"))
+            }
+        };
+        let resolver = AssetResolver::discover(
+            &search_dirs,
+            assets_dir,
+            &mut self.scan_cache,
+            &mut self.sub_classification_cache,
+        );
+        PreparedRelease {
+            fonts_dir,
+            resolver,
         }
-    };
-    let resolver = AssetResolver::discover(
-        &search_dirs,
-        options.assets_dir,
-        options.scan_cache,
-        options.sub_classification_cache,
-    );
-    PreparedRelease {
-        fonts_dir,
-        resolver,
+    }
+
+    /// The fonts found in `fonts_dir`, as the attachment arguments `mkvmerge` takes.
+    pub fn fonts(&mut self, fonts_dir: &Path) -> FontInfo {
+        scan_fonts(fonts_dir, Some(&mut self.font_cache))
     }
 }
 
@@ -582,22 +595,18 @@ fn populate_indices(
     sub_index: &mut SubIndex,
     chap_index: &mut ChapterIndex,
     cover_index: &mut CoverIndex,
-    mut sub_classification_cache: Option<&mut HashMap<PathBuf, SubClassification>>,
+    sub_classification_cache: &mut HashMap<PathBuf, SubClassification>,
 ) {
     for sub in &assets.subs {
-        let classification = if sub.parsed.is_some() {
-            sub_classification_cache.as_deref_mut().map(|cache| {
-                if let Some(hit) = cache.get(&sub.path) {
-                    hit.clone()
-                } else {
-                    let fresh = classify_sub(sub);
-                    cache.insert(sub.path.clone(), fresh.clone());
-                    fresh
-                }
-            })
-        } else {
-            None
-        };
+        let classification = sub.parsed.is_some().then(|| {
+            if let Some(hit) = sub_classification_cache.get(&sub.path) {
+                hit.clone()
+            } else {
+                let fresh = classify_sub(sub);
+                sub_classification_cache.insert(sub.path.clone(), fresh.clone());
+                fresh
+            }
+        });
         sub_index.add_classified(sub.clone(), classification);
     }
     for chap in &assets.chapters {
@@ -629,12 +638,12 @@ impl AssetResolver {
 
     /// Indexes the assets of `search_dirs` (ordered root first, indexed deepest first) and,
     /// when given, of `assets_dir` and its parent as the fallback indices. Directory-level
-    /// font resolution is owned by `prepare_release_directory`.
+    /// font resolution is owned by `ReleasePreparer`.
     pub fn discover(
         search_dirs: &[PathBuf],
         assets_dir: Option<&Path>,
-        mut scan_cache: Option<&mut ScanCache>,
-        mut sub_classification_cache: Option<&mut HashMap<PathBuf, SubClassification>>,
+        scan_cache: &mut ScanCache,
+        sub_classification_cache: &mut HashMap<PathBuf, SubClassification>,
     ) -> Self {
         let mut sub_index = SubIndex::new();
         let mut chap_index = ChapterIndex::new();
@@ -642,11 +651,11 @@ impl AssetResolver {
 
         for d in search_dirs.iter().rev() {
             populate_indices(
-                &scan_assets(d, scan_cache.as_deref_mut()),
+                &scan_assets(d, Some(&mut *scan_cache)),
                 &mut sub_index,
                 &mut chap_index,
                 &mut cover_index,
-                sub_classification_cache.as_deref_mut(),
+                sub_classification_cache,
             );
         }
 
@@ -668,11 +677,11 @@ impl AssetResolver {
 
             for fb_dir in fallback_dirs {
                 populate_indices(
-                    &scan_assets(&fb_dir, scan_cache.as_deref_mut()),
+                    &scan_assets(&fb_dir, Some(&mut *scan_cache)),
                     &mut fb_sub,
                     &mut fb_chap,
                     &mut fb_cov,
-                    sub_classification_cache.as_deref_mut(),
+                    sub_classification_cache,
                 );
             }
 
@@ -846,5 +855,61 @@ pub fn claim_leftover_chapters(
     match (candidates.next(), candidates.next()) {
         (Some(video), None) => HashMap::from([(video.path.clone(), sole_chapter.clone())]),
         _ => HashMap::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::*;
+
+    #[test]
+    fn test_preparer_classifies_shared_ancestor_subtitles_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("Anime");
+        let season1 = root.join("Season 01");
+        let season2 = root.join("Season 02");
+        for dir in [&season1, &season2] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        let sub_s1 = root.join("Show - S01E01.ind.ass");
+        let sub_s2 = root.join("Show - S02E01.eng.ass");
+        for sub in [&sub_s1, &sub_s2] {
+            fs::write(sub, b"[Script Info]\n").unwrap();
+        }
+
+        let mut preparer = ReleasePreparer::default();
+        preparer.prepare(&season1, &root, None, None);
+
+        // The first Release Directory classified both subtitles of the shared root.
+        assert_eq!(preparer.sub_classification_cache[&sub_s1].lang, "ind");
+        assert_eq!(preparer.sub_classification_cache[&sub_s2].lang, "eng");
+        let classified = preparer.sub_classification_cache.clone();
+
+        // The sibling has no subtitles of its own, so it adds nothing and drops nothing.
+        preparer.prepare(&season2, &root, None, None);
+        assert_eq!(preparer.sub_classification_cache, classified);
+    }
+
+    #[test]
+    fn test_preparer_does_not_classify_unparsed_subtitles() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("Anime");
+        let season = root.join("Season 01");
+        fs::create_dir_all(&season).unwrap();
+        fs::write(season.join("credits_roll.ass"), b"[Script Info]\n").unwrap();
+        fs::write(
+            season.join("extras.srt"),
+            b"1\n00:00:01 --> 00:00:02\nExtra\n",
+        )
+        .unwrap();
+
+        let mut preparer = ReleasePreparer::default();
+        let prepared = preparer.prepare(&season, &root, None, None);
+
+        // Unparsed subtitles are not eagerly classified, but they still count as discovered.
+        assert!(preparer.sub_classification_cache.is_empty());
+        assert!(prepared.resolver.has_subtitles());
     }
 }
