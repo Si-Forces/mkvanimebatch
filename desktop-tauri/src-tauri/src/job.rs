@@ -266,9 +266,9 @@ impl JobState {
         self.0.snapshot.get()
     }
 
-    /// Drops the Job Snapshot unless a job holds the Job Slot. Holds the slot lock across the clear, in the
-    /// slot-then-snapshot order `start` takes, so a start cannot reserve the slot and begin its
-    /// snapshot between the check and the clear.
+    /// Drops the Job Snapshot unless a job holds the Job Slot; a poisoned slot lock counts as no
+    /// job. Holds the slot lock across the clear, in the slot-then-snapshot order `start` takes,
+    /// so a start cannot reserve the slot and begin its snapshot between the check and the clear.
     pub(crate) fn clear_snapshot(&self) {
         let lock = self.0.slot.lock();
         if lock.as_ref().is_ok_and(|slot| slot.is_some()) {
@@ -821,6 +821,31 @@ mod tests {
             *dones.lock().unwrap(),
             [serde_json::json!({ "mode": "remux", "job_id": 7, "code": -1 })]
         );
+    }
+
+    #[test]
+    fn a_partial_batch_flushes_when_the_interval_elapses() {
+        let sink = RecordingSink::default();
+        let (log_tx, log_rx) = mkv_core::pipeline::create_log_channel(64);
+        let forwarder = {
+            let sink = sink.clone();
+            tauri::async_runtime::spawn(async move {
+                forward_logs(&sink, log_rx, Duration::from_millis(20)).await
+            })
+        };
+
+        log_tx.try_send("a".to_string()).unwrap();
+        log_tx.try_send("b".to_string()).unwrap();
+        // The channel is still open and the batch is not full, so only the interval can flush.
+        assert!(
+            sink.wait_until(Duration::from_secs(2), |recorded| recorded.logs.len() == 1),
+            "a partial batch waited for a full one"
+        );
+        assert_eq!(sink.log_batches()[0], ["a", "b"]);
+
+        drop(log_tx);
+        tauri::async_runtime::block_on(forwarder).unwrap();
+        assert_eq!(sink.log_batches().len(), 1);
     }
 
     #[test]
