@@ -595,6 +595,29 @@ fn test_release_preparer_uses_nearest_fonts_dir_with_fonts() {
 }
 
 #[test]
+fn test_release_preparer_fonts_override_beats_release_and_ancestor_fonts() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let season = root.join("Season 01");
+    for dir in [&root, &season] {
+        fs::create_dir_all(dir.join("fonts")).unwrap();
+        fs::write(dir.join("fonts").join("f.ttf"), b"font").unwrap();
+    }
+    let override_dir = tmp.path().join("custom_fonts");
+
+    // The override wins even before it exists: prepare() never scans it.
+    let mut preparer = ReleasePreparer::default();
+    let prepared = preparer.prepare(&season, &root, Some(&override_dir), None);
+    assert_eq!(prepared.fonts_dir, override_dir);
+
+    fs::create_dir_all(&override_dir).unwrap();
+    fs::write(override_dir.join("custom.otf"), b"font").unwrap();
+    let fonts = preparer.fonts(&prepared.fonts_dir);
+    assert_eq!(fonts.count, 1);
+    assert!(fonts.args[3].ends_with("custom.otf"));
+}
+
+#[test]
 fn test_sub_index_is_empty_and_has_subtitles() {
     let mut sub_idx = SubIndex::new();
     assert!(sub_idx.is_empty());

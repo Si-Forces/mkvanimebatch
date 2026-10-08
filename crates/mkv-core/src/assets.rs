@@ -61,8 +61,8 @@ impl ReleasePreparer {
             Some(over) => over.to_path_buf(),
             None => {
                 let mut fonts_dir_with_fonts = |dir: &Path| -> Option<PathBuf> {
-                    let candidate = find_fonts_dir(dir, None, Some(&mut self.fonts_dir_cache));
-                    let scanned = scan_fonts(&candidate, Some(&mut self.font_cache));
+                    let candidate = find_fonts_dir(dir, &mut self.fonts_dir_cache);
+                    let scanned = scan_fonts(&candidate, &mut self.font_cache);
                     (scanned.count > 0).then_some(candidate)
                 };
                 search_dirs
@@ -87,7 +87,7 @@ impl ReleasePreparer {
 
     /// The fonts found in `fonts_dir`, as the attachment arguments `mkvmerge` takes.
     pub fn fonts(&mut self, fonts_dir: &Path) -> FontInfo {
-        scan_fonts(fonts_dir, Some(&mut self.font_cache))
+        scan_fonts(fonts_dir, &mut self.font_cache)
     }
 }
 
