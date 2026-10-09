@@ -23,6 +23,7 @@ fn job(video: &Path, output_file: PathBuf, subtitle_file: Option<PathBuf>) -> Pl
         subtitle_label: "Default English".to_string(),
         subtitle_mkv_lang: "eng".to_string(),
         chapter_file: None,
+        chapter_warning: None,
         cover_file: None,
         embedded_sub_id: None,
         use_source_fonts: false,
@@ -348,6 +349,43 @@ async fn test_execute_remux_job_logs_warnings_on_exit_code_1() {
         std::fs::read(dir.path().join("out.mkv")).unwrap(),
         b"dummy data\n"
     );
+}
+
+/// The item's chapter warning comes right after "Processing:", before any mkvmerge warning.
+#[tokio::test]
+async fn test_execute_remux_job_logs_the_chapter_warning_after_processing() {
+    let dir = tempfile::tempdir().unwrap();
+    let video = dir.path().join("test.mkv");
+    std::fs::File::create(&video).unwrap();
+    let mut job = job(&video, dir.path().join("out.mkv"), None);
+    job.chapter_warning = Some("  Warning: More than one chapter file".to_string());
+    let runner = ScriptedRunner::new([Step::exited(
+        MediaTool::Mkvmerge,
+        1,
+        "Warning: QuickTime track parsing\n",
+        "",
+    )
+    .writes_output(b"dummy data\n")]);
+
+    let log = execute_remux_job(
+        &job,
+        &selection(),
+        &FontInfo::default(),
+        &REMUX_OPTIONS,
+        None,
+        &tokio::sync::Semaphore::new(1),
+        &runner,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(log[0], "Processing: test.mkv");
+    assert_eq!(log[1], "  Warning: More than one chapter file");
+    let mkvmerge_warning = log
+        .iter()
+        .position(|l| l == "  Warning: QuickTime track parsing")
+        .unwrap_or_else(|| panic!("{log:?}"));
+    assert!(mkvmerge_warning > 1, "{log:?}");
 }
 
 /// The governor is exhausted first, so the runner must not be invoked until a permit is

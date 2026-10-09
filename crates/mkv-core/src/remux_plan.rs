@@ -160,6 +160,7 @@ impl<'a> RemuxPlanner<'a> {
                 subtitle_label: res_assets.subtitle_label,
                 subtitle_mkv_lang: res_assets.subtitle_mkv_lang,
                 chapter_file: res_assets.chapter_file,
+                chapter_warning: res_assets.chapter_warning,
                 cover_file: res_assets.cover_file,
                 embedded_sub_id: res_assets.embedded_sub_id,
                 use_source_fonts: dir_prep.font_info.count == 0,

@@ -691,3 +691,130 @@ async fn test_pipeline_extract_persists_font_hash_memo() {
         "persisted memo must contain font hash"
     );
 }
+
+const CHAPTER_XML: &[u8] =
+    b"<?xml version='1.0'?><Chapters><EditionEntry></EditionEntry></Chapters>";
+
+/// Runs a remux dry run over `root` and returns the summary log. Every `Show - NN.mkv` has a
+/// sibling subtitle and probes as `metadata`.
+async fn chapter_dry_run_log(
+    root: &Path,
+    metadata: &mkv_core::scan::MkvmergeMetadata,
+    assets_dir: Option<&Path>,
+    selected_items: Option<Vec<String>>,
+) -> Vec<String> {
+    let videos: Vec<_> = ["Show - 01.mkv", "Show - 02.mkv"]
+        .iter()
+        .map(|name| root.join(name))
+        .collect();
+    for video in &videos {
+        fs::write(video, b"dummy mkv").unwrap();
+        fs::write(video.with_extension("ass"), b"[Script Info]\n").unwrap();
+    }
+    let video_refs: Vec<&Path> = videos.iter().map(|v| v.as_path()).collect();
+
+    let (summary, _) = run_batch(
+        PipelineConfig {
+            dry_run: true,
+            assets_dir: assets_dir.map(Path::to_path_buf),
+            selected_items,
+            cache: Some(seeded_cache(root, &video_refs, metadata)),
+            ..config(PipelineMode::Remux, root)
+        },
+        CancellationToken::new(),
+    )
+    .await;
+    summary.unwrap().log
+}
+
+fn write_chapters(dir: &Path, names: &[&str]) {
+    fs::create_dir_all(dir).unwrap();
+    for name in names {
+        fs::write(dir.join(name), CHAPTER_XML).unwrap();
+    }
+}
+
+fn duplicate_chapter_lines(log: &[String]) -> Vec<&String> {
+    log.iter()
+        .filter(|l| l.contains("More than one chapter file"))
+        .collect()
+}
+
+/// Same-directory duplicates are reported on the item that uses the kept file, right after its
+/// `[DRY-RUN]` line, naming every ignored file in index order.
+#[tokio::test]
+async fn test_remux_dry_run_reports_same_directory_duplicate_chapters_on_the_item() {
+    for (names, ignored) in [
+        (
+            &["Show - 01.xml", "Show - 01_b.xml"][..],
+            "'Show - 01_b.xml'",
+        ),
+        (
+            &["Show - 01.xml", "Show - 01_b.xml", "Show - 01_c.xml"][..],
+            "'Show - 01_b.xml', 'Show - 01_c.xml'",
+        ),
+    ] {
+        let tmp = tempdir().unwrap();
+        write_chapters(tmp.path(), names);
+
+        let log = chapter_dry_run_log(tmp.path(), &video_metadata("A_AAC"), None, None).await;
+
+        let warning = format!(
+            "  Warning: More than one chapter file for this episode in '{}': using 'Show - 01.xml', ignoring {ignored}",
+            tmp.path().display()
+        );
+        let dry_run = log
+            .iter()
+            .position(|l| l.starts_with("[DRY-RUN] Would remux 'Show - 01.mkv'"))
+            .unwrap_or_else(|| panic!("{log:#?}"));
+        assert_eq!(log[dry_run + 1], warning, "{log:#?}");
+        // Episode 02 has no chapter file, so only episode 01 carries a line.
+        assert_eq!(duplicate_chapter_lines(&log).len(), 1, "{log:#?}");
+    }
+}
+
+/// With duplicates only in the `--assets-dir` fallback, the line appears when the fallback is
+/// consulted (the source has no chapters) and not when embedded chapters make it unnecessary.
+#[tokio::test]
+async fn test_remux_dry_run_reports_fallback_duplicate_chapters_only_when_consulted() {
+    let mut embedded = video_metadata("A_AAC");
+    embedded.chapters = vec![mkv_core::scan::MkvChapter {
+        num_entries: Some(3),
+    }];
+
+    for (metadata, reported) in [(video_metadata("A_AAC"), true), (embedded, false)] {
+        let tmp = tempdir().unwrap();
+        let assets = tmp.path().join("assets");
+        write_chapters(&assets, &["Show - 01.xml", "Show - 01_b.xml"]);
+
+        let log = chapter_dry_run_log(tmp.path(), &metadata, Some(&assets), None).await;
+
+        assert_eq!(
+            duplicate_chapter_lines(&log).len(),
+            usize::from(reported),
+            "{log:#?}"
+        );
+    }
+}
+
+/// A duplicate for an episode outside the run's selection is not reported.
+#[tokio::test]
+async fn test_remux_dry_run_ignores_duplicate_chapters_of_unselected_episodes() {
+    let tmp = tempdir().unwrap();
+    write_chapters(tmp.path(), &["Show - 02.xml", "Show - 02_b.xml"]);
+
+    let log = chapter_dry_run_log(
+        tmp.path(),
+        &video_metadata("A_AAC"),
+        None,
+        Some(vec!["Show - 01.mkv".to_string()]),
+    )
+    .await;
+
+    assert!(
+        log.iter()
+            .any(|l| l.contains("Would remux 'Show - 01.mkv'")),
+        "{log:#?}"
+    );
+    assert!(duplicate_chapter_lines(&log).is_empty(), "{log:#?}");
+}

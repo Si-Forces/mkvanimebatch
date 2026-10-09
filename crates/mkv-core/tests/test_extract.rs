@@ -8,7 +8,7 @@ use mkv_core::domain::{EpisodeInfo, MkvTrack, TrackProperties, SUBPROCESS_TIMEOU
 use mkv_core::extract::{extract_mkv_file, select_subtitle_for_extraction};
 use mkv_core::fonts::FontRegistry;
 use mkv_core::media_tool::MediaTool;
-use mkv_core::scan::{InspectedVideo, MkvmergeMetadata};
+use mkv_core::scan::{InspectedVideo, MkvAttachment, MkvmergeMetadata};
 
 fn video_track() -> MkvTrack {
     MkvTrack {
@@ -211,4 +211,69 @@ fn test_select_subtitle_for_extraction_sanitizes_path_traversal() {
             "Sub path is not an immediate child of target dir for {payload:?}: {sub_path:?}"
         );
     }
+}
+
+fn font_attachment(id: u32, name: &str) -> MkvAttachment {
+    MkvAttachment {
+        id: Some(id),
+        file_name: Some(name.to_string()),
+        content_type: Some("application/x-truetype-font".to_string()),
+        size: Some(10),
+    }
+}
+
+/// Extracts `fonts` from a video whose mkvextract run writes `content` to every attachment
+/// target, and returns the summary.
+async fn extract_fonts(
+    fonts: &[MkvAttachment],
+    content: &'static [u8],
+) -> mkv_core::extract::ExtractSummary {
+    let dir = tempdir().unwrap();
+    let mkv_path = dir.path().join("Show - 01.mkv");
+    fs::File::create(&mkv_path).unwrap();
+    let font_mgr = FontRegistry::new(dir.path().join("fonts"), None);
+    let runner = ScriptedRunner::new([
+        Step::exited(MediaTool::Mkvextract, 0, "", "").writes_extract_targets(content)
+    ]);
+    let inspected = InspectedVideo::new(MkvmergeMetadata {
+        tracks: vec![video_track()],
+        attachments: fonts.to_vec(),
+        chapters: vec![],
+    });
+    extract_mkv_file(&mkv_path, &inspected, &font_mgr, None, None, &runner)
+        .await
+        .unwrap()
+}
+
+/// A font mkvextract left empty is reported on the item's log; the item still completes and the
+/// font count stays at zero.
+#[tokio::test]
+async fn test_extract_mkv_file_logs_a_font_that_was_not_saved() {
+    let summary = extract_fonts(&[font_attachment(1, "Broken.ttf")], b"").await;
+
+    assert_eq!(summary.extracted_fonts, 0);
+    assert!(
+        summary
+            .log
+            .iter()
+            .any(|l| l
+                == "   -> WARNING: Font 'Broken.ttf' was not saved: the extracted file is empty"),
+        "{:?}",
+        summary.log
+    );
+    assert!(!summary.log.iter().any(|l| l.contains("new font(s)")));
+}
+
+/// A content duplicate is dedup working as designed: counted once and not warned about.
+#[tokio::test]
+async fn test_extract_mkv_file_does_not_warn_about_a_duplicate_font() {
+    let fonts = [font_attachment(1, "A.ttf"), font_attachment(2, "B.ttf")];
+    let summary = extract_fonts(&fonts, b"same font bytes").await;
+
+    assert_eq!(summary.extracted_fonts, 1);
+    assert!(
+        !summary.log.iter().any(|l| l.contains("WARNING")),
+        "{:?}",
+        summary.log
+    );
 }

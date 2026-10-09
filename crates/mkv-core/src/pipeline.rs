@@ -1054,6 +1054,7 @@ impl BatchPipeline {
                         video_file.name,
                         work.job.output_file.display()
                     ));
+                    summary.log.extend(work.job.chapter_warning);
                     planning_outcomes.push(planned_item(item));
                     summary.completed += 1;
                 }
