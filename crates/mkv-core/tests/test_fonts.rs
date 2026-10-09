@@ -5,7 +5,8 @@ use std::sync::Arc;
 use std::thread;
 
 use mkv_core::fonts::{
-    find_fonts_dir, hash_file, scan_fonts, FontClaimsGuard, FontHashMemo, FontRegistry,
+    find_fonts_dir, hash_file, scan_fonts, FontClaimsGuard, FontHashMemo, FontPromotion,
+    FontRegistry,
 };
 use mkv_core::scan::FileSignature;
 use tempfile::{tempdir, TempDir};
@@ -41,7 +42,15 @@ fn shared_memo(tmp: &TempDir) -> Arc<parking_lot::Mutex<FontHashMemo>> {
 fn stage_and_promote(registry: &FontRegistry, name: &str, content: &[u8]) -> Option<PathBuf> {
     let mut claim = registry.claim(name, content.len() as u64)?;
     fs::write(&claim.staging_path, content).unwrap();
-    registry.promote(&mut claim)
+    saved_path(registry.promote(&mut claim))
+}
+
+/// The path of a saved font; `None` for a duplicate or a failure.
+fn saved_path(promotion: FontPromotion) -> Option<PathBuf> {
+    match promotion {
+        FontPromotion::Promoted(path) => Some(path),
+        FontPromotion::Duplicate | FontPromotion::Failed(_) => None,
+    }
 }
 
 #[test]
@@ -67,7 +76,9 @@ fn test_claim_and_promote() {
 
     fs::write(&claim.staging_path, b"unique font content 1").unwrap();
 
-    let promoted = mgr.promote(&mut claim).expect("promote should return path");
+    let FontPromotion::Promoted(promoted) = mgr.promote(&mut claim) else {
+        panic!("promote should return path");
+    };
     assert_eq!(promoted, fonts_dir.join("Arial.ttf"));
     assert_eq!(fs::read(&promoted).unwrap(), b"unique font content 1");
     assert!(!claim.staging_path.exists());
@@ -104,18 +115,79 @@ fn test_release_allows_reclaim() {
     assert!(mgr.claim("Arial.ttf", 100).is_some());
 }
 
+/// The reason of a failed promotion, panicking on any other outcome.
+fn failure_reason(promotion: FontPromotion) -> String {
+    match promotion {
+        FontPromotion::Failed(reason) => reason,
+        other => panic!("expected a failed promotion, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_promote_of_an_empty_staged_file_fails_and_releases_the_claim() {
+    let (_tmp, _fonts_dir, mgr) = fresh_registry();
+
+    let mut claim = mgr.claim("Empty.ttf", 100).unwrap();
+    fs::write(&claim.staging_path, b"").unwrap();
+
+    assert_eq!(
+        failure_reason(mgr.promote(&mut claim)),
+        "the extracted file is empty"
+    );
+    // The released reservation can be claimed again.
+    assert!(mgr.claim("Empty.ttf", 100).is_some());
+}
+
+#[test]
+fn test_promote_names_a_missing_or_non_file_staged_font() {
+    let (_tmp, _fonts_dir, mgr) = fresh_registry();
+
+    let mut missing = mgr.claim("Missing.ttf", 100).unwrap();
+    assert!(failure_reason(mgr.promote(&mut missing)).starts_with("could not read it: "));
+
+    let mut not_a_file = mgr.claim("Folder.ttf", 100).unwrap();
+    fs::create_dir(&not_a_file.staging_path).unwrap();
+    assert_eq!(
+        failure_reason(mgr.promote(&mut not_a_file)),
+        "it is not a regular file"
+    );
+}
+
+#[test]
+fn test_promote_fails_when_the_fonts_dir_cannot_be_created() {
+    let (tmp, fonts_dir, mgr) = fresh_registry();
+
+    // The claim creates the staging dir inside fonts_dir. Stage the bytes elsewhere, then put a
+    // regular file where fonts_dir was, so create_dir_all fails on every OS.
+    let mut claim = mgr.claim("Arial.ttf", 100).unwrap();
+    claim.staging_path = tmp.path().join("staged.bin");
+    fs::write(&claim.staging_path, b"font bytes").unwrap();
+    fs::remove_dir_all(&fonts_dir).unwrap();
+    fs::write(&fonts_dir, b"not a dir").unwrap();
+
+    let reason = failure_reason(mgr.promote(&mut claim));
+    assert!(
+        reason.starts_with(&format!("could not create '{}': ", fonts_dir.display())),
+        "{reason}"
+    );
+    assert!(!claim.is_promoted());
+}
+
 #[test]
 fn test_promote_hash_deduplication_preserves_name_size_claim() {
     let (_tmp, fonts_dir, mgr) = fresh_registry();
 
     let mut claim1 = mgr.claim("FontA.ttf", 100).unwrap();
     fs::write(&claim1.staging_path, b"shared font data").unwrap();
-    assert_eq!(mgr.promote(&mut claim1), Some(fonts_dir.join("FontA.ttf")));
+    assert_eq!(
+        mgr.promote(&mut claim1),
+        FontPromotion::Promoted(fonts_dir.join("FontA.ttf"))
+    );
 
     // Different name and size, identical content.
     let mut claim2 = mgr.claim("FontB.ttf", 200).unwrap();
     fs::write(&claim2.staging_path, b"shared font data").unwrap();
-    assert!(mgr.promote(&mut claim2).is_none());
+    assert_eq!(mgr.promote(&mut claim2), FontPromotion::Duplicate);
     assert!(!claim2.staging_path.exists());
     assert!(!fonts_dir.join("FontB.ttf").exists());
 
@@ -137,7 +209,7 @@ fn test_collision_safe_target_allocation() {
     let mut claim = mgr.claim("Arial.ttf", 999).unwrap();
     fs::write(&claim.staging_path, b"new different content").unwrap();
 
-    let promoted = mgr.promote(&mut claim).expect("promote should succeed");
+    let promoted = saved_path(mgr.promote(&mut claim)).expect("promote should succeed");
     assert_ne!(promoted, existing_font);
     let promoted_name = promoted.file_name().unwrap().to_string_lossy();
     assert!(promoted_name.starts_with("Arial_"));
@@ -160,7 +232,7 @@ fn test_seed_existing_fonts() {
 
     let mut claim = mgr.claim("Other.otf", 50).unwrap();
     fs::write(&claim.staging_path, b"pre-existing content").unwrap();
-    assert!(mgr.promote(&mut claim).is_none());
+    assert_eq!(mgr.promote(&mut claim), FontPromotion::Duplicate);
 }
 
 /// Seeding reads metadata only (#33). A seeded font is hashed, through the memo, only when a
@@ -235,7 +307,11 @@ fn test_concurrent_promotes_of_a_seeded_size_all_find_their_duplicates() {
         .collect();
 
     for h in handles {
-        assert_eq!(h.join().unwrap(), None, "a seeded duplicate was promoted");
+        assert_eq!(
+            h.join().unwrap(),
+            FontPromotion::Duplicate,
+            "a seeded duplicate was promoted"
+        );
     }
     assert_eq!(mgr.claimed_hashes().len(), 2);
 }
@@ -371,7 +447,7 @@ fn test_cleanup_staging() {
 
     let mut claim = mgr.claim("Test.ttf", 100).unwrap();
     fs::write(&claim.staging_path, b"abc").unwrap();
-    mgr.promote(&mut claim).unwrap();
+    saved_path(mgr.promote(&mut claim)).unwrap();
 
     mgr.cleanup_staging();
     assert!(!fonts_dir.join(".font_staging").exists());
@@ -592,7 +668,7 @@ fn test_concurrent_font_claims_and_promotions() {
             thread::spawn(move || {
                 let mut claim = mgr.claim(&format!("Font_{i}.ttf"), 100).unwrap();
                 fs::write(&claim.staging_path, format!("content {i}")).unwrap();
-                assert!(mgr.promote(&mut claim).is_some());
+                assert!(saved_path(mgr.promote(&mut claim)).is_some());
             })
         })
         .collect();

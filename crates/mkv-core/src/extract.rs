@@ -6,7 +6,7 @@ use crate::domain::{
     parse_episode, promote_file, safe_filename, select_best_subtitle_track, EpisodeInfo,
     COVER_EXTENSIONS, SUBPROCESS_TIMEOUT,
 };
-use crate::fonts::{FontClaimsGuard, FontRegistry};
+use crate::fonts::{FontClaimsGuard, FontPromotion, FontRegistry};
 use crate::media_tool::{self, MediaTool, MediaToolRunner};
 use crate::scan::{path_ext_lower, InspectedVideo};
 
@@ -230,8 +230,13 @@ pub async fn extract_mkv_file(
     }
 
     while let Some((_, mut claim)) = font_claims.pop() {
-        if font_registry.promote(&mut claim).is_some() {
-            summary.extracted_fonts += 1;
+        match font_registry.promote(&mut claim) {
+            FontPromotion::Promoted(_) => summary.extracted_fonts += 1,
+            FontPromotion::Duplicate => {}
+            FontPromotion::Failed(reason) => summary.log.push(format!(
+                "   -> WARNING: Font '{}' was not saved: {reason}",
+                claim.name()
+            )),
         }
     }
 

@@ -622,6 +622,58 @@ async fn test_fallback_probe_rejects_an_unrecognized_container() {
     assert_eq!(err, "File is not a recognized Matroska container");
 }
 
+/// A rejection carries mkvmerge's own `errors` in its text, so the Log Channel and the
+/// Inspection Manifest say why.
+#[tokio::test]
+async fn test_fallback_probe_appends_mkvmerge_errors_to_an_unrecognized_container() {
+    let step = Step::exited(
+        MediaTool::Mkvmerge,
+        0,
+        r#"{"container": {"recognized": false}, "errors": ["e1", " e2 "], "tracks": []}"#,
+        "",
+    );
+
+    let err = scripted_fallback_probe(step).await.unwrap_err();
+
+    assert_eq!(
+        err,
+        "File is not a recognized Matroska container (mkvmerge: e1; e2)"
+    );
+}
+
+#[tokio::test]
+async fn test_fallback_probe_appends_mkvmerge_errors_to_a_metadata_parse_failure() {
+    let step = Step::exited(
+        MediaTool::Mkvmerge,
+        0,
+        r#"{"container": {"recognized": true}, "errors": ["e1"], "tracks": "not a list"}"#,
+        "",
+    );
+
+    let err = scripted_fallback_probe(step).await.unwrap_err();
+
+    assert!(
+        err.starts_with("Failed to parse mkvmerge metadata: ") && err.ends_with(" (mkvmerge: e1)"),
+        "{err}"
+    );
+}
+
+/// Warnings never change the outcome of a probe that succeeds, and an empty `errors` array
+/// leaves a rejection's text as it was.
+#[tokio::test]
+async fn test_fallback_probe_leaves_the_message_alone_without_errors() {
+    let step = Step::exited(
+        MediaTool::Mkvmerge,
+        0,
+        r#"{"container": {"recognized": false}, "errors": [], "warnings": ["w1"], "tracks": []}"#,
+        "",
+    );
+
+    let err = scripted_fallback_probe(step).await.unwrap_err();
+
+    assert_eq!(err, "File is not a recognized Matroska container");
+}
+
 /// A stalled native read must not block the runtime (#20). `open()` on a FIFO blocks until a
 /// writer appears, standing in for a cold or hung device.
 #[cfg(unix)]

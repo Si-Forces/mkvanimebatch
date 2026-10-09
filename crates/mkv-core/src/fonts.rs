@@ -12,7 +12,7 @@ use blake2::{Blake2b512, Digest};
 use parking_lot::{Mutex, MutexGuard};
 use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
-use tracing::{error, warn};
+use tracing::warn;
 
 use crate::domain::{
     font_mime, natural_sort_key, promote_file, safe_filename, unique_file_token, FONT_EXTENSIONS,
@@ -258,6 +258,17 @@ impl FontHashMemo {
 
 // ─── FONT CLAIM & REGISTRY ───────────────────────────────────────────────────
 
+/// What `FontRegistry::promote` did with a staged font.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FontPromotion {
+    /// Saved at this path.
+    Promoted(PathBuf),
+    /// Its content is already saved, so the staged copy was dropped. Dedup working as designed.
+    Duplicate,
+    /// Not saved; the reason reads after "was not saved:" in the Log Channel line.
+    Failed(String),
+}
+
 /// A reservation of a sanitized font name and size, plus the staging path its bytes go to.
 #[derive(Debug)]
 pub struct FontClaim {
@@ -450,19 +461,26 @@ impl FontRegistry {
     }
 
     /// Validate, hash, deduplicate, and atomically promote a staged font file to fonts_dir.
-    /// If hash is duplicate or validation fails, staging file is removed and released.
-    /// Returns the final promoted destination Path, or None if duplicate or failed.
-    pub fn promote(&self, claim: &mut FontClaim) -> Option<PathBuf> {
+    /// A duplicate drops the staged file and keeps its `(name, size)` reservation; a failure
+    /// removes it and releases the claim.
+    /// The outcome tells the caller whether the font was saved, was a content duplicate, or
+    /// failed (with the reason, for the caller to report on the Log Channel).
+    pub fn promote(&self, claim: &mut FontClaim) -> FontPromotion {
         let staged = match fs::metadata(&claim.staging_path) {
-            Ok(meta) if meta.is_file() && meta.len() > 0 => hash_file(&claim.staging_path)
-                .ok()
-                .map(|hash| (hash, meta.len())),
-            _ => None,
+            Err(e) => Err(format!("could not read it: {e}")),
+            Ok(meta) if !meta.is_file() => Err("it is not a regular file".to_string()),
+            Ok(meta) if meta.len() == 0 => Err("the extracted file is empty".to_string()),
+            Ok(meta) => hash_file(&claim.staging_path)
+                .map(|hash| (hash, meta.len()))
+                .map_err(|e| format!("could not read it: {e}")),
         };
-        let Some((file_hash, size)) = staged else {
-            let mut state = self.state.lock();
-            release_locked(&mut state, claim);
-            return None;
+        let (file_hash, size) = match staged {
+            Ok(found) => found,
+            Err(reason) => {
+                let mut state = self.state.lock();
+                release_locked(&mut state, claim);
+                return FontPromotion::Failed(reason);
+            }
         };
 
         // Only a seeded font of the staged file's size can share its content.
@@ -473,23 +491,24 @@ impl FontRegistry {
         if state.claimed_hashes.contains(&file_hash) {
             let _ = fs::remove_file(&claim.staging_path);
             claim.released = true;
-            return None;
+            return FontPromotion::Duplicate;
         }
 
         if let Err(e) = fs::create_dir_all(&self.fonts_dir) {
-            error!(
-                "Failed to create fonts dir '{}': {e}",
-                self.fonts_dir.display()
-            );
             release_locked(&mut state, claim);
-            return None;
+            return FontPromotion::Failed(format!(
+                "could not create '{}': {e}",
+                self.fonts_dir.display()
+            ));
         }
 
         let target_path = self.vacant_target(claim.name(), &file_hash);
         if let Err(e) = promote_file(&claim.staging_path, &target_path) {
-            error!("Failed to promote font '{}': {e}", claim.name());
             release_locked(&mut state, claim);
-            return None;
+            return FontPromotion::Failed(format!(
+                "could not move it to '{}': {e}",
+                target_path.display()
+            ));
         }
 
         claim.promoted = true;
@@ -500,7 +519,7 @@ impl FontRegistry {
         }
         state.claimed_hashes.insert(file_hash);
 
-        Some(target_path)
+        FontPromotion::Promoted(target_path)
     }
 
     /// `fonts_dir/name`, or when that is taken, a sibling disambiguated by the hash prefix
