@@ -1,6 +1,6 @@
 # 0007. In-Process Engine Bridge and Sidecar Retirement
 
-> **Status**: Accepted (Partially superseded by ADR-0008; amended 2026-09-28, 2026-10-04)
+> **Status**: Accepted (Partially superseded by ADR-0008; amended 2026-09-28, 2026-10-04, 2026-10-09)
 > **Date**: 2026-05-01
 > **Context**: Desktop Application Bridge
 
@@ -44,3 +44,9 @@ The entry points and validation home named above no longer exist under those nam
 - **Teardown thread (#26).** Decision 4's two phases are synchronous waits, and they must run neither on the main thread nor on a Tokio worker. `stop_job` and `close_window` are async commands that run the teardown on Tokio's blocking pool (`run_teardown`); the `ExitRequested` handler runs it on its own thread. A sync command would freeze the window for up to about 3 s. A plain async command would park a Tokio worker that the supervisor it waits for also needs. `close_window` closes starts (`begin_shutdown`) before handing the wait to the pool; unlike the old sync command, it does so one async hop after dispatch, so a `run_job` landing in that hop starts and is then cancelled. The decision itself stands.
 
   **Coverage.** `test_teardown_leaves_the_calling_runtime_free_while_it_waits` proves the calling runtime keeps running during the wait; `close_during_a_pending_stop_settles_the_job_once` runs a Stop and a Close against one slot. No test covers `close_window` itself, including its `begin_shutdown` ordering: that needs a real window.
+
+## Amendment — 2026-10-09
+
+- **Engine Diagnostics (#79).** Decision 2's two channels are not the only output. **Engine Diagnostics** (see the Media Engine glossary) are a third stream beside Job Events and the Log Channel: the messages `mkv-core` raises through `tracing` about its own operation. `mkv-core` depends only on `tracing`; each binary installs its own subscriber.
+- **Where it goes.** `mkv-cli` writes to stderr, so stdout stays reserved for `--plan` JSON, `--events` NDJSON and the summary. The desktop writes to `mkv-anime-batch.log` in Tauri's app log directory and to stderr. The default level is `warn`; `RUST_LOG` overrides it in both. The desktop empties the file at startup when it is over 1 MB and does not rotate it. If the file cannot be opened, the desktop logs to stderr only and still starts. A packaged Windows build has no console, so there the log file is the only output, and losing it loses Engine Diagnostics until the next start.
+- **Rule.** An outcome that changes what a run produces is reported on the Log Channel, never only as an Engine Diagnostic. Some current messages break it; follow-up #81 moves them. The decision itself stands.
