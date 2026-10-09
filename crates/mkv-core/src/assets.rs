@@ -4,12 +4,10 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use tracing::info;
-
 use crate::domain::{
     ancestor_dirs, detect_sub_lang, is_dialogue_track, lang_label, lang_mkv_tag, natural_sort_key,
-    parse_episode, score_subtitle_category, seasons_match, select_best_subtitle_track, EpisodeInfo,
-    EpisodeType, NaturalSortToken, COVER_EXTENSIONS,
+    parse_episode, score_subtitle_category, season_is_exact, seasons_match,
+    select_best_subtitle_track, EpisodeInfo, EpisodeType, NaturalSortToken, COVER_EXTENSIONS,
 };
 use crate::fonts::{find_fonts_dir, scan_fonts, FontInfo};
 use crate::scan::{
@@ -133,33 +131,6 @@ fn file_name_of(path: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// The already indexed chapter of the same season that `path` duplicates, if any. The first
-/// file indexed wins. A duplicate from another directory is an Engine Diagnostic (the
-/// precedence ladder working as designed); the caller reports a same-directory one.
-fn kept_chapter<'a>(
-    existing: &'a [(PathBuf, String)],
-    path: &Path,
-    season: &str,
-    key: &str,
-) -> Option<&'a Path> {
-    let (kept, _) = existing
-        .iter()
-        .find(|(_, existing_season)| existing_season == season)?;
-    if kept.parent() != path.parent() {
-        let parent_name = path.parent().map(file_name_of).unwrap_or_default();
-        let parent_display = path
-            .parent()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default();
-        info!(
-            "Duplicate asset for key {key} also found in '{parent_name}': keeping '{}', ignoring '{}' from '{parent_display}'",
-            file_name_of(kept),
-            file_name_of(path)
-        );
-    }
-    Some(kept)
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct SubIndex {
     index: HashMap<String, Vec<SubEntry>>,
@@ -221,6 +192,8 @@ impl SubIndex {
                 Some((
                     (
                         std::cmp::Reverse(distance),
+                        // Within a directory an exact season beats an unknown one.
+                        season_is_exact(&parsed.season, &file_parsed.season),
                         entry.classification.category_score,
                         entry.classification.is_dialogue,
                         std::cmp::Reverse(entry.file.name.len()),
@@ -260,9 +233,9 @@ impl SubIndex {
 
 #[derive(Debug, Clone, Default)]
 pub struct ChapterIndex {
+    /// Every chapter file per episode key with its season, in index order: nearer
+    /// directories are indexed first.
     index: HashMap<String, Vec<(PathBuf, String)>>,
-    /// For each kept file, the same-directory files indexed after it and ignored, in index order.
-    ignored_beside: HashMap<PathBuf, Vec<PathBuf>>,
     unmatched: Vec<PathBuf>,
 }
 
@@ -275,44 +248,52 @@ impl ChapterIndex {
     /// place a file is sniffed for chapter content. Only the path and season are kept.
     pub fn add(&mut self, xml_file: &ParsedFile) {
         if let Some(parsed) = &xml_file.parsed {
-            let key = ep_key(parsed);
-            let existing = self.index.entry(key.clone()).or_default();
-            if let Some(kept) = kept_chapter(existing, &xml_file.path, &parsed.season, &key) {
-                if kept.parent() == xml_file.path.parent() {
-                    self.ignored_beside
-                        .entry(kept.to_path_buf())
-                        .or_default()
-                        .push(xml_file.path.clone());
-                }
-                return;
-            }
-            existing.push((xml_file.path.clone(), parsed.season.clone()));
+            self.index
+                .entry(ep_key(parsed))
+                .or_default()
+                .push((xml_file.path.clone(), parsed.season.clone()));
         } else {
             self.unmatched.push(xml_file.path.clone());
         }
     }
 
     pub fn lookup(&self, parsed: &EpisodeInfo) -> Option<PathBuf> {
-        self.index
-            .get(&ep_key(parsed))?
-            .iter()
-            .find_map(|(path, season)| seasons_match(&parsed.season, season).then(|| path.clone()))
+        self.lookup_with_warning(parsed).map(|(path, _)| path)
     }
 
-    /// The warning text for an episode whose chapters resolve to `kept` while other chapter
-    /// files sit beside it, or `None` when `kept` has no same-directory duplicate.
-    fn duplicate_warning(&self, kept: &Path) -> Option<String> {
-        let ignored = self.ignored_beside.get(kept)?;
-        let ignored: Vec<String> = ignored
+    /// The chapter file for `parsed` and the warning text for the compatible files beside it
+    /// (same episode, season equal or unknown) that were passed over. The nearest directory
+    /// with a compatible file wins, then an exact season over an unknown one, then index order.
+    /// A file of another known season is no candidate, so it is never named.
+    fn lookup_with_warning(&self, parsed: &EpisodeInfo) -> Option<(PathBuf, Option<String>)> {
+        let compatible = self
+            .index
+            .get(&ep_key(parsed))?
             .iter()
-            .map(|p| format!("'{}'", file_name_of(p)))
+            .filter(|(_, season)| seasons_match(&parsed.season, season));
+        // The first compatible file is in the nearest directory, so `beside` is never empty.
+        let dir = compatible.clone().next()?.0.parent();
+        let beside: Vec<&(PathBuf, String)> = compatible
+            .filter(|(path, _)| path.parent() == dir)
             .collect();
-        Some(format!(
-            "More than one chapter file for this episode in '{}': using '{}', ignoring {}",
-            kept.parent().unwrap_or(Path::new("")).display(),
-            file_name_of(kept),
-            ignored.join(", ")
-        ))
+        let chosen = beside
+            .iter()
+            .find(|(_, season)| season_is_exact(&parsed.season, season))
+            .unwrap_or(&beside[0]);
+        let ignored: Vec<String> = beside
+            .iter()
+            .filter(|candidate| candidate.0 != chosen.0)
+            .map(|(path, _)| format!("'{}'", file_name_of(path)))
+            .collect();
+        let warning = (!ignored.is_empty()).then(|| {
+            format!(
+                "More than one chapter file for this episode in '{}': using '{}', ignoring {}",
+                dir.unwrap_or(Path::new("")).display(),
+                file_name_of(&chosen.0),
+                ignored.join(", ")
+            )
+        });
+        Some((chosen.0.clone(), warning))
     }
 
     /// Chapter files whose names carry no episode number.
@@ -340,10 +321,13 @@ struct CoverEntry {
     natural_name: Vec<NaturalSortToken>,
 }
 
+/// Orders covers by `(directory rank, open)`, then by kind, name and path. An open cover (an
+/// episode cover with a non-exact season, or any other kind) ranks after an exact one in the
+/// same directory.
 fn compare_ranked_covers(
-    a_rank: usize,
+    a_rank: (usize, bool),
     a: &CoverEntry,
-    b_rank: usize,
+    b_rank: (usize, bool),
     b: &CoverEntry,
 ) -> std::cmp::Ordering {
     a_rank
@@ -444,8 +428,12 @@ impl CoverIndex {
             if let Some(rank) = directory_rank {
                 let candidate = &self.entries[entry_index];
                 let is_best = self.directory_winner.is_none_or(|(best_rank, best_index)| {
-                    compare_ranked_covers(rank, candidate, best_rank, &self.entries[best_index])
-                        == std::cmp::Ordering::Less
+                    compare_ranked_covers(
+                        (rank, true),
+                        candidate,
+                        (best_rank, true),
+                        &self.entries[best_index],
+                    ) == std::cmp::Ordering::Less
                 });
                 if is_best {
                     self.directory_winner = Some((rank, entry_index));
@@ -462,17 +450,16 @@ impl CoverIndex {
         candidates
             .filter_map(|(index, distance)| {
                 let entry = &self.entries[index];
+                // Only episode covers carry a season; every other kind counts as open.
+                let mut open = true;
                 if matches!(entry.kind, CoverKind::Underscore | CoverKind::Dot) {
-                    let applies = video.parsed.as_ref().is_some_and(|target| {
-                        entry.episode.as_ref().is_some_and(|candidate| {
-                            seasons_match(&target.season, &candidate.season)
-                        })
-                    });
-                    if !applies {
+                    let (target, candidate) = video.parsed.as_ref().zip(entry.episode.as_ref())?;
+                    if !seasons_match(&target.season, &candidate.season) {
                         return None;
                     }
+                    open = !season_is_exact(&target.season, &candidate.season);
                 }
-                Some((distance, entry))
+                Some(((distance, open), entry))
             })
             .min_by(|(a_rank, a), (b_rank, b)| compare_ranked_covers(*a_rank, a, *b_rank, b))
             .map(|(_, entry)| entry.file.path.clone())
@@ -794,16 +781,16 @@ impl AssetResolver {
         parsed: &EpisodeInfo,
         has_source_chapters: bool,
         claimed_chapter: Option<&Path>,
-    ) -> Option<PathBuf> {
-        if let Some(chap) = self.chap_index.lookup(parsed) {
+    ) -> Option<(PathBuf, Option<String>)> {
+        if let Some(chap) = self.chap_index.lookup_with_warning(parsed) {
             return Some(chap);
         }
         if !has_source_chapters {
             if let Some(claimed) = claimed_chapter {
-                return Some(claimed.to_path_buf());
+                return Some((claimed.to_path_buf(), None));
             }
             if let Some(fb_chap) = &self.fallback_chap_index {
-                return fb_chap.lookup(parsed);
+                return fb_chap.lookup_with_warning(parsed);
             }
         }
         None
@@ -821,7 +808,7 @@ impl AssetResolver {
         let has_source_chapters = inspected.is_some_and(|i| i.has_chapters());
         let has_source_cover = inspected.is_some_and(|i| i.cover_attachment().is_some());
 
-        let (sub_res, chapter_file) = if let Some(parsed) = &video.parsed {
+        let (sub_res, chapter) = if let Some(parsed) = &video.parsed {
             let sub = self.resolve_sub(video, parsed, inspected, assigned_subtitle);
             let chap = self.resolve_chap(parsed, has_source_chapters, claimed_chapter);
             (sub, chap)
@@ -832,15 +819,8 @@ impl AssetResolver {
             };
             (sub, None)
         };
-        // Only a chapter file picked from an index can have ignored duplicates; a claimed
-        // leftover chapter is in neither.
-        let chapter_warning = chapter_file.as_deref().and_then(|chapter| {
-            self.chap_index.duplicate_warning(chapter).or_else(|| {
-                self.fallback_chap_index
-                    .as_ref()
-                    .and_then(|fb| fb.duplicate_warning(chapter))
-            })
-        });
+        let (chapter_file, chapter_warning) =
+            chapter.map_or((None, None), |(file, warning)| (Some(file), warning));
         let cover_file = self.resolve_cov(video, has_source_cover);
 
         let subtitle_label = lang_label(&sub_res.lang).to_string();

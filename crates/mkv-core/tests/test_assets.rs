@@ -93,8 +93,8 @@ fn test_chap_index_cross_dir_duplicate_kept_first() {
     );
 }
 
-/// A duplicate in another directory is only an Engine Diagnostic: the item that uses the kept
-/// file gets no chapter warning.
+/// A duplicate in another directory is not reported: the item that uses the nearest file gets
+/// no chapter warning.
 #[test]
 fn test_cross_dir_chapter_duplicate_gives_no_chapter_warning() {
     let tmp = tempdir().unwrap();
@@ -839,4 +839,231 @@ fn test_release_preparer_reuse_across_shared_ancestor_matches_fresh_preparers() 
     assert_eq!(shared_s1.2[0].subtitle_file, Some(root_sub_s1));
     assert_eq!(shared_s1.2[1].subtitle_file, Some(fallback_sub));
     assert_eq!(shared_s2.2[0].subtitle_file, Some(root_sub_s2));
+}
+
+// ─── Exact season before open season (same directory) ───────────────────────
+
+/// Index-order permutations are covered by also trying each list reversed.
+fn both_orders<'a>(names: &[&'a str]) -> [Vec<&'a str>; 2] {
+    let mut reversed = names.to_vec();
+    reversed.reverse();
+    [names.to_vec(), reversed]
+}
+
+fn season2_video(dir: &str) -> ParsedFile {
+    create_parsed_file(format!("{dir}/Show - S02E01.mkv"))
+}
+
+fn resolve_subtitle(video: &ParsedFile, subs: &[String]) -> Option<PathBuf> {
+    let mut sub_index = SubIndex::new();
+    for sub in subs {
+        sub_index.add(create_parsed_file(sub));
+    }
+    AssetResolver {
+        sub_index,
+        ..Default::default()
+    }
+    .resolve_for(video, None, None, None)
+    .subtitle_file
+}
+
+#[test]
+fn test_subtitle_exact_season_beats_open_season_in_either_name_order() {
+    // The open names are shorter or sort first, so only the season can pick the exact file.
+    let exact = "/lib/A - S02E01.ass";
+    for open in ["/lib/A - 01.ass", "/lib/Z - 01.ass"] {
+        for subs in both_orders(&[exact, open]) {
+            let subs: Vec<String> = subs.iter().map(|s| s.to_string()).collect();
+            assert_eq!(
+                resolve_subtitle(&season2_video("/lib"), &subs),
+                Some(PathBuf::from(exact)),
+                "{subs:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_subtitle_exact_season_beats_a_better_language_score() {
+    // An open ASS (score) must not beat an exact SRT in the same directory.
+    let subs = ["/lib/Show - 01.ass", "/lib/Show - S02E01.srt"].map(String::from);
+    assert_eq!(
+        resolve_subtitle(&season2_video("/lib"), &subs),
+        Some(PathBuf::from("/lib/Show - S02E01.srt"))
+    );
+}
+
+#[test]
+fn test_subtitle_nearer_open_beats_farther_exact() {
+    for subs in both_orders(&["/lib/Show - S02E01.ass", "/lib/s2/Show - 01.ass"]) {
+        let subs: Vec<String> = subs.iter().map(|s| s.to_string()).collect();
+        // Same directory first, then ancestors by distance (ADR-0004): the season never
+        // overrides the distance.
+        assert_eq!(
+            resolve_subtitle(&season2_video("/lib/s2"), &subs),
+            Some(PathBuf::from("/lib/s2/Show - 01.ass"))
+        );
+        assert_eq!(
+            resolve_subtitle(&season2_video("/lib/s2/ep"), &subs),
+            Some(PathBuf::from("/lib/s2/Show - 01.ass"))
+        );
+    }
+}
+
+#[test]
+fn test_resolver_on_disk_picks_the_exact_season_subtitle() {
+    let tmp = tempdir().unwrap();
+    let season = tmp.path().join("Season 02");
+    fs::create_dir_all(&season).unwrap();
+    for name in ["Show - 01.ass", "Show - S02E01.ass"] {
+        fs::write(season.join(name), b"[Script Info]\n").unwrap();
+    }
+    let video = season.join("Show - S02E01.mkv");
+    fs::write(&video, b"vid").unwrap();
+
+    let resolved = ReleasePreparer::default()
+        .prepare(&season, tmp.path(), None, None)
+        .resolver
+        .resolve_for(&create_parsed_file(&video), None, None, None);
+
+    assert_eq!(
+        resolved.subtitle_file,
+        Some(season.join("Show - S02E01.ass"))
+    );
+}
+
+fn resolve_cover(video: &ParsedFile, covers: &[String]) -> Option<PathBuf> {
+    let mut cover_index = CoverIndex::new();
+    for cover in covers {
+        cover_index.add(create_parsed_file(cover));
+    }
+    cover_index.lookup(video)
+}
+
+#[test]
+fn test_cover_exact_season_beats_open_season_in_either_name_order() {
+    // The open `_cover` kind ranks before the exact `.cover` kind, and its name sorts either
+    // side of the exact one, so only the season can pick the exact file.
+    let exact = "/lib/M - S02E01.cover.jpg";
+    for open in ["/lib/A - 01_cover.jpg", "/lib/Z - 01_cover.jpg"] {
+        for covers in both_orders(&[exact, open]) {
+            let covers: Vec<String> = covers.iter().map(|s| s.to_string()).collect();
+            assert_eq!(
+                resolve_cover(&season2_video("/lib"), &covers),
+                Some(PathBuf::from(exact)),
+                "{covers:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_cover_nearer_open_beats_farther_exact() {
+    for covers in both_orders(&[
+        "/lib/Show - S02E01_cover.jpg",
+        "/lib/s2/Show - 01_cover.jpg",
+    ]) {
+        let covers: Vec<String> = covers.iter().map(|s| s.to_string()).collect();
+        assert_eq!(
+            resolve_cover(&season2_video("/lib/s2"), &covers),
+            Some(PathBuf::from("/lib/s2/Show - 01_cover.jpg"))
+        );
+    }
+}
+
+fn chapter_index(files: &[&str]) -> ChapterIndex {
+    let mut index = ChapterIndex::new();
+    for file in files {
+        index.add(&create_parsed_file(file));
+    }
+    index
+}
+
+fn resolve_chapter(
+    index: ChapterIndex,
+    fallback: bool,
+    video: &ParsedFile,
+) -> (Option<PathBuf>, Option<String>) {
+    let resolver = if fallback {
+        AssetResolver {
+            fallback_chap_index: Some(index),
+            ..Default::default()
+        }
+    } else {
+        AssetResolver {
+            chap_index: index,
+            ..Default::default()
+        }
+    };
+    let resolved = resolver.resolve_for(video, None, None, None);
+    (resolved.chapter_file, resolved.chapter_warning)
+}
+
+#[test]
+fn test_chapter_exact_season_beats_open_season_in_either_index_order() {
+    let exact = "/lib/Show - S02E01.xml";
+    for files in both_orders(&[exact, "/lib/Show - 01.xml"]) {
+        for fallback in [false, true] {
+            let (chosen, warning) =
+                resolve_chapter(chapter_index(&files), fallback, &season2_video("/lib"));
+            assert_eq!(chosen, Some(PathBuf::from(exact)), "{files:?}");
+            // The open file matches the video's season too, so it is named as passed over.
+            assert_eq!(
+                warning.as_deref(),
+                Some("More than one chapter file for this episode in '/lib': using 'Show - S02E01.xml', ignoring 'Show - 01.xml'"),
+                "{files:?} fallback={fallback}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_chapter_nearer_open_beats_farther_exact_without_a_warning() {
+    // The release-tree index lists the nearest directory first.
+    let near_first = ["/lib/s2/Show - 01.xml", "/lib/Show - S02E01.xml"];
+    for fallback in [false, true] {
+        let (chosen, warning) = resolve_chapter(
+            chapter_index(&near_first),
+            fallback,
+            &season2_video("/lib/s2"),
+        );
+        assert_eq!(chosen, Some(PathBuf::from("/lib/s2/Show - 01.xml")));
+        assert_eq!(warning, None);
+    }
+}
+
+#[test]
+fn test_chapter_mirror_case_names_the_reachable_file_only() {
+    // [(A, "1"), (B, "")]: a season-1 video takes the exact A and names the open B ...
+    let index = || chapter_index(&["/lib/Show - S01E01.xml", "/lib/Show - 01.xml"]);
+    for fallback in [false, true] {
+        let (chosen, warning) = resolve_chapter(
+            index(),
+            fallback,
+            &create_parsed_file("/lib/Show - S01E01.mkv"),
+        );
+        assert_eq!(chosen, Some(PathBuf::from("/lib/Show - S01E01.xml")));
+        assert!(warning.unwrap().ends_with("ignoring 'Show - 01.xml'"));
+
+        // ... and a season-2 video takes B alone: A is another known season, never named.
+        let (chosen, warning) = resolve_chapter(index(), fallback, &season2_video("/lib"));
+        assert_eq!(chosen, Some(PathBuf::from("/lib/Show - 01.xml")));
+        assert_eq!(warning, None);
+    }
+}
+
+#[test]
+fn test_chapter_unseasoned_video_takes_the_first_and_names_the_other() {
+    for fallback in [false, true] {
+        let (chosen, warning) = resolve_chapter(
+            chapter_index(&["/lib/Show - S01E01.xml", "/lib/Show - S02E01.xml"]),
+            fallback,
+            &create_parsed_file("/lib/Show - 01.mkv"),
+        );
+        assert_eq!(chosen, Some(PathBuf::from("/lib/Show - S01E01.xml")));
+        assert_eq!(
+            warning.as_deref(),
+            Some("More than one chapter file for this episode in '/lib': using 'Show - S01E01.xml', ignoring 'Show - S02E01.xml'")
+        );
+    }
 }
