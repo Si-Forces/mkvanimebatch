@@ -215,10 +215,10 @@ cargo tauri build
 
 ## Troubleshooting
 
-The engine reports its own problems (a corrupt inspect cache, a failed font memo, `mkvmerge -J` warnings) as diagnostics. The default level is `warn`; set `RUST_LOG` to see more, in both binaries.
+The engine reports its own problems (a corrupt inspect cache, a failed font memo, `mkvmerge -J` warnings) as diagnostics. The default level is `warn`; set `RUST_LOG` to see more, in both binaries. `RUST_LOG` replaces the default rather than adding to it, so start it with `warn,` to keep the other warnings when you raise one module.
 
 - **CLI**: diagnostics go to stderr, so stdout stays the `--plan` JSON, the `--events` NDJSON and the summary.
-- **Desktop**: diagnostics go to stderr and to `mkv-anime-batch.log`, which is emptied at startup when it is over 1 MB:
+- **Desktop**: diagnostics go to `mkv-anime-batch.log`, which is emptied at startup when it is over 1 MB. They also go to stderr, which you only see when the app is started from a terminal. The Windows build has no console at all, so there the log file is the only output. On Linux, a desktop launcher usually sends stderr to the session log (the journal or `~/.xsession-errors`). `RUST_LOG` applies to the log file too, if it is set in the environment the app starts from.
 
   | OS | Log file |
   |---|---|
@@ -230,10 +230,10 @@ The engine reports its own problems (a corrupt inspect cache, a failed font memo
 # Everything at debug level
 RUST_LOG=debug mkv-cli --input-dir /path/to/series --plan
 
-# One module only (here the font registry)
-RUST_LOG=mkv_core::fonts=debug mkv-cli --input-dir /path/to/series
+# One module at debug (here the font registry), the rest still at warn
+RUST_LOG=warn,mkv_core::fonts=debug mkv-cli --input-dir /path/to/series
 
-# Desktop: start the app from a terminal with the same variable
+# Desktop on Linux or macOS: start it from a terminal to see stderr too
 RUST_LOG=debug ./mkv-anime-batch
 ```
 

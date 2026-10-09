@@ -89,9 +89,9 @@
 
 ### Engine Diagnostics
 
-- `mkv-cli` and the desktop now install a `tracing` subscriber, so the engine's own `warn!` and `error!` messages (a corrupt inspect cache, a failed font memo, the `mkvmerge -J` warnings) are shown. Nothing showed them before. The default level is `warn`; `RUST_LOG` overrides it, for example `RUST_LOG=debug` or `RUST_LOG=mkv_core::fonts=debug`.
+- `mkv-cli` and the desktop now install a `tracing` subscriber, so the engine's own `warn!` and `error!` messages (a corrupt inspect cache, a failed font memo, the `mkvmerge -J` warnings) are shown. Nothing showed them before. The default level is `warn`; `RUST_LOG` replaces it, for example `RUST_LOG=debug`, or `RUST_LOG=warn,mkv_core::fonts=debug` to raise one module and keep the other warnings.
 - CLI: they go to stderr as the level and the message (no timestamp or module), coloured only on a terminal, so stdout still holds only the `--plan` JSON, the `--events` NDJSON and the summary.
-- Desktop: they go to `mkv-anime-batch.log` in the app log directory (on Linux `~/.local/share/com.mkvanimebatch.desktop/logs/`; one UTC-timestamped line per message with its level and module) and to stderr. The file is emptied at startup when it is over 1 MB, and the app starts with stderr only if it cannot be opened. See the README's Troubleshooting section for the path.
+- Desktop: they go to `mkv-anime-batch.log` in the app log directory (on Linux `$XDG_DATA_HOME/com.mkvanimebatch.desktop/logs/`, `~/.local/share` when unset; one UTC-timestamped line per message with its level and module) and to stderr. The file is emptied at startup when it is over 1 MB, and the app starts with stderr only if it cannot be opened; the Windows build has no console, so there that leaves no output until a later start opens the file. See the README's Troubleshooting section for the path.
 
 ### Extracted Subtitle Naming
 

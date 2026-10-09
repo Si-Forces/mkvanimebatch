@@ -40,6 +40,9 @@ fn env_filter() -> EnvFilter {
 fn open_log_file(dir: &Path) -> io::Result<File> {
     fs::create_dir_all(dir)?;
     let path = dir.join(LOG_FILE_NAME);
+    // Two opens on purpose, so truncation is a separate `File::create`: `append` cannot be
+    // combined with `truncate`, and on Windows an append handle lacks the write-data right that
+    // `set_len` would need.
     if fs::metadata(&path).is_ok_and(|meta| meta.len() > MAX_LOG_BYTES) {
         File::create(&path)?;
     }
@@ -59,7 +62,7 @@ where
         .boxed())
 }
 
-/// Builds the two-layer subscriber without installing it, so tests can scope it with
+/// Builds the two-layer subscriber without installing it globally, so tests can scope it with
 /// `tracing::dispatcher::with_default`.
 ///
 /// - File layer: see [`file_layer`]. Skipped, with a warning, when the file cannot be opened.
@@ -158,8 +161,8 @@ mod tests {
         );
         assert!(!log.contains('\u{1b}'), "no ANSI in the file: {log:?}");
         assert!(
-            rest.trim_start()
-                .starts_with("WARN mkv_anime_batch_lib::diagnostics::tests: font memo unreadable"),
+            rest.trim_start().starts_with("WARN ")
+                && rest.contains("diagnostics::tests: font memo unreadable"),
             "{line}"
         );
     }

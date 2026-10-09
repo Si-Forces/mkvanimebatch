@@ -14,7 +14,8 @@ use tracing_subscriber::filter::{EnvFilter, LevelFilter};
 
 /// Routes Engine Diagnostics to stderr, keeping stdout for `--plan` JSON, `--events` NDJSON and the
 /// summary. `RUST_LOG` sets the filter (default `warn`); the line is the level and the message,
-/// with colour only on a terminal. A subscriber that is already set is left alone.
+/// with colour only on a terminal. A subscriber that is already set is left alone. The desktop's
+/// stderr layer (`desktop-tauri/src-tauri/src/diagnostics.rs`) uses the same filter and format.
 fn init_diagnostics() {
     let filter = EnvFilter::builder()
         .with_default_directive(LevelFilter::WARN.into())
