@@ -2,6 +2,7 @@
 
 mod args;
 
+use std::io::IsTerminal;
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -9,6 +10,24 @@ use mkv_core::manifest::{generate_inspection_manifest, InspectionManifest};
 use mkv_core::pipeline::{create_event_channel, BatchPipeline, CancellationToken};
 use mkv_core::request::BatchRequest;
 use mkv_core::scan::PersistentInspectCache;
+use tracing_subscriber::filter::{EnvFilter, LevelFilter};
+
+/// Routes Engine Diagnostics to stderr, keeping stdout for `--plan` JSON, `--events` NDJSON and the
+/// summary. `RUST_LOG` sets the filter (default `warn`); the line is the level and the message,
+/// with colour only on a terminal. A subscriber that is already set is left alone. The desktop's
+/// stderr layer (`desktop-tauri/src-tauri/src/diagnostics.rs`) uses the same filter and format.
+fn init_diagnostics() {
+    let filter = EnvFilter::builder()
+        .with_default_directive(LevelFilter::WARN.into())
+        .from_env_lossy();
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .with_ansi(std::io::stderr().is_terminal())
+        .without_time()
+        .with_target(false)
+        .try_init();
+}
 
 /// Builds the `--plan` manifest, restricted to and ordered by `selected_items` when set.
 async fn generate_plan_manifest(
@@ -25,6 +44,7 @@ async fn generate_plan_manifest(
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    init_diagnostics();
     match run().await {
         Ok(code) => code,
         Err(err) => {

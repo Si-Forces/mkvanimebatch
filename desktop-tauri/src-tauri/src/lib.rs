@@ -1,4 +1,5 @@
 mod commands;
+mod diagnostics;
 mod job;
 mod process;
 mod snapshot;
@@ -62,6 +63,11 @@ pub fn run() {
     init_linux_env();
 
     tauri::Builder::default()
+        .setup(|app| {
+            // As early as the log directory is known; a failed lookup leaves stderr only.
+            diagnostics::init(app.path().app_log_dir().ok().as_deref());
+            Ok(())
+        })
         .manage(JobState::default())
         .manage(ScanState::default())
         .manage(commands::InspectCacheState::default())
