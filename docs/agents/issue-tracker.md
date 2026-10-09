@@ -2,6 +2,26 @@
 
 Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all operations.
 
+## GitLab trial: use `glab` instead
+
+While `origin` points at GitLab, issues live there, so new issues go there too. GitHub is only a push mirror, and issues filed on it are not synced. The GitHub import kept all numbers, but PRs became merge requests: the `(#N)` in older commit subjects is merge request `!N` on GitLab, not issue `#N`. Map the `gh` commands below as follows:
+
+| `gh` | `glab` |
+|---|---|
+| `gh issue create --title … --body …` | `glab issue create --title … --description …` |
+| `gh issue view <n> --comments` | `glab issue view <n> --comments` (structured: `--output json`) |
+| `gh issue list --state open --label …` | `glab issue list --label …` (`--closed`, `--all`; structured: `--output json`) |
+| `gh issue comment <n> --body …` | `glab issue note <n> --message …` |
+| `gh issue edit <n> --add-label/--remove-label …` | `glab issue update <n> --label/--unlabel …` |
+| `gh issue edit <n> --add-assignee @me` | `glab issue update <n> --assignee @me` |
+| `gh label list` / `gh label create "<name>"` | `glab label list` / `glab label create --name "<name>"` |
+| `gh issue close <n> --comment …` | `glab issue note <n> --message …`, then `glab issue close <n>` |
+| `gh pr view/diff <n>` | `glab mr view <n> --comments` / `glab mr diff <n>` |
+
+`glab issue list --output json` omits comments, so read the thread of each issue you act on with `glab issue view <n> --comments`. Issues (`#N`) and merge requests (`!N`) have separate number spaces, so you don't need to guess which one a bare number refers to.
+
+GitLab's issue blocking links are a paid feature that would disappear when the trial ends, and `glab` has no equivalent of GitHub sub-issues. For wayfinding, use only the text fallbacks below: the map's task list (also for the frontier query), `Part of #<map>`, and `Blocked by: #<n>`.
+
 ## Conventions
 
 - **Create an issue**: `gh issue create --title "..." --body "..."`. Use a heredoc for multi-line bodies.
