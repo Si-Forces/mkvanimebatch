@@ -93,8 +93,8 @@ fn test_chap_index_cross_dir_duplicate_kept_first() {
     );
 }
 
-/// A duplicate in another directory is only an Engine Diagnostic: the item that uses the kept
-/// file gets no chapter warning.
+/// A duplicate in another directory is not reported: the item that uses the nearest file gets
+/// no chapter warning.
 #[test]
 fn test_cross_dir_chapter_duplicate_gives_no_chapter_warning() {
     let tmp = tempdir().unwrap();
@@ -310,6 +310,30 @@ fn test_assets_dir_multi_level_fallback_hierarchy() {
     assert_eq!(
         resolver.resolve_cov(&video, false),
         Some(assets_override.join("cover.jpg"))
+    );
+}
+
+#[test]
+fn test_assets_dir_directory_cover_goes_to_a_video_without_its_own_cover() {
+    // `Ep 02_cover.jpg` sorts before `folder.jpg`, so the directory cover is not the first
+    // entry. Episode 1 has no cover of its own and must get `folder.jpg`, not episode 2's.
+    let mut fallback_idx = CoverIndex::new();
+    for cover in ["/assets/Ep 02_cover.jpg", "/assets/folder.jpg"] {
+        fallback_idx.add(create_parsed_file(cover));
+    }
+    let resolver = AssetResolver {
+        fallback_cover_index: Some(fallback_idx),
+        ..Default::default()
+    };
+    let cover_for =
+        |name: &str| resolver.resolve_cov(&create_parsed_file(format!("/lib/{name}")), false);
+    assert_eq!(
+        cover_for("Show - 01.mkv"),
+        Some(PathBuf::from("/assets/folder.jpg"))
+    );
+    assert_eq!(
+        cover_for("Show - 02.mkv"),
+        Some(PathBuf::from("/assets/Ep 02_cover.jpg"))
     );
 }
 

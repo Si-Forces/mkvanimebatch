@@ -336,6 +336,12 @@ pub fn seasons_match(mkv_season: &str, sub_season: &str) -> bool {
     }
 }
 
+/// Both seasons are known and equal: the closer kind of `seasons_match`. An unknown season on
+/// either side only matches openly.
+pub fn season_is_exact(mkv_season: &str, sub_season: &str) -> bool {
+    !mkv_season.is_empty() && mkv_season == sub_season
+}
+
 pub fn ancestor_dirs(mkv_dir: &Path, root_input_dir: &Path) -> Vec<PathBuf> {
     let Some(rel) = relative_to(mkv_dir, root_input_dir) else {
         return vec![mkv_dir.to_path_buf()];
