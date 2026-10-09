@@ -1,8 +1,8 @@
 use mkv_core::domain::{
     detect_sub_lang, is_dialogue_track, natural_sort_key, output_stem, parse_episode, promote_file,
-    resolve_output_dir, safe_filename, score_subtitle_category, seasons_match, select_audio_track,
-    select_best_subtitle_track, unique_file_token, AudioTrack, EpisodeInfo, EpisodeType,
-    ItemOutcome, MkvTrack, TrackProperties,
+    resolve_output_dir, safe_filename, score_subtitle_category, season_is_exact, seasons_match,
+    select_audio_track, select_best_subtitle_track, unique_file_token, AudioTrack, EpisodeInfo,
+    EpisodeType, ItemOutcome, MkvTrack, TrackProperties,
 };
 use std::collections::HashSet;
 use std::path::Path;
@@ -184,6 +184,16 @@ fn test_seasons_match() {
     assert!(seasons_match("2", ""));
     assert!(seasons_match("1", "1"));
     assert!(!seasons_match("1", "2"));
+}
+
+#[test]
+fn test_season_is_exact() {
+    assert!(season_is_exact("1", "1"));
+    assert!(!season_is_exact("1", "2"));
+    // Open matches: an unknown season on either side, or on both, is never exact.
+    assert!(!season_is_exact("", "2"));
+    assert!(!season_is_exact("2", ""));
+    assert!(!season_is_exact("", ""));
 }
 
 // ─── DIALOGUE TRACK TESTS ────────────────────────────────────────────────────
