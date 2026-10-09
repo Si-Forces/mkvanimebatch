@@ -202,7 +202,8 @@ async fn test_planning_abort_keeps_earlier_skip_lines_and_drops_dry_run_lines() 
         }
         assert_eq!(channel_log, expected, "dry_run={dry_run}");
         assert_eq!(summary.log, expected, "dry_run={dry_run}");
-        assert_eq!((summary.total, summary.errors), (3, 3));
+        // The skip is reported in the log, but an abort settles every item as an error.
+        assert_eq!((summary.total, summary.skipped, summary.errors), (3, 0, 3));
         assert_eq!(
             fs::read_dir(output.path()).unwrap().count(),
             0,

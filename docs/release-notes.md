@@ -95,7 +95,7 @@
 
 ### Remux Planning Abort
 
-- A remux planning abort (an assigned subtitle that no longer exists) now keeps the log lines collected before it: the `Skipping ...` and `ERROR: ...` lines of earlier items now appear in the desktop log console and the CLI summary ahead of the `Remux planning failed` line, where before they were lost. A dry run drops its `[DRY-RUN]` lines on an abort, since the batch does no work. Item events and counts are unchanged (#81).
+- A remux planning abort (an assigned subtitle that no longer exists) now keeps the log lines collected before it: the `Skipping ...` and `ERROR: ...` lines of earlier items now appear in the desktop log console and the CLI summary ahead of the `Remux planning failed` line, where before they were lost. A dry run drops its `[DRY-RUN]` lines on an abort, since the batch does no work. Item events and counts are unchanged.
 
 ### Extracted Subtitle Naming
 

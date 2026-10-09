@@ -1000,7 +1000,6 @@ impl BatchPipeline {
         let mut remux_work: Vec<(BatchItemInfo, RemuxWork)> = Vec::new();
         let mut planning_outcomes = Vec::new();
         let mut planning_error: Option<(usize, String)> = None;
-        // The summary log lines that survive an abort; dry-run predictions do not.
         let mut abort_log: Vec<String> = Vec::new();
 
         let planner = RemuxPlanner::new(
@@ -1381,6 +1380,44 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn planning_failure_sends_the_collected_lines_before_the_abort_line() {
+        let (log_sender, mut log_receiver) = create_log_channel(8);
+        let pipeline = BatchPipeline::new(
+            PipelineConfig {
+                input_dir: PathBuf::from("/anime"),
+                ..Default::default()
+            },
+            None,
+            CancellationToken::new(),
+        )
+        .with_log_sender(log_sender);
+        let files = [parsed_file("one.mkv"), parsed_file("two.mkv")];
+        let collected = vec![
+            "Skipping 'a.mkv': no episode".to_string(),
+            "  ERROR: Failed to probe '/anime/b.mkv': bad header".to_string(),
+            "  ERROR: '/anime/c.mkv': no prepared Release Directory".to_string(),
+        ];
+        let summary = pipeline
+            .settle_planning_failure(
+                &files,
+                1,
+                "assignment disappeared".into(),
+                collected.clone(),
+            )
+            .await;
+
+        let mut expected = collected;
+        expected
+            .push("  ERROR: Remux planning failed for 'two.mkv': assignment disappeared".into());
+        let mut sent = Vec::new();
+        while let Ok(line) = log_receiver.try_recv() {
+            sent.push(line);
+        }
+        assert_eq!(sent, expected);
+        assert_eq!(summary.log, expected);
     }
 
     #[tokio::test(flavor = "current_thread")]
