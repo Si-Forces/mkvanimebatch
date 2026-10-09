@@ -27,9 +27,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-24.04
+          - os: blacksmith-4vcpu-ubuntu-2404
             target: x86_64-unknown-linux-gnu
-          - os: windows-latest
+          - os: blacksmith-4vcpu-windows-2025
             target: x86_64-pc-windows-msvc
 
     steps:
@@ -106,10 +106,10 @@ jobs:
   # ────────────────────────────────────────────────────────────────────────────
   ui-tests:
     name: UI State & Contract Tests
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: useblacksmith/checkout@v1
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -126,10 +126,10 @@ jobs:
   # ────────────────────────────────────────────────────────────────────────────
   security-audit:
     name: Security Audit
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: useblacksmith/checkout@v1
 
       - name: Install cargo-audit
         uses: taiki-e/install-action@cargo-audit
@@ -143,7 +143,7 @@ jobs:
   ci-status:
     name: CI Status Gate
     needs: [workspace-checks, ui-tests, security-audit]
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     if: always()
     steps:
       - name: Evaluate status
