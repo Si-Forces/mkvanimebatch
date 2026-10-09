@@ -9,7 +9,10 @@ use tempfile::tempdir;
 
 use common::{run_batch, seeded_cache, video_metadata};
 use mkv_core::manifest::generate_inspection_manifest;
-use mkv_core::pipeline::{CancellationToken, ItemOutcome, JobEvent, PipelineConfig, PipelineMode};
+use mkv_core::pipeline::{
+    create_event_channel, create_log_channel, BatchPipeline, CancellationToken, ItemOutcome,
+    JobEvent, PipelineConfig, PipelineMode,
+};
 use mkv_core::request::{AssignmentKind, BatchRequest, TrackAssignment};
 
 fn manual_subtitle_assignment(target: &str, asset: &str) -> TrackAssignment {
@@ -138,6 +141,82 @@ async fn test_missing_assignment_aborts_entire_remux_plan() {
             "the single terminal must follow every item error"
         );
         assert_eq!(fs::read_dir(output.path()).unwrap().count(), 0);
+    }
+}
+
+/// A planning abort keeps the lines planning collected before it: the skip reaches the Log
+/// Channel and the summary log ahead of the abort line. The dry-run prediction for the planned
+/// item in between is dropped, since the aborted batch never does that work.
+#[tokio::test]
+async fn test_planning_abort_keeps_earlier_skip_lines_and_drops_dry_run_lines() {
+    for dry_run in [false, true] {
+        let input = tempdir().unwrap();
+        let output = tempdir().unwrap();
+        let skipped = input.path().join("Extras.mkv");
+        let planned = input.path().join("Show - 01.mkv");
+        let assigned = input.path().join("Show - 02.mkv");
+        let manual = input.path().join("manual.ass");
+        for video in [&skipped, &planned, &assigned] {
+            fs::write(video, b"video").unwrap();
+        }
+        fs::write(input.path().join("Show - 01.ass"), b"subtitle").unwrap();
+
+        // The assignment's asset never exists, so planning "Show - 02.mkv" aborts the batch.
+        let (event_sender, mut event_receiver) = create_event_channel(64);
+        let (log_sender, mut log_receiver) = create_log_channel(64);
+        let pipeline = BatchPipeline::new(
+            PipelineConfig {
+                dry_run,
+                cache: Some(seeded_cache(
+                    input.path(),
+                    &[&skipped, &planned, &assigned],
+                    &video_metadata("A_FLAC"),
+                )),
+                selected_items: Some(vec![
+                    "Extras.mkv".into(),
+                    "Show - 01.mkv".into(),
+                    "Show - 02.mkv".into(),
+                ]),
+                ..remux_dry_run(
+                    input.path(),
+                    output.path(),
+                    vec![manual_subtitle_assignment("Show - 02.mkv", "manual.ass")],
+                )
+            },
+            Some(event_sender),
+            CancellationToken::new(),
+        )
+        .with_log_sender(log_sender);
+        let summary = pipeline.run().await.unwrap();
+
+        let expected = vec![
+            "Skipping 'Extras.mkv': Could not extract episode number from filename".to_string(),
+            format!(
+                "  ERROR: Remux planning failed for 'Show - 02.mkv': Assigned subtitle '{}' no longer exists",
+                manual.display()
+            ),
+        ];
+        let mut channel_log = Vec::new();
+        while let Ok(line) = log_receiver.try_recv() {
+            channel_log.push(line);
+        }
+        assert_eq!(channel_log, expected, "dry_run={dry_run}");
+        assert_eq!(summary.log, expected, "dry_run={dry_run}");
+        assert_eq!((summary.total, summary.errors), (3, 3));
+        assert_eq!(
+            fs::read_dir(output.path()).unwrap().count(),
+            0,
+            "dry_run={dry_run}"
+        );
+
+        let mut errors = 0;
+        while let Ok(event) = event_receiver.try_recv() {
+            if let JobEvent::ItemComplete { status, .. } = event {
+                assert_eq!(status, ItemOutcome::Error);
+                errors += 1;
+            }
+        }
+        assert_eq!(errors, 3);
     }
 }
 

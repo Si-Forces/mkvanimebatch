@@ -93,6 +93,10 @@
 - CLI: they go to stderr as the level and the message (no timestamp or module), coloured only on a terminal, so stdout still holds only the `--plan` JSON, the `--events` NDJSON and the summary.
 - Desktop: they go to `mkv-anime-batch.log` in the app log directory (on Linux `$XDG_DATA_HOME/com.mkvanimebatch.desktop/logs/`, `~/.local/share` when unset; one UTC-timestamped line per message with its level and module) and to stderr. The file is emptied at startup when it is over 1 MB, and the app starts with stderr only if it cannot be opened; the Windows build has no console, so there that leaves no output until a later start opens the file. See the README's Troubleshooting section for the path.
 
+### Remux Planning Abort
+
+- A remux planning abort (an assigned subtitle that no longer exists) now keeps the log lines collected before it: the `Skipping ...` and `ERROR: ...` lines of earlier items now appear in the desktop log console and the CLI summary ahead of the `Remux planning failed` line, where before they were lost. A dry run drops its `[DRY-RUN]` lines on an abort, since the batch does no work. Item events and counts are unchanged (#81).
+
 ### Extracted Subtitle Naming
 
 - When a file name does not parse as an episode, its extracted subtitle is named `{stem}_{lang}_track{id}.ass` instead of repeating the stem (`{stem}_{stem}_{lang}_track{id}.ass`). Parsed episodes are unchanged: `{stem}_{EpLabel}{ep}_{lang}_track{id}.ass`.

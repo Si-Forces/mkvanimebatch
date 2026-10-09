@@ -886,17 +886,22 @@ impl BatchPipeline {
         Ok(self.finish(summary).await)
     }
 
+    /// `abort_log` holds the lines planning collected before the abort that still describe
+    /// what happened (skips and errors, not dry-run predictions). They are sent ahead of the
+    /// abort line and kept in the summary.
     async fn settle_planning_failure(
         &self,
         files: &[ParsedFile],
         failed_idx: usize,
         err: String,
+        mut abort_log: Vec<String>,
     ) -> PipelineSummary {
         let msg = format!(
             "  ERROR: Remux planning failed for '{}': {err}",
             files[failed_idx].name
         );
-        self.log(&msg).await;
+        abort_log.push(msg);
+        self.log_batch(&abort_log).await;
 
         let cancelled = self.cancel_token.is_cancelled();
         let aborted = format!(
@@ -908,7 +913,7 @@ impl BatchPipeline {
             total: files.len(),
             errors: if cancelled { 0 } else { files.len() },
             cancelled,
-            log: vec![msg],
+            log: abort_log,
             ..Default::default()
         };
         for (idx, file) in files.iter().enumerate() {
@@ -995,6 +1000,8 @@ impl BatchPipeline {
         let mut remux_work: Vec<(BatchItemInfo, RemuxWork)> = Vec::new();
         let mut planning_outcomes = Vec::new();
         let mut planning_error: Option<(usize, String)> = None;
+        // The summary log lines that survive an abort; dry-run predictions do not.
+        let mut abort_log: Vec<String> = Vec::new();
 
         let planner = RemuxPlanner::new(
             &self.config.input_dir,
@@ -1020,25 +1027,26 @@ impl BatchPipeline {
                 }
                 RemuxPlan::Skip { reason } => {
                     summary.skipped += 1;
-                    summary
-                        .log
-                        .push(format!("Skipping '{}': {reason}", video_file.name));
+                    let line = format!("Skipping '{}': {reason}", video_file.name);
+                    abort_log.push(line.clone());
+                    summary.log.push(line);
                     planning_outcomes.push(skipped_item(item, reason));
                 }
                 RemuxPlan::ProbeFailed { message } => {
                     summary.errors += 1;
-                    summary.log.push(format!(
+                    let line = format!(
                         "  ERROR: Failed to probe '{}': {message}",
                         video_file.path.display()
-                    ));
+                    );
+                    abort_log.push(line.clone());
+                    summary.log.push(line);
                     planning_outcomes.push(errored_item(item, message));
                 }
                 RemuxPlan::Internal { message } => {
                     summary.errors += 1;
-                    summary.log.push(format!(
-                        "  ERROR: '{}': {message}",
-                        video_file.path.display()
-                    ));
+                    let line = format!("  ERROR: '{}': {message}", video_file.path.display());
+                    abort_log.push(line.clone());
+                    summary.log.push(line);
                     planning_outcomes.push(errored_item(item, message));
                 }
                 RemuxPlan::Planned(work) if self.config.dry_run => {
@@ -1055,7 +1063,9 @@ impl BatchPipeline {
         }
 
         if let Some((failed_idx, err)) = planning_error {
-            return Ok(self.settle_planning_failure(&files, failed_idx, err).await);
+            return Ok(self
+                .settle_planning_failure(&files, failed_idx, err, abort_log)
+                .await);
         }
 
         if summary.cancelled {
@@ -1213,7 +1223,7 @@ mod tests {
         let settlement = tokio::spawn(async move {
             let _ = started_sender.send(());
             pipeline
-                .settle_planning_failure(&files, 0, "assignment disappeared".into())
+                .settle_planning_failure(&files, 0, "assignment disappeared".into(), Vec::new())
                 .await
         });
 
@@ -1344,7 +1354,7 @@ mod tests {
         let files = ["Season 1/one.mkv", "Season 2/two.mkv"]
             .map(|rel| create_parsed_file(input_dir.join(rel)));
         pipeline
-            .settle_planning_failure(&files, 0, "assignment disappeared".into())
+            .settle_planning_failure(&files, 0, "assignment disappeared".into(), Vec::new())
             .await;
 
         let mut outcomes = Vec::new();
