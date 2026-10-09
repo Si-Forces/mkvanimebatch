@@ -763,10 +763,11 @@ mod tests {
         request.resolve().unwrap();
     }
 
-    /// `--selected-items` trims each entry, so a leading space survives only when the entry does
-    /// not start with it: `./ 01.mkv` keeps the space, the bare ` 01.mkv` loses it (ADR-0014).
+    /// `--selected-items` trims each entry, so a name's leading space survives only when the
+    /// trimmed entry has something before it, as in `./ 01.mkv` or `<input-dir>/ 01.mkv`; the bare
+    /// ` 01.mkv` loses it (ADR-0014).
     #[test]
-    fn test_cli_selected_items_keeps_a_leading_space_after_dot_slash() {
+    fn test_cli_selected_items_keeps_a_leading_space_after_a_path_prefix() {
         let dir = tempdir().unwrap();
         write_files(dir.path(), &[" 01.mkv", "01.mkv"]);
         let input_dir = path_arg(dir.path());
@@ -775,6 +776,14 @@ mod tests {
         let request = parsed.unwrap().request;
         assert_eq!(request.selected_items.as_deref().unwrap(), [" 01.mkv"]);
         request.resolve().unwrap();
+
+        // So does a path that begins with the input directory.
+        let absolute = path_arg(&dir.path().join(" 01.mkv")).to_owned();
+        let parsed = parse_args_from(["--input-dir", input_dir, "--selected-items", &absolute]);
+        assert_eq!(
+            parsed.unwrap().request.selected_items.as_deref().unwrap(),
+            [" 01.mkv"]
+        );
 
         let parsed = parse_args_from(["--input-dir", input_dir, "--selected-items", " 01.mkv"]);
         assert_eq!(
