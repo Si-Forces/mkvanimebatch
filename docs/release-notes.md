@@ -83,9 +83,15 @@
 ### Media Tool Invocation
 
 - Extraction now logs mkvextract's exit-code-1 warnings in the item's log, as remux does for mkvmerge (`  Warning: <text>`). It discarded them before.
-- The `mkvmerge -J` fallback probe accepts exit code 1 (warnings) when the output is valid JSON, and passes the document's `warnings` and `errors` arrays, naming the file, to `tracing::warn!` on exit code 0 or 1. `mkvmerge -J` reports its messages in the document, and can exit 0 with them; the run's stderr is not logged. Neither `mkv-cli` nor the desktop installs a `tracing` subscriber yet, so the warning is not shown anywhere. It failed with `mkvmerge exit code Some(1)` before. `probe_video_mkvmerge_with(runner, path)` takes the runner, so a scripted one covers this.
+- The `mkvmerge -J` fallback probe accepts exit code 1 (warnings) when the output is valid JSON, and passes the document's `warnings` and `errors` arrays, naming the file, to `tracing::warn!` on exit code 0 or 1. `mkvmerge -J` reports its messages in the document, and can exit 0 with them; the run's stderr is not logged. It failed with `mkvmerge exit code Some(1)` before. `probe_video_mkvmerge_with(runner, path)` takes the runner, so a scripted one covers this.
 - `mkvmerge`, `mkvextract`, and `ffmpeg` failures share one wording: `Failed to run <tool>: <error>`, `<tool> timed out after <N> seconds`, and `<tool> failed (exit code N | terminated by signal): <stderr and stdout>`. A tool that printed nothing now gives `<tool> failed (exit code N)`, without repeating the code after a colon. A failed transcode reads `Audio transcode: ffmpeg failed (exit code N): ...` instead of `ffmpeg audio transcode failed: ...`.
 - Every Media Tool starts with stdin closed; `mkvmerge` and `mkvextract` inherited it before.
+
+### Engine Diagnostics
+
+- `mkv-cli` and the desktop now install a `tracing` subscriber, so the engine's own `warn!` and `error!` messages (a corrupt inspect cache, a failed font memo, the `mkvmerge -J` warnings) are shown. Nothing showed them before. The default level is `warn`; `RUST_LOG` overrides it, for example `RUST_LOG=debug` or `RUST_LOG=mkv_core::fonts=debug`.
+- CLI: they go to stderr as the level and the message (no timestamp or module), coloured only on a terminal, so stdout still holds only the `--plan` JSON, the `--events` NDJSON and the summary.
+- Desktop: they go to `mkv-anime-batch.log` in the app log directory (on Linux `~/.local/share/com.mkvanimebatch.desktop/logs/`; one UTC-timestamped line per message with its level and module) and to stderr. The file is emptied at startup when it is over 1 MB, and the app starts with stderr only if it cannot be opened. See the README's Troubleshooting section for the path.
 
 ### Extracted Subtitle Naming
 

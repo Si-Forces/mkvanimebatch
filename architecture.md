@@ -152,6 +152,7 @@ mkvanimebatch/
     │       ├── lib.rs               # Tauri builder, command registration, exit handling, Linux environment defaults
     │       ├── main.rs              # Binary entry point
     │       ├── commands.rs          # inspect_directory, canonical_directory, resolve_batch_request, run_job (`launch`), clear_cache, pickers, presets, default settings, get_job_snapshot
+    │       ├── diagnostics.rs       # Engine Diagnostics subscriber: log file + stderr (ADR-0007)
     │       ├── job.rs               # JobState (Job Slot, supervisor, two-phase stop, start gate), JobSink seam and its Tauri adapter
     │       ├── snapshot.rs          # Job Snapshot types and SnapshotStore: event reduction and Item Settlement
     │       ├── process.rs           # ScanState, job and scan teardown, shutdown, close_window
@@ -215,7 +216,7 @@ flowchart TD
    - Fails (and so triggers the fallback) only when the probe returns an error: missing EBML header or Segment, a malformed top-level element, clusters with no SeekHead before them, or no track found. A malformed SeekHead entry or a truncated tail ends the scan without failing. The parser tracks stream position in memory and preserves `BufReader` buffers across intra-buffer skips via relative seeking, eliminating loop guard `lseek` calls. ADR-0013 measured the original warm native probe at 0.091 ms.
 
 2. **Fallback inspector (`scan.rs`)**:
-   - Runs `mkvmerge -J` through `SubprocessRunner` and the shared exit-code policy (§4.6) with a 30-second timeout (`PROBE_TIMEOUT`), so exit code 1 (warnings) with valid JSON still probes successfully, and the document's `warnings` and `errors` arrays (mkvmerge reports `-J` messages there, even on exit code 0) go to `tracing::warn!` naming the file (no binary installs a `tracing` subscriber yet, so `mkv-core`'s `tracing` output is not shown). It rejects output whose `container.recognized` is `false`. `probe_video_mkvmerge_with(runner, path)` takes the runner; `probe_video_mkvmerge(path)` passes `SubprocessRunner`.
+   - Runs `mkvmerge -J` through `SubprocessRunner` and the shared exit-code policy (§4.6) with a 30-second timeout (`PROBE_TIMEOUT`), so exit code 1 (warnings) with valid JSON still probes successfully, and the document's `warnings` and `errors` arrays (mkvmerge reports `-J` messages there, even on exit code 0) go to `tracing::warn!` naming the file. It rejects output whose `container.recognized` is `false`. `probe_video_mkvmerge_with(runner, path)` takes the runner; `probe_video_mkvmerge(path)` passes `SubprocessRunner`.
    - On Windows every child tool (`mkvmerge`, `mkvextract`, `ffmpeg`) is spawned by `SubprocessRunner` with `CREATE_NO_WINDOW` (`0x08000000`).
 
 3. **Persistent inspection cache (`PersistentInspectCache`)**:
@@ -542,6 +543,10 @@ The engine runs inside the desktop process (ADR-0007, ADR-0008). `commands.rs` k
 
 ---
 
+### 5.1.1 Engine Diagnostics (`diagnostics.rs`)
+
+The desktop installs its own `tracing` subscriber from the Tauri `setup` hook, as soon as `app_log_dir()` resolves (ADR-0007). It has two layers behind one `EnvFilter` (`RUST_LOG`, default `warn`): `mkv-anime-batch.log` in the app log directory (append mode, UTC timestamp, level and module, no ANSI; emptied at startup when over 1 MB, with no rotation), and stderr in the CLI's short format. If the directory or file cannot be created or opened, it logs a warning and uses stderr only; startup never fails. `build_dispatch` takes the log directory and returns the `Dispatch` without installing it, so tests scope it with `tracing::dispatcher::with_default`. An outcome that changes what a run produces goes on the Log Channel, never only here.
+
 ### 5.2 System Telemetry (`telemetry.rs`, `telemetry.js`)
 
 The webview polls `get_system_telemetry` every second while a job is active and every 30 seconds otherwise, skipping ticks while a request is in flight and pausing while the page is hidden.
@@ -600,7 +605,8 @@ The frontend is plain ES modules with no framework.
    - `--assignments <FILE>` is read with `parse_assignments_json`: a `TrackAssignment` array, `{"assignments": [...] | {video: asset}}`, or a flat `{video: asset}` map (maps become subtitle assignments).
    - Selection: `--selected-item <PATH>` (repeatable, literal, commas kept) and `--selected-items <LIST>` (repeatable, comma-separated, whitespace trimmed, empty segments dropped); both require `--input-dir`. Paths are normalized relative to `input_dir`, with a working-directory fallback, and anything resolving outside `input_dir` is rejected. Each is normalised with `ItemId::parse`. In `--plan` mode, `InspectionManifest::select_items` fails if a selection names no discovered MKV, then keeps the selected items in selection order.
    - Validation: numeric syntax is checked while parsing, as is `--sub-offset`, whose seconds must be finite and round (half away from zero) to whole milliseconds that fit `i64`. `main.rs` then calls `BatchRequest::resolve()` once, before anything runs, `--plan` included, and a run keeps the resolved `PipelineConfig`. `resolve` checks `--preset`, `--bitrate` (positive integer with an optional `k`/`K` or `M` suffix; lowercase `m` is rejected because ffmpeg reads it as milli), the ranges (`workers` 1–64, `io_jobs` 0–64, `ffmpeg_threads` 1–32, `complexity` 0–10) and the paths. The `--help` ranges and the `--io-jobs` default are built from the same constants.
-4. **Exit codes**: `0` on success; `1` on argument or validation errors, when any item failed, or on a fatal pipeline error; `130` when cancelled by SIGINT (or SIGTERM on Unix).
+4. **Engine Diagnostics**: `main.rs` installs a `tracing` subscriber before anything runs. It writes to stderr, so stdout stays reserved for the `--plan` JSON, the `--events` NDJSON and the summary. `RUST_LOG` sets the filter (default `warn`). A line is the level and the message, with no timestamp or module path, and is coloured only when stderr is a terminal. A failed install (a subscriber already set) is ignored.
+5. **Exit codes**: `0` on success; `1` on argument or validation errors, when any item failed, or on a fatal pipeline error; `130` when cancelled by SIGINT (or SIGTERM on Unix).
 
 ---
 

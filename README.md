@@ -23,6 +23,7 @@ Available both as a standalone **CLI binary (`mkv-cli`)** and as a **Tauri v2 de
 - [Tauri Desktop Application](#tauri-desktop-application)
   - [Pre-built Releases](#pre-built-releases)
   - [Building from Source](#building-from-source)
+- [Troubleshooting](#troubleshooting)
 - [Architecture & Design](#architecture--design)
 - [Running Automated Tests](#running-automated-tests)
 - [Project Layout](#project-layout)
@@ -212,6 +213,32 @@ cargo tauri build
 
 ---
 
+## Troubleshooting
+
+The engine reports its own problems (a corrupt inspect cache, a failed font memo, `mkvmerge -J` warnings) as diagnostics. The default level is `warn`; set `RUST_LOG` to see more, in both binaries.
+
+- **CLI**: diagnostics go to stderr, so stdout stays the `--plan` JSON, the `--events` NDJSON and the summary.
+- **Desktop**: diagnostics go to stderr and to `mkv-anime-batch.log`, which is emptied at startup when it is over 1 MB:
+
+  | OS | Log file |
+  |---|---|
+  | Linux | `$XDG_DATA_HOME/com.mkvanimebatch.desktop/logs/mkv-anime-batch.log` (`~/.local/share` when unset) |
+  | Windows | `%LOCALAPPDATA%\com.mkvanimebatch.desktop\logs\mkv-anime-batch.log` |
+  | macOS | `~/Library/Logs/com.mkvanimebatch.desktop/mkv-anime-batch.log` |
+
+```bash
+# Everything at debug level
+RUST_LOG=debug mkv-cli --input-dir /path/to/series --plan
+
+# One module only (here the font registry)
+RUST_LOG=mkv_core::fonts=debug mkv-cli --input-dir /path/to/series
+
+# Desktop: start the app from a terminal with the same variable
+RUST_LOG=debug ./mkv-anime-batch
+```
+
+---
+
 ## Architecture & Design
 
 ```
@@ -233,6 +260,7 @@ cargo tauri build
 │  • Unified Asset Resolver (Nearest-Directory Precedence)    │
 │  • Batch Pipeline & Bounded Concurrency Engine              │
 │  • Dual-Channel Streaming (Job Events & Log Channel)        │
+│  • Engine Diagnostics (tracing: stderr, desktop log file)   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
