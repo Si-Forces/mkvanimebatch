@@ -177,15 +177,19 @@ pub struct ToolOutput {
 }
 
 impl ToolOutput {
-    /// The log line for the warning, if any: `  <text>` when it already starts with
-    /// "warning" (any case), else `  Warning: <text>`.
+    /// The log line for the warning, if any (see [`warning_log_line`]).
     pub fn warning_log_line(&self) -> Option<String> {
-        let text = self.warning.as_deref()?;
-        Some(if text.to_lowercase().starts_with("warning") {
-            format!("  {text}")
-        } else {
-            format!("  Warning: {text}")
-        })
+        self.warning.as_deref().map(warning_log_line)
+    }
+}
+
+/// The Log Channel line for a warning: `  <text>` when `text` already starts with "warning"
+/// (any case), else `  Warning: <text>`.
+pub fn warning_log_line(text: &str) -> String {
+    if text.to_lowercase().starts_with("warning") {
+        format!("  {text}")
+    } else {
+        format!("  Warning: {text}")
     }
 }
 

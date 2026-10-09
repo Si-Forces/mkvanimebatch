@@ -62,8 +62,8 @@ pub async fn probe_video_mkvmerge(path: &Path) -> Result<MkvmergeMetadata, Strin
 /// [`probe_video_mkvmerge`] through `runner`, so a test can script the `mkvmerge -J` run.
 ///
 /// Exit code 1 (success with warnings) still parses the JSON. `mkvmerge -J` reports its messages
-/// in the document's `warnings` and `errors` arrays, even on exit code 0, so those are what gets
-/// logged; the run's stderr is not.
+/// in the document, even on exit code 0, not on stderr: `warnings` are logged, and `errors` ride
+/// on a rejection's text, or are logged when the file is still accepted.
 pub async fn probe_video_mkvmerge_with(
     runner: &dyn MediaToolRunner,
     path: &Path,
@@ -74,25 +74,45 @@ pub async fn probe_video_mkvmerge_with(
     let val: serde_json::Value = serde_json::from_slice(&output.stdout)
         .map_err(|e| format!("Failed to parse mkvmerge JSON: {e}"))?;
 
-    for key in ["errors", "warnings"] {
-        let messages = json_messages(&val, key);
-        if !messages.is_empty() {
-            warn!(
-                "mkvmerge -J reported {key} for {}: {}",
-                path.display(),
-                messages.join("; ")
-            );
-        }
+    let warnings = json_messages(&val, "warnings");
+    if !warnings.is_empty() {
+        warn!(
+            "mkvmerge -J reported warnings for {}: {}",
+            path.display(),
+            warnings.join("; ")
+        );
     }
+
+    // A rejected file carries mkvmerge's own explanation in the error text, which reaches the
+    // Log Channel and the Inspection Manifest.
+    let errors = json_messages(&val, "errors").join("; ");
+    let with_mkvmerge_errors = |reason: String| {
+        if errors.is_empty() {
+            reason
+        } else {
+            format!("{reason} (mkvmerge: {errors})")
+        }
+    };
 
     if let Some(false) = val
         .pointer("/container/recognized")
         .and_then(|v| v.as_bool())
     {
-        return Err("File is not a recognized Matroska container".to_string());
+        return Err(with_mkvmerge_errors(
+            "File is not a recognized Matroska container".to_string(),
+        ));
     }
 
-    serde_json::from_value(val).map_err(|e| format!("Failed to parse mkvmerge metadata: {e}"))
+    let metadata = serde_json::from_value(val)
+        .map_err(|e| with_mkvmerge_errors(format!("Failed to parse mkvmerge metadata: {e}")))?;
+    // An accepted file's errors change nothing the run produces, so they stay a diagnostic.
+    if !errors.is_empty() {
+        warn!(
+            "mkvmerge -J reported errors for {}: {errors}",
+            path.display()
+        );
+    }
+    Ok(metadata)
 }
 
 /// The non-blank string entries of an `mkvmerge -J` document's `key` array (`warnings` or

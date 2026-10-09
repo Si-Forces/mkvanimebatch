@@ -18,7 +18,7 @@ use crate::extract::extract_mkv_file;
 use crate::fonts::{FontHashMemo, FontRegistry};
 use crate::inspect::inspect_videos;
 use crate::item_id::ItemId;
-use crate::media_tool::{MediaToolRunner, SubprocessRunner};
+use crate::media_tool::{warning_log_line, MediaToolRunner, SubprocessRunner};
 use crate::remux::{execute_remux_job, RemuxOptions};
 use crate::remux_plan::{PreparedDir, RemuxPlan, RemuxPlanner, RemuxWork};
 use crate::request::{resolve_selected_items, EffectiveSettings, TrackAssignment};
@@ -1054,6 +1054,9 @@ impl BatchPipeline {
                         video_file.name,
                         work.job.output_file.display()
                     ));
+                    summary
+                        .log
+                        .extend(work.job.chapter_warning.as_deref().map(warning_log_line));
                     planning_outcomes.push(planned_item(item));
                     summary.completed += 1;
                 }

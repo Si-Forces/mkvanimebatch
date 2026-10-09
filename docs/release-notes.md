@@ -45,6 +45,7 @@
 - **`clean_relative_path` removed; item identity is an `ItemId`**: the new public module `mkv_core::item_id` holds `ItemId`, a value built only normalised: `ItemId::of(path, input_dir)` for a discovered file and `ItemId::parse(spelling)` for a user-supplied relative spelling (use it where you called `request::clean_relative_path`). `BatchItemInfo.id`, `ManifestItem.id` and the `id` of `JobEvent::{ItemStart, ItemProgress, ItemComplete}` are now `ItemId` instead of `String`; read it with `as_str()`, `to_string()` or `String::from`. The JSON shape is unchanged: an `ItemId` serialises as a plain string, so the manifest v2 schema, the job events and `--plan` output are identical for any path (an ID is not trimmed, and its `.` segments and repeated separators are dropped, as selections already were), and deserialising an `ItemId` normalises it. `get_item_id` moved from `manifest` to `item_id` with the same signature; it stays for release directories and subtitle candidates.
 - **Selected Items and Track Assignment targets are no longer trimmed**: a Batch Request entry, a `--selected-item` value or an `--assignments` JSON `target_video` with surrounding whitespace now names that exact path, where it used to match the trimmed path. Leading whitespace with no such file fails with the existing `does not exist` error; a spelling that no longer ends in `.mkv`, such as one with trailing whitespace, fails as `is not an MKV file`. `--selected-items` still trims each comma segment. An entry that is empty or only whitespace is still rejected. Items whose path starts with whitespace, such as a top-level folder ` Season 1/`, can now be selected and assigned, and two files that differ only by leading whitespace are two items (fixes #61).
 - **`find_fonts_dir` and `scan_fonts` require their caches**: in `mkv_core::fonts`, both take their cache as `&mut HashMap` instead of `Option`, and `find_fonts_dir` no longer takes `override_dir`. `ReleasePreparer` applies `--fonts-dir` before it consults `find_fonts_dir`; a caller outside the preparer must do the same.
+- **`FontRegistry::promote` returns a `FontPromotion`**: `Promoted(path)`, `Duplicate` or `Failed(reason)` instead of `Option<PathBuf>`. `ResolvedAssets` and `PlannedJob` gain a `chapter_warning: Option<String>` field.
 
 ### Core Scanning
 
@@ -83,7 +84,7 @@
 ### Media Tool Invocation
 
 - Extraction now logs mkvextract's exit-code-1 warnings in the item's log, as remux does for mkvmerge (`  Warning: <text>`). It discarded them before.
-- The `mkvmerge -J` fallback probe accepts exit code 1 (warnings) when the output is valid JSON, and passes the document's `warnings` and `errors` arrays, naming the file, to `tracing::warn!` on exit code 0 or 1. `mkvmerge -J` reports its messages in the document, and can exit 0 with them; the run's stderr is not logged. It failed with `mkvmerge exit code Some(1)` before. `probe_video_mkvmerge_with(runner, path)` takes the runner, so a scripted one covers this.
+- The `mkvmerge -J` fallback probe accepts exit code 1 (warnings) when the output is valid JSON, and passes the document's `warnings` array, naming the file, to `tracing::warn!` on exit code 0 or 1 (its `errors` array goes into a rejection's message, see Log Channel Outcomes, and to `tracing::warn!` when the file is accepted). `mkvmerge -J` reports its messages in the document, and can exit 0 with them; the run's stderr is not logged. It failed with `mkvmerge exit code Some(1)` before. `probe_video_mkvmerge_with(runner, path)` takes the runner, so a scripted one covers this.
 - `mkvmerge`, `mkvextract`, and `ffmpeg` failures share one wording: `Failed to run <tool>: <error>`, `<tool> timed out after <N> seconds`, and `<tool> failed (exit code N | terminated by signal): <stderr and stdout>`. A tool that printed nothing now gives `<tool> failed (exit code N)`, without repeating the code after a colon. A failed transcode reads `Audio transcode: ffmpeg failed (exit code N): ...` instead of `ffmpeg audio transcode failed: ...`.
 - Every Media Tool starts with stdin closed; `mkvmerge` and `mkvextract` inherited it before.
 
@@ -96,6 +97,10 @@
 ### Remux Planning Abort
 
 - A remux planning abort (an assigned subtitle that no longer exists) now keeps the log lines collected before it: the `Skipping ...` and `ERROR: ...` lines of earlier items now appear in the desktop log console and the CLI summary ahead of the `Remux planning failed` line, where before they were lost. A dry run drops its `[DRY-RUN]` lines on an abort, since the batch does no work. Item events and counts are unchanged.
+
+### Log Channel Outcomes
+
+- Three outcomes that were silent or only Engine Diagnostics now reach the user. An extracted font that cannot be saved adds `   -> WARNING: Font '<name>' was not saved: <reason>` to the item's log (the item still completes; a duplicate of a saved font stays silent). An episode whose chapters come from a file with same-directory duplicates logs `  Warning: More than one chapter file for this episode in '<dir>': using '<kept>', ignoring '<a>', '<b>'` on its own item, after `Processing:` (after its `[DRY-RUN]` line in a dry run), where before it was only an Engine Diagnostic. A file the `mkvmerge -J` fallback probe rejects carries mkvmerge's `errors` in its message, for example `File is not a recognized Matroska container (mkvmerge: <error>)`, in the run's log and the Inspect manifest's `inspection_error`.
 
 ### Extracted Subtitle Naming
 

@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::domain::{
     ancestor_dirs, detect_sub_lang, is_dialogue_track, lang_label, lang_mkv_tag, natural_sort_key,
@@ -126,44 +126,38 @@ fn classify_sub(sub_file: &ParsedFile) -> SubClassification {
     }
 }
 
-/// Whether `path` duplicates an already indexed chapter of the same season. The first file
-/// indexed wins; the rejection is logged.
-fn is_duplicate_chapter(
-    existing: &[(PathBuf, String)],
+/// `path`'s file name, lossily, or empty when it has none.
+fn file_name_of(path: &Path) -> String {
+    path.file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// The already indexed chapter of the same season that `path` duplicates, if any. The first
+/// file indexed wins. A duplicate from another directory is an Engine Diagnostic (the
+/// precedence ladder working as designed); the caller reports a same-directory one.
+fn kept_chapter<'a>(
+    existing: &'a [(PathBuf, String)],
     path: &Path,
     season: &str,
     key: &str,
-) -> bool {
-    let Some((existing_path, _)) = existing
+) -> Option<&'a Path> {
+    let (kept, _) = existing
         .iter()
-        .find(|(_, existing_season)| existing_season == season)
-    else {
-        return false;
-    };
-    let parent_name = path
-        .parent()
-        .and_then(|p| p.file_name())
-        .map(|s| s.to_string_lossy())
-        .unwrap_or_default();
-    let existing_name = existing_path
-        .file_name()
-        .map(|s| s.to_string_lossy())
-        .unwrap_or_default();
-    let path_name = path
-        .file_name()
-        .map(|s| s.to_string_lossy())
-        .unwrap_or_default();
-
-    if existing_path.parent() == path.parent() {
-        warn!("Duplicate chapter file: key {key} in '{parent_name}': keeping '{existing_name}', ignoring '{path_name}'");
-    } else {
+        .find(|(_, existing_season)| existing_season == season)?;
+    if kept.parent() != path.parent() {
+        let parent_name = path.parent().map(file_name_of).unwrap_or_default();
         let parent_display = path
             .parent()
             .map(|p| p.display().to_string())
             .unwrap_or_default();
-        info!("Duplicate asset for key {key} also found in '{parent_name}': keeping '{existing_name}', ignoring '{path_name}' from '{parent_display}'");
+        info!(
+            "Duplicate asset for key {key} also found in '{parent_name}': keeping '{}', ignoring '{}' from '{parent_display}'",
+            file_name_of(kept),
+            file_name_of(path)
+        );
     }
-    true
+    Some(kept)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -267,6 +261,8 @@ impl SubIndex {
 #[derive(Debug, Clone, Default)]
 pub struct ChapterIndex {
     index: HashMap<String, Vec<(PathBuf, String)>>,
+    /// For each kept file, the same-directory files indexed after it and ignored, in index order.
+    ignored_beside: HashMap<PathBuf, Vec<PathBuf>>,
     unmatched: Vec<PathBuf>,
 }
 
@@ -281,7 +277,13 @@ impl ChapterIndex {
         if let Some(parsed) = &xml_file.parsed {
             let key = ep_key(parsed);
             let existing = self.index.entry(key.clone()).or_default();
-            if is_duplicate_chapter(existing, &xml_file.path, &parsed.season, &key) {
+            if let Some(kept) = kept_chapter(existing, &xml_file.path, &parsed.season, &key) {
+                if kept.parent() == xml_file.path.parent() {
+                    self.ignored_beside
+                        .entry(kept.to_path_buf())
+                        .or_default()
+                        .push(xml_file.path.clone());
+                }
                 return;
             }
             existing.push((xml_file.path.clone(), parsed.season.clone()));
@@ -295,6 +297,22 @@ impl ChapterIndex {
             .get(&ep_key(parsed))?
             .iter()
             .find_map(|(path, season)| seasons_match(&parsed.season, season).then(|| path.clone()))
+    }
+
+    /// The warning text for an episode whose chapters resolve to `kept` while other chapter
+    /// files sit beside it, or `None` when `kept` has no same-directory duplicate.
+    fn duplicate_warning(&self, kept: &Path) -> Option<String> {
+        let ignored = self.ignored_beside.get(kept)?;
+        let ignored: Vec<String> = ignored
+            .iter()
+            .map(|p| format!("'{}'", file_name_of(p)))
+            .collect();
+        Some(format!(
+            "More than one chapter file for this episode in '{}': using '{}', ignoring {}",
+            kept.parent().unwrap_or(Path::new("")).display(),
+            file_name_of(kept),
+            ignored.join(", ")
+        ))
     }
 
     /// Chapter files whose names carry no episode number.
@@ -537,6 +555,9 @@ pub struct ResolvedAssets {
     pub subtitle_mkv_lang: String,
     pub matched_subtitle: bool,
     pub chapter_file: Option<PathBuf>,
+    /// Warning text for same-directory chapter files ignored in favor of `chapter_file`; the
+    /// caller logs it as a warning line.
+    pub chapter_warning: Option<String>,
     pub cover_file: Option<PathBuf>,
     pub skip_reason: Option<String>,
 }
@@ -811,6 +832,15 @@ impl AssetResolver {
             };
             (sub, None)
         };
+        // Only a chapter file picked from an index can have ignored duplicates; a claimed
+        // leftover chapter is in neither.
+        let chapter_warning = chapter_file.as_deref().and_then(|chapter| {
+            self.chap_index.duplicate_warning(chapter).or_else(|| {
+                self.fallback_chap_index
+                    .as_ref()
+                    .and_then(|fb| fb.duplicate_warning(chapter))
+            })
+        });
         let cover_file = self.resolve_cov(video, has_source_cover);
 
         let subtitle_label = lang_label(&sub_res.lang).to_string();
@@ -824,6 +854,7 @@ impl AssetResolver {
             subtitle_mkv_lang,
             matched_subtitle: sub_res.matched,
             chapter_file,
+            chapter_warning,
             cover_file,
             skip_reason: sub_res.skip_reason,
         }
