@@ -5,7 +5,7 @@ use tempfile::tempdir;
 
 use common::{ScriptedRunner, Step};
 use mkv_core::domain::{EpisodeInfo, MkvTrack, TrackProperties, SUBPROCESS_TIMEOUT};
-use mkv_core::extract::{extract_mkv_file, select_subtitle_for_extraction};
+use mkv_core::extract::{extract_mkv_file, select_subtitle_for_extraction, ExtractSummary};
 use mkv_core::fonts::FontRegistry;
 use mkv_core::media_tool::MediaTool;
 use mkv_core::scan::{InspectedVideo, MkvAttachment, MkvmergeMetadata};
@@ -224,10 +224,7 @@ fn font_attachment(id: u32, name: &str) -> MkvAttachment {
 
 /// Extracts `fonts` from a video whose mkvextract run writes `content` to every attachment
 /// target, and returns the summary.
-async fn extract_fonts(
-    fonts: &[MkvAttachment],
-    content: &'static [u8],
-) -> mkv_core::extract::ExtractSummary {
+async fn extract_fonts(fonts: &[MkvAttachment], content: &'static [u8]) -> ExtractSummary {
     let dir = tempdir().unwrap();
     let mkv_path = dir.path().join("Show - 01.mkv");
     fs::File::create(&mkv_path).unwrap();

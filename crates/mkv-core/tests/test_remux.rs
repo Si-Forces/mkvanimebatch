@@ -358,7 +358,7 @@ async fn test_execute_remux_job_logs_the_chapter_warning_after_processing() {
     let video = dir.path().join("test.mkv");
     std::fs::File::create(&video).unwrap();
     let mut job = job(&video, dir.path().join("out.mkv"), None);
-    job.chapter_warning = Some("  Warning: More than one chapter file".to_string());
+    job.chapter_warning = Some("More than one chapter file".to_string());
     let runner = ScriptedRunner::new([Step::exited(
         MediaTool::Mkvmerge,
         1,

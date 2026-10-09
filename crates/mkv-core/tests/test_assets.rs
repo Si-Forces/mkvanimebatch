@@ -93,6 +93,32 @@ fn test_chap_index_cross_dir_duplicate_kept_first() {
     );
 }
 
+/// A duplicate in another directory is only an Engine Diagnostic: the item that uses the kept
+/// file gets no chapter warning.
+#[test]
+fn test_cross_dir_chapter_duplicate_gives_no_chapter_warning() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().to_path_buf();
+    let season = root.join("Season 01");
+    fs::create_dir_all(&season).unwrap();
+    let kept = season.join("Show_S01E01_chapters.xml");
+    for p in [&kept, &root.join("Show_S01E01_chapters.xml")] {
+        fs::write(p, CHAPTER_XML).unwrap();
+    }
+    let video = season.join("Show_S01E01.mkv");
+    fs::write(&video, b"vid").unwrap();
+
+    let resolved = discover(&ancestor_dirs(&season, &root), None).resolve_for(
+        &create_parsed_file(&video),
+        None,
+        None,
+        None,
+    );
+
+    assert_eq!(resolved.chapter_file, Some(kept));
+    assert_eq!(resolved.chapter_warning, None);
+}
+
 #[test]
 fn test_discover_scan_cache_hit_keeps_chapter_without_resniffing() {
     let tmp = tempdir().unwrap();

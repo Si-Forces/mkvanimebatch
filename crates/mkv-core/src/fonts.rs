@@ -461,18 +461,21 @@ impl FontRegistry {
     }
 
     /// Validate, hash, deduplicate, and atomically promote a staged font file to fonts_dir.
-    /// If hash is duplicate or validation fails, staging file is removed and released.
+    /// A duplicate drops the staged file and keeps its `(name, size)` reservation; a failure
+    /// removes it and releases the claim.
     /// The outcome tells the caller whether the font was saved, was a content duplicate, or
     /// failed (with the reason, for the caller to report on the Log Channel).
     pub fn promote(&self, claim: &mut FontClaim) -> FontPromotion {
         let staged = match fs::metadata(&claim.staging_path) {
-            Ok(meta) if meta.is_file() && meta.len() > 0 => hash_file(&claim.staging_path)
+            Err(e) => Err(format!("could not read it: {e}")),
+            Ok(meta) if !meta.is_file() => Err("it is not a regular file".to_string()),
+            Ok(meta) if meta.len() == 0 => Err("the extracted file is empty".to_string()),
+            Ok(meta) => hash_file(&claim.staging_path)
                 .map(|hash| (hash, meta.len()))
                 .map_err(|e| format!("could not read it: {e}")),
-            _ => Err("the extracted file is empty".to_string()),
         };
         let (file_hash, size) = match staged {
-            Ok(staged) => staged,
+            Ok(found) => found,
             Err(reason) => {
                 let mut state = self.state.lock();
                 release_locked(&mut state, claim);

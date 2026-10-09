@@ -62,8 +62,8 @@ pub async fn probe_video_mkvmerge(path: &Path) -> Result<MkvmergeMetadata, Strin
 /// [`probe_video_mkvmerge`] through `runner`, so a test can script the `mkvmerge -J` run.
 ///
 /// Exit code 1 (success with warnings) still parses the JSON. `mkvmerge -J` reports its messages
-/// in the document's `warnings` and `errors` arrays, even on exit code 0, so those are what gets
-/// reported; the run's stderr is not. `warnings` are logged; `errors` ride on a rejection's text.
+/// in the document, even on exit code 0, not on stderr: `warnings` are logged, and `errors` ride
+/// on a rejection's text, or are logged when the file is still accepted.
 pub async fn probe_video_mkvmerge_with(
     runner: &dyn MediaToolRunner,
     path: &Path,
@@ -103,8 +103,16 @@ pub async fn probe_video_mkvmerge_with(
         ));
     }
 
-    serde_json::from_value(val)
-        .map_err(|e| with_mkvmerge_errors(format!("Failed to parse mkvmerge metadata: {e}")))
+    let metadata = serde_json::from_value(val)
+        .map_err(|e| with_mkvmerge_errors(format!("Failed to parse mkvmerge metadata: {e}")))?;
+    // An accepted file's errors change nothing the run produces, so they stay a diagnostic.
+    if !errors.is_empty() {
+        warn!(
+            "mkvmerge -J reported errors for {}: {errors}",
+            path.display()
+        );
+    }
+    Ok(metadata)
 }
 
 /// The non-blank string entries of an `mkvmerge -J` document's `key` array (`warnings` or

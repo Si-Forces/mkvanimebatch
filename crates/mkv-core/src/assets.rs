@@ -126,6 +126,13 @@ fn classify_sub(sub_file: &ParsedFile) -> SubClassification {
     }
 }
 
+/// `path`'s file name, lossily, or empty when it has none.
+fn file_name_of(path: &Path) -> String {
+    path.file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
 /// The already indexed chapter of the same season that `path` duplicates, if any. The first
 /// file indexed wins. A duplicate from another directory is an Engine Diagnostic (the
 /// precedence ladder working as designed); the caller reports a same-directory one.
@@ -139,16 +146,15 @@ fn kept_chapter<'a>(
         .iter()
         .find(|(_, existing_season)| existing_season == season)?;
     if kept.parent() != path.parent() {
-        let name = |p: &Path| p.file_name().map(|s| s.to_string_lossy().into_owned());
-        let parent_name = path.parent().and_then(name).unwrap_or_default();
+        let parent_name = path.parent().map(file_name_of).unwrap_or_default();
         let parent_display = path
             .parent()
             .map(|p| p.display().to_string())
             .unwrap_or_default();
         info!(
             "Duplicate asset for key {key} also found in '{parent_name}': keeping '{}', ignoring '{}' from '{parent_display}'",
-            name(kept).unwrap_or_default(),
-            name(path).unwrap_or_default()
+            file_name_of(kept),
+            file_name_of(path)
         );
     }
     Some(kept)
@@ -293,21 +299,18 @@ impl ChapterIndex {
             .find_map(|(path, season)| seasons_match(&parsed.season, season).then(|| path.clone()))
     }
 
-    /// The Log Channel warning for an episode whose chapters resolve to `kept` while other
-    /// chapter files sit beside it, or `None` when `kept` has no same-directory duplicate.
+    /// The warning text for an episode whose chapters resolve to `kept` while other chapter
+    /// files sit beside it, or `None` when `kept` has no same-directory duplicate.
     fn duplicate_warning(&self, kept: &Path) -> Option<String> {
         let ignored = self.ignored_beside.get(kept)?;
-        let name = |p: &Path| {
-            p.file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned()
-        };
-        let ignored: Vec<String> = ignored.iter().map(|p| format!("'{}'", name(p))).collect();
+        let ignored: Vec<String> = ignored
+            .iter()
+            .map(|p| format!("'{}'", file_name_of(p)))
+            .collect();
         Some(format!(
-            "  Warning: More than one chapter file for this episode in '{}': using '{}', ignoring {}",
+            "More than one chapter file for this episode in '{}': using '{}', ignoring {}",
             kept.parent().unwrap_or(Path::new("")).display(),
-            name(kept),
+            file_name_of(kept),
             ignored.join(", ")
         ))
     }
@@ -552,7 +555,8 @@ pub struct ResolvedAssets {
     pub subtitle_mkv_lang: String,
     pub matched_subtitle: bool,
     pub chapter_file: Option<PathBuf>,
-    /// Log line for same-directory chapter files ignored in favor of `chapter_file`.
+    /// Warning text for same-directory chapter files ignored in favor of `chapter_file`; the
+    /// caller logs it as a warning line.
     pub chapter_warning: Option<String>,
     pub cover_file: Option<PathBuf>,
     pub skip_reason: Option<String>,

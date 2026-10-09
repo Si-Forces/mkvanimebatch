@@ -139,6 +139,21 @@ fn test_promote_of_an_empty_staged_file_fails_and_releases_the_claim() {
 }
 
 #[test]
+fn test_promote_names_a_missing_or_non_file_staged_font() {
+    let (_tmp, _fonts_dir, mgr) = fresh_registry();
+
+    let mut missing = mgr.claim("Missing.ttf", 100).unwrap();
+    assert!(failure_reason(mgr.promote(&mut missing)).starts_with("could not read it: "));
+
+    let mut not_a_file = mgr.claim("Folder.ttf", 100).unwrap();
+    fs::create_dir(&not_a_file.staging_path).unwrap();
+    assert_eq!(
+        failure_reason(mgr.promote(&mut not_a_file)),
+        "it is not a regular file"
+    );
+}
+
+#[test]
 fn test_promote_fails_when_the_fonts_dir_cannot_be_created() {
     let (tmp, fonts_dir, mgr) = fresh_registry();
 

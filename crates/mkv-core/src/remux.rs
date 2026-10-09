@@ -20,8 +20,8 @@ pub struct PlannedJob {
     pub subtitle_label: String,
     pub subtitle_mkv_lang: String,
     pub chapter_file: Option<PathBuf>,
-    /// Log line for same-directory chapter files ignored in favor of `chapter_file`, logged
-    /// right after "Processing:" (after the "[DRY-RUN]" line in a dry run).
+    /// Warning text for same-directory chapter files ignored in favor of `chapter_file`, logged
+    /// as a warning line right after "Processing:" (after the "[DRY-RUN]" line in a dry run).
     pub chapter_warning: Option<String>,
     pub cover_file: Option<PathBuf>,
     pub embedded_sub_id: Option<u32>,
@@ -277,7 +277,11 @@ pub async fn execute_remux_job(
     runner: &dyn MediaToolRunner,
 ) -> Result<Vec<String>, String> {
     let mut log = vec![format!("Processing: {}", job.video_name)];
-    log.extend(job.chapter_warning.clone());
+    log.extend(
+        job.chapter_warning
+            .as_deref()
+            .map(media_tool::warning_log_line),
+    );
 
     let output_file_name = job.output_file.file_name().ok_or_else(|| {
         format!(

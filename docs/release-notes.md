@@ -84,7 +84,7 @@
 ### Media Tool Invocation
 
 - Extraction now logs mkvextract's exit-code-1 warnings in the item's log, as remux does for mkvmerge (`  Warning: <text>`). It discarded them before.
-- The `mkvmerge -J` fallback probe accepts exit code 1 (warnings) when the output is valid JSON, and passes the document's `warnings` array, naming the file, to `tracing::warn!` on exit code 0 or 1 (its `errors` array goes into a rejection's message, see Log Channel Outcomes). `mkvmerge -J` reports its messages in the document, and can exit 0 with them; the run's stderr is not logged. It failed with `mkvmerge exit code Some(1)` before. `probe_video_mkvmerge_with(runner, path)` takes the runner, so a scripted one covers this.
+- The `mkvmerge -J` fallback probe accepts exit code 1 (warnings) when the output is valid JSON, and passes the document's `warnings` array, naming the file, to `tracing::warn!` on exit code 0 or 1 (its `errors` array goes into a rejection's message, see Log Channel Outcomes, and to `tracing::warn!` when the file is accepted). `mkvmerge -J` reports its messages in the document, and can exit 0 with them; the run's stderr is not logged. It failed with `mkvmerge exit code Some(1)` before. `probe_video_mkvmerge_with(runner, path)` takes the runner, so a scripted one covers this.
 - `mkvmerge`, `mkvextract`, and `ffmpeg` failures share one wording: `Failed to run <tool>: <error>`, `<tool> timed out after <N> seconds`, and `<tool> failed (exit code N | terminated by signal): <stderr and stdout>`. A tool that printed nothing now gives `<tool> failed (exit code N)`, without repeating the code after a colon. A failed transcode reads `Audio transcode: ffmpeg failed (exit code N): ...` instead of `ffmpeg audio transcode failed: ...`.
 - Every Media Tool starts with stdin closed; `mkvmerge` and `mkvextract` inherited it before.
 
@@ -100,7 +100,7 @@
 
 ### Log Channel Outcomes
 
-- Three outcomes that were only Engine Diagnostics now reach the user. An extracted font that cannot be saved adds `   -> WARNING: Font '<name>' was not saved: <reason>` to the item's log (the item still completes; a duplicate of a saved font stays silent). An episode whose chapters come from a file with same-directory duplicates logs `  Warning: More than one chapter file for this episode in '<dir>': using '<kept>', ignoring '<a>', '<b>'` on its own item, after `Processing:` (after its `[DRY-RUN]` line in a dry run), where before it was only an Engine Diagnostic. A file the `mkvmerge -J` fallback probe rejects carries mkvmerge's `errors` in its message, for example `File is not a recognized Matroska container (mkvmerge: <error>)`, in the run's log and the Inspect manifest's `inspection_error`.
+- Three outcomes that were silent or only Engine Diagnostics now reach the user. An extracted font that cannot be saved adds `   -> WARNING: Font '<name>' was not saved: <reason>` to the item's log (the item still completes; a duplicate of a saved font stays silent). An episode whose chapters come from a file with same-directory duplicates logs `  Warning: More than one chapter file for this episode in '<dir>': using '<kept>', ignoring '<a>', '<b>'` on its own item, after `Processing:` (after its `[DRY-RUN]` line in a dry run), where before it was only an Engine Diagnostic. A file the `mkvmerge -J` fallback probe rejects carries mkvmerge's `errors` in its message, for example `File is not a recognized Matroska container (mkvmerge: <error>)`, in the run's log and the Inspect manifest's `inspection_error`.
 
 ### Extracted Subtitle Naming
 
