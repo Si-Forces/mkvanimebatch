@@ -29,7 +29,10 @@ jobs:
         include:
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
-          - os: windows-latest
+          # Windows is the slowest job and gains the most from Blacksmith. Linux
+          # stays on GitHub: it still finishes first, so moving it would spend
+          # Blacksmith's free minutes without making CI finish sooner.
+          - os: blacksmith-2vcpu-windows-2025
             target: x86_64-pc-windows-msvc
 
     steps:
