@@ -29,9 +29,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: blacksmith-4vcpu-ubuntu-2404
+          - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
-          - os: blacksmith-4vcpu-windows-2025
+          - os: windows-latest
             target: x86_64-pc-windows-msvc
 
     steps:
@@ -88,10 +88,10 @@ jobs:
   # ────────────────────────────────────────────────────────────────────────────
   ui-tests:
     name: Verify UI State & Contract Tests
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: useblacksmith/checkout@v1
+        uses: actions/checkout@v4
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -109,7 +109,7 @@ jobs:
   ci-status:
     name: Release Verification Gate
     needs: [workspace-checks, ui-tests]
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     if: always()
     steps:
       - name: Evaluate verification status
@@ -128,7 +128,7 @@ jobs:
     name: Build & Release — Windows
     needs: [ci-status]
     if: needs.ci-status.result == 'success'
-    runs-on: blacksmith-4vcpu-windows-2025
+    runs-on: windows-latest
 
     steps:
       - name: Checkout repository
@@ -250,11 +250,11 @@ jobs:
     name: Build & Release — Linux
     needs: [ci-status]
     if: needs.ci-status.result == 'success'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout repository
-        uses: useblacksmith/checkout@v1
+        uses: actions/checkout@v4
 
       # ── Linux system deps ─────────────────────────────────────────────────────
       - name: Install Linux system dependencies
