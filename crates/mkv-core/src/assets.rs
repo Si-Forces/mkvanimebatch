@@ -233,8 +233,9 @@ impl SubIndex {
 
 #[derive(Debug, Clone, Default)]
 pub struct ChapterIndex {
-    /// Every chapter file per episode key with its season, in index order: nearer
-    /// directories are indexed first.
+    /// Every chapter file per episode key with its season, in index order. The release-tree
+    /// index is filled nearest directory first; the `--assets-dir` index holds the assets
+    /// directory before its parent (scan order, not ancestor distance).
     index: HashMap<String, Vec<(PathBuf, String)>>,
     unmatched: Vec<PathBuf>,
 }
@@ -246,6 +247,11 @@ impl ChapterIndex {
 
     /// Indexes `xml_file` as chapter XML without re-reading it: `scan_assets` is the only
     /// place a file is sniffed for chapter content. Only the path and season are kept.
+    ///
+    /// Contract: each file is added once, the first-indexed directory first (release tree:
+    /// deepest first; `--assets-dir`: the assets directory before its parent).
+    /// `lookup_with_warning` takes the first compatible file's directory as the nearest one
+    /// and does not dedupe.
     pub fn add(&mut self, xml_file: &ParsedFile) {
         if let Some(parsed) = &xml_file.parsed {
             self.index
@@ -323,7 +329,8 @@ struct CoverEntry {
 
 /// Orders covers by `(directory rank, open)`, then by kind, name and path. An open cover (an
 /// episode cover with a non-exact season, or any other kind) ranks after an exact one in the
-/// same directory.
+/// same directory. In `CoverIndex::add`, the `directory_winner` comparison passes only directory
+/// covers, which are always open (the constant `true` in `(rank, true)`).
 fn compare_ranked_covers(
     a_rank: (usize, bool),
     a: &CoverEntry,
@@ -345,7 +352,7 @@ pub struct CoverIndex {
     episode_entries: HashMap<EpisodeType, HashMap<String, HashMap<PathBuf, Vec<usize>>>>,
     adjacent_entries: HashMap<PathBuf, HashMap<String, Vec<usize>>>,
     directory_entries: HashMap<PathBuf, Vec<usize>>,
-    // (first-seen fallback directory rank, entry index)
+    // (rank, entry index) of the best directory cover; `lookup_fallback` uses (index, distance)
     directory_winner: Option<(usize, usize)>,
 }
 
@@ -526,7 +533,8 @@ impl CoverIndex {
                     .copied()
                     .map(|rank| (index, rank))
             })
-            .chain(self.directory_winner);
+            // `directory_winner` is (rank, index); the candidates are (index, distance).
+            .chain(self.directory_winner.map(|(rank, index)| (index, rank)));
         self.lookup_ranked(video, candidates)
     }
 }
@@ -542,8 +550,8 @@ pub struct ResolvedAssets {
     pub subtitle_mkv_lang: String,
     pub matched_subtitle: bool,
     pub chapter_file: Option<PathBuf>,
-    /// Warning text for same-directory chapter files ignored in favor of `chapter_file`; the
-    /// caller logs it as a warning line.
+    /// Warning text for same-directory chapter files ignored in favor of `chapter_file` that
+    /// match the video's season (equal or unknown); the caller logs it as a warning line.
     pub chapter_warning: Option<String>,
     pub cover_file: Option<PathBuf>,
     pub skip_reason: Option<String>,
@@ -819,8 +827,10 @@ impl AssetResolver {
             };
             (sub, None)
         };
-        let (chapter_file, chapter_warning) =
-            chapter.map_or((None, None), |(file, warning)| (Some(file), warning));
+        let (chapter_file, chapter_warning) = match chapter {
+            Some((file, warning)) => (Some(file), warning),
+            None => (None, None),
+        };
         let cover_file = self.resolve_cov(video, has_source_cover);
 
         let subtitle_label = lang_label(&sub_res.lang).to_string();

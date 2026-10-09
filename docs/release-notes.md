@@ -100,12 +100,11 @@
 
 ### Log Channel Outcomes
 
-- Three outcomes that were silent or only Engine Diagnostics now reach the user. An extracted font that cannot be saved adds `   -> WARNING: Font '<name>' was not saved: <reason>` to the item's log (the item still completes; a duplicate of a saved font stays silent). An episode whose chapters come from a file with same-directory duplicates logs `  Warning: More than one chapter file for this episode in '<dir>': using '<kept>', ignoring '<a>', '<b>'` on its own item, after `Processing:` (after its `[DRY-RUN]` line in a dry run), where before it was only an Engine Diagnostic. A file the `mkvmerge -J` fallback probe rejects carries mkvmerge's `errors` in its message, for example `File is not a recognized Matroska container (mkvmerge: <error>)`, in the run's log and the Inspect manifest's `inspection_error`.
+- Three outcomes that were silent or only Engine Diagnostics now reach the user. An extracted font that cannot be saved adds `   -> WARNING: Font '<name>' was not saved: <reason>` to the item's log (the item still completes; a duplicate of a saved font stays silent). An episode whose chapter file has same-directory siblings that match the video's season (equal or unknown) and were not chosen logs `  Warning: More than one chapter file for this episode in '<dir>': using '<kept>', ignoring '<a>', '<b>'` on its own item, after `Processing:` (after its `[DRY-RUN]` line in a dry run), where before it was only an Engine Diagnostic; a file of another known season is never named, and a duplicate in another directory is no longer an Engine Diagnostic. A file the `mkvmerge -J` fallback probe rejects carries mkvmerge's `errors` in its message, for example `File is not a recognized Matroska container (mkvmerge: <error>)`, in the run's log and the Inspect manifest's `inspection_error`.
 
 ### Season Matching
 
 - **User-visible selection change**: within one directory, a candidate with the same known season as the video now beats one with an unknown season. A season-2 video next to `Show - 01.xml` and `Show - S02E01.xml` now gets the `S02E01` chapter file, where before the first file in name order won. The same holds for subtitles (exactness now ranks above language score) and episode covers (it ranks above cover kind). A nearer directory still wins first, so the precedence ladder is unchanged.
-- The chapter warning for several files of one episode names only the same-directory files that match the video's season and were not chosen; a file of another known season is never named. A chapter duplicate in another directory is no longer logged.
 
 ### Extracted Subtitle Naming
 

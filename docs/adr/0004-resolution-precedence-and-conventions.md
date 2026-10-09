@@ -1,6 +1,6 @@
 # 0004. Resolution Precedence and Naming Conventions
 
-> **Status**: Accepted; amended by ADR-0008, revised 2026-09-24 and amended 2026-09-28 and 2026-10-09 (implemented)
+> **Status**: Accepted; amended by ADR-0008, revised 2026-09-24; amended 2026-09-28, 2026-10-09 (implemented)
 > **Date**: 2026-03-15
 > **Context**: Media Engine Context
 
@@ -83,10 +83,10 @@ Both revisions are implemented. The ordering stated in the body is shipped behav
 
 ## Amendment — 2026-10-09 (exact season before open season)
 
-**Seasons — a known season ranks above an unknown one within a directory.** Subtitles, chapters and episode covers all filter candidates with `seasons_match`, where an unknown season (`""`) on either side matches any season. Nothing ranked an exact match above such an open match, so other keys decided (chapters: index order; subtitles: category score and shorter file name; covers: cover kind): a season-2 video beside `Show - 01.xml` and `Show - S02E01.xml` got the unseasoned file and never used the exact one. Now, within one directory, an **exact** match (both seasons known and equal) beats an **open** one (either season unknown). Section 4's within-directory cover order (`_cover` before `.cover` before an exact bare stem) now applies within each of those two groups. The directory ladder is unchanged and ranks first, so a nearer open candidate still beats a farther exact one, and for subtitles source tier and the embedded track still precede it.
+**Seasons — a known season ranks above an unknown one within a directory.** Subtitles, chapters and episode covers all filter candidates with `seasons_match`, where an unknown season (`""`) on either side matches any season. Nothing ranked an exact match above such an open match, so other keys decided (chapters: index order; subtitles: category score and shorter file name; covers: cover kind): a season-2 video beside `Show - 01.xml` and `Show - S02E01.xml` got the unseasoned file and never used the exact one. Now, within one directory, an **exact** match (both seasons known and equal) beats an **open** one (either season unknown). Section 4's within-directory cover order (`_cover` before `.cover` before an adjacent bare stem) now applies within each of those two groups. The directory ladder is unchanged and ranks first, so a nearer open candidate still beats a farther exact one, and for subtitles source tier and the embedded track still precede it.
 
-- **Subtitles:** nearest directory, then exact before open, then category score, dialogue keyword, shorter file name and index order. The season is part of the episode's identity, whereas the category score is a preference, so exactness ranks above it.
-- **Chapters:** nearest directory, then exact before open, then index order. Every chapter file of an episode is kept in the index; a file of another known season is never a candidate.
-- **Episode covers:** nearest directory, then exact before open (a directory cover and an exact-stem cover count as open), then kind, natural file name and full path.
+- **Section 1 — subtitle sources:** nearest directory, then exact before open, then category score, dialogue keyword, shorter file name and index order. The season is part of the episode's identity, whereas the category score is a preference, so exactness ranks above it.
+- **Chapter files (no numbered section covers them):** nearest directory, then exact before open, then index order. Every chapter file of an episode is kept in the index; a file of another known season is never a candidate. The `--assets-dir` chapter index orders the assets directory before its parent (scan order, not ancestor distance).
+- **Section 4 — cover names:** nearest directory, then exact before open (a directory cover and a bare-stem cover count as open), then kind, natural file name and full path.
 
-The Log Channel warning for several chapter files of one episode now names the same-directory files that match the video's season but were not chosen, and a duplicate in another directory is no longer logged at all, being the ladder working as designed. A season-2 video can therefore get a different subtitle, chapter file or cover than before.
+The Log Channel warning for several chapter files of one episode now names the same-directory files that match the video's season but were not chosen, and a duplicate in another directory is no longer an Engine Diagnostic, being the ladder working as designed. A season-2 video can therefore get a different subtitle, chapter file or cover than before.
