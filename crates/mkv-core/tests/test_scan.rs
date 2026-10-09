@@ -1,15 +1,19 @@
+mod common;
+
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
+use common::{ScriptedRunner, Step};
 use mkv_core::domain::{AudioTrack, MkvTrack, TrackProperties};
 use mkv_core::manifest::generate_inspection_manifest;
+use mkv_core::media_tool::MediaTool;
 use mkv_core::pipeline::CancellationToken;
 use mkv_core::scan::{
-    is_cover_attachment, is_cover_filename, is_font_attachment, scan_assets, scan_mkv_files,
-    FileSignature, InspectedVideo, MkvAttachment, MkvChapter, MkvmergeMetadata,
-    PersistentInspectCache,
+    is_cover_attachment, is_cover_filename, is_font_attachment, probe_video_mkvmerge_with,
+    scan_assets, scan_mkv_files, FileSignature, InspectedVideo, MkvAttachment, MkvChapter,
+    MkvmergeMetadata, PersistentInspectCache,
 };
 use tempfile::tempdir;
 
@@ -539,6 +543,83 @@ async fn test_probe_video_rejects_non_matroska_file() {
     let corrupt_mkv = tmp.path().join("corrupt.mkv");
     fs::write(&corrupt_mkv, b"not a real ebml file").unwrap();
     assert!(mkv_core::scan::probe_video(&corrupt_mkv).await.is_err());
+}
+
+/// A `mkvmerge -J` document for a recognized file with one video track.
+const MKVMERGE_J_ONE_VIDEO_TRACK: &str = r#"{
+    "container": {"recognized": true, "supported": true, "type": "Matroska"},
+    "tracks": [{
+        "id": 0,
+        "type": "video",
+        "codec": "HEVC/H.265/MPEG-H",
+        "properties": {"codec_id": "V_MPEGH/ISO/HEVC"}
+    }]
+}"#;
+
+const SCRIPTED_VIDEO: &str = "/anime/Show - 01.mkv";
+
+/// Runs the `mkvmerge -J` fallback probe against a runner scripted with `step`, and checks the
+/// runner was asked for `mkvmerge -J <video>`.
+async fn scripted_fallback_probe(step: Step) -> Result<MkvmergeMetadata, String> {
+    let runner = ScriptedRunner::new([step]);
+    let result = probe_video_mkvmerge_with(&runner, Path::new(SCRIPTED_VIDEO)).await;
+    assert_eq!(
+        runner.calls(),
+        [(
+            MediaTool::Mkvmerge,
+            vec!["-J".to_string(), SCRIPTED_VIDEO.to_string()]
+        )]
+    );
+    result
+}
+
+/// MKVToolNix exits 1 for success with warnings, so the probe still parses its JSON (#62).
+#[tokio::test]
+async fn test_fallback_probe_parses_the_json_of_an_exit_1_run() {
+    let step = Step::exited(
+        MediaTool::Mkvmerge,
+        1,
+        MKVMERGE_J_ONE_VIDEO_TRACK,
+        "Warning: unknown element skipped\n",
+    );
+
+    let metadata = scripted_fallback_probe(step).await.unwrap();
+
+    assert_eq!(metadata.tracks.len(), 1);
+    assert_eq!(metadata.tracks[0].track_type, "video");
+    assert_eq!(
+        metadata.tracks[0].properties.codec_id.as_deref(),
+        Some("V_MPEGH/ISO/HEVC")
+    );
+}
+
+#[tokio::test]
+async fn test_fallback_probe_fails_with_the_output_of_an_exit_2_run() {
+    let step = Step::exited(
+        MediaTool::Mkvmerge,
+        2,
+        "",
+        "Error: could not open the file\n",
+    );
+
+    let err = scripted_fallback_probe(step).await.unwrap_err();
+
+    assert!(err.starts_with("mkvmerge failed (exit code 2): "), "{err}");
+    assert!(err.contains("Error: could not open the file"), "{err}");
+}
+
+#[tokio::test]
+async fn test_fallback_probe_rejects_an_unrecognized_container() {
+    let step = Step::exited(
+        MediaTool::Mkvmerge,
+        0,
+        r#"{"container": {"recognized": false}, "tracks": []}"#,
+        "",
+    );
+
+    let err = scripted_fallback_probe(step).await.unwrap_err();
+
+    assert_eq!(err, "File is not a recognized Matroska container");
 }
 
 /// A stalled native read must not block the runtime (#20). `open()` on a FIFO blocks until a

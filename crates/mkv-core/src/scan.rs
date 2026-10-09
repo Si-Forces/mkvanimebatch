@@ -20,7 +20,7 @@ use crate::domain::{
     FONT_EXTENSIONS,
 };
 use crate::fonts::FONT_DIR_NAMES;
-use crate::media_tool::{self, MediaTool, SubprocessRunner};
+use crate::media_tool::{self, MediaTool, MediaToolRunner, SubprocessRunner};
 
 // ─── MKVMERGE METADATA TYPES ──────────────────────────────────────────────────
 
@@ -56,18 +56,34 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Probes MKV metadata by running `mkvmerge -J` as a Media Tool.
 pub async fn probe_video_mkvmerge(path: &Path) -> Result<MkvmergeMetadata, String> {
+    probe_video_mkvmerge_with(&SubprocessRunner, path).await
+}
+
+/// [`probe_video_mkvmerge`] through `runner`, so a test can script the `mkvmerge -J` run.
+///
+/// Exit code 1 (success with warnings) still parses the JSON. `mkvmerge -J` reports its messages
+/// in the document's `warnings` and `errors` arrays, even on exit code 0, so those are what gets
+/// logged; the run's stderr is not.
+pub async fn probe_video_mkvmerge_with(
+    runner: &dyn MediaToolRunner,
+    path: &Path,
+) -> Result<MkvmergeMetadata, String> {
     let args = [OsStr::new("-J"), path.as_os_str()];
-    let output = media_tool::run(
-        &SubprocessRunner,
-        MediaTool::Mkvmerge,
-        &args,
-        PROBE_TIMEOUT,
-        None,
-    )
-    .await?;
+    let output = media_tool::run(runner, MediaTool::Mkvmerge, &args, PROBE_TIMEOUT, None).await?;
 
     let val: serde_json::Value = serde_json::from_slice(&output.stdout)
         .map_err(|e| format!("Failed to parse mkvmerge JSON: {e}"))?;
+
+    for key in ["errors", "warnings"] {
+        let messages = json_messages(&val, key);
+        if !messages.is_empty() {
+            warn!(
+                "mkvmerge -J reported {key} for {}: {}",
+                path.display(),
+                messages.join("; ")
+            );
+        }
+    }
 
     if let Some(false) = val
         .pointer("/container/recognized")
@@ -77,6 +93,20 @@ pub async fn probe_video_mkvmerge(path: &Path) -> Result<MkvmergeMetadata, Strin
     }
 
     serde_json::from_value(val).map_err(|e| format!("Failed to parse mkvmerge metadata: {e}"))
+}
+
+/// The non-blank string entries of an `mkvmerge -J` document's `key` array (`warnings` or
+/// `errors`), trimmed.
+fn json_messages<'a>(document: &'a serde_json::Value, key: &str) -> Vec<&'a str> {
+    document
+        .get(key)
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|message| !message.is_empty())
+        .collect()
 }
 
 /// Probes MKV container headers, tracks, attachments, and chapters with the native EBML
@@ -903,6 +933,21 @@ impl Default for PersistentInspectCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_json_messages_reads_the_document_arrays() {
+        let document = serde_json::json!({
+            "warnings": ["damaged file structure\n", "  ", 3, "second"],
+            "errors": ["unreadable\n"],
+            "tracks": []
+        });
+        assert_eq!(
+            json_messages(&document, "warnings"),
+            ["damaged file structure", "second"]
+        );
+        assert_eq!(json_messages(&document, "errors"), ["unreadable"]);
+        assert!(json_messages(&serde_json::json!({ "tracks": [] }), "warnings").is_empty());
+    }
 
     /// A `clear` landing while a save is in flight must neither let that save restore the
     /// cleared entries nor let it mark a put made after the clear as already saved.
