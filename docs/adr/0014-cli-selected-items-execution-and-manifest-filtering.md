@@ -1,6 +1,6 @@
 # 0014. CLI Selected Items Execution and Manifest Filtering
 
-> **Status**: Accepted (amended 2026-09-28)
+> **Status**: Accepted (amended 2026-09-28, 2026-10-09)
 > **Date**: 2026-09-22
 > **Context**: Media Engine Context & Standalone CLI Adapter
 > **Amends**: ADR-0011
@@ -56,3 +56,11 @@ Decision 3's API was replaced; the filtering rules it describes stand.
 - **`filter_selected` is now `select_items`.** `InspectionManifest::select_items(&self, selected_items: &[String]) -> Result<InspectionManifest, String>` replaces the infallible `filter_selected`. It keeps items in selection order, drops repeated selections, and prunes `subtitle_candidates` to the releases of the retained items.
 - **`--plan` fails on unmatched selections before filtering.** `BatchRequest::validate` first rejects a selected item that is missing (`Selected item does not exist: …`) or not an MKV (`Selected item is not an MKV file: …`). If an existing MKV selection names no discovered MKV file (for example one under `Output/`), `select_items` returns `Selected items not found among discovered MKV files: <items>` and `mkv-cli --plan` exits with that error instead of printing a manifest. Nothing is filtered or reordered in that case. This is the fail-fast rule of the "Silent Dropping" option applied to planning.
 - **One matcher for planning and execution.** `select_items` and the pipeline's own selection step both resolve selections through `request::resolve_selected_items` (crate-private), so `--plan` and a real run match selections to discovered items the same way and report unmatched ones with the same message.
+
+## Amendment — 2026-10-09 (Whitespace in selections; validate reference)
+
+**Correction.** Since #77 (issue #61), an Item ID keeps surrounding whitespace: a file named ` 01.mkv` has the ID ` 01.mkv`, not `01.mkv`. Two statements above read differently now, and a third names an API that #57 made private. They are left as written, and this amendment supersedes only the parts named here.
+
+- **Consequences, "spaces".** Both flags handle a space inside a path, including a folder name that ends in one (`Season 1 /01.mkv`). A path that starts with a space, such as ` 01.mkv` or ` Season 1/02.mkv`, needs care with `--selected-items`: it trims each entry, as Decision 1 specifies, so the bare entry ` 01.mkv` names `01.mkv`. Write the entry so the space is not at its start, as in `./ 01.mkv` or a path that begins with the input directory, or use the literal `--selected-item " 01.mkv"`. Decision 1 is unchanged: trimming suits scripted lists. (A file name cannot end in a space here: the space would follow `.mkv`, and discovery skips such files.)
+- **Decision 2, "a clean relative item path matching the engine's internal item IDs".** The rule stands, but cleaning no longer trims. Within a relative path, an Item ID reads backslashes as `/`, drops `.` segments and collapses repeated separators, and keeps whitespace, which is part of the name.
+- **Amendment 2026-09-28, "`BatchRequest::validate` first rejects".** `validate` has been private since #57, as ADR-0008's 2026-10-06 amendment records. `BatchRequest::resolve` is the public entry point and runs the same checks with the same messages.
