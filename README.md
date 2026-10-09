@@ -218,13 +218,14 @@ cargo tauri build
 The engine reports its own problems (a corrupt inspect cache, a failed font memo, `mkvmerge -J` warnings) as diagnostics. The default level is `warn`; set `RUST_LOG` to see more, in both binaries. `RUST_LOG` replaces the default rather than adding to it, so start it with `warn,` to keep the other warnings when you raise one module.
 
 - **CLI**: diagnostics go to stderr, so stdout stays the `--plan` JSON, the `--events` NDJSON and the summary.
-- **Desktop**: diagnostics go to `mkv-anime-batch.log`, which is emptied at startup when it is over 1 MB. They also go to stderr, which you only see when the app is started from a terminal. The Windows build has no console at all, so there the log file is the only output. On Linux, a desktop launcher usually sends stderr to the session log (the journal or `~/.xsession-errors`). `RUST_LOG` applies to the log file too, if it is set in the environment the app starts from.
+- **Desktop log file**: diagnostics go to `mkv-anime-batch.log`, which is emptied at startup when it is over 1 MB. `RUST_LOG` applies to it too, if it is set in the environment the app starts from.
 
   | OS | Log file |
   |---|---|
   | Linux | `$XDG_DATA_HOME/com.mkvanimebatch.desktop/logs/mkv-anime-batch.log` (`~/.local/share` when unset) |
   | Windows | `%LOCALAPPDATA%\com.mkvanimebatch.desktop\logs\mkv-anime-batch.log` |
   | macOS | `~/Library/Logs/com.mkvanimebatch.desktop/mkv-anime-batch.log` |
+- **Desktop stderr**: diagnostics also go to stderr, which you only see when the app is started from a terminal. The Windows build has no console, so there the log file is the only output. On Linux, a desktop launcher usually sends stderr to the session log (the journal or `~/.xsession-errors`).
 
 ```bash
 # Everything at debug level
