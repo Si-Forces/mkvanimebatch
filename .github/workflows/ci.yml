@@ -31,7 +31,7 @@ jobs:
             target: x86_64-unknown-linux-gnu
           # Blacksmith runners are organization-only; this repo is on a personal
           # account, so Windows uses GitHub's hosted runner.
-          - os: windows-2025
+          - os: blacksmith-2vcpu-windows-2025
             target: x86_64-pc-windows-msvc
 
     steps:
