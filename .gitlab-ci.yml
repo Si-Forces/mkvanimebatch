@@ -2,15 +2,24 @@
 # receives every push through the GitLab push mirror. Pipeline success replaces the
 # `ci-status` gate job that ADR-0010 requires: protect main with "Pipelines must succeed".
 # Unlike ADR-0010's always-on gate, the Rust jobs skip pipelines that change no Rust input
-# (see .rust-job), so a docs-only MR passes on ui-tests and security-audit alone.
+# (see .rust-job), so a docs-only MR passes on ui-tests and security-audit alone. Windows MRs
+# smoke-test only the debug mkv-cli.exe; the release build and its smoke test run on main.
 
 workflow:
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == $CI_DEFAULT_BRANCH
     # Like the GitHub workflow, a newer push cancels an older MR pipeline but never a main one.
+    # Only main pipelines write the caches; see JOB_CACHE_POLICY.
     - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
       auto_cancel:
         on_new_commit: none
+      variables:
+        JOB_CACHE_POLICY: pull-push
+    - if: $CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      auto_cancel:
+        on_new_commit: none
+      variables:
+        JOB_CACHE_POLICY: pull-push
     - if: $CI_PIPELINE_SOURCE == "web"
       auto_cancel:
         on_new_commit: none
@@ -27,6 +36,10 @@ variables:
   # compiler and linker memory, keep backtrace line numbers, and shrink every job's cache.
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
   CARGO_TERM_COLOR: always
+  # Protected and unprotected refs share caches (separate caches are off), so only main
+  # pipelines write them (workflow rules set pull-push). MRs and manual runs on other branches
+  # only read main's: no upload wait, and no branch can poison the cache main builds from.
+  JOB_CACHE_POLICY: pull
   # target/ makes the cache large; fast zipping cuts its upload time.
   FF_USE_FASTZIP: "true"
   CACHE_COMPRESSION_LEVEL: fastest
@@ -36,7 +49,7 @@ variables:
   # against the target branch, pushes to main against the previous push; manual pipelines
   # always run them.
   rules:
-    - changes:
+    - changes: &rust-inputs
         - crates/**/*
         - desktop-tauri/src-tauri/**/*
         # snapshot.rs tests read these fixtures.
@@ -51,10 +64,10 @@ variables:
   # rebuild what changed. Clear runner caches in CI/CD > Pipelines if it grows too large.
   cache:
     key: $CI_JOB_NAME
+    policy: $JOB_CACHE_POLICY
     paths:
       - .cargo-home/registry/index/
       - .cargo-home/registry/cache/
-      - .cargo-home/git/db/
       - target/
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -81,7 +94,7 @@ rust-linux:
   script:
     - cargo fmt --all -- --check
     - cargo clippy --workspace --all-targets -- -D warnings
-    - cargo test --workspace --verbose
+    - cargo test --workspace
     # The real-media bench runs its self-check asserts, then skips because MKV_BENCH_CORPUS
     # is unset. `cargo test --workspace` does not build bench targets.
     - cargo test -p mkv-core --bench bench_real_media
@@ -96,9 +109,8 @@ rust-linux:
       grep -q '"items": \[\]' "$EMPTY/manifest.json"
 
 # GitLab-hosted Windows runners are beta, PowerShell-only, take ~5 min to provision and
-# ship MSVC Build Tools but no Rust. The runner checks $? after every line, which a pipe or
-# an assignment hides, so the smoke test checks $LASTEXITCODE itself.
-rust-windows:
+# ship MSVC Build Tools but no Rust.
+.windows-job:
   extends: .rust-job
   tags: [saas-windows-medium-amd64]
   # A cold cache on 2 vCPU can outrun GitLab's 60-minute default (GitHub allowed 6 h).
@@ -106,23 +118,14 @@ rust-windows:
   before_script:
     - $ProgressPreference = "SilentlyContinue"
     - Invoke-WebRequest https://win.rustup.rs/x86_64 -OutFile rustup-init.exe
-    - .\rustup-init.exe -y --profile minimal --default-toolchain stable --component clippy
+    - .\rustup-init.exe -y --profile minimal --default-toolchain stable
     - $env:Path = "$env:CARGO_HOME\bin;$env:Path"
+
+# Smoke-tests target\$CLI_PROFILE\mkv-cli.exe. The runner checks $? after every line, which a
+# pipe or an assignment hides, so the checks read $LASTEXITCODE themselves.
+.windows-cli-smoke:
   script:
-    - cargo clippy --workspace --all-targets -- -D warnings
-    # MKV_REQUIRE_MEDIA_TOOLS stays unset: the real-media regression skips on Windows.
-    - cargo test --workspace --verbose
-    # Release builds (LTO, codegen-units = 1) are too slow on 2 vCPU for every pipeline: only
-    # main builds them; other pipelines smoke-test the debug mkv-cli.exe that cargo test built
-    # for CARGO_BIN_EXE.
-    - $cliProfile = "debug"
-    - |
-      if ($env:CI_COMMIT_BRANCH -eq $env:CI_DEFAULT_BRANCH) {
-        $cliProfile = "release"
-        cargo build --release -p mkv-cli
-        if ($LASTEXITCODE) { throw "cargo build --release -p mkv-cli exited $LASTEXITCODE" }
-      }
-    - $cli = ".\target\$cliProfile\mkv-cli.exe"
+    - $cli = ".\target\$env:CLI_PROFILE\mkv-cli.exe"
     - if (-not (Test-Path $cli) -or (Get-Item $cli).Length -eq 0) { throw "mkv-cli.exe is missing or empty" }
     - '& $cli --help > $null; if ($LASTEXITCODE) { throw "mkv-cli --help exited $LASTEXITCODE" }'
     - $empty = New-Item -ItemType Directory -Path (Join-Path $env:TEMP "mkv-empty-$(Get-Random)")
@@ -130,11 +133,39 @@ rust-windows:
     - if ($LASTEXITCODE) { throw "mkv-cli --plan exited $LASTEXITCODE" }
     - |
       if ($manifest -notmatch '"version": 2' -or $manifest -notmatch '"items": \[\]') { throw "unexpected manifest: $manifest" }
-    - |
-      if ($cliProfile -eq "release") {
-        cargo build --release -p mkv-anime-batch
-        if ($LASTEXITCODE) { throw "cargo build --release -p mkv-anime-batch exited $LASTEXITCODE" }
-      }
+
+rust-windows:
+  extends: .windows-job
+  variables:
+    # cargo test builds the debug mkv-cli.exe for CARGO_BIN_EXE.
+    CLI_PROFILE: debug
+  cache:
+    # Debug artifacts only: release ones belong to rust-windows-release's cache.
+    paths:
+      - .cargo-home/registry/index/
+      - .cargo-home/registry/cache/
+      - target/debug/
+  script:
+    - rustup component add clippy
+    - cargo clippy --workspace --all-targets -- -D warnings
+    # MKV_REQUIRE_MEDIA_TOOLS stays unset: the real-media regression skips on Windows.
+    - cargo test --workspace
+    - !reference [.windows-cli-smoke, script]
+
+# Release builds (LTO, codegen-units = 1) take ~20 min on 2 vCPU with a warm cache, so they
+# get their own job: it runs in parallel with rust-windows, only on main and manual pipelines,
+# and keeps its own cache so MR pipelines don't download release artifacts.
+rust-windows-release:
+  extends: .windows-job
+  variables:
+    CLI_PROFILE: release
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH || $CI_PIPELINE_SOURCE == "web"
+      changes: *rust-inputs
+  script:
+    - cargo build --release -p mkv-cli
+    - !reference [.windows-cli-smoke, script]
+    - cargo build --release -p mkv-anime-batch
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 2. Frontend UI state and contract tests
@@ -152,6 +183,7 @@ security-audit:
   image: rust:1-trixie
   cache:
     key: cargo-audit
+    policy: $JOB_CACHE_POLICY
     paths:
       - .cargo-home/bin/
       # cargo install's own records: without them it refuses to overwrite the cached binary.
