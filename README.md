@@ -1,9 +1,9 @@
 # MKV Anime Batch Tool (`mkvanimebatch`)
 
-[![CI](https://github.com/sifahaz/mkvanimebatch/actions/workflows/ci.yml/badge.svg)](https://github.com/sifahaz/mkvanimebatch/actions/workflows/ci.yml)
+[![CI](https://github.com/Si-Forces/mkvanimebatch/actions/workflows/ci.yml/badge.svg)](https://github.com/Si-Forces/mkvanimebatch/actions/workflows/ci.yml)
 [![Rust](https://img.shields.io/badge/Rust-2021%20%7C%201.88%2B-orange?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![Tauri v2](https://img.shields.io/badge/Tauri-v2-24C8D8?logo=tauri&logoColor=white)](https://v2.tauri.app/)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey)](https://github.com/sifahaz/mkvanimebatch/releases)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey)](https://github.com/Si-Forces/mkvanimebatch/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 A batch remux and extraction engine with a native desktop GUI for anime fansub releases. `mkvanimebatch` probes Matroska files with a native EBML parser, ranks subtitle and audio tracks, extracts and deduplicates fonts, transcodes FLAC audio to Opus, applies subtitle sync offsets, promotes outputs atomically, and processes files with bounded concurrency.
@@ -103,7 +103,7 @@ sudo pacman -S mkvtoolnix-cli ffmpeg
 
 ### 1. Standalone CLI (`mkv-cli`)
 
-Download `mkv-cli` from [GitHub Releases](https://github.com/sifahaz/mkvanimebatch/releases) or compile from source:
+Download `mkv-cli` from [GitHub Releases](https://github.com/Si-Forces/mkvanimebatch/releases) or compile from source:
 
 ```bash
 # Inspect a series directory and generate structured Manifest v2 JSON
@@ -178,7 +178,7 @@ A desktop GUI built with **Tauri v2**, featuring:
 
 ### Pre-built Releases
 
-Download ready-to-run desktop releases directly from [GitHub Releases](https://github.com/sifahaz/mkvanimebatch/releases):
+Download ready-to-run desktop releases directly from [GitHub Releases](https://github.com/Si-Forces/mkvanimebatch/releases):
 
 * **Windows**: Standalone `mkv-anime-batch.exe` or portable `MKV_Anime_Batch_Portable_win64.zip`; CLI archive `mkv-cli-x86_64-pc-windows-msvc.zip`
 * **Linux**: `MKV_Anime_Batch_*_amd64.AppImage`, Debian/Ubuntu `MKV_Anime_Batch_*_amd64.deb`, or Fedora/RHEL `MKV_Anime_Batch_*_x86_64.rpm`; CLI archive `mkv-cli-x86_64-unknown-linux-gnu.tar.gz`
