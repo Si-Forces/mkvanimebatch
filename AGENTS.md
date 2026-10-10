@@ -24,7 +24,7 @@ This repo is developed on a 4-core, 8 GB laptop, where a full workspace build us
 
 ### Issue tracker
 
-Issues and specs live in GitHub Issues (`sifahaz/mkvanimebatch`). See `docs/agents/issue-tracker.md`.
+Issues and specs live in GitHub Issues (`Si-Forces/mkvanimebatch`). See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 
