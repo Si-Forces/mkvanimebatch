@@ -29,9 +29,11 @@ jobs:
         include:
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
-          # Blacksmith runners are organization-only; this repo is on a personal
-          # account, so Windows uses GitHub's hosted runner.
-          - os: windows-2025
+          # Windows is the slowest job and gains the most from Blacksmith. Linux
+          # stays on GitHub: it still finishes first, so moving it would spend
+          # Blacksmith's free minutes without making CI finish sooner. Blacksmith
+          # runners are organization-only: on a personal account, use windows-2025.
+          - os: blacksmith-2vcpu-windows-2025
             target: x86_64-pc-windows-msvc
 
     steps:
