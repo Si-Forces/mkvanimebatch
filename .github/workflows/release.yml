@@ -469,7 +469,7 @@ jobs:
 
             The AppImage ships its own GTK and WebKitGTK rather than the host's, so this
             is the runtime that governs its window rendering — see
-            [ADR-0015](https://github.com/sifahaz/mkvanimebatch/blob/main/docs/adr/0015-per-package-webkitgtk-dmabuf-renderer-scoping.md).
+            [ADR-0015](https://github.com/Si-Forces/mkvanimebatch/blob/main/docs/adr/0015-per-package-webkitgtk-dmabuf-renderer-scoping.md).
 
             | Library | Version |
             |---------|---------|
