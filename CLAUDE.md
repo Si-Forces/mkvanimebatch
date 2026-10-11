@@ -106,7 +106,7 @@ On the frontend:
 - `job-controller.js` builds the `BatchRequest` and starts and stops runs.
 - The coordinators allow one active job across the Remux and Extract views, and deduplicate in-flight inspections.
 
-Linux-only env defaults are set in `lib.rs` (`init_linux_env`, ADR-0015). The WebKitGTK DMABUF workaround is scoped to the AppImage on purpose. Don't extend it to deb/rpm.
+Linux-only env defaults are set in `lib.rs` (`init_linux_env`, ADR-0015). The WebKitGTK DMABUF workaround is scoped to the AppImage on an NVIDIA driver on purpose. Don't extend it to deb/rpm.
 
 ## Domain docs
 

@@ -73,3 +73,22 @@ option above now read 14px. The trade-off is unchanged. The redesign also gives 
 bottom bar their own compositing layers, which WebKitGTK does not clip to the rounded `#app`, so
 the title bar and the bottom bar, which touch the window corners, round their own outer corners and
 square them when the window is maximized.
+
+## Amendment — 2026-10-11 (DMABUF back on for non-NVIDIA AppImages)
+
+Decision 1 is narrowed. Inside an AppImage, `WEBKIT_DISABLE_DMABUF_RENDERER=1` is now defaulted only when the NVIDIA kernel driver is loaded (`/sys/module/nvidia` exists, which covers both the proprietary and the open modules). On every other GPU the AppImage keeps the DMABUF renderer on, like a Native Package. Decisions 2 to 5 stand: the default is still `is_none()`-guarded, so exporting `WEBKIT_DISABLE_DMABUF_RENDERER=1` remains the escape hatch, and the release notes now name it.
+
+**Why.** With DMABUF off, the AppImage renders on the CPU at 7–9 fps on the dev laptop (Intel HD 4000), even with solid panes. On 2026-10-11 the v1.0.0 AppImage (bundled WebKitGTK `2.52.6-0ubuntu0.24.04.1`) was run extracted with `WEBKIT_DISABLE_DMABUF_RENDERER=0` on that laptop (Fedora 44, Mesa 26.2.4). It rendered correctly on XWayland and on native Wayland, and closing the window exited 0 with no core dump, so the `SkiaGLContext` / `__eglFini` shutdown segfault did not reproduce. The `WebKitWebProcess` startup aborts recorded on 2026-09-23 (`std::__glibcxx_assert_fail`, Mesa 26.2.2) date from when DMABUF was disabled on every run, so they were not DMABUF crashes.
+
+**NVIDIA.** It was not tested. Its driver is the most commonly reported DMABUF breaker for WebKitGTK, so it keeps the old default rather than being re-enabled on no evidence.
+
+**Testing.** `init_linux_env()` now only probes the driver and passes it to `apply_linux_env(nvidia_driver_loaded)`, which reads and writes the environment. Where decisions 2 and 5 name `init_linux_env()` as the function that guards and mutates the env, read `apply_linux_env()`. The single serialised test (decision 5) now covers both markers with and without NVIDIA, Native Packages with NVIDIA, and an exported value surviving on an NVIDIA AppImage.
+
+**Superseded statements.** They are left as written above, and this amendment supersedes only these parts, which now hold for NVIDIA hosts only:
+
+- Considered Options, "Drop the DMABUF workaround entirely: *Rejected*". It is dropped for every AppImage host without NVIDIA.
+- Consequences, "AppImage behaviour is unchanged: it still receives `WEBKIT_DISABLE_DMABUF_RENDERER=1`".
+- Consequences, the latent-regression bullet's "while still carrying the DMABUF workaround". On other hosts the AppImage no longer carries it, so a bundled WebKitGTK reaching the 2.54 behaviour does not inherit the transparent-window bug there.
+- Consequences, "the AppImage-only guard and the preload injection can both be retired together". The DMABUF guard has been narrowed separately, so the two are no longer tied.
+
+**Consequences.** This rests on one Intel host. An AppImage that crashes or shows a blank window on AMD or newer Intel GPUs should first be retried with `WEBKIT_DISABLE_DMABUF_RENDERER=1`, and then the driver check widened. The bundled-WebKitGTK and host-Mesa skew described above is unchanged, and a later Mesa can break it again. A runtime that pins the two together, such as Flatpak, is the structural fix.
