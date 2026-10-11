@@ -414,12 +414,16 @@ test("the log shows paths Finder-style, Copy puts the real paths on the clipboar
   ipc.elements.set("log-copy", copyBtn);
   ipc.elements.set("log-badge", badge);
   const copied = [];
-  const prior = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  const priorNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
   Object.defineProperty(globalThis, "navigator", {
     configurable: true,
     value: { clipboard: { writeText: async text => { copied.push(text); } } },
   });
-  t.after(() => Object.defineProperty(globalThis, "navigator", prior));
+  // Node before 21 has no global navigator, so there may be nothing to restore.
+  t.after(() => {
+    if (priorNavigator) Object.defineProperty(globalThis, "navigator", priorNavigator);
+    else delete globalThis.navigator;
+  });
 
   await ipc.mount("log-copy");
   assert.equal(await ipc.scan("remux", "/release"), true);
