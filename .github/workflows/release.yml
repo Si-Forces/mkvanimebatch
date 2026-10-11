@@ -343,16 +343,18 @@ jobs:
           # so its rendering behaviour is decided by the runner image rather than
           # by this repo. See ADR-0015: an AppImage whose WebKitGTK reaches the
           # 2.54 transparent-window behaviour inherits a rendering bug that the
-          # DMABUF workaround itself causes. Record what we actually bundled so a
-          # bad release is diagnosable instead of mysterious.
+          # DMABUF workaround itself causes, on the NVIDIA hosts that still get
+          # it. Record what we actually bundled so a bad release is diagnosable
+          # instead of mysterious.
           #
           # Versions come from dpkg, not from the .so: the bundled libwebkit2gtk
           # carries no greppable version string. Fail loudly rather than shipping
           # a manifest with a blank version.
           #
           # `appdir` here is the extracted AppImage's root, not the AppImage
-          # runtime's own APPDIR env var, which init_linux_env() keys the DMABUF
-          # scoping off (ADR-0015). The two are unrelated; keep them apart.
+          # runtime's own APPDIR env var, which apply_linux_env() keys the
+          # DMABUF scoping off (ADR-0015). The two are unrelated; keep them
+          # apart.
           appdir=/tmp/appimage-contents/squashfs-root
           libdir=$appdir/usr/lib
           if [ ! -d "$appdir" ]; then
@@ -408,8 +410,8 @@ jobs:
             # A missing bundle is not cosmetic. Without its own WebKitGTK the
             # AppImage falls back to the host's, and on a host carrying the 2.54
             # transparent-window behaviour the DMABUF workaround this packaging
-            # relies on becomes the cause of ADR-0015's rendering bug. Fail the
-            # release rather than shipping that silently.
+            # applies on NVIDIA hosts becomes the cause of ADR-0015's rendering
+            # bug. Fail the release rather than shipping that silently.
             if [ "$bundled" = "NO" ]; then
               echo "::error::$soname is not bundled in the AppImage; it would fall back to the host runtime"
               exit 1
@@ -470,6 +472,11 @@ jobs:
             The AppImage ships its own GTK and WebKitGTK rather than the host's, so this
             is the runtime that governs its window rendering — see
             [ADR-0015](https://github.com/Si-Forces/mkvanimebatch/blob/main/docs/adr/0015-per-package-webkitgtk-dmabuf-renderer-scoping.md).
+            If the AppImage crashes at startup or shows a blank window, run it with
+            `WEBKIT_DISABLE_DMABUF_RENDERER=1` to fall back to software rendering, and
+            [open an issue](https://github.com/Si-Forces/mkvanimebatch/issues) naming your
+            GPU and driver. With the NVIDIA driver loaded that variable is already the
+            default, so a crash there has another cause; please report it the same way.
 
             | Library | Version |
             |---------|---------|

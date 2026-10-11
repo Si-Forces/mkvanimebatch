@@ -23,6 +23,12 @@ const HOST_WAYLAND_CLIENT_CANDIDATES: &[&str] = &[
 
 #[cfg(target_os = "linux")]
 fn init_linux_env() {
+    // Both the proprietary and the open NVIDIA kernel modules register as `nvidia`.
+    apply_linux_env(std::path::Path::new("/sys/module/nvidia").exists());
+}
+
+#[cfg(target_os = "linux")]
+fn apply_linux_env(nvidia_driver_loaded: bool) {
     // Prefer X11/XWayland backend by default to prevent WebKitWebProcess EGL_BAD_PARAMETER abort on Wayland
     if std::env::var_os("GDK_BACKEND").is_none() {
         std::env::set_var("GDK_BACKEND", "x11,wayland");
@@ -30,12 +36,15 @@ fn init_linux_env() {
 
     // Fixes for bundled WebKitGTK inside AppImage on modern Linux (Fedora/Arch/Ubuntu 24+):
     if std::env::var_os("APPIMAGE").is_some() || std::env::var_os("APPDIR").is_some() {
-        // Workaround for an upstream WebKitGTK / Mesa EGL race condition crash on shutdown in
-        // AppImage. Disabling the DMABUF renderer prevents SkiaGLContext / __eglFini SEGV upon exit.
-        // Note: Do NOT set this on native packages (RPM/DEB) with WebKitGTK 2.54+, where disabling
-        // DMABUF drops Skia to CPU shared-memory rendering on transparent windows and causes
-        // regions outside pointer damage to vanish.
-        if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        // The DMABUF renderer stays on unless the NVIDIA driver is loaded: the shutdown SEGV
+        // (SkiaGLContext / __eglFini) that motivated disabling it did not reproduce on an Intel
+        // host (ADR-0015, 2026-10-11 amendment), and the CPU path runs at single-digit fps.
+        // NVIDIA, untested and the most reported DMABUF breaker, keeps the old default. Widen
+        // the check if another GPU reports DMABUF crashes. Note: never set this on native
+        // packages (RPM/DEB) with WebKitGTK 2.54+, where disabling DMABUF drops Skia to CPU
+        // shared-memory rendering on transparent windows and causes regions outside pointer
+        // damage to vanish.
+        if nvidia_driver_loaded && std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
             std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
         }
 
@@ -122,7 +131,7 @@ pub fn run() {
 mod tests {
     use std::ffi::OsString;
 
-    // Every env var init_linux_env() reads or writes.
+    // Every env var apply_linux_env() reads or writes.
     const TOUCHED: [&str; 5] = [
         "APPIMAGE",
         "APPDIR",
@@ -131,10 +140,10 @@ mod tests {
         "WEBKIT_DISABLE_DMABUF_RENDERER",
     ];
 
-    // One test on purpose: init_linux_env() mutates process-global env, and
+    // One test on purpose: apply_linux_env() mutates process-global env, and
     // cargo runs tests on parallel threads, so split cases would race.
     #[test]
-    fn test_init_linux_env_scopes_dmabuf_workaround_to_appimage() {
+    fn test_apply_linux_env_scopes_dmabuf_workaround_to_nvidia_appimage() {
         let saved: Vec<(&str, Option<OsString>)> = TOUCHED
             .iter()
             .map(|key| (*key, std::env::var_os(key)))
@@ -148,23 +157,33 @@ mod tests {
         };
 
         // Native packages (RPM/DEB): leave DMABUF enabled so transparent
-        // windows keep hardware-accelerated damage tracking.
+        // windows keep hardware-accelerated damage tracking, even on NVIDIA.
         reset();
-        super::init_linux_env();
+        super::apply_linux_env(true);
         let native = std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER");
 
-        // AppImage: keep the shutdown-SEGV workaround. Both env markers the
-        // runtime sets are exercised, so neither arm of the detection can be
-        // dropped without this failing. Results are asserted only after the
+        // AppImage: disable DMABUF only on the NVIDIA driver. Both env markers
+        // the runtime sets are exercised, so neither arm of the detection can
+        // be dropped without this failing. Results are asserted only after the
         // restore below, so a failing assertion cannot leak the vars into
         // later tests.
-        let mut markers: Vec<(&str, Option<String>)> = Vec::new();
+        let mut markers: Vec<(&str, bool, Option<String>)> = Vec::new();
         for marker in ["APPIMAGE", "APPDIR"] {
-            reset();
-            std::env::set_var(marker, "1");
-            super::init_linux_env();
-            markers.push((marker, std::env::var("WEBKIT_DISABLE_DMABUF_RENDERER").ok()));
+            for nvidia in [false, true] {
+                reset();
+                std::env::set_var(marker, "1");
+                super::apply_linux_env(nvidia);
+                let value = std::env::var("WEBKIT_DISABLE_DMABUF_RENDERER").ok();
+                markers.push((marker, nvidia, value));
+            }
         }
+
+        // An operator's own value always wins, even where the default would apply.
+        reset();
+        std::env::set_var("APPIMAGE", "1");
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "0");
+        super::apply_linux_env(true);
+        let overridden = std::env::var("WEBKIT_DISABLE_DMABUF_RENDERER").ok();
 
         // The libwayland-client preload must survive alongside the DMABUF
         // workaround; only assert when this host actually has a candidate.
@@ -181,13 +200,18 @@ mod tests {
         }
 
         assert_eq!(native, None, "native packages must keep DMABUF enabled");
-        for (marker, value) in &markers {
+        for (marker, nvidia, value) in &markers {
             assert_eq!(
                 value.as_deref(),
-                Some("1"),
-                "{marker} must keep DMABUF disabled"
+                nvidia.then_some("1"),
+                "{marker} with nvidia={nvidia} must disable DMABUF only on NVIDIA"
             );
         }
+        assert_eq!(
+            overridden.as_deref(),
+            Some("0"),
+            "an exported WEBKIT_DISABLE_DMABUF_RENDERER must win"
+        );
         if has_candidate {
             assert!(
                 preload.is_some_and(|value| value.contains("libwayland-client")),
