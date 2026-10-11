@@ -1059,3 +1059,25 @@ test("picking a row puts it in the inspector, which shows the first row until th
   assert.equal(tracker.cards.get("ep2").el.classList.contains("is-inspected"), false);
   assert.ok(tracker.cards.get("ep1").el.classList.contains("is-inspected"));
 });
+
+test("a row that fails mid-batch says why in its meta line, and the next Run's re-inspection restores it", t => {
+  setupMockEnvironment(t);
+  const tracker = new QueueTracker("remux");
+  const dir = "/anime/show";
+  assert.equal(tracker.acceptInspection(tracker.startScan(dir), dir, detailedManifest(["01.mkv"])), true);
+  const card = tracker.cards.get("01.mkv");
+  const inspected = card.meta.textContent;
+
+  tracker.handleEvent({ version: 1, type: "batch_start", total: 1, input_dir: dir, items: [{ id: "01.mkv", file: "01.mkv" }] });
+  tracker.handleEvent({ version: 1, type: "item_start", id: "01.mkv" });
+  tracker.handleEvent({ version: 1, type: "item_complete", id: "01.mkv", status: "error", error: "mkvmerge exited with 2" });
+  assert.equal(card.meta.textContent, "Failed · mkvmerge exited with 2");
+  assert.equal(card.meta.className, "ep-meta is-error");
+
+  // Every Run re-inspects the folder first, which puts the item back to queued.
+  tracker.endBatch(false);
+  assert.equal(tracker.acceptInspection(tracker.startScan(dir), dir, detailedManifest(["01.mkv"])), true);
+  const reused = tracker.cards.get("01.mkv");
+  assert.equal(reused.meta.textContent, inspected);
+  assert.equal(reused.meta.className, "ep-meta");
+});

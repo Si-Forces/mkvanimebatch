@@ -77,11 +77,6 @@ export class JobController {
 
     this.runtime.safeAddListener(this.runBtn, "click", () => this.start());
     this.runtime.safeAddListener(this.stopBtn, "click", () => this.stop());
-    this.runtime.safeAddListener(
-      document.getElementById(`${mode}-clear-log`),
-      "click",
-      () => this.runtime.clearLog(this.logEl)
-    );
     this.runtime.safeAddListener(document.getElementById(`${mode}-clear-cache`), "click", () => this.clearCache());
     // The Run button reads "Plan" for a dry run.
     this.runtime.safeAddListener(document.getElementById(`${mode}-dry-run`), "change", () => this.syncGlobalControls());

@@ -56,6 +56,7 @@ export function createPresetMenu({ invoke, doc }) {
     });
   }
 
+  /** Fills the Remux form: presets set the Opus encode, and only Remux transcodes (#preset-list is remux-only). */
   function apply(presetKey) {
     if (presetKey === "custom") {
       setActiveProfileOption("custom");
