@@ -571,9 +571,11 @@ test("job controller rejects a sub-offset that is not a number of seconds", asyn
     await t.test(value, async t => {
       installDocument(t, remuxElements({ "input-dir": "/input", "sub-offset": value }));
       const logs = [];
+      const opened = [];
       let scanCalled = false;
       const runtime = makeRuntime(makeTracker(), {
         appendLog: (_el, msg) => logs.push(msg),
+        openSettings: mode => opened.push(mode),
         scanInputDirectory: async () => {
           scanCalled = true;
           return true;
@@ -587,6 +589,8 @@ test("job controller rejects a sub-offset that is not a number of seconds", asyn
       assert.equal(controller.running, false);
       assert.equal(runtime.coordinator.activeMode, null);
       assert.ok(logs.some(msg => msg.includes("Invalid sub-offset value")));
+      // The field sits in the settings sheet, which opens so the error shows.
+      assert.deepEqual(opened, ["remux"]);
     });
   }
 });
@@ -629,7 +633,8 @@ test("a refused run_job reports failed and leaves the queue as it was", async t 
 });
 
 test("job controller disables Run while scanning or snapshot restore blocks start", async t => {
-  const elements = remuxElements();
+  const dryRun = new FakeElement();
+  const elements = remuxElements({ "dry-run": dryRun });
   installDocument(t, elements);
   const tracker = { isScanning: true, state: { totalCount: 2 }, getSelectedCount: () => 2 };
   const runtime = makeRuntime(tracker);
@@ -638,6 +643,8 @@ test("job controller disables Run while scanning or snapshot restore blocks star
   const controller = new JobController("remux", runtime);
   controller.syncGlobalControls();
   assert.equal(runBtn.disabled, true);
+  assert.equal(runBtn.title, "Scanning the folder");
+  assert.equal(runBtn.textContent, "Run remux · 2");
 
   tracker.isScanning = false;
   let answerSnapshot;
@@ -654,6 +661,17 @@ test("job controller disables Run while scanning or snapshot restore blocks star
   await restoring;
   controller.syncGlobalControls();
   assert.equal(runBtn.disabled, false);
+  assert.equal(runBtn.title, "");
+
+  // A dry run plans; the label follows the checkbox.
+  dryRun.checked = true;
+  dryRun.handlers.get("change")();
+  assert.equal(runBtn.textContent, "Plan remux · 2");
+
+  // The other mode's job blocks this Run, and its tooltip says so.
+  runtime.coordinator.begin("extract");
+  assert.equal(runBtn.disabled, true);
+  assert.equal(runBtn.title, "Extract batch is running");
 });
 
 test("job controller onDone is ignored when jobId is null or not running", t => {

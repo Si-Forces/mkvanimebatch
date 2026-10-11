@@ -733,7 +733,7 @@ test("subset batch progress counts only batch participants", t => {
     input_dir: "/anime/show",
     items: [{ id: "ep1", file: "ep1" }],
   });
-  assert.equal(countEl.textContent, "0 / 1 Processed");
+  assert.equal(countEl.textContent, "0 of 1 · 0 done");
 
   tracker.handleEvent({ version: 1, type: "item_start", id: "ep1" });
   tracker.handleEvent({
@@ -746,7 +746,7 @@ test("subset batch progress counts only batch participants", t => {
   tracker.handleEvent({ version: 1, type: "batch_complete", success: true });
   tracker.endBatch(false);
 
-  assert.equal(countEl.textContent, "1 Completed (1 Total)");
+  assert.equal(countEl.textContent, "1 of 1 · 1 done");
 });
 
 test("a job that fails before BatchStart leaves the queue's cards, selection and count as they were", t => {

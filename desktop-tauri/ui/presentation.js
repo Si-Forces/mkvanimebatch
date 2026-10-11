@@ -77,7 +77,7 @@ const FILTERS = {
   failed: item => item.selected !== false && item.status === "error",
 };
 
-export const FILTER_KEYS = Object.keys(FILTERS);
+const FILTER_KEYS = Object.keys(FILTERS);
 
 export function matchesFilter(item, filter) {
   return (FILTERS[filter] ?? FILTERS.all)(item);

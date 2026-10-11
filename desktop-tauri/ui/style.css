@@ -38,6 +38,10 @@
   --line: rgba(20, 32, 48, .1);
   --hover: rgba(110, 122, 145, .1);
   --accent: #0d826d;
+  --brand-tile: linear-gradient(180deg, #ffffff, #e9eef3);
+  --brand-rim: rgba(20, 32, 48, .14);
+  --brand-shadow: 0 2px 6px rgba(30, 42, 64, .14);
+  --brand-sub: #f0b400;
   --accent-fg: #ffffff;
   --accent-soft: rgba(13, 130, 109, .14);
   --accent-ring: rgba(13, 130, 109, .38);
@@ -76,6 +80,10 @@
   --line: rgba(255, 255, 255, .09);
   --hover: rgba(255, 255, 255, .06);
   --accent: #4cc7ad;
+  --brand-tile: linear-gradient(180deg, #1a222b, #0e1318);
+  --brand-rim: rgba(255, 255, 255, .08);
+  --brand-shadow: 0 2px 6px rgba(0, 0, 0, .25);
+  --brand-sub: #ffd23f;
   --accent-fg: #06201a;
   --accent-soft: rgba(76, 199, 173, .16);
   --accent-ring: rgba(76, 199, 173, .45);
@@ -120,6 +128,8 @@ button, input, select { font: inherit; color: inherit; }
 button { cursor: pointer; }
 button:disabled, input:disabled, select:disabled { cursor: not-allowed; opacity: .75; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* Focus handed back after a pointer closed a dialog (see the sheet's close handler). */
+.quiet-focus:focus-visible { outline: none; }
 [hidden] { display: none !important; }
 input, textarea { user-select: text; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
@@ -258,12 +268,14 @@ html.is-linux.is-maximized .bar {
 .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .brand-name { display: flex; flex-direction: column; align-items: center; text-align: center; line-height: 1.15; font-weight: 700; font-size: 14px; white-space: nowrap; }
 .brand-tile {
-  width: 26px; height: 26px; flex: none;
-  border-radius: 7px;
-  background: #0e1318;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .08), 0 2px 6px rgba(0, 0, 0, .25);
+  width: 34px; height: 34px; flex: none;
+  border-radius: 9px;
+  background: var(--brand-tile);
+  box-shadow: inset 0 0 0 1px var(--brand-rim), var(--brand-shadow);
   display: grid; place-items: center;
 }
+/* The yellow subtitle bar deepens on the light tile so it still reads. */
+.brand-sub { fill: var(--brand-sub); }
 .nav-text { display: flex; flex-direction: column; line-height: 1.2; min-width: 0; }
 .brand-name small, .nav-text small { color: var(--mute); font-weight: 400; font-size: 11px; }
 
@@ -629,7 +641,7 @@ html.job-locked .list-hint .hint-locked { display: inline; }
 .overlay::backdrop { background: transparent; }
 .sheet {
   width: 580px; max-width: 100%; max-height: 100%;
-  overflow: auto;
+  overflow: hidden;
   border-radius: 26px;
   background: var(--float);
   display: flex; flex-direction: column;
@@ -640,7 +652,7 @@ html.job-locked .list-hint .hint-locked { display: inline; }
   .sheet, .is-spinning .ep-ring, .scan-spinner { animation: none; }
 }
 .sheet-head {
-  position: sticky; top: 0; z-index: 1;
+  flex: none;
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
   padding: 16px 20px;
   background: var(--float);
@@ -649,7 +661,10 @@ html.job-locked .list-hint .hint-locked { display: inline; }
 .sheet-head h2 { font-size: 16px; font-weight: 700; }
 .sheet-head p, .sheet-note { font-size: 12px; color: var(--mute); }
 .sheet-note { padding-top: 14px; }
-.sheet-body { padding: 4px 20px 20px; }
+/* Only the body scrolls, so the scrollbar starts below the header rule and
+   stops short of the 26px bottom corner. */
+.sheet-body { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 4px 20px 20px; }
+.sheet-body::-webkit-scrollbar-track { margin: 8px 0 22px; }
 .locked-note {
   display: none;
   margin-top: 14px; padding: 8px 12px; border-radius: 10px;

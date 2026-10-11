@@ -9,7 +9,6 @@ use serde::{Deserialize, Serialize};
 pub struct PresetProfile {
     pub id: String,
     pub name: String,
-    pub icon: String,
     pub bitrate: String,
     pub complexity: u32,
 }
@@ -19,29 +18,25 @@ pub fn get_preset_profiles() -> Vec<PresetProfile> {
     vec![
         PresetProfile {
             id: "balanced".to_string(),
-            name: "Balanced Anime (Opus 192k)".to_string(),
-            icon: "🌸".to_string(),
+            name: "Balanced".to_string(),
             bitrate: "192k".to_string(),
             complexity: 5,
         },
         PresetProfile {
             id: "fast".to_string(),
-            name: "Fast Muxing (128k)".to_string(),
-            icon: "⚡".to_string(),
+            name: "Fast muxing".to_string(),
             bitrate: "128k".to_string(),
             complexity: 5,
         },
         PresetProfile {
             id: "hifi".to_string(),
-            name: "Hi-Fi Master (320k)".to_string(),
-            icon: "🎧".to_string(),
+            name: "Hi-Fi master".to_string(),
             bitrate: "320k".to_string(),
             complexity: 10,
         },
         PresetProfile {
             id: "custom".to_string(),
-            name: "Custom Configuration".to_string(),
-            icon: "🛠️".to_string(),
+            name: "Custom".to_string(),
             bitrate: "192k".to_string(),
             complexity: 5,
         },
@@ -96,7 +91,7 @@ mod tests {
         // Pin the fields the desktop reads by name, not the exhaustive key set: adding a field
         // is a legitimate change, whereas renaming or dropping one breaks
         // `createPresetMenu().load` in desktop-tauri/ui/preset-menu.js.
-        for key in ["id", "name", "icon", "bitrate", "complexity"] {
+        for key in ["id", "name", "bitrate", "complexity"] {
             assert!(
                 object.contains_key(key),
                 "the desktop UI reads preset field {key}"
