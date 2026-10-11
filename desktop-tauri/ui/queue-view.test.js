@@ -1,7 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { QueueTracker } from "./queue-view.js";
+import { QueueTracker, RING_CIRCUMFERENCE } from "./queue-view.js";
 import { createQueueState, setItemSelected } from "./queue-state.js";
+
+/** The status ring's dash offset at `progress` percent. */
+const ringOffset = progress => (RING_CIRCUMFERENCE * (1 - progress / 100)).toFixed(2);
 
 class FakeElement {
   constructor(value = "") {
@@ -18,7 +21,20 @@ class FakeElement {
       _classes: new Set(),
       add(cls) { this._classes.add(cls); },
       remove(cls) { this._classes.delete(cls); },
+      contains(cls) { return this._classes.has(cls); },
     };
+  }
+
+  append(...nodes) {
+    for (const node of nodes) this.appendChild(node);
+  }
+
+  /** Like the DOM's, this moves `node` when it is already in the tree. */
+  before(node) {
+    node.remove();
+    const siblings = this.parent.children;
+    node.parent = this.parent;
+    siblings.splice(siblings.indexOf(this), 0, node);
   }
 
   set innerHTML(markup) {
@@ -42,8 +58,13 @@ class FakeElement {
     this.parent = null;
   }
 
-  addEventListener() {}
-  remove() {}
+  addEventListener(type, handler) { (this.handlers ??= new Map()).set(type, handler); }
+
+  remove() {
+    const siblings = this.parent?.children;
+    if (siblings?.includes(this)) siblings.splice(siblings.indexOf(this), 1);
+    this.parent = null;
+  }
 
   querySelector(selector) {
     if (!this.queried.has(selector)) {
@@ -70,6 +91,7 @@ function setupMockEnvironment(t, { deferFrames = false } = {}) {
     ["remux-episode-list", new FakeElement()],
     ["remux-queue-count", new FakeElement()],
     ["remux-bitrate", new FakeElement("192k")],
+    ["remux-filter-empty", new FakeElement()],
   ]);
 
   globalThis.document = {
@@ -171,13 +193,20 @@ test("restoreFromSnapshot renders a card per restored item in its outcome state"
 
   assert.equal(tracker.cards.size, 4);
   const card1 = tracker.cards.get("ep1");
-  assert.ok(card1.el.className.includes("completed"));
-  assert.equal(card1.badge.textContent, "COMPLETED");
+  assert.equal(card1.el.dataset.status, "completed");
+  assert.equal(card1.status.className, "ep-status tone-ok");
+  assert.equal(card1.statusTag.textContent, "Done in 10.2s");
+
+  const card2 = tracker.cards.get("ep2");
+  assert.equal(card2.status.className, "ep-status tone-mute");
+  assert.equal(card2.statusTag.textContent, "Skipped");
+  assert.equal(card2.status.title, "Already up to date");
 
   const card4 = tracker.cards.get("ep4");
-  assert.ok(card4.el.className.includes("failed"));
-  assert.equal(card4.badge.textContent, "FAILED");
-  assert.equal(card4.statusTag.textContent, "FFmpeg encoding failed");
+  assert.equal(card4.el.dataset.status, "error");
+  assert.equal(card4.status.className, "ep-status tone-err");
+  assert.equal(card4.statusTag.textContent, "Failed");
+  assert.equal(card4.status.title, "FFmpeg encoding failed");
 });
 
 test("restoreFromSnapshot sets meaningful restored tags instead of placeholder inspection text", t => {
@@ -197,10 +226,8 @@ test("restoreFromSnapshot sets meaningful restored tags instead of placeholder i
   const card1 = tracker.cards.get("ep1");
   const card2 = tracker.cards.get("ep2");
 
-  assert.equal(card1.tag1.textContent, "Processed");
-  assert.equal(card1.tag2.textContent, "Done in 4.5s");
-  assert.equal(card2.tag1.textContent, "Skipped");
-  assert.equal(card2.tag2.textContent, "Up to date");
+  assert.equal(card1.meta.textContent, "Processed · Done in 4.5s");
+  assert.equal(card2.meta.textContent, "Skipped · Up to date");
 });
 
 test("QueueTracker handles item_start (indeterminate shimmer), item_progress (determinate width), item_complete (green fill; heartbeat stops on its next tick)", t => {
@@ -215,23 +242,22 @@ test("QueueTracker handles item_start (indeterminate shimmer), item_progress (de
   assert.ok(card);
   assert.equal(tracker.heartbeatTimer, null);
 
-  // 1. item_start -> indeterminate shimmer + ticking text + starts heartbeat
+  // 1. item_start -> blue spinning ring + ticking text + starts heartbeat
   tracker.handleEvent({ version: 1, type: "batch_start", total: 1 });
   tracker.handleEvent({ version: 1, type: "item_start", id: "ep1" });
 
-  assert.ok(card.el.className.includes("processing"));
-  assert.equal(card.badge.textContent, "PROCESSING");
-  assert.equal(card.fill.className, "ep-progress-fill indeterminate");
-  assert.equal(card.fill.style.width, "");
-  assert.match(card.statusTag.textContent, /^Processing \(\d+s\)$/);
+  assert.equal(card.el.dataset.status, "processing");
+  assert.equal(card.status.className, "ep-status tone-info is-spinning");
+  assert.equal(card.arc.style.strokeDashoffset, "");
+  assert.match(card.statusTag.textContent, /^Processing · \d+s$/);
   assert.notEqual(tracker.heartbeatTimer, null);
 
   // Tick heartbeat advances clock text
   tracker.state.items.get("ep1").startTime = Date.now() - 5000;
   tracker.tickHeartbeat();
-  assert.equal(card.statusTag.textContent, "Processing (5s)");
+  assert.equal(card.statusTag.textContent, "Processing · 5s");
 
-  // 2. item_progress -> determinate width percentage
+  // 2. item_progress -> determinate ring
   tracker.handleEvent({
     version: 1,
     type: "item_progress",
@@ -239,15 +265,15 @@ test("QueueTracker handles item_start (indeterminate shimmer), item_progress (de
     progress: 64.2,
   });
 
-  assert.equal(card.fill.className, "ep-progress-fill");
-  assert.equal(card.fill.style.width, "64.2%");
-  assert.equal(card.statusTag.textContent, "64% (5s)");
+  assert.equal(card.status.className, "ep-status tone-info");
+  assert.equal(card.arc.style.strokeDashoffset, ringOffset(64.2));
+  assert.equal(card.statusTag.textContent, "64% · 5s");
 
   tracker.state.items.get("ep1").startTime = Date.now() - 12000;
   tracker.tickHeartbeat();
-  assert.equal(card.statusTag.textContent, "64% (12s)");
+  assert.equal(card.statusTag.textContent, "64% · 12s");
 
-  // 3. item_complete -> green fill, Done in X.Xs, stops heartbeat
+  // 3. item_complete -> green, Done in X.Xs, stops heartbeat
   tracker.handleEvent({
     version: 1,
     type: "item_complete",
@@ -256,10 +282,9 @@ test("QueueTracker handles item_start (indeterminate shimmer), item_progress (de
     duration_sec: 14.8,
   });
 
-  assert.equal(card.el.className, "tokyo-ep-card completed");
-  assert.equal(card.badge.textContent, "COMPLETED");
-  assert.equal(card.fill.className, "ep-progress-fill green");
-  assert.equal(card.fill.style.width, "100%");
+  assert.equal(card.el.dataset.status, "completed");
+  assert.equal(card.status.className, "ep-status tone-ok");
+  assert.equal(card.arc.style.strokeDashoffset, "");
   assert.equal(card.statusTag.textContent, "Done in 14.8s");
   // The heartbeat stops itself on its next tick once nothing is processing.
   assert.notEqual(tracker.heartbeatTimer, null);
@@ -343,8 +368,8 @@ test("active snapshot renders only submitted cards in order and keeps live updat
   assert.equal(list.children.length, 0);
   renderFrame();
   assert.deepEqual(cardTitles(list), ["02.mkv"]);
-  assert.equal(tracker.cards.get("02").fill.style.width, "70%");
-  assert.equal(tracker.cards.get("02").statusTag.textContent, "70% (5s)");
+  assert.equal(tracker.cards.get("02").arc.style.strokeDashoffset, ringOffset(70));
+  assert.equal(tracker.cards.get("02").statusTag.textContent, "70% · 5s");
 
   tracker.handleEvent({ version: 1, type: "item_complete", id: "01", status: "completed", duration_sec: 75.4 });
   tracker.handleEvent({ version: 1, type: "item_progress", id: "02", progress: 76 });
@@ -352,11 +377,11 @@ test("active snapshot renders only submitted cards in order and keeps live updat
   assert.deepEqual(cardTitles(list), ["02.mkv", "01.mkv"]);
   assert.equal(tracker.cards.size, 2);
   assert.equal(tracker.cards.get("01").statusTag.textContent, "Done in 1m 15.4s");
-  assert.equal(tracker.cards.get("02").fill.style.width, "76%");
+  assert.equal(tracker.cards.get("02").arc.style.strokeDashoffset, ringOffset(76));
 
   tracker.handleEvent({ version: 1, type: "item_complete", id: "02", status: "completed", duration_sec: 4.2 });
   assert.equal(tracker.cards.get("02").statusTag.textContent, "Done in 4.2s");
-  assert.equal(tracker.cards.get("02").fill.style.width, "100%");
+  assert.equal(tracker.cards.get("02").status.className, "ep-status tone-ok");
   tracker.tickHeartbeat();
   assert.equal(tracker.heartbeatTimer, null);
 });
@@ -396,7 +421,7 @@ test("QueueTracker dynamically mounts card element in handleEvent if card not pr
   const card = tracker.cards.get("ep1");
   assert.equal(card.el.querySelector(".ep-title").textContent, "01.mkv");
   assert.ok(elements.get("remux-episode-list").children.includes(card.el));
-  assert.equal(card.badge.textContent, "PROCESSING");
+  assert.equal(card.el.dataset.status, "processing");
 });
 
 test("QueueTracker selection and card reordering", t => {
@@ -420,8 +445,8 @@ test("QueueTracker selection and card reordering", t => {
 
   tracker.reorderCard("ep2", "up");
   assert.deepEqual(tracker.getSelectedOrderedItemIds(), ["ep2", "ep1", "ep3"]);
-  assert.equal(tracker.cards.get("ep2").badge.textContent, "EPISODE 01");
-  assert.equal(tracker.cards.get("ep1").badge.textContent, "EPISODE 02");
+  assert.equal(tracker.cards.get("ep2").num.textContent, "01");
+  assert.equal(tracker.cards.get("ep1").num.textContent, "02");
 });
 
 test("QueueTracker reconciles same-directory replacements, cached reuse, stale scans, and fresh directories", t => {
@@ -449,8 +474,9 @@ test("QueueTracker reconciles same-directory replacements, cached reuse, stale s
   assert.equal(tracker.cards.get("Season/01.mkv").checkbox.checked, false);
   assert.equal(tracker.cards.get("Season/03.mkv").checkbox.checked, false);
   assert.deepEqual([...tracker.assignments.keys()], ["Season/02.mkv"]);
-  assert.equal(tracker.cards.get("Season/02.mkv").subBtn.textContent, "Sub: 02.ass");
-  assert.equal(tracker.cards.get("Season/01.mkv").subBtn.textContent, "+ Sub");
+  // The carried assignment is what the inspector's ladder reports as used.
+  assert.equal(tracker.ladderFor("Season/02.mkv")[0].tag, "Used");
+  assert.equal(tracker.ladderFor("Season/01.mkv")[0].tag, "None");
 
   tracker.reorderCard("Season/03.mkv", "up");
   tracker.state.items.get("Season/03.mkv").selected = true;
@@ -797,11 +823,11 @@ test("a same-directory re-inspection with an identical manifest keeps every card
   assert.equal(tracker.cards.get("02.mkv").checkbox.checked, false);
   // The re-inspected item is queued again, so its kept card is back to the queued look.
   const card1 = tracker.cards.get("01.mkv");
-  assert.equal(card1.el.className, "tokyo-ep-card");
-  assert.equal(card1.badge.className, "ep-badge");
-  assert.equal(card1.badge.textContent, "EPISODE 01");
+  assert.equal(card1.el.dataset.status, "queued");
+  assert.equal(card1.status.className, "ep-status tone-mute");
+  assert.equal(card1.num.textContent, "01");
   assert.equal(card1.statusTag.textContent, "Queued");
-  assert.equal(card1.fill.style.width, "0%");
+  assert.equal(card1.arc.style.strokeDashoffset, "");
 });
 
 test("startScan keeps the cards of the same Directory Identity and clears them for any other", t => {
@@ -828,7 +854,7 @@ test("startScan keeps the cards of the same Directory Identity and clears them f
     tracker.startScan(other);
     assert.equal(tracker.cards.size, 0);
     assert.equal(list.children.length, 0);
-    assert.match(list.innerHTML, /Scanning Directory/);
+    assert.match(list.innerHTML, /Scanning folder/);
   }
 });
 
@@ -841,12 +867,10 @@ test("a freshly mounted card is drawn in the queued look by its first renderCard
 
   const card = tracker.cards.get("02.mkv");
   assert.equal(card.renderedStatus, "queued");
-  assert.equal(card.el.className, "tokyo-ep-card");
-  assert.equal(card.badge.className, "ep-badge");
-  assert.equal(card.badge.textContent, "EPISODE 02");
-  assert.equal(card.statusTag.className, "ep-duration-tag status-tag");
+  assert.equal(card.el.dataset.status, "queued");
+  assert.equal(card.status.className, "ep-status tone-mute");
+  assert.equal(card.num.textContent, "02");
   assert.equal(card.statusTag.textContent, "Queued");
-  assert.equal(card.fill.style.width, "0%");
 });
 
 test("a Remux card names the bitrate control's value, and only that, for a FLAC track", t => {
@@ -854,12 +878,17 @@ test("a Remux card names the bitrate control's value, and only that, for a FLAC 
   const tracker = new QueueTracker("remux");
   const dir = "/anime/show";
   assert.equal(tracker.acceptInspection(tracker.startScan(dir), dir, detailedManifest(["01.mkv"])), true);
-  assert.equal(tracker.cards.get("01.mkv").tag1.textContent, "FLAC 2.0 → Opus 192k");
+  assert.equal(tracker.cards.get("01.mkv").meta.textContent, "FLAC 2.0 → Opus 192k · Embedded subs · 3 fonts");
 
-  // With no bitrate to show, the card omits it rather than assume one.
+  // With no bitrate to show, the row omits it rather than assume one.
   elements.get("remux-bitrate").value = "";
   assert.equal(tracker.acceptInspection(tracker.startScan(dir), dir, detailedManifest(["01.mkv", "02.mkv"])), true);
-  assert.equal(tracker.cards.get("02.mkv").tag1.textContent, "FLAC 2.0 → Opus");
+  assert.equal(tracker.cards.get("02.mkv").meta.textContent, "FLAC 2.0 → Opus · Embedded subs · 3 fonts");
+
+  // A bitrate change redraws every row's meta line in place.
+  elements.get("remux-bitrate").value = "256k";
+  tracker.refreshMeta();
+  assert.equal(tracker.cards.get("01.mkv").meta.textContent, "FLAC 2.0 → Opus 256k · Embedded subs · 3 fonts");
 });
 
 test("a same-directory re-inspection remounts only the card whose manifest entry changed, in place", t => {
@@ -881,7 +910,7 @@ test("a same-directory re-inspection remounts only the card whose manifest entry
   assert.equal(tracker.cards.get("03.mkv"), cardsBefore.get("03.mkv"));
   const fresh = tracker.cards.get("02.mkv");
   assert.notEqual(fresh, cardsBefore.get("02.mkv"));
-  assert.equal(fresh.tag2.textContent, "ASS (ind) + 5 Fonts");
+  assert.equal(fresh.meta.textContent, "FLAC 2.0 → Opus 192k · Embedded subs · 5 fonts");
   assert.deepEqual(list.children, [cardsBefore.get("01.mkv").el, fresh.el, cardsBefore.get("03.mkv").el]);
 });
 
@@ -921,7 +950,7 @@ test("a failed re-inspection that kept its cards drops them, and the next scan r
   for (const [id, card] of cardsBefore) assert.notEqual(tracker.cards.get(id), card);
 });
 
-test("progress events on a processing card write only the fill width and the tag text", t => {
+test("progress events on a processing row write only the ring and the status text", t => {
   setupMockEnvironment(t);
   const tracker = new QueueTracker("remux");
   tracker.populateFromInspection(manifestOf(["ep1"]));
@@ -931,29 +960,102 @@ test("progress events on a processing card write only the fill width and the tag
   tracker.handleEvent({ version: 1, type: "item_progress", id: "ep1", progress: 10 });
 
   const writes = [];
-  recordWrites(card.el, "card", ["className"], writes);
-  recordWrites(card.badge, "badge", ["className", "textContent"], writes);
-  recordWrites(card.statusTag, "tag", ["className"], writes);
-  recordWrites(card.fill, "fill", ["className"], writes);
+  recordWrites(card.el.dataset, "row", ["status"], writes);
+  recordWrites(card.status, "status", ["className", "title"], writes);
   for (const progress of [20, 30, 40]) {
     tracker.handleEvent({ version: 1, type: "item_progress", id: "ep1", progress });
   }
 
   assert.deepEqual(writes, []);
-  assert.equal(card.fill.style.width, "40%");
-  assert.match(card.statusTag.textContent, /^40% \(\d+s\)$/);
+  assert.equal(card.arc.style.strokeDashoffset, ringOffset(40));
+  assert.match(card.statusTag.textContent, /^40% · \d+s$/);
 
-  // A status change after the run of same-status updates still writes classes and badge.
+  // A status change after the run of same-status updates still writes the status and tone.
   tracker.handleEvent({ version: 1, type: "item_complete", id: "ep1", status: "completed", duration_sec: 3 });
-  assert.deepEqual(writes, ["card.className", "badge.className", "badge.textContent", "tag.className", "fill.className"]);
-  assert.equal(card.el.className, "tokyo-ep-card completed");
-  assert.equal(card.badge.textContent, "COMPLETED");
-  assert.equal(card.fill.style.width, "100%");
+  assert.deepEqual(writes, ["row.status", "status.className", "status.title"]);
+  assert.equal(card.el.dataset.status, "completed");
+  assert.equal(card.status.className, "ep-status tone-ok");
 
   // Re-rendering the same terminal status, from a repeated item_complete (ignored by the
-  // reducer) or from endBatch, writes nothing more, its tag text included.
+  // reducer) or from endBatch, writes nothing more, its status text included.
   recordWrites(card.statusTag, "tag", ["textContent"], writes);
   tracker.handleEvent({ version: 1, type: "item_complete", id: "ep1", status: "completed", duration_sec: 3 });
   tracker.endBatch(false);
-  assert.deepEqual(writes, ["card.className", "badge.className", "badge.textContent", "tag.className", "fill.className"]);
+  assert.deepEqual(writes, ["row.status", "status.className", "status.title"]);
+});
+
+test("filter chips hide the rows they do not match, and say so when none match", t => {
+  const { elements } = setupMockEnvironment(t);
+  const tracker = new QueueTracker("remux");
+  tracker.populateFromInspection(manifestOf(["ep1", "ep2", "ep3"]));
+  tracker.handleEvent({ version: 1, type: "batch_start", items: [{ id: "ep1" }, { id: "ep2" }, { id: "ep3" }] });
+  tracker.handleEvent({ version: 1, type: "item_complete", id: "ep1", status: "completed" });
+  const hidden = () => ["ep1", "ep2", "ep3"].map(id => tracker.cards.get(id).el.hidden);
+
+  tracker.setFilter("done");
+  assert.deepEqual(hidden(), [false, true, true]);
+  assert.equal(elements.get("remux-filter-empty").hidden, true);
+
+  // A status change while filtered re-applies the filter.
+  tracker.handleEvent({ version: 1, type: "item_complete", id: "ep2", status: "completed" });
+  assert.deepEqual(hidden(), [false, false, true]);
+
+  tracker.setFilter("failed");
+  assert.deepEqual(hidden(), [true, true, true]);
+  assert.equal(elements.get("remux-filter-empty").hidden, false);
+  assert.ok(elements.get("remux-episode-list").classList.contains("is-filtered"));
+
+  tracker.setFilter("all");
+  assert.deepEqual(hidden(), [false, false, false]);
+  assert.equal(elements.get("remux-filter-empty").hidden, true);
+});
+
+test("a queue spanning release directories gets one header per run of rows, and reordering keeps them in place", t => {
+  const { elements } = setupMockEnvironment(t);
+  const tracker = new QueueTracker("remux");
+  const list = elements.get("remux-episode-list");
+  tracker.populateFromInspection({
+    version: 2,
+    items: [
+      { id: "S1/01.mkv", name: "01.mkv", release: "Season 1" },
+      { id: "S1/02.mkv", name: "02.mkv", release: "Season 1" },
+      { id: "SP/01.mkv", name: "SP1.mkv", release: "Specials" },
+    ],
+  });
+  const layout = () => list.children.map(el => (el.className === "ep-group-head"
+    ? `[${el.children.map(part => part.textContent).join(" ")}]`
+    : el.querySelector(".ep-title").textContent));
+  assert.deepEqual(layout(), ["[Season 1 2]", "01.mkv", "02.mkv", "[Specials 1]", "SP1.mkv"]);
+
+  // Moving a Specials row up past the boundary swaps rows, not a row and a header.
+  const row = tracker.cards.get("SP/01.mkv").el;
+  Object.defineProperty(row, "previousElementSibling", { get: () => list.children[list.children.indexOf(row) - 1] });
+  tracker.reorderCard("SP/01.mkv", "up");
+  assert.deepEqual(tracker.state.order, ["S1/01.mkv", "SP/01.mkv", "S1/02.mkv"]);
+  assert.deepEqual(layout(), ["[Season 1 1]", "01.mkv", "[Specials 1]", "SP1.mkv", "[Season 1 1]", "02.mkv"]);
+
+  // A single-release queue has no headers at all.
+  tracker.populateFromInspection(manifestOf(["a", "b"]));
+  assert.deepEqual(list.children.map(el => el.className), ["ep-row", "ep-row"]);
+});
+
+test("picking a row puts it in the inspector, which shows the first row until then", t => {
+  const { elements } = setupMockEnvironment(t);
+  const tracker = new QueueTracker("remux");
+  const changes = [];
+  tracker.onChange = () => changes.push(tracker.inspectedItem()?.id);
+  tracker.populateFromInspection(manifestOf(["ep1", "ep2"]));
+  assert.equal(tracker.inspectedItem().id, "ep1");
+  assert.ok(tracker.cards.get("ep1").el.classList.contains("is-inspected"), "the default row is highlighted too");
+
+  const pick = tracker.cards.get("ep2").pick;
+  elements.get("remux-episode-list").handlers.get("click")({ target: { closest: sel => (sel === ".ep-pick" ? pick : null) } });
+  assert.equal(tracker.inspectedId, "ep2");
+  assert.equal(tracker.inspectedItem().id, "ep2");
+  assert.ok(tracker.cards.get("ep2").el.classList.contains("is-inspected"));
+  assert.equal(changes.at(-1), "ep2");
+
+  tracker.inspect("ep1");
+  assert.equal(tracker.cards.get("ep2").el.classList.contains("is-inspected"), false);
+  assert.ok(tracker.cards.get("ep1").el.classList.contains("is-inspected"));
 });

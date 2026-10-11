@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-view="remux">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -21,751 +21,447 @@
   <div class="resize-handle se" data-direction="se"></div>
   <div class="resize-handle sw" data-direction="sw"></div>
 
-  <!-- ─── Titlebar ───────────────────────────────────────────────────────── -->
-  <div class="titlebar">
-    <div class="titlebar-drag-region" data-tauri-drag-region></div>
+  <div class="panes">
 
-    <!-- Left: window controls & view tabs -->
-    <div class="titlebar-left">
-      <div class="traffic-lights">
-        <button class="tl-btn tl-close" id="btn-close" title="Close" type="button">
-          <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
-            <line x1="2" y1="2" x2="10" y2="10"></line>
-            <line x1="10" y1="2" x2="2" y2="10"></line>
-          </svg>
-        </button>
-        <button class="tl-btn tl-min" id="btn-min" title="Minimize" type="button">
-          <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
-            <line x1="2" y1="6" x2="10" y2="6"></line>
-          </svg>
-        </button>
-        <button class="tl-btn tl-max" id="btn-max" title="Maximize" type="button">
-          <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
-            <rect x="2.5" y="2.5" width="7" height="7" rx="1.5"></rect>
-          </svg>
-        </button>
-      </div>
-
-      <nav class="pipeline-tab-group" role="tablist">
-        <button class="pipeline-tab-btn active" data-view="remux" id="nav-remux" role="tab" aria-selected="true" aria-label="Batch Remux">
-          <span class="tab-icon">
-            <svg class="app-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M20.2 6 3 11l-.9-4.2L18 2l2.2 4z"></path>
-              <line x1="7" y1="4.5" x2="8.5" y2="9.5"></line>
-              <line x1="12" y1="3" x2="13.5" y2="8"></line>
-              <rect x="2" y="10.5" width="20" height="11.5" rx="2.5"></rect>
-              <polygon points="10 13.5 15 16.2 10 19" fill="currentColor"></polygon>
-            </svg>
-          </span>
-          <span>Batch Remux</span>
-        </button>
-        <button class="pipeline-tab-btn" data-view="extract" id="nav-extract" role="tab" aria-selected="false" aria-label="Subtitle and Fonts Extractor">
-          <span class="tab-icon">
-            <svg class="app-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
-              <polyline points="2 12 12 17 22 12"></polyline>
-              <path d="M12 17v5"></path>
-              <polyline points="9 19 12 22 15 19"></polyline>
-            </svg>
-          </span>
-          <span>Subtitle &amp; Fonts</span>
-        </button>
-      </nav>
-    </div>
-
-    <!-- Center: app brand -->
-    <div class="titlebar-center">
-      <div class="titlebar-brand">
-        <div class="titlebar-logo-badge">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path>
-            <polygon points="10 9 14.5 12 10 15" fill="currentColor"></polygon>
-          </svg>
+    <!-- ─── Sidebar ─────────────────────────────────────────────────────── -->
+    <aside class="side glass" aria-label="Tasks and library">
+      <div class="side-top" data-tauri-drag-region>
+        <div class="traffic-lights">
+          <button class="tl-btn tl-close" id="btn-close" type="button" title="Close" aria-label="Close window"></button>
+          <button class="tl-btn tl-min" id="btn-min" type="button" title="Minimize" aria-label="Minimize window"></button>
+          <button class="tl-btn tl-max" id="btn-max" type="button" title="Maximize" aria-label="Maximize window"></button>
         </div>
-        <span class="brand-name">MKV Anime Batch</span>
-      </div>
-    </div>
-
-    <!-- Right: preset profile & theme toggle -->
-    <div class="titlebar-actions">
-      <div class="profile-dropdown-wrapper" id="profile-dropdown-wrapper">
-        <button class="preset-pill-btn" id="active-profile-btn" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="profile-dropdown-menu">
-          <span id="active-profile-name">🌸 Balanced Anime (Opus 192k)</span> ▾
+        <button class="icon-btn theme-btn" id="btn-theme" type="button" title="Toggle light and dark theme (Ctrl+T)" aria-label="Toggle theme">
+          <svg class="sun-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4.5"/><path d="M12 2v2M12 20v2M4.2 4.2l1.4 1.4M18.4 18.4l1.4 1.4M2 12h2M20 12h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4"/></svg>
+          <svg class="moon-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
         </button>
-        <div class="profile-dropdown-menu" id="profile-dropdown-menu">
-          <button class="profile-option-item active" type="button" data-preset="balanced" aria-pressed="true">
-            <span class="preset-icon">🌸</span>
-            <div class="preset-info">
-              <div class="preset-title">Balanced Anime (Opus 192k)</div>
-              <div class="preset-sub">Opus 192k • Complexity 5</div>
-            </div>
-          </button>
-          <button class="profile-option-item" type="button" data-preset="fast" aria-pressed="false">
-            <span class="preset-icon">⚡</span>
-            <div class="preset-info">
-              <div class="preset-title">Fast Muxing</div>
-              <div class="preset-sub">Opus 128k • Complexity 5</div>
-            </div>
-          </button>
-          <button class="profile-option-item" type="button" data-preset="hifi" aria-pressed="false">
-            <span class="preset-icon">🎧</span>
-            <div class="preset-info">
-              <div class="preset-title">Hi-Fi Master (320k)</div>
-              <div class="preset-sub">Opus 320k • Complexity 10</div>
-            </div>
-          </button>
-          <button class="profile-option-item" type="button" data-preset="custom" aria-pressed="false">
-            <span class="preset-icon">🛠️</span>
-            <div class="preset-info">
-              <div class="preset-title">Custom Configuration</div>
-              <div class="preset-sub">User-defined pipeline parameters</div>
-            </div>
-          </button>
-        </div>
       </div>
 
-      <div class="header-mode-badge" id="extract-header-badge" style="display: none;">
-        <span class="mode-badge-dot"></span>
-        <span>
-          <svg class="app-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
-            <polyline points="2 12 12 17 22 12"></polyline>
-            <path d="M12 17v5"></path>
-            <polyline points="9 19 12 22 15 19"></polyline>
+      <div class="brand" data-tauri-drag-region>
+        <span class="brand-tile" aria-hidden="true">
+          <svg width="24" height="24" viewBox="0 0 24 24">
+            <defs>
+              <linearGradient id="mk-screen" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3ddbb4"/><stop offset="0.5" stop-color="#3b8cf6"/><stop offset="1" stop-color="#b05cf6"/></linearGradient>
+            </defs>
+            <rect x="2" y="2.5" width="20" height="14" rx="3" fill="url(#mk-screen)"/>
+            <rect x="2" y="2.5" width="20" height="5" rx="2.5" fill="#ffffff" opacity="0.14"/>
+            <path d="M9.6 6.3v6.4l5.4-3.2z" fill="#ffffff"/>
+            <rect x="4" y="18.8" width="9" height="2.4" rx="1.2" fill="#ffd23f"/>
+            <rect x="14.5" y="18.8" width="5.5" height="2.4" rx="1.2" fill="#ff6fae"/>
           </svg>
-          Extractor Pipeline
         </span>
+        <span class="brand-name">MKV Anime Batch<small>by Sifahaz</small></span>
       </div>
 
-      <button class="theme-toggle-switch" id="btn-theme" title="Toggle Light/Dark Theme" type="button" aria-label="Toggle theme">
-        <div class="theme-toggle-track">
-          <svg class="theme-icon sun-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="5"></circle>
-            <line x1="12" y1="1" x2="12" y2="3"></line>
-            <line x1="12" y1="21" x2="12" y2="23"></line>
-            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
-            <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
-            <line x1="1" y1="12" x2="3" y2="12"></line>
-            <line x1="21" y1="12" x2="23" y2="12"></line>
-            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
-            <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
-          </svg>
-          <svg class="theme-icon moon-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
-          </svg>
+      <section class="side-group" aria-labelledby="side-task">
+        <h2 id="side-task">Task</h2>
+        <div class="task-row">
+          <button class="nav pipeline-tab-btn active" id="nav-remux" data-view="remux" type="button" aria-current="page">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 4v16M17 4v16M3 9h4M3 15h4M17 9h4M17 15h4"/></svg>
+            <span class="nav-text">Remux<small>FLAC → Opus, mux subs</small></span>
+            <span class="status-pill status-idle" id="remux-status"><span class="status-dot"></span> Idle</span>
+          </button>
+          <button class="icon-btn task-settings-btn" data-view="remux" type="button" title="Remux settings" aria-label="Remux settings" aria-haspopup="dialog">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          </button>
         </div>
-        <div class="theme-toggle-knob"></div>
-      </button>
-    </div>
+        <div class="task-row">
+          <button class="nav pipeline-tab-btn" id="nav-extract" data-view="extract" type="button">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 15h4M13 15h4M7 11h10"/></svg>
+            <span class="nav-text">Extract<small>Subs, fonts, chapters</small></span>
+            <span class="status-pill status-idle" id="extract-status"><span class="status-dot"></span> Idle</span>
+          </button>
+          <button class="icon-btn task-settings-btn" data-view="extract" type="button" title="Extract settings" aria-label="Extract settings" aria-haspopup="dialog">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          </button>
+        </div>
+      </section>
+
+      <section class="side-group" aria-labelledby="side-library">
+        <h2 id="side-library">Library</h2>
+        <div class="library-tree" id="library-tree"></div>
+        <button class="nav lib-open lock-while-job" id="library-open" type="button">+ Open folder…</button>
+      </section>
+
+      <section class="side-group" aria-labelledby="side-preset" data-for="remux">
+        <h2 id="side-preset">Preset
+          <span class="locked-label">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>Locked
+          </span>
+        </h2>
+        <button class="nav preset-row profile-option-item lock-while-job active" type="button" data-preset="balanced" aria-pressed="true">
+          <span class="preset-dot" aria-hidden="true"></span>
+          <span class="nav-text">Balanced<small>Opus 192k · complexity 5</small></span>
+        </button>
+        <button class="nav preset-row profile-option-item lock-while-job" type="button" data-preset="fast" aria-pressed="false">
+          <span class="preset-dot" aria-hidden="true"></span>
+          <span class="nav-text">Fast muxing<small>Opus 128k · complexity 5</small></span>
+        </button>
+        <button class="nav preset-row profile-option-item lock-while-job" type="button" data-preset="hifi" aria-pressed="false">
+          <span class="preset-dot" aria-hidden="true"></span>
+          <span class="nav-text">Hi-Fi master<small>Opus 320k · complexity 10</small></span>
+        </button>
+        <button class="nav preset-row profile-option-item lock-while-job" type="button" data-preset="custom" aria-pressed="false">
+          <span class="preset-dot" aria-hidden="true"></span>
+          <span class="nav-text">Custom<small id="preset-custom-sub">Your own bitrate and complexity</small></span>
+        </button>
+      </section>
+
+      <p class="side-hint">
+        <span class="hint-idle">Tick episodes to include them. Click a row to inspect it.</span>
+        <span class="hint-locked">Selection is locked while the batch runs.</span>
+      </p>
+    </aside>
+
+    <!-- ─── Episode lists, one per task ─────────────────────────────────── -->
+    <main class="main" data-for="remux" aria-labelledby="remux-title">
+      <header class="list-head" data-tauri-drag-region>
+        <h1 class="release-title" id="remux-title">No folder open</h1>
+        <p class="crumbs list-path" id="remux-path"></p>
+        <div class="list-tools">
+          <div class="filters" role="group" aria-label="Filter episodes">
+            <button class="chip filter-chip is-on" type="button" data-mode="remux" data-filter="all" aria-pressed="true">All <span class="n">0</span></button>
+            <button class="chip filter-chip" type="button" data-mode="remux" data-filter="todo" aria-pressed="false">To do <span class="n">0</span></button>
+            <button class="chip filter-chip" type="button" data-mode="remux" data-filter="done" aria-pressed="false">Done <span class="n">0</span></button>
+            <button class="chip filter-chip" type="button" data-mode="remux" data-filter="failed" aria-pressed="false">Failed <span class="n">0</span></button>
+          </div>
+          <span class="spacer"></span>
+          <button class="link-btn" type="button" id="remux-select-all">Select all</button>
+          <button class="link-btn" type="button" id="remux-deselect-all">None</button>
+        </div>
+      </header>
+      <div class="list" id="remux-episode-list">
+        <div class="empty-state-card">
+          <svg class="empty-icon" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+          <div class="empty-state-title">No episodes yet</div>
+          <div class="empty-state-desc">Open a release folder to scan its MKV episodes into this batch.</div>
+          <button class="btn btn-accent empty-state-action" type="button" data-target="remux-input-dir">Open folder…</button>
+        </div>
+      </div>
+      <p class="filter-empty" id="remux-filter-empty" hidden>No episodes match this filter.</p>
+    </main>
+
+    <main class="main" data-for="extract" aria-labelledby="extract-title">
+      <header class="list-head" data-tauri-drag-region>
+        <h1 class="release-title" id="extract-title">No folder open</h1>
+        <p class="crumbs list-path" id="extract-path"></p>
+        <div class="list-tools">
+          <div class="filters" role="group" aria-label="Filter episodes">
+            <button class="chip filter-chip is-on" type="button" data-mode="extract" data-filter="all" aria-pressed="true">All <span class="n">0</span></button>
+            <button class="chip filter-chip" type="button" data-mode="extract" data-filter="todo" aria-pressed="false">To do <span class="n">0</span></button>
+            <button class="chip filter-chip" type="button" data-mode="extract" data-filter="done" aria-pressed="false">Done <span class="n">0</span></button>
+            <button class="chip filter-chip" type="button" data-mode="extract" data-filter="failed" aria-pressed="false">Failed <span class="n">0</span></button>
+          </div>
+          <span class="spacer"></span>
+          <button class="link-btn" type="button" id="extract-select-all">Select all</button>
+          <button class="link-btn" type="button" id="extract-deselect-all">None</button>
+        </div>
+      </header>
+      <div class="list" id="extract-episode-list">
+        <div class="empty-state-card">
+          <svg class="empty-icon" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+          <div class="empty-state-title">No episodes yet</div>
+          <div class="empty-state-desc">Open a release folder to scan its MKV episodes into this batch.</div>
+          <button class="btn btn-accent empty-state-action" type="button" data-target="extract-input-dir">Open folder…</button>
+        </div>
+      </div>
+      <p class="filter-empty" id="extract-filter-empty" hidden>No episodes match this filter.</p>
+    </main>
+
+    <!-- ─── Inspector ───────────────────────────────────────────────────── -->
+    <aside class="insp glass" id="inspector" aria-label="Episode details">
+      <p class="insp-empty" id="insp-empty">Open a folder, then pick an episode to see what the batch does with it.</p>
+      <div class="insp-body" id="insp-body" hidden>
+        <div class="insp-head">
+          <span class="insp-num" id="insp-num"></span>
+          <div class="insp-head-text">
+            <h3 id="insp-title"></h3>
+            <small class="crumbs" id="insp-path"></small>
+          </div>
+        </div>
+
+        <div class="insp-error" id="insp-error" hidden></div>
+
+        <section class="insp-section">
+          <h4>Output</h4>
+          <dl class="insp-dl">
+            <dt>Status</dt><dd><span class="pill tone-mute" id="insp-status"></span></dd>
+            <dt>Video</dt><dd id="insp-video"></dd>
+            <dt id="insp-audio-label">Audio</dt><dd id="insp-audio"></dd>
+            <dt>Folder</dt><dd class="crumbs" id="insp-out"></dd>
+          </dl>
+        </section>
+
+        <section class="insp-section" data-for="remux">
+          <h4>Subtitle · why this one</h4>
+          <ol class="ladder" id="insp-ladder"></ol>
+          <div class="assign-row">
+            <label class="sr-only" for="sub-assign-select">Assign subtitle</label>
+            <select id="sub-assign-select" class="field lock-while-job"></select>
+            <button class="link-btn lock-while-job" type="button" id="sub-assign-reset" hidden>Reset</button>
+          </div>
+          <div class="assign-opts" id="sub-assign-opts" hidden>
+            <label class="field-label">Language
+              <select id="sub-lang-select" class="field lock-while-job">
+                <option value="ind">Indonesian (ind)</option>
+                <option value="eng">English (eng)</option>
+                <option value="jpn">Japanese (jpn)</option>
+                <option value="custom">Custom tag…</option>
+              </select>
+            </label>
+            <label class="field-label" id="sub-lang-custom-label" hidden>Language tag
+              <input type="text" id="sub-lang-custom" class="field lock-while-job" maxlength="3" placeholder="ISO 639-2, e.g. may" />
+            </label>
+            <label class="field-label">Track title
+              <input type="text" id="sub-title-input" class="field lock-while-job" placeholder="e.g. Dialogue" />
+            </label>
+            <label class="field-label">Offset (ms)
+              <input type="number" id="sub-offset-input" class="field lock-while-job" step="100" placeholder="0" />
+            </label>
+          </div>
+        </section>
+
+        <section class="insp-section">
+          <h4 id="insp-fonts-head">Fonts</h4>
+          <div class="font-chips" id="insp-fonts"></div>
+        </section>
+      </div>
+    </aside>
   </div>
 
-  <!-- ─── Workspace ──────────────────────────────────────────────────────── -->
-  <div class="layout">
-    <div class="content">
+  <!-- ─── Bottom bar ──────────────────────────────────────────────────────── -->
+  <footer class="bar glass">
+    <div class="bar-run" data-for="remux">
+      <button class="cap btn-run" id="remux-run" type="button">Run remux</button>
+      <button class="cap btn-stop" id="remux-stop" type="button" disabled hidden>Stop</button>
+    </div>
+    <div class="bar-run" data-for="extract">
+      <button class="cap btn-run" id="extract-run" type="button">Run extract</button>
+      <button class="cap btn-stop" id="extract-stop" type="button" disabled hidden>Stop</button>
+    </div>
 
-      <!-- ─── Remux View ─────────────────────────────────────────────────── -->
-      <div class="view active" id="view-remux">
-        <div class="view-3col-layout">
+    <div class="bar-progress" data-for="remux">
+      <div class="bar-line"><b id="remux-queue-count">Ready</b><span class="bar-clock" id="remux-clock">Not started</span></div>
+      <div class="stack" id="remux-stack" aria-hidden="true"><i class="seg-done"></i><i class="seg-skip"></i><i class="seg-fail"></i><i class="seg-live"></i></div>
+    </div>
+    <div class="bar-progress" data-for="extract">
+      <div class="bar-line"><b id="extract-queue-count">Ready</b><span class="bar-clock" id="extract-clock">Not started</span></div>
+      <div class="stack" id="extract-stack" aria-hidden="true"><i class="seg-done"></i><i class="seg-skip"></i><i class="seg-fail"></i><i class="seg-live"></i></div>
+    </div>
 
-          <!-- Col 1: parameters, Run/Stop -->
-          <div class="glass-panel col-options">
-            <div class="panel-header">
-              <span class="panel-title">
-                <span>
-                  <svg class="app-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M20.2 6 3 11l-.9-4.2L18 2l2.2 4z"></path>
-                    <line x1="7" y1="4.5" x2="8.5" y2="9.5"></line>
-                    <line x1="12" y1="3" x2="13.5" y2="8"></line>
-                    <rect x="2" y="10.5" width="20" height="11.5" rx="2.5"></rect>
-                    <polygon points="10 13.5 15 16.2 10 19" fill="currentColor"></polygon>
-                  </svg>
-                </span>
-                <span class="panel-title-prefix-remux">Remux </span>Parameters
-              </span>
-              <span class="status-pill status-idle" id="remux-status">
-                <span class="status-dot"></span> Idle
-              </span>
-            </div>
+    <div class="bar-chips" title="Workers and disk I/O jobs: the engine's defaults, or the running batch's own">
+      <span class="metric-workers-chip">Standby</span>
+      <span class="metric-iojobs-chip">Idle</span>
+    </div>
 
-            <div class="panel-body" style="display:flex; flex-direction:column;">
-              <div class="form-grid" style="flex:1;">
+    <div class="tel">
+      <div class="tel-item tone-accent">
+        <svg width="64" height="20" viewBox="0 0 64 20" aria-hidden="true"><polyline id="tel-cpu-line" points=""/></svg>
+        <span>CPU<b id="tel-cpu">–</b></span>
+      </div>
+      <div class="tel-item tone-done">
+        <svg width="64" height="20" viewBox="0 0 64 20" aria-hidden="true"><polyline id="tel-ram-line" points=""/></svg>
+        <span>RAM<b id="tel-ram">–</b></span>
+      </div>
+      <div class="tel-item tone-info" title="Write rate of the app and its media tools">
+        <svg width="64" height="20" viewBox="0 0 64 20" aria-hidden="true"><polyline id="tel-disk-line" points=""/></svg>
+        <span>Disk write<b id="tel-disk">–</b></span>
+      </div>
+    </div>
 
-                <!-- Input Dir -->
-                <div class="form-group full">
-                  <div class="form-label-row">
-                    <label class="form-label">Input Directory <span class="required">*</span></label>
-                    <span class="field-hint">Source MKVs</span>
-                  </div>
-                  <div class="input-row">
-                    <input type="text" id="remux-input-dir" placeholder="/path/to/anime" />
-                    <button class="browse-btn" data-target="remux-input-dir">📁 Browse</button>
-                  </div>
-                </div>
+    <button class="pill-btn" id="btn-log" type="button" aria-expanded="false" aria-controls="log-drawer">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+      Log <span class="badge" id="log-badge" hidden>0</span>
+    </button>
+  </footer>
 
-                <!-- Output Dir -->
-                <div class="form-group full">
-                  <div class="form-label-row">
-                    <label class="form-label">Output Directory</label>
-                    <span class="field-hint">Default: Output/</span>
-                  </div>
-                  <div class="input-row">
-                    <input type="text" id="remux-out-dir" placeholder="(same as input)" />
-                    <button class="browse-btn" data-target="remux-out-dir">📁 Browse</button>
-                  </div>
-                </div>
-
-                <!-- Fonts Dir -->
-                <div class="form-group full">
-                  <div class="form-label-row">
-                    <label class="form-label">Fonts Directory</label>
-                    <span class="field-hint">Auto: fonts/</span>
-                  </div>
-                  <div class="input-row">
-                    <input type="text" id="remux-fonts-dir" placeholder="(auto-detect)" />
-                    <button class="browse-btn" data-target="remux-fonts-dir">📁 Browse</button>
-                  </div>
-                </div>
-
-                <!-- Assets Dir -->
-                <div class="form-group full">
-                  <div class="form-label-row">
-                    <label class="form-label">Assets Directory</label>
-                    <span class="field-hint">Optional Fallback</span>
-                  </div>
-                  <div class="input-row">
-                    <input type="text" id="remux-assets-dir" placeholder="(optional)" />
-                    <button class="browse-btn" data-target="remux-assets-dir">📁 Browse</button>
-                  </div>
-                </div>
-
-                <!-- Audio Bitrate -->
-                <div class="form-group full">
-                  <div class="form-label-row">
-                    <label class="form-label">Audio Bitrate</label>
-                    <span class="field-hint">Opus Encoder</span>
-                  </div>
-                  <select id="remux-bitrate">
-                    <option value="192k">192k (Recommended)</option>
-                    <option value="160k">160k (Balanced)</option>
-                    <option value="128k">128k (Compact)</option>
-                    <option value="256k">256k (High Quality)</option>
-                    <option value="320k">320k (Maximum)</option>
-                  </select>
-                </div>
-
-                <!-- Complexity Level -->
-                <div class="form-group full">
-                  <div class="form-label-row">
-                    <label class="form-label">Complexity Level <span title="libopus encoding complexity (10 = maximum quality / psychoacoustics, 0 = fastest)" class="info-tip">ⓘ</span></label>
-                    <span class="field-hint">0 (Fast) → 10 (Max)</span>
-                  </div>
-                  <div style="display:flex;align-items:center;gap:10px; height: 32px;">
-                    <input type="range" id="remux-complexity" value="5" min="0" max="10" step="1" aria-label="Complexity Level Slider" style="flex:1; margin: 0;" />
-                    <div class="number-stepper pill-stepper">
-                      <button type="button" class="stepper-btn minus" aria-label="Decrease complexity">−</button>
-                      <input type="number" id="remux-cplx-val" value="5" min="0" max="10" aria-label="Complexity Level Value" />
-                      <button type="button" class="stepper-btn plus" aria-label="Increase complexity">+</button>
-                    </div>
-                  </div>
-                </div>
-
-                <!-- Subtitle Timestamp Offset -->
-                <div class="form-group full">
-                  <div class="form-label-row">
-                    <label class="form-label">Subtitle Timestamp Offset <span title="Shift subtitle timestamps by seconds (+ delay, − advance)" class="info-tip">ⓘ</span></label>
-                    <span class="field-hint">Seconds (±)</span>
-                  </div>
-                  <div class="number-stepper">
-                    <button type="button" class="stepper-btn minus" aria-label="Decrease offset">−</button>
-                    <input type="number" id="remux-sub-offset" value="0" step="0.5" placeholder="0.0" />
-                    <button type="button" class="stepper-btn plus" aria-label="Increase offset">+</button>
-                  </div>
-                </div>
-
-                <!-- Concurrency: Workers, Disk I/O Jobs, FFmpeg Threads -->
-                <div class="form-group full" style="margin-bottom: 2px;">
-                  <div class="form-grid-3col">
-                    <div class="form-group">
-                      <label class="form-label compact">Workers <span title="Concurrent files to process (1-64; empty = auto)" class="info-tip">ⓘ</span></label>
-                      <div class="number-stepper">
-                        <button type="button" class="stepper-btn minus" aria-label="Decrease workers">−</button>
-                        <input type="number" id="remux-workers" placeholder="auto" min="1" max="64" />
-                        <button type="button" class="stepper-btn plus" aria-label="Increase workers">+</button>
-                      </div>
-                    </div>
-
-                    <div class="form-group">
-                      <label class="form-label compact">Disk I/O <span title="Max concurrent disk I/O streams (0-64; 0 = same as Workers)" class="info-tip">ⓘ</span></label>
-                      <div class="number-stepper">
-                        <button type="button" class="stepper-btn minus" aria-label="Decrease IO jobs">−</button>
-                        <input type="number" id="remux-io-jobs" placeholder="auto" min="0" max="64" />
-                        <button type="button" class="stepper-btn plus" aria-label="Increase IO jobs">+</button>
-                      </div>
-                    </div>
-
-                    <div class="form-group">
-                      <label class="form-label compact">FFmpeg Thds <span title="FLAC decoder threads per transcode job (1-32; empty = auto). Opus encoding is single-threaded" class="info-tip">ⓘ</span></label>
-                      <div class="number-stepper">
-                        <button type="button" class="stepper-btn minus" aria-label="Decrease FFmpeg threads">−</button>
-                        <input type="number" id="remux-ffmpeg-threads" placeholder="auto" min="1" max="32" />
-                        <button type="button" class="stepper-btn plus" aria-label="Increase FFmpeg threads">+</button>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                <!-- Flags & cache maintenance -->
-                <div class="form-group full" style="margin-top: 2px;">
-                  <label class="form-label">CLI Flags &amp; Cache</label>
-                  <div class="cli-flags-grid">
-                    <label class="cli-flag-card">
-                      <input type="checkbox" id="remux-dry-run" />
-                      <span class="flag-title">Dry Run</span>
-                    </label>
-                    <label class="cli-flag-card">
-                      <input type="checkbox" id="remux-no-cache" />
-                      <span class="flag-title">Bypass Cache</span>
-                    </label>
-                  </div>
-                  <button class="clear-cache-btn" id="remux-clear-cache" type="button" title="Delete inspection cache">
-                    🗑 Clear Inspection Cache
-                  </button>
-                </div>
-
-              </div>
-
-              <div class="param-actions-footer">
-                <button class="btn btn-gradient" id="remux-run">▶ Run Batch Remux</button>
-                <button class="btn btn-stop" id="remux-stop" disabled>■ Stop</button>
-              </div>
-
-            </div>
-          </div>
-
-          <!-- Col 2: episode queue -->
-          <div class="glass-panel col-queue">
-            <div class="panel-header queue-panel-header">
-              <div class="queue-header-top">
-                <span class="panel-title">
-                  <span>
-                    <svg class="app-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                      <path d="M20.2 6 3 11l-.9-4.2L18 2l2.2 4z"></path>
-                      <line x1="7" y1="4.5" x2="8.5" y2="9.5"></line>
-                      <line x1="12" y1="3" x2="13.5" y2="8"></line>
-                      <rect x="2" y="10.5" width="20" height="11.5" rx="2.5"></rect>
-                      <polygon points="10 13.5 15 16.2 10 19" fill="currentColor"></polygon>
-                    </svg>
-                  </span>
-                  <span class="queue-title-prefix">Episode </span>Batch Queue
-                </span>
-                <span class="queue-count-badge" id="remux-queue-count">Ready</span>
-              </div>
-              <div class="queue-header-toolbar">
-                <div class="queue-bulk-actions">
-                  <button type="button" class="btn btn-xs" id="remux-select-all">Select All</button>
-                  <button type="button" class="btn btn-xs" id="remux-deselect-all">Deselect All</button>
-                </div>
-              </div>
-            </div>
-            <div class="panel-body queue-body" id="remux-episode-list">
-
-              <div class="empty-state-card">
-                <div class="empty-icon-glow">
-                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M22 19a2 2 0 0 1-2-2V8a2 2 0 0 0-2-2h-7l-2-3H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2z"></path>
-                    <line x1="12" y1="10" x2="12" y2="16"></line>
-                    <line x1="9" y1="13" x2="15" y2="13"></line>
-                  </svg>
-                </div>
-                <div class="empty-state-title">No Episodes Queued</div>
-                <div class="empty-state-desc">Choose an input directory to scan MKV episodes into this batch.</div>
-                <button class="btn btn-gradient empty-state-action" type="button" data-target="remux-input-dir">📁 Choose Input Directory</button>
-              </div>
-
-            </div>
-          </div>
-
-          <!-- Col 3: resource monitor & console -->
-          <div class="glass-panel col-console">
-            <div class="panel-header">
-              <span class="panel-title">📊 Resource Monitor<span class="panel-title-suffix-console"> &amp; Console</span></span>
-            </div>
-
-            <div class="prominent-resource-card">
-              <div class="res-card-title">
-                <span>🖥️ SYSTEM HARDWARE TELEMETRY</span>
-                <span class="res-status-dot green"></span>
-              </div>
-
-              <!-- CPU -->
-              <div class="metric-block">
-                <div class="metric-header">
-                  <span class="metric-name">CPU UTILIZATION</span>
-                  <span class="metric-val green metric-cpu-val">0%</span>
-                </div>
-                <div class="metric-bar-bg">
-                  <div class="metric-bar-fill green metric-cpu-fill" style="width: 0%;"></div>
-                </div>
-              </div>
-
-              <!-- Disk I/O -->
-              <div class="metric-block" title="System-wide disk I/O is not measured; batch disk concurrency is limited by the Disk I/O Jobs (--io-jobs) setting">
-                <div class="metric-header">
-                  <span class="metric-name">DISK I/O <span class="info-tip">ⓘ</span></span>
-                  <span class="metric-val muted metric-io-val">Not measured</span>
-                </div>
-                <div class="metric-bar-bg">
-                  <div class="metric-bar-fill cyan metric-io-fill unavailable" style="width: 0%;"></div>
-                </div>
-              </div>
-
-              <!-- RAM -->
-              <div class="metric-block">
-                <div class="metric-header">
-                  <span class="metric-name">RAM MEMORY USAGE</span>
-                  <span class="metric-val purple metric-ram-val">0 MB</span>
-                </div>
-                <div class="metric-bar-bg">
-                  <div class="metric-bar-fill purple metric-ram-fill" style="width: 0%;"></div>
-                </div>
-              </div>
-
-              <!-- Workers & I/O jobs -->
-              <div class="metric-badges-row">
-                <div class="metric-pill metric-workers-chip">⚡ Standby</div>
-                <div class="metric-pill purple metric-iojobs-chip">🔀 Idle</div>
-              </div>
-            </div>
-
-            <!-- Log console -->
-            <div class="log-console">
-              <div class="log-header">
-                <span class="log-title">📟 Transcode Stream Output</span>
-                <div>
-                  <button class="btn btn-ghost" id="remux-clear-log">Clear Stream</button>
-                </div>
-              </div>
-              <div class="log-body" id="remux-log" aria-live="polite"></div>
-            </div>
-
-          </div>
-
-        </div>
-      </div><!-- /view-remux -->
-
-      <!-- ─── Extract View ───────────────────────────────────────────────── -->
-      <div class="view" id="view-extract">
-        <div class="view-3col-layout">
-
-          <!-- Col 1: parameters, Run/Stop -->
-          <div class="glass-panel col-options">
-            <div class="panel-header">
-              <span class="panel-title">
-                <span>
-                  <svg class="app-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
-                    <polyline points="2 12 12 17 22 12"></polyline>
-                    <path d="M12 17v5"></path>
-                    <polyline points="9 19 12 22 15 19"></polyline>
-                  </svg>
-                </span>
-                <span class="panel-title-prefix-extract">Extract </span>Parameters
-              </span>
-              <span class="status-pill status-idle" id="extract-status">
-                <span class="status-dot"></span> Idle
-              </span>
-            </div>
-
-            <div class="panel-body" style="display:flex; flex-direction:column; gap: 10px;">
-
-              <!-- Extract targets -->
-              <div class="extract-scope-card">
-                <div class="extract-scope-header">
-                  <span class="scope-label">EXTRACT TARGETS</span>
-                  <span class="scope-badge">Batch Mode</span>
-                </div>
-                <div class="extract-targets-pills">
-                  <div class="extract-target-pill cyan" title="Extracts best-match ASS subtitle track">
-                    <span class="pill-dot"></span>
-                    <span class="pill-text">.ASS Subtitles</span>
-                  </div>
-                  <div class="extract-target-pill purple" title="Extracts embedded fonts and deduplicates with BLAKE2b">
-                    <span class="pill-dot"></span>
-                    <span class="pill-text">Deduped Fonts</span>
-                  </div>
-                  <div class="extract-target-pill green" title="Extracts XML/text chapters if present">
-                    <span class="pill-dot"></span>
-                    <span class="pill-text">Chapters</span>
-                  </div>
-                  <div class="extract-target-pill yellow" title="Extracts cover artwork attachments">
-                    <span class="pill-dot"></span>
-                    <span class="pill-text">Cover Art</span>
-                  </div>
-                </div>
-              </div>
-
-              <div class="form-grid" style="flex:1;">
-                <!-- Input Dir -->
-                <div class="form-group full">
-                  <div class="form-label-row">
-                    <label class="form-label">Input Directory <span class="required">*</span></label>
-                    <span class="field-hint">Source MKVs</span>
-                  </div>
-                  <div class="input-row">
-                    <input type="text" id="extract-input-dir" placeholder="/path/to/anime" />
-                    <button class="browse-btn" data-target="extract-input-dir">📁 Browse</button>
-                  </div>
-                </div>
-
-                <!-- Output Dir -->
-                <div class="form-group full">
-                  <div class="form-label-row">
-                    <label class="form-label">Output Directory</label>
-                    <span class="field-hint">Default: same as input</span>
-                  </div>
-                  <div class="input-row">
-                    <input type="text" id="extract-out-dir" placeholder="(same as input)" />
-                    <button class="browse-btn" data-target="extract-out-dir">📁 Browse</button>
-                  </div>
-                </div>
-
-                <!-- Fonts Dir -->
-                <div class="form-group full">
-                  <div class="form-label-row">
-                    <label class="form-label">Fonts Output Directory</label>
-                    <span class="field-hint">Default: fonts/</span>
-                  </div>
-                  <div class="input-row">
-                    <input type="text" id="extract-fonts-dir" placeholder="(auto-detect)" />
-                    <button class="browse-btn" data-target="extract-fonts-dir">📁 Browse</button>
-                  </div>
-                </div>
-
-                <!-- Concurrency: Workers, Disk I/O Jobs -->
-                <div class="form-group">
-                  <label class="form-label compact">Workers <span title="Concurrent files to process (1-64; empty = auto)" class="info-tip">ⓘ</span></label>
-                  <div class="number-stepper">
-                    <button type="button" class="stepper-btn minus" aria-label="Decrease workers">−</button>
-                    <input type="number" id="extract-workers" placeholder="auto" min="1" max="64" />
-                    <button type="button" class="stepper-btn plus" aria-label="Increase workers">+</button>
-                  </div>
-                </div>
-
-                <div class="form-group">
-                  <label class="form-label compact">Disk I/O Jobs <span title="Max concurrent disk I/O streams (0-64; 0 = same as Workers)" class="info-tip">ⓘ</span></label>
-                  <div class="number-stepper">
-                    <button type="button" class="stepper-btn minus" aria-label="Decrease IO jobs">−</button>
-                    <input type="number" id="extract-io-jobs" placeholder="auto" min="0" max="64" />
-                    <button type="button" class="stepper-btn plus" aria-label="Increase IO jobs">+</button>
-                  </div>
-                </div>
-
-                <!-- Flags & cache maintenance -->
-                <div class="form-group full" style="margin-top: 2px;">
-                  <label class="form-label">CLI Flags &amp; Cache</label>
-                  <div class="cli-flags-grid">
-                    <label class="cli-flag-card">
-                      <input type="checkbox" id="extract-dry-run" />
-                      <span class="flag-title">Dry Run</span>
-                    </label>
-                    <label class="cli-flag-card">
-                      <input type="checkbox" id="extract-no-cache" />
-                      <span class="flag-title">Bypass Cache</span>
-                    </label>
-                  </div>
-                  <button class="clear-cache-btn" id="extract-clear-cache" type="button" title="Delete inspection cache">
-                    🗑 Clear Inspection Cache
-                  </button>
-                </div>
-
-              </div>
-
-              <div class="param-actions-footer">
-                <button class="btn btn-gradient" id="extract-run">▶ Run Extraction</button>
-                <button class="btn btn-stop" id="extract-stop" disabled>■ Stop</button>
-              </div>
-
-            </div>
-          </div>
-
-          <!-- Col 2: episode queue -->
-          <div class="glass-panel col-queue">
-            <div class="panel-header queue-panel-header">
-              <div class="queue-header-top">
-                <span class="panel-title">
-                  <span>
-                    <svg class="app-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                      <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
-                      <polyline points="2 12 12 17 22 12"></polyline>
-                      <path d="M12 17v5"></path>
-                      <polyline points="9 19 12 22 15 19"></polyline>
-                    </svg>
-                  </span>
-                  Extract Queue
-                </span>
-                <span class="queue-count-badge" id="extract-queue-count">Ready</span>
-              </div>
-              <div class="queue-header-toolbar">
-                <div class="queue-bulk-actions">
-                  <button type="button" class="btn btn-xs" id="extract-select-all">Select All</button>
-                  <button type="button" class="btn btn-xs" id="extract-deselect-all">Deselect All</button>
-                </div>
-              </div>
-            </div>
-            <div class="panel-body queue-body" id="extract-episode-list">
-
-              <div class="empty-state-card">
-                <div class="empty-icon-glow">
-                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M22 19a2 2 0 0 1-2-2V8a2 2 0 0 0-2-2h-7l-2-3H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2z"></path>
-                    <line x1="12" y1="10" x2="12" y2="16"></line>
-                    <line x1="9" y1="13" x2="15" y2="13"></line>
-                  </svg>
-                </div>
-                <div class="empty-state-title">No Episodes Queued</div>
-                <div class="empty-state-desc">Choose an input directory to scan MKV episodes into this batch.</div>
-                <button class="btn btn-gradient empty-state-action" type="button" data-target="extract-input-dir">📁 Choose Input Directory</button>
-              </div>
-
-            </div>
-          </div>
-
-          <!-- Col 3: resource monitor & console -->
-          <div class="glass-panel col-console">
-            <div class="panel-header">
-              <span class="panel-title">📊 Resource Monitor<span class="panel-title-suffix-console"> &amp; Console</span></span>
-            </div>
-
-            <div class="prominent-resource-card">
-              <div class="res-card-title">
-                <span>🖥️ SYSTEM HARDWARE TELEMETRY</span>
-                <span class="res-status-dot green"></span>
-              </div>
-
-              <!-- CPU -->
-              <div class="metric-block">
-                <div class="metric-header">
-                  <span class="metric-name">CPU UTILIZATION</span>
-                  <span class="metric-val green metric-cpu-val">0%</span>
-                </div>
-                <div class="metric-bar-bg">
-                  <div class="metric-bar-fill green metric-cpu-fill" style="width: 0%;"></div>
-                </div>
-              </div>
-
-              <!-- Disk I/O -->
-              <div class="metric-block" title="System-wide disk I/O is not measured; batch disk concurrency is limited by the Disk I/O Jobs (--io-jobs) setting">
-                <div class="metric-header">
-                  <span class="metric-name">DISK I/O <span class="info-tip">ⓘ</span></span>
-                  <span class="metric-val muted metric-io-val">Not measured</span>
-                </div>
-                <div class="metric-bar-bg">
-                  <div class="metric-bar-fill cyan metric-io-fill unavailable" style="width: 0%;"></div>
-                </div>
-              </div>
-
-              <!-- RAM -->
-              <div class="metric-block">
-                <div class="metric-header">
-                  <span class="metric-name">RAM MEMORY USAGE</span>
-                  <span class="metric-val purple metric-ram-val">0 MB</span>
-                </div>
-                <div class="metric-bar-bg">
-                  <div class="metric-bar-fill purple metric-ram-fill" style="width: 0%;"></div>
-                </div>
-              </div>
-
-              <!-- Workers & I/O jobs -->
-              <div class="metric-badges-row">
-                <div class="metric-pill metric-workers-chip">⚡ Standby</div>
-                <div class="metric-pill purple metric-iojobs-chip">🔀 Idle</div>
-              </div>
-            </div>
-
-            <!-- Log console -->
-            <div class="log-console">
-              <div class="log-header">
-                <span class="log-title">📟 Active Extract Stream</span>
-                <div>
-                  <button class="btn btn-ghost" id="extract-clear-log">Clear</button>
-                </div>
-              </div>
-              <div class="log-body" id="extract-log" aria-live="polite"></div>
-            </div>
-
-          </div>
-
-        </div>
-      </div><!-- /view-extract -->
-
-    </div><!-- /.content -->
-
-  </div><!-- /.layout -->
+  <!-- ─── Log drawer ──────────────────────────────────────────────────────── -->
+  <section class="logdrawer glass" id="log-drawer" aria-label="Log" hidden>
+    <header class="logdrawer-head">
+      <span>Log · <span data-for="remux">Remux</span><span data-for="extract">Extract</span></span>
+      <span class="logdrawer-actions">
+        <button class="link-btn" type="button" id="log-copy" title="Copies the log with its real file paths, for bug reports">Copy</button>
+        <button class="link-btn" type="button" id="log-close">Close</button>
+      </span>
+    </header>
+    <div class="log-body" id="remux-log" data-for="remux" aria-live="polite"></div>
+    <div class="log-body" id="extract-log" data-for="extract" aria-live="polite"></div>
+  </section>
 
 </div><!-- /#app -->
 
-<!-- Confirmation modal -->
-<div class="modal-overlay" id="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
-  <div class="modal-card">
-    <div class="modal-icon">⚠️</div>
+<!-- ─── Settings sheet ─────────────────────────────────────────────────────── -->
+<dialog class="overlay" id="settings-sheet" aria-labelledby="sheet-title">
+  <section class="sheet glass">
+    <header class="sheet-head">
+      <div>
+        <h2 id="sheet-title"><span data-for="remux">Remux</span><span data-for="extract">Extract</span> settings</h2>
+        <p>Applies to every episode in the next batch.</p>
+      </div>
+      <button class="cap btn-run" type="button" id="sheet-done">Done</button>
+    </header>
+
+    <div class="sheet-body">
+      <p class="locked-note">Locked while a batch runs. Changes apply to the next batch.</p>
+
+      <fieldset class="settings" id="remux-settings" data-for="remux">
+        <legend class="sr-only">Remux settings</legend>
+        <section class="sheet-section">
+          <h3>Folders</h3>
+          <label class="field-label"><span>Input folder <span class="required">required</span></span>
+            <span class="input-row">
+              <input type="text" class="field mono" id="remux-input-dir" placeholder="Release folder with the MKV episodes" />
+              <button class="browse-btn" type="button" data-target="remux-input-dir">Browse…</button>
+            </span>
+          </label>
+          <label class="field-label">Output directory
+            <span class="input-row">
+              <input type="text" class="field mono" id="remux-out-dir" placeholder="Output folder next to the input" />
+              <button class="browse-btn" type="button" data-target="remux-out-dir">Browse…</button>
+            </span>
+          </label>
+          <label class="field-label">Fonts directory
+            <span class="input-row">
+              <input type="text" class="field mono" id="remux-fonts-dir" placeholder="Auto: fonts folder" />
+              <button class="browse-btn" type="button" data-target="remux-fonts-dir">Browse…</button>
+            </span>
+          </label>
+          <label class="field-label">Assets directory
+            <span class="input-row">
+              <input type="text" class="field mono" id="remux-assets-dir" placeholder="Optional fallback for subtitles" />
+              <button class="browse-btn" type="button" data-target="remux-assets-dir">Browse…</button>
+            </span>
+          </label>
+        </section>
+
+        <section class="sheet-section grid-2">
+          <h3>Audio &amp; subtitles</h3>
+          <label class="field-label">Opus bitrate
+            <select class="field" id="remux-bitrate">
+              <option value="128k">128k</option>
+              <option value="160k">160k</option>
+              <option value="192k" selected>192k</option>
+              <option value="256k">256k</option>
+              <option value="320k">320k</option>
+            </select>
+          </label>
+          <label class="field-label">Subtitle offset (seconds)
+            <span class="number-stepper">
+              <button type="button" class="stepper-btn minus" aria-label="Decrease offset">−</button>
+              <input type="number" class="field" id="remux-sub-offset" value="0" step="0.5" placeholder="0.0" />
+              <button type="button" class="stepper-btn plus" aria-label="Increase offset">+</button>
+            </span>
+          </label>
+          <label class="field-label span-2" title="libopus encoding complexity: 0 is fastest, 10 is best quality">Encoder complexity
+            <span class="range-row">
+              <input type="range" id="remux-complexity" value="5" min="0" max="10" step="1" aria-label="Encoder complexity" />
+              <input type="number" class="field cplx-val" id="remux-cplx-val" value="5" min="0" max="10" aria-label="Encoder complexity value" />
+            </span>
+          </label>
+        </section>
+
+        <section class="sheet-section">
+          <h3>Performance</h3>
+          <div class="grid-3">
+            <label class="field-label" title="Episodes processed at once (1–64; empty is auto)">Workers
+              <span class="number-stepper">
+                <button type="button" class="stepper-btn minus" aria-label="Decrease workers">−</button>
+                <input type="number" class="field" id="remux-workers" placeholder="auto" min="1" max="64" />
+                <button type="button" class="stepper-btn plus" aria-label="Increase workers">+</button>
+              </span>
+            </label>
+            <label class="field-label" title="Concurrent disk I/O streams (0–64; 0 is the same as Workers)">Disk I/O
+              <span class="number-stepper">
+                <button type="button" class="stepper-btn minus" aria-label="Decrease disk I/O jobs">−</button>
+                <input type="number" class="field" id="remux-io-jobs" placeholder="auto" min="0" max="64" />
+                <button type="button" class="stepper-btn plus" aria-label="Increase disk I/O jobs">+</button>
+              </span>
+            </label>
+            <label class="field-label" title="FLAC decoder threads per transcode (1–32; empty is auto). Opus encoding is single-threaded">FFmpeg threads
+              <span class="number-stepper">
+                <button type="button" class="stepper-btn minus" aria-label="Decrease FFmpeg threads">−</button>
+                <input type="number" class="field" id="remux-ffmpeg-threads" placeholder="auto" min="1" max="32" />
+                <button type="button" class="stepper-btn plus" aria-label="Increase FFmpeg threads">+</button>
+              </span>
+            </label>
+          </div>
+        </section>
+
+        <section class="sheet-section">
+          <h3>Run options</h3>
+          <label class="check-row"><input type="checkbox" id="remux-dry-run" /> Dry run (plan only, write nothing)</label>
+          <label class="check-row"><input type="checkbox" id="remux-no-cache" /> Bypass inspection cache</label>
+          <button class="pill-btn clear-cache-btn" type="button" id="remux-clear-cache">Clear inspection cache…</button>
+        </section>
+      </fieldset>
+
+      <fieldset class="settings" id="extract-settings" data-for="extract">
+        <legend class="sr-only">Extract settings</legend>
+        <p class="sheet-note">Extracts the best subtitle track, deduplicated fonts, chapters and cover art.</p>
+        <section class="sheet-section">
+          <h3>Folders</h3>
+          <label class="field-label"><span>Input folder <span class="required">required</span></span>
+            <span class="input-row">
+              <input type="text" class="field mono" id="extract-input-dir" placeholder="Release folder with the MKV episodes" />
+              <button class="browse-btn" type="button" data-target="extract-input-dir">Browse…</button>
+            </span>
+          </label>
+          <label class="field-label">Output directory
+            <span class="input-row">
+              <input type="text" class="field mono" id="extract-out-dir" placeholder="Same folder as the input" />
+              <button class="browse-btn" type="button" data-target="extract-out-dir">Browse…</button>
+            </span>
+          </label>
+          <label class="field-label">Fonts directory
+            <span class="input-row">
+              <input type="text" class="field mono" id="extract-fonts-dir" placeholder="Auto: fonts folder" />
+              <button class="browse-btn" type="button" data-target="extract-fonts-dir">Browse…</button>
+            </span>
+          </label>
+        </section>
+
+        <section class="sheet-section">
+          <h3>Performance</h3>
+          <div class="grid-3">
+            <label class="field-label" title="Episodes processed at once (1–64; empty is auto)">Workers
+              <span class="number-stepper">
+                <button type="button" class="stepper-btn minus" aria-label="Decrease workers">−</button>
+                <input type="number" class="field" id="extract-workers" placeholder="auto" min="1" max="64" />
+                <button type="button" class="stepper-btn plus" aria-label="Increase workers">+</button>
+              </span>
+            </label>
+            <label class="field-label" title="Concurrent disk I/O streams (0–64; 0 is the same as Workers)">Disk I/O
+              <span class="number-stepper">
+                <button type="button" class="stepper-btn minus" aria-label="Decrease disk I/O jobs">−</button>
+                <input type="number" class="field" id="extract-io-jobs" placeholder="auto" min="0" max="64" />
+                <button type="button" class="stepper-btn plus" aria-label="Increase disk I/O jobs">+</button>
+              </span>
+            </label>
+          </div>
+        </section>
+
+        <section class="sheet-section">
+          <h3>Run options</h3>
+          <label class="check-row"><input type="checkbox" id="extract-dry-run" /> Dry run (plan only, write nothing)</label>
+          <label class="check-row"><input type="checkbox" id="extract-no-cache" /> Bypass inspection cache</label>
+          <button class="pill-btn clear-cache-btn" type="button" id="extract-clear-cache">Clear inspection cache…</button>
+        </section>
+      </fieldset>
+    </div>
+  </section>
+</dialog>
+
+<!-- ─── Confirmation modal ────────────────────────────────────────────────── -->
+<dialog class="overlay" id="confirm-modal" aria-labelledby="modal-title" aria-describedby="modal-desc">
+  <section class="modal-card glass">
     <h3 class="modal-title" id="modal-title">Clear Inspection Cache</h3>
     <p class="modal-desc" id="modal-desc">Are you sure you want to clear the persistent inspection cache?</p>
     <div class="modal-actions">
-      <button class="btn btn-ghost" id="modal-cancel" type="button">Cancel</button>
-      <button class="btn" id="modal-confirm" type="button">Clear Cache</button>
+      <button class="pill-btn" id="modal-cancel" type="button">Cancel</button>
+      <button class="cap btn-run" id="modal-confirm" type="button">Clear Cache</button>
     </div>
-  </div>
-</div>
-
-<!-- Subtitle assignment modal -->
-<div class="modal-overlay" id="sub-assign-modal" role="dialog" aria-modal="true" aria-labelledby="sub-assign-title">
-  <div class="modal-card sub-assign-card">
-    <div class="modal-icon">💬</div>
-    <h3 class="modal-title" id="sub-assign-title">Assign Subtitle</h3>
-    <p class="modal-desc" id="sub-assign-episode"></p>
-
-    <div class="sub-assign-section-label">Discovered Candidates</div>
-    <div class="sub-assign-list" id="sub-assign-list"></div>
-
-    <div class="sub-assign-section-label">Custom Subtitle File</div>
-    <div class="sub-assign-custom-row">
-      <input type="text" id="sub-custom-path" readonly placeholder="Choose custom subtitle file..." />
-      <button type="button" id="sub-browse-btn" class="btn">📁 Browse...</button>
-    </div>
-
-    <div class="sub-assign-params-grid">
-      <div>
-        <label for="sub-lang-select">Language</label>
-        <div class="sub-lang-inputs">
-          <select id="sub-lang-select">
-            <option value="ind">Indonesian (ind)</option>
-            <option value="eng">English (eng)</option>
-            <option value="jpn">Japanese (jpn)</option>
-            <option value="custom">Custom tag...</option>
-          </select>
-          <input type="text" id="sub-lang-custom" placeholder="ISO-639-2 tag" style="display: none;" maxlength="3" />
-        </div>
-      </div>
-      <div>
-        <label for="sub-title-input">Track Title</label>
-        <input type="text" id="sub-title-input" placeholder="e.g. Dialogue" />
-      </div>
-      <div>
-        <label for="sub-offset-input">Time Offset</label>
-        <div class="sub-offset-input-wrap">
-          <input type="number" id="sub-offset-input" step="100" placeholder="0" />
-          <span class="sub-offset-unit">ms</span>
-        </div>
-      </div>
-    </div>
-
-    <div class="modal-actions">
-      <button class="btn btn-ghost" id="sub-assign-clear" type="button">Clear Assignment</button>
-      <button class="btn btn-ghost" id="sub-assign-cancel" type="button">Cancel</button>
-      <button class="btn btn-gradient" id="sub-assign-save" type="button">Save Assignment</button>
-    </div>
-  </div>
-</div>
+  </section>
+</dialog>
 
 <script type="module" src="app.js"></script>
 </body>

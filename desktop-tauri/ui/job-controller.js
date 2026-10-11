@@ -68,7 +68,7 @@ export class JobController {
     this.runBtn = document.getElementById(`${mode}-run`);
     this.stopBtn = document.getElementById(`${mode}-stop`);
     this.formControls = document.querySelectorAll(
-      `#view-${mode} input, #view-${mode} select, #view-${mode} .browse-btn, #view-${mode} .clear-cache-btn`
+      `#${mode}-settings input, #${mode}-settings select, #${mode}-settings button`
     );
     this.runtime.clearLog(this.logEl);
 
@@ -226,7 +226,6 @@ export class JobController {
     const vanishedBeforeScan = capturedDir ? [...(tracker.state?.vanishedSelectedIds ?? [])] : [];
     const assignmentSnapshot = capturedDir ? new Map(tracker.assignments) : null;
     if (!this.runtime.coordinator.begin(this.mode)) return;
-    this.runtime.closeSubAssignModal();
 
     this.setRunning(true);
 
@@ -496,17 +495,24 @@ export class JobController {
     for (const mode of QUEUE_MODES) {
       this.runtime.queueFor(mode).selectionLocked = !this.canMutateQueueSelection(mode);
     }
-    document.querySelectorAll(`#view-${this.mode} .sub-assign-btn, #view-${this.mode} .empty-state-action`).forEach(control => {
+    // Controls outside the settings sheet that a job freezes (the presets, the inspector's Track
+    // Assignment controls, Open folder), and the root class the locked notes and labels key off.
+    document.querySelectorAll(`.lock-while-job, #${this.mode}-episode-list .empty-state-action`).forEach(control => {
       control.disabled = busy;
     });
+    document.documentElement?.classList?.toggle("job-locked", busy);
     const selectionFrozen = !this.canMutateQueueSelection(this.mode);
-    document.querySelectorAll(`#view-${this.mode} .ep-select-check, #view-${this.mode} .ep-reorder-btn`).forEach(control => {
+    document.querySelectorAll(`#${this.mode}-episode-list .ep-select-check, #${this.mode}-episode-list .ep-reorder-btn`).forEach(control => {
       control.disabled = selectionFrozen;
     });
     if (this.stopBtn) {
-      const stopping = coordinator.isStopping && coordinator.activeMode === this.mode;
-      this.stopBtn.disabled = coordinator.activeMode !== this.mode || coordinator.isStopping;
-      this.stopBtn.textContent = stopping ? "Stopping..." : "■ Stop";
+      const owns = coordinator.activeMode === this.mode;
+      const stopping = coordinator.isStopping && owns;
+      this.stopBtn.disabled = !owns || coordinator.isStopping;
+      this.stopBtn.textContent = stopping ? "Stopping…" : "Stop";
+      // The bottom bar shows this mode's Stop while it owns the job, and its Run otherwise.
+      this.stopBtn.hidden = !owns;
+      if (this.runBtn) this.runBtn.hidden = owns;
     }
   }
 

@@ -159,16 +159,18 @@ mkvanimebatch/
     │       ├── telemetry.rs         # sysinfo CPU, RAM, and engine process write-rate sampling
     │       └── window.rs            # Frameless window controls, drag/resize, native window theme
     └── ui/                          # Webview frontend (plain ES modules and CSS)
-        ├── index.html               # Application shell, views, modals
-        ├── style.css                # Layout, cards, light/dark themes, system font stacks
+        ├── index.html               # Application shell: sidebar, episode lists, inspector, bottom bar, log drawer, settings sheet, confirm dialog
+        ├── style.css                # Library + Inspector layout, faked Liquid Glass (no backdrop-filter), light/dark tokens, vendored fonts
         ├── theme-init.js            # Early stored or OS theme application before stylesheet (classic script)
         ├── os-detect.js             # Adds an is-windows/is-mac/is-linux class to <html> (classic script)
-        ├── app.js                   # Startup and wiring, telemetry gauges, log console, subtitle assignment modal, window controls
+        ├── app.js                   # Startup and wiring: view switching, list header, library, inspector and its Track Assignment controls, bottom bar, telemetry sparklines, log drawer, settings sheet, window controls
+        ├── presentation.js          # DOM-free presentation rules: Finder-style paths, log display text, status text and colour, list filters, progress segments, subtitle ladder, sparklines
+        ├── fonts/                   # Vendored Onest, Unbounded and JetBrains Mono (latin woff2) with their OFL licenses
         ├── settings-chips.js        # createSettingsChips: get_default_settings, the `auto (N)` hints on the workers and Disk I/O inputs, and the worker and I/O job chips
         ├── preset-menu.js           # createPresetMenu: the Preset Profile catalog from get_preset_profiles, and applying a profile (or "custom") to the form
         ├── theme.js                 # createTheme: applies the theme theme-init.js published, follows the OS live, toggles and stores the choice
         ├── queue-state.js           # Queue state factories, JobEvent reducer, selection and order helpers
-        ├── queue-view.js            # QueueTracker: episode card rendering, selection, reordering, heartbeat
+        ├── queue-view.js            # QueueTracker: episode row rendering, release group headers, filter, selection, reordering, inspected row, heartbeat
         ├── job-controller.js        # BatchRequest from the form, engine resolve check, preflight, run/stop, job event routing
         ├── job-coordinator.js       # Job lifecycle state machine (idle, restoring, starting, running, stopping): one active job across the Remux and Extract views, and the startup snapshot restore
         ├── inspection-coordinator.js# Shares in-flight inspect_directory calls per (Directory Identity, noCache)
@@ -572,17 +574,19 @@ The frontend is plain ES modules with no framework.
    - `reduceQueueEvent(state, event)` updates the owned item records and counters in place ($O(1)$ per event) and returns the same state object.
    - Order and selection helpers back queue reordering (`▲` / `▼`) and selective execution (`selected_items`).
    - The webview does not settle items. `guardUnsettledItems(state, cancelled)` is the one guard against a run that broke Item Settlement, called by `QueueTracker.endBatch` on `job-done` and by `createQueueStateFromSnapshot` for a finished snapshot: a participant of the started batch (`batchItemIds`) that is still open becomes `cancelled` with `Operation cancelled`, or an `error` with `Batch failed`, and the batch is no success; one `console.warn` names them. A job that ended before `BatchStart` has no participants, so the queue, its selection and its selection count stay as they were.
-2. **Card rendering (`queue-view.js`)**:
-   - `QueueTracker.renderCardsIncrementally` creates every card in `requestAnimationFrame` batches, each running until a best-effort ~8 ms deadline, so large manifests do not block the main thread.
-   - The forced re-inspection of each Run keeps the cards of the directory already shown on screen instead of showing the scanning placeholder. If the manifest has the same item IDs in the same order, a card whose manifest entry is deep-equal to the previous one, and which was rendered at the current bitrate, keeps its element and gets only its status and checkbox re-applied; a changed item's card is remounted in place. Any other ID set or order rebuilds every card.
-   - Events update mounted cards synchronously; a card created later renders from the item's current reducer state. Each card remembers the status it last drew, so a progress event on a processing card writes only the fill width and the tag text. Log lines are queued and flushed once per animation frame, keeping the last 2000 lines; the pending queue is capped at the same limit, since no frame fires while the window is hidden and it would otherwise grow without bound.
+2. **Row rendering (`queue-view.js`)**:
+   - The layout is Library + Inspector: a sidebar (tasks, the scanned folder and its release subfolders, presets), the episode list of the current task, an inspector for one episode, a bottom bar (Run/Stop, progress, worker chips, telemetry sparklines, Log) and a log drawer. Settings live in a modal sheet (`<dialog>`) opened from each task's gear. Panes fake Liquid Glass with translucent fills over the app's own wallpaper; there is no `backdrop-filter`, which measured 14 fps against 50–57 fps for solid panes on WebKitGTK on the reference laptop. Each pane is its own compositing layer (`will-change: transform`), so a changing row or clock repaints only its pane.
+   - `QueueTracker.renderCardsIncrementally` creates every row in `requestAnimationFrame` batches, each running until a best-effort ~8 ms deadline, so large manifests do not block the main thread. Rows stay direct children of the list in queue order; when the queue spans more than one release directory, `applyListChrome` puts a sticky header before each run of rows from one release and hides the rows the filter chip (All, To do, Done, Failed) does not match.
+   - The forced re-inspection of each Run keeps the rows of the directory already shown on screen instead of showing the scanning placeholder. If the manifest has the same item IDs in the same order, a row whose manifest entry is deep-equal to the previous one, and which was rendered at the current bitrate, keeps its element and gets only its status and checkbox re-applied; a changed item's row is remounted in place. Any other ID set or order rebuilds every row.
+   - Events update mounted rows synchronously; a row created later renders from the item's current reducer state. Each row remembers the status it last drew, so a progress event on a processing row writes only the ring and the status text. The rest of the window (list header, library, inspector, bottom bar) redraws at most once a frame through `QueueTracker.onChange`. Log lines are queued and flushed once per animation frame, keeping the last 2000 lines; the pending queue is capped at the same limit, since no frame fires while the window is hidden and it would otherwise grow without bound. The drawer shows paths Finder-style (`›`, no `/`); Copy puts the raw lines, with their real paths, on the clipboard.
 3. **Card progress (ADR-0009)**:
-   - **Indeterminate shimmer**: from `ItemStart` until the item reports numeric progress (probing, transcoding).
-   - **Determinate bar**: filled from `ItemProgress.progress`, parsed from `mkvmerge`/`mkvextract` `Progress: N%` output.
-   - **Terminal state**: `ItemComplete` fills the bar to 100% with the completed, skipped, error, cancelled, or planned styling.
+   - **Indeterminate**: a spinning ring from `ItemStart` until the item reports numeric progress (probing, transcoding).
+   - **Determinate**: the ring fills from `ItemProgress.progress`, parsed from `mkvmerge`/`mkvextract` `Progress: N%` output. Running is blue (`--info`).
+   - **Terminal state**: `ItemComplete` replaces the ring with the outcome: green for completed, red for error, muted for skipped, cancelled and planned.
 4. **Presentation heartbeat (ADR-0009)**:
-   - One 1 Hz timer in `QueueTracker` updates the elapsed time of every processing card, and stops itself on the first tick that finds no item processing.
-5. **Subtitle assignment modal (ADR-0011, ADR-0012)**:
+   - One 1 Hz timer in `QueueTracker` updates the elapsed time of every processing row, and the bottom bar's batch clock through `onChange`, and stops itself on the first tick that finds no item processing.
+5. **Subtitle assignment in the inspector (ADR-0011, ADR-0012)**:
+   - The inspector shows the precedence ladder (manual > same folder > embedded > parent folder > assets dir) with what the inspection found on each rung. A manual assignment is "Used"; without one, the highest rung that found a subtitle is "Auto", since the engine, not the UI, matches files to episodes. A configured assets dir is a setting, not a found file, so its rung reads "Fallback".
    - Per remux item: choose a subtitle from the manifest's `subtitle_candidates` for the release, or a custom path (browse via `pick_subtitle_file`, an `rfd` native dialog); set the language (`ind`, `eng`, `jpn`, or a custom code), track title, and offset in milliseconds (`offset_ms`; a fraction is truncated, and an empty or out-of-range value leaves the global offset in effect). The resulting `TrackAssignment` is sent in `BatchRequest.assignments` and applied to the `mkvmerge` arguments (§4.4). `subtitle_candidates` never lists a subtitle outside the input directory, and `generate_inspection_manifest` takes no assets directory: a subtitle in `--assets-dir` still resolves through the fallback tier but is not listed, so a person assigns it by browsing to it, or the CLI takes its path in `--assignments` (ADR-0001, 2026-10-08 amendment).
 6. **Worker inputs and chips**: the workers and Disk I/O inputs start empty with the placeholder `auto`. At startup `settings-chips.js` calls `get_default_settings` once and, on success, sets `auto (N)` (N is the default `workers` or `io_jobs`) and `data-auto-value="N"` on them. An empty field sends `workers: null` or `io_jobs: null`. The worker and I/O job chips show the default settings while idle, the settings `resolve_batch_request` returned while a run starts, and a restored running job's `effective_settings` after a reload. Until the defaults are known, or when the call failed, the placeholder stays `auto` and the chips name their state (`Standby`, `Idle`) without a count. A stepper click on an empty field with a `data-auto-value` starts from N (`stepper.js`).
 7. **Preset catalog**: the preset menu (`preset-menu.js`) applies only the profiles `get_preset_profiles` returned at startup; the webview holds no copy of them (ADR-0008, 2026-10-06 desktop amendment). The form's bitrate and complexity controls are what a run sends; the preset id is a label.
@@ -693,7 +697,7 @@ sequenceDiagram
 
     loop Each planned item (at most `workers` concurrently)
         Pipe-->>Cmd: JobEvent::ItemStart
-        Cmd-->>UI: job-event (ItemStart → shimmer)
+        Cmd-->>UI: job-event (ItemStart → spinning ring)
 
         alt Selected audio is A_FLAC
             Pipe->>RX: execute_remux_job
