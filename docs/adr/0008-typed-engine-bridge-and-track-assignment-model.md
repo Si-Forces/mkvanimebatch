@@ -1,6 +1,6 @@
 # 0008. Typed Engine Bridge, Preset Profiles, and Track Assignment Domain
 
-> **Status**: Accepted (Extended by ADR-0011, ADR-0012; amended by ADR-0013; amended 2026-09-24, 2026-09-26, 2026-09-28, 2026-10-06, 2026-10-07 and 2026-10-08, implemented)
+> **Status**: Accepted (Extended by ADR-0011, ADR-0012; amended by ADR-0013; amended 2026-09-24, 2026-09-26, 2026-09-28, 2026-10-06, 2026-10-07, 2026-10-08 and 2026-10-11, implemented)
 > **Date**: 2026-05-15
 > **Context**: Media Engine Context & Desktop Application Bridge
 > **Amends**: ADR-0004, ADR-0007
@@ -121,3 +121,9 @@ This rule previously appeared in exactly one place in the repository — the Med
 - **Options considered.**
   - **(A) Remove the field (chosen).** It holds no value and nothing reads it.
   - **(B) Have the bridge measure the job.** A monotonic clock from the start of the snapshot to the terminal. Rejected as a value with no consumer. If a total job time is ever shown, measure it then on a monotonic clock, as the bridge does for the Item Duration of a settled item.
+
+## Amendment — 2026-10-11 (Preset rows come from the catalog)
+
+- **The sidebar renders the catalog.** The Library + Inspector redesign shows the Preset Profiles as sidebar rows. `preset-menu.js` builds one row per profile from `get_preset_profiles`, with the profile's `name` and a subtitle from its `bitrate` and `complexity`, so the 2026-10-06 rule that the webview holds no copy of the catalog still holds. Until the catalog loads the sidebar shows no rows.
+- **Names are the labels.** The `name` of each built-in profile is now the short label the sidebar shows (`Balanced`, `Fast muxing`, `Hi-Fi master`, `Custom`); the bitrate is no longer repeated in it.
+- **`icon` is removed.** No client reads it since the redesign, so `PresetProfile` now carries `id`, `name`, `bitrate`, and `complexity`, as `description` was removed in the 2026-09-28 amendment. This supersedes the field list in that amendment's Preset payload bullet.

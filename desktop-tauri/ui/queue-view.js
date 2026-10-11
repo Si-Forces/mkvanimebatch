@@ -813,18 +813,15 @@ export class QueueTracker {
       this.updateSelectionBadge();
       return;
     }
-    const { totalCount, completedCount, skippedCount, cancelledCount, errorCount, batchCompleted, batchItemIds } = this.state;
+    const { totalCount, completedCount, skippedCount, cancelledCount, errorCount, batchItemIds } = this.state;
     const total = batchItemIds?.length ?? totalCount;
-
-    if (batchCompleted) {
-      const parts = [`${completedCount} Completed`];
-      if (skippedCount > 0) parts.push(`${skippedCount} Skipped`);
-      if (cancelledCount > 0) parts.push(`${cancelledCount} Cancelled`);
-      if (errorCount > 0) parts.push(`${errorCount} Failed`);
-      this.setCountText(`${parts.join(", ")} (${total} Total)`);
-    } else {
-      const processed = completedCount + skippedCount + cancelledCount + errorCount;
-      this.setCountText(`${processed} / ${total} Processed`);
-    }
+    // "6 of 12 · 5 done · 1 failed": settled items, then each outcome that occurred. The batch
+    // clock beside it says whether the batch is still running.
+    const settled = completedCount + skippedCount + cancelledCount + errorCount;
+    const parts = [`${completedCount} done`];
+    if (skippedCount > 0) parts.push(`${skippedCount} skipped`);
+    if (cancelledCount > 0) parts.push(`${cancelledCount} cancelled`);
+    if (errorCount > 0) parts.push(`${errorCount} failed`);
+    this.setCountText(`${settled} of ${total} · ${parts.join(" · ")}`);
   }
 }

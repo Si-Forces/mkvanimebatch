@@ -9,7 +9,7 @@ import { createJobCoordinator } from "./job-coordinator.js";
 import { createDirectoryScanner } from "./directory-scan.js";
 import { nextStepValue } from "./stepper.js";
 import { createSettingsChips } from "./settings-chips.js";
-import { createPresetMenu } from "./preset-menu.js";
+import { createPresetMenu, presetSubtitle } from "./preset-menu.js";
 import { createTheme } from "./theme.js";
 import {
   batchClock,
@@ -297,8 +297,9 @@ function renderInspector(queue) {
   const outInput = byId(`${mode}-out-dir`);
   const outDir = outInput?.value?.trim() ?? "";
   const outEl = byId("insp-out");
-  if (outEl && outEl.dataset.path !== outDir) {
-    outEl.dataset.path = outDir;
+  const outKey = `${mode}:${outDir}`;
+  if (outEl && outEl.dataset.path !== outKey) {
+    outEl.dataset.path = outKey;
     if (outDir) renderCrumbs(outEl, outDir);
     else outEl.textContent = outInput?.placeholder ?? "Default";
   }
@@ -374,7 +375,8 @@ function renderSubtitleSection(queue, item) {
   const opts = byId("sub-assign-opts");
   if (opts) opts.hidden = !assignment;
 
-  const lang = assignment?.language ?? "ind";
+  // An assignment's null language is a custom tag not typed yet, not the "ind" default.
+  const lang = assignment ? assignment.language : "ind";
   const preset = PRESET_SUBTITLE_LANGUAGES.includes(lang);
   const langSelect = byId("sub-lang-select");
   if (langSelect) langSelect.value = preset ? lang : "custom";
@@ -482,6 +484,7 @@ function applyTelemetryData(data) {
   setText("tel-disk", io > 0 ? `${io.toFixed(1)} MB/s` : "Idle");
   byId("tel-cpu-line")?.setAttribute("points", sparkPoints(telemetrySamples.cpu, 100));
   byId("tel-ram-line")?.setAttribute("points", sparkPoints(telemetrySamples.ram, 100));
+  // The disk line scales to at least 50 MB/s, so a few MB/s of idle writes stay near the floor.
   byId("tel-disk-line")?.setAttribute("points", sparkPoints(telemetrySamples.disk, Math.max(50, ...telemetrySamples.disk)));
 }
 
@@ -558,13 +561,15 @@ function appendLog(logEl, text) {
         frag.appendChild(div);
       }
       _rawLogs.set(logEl, pushCapped(_rawLogs.get(logEl) ?? [], pending, MAX_LOG_LINES));
-      _logErrors.set(logEl, errors);
       const shouldFollow = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 32;
       logEl.appendChild(frag);
 
+      // The badge counts only errors the console still shows.
       while (logEl.childElementCount > MAX_LOG_LINES) {
+        if (logEl.firstElementChild.classList.contains("line-err")) errors--;
         logEl.firstElementChild.remove();
       }
+      _logErrors.set(logEl, errors);
 
       if (shouldFollow) logEl.scrollTop = logEl.scrollHeight;
       renderLogBadge();
@@ -596,8 +601,11 @@ function renderLogBadge() {
 
 function setLogOpen(open) {
   const drawer = byId("log-drawer");
+  const toggle = byId("btn-log");
+  // Hiding the drawer while focus is inside it would drop focus on <body>; hand it to the toggle.
+  if (!open && drawer?.contains?.(document.activeElement)) toggle?.focus();
   if (drawer) drawer.hidden = !open;
-  byId("btn-log")?.setAttribute("aria-expanded", String(open));
+  toggle?.setAttribute("aria-expanded", String(open));
 }
 
 async function copyLog() {
@@ -617,6 +625,9 @@ async function copyLog() {
 // ─── Settings Sheet and Modal Dialog ────────────────────────────────────────
 
 let sheetOpener = null;
+// True when the last input inside the sheet was a pointer, so closing it with
+// Done or a backdrop click hands focus back to the opener without a focus ring.
+let sheetPointerInput = false;
 
 /** Switches to `mode` and opens its settings sheet; closing it returns focus to `opener`. */
 function openSettings(mode, opener) {
@@ -624,6 +635,7 @@ function openSettings(mode, opener) {
   const sheet = byId("settings-sheet");
   if (!sheet || sheet.open) return;
   sheetOpener = opener ?? document.activeElement;
+  sheetPointerInput = false;
   sheet.showModal();
 }
 
@@ -694,7 +706,7 @@ async function syncMaximizedState() {
 function updateCustomPresetText() {
   const bitrate = byId("remux-bitrate")?.value;
   const complexity = byId("remux-complexity")?.value;
-  if (bitrate && complexity !== undefined) setText("preset-custom-sub", `Opus ${bitrate} · complexity ${complexity}`);
+  if (bitrate && complexity !== undefined) setText("preset-custom-sub", presetSubtitle(bitrate, complexity));
 }
 
 function initApp() {
@@ -764,9 +776,19 @@ function initApp() {
   safeAddListener(sheet, "click", e => {
     if (e.target === sheet) sheet.close();
   });
+  safeAddListener(sheet, "pointerdown", () => { sheetPointerInput = true; });
+  safeAddListener(sheet, "keydown", () => { sheetPointerInput = false; });
   safeAddListener(sheet, "close", () => {
-    sheetOpener?.focus?.();
+    const opener = sheetOpener;
     sheetOpener = null;
+    if (!opener?.focus) return;
+    // WebKit matches :focus-visible on this programmatic focus even after a
+    // click, so mark the opener quiet until it loses focus.
+    if (sheetPointerInput) {
+      opener.classList.add("quiet-focus");
+      opener.addEventListener("blur", () => opener.classList.remove("quiet-focus"), { once: true });
+    }
+    opener.focus();
   });
 
   // ─── Log drawer ───────────────────────────────────────────────────────────
@@ -782,14 +804,12 @@ function initApp() {
   }
 
   // ─── Presets ──────────────────────────────────────────────────────────────
-  document.querySelectorAll(".profile-option-item[data-preset]").forEach(item => {
-    item.addEventListener("click", (e) => {
-      e.stopPropagation?.();
-      if (jobCoordinator.activeMode !== null) return;
-      presets.apply(item.dataset.preset);
-      updateCustomPresetText();
-      remuxQueue.refreshMeta();
-    });
+  safeAddListener("preset-list", "click", e => {
+    const item = e.target.closest?.(".profile-option-item[data-preset]");
+    if (!item || jobCoordinator.activeMode !== null) return;
+    presets.apply(item.dataset.preset);
+    updateCustomPresetText();
+    remuxQueue.refreshMeta();
   });
 
   // ─── Complexity Slider & Number Synchronization ──────────────────────────
@@ -818,8 +838,8 @@ function initApp() {
     cplxNumber.addEventListener("blur", normalizeNumber);
   }
 
-  // Editing any encoding field by hand leaves the selected preset.
-  ["remux-bitrate", "remux-complexity", "remux-cplx-val", "remux-ffmpeg-threads", "remux-sub-offset", "remux-dry-run", "remux-no-cache"].forEach(id => {
+  // Editing what a Preset Profile sets (bitrate, complexity) by hand leaves the selected preset.
+  ["remux-bitrate", "remux-complexity", "remux-cplx-val"].forEach(id => {
     const toCustom = () => {
       presets.apply("custom");
       updateCustomPresetText();
@@ -846,6 +866,7 @@ function initApp() {
     showModal,
     telemetryLoop,
     updateWorkerChips: chips.update,
+    openSettings: mode => openSettings(mode),
   };
   const controllers = {
     remux: new JobController("remux", jobRuntime),
@@ -856,15 +877,22 @@ function initApp() {
   }
   jobCoordinator.syncControls();
   telemetryLoop.start();
-  presets.load();
+  // The rows arrive with the catalog: fill the custom row's values and lock them if a job runs.
+  presets.load().then(() => {
+    updateCustomPresetText();
+    jobCoordinator.syncControls();
+  });
   chips.loadDefaults();
-  updateCustomPresetText();
   jobCoordinator.restore({ listen, invoke, queueFor, switchView });
 
   document.addEventListener("keydown", e => {
     if ((e.ctrlKey || e.metaKey) && e.key === "t") {
       e.preventDefault();
       theme.toggle();
+    }
+    // Esc closes the log drawer, unless an open dialog takes the key for itself.
+    if (e.key === "Escape" && byId("log-drawer")?.hidden === false && !document.querySelector("dialog[open]")) {
+      setLogOpen(false);
     }
   });
 }

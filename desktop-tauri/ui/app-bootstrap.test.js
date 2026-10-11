@@ -29,6 +29,7 @@ class BootElement {
     else this.children.push(child);
     return child;
   }
+  append(...nodes) { this.children.push(...nodes); }
   remove() {}
   querySelector(selector) {
     if (!this.queried.has(selector)) this.queried.set(selector, new BootElement());
@@ -223,7 +224,7 @@ test("no snapshot preserves pre-run selection and cleans up bootstrap listeners"
 // app.js drops the call or listener that connects its module.
 test("app.js wires the settings chips, the preset menu and the theme to their modules", async t => {
   let answerDefaults;
-  const fast = { id: "fast", icon: "⚡", name: "Fast Muxing (128k)", bitrate: "128k", complexity: 3 };
+  const fast = { id: "fast", name: "Fast muxing", bitrate: "128k", complexity: 3 };
   const ipc = bootstrapHarness(t, {
     get_default_settings: new Promise(resolve => { answerDefaults = resolve; }),
     get_preset_profiles: [fast],
@@ -255,17 +256,13 @@ test("app.js wires the settings chips, the preset menu and the theme to their mo
   ipc.elements.set("btn-theme", themeButton);
   const pinnedThemes = () => ipc.calls.filter(([command]) => command === "set_window_theme").map(([, args]) => args.theme);
 
-  // The titlebar's profile picker and the fields a profile fills.
-  const fastOption = Object.assign(new BootElement(), { dataset: { preset: "fast" } });
+  // The sidebar's preset rows (rendered into #preset-list once the catalog loads) and the
+  // fields a profile fills.
+  const presetList = Object.assign(new BootElement(), { querySelectorAll: () => [] });
+  ipc.elements.set("preset-list", presetList);
   for (const [id, value] of [["remux-bitrate", "192k"], ["remux-complexity", "5"], ["remux-cplx-val", "5"]]) {
     ipc.elements.set(id, new BootElement(value));
   }
-  ipc.elements.set("active-profile-name", new BootElement());
-  ipc.elements.set("active-profile-btn", Object.assign(new BootElement(), { focus() {} }));
-  ipc.elements.set("profile-dropdown-menu", new BootElement());
-  const queryAll = globalThis.document.querySelectorAll;
-  globalThis.document.querySelectorAll = selector =>
-    selector === ".profile-option-item[data-preset]" ? [fastOption] : queryAll(selector);
 
   await ipc.mount("module-wiring");
   assert.deepEqual(pinnedThemes(), ["dark"], "startup applies and pins the published choice");
@@ -288,7 +285,11 @@ test("app.js wires the settings chips, the preset menu and the theme to their mo
   assert.deepEqual(stored, [["mkv-theme", "light"]]);
   assert.deepEqual(pinnedThemes(), ["dark", "light"]);
 
-  fastOption.handlers.get("click")({ stopPropagation() {} });
+  assert.equal(presetList.children.length, 1, "the catalog's one profile became a row");
+  const fastRow = presetList.children[0];
+  const matches = selector => selector === ".profile-option-item[data-preset]" &&
+    fastRow.className.split(" ").includes("profile-option-item") && Boolean(fastRow.dataset.preset);
+  presetList.handlers.get("click")({ target: { closest: selector => (matches(selector) ? fastRow : null) } });
   assert.equal(ipc.elements.get("remux-bitrate").value, "128k");
 });
 
@@ -340,6 +341,46 @@ for (const { label, input, expected } of [
     });
   });
 }
+
+test("choosing a custom language tag keeps the tag box open until the tag is typed", async t => {
+  const ipc = bootstrapHarness(t, { pick_subtitle_file: "/custom/sub.ass" });
+  const assignSelect = new BootElement();
+  const langSelect = new BootElement("ind");
+  const langCustom = new BootElement();
+  const customLabel = new BootElement();
+  ipc.elements.set("sub-assign-select", assignSelect);
+  ipc.elements.set("sub-lang-select", langSelect);
+  ipc.elements.set("sub-lang-custom", langCustom);
+  ipc.elements.set("sub-lang-custom-label", customLabel);
+  // The inspector draws only when its body exists.
+  ipc.elements.set("insp-body", new BootElement());
+  await ipc.mount("sub-custom-lang");
+  assert.equal(await ipc.scan("remux", "/release"), true);
+  ipc.resolveSnapshot(null);
+  await ipc.flush();
+
+  ipc.elements.get("remux-episode-list").handlers.get("click")({
+    target: { closest: selector => (selector === ".ep-pick" ? { dataset: { itemId: "one" } } : null) },
+  });
+  assignSelect.value = "__browse__";
+  await assignSelect.handlers.get("change")({ target: assignSelect });
+  await ipc.flush();
+
+  // The assignment briefly has no language while the tag box is empty; the redraw must not
+  // read that as the "ind" default and snap the select back.
+  langSelect.value = "custom";
+  langSelect.handlers.get("change")();
+  await ipc.flush();
+  assert.equal(langSelect.value, "custom");
+  assert.equal(customLabel.hidden, false);
+
+  langCustom.value = "may";
+  langCustom.handlers.get("change")();
+  await ipc.elements.get("remux-run").handlers.get("click")();
+  await ipc.flush();
+  const request = ipc.calls.find(([command]) => command === "run_job")[1].request;
+  assert.equal(request.assignments.find(a => a.target_video === "one").language, "may");
+});
 
 test("the inspector's Reset clears a Track Assignment and a running job refuses a new one", async t => {
   const ipc = bootstrapHarness(t, { pick_subtitle_file: "/custom/sub.ass" });
