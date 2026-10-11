@@ -14,7 +14,7 @@
   --font-ui: -apple-system, BlinkMacSystemFont, "Onest", system-ui, sans-serif;
   --font-num: "Unbounded", var(--font-ui);
   --font-mono: "JetBrains Mono", ui-monospace, monospace;
-  --window-radius: 12px;
+  --window-radius: 14px;
   --pane-radius: 22px;
 
   --wall: radial-gradient(1100px 700px at 6% 0%, #bfe3ff 0%, rgba(191, 227, 255, 0) 60%),
@@ -47,6 +47,10 @@
   --err-soft: rgba(192, 55, 44, .12);
   --info: #2a66a8;
   --done: #6b45b5;
+  --run: #0e8fb0;
+  --run-fg: #ffffff;
+  --scroll: rgba(20, 32, 48, .22);
+  --scroll-hover: rgba(20, 32, 48, .4);
   color-scheme: light;
 }
 
@@ -81,6 +85,10 @@
   --err-soft: rgba(240, 119, 107, .14);
   --info: #6aa8ea;
   --done: #b195ee;
+  --run: #3cc8e6;
+  --run-fg: #04222b;
+  --scroll: rgba(255, 255, 255, .2);
+  --scroll-hover: rgba(255, 255, 255, .38);
   color-scheme: dark;
 }
 
@@ -116,10 +124,12 @@ button:disabled, input:disabled, select:disabled { cursor: not-allowed; opacity:
 input, textarea { user-select: text; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
-* { scrollbar-width: thin; scrollbar-color: var(--sep) transparent; }
-::-webkit-scrollbar { width: 8px; height: 8px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--sep); border-radius: 4px; }
+/* Thin overlay-style scrollbars that stop short of the pane edges. */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; margin: 10px 0; }
+::-webkit-scrollbar-thumb { background-color: var(--scroll); border: 3px solid transparent; border-radius: 999px; background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background-color: var(--scroll-hover); }
+::-webkit-scrollbar-corner { background: transparent; }
 
 input[type="number"]::-webkit-inner-spin-button,
 input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
@@ -155,9 +165,17 @@ html.is-linux .overlay {
   overflow: hidden;
 }
 
+/* WebKitGTK does not clip a composited child to the parent's rounded corners, and the bottom bar
+   has its own layer (see Layout), so it rounds its own bottom corners. The title bar, the other
+   element touching the corners, rounds its top two to match. */
+html.is-linux .titlebar { border-radius: var(--window-radius) var(--window-radius) 0 0; }
+html.is-linux .bar { border-radius: 0 0 var(--window-radius) var(--window-radius); }
+
 /* A maximized window must be square or the desktop shows through the corners. */
 html.is-linux.is-maximized #app,
-html.is-linux.is-maximized .overlay {
+html.is-linux.is-maximized .overlay,
+html.is-linux.is-maximized .titlebar,
+html.is-linux.is-maximized .bar {
   border-radius: 0 !important;
 }
 
@@ -180,41 +198,49 @@ html.is-linux.is-maximized .overlay {
 .cap { box-shadow: inset 0 1px 0 rgba(255, 255, 255, .4), 0 2px 8px rgba(0, 0, 0, .14); }
 
 /* ─── Layout ───────────────────────────────────────────────────────────────── */
+/* Title bar, panes and bottom bar sit flush against the window edges, divided by 1px lines;
+   only the log drawer and the sheets float. */
 .panes {
   flex: 1 1 auto;
   min-height: 0;
   display: grid;
   grid-template-columns: 220px minmax(0, 1fr) 320px;
-  gap: 10px;
-  padding: 10px;
 }
 @media (max-width: 1179px) { .panes { grid-template-columns: 200px minmax(0, 1fr) 280px; } }
-@media (max-width: 979px) { .panes { grid-template-columns: 196px minmax(0, 1fr) 248px; gap: 8px; padding: 8px; } }
+@media (max-width: 979px) { .panes { grid-template-columns: 196px minmax(0, 1fr) 248px; } }
 
-.side, .insp, .main { min-height: 0; border-radius: var(--pane-radius); }
+.side, .insp, .main { min-height: 0; }
 /* Each pane gets its own compositing layer, so a row or a clock that changes repaints that pane
-   alone, never the wallpaper's gradients and the panes' shadows around it. */
+   alone, never the wallpaper's gradients around it (23 → 58 fps scrolling a running batch on
+   WebKitGTK). */
 .side, .insp, .main, .bar, .logdrawer { will-change: transform; }
 
-/* ─── Sidebar ──────────────────────────────────────────────────────────────── */
-.side {
+/* ─── Title bar ────────────────────────────────────────────────────────────── */
+.titlebar {
+  flex: none;
+  height: 46px;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 12px;
+  padding: 0 14px;
   background: var(--side);
-  padding: 12px 10px;
-  overflow: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 18px;
+  border-bottom: 1px solid var(--line);
 }
-.side-top { display: flex; align-items: center; justify-content: space-between; padding: 2px 4px 0 6px; }
 .traffic-lights { display: flex; gap: 8px; }
 .tl-btn {
-  width: 12px; height: 12px; padding: 0; border: 0; border-radius: 50%;
+  width: 14px; height: 14px; padding: 0; border: 0; border-radius: 50%;
+  display: grid; place-items: center;
   box-shadow: inset 0 0 0 .5px rgba(0, 0, 0, .22);
 }
-.tl-close { background: #ff5f57; }
-.tl-min { background: #febc2e; }
-.tl-max { background: #28c840; }
+.tl-btn svg { display: block; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; opacity: 0; transition: opacity .12s; }
+/* The glyphs show for the whole group on hover or keyboard focus, as on macOS. */
+.traffic-lights:hover svg, .traffic-lights:focus-within svg { opacity: 1; }
+.tl-close { background: #ff5f57; color: rgba(80, 0, 0, .92); }
+.tl-min { background: #febc2e; color: rgba(100, 50, 0, .92); }
+.tl-max { background: #28c840; color: rgba(0, 70, 0, .92); }
 
+/* Icon buttons (the theme toggle, the gears) only recolour on hover. */
 .icon-btn {
   flex: none;
   width: 32px; height: 32px;
@@ -223,21 +249,34 @@ html.is-linux.is-maximized .overlay {
   background: transparent;
   color: var(--mute);
 }
-.icon-btn:hover { background: var(--hover); color: var(--fg); }
+.icon-btn:hover { color: var(--fg); }
+.theme-btn { justify-self: end; }
 .theme-btn .moon-icon { display: none; }
 [data-theme="dark"] .theme-btn .sun-icon { display: none; }
 [data-theme="dark"] .theme-btn .moon-icon { display: block; }
 
-.brand { display: flex; align-items: center; gap: 8px; padding: 0 6px; font-weight: 700; font-size: 14px; }
+.brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.brand-name { display: flex; flex-direction: column; align-items: center; text-align: center; line-height: 1.15; font-weight: 700; font-size: 14px; white-space: nowrap; }
 .brand-tile {
-  width: 32px; height: 32px; flex: none;
-  border-radius: 9px;
+  width: 26px; height: 26px; flex: none;
+  border-radius: 7px;
   background: #0e1318;
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .08), 0 2px 6px rgba(0, 0, 0, .25);
   display: grid; place-items: center;
 }
-.brand-name, .nav-text { display: flex; flex-direction: column; line-height: 1.2; min-width: 0; }
+.nav-text { display: flex; flex-direction: column; line-height: 1.2; min-width: 0; }
 .brand-name small, .nav-text small { color: var(--mute); font-weight: 400; font-size: 11px; }
+
+/* ─── Sidebar ──────────────────────────────────────────────────────────────── */
+.side {
+  background: var(--side);
+  border-right: 1px solid var(--line);
+  padding: 14px 10px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
 
 .side-group { display: flex; flex-direction: column; gap: 2px; }
 .side-group h2 {
@@ -259,7 +298,10 @@ html.is-linux.is-maximized .overlay {
 
 .task-row { display: flex; align-items: center; gap: 2px; border-radius: 8px; }
 .task-row:has(.pipeline-tab-btn.active) { background: var(--sel); }
+/* One hover box per row: an inset tint layered over the row's own background. */
+.task-row:hover { box-shadow: inset 0 0 0 100px var(--hover); }
 .task-row .nav { flex: 1; min-height: 44px; }
+.task-row .nav:hover:not(:disabled) { background: transparent; }
 .task-row .icon-btn { width: 36px; height: 36px; margin-right: 4px; }
 
 .status-pill { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; font-size: 10px; font-weight: 600; white-space: nowrap; color: var(--mute); }
@@ -286,9 +328,9 @@ html.job-locked .locked-label { display: inline-flex; }
 .preset-row.active { background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent-ring); font-weight: 600; }
 .preset-row.active .preset-dot { border-color: var(--accent); background: var(--accent); }
 
-.side-hint { margin-top: auto; padding: 8px; font-size: 11px; color: var(--mute); }
-.side-hint .hint-locked, html.job-locked .side-hint .hint-idle { display: none; }
-html.job-locked .side-hint .hint-locked { display: inline; }
+.list-hint { font-size: 12px; color: var(--mute); }
+.list-hint .hint-locked, html.job-locked .list-hint .hint-idle { display: none; }
+html.job-locked .list-hint .hint-locked { display: inline; }
 
 /* ─── Episode list ─────────────────────────────────────────────────────────── */
 .main {
@@ -297,7 +339,6 @@ html.job-locked .side-hint .hint-locked { display: inline; }
   min-width: 0;
   overflow: hidden;
   background: var(--content);
-  border: 1px solid var(--edge);
 }
 .list-head { padding: 16px 20px 10px; display: flex; flex-direction: column; gap: 10px; border-bottom: 1px solid var(--line); }
 .release-title { font-size: 18px; font-weight: 700; text-wrap: balance; overflow-wrap: anywhere; }
@@ -406,10 +447,10 @@ html.job-locked .side-hint .hint-locked { display: inline; }
   border: 0; border-radius: 999px;
   font-weight: 700;
 }
-.btn-accent, .btn-run { background: var(--accent); color: var(--accent-fg); }
+.btn-accent { background: var(--accent); color: var(--accent-fg); }
+.btn-run { background: var(--run); color: var(--run-fg); }
 .btn-stop { background: var(--err); color: #ffffff; }
 .btn-run::before { content: ""; width: 0; height: 0; border-style: solid; border-width: 6px 0 6px 10px; border-color: transparent transparent transparent currentColor; }
-#sheet-done::before, #modal-confirm::before { display: none; }
 .btn-stop::before { content: ""; width: 11px; height: 11px; border-radius: 2px; background: currentColor; }
 .pill-btn {
   display: inline-flex; align-items: center; gap: 6px;
@@ -420,10 +461,12 @@ html.job-locked .side-hint .hint-locked { display: inline; }
 }
 
 /* ─── Inspector ────────────────────────────────────────────────────────────── */
-.insp { background: var(--panel); overflow: auto; }
+.insp { background: var(--panel); border-left: 1px solid var(--line); overflow: hidden; display: flex; flex-direction: column; }
 .insp-empty { padding: 24px 18px; color: var(--mute); }
-.insp-body { padding: 18px 16px 16px; display: flex; flex-direction: column; gap: 18px; }
-.insp-head { display: flex; gap: 12px; align-items: flex-start; }
+.insp-body { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+/* The episode header stays put; only the sections below it scroll. */
+.insp-head { flex: none; display: flex; gap: 12px; align-items: flex-start; padding: 18px 16px 14px; border-bottom: 1px solid var(--sep); }
+.insp-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 16px; display: flex; flex-direction: column; gap: 18px; }
 .insp-num { font-family: var(--font-num); font-weight: 700; font-size: 30px; line-height: 1; letter-spacing: -.02em; }
 .insp-head-text { min-width: 0; }
 .insp-head h3 { font-size: 15px; text-wrap: balance; overflow-wrap: anywhere; }
@@ -434,7 +477,7 @@ html.job-locked .side-hint .hint-locked { display: inline; }
   font-family: var(--font-mono); font-size: 12px;
   overflow-wrap: anywhere; user-select: text;
 }
-.insp-section { border-top: 1px solid var(--sep); padding-top: 16px; }
+.insp-section + .insp-section { border-top: 1px solid var(--sep); padding-top: 16px; }
 .insp-section h4, .sheet-section h3 {
   margin: 0 0 8px;
   font-size: 11px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase;
@@ -517,11 +560,10 @@ html.job-locked .side-hint .hint-locked { display: inline; }
 /* ─── Bottom bar ───────────────────────────────────────────────────────────── */
 .bar {
   flex: none;
-  margin: 0 10px 10px;
   display: flex; align-items: center; gap: 18px;
-  padding: 8px 10px 8px 8px;
-  border-radius: 999px;
-  background: var(--panel);
+  padding: 8px 14px;
+  background: var(--side);
+  border-top: 1px solid var(--line);
 }
 .bar-run .cap { min-height: 40px; }
 .bar-progress { flex: 1 1 200px; min-width: 0; display: flex; flex-direction: column; gap: 5px; font-size: 12px; }
@@ -546,7 +588,7 @@ html.job-locked .side-hint .hint-locked { display: inline; }
 /* ─── Log drawer ───────────────────────────────────────────────────────────── */
 .logdrawer {
   position: absolute;
-  left: 248px; right: 348px; bottom: 84px;
+  left: 232px; right: 332px; bottom: 68px;
   height: 44%;
   z-index: 3;
   display: flex; flex-direction: column;
@@ -554,8 +596,8 @@ html.job-locked .side-hint .hint-locked { display: inline; }
   border-radius: var(--pane-radius);
   background: var(--float);
 }
-@media (max-width: 1179px) { .logdrawer { left: 222px; right: 302px; } }
-@media (max-width: 979px) { .logdrawer { left: 212px; right: 264px; } }
+@media (max-width: 1179px) { .logdrawer { left: 212px; right: 292px; } }
+@media (max-width: 979px) { .logdrawer { left: 208px; right: 260px; } }
 .logdrawer-head { display: flex; justify-content: space-between; align-items: center; padding: 8px 14px; border-bottom: 1px solid var(--line); font-weight: 600; }
 .logdrawer-actions { display: flex; gap: 4px; }
 .log-body {
