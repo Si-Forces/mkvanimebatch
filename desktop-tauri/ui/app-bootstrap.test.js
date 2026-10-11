@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { RING_CIRCUMFERENCE } from "./queue-view.js";
 
 /** The Effective Settings the harness answers `get_default_settings` and `resolve_batch_request` with. */
 const DEFAULT_SETTINGS = { workers: 6, io_jobs: 2, ffmpeg_threads: 1, bitrate: "192k", complexity: 5 };
@@ -28,6 +29,7 @@ class BootElement {
     else this.children.push(child);
     return child;
   }
+  append(...nodes) { this.children.push(...nodes); }
   remove() {}
   querySelector(selector) {
     if (!this.queried.has(selector)) this.queried.set(selector, new BootElement());
@@ -152,7 +154,7 @@ test("bootstrap binds IPC before snapshot, restores active subset and targets St
 
   const list = ipc.elements.get("remux-episode-list");
   assert.deepEqual(list.children.map(card => card.querySelector(".ep-title").textContent), ["two.mkv", "one.mkv"]);
-  assert.equal(list.children[1].querySelector(".ep-progress-fill").style.width, "70%");
+  assert.equal(list.children[1].querySelector(".ep-ring-arc").style.strokeDashoffset, (RING_CIRCUMFERENCE * 0.3).toFixed(2));
   assert.equal(ipc.elements.get("remux-stop").disabled, false);
   assert.equal(ipc.elements.get("extract-run").disabled, true);
   assert.match(ipc.workerChip.innerText, /Active/);
@@ -181,7 +183,7 @@ test("completion buffered during snapshot fetch releases restored controller exa
   assert.equal(ipc.elements.get("remux-run").disabled, false);
   assert.equal(ipc.handlers.has("job-done"), false);
   assert.equal(ipc.handlers.has("job-event"), false);
-  assert.equal(ipc.elements.get("remux-episode-list").children[1].querySelector(".ep-progress-fill").style.width, "100%");
+  assert.equal(ipc.elements.get("remux-episode-list").children[1].querySelector(".ep-status").className, "ep-status tone-ok");
 });
 
 test("terminal snapshot restores presentation only and leaves no eager job listeners", async t => {
@@ -197,7 +199,7 @@ test("terminal snapshot restores presentation only and leaves no eager job liste
   assert.equal(ipc.elements.get("remux-stop").disabled, true);
   assert.equal(ipc.handlers.has("job-event"), false);
   assert.equal(ipc.handlers.has("job-done"), false);
-  assert.equal(ipc.elements.get("remux-episode-list").children[1].querySelector(".track-tag.magenta").textContent, "Done in 8.4s");
+  assert.equal(ipc.elements.get("remux-episode-list").children[1].querySelector(".status-tag").textContent, "Done in 8.4s");
   assert.equal(ipc.calls.some(([command]) => command === "inspect_directory"), false);
 });
 
@@ -222,7 +224,7 @@ test("no snapshot preserves pre-run selection and cleans up bootstrap listeners"
 // app.js drops the call or listener that connects its module.
 test("app.js wires the settings chips, the preset menu and the theme to their modules", async t => {
   let answerDefaults;
-  const fast = { id: "fast", icon: "⚡", name: "Fast Muxing (128k)", bitrate: "128k", complexity: 3 };
+  const fast = { id: "fast", name: "Fast muxing", bitrate: "128k", complexity: 3 };
   const ipc = bootstrapHarness(t, {
     get_default_settings: new Promise(resolve => { answerDefaults = resolve; }),
     get_preset_profiles: [fast],
@@ -254,17 +256,13 @@ test("app.js wires the settings chips, the preset menu and the theme to their mo
   ipc.elements.set("btn-theme", themeButton);
   const pinnedThemes = () => ipc.calls.filter(([command]) => command === "set_window_theme").map(([, args]) => args.theme);
 
-  // The titlebar's profile picker and the fields a profile fills.
-  const fastOption = Object.assign(new BootElement(), { dataset: { preset: "fast" } });
+  // The sidebar's preset rows (rendered into #preset-list once the catalog loads) and the
+  // fields a profile fills.
+  const presetList = Object.assign(new BootElement(), { querySelectorAll: () => [] });
+  ipc.elements.set("preset-list", presetList);
   for (const [id, value] of [["remux-bitrate", "192k"], ["remux-complexity", "5"], ["remux-cplx-val", "5"]]) {
     ipc.elements.set(id, new BootElement(value));
   }
-  ipc.elements.set("active-profile-name", new BootElement());
-  ipc.elements.set("active-profile-btn", Object.assign(new BootElement(), { focus() {} }));
-  ipc.elements.set("profile-dropdown-menu", new BootElement());
-  const queryAll = globalThis.document.querySelectorAll;
-  globalThis.document.querySelectorAll = selector =>
-    selector === ".profile-option-item[data-preset]" ? [fastOption] : queryAll(selector);
 
   await ipc.mount("module-wiring");
   assert.deepEqual(pinnedThemes(), ["dark"], "startup applies and pins the published choice");
@@ -274,20 +272,24 @@ test("app.js wires the settings chips, the preset menu and the theme to their mo
   await ipc.flush();
   answerDefaults(DEFAULT_SETTINGS);
   await ipc.flush();
-  assert.equal(ipc.workerChip.innerText, "⚡ 3 Workers Active");
-  assert.equal(ipc.ioChip.innerText, "🔀 5 IO Jobs Active");
+  assert.equal(ipc.workerChip.innerText, "3 Workers Active");
+  assert.equal(ipc.ioChip.innerText, "5 IO Jobs Active");
   assert.equal(ipc.elements.get("remux-workers").placeholder, "auto (6)");
   // The defaults reached the same chips: they fall back to them when the job ends.
   ipc.emit("job-done", { job_id: 42, mode: "remux", code: 0 });
-  assert.equal(ipc.workerChip.innerText, "⚡ Standby (6 Workers)");
-  assert.equal(ipc.ioChip.innerText, "🔀 Idle (2 IO Jobs)");
+  assert.equal(ipc.workerChip.innerText, "Standby (6 Workers)");
+  assert.equal(ipc.ioChip.innerText, "Idle (2 IO Jobs)");
 
   themeButton.handlers.get("click")();
   assert.equal(attributes.get("data-theme"), "light");
   assert.deepEqual(stored, [["mkv-theme", "light"]]);
   assert.deepEqual(pinnedThemes(), ["dark", "light"]);
 
-  fastOption.handlers.get("click")({ stopPropagation() {} });
+  assert.equal(presetList.children.length, 1, "the catalog's one profile became a row");
+  const fastRow = presetList.children[0];
+  const matches = selector => selector === ".profile-option-item[data-preset]" &&
+    fastRow.className.split(" ").includes("profile-option-item") && Boolean(fastRow.dataset.preset);
+  presetList.handlers.get("click")({ target: { closest: selector => (matches(selector) ? fastRow : null) } });
   assert.equal(ipc.elements.get("remux-bitrate").value, "128k");
 });
 
@@ -299,16 +301,12 @@ for (const { label, input, expected } of [
   { label: "beyond the safe-integer range 1e20", input: "1e20", expected: null },
 ]) {
   test(`track-assignment offset parsing: ${label} produces ${expected}`, async t => {
-    const ipc = bootstrapHarness(t);
-    const modal = new BootElement();
-    const saveBtn = new BootElement();
-    const customPath = new BootElement();
+    const ipc = bootstrapHarness(t, { pick_subtitle_file: "/custom/sub.ass" });
+    const assignSelect = new BootElement();
     const offsetInput = new BootElement();
     const langSelect = new BootElement("ind");
     const titleInput = new BootElement();
-    ipc.elements.set("sub-assign-modal", modal);
-    ipc.elements.set("sub-assign-save", saveBtn);
-    ipc.elements.set("sub-custom-path", customPath);
+    ipc.elements.set("sub-assign-select", assignSelect);
     ipc.elements.set("sub-offset-input", offsetInput);
     ipc.elements.set("sub-lang-select", langSelect);
     ipc.elements.set("sub-title-input", titleInput);
@@ -318,13 +316,14 @@ for (const { label, input, expected } of [
     ipc.resolveSnapshot(null);
     await ipc.flush();
 
+    // Pick the row into the inspector, then choose a subtitle file from its assign select.
     const list = ipc.elements.get("remux-episode-list");
     list.handlers.get("click")({
-      target: { closest: () => ({ dataset: { itemId: "one" } }) },
+      target: { closest: selector => (selector === ".ep-pick" ? { dataset: { itemId: "one" } } : null) },
     });
-    customPath.value = "/custom/sub.ass";
     offsetInput.value = input;
-    saveBtn.handlers.get("click")();
+    assignSelect.value = "__browse__";
+    await assignSelect.handlers.get("change")({ target: assignSelect });
 
     await ipc.elements.get("remux-run").handlers.get("click")();
     await ipc.flush();
@@ -332,6 +331,117 @@ for (const { label, input, expected } of [
     const runCall = ipc.calls.find(([command]) => command === "run_job");
     assert.ok(runCall, "run_job was invoked");
     const assignment = runCall[1].request.assignments.find(a => a.target_video === "one");
-    assert.equal(assignment.offset_ms, expected);
+    assert.deepEqual(assignment, {
+      target_video: "one",
+      asset_path: "/custom/sub.ass",
+      track_type: "subtitle",
+      language: "ind",
+      title: null,
+      offset_ms: expected,
+    });
   });
 }
+
+test("choosing a custom language tag keeps the tag box open until the tag is typed", async t => {
+  const ipc = bootstrapHarness(t, { pick_subtitle_file: "/custom/sub.ass" });
+  const assignSelect = new BootElement();
+  const langSelect = new BootElement("ind");
+  const langCustom = new BootElement();
+  const customLabel = new BootElement();
+  ipc.elements.set("sub-assign-select", assignSelect);
+  ipc.elements.set("sub-lang-select", langSelect);
+  ipc.elements.set("sub-lang-custom", langCustom);
+  ipc.elements.set("sub-lang-custom-label", customLabel);
+  // The inspector draws only when its body exists.
+  ipc.elements.set("insp-body", new BootElement());
+  await ipc.mount("sub-custom-lang");
+  assert.equal(await ipc.scan("remux", "/release"), true);
+  ipc.resolveSnapshot(null);
+  await ipc.flush();
+
+  ipc.elements.get("remux-episode-list").handlers.get("click")({
+    target: { closest: selector => (selector === ".ep-pick" ? { dataset: { itemId: "one" } } : null) },
+  });
+  assignSelect.value = "__browse__";
+  await assignSelect.handlers.get("change")({ target: assignSelect });
+  await ipc.flush();
+
+  // The assignment briefly has no language while the tag box is empty; the redraw must not
+  // read that as the "ind" default and snap the select back.
+  langSelect.value = "custom";
+  langSelect.handlers.get("change")();
+  await ipc.flush();
+  assert.equal(langSelect.value, "custom");
+  assert.equal(customLabel.hidden, false);
+
+  langCustom.value = "may";
+  langCustom.handlers.get("change")();
+  await ipc.elements.get("remux-run").handlers.get("click")();
+  await ipc.flush();
+  const request = ipc.calls.find(([command]) => command === "run_job")[1].request;
+  assert.equal(request.assignments.find(a => a.target_video === "one").language, "may");
+});
+
+test("the inspector's Reset clears a Track Assignment and a running job refuses a new one", async t => {
+  const ipc = bootstrapHarness(t, { pick_subtitle_file: "/custom/sub.ass" });
+  const assignSelect = new BootElement();
+  const reset = new BootElement();
+  ipc.elements.set("sub-assign-select", assignSelect);
+  ipc.elements.set("sub-assign-reset", reset);
+  await ipc.mount("sub-reset");
+  assert.equal(await ipc.scan("remux", "/release"), true);
+  ipc.resolveSnapshot(null);
+  await ipc.flush();
+
+  assignSelect.value = "__browse__";
+  await assignSelect.handlers.get("change")({ target: assignSelect });
+  reset.handlers.get("click")();
+  await ipc.elements.get("remux-run").handlers.get("click")();
+  await ipc.flush();
+  const request = ipc.calls.find(([command]) => command === "run_job")[1].request;
+  assert.equal(request.assignments, null);
+
+  // The job now runs: a pick is refused before the file dialog opens.
+  const picks = ipc.calls.filter(([command]) => command === "pick_subtitle_file").length;
+  await assignSelect.handlers.get("change")({ target: assignSelect });
+  assert.equal(ipc.calls.filter(([command]) => command === "pick_subtitle_file").length, picks);
+});
+
+test("the log shows paths Finder-style, Copy puts the real paths on the clipboard, and errors badge the Log button", async t => {
+  const ipc = bootstrapHarness(t);
+  const copyBtn = new BootElement();
+  const badge = new BootElement();
+  ipc.elements.set("log-copy", copyBtn);
+  ipc.elements.set("log-badge", badge);
+  const copied = [];
+  const priorNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: { clipboard: { writeText: async text => { copied.push(text); } } },
+  });
+  // Node before 21 has no global navigator, so there may be nothing to restore.
+  t.after(() => {
+    if (priorNavigator) Object.defineProperty(globalThis, "navigator", priorNavigator);
+    else delete globalThis.navigator;
+  });
+
+  await ipc.mount("log-copy");
+  assert.equal(await ipc.scan("remux", "/release"), true);
+  ipc.resolveSnapshot(null);
+  await ipc.flush();
+  await ipc.elements.get("remux-run").handlers.get("click")();
+  await ipc.flush();
+
+  const raw = ["[+] Remuxed: /media/anime/Show/Season 1/Output/Show - 01.mkv", "[ERR] mkvmerge failed on Show - 02.mkv"];
+  ipc.emit("job-log", raw);
+  const log = ipc.elements.get("remux-log");
+  assert.deepEqual(log.children.map(line => line.textContent), [
+    "[+] Remuxed: media › anime › Show › Season 1 › Output › Show - 01.mkv",
+    "[ERR] mkvmerge failed on Show - 02.mkv",
+  ]);
+  assert.equal(badge.hidden, false);
+  assert.equal(badge.textContent, "1");
+
+  await copyBtn.handlers.get("click")();
+  assert.deepEqual(copied, [raw.join("\n")]);
+});

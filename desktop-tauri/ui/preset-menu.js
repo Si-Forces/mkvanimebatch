@@ -1,29 +1,54 @@
 /**
- * The titlebar's Preset Profile menu: applies a profile's name, bitrate and complexity to the
- * form, or marks the form as hand-edited ("custom"). The engine owns the Preset Profile catalog,
- * and `load()` fills this module's copy from it; there is no hardcoded fallback copy.
+ * The sidebar's Preset Profile rows: applies a profile's bitrate and complexity to the form, or
+ * marks the form as hand-edited ("custom"). The engine owns the Preset Profile catalog: `load()`
+ * fills this module's copy from it and renders one row per profile into `#preset-list`, so the
+ * page holds no hardcoded copy of it.
  */
 export function createPresetMenu({ invoke, doc }) {
   // Keyed by profile id; empty until `load()` has an answer.
   const catalog = {};
+  // The form starts on the engine's defaults, which are the balanced profile's.
+  let activeKey = "balanced";
+
+  function renderRows(profiles) {
+    const list = doc.getElementById("preset-list");
+    if (!list) return;
+    list.querySelectorAll(".preset-row").forEach(row => row.remove());
+    for (const p of profiles) {
+      const row = doc.createElement("button");
+      row.type = "button";
+      row.className = "nav preset-row profile-option-item lock-while-job";
+      row.dataset.preset = p.id;
+      const dot = doc.createElement("span");
+      dot.className = "preset-dot";
+      dot.setAttribute("aria-hidden", "true");
+      const text = doc.createElement("span");
+      text.className = "nav-text";
+      const sub = doc.createElement("small");
+      // The custom row shows the form's own values, which app.js keeps current.
+      if (p.id === "custom") sub.id = "preset-custom-sub";
+      sub.textContent = presetSubtitle(p.bitrate, p.complexity);
+      text.append(p.name, sub);
+      row.append(dot, text);
+      list.appendChild(row);
+    }
+    setActiveProfileOption(activeKey);
+  }
 
   async function load() {
     try {
-      const profiles = await invoke("get_preset_profiles");
-      for (const p of profiles ?? []) {
-        catalog[p.id] = {
-          icon: p.icon,
-          name: p.name,
-          bitrate: p.bitrate,
-          complexity: String(p.complexity),
-        };
+      const profiles = (await invoke("get_preset_profiles")) ?? [];
+      for (const p of profiles) {
+        catalog[p.id] = { bitrate: p.bitrate, complexity: String(p.complexity) };
       }
+      renderRows(profiles);
     } catch (err) {
       console.error("[get_preset_profiles] failed:", err);
     }
   }
 
   function setActiveProfileOption(presetKey) {
+    activeKey = presetKey;
     doc.querySelectorAll(".profile-option-item").forEach(item => {
       const active = item.dataset.preset === presetKey;
       item.classList.toggle("active", active);
@@ -31,35 +56,30 @@ export function createPresetMenu({ invoke, doc }) {
     });
   }
 
+  /** Fills the Remux form: presets set the Opus encode, and only Remux transcodes (#preset-list is remux-only). */
   function apply(presetKey) {
-    const p = catalog[presetKey];
-    const nameEl = doc.getElementById("active-profile-name");
-    const profileBtn = doc.getElementById("active-profile-btn");
-
     if (presetKey === "custom") {
-      if (nameEl) nameEl.textContent = "🛠️ Custom Configuration";
-      if (profileBtn) profileBtn.dataset.preset = "custom";
       setActiveProfileOption("custom");
       return;
     }
+    const p = catalog[presetKey];
     // Without its catalog entry there is nothing to apply.
     if (!p) return;
-
-    if (nameEl) nameEl.textContent = `${p.icon} ${p.name}`;
-    if (profileBtn) profileBtn.dataset.preset = presetKey;
     setActiveProfileOption(presetKey);
 
     const setVal = (id, val) => {
       const el = doc.getElementById(id);
       if (el) el.value = val;
     };
-
-    if (p.bitrate !== undefined) setVal("remux-bitrate", p.bitrate);
-    if (p.complexity !== undefined) {
-      setVal("remux-complexity", p.complexity);
-      setVal("remux-cplx-val", p.complexity);
-    }
+    setVal("remux-bitrate", p.bitrate);
+    setVal("remux-complexity", p.complexity);
+    setVal("remux-cplx-val", p.complexity);
   }
 
   return { load, apply };
+}
+
+/** A preset row's subtitle: the bitrate and complexity a profile, or the custom form, encodes with. */
+export function presetSubtitle(bitrate, complexity) {
+  return `Opus ${bitrate} · complexity ${complexity}`;
 }

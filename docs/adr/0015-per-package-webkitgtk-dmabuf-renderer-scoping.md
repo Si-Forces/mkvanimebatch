@@ -1,6 +1,6 @@
 # 0015. Per-Package WebKitGTK DMABUF Renderer Scoping
 
-> **Status**: Accepted
+> **Status**: Accepted (amended 2026-10-11)
 > **Date**: 2026-09-27
 > **Context**: Desktop Application Context
 
@@ -64,3 +64,12 @@ We decided to scope the DMABUF workaround to the packaging boundary that actuall
 - **The AppImage runtime is now recorded, not just described.** `release.yml` writes `APPIMAGE-RUNTIME.txt` into the release, listing the exact WebKitGTK, JavaScriptCoreGTK and GTK versions bundled, and the release body embeds the same table. This is diagnosis, not prevention: it makes a release that inherited the defect above identifiable from its own manifest instead of mysterious. The release also **fails** if any of those three libraries is missing from the AppDir, because a missing bundle means silent fallback to the host runtime — which is the same latent regression arriving by a different route. Neither measure pins the version; that remains open.
 - The AppImage shutdown workaround should be re-checked periodically against current WebKitGTK. Once the upstream `SkiaGLContext` race is fixed, the AppImage-only guard and the preload injection can both be retired together.
 - The env-scoping test must remain a single test function. Anyone extending it should extend that one test rather than splitting the cases, or reintroduce a flake that is invisible on the full-suite CI path and appears only when the tests are run filtered.
+
+## Amendment — 2026-10-11
+
+The Library + Inspector redesign raised the window corner radius from 12px to 14px
+(`--window-radius` in `ui/style.css`), so the "12px rounded window corners" in the rejected
+option above now read 14px. The trade-off is unchanged. The redesign also gives the panes and the
+bottom bar their own compositing layers, which WebKitGTK does not clip to the rounded `#app`, so
+the title bar and the bottom bar, which touch the window corners, round their own outer corners and
+square them when the window is maximized.
