@@ -80,7 +80,6 @@ function makeRuntime(tracker, { invoke = async () => null, resolve = async () =>
     coordinator: createJobCoordinator(),
     appendLog() {},
     clearLog() {},
-    closeSubAssignModal() {},
     queueFor: () => tracker,
     safeAddListener: (el, event, handler) => el?.addEventListener(event, handler),
     scanInputDirectory: async () => true,
@@ -422,8 +421,8 @@ test("Stop while the engine resolves the request ends the start without a scan o
 
 test("index.html chips name their state without inventing a worker or I/O job count", () => {
   const html = fs.readFileSync(path.join(import.meta.dirname, "index.html"), "utf8");
-  const chips = [...html.matchAll(/<div\b[^>]*\bmetric-(?:workers|iojobs)-chip\b[^>]*>([^<]*)<\/div>/g)];
-  assert.equal(chips.length, 4, "a Workers and an I/O Jobs chip in each of the two views");
+  const chips = [...html.matchAll(/<span\b[^>]*\bmetric-(?:workers|iojobs)-chip\b[^>]*>([^<]*)<\/span>/g)];
+  assert.equal(chips.length, 2, "a Workers and an I/O Jobs chip in the bottom bar");
   for (const [, text] of chips) assert.doesNotMatch(text, /\d/, `chip "${text}" shows a count before the engine reported one`);
 });
 

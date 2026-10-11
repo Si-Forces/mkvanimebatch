@@ -5,10 +5,10 @@ const AUTO_INPUTS = ["remux", "extract"].flatMap(mode => [
 ]);
 
 /** A chip's text: `count` is shown when known, and otherwise left out rather than guessed. */
-function chipText(icon, isJobActive, idleWord, count, noun) {
+function chipText(isJobActive, idleWord, count, noun) {
   const counted = count == null ? null : `${count} ${noun}`;
-  if (isJobActive) return `${icon} ${counted ?? noun} Active`;
-  return counted ? `${icon} ${idleWord} (${counted})` : `${icon} ${idleWord}`;
+  if (isJobActive) return `${counted ?? noun} Active`;
+  return counted ? `${idleWord} (${counted})` : idleWord;
 }
 
 /**
@@ -30,10 +30,10 @@ export function createSettingsChips({ invoke, doc, isJobActive }) {
    */
   function update(jobActive = false, settings = defaultSettings) {
     doc.querySelectorAll(".metric-workers-chip").forEach(chip => {
-      chip.innerText = chipText("⚡", jobActive, "Standby", settings?.workers, "Workers");
+      chip.innerText = chipText(jobActive, "Standby", settings?.workers, "Workers");
     });
     doc.querySelectorAll(".metric-iojobs-chip").forEach(chip => {
-      chip.innerText = chipText("🔀", jobActive, "Idle", settings?.io_jobs, "IO Jobs");
+      chip.innerText = chipText(jobActive, "Idle", settings?.io_jobs, "IO Jobs");
     });
   }
 

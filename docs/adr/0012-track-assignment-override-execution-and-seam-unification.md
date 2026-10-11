@@ -1,6 +1,6 @@
 # 0012. Track Assignment Override Execution and Seam Unification
 
-> **Status**: Accepted (amended 2026-09-26, 2026-09-28 and 2026-10-05)
+> **Status**: Accepted (amended 2026-09-26, 2026-09-28, 2026-10-05 and 2026-10-11)
 > **Date**: 2026-09-20
 > **Context**: Media Engine Context & Desktop Application Bridge
 > **Amends**: ADR-0008, ADR-0011
@@ -65,3 +65,10 @@ This also closes a reachability gap. The desktop controller normalised a literal
 - **The 2026-09-26 unit change landed (issue #19).** The global offset is `default_sub_offset_ms: i64` on `BatchRequest`, `PipelineConfig`, and `RemuxOptions`, and `build_mkvmerge_args` takes it as `i64`. No `f64` remains in the engine's offset path. The rename is breaking on the `run_job` IPC payload, with no alias for `sub_offset`. The override rule is unchanged. The zero guard the 2026-09-26 amendment warns about now exists once, in `format_sync_args`: `build_mkvmerge_args` passes it `default_sub_offset_ms` for an embedded track, or the external subtitle's `custom_offset_ms.unwrap_or(default_sub_offset_ms)`, so `Some(0)` still emits no `--sync`. The warning applies to that guard.
 - **The human-facing inputs stay in seconds.** "Milliseconds everywhere" covers the engine's representation, not the unit a person types. `mkv-cli --sub-offset <SEC>` keeps its name and unit so existing scripts keep working. The Remux view keeps its seconds input with `step="0.5"`, which suits typical sub-second corrections. Both convert to whole milliseconds at the boundary and round half away from zero. The CLI rejects a value that is not finite or whose milliseconds do not fit `i64`. The desktop controller rejects an entry that is not a number, or whose milliseconds are not a safe JavaScript integer. Deprecating the seconds flag is a separate decision.
 - **The desktop controller sends an entered `0` as `0`** and an empty field as `null`. For the global offset the two resolve alike: `None` falls back to `PipelineConfig`'s `0`, and no `PresetProfile` carries an offset. Explicit zero changes the outcome only on a Track Assignment's `offset_ms`, where it suppresses the global offset.
+
+## Amendment — 2026-10-11
+
+The Context paragraph and the Consequences list name the desktop "track assignment modal" and
+"GUI track override modal". Since the Library + Inspector redesign these controls live in the
+inspector's subtitle section (see the 2026-10-11 amendment to ADR-0011). The parity this ADR
+records holds unchanged: the inspector produces the same `TrackAssignment` payload.
