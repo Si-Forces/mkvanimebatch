@@ -68,7 +68,7 @@ export class JobController {
     this.runBtn = document.getElementById(`${mode}-run`);
     this.stopBtn = document.getElementById(`${mode}-stop`);
     this.formControls = document.querySelectorAll(
-      `#view-${mode} input, #view-${mode} select, #view-${mode} .browse-btn, #view-${mode} .clear-cache-btn`
+      `#${mode}-settings input, #${mode}-settings select, #${mode}-settings button`
     );
     this.runtime.clearLog(this.logEl);
 
@@ -77,12 +77,9 @@ export class JobController {
 
     this.runtime.safeAddListener(this.runBtn, "click", () => this.start());
     this.runtime.safeAddListener(this.stopBtn, "click", () => this.stop());
-    this.runtime.safeAddListener(
-      document.getElementById(`${mode}-clear-log`),
-      "click",
-      () => this.runtime.clearLog(this.logEl)
-    );
     this.runtime.safeAddListener(document.getElementById(`${mode}-clear-cache`), "click", () => this.clearCache());
+    // The Run button reads "Plan" for a dry run.
+    this.runtime.safeAddListener(document.getElementById(`${mode}-dry-run`), "change", () => this.syncGlobalControls());
 
     const inputDirEl = document.getElementById(`${mode}-input-dir`);
     if (inputDirEl) {
@@ -139,6 +136,8 @@ export class JobController {
   flagInputError(inputId, message) {
     const el = document.getElementById(`${this.mode}-${inputId}`);
     if (el) {
+      // Every flagged field lives in the closed settings sheet; open it so the error shows.
+      this.runtime.openSettings?.(this.mode);
       el.classList.add("input-error");
       el.focus();
       const clear = () => el.classList.remove("input-error");
@@ -226,7 +225,6 @@ export class JobController {
     const vanishedBeforeScan = capturedDir ? [...(tracker.state?.vanishedSelectedIds ?? [])] : [];
     const assignmentSnapshot = capturedDir ? new Map(tracker.assignments) : null;
     if (!this.runtime.coordinator.begin(this.mode)) return;
-    this.runtime.closeSubAssignModal();
 
     this.setRunning(true);
 
@@ -482,7 +480,13 @@ export class JobController {
     const tracker = this.runtime.queueFor(this.mode);
     const hasItems = (tracker.state?.totalCount ?? 0) > 0;
     const selectionDisabled = hasItems && (tracker.getSelectedCount?.() ?? 0) === 0;
-    if (this.runBtn) this.runBtn.disabled = !coordinator.canStart() || Boolean(tracker.isScanning) || selectionDisabled;
+    if (this.runBtn) {
+      this.runBtn.disabled = !coordinator.canStart() || Boolean(tracker.isScanning) || selectionDisabled;
+      const verb = document.getElementById(`${this.mode}-dry-run`)?.checked ? "Plan" : "Run";
+      const label = hasItems ? `${verb} ${this.mode} · ${tracker.getSelectedCount?.() ?? 0}` : `${verb} ${this.mode}`;
+      if (this.runBtn.textContent !== label) this.runBtn.textContent = label;
+      this.runBtn.title = this.runBlockedReason(selectionDisabled);
+    }
     for (const control of this.formControls) control.disabled = busy;
     // Selection stays frozen for the whole preflight/run window: the request
     // captured this queue's selection before the forced scan, so a click now
@@ -496,18 +500,34 @@ export class JobController {
     for (const mode of QUEUE_MODES) {
       this.runtime.queueFor(mode).selectionLocked = !this.canMutateQueueSelection(mode);
     }
-    document.querySelectorAll(`#view-${this.mode} .sub-assign-btn, #view-${this.mode} .empty-state-action`).forEach(control => {
+    // Controls outside the settings sheet that a job freezes (the presets, the inspector's Track
+    // Assignment controls, Open folder), and the root class the locked notes and labels key off.
+    document.querySelectorAll(`.lock-while-job, #${this.mode}-episode-list .empty-state-action`).forEach(control => {
       control.disabled = busy;
     });
+    document.documentElement?.classList?.toggle("job-locked", busy);
     const selectionFrozen = !this.canMutateQueueSelection(this.mode);
-    document.querySelectorAll(`#view-${this.mode} .ep-select-check, #view-${this.mode} .ep-reorder-btn`).forEach(control => {
+    document.querySelectorAll(`#${this.mode}-episode-list .ep-select-check, #${this.mode}-episode-list .ep-reorder-btn`).forEach(control => {
       control.disabled = selectionFrozen;
     });
     if (this.stopBtn) {
-      const stopping = coordinator.isStopping && coordinator.activeMode === this.mode;
-      this.stopBtn.disabled = coordinator.activeMode !== this.mode || coordinator.isStopping;
-      this.stopBtn.textContent = stopping ? "Stopping..." : "■ Stop";
+      const owns = coordinator.activeMode === this.mode;
+      const stopping = coordinator.isStopping && owns;
+      this.stopBtn.disabled = !owns || coordinator.isStopping;
+      this.stopBtn.textContent = stopping ? "Stopping…" : "Stop";
+      // The bottom bar shows this mode's Stop while it owns the job, and its Run otherwise.
+      this.stopBtn.hidden = !owns;
+      if (this.runBtn) this.runBtn.hidden = owns;
     }
+  }
+
+  /** Why Run is disabled, for its tooltip; "" when it is not, or when nothing explains it. */
+  runBlockedReason(selectionDisabled) {
+    const owner = this.runtime.coordinator.activeMode;
+    if (owner && owner !== this.mode) return `${owner === "remux" ? "Remux" : "Extract"} batch is running`;
+    if (this.runtime.queueFor(this.mode).isScanning) return "Scanning the folder";
+    if (selectionDisabled) return "Tick at least one episode";
+    return "";
   }
 
   renderStatus() {

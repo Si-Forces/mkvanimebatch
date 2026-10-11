@@ -62,8 +62,8 @@ test("loadDefaults puts auto (N) on the workers and Disk I/O inputs and the defa
     assert.equal(ioJobs.placeholder, "auto (4)");
     assert.equal(ioJobs.dataset.autoValue, "4");
   }
-  assert.equal(page.workerChip.innerText, "⚡ Standby (6 Workers)");
-  assert.equal(page.ioChip.innerText, "🔀 Idle (4 IO Jobs)");
+  assert.equal(page.workerChip.innerText, "Standby (6 Workers)");
+  assert.equal(page.ioChip.innerText, "Idle (4 IO Jobs)");
 });
 
 test("a failed get_default_settings leaves the inputs on plain auto and does not write the chips", async t => {
@@ -101,8 +101,8 @@ for (const [label, answer] of [
 
     // The refused answer must not have become the defaults.
     page.chips.update(false);
-    assert.equal(page.workerChip.innerText, "⚡ Standby");
-    assert.equal(page.ioChip.innerText, "🔀 Idle");
+    assert.equal(page.workerChip.innerText, "Standby");
+    assert.equal(page.ioChip.innerText, "Idle");
   });
 }
 
@@ -110,8 +110,8 @@ test("update(true, settings) shows the job's own Effective Settings, not the def
   const page = chipsHarness(DEFAULTS);
   await page.chips.loadDefaults();
   page.chips.update(true, JOB_SETTINGS);
-  assert.equal(page.workerChip.innerText, "⚡ 3 Workers Active");
-  assert.equal(page.ioChip.innerText, "🔀 5 IO Jobs Active");
+  assert.equal(page.workerChip.innerText, "3 Workers Active");
+  assert.equal(page.ioChip.innerText, "5 IO Jobs Active");
 });
 
 test("with get_default_settings failed, update(true, settings) still shows the job's own settings", async t => {
@@ -119,8 +119,8 @@ test("with get_default_settings failed, update(true, settings) still shows the j
   const page = chipsHarness(new Error("unavailable"));
   await page.chips.loadDefaults();
   page.chips.update(true, JOB_SETTINGS);
-  assert.equal(page.workerChip.innerText, "⚡ 3 Workers Active");
-  assert.equal(page.ioChip.innerText, "🔀 5 IO Jobs Active");
+  assert.equal(page.workerChip.innerText, "3 Workers Active");
+  assert.equal(page.ioChip.innerText, "5 IO Jobs Active");
 });
 
 test("with no settings known anywhere, the chips name their state and invent no counts", async t => {
@@ -129,20 +129,20 @@ test("with no settings known anywhere, the chips name their state and invent no 
   await page.chips.loadDefaults();
   // A job no `run_job` began, so it carries no Effective Settings: `null`, not the defaults.
   page.chips.update(true, null);
-  assert.equal(page.workerChip.innerText, "⚡ Workers Active");
-  assert.equal(page.ioChip.innerText, "🔀 IO Jobs Active");
+  assert.equal(page.workerChip.innerText, "Workers Active");
+  assert.equal(page.ioChip.innerText, "IO Jobs Active");
 
   page.chips.update(false);
-  assert.equal(page.workerChip.innerText, "⚡ Standby");
-  assert.equal(page.ioChip.innerText, "🔀 Idle");
+  assert.equal(page.workerChip.innerText, "Standby");
+  assert.equal(page.ioChip.innerText, "Idle");
 });
 
 test("null settings stay unknown even when the defaults are known", async () => {
   const page = chipsHarness(DEFAULTS);
   await page.chips.loadDefaults();
   page.chips.update(true, null);
-  assert.equal(page.workerChip.innerText, "⚡ Workers Active");
-  assert.equal(page.ioChip.innerText, "🔀 IO Jobs Active");
+  assert.equal(page.workerChip.innerText, "Workers Active");
+  assert.equal(page.ioChip.innerText, "IO Jobs Active");
 });
 
 test("defaults that arrive while a job is active leave its chips alone, and idle chips return the defaults", async () => {
@@ -155,15 +155,15 @@ test("defaults that arrive while a job is active leave its chips alone, and idle
   reply.resolve(DEFAULTS);
   await loaded;
   await flush();
-  assert.equal(page.workerChip.innerText, "⚡ 3 Workers Active");
-  assert.equal(page.ioChip.innerText, "🔀 5 IO Jobs Active");
+  assert.equal(page.workerChip.innerText, "3 Workers Active");
+  assert.equal(page.ioChip.innerText, "5 IO Jobs Active");
   // The inputs still learn the defaults; only the chips belong to the job.
   assert.equal(page.inputs.get("remux-workers").placeholder, "auto (6)");
 
   page.state.jobActive = false;
   page.chips.update(false);
-  assert.equal(page.workerChip.innerText, "⚡ Standby (6 Workers)");
-  assert.equal(page.ioChip.innerText, "🔀 Idle (4 IO Jobs)");
+  assert.equal(page.workerChip.innerText, "Standby (6 Workers)");
+  assert.equal(page.ioChip.innerText, "Idle (4 IO Jobs)");
 });
 
 test("loadDefaults skips an auto input the page does not have", async () => {
@@ -172,5 +172,5 @@ test("loadDefaults skips an auto input the page does not have", async () => {
   await page.chips.loadDefaults();
   assert.equal(page.inputs.get("remux-io-jobs").placeholder, "auto (4)");
   assert.equal(page.inputs.get("extract-workers").placeholder, "auto (6)");
-  assert.equal(page.workerChip.innerText, "⚡ Standby (6 Workers)");
+  assert.equal(page.workerChip.innerText, "Standby (6 Workers)");
 });

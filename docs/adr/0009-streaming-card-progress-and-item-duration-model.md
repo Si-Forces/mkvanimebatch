@@ -1,6 +1,6 @@
 # 0009. Streaming Card Progress, Centralized Heartbeat, and Authoritative Item Duration Model
 
-> **Status**: Accepted (amended 2026-09-28, 2026-10-01)
+> **Status**: Accepted (amended 2026-09-28, 2026-10-01, 2026-10-11)
 > **Date**: 2026-06-01
 > **Context**: Desktop Application Context
 
@@ -65,3 +65,16 @@ exists, and describes read compatibility the crate no longer offers.
   half of the attribute pair is gone. ADR-0001 declares the `@event:` stream a version-1
   external contract, so an external consumer parsing that stream must now supply its own
   deserializer. Recorded as a breaking change in the release notes.
+
+## Amendment — 2026-10-11
+
+The Library + Inspector redesign replaced the queue cards with episode rows, so Decision 1's
+shapes changed while its rule stands.
+
+- **A ring, not a bar.** Card Progress is drawn as a status ring beside each row: it spins while
+  the item has no numeric progress and fills from the first `ItemProgress`, as the shimmer and the
+  bar did. A terminal `ItemComplete` replaces the ring with the outcome. Running is blue, done
+  green, failed red, and every other status muted.
+- **The heartbeat also drives the batch clock.** The one 1 Hz timer of Decision 2 still updates
+  every processing row's elapsed time, and on the same tick it asks the window to redraw the bottom
+  bar's batch clock. No second timer was added.

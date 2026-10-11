@@ -1,6 +1,6 @@
 # 0011. Selected Items Execution Queue, Concurrency Pipelining, and Enriched Track Assignment
 
-> **Status**: Accepted (Amended by ADR-0012, ADR-0013, ADR-0014; amended 2026-09-29)
+> **Status**: Accepted (Amended by ADR-0012, ADR-0013, ADR-0014; amended 2026-09-29, 2026-10-11)
 > **Date**: 2026-08-01
 > **Context**: Media Engine Context & Desktop Application Bridge
 > **Amends**: ADR-0008
@@ -47,3 +47,11 @@ Decision 4 records that removal.
 
 The contract this ADR defines is unchanged: `selected_items`, the unified global queue, the
 dual governor, and 1:1 subtitle overrides behave as specified above.
+
+## Amendment — 2026-10-11 (the assignment modal is gone)
+
+Decision 1 above describes "the desktop track assignment modal". The Library + Inspector
+redesign removed that modal: the same controls (a candidate or an arbitrary file picked through
+`pick_subtitle_file`, the language with a custom ISO-639-2 code, the track title and `offset_ms`)
+now sit in the inspector's subtitle section, under the precedence ladder. The `TrackAssignment`
+they produce, and the request that carries it, are unchanged.

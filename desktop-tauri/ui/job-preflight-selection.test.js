@@ -76,7 +76,6 @@ function makeRuntime(tracker, { invoke = async () => null, ...overrides } = {}) 
     coordinator: createJobCoordinator(),
     appendLog() {},
     clearLog() {},
-    closeSubAssignModal() {},
     queueFor: () => tracker,
     safeAddListener() {},
     scanInputDirectory: async () => true,
@@ -139,7 +138,7 @@ test("Start preserves selected order across real rescans and rejects vanished ID
     "remux-queue-count": "",
   });
   installDom(t, elements, {
-    querySelectorAll: selector => selector.startsWith("#view-remux input,") ? [elements.get("remux-input-dir")] : [],
+    querySelectorAll: selector => selector.startsWith("#remux-settings input,") ? [elements.get("remux-input-dir")] : [],
   });
 
   const tracker = new QueueTracker("remux");
