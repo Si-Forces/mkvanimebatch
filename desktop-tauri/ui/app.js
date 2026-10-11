@@ -245,6 +245,8 @@ function renderLibrary(queue) {
     btn.append(label, n);
     tree.appendChild(btn);
   };
+  // These counts are each release's total; the list's group headers count only the rows the
+  // filter shows, so the two differ under To do, Done and Failed.
   row("lib-root", pathSegments(dir).at(-1) ?? dir, queue.state.totalCount, null);
   for (const [release, count] of releases) {
     if (release !== ".") row("lib-release", prettyPath(release), count, release);
@@ -453,9 +455,12 @@ async function onAssignSelect(e) {
 function onAssignOptions() {
   const item = remuxQueue.inspectedItem();
   const assignment = item && remuxQueue.assignments.get(item.id);
+  const custom = byId("sub-lang-select")?.value === "custom";
   const customLabel = byId("sub-lang-custom-label");
-  if (customLabel) customLabel.hidden = byId("sub-lang-select")?.value !== "custom";
+  if (customLabel) customLabel.hidden = !custom;
   if (assignment) assignSubtitle(assignment.asset_path);
+  // Picking "Custom tag…" puts the cursor in the tag box.
+  if (custom && document.activeElement === byId("sub-lang-select")) byId("sub-lang-custom")?.focus?.();
 }
 
 // ─── System Telemetry ───────────────────────────────────────────────────────

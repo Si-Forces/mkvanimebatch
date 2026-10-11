@@ -242,6 +242,12 @@ html.is-linux.is-maximized .bar {
   width: 14px; height: 14px; padding: 0; border: 0; border-radius: 50%;
   display: grid; place-items: center;
   box-shadow: inset 0 0 0 .5px rgba(0, 0, 0, .22);
+  transition: transform .15s cubic-bezier(.16, 1, .3, 1), filter .15s ease;
+}
+/* The hovered light swells and brightens, as in the previous design. */
+.tl-btn:hover { transform: scale(1.15); filter: brightness(1.12); }
+@media (prefers-reduced-motion: reduce) {
+  .tl-btn:hover { transform: none; }
 }
 .tl-btn svg { display: block; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; opacity: 0; transition: opacity .12s; }
 /* The glyphs show for the whole group on hover or keyboard focus, as on macOS. */
@@ -324,6 +330,7 @@ html.is-linux.is-maximized .bar {
 .status-pill.status-running { color: var(--info); }
 .status-pill.status-success { color: var(--ok); }
 .status-pill.status-error { color: var(--err); }
+.status-pill.status-cancelled { color: var(--mute); }
 
 .library-tree { display: flex; flex-direction: column; gap: 2px; }
 .lib-root { background: var(--sel); }

@@ -23,8 +23,8 @@ export function prettyPath(path) {
 
 /**
  * A log line as the drawer shows it: a path's leading separator is dropped and every other one
- * becomes ` › `. A slash between two digits stays, so `3/12` and dates read as they were. Copy
- * uses the raw line.
+ * becomes ` › `. A run of separators counts as one, and a run between two digits stays as written,
+ * so `3/12` and dates read as they were. Copy uses the raw line.
  *
  * Known limit: this is a regex over the whole line, not a path parser, so a folder named `2`
  * followed by `01.mkv` keeps its slash, and a codec ID such as `S_TEXT/ASS` gets a chevron. Parse
@@ -34,9 +34,12 @@ export function prettyPath(path) {
  * @returns {string}
  */
 export function logDisplayText(line) {
+  // No lookbehind: WebKitGTK before 2.40 cannot parse one, and that SyntaxError would stop the
+  // whole module graph from loading, leaving an empty window.
+  const digit = ch => ch !== undefined && ch >= "0" && ch <= "9";
   return String(line)
     .replace(/(^|\s)[\\/]+(?=[^\s\\/])/g, "$1")
-    .replace(/(?<!\d)[\\/]+|[\\/]+(?!\d)/g, " › ");
+    .replace(/[\\/]+/g, (sep, at, text) => (digit(text[at - 1]) && digit(text[at + sep.length]) ? sep : " › "));
 }
 
 /** The colour token of an item status: running is blue, done green, failed red, the rest muted. */

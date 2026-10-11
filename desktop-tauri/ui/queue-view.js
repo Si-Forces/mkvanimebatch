@@ -452,7 +452,12 @@ export class QueueTracker {
   }
 
   applyCardMeta(card, item, bitrate) {
-    if (item.inspectionError) {
+    // A failed row says why, so a batch with several failures reads without opening each row.
+    card.showsFailure = item.status === "error";
+    if (card.showsFailure) {
+      card.meta.className = "ep-meta is-error";
+      card.meta.textContent = `Failed · ${item.error || "Error"}`;
+    } else if (item.inspectionError) {
       this.applyInspectionError(card, item.inspectionError);
     } else if (item.metadata) {
       this.applyMetadata(card, item.metadata, bitrate, item.id);
@@ -523,6 +528,8 @@ export class QueueTracker {
       // The status renderCardState last drew. None yet: mountCard draws the first status,
       // so the queued look is drawn only in renderCardState.
       renderedStatus: null,
+      // Whether the meta line shows the failure rather than the inspection (applyCardMeta).
+      showsFailure: false,
     };
     card.title.textContent = item.name;
     card.num.textContent = episodeNumberText(epNum);
@@ -696,6 +703,10 @@ export class QueueTracker {
   renderCardState(card, item) {
     const statusChanged = card.renderedStatus !== item.status;
     card.renderedStatus = item.status;
+    // Entering or leaving "error" swaps the meta line between the failure and the inspection.
+    if (statusChanged && (item.status === "error" || card.showsFailure)) {
+      this.applyCardMeta(card, item, card.bitrate ?? this.getBitrate());
+    }
 
     if (item.status === "processing") {
       if (statusChanged) {

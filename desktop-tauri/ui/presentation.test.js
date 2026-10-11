@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import { createQueueState, reduceQueueEvent, setItemSelected } from "./queue-state.js";
 import {
   batchClock,
@@ -33,6 +34,9 @@ test("the log shows › for path separators, keeps digit fractions, and leaves t
   assert.equal(logDisplayText("Output/Show.mkv"), "Output › Show.mkv");
   assert.equal(logDisplayText("C:\\Anime\\Show.mkv"), "C: › Anime › Show.mkv");
   assert.equal(logDisplayText("no paths here"), "no paths here");
+  // A run of separators is one separator: between digits it stays whole, elsewhere one chevron.
+  assert.equal(logDisplayText("16/9 and 2//1"), "16/9 and 2//1");
+  assert.equal(logDisplayText("a//b C:\\Anime\\ trailing/"), "a › b C: › Anime ›  trailing › ");
   // Display is a pure function of the raw line: the caller still holds the original for Copy.
   assert.match(raw, /\/media\/anime\/Season 1\//);
 });
@@ -126,4 +130,13 @@ test("the subtitle ladder follows the precedence order and never claims an autom
 test("sparkline points scale to the box and clamp out-of-range samples", () => {
   assert.equal(sparkPoints([5], 100), "");
   assert.equal(sparkPoints([0, 100, 200], 100, 64, 20), "0.0,18.0 32.0,2.0 64.0,2.0");
+});
+
+// WebKitGTK before 2.40 cannot parse a regex lookbehind, and the SyntaxError stops the whole
+// module graph from loading, so the window stays empty. The deb and rpm use the host's WebKitGTK.
+test("no UI module uses a regex lookbehind", () => {
+  const dir = new URL(".", import.meta.url);
+  for (const file of fs.readdirSync(dir).filter(name => name.endsWith(".js") && !name.endsWith(".test.js"))) {
+    assert.doesNotMatch(fs.readFileSync(new URL(file, dir), "utf8"), /\(\?<[=!]/, file);
+  }
 });
