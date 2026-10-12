@@ -229,7 +229,9 @@ html.is-linux.is-maximized .bar {
   background: var(--side);
   border-bottom: 1px solid var(--line);
 }
-.traffic-lights { display: flex; gap: 8px; }
+/* Shrink to the buttons: as a grid item it would stretch across its 1fr column and make the whole
+   left third a hover zone. */
+.traffic-lights { display: flex; gap: 8px; justify-self: start; }
 .tl-btn {
   width: 14px; height: 14px; padding: 0; border: 0; border-radius: 50%;
   display: grid; place-items: center;
@@ -242,8 +244,11 @@ html.is-linux.is-maximized .bar {
   .tl-btn:hover { transform: none; }
 }
 .tl-btn svg { display: block; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; opacity: 0; transition: opacity .12s; }
-/* The glyphs show for the whole group on hover or keyboard focus, as on macOS. */
-.traffic-lights:hover svg, .traffic-lights:focus-within svg { opacity: 1; }
+/* The glyphs show for the whole group on hover or keyboard focus, as on macOS. Not on mouse focus:
+   a clicked button keeps focus, which would leave them lit after the cursor moves away. The :has()
+   rule stands alone so an engine without :has() drops only it, not the hover rule. */
+.traffic-lights:hover svg { opacity: 1; }
+.traffic-lights:has(:focus-visible) svg { opacity: 1; }
 .tl-close { background: #ff5f57; color: rgba(80, 0, 0, .92); }
 .tl-min { background: #febc2e; color: rgba(100, 50, 0, .92); }
 .tl-max { background: #28c840; color: rgba(0, 70, 0, .92); }
