@@ -1,0 +1,38 @@
+name: Install Linux system dependencies
+description: >
+  apt-get install with a time-limited, retried download. A throttled mirror connection once
+  fetched 161 MB at 90 kB/s for 30 minutes; a fresh connection is usually fast again.
+
+inputs:
+  packages:
+    description: Space-separated apt package names.
+    required: true
+  install-recommends:
+    description: >
+      "true" to install recommended packages too. The release AppImage bundles what is
+      installed, so its build keeps them; test jobs skip them to download less.
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: apt-get update and install
+      shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+        RECOMMENDS: ${{ inputs.install-recommends == 'true' && '--install-recommends' || '--no-install-recommends' }}
+      run: |
+        # Each attempt gets 3 minutes to refresh the indexes and download: apt keeps finished
+        # files, so a retry on a fresh connection fetches only the rest. Three attempts bound a
+        # throttled mirror at about 9 minutes. The install then runs from the local cache with no
+        # limit, so a timeout never interrupts dpkg.
+        for attempt in 1 2 3; do
+          if sudo timeout -k 10 180 sh -c 'apt-get update -y && apt-get install -y --download-only "$0" $1' \
+              "$RECOMMENDS" "$PACKAGES"; then
+            sudo apt-get install -y "$RECOMMENDS" $PACKAGES
+            exit 0
+          fi
+          echo "::warning::apt download attempt $attempt of 3 failed or took over 3 minutes"
+        done
+        echo "::error::apt download failed after 3 attempts"
+        exit 1
