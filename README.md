@@ -328,6 +328,7 @@ mkvanimebatch/
 │   ├── agents/              # Agent skill docs (issue tracker, triage labels, domain docs)
 │   └── release-notes.md     # Release notes
 └── .github/
+    ├── actions/             # install-linux-deps: apt install with a timed, retried download
     └── workflows/           # ci.yml (CI checks) and release.yml (release build & publish)
 ```
 
