@@ -40,18 +40,11 @@ jobs:
 
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y \
-            build-essential curl wget file \
-            libssl-dev \
-            libgtk-3-dev \
-            libwebkit2gtk-4.1-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            patchelf \
-            ffmpeg \
-            mkvtoolnix
+        uses: ./.github/actions/install-linux-deps
+        with:
+          packages: >-
+            build-essential curl wget file libssl-dev libgtk-3-dev libwebkit2gtk-4.1-dev
+            libayatana-appindicator3-dev librsvg2-dev patchelf ffmpeg mkvtoolnix
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -258,16 +251,12 @@ jobs:
 
       # ── Linux system deps ─────────────────────────────────────────────────────
       - name: Install Linux system dependencies
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y \
-            build-essential curl wget file rpm \
-            libssl-dev \
-            libgtk-3-dev \
-            libwebkit2gtk-4.1-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            patchelf
+        uses: ./.github/actions/install-linux-deps
+        with:
+          install-recommends: "true"
+          packages: >-
+            build-essential curl wget file rpm libssl-dev libgtk-3-dev libwebkit2gtk-4.1-dev
+            libayatana-appindicator3-dev librsvg2-dev patchelf
 
       # ── Rust + Tauri ─────────────────────────────────────────────────────────
       - name: Install Rust toolchain
