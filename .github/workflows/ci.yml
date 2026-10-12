@@ -23,6 +23,9 @@ jobs:
   workspace-checks:
     name: Rust Workspace (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # Warm runs take 3-4 minutes and the slowest Windows run took 15. The apt step
+    # once stalled for 30 minutes; without a timeout GitHub waits 6 hours.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -30,9 +33,10 @@ jobs:
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
           # Windows is the slowest job and gains the most from Blacksmith. Linux
-          # stays on GitHub: it still finishes first, so moving it would spend
-          # Blacksmith's free minutes without making CI finish sooner. Blacksmith
-          # runners are organization-only: on a personal account, use windows-2025.
+          # stays on GitHub to save Blacksmith's free minutes for Windows; it
+          # already finishes first, so moving it would not make CI finish sooner.
+          # Blacksmith runners are organization-only: on a personal account, use
+          # windows-2025.
           - os: blacksmith-2vcpu-windows-2025
             target: x86_64-pc-windows-msvc
 
@@ -111,6 +115,7 @@ jobs:
   ui-tests:
     name: UI State & Contract Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -131,6 +136,7 @@ jobs:
   security-audit:
     name: Security Audit
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -148,6 +154,7 @@ jobs:
     name: CI Status Gate
     needs: [workspace-checks, ui-tests, security-audit]
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     if: always()
     steps:
       - name: Evaluate status
