@@ -6,7 +6,7 @@
       <stop offset="0" stop-color="#3ddbb4"/><stop offset="0.5" stop-color="#3b8cf6"/><stop offset="1" stop-color="#b05cf6"/>
     </linearGradient>
   </defs>
-  <!-- The glyph spans x 2..22, y 2.5..21.2 of its 24-unit box; scale 44 centres it on the canvas. -->
+  <!-- The glyph spans x 2..22, y 2.5..21.2 of its 24-unit box; scale 44 centres it on the canvas to within 0.1 px. -->
   <g transform="translate(-16 -9.5) scale(44)">
     <rect x="2" y="2.5" width="20" height="14" rx="3" fill="url(#screen)"/>
     <rect x="2" y="2.5" width="20" height="5" rx="2.5" fill="#ffffff" opacity="0.14"/>

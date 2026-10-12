@@ -148,7 +148,7 @@ mkvanimebatch/
     │   ├── tauri.conf.json          # Tauri application configuration
     │   ├── tauri.linux.conf.json    # Linux overrides (transparent window)
     │   ├── capabilities/            # Tauri capability definitions
-    │   ├── icons/                   # Bundle icons, all rendered from the icon.svg master: a real ICNS and an ICO whose entries are PNG-compressed (BMP entries grow it about 15x); ui/app-icons.test.js checks both
+    │   ├── icons/                   # Bundle icons, all rendered from the icon.svg master: a real ICNS and an ICO whose entries are PNG-compressed (BMP entries grow it about 15x); ui/app-icons.test.js checks both, that they embed the standalone PNGs, that icon.png holds the glyph where icon.svg puts it, and that icon.svg draws the title-bar glyph
     │   └── src/
     │       ├── lib.rs               # Tauri builder, command registration, exit handling, Linux environment defaults
     │       ├── main.rs              # Binary entry point
