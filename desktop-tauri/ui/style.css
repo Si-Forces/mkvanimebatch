@@ -266,7 +266,8 @@ html.is-linux.is-maximized .bar {
 .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .brand-name { display: flex; flex-direction: column; align-items: center; text-align: center; line-height: 1.15; font-weight: 700; font-size: 14px; white-space: nowrap; }
 /* The logo glyph sits bare, with fixed colours, so it looks the same in either theme. */
-.brand-mark { flex: none; display: grid; place-items: center; }
+/* Grid, not inline: an inline SVG would sit on the text baseline and leave a gap below it. */
+.brand-mark { flex: none; display: grid; }
 .nav-text { display: flex; flex-direction: column; line-height: 1.2; min-width: 0; }
 .brand-name small, .nav-text small { color: var(--mute); font-weight: 400; font-size: 11px; }
 
