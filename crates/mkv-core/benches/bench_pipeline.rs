@@ -102,8 +102,8 @@ fn populate_shared_assets_workload(root: &Path, count: usize, cache: &Persistent
     cache.save();
 }
 
-/// Times `BatchRequest::resolve`. Each run also clones the request and looks up the physical core
-/// count, so the figure is not comparable with the earlier `validate`-only numbers.
+/// Times `BatchRequest::resolve`, including the request clone and the physical core count lookup
+/// each run makes.
 fn bench_resolution(runs: usize) {
     let tmp = tempdir().unwrap();
     fs::write(tmp.path().join("ep01.mkv"), b"dummy").unwrap();

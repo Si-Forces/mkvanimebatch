@@ -21,7 +21,7 @@ use crate::scan::FileSignature;
 
 pub(crate) const FONT_DIR_NAMES: &[&str] = &["fonts", "font", "attachments"];
 
-/// Calculate BLAKE2b-512 hash of a file for content-based deduplication.
+/// The hex BLAKE2b-512 digest of a file, used for content-based deduplication.
 pub fn hash_file(filepath: &Path) -> Result<String, std::io::Error> {
     let mut file = File::open(filepath)?;
     let mut hasher = Blake2b512::new();
@@ -45,17 +45,15 @@ pub struct FontInfo {
     pub count: usize,
 }
 
-/// Build attachment arguments for all fonts found in `fonts_dir`, serving and filling
-/// `font_cache`. A `fonts_dir` that is not a directory is not cached, so the first scan made
-/// once it is one sees its fonts. An existing directory is cached on its first scan, even
-/// when it is empty.
+/// Builds the mkvmerge attachment arguments for every font in `fonts_dir`, serving and filling
+/// `font_cache`. A `fonts_dir` that is not a directory is not cached, so if extraction creates
+/// it later in the run, the next scan sees its fonts. An existing directory is cached on its
+/// first scan, even when it is empty.
 pub fn scan_fonts(fonts_dir: &Path, font_cache: &mut HashMap<PathBuf, FontInfo>) -> FontInfo {
     if let Some(info) = font_cache.get(fonts_dir) {
         return info.clone();
     }
 
-    // Intentionally do not cache a path that is not a directory: if extraction creates
-    // fonts_dir later in the run, subsequent scans must discover it.
     if !fonts_dir.is_dir() {
         return FontInfo::default();
     }
@@ -263,7 +261,7 @@ impl FontHashMemo {
 pub enum FontPromotion {
     /// Saved at this path.
     Promoted(PathBuf),
-    /// Its content is already saved, so the staged copy was dropped. Dedup working as designed.
+    /// Its content is already saved, so the staged copy was dropped.
     Duplicate,
     /// Not saved; the reason reads after "was not saved:" in the Log Channel line.
     Failed(String),
@@ -439,8 +437,9 @@ impl FontRegistry {
         self.state.lock().claimed_hashes.clone()
     }
 
-    /// Atomically reserve a font by sanitized name and size.
-    /// Returns a FontClaim with a registry-created same-filesystem staging path, or None if already claimed.
+    /// Reserves a font by sanitized name and size, returning a claim whose staging path is in
+    /// `fonts_dir/.font_staging` (the same filesystem as the target), or `None` if the font is
+    /// already claimed.
     pub fn claim(&self, name: &str, size: u64) -> Option<FontClaim> {
         let identity = (safe_filename(name), size);
         let mut state = self.state.lock();
@@ -460,11 +459,9 @@ impl FontRegistry {
         })
     }
 
-    /// Validate, hash, deduplicate, and atomically promote a staged font file to fonts_dir.
+    /// Validates, hashes, deduplicates, and atomically promotes a staged font into `fonts_dir`.
     /// A duplicate drops the staged file and keeps its `(name, size)` reservation; a failure
-    /// removes it and releases the claim.
-    /// The outcome tells the caller whether the font was saved, was a content duplicate, or
-    /// failed (with the reason, for the caller to report on the Log Channel).
+    /// removes it and releases the claim, and its reason is for the caller's Log Channel line.
     pub fn promote(&self, claim: &mut FontClaim) -> FontPromotion {
         let staged = match fs::metadata(&claim.staging_path) {
             Err(e) => Err(format!("could not read it: {e}")),
@@ -551,8 +548,8 @@ impl FontRegistry {
         candidate
     }
 
-    /// Idempotently release an uncommitted claim and clean up its staging path.
-    /// Never removes committed/promoted files.
+    /// Releases a claim that is not yet promoted and deletes its staging file. Idempotent, and a
+    /// no-op on a promoted claim.
     pub fn release(&self, claim: &mut FontClaim) {
         if claim.promoted || claim.released {
             return;
@@ -560,7 +557,7 @@ impl FontRegistry {
         release_locked(&mut self.state.lock(), claim);
     }
 
-    /// Remove staging directory if empty.
+    /// Removes the staging directory if it is empty.
     pub fn cleanup_staging(&self) {
         let _ = fs::remove_dir(&self.staging_dir);
     }
@@ -581,8 +578,8 @@ impl<'a> FontClaimsGuard<'a> {
         }
     }
 
-    pub fn push(&mut self, track_id: u32, claim: FontClaim) {
-        self.claims.push((track_id, claim));
+    pub fn push(&mut self, attachment_id: u32, claim: FontClaim) {
+        self.claims.push((attachment_id, claim));
     }
 
     pub fn is_empty(&self) -> bool {

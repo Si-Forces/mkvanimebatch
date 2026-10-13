@@ -1,6 +1,6 @@
 # 0005. Rust Media Engine Migration and Workspace Topology
 
-> **Status**: Accepted (Completed in ADR-0010; amended 2026-09-28)
+> **Status**: Accepted (completed in ADR-0010; amended 2026-09-28)
 > **Date**: 2026-04-01
 > **Context**: System Workspace Topology
 

@@ -1,5 +1,5 @@
-//! Asset discovery, indexing, and resolution for anime releases
-//! (subtitles, chapters, covers, fonts).
+//! Asset discovery, indexing, and resolution for Release Directories: subtitles, chapters, and
+//! covers through the Asset Resolver, fonts directories through the Release Preparer.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -28,11 +28,10 @@ pub struct PreparedRelease {
 }
 
 /// Prepares the Release Directories of one batch: resolves each one's fonts directory and
-/// indexes its assets. Use one preparer per batch. Release Directories sharing ancestors
-/// re-scan and re-classify the same files, so the preparer keeps those results. The caches are
-/// transparent: they only skip repeated scans and classification work, and a result equals the
-/// one a fresh preparer would return, except that a directory reached through a second spelling
-/// keeps the path spelling of its first scan (see [`ScanCache`]).
+/// indexes its assets. Use one preparer per batch. Release Directories that share ancestors
+/// would re-scan and re-classify the same files, so the preparer caches those results. A result
+/// equals the one a fresh preparer would return, except that a directory reached through a
+/// second spelling keeps the path spelling of its first scan (see [`ScanCache`]).
 #[derive(Debug, Default)]
 pub struct ReleasePreparer {
     scan_cache: ScanCache,
@@ -45,8 +44,9 @@ impl ReleasePreparer {
     /// Resolves the fonts directory for `mkv_dir` and indexes the assets of every directory
     /// from `root_input_dir` down to it.
     ///
-    /// Fonts come from `fonts_override`, else the nearest directory (from `mkv_dir` upwards)
-    /// whose fonts directory holds fonts, else the assets directory, else `mkv_dir/fonts`.
+    /// Fonts come from `fonts_override`, else the fonts directory of the nearest directory (from
+    /// `mkv_dir` upwards) whose fonts directory holds fonts, else the assets directory's fonts
+    /// directory if it holds fonts, else `mkv_dir/fonts`.
     pub fn prepare(
         &mut self,
         mkv_dir: &Path,
@@ -352,7 +352,7 @@ pub struct CoverIndex {
     episode_entries: HashMap<EpisodeType, HashMap<String, HashMap<PathBuf, Vec<usize>>>>,
     adjacent_entries: HashMap<PathBuf, HashMap<String, Vec<usize>>>,
     directory_entries: HashMap<PathBuf, Vec<usize>>,
-    // (rank, entry index) of the best directory cover; `lookup_fallback` uses (index, distance)
+    /// (rank, entry index) of the best directory cover.
     directory_winner: Option<(usize, usize)>,
 }
 
@@ -723,7 +723,7 @@ impl AssetResolver {
         inspected: Option<&InspectedVideo>,
         assigned_subtitle: Option<&Path>,
     ) -> SubResolution {
-        // Explicit human assignment overrides automatic matching (ADR 0004).
+        // Explicit human assignment overrides automatic matching (ADR-0004).
         if let Some(assigned) = assigned_subtitle {
             return SubResolution::from_assigned(assigned);
         }
@@ -737,7 +737,7 @@ impl AssetResolver {
             return SubResolution::external(sub_path, lang);
         }
 
-        // Embedded track from source video (ADR 0004).
+        // Embedded track from source video (ADR-0004).
         if let Some(insp) = inspected {
             if let Some((track_id, lang)) =
                 select_best_subtitle_track(&insp.subtitle_tracks(), None)

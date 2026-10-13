@@ -147,7 +147,7 @@ impl<'a> RemuxPlanner<'a> {
 
         // Assignment attributes only describe the assigned subtitle; they never restyle a
         // subtitle the resolver chose instead. The resolver always picks the assigned subtitle
-        // first (ADR-0004), so the filter never drops one today.
+        // first (ADR-0004), so the filter is a guard, and the debug assertion pins that.
         let chose_assigned = res_assets.subtitle_file.as_deref() == assigned_sub;
         debug_assert!(assignment.is_none() || chose_assigned);
         let assignment = assignment.filter(|_| chose_assigned);

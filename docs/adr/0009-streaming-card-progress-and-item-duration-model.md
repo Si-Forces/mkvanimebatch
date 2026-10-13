@@ -1,6 +1,6 @@
 # 0009. Streaming Card Progress, Centralized Heartbeat, and Authoritative Item Duration Model
 
-> **Status**: Accepted (amended 2026-09-28, 2026-10-01, 2026-10-11)
+> **Status**: Accepted (amended 2026-09-28, 2026-10-01, 2026-10-11; corrected 2026-10-13)
 > **Date**: 2026-06-01
 > **Context**: Desktop Application Context
 
@@ -27,7 +27,7 @@ We decided to adopt a unified, authoritative progress and duration architecture 
    - `mkv-core` assumes exclusive ownership over measuring item execution duration.
    - In both extraction and remux worker tasks, the engine captures a monotonic start timestamp (`Instant::now()`) immediately upon task entry and calculates elapsed seconds (`start_instant.elapsed().as_secs_f64()`) upon task termination (completion, cancellation, or error).
    - `JobEvent::ItemComplete` exposes a strongly-typed `duration_sec: Option<f64>` field containing this measured duration (or `None` for planned/skipped items that never ran).
-   - Desktop bridge snapshot reduction (`update_snapshot`) extracts `duration_sec` directly from `ItemComplete` into `ItemSnapshot`, ensuring reloaded snapshots preserve accurate terminal runtimes.
+   - Desktop bridge snapshot reduction (`SnapshotStore::update`; originally `update_snapshot`, corrected 2026-10-13) extracts `duration_sec` directly from `ItemComplete` into `ItemSnapshot`, ensuring reloaded snapshots preserve accurate terminal runtimes.
 
 4. **Adaptive Humanized Duration Formatting**:
    - Durations are rendered using adaptive formatting thresholds:

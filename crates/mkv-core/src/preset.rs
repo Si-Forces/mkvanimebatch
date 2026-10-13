@@ -1,10 +1,9 @@
-//! Canonical preset profiles for audio transcoding and container remuxing.
+//! The built-in Preset Profiles for audio transcoding.
 
 use serde::{Deserialize, Serialize};
 
-/// A named configuration profile for audio transcoding.
-/// Concurrency and hardware parameters (workers, io_jobs) are deliberately decoupled
-/// from encoding presets per ADR-0008.
+/// A named audio transcoding profile. Concurrency settings (`workers`, `io_jobs`) are not part of
+/// a preset (ADR-0008).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PresetProfile {
     pub id: String,
@@ -13,7 +12,7 @@ pub struct PresetProfile {
     pub complexity: u32,
 }
 
-/// Returns the standard catalog of built-in preset profiles.
+/// The built-in Preset Profiles.
 pub fn get_preset_profiles() -> Vec<PresetProfile> {
     vec![
         PresetProfile {

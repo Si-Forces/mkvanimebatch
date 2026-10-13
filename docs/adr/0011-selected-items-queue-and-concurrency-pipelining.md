@@ -1,6 +1,6 @@
 # 0011. Selected Items Execution Queue, Concurrency Pipelining, and Enriched Track Assignment
 
-> **Status**: Accepted (Amended by ADR-0012, ADR-0013, ADR-0014; amended 2026-09-29, 2026-10-11)
+> **Status**: Accepted (amended by ADR-0012, ADR-0013, ADR-0014; amended 2026-09-29, 2026-10-11)
 > **Date**: 2026-08-01
 > **Context**: Media Engine Context & Desktop Application Bridge
 > **Amends**: ADR-0008

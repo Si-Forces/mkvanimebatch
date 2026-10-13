@@ -496,7 +496,7 @@ function applyTelemetryData(data) {
 const telemetryLoop = createTelemetryLoop({
   invoke,
   onData: applyTelemetryData,
-  onError: (e) => console.log("[Telemetry Error]", e),
+  onError: err => console.error("[get_system_telemetry] failed:", err),
   doc: document,
 });
 
@@ -688,7 +688,7 @@ function showModal(title, message, { confirmLabel = "Confirm", showCancel = true
 function showCleanupError(error) {
   console.error("[cleanup] failed:", error);
   return showModal(
-    "Could Not Close Safely",
+    "Could not close safely",
     `MKV Anime Batch is still open because process cleanup failed: ${error}`,
     { confirmLabel: "OK", showCancel: false }
   );

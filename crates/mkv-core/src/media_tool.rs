@@ -172,7 +172,7 @@ async fn drain_stdout<R: AsyncRead + Unpin>(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolOutput {
     pub stdout: Vec<u8>,
-    /// The trimmed stderr and stdout of a run an MKVToolNix tool ended with exit code 1.
+    /// The trimmed stderr and stdout when an MKVToolNix tool exits with code 1 and prints any.
     pub warning: Option<String>,
 }
 
