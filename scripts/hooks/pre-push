@@ -56,7 +56,7 @@ helper="$(dirname "$0")/hidden-changes.sh"
 source "$helper" || { echo "❌ [pre-push] cannot load $helper. Restore it: git checkout -- scripts/hooks/hidden-changes.sh" >&2; exit 1; }
 hidden=$(hidden_changes) || { echo "❌ [pre-push] cannot list the index to check for hidden edits." >&2; exit 1; }
 dirty=$(git diff --name-only HEAD)
-untracked=$(git ls-files --others --exclude-standard -- '*.rs' '*Cargo.toml' 'desktop-tauri/ui/*')
+untracked=$(git ls-files --others --exclude-standard -- '*.rs' '*Cargo.toml' 'desktop-tauri/ui/*' 'scripts/*')
 if [ -n "$dirty$untracked$hidden" ]; then
   echo "❌ [pre-push] the working tree differs from HEAD, so the tests would not run on the pushed commit." >&2
   if [ -n "$dirty$untracked" ]; then
@@ -70,5 +70,5 @@ fi
 
 echo "[pre-push] cargo test --workspace..."
 cargo test --workspace || { echo "❌ [pre-push] cargo test failed." >&2; exit 1; }
-echo "[pre-push] node --test desktop-tauri/ui/*.test.js..."
-node --test "$root"/desktop-tauri/ui/*.test.js || { echo "❌ [pre-push] node --test failed." >&2; exit 1; }
+echo "[pre-push] node --test scripts/*.test.js desktop-tauri/ui/*.test.js..."
+node --test "$root"/scripts/*.test.js "$root"/desktop-tauri/ui/*.test.js || { echo "❌ [pre-push] node --test failed." >&2; exit 1; }

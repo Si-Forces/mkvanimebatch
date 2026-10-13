@@ -9,7 +9,7 @@ Always run the code review skill (Standards + Spec axes, parallel sub-agents) on
 ### CI formatting & lint gate before committing
 
 - **Rust Workspace**: Always run `cargo fmt --all` whenever Rust files are touched. The pre-commit hook then checks `cargo fmt --all -- --check` and `cargo clippy --workspace --all-targets -- -D warnings` on the staged tree, and that run is the clippy gate. Test as described in "Test runs" below.
-- **Frontend UI**: Always run `node --check desktop-tauri/ui/app.js` and `node --test desktop-tauri/ui/*.test.js` whenever UI files are touched.
+- **Frontend UI**: Always run `node --check desktop-tauri/ui/app.js` and `node --test scripts/*.test.js desktop-tauri/ui/*.test.js` whenever UI files or `scripts/` are touched.
 
 ### Test runs: targeted first, then the workspace once
 

@@ -806,9 +806,9 @@ cargo test --workspace
 
 # 3. Frontend syntax check and node:test suites
 node --check desktop-tauri/ui/app.js
-node --test desktop-tauri/ui/*.test.js
+node --test scripts/*.test.js desktop-tauri/ui/*.test.js
 ```
 
 CI (`.github/workflows/ci.yml`) runs the Rust checks on Ubuntu 24.04 and Windows, the UI tests, and `cargo audit`. The `mkv-core` integration suite `test_real_remux` drives real FFmpeg/MKVToolNix binaries. Developer-local `cargo test` runs skip it when the tools are absent; CI and release verification set `MKV_REQUIRE_MEDIA_TOOLS=1` on the Ubuntu runner, which makes a missing `ffmpeg`, `mkvmerge`, or `mkvextract` a hard failure.
 
-Releases (`.github/workflows/release.yml`) build only after the `ci-status` gate, which requires the `workspace-checks` job (including the non-skipping real-media regression) and the `ui-tests` job to pass.
+Releases (`.github/workflows/release.yml`) build only after the `ci-status` gate, which requires the `workspace-checks` job (including the non-skipping real-media regression) and the `ui-tests` job to pass. The gate also fails when `docs/release-notes.md` has no usable `## <version>` section (one with notes besides its intro and `### Downloads`), or when the tag differs from the workspace version in `Cargo.toml`. `scripts/release-body.sh` generates the release page from that section plus generated download and runtime tables, and its tests run with the UI tests. On `workflow_dispatch` the checkout is the selected ref, so a re-run after `main`'s version has moved on fails the version check, by design.
