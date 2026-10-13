@@ -273,7 +273,7 @@ flowchart TD
    - A video with no match is skipped. A video whose name has no episode number is skipped unless it has a manual assignment.
 
 2. **Episode identity parsing (`parse_episode`)**:
-   - Recognizes `S01E02`/`S1E2`, `S01P02` parts, season markers (`Season 1`, standalone `S1`), type qualifiers (`OVA`, `OAD`, `ONA`, `Special`, `SP`), and episode markers (`- 02`, `[02]`, `(02)`, `EP02`, `Episode 2`, `第02話`), with a bare-number fallback. `.[±N.Ns]` offset tags are ignored.
+   - Recognizes `S01E02`/`S1E2`, `S01P02` parts, season markers (`Season 1`, standalone `S1`), type qualifiers (`OVA`, `OAD`, `ONA`, `Special`, `SP`), and episode markers (`- 02`, `[02]`, `(02)`, `EP02`, `Episode 2`, `第02話`), with a bare-number fallback. `.[±N.Ns]` offset tags are ignored. An explicit `SxxExx`/`SxxPxx` beats a type qualifier, which may just be a word in the episode title (`S01E07 - Special Service` is an episode).
    - Keeps fractional episode numbers (`01.5`, `02.5`) without truncation (ADR-0004).
 
 3. **Subtitle scoring (`score_subtitle_category`)**:

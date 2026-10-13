@@ -63,6 +63,23 @@ fn test_subtitle_exact_season_beats_a_better_language_score() {
 }
 
 #[test]
+fn test_subtitle_for_an_s00_episode_with_a_qualifier_word_needs_season_0_or_open() {
+    // "S00E01 - Special" is episode 01 of season 0, not Special 00, so it now takes a
+    // season-0 or open subtitle, the exact one first, and never a season-1 one.
+    let video = create_parsed_file("/lib/Show - S00E01 - Special.mkv");
+    let (exact, open) = ("/lib/Show - S00E01.ass", "/lib/Show - 01.ass");
+    assert_eq!(resolve_subtitle(&video, &["/lib/Show - S01E01.ass"]), None);
+    assert_eq!(resolve_subtitle(&video, &[open]), Some(PathBuf::from(open)));
+    for subs in both_orders(&[open, exact, "/lib/Show - S01E01.ass"]) {
+        assert_eq!(
+            resolve_subtitle(&video, &subs),
+            Some(PathBuf::from(exact)),
+            "{subs:?}"
+        );
+    }
+}
+
+#[test]
 fn test_subtitle_nearer_open_beats_farther_exact() {
     for subs in both_orders(&["/lib/Show - S02E01.ass", "/lib/s2/Show - 01.ass"]) {
         // Same directory first, then ancestors by distance (ADR-0004): the season never

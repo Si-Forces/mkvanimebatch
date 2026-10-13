@@ -79,6 +79,13 @@ fn test_parse_episode_cases() {
         ("Show OAD 01", ("", "OVA", "01")),
         ("Show SP01", ("", "SP", "01")),
         ("Show Special 02", ("", "SP", "02")),
+        // An explicit SxxExx/SxxPxx beats a type qualifier in the episode title
+        (
+            "Show - S01E07 v2 - Special Service [BD][1080p]",
+            ("1", "E", "07"),
+        ),
+        ("Show - S01E05 - The OVA Club", ("1", "E", "05")),
+        ("Show - S02P03 - SP Unit", ("2", "P", "03")),
         // Subtitle offset suffixes are ignored
         ("Show - 01.[+5s]", ("", "E", "01")),
         ("Show - 02.[-3s]", ("", "E", "02")),
