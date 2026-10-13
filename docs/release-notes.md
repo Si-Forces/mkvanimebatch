@@ -11,7 +11,7 @@ The first public release of MKV Anime Batch: a desktop app and a command-line to
 | Platform | Desktop app | CLI |
 | :--- | :--- | :--- |
 | Windows (x64) | `mkv-anime-batch.exe`, or `MKV_Anime_Batch_Portable_win64.zip` | `mkv-cli-x86_64-pc-windows-msvc.zip` |
-| Linux (x86_64) | `MKV_Anime_Batch_*_amd64.AppImage`, `MKV_Anime_Batch_*_amd64.deb`, or `MKV_Anime_Batch-*.x86_64.rpm` | `mkv-cli-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux (x86_64) | `MKV_Anime_Batch_1.0.0_amd64.AppImage`, `MKV_Anime_Batch_1.0.0_amd64.deb`, or `MKV_Anime_Batch-1.0.0-1.x86_64.rpm` | `mkv-cli-x86_64-unknown-linux-gnu.tar.gz` |
 
 Each CLI archive has a `.sha256` file. There is no macOS build. `APPIMAGE-RUNTIME.txt` lists the GTK and WebKitGTK versions bundled in the AppImage.
 

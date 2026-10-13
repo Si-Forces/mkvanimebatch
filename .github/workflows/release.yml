@@ -94,7 +94,7 @@ jobs:
       - name: Run UI syntax and contract tests
         run: |
           node --check desktop-tauri/ui/app.js
-          node --test desktop-tauri/ui/*.test.js
+          node --test scripts/*.test.js desktop-tauri/ui/*.test.js
 
   # ────────────────────────────────────────────────────────────────────────────
   # 3. Release Verification Gate
@@ -108,18 +108,29 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Resolve Release Tag
+        id: release-tag
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.version_tag }}
+          REF_NAME: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "tag=$INPUT_TAG" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=$REF_NAME" >> "$GITHUB_OUTPUT"
+          fi
+
       # Fail before any build if the release page could not be generated: build-linux
       # needs a "## <version>" section in docs/release-notes.md (pre-release tags too),
       # and the bundle names it lists come from the workspace version.
       - name: Check release notes and version
         env:
-          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.version_tag || github.ref_name }}
+          TAG: ${{ steps.release-tag.outputs.tag }}
         run: |
           version="${TAG#v}"
-          if ! grep -qE "^## ${version//./\\.}( |\$)" docs/release-notes.md; then
-            echo "::error::docs/release-notes.md has no '## $version' section for $TAG"
-            exit 1
-          fi
+          scripts/release-body.sh notes "$version" > /dev/null
           cargo_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
           if [ "$version" != "$cargo_version" ]; then
             echo "::error::tag $TAG does not match the workspace version $cargo_version"
@@ -462,98 +473,7 @@ jobs:
           GTK: ${{ steps.verify-linux.outputs.gtk_version }}
         run: |
           version="${TAG#v}"
-          body="$RUNNER_TEMP/release-body.md"
-
-          # The table below names these files; fail if the bundles came out under other names.
-          for f in "MKV_Anime_Batch_${version}_amd64.AppImage" "MKV_Anime_Batch_${version}_amd64.deb" \
-                   "MKV_Anime_Batch-${version}-1.x86_64.rpm"; do
-            if [ ! -e "/tmp/linux-release/$f" ]; then
-              echo "::error::expected bundle /tmp/linux-release/$f is missing"
-              exit 1
-            fi
-          done
-
-          # Take the "## <version>" section of docs/release-notes.md. Text before its
-          # first "###" (the intro) and its "### Downloads" subsection are dropped,
-          # because this page generates both. Remaining "###" headings become "##".
-          notes="$(awk -v v="$version" '
-            /^## / { insec = ($2 "" == v); keep = 0; next }
-            insec && /^### / { keep = ($0 != "### Downloads"); if (keep) sub(/^#/, "") }
-            insec && keep
-          ' docs/release-notes.md)"
-          if [ -z "$notes" ]; then
-            echo "::error::docs/release-notes.md has no '## $version' section for $TAG"
-            exit 1
-          fi
-
-          {
-            cat <<'EOF'
-          MKV Anime Batch is a desktop app and a command-line tool (`mkv-cli`) that remux or extract a whole folder of anime fansub MKV episodes in one run. See the [README](https://github.com/Si-Forces/mkvanimebatch#readme) for install and usage.
-
-          ## Downloads
-
-          ### Windows (x64)
-
-          | File | Description |
-          |------|-------------|
-          | `mkv-anime-batch.exe` | Desktop app, single executable |
-          | `MKV_Anime_Batch_Portable_win64.zip` | Desktop app, portable zip |
-          | `mkv-cli-x86_64-pc-windows-msvc.zip` | Command-line tool |
-
-          ### Linux (x86_64)
-
-          | File | Description |
-          |------|-------------|
-          EOF
-            printf '| `MKV_Anime_Batch_%s_amd64.AppImage` | Desktop app for any distribution |\n' "$version"
-            printf '| `MKV_Anime_Batch_%s_amd64.deb` | Desktop app for Debian and Ubuntu |\n' "$version"
-            printf '| `MKV_Anime_Batch-%s-1.x86_64.rpm` | Desktop app for Fedora and RHEL |\n' "$version"
-            cat <<'EOF'
-          | `mkv-cli-x86_64-unknown-linux-gnu.tar.gz` | Command-line tool |
-          | `APPIMAGE-RUNTIME.txt` | GTK and WebKitGTK versions bundled in the AppImage |
-
-          Each CLI archive has a `.sha256` file. There is no macOS build.
-
-          ## Requirements
-
-          - `mkvmerge` and `mkvextract` ([MKVToolNix](https://mkvtoolnix.download/)), and `ffmpeg` with `libopus` ([FFmpeg](https://ffmpeg.org/)), all on your `PATH`.
-          - The Windows MKVToolNix installer does not add itself to `PATH`. Add `C:\Program Files\MKVToolNix` yourself.
-          - The Windows desktop app needs the Microsoft Edge WebView2 Runtime, which current Windows includes.
-          - On Linux, run `chmod +x` on the AppImage before starting it.
-
-          ## Quick start (CLI)
-
-          With `mkv-cli` on your `PATH` (or run it by its full path):
-
-          ```bash
-          # Print the inspection manifest (JSON), writing no media
-          mkv-cli --input-dir "/path/to/series" --plan
-
-          # Show what a remux would do, without writing anything
-          mkv-cli --input-dir "/path/to/series" --dry-run
-
-          # Remux every episode into an Output/ folder beside each MKV
-          mkv-cli --input-dir "/path/to/series"
-          ```
-
-          The full option list is in the [README](https://github.com/Si-Forces/mkvanimebatch#command-line-mkv-cli).
-
-          EOF
-            printf '%s\n\n' "$notes"
-            cat <<'EOF'
-          ## AppImage bundled runtime
-
-          The AppImage ships its own GTK and WebKitGTK instead of the host's, and they decide how its
-          window renders ([ADR-0015](https://github.com/Si-Forces/mkvanimebatch/blob/main/docs/adr/0015-per-package-webkitgtk-dmabuf-renderer-scoping.md)). If it crashes at
-          startup or shows a blank window, run it with `WEBKIT_DISABLE_DMABUF_RENDERER=1`. This build bundles:
-
-          | Library | Version |
-          |---------|---------|
-          EOF
-            printf '| `libwebkit2gtk-4.1.so.0` | `%s` |\n' "$WEBKIT"
-            printf '| `libjavascriptcoregtk-4.1.so.0` | `%s` |\n' "$JSC"
-            printf '| `libgtk-3.so.0` | `%s` |\n' "$GTK"
-          } > "$body"
+          scripts/release-body.sh page "$version" /tmp/linux-release > "$RUNNER_TEMP/release-body.md"
 
       # Sole owner of the release's name and body. The body documents both
       # platforms because one release carries both platforms' assets, and it
