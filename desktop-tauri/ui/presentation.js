@@ -16,6 +16,17 @@ export function pathSegments(path) {
   return String(path ?? "").split(/[\\/]+/).filter(segment => segment && segment !== "." && segment !== "..");
 }
 
+/**
+ * The folder crumbs of an Inspector episode: its Item ID minus the file name, which the
+ * Inspector title already shows. None for an episode at the top of the input folder.
+ *
+ * @param {string} id
+ * @returns {string[]}
+ */
+export function inspectorCrumbs(id) {
+  return pathSegments(id).slice(0, -1);
+}
+
 /** A path as one line of Finder-style text: `media › anime › Show`. */
 export function prettyPath(path) {
   return pathSegments(path).join(" › ");
