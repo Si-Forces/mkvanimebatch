@@ -1,6 +1,6 @@
 /**
  * DOM-free presentation rules of the Library + Inspector layout: Finder-style paths, row status
- * text and colour, the list filters, the bottom bar's progress, the subtitle precedence ladder
+ * text and color, the list filters, the bottom bar's progress, the subtitle precedence ladder
  * and the telemetry sparklines. Nothing here decides what the engine does.
  */
 import { formatElapsedDuration, formatOutcomeDuration } from "./queue-state.js";
@@ -42,7 +42,7 @@ export function logDisplayText(line) {
     .replace(/[\\/]+/g, (sep, at, text) => (digit(text[at - 1]) && digit(text[at + sep.length]) ? sep : " › "));
 }
 
-/** The colour token of an item status: running is blue, done green, failed red, the rest muted. */
+/** The color token of an item status: running is blue, done green, failed red, the rest muted. */
 const STATUS_TONES = { processing: "info", completed: "ok", error: "err" };
 
 /** @returns {"info"|"ok"|"err"|"mute"} */

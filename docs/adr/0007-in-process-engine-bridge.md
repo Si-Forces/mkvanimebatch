@@ -1,6 +1,6 @@
 # 0007. In-Process Engine Bridge and Sidecar Retirement
 
-> **Status**: Accepted (Partially superseded by ADR-0008; amended 2026-09-28, 2026-10-04, 2026-10-09)
+> **Status**: Accepted (partially superseded by ADR-0008; amended 2026-09-28, 2026-10-04, 2026-10-09; corrected 2026-10-13)
 > **Date**: 2026-05-01
 > **Context**: Desktop Application Bridge
 
@@ -15,7 +15,7 @@ We decided to cut over `desktop-tauri` entirely to an in-process **Engine Bridge
    > **AMENDED BY ADR-0008**: The untyped IPC signature `run_job(mode, args, assignments_json)` was superseded by strongly-typed `BatchRequest`.
 2. **Dual-Channel Streaming**: Decouple structured state from diagnostic logs. The batch pipeline emits strongly-typed `JobEvent` structs over an MPSC event channel to update the `Queue Tracker`, while emitting diagnostic lines over a dedicated `Log Channel` to stream batched console lines (`"job-log"`) to the UI terminal drawer.
 3. **Task-Level Panic Isolation**: Run pipeline execution within Tokio asynchronous task boundaries. Any unexpected engine panic is caught at the join boundary, preventing desktop crashes, cleanly releasing the `JobSlot`, and emitting a terminal error event to the GUI.
-4. **Two-Phase Teardown**: Coordination uses `tokio_util::sync::CancellationToken` and `tauri::async_runtime::JoinHandle` (wrapping Tokio's `JoinHandle`). On cancellation or shutdown, cooperative cancellation is triggered first, allowing up to 2.0 seconds for temporary scratch directory cleanup and inspect cache persistence; if unreleased after 2.0 seconds, hard task abortion is invoked as a safety valve.
+4. **Two-Phase Teardown**: Coordination uses `tokio_util::sync::CancellationToken` and the pipeline task's `tokio::task::AbortHandle` (originally a `tauri::async_runtime::JoinHandle`; corrected 2026-10-13). On cancellation or shutdown, cooperative cancellation is triggered first, allowing up to 2.0 seconds for temporary scratch directory cleanup and inspect cache persistence; if unreleased after 2.0 seconds, hard task abortion is invoked as a safety valve.
 5. **Full Sidecar Retirement**: Delete `sidecar.rs`, remove `build-sidecars.*` scripts, and eliminate `externalBin` configurations from `tauri.conf.json`. `mkv-cli` is retained strictly as a standalone terminal CLI for headless scripting.
 
 ## Considered Options

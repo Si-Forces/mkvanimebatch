@@ -1,339 +1,340 @@
-# MKV Anime Batch Tool (`mkvanimebatch`)
+# MKV Anime Batch (`mkvanimebatch`)
 
 [![CI](https://github.com/Si-Forces/mkvanimebatch/actions/workflows/ci.yml/badge.svg)](https://github.com/Si-Forces/mkvanimebatch/actions/workflows/ci.yml)
-[![Rust](https://img.shields.io/badge/Rust-2021%20%7C%201.88%2B-orange?logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/Rust-stable-orange?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![Tauri v2](https://img.shields.io/badge/Tauri-v2-24C8D8?logo=tauri&logoColor=white)](https://v2.tauri.app/)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey)](https://github.com/Si-Forces/mkvanimebatch/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A batch remux and extraction engine with a native desktop GUI for anime fansub releases. `mkvanimebatch` probes Matroska files with a native EBML parser, ranks subtitle and audio tracks, extracts and deduplicates fonts, transcodes FLAC audio to Opus, applies subtitle sync offsets, promotes outputs atomically, and processes files with bounded concurrency.
+MKV Anime Batch processes a folder of anime fansub episodes (Matroska `.mkv` files) in one run. It has two modes:
 
-Available both as a standalone **CLI binary (`mkv-cli`)** and as a **Tauri v2 desktop application** that runs the engine in-process and shows system telemetry and streamed per-item progress.
+- **Remux**: writes a new MKV per episode with the best matching subtitle, one audio track, chapters, a cover, and the release's fonts. A FLAC audio track is transcoded to Opus. Subtitle timing can be shifted.
+- **Extract**: pulls the best subtitle, the chapters, the cover, and the fonts out of each episode, with fonts deduplicated across the whole release.
+
+It is for people who keep or prepare fansub releases where subtitles, fonts, chapters, and covers are spread across season folders, sit next to or above the videos, or repeat in every episode. It runs on Windows and Linux, as a desktop app and as a command-line tool (`mkv-cli`). Both use the same engine and the same rules.
+
+It does not re-encode video. All media work is done by [MKVToolNix](https://mkvtoolnix.download/) and [FFmpeg](https://ffmpeg.org/), which you install separately.
+
+Found a bug or have a question? [Open an issue](https://github.com/Si-Forces/mkvanimebatch/issues).
 
 ---
 
-## Table of Contents
+## Contents
 
-- [Key Features](#key-features)
-- [System Requirements](#system-requirements)
-- [Quick Start & CLI Usage](#quick-start--cli-usage)
-  - [1. Standalone CLI (`mkv-cli`)](#1-standalone-cli-mkv-cli)
-  - [2. CLI Options Reference](#2-cli-options-reference)
-  - [3. Concurrency & Performance Tuning](#3-concurrency--performance-tuning)
-- [Tauri Desktop Application](#tauri-desktop-application)
-  - [Pre-built Releases](#pre-built-releases)
-  - [Building from Source](#building-from-source)
+- [Install](#install)
+- [Desktop app](#desktop-app)
+- [Command line (`mkv-cli`)](#command-line-mkv-cli)
+- [How files are chosen](#how-files-are-chosen)
+- [Output and safety](#output-and-safety)
 - [Troubleshooting](#troubleshooting)
-- [Architecture & Design](#architecture--design)
-- [Running Automated Tests](#running-automated-tests)
-- [Project Layout](#project-layout)
+- [Building from source](#building-from-source)
+- [Development](#development)
 - [License](#license)
 
 ---
 
-## Key Features
+## Install
 
-### Hybrid EBML Probing & Fast Preflight
-* **Native Parsing**: Reads Matroska/EBML headers, tracks, attachments, and chapters in-process, without spawning a tool per file (ADR-0006).
-* **Fallback Inspector**: Falls back to `mkvmerge -J` whenever native parsing fails.
+### 1. Download a release
 
-### Subtitle Selection & Extraction
-* **Language Priority**: Ranks subtitles by language: Indonesian (`ind`, then `id`), undetermined (`und`), English (`eng`, then `en`), then any other language.
-* **Format Scoring**: Any ASS subtitle (`S_TEXT/ASS` track or `.ass` file) outranks every non-ASS subtitle. Among equal scores, a track or file whose name marks it as dialogue (e.g. `Full`, `Dialogue`, `Main`) wins. Extract mode extracts only ASS/SSA tracks.
-* **Manual Track Assignments**: Per-episode subtitle overrides via `--assignments`, validated fail-fast before the batch starts.
-* **Resolution Precedence Ladder**: Evaluates candidate subtitles in strict order: manual `TrackAssignment` > exact same-directory external subtitle > embedded subtitle track > nearest matching ancestor external subtitle > explicit `--assets-dir` fallback. Source precedence beats language score across sources.
+Get the files from [GitHub Releases](https://github.com/Si-Forces/mkvanimebatch/releases).
 
-### Audio Scoring & Opus Transcoding
-* **Dialogue Priority**: Scores audio tracks, preferring Japanese (stereo dialogue, then stereo, then any channel layout), then undetermined-language tracks, then other stereo tracks.
-* **Commentary Track Isolation**: Tracks whose names look like commentary or audio description are considered only when every audio track looks like one.
-* **FLAC to Opus**: A selected FLAC audio track is transcoded to Opus with FFmpeg; other codecs are kept as-is. Preset Profiles (`balanced`, `fast`, `hifi`, `custom`) set the Opus bitrate and complexity.
-* **Automatic Thread Governance**: The FLAC decoder thread cap per transcode (`--ffmpeg-threads`) defaults to `auto`: `(cores / workers)` clamped to 1–4, where cores are physical cores from `/proc/cpuinfo` on Linux, capped at the available parallelism (which accounts for cgroup CPU quotas and affinity where it can read them); the available parallelism elsewhere (ADR-0013). Encoding is single-threaded per transcode (libopus), so the cap only limits decoder threads.
+| Platform | Desktop app | CLI |
+| :--- | :--- | :--- |
+| Windows (x64) | `mkv-anime-batch.exe` (single executable), or `MKV_Anime_Batch_Portable_win64.zip` | `mkv-cli-x86_64-pc-windows-msvc.zip` |
+| Linux (x86_64), any distribution | `MKV_Anime_Batch_*_amd64.AppImage` | `mkv-cli-x86_64-unknown-linux-gnu.tar.gz` |
+| Debian, Ubuntu | `MKV_Anime_Batch_*_amd64.deb` | same as above |
+| Fedora, RHEL | `MKV_Anime_Batch-*.x86_64.rpm` | same as above |
 
-### Transactional Font Registry & Asset Deduplication
-* **Embedded Font Detection**: Identifies font attachments by filename extension or MIME type.
-* **BLAKE2b Hash Deduplication**: Claims each font by name and size, then deduplicates by BLAKE2b-512 content hash against fonts already in the target fonts directory.
-* **RAII Claim Safety**: A font claim that is never promoted, for example on cancellation or failure, is released and its staging file deleted when the claim guard drops.
-* **Mode-Specific Font Handling**: Extraction mode retains extracted fonts as user output, while remux mode discovers and embeds fonts into output Matroska files.
-* **Chapter & Cover Art Preservation**: Extracts and embeds XML chapter definitions and front cover art. Directory covers (`cover.<ext>`, `folder.<ext>`) and episode covers (`<video-stem>_cover.<ext>`, `<video-stem>.cover.<ext>`, `<video-stem>.<ext>`) resolve nearest applicable directory first, then an exact season over an unknown one, then `_cover` > `.cover` > bare stem > `cover` > `folder`. The bare-stem form only matches a video in the same directory, so an `--assets-dir` cover meant for a video elsewhere must use one of the other four forms. Local and ancestor external covers supersede embedded artwork; explicit `--assets-dir` covers apply only when embedded art is absent.
+Each CLI archive has a `.sha256` checksum file next to it. Extract `mkv-cli` somewhere on your `PATH`, or run it by its full path. On Linux, make the AppImage executable first (`chmod +x MKV_Anime_Batch_*_amd64.AppImage`). There is no macOS build.
 
-### Crash-Resistant Output & Safe Recovery
-* **Atomic File Promotion**: Remuxing and extraction write into a temporary scratch directory inside the destination, then promote each file by rename. An existing destination is replaced with backup-and-rollback; across filesystem boundaries (`EXDEV`) the file is copied to a temporary sibling and renamed into place.
-* **Scratch Cleanup**: On cancellation or failure the scratch directory is removed, so no partial output reaches its final path.
+The Windows desktop app uses the Microsoft Edge WebView2 Runtime, which Windows 11 and current Windows 10 already include. If the window does not open, install the runtime from Microsoft.
 
----
+### 2. Install the media tools
 
-## System Requirements
+Both the desktop app and the CLI need these programs on your `PATH`:
 
-Ensure the following external media tools are installed and available in your system `PATH`:
+| Tool | Used for |
+| :--- | :--- |
+| `mkvmerge`, `mkvextract` ([MKVToolNix](https://mkvtoolnix.download/)) | Writing remuxed files, extracting tracks and attachments, and reading files the built-in parser cannot |
+| `ffmpeg` with the `libopus` encoder ([FFmpeg](https://ffmpeg.org/download.html)) | Transcoding FLAC audio to Opus. Only needed when a selected audio track is FLAC |
 
-1. **MKVToolNix** (`mkvmerge`, `mkvextract`) — [Download MKVToolNix](https://mkvtoolnix.download/)
-2. **ffmpeg** (used to transcode FLAC audio tracks to Opus) — [Download ffmpeg](https://ffmpeg.org/download.html)
+The packages below include `libopus`.
 
-### Package Manager Installation
-
-#### Windows (Winget / Scoop)
 ```powershell
-# Using Winget
+# Windows: winget
 winget install MKVToolNix.MKVToolNix
 winget install Gyan.FFmpeg
 
-# Using Scoop
+# Windows: Scoop
 scoop install mkvtoolnix ffmpeg
 ```
 
-#### Linux (Debian / Ubuntu / Mint)
 ```bash
-sudo apt update
-sudo apt install -y mkvtoolnix ffmpeg
-```
+# Debian, Ubuntu, Mint
+sudo apt install mkvtoolnix ffmpeg
 
-#### Linux (Fedora / RHEL)
-```bash
-sudo dnf install -y mkvtoolnix ffmpeg-free
-```
+# Fedora
+sudo dnf install mkvtoolnix ffmpeg-free
 
-#### Linux (Arch Linux)
-```bash
+# Arch Linux
 sudo pacman -S mkvtoolnix-cli ffmpeg
 ```
 
+The Windows MKVToolNix installer does not add itself to `PATH`: add `C:\Program Files\MKVToolNix` to `PATH` yourself (Scoop does it for you). Check that the tools are found with `mkvmerge --version` and `ffmpeg -hide_banner -encoders | grep libopus` (on Windows, `findstr libopus`).
+
 ---
 
-## Quick Start & CLI Usage
+## Desktop app
 
-### 1. Standalone CLI (`mkv-cli`)
+1. Pick **Remux** or **Extract** under **Pipeline** in the sidebar.
+2. Click **Open folder…** and choose the release folder. The app scans it, including subfolders, and lists every episode, grouped by folder.
+3. Tick the episodes to process. The arrows on a row change the order they run in.
+4. Click an episode to open the inspector. It shows the output file, the audio and subtitle tracks, the subtitle ladder (which subtitle would be used, and why), and the fonts. In Remux mode you can assign a different subtitle there, with its own language, title, and offset.
+5. Pick a preset in the sidebar, or open the settings sheet with the gear next to the mode. The sheet holds the input, output, fonts, and assets folders, the Opus bitrate and complexity, the subtitle offset, worker and disk I/O limits, **Dry run**, and **Bypass inspection cache**. Empty worker and disk I/O fields use the engine's defaults, shown as `auto (N)`.
+6. Click **Run remux** or **Run extract**. Each row shows its progress and result. **Stop** cancels the batch and removes partial output. **Log** opens the log, which you can copy.
 
-Download `mkv-cli` from [GitHub Releases](https://github.com/Si-Forces/mkvanimebatch/releases) or compile from source:
+One batch runs at a time. If the window is reloaded during a run, it reconnects to the running batch. The theme follows the system light or dark setting until you toggle it.
+
+The bottom bar shows CPU and RAM use and the disk write rate of the app and its `mkvmerge`, `mkvextract`, and `ffmpeg` processes.
+
+---
+
+## Command line (`mkv-cli`)
 
 ```bash
-# Inspect a series directory and generate structured Manifest v2 JSON
-./mkv-cli --input-dir "/path/to/anime/series" --plan
+# Print the inspection manifest (JSON) for a release folder, writing no media
+mkv-cli --input-dir "/path/to/series" --plan
 
-# Plan inspection manifest filtered to specific episodes
-./mkv-cli --input-dir "/path/to/anime/series" --selected-item "[Group] Show - 01 [1080p, AAC].mkv" --plan
+# Show what a remux would do, without writing anything
+mkv-cli --input-dir "/path/to/series" --dry-run
 
-# Dry-run batch remuxing (plans each file without remuxing, transcoding, or writing outputs)
-./mkv-cli --input-dir "/path/to/anime/series" --dry-run
+# Remux every episode into an Output/ folder beside each MKV
+mkv-cli --input-dir "/path/to/series"
 
-# Batch remux selected episodes with the balanced preset
-./mkv-cli --input-dir "/path/to/anime/series" --selected-items "01.mkv, 02.mkv" --preset balanced
+# Remux two episodes, in this order, with the hifi preset, into another folder
+mkv-cli --input-dir "/path/to/series" --selected-items "01.mkv, 02.mkv" --preset hifi --out-dir "/path/to/output"
 
-# Batch remux episodes into a custom output directory
-./mkv-cli --input-dir "/path/to/anime/series" --out-dir "/path/to/output" --preset balanced
+# Select a file whose name contains a comma
+mkv-cli --input-dir "/path/to/series" --selected-item "[Group] Show - 01 [1080p, AAC].mkv"
 
-# Batch extract subtitles, fonts, chapters, and covers
-./mkv-cli --input-dir "/path/to/anime/series" --extract --workers 4
+# Extract subtitles, fonts, chapters, and covers with 4 workers
+mkv-cli --input-dir "/path/to/series" --extract --workers 4
 
-# Remux with manual track assignments JSON
-./mkv-cli --input-dir "/path/to/anime/series" --assignments "/path/to/assignments.json"
+# Remux with manual subtitle assignments
+mkv-cli --input-dir "/path/to/series" --assignments assignments.json
 ```
 
-### 2. CLI Options Reference
+### Options
 
 | Option | Description | Default |
 | :--- | :--- | :--- |
-| `--input-dir <DIR>` | Source directory containing anime video releases; searched recursively | *Required* (except with `--help` or `--clear-cache`) |
-| `--out-dir <DIR>` | Output root; each MKV's subdirectory under `--input-dir` is mirrored beneath it | Remux: an `Output/` directory beside each MKV<br>Extract: the MKV's own directory |
-| `--fonts-dir <DIR>` | Explicit fonts directory override; must be an existing directory | None (auto-discovered) |
-| `--assets-dir <DIR>` | Fallback directory for external subtitle/chapter/cover assets; must be an existing directory | None |
-| `--preset <PROFILE>` | Preset profile, case-insensitive: `balanced` (192k, complexity 5), `fast` (128k, 5), `hifi` (320k, 10), `custom` (192k, 5). `default` is accepted for `balanced` and `high_quality` / `high-quality` for `hifi` | None (192k, complexity 5) |
-| `--assignments <FILE>` | JSON file of subtitle Track Assignments: an array of `TrackAssignment` objects, an object whose `assignments` key holds such an array or a map, or a legacy `{"video.mkv": "sub.ass"}` map. If repeated, the last one wins | None |
-| `--selected-item <PATH>` | Select one video file to process (repeatable, literal path; safe for filenames with commas) | None (all discovered files) |
-| `--selected-items <LIST>` | Comma-separated list of video files to process (repeatable; trims whitespace and drops empty segments) | None (all discovered files) |
-| `--sub-offset <SEC>` | Subtitle timestamp sync offset in seconds (e.g. `1.5`, `-0.5`), rounded half away from zero to whole milliseconds; a value that is not finite, or whose milliseconds do not fit `i64`, is rejected. A Track Assignment's `offset_ms` replaces it | `0` |
-| `--workers <N>` | Number of concurrent worker tasks (1–64) | Physical cores, capped at the available parallelism, clamped to 1–16 |
-| `--io-jobs <N>` | Concurrency limit for disk-heavy work (0–64; `0` uses the worker count) | `2` |
-| `--ffmpeg-threads <N\|auto>` | FLAC decoder thread cap per audio transcode job (1–32); `auto` is case-insensitive. Opus encoding is single-threaded per transcode, so raising it rarely speeds up a transcode | `auto`: `(cores / workers)` clamped to 1–4 |
-| `--bitrate <RATE>` | Opus bitrate: a positive integer with an optional `k`/`K` or `M` suffix (e.g. `128k`, `192K`); lowercase `m` is rejected | Preset bitrate, else `192k` |
-| `--complexity <0-10>` | Opus encoder complexity | Preset complexity, else `5` |
-| `--extract` | Run batch extraction instead of remuxing | Off |
-| `--remux` | Run batch remuxing | On, unless the executable is named `mkv-extract` |
-| `--plan` | Print the Inspection Manifest (version 2) JSON and exit. With a selection, fails if any selected item is not a discovered MKV, then keeps only the selected items in selection order | Off |
-| `--dry-run` | Plan the batch and report each runnable item as `planned`, without remuxing, extracting, or transcoding | Off |
-| `--events` | Emit NDJSON job events, one per line, prefixed `@event: `; the summary log is not printed | Off |
-| `--no-cache` | Bypass the persistent inspection cache | Off |
-| `--clear-cache` | Clear the persistent inspection cache and exit | Off |
-| `-h, --help` | Show usage help | |
+| `--input-dir <DIR>` | Release folder to process; searched recursively | Required, except with `--help` or `--clear-cache` |
+| `--out-dir <DIR>` | Output root. Each MKV's subfolder under `--input-dir` is mirrored beneath it | Remux: an `Output/` folder beside each MKV<br>Extract: the MKV's own folder |
+| `--fonts-dir <DIR>` | Fonts folder to use instead of the one found automatically; must exist | Found automatically (see [Fonts](#fonts)) |
+| `--assets-dir <DIR>` | Fallback folder for external subtitles, chapters, and covers; must exist | None |
+| `--preset <PROFILE>` | Preset Profile, case-insensitive: `balanced` (192k, complexity 5), `fast` (128k, 5), `hifi` (320k, 10), `custom` (192k, 5). `default` means `balanced`; `high_quality` and `high-quality` mean `hifi` | `balanced` values (192k, complexity 5) |
+| `--assignments <FILE>` | JSON file of subtitle Track Assignments (see [Track Assignments](#track-assignments)). If repeated, the last one wins | None |
+| `--selected-item <PATH>` | Process this video. Repeatable. Taken literally, so commas in names are safe | All discovered videos |
+| `--selected-items <LIST>` | Process these comma-separated videos. Repeatable. Each entry is trimmed; empty entries are dropped | All discovered videos |
+| `--sub-offset <SEC>` | Subtitle timing offset in seconds, such as `1.5` or `-0.5`, rounded half away from zero to whole milliseconds. A Track Assignment's own offset replaces it | `0` |
+| `--workers <N>` | Episodes processed at once, 1–64 | The CPU core count (physical cores on Linux, logical CPUs elsewhere), capped at the CPUs the process may use, clamped to 1–16 |
+| `--io-jobs <N>` | Disk-heavy steps run at once, 0–64. `0` means the worker count | `2` |
+| `--ffmpeg-threads <N\|auto>` | FLAC decoder threads per transcode, 1–32, or `auto` | `auto`: the same core count ÷ workers, clamped to 1–4 |
+| `--bitrate <RATE>` | Opus bitrate: a positive integer with an optional `k`, `K`, or `M` suffix, such as `128k`. Lowercase `m` is rejected, because FFmpeg reads it as "milli" | The preset's bitrate, else `192k` |
+| `--complexity <0-10>` | Opus encoder complexity | The preset's complexity, else `5` |
+| `--extract` | Extract instead of remux | Off |
+| `--remux` | Remux | On, unless the executable is named `mkv-extract` |
+| `--plan` | Print the Inspection Manifest (JSON, version 2) and exit. With a selection, keep only the selected items, in selection order | Off |
+| `--dry-run` | Plan the batch and report each runnable item as `planned`, without writing, extracting, or transcoding | Off |
+| `--events` | Print job events as NDJSON lines prefixed `@event: `, instead of the summary | Off |
+| `--no-cache` | Do not read or write the inspection cache | Off |
+| `--clear-cache` | Delete the inspection cache and exit | Off |
+| `-h`, `--help` | Show help | |
 
-`--extract` and `--remux` override each other (the last one wins) and the executable-name default. `--selected-item` and `--selected-items` require `--input-dir`; each selection is resolved relative to `--input-dir` (absolute paths and paths relative to the working directory are also accepted) and is rejected if it resolves outside it. Unknown arguments are an error.
+Notes:
 
-Exit codes: `0` on success; `1` on an argument or validation error, when any file ends in error, or on a fatal pipeline error; `130` when cancelled by Ctrl-C/SIGINT (or SIGTERM on Unix).
+- `--extract` and `--remux` override each other (the last one wins) and the executable-name default. Renaming or linking the binary as `mkv-extract` makes extract the default.
+- `--selected-item` and `--selected-items` need `--input-dir`. A selection may be relative to `--input-dir`, absolute, or relative to the current directory. It must be a discovered `.mkv` inside `--input-dir`, listed once, or the whole run fails. Selected videos run in the order given.
+- Unknown arguments are an error. All values are checked before any work starts.
 
-### 3. Concurrency & Performance Tuning
+Exit codes: `0` on success; `1` on an invalid argument, when any episode ends in error, or on a fatal error; `130` when a batch is cancelled with Ctrl-C (or SIGTERM on Linux). Cancelling `--plan` exits `1`.
 
-* **`--workers`**: Governs overall concurrency (number of episodes in flight). Defaults to the core count clamped to 1–16: physical cores from `/proc/cpuinfo` on Linux, capped at the available parallelism (which accounts for cgroup CPU quotas and affinity where it can read them); the available parallelism elsewhere (see `crates/mkv-core/src/cpu.rs`).
-* **`--io-jobs`**: Caps how many workers run disk-heavy work at once. Keeping `--io-jobs 2` prevents head thrashing on spinning hard drives (HDDs), while SSD/NVMe drives can scale to `4`–`8`. `0` sets the cap to the worker count.
-* **`--ffmpeg-threads`**: Caps the FLAC decoder threads of each transcode (ffmpeg's `-threads`, an input option). Defaults to `auto`, deriving the cap as `(cores / workers)` clamped to 1–4 (ADR-0013), which keeps a batch from starting `workers × cores` mostly idle decoder threads. Set an explicit value to override the governor. Opus encoding (libopus) is single-threaded, so each transcode encodes on about one core whatever this is set to; `--workers` is the only lever on encode CPU use.
-* **Queue Scoping & Ordering**: Specifying `--selected-item` or `--selected-items` restricts execution to the selected episodes in the exact specified order, running up to `--workers` concurrently across the active selection (ADR-0011, ADR-0014). Every selected item must be a discovered MKV file, otherwise the whole run fails.
+### Tuning
+
+- **`--workers`** sets how many episodes are in flight. It is also the main control over CPU use, because each Opus encode uses about one core.
+- **`--io-jobs`** limits how many episodes run `mkvmerge` or `mkvextract` and move their output at the same time. Transcoding is outside this limit, so it overlaps with other episodes' muxing. Keep `2` on a spinning hard drive; an SSD can take `4`–`8`.
+- **`--ffmpeg-threads`** only limits FLAC decoding threads. Encoding is single-threaded per episode whatever you set here. The `auto` value keeps a batch from starting many idle decoder threads.
+
+### Track Assignments
+
+A Track Assignment tells the tool which subtitle file to use for one episode. `--assignments` accepts any of these JSON shapes:
+
+```json
+[
+  {
+    "target_video": "Season 1/Show - 01.mkv",
+    "asset_path": "subs/Show - 01 [v2].ass",
+    "language": "ind",
+    "title": "Indonesian",
+    "offset_ms": 1500
+  }
+]
+```
+
+```json
+{ "assignments": [ { "target_video": "Show - 01.mkv", "asset_path": "Show - 01.ass" } ] }
+```
+
+```json
+{ "Show - 01.mkv": "Show - 01.ass" }
+```
+
+`target_video` is the video's path relative to `--input-dir`. `asset_path` is absolute, or relative to `--input-dir` (then `--assets-dir`). `language`, `title`, and `offset_ms` are optional; `offset_ms` replaces `--sub-offset` for that episode, and `0` means no shift. A target that does not exist or is outside the selection, a missing subtitle, or two assignments for one video fail the run before it starts.
 
 ---
 
-## Tauri Desktop Application
+## How files are chosen
 
-A desktop GUI built with **Tauri v2**, featuring:
-* **Liquid Glass Aesthetic**: Translucent frosted panels, a custom window frame, and light and dark themes. The theme follows the system color scheme until you toggle it; the choice is then remembered.
-* **In-Process Engine Bridge**: Runs `mkv-core` in-process, with no sidecar process, and isolates pipeline panics so a failed job reports an error instead of taking the app down (ADR-0007).
-* **Queue Tracker & Streaming Progress**: Each running card shows an indeterminate bar until the engine streams progress for it, then a determinate fill; finished cards show the engine-measured duration.
-* **Live Telemetry & Logs**: System CPU and RAM usage, the disk write rate of the app and its mkvmerge/mkvextract/ffmpeg child processes, and a streaming log console.
+This section describes Remux. Extract reads only what is inside each video: the best embedded ASS or SSA subtitle (ranked by format and language as below), the chapters, the cover, and the fonts.
 
-### Pre-built Releases
+### Subtitles
 
-Download ready-to-run desktop releases directly from [GitHub Releases](https://github.com/Si-Forces/mkvanimebatch/releases):
+For each episode, the first source that has a match wins:
 
-* **Windows**: Standalone `mkv-anime-batch.exe` or portable `MKV_Anime_Batch_Portable_win64.zip`; CLI archive `mkv-cli-x86_64-pc-windows-msvc.zip`
-* **Linux**: `MKV_Anime_Batch_*_amd64.AppImage`, Debian/Ubuntu `MKV_Anime_Batch_*_amd64.deb`, or Fedora/RHEL `MKV_Anime_Batch_*_x86_64.rpm`; CLI archive `mkv-cli-x86_64-unknown-linux-gnu.tar.gz`
+1. A manual Track Assignment.
+2. An external subtitle in the video's own folder.
+3. A subtitle track inside the video.
+4. An external subtitle in the nearest parent folder (up to `--input-dir`).
+5. An external subtitle in `--assets-dir`.
 
-Each CLI archive ships with a `.sha256` checksum file.
+The source order beats language: an English `.ass` next to the video wins over an embedded Indonesian track. External files match by episode identity parsed from the file name (`S01E02`, `- 02`, `[02]`, `EP02`, `第02話`, OVA and specials, fractional episodes such as `12.5`). Within one folder, a file of the video's known season beats one with no season; a nearer folder still wins first. An episode with no matching subtitle is skipped.
 
-### Building from Source
+Within one source, any ASS subtitle beats any other format (SSA included). Within one format, subtitles rank by language: Indonesian, then undetermined (`und`), then English, then others. Ties go to names that mark dialogue (`Full`, `Dialogue`, `Main`, and similar).
 
-#### Prerequisites
-- [Rust & Cargo](https://rustup.rs/) (stable; the locked dependencies require 1.88 or newer)
-- Linux dependencies (Debian/Ubuntu):
+### Audio
+
+One audio track is kept. Japanese is preferred, then undetermined language (`und`), then any stereo track. Within Japanese and `und`, a stereo track named as dialogue comes first, then any stereo track, then any layout. Remaining ties go to the earliest track. Tracks named like commentary or audio description are used only when every track looks like one. A FLAC track is transcoded to Opus; other codecs are copied.
+
+### Chapters and covers
+
+- **Chapters**: an `.xml` file containing a `<Chapters>` element, whose name parses to the episode. The nearest folder wins. A chapter file in the release folders replaces the video's own chapters. A release's single chapter file with no episode number, and `--assets-dir` chapters, are used only when the video has none.
+- **Covers**: `cover.<ext>` and `folder.<ext>` apply to a folder and its subfolders. `<video-stem>_cover.<ext>`, `<video-stem>.cover.<ext>`, and `<video-stem>.<ext>` apply to one episode. The nearest folder wins, then `_cover`, `.cover`, the bare stem, `cover`, and `folder`, in that order. The bare-stem form only matches a video in the same folder. Covers in the release folders replace embedded artwork; `--assets-dir` covers are used only when the video has none.
+
+### Fonts
+
+- **Remux** attaches every font in the release's fonts folder: `--fonts-dir`, else the nearest folder from the video up to `--input-dir` that has a `fonts`, `font`, or `attachments` folder with fonts in it, else the one in `--assets-dir`, else `<video folder>/fonts`. When that folder has no fonts, the video's own font attachments are kept.
+- **Extract** saves each new font once, into `--fonts-dir` or a `fonts` folder under the output folder. A font with the same name and size, or the same content (BLAKE2b hash), as one already there is not written again. A different font whose name is taken is saved as `<name>_<hash prefix>.<ext>`, so existing files are never overwritten.
+
+---
+
+## Output and safety
+
+- Remuxed files are named after the source, with an `OVA<ep>_` or `SP<ep>_` prefix for OVAs and specials. Extracted files are named `<stem>_EP<ep>_<lang>_track<id>.ass`, and `<stem>_EP<ep>_chapters.xml` (`Part`, `OVA`, or `SP` replace `EP` where they apply, and the episode part is left out when the name has none), and `<stem>_cover<ext>`.
+- Work is written to a hidden temporary folder inside the destination and moved into place only when complete. Stopping a batch or a failure removes the temporary folder, so a partial file never appears under its final name.
+- An existing output file is replaced by an atomic rename. Where the system will not rename over a file (Windows), the old file is moved aside first and put back if the replace fails. Extract never overwrites an existing cover.
+- Media file metadata is cached, keyed on path, size, and modification time, so a second scan of the same folder is fast. The cache is `inspect_cache.json` in `%LOCALAPPDATA%\mkvanimebatch` on Windows and `~/.cache/mkvanimebatch` on Linux. Use **Clear inspection cache…** in the settings sheet or `mkv-cli --clear-cache` to delete it.
+
+---
+
+## Troubleshooting
+
+**The AppImage crashes at startup or shows a blank window.** Run it with `WEBKIT_DISABLE_DMABUF_RENDERER=1` to use software rendering, and [open an issue](https://github.com/Si-Forces/mkvanimebatch/issues) with your GPU and driver. With the NVIDIA driver loaded, the AppImage already sets this. Do not set it for the `.deb` or `.rpm` packages: there it breaks the window's rendering ([ADR-0015](docs/adr/0015-per-package-webkitgtk-dmabuf-renderer-scoping.md)).
+
+**An episode was skipped or failed.** The log line for that episode says why, for example no matching subtitle, or the `mkvmerge` or `ffmpeg` error.
+
+**More detail.** The engine writes its own warnings (an unreadable cache, `mkvmerge -J` warnings) as diagnostics. The default level is `warn`. Set `RUST_LOG` to see more. `RUST_LOG` replaces the default, so start it with `warn,` to keep other warnings when raising one module.
+
+- **CLI**: diagnostics go to stderr, so stdout holds only the `--plan` JSON, the `--events` lines, or the summary.
+- **Desktop**: diagnostics go to a log file and to stderr. The file is emptied at startup when it is over 1 MB. The Windows app has no console, so the file is the only output there.
+
+  | OS | Log file |
+  | :--- | :--- |
+  | Linux | `$XDG_DATA_HOME/com.mkvanimebatch.desktop/logs/mkv-anime-batch.log` (`~/.local/share` when unset) |
+  | Windows | `%LOCALAPPDATA%\com.mkvanimebatch.desktop\logs\mkv-anime-batch.log` |
+
+```bash
+# Everything at debug level
+RUST_LOG=debug mkv-cli --input-dir /path/to/series --plan
+
+# Only the font code at debug level, everything else at warn
+RUST_LOG=warn,mkv_core::fonts=debug mkv-cli --input-dir /path/to/series
+
+# Desktop on Linux: start it from a terminal to see stderr too
+RUST_LOG=debug ./MKV_Anime_Batch_*_amd64.AppImage
+```
+
+---
+
+## Building from source
+
+Requirements:
+
+- [Rust](https://rustup.rs/), the current stable toolchain (CI builds with the latest stable).
+- On Linux, the Tauri system libraries (Debian and Ubuntu names):
+
   ```bash
-  sudo apt install -y build-essential curl wget file libssl-dev libgtk-3-dev \
+  sudo apt install build-essential curl wget file libssl-dev libgtk-3-dev \
     libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
   ```
 
-#### 1. Compile `mkv-cli`
 ```bash
+# CLI
 cargo build --release -p mkv-cli
 ./target/release/mkv-cli --help
-```
 
-#### 2. Compile Desktop Application
-```bash
-# Install Tauri CLI
+# Desktop app
 cargo install tauri-cli --version "^2" --locked
-
-# Build desktop application
 cd desktop-tauri
 cargo tauri build
 ```
 
 ---
 
-## Troubleshooting
+## Development
 
-The engine reports its own problems (a corrupt inspect cache, a failed font memo, `mkvmerge -J` warnings) as diagnostics. The default level is `warn`; set `RUST_LOG` to see more, in both binaries. `RUST_LOG` replaces the default rather than adding to it, so start it with `warn,` to keep the other warnings when you raise one module.
+The repository is a Cargo workspace:
 
-- **CLI**: diagnostics go to stderr, so stdout stays the `--plan` JSON, the `--events` NDJSON and the summary.
-- **Desktop log file**: diagnostics go to `mkv-anime-batch.log`, which is emptied at startup when it is over 1 MB. `RUST_LOG` applies to it too, if it is set in the environment the app starts from.
+```
+mkvanimebatch/
+├── crates/
+│   ├── mkv-core/        # Media engine library: probing, matching, fonts, remux, extract, batch pipeline
+│   └── mkv-cli/         # Command-line front end
+├── desktop-tauri/
+│   ├── src-tauri/       # Tauri v2 host; runs mkv-core in-process
+│   └── ui/              # Frontend: plain ES modules and CSS, no framework or bundler
+├── docs/
+│   ├── adr/             # Architecture Decision Records
+│   ├── agents/          # Conventions for coding agents (issue tracker, labels, domain docs)
+│   └── release-notes.md
+├── scripts/             # Git hooks and the review-ledger script
+└── .github/             # CI and release workflows
+```
 
-  | OS | Log file |
-  |---|---|
-  | Linux | `$XDG_DATA_HOME/com.mkvanimebatch.desktop/logs/mkv-anime-batch.log` (`~/.local/share` when unset) |
-  | Windows | `%LOCALAPPDATA%\com.mkvanimebatch.desktop\logs\mkv-anime-batch.log` |
-  | macOS | `~/Library/Logs/com.mkvanimebatch.desktop/mkv-anime-batch.log` |
-- **Desktop stderr**: diagnostics also go to stderr, which you only see when the app is started from a terminal. The Windows build has no console, so there the log file is the only output. On Linux, a desktop launcher usually sends stderr to the session log (the journal or `~/.xsession-errors`).
+Run the same checks as CI (Node.js 20 or newer for the UI tests):
 
 ```bash
-# Everything at debug level
-RUST_LOG=debug mkv-cli --input-dir /path/to/series --plan
-
-# One module at debug (here the font registry), the rest still at warn
-RUST_LOG=warn,mkv_core::fonts=debug mkv-cli --input-dir /path/to/series
-
-# Desktop on Linux or macOS: start it from a terminal to see stderr too
-RUST_LOG=debug ./mkv-anime-batch
-```
-
----
-
-## Architecture & Design
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    mkvanimebatch Suite                      │
-├──────────────────────────────┬──────────────────────────────┤
-│      Desktop GUI Host        │       Standalone CLI         │
-│        (Tauri v2)            │         (mkv-cli)            │
-│  Queue Tracker & Telemetry   │   Terminal & Scripting       │
-└──────────────┬───────────────┴──────────────┬───────────────┘
-               │                              │
-               ▼                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                   mkv-core (Media Engine)                   │
-├─────────────────────────────────────────────────────────────┤
-│  • Domain Heuristics (Audio Scoring, Subtitle Ranking)      │
-│  • Hybrid EBML Probing (Native Parser + mkvmerge Fallback)  │
-│  • Transactional Font Registry (BLAKE2b Hash Dedup)         │
-│  • Unified Asset Resolver (Nearest-Directory Precedence)    │
-│  • Batch Pipeline & Bounded Concurrency Engine              │
-│  • Dual-Channel Streaming (Job Events & Log Channel)        │
-│  • Engine Diagnostics (tracing: stderr, desktop log file)   │
-└─────────────────────────────────────────────────────────────┘
-```
-
-See the architecture decision records in `docs/adr/` (0001–0015) for complete architectural rationale:
-- [ADR-0005: Rust Engine Migration & Workspace Topology](docs/adr/0005-rust-engine-migration-and-workspace-topology.md)
-- [ADR-0006: Hybrid EBML Probing & Channel Streaming](docs/adr/0006-hybrid-ebml-probing-and-channel-streaming.md)
-- [ADR-0007: In-Process Engine Bridge & Sidecar Retirement](docs/adr/0007-in-process-engine-bridge.md)
-- [ADR-0008: Typed Engine Bridge & Track Assignment Model](docs/adr/0008-typed-engine-bridge-and-track-assignment-model.md)
-- [ADR-0009: Streaming Card Progress & Item Duration Model](docs/adr/0009-streaming-card-progress-and-item-duration-model.md)
-- [ADR-0010: Mainline Rust Engine Cutover & Python Decommissioning](docs/adr/0010-mainline-rust-cutover-and-python-decommissioning.md)
-- [ADR-0011: Selected Items Queue & Concurrency Pipelining](docs/adr/0011-selected-items-queue-and-concurrency-pipelining.md)
-- [ADR-0012: Track Assignment Override Execution & Seam Unification](docs/adr/0012-track-assignment-override-execution-and-seam-unification.md)
-- [ADR-0013: Asynchronous Probing and Transcode Governance Performance Overhaul](docs/adr/0013-asynchronous-probing-and-transcode-governance-performance-overhaul.md)
-- [ADR-0014: CLI Selected Items Execution and Manifest Filtering](docs/adr/0014-cli-selected-items-execution-and-manifest-filtering.md)
-- [ADR-0015: Per-Package WebKitGTK DMABUF Renderer Scoping](docs/adr/0015-per-package-webkitgtk-dmabuf-renderer-scoping.md)
-
----
-
-## Running Automated Tests
-
-To run the complete automated test suite:
-
-```bash
-# Check formatting
 cargo fmt --all -- --check
-
-# Run Clippy across all crates
 cargo clippy --workspace --all-targets -- -D warnings
-
-# Run all Rust unit and integration tests (mkv-core, mkv-cli, desktop-tauri)
 cargo test --workspace
-
-# Run frontend UI contract and state machine tests (Node.js 20+; CI uses Node 20)
 node --check desktop-tauri/ui/app.js
 node --test desktop-tauri/ui/*.test.js
 ```
 
-`crates/mkv-core/tests/test_real_remux.rs` drives real `ffmpeg`, `mkvmerge`, and `mkvextract` binaries and is skipped when they are unavailable. On Linux, CI and the release verification gate set `MKV_REQUIRE_MEDIA_TOOLS=1`, which turns a missing tool into a test failure:
+`crates/mkv-core/tests/test_real_remux.rs` runs the real `ffmpeg`, `mkvmerge`, and `mkvextract` and is skipped when they are missing. Linux CI sets `MKV_REQUIRE_MEDIA_TOOLS=1`, which makes a missing tool a failure:
 
 ```bash
 MKV_REQUIRE_MEDIA_TOOLS=1 cargo test -p mkv-core --test test_real_remux
 ```
 
----
+Design documents:
 
-## Project Layout
-
-```
-mkvanimebatch/
-├── Cargo.toml               # Unified Cargo workspace root
-├── CONTEXT-MAP.md           # Bounded context map
-├── AGENTS.md                # Agent workflow rules (review and CI gate before commits) and agent skill docs
-├── crates/
-│   ├── mkv-core/            # Standalone media engine library crate
-│   │   ├── src/             # EBML parsing, CPU topology, domain heuristics, fonts, pipeline
-│   │   └── tests/           # 12 integration suites (assets, domain, scan, remux, extract, fonts, media-tool, pipeline, pipeline-assignments, pipeline-font-memo, cross-regex, real-remux)
-│   └── mkv-cli/             # Standalone CLI binary adapter
-│       └── src/             # CLI argument parsing and entry point
-├── desktop-tauri/           # Desktop GUI application
-│   ├── ui/                  # Web frontend (Liquid Glass UI, Queue Tracker, 13 Node test suites)
-│   └── src-tauri/           # In-process Tauri Engine Bridge & telemetry
-├── docs/
-│   ├── adr/                 # Architecture Decision Records (0001 - 0015)
-│   ├── agents/              # Agent skill docs (issue tracker, triage labels, domain docs)
-│   └── release-notes.md     # Release notes
-└── .github/
-    ├── actions/             # install-linux-deps: apt install with a timed, retried download
-    └── workflows/           # ci.yml (CI checks) and release.yml (release build & publish)
-```
+- [architecture.md](architecture.md): the detailed system description.
+- [CONTEXT-MAP.md](CONTEXT-MAP.md), [crates/mkv-core/CONTEXT.md](crates/mkv-core/CONTEXT.md), and [desktop-tauri/CONTEXT.md](desktop-tauri/CONTEXT.md): the domain vocabulary.
+- [docs/adr/](docs/adr/): why the system is built the way it is (ADR-0001 to ADR-0015).
 
 ---
 
 ## License
 
-This project is open-source software licensed under the [MIT License](LICENSE).
+[MIT](LICENSE).

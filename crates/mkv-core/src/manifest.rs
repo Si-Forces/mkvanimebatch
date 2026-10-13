@@ -58,7 +58,7 @@ fn parse_resolution(pixel_dimensions: &str) -> Option<&'static str> {
     None
 }
 
-/// Normalizes video codec strings into standard identifiers (HEVC, AVC, AV1, VP9).
+/// Normalizes a video codec to HEVC, AVC, AV1, or VP9; any other non-empty codec passes through.
 fn parse_video_codec(codec: &str, codec_id: &str) -> Option<String> {
     let combined = format!("{codec} {codec_id}").to_lowercase();
     if combined.contains("hevc") || combined.contains("h.265") {
@@ -141,11 +141,10 @@ pub struct ManifestItem {
 pub struct InspectionManifest {
     pub version: u64,
     /// External subtitles a human can assign to the items of each release, keyed by release and
-    /// listed as root-relative POSIX paths. A subtitle outside the input directory is never
-    /// listed, whatever `--assets-dir` says: only those in the Release Directory or an ancestor
-    /// up to the input root appear. `generate_inspection_manifest` takes no assets directory, so
-    /// an `--assets-dir` subtitle is resolved by the Asset Resolver's fallback but not listed. A
-    /// person can still assign it with a browsed path or a CLI `--assignments` path.
+    /// listed as root-relative POSIX paths: those in the Release Directory or an ancestor up to
+    /// the input root. `generate_inspection_manifest` takes no assets directory, so an
+    /// `--assets-dir` subtitle is resolved by the Asset Resolver's fallback but never listed; it
+    /// can still be assigned by a browsed path or a CLI `--assignments` path.
     #[serde(default)]
     pub subtitle_candidates: BTreeMap<String, Vec<String>>,
     pub items: Vec<ManifestItem>,
@@ -339,7 +338,7 @@ fn prune_and_save_cache(
     }
 }
 
-/// Generates a complete preflight inspection manifest for an anime batch directory.
+/// Builds the Inspection Manifest of `input_dir`.
 ///
 /// After a completed inspection it also prunes `persistent_cache` of the entries under
 /// `input_dir` whose file was not discovered, then saves it; a cancelled inspection prunes nothing.

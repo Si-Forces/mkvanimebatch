@@ -52,9 +52,8 @@ fn starts_with_ignore_ascii_case(s: &str, prefix: &str) -> bool {
         .is_some_and(|start| start.eq_ignore_ascii_case(prefix.as_bytes()))
 }
 
-/// Determines if a process is an engine process (the desktop app itself, or its
-/// direct child media tools: mkvmerge, mkvextract, ffmpeg)
-/// by checking process name and whether its parent is `self_pid`.
+/// Whether `pid` is the desktop app itself (`self_pid`) or one of its direct child
+/// Media Tools, matched by name prefix and parent.
 fn is_engine_process(
     pid: Pid,
     process_name: &str,

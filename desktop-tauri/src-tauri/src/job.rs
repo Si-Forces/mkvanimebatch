@@ -324,7 +324,7 @@ impl JobState {
 }
 
 /// The terminal a finished pipeline task amounts to: the engine's own `BatchComplete` when it
-/// delivered one, else one the bridge synthesises from how the task ended. `cancelled` is whether
+/// delivered one, else one the bridge synthesizes from how the task ended. `cancelled` is whether
 /// the job was told to stop. A worker error or panic is also written to the job log.
 fn pipeline_terminal(
     pipeline_result: tauri::Result<Result<PipelineSummary, String>>,
@@ -475,7 +475,7 @@ pub(crate) fn display_canonical_path(path: &str) -> String {
     }
 }
 
-/// A terminal the supervisor synthesises when the worker did not deliver one.
+/// A terminal the supervisor synthesizes when the worker did not deliver one.
 fn bridge_terminal(cancelled: bool, problem: Option<(&str, String)>) -> JobEvent {
     let mut extra = serde_json::Map::new();
     if let Some((key, message)) = problem {

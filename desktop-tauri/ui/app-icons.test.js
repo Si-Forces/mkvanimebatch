@@ -4,10 +4,10 @@ import fs from "node:fs";
 import zlib from "node:zlib";
 
 // The bundle icons are derived from src-tauri/icons/icon.svg, and nothing re-renders them
-// automatically. These tests check each derived file is the format its extension promises (an
-// icon.icns that was really a renamed PNG shipped unnoticed once) and catch a file drifting from
-// its source: the containers must embed the standalone PNGs, icon.png must hold the glyph where
-// icon.svg puts it, and icon.svg must draw the same glyph as the title bar.
+// automatically. These tests check each derived file is the format its extension promises (a
+// renamed PNG passes for an icon.icns unnoticed) and catch a file drifting from its source: the
+// containers must embed the standalone PNGs, icon.png must hold the glyph where icon.svg puts it,
+// and icon.svg must draw the same glyph as the title bar.
 const icons = new URL("../src-tauri/icons/", import.meta.url);
 const read = name => fs.readFileSync(new URL(name, icons));
 const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
@@ -126,7 +126,7 @@ test("icon.svg draws the same glyph as the title-bar brand mark", () => {
   const html = fs.readFileSync(new URL("index.html", import.meta.url), "utf8");
   const brand = html.match(/<span class="brand-mark"[\s\S]*?<\/span>/)?.[0];
   assert.ok(brand, "index.html has a .brand-mark");
-  // Every drawing element and the gradient, with the gradient id (screen vs mk-screen) normalised.
+  // Every drawing element and the gradient, with the gradient id (screen vs mk-screen) normalized.
   const glyph = text =>
     [...text.matchAll(/<(?:rect|path|circle|ellipse|line|polyline|polygon|linearGradient|radialGradient|stop)\b[^>]*>/g)]
       .map(m => m[0].replace(/\bid="[\w-]+"/, 'id="g"').replace(/url\(#[\w-]+\)/, "url(#g)"));

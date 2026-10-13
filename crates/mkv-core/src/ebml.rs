@@ -1,11 +1,10 @@
-//! Native lightweight EBML parser for Matroska containers.
+//! Native EBML parser for Matroska containers.
 //!
-//! Parses Segment Header, Tracks (video, audio, subtitles), Attachments
-//! (fonts, covers), and Chapters directly in pure Rust without external process spawning.
-//! A truncated tail or a malformed SeekHead entry ends the scan without failing. Any error
-//! (not an EBML/Matroska file, a Cluster before any SeekHead, a malformed Tracks or
-//! Attachments element, no track found, I/O failure) makes the caller fall back to
-//! `mkvmerge -J` (ADR 0006).
+//! Reads Tracks (video, audio, subtitles), Attachments (fonts, covers), and whether Chapters
+//! exist, without running a Media Tool. A truncated tail or a malformed SeekHead entry ends the
+//! scan without failing. Any error (not an EBML/Matroska file, a Cluster before any SeekHead, a
+//! malformed Tracks or Attachments element, no track found, I/O failure) makes the caller fall
+//! back to `mkvmerge -J` (ADR-0006).
 
 use std::fs::File;
 use std::io::{self, BufReader, Read, Seek};
@@ -57,8 +56,8 @@ fn with_context(e: io::Error, context: &str) -> io::Error {
     io::Error::new(e.kind(), format!("{context}: {e}"))
 }
 
-/// Reader wrapper that preserves `BufReader`'s buffer on intra-buffer seeks via `seek_relative`
-/// and tracks stream position in memory, eliminating kernel `lseek` loop guards.
+/// Seeks with `BufReader::seek_relative`, which keeps the buffer when the target lies inside it,
+/// and tracks the stream position itself, so reading the position never issues an `lseek`.
 struct EbmlReader<R> {
     inner: BufReader<R>,
     pos: u64,
@@ -817,7 +816,7 @@ mod tests {
         let meta = probe_ebml_native(temp.path()).unwrap();
         assert_eq!(meta.tracks.len(), 6);
 
-        // 2. Verify tracking reader verifies buffer retention on intra-buffer skips
+        // 2. Parsing the same bytes keeps the buffer: one fill and no seeks
         let tracker = TrackingReader {
             inner: Cursor::new(mkv_bytes),
             reads: 0,

@@ -9,7 +9,7 @@ How the engineering skills should consume this repo's domain documentation when 
   - [`desktop-tauri/CONTEXT.md`](../../desktop-tauri/CONTEXT.md) for desktop GUI, queue state projection, and the in-process Engine Bridge.
 - **`docs/adr/`** — read ADRs that touch the area you're about to work in (`0001` through `0015`, noting the 2026-09-24 ratified amendments to ADR-0004 for subtitle/cover precedence and to ADR-0008 for font retention removal and typed track assignments).
 
-If any of these files don't exist, **proceed silently**. Don't flag their absence; don't suggest creating them upfront. The `/domain-modeling` skill (reached via `/grill-with-docs` and `/improve-codebase-architecture`) creates them lazily when terms or decisions actually get resolved.
+If any of these files don't exist, **proceed silently**. Don't flag their absence; don't suggest creating them upfront. They are created lazily, when terms or decisions actually get resolved.
 
 ## File structure
 

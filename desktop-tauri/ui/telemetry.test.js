@@ -114,7 +114,7 @@ test("switches to the fast cadence while a job is active", async () => {
   assert.equal(timers.activeInterval(), IDLE_POLL_MS);
 });
 
-test("never overlaps in-flight invokes (regression: 1s pile-up burned ~44% idle CPU)", async () => {
+test("never overlaps in-flight invokes (a 1s pile-up burned ~44% idle CPU)", async () => {
   const timers = new FakeTimers();
   let calls = 0;
   let release;

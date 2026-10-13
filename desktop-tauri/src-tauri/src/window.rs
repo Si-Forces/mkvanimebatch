@@ -91,10 +91,8 @@ mod tests {
         assert!(direction_for(tauri::Window::start_resize_dragging, "invalid").is_none());
     }
 
-    /// `set_window_theme` changed from coercing every unrecognized name to Dark to
-    /// ignoring it. That is user-visible native chrome on a Tauri command, so the
-    /// three-way mapping is pinned here rather than only through the webview's
-    /// negative "was not invoked" assertions.
+    /// The mapping drives user-visible native chrome, so it is pinned here rather
+    /// than only through the webview's negative "was not invoked" assertions.
     #[test]
     fn theme_names_map_to_tauri_themes_and_unknown_names_to_none() {
         for (name, expected) in [

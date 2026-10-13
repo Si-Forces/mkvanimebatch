@@ -131,10 +131,10 @@ fn json_messages<'a>(document: &'a serde_json::Value, key: &str) -> Vec<&'a str>
 
 /// Probes MKV container headers, tracks, attachments, and chapters with the native EBML
 /// parser, falling back to `mkvmerge -J` when native parsing fails or its task panics
-/// (ADR 0006).
+/// (ADR-0006).
 ///
 /// The native probe runs on the blocking pool so a cold or network read cannot stall a reactor
-/// worker (ADR 0013 Amendment 7). Once started it is not cancellable and reads to completion.
+/// worker (ADR-0013, Amendment 7). Once started it is not cancellable and reads to completion.
 pub async fn probe_video(path: &Path) -> Result<MkvmergeMetadata, String> {
     let native_path = path.to_path_buf();
     match tokio::task::spawn_blocking(move || crate::ebml::probe_ebml_native(&native_path)).await {
@@ -183,15 +183,13 @@ const COVER_LIKE_STEMS: &[&str] = &[
     "fanart",
 ];
 
-/// Sniff whether a file is MKV chapter XML by reading up to 4096 bytes and checking
-/// case-insensitively for `<Chapters[ >]`.
+/// Whether a file is Matroska chapter XML: its first 4096 bytes contain `<Chapters[ >]`,
+/// ignoring case.
 pub fn is_chapter_xml(path: &Path) -> bool {
-    let Ok(mut file) = File::open(path) else {
-        return false;
-    };
-    let mut buf = [0u8; CHAPTER_SNIFF_BYTES];
-    file.read(&mut buf)
-        .is_ok_and(|n| CHAPTER_TAG_RE.is_match(&buf[..n]))
+    let mut head = Vec::with_capacity(CHAPTER_SNIFF_BYTES);
+    File::open(path)
+        .and_then(|file| file.take(CHAPTER_SNIFF_BYTES as u64).read_to_end(&mut head))
+        .is_ok_and(|_| CHAPTER_TAG_RE.is_match(&head))
 }
 
 /// Lowercased extension with its leading dot (`".mkv"`), or `""` when there is none.
@@ -256,7 +254,7 @@ fn attachment_names(att: &MkvAttachment) -> Option<(&str, &str)> {
 
 // ─── INSPECTED VIDEO ─────────────────────────────────────────────────────────
 
-/// Typed wrapper around raw `mkvmerge -J` metadata providing normalized schema access.
+/// Typed access to the probe metadata of one video.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InspectedVideo {
     data: MkvmergeMetadata,
@@ -522,7 +520,9 @@ pub fn scan_assets(dir: &Path, mut cache: Option<&mut ScanCache>) -> Arc<ScanRes
     result
 }
 
-/// Recursively scans for `.mkv` files, naturally sorted by path/name, respecting ignore directories.
+/// Finds the `.mkv` files under `dir_path`, descending into subdirectories when `recursive`,
+/// except `Output`, fonts directories, and anything under `ignore_paths`. A file reached by
+/// two spellings is listed once. The result is naturally sorted by path.
 pub fn scan_mkv_files(
     dir_path: &Path,
     recursive: bool,
@@ -696,7 +696,8 @@ impl FileSignature {
     }
 }
 
-/// Thread-safe persistent JSON cache for mkvmerge inspection metadata keyed on (path, size, mtime).
+/// Thread-safe persistent JSON cache of probe metadata, keyed by canonical path and valid while
+/// the file's size and mtime match.
 #[derive(Debug)]
 pub struct PersistentInspectCache {
     cache_file: PathBuf,

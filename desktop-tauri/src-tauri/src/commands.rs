@@ -105,9 +105,9 @@ pub async fn inspect_directory<R: tauri::Runtime>(
     path: String,
     options: Option<InspectOptions>,
 ) -> Result<InspectionManifest, String> {
-    // A closing app refuses before it touches the path, as it did when the check came first.
-    // Canonicalizing runs before the start lock, whose guard is not `Send` and so cannot be held
-    // across this await; the check repeats under the lock for a shutdown that began meanwhile.
+    // A closing app refuses before it touches the path. Canonicalizing runs before the start
+    // lock, whose guard is not `Send` and so cannot be held across this await; the check
+    // repeats under the lock for a shutdown that began meanwhile.
     state.ensure_accepting_starts()?;
     let (dir, identity) = canonicalize_directory(path).await?;
     let start_lock = state.start_lock.lock().map_err(|e| e.to_string())?;
@@ -265,7 +265,8 @@ mod tests {
     }
 
     impl Bridge {
-        /// Never loads the cache: the runs these tests start all set `no_cache`.
+        /// Backed by the default cache file, so its runs set `no_cache`. A test that loads the
+        /// cache gives the bridge its own `cache_state`.
         fn new() -> Self {
             Self {
                 job: JobState::default(),

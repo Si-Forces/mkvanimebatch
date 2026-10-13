@@ -76,10 +76,6 @@ pub enum JobEvent {
         id: ItemId,
         file: String,
         progress: f64,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        speed: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        eta: Option<String>,
         #[serde(flatten)]
         extra: serde_json::Map<String, serde_json::Value>,
     },
@@ -149,8 +145,7 @@ pub struct PipelineConfig {
     pub io_jobs: usize,
     pub bitrate: String,
     pub complexity: u32,
-    /// ffmpeg `-threads` per transcode: the FLAC decoder thread cap (ADR-0013, 2026-10-05
-    /// correction, #36).
+    /// ffmpeg `-threads` per transcode: the FLAC decoder thread cap (ADR-0013).
     pub ffmpeg_threads: usize,
     /// Global subtitle sync offset in milliseconds; a Track Assignment's `offset_ms` replaces it.
     pub default_sub_offset_ms: i64,
@@ -464,8 +459,6 @@ impl ProgressSink {
                 id: self.item.id.clone(),
                 file: self.item.file.clone(),
                 progress,
-                speed: None,
-                eta: None,
                 extra: Default::default(),
             });
         }

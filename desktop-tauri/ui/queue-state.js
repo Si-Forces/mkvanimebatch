@@ -1,13 +1,10 @@
 /**
- * queue-state.js
- * Queue state factories, the engine JobEvent reducer, and the selection and
- * order helpers behind the Queue Tracker.
+ * Queue state factories, the engine JobEvent reducer, and the selection and order helpers behind
+ * the Queue Tracker.
  *
- * Ownership contract: the state object returned by createQueueState is
- * exclusively owned by a single Queue Tracker. reduceQueueEvent advances
- * it by mutating the owned item records and counters in place (O(1) per
- * event) and returns the same state object. It is NOT persistent
- * immutable data — callers must not retain pre-event snapshots.
+ * Ownership contract: one Queue Tracker exclusively owns the state object createQueueState
+ * returns. reduceQueueEvent mutates its item records and counters in place (O(1) per event) and
+ * returns the same object, so callers must not retain pre-event snapshots.
  */
 
 /**
@@ -432,7 +429,7 @@ export function setAllSelected(state, selected) {
   state.vanishedSelectedIds = [];
 }
 
-/** Swap an item with its neighbour in `order` ("up" = earlier) and mirror the swap in `knownOrder`. */
+/** Swap an item with its neighbor in `order` ("up" = earlier) and mirror the swap in `knownOrder`. */
 export function reorderItem(state, id, direction) {
   const idx = state.order.indexOf(id);
   if (idx === -1) return;

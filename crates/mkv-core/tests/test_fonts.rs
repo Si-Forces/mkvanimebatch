@@ -235,7 +235,7 @@ fn test_seed_existing_fonts() {
     assert_eq!(mgr.promote(&mut claim), FontPromotion::Duplicate);
 }
 
-/// Seeding reads metadata only (#33). A seeded font is hashed, through the memo, only when a
+/// Seeding reads metadata only. A seeded font is hashed, through the memo, only when a
 /// staged font of its size is promoted; fonts of other sizes stay unhashed.
 #[test]
 fn test_seed_existing_hashes_only_the_promoted_size() {
@@ -328,7 +328,7 @@ fn test_seed_existing_memo_signature_matches_resolved_lookup() {
 
     let memo = shared_memo(&tmp);
     let mgr = FontRegistry::new(fonts_dir, Some(Arc::clone(&memo)));
-    // Seeded fonts are hashed lazily (#33): promote one of the same size to hash it.
+    // Seeded fonts are hashed lazily: promote one of the same size to hash it.
     assert!(stage_and_promote(&mgr, "Other.otf", b"fake font content").is_some());
 
     let expected = hash_file(&font).unwrap();
@@ -355,7 +355,7 @@ fn test_seed_existing_symlinked_font_uses_resolved_signature() {
 
     let memo = shared_memo(&tmp);
     let mgr = FontRegistry::new(fonts_dir, Some(Arc::clone(&memo)));
-    // Seeded fonts are hashed lazily (#33): promote one of the same size to hash them.
+    // Seeded fonts are hashed lazily: promote one of the same size to hash them.
     assert!(stage_and_promote(&mgr, "Other.otf", b"fake font content").is_some());
 
     let expected = hash_file(&real).unwrap();

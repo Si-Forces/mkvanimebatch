@@ -3,11 +3,11 @@ import test from "node:test";
 import { createTheme } from "./theme.js";
 
 /**
- * A page and its OS colour scheme. `published` is what `theme-init.js` left in `dataset`: nothing
+ * A page and its OS color scheme. `published` is what `theme-init.js` left in `dataset`: nothing
  * when the bootstrap never ran. `data-theme` is the `dataset.theme` it mirrors in a real DOM.
  * `storage.setItem` throws when `storageBlocked`; every key it was asked to save is in `saved`, and
  * every key `storage.getItem` was asked for is in `reads`.
- * `schemeChange(matches)` plays an OS colour scheme change to the live listeners.
+ * `schemeChange(matches)` plays an OS color scheme change to the live listeners.
  */
 function themeHarness({ published = {}, osDark = false, storageBlocked = false } = {}) {
   const dataset = { ...published };

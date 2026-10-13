@@ -35,11 +35,11 @@ function runThemeInit({ storedTheme = null, prefersDark = true, storageThrows = 
   return dataset.theme;
 }
 
-test("theme-init: honours explicit stored light theme", () => {
+test("theme-init: honors explicit stored light theme", () => {
   assert.equal(runThemeInit({ storedTheme: "light", prefersDark: true }), "light");
 });
 
-test("theme-init: honours explicit stored dark theme", () => {
+test("theme-init: honors explicit stored dark theme", () => {
   assert.equal(runThemeInit({ storedTheme: "dark", prefersDark: false }), "dark");
 });
 

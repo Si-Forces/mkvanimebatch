@@ -45,8 +45,7 @@ export function createJobCoordinator() {
    *
    * The listeners bind before the snapshot is fetched and buffer what they hear, so a signal that
    * lands in between is replayed (flagged `replay`) once the job is attached rather than lost.
-   * The controller is the one registered for the snapshot's mode. Resolves `false` when refused
-   * because the coordinator is not idle, else `true` once the restore has settled.
+   * Resolves `false` when the coordinator is not idle, else `true` once the restore has settled.
    */
   async function restore({ listen, invoke, queueFor, switchView }) {
     if (!move(["idle"], "restoring")) return false;

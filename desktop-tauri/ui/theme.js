@@ -2,7 +2,7 @@ const THEME_KEY = "mkv-theme";
 
 /**
  * The light/dark theme after startup: `init()` applies the choice `theme-init.js` published, or
- * follows the OS colour scheme live until the user picks one; `toggle()` flips it. `win` gives
+ * follows the OS color scheme live until the user picks one; `toggle()` flips it. `win` gives
  * `matchMedia`, and `storage.setItem` saves a choice (it may throw). `invoke` pins the native
  * window theme.
  */
@@ -16,9 +16,8 @@ export function createTheme({ doc, win, storage, invoke }) {
 
   /**
    * An explicit choice also pins the native window theme; following the OS leaves it unpinned.
-   * Updates `dataset.themeExplicit` as well as `data-theme`, so the DOM stays the single source
-   * of truth after a toggle. Without it the dataset would still read "false" while storage holds
-   * an explicit choice, and the two copies of the theme would disagree.
+   * It sets `dataset.themeExplicit` too, so the DOM stays the single source of truth after a
+   * toggle and agrees with storage.
    */
   function applyChosenTheme(theme) {
     setDocumentTheme(theme);
@@ -26,16 +25,15 @@ export function createTheme({ doc, win, storage, invoke }) {
     invoke("set_window_theme", { theme });
   }
 
-  // Reads the theme `theme-init.js` published at bootstrap. It is the sole resolver of the stored
-  // choice: this must never re-read localStorage, or the two copies could disagree.
-  // Returns null when the user has made no explicit choice, meaning "follow the OS".
+  // The explicit choice `theme-init.js` published, or null to follow the OS. Never re-read
+  // localStorage here: `theme-init.js` is its sole reader, so the two copies cannot disagree.
   function storedTheme() {
     const dataset = doc.documentElement?.dataset;
     if (dataset?.themeExplicit !== "true") return null;
     return dataset.theme === "light" || dataset.theme === "dark" ? dataset.theme : null;
   }
 
-  /** Applies the user's stored theme, or follows the OS colour scheme live until they pick one. */
+  /** Applies the user's stored theme, or follows the OS color scheme live until they pick one. */
   function init() {
     const saved = storedTheme();
     if (saved) {
