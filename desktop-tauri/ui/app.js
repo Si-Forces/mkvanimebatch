@@ -273,7 +273,9 @@ function renderInspector(queue) {
   const pathEl = byId("insp-path");
   if (pathEl && pathEl.dataset.path !== item.id) {
     pathEl.dataset.path = item.id;
-    renderCrumbs(pathEl, item.id);
+    // The title is the file name, so the crumbs show only its folder; none for a top-level episode.
+    // Taken from the ID, not `release`: an item restored from a snapshot has an empty release.
+    renderCrumbs(pathEl, pathSegments(item.id).slice(0, -1).join("/"));
   }
 
   const error = item.status === "error" ? item.error : item.inspectionError;
