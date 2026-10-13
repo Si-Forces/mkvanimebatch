@@ -307,7 +307,7 @@ mkvanimebatch/
 │   ├── adr/             # Architecture Decision Records
 │   ├── agents/          # Conventions for coding agents (issue tracker, labels, domain docs)
 │   └── release-notes.md
-├── scripts/             # Git hooks and the review-ledger script
+├── scripts/             # Git hooks, the review-ledger script, and the release-page generator
 └── .github/             # CI and release workflows
 ```
 
@@ -318,7 +318,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 node --check desktop-tauri/ui/app.js
-node --test desktop-tauri/ui/*.test.js
+node --test scripts/*.test.js desktop-tauri/ui/*.test.js
 ```
 
 `crates/mkv-core/tests/test_real_remux.rs` runs the real `ffmpeg`, `mkvmerge`, and `mkvextract` and is skipped when they are missing. Linux CI sets `MKV_REQUIRE_MEDIA_TOOLS=1`, which makes a missing tool a failure:

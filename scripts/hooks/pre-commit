@@ -13,7 +13,7 @@ ui_js=()
 for f in "${staged[@]}"; do
   case "$f" in
     *.rs | Cargo.toml | */Cargo.toml | Cargo.lock) rust=1 ;;
-    desktop-tauri/ui/*.js) ui_js+=("$f") ;;
+    desktop-tauri/ui/*.js | scripts/*.js) ui_js+=("$f") ;;
   esac
 done
 

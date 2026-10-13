@@ -121,7 +121,7 @@ jobs:
       - name: Run UI syntax and contract tests
         run: |
           node --check desktop-tauri/ui/app.js
-          node --test desktop-tauri/ui/*.test.js
+          node --test scripts/*.test.js desktop-tauri/ui/*.test.js
 
   # ────────────────────────────────────────────────────────────────────────────
   # 3. Security Audit (Cargo Audit with audit.toml)
