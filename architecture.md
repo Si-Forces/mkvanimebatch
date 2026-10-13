@@ -1,6 +1,6 @@
 # System Architecture Specification (`mkvanimebatch`)
 
-> **Version**: 1.0.0  
+> **Version**: 1.0.1  
 > **Topology**: Rust workspace (engine library + Tauri v2 desktop app + CLI)  
 > **Reference Contexts**: [Context Map](./CONTEXT-MAP.md) · [Media Engine](./crates/mkv-core/CONTEXT.md) · [Desktop Application](./desktop-tauri/CONTEXT.md)
 
@@ -100,7 +100,7 @@ A term used by both contexts is defined once, by the context that produces it, a
 
 ## 3. Workspace Topology & Module Organization
 
-The Cargo workspace shares one version (`1.0.0`) and edition 2021:
+The Cargo workspace shares one version and edition 2021:
 
 ```
 mkvanimebatch/
