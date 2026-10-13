@@ -53,7 +53,7 @@ fn starts_with_ignore_ascii_case(s: &str, prefix: &str) -> bool {
 }
 
 /// Whether `pid` is the desktop app itself (`self_pid`) or one of its direct child
-/// media tools, matched by name prefix and parent.
+/// Media Tools, matched by name prefix and parent.
 fn is_engine_process(
     pid: Pid,
     process_name: &str,

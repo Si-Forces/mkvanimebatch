@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 // ─── DOMAIN TYPES ────────────────────────────────────────────────────────────
 
-/// The Episode Type of a numbered release; `as_str` is its identity key.
+/// The Episode Type: an episode's place in a release. `as_str` is its identity key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum EpisodeType {
     #[default]

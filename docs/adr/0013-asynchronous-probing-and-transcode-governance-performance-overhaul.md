@@ -1,6 +1,6 @@
 # 0013. Asynchronous Probing and Transcode Governance Performance Overhaul
 
-> **Status**: Accepted (amended 2026-09-28, 2026-09-30, 2026-10-02, 2026-10-04, 2026-10-05, 2026-10-06, 2026-10-08; Decision 2 rationale corrected 2026-10-05, #36)
+> **Status**: Accepted (amended 2026-09-28, 2026-09-30, 2026-10-02, 2026-10-04, 2026-10-05, 2026-10-06, 2026-10-08; Decision 2 rationale corrected 2026-10-05; Amendment 7 corrected 2026-10-13)
 > **Date**: 2026-09-21
 > **Context**: Media Engine Context & In-Process Engine Bridge
 > **Amends**: ADR-0006, ADR-0008, ADR-0011
@@ -608,7 +608,7 @@ or `None` once the token fires. It owns:
   `probe_concurrency` (`manifest.rs` and `pipeline.rs`) that Amendment 4's governor paragraph
   lists, and Amendment 6 describes, read `inspect.rs`. The semaphore is local to the call and
   never closed, so the "Probe semaphore closed" result is gone. Remux execution probes are now
-  bulk probes, so Amendment 7's "bounded only by `max_workers`" holds for extract mode only.
+  bulk probes, so Amendment 7's "bounded only by `max_workers`" holds for extract mode only (corrected 2026-10-13).
 - **Cancellation.** A cancel aborts the outstanding probe tasks and returns `None`. Preflight
   turns that into `Inspection cancelled`, and a remux run settles every item as `cancelled`, as
   before. A token already cancelled on entry returns `None` too. The cancel arm is polled first,
