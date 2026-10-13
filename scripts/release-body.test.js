@@ -86,8 +86,12 @@ test("notes matches the version literally, so + and . are not patterns", () => {
   assert.match(run(["notes", "1x0x0", file]).stderr, /has no '## 1x0x0' section/);
 });
 
-test("the real release notes have a usable 1.0.0 section", () => {
-  const r = run(["notes", "1.0.0", realNotes]);
+// The release fails on a tag whose version has no notes, so a bump without them fails here first.
+test("the real release notes have a usable section for the workspace version", () => {
+  const cargo = fs.readFileSync(new URL("../Cargo.toml", import.meta.url), "utf8");
+  const version = cargo.match(/^version = "([^"]+)"/m)?.[1];
+  assert.ok(version, "no workspace version in Cargo.toml");
+  const r = run(["notes", version, realNotes]);
   assert.equal(r.status, 0, r.stderr);
 });
 

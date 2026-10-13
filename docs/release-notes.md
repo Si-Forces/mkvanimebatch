@@ -2,6 +2,20 @@
 
 <!-- scripts/release-body.sh, run by .github/workflows/release.yml, publishes each "## <version>" section on that release's page, without its "### Downloads" subsection: the page generates its own download table. A tag with no section here fails the release before it builds. -->
 
+## 1.0.1
+
+A bug-fix release for 1.0.0.
+
+### Fixes
+
+- **Episode names**: a regular episode whose title contains `Special`, `SP`, `OVA`, `OAD`, or `ONA` is no longer treated as a special or an OVA. Remux wrote `Show - S01E07 - Special Service.mkv` as `SP00_Show - S01E07 - Special Service.mkv`, and extract named its subtitle and chapter files `…_SP00` instead of `…_EP07`. An explicit `SxxExx` or `SxxPxx` now decides the episode, and names without one are classified as before ([#104](https://github.com/Si-Forces/mkvanimebatch/pull/104)).
+- **Desktop inspector**: the line under an episode title no longer repeats the file name. It shows only the episode folder, and is empty for an episode at the top of the opened folder ([#103](https://github.com/Si-Forces/mkvanimebatch/pull/103)).
+
+### Behavior changes
+
+- A file named like `Show - S00E03 - Special.mkv` is now season 0, episode 03, with no `SP` prefix. It used to get `SP00_`, the same prefix as every other `S00` file with a qualifier word. Its external subtitles, chapters, and covers now match that episode: a season-0 or season-less file such as `Show - S00E03.ass` or `Show - 03.ass`, never a season-1 one.
+- A tie-in OVA named with both an OVA number and an `SxxExx`, such as `Show - OVA 03 (S01E05 tie-in).mkv`, is now season 1, episode 05 ([#105](https://github.com/Si-Forces/mkvanimebatch/issues/105)).
+
 ## 1.0.0
 
 The first public release of MKV Anime Batch: a desktop app and a command-line tool (`mkv-cli`) that remux or extract a whole folder of anime fansub MKV episodes in one run. See the [README](../README.md) for installation and usage.
