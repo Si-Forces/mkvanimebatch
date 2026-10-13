@@ -548,8 +548,8 @@ pub fn parse_episode(name: &str) -> Option<EpisodeInfo> {
         }
     }
 
-    // An explicit SxxExx/SxxPxx comes before the OVA/Special type qualifiers, which can be
-    // words in the episode title ("S01E07 - Special Service").
+    // An explicit SxxExx/SxxPxx wins over the OVA/Special type qualifiers, which can match an
+    // ordinary word in the episode title ("S01E07 - Special Service").
     if let Ok(Some(caps)) = SXXEXX_PATTERN.captures(&normalized) {
         let s_num: u32 = caps.get(1).unwrap().as_str().parse().unwrap_or(0);
         let ep = format_ep(caps.get(2).unwrap().as_str());
