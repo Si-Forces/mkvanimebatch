@@ -186,12 +186,10 @@ const COVER_LIKE_STEMS: &[&str] = &[
 /// Sniff whether a file is MKV chapter XML by reading up to 4096 bytes and checking
 /// case-insensitively for `<Chapters[ >]`.
 pub fn is_chapter_xml(path: &Path) -> bool {
-    let Ok(mut file) = File::open(path) else {
-        return false;
-    };
-    let mut buf = [0u8; CHAPTER_SNIFF_BYTES];
-    file.read(&mut buf)
-        .is_ok_and(|n| CHAPTER_TAG_RE.is_match(&buf[..n]))
+    let mut head = Vec::with_capacity(CHAPTER_SNIFF_BYTES);
+    File::open(path)
+        .and_then(|file| file.take(CHAPTER_SNIFF_BYTES as u64).read_to_end(&mut head))
+        .is_ok_and(|_| CHAPTER_TAG_RE.is_match(&head))
 }
 
 /// Lowercased extension with its leading dot (`".mkv"`), or `""` when there is none.
