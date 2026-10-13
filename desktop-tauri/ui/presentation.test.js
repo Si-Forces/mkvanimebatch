@@ -6,6 +6,7 @@ import {
   batchClock,
   candidateTier,
   filterCounts,
+  inspectorCrumbs,
   logDisplayText,
   matchesFilter,
   pathSegments,
@@ -26,6 +27,11 @@ test("paths read Finder-style: no slashes, no dot segments, Windows separators t
   assert.deepEqual(pathSegments(null), []);
   assert.equal(prettyPath("/media/anime/Show"), "media › anime › Show");
   assert.equal(prettyPath("."), "");
+});
+
+test("the Inspector crumbs show the episode folder, not the file name the title already shows", () => {
+  assert.deepEqual(inspectorCrumbs("Show - 01.mkv"), []);
+  assert.deepEqual(inspectorCrumbs("Show/Season 1/Show - 01.mkv"), ["Show", "Season 1"]);
 });
 
 test("the log shows › for path separators, keeps digit fractions, and leaves the raw line alone", () => {
