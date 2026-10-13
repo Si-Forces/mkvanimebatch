@@ -32,6 +32,8 @@ GRAPH_REPORT.md
 graph.html
 graph.json
 graphify-out/
+.agents/rules/graphify.md
+.agents/workflows/graphify.md
 
 # Windows Zone Identifier metadata
 *:Zone.Identifier
