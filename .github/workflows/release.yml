@@ -105,6 +105,27 @@ jobs:
     runs-on: ubuntu-latest
     if: always()
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Fail before any build if the release page could not be generated: build-linux
+      # needs a "## <version>" section in docs/release-notes.md (pre-release tags too),
+      # and the bundle names it lists come from the workspace version.
+      - name: Check release notes and version
+        env:
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.version_tag || github.ref_name }}
+        run: |
+          version="${TAG#v}"
+          if ! grep -qE "^## ${version//./\\.}( |\$)" docs/release-notes.md; then
+            echo "::error::docs/release-notes.md has no '## $version' section for $TAG"
+            exit 1
+          fi
+          cargo_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
+          if [ "$version" != "$cargo_version" ]; then
+            echo "::error::tag $TAG does not match the workspace version $cargo_version"
+            exit 1
+          fi
+
       - name: Evaluate verification status
         run: |
           if [ "${{ needs.workspace-checks.result }}" != "success" ] || \
@@ -429,6 +450,111 @@ jobs:
             echo "tag=$REF_NAME" >> "$GITHUB_OUTPUT"
           fi
 
+      # Builds the release page. The prose for this version comes from
+      # docs/release-notes.md; the rest is generic or filled from the verified
+      # AppImage runtime versions.
+      - name: Build release body
+        shell: bash
+        env:
+          TAG: ${{ steps.release-tag.outputs.tag }}
+          WEBKIT: ${{ steps.verify-linux.outputs.webkit_version }}
+          JSC: ${{ steps.verify-linux.outputs.jsc_version }}
+          GTK: ${{ steps.verify-linux.outputs.gtk_version }}
+        run: |
+          version="${TAG#v}"
+          body="$RUNNER_TEMP/release-body.md"
+
+          # The table below names these files; fail if the bundles came out under other names.
+          for f in "MKV_Anime_Batch_${version}_amd64.AppImage" "MKV_Anime_Batch_${version}_amd64.deb" \
+                   "MKV_Anime_Batch-${version}-1.x86_64.rpm"; do
+            if [ ! -e "/tmp/linux-release/$f" ]; then
+              echo "::error::expected bundle /tmp/linux-release/$f is missing"
+              exit 1
+            fi
+          done
+
+          # Take the "## <version>" section of docs/release-notes.md. Text before its
+          # first "###" (the intro) and its "### Downloads" subsection are dropped,
+          # because this page generates both. Remaining "###" headings become "##".
+          notes="$(awk -v v="$version" '
+            /^## / { insec = ($2 "" == v); keep = 0; next }
+            insec && /^### / { keep = ($0 != "### Downloads"); if (keep) sub(/^#/, "") }
+            insec && keep
+          ' docs/release-notes.md)"
+          if [ -z "$notes" ]; then
+            echo "::error::docs/release-notes.md has no '## $version' section for $TAG"
+            exit 1
+          fi
+
+          {
+            cat <<'EOF'
+          MKV Anime Batch is a desktop app and a command-line tool (`mkv-cli`) that remux or extract a whole folder of anime fansub MKV episodes in one run. See the [README](https://github.com/Si-Forces/mkvanimebatch#readme) for install and usage.
+
+          ## Downloads
+
+          ### Windows (x64)
+
+          | File | Description |
+          |------|-------------|
+          | `mkv-anime-batch.exe` | Desktop app, single executable |
+          | `MKV_Anime_Batch_Portable_win64.zip` | Desktop app, portable zip |
+          | `mkv-cli-x86_64-pc-windows-msvc.zip` | Command-line tool |
+
+          ### Linux (x86_64)
+
+          | File | Description |
+          |------|-------------|
+          EOF
+            printf '| `MKV_Anime_Batch_%s_amd64.AppImage` | Desktop app for any distribution |\n' "$version"
+            printf '| `MKV_Anime_Batch_%s_amd64.deb` | Desktop app for Debian and Ubuntu |\n' "$version"
+            printf '| `MKV_Anime_Batch-%s-1.x86_64.rpm` | Desktop app for Fedora and RHEL |\n' "$version"
+            cat <<'EOF'
+          | `mkv-cli-x86_64-unknown-linux-gnu.tar.gz` | Command-line tool |
+          | `APPIMAGE-RUNTIME.txt` | GTK and WebKitGTK versions bundled in the AppImage |
+
+          Each CLI archive has a `.sha256` file. There is no macOS build.
+
+          ## Requirements
+
+          - `mkvmerge` and `mkvextract` ([MKVToolNix](https://mkvtoolnix.download/)), and `ffmpeg` with `libopus` ([FFmpeg](https://ffmpeg.org/)), all on your `PATH`.
+          - The Windows MKVToolNix installer does not add itself to `PATH`. Add `C:\Program Files\MKVToolNix` yourself.
+          - The Windows desktop app needs the Microsoft Edge WebView2 Runtime, which current Windows includes.
+          - On Linux, run `chmod +x` on the AppImage before starting it.
+
+          ## Quick start (CLI)
+
+          With `mkv-cli` on your `PATH` (or run it by its full path):
+
+          ```bash
+          # Print the inspection manifest (JSON), writing no media
+          mkv-cli --input-dir "/path/to/series" --plan
+
+          # Show what a remux would do, without writing anything
+          mkv-cli --input-dir "/path/to/series" --dry-run
+
+          # Remux every episode into an Output/ folder beside each MKV
+          mkv-cli --input-dir "/path/to/series"
+          ```
+
+          The full option list is in the [README](https://github.com/Si-Forces/mkvanimebatch#command-line-mkv-cli).
+
+          EOF
+            printf '%s\n\n' "$notes"
+            cat <<'EOF'
+          ## AppImage bundled runtime
+
+          The AppImage ships its own GTK and WebKitGTK instead of the host's, and they decide how its
+          window renders ([ADR-0015](https://github.com/Si-Forces/mkvanimebatch/blob/main/docs/adr/0015-per-package-webkitgtk-dmabuf-renderer-scoping.md)). If it crashes at
+          startup or shows a blank window, run it with `WEBKIT_DISABLE_DMABUF_RENDERER=1`. This build bundles:
+
+          | Library | Version |
+          |---------|---------|
+          EOF
+            printf '| `libwebkit2gtk-4.1.so.0` | `%s` |\n' "$WEBKIT"
+            printf '| `libjavascriptcoregtk-4.1.so.0` | `%s` |\n' "$JSC"
+            printf '| `libgtk-3.so.0` | `%s` |\n' "$GTK"
+          } > "$body"
+
       # Sole owner of the release's name and body. The body documents both
       # platforms because one release carries both platforms' assets, and it
       # embeds the AppImage runtime versions that only this job can compute.
@@ -439,62 +565,7 @@ jobs:
         with:
           tag_name: ${{ steps.release-tag.outputs.tag }}
           name: "MKV Anime Batch ${{ steps.release-tag.outputs.tag }}"
-          body: |
-            ## Windows
-
-            | File | Description |
-            |------|-------------|
-            | `mkv-anime-batch.exe` | Single self-contained standalone desktop GUI executable |
-            | `MKV_Anime_Batch_Portable_win64.zip` | Portable Zip package (self-contained GUI) |
-            | `mkv-cli-x86_64-pc-windows-msvc.zip` | Standalone native CLI executable (includes `.sha256`) |
-
-            ---
-
-            ## Linux
-
-            | File | Description |
-            |------|-------------|
-            | `MKV_Anime_Batch_*_amd64.AppImage` | Universal AppImage — works on any modern Linux distro |
-            | `MKV_Anime_Batch_*_amd64.deb` | Debian / Ubuntu package |
-            | `MKV_Anime_Batch-*.x86_64.rpm` | Fedora / RHEL package |
-            | `mkv-cli-x86_64-unknown-linux-gnu.tar.gz` | Standalone native CLI executable (includes `.sha256`) |
-            | `APPIMAGE-RUNTIME.txt` | GTK/WebKitGTK versions bundled into the AppImage |
-
-            ### AppImage Bundled Runtime
-
-            The AppImage ships its own GTK and WebKitGTK rather than the host's, so this
-            is the runtime that governs its window rendering — see
-            [ADR-0015](https://github.com/Si-Forces/mkvanimebatch/blob/main/docs/adr/0015-per-package-webkitgtk-dmabuf-renderer-scoping.md).
-            If the AppImage crashes at startup or shows a blank window, run it with
-            `WEBKIT_DISABLE_DMABUF_RENDERER=1` to fall back to software rendering, and
-            [open an issue](https://github.com/Si-Forces/mkvanimebatch/issues) naming your
-            GPU and driver. With the NVIDIA driver loaded that variable is already the
-            default, so a crash there has another cause; please report it the same way.
-
-            | Library | Version |
-            |---------|---------|
-            | `libwebkit2gtk-4.1.so.0` | `${{ steps.verify-linux.outputs.webkit_version }}` |
-            | `libjavascriptcoregtk-4.1.so.0` | `${{ steps.verify-linux.outputs.jsc_version }}` |
-            | `libgtk-3.so.0` | `${{ steps.verify-linux.outputs.gtk_version }}` |
-
-            ---
-
-            ### Quick Start (CLI)
-
-            ```bash
-            # Inspect releases and generate Manifest v2 JSON
-            ./mkv-cli --input-dir "/path/to/anime/series" --plan
-
-            # Dry-run batch remuxing simulation
-            ./mkv-cli --input-dir "/path/to/anime/series" --dry-run
-            ```
-
-            ---
-
-            ### External Prerequisites
-            Ensure the following command-line tools are installed and in your `PATH`:
-            - `mkvmerge` & `mkvextract` (from [MKVToolNix](https://mkvtoolnix.download/))
-            - `ffmpeg` with the `libopus` encoder (for FLAC to Opus transcoding, from [ffmpeg.org](https://ffmpeg.org/))
+          body_path: ${{ runner.temp }}/release-body.md
           files: |
             /tmp/linux-release/*.AppImage
             /tmp/linux-release/*.deb
