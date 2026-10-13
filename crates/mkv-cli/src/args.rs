@@ -318,7 +318,7 @@ OPTIONS:
     --assignments <FILE>       Path to JSON file of subtitle Track Assignments for target videos
     --fonts-dir <DIR>          Explicit fonts directory override
     --assets-dir <DIR>         Fallback asset directory
-    --plan                     Print the inspection manifest (JSON) and exit
+    --plan                     Print the Inspection Manifest (JSON) and exit
     --events                   Emit machine-readable NDJSON events prefixed with '@event: '
     --remux                    Process batch in remux mode (default for mkv-cli)
     --extract                  Extract best-match subtitles, fonts, chapters, and covers

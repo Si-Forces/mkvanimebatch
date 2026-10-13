@@ -81,7 +81,7 @@ sudo dnf install mkvtoolnix ffmpeg-free
 sudo pacman -S mkvtoolnix-cli ffmpeg
 ```
 
-Check that they are found with `mkvmerge --version` and `ffmpeg -hide_banner -encoders | grep libopus` (on Windows, `findstr libopus`).
+The Windows MKVToolNix installer does not add itself to `PATH`: add `C:\Program Files\MKVToolNix` to `PATH` yourself (Scoop does it for you). Check that the tools are found with `mkvmerge --version` and `ffmpeg -hide_banner -encoders | grep libopus` (on Windows, `findstr libopus`).
 
 ---
 
@@ -138,9 +138,9 @@ mkv-cli --input-dir "/path/to/series" --assignments assignments.json
 | `--selected-item <PATH>` | Process this video. Repeatable. Taken literally, so commas in names are safe | All discovered videos |
 | `--selected-items <LIST>` | Process these comma-separated videos. Repeatable. Each entry is trimmed; empty entries are dropped | All discovered videos |
 | `--sub-offset <SEC>` | Subtitle timing offset in seconds, such as `1.5` or `-0.5`, rounded half away from zero to whole milliseconds. A Track Assignment's own offset replaces it | `0` |
-| `--workers <N>` | Episodes processed at once, 1–64 | Physical CPU cores, capped at the CPUs the process may use, clamped to 1–16 |
+| `--workers <N>` | Episodes processed at once, 1–64 | The CPU core count (physical cores on Linux, logical CPUs elsewhere), capped at the CPUs the process may use, clamped to 1–16 |
 | `--io-jobs <N>` | Disk-heavy steps run at once, 0–64. `0` means the worker count | `2` |
-| `--ffmpeg-threads <N\|auto>` | FLAC decoder threads per transcode, 1–32, or `auto` | `auto`: cores ÷ workers, clamped to 1–4 |
+| `--ffmpeg-threads <N\|auto>` | FLAC decoder threads per transcode, 1–32, or `auto` | `auto`: the same core count ÷ workers, clamped to 1–4 |
 | `--bitrate <RATE>` | Opus bitrate: a positive integer with an optional `k`, `K`, or `M` suffix, such as `128k`. Lowercase `m` is rejected, because FFmpeg reads it as "milli" | The preset's bitrate, else `192k` |
 | `--complexity <0-10>` | Opus encoder complexity | The preset's complexity, else `5` |
 | `--extract` | Extract instead of remux | Off |
@@ -155,7 +155,7 @@ mkv-cli --input-dir "/path/to/series" --assignments assignments.json
 Notes:
 
 - `--extract` and `--remux` override each other (the last one wins) and the executable-name default. Renaming or linking the binary as `mkv-extract` makes extract the default.
-- `--selected-item` and `--selected-items` need `--input-dir`. A selection may be relative to `--input-dir`, absolute, or relative to the current directory. It must be a discovered `.mkv` inside `--input-dir`, or the whole run fails. Selected videos run in the order given.
+- `--selected-item` and `--selected-items` need `--input-dir`. A selection may be relative to `--input-dir`, absolute, or relative to the current directory. It must be a discovered `.mkv` inside `--input-dir`, listed once, or the whole run fails. Selected videos run in the order given.
 - Unknown arguments are an error. All values are checked before any work starts.
 
 Exit codes: `0` on success; `1` on an invalid argument, when any episode ends in error, or on a fatal error; `130` when a batch is cancelled with Ctrl-C (or SIGTERM on Linux). Cancelling `--plan` exits `1`.
@@ -190,11 +190,13 @@ A Track Assignment tells the tool which subtitle file to use for one episode. `-
 { "Show - 01.mkv": "Show - 01.ass" }
 ```
 
-`target_video` is the video's path relative to `--input-dir`. `asset_path` is absolute, or relative to `--input-dir` (then `--assets-dir`). `language`, `title`, and `offset_ms` are optional; `offset_ms` replaces `--sub-offset` for that episode, and `0` means no shift. A target that does not exist, a missing subtitle, or two assignments for one video fail the run before it starts.
+`target_video` is the video's path relative to `--input-dir`. `asset_path` is absolute, or relative to `--input-dir` (then `--assets-dir`). `language`, `title`, and `offset_ms` are optional; `offset_ms` replaces `--sub-offset` for that episode, and `0` means no shift. A target that does not exist or is outside the selection, a missing subtitle, or two assignments for one video fail the run before it starts.
 
 ---
 
 ## How files are chosen
+
+This section describes Remux. Extract reads only what is inside each video: the best embedded ASS or SSA subtitle (ranked by format and language as below), the chapters, the cover, and the fonts.
 
 ### Subtitles
 
@@ -208,7 +210,7 @@ For each episode, the first source that has a match wins:
 
 The source order beats language: an English `.ass` next to the video wins over an embedded Indonesian track. External files match by episode identity parsed from the file name (`S01E02`, `- 02`, `[02]`, `EP02`, `第02話`, OVA and specials, fractional episodes such as `12.5`). Within one folder, a file of the video's known season beats one with no season; a nearer folder still wins first. An episode with no matching subtitle is skipped.
 
-Within one source, any ASS subtitle beats any other format (SSA included). Within one format, subtitles rank by language: Indonesian, then undetermined (`und`), then English, then others. Ties go to names that mark dialogue (`Full`, `Dialogue`, `Main`, and similar). Extract mode only extracts ASS and SSA tracks.
+Within one source, any ASS subtitle beats any other format (SSA included). Within one format, subtitles rank by language: Indonesian, then undetermined (`und`), then English, then others. Ties go to names that mark dialogue (`Full`, `Dialogue`, `Main`, and similar).
 
 ### Audio
 
@@ -230,7 +232,7 @@ One audio track is kept. Japanese is preferred, then undetermined language (`und
 
 - Remuxed files are named after the source, with an `OVA<ep>_` or `SP<ep>_` prefix for OVAs and specials. Extracted files are named `<stem>_EP<ep>_<lang>_track<id>.ass`, and `<stem>_EP<ep>_chapters.xml` (`Part`, `OVA`, or `SP` replace `EP` where they apply, and the episode part is left out when the name has none), and `<stem>_cover<ext>`.
 - Work is written to a hidden temporary folder inside the destination and moved into place only when complete. Stopping a batch or a failure removes the temporary folder, so a partial file never appears under its final name.
-- An existing output file is replaced with a backup-and-restore step, so a failed replace keeps the old file.
+- An existing output file is replaced by an atomic rename. Where the system will not rename over a file (Windows), the old file is moved aside first and put back if the replace fails. Extract never overwrites an existing cover.
 - Media file metadata is cached, keyed on path, size, and modification time, so a second scan of the same folder is fast. The cache is `inspect_cache.json` in `%LOCALAPPDATA%\mkvanimebatch` on Windows and `~/.cache/mkvanimebatch` on Linux. Use **Clear inspection cache…** in the settings sheet or `mkv-cli --clear-cache` to delete it.
 
 ---
