@@ -548,16 +548,8 @@ pub fn parse_episode(name: &str) -> Option<EpisodeInfo> {
         }
     }
 
-    if let Ok(Some(_)) = OVA_PATTERN.find(&normalized) {
-        let ep = parse_typed_ep(&normalized, &OVA_PATTERN);
-        return Some(EpisodeInfo::new(season, EpisodeType::Ova, ep));
-    }
-
-    if let Ok(Some(_)) = SPECIAL_PATTERN.find(&normalized) {
-        let ep = parse_typed_ep(&normalized, &SPECIAL_PATTERN);
-        return Some(EpisodeInfo::new(season, EpisodeType::Special, ep));
-    }
-
+    // An explicit SxxExx/SxxPxx comes before the OVA/Special type qualifiers, which can be
+    // words in the episode title ("S01E07 - Special Service").
     if let Ok(Some(caps)) = SXXEXX_PATTERN.captures(&normalized) {
         let s_num: u32 = caps.get(1).unwrap().as_str().parse().unwrap_or(0);
         let ep = format_ep(caps.get(2).unwrap().as_str());
@@ -572,6 +564,16 @@ pub fn parse_episode(name: &str) -> Option<EpisodeInfo> {
         let s_num: u32 = caps.get(1).unwrap().as_str().parse().unwrap_or(0);
         let ep = format_ep(caps.get(2).unwrap().as_str());
         return Some(EpisodeInfo::new(s_num.to_string(), EpisodeType::Part, ep));
+    }
+
+    if let Ok(Some(_)) = OVA_PATTERN.find(&normalized) {
+        let ep = parse_typed_ep(&normalized, &OVA_PATTERN);
+        return Some(EpisodeInfo::new(season, EpisodeType::Ova, ep));
+    }
+
+    if let Ok(Some(_)) = SPECIAL_PATTERN.find(&normalized) {
+        let ep = parse_typed_ep(&normalized, &SPECIAL_PATTERN);
+        return Some(EpisodeInfo::new(season, EpisodeType::Special, ep));
     }
 
     if let Ok(Some(caps)) = EP_NUM_MARKER_RE.captures(normalized.as_str()) {
