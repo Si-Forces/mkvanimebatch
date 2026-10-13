@@ -44,7 +44,7 @@ Get the files from [GitHub Releases](https://github.com/Si-Forces/mkvanimebatch/
 | Windows (x64) | `mkv-anime-batch.exe` (single executable), or `MKV_Anime_Batch_Portable_win64.zip` | `mkv-cli-x86_64-pc-windows-msvc.zip` |
 | Linux (x86_64), any distribution | `MKV_Anime_Batch_*_amd64.AppImage` | `mkv-cli-x86_64-unknown-linux-gnu.tar.gz` |
 | Debian, Ubuntu | `MKV_Anime_Batch_*_amd64.deb` | same as above |
-| Fedora, RHEL | `MKV_Anime_Batch_*_x86_64.rpm` | same as above |
+| Fedora, RHEL | `MKV_Anime_Batch-*.x86_64.rpm` | same as above |
 
 Each CLI archive has a `.sha256` checksum file next to it. Extract `mkv-cli` somewhere on your `PATH`, or run it by its full path. On Linux, make the AppImage executable first (`chmod +x MKV_Anime_Batch_*_amd64.AppImage`). There is no macOS build.
 
