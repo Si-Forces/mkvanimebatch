@@ -23,7 +23,7 @@ notes() {
   out="$(V="$version" awk '
     /^## / { insec = ($2 "" == ENVIRON["V"]); found = found || insec; keep = 0; next }
     insec && /^### / {
-      h = $0; sub(/[ \t\r]+$/, "", h)
+      h = $0; sub(/[[:space:]]+$/, "", h)
       keep = (h != "### Downloads")
       if (keep) sub(/^#/, "")
     }
@@ -31,13 +31,13 @@ notes() {
     END { if (!found) exit 3 }
   ' "$file")" || rc=$?
   if [ "$rc" -eq 3 ]; then
-    echo "::error::$file has no '## $version' section" >&2
+    echo "::error::${file#"$root"/} has no '## $version' section" >&2
     return 1
   elif [ "$rc" -ne 0 ]; then
     return "$rc"
   fi
   if [ -z "$out" ]; then
-    echo "::error::'## $version' in $file has no notes: add a '###' section other than Downloads" >&2
+    echo "::error::'## $version' in ${file#"$root"/} has no notes: add a '###' section other than Downloads" >&2
     return 1
   fi
   printf '%s\n' "$out"
@@ -45,7 +45,12 @@ notes() {
 
 page() {
   local version="$1" dir="$2" file="$3" notes_text f
-  : "${WEBKIT:?WEBKIT is not set}" "${JSC:?JSC is not set}" "${GTK:?GTK is not set}"
+  for var in WEBKIT JSC GTK; do
+    if [ -z "${!var:-}" ]; then
+      echo "::error::$var is not set" >&2
+      return 1
+    fi
+  done
 
   # The table below names these files; fail if the bundles came out under other names.
   for f in "MKV_Anime_Batch_${version}_amd64.AppImage" "MKV_Anime_Batch_${version}_amd64.deb" \

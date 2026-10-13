@@ -77,10 +77,10 @@ jobs:
         run: cargo build --release -p mkv-anime-batch
 
   # ────────────────────────────────────────────────────────────────────────────
-  # 2. Release Verification: Frontend UI State & Contract Tests
+  # 2. Release Verification: Frontend UI and Script Tests
   # ────────────────────────────────────────────────────────────────────────────
   ui-tests:
-    name: Verify UI State & Contract Tests
+    name: Verify UI and Script Tests
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -91,7 +91,7 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Run UI syntax and contract tests
+      - name: Run UI syntax checks and the UI and script tests
         run: |
           node --check desktop-tauri/ui/app.js
           node --test scripts/*.test.js desktop-tauri/ui/*.test.js
