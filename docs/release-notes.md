@@ -1,6 +1,6 @@
 # Release Notes
 
-<!-- .github/workflows/release.yml publishes each "## <version>" section on that release's page, without its "### Downloads" subsection: the page generates its own download table. A tag with no section here fails the release before it builds. -->
+<!-- scripts/release-body.sh, run by .github/workflows/release.yml, publishes each "## <version>" section on that release's page, without its "### Downloads" subsection: the page generates its own download table. A tag with no section here fails the release before it builds. -->
 
 ## 1.0.0
 

@@ -9,11 +9,11 @@ mapfile -d '' staged < <(git diff --cached --name-only -z)
 wait $! # a process substitution's failure is otherwise ignored
 
 rust=0
-ui_js=()
+staged_js=()
 for f in "${staged[@]}"; do
   case "$f" in
     *.rs | Cargo.toml | */Cargo.toml | Cargo.lock) rust=1 ;;
-    desktop-tauri/ui/*.js | scripts/*.js) ui_js+=("$f") ;;
+    desktop-tauri/ui/*.js | scripts/*.js) staged_js+=("$f") ;;
   esac
 done
 
@@ -44,7 +44,7 @@ if [ "$rust" -eq 1 ]; then
 fi
 
 # Checks the staged blob itself, so unstaged edits cannot hide a syntax error.
-for f in "${ui_js[@]}"; do
+for f in "${staged_js[@]}"; do
   git cat-file -e ":$f" 2> /dev/null || continue # staged deletion
   # theme-init.js must stay a classic script (CSP, see its header); the rest are modules.
   case "$f" in */theme-init.js) input_type=commonjs ;; *) input_type=module ;; esac
