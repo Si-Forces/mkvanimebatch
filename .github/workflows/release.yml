@@ -307,6 +307,10 @@ jobs:
           find target desktop-tauri -type f -name "*.AppImage" -exec cp {} /tmp/linux-release/ \;
           find target desktop-tauri -type f -name "*.deb" -exec cp {} /tmp/linux-release/ \;
           find target desktop-tauri -type f -name "*.rpm" -exec cp {} /tmp/linux-release/ \;
+          # Tauri keeps the spaces of productName, which GitHub would turn into dots on upload.
+          for f in /tmp/linux-release/*' '*; do
+            if [ -e "$f" ]; then mv "$f" "${f// /_}"; fi
+          done
 
       - name: Verify Linux packages and record AppImage runtime
         id: verify-linux
@@ -452,7 +456,7 @@ jobs:
             |------|-------------|
             | `MKV_Anime_Batch_*_amd64.AppImage` | Universal AppImage — works on any modern Linux distro |
             | `MKV_Anime_Batch_*_amd64.deb` | Debian / Ubuntu package |
-            | `MKV_Anime_Batch_*_x86_64.rpm` | Fedora / RHEL package |
+            | `MKV_Anime_Batch-*.x86_64.rpm` | Fedora / RHEL package |
             | `mkv-cli-x86_64-unknown-linux-gnu.tar.gz` | Standalone native CLI executable (includes `.sha256`) |
             | `APPIMAGE-RUNTIME.txt` | GTK/WebKitGTK versions bundled into the AppImage |
 
