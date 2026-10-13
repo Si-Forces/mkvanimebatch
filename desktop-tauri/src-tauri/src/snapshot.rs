@@ -424,8 +424,6 @@ pub(crate) mod test_support {
             id: ItemId::parse(id),
             file: format!("{id}.mkv"),
             progress,
-            speed: None,
-            eta: None,
             extra: Default::default(),
         }
     }

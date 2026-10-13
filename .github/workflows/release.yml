@@ -66,7 +66,7 @@ jobs:
 
       # `MKV_REQUIRE_MEDIA_TOOLS=1` makes the real-media regression fail instead of
       # skipping when FFmpeg/MKVToolNix are missing, so a release cannot publish
-      # with real media output unverified. Windows keeps the local skip behaviour.
+      # with real media output unverified. Windows keeps the local skip behavior.
       - name: Run Rust workspace unit and integration tests
         env:
           MKV_REQUIRE_MEDIA_TOOLS: ${{ runner.os == 'Linux' && '1' || '' }}
@@ -329,9 +329,9 @@ jobs:
           find /tmp/appimage-contents/squashfs-root -name 'mkv-anime-batch' -type f -print -quit | grep -q .
 
           # The AppImage bundles its own GTK/WebKitGTK, copied off this runner,
-          # so its rendering behaviour is decided by the runner image rather than
+          # so its rendering behavior is decided by the runner image rather than
           # by this repo. See ADR-0015: an AppImage whose WebKitGTK reaches the
-          # 2.54 transparent-window behaviour inherits a rendering bug that the
+          # 2.54 transparent-window behavior inherits a rendering bug that the
           # DMABUF workaround itself causes, on the NVIDIA hosts that still get
           # it. Record what we actually bundled so a bad release is diagnosable
           # instead of mysterious.
@@ -398,7 +398,7 @@ jobs:
 
             # A missing bundle is not cosmetic. Without its own WebKitGTK the
             # AppImage falls back to the host's, and on a host carrying the 2.54
-            # transparent-window behaviour the DMABUF workaround this packaging
+            # transparent-window behavior the DMABUF workaround this packaging
             # applies on NVIDIA hosts becomes the cause of ADR-0015's rendering
             # bug. Fail the release rather than shipping that silently.
             if [ "$bundled" = "NO" ]; then
@@ -452,7 +452,7 @@ jobs:
             |------|-------------|
             | `MKV_Anime_Batch_*_amd64.AppImage` | Universal AppImage — works on any modern Linux distro |
             | `MKV_Anime_Batch_*_amd64.deb` | Debian / Ubuntu package |
-            | `MKV_Anime_Batch_*_x86_64.rpm` | Fedora / RedHat / SUSE package |
+            | `MKV_Anime_Batch_*_x86_64.rpm` | Fedora / RHEL package |
             | `mkv-cli-x86_64-unknown-linux-gnu.tar.gz` | Standalone native CLI executable (includes `.sha256`) |
             | `APPIMAGE-RUNTIME.txt` | GTK/WebKitGTK versions bundled into the AppImage |
 
@@ -490,7 +490,7 @@ jobs:
             ### External Prerequisites
             Ensure the following command-line tools are installed and in your `PATH`:
             - `mkvmerge` & `mkvextract` (from [MKVToolNix](https://mkvtoolnix.download/))
-            - `ffmpeg` (for Opus audio transcoding, from [ffmpeg.org](https://ffmpeg.org/))
+            - `ffmpeg` with the `libopus` encoder (for FLAC to Opus transcoding, from [ffmpeg.org](https://ffmpeg.org/))
           files: |
             /tmp/linux-release/*.AppImage
             /tmp/linux-release/*.deb

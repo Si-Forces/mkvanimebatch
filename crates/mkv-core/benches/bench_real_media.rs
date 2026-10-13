@@ -1,7 +1,7 @@
-//! Real-media remux bench for the execution phase (issue #31). It measures two audit
-//! observations: ffmpeg reads the source outside the io governor, so up to `workers` readers hit
-//! the disk at once; and no-transcode items hold a worker slot while they wait on `io_jobs`.
-//! CI never runs a cell: it needs a real corpus and takes minutes per cell. CI only runs the bench
+//! Real-media remux bench for the execution phase. It measures two observations: ffmpeg reads
+//! the source outside the io governor, so up to `workers` readers hit the disk at once; and
+//! no-transcode items hold a worker slot while they wait on `io_jobs`.
+//! CI never runs a cell: it needs a real corpus and takes minutes per cell. CI runs the bench
 //! with no corpus (`cargo test -p mkv-core --bench bench_real_media`), so the self-check asserts
 //! run, then it skips.
 //!

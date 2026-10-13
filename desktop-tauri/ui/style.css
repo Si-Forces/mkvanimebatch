@@ -9,7 +9,7 @@
 @font-face { font-family: "Unbounded"; src: url("fonts/unbounded-latin-wght-normal.woff2") format("woff2"); font-weight: 200 900; font-display: swap; }
 @font-face { font-family: "JetBrains Mono"; src: url("fonts/jetbrains-mono-latin-wght-normal.woff2") format("woff2"); font-weight: 100 800; font-display: swap; }
 
-/* ─── Tokens (canvas .mk / .mk.dark) ───────────────────────────────────────── */
+/* ─── Tokens ───────────────────────────────────────────────────────────────── */
 :root {
   --font-ui: -apple-system, BlinkMacSystemFont, "Onest", system-ui, sans-serif;
   --font-num: "Unbounded", var(--font-ui);
@@ -238,7 +238,7 @@ html.is-linux.is-maximized .bar {
   box-shadow: inset 0 0 0 .5px rgba(0, 0, 0, .22);
   transition: transform .15s cubic-bezier(.16, 1, .3, 1), filter .15s ease;
 }
-/* The hovered light swells and brightens, as in the previous design. */
+/* The hovered light swells and brightens. */
 .tl-btn:hover { transform: scale(1.15); filter: brightness(1.12); }
 @media (prefers-reduced-motion: reduce) {
   .tl-btn:hover { transform: none; }
@@ -253,7 +253,7 @@ html.is-linux.is-maximized .bar {
 .tl-min { background: #febc2e; color: rgba(100, 50, 0, .92); }
 .tl-max { background: #28c840; color: rgba(0, 70, 0, .92); }
 
-/* Icon buttons (the theme toggle, the gears) only recolour on hover. */
+/* Icon buttons (the theme toggle, the gears) only recolor on hover. */
 .icon-btn {
   flex: none;
   width: 32px; height: 32px;
@@ -270,7 +270,7 @@ html.is-linux.is-maximized .bar {
 
 .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .brand-name { display: flex; flex-direction: column; align-items: center; text-align: center; line-height: 1.15; font-weight: 700; font-size: 14px; white-space: nowrap; }
-/* The logo glyph sits bare, with fixed colours, so it looks the same in either theme. */
+/* The logo glyph sits bare, with fixed colors, so it looks the same in either theme. */
 /* Grid, not inline: an inline SVG would sit on the text baseline and leave a gap below it. */
 .brand-mark { flex: none; display: grid; }
 .nav-text { display: flex; flex-direction: column; line-height: 1.2; min-width: 0; }
@@ -530,7 +530,6 @@ html.job-locked .list-hint .hint-locked { display: inline; }
 .assign-opts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
 
 .font-chips { display: flex; flex-wrap: wrap; gap: 4px; font-size: 12px; color: var(--path); }
-.font-chip { padding: 2px 8px; border-radius: 6px; background: var(--field); border: 1px solid var(--line); font-size: 11px; color: var(--fg); }
 
 /* ─── Fields (sheet and inspector) ─────────────────────────────────────────── */
 .field {

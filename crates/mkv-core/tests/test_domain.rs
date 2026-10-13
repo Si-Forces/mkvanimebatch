@@ -64,7 +64,7 @@ fn test_parse_episode_cases() {
         ("Show S01E03", ("1", "E", "03")),
         ("Show S03E125", ("3", "E", "125")),
         ("Show S01E05v2", ("1", "E", "05")),
-        // Bracketed, parenthesised, and keyword numbers
+        // Bracketed, parenthesized, and keyword numbers
         ("Show [07] [720p]", ("", "E", "07")),
         ("Show (13)", ("", "E", "13")),
         ("Show EP03", ("", "E", "03")),
@@ -230,7 +230,7 @@ fn test_select_best_subtitle_track_language_precedence() {
         (("id", "ind"), (2, "ind")),
         (("en", "eng"), (2, "eng")),
         (("eng", "jpn"), (1, "eng")),
-        // Unrecognised languages tie; the lower track ID wins.
+        // Unrecognized languages tie; the lower track ID wins.
         (("zho", "kor"), (1, "zho")),
     ];
     for ((first, second), (tid, lang)) in cases {

@@ -1,4 +1,4 @@
-// Maps engine log lines to console CSS classes. Cosmetic only: no behaviour keys off these classes.
+// Maps engine log lines to console CSS classes. Cosmetic only: no behavior keys off these classes.
 // Also holds the DOM-free queue cap the console uses while it waits for a frame.
 
 export function stripLogPrefix(text) {

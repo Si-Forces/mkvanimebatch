@@ -496,7 +496,7 @@ function applyTelemetryData(data) {
 const telemetryLoop = createTelemetryLoop({
   invoke,
   onData: applyTelemetryData,
-  onError: (e) => console.log("[Telemetry Error]", e),
+  onError: err => console.error("[get_system_telemetry] failed:", err),
   doc: document,
 });
 

@@ -66,7 +66,7 @@ where
 /// `tracing::dispatcher::with_default`.
 ///
 /// - File layer: see [`file_layer`]. Skipped, with a warning, when the file cannot be opened.
-/// - Stderr layer: level and message only, written to `stderr` and coloured only when `ansi`.
+/// - Stderr layer: level and message only, written to `stderr` and colored only when `ansi`.
 fn build_dispatch<W>(log_dir: Option<&Path>, filter: EnvFilter, stderr: W, ansi: bool) -> Dispatch
 where
     W: for<'a> MakeWriter<'a> + Send + Sync + 'static,

@@ -424,7 +424,7 @@ fn test_scan_assets_grouping() {
 }
 
 /// A directory reached through a second spelling gets the first spelling's results back, so
-/// asset paths, and the subtitle IDs derived from them, keep that spelling (#32).
+/// asset paths, and the subtitle IDs derived from them, keep that spelling.
 #[cfg(unix)]
 #[test]
 fn test_scan_assets_cache_keeps_first_spelling() {
@@ -573,7 +573,7 @@ async fn scripted_fallback_probe(step: Step) -> Result<MkvmergeMetadata, String>
     result
 }
 
-/// MKVToolNix exits 1 for success with warnings, so the probe still parses its JSON (#62).
+/// MKVToolNix exits 1 for success with warnings, so the probe still parses its JSON.
 #[tokio::test]
 async fn test_fallback_probe_parses_the_json_of_an_exit_1_run() {
     let step = Step::exited(
@@ -674,7 +674,7 @@ async fn test_fallback_probe_leaves_the_message_alone_without_errors() {
     assert_eq!(err, "File is not a recognized Matroska container");
 }
 
-/// A stalled native read must not block the runtime (#20). `open()` on a FIFO blocks until a
+/// A stalled native read must not block the runtime. `open()` on a FIFO blocks until a
 /// writer appears, standing in for a cold or hung device.
 #[cfg(unix)]
 #[test]
@@ -898,7 +898,7 @@ fn test_scan_mkv_files_symlink_dedup_under_non_canonical_root() {
 }
 
 /// `ignore_paths` must still apply when the walk root is not canonical -- a relative CLI root
-/// (`-i ./Anime`) or one reached through a symlinked mount.
+/// (`--input-dir ./Anime`) or one reached through a symlinked mount.
 #[cfg(unix)]
 #[test]
 fn test_scan_mkv_files_honors_ignore_paths_under_non_canonical_root() {

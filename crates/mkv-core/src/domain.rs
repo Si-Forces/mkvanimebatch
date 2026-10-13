@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 // ─── DOMAIN TYPES ────────────────────────────────────────────────────────────
 
-/// Kind of numbered release an episode belongs to; `as_str` is its identity key.
+/// The Episode Type of a numbered release; `as_str` is its identity key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum EpisodeType {
     #[default]
@@ -62,7 +62,7 @@ impl From<&str> for EpisodeType {
     }
 }
 
-/// Canonical parsed identity of an episode: season tag, type key, number.
+/// Episode Info: the season (empty when unknown), Episode Type, and episode number.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EpisodeInfo {
     pub season: String,
@@ -517,7 +517,7 @@ pub fn parse_episode(name: &str) -> Option<EpisodeInfo> {
     let without_offset = OFFSET_TAG_RE.replace(name, "");
     let normalized = without_offset.replace('_', " ");
 
-    // Replace non-decimal '.' with space
+    // A '.' that is not a decimal point becomes a space.
     let mut norm_bytes = normalized.into_bytes();
     for i in 0..norm_bytes.len() {
         if norm_bytes[i] == b'.' {
@@ -710,13 +710,13 @@ pub fn unique_file_token() -> String {
 /// True when a failed `rename` means the two paths sit on different devices, which is the
 /// main condition under which a copy can succeed where the rename did not.
 ///
-/// Recognises `ErrorKind::CrossesDevices` plus the raw code for `EXDEV` (18, Linux/BSD) and
+/// Recognizes `ErrorKind::CrossesDevices` plus the raw code for `EXDEV` (18, Linux/BSD) and
 /// `ERROR_NOT_SAME_DEVICE` (17, Windows), which not every platform surfaces as a typed
 /// kind. The codes are platform-scoped: 18 is `ERROR_NO_MORE_FILES` on Windows, and 17 is
 /// not a device error off it.
 ///
-/// This is a heuristic about the *error*, not a proof that a copy would help. A copy can
-/// still rescue a failure that only affects the source side — see `promote_file`.
+/// This classifies the error; it does not prove a copy would help. A copy could still rescue
+/// some source-side failures that this rejects (see `promote_file`).
 fn is_cross_device_rename(err: &std::io::Error) -> bool {
     err.kind() == std::io::ErrorKind::CrossesDevices
         || (cfg!(not(windows)) && err.raw_os_error() == Some(18))
@@ -735,8 +735,8 @@ fn is_cross_device_rename(err: &std::io::Error) -> bool {
 /// Consequence: `rename(2)` needs write permission on *both* parents, so a staged file in a
 /// read-only directory is refused even though a copy could have read it. Callers stage
 /// inside directories this process creates: `extract` and `remux` use
-/// `tempdir_in(<destination>)`, font promotion `<fonts_dir>/.font_staging`. See ADR-0013's
-/// amendment.
+/// `tempdir_in(<destination>)`, font promotion `<fonts_dir>/.font_staging` (ADR-0013,
+/// Amendment 2).
 pub fn promote_file(staged: &Path, final_path: &Path) -> Result<(), std::io::Error> {
     let parent = final_path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)?;

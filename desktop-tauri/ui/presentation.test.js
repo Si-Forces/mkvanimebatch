@@ -41,7 +41,7 @@ test("the log shows › for path separators, keeps digit fractions, and leaves t
   assert.match(raw, /\/media\/anime\/Season 1\//);
 });
 
-test("status colours: running blue, done green, failed red, everything else muted", () => {
+test("status colors: running blue, done green, failed red, everything else muted", () => {
   assert.equal(statusTone("processing"), "info");
   assert.equal(statusTone("completed"), "ok");
   assert.equal(statusTone("error"), "err");

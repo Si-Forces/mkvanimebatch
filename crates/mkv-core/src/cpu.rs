@@ -69,27 +69,22 @@ pub(crate) fn physical_core_count() -> usize {
     effective_core_count(topology_core_count(), available)
 }
 
-/// Derives the per-job FFmpeg `-threads` value from physical cores and active batch workers
-/// per ADR-0013.
+/// Derives the per-job FFmpeg `-threads` value from physical cores and active batch workers.
 ///
 /// `-threads` precedes `-i`, so it caps the FLAC decoder's threads, not the encoder's: libopus is
 /// single-threaded. The cap keeps ffmpeg from sizing decoder threads to all cores in each of
-/// `workers` processes (ADR-0013, 2026-10-05 correction, #36).
+/// `workers` processes (ADR-0013).
 pub(crate) fn transcode_governor_threads(cores: usize, workers: usize) -> usize {
     (cores / workers.max(1)).clamp(1, 4)
 }
 
 /// The default batch worker count for `cores` physical CPU cores, clamped to [1, 16].
-///
-/// The one home of the rule: `BatchRequest::resolve` applies it to its injected core count.
+/// `BatchRequest::resolve` applies it to its injected core count when `workers` is `None`.
 pub(crate) fn default_workers_for(cores: usize) -> usize {
     cores.clamp(1, 16)
 }
 
-/// Default batch worker count derived from physical CPU cores, clamped to [1, 16].
-///
-/// `BatchRequest::resolve` applies the same rule (`default_workers_for`) to its core count when
-/// `workers` is `None`.
+/// [`default_workers_for`] applied to this machine's physical core count.
 pub(crate) fn default_workers() -> usize {
     default_workers_for(physical_core_count())
 }

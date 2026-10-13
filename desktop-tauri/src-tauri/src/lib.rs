@@ -29,27 +29,25 @@ fn init_linux_env() {
 
 #[cfg(target_os = "linux")]
 fn apply_linux_env(nvidia_driver_loaded: bool) {
-    // Prefer X11/XWayland backend by default to prevent WebKitWebProcess EGL_BAD_PARAMETER abort on Wayland
+    // Prefer X11/XWayland: on native Wayland, WebKitWebProcess aborts with EGL_BAD_PARAMETER.
     if std::env::var_os("GDK_BACKEND").is_none() {
         std::env::set_var("GDK_BACKEND", "x11,wayland");
     }
 
-    // Fixes for bundled WebKitGTK inside AppImage on modern Linux (Fedora/Arch/Ubuntu 24+):
+    // Workarounds for the WebKitGTK bundled in the AppImage (ADR-0015).
     if std::env::var_os("APPIMAGE").is_some() || std::env::var_os("APPDIR").is_some() {
-        // The DMABUF renderer stays on unless the NVIDIA driver is loaded: the shutdown SEGV
-        // (SkiaGLContext / __eglFini) that motivated disabling it did not reproduce on an Intel
-        // host (ADR-0015, 2026-10-11 amendment), and the CPU path runs at single-digit fps.
-        // NVIDIA, untested and the most reported DMABUF breaker, keeps the old default. Widen
-        // the check if another GPU reports DMABUF crashes. Note: never set this on native
-        // packages (RPM/DEB) with WebKitGTK 2.54+, where disabling DMABUF drops Skia to CPU
-        // shared-memory rendering on transparent windows and causes regions outside pointer
-        // damage to vanish.
+        // Disable the DMABUF renderer only on the NVIDIA driver, untested here and the most
+        // reported DMABUF breaker. On the one Intel host retested, the shutdown SEGV
+        // (SkiaGLContext / __eglFini) did not reproduce, and the CPU path ran at single-digit fps.
+        // Widen the check if another GPU reports DMABUF crashes. Never set this on native packages
+        // (RPM/DEB): with WebKitGTK 2.54+, disabling DMABUF drops Skia to CPU shared-memory
+        // rendering on transparent windows, and regions outside pointer damage vanish.
         if nvidia_driver_loaded && std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
             std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
         }
 
-        // AppImage bundles an older libwayland-client.so.0 that conflicts with host Mesa EGL drivers.
-        // Preloading the host system's native libwayland-client.so.0 resolves the ABI/symbol mismatch.
+        // The bundled libwayland-client.so.0 is older than the host Mesa EGL drivers expect.
+        // Preloading the host copy resolves the ABI/symbol mismatch.
         let current_preload = std::env::var("LD_PRELOAD").unwrap_or_default();
         if !current_preload.contains("libwayland-client") {
             for candidate in HOST_WAYLAND_CLIENT_CANDIDATES {
@@ -149,7 +147,6 @@ mod tests {
             .map(|key| (*key, std::env::var_os(key)))
             .collect();
 
-        // Reset to a known-clean slate before each case.
         let reset = || {
             for key in TOUCHED {
                 std::env::remove_var(key);

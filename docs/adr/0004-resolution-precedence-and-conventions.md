@@ -1,6 +1,6 @@
 # 0004. Resolution Precedence and Naming Conventions
 
-> **Status**: Accepted; amended by ADR-0008, revised 2026-09-24; amended 2026-09-28, 2026-10-09 (implemented)
+> **Status**: Accepted (amended by ADR-0008; amended 2026-09-24, 2026-09-28, 2026-10-09)
 > **Date**: 2026-03-15
 > **Context**: Media Engine Context
 

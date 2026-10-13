@@ -21,12 +21,11 @@ fn media_command(command: &mut Command) {
 /// Media binaries this suite drives for real.
 const MEDIA_TOOLS: [&str; 3] = ["ffmpeg", "mkvmerge", "mkvextract"];
 
-/// Returns `false` when the real-media regression may be skipped.
+/// Returns `false` when a Media Tool is missing and the real-media tests may skip.
 ///
-/// Required verification (CI and the release gate) sets
-/// `MKV_REQUIRE_MEDIA_TOOLS=1`, which turns a missing binary into a failure so
-/// a release cannot publish with this regression silently skipped. Developer-local
-/// runs without the variable keep the documented skip behaviour.
+/// CI and the release gate set `MKV_REQUIRE_MEDIA_TOOLS=1`, which turns a missing tool into a
+/// failure, so a release cannot ship with these tests silently skipped. Without the variable,
+/// a missing tool skips them.
 fn media_tools_available() -> bool {
     let missing: Vec<&str> = MEDIA_TOOLS
         .iter()

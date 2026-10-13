@@ -10,7 +10,6 @@ import { createInspectionCoordinator } from "./inspection-coordinator.js";
  * Remux and Extract views share one inspection of the same directory.
  */
 export function createDirectoryScanner({ invoke, queueFor, onSettled }) {
-  // One coordinator for every scan, so concurrent scans of one directory share one inspection.
   const inspectDirectory = createInspectionCoordinator((path, options) => invoke("inspect_directory", { path, options }));
 
   return async function scanInputDirectory(path, mode, { force = false, options } = {}) {
@@ -37,7 +36,7 @@ export function createDirectoryScanner({ invoke, queueFor, onSettled }) {
       const acceptedPath = manifest?.canonical_dir || directory;
       return tracker.acceptInspection(scanToken, acceptedPath, manifest);
     } catch (err) {
-      console.log("[inspect_directory] failed:", err);
+      console.error("[inspect_directory] failed:", err);
       if (scanToken !== null) tracker.rejectInspection(scanToken);
       return false;
     } finally {

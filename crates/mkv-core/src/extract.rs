@@ -28,7 +28,7 @@ fn sidecar_stem(file_stem: &str, parsed: Option<&EpisodeInfo>) -> String {
     }
 }
 
-/// Picks the best ASS subtitle track for extraction and computes its output path.
+/// Picks the best ASS or SSA subtitle track for extraction and computes its output path.
 pub fn select_subtitle_for_extraction(
     inspected: &InspectedVideo,
     file_stem: &str,

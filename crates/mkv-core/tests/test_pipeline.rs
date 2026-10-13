@@ -525,10 +525,8 @@ async fn test_pipeline_selected_items_filters_and_orders_batch() {
     );
 }
 
-// Unix-only by construction, not by convenience: a canonical-ID collision needs two
-// distinct filesystem paths that normalize to one item ID, which requires a literal
-// backslash inside a filename. Windows forbids `\` in a filename, so the scenario is
-// unrepresentable there and the Windows leg has nothing to cover.
+// Unix-only: a canonical-ID collision needs two distinct paths that normalize to one Item ID,
+// which takes a literal backslash in a filename. Windows forbids `\` in a filename.
 #[cfg(unix)]
 #[tokio::test]
 async fn test_batch_rejects_colliding_canonical_ids_before_batch_start() {
@@ -558,7 +556,7 @@ async fn test_batch_rejects_colliding_canonical_ids_before_batch_start() {
     }
 }
 
-// Leading whitespace is part of a name (#61), so " a.mkv" and "a.mkv" are two items rather than
+// Leading whitespace is part of a name, so " a.mkv" and "a.mkv" are two items rather than
 // one shared ID. Unlike the backslash collision above, this is representable on every platform.
 #[tokio::test]
 async fn test_files_differing_by_leading_space_are_two_items() {
@@ -663,7 +661,7 @@ async fn test_pipeline_extract_persists_font_hash_memo() {
     let memo = Arc::new(parking_lot::Mutex::new(FontHashMemo::new(
         memo_file.clone(),
     )));
-    // Seeding hashes nothing (#33), and this dummy episode carries no font to promote, so the
+    // Seeding hashes nothing, and this dummy episode carries no font to promote, so the
     // run itself adds no entry. Leave an unsaved one instead: the run must persist it.
     let sig = mkv_core::scan::FileSignature::of(&font_file).unwrap();
     let hash = mkv_core::fonts::hash_file(&font_file).unwrap();

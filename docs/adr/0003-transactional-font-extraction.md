@@ -1,6 +1,6 @@
 # 0003. Transactional Font Extraction and Concurrency Safety
 
-> **Status**: Migrated to Rust (ADR-0005, ADR-0010)
+> **Status**: Accepted (migrated to Rust by ADR-0005, ADR-0010)
 > **Date**: 2026-03-10
 > **Context**: Media Engine Context
 

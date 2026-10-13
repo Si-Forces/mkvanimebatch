@@ -222,7 +222,7 @@ test("a pending scan of one view is not cancelled by a scan of the other", async
 
 test("a path the bridge cannot resolve is inspected as typed, and the inspect error rejects the scan", async t => {
   const failure = new Error("Invalid directory path: No such file or directory (os error 2)");
-  const logged = t.mock.method(console, "log", () => {});
+  const logged = t.mock.method(console, "error", () => {});
   const { scan, log, inspected } = scannerHarness({
     canonical: () => { throw failure; },
     inspect: () => { throw failure; },
