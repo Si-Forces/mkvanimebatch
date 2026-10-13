@@ -1,6 +1,6 @@
 # 0008. Typed Engine Bridge, Preset Profiles, and Track Assignment Domain
 
-> **Status**: Accepted (Extended by ADR-0011, ADR-0012; amended by ADR-0013; amended 2026-09-24, 2026-09-26, 2026-09-28, 2026-10-06, 2026-10-07, 2026-10-08 and 2026-10-11, implemented)
+> **Status**: Accepted (extended by ADR-0011, ADR-0012; amended by ADR-0013; amended 2026-09-24, 2026-09-26, 2026-09-28, 2026-10-06, 2026-10-07, 2026-10-08, 2026-10-11)
 > **Date**: 2026-05-15
 > **Context**: Media Engine Context & Desktop Application Bridge
 > **Amends**: ADR-0004, ADR-0007

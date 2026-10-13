@@ -1,6 +1,6 @@
 # 0002. Asset Resolver and Runner Architecture
 
-> **Status**: Migrated to Rust (ADR-0005, ADR-0010, ADR-0011)
+> **Status**: Accepted (migrated to Rust by ADR-0005, ADR-0010, ADR-0011)
 > **Date**: 2026-03-05
 > **Context**: Media Engine Context
 

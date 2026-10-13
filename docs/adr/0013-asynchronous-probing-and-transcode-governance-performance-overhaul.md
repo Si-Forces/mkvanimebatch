@@ -607,7 +607,8 @@ or `None` once the token fires. It owns:
   Amendment 6's shared derivation now has a single call site, and the call sites for
   `probe_concurrency` (`manifest.rs` and `pipeline.rs`) that Amendment 4's governor paragraph
   lists, and Amendment 6 describes, read `inspect.rs`. The semaphore is local to the call and
-  never closed, so the "Probe semaphore closed" result is gone.
+  never closed, so the "Probe semaphore closed" result is gone. Remux execution probes are now
+  bulk probes, so Amendment 7's "bounded only by `max_workers`" holds for extract mode only.
 - **Cancellation.** A cancel aborts the outstanding probe tasks and returns `None`. Preflight
   turns that into `Inspection cancelled`, and a remux run settles every item as `cancelled`, as
   before. A token already cancelled on entry returns `None` too. The cancel arm is polled first,

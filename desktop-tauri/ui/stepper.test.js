@@ -10,7 +10,7 @@ test("an empty field with an auto value starts from it: + gives N+1, - gives N-1
   assert.equal(nextStepValue("-", 6, 1, 1, 1, 64), 7);
 });
 
-test("an empty field without an auto value starts from 0, as before", () => {
+test("an empty field without an auto value starts from 0", () => {
   for (const auto of [NaN, undefined, null]) {
     assert.equal(nextStepValue("", auto, 1, 1, 0, 64), 1);
     assert.equal(nextStepValue("", auto, -1, 1, 0, 64), 0);

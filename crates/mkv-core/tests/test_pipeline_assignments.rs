@@ -508,7 +508,7 @@ async fn test_valid_assignments_still_resolve_within_the_active_selection() {
     assert_eq!(outcomes.get("Show - 01.mkv"), Some(&ItemOutcome::Planned));
 }
 
-// Surrounding whitespace is part of a name (#61): a top-level folder that starts with a space
+// Surrounding whitespace is part of a name: a top-level folder that starts with a space
 // must list, select and assign under the ID it has on disk.
 #[tokio::test]
 async fn test_item_under_a_leading_space_folder_is_listed_selected_and_assigned() {

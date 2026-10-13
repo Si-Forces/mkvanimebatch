@@ -1,6 +1,6 @@
 # 0012. Track Assignment Override Execution and Seam Unification
 
-> **Status**: Accepted (amended 2026-09-26, 2026-09-28, 2026-10-05 and 2026-10-11)
+> **Status**: Accepted (amended 2026-09-26, 2026-09-28, 2026-10-05, 2026-10-11)
 > **Date**: 2026-09-20
 > **Context**: Media Engine Context & Desktop Application Bridge
 > **Amends**: ADR-0008, ADR-0011

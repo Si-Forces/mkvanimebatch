@@ -3,8 +3,7 @@
  *
  * A field that holds no number starts from `autoValue` when it is a finite number (the
  * engine's resolved default behind an "auto" placeholder), so + gives N+1 and − gives N−1.
- * Without one it starts from 0, as the steppers always did. A typed `0` is a value, not an
- * empty field, and steps from 0.
+ * Without one it starts from 0. A typed `0` is a value, not an empty field, and steps from 0.
  *
  * `step`, `min` and `max` are numbers; a NaN, null or undefined `min` or `max` leaves that
  * side unbounded. The result is clamped, then rounded to 10 significant digits to drop

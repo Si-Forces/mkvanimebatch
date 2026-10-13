@@ -2,7 +2,7 @@ import { buildTrackAssignmentsForManifest, isSameDirectory } from "./queue-state
 
 /** Webview event names emitted by the engine bridge; must match `job.rs`. */
 export const JOB_EVENT = "job-event";
-export const JOB_LOG = "job-log";
+const JOB_LOG = "job-log";
 export const JOB_DONE = "job-done";
 export const CLEANUP_ERROR = "cleanup-error";
 
@@ -40,7 +40,7 @@ const TERMINAL_LIFECYCLE = { completed: "done", cancelled: "cancelled" };
  * "0" stays `0` (ADR-0012). Returns `NaN` when the entry is not a number or its milliseconds
  * are not a safe integer, which serde could not read as an `i64`.
  */
-export function subOffsetSecondsToMs(raw) {
+function subOffsetSecondsToMs(raw) {
   if (raw === "") return null;
   const seconds = Number(raw);
   // Math.round sends -x.5 toward +Infinity, so round the magnitude and restore the sign.
@@ -228,12 +228,11 @@ export class JobController {
 
     this.setRunning(true);
 
-    // The engine resolves the request before the scan, so a bad value fails here rather than
-    // after the scan, and the chips show the values it resolved. `run_job` resolves the
-    // complete request again once `selected_items` and `assignments` are set. The coordinator
-    // is held across the call so a second Run cannot start meanwhile, which makes a refusal end
-    // in `abortStart` (the pill reads "failed") like the other pre-scan failures; the message is
-    // appended to the log as it stands, which a refused request leaves uncleared.
+    // Resolve the request before the scan, so a bad value fails before it and the chips show the
+    // resolved values. `run_job` resolves the complete request again once `selected_items` and
+    // `assignments` are set. The coordinator stays held across the call so a second Run cannot
+    // start; a refusal ends in `abortStart` (the pill reads "failed") like the other pre-scan
+    // failures, and its message is appended to the log, which is not cleared yet.
     let settings;
     try {
       settings = await this.runtime.invoke("resolve_batch_request", { request: batchRequest });
@@ -393,9 +392,9 @@ export class JobController {
 
   async clearCache() {
     const confirmed = await this.runtime.showModal(
-      "Clear Inspection Cache",
+      "Clear inspection cache",
       "Are you sure you want to clear the persistent inspection cache?",
-      { confirmLabel: "Clear Cache" }
+      { confirmLabel: "Clear cache" }
     );
     if (!confirmed) return;
 
@@ -435,37 +434,27 @@ export class JobController {
   /**
    * True while a job owns the batch: starting, running, or stopping.
    *
-   * `start()` captures the ordered selected IDs *before* the forced inspection,
-   * so a selection action landing during preflight would change what the user
-   * believes they are running without changing the request. That freeze covers
-   * every mode: the captured request belongs to the owning mode, and the other
-   * queue is not what is being run.
+   * `start()` captures the ordered selected IDs before the forced inspection, so a selection
+   * change during preflight would change what the user believes they run without changing the
+   * request. The freeze covers both modes' queues.
    *
-   * The startup snapshot restore is deliberately excluded. It holds the
-   * coordinator in its `restoring` phase to block a concurrent start, but no
-   * job owns a batch then, and the user must still be able to adjust a
-   * restored queue before running.
+   * The startup snapshot restore is excluded: its `restoring` phase blocks a concurrent start,
+   * but no job owns a batch then, and the user may still adjust a restored queue.
    */
   isJobActive() {
     return this.runtime.coordinator.activeMode !== null;
   }
 
   /**
-   * True while `mode`'s selection may still be mutated by the user.
-   *
-   * Beyond an active job, a queue is only locked against *its own* inspection:
-   * a background rescan of one tab must not disable the other tab's selection
-   * controls while the coordinator is idle.
+   * True while the user may change `mode`'s selection. Beyond an active job, a queue is locked
+   * only by its own inspection: a rescan of one tab leaves the other tab's selection alone.
    */
   canMutateQueueSelection(mode) {
     if (this.isJobActive()) return false;
     return !this.runtime.queueFor(mode).isScanning;
   }
 
-  /**
-   * Select All / Deselect All action behind the bulk buttons.
-   * Returns true only when the selection was actually mutated.
-   */
+  /** Select All / Deselect All. Returns false, changing nothing, while the selection is locked. */
   applyBulkSelection(mode, select) {
     if (!this.canMutateQueueSelection(mode)) return false;
     const tracker = this.runtime.queueFor(mode);
@@ -488,11 +477,9 @@ export class JobController {
       this.runBtn.title = this.runBlockedReason(selectionDisabled);
     }
     for (const control of this.formControls) control.disabled = busy;
-    // Selection stays frozen for the whole preflight/run window: the request
-    // captured this queue's selection before the forced scan, so a click now
-    // could only desynchronize the UI from the batch. The tracker enforces the
-    // same predicate on every mutation, so a card re-rendered after this sync
-    // cannot slip an unguarded change through either.
+    // Selection stays frozen through preflight and the run: the request captured it before the
+    // forced scan, so a click could only desynchronize the UI from the batch. The tracker checks
+    // the same predicate on every mutation, so a card re-rendered after this sync is guarded too.
     for (const { id, mode } of BULK_SELECTION_CONTROLS) {
       const control = document.getElementById(id);
       if (control) control.disabled = !this.canMutateQueueSelection(mode);

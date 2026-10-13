@@ -5,7 +5,7 @@ use std::process::{Command, Output};
 
 /// Runs `mkv-cli --plan` with the inspect cache redirected into `home`.
 ///
-/// `get_default_cache_dir` honours `LOCALAPPDATA` first and `HOME` second; the cache file sits in
+/// `get_default_cache_dir` honors `LOCALAPPDATA` first and `HOME` second; the cache file sits in
 /// `$LOCALAPPDATA/mkvanimebatch`, so setting it points the cache at `home` on every platform.
 /// `HOME` is set too so that no fallback can reach the real user cache.
 fn run_plan(input: &Path, home: &Path, rust_log: Option<&str>) -> Output {

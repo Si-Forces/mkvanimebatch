@@ -44,7 +44,7 @@ test("cache wording classifies as line-done", () => {
   assert.equal(classifyLine("Persistent inspection cache cleared."), "line-done");
 });
 
-test("unrecognised lines classify to empty string", () => {
+test("unrecognized lines classify to empty string", () => {
   assert.equal(classifyLine(""), "");
   assert.equal(classifyLine("random text with no keywords"), "");
 });

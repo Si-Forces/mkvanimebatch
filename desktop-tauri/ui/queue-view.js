@@ -79,17 +79,14 @@ export class QueueTracker {
     this.isScanning = false;
     this.renderRafId = null;
     this.lastManifest = null;
-    // Set by the owning JobController. While true, every user-driven selection
-    // or order mutation is refused: `start()` snapshots the ordered selected IDs
-    // before its forced inspection, so a click landing afterwards would change
-    // what the user believes they are running without changing the request.
-    // Disabling the controls is not the invariant — a row re-rendered after
-    // the last sync carries a fresh, enabled checkbox — so the guard lives on
-    // the mutation itself.
+    // Set by the owning JobController. While true, every user selection or order change is
+    // refused: `start()` captured the ordered selected IDs before its forced inspection. The
+    // guard lives on the mutation, not only on the disabled controls, because a row re-rendered
+    // after the last sync carries a fresh, enabled checkbox.
     this.selectionLocked = false;
-    // Track Assignment overrides (remux only): item id -> assignment payload
+    // Track Assignments (remux only): item id -> assignment payload.
     this.assignments = new Map();
-    // v2 manifest: candidates are stored once per release directory.
+    // Subtitle candidates, once per Release Directory.
     this.subtitleCandidates = {};
     this.heartbeatTimer = null;
     // Presentation only: the list filter chip, the row shown in the inspector, and the
@@ -395,11 +392,10 @@ export class QueueTracker {
     return document.getElementById(`${this.mode}-bitrate`)?.value?.trim() ?? "";
   }
 
-  // Creates row DOM in requestAnimationFrame batches under a ~8 ms frame
-  // budget so large manifests don't block the main thread. Each tick aborts
-  // when scanToken has moved on (reset/startScan/reuseInspection bump it).
-  // Rows render from the item's CURRENT reducer state, so events that
-  // arrived before a row existed are reflected once it is created.
+  // Creates rows in requestAnimationFrame batches under a ~8 ms frame budget so a large manifest
+  // does not block the main thread. A tick aborts once scanToken has moved on (reset, startScan
+  // and reuseInspection bump it). Rows render from the item's current reducer state, so events
+  // that arrived before a row existed show once it is created.
   renderCardsIncrementally() {
     this.cancelRender();
     const order = this.state.order;
@@ -794,7 +790,7 @@ export class QueueTracker {
     reorderItem(this.state, id, dir);
     const card = this.cards.get(id);
     if (card) {
-      // Headers sit between rows; take them out so the swap is with the neighbouring row.
+      // Headers sit between rows; take them out so the swap is with the neighboring row.
       this.clearGroupHeads();
       if (dir === "up" && card.el.previousElementSibling) {
         card.el.previousElementSibling.before(card.el);

@@ -1,193 +1,49 @@
 # Release Notes
 
-## Unreleased
+## 1.0.0
 
-### Breaking Changes
+The first public release of MKV Anime Batch: a desktop app and a command-line tool (`mkv-cli`) that remux or extract a whole folder of anime fansub MKV episodes in one run. See the [README](../README.md) for installation and usage.
 
-- **`FontRegistry::claimed_hashes()` returns only the hashes computed so far**: a font already in the fonts directory is hashed only when a staged font of its size is promoted, so until then its hash is absent from the returned set.
-- **`JobEvent` and `BatchItemInfo` drop `Deserialize`**: `JobEvent` and `BatchItemInfo` in `mkv-core::pipeline` no longer derive `Deserialize`, and unused `#[serde(default...)]` annotations were removed from `JobEvent` variants.
-- **`EpisodeType::label()` parameter dropped**: `EpisodeType::label(&self)` no longer accepts `long: bool`; it always returns the standard short label (`EP`, `Part`, `OVA`, `SP`).
-- **Asset font fields and `use_source_fonts()` removed**: Removed write-only `fonts: FontInfo` from `ResolvedAssets` and `AssetResolver`, removed unused `AssetResolver::use_source_fonts()`, and eliminated redundant font fallback scanning in `AssetResolver::discover`, which drops its `fonts_dir` and `font_cache` parameters. Directory-level font resolution is owned by `ReleasePreparer`.
-- **`execute_remux_job` requires the I/O governor**: its `io_semaphore` parameter is now `&Semaphore` instead of `Option<&Semaphore>`. A closed semaphore fails the item instead of running it without the ADR-0011 disk-write limit, in both remux and extract.
-- **`sub_offset` renamed to `default_sub_offset_ms` in whole milliseconds**: the global subtitle offset on `BatchRequest` (and so the `run_job` IPC payload), `PipelineConfig`, and `RemuxOptions` is now `default_sub_offset_ms`, an `i64` in milliseconds instead of `sub_offset`, an `f64` in seconds; `build_mkvmerge_args` takes it as `i64`. No alias is kept: a request that still sends `sub_offset` has the key ignored and runs with no global offset, and a fractional `default_sub_offset_ms` fails to deserialize. `--sub-offset` and the desktop Remux view still take seconds and convert them to whole milliseconds, rounding half away from zero. The desktop now sends an entered `0` as `0` rather than `null`; both mean no global offset.
-- **Non-finite subtitle offset rejected**: `mkv-cli` rejects a `--sub-offset` value that is not finite, such as `inf`, `-inf`, or `NaN`, or whose milliseconds do not fit `i64`. With the field now an integer, `BatchRequest::resolve` no longer checks it.
-- **Lowercase `m` bitrate suffix rejected**: CLI and desktop requests now reject rates such as `2m`, which ffmpeg interprets as milli rather than mega. Use uppercase `M` for mega; `k` and `K` remain accepted. Surrounding whitespace is trimmed before encoding.
-- **Removal of `--keep-fonts` CLI Flag**: The `--keep-fonts` command-line option has been removed from `mkv-cli`. Invoking `mkv-cli` with `--keep-fonts` will now result in an unknown flag error.
-- **Removal of `keep_fonts` from Typed Contracts & IPC**: The `keep_fonts` field has been removed from `BatchRequest`, `PresetProfile`, `PipelineConfig`, and desktop Tauri IPC command schemas (`run_job`, `get_preset_profiles`). Desktop presets and UI controls no longer expose a font-retention toggle. No compatibility alias is retained.
-- **Public `mkv-core` API removals**: Removed `SubIndex::{lookup, indexed_count, primary_count, fallback_count}`, `ChapterIndex::{indexed_count, rejected_count}`, `CoverIndex::{indexed_count, has_global}`, and `AssetResolver::{has_local_subtitle, count_unmatched_chapter_videos}`. Downstream code calling these helpers must migrate; the methods are no longer available.
-- **`mkv-core` public API narrowed to what the workspace uses**: The `cpu` module is now crate-private. Removed or no longer public, by module:
-  - `assets`: `FontsOrigin`; `PreparedRelease::{mkv_dir, videos, fonts_origin}`; `AssetResolver::{new, discover_with_caches, resolve_chap}` (`discover` takes the former `discover_with_caches` arguments); `SubIndex::{all_subtitles, lookup_same_dir, lookup_ancestors, lookup_fallback}`; `ChapterIndex::has_match`; `CoverIndex::lookup_fallback`. `prepare_release_directory` and `ReleasePreparationOptions` are replaced by `ReleasePreparer::{prepare, fonts}`, one per batch, which owns the four caches; `AssetResolver::discover` takes its `ScanCache` and subtitle-classification cache as `&mut`, not `Option`.
-  - `domain`: `SUBTITLE_LANGS_PRIMARY_ORDER`, `SUBTITLE_LANGS_FALLBACK_ORDER`, `SUBTITLE_EXTENSIONS`, `CHAPTER_EXT`, `DIALOGUE_KEYWORDS`, `KNOWN_LANG_TOKENS`, `ep_type_label`, `format_ep`, `parse_progress_percentage`, `is_windows_reserved_device`, `EpisodeType::is_special_or_ova`. `is_dialogue_track` takes `&str`; `select_best_subtitle_track` returns `Option<(u32, String)>`; `select_audio_track` returns `Option<AudioTrack>`; `read_progress_stream` takes `&mut Vec<u8>`.
-  - `extract`: `build_mkvextract_args`, `ExtractSummary::mkv_path`.
-  - `fonts`: `FONT_DIR_NAMES`, `FontMemoEntry`, `FontHashMemo::memo_file`, `FontRegistry::fonts_dir`, `FontClaim::{name, size, identity}` fields (use `FontClaim::name()`), `FontClaimsGuard::{defuse, len, drain_claims}`.
-  - `manifest`: `parse_resolution`, `parse_video_codec`, `parse_audio_track_info`, `extract_mkv_metadata`.
-  - `pipeline`: `PipelineConfig::cache_file`, the `BatchPipeline` fields; `with_log_sender` takes a `LogSender`.
-  - `remux`: `RemuxSummary` (`execute_remux_job` returns the log lines), `PlannedJob::{base, release_dir}` and its write-only `String` field `item_id`, `TrackSelection::{audio_channels, audio_reason, has_source_chapters}`.
-  - `request`: `assignments_to_track_map`, `canonical_assignment_target_id` (use `ItemId::parse`), `TrackAssignment::{clean_target_video, is_relative_asset}`.
-  - `scan`: `COVER_LIKE_STEMS`, `parse_attachments`, `InspectCacheEntry`, `get_default_cache_file`, `InspectedVideo::{metadata, into_metadata, attachments, fonts_count}`, `InspectionResult::is_success`, `PersistentInspectCache::{get, put}` (use `get_path`/`put_path`) and its fields. `cover_attachment`/`font_attachments` return references.
-- **`mkv-core` type surface narrowed**: beyond the items listed above, these public types lost trait implementations, and one conversion was removed: `InspectedVideo` no longer derives `Serialize`, `Deserialize` or `Default`, and `impl From<MkvmergeMetadata> for InspectedVideo` is gone; `InspectionResult` no longer derives `Serialize` or `Deserialize`; `FileSignature` no longer derives `Hash`, `Serialize` or `Deserialize`; `FontClaim` no longer derives `Clone`. `AssetResolver` now derives `Default`. Downstream code relying on these traits must migrate.
-- **App version no longer pinned in `tauri.conf.json`**: the `version` key was removed so the workspace package version (`[workspace.package]` in the root `Cargo.toml`, inherited by `desktop-tauri/src-tauri/Cargo.toml`) is the single source of truth; Tauri falls back to it. The packaged version is unchanged.
-- **Release profile no longer aborts on panic**: `[profile.release]` no longer sets `panic = "abort"`. This is what lets the Engine Bridge intercept a task panic, emit a terminal failure event, and release the job slot instead of the whole desktop process dying. Expect a larger packaged binary; crash containment takes priority over size.
-- **`BatchStart` / `JobSnapshot` `input_dir` is now the display path form**: On Windows these fields no longer carry a verbatim (`\\?\`) prefix, and `\\?\UNC\` is rewritten to `\\`. Consumers that compare the path against a raw `std::fs::canonicalize` result must strip the prefix themselves. This matches the form the Inspection Manifest's `canonical_dir` already used; see *Directory Identity* in `architecture.md` §5.1 (item 5).
-- **Removal of `--sub-assignments` CLI Flag**: The deprecated `--sub-assignments` alias has been removed from `mkv-cli`; passing it now fails with `Unknown argument: --sub-assignments`. Use `--assignments`, which still accepts the legacy flat `{"video.mkv": "sub.ass"}` map as well as `TrackAssignment` arrays.
-- **`TrackAssignment.track_type` is a typed `AssignmentKind`**: the field is now `AssignmentKind` (only `Subtitle`) instead of `Option<String>`, and is always serialized as `"track_type":"subtitle"`. Assignment JSON accepts only lowercase `"subtitle"` or an omitted key; `"Subtitle"`, padded values, and `null` are now rejected. Malformed `TrackAssignment` arrays, bare or under an `assignments` key, now report the underlying reason (e.g. ``Invalid track assignment: unknown variant `audio` ``) instead of a generic schema error.
-- **`PresetProfile.description` removed**: The `description` field is gone from `PresetProfile` and from the `get_preset_profiles` payload.
-- **Inspection cache entries drop `mtime`**: `inspect_cache.json` entries no longer store the unused `mtime` field; freshness is still checked by size and `mtime_ns`. Existing cache files keep loading.
-- **`JobSnapshot.duration_sec` removed**: The Job Snapshot returned by `get_job_snapshot` no longer has a top-level `duration_sec`. It was always `null`, because nothing set it, and the webview never read it. Item durations (`ItemSnapshot.duration_sec`, `ItemComplete.duration_sec`) are unchanged (ADR-0008, 2026-10-08 amendment).
-- **`generate_inspection_manifest` prunes the inspect cache**: after a completed inspection it now drops the cache entries under the input directory whose file the scan did not discover, then saves the cache, including when the directory holds no MKV files. It previously only added entries. A cancelled inspection prunes nothing.
-- **`InspectionManifest::filter_selected` replaced by `select_items`**: `select_items(&[String])` returns `Result<InspectionManifest, String>`, failing with `Selected items not found among discovered MKV files: ...` when a selection names no discovered item. It keeps selection order and drops repeated selections.
-- **Asset scan cache is a `ScanCache`; `ScanResults.videos` removed**: `scan_assets` takes `Option<&mut ScanCache>` instead of a `HashMap<PathBuf, ScanResults>` and returns `Arc<ScanResults>`; `AssetResolver::discover` takes a `ScanCache` too, and `ReleasePreparer` owns one. `ScanResults` no longer has a `videos` field. `ChapterIndex::add` takes `&ParsedFile` and no longer checks that the file is chapter XML: `scan_assets` is the only place a file is sniffed for chapter content.
-- **`AssetResolver::resolve_for` no longer checks that the assigned subtitle exists, and cannot fail**: it takes `assigned_subtitle` as given and no longer fails with `Assigned subtitle '...' no longer exists`, and it returns `ResolvedAssets` instead of `Result<ResolvedAssets, String>`, since it can no longer fail. The Remux Plan makes that check once, before it resolves, so a batch still aborts on a missing assigned subtitle exactly as before (ADR-0008). A caller outside the pipeline must check `Path::is_file` itself.
-- **`generate_inspection_manifest` takes an `Arc` cache**: its `persistent_cache` parameter is now `Option<Arc<PersistentInspectCache>>` instead of `Option<&PersistentInspectCache>`, matching `PipelineConfig.cache`, because each spawned probe task holds the cache. Callers wrap their cache in an `Arc`.
-- **`BatchPipeline::from_request` removed**: it had no callers left once the CLI and the desktop both resolve the request themselves. Call `BatchRequest::resolve` and pass the config to `BatchPipeline::new`.
-- **`BatchRequest::resolve` replaces `validate` and `into_pipeline_config`**: `BatchRequest::validate` is now private and `into_pipeline_config` is removed; `BatchRequest::resolve(self) -> Result<PipelineConfig, String>` validates the request and converts it in one step, so a caller validates and converts with one call. The ranges and defaults are public constants (`WORKERS_RANGE`, `IO_JOBS_RANGE`, `FFMPEG_THREADS_RANGE`, `COMPLEXITY_RANGE`, `DEFAULT_IO_JOBS`, `DEFAULT_PRESET_ID`). An unset bitrate and complexity now come from the `balanced` Preset Profile rather than `PipelineConfig::default`, which is a fixed fixture for tests; the values are unchanged. `PipelineConfig.io_jobs` now holds the effective limit: a requested `0` resolves to the worker count, so it is never `0`, and a hand-built config with `io_jobs: 0` now runs with 1 I/O job instead of the worker count. The invalid-bitrate error now reads ``Invalid bitrate format: '<value>'. Must be a positive integer with an optional k/K/M suffix, like 128k or 192k.`` in the desktop too, and `mkv-cli` no longer rejects `--preset` or `--bitrate` while parsing: `resolve` reports them. New `EffectiveSettings` type, from `PipelineConfig::effective_settings()` and `EffectiveSettings::defaults()`, holds the workers, I/O jobs, FFmpeg threads, bitrate and complexity a run uses.
-- **Media Tool runner parameter on `execute_remux_job` and `extract_mkv_file`; `read_progress_stream` removed**: both take a trailing `runner: &dyn MediaToolRunner` (`mkv-core::media_tool`); pass `&SubprocessRunner` to spawn the real tools. `BatchPipeline::with_media_tool_runner` replaces the runner a pipeline uses, defaulting to `SubprocessRunner`. `domain::read_progress_stream` is gone: `media_tool::run` parses the "Progress: N%" lines.
-- **`clean_relative_path` removed; item identity is an `ItemId`**: the new public module `mkv_core::item_id` holds `ItemId`, a value built only normalised: `ItemId::of(path, input_dir)` for a discovered file and `ItemId::parse(spelling)` for a user-supplied relative spelling (use it where you called `request::clean_relative_path`). `BatchItemInfo.id`, `ManifestItem.id` and the `id` of `JobEvent::{ItemStart, ItemProgress, ItemComplete}` are now `ItemId` instead of `String`; read it with `as_str()`, `to_string()` or `String::from`. The JSON shape is unchanged: an `ItemId` serialises as a plain string, so the manifest v2 schema, the job events and `--plan` output are identical for any path (an ID is not trimmed, and its `.` segments and repeated separators are dropped, as selections already were), and deserialising an `ItemId` normalises it. `get_item_id` moved from `manifest` to `item_id` with the same signature; it stays for release directories and subtitle candidates.
-- **Selected Items and Track Assignment targets are no longer trimmed**: a Batch Request entry, a `--selected-item` value or an `--assignments` JSON `target_video` with surrounding whitespace now names that exact path, where it used to match the trimmed path. Leading whitespace with no such file fails with the existing `does not exist` error; a spelling that no longer ends in `.mkv`, such as one with trailing whitespace, fails as `is not an MKV file`. `--selected-items` still trims each comma segment. An entry that is empty or only whitespace is still rejected. Items whose path starts with whitespace, such as a top-level folder ` Season 1/`, can now be selected and assigned, and two files that differ only by leading whitespace are two items (fixes #61).
-- **`find_fonts_dir` and `scan_fonts` require their caches**: in `mkv_core::fonts`, both take their cache as `&mut HashMap` instead of `Option`, and `find_fonts_dir` no longer takes `override_dir`. `ReleasePreparer` applies `--fonts-dir` before it consults `find_fonts_dir`; a caller outside the preparer must do the same.
-- **`FontRegistry::promote` returns a `FontPromotion`**: `Promoted(path)`, `Duplicate` or `Failed(reason)` instead of `Option<PathBuf>`. `ResolvedAssets` and `PlannedJob` gain a `chapter_warning: Option<String>` field.
+### Downloads
 
-### Core Scanning
+| Platform | Desktop app | CLI |
+| :--- | :--- | :--- |
+| Windows (x64) | `mkv-anime-batch.exe`, or `MKV_Anime_Batch_Portable_win64.zip` | `mkv-cli-x86_64-pc-windows-msvc.zip` |
+| Linux (x86_64) | `MKV_Anime_Batch_*_amd64.AppImage`, `MKV_Anime_Batch_*_amd64.deb`, or `MKV_Anime_Batch_*_x86_64.rpm` | `mkv-cli-x86_64-unknown-linux-gnu.tar.gz` |
 
-- Recursive MKV scanning skips canonical-key path allocations for non-MKV files and directories excluded by the output/font-directory name filters. Canonical keys are still derived for candidates that need ignore-path or deduplication checks.
-- Asset discovery stops repeating work for directories shared by many Release Directories (ancestors and the `--assets-dir` fallback): chapter XMLs are sniffed once per directory per run instead of on every index build, a repeated spelling of a scanned directory skips the `realpath`, a cache hit no longer deep-copies the scan results, and directory entries are classified from `read_dir` file types instead of a resolving `stat` each.
-- A stop during the per-directory asset pass takes effect after the directory being scanned, instead of only once planning starts. Remux checks before each Release Directory and settles every item as `cancelled`; preflight inspection checks before each directory whose subtitles it lists and fails with `Inspection cancelled`. A directory scan already underway still runs to completion.
+Each CLI archive has a `.sha256` file. `APPIMAGE-RUNTIME.txt` lists the GTK and WebKitGTK versions bundled in the AppImage.
 
-### Core Performance & Probing
+You also need `mkvmerge` and `mkvextract` ([MKVToolNix](https://mkvtoolnix.download/)) and `ffmpeg` with `libopus` on your `PATH`. The Windows desktop app needs the Microsoft Edge WebView2 Runtime, which current Windows includes.
 
-- The native EBML probe runs on Tokio's blocking pool. Concurrent probes reading cold or slow media (cold-read latency measured on a USB HDD and an SSD) no longer stall the async runtime, which froze progress events and NDJSON output for the CLI and desktop app. Once started, a native probe is not cancellable and reads to completion after a stop.
-- `probe_ebml_native` preserves `BufReader` buffers across intra-buffer element skips using relative seeking and tracks stream positions in memory, eliminating redundant kernel `lseek` loop guards and reducing probe I/O from hundreds of syscalls to roughly one buffer read per 8 KiB of header scanned.
-- Preflight inspection default probe concurrency is now calculated from physical core count via `cpu::probe_concurrency(cpu::default_workers())`, aligning with pipeline execution's default. Previously it used logical cores (`available_parallelism()`), which allowed up to 16 concurrent probes on machines with 4 physical and 8 logical cores.
-- The physical core count is capped at `available_parallelism()`, which accounts for cgroup CPU quotas and `taskset` affinity where it can read them. In a CPU-limited container or under `taskset`, the defaults derived from it (CLI `--workers`, `auto` FFmpeg threads, preflight probe concurrency) follow the CPUs the process may use instead of the host's `/proc/cpuinfo` topology. On an unconstrained host they are unchanged. Pinning to two hyperthread siblings of one core counts as 2.
-- Extraction no longer hashes every font already in the fonts directory when it starts. Existing fonts are recorded by name and size, and one is hashed only when a staged font of its size is promoted, since only then can it be a content duplicate. This helps most with `--no-cache` or the desktop "no cache" box, which have no font hash memo, so each run hashed every existing font once per fonts directory. Duplicates are still caught.
-- Preflight inspection looks up and stores each file's inspect-cache entry inside its probe task, as the pipeline does, instead of checking every file in one serial pass before the first probe starts. Lookups now run alongside probing, and pending ones are aborted with the probes on cancel. On high-latency storage (network shares, USB HDDs) the first probe starts sooner, and an all-hit re-Inspect is no longer fully serial.
-- `--ffmpeg-threads` and the desktop "FFmpeg Thds" field are now described as the FLAC decoder thread cap per transcode. `-threads` precedes `-i`, so it never reached the encoder, and libopus is single-threaded: each transcode encodes on about one core whatever the value, and `--workers` is the only lever on encode CPU use. Behavior, the `auto` default `(cores / workers)` clamped to 1–4, and validation are unchanged; the `--help` text, the field's tooltip, the README, and ADR-0013 (a dated note under Decision 2) say so now.
-- A probe task that fails unexpectedly (it panics) now reports `Probe task failed: <reason>` for its own item in both Inspect and Run. Inspect showed `Probe result missing` and Run showed `Failed to probe video` before.
+### Features
 
-### Inspect Cache Lifetime
+- **Remux**: one output MKV per episode with the chosen subtitle, one audio track, chapters, a cover, and the release's fonts. FLAC audio is transcoded to Opus with a preset (`balanced`, `fast`, `hifi`, `custom`) or your own bitrate and complexity. A global subtitle offset, or one per episode, shifts subtitle timing.
+- **Extract**: the best ASS or SSA subtitle, chapters, cover, and fonts of each episode. Fonts are written once per fonts folder, deduplicated by name and size and by content hash.
+- **Subtitle matching** across a release tree, in a fixed order: manual Track Assignment, same folder, embedded track, nearest parent folder, then `--assets-dir`. Episode identity is parsed from file names, including seasons, OVAs, specials, and fractional episodes.
+- **Audio selection** prefers Japanese, then undetermined language, then stereo, and skips commentary and audio-description tracks.
+- **Fast scanning**: a built-in Matroska parser reads track and attachment metadata without starting a process, with `mkvmerge -J` as the fallback. Results are cached by path, size, and modification time.
+- **Concurrency**: several episodes at once (`--workers`), with a separate limit on disk-heavy steps (`--io-jobs`) so transcoding overlaps with muxing.
+- **Safe output**: work is staged in a temporary folder inside the destination and moved into place when complete. Stopping a batch or a failure leaves no partial files.
+- **Desktop app**: episode list grouped by release folder, a per-episode inspector with the subtitle ladder and Track Assignment controls, per-row progress, a log you can copy, CPU, RAM, and disk-write graphs, light and dark themes. A reloaded window reconnects to a running batch.
+- **CLI**: `--plan` prints the inspection manifest as JSON, `--dry-run` shows what would run, `--events` streams job events as NDJSON, and `--selected-item`/`--selected-items` run chosen episodes in a given order.
 
-- A completed preflight inspection prunes the inspect cache: `generate_inspection_manifest` drops the entries under the input directory whose file the scan did not discover, so the cache follows the current library instead of every file ever probed. Entries outside the input directory are kept, and a cancelled inspection prunes nothing. Output and font directories are never discovered, so inspecting their parent drops their entries; they are re-probed if inspected later.
-- The cache file is read with one `fs::read` and parsed with `serde_json::from_slice` instead of streamed through `serde_json::from_reader`.
-- `PersistentInspectCache::clear` now discards a save already in flight, which could otherwise write the cleared entries back.
-- Desktop: one inspect cache per app session. The first Inspect or Run that wants it loads the file, and later Inspects and Runs share it, so an Inspect followed by a Run reads the file once instead of twice. Entries written meanwhile by the CLI or a second app instance are not picked up, and the session's next save overwrites them.
-- Desktop: "Clear cache" clears the session's cache, so a later save no longer restores the cleared entries, and it no longer parses the file just to delete it. It works during a running job.
-- CLI: `--no-cache` no longer parses the default cache file, and neither does a batch run (its pipeline loads its own). `--clear-cache` deletes the file without parsing it.
+### Known issues
 
-### Audio Track Selection
+- **AppImage rendering**: if the AppImage crashes at startup or shows a blank window, run it with `WEBKIT_DISABLE_DMABUF_RENDERER=1` and [open an issue](https://github.com/Si-Forces/mkvanimebatch/issues) with your GPU and driver. With the NVIDIA driver loaded the AppImage already sets this. Do not set it for the `.deb` or `.rpm` packages, where it breaks the window's rendering ([ADR-0015](adr/0015-per-package-webkitgtk-dmabuf-renderer-scoping.md)).
+- **Windows testing**: the tests that run the real `mkvmerge`, `mkvextract`, and `ffmpeg` run only on Linux in CI. Windows builds pass the rest of the test suite.
+- **No macOS build.**
+- Stopping during a scan does not interrupt a file read already in progress. The batch stops, and that read finishes in the background.
+- The desktop app and the CLI share the inspection cache file, but neither sees entries the other writes while it is running, and its next save drops them. The only cost is that those files are scanned again.
 
-- Tracks named `Comments`, `Commentaries`, and lowercase variants are excluded from primary audio selection so they are not transcoded over feature audio.
+### Changes for users of pre-release builds
 
-### Worker Panic Reporting
+If you used a build from before this release:
 
-- A worker task that panics now completes its item with outcome `error` and the message `worker panicked: ...`. Previously that item never received an `ItemComplete` event.
-
-### Media Tool Invocation
-
-- Extraction now logs mkvextract's exit-code-1 warnings in the item's log, as remux does for mkvmerge (`  Warning: <text>`). It discarded them before.
-- The `mkvmerge -J` fallback probe accepts exit code 1 (warnings) when the output is valid JSON, and passes the document's `warnings` array, naming the file, to `tracing::warn!` on exit code 0 or 1 (its `errors` array goes into a rejection's message, see Log Channel Outcomes, and to `tracing::warn!` when the file is accepted). `mkvmerge -J` reports its messages in the document, and can exit 0 with them; the run's stderr is not logged. It failed with `mkvmerge exit code Some(1)` before. `probe_video_mkvmerge_with(runner, path)` takes the runner, so a scripted one covers this.
-- `mkvmerge`, `mkvextract`, and `ffmpeg` failures share one wording: `Failed to run <tool>: <error>`, `<tool> timed out after <N> seconds`, and `<tool> failed (exit code N | terminated by signal): <stderr and stdout>`. A tool that printed nothing now gives `<tool> failed (exit code N)`, without repeating the code after a colon. A failed transcode reads `Audio transcode: ffmpeg failed (exit code N): ...` instead of `ffmpeg audio transcode failed: ...`.
-- Every Media Tool starts with stdin closed; `mkvmerge` and `mkvextract` inherited it before.
-
-### Engine Diagnostics
-
-- `mkv-cli` and the desktop now install a `tracing` subscriber, so the engine's own `warn!` and `error!` messages (a corrupt inspect cache, a failed font memo, the `mkvmerge -J` warnings) are shown. Nothing showed them before. The default level is `warn`; `RUST_LOG` replaces it, for example `RUST_LOG=debug`, or `RUST_LOG=warn,mkv_core::fonts=debug` to raise one module and keep the other warnings.
-- CLI: they go to stderr as the level and the message (no timestamp or module), coloured only on a terminal, so stdout still holds only the `--plan` JSON, the `--events` NDJSON and the summary.
-- Desktop: they go to `mkv-anime-batch.log` in the app log directory (on Linux `$XDG_DATA_HOME/com.mkvanimebatch.desktop/logs/`, `~/.local/share` when unset; one UTC-timestamped line per message with its level and module) and to stderr. The file is emptied at startup when it is over 1 MB, and the app starts with stderr only if it cannot be opened; the Windows build has no console, so there that leaves no output until a later start opens the file. See the README's Troubleshooting section for the path.
-
-### Remux Planning Abort
-
-- A remux planning abort (an assigned subtitle that no longer exists) now keeps the log lines collected before it: the `Skipping ...` and `ERROR: ...` lines of earlier items now appear in the desktop log console and the CLI summary ahead of the `Remux planning failed` line, where before they were lost. A dry run drops its `[DRY-RUN]` lines on an abort, since the batch does no work. Item events and counts are unchanged.
-
-### Log Channel Outcomes
-
-- Three outcomes that were silent or only Engine Diagnostics now reach the user. An extracted font that cannot be saved adds `   -> WARNING: Font '<name>' was not saved: <reason>` to the item's log (the item still completes; a duplicate of a saved font stays silent). An episode whose chapter file has same-directory siblings that match the video's season (equal or unknown) and were not chosen logs `  Warning: More than one chapter file for this episode in '<dir>': using '<kept>', ignoring '<a>', '<b>'` on its own item, after `Processing:` (after its `[DRY-RUN]` line in a dry run), where before it was only an Engine Diagnostic; a file of another known season is never named, and a duplicate in another directory is no longer an Engine Diagnostic. A file the `mkvmerge -J` fallback probe rejects carries mkvmerge's `errors` in its message, for example `File is not a recognized Matroska container (mkvmerge: <error>)`, in the run's log and the Inspect manifest's `inspection_error`.
-
-### Season Matching
-
-- **User-visible selection change**: within one directory, a candidate with the same known season as the video now beats one with an unknown season. A season-2 video next to `Show - 01.xml` and `Show - S02E01.xml` now gets the `S02E01` chapter file, where before the first file in name order won. The same holds for subtitles (exactness now ranks above language score) and episode covers (it ranks above cover kind). A nearer directory still wins first, so the precedence ladder is unchanged.
-
-### Extracted Subtitle Naming
-
-- When a file name does not parse as an episode, its extracted subtitle is named `{stem}_{lang}_track{id}.ass` instead of repeating the stem (`{stem}_{stem}_{lang}_track{id}.ass`). Parsed episodes are unchanged: `{stem}_{EpLabel}{ep}_{lang}_track{id}.ass`.
-
-### Desktop Application
-
-- The theme follows the system light/dark preference, live, until the user toggles it; only an explicit toggle is stored and applied to the native window. Unrecognized stored themes are ignored, consistently with the early theme bootstrap.
-- The window's corner resize handles now have a usable size and a diagonal resize cursor.
-- Stepper limits match the engine's validation: workers 1–64, Disk I/O jobs 0–64, FFmpeg threads 1–32. Fractional and out-of-range values in those three fields are rejected before inspection instead of being truncated to integers. The engine does the rejecting (the new `resolve_batch_request` command; the webview has no check of its own): an out-of-range whole number logs the engine's message, such as `Worker thread count must be between 1 and 64`, while a fractional or negative one is refused earlier, as the command's arguments are read, and logs that error text instead. A rejected request leaves the previous run's log in place and adds the error line to it.
-- The UI uses the system font stacks; bundled web fonts are no longer loaded.
-- Two spellings of one folder now match exactly when the OS resolves them to the same folder, symlinks included, so the queue keeps its cards, selection and order across a re-inspection however the path was typed. The webview no longer normalizes paths itself, so folder names that differ only by trailing dots or spaces are no longer conflated.
-- The per-item subtitle offset reads exponent notation correctly (`1e3` is 1000 ms; it was 1 ms). A value beyond the safe-integer range now leaves the global offset in effect instead of failing the run.
-- Stop and Close no longer freeze the window while a job shuts down. Their teardown runs off the main thread, so the log and queue keep updating, including when the cooperative cancel misses its 2 s deadline and the job is aborted. The "Stop requested; waiting for shutdown." log line now appears when Stop is pressed instead of after the job has stopped.
-- Exited media tools are now removed from the telemetry process list. They used to stay in it for the rest of the session, and each one's last write rate was counted again on every poll, so the disk write rate could stay up after a batch. Each telemetry poll refreshes only disk usage per process and runs off the main thread, and startup no longer takes a full process snapshot.
-- The `set_window_theme` IPC command no longer coerces an unrecognized theme name to Dark. An unrecognized name is now ignored and leaves the native window exactly as it was, including any pin set by an earlier explicit choice. The webview only ever sends `light` or `dark`, so this affects a caller that bypasses the UI.
-- Starting a Run on the directory already shown no longer empties the queue list while it is re-inspected. Cards whose items are unchanged are kept, and only a changed item's card is rebuilt. A progress update now rewrites only a card's progress bar and status text, and the log lines waiting while the window is hidden are capped at the console's 2000-line limit.
-- The Workers and Disk I/O inputs in the Remux and Extract views start empty and show `auto (N)`, where N is the engine's default worker count or I/O job limit, read through the new `get_default_settings` command. Before, both Workers inputs were pre-filled with 8, so the desktop always overrode the default: a 4-core machine or a 2-CPU container ran 8 workers and `auto` FFmpeg threads dropped to 1. The Disk I/O inputs were pre-filled with 2, a copy of the engine's default. An empty field now sends `workers: null` or `io_jobs: null` and the engine's default applies; a typed number is used as is, and clearing the field returns to auto. The − and + buttons on an empty field start from N. If N cannot be read, the placeholder stays `auto` and the worker and I/O job chips show `Standby` and `Idle` with no count; they used to show 8 workers and 2 I/O jobs before anything was known.
-- New desktop commands: `get_default_settings` returns the Effective Settings of a request that sets nothing (its `workers` is the N above, and its `io_jobs` the idle chip's count); `resolve_batch_request` resolves a request exactly as `run_job` does, without starting anything, and returns its Effective Settings or the engine's validation error. The webview calls it before a Run's preflight inspection and shows the resolved counts on the chips, so an empty Workers field or an I/O jobs value of 0 shows the number the run uses. `canonical_directory` returns the display form of a path's canonical path, the same string the Inspection Manifest reports as `canonical_dir`; the webview resolves the typed input directory through it before it compares or inspects it, and a path it cannot resolve is inspected as typed and fails with the usual message.
-- The `JobSnapshot` carries the Effective Settings its job runs with (`effective_settings`), so after a webview reload the chips of a running job show its own values instead of the defaults. A job's snapshot keeps its `input_dir` and `effective_settings` only from the snapshot `run_job` began for that same job, never from an earlier job's.
-- The preset menu holds no built-in copy of the catalog: it applies the profiles `get_preset_profiles` returned, and a click before they arrive does nothing. A Remux card for a FLAC track reads `→ Opus` without a bitrate when the bitrate control has no value, instead of assuming 192k.
-- A job that ends with items still open now settles them in the Engine Bridge, not in the webview. Before it ends, the bridge emits an `ItemComplete` for every queued or processing item of the batch, in batch order: `cancelled` (`Operation cancelled`) after a Stop, otherwise `error` with the run's own error, else its panic text, else `Batch failed`. A run that reported success but still left items open reports `Protocol error: missing completion event`. An item that had started reports how long it ran. A live window and a webview reload now show the same status, text and duration for every item, and the `Aborted (exit N)` text is gone.
-- The status pill reads Cancelled only when the job's terminal event says so or the job ends with code -1. A Stop that is still pending when the job completes no longer turns the pill of a completed job to Cancelled; it reads Done.
-- A job that fails before it starts, such as one whose selected episode no longer exists, leaves the queue as it was: the cards stay Queued, and the selection and the selection count are unchanged. The log and the Failed pill report the error. Before, every selected card turned Failed, and a webview reload then emptied the queue. A Stop pressed while the Run is still inspecting leaves the queue as it was too, instead of turning its cards Cancelled.
-- The window is redesigned as Library + Inspector: a title bar with the window controls, the app name and the theme toggle; a sidebar with the Remux and Extract tasks, the scanned folder and its release subfolders, and the presets; an episode list grouped by release folder with All, To do, Done and Failed filters; an inspector for the picked episode, whose subtitle section shows the precedence ladder and replaces the subtitle assignment dialog (the Track Assignments it sends are unchanged); a bottom bar with Run or Stop, the batch's progress and elapsed time, the worker chips and CPU, RAM and disk-write sparklines; and a log drawer. Each task's settings, the input folder included, are in a sheet opened from its gear button. Paths read Finder-style (`media › anime › Show`), in the log too. The log's Copy button copies each line exactly as the engine wrote it; since the log's path display is a heuristic over the whole line, a non-path with a slash, such as the codec ID `S_TEXT/ASS`, also shows a chevron there but copies as written. The log clears when a Run starts and has no separate Clear button any more. Running is blue, done green and failed red. The panes fake translucent glass without `backdrop-filter`, which ran at 14 fps on WebKitGTK on a low-end GPU; in a stubbed benchmark on that laptop, a scrolling list with a running batch held about 58 fps. With `prefers-reduced-transparency` the panes are solid.
-- The Run button names the mode and the number of ticked episodes (`Run remux · 12`), reads Plan for a dry run, and its tooltip says why it is disabled. The progress line reads `6 of 12 · 5 done · 1 failed`. A Run refused for a missing or invalid setting opens the settings sheet on that field.
-- A row that fails says why in its meta line (`Failed · <error>`), during a run as well as after a reload, so a batch with several failures reads without opening each row.
-- The macOS `icon.icns` is a real ICNS file (it was a renamed PNG), and `icon.ico` uses PNG-compressed entries, which shrinks it from 370 KB to 25 KB.
-- The sidebar's preset rows come from the engine's catalog, whose profile names are now the short labels the sidebar shows (`Balanced`, `Fast muxing`, `Hi-Fi master`, `Custom`). `get_preset_profiles` no longer returns the unused `icon` field.
-- The UI bundles its fonts again, Onest, Unbounded and JetBrains Mono (latin subset, SIL OFL 1.1, under `ui/fonts/`), served from the app as the CSP requires.
-
-### Queue Selection Freeze
-
-- Every Queue Selection mutation is refused for the whole preflight and run window — bulk Select All / Deselect All, per-card checkboxes, and reorder controls all run off one predicate, enforced at the mutation site rather than by the `disabled` attribute. Controls re-enable when the coordinator releases the job.
-- If a previously missing selected episode reappears during the forced inspection, the job is not started and the queue logs `Queue selection changed during inspection; previously missing selected episodes reappeared`. Previously a vanished selection aborted with a single message; the reappearance case is now distinguished so the user knows the queue needs review rather than repair.
-
-### Cover Art Matching
-
-- A bare-stem cover (`<video-stem>.<ext>`) must be an exact sibling of the video, so a root cover no longer attaches to a nested episode with the same stem. A bare-stem cover inside `--assets-dir` only matches a video in that same directory.
-
-### Selected Item Validation
-
-- If any selected item is unmatched or is not an MKV file, the entire request now fails instead of processing only the valid subset.
-- If two discovered MKV files resolve to the same canonical item ID, the batch now fails instead of running. This applies with or without an explicit selection, because a shared ID makes item identity ambiguous.
-
-### CLI Mode Selection
-
-- Explicit `--remux` and `--extract` flags override mode defaults inferred from the executable name. `mkv-cli` continues to default to remux mode.
-
-### Exact Track Assignment Behavior
-
-- A `TrackAssignment` applies only to the video whose root-relative ID matches `target_video`. The bare-filename fallback is removed, so an assignment for root `ep.mkv` no longer also applies to `Season 01/ep.mkv`.
-
-### Font Handling Behavior
-
-- **Extract Mode**: Always retains extracted font attachments as user output in a `fonts/` directory under the destination directory (or in `--fonts-dir` when given).
-- **Remux Mode**: Discovers and embeds fonts into output Matroska files as container attachments.
-- **Transactional Staging**: Fonts are staged in `<fonts_dir>/.font_staging/`, which `FontRegistry::cleanup_staging()` removes once it is empty. BLAKE2b content-hash deduplication is preserved without modifying or deleting pre-existing or user-supplied font files.
-
-### Subtitle Resolution Precedence Ladder
-
-Subtitle candidate selection follows a strict five-tier precedence hierarchy where source precedence strictly supersedes cross-source language scoring:
-
-1. **Manual `TrackAssignment`**: Explicit per-episode track assignment. Fails fast during preflight validation if the asset is missing or invalid.
-2. **Same-Directory External Subtitle**: Exact external subtitle residing in the same directory as the MKV file matching the episode identity.
-3. **Embedded Subtitle Track**: Best embedded subtitle track inside the source MKV container.
-4. **Nearest Ancestor External Subtitle**: External subtitle matching the episode identity found in the nearest parent directory.
-5. **Explicit `--assets-dir` Fallback**: External subtitle resolved from the explicit fallback assets directory.
-
-*Rule*: A local same-directory external subtitle takes precedence over an embedded track regardless of language score. An embedded subtitle track strictly takes precedence over ancestor external subtitles (e.g., a parent English subtitle will not displace an embedded Indonesian track).
-
-### Cover Art Precedence & Naming Conventions
-
-Cover art resolution evaluates directory hierarchy before candidate kind, following strict deterministic ranking:
-
-- **Directory-Wide Covers**: Strictly `cover.<ext>` and `folder.<ext>`.
-- **Episode-Specific Covers**: `<video-stem>_cover.<ext>`, `<video-stem>.cover.<ext>`, and exact adjacent `<video-stem>.<ext>`. An inapplicable `*_cover` image is never classified as a directory-wide cover.
-- **Directory Hierarchy**: The nearest applicable directory wins before cover kind specificity.
-- **Intra-Directory Ranking**:
-  1. Episode `_cover` (`<video-stem>_cover.<ext>`)
-  2. Episode `.cover` (`<video-stem>.cover.<ext>`)
-  3. Exact adjacent bare stem (`<video-stem>.<ext>`)
-  4. Directory `cover` (`cover.<ext>`)
-  5. Directory `folder` (`folder.<ext>`)
-- **Tie-Breaking**: Equal-tier candidates break ties by natural filename order followed by full filename.
-- **Source Hierarchy**: Local or ancestor external covers supersede embedded container artwork. Explicit `--assets-dir` fallback covers apply only when no embedded artwork is present in the source file.
+- `--keep-fonts` is removed: extract mode always keeps extracted fonts. `--sub-assignments` is removed: use `--assignments`, which still accepts the flat `{"video.mkv": "sub.ass"}` map.
+- A selection that names any video that is not a discovered MKV now fails the whole run, instead of running the valid part. Two files that resolve to the same item ID also fail the run.
+- A Track Assignment applies only to the video whose path relative to `--input-dir` matches `target_video`. A bare file name no longer matches the same name in a subfolder. `target_video` and `--selected-item` values are no longer trimmed.
+- A candidate with the same known season as the video now beats one with no season, for subtitles, chapters, and episode covers in the same folder.
+- A bitrate with a lowercase `m` suffix (`2m`) is rejected, because FFmpeg reads it as "milli". Use `M`.
+- A subtitle extracted from a file whose name has no episode number is named `<stem>_<lang>_track<id>.ass`, without a repeated stem.
+- The desktop Workers and Disk I/O fields start empty and use the engine's defaults, shown as `auto (N)`, instead of fixed values.
+- The inspection cache file from earlier builds still loads.

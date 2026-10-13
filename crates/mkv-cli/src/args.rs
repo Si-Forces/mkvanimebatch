@@ -46,8 +46,7 @@ fn next_value<T: AsRef<str>>(
         .ok_or_else(|| format!("Missing value for {flag}"))
 }
 
-/// Parses `raw` as `N`. The only place that formats the numeric parse error; `kind` names
-/// the expected value in it ("integer", "number").
+/// Parses `raw` as `N`; the error names `kind`, the expected value ("integer", "number").
 fn parse_number<N: FromStr>(raw: &str, flag: &str, kind: &str) -> Result<N, String> {
     raw.parse()
         .map_err(|_| format!("Invalid {kind} for {flag}"))
@@ -316,10 +315,10 @@ OPTIONS:
     --preset <PROFILE>         Preset profile (balanced, fast, hifi, custom; also default, high_quality/high-quality)
     --selected-item <PATH>     Include a single release item (repeatable, preserves commas)
     --selected-items <LIST>    Include comma-separated release items (repeatable)
-    --assignments <FILE>       Path to JSON file mapping episode IDs to track paths
+    --assignments <FILE>       Path to JSON file of subtitle Track Assignments for target videos
     --fonts-dir <DIR>          Explicit fonts directory override
     --assets-dir <DIR>         Fallback asset directory
-    --plan                     Generate structured inspection manifest JSON for queue hydration
+    --plan                     Print the inspection manifest (JSON) and exit
     --events                   Emit machine-readable NDJSON events prefixed with '@event: '
     --remux                    Process batch in remux mode (default for mkv-cli)
     --extract                  Extract best-match subtitles, fonts, chapters, and covers

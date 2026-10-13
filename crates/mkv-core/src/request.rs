@@ -1,4 +1,5 @@
-//! Strongly-typed batch execution requests and track assignments.
+//! The Batch Request, its validation and resolution into a `PipelineConfig`, and Track
+//! Assignments.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
@@ -36,23 +37,24 @@ pub enum AssignmentKind {
     Subtitle,
 }
 
-/// Explicit manual track assignment attaching an asset to a target video.
+/// A Track Assignment: a human-chosen subtitle file for one target video.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrackAssignment {
-    /// Target video file path, relative to `input_dir` (e.g. "Season 1/Ep01.mkv")
+    /// Target video path relative to `input_dir` (e.g. "Season 1/Ep01.mkv"), compared as an
+    /// Item ID.
     pub target_video: String,
-    /// Absolute or relative path to the subtitle file
+    /// Path to the subtitle file; a relative one is resolved by `resolve_asset_path`.
     pub asset_path: PathBuf,
     /// Track kind; defaults to subtitle when absent.
     #[serde(default)]
     pub track_type: AssignmentKind,
-    /// Optional ISO-639-2 language tag (e.g. "ind", "eng", "jpn")
+    /// ISO 639-2 language tag (e.g. "ind", "eng", "jpn").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
-    /// Optional track title string
+    /// Track title.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    /// Optional millisecond time shift
+    /// Time shift in milliseconds; replaces the request's `default_sub_offset_ms`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offset_ms: Option<i64>,
 }
@@ -139,8 +141,7 @@ impl TrackAssignment {
         ItemId::parse(&self.target_video)
     }
 
-    /// True if the asset path is relative to the release/input directory
-    /// (not absolute, not root-relative, and not drive-prefixed).
+    /// True if the asset path is relative: no root and no drive prefix.
     fn is_relative_asset(&self) -> bool {
         let s = self.asset_path.to_string_lossy().replace('\\', "/");
         !is_drive_prefix(&s) && !Path::new(&s).has_root()
@@ -164,7 +165,8 @@ impl TrackAssignment {
     }
 }
 
-/// Canonical serializable specification to configure and initiate batch execution.
+/// The serializable specification of one Batch Pipeline run, sent across the Engine Bridge or
+/// built from CLI arguments. [`BatchRequest::resolve`] turns it into a `PipelineConfig`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BatchRequest {
     /// Pipeline execution mode (Extract or Remux)
@@ -196,7 +198,7 @@ pub struct BatchRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub io_jobs: Option<usize>,
     /// Per-job FFmpeg `-threads` override. It precedes `-i`, so it caps the FLAC decoder's threads;
-    /// libopus is single-threaded (ADR-0013, 2026-10-05 correction, #36).
+    /// libopus is single-threaded (ADR-0013).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ffmpeg_threads: Option<usize>,
     /// Global subtitle sync offset in whole milliseconds. `None` and `Some(0)` both mean no
@@ -206,13 +208,13 @@ pub struct BatchRequest {
     /// Whether to perform a dry run (plan without writing files)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dry_run: Option<bool>,
-    /// Whether to bypass and ignore persistent inspect cache
+    /// Whether to bypass the persistent inspection cache
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_cache: Option<bool>,
-    /// Explicit track assignments
+    /// Track Assignments
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assignments: Option<Vec<TrackAssignment>>,
-    /// Optional ordered subset of relative video paths or item IDs designating active execution.
+    /// Selected Items: relative video paths, compared as Item IDs, that restrict and order the run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_items: Option<Vec<String>>,
 }
@@ -322,8 +324,8 @@ impl BatchRequest {
     }
 
     /// Layers the explicit settings over `preset` and the defaults for a machine with `cores`
-    /// physical cores. With `preset_profile`, which picks the default preset, the one home of the
-    /// default rules; it does not check ranges, which `validate` does.
+    /// physical cores. Together with `preset_profile`, which picks the default preset, it holds
+    /// every default rule. Ranges are checked by `validate`, not here.
     fn layer_effective_settings(&self, preset: PresetProfile, cores: usize) -> EffectiveSettings {
         let workers = self.workers.unwrap_or_else(|| default_workers_for(cores));
         let io_jobs = match self.io_jobs {
@@ -902,7 +904,7 @@ mod tests {
             (r#","default_sub_offset_ms":0"#, Some(0)),
             (r#","default_sub_offset_ms":null"#, None),
             ("", None),
-            // No alias: the pre-rename key is an unknown field, so it is ignored.
+            // `sub_offset` is no alias: as an unknown field it is ignored.
             (r#","sub_offset":1.5"#, None),
         ] {
             let parsed = parse(offset).unwrap();
@@ -924,7 +926,7 @@ mod tests {
 
     /// The concurrency fields are `usize` on the wire, so a fraction or a negative number fails
     /// to deserialize before `resolve` can check its range. The desktop relies on that: it has
-    /// no range check of its own (ADR-0008 Amendment 2026-10-06).
+    /// no range check of its own (ADR-0008).
     #[test]
     fn test_concurrency_fields_are_whole_non_negative_numbers() {
         let parse = |field: &str, value: &str| {
@@ -1269,7 +1271,7 @@ mod tests {
         );
 
         // The preset is checked after the numeric settings and before the assignments and
-        // selected items, so the first failure is the same as it was for `validate`.
+        // selected items.
         req.assignments = Some(vec![subtitle("ghost.mkv", "ghost.ass")]);
         req.selected_items = Some(vec![]);
         assert_eq!(

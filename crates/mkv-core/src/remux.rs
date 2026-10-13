@@ -1,4 +1,4 @@
-//! Remux track selection, command construction, and argument generation.
+//! Remux track selection, Media Tool arguments, and execution of one planned job.
 
 use std::path::{Path, PathBuf};
 
@@ -76,8 +76,8 @@ pub fn select_tracks(inspected: &InspectedVideo) -> TrackSelection {
 
 /// `--sync <track_id>:<offset_ms>`, or nothing for a zero offset.
 ///
-/// This is the only zero guard for both subtitle branches. It is what makes a Track
-/// Assignment's explicit `offset_ms = 0` mean unshifted (ADR-0012), not an off-by-one.
+/// The one zero guard for both subtitle branches: it makes a Track Assignment's explicit
+/// `offset_ms = 0` mean unshifted (ADR-0012).
 fn format_sync_args(track_id: u32, offset_ms: i64) -> Vec<String> {
     if offset_ms != 0 {
         vec!["--sync".to_string(), format!("{track_id}:{offset_ms}")]
@@ -86,7 +86,7 @@ fn format_sync_args(track_id: u32, offset_ms: i64) -> Vec<String> {
     }
 }
 
-/// Builds complete command-line argument list for `mkvmerge`.
+/// Builds the `mkvmerge` arguments.
 ///
 /// `default_sub_offset_ms` applies to an embedded subtitle, and to an external one whose
 /// `custom_offset_ms` is `None`. A custom offset replaces it, never adds to it.
@@ -215,11 +215,11 @@ pub fn build_mkvmerge_args(
     args
 }
 
-/// Builds command-line argument list for audio transcoding via `ffmpeg`.
+/// Builds the `ffmpeg` arguments that transcode the selected audio track to Opus.
 ///
 /// `-threads` sits before `-i`, making it an input option that caps the FLAC decoder's threads.
 /// Nothing after `-i` sets encoder threads, and libopus is single-threaded, so each transcode
-/// encodes on about one core whatever `ffmpeg_threads` is (ADR-0013, 2026-10-05 correction, #36).
+/// encodes on about one core whatever `ffmpeg_threads` is (ADR-0013).
 pub fn build_ffmpeg_args(
     video: &Path,
     audio_index: usize,
@@ -259,8 +259,7 @@ pub fn build_ffmpeg_args(
 pub struct RemuxOptions<'a> {
     pub opus_bitrate: &'a str,
     pub complexity: u32,
-    /// The FLAC decoder thread cap, passed to `build_ffmpeg_args` as `-threads` (ADR-0013,
-    /// 2026-10-05 correction, #36).
+    /// The FLAC decoder thread cap, passed to `build_ffmpeg_args` as `-threads` (ADR-0013).
     pub ffmpeg_threads: usize,
     pub default_sub_offset_ms: i64,
 }
@@ -336,8 +335,8 @@ pub async fn execute_remux_job(
         &temp_output,
         options.default_sub_offset_ms,
     );
-    // ADR-0011 Dual-Governor: CPU-intensive Opus transcoding runs in worker slot;
-    // disk-intensive remux multiplexing (mkvmerge) is guarded by io_semaphore.
+    // The transcode above holds only a worker slot; mkvmerge and the promotion below also
+    // hold an I/O permit (ADR-0011).
     let _io_permit = io_semaphore
         .acquire()
         .await

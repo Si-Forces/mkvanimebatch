@@ -1,6 +1,6 @@
-//! The canonical identity of a discovered video, buildable only in its normalised form. The
-//! module also holds `get_item_id`, the raw root-relative path string used for release
-//! directories and subtitle candidates, which is not an `ItemId`.
+//! The Item ID of a discovered video, buildable only in its normalized form, and `get_item_id`,
+//! the raw root-relative path string used for Release Directories and subtitle candidates, which
+//! is not an `ItemId`.
 
 use std::fmt;
 use std::path::{Component, Path};
@@ -12,11 +12,11 @@ use serde::{Deserialize, Deserializer, Serialize};
 /// trimming it would name a different file.
 ///
 /// Event IDs, manifest item IDs, Selected Items and Track Assignment targets all compare as
-/// `ItemId`s. The field is private and every constructor normalises, so two spellings of one
-/// video are equal by type rather than by each call site remembering to normalise. It
-/// serialises as a plain string and normalises again when deserialised.
+/// `ItemId`s. The field is private and every constructor normalizes, so two spellings of one
+/// video are equal by type rather than by each call site remembering to normalize. It
+/// serializes as a plain string and normalizes again when deserialized.
 ///
-/// Normalisation is the only invariant: an `ItemId` can be empty or name a path outside the
+/// Normalization is the only invariant: an `ItemId` can be empty or name a path outside the
 /// input directory. `BatchRequest::resolve` judges validity.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
@@ -24,7 +24,7 @@ pub struct ItemId(String);
 
 impl ItemId {
     /// The ID of a discovered file under `input_dir`. A path outside `input_dir` keeps its full
-    /// spelling, as [`get_item_id`] reports it, then normalises as [`ItemId::parse`] does, so
+    /// spelling, as [`get_item_id`] reports it, then normalizes as [`ItemId::parse`] does, so
     /// surrounding whitespace in the path is kept.
     pub fn of(path: &Path, input_dir: &Path) -> Self {
         Self::parse(&get_item_id(path, input_dir))
@@ -46,7 +46,7 @@ impl ItemId {
         Self(parts.join("/"))
     }
 
-    /// The normalised, `/`-separated spelling.
+    /// The normalized, `/`-separated spelling.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -70,9 +70,9 @@ impl<'de> Deserialize<'de> for ItemId {
     }
 }
 
-/// Derives a root-relative POSIX path ID. The engine uses it for release directories and
-/// subtitle candidates.
-/// Normalizes backslashes `\` to `/`. If stripped is empty or points to root, returns `"."`.
+/// The `/`-separated path of `path` relative to `root_dir`, used for Release Directories and
+/// subtitle candidates. Backslashes become `/`; `root_dir` itself is `"."`. A path outside
+/// `root_dir`, even after canonicalizing both, keeps its full path, with `/` separators.
 pub fn get_item_id(path: &Path, root_dir: &Path) -> String {
     let rel = match path.strip_prefix(root_dir) {
         Ok(p) => p.to_path_buf(),
@@ -135,14 +135,14 @@ mod tests {
     }
 
     #[test]
-    fn of_equals_normalised_get_item_id() {
+    fn of_equals_normalized_get_item_id() {
         let root = Path::new("/anime");
         // A path outside `input_dir` keeps its full spelling.
         assert_eq!(
             ItemId::of(Path::new("other/x.mkv"), root).as_str(),
             "other/x.mkv"
         );
-        // `get_item_id` names the root `.`; normalising drops that segment.
+        // `get_item_id` names the root `.`; normalizing drops that segment.
         assert_eq!(ItemId::of(root, root).as_str(), "");
     }
 
@@ -157,7 +157,7 @@ mod tests {
     }
 
     #[test]
-    fn serialises_as_a_plain_string_and_normalises_on_deserialise() {
+    fn serializes_as_a_plain_string_and_normalizes_on_deserialize() {
         let id = ItemId::parse("a/b.mkv");
         assert_eq!(serde_json::to_string(&id).unwrap(), r#""a/b.mkv""#);
         let parsed: ItemId = serde_json::from_str(r#""./a//b.mkv""#).unwrap();
