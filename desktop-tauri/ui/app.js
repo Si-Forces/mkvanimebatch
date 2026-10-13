@@ -15,6 +15,7 @@ import {
   batchClock,
   candidateTier,
   filterCounts,
+  inspectorCrumbs,
   logDisplayText,
   pathSegments,
   prettyPath,
@@ -53,12 +54,12 @@ function setText(id, text) {
   if (el && el.textContent !== text) el.textContent = text;
 }
 
-/** Fills `el` with `path` as Finder-style crumbs: segments joined by ›, the last one bold. */
-function renderCrumbs(el, path) {
+/** Fills `el` with path `segments` as Finder-style crumbs: joined by ›, the last one bold. */
+function renderCrumbs(el, segments) {
   if (!el) return;
   el.textContent = "";
-  el.title = prettyPath(path);
-  pathSegments(path).forEach((segment, i, all) => {
+  el.title = segments.join(" › ");
+  segments.forEach((segment, i, all) => {
     if (i > 0) {
       const sep = document.createElement("span");
       sep.className = "crumb-sep";
@@ -185,7 +186,7 @@ function renderChrome(mode) {
     listHeadKeys[mode] = dir;
     const segments = pathSegments(dir);
     setText(`${mode}-title`, segments.at(-1) ?? "No folder open");
-    renderCrumbs(byId(`${mode}-path`), dir);
+    renderCrumbs(byId(`${mode}-path`), segments);
   }
 
   const counts = filterCounts(state);
@@ -273,7 +274,8 @@ function renderInspector(queue) {
   const pathEl = byId("insp-path");
   if (pathEl && pathEl.dataset.path !== item.id) {
     pathEl.dataset.path = item.id;
-    renderCrumbs(pathEl, item.id);
+    // From the ID, not `release`: an item restored from a snapshot has an empty release.
+    renderCrumbs(pathEl, inspectorCrumbs(item.id));
   }
 
   const error = item.status === "error" ? item.error : item.inspectionError;
@@ -302,7 +304,7 @@ function renderInspector(queue) {
   const outKey = `${mode}:${outDir}`;
   if (outEl && outEl.dataset.path !== outKey) {
     outEl.dataset.path = outKey;
-    if (outDir) renderCrumbs(outEl, outDir);
+    if (outDir) renderCrumbs(outEl, pathSegments(outDir));
     else outEl.textContent = outInput?.placeholder ?? "Default";
   }
 
