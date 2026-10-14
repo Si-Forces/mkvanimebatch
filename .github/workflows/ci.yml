@@ -11,9 +11,13 @@ on:
     branches:
       - main
   workflow_dispatch:
+  # release.yml runs this workflow as its verification stage.
+  workflow_call:
 
+# A called workflow sees the caller's github context, so without the "ci-" prefix this
+# group would equal release.yml's own group and the two would block each other.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -24,14 +28,16 @@ jobs:
     name: Rust Workspace (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     # Warm runs take 3-4 minutes and the slowest Windows run took 15. The apt step
-    # once stalled for 30 minutes; without a timeout GitHub waits 6 hours.
-    timeout-minutes: 20
+    # once stalled for 30 minutes; without a timeout GitHub waits 6 hours. Windows gets
+    # more because release.yml runs this job too, often on a cold cache (issue #95).
+    timeout-minutes: ${{ matrix.timeout }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
+            timeout: 20
           # Windows is the slowest job and gains the most from Blacksmith. Linux
           # stays on GitHub to save Blacksmith's free minutes for Windows; it
           # already finishes first, so moving it would not make CI finish sooner.
@@ -39,10 +45,13 @@ jobs:
           # windows-2025.
           - os: blacksmith-2vcpu-windows-2025
             target: x86_64-pc-windows-msvc
+            timeout: 35
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
@@ -53,13 +62,14 @@ jobs:
             libayatana-appindicator3-dev librsvg2-dev patchelf ffmpeg mkvtoolnix
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
           components: rustfmt, clippy
 
       - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: ${{ matrix.target }}
 
@@ -75,7 +85,7 @@ jobs:
       - name: Run Rust workspace unit and integration tests
         env:
           MKV_REQUIRE_MEDIA_TOOLS: ${{ runner.os == 'Linux' && '1' || '' }}
-        run: cargo test --workspace --verbose
+        run: cargo test --workspace
 
       # The real-media bench never runs a cell here: it runs its self-check asserts, then skips
       # because MKV_BENCH_CORPUS is unset. `cargo test --workspace` does not build bench targets.
@@ -111,12 +121,14 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "20"
+          node-version: "22"
 
       - name: Run UI syntax checks and the UI and script tests
         run: |
@@ -132,10 +144,14 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install cargo-audit
-        uses: taiki-e/install-action@cargo-audit
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-audit
 
       - name: Run Cargo Audit
         run: cargo audit

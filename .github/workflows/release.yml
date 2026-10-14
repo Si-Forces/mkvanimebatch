@@ -1,7 +1,7 @@
 name: Release
 
 permissions:
-  contents: write
+  contents: read
 
 on:
   push:
@@ -12,160 +12,76 @@ on:
       version_tag:
         description: "Release tag (e.g. v1.0.0)"
         required: true
-        default: "v1.0.1"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
+# A tag push leaves inputs.version_tag empty, so this falls back to the pushed tag.
+env:
+  RELEASE_TAG: ${{ inputs.version_tag || github.ref_name }}
+
 jobs:
   # ────────────────────────────────────────────────────────────────────────────
-  # 1. Release Verification: Rust Workspace Checks
+  # 1. Release Verification: the full CI workflow, including its status gate
   # ────────────────────────────────────────────────────────────────────────────
-  workspace-checks:
-    name: Verify Rust Workspace (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install Linux system dependencies
-        if: runner.os == 'Linux'
-        uses: ./.github/actions/install-linux-deps
-        with:
-          packages: >-
-            build-essential curl wget file libssl-dev libgtk-3-dev libwebkit2gtk-4.1-dev
-            libayatana-appindicator3-dev librsvg2-dev patchelf ffmpeg mkvtoolnix
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-          components: rustfmt, clippy
-
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
-
-      - name: Check Rust formatting (Linux only)
-        if: runner.os == 'Linux'
-        run: cargo fmt --all -- --check
-
-      - name: Run Clippy linter
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      # `MKV_REQUIRE_MEDIA_TOOLS=1` makes the real-media regression fail instead of
-      # skipping when FFmpeg/MKVToolNix are missing, so a release cannot publish
-      # with real media output unverified. Windows keeps the local skip behavior.
-      - name: Run Rust workspace unit and integration tests
-        env:
-          MKV_REQUIRE_MEDIA_TOOLS: ${{ runner.os == 'Linux' && '1' || '' }}
-        run: cargo test --workspace --verbose
-
-      - name: Build Desktop App Binary (Windows Release)
-        if: runner.os == 'Windows'
-        run: cargo build --release -p mkv-anime-batch
+  verify:
+    name: Verify
+    uses: ./.github/workflows/ci.yml
 
   # ────────────────────────────────────────────────────────────────────────────
-  # 2. Release Verification: Frontend UI and Script Tests
+  # 2. Release Notes and Version Check
   # ────────────────────────────────────────────────────────────────────────────
-  ui-tests:
-    name: Verify UI and Script Tests
+  # Fail before any build if the release page could not be generated: build-linux
+  # needs a "## <version>" section in docs/release-notes.md (pre-release tags too),
+  # and the bundle names it lists come from the workspace version.
+  release-notes:
+    name: Check Release Notes and Version
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          node-version: "20"
+          persist-credentials: false
 
-      - name: Run UI syntax checks and the UI and script tests
-        run: |
-          node --check desktop-tauri/ui/app.js
-          node --test scripts/*.test.js desktop-tauri/ui/*.test.js
-
-  # ────────────────────────────────────────────────────────────────────────────
-  # 3. Release Verification Gate
-  # ────────────────────────────────────────────────────────────────────────────
-  ci-status:
-    name: Release Verification Gate
-    needs: [workspace-checks, ui-tests]
-    runs-on: ubuntu-latest
-    if: always()
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Resolve Release Tag
-        id: release-tag
-        shell: bash
-        env:
-          INPUT_TAG: ${{ inputs.version_tag }}
-          REF_NAME: ${{ github.ref_name }}
-          EVENT_NAME: ${{ github.event_name }}
-        run: |
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            echo "tag=$INPUT_TAG" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=$REF_NAME" >> "$GITHUB_OUTPUT"
-          fi
-
-      # Fail before any build if the release page could not be generated: build-linux
-      # needs a "## <version>" section in docs/release-notes.md (pre-release tags too),
-      # and the bundle names it lists come from the workspace version.
       - name: Check release notes and version
-        env:
-          TAG: ${{ steps.release-tag.outputs.tag }}
         run: |
-          version="${TAG#v}"
+          version="${RELEASE_TAG#v}"
           scripts/release-body.sh notes "$version" > /dev/null
           cargo_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
           if [ "$version" != "$cargo_version" ]; then
-            echo "::error::tag $TAG does not match the workspace version $cargo_version"
+            echo "::error::tag $RELEASE_TAG does not match the workspace version $cargo_version"
             exit 1
           fi
-
-      - name: Evaluate verification status
-        run: |
-          if [ "${{ needs.workspace-checks.result }}" != "success" ] || \
-             [ "${{ needs.ui-tests.result }}" != "success" ]; then
-            echo "Release verification failed! Aborting release build."
-            exit 1
-          fi
-          echo "All release verification checks passed!"
 
   # ────────────────────────────────────────────────────────────────────────────
-  # 4. Desktop GUI & CLI Build — Windows (Runs ONLY after verification passes)
+  # 3. Desktop GUI & CLI Build — Windows (Runs ONLY after verification passes)
   # ────────────────────────────────────────────────────────────────────────────
   build-windows:
     name: Build & Release — Windows
-    needs: [ci-status]
-    if: needs.ci-status.result == 'success'
+    needs: [verify, release-notes]
     runs-on: windows-latest
+    # The first build of a release is usually a rust-cache miss: cold builds took 19-36
+    # minutes (issue #95). A killed release build costs the release, so leave headroom.
+    timeout-minutes: 60
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
+          toolchain: stable
           targets: x86_64-pc-windows-msvc
 
       - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: x86_64-pc-windows-msvc
 
@@ -197,8 +113,12 @@ jobs:
           $hash = (Get-FileHash -Algorithm SHA256 mkv-cli-x86_64-pc-windows-msvc.zip).Hash.ToLower()
           "$hash  mkv-cli-x86_64-pc-windows-msvc.zip" | Out-File -Encoding utf8 "mkv-cli-x86_64-pc-windows-msvc.zip.sha256"
 
+      # Not in install-action's manifest, so it falls back to cargo-binstall, which fetches
+      # Tauri's prebuilt cargo-tauri instead of compiling it. "2" means ^2, so no v3 pre-release.
       - name: Install tauri-cli
-        run: cargo install tauri-cli --version "^2" --locked
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: tauri-cli@2
 
       - name: Build Tauri app
         working-directory: desktop-tauri
@@ -239,27 +159,13 @@ jobs:
             }
           }
 
-      - name: Resolve Release Tag
-        id: release-tag
-        shell: bash
-        env:
-          INPUT_TAG: ${{ inputs.version_tag }}
-          REF_NAME: ${{ github.ref_name }}
-          EVENT_NAME: ${{ github.event_name }}
-        run: |
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            echo "tag=$INPUT_TAG" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=$REF_NAME" >> "$GITHUB_OUTPUT"
-          fi
-
       # Uploads assets only. build-linux runs in parallel on the same tag and is
       # the sole owner of the release name and body (see "Publish Linux bundles
       # to release"), so leaving them unset here avoids a last-writer-wins race.
       - name: Publish Windows files to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
-          tag_name: ${{ steps.release-tag.outputs.tag }}
+          tag_name: ${{ env.RELEASE_TAG }}
           files: |
             windows-artifacts/mkv-anime-batch.exe
             windows-artifacts/MKV_Anime_Batch_Portable_win64.zip
@@ -269,17 +175,22 @@ jobs:
           prerelease: false
 
   # ────────────────────────────────────────────────────────────────────────────
-  # 5. Desktop GUI & CLI Build — Linux (Runs ONLY after verification passes)
+  # 4. Desktop GUI & CLI Build — Linux (Runs ONLY after verification passes)
   # ────────────────────────────────────────────────────────────────────────────
   build-linux:
     name: Build & Release — Linux
-    needs: [ci-status]
-    if: needs.ci-status.result == 'success'
+    needs: [verify, release-notes]
     runs-on: ubuntu-24.04
+    # Cold builds took 16-21 minutes (issue #95); the apt step alone is bounded at about 9.
+    timeout-minutes: 30
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # ── Linux system deps ─────────────────────────────────────────────────────
       - name: Install Linux system dependencies
@@ -292,12 +203,13 @@ jobs:
 
       # ── Rust + Tauri ─────────────────────────────────────────────────────────
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
+          toolchain: stable
           targets: x86_64-unknown-linux-gnu
 
       - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: x86_64-unknown-linux-gnu
 
@@ -324,8 +236,11 @@ jobs:
           cd ..
           sha256sum mkv-cli-x86_64-unknown-linux-gnu.tar.gz > mkv-cli-x86_64-unknown-linux-gnu.tar.gz.sha256
 
+      # Prebuilt via cargo-binstall; see the same step in build-windows.
       - name: Install tauri-cli
-        run: cargo install tauri-cli --version "^2" --locked
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: tauri-cli@2
 
       # tauri.linux.conf.json is merged automatically when building on Linux.
       - name: Build Tauri app
@@ -447,32 +362,17 @@ jobs:
 
           cat "$manifest"
 
-      - name: Resolve Release Tag
-        id: release-tag
-        shell: bash
-        env:
-          INPUT_TAG: ${{ inputs.version_tag }}
-          REF_NAME: ${{ github.ref_name }}
-          EVENT_NAME: ${{ github.event_name }}
-        run: |
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            echo "tag=$INPUT_TAG" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=$REF_NAME" >> "$GITHUB_OUTPUT"
-          fi
-
       # Builds the release page. The prose for this version comes from
       # docs/release-notes.md; the rest is generic or filled from the verified
       # AppImage runtime versions.
       - name: Build release body
         shell: bash
         env:
-          TAG: ${{ steps.release-tag.outputs.tag }}
           WEBKIT: ${{ steps.verify-linux.outputs.webkit_version }}
           JSC: ${{ steps.verify-linux.outputs.jsc_version }}
           GTK: ${{ steps.verify-linux.outputs.gtk_version }}
         run: |
-          version="${TAG#v}"
+          version="${RELEASE_TAG#v}"
           scripts/release-body.sh page "$version" /tmp/linux-release > "$RUNNER_TEMP/release-body.md"
 
       # Sole owner of the release's name and body. The body documents both
@@ -481,10 +381,10 @@ jobs:
       # build-windows runs in parallel and uploads assets without touching the
       # body, so the outcome does not depend on which job finishes first.
       - name: Publish Linux bundles to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
-          tag_name: ${{ steps.release-tag.outputs.tag }}
-          name: "MKV Anime Batch ${{ steps.release-tag.outputs.tag }}"
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: "MKV Anime Batch ${{ env.RELEASE_TAG }}"
           body_path: ${{ runner.temp }}/release-body.md
           files: |
             /tmp/linux-release/*.AppImage
