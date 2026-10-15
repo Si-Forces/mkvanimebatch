@@ -8,7 +8,7 @@ pub mod extract;
 pub mod fonts;
 mod inspect;
 pub mod item_id;
-mod log_line;
+pub mod log_line;
 pub mod manifest;
 pub mod media_tool;
 pub mod pipeline;

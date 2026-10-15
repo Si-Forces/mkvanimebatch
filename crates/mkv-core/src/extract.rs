@@ -7,7 +7,7 @@ use crate::domain::{
     COVER_EXTENSIONS, SUBPROCESS_TIMEOUT,
 };
 use crate::fonts::{FontClaimsGuard, FontPromotion, FontRegistry};
-use crate::log_line::{LogKind, LogLine};
+use crate::log_line::LogLine;
 use crate::media_tool::{self, MediaTool, MediaToolRunner};
 use crate::scan::{path_ext_lower, InspectedVideo};
 
@@ -66,21 +66,18 @@ fn promote_optional(
     }
     match promote_file(staged, &final_path) {
         Ok(()) => {
-            log.push(LogLine::new(
-                LogKind::Note,
-                format!("   -> {label}: {}", final_path.display()),
-            ));
+            log.push(LogLine::note(format!(
+                "   -> {label}: {}",
+                final_path.display()
+            )));
             Some(final_path)
         }
         Err(e) => {
-            log.push(LogLine::new(
-                LogKind::Warning,
-                format!(
-                    "   -> WARNING: Failed to promote {} to '{}': {e}",
-                    label.to_ascii_lowercase(),
-                    final_path.display()
-                ),
-            ));
+            log.push(LogLine::warning(format!(
+                "   -> WARNING: Failed to promote {} to '{}': {e}",
+                label.to_ascii_lowercase(),
+                final_path.display()
+            )));
             None
         }
     }
@@ -97,10 +94,7 @@ pub async fn extract_mkv_file(
     runner: &dyn MediaToolRunner,
 ) -> Result<ExtractSummary, String> {
     let mut summary = ExtractSummary {
-        log: vec![LogLine::new(
-            LogKind::Step,
-            format!("Processing: {}", mkv_path.display()),
-        )],
+        log: vec![LogLine::step(format!("Processing: {}", mkv_path.display()))],
         ..Default::default()
     };
 
@@ -154,8 +148,7 @@ pub async fn extract_mkv_file(
         || cover_target.is_some()
         || !font_claims.is_empty();
     if !has_work {
-        summary.log.push(LogLine::new(
-            LogKind::Note,
+        summary.log.push(LogLine::note(
             "   -> No tracks, chapters, covers, or new fonts to extract.",
         ));
         return Ok(summary);
@@ -224,10 +217,10 @@ pub async fn extract_mkv_file(
                     final_path.display()
                 )
             })?;
-            summary.log.push(LogLine::new(
-                LogKind::Note,
-                format!("   -> Subtitle: {}", final_path.display()),
-            ));
+            summary.log.push(LogLine::note(format!(
+                "   -> Subtitle: {}",
+                final_path.display()
+            )));
             summary.extracted_sub = Some(final_path);
         }
     }
@@ -245,21 +238,18 @@ pub async fn extract_mkv_file(
         match font_registry.promote(&mut claim) {
             FontPromotion::Promoted(_) => summary.extracted_fonts += 1,
             FontPromotion::Duplicate => {}
-            FontPromotion::Failed(reason) => summary.log.push(LogLine::new(
-                LogKind::Warning,
-                format!(
-                    "   -> WARNING: Font '{}' was not saved: {reason}",
-                    claim.name()
-                ),
-            )),
+            FontPromotion::Failed(reason) => summary.log.push(LogLine::warning(format!(
+                "   -> WARNING: Font '{}' was not saved: {reason}",
+                claim.name()
+            ))),
         }
     }
 
     if summary.extracted_fonts > 0 {
-        summary.log.push(LogLine::new(
-            LogKind::Note,
-            format!("   -> Extracted {} new font(s).", summary.extracted_fonts),
-        ));
+        summary.log.push(LogLine::note(format!(
+            "   -> Extracted {} new font(s).",
+            summary.extracted_fonts
+        )));
     }
 
     Ok(summary)
@@ -268,6 +258,7 @@ pub async fn extract_mkv_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::log_line::LogKind;
 
     /// A failed promotion is a warning, not an error: the file still completes.
     #[test]

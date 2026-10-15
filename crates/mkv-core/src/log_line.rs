@@ -37,4 +37,20 @@ impl LogLine {
             text: text.into(),
         }
     }
+
+    pub fn error(text: impl Into<String>) -> Self {
+        Self::new(LogKind::Error, text)
+    }
+
+    pub fn warning(text: impl Into<String>) -> Self {
+        Self::new(LogKind::Warning, text)
+    }
+
+    pub fn step(text: impl Into<String>) -> Self {
+        Self::new(LogKind::Step, text)
+    }
+
+    pub fn note(text: impl Into<String>) -> Self {
+        Self::new(LogKind::Note, text)
+    }
 }

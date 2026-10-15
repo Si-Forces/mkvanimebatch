@@ -7,8 +7,8 @@ use common::{ScriptedRunner, Step};
 use mkv_core::domain::{EpisodeInfo, MkvTrack, TrackProperties, SUBPROCESS_TIMEOUT};
 use mkv_core::extract::{extract_mkv_file, select_subtitle_for_extraction, ExtractSummary};
 use mkv_core::fonts::FontRegistry;
+use mkv_core::log_line::LogLine;
 use mkv_core::media_tool::MediaTool;
-use mkv_core::pipeline::{LogKind, LogLine};
 use mkv_core::scan::{InspectedVideo, MkvAttachment, MkvmergeMetadata};
 
 fn video_track() -> MkvTrack {
@@ -102,7 +102,7 @@ async fn test_extract_mkv_file_logs_mkvextract_warnings_on_exit_code_1() {
         summary
             .log
             .iter()
-            .any(|l| l == &LogLine::new(LogKind::Warning, "  Warning: Cluster out of order")),
+            .any(|l| l == &LogLine::warning("  Warning: Cluster out of order")),
         "log did not contain the warning: {:?}",
         summary.log
     );
@@ -252,8 +252,7 @@ async fn test_extract_mkv_file_logs_a_font_that_was_not_saved() {
     assert_eq!(summary.extracted_fonts, 0);
     assert!(
         summary.log.iter().any(|l| l
-            == &LogLine::new(
-                LogKind::Warning,
+            == &LogLine::warning(
                 "   -> WARNING: Font 'Broken.ttf' was not saved: the extracted file is empty"
             )),
         "{:?}",

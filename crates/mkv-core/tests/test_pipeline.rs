@@ -10,7 +10,7 @@ use common::{run_batch, seeded_cache, video_metadata};
 use mkv_core::fonts::FontHashMemo;
 use mkv_core::pipeline::{
     create_event_channel, create_log_channel, BatchPipeline, CancellationToken, ItemOutcome,
-    JobEvent, LogKind, LogLine, PipelineConfig, PipelineMode,
+    JobEvent, LogLine, PipelineConfig, PipelineMode,
 };
 
 fn config(mode: PipelineMode, input_dir: &Path) -> PipelineConfig {
@@ -770,11 +770,7 @@ async fn test_remux_dry_run_reports_same_directory_duplicate_chapters_on_the_ite
             .iter()
             .position(|l| l.text.starts_with("[DRY-RUN] Would remux 'Show - 01.mkv'"))
             .unwrap_or_else(|| panic!("{log:#?}"));
-        assert_eq!(
-            log[dry_run + 1],
-            LogLine::new(LogKind::Warning, warning),
-            "{log:#?}"
-        );
+        assert_eq!(log[dry_run + 1], LogLine::warning(warning), "{log:#?}");
         // Episode 02 has no chapter file, so only episode 01 carries a line.
         assert_eq!(duplicate_chapter_lines(&log).len(), 1, "{log:#?}");
     }
