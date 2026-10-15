@@ -10,7 +10,7 @@ use common::{run_batch, seeded_cache, video_metadata};
 use mkv_core::fonts::FontHashMemo;
 use mkv_core::pipeline::{
     create_event_channel, create_log_channel, BatchPipeline, CancellationToken, ItemOutcome,
-    JobEvent, PipelineConfig, PipelineMode,
+    JobEvent, LogKind, LogLine, PipelineConfig, PipelineMode,
 };
 
 fn config(mode: PipelineMode, input_dir: &Path) -> PipelineConfig {
@@ -122,9 +122,11 @@ async fn test_remux_dry_run_preserves_nested_output_directory() {
     let expected_nested_str = expected_nested_path.to_string_lossy().into_owned();
     let expected_nested_slash = expected_nested_str.replace('\\', "/");
     assert!(
-        summary.log.iter().any(
-            |line| line.contains(&expected_nested_str) || line.contains(&expected_nested_slash)
-        ),
+        summary
+            .log
+            .iter()
+            .any(|line| line.text.contains(&expected_nested_str)
+                || line.text.contains(&expected_nested_slash)),
         "Log should contain preserved nested output path '{}'. Actual log:\n{:#?}",
         expected_nested_path.display(),
         summary.log
@@ -338,7 +340,10 @@ async fn test_pipeline_with_log_sender() {
     assert_eq!(summary.total, 0);
 
     let first_log = log_receiver.try_recv().expect("expected a log line");
-    assert!(first_log.contains("No MKV files found in"), "{first_log}");
+    assert!(
+        first_log.text.contains("No MKV files found in"),
+        "{first_log}"
+    );
 }
 
 #[tokio::test]
@@ -700,7 +705,7 @@ async fn chapter_dry_run_log(
     metadata: &mkv_core::scan::MkvmergeMetadata,
     assets_dir: Option<&Path>,
     selected_items: Option<Vec<String>>,
-) -> Vec<String> {
+) -> Vec<LogLine> {
     let videos: Vec<_> = ["Show - 01.mkv", "Show - 02.mkv"]
         .iter()
         .map(|name| root.join(name))
@@ -732,9 +737,9 @@ fn write_chapters(dir: &Path, names: &[&str]) {
     }
 }
 
-fn duplicate_chapter_lines(log: &[String]) -> Vec<&String> {
+fn duplicate_chapter_lines(log: &[LogLine]) -> Vec<&LogLine> {
     log.iter()
-        .filter(|l| l.contains("More than one chapter file"))
+        .filter(|l| l.text.contains("More than one chapter file"))
         .collect()
 }
 
@@ -763,9 +768,13 @@ async fn test_remux_dry_run_reports_same_directory_duplicate_chapters_on_the_ite
         );
         let dry_run = log
             .iter()
-            .position(|l| l.starts_with("[DRY-RUN] Would remux 'Show - 01.mkv'"))
+            .position(|l| l.text.starts_with("[DRY-RUN] Would remux 'Show - 01.mkv'"))
             .unwrap_or_else(|| panic!("{log:#?}"));
-        assert_eq!(log[dry_run + 1], warning, "{log:#?}");
+        assert_eq!(
+            log[dry_run + 1],
+            LogLine::new(LogKind::Warning, warning),
+            "{log:#?}"
+        );
         // Episode 02 has no chapter file, so only episode 01 carries a line.
         assert_eq!(duplicate_chapter_lines(&log).len(), 1, "{log:#?}");
     }
@@ -811,7 +820,7 @@ async fn test_remux_dry_run_ignores_duplicate_chapters_of_unselected_episodes() 
 
     assert!(
         log.iter()
-            .any(|l| l.contains("Would remux 'Show - 01.mkv'")),
+            .any(|l| l.text.contains("Would remux 'Show - 01.mkv'")),
         "{log:#?}"
     );
     assert!(duplicate_chapter_lines(&log).is_empty(), "{log:#?}");

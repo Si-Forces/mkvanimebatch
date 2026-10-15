@@ -3,7 +3,7 @@
 
 import { BULK_SELECTION_CONTROLS, CLEANUP_ERROR, JobController } from "./job-controller.js";
 import { QueueTracker } from "./queue-view.js";
-import { classifyLine, pushCapped } from "./log-classify.js";
+import { lineClass, pushCapped, renderLine } from "./log-classify.js";
 import { createTelemetryLoop } from "./telemetry.js";
 import { createJobCoordinator } from "./job-coordinator.js";
 import { createDirectoryScanner } from "./directory-scan.js";
@@ -533,19 +533,19 @@ const MAX_LOG_LINES = 2000;
 const _logQueues = new WeakMap();
 const _logRafIds = new WeakMap();
 // What each console holds, as the engine wrote it (Copy uses these, with their real paths), and
-// how many of those lines read as errors (the Log button's badge).
+// how many of those lines are errors (the Log button's badge).
 const _rawLogs = new WeakMap();
 const _logErrors = new WeakMap();
 
 /**
- * Queues one line or a `job-log` batch and flushes it on the next animation frame.
+ * Queues one `{kind, text}` line or a `job-log` batch and flushes it on the next animation frame.
  * The queue keeps only the newest MAX_LOG_LINES: no frame fires while the window
  * is hidden, and the console would drop the older lines on flush anyway.
  */
-function appendLog(logEl, text) {
+function appendLog(logEl, lines) {
   if (!logEl) return;
 
-  _logQueues.set(logEl, pushCapped(_logQueues.get(logEl) ?? [], text, MAX_LOG_LINES));
+  _logQueues.set(logEl, pushCapped(_logQueues.get(logEl) ?? [], lines, MAX_LOG_LINES));
 
   if (!_logRafIds.has(logEl)) {
     const rafId = requestAnimationFrame(() => {
@@ -558,13 +558,12 @@ function appendLog(logEl, text) {
 
       const frag = document.createDocumentFragment();
       let errors = _logErrors.get(logEl) ?? 0;
-      for (const lineText of pending) {
+      for (const line of pending) {
         const div = document.createElement("div");
-        const kind = classifyLine(lineText);
-        if (kind === "line-err") errors++;
-        div.className = `log-line ${kind}`;
+        if (line.kind === "error") errors++;
+        div.className = `log-line ${lineClass(line.kind)}`;
         // Paths display Finder-style; the raw line is kept for Copy.
-        div.textContent = logDisplayText(lineText);
+        div.textContent = logDisplayText(line.text);
         frag.appendChild(div);
       }
       _rawLogs.set(logEl, pushCapped(_rawLogs.get(logEl) ?? [], pending, MAX_LOG_LINES));
@@ -593,9 +592,9 @@ function clearLog(logEl) {
   renderLogBadge();
 }
 
-/** The current view's log as the engine wrote it, real `/` paths included. */
+/** The current view's log as the engine wrote it, real `/` paths included, rendered as plain text. */
 function rawLogText(logEl) {
-  return [...(_rawLogs.get(logEl) ?? []), ...(_logQueues.get(logEl) ?? [])].join("\n");
+  return [...(_rawLogs.get(logEl) ?? []), ...(_logQueues.get(logEl) ?? [])].map(renderLine).join("\n");
 }
 
 function renderLogBadge() {

@@ -8,6 +8,7 @@ use mkv_core::domain::{EpisodeInfo, MkvTrack, TrackProperties, SUBPROCESS_TIMEOU
 use mkv_core::extract::{extract_mkv_file, select_subtitle_for_extraction, ExtractSummary};
 use mkv_core::fonts::FontRegistry;
 use mkv_core::media_tool::MediaTool;
+use mkv_core::pipeline::{LogKind, LogLine};
 use mkv_core::scan::{InspectedVideo, MkvAttachment, MkvmergeMetadata};
 
 fn video_track() -> MkvTrack {
@@ -101,7 +102,7 @@ async fn test_extract_mkv_file_logs_mkvextract_warnings_on_exit_code_1() {
         summary
             .log
             .iter()
-            .any(|l| l == "  Warning: Cluster out of order"),
+            .any(|l| l == &LogLine::new(LogKind::Warning, "  Warning: Cluster out of order")),
         "log did not contain the warning: {:?}",
         summary.log
     );
@@ -250,15 +251,15 @@ async fn test_extract_mkv_file_logs_a_font_that_was_not_saved() {
 
     assert_eq!(summary.extracted_fonts, 0);
     assert!(
-        summary
-            .log
-            .iter()
-            .any(|l| l
-                == "   -> WARNING: Font 'Broken.ttf' was not saved: the extracted file is empty"),
+        summary.log.iter().any(|l| l
+            == &LogLine::new(
+                LogKind::Warning,
+                "   -> WARNING: Font 'Broken.ttf' was not saved: the extracted file is empty"
+            )),
         "{:?}",
         summary.log
     );
-    assert!(!summary.log.iter().any(|l| l.contains("new font(s)")));
+    assert!(!summary.log.iter().any(|l| l.text.contains("new font(s)")));
 }
 
 /// A content duplicate is dedup working as designed: counted once and not warned about.
@@ -269,7 +270,7 @@ async fn test_extract_mkv_file_does_not_warn_about_a_duplicate_font() {
 
     assert_eq!(summary.extracted_fonts, 1);
     assert!(
-        !summary.log.iter().any(|l| l.contains("WARNING")),
+        !summary.log.iter().any(|l| l.text.contains("WARNING")),
         "{:?}",
         summary.log
     );

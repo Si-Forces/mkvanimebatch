@@ -432,16 +432,22 @@ test("the log shows paths Finder-style, Copy puts the real paths on the clipboar
   await ipc.elements.get("remux-run").handlers.get("click")();
   await ipc.flush();
 
-  const raw = ["[+] Remuxed: /media/anime/Show/Season 1/Output/Show - 01.mkv", "[ERR] mkvmerge failed on Show - 02.mkv"];
-  ipc.emit("job-log", raw);
+  ipc.emit("job-log", [
+    { kind: "succeeded", text: "  Completed -> /media/anime/Show/Season 1/Output/Show - 01.mkv" },
+    { kind: "error", text: "Pipeline failed: mkvmerge failed on Show - 02.mkv" },
+  ]);
   const log = ipc.elements.get("remux-log");
   assert.deepEqual(log.children.map(line => line.textContent), [
-    "[+] Remuxed: media › anime › Show › Season 1 › Output › Show - 01.mkv",
-    "[ERR] mkvmerge failed on Show - 02.mkv",
+    "  Completed -> media › anime › Show › Season 1 › Output › Show - 01.mkv",
+    "Pipeline failed: mkvmerge failed on Show - 02.mkv",
   ]);
+  assert.deepEqual(log.children.map(line => line.className), ["log-line line-ok", "log-line line-err"]);
   assert.equal(badge.hidden, false);
   assert.equal(badge.textContent, "1");
 
   await copyBtn.handlers.get("click")();
-  assert.deepEqual(copied, [raw.join("\n")]);
+  // Copy renders the kind as the CLI does: `[ERR] ` before an error.
+  assert.deepEqual(copied, [
+    "  Completed -> /media/anime/Show/Season 1/Output/Show - 01.mkv\n[ERR] Pipeline failed: mkvmerge failed on Show - 02.mkv",
+  ]);
 });
