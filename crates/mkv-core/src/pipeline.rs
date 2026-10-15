@@ -1351,15 +1351,7 @@ mod tests {
     }
 
     #[test]
-    fn log_line_renders_the_err_marker_for_errors_only() {
-        assert_eq!(
-            LogLine::new(LogKind::Error, "Pipeline failed: x").to_string(),
-            "[ERR] Pipeline failed: x"
-        );
-        assert_eq!(
-            LogLine::new(LogKind::Warning, "  Warning: x").to_string(),
-            "  Warning: x"
-        );
+    fn log_line_serializes_as_its_kind_and_text() {
         assert_eq!(
             serde_json::to_value(LogLine::new(LogKind::Succeeded, "done")).unwrap(),
             serde_json::json!({"kind": "succeeded", "text": "done"})

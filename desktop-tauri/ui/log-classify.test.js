@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { lineClass, pushCapped, renderLine } from "./log-classify.js";
+import { lineClass, pushCapped } from "./log-classify.js";
 
 test("lineClass maps each Log Channel kind to its console class", () => {
   assert.equal(lineClass("error"), "line-err");
@@ -10,12 +10,6 @@ test("lineClass maps each Log Channel kind to its console class", () => {
   assert.equal(lineClass("step"), "line-info");
   assert.equal(lineClass("cache"), "line-done");
   assert.equal(lineClass("note"), "");
-});
-
-test("renderLine marks errors with [ERR] and leaves other kinds as their text", () => {
-  assert.equal(renderLine({ kind: "error", text: "Pipeline failed: x" }), "[ERR] Pipeline failed: x");
-  assert.equal(renderLine({ kind: "warning", text: "  Warning: /a/b.mkv" }), "  Warning: /a/b.mkv");
-  assert.equal(renderLine({ kind: "note", text: "plain" }), "plain");
 });
 
 test("pushCapped keeps the newest max lines across single and batch pushes", () => {

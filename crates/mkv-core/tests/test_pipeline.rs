@@ -342,7 +342,7 @@ async fn test_pipeline_with_log_sender() {
     let first_log = log_receiver.try_recv().expect("expected a log line");
     assert!(
         first_log.text.contains("No MKV files found in"),
-        "{first_log}"
+        "{first_log:?}"
     );
 }
 

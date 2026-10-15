@@ -434,20 +434,20 @@ test("the log shows paths Finder-style, Copy puts the real paths on the clipboar
 
   ipc.emit("job-log", [
     { kind: "succeeded", text: "  Completed -> /media/anime/Show/Season 1/Output/Show - 01.mkv" },
-    { kind: "error", text: "Pipeline failed: mkvmerge failed on Show - 02.mkv" },
+    { kind: "error", text: "ERROR: Pipeline failed: mkvmerge failed on Show - 02.mkv" },
   ]);
   const log = ipc.elements.get("remux-log");
   assert.deepEqual(log.children.map(line => line.textContent), [
     "  Completed -> media › anime › Show › Season 1 › Output › Show - 01.mkv",
-    "Pipeline failed: mkvmerge failed on Show - 02.mkv",
+    "ERROR: Pipeline failed: mkvmerge failed on Show - 02.mkv",
   ]);
   assert.deepEqual(log.children.map(line => line.className), ["log-line line-ok", "log-line line-err"]);
   assert.equal(badge.hidden, false);
   assert.equal(badge.textContent, "1");
 
   await copyBtn.handlers.get("click")();
-  // Copy renders the kind as the CLI does: `[ERR] ` before an error.
+  // Copy is each line's text, as the CLI prints it: an error line gets no added prefix.
   assert.deepEqual(copied, [
-    "  Completed -> /media/anime/Show/Season 1/Output/Show - 01.mkv\n[ERR] Pipeline failed: mkvmerge failed on Show - 02.mkv",
+    "  Completed -> /media/anime/Show/Season 1/Output/Show - 01.mkv\nERROR: Pipeline failed: mkvmerge failed on Show - 02.mkv",
   ]);
 });

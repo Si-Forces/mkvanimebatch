@@ -33,13 +33,3 @@ impl LogLine {
         }
     }
 }
-
-/// The plain-text rendering: an `Error` line reads `[ERR] <text>`, every other kind its text.
-impl std::fmt::Display for LogLine {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.kind == LogKind::Error {
-            f.write_str("[ERR] ")?;
-        }
-        f.write_str(&self.text)
-    }
-}

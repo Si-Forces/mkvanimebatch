@@ -381,7 +381,7 @@ test("a request the engine refuses is appended to the log, uncleared, and aborts
   assert.equal(controller.lifecycle, "failed");
   assert.equal(runtime.coordinator.activeMode, null);
   assert.equal(runtime.coordinator.canStart(), true);
-  assert.deepEqual(logs, [{ kind: "error", text: "Worker thread count must be between 1 and 64" }]);
+  assert.deepEqual(logs, [{ kind: "error", text: "ERROR: Worker thread count must be between 1 and 64" }]);
   // The chips were never switched to a running job.
   assert.deepEqual(chipCalls, [[false]]);
 });

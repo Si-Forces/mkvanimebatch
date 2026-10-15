@@ -352,7 +352,7 @@ fn pipeline_terminal(
         Ok(Err(error)) => {
             sink.logs(&[LogLine::new(
                 LogKind::Error,
-                format!("Pipeline failed: {error}"),
+                format!("ERROR: Pipeline failed: {error}"),
             )]);
             if cancelled {
                 bridge_terminal(true, None)
@@ -372,7 +372,7 @@ fn pipeline_terminal(
                 .unwrap_or_else(|| "Unknown pipeline panic".to_string());
             sink.logs(&[LogLine::new(
                 LogKind::Error,
-                format!("Pipeline panicked: {message}"),
+                format!("ERROR: Pipeline panicked: {message}"),
             )]);
             bridge_terminal(false, Some(("panic", message)))
         }
@@ -816,7 +816,7 @@ mod tests {
             &sink,
             &[
                 note("probing"),
-                LogLine::new(LogKind::Error, "Pipeline failed: x"),
+                LogLine::new(LogKind::Error, "ERROR: Pipeline failed: x"),
             ],
         );
         JobSink::done(
@@ -833,7 +833,7 @@ mod tests {
             *logs.lock().unwrap(),
             [serde_json::json!([
                 { "kind": "note", "text": "probing" },
-                { "kind": "error", "text": "Pipeline failed: x" },
+                { "kind": "error", "text": "ERROR: Pipeline failed: x" },
             ])]
         );
         assert_eq!(
@@ -1141,7 +1141,7 @@ mod tests {
         assert!(
             sink.log_batches().concat().contains(&LogLine::new(
                 LogKind::Error,
-                "Pipeline failed: scan failed before any stop"
+                "ERROR: Pipeline failed: scan failed before any stop"
             )),
             "worker error must reach the job log as an Error line"
         );
@@ -1330,7 +1330,7 @@ mod tests {
             sink.log_batches(),
             [[LogLine::new(
                 LogKind::Error,
-                "Pipeline panicked: bridge worker panicked"
+                "ERROR: Pipeline panicked: bridge worker panicked"
             )]]
         );
 

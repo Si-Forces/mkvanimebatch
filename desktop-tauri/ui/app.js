@@ -3,7 +3,7 @@
 
 import { BULK_SELECTION_CONTROLS, CLEANUP_ERROR, JobController } from "./job-controller.js";
 import { QueueTracker } from "./queue-view.js";
-import { lineClass, pushCapped, renderLine } from "./log-classify.js";
+import { lineClass, pushCapped } from "./log-classify.js";
 import { createTelemetryLoop } from "./telemetry.js";
 import { createJobCoordinator } from "./job-coordinator.js";
 import { createDirectoryScanner } from "./directory-scan.js";
@@ -592,9 +592,9 @@ function clearLog(logEl) {
   renderLogBadge();
 }
 
-/** The current view's log as the engine wrote it, real `/` paths included, rendered as plain text. */
+/** The current view's log as the engine wrote it, real `/` paths included. */
 function rawLogText(logEl) {
-  return [...(_rawLogs.get(logEl) ?? []), ...(_logQueues.get(logEl) ?? [])].map(renderLine).join("\n");
+  return [...(_rawLogs.get(logEl) ?? []), ...(_logQueues.get(logEl) ?? [])].map(line => line.text).join("\n");
 }
 
 function renderLogBadge() {

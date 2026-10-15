@@ -144,7 +144,7 @@ export class JobController {
       el.addEventListener("input", clear, { once: true });
       el.addEventListener("change", clear, { once: true });
     }
-    this.runtime.appendLog(this.logEl, { kind: "error", text: message });
+    this.runtime.appendLog(this.logEl, { kind: "error", text: `ERROR: ${message}` });
   }
 
   buildBatchRequest() {
@@ -238,7 +238,7 @@ export class JobController {
       settings = await this.runtime.invoke("resolve_batch_request", { request: batchRequest });
     } catch (err) {
       if (generation !== this.startGeneration) return;
-      this.runtime.appendLog(this.logEl, { kind: "error", text: `${err}` });
+      this.runtime.appendLog(this.logEl, { kind: "error", text: `ERROR: ${err}` });
       this.abortStart();
       return;
     }
@@ -254,7 +254,7 @@ export class JobController {
     });
     if (generation !== this.startGeneration) return;
     if (!inspected) {
-      this.runtime.appendLog(this.logEl, { kind: "error", text: "Input inspection failed; job was not started." });
+      this.runtime.appendLog(this.logEl, { kind: "error", text: "ERROR: Input inspection failed; job was not started." });
       this.abortStart();
       return;
     }
@@ -262,7 +262,7 @@ export class JobController {
 
     const effectiveSelectedIds = isSameDir ? selectedIds : tracker.getSelectedOrderedItemIds();
     if (!effectiveSelectedIds || effectiveSelectedIds.length === 0) {
-      this.runtime.appendLog(this.logEl, { kind: "error", text: "No episodes selected in queue." });
+      this.runtime.appendLog(this.logEl, { kind: "error", text: "ERROR: No episodes selected in queue." });
       this.abortStart();
       return;
     }
@@ -278,7 +278,7 @@ export class JobController {
         const message = reappearedIds.length
           ? `Queue selection changed during inspection; previously missing selected episodes reappeared: ${reappearedIds.join(", ")}. Review the queue and press Run again; job was not started.`
           : `Selected episodes disappeared from the input directory: ${missingIds.join(", ")}. Change the queue selection to continue; job was not started.`;
-        this.runtime.appendLog(this.logEl, { kind: "error", text: message });
+        this.runtime.appendLog(this.logEl, { kind: "error", text: `ERROR: ${message}` });
         this.abortStart();
         return;
       }
@@ -321,7 +321,7 @@ export class JobController {
     } catch (err) {
       unlisteners.forEach(unlisten => unlisten());
       if (generation !== this.startGeneration) return;
-      this.runtime.appendLog(this.logEl, { kind: "error", text: `Listeners failed: ${err}` });
+      this.runtime.appendLog(this.logEl, { kind: "error", text: `ERROR: Listeners failed: ${err}` });
       this.abortStart();
       return;
     }
@@ -347,7 +347,7 @@ export class JobController {
         if (done) this.onDone(done.code);
       }
     } catch (err) {
-      this.runtime.appendLog(this.logEl, { kind: "error", text: `${err}` });
+      this.runtime.appendLog(this.logEl, { kind: "error", text: `ERROR: ${err}` });
       this.abortStart();
     }
   }
@@ -377,7 +377,7 @@ export class JobController {
       if (!this.running || generation !== this.startGeneration || this.jobId !== jobId) return;
     } catch (err) {
       if (!this.running || generation !== this.startGeneration) return;
-      this.runtime.appendLog(this.logEl, { kind: "error", text: `${err}` });
+      this.runtime.appendLog(this.logEl, { kind: "error", text: `ERROR: ${err}` });
       if (this.jobId !== null) {
         this.runtime.coordinator.stopFailed();
         this.lifecycle = "running";
@@ -402,7 +402,7 @@ export class JobController {
       const msg = await this.runtime.invoke("clear_cache");
       this.runtime.appendLog(this.logEl, { kind: "cache", text: `[CACHE] ${msg || "Cache cleared."}` });
     } catch (err) {
-      this.runtime.appendLog(this.logEl, { kind: "error", text: `${err}` });
+      this.runtime.appendLog(this.logEl, { kind: "error", text: `ERROR: ${err}` });
     }
   }
 
