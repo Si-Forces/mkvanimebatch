@@ -442,6 +442,7 @@ test("the log shows paths Finder-style, Copy puts the real paths on the clipboar
     "ERROR: Pipeline failed: mkvmerge failed on Show - 02.mkv",
   ]);
   assert.deepEqual(log.children.map(line => line.className), ["log-line line-ok", "log-line line-err"]);
+  assert.deepEqual(log.children.map(line => line.dataset.kind), ["succeeded", "error"]);
   assert.equal(badge.hidden, false);
   assert.equal(badge.textContent, "1");
 

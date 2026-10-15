@@ -3,7 +3,7 @@
 // Also holds the DOM-free queue cap the console uses while it waits for a frame.
 
 // One console class per `LogKind`; a `note` is unstyled.
-const KIND_CLASS = {
+export const KIND_CLASS = {
   error: "line-err",
   warning: "line-warn",
   skipped: "line-skip",

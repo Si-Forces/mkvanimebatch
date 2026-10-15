@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { lineClass, pushCapped } from "./log-classify.js";
+import { readFileSync } from "node:fs";
+import { KIND_CLASS, lineClass, pushCapped } from "./log-classify.js";
 
 test("lineClass maps each Log Channel kind to its console class", () => {
   assert.equal(lineClass("error"), "line-err");
@@ -10,6 +11,14 @@ test("lineClass maps each Log Channel kind to its console class", () => {
   assert.equal(lineClass("step"), "line-info");
   assert.equal(lineClass("cache"), "line-done");
   assert.equal(lineClass("note"), "");
+});
+
+// Drift guard: KIND_CLASS must name every `LogKind` variant, serialized lowercase.
+test("KIND_CLASS lists exactly the LogKind names log_line.rs serializes", () => {
+  const src = readFileSync(new URL("../../crates/mkv-core/src/log_line.rs", import.meta.url), "utf8");
+  const body = src.match(/pub enum LogKind \{([^}]*)\}/)[1];
+  const kinds = [...body.matchAll(/^\s*(\w+),/gm)].map(([, name]) => name.toLowerCase());
+  assert.deepEqual(kinds.sort(), Object.keys(KIND_CLASS).sort());
 });
 
 test("pushCapped keeps the newest max lines across single and batch pushes", () => {

@@ -35,8 +35,8 @@ test("the Inspector crumbs show the episode folder, not the file name the title 
 });
 
 test("the log shows › for path separators, keeps digit fractions, and leaves the raw line alone", () => {
-  const raw = "[INFO] Remuxed: /media/anime/Season 1/Show - 01.mkv (3/12)";
-  assert.equal(logDisplayText(raw), "[INFO] Remuxed: media › anime › Season 1 › Show - 01.mkv (3/12)");
+  const raw = "Remuxed: /media/anime/Season 1/Show - 01.mkv (3/12)";
+  assert.equal(logDisplayText(raw), "Remuxed: media › anime › Season 1 › Show - 01.mkv (3/12)");
   assert.equal(logDisplayText("Output/Show.mkv"), "Output › Show.mkv");
   assert.equal(logDisplayText("C:\\Anime\\Show.mkv"), "C: › Anime › Show.mkv");
   assert.equal(logDisplayText("no paths here"), "no paths here");

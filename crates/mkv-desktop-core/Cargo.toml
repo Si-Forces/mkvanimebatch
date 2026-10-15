@@ -1,0 +1,29 @@
+[package]
+name = "mkv-desktop-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Toolkit-agnostic Desktop Core: the Engine Bridge between mkv-core and a desktop UI"
+
+[lints]
+workspace = true
+
+[lib]
+name = "mkv_desktop_core"
+
+[features]
+# Exposes the test helpers (recording sink, fixtures) to the desktop adapter's own tests.
+test-support = ["tokio/rt-multi-thread"]
+
+[dependencies]
+mkv-core = { path = "../mkv-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sysinfo = "0.33"
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread"] }

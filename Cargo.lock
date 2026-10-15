@@ -2194,10 +2194,10 @@ name = "mkv-anime-batch"
 version = "1.0.1"
 dependencies = [
  "mkv-core",
+ "mkv-desktop-core",
  "rfd",
  "serde",
  "serde_json",
- "sysinfo",
  "tauri",
  "tauri-build",
  "tempfile",
@@ -2231,6 +2231,18 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+]
+
+[[package]]
+name = "mkv-desktop-core"
+version = "1.0.1"
+dependencies = [
+ "mkv-core",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

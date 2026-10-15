@@ -6,8 +6,8 @@ use std::sync::Arc;
 use common::{ScriptedRunner, Step};
 use mkv_core::domain::{MkvTrack, TrackProperties, SUBPROCESS_TIMEOUT};
 use mkv_core::fonts::FontInfo;
+use mkv_core::log_line::LogLine;
 use mkv_core::media_tool::MediaTool;
-use mkv_core::pipeline::{LogKind, LogLine};
 use mkv_core::remux::{
     build_ffmpeg_args, build_mkvmerge_args, execute_remux_job, select_tracks, PlannedJob,
     RemuxOptions, TrackSelection,
@@ -343,7 +343,7 @@ async fn test_execute_remux_job_logs_warnings_on_exit_code_1() {
     let log = remux(dir.path(), &runner).await.unwrap();
     assert!(
         log.iter()
-            .any(|l| l == &LogLine::new(LogKind::Warning, "  Warning: QuickTime track parsing")),
+            .any(|l| l == &LogLine::warning("  Warning: QuickTime track parsing")),
         "log did not contain the warning: {log:?}"
     );
     assert_eq!(
@@ -380,10 +380,10 @@ async fn test_execute_remux_job_logs_the_chapter_warning_after_processing() {
     .await
     .unwrap();
 
-    assert_eq!(log[0], LogLine::new(LogKind::Step, "Processing: test.mkv"));
+    assert_eq!(log[0], LogLine::step("Processing: test.mkv"));
     assert_eq!(
         log[1],
-        LogLine::new(LogKind::Warning, "  Warning: More than one chapter file")
+        LogLine::warning("  Warning: More than one chapter file")
     );
     let mkvmerge_warning = log
         .iter()

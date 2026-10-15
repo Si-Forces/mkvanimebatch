@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-use crate::log_line::{LogKind, LogLine};
+use crate::log_line::LogLine;
 
 /// Windows process creation flag that keeps child tools from opening a console window.
 #[cfg(windows)]
@@ -193,7 +193,7 @@ pub fn warning_log_line(text: &str) -> LogLine {
     } else {
         format!("  Warning: {text}")
     };
-    LogLine::new(LogKind::Warning, text)
+    LogLine::warning(text)
 }
 
 /// Parses mkvmerge/mkvextract "Progress: XX%" output lines.

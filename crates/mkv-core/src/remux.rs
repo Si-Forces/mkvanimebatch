@@ -276,10 +276,7 @@ pub async fn execute_remux_job(
     io_semaphore: &Semaphore,
     runner: &dyn MediaToolRunner,
 ) -> Result<Vec<LogLine>, String> {
-    let mut log = vec![LogLine::new(
-        LogKind::Step,
-        format!("Processing: {}", job.video_name),
-    )];
+    let mut log = vec![LogLine::step(format!("Processing: {}", job.video_name))];
     log.extend(
         job.chapter_warning
             .as_deref()
@@ -317,10 +314,7 @@ pub async fn execute_remux_job(
             options.complexity,
             options.ffmpeg_threads,
         );
-        log.push(LogLine::new(
-            LogKind::Note,
-            "  Transcoding audio to Opus with ffmpeg...",
-        ));
+        log.push(LogLine::note("  Transcoding audio to Opus with ffmpeg..."));
         media_tool::run(
             runner,
             MediaTool::Ffmpeg,
@@ -349,7 +343,7 @@ pub async fn execute_remux_job(
         .await
         .map_err(|_| IO_GOVERNOR_CLOSED.to_string())?;
 
-    log.push(LogLine::new(LogKind::Note, "  Running mkvmerge..."));
+    log.push(LogLine::note("  Running mkvmerge..."));
     let output = media_tool::run(
         runner,
         MediaTool::Mkvmerge,

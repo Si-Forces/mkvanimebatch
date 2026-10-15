@@ -1,10 +1,12 @@
 //! The active job of the Engine Bridge: the Job Slot, the supervisor that takes a job's pipeline
 //! to one terminal, the two-phase stop, and the Job Snapshot. The supervisor reports through a
-//! `JobSink`, so it runs, and is tested, without a Tauri app.
+//! `JobSink`, so it runs, and is tested, without a UI toolkit; its tasks run on the tokio
+//! runtime the adapter hands `JobState::new`.
 
 use crate::snapshot::{attach_context, BatchStatus, JobSnapshot, SnapshotStore};
+use mkv_core::log_line::LogLine;
 use mkv_core::pipeline::{
-    CancellationToken, EventReceiver, JobEvent, LogKind, LogLine, LogReceiver, PipelineSummary,
+    CancellationToken, EventReceiver, JobEvent, LogReceiver, PipelineSummary,
 };
 use mkv_core::request::EffectiveSettings;
 use serde::Serialize;
@@ -13,53 +15,37 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::Duration;
-use tauri::{AppHandle, Emitter, Runtime};
+use tokio::runtime::Handle;
+use tokio::task::JoinError;
 
-const JOB_EVENT: &str = "job-event";
-const JOB_LOG: &str = "job-log";
-const JOB_DONE: &str = "job-done";
 /// Log lines are forwarded to the sink in batches of at most this many lines...
 const LOG_BATCH_MAX_LINES: usize = 25;
 /// ...or whenever this interval elapses with lines pending.
 const LOG_FLUSH_INTERVAL: Duration = Duration::from_millis(25);
 
-/// The end of a job, as the webview's `job-done` receives it.
+/// The end of a job: the `job-done` payload a UI adapter emits.
 #[derive(Serialize)]
-pub(crate) struct JobDone {
-    pub(crate) mode: &'static str,
-    pub(crate) job_id: u64,
+pub struct JobDone {
+    pub mode: &'static str,
+    pub job_id: u64,
     /// `0` completed, `-1` cancelled, `1` otherwise.
-    pub(crate) code: i32,
+    pub code: i32,
 }
 
-/// Where a job's events, log batches and completion go. The Tauri adapter emits them to the
-/// webview; tests record them.
-pub(crate) trait JobSink: Send + Sync + 'static {
+/// Where a job's events, log batches and completion go. A UI adapter emits them (the Tauri one
+/// to the webview); tests record them.
+pub trait JobSink: Send + Sync + 'static {
     fn event(&self, event: &JobEvent);
     fn logs(&self, lines: &[LogLine]);
     fn done(&self, done: &JobDone);
 }
 
-impl<R: Runtime> JobSink for AppHandle<R> {
-    fn event(&self, event: &JobEvent) {
-        let _ = self.emit(JOB_EVENT, event);
-    }
-
-    fn logs(&self, lines: &[LogLine]) {
-        let _ = self.emit(JOB_LOG, lines);
-    }
-
-    fn done(&self, done: &JobDone) {
-        let _ = self.emit(JOB_DONE, done);
-    }
-}
-
 /// What a job runs with and is identified by when it starts.
-pub(crate) struct JobConfig {
-    pub(crate) mode: &'static str,
-    pub(crate) input_dir: String,
-    pub(crate) effective_settings: EffectiveSettings,
-    pub(crate) cancel_token: CancellationToken,
+pub struct JobConfig {
+    pub mode: &'static str,
+    pub input_dir: String,
+    pub effective_settings: EffectiveSettings,
+    pub cancel_token: CancellationToken,
 }
 
 /// The Job Slot's occupant: the one job the app runs at a time.
@@ -74,28 +60,30 @@ struct Inner {
     next_id: AtomicU64,
     snapshot: SnapshotStore,
     accepting_starts: AtomicBool,
-}
-
-impl Default for Inner {
-    fn default() -> Self {
-        Self {
-            slot: Mutex::new(None),
-            next_id: AtomicU64::new(1),
-            snapshot: SnapshotStore::default(),
-            accepting_starts: AtomicBool::new(true),
-        }
-    }
+    /// Where a job's pipeline and supervisor tasks run.
+    runtime: Handle,
 }
 
 /// The active job of the app: its Job Slot, its Job Snapshot, and the gate that refuses starts
 /// once shutdown begins. Clones share one state; a job's supervisor holds one for its whole life.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct JobState(Arc<Inner>);
 
 impl JobState {
+    /// A state with an empty Job Slot whose jobs run on `runtime`.
+    pub fn new(runtime: Handle) -> Self {
+        Self(Arc::new(Inner {
+            slot: Mutex::new(None),
+            next_id: AtomicU64::new(1),
+            snapshot: SnapshotStore::default(),
+            accepting_starts: AtomicBool::new(true),
+            runtime,
+        }))
+    }
+
     /// Reserves the Job Slot, begins the Job Snapshot, and runs `pipeline_future` under a
     /// supervisor that reports to `sink`. Returns the job's ID.
-    pub(crate) fn start<S, F>(
+    pub fn start<S, F>(
         &self,
         sink: S,
         config: JobConfig,
@@ -120,12 +108,12 @@ impl JobState {
             .snapshot
             .begin(job_id, mode, input_dir, effective_settings)?;
 
-        let pipeline_handle = tauri::async_runtime::spawn(pipeline_future);
-        let pipeline_abort = pipeline_handle.inner().abort_handle();
+        let pipeline_handle = self.0.runtime.spawn(pipeline_future);
+        let pipeline_abort = pipeline_handle.abort_handle();
         let abort_on_supervisor_drop = pipeline_abort.clone();
         let supervisor_cancel = cancel_token.clone();
         let state = self.clone();
-        tauri::async_runtime::spawn(async move {
+        self.0.runtime.spawn(async move {
             struct JobSlotGuard {
                 state: JobState,
                 job_id: u64,
@@ -262,14 +250,14 @@ impl JobState {
         })
     }
 
-    pub(crate) fn snapshot(&self) -> Result<Option<JobSnapshot>, String> {
+    pub fn snapshot(&self) -> Result<Option<JobSnapshot>, String> {
         self.0.snapshot.get()
     }
 
     /// Drops the Job Snapshot unless a job holds the Job Slot; a poisoned slot lock counts as no
     /// job. Holds the slot lock across the clear, in the slot-then-snapshot order `start` takes,
     /// so a start cannot reserve the slot and begin its snapshot between the check and the clear.
-    pub(crate) fn clear_snapshot(&self) {
+    pub fn clear_snapshot(&self) {
         let lock = self.0.slot.lock();
         if lock.as_ref().is_ok_and(|slot| slot.is_some()) {
             return;
@@ -327,7 +315,7 @@ impl JobState {
 /// delivered one, else one the bridge synthesizes from how the task ended. `cancelled` is whether
 /// the job was told to stop. A worker error or panic is also written to the job log.
 fn pipeline_terminal(
-    pipeline_result: tauri::Result<Result<PipelineSummary, String>>,
+    pipeline_result: Result<Result<PipelineSummary, String>, JoinError>,
     completion: Option<JobEvent>,
     cancelled: bool,
     sink: &impl JobSink,
@@ -350,30 +338,24 @@ fn pipeline_terminal(
         // cancelled, so the terminal must stay cancelled. Either way the
         // error is still surfaced in the job log.
         Ok(Err(error)) => {
-            sink.logs(&[LogLine::new(
-                LogKind::Error,
-                format!("ERROR: Pipeline failed: {error}"),
-            )]);
+            sink.logs(&[LogLine::error(format!("ERROR: Pipeline failed: {error}"))]);
             if cancelled {
                 bridge_terminal(true, None)
             } else {
                 bridge_terminal(false, Some(("error", error)))
             }
         }
-        Err(tauri::Error::JoinError(join_error)) if join_error.is_cancelled() && cancelled => {
-            bridge_terminal(true, None)
-        }
-        Err(tauri::Error::JoinError(join_error)) if join_error.is_panic() => {
+        Err(join_error) if join_error.is_cancelled() && cancelled => bridge_terminal(true, None),
+        Err(join_error) if join_error.is_panic() => {
             let payload = join_error.into_panic();
             let message = payload
                 .downcast_ref::<&str>()
                 .map(|value| (*value).to_string())
                 .or_else(|| payload.downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "Unknown pipeline panic".to_string());
-            sink.logs(&[LogLine::new(
-                LogKind::Error,
-                format!("ERROR: Pipeline panicked: {message}"),
-            )]);
+            sink.logs(&[LogLine::error(format!(
+                "ERROR: Pipeline panicked: {message}"
+            ))]);
             bridge_terminal(false, Some(("panic", message)))
         }
         Err(_) => bridge_terminal(
@@ -431,6 +413,7 @@ async fn forward_events(
             }
             attach_context(&mut event, mode, job_id);
             state.0.snapshot.update(&event, job_id, mode);
+            // The sink still gets every event; the webview drops non-v1 events itself.
             sink.event(&event);
         }
     }
@@ -473,7 +456,7 @@ async fn forward_logs(sink: &impl JobSink, mut log_rx: LogReceiver, flush_every:
 
 /// Strips the Windows verbatim prefix (`\\?\`, `\\?\UNC\`) that `canonicalize`
 /// adds, so every path the UI compares uses the same display form.
-pub(crate) fn display_canonical_path(path: &str) -> String {
+pub fn display_canonical_path(path: &str) -> String {
     if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
         format!(r"\\{rest}")
     } else {
@@ -495,22 +478,35 @@ fn bridge_terminal(cancelled: bool, problem: Option<(&str, String)>) -> JobEvent
     }
 }
 
-#[cfg(test)]
-pub(crate) mod test_support {
+/// Test helpers, also exported to the desktop adapter's tests through the `test-support` feature.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
     use super::*;
     use crate::snapshot::test_support::effective_settings;
     use serde_json::Value;
-    use std::sync::{Condvar, TryLockError};
+    use std::sync::{Condvar, OnceLock, TryLockError};
 
-    fn dummy_slot(id: u64) -> JobSlot {
-        JobSlot {
-            id,
-            cancel_token: CancellationToken::new(),
-            pipeline_abort: tauri::async_runtime::spawn(async {}).inner().abort_handle(),
-        }
+    /// One multi-thread runtime for every test, standing in for the adapter's. A test may block
+    /// its own thread (a stop, a `RecordingSink` wait) while the jobs it started run here.
+    pub fn runtime() -> Handle {
+        static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+        RUNTIME
+            .get_or_init(|| {
+                tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+            })
+            .handle()
+            .clone()
     }
 
-    pub(crate) fn poison<T: Send>(mutex: &Mutex<T>) {
+    /// A state whose jobs run on the shared test `runtime`.
+    pub fn job_state() -> JobState {
+        JobState::new(runtime())
+    }
+
+    pub fn poison<T: Send>(mutex: &Mutex<T>) {
         let _ = thread::scope(|scope| {
             scope
                 .spawn(|| {
@@ -524,29 +520,33 @@ pub(crate) mod test_support {
     impl JobState {
         /// Fills the Job Slot with job `id` that has no pipeline behind it, so nothing ever
         /// releases it.
-        pub(crate) fn occupy(&self, id: u64) {
-            *self.0.slot.lock().unwrap() = Some(dummy_slot(id));
+        pub fn occupy(&self, id: u64) {
+            *self.0.slot.lock().unwrap() = Some(JobSlot {
+                id,
+                cancel_token: CancellationToken::new(),
+                pipeline_abort: self.0.runtime.spawn(async {}).abort_handle(),
+            });
         }
 
         /// Empties the Job Slot as a supervisor does when its job ends.
-        pub(crate) fn vacate(&self) {
+        pub fn vacate(&self) {
             self.0.slot.lock().unwrap().take();
         }
 
         /// Begins a Job Snapshot for job `id`, as `start` does.
-        pub(crate) fn begin_snapshot(&self, id: u64) {
+        pub fn begin_snapshot(&self, id: u64) {
             self.0
                 .snapshot
                 .begin(id, "remux", "/anime".into(), effective_settings())
                 .unwrap();
         }
 
-        pub(crate) fn poison_slot(&self) {
+        pub fn poison_slot(&self) {
             poison(&self.0.slot);
         }
 
         /// Whether the job in the slot has been told to stop.
-        pub(crate) fn current_cancelled(&self) -> bool {
+        pub fn current_cancelled(&self) -> bool {
             self.0
                 .slot
                 .lock()
@@ -556,27 +556,27 @@ pub(crate) mod test_support {
         }
 
         /// Whether another thread holds the slot lock right now.
-        pub(crate) fn slot_is_locked(&self) -> bool {
+        pub fn slot_is_locked(&self) -> bool {
             matches!(self.0.slot.try_lock(), Err(TryLockError::WouldBlock))
         }
 
         /// Holds the Job Snapshot lock; see `SnapshotStore::hold`.
-        pub(crate) fn hold_snapshot(&self) -> MutexGuard<'_, Option<JobSnapshot>> {
+        pub fn hold_snapshot(&self) -> MutexGuard<'_, Option<JobSnapshot>> {
             self.0.snapshot.hold()
         }
     }
 
     /// Everything a `RecordingSink` was given, in order; events and dones as the webview's JSON.
     #[derive(Default)]
-    pub(crate) struct Recorded {
-        pub(crate) events: Vec<Value>,
-        pub(crate) logs: Vec<Vec<LogLine>>,
-        pub(crate) dones: Vec<Value>,
+    pub struct Recorded {
+        pub events: Vec<Value>,
+        pub logs: Vec<Vec<LogLine>>,
+        pub dones: Vec<Value>,
     }
 
     /// A `JobSink` that records what it is given, for a test to read or wait on.
     #[derive(Clone, Default)]
-    pub(crate) struct RecordingSink(Arc<(Mutex<Recorded>, Condvar)>);
+    pub struct RecordingSink(Arc<(Mutex<Recorded>, Condvar)>);
 
     impl RecordingSink {
         fn record(&self, write: impl FnOnce(&mut Recorded)) {
@@ -585,25 +585,21 @@ pub(crate) mod test_support {
             changed.notify_all();
         }
 
-        pub(crate) fn events(&self) -> Vec<Value> {
+        pub fn events(&self) -> Vec<Value> {
             self.0 .0.lock().unwrap().events.clone()
         }
 
-        pub(crate) fn log_batches(&self) -> Vec<Vec<LogLine>> {
+        pub fn log_batches(&self) -> Vec<Vec<LogLine>> {
             self.0 .0.lock().unwrap().logs.clone()
         }
 
-        pub(crate) fn dones(&self) -> Vec<Value> {
+        pub fn dones(&self) -> Vec<Value> {
             self.0 .0.lock().unwrap().dones.clone()
         }
 
         /// Blocks until `ready` holds for what was recorded, or `timeout` passes. Returns
         /// whether it held.
-        pub(crate) fn wait_until(
-            &self,
-            timeout: Duration,
-            ready: impl Fn(&Recorded) -> bool,
-        ) -> bool {
+        pub fn wait_until(&self, timeout: Duration, ready: impl Fn(&Recorded) -> bool) -> bool {
             let (recorded, changed) = &*self.0;
             let (_recorded, result) = changed
                 .wait_timeout_while(recorded.lock().unwrap(), timeout, |recorded| {
@@ -641,12 +637,10 @@ mod tests {
     use crate::snapshot::ItemStatus;
     use mkv_core::pipeline::CANCELLED_REASON;
     use serde_json::Value;
-    use tauri::test::MockRuntime;
-    use tauri::Listener;
 
     /// A job state and a sink recording everything its jobs report.
     fn observed() -> (JobState, RecordingSink) {
-        (JobState::default(), RecordingSink::default())
+        (job_state(), RecordingSink::default())
     }
 
     /// Starts a remux job running `worker`, or returns the error that refuses it.
@@ -769,7 +763,7 @@ mod tests {
     }
 
     fn note(text: impl Into<String>) -> LogLine {
-        LogLine::new(LogKind::Note, text)
+        LogLine::note(text)
     }
 
     fn logged(sink: &RecordingSink, needle: &str) -> bool {
@@ -786,71 +780,14 @@ mod tests {
         panic!("bridge worker panicked");
     }
 
-    type Recorder<T> = Arc<Mutex<Vec<T>>>;
-
-    fn record<T: serde::de::DeserializeOwned + Send + 'static>(
-        app: &tauri::App<MockRuntime>,
-        event: &str,
-    ) -> Recorder<T> {
-        let recorder = Arc::new(Mutex::new(Vec::new()));
-        let writer = Arc::clone(&recorder);
-        app.listen(event, move |event| {
-            writer
-                .lock()
-                .unwrap()
-                .push(serde_json::from_str(event.payload()).unwrap());
-        });
-        recorder
-    }
-
-    #[test]
-    fn the_app_handle_sink_emits_the_three_job_events() {
-        let app = tauri::test::mock_app();
-        let events = record::<Value>(&app, JOB_EVENT);
-        let logs = record::<Value>(&app, JOB_LOG);
-        let dones = record::<Value>(&app, JOB_DONE);
-        let sink = app.handle().clone();
-
-        JobSink::event(&sink, &batch_start(&["ep1"]));
-        JobSink::logs(
-            &sink,
-            &[
-                note("probing"),
-                LogLine::new(LogKind::Error, "ERROR: Pipeline failed: x"),
-            ],
-        );
-        JobSink::done(
-            &sink,
-            &JobDone {
-                mode: "remux",
-                job_id: 7,
-                code: -1,
-            },
-        );
-
-        assert_eq!(events.lock().unwrap()[0]["type"], "batch_start");
-        assert_eq!(
-            *logs.lock().unwrap(),
-            [serde_json::json!([
-                { "kind": "note", "text": "probing" },
-                { "kind": "error", "text": "ERROR: Pipeline failed: x" },
-            ])]
-        );
-        assert_eq!(
-            *dones.lock().unwrap(),
-            [serde_json::json!({ "mode": "remux", "job_id": 7, "code": -1 })]
-        );
-    }
-
     #[test]
     fn a_partial_batch_flushes_when_the_interval_elapses() {
         let sink = RecordingSink::default();
         let (log_tx, log_rx) = mkv_core::pipeline::create_log_channel(64);
         let forwarder = {
             let sink = sink.clone();
-            tauri::async_runtime::spawn(async move {
-                forward_logs(&sink, log_rx, Duration::from_millis(20)).await
-            })
+            runtime()
+                .spawn(async move { forward_logs(&sink, log_rx, Duration::from_millis(20)).await })
         };
 
         log_tx.try_send(note("a")).unwrap();
@@ -863,7 +800,7 @@ mod tests {
         assert_eq!(sink.log_batches()[0], [note("a"), note("b")]);
 
         drop(log_tx);
-        tauri::async_runtime::block_on(forwarder).unwrap();
+        runtime().block_on(forwarder).unwrap();
         assert_eq!(sink.log_batches().len(), 1);
     }
 
@@ -874,9 +811,8 @@ mod tests {
         // An hour apart, so only a full batch or the closed channel can flush.
         let forwarder = {
             let sink = sink.clone();
-            tauri::async_runtime::spawn(async move {
-                forward_logs(&sink, log_rx, Duration::from_secs(3600)).await
-            })
+            runtime()
+                .spawn(async move { forward_logs(&sink, log_rx, Duration::from_secs(3600)).await })
         };
 
         for line in 0..LOG_BATCH_MAX_LINES {
@@ -893,7 +829,7 @@ mod tests {
             log_tx.try_send(note(line)).unwrap();
         }
         drop(log_tx);
-        tauri::async_runtime::block_on(forwarder).unwrap();
+        runtime().block_on(forwarder).unwrap();
 
         let batches = sink.log_batches();
         assert_eq!(batches.len(), 2);
@@ -1007,7 +943,7 @@ mod tests {
             vec!["ep2".to_string(), "ep1".to_string()]
         );
         assert_eq!(snapshot.items.len(), 2);
-        assert_eq!(snapshot.completed_items, 2);
+        assert_eq!(snapshot.completed_items(), 2);
         assert_eq!(snapshot.items["ep2"].progress, Some(70.0));
         assert_eq!(snapshot.items["ep2"].status, ItemStatus::Cancelled);
         assert_eq!(snapshot.items["ep1"].status, ItemStatus::Cancelled);
@@ -1093,7 +1029,7 @@ mod tests {
 
         let snapshot = job.snapshot().unwrap().unwrap();
         assert_eq!(snapshot.status, BatchStatus::Cancelled);
-        assert_eq!(snapshot.completed_items, 2);
+        assert_eq!(snapshot.completed_items(), 2);
         assert_eq!(snapshot.items["ep2"].status, ItemStatus::Cancelled);
         assert_eq!(snapshot.items["ep1"].status, ItemStatus::Cancelled);
         let terminal = terminal_for(&sink, job_id);
@@ -1139,8 +1075,7 @@ mod tests {
         assert_eq!(terminal["error"], "scan failed before any stop");
         assert_ne!(done_for(&sink, job_id)["code"], -1);
         assert!(
-            sink.log_batches().concat().contains(&LogLine::new(
-                LogKind::Error,
+            sink.log_batches().concat().contains(&LogLine::error(
                 "ERROR: Pipeline failed: scan failed before any stop"
             )),
             "worker error must reach the job log as an Error line"
@@ -1297,7 +1232,7 @@ mod tests {
 
         let snapshot = job.snapshot().unwrap().unwrap();
         assert_eq!(snapshot.status, BatchStatus::Cancelled);
-        assert_eq!(snapshot.completed_items, 2);
+        assert_eq!(snapshot.completed_items(), 2);
         assert_eq!(terminal_for(&sink, job_id)["cancelled"], true);
         done_for(&sink, job_id);
     }
@@ -1328,8 +1263,7 @@ mod tests {
         assert_eq!(done_for(&sink, job_id)["code"], 1);
         assert_eq!(
             sink.log_batches(),
-            [[LogLine::new(
-                LogKind::Error,
+            [[LogLine::error(
                 "ERROR: Pipeline panicked: bridge worker panicked"
             )]]
         );
@@ -1370,7 +1304,7 @@ mod tests {
 
     #[test]
     fn test_clear_snapshot_ignored_while_job_is_active() {
-        let state = JobState::default();
+        let state = job_state();
         state.occupy(42);
         state.begin_snapshot(42);
         state.clear_snapshot();
@@ -1379,7 +1313,7 @@ mod tests {
 
     #[test]
     fn test_clear_snapshot_drops_the_snapshot_when_no_job_is_active() {
-        let state = JobState::default();
+        let state = job_state();
         state.begin_snapshot(42);
         assert!(state.snapshot().unwrap().is_some());
 
@@ -1389,7 +1323,7 @@ mod tests {
 
     #[test]
     fn test_clear_snapshot_drops_the_snapshot_when_the_slot_is_poisoned() {
-        let state = JobState::default();
+        let state = job_state();
         state.poison_slot();
         state.begin_snapshot(42);
 
@@ -1399,7 +1333,7 @@ mod tests {
 
     #[test]
     fn test_clear_snapshot_holds_the_slot_until_it_has_cleared() {
-        let state = JobState::default();
+        let state = job_state();
         state.begin_snapshot(42);
         let guard = state.hold_snapshot();
 
@@ -1430,7 +1364,7 @@ mod tests {
 
     #[test]
     fn test_wait_for_job_slot_release_waits_for_cleanup() {
-        let state = JobState::default();
+        let state = job_state();
         state.occupy(42);
 
         thread::scope(|scope| {
@@ -1446,7 +1380,7 @@ mod tests {
 
     #[test]
     fn test_wait_for_job_slot_release_times_out_while_owned() {
-        let state = JobState::default();
+        let state = job_state();
         state.occupy(42);
 
         let result = state.wait_until_released(42, Duration::from_millis(10));
@@ -1455,7 +1389,7 @@ mod tests {
 
     #[test]
     fn test_stop_reports_unreleased_slot() {
-        let state = JobState::default();
+        let state = job_state();
         state.occupy(42);
 
         let result = state.stop(None, Duration::from_millis(50));
