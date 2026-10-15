@@ -4,7 +4,8 @@ updates:
   # One grouped PR on purpose: a few build-only actions, validated together by one CI run,
   # are not worth a PR each. Bisect inside the group if a bump breaks CI.
   - package-ecosystem: github-actions
-    directory: /
+    # The composite actions pin actions too.
+    directories: ["/", "/.github/actions/*"]
     schedule:
       interval: weekly
     groups:
