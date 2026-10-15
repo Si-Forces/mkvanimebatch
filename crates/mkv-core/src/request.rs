@@ -101,6 +101,15 @@ pub fn is_valid_bitrate(raw: &str) -> bool {
         && digits.parse::<u64>().is_ok_and(|n| n > 0)
 }
 
+/// Converts a subtitle offset in seconds to the whole milliseconds `default_sub_offset_ms`
+/// takes, rounding half away from zero. `None` when `seconds` is not finite or its
+/// milliseconds do not fit `i64`.
+pub fn seconds_to_ms(seconds: f64) -> Option<i64> {
+    let ms = (seconds * 1000.0).round();
+    // `as` saturates silently, so check the range first; 2^63 itself does not fit.
+    (ms >= i64::MIN as f64 && ms < i64::MAX as f64).then_some(ms as i64)
+}
+
 /// Words a range for a validation error, e.g. `between 1 and 64`.
 fn between<T: Display>(range: &RangeInclusive<T>) -> String {
     format!("between {} and {}", range.start(), range.end())
@@ -887,6 +896,35 @@ mod tests {
             resolved(&req).unwrap_err(),
             "Encoder complexity must be between 0 and 10, got 11"
         );
+    }
+
+    #[test]
+    fn test_seconds_to_ms_rounds_half_away_from_zero_within_i64() {
+        for (sec, expected) in [
+            (0.5, 500),
+            (-1.5, -1500),
+            (0.0, 0),
+            (-0.0, 0),
+            // Half a millisecond rounds away from zero, as the desktop controller does.
+            (0.0005, 1),
+            (-0.0005, -1),
+            (0.0004, 0),
+            (1.2344, 1234),
+        ] {
+            assert_eq!(seconds_to_ms(sec), Some(expected), "{sec}");
+        }
+
+        // The last value is exactly 2^63 ms, one past `i64::MAX`.
+        for bad in [
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+            1e300,
+            -1e300,
+            9_223_372_036_854_775.807,
+        ] {
+            assert_eq!(seconds_to_ms(bad), None, "{bad}");
+        }
     }
 
     /// The wire type is the only check: whole milliseconds deserialize, a fraction does

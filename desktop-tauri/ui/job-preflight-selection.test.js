@@ -166,7 +166,7 @@ test("Start preserves selected order across real rescans and rejects vanished ID
   const listeners = new Map();
   let replacement = manifest(one, two, three, four, five);
   const runtime = makeRuntime(tracker, {
-    appendLog(_el, text) { logs.push(text); },
+    appendLog(_el, line) { logs.push(line.text); },
     async scanInputDirectory(path, mode, { force }) {
       assert.equal(path, "/anime/series");
       assert.equal(mode, "remux");
@@ -390,7 +390,7 @@ test("start rejects vanished selection when input is an alias of the scanned can
   const requests = [];
   const tracker = scannedTracker("/real/show", ["ep1.mkv", "ep2.mkv"], ["ep1.mkv", "ep2.mkv"]);
   const runtime = makeRuntime(tracker, {
-    appendLog(_el, text) { logs.push(text); },
+    appendLog(_el, line) { logs.push(line.text); },
     scanInputDirectory: async () => {
       tracker.lastManifest = manifest("ep1.mkv");
       tracker.getSelectedOrderedItemIds = () => ["ep1.mkv"];
@@ -414,7 +414,7 @@ test("start rejects selections that vanished during an earlier user rescan", asy
     state: { totalCount: 1, vanishedSelectedIds: ["ep2.mkv"] },
   });
   const runtime = makeRuntime(tracker, {
-    appendLog(_el, text) { logs.push(text); },
+    appendLog(_el, line) { logs.push(line.text); },
     invoke: recordRunJob(requests, 101),
   });
 
@@ -433,7 +433,7 @@ test("start rejects when a vanished selection reappears during the forced rescan
     state: { totalCount: 1, vanishedSelectedIds: ["ep2.mkv"] },
   });
   const runtime = makeRuntime(tracker, {
-    appendLog(_el, text) { logs.push(text); },
+    appendLog(_el, line) { logs.push(line.text); },
     scanInputDirectory: async () => {
       tracker.lastManifest = manifest("ep1.mkv", "ep2.mkv");
       tracker.state = { totalCount: 2, vanishedSelectedIds: [] };

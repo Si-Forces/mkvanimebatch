@@ -1,6 +1,6 @@
 # 0016. Toolkit-Agnostic Desktop Core Owns UI State
 
-> **Status**: Accepted (not yet implemented)
+> **Status**: Accepted (not yet implemented; amended 2026-10-15)
 > **Date**: 2026-10-15
 > **Context**: Desktop Application Context
 > **Amends**: ADR-0001, ADR-0007, ADR-0008, ADR-0009, ADR-0011, ADR-0013
@@ -61,3 +61,10 @@ The toolkit spike starts after S1, so it can render real queue state.
 - The glossary's Queue Tracker, Job Coordinator, Presentation Heartbeat and Job Snapshot now describe Desktop Core components, not frontend ones.
 - Several known JS-only bugs go away because the behaviour they live in goes away: `release`/`metadata` lost on restore, and unguarded non-finite progress.
 - The Log Channel type change touches `mkv-core`, the CLI and the desktop.
+
+## Amendment — 2026-10-15 (no `[ERR]` rendering)
+
+- **Replaces decision 6's "`[ERR]` prefix becomes CLI and copy-log rendering".** No kind adds a prefix when a line is rendered as text: the CLI and the desktop's Copy write each line's text unchanged. The kind replaces `[ERR]`, which existed only so `classifyLine` could colour the bridge's lines red.
+- **Error lines say `ERROR:` in their text**, as the engine's `  ERROR: ...` lines already do. The Engine Bridge writes `ERROR: Pipeline failed: {error}` and `ERROR: Pipeline panicked: {message}`, with no indent since they are not nested under a `Processing:` line, and the webview's own error lines read `ERROR: <message>`. All of them stay `error` lines.
+- **One exception to the 1:1 looks.** `   -> WARNING: Failed to promote {label} to ...` (`extract.rs` `promote_optional`) is a `warning`, like `FontPromotion::Failed`, because a failed optional promotion does not fail the file. `classifyLine` coloured it red ("failed" matched first); it is now yellow and no longer counts toward the error badge.
+- **Why.** Rendering `[ERR] ` before every `error` line doubled the marker on engine lines (`[ERR]   ERROR: Remux failed ...`). With no prefix, the CLI prints every line byte for byte as it did before the Log Channel was typed.

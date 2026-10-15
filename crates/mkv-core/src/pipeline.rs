@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 pub use crate::domain::ItemOutcome;
+pub use crate::log_line::{LogKind, LogLine};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Semaphore};
 pub use tokio_util::sync::CancellationToken;
@@ -116,8 +117,8 @@ pub fn create_event_channel(buffer_size: usize) -> (EventSender, EventReceiver) 
     mpsc::channel(buffer_size)
 }
 
-pub type LogSender = mpsc::Sender<String>;
-pub type LogReceiver = mpsc::Receiver<String>;
+pub type LogSender = mpsc::Sender<LogLine>;
+pub type LogReceiver = mpsc::Receiver<LogLine>;
 
 pub fn create_log_channel(buffer_size: usize) -> (LogSender, LogReceiver) {
     mpsc::channel(buffer_size)
@@ -200,7 +201,7 @@ pub struct PipelineSummary {
     pub skipped: usize,
     pub errors: usize,
     pub cancelled: bool,
-    pub log: Vec<String>,
+    pub log: Vec<LogLine>,
 }
 
 fn cancelled_item(item: BatchItemInfo, duration_sec: Option<f64>) -> JobEvent {
@@ -502,13 +503,13 @@ impl BatchPipeline {
         self
     }
 
-    async fn log(&self, msg: impl Into<String>) {
+    async fn log(&self, line: LogLine) {
         if let Some(tx) = &self.log_sender {
-            let _ = tx.send(msg.into()).await;
+            let _ = tx.send(line).await;
         }
     }
 
-    async fn log_batch(&self, msgs: &[String]) {
+    async fn log_batch(&self, msgs: &[LogLine]) {
         if let Some(tx) = &self.log_sender {
             for msg in msgs {
                 let _ = tx.send(msg.clone()).await;
@@ -601,11 +602,14 @@ impl BatchPipeline {
         .await;
 
         if files.is_empty() {
-            let msg = format!(
-                "No MKV files found in '{}'",
-                self.config.input_dir.display()
+            let msg = LogLine::new(
+                LogKind::Note,
+                format!(
+                    "No MKV files found in '{}'",
+                    self.config.input_dir.display()
+                ),
             );
-            self.log(&msg).await;
+            self.log(msg.clone()).await;
             summary.log.push(msg);
             self.emit_batch_complete(true, false).await;
         }
@@ -628,7 +632,7 @@ impl BatchPipeline {
         mut start: impl FnMut(T, ProgressSink) -> F,
         failure_label: &str,
     ) where
-        F: Future<Output = Result<Vec<String>, ItemFailure>> + Send + 'static,
+        F: Future<Output = Result<Vec<LogLine>, ItemFailure>> + Send + 'static,
     {
         let max_workers = self.max_workers();
         let mut pending = items.into_iter().peekable();
@@ -722,8 +726,11 @@ impl BatchPipeline {
                 Err(ItemFailure::Failed(err)) => {
                     summary.errors += 1;
                     let BatchItemInfo { id, file } = item;
-                    let msg = format!("  ERROR: {failure_label} failed for '{file}': {err}");
-                    self.log(&msg).await;
+                    let msg = LogLine::new(
+                        LogKind::Error,
+                        format!("  ERROR: {failure_label} failed for '{file}': {err}"),
+                    );
+                    self.log(msg.clone()).await;
                     summary.log.push(msg);
                     self.emit(JobEvent::ItemComplete {
                         version: EVENT_VERSION,
@@ -772,11 +779,14 @@ impl BatchPipeline {
                     break;
                 }
 
-                let msg = format!(
-                    "[DRY-RUN] Would extract assets from: {}",
-                    file.path.display()
+                let msg = LogLine::new(
+                    LogKind::Note,
+                    format!(
+                        "[DRY-RUN] Would extract assets from: {}",
+                        file.path.display()
+                    ),
                 );
-                self.log(&msg).await;
+                self.log(msg.clone()).await;
                 summary.log.push(msg);
                 self.emit(planned_item(BatchItemInfo::new(
                     file,
@@ -887,13 +897,15 @@ impl BatchPipeline {
         files: &[ParsedFile],
         failed_idx: usize,
         err: String,
-        mut abort_log: Vec<String>,
+        mut abort_log: Vec<LogLine>,
     ) -> PipelineSummary {
-        let msg = format!(
-            "  ERROR: Remux planning failed for '{}': {err}",
-            files[failed_idx].name
-        );
-        abort_log.push(msg);
+        abort_log.push(LogLine::new(
+            LogKind::Error,
+            format!(
+                "  ERROR: Remux planning failed for '{}': {err}",
+                files[failed_idx].name
+            ),
+        ));
         self.log_batch(&abort_log).await;
 
         let cancelled = self.cancel_token.is_cancelled();
@@ -993,7 +1005,7 @@ impl BatchPipeline {
         let mut remux_work: Vec<(BatchItemInfo, RemuxWork)> = Vec::new();
         let mut planning_outcomes = Vec::new();
         let mut planning_error: Option<(usize, String)> = None;
-        let mut abort_log: Vec<String> = Vec::new();
+        let mut abort_log: Vec<LogLine> = Vec::new();
 
         let planner = RemuxPlanner::new(
             &self.config.input_dir,
@@ -1019,16 +1031,22 @@ impl BatchPipeline {
                 }
                 RemuxPlan::Skip { reason } => {
                     summary.skipped += 1;
-                    let line = format!("Skipping '{}': {reason}", video_file.name);
+                    let line = LogLine::new(
+                        LogKind::Skipped,
+                        format!("Skipping '{}': {reason}", video_file.name),
+                    );
                     abort_log.push(line.clone());
                     summary.log.push(line);
                     planning_outcomes.push(skipped_item(item, reason));
                 }
                 RemuxPlan::ProbeFailed { message } => {
                     summary.errors += 1;
-                    let line = format!(
-                        "  ERROR: Failed to probe '{}': {message}",
-                        video_file.path.display()
+                    let line = LogLine::new(
+                        LogKind::Error,
+                        format!(
+                            "  ERROR: Failed to probe '{}': {message}",
+                            video_file.path.display()
+                        ),
                     );
                     abort_log.push(line.clone());
                     summary.log.push(line);
@@ -1036,16 +1054,22 @@ impl BatchPipeline {
                 }
                 RemuxPlan::Internal { message } => {
                     summary.errors += 1;
-                    let line = format!("  ERROR: '{}': {message}", video_file.path.display());
+                    let line = LogLine::new(
+                        LogKind::Error,
+                        format!("  ERROR: '{}': {message}", video_file.path.display()),
+                    );
                     abort_log.push(line.clone());
                     summary.log.push(line);
                     planning_outcomes.push(errored_item(item, message));
                 }
                 RemuxPlan::Planned(work) if self.config.dry_run => {
-                    summary.log.push(format!(
-                        "[DRY-RUN] Would remux '{}' -> '{}'",
-                        video_file.name,
-                        work.job.output_file.display()
+                    summary.log.push(LogLine::new(
+                        LogKind::Note,
+                        format!(
+                            "[DRY-RUN] Would remux '{}' -> '{}'",
+                            video_file.name,
+                            work.job.output_file.display()
+                        ),
                     ));
                     summary
                         .log
@@ -1203,7 +1227,9 @@ mod tests {
         let cancel_for_test = cancel_token.clone();
         let (event_sender, mut event_receiver) = create_event_channel(8);
         let (log_sender, mut log_receiver) = create_log_channel(1);
-        log_sender.try_send("barrier".into()).unwrap();
+        log_sender
+            .try_send(LogLine::new(LogKind::Note, "barrier"))
+            .unwrap();
         let pipeline = BatchPipeline::new(
             PipelineConfig {
                 input_dir: PathBuf::from("/anime"),
@@ -1223,12 +1249,16 @@ mod tests {
         });
 
         started_receiver.await.unwrap();
-        assert_eq!(log_receiver.recv().await.as_deref(), Some("barrier"));
+        assert_eq!(
+            log_receiver.recv().await.map(|line| line.text).as_deref(),
+            Some("barrier")
+        );
         cancel_for_test.cancel();
         assert!(log_receiver
             .recv()
             .await
             .unwrap()
+            .text
             .contains("assignment disappeared"));
 
         let summary = settlement.await.unwrap();
@@ -1240,7 +1270,7 @@ mod tests {
         assert!(summary.cancelled);
         assert_eq!(summary.errors, 0);
         assert_eq!(summary.total, 2);
-        assert!(summary.log[0].contains("assignment disappeared"));
+        assert!(summary.log[0].text.contains("assignment disappeared"));
         assert_eq!(events.len(), 3);
         assert!(events[..2].iter().all(|event| matches!(
             event,
@@ -1317,7 +1347,45 @@ mod tests {
             ]
         );
         assert_eq!((summary.completed, summary.errors), (1, 1));
-        assert!(summary.log[0].contains("worker panicked"));
+        assert!(summary.log[0].text.contains("worker panicked"));
+    }
+
+    #[test]
+    fn log_line_serializes_as_its_kind_and_text() {
+        assert_eq!(
+            serde_json::to_value(LogLine::new(LogKind::Succeeded, "done")).unwrap(),
+            serde_json::json!({"kind": "succeeded", "text": "done"})
+        );
+    }
+
+    /// `desktop-tauri/ui/log-classify.js` KIND_CLASS keys on these names.
+    #[test]
+    fn log_kind_serializes_to_the_names_the_console_maps() {
+        let kinds = [
+            LogKind::Error,
+            LogKind::Warning,
+            LogKind::Skipped,
+            LogKind::Succeeded,
+            LogKind::Step,
+            LogKind::Cache,
+            LogKind::Note,
+        ];
+        let names: Vec<_> = kinds
+            .iter()
+            .map(|k| serde_json::to_value(k).unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "error",
+                "warning",
+                "skipped",
+                "succeeded",
+                "step",
+                "cache",
+                "note"
+            ]
+        );
     }
 
     #[test]
@@ -1392,9 +1460,15 @@ mod tests {
         .with_log_sender(log_sender);
         let files = [parsed_file("one.mkv"), parsed_file("two.mkv")];
         let collected = vec![
-            "Skipping 'a.mkv': no episode".to_string(),
-            "  ERROR: Failed to probe '/anime/b.mkv': bad header".to_string(),
-            "  ERROR: '/anime/c.mkv': no prepared Release Directory".to_string(),
+            LogLine::new(LogKind::Skipped, "Skipping 'a.mkv': no episode"),
+            LogLine::new(
+                LogKind::Error,
+                "  ERROR: Failed to probe '/anime/b.mkv': bad header",
+            ),
+            LogLine::new(
+                LogKind::Error,
+                "  ERROR: '/anime/c.mkv': no prepared Release Directory",
+            ),
         ];
         let summary = pipeline
             .settle_planning_failure(
@@ -1406,8 +1480,10 @@ mod tests {
             .await;
 
         let mut expected = collected;
-        expected
-            .push("  ERROR: Remux planning failed for 'two.mkv': assignment disappeared".into());
+        expected.push(LogLine::new(
+            LogKind::Error,
+            "  ERROR: Remux planning failed for 'two.mkv': assignment disappeared",
+        ));
         let mut sent = Vec::new();
         while let Ok(line) = log_receiver.try_recv() {
             sent.push(line);
@@ -1497,7 +1573,7 @@ mod tests {
                 ("Season 2/Show - 03.mkv", "start"),
             ]
         );
-        assert!(summary.log[0].contains("failed for 'Show - 02.mkv'"));
+        assert!(summary.log[0].text.contains("failed for 'Show - 02.mkv'"));
     }
 
     #[test]

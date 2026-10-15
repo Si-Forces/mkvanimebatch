@@ -7,6 +7,7 @@ use common::{ScriptedRunner, Step};
 use mkv_core::domain::{MkvTrack, TrackProperties, SUBPROCESS_TIMEOUT};
 use mkv_core::fonts::FontInfo;
 use mkv_core::media_tool::MediaTool;
+use mkv_core::pipeline::{LogKind, LogLine};
 use mkv_core::remux::{
     build_ffmpeg_args, build_mkvmerge_args, execute_remux_job, select_tracks, PlannedJob,
     RemuxOptions, TrackSelection,
@@ -269,7 +270,7 @@ async fn remux_with(
     selection: &TrackSelection,
     io_semaphore: &tokio::sync::Semaphore,
     runner: &ScriptedRunner,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<LogLine>, String> {
     let video = dir.join("test.mkv");
     std::fs::File::create(&video).unwrap();
     let out = dir.join("out.mkv");
@@ -286,7 +287,7 @@ async fn remux_with(
 }
 
 /// Remuxes a copied-audio source with an uncontended I/O governor.
-async fn remux(dir: &Path, runner: &ScriptedRunner) -> Result<Vec<String>, String> {
+async fn remux(dir: &Path, runner: &ScriptedRunner) -> Result<Vec<LogLine>, String> {
     remux_with(dir, &selection(), &tokio::sync::Semaphore::new(1), runner).await
 }
 
@@ -342,7 +343,7 @@ async fn test_execute_remux_job_logs_warnings_on_exit_code_1() {
     let log = remux(dir.path(), &runner).await.unwrap();
     assert!(
         log.iter()
-            .any(|l| l == "  Warning: QuickTime track parsing"),
+            .any(|l| l == &LogLine::new(LogKind::Warning, "  Warning: QuickTime track parsing")),
         "log did not contain the warning: {log:?}"
     );
     assert_eq!(
@@ -379,11 +380,14 @@ async fn test_execute_remux_job_logs_the_chapter_warning_after_processing() {
     .await
     .unwrap();
 
-    assert_eq!(log[0], "Processing: test.mkv");
-    assert_eq!(log[1], "  Warning: More than one chapter file");
+    assert_eq!(log[0], LogLine::new(LogKind::Step, "Processing: test.mkv"));
+    assert_eq!(
+        log[1],
+        LogLine::new(LogKind::Warning, "  Warning: More than one chapter file")
+    );
     let mkvmerge_warning = log
         .iter()
-        .position(|l| l == "  Warning: QuickTime track parsing")
+        .position(|l| l.text == "  Warning: QuickTime track parsing")
         .unwrap_or_else(|| panic!("{log:?}"));
     assert!(mkvmerge_warning > 1, "{log:?}");
 }

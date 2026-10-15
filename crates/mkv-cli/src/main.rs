@@ -145,7 +145,7 @@ async fn run() -> Result<ExitCode, String> {
         Ok(summary) => {
             if !args.events {
                 for line in summary.log {
-                    println!("{line}");
+                    println!("{}", line.text);
                 }
                 println!(
                     "Finished. Processed {} file(s) ({} completed, {} skipped, {} errors).",
