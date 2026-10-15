@@ -1,7 +1,8 @@
 version: 2
 updates:
   # Workflow actions are pinned to commit SHAs; Dependabot bumps the SHA and its version comment.
-  # dtolnay/rust-toolchain has no releases, so its "# master" pin is bumped by hand.
+  # One grouped PR on purpose: a few build-only actions, validated together by one CI run,
+  # are not worth a PR each. Bisect inside the group if a bump breaks CI.
   - package-ecosystem: github-actions
     directory: /
     schedule:
