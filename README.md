@@ -331,7 +331,7 @@ Design documents:
 
 - [architecture.md](architecture.md): the detailed system description.
 - [CONTEXT-MAP.md](CONTEXT-MAP.md), [crates/mkv-core/CONTEXT.md](crates/mkv-core/CONTEXT.md), and [desktop-tauri/CONTEXT.md](desktop-tauri/CONTEXT.md): the domain vocabulary.
-- [docs/adr/](docs/adr/): why the system is built the way it is (ADR-0001 to ADR-0015).
+- [docs/adr/](docs/adr/): why the system is built the way it is (ADR-0001 to ADR-0016).
 
 ---
 

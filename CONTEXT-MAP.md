@@ -3,7 +3,7 @@
 ## Contexts
 
 - [Media Engine](./crates/mkv-core/CONTEXT.md) — parses, indexes, scores, probes, and executes anime fansub batch processing
-- [Desktop Application](./desktop-tauri/CONTEXT.md) — manages GUI state, queue progression, user configuration, and desktop presentation
+- [Desktop Application](./desktop-tauri/CONTEXT.md) — manages GUI state, queue progression, user configuration, and desktop presentation; its Desktop Core is the planned toolkit-agnostic `crates/mkv-desktop-core`, and `desktop-tauri` is one view over it ([ADR-0016](./docs/adr/0016-toolkit-agnostic-desktop-core.md))
 
 ## Relationships
 
