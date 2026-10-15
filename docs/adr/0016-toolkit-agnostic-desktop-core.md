@@ -3,7 +3,7 @@
 > **Status**: Accepted (not yet implemented)
 > **Date**: 2026-10-15
 > **Context**: Desktop Application Context
-> **Amends**: ADR-0007, ADR-0008, ADR-0009
+> **Amends**: ADR-0001, ADR-0007, ADR-0008, ADR-0009, ADR-0011, ADR-0013
 
 ## Context
 
@@ -50,7 +50,13 @@ The toolkit spike starts after S1, so it can render real queue state.
 
 ## Consequences
 
-- This amends the reload-restore path of ADR-0008 (decision 4, `get_job_snapshot()` restoring queue presentation across UI reloads) and ADR-0009 (2026-09-28 amendment, a webview reload restoring the Job Snapshot from `get_job_snapshot()`): a reload calls `get_state` instead. It also amends ADR-0007's command surface (`run_job` in decision 1 and the 2026-10-04 amendment, `stop_job` in the 2026-10-04 amendment): running and stopping become Intents sent through `dispatch`. The engine stays in-process.
+- The engine stays in-process. It amends these ADRs:
+  - **ADR-0001**: decision 4 (the reducer in the frontend `QueueTracker`), the Inspection Reuse addendum (rebuilding Queue Tracker state from a reused manifest) and the 2026-09-28 amendment (the Queue Tracker rejecting a manifest whose `version` is not 2): all now live in the Desktop Core.
+  - **ADR-0007**: its command surface (`run_job` in decision 1 and the 2026-10-04 amendment, `stop_job` in the 2026-10-04 amendment): running and stopping become Intents sent through `dispatch`.
+  - **ADR-0008**: decision 4 (`get_job_snapshot()` restoring queue presentation across UI reloads): a reload calls `get_state` instead.
+  - **ADR-0009**: decisions 2 and 4 and the 2026-09-28 and 2026-10-11 amendments: the Presentation Heartbeat (formerly in the JS `QueueTracker`), its batch clock redraw, the adaptive duration formatting and the reducer's `item_start` duration fallback move into the Desktop Core, and a webview reload calls `get_state` instead of restoring the Job Snapshot from `get_job_snapshot()`.
+  - **ADR-0011**: decision 4: queue selection and reordering in the JS `QueueTracker` become Desktop Core state and Intents.
+  - **ADR-0013**: Amendment 11 (2026-10-06): after a webview reload the chips show the Effective Settings from `get_state`, not from a restored Job Snapshot's `effective_settings`, and the frontend tests that cover them move to Rust.
 - The toolkit ADR (the spike winner, and packaging for deb/rpm/AppImage/msi) follows the spike, per #102, and supersedes ADR-0007 and ADR-0015.
 - The glossary's Queue Tracker, Job Coordinator, Presentation Heartbeat and Job Snapshot now describe Desktop Core components, not frontend ones.
 - Several known JS-only bugs go away because the behaviour they live in goes away: `release`/`metadata` lost on restore, and unguarded non-finite progress.
