@@ -509,10 +509,10 @@ impl BatchPipeline {
         }
     }
 
-    async fn log_batch(&self, msgs: &[LogLine]) {
+    async fn log_batch(&self, lines: &[LogLine]) {
         if let Some(tx) = &self.log_sender {
-            for msg in msgs {
-                let _ = tx.send(msg.clone()).await;
+            for line in lines {
+                let _ = tx.send(line.clone()).await;
             }
         }
     }
@@ -602,13 +602,10 @@ impl BatchPipeline {
         .await;
 
         if files.is_empty() {
-            let msg = LogLine::new(
-                LogKind::Note,
-                format!(
-                    "No MKV files found in '{}'",
-                    self.config.input_dir.display()
-                ),
-            );
+            let msg = LogLine::note(format!(
+                "No MKV files found in '{}'",
+                self.config.input_dir.display()
+            ));
             self.log(msg.clone()).await;
             summary.log.push(msg);
             self.emit_batch_complete(true, false).await;
@@ -726,10 +723,9 @@ impl BatchPipeline {
                 Err(ItemFailure::Failed(err)) => {
                     summary.errors += 1;
                     let BatchItemInfo { id, file } = item;
-                    let msg = LogLine::new(
-                        LogKind::Error,
-                        format!("  ERROR: {failure_label} failed for '{file}': {err}"),
-                    );
+                    let msg = LogLine::error(format!(
+                        "  ERROR: {failure_label} failed for '{file}': {err}"
+                    ));
                     self.log(msg.clone()).await;
                     summary.log.push(msg);
                     self.emit(JobEvent::ItemComplete {
@@ -779,13 +775,10 @@ impl BatchPipeline {
                     break;
                 }
 
-                let msg = LogLine::new(
-                    LogKind::Note,
-                    format!(
-                        "[DRY-RUN] Would extract assets from: {}",
-                        file.path.display()
-                    ),
-                );
+                let msg = LogLine::note(format!(
+                    "[DRY-RUN] Would extract assets from: {}",
+                    file.path.display()
+                ));
                 self.log(msg.clone()).await;
                 summary.log.push(msg);
                 self.emit(planned_item(BatchItemInfo::new(
@@ -899,13 +892,10 @@ impl BatchPipeline {
         err: String,
         mut abort_log: Vec<LogLine>,
     ) -> PipelineSummary {
-        abort_log.push(LogLine::new(
-            LogKind::Error,
-            format!(
-                "  ERROR: Remux planning failed for '{}': {err}",
-                files[failed_idx].name
-            ),
-        ));
+        abort_log.push(LogLine::error(format!(
+            "  ERROR: Remux planning failed for '{}': {err}",
+            files[failed_idx].name
+        )));
         self.log_batch(&abort_log).await;
 
         let cancelled = self.cancel_token.is_cancelled();
@@ -1041,36 +1031,30 @@ impl BatchPipeline {
                 }
                 RemuxPlan::ProbeFailed { message } => {
                     summary.errors += 1;
-                    let line = LogLine::new(
-                        LogKind::Error,
-                        format!(
-                            "  ERROR: Failed to probe '{}': {message}",
-                            video_file.path.display()
-                        ),
-                    );
+                    let line = LogLine::error(format!(
+                        "  ERROR: Failed to probe '{}': {message}",
+                        video_file.path.display()
+                    ));
                     abort_log.push(line.clone());
                     summary.log.push(line);
                     planning_outcomes.push(errored_item(item, message));
                 }
                 RemuxPlan::Internal { message } => {
                     summary.errors += 1;
-                    let line = LogLine::new(
-                        LogKind::Error,
-                        format!("  ERROR: '{}': {message}", video_file.path.display()),
-                    );
+                    let line = LogLine::error(format!(
+                        "  ERROR: '{}': {message}",
+                        video_file.path.display()
+                    ));
                     abort_log.push(line.clone());
                     summary.log.push(line);
                     planning_outcomes.push(errored_item(item, message));
                 }
                 RemuxPlan::Planned(work) if self.config.dry_run => {
-                    summary.log.push(LogLine::new(
-                        LogKind::Note,
-                        format!(
-                            "[DRY-RUN] Would remux '{}' -> '{}'",
-                            video_file.name,
-                            work.job.output_file.display()
-                        ),
-                    ));
+                    summary.log.push(LogLine::note(format!(
+                        "[DRY-RUN] Would remux '{}' -> '{}'",
+                        video_file.name,
+                        work.job.output_file.display()
+                    )));
                     summary
                         .log
                         .extend(work.job.chapter_warning.as_deref().map(warning_log_line));
@@ -1227,9 +1211,7 @@ mod tests {
         let cancel_for_test = cancel_token.clone();
         let (event_sender, mut event_receiver) = create_event_channel(8);
         let (log_sender, mut log_receiver) = create_log_channel(1);
-        log_sender
-            .try_send(LogLine::new(LogKind::Note, "barrier"))
-            .unwrap();
+        log_sender.try_send(LogLine::note("barrier")).unwrap();
         let pipeline = BatchPipeline::new(
             PipelineConfig {
                 input_dir: PathBuf::from("/anime"),
@@ -1461,14 +1443,8 @@ mod tests {
         let files = [parsed_file("one.mkv"), parsed_file("two.mkv")];
         let collected = vec![
             LogLine::new(LogKind::Skipped, "Skipping 'a.mkv': no episode"),
-            LogLine::new(
-                LogKind::Error,
-                "  ERROR: Failed to probe '/anime/b.mkv': bad header",
-            ),
-            LogLine::new(
-                LogKind::Error,
-                "  ERROR: '/anime/c.mkv': no prepared Release Directory",
-            ),
+            LogLine::error("  ERROR: Failed to probe '/anime/b.mkv': bad header"),
+            LogLine::error("  ERROR: '/anime/c.mkv': no prepared Release Directory"),
         ];
         let summary = pipeline
             .settle_planning_failure(
@@ -1480,8 +1456,7 @@ mod tests {
             .await;
 
         let mut expected = collected;
-        expected.push(LogLine::new(
-            LogKind::Error,
+        expected.push(LogLine::error(
             "  ERROR: Remux planning failed for 'two.mkv': assignment disappeared",
         ));
         let mut sent = Vec::new();

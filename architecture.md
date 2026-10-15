@@ -31,7 +31,7 @@ flowchart TD
         UI["Plain JS / CSS UI\n(app.js)"]
         QT["Queue Tracker\n(queue-state.js / queue-view.js)"]
         JC["Job Controller & Coordinators\n(job-controller.js / job-coordinator.js / inspection-coordinator.js / directory-scan.js)"]
-        EB["Engine Bridge\n(desktop-tauri/src-tauri)"]
+        EB["Engine Bridge\n(crates/mkv-desktop-core, desktop-tauri/src-tauri)"]
         TS["System Telemetry\n(sysinfo)"]
     end
 
@@ -104,7 +104,7 @@ The Cargo workspace shares one version and edition 2021:
 
 ```
 mkvanimebatch/
-├── Cargo.toml                       # Workspace root manifest (crates/mkv-core, crates/mkv-cli, desktop-tauri/src-tauri)
+├── Cargo.toml                       # Workspace root manifest (crates/mkv-core, crates/mkv-cli, crates/mkv-desktop-core, desktop-tauri/src-tauri)
 ├── CONTEXT-MAP.md                   # Context boundaries and relationships
 ├── AGENTS.md                        # Agent workflow rules, CI gate, agent skills
 ├── README.md                        # User guide and CLI/GUI reference
@@ -136,12 +136,20 @@ mkvanimebatch/
 │   │   │   └── pipeline.rs          # BatchPipeline, JobEvent and log channels, tokio JoinSet scheduling
 │   │   ├── benches/                 # bench_pipeline.rs (BatchRequest::resolve throughput, warm-cache remux/extract dry runs); bench_real_media.rs (cold-cache remux of a real corpus across worker counts at io_jobs = 2, local only; CI runs only its self-check)
 │   │   └── tests/                   # Integration suites (test_assets, test_cross_regex, test_domain, test_extract, test_fonts, test_media_tool, test_pipeline, test_pipeline_assignments, test_pipeline_font_memo, test_real_remux, test_remux, test_scan, test_season_matching); common/ holds ScriptedRunner and shared fixtures
-│   └── mkv-cli/                     # CLI binary
-│       ├── Cargo.toml
-│       ├── src/
-│       │   ├── args.rs              # Argument parsing, executable-name mode default, selected-item normalization, help text
-│       │   └── main.rs              # --plan, --events, --clear-cache, signal handling, exit codes
-│       └── tests/                   # test_diagnostics: the stderr diagnostics subscriber
+│   ├── mkv-cli/                     # CLI binary
+│   │   ├── Cargo.toml
+│   │   ├── src/
+│   │   │   ├── args.rs              # Argument parsing, executable-name mode default, selected-item normalization, help text
+│   │   │   └── main.rs              # --plan, --events, --clear-cache, signal handling, exit codes
+│   │   └── tests/                   # test_diagnostics: the stderr diagnostics subscriber
+│   └── mkv-desktop-core/            # Desktop Core (ADR-0016): the Engine Bridge, with no UI toolkit dependency
+│       ├── Cargo.toml               # `test-support` feature exports the test helpers to the Tauri adapter's tests
+│       └── src/
+│           ├── lib.rs               # Module declarations
+│           ├── control.rs           # Session inspect cache (InspectCacheState), resolve_canonical, launch (run_job's logic), ScanState, job and scan teardown, shutdown
+│           ├── job.rs               # JobState (Job Slot, supervisor, two-phase stop, start gate) on the adapter's tokio Handle, JobSink seam, display_canonical_path
+│           ├── snapshot.rs          # Job Snapshot types and SnapshotStore: event reduction and Item Settlement
+│           └── telemetry.rs         # TelemetryState: sysinfo CPU, RAM, and engine process write-rate sampling
 └── desktop-tauri/                   # Desktop app (Tauri v2 + webview)
     ├── CONTEXT.md                   # Desktop Application bounded context
     ├── src-tauri/
@@ -154,12 +162,11 @@ mkvanimebatch/
     │   └── src/
     │       ├── lib.rs               # Tauri builder, command registration, exit handling, Linux environment defaults
     │       ├── main.rs              # Binary entry point
-    │       ├── commands.rs          # inspect_directory, canonical_directory, resolve_batch_request, run_job (`launch`), clear_cache, pickers, presets, default settings, get_job_snapshot
+    │       ├── commands.rs          # inspect_directory, canonical_directory, resolve_batch_request, run_job, clear_cache, pickers, presets, default settings, get_job_snapshot
     │       ├── diagnostics.rs       # Engine Diagnostics subscriber: log file + stderr (ADR-0007)
-    │       ├── job.rs               # JobState (Job Slot, supervisor, two-phase stop, start gate), JobSink seam and its Tauri adapter
-    │       ├── snapshot.rs          # Job Snapshot types and SnapshotStore: event reduction and Item Settlement
-    │       ├── process.rs           # ScanState, job and scan teardown, shutdown, close_window
-    │       ├── telemetry.rs         # sysinfo CPU, RAM, and engine process write-rate sampling
+    │       ├── sink.rs              # WebviewSink: the AppHandle JobSink that emits job-event, job-log and job-done
+    │       ├── process.rs           # stop_job, close_window, run_teardown (the core's teardown on the blocking pool)
+    │       ├── telemetry.rs         # get_system_telemetry, reading the core's TelemetryState
     │       └── window.rs            # Frameless window controls, drag/resize, native window theme
     └── ui/                          # Webview frontend (plain ES modules and CSS)
         ├── index.html               # Application shell: sidebar, episode lists, inspector, bottom bar, log drawer, settings sheet, confirm dialog
@@ -229,7 +236,7 @@ flowchart TD
    - State is guarded by a `parking_lot::Mutex`.
    - Stored at `inspect_cache.json` under `$LOCALAPPDATA/mkvanimebatch` when `LOCALAPPDATA` is set, else `$HOME/.cache/mkvanimebatch`, else `./.cache/mkvanimebatch`. Writes go to a `NamedTempFile` that is persisted over the cache file. `save()` writes immediately; `save_shared()` skips the write if the previous one was under 500 ms ago.
    - Loaded with one `fs::read` and `serde_json::from_slice` when an enabled instance is built; never re-read after that.
-   - **Lifetime**: the desktop app keeps one instance per app session (`InspectCacheState` in `commands.rs`, a `tokio::sync::OnceCell`). The first Inspect or Run that wants a cache loads it on the blocking pool, and every later Inspect and Run shares it (`run_job` sets it as `PipelineConfig.cache`), so the file is read once per session. A `noCache` request never loads it. The CLI builds one only for `--plan` without `--no-cache`; a batch run's pipeline builds its own unless `no_cache` is set. The path memo (canonical key per spelling) lives as long as the instance; a retargeted symlink can leave a stale memo entry. The size/mtime check turns it into a re-probe, unless the new target's file has the same size and mtime as the old one, in which case the old target's metadata is served.
+   - **Lifetime**: the desktop app keeps one instance per app session (`InspectCacheState` in `mkv-desktop-core`'s `control.rs`, a `tokio::sync::OnceCell`). The first Inspect or Run that wants a cache loads it on the blocking pool, and every later Inspect and Run shares it (`run_job` sets it as `PipelineConfig.cache`), so the file is read once per session. A `noCache` request never loads it. The CLI builds one only for `--plan` without `--no-cache`; a batch run's pipeline builds its own unless `no_cache` is set. The path memo (canonical key per spelling) lives as long as the instance; a retargeted symlink can leave a stale memo entry. The size/mtime check turns it into a re-probe, unless the new target's file has the same size and mtime as the old one, in which case the old target's metadata is served.
    - **External writers**: an instance does not see entries written by another process after it loaded (the CLI, a second app instance), and its next save overwrites them. The cost is a re-probe.
    - **Pruning**: after a completed preflight inspection, `generate_inspection_manifest` drops the entries keyed under the canonical input directory whose file the scan did not discover (`prune_undiscovered`), then saves. Entries outside the input directory are untouched. A cancelled inspection prunes nothing, and the pipeline never prunes: its file list is filtered by `selected_items`. Output and font directories are never discovered, so inspecting their parent prunes their entries. Pruning trusts the scan: anything the scan skips (an unreadable directory, the input directory included, an entry it cannot stat, or a non-UTF-8 name) counts as not discovered, so its entries are dropped. Desktop Runs are covered by their forced Inspect; the CLI prunes on `--plan`.
    - **Clearing**: `clear()` empties the instance and deletes the file, and discards a save in flight so it cannot restore the cleared entries. The desktop `clear_cache` clears the session instance when it is loaded; otherwise it deletes the file unparsed and starts the session from an empty instance. It is allowed during a running job; later puts persist. `--clear-cache` deletes the file without parsing it.
@@ -475,13 +482,19 @@ flowchart LR
         UITel["telemetry.js\nPolling"]
     end
 
-    subgraph RustBridge["Engine Bridge (src-tauri/src/)"]
+    subgraph TauriAdapter["Tauri Adapter (desktop-tauri/src-tauri/src)"]
         Cmds["commands.rs\nTauri Commands"]
+        Proc["process.rs\nstop_job, close_window, Teardown"]
+        TelCmd["telemetry.rs\nget_system_telemetry"]
+        Sink["sink.rs\nAppHandle JobSink"]
+        Win["window.rs\nFrameless Window"]
+    end
+
+    subgraph DesktopCore["Engine Bridge (crates/mkv-desktop-core/src)"]
+        Ctrl["control.rs\nlaunch, ScanState, Stop & Shutdown"]
         Job["job.rs\nJobState, Job Supervisor, JobSink"]
         Snap["snapshot.rs\nJob Snapshot"]
-        Proc["process.rs\nScanState, Stop & Shutdown"]
         Telem["telemetry.rs\nsysinfo Sampling"]
-        Win["window.rs\nFrameless Window"]
     end
 
     subgraph CoreEngine["Media Engine (crates/mkv-core)"]
@@ -504,41 +517,42 @@ flowchart LR
     UIJob -->|preflight scan| UIScan
     UIJob -->|run_job BatchRequest| Cmds
     UIJob -->|stop_job| Proc
-    UITel -->|get_system_telemetry| Telem
+    UITel -->|get_system_telemetry| TelCmd
     UIApp -->|window commands| Win
 
-    Cmds --> Proc
-    Cmds --> Job
-    Proc --> Job
+    Cmds --> Ctrl
+    Proc --> Ctrl
+    TelCmd --> Telem
+    Ctrl --> Job
     Job --> Snap
     Cmds -->|async .await| CoreScan
-    Job -->|async_runtime::spawn| CorePipe
+    Job -->|tokio Handle::spawn| CorePipe
 
     CorePipe -->|JobEvent mpsc| Job
     CorePipe -->|Log line mpsc| Job
-    Job -->|JobSink: emit job-event / job-done| UIJob
-    Job -->|JobSink: emit job-log| UIJob
+    Job -->|JobSink| Sink
+    Sink -->|emit job-event / job-log / job-done| UIJob
     UIJob --> UIView
     UIView --> UIQueue
 ```
 
-### 5.1 In-Process Engine Bridge (`commands.rs`, `job.rs`, `snapshot.rs`, `process.rs`)
+### 5.1 In-Process Engine Bridge (`mkv-desktop-core`, `commands.rs`, `process.rs`)
 
-The engine runs inside the desktop process (ADR-0007, ADR-0008). `commands.rs` keeps the Tauri commands thin. `job.rs` is the active-job module: `JobState` owns the Job Slot, the supervisor, the two-phase stop of the job, and the gate that refuses starts once shutdown begins. `snapshot.rs` owns the Job Snapshot. `process.rs` owns the directory-scan registry and the teardown that stops the job and the scan together. The supervisor reports through a `JobSink` seam (`event`, `logs`, `done`): the `AppHandle` adapter emits the three events below, and a test records them, so a job runs without a Tauri app. Registered Tauri commands: `inspect_directory`, `canonical_directory`, `resolve_batch_request`, `run_job`, `stop_job`, `clear_cache`, `pick_directory`, `pick_subtitle_file`, `get_preset_profiles`, `get_default_settings`, `get_job_snapshot`, `get_system_telemetry`, `close_window`, and the window controls `minimize_window`, `toggle_maximize`, `is_maximized`, `start_drag`, `start_resize`, `set_window_theme`. Events emitted to the webview: `job-event` (a `JobEvent` plus `mode` and `job_id`), `job-log` (a batch of log lines, each `{kind, text}`), `job-done` (`{mode, job_id, code}`, code `0` completed, `-1` cancelled, `1` otherwise), and `cleanup-error`.
+The engine runs inside the desktop process (ADR-0007, ADR-0008). The bridge itself lives in `crates/mkv-desktop-core`, which depends on no UI toolkit (ADR-0016); `desktop-tauri/src-tauri` keeps only the thin Tauri commands (`commands.rs`, `process.rs`, `telemetry.rs`) and the `AppHandle` sink (`sink.rs`). In the core, `job.rs` is the active-job module: `JobState` owns the Job Slot, the supervisor, the two-phase stop of the job, and the gate that refuses starts once shutdown begins; its tasks run on the tokio `Handle` the adapter passes to `JobState::new` (Tauri's own runtime). `snapshot.rs` owns the Job Snapshot. `control.rs` owns `run_job`'s logic (`launch`), the session inspect cache, the directory-scan registry, and the teardown that stops the job and the scan together. The supervisor reports through a `JobSink` seam (`event`, `logs`, `done`): the adapter's `WebviewSink` emits the three events below, and a test records them, so a job runs without a Tauri app. Registered Tauri commands: `inspect_directory`, `canonical_directory`, `resolve_batch_request`, `run_job`, `stop_job`, `clear_cache`, `pick_directory`, `pick_subtitle_file`, `get_preset_profiles`, `get_default_settings`, `get_job_snapshot`, `get_system_telemetry`, `close_window`, and the window controls `minimize_window`, `toggle_maximize`, `is_maximized`, `start_drag`, `start_resize`, `set_window_theme`. Events emitted to the webview: `job-event` (a `JobEvent` plus `mode` and `job_id`), `job-log` (a batch of log lines, each `{kind, text}`), `job-done` (`{mode, job_id, code}`, code `0` completed, `-1` cancelled, `1` otherwise), and `cleanup-error`.
 
 1. **In-memory channels**: the engine sends `JobEvent`s and log lines over Tokio mpsc channels. A log line is a `LogLine`: its `LogKind` (`error`, `warning`, `skipped`, `succeeded`, `step`, `cache` or `note`, the plain default), chosen where the line is written and deciding how the line is shown, and its text, which rendering leaves unchanged. Error lines say `ERROR:` in their own text. The supervisor forwards log lines to the sink in batches of up to 25 lines or every 25 ms, and writes its own `error` line when the pipeline task fails (`ERROR: Pipeline failed: …`) or panics (`ERROR: Pipeline panicked: …`).
 2. **Job slot & panic isolation**:
    - `JobState` holds the Job Slot, which holds at most one job; `run_job` fails while a job is running or stopping, and after shutdown has begun. Only the job's supervisor releases the slot, after `job-done`.
    - `resolve_batch_request` runs the same `resolve_canonical` and returns the request's Effective Settings, or its first validation error, without touching the slot. The webview calls it before the preflight scan, while `selected_items` and `assignments` are still unset.
-   - `run_job` resolves the request (`resolve_canonical`: canonicalize `input_dir`, then `BatchRequest::resolve`), then hands the pipeline future to `JobState::start`, which reserves the slot, begins the Job Snapshot, and spawns the pipeline with `tauri::async_runtime::spawn` and a supervisor task. The supervisor holds back the engine's `BatchComplete` until the pipeline future returns, then settles the items the pipeline left open (below), publishes one terminal `job-event` and `job-done`, and releases the slot. A pipeline error or panic caught at the `JoinHandle` becomes a failed terminal event (with `error` or `panic`) instead of crashing the app. This depends on the release profile unwinding on panic; the root `Cargo.toml` must never set `panic = "abort"`.
+   - `run_job` resolves the request (`resolve_canonical`: canonicalize `input_dir`, then `BatchRequest::resolve`), then hands the pipeline future to `JobState::start`, which reserves the slot, begins the Job Snapshot, and spawns the pipeline and a supervisor task on the `JobState`'s tokio runtime. The supervisor holds back the engine's `BatchComplete` until the pipeline future returns, then settles the items the pipeline left open (below), publishes one terminal `job-event` and `job-done`, and releases the slot. A pipeline error or panic caught at the `JoinHandle` becomes a failed terminal event (with `error` or `panic`) instead of crashing the app. This depends on the release profile unwinding on panic; the root `Cargo.toml` must never set `panic = "abort"`.
    - **Item Settlement ([ADR-0008](./docs/adr/0008-typed-engine-bridge-and-track-assignment-model.md#amendment--2026-10-07-item-settlement))**: before it applies the terminal, the supervisor asks `SnapshotStore::settlement_events` for one `ItemComplete` per item of the snapshot that is still queued or processing, in batch order. Each is applied through `SnapshotStore::update` and emitted as a `job-event` with the `mode` and `job_id` of every other event, so the webview and a reloaded snapshot see the same events. A stop settles them as `cancelled` with the reason `Operation cancelled`; otherwise they are `error`s carrying the terminal's `error`, else its `panic` text, else `Batch failed`, or `Protocol error: missing completion event` when the engine reported success with items open. An item that had started reports a `duration_sec` measured from the monotonic `Instant` recorded on its `ItemStart` (not serialized); one that never started has none. The terminal is then applied and emitted as before, and `job-done` keeps its codes; a success terminal that needed settling leaves the snapshot `error`, so its code is `1`.
-3. **Two-phase stop (ADR-0007)** (`JobState::stop` for the job; `stop_job`, and `close_window`/app exit through `process.rs` for every owned job and scan):
+3. **Two-phase stop (ADR-0007)** (`JobState::stop` for the job; `stop_job`, and `close_window`/app exit through `control.rs` for every owned job and scan):
    - **Phase 1 (cooperative)**: cancels the job's `CancellationToken` and waits up to 2 seconds (`STOP_TIMEOUT`) for the supervisor to release the slot.
    - **Phase 2 (abort)**: if the slot is still held, aborts only the pipeline task (`slot.pipeline_abort.abort()`) and waits up to 1 more second. The supervisor survives to publish the cancelled terminal event and `job-done`, then releases the slot.
    - `close_window` and the `ExitRequested` handler first stop new jobs and scans from starting (`begin_shutdown`), then run both stops (`cleanup_owned_processes`). If cleanup fails, starts are allowed again (`cancel_shutdown`) and the error is returned, or emitted as `cleanup-error`. A Close while a Stop is pending is allowed: both cancel the same token and wait on the same slot, and a second abort is a no-op.
    - The waits are synchronous and never run on the main thread. `stop_job` and `close_window` are async commands that hand the teardown to Tokio's blocking pool (`run_teardown`), not to a Tokio worker the supervisor needs; `ExitRequested` runs it on its own thread. The window keeps painting and taking input while it waits. `stop_job` still resolves only after teardown, or with the timeout error.
 4. **`JobSnapshot` projection (ADR-0008, ADR-0009)**:
-   - The supervisor reduces every forwarded `JobEvent`, the settlement `ItemComplete`s included, into an in-memory `JobSnapshot`, held by `SnapshotStore` (status, input directory, item order, per-item status, progress, reason, error, and Item Duration). `BatchComplete` writes no item outcome: no item is open by then, and a success terminal that still finds one open (or an error item) leaves the snapshot `error`.
+   - The supervisor reduces every forwarded `JobEvent`, the settlement `ItemComplete`s included, into an in-memory `JobSnapshot`, held by `SnapshotStore` (status, input directory, item order, per-item status, progress, reason, error, and Item Duration). The reducer drops an event whose `version` is not 1, and any but a `BatchStart` once the batch has ended or when it is another job's; it applies progress only to a processing item, finite and clamped to 0–100, lets `ItemStart` rename the item's file, and stores only the reason an event carries. An `ItemComplete` without `duration_sec` falls back to the time since the item's monotonic start; one that never started has none. `completed_items` is derived from the items' terminal statuses, not counted. `BatchComplete` writes no item outcome: no item is open by then, and a success terminal that still finds one open (or an error item) leaves the snapshot `error`.
    - The snapshot also holds the job's Effective Settings (`effective_settings`). `JobState::start` sets them once, from the config `run_job` resolved, when it begins the snapshot; no event changes them.
    - On startup the webview's Job Coordinator calls `get_job_snapshot()` (§5.3, item 9) and rebuilds the queue from it, so a reload keeps the running or finished batch, its outcomes, its durations, and, for a running job, the settings its worker chips show. Starting a new inspection clears the snapshot unless a job is active.
 5. **Directory Identity** (the canonical form of a directory):
@@ -558,13 +572,13 @@ The engine runs inside the desktop process (ADR-0007, ADR-0008). `commands.rs` k
 
 The desktop installs its own `tracing` subscriber from the Tauri `setup` hook, as soon as `app_log_dir()` resolves (ADR-0007). It has two layers behind one `EnvFilter` (`RUST_LOG`, default `warn`): `mkv-anime-batch.log` in the app log directory (append mode, UTC timestamp, level and module, no ANSI; emptied at startup when over 1 MB, with no rotation), and stderr in the CLI's short format. If the directory or file cannot be created or opened, it logs a warning and uses stderr only (on a packaged Windows build that leaves no output until a later start opens the file); startup never fails. `build_dispatch` takes the log directory and returns the `Dispatch` without installing it globally (when the file cannot be opened, it emits that warning through the new `Dispatch`), so tests scope it with `tracing::dispatcher::with_default`. A packaged Windows build has no console (`windows_subsystem = "windows"`), so there the log file is the only output. An outcome that changes what a run produces goes on the Log Channel, never only here.
 
-### 5.2 System Telemetry (`telemetry.rs`, `telemetry.js`)
+### 5.2 System Telemetry (`mkv-desktop-core` and `src-tauri` `telemetry.rs`, `telemetry.js`)
 
 The webview polls `get_system_telemetry` every second while a job is active and every 30 seconds otherwise, skipping ticks while a request is in flight and pausing while the page is hidden.
 
 1. **Per-poll sampling** (`sysinfo::System`): overall CPU percentage, RAM used/total, and `io_mb_s`, the bytes written since the previous poll by the app process and its direct child `mkvmerge`, `mkvextract`, and `ffmpeg` processes (`is_engine_process`), divided by the time between polls.
 2. **One refresh per poll**: every poll refreshes all processes, requesting only disk usage (name and parent are always populated), and removes dead ones. An exited child therefore leaves the map once reaped instead of having its last write delta counted on every later poll. With no job running there are no children, so only the app's own writes are counted.
-3. **Off the main thread**: `get_system_telemetry` is an async command that runs the poll (`poll`) on Tokio's blocking pool. The `System` is built with CPU and memory only; the process map fills on the first poll.
+3. **Off the main thread**: `get_system_telemetry` is an async command that runs the core's poll (`TelemetryState::sample`) on Tokio's blocking pool. The `System` is built with CPU and memory only; the process map fills on the first poll.
 
 ---
 
@@ -781,7 +795,7 @@ sequenceDiagram
 | [**0004**](docs/adr/0004-resolution-precedence-and-conventions.md) | Resolution Precedence and Conventions | Subtitle precedence ladder (Manual → Same-Directory → Embedded → Ancestor → Fallback), cover ranking rules, fractional episode passthrough. Includes the [2026-09-24 amendment](docs/adr/0004-resolution-precedence-and-conventions.md#amendment--2026-09-24) (embedded-before-ancestor subtitle ordering, cover ranking). | `assets.rs`, `domain.rs` |
 | [**0005**](docs/adr/0005-rust-engine-migration-and-workspace-topology.md) | Rust Media Engine Migration | Root workspace topology split into Media Engine and Desktop contexts. Implemented. | `Cargo.toml`, `CONTEXT-MAP.md` |
 | [**0006**](docs/adr/0006-hybrid-ebml-probing-and-channel-streaming.md) | Hybrid EBML Probing & Channel Streaming | Native EBML parser with `mkvmerge -J` fallback; Tokio mpsc event channels. Implemented. | `ebml.rs`, `scan.rs`, `pipeline.rs` |
-| [**0007**](docs/adr/0007-in-process-engine-bridge.md) | In-Process Engine Bridge | Retired subprocess sidecars; Tauri calls `mkv-core` directly with panic isolation and two-phase stop. Implemented. | `commands.rs`, `job.rs`, `process.rs` |
+| [**0007**](docs/adr/0007-in-process-engine-bridge.md) | In-Process Engine Bridge | Retired subprocess sidecars; Tauri calls `mkv-core` directly with panic isolation and two-phase stop. Implemented. | `commands.rs`, `job.rs`, `control.rs` |
 | [**0008**](docs/adr/0008-typed-engine-bridge-and-track-assignment-model.md) | Typed Engine Bridge & Track Assignments | Typed `BatchRequest`, fail-fast preflight validation, and `JobSnapshot` projection. Its amendments add fail-closed resolution and the two preflight failure points, remove `keep_fonts`, replace `validate` with `BatchRequest::resolve` and Effective Settings, put the Effective Settings in the Job Snapshot, add `resolve_batch_request`, take the preset catalog only from `get_preset_profiles`, define [Item Settlement](docs/adr/0008-typed-engine-bridge-and-track-assignment-model.md#amendment--2026-10-07-item-settlement), and drop the job-level `duration_sec` and `PresetProfile.icon`. Implemented. | `request.rs`, `preset.rs`, `job.rs`, `snapshot.rs` |
 | [**0009**](docs/adr/0009-streaming-card-progress-and-item-duration-model.md) | Streaming Card Progress & Item Duration | Engine-owned `duration_sec`, indeterminate-to-determinate card progress, 1 Hz presentation heartbeat. The 2026-10-11 amendment draws Card Progress as a status ring on each episode row and has the heartbeat also redraw the batch clock. Implemented. | `pipeline.rs`, `queue-state.js`, `queue-view.js` |
 | [**0010**](docs/adr/0010-mainline-rust-cutover-and-python-decommissioning.md) | Mainline Rust Engine Cutover | Removed the Python codebase; unified 1.0.0 versioning and CI/release status gates. Implemented. | Root `Cargo.toml`, `.github/workflows/ci.yml`, `.github/workflows/release.yml` |
@@ -790,7 +804,7 @@ sequenceDiagram
 | [**0013**](docs/adr/0013-asynchronous-probing-and-transcode-governance-performance-overhaul.md) | Asynchronous Probing and Transcode Governance Performance Overhaul | Asynchronous mkvmerge fallback probing, transcode thread governor, default complexity 5, font seeding outside the registry lock, and cache serialization without intermediate copies. [Amendments 1–14](docs/adr/0013-asynchronous-probing-and-transcode-governance-performance-overhaul.md#amendment-1--2026-09-28-memo-persistence) persist the font hash memo, limit `promote_file`'s copy fallback to device boundaries, keep the caller's path spelling in scans, run the native probe on the blocking pool, cap physical cores at the available parallelism, hash seeded fonts lazily by size, have the desktop send `workers: null` and read defaults from `get_default_settings`, inject a scripted Media Tool runner in tests, route bulk probing through `inspect.rs`, and name the Release Preparer. Implemented. | `scan.rs`, `request.rs`, `fonts.rs`, `pipeline.rs`, `domain.rs`, `inspect.rs` |
 | [**0014**](docs/adr/0014-cli-selected-items-execution-and-manifest-filtering.md) | CLI Selected Items Execution and Manifest Filtering | `--selected-item` and `--selected-items`, path normalization with working-directory fallback, and `--plan` manifest selection (`InspectionManifest::select_items`). Implemented. | `mkv-cli`, `manifest.rs`, `pipeline.rs` |
 | [**0015**](docs/adr/0015-per-package-webkitgtk-dmabuf-renderer-scoping.md) | Per-Package WebKitGTK DMABUF Renderer Scoping | `WEBKIT_DISABLE_DMABUF_RENDERER` scoped to AppImage via the `APPIMAGE`/`APPDIR` markers, so Native Packages keep hardware-accelerated damage tracking on transparent windows. The 2026-10-11 amendment rounds the title bar's and bottom bar's own outer corners, since WebKitGTK does not clip their compositing layers to the rounded window. A second 2026-10-11 amendment defaults it in AppImages only when the NVIDIA driver is loaded. Accepted. | `desktop-tauri/src-tauri/src/lib.rs` |
-| [**0016**](docs/adr/0016-toolkit-agnostic-desktop-core.md) | Toolkit-Agnostic Desktop Core Owns UI State | Moves all desktop UI state and logic except the theme out of `desktop-tauri/ui` into a Tauri-free `crates/mkv-desktop-core`: one actor-owned reducer, coalesced whole-state publication, no reload restore, and a Log Channel whose lines are tagged with their kind. Accepted; not yet implemented (#102). | `crates/mkv-desktop-core` (planned), `job.rs`, `snapshot.rs`, `pipeline.rs` |
+| [**0016**](docs/adr/0016-toolkit-agnostic-desktop-core.md) | Toolkit-Agnostic Desktop Core Owns UI State | Moves all desktop UI state and logic except the theme out of `desktop-tauri/ui` into a Tauri-free `crates/mkv-desktop-core`: one actor-owned reducer, coalesced whole-state publication, no reload restore, and a Log Channel whose lines are tagged with their kind. Accepted; S0–S1 implemented (S0 in #110, S1 in #111). | `crates/mkv-desktop-core`, `job.rs`, `snapshot.rs`, `pipeline.rs` |
 
 ---
 

@@ -1,96 +1,11 @@
-use crate::job::{wait_until, JobState};
-use mkv_core::pipeline::CancellationToken;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Mutex;
-use std::time::Duration;
+//! The Stop and Close commands: thin wrappers that run the Desktop Core's teardown on Tauri's
+//! blocking pool, reading the states through the `AppHandle`.
 
+use mkv_desktop_core::control::{
+    begin_shutdown, cancel_shutdown, cleanup_owned_processes, stop_job_inner, ScanState,
+};
+use mkv_desktop_core::job::JobState;
 use tauri::{AppHandle, Manager, Runtime};
-
-pub(crate) struct ActiveScan {
-    pub(crate) id: u64,
-    pub(crate) cancel_token: CancellationToken,
-}
-
-pub struct ScanState {
-    pub(crate) active: Mutex<Option<ActiveScan>>,
-    pub(crate) next_id: AtomicU64,
-    pub(crate) start_lock: Mutex<()>,
-    accepting_starts: AtomicBool,
-}
-
-impl Default for ScanState {
-    fn default() -> Self {
-        Self {
-            active: Mutex::new(None),
-            next_id: AtomicU64::new(1),
-            start_lock: Mutex::new(()),
-            accepting_starts: AtomicBool::new(true),
-        }
-    }
-}
-
-impl ScanState {
-    pub fn is_active(&self) -> bool {
-        self.active.lock().is_ok_and(|active| active.is_some())
-    }
-
-    pub(crate) fn ensure_accepting_starts(&self) -> Result<(), String> {
-        if self.accepting_starts.load(Ordering::SeqCst) {
-            Ok(())
-        } else {
-            Err("Application is closing; no new directory inspection can start.".into())
-        }
-    }
-
-    fn wait_until_empty(&self, timeout: Duration) -> Result<(), String> {
-        wait_until(timeout, "directory inspection", || {
-            Ok(self.active.lock().map_err(|e| e.to_string())?.is_none())
-        })
-    }
-}
-
-pub(crate) struct ScanRegistration<'a> {
-    pub(crate) state: &'a ScanState,
-    pub(crate) id: u64,
-}
-
-impl Drop for ScanRegistration<'_> {
-    fn drop(&mut self) {
-        if let Ok(mut active) = self.state.active.lock() {
-            if active.as_ref().is_some_and(|scan| scan.id == self.id) {
-                *active = None;
-            }
-        }
-    }
-}
-
-/// Default bound on waiting for owned-process teardown to finish.
-const STOP_TIMEOUT: Duration = Duration::from_secs(2);
-
-fn combine_errors(errors: impl IntoIterator<Item = Option<String>>) -> Result<(), String> {
-    let errors: Vec<String> = errors.into_iter().flatten().collect();
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(errors.join(" "))
-    }
-}
-
-pub(crate) fn stop_job_inner(
-    state: &JobState,
-    scan_state: &ScanState,
-    job_id: Option<u64>,
-) -> Result<(), String> {
-    if let Some(expected_id) = job_id {
-        if !state.holds_slot(expected_id)? {
-            return Ok(());
-        }
-    }
-    // Stopping the job must proceed even if scan teardown fails; report both.
-    let scan_error = stop_scan(scan_state).err();
-    let job_error = state.stop(job_id, STOP_TIMEOUT).err();
-    combine_errors([scan_error, job_error])
-}
 
 #[tauri::command]
 pub async fn stop_job(app: AppHandle, job_id: Option<u64>) -> Result<(), String> {
@@ -114,68 +29,6 @@ pub(crate) async fn run_teardown<R: Runtime>(
     .map_err(|error| format!("Async runtime error: {error}"))?
 }
 
-fn stop_scan(state: &ScanState) -> Result<(), String> {
-    let _start_lock = state.start_lock.lock().map_err(|e| e.to_string())?;
-    stop_registered_scan(state)
-}
-
-pub(crate) fn stop_registered_scan(state: &ScanState) -> Result<(), String> {
-    let mut active = state.active.lock().map_err(|e| e.to_string())?;
-    if let Some(scan) = active.take() {
-        scan.cancel_token.cancel();
-    }
-    Ok(())
-}
-
-pub fn cleanup_owned_processes(job_state: &JobState, scan_state: &ScanState) -> Result<(), String> {
-    cleanup_owned_processes_with_timeout(job_state, scan_state, STOP_TIMEOUT)
-}
-
-pub(crate) fn cleanup_owned_processes_with_timeout(
-    job_state: &JobState,
-    scan_state: &ScanState,
-    timeout: Duration,
-) -> Result<(), String> {
-    // Both stops run before either wait; a failed stop already reports why, so skip its wait.
-    let scan_stop = stop_scan(scan_state);
-    let job_stop = job_state.stop(None, timeout);
-    let scan_error = scan_stop
-        .and_then(|()| scan_state.wait_until_empty(timeout))
-        .err();
-    let job_error = job_stop
-        .and_then(|()| {
-            if job_state.is_active() {
-                job_state.wait_until_empty(Duration::from_millis(50))
-            } else {
-                Ok(())
-            }
-        })
-        .err();
-
-    combine_errors([
-        scan_error.map(|error| format!("Directory inspection cleanup failed: {error}")),
-        job_error.map(|error| format!("Job cleanup failed: {error}")),
-    ])
-}
-
-pub fn begin_shutdown(job_state: &JobState, scan_state: &ScanState) -> bool {
-    job_state.close_starts();
-    scan_state.accepting_starts.store(false, Ordering::SeqCst);
-    job_state.cancel_current();
-    if let Ok(lock) = scan_state.active.lock() {
-        if let Some(scan) = lock.as_ref() {
-            scan.cancel_token.cancel();
-        }
-    }
-    let scan_starting = scan_state.start_lock.try_lock().is_err();
-    scan_starting || scan_state.is_active() || job_state.is_active()
-}
-
-pub fn cancel_shutdown(job_state: &JobState, scan_state: &ScanState) {
-    job_state.open_starts();
-    scan_state.accepting_starts.store(true, Ordering::SeqCst);
-}
-
 /// Allowed while a Stop is pending: both cancel the same token and wait on the same slot, and a
 /// second abort is a no-op.
 #[tauri::command]
@@ -194,101 +47,17 @@ pub async fn close_window(window: tauri::Window, app: AppHandle) -> Result<(), S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::job::test_support::{poison, RecordingSink};
-    use crate::job::JobConfig;
-    use crate::snapshot::test_support::effective_settings;
-    use mkv_core::pipeline::PipelineSummary;
-    use std::time::Instant;
-
-    #[test]
-    fn test_stale_stop_job_does_not_stop_active_scan() {
-        let scan_state = ScanState::default();
-        let token = CancellationToken::new();
-        *scan_state.active.lock().unwrap() = Some(ActiveScan {
-            id: 1,
-            cancel_token: token.clone(),
-        });
-
-        let job_state = JobState::default();
-        job_state.occupy(7);
-        assert!(stop_job_inner(&job_state, &scan_state, Some(99)).is_ok());
-        assert!(stop_job_inner(&JobState::default(), &scan_state, Some(99)).is_ok());
-
-        assert!(scan_state.is_active());
-        assert!(!token.is_cancelled());
-    }
-
-    #[test]
-    fn test_stop_job_proceeds_when_scan_teardown_fails() {
-        let scan_state = ScanState::default();
-        poison(&scan_state.start_lock);
-
-        let job_state = JobState::default();
-        job_state.occupy(7);
-
-        let error = stop_job_inner(&job_state, &scan_state, Some(7)).unwrap_err();
-        assert!(error.contains("poisoned"));
-        assert!(job_state.current_cancelled());
-    }
-
-    #[test]
-    fn test_cleanup_attempts_scan_and_job_teardown() {
-        let scan_state = ScanState::default();
-        poison(&scan_state.start_lock);
-        let job_state = JobState::default();
-        job_state.poison_slot();
-
-        let error = cleanup_owned_processes(&job_state, &scan_state).unwrap_err();
-        assert!(error.contains("Directory inspection cleanup failed"));
-        assert!(error.contains("Job cleanup failed"));
-    }
-
-    #[test]
-    fn test_scan_startup_is_visible_before_process_registration() {
-        let job_state = JobState::default();
-        let scan_state = ScanState::default();
-
-        let _startup = scan_state.start_lock.lock().unwrap();
-        assert!(begin_shutdown(&job_state, &scan_state));
-        assert!(scan_state.ensure_accepting_starts().is_err());
-        assert!(job_state.ensure_accepting_starts().is_err());
-    }
-
-    #[test]
-    fn test_cancel_shutdown_restores_accepting_starts() {
-        let job_state = JobState::default();
-        let scan_state = ScanState::default();
-
-        begin_shutdown(&job_state, &scan_state);
-        assert!(scan_state.ensure_accepting_starts().is_err());
-        assert!(job_state.ensure_accepting_starts().is_err());
-
-        cancel_shutdown(&job_state, &scan_state);
-        assert!(scan_state.ensure_accepting_starts().is_ok());
-        assert!(job_state.ensure_accepting_starts().is_ok());
-    }
-
-    #[test]
-    fn test_cleanup_fails_if_job_slot_not_released() {
-        let job_state = JobState::default();
-        let scan_state = ScanState::default();
-        job_state.occupy(42);
-
-        let error = cleanup_owned_processes_with_timeout(
-            &job_state,
-            &scan_state,
-            Duration::from_millis(50),
-        )
-        .unwrap_err();
-
-        assert!(error.contains("Timed out"));
-        assert!(error.contains("Job cleanup failed"));
-    }
+    use mkv_core::pipeline::{CancellationToken, PipelineSummary};
+    use mkv_desktop_core::control::cleanup_owned_processes_with_timeout;
+    use mkv_desktop_core::job::test_support::RecordingSink;
+    use mkv_desktop_core::job::JobConfig;
+    use mkv_desktop_core::snapshot::test_support::effective_settings;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn test_teardown_leaves_the_calling_runtime_free_while_it_waits() {
         let app = tauri::test::mock_app();
-        app.manage(JobState::default());
+        app.manage(mkv_desktop_core::job::test_support::job_state());
         app.manage(ScanState::default());
         // Nothing releases this slot, so the teardown waits out both phases.
         app.state::<JobState>().occupy(42);
@@ -321,7 +90,7 @@ mod tests {
     #[test]
     fn close_during_a_pending_stop_settles_the_job_once() {
         let app = tauri::test::mock_app();
-        app.manage(JobState::default());
+        app.manage(mkv_desktop_core::job::test_support::job_state());
         app.manage(ScanState::default());
         let sink = RecordingSink::default();
         let token = CancellationToken::new();
@@ -374,37 +143,5 @@ mod tests {
         assert_eq!(dones.len(), 1);
         assert_eq!(dones[0]["job_id"], job_id);
         assert_eq!(dones[0]["code"], -1);
-    }
-
-    #[test]
-    fn test_stop_registered_scan_cancels_token() {
-        let state = ScanState::default();
-        let token = CancellationToken::new();
-        *state.active.lock().unwrap() = Some(ActiveScan {
-            id: 1,
-            cancel_token: token.clone(),
-        });
-
-        assert!(stop_registered_scan(&state).is_ok());
-        assert!(token.is_cancelled());
-        assert!(!state.is_active());
-    }
-
-    #[test]
-    fn test_scan_registration_drop_clears_active_scan() {
-        let state = ScanState::default();
-        let token = CancellationToken::new();
-        *state.active.lock().unwrap() = Some(ActiveScan {
-            id: 1,
-            cancel_token: token.clone(),
-        });
-
-        drop(ScanRegistration {
-            state: &state,
-            id: 1,
-        });
-
-        assert!(!state.is_active());
-        assert!(!token.is_cancelled());
     }
 }

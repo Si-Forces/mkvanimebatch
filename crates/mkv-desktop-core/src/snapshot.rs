@@ -4,7 +4,8 @@
 use mkv_core::item_id::ItemId;
 use mkv_core::pipeline::{ItemOutcome, JobEvent, CANCELLED_REASON, EVENT_VERSION};
 use mkv_core::request::EffectiveSettings;
-use serde::Serialize;
+use serde::ser::SerializeStruct;
+use serde::{Serialize, Serializer};
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -75,20 +76,51 @@ pub struct ItemSnapshot {
     started_at: Option<Instant>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct JobSnapshot {
     pub job_id: u64,
     pub mode: String,
     pub status: BatchStatus,
     pub start_time_ms: u64,
     pub total_items: usize,
-    pub completed_items: usize,
     pub input_dir: Option<String>,
     /// What the job runs with, fixed when it starts. `None` only for a snapshot that no
     /// `SnapshotStore::begin` preceded.
     pub effective_settings: Option<EffectiveSettings>,
     pub ordered_item_ids: Vec<String>,
     pub items: HashMap<String, ItemSnapshot>,
+}
+
+impl JobSnapshot {
+    /// How many items have an outcome, derived from their statuses rather than counted.
+    pub fn completed_items(&self) -> usize {
+        self.items
+            .values()
+            .filter(|item| item.status.is_terminal())
+            .count()
+    }
+}
+
+/// The `get_job_snapshot` payload: the fields in order, with `completed_items` derived, since
+/// the webview's restore path still reads it.
+/// `test_reducer_derives_completed_items_from_item_outcomes` pins the serialized key set and is
+/// the guard against a field silently dropping off the wire; do not "simplify" this back to a
+/// derive without keeping `completed_items`.
+impl Serialize for JobSnapshot {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut state = serializer.serialize_struct("JobSnapshot", 10)?;
+        state.serialize_field("job_id", &self.job_id)?;
+        state.serialize_field("mode", &self.mode)?;
+        state.serialize_field("status", &self.status)?;
+        state.serialize_field("start_time_ms", &self.start_time_ms)?;
+        state.serialize_field("total_items", &self.total_items)?;
+        state.serialize_field("completed_items", &self.completed_items())?;
+        state.serialize_field("input_dir", &self.input_dir)?;
+        state.serialize_field("effective_settings", &self.effective_settings)?;
+        state.serialize_field("ordered_item_ids", &self.ordered_item_ids)?;
+        state.serialize_field("items", &self.items)?;
+        state.end()
+    }
 }
 
 fn timestamp_ms() -> u64 {
@@ -138,7 +170,6 @@ impl SnapshotStore {
             status: BatchStatus::Running,
             start_time_ms: timestamp_ms(),
             total_items: 0,
-            completed_items: 0,
             input_dir: Some(input_dir),
             effective_settings: Some(effective_settings),
             ordered_item_ids: Vec::new(),
@@ -147,7 +178,19 @@ impl SnapshotStore {
         Ok(())
     }
 
+    /// Applies `event` of job `job_id` to the snapshot. Drops an event of another event version,
+    /// and any but a `BatchStart` once the batch has ended or when it is another job's.
     pub(crate) fn update(&self, event: &JobEvent, job_id: u64, mode: &str) {
+        let (JobEvent::BatchStart { version, .. }
+        | JobEvent::ItemStart { version, .. }
+        | JobEvent::ItemProgress { version, .. }
+        | JobEvent::ItemComplete { version, .. }
+        | JobEvent::BatchComplete { version, .. }) = event;
+        // Webview twin: the v1 guard in queue-state.js `reduceQueueEvent`, until S2 removes that
+        // reducer. Both must drop the same events.
+        if *version != EVENT_VERSION {
+            return;
+        }
         if let Ok(mut snap) = self.0.lock() {
             if !matches!(event, JobEvent::BatchStart { .. })
                 && !snap.as_ref().is_some_and(|snapshot| {
@@ -197,7 +240,6 @@ impl SnapshotStore {
                         status: BatchStatus::Running,
                         start_time_ms,
                         total_items: *total,
-                        completed_items: 0,
                         input_dir: own.and_then(|snapshot| snapshot.input_dir.clone()),
                         effective_settings: own
                             .and_then(|snapshot| snapshot.effective_settings.clone()),
@@ -243,10 +285,16 @@ impl SnapshotStore {
                                 item.file = file.clone();
                                 item.status = (*status).into();
                                 item.outcome = Some(*status);
-                                item.duration_sec = *duration_sec;
+                                // An outcome without a duration falls back to how long the item
+                                // ran since the bridge saw it start, on the monotonic clock.
+                                item.duration_sec = duration_sec.or_else(|| {
+                                    item.started_at
+                                        .map(|started_at| started_at.elapsed().as_secs_f64())
+                                });
+                                // Only the reason the event carries: a default is a label for
+                                // the UI to show, not a stored value.
                                 item.reason = reason.clone();
                                 item.error = error.clone();
-                                snapshot.completed_items += 1;
                             }
                         }
                     }
@@ -364,8 +412,9 @@ impl SnapshotStore {
     }
 }
 
-#[cfg(test)]
-pub(crate) mod test_support {
+/// Test helpers, also exported to the desktop adapter's tests through the `test-support` feature.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
     use super::{JobSnapshot, SnapshotStore};
     use mkv_core::item_id::ItemId;
     use mkv_core::pipeline::{BatchItemInfo, ItemOutcome, JobEvent};
@@ -374,14 +423,14 @@ pub(crate) mod test_support {
 
     impl SnapshotStore {
         /// Holds the snapshot lock; until the guard drops, every caller that takes it blocks.
-        pub(crate) fn hold(&self) -> MutexGuard<'_, Option<JobSnapshot>> {
+        pub fn hold(&self) -> MutexGuard<'_, Option<JobSnapshot>> {
             self.0.lock().unwrap()
         }
     }
 
     /// Effective Settings that differ from every default, so a test sees them pass through
     /// unchanged.
-    pub(crate) fn effective_settings() -> EffectiveSettings {
+    pub fn effective_settings() -> EffectiveSettings {
         EffectiveSettings {
             workers: 3,
             io_jobs: 5,
@@ -392,7 +441,7 @@ pub(crate) mod test_support {
     }
 
     /// A `BatchStart` listing `ids` in engine order; each item's file is `<id>.mkv`.
-    pub(crate) fn batch_start(ids: &[&str]) -> JobEvent {
+    pub fn batch_start(ids: &[&str]) -> JobEvent {
         JobEvent::BatchStart {
             version: 1,
             total: ids.len(),
@@ -409,7 +458,7 @@ pub(crate) mod test_support {
         }
     }
 
-    pub(crate) fn item_start(id: &str) -> JobEvent {
+    pub fn item_start(id: &str) -> JobEvent {
         JobEvent::ItemStart {
             version: 1,
             id: ItemId::parse(id),
@@ -418,7 +467,7 @@ pub(crate) mod test_support {
         }
     }
 
-    pub(crate) fn item_progress(id: &str, progress: f64) -> JobEvent {
+    pub fn item_progress(id: &str, progress: f64) -> JobEvent {
         JobEvent::ItemProgress {
             version: 1,
             id: ItemId::parse(id),
@@ -428,7 +477,7 @@ pub(crate) mod test_support {
         }
     }
 
-    pub(crate) fn item_complete(id: &str, duration_sec: f64) -> JobEvent {
+    pub fn item_complete(id: &str, duration_sec: f64) -> JobEvent {
         JobEvent::ItemComplete {
             version: 1,
             id: ItemId::parse(id),
@@ -441,7 +490,7 @@ pub(crate) mod test_support {
         }
     }
 
-    pub(crate) fn batch_complete(success: bool, cancelled: bool) -> JobEvent {
+    pub fn batch_complete(success: bool, cancelled: bool) -> JobEvent {
         JobEvent::BatchComplete {
             version: 1,
             success,
@@ -470,7 +519,7 @@ mod tests {
         assert_eq!(snap.mode, "remux");
         assert_eq!(snap.status, BatchStatus::Running);
         assert_eq!(snap.total_items, 1);
-        assert_eq!(snap.completed_items, 0);
+        assert_eq!(snap.completed_items(), 0);
         assert_eq!(snap.ordered_item_ids, vec!["ep1".to_string()]);
 
         store.update(&item_start("ep1"), 10, "remux");
@@ -479,7 +528,7 @@ mod tests {
         let complete = item_complete("ep1", 42.5);
         store.update(&complete, 10, "remux");
         let snap = snapshot(&store);
-        assert_eq!(snap.completed_items, 1);
+        assert_eq!(snap.completed_items(), 1);
         let item = &snap.items["ep1"];
         assert_eq!(item.status, ItemStatus::Completed);
         assert_eq!(item.duration_sec, Some(42.5));
@@ -487,7 +536,7 @@ mod tests {
 
         // A duplicate completion must not count the item twice.
         store.update(&complete, 10, "remux");
-        assert_eq!(snapshot(&store).completed_items, 1);
+        assert_eq!(snapshot(&store).completed_items(), 1);
 
         store.update(&batch_complete(true, false), 10, "remux");
         let snap = snapshot(&store);
@@ -613,7 +662,7 @@ mod tests {
 
         let snap = snapshot(&store);
         assert!(snap.items.values().all(|item| item.status.is_terminal()));
-        assert_eq!(snap.completed_items, 4);
+        assert_eq!(snap.completed_items(), 4);
         assert_eq!(snap.items["ep1"].reason.as_deref(), Some(CANCELLED_REASON));
         assert!(snap.items["ep1"].duration_sec.is_some());
         assert_eq!(snap.items["ep2"].duration_sec, None);
@@ -725,7 +774,7 @@ mod tests {
     fn test_settlement_wording_matches_the_golden_fixture() {
         const FIXTURE: &str = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../ui/fixtures/settlement-events.json"
+            "/../../desktop-tauri/ui/fixtures/settlement-events.json"
         );
         let built = serde_json::json!({
             "stopped": settlement_scenario(batch_complete(false, true)),
@@ -858,5 +907,162 @@ mod tests {
         // Failure
         assert_eq!(terminal_status(false, false, false), BatchStatus::Error);
         assert_eq!(terminal_status(false, false, true), BatchStatus::Error);
+    }
+
+    /// An `ItemComplete` of `id` with outcome `status` and no reason or duration.
+    fn bare_outcome(id: &str, status: ItemOutcome) -> JobEvent {
+        JobEvent::ItemComplete {
+            version: EVENT_VERSION,
+            id: ItemId::parse(id),
+            file: format!("{id}.mkv"),
+            status,
+            reason: None,
+            error: None,
+            duration_sec: None,
+            extra: Default::default(),
+        }
+    }
+
+    #[test]
+    fn test_reducer_drops_an_event_of_another_version() {
+        let store = SnapshotStore::default();
+        store.update(&batch_start(&["ep1"]), 10, "remux");
+        let mut start = item_start("ep1");
+        let JobEvent::ItemStart { version, .. } = &mut start else {
+            unreachable!()
+        };
+        *version = EVENT_VERSION + 1;
+        store.update(&start, 10, "remux");
+        assert_eq!(snapshot(&store).items["ep1"].status, ItemStatus::Queued);
+
+        // Not even a `BatchStart` of another version replaces the snapshot.
+        let mut next = batch_start(&["ep9"]);
+        let JobEvent::BatchStart { version, .. } = &mut next else {
+            unreachable!()
+        };
+        *version = EVENT_VERSION + 1;
+        store.update(&next, 11, "remux");
+        assert_eq!(snapshot(&store).job_id, 10);
+    }
+
+    #[test]
+    fn test_reducer_drops_events_after_the_batch_or_from_another_job() {
+        let store = SnapshotStore::default();
+        store.update(&batch_start(&["ep1", "ep2"]), 10, "remux");
+        store.update(&item_start("ep1"), 11, "remux");
+        assert_eq!(snapshot(&store).items["ep1"].status, ItemStatus::Queued);
+
+        store.update(&batch_complete(false, false), 10, "remux");
+        store.update(&item_start("ep2"), 10, "remux");
+        store.update(&item_complete("ep2", 1.0), 10, "remux");
+        let snap = snapshot(&store);
+        assert_eq!(snap.items["ep2"].status, ItemStatus::Queued);
+        assert_eq!(snap.status, BatchStatus::Error);
+    }
+
+    #[test]
+    fn test_reducer_applies_progress_only_to_processing_items_with_finite_values() {
+        let store = SnapshotStore::default();
+        store.update(&batch_start(&["ep1", "ep2"]), 10, "remux");
+        // ep1 is still queued, so its progress is dropped.
+        store.update(&item_progress("ep1", 30.0), 10, "remux");
+        assert_eq!(snapshot(&store).items["ep1"].progress, None);
+
+        store.update(&item_start("ep2"), 10, "remux");
+        store.update(&item_progress("ep2", 40.0), 10, "remux");
+        for progress in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            store.update(&item_progress("ep2", progress), 10, "remux");
+        }
+        assert_eq!(snapshot(&store).items["ep2"].progress, Some(40.0));
+    }
+
+    #[test]
+    fn test_reducer_item_start_renames_the_items_file() {
+        let store = SnapshotStore::default();
+        store.update(&batch_start(&["ep1"]), 10, "remux");
+        store.update(
+            &JobEvent::ItemStart {
+                version: EVENT_VERSION,
+                id: ItemId::parse("ep1"),
+                file: "Show - 01.mkv".into(),
+                extra: Default::default(),
+            },
+            10,
+            "remux",
+        );
+        assert_eq!(snapshot(&store).items["ep1"].file, "Show - 01.mkv");
+    }
+
+    #[test]
+    fn test_reducer_falls_back_to_the_monotonic_start_for_a_missing_duration() {
+        let store = SnapshotStore::default();
+        store.update(&batch_start(&["ep1", "ep2", "ep3"]), 10, "remux");
+        store.update(&item_start("ep1"), 10, "remux");
+        store.update(&item_start("ep3"), 10, "remux");
+        store.update(&bare_outcome("ep1", ItemOutcome::Completed), 10, "remux");
+        // An item that never started has nothing to measure from.
+        store.update(&bare_outcome("ep2", ItemOutcome::Skipped), 10, "remux");
+        // A duration the event carries wins over the fallback.
+        store.update(&item_complete("ep3", 42.5), 10, "remux");
+
+        let snap = snapshot(&store);
+        assert!(snap.items["ep1"]
+            .duration_sec
+            .is_some_and(|seconds| seconds >= 0.0));
+        assert_eq!(snap.items["ep2"].duration_sec, None);
+        assert_eq!(snap.items["ep3"].duration_sec, Some(42.5));
+    }
+
+    #[test]
+    fn test_reducer_derives_completed_items_from_item_outcomes() {
+        let store = SnapshotStore::default();
+        store.update(&batch_start(&["ep1", "ep2", "ep3"]), 10, "remux");
+        store.update(&item_start("ep1"), 10, "remux");
+        store.update(&item_complete("ep1", 1.0), 10, "remux");
+        store.update(&bare_outcome("ep2", ItemOutcome::Error), 10, "remux");
+        // An outcome for an item the batch never listed counts for nothing.
+        store.update(&bare_outcome("ep9", ItemOutcome::Completed), 10, "remux");
+
+        let snap = snapshot(&store);
+        assert_eq!(snap.completed_items(), 2);
+        // The webview's restore path still reads the count from the payload.
+        let json = serde_json::to_value(&snap).unwrap();
+        assert_eq!(json["completed_items"], 2);
+        assert_eq!(json["total_items"], 3);
+        // The hand-written `Serialize` lists the fields: pin the key set so none drops out.
+        let mut keys: Vec<&str> = json
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "completed_items",
+                "effective_settings",
+                "input_dir",
+                "items",
+                "job_id",
+                "mode",
+                "ordered_item_ids",
+                "start_time_ms",
+                "status",
+                "total_items",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_reducer_stores_no_default_reason() {
+        let store = SnapshotStore::default();
+        store.update(&batch_start(&["ep1", "ep2"]), 10, "remux");
+        store.update(&bare_outcome("ep1", ItemOutcome::Skipped), 10, "remux");
+        store.update(&bare_outcome("ep2", ItemOutcome::Cancelled), 10, "remux");
+
+        let snap = snapshot(&store);
+        assert_eq!(snap.items["ep1"].reason, None);
+        assert_eq!(snap.items["ep2"].reason, None);
     }
 }

@@ -100,6 +100,19 @@ jobs:
         working-directory: ${{ env.BUILD_DIR }}
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # The Desktop Core stays toolkit-agnostic (ADR-0016 decision 1). The tree is captured first,
+      # so a failing `cargo tree` fails the step and `grep -q` cannot SIGPIPE it under pipefail.
+      - name: Check the Desktop Core does not depend on Tauri (Linux only)
+        if: runner.os == 'Linux'
+        shell: bash
+        working-directory: ${{ env.BUILD_DIR }}
+        run: |
+          deps="$(cargo tree -p mkv-desktop-core -e normal --prefix none)"
+          if grep -qi '^tauri' <<< "$deps"; then
+            echo "::error::mkv-desktop-core depends on tauri; ADR-0016 keeps the Desktop Core toolkit-agnostic."
+            exit 1
+          fi
+
       # `MKV_REQUIRE_MEDIA_TOOLS=1` makes the real-media regression fail instead of
       # skipping when FFmpeg/MKVToolNix are missing. Windows keeps the local skip.
       - name: Run Rust workspace unit and integration tests

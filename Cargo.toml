@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/mkv-core",
     "crates/mkv-cli",
+    "crates/mkv-desktop-core",
     "desktop-tauri/src-tauri",
 ]
 [workspace.package]

@@ -561,6 +561,8 @@ function appendLog(logEl, lines) {
       for (const line of pending) {
         const div = document.createElement("div");
         if (line.kind === "error") errors++;
+        // The kind, not the cosmetic class, is what the trim below counts errors by.
+        div.dataset.kind = line.kind;
         div.className = `log-line ${lineClass(line.kind)}`;
         // Paths display Finder-style; the raw line is kept for Copy.
         div.textContent = logDisplayText(line.text);
@@ -572,7 +574,7 @@ function appendLog(logEl, lines) {
 
       // The badge counts only errors the console still shows.
       while (logEl.childElementCount > MAX_LOG_LINES) {
-        if (logEl.firstElementChild.classList.contains("line-err")) errors--;
+        if (logEl.firstElementChild.dataset.kind === "error") errors--;
         logEl.firstElementChild.remove();
       }
       _logErrors.set(logEl, errors);

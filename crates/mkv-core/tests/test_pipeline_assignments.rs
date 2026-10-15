@@ -194,13 +194,10 @@ async fn test_planning_abort_keeps_earlier_skip_lines_and_drops_dry_run_lines() 
                 LogKind::Skipped,
                 "Skipping 'Extras.mkv': Could not extract episode number from filename",
             ),
-            LogLine::new(
-                LogKind::Error,
-                format!(
-                    "  ERROR: Remux planning failed for 'Show - 02.mkv': Assigned subtitle '{}' no longer exists",
-                    manual.display()
-                ),
-            ),
+            LogLine::error(format!(
+                "  ERROR: Remux planning failed for 'Show - 02.mkv': Assigned subtitle '{}' no longer exists",
+                manual.display()
+            )),
         ];
         let mut channel_log = Vec::new();
         while let Ok(line) = log_receiver.try_recv() {

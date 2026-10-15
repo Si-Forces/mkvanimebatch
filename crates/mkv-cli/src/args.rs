@@ -512,6 +512,17 @@ mod tests {
         );
     }
 
+    /// `f64` parses "inf" and "NaN", so they reach `seconds_to_ms`, which rejects them.
+    #[test]
+    fn test_sub_offset_rejects_non_finite_seconds() {
+        for sec in ["inf", "NaN"] {
+            assert_eq!(
+                parse_args_from(["--sub-offset", sec]).map(|parsed| parsed.request.default_sub_offset_ms),
+                Err(format!("Invalid --sub-offset: {sec} seconds is not a finite offset that fits in whole milliseconds"))
+            );
+        }
+    }
+
     #[test]
     fn test_ffmpeg_threads_auto_clears_override() {
         let parsed =
