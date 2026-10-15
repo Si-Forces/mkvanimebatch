@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds the GitHub release page for a tag from docs/release-notes.md.
-# Used by .github/workflows/release.yml (the gate and the Linux build job).
+# Used by .github/workflows/release.yml (the release-notes check and the Linux build job).
 #
 # Usage:
 #   scripts/release-body.sh notes <version> [notes-file]

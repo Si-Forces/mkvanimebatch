@@ -11,10 +11,26 @@ on:
     branches:
       - main
   workflow_dispatch:
+  # release.yml runs this workflow as its verification stage. Its Windows leg can differ
+  # from PR CI: unset inputs fall back to the PR CI values in the matrix below.
+  workflow_call:
+    inputs:
+      windows-runner:
+        description: Runner label for the Windows leg.
+        type: string
+      windows-timeout:
+        description: timeout-minutes for the Windows leg.
+        type: number
 
+# A called workflow sees the caller's github context, so without the "ci-" prefix this
+# group would equal release.yml's own, and GitHub would cancel the run as a concurrency deadlock.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# dtolnay/rust-toolchain used to set this; keep backtraces in failing test logs.
+env:
+  RUST_BACKTRACE: short
 
 jobs:
   # ────────────────────────────────────────────────────────────────────────────
@@ -24,8 +40,9 @@ jobs:
     name: Rust Workspace (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     # Warm runs take 3-4 minutes and the slowest Windows run took 15. The apt step
-    # once stalled for 30 minutes; without a timeout GitHub waits 6 hours.
-    timeout-minutes: 20
+    # once stalled for 30 minutes; without a timeout GitHub waits 6 hours. The "|| 20"
+    # keeps a matrix entry without a timeout from silently getting those 6 hours.
+    timeout-minutes: ${{ matrix.timeout || 20 }}
     strategy:
       fail-fast: false
       matrix:
@@ -35,14 +52,17 @@ jobs:
           # Windows is the slowest job and gains the most from Blacksmith. Linux
           # stays on GitHub to save Blacksmith's free minutes for Windows; it
           # already finishes first, so moving it would not make CI finish sooner.
-          # Blacksmith runners are organization-only: on a personal account, use
-          # windows-2025.
-          - os: blacksmith-2vcpu-windows-2025
+          # Blacksmith runners are organization-only: on a personal account, replace
+          # the fallback label below with windows-2025.
+          - os: ${{ inputs.windows-runner || 'blacksmith-2vcpu-windows-2025' }}
             target: x86_64-pc-windows-msvc
+            timeout: ${{ inputs.windows-timeout }}
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
@@ -52,14 +72,17 @@ jobs:
             build-essential curl wget file libssl-dev libgtk-3-dev libwebkit2gtk-4.1-dev
             libayatana-appindicator3-dev librsvg2-dev patchelf ffmpeg mkvtoolnix
 
+      # rustup ships on the runner images, so this needs no third-party action.
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-          components: rustfmt, clippy
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update --component rustfmt,clippy --target "$TARGET"
+          rustup default stable
 
       - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: ${{ matrix.target }}
 
@@ -75,7 +98,7 @@ jobs:
       - name: Run Rust workspace unit and integration tests
         env:
           MKV_REQUIRE_MEDIA_TOOLS: ${{ runner.os == 'Linux' && '1' || '' }}
-        run: cargo test --workspace --verbose
+        run: cargo test --workspace
 
       # The real-media bench never runs a cell here: it runs its self-check asserts, then skips
       # because MKV_BENCH_CORPUS is unset. `cargo test --workspace` does not build bench targets.
@@ -111,12 +134,14 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "20"
+          node-version: "22"
 
       - name: Run UI syntax checks and the UI and script tests
         run: |
@@ -124,7 +149,26 @@ jobs:
           node --test scripts/*.test.js desktop-tauri/ui/*.test.js
 
   # ────────────────────────────────────────────────────────────────────────────
-  # 3. Security Audit (Cargo Audit with audit.toml)
+  # 3. Workflow Lint (actionlint, which also runs shellcheck on run: scripts)
+  # ────────────────────────────────────────────────────────────────────────────
+  workflow-lint:
+    name: Workflow Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Go and shellcheck ship on the runner image; the Go checksum database pins the module.
+      - name: Run actionlint
+        run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          "$(go env GOPATH)/bin/actionlint"
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 4. Security Audit (Cargo Audit with audit.toml)
   # ────────────────────────────────────────────────────────────────────────────
   security-audit:
     name: Security Audit
@@ -132,20 +176,24 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install cargo-audit
-        uses: taiki-e/install-action@cargo-audit
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-audit
 
       - name: Run Cargo Audit
         run: cargo audit
 
   # ────────────────────────────────────────────────────────────────────────────
-  # 4. CI Completion Gate (Required Check Summary for Branch Protection)
+  # 5. CI Completion Gate (Required Check Summary for Branch Protection)
   # ────────────────────────────────────────────────────────────────────────────
   ci-status:
     name: CI Status Gate
-    needs: [workspace-checks, ui-tests, security-audit]
+    needs: [workspace-checks, ui-tests, workflow-lint, security-audit]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: always()
@@ -154,6 +202,7 @@ jobs:
         run: |
           if [ "${{ needs.workspace-checks.result }}" != "success" ] || \
              [ "${{ needs.ui-tests.result }}" != "success" ] || \
+             [ "${{ needs.workflow-lint.result }}" != "success" ] || \
              [ "${{ needs.security-audit.result }}" != "success" ]; then
             echo "CI pipeline checks failed!"
             exit 1
