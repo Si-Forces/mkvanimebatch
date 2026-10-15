@@ -28,6 +28,11 @@ jobs:
   verify:
     name: Verify
     uses: ./.github/workflows/ci.yml
+    # Verify on the image build-windows publishes from, not PR CI's Blacksmith runner,
+    # and allow for a cold cache: verify took up to 23.5 minutes there (issue #95).
+    with:
+      windows-runner: windows-latest
+      windows-timeout: 35
 
   # ────────────────────────────────────────────────────────────────────────────
   # 2. Release Notes and Version Check
@@ -45,8 +50,14 @@ jobs:
         with:
           persist-credentials: false
 
+      # A dispatch input reaches the ::error:: lines below, so refuse anything that is not
+      # a plain version tag (a newline in it could inject workflow commands).
       - name: Check release notes and version
         run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9A-Za-z.+-]+$ ]]; then
+            echo "::error::the release tag is not of the form v<version>"
+            exit 1
+          fi
           version="${RELEASE_TAG#v}"
           scripts/release-body.sh notes "$version" > /dev/null
           cargo_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
@@ -74,11 +85,14 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
-        with:
-          toolchain: stable
-          targets: x86_64-pc-windows-msvc
+      # rustup ships on the runner images, so this needs no third-party action.
+      - name: Install Rust stable
+        shell: bash
+        env:
+          TARGET: x86_64-pc-windows-msvc
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update --target "$TARGET"
+          rustup default stable
 
       - name: Cache Rust build
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -114,7 +128,9 @@ jobs:
           "$hash  mkv-cli-x86_64-pc-windows-msvc.zip" | Out-File -Encoding utf8 "mkv-cli-x86_64-pc-windows-msvc.zip.sha256"
 
       # Not in install-action's manifest, so it falls back to cargo-binstall, which fetches
-      # Tauri's prebuilt cargo-tauri instead of compiling it. "2" means ^2, so no v3 pre-release.
+      # Tauri's prebuilt cargo-tauri. If no prebuilt binary matches, cargo-binstall compiles
+      # it, which is as slow as the old cargo install. cargo-binstall reads "2" as ^2 (latest
+      # 2.x at build time), which excludes v3 pre-releases.
       - name: Install tauri-cli
         uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
@@ -202,11 +218,14 @@ jobs:
             libayatana-appindicator3-dev librsvg2-dev patchelf
 
       # ── Rust + Tauri ─────────────────────────────────────────────────────────
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
-        with:
-          toolchain: stable
-          targets: x86_64-unknown-linux-gnu
+      # rustup ships on the runner images, so this needs no third-party action.
+      - name: Install Rust stable
+        shell: bash
+        env:
+          TARGET: x86_64-unknown-linux-gnu
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update --target "$TARGET"
+          rustup default stable
 
       - name: Cache Rust build
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
