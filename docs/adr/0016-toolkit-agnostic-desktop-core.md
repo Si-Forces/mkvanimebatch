@@ -1,6 +1,6 @@
 # 0016. Toolkit-Agnostic Desktop Core Owns UI State
 
-> **Status**: Accepted (not yet implemented; amended 2026-10-15)
+> **Status**: Accepted (S0–S1 implemented; amended 2026-10-15)
 > **Date**: 2026-10-15
 > **Context**: Desktop Application Context
 > **Amends**: ADR-0001, ADR-0007, ADR-0008, ADR-0009, ADR-0011, ADR-0013

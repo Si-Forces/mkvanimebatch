@@ -1,13 +1,15 @@
 mod commands;
 mod diagnostics;
-mod job;
 mod process;
-mod snapshot;
+mod sink;
 mod telemetry;
 mod window;
 
-use job::JobState;
-use process::{begin_shutdown, cancel_shutdown, cleanup_owned_processes, ScanState};
+use mkv_desktop_core::control::{
+    begin_shutdown, cancel_shutdown, cleanup_owned_processes, InspectCacheState, ScanState,
+};
+use mkv_desktop_core::job::JobState;
+use mkv_desktop_core::telemetry::TelemetryState;
 use tauri::{Emitter, Manager};
 
 /// Host `libwayland-client.so.0` locations to preload inside an AppImage.
@@ -75,10 +77,13 @@ pub fn run() {
             diagnostics::init(app.path().app_log_dir().ok().as_deref());
             Ok(())
         })
-        .manage(JobState::default())
+        // Jobs run on the tokio runtime Tauri runs its async commands on.
+        .manage(JobState::new(
+            tauri::async_runtime::handle().inner().clone(),
+        ))
         .manage(ScanState::default())
-        .manage(commands::InspectCacheState::default())
-        .manage(telemetry::TelemetryState::default())
+        .manage(InspectCacheState::default())
+        .manage(TelemetryState::default())
         .invoke_handler(tauri::generate_handler![
             commands::run_job,
             commands::resolve_batch_request,

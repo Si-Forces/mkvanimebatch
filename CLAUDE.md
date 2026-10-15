@@ -10,6 +10,7 @@ The fmt/clippy/test gate commands are listed in AGENTS.md.
 
 ```bash
 # One package / one integration suite / one test
+cargo test -p mkv-desktop-core
 cargo test -p mkv-core
 cargo test -p mkv-core --test test_assets
 cargo test -p mkv-core --test test_domain <test_name_substring>
@@ -59,11 +60,12 @@ The ledger keys each commit on the `git patch-id` of its diff, so a review survi
 
 ## Architecture
 
-A Cargo workspace with three members that share one version:
+A Cargo workspace with four members that share one version:
 
 - `crates/mkv-core`: the media engine library, which holds all the domain logic.
 - `crates/mkv-cli`: a thin CLI adapter (`args.rs` parses the flags, `main.rs` runs the batch or `--plan`). If the binary is renamed to `mkv-extract`, it defaults to extract mode.
-- `desktop-tauri/src-tauri` (package `mkv-anime-batch`): a Tauri v2 host that runs `mkv-core` **in-process** (no sidecar, ADR-0007), with a plain-ES-module frontend in `desktop-tauri/ui` (no framework, no bundler).
+- `crates/mkv-desktop-core`: the toolkit-agnostic Desktop Core (ADR-0016), which holds the Engine Bridge and depends on no UI toolkit.
+- `desktop-tauri/src-tauri` (package `mkv-anime-batch`): a Tauri v2 host that runs `mkv-core` **in-process** through `mkv-desktop-core` (no sidecar, ADR-0007), with a plain-ES-module frontend in `desktop-tauri/ui` (no framework, no bundler).
 
 Media Tools (`mkvmerge`, `mkvextract`, and `ffmpeg` with libopus) run as child processes. Every run goes through `media_tool.rs`: the `MediaToolRunner` port, `SubprocessRunner` as its adapter, and one exit-code policy per tool family (exit 1 is success with warnings for MKVToolNix, a failure for `ffmpeg`). Tests script the port with `ScriptedRunner` in `tests/common`.
 
@@ -93,7 +95,7 @@ Invariants to preserve:
 
 ### Engine ↔ desktop bridge
 
-`commands.rs` and `process.rs` define the Tauri commands (`inspect_directory`, `canonical_directory`, `resolve_batch_request`, `run_job`, `stop_job`, `get_default_settings`, `get_job_snapshot`, …). The active job lives in `job.rs` (`JobState`: the Job Slot, the supervisor, the two-phase stop) and its `JobSnapshot` in `snapshot.rs`. The engine streams `JobEvent`s and log lines over two tokio mpsc channels. A supervisor task forwards them through a `JobSink`: the `AppHandle` adapter emits them to the webview as `job-event`, `job-log` (batched), and `job-done`, and tests record them with no Tauri app. It also reduces the events into a `JobSnapshot`, which carries the job's Effective Settings, so a webview reload can rebuild the queue and the worker chips.
+The bridge lives in `crates/mkv-desktop-core`: the active job in `job.rs` (`JobState`: the Job Slot, the supervisor, the two-phase stop), its `JobSnapshot` in `snapshot.rs`, and the run, stop and shutdown logic in `control.rs`. Its tasks run on a tokio `Handle` the adapter passes to `JobState::new`. In `desktop-tauri/src-tauri/src`, `commands.rs` and `process.rs` define the thin Tauri commands that call it (`inspect_directory`, `canonical_directory`, `resolve_batch_request`, `run_job`, `stop_job`, `get_default_settings`, `get_job_snapshot`, …), and `sink.rs` holds the `AppHandle` `JobSink`. The engine streams `JobEvent`s and log lines over two tokio mpsc channels. A supervisor task forwards them through a `JobSink`: the `AppHandle` sink emits them to the webview as `job-event`, `job-log` (batched), and `job-done`, and tests record them with no Tauri app. It also reduces the events into a `JobSnapshot`, which carries the job's Effective Settings, so a webview reload can rebuild the queue and the worker chips.
 
 Only one job runs at a time. Stopping is two-phase: a cooperative cancel with a 2 s wait, then an abort of the pipeline task.
 
