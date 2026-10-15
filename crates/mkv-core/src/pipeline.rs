@@ -1358,6 +1358,36 @@ mod tests {
         );
     }
 
+    /// `desktop-tauri/ui/log-classify.js` KIND_CLASS keys on these names.
+    #[test]
+    fn log_kind_serializes_to_the_names_the_console_maps() {
+        let kinds = [
+            LogKind::Error,
+            LogKind::Warning,
+            LogKind::Skipped,
+            LogKind::Succeeded,
+            LogKind::Step,
+            LogKind::Cache,
+            LogKind::Note,
+        ];
+        let names: Vec<_> = kinds
+            .iter()
+            .map(|k| serde_json::to_value(k).unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "error",
+                "warning",
+                "skipped",
+                "succeeded",
+                "step",
+                "cache",
+                "note"
+            ]
+        );
+    }
+
     #[test]
     fn batch_item_info_pairs_canonical_id_with_scanned_name() {
         let input_dir = Path::new("/anime");

@@ -830,7 +830,7 @@ test("Stop logs the shutdown wait before stop_job resolves", async t => {
     appendLog: (_el, line) => logs.push(line),
   });
 
-  assert.deepEqual(logs, [{ kind: "note", text: "[INFO] Stop requested; waiting for shutdown." }]);
+  assert.deepEqual(logs, [{ kind: "note", text: "Stop requested; waiting for shutdown." }]);
 
   resolveStop();
   await stopping;

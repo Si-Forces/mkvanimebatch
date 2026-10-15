@@ -180,7 +180,7 @@ mkvanimebatch/
         ├── directory-scan.js        # scanInputDirectory: resolves the typed path to its Directory Identity, inspects it through the one Inspection Coordinator, and drives the mode's Queue Tracker
         ├── telemetry.js             # Polls get_system_telemetry (1 s during a job, 30 s idle, paused while hidden)
         ├── stepper.js               # nextStepValue: the number-input stepper's next value, starting an empty field from its data-auto-value
-        ├── log-classify.js          # Maps each log line's kind to its console class (line-err, line-warn, line-skip, line-ok, line-info, line-done); renders a line as plain text for Copy; caps the pending log queue
+        ├── log-classify.js          # Maps each log line's kind to its console class (line-err, line-warn, line-skip, line-ok, line-info, line-done); caps the pending log queue
         ├── job-coordinator-fakes.js # Test support, not loaded by the app: fakes that drive coordinator.restore()
         ├── fixtures/                # Golden fixtures (settlement-events.json)
         └── *.test.js                # node:test suites for the frontend modules

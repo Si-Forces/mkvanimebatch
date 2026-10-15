@@ -500,7 +500,7 @@ mod tests {
             parse_args_from(["--sub-offset", sec])
                 .map(|parsed| parsed.request.default_sub_offset_ms)
         };
-        assert_eq!(ms("-0.0005"), Ok(seconds_to_ms(-0.0005)));
+        assert_eq!(ms("-0.0005"), Ok(Some(-1)));
         // 2^63 ms, one past `i64::MAX`: the error quotes the value as typed.
         assert_eq!(
             ms("9223372036854775.807"),

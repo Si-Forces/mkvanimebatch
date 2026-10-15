@@ -73,9 +73,8 @@ fn promote_optional(
             Some(final_path)
         }
         Err(e) => {
-            // Error, not Warning: the console has always styled this line by its "failed".
             log.push(LogLine::new(
-                LogKind::Error,
+                LogKind::Warning,
                 format!(
                     "   -> WARNING: Failed to promote {} to '{}': {e}",
                     label.to_ascii_lowercase(),
@@ -264,4 +263,36 @@ pub async fn extract_mkv_file(
     }
 
     Ok(summary)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A failed promotion is a warning, not an error: the file still completes.
+    #[test]
+    fn promote_optional_logs_a_failed_promotion_as_a_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let staged = dir.path().join("staged.xml");
+        std::fs::write(&staged, b"<Chapters/>").unwrap();
+        // The destination's parent is a regular file, so the promotion cannot create it.
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"").unwrap();
+        let final_path = blocker.join("Show - 01.xml");
+
+        let mut log = Vec::new();
+        assert_eq!(
+            promote_optional(&staged, final_path.clone(), "Chapters", &mut log),
+            None
+        );
+        let [line] = log.as_slice() else {
+            panic!("expected one log line: {log:?}");
+        };
+        assert_eq!(line.kind, LogKind::Warning);
+        let prefix = format!(
+            "   -> WARNING: Failed to promote chapters to '{}': ",
+            final_path.display()
+        );
+        assert!(line.text.starts_with(&prefix), "{line:?}");
+    }
 }

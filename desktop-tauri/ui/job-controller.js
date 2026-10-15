@@ -39,6 +39,9 @@ const TERMINAL_LIFECYCLE = { completed: "done", cancelled: "cancelled" };
  * half away from zero like the CLI's `--sub-offset`. An empty entry is `null`; an explicit
  * "0" stays `0` (ADR-0012). Returns `NaN` when the entry is not a number or its milliseconds
  * are not a safe integer, which serde could not read as an `i64`.
+ *
+ * TODO(S3, #113): this bounds with Number.isSafeInteger (±2^53) while
+ * mkv_core::request::seconds_to_ms bounds with i64; S3 deletes this copy for the Rust one.
  */
 function subOffsetSecondsToMs(raw) {
   if (raw === "") return null;
@@ -371,7 +374,7 @@ export class JobController {
       const jobId = this.jobId;
       // stop_job resolves only once teardown is over, so announce the wait first.
       if (this.launched) {
-        this.runtime.appendLog(this.logEl, { kind: "note", text: "[INFO] Stop requested; waiting for shutdown." });
+        this.runtime.appendLog(this.logEl, { kind: "note", text: "Stop requested; waiting for shutdown." });
       }
       await this.runtime.invoke("stop_job", { jobId });
       if (!this.running || generation !== this.startGeneration || this.jobId !== jobId) return;
@@ -400,7 +403,7 @@ export class JobController {
 
     try {
       const msg = await this.runtime.invoke("clear_cache");
-      this.runtime.appendLog(this.logEl, { kind: "cache", text: `[CACHE] ${msg || "Cache cleared."}` });
+      this.runtime.appendLog(this.logEl, { kind: "cache", text: msg || "Cache cleared." });
     } catch (err) {
       this.runtime.appendLog(this.logEl, { kind: "error", text: `ERROR: ${err}` });
     }
