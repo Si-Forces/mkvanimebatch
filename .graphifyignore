@@ -1,0 +1,16 @@
+# Documentation
+README.md
+*.md
+docs/
+*.txt
+
+# CI workflows and agent configs
+.github/
+.agents/
+
+# Static image/media assets
+desktop-tauri/src-tauri/icons/
+*.png
+*.svg
+*.ico
+*.icns
