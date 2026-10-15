@@ -11,7 +11,7 @@ Issue #102 aims to replace the WebKitGTK webview with a native Rust toolkit (Sli
 
 ## Decision
 
-Before choosing a toolkit, move all desktop UI state and logic into a new workspace crate, `crates/mkv-desktop-core` (the **Desktop Core**). It depends on `mkv-core` and **not on Tauri**.
+Before choosing a toolkit, move all desktop UI state and logic except the theme into a new workspace crate, `crates/mkv-desktop-core` (the **Desktop Core**). It depends on `mkv-core` and **not on Tauri**.
 
 1. **The Desktop Core owns the state.** Per mode it holds the Inspection Manifest, the Queue Selection and the Track Assignments. It also holds one Job Snapshot (participants only) and the Job Coordinator's phase. Queue rows are derived by laying the Job Snapshot over the manifest order. The core also runs preflight and builds the `BatchRequest`; a view never builds a request. A view sends user intents and renders what the core publishes.
 2. **One reducer.** Where the JS and Rust reducers disagree, Rust's stricter rules win: drop events that arrive after the batch or belong to another job, apply progress only to processing items with finite values, let `ItemStart` rename the item's file, keep an item's status typed (`ItemStatus`, whose terminal values are the Item Outcomes) rather than a string, and settle the batch status as error when items are left open. There are two exceptions. Default outcome reasons become presentation labels, not stored values. A per-item fallback duration, measured on a monotonic clock like Item Duration, is kept for when `duration_sec` is missing. Outcome counts are derived, not counted.
