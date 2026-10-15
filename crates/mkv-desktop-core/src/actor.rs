@@ -47,7 +47,8 @@ pub struct JobView {
     pub job_id: u64,
     pub mode: String,
     pub status: BatchStatus,
-    /// Whether the job still runs: from its start until its `job-done`.
+    /// Whether the job still runs: from its start until its `job-done`, or until
+    /// its sink is dropped without one.
     pub active: bool,
     pub start_time_ms: u64,
     pub input_dir: String,
@@ -65,6 +66,10 @@ enum Msg {
     },
     Logs(Vec<LogLine>),
     Done(JobDone),
+    /// A job's sink was dropped: after its `Done`, or without one if its supervisor died.
+    SinkClosed {
+        job_id: u64,
+    },
     /// S2a only: the `get_job_snapshot` payload the webview's restore path still reads.
     GetJobSnapshot(oneshot::Sender<Option<JobSnapshot>>),
     /// S2a only: a Directory Inspection began, which drops the snapshot unless a job runs.
@@ -145,16 +150,25 @@ impl JobSink for ActorSink {
     }
 }
 
+impl Drop for ActorSink {
+    fn drop(&mut self) {
+        // The supervisor owns the sink, so this reaches the actor even when it dies before `done`.
+        if let Some(&job_id) = self.job_id.get() {
+            self.core.send(Msg::SinkClosed { job_id });
+        }
+    }
+}
+
 /// The actor's state.
 pub struct Core<P> {
     publisher: P,
     snapshot: Option<JobSnapshot>,
-    /// Whether a job runs: from its `JobStarted` until its `Done`. A supervisor that dies before
-    /// `finish` sends no `Done`, which leaves this set until the next job's `Done`.
+    /// Whether a job runs: from its `JobStarted` until its `Done`, or until its sink is dropped
+    /// when a supervisor that died before `finish` sent no `Done`.
     active: bool,
     /// Whether the state changed since the last publication.
     dirty: bool,
-    last: ViewState,
+    last_published: ViewState,
     last_published_at: Option<Instant>,
 }
 
@@ -167,7 +181,7 @@ impl<P: Publisher> Core<P> {
             snapshot: None,
             active: false,
             dirty: false,
-            last: ViewState { seq: 0, job: None },
+            last_published: ViewState { seq: 0, job: None },
             last_published_at: None,
         };
         runtime.spawn(core.run(inbox));
@@ -182,21 +196,25 @@ impl<P: Publisher> Core<P> {
         tokio::pin!(tick);
         let mut armed = false;
         loop {
+            // Biased: messages already queued go before the tick. A steady stream cannot starve
+            // publication, since the due check below runs after every step, whichever arm ran.
             tokio::select! {
+                biased;
                 msg = inbox.recv() => match msg {
                     Some(msg) => self.handle(msg),
                     None => break,
                 },
-                // The check below publishes if still due: a `done` flush since arming moved it.
                 () = &mut tick, if armed => armed = false,
             }
-            if self.dirty && !armed {
+            if self.dirty {
                 let due = self
                     .last_published_at
                     .map_or_else(Instant::now, |at| at + PUBLISH_INTERVAL);
                 if due <= Instant::now() {
                     self.publish();
-                } else {
+                    armed = false;
+                } else if !armed || tick.deadline() != due {
+                    // Re-armed when a `done` flush since arming moved the due time.
                     tick.as_mut().reset(due);
                     armed = true;
                 }
@@ -207,7 +225,7 @@ impl<P: Publisher> Core<P> {
     fn handle(&mut self, msg: Msg) {
         match msg {
             Msg::GetState(reply) => {
-                let _ = reply.send(self.last.clone());
+                let _ = reply.send(self.last_published.clone());
             }
             Msg::JobStarted(job) => {
                 self.snapshot = Some(job.snapshot());
@@ -233,6 +251,18 @@ impl<P: Publisher> Core<P> {
                 self.publish();
                 self.publisher.done(&done);
             }
+            Msg::SinkClosed { job_id } => {
+                // A no-op after a normal `Done`, or once a later job holds the snapshot.
+                if self.active
+                    && self
+                        .snapshot
+                        .as_ref()
+                        .is_some_and(|snapshot| snapshot.job_id == job_id)
+                {
+                    self.active = false;
+                    self.dirty = true;
+                }
+            }
             Msg::GetJobSnapshot(reply) => {
                 let _ = reply.send(self.snapshot.clone());
             }
@@ -255,13 +285,13 @@ impl<P: Publisher> Core<P> {
             effective_settings: snapshot.effective_settings.clone(),
             participants: snapshot.ordered_item_ids.clone(),
         });
-        self.last = ViewState {
-            seq: self.last.seq + 1,
+        self.last_published = ViewState {
+            seq: self.last_published.seq + 1,
             job,
         };
         self.dirty = false;
         self.last_published_at = Some(Instant::now());
-        self.publisher.state(&self.last);
+        self.publisher.state(&self.last_published);
     }
 }
 
@@ -396,6 +426,70 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn test_a_steady_stream_that_never_drains_the_inbox_still_publishes_every_interval() {
+        let (core, publisher) = spawn_core();
+        let sink = core.job_sink();
+        let begun = Instant::now();
+
+        sink.started(&started(1));
+        sink.event(&batch_start(&["ep1"]));
+        sink.event(&item_start("ep1"));
+        for step in 0..300 {
+            // More than the actor's cooperative budget per turn, so the queue only grows and
+            // the biased inbox arm is always ready.
+            for _ in 0..200 {
+                sink.event(&item_progress("ep1", f64::from(step) / 10.0));
+            }
+            tokio::time::advance(Duration::from_millis(2)).await;
+        }
+
+        let elapsed = begun.elapsed();
+        let states = publisher.states().len() as u128;
+        let interval = PUBLISH_INTERVAL.as_millis();
+        let bound = elapsed.as_millis().div_ceil(interval) + 1;
+        assert!(states <= bound, "{states} publications in {elapsed:?}");
+        assert!(
+            states + 2 >= elapsed.as_millis() / interval,
+            "a steady stream starved publication: {states} in {elapsed:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_a_sink_dropped_without_done_ends_the_active_job() {
+        let (core, publisher) = spawn_core();
+        let sink = core.job_sink();
+        sink.started(&started(1));
+        sink.event(&batch_start(&["ep1"]));
+        // A supervisor that panicked inside a sink call drops it without `done`.
+        drop(sink);
+        tokio::time::sleep(PUBLISH_INTERVAL * 2).await;
+
+        let state = core.state().await.unwrap();
+        assert!(!state.job.unwrap().active);
+        assert!(!publisher
+            .all()
+            .iter()
+            .any(|published| matches!(published, Published::Done(_))));
+        core.scan_began();
+        assert!(core.job_snapshot().await.unwrap().is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_a_sink_dropped_after_done_publishes_nothing_more() {
+        let (core, publisher) = spawn_core();
+        let sink = core.job_sink();
+        sink.started(&started(1));
+        sink.done(&done(1, 0));
+        core.state().await.unwrap();
+        let before = publisher.all().len();
+
+        drop(sink);
+        tokio::time::sleep(PUBLISH_INTERVAL * 2).await;
+        core.state().await.unwrap();
+        assert_eq!(publisher.all().len(), before);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn test_a_single_change_after_idle_publishes_at_once() {
         let (core, publisher) = spawn_core();
         let sink = core.job_sink();
@@ -477,7 +571,8 @@ mod tests {
         tokio::time::sleep(ms(10)).await;
         first.done(&done(1, 0)); // t=20: the flush, seq 2
         tokio::time::sleep(ms(10)).await;
-        core.job_sink().started(&started(2)); // t=30: due at t=86, not at the stale t=66
+        let second = core.job_sink(); // lives to the end, so job 2 stays active
+        second.started(&started(2)); // t=30: due at t=86, not at the stale t=66
 
         tokio::time::sleep(ms(40)).await; // t=70
         assert_eq!(core.state().await.unwrap().seq, 2);

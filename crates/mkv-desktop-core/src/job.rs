@@ -3,7 +3,7 @@
 //! Snapshot (the settlement ledger) and reports through a `JobSink`, so it runs, and is tested,
 //! without a UI toolkit; its tasks run on the tokio runtime the adapter hands `JobState::new`.
 
-use crate::snapshot::{attach_context, BatchStatus, JobSnapshot};
+use crate::snapshot::{attach_context, timestamp_ms, BatchStatus, JobSnapshot};
 use mkv_core::log_line::LogLine;
 use mkv_core::pipeline::{
     CancellationToken, EventReceiver, JobEvent, LogReceiver, PipelineSummary,
@@ -39,21 +39,21 @@ pub struct JobStarted {
     pub mode: &'static str,
     pub input_dir: String,
     pub effective_settings: EffectiveSettings,
-    /// The wall-clock start the supervisor's ledger was begun with, so every copy shares it.
+    /// The job's wall-clock start, read once, so the supervisor's ledger and every sink's copy
+    /// share it.
     pub start_time_ms: u64,
 }
 
 impl JobStarted {
-    /// The Job Snapshot of this job as it starts, with the supervisor's start time.
+    /// The Job Snapshot of this job as it starts.
     pub fn snapshot(&self) -> JobSnapshot {
-        let mut snapshot = JobSnapshot::begin(
+        JobSnapshot::begin(
             self.job_id,
             self.mode,
+            self.start_time_ms,
             self.input_dir.clone(),
             self.effective_settings.clone(),
-        );
-        snapshot.start_time_ms = self.start_time_ms;
-        snapshot
+        )
     }
 }
 
@@ -61,7 +61,7 @@ impl JobStarted {
 /// `ActorSink` in the app; tests record them.
 pub trait JobSink: Send + Sync + 'static {
     /// Called once, after the job has reserved the Job Slot and before its supervisor runs.
-    fn started(&self, _job: &JobStarted) {}
+    fn started(&self, job: &JobStarted);
     fn event(&self, event: &JobEvent);
     fn logs(&self, lines: &[LogLine]);
     fn done(&self, done: &JobDone);
@@ -130,14 +130,15 @@ impl JobState {
         let job_id = self.0.next_id.fetch_add(1, Ordering::SeqCst);
         // The supervisor's private settlement ledger: built by the same reducer as the snapshot
         // the UI sees, so teardown never depends on anyone else's copy.
-        let mut ledger = JobSnapshot::begin(job_id, mode, input_dir, effective_settings);
-        sink.started(&JobStarted {
+        let started = JobStarted {
             job_id,
             mode,
-            input_dir: ledger.input_dir.clone(),
-            effective_settings: ledger.effective_settings.clone(),
-            start_time_ms: ledger.start_time_ms,
-        });
+            input_dir,
+            effective_settings,
+            start_time_ms: timestamp_ms(),
+        };
+        let mut ledger = started.snapshot();
+        sink.started(&started);
 
         let pipeline_handle = self.0.runtime.spawn(pipeline_future);
         let pipeline_abort = pipeline_handle.abort_handle();
@@ -932,6 +933,8 @@ mod tests {
         assert_eq!(start["mode"], "remux");
         assert_eq!(start["job_id"], job_id);
         assert_eq!(start["source"], "engine");
+        // A clean success: the ledger ended Completed.
+        assert_eq!(done_for(&sink, job_id)["code"], 0);
     }
 
     #[test]
@@ -1105,7 +1108,7 @@ mod tests {
         let terminal = terminal_for(&sink, job_id);
         assert_eq!(terminal["cancelled"], false);
         assert_eq!(terminal["error"], "scan failed before any stop");
-        assert_ne!(done_for(&sink, job_id)["code"], -1);
+        assert_eq!(done_for(&sink, job_id)["code"], 1);
         assert!(
             sink.log_batches().concat().contains(&LogLine::error(
                 "ERROR: Pipeline failed: scan failed before any stop"
@@ -1237,6 +1240,7 @@ mod tests {
             previous_worker,
         );
         wait_released(&job, &sink, previous_id);
+        assert_eq!(done_for(&sink, previous_id)["code"], 0);
 
         let token = CancellationToken::new();
         let worker_token = token.clone();

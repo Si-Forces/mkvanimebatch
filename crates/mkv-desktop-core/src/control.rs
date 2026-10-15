@@ -503,6 +503,14 @@ mod tests {
                 .unwrap();
             self.sink.snapshot()
         }
+
+        /// The `job-done` code of the last job this bridge ran.
+        fn done_code(&self) -> i64 {
+            let dones = self.sink.dones();
+            dones.last().expect("no job-done recorded")["code"]
+                .as_i64()
+                .unwrap()
+        }
     }
 
     /// A dry-run extract request of `input_dir` that sets nothing else.
@@ -517,7 +525,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_job_snapshot_carries_the_effective_settings() {
+    fn test_run_job_reports_the_effective_settings_to_its_sink() {
         let bridge = Bridge::new();
         let tmp = tempfile::tempdir().unwrap();
         let request = BatchRequest {
@@ -535,10 +543,11 @@ mod tests {
         // The snapshot is the finished job's: BatchStart replaced its batch, not its settings.
         assert_eq!(snapshot.effective_settings, expected);
         assert_eq!(snapshot.total_items, 0);
+        assert_eq!(bridge.done_code(), 0);
     }
 
     #[test]
-    fn test_run_job_canonicalizes_linked_input_dir() {
+    fn test_run_job_reports_the_canonical_linked_input_dir_to_its_sink() {
         let bridge = Bridge::new();
         let target_dir = tempfile::tempdir().unwrap();
         let parent_dir = tempfile::tempdir().unwrap();
@@ -567,6 +576,7 @@ mod tests {
         );
         let linked_input_dir = symlink_path.to_string_lossy().into_owned();
         let snapshot_input_dir = bridge.run_dry_extract(symlink_path).input_dir;
+        assert_eq!(bridge.done_code(), 0);
         let canonical_target = std::fs::canonicalize(target_dir.path()).unwrap();
         assert_ne!(snapshot_input_dir, linked_input_dir);
         assert_eq!(
@@ -612,6 +622,7 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         assert_eq!(snapshot.input_dir, expected_display);
+        assert_eq!(bridge.done_code(), 0);
     }
 
     /// A session cache backed by `dir/inspect_cache.json`, whose file already holds an entry

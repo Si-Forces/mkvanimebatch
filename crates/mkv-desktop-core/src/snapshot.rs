@@ -92,10 +92,11 @@ pub struct JobSnapshot {
 }
 
 impl JobSnapshot {
-    /// The snapshot of job `job_id` as it starts: running, with no batch yet.
+    /// The snapshot of job `job_id`, started at `start_time_ms`: running, with no batch yet.
     pub fn begin(
         job_id: u64,
         mode: &str,
+        start_time_ms: u64,
         input_dir: String,
         effective_settings: EffectiveSettings,
     ) -> Self {
@@ -103,7 +104,7 @@ impl JobSnapshot {
             job_id,
             mode: mode.to_string(),
             status: BatchStatus::Running,
-            start_time_ms: timestamp_ms(),
+            start_time_ms,
             total_items: 0,
             input_dir,
             effective_settings,
@@ -121,7 +122,7 @@ impl JobSnapshot {
         | JobEvent::ItemProgress { version, .. }
         | JobEvent::ItemComplete { version, .. }
         | JobEvent::BatchComplete { version, .. }) = event;
-        // Webview twin: the v1 guard in queue-state.js `reduceQueueEvent`, until S2 removes that
+        // Webview twin: the v1 guard in queue-state.js `reduceQueueEvent`, until S2b removes that
         // reducer. Both must drop the same events.
         if *version != EVENT_VERSION {
             return;
@@ -317,7 +318,7 @@ impl Serialize for JobSnapshot {
     }
 }
 
-fn timestamp_ms() -> u64 {
+pub(crate) fn timestamp_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
@@ -367,7 +368,13 @@ pub mod test_support {
 
     /// The snapshot of remux job `job_id` of `/anime` as it starts, with `effective_settings`.
     pub fn begun(job_id: u64) -> JobSnapshot {
-        JobSnapshot::begin(job_id, "remux", "/anime".into(), effective_settings())
+        JobSnapshot::begin(
+            job_id,
+            "remux",
+            1_700_000_000_000,
+            "/anime".into(),
+            effective_settings(),
+        )
     }
 
     /// A `BatchStart` listing `ids` in engine order; each item's file is `<id>.mkv`.
