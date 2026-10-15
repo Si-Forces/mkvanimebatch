@@ -18,7 +18,8 @@ pub enum LogKind {
     Note,
 }
 
-/// One Log Channel line: its kind and its text, which carries no kind marker of its own.
+/// One Log Channel line: its kind, which decides how the line is shown, and its text, which
+/// rendering leaves unchanged. Error lines say "ERROR:" in their own text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LogLine {
     pub kind: LogKind,
