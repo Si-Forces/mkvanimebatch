@@ -37,11 +37,11 @@ impl Default for TelemetryState {
 
 #[derive(serde::Serialize)]
 pub struct TelemetryData {
-    cpu_pct: f32,
-    ram_used_mb: u64,
-    ram_total_mb: u64,
-    ram_pct: f32,
-    io_mb_s: f32,
+    pub cpu_pct: f32,
+    pub ram_used_mb: u64,
+    pub ram_total_mb: u64,
+    pub ram_pct: f32,
+    pub io_mb_s: f32,
 }
 
 const KNOWN_ENGINE_PREFIXES: [&str; 3] = ["mkvmerge", "mkvextract", "ffmpeg"];

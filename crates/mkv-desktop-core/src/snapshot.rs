@@ -103,6 +103,9 @@ impl JobSnapshot {
 
 /// The `get_job_snapshot` payload: the fields in order, with `completed_items` derived, since
 /// the webview's restore path still reads it.
+/// `test_reducer_derives_completed_items_from_item_outcomes` pins the serialized key set and is
+/// the guard against a field silently dropping off the wire; do not "simplify" this back to a
+/// derive without keeping `completed_items`.
 impl Serialize for JobSnapshot {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut state = serializer.serialize_struct("JobSnapshot", 10)?;
@@ -183,6 +186,8 @@ impl SnapshotStore {
         | JobEvent::ItemProgress { version, .. }
         | JobEvent::ItemComplete { version, .. }
         | JobEvent::BatchComplete { version, .. }) = event;
+        // Webview twin: the v1 guard in queue-state.js `reduceQueueEvent`, until S2 removes that
+        // reducer. Both must drop the same events.
         if *version != EVENT_VERSION {
             return;
         }

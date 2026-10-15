@@ -4,8 +4,9 @@
 //! runtime the adapter hands `JobState::new`.
 
 use crate::snapshot::{attach_context, BatchStatus, JobSnapshot, SnapshotStore};
+use mkv_core::log_line::LogLine;
 use mkv_core::pipeline::{
-    CancellationToken, EventReceiver, JobEvent, LogKind, LogLine, LogReceiver, PipelineSummary,
+    CancellationToken, EventReceiver, JobEvent, LogReceiver, PipelineSummary,
 };
 use mkv_core::request::EffectiveSettings;
 use serde::Serialize;
@@ -337,10 +338,7 @@ fn pipeline_terminal(
         // cancelled, so the terminal must stay cancelled. Either way the
         // error is still surfaced in the job log.
         Ok(Err(error)) => {
-            sink.logs(&[LogLine::new(
-                LogKind::Error,
-                format!("ERROR: Pipeline failed: {error}"),
-            )]);
+            sink.logs(&[LogLine::error(format!("ERROR: Pipeline failed: {error}"))]);
             if cancelled {
                 bridge_terminal(true, None)
             } else {
@@ -355,10 +353,9 @@ fn pipeline_terminal(
                 .map(|value| (*value).to_string())
                 .or_else(|| payload.downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "Unknown pipeline panic".to_string());
-            sink.logs(&[LogLine::new(
-                LogKind::Error,
-                format!("ERROR: Pipeline panicked: {message}"),
-            )]);
+            sink.logs(&[LogLine::error(format!(
+                "ERROR: Pipeline panicked: {message}"
+            ))]);
             bridge_terminal(false, Some(("panic", message)))
         }
         Err(_) => bridge_terminal(
@@ -416,6 +413,7 @@ async fn forward_events(
             }
             attach_context(&mut event, mode, job_id);
             state.0.snapshot.update(&event, job_id, mode);
+            // The sink still gets every event; the webview drops non-v1 events itself.
             sink.event(&event);
         }
     }
@@ -503,11 +501,9 @@ pub mod test_support {
             .clone()
     }
 
-    impl Default for JobState {
-        /// A state whose jobs run on the shared test `runtime`.
-        fn default() -> Self {
-            Self::new(runtime())
-        }
+    /// A state whose jobs run on the shared test `runtime`.
+    pub fn job_state() -> JobState {
+        JobState::new(runtime())
     }
 
     pub fn poison<T: Send>(mutex: &Mutex<T>) {
@@ -644,7 +640,7 @@ mod tests {
 
     /// A job state and a sink recording everything its jobs report.
     fn observed() -> (JobState, RecordingSink) {
-        (JobState::default(), RecordingSink::default())
+        (job_state(), RecordingSink::default())
     }
 
     /// Starts a remux job running `worker`, or returns the error that refuses it.
@@ -767,7 +763,7 @@ mod tests {
     }
 
     fn note(text: impl Into<String>) -> LogLine {
-        LogLine::new(LogKind::Note, text)
+        LogLine::note(text)
     }
 
     fn logged(sink: &RecordingSink, needle: &str) -> bool {
@@ -1079,8 +1075,7 @@ mod tests {
         assert_eq!(terminal["error"], "scan failed before any stop");
         assert_ne!(done_for(&sink, job_id)["code"], -1);
         assert!(
-            sink.log_batches().concat().contains(&LogLine::new(
-                LogKind::Error,
+            sink.log_batches().concat().contains(&LogLine::error(
                 "ERROR: Pipeline failed: scan failed before any stop"
             )),
             "worker error must reach the job log as an Error line"
@@ -1268,8 +1263,7 @@ mod tests {
         assert_eq!(done_for(&sink, job_id)["code"], 1);
         assert_eq!(
             sink.log_batches(),
-            [[LogLine::new(
-                LogKind::Error,
+            [[LogLine::error(
                 "ERROR: Pipeline panicked: bridge worker panicked"
             )]]
         );
@@ -1310,7 +1304,7 @@ mod tests {
 
     #[test]
     fn test_clear_snapshot_ignored_while_job_is_active() {
-        let state = JobState::default();
+        let state = job_state();
         state.occupy(42);
         state.begin_snapshot(42);
         state.clear_snapshot();
@@ -1319,7 +1313,7 @@ mod tests {
 
     #[test]
     fn test_clear_snapshot_drops_the_snapshot_when_no_job_is_active() {
-        let state = JobState::default();
+        let state = job_state();
         state.begin_snapshot(42);
         assert!(state.snapshot().unwrap().is_some());
 
@@ -1329,7 +1323,7 @@ mod tests {
 
     #[test]
     fn test_clear_snapshot_drops_the_snapshot_when_the_slot_is_poisoned() {
-        let state = JobState::default();
+        let state = job_state();
         state.poison_slot();
         state.begin_snapshot(42);
 
@@ -1339,7 +1333,7 @@ mod tests {
 
     #[test]
     fn test_clear_snapshot_holds_the_slot_until_it_has_cleared() {
-        let state = JobState::default();
+        let state = job_state();
         state.begin_snapshot(42);
         let guard = state.hold_snapshot();
 
@@ -1370,7 +1364,7 @@ mod tests {
 
     #[test]
     fn test_wait_for_job_slot_release_waits_for_cleanup() {
-        let state = JobState::default();
+        let state = job_state();
         state.occupy(42);
 
         thread::scope(|scope| {
@@ -1386,7 +1380,7 @@ mod tests {
 
     #[test]
     fn test_wait_for_job_slot_release_times_out_while_owned() {
-        let state = JobState::default();
+        let state = job_state();
         state.occupy(42);
 
         let result = state.wait_until_released(42, Duration::from_millis(10));
@@ -1395,7 +1389,7 @@ mod tests {
 
     #[test]
     fn test_stop_reports_unreleased_slot() {
-        let state = JobState::default();
+        let state = job_state();
         state.occupy(42);
 
         let result = state.stop(None, Duration::from_millis(50));

@@ -1,7 +1,8 @@
 //! The webview side of a job: the `JobSink` adapter that emits a job's events, log batches and
 //! completion to the webview.
 
-use mkv_core::pipeline::{JobEvent, LogLine};
+use mkv_core::log_line::LogLine;
+use mkv_core::pipeline::JobEvent;
 use mkv_desktop_core::job::{JobDone, JobSink};
 use tauri::{AppHandle, Emitter, Runtime};
 
@@ -29,7 +30,6 @@ impl<R: Runtime> JobSink for WebviewSink<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mkv_core::pipeline::LogKind;
     use mkv_desktop_core::snapshot::test_support::batch_start;
     use serde_json::Value;
     use std::sync::{Arc, Mutex};
@@ -65,8 +65,8 @@ mod tests {
         JobSink::logs(
             &sink,
             &[
-                LogLine::new(LogKind::Note, "probing"),
-                LogLine::new(LogKind::Error, "ERROR: Pipeline failed: x"),
+                LogLine::note("probing"),
+                LogLine::error("ERROR: Pipeline failed: x"),
             ],
         );
         JobSink::done(

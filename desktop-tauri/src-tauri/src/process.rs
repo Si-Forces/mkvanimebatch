@@ -57,7 +57,7 @@ mod tests {
     #[test]
     fn test_teardown_leaves_the_calling_runtime_free_while_it_waits() {
         let app = tauri::test::mock_app();
-        app.manage(JobState::default());
+        app.manage(mkv_desktop_core::job::test_support::job_state());
         app.manage(ScanState::default());
         // Nothing releases this slot, so the teardown waits out both phases.
         app.state::<JobState>().occupy(42);
@@ -90,7 +90,7 @@ mod tests {
     #[test]
     fn close_during_a_pending_stop_settles_the_job_once() {
         let app = tauri::test::mock_app();
-        app.manage(JobState::default());
+        app.manage(mkv_desktop_core::job::test_support::job_state());
         app.manage(ScanState::default());
         let sink = RecordingSink::default();
         let token = CancellationToken::new();

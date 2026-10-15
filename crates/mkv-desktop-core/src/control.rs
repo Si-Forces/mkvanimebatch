@@ -6,21 +6,21 @@ use crate::job::{display_canonical_path, wait_until, JobConfig, JobSink, JobStat
 use mkv_core::pipeline::{CancellationToken, PipelineConfig, PipelineMode};
 use mkv_core::request::BatchRequest;
 use mkv_core::scan::PersistentInspectCache;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::OnceCell;
 
-pub struct ActiveScan {
-    pub id: u64,
-    pub cancel_token: CancellationToken,
+struct ActiveScan {
+    id: u64,
+    cancel_token: CancellationToken,
 }
 
 pub struct ScanState {
-    pub active: Mutex<Option<ActiveScan>>,
-    pub next_id: AtomicU64,
-    pub start_lock: Mutex<()>,
+    active: Mutex<Option<ActiveScan>>,
+    next_id: AtomicU64,
+    start_lock: Mutex<()>,
     accepting_starts: AtomicBool,
 }
 
@@ -48,6 +48,36 @@ impl ScanState {
         }
     }
 
+    /// Registers a Directory Inspection of `dir`, which the caller has already canonicalized,
+    /// and returns its registration and cancel token. The caller canonicalizes before this
+    /// because the start lock's guard is not `Send` and so cannot be held across that await; the
+    /// accepting check repeats under the lock for a shutdown that began meanwhile. A previous
+    /// inspection is cancelled, and the new one replaces it as the active scan; the previous
+    /// registration's drop then leaves the new one alone. Keep the registration alive until the
+    /// inspection ends: its drop is what tells teardown the inspection has finished.
+    pub fn begin(
+        &self,
+        job: &JobState,
+        dir: &Path,
+    ) -> Result<(ScanRegistration<'_>, CancellationToken), String> {
+        let start_lock = self.start_lock.lock().map_err(|e| e.to_string())?;
+        self.ensure_accepting_starts()?;
+        if !dir.is_dir() {
+            return Err("Directory does not exist or is not a directory".into());
+        }
+        stop_registered_scan(self)?;
+
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let cancel_token = CancellationToken::new();
+        *self.active.lock().map_err(|e| e.to_string())? = Some(ActiveScan {
+            id,
+            cancel_token: cancel_token.clone(),
+        });
+        job.clear_snapshot();
+        drop(start_lock);
+        Ok((ScanRegistration { state: self, id }, cancel_token))
+    }
+
     fn wait_until_empty(&self, timeout: Duration) -> Result<(), String> {
         wait_until(timeout, "directory inspection", || {
             Ok(self.active.lock().map_err(|e| e.to_string())?.is_none())
@@ -55,9 +85,11 @@ impl ScanState {
     }
 }
 
+/// A running Directory Inspection. Its drop is the only place that vacates the active scan, and
+/// only while the scan is still its own.
 pub struct ScanRegistration<'a> {
-    pub state: &'a ScanState,
-    pub id: u64,
+    state: &'a ScanState,
+    id: u64,
 }
 
 impl Drop for ScanRegistration<'_> {
@@ -103,9 +135,11 @@ fn stop_scan(state: &ScanState) -> Result<(), String> {
     stop_registered_scan(state)
 }
 
-pub fn stop_registered_scan(state: &ScanState) -> Result<(), String> {
-    let mut active = state.active.lock().map_err(|e| e.to_string())?;
-    if let Some(scan) = active.take() {
+/// Cancels the active scan but leaves it registered: its `ScanRegistration` vacates it when the
+/// inspection actually ends, so `wait_until_empty` waits for that rather than for the cancel.
+fn stop_registered_scan(state: &ScanState) -> Result<(), String> {
+    let active = state.active.lock().map_err(|e| e.to_string())?;
+    if let Some(scan) = active.as_ref() {
         scan.cancel_token.cancel();
     }
     Ok(())
@@ -269,7 +303,7 @@ pub fn launch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::job::test_support::{poison, runtime, RecordingSink};
+    use crate::job::test_support::{job_state, poison, runtime, RecordingSink};
     use crate::snapshot::JobSnapshot;
 
     #[test]
@@ -281,10 +315,10 @@ mod tests {
             cancel_token: token.clone(),
         });
 
-        let job_state = JobState::default();
-        job_state.occupy(7);
-        assert!(stop_job_inner(&job_state, &scan_state, Some(99)).is_ok());
-        assert!(stop_job_inner(&JobState::default(), &scan_state, Some(99)).is_ok());
+        let job = job_state();
+        job.occupy(7);
+        assert!(stop_job_inner(&job, &scan_state, Some(99)).is_ok());
+        assert!(stop_job_inner(&job_state(), &scan_state, Some(99)).is_ok());
 
         assert!(scan_state.is_active());
         assert!(!token.is_cancelled());
@@ -295,63 +329,60 @@ mod tests {
         let scan_state = ScanState::default();
         poison(&scan_state.start_lock);
 
-        let job_state = JobState::default();
-        job_state.occupy(7);
+        let job = job_state();
+        job.occupy(7);
 
-        let error = stop_job_inner(&job_state, &scan_state, Some(7)).unwrap_err();
+        let error = stop_job_inner(&job, &scan_state, Some(7)).unwrap_err();
         assert!(error.contains("poisoned"));
-        assert!(job_state.current_cancelled());
+        assert!(job.current_cancelled());
     }
 
     #[test]
     fn test_cleanup_attempts_scan_and_job_teardown() {
         let scan_state = ScanState::default();
         poison(&scan_state.start_lock);
-        let job_state = JobState::default();
-        job_state.poison_slot();
+        let job = job_state();
+        job.poison_slot();
 
-        let error = cleanup_owned_processes(&job_state, &scan_state).unwrap_err();
+        let error = cleanup_owned_processes(&job, &scan_state).unwrap_err();
         assert!(error.contains("Directory inspection cleanup failed"));
         assert!(error.contains("Job cleanup failed"));
     }
 
     #[test]
     fn test_scan_startup_is_visible_before_process_registration() {
-        let job_state = JobState::default();
+        let job = job_state();
         let scan_state = ScanState::default();
 
         let _startup = scan_state.start_lock.lock().unwrap();
-        assert!(begin_shutdown(&job_state, &scan_state));
+        assert!(begin_shutdown(&job, &scan_state));
         assert!(scan_state.ensure_accepting_starts().is_err());
-        assert!(job_state.ensure_accepting_starts().is_err());
+        assert!(job.ensure_accepting_starts().is_err());
     }
 
     #[test]
     fn test_cancel_shutdown_restores_accepting_starts() {
-        let job_state = JobState::default();
+        let job = job_state();
         let scan_state = ScanState::default();
 
-        begin_shutdown(&job_state, &scan_state);
+        begin_shutdown(&job, &scan_state);
         assert!(scan_state.ensure_accepting_starts().is_err());
-        assert!(job_state.ensure_accepting_starts().is_err());
+        assert!(job.ensure_accepting_starts().is_err());
 
-        cancel_shutdown(&job_state, &scan_state);
+        cancel_shutdown(&job, &scan_state);
         assert!(scan_state.ensure_accepting_starts().is_ok());
-        assert!(job_state.ensure_accepting_starts().is_ok());
+        assert!(job.ensure_accepting_starts().is_ok());
     }
 
     #[test]
     fn test_cleanup_fails_if_job_slot_not_released() {
-        let job_state = JobState::default();
+        let job = job_state();
         let scan_state = ScanState::default();
-        job_state.occupy(42);
+        job.occupy(42);
 
-        let error = cleanup_owned_processes_with_timeout(
-            &job_state,
-            &scan_state,
-            Duration::from_millis(50),
-        )
-        .unwrap_err();
+        let error =
+            cleanup_owned_processes_with_timeout(&job, &scan_state, Duration::from_millis(50))
+                .unwrap_err();
 
         assert!(error.contains("Timed out"));
         assert!(error.contains("Job cleanup failed"));
@@ -368,7 +399,54 @@ mod tests {
 
         assert!(stop_registered_scan(&state).is_ok());
         assert!(token.is_cancelled());
-        assert!(!state.is_active());
+        // Still registered: only the inspection's own registration vacates it.
+        assert!(state.is_active());
+    }
+
+    #[test]
+    fn test_cleanup_waits_until_the_scan_registration_drops() {
+        let (job, scan_state) = (job_state(), ScanState::default());
+        let tmp = tempfile::tempdir().unwrap();
+        let (registration, token) = scan_state.begin(&job, tmp.path()).unwrap();
+        let released = AtomicBool::new(false);
+
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                // Stands in for an inspection that ends a while after its cancel.
+                while !token.is_cancelled() {
+                    std::thread::yield_now();
+                }
+                std::thread::sleep(Duration::from_millis(100));
+                released.store(true, Ordering::SeqCst);
+                drop(registration);
+            });
+            cleanup_owned_processes(&job, &scan_state).unwrap();
+            assert!(
+                released.load(Ordering::SeqCst),
+                "cleanup returned before the cancelled inspection ended"
+            );
+        });
+
+        let (_registration, _token) = scan_state.begin(&job, tmp.path()).unwrap();
+        let error =
+            cleanup_owned_processes_with_timeout(&job, &scan_state, Duration::from_millis(50))
+                .unwrap_err();
+        assert!(error.contains("Directory inspection cleanup failed"));
+        assert!(error.contains("Timed out"));
+    }
+
+    #[test]
+    fn test_begin_replaces_and_cancels_the_previous_scan() {
+        let (job, scan_state) = (job_state(), ScanState::default());
+        let tmp = tempfile::tempdir().unwrap();
+        let (first, first_token) = scan_state.begin(&job, tmp.path()).unwrap();
+        let (_second, second_token) = scan_state.begin(&job, tmp.path()).unwrap();
+        assert!(first_token.is_cancelled());
+
+        drop(first);
+        assert!(scan_state.is_active(), "the old drop vacated the new scan");
+        assert!(!second_token.is_cancelled());
+        assert!(scan_state.begin(&job, &tmp.path().join("missing")).is_err());
     }
 
     #[test]
@@ -402,7 +480,7 @@ mod tests {
         /// cache gives the bridge its own `cache_state`.
         fn new() -> Self {
             Self {
-                job: JobState::default(),
+                job: job_state(),
                 sink: RecordingSink::default(),
                 cache_state: InspectCacheState::default(),
             }

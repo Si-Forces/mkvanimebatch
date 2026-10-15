@@ -1,16 +1,11 @@
 use crate::sink::WebviewSink;
 use mkv_core::manifest::InspectionManifest;
-use mkv_core::pipeline::CancellationToken;
 use mkv_core::request::{BatchRequest, EffectiveSettings};
-use mkv_desktop_core::control::{
-    launch, resolve_canonical, stop_registered_scan, ActiveScan, InspectCacheState,
-    ScanRegistration, ScanState,
-};
+use mkv_desktop_core::control::{launch, resolve_canonical, InspectCacheState, ScanState};
 use mkv_desktop_core::job::{display_canonical_path, JobState};
 use mkv_desktop_core::snapshot::JobSnapshot;
 use serde::Deserialize;
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Manager, State};
 
 pub(crate) const CLEANUP_ERROR: &str = "cleanup-error";
@@ -50,30 +45,11 @@ pub async fn inspect_directory<R: tauri::Runtime>(
     path: String,
     options: Option<InspectOptions>,
 ) -> Result<InspectionManifest, String> {
-    // A closing app refuses before it touches the path. Canonicalizing runs before the start
-    // lock, whose guard is not `Send` and so cannot be held across this await; the check
-    // repeats under the lock for a shutdown that began meanwhile.
+    // A closing app refuses before it touches the path. Canonicalizing runs before
+    // `ScanState::begin` takes the start lock, whose guard cannot be held across this await.
     state.ensure_accepting_starts()?;
     let (dir, identity) = canonicalize_directory(path).await?;
-    let start_lock = state.start_lock.lock().map_err(|e| e.to_string())?;
-    state.ensure_accepting_starts()?;
-    if !dir.is_dir() {
-        return Err("Directory does not exist or is not a directory".into());
-    }
-    stop_registered_scan(&state)?;
-
-    let scan_id = state.next_id.fetch_add(1, Ordering::SeqCst);
-    let cancel_token = CancellationToken::new();
-    *state.active.lock().map_err(|e| e.to_string())? = Some(ActiveScan {
-        id: scan_id,
-        cancel_token: cancel_token.clone(),
-    });
-    app.state::<JobState>().clear_snapshot();
-    drop(start_lock);
-    let _registration = ScanRegistration {
-        state: &state,
-        id: scan_id,
-    };
+    let (_registration, cancel_token) = state.begin(&app.state::<JobState>(), &dir)?;
 
     let no_cache = options.and_then(|o| o.no_cache).unwrap_or(false);
     let cache = if no_cache {
@@ -255,7 +231,7 @@ mod tests {
     #[test]
     fn test_inspect_directory_reports_the_identity_canonical_directory_returns() {
         let app = tauri::test::mock_app();
-        app.manage(JobState::default());
+        app.manage(mkv_desktop_core::job::test_support::job_state());
         app.manage(ScanState::default());
         app.manage(InspectCacheState::default());
         let tmp = tempfile::tempdir().unwrap();
