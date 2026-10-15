@@ -8,6 +8,7 @@ use crate::domain::{
     cover_mime, promote_file, select_audio_track, IO_GOVERNOR_CLOSED, SUBPROCESS_TIMEOUT,
 };
 use crate::fonts::FontInfo;
+use crate::log_line::{LogKind, LogLine};
 use crate::media_tool::{self, MediaTool, MediaToolRunner};
 use crate::scan::InspectedVideo;
 
@@ -274,8 +275,11 @@ pub async fn execute_remux_job(
     on_progress: Option<&(dyn Fn(f64) + Send + Sync)>,
     io_semaphore: &Semaphore,
     runner: &dyn MediaToolRunner,
-) -> Result<Vec<String>, String> {
-    let mut log = vec![format!("Processing: {}", job.video_name)];
+) -> Result<Vec<LogLine>, String> {
+    let mut log = vec![LogLine::new(
+        LogKind::Step,
+        format!("Processing: {}", job.video_name),
+    )];
     log.extend(
         job.chapter_warning
             .as_deref()
@@ -313,7 +317,10 @@ pub async fn execute_remux_job(
             options.complexity,
             options.ffmpeg_threads,
         );
-        log.push("  Transcoding audio to Opus with ffmpeg...".into());
+        log.push(LogLine::new(
+            LogKind::Note,
+            "  Transcoding audio to Opus with ffmpeg...",
+        ));
         media_tool::run(
             runner,
             MediaTool::Ffmpeg,
@@ -342,7 +349,7 @@ pub async fn execute_remux_job(
         .await
         .map_err(|_| IO_GOVERNOR_CLOSED.to_string())?;
 
-    log.push("  Running mkvmerge...".into());
+    log.push(LogLine::new(LogKind::Note, "  Running mkvmerge..."));
     let output = media_tool::run(
         runner,
         MediaTool::Mkvmerge,
@@ -363,6 +370,9 @@ pub async fn execute_remux_job(
     promote_file(&temp_output, &job.output_file)
         .map_err(|e| format!("Failed to promote remuxed file to final destination: {e}"))?;
 
-    log.push(format!("  Completed -> {}", job.output_file.display()));
+    log.push(LogLine::new(
+        LogKind::Succeeded,
+        format!("  Completed -> {}", job.output_file.display()),
+    ));
     Ok(log)
 }

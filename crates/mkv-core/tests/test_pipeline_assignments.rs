@@ -11,7 +11,7 @@ use common::{run_batch, seeded_cache, video_metadata};
 use mkv_core::manifest::generate_inspection_manifest;
 use mkv_core::pipeline::{
     create_event_channel, create_log_channel, BatchPipeline, CancellationToken, ItemOutcome,
-    JobEvent, PipelineConfig, PipelineMode,
+    JobEvent, LogKind, LogLine, PipelineConfig, PipelineMode,
 };
 use mkv_core::request::{AssignmentKind, BatchRequest, TrackAssignment};
 
@@ -190,10 +190,16 @@ async fn test_planning_abort_keeps_earlier_skip_lines_and_drops_dry_run_lines() 
         let summary = pipeline.run().await.unwrap();
 
         let expected = vec![
-            "Skipping 'Extras.mkv': Could not extract episode number from filename".to_string(),
-            format!(
-                "  ERROR: Remux planning failed for 'Show - 02.mkv': Assigned subtitle '{}' no longer exists",
-                manual.display()
+            LogLine::new(
+                LogKind::Skipped,
+                "Skipping 'Extras.mkv': Could not extract episode number from filename",
+            ),
+            LogLine::new(
+                LogKind::Error,
+                format!(
+                    "  ERROR: Remux planning failed for 'Show - 02.mkv': Assigned subtitle '{}' no longer exists",
+                    manual.display()
+                ),
             ),
         ];
         let mut channel_log = Vec::new();

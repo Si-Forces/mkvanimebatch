@@ -4,7 +4,7 @@
 
 use crate::snapshot::{attach_context, BatchStatus, JobSnapshot, SnapshotStore};
 use mkv_core::pipeline::{
-    CancellationToken, EventReceiver, JobEvent, LogReceiver, PipelineSummary,
+    CancellationToken, EventReceiver, JobEvent, LogKind, LogLine, LogReceiver, PipelineSummary,
 };
 use mkv_core::request::EffectiveSettings;
 use serde::Serialize;
@@ -36,7 +36,7 @@ pub(crate) struct JobDone {
 /// webview; tests record them.
 pub(crate) trait JobSink: Send + Sync + 'static {
     fn event(&self, event: &JobEvent);
-    fn logs(&self, lines: &[String]);
+    fn logs(&self, lines: &[LogLine]);
     fn done(&self, done: &JobDone);
 }
 
@@ -45,7 +45,7 @@ impl<R: Runtime> JobSink for AppHandle<R> {
         let _ = self.emit(JOB_EVENT, event);
     }
 
-    fn logs(&self, lines: &[String]) {
+    fn logs(&self, lines: &[LogLine]) {
         let _ = self.emit(JOB_LOG, lines);
     }
 
@@ -350,7 +350,10 @@ fn pipeline_terminal(
         // cancelled, so the terminal must stay cancelled. Either way the
         // error is still surfaced in the job log.
         Ok(Err(error)) => {
-            sink.logs(&[format!("[ERR] Pipeline failed: {error}")]);
+            sink.logs(&[LogLine::new(
+                LogKind::Error,
+                format!("ERROR: Pipeline failed: {error}"),
+            )]);
             if cancelled {
                 bridge_terminal(true, None)
             } else {
@@ -367,7 +370,10 @@ fn pipeline_terminal(
                 .map(|value| (*value).to_string())
                 .or_else(|| payload.downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "Unknown pipeline panic".to_string());
-            sink.logs(&[format!("[PANIC] {message}")]);
+            sink.logs(&[LogLine::new(
+                LogKind::Error,
+                format!("ERROR: Pipeline panicked: {message}"),
+            )]);
             bridge_terminal(false, Some(("panic", message)))
         }
         Err(_) => bridge_terminal(
@@ -434,7 +440,7 @@ async fn forward_events(
 /// Forwards the engine's log lines to `sink` in batches: when `LOG_BATCH_MAX_LINES` are pending,
 /// whenever `flush_every` elapses with lines pending, and the rest when the channel closes.
 async fn forward_logs(sink: &impl JobSink, mut log_rx: LogReceiver, flush_every: Duration) {
-    let flush = |batch: &mut Vec<String>| {
+    let flush = |batch: &mut Vec<LogLine>| {
         if !batch.is_empty() {
             sink.logs(batch);
             batch.clear();
@@ -564,7 +570,7 @@ pub(crate) mod test_support {
     #[derive(Default)]
     pub(crate) struct Recorded {
         pub(crate) events: Vec<Value>,
-        pub(crate) logs: Vec<Vec<String>>,
+        pub(crate) logs: Vec<Vec<LogLine>>,
         pub(crate) dones: Vec<Value>,
     }
 
@@ -583,7 +589,7 @@ pub(crate) mod test_support {
             self.0 .0.lock().unwrap().events.clone()
         }
 
-        pub(crate) fn log_batches(&self) -> Vec<Vec<String>> {
+        pub(crate) fn log_batches(&self) -> Vec<Vec<LogLine>> {
             self.0 .0.lock().unwrap().logs.clone()
         }
 
@@ -614,7 +620,7 @@ pub(crate) mod test_support {
             self.record(|recorded| recorded.events.push(event));
         }
 
-        fn logs(&self, lines: &[String]) {
+        fn logs(&self, lines: &[LogLine]) {
             self.record(|recorded| recorded.logs.push(lines.to_vec()));
         }
 
@@ -762,11 +768,15 @@ mod tests {
         );
     }
 
+    fn note(text: impl Into<String>) -> LogLine {
+        LogLine::new(LogKind::Note, text)
+    }
+
     fn logged(sink: &RecordingSink, needle: &str) -> bool {
         sink.log_batches()
             .iter()
             .flatten()
-            .any(|line| line.contains(needle))
+            .any(|line| line.text.contains(needle))
     }
 
     async fn panicking_worker(
@@ -797,12 +807,18 @@ mod tests {
     fn the_app_handle_sink_emits_the_three_job_events() {
         let app = tauri::test::mock_app();
         let events = record::<Value>(&app, JOB_EVENT);
-        let logs = record::<Vec<String>>(&app, JOB_LOG);
+        let logs = record::<Value>(&app, JOB_LOG);
         let dones = record::<Value>(&app, JOB_DONE);
         let sink = app.handle().clone();
 
         JobSink::event(&sink, &batch_start(&["ep1"]));
-        JobSink::logs(&sink, &["probing".to_string(), "done".to_string()]);
+        JobSink::logs(
+            &sink,
+            &[
+                note("probing"),
+                LogLine::new(LogKind::Error, "ERROR: Pipeline failed: x"),
+            ],
+        );
         JobSink::done(
             &sink,
             &JobDone {
@@ -815,7 +831,10 @@ mod tests {
         assert_eq!(events.lock().unwrap()[0]["type"], "batch_start");
         assert_eq!(
             *logs.lock().unwrap(),
-            [vec!["probing".to_string(), "done".to_string()]]
+            [serde_json::json!([
+                { "kind": "note", "text": "probing" },
+                { "kind": "error", "text": "ERROR: Pipeline failed: x" },
+            ])]
         );
         assert_eq!(
             *dones.lock().unwrap(),
@@ -834,14 +853,14 @@ mod tests {
             })
         };
 
-        log_tx.try_send("a".to_string()).unwrap();
-        log_tx.try_send("b".to_string()).unwrap();
+        log_tx.try_send(note("a")).unwrap();
+        log_tx.try_send(note("b")).unwrap();
         // The channel is still open and the batch is not full, so only the interval can flush.
         assert!(
             sink.wait_until(Duration::from_secs(2), |recorded| recorded.logs.len() == 1),
             "a partial batch waited for a full one"
         );
-        assert_eq!(sink.log_batches()[0], ["a", "b"]);
+        assert_eq!(sink.log_batches()[0], [note("a"), note("b")]);
 
         drop(log_tx);
         tauri::async_runtime::block_on(forwarder).unwrap();
@@ -861,7 +880,7 @@ mod tests {
         };
 
         for line in 0..LOG_BATCH_MAX_LINES {
-            log_tx.try_send(format!("line {line}")).unwrap();
+            log_tx.try_send(note(format!("line {line}"))).unwrap();
         }
         // The channel is still open, so only the line count can have flushed this.
         assert!(
@@ -871,16 +890,16 @@ mod tests {
         assert_eq!(sink.log_batches()[0].len(), LOG_BATCH_MAX_LINES);
 
         for line in ["tail 1", "tail 2", "tail 3"] {
-            log_tx.try_send(line.to_string()).unwrap();
+            log_tx.try_send(note(line)).unwrap();
         }
         drop(log_tx);
         tauri::async_runtime::block_on(forwarder).unwrap();
 
         let batches = sink.log_batches();
         assert_eq!(batches.len(), 2);
-        assert_eq!(batches[0][0], "line 0");
-        assert_eq!(batches[0][LOG_BATCH_MAX_LINES - 1], "line 24");
-        assert_eq!(batches[1], ["tail 1", "tail 2", "tail 3"]);
+        assert_eq!(batches[0][0], note("line 0"));
+        assert_eq!(batches[0][LOG_BATCH_MAX_LINES - 1], note("line 24"));
+        assert_eq!(batches[1], [note("tail 1"), note("tail 2"), note("tail 3")]);
     }
 
     #[test]
@@ -1062,7 +1081,7 @@ mod tests {
         let (log_tx, log_rx) = mkv_core::pipeline::create_log_channel(8);
         let worker = async move {
             event_tx.send(batch_start(&["ep2", "ep1"])).await.unwrap();
-            log_tx.send("probing batch".to_string()).await.unwrap();
+            log_tx.send(note("probing batch")).await.unwrap();
             event_tx.send(item_start("ep2")).await.unwrap();
             event_tx.send(item_progress("ep2", 40.0)).await.unwrap();
             worker_token.cancelled().await;
@@ -1102,7 +1121,7 @@ mod tests {
         let (log_tx, log_rx) = mkv_core::pipeline::create_log_channel(8);
         let worker = async move {
             event_tx.send(batch_start(&["ep2", "ep1"])).await.unwrap();
-            log_tx.send("probing batch".to_string()).await.unwrap();
+            log_tx.send(note("probing batch")).await.unwrap();
             Err("scan failed before any stop".to_string())
         };
         let job_id = start_remux(
@@ -1120,8 +1139,11 @@ mod tests {
         assert_eq!(terminal["error"], "scan failed before any stop");
         assert_ne!(done_for(&sink, job_id)["code"], -1);
         assert!(
-            logged(&sink, "scan failed before any stop"),
-            "worker error must reach the job log"
+            sink.log_batches().concat().contains(&LogLine::new(
+                LogKind::Error,
+                "ERROR: Pipeline failed: scan failed before any stop"
+            )),
+            "worker error must reach the job log as an Error line"
         );
         // No item ever started: each ends as an error carrying the run's own message, in batch
         // order and before the terminal, with no duration.
@@ -1304,6 +1326,13 @@ mod tests {
             "bridge worker panicked"
         );
         assert_eq!(done_for(&sink, job_id)["code"], 1);
+        assert_eq!(
+            sink.log_batches(),
+            [[LogLine::new(
+                LogKind::Error,
+                "ERROR: Pipeline panicked: bridge worker panicked"
+            )]]
+        );
 
         // Each open item ended as an error carrying the panic text, in batch order, before the
         // terminal.

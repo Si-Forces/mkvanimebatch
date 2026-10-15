@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use common::{ScriptedRunner, Step};
 use mkv_core::media_tool::{self, MediaTool, RawOutcome, ToolOutput};
+use mkv_core::pipeline::{LogKind, LogLine};
 use parking_lot::Mutex;
 
 const MKVTOOLNIX: [MediaTool; 2] = [MediaTool::Mkvmerge, MediaTool::Mkvextract];
@@ -76,8 +77,8 @@ async fn warning_log_line_prefixes_unless_the_text_already_says_warning() {
     .await
     .unwrap();
     assert_eq!(
-        plain.warning_log_line().as_deref(),
-        Some("  Warning: odd stream")
+        plain.warning_log_line(),
+        Some(LogLine::new(LogKind::Warning, "  Warning: odd stream"))
     );
 
     for text in ["Warning: odd stream", "WARNING: odd stream"] {
@@ -89,7 +90,7 @@ async fn warning_log_line_prefixes_unless_the_text_already_says_warning() {
         .unwrap();
         assert_eq!(
             output.warning_log_line(),
-            Some(format!("  {text}")),
+            Some(LogLine::new(LogKind::Warning, format!("  {text}"))),
             "text that starts with `warning` is logged as is"
         );
     }

@@ -12,6 +12,8 @@ use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt};
 
+use crate::log_line::{LogKind, LogLine};
+
 /// Windows process creation flag that keeps child tools from opening a console window.
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -178,19 +180,20 @@ pub struct ToolOutput {
 
 impl ToolOutput {
     /// The log line for the warning, if any (see [`warning_log_line`]).
-    pub fn warning_log_line(&self) -> Option<String> {
+    pub fn warning_log_line(&self) -> Option<LogLine> {
         self.warning.as_deref().map(warning_log_line)
     }
 }
 
-/// The Log Channel line for a warning: `  <text>` when `text` already starts with "warning"
-/// (any case), else `  Warning: <text>`.
-pub fn warning_log_line(text: &str) -> String {
-    if text.to_lowercase().starts_with("warning") {
+/// The Log Channel `Warning` line for a warning: `  <text>` when `text` already starts with
+/// "warning" (any case), else `  Warning: <text>`.
+pub fn warning_log_line(text: &str) -> LogLine {
+    let text = if text.to_lowercase().starts_with("warning") {
         format!("  {text}")
     } else {
         format!("  Warning: {text}")
-    }
+    };
+    LogLine::new(LogKind::Warning, text)
 }
 
 /// Parses mkvmerge/mkvextract "Progress: XX%" output lines.

@@ -381,7 +381,7 @@ test("a request the engine refuses is appended to the log, uncleared, and aborts
   assert.equal(controller.lifecycle, "failed");
   assert.equal(runtime.coordinator.activeMode, null);
   assert.equal(runtime.coordinator.canStart(), true);
-  assert.deepEqual(logs, ["[ERROR] Worker thread count must be between 1 and 64"]);
+  assert.deepEqual(logs, [{ kind: "error", text: "ERROR: Worker thread count must be between 1 and 64" }]);
   // The chips were never switched to a running job.
   assert.deepEqual(chipCalls, [[false]]);
 });
@@ -588,7 +588,7 @@ test("job controller rejects a sub-offset that is not a number of seconds", asyn
       assert.equal(scanCalled, false);
       assert.equal(controller.running, false);
       assert.equal(runtime.coordinator.activeMode, null);
-      assert.ok(logs.some(msg => msg.includes("Invalid sub-offset value")));
+      assert.ok(logs.some(msg => msg.kind === "error" && msg.text.includes("Invalid sub-offset value")));
       // The field sits in the settings sheet, which opens so the error shows.
       assert.deepEqual(opened, ["remux"]);
     });
@@ -606,7 +606,7 @@ test("job controller aborts start if episodes exist in queue but zero are select
   await controller.start();
 
   assert.equal(controller.running, false);
-  assert.ok(logs.some(l => l.includes("No episodes selected in queue")));
+  assert.ok(logs.some(l => l.text.includes("No episodes selected in queue")));
 });
 
 test("a refused run_job reports failed and leaves the queue as it was", async t => {
@@ -629,7 +629,7 @@ test("a refused run_job reports failed and leaves the queue as it was", async t 
   assert.equal(controller.running, false);
   assert.equal(controller.lifecycle, "failed");
   assert.equal(runtime.coordinator.activeMode, null);
-  assert.ok(logs.some(msg => msg.includes("Another job is already running")));
+  assert.ok(logs.some(msg => msg.text.includes("Another job is already running")));
 });
 
 test("job controller disables Run while scanning or snapshot restore blocks start", async t => {
@@ -830,7 +830,7 @@ test("Stop logs the shutdown wait before stop_job resolves", async t => {
     appendLog: (_el, line) => logs.push(line),
   });
 
-  assert.deepEqual(logs, ["[INFO] Stop requested; waiting for shutdown."]);
+  assert.deepEqual(logs, [{ kind: "note", text: "Stop requested; waiting for shutdown." }]);
 
   resolveStop();
   await stopping;
