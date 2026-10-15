@@ -1,0 +1,22 @@
+name: Set up the build directory
+description: >
+  Sets BUILD_DIR, where the cargo steps run. On Windows it is a copy of the workspace on a
+  trusted ReFS Dev Drive, which keeps Defender out of the build's I/O path; CARGO_HOME moves
+  there too, while the toolchain stays on C:. Elsewhere it is the checkout itself.
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Dev Drive
+      if: runner.os == 'Windows'
+      uses: samypr100/setup-dev-drive@562171fe8df7401fdf582d766cd3b6ab80d5b1a0 # v4.1.0
+      with:
+        drive-size: 20GB
+        trusted-dev-drive: true
+        workspace-copy: true
+        env-mapping: |
+          CARGO_HOME,{{ DEV_DRIVE }}/.cargo
+
+    - name: Export BUILD_DIR
+      shell: bash
+      run: echo "BUILD_DIR=${DEV_DRIVE_WORKSPACE:-$GITHUB_WORKSPACE}" >> "$GITHUB_ENV"

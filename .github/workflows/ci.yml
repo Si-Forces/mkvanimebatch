@@ -11,13 +11,10 @@ on:
     branches:
       - main
   workflow_dispatch:
-  # release.yml runs this workflow as its verification stage. Its Windows leg can differ
-  # from PR CI: unset inputs fall back to the PR CI values in the matrix below.
+  # release.yml runs this workflow as its verification stage, with a longer Windows
+  # timeout for its usually cold cache. PR CI leaves it unset and gets 20 minutes.
   workflow_call:
     inputs:
-      windows-runner:
-        description: Runner label for the Windows leg.
-        type: string
       windows-timeout:
         description: timeout-minutes for the Windows leg.
         type: number
@@ -36,12 +33,16 @@ jobs:
   # ────────────────────────────────────────────────────────────────────────────
   # 1. Rust Workspace Checks (Linux Ubuntu 24.04 & Windows)
   # ────────────────────────────────────────────────────────────────────────────
+  # Windows runs on GitHub-hosted runners, free for a public repo. A trial in PR #108 timed
+  # warm runs: this split layout on windows-2025 with a Dev Drive took about 213 s, the old
+  # single job on blacksmith-2vcpu-windows-2025 222 s, and the same split on Blacksmith
+  # 147 s. Blacksmith's 3,000 free minutes (Windows counts 1.5x) could not cover the split.
   workspace-checks:
     name: Rust Workspace (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    # Warm runs take 3-4 minutes and the slowest Windows run took 15. The apt step
-    # once stalled for 30 minutes; without a timeout GitHub waits 6 hours. The "|| 20"
-    # keeps a matrix entry without a timeout from silently getting those 6 hours.
+    # Warm runs take 2-3 minutes and a cold Windows run about 7.5. The apt step once stalled
+    # for 30 minutes; without a timeout GitHub waits 6 hours. The "|| 20" keeps a matrix
+    # entry without a timeout from silently getting those 6 hours.
     timeout-minutes: ${{ matrix.timeout || 20 }}
     strategy:
       fail-fast: false
@@ -49,20 +50,23 @@ jobs:
         include:
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
-          # Windows is the slowest job and gains the most from Blacksmith. Linux
-          # stays on GitHub to save Blacksmith's free minutes for Windows; it
-          # already finishes first, so moving it would not make CI finish sooner.
-          # Blacksmith runners are organization-only: on a personal account, replace
-          # the fallback label below with windows-2025.
-          - os: ${{ inputs.windows-runner || 'blacksmith-2vcpu-windows-2025' }}
+          - os: windows-2025
             target: x86_64-pc-windows-msvc
             timeout: ${{ inputs.windows-timeout }}
+    # Line tables keep backtraces readable while shrinking the debug info that MSVC links
+    # slowly and that rust-cache has to download.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      # A Dev Drive copy of the workspace on Windows; cargo steps run in $BUILD_DIR.
+      - name: Set up the build directory
+        uses: ./.github/actions/setup-build-dir
 
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
@@ -85,17 +89,21 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: ${{ matrix.target }}
+          workspaces: ${{ env.BUILD_DIR }}
 
       - name: Check Rust formatting (Linux only)
         if: runner.os == 'Linux'
+        working-directory: ${{ env.BUILD_DIR }}
         run: cargo fmt --all -- --check
 
       - name: Run Clippy linter
+        working-directory: ${{ env.BUILD_DIR }}
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       # `MKV_REQUIRE_MEDIA_TOOLS=1` makes the real-media regression fail instead of
       # skipping when FFmpeg/MKVToolNix are missing. Windows keeps the local skip.
       - name: Run Rust workspace unit and integration tests
+        working-directory: ${{ env.BUILD_DIR }}
         env:
           MKV_REQUIRE_MEDIA_TOOLS: ${{ runner.os == 'Linux' && '1' || '' }}
         run: cargo test --workspace
@@ -104,13 +112,16 @@ jobs:
       # because MKV_BENCH_CORPUS is unset. `cargo test --workspace` does not build bench targets.
       - name: Self-check the real-media bench (Linux only)
         if: runner.os == 'Linux'
+        working-directory: ${{ env.BUILD_DIR }}
         run: cargo test -p mkv-core --bench bench_real_media
 
       - name: Build Standalone mkv-cli Binary (Release)
+        working-directory: ${{ env.BUILD_DIR }}
         run: cargo build --release -p mkv-cli
 
       - name: Smoke Test CLI Executable
         shell: bash
+        working-directory: ${{ env.BUILD_DIR }}
         run: |
           CLI="./target/release/mkv-cli${{ runner.os == 'Windows' && '.exe' || '' }}"
           test -s "$CLI"
@@ -121,12 +132,44 @@ jobs:
           grep -q '"version": 2' "$EMPTY/manifest.json"
           grep -q '"items": \[\]' "$EMPTY/manifest.json"
 
+  # ────────────────────────────────────────────────────────────────────────────
+  # 2. Windows Desktop Release Build
+  # ────────────────────────────────────────────────────────────────────────────
+  # Runs beside workspace-checks rather than after it in the same job, so the Windows leg
+  # takes the longer of the two instead of their sum (about 3.5 minutes warm).
+  windows-desktop:
+    name: Desktop Release Build (windows-2025)
+    runs-on: windows-2025
+    # The trial measured 7 minutes cold and 3.5 warm.
+    timeout-minutes: ${{ inputs.windows-timeout || 20 }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # A Dev Drive copy of the workspace on Windows; cargo steps run in $BUILD_DIR.
+      - name: Set up the build directory
+        uses: ./.github/actions/setup-build-dir
+
+      # rustup ships on the runner images, so this needs no third-party action.
+      - name: Install Rust stable
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: ${{ env.BUILD_DIR }}
+
       - name: Build Desktop App Binary (Windows Release)
-        if: runner.os == 'Windows'
+        working-directory: ${{ env.BUILD_DIR }}
         run: cargo build --release -p mkv-anime-batch
 
   # ────────────────────────────────────────────────────────────────────────────
-  # 2. Frontend UI and Script Tests
+  # 3. Frontend UI and Script Tests
   # ────────────────────────────────────────────────────────────────────────────
   ui-tests:
     name: UI and Script Tests
@@ -149,7 +192,7 @@ jobs:
           node --test scripts/*.test.js desktop-tauri/ui/*.test.js
 
   # ────────────────────────────────────────────────────────────────────────────
-  # 3. Workflow Lint (actionlint, which also runs shellcheck on run: scripts)
+  # 4. Workflow Lint (actionlint, which also runs shellcheck on run: scripts)
   # ────────────────────────────────────────────────────────────────────────────
   workflow-lint:
     name: Workflow Lint
@@ -168,7 +211,7 @@ jobs:
           "$(go env GOPATH)/bin/actionlint"
 
   # ────────────────────────────────────────────────────────────────────────────
-  # 4. Security Audit (Cargo Audit with audit.toml)
+  # 5. Security Audit (Cargo Audit with audit.toml)
   # ────────────────────────────────────────────────────────────────────────────
   security-audit:
     name: Security Audit
@@ -189,11 +232,11 @@ jobs:
         run: cargo audit
 
   # ────────────────────────────────────────────────────────────────────────────
-  # 5. CI Completion Gate (Required Check Summary for Branch Protection)
+  # 6. CI Completion Gate (Required Check Summary for Branch Protection)
   # ────────────────────────────────────────────────────────────────────────────
   ci-status:
     name: CI Status Gate
-    needs: [workspace-checks, ui-tests, workflow-lint, security-audit]
+    needs: [workspace-checks, windows-desktop, ui-tests, workflow-lint, security-audit]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: always()
@@ -201,6 +244,7 @@ jobs:
       - name: Evaluate status
         run: |
           if [ "${{ needs.workspace-checks.result }}" != "success" ] || \
+             [ "${{ needs.windows-desktop.result }}" != "success" ] || \
              [ "${{ needs.ui-tests.result }}" != "success" ] || \
              [ "${{ needs.workflow-lint.result }}" != "success" ] || \
              [ "${{ needs.security-audit.result }}" != "success" ]; then
