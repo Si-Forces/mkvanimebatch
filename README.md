@@ -327,8 +327,6 @@ node --test scripts/*.test.js desktop-tauri/ui/*.test.js
 MKV_REQUIRE_MEDIA_TOOLS=1 cargo test -p mkv-core --test test_real_remux
 ```
 
-The Windows CI job runs on a Blacksmith runner (`blacksmith-2vcpu-windows-2025`), which needs a GitHub organization with Blacksmith installed. If you enable Actions on a fork without that, the job stays queued until GitHub cancels it. To run it there, change its Blacksmith fallback label in `.github/workflows/ci.yml` to `windows-2025` on your fork, and leave that change out of pull requests. A pull request to this repository runs its CI here, where the Blacksmith runner is available.
-
 Design documents:
 
 - [architecture.md](architecture.md): the detailed system description.
