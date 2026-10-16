@@ -168,7 +168,7 @@ mkvanimebatch/
     │   └── src/
     │       ├── lib.rs               # Tauri builder, command registration, exit handling, Linux environment defaults
     │       ├── main.rs              # Binary entry point
-    │       ├── commands.rs          # dispatch, get_state, resolve_batch_request, run_job, clear_cache, pickers, presets, default settings
+    │       ├── commands.rs          # dispatch, get_state, resolve_batch_request, run_job, clear_cache, pickers
     │       ├── diagnostics.rs       # Engine Diagnostics subscriber: log file + stderr (ADR-0007)
     │       ├── publisher.rs         # WebviewPublisher: the AppHandle Publisher that emits view-state, job-log and job-done
     │       ├── process.rs           # stop_job, close_window, run_teardown (the core's teardown on the blocking pool)
