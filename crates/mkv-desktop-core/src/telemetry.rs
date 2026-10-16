@@ -136,8 +136,12 @@ pub struct TelemetrySamples {
 impl TelemetryView {
     /// Takes in one sample.
     pub fn push(&mut self, data: &TelemetryData) {
-        // `max` also turns a NaN into 0.
-        let cpu = data.cpu_pct.max(0.0);
+        // A NaN or an infinity reads 0, so the text never reads "inf%".
+        let cpu = if data.cpu_pct.is_finite() {
+            data.cpu_pct.max(0.0)
+        } else {
+            0.0
+        };
         // The write rate of the engine's own processes is zero whenever no batch writes: that
         // shows as idle rather than "0 MB/s".
         let io = if data.io_mb_s > 0.0 {
@@ -288,6 +292,14 @@ mod tests {
                 .len(),
             SPARK_SAMPLES
         );
+    }
+
+    #[test]
+    fn test_an_infinite_cpu_reads_0() {
+        let mut view = TelemetryView::default();
+        view.push(&data(f32::INFINITY, 0, 0.0, 0.0));
+        assert_eq!(view.cpu, "0%");
+        assert_eq!(Vec::from(view.samples.cpu.clone()), [0.0]);
     }
 
     #[test]

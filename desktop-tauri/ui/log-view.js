@@ -84,7 +84,8 @@ export function createRunLogs({
     const newer = batch.generation > con.generation;
     if (newer) reset(con, batch.generation, batch.first);
     const end = con.first + con.lines.length;
-    // A gap means lines were never sent here; index on from this batch.
+    // A gap means lines were never sent here: `con.first` shifts so the kept lines end exactly at
+    // `batch.first`, and this batch appends right after them.
     if (batch.first > end) con.first = batch.first - con.lines.length;
     // Lines this console already holds are not drawn again.
     const fresh = batch.lines.slice(Math.max(0, end - batch.first));
@@ -96,6 +97,7 @@ export function createRunLogs({
       const drawn = con.lines.length - con.pending;
       const undrawn = Math.max(0, drop - drawn);
       for (let i = Math.min(drop, drawn); i > 0; i--) con.el?.firstElementChild?.remove();
+      // Keeps `pending <= lines.length`: `drawn` stays exact, and an emptied console keeps its prompt.
       con.pending -= undrawn;
       con.lines.splice(0, drop);
       con.first += drop;

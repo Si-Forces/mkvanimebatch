@@ -12,7 +12,7 @@ use crate::coordinator::{JobCoordinator, Phase};
 use crate::draft::{DraftChanges, SettingsDraft};
 use crate::inspection::{InFlight, Inspector};
 use crate::job::{JobDone, JobSink, JobStarted};
-use crate::log::{LogBatch, LogView, RunLog};
+use crate::log::{error_line, LogBatch, LogView, RunLog};
 use crate::queue::{Direction, Queue, Row};
 use crate::snapshot::{BatchStatus, JobSnapshot};
 use crate::telemetry::{Sampler, TelemetryData, TelemetryView};
@@ -584,8 +584,9 @@ impl<P: Publisher, I: Inspector, L: Launcher, S: Sampler> Core<P, I, L, S> {
             if let Some(at) = poll_at.filter(|&at| poll.deadline() != at) {
                 poll.as_mut().reset(at);
             }
-            // Biased: messages already queued go before the tick. A steady stream cannot starve
-            // publication, since the due check below runs after every step, whichever arm ran.
+            // Biased: messages already queued go before the tick and the poll. A steady stream
+            // cannot starve publication or the poll, since the due checks below run after every
+            // step, whichever arm ran: the two timer arms only wake an idle actor.
             tokio::select! {
                 biased;
                 msg = inbox.recv() => match msg {
@@ -593,9 +594,10 @@ impl<P: Publisher, I: Inspector, L: Launcher, S: Sampler> Core<P, I, L, S> {
                     None => break,
                 },
                 () = &mut tick, if armed => armed = false,
-                () = &mut poll, if poll_at.is_some() => self.poll_due(),
+                () = &mut poll, if poll_at.is_some() => {}
             }
             self.follow_busy();
+            self.poll_if_due();
             if self.dirty {
                 let due = self
                     .last_published_at
@@ -716,7 +718,7 @@ impl<P: Publisher, I: Inspector, L: Launcher, S: Sampler> Core<P, I, L, S> {
             } => {
                 let line = match &result {
                     Ok(()) => LogLine::new(LogKind::Cache, CACHE_CLEARED),
-                    Err(error) => LogLine::error(format!("ERROR: {error}")),
+                    Err(error) => error_line(error),
                 };
                 self.log(mode, &[line]);
                 self.answer(reply, result.map(|()| true));

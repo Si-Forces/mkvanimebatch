@@ -5,7 +5,9 @@
 use mkv_core::log_line::{LogKind, LogLine};
 use mkv_core::pipeline::PipelineMode;
 use serde::Serialize;
+use std::borrow::Cow;
 use std::collections::VecDeque;
+use std::fmt::Display;
 
 /// How many lines each Run Log keeps: the oldest go first.
 pub const RUN_LOG_CAP: usize = 2000;
@@ -25,10 +27,15 @@ impl From<&LogLine> for ShownLine {
         let display = log_display_text(&line.text);
         Self {
             kind: line.kind,
-            display: (display != line.text).then_some(display),
+            display: (display != line.text).then(|| display.into_owned()),
             text: line.text.clone(),
         }
     }
+}
+
+/// An error line the Desktop Core writes itself: `ERROR: {msg}`, the engine's convention.
+pub fn error_line(msg: impl Display) -> LogLine {
+    LogLine::error(format!("ERROR: {msg}"))
 }
 
 /// What a push or a clear appends to a mode's console (the `job-log` event). A view whose
@@ -150,7 +157,11 @@ fn is_separator(c: char) -> bool {
 ///
 /// Known limit: this works on the whole line, not on parsed paths, so a folder named `2` followed
 /// by `01.mkv` keeps its slash, and a codec ID such as `S_TEXT/ASS` gets a chevron.
-pub fn log_display_text(text: &str) -> String {
+pub fn log_display_text(text: &str) -> Cow<'_, str> {
+    // The common line holds no separator: nothing to rewrite, nothing to allocate.
+    if !text.contains(is_separator) {
+        return Cow::Borrowed(text);
+    }
     let chars: Vec<char> = text.chars().collect();
     // Each maximal run of separators, as `(start, end)` char indices.
     let mut runs = Vec::new();
@@ -206,7 +217,7 @@ pub fn log_display_text(text: &str) -> String {
             shown.push_str(" › ");
         }
     }
-    shown
+    Cow::Owned(shown)
 }
 
 #[cfg(test)]
@@ -291,7 +302,10 @@ mod tests {
             log_display_text("C:\\Anime\\Show.mkv"),
             "C: › Anime › Show.mkv"
         );
-        assert_eq!(log_display_text("no paths here"), "no paths here");
+        assert!(matches!(
+            log_display_text("no paths here"),
+            Cow::Borrowed("no paths here")
+        ));
         // A run of separators is one separator: between digits it stays whole, elsewhere one
         // chevron.
         assert_eq!(log_display_text("16/9 and 2//1"), "16/9 and 2//1");

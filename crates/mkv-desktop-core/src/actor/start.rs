@@ -8,6 +8,7 @@ use super::{Core, CoreHandle, Msg, Outcome, Publisher, Reply, ScanReply, ScanVie
 use crate::control::Launcher;
 use crate::coordinator::{preflight, Captured, Phase};
 use crate::inspection::Inspector;
+use crate::log::error_line;
 use crate::telemetry::Sampler;
 use mkv_core::log_line::LogLine;
 use mkv_core::pipeline::PipelineMode;
@@ -134,7 +135,7 @@ impl<P: Publisher, I: Inspector, L: Launcher, S: Sampler> Core<P, I, L, S> {
     /// Run Log first.
     fn answer_run(&mut self, mode: PipelineMode, reply: Reply, answer: Result<bool, String>) {
         if let Err(error) = &answer {
-            self.log(mode, &[LogLine::error(format!("ERROR: {error}"))]);
+            self.log(mode, &[error_line(error)]);
         }
         self.answer(reply, answer);
     }
@@ -292,7 +293,7 @@ impl<P: Publisher, I: Inspector, L: Launcher, S: Sampler> Core<P, I, L, S> {
         result: Result<(), String>,
     ) {
         if let Err(error) = &result {
-            self.log(mode, &[LogLine::error(format!("ERROR: {error}"))]);
+            self.log(mode, &[error_line(error)]);
         }
         let waiters = self.take_stop_waiters(attempt);
         let step = self.current(attempt).map(|start| start.step);

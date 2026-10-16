@@ -270,6 +270,8 @@ function switchView(viewId) {
   });
   lastLibraryKey = null;
   lastAssignKey = null;
+  // The badge counts the shown mode's errors: not a frame late on a switch.
+  renderLogBadge();
   scheduleChrome(currentView);
 }
 

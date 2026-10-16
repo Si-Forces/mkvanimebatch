@@ -59,14 +59,20 @@ impl<P: Publisher, I: Inspector, L: Launcher, S: Sampler> Core<P, I, L, S> {
         self.sample();
     }
 
-    /// The poll fired: the next one is due a period after it was.
-    pub(super) fn poll_due(&mut self) {
+    /// Polls if the poll is due: the next one is due a period after it was, or a period from now
+    /// when that is past already (after a suspend or a stall), so overdue polls never burst.
+    pub(super) fn poll_if_due(&mut self) {
+        let now = Instant::now();
+        let Some(at) = self.telemetry.poll_at.filter(|&at| at <= now) else {
+            return;
+        };
         let period = if self.telemetry.busy {
             BUSY_PERIOD
         } else {
             IDLE_PERIOD
         };
-        self.telemetry.poll_at = self.telemetry.poll_at.map(|at| at + period);
+        let next = at + period;
+        self.telemetry.poll_at = Some(if next <= now { now + period } else { next });
         self.sample();
     }
 
@@ -243,6 +249,54 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(24)).await;
         settle().await;
         assert_eq!(sampler.calls(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_an_overdue_poll_samples_once_and_the_next_is_a_period_away() {
+        let sampler = FakeSampler::default();
+        let (_core, _publisher) = core_with(sampler.clone(), FakeLauncher::default());
+        settle().await;
+        assert_eq!(sampler.calls(), 1);
+        // A stall: the clock jumps ten and a half periods with the actor not running.
+        tokio::time::advance(IDLE_PERIOD * 10 + IDLE_PERIOD / 2).await;
+        settle().await;
+        assert_eq!(sampler.calls(), 2);
+        // No catch-up: the next poll is a whole period after the overdue one.
+        tokio::time::sleep(IDLE_PERIOD - Duration::from_millis(1)).await;
+        settle().await;
+        assert_eq!(sampler.calls(), 2);
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        settle().await;
+        assert_eq!(sampler.calls(), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_a_steady_inbox_stream_does_not_starve_a_due_poll() {
+        let sampler = FakeSampler::default();
+        let (core, _publisher) = core_with(sampler.clone(), FakeLauncher::default());
+        settle().await;
+        tokio::time::sleep(IDLE_PERIOD - Duration::from_millis(1)).await;
+        assert_eq!(sampler.calls(), 1);
+        // Each turn queues far more messages than the actor drains between two (its coop
+        // budget), so its inbox never empties while the poll comes due.
+        let burst = |core: &CoreHandle| {
+            for _ in 0..1000 {
+                core.send(Msg::GetState(tokio::sync::oneshot::channel().0));
+            }
+        };
+        let feeder = tokio::spawn({
+            let sampler = sampler.clone();
+            async move {
+                burst(&core);
+                tokio::time::advance(Duration::from_millis(2)).await;
+                for _ in 0..20 {
+                    burst(&core);
+                    tokio::task::yield_now().await;
+                }
+                sampler.calls()
+            }
+        });
+        assert_eq!(feeder.await.unwrap(), 2);
     }
 
     #[tokio::test(start_paused = true)]
