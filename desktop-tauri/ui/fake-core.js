@@ -34,8 +34,27 @@ export function row(id, fields = {}) {
   };
 }
 
-/** A published ModeView with `rows` (Rows or IDs) and an idle scan. */
-export function modeView(rows = [], fields = {}) {
+/** The published Preset Profile catalog, as `mkv_core::preset::get_preset_profiles` builds it. */
+const PRESETS = [
+  { id: "balanced", name: "Balanced", bitrate: "192k", complexity: 5 },
+  { id: "fast", name: "Fast muxing", bitrate: "128k", complexity: 5 },
+  { id: "hifi", name: "Hi-Fi master", bitrate: "320k", complexity: 10 },
+  { id: "custom", name: "Custom", bitrate: "192k", complexity: 5 },
+];
+
+/** The published Effective Settings defaults the fake core starts with. */
+export const DEFAULTS = { workers: 6, io_jobs: 2, ffmpeg_threads: 1, bitrate: "192k", complexity: 5 };
+
+/** A mode's initial Settings Draft, as `SettingsDraft::new` builds it, with `fields` over it. */
+export function draft(mode, fields = {}) {
+  const remux = mode === "remux"
+    ? { assets_dir: "", preset: "balanced", bitrate: "192k", complexity: "5", sub_offset: "0", ffmpeg_threads: "" }
+    : {};
+  return { input_dir: "", out_dir: "", fonts_dir: "", workers: "", io_jobs: "", dry_run: false, no_cache: false, ...remux, ...fields };
+}
+
+/** A published ModeView with `rows` (Rows or IDs), an idle scan and `mode`'s initial draft. */
+export function modeView(rows = [], fields = {}, mode = "remux") {
   return {
     directory: null,
     scan: { state: "idle" },
@@ -44,6 +63,7 @@ export function modeView(rows = [], fields = {}) {
     rows: rows.map(entry => (typeof entry === "string" ? row(entry) : entry)),
     vanished_selected_ids: [],
     assignments: {},
+    draft: draft(mode),
     ...fields,
   };
 }
@@ -69,17 +89,51 @@ function published(assignment) {
 }
 
 /**
+ * Applies a draft Intent to `view.draft` as `SettingsDraft` does; false when nothing changed.
+ * Throws the core's error for a field or a preset the mode does not have.
+ */
+function applyDraftIntent(view, intent, presets) {
+  const current = view.draft;
+  if (intent.type === "set_preset") {
+    if (!("preset" in current)) throw "Preset Profiles are for remux only.";
+    const profile = presets.find(p => p.id === intent.preset);
+    if (!profile) throw `Unknown Preset Profile '${intent.preset}'.`;
+    const next = profile.id === "custom"
+      ? { ...current, preset: "custom" }
+      : { ...current, preset: profile.id, bitrate: profile.bitrate, complexity: String(profile.complexity) };
+    view.draft = next;
+    return JSON.stringify(next) !== JSON.stringify(current);
+  }
+  // The core rejects the key while deserializing the Intent, on either mode.
+  if ("preset" in intent.changes) throw "unknown field `preset`";
+  const missing = Object.keys(intent.changes).find(key => !(key in current));
+  if (missing) throw `Extract has no ${missing} setting.`;
+  const changed = Object.keys(intent.changes).filter(key => current[key] !== intent.changes[key]);
+  view.draft = { ...current, ...intent.changes };
+  if (changed.includes("bitrate") || changed.includes("complexity")) view.draft.preset = "custom";
+  return changed.length > 0;
+}
+
+/**
  * A Desktop Core over a scripted View State. `state` is the next state to publish; change it, then
  * `publish()` bumps `seq` and hands a copy to every `onPublish` listener (the `view-state` event).
  * `invoke(command, args)` answers `get_state` and `dispatch`: a queue Intent is applied to
  * `state` as the core would: refused while a job runs or the mode scans, a Track Assignment is
- * refused on extract, and only the manifest rows take Intents. A scan is answered by
+ * refused on extract, and only the manifest rows take Intents. A Settings Draft Intent follows
+ * `applyDraftIntent`, refused while a job runs. A scan is answered by
  * `onScan(intent)`, which the test scripts and which publishes what it wants itself.
  */
 export function createFakeCore({ onScan = async () => true } = {}) {
   const listeners = new Set();
   const core = {
-    state: { seq: 0, job: null, remux: modeView(), extract: modeView() },
+    state: {
+      seq: 0,
+      job: null,
+      defaults: structuredClone(DEFAULTS),
+      presets: structuredClone(PRESETS),
+      remux: modeView(),
+      extract: modeView([], {}, "extract"),
+    },
     onScan,
     intents: [],
     onPublish: listener => listeners.add(listener),
@@ -92,7 +146,7 @@ export function createFakeCore({ onScan = async () => true } = {}) {
     /** Accepts `rows` as the inspection of `directory` for `mode`, as a new manifest. */
     accept(mode, directory, rows, fields = {}) {
       const previous = core.state[mode];
-      core.state[mode] = modeView(rows, { directory, manifest_rev: previous.manifest_rev + 1, ...fields });
+      core.state[mode] = modeView(rows, { directory, manifest_rev: previous.manifest_rev + 1, draft: previous.draft, ...fields });
       return core.publish();
     },
     async invoke(command, args) {
@@ -101,8 +155,14 @@ export function createFakeCore({ onScan = async () => true } = {}) {
       const { intent } = args;
       core.intents.push(intent);
       if (intent.type === "scan_directory") return core.onScan(intent);
-      if (core.state.job?.active) throw "A batch is running; the queue is locked until it ends.";
       const view = core.state[intent.mode];
+      if (intent.type === "edit_draft" || intent.type === "set_preset") {
+        if (core.state.job?.active) throw "A batch is running; the settings are locked until it ends.";
+        const changed = applyDraftIntent(view, intent, core.state.presets);
+        if (changed) core.publish();
+        return changed;
+      }
+      if (core.state.job?.active) throw "A batch is running; the queue is locked until it ends.";
       if (view.scan.state === "scanning") throw "The folder is being scanned; the queue is locked until it ends.";
       if (intent.mode === "extract" && intent.type.endsWith("_track")) throw "Track Assignments are for remux only.";
       const changed = applyIntent(view, intent);

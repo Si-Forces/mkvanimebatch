@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createPresetMenu } from "./preset-menu.js";
+import { draft } from "./fake-core.js";
 
 const FAST = { id: "fast", name: "Fast muxing", bitrate: "128k", complexity: 3 };
 const CUSTOM = { id: "custom", name: "Custom", bitrate: "192k", complexity: 5 };
 
-/** Just enough of an element for the rows `load()` builds. */
+/** Just enough of an element for the rows `render()` builds. */
 function fakeElement(tag) {
   const el = {
     tag,
@@ -29,92 +30,70 @@ function fakeElement(tag) {
 }
 
 /**
- * A page with the sidebar's empty `#preset-list` and the bitrate and complexity fields, which
- * start on the 192k / 5 defaults. `profiles` is what `get_preset_profiles` returns, or an `Error`
- * instance to throw. `commands` lists every command invoked: `load` logs a failed call rather
- * than throwing, so a wrong command shows up here, not as a failed assertion inside `invoke`.
+ * A page with the sidebar's empty `#preset-list`. `intents` lists what a click dispatched;
+ * `state.locked` is what `isLocked()` reports.
  */
-function presetHarness(profiles) {
-  const commands = [];
+function presetHarness() {
+  const intents = [];
+  const state = { locked: false };
   const list = fakeElement("section");
+  const handlers = new Map();
+  list.addEventListener = (name, handler) => handlers.set(name, handler);
   const rows = () => list.children.filter(row => !row.removed);
   list.querySelectorAll = selector => (selector === ".preset-row" ? rows() : []);
-  const elements = new Map([
-    ["preset-list", list],
-    ["remux-bitrate", { value: "192k" }],
-    ["remux-complexity", { value: "5" }],
-    ["remux-cplx-val", { value: "5" }],
-  ]);
+  const findSub = () => rows().map(row => row.children[1].children[1]).find(sub => sub.id === "preset-custom-sub");
   const doc = {
-    getElementById: id => elements.get(id) ?? null,
+    getElementById: id => (id === "preset-list" ? list : id === "preset-custom-sub" ? findSub() ?? null : null),
     querySelectorAll: selector => (selector === ".profile-option-item" ? rows() : []),
     createElement: fakeElement,
   };
-  const invoke = async command => {
-    commands.push(command);
-    if (profiles instanceof Error) throw profiles;
-    return profiles;
-  };
-  const menu = createPresetMenu({ invoke, doc });
-  const field = id => elements.get(id).value;
+  const dispatch = async intent => { intents.push(intent); return true; };
+  const menu = createPresetMenu({ doc, dispatch, isLocked: () => state.locked });
+  menu.bind();
   const activeRows = () => rows().filter(row => row.classes.has("active")).map(row => row.dataset.preset);
-  return { menu, commands, rows, field, activeRows };
+  const click = row => handlers.get("click")({
+    target: { closest: selector => (selector === ".profile-option-item[data-preset]" ? row : null) },
+  });
+  return { menu, intents, state, rows, activeRows, click, findSub };
 }
 
-test("load renders one row per catalog profile, from the catalog alone", async () => {
-  const page = presetHarness([FAST, CUSTOM]);
-  await page.menu.load();
-  assert.deepEqual(page.commands, ["get_preset_profiles"]);
+test("render draws one row per published profile and marks the draft's preset active", () => {
+  const page = presetHarness();
+  assert.equal(page.menu.render([FAST, CUSTOM], draft("remux", { preset: "fast" })), true);
   assert.deepEqual(page.rows().map(row => row.dataset.preset), ["fast", "custom"]);
   assert.deepEqual(page.rows().map(row => row.textContent), [
     "Fast muxingOpus 128k · complexity 3",
+    // The custom row's subtitle shows the draft's own encode, not the catalog's.
     "CustomOpus 192k · complexity 5",
   ]);
-  // The custom row's subtitle is the one app.js keeps on the form's values.
-  assert.equal(page.rows()[1].children[1].children[1].id, "preset-custom-sub");
+  assert.deepEqual(page.activeRows(), ["fast"]);
+  assert.deepEqual(page.rows().map(row => row.attributes["aria-pressed"]), ["true", "false"]);
   // Rows freeze with the rest of the job-locked controls.
   assert.ok(page.rows().every(row => row.className.includes("lock-while-job")));
 
-  // A second load replaces the rows rather than doubling them.
-  await page.menu.load();
+  // The same catalog again keeps the rows and follows the draft.
+  assert.equal(page.menu.render([FAST, CUSTOM], draft("remux", { preset: "custom", bitrate: "256k", complexity: "8" })), false);
   assert.equal(page.rows().length, 2);
+  assert.deepEqual(page.activeRows(), ["custom"]);
+  assert.equal(page.findSub().textContent, "Opus 256k · complexity 8");
 });
 
-test("the menu applies only what get_preset_profiles delivered", async () => {
-  const page = presetHarness([FAST]);
-  await page.menu.load();
+test("an empty catalog renders no rows", () => {
+  const page = presetHarness();
+  page.menu.render([], draft("remux"));
+  assert.equal(page.rows().length, 0);
+});
 
-  // "hifi" is not in the catalog, and the page carries no copy of it to fall back on.
-  page.menu.apply("hifi");
-  assert.equal(page.field("remux-bitrate"), "192k");
-  assert.equal(page.field("remux-complexity"), "5");
+test("a click sends set_preset for its row, and nothing while a job holds the form", async () => {
+  const page = presetHarness();
+  page.menu.render([FAST, CUSTOM], draft("remux"));
+  assert.equal(await page.click(page.rows()[0]), true);
+  assert.deepEqual(page.intents, [{ type: "set_preset", mode: "remux", preset: "fast" }]);
+  // The click changes nothing itself: the published draft does.
   assert.deepEqual(page.activeRows(), []);
 
-  page.menu.apply("fast");
-  assert.equal(page.field("remux-bitrate"), "128k");
-  assert.equal(page.field("remux-complexity"), "3");
-  assert.equal(page.field("remux-cplx-val"), "3");
-  assert.deepEqual(page.activeRows(), ["fast"]);
-  assert.deepEqual(page.rows().map(row => row.attributes["aria-pressed"]), ["true"]);
-});
-
-test("custom marks the form as hand-edited and leaves its fields alone, even before the catalog loads", async () => {
-  const page = presetHarness([FAST, CUSTOM]);
-  page.menu.apply("custom");
-  assert.equal(page.field("remux-bitrate"), "192k");
-  assert.equal(page.field("remux-complexity"), "5");
-  // Rows rendered after the choice still show it.
-  await page.menu.load();
-  assert.deepEqual(page.activeRows(), ["custom"]);
-});
-
-test("a failed get_preset_profiles leaves the catalog and the rows empty and logs the failure", async t => {
-  const logged = t.mock.method(console, "error", () => {});
-  const page = presetHarness(new Error("unavailable"));
-  await page.menu.load();
-  assert.deepEqual(page.commands, ["get_preset_profiles"]);
-  assert.equal(page.rows().length, 0);
-  page.menu.apply("fast");
-  assert.equal(page.field("remux-bitrate"), "192k");
-  assert.equal(logged.mock.calls.some(({ arguments: [label] }) => label === "[get_preset_profiles] failed:"), true);
+  page.state.locked = true;
+  page.click(page.rows()[1]);
+  page.click(null);
+  assert.equal(page.intents.length, 1);
 });

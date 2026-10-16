@@ -4,6 +4,7 @@
 
 pub mod actor;
 pub mod control;
+pub mod draft;
 pub mod inspection;
 pub mod job;
 pub mod queue;

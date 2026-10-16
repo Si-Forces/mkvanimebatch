@@ -1,11 +1,12 @@
-//! The Desktop Core actor (ADR-0016): one task that owns the queue of each mode, the published
-//! Job Snapshot and the scans in flight, and publishes the whole View State through a
-//! `Publisher`, at most about 15 times a second. Everything reaches it through one inbox, so a
-//! job's start, events, log batches and completion arrive in the order the supervisor sent them,
-//! and an Intent sees every change sent before it. A UI adapter spawns it once with `Core::spawn`
-//! and talks to it through the `CoreHandle`.
+//! The Desktop Core actor (ADR-0016): one task that owns the queue and the Settings Draft of each
+//! mode, the published Job Snapshot and the scans in flight, and publishes the whole View State
+//! through a `Publisher`, at most about 15 times a second. Everything reaches it through one
+//! inbox, so a job's start, events, log batches and completion arrive in the order the supervisor
+//! sent them, and an Intent sees every change sent before it. A UI adapter spawns it once with
+//! `Core::spawn` and talks to it through the `CoreHandle`.
 
 use crate::control::mode_name;
+use crate::draft::{DraftChanges, SettingsDraft};
 use crate::inspection::{InFlight, Inspector};
 use crate::job::{JobDone, JobSink, JobStarted};
 use crate::queue::{Direction, Queue, Row};
@@ -13,6 +14,7 @@ use crate::snapshot::{BatchStatus, JobSnapshot};
 use mkv_core::log_line::LogLine;
 use mkv_core::manifest::InspectionManifest;
 use mkv_core::pipeline::{JobEvent, PipelineMode};
+use mkv_core::preset::{get_preset_profiles, PresetProfile};
 use mkv_core::request::{EffectiveSettings, TrackAssignment};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -75,6 +77,16 @@ pub enum Intent {
         mode: PipelineMode,
         id: String,
     },
+    /// Sets the Settings Draft fields `changes` names; see `SettingsDraft::edit`.
+    EditDraft {
+        mode: PipelineMode,
+        changes: DraftChanges,
+    },
+    /// Puts the Settings Draft on a Preset Profile (remux only); see `SettingsDraft::set_preset`.
+    SetPreset {
+        mode: PipelineMode,
+        preset: String,
+    },
 }
 
 /// What the core publishes. `seq` grows by one with every publication, so a view can drop a
@@ -83,6 +95,11 @@ pub enum Intent {
 pub struct ViewState {
     pub seq: u64,
     pub job: Option<JobView>,
+    /// The Effective Settings of a request that sets nothing, for the `auto (N)` hints: `None`
+    /// until the actor has read the CPU topology once it started.
+    pub defaults: Option<EffectiveSettings>,
+    /// The built-in Preset Profiles.
+    pub presets: Vec<PresetProfile>,
     pub remux: ModeView,
     pub extract: ModeView,
 }
@@ -117,6 +134,7 @@ pub struct ModeView {
     pub vanished_selected_ids: Vec<String>,
     /// Track Assignments by item ID (remux only).
     pub assignments: BTreeMap<String, TrackAssignment>,
+    pub draft: SettingsDraft,
 }
 
 /// Where a mode's scan stands.
@@ -162,6 +180,8 @@ enum Msg {
     SinkClosed {
         job_id: u64,
     },
+    /// The Effective Settings defaults, read off the actor.
+    Defaults(EffectiveSettings),
 }
 
 /// The way into the actor. Clones share its one inbox.
@@ -243,10 +263,11 @@ impl Drop for ActorSink {
     }
 }
 
-/// One mode's queue and scan.
+/// One mode's queue, scan and Settings Draft.
 #[derive(Default)]
 struct ModeState {
     queue: Queue,
+    draft: SettingsDraft,
     scan: ScanView,
     /// The newest scan request: a request answered after a newer one began is overtaken.
     request: u64,
@@ -281,6 +302,7 @@ pub struct Core<P, I> {
     /// Whether a job runs: from its `JobStarted` until its `Done`, or until its sink is dropped
     /// when a supervisor that died before `finish` sent no `Done`.
     active: bool,
+    defaults: Option<EffectiveSettings>,
     /// Whether the state changed since the last publication.
     dirty: bool,
     last_published: ViewState,
@@ -289,31 +311,66 @@ pub struct Core<P, I> {
 
 /// The answer to a scan of the running job's own mode.
 const SCAN_REFUSED: &str = "A batch is running; its folder cannot be scanned until it ends.";
+/// The answer to a Settings Draft edit while a job runs.
+const DRAFT_REFUSED: &str = "A batch is running; the settings are locked until it ends.";
 
 impl<P: Publisher, I: Inspector> Core<P, I> {
     /// Spawns the actor on `runtime`, publishing through `publisher` and scanning through
     /// `inspector`.
     pub fn spawn(runtime: Handle, publisher: P, inspector: I) -> CoreHandle {
+        Self::start(runtime, publisher, inspector, None)
+    }
+
+    /// `spawn`, with the defaults already known when `defaults` holds them, else read on the
+    /// blocking pool (`EffectiveSettings::defaults` reads the CPU topology) and published then.
+    fn start(
+        runtime: Handle,
+        publisher: P,
+        inspector: I,
+        defaults: Option<EffectiveSettings>,
+    ) -> CoreHandle {
         // Unbounded on purpose (ADR-0016, 2026-10-16 amendment). The engine already drops
         // `ItemProgress` it cannot send (`try_send` in `crates/mkv-core/src/pipeline.rs`), and
         // the actor only applies events in memory and publishes at most about 15 times a second,
         // so the queue drains faster than a job fills it. A bounded channel would need async `JobSink` methods and let a slow actor
         // stall the supervisor's teardown, which must never depend on the actor.
         let (inbox_tx, inbox) = mpsc::unbounded_channel();
-        let core = Core {
+        let mode_state = |mode| ModeState {
+            draft: SettingsDraft::new(mode),
+            ..ModeState::default()
+        };
+        let mut core = Core {
             publisher,
             inspector: Arc::new(inspector),
             runtime: runtime.clone(),
             inbox: inbox_tx.downgrade(),
-            remux: ModeState::default(),
-            extract: ModeState::default(),
+            remux: mode_state(PipelineMode::Remux),
+            extract: mode_state(PipelineMode::Extract),
             in_flight: InFlight::default(),
             snapshot: None,
             active: false,
+            defaults,
             dirty: false,
             last_published: ViewState::default(),
             last_published_at: None,
         };
+        // What `get_state` answers before the first publication: the drafts and the catalog too.
+        core.last_published = ViewState {
+            defaults: core.defaults.clone(),
+            presets: get_preset_profiles(),
+            remux: core.mode_view(PipelineMode::Remux),
+            extract: core.mode_view(PipelineMode::Extract),
+            ..ViewState::default()
+        };
+        if core.defaults.is_none() {
+            let inbox = core.inbox.clone();
+            let defaults = runtime.spawn_blocking(EffectiveSettings::defaults);
+            runtime.spawn(async move {
+                if let (Ok(defaults), Some(inbox)) = (defaults.await, inbox.upgrade()) {
+                    let _ = inbox.send(Msg::Defaults(defaults));
+                }
+            });
+        }
         runtime.spawn(core.run(inbox));
         CoreHandle(inbox_tx)
     }
@@ -404,6 +461,10 @@ impl<P: Publisher, I: Inspector> Core<P, I> {
                     self.dirty = true;
                 }
             }
+            Msg::Defaults(defaults) => {
+                self.defaults = Some(defaults);
+                self.dirty = true;
+            }
         }
     }
 
@@ -464,6 +525,14 @@ impl<P: Publisher, I: Inspector> Core<P, I> {
             } => (mode, QueueChange::Reorder(id, direction)),
             Intent::AssignTrack { mode, assignment } => (mode, QueueChange::Assign(assignment)),
             Intent::ClearTrack { mode, id } => (mode, QueueChange::Clear(id)),
+            Intent::EditDraft { mode, changes } => {
+                let answer = self.change_draft(mode, |draft| draft.edit(changes));
+                return self.answer(reply, answer);
+            }
+            Intent::SetPreset { mode, preset } => {
+                let answer = self.change_draft(mode, |draft| draft.set_preset(&preset));
+                return self.answer(reply, answer);
+            }
         };
         let answer = self.change_queue(mode, change);
         self.answer(reply, answer);
@@ -492,6 +561,31 @@ impl<P: Publisher, I: Inspector> Core<P, I> {
         };
         if changed {
             self.touch(mode);
+        }
+        Ok(changed)
+    }
+
+    /// Applies a Settings Draft change, which a running job refuses: the form is locked while it
+    /// runs.
+    fn change_draft(
+        &mut self,
+        mode: PipelineMode,
+        change: impl FnOnce(&mut SettingsDraft) -> Result<bool, String>,
+    ) -> Result<bool, String> {
+        if self.active {
+            return Err(DRAFT_REFUSED.into());
+        }
+        let state = self.mode(mode);
+        let changed = change(&mut state.draft)?;
+        if changed {
+            // Only the draft changed: it is patched into the view last built, so a keystroke does
+            // not rebuild the rows.
+            let draft = state.draft.clone();
+            match mode {
+                PipelineMode::Remux => self.last_published.remux.draft = draft,
+                PipelineMode::Extract => self.last_published.extract.draft = draft,
+            }
+            self.dirty = true;
         }
         Ok(changed)
     }
@@ -685,6 +779,7 @@ impl<P: Publisher, I: Inspector> Core<P, I> {
             rows: queue.rows(job),
             vanished_selected_ids: queue.vanished_selected_ids().to_vec(),
             assignments: queue.assignments().clone(),
+            draft: state.draft.clone(),
         }
     }
 
@@ -709,6 +804,7 @@ impl<P: Publisher, I: Inspector> Core<P, I> {
         }
         self.last_published.seq += 1;
         self.last_published.job = job;
+        self.last_published.defaults.clone_from(&self.defaults);
         self.dirty = false;
         self.last_published_at = Some(Instant::now());
         self.publisher.state(&self.last_published);
@@ -781,13 +877,19 @@ mod tests {
         }
     }
 
+    /// A core whose defaults are known from the start, so they publish nothing of their own.
+    fn ready<P: Publisher, I: Inspector>(publisher: P, inspector: I) -> CoreHandle {
+        Core::start(
+            Handle::current(),
+            publisher,
+            inspector,
+            Some(effective_settings()),
+        )
+    }
+
     fn spawn_core() -> (CoreHandle, RecordingPublisher) {
         let publisher = RecordingPublisher::default();
-        let core = Core::spawn(
-            Handle::current(),
-            publisher.clone(),
-            FakeInspector::default(),
-        );
+        let core = ready(publisher.clone(), FakeInspector::default());
         (core, publisher)
     }
 
@@ -1062,6 +1164,7 @@ mod tests {
             },
             manifest_rev: 2,
             vanished_selected_ids: vec!["ep9".into()],
+            draft: SettingsDraft::new(REMUX),
             ..ModeView::default()
         };
         remux
@@ -1090,6 +1193,8 @@ mod tests {
                 effective_settings: effective_settings(),
                 participants: vec!["ep2".into(), "ep1".into()],
             }),
+            defaults: Some(EffectiveSettings::defaults()),
+            presets: get_preset_profiles()[..1].to_vec(),
             remux,
             extract: ModeView {
                 scan: ScanView::Failed,
@@ -1117,6 +1222,10 @@ mod tests {
                     },
                     "participants": ["ep2", "ep1"]
                 },
+                "defaults": serde_json::to_value(EffectiveSettings::defaults()).unwrap(),
+                "presets": [
+                    { "id": "balanced", "name": "Balanced", "bitrate": "192k", "complexity": 5 }
+                ],
                 "remux": {
                     "directory": "/anime",
                     "scan": { "state": "scanning", "directory": "/anime" },
@@ -1132,7 +1241,9 @@ mod tests {
                             "language": "ind",
                             "offset_ms": -250
                         }
-                    }
+                    },
+                    // The draft has its own pin: `draft::tests::test_draft_wire_shape`.
+                    "draft": serde_json::to_value(SettingsDraft::new(REMUX)).unwrap()
                 },
                 "extract": {
                     "directory": null,
@@ -1141,12 +1252,17 @@ mod tests {
                     "subtitle_candidates": {},
                     "rows": [],
                     "vanished_selected_ids": [],
-                    "assignments": {}
+                    "assignments": {},
+                    "draft": {
+                        "input_dir": "", "out_dir": "", "fonts_dir": "", "workers": "",
+                        "io_jobs": "", "dry_run": false, "no_cache": false
+                    }
                 }
             })
         );
         let idle = serde_json::to_value(ViewState::default()).unwrap();
         assert_eq!(idle["job"], Value::Null);
+        assert_eq!(idle["defaults"], Value::Null);
         assert_eq!(
             idle["remux"]["scan"],
             serde_json::json!({ "state": "idle" })
@@ -1227,6 +1343,27 @@ mod tests {
             Intent::ClearTrack {
                 mode: PipelineMode::Remux,
                 id: "ep1".into(),
+            }
+        );
+        assert_eq!(
+            intent(serde_json::json!({
+                "type": "edit_draft", "mode": "remux",
+                "changes": { "input_dir": "/anime", "dry_run": true }
+            })),
+            Intent::EditDraft {
+                mode: PipelineMode::Remux,
+                changes: DraftChanges {
+                    input_dir: Some("/anime".into()),
+                    dry_run: Some(true),
+                    ..DraftChanges::default()
+                },
+            }
+        );
+        assert_eq!(
+            intent(serde_json::json!({ "type": "set_preset", "mode": "remux", "preset": "fast" })),
+            Intent::SetPreset {
+                mode: PipelineMode::Remux,
+                preset: "fast".into(),
             }
         );
         assert!(serde_json::from_value::<Intent>(serde_json::json!({
@@ -1321,7 +1458,7 @@ mod tests {
             .with("/fast", manifest_of(&["fast"]))
             .with("/slow", manifest_of(&["slow"]));
         let publisher = RecordingPublisher::default();
-        let core = Core::spawn(Handle::current(), publisher.clone(), inspector.clone());
+        let core = ready(publisher.clone(), inspector.clone());
         (core, publisher, inspector)
     }
 
@@ -1376,11 +1513,7 @@ mod tests {
         let inspector = FakeInspector::default()
             .with("/anime", manifest)
             .with("/plain", manifest_of(&["ep1"]));
-        let core = Core::spawn(
-            Handle::current(),
-            RecordingPublisher::default(),
-            inspector.clone(),
-        );
+        let core = ready(RecordingPublisher::default(), inspector.clone());
 
         assert_eq!(core.dispatch(scan(REMUX, "/anime", false)).await, Ok(true));
         let state = core.state().await.unwrap();
@@ -1502,7 +1635,7 @@ mod tests {
 
         let inspector = FakeInspector::default().with("/anime", manifest_of(&["ep1", "ep2"]));
         let publisher = RowBuffers::default();
-        let core = Core::spawn(Handle::current(), publisher.clone(), inspector);
+        let core = ready(publisher.clone(), inspector);
         core.dispatch(scan(REMUX, "/anime", false)).await.unwrap();
         core.dispatch(scan(EXTRACT, "/anime", false)).await.unwrap();
         let before = publisher.0.lock().unwrap().len();
@@ -1566,6 +1699,7 @@ mod tests {
             state.remux,
             ModeView {
                 manifest_rev: 2,
+                draft: SettingsDraft::new(REMUX),
                 ..ModeView::default()
             }
         );
@@ -1622,7 +1756,7 @@ mod tests {
         let mut manifest = manifest_of(&["ep1"]);
         manifest.version = 1;
         let inspector = FakeInspector::default().with("/anime", manifest);
-        let core = Core::spawn(Handle::current(), RecordingPublisher::default(), inspector);
+        let core = ready(RecordingPublisher::default(), inspector);
 
         assert_eq!(core.dispatch(scan(REMUX, "/anime", false)).await, Ok(false));
         let state = core.state().await.unwrap();
@@ -1794,5 +1928,108 @@ mod tests {
             assert!(state.remux.rows.is_empty(), "{path}");
             sink.done(&done(1, 0));
         }
+    }
+
+    fn edit(mode: PipelineMode, changes: DraftChanges) -> Intent {
+        Intent::EditDraft { mode, changes }
+    }
+
+    fn set_preset(mode: PipelineMode, preset: &str) -> Intent {
+        Intent::SetPreset {
+            mode,
+            preset: preset.into(),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_draft_intents_publish_their_change_before_they_answer() {
+        let (core, publisher) = spawn_core();
+        // Before any publication, `get_state` already holds each mode's draft and the catalog.
+        let state = core.state().await.unwrap();
+        assert_eq!(state.remux.draft, SettingsDraft::new(REMUX));
+        assert_eq!(state.extract.draft, SettingsDraft::new(EXTRACT));
+        assert_eq!(state.presets, get_preset_profiles());
+
+        let typed = DraftChanges {
+            input_dir: Some("/anime".into()),
+            bitrate: Some("256k".into()),
+            ..DraftChanges::default()
+        };
+        assert_eq!(core.dispatch(edit(REMUX, typed.clone())).await, Ok(true));
+        let state = core.state().await.unwrap();
+        assert_eq!(&state, publisher.states().last().unwrap());
+        assert_eq!(state.remux.draft.input_dir, "/anime");
+        assert_eq!(state.remux.draft.preset.as_deref(), Some("custom"));
+        // The other mode keeps its own draft.
+        assert_eq!(state.extract.draft, SettingsDraft::new(EXTRACT));
+        let published = publisher.states().len();
+        assert_eq!(core.dispatch(edit(REMUX, typed)).await, Ok(false));
+        assert_eq!(
+            publisher.states().len(),
+            published,
+            "nothing changed, nothing published"
+        );
+
+        assert_eq!(core.dispatch(set_preset(REMUX, "hifi")).await, Ok(true));
+        let draft = core.state().await.unwrap().remux.draft;
+        assert_eq!(draft.bitrate.as_deref(), Some("320k"));
+        assert!(core.dispatch(set_preset(REMUX, "studio")).await.is_err());
+        assert!(core.dispatch(set_preset(EXTRACT, "fast")).await.is_err());
+        let assets = DraftChanges {
+            assets_dir: Some("/subs".into()),
+            ..DraftChanges::default()
+        };
+        assert!(core.dispatch(edit(EXTRACT, assets)).await.is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_a_running_job_refuses_draft_intents() {
+        let (core, _publisher) = spawn_core();
+        let sink = core.job_sink();
+        sink.started(&started(1));
+        let workers = || DraftChanges {
+            workers: Some("4".into()),
+            ..DraftChanges::default()
+        };
+        for mode in [REMUX, EXTRACT] {
+            let error = core.dispatch(edit(mode, workers())).await.unwrap_err();
+            assert!(error.contains("running"), "{error}");
+        }
+        let error = core.dispatch(set_preset(REMUX, "fast")).await.unwrap_err();
+        assert!(error.contains("running"), "{error}");
+        assert_eq!(
+            core.state().await.unwrap().remux.draft,
+            SettingsDraft::new(REMUX)
+        );
+
+        sink.done(&done(1, 0));
+        assert_eq!(core.dispatch(edit(REMUX, workers())).await, Ok(true));
+    }
+
+    #[tokio::test]
+    async fn test_the_defaults_are_published_once_the_actor_has_read_them() {
+        let publisher = RecordingPublisher::default();
+        let core = Core::spawn(
+            Handle::current(),
+            publisher.clone(),
+            FakeInspector::default(),
+        );
+        // Read on the blocking pool after the spawn, then published at once.
+        let mut published = None;
+        for _ in 0..1_000 {
+            published = publisher
+                .states()
+                .into_iter()
+                .find_map(|state| state.defaults);
+            if published.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(published, Some(EffectiveSettings::defaults()));
+        assert_eq!(
+            core.state().await.unwrap().defaults,
+            Some(EffectiveSettings::defaults())
+        );
     }
 }
