@@ -5,6 +5,7 @@ use mkv_desktop_core::control::{
     begin_shutdown, cancel_shutdown, cleanup_owned_processes, stop_job_inner, ScanState,
 };
 use mkv_desktop_core::job::JobState;
+use std::sync::Arc;
 use tauri::{AppHandle, Manager, Runtime};
 
 #[tauri::command]
@@ -23,7 +24,7 @@ pub(crate) async fn run_teardown<R: Runtime>(
     teardown: impl FnOnce(&JobState, &ScanState) -> Result<(), String> + Send + 'static,
 ) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        teardown(&app.state::<JobState>(), &app.state::<ScanState>())
+        teardown(&app.state::<JobState>(), &app.state::<Arc<ScanState>>())
     })
     .await
     .map_err(|error| format!("Async runtime error: {error}"))?
@@ -36,7 +37,7 @@ pub async fn close_window(window: tauri::Window, app: AppHandle) -> Result<(), S
     // Refuse starts before the blocking-pool hop, so a `run_job` that lands while the pool
     // schedules the teardown is refused instead of starting a job the teardown then cancels. One
     // async hop remains: this body runs on a Tokio task, not at dispatch.
-    let (state, scan_state) = (app.state::<JobState>(), app.state::<ScanState>());
+    let (state, scan_state) = (app.state::<JobState>(), app.state::<Arc<ScanState>>());
     begin_shutdown(&state, &scan_state);
     run_teardown(app.clone(), cleanup_owned_processes)
         .await
@@ -58,7 +59,7 @@ mod tests {
     fn test_teardown_leaves_the_calling_runtime_free_while_it_waits() {
         let app = tauri::test::mock_app();
         app.manage(mkv_desktop_core::job::test_support::job_state());
-        app.manage(ScanState::default());
+        app.manage(Arc::new(ScanState::default()));
         // Nothing releases this slot, so the teardown waits out both phases.
         app.state::<JobState>().occupy(42);
 
@@ -91,7 +92,7 @@ mod tests {
     fn close_during_a_pending_stop_settles_the_job_once() {
         let app = tauri::test::mock_app();
         app.manage(mkv_desktop_core::job::test_support::job_state());
-        app.manage(ScanState::default());
+        app.manage(Arc::new(ScanState::default()));
         let sink = RecordingSink::default();
         let token = CancellationToken::new();
         let (event_tx, event_rx) = mkv_core::pipeline::create_event_channel(8);

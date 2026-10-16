@@ -132,10 +132,71 @@ function initSteppers() {
   });
 }
 
+// ─── Desktop Core state ─────────────────────────────────────────────────────
+
+/** The event the Desktop Core publishes the View State on; must match `src-tauri/src/publisher.rs`. */
+const VIEW_STATE = "view-state";
+// The newest View State applied, which `syncState` hands out.
+let appliedState = null;
+// The `seq` of the last View State applied. A publication and a `get_state` answer can arrive in
+// either order, so one not newer than this is stale and dropped.
+let appliedSeq = -1;
+// What the global controls read from the queues and the Job View when they were last synced.
+// Progress publications leave it unchanged, so they skip the DOM-wide control sync.
+let controlsKey = "";
+
+/** Renders a View State the Desktop Core published, unless it is stale. */
+function applyState(state) {
+  if (!state || state.seq <= appliedSeq) return;
+  appliedSeq = state.seq;
+  appliedState = state;
+  remuxQueue.applyView(state.remux, state.job);
+  extractQueue.applyView(state.extract, state.job);
+  // Every ModeView field but the rows, and from the rows only the counts the controls show, so a
+  // ModeView field added later syncs the controls too, while a progress publication does not.
+  const key = JSON.stringify([state.job?.job_id, state.job?.active, ...[remuxQueue, extractQueue].map(queue => {
+    const { rows, ...fields } = queue.view;
+    return [fields, queue.state.totalCount, queue.getSelectedCount()];
+  })]);
+  if (key !== controlsKey) {
+    controlsKey = key;
+    jobCoordinator.syncControls();
+  }
+}
+
+/**
+ * Fetches and applies the current View State. Resolves to the newest state applied, which is a
+ * publication that overtook the answer when it is stale, or null when the core is unreachable.
+ */
+async function syncState() {
+  try {
+    applyState(await invoke("get_state"));
+    return appliedState;
+  } catch (err) {
+    console.error("[get_state] failed:", err);
+    return null;
+  }
+}
+
+/**
+ * Sends an Intent to the Desktop Core, then applies the state it published for it. Resolves to the
+ * core's reply, or false when it refused the Intent (the queue is locked) or is unreachable.
+ */
+async function dispatchIntent(intent) {
+  try {
+    return await invoke("dispatch", { intent });
+  } catch (err) {
+    console.error(`[dispatch] ${intent.type} refused:`, err);
+    return false;
+  } finally {
+    await syncState();
+  }
+}
+
 // ─── Queues and the view around them ────────────────────────────────────────
 
-const remuxQueue = new QueueTracker("remux");
-const extractQueue = new QueueTracker("extract");
+const remuxQueue = new QueueTracker("remux", dispatchIntent);
+const extractQueue = new QueueTracker("extract", dispatchIntent);
 let currentView = "remux";
 
 function queueFor(mode) {
@@ -274,7 +335,7 @@ function renderInspector(queue) {
   const pathEl = byId("insp-path");
   if (pathEl && pathEl.dataset.path !== item.id) {
     pathEl.dataset.path = item.id;
-    // From the ID, not `release`: an item restored from a snapshot has an empty release.
+    // From the ID, not `release`: a row the manifest does not list has an empty release.
     renderCrumbs(pathEl, inspectorCrumbs(item.id));
   }
 
@@ -422,18 +483,21 @@ function subtitleAssignment(itemId, path) {
 }
 
 /** Sets (or, with no path, clears) the inspected item's Track Assignment. Refused while a job runs. */
-function assignSubtitle(path) {
+async function assignSubtitle(path) {
   const item = remuxQueue.inspectedItem();
   if (!item || jobCoordinator.activeMode !== null) return;
-  if (path) remuxQueue.assignments.set(item.id, subtitleAssignment(item.id, path));
-  else remuxQueue.assignments.delete(item.id);
-  remuxQueue.applyAssignmentToCard(item.id);
+  await dispatchIntent(path
+    ? { type: "assign_track", mode: "remux", assignment: subtitleAssignment(item.id, path) }
+    : { type: "clear_track", mode: "remux", id: item.id });
+  // Redraw the inspector even when the core refused the change, so it shows what is assigned.
+  lastAssignKey = null;
+  scheduleChrome("remux");
 }
 
 async function onAssignSelect(e) {
   const value = e.target.value;
   if (value !== BROWSE_SUBTITLE) {
-    assignSubtitle(value);
+    await assignSubtitle(value);
     return;
   }
   let picked = null;
@@ -445,7 +509,7 @@ async function onAssignSelect(e) {
     }
   }
   if (picked) {
-    assignSubtitle(picked);
+    await assignSubtitle(picked);
   } else {
     // Nothing picked: put the select back on what is assigned.
     lastAssignKey = null;
@@ -505,8 +569,7 @@ const telemetryLoop = createTelemetryLoop({
 // ─── Directory Scan ─────────────────────────────────────────────────────────
 
 const scanInputDirectory = createDirectoryScanner({
-  invoke,
-  queueFor,
+  dispatch: dispatchIntent,
   onSettled: () => jobCoordinator.syncControls(),
 });
 
@@ -872,6 +935,7 @@ function initApp() {
     safeAddListener,
     scanInputDirectory,
     showModal,
+    syncState,
     telemetryLoop,
     updateWorkerChips: chips.update,
     openSettings: mode => openSettings(mode),
@@ -891,7 +955,7 @@ function initApp() {
     jobCoordinator.syncControls();
   });
   chips.loadDefaults();
-  jobCoordinator.restore({ listen, invoke, queueFor, switchView });
+  boot(controllers);
 
   document.addEventListener("keydown", e => {
     if ((e.ctrlKey || e.metaKey) && e.key === "t") {
@@ -903,6 +967,24 @@ function initApp() {
       setLogOpen(false);
     }
   });
+}
+
+/**
+ * Loads the queues and any job from the Desktop Core, which outlives a webview reload: listens to
+ * `view-state` first, so no publication after `get_state` is missed, then renders the current
+ * state and hands a job it holds to the controller of its mode.
+ */
+async function boot(controllers) {
+  try {
+    await listen(VIEW_STATE, event => applyState(event.payload));
+  } catch (err) {
+    console.error("[view-state] listener failed:", err);
+  }
+  const job = (await syncState())?.job;
+  if (!job) return;
+  // An extract job is shown in its own view.
+  if (job.mode === "extract") switchView("extract");
+  await controllers[job.mode]?.adopt(job);
 }
 
 if (document.readyState === "loading") {

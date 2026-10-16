@@ -1,12 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { createQueueState, reduceQueueEvent, setItemSelected } from "./queue-state.js";
 import {
   batchClock,
   candidateTier,
   filterCounts,
+  formatElapsedDuration,
+  formatOutcomeDuration,
   inspectorCrumbs,
+  isSameDirectory,
   logDisplayText,
   matchesFilter,
   pathSegments,
@@ -19,6 +21,27 @@ import {
   subtitleLadder,
   subtitleSourceText,
 } from "./presentation.js";
+
+test("Directory Identities compare byte for byte, and a missing or empty one is never the same", () => {
+  // The same table as `queue::tests::test_directory_identities_compare_byte_for_byte`.
+  assert.equal(isSameDirectory("/anime/show", "/anime/show"), true);
+  assert.equal(isSameDirectory("C:\\Anime\\Show", "C:\\Anime\\Show"), true);
+  // Nothing normalizes: the bridge resolves every spelling to one identity first.
+  for (const [a, b] of [
+    ["/anime/show", "/anime/show/"],
+    ["/anime/show", "/anime/x/../show"],
+    ["/anime/Show", "/anime/show"],
+    ["C:\\Anime\\Show", "c:/anime/show"],
+    ["/anime/showA", "/anime/showB"],
+    ["", "/anime/show"],
+    ["", ""],
+    [null, "/anime/show"],
+    [null, null],
+    [undefined, undefined],
+  ]) {
+    assert.equal(isSameDirectory(a, b), false, `${a} vs ${b}`);
+  }
+});
 
 test("paths read Finder-style: no slashes, no dot segments, Windows separators too", () => {
   assert.deepEqual(pathSegments("/media/anime/Show (2023)/"), ["media", "anime", "Show (2023)"]);
@@ -65,35 +88,72 @@ test("status labels name the outcome, and a processing item its progress and ela
   assert.equal(statusLabel({ status: "queued" }), "Queued");
 });
 
-const manifest = ids => ({ version: 2, items: ids.map(id => ({ id, name: id })) });
-const event = (type, fields) => ({ version: 1, type, ...fields });
+/** Queue state in the shape `QueueTracker.applyView` projects: `items` in queue order. */
+function stateOf(items, batch = {}) {
+  return {
+    items: new Map(items.map(item => [item.id, { selected: true, status: "queued", progress: null, ...item }])),
+    order: items.map(item => item.id),
+    batchItemIds: null,
+    batchStartTime: null,
+    batchCompleted: false,
+    batchSuccess: null,
+    batchCancelled: false,
+    ...batch,
+  };
+}
 
 test("filters: To do, Done and Failed count selected items only, All counts every item", () => {
-  const state = createQueueState(manifest(["a", "b", "c", "d", "e"]));
-  reduceQueueEvent(state, event("batch_start", { items: [{ id: "a" }, { id: "b" }, { id: "c" }, { id: "d" }] }));
-  reduceQueueEvent(state, event("item_complete", { id: "a", status: "completed" }));
-  reduceQueueEvent(state, event("item_complete", { id: "b", status: "error", error: "x" }));
-  reduceQueueEvent(state, event("item_start", { id: "c" }));
-  setItemSelected(state, "e", false);
+  const state = stateOf([
+    { id: "a", status: "completed" },
+    { id: "b", status: "error" },
+    { id: "c", status: "processing" },
+    { id: "d" },
+    { id: "e", selected: false },
+  ]);
   assert.deepEqual(filterCounts(state), { all: 5, todo: 2, done: 1, failed: 1 });
   assert.equal(matchesFilter(state.items.get("e"), "todo"), false);
   assert.equal(matchesFilter(state.items.get("e"), "all"), true);
 });
 
 test("progress segments cover the Active Batch, and the clock says how the batch ended", () => {
-  const state = createQueueState(manifest(["a", "b", "c", "d"]));
-  assert.equal(batchClock(state), "Not started");
-  reduceQueueEvent(state, event("batch_start", { items: [{ id: "a" }, { id: "b" }, { id: "c" }, { id: "d" }] }), 1_000);
-  reduceQueueEvent(state, event("item_complete", { id: "a", status: "completed" }));
-  reduceQueueEvent(state, event("item_complete", { id: "b", status: "skipped" }));
-  reduceQueueEvent(state, event("item_start", { id: "c" }));
-  reduceQueueEvent(state, event("item_progress", { id: "c", progress: 40 }));
-  assert.deepEqual(progressSegments(state), { done: 25, skipped: 25, failed: 0, live: 10 });
-  assert.equal(batchClock(state, 73_000), "1m 12s elapsed");
-  reduceQueueEvent(state, event("item_complete", { id: "c", status: "error", error: "x" }));
-  reduceQueueEvent(state, event("item_complete", { id: "d", status: "completed" }));
-  reduceQueueEvent(state, event("batch_complete", { success: false }));
-  assert.equal(batchClock(state), "Finished with errors");
+  const ids = ["a", "b", "c", "d"];
+  assert.equal(batchClock(stateOf(ids.map(id => ({ id })))), "Not started");
+  const running = stateOf([
+    { id: "a", status: "completed" },
+    { id: "b", status: "skipped" },
+    { id: "c", status: "processing", progress: 40 },
+    { id: "d" },
+    // Not a participant: the Active Batch is the four above.
+    { id: "e", status: "error" },
+  ], { batchItemIds: ids, batchStartTime: 1_000 });
+  assert.deepEqual(progressSegments(running), { done: 25, skipped: 25, failed: 0, live: 10 });
+  assert.equal(batchClock(running, 73_000), "1m 12s elapsed");
+  const ended = { ...running, batchCompleted: true, batchSuccess: false };
+  assert.equal(batchClock(ended), "Finished with errors");
+  assert.equal(batchClock({ ...ended, batchCancelled: true }), "Stopped");
+  assert.equal(batchClock({ ...ended, batchSuccess: true }), "Finished");
+});
+
+test("formatOutcomeDuration formats seconds across the sub-0.1s, seconds, and minutes thresholds", () => {
+  assert.equal(formatOutcomeDuration(0), "<0.1s");
+  assert.equal(formatOutcomeDuration(0.04), "<0.1s");
+  assert.equal(formatOutcomeDuration(4.2), "4.2s");
+  assert.equal(formatOutcomeDuration(59.94), "59.9s");
+  assert.equal(formatOutcomeDuration(59.96), "1m 0.0s");
+  assert.equal(formatOutcomeDuration(60.0), "1m 0.0s");
+  assert.equal(formatOutcomeDuration(75.4), "1m 15.4s");
+  assert.equal(formatOutcomeDuration(119.96), "2m 0.0s");
+});
+
+test("formatElapsedDuration formats negative seconds, seconds, and minutes", () => {
+  assert.equal(formatElapsedDuration(-5), "0s");
+  assert.equal(formatElapsedDuration(-0.1), "0s");
+  assert.equal(formatElapsedDuration(0), "0s");
+  assert.equal(formatElapsedDuration(4.2), "4s");
+  assert.equal(formatElapsedDuration(42), "42s");
+  assert.equal(formatElapsedDuration(59.9), "59s");
+  assert.equal(formatElapsedDuration(75.4), "1m 15s");
+  assert.equal(formatElapsedDuration(130), "2m 10s");
 });
 
 test("remux audio names the Opus bitrate only for FLAC", () => {
