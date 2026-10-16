@@ -1,7 +1,8 @@
 //! The telemetry cadence of the Desktop Core actor (ADR-0016, S4): the System Telemetry Provider
 //! is sampled every second while a start or a job holds the batch and every 30 seconds otherwise,
 //! never while the view is hidden, and never twice at once. A sample is taken at once when the
-//! actor starts, when the view is shown again and when the batch is taken or released.
+//! actor starts, when the view is shown again and when the batch is taken or released (or as soon
+//! as the sample in flight is back).
 
 use super::{Core, Msg, Publisher};
 use crate::control::Launcher;
@@ -22,6 +23,8 @@ pub(super) struct Telemetry {
     visible: bool,
     /// Whether a sample is in flight: a poll due meanwhile is skipped.
     sampling: bool,
+    /// Whether a restart found a sample in flight: one more is taken when it comes back.
+    resample: bool,
     /// When the next poll is due: `None` while hidden.
     pub(super) poll_at: Option<Instant>,
     /// Whether the batch was held when the cadence was last set.
@@ -35,6 +38,7 @@ impl Default for Telemetry {
         Self {
             visible: true,
             sampling: false,
+            resample: false,
             poll_at: None,
             busy: false,
             view: None,
@@ -43,11 +47,12 @@ impl Default for Telemetry {
 }
 
 impl<P: Publisher, I: Inspector, L: Launcher, S: Sampler> Core<P, I, L, S> {
-    /// Samples now and polls from now on at the period the batch calls for, unless the view is
-    /// hidden, which stops polling.
+    /// Samples now, or as soon as the sample in flight is back, and polls from now on at the
+    /// period the batch calls for, unless the view is hidden, which stops polling.
     pub(super) fn restart_telemetry(&mut self) {
         if !self.telemetry.visible {
             self.telemetry.poll_at = None;
+            self.telemetry.resample = false;
             return;
         }
         let period = if self.telemetry.busy {
@@ -56,7 +61,12 @@ impl<P: Publisher, I: Inspector, L: Launcher, S: Sampler> Core<P, I, L, S> {
             IDLE_PERIOD
         };
         self.telemetry.poll_at = Some(Instant::now() + period);
-        self.sample();
+        // The in-flight sample may predate the restart: take another once it is back.
+        if self.telemetry.sampling {
+            self.telemetry.resample = true;
+        } else {
+            self.sample();
+        }
     }
 
     /// Polls if the poll is due: the next one is due a period after it was, or a period from now
@@ -113,6 +123,11 @@ impl<P: Publisher, I: Inspector, L: Launcher, S: Sampler> Core<P, I, L, S> {
         if let Ok(data) = result {
             self.telemetry.view.get_or_insert_default().push(&data);
             self.dirty = true;
+        }
+        // Hiding the view clears the flag, so this never samples while hidden. The poll
+        // deadline the restart set stays as it is.
+        if std::mem::take(&mut self.telemetry.resample) {
+            self.sample();
         }
     }
 }
@@ -249,6 +264,52 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(24)).await;
         settle().await;
         assert_eq!(sampler.calls(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_a_restart_while_a_sample_is_in_flight_samples_again_when_it_is_back() {
+        let sampler = FakeSampler {
+            delay: Duration::from_secs(5),
+            ..FakeSampler::default()
+        };
+        let (core, _publisher) = core_with(sampler.clone(), FakeLauncher::default());
+        settle().await;
+        assert_eq!(sampler.calls(), 1);
+        // Hidden and shown again at 1 s, with the first sample still in flight.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(core.dispatch(visible(false)).await, Ok(true));
+        assert_eq!(core.dispatch(visible(true)).await, Ok(true));
+        settle().await;
+        assert_eq!(sampler.calls(), 1);
+        // Back at 5 s: the restart's sample is taken at once.
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        settle().await;
+        assert_eq!(sampler.calls(), 2);
+        // The next poll is still a period after the restart, at 31 s.
+        tokio::time::sleep(Duration::from_secs(26) - Duration::from_millis(1)).await;
+        settle().await;
+        assert_eq!(sampler.calls(), 2);
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        settle().await;
+        assert_eq!(sampler.calls(), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_hiding_the_view_drops_a_pending_resample() {
+        let sampler = FakeSampler {
+            delay: Duration::from_secs(5),
+            ..FakeSampler::default()
+        };
+        let (core, _publisher) = core_with(sampler.clone(), FakeLauncher::default());
+        settle().await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(core.dispatch(visible(false)).await, Ok(true));
+        assert_eq!(core.dispatch(visible(true)).await, Ok(true));
+        assert_eq!(core.dispatch(visible(false)).await, Ok(true));
+        // The first sample comes back with the view hidden: nothing more is sampled.
+        tokio::time::sleep(IDLE_PERIOD * 3).await;
+        settle().await;
+        assert_eq!(sampler.calls(), 1);
     }
 
     #[tokio::test(start_paused = true)]
