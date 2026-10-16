@@ -46,18 +46,6 @@ pub fn pick_subtitle_file() -> Option<String> {
         .map(|p| p.to_string_lossy().into_owned())
 }
 
-#[tauri::command]
-pub fn get_preset_profiles() -> Vec<mkv_core::preset::PresetProfile> {
-    mkv_core::preset::get_preset_profiles()
-}
-
-/// The Effective Settings of a `BatchRequest` that leaves every setting unset, for the UI's
-/// "auto (N)" and idle displays.
-#[tauri::command]
-pub fn get_default_settings() -> EffectiveSettings {
-    EffectiveSettings::defaults()
-}
-
 /// The Desktop Core's last published View State.
 #[tauri::command]
 pub async fn get_state(core: State<'_, CoreHandle>) -> Result<ViewState, String> {
@@ -90,10 +78,11 @@ mod tests {
         }
     }
 
+    /// The View State's `defaults` are what a run of an empty form resolves to.
     #[test]
-    fn test_get_default_settings_match_a_resolved_empty_request() {
+    fn test_default_settings_match_a_resolved_empty_request() {
         let tmp = tempfile::tempdir().unwrap();
-        let defaults = get_default_settings();
+        let defaults = EffectiveSettings::defaults();
         assert_eq!(
             resolve_batch_request(dry_run_request(tmp.path())),
             Ok(defaults.clone())

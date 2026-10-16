@@ -60,6 +60,12 @@ pub fn lookup_preset(id: &str) -> Option<PresetProfile> {
         .find(|p| p.id.eq_ignore_ascii_case(target))
 }
 
+/// `lookup_preset`, else the error a request or a Settings Draft naming no built-in preset
+/// answers.
+pub fn require_preset(id: &str) -> Result<PresetProfile, String> {
+    lookup_preset(id).ok_or_else(|| format!("Unknown preset profile: '{id}'"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

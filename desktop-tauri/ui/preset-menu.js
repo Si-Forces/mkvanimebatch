@@ -1,14 +1,12 @@
 /**
- * The sidebar's Preset Profile rows: applies a profile's bitrate and complexity to the form, or
- * marks the form as hand-edited ("custom"). The engine owns the Preset Profile catalog: `load()`
- * fills this module's copy from it and renders one row per profile into `#preset-list`, so the
- * page holds no hardcoded copy of it.
+ * The sidebar's Preset Profile rows, rendered from the View State: one row per profile of the
+ * published catalog (`presets`), the remux Settings Draft's preset marked active, and the custom
+ * row's subtitle showing the draft's own bitrate and complexity. A click sends `set_preset`; the
+ * core applies the profile to the draft, so the page holds no copy of the catalog or its rules.
  */
-export function createPresetMenu({ invoke, doc }) {
-  // Keyed by profile id; empty until `load()` has an answer.
-  const catalog = {};
-  // The form starts on the engine's defaults, which are the balanced profile's.
-  let activeKey = "balanced";
+export function createPresetMenu({ doc, dispatch, isLocked }) {
+  // The catalog the rows were rendered from, as JSON.
+  let rowsKey = null;
 
   function renderRows(profiles) {
     const list = doc.getElementById("preset-list");
@@ -25,61 +23,50 @@ export function createPresetMenu({ invoke, doc }) {
       const text = doc.createElement("span");
       text.className = "nav-text";
       const sub = doc.createElement("small");
-      // The custom row shows the form's own values, which app.js keeps current.
+      // The custom row shows the draft's own values, which `render` keeps current.
       if (p.id === "custom") sub.id = "preset-custom-sub";
       sub.textContent = presetSubtitle(p.bitrate, p.complexity);
       text.append(p.name, sub);
       row.append(dot, text);
       list.appendChild(row);
     }
-    setActiveProfileOption(activeKey);
   }
 
-  async function load() {
-    try {
-      const profiles = (await invoke("get_preset_profiles")) ?? [];
-      for (const p of profiles) {
-        catalog[p.id] = { bitrate: p.bitrate, complexity: String(p.complexity) };
-      }
+  /** Renders `profiles` and the remux `draft` over them. */
+  function render(profiles = [], draft = null) {
+    const key = JSON.stringify(profiles);
+    if (key !== rowsKey) {
+      rowsKey = key;
       renderRows(profiles);
-    } catch (err) {
-      console.error("[get_preset_profiles] failed:", err);
     }
-  }
-
-  function setActiveProfileOption(presetKey) {
-    activeKey = presetKey;
     doc.querySelectorAll(".profile-option-item").forEach(item => {
-      const active = item.dataset.preset === presetKey;
+      const active = item.dataset.preset === draft?.preset;
       item.classList.toggle("active", active);
       item.setAttribute("aria-pressed", active ? "true" : "false");
     });
-  }
-
-  /** Fills the Remux form: presets set the Opus encode, and only Remux transcodes (#preset-list is remux-only). */
-  function apply(presetKey) {
-    if (presetKey === "custom") {
-      setActiveProfileOption("custom");
-      return;
+    const sub = doc.getElementById("preset-custom-sub");
+    // A complexity that is not a number yet (a cleared box) keeps the subtitle as it was.
+    const complexity = parseInt(draft?.complexity, 10);
+    if (sub && draft?.bitrate != null && !Number.isNaN(complexity)) {
+      const text = presetSubtitle(draft.bitrate, complexity);
+      if (sub.textContent !== text) sub.textContent = text;
     }
-    const p = catalog[presetKey];
-    // Without its catalog entry there is nothing to apply.
-    if (!p) return;
-    setActiveProfileOption(presetKey);
-
-    const setVal = (id, val) => {
-      const el = doc.getElementById(id);
-      if (el) el.value = val;
-    };
-    setVal("remux-bitrate", p.bitrate);
-    setVal("remux-complexity", p.complexity);
-    setVal("remux-cplx-val", p.complexity);
   }
 
-  return { load, apply };
+  /** Sends `set_preset` for a clicked row, unless a job holds the form. */
+  function bind() {
+    doc.getElementById("preset-list")?.addEventListener("click", e => {
+      const item = e.target.closest?.(".profile-option-item[data-preset]");
+      if (!item || isLocked()) return undefined;
+      // Presets set the Opus encode, and only Remux transcodes (#preset-list is remux-only).
+      return dispatch({ type: "set_preset", mode: "remux", preset: item.dataset.preset });
+    });
+  }
+
+  return { bind, render };
 }
 
 /** A preset row's subtitle: the bitrate and complexity a profile, or the custom form, encodes with. */
-export function presetSubtitle(bitrate, complexity) {
+function presetSubtitle(bitrate, complexity) {
   return `Opus ${bitrate} · complexity ${complexity}`;
 }

@@ -16,10 +16,10 @@ function chipText(isJobActive, idleWord, count, noun) {
  * show Effective Settings: the engine's defaults, or a running job's own. `isJobActive()` says
  * whether a job owns the chips right now.
  */
-export function createSettingsChips({ invoke, doc, isJobActive }) {
+export function createSettingsChips({ doc, isJobActive }) {
   /**
-   * The Effective Settings of a request that sets nothing: `null` until `get_default_settings`
-   * answers, or when it fails. An empty workers field sends `workers: null`, which the engine
+   * The View State's `defaults`, the Effective Settings of a request that sets nothing: `null`
+   * until the core has read them. An empty workers field sends `workers: null`, which the engine
    * resolves to these.
    */
   let defaultSettings = null;
@@ -37,26 +37,19 @@ export function createSettingsChips({ invoke, doc, isJobActive }) {
     });
   }
 
-  async function loadDefaults() {
-    try {
-      const settings = await invoke("get_default_settings");
-      if (!Number.isInteger(settings?.workers) || settings.workers < 1) {
-        throw new Error(`unexpected value ${JSON.stringify(settings)}`);
-      }
-      defaultSettings = settings;
-      for (const [id, key] of AUTO_INPUTS) {
-        const input = doc.getElementById(id);
-        if (!input) continue;
-        input.placeholder = `auto (${settings[key]})`;
-        input.dataset.autoValue = String(settings[key]);
-      }
-      // Leave the chips alone while a job owns them; they show that job's own settings.
-      if (!isJobActive()) update(false);
-    } catch (err) {
-      // The placeholder stays "auto" and the chips name their state without a count.
-      console.error("[get_default_settings] failed:", err);
+  /** Takes the published `defaults`; a View State without them yet leaves the inputs on plain `auto`. */
+  function applyDefaults(settings) {
+    if (!settings || JSON.stringify(settings) === JSON.stringify(defaultSettings)) return;
+    defaultSettings = settings;
+    for (const [id, key] of AUTO_INPUTS) {
+      const input = doc.getElementById(id);
+      if (!input) continue;
+      input.placeholder = `auto (${settings[key]})`;
+      input.dataset.autoValue = String(settings[key]);
     }
+    // Leave the chips alone while a job owns them; they show that job's own settings.
+    if (!isJobActive()) update(false);
   }
 
-  return { loadDefaults, update };
+  return { applyDefaults, update };
 }

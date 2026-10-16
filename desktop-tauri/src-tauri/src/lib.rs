@@ -115,8 +115,6 @@ pub fn run() {
             window::start_drag,
             window::start_resize,
             window::set_window_theme,
-            commands::get_preset_profiles,
-            commands::get_default_settings,
             commands::get_state,
             commands::dispatch,
         ])

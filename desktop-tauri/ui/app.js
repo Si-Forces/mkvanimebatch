@@ -9,7 +9,8 @@ import { createJobCoordinator } from "./job-coordinator.js";
 import { createDirectoryScanner } from "./directory-scan.js";
 import { nextStepValue } from "./stepper.js";
 import { createSettingsChips } from "./settings-chips.js";
-import { createPresetMenu, presetSubtitle } from "./preset-menu.js";
+import { createPresetMenu } from "./preset-menu.js";
+import { createSettingsDraft } from "./settings-draft.js";
 import { createTheme } from "./theme.js";
 import {
   batchClock,
@@ -77,12 +78,16 @@ function renderCrumbs(el, segments) {
 // ─── Worker Chips, Presets and Theme ────────────────────────────────────────
 
 const chips = createSettingsChips({
-  invoke,
   doc: document,
   // A running job owns the chips; they show its own settings, not the defaults.
   isJobActive: () => jobCoordinator.activeMode !== null,
 });
-const presets = createPresetMenu({ invoke, doc: document });
+const presets = createPresetMenu({
+  doc: document,
+  dispatch: dispatchIntent,
+  isLocked: () => jobCoordinator.activeMode !== null,
+});
+const draftForm = createSettingsDraft({ doc: document, dispatch: dispatchIntent });
 const theme = createTheme({
   doc: document,
   win: window,
@@ -150,13 +155,21 @@ function applyState(state) {
   if (!state || state.seq <= appliedSeq) return;
   appliedSeq = state.seq;
   appliedState = state;
+  // The fields first, so the queues and the chrome below read the published draft.
+  const remuxWritten = draftForm.apply("remux", state.remux.draft);
+  draftForm.apply("extract", state.extract.draft);
+  chips.applyDefaults(state.defaults);
+  presets.render(state.presets, state.remux.draft);
   remuxQueue.applyView(state.remux, state.job);
   extractQueue.applyView(state.extract, state.job);
-  // Every ModeView field but the rows, and from the rows only the counts the controls show, so a
-  // ModeView field added later syncs the controls too, while a progress publication does not.
+  // The rows show the bitrate and the subtitle ladder the assets dir is part of.
+  if (remuxWritten.has("bitrate") || remuxWritten.has("assets_dir")) remuxQueue.refreshMeta();
+  // Every ModeView field but the rows and the draft, and from the rows only the counts the controls
+  // show, so a ModeView field added later syncs the controls too, while a progress publication or a
+  // keystroke does not. Of the draft, only dry_run is on the controls (the Run label).
   const key = JSON.stringify([state.job?.job_id, state.job?.active, ...[remuxQueue, extractQueue].map(queue => {
-    const { rows, ...fields } = queue.view;
-    return [fields, queue.state.totalCount, queue.getSelectedCount()];
+    const { rows, draft, ...fields } = queue.view;
+    return [fields, draft?.dry_run, queue.state.totalCount, queue.getSelectedCount()];
   })]);
   if (key !== controlsKey) {
     controlsKey = key;
@@ -178,19 +191,38 @@ async function syncState() {
   }
 }
 
+// The Intents sent so far. Each is sent once the one before it was answered: the IPC does not keep
+// the order of concurrent calls, and an edit must not reach the core after a later Intent. A scan
+// is the exception: it is answered only once its inspection settles, so the chain waits for it to
+// be sent, not answered. A scan reads its own path, not the draft, so what overtakes it is
+// harmless, and a newer scan of the mode can still overtake it in the core.
+// ponytail: the IPC may still deliver an Intent sent right after a scan before it; an early scan
+// ack from the core would close that gap if it ever matters.
+let dispatchChain = Promise.resolve();
+
+// The draft Intents: the core answers them before it publishes their change, which reaches the
+// page as a coalesced `view-state` publication (ADR-0016, S3).
+const DRAFT_INTENTS = new Set(["edit_draft", "set_preset"]);
+
 /**
- * Sends an Intent to the Desktop Core, then applies the state it published for it. Resolves to the
- * core's reply, or false when it refused the Intent (the queue is locked) or is unreachable.
+ * Sends an Intent to the Desktop Core after every Intent sent before it was answered (a scan only
+ * sent), then applies the state it published for it, but for a draft Intent, whose state arrives
+ * as a publication. Resolves to the core's reply, or false when it refused the Intent (the queue
+ * or the settings are locked) or is unreachable.
  */
-async function dispatchIntent(intent) {
-  try {
-    return await invoke("dispatch", { intent });
-  } catch (err) {
-    console.error(`[dispatch] ${intent.type} refused:`, err);
-    return false;
-  } finally {
-    await syncState();
-  }
+function dispatchIntent(intent) {
+  const answer = dispatchChain.then(async () => {
+    try {
+      return await invoke("dispatch", { intent });
+    } catch (err) {
+      console.error(`[dispatch] ${intent.type} refused:`, err);
+      return false;
+    } finally {
+      if (!DRAFT_INTENTS.has(intent.type)) await syncState();
+    }
+  });
+  if (intent.type !== "scan_directory") dispatchChain = answer;
+  return answer;
 }
 
 // ─── Queues and the view around them ────────────────────────────────────────
@@ -584,8 +616,11 @@ async function chooseInputDirectory(targetId) {
 
   if (targetId === "remux-input-dir" || targetId === "extract-input-dir") {
     const mode = targetId.startsWith("extract") ? "extract" : "remux";
+    // An input event, not a change: the field's own change rescans, and this scans below.
+    input.dispatchEvent?.(new Event("input"));
     await scanInputDirectory(directory, mode);
   } else {
+    // The change sends the edit to the Settings Draft too.
     input.dispatchEvent?.(new Event("change"));
   }
 }
@@ -773,13 +808,6 @@ async function syncMaximizedState() {
   }
 }
 
-/** The Custom preset's subtitle shows the form's own bitrate and complexity. */
-function updateCustomPresetText() {
-  const bitrate = byId("remux-bitrate")?.value;
-  const complexity = byId("remux-complexity")?.value;
-  if (bitrate && complexity !== undefined) setText("preset-custom-sub", presetSubtitle(bitrate, complexity));
-}
-
 function initApp() {
   theme.init();
 
@@ -874,14 +902,10 @@ function initApp() {
     safeAddListener(id, "change", onAssignOptions);
   }
 
-  // ─── Presets ──────────────────────────────────────────────────────────────
-  safeAddListener("preset-list", "click", e => {
-    const item = e.target.closest?.(".profile-option-item[data-preset]");
-    if (!item || jobCoordinator.activeMode !== null) return;
-    presets.apply(item.dataset.preset);
-    updateCustomPresetText();
-    remuxQueue.refreshMeta();
-  });
+  // ─── Presets and the Settings Draft ───────────────────────────────────────
+  // Bound before the Job Controllers, so a field's edit is sent before the rescan its change starts.
+  presets.bind();
+  draftForm.bind();
 
   // ─── Complexity Slider & Number Synchronization ──────────────────────────
   const cplxSlider = document.getElementById("remux-complexity");
@@ -898,8 +922,10 @@ function initApp() {
     const normalizeNumber = () => {
       const v = parseInt(cplxNumber.value, 10);
       const normalized = String(isNaN(v) ? Number(cplxSlider.min) : clamp(v));
+      if (cplxNumber.value === normalized && cplxSlider.value === normalized) return;
       cplxNumber.value = normalized;
       cplxSlider.value = normalized;
+      draftForm.send("remux", "complexity", cplxNumber);
     };
 
     cplxSlider.addEventListener("input", syncFromSlider);
@@ -909,15 +935,6 @@ function initApp() {
     cplxNumber.addEventListener("blur", normalizeNumber);
   }
 
-  // Editing what a Preset Profile sets (bitrate, complexity) by hand leaves the selected preset.
-  ["remux-bitrate", "remux-complexity", "remux-cplx-val"].forEach(id => {
-    const toCustom = () => {
-      presets.apply("custom");
-      updateCustomPresetText();
-    };
-    safeAddListener(id, "change", toCustom);
-    safeAddListener(id, "input", toCustom);
-  });
   // The rows and the inspector show the bitrate and the subtitle ladder; the inspector the folders.
   safeAddListener("remux-bitrate", "change", () => remuxQueue.refreshMeta());
   safeAddListener("remux-assets-dir", "change", () => remuxQueue.refreshMeta());
@@ -949,12 +966,6 @@ function initApp() {
   }
   jobCoordinator.syncControls();
   telemetryLoop.start();
-  // The rows arrive with the catalog: fill the custom row's values and lock them if a job runs.
-  presets.load().then(() => {
-    updateCustomPresetText();
-    jobCoordinator.syncControls();
-  });
-  chips.loadDefaults();
   boot(controllers);
 
   document.addEventListener("keydown", e => {

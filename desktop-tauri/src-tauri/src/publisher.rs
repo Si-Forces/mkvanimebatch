@@ -62,7 +62,7 @@ mod tests {
 
         let state = ViewState {
             seq: 1,
-            ..ViewState::default()
+            ..ViewState::new(None)
         };
         publisher.state(&state);
         publisher.logs(&[
