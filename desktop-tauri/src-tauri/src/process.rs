@@ -1,20 +1,13 @@
-//! The Stop and Close commands: thin wrappers that run the Desktop Core's teardown on Tauri's
-//! blocking pool, reading the states through the `AppHandle`.
+//! The Close command: a thin wrapper that runs the Desktop Core's teardown on Tauri's blocking
+//! pool, reading the states through the `AppHandle`. Stop is the core's `stop` Intent, which its
+//! `EngineLauncher` tears down on the blocking pool too.
 
 use mkv_desktop_core::control::{
-    begin_shutdown, cancel_shutdown, cleanup_owned_processes, stop_job_inner, ScanState,
+    begin_shutdown, cancel_shutdown, cleanup_owned_processes, ScanState,
 };
 use mkv_desktop_core::job::JobState;
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, Runtime};
-
-#[tauri::command]
-pub async fn stop_job(app: AppHandle, job_id: Option<u64>) -> Result<(), String> {
-    run_teardown(app, move |state, scan_state| {
-        stop_job_inner(state, scan_state, job_id)
-    })
-    .await
-}
 
 /// Runs a sync teardown on the blocking pool. A sync command would run it on the main thread and
 /// freeze the window; a plain async one would park a Tokio worker the supervisor needs. The
@@ -34,7 +27,7 @@ pub(crate) async fn run_teardown<R: Runtime>(
 /// second abort is a no-op.
 #[tauri::command]
 pub async fn close_window(window: tauri::Window, app: AppHandle) -> Result<(), String> {
-    // Refuse starts before the blocking-pool hop, so a `run_job` that lands while the pool
+    // Refuse starts before the blocking-pool hop, so a launch that lands while the pool
     // schedules the teardown is refused instead of starting a job the teardown then cancels. One
     // async hop remains: this body runs on a Tokio task, not at dispatch.
     let (state, scan_state) = (app.state::<JobState>(), app.state::<Arc<ScanState>>());
@@ -49,7 +42,7 @@ pub async fn close_window(window: tauri::Window, app: AppHandle) -> Result<(), S
 mod tests {
     use super::*;
     use mkv_core::pipeline::{CancellationToken, PipelineSummary};
-    use mkv_desktop_core::control::cleanup_owned_processes_with_timeout;
+    use mkv_desktop_core::control::{cleanup_owned_processes_with_timeout, stop_job_inner};
     use mkv_desktop_core::job::test_support::RecordingSink;
     use mkv_desktop_core::job::JobConfig;
     use mkv_desktop_core::snapshot::test_support::effective_settings;
@@ -87,7 +80,8 @@ mod tests {
         assert!(result.unwrap_err().contains("Timed out"));
     }
 
-    /// Stop and Close race on one Job Slot through `run_teardown`, the route the commands take.
+    /// Stop and Close race on one Job Slot on the blocking pool: Stop as `EngineLauncher::stop`
+    /// runs it, Close through `run_teardown`, the route its command takes.
     #[test]
     fn close_during_a_pending_stop_settles_the_job_once() {
         let app = tauri::test::mock_app();

@@ -1,11 +1,14 @@
 //! Run, stop and shutdown control of the Engine Bridge: the session inspect cache, the start of a
 //! job from a `BatchRequest`, the Directory Inspection registry, and the teardown that Stop and
-//! Close share. A UI adapter wraps these in its own commands.
+//! Close share. The `Launcher` port is how the Job Coordinator in the Desktop Core actor resolves,
+//! launches and stops a job; `EngineLauncher` does it with these, and tests script a fake.
 
+use crate::actor::ActorSink;
 use crate::job::{display_canonical_path, wait_until, JobConfig, JobSink, JobState};
 use mkv_core::pipeline::{CancellationToken, PipelineConfig, PipelineMode};
-use mkv_core::request::BatchRequest;
+use mkv_core::request::{BatchRequest, EffectiveSettings};
 use mkv_core::scan::PersistentInspectCache;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -255,7 +258,7 @@ impl InspectCacheState {
 
 /// Resolves `request` into the config a Batch Pipeline runs, after canonicalizing its
 /// `input_dir`. A path that cannot be canonicalized stays as given, for `resolve` to reject.
-/// `run_job` and `resolve_batch_request` both go through it, so the UI's preview and the run
+/// A Run's resolve and its launch both go through it, so the settings it shows first and the job
 /// agree on the directory and on every error.
 pub fn resolve_canonical(mut request: BatchRequest) -> Result<PipelineConfig, String> {
     request.input_dir =
@@ -271,8 +274,8 @@ pub(crate) fn mode_name(mode: PipelineMode) -> &'static str {
     }
 }
 
-/// Starts a job for `request` in `job`, reporting to `sink`: what the `run_job` command runs, and
-/// what a test runs against a recording sink.
+/// Starts a job for `request` in `job`, reporting to `sink`: what `EngineLauncher::launch` runs,
+/// and what a test runs against a recording sink.
 pub fn launch(
     job: &JobState,
     sink: impl JobSink,
@@ -305,6 +308,61 @@ pub fn launch(
             .run()
             .await
     })
+}
+
+/// What the Job Coordinator needs to run a job. Each runs off the actor; the actor never awaits
+/// one inline, and window close and `ExitRequested` tear down without it.
+pub trait Launcher: Send + Sync + 'static {
+    /// The Effective Settings `request` would run with, or why it would be refused.
+    fn resolve(
+        &self,
+        request: BatchRequest,
+    ) -> impl Future<Output = Result<EffectiveSettings, String>> + Send;
+
+    /// Starts a job for `request` that reports to `sink`, and returns its ID.
+    fn launch(
+        &self,
+        request: BatchRequest,
+        sink: ActorSink,
+    ) -> impl Future<Output = Result<u64, String>> + Send;
+
+    /// Stops job `job_id` (any job when `None`) and the Directory Inspection, and returns once
+    /// both are torn down.
+    fn stop(&self, job_id: Option<u64>) -> impl Future<Output = Result<(), String>> + Send;
+}
+
+/// The `Launcher` of the app: the Job Slot, the Directory Inspection registry and the session
+/// cache that Stop, Close and every Run share. Each call runs on the blocking pool: resolving
+/// canonicalizes the input directory, and stopping waits on the slot.
+pub struct EngineLauncher {
+    pub job: JobState,
+    pub scan: Arc<ScanState>,
+    pub cache: InspectCacheState,
+}
+
+/// Runs `task` on the blocking pool of the current runtime.
+async fn blocking<T: Send + 'static>(
+    task: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tokio::task::spawn_blocking(task)
+        .await
+        .map_err(|e| format!("Async runtime error: {e}"))?
+}
+
+impl Launcher for EngineLauncher {
+    async fn resolve(&self, request: BatchRequest) -> Result<EffectiveSettings, String> {
+        blocking(move || resolve_canonical(request).map(|config| config.effective_settings())).await
+    }
+
+    async fn launch(&self, request: BatchRequest, sink: ActorSink) -> Result<u64, String> {
+        let (job, cache) = (self.job.clone(), self.cache.clone());
+        blocking(move || launch(&job, sink, &cache, request)).await
+    }
+
+    async fn stop(&self, job_id: Option<u64>) -> Result<(), String> {
+        let (job, scan) = (self.job.clone(), Arc::clone(&self.scan));
+        blocking(move || stop_job_inner(&job, &scan, job_id)).await
+    }
 }
 
 #[cfg(test)]
@@ -474,7 +532,7 @@ mod tests {
         assert!(!token.is_cancelled());
     }
 
-    /// What `run_job` has to run a request: a job state, a sink recording what its jobs report,
+    /// What `launch` needs to run a request: a job state, a sink recording what its jobs report,
     /// and the session cache.
     struct Bridge {
         job: JobState,
@@ -536,8 +594,73 @@ mod tests {
         }
     }
 
+    /// What `EngineLauncher::resolve` answers for `request`, on the shared test runtime.
+    fn resolve(request: BatchRequest) -> Result<EffectiveSettings, String> {
+        let launcher = EngineLauncher {
+            job: job_state(),
+            scan: Arc::default(),
+            cache: InspectCacheState::default(),
+        };
+        runtime().block_on(launcher.resolve(request))
+    }
+
+    /// The View State's `defaults` are what a run of an empty form resolves to.
     #[test]
-    fn test_run_job_reports_the_effective_settings_to_its_sink() {
+    fn test_default_settings_match_a_resolved_empty_request() {
+        let tmp = tempfile::tempdir().unwrap();
+        let defaults = EffectiveSettings::defaults();
+        assert_eq!(resolve(dry_run_request(tmp.path())), Ok(defaults.clone()));
+        // `BatchRequest::resolve` accepts 1-64; the default is clamped to 1-16.
+        assert!(
+            (1..=16).contains(&defaults.workers),
+            "workers out of range: {}",
+            defaults.workers
+        );
+    }
+
+    #[test]
+    fn test_resolve_layers_explicit_values_over_the_defaults() {
+        let tmp = tempfile::tempdir().unwrap();
+        let settings = resolve(BatchRequest {
+            workers: Some(3),
+            io_jobs: Some(0),
+            ffmpeg_threads: Some(2),
+            bitrate: Some(" 256k ".into()),
+            complexity: Some(8),
+            ..dry_run_request(tmp.path())
+        })
+        .unwrap();
+        // An explicit `io_jobs` of 0 is the worker count.
+        assert_eq!(
+            settings,
+            EffectiveSettings {
+                workers: 3,
+                io_jobs: 3,
+                ffmpeg_threads: 2,
+                bitrate: "256k".into(),
+                complexity: 8,
+            }
+        );
+    }
+
+    #[test]
+    fn test_resolve_reports_the_first_validation_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let error = resolve(BatchRequest {
+            workers: Some(0),
+            io_jobs: Some(65),
+            ..dry_run_request(tmp.path())
+        })
+        .unwrap_err();
+        assert_eq!(error, "Worker thread count must be between 1 and 64");
+
+        let missing = tmp.path().join("missing");
+        let error = resolve(dry_run_request(&missing)).unwrap_err();
+        assert!(error.contains("Input directory does not exist"), "{error}");
+    }
+
+    #[test]
+    fn test_launch_reports_the_effective_settings_to_its_sink() {
         let bridge = Bridge::new();
         let tmp = tempfile::tempdir().unwrap();
         let request = BatchRequest {
@@ -559,7 +682,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_job_reports_the_canonical_linked_input_dir_to_its_sink() {
+    fn test_launch_reports_the_canonical_linked_input_dir_to_its_sink() {
         let bridge = Bridge::new();
         let target_dir = tempfile::tempdir().unwrap();
         let parent_dir = tempfile::tempdir().unwrap();
@@ -584,7 +707,7 @@ mod tests {
 
         assert!(
             symlink_path.exists(),
-            "link creation failed; run_job input_dir canonicalization is untested"
+            "link creation failed; launch input_dir canonicalization is untested"
         );
         let linked_input_dir = symlink_path.to_string_lossy().into_owned();
         let snapshot_input_dir = bridge.run_dry_extract(symlink_path).input_dir;
@@ -615,7 +738,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn test_run_job_preserves_non_utf8_canonical_input_path() {
+    fn test_launch_preserves_non_utf8_canonical_input_path() {
         use std::os::unix::ffi::OsStringExt;
 
         let bridge = Bridge::new();
@@ -702,7 +825,7 @@ mod tests {
     }
 
     #[test]
-    fn run_job_shares_the_session_cache_unless_no_cache() {
+    fn launch_shares_the_session_cache_unless_no_cache() {
         let tmp = tempfile::tempdir().unwrap();
         let input = tmp.path().join("input");
         std::fs::create_dir(&input).unwrap();
