@@ -875,8 +875,9 @@ impl<P: Publisher, I: Inspector, L: Launcher> Core<P, I, L> {
     }
 
     /// Settles every scan waiting on inspection `id`: a scan still current accepts the manifest
-    /// (under its `canonical_dir`, else the identity it asked for) or fails; an overtaken one only
-    /// answers.
+    /// (under its `canonical_dir`, else the identity it asked for) or fails. One overtaken by a
+    /// newer scan only answers; a start's scan whose start ended or is stopping goes back to Idle,
+    /// keeps the queue and answers `Ok(false)`.
     fn inspected(&mut self, id: u64, result: Result<InspectionManifest, String>) {
         // One manifest, shared by every queue that accepts it.
         let result = result.map(Arc::new);
@@ -885,8 +886,23 @@ impl<P: Publisher, I: Inspector, L: Launcher> Core<P, I, L> {
             // A start's own scan is never refused.
             let job_runs =
                 matches!(waiter.reply, ScanReply::Intent(_)) && self.job_runs(waiter.mode);
+            // A start's scan that settles after its start ended or while it stops is overtaken:
+            // a Stop cancels its inspection, which must not fail the mode's scan.
+            let overtaken = match waiter.reply {
+                ScanReply::Preflight(attempt) => {
+                    self.coordinator.phase() == Phase::Stopping || self.current(attempt).is_none()
+                }
+                ScanReply::Intent(_) => false,
+            };
             let state = self.mode(waiter.mode);
             if state.token != waiter.token {
+                answers.push((waiter.reply, Ok(false)));
+                continue;
+            }
+            if overtaken {
+                // The queue keeps its rows: no accept, no reset.
+                state.scan = ScanView::Idle;
+                self.touch(waiter.mode);
                 answers.push((waiter.reply, Ok(false)));
                 continue;
             }

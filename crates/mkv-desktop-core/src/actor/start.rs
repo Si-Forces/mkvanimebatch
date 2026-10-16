@@ -648,6 +648,30 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn test_a_stop_that_cancels_the_forced_inspection_leaves_the_scan_idle_and_the_queue() {
+        let launcher = FakeLauncher::default();
+        let (core, _publisher, inspector) = run_core(&launcher).await;
+        let rows = core.state().await.unwrap().remux.rows;
+        let running = pending(&core, run(REMUX));
+        tokio::time::sleep(RESOLVE + INSPECTION / 2).await;
+
+        assert_eq!(core.dispatch(stop(REMUX)).await, Ok(true));
+        // The Stop cancels the forced inspection, which then settles as a failure.
+        inspector.manifests.lock().unwrap().remove("/anime");
+        assert_eq!(running.await.unwrap(), Ok(false));
+        tokio::time::sleep(INSPECTION).await;
+        assert_eq!(inspector.inspected().len(), 2);
+        let state = core.state().await.unwrap();
+        assert_eq!(state.remux.outcome, Some(Outcome::Cancelled));
+        assert_eq!(
+            state.remux.scan,
+            ScanView::Idle,
+            "a Stop is not a failed scan"
+        );
+        assert_eq!(state.remux.rows, rows);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn test_a_stop_while_launching_stops_the_job_once_it_launched() {
         let launcher = FakeLauncher::default();
         let (core, _publisher, _inspector) = run_core(&launcher).await;
