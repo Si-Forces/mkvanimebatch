@@ -37,23 +37,20 @@ const IDLE_RUN = { phase: "idle", mode: null, settings: null };
  * The Run and Stop buttons, the status pill and the controls a busy batch locks, for one mode.
  * The Job Coordinator is the Desktop Core's (`crates/mkv-desktop-core/src/coordinator.rs`): Run
  * and Stop are Intents, and every control here renders the published `run`, the mode's `outcome`
- * and scan, and its Settings Draft's `invalid` field. The log is still the page's (S4).
+ * and scan, and its Settings Draft's `invalid` field. The core writes the Run Log lines a Run, a
+ * Stop or a cache clear adds (`actor/start.rs`, `actor.rs`); nothing here writes to the log.
  */
 export class JobController {
   constructor(mode, runtime) {
     this.mode = mode;
     this.runtime = runtime;
-    // The run settings last rendered for this mode: the log is cleared when they appear.
-    this.shownSettings = null;
 
-    this.logEl = document.getElementById(`${mode}-log`);
     this.statusEl = document.getElementById(`${mode}-status`);
     this.runBtn = document.getElementById(`${mode}-run`);
     this.stopBtn = document.getElementById(`${mode}-stop`);
     this.formControls = document.querySelectorAll(
       `#${mode}-settings input, #${mode}-settings select, #${mode}-settings button`
     );
-    this.runtime.clearLog(this.logEl);
 
     this.runtime.safeAddListener(this.runBtn, "click", () => this.start());
     this.runtime.safeAddListener(this.stopBtn, "click", () => this.stop());
@@ -85,35 +82,28 @@ export class JobController {
     return pendingRuns.has(this.mode);
   }
 
-  appendError(text) {
-    this.runtime.appendLog(this.logEl, { kind: "error", text: `ERROR: ${text}` });
-  }
-
   /**
    * Sends Run, which the core answers once the start settles. Run and the mode's settings lock at
    * the click, before the core publishes the start, so a second click sends no second Run and an
    * edit or a preset picked meanwhile is not refused and reverted under the caret; after the
-   * answer the published state rules again. A refusal or a failed start is logged; a draft that built no
-   * request also opens the settings sheet on its flagged field.
+   * answer the published state rules again. The core logs a refusal or a failed start; a draft that
+   * built no request also opens the settings sheet on its flagged field.
    */
   async start() {
     if (this.runPending) return;
     pendingRuns.add(this.mode);
     let failed = false;
-    let error;
     try {
       this.syncGlobalControls();
       await this.runtime.send({ type: "run", mode: this.mode });
-    } catch (err) {
+    } catch {
       failed = true;
-      error = err;
     } finally {
       // Unlocked before the error handling, so the flagged field below can take focus.
       pendingRuns.delete(this.mode);
       this.syncGlobalControls();
     }
     if (!failed) return;
-    this.appendError(error);
     // The refusal is answered after the state that flagged the field was applied.
     const invalid = this.runtime.state()?.[this.mode]?.draft?.invalid;
     const el = invalid && document.getElementById(`${this.mode}-${DRAFT_FIELDS[invalid]?.at(-1)}`);
@@ -124,16 +114,12 @@ export class JobController {
     }
   }
 
-  /** Sends Stop, which the core answers once the teardown is over. */
+  /** Sends Stop, which the core answers once the teardown is over; it logs the wait and a failed teardown. */
   async stop() {
-    // A launched job's teardown can take a while, so announce the wait first.
-    if (this.owner === this.mode && this.run.phase === "running") {
-      this.runtime.appendLog(this.logEl, { kind: "note", text: "Stop requested; waiting for shutdown." });
-    }
     try {
       await this.runtime.send({ type: "stop", mode: this.mode });
-    } catch (err) {
-      this.appendError(err);
+    } catch {
+      // Already in the Run Log.
     }
   }
 
@@ -144,13 +130,8 @@ export class JobController {
       { confirmLabel: "Clear cache" }
     );
     if (!confirmed) return;
-
-    try {
-      const msg = await this.runtime.invoke("clear_cache");
-      this.runtime.appendLog(this.logEl, { kind: "cache", text: msg || "Cache cleared." });
-    } catch (err) {
-      this.appendError(err);
-    }
+    // The core writes the cache line, or its error, into this mode's Run Log.
+    await this.runtime.send({ type: "clear_cache", mode: this.mode }).catch(() => {});
   }
 
   /**
@@ -180,11 +161,6 @@ export class JobController {
     const tracker = this.runtime.queueFor(this.mode);
     const hasItems = (tracker.state?.totalCount ?? 0) > 0;
     const selectionDisabled = hasItems && (tracker.getSelectedCount?.() ?? 0) === 0;
-
-    // A start of this mode clears the log once its request resolved, as its settings show.
-    const settings = run.mode === this.mode ? run.settings : null;
-    if (settings && !this.shownSettings) this.runtime.clearLog(this.logEl);
-    this.shownSettings = settings;
 
     if (this.runBtn) {
       this.runBtn.disabled = busy || this.runPending || Boolean(tracker.isScanning) || selectionDisabled;

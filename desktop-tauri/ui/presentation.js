@@ -58,27 +58,6 @@ export function prettyPath(path) {
 }
 
 /**
- * A log line as the drawer shows it: a path's leading separator is dropped and every other one
- * becomes ` › `. A run of separators counts as one, and a run between two digits stays as written,
- * so `3/12` and dates read as they were. Copy uses the raw line.
- *
- * Known limit: this is a regex over the whole line, not a path parser, so a folder named `2`
- * followed by `01.mkv` keeps its slash, and a codec ID such as `S_TEXT/ASS` gets a chevron. Parse
- * paths out of structured log fields if that ever matters.
- *
- * @param {string} line
- * @returns {string}
- */
-export function logDisplayText(line) {
-  // No lookbehind: WebKitGTK before 2.40 cannot parse one, and that SyntaxError would stop the
-  // whole module graph from loading, leaving an empty window.
-  const digit = ch => ch !== undefined && ch >= "0" && ch <= "9";
-  return String(line)
-    .replace(/(^|\s)[\\/]+(?=[^\s\\/])/g, "$1")
-    .replace(/[\\/]+/g, (sep, at, text) => (digit(text[at - 1]) && digit(text[at + sep.length]) ? sep : " › "));
-}
-
-/**
  * Format a measured item duration for cards and tags (e.g. <0.1s, 4.2s, 1m 15.4s).
  *
  * @param {number} seconds

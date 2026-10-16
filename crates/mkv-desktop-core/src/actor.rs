@@ -4,16 +4,19 @@
 //! reaches it through one inbox, so a job's start, events, log batches and completion arrive in
 //! the order the supervisor sent them, and an Intent sees every change sent before it. A UI
 //! adapter spawns it once with `Core::spawn` and talks to it through the `CoreHandle`. The start
-//! of a Run and the Stop that ends it are in `start`.
+//! of a Run and the Stop that ends it are in `start`, the telemetry cadence in `timers`. Each
+//! mode's Run Log is published batch by batch, outside the View State.
 
 use crate::control::{mode_name, Launcher};
 use crate::coordinator::{JobCoordinator, Phase};
 use crate::draft::{DraftChanges, SettingsDraft};
 use crate::inspection::{InFlight, Inspector};
 use crate::job::{JobDone, JobSink, JobStarted};
+use crate::log::{error_line, LogBatch, LogView, RunLog};
 use crate::queue::{Direction, Queue, Row};
 use crate::snapshot::{BatchStatus, JobSnapshot};
-use mkv_core::log_line::LogLine;
+use crate::telemetry::{Sampler, TelemetryData, TelemetryView};
+use mkv_core::log_line::{LogKind, LogLine};
 use mkv_core::manifest::InspectionManifest;
 use mkv_core::pipeline::{JobEvent, PipelineMode};
 use mkv_core::preset::{get_preset_profiles, PresetProfile};
@@ -27,7 +30,9 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
 mod start;
+mod timers;
 use start::{Start, Step};
+use timers::Telemetry;
 
 /// The shortest gap between two View State publications: at most about 15 a second.
 const PUBLISH_INTERVAL: Duration = Duration::from_millis(66);
@@ -37,13 +42,13 @@ pub trait Publisher: Send + 'static {
     /// The whole View State, at most once per `PUBLISH_INTERVAL` except for the flush before a
     /// `done` or the reply to an Intent that is not a draft Intent.
     fn state(&self, state: &ViewState);
-    /// A job's log batch, as soon as it arrives.
-    fn logs(&self, lines: &[LogLine]);
+    /// What a mode's Run Log appended or a clear of it, as soon as it happens.
+    fn logs(&self, batch: &LogBatch);
     /// A job's end, after the publication of the state it ended in.
     fn done(&self, done: &JobDone);
 }
 
-/// What a view asks the core to do. Each names the mode whose queue it acts on.
+/// What a view asks the core to do. Each names the mode it acts on, except `ViewVisible`.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Intent {
@@ -107,6 +112,16 @@ pub enum Intent {
     Stop {
         mode: PipelineMode,
     },
+    /// Empties the session inspect cache and deletes its file, and says so, or why it failed, in
+    /// the mode's Run Log. Answers `true` once it is cleared, else the error.
+    ClearCache {
+        mode: PipelineMode,
+    },
+    /// The view was shown or hidden: telemetry is not sampled while it is hidden. Answers whether
+    /// that changed, at once and without a publication of its own, like a draft Intent.
+    ViewVisible {
+        visible: bool,
+    },
 }
 
 /// What the core publishes. `seq` grows by one with every publication, so a view can drop a
@@ -123,6 +138,8 @@ pub struct ViewState {
     pub presets: Vec<PresetProfile>,
     pub remux: ModeView,
     pub extract: ModeView,
+    /// The System Telemetry Provider's last sample and history: `None` until the first.
+    pub telemetry: Option<TelemetryView>,
 }
 
 /// The Job Coordinator as a view renders it.
@@ -203,6 +220,7 @@ impl ViewState {
             presets: get_preset_profiles(),
             remux: ModeState::new(PipelineMode::Remux).view(None),
             extract: ModeState::new(PipelineMode::Extract).view(None),
+            telemetry: None,
         }
     }
 }
@@ -231,6 +249,7 @@ enum ScanReply {
 
 enum Msg {
     GetState(oneshot::Sender<ViewState>),
+    GetLog(PipelineMode, oneshot::Sender<LogView>),
     Dispatch(Intent, Reply),
     /// A scan's path resolved to `directory` (as typed when it has no identity).
     Resolved {
@@ -251,7 +270,11 @@ enum Msg {
         job_id: u64,
         event: JobEvent,
     },
-    Logs(Vec<LogLine>),
+    /// A log batch of a job of `mode`.
+    Logs {
+        mode: PipelineMode,
+        lines: Vec<LogLine>,
+    },
     Done(JobDone),
     /// A job's sink was dropped: after its `Done`, or without one if its supervisor died.
     SinkClosed {
@@ -269,11 +292,20 @@ enum Msg {
         attempt: u64,
         result: Result<u64, String>,
     },
-    /// The teardown a Stop of start `attempt` issued is over.
+    /// The teardown a Stop of start `attempt`, of `mode`, issued is over.
     StopSettled {
         attempt: u64,
+        mode: PipelineMode,
         result: Result<(), String>,
     },
+    /// A `ClearCache` of `mode` is over.
+    CacheCleared {
+        mode: PipelineMode,
+        result: Result<(), String>,
+        reply: Reply,
+    },
+    /// A telemetry sample came back.
+    Sampled(Result<TelemetryData, String>),
 }
 
 /// The way into the actor. Clones share its one inbox.
@@ -298,7 +330,7 @@ impl CoreHandle {
     pub(crate) fn job_sink(&self) -> ActorSink {
         ActorSink {
             core: self.clone(),
-            job_id: OnceLock::new(),
+            job: OnceLock::new(),
         }
     }
 
@@ -307,9 +339,14 @@ impl CoreHandle {
         self.ask(Msg::GetState).await
     }
 
+    /// The whole of `mode`'s Run Log, as every batch published so far left it.
+    pub async fn log(&self, mode: PipelineMode) -> Result<LogView, String> {
+        self.ask(|reply| Msg::GetLog(mode, reply)).await
+    }
+
     /// Applies `intent`. Its effect is published before the answer, but for a draft Intent
-    /// (`EditDraft`, `SetPreset`), which answers at once and is published with the next
-    /// coalesced publication: `Ok(true)` when it applied, `Ok(false)` when it changed nothing
+    /// (`EditDraft`, `SetPreset`) and `ViewVisible`, which answer at once and are published with
+    /// the next coalesced publication: `Ok(true)` when it applied, `Ok(false)` when it changed nothing
     /// (see `Intent::ScanDirectory`, `Intent::Run` and `Intent::Stop` for those), and an error
     /// when the core refuses it.
     pub async fn dispatch(&self, intent: Intent) -> Result<bool, String> {
@@ -320,18 +357,19 @@ impl CoreHandle {
 /// The `JobSink` of one job: turns what the supervisor reports into inbox messages, in its order.
 pub struct ActorSink {
     core: CoreHandle,
-    job_id: OnceLock<u64>,
+    /// The job's ID and mode, from its start on.
+    job: OnceLock<(u64, Option<PipelineMode>)>,
 }
 
 impl JobSink for ActorSink {
     fn started(&self, job: &JobStarted) {
-        let _ = self.job_id.set(job.job_id);
+        let _ = self.job.set((job.job_id, mode_of(job.mode)));
         self.core.send(Msg::JobStarted(job.clone()));
     }
 
     fn event(&self, event: &JobEvent) {
-        // `JobState::start` reports the start before the supervisor sends any event.
-        if let Some(&job_id) = self.job_id.get() {
+        // `JobState::start` reports the start before the supervisor sends any event or log.
+        if let Some(&(job_id, _)) = self.job.get() {
             self.core.send(Msg::JobEvent {
                 job_id,
                 event: event.clone(),
@@ -340,7 +378,13 @@ impl JobSink for ActorSink {
     }
 
     fn logs(&self, lines: &[LogLine]) {
-        self.core.send(Msg::Logs(lines.to_vec()));
+        // Into the Run Log of the job's mode, whichever mode the view shows.
+        if let Some(&(_, Some(mode))) = self.job.get() {
+            self.core.send(Msg::Logs {
+                mode,
+                lines: lines.to_vec(),
+            });
+        }
     }
 
     fn done(&self, done: &JobDone) {
@@ -351,16 +395,17 @@ impl JobSink for ActorSink {
 impl Drop for ActorSink {
     fn drop(&mut self) {
         // The supervisor owns the sink, so this reaches the actor even when it dies before `done`.
-        if let Some(&job_id) = self.job_id.get() {
+        if let Some(&(job_id, _)) = self.job.get() {
             self.core.send(Msg::SinkClosed { job_id });
         }
     }
 }
 
-/// One mode's queue, scan, Settings Draft and outcome.
+/// One mode's queue, scan, Settings Draft, outcome and Run Log.
 struct ModeState {
     queue: Queue,
     draft: SettingsDraft,
+    log: RunLog,
     scan: ScanView,
     outcome: Option<Outcome>,
     /// The newest scan request: a request answered after a newer one began is overtaken.
@@ -378,6 +423,7 @@ impl ModeState {
         Self {
             queue: Queue::default(),
             draft: SettingsDraft::new(mode),
+            log: RunLog::new(mode),
             scan: ScanView::Idle,
             outcome: None,
             request: 0,
@@ -411,11 +457,22 @@ struct Waiter {
     reply: ScanReply,
 }
 
+/// The ports a UI adapter spawns the actor with, besides its `Publisher`.
+pub struct Ports<I, L, S> {
+    /// Scans directories and owns the session inspect cache.
+    pub inspector: I,
+    /// Runs and stops jobs.
+    pub launcher: L,
+    /// Samples the System Telemetry Provider.
+    pub sampler: S,
+}
+
 /// The actor's state.
-pub struct Core<P, I, L> {
+pub struct Core<P, I, L, S> {
     publisher: P,
     inspector: Arc<I>,
     launcher: Arc<L>,
+    sampler: Arc<S>,
     runtime: Handle,
     /// Where the scans the actor spawns send their results; weak, so the loop still ends once
     /// every `CoreHandle` is gone.
@@ -436,6 +493,7 @@ pub struct Core<P, I, L> {
     /// The Stops waiting on the teardown of their start.
     stop_waiters: Vec<(u64, Reply)>,
     defaults: Option<EffectiveSettings>,
+    telemetry: Telemetry,
     /// Whether the state changed since the last publication.
     dirty: bool,
     last_published: ViewState,
@@ -446,14 +504,16 @@ pub struct Core<P, I, L> {
 const SCAN_REFUSED: &str = "A batch is running; its folder cannot be scanned until it ends.";
 /// The answer to a scan of either mode while a start runs its forced scan.
 const SCAN_STARTING: &str = "A batch is starting; no folder can be scanned until it has started.";
+/// The Run Log line of a cleared cache.
+const CACHE_CLEARED: &str = "Persistent inspection cache cleared.";
 /// The answer to a Settings Draft edit while a job runs.
 const DRAFT_REFUSED: &str = "A batch is running; the settings are locked until it ends.";
 
-impl<P: Publisher, I: Inspector, L: Launcher> Core<P, I, L> {
-    /// Spawns the actor on `runtime`, publishing through `publisher`, scanning through
-    /// `inspector` and running jobs through `launcher`.
-    pub fn spawn(runtime: Handle, publisher: P, inspector: I, launcher: L) -> CoreHandle {
-        Self::start(runtime, publisher, inspector, launcher, None)
+impl<P: Publisher, I: Inspector, L: Launcher, S: Sampler> Core<P, I, L, S> {
+    /// Spawns the actor on `runtime`, publishing through `publisher`, scanning, running jobs
+    /// and sampling telemetry through `ports`.
+    pub fn spawn(runtime: Handle, publisher: P, ports: Ports<I, L, S>) -> CoreHandle {
+        Self::start(runtime, publisher, ports, None)
     }
 
     /// `spawn`, with the defaults already known when `defaults` holds them, else read on the
@@ -461,8 +521,7 @@ impl<P: Publisher, I: Inspector, L: Launcher> Core<P, I, L> {
     fn start(
         runtime: Handle,
         publisher: P,
-        inspector: I,
-        launcher: L,
+        ports: Ports<I, L, S>,
         defaults: Option<EffectiveSettings>,
     ) -> CoreHandle {
         // Unbounded on purpose (ADR-0016, 2026-10-16 amendment). The engine already drops
@@ -473,8 +532,9 @@ impl<P: Publisher, I: Inspector, L: Launcher> Core<P, I, L> {
         let (inbox_tx, inbox) = mpsc::unbounded_channel();
         let core = Core {
             publisher,
-            inspector: Arc::new(inspector),
-            launcher: Arc::new(launcher),
+            inspector: Arc::new(ports.inspector),
+            launcher: Arc::new(ports.launcher),
+            sampler: Arc::new(ports.sampler),
             runtime: runtime.clone(),
             inbox: inbox_tx.downgrade(),
             remux: ModeState::new(PipelineMode::Remux),
@@ -491,6 +551,7 @@ impl<P: Publisher, I: Inspector, L: Launcher> Core<P, I, L> {
             // too.
             last_published: ViewState::new(defaults.clone()),
             defaults,
+            telemetry: Telemetry::default(),
             dirty: false,
             last_published_at: None,
         };
@@ -514,9 +575,18 @@ impl<P: Publisher, I: Inspector, L: Launcher> Core<P, I, L> {
         let tick = tokio::time::sleep(Duration::ZERO);
         tokio::pin!(tick);
         let mut armed = false;
+        let poll = tokio::time::sleep(Duration::ZERO);
+        tokio::pin!(poll);
+        self.restart_telemetry();
         loop {
-            // Biased: messages already queued go before the tick. A steady stream cannot starve
-            // publication, since the due check below runs after every step, whichever arm ran.
+            // The telemetry poll's deadline, if one is due at all.
+            let poll_at = self.telemetry.poll_at;
+            if let Some(at) = poll_at.filter(|&at| poll.deadline() != at) {
+                poll.as_mut().reset(at);
+            }
+            // Biased: messages already queued go before the tick and the poll. A steady stream
+            // cannot starve publication or the poll, since the due checks below run after every
+            // step, whichever arm ran: the two timer arms only wake an idle actor.
             tokio::select! {
                 biased;
                 msg = inbox.recv() => match msg {
@@ -524,7 +594,10 @@ impl<P: Publisher, I: Inspector, L: Launcher> Core<P, I, L> {
                     None => break,
                 },
                 () = &mut tick, if armed => armed = false,
+                () = &mut poll, if poll_at.is_some() => {}
             }
+            self.follow_busy();
+            self.poll_if_due();
             if self.dirty {
                 let due = self
                     .last_published_at
@@ -545,6 +618,9 @@ impl<P: Publisher, I: Inspector, L: Launcher> Core<P, I, L> {
         match msg {
             Msg::GetState(reply) => {
                 let _ = reply.send(self.last_published.clone());
+            }
+            Msg::GetLog(mode, reply) => {
+                let _ = reply.send(self.state(mode).log.view());
             }
             Msg::Dispatch(intent, reply) => self.dispatch(intent, reply),
             Msg::Resolved {
@@ -581,7 +657,7 @@ impl<P: Publisher, I: Inspector, L: Launcher> Core<P, I, L> {
                     self.touch_job();
                 }
             }
-            Msg::Logs(lines) => self.publisher.logs(&lines),
+            Msg::Logs { mode, lines } => self.log(mode, &lines),
             Msg::Done(done) => {
                 let outcome = Outcome::of_code(done.code);
                 // A stale sink's `done` ends no later job.
@@ -630,7 +706,24 @@ impl<P: Publisher, I: Inspector, L: Launcher> Core<P, I, L> {
             }
             Msg::RequestResolved { attempt, result } => self.request_resolved(attempt, result),
             Msg::Launched { attempt, result } => self.launched(attempt, result),
-            Msg::StopSettled { attempt, result } => self.stop_settled(attempt, result),
+            Msg::StopSettled {
+                attempt,
+                mode,
+                result,
+            } => self.stop_settled(attempt, mode, result),
+            Msg::CacheCleared {
+                mode,
+                result,
+                reply,
+            } => {
+                let line = match &result {
+                    Ok(()) => LogLine::new(LogKind::Cache, CACHE_CLEARED),
+                    Err(error) => error_line(error),
+                };
+                self.log(mode, &[line]);
+                self.answer(reply, result.map(|()| true));
+            }
+            Msg::Sampled(result) => self.sampled(result),
         }
     }
 
@@ -646,6 +739,12 @@ impl<P: Publisher, I: Inspector, L: Launcher> Core<P, I, L> {
             PipelineMode::Remux => &self.remux,
             PipelineMode::Extract => &self.extract,
         }
+    }
+
+    /// Appends `lines` to `mode`'s Run Log and publishes them at once, in inbox order.
+    fn log(&mut self, mode: PipelineMode, lines: &[LogLine]) {
+        let batch = self.mode(mode).log.push(lines);
+        self.publisher.logs(&batch);
     }
 
     /// Marks `mode`'s view as changed, for the next publication.
@@ -691,6 +790,22 @@ impl<P: Publisher, I: Inspector, L: Launcher> Core<P, I, L> {
             } => return self.scan(mode, path, force, no_cache, ScanReply::Intent(reply)),
             Intent::Run { mode } => return self.run_batch(mode, reply),
             Intent::Stop { mode } => return self.stop_batch(mode, reply),
+            Intent::ClearCache { mode } => {
+                // Like the button, not refused while a batch runs: the cache is the session's.
+                let inspector = Arc::clone(&self.inspector);
+                return self.off_actor(
+                    async move { inspector.clear_cache().await },
+                    move |result| Msg::CacheCleared {
+                        mode,
+                        result,
+                        reply,
+                    },
+                );
+            }
+            Intent::ViewVisible { visible } => {
+                let _ = reply.send(Ok(self.view_visible(visible)));
+                return;
+            }
             Intent::SetSelected { mode, id, selected } => (mode, QueueChange::Select(id, selected)),
             Intent::SetAllSelected { mode, selected } => (mode, QueueChange::SelectAll(selected)),
             Intent::Reorder {
@@ -1022,6 +1137,9 @@ impl<P: Publisher, I: Inspector, L: Launcher> Core<P, I, L> {
         };
         self.last_published.defaults.clone_from(&self.defaults);
         self.last_published
+            .telemetry
+            .clone_from(&self.telemetry.view);
+        self.last_published
             .remux
             .draft
             .clone_from(&self.remux.draft);
@@ -1077,7 +1195,7 @@ mod tests {
     #[derive(Debug, Clone)]
     pub(super) enum Published {
         State(Box<ViewState>),
-        Logs(Vec<LogLine>),
+        Logs(LogBatch),
         Done(Value),
     }
 
@@ -1102,6 +1220,17 @@ mod tests {
                 })
                 .collect()
         }
+
+        /// The log batches published, in order.
+        pub(super) fn logs(&self) -> Vec<LogBatch> {
+            self.all()
+                .into_iter()
+                .filter_map(|published| match published {
+                    Published::Logs(batch) => Some(batch),
+                    _ => None,
+                })
+                .collect()
+        }
     }
 
     impl Publisher for RecordingPublisher {
@@ -1113,9 +1242,9 @@ mod tests {
             self.stated.notify_one();
         }
 
-        fn logs(&self, lines: &[LogLine]) {
-            let lines = Published::Logs(lines.to_vec());
-            self.published.lock().unwrap().push(lines);
+        fn logs(&self, batch: &LogBatch) {
+            let batch = Published::Logs(batch.clone());
+            self.published.lock().unwrap().push(batch);
         }
 
         fn done(&self, done: &JobDone) {
@@ -1134,13 +1263,36 @@ mod tests {
         inspector: I,
         launcher: L,
     ) -> CoreHandle {
+        ready_with_ports(publisher, inspector, launcher, NoSampler)
+    }
+
+    pub(super) fn ready_with_ports<P: Publisher, I: Inspector, L: Launcher, S: Sampler>(
+        publisher: P,
+        inspector: I,
+        launcher: L,
+        sampler: S,
+    ) -> CoreHandle {
+        let ports = Ports {
+            inspector,
+            launcher,
+            sampler,
+        };
         Core::start(
             Handle::current(),
             publisher,
-            inspector,
-            launcher,
+            ports,
             Some(effective_settings()),
         )
+    }
+
+    /// A `Sampler` whose first sample never comes back, so telemetry publishes nothing and only
+    /// `actor::timers` tests see it.
+    pub(super) struct NoSampler;
+
+    impl Sampler for NoSampler {
+        async fn sample(&self) -> Result<TelemetryData, String> {
+            std::future::pending().await
+        }
     }
 
     fn spawn_core() -> (CoreHandle, RecordingPublisher) {
@@ -1149,7 +1301,7 @@ mod tests {
         (core, publisher)
     }
 
-    fn started(job_id: u64) -> JobStarted {
+    pub(super) fn started(job_id: u64) -> JobStarted {
         JobStarted {
             job_id,
             mode: "remux",
@@ -1324,11 +1476,18 @@ mod tests {
             .iter()
             .filter_map(|published| match published {
                 Published::State(_) => None,
-                Published::Logs(lines) => Some(format!("log {}", lines[0].text)),
+                Published::Logs(batch) => Some(format!(
+                    "log {} {:?} at {}",
+                    batch.lines[0].text, batch.mode, batch.first
+                )),
                 Published::Done(done) => Some(format!("done {}", done["code"])),
             })
             .collect();
-        assert_eq!(order, ["log one", "log two", "done -1"]);
+        // Each batch goes into the Run Log of the job's mode, after the lines before it.
+        assert_eq!(
+            order,
+            ["log one Remux at 0", "log two Remux at 1", "done -1"]
+        );
         // The trailing changes were not yet due, so `done` flushed them first.
         let Published::State(last) = &published[published.len() - 2] else {
             panic!("done was not preceded by a state publication: {published:?}");
@@ -1337,6 +1496,83 @@ mod tests {
         assert!(!job.active);
         assert_eq!(job.status, BatchStatus::Cancelled);
         assert!(matches!(published.last(), Some(Published::Done(_))));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_a_jobs_lines_go_into_the_run_log_of_its_own_mode_and_get_log_reads_them_back() {
+        let (core, publisher) = spawn_core();
+        let sink = core.job_sink();
+        sink.started(&JobStarted {
+            mode: "extract",
+            ..started(1)
+        });
+        sink.logs(&[LogLine::step("Extracting /anime/ep1.mkv")]);
+        // A bridge error line takes the same way.
+        sink.logs(&[LogLine::error("ERROR: Pipeline failed: x")]);
+
+        let log = core.log(EXTRACT).await.unwrap();
+        assert_eq!(
+            serde_json::to_value(&log).unwrap(),
+            serde_json::json!({
+                "mode": "extract",
+                "generation": 0,
+                "first": 0,
+                "errors": 1,
+                "lines": [
+                    {
+                        "kind": "step",
+                        "text": "Extracting /anime/ep1.mkv",
+                        "display": "Extracting anime › ep1.mkv"
+                    },
+                    { "kind": "error", "text": "ERROR: Pipeline failed: x" },
+                ]
+            })
+        );
+        assert!(core.log(REMUX).await.unwrap().lines.is_empty());
+        let batches = publisher.logs();
+        assert_eq!(batches.len(), 2);
+        assert_eq!(
+            serde_json::to_value(&batches[1]).unwrap(),
+            serde_json::json!({
+                "mode": "extract",
+                "generation": 0,
+                "first": 1,
+                "keep_from": 0,
+                "errors": 1,
+                "lines": [{ "kind": "error", "text": "ERROR: Pipeline failed: x" }]
+            })
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_clear_cache_writes_its_line_or_its_error_into_the_modes_run_log() {
+        let inspector = FakeInspector::default();
+        let publisher = RecordingPublisher::default();
+        let core = ready(publisher.clone(), inspector.clone());
+        let clear = |mode| Intent::ClearCache { mode };
+
+        assert_eq!(core.dispatch(clear(REMUX)).await, Ok(true));
+        *inspector.clear_error.lock().unwrap() = Some("Permission denied".into());
+        assert_eq!(
+            core.dispatch(clear(REMUX)).await,
+            Err("Permission denied".into())
+        );
+        let log = core.log(REMUX).await.unwrap();
+        let lines: Vec<_> = log
+            .lines
+            .iter()
+            .map(|line| (line.kind, line.text.as_str()))
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                (LogKind::Cache, "Persistent inspection cache cleared."),
+                (LogKind::Error, "ERROR: Permission denied"),
+            ]
+        );
+        assert!(core.log(EXTRACT).await.unwrap().lines.is_empty());
+        // Nothing in the View State changed.
+        assert!(publisher.states().is_empty());
     }
 
     #[tokio::test(start_paused = true)]
@@ -1437,6 +1673,14 @@ mod tests {
             },
         );
         remux.outcome = Some(Outcome::Failed);
+        let mut telemetry = TelemetryView::default();
+        telemetry.push(&TelemetryData {
+            cpu_pct: 37.0,
+            ram_used_mb: 5243,
+            ram_total_mb: 16_384,
+            ram_pct: 32.0,
+            io_mb_s: 0.0,
+        });
         let state = ViewState {
             seq: 3,
             run: RunView {
@@ -1461,6 +1705,7 @@ mod tests {
                 scan: ScanView::Failed,
                 ..empty(EXTRACT)
             },
+            telemetry: Some(telemetry),
         };
         // Rows have their own pin: `queue::tests::test_row_wire_shape`.
         assert_eq!(
@@ -1531,12 +1776,19 @@ mod tests {
                         "io_jobs": "", "dry_run": false, "no_cache": false, "invalid": null
                     },
                     "outcome": null
+                },
+                "telemetry": {
+                    "cpu": "37%",
+                    "ram": "5.12 GB",
+                    "disk": "Idle",
+                    "samples": { "cpu": [37.0], "ram": [32.0], "disk": [0.0] }
                 }
             })
         );
         let idle = serde_json::to_value(ViewState::new(None)).unwrap();
         assert_eq!(idle["job"], Value::Null);
         assert_eq!(idle["defaults"], Value::Null);
+        assert_eq!(idle["telemetry"], Value::Null);
         assert_eq!(
             idle["run"],
             serde_json::json!({ "phase": "idle", "mode": null, "settings": null })
@@ -1662,6 +1914,14 @@ mod tests {
             intent(serde_json::json!({ "type": "stop", "mode": "remux" })),
             Intent::Stop { mode: REMUX }
         );
+        assert_eq!(
+            intent(serde_json::json!({ "type": "clear_cache", "mode": "extract" })),
+            Intent::ClearCache { mode: EXTRACT }
+        );
+        assert_eq!(
+            intent(serde_json::json!({ "type": "view_visible", "visible": false })),
+            Intent::ViewVisible { visible: false }
+        );
         assert!(serde_json::from_value::<Intent>(serde_json::json!({
             "type": "reorder", "mode": "remux", "id": "ep1", "direction": "left"
         }))
@@ -1687,6 +1947,8 @@ mod tests {
     pub(super) struct FakeInspector {
         pub(super) manifests: Arc<Mutex<HashMap<String, InspectionManifest>>>,
         inspected: Arc<Mutex<Vec<(String, bool)>>>,
+        /// What `clear_cache` answers: `Ok` when `None`.
+        pub(super) clear_error: Arc<Mutex<Option<String>>>,
     }
 
     pub(super) const SLOW: Duration = Duration::from_millis(500);
@@ -1731,6 +1993,11 @@ mod tests {
             assert!(identity != "/panic", "inspector panicked");
             let manifest = self.manifests.lock().unwrap().get(&identity).cloned();
             manifest.ok_or_else(|| format!("cannot inspect {identity}"))
+        }
+
+        async fn clear_cache(&self) -> Result<(), String> {
+            tokio::time::sleep(INSPECTION).await;
+            self.clear_error.lock().unwrap().clone().map_or(Ok(()), Err)
         }
     }
 
@@ -1929,7 +2196,7 @@ mod tests {
                 self.0.lock().unwrap().push(buffers);
             }
 
-            fn logs(&self, _lines: &[LogLine]) {}
+            fn logs(&self, _batch: &LogBatch) {}
 
             fn done(&self, _done: &JobDone) {}
         }
@@ -2375,12 +2642,12 @@ mod tests {
     #[tokio::test]
     async fn test_the_defaults_are_published_once_the_actor_has_read_them() {
         let publisher = RecordingPublisher::default();
-        let core = Core::spawn(
-            Handle::current(),
-            publisher.clone(),
-            FakeInspector::default(),
-            FakeLauncher::default(),
-        );
+        let ports = Ports {
+            inspector: FakeInspector::default(),
+            launcher: FakeLauncher::default(),
+            sampler: NoSampler,
+        };
+        let core = Core::spawn(Handle::current(), publisher.clone(), ports);
         // Read on the blocking pool after the spawn, then published at once: each publication
         // wakes the wait, and the timeout only bounds a hang.
         let published = tokio::time::timeout(Duration::from_secs(30), async {

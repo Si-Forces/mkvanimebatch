@@ -3,6 +3,7 @@
 //! Snapshot (the settlement ledger) and reports through a `JobSink`, so it runs, and is tested,
 //! without a UI toolkit; its tasks run on the tokio runtime the adapter hands `JobState::new`.
 
+use crate::log::error_line;
 use crate::snapshot::{attach_context, timestamp_ms, BatchStatus, JobSnapshot};
 use mkv_core::log_line::LogLine;
 use mkv_core::pipeline::{
@@ -362,7 +363,7 @@ fn pipeline_terminal(
         // cancelled, so the terminal must stay cancelled. Either way the
         // error is still surfaced in the job log.
         Ok(Err(error)) => {
-            sink.logs(&[LogLine::error(format!("ERROR: Pipeline failed: {error}"))]);
+            sink.logs(&[error_line(format_args!("Pipeline failed: {error}"))]);
             if cancelled {
                 bridge_terminal(true, None)
             } else {
@@ -377,9 +378,7 @@ fn pipeline_terminal(
                 .map(|value| (*value).to_string())
                 .or_else(|| payload.downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "Unknown pipeline panic".to_string());
-            sink.logs(&[LogLine::error(format!(
-                "ERROR: Pipeline panicked: {message}"
-            ))]);
+            sink.logs(&[error_line(format_args!("Pipeline panicked: {message}"))]);
             bridge_terminal(false, Some(("panic", message)))
         }
         Err(_) => bridge_terminal(

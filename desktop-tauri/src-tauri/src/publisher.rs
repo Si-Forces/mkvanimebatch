@@ -1,9 +1,9 @@
-//! The webview side of the Desktop Core: the `Publisher` adapter that emits the View State and a
-//! job's log batches and completion to the webview.
+//! The webview side of the Desktop Core: the `Publisher` adapter that emits the View State, each
+//! Run Log batch and a job's completion to the webview.
 
-use mkv_core::log_line::LogLine;
 use mkv_desktop_core::actor::{Publisher, ViewState};
 use mkv_desktop_core::job::JobDone;
+use mkv_desktop_core::log::LogBatch;
 use tauri::{AppHandle, Emitter, Runtime};
 
 const VIEW_STATE: &str = "view-state";
@@ -18,8 +18,8 @@ impl<R: Runtime> Publisher for WebviewPublisher<R> {
         let _ = self.0.emit(VIEW_STATE, state);
     }
 
-    fn logs(&self, lines: &[LogLine]) {
-        let _ = self.0.emit(JOB_LOG, lines);
+    fn logs(&self, batch: &LogBatch) {
+        let _ = self.0.emit(JOB_LOG, batch);
     }
 
     fn done(&self, done: &JobDone) {
@@ -30,6 +30,9 @@ impl<R: Runtime> Publisher for WebviewPublisher<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mkv_core::log_line::LogLine;
+    use mkv_core::pipeline::PipelineMode;
+    use mkv_desktop_core::log::RunLog;
     use serde_json::Value;
     use std::sync::{Arc, Mutex};
     use tauri::test::MockRuntime;
@@ -65,10 +68,11 @@ mod tests {
             ..ViewState::new(None)
         };
         publisher.state(&state);
-        publisher.logs(&[
-            LogLine::note("probing"),
+        let mut log = RunLog::new(PipelineMode::Extract);
+        publisher.logs(&log.push(&[
+            LogLine::note("probing /anime"),
             LogLine::error("ERROR: Pipeline failed: x"),
-        ]);
+        ]));
         publisher.done(&JobDone {
             mode: "remux",
             job_id: 7,
@@ -81,10 +85,17 @@ mod tests {
         );
         assert_eq!(
             *logs.lock().unwrap(),
-            [serde_json::json!([
-                { "kind": "note", "text": "probing" },
-                { "kind": "error", "text": "ERROR: Pipeline failed: x" },
-            ])]
+            [serde_json::json!({
+                "mode": "extract",
+                "generation": 0,
+                "first": 0,
+                "keep_from": 0,
+                "errors": 1,
+                "lines": [
+                    { "kind": "note", "text": "probing /anime", "display": "probing anime" },
+                    { "kind": "error", "text": "ERROR: Pipeline failed: x" },
+                ]
+            })]
         );
         assert_eq!(
             *dones.lock().unwrap(),

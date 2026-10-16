@@ -147,6 +147,32 @@ const RUN_BUSY = "A job is already running or stopping. Wait for it to finish.";
 const RUN_SCANNING = "The folder is being scanned; a batch can start once the scan ends.";
 const SCAN_STARTING = "A batch is starting; no folder can be scanned until it has started.";
 
+/** The lines the core writes into a Run Log (`actor/start.rs`, `actor.rs`). */
+const STOP_REQUESTED = "Stop requested; waiting for shutdown.";
+const CACHE_CLEARED = "Persistent inspection cache cleared.";
+
+/**
+ * A mode's Run Log as `crates/mkv-desktop-core/src/log.rs` keeps it, uncapped and with no display
+ * text: what `get_log` answers. `push` and `clear` return the `job-log` batch.
+ */
+function runLog(mode) {
+  const log = { mode, generation: 0, first: 0, lines: [] };
+  const errors = () => log.lines.filter(line => line.kind === "error").length;
+  const batch = (first, lines) => ({ mode, generation: log.generation, first, keep_from: log.first, errors: errors(), lines });
+  return {
+    view: () => ({ mode, generation: log.generation, first: log.first, errors: errors(), lines: structuredClone(log.lines) }),
+    push(lines) {
+      const first = log.first + log.lines.length;
+      log.lines.push(...lines);
+      return batch(first, structuredClone(lines));
+    },
+    clear() {
+      Object.assign(log, { generation: log.generation + 1, first: 0, lines: [] });
+      return batch(0, []);
+    },
+  };
+}
+
 /**
  * A Desktop Core over a scripted View State. `state` is the next state to publish; change it, then
  * `publish()` bumps `seq` and hands a copy to every `onPublish` listener (the `view-state` event).
@@ -165,9 +191,20 @@ const SCAN_STARTING = "A batch is starting; no folder can be scanned until it ha
  * `launch(mode)`, which runs a job over the mode's selected rows. Its answer is the Run's. A Stop
  * of the owning mode ends the job, or the start, as cancelled (`end`) and answers true; of any
  * other, false. Busy is `run.phase` not idle, or an active job, as `isBusy` reads it.
+ *
+ * Each mode has a Run Log (`runLog`): `log(mode, lines)` appends to it and hands the batch to every
+ * `onLog` listener (the `job-log` event), and `get_log` answers it. Like the core, a Run answered
+ * with an error logs `ERROR: …`, a Run that passes the input folder check clears its log, a Stop of
+ * a running batch logs the wait, and `clear_cache` logs its line. `view_visible` is recorded in
+ * `visible`, not in `intents`.
  */
 export function createFakeCore({ onScan = async () => true, onStart = null } = {}) {
   const listeners = new Set();
+  const logListeners = new Set();
+  const logs = { remux: runLog("remux"), extract: runLog("extract") };
+  const emitLog = batch => {
+    for (const listener of logListeners) listener(structuredClone(batch));
+  };
   const core = {
     state: {
       seq: 0,
@@ -177,7 +214,9 @@ export function createFakeCore({ onScan = async () => true, onStart = null } = {
       presets: structuredClone(PRESETS),
       remux: modeView(),
       extract: modeView([], {}, "extract"),
+      telemetry: null,
     },
+    visible: null,
     onScan,
     onStart: onStart ?? (({ mode }) => core.launch(mode)),
     intents: [],
@@ -202,6 +241,11 @@ export function createFakeCore({ onScan = async () => true, onStart = null } = {
       return core.publish();
     },
     onPublish: listener => listeners.add(listener),
+    onLog: listener => logListeners.add(listener),
+    /** Appends `lines` (`{kind, text, display?}`) to `mode`'s Run Log and emits their batch. */
+    log(mode, lines) {
+      emitLog(logs[mode].push(lines));
+    },
     publish() {
       core.state.seq++;
       const copy = structuredClone(core.state);
@@ -216,8 +260,14 @@ export function createFakeCore({ onScan = async () => true, onStart = null } = {
     },
     async invoke(command, args) {
       if (command === "get_state") return structuredClone(core.state);
+      if (command === "get_log") return logs[args.mode].view();
       if (command !== "dispatch") return undefined;
       const { intent } = args;
+      if (intent.type === "view_visible") {
+        const changed = core.visible !== intent.visible;
+        core.visible = intent.visible;
+        return changed;
+      }
       core.intents.push(intent);
       if (intent.type === "scan_directory") {
         if (core.state.run.phase === "starting") throw SCAN_STARTING;
@@ -225,22 +275,21 @@ export function createFakeCore({ onScan = async () => true, onStart = null } = {
       }
       const view = core.state[intent.mode];
       if (intent.type === "run") {
-        if (core.busy()) throw RUN_BUSY;
-        if (view.scan.state === "scanning") throw RUN_SCANNING;
-        if (!view.draft.input_dir.trim()) {
-          view.draft.invalid = "input_dir";
-          core.publish();
-          throw "Input directory is required.";
+        try {
+          return await run(intent, view);
+        } catch (err) {
+          core.log(intent.mode, [{ kind: "error", text: `ERROR: ${err}` }]);
+          throw err;
         }
-        view.draft.invalid = null;
-        view.outcome = null;
-        core.state.run = { phase: "starting", mode: intent.mode, settings: null };
-        core.publish();
-        return core.onStart(intent);
       }
       if (intent.type === "stop") {
         if (core.state.run.mode !== intent.mode) return false;
+        if (core.state.run.phase === "running") core.log(intent.mode, [{ kind: "note", text: STOP_REQUESTED }]);
         core.end("cancelled");
+        return true;
+      }
+      if (intent.type === "clear_cache") {
+        core.log(intent.mode, [{ kind: "cache", text: CACHE_CLEARED }]);
         return true;
       }
       if (intent.type === "edit_draft" || intent.type === "set_preset") {
@@ -257,6 +306,23 @@ export function createFakeCore({ onScan = async () => true, onStart = null } = {
       return changed;
     },
   };
+  /** A Run as the core starts it; the caller logs the error it answers with. */
+  async function run(intent, view) {
+    if (core.busy()) throw RUN_BUSY;
+    if (view.scan.state === "scanning") throw RUN_SCANNING;
+    if (!view.draft.input_dir.trim()) {
+      view.draft.invalid = "input_dir";
+      core.publish();
+      throw "Input directory is required.";
+    }
+    view.draft.invalid = null;
+    view.outcome = null;
+    // The request resolved: its mode's log clears.
+    emitLog(logs[intent.mode].clear());
+    core.state.run = { phase: "starting", mode: intent.mode, settings: null };
+    core.publish();
+    return core.onStart(intent);
+  }
   return core;
 }
 
