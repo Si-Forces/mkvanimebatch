@@ -1,13 +1,12 @@
-//! The Job Snapshot: the in-memory projection of one job, reduced from its `JobEvent`s so a
-//! webview reload can rebuild the queue. A plain value with no lock: the supervisor keeps one as
-//! its private settlement ledger and the Desktop Core actor keeps the published one, both built
-//! by the same `JobSnapshot::apply` over the same events.
+//! The Job Snapshot: the in-memory projection of one job, reduced from its `JobEvent`s, which
+//! the Desktop Core lays over the queue rows it publishes. A plain value with no lock: the
+//! supervisor keeps one as its private settlement ledger and the Desktop Core actor keeps the
+//! published one, both built by the same `JobSnapshot::apply` over the same events.
 
 use mkv_core::item_id::ItemId;
 use mkv_core::pipeline::{ItemOutcome, JobEvent, CANCELLED_REASON, EVENT_VERSION};
 use mkv_core::request::EffectiveSettings;
-use serde::ser::SerializeStruct;
-use serde::{Serialize, Serializer};
+use serde::Serialize;
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -59,7 +58,7 @@ impl From<ItemOutcome> for ItemStatus {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct ItemSnapshot {
     pub id: String,
     pub file: String,
@@ -71,9 +70,7 @@ pub struct ItemSnapshot {
     pub reason: Option<String>,
     pub error: Option<String>,
     /// When the bridge saw the item start, on a monotonic clock: the origin of the duration of
-    /// an item the bridge settles. Not serialized; `start_time_ms` is the wall-clock value the
-    /// webview gets.
-    #[serde(skip)]
+    /// an item the bridge settles; `start_time_ms` is the wall-clock value a row shows.
     started_at: Option<Instant>,
 }
 
@@ -83,7 +80,6 @@ pub struct JobSnapshot {
     pub mode: String,
     pub status: BatchStatus,
     pub start_time_ms: u64,
-    pub total_items: usize,
     pub input_dir: String,
     /// What the job runs with, fixed when it starts.
     pub effective_settings: EffectiveSettings,
@@ -105,7 +101,6 @@ impl JobSnapshot {
             mode: mode.to_string(),
             status: BatchStatus::Running,
             start_time_ms,
-            total_items: 0,
             input_dir,
             effective_settings,
             ordered_item_ids: Vec::new(),
@@ -122,8 +117,6 @@ impl JobSnapshot {
         | JobEvent::ItemProgress { version, .. }
         | JobEvent::ItemComplete { version, .. }
         | JobEvent::BatchComplete { version, .. }) = event;
-        // Webview twin: the v1 guard in queue-state.js `reduceQueueEvent`, until S2b removes that
-        // reducer. Both must drop the same events.
         if *version != EVENT_VERSION {
             return;
         }
@@ -131,9 +124,8 @@ impl JobSnapshot {
             return;
         }
         match event {
-            JobEvent::BatchStart { total, items, .. } => {
+            JobEvent::BatchStart { items, .. } => {
                 self.status = BatchStatus::Running;
-                self.total_items = *total;
                 self.ordered_item_ids.clear();
                 self.items.clear();
                 for item in items.iter().flatten() {
@@ -221,8 +213,7 @@ impl JobSnapshot {
     }
 
     /// The error of an item settled by a failed job whose terminal carries no error or panic text.
-    /// The webview's guard (`queue-state.js`) repeats it for a run that broke Item Settlement;
-    /// `test_settlement_wording_matches_the_golden_fixture` pins both to one fixture.
+    /// `test_settlement_wording_matches_the_golden_fixture` pins it.
     const BATCH_FAILED_ERROR: &'static str = "Batch failed";
 
     /// Item Settlement: the `ItemComplete` events that end every item the Batch Pipeline left
@@ -288,33 +279,12 @@ impl JobSnapshot {
     }
 
     /// How many items have an outcome, derived from their statuses rather than counted.
+    #[cfg(test)]
     pub fn completed_items(&self) -> usize {
         self.items
             .values()
             .filter(|item| item.status.is_terminal())
             .count()
-    }
-}
-
-/// The `get_job_snapshot` payload: the fields in order, with `completed_items` derived, since
-/// the webview's restore path still reads it.
-/// `test_reducer_derives_completed_items_from_item_outcomes` pins the serialized key set and is
-/// the guard against a field silently dropping off the wire; do not "simplify" this back to a
-/// derive without keeping `completed_items`.
-impl Serialize for JobSnapshot {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut state = serializer.serialize_struct("JobSnapshot", 10)?;
-        state.serialize_field("job_id", &self.job_id)?;
-        state.serialize_field("mode", &self.mode)?;
-        state.serialize_field("status", &self.status)?;
-        state.serialize_field("start_time_ms", &self.start_time_ms)?;
-        state.serialize_field("total_items", &self.total_items)?;
-        state.serialize_field("completed_items", &self.completed_items())?;
-        state.serialize_field("input_dir", &self.input_dir)?;
-        state.serialize_field("effective_settings", &self.effective_settings)?;
-        state.serialize_field("ordered_item_ids", &self.ordered_item_ids)?;
-        state.serialize_field("items", &self.items)?;
-        state.end()
     }
 }
 
@@ -450,7 +420,6 @@ mod tests {
         assert_eq!(snap.job_id, 10);
         assert_eq!(snap.mode, "remux");
         assert_eq!(snap.status, BatchStatus::Running);
-        assert_eq!(snap.total_items, 1);
         assert_eq!(snap.completed_items(), 0);
         assert_eq!(snap.ordered_item_ids, vec!["ep1".to_string()]);
 
@@ -468,6 +437,8 @@ mod tests {
         // A duplicate completion must not count the item twice.
         snap.apply(&complete);
         assert_eq!(snap.completed_items(), 1);
+        // Every item has an outcome, but only `batch_complete` ends the batch.
+        assert_eq!(snap.status, BatchStatus::Running);
 
         snap.apply(&batch_complete(true, false));
         assert_eq!(snap.status, BatchStatus::Completed);
@@ -484,10 +455,6 @@ mod tests {
         assert_eq!(snap.effective_settings, settings);
         snap.apply(&batch_complete(true, false));
         assert_eq!(snap.effective_settings, settings);
-
-        let json = serde_json::to_value(&snap).unwrap();
-        assert_eq!(json["effective_settings"]["io_jobs"], 5);
-        assert_eq!(json["effective_settings"]["bitrate"], "256k");
 
         // A second BatchStart replaces the batch, never the job: its start time, input directory
         // and settings stay. A later job begins its own snapshot, so it inherits none of them
@@ -688,10 +655,8 @@ mod tests {
         serde_json::json!({ "terminal": terminal, "settled": settled })
     }
 
-    /// Pins the Item Settlement wording across the language boundary. The fixture holds the
-    /// events Rust sends for a stopped job and for a failed job whose terminal has no error or
-    /// panic text; `queue-state.test.js` reads the same file and asserts that its guard, which
-    /// settles an item the bridge left open, uses the same `reason` and `error`.
+    /// Pins the Item Settlement wording. The golden fixture holds the events Rust sends for a
+    /// stopped job and for a failed job whose terminal has no error or panic text.
     ///
     /// Set `UPDATE_SETTLEMENT_FIXTURE=1` to rewrite the file from the real code path instead of
     /// comparing, then review the diff.
@@ -699,7 +664,7 @@ mod tests {
     fn test_settlement_wording_matches_the_golden_fixture() {
         const FIXTURE: &str = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../desktop-tauri/ui/fixtures/settlement-events.json"
+            "/tests/fixtures/settlement-events.json"
         );
         let built = serde_json::json!({
             "stopped": settlement_scenario(batch_complete(false, true)),
@@ -774,10 +739,7 @@ mod tests {
         assert_eq!(snap.items["ep1"].status, ItemStatus::Queued);
         assert_eq!(snap.items["ep1"].file, "ep1.mkv");
         assert_eq!(snap.items["ep1"].start_time_ms, None);
-        let value = serde_json::to_value(snap).unwrap();
-        assert_eq!(value["ordered_item_ids"], serde_json::json!(["ep2", "ep1"]));
-        assert_eq!(value["items"]["ep2"]["progress"], 70.0);
-        assert!(value["items"]["ep2"]["start_time_ms"].is_number());
+        assert_eq!(snap.items["ep2"].progress, Some(70.0));
     }
 
     #[test]
@@ -937,33 +899,53 @@ mod tests {
         snap.apply(&bare_outcome("ep9", ItemOutcome::Completed));
 
         assert_eq!(snap.completed_items(), 2);
-        // The webview's restore path still reads the count from the payload.
-        let json = serde_json::to_value(&snap).unwrap();
-        assert_eq!(json["completed_items"], 2);
-        assert_eq!(json["total_items"], 3);
-        // The hand-written `Serialize` lists the fields: pin the key set so none drops out.
-        let mut keys: Vec<&str> = json
-            .as_object()
-            .unwrap()
-            .keys()
-            .map(String::as_str)
-            .collect();
-        keys.sort_unstable();
+        assert_eq!(snap.ordered_item_ids.len(), 3);
+    }
+
+    #[test]
+    fn test_reducer_records_each_outcome_once_and_only_for_a_participant() {
+        let mut snap = begun(10);
+        snap.apply(&batch_start(&["ep1", "ep2", "ep3", "ep4"]));
+        let mut skipped = bare_outcome("ep1", ItemOutcome::Skipped);
+        if let JobEvent::ItemComplete { reason, .. } = &mut skipped {
+            *reason = Some("output already exists".into());
+        }
+        snap.apply(&skipped);
+        snap.apply(&bare_outcome("ep2", ItemOutcome::Planned));
+        let mut failed = bare_outcome("ep3", ItemOutcome::Error);
+        if let JobEvent::ItemComplete { error, .. } = &mut failed {
+            *error = Some("mkvmerge failed".into());
+        }
+        snap.apply(&failed);
+        // Never started: no duration to fall back to.
+        assert_eq!(snap.items["ep3"].duration_sec, None);
         assert_eq!(
-            keys,
-            [
-                "completed_items",
-                "effective_settings",
-                "input_dir",
-                "items",
-                "job_id",
-                "mode",
-                "ordered_item_ids",
-                "start_time_ms",
-                "status",
-                "total_items",
-            ]
+            snap.items["ep1"].reason.as_deref(),
+            Some("output already exists")
         );
+        assert_eq!(snap.items["ep2"].status, ItemStatus::Planned);
+        assert_eq!(snap.items["ep3"].error.as_deref(), Some("mkvmerge failed"));
+        assert_eq!(snap.completed_items(), 3);
+
+        // An outcome is final: a second one and a late start change nothing.
+        snap.apply(&bare_outcome("ep1", ItemOutcome::Completed));
+        snap.apply(&item_start("ep1"));
+        assert_eq!(snap.items["ep1"].status, ItemStatus::Skipped);
+        assert_eq!(snap.completed_items(), 3);
+
+        // An ID the batch never listed gets no item.
+        snap.apply(&item_start("unknown"));
+        snap.apply(&bare_outcome("unknown", ItemOutcome::Completed));
+        assert!(!snap.items.contains_key("unknown"));
+        assert_eq!(snap.completed_items(), 3);
+    }
+
+    #[test]
+    fn test_reducer_lists_a_repeated_batch_start_id_once() {
+        let mut snap = begun(10);
+        snap.apply(&batch_start(&["01", "02", "01"]));
+        assert_eq!(snap.ordered_item_ids, ["01", "02"]);
+        assert_eq!(snap.items.len(), 2);
     }
 
     #[test]

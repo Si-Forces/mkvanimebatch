@@ -1,6 +1,6 @@
 # 0016. Toolkit-Agnostic Desktop Core Owns UI State
 
-> **Status**: Accepted (S0–S1 implemented, S2 in progress; amended 2026-10-15)
+> **Status**: Accepted (S0–S2 implemented; amended 2026-10-15, 2026-10-16)
 > **Date**: 2026-10-15
 > **Context**: Desktop Application Context
 > **Amends**: ADR-0001, ADR-0007, ADR-0008, ADR-0009, ADR-0011, ADR-0013
@@ -77,3 +77,8 @@ The toolkit spike starts after S1, so it can render real queue state.
 - **The supervisor keeps a private settlement ledger.** Decision 1 gives the actor the one Job Snapshot; the job supervisor also keeps its own per-job `JobSnapshot`, built by the same reducer (`JobSnapshot::apply`) from the same events, settlement events included. It settles the job and computes the `job-done` code from it, so teardown (Stop, Close, `ExitRequested`) never depends on the actor. One reducer, two instances of its state; `SnapshotStore` and its lock are gone.
 - **Run and stop stay commands until S3.** `run_job` and `stop_job` remain Tauri commands while request building and preflight are still in JS, and `stop_job` must still resolve only after teardown. S3 turns them into Intents sent through `dispatch`.
 - **S2 ships in two parts.** S2a: the actor with its one inbox, the actor-owned published Job Snapshot, coalesced whole-state publication (the ~15 Hz cap lives in the core, not the Tauri adapter as decision 4 phrases it, so a native view gets it too) and `get_state`, with the supervisor's `JobSink` feeding the inbox; the webview is unchanged. S2b: Intents, the queue rows, the Inspection Coordinator and the JS cutover.
+
+## Amendment — 2026-10-16 (S2b: fixture path, unbounded inbox)
+
+- **The Item Settlement golden fixture lives at `crates/mkv-desktop-core/tests/fixtures/settlement-events.json`** (decision 8), now that its JS consumers are gone; the Rust wording test in `snapshot.rs` keeps it. The actor's inbox stays unbounded, with no `Arc<JobEvent>`: the engine already drops `ItemProgress` it cannot send, the actor only applies events in memory and publishes at most about 15 times a second, and a bounded inbox would need async `JobSink` methods, letting a slow actor stall the supervisor's teardown.
+- **Older ADRs that name what S2b removed are superseded on those points**, their bodies unchanged: ADR-0001's Desktop Operation Ownership addendum (item 1) and its 2026-10-08 amendment name `inspect_directory`, which the `ScanDirectory` Intent and the Inspection Coordinator replace; ADR-0008's Item Settlement amendment names `guardUnsettledItems`, the fixture at `desktop-tauri/ui/fixtures/` and a JS test of the guard's two constants, all removed: no webview code settles or guards items, and the fixture's only test is the Rust one. The pill rule of that amendment holds through the `job-done` code alone, which is the terminal's status.

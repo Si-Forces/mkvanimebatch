@@ -9,9 +9,11 @@ use mkv_desktop_core::actor::Core;
 use mkv_desktop_core::control::{
     begin_shutdown, cancel_shutdown, cleanup_owned_processes, InspectCacheState, ScanState,
 };
+use mkv_desktop_core::inspection::EngineInspector;
 use mkv_desktop_core::job::JobState;
 use mkv_desktop_core::telemetry::TelemetryState;
 use publisher::WebviewPublisher;
+use std::sync::Arc;
 use tauri::{Emitter, Manager};
 
 /// Host `libwayland-client.so.0` locations to preload inside an AppImage.
@@ -78,10 +80,16 @@ pub fn run() {
             // As early as the log directory is known; a failed lookup leaves stderr only.
             diagnostics::init(app.path().app_log_dir().ok().as_deref());
             // The Desktop Core actor runs on the tokio runtime Tauri runs its async commands on,
-            // and publishes to the webview.
+            // publishes to the webview, and inspects through the Directory Inspection registry
+            // and the session cache that Stop, Close and Run share.
+            let inspector = EngineInspector {
+                scan: Arc::clone(&app.state::<Arc<ScanState>>()),
+                cache: app.state::<InspectCacheState>().inner().clone(),
+            };
             app.manage(Core::spawn(
                 tauri::async_runtime::handle().inner().clone(),
                 WebviewPublisher(app.handle().clone()),
+                inspector,
             ));
             Ok(())
         })
@@ -89,7 +97,7 @@ pub fn run() {
         .manage(JobState::new(
             tauri::async_runtime::handle().inner().clone(),
         ))
-        .manage(ScanState::default())
+        .manage(Arc::new(ScanState::default()))
         .manage(InspectCacheState::default())
         .manage(TelemetryState::default())
         .invoke_handler(tauri::generate_handler![
@@ -99,8 +107,6 @@ pub fn run() {
             commands::clear_cache,
             commands::pick_directory,
             commands::pick_subtitle_file,
-            commands::inspect_directory,
-            commands::canonical_directory,
             telemetry::get_system_telemetry,
             process::close_window,
             window::minimize_window,
@@ -111,21 +117,21 @@ pub fn run() {
             window::set_window_theme,
             commands::get_preset_profiles,
             commands::get_default_settings,
-            commands::get_job_snapshot,
             commands::get_state,
+            commands::dispatch,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
             if let tauri::RunEvent::ExitRequested { api, .. } = event {
                 let state = app.state::<JobState>();
-                let scan_state = app.state::<ScanState>();
+                let scan_state = app.state::<Arc<ScanState>>();
                 if begin_shutdown(&state, &scan_state) {
                     api.prevent_exit();
                     let app = app.clone();
                     std::thread::spawn(move || {
                         let state = app.state::<JobState>();
-                        let scan_state = app.state::<ScanState>();
+                        let scan_state = app.state::<Arc<ScanState>>();
                         match cleanup_owned_processes(&state, &scan_state) {
                             Ok(()) => app.exit(0),
                             Err(error) => {

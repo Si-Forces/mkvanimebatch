@@ -17,6 +17,9 @@ struct ActiveScan {
     cancel_token: CancellationToken,
 }
 
+/// The Directory Inspection registry: at most one inspection runs at a time, across both modes,
+/// and a new one cancels the one before it. Shared behind an `Arc`, so an inspection that runs off
+/// the Desktop Core actor holds the registry its teardown waits on.
 pub struct ScanState {
     active: Mutex<Option<ActiveScan>>,
     next_id: AtomicU64,
@@ -55,7 +58,10 @@ impl ScanState {
     /// inspection is cancelled, and the new one replaces it as the active scan; the previous
     /// registration's drop then leaves the new one alone. Keep the registration alive until the
     /// inspection ends: its drop is what tells teardown the inspection has finished.
-    pub fn begin(&self, dir: &Path) -> Result<(ScanRegistration<'_>, CancellationToken), String> {
+    pub fn begin(
+        self: &Arc<Self>,
+        dir: &Path,
+    ) -> Result<(ScanRegistration, CancellationToken), String> {
         let start_lock = self.start_lock.lock().map_err(|e| e.to_string())?;
         self.ensure_accepting_starts()?;
         if !dir.is_dir() {
@@ -70,7 +76,8 @@ impl ScanState {
             cancel_token: cancel_token.clone(),
         });
         drop(start_lock);
-        Ok((ScanRegistration { state: self, id }, cancel_token))
+        let state = Arc::clone(self);
+        Ok((ScanRegistration { state, id }, cancel_token))
     }
 
     fn wait_until_empty(&self, timeout: Duration) -> Result<(), String> {
@@ -82,12 +89,12 @@ impl ScanState {
 
 /// A running Directory Inspection. Its drop is the only place that vacates the active scan, and
 /// only while the scan is still its own.
-pub struct ScanRegistration<'a> {
-    state: &'a ScanState,
+pub struct ScanRegistration {
+    state: Arc<ScanState>,
     id: u64,
 }
 
-impl Drop for ScanRegistration<'_> {
+impl Drop for ScanRegistration {
     fn drop(&mut self) {
         if let Ok(mut active) = self.state.active.lock() {
             if active.as_ref().is_some_and(|scan| scan.id == self.id) {
@@ -256,6 +263,14 @@ pub fn resolve_canonical(mut request: BatchRequest) -> Result<PipelineConfig, St
     request.resolve()
 }
 
+/// The wire name of `mode`: what a Job Snapshot and a `job-done` carry.
+pub(crate) fn mode_name(mode: PipelineMode) -> &'static str {
+    match mode {
+        PipelineMode::Extract => "extract",
+        PipelineMode::Remux => "remux",
+    }
+}
+
 /// Starts a job for `request` in `job`, reporting to `sink`: what the `run_job` command runs, and
 /// what a test runs against a recording sink.
 pub fn launch(
@@ -267,10 +282,7 @@ pub fn launch(
     let mut pipeline_config = resolve_canonical(request)?;
     let input_dir = display_canonical_path(&pipeline_config.input_dir.to_string_lossy());
 
-    let mode = match pipeline_config.mode {
-        PipelineMode::Extract => "extract",
-        PipelineMode::Remux => "remux",
-    };
+    let mode = mode_name(pipeline_config.mode);
     let cancel_token = CancellationToken::new();
     let (event_tx, event_rx) = mkv_core::pipeline::create_event_channel(64);
     let (log_tx, log_rx) = mkv_core::pipeline::create_log_channel(128);
@@ -400,7 +412,7 @@ mod tests {
 
     #[test]
     fn test_cleanup_waits_until_the_scan_registration_drops() {
-        let (job, scan_state) = (job_state(), ScanState::default());
+        let (job, scan_state) = (job_state(), Arc::new(ScanState::default()));
         let tmp = tempfile::tempdir().unwrap();
         let (registration, token) = scan_state.begin(tmp.path()).unwrap();
         let released = AtomicBool::new(false);
@@ -432,7 +444,7 @@ mod tests {
 
     #[test]
     fn test_begin_replaces_and_cancels_the_previous_scan() {
-        let scan_state = ScanState::default();
+        let scan_state = Arc::new(ScanState::default());
         let tmp = tempfile::tempdir().unwrap();
         let (first, first_token) = scan_state.begin(tmp.path()).unwrap();
         let (_second, second_token) = scan_state.begin(tmp.path()).unwrap();
@@ -446,7 +458,7 @@ mod tests {
 
     #[test]
     fn test_scan_registration_drop_clears_active_scan() {
-        let state = ScanState::default();
+        let state = Arc::new(ScanState::default());
         let token = CancellationToken::new();
         *state.active.lock().unwrap() = Some(ActiveScan {
             id: 1,
@@ -454,7 +466,7 @@ mod tests {
         });
 
         drop(ScanRegistration {
-            state: &state,
+            state: Arc::clone(&state),
             id: 1,
         });
 
@@ -542,7 +554,7 @@ mod tests {
 
         // The snapshot is the finished job's: BatchStart replaced its batch, not its settings.
         assert_eq!(snapshot.effective_settings, expected);
-        assert_eq!(snapshot.total_items, 0);
+        assert!(snapshot.ordered_item_ids.is_empty());
         assert_eq!(bridge.done_code(), 0);
     }
 

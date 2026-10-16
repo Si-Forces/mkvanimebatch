@@ -315,7 +315,7 @@ fn finish(
 ) {
     attach_context(&mut terminal, mode, job_id);
     // Item Settlement: every item the pipeline left open ends before the job does, through
-    // the same event the pipeline uses, so a live webview and a reloaded snapshot agree.
+    // the same event the pipeline uses, so the ledger and the published snapshot agree.
     for mut event in ledger.settlement_events(&terminal) {
         attach_context(&mut event, mode, job_id);
         ledger.apply(&event);
@@ -433,7 +433,8 @@ async fn forward_events(
             }
             attach_context(&mut event, mode, job_id);
             ledger.apply(&event);
-            // The sink still gets every event; the webview drops non-v1 events itself.
+            // The sink still gets every event; the ledger and the actor's snapshot drop non-v1
+            // events.
             sink.event(&event);
         }
     }
@@ -753,7 +754,7 @@ mod tests {
         only_one(&sink.dones(), job_id, |_| true)
     }
 
-    /// Every `job-event` payload of `job_id`, in the order the webview received them.
+    /// Every event payload of `job_id`, in the order the sink received them.
     fn emitted_for(sink: &RecordingSink, job_id: u64) -> Vec<Value> {
         sink.events()
             .into_iter()

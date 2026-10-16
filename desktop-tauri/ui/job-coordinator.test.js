@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { createJobCoordinator } from "./job-coordinator.js";
-import { makeRestore } from "./job-coordinator-fakes.js";
 
 /** A coordinator that counts how often it re-renders its controls. */
 function countedCoordinator() {
@@ -16,23 +15,19 @@ function countedCoordinator() {
 function inPhase(phase) {
   const coordinator = createJobCoordinator();
   if (phase === "idle") return coordinator;
-  if (phase === "restoring") {
-    // The restore holds `restoring` until the snapshot answers, which this fake never does.
-    coordinator.restore(makeRestore(coordinator, { getSnapshot: () => new Promise(() => {}) }).deps);
-    return coordinator;
-  }
   coordinator.begin("remux");
   if (phase !== "starting") coordinator.launched();
   if (phase === "stopping") coordinator.requestStop();
   return coordinator;
 }
 
-const PHASES = ["idle", "restoring", "starting", "running", "stopping"];
+const PHASES = ["idle", "starting", "running", "stopping"];
 
 /** The transitions that must refuse from every phase but those listed, with how to call each. */
 const GUARDED_TRANSITIONS = [
   { name: "begin", call: c => c.begin("extract"), legalFrom: ["idle"] },
   { name: "launched", call: c => c.launched(), legalFrom: ["starting"] },
+  { name: "adopt", call: c => c.adopt("extract"), legalFrom: ["idle"] },
   { name: "requestStop", call: c => c.requestStop(), legalFrom: ["starting", "running"] },
   { name: "stopFailed", call: c => c.stopFailed(), legalFrom: ["stopping"] },
 ];
@@ -72,6 +67,16 @@ test("a job walks idle, starting, running, stopping and back to idle", () => {
   assert.equal(coordinator.activeMode, null);
   assert.equal(coordinator.isStopping, false);
   assert.equal(coordinator.canStart(), true);
+});
+
+test("adopting a job that outlived a webview reload runs it for its mode", () => {
+  const coordinator = createJobCoordinator();
+
+  assert.equal(coordinator.adopt("extract"), true);
+  assert.equal(coordinator.phase, "running");
+  assert.equal(coordinator.activeMode, "extract");
+  assert.equal(coordinator.canStart(), false);
+  assert.equal(coordinator.requestStop(), true, "an adopted job stops like a launched one");
 });
 
 test("a stop during starting moves straight to stopping", () => {
@@ -161,7 +166,7 @@ test("syncControls re-renders without a transition, for changes the coordinator 
   assert.equal(coordinator.phase, "idle");
 });
 
-test("a second controller for one mode is refused, so restore() never attaches the wrong one", () => {
+test("a second controller for one mode is refused", () => {
   const coordinator = createJobCoordinator();
   coordinator.register({ mode: "remux", syncGlobalControls() {} });
   assert.throws(() => coordinator.register({ mode: "remux", syncGlobalControls() {} }), /already registered for mode "remux"/);
