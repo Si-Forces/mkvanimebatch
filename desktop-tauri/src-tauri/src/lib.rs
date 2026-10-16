@@ -7,7 +7,8 @@ mod window;
 
 use mkv_desktop_core::actor::Core;
 use mkv_desktop_core::control::{
-    begin_shutdown, cancel_shutdown, cleanup_owned_processes, InspectCacheState, ScanState,
+    begin_shutdown, cancel_shutdown, cleanup_owned_processes, EngineLauncher, InspectCacheState,
+    ScanState,
 };
 use mkv_desktop_core::inspection::EngineInspector;
 use mkv_desktop_core::job::JobState;
@@ -80,16 +81,24 @@ pub fn run() {
             // As early as the log directory is known; a failed lookup leaves stderr only.
             diagnostics::init(app.path().app_log_dir().ok().as_deref());
             // The Desktop Core actor runs on the tokio runtime Tauri runs its async commands on,
-            // publishes to the webview, and inspects through the Directory Inspection registry
-            // and the session cache that Stop, Close and Run share.
+            // publishes to the webview, and inspects and runs jobs through the Job Slot, the
+            // Directory Inspection registry and the session cache that Close also tears down.
+            let scan = Arc::clone(&app.state::<Arc<ScanState>>());
+            let cache = app.state::<InspectCacheState>().inner().clone();
             let inspector = EngineInspector {
-                scan: Arc::clone(&app.state::<Arc<ScanState>>()),
-                cache: app.state::<InspectCacheState>().inner().clone(),
+                scan: Arc::clone(&scan),
+                cache: cache.clone(),
+            };
+            let launcher = EngineLauncher {
+                job: app.state::<JobState>().inner().clone(),
+                scan,
+                cache,
             };
             app.manage(Core::spawn(
                 tauri::async_runtime::handle().inner().clone(),
                 WebviewPublisher(app.handle().clone()),
                 inspector,
+                launcher,
             ));
             Ok(())
         })
@@ -101,9 +110,6 @@ pub fn run() {
         .manage(InspectCacheState::default())
         .manage(TelemetryState::default())
         .invoke_handler(tauri::generate_handler![
-            commands::run_job,
-            commands::resolve_batch_request,
-            process::stop_job,
             commands::clear_cache,
             commands::pick_directory,
             commands::pick_subtitle_file,

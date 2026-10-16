@@ -1,3 +1,5 @@
+import { isBusy } from "./presentation.js";
+
 /** Inputs whose empty state means the engine's default, as [input id, Effective Settings key]. */
 const AUTO_INPUTS = ["remux", "extract"].flatMap(mode => [
   [`${mode}-workers`, "workers"],
@@ -13,43 +15,41 @@ function chipText(isJobActive, idleWord, count, noun) {
 
 /**
  * The worker and I/O job chips and the `auto (N)` hints on the workers and Disk I/O inputs, which
- * show Effective Settings: the engine's defaults, or a running job's own. `isJobActive()` says
- * whether a job owns the chips right now.
+ * show Effective Settings, all read from the View State: the published `defaults` while nothing
+ * holds the batch, else the start's or the job's own (`run.settings`, else the Job View's).
  */
-export function createSettingsChips({ doc, isJobActive }) {
-  /**
-   * The View State's `defaults`, the Effective Settings of a request that sets nothing: `null`
-   * until the core has read them. An empty workers field sends `workers: null`, which the engine
-   * resolves to these.
-   */
-  let defaultSettings = null;
+export function createSettingsChips({ doc }) {
+  // The `defaults` the inputs show, as JSON.
+  let defaultsKey = null;
 
-  /**
-   * Shows `settings` (Effective Settings) on the chips: the running job's while `jobActive`,
-   * otherwise the defaults. `null` settings, not yet known, leave the counts out.
-   */
-  function update(jobActive = false, settings = defaultSettings) {
-    doc.querySelectorAll(".metric-workers-chip").forEach(chip => {
-      chip.innerText = chipText(jobActive, "Standby", settings?.workers, "Workers");
-    });
-    doc.querySelectorAll(".metric-iojobs-chip").forEach(chip => {
-      chip.innerText = chipText(jobActive, "Idle", settings?.io_jobs, "IO Jobs");
+  function setChips(selector, text) {
+    doc.querySelectorAll(selector).forEach(chip => {
+      if (chip.innerText !== text) chip.innerText = text;
     });
   }
 
-  /** Takes the published `defaults`; a View State without them yet leaves the inputs on plain `auto`. */
-  function applyDefaults(settings) {
-    if (!settings || JSON.stringify(settings) === JSON.stringify(defaultSettings)) return;
-    defaultSettings = settings;
-    for (const [id, key] of AUTO_INPUTS) {
-      const input = doc.getElementById(id);
-      if (!input) continue;
-      input.placeholder = `auto (${settings[key]})`;
-      input.dataset.autoValue = String(settings[key]);
+  /**
+   * Renders `state`. Its `defaults` are `null` until the core has read them, which leaves the
+   * inputs on plain `auto`; an empty workers field sends no value, which the engine resolves to
+   * these. A busy batch with no settings known yet (a start still resolving) shows no counts.
+   */
+  function render(state) {
+    const defaults = state?.defaults ?? null;
+    const key = JSON.stringify(defaults);
+    if (defaults && key !== defaultsKey) {
+      defaultsKey = key;
+      for (const [id, field] of AUTO_INPUTS) {
+        const input = doc.getElementById(id);
+        if (!input) continue;
+        input.placeholder = `auto (${defaults[field]})`;
+        input.dataset.autoValue = String(defaults[field]);
+      }
     }
-    // Leave the chips alone while a job owns them; they show that job's own settings.
-    if (!isJobActive()) update(false);
+    const busy = isBusy(state);
+    const settings = busy ? state.run?.settings ?? (state.job?.active ? state.job.effective_settings : null) ?? null : defaults;
+    setChips(".metric-workers-chip", chipText(busy, "Standby", settings?.workers, "Workers"));
+    setChips(".metric-iojobs-chip", chipText(busy, "Idle", settings?.io_jobs, "IO Jobs"));
   }
 
-  return { applyDefaults, update };
+  return { render };
 }

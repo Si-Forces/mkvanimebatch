@@ -6,7 +6,7 @@
  */
 
 /** The fields of each draft key, as id suffixes after `${mode}-`. Complexity has a slider and a box. */
-const DRAFT_FIELDS = {
+export const DRAFT_FIELDS = {
   input_dir: ["input-dir"],
   out_dir: ["out-dir"],
   fonts_dir: ["fonts-dir"],
@@ -24,7 +24,8 @@ const DRAFT_FIELDS = {
 const isCheckbox = el => el.type === "checkbox";
 
 /**
- * `dispatch` sends an Intent (app.js's `dispatchIntent`). Two guards keep a published draft from
+ * `dispatch` sends an Intent and rejects with the core's refusal (app.js's `sendIntent`), and
+ * `published(mode)` is the mode's draft in the View State applied last. Two guards keep a published draft from
  * undoing what the user is doing: a field with focus is never written, so typing keeps its caret,
  * and neither is a key whose edit is still on its way to the core, since a state published before
  * the core applied it holds the value from before the edit. The core answers a draft Intent once it
@@ -33,19 +34,31 @@ const isCheckbox = el => el.type === "checkbox";
  * against invoke replies: an unfocused field then shows the old value until the publication the
  * edit armed, at most one interval (66 ms) later. That flicker is accepted.
  */
-export function createSettingsDraft({ doc, dispatch }) {
+export function createSettingsDraft({ doc, dispatch, published }) {
   // Edits sent and not answered yet, by `${mode}:${key}`.
   const pending = new Map();
 
-  /** Sends the value `el` now holds as the draft's `key`; call it after setting a field from code. */
+  /**
+   * Sends the value `el` now holds as the draft's `key`; call it after setting a field from code.
+   * A refused edit (a busy batch locks the draft) changed nothing in the core, which then
+   * publishes nothing, so the field gets the published value back unless a later edit is pending.
+   */
   async function send(mode, key, el) {
     const id = `${mode}:${key}`;
     pending.set(id, (pending.get(id) ?? 0) + 1);
+    let refused = false;
     try {
       await dispatch({ type: "edit_draft", mode, changes: { [key]: isCheckbox(el) ? el.checked : el.value } });
+    } catch (err) {
+      console.error("[edit_draft] refused:", err);
+      refused = true;
     } finally {
       if (pending.get(id) === 1) pending.delete(id);
       else pending.set(id, pending.get(id) - 1);
+    }
+    if (refused && !pending.has(id)) {
+      const value = published(mode)?.[key];
+      if (value !== undefined) apply(mode, { [key]: value }, { force: true });
     }
   }
 
@@ -67,14 +80,17 @@ export function createSettingsDraft({ doc, dispatch }) {
     }
   }
 
-  /** Writes `draft` into `mode`'s fields, but the guarded ones. Returns the keys of the fields it changed. */
-  function apply(mode, draft) {
+  /**
+   * Writes `draft` into `mode`'s fields, but the guarded ones (any, with `force`). Returns the keys
+   * of the fields it changed.
+   */
+  function apply(mode, draft, { force = false } = {}) {
     const written = new Set();
     for (const [key, value] of Object.entries(draft ?? {})) {
-      if (pending.has(`${mode}:${key}`)) continue;
+      if (!force && pending.has(`${mode}:${key}`)) continue;
       for (const suffix of DRAFT_FIELDS[key] ?? []) {
         const el = doc.getElementById(`${mode}-${suffix}`);
-        if (!el || el === doc.activeElement) continue;
+        if (!el || (!force && el === doc.activeElement)) continue;
         const property = isCheckbox(el) ? "checked" : "value";
         // A range resets a value that is not a number to its midpoint, so the complexity slider
         // takes only a parsed value and stays put while the box holds something else.

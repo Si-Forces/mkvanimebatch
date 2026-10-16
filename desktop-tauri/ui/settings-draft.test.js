@@ -17,7 +17,8 @@ function field(type = "text", value = "") {
 
 /**
  * The remux sheet's fields and the extract input folder. `answers` holds each dispatch until the
- * test settles it, in the order sent.
+ * test settles it, in the order sent, and `refusals` rejects it instead. `published` is the
+ * View State's drafts by mode.
  */
 function draftHarness() {
   const fields = new Map([
@@ -32,13 +33,18 @@ function draftHarness() {
   const doc = { activeElement: null, getElementById: id => fields.get(id) ?? null };
   const intents = [];
   const answers = [];
+  const refusals = [];
   const dispatch = intent => {
     intents.push(intent);
-    return new Promise(resolve => answers.push(resolve));
+    return new Promise((resolve, reject) => {
+      answers.push(resolve);
+      refusals.push(reject);
+    });
   };
-  const form = createSettingsDraft({ doc, dispatch });
-  form.bind();
-  return { form, fields, doc, intents, answers, get: id => fields.get(id) };
+  const page = { fields, doc, intents, answers, refusals, published: { remux: draft("remux") }, get: id => fields.get(id) };
+  page.form = createSettingsDraft({ doc, dispatch, published: mode => page.published[mode] });
+  page.form.bind();
+  return page;
 }
 
 const flush = () => new Promise(resolve => setImmediate(resolve));
@@ -110,4 +116,36 @@ test("the complexity slider takes only a value that parses, so a cleared box doe
   assert.equal(page.get("remux-complexity").value, "5");
   page.form.apply("remux", draft("remux", { complexity: "8x" }));
   assert.equal(page.get("remux-complexity").value, "8");
+});
+
+test("a refused edit gets the published value back, even in the focused field, once no later edit is pending", async t => {
+  t.mock.method(console, "error", () => {});
+  const page = draftHarness();
+  page.published.remux = draft("remux", { out_dir: "/kept", complexity: "6" });
+  const out = page.get("remux-out-dir");
+  page.doc.activeElement = out;
+  out.value = "/a";
+  out.handlers.get("input")();
+  out.value = "/ab";
+  out.handlers.get("input")();
+  page.refusals.shift()("A batch is running; the settings are locked until it ends.");
+  await flush();
+  // The second edit is still on its way, so the field keeps what was typed.
+  assert.equal(out.value, "/ab");
+  page.refusals.at(-1)("A batch is running; the settings are locked until it ends.");
+  await flush();
+  assert.equal(out.value, "/kept");
+
+  // Both complexity fields go back, and an accepted edit writes nothing.
+  page.get("remux-cplx-val").value = "9";
+  page.get("remux-cplx-val").handlers.get("change")();
+  page.refusals.at(-1)("locked");
+  await flush();
+  assert.equal(page.get("remux-cplx-val").value, "6");
+  assert.equal(page.get("remux-complexity").value, "6");
+  page.get("remux-cplx-val").value = "7";
+  page.get("remux-cplx-val").handlers.get("change")();
+  page.answers.at(-1)(true);
+  await flush();
+  assert.equal(page.get("remux-cplx-val").value, "7");
 });

@@ -1,11 +1,13 @@
 //! The Desktop Core actor (ADR-0016): one task that owns the queue and the Settings Draft of each
-//! mode, the published Job Snapshot and the scans in flight, and publishes the whole View State
-//! through a `Publisher`, at most about 15 times a second. Everything reaches it through one
-//! inbox, so a job's start, events, log batches and completion arrive in the order the supervisor
-//! sent them, and an Intent sees every change sent before it. A UI adapter spawns it once with
-//! `Core::spawn` and talks to it through the `CoreHandle`.
+//! mode, the Job Coordinator, the published Job Snapshot and the scans in flight, and publishes
+//! the whole View State through a `Publisher`, at most about 15 times a second. Everything
+//! reaches it through one inbox, so a job's start, events, log batches and completion arrive in
+//! the order the supervisor sent them, and an Intent sees every change sent before it. A UI
+//! adapter spawns it once with `Core::spawn` and talks to it through the `CoreHandle`. The start
+//! of a Run and the Stop that ends it are in `start`.
 
-use crate::control::mode_name;
+use crate::control::{mode_name, Launcher};
+use crate::coordinator::{JobCoordinator, Phase};
 use crate::draft::{DraftChanges, SettingsDraft};
 use crate::inspection::{InFlight, Inspector};
 use crate::job::{JobDone, JobSink, JobStarted};
@@ -23,6 +25,9 @@ use std::time::Duration;
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
+
+mod start;
+use start::{Start, Step};
 
 /// The shortest gap between two View State publications: at most about 15 a second.
 const PUBLISH_INTERVAL: Duration = Duration::from_millis(66);
@@ -46,7 +51,7 @@ pub enum Intent {
     /// already held for it unless `force`, else inspect it. Answers once the scan settles:
     /// `true` when the queue took the inspection, `false` when a newer scan of the mode overtook
     /// it, it failed, or an empty `path` reset the queue; an error when a job is running in the
-    /// same mode.
+    /// same mode, or a start of either mode is before its launch.
     ScanDirectory {
         mode: PipelineMode,
         path: String,
@@ -87,6 +92,21 @@ pub enum Intent {
         mode: PipelineMode,
         preset: String,
     },
+    /// Runs the mode's batch: builds the request from its Settings Draft, resolves it, scans the
+    /// input directory again (forced), checks the Queue Selection against that scan, and launches
+    /// the job. Answers once the start settles: `true` when the job launched, `false` when a Stop
+    /// ended the start before that, and the reason when the draft, the request, the scan, the
+    /// preflight or the launch failed. Refused while another start or job holds the batch or the
+    /// mode scans.
+    Run {
+        mode: PipelineMode,
+    },
+    /// Stops the mode's start or job. Answers once the teardown is over: `true` when it stopped
+    /// or the start was cancelled, `false` when the mode owns no batch, and the teardown's error
+    /// when it failed, which leaves the job running.
+    Stop {
+        mode: PipelineMode,
+    },
 }
 
 /// What the core publishes. `seq` grows by one with every publication, so a view can drop a
@@ -95,6 +115,7 @@ pub enum Intent {
 pub struct ViewState {
     pub seq: u64,
     pub job: Option<JobView>,
+    pub run: RunView,
     /// The Effective Settings of a request that sets nothing, for the `auto (N)` hints: `None`
     /// until the actor has read the CPU topology once it started.
     pub defaults: Option<EffectiveSettings>,
@@ -102,6 +123,37 @@ pub struct ViewState {
     pub presets: Vec<PresetProfile>,
     pub remux: ModeView,
     pub extract: ModeView,
+}
+
+/// The Job Coordinator as a view renders it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct RunView {
+    pub phase: Phase,
+    /// The mode that owns the batch while it is not idle.
+    pub mode: Option<PipelineMode>,
+    /// The Effective Settings of the owning mode's request, from its resolve until the start or
+    /// the job ends.
+    pub settings: Option<EffectiveSettings>,
+}
+
+/// How a mode's last start or job ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Outcome {
+    Done,
+    Cancelled,
+    Failed,
+}
+
+impl Outcome {
+    /// The outcome of a `job-done` code: `0` completed, `-1` cancelled, else failed.
+    fn of_code(code: i32) -> Self {
+        match code {
+            0 => Self::Done,
+            -1 => Self::Cancelled,
+            _ => Self::Failed,
+        }
+    }
 }
 
 /// The published Job Snapshot, without its items: those are in the rows of its mode.
@@ -135,6 +187,8 @@ pub struct ModeView {
     /// Track Assignments by item ID (remux only).
     pub assignments: BTreeMap<String, TrackAssignment>,
     pub draft: SettingsDraft,
+    /// How the mode's last start or job ended: `None` before the first and while one runs.
+    pub outcome: Option<Outcome>,
 }
 
 impl ViewState {
@@ -144,6 +198,7 @@ impl ViewState {
         Self {
             seq: 0,
             job: None,
+            run: RunView::default(),
             defaults,
             presets: get_preset_profiles(),
             remux: ModeState::new(PipelineMode::Remux).view(None),
@@ -167,6 +222,13 @@ pub enum ScanView {
 
 type Reply = oneshot::Sender<Result<bool, String>>;
 
+/// Who a scan answers: the Intent that asked for it, or the preflight of start `attempt`, whose
+/// forced scan no start or job refuses.
+enum ScanReply {
+    Intent(Reply),
+    Preflight(u64),
+}
+
 enum Msg {
     GetState(oneshot::Sender<ViewState>),
     Dispatch(Intent, Reply),
@@ -177,7 +239,7 @@ enum Msg {
         directory: String,
         force: bool,
         no_cache: bool,
-        reply: Reply,
+        reply: ScanReply,
     },
     /// In-flight inspection `id` ended.
     Inspected {
@@ -197,6 +259,21 @@ enum Msg {
     },
     /// The Effective Settings defaults, read off the actor.
     Defaults(EffectiveSettings),
+    /// Start `attempt`'s request resolved, or was refused.
+    RequestResolved {
+        attempt: u64,
+        result: Result<EffectiveSettings, String>,
+    },
+    /// Start `attempt`'s launch returned its job ID, or why it started none.
+    Launched {
+        attempt: u64,
+        result: Result<u64, String>,
+    },
+    /// The teardown a Stop of start `attempt` issued is over.
+    StopSettled {
+        attempt: u64,
+        result: Result<(), String>,
+    },
 }
 
 /// The way into the actor. Clones share its one inbox.
@@ -218,7 +295,7 @@ impl CoreHandle {
     }
 
     /// A `JobSink` for one job that feeds this actor.
-    pub fn job_sink(&self) -> ActorSink {
+    pub(crate) fn job_sink(&self) -> ActorSink {
         ActorSink {
             core: self.clone(),
             job_id: OnceLock::new(),
@@ -233,7 +310,8 @@ impl CoreHandle {
     /// Applies `intent`. Its effect is published before the answer, but for a draft Intent
     /// (`EditDraft`, `SetPreset`), which answers at once and is published with the next
     /// coalesced publication: `Ok(true)` when it applied, `Ok(false)` when it changed nothing
-    /// (see `Intent::ScanDirectory` for a scan), and an error when the queue refuses it.
+    /// (see `Intent::ScanDirectory`, `Intent::Run` and `Intent::Stop` for those), and an error
+    /// when the core refuses it.
     pub async fn dispatch(&self, intent: Intent) -> Result<bool, String> {
         self.ask(|reply| Msg::Dispatch(intent, reply)).await?
     }
@@ -279,11 +357,12 @@ impl Drop for ActorSink {
     }
 }
 
-/// One mode's queue, scan and Settings Draft.
+/// One mode's queue, scan, Settings Draft and outcome.
 struct ModeState {
     queue: Queue,
     draft: SettingsDraft,
     scan: ScanView,
+    outcome: Option<Outcome>,
     /// The newest scan request: a request answered after a newer one began is overtaken.
     request: u64,
     /// The scan the queue waits for: an inspection that settles after a newer scan began, a reuse
@@ -300,6 +379,7 @@ impl ModeState {
             queue: Queue::default(),
             draft: SettingsDraft::new(mode),
             scan: ScanView::Idle,
+            outcome: None,
             request: 0,
             token: 0,
             changed: false,
@@ -318,6 +398,7 @@ impl ModeState {
             vanished_selected_ids: queue.vanished_selected_ids().to_vec(),
             assignments: queue.assignments().clone(),
             draft: self.draft.clone(),
+            outcome: self.outcome,
         }
     }
 }
@@ -327,13 +408,14 @@ struct Waiter {
     mode: PipelineMode,
     token: u64,
     directory: String,
-    reply: Reply,
+    reply: ScanReply,
 }
 
 /// The actor's state.
-pub struct Core<P, I> {
+pub struct Core<P, I, L> {
     publisher: P,
     inspector: Arc<I>,
+    launcher: Arc<L>,
     runtime: Handle,
     /// Where the scans the actor spawns send their results; weak, so the loop still ends once
     /// every `CoreHandle` is gone.
@@ -345,6 +427,14 @@ pub struct Core<P, I> {
     /// Whether a job runs: from its `JobStarted` until its `Done`, or until its sink is dropped
     /// when a supervisor that died before `finish` sent no `Done`.
     active: bool,
+    coordinator: JobCoordinator,
+    start: Option<Start>,
+    /// The number of the last start: a message of an older one is stale.
+    attempt: u64,
+    /// The published `RunView::settings`.
+    run_settings: Option<EffectiveSettings>,
+    /// The Stops waiting on the teardown of their start.
+    stop_waiters: Vec<(u64, Reply)>,
     defaults: Option<EffectiveSettings>,
     /// Whether the state changed since the last publication.
     dirty: bool,
@@ -354,14 +444,16 @@ pub struct Core<P, I> {
 
 /// The answer to a scan of the running job's own mode.
 const SCAN_REFUSED: &str = "A batch is running; its folder cannot be scanned until it ends.";
+/// The answer to a scan of either mode while a start runs its forced scan.
+const SCAN_STARTING: &str = "A batch is starting; no folder can be scanned until it has started.";
 /// The answer to a Settings Draft edit while a job runs.
 const DRAFT_REFUSED: &str = "A batch is running; the settings are locked until it ends.";
 
-impl<P: Publisher, I: Inspector> Core<P, I> {
-    /// Spawns the actor on `runtime`, publishing through `publisher` and scanning through
-    /// `inspector`.
-    pub fn spawn(runtime: Handle, publisher: P, inspector: I) -> CoreHandle {
-        Self::start(runtime, publisher, inspector, None)
+impl<P: Publisher, I: Inspector, L: Launcher> Core<P, I, L> {
+    /// Spawns the actor on `runtime`, publishing through `publisher`, scanning through
+    /// `inspector` and running jobs through `launcher`.
+    pub fn spawn(runtime: Handle, publisher: P, inspector: I, launcher: L) -> CoreHandle {
+        Self::start(runtime, publisher, inspector, launcher, None)
     }
 
     /// `spawn`, with the defaults already known when `defaults` holds them, else read on the
@@ -370,6 +462,7 @@ impl<P: Publisher, I: Inspector> Core<P, I> {
         runtime: Handle,
         publisher: P,
         inspector: I,
+        launcher: L,
         defaults: Option<EffectiveSettings>,
     ) -> CoreHandle {
         // Unbounded on purpose (ADR-0016, 2026-10-16 amendment). The engine already drops
@@ -381,6 +474,7 @@ impl<P: Publisher, I: Inspector> Core<P, I> {
         let core = Core {
             publisher,
             inspector: Arc::new(inspector),
+            launcher: Arc::new(launcher),
             runtime: runtime.clone(),
             inbox: inbox_tx.downgrade(),
             remux: ModeState::new(PipelineMode::Remux),
@@ -388,6 +482,11 @@ impl<P: Publisher, I: Inspector> Core<P, I> {
             in_flight: InFlight::default(),
             snapshot: None,
             active: false,
+            coordinator: JobCoordinator::default(),
+            start: None,
+            attempt: 0,
+            run_settings: None,
+            stop_waiters: Vec::new(),
             // What `get_state` answers before the first publication: the drafts and the catalog
             // too.
             last_published: ViewState::new(defaults.clone()),
@@ -458,6 +557,13 @@ impl<P: Publisher, I: Inspector> Core<P, I> {
             } => self.resolved(mode, request, directory, force, no_cache, reply),
             Msg::Inspected { id, result } => self.inspected(id, result),
             Msg::JobStarted(job) => {
+                if let Some(start) = self
+                    .start
+                    .as_mut()
+                    .filter(|start| start.step == Step::Launching)
+                {
+                    start.job_id = Some(job.job_id);
+                }
                 // The rows of the replaced snapshot's mode lose its overlay.
                 self.touch_job();
                 self.snapshot = Some(job.snapshot());
@@ -477,27 +583,54 @@ impl<P: Publisher, I: Inspector> Core<P, I> {
             }
             Msg::Logs(lines) => self.publisher.logs(&lines),
             Msg::Done(done) => {
-                self.active = false;
+                let outcome = Outcome::of_code(done.code);
+                // A stale sink's `done` ends no later job.
+                if self
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.job_id == done.job_id)
+                {
+                    self.active = false;
+                    self.dirty = true;
+                    if let Some(mode) = mode_of(done.mode) {
+                        self.set_outcome(mode, Some(outcome));
+                    }
+                }
+                // A job that ends before its launch returned ends its start too, which answers
+                // the Run: the launch did start it.
+                if self.start_job_is(done.job_id) {
+                    self.finish_start(outcome, Ok(true));
+                }
                 // The view sees the state the job ended in before it hears the job ended.
-                self.publish();
+                self.flush();
                 self.publisher.done(&done);
             }
             Msg::SinkClosed { job_id } => {
                 // A no-op after a normal `Done`, or once a later job holds the snapshot.
-                if self.active
-                    && self
-                        .snapshot
-                        .as_ref()
-                        .is_some_and(|snapshot| snapshot.job_id == job_id)
-                {
-                    self.active = false;
-                    self.dirty = true;
+                let Some(snapshot) = self
+                    .snapshot
+                    .as_ref()
+                    .filter(|snapshot| self.active && snapshot.job_id == job_id)
+                else {
+                    return;
+                };
+                let mode = mode_of(&snapshot.mode);
+                self.active = false;
+                self.dirty = true;
+                if let Some(mode) = mode {
+                    self.set_outcome(mode, Some(Outcome::Failed));
+                }
+                if self.start_job_is(job_id) {
+                    self.finish_start(Outcome::Failed, Ok(true));
                 }
             }
             Msg::Defaults(defaults) => {
                 self.defaults = Some(defaults);
                 self.dirty = true;
             }
+            Msg::RequestResolved { attempt, result } => self.request_resolved(attempt, result),
+            Msg::Launched { attempt, result } => self.launched(attempt, result),
+            Msg::StopSettled { attempt, result } => self.stop_settled(attempt, result),
         }
     }
 
@@ -505,6 +638,13 @@ impl<P: Publisher, I: Inspector> Core<P, I> {
         match mode {
             PipelineMode::Remux => &mut self.remux,
             PipelineMode::Extract => &mut self.extract,
+        }
+    }
+
+    fn state(&self, mode: PipelineMode) -> &ModeState {
+        match mode {
+            PipelineMode::Remux => &self.remux,
+            PipelineMode::Extract => &self.extract,
         }
     }
 
@@ -548,7 +688,9 @@ impl<P: Publisher, I: Inspector> Core<P, I> {
                 path,
                 force,
                 no_cache,
-            } => return self.scan(mode, path, force, no_cache, reply),
+            } => return self.scan(mode, path, force, no_cache, ScanReply::Intent(reply)),
+            Intent::Run { mode } => return self.run_batch(mode, reply),
+            Intent::Stop { mode } => return self.stop_batch(mode, reply),
             Intent::SetSelected { mode, id, selected } => (mode, QueueChange::Select(id, selected)),
             Intent::SetAllSelected { mode, selected } => (mode, QueueChange::SelectAll(selected)),
             Intent::Reorder {
@@ -573,10 +715,16 @@ impl<P: Publisher, I: Inspector> Core<P, I> {
         self.answer(reply, answer);
     }
 
-    /// Applies a Queue Selection or Track Assignment change, which a running job or the mode's
-    /// own scan refuses: the job runs the selection it started with, and the scan replaces it.
+    /// Whether a start or a job holds the batch, which locks both queues and both drafts.
+    fn busy(&self) -> bool {
+        self.coordinator.phase() != Phase::Idle || self.active
+    }
+
+    /// Applies a Queue Selection or Track Assignment change, which a start, a running job or the
+    /// mode's own scan refuses: the start captured the selection, the job runs it, and the scan
+    /// replaces it.
     fn change_queue(&mut self, mode: PipelineMode, change: QueueChange) -> Result<bool, String> {
-        if self.active {
+        if self.busy() {
             return Err("A batch is running; the queue is locked until it ends.".into());
         }
         let state = self.mode(mode);
@@ -600,14 +748,14 @@ impl<P: Publisher, I: Inspector> Core<P, I> {
         Ok(changed)
     }
 
-    /// Applies a Settings Draft change, which a running job refuses: the form is locked while it
-    /// runs.
+    /// Applies a Settings Draft change, which a start or a running job refuses: the form is
+    /// locked while either holds the batch.
     fn change_draft(
         &mut self,
         mode: PipelineMode,
         change: impl FnOnce(&mut SettingsDraft) -> Result<bool, String>,
     ) -> Result<bool, String> {
-        if self.active {
+        if self.busy() {
             return Err(DRAFT_REFUSED.into());
         }
         let changed = change(&mut self.mode(mode).draft)?;
@@ -618,17 +766,17 @@ impl<P: Publisher, I: Inspector> Core<P, I> {
 
     /// Begins a scan: an empty path resets the queue at once, any other resolves off the actor. A
     /// running job refuses a scan of its own mode, whose queue it runs, also one begun before the
-    /// job started and still resolving or inspecting.
+    /// job started and still resolving or inspecting; a start refuses every scan but its own.
     fn scan(
         &mut self,
         mode: PipelineMode,
         path: String,
         force: bool,
         no_cache: bool,
-        reply: Reply,
+        reply: ScanReply,
     ) {
-        if self.job_runs(mode) {
-            return self.answer(reply, Err(SCAN_REFUSED.into()));
+        if let Some(refusal) = self.scan_refusal(mode, &reply) {
+            return self.reply_scan(reply, Err(refusal.into()));
         }
         let state = self.mode(mode);
         state.request += 1;
@@ -642,7 +790,7 @@ impl<P: Publisher, I: Inspector> Core<P, I> {
             state.scan = ScanView::Idle;
             self.touch(mode);
             self.clear_snapshot(mode);
-            return self.answer(reply, Ok(false));
+            return self.reply_scan(reply, Ok(false));
         }
         let inspector = Arc::clone(&self.inspector);
         let inbox = self.inbox.clone();
@@ -671,13 +819,21 @@ impl<P: Publisher, I: Inspector> Core<P, I> {
         directory: String,
         force: bool,
         no_cache: bool,
-        reply: Reply,
+        reply: ScanReply,
     ) {
         if self.mode(mode).request != request {
-            return self.answer(reply, Ok(false));
+            return self.reply_scan(reply, Ok(false));
         }
-        if self.job_runs(mode) {
-            return self.answer(reply, Err(SCAN_REFUSED.into()));
+        // A start's scan whose start ended or is stopping inspects nothing: its Stop could only
+        // cancel an inspection already registered.
+        if let &ScanReply::Preflight(attempt) = &reply {
+            let stopping = self.coordinator.phase() == Phase::Stopping;
+            if stopping || self.current(attempt).is_none() {
+                return self.reply_scan(reply, Ok(false));
+            }
+        }
+        if let Some(refusal) = self.scan_refusal(mode, &reply) {
+            return self.reply_scan(reply, Err(refusal.into()));
         }
         let state = self.mode(mode);
         state.token += 1;
@@ -685,7 +841,7 @@ impl<P: Publisher, I: Inspector> Core<P, I> {
             state.scan = ScanView::Idle;
             self.touch(mode);
             self.clear_snapshot(mode);
-            return self.answer(reply, Ok(true));
+            return self.reply_scan(reply, Ok(true));
         }
         let token = state.token;
         state.scan = ScanView::Scanning {
@@ -719,16 +875,34 @@ impl<P: Publisher, I: Inspector> Core<P, I> {
     }
 
     /// Settles every scan waiting on inspection `id`: a scan still current accepts the manifest
-    /// (under its `canonical_dir`, else the identity it asked for) or fails; an overtaken one only
-    /// answers.
+    /// (under its `canonical_dir`, else the identity it asked for) or fails. One overtaken by a
+    /// newer scan only answers; a start's scan whose start ended or is stopping goes back to Idle,
+    /// keeps the queue and answers `Ok(false)`.
     fn inspected(&mut self, id: u64, result: Result<InspectionManifest, String>) {
         // One manifest, shared by every queue that accepts it.
         let result = result.map(Arc::new);
         let mut answers = Vec::new();
         for waiter in self.in_flight.settle(id) {
-            let job_runs = self.job_runs(waiter.mode);
+            // A start's own scan is never refused.
+            let job_runs =
+                matches!(waiter.reply, ScanReply::Intent(_)) && self.job_runs(waiter.mode);
+            // A start's scan that settles after its start ended or while it stops is overtaken:
+            // a Stop cancels its inspection, which must not fail the mode's scan.
+            let overtaken = match waiter.reply {
+                ScanReply::Preflight(attempt) => {
+                    self.coordinator.phase() == Phase::Stopping || self.current(attempt).is_none()
+                }
+                ScanReply::Intent(_) => false,
+            };
             let state = self.mode(waiter.mode);
             if state.token != waiter.token {
+                answers.push((waiter.reply, Ok(false)));
+                continue;
+            }
+            if overtaken {
+                // The queue keeps its rows: no accept, no reset.
+                state.scan = ScanView::Idle;
+                self.touch(waiter.mode);
                 answers.push((waiter.reply, Ok(false)));
                 continue;
             }
@@ -760,7 +934,31 @@ impl<P: Publisher, I: Inspector> Core<P, I> {
         }
         self.flush();
         for (reply, answer) in answers {
-            let _ = reply.send(answer);
+            self.reply_scan(reply, answer);
+        }
+    }
+
+    /// Why a scan of `mode` that answers `reply` is refused, if it is.
+    fn scan_refusal(&self, mode: PipelineMode, reply: &ScanReply) -> Option<&'static str> {
+        if matches!(reply, ScanReply::Preflight(_)) {
+            None
+        } else if self
+            .start
+            .as_ref()
+            .is_some_and(|start| start.step != Step::Launched)
+        {
+            Some(SCAN_STARTING)
+        } else {
+            self.job_runs(mode).then_some(SCAN_REFUSED)
+        }
+    }
+
+    /// Answers a scan: its Intent after the publication of what led to it, or its start's
+    /// preflight.
+    fn reply_scan(&mut self, reply: ScanReply, answer: Result<bool, String>) {
+        match reply {
+            ScanReply::Intent(reply) => self.answer(reply, answer),
+            ScanReply::Preflight(attempt) => self.preflight_scanned(attempt, answer),
         }
     }
 
@@ -788,10 +986,7 @@ impl<P: Publisher, I: Inspector> Core<P, I> {
     }
 
     fn mode_view(&self, mode: PipelineMode) -> ModeView {
-        let state = match mode {
-            PipelineMode::Remux => &self.remux,
-            PipelineMode::Extract => &self.extract,
-        };
+        let state = self.state(mode);
         let job = self
             .snapshot
             .as_ref()
@@ -820,6 +1015,11 @@ impl<P: Publisher, I: Inspector> Core<P, I> {
         }
         self.last_published.seq += 1;
         self.last_published.job = job;
+        self.last_published.run = RunView {
+            phase: self.coordinator.phase(),
+            mode: self.coordinator.owner(),
+            settings: self.run_settings.clone(),
+        };
         self.last_published.defaults.clone_from(&self.defaults);
         self.last_published
             .remux
@@ -833,6 +1033,21 @@ impl<P: Publisher, I: Inspector> Core<P, I> {
         self.last_published_at = Some(Instant::now());
         self.publisher.state(&self.last_published);
     }
+
+    fn set_outcome(&mut self, mode: PipelineMode, outcome: Option<Outcome>) {
+        let state = self.mode(mode);
+        if state.outcome != outcome {
+            state.outcome = outcome;
+            self.touch(mode);
+        }
+    }
+}
+
+/// The mode a Job Snapshot or `job-done` names.
+fn mode_of(name: &str) -> Option<PipelineMode> {
+    [PipelineMode::Remux, PipelineMode::Extract]
+        .into_iter()
+        .find(|&mode| mode_name(mode) == name)
 }
 
 /// A change to a mode's queue, as an Intent asks it.
@@ -852,6 +1067,7 @@ mod tests {
         batch_complete, batch_start, effective_settings, item_complete, item_progress, item_start,
     };
     use crate::snapshot::ItemStatus;
+    use mkv_core::request::BatchRequest;
     use serde_json::Value;
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -859,25 +1075,25 @@ mod tests {
 
     /// One thing the actor published, dones as JSON.
     #[derive(Debug, Clone)]
-    enum Published {
+    pub(super) enum Published {
         State(Box<ViewState>),
         Logs(Vec<LogLine>),
         Done(Value),
     }
 
     #[derive(Clone, Default)]
-    struct RecordingPublisher {
+    pub(super) struct RecordingPublisher {
         published: Arc<Mutex<Vec<Published>>>,
         /// Notified on every state publication.
-        stated: Arc<Notify>,
+        pub(super) stated: Arc<Notify>,
     }
 
     impl RecordingPublisher {
-        fn all(&self) -> Vec<Published> {
+        pub(super) fn all(&self) -> Vec<Published> {
             self.published.lock().unwrap().clone()
         }
 
-        fn states(&self) -> Vec<ViewState> {
+        pub(super) fn states(&self) -> Vec<ViewState> {
             self.all()
                 .into_iter()
                 .filter_map(|published| match published {
@@ -910,10 +1126,19 @@ mod tests {
 
     /// A core whose defaults are known from the start, so they publish nothing of their own.
     fn ready<P: Publisher, I: Inspector>(publisher: P, inspector: I) -> CoreHandle {
+        ready_with(publisher, inspector, FakeLauncher::default())
+    }
+
+    pub(super) fn ready_with<P: Publisher, I: Inspector, L: Launcher>(
+        publisher: P,
+        inspector: I,
+        launcher: L,
+    ) -> CoreHandle {
         Core::start(
             Handle::current(),
             publisher,
             inspector,
+            launcher,
             Some(effective_settings()),
         )
     }
@@ -934,7 +1159,7 @@ mod tests {
         }
     }
 
-    fn done(job_id: u64, code: i32) -> JobDone {
+    pub(super) fn done(job_id: u64, code: i32) -> JobDone {
         JobDone {
             mode: "remux",
             job_id,
@@ -1211,8 +1436,14 @@ mod tests {
                 offset_ms: Some(-250),
             },
         );
+        remux.outcome = Some(Outcome::Failed);
         let state = ViewState {
             seq: 3,
+            run: RunView {
+                phase: Phase::Running,
+                mode: Some(REMUX),
+                settings: Some(effective_settings()),
+            },
             job: Some(JobView {
                 job_id: 7,
                 mode: "remux".into(),
@@ -1252,6 +1483,17 @@ mod tests {
                     },
                     "participants": ["ep2", "ep1"]
                 },
+                "run": {
+                    "phase": "running",
+                    "mode": "remux",
+                    "settings": {
+                        "workers": 3,
+                        "io_jobs": 5,
+                        "ffmpeg_threads": 2,
+                        "bitrate": "256k",
+                        "complexity": 8
+                    }
+                },
                 "defaults": serde_json::to_value(EffectiveSettings::defaults()).unwrap(),
                 "presets": [
                     { "id": "balanced", "name": "Balanced", "bitrate": "192k", "complexity": 5 }
@@ -1273,7 +1515,8 @@ mod tests {
                         }
                     },
                     // The draft has its own pin: `draft::tests::test_draft_wire_shape`.
-                    "draft": serde_json::to_value(SettingsDraft::new(REMUX)).unwrap()
+                    "draft": serde_json::to_value(SettingsDraft::new(REMUX)).unwrap(),
+                    "outcome": "failed"
                 },
                 "extract": {
                     "directory": null,
@@ -1285,14 +1528,29 @@ mod tests {
                     "assignments": {},
                     "draft": {
                         "input_dir": "", "out_dir": "", "fonts_dir": "", "workers": "",
-                        "io_jobs": "", "dry_run": false, "no_cache": false
-                    }
+                        "io_jobs": "", "dry_run": false, "no_cache": false, "invalid": null
+                    },
+                    "outcome": null
                 }
             })
         );
         let idle = serde_json::to_value(ViewState::new(None)).unwrap();
         assert_eq!(idle["job"], Value::Null);
         assert_eq!(idle["defaults"], Value::Null);
+        assert_eq!(
+            idle["run"],
+            serde_json::json!({ "phase": "idle", "mode": null, "settings": null })
+        );
+        for (outcome, wire) in [
+            (Outcome::Done, "done"),
+            (Outcome::Cancelled, "cancelled"),
+            (Outcome::Failed, "failed"),
+        ] {
+            assert_eq!(serde_json::to_value(outcome).unwrap(), wire);
+        }
+        for (phase, wire) in [(Phase::Starting, "starting"), (Phase::Stopping, "stopping")] {
+            assert_eq!(serde_json::to_value(phase).unwrap(), wire);
+        }
         assert_eq!(
             idle["remux"]["scan"],
             serde_json::json!({ "state": "idle" })
@@ -1396,6 +1654,14 @@ mod tests {
                 preset: "fast".into(),
             }
         );
+        assert_eq!(
+            intent(serde_json::json!({ "type": "run", "mode": "extract" })),
+            Intent::Run { mode: EXTRACT }
+        );
+        assert_eq!(
+            intent(serde_json::json!({ "type": "stop", "mode": "remux" })),
+            Intent::Stop { mode: REMUX }
+        );
         assert!(serde_json::from_value::<Intent>(serde_json::json!({
             "type": "reorder", "mode": "remux", "id": "ep1", "direction": "left"
         }))
@@ -1403,7 +1669,7 @@ mod tests {
     }
 
     /// A Track Assignment of `path` to `id`, with no language.
-    fn subtitle(id: &str, path: &str, title: Option<&str>) -> TrackAssignment {
+    pub(super) fn subtitle(id: &str, path: &str, title: Option<&str>) -> TrackAssignment {
         TrackAssignment {
             target_video: id.into(),
             asset_path: path.into(),
@@ -1418,16 +1684,16 @@ mod tests {
     /// resolves to itself less any trailing `/` or `/.`, after `slow` when it is `/slow`; a
     /// directory without a scripted manifest fails to inspect.
     #[derive(Clone, Default)]
-    struct FakeInspector {
-        manifests: Arc<Mutex<HashMap<String, InspectionManifest>>>,
+    pub(super) struct FakeInspector {
+        pub(super) manifests: Arc<Mutex<HashMap<String, InspectionManifest>>>,
         inspected: Arc<Mutex<Vec<(String, bool)>>>,
     }
 
-    const SLOW: Duration = Duration::from_millis(500);
-    const INSPECTION: Duration = Duration::from_millis(200);
+    pub(super) const SLOW: Duration = Duration::from_millis(500);
+    pub(super) const INSPECTION: Duration = Duration::from_millis(200);
 
     impl FakeInspector {
-        fn with(self, directory: &str, manifest: InspectionManifest) -> Self {
+        pub(super) fn with(self, directory: &str, manifest: InspectionManifest) -> Self {
             self.manifests
                 .lock()
                 .unwrap()
@@ -1435,7 +1701,7 @@ mod tests {
             self
         }
 
-        fn inspected(&self) -> Vec<(String, bool)> {
+        pub(super) fn inspected(&self) -> Vec<(String, bool)> {
             self.inspected.lock().unwrap().clone()
         }
     }
@@ -1468,7 +1734,7 @@ mod tests {
         }
     }
 
-    fn scan(mode: PipelineMode, path: &str, force: bool) -> Intent {
+    pub(super) fn scan(mode: PipelineMode, path: &str, force: bool) -> Intent {
         Intent::ScanDirectory {
             mode,
             path: path.into(),
@@ -1477,8 +1743,8 @@ mod tests {
         }
     }
 
-    const REMUX: PipelineMode = PipelineMode::Remux;
-    const EXTRACT: PipelineMode = PipelineMode::Extract;
+    pub(super) const REMUX: PipelineMode = PipelineMode::Remux;
+    pub(super) const EXTRACT: PipelineMode = PipelineMode::Extract;
 
     /// A core over `inspector` whose `/anime` holds `ep1` and `ep2`, and `/fast` and `/slow` one
     /// episode each.
@@ -1497,7 +1763,7 @@ mod tests {
         ModeState::new(mode).view(None)
     }
 
-    fn ids(view: &ModeView) -> Vec<&str> {
+    pub(super) fn ids(view: &ModeView) -> Vec<&str> {
         view.rows.iter().map(|row| row.id.as_str()).collect()
     }
 
@@ -1974,11 +2240,11 @@ mod tests {
         }
     }
 
-    fn edit(mode: PipelineMode, changes: DraftChanges) -> Intent {
+    pub(super) fn edit(mode: PipelineMode, changes: DraftChanges) -> Intent {
         Intent::EditDraft { mode, changes }
     }
 
-    fn set_preset(mode: PipelineMode, preset: &str) -> Intent {
+    pub(super) fn set_preset(mode: PipelineMode, preset: &str) -> Intent {
         Intent::SetPreset {
             mode,
             preset: preset.into(),
@@ -2113,6 +2379,7 @@ mod tests {
             Handle::current(),
             publisher.clone(),
             FakeInspector::default(),
+            FakeLauncher::default(),
         );
         // Read on the blocking pool after the spawn, then published at once: each publication
         // wakes the wait, and the timeout only bounds a hang.
@@ -2135,5 +2402,105 @@ mod tests {
             core.state().await.unwrap().defaults,
             Some(EffectiveSettings::defaults())
         );
+    }
+
+    /// What a `FakeLauncher` was told, and how it answers.
+    #[derive(Default)]
+    pub(super) struct LauncherScript {
+        /// Each call, in order: `resolve`, `launch`, `stop None` or `stop Some(id)`.
+        calls: Vec<String>,
+        launched: Vec<BatchRequest>,
+        pub(super) resolve_error: Option<String>,
+        pub(super) launch_error: Option<String>,
+        pub(super) stop_error: Option<String>,
+        /// Ends each job with this `job-done` code before its launch returns.
+        pub(super) end_at_launch: Option<i32>,
+        /// The jobs still running: ID, mode and sink.
+        pub(super) jobs: Vec<(u64, &'static str, ActorSink)>,
+        next_id: u64,
+    }
+
+    /// A `Launcher` that answers from a script, after a delay on the paused clock. A launched job
+    /// runs until the test ends it or a Stop does, which ends it cancelled before the Stop
+    /// settles, as the supervisor's `done` precedes the slot release.
+    #[derive(Clone, Default)]
+    pub(super) struct FakeLauncher(Arc<Mutex<LauncherScript>>);
+
+    pub(super) const RESOLVE: Duration = Duration::from_millis(100);
+    pub(super) const LAUNCH: Duration = Duration::from_millis(100);
+    pub(super) const STOP: Duration = Duration::from_millis(50);
+
+    impl FakeLauncher {
+        pub(super) fn script(&self) -> std::sync::MutexGuard<'_, LauncherScript> {
+            self.0.lock().unwrap()
+        }
+
+        pub(super) fn calls(&self) -> Vec<String> {
+            self.script().calls.clone()
+        }
+
+        pub(super) fn launched(&self) -> Vec<BatchRequest> {
+            self.script().launched.clone()
+        }
+
+        /// Ends the running job with `code`, as its supervisor would.
+        pub(super) fn end_job(&self, code: i32) {
+            let (job_id, mode, sink) = self.script().jobs.remove(0);
+            sink.done(&JobDone { mode, job_id, code });
+        }
+    }
+
+    impl Launcher for FakeLauncher {
+        async fn resolve(&self, _request: BatchRequest) -> Result<EffectiveSettings, String> {
+            self.script().calls.push("resolve".into());
+            tokio::time::sleep(RESOLVE).await;
+            match self.script().resolve_error.clone() {
+                Some(error) => Err(error),
+                None => Ok(effective_settings()),
+            }
+        }
+
+        async fn launch(&self, request: BatchRequest, sink: ActorSink) -> Result<u64, String> {
+            self.script().calls.push("launch".into());
+            tokio::time::sleep(LAUNCH).await;
+            let mut script = self.script();
+            if let Some(error) = script.launch_error.clone() {
+                return Err(error);
+            }
+            script.next_id += 1;
+            let job_id = script.next_id;
+            let mode = mode_name(request.mode);
+            sink.started(&JobStarted {
+                job_id,
+                mode,
+                input_dir: request.input_dir.to_string_lossy().into_owned(),
+                effective_settings: effective_settings(),
+                start_time_ms: 1_700_000_000_000,
+            });
+            script.launched.push(request);
+            match script.end_at_launch {
+                Some(code) => sink.done(&JobDone { mode, job_id, code }),
+                None => script.jobs.push((job_id, mode, sink)),
+            }
+            Ok(job_id)
+        }
+
+        async fn stop(&self, job_id: Option<u64>) -> Result<(), String> {
+            self.script().calls.push(format!("stop {job_id:?}"));
+            tokio::time::sleep(STOP).await;
+            let mut script = self.script();
+            if let Some(error) = script.stop_error.clone() {
+                return Err(error);
+            }
+            if let Some(at) = script.jobs.iter().position(|job| Some(job.0) == job_id) {
+                let (job_id, mode, sink) = script.jobs.remove(at);
+                sink.done(&JobDone {
+                    mode,
+                    job_id,
+                    code: -1,
+                });
+            }
+            Ok(())
+        }
     }
 }

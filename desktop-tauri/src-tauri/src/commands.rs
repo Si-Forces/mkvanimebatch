@@ -1,27 +1,8 @@
-use mkv_core::request::{BatchRequest, EffectiveSettings};
 use mkv_desktop_core::actor::{CoreHandle, Intent, ViewState};
-use mkv_desktop_core::control::{launch, resolve_canonical, InspectCacheState};
-use mkv_desktop_core::job::JobState;
+use mkv_desktop_core::control::InspectCacheState;
 use tauri::State;
 
 pub(crate) const CLEANUP_ERROR: &str = "cleanup-error";
-
-/// The Effective Settings `run_job` would run `request` with, or the reason it would refuse it.
-/// Synchronous and slot-free, so the UI can check a request before it starts its preflight scan.
-#[tauri::command]
-pub fn resolve_batch_request(request: BatchRequest) -> Result<EffectiveSettings, String> {
-    resolve_canonical(request).map(|config| config.effective_settings())
-}
-
-#[tauri::command]
-pub fn run_job(
-    state: State<'_, JobState>,
-    core: State<'_, CoreHandle>,
-    cache_state: State<'_, InspectCacheState>,
-    request: BatchRequest,
-) -> Result<u64, String> {
-    launch(&state, core.job_sink(), &cache_state, request)
-}
 
 #[tauri::command]
 pub async fn clear_cache(cache_state: State<'_, InspectCacheState>) -> Result<String, String> {
@@ -63,88 +44,26 @@ mod tests {
     use super::*;
     use crate::publisher::WebviewPublisher;
     use mkv_desktop_core::actor::Core;
+    use mkv_desktop_core::control::{EngineLauncher, ScanState};
     use mkv_desktop_core::inspection::EngineInspector;
     use std::sync::Arc;
     use tauri::Manager;
 
-    /// A dry-run extract request of `input_dir` that sets nothing else.
-    fn dry_run_request(input_dir: &std::path::Path) -> BatchRequest {
-        BatchRequest {
-            mode: mkv_core::pipeline::PipelineMode::Extract,
-            input_dir: input_dir.to_path_buf(),
-            dry_run: Some(true),
-            no_cache: Some(true),
-            ..Default::default()
-        }
-    }
-
-    /// The View State's `defaults` are what a run of an empty form resolves to.
-    #[test]
-    fn test_default_settings_match_a_resolved_empty_request() {
-        let tmp = tempfile::tempdir().unwrap();
-        let defaults = EffectiveSettings::defaults();
-        assert_eq!(
-            resolve_batch_request(dry_run_request(tmp.path())),
-            Ok(defaults.clone())
-        );
-        // `BatchRequest::resolve` accepts 1-64; the default is clamped to 1-16.
-        assert!(
-            (1..=16).contains(&defaults.workers),
-            "workers out of range: {}",
-            defaults.workers
-        );
-    }
-
-    #[test]
-    fn test_resolve_batch_request_layers_explicit_values_over_the_defaults() {
-        let tmp = tempfile::tempdir().unwrap();
-        let settings = resolve_batch_request(BatchRequest {
-            workers: Some(3),
-            io_jobs: Some(0),
-            ffmpeg_threads: Some(2),
-            bitrate: Some(" 256k ".into()),
-            complexity: Some(8),
-            ..dry_run_request(tmp.path())
-        })
-        .unwrap();
-        // An explicit `io_jobs` of 0 is the worker count.
-        assert_eq!(
-            settings,
-            EffectiveSettings {
-                workers: 3,
-                io_jobs: 3,
-                ffmpeg_threads: 2,
-                bitrate: "256k".into(),
-                complexity: 8,
-            }
-        );
-    }
-
-    #[test]
-    fn test_resolve_batch_request_reports_the_first_validation_error() {
-        let tmp = tempfile::tempdir().unwrap();
-        let error = resolve_batch_request(BatchRequest {
-            workers: Some(0),
-            io_jobs: Some(65),
-            ..dry_run_request(tmp.path())
-        })
-        .unwrap_err();
-        assert_eq!(error, "Worker thread count must be between 1 and 64");
-
-        let missing = tmp.path().join("missing");
-        let error = resolve_batch_request(dry_run_request(&missing)).unwrap_err();
-        assert!(error.contains("Input directory does not exist"), "{error}");
-    }
-
     #[test]
     fn test_dispatch_scans_a_directory_into_the_published_state() {
         let app = tauri::test::mock_app();
+        let (scan, cache) = (Arc::new(ScanState::default()), InspectCacheState::default());
         app.manage(Core::spawn(
             tauri::async_runtime::handle().inner().clone(),
             WebviewPublisher(app.handle().clone()),
             EngineInspector {
-                scan: Arc::default(),
-                cache: InspectCacheState::default(),
+                scan: Arc::clone(&scan),
+                cache: cache.clone(),
+            },
+            EngineLauncher {
+                job: mkv_desktop_core::job::test_support::job_state(),
+                scan,
+                cache,
             },
         ));
         let tmp = tempfile::tempdir().unwrap();

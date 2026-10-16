@@ -1,11 +1,13 @@
 //! The Settings Draft of each mode (ADR-0016): the values of its settings form, held as typed, so a
-//! view only mirrors them. Edits arrive as Intents; nothing is parsed until a run reads them, and
-//! nothing is persisted.
+//! view only mirrors them. Edits arrive as Intents; nothing is parsed until a run builds its
+//! `BatchRequest` from them, and nothing is persisted.
 
 use mkv_core::pipeline::PipelineMode;
 use mkv_core::preset::require_preset;
-use mkv_core::request::DEFAULT_PRESET_ID;
+use mkv_core::request::{seconds_to_ms, BatchRequest, DEFAULT_PRESET_ID};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use std::str::FromStr;
 
 /// The Preset Profile a hand-edited encode is labelled with.
 const CUSTOM_PRESET: &str = "custom";
@@ -36,7 +38,13 @@ pub struct SettingsDraft {
     pub ffmpeg_threads: Option<String>,
     pub dry_run: bool,
     pub no_cache: bool,
+    /// The field (its wire name) the last Run could not read, which a view flags: set by a Run
+    /// that fails to build its request, cleared by the next edit of that field or the next Run.
+    pub invalid: Option<&'static str>,
 }
+
+/// Why a draft builds no request: the field (its wire name) and the error text.
+pub type DraftError = (&'static str, String);
 
 /// The fields an `EditDraft` Intent sets; each one left out stays as it is. The preset is set by
 /// `SetPreset` alone.
@@ -89,6 +97,7 @@ impl SettingsDraft {
             ffmpeg_threads: remux.then(String::new),
             dry_run: false,
             no_cache: false,
+            invalid: None,
         }
     }
 
@@ -110,6 +119,17 @@ impl SettingsDraft {
             dry_run,
             no_cache,
         } = changes;
+        // Editing the flagged field clears the flag, whatever the new value.
+        let edited = |field: &str| match field {
+            "input_dir" => input_dir.is_some(),
+            "sub_offset" => sub_offset.is_some(),
+            "complexity" => complexity.is_some(),
+            "workers" => workers.is_some(),
+            "io_jobs" => io_jobs.is_some(),
+            "ffmpeg_threads" => ffmpeg_threads.is_some(),
+            _ => false,
+        };
+        let unflag = self.invalid.is_some_and(edited);
         let encode = (self.bitrate.clone(), self.complexity.clone());
         // A field that is `None` is one the mode lacks: an extract draft has none of these.
         let remux_only = [
@@ -126,7 +146,10 @@ impl SettingsDraft {
             return Err(format!("Extract has no {name} setting."));
         }
 
-        let mut changed = false;
+        let mut changed = unflag;
+        if unflag {
+            self.invalid = None;
+        }
         for (_, field, value) in remux_only {
             if let Some(field) = field {
                 changed |= replace(field, value);
@@ -164,9 +187,85 @@ impl SettingsDraft {
             changed |= self.bitrate != bitrate || self.complexity != complexity;
             self.bitrate = bitrate;
             self.complexity = complexity;
+            // The profile replaced a flagged complexity.
+            if self.invalid == Some("complexity") {
+                self.invalid = None;
+                changed = true;
+            }
         }
         Ok(changed)
     }
+
+    /// The `BatchRequest` a Run of `mode` sends, before preflight sets its Queue Selection and
+    /// Track Assignments. Every value is trimmed and an empty one is unset; the sub-offset is read
+    /// as seconds, and the counts as whole numbers. Extract sends no preset.
+    pub fn request(&self, mode: PipelineMode) -> Result<BatchRequest, DraftError> {
+        let input_dir = self.input_dir.trim();
+        if input_dir.is_empty() {
+            return Err(("input_dir", "Input directory is required.".into()));
+        }
+        let default_sub_offset_ms = match text(self.sub_offset.as_deref()) {
+            None => None,
+            Some(raw) => match raw.parse().ok().and_then(seconds_to_ms) {
+                Some(ms) => Some(ms),
+                None => {
+                    let message = format!(
+                        "Invalid sub-offset value '{raw}': must be a number of seconds within range."
+                    );
+                    return Err(("sub_offset", message));
+                }
+            },
+        };
+        let path = |value: Option<&str>| text(value).map(PathBuf::from);
+        Ok(BatchRequest {
+            mode,
+            input_dir: input_dir.into(),
+            out_dir: path(Some(&self.out_dir)),
+            fonts_dir: path(Some(&self.fonts_dir)),
+            assets_dir: path(self.assets_dir.as_deref()),
+            preset: self.preset.clone(),
+            bitrate: text(self.bitrate.as_deref()).map(str::to_string),
+            complexity: whole(
+                self.complexity.as_deref(),
+                "complexity",
+                "encoder complexity",
+            )?,
+            workers: whole(Some(&self.workers), "workers", "workers")?,
+            io_jobs: whole(Some(&self.io_jobs), "io_jobs", "Disk I/O")?,
+            ffmpeg_threads: whole(
+                self.ffmpeg_threads.as_deref(),
+                "ffmpeg_threads",
+                "FFmpeg threads",
+            )?,
+            default_sub_offset_ms,
+            dry_run: Some(self.dry_run),
+            no_cache: Some(self.no_cache),
+            assignments: None,
+            selected_items: None,
+        })
+    }
+}
+
+/// `value` trimmed, or `None` when the mode lacks the field or it is empty.
+fn text(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+/// `value` as a whole number, or `None` when it is empty; `label` is the field as the form
+/// names it.
+fn whole<T: FromStr>(
+    value: Option<&str>,
+    field: &'static str,
+    label: &str,
+) -> Result<Option<T>, DraftError> {
+    text(value)
+        .map(|raw| {
+            raw.parse().map_err(|_| {
+                let message = format!("Invalid {label} value '{raw}': must be a whole number.");
+                (field, message)
+            })
+        })
+        .transpose()
 }
 
 #[cfg(test)]
@@ -297,14 +396,14 @@ mod tests {
                 "input_dir": "", "out_dir": "", "fonts_dir": "", "assets_dir": "",
                 "preset": "balanced", "bitrate": "192k", "complexity": "5", "sub_offset": "0",
                 "workers": "", "io_jobs": "", "ffmpeg_threads": "",
-                "dry_run": false, "no_cache": false
+                "dry_run": false, "no_cache": false, "invalid": null
             })
         );
         assert_eq!(
             serde_json::to_value(SettingsDraft::new(PipelineMode::Extract)).unwrap(),
             serde_json::json!({
                 "input_dir": "", "out_dir": "", "fonts_dir": "", "workers": "", "io_jobs": "",
-                "dry_run": false, "no_cache": false
+                "dry_run": false, "no_cache": false, "invalid": null
             })
         );
         let changes: DraftChanges =
@@ -325,5 +424,181 @@ mod tests {
         ] {
             assert!(serde_json::from_value::<DraftChanges>(json).is_err());
         }
+    }
+
+    /// A remux draft of `/anime` with `changes` applied.
+    fn typed(changes: DraftChanges) -> SettingsDraft {
+        let mut draft = remux();
+        draft
+            .edit(DraftChanges {
+                input_dir: Some(" /anime ".into()),
+                ..changes
+            })
+            .unwrap();
+        draft
+    }
+
+    #[test]
+    fn test_a_request_trims_every_value_and_unsets_the_empty_ones() {
+        let draft = typed(DraftChanges {
+            out_dir: Some(" /out ".into()),
+            fonts_dir: Some("  ".into()),
+            assets_dir: Some("/subs".into()),
+            bitrate: Some(" 256k ".into()),
+            complexity: Some(" 8 ".into()),
+            sub_offset: Some(" 1.5 ".into()),
+            workers: Some("6".into()),
+            io_jobs: Some("0".into()),
+            ffmpeg_threads: Some("4".into()),
+            no_cache: Some(true),
+            ..DraftChanges::default()
+        });
+        assert_eq!(
+            draft.request(PipelineMode::Remux),
+            Ok(BatchRequest {
+                mode: PipelineMode::Remux,
+                input_dir: "/anime".into(),
+                out_dir: Some("/out".into()),
+                fonts_dir: None,
+                assets_dir: Some("/subs".into()),
+                preset: Some("custom".into()),
+                bitrate: Some("256k".into()),
+                complexity: Some(8),
+                // An explicit 0 is kept: the engine expands it to the worker count.
+                io_jobs: Some(0),
+                workers: Some(6),
+                ffmpeg_threads: Some(4),
+                default_sub_offset_ms: Some(1500),
+                dry_run: Some(false),
+                no_cache: Some(true),
+                assignments: None,
+                selected_items: None,
+            })
+        );
+        // Empty counts are unset, so the engine's defaults apply.
+        let request = typed(DraftChanges::default())
+            .request(PipelineMode::Remux)
+            .unwrap();
+        assert_eq!(request.preset.as_deref(), Some("balanced"));
+        assert_eq!((request.workers, request.io_jobs), (None, None));
+        assert_eq!(request.ffmpeg_threads, None);
+        // Extract has no remux settings, and sends no preset.
+        let mut extract = SettingsDraft::new(PipelineMode::Extract);
+        extract.input_dir = "/anime".into();
+        let request = extract.request(PipelineMode::Extract).unwrap();
+        assert_eq!(
+            request,
+            BatchRequest {
+                mode: PipelineMode::Extract,
+                input_dir: "/anime".into(),
+                dry_run: Some(false),
+                no_cache: Some(false),
+                ..BatchRequest::default()
+            }
+        );
+    }
+
+    #[test]
+    fn test_an_empty_input_directory_builds_no_request() {
+        for input_dir in ["", "   "] {
+            let mut draft = remux();
+            draft.input_dir = input_dir.into();
+            assert_eq!(
+                draft.request(PipelineMode::Remux),
+                Err(("input_dir", "Input directory is required.".into()))
+            );
+        }
+    }
+
+    #[test]
+    fn test_the_sub_offset_is_whole_milliseconds_rounded_half_away_from_zero() {
+        for (seconds, expected) in [
+            ("1.5", Some(1500)),
+            ("-0.5", Some(-500)),
+            ("0", Some(0)),
+            ("-0", Some(0)),
+            ("", None),
+            ("0.0005", Some(1)),
+            ("-0.0005", Some(-1)),
+            // 1e18 ms fits i64, so the CLI and now the desktop accept it.
+            ("1e15", Some(1_000_000_000_000_000_000)),
+            ("-1e15", Some(-1_000_000_000_000_000_000)),
+        ] {
+            let draft = typed(DraftChanges {
+                sub_offset: Some(seconds.into()),
+                ..DraftChanges::default()
+            });
+            let request = draft.request(PipelineMode::Remux).unwrap();
+            assert_eq!(request.default_sub_offset_ms, expected, "{seconds:?}");
+        }
+    }
+
+    #[test]
+    fn test_a_sub_offset_that_is_no_number_of_seconds_in_range_builds_no_request() {
+        for seconds in ["abc", "1e300", "1e400", "inf", "NaN"] {
+            let draft = typed(DraftChanges {
+                sub_offset: Some(format!(" {seconds} ")),
+                ..DraftChanges::default()
+            });
+            let message = format!(
+                "Invalid sub-offset value '{seconds}': must be a number of seconds within range."
+            );
+            assert_eq!(
+                draft.request(PipelineMode::Remux),
+                Err(("sub_offset", message))
+            );
+        }
+    }
+
+    #[test]
+    fn test_a_count_that_is_no_whole_number_builds_no_request() {
+        let cases = [
+            ("complexity", "encoder complexity"),
+            ("workers", "workers"),
+            ("io_jobs", "Disk I/O"),
+            ("ffmpeg_threads", "FFmpeg threads"),
+        ];
+        for (field, label) in cases {
+            for raw in ["2.5", "-1", "abc", "1e3"] {
+                let mut draft = typed(DraftChanges::default());
+                let value = Some(raw.to_string());
+                match field {
+                    "complexity" => draft.complexity = value,
+                    "workers" => draft.workers = raw.into(),
+                    "io_jobs" => draft.io_jobs = raw.into(),
+                    _ => draft.ffmpeg_threads = value,
+                }
+                let message = format!("Invalid {label} value '{raw}': must be a whole number.");
+                assert_eq!(draft.request(PipelineMode::Remux), Err((field, message)));
+            }
+        }
+    }
+
+    #[test]
+    fn test_the_flag_clears_on_the_next_edit_of_its_field_only() {
+        let mut draft = typed(DraftChanges::default());
+        draft.invalid = Some("workers");
+        let other = DraftChanges {
+            io_jobs: Some("2".into()),
+            ..DraftChanges::default()
+        };
+        assert_eq!(draft.edit(other), Ok(true));
+        assert_eq!(draft.invalid, Some("workers"));
+        // Even an edit that leaves the value as it was clears it, and answers that it changed.
+        let same = DraftChanges {
+            workers: Some(String::new()),
+            ..DraftChanges::default()
+        };
+        assert_eq!(draft.edit(same.clone()), Ok(true));
+        assert_eq!(draft.invalid, None);
+        assert_eq!(draft.edit(same), Ok(false));
+
+        // A profile replaces a flagged complexity; custom keeps it.
+        draft.invalid = Some("complexity");
+        assert_eq!(draft.set_preset("custom"), Ok(true));
+        assert_eq!(draft.invalid, Some("complexity"));
+        assert_eq!(draft.set_preset("custom"), Ok(false));
+        assert_eq!(draft.set_preset("balanced"), Ok(true));
+        assert_eq!(draft.invalid, None);
     }
 }

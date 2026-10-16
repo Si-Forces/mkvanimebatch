@@ -179,6 +179,10 @@ impl JobState {
                 supervisor_cancel.is_cancelled(),
                 &sink,
             );
+            // Load-bearing order: `finish` sends `done` here, before `_slot_guard` drops at the
+            // end of this block and releases the Job Slot. A Stop waits for that release, so the
+            // actor always has this job's `Done` in its inbox before the Stop's `StopSettled`,
+            // and `get_state` right after a Stop's answer shows the job ended.
             finish(&sink, &mut ledger, mode, job_id, terminal);
         });
 

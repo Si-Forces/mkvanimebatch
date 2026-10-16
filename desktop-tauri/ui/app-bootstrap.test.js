@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { RING_CIRCUMFERENCE } from "./queue-view.js";
-import { DEFAULTS as DEFAULT_SETTINGS, createFakeCore, draft, jobView, modeView, row } from "./fake-core.js";
+import { createFakeCore, draft, jobView, modeView, row } from "./fake-core.js";
 
 class BootElement {
   constructor(value = "") {
@@ -25,6 +25,7 @@ class BootElement {
     this.handlers.set(name, prior ? (...args) => { prior(...args); return handler(...args); } : handler);
   }
   setAttribute() {}
+  focus() {}
   getAttribute() { return null; }
   appendChild(child) {
     if (child.fragment) this.children.push(...child.children);
@@ -107,13 +108,11 @@ function bootstrapHarness(t, answers = {}, { onListen = () => {} } = {}) {
       core: { invoke: async (command, args) => {
         calls.push([command, args]);
         if (command in answers) return answers[command];
-        if (command === "resolve_batch_request") return DEFAULT_SETTINGS;
         if (command === "get_state" && !booted) {
           booted = true;
           stateRequested();
           await stateGate;
         }
-        if (command === "run_job") return 42;
         return core.invoke(command, args);
       } },
       event: { listen: async (name, handler) => {
@@ -151,9 +150,13 @@ function bootstrapHarness(t, answers = {}, { onListen = () => {} } = {}) {
 /** What the running job of `activeJob` runs with: nothing like `DEFAULT_SETTINGS`. */
 const JOB_SETTINGS = { workers: 3, io_jobs: 5, ffmpeg_threads: 2, bitrate: "256k", complexity: 8 };
 
+/** The outcome a finished job of `status` leaves its mode with. */
+const OUTCOMES = { completed: "done", cancelled: "cancelled", error: "failed" };
+
 /**
- * Puts running remux job 42 over "two" (done) and "one" (70%) in `core`, as a reload finds it: the
- * rows the Job Snapshot lists, which the reloaded queue's manifest does not.
+ * Puts remux job 42 over "two" (done) and "one" (70%) in `core`, as a reload finds it: the rows
+ * the Job Snapshot lists, which the reloaded queue's manifest does not. A running one owns the
+ * Job Coordinator; a finished one left its outcome.
  */
 function activeJob(core, status = "running") {
   const jobOnly = (id, fields) => row(id, { name: `${id}.mkv`, release: "", metadata: null, in_manifest: false, participant: true, ...fields });
@@ -165,29 +168,24 @@ function activeJob(core, status = "running") {
     jobOnly("one", status === "running"
       ? { status: "processing", progress: 70, start_time_ms: Date.now() - 1500 }
       : { status: "completed", duration_sec: 8.4 }),
-  ], { directory: "/anime/show", manifest_rev: 1 });
+  ], { directory: "/anime/show", manifest_rev: 1, outcome: OUTCOMES[status] ?? null });
+  if (status === "running") core.state.run = { phase: "running", mode: "remux", settings: JOB_SETTINGS };
   core.state.seq = 5;
 }
 
 /** Ends job 42 in `core` as `status`, settling its open rows, and publishes the state it ended in. */
 function settleJob(core, status) {
-  Object.assign(core.state.job, { status, active: false });
   for (const entry of core.state.remux.rows) {
     if (entry.status === "processing") entry.status = status === "cancelled" ? "cancelled" : "completed";
   }
-  core.publish();
+  core.end(OUTCOMES[status], status);
 }
 
-/** Ends job 42 as the core does: the state it ended in first, then its `job-done`. */
-function endJob(ipc, status, code) {
-  settleJob(ipc.core, status);
-  ipc.emit("job-done", { job_id: 42, mode: "remux", code });
-}
-
-test("boot listens to view-state, renders the running job get_state holds, adopts it and targets Stop with its ID", async t => {
+test("boot listens to view-state and job-log, renders the running job get_state holds, and Stop stops its mode", async t => {
   const ipc = bootstrapHarness(t);
   await ipc.mount("active");
   assert.ok(ipc.handlers.has("view-state"), "view-state is bound before get_state");
+  assert.ok(ipc.handlers.has("job-log"), "job-log is bound before get_state");
   assert.equal(ipc.handlers.has("job-event"), false);
   activeJob(ipc.core);
   ipc.resolveState();
@@ -205,32 +203,16 @@ test("boot listens to view-state, renders the running job get_state holds, adopt
   ipc.core.publish();
   assert.equal(list.children[1].querySelector(".ep-ring-arc").style.strokeDashoffset, (RING_CIRCUMFERENCE * 0.15).toFixed(2));
 
-  ipc.emit("job-done", { job_id: 40, mode: "remux", code: 0 });
-  assert.equal(ipc.elements.get("remux-stop").disabled, false);
+  assert.match(ipc.elements.get("remux-status").innerHTML, /Running/);
+  // The page no longer listens to job-done: the published outcome ends the job.
+  assert.equal(ipc.handlers.has("job-done"), false);
+  // The fake core ends the job at Stop; its row ends with it, as the job's own events settle it.
+  ipc.core.state.remux.rows[1].status = "cancelled";
   await ipc.elements.get("remux-stop").handlers.get("click")();
-  assert.deepEqual(ipc.calls.find(([command]) => command === "stop_job"), ["stop_job", { jobId: 42 }]);
-  endJob(ipc, "cancelled", -1);
+  assert.deepEqual(ipc.core.intents.at(-1), { type: "stop", mode: "remux" });
   assert.match(ipc.elements.get("remux-status").innerHTML, /Cancelled/);
   assert.equal(ipc.elements.get("remux-stop").disabled, true);
-  assert.deepEqual(ipc.removed, ["job-done"]);
-});
-
-test("a job that ends while boot binds its job-done ends on the state read after it, once", async t => {
-  let ipc;
-  ipc = bootstrapHarness(t, {}, {
-    onListen: name => {
-      // The job ends, and its job-done goes out, before the listener exists.
-      if (name === "job-done") settleJob(ipc.core, "completed");
-    },
-  });
-  await ipc.mount("early-done");
-  activeJob(ipc.core);
-  ipc.resolveState();
-  await ipc.flush();
-  assert.match(ipc.elements.get("remux-status").innerHTML, /Done/);
-  assert.equal(ipc.elements.get("remux-stop").disabled, true);
   assert.equal(ipc.elements.get("remux-run").disabled, false);
-  assert.equal(ipc.handlers.has("job-done"), false);
 });
 
 test("a finished job sets the status pill and its rows, and binds no job-done", async t => {
@@ -251,6 +233,7 @@ test("an extract job is shown in the extract view", async t => {
   const ipc = bootstrapHarness(t);
   await ipc.mount("extract-job");
   ipc.core.state.job = jobView([], { mode: "extract", status: "completed", active: false });
+  ipc.core.state.extract.outcome = "done";
   ipc.resolveState();
   await ipc.flush();
   assert.equal(globalThis.document.documentElement.dataset.view, "extract");
@@ -334,7 +317,7 @@ test("app.js wires the settings chips, the preset menu and the theme to their mo
   assert.equal(ipc.ioChip.innerText, "5 IO Jobs Active");
   assert.equal(ipc.elements.get("remux-workers").placeholder, "auto (6)");
   // The defaults reached the same chips: they fall back to them when the job ends.
-  endJob(ipc, "completed", 0);
+  settleJob(ipc.core, "completed");
   assert.equal(ipc.workerChip.innerText, "Standby (6 Workers)");
   assert.equal(ipc.ioChip.innerText, "Idle (2 IO Jobs)");
 
@@ -461,21 +444,17 @@ for (const { label, input, expected } of [
     assignSelect.value = "__browse__";
     await assignSelect.handlers.get("change")({ target: assignSelect });
 
-    await ipc.elements.get("remux-run").handlers.get("click")();
     await ipc.flush();
 
-    const runCall = ipc.calls.find(([command]) => command === "run_job");
-    assert.ok(runCall, "run_job was invoked");
-    const assignment = runCall[1].request.assignments.find(a => a.target_video === "one");
-    // The core publishes a Track Assignment without its null fields; the engine reads them as unset.
-    assert.deepEqual(assignment, {
+    // The core builds the request from what it holds; the Intent carries the parsed offset.
+    assert.deepEqual(ipc.core.intents.find(intent => intent.type === "assign_track").assignment, {
       target_video: "one",
       asset_path: "/custom/sub.ass",
       track_type: "subtitle",
       language: "ind",
-      ...(expected === null ? {} : { offset_ms: expected }),
+      title: null,
+      offset_ms: expected,
     });
-    assert.deepEqual(ipc.core.intents.find(intent => intent.type === "assign_track").assignment.offset_ms, expected);
   });
 }
 
@@ -513,12 +492,9 @@ test("choosing a custom language tag keeps the tag box open until the tag is typ
 
   langCustom.value = "may";
   langCustom.handlers.get("change")();
-  // The assignment's Intent goes out after the ones before it.
   await ipc.flush();
-  await ipc.elements.get("remux-run").handlers.get("click")();
-  await ipc.flush();
-  const request = ipc.calls.find(([command]) => command === "run_job")[1].request;
-  assert.equal(request.assignments.find(a => a.target_video === "one").language, "may");
+  assert.equal(ipc.core.intents.at(-1).assignment.language, "may");
+  assert.equal(ipc.core.state.remux.assignments.one.language, "may");
 });
 
 test("the inspector's Reset clears a Track Assignment and a running job refuses a new one", async t => {
@@ -535,15 +511,47 @@ test("the inspector's Reset clears a Track Assignment and a running job refuses 
   assignSelect.value = "__browse__";
   await assignSelect.handlers.get("change")({ target: assignSelect });
   await reset.handlers.get("click")();
+  assert.deepEqual(ipc.core.intents.at(-1), { type: "clear_track", mode: "remux", id: "one" });
+  assert.deepEqual(ipc.core.state.remux.assignments, {});
   await ipc.elements.get("remux-run").handlers.get("click")();
   await ipc.flush();
-  const request = ipc.calls.find(([command]) => command === "run_job")[1].request;
-  assert.equal(request.assignments, null);
+  assert.equal(ipc.core.state.job?.active, true);
 
   // The job now runs: a pick is refused before the file dialog opens.
   const picks = ipc.calls.filter(([command]) => command === "pick_subtitle_file").length;
   await assignSelect.handlers.get("change")({ target: assignSelect });
   assert.equal(ipc.calls.filter(([command]) => command === "pick_subtitle_file").length, picks);
+});
+
+test("a Run the core refuses is logged as ERROR in its mode's console and flags the field it names", async t => {
+  const ipc = bootstrapHarness(t);
+  await ipc.mount("run-refused");
+  ipc.resolveState();
+  await ipc.flush();
+  await ipc.elements.get("remux-run").handlers.get("click")();
+  await ipc.flush();
+  assert.deepEqual(ipc.core.intents.at(-1), { type: "run", mode: "remux" });
+  assert.deepEqual(ipc.elements.get("remux-log").children.map(line => line.textContent), ["ERROR: Input directory is required."]);
+  assert.equal(ipc.elements.get("remux-input-dir").classList.contains("input-error"), true);
+  assert.equal(ipc.core.state.run.phase, "idle");
+});
+
+test("while a job runs, a refused draft edit puts the published value back into its field", async t => {
+  t.mock.method(console, "error", () => {});
+  const ipc = bootstrapHarness(t);
+  await ipc.mount("draft-refused");
+  activeJob(ipc.core);
+  ipc.core.state.remux.draft = draft("remux", { workers: "3" });
+  ipc.resolveState();
+  await ipc.flush();
+  const workers = ipc.elements.get("remux-workers");
+  assert.equal(workers.value, "3");
+  workers.value = "9";
+  workers.handlers.get("input")();
+  await ipc.flush();
+  assert.equal(workers.value, "3");
+  assert.equal(ipc.core.state.remux.draft.workers, "3");
+  settleJob(ipc.core, "completed");
 });
 
 test("the log shows paths Finder-style, Copy puts the real paths on the clipboard, and errors badge the Log button", async t => {
