@@ -43,13 +43,14 @@ function draftHarness() {
 
 const flush = () => new Promise(resolve => setImmediate(resolve));
 
-test("every input and change of a field sends its value as the mode's draft key", () => {
+test("every edit of a field sends its value as the mode's draft key, a checkbox only on change", () => {
   const page = draftHarness();
   page.get("remux-input-dir").value = "/anime";
   page.get("remux-input-dir").handlers.get("input")();
   page.get("remux-cplx-val").value = "7";
   page.get("remux-cplx-val").handlers.get("change")();
   page.get("remux-dry-run").checked = true;
+  assert.equal(page.get("remux-dry-run").handlers.has("input"), false);
   page.get("remux-dry-run").handlers.get("change")();
   page.get("extract-input-dir").value = "/other";
   page.get("extract-input-dir").handlers.get("input")();

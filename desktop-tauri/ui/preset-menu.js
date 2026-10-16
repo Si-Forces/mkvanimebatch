@@ -32,14 +32,10 @@ export function createPresetMenu({ doc, dispatch, isLocked }) {
     }
   }
 
-  /**
-   * Renders `profiles` and the remux `draft` over them. Returns true when the rows were rebuilt, so
-   * the caller can lock them while a job runs.
-   */
+  /** Renders `profiles` and the remux `draft` over them. */
   function render(profiles = [], draft = null) {
     const key = JSON.stringify(profiles);
-    const rebuilt = key !== rowsKey;
-    if (rebuilt) {
+    if (key !== rowsKey) {
       rowsKey = key;
       renderRows(profiles);
     }
@@ -55,7 +51,6 @@ export function createPresetMenu({ doc, dispatch, isLocked }) {
       const text = presetSubtitle(draft.bitrate, complexity);
       if (sub.textContent !== text) sub.textContent = text;
     }
-    return rebuilt;
   }
 
   /** Sends `set_preset` for a clicked row, unless a job holds the form. */
@@ -72,6 +67,6 @@ export function createPresetMenu({ doc, dispatch, isLocked }) {
 }
 
 /** A preset row's subtitle: the bitrate and complexity a profile, or the custom form, encodes with. */
-export function presetSubtitle(bitrate, complexity) {
+function presetSubtitle(bitrate, complexity) {
   return `Opus ${bitrate} · complexity ${complexity}`;
 }

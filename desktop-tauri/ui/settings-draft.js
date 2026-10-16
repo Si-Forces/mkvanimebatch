@@ -1,6 +1,7 @@
 /**
  * The settings sheet as a mirror of each mode's Settings Draft, which the Desktop Core holds: every
- * edit of a field sends `edit_draft`, and every published draft is written back into the fields.
+ * edit of a field sends `edit_draft` (a checkbox on change, any other field on input and change),
+ * and every published draft is written back into the fields.
  * The draft keys a mode does not have are not in its draft, and their fields are not on the page.
  */
 
@@ -26,7 +27,11 @@ const isCheckbox = el => el.type === "checkbox";
  * `dispatch` sends an Intent (app.js's `dispatchIntent`). Two guards keep a published draft from
  * undoing what the user is doing: a field with focus is never written, so typing keeps its caret,
  * and neither is a key whose edit is still on its way to the core, since a state published before
- * the core applied it holds the value from before the edit.
+ * the core applied it holds the value from before the edit. The core answers a draft Intent once it
+ * applied it, before it publishes it, so every state it publishes after the answer holds the edit.
+ * A publication sent before the answer can still arrive after it, since Tauri does not order events
+ * against invoke replies: an unfocused field then shows the old value until the publication the
+ * edit armed, at most one interval (66 ms) later. That flicker is accepted.
  */
 export function createSettingsDraft({ doc, dispatch }) {
   // Edits sent and not answered yet, by `${mode}:${key}`.
@@ -44,7 +49,10 @@ export function createSettingsDraft({ doc, dispatch }) {
     }
   }
 
-  /** Sends an edit on every input and change of each field the page has. */
+  /**
+   * Sends an edit on each change of every field the page has, and on each input of any field but a
+   * checkbox, whose click already fires change.
+   */
   function bind() {
     for (const mode of ["remux", "extract"]) {
       for (const [key, suffixes] of Object.entries(DRAFT_FIELDS)) {
@@ -52,7 +60,7 @@ export function createSettingsDraft({ doc, dispatch }) {
           const el = doc.getElementById(`${mode}-${suffix}`);
           if (!el) continue;
           const onEdit = () => { send(mode, key, el); };
-          el.addEventListener("input", onEdit);
+          if (!isCheckbox(el)) el.addEventListener("input", onEdit);
           el.addEventListener("change", onEdit);
         }
       }
@@ -68,8 +76,8 @@ export function createSettingsDraft({ doc, dispatch }) {
         const el = doc.getElementById(`${mode}-${suffix}`);
         if (!el || el === doc.activeElement) continue;
         const property = isCheckbox(el) ? "checked" : "value";
-        // A range resets a value that is not a number to its midpoint: the complexity slider takes
-        // only a parsed value, and stays put while the box holds something else.
+        // A range resets a value that is not a number to its midpoint, so the complexity slider
+        // takes only a parsed value and stays put while the box holds something else.
         const next = el.type === "range" ? String(parseInt(value, 10)) : value;
         if (next === "NaN" || el[property] === next) continue;
         el[property] = next;

@@ -88,24 +88,34 @@ function published(assignment) {
   return Object.fromEntries(Object.entries(assignment).filter(([, value]) => value !== null && value !== undefined));
 }
 
+/** The keys an `edit_draft` Intent may set: the fields of `DraftChanges`. */
+const DRAFT_KEYS = new Set([
+  "input_dir", "out_dir", "fonts_dir", "assets_dir", "bitrate", "complexity", "sub_offset",
+  "workers", "io_jobs", "ffmpeg_threads", "dry_run", "no_cache",
+]);
+
 /**
  * Applies a draft Intent to `view.draft` as `SettingsDraft` does; false when nothing changed.
- * Throws the core's error for a field or a preset the mode does not have.
+ * Throws the core's error for a field or a preset the mode does not have. A mirror for tests:
+ * `crates/mkv-desktop-core/src/draft.rs` holds the rules, so change them there first. Presets are
+ * looked up by exact id, without `lookup_preset`'s aliases.
  */
 function applyDraftIntent(view, intent, presets) {
   const current = view.draft;
   if (intent.type === "set_preset") {
     if (!("preset" in current)) throw "Preset Profiles are for remux only.";
     const profile = presets.find(p => p.id === intent.preset);
-    if (!profile) throw `Unknown Preset Profile '${intent.preset}'.`;
+    if (!profile) throw `Unknown preset profile: '${intent.preset}'`;
     const next = profile.id === "custom"
       ? { ...current, preset: "custom" }
       : { ...current, preset: profile.id, bitrate: profile.bitrate, complexity: String(profile.complexity) };
     view.draft = next;
     return JSON.stringify(next) !== JSON.stringify(current);
   }
-  // The core rejects the key while deserializing the Intent, on either mode.
-  if ("preset" in intent.changes) throw "unknown field `preset`";
+  // The core rejects a key `DraftChanges` lacks (the preset too) while deserializing the Intent, on
+  // either mode.
+  const unknown = Object.keys(intent.changes).find(key => !DRAFT_KEYS.has(key));
+  if (unknown) throw `unknown field \`${unknown}\``;
   const missing = Object.keys(intent.changes).find(key => !(key in current));
   if (missing) throw `Extract has no ${missing} setting.`;
   const changed = Object.keys(intent.changes).filter(key => current[key] !== intent.changes[key]);
@@ -146,7 +156,7 @@ export function createFakeCore({ onScan = async () => true } = {}) {
     /** Accepts `rows` as the inspection of `directory` for `mode`, as a new manifest. */
     accept(mode, directory, rows, fields = {}) {
       const previous = core.state[mode];
-      core.state[mode] = modeView(rows, { directory, manifest_rev: previous.manifest_rev + 1, draft: previous.draft, ...fields });
+      core.state[mode] = modeView(rows, { directory, manifest_rev: previous.manifest_rev + 1, draft: previous.draft, ...fields }, mode);
       return core.publish();
     },
     async invoke(command, args) {

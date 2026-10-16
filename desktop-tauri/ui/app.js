@@ -159,7 +159,7 @@ function applyState(state) {
   const remuxWritten = draftForm.apply("remux", state.remux.draft);
   draftForm.apply("extract", state.extract.draft);
   chips.applyDefaults(state.defaults);
-  const presetRows = presets.render(state.presets, state.remux.draft);
+  presets.render(state.presets, state.remux.draft);
   remuxQueue.applyView(state.remux, state.job);
   extractQueue.applyView(state.extract, state.job);
   // The rows show the bitrate and the subtitle ladder the assets dir is part of.
@@ -171,7 +171,7 @@ function applyState(state) {
     const { rows, draft, ...fields } = queue.view;
     return [fields, draft?.dry_run, queue.state.totalCount, queue.getSelectedCount()];
   })]);
-  if (presetRows || key !== controlsKey) {
+  if (key !== controlsKey) {
     controlsKey = key;
     jobCoordinator.syncControls();
   }
@@ -200,9 +200,14 @@ async function syncState() {
 // ack from the core would close that gap if it ever matters.
 let dispatchChain = Promise.resolve();
 
+// The draft Intents: the core answers them before it publishes their change, which reaches the
+// page as a coalesced `view-state` publication (ADR-0016, S3).
+const DRAFT_INTENTS = new Set(["edit_draft", "set_preset"]);
+
 /**
  * Sends an Intent to the Desktop Core after every Intent sent before it was answered (a scan only
- * sent), then applies the state it published for it. Resolves to the core's reply, or false when it refused the Intent (the queue
+ * sent), then applies the state it published for it, but for a draft Intent, whose state arrives
+ * as a publication. Resolves to the core's reply, or false when it refused the Intent (the queue
  * or the settings are locked) or is unreachable.
  */
 function dispatchIntent(intent) {
@@ -213,7 +218,7 @@ function dispatchIntent(intent) {
       console.error(`[dispatch] ${intent.type} refused:`, err);
       return false;
     } finally {
-      await syncState();
+      if (!DRAFT_INTENTS.has(intent.type)) await syncState();
     }
   });
   if (intent.type !== "scan_directory") dispatchChain = answer;

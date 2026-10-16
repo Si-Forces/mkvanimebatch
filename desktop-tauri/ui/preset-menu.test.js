@@ -59,7 +59,7 @@ function presetHarness() {
 
 test("render draws one row per published profile and marks the draft's preset active", () => {
   const page = presetHarness();
-  assert.equal(page.menu.render([FAST, CUSTOM], draft("remux", { preset: "fast" })), true);
+  page.menu.render([FAST, CUSTOM], draft("remux", { preset: "fast" }));
   assert.deepEqual(page.rows().map(row => row.dataset.preset), ["fast", "custom"]);
   assert.deepEqual(page.rows().map(row => row.textContent), [
     "Fast muxingOpus 128k · complexity 3",
@@ -72,8 +72,10 @@ test("render draws one row per published profile and marks the draft's preset ac
   assert.ok(page.rows().every(row => row.className.includes("lock-while-job")));
 
   // The same catalog again keeps the rows and follows the draft.
-  assert.equal(page.menu.render([FAST, CUSTOM], draft("remux", { preset: "custom", bitrate: "256k", complexity: "8" })), false);
+  const [fast] = page.rows();
+  page.menu.render([FAST, CUSTOM], draft("remux", { preset: "custom", bitrate: "256k", complexity: "8" }));
   assert.equal(page.rows().length, 2);
+  assert.equal(page.rows()[0], fast, "the rows were not rebuilt");
   assert.deepEqual(page.activeRows(), ["custom"]);
   assert.equal(page.findSub().textContent, "Opus 256k · complexity 8");
 });

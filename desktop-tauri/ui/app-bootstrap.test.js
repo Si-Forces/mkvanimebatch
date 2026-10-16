@@ -408,6 +408,27 @@ test("boot restores each mode's typed Settings Draft from get_state, and every I
   assert.equal(ipc.core.state.remux.draft.workers, "5");
 });
 
+test("a draft Intent takes its state from the publication, with no get_state after its answer", async t => {
+  const ipc = bootstrapHarness(t);
+  await ipc.mount("draft-no-sync");
+  ipc.resolveState();
+  await ipc.flush();
+  const since = ipc.calls.length;
+  const commands = () => ipc.calls.slice(since).map(([command]) => command);
+  const workers = ipc.elements.get("remux-workers");
+  workers.value = "4";
+  workers.handlers.get("input")();
+  await ipc.flush();
+  assert.deepEqual(commands(), ["dispatch"]);
+  assert.equal(ipc.elements.get("remux-workers").value, "4");
+  assert.equal(ipc.core.state.remux.draft.workers, "4");
+
+  // Any other Intent, here the scan the input folder's edit sends, still reads the state after.
+  await ipc.scan("remux", "/anime");
+  await ipc.flush();
+  assert.ok(commands().slice(1).includes("get_state"), commands().join(", "));
+});
+
 for (const { label, input, expected } of [
   { label: "empty string", input: "", expected: null },
   { label: "whitespace string", input: "   ", expected: null },

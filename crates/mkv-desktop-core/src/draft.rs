@@ -3,7 +3,7 @@
 //! nothing is persisted.
 
 use mkv_core::pipeline::PipelineMode;
-use mkv_core::preset::{get_preset_profiles, PresetProfile};
+use mkv_core::preset::require_preset;
 use mkv_core::request::DEFAULT_PRESET_ID;
 use serde::{Deserialize, Serialize};
 
@@ -12,7 +12,7 @@ const CUSTOM_PRESET: &str = "custom";
 
 /// One mode's settings form, every field a string as typed but the two checkboxes. The remux-only
 /// fields are `None` in an extract draft and left out of its wire form.
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SettingsDraft {
     pub input_dir: String,
     pub out_dir: String,
@@ -72,20 +72,23 @@ impl SettingsDraft {
     /// The form a mode starts with: empty, but for the remux encode, which starts on the default
     /// Preset Profile, and its zero subtitle offset.
     pub fn new(mode: PipelineMode) -> Self {
-        match mode {
-            PipelineMode::Extract => Self::default(),
-            PipelineMode::Remux => {
-                let preset = profile(DEFAULT_PRESET_ID).expect("the default preset is built in");
-                Self {
-                    assets_dir: Some(String::new()),
-                    preset: Some(preset.id),
-                    bitrate: Some(preset.bitrate),
-                    complexity: Some(preset.complexity.to_string()),
-                    sub_offset: Some("0".into()),
-                    ffmpeg_threads: Some(String::new()),
-                    ..Self::default()
-                }
-            }
+        let remux = mode == PipelineMode::Remux;
+        let preset = remux
+            .then(|| require_preset(DEFAULT_PRESET_ID).expect("the default preset is built in"));
+        Self {
+            input_dir: String::new(),
+            out_dir: String::new(),
+            fonts_dir: String::new(),
+            assets_dir: remux.then(String::new),
+            bitrate: preset.as_ref().map(|preset| preset.bitrate.clone()),
+            complexity: preset.as_ref().map(|preset| preset.complexity.to_string()),
+            preset: preset.map(|preset| preset.id),
+            sub_offset: remux.then(|| "0".into()),
+            workers: String::new(),
+            io_jobs: String::new(),
+            ffmpeg_threads: remux.then(String::new),
+            dry_run: false,
+            no_cache: false,
         }
     }
 
@@ -108,6 +111,7 @@ impl SettingsDraft {
             no_cache,
         } = changes;
         let encode = (self.bitrate.clone(), self.complexity.clone());
+        // A field that is `None` is one the mode lacks: an extract draft has none of these.
         let remux_only = [
             ("assets_dir", &mut self.assets_dir, assets_dir),
             ("bitrate", &mut self.bitrate, bitrate),
@@ -145,28 +149,24 @@ impl SettingsDraft {
         Ok(changed)
     }
 
-    /// Puts the form on Preset Profile `id`: its bitrate and complexity, or for custom only the
-    /// label, which keeps the values the form has. True when that changed the form.
+    /// Puts the form on Preset Profile `id`, under its canonical id, as a request resolves it:
+    /// its bitrate and complexity, or for custom only the label, which keeps the values the form
+    /// has. True when that changed the form.
     pub fn set_preset(&mut self, id: &str) -> Result<bool, String> {
         let Some(preset) = self.preset.as_mut() else {
             return Err("Preset Profiles are for remux only.".into());
         };
-        let profile = profile(id).ok_or_else(|| format!("Unknown Preset Profile '{id}'."))?;
-        let mut changed = replace(preset, Some(profile.id));
-        if id != CUSTOM_PRESET {
-            changed |= replace(&mut self.bitrate, Some(Some(profile.bitrate)));
-            changed |= replace(
-                &mut self.complexity,
-                Some(Some(profile.complexity.to_string())),
-            );
+        let profile = require_preset(id)?;
+        let mut changed = replace(preset, Some(profile.id.clone()));
+        if profile.id != CUSTOM_PRESET {
+            let bitrate = Some(profile.bitrate);
+            let complexity = Some(profile.complexity.to_string());
+            changed |= self.bitrate != bitrate || self.complexity != complexity;
+            self.bitrate = bitrate;
+            self.complexity = complexity;
         }
         Ok(changed)
     }
-}
-
-/// The built-in Preset Profile with exactly this `id`.
-fn profile(id: &str) -> Option<PresetProfile> {
-    get_preset_profiles().into_iter().find(|p| p.id == id)
 }
 
 #[cfg(test)]
@@ -188,10 +188,6 @@ mod tests {
         assert_eq!(draft.ffmpeg_threads.as_deref(), Some(""));
         assert_eq!((draft.workers.as_str(), draft.io_jobs.as_str()), ("", ""));
         assert!(!draft.dry_run && !draft.no_cache);
-        assert_eq!(
-            SettingsDraft::new(PipelineMode::Extract),
-            SettingsDraft::default()
-        );
     }
 
     #[test]
@@ -243,8 +239,11 @@ mod tests {
     #[test]
     fn test_set_preset_applies_only_the_catalogs_profiles() {
         let mut draft = remux();
-        // Not in the catalog: nothing changes.
-        assert!(draft.set_preset("studio").is_err());
+        // Not in the catalog: nothing changes, and the error is the one a request answers.
+        assert_eq!(
+            draft.set_preset("studio"),
+            Err("Unknown preset profile: 'studio'".into())
+        );
         assert_eq!(draft, remux());
 
         assert_eq!(draft.set_preset("fast"), Ok(true));
@@ -255,6 +254,11 @@ mod tests {
         assert_eq!(draft.bitrate.as_deref(), Some("320k"));
         assert_eq!(draft.complexity.as_deref(), Some("10"));
         assert_eq!(draft.set_preset("hifi"), Ok(false));
+        // An alias or another case is the profile a request resolves, under its canonical id.
+        assert_eq!(draft.set_preset("High-Quality"), Ok(false));
+        assert_eq!(draft.set_preset(" DEFAULT "), Ok(true));
+        assert_eq!(draft.preset.as_deref(), Some("balanced"));
+        assert_eq!(draft.bitrate.as_deref(), Some("192k"));
     }
 
     #[test]
@@ -282,7 +286,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(error, "Extract has no ffmpeg_threads setting.");
         // All or none: the out_dir of the refused edit is not applied either.
-        assert_eq!(draft, SettingsDraft::default());
+        assert_eq!(draft, SettingsDraft::new(PipelineMode::Extract));
     }
 
     #[test]
