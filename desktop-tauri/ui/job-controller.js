@@ -1,9 +1,9 @@
 import { isBusy } from "./presentation.js";
 import { DRAFT_FIELDS } from "./settings-draft.js";
 
-/** Webview event names emitted by the engine bridge; must match `src-tauri/src/publisher.rs` (`cleanup-error`: `commands.rs`). */
-export const JOB_LOG = "job-log";
-export const CLEANUP_ERROR = "cleanup-error";
+// The modes with a Run sent and not answered yet. Module-wide because both controllers sync the
+// shared `.lock-while-job` controls on every publication, and the last sync wins.
+const pendingRuns = new Set();
 
 /**
  * The four queue bulk-selection buttons, each with the selection it applies.
@@ -80,27 +80,47 @@ export class JobController {
     return state?.run?.mode ?? (state?.job?.active ? state.job.mode : null);
   }
 
+  /** A Run of this mode sent and not answered yet: Run and the settings stay locked from the click on. */
+  get runPending() {
+    return pendingRuns.has(this.mode);
+  }
+
   appendError(text) {
     this.runtime.appendLog(this.logEl, { kind: "error", text: `ERROR: ${text}` });
   }
 
   /**
-   * Sends Run, which the core answers once the start settles. A refusal or a failed start is
-   * logged; a draft that built no request also opens the settings sheet on its flagged field.
+   * Sends Run, which the core answers once the start settles. Run and the mode's settings lock at
+   * the click, before the core publishes the start, so a second click sends no second Run and an
+   * edit or a preset picked meanwhile is not refused and reverted under the caret; after the
+   * answer the published state rules again. A refusal or a failed start is logged; a draft that built no
+   * request also opens the settings sheet on its flagged field.
    */
   async start() {
+    if (this.runPending) return;
+    pendingRuns.add(this.mode);
+    let failed = false;
+    let error;
     try {
+      this.syncGlobalControls();
       await this.runtime.send({ type: "run", mode: this.mode });
     } catch (err) {
-      this.appendError(err);
-      // The refusal is answered after the state that flagged the field was applied.
-      const invalid = this.runtime.state()?.[this.mode]?.draft?.invalid;
-      const el = invalid && document.getElementById(`${this.mode}-${DRAFT_FIELDS[invalid]?.at(-1)}`);
-      if (el) {
-        // Every flagged field lives in the closed settings sheet; open it so the error shows.
-        this.runtime.openSettings?.(this.mode);
-        el.focus();
-      }
+      failed = true;
+      error = err;
+    } finally {
+      // Unlocked before the error handling, so the flagged field below can take focus.
+      pendingRuns.delete(this.mode);
+      this.syncGlobalControls();
+    }
+    if (!failed) return;
+    this.appendError(error);
+    // The refusal is answered after the state that flagged the field was applied.
+    const invalid = this.runtime.state()?.[this.mode]?.draft?.invalid;
+    const el = invalid && document.getElementById(`${this.mode}-${DRAFT_FIELDS[invalid]?.at(-1)}`);
+    if (el) {
+      // Every flagged field lives in the closed settings sheet; open it so the error shows.
+      this.runtime.openSettings?.(this.mode);
+      el.focus();
     }
   }
 
@@ -167,13 +187,13 @@ export class JobController {
     this.shownSettings = settings;
 
     if (this.runBtn) {
-      this.runBtn.disabled = busy || Boolean(tracker.isScanning) || selectionDisabled;
+      this.runBtn.disabled = busy || this.runPending || Boolean(tracker.isScanning) || selectionDisabled;
       const verb = document.getElementById(`${this.mode}-dry-run`)?.checked ? "Plan" : "Run";
       const label = hasItems ? `${verb} ${this.mode} · ${tracker.getSelectedCount?.() ?? 0}` : `${verb} ${this.mode}`;
       if (this.runBtn.textContent !== label) this.runBtn.textContent = label;
       this.runBtn.title = this.runBlockedReason(owner, selectionDisabled);
     }
-    for (const control of this.formControls) control.disabled = busy;
+    for (const control of this.formControls) control.disabled = busy || this.runPending;
     // Selection stays frozen through the start and the run: the core captured it at Run and
     // refuses a change, so a click could only desynchronize the UI from the batch. The tracker
     // checks the same predicate on every mutation, so a card re-rendered after this sync is
@@ -187,8 +207,10 @@ export class JobController {
     }
     // Controls outside the settings sheet that a busy batch freezes (the presets, the inspector's
     // Track Assignment controls, Open folder), and the root class the locked notes and labels key off.
+    // A pending Run of either mode locks them too, as its start will.
+    const locked = busy || pendingRuns.size > 0;
     document.querySelectorAll(`.lock-while-job, #${this.mode}-episode-list .empty-state-action`).forEach(control => {
-      control.disabled = busy;
+      control.disabled = locked;
     });
     document.documentElement?.classList?.toggle("job-locked", busy);
     const selectionFrozen = !this.canMutateQueueSelection(this.mode);

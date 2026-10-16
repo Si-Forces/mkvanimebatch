@@ -178,6 +178,7 @@ export function createFakeCore({ onScan = async () => true, onStart = null } = {
     onScan,
     onStart: onStart ?? (({ mode }) => core.launch(mode)),
     intents: [],
+    // The core's `busy()` (`crates/mkv-desktop-core/src/actor.rs`), as `isBusy` in `presentation.js` reads it.
     busy: () => core.state.run.phase !== "idle" || Boolean(core.state.job?.active),
     /** Launches job `job_id` of the starting `mode` over its selected rows, and publishes it running. */
     launch(mode, job_id = (core.state.job?.job_id ?? 0) + 1) {

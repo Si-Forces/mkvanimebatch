@@ -1,7 +1,7 @@
 /* MKV Anime Batch desktop frontend.
    Talks to the Tauri host through window.__TAURI__ (withGlobalTauri: true in tauri.conf.json). */
 
-import { BULK_SELECTION_CONTROLS, CLEANUP_ERROR, JOB_LOG, JobController } from "./job-controller.js";
+import { BULK_SELECTION_CONTROLS, JobController } from "./job-controller.js";
 import { QueueTracker } from "./queue-view.js";
 import { lineClass, pushCapped } from "./log-classify.js";
 import { createTelemetryLoop } from "./telemetry.js";
@@ -139,6 +139,9 @@ function initSteppers() {
 
 /** The event the Desktop Core publishes the View State on; must match `src-tauri/src/publisher.rs`. */
 const VIEW_STATE = "view-state";
+/** Webview event names emitted by the engine bridge; must match `src-tauri/src/publisher.rs` (`cleanup-error`: `commands.rs`). */
+const JOB_LOG = "job-log";
+const CLEANUP_ERROR = "cleanup-error";
 // The newest View State applied, which `syncState` hands out.
 let appliedState = null;
 // The `seq` of the last View State applied. A publication and a `get_state` answer can arrive in
@@ -207,8 +210,10 @@ async function syncState() {
 // the order of concurrent calls, and an edit must not reach the core after a later Intent. A scan,
 // a Run and a Stop are the exceptions: each is answered only once its inspection, its start or its
 // teardown settles, so the chain waits for it to be sent, not answered (a Stop must not wait for
-// the Run it stops). A scan reads its own path and a Run the draft the core already holds, so what
-// overtakes either is harmless, and a newer scan of the mode can still overtake one in the core.
+// the Run it stops; nor can they cross, as Stop is shown and enabled only once the published state
+// shows the start, `run.phase` not idle). A scan reads its own path and a Run the draft the core
+// already holds, so what overtakes either is harmless, and a newer scan of the mode can still
+// overtake one in the core.
 // ponytail: the IPC may still deliver an Intent sent right after one of them before it; an early
 // ack from the core would close that gap if it ever matters.
 let dispatchChain = Promise.resolve();

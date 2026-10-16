@@ -20,7 +20,8 @@ export function isSameDirectory(dirA, dirB) {
 /**
  * Whether a start or a job holds the batch in the published View State `state`, which locks both
  * queues and both Settings Drafts: the Desktop Core's own rule (`busy` in
- * `crates/mkv-desktop-core/src/actor.rs`). False before the first View State.
+ * `crates/mkv-desktop-core/src/actor.rs`; `busy` in `fake-core.js` mirrors it too). False before
+ * the first View State.
  *
  * @param {object|null|undefined} state
  * @returns {boolean}

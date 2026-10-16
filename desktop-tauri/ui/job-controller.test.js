@@ -135,6 +135,36 @@ test("Run and Stop send their Intents, with the mode and nothing else", async t 
   assert.deepEqual(page.logs, [], "an idle Stop announces no shutdown wait");
 });
 
+test("a Run click locks Run and the settings until its answer, so a second click sends nothing", async t => {
+  const elements = makeElements();
+  installDom(t, elements);
+  let answer;
+  const page = makeRuntime(idleTracker(), { reply: () => new Promise(resolve => { answer = resolve; }) });
+  const controller = new JobController("remux", page.runtime);
+  const field = new FakeElement();
+  controller.formControls = [field];
+  const preset = new FakeElement();
+  globalThis.document.querySelectorAll = selector => (selector.includes(".lock-while-job") ? [preset] : []);
+  const runBtn = elements.get("remux-run");
+
+  // Still idle in the published state: the lock is the click's own.
+  const running = controller.start();
+  assert.equal(runBtn.disabled, true);
+  assert.equal(field.disabled, true, "an edit typed after the click cannot reach the core");
+  assert.equal(preset.disabled, true, "nor can a preset picked after it");
+  controller.syncGlobalControls();
+  assert.equal(runBtn.disabled, true, "a publication before the answer keeps the lock");
+  await controller.start();
+  assert.deepEqual(page.sent, [{ type: "run", mode: "remux" }]);
+
+  // A refused Run unlocks: the published state, still idle, rules again.
+  answer(Promise.reject("A batch is running; the queue is locked until it ends."));
+  await running;
+  assert.equal(runBtn.disabled, false);
+  assert.equal(field.disabled, false);
+  assert.equal(preset.disabled, false);
+});
+
 test("a refused or failed Run is logged as ERROR, and a flagged field opens the settings sheet on it", async t => {
   const offset = new FakeElement();
   const elements = makeElements(["remux"], { "remux-sub-offset": offset });

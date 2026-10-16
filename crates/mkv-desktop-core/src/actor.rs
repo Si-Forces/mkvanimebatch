@@ -1,9 +1,9 @@
 //! The Desktop Core actor (ADR-0016): one task that owns the queue and the Settings Draft of each
-//! mode, the Job Coordinator, the published Job Snapshot and the scans in flight, and publishes the
-//! whole View State through a `Publisher`, at most about 15 times a second. Everything reaches it through one
-//! inbox, so a job's start, events, log batches and completion arrive in the order the supervisor
-//! sent them, and an Intent sees every change sent before it. A UI adapter spawns it once with
-//! `Core::spawn` and talks to it through the `CoreHandle`.
+//! mode, the Job Coordinator, the published Job Snapshot and the scans in flight, and publishes
+//! the whole View State through a `Publisher`, at most about 15 times a second. Everything
+//! reaches it through one inbox, so a job's start, events, log batches and completion arrive in
+//! the order the supervisor sent them, and an Intent sees every change sent before it. A UI
+//! adapter spawns it once with `Core::spawn` and talks to it through the `CoreHandle`.
 
 use crate::control::{mode_name, Launcher};
 use crate::coordinator::{preflight, Captured, JobCoordinator, Phase};
@@ -635,19 +635,21 @@ impl<P: Publisher, I: Inspector, L: Launcher> Core<P, I, L> {
             }
             Msg::SinkClosed { job_id } => {
                 // A no-op after a normal `Done`, or once a later job holds the snapshot.
-                let snapshot = self
+                let Some(snapshot) = self
                     .snapshot
                     .as_ref()
-                    .filter(|snapshot| self.active && snapshot.job_id == job_id);
-                if let Some(mode) = snapshot.map(|snapshot| mode_of(&snapshot.mode)) {
-                    self.active = false;
-                    self.dirty = true;
-                    if let Some(mode) = mode {
-                        self.set_outcome(mode, Some(Outcome::Failed));
-                    }
-                    if self.start_job_is(job_id) {
-                        self.finish_start(Outcome::Failed, Ok(true));
-                    }
+                    .filter(|snapshot| self.active && snapshot.job_id == job_id)
+                else {
+                    return;
+                };
+                let mode = mode_of(&snapshot.mode);
+                self.active = false;
+                self.dirty = true;
+                if let Some(mode) = mode {
+                    self.set_outcome(mode, Some(Outcome::Failed));
+                }
+                if self.start_job_is(job_id) {
+                    self.finish_start(Outcome::Failed, Ok(true));
                 }
             }
             Msg::Defaults(defaults) => {
@@ -1052,8 +1054,9 @@ impl<P: Publisher, I: Inspector, L: Launcher> Core<P, I, L> {
         }
     }
 
-    /// Runs `task` in a task of its own, so a panic still answers, as a failure, and sends its
-    /// result to the inbox as `message`.
+    /// Runs `task` in a task of its own and sends its result to the inbox as `message`. The inner
+    /// task is what turns a panic in `task` itself (a fake, or adapter code outside its
+    /// `spawn_blocking`) into an `Err`, so the Run or Stop still answers, as a failure.
     fn off_actor<T: Send + 'static>(
         &self,
         task: impl Future<Output = Result<T, String>> + Send + 'static,
@@ -1107,7 +1110,8 @@ impl<P: Publisher, I: Inspector, L: Launcher> Core<P, I, L> {
         };
         let captured = Captured::of(&state.queue);
         self.dirty |= unflagged;
-        self.coordinator.begin(mode);
+        let begun = self.coordinator.begin(mode);
+        debug_assert!(begun, "an idle coordinator begins");
         self.set_outcome(mode, None);
         self.attempt += 1;
         let attempt = self.attempt;
@@ -1133,11 +1137,10 @@ impl<P: Publisher, I: Inspector, L: Launcher> Core<P, I, L> {
     /// A start's request resolved: its Effective Settings are published, and the forced scan of
     /// its input directory begins. A refused one ends the start.
     fn request_resolved(&mut self, attempt: u64, result: Result<EffectiveSettings, String>) {
-        let stopping = self.coordinator.phase() == Phase::Stopping;
-        let Some(start) = self.current(attempt) else {
+        let Some(start) = self.start.as_mut().filter(|start| start.attempt == attempt) else {
             return;
         };
-        if stopping {
+        if self.coordinator.phase() == Phase::Stopping {
             // Its `StopSettled` ends it.
             return;
         }
@@ -1161,18 +1164,21 @@ impl<P: Publisher, I: Inspector, L: Launcher> Core<P, I, L> {
     /// A start's forced scan settled: preflight checks the captured Queue Selection against it,
     /// and the job launches off the actor.
     fn preflight_scanned(&mut self, attempt: u64, answer: Result<bool, String>) {
-        let stopping = self.coordinator.phase() == Phase::Stopping;
-        let Some(start) = self.start.as_ref().filter(|start| start.attempt == attempt) else {
+        let Some(start) = self.start.as_mut().filter(|start| start.attempt == attempt) else {
             return;
         };
-        if stopping {
+        if self.coordinator.phase() == Phase::Stopping {
             return;
         }
         if answer != Ok(true) {
             return self.finish_start(Outcome::Failed, Err(INSPECTION_FAILED.into()));
         }
-        let batch = preflight(start.mode, &start.captured, &self.state(start.mode).queue);
-        let batch = match batch {
+        // Field by field, so the start stays borrowed across its mode's queue.
+        let queue = match start.mode {
+            PipelineMode::Remux => &self.remux.queue,
+            PipelineMode::Extract => &self.extract.queue,
+        };
+        let batch = match preflight(start.mode, &start.captured, queue) {
             Ok(batch) => batch,
             Err(error) => return self.finish_start(Outcome::Failed, Err(error)),
         };
@@ -1180,7 +1186,6 @@ impl<P: Publisher, I: Inspector, L: Launcher> Core<P, I, L> {
             return;
         };
         let sink = CoreHandle(inbox).job_sink();
-        let start = self.current(attempt).expect("the start was found above");
         start.request.selected_items = Some(batch.selected_items);
         start.request.assignments = batch.assignments;
         start.step = Step::Launching;
@@ -3054,6 +3059,24 @@ mod tests {
         tokio::time::sleep(RESOLVE).await;
         assert_eq!(launcher.calls(), ["resolve", "stop None"]);
         assert_eq!(inspector.inspected().len(), 1, "no forced scan");
+        let state = core.state().await.unwrap();
+        assert_eq!(state.run, RunView::default());
+        assert_eq!(state.remux.outcome, Some(Outcome::Cancelled));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_a_failed_teardown_while_resolving_answers_the_stop_its_error_and_still_cancels() {
+        let launcher = FakeLauncher::default();
+        let (core, _publisher, _inspector) = run_core(&launcher).await;
+        launcher.script().stop_error = Some("Timed out waiting for job cleanup to finish.".into());
+        let running = pending(&core, run(REMUX));
+        tokio::time::sleep(RESOLVE / 2).await;
+
+        assert_eq!(
+            core.dispatch(stop(REMUX)).await,
+            Err("Timed out waiting for job cleanup to finish.".into())
+        );
+        assert_eq!(running.await.unwrap(), Ok(false));
         let state = core.state().await.unwrap();
         assert_eq!(state.run, RunView::default());
         assert_eq!(state.remux.outcome, Some(Outcome::Cancelled));
