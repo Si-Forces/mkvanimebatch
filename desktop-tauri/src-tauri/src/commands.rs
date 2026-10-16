@@ -1,12 +1,12 @@
-use crate::sink::WebviewSink;
 use mkv_core::manifest::InspectionManifest;
 use mkv_core::request::{BatchRequest, EffectiveSettings};
+use mkv_desktop_core::actor::{CoreHandle, ViewState};
 use mkv_desktop_core::control::{launch, resolve_canonical, InspectCacheState, ScanState};
 use mkv_desktop_core::job::{display_canonical_path, JobState};
 use mkv_desktop_core::snapshot::JobSnapshot;
 use serde::Deserialize;
 use std::path::PathBuf;
-use tauri::{AppHandle, Manager, State};
+use tauri::State;
 
 pub(crate) const CLEANUP_ERROR: &str = "cleanup-error";
 
@@ -38,8 +38,8 @@ pub async fn canonical_directory(path: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-pub async fn inspect_directory<R: tauri::Runtime>(
-    app: AppHandle<R>,
+pub async fn inspect_directory(
+    core: State<'_, CoreHandle>,
     state: State<'_, ScanState>,
     cache_state: State<'_, InspectCacheState>,
     path: String,
@@ -49,7 +49,8 @@ pub async fn inspect_directory<R: tauri::Runtime>(
     // `ScanState::begin` takes the start lock, whose guard cannot be held across this await.
     state.ensure_accepting_starts()?;
     let (dir, identity) = canonicalize_directory(path).await?;
-    let (_registration, cancel_token) = state.begin(&app.state::<JobState>(), &dir)?;
+    let (_registration, cancel_token) = state.begin(&dir)?;
+    core.scan_began();
 
     let no_cache = options.and_then(|o| o.no_cache).unwrap_or(false);
     let cache = if no_cache {
@@ -73,13 +74,13 @@ pub fn resolve_batch_request(request: BatchRequest) -> Result<EffectiveSettings,
 }
 
 #[tauri::command]
-pub fn run_job<R: tauri::Runtime>(
-    app: AppHandle<R>,
+pub fn run_job(
     state: State<'_, JobState>,
+    core: State<'_, CoreHandle>,
     cache_state: State<'_, InspectCacheState>,
     request: BatchRequest,
 ) -> Result<u64, String> {
-    launch(&state, WebviewSink(app), &cache_state, request)
+    launch(&state, core.job_sink(), &cache_state, request)
 }
 
 #[tauri::command]
@@ -117,14 +118,24 @@ pub fn get_default_settings() -> EffectiveSettings {
     EffectiveSettings::defaults()
 }
 
+/// The Desktop Core's published Job Snapshot, which the webview's restore path reads.
 #[tauri::command]
-pub fn get_job_snapshot(state: State<'_, JobState>) -> Result<Option<JobSnapshot>, String> {
-    state.snapshot()
+pub async fn get_job_snapshot(core: State<'_, CoreHandle>) -> Result<Option<JobSnapshot>, String> {
+    core.job_snapshot().await
+}
+
+/// The Desktop Core's last published View State.
+#[tauri::command]
+pub async fn get_state(core: State<'_, CoreHandle>) -> Result<ViewState, String> {
+    core.state().await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::publisher::WebviewPublisher;
+    use mkv_desktop_core::actor::Core;
+    use tauri::Manager;
 
     #[test]
     fn test_inspect_options_deserialization() {
@@ -231,14 +242,17 @@ mod tests {
     #[test]
     fn test_inspect_directory_reports_the_identity_canonical_directory_returns() {
         let app = tauri::test::mock_app();
-        app.manage(mkv_desktop_core::job::test_support::job_state());
+        app.manage(Core::spawn(
+            tauri::async_runtime::handle().inner().clone(),
+            WebviewPublisher(app.handle().clone()),
+        ));
         app.manage(ScanState::default());
         app.manage(InspectCacheState::default());
         let tmp = tempfile::tempdir().unwrap();
         let spelled = tmp.path().join(".").to_string_lossy().into_owned();
 
         let manifest = tauri::async_runtime::block_on(inspect_directory(
-            app.handle().clone(),
+            app.state(),
             app.state(),
             app.state(),
             spelled.clone(),
