@@ -1,11 +1,10 @@
 /* MKV Anime Batch desktop frontend.
    Talks to the Tauri host through window.__TAURI__ (withGlobalTauri: true in tauri.conf.json). */
 
-import { BULK_SELECTION_CONTROLS, CLEANUP_ERROR, JobController } from "./job-controller.js";
+import { BULK_SELECTION_CONTROLS, CLEANUP_ERROR, JOB_LOG, JobController } from "./job-controller.js";
 import { QueueTracker } from "./queue-view.js";
 import { lineClass, pushCapped } from "./log-classify.js";
 import { createTelemetryLoop } from "./telemetry.js";
-import { createJobCoordinator } from "./job-coordinator.js";
 import { createDirectoryScanner } from "./directory-scan.js";
 import { nextStepValue } from "./stepper.js";
 import { createSettingsChips } from "./settings-chips.js";
@@ -17,6 +16,7 @@ import {
   candidateTier,
   filterCounts,
   inspectorCrumbs,
+  isBusy,
   logDisplayText,
   pathSegments,
   prettyPath,
@@ -28,8 +28,6 @@ import {
 } from "./presentation.js";
 
 // ─── Tauri API helpers ──────────────────────────────────────────────────────
-
-const jobCoordinator = createJobCoordinator();
 
 async function invoke(cmd, args = {}) {
   const fn = window.__TAURI__?.core?.invoke;
@@ -77,17 +75,17 @@ function renderCrumbs(el, segments) {
 
 // ─── Worker Chips, Presets and Theme ────────────────────────────────────────
 
-const chips = createSettingsChips({
-  doc: document,
-  // A running job owns the chips; they show its own settings, not the defaults.
-  isJobActive: () => jobCoordinator.activeMode !== null,
-});
+const chips = createSettingsChips({ doc: document });
 const presets = createPresetMenu({
   doc: document,
   dispatch: dispatchIntent,
-  isLocked: () => jobCoordinator.activeMode !== null,
+  isLocked: () => busy(),
 });
-const draftForm = createSettingsDraft({ doc: document, dispatch: dispatchIntent });
+const draftForm = createSettingsDraft({
+  doc: document,
+  dispatch: sendIntent,
+  published: mode => appliedState?.[mode]?.draft,
+});
 const theme = createTheme({
   doc: document,
   win: window,
@@ -149,6 +147,19 @@ let appliedSeq = -1;
 // What the global controls read from the queues and the Job View when they were last synced.
 // Progress publications leave it unchanged, so they skip the DOM-wide control sync.
 let controlsKey = "";
+// The Job Controllers by mode, once `initApp` made them.
+let controllers = {};
+
+/** Whether a start or a job holds the batch in the View State applied last. */
+function busy() {
+  return isBusy(appliedState);
+}
+
+/** Re-renders every control a busy batch, a scan or the Job Coordinator moves. */
+function syncControls() {
+  for (const controller of Object.values(controllers)) controller.syncGlobalControls();
+  telemetryLoop.setJobActive(busy());
+}
 
 /** Renders a View State the Desktop Core published, unless it is stale. */
 function applyState(state) {
@@ -158,22 +169,23 @@ function applyState(state) {
   // The fields first, so the queues and the chrome below read the published draft.
   const remuxWritten = draftForm.apply("remux", state.remux.draft);
   draftForm.apply("extract", state.extract.draft);
-  chips.applyDefaults(state.defaults);
+  chips.render(state);
   presets.render(state.presets, state.remux.draft);
   remuxQueue.applyView(state.remux, state.job);
   extractQueue.applyView(state.extract, state.job);
   // The rows show the bitrate and the subtitle ladder the assets dir is part of.
   if (remuxWritten.has("bitrate") || remuxWritten.has("assets_dir")) remuxQueue.refreshMeta();
-  // Every ModeView field but the rows and the draft, and from the rows only the counts the controls
-  // show, so a ModeView field added later syncs the controls too, while a progress publication or a
-  // keystroke does not. Of the draft, only dry_run is on the controls (the Run label).
-  const key = JSON.stringify([state.job?.job_id, state.job?.active, ...[remuxQueue, extractQueue].map(queue => {
+  // The Job Coordinator, every ModeView field but the rows and the draft, and from the rows only
+  // the counts the controls show, so a ModeView field added later syncs the controls too, while a
+  // progress publication or a keystroke does not. Of the draft, only dry_run (the Run label) and
+  // the flagged field are on the controls.
+  const key = JSON.stringify([state.run, state.job?.job_id, state.job?.active, ...[remuxQueue, extractQueue].map(queue => {
     const { rows, draft, ...fields } = queue.view;
-    return [fields, draft?.dry_run, queue.state.totalCount, queue.getSelectedCount()];
+    return [fields, draft?.dry_run, draft?.invalid, queue.state.totalCount, queue.getSelectedCount()];
   })]);
   if (key !== controlsKey) {
     controlsKey = key;
-    jobCoordinator.syncControls();
+    syncControls();
   }
 }
 
@@ -192,37 +204,46 @@ async function syncState() {
 }
 
 // The Intents sent so far. Each is sent once the one before it was answered: the IPC does not keep
-// the order of concurrent calls, and an edit must not reach the core after a later Intent. A scan
-// is the exception: it is answered only once its inspection settles, so the chain waits for it to
-// be sent, not answered. A scan reads its own path, not the draft, so what overtakes it is
-// harmless, and a newer scan of the mode can still overtake it in the core.
-// ponytail: the IPC may still deliver an Intent sent right after a scan before it; an early scan
+// the order of concurrent calls, and an edit must not reach the core after a later Intent. A scan,
+// a Run and a Stop are the exceptions: each is answered only once its inspection, its start or its
+// teardown settles, so the chain waits for it to be sent, not answered (a Stop must not wait for
+// the Run it stops). A scan reads its own path and a Run the draft the core already holds, so what
+// overtakes either is harmless, and a newer scan of the mode can still overtake one in the core.
+// ponytail: the IPC may still deliver an Intent sent right after one of them before it; an early
 // ack from the core would close that gap if it ever matters.
 let dispatchChain = Promise.resolve();
+
+// The Intents the chain does not wait on.
+const UNCHAINED_INTENTS = new Set(["scan_directory", "run", "stop"]);
 
 // The draft Intents: the core answers them before it publishes their change, which reaches the
 // page as a coalesced `view-state` publication (ADR-0016, S3).
 const DRAFT_INTENTS = new Set(["edit_draft", "set_preset"]);
 
 /**
- * Sends an Intent to the Desktop Core after every Intent sent before it was answered (a scan only
- * sent), then applies the state it published for it, but for a draft Intent, whose state arrives
- * as a publication. Resolves to the core's reply, or false when it refused the Intent (the queue
- * or the settings are locked) or is unreachable.
+ * Sends an Intent to the Desktop Core after every Intent sent before it was answered (a scan, a
+ * Run or a Stop only sent), then applies the state it published for it, but for a draft Intent,
+ * whose state arrives as a publication. Resolves to the core's reply, and rejects with its
+ * refusal (the queue or the settings are locked, a Run failed) once that state is applied.
  */
-function dispatchIntent(intent) {
+function sendIntent(intent) {
   const answer = dispatchChain.then(async () => {
     try {
       return await invoke("dispatch", { intent });
-    } catch (err) {
-      console.error(`[dispatch] ${intent.type} refused:`, err);
-      return false;
     } finally {
       if (!DRAFT_INTENTS.has(intent.type)) await syncState();
     }
   });
-  if (intent.type !== "scan_directory") dispatchChain = answer;
+  if (!UNCHAINED_INTENTS.has(intent.type)) dispatchChain = answer.catch(() => {});
   return answer;
+}
+
+/** `sendIntent`, resolving to false when the core refused the Intent or is unreachable. */
+function dispatchIntent(intent) {
+  return sendIntent(intent).catch(err => {
+    console.error(`[dispatch] ${intent.type} refused:`, err);
+    return false;
+  });
 }
 
 // ─── Queues and the view around them ────────────────────────────────────────
@@ -500,7 +521,7 @@ function subtitleAssignment(itemId, path) {
   }
   // `offset_ms` is an i64 and serde rejects a float, so a fraction is truncated. An
   // empty field must stay null (Number("") is 0, which would suppress the global offset),
-  // and a value beyond the safe-integer range would fail the whole run_job request.
+  // and a value beyond the safe-integer range would fail the whole Intent.
   const raw = byId("sub-offset-input")?.value?.trim() ?? "";
   const truncatedMs = Math.trunc(Number(raw));
   const offsetMs = raw !== "" && Number.isSafeInteger(truncatedMs) ? truncatedMs : null;
@@ -517,7 +538,7 @@ function subtitleAssignment(itemId, path) {
 /** Sets (or, with no path, clears) the inspected item's Track Assignment. Refused while a job runs. */
 async function assignSubtitle(path) {
   const item = remuxQueue.inspectedItem();
-  if (!item || jobCoordinator.activeMode !== null) return;
+  if (!item || busy()) return;
   await dispatchIntent(path
     ? { type: "assign_track", mode: "remux", assignment: subtitleAssignment(item.id, path) }
     : { type: "clear_track", mode: "remux", id: item.id });
@@ -533,7 +554,7 @@ async function onAssignSelect(e) {
     return;
   }
   let picked = null;
-  if (jobCoordinator.activeMode === null) {
+  if (!busy()) {
     try {
       picked = await invoke("pick_subtitle_file");
     } catch (err) {
@@ -602,13 +623,13 @@ const telemetryLoop = createTelemetryLoop({
 
 const scanInputDirectory = createDirectoryScanner({
   dispatch: dispatchIntent,
-  onSettled: () => jobCoordinator.syncControls(),
+  onSettled: () => syncControls(),
 });
 
 async function chooseInputDirectory(targetId) {
-  if (jobCoordinator.activeMode !== null) return;
+  if (busy()) return;
   const directory = await invoke("pick_directory");
-  if (!directory || jobCoordinator.activeMode !== null) return;
+  if (!directory || busy()) return;
 
   const input = document.getElementById(targetId);
   if (!input) return;
@@ -943,30 +964,27 @@ function initApp() {
   }
 
   const jobRuntime = {
-    coordinator: jobCoordinator,
     appendLog,
     clearLog,
     invoke,
-    listen,
     queueFor,
     safeAddListener,
     scanInputDirectory,
+    send: sendIntent,
     showModal,
-    syncState,
-    telemetryLoop,
-    updateWorkerChips: chips.update,
+    state: () => appliedState,
     openSettings: mode => openSettings(mode),
   };
-  const controllers = {
+  controllers = {
     remux: new JobController("remux", jobRuntime),
     extract: new JobController("extract", jobRuntime),
   };
   for (const { id, mode, select } of BULK_SELECTION_CONTROLS) {
     safeAddListener(id, "click", () => controllers[mode].applyBulkSelection(mode, select));
   }
-  jobCoordinator.syncControls();
+  syncControls();
   telemetryLoop.start();
-  boot(controllers);
+  boot();
 
   document.addEventListener("keydown", e => {
     if ((e.ctrlKey || e.metaKey) && e.key === "t") {
@@ -981,21 +999,28 @@ function initApp() {
 }
 
 /**
- * Loads the queues and any job from the Desktop Core, which outlives a webview reload: listens to
- * `view-state` first, so no publication after `get_state` is missed, then renders the current
- * state and hands a job it holds to the controller of its mode.
+ * Loads the queues, the Job Coordinator and any job from the Desktop Core, which outlives a
+ * webview reload: listens to `view-state` and `job-log` first, so no publication after
+ * `get_state` is missed, then renders the current state.
  */
-async function boot(controllers) {
+async function boot() {
   try {
     await listen(VIEW_STATE, event => applyState(event.payload));
   } catch (err) {
     console.error("[view-state] listener failed:", err);
   }
-  const job = (await syncState())?.job;
-  if (!job) return;
-  // An extract job is shown in its own view.
-  if (job.mode === "extract") switchView("extract");
-  await controllers[job.mode]?.adopt(job);
+  // A job's log lines go to the console of the mode that owns the batch, or ran the last job.
+  try {
+    await listen(JOB_LOG, event => {
+      const mode = appliedState?.run?.mode ?? appliedState?.job?.mode;
+      if (mode) appendLog(byId(`${mode}-log`), event.payload);
+    });
+  } catch (err) {
+    console.error("[job-log] listener failed:", err);
+  }
+  const state = await syncState();
+  // An extract batch is shown in its own view.
+  if ((state?.run?.mode ?? state?.job?.mode) === "extract") switchView("extract");
 }
 
 if (document.readyState === "loading") {

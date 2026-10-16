@@ -129,8 +129,12 @@ impl Queue {
             .unwrap_or_default()
     }
 
+    /// Whether the accepted manifest lists `id`.
+    pub fn contains(&self, id: &str) -> bool {
+        self.index.contains_key(id)
+    }
+
     /// The selected item IDs in queue order.
-    #[cfg(test)]
     pub fn selected_ids(&self) -> Vec<&str> {
         self.order
             .iter()

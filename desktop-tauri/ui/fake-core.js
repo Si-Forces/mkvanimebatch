@@ -50,7 +50,9 @@ export function draft(mode, fields = {}) {
   const remux = mode === "remux"
     ? { assets_dir: "", preset: "balanced", bitrate: "192k", complexity: "5", sub_offset: "0", ffmpeg_threads: "" }
     : {};
-  return { input_dir: "", out_dir: "", fonts_dir: "", workers: "", io_jobs: "", dry_run: false, no_cache: false, ...remux, ...fields };
+  return {
+    input_dir: "", out_dir: "", fonts_dir: "", workers: "", io_jobs: "", dry_run: false, no_cache: false, ...remux, invalid: null, ...fields,
+  };
 }
 
 /** A published ModeView with `rows` (Rows or IDs), an idle scan and `mode`'s initial draft. */
@@ -64,6 +66,7 @@ export function modeView(rows = [], fields = {}, mode = "remux") {
     vanished_selected_ids: [],
     assignments: {},
     draft: draft(mode),
+    outcome: null,
     ...fields,
   };
 }
@@ -82,6 +85,9 @@ export function jobView(participants = [], fields = {}) {
     ...fields,
   };
 }
+
+/** The published Job Coordinator while nothing holds the batch. */
+export const IDLE_RUN = { phase: "idle", mode: null, settings: null };
 
 /** Drops the nulls the core leaves out of a published Track Assignment. */
 function published(assignment) {
@@ -108,7 +114,14 @@ function applyDraftIntent(view, intent, presets) {
     if (!profile) throw `Unknown preset profile: '${intent.preset}'`;
     const next = profile.id === "custom"
       ? { ...current, preset: "custom" }
-      : { ...current, preset: profile.id, bitrate: profile.bitrate, complexity: String(profile.complexity) };
+      : {
+        ...current,
+        preset: profile.id,
+        bitrate: profile.bitrate,
+        complexity: String(profile.complexity),
+        // The profile replaced a flagged complexity.
+        ...(current.invalid === "complexity" ? { invalid: null } : {}),
+      };
     view.draft = next;
     return JSON.stringify(next) !== JSON.stringify(current);
   }
@@ -119,10 +132,17 @@ function applyDraftIntent(view, intent, presets) {
   const missing = Object.keys(intent.changes).find(key => !(key in current));
   if (missing) throw `Extract has no ${missing} setting.`;
   const changed = Object.keys(intent.changes).filter(key => current[key] !== intent.changes[key]);
-  view.draft = { ...current, ...intent.changes };
+  // An edit of the flagged field clears the flag.
+  const unflagged = current.invalid !== null && current.invalid in intent.changes;
+  view.draft = { ...current, ...intent.changes, ...(unflagged ? { invalid: null } : {}) };
   if (changed.includes("bitrate") || changed.includes("complexity")) view.draft.preset = "custom";
-  return changed.length > 0;
+  return changed.length > 0 || unflagged;
 }
+
+/** The answers the core gives a Run it refuses, or whose start fails (`actor.rs`). */
+const RUN_BUSY = "A job is already running or stopping. Wait for it to finish.";
+const RUN_SCANNING = "The folder is being scanned; a batch can start once the scan ends.";
+const SCAN_STARTING = "A batch is starting; no folder can be scanned until it has started.";
 
 /**
  * A Desktop Core over a scripted View State. `state` is the next state to publish; change it, then
@@ -130,22 +150,53 @@ function applyDraftIntent(view, intent, presets) {
  * `invoke(command, args)` answers `get_state` and `dispatch`: a queue Intent is applied to
  * `state` as the core would: refused while a job runs or the mode scans, a Track Assignment is
  * refused on extract, and only the manifest rows take Intents. A Settings Draft Intent follows
- * `applyDraftIntent`, refused while a job runs. A scan is answered by
- * `onScan(intent)`, which the test scripts and which publishes what it wants itself.
+ * `applyDraftIntent`, refused while busy. A scan is answered by
+ * `onScan(intent)`, which the test scripts and which publishes what it wants itself; every scan
+ * is refused while a start is before its launch.
+ *
+ * Run and Stop mirror the Job Coordinator (`crates/mkv-desktop-core/src/actor.rs` and
+ * `coordinator.rs` hold the rules; change them there first). A Run is refused while busy or while
+ * its mode scans; a draft with no input folder flags `input_dir` (the only build check mirrored;
+ * `draft.rs` holds the rest); otherwise the start begins
+ * (`starting`, its outcome reset) and `onStart(intent)` scripts the rest: by default
+ * `launch(mode)`, which runs a job over the mode's selected rows. Its answer is the Run's. A Stop
+ * of the owning mode ends the job, or the start, as cancelled (`end`) and answers true; of any
+ * other, false. Busy is `run.phase` not idle, or an active job, as `isBusy` reads it.
  */
-export function createFakeCore({ onScan = async () => true } = {}) {
+export function createFakeCore({ onScan = async () => true, onStart = null } = {}) {
   const listeners = new Set();
   const core = {
     state: {
       seq: 0,
       job: null,
+      run: structuredClone(IDLE_RUN),
       defaults: structuredClone(DEFAULTS),
       presets: structuredClone(PRESETS),
       remux: modeView(),
       extract: modeView([], {}, "extract"),
     },
     onScan,
+    onStart: onStart ?? (({ mode }) => core.launch(mode)),
     intents: [],
+    busy: () => core.state.run.phase !== "idle" || Boolean(core.state.job?.active),
+    /** Launches job `job_id` of the starting `mode` over its selected rows, and publishes it running. */
+    launch(mode, job_id = (core.state.job?.job_id ?? 0) + 1) {
+      const participants = core.state[mode].rows.filter(entry => entry.in_manifest && entry.selected).map(entry => entry.id);
+      core.state.run = { phase: "running", mode, settings: structuredClone(DEFAULTS) };
+      core.state.job = jobView(participants, {
+        job_id, mode, input_dir: core.state[mode].directory, effective_settings: structuredClone(DEFAULTS),
+      });
+      core.publish();
+      return true;
+    },
+    /** Ends the batch `run.mode` owns with `outcome`, its job (if any) in `status`, and publishes it. */
+    end(outcome, status = outcome === "done" ? "completed" : outcome) {
+      const mode = core.state.run.mode ?? core.state.job?.mode;
+      if (core.state.job?.active) Object.assign(core.state.job, { status, active: false });
+      core.state.run = structuredClone(IDLE_RUN);
+      core.state[mode].outcome = outcome;
+      return core.publish();
+    },
     onPublish: listener => listeners.add(listener),
     publish() {
       core.state.seq++;
@@ -156,7 +207,7 @@ export function createFakeCore({ onScan = async () => true } = {}) {
     /** Accepts `rows` as the inspection of `directory` for `mode`, as a new manifest. */
     accept(mode, directory, rows, fields = {}) {
       const previous = core.state[mode];
-      core.state[mode] = modeView(rows, { directory, manifest_rev: previous.manifest_rev + 1, draft: previous.draft, ...fields }, mode);
+      core.state[mode] = modeView(rows, { directory, manifest_rev: previous.manifest_rev + 1, draft: previous.draft, outcome: previous.outcome, ...fields }, mode);
       return core.publish();
     },
     async invoke(command, args) {
@@ -164,15 +215,37 @@ export function createFakeCore({ onScan = async () => true } = {}) {
       if (command !== "dispatch") return undefined;
       const { intent } = args;
       core.intents.push(intent);
-      if (intent.type === "scan_directory") return core.onScan(intent);
+      if (intent.type === "scan_directory") {
+        if (core.state.run.phase === "starting") throw SCAN_STARTING;
+        return core.onScan(intent);
+      }
       const view = core.state[intent.mode];
+      if (intent.type === "run") {
+        if (core.busy()) throw RUN_BUSY;
+        if (view.scan.state === "scanning") throw RUN_SCANNING;
+        if (!view.draft.input_dir.trim()) {
+          view.draft.invalid = "input_dir";
+          core.publish();
+          throw "Input directory is required.";
+        }
+        view.draft.invalid = null;
+        view.outcome = null;
+        core.state.run = { phase: "starting", mode: intent.mode, settings: null };
+        core.publish();
+        return core.onStart(intent);
+      }
+      if (intent.type === "stop") {
+        if (core.state.run.mode !== intent.mode) return false;
+        core.end("cancelled");
+        return true;
+      }
       if (intent.type === "edit_draft" || intent.type === "set_preset") {
-        if (core.state.job?.active) throw "A batch is running; the settings are locked until it ends.";
+        if (core.busy()) throw "A batch is running; the settings are locked until it ends.";
         const changed = applyDraftIntent(view, intent, core.state.presets);
         if (changed) core.publish();
         return changed;
       }
-      if (core.state.job?.active) throw "A batch is running; the queue is locked until it ends.";
+      if (core.busy()) throw "A batch is running; the queue is locked until it ends.";
       if (view.scan.state === "scanning") throw "The folder is being scanned; the queue is locked until it ends.";
       if (intent.mode === "extract" && intent.type.endsWith("_track")) throw "Track Assignments are for remux only.";
       const changed = applyIntent(view, intent);
