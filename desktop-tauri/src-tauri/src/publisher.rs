@@ -1,21 +1,24 @@
-//! The webview side of a job: the `JobSink` adapter that emits a job's events, log batches and
-//! completion to the webview.
+//! The webview side of the Desktop Core: the `Publisher` adapter that emits the View State and a
+//! job's events, log batches and completion to the webview.
 
 use mkv_core::log_line::LogLine;
 use mkv_core::pipeline::JobEvent;
-use mkv_desktop_core::job::{JobDone, JobSink};
+use mkv_desktop_core::actor::{Publisher, ViewState};
+use mkv_desktop_core::job::JobDone;
 use tauri::{AppHandle, Emitter, Runtime};
 
+const VIEW_STATE: &str = "view-state";
 const JOB_EVENT: &str = "job-event";
 const JOB_LOG: &str = "job-log";
 const JOB_DONE: &str = "job-done";
 
-/// Emits what a job reports to the webview as `job-event`, `job-log` and `job-done`.
-pub(crate) struct WebviewSink<R: Runtime>(pub(crate) AppHandle<R>);
+/// Emits what the core publishes to the webview as `view-state`, `job-event`, `job-log` and
+/// `job-done`.
+pub(crate) struct WebviewPublisher<R: Runtime>(pub(crate) AppHandle<R>);
 
-impl<R: Runtime> JobSink for WebviewSink<R> {
-    fn event(&self, event: &JobEvent) {
-        let _ = self.0.emit(JOB_EVENT, event);
+impl<R: Runtime> Publisher for WebviewPublisher<R> {
+    fn state(&self, state: &ViewState) {
+        let _ = self.0.emit(VIEW_STATE, state);
     }
 
     fn logs(&self, lines: &[LogLine]) {
@@ -24,6 +27,10 @@ impl<R: Runtime> JobSink for WebviewSink<R> {
 
     fn done(&self, done: &JobDone) {
         let _ = self.0.emit(JOB_DONE, done);
+    }
+
+    fn job_event(&self, event: &JobEvent) {
+        let _ = self.0.emit(JOB_EVENT, event);
     }
 }
 
@@ -54,30 +61,30 @@ mod tests {
     }
 
     #[test]
-    fn the_app_handle_sink_emits_the_three_job_events() {
+    fn the_webview_publisher_emits_the_view_state_and_the_three_job_events() {
         let app = tauri::test::mock_app();
+        let states = record::<Value>(&app, VIEW_STATE);
         let events = record::<Value>(&app, JOB_EVENT);
         let logs = record::<Value>(&app, JOB_LOG);
         let dones = record::<Value>(&app, JOB_DONE);
-        let sink = WebviewSink(app.handle().clone());
+        let publisher = WebviewPublisher(app.handle().clone());
 
-        JobSink::event(&sink, &batch_start(&["ep1"]));
-        JobSink::logs(
-            &sink,
-            &[
-                LogLine::note("probing"),
-                LogLine::error("ERROR: Pipeline failed: x"),
-            ],
-        );
-        JobSink::done(
-            &sink,
-            &JobDone {
-                mode: "remux",
-                job_id: 7,
-                code: -1,
-            },
-        );
+        publisher.state(&ViewState { seq: 1, job: None });
+        publisher.job_event(&batch_start(&["ep1"]));
+        publisher.logs(&[
+            LogLine::note("probing"),
+            LogLine::error("ERROR: Pipeline failed: x"),
+        ]);
+        publisher.done(&JobDone {
+            mode: "remux",
+            job_id: 7,
+            code: -1,
+        });
 
+        assert_eq!(
+            *states.lock().unwrap(),
+            [serde_json::json!({ "seq": 1, "job": null })]
+        );
         assert_eq!(events.lock().unwrap()[0]["type"], "batch_start");
         assert_eq!(
             *logs.lock().unwrap(),

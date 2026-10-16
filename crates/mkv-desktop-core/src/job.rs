@@ -1,9 +1,9 @@
 //! The active job of the Engine Bridge: the Job Slot, the supervisor that takes a job's pipeline
-//! to one terminal, the two-phase stop, and the Job Snapshot. The supervisor reports through a
-//! `JobSink`, so it runs, and is tested, without a UI toolkit; its tasks run on the tokio
-//! runtime the adapter hands `JobState::new`.
+//! to one terminal, and the two-phase stop. The supervisor settles a job from its own private Job
+//! Snapshot (the settlement ledger) and reports through a `JobSink`, so it runs, and is tested,
+//! without a UI toolkit; its tasks run on the tokio runtime the adapter hands `JobState::new`.
 
-use crate::snapshot::{attach_context, BatchStatus, JobSnapshot, SnapshotStore};
+use crate::snapshot::{attach_context, timestamp_ms, BatchStatus, JobSnapshot};
 use mkv_core::log_line::LogLine;
 use mkv_core::pipeline::{
     CancellationToken, EventReceiver, JobEvent, LogReceiver, PipelineSummary,
@@ -24,7 +24,7 @@ const LOG_BATCH_MAX_LINES: usize = 25;
 const LOG_FLUSH_INTERVAL: Duration = Duration::from_millis(25);
 
 /// The end of a job: the `job-done` payload a UI adapter emits.
-#[derive(Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct JobDone {
     pub mode: &'static str,
     pub job_id: u64,
@@ -32,9 +32,36 @@ pub struct JobDone {
     pub code: i32,
 }
 
-/// Where a job's events, log batches and completion go. A UI adapter emits them (the Tauri one
-/// to the webview); tests record them.
+/// The start of a job, as `JobState::start` reports it to the job's sink.
+#[derive(Debug, Clone)]
+pub struct JobStarted {
+    pub job_id: u64,
+    pub mode: &'static str,
+    pub input_dir: String,
+    pub effective_settings: EffectiveSettings,
+    /// The job's wall-clock start, read once, so the supervisor's ledger and every sink's copy
+    /// share it.
+    pub start_time_ms: u64,
+}
+
+impl JobStarted {
+    /// The Job Snapshot of this job as it starts.
+    pub fn snapshot(&self) -> JobSnapshot {
+        JobSnapshot::begin(
+            self.job_id,
+            self.mode,
+            self.start_time_ms,
+            self.input_dir.clone(),
+            self.effective_settings.clone(),
+        )
+    }
+}
+
+/// Where a job's start, events, log batches and completion go: the Desktop Core actor's
+/// `ActorSink` in the app; tests record them.
 pub trait JobSink: Send + Sync + 'static {
+    /// Called once, after the job has reserved the Job Slot and before its supervisor runs.
+    fn started(&self, job: &JobStarted);
     fn event(&self, event: &JobEvent);
     fn logs(&self, lines: &[LogLine]);
     fn done(&self, done: &JobDone);
@@ -58,13 +85,12 @@ struct JobSlot {
 struct Inner {
     slot: Mutex<Option<JobSlot>>,
     next_id: AtomicU64,
-    snapshot: SnapshotStore,
     accepting_starts: AtomicBool,
     /// Where a job's pipeline and supervisor tasks run.
     runtime: Handle,
 }
 
-/// The active job of the app: its Job Slot, its Job Snapshot, and the gate that refuses starts
+/// The active job of the app: its Job Slot and the gate that refuses starts
 /// once shutdown begins. Clones share one state; a job's supervisor holds one for its whole life.
 #[derive(Clone)]
 pub struct JobState(Arc<Inner>);
@@ -75,13 +101,12 @@ impl JobState {
         Self(Arc::new(Inner {
             slot: Mutex::new(None),
             next_id: AtomicU64::new(1),
-            snapshot: SnapshotStore::default(),
             accepting_starts: AtomicBool::new(true),
             runtime,
         }))
     }
 
-    /// Reserves the Job Slot, begins the Job Snapshot, and runs `pipeline_future` under a
+    /// Reserves the Job Slot, reports the start to `sink`, and runs `pipeline_future` under a
     /// supervisor that reports to `sink`. Returns the job's ID.
     pub fn start<S, F>(
         &self,
@@ -101,12 +126,19 @@ impl JobState {
             effective_settings,
             cancel_token,
         } = config;
-        // Slot, then snapshot: the lock order `clear_snapshot` relies on.
         let mut lock = self.reserve()?;
         let job_id = self.0.next_id.fetch_add(1, Ordering::SeqCst);
-        self.0
-            .snapshot
-            .begin(job_id, mode, input_dir, effective_settings)?;
+        // The supervisor's private settlement ledger: built by the same reducer as the snapshot
+        // the UI sees, so teardown never depends on anyone else's copy.
+        let started = JobStarted {
+            job_id,
+            mode,
+            input_dir,
+            effective_settings,
+            start_time_ms: timestamp_ms(),
+        };
+        let mut ledger = started.snapshot();
+        sink.started(&started);
 
         let pipeline_handle = self.0.runtime.spawn(pipeline_future);
         let pipeline_abort = pipeline_handle.abort_handle();
@@ -138,7 +170,7 @@ impl JobState {
 
             let (pipeline_result, completion, ()) = tokio::join!(
                 pipeline_handle,
-                forward_events(&state, &sink, mode, job_id, event_rx),
+                forward_events(&sink, &mut ledger, mode, job_id, event_rx),
                 forward_logs(&sink, log_rx, LOG_FLUSH_INTERVAL),
             );
             let terminal = pipeline_terminal(
@@ -147,7 +179,7 @@ impl JobState {
                 supervisor_cancel.is_cancelled(),
                 &sink,
             );
-            state.finish(&sink, mode, job_id, terminal);
+            finish(&sink, &mut ledger, mode, job_id, terminal);
         });
 
         *lock = Some(JobSlot {
@@ -250,21 +282,6 @@ impl JobState {
         })
     }
 
-    pub fn snapshot(&self) -> Result<Option<JobSnapshot>, String> {
-        self.0.snapshot.get()
-    }
-
-    /// Drops the Job Snapshot unless a job holds the Job Slot; a poisoned slot lock counts as no
-    /// job. Holds the slot lock across the clear, in the slot-then-snapshot order `start` takes,
-    /// so a start cannot reserve the slot and begin its snapshot between the check and the clear.
-    pub fn clear_snapshot(&self) {
-        let lock = self.0.slot.lock();
-        if lock.as_ref().is_ok_and(|slot| slot.is_some()) {
-            return;
-        }
-        self.0.snapshot.clear();
-    }
-
     /// The slot, once this start may take it: shutdown has not begun and no job holds it. The
     /// caller keeps the lock until the job is in the slot, so a shutdown that begins meanwhile
     /// cancels it.
@@ -284,31 +301,34 @@ impl JobState {
             }
         }
     }
+}
 
-    /// Ends job `job_id` at `terminal`: settles the items the pipeline left open, applies and
-    /// sends the terminal, and reports `job-done` with the code its snapshot status gives.
-    fn finish(&self, sink: &impl JobSink, mode: &'static str, job_id: u64, mut terminal: JobEvent) {
-        let snapshot = &self.0.snapshot;
-        attach_context(&mut terminal, mode, job_id);
-        // Item Settlement: every item the pipeline left open ends before the job does, through
-        // the same event the pipeline uses, so a live webview and a reloaded snapshot agree.
-        for mut event in snapshot.settlement_events(job_id, &terminal) {
-            attach_context(&mut event, mode, job_id);
-            snapshot.update(&event, job_id, mode);
-            sink.event(&event);
-        }
-        snapshot.update(&terminal, job_id, mode);
-        let code = snapshot
-            .status_of(job_id)
-            .map(|status| match status {
-                BatchStatus::Completed => 0,
-                BatchStatus::Cancelled => -1,
-                _ => 1,
-            })
-            .unwrap_or(1);
-        sink.event(&terminal);
-        sink.done(&JobDone { mode, job_id, code });
+/// Ends job `job_id` at `terminal`: settles the items the pipeline left open, applies and
+/// sends the terminal, and reports `job-done` with the code the status of `ledger`, the
+/// supervisor's own Job Snapshot, gives.
+fn finish(
+    sink: &impl JobSink,
+    ledger: &mut JobSnapshot,
+    mode: &'static str,
+    job_id: u64,
+    mut terminal: JobEvent,
+) {
+    attach_context(&mut terminal, mode, job_id);
+    // Item Settlement: every item the pipeline left open ends before the job does, through
+    // the same event the pipeline uses, so a live webview and a reloaded snapshot agree.
+    for mut event in ledger.settlement_events(&terminal) {
+        attach_context(&mut event, mode, job_id);
+        ledger.apply(&event);
+        sink.event(&event);
     }
+    ledger.apply(&terminal);
+    let code = match ledger.status {
+        BatchStatus::Completed => 0,
+        BatchStatus::Cancelled => -1,
+        _ => 1,
+    };
+    sink.event(&terminal);
+    sink.done(&JobDone { mode, job_id, code });
 }
 
 /// The terminal a finished pipeline task amounts to: the engine's own `BatchComplete` when it
@@ -384,11 +404,11 @@ pub(crate) fn wait_until(
     }
 }
 
-/// Forwards the engine's events to `sink`, applying each to the Job Snapshot first. Returns the
-/// first `BatchComplete`, held back for the supervisor to settle.
+/// Forwards the engine's events to `sink`, applying each to `ledger` first. Returns the first
+/// `BatchComplete`, held back for the supervisor to settle.
 async fn forward_events(
-    state: &JobState,
     sink: &impl JobSink,
+    ledger: &mut JobSnapshot,
     mode: &str,
     job_id: u64,
     mut event_rx: EventReceiver,
@@ -412,7 +432,7 @@ async fn forward_events(
                 *input_dir = display_canonical_path(input_dir);
             }
             attach_context(&mut event, mode, job_id);
-            state.0.snapshot.update(&event, job_id, mode);
+            ledger.apply(&event);
             // The sink still gets every event; the webview drops non-v1 events itself.
             sink.event(&event);
         }
@@ -482,9 +502,8 @@ fn bridge_terminal(cancelled: bool, problem: Option<(&str, String)>) -> JobEvent
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     use super::*;
-    use crate::snapshot::test_support::effective_settings;
     use serde_json::Value;
-    use std::sync::{Condvar, OnceLock, TryLockError};
+    use std::sync::{Condvar, OnceLock};
 
     /// One multi-thread runtime for every test, standing in for the adapter's. A test may block
     /// its own thread (a stop, a `RecordingSink` wait) while the jobs it started run here.
@@ -533,14 +552,6 @@ pub mod test_support {
             self.0.slot.lock().unwrap().take();
         }
 
-        /// Begins a Job Snapshot for job `id`, as `start` does.
-        pub fn begin_snapshot(&self, id: u64) {
-            self.0
-                .snapshot
-                .begin(id, "remux", "/anime".into(), effective_settings())
-                .unwrap();
-        }
-
         pub fn poison_slot(&self) {
             poison(&self.0.slot);
         }
@@ -554,24 +565,19 @@ pub mod test_support {
                 .as_ref()
                 .is_some_and(|slot| slot.cancel_token.is_cancelled())
         }
-
-        /// Whether another thread holds the slot lock right now.
-        pub fn slot_is_locked(&self) -> bool {
-            matches!(self.0.slot.try_lock(), Err(TryLockError::WouldBlock))
-        }
-
-        /// Holds the Job Snapshot lock; see `SnapshotStore::hold`.
-        pub fn hold_snapshot(&self) -> MutexGuard<'_, Option<JobSnapshot>> {
-            self.0.snapshot.hold()
-        }
     }
 
     /// Everything a `RecordingSink` was given, in order; events and dones as the webview's JSON.
+    /// `snapshot` is the last job's Job Snapshot, begun on `started` and built from its events
+    /// by `JobSnapshot::apply`, as the Desktop Core actor builds the published one.
     #[derive(Default)]
     pub struct Recorded {
         pub events: Vec<Value>,
         pub logs: Vec<Vec<LogLine>>,
         pub dones: Vec<Value>,
+        pub snapshot: Option<JobSnapshot>,
+        /// How many times `started` was called.
+        pub started: usize,
     }
 
     /// A `JobSink` that records what it is given, for a test to read or wait on.
@@ -597,6 +603,16 @@ pub mod test_support {
             self.0 .0.lock().unwrap().dones.clone()
         }
 
+        pub fn started_count(&self) -> usize {
+            self.0 .0.lock().unwrap().started
+        }
+
+        /// The Job Snapshot of the last job this sink saw start.
+        pub fn snapshot(&self) -> JobSnapshot {
+            let snapshot = self.0 .0.lock().unwrap().snapshot.clone();
+            snapshot.expect("the sink saw no job start")
+        }
+
         /// Blocks until `ready` holds for what was recorded, or `timeout` passes. Returns
         /// whether it held.
         pub fn wait_until(&self, timeout: Duration, ready: impl Fn(&Recorded) -> bool) -> bool {
@@ -611,9 +627,22 @@ pub mod test_support {
     }
 
     impl JobSink for RecordingSink {
+        fn started(&self, job: &JobStarted) {
+            let snapshot = job.snapshot();
+            self.record(|recorded| {
+                recorded.started += 1;
+                recorded.snapshot = Some(snapshot);
+            });
+        }
+
         fn event(&self, event: &JobEvent) {
-            let event = serde_json::to_value(event).unwrap();
-            self.record(|recorded| recorded.events.push(event));
+            let json = serde_json::to_value(event).unwrap();
+            self.record(|recorded| {
+                recorded.events.push(json);
+                if let Some(snapshot) = &mut recorded.snapshot {
+                    snapshot.apply(event);
+                }
+            });
         }
 
         fn logs(&self, lines: &[LogLine]) {
@@ -747,8 +776,8 @@ mod tests {
             .collect()
     }
 
-    /// Waits until the webview has been sent `target` as the progress of `id`. The supervisor
-    /// applies an event to the snapshot before it emits it, so the snapshot has it too.
+    /// Waits until the webview has been sent `target` as the progress of `id`. The sink
+    /// applies each event to its snapshot as it records it, so the snapshot has it too.
     fn wait_for_progress(sink: &RecordingSink, id: &str, target: f64) {
         assert!(
             sink.wait_until(Duration::from_secs(2), |recorded| {
@@ -847,12 +876,16 @@ mod tests {
             start_pending(&job, &sink).unwrap_err(),
             "Application is closing; no new job can start."
         );
+        // A refused start never reports a start to the sink.
+        assert_eq!(sink.started_count(), 0);
         job.open_starts();
         let job_id = start_pending(&job, &sink).unwrap();
         assert_eq!(
             start_pending(&job, &sink).unwrap_err(),
             "A job is already running or stopping. Wait for it to finish."
         );
+        assert_eq!(sink.started_count(), 1);
+        assert_eq!(sink.snapshot().job_id, job_id);
 
         job.stop(Some(job_id), Duration::from_millis(20)).unwrap();
         wait_released(&job, &sink, job_id);
@@ -900,6 +933,8 @@ mod tests {
         assert_eq!(start["mode"], "remux");
         assert_eq!(start["job_id"], job_id);
         assert_eq!(start["source"], "engine");
+        // A clean success: the ledger ended Completed.
+        assert_eq!(done_for(&sink, job_id)["code"], 0);
     }
 
     #[test]
@@ -936,7 +971,7 @@ mod tests {
         job.stop(Some(job_id), Duration::from_millis(20)).unwrap();
 
         assert!(!job.is_active());
-        let snapshot = job.snapshot().unwrap().unwrap();
+        let snapshot = sink.snapshot();
         assert_eq!(snapshot.status, BatchStatus::Cancelled);
         assert_eq!(
             snapshot.ordered_item_ids,
@@ -1002,7 +1037,7 @@ mod tests {
             terminal_for(&sink, job_id)["error"],
             "selected item vanished"
         );
-        let snapshot = job.snapshot().unwrap().unwrap();
+        let snapshot = sink.snapshot();
         assert_eq!(snapshot.status, BatchStatus::Error);
         assert!(snapshot.items.is_empty());
         assert_eq!(done_for(&sink, job_id)["code"], 1);
@@ -1027,7 +1062,7 @@ mod tests {
         wait_for_progress(&sink, "ep2", 40.0);
         job.stop(Some(job_id), Duration::from_secs(1)).unwrap();
 
-        let snapshot = job.snapshot().unwrap().unwrap();
+        let snapshot = sink.snapshot();
         assert_eq!(snapshot.status, BatchStatus::Cancelled);
         assert_eq!(snapshot.completed_items(), 2);
         assert_eq!(snapshot.items["ep2"].status, ItemStatus::Cancelled);
@@ -1073,7 +1108,7 @@ mod tests {
         let terminal = terminal_for(&sink, job_id);
         assert_eq!(terminal["cancelled"], false);
         assert_eq!(terminal["error"], "scan failed before any stop");
-        assert_ne!(done_for(&sink, job_id)["code"], -1);
+        assert_eq!(done_for(&sink, job_id)["code"], 1);
         assert!(
             sink.log_batches().concat().contains(&LogLine::error(
                 "ERROR: Pipeline failed: scan failed before any stop"
@@ -1143,7 +1178,7 @@ mod tests {
         );
         // The engine's own terminal is emitted unchanged, but the snapshot calls the job failed.
         assert_eq!(terminal_for(&sink, job_id)["success"], true);
-        let snapshot = job.snapshot().unwrap().unwrap();
+        let snapshot = sink.snapshot();
         assert_eq!(snapshot.status, BatchStatus::Error);
         assert_eq!(done_for(&sink, job_id)["code"], 1);
     }
@@ -1205,6 +1240,7 @@ mod tests {
             previous_worker,
         );
         wait_released(&job, &sink, previous_id);
+        assert_eq!(done_for(&sink, previous_id)["code"], 0);
 
         let token = CancellationToken::new();
         let worker_token = token.clone();
@@ -1230,7 +1266,7 @@ mod tests {
         assert!(job.is_active());
         job.stop(Some(job_id), Duration::from_secs(1)).unwrap();
 
-        let snapshot = job.snapshot().unwrap().unwrap();
+        let snapshot = sink.snapshot();
         assert_eq!(snapshot.status, BatchStatus::Cancelled);
         assert_eq!(snapshot.completed_items(), 2);
         assert_eq!(terminal_for(&sink, job_id)["cancelled"], true);
@@ -1252,7 +1288,7 @@ mod tests {
         );
         wait_released(&job, &sink, job_id);
 
-        let snapshot = job.snapshot().unwrap().unwrap();
+        let snapshot = sink.snapshot();
         assert_eq!(snapshot.status, BatchStatus::Error);
         assert_eq!(snapshot.items["ep2"].status, ItemStatus::Error);
         assert_eq!(snapshot.items["ep1"].status, ItemStatus::Error);
@@ -1300,66 +1336,6 @@ mod tests {
             r"\\server\share\Show"
         );
         assert_eq!(display_canonical_path("/home/user/show"), "/home/user/show");
-    }
-
-    #[test]
-    fn test_clear_snapshot_ignored_while_job_is_active() {
-        let state = job_state();
-        state.occupy(42);
-        state.begin_snapshot(42);
-        state.clear_snapshot();
-        assert!(state.snapshot().unwrap().is_some());
-    }
-
-    #[test]
-    fn test_clear_snapshot_drops_the_snapshot_when_no_job_is_active() {
-        let state = job_state();
-        state.begin_snapshot(42);
-        assert!(state.snapshot().unwrap().is_some());
-
-        state.clear_snapshot();
-        assert!(state.snapshot().unwrap().is_none());
-    }
-
-    #[test]
-    fn test_clear_snapshot_drops_the_snapshot_when_the_slot_is_poisoned() {
-        let state = job_state();
-        state.poison_slot();
-        state.begin_snapshot(42);
-
-        state.clear_snapshot();
-        assert!(state.snapshot().unwrap().is_none());
-    }
-
-    #[test]
-    fn test_clear_snapshot_holds_the_slot_until_it_has_cleared() {
-        let state = job_state();
-        state.begin_snapshot(42);
-        let guard = state.hold_snapshot();
-
-        // The closure owns the snapshot guard, so a failed assert drops it while unwinding and the
-        // scope can join the blocked clear instead of hanging.
-        thread::scope(|scope| {
-            let clear = scope.spawn(|| state.clear_snapshot());
-            // The clear now waits for the snapshot lock. A start must not get the slot meanwhile:
-            // it would begin a snapshot that the clear then wipes.
-            let waited = std::time::Instant::now();
-            while !state.slot_is_locked() {
-                assert!(
-                    waited.elapsed() < Duration::from_secs(2),
-                    "clear_snapshot never held the slot"
-                );
-                thread::sleep(Duration::from_millis(5));
-            }
-            thread::sleep(Duration::from_millis(50));
-            assert!(
-                state.slot_is_locked(),
-                "clear_snapshot let go of the slot before it cleared"
-            );
-            drop(guard);
-            clear.join().unwrap();
-        });
-        assert!(state.snapshot().unwrap().is_none());
     }
 
     #[test]

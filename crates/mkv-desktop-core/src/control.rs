@@ -55,11 +55,7 @@ impl ScanState {
     /// inspection is cancelled, and the new one replaces it as the active scan; the previous
     /// registration's drop then leaves the new one alone. Keep the registration alive until the
     /// inspection ends: its drop is what tells teardown the inspection has finished.
-    pub fn begin(
-        &self,
-        job: &JobState,
-        dir: &Path,
-    ) -> Result<(ScanRegistration<'_>, CancellationToken), String> {
+    pub fn begin(&self, dir: &Path) -> Result<(ScanRegistration<'_>, CancellationToken), String> {
         let start_lock = self.start_lock.lock().map_err(|e| e.to_string())?;
         self.ensure_accepting_starts()?;
         if !dir.is_dir() {
@@ -73,7 +69,6 @@ impl ScanState {
             id,
             cancel_token: cancel_token.clone(),
         });
-        job.clear_snapshot();
         drop(start_lock);
         Ok((ScanRegistration { state: self, id }, cancel_token))
     }
@@ -407,7 +402,7 @@ mod tests {
     fn test_cleanup_waits_until_the_scan_registration_drops() {
         let (job, scan_state) = (job_state(), ScanState::default());
         let tmp = tempfile::tempdir().unwrap();
-        let (registration, token) = scan_state.begin(&job, tmp.path()).unwrap();
+        let (registration, token) = scan_state.begin(tmp.path()).unwrap();
         let released = AtomicBool::new(false);
 
         std::thread::scope(|scope| {
@@ -427,7 +422,7 @@ mod tests {
             );
         });
 
-        let (_registration, _token) = scan_state.begin(&job, tmp.path()).unwrap();
+        let (_registration, _token) = scan_state.begin(tmp.path()).unwrap();
         let error =
             cleanup_owned_processes_with_timeout(&job, &scan_state, Duration::from_millis(50))
                 .unwrap_err();
@@ -437,16 +432,16 @@ mod tests {
 
     #[test]
     fn test_begin_replaces_and_cancels_the_previous_scan() {
-        let (job, scan_state) = (job_state(), ScanState::default());
+        let scan_state = ScanState::default();
         let tmp = tempfile::tempdir().unwrap();
-        let (first, first_token) = scan_state.begin(&job, tmp.path()).unwrap();
-        let (_second, second_token) = scan_state.begin(&job, tmp.path()).unwrap();
+        let (first, first_token) = scan_state.begin(tmp.path()).unwrap();
+        let (_second, second_token) = scan_state.begin(tmp.path()).unwrap();
         assert!(first_token.is_cancelled());
 
         drop(first);
         assert!(scan_state.is_active(), "the old drop vacated the new scan");
         assert!(!second_token.is_cancelled());
-        assert!(scan_state.begin(&job, &tmp.path().join("missing")).is_err());
+        assert!(scan_state.begin(&tmp.path().join("missing")).is_err());
     }
 
     #[test]
@@ -506,8 +501,15 @@ mod tests {
             self.job
                 .wait_until_released(job_id, Duration::from_secs(5))
                 .unwrap();
-            let snapshot = self.job.snapshot().unwrap();
-            snapshot.expect("a finished job must leave a snapshot")
+            self.sink.snapshot()
+        }
+
+        /// The `job-done` code of the last job this bridge ran.
+        fn done_code(&self) -> i64 {
+            let dones = self.sink.dones();
+            dones.last().expect("no job-done recorded")["code"]
+                .as_i64()
+                .unwrap()
         }
     }
 
@@ -523,7 +525,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_job_snapshot_carries_the_effective_settings() {
+    fn test_run_job_reports_the_effective_settings_to_its_sink() {
         let bridge = Bridge::new();
         let tmp = tempfile::tempdir().unwrap();
         let request = BatchRequest {
@@ -538,13 +540,14 @@ mod tests {
 
         let snapshot = bridge.run_to_completion(request);
 
-        // The snapshot is the finished job's, after BatchStart replaced the one `run_job` began.
-        assert_eq!(snapshot.effective_settings, Some(expected));
+        // The snapshot is the finished job's: BatchStart replaced its batch, not its settings.
+        assert_eq!(snapshot.effective_settings, expected);
         assert_eq!(snapshot.total_items, 0);
+        assert_eq!(bridge.done_code(), 0);
     }
 
     #[test]
-    fn test_run_job_canonicalizes_linked_input_dir() {
+    fn test_run_job_reports_the_canonical_linked_input_dir_to_its_sink() {
         let bridge = Bridge::new();
         let target_dir = tempfile::tempdir().unwrap();
         let parent_dir = tempfile::tempdir().unwrap();
@@ -572,10 +575,8 @@ mod tests {
             "link creation failed; run_job input_dir canonicalization is untested"
         );
         let linked_input_dir = symlink_path.to_string_lossy().into_owned();
-        let snapshot_input_dir = bridge
-            .run_dry_extract(symlink_path)
-            .input_dir
-            .expect("snapshot should preserve input path");
+        let snapshot_input_dir = bridge.run_dry_extract(symlink_path).input_dir;
+        assert_eq!(bridge.done_code(), 0);
         let canonical_target = std::fs::canonicalize(target_dir.path()).unwrap();
         assert_ne!(snapshot_input_dir, linked_input_dir);
         assert_eq!(
@@ -620,10 +621,8 @@ mod tests {
             .unwrap()
             .to_string_lossy()
             .into_owned();
-        assert_eq!(
-            snapshot.input_dir.as_deref(),
-            Some(expected_display.as_str())
-        );
+        assert_eq!(snapshot.input_dir, expected_display);
+        assert_eq!(bridge.done_code(), 0);
     }
 
     /// A session cache backed by `dir/inspect_cache.json`, whose file already holds an entry

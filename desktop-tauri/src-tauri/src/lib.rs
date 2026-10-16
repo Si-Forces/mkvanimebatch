@@ -1,15 +1,17 @@
 mod commands;
 mod diagnostics;
 mod process;
-mod sink;
+mod publisher;
 mod telemetry;
 mod window;
 
+use mkv_desktop_core::actor::Core;
 use mkv_desktop_core::control::{
     begin_shutdown, cancel_shutdown, cleanup_owned_processes, InspectCacheState, ScanState,
 };
 use mkv_desktop_core::job::JobState;
 use mkv_desktop_core::telemetry::TelemetryState;
+use publisher::WebviewPublisher;
 use tauri::{Emitter, Manager};
 
 /// Host `libwayland-client.so.0` locations to preload inside an AppImage.
@@ -75,6 +77,12 @@ pub fn run() {
         .setup(|app| {
             // As early as the log directory is known; a failed lookup leaves stderr only.
             diagnostics::init(app.path().app_log_dir().ok().as_deref());
+            // The Desktop Core actor runs on the tokio runtime Tauri runs its async commands on,
+            // and publishes to the webview.
+            app.manage(Core::spawn(
+                tauri::async_runtime::handle().inner().clone(),
+                WebviewPublisher(app.handle().clone()),
+            ));
             Ok(())
         })
         // Jobs run on the tokio runtime Tauri runs its async commands on.
@@ -104,6 +112,7 @@ pub fn run() {
             commands::get_preset_profiles,
             commands::get_default_settings,
             commands::get_job_snapshot,
+            commands::get_state,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
