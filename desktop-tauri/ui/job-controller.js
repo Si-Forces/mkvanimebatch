@@ -1,7 +1,7 @@
-import { buildTrackAssignmentsForManifest, isSameDirectory } from "./queue-state.js";
+import { isSameDirectory } from "./queue-view.js";
 
 /** Webview event names emitted by the engine bridge; must match `src-tauri/src/publisher.rs` (`cleanup-error`: `commands.rs`). */
-export const JOB_EVENT = "job-event";
+export const VIEW_STATE = "view-state";
 const JOB_LOG = "job-log";
 export const JOB_DONE = "job-done";
 export const CLEANUP_ERROR = "cleanup-error";
@@ -34,6 +34,9 @@ const STATUS_PILLS = {
 
 const TERMINAL_LIFECYCLE = { completed: "done", cancelled: "cancelled" };
 
+/** The `job-done` code of a finished Job View's status (architecture.md §5.1). */
+const DONE_CODES = { completed: 0, cancelled: -1 };
+
 /**
  * Converts the Remux view's seconds entry to the engine's `default_sub_offset_ms`, rounding
  * half away from zero like the CLI's `--sub-offset`. An empty entry is `null`; an explicit
@@ -58,7 +61,6 @@ export class JobController {
     this.runtime = runtime;
     this.running = false;
     this.unlistenLog = null;
-    this.unlistenEvent = null;
     this.unlistenDone = null;
     this.lifecycle = "idle";
     this.startGeneration = 0;
@@ -76,7 +78,6 @@ export class JobController {
     this.runtime.clearLog(this.logEl);
 
     this.runtime.coordinator.register(this);
-    this.runtime.queueFor(mode).onSelectionChange = () => this.syncGlobalControls();
 
     this.runtime.safeAddListener(this.runBtn, "click", () => this.start());
     this.runtime.safeAddListener(this.stopBtn, "click", () => this.stop());
@@ -92,43 +93,47 @@ export class JobController {
     }
   }
 
-  /** True when a `job-event` / `job-done` payload belongs to this controller's current job. */
+  /** True when a `job-done` payload belongs to this controller's current job. */
   isOwnSignal(payload) {
     return payload?.job_id === this.jobId && (!payload?.mode || payload.mode === this.mode);
   }
 
-  /** Takes over a running job from `coordinator.restore()`, which has already attached the coordinator to it. */
-  restoreActiveSnapshot(snapshot, unlistenEvent, unlistenDone) {
-    this.unlistenEvent = unlistenEvent;
-    this.unlistenDone = unlistenDone;
-    this.jobId = snapshot.job_id;
+  /**
+   * Takes over `job`, the Job View a webview (re)load found: a finished one only sets the status
+   * pill; a running one moves the coordinator to `running` for this mode and waits for its
+   * `job-done`. The View State is read again once that listener is bound, so a job that ended in
+   * between, whose `job-done` nobody heard, still ends here.
+   */
+  async adopt(job) {
+    if (!job.active) {
+      this.lifecycle = TERMINAL_LIFECYCLE[job.status] ?? "failed";
+      this.renderStatus();
+      return;
+    }
+    if (!this.runtime.coordinator.adopt(this.mode)) return;
+    this.jobId = job.job_id;
     this.launched = true;
     this.setRunning(true);
-    // `null`, not undefined: a snapshot without settings must not fall back to the idle defaults.
-    this.runtime.updateWorkerChips(true, snapshot.effective_settings ?? null);
+    // `null`, not undefined: a job without settings must not fall back to the idle defaults.
+    this.runtime.updateWorkerChips(true, job.effective_settings ?? null);
     this.runtime.telemetryLoop.setJobActive(true);
-  }
-
-  restoreTerminalSnapshot(snapshot) {
-    this.lifecycle = TERMINAL_LIFECYCLE[snapshot.status] ?? "failed";
-    this.renderStatus();
-  }
-
-  handleSnapshotSignal(type, payload, replay = false) {
-    if (!this.running || !this.isOwnSignal(payload)) return;
-    if (type === "done") {
-      this.onDone(payload.code);
-    } else if (type === "event") {
-      const queue = this.runtime.queueFor(this.mode);
-      // A pre-fetch progress event may already be reflected in the snapshot.
-      if (replay && payload.type === "item_progress" && typeof payload.progress === "number" &&
-          payload.progress < (queue.state?.items?.get(payload.id)?.progress ?? -Infinity)) return;
-      queue.handleEvent(payload);
+    try {
+      const unlisten = await this.runtime.listen(JOB_DONE, e => {
+        if (this.isOwnSignal(e.payload)) this.onDone(e.payload.code);
+      });
+      if (this.jobId === job.job_id) this.unlistenDone = unlisten;
+      else unlisten();
+    } catch (err) {
+      console.error("[job-done] listener failed:", err);
+    }
+    const current = (await this.runtime.syncState())?.job;
+    if (this.jobId === job.job_id && current?.job_id === job.job_id && !current.active) {
+      this.onDone(DONE_CODES[current.status] ?? 1);
     }
   }
 
   cleanupListeners() {
-    for (const key of ["unlistenLog", "unlistenEvent", "unlistenDone"]) {
+    for (const key of ["unlistenLog", "unlistenDone"]) {
       if (this[key]) {
         this[key]();
         this[key] = null;
@@ -223,7 +228,7 @@ export class JobController {
     const inputDir = batchRequest.input_dir;
     const generation = ++this.startGeneration;
     const tracker = this.runtime.queueFor(this.mode);
-    const capturedDir = tracker.currentDirectory || tracker.lastScannedPath;
+    const capturedDir = tracker.currentDirectory;
     const selectedIds = capturedDir ? tracker.getSelectedOrderedItemIds() : null;
     const vanishedBeforeScan = capturedDir ? [...(tracker.state?.vanishedSelectedIds ?? [])] : [];
     const assignmentSnapshot = capturedDir ? new Map(tracker.assignments) : null;
@@ -253,7 +258,7 @@ export class JobController {
 
     const inspected = await this.runtime.scanInputDirectory(inputDir, this.mode, {
       force: true,
-      options: { noCache: batchRequest.no_cache },
+      noCache: batchRequest.no_cache,
     });
     if (generation !== this.startGeneration) return;
     if (!inspected) {
@@ -261,7 +266,7 @@ export class JobController {
       this.abortStart();
       return;
     }
-    const isSameDir = Boolean(capturedDir) && isSameDirectory(capturedDir, tracker.currentDirectory || tracker.lastScannedPath);
+    const isSameDir = Boolean(capturedDir) && isSameDirectory(capturedDir, tracker.currentDirectory);
 
     const effectiveSelectedIds = isSameDir ? selectedIds : tracker.getSelectedOrderedItemIds();
     if (!effectiveSelectedIds || effectiveSelectedIds.length === 0) {
@@ -269,7 +274,7 @@ export class JobController {
       this.abortStart();
       return;
     }
-    const discoveredIds = new Set(tracker.lastManifest?.items?.map(item => item.id) ?? []);
+    const discoveredIds = new Set(tracker.manifestItemIds());
     if (isSameDir) {
       const reappearedIds = vanishedBeforeScan.filter(id => discoveredIds.has(id));
       const missingIds = [...new Set([
@@ -290,13 +295,13 @@ export class JobController {
 
     if (this.mode === "remux") {
       const effectiveAssignments = isSameDir ? assignmentSnapshot : tracker.assignments;
-      const fullAssignments = buildTrackAssignmentsForManifest(effectiveAssignments, tracker.lastManifest);
+      // Only the assignments of items the forced scan still found, and of those the selected ones.
+      const surviving = [...effectiveAssignments.values()].filter(a => discoveredIds.has(a.target_video));
       const selectedSet = new Set(effectiveSelectedIds);
-      batchRequest.assignments = fullAssignments?.filter(a => selectedSet.has(a.target_video)) ?? null;
+      batchRequest.assignments = surviving.length ? surviving.filter(a => selectedSet.has(a.target_video)) : null;
     }
     this.cleanupListeners();
 
-    const earlyEvents = [];
     const earlyDone = [];
     const unlisteners = [];
     let launched = false;
@@ -304,14 +309,6 @@ export class JobController {
     try {
       unlisteners.push(await this.runtime.listen(JOB_LOG, e => {
         if (generation === this.startGeneration || launched) this.runtime.appendLog(this.logEl, e.payload);
-      }));
-      unlisteners.push(await this.runtime.listen(JOB_EVENT, e => {
-        if (generation !== this.startGeneration && !launched) return;
-        if (this.jobId === null) {
-          earlyEvents.push(e.payload);
-          return;
-        }
-        if (this.isOwnSignal(e.payload)) tracker.handleEvent(e.payload);
       }));
       unlisteners.push(await this.runtime.listen(JOB_DONE, e => {
         if (generation !== this.startGeneration && !launched) return;
@@ -333,7 +330,7 @@ export class JobController {
       unlisteners.forEach(unlisten => unlisten());
       return;
     }
-    [this.unlistenLog, this.unlistenEvent, this.unlistenDone] = unlisteners;
+    [this.unlistenLog, this.unlistenDone] = unlisteners;
 
     try {
       this.launched = true;
@@ -343,9 +340,6 @@ export class JobController {
       const jobId = await this.launchPromise;
       if (this.running) {
         this.jobId = jobId;
-        for (const payload of earlyEvents) {
-          if (this.isOwnSignal(payload)) tracker.handleEvent(payload);
-        }
         const done = earlyDone.find(payload => this.isOwnSignal(payload));
         if (done) this.onDone(done.code);
       }
@@ -413,9 +407,9 @@ export class JobController {
     if (!this.running || this.jobId === null) return;
     const tracker = this.runtime.queueFor(this.mode);
     // `job-done` codes: 0 completed, -1 cancelled, 1 otherwise (architecture.md §5.1). A Stop
-    // that lost the race to a completed job is no cancellation: only the terminal says so.
+    // that lost the race to a completed job is no cancellation: only the terminal says so. The
+    // core publishes the state a job ended in before its `job-done`, so the queue holds it.
     const cancelled = tracker.state?.batchCancelled === true || code === -1;
-    tracker.endBatch(cancelled);
     const succeeded = Boolean(tracker.state?.batchSuccess) && code === 0;
     this.lifecycle = cancelled ? "cancelled" : (succeeded ? "done" : "failed");
     this.launched = false;
@@ -440,9 +434,6 @@ export class JobController {
    * `start()` captures the ordered selected IDs before the forced inspection, so a selection
    * change during preflight would change what the user believes they run without changing the
    * request. The freeze covers both modes' queues.
-   *
-   * The startup snapshot restore is excluded: its `restoring` phase blocks a concurrent start,
-   * but no job owns a batch then, and the user may still adjust a restored queue.
    */
   isJobActive() {
     return this.runtime.coordinator.activeMode !== null;

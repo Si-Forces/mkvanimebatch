@@ -24,7 +24,7 @@ MKV_REQUIRE_MEDIA_TOOLS=1 cargo test -p mkv-core --test test_real_remux
 cargo test -p mkv-core --bench bench_real_media
 
 # One frontend suite (Node 20+, node:test, no package.json/npm)
-node --test desktop-tauri/ui/queue-state.test.js
+node --test desktop-tauri/ui/queue-view.test.js
 
 # Builds
 cargo build --release -p mkv-cli                  # CLI
@@ -95,18 +95,19 @@ Invariants to preserve:
 
 ### Engine ↔ desktop bridge
 
-The bridge lives in `crates/mkv-desktop-core`: the active job in `job.rs` (`JobState`: the Job Slot, the supervisor, the two-phase stop), the `JobSnapshot` and its reducer in `snapshot.rs`, the Desktop Core actor in `actor.rs`, and the run, stop and shutdown logic in `control.rs`. Its tasks run on a tokio `Handle` the adapter passes to `JobState::new` and `Core::spawn`. In `desktop-tauri/src-tauri/src`, `commands.rs` and `process.rs` define the thin Tauri commands that call it (`inspect_directory`, `canonical_directory`, `resolve_batch_request`, `run_job`, `stop_job`, `get_default_settings`, `get_job_snapshot`, `get_state`, …), and `publisher.rs` holds the `AppHandle` `Publisher`. The engine streams `JobEvent`s and log lines over two tokio mpsc channels. A supervisor task forwards them through a `JobSink`, which in the app is the actor's `ActorSink` and in tests records them with no Tauri app. The supervisor reduces the events into its own private `JobSnapshot`, the settlement ledger it settles the job and computes `job-done` from, so teardown never depends on the actor. The actor reduces the same events with the same `JobSnapshot::apply` into the published snapshot, which carries the job's Effective Settings so a webview reload can rebuild the queue and the worker chips. It publishes the whole View State as `view-state` at most every 66 ms, forwards `job-event` and `job-log` (batched) at once, and on `job-done` publishes first.
+The bridge lives in `crates/mkv-desktop-core`: the active job in `job.rs` (`JobState`: the Job Slot, the supervisor, the two-phase stop), the `JobSnapshot` and its reducer in `snapshot.rs`, the Desktop Core actor in `actor.rs` (the Intents, the View State), each mode's queue (Inspection Manifest, Queue Selection, Track Assignments, rows) in `queue.rs`, the Inspection Coordinator in `inspection.rs`, and the run, stop and shutdown logic in `control.rs`. Its tasks run on a tokio `Handle` the adapter passes to `JobState::new` and `Core::spawn`. In `desktop-tauri/src-tauri/src`, `commands.rs` and `process.rs` define the thin Tauri commands that call it (`dispatch`, `get_state`, `resolve_batch_request`, `run_job`, `stop_job`, `get_default_settings`, …), and `publisher.rs` holds the `AppHandle` `Publisher`. The engine streams `JobEvent`s and log lines over two tokio mpsc channels. A supervisor task forwards them through a `JobSink`, which in the app is the actor's `ActorSink` and in tests records them with no Tauri app. The supervisor reduces the events into its own private `JobSnapshot`, the settlement ledger it settles the job and computes `job-done` from, so teardown never depends on the actor. The actor reduces the same events with the same `JobSnapshot::apply` into the published snapshot, which carries the job's Effective Settings. It owns each mode's queue and scan, applies the Intents `dispatch` sends (a scan, a selection, a reorder, a Track Assignment), and publishes the whole View State (`{seq, job, remux, extract}`) as `view-state` at most every 66 ms, at once before a `dispatch` reply, and before `job-done`. It forwards `job-log` (batched) at once. A webview reload calls `get_state`, so it loses nothing but the log.
 
 Only one job runs at a time. Stopping is two-phase: a cooperative cancel with a 2 s wait, then an abort of the pipeline task.
 
-Directory Identities that cross the bridge must use the display form of the canonical path, with the `\\?\` prefix stripped (`display_canonical_path`). That covers `canonical_directory` (which `scanInputDirectory` calls on the typed path first) as well as `canonical_dir`, the Job Snapshot's `input_dir`, and `BatchStart.input_dir`. The Queue Tracker compares directories byte for byte and never normalizes a path in JS, so a mismatch silently breaks selection and ordering.
+Directory Identities that cross the bridge must use the display form of the canonical path, with the `\\?\` prefix stripped (`display_canonical_path`). That covers the identity a `ScanDirectory` Intent resolves the typed path to (`inspection::canonicalize_directory`), as well as `canonical_dir`, a ModeView's `directory`, the Job Snapshot's `input_dir`, and `BatchStart.input_dir`. The Desktop Core's queue and the JS preflight compare directories byte for byte and never normalize a path, so a mismatch silently breaks selection and ordering.
 
 On the frontend:
 
-- `queue-state.js` holds a pure reducer that applies `JobEvent`s to queue state.
-- `queue-view.js` renders the cards.
-- `job-controller.js` builds the `BatchRequest` and starts and stops runs.
-- The coordinators allow one active job across the Remux and Extract views, and deduplicate in-flight inspections.
+- `app.js` applies each `view-state` (dropping one whose `seq` is not newer) and boots from `get_state`.
+- `queue-view.js` renders the published rows and turns selection, reorder and Track Assignment clicks into Intents; it holds no queue rules.
+- `directory-scan.js` sends the `ScanDirectory` Intent.
+- `job-controller.js` builds the `BatchRequest`, guards the selection through preflight, starts and stops runs, and adopts a job a reload finds.
+- `job-coordinator.js` allows one active job across the Remux and Extract views.
 
 Linux-only env defaults are set in `lib.rs` (`init_linux_env`, ADR-0015). The WebKitGTK DMABUF workaround is scoped to the AppImage on an NVIDIA driver on purpose. Don't extend it to deb/rpm.
 

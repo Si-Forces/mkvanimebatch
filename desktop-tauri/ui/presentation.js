@@ -3,7 +3,6 @@
  * text and color, the list filters, the bottom bar's progress, the subtitle precedence ladder
  * and the telemetry sparklines. Nothing here decides what the engine does.
  */
-import { formatElapsedDuration, formatOutcomeDuration } from "./queue-state.js";
 
 /**
  * A path's segments as the Finder path bar shows them: split on `/` or `\`, with empty, `.`
@@ -51,6 +50,31 @@ export function logDisplayText(line) {
   return String(line)
     .replace(/(^|\s)[\\/]+(?=[^\s\\/])/g, "$1")
     .replace(/[\\/]+/g, (sep, at, text) => (digit(text[at - 1]) && digit(text[at + sep.length]) ? sep : " › "));
+}
+
+/**
+ * Format a measured item duration for cards and tags (e.g. <0.1s, 4.2s, 1m 15.4s).
+ *
+ * @param {number} seconds
+ * @returns {string}
+ */
+export function formatOutcomeDuration(seconds) {
+  if (seconds < 0.1) return "<0.1s";
+  const rounded = Math.round(seconds * 10) / 10;
+  if (rounded < 60) return `${rounded.toFixed(1)}s`;
+  return `${Math.floor(rounded / 60)}m ${(rounded % 60).toFixed(1)}s`;
+}
+
+/**
+ * Format an in-flight elapsed time in whole seconds (e.g. 5s, 1m 15s).
+ *
+ * @param {number} seconds
+ * @returns {string}
+ */
+export function formatElapsedDuration(seconds) {
+  const sec = Math.max(0, seconds);
+  if (sec < 60) return `${Math.floor(sec)}s`;
+  return `${Math.floor(sec / 60)}m ${Math.floor(sec % 60)}s`;
 }
 
 /** The color token of an item status: running is blue, done green, failed red, the rest muted. */

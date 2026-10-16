@@ -1,18 +1,5 @@
 import {
-  carryOverAssignments,
-  createQueueState,
-  createQueueStateFromSnapshot,
   formatOutcomeDuration,
-  getSelectedCount,
-  guardUnsettledItems,
-  isSameDirectory,
-  reduceQueueEvent,
-  reconcileQueueSelection,
-  reorderItem,
-  setAllSelected,
-  setItemSelected,
-} from "./queue-state.js";
-import {
   matchesFilter,
   prettyPath,
   remuxAudioText,
@@ -22,11 +9,109 @@ import {
   subtitleSourceText,
 } from "./presentation.js";
 
-const EMPTY_MANIFEST = { version: 2, items: [] };
-
 /** The status ring: its radius, and the circumference its dash offset is measured against. */
 const RING_RADIUS = 8;
 export const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS;
+
+/** A mode's queue before the Desktop Core published one. */
+const EMPTY_VIEW = {
+  directory: null,
+  scan: { state: "idle" },
+  manifest_rev: 0,
+  subtitle_candidates: {},
+  rows: [],
+  vanished_selected_ids: [],
+  assignments: {},
+};
+
+/** Terminal item status -> the state counter it increments. */
+const OUTCOME_COUNTERS = new Map([
+  ["completed", "completedCount"],
+  ["planned", "completedCount"],
+  ["skipped", "skippedCount"],
+  ["cancelled", "cancelledCount"],
+  ["error", "errorCount"],
+]);
+
+/**
+ * The labels a row shows for an outcome the engine gave no reason for. The Desktop Core keeps
+ * only what the engine sent; until it supplies presentation values (S4), the view does.
+ */
+const DEFAULT_REASONS = { skipped: "Skipped", cancelled: "Cancelled" };
+const DEFAULT_ERROR = "Failed";
+
+/**
+ * Returns true if both Directory Identities name the same directory. The Engine Bridge
+ * produces every identity in display-canonical form, so the UI compares them byte for byte
+ * and never normalizes a path itself. An empty, null, or missing identity is never the same.
+ *
+ * @param {string|null|undefined} dirA
+ * @param {string|null|undefined} dirB
+ * @returns {boolean}
+ */
+export function isSameDirectory(dirA, dirB) {
+  return Boolean(dirA) && dirA === dirB;
+}
+
+/** One published Row as the renderer and `presentation.js` read an item. */
+function projectRow(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    release: row.release,
+    // Every manifest row carries its inspection metadata; only a row the Job Snapshot lists
+    // but the manifest does not has none.
+    metadata: row.metadata ?? null,
+    inspectionError: row.inspection_error ?? null,
+    selected: row.selected,
+    status: row.status,
+    startTime: row.start_time_ms ?? null,
+    durationSec: row.duration_sec ?? null,
+    progress: typeof row.progress === "number" ? row.progress : null,
+    reason: row.reason ?? DEFAULT_REASONS[row.status] ?? null,
+    error: row.error ?? (row.status === "error" ? DEFAULT_ERROR : null),
+  };
+}
+
+/**
+ * Projects a published ModeView, and the Job View when it is this mode's, into the queue state
+ * the renderer and `presentation.js` read. Rendering only: every queue rule lives in the core.
+ */
+function projectState(view, job) {
+  const state = {
+    items: new Map(),
+    order: [],
+    vanishedSelectedIds: view.vanished_selected_ids ?? [],
+    batchStartTime: null,
+    batchItemIds: null,
+    batchCompleted: false,
+    batchSuccess: null,
+    batchCancelled: false,
+    completedCount: 0,
+    totalCount: 0,
+    skippedCount: 0,
+    cancelledCount: 0,
+    errorCount: 0,
+  };
+  for (const row of view.rows ?? []) {
+    state.items.set(row.id, projectRow(row));
+    state.order.push(row.id);
+    const counter = OUTCOME_COUNTERS.get(row.status);
+    if (counter && row.participant) state[counter]++;
+  }
+  state.totalCount = state.order.length;
+  if (job) {
+    state.batchCompleted = job.status !== "running";
+    state.batchSuccess = job.status === "completed";
+    state.batchCancelled = job.status === "cancelled";
+    // A job that ended before `BatchStart` ran no batch, so the queue keeps its selection count.
+    if (job.participants.length > 0) {
+      state.batchStartTime = job.start_time_ms;
+      state.batchItemIds = job.participants;
+    }
+  }
+  return state;
+}
 
 function episodeNumberText(epNum) {
   return String(epNum).padStart(2, "0");
@@ -42,8 +127,17 @@ function sameJsonValue(a, b) {
   return keys.every(key => Object.hasOwn(b, key) && sameJsonValue(a[key], b[key]));
 }
 
-/** The meta line of a row restored from a JobSnapshot, which carries no inspection metadata. */
-function restoredMetaText(item) {
+function sameSequence(a, b) {
+  return a.length === b.length && a.every((id, index) => id === b[index]);
+}
+
+/** What a row renders from its manifest entry: a change to any of these remounts the row. */
+function manifestPart(row) {
+  return row && { name: row.name, release: row.release, metadata: row.metadata, inspection_error: row.inspection_error };
+}
+
+/** The meta line of a row the Job Snapshot lists but the manifest does not: it has no inspection metadata. */
+function jobOnlyMetaText(item) {
   switch (item.status) {
     case "completed":
       return item.durationSec != null ? `Processed · Done in ${formatOutcomeDuration(item.durationSec)}` : "Processed";
@@ -63,29 +157,41 @@ const CROSS_ICON = `<svg class="ep-icon ep-icon-err" width="14" height="14" view
 const RING = `<svg class="ep-ring" width="20" height="20" viewBox="0 0 20 20" aria-hidden="true"><circle class="ep-ring-track" cx="10" cy="10" r="${RING_RADIUS}"/><circle class="ep-ring-arc" cx="10" cy="10" r="${RING_RADIUS}" transform="rotate(-90 10 10)" stroke-dasharray="${RING_CIRCUMFERENCE.toFixed(2)}"/></svg>`;
 const CHEVRON = d => `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${d}"/></svg>`;
 
+/**
+ * The Queue Tracker's view of one mode: renders the queue the Desktop Core publishes
+ * (`applyView`) and turns the user's selection and order clicks into Intents through `dispatch`.
+ * It holds no queue rules of its own.
+ */
 export class QueueTracker {
-  constructor(mode) {
+  /** @param {(intent: object) => Promise<unknown>} dispatch sends an Intent to the Desktop Core */
+  constructor(mode, dispatch = async () => false) {
     this.mode = mode;
+    this.dispatch = dispatch;
     this.listEl = document.getElementById(`${mode}-episode-list`);
     this.countEl = document.getElementById(`${mode}-queue-count`);
     this.filterEmptyEl = document.getElementById(`${mode}-filter-empty`);
-    this.state = createQueueState(EMPTY_MANIFEST);
+    // The last ModeView applied, and its projection.
+    this.view = EMPTY_VIEW;
+    this.state = projectState(EMPTY_VIEW, null);
     this.cards = new Map();
-    this.scanToken = 0;
-    this.scanRequest = 0;
-    this.pendingRenderToken = null;
-    this.currentDirectory = null;
-    this.lastScannedPath = null;
-    this.isScanning = false;
+    // What the list shows: "empty", "scanning", "failed", or "rows" (mounted or mounting).
+    this.shown = null;
+    this.emptyTitle = null;
+    // The row IDs in the order they are mounted, once an incremental render completes.
+    this.renderedOrder = [];
+    // The order an incremental render is mounting, or null when none is pending.
+    this.renderingOrder = null;
     this.renderRafId = null;
-    this.lastManifest = null;
+    this.currentDirectory = null;
+    this.isScanning = false;
     // Set by the owning JobController. While true, every user selection or order change is
     // refused: `start()` captured the ordered selected IDs before its forced inspection. The
     // guard lives on the mutation, not only on the disabled controls, because a row re-rendered
     // after the last sync carries a fresh, enabled checkbox.
     this.selectionLocked = false;
-    // Track Assignments (remux only): item id -> assignment payload.
+    // Track Assignments (remux only): item id -> assignment payload, as published.
     this.assignments = new Map();
+    this.assignmentsKey = "{}";
     // Subtitle candidates, once per Release Directory.
     this.subtitleCandidates = {};
     this.heartbeatTimer = null;
@@ -108,11 +214,7 @@ export class QueueTracker {
           check.checked = item ? item.selected !== false : false;
           return;
         }
-        setItemSelected(this.state, id, check.checked);
-        this.updateSelectionBadge();
-        if (this.filter !== "all") this.applyListChrome();
-        this.onSelectionChange?.();
-        this.onChange?.();
+        this.dispatch({ type: "set_selected", mode: this.mode, id, selected: check.checked });
       });
 
       this.listEl.addEventListener("click", e => {
@@ -135,7 +237,7 @@ export class QueueTracker {
       }
       this.renderRafId = null;
     }
-    this.pendingRenderToken = null;
+    this.renderingOrder = null;
   }
 
   startHeartbeat() {
@@ -203,181 +305,162 @@ export class QueueTracker {
       </div>`;
   }
 
-  startScan(directory) {
+  /**
+   * Renders the ModeView the Desktop Core published for this mode, with `job`, the Job View,
+   * laid over it only when the job is this mode's.
+   *
+   * @param {object} view a ModeView
+   * @param {object|null} job the Job View, or null
+   */
+  applyView(view, job = null) {
+    const previous = this.view;
+    this.view = view;
+    this.state = projectState(view, job?.mode === this.mode ? job : null);
+    this.currentDirectory = view.directory ?? null;
+    this.subtitleCandidates = view.subtitle_candidates ?? {};
+    const assignmentsKey = JSON.stringify(view.assignments ?? {});
+    const assignmentsChanged = assignmentsKey !== this.assignmentsKey;
+    this.assignmentsKey = assignmentsKey;
+    this.assignments = new Map(Object.entries(view.assignments ?? {}));
+    this.isScanning = view.scan?.state === "scanning";
+
+    if (this.isScanning) this.showScanning(previous, view.scan.directory);
+    else if (view.scan?.state === "failed") this.showFailure();
+    else if (this.state.order.length === 0) this.showEmpty();
+    else this.showRows(previous, assignmentsChanged);
+    // A view with nothing processing ends the heartbeat at once, as a finished job's does.
+    if (!this.hasProcessingItems()) this.stopHeartbeat();
+    this.onChange?.();
+  }
+
+  /** Replaces the list with `markup`, dropping its cards and headers and ending any render and heartbeat. */
+  clearList(markup) {
     this.stopHeartbeat();
-    this.isScanning = true;
-    // Re-inspecting the directory already shown (every Run forces one) leaves
-    // its fully rendered rows on screen; populateFromInspection then reuses
-    // the unchanged ones instead of flashing the list empty.
-    const keepCards = this.cards.size > 0 && this.pendingRenderToken === null && isSameDirectory(this.currentDirectory, directory);
     this.cancelRender();
-    const token = ++this.scanToken;
-    if (!keepCards) {
-      this.cards.clear();
-      this.groupHeads = [];
-      if (this.listEl) {
-        this.listEl.innerHTML = `
+    this.cards.clear();
+    this.groupHeads = [];
+    this.renderedOrder = [];
+    if (this.listEl) this.listEl.innerHTML = markup;
+  }
+
+  showScanning(previous, directory) {
+    this.stopHeartbeat();
+    this.setCountText("Scanning…");
+    // Re-inspecting the directory already shown (every Run forces one) leaves its fully rendered
+    // rows on screen, so the accepted manifest can reuse the unchanged ones instead of flashing
+    // the list empty.
+    const keepCards = this.shown === "rows" && this.cards.size > 0 && this.renderingOrder === null
+      && isSameDirectory(previous.directory, directory);
+    if (keepCards || this.shown === "scanning") return;
+    this.shown = "scanning";
+    this.clearList(`
           <div class="empty-state-card scanning-state">
             <div class="scan-spinner" aria-hidden="true"></div>
             <div class="empty-state-title">Scanning folder</div>
             <div class="empty-state-desc">Inspecting MKV files and reading track metadata…</div>
-          </div>`;
-      }
-    }
-    this.setCountText("Scanning…");
-    this.onChange?.();
-    return token;
+          </div>`);
   }
 
-  isCurrentScan(token) {
-    return token === this.scanToken;
-  }
-
-  // A scan request begins when the user asks for a scan, before `canonical_directory` has
-  // answered. The newest request of a queue wins, whatever order the answers come back in:
-  // an older one must not start a scan, as a later `startScan` supersedes an earlier one.
-  // `reset()` leaves the counter alone, so the request an empty path begins still cancels
-  // one pending in this queue.
-  beginScanRequest() {
-    return ++this.scanRequest;
-  }
-
-  isNewestScanRequest(request) {
-    return request === this.scanRequest;
-  }
-
-  setDirectory(directory) {
-    this.currentDirectory = directory;
-    this.lastScannedPath = directory;
-  }
-
-  reuseInspection(directory) {
-    if (!this.lastManifest || !isSameDirectory(this.lastScannedPath, directory)) return false;
-    this.scanToken++;
-    this.populateFromInspection(this.lastManifest, true);
-    return true;
-  }
-
-  acceptInspection(token, directory, manifest) {
-    if (!this.isCurrentScan(token)) return false;
-    if (manifest?.version !== 2 || !Array.isArray(manifest.items)) {
-      this.failScan();
-      return false;
-    }
-    this.populateFromInspection(manifest, isSameDirectory(this.currentDirectory, directory));
-    this.setDirectory(directory);
-    this.onChange?.();
-    return true;
-  }
-
-  rejectInspection(token) {
-    if (this.isCurrentScan(token)) this.failScan();
-  }
-
-  failScan() {
-    this.isScanning = false;
-    this.lastScannedPath = null;
-    // A scan that kept its rows must not leave them registered once the
-    // failure markup replaces them.
-    this.cards.clear();
-    this.groupHeads = [];
-    if (this.listEl) {
-      this.listEl.innerHTML = this.emptyStateMarkup(
-        "Scan failed",
-        "That folder could not be inspected. Choose another folder and try again.",
-        "Choose another folder…"
-      );
-    }
+  showFailure() {
     this.setCountText("Scan failed");
-    this.onChange?.();
+    if (this.shown === "failed") return;
+    this.shown = "failed";
+    // A scan that kept its rows must not leave them registered once the failure markup replaces them.
+    this.clearList(this.emptyStateMarkup(
+      "Scan failed",
+      "That folder could not be inspected. Choose another folder and try again.",
+      "Choose another folder…"
+    ));
   }
 
-  reset(title = "No episodes yet", description = "Open a release folder to scan its MKV episodes into this batch.") {
-    this.stopHeartbeat();
-    this.isScanning = false;
-    this.cancelRender();
-    this.scanToken++;
-    this.cards.clear();
-    this.groupHeads = [];
-    this.assignments.clear();
-    this.subtitleCandidates = {};
-    this.currentDirectory = null;
-    this.lastScannedPath = null;
-    this.state = createQueueState(EMPTY_MANIFEST);
-    if (this.listEl) this.listEl.innerHTML = this.emptyStateMarkup(title, description);
-    if (this.filterEmptyEl) this.filterEmptyEl.hidden = true;
+  /** No rows: an empty folder when a directory is shown, else no folder yet. */
+  showEmpty() {
+    const [title, description] = this.currentDirectory
+      ? ["No MKV files found", "This folder holds no MKV episodes. Open another release folder to continue."]
+      : ["No episodes yet", "Open a release folder to scan its MKV episodes into this batch."];
     this.setCountText("Ready");
-    this.onChange?.();
+    if (this.shown === "empty" && this.emptyTitle === title) return;
+    this.shown = "empty";
+    this.emptyTitle = title;
+    this.clearList(this.emptyStateMarkup(title, description));
+    if (this.filterEmptyEl) this.filterEmptyEl.hidden = true;
   }
 
-  populateFromInspection(manifest, preserveSelection = false) {
-    this.stopHeartbeat();
-    this.isScanning = false;
-    // Read before cancelRender clears it: a half-rendered list is never reused.
-    const cardsComplete = this.pendingRenderToken === null;
-    this.cancelRender();
-    const previousManifest = this.lastManifest;
-    const previousOrder = this.state.order;
-    this.lastManifest = manifest;
-    const nextState = createQueueState(manifest);
-    this.state = preserveSelection ? reconcileQueueSelection(nextState, this.state) : nextState;
-
-    // A different input directory starts a new batch; only a same-directory
-    // rescan carries assignments for IDs that are still present.
-    this.assignments = preserveSelection ? carryOverAssignments(this.assignments, manifest) : new Map();
-    this.subtitleCandidates = manifest.subtitle_candidates ?? {};
-
-    if (manifest.items.length === 0) {
-      const directory = this.currentDirectory || this.lastScannedPath;
-      const { vanishedSelectedIds, knownOrder } = this.state;
-      this.reset(
-        "No MKV files found",
-        "This folder holds no MKV episodes. Open another release folder to continue."
-      );
-      if (preserveSelection) {
-        if (directory) this.setDirectory(directory);
-        this.state.vanishedSelectedIds = vanishedSelectedIds;
-        this.state.knownOrder = knownOrder;
+  /**
+   * Brings the mounted rows in step with the published ones. A new manifest of the directory
+   * shown, with the same IDs in the same order, updates the rows in place; the same rows in
+   * another order are moved; any other row set rebuilds the list.
+   */
+  showRows(previous, assignmentsChanged) {
+    const { order } = this.state;
+    const wasRows = this.shown === "rows";
+    this.shown = "rows";
+    if (!wasRows) {
+      this.renderCardsIncrementally();
+    } else if (this.renderingOrder !== null) {
+      // A pending render mounts each row from the current state, so only another row set or
+      // another manifest restarts it; otherwise the rows already mounted are redrawn.
+      if (sameSequence(this.renderingOrder, order) && previous.manifest_rev === this.view.manifest_rev) {
+        this.updateCards(assignmentsChanged);
       }
-      return;
-    }
-
-    this.updateSelectionBadge();
-    if (preserveSelection && cardsComplete && previousManifest && this.cardsMatchOrder(previousOrder)) {
-      this.refreshCards(previousManifest, manifest);
+      else this.renderCardsIncrementally();
+    } else if (previous.manifest_rev !== this.view.manifest_rev) {
+      if (isSameDirectory(previous.directory, this.view.directory) && sameSequence(this.renderedOrder, order)) {
+        this.refreshCards(previous.rows);
+      } else {
+        this.renderCardsIncrementally();
+      }
+    } else if (sameSequence(this.renderedOrder, order)) {
+      this.updateCards(assignmentsChanged);
+    } else if (this.renderedOrder.length === order.length && order.every(id => this.cards.has(id))) {
+      this.moveCards();
+      this.updateCards(assignmentsChanged);
     } else {
-      this.cards.clear();
       this.renderCardsIncrementally();
     }
-    this.onChange?.();
+    this.renderQueueCount();
   }
 
-  /** True when the mounted rows are exactly `previousOrder` and the new state keeps that order. */
-  cardsMatchOrder(previousOrder) {
-    const { order } = this.state;
-    return order.length > 0
-      && this.cards.size === order.length
-      && previousOrder.length === order.length
-      && order.every((id, index) => id === previousOrder[index] && this.cards.has(id));
+  /** Redraws each mounted row's selection and status, and its meta line when the assignments changed. */
+  updateCards(assignmentsChanged) {
+    let changed = false;
+    for (const [id, card] of this.cards) {
+      const item = this.state.items.get(id);
+      if (!item) continue;
+      const selected = item.selected !== false;
+      if (card.checkbox.checked !== selected || card.renderedStatus !== item.status) changed = true;
+      card.checkbox.checked = selected;
+      if (assignmentsChanged) this.applyCardMeta(card, item, card.bitrate ?? this.getBitrate());
+      this.renderCardState(card, item);
+    }
+    // The filter matches on selection and status, so only a change there redraws the chrome.
+    if (changed && this.filter !== "all") this.applyListChrome();
   }
 
-  // Updates the mounted rows in place for a same-directory manifest with the
-  // same IDs in the same order. A row keeps its element when its manifest
-  // entry is deep-equal to the previous one and it was rendered at the current
-  // bitrate, since those are everything mountCard renders from besides the
-  // selection and status re-applied here (a surviving ID keeps its assignment
-  // unchanged, so its meta line is already current). Any other row is remounted
-  // in place.
-  refreshCards(previousManifest, manifest) {
-    const entriesById = items => new Map(items.filter(entry => entry?.id).map(entry => [String(entry.id), entry]));
-    const previousEntries = entriesById(previousManifest.items);
-    const entries = entriesById(manifest.items);
+  /** Puts the mounted rows in the published order. */
+  moveCards() {
+    // Headers sit between rows; take them out so the rows line up.
+    this.clearGroupHeads();
+    this.listEl?.append(...this.state.order.map(id => this.cards.get(id).el));
+    this.renderedOrder = [...this.state.order];
+    this.updateEpisodeNumbers();
+    this.applyListChrome();
+  }
+
+  // Updates the mounted rows in place for a same-directory manifest with the same IDs in the same
+  // order. A row keeps its element when its manifest part is deep-equal to the previous one and it
+  // was rendered at the current bitrate, since those are everything mountCard renders from besides
+  // the selection, assignment and status redrawn here. Any other row is remounted in place.
+  refreshCards(previousRows) {
+    const previousById = new Map(previousRows.map(row => [row.id, row]));
+    const rowsById = new Map(this.view.rows.map(row => [row.id, row]));
     const bitrate = this.getBitrate();
     this.state.order.forEach((id, index) => {
       const item = this.state.items.get(id);
       const card = this.cards.get(id);
-      if (card.bitrate === bitrate && sameJsonValue(previousEntries.get(id), entries.get(id))) {
+      if (card.bitrate === bitrate && sameJsonValue(manifestPart(previousById.get(id)), manifestPart(rowsById.get(id)))) {
         card.checkbox.checked = item.selected !== false;
+        this.applyCardMeta(card, item, bitrate);
         this.renderCardState(card, item);
         return;
       }
@@ -393,28 +476,25 @@ export class QueueTracker {
   }
 
   // Creates rows in requestAnimationFrame batches under a ~8 ms frame budget so a large manifest
-  // does not block the main thread. A tick aborts once scanToken has moved on (reset, startScan
-  // and reuseInspection bump it). Rows render from the item's current reducer state, so events
-  // that arrived before a row existed show once it is created.
+  // does not block the main thread. A tick aborts once another render or a cleared list took
+  // over. Rows render from the item's current state, so a view applied before a row exists
+  // shows once it is created.
   renderCardsIncrementally() {
     this.cancelRender();
     const order = this.state.order;
-    if (!this.listEl || order.length === 0) return;
-
-    const token = this.scanToken;
-    const bitrate = this.getBitrate();
     this.cards.clear();
     this.groupHeads = [];
+    this.renderedOrder = [];
+    if (!this.listEl || order.length === 0) return;
+
+    const bitrate = this.getBitrate();
     this.listEl.innerHTML = "";
-    this.pendingRenderToken = token;
+    this.renderingOrder = order;
     let index = 0;
 
     const renderBatch = () => {
       this.renderRafId = null;
-      if (!this.isCurrentScan(token)) {
-        this.pendingRenderToken = null;
-        return;
-      }
+      if (this.renderingOrder !== order) return;
       const frag = document.createDocumentFragment();
       const deadline = performance.now() + 8;
       do {
@@ -427,7 +507,8 @@ export class QueueTracker {
       if (index < order.length) {
         this.renderRafId = requestAnimationFrame(renderBatch);
       } else {
-        this.pendingRenderToken = null;
+        this.renderingOrder = null;
+        this.renderedOrder = [...order];
         this.applyListChrome();
         this.onChange?.();
       }
@@ -458,7 +539,7 @@ export class QueueTracker {
     } else if (item.metadata) {
       this.applyMetadata(card, item.metadata, bitrate, item.id);
     } else {
-      this.applyRestoredMeta(card, item);
+      this.applyJobOnlyMeta(card, item);
     }
   }
 
@@ -477,9 +558,9 @@ export class QueueTracker {
     card.meta.textContent = `Inspection failed: ${error}`;
   }
 
-  applyRestoredMeta(card, item) {
+  applyJobOnlyMeta(card, item) {
     card.meta.className = "ep-meta";
-    card.meta.textContent = restoredMetaText(item);
+    card.meta.textContent = jobOnlyMetaText(item);
   }
 
   /** Redraws every row's meta line, after the bitrate or the assets dir changed. */
@@ -535,14 +616,6 @@ export class QueueTracker {
       if (control) control.dataset.itemId = item.id;
     }
     return card;
-  }
-
-  /** Redraws the meta line of `id`'s row after its Track Assignment changed. */
-  applyAssignmentToCard(id) {
-    const card = this.cards.get(id);
-    const item = this.state.items.get(id);
-    if (card && item) this.applyCardMeta(card, item, card.bitrate ?? this.getBitrate());
-    this.onChange?.();
   }
 
   /** The item the inspector shows: the one picked, or else the first in order. */
@@ -601,7 +674,7 @@ export class QueueTracker {
    * list in queue order, so reordering and incremental rendering never see a header.
    */
   applyListChrome() {
-    if (!this.listEl || this.pendingRenderToken !== null) return;
+    if (!this.listEl || this.renderingOrder !== null) return;
     this.markInspected();
     this.clearGroupHeads();
     const filtering = this.filter !== "all";
@@ -643,55 +716,6 @@ export class QueueTracker {
     this.groupHeads = [];
   }
 
-  restoreFromSnapshot(snapshot) {
-    this.stopHeartbeat();
-    this.isScanning = false;
-    this.cancelRender();
-    this.scanToken++;
-    this.cards.clear();
-    this.groupHeads = [];
-    this.lastManifest = null;
-    if (this.listEl) this.listEl.innerHTML = "";
-
-    this.state = createQueueStateFromSnapshot(snapshot);
-    if (snapshot.input_dir) this.setDirectory(snapshot.input_dir);
-    this.renderQueueCount();
-    this.renderCardsIncrementally();
-    this.onChange?.();
-  }
-
-  handleEvent(event) {
-    this.state = reduceQueueEvent(this.state, event);
-
-    if (event.type === "batch_start") {
-      if (event.input_dir) this.setDirectory(event.input_dir);
-      if (this.cards.size === 0 && this.pendingRenderToken === null && this.state.order.length > 0) {
-        this.renderCardsIncrementally();
-      }
-    }
-
-    const item = this.state.items.get(event.id);
-    if (item) {
-      const card = this.cards.get(item.id);
-      // A missing row is mounted here unless an incremental render is pending, which will
-      // mount it from current state.
-      if (card) {
-        this.renderCardState(card, item);
-        if (this.filter !== "all" && event.type !== "item_progress") this.applyListChrome();
-      } else if (this.pendingRenderToken !== this.scanToken) {
-        const mounted = this.mountCard(item, this.cards.size + 1, this.getBitrate());
-        if (this.listEl) {
-          this.listEl.querySelector(".empty-state-card")?.remove();
-          this.listEl.appendChild(mounted.el);
-        }
-        this.applyListChrome();
-      }
-    }
-
-    this.renderQueueCount();
-    this.onChange?.();
-  }
-
   // Classes are written only when the status differs from the one the row last
   // drew, so the stream of progress events on a processing row writes just the
   // ring and the status text. The heartbeat is not stopped here: tickHeartbeat
@@ -729,23 +753,6 @@ export class QueueTracker {
     card.statusTag.textContent = statusLabel(item);
   }
 
-  /**
-   * Ends the batch's presentation on `job-done`. The Engine Bridge has settled every item, so
-   * the Item Settlement guard only acts on a run that broke that protocol.
-   *
-   * @param {boolean} cancelled whether the job was stopped
-   */
-  endBatch(cancelled) {
-    this.stopHeartbeat();
-    guardUnsettledItems(this.state, cancelled);
-    for (const [id, card] of this.cards) {
-      this.renderCardState(card, this.state.items.get(id));
-    }
-    this.applyListChrome();
-    this.renderQueueCount();
-    this.onChange?.();
-  }
-
   setCountText(text) {
     if (!this.countEl || this.countEl.textContent === text) return;
     this.countEl.textContent = text;
@@ -754,15 +761,25 @@ export class QueueTracker {
 
   updateSelectionBadge() {
     const total = this.state.totalCount;
-    this.setCountText(total === 0 ? "Ready" : `${getSelectedCount(this.state)} / ${total} Selected`);
+    this.setCountText(total === 0 ? "Ready" : `${this.getSelectedCount()} / ${total} Selected`);
   }
 
   getSelectedCount() {
-    return getSelectedCount(this.state);
+    let count = 0;
+    for (const item of this.state.items.values()) {
+      if (item.selected !== false) count++;
+    }
+    return count;
   }
 
+  /** The IDs of the manifest rows, in queue order: what the last accepted inspection found. */
+  manifestItemIds() {
+    return this.state.order.filter(id => this.state.items.get(id).metadata !== null);
+  }
+
+  /** The Queue Selection: the selected manifest rows, in queue order. */
   getSelectedOrderedItemIds() {
-    return this.state.order.filter(id => this.state.items.get(id).selected !== false);
+    return this.manifestItemIds().filter(id => this.state.items.get(id).selected !== false);
   }
 
   selectAll() {
@@ -775,33 +792,12 @@ export class QueueTracker {
 
   bulkSelect(selected) {
     if (this.selectionLocked) return;
-    setAllSelected(this.state, selected);
-    for (const card of this.cards.values()) {
-      card.checkbox.checked = selected;
-    }
-    this.updateSelectionBadge();
-    if (this.filter !== "all") this.applyListChrome();
-    this.onSelectionChange?.();
-    this.onChange?.();
+    this.dispatch({ type: "set_all_selected", mode: this.mode, selected });
   }
 
-  reorderCard(id, dir) {
+  reorderCard(id, direction) {
     if (this.selectionLocked) return;
-    reorderItem(this.state, id, dir);
-    const card = this.cards.get(id);
-    if (card) {
-      // Headers sit between rows; take them out so the swap is with the neighboring row.
-      this.clearGroupHeads();
-      if (dir === "up" && card.el.previousElementSibling) {
-        card.el.previousElementSibling.before(card.el);
-      } else if (dir === "down" && card.el.nextElementSibling) {
-        card.el.nextElementSibling.after(card.el);
-      }
-      this.applyListChrome();
-    }
-    this.updateEpisodeNumbers();
-    this.onSelectionChange?.();
-    this.onChange?.();
+    this.dispatch({ type: "reorder", mode: this.mode, id, direction });
   }
 
   updateEpisodeNumbers() {

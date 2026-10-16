@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { createJobCoordinator } from "./job-coordinator.js";
 import { BULK_SELECTION_CONTROLS, JobController } from "./job-controller.js";
 import { QueueTracker } from "./queue-view.js";
+import { createFakeCore, modeView, row } from "./fake-core.js";
 
 class FakeElement {
   constructor(value = "") {
@@ -26,7 +27,6 @@ class FakeElement {
   focus() {}
 }
 
-const manifest = (...ids) => ({ version: 2, items: ids.map(id => ({ id, name: id })) });
 
 /** A manual subtitle assignment in the shape app.js stores in `QueueTracker.assignments`. */
 const subtitle = (id, path) => ({
@@ -80,6 +80,7 @@ function makeRuntime(tracker, { invoke = async () => null, ...overrides } = {}) 
     safeAddListener() {},
     scanInputDirectory: async () => true,
     showModal: async () => true,
+    syncState: async () => null,
     telemetryLoop: { setJobActive() {} },
     updateWorkerChips() {},
     listen: async () => () => {},
@@ -101,15 +102,25 @@ function recordRunJob(requests, jobId) {
 function scannedTracker(dir, ids, selected, overrides = {}) {
   return {
     currentDirectory: dir,
-    lastScannedPath: dir,
     assignments: new Map(),
     getSelectedOrderedItemIds: () => selected,
-    lastManifest: manifest(...ids),
+    manifestItemIds: () => ids,
     state: { totalCount: ids.length },
-    handleEvent() {},
-    endBatch() {},
     ...overrides,
   };
+}
+
+/** A real Queue Tracker of `mode` over a fake core, rendering what the core publishes. */
+function trackerOverCore(mode = "remux", core = createFakeCore()) {
+  const tracker = new QueueTracker(mode, async intent => {
+    try {
+      return await core.invoke("dispatch", { intent });
+    } catch {
+      return false;
+    }
+  });
+  core.onPublish(state => tracker.applyView(state[mode], state.job));
+  return { tracker, core };
 }
 
 test("job controller includes selected_items and filters assignments to selected items", async t => {
@@ -117,7 +128,6 @@ test("job controller includes selected_items and filters assignments to selected
 
   const requests = [];
   const queue = scannedTracker(null, ["ep1.mkv", "ep2.mkv"], ["ep1.mkv"], {
-    lastScannedPath: null,
     assignments: new Map([
       ["ep1.mkv", subtitle("ep1.mkv", "/subs/ep1.ass")],
       ["ep2.mkv", subtitle("ep2.mkv", "/subs/ep2.ass")],
@@ -131,7 +141,7 @@ test("job controller includes selected_items and filters assignments to selected
   assert.deepEqual(requests[0].assignments.map(a => a.target_video), ["ep1.mkv"]);
 });
 
-test("Start preserves selected order across real rescans and rejects vanished IDs", async t => {
+test("Start submits the selection and assignments captured before the forced scan, and rejects vanished IDs", async t => {
   const elements = makeElements(["remux"], {
     "remux-input-dir": "/anime/series",
     "remux-episode-list": "",
@@ -141,30 +151,25 @@ test("Start preserves selected order across real rescans and rejects vanished ID
     querySelectorAll: selector => selector.startsWith("#remux-settings input,") ? [elements.get("remux-input-dir")] : [],
   });
 
-  const tracker = new QueueTracker("remux");
-  const one = "Series/01.mkv";
-  const two = "Series/02.mkv";
-  const three = "Series/03.mkv";
-  const four = "Series/04.mkv";
-  const five = "Series/05.mkv";
-  assert.equal(tracker.acceptInspection(tracker.startScan(), "/anime/series", manifest(one, two, three)), true);
-  tracker.reorderCard(two, "up");
-  const thirdCheckbox = tracker.cards.get(three).checkbox;
-  thirdCheckbox.checked = false;
-  elements.get("remux-episode-list").handlers.get("change")({ target: { closest: () => thirdCheckbox } });
-  tracker.assignments = new Map([[two, subtitle(two, "/subs/02.ass")], [three, subtitle(three, "/subs/03.ass")]]);
-
-  // A user-initiated same-directory inspection discovers a new unselected item.
-  assert.equal(tracker.acceptInspection(tracker.startScan(), "/anime/series", manifest(one, two, three, four)), true);
-  assert.deepEqual(tracker.state.order, [two, one, three, four]);
+  const { tracker, core } = trackerOverCore();
+  const [one, two, three, four, five] = ["01", "02", "03", "04", "05"].map(n => `Series/${n}.mkv`);
+  const unselected = id => row(id, { selected: false });
+  // The queue after the user reordered, deselected 03 and rescanned, which found 04 unselected.
+  core.accept("remux", "/anime/series", [two, one, unselected(three), unselected(four)], {
+    assignments: {
+      [two]: subtitle(two, "/subs/02.ass"),
+      [three]: subtitle(three, "/subs/03.ass"),
+      [four]: subtitle(four, "/subs/04.ass"),
+    },
+  });
   assert.deepEqual(tracker.getSelectedOrderedItemIds(), [two, one]);
-  assert.deepEqual([...tracker.state.order].map(id => tracker.cards.get(id).checkbox.checked), [true, true, false, false]);
-  tracker.assignments.set(four, subtitle(four, "/subs/04.ass"));
+  assert.deepEqual(tracker.state.order.map(id => tracker.cards.get(id).checkbox.checked), [true, true, false, false]);
 
   const logs = [];
   const calls = [];
   const listeners = new Map();
-  let replacement = manifest(one, two, three, four, five);
+  let found = [two, one, unselected(three), unselected(four), unselected(five)];
+  let vanished = [];
   const runtime = makeRuntime(tracker, {
     appendLog(_el, line) { logs.push(line.text); },
     async scanInputDirectory(path, mode, { force }) {
@@ -172,8 +177,12 @@ test("Start preserves selected order across real rescans and rejects vanished ID
       assert.equal(mode, "remux");
       assert.equal(force, true);
       assert.equal(elements.get("remux-input-dir").disabled, true);
-      tracker.assignments.set(two, subtitle(two, "/subs/changed.ass"));
-      return tracker.acceptInspection(tracker.startScan(), path, replacement);
+      // What the forced scan publishes: an assignment changed meanwhile must not reach the run.
+      core.accept("remux", "/anime/series", found, {
+        assignments: { [two]: subtitle(two, "/subs/changed.ass") },
+        vanished_selected_ids: vanished,
+      });
+      return true;
     },
     async listen(event, callback) { listeners.set(event, callback); return () => listeners.delete(event); },
     async invoke(command, args) {
@@ -187,10 +196,10 @@ test("Start preserves selected order across real rescans and rejects vanished ID
   assert.deepEqual(calls[0].assignments.map(assignment => assignment.target_video), [two]);
   assert.equal(calls[0].assignments[0].asset_path, "/subs/02.ass");
   assert.deepEqual(tracker.state.order, [two, one, three, four, five]);
-  assert.deepEqual([...tracker.state.order].map(id => tracker.cards.get(id).checkbox.checked), [true, true, false, false, false]);
 
   listeners.get("job-done")({ payload: { mode: "remux", job_id: 42, code: 0 } });
-  replacement = manifest(one, three, four, five);
+  found = [one, unselected(three), unselected(four), unselected(five)];
+  vanished = [two];
   await controller.start();
   assert.equal(calls.length, 1);
   assert.equal(controller.running, false);
@@ -198,7 +207,7 @@ test("Start preserves selected order across real rescans and rejects vanished ID
   assert.ok(logs.some(message => message.includes(two) && message.includes("disappeared")));
 });
 
-test("Start freezes bulk selection for the whole preflight and submits only the captured IDs", async t => {
+test("Start freezes selection for the whole preflight and submits only the captured IDs", async t => {
   const bulkButtons = BULK_SELECTION_CONTROLS.map(({ id }) => [id, new FakeElement()]);
   const elements = makeElements(["remux"], {
     "remux-input-dir": "/anime/series",
@@ -208,13 +217,9 @@ test("Start freezes bulk selection for the whole preflight and submits only the 
   for (const [id, button] of bulkButtons) elements.set(id, button);
   installDom(t, elements);
 
-  const tracker = new QueueTracker("remux");
-  const one = "Series/01.mkv";
-  const two = "Series/02.mkv";
-  const three = "Series/03.mkv";
-  assert.equal(tracker.acceptInspection(tracker.startScan(), "/anime/series", manifest(one, two)), true);
-  tracker.reorderCard(two, "up");
-  assert.deepEqual(tracker.getSelectedOrderedItemIds(), [two, one]);
+  const { tracker, core } = trackerOverCore();
+  const [one, two, three] = ["01", "02", "03"].map(n => `Series/${n}.mkv`);
+  core.accept("remux", "/anime/series", [two, one]);
 
   let resolveScan;
   const scanGate = new Promise(resolve => { resolveScan = resolve; });
@@ -222,8 +227,6 @@ test("Start freezes bulk selection for the whole preflight and submits only the 
   const listeners = new Map();
   const runtime = makeRuntime(tracker, {
     scanInputDirectory: async (path, mode, { force }) => {
-      assert.equal(path, "/anime/series");
-      assert.equal(mode, "remux");
       assert.equal(force, true);
       return scanGate;
     },
@@ -236,60 +239,43 @@ test("Start freezes bulk selection for the whole preflight and submits only the 
   const { coordinator } = runtime;
   const controller = new JobController("remux", runtime);
 
-  // A queue mid-inspection is not editable either, with no coordinator involved.
-  const scanningToken = tracker.startScan();
-  assert.equal(controller.applyBulkSelection("remux", false), false);
-  assert.deepEqual(tracker.state.order, [two, one]);
-  assert.equal(tracker.acceptInspection(scanningToken, "/anime/series", manifest(one, two)), true);
-
   const startPromise = controller.start();
   await new Promise(resolve => setTimeout(resolve, 0));
   assert.equal(coordinator.activeMode, "remux");
   assert.equal(requests.length, 0);
   for (const [, button] of bulkButtons) assert.equal(button.disabled, true, "bulk control must be disabled during preflight");
 
-  // The user clicks both bulk buttons mid-preflight: neither may reach the queue.
+  // The core does not lock the queue before run_job, so the view must not send any change.
   assert.equal(controller.applyBulkSelection("remux", false), false);
-  assert.equal(controller.applyBulkSelection("remux", true), false);
-  assert.deepEqual(tracker.getSelectedOrderedItemIds(), [two, one]);
-
-  // Card-level controls must obey the same freeze. The guard lives on the
-  // mutation, not on the disabled attribute: the forced scan below re-renders
-  // the cards, and a freshly mounted checkbox arrives enabled.
-  const list = elements.get("remux-episode-list");
   assert.equal(tracker.selectionLocked, true, "tracker must refuse selection mutations during preflight");
+  const list = elements.get("remux-episode-list");
   const checkbox = { dataset: { itemId: one }, checked: false };
   list.handlers.get("change")({ target: { closest: () => checkbox } });
-  assert.equal(tracker.state.items.get(one).selected, true, "card checkbox must not deselect during preflight");
   assert.equal(checkbox.checked, true, "a refused checkbox click must be reverted in the DOM");
-  const reorderBtn = { dataset: { itemId: one }, classList: { contains: () => false } };
-  list.handlers.get("click")({ target: { closest: () => reorderBtn } });
+  list.handlers.get("click")({ target: { closest: sel => (sel === ".ep-reorder-btn" ? { dataset: { itemId: one }, classList: { contains: () => true } } : null) } });
   tracker.selectAll();
   tracker.deselectAll();
-  assert.deepEqual(tracker.state.order, [two, one], "card reorder must not change order during preflight");
-  assert.deepEqual(tracker.getSelectedOrderedItemIds(), [two, one], "card controls must not change selection during preflight");
+  assert.deepEqual(core.intents, [], "no Intent may leave the view during preflight");
 
-  tracker.acceptInspection(tracker.startScan(), "/anime/series", manifest(one, two, three));
-  assert.equal(tracker.selectionLocked, true, "a re-rendered card must not escape the freeze");
+  // The forced scan re-renders the rows; a fresh checkbox must not escape the freeze.
+  core.accept("remux", "/anime/series", [two, one, row(three, { selected: false })]);
+  assert.equal(tracker.selectionLocked, true);
   list.handlers.get("change")({ target: { closest: () => ({ dataset: { itemId: one }, checked: false }) } });
-  assert.deepEqual(tracker.getSelectedOrderedItemIds(), [two, one]);
-
-  tracker.acceptInspection(tracker.startScan(), "/anime/series", manifest(one, two, three));
+  assert.deepEqual(core.intents, []);
   resolveScan(true);
   await startPromise;
 
   assert.deepEqual(requests.map(request => request.selected_items), [[two, one]]);
-  assert.deepEqual(tracker.getSelectedOrderedItemIds(), [two, one]);
-  assert.equal(tracker.state.items.get(three).selected, false);
   assert.equal(controller.jobId, 77);
 
   listeners.get("job-done")({ payload: { mode: "remux", job_id: 77, code: 0 } });
   assert.equal(coordinator.activeMode, null);
-  assert.equal(tracker.selectionLocked, false, "the card freeze must lift when the job releases ownership");
-  list.handlers.get("change")({ target: { closest: () => ({ dataset: { itemId: one }, checked: false }) } });
-  assert.equal(tracker.state.items.get(one).selected, false, "card selection must work again once idle");
+  assert.equal(tracker.selectionLocked, false, "the freeze must lift when the job releases ownership");
   for (const [, button] of bulkButtons) assert.equal(button.disabled, false, "bulk control must return after completion");
+  list.handlers.get("change")({ target: { closest: () => ({ dataset: { itemId: one }, checked: false }) } });
   assert.equal(controller.applyBulkSelection("remux", false), true);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.deepEqual(core.intents.map(intent => intent.type), ["set_selected", "set_all_selected"]);
   assert.deepEqual(tracker.getSelectedOrderedItemIds(), []);
 });
 
@@ -304,16 +290,15 @@ test("An idle coordinator freezes only the queue that is scanning, not the other
   installDom(t, elements);
 
   const queues = { remux: new QueueTracker("remux"), extract: new QueueTracker("extract") };
-  for (const [mode, tracker] of Object.entries(queues)) {
-    assert.equal(tracker.acceptInspection(tracker.startScan(), `/anime/${mode}`, manifest(`${mode}.mkv`)), true);
-  }
+  const shown = mode => modeView([`${mode}.mkv`], { directory: `/anime/${mode}`, manifest_rev: 1 });
+  for (const [mode, tracker] of Object.entries(queues)) tracker.applyView(shown(mode));
   const runtime = makeRuntime(null, { queueFor: mode => queues[mode] });
   const { coordinator } = runtime;
   const remuxController = new JobController("remux", runtime);
   new JobController("extract", runtime);
 
   // The remux queue is mid-rescan while the coordinator is idle.
-  const rescanToken = queues.remux.startScan();
+  queues.remux.applyView({ ...shown("remux"), scan: { state: "scanning", directory: "/anime/remux" } });
   coordinator.syncControls();
 
   assert.equal(coordinator.activeMode, null, "no job is running");
@@ -326,7 +311,7 @@ test("An idle coordinator freezes only the queue that is scanning, not the other
   assert.equal(remuxController.applyBulkSelection("extract", false), true, "the other tab must accept bulk selection");
 
   // Once the rescan lands, both queues are editable again.
-  queues.remux.acceptInspection(rescanToken, "/anime/remux", manifest("remux.mkv"));
+  queues.remux.applyView({ ...shown("remux"), manifest_rev: 2 });
   coordinator.syncControls();
   for (const { id } of BULK_SELECTION_CONTROLS) assert.equal(elements.get(id).disabled, false);
   assert.equal(queues.remux.selectionLocked, false);
@@ -338,7 +323,6 @@ test("Start with different input directory defaults to all-selected and drops pr
   const requests = [];
   // The queue holds series-a with only 01 selected and an assignment.
   const tracker = scannedTracker("/anime/series-a", ["01.mkv", "02.mkv"], ["01.mkv"], {
-    lastScannedPath: undefined,
     assignments: new Map([["01.mkv", subtitle("01.mkv", "/subs/old.ass")]]),
   });
   const runtime = makeRuntime(tracker, {
@@ -347,7 +331,7 @@ test("Start with different input directory defaults to all-selected and drops pr
       tracker.currentDirectory = dir;
       tracker.assignments = new Map();
       tracker.getSelectedOrderedItemIds = () => ["01.mkv", "02.mkv"];
-      tracker.lastManifest = manifest("01.mkv", "02.mkv");
+      tracker.manifestItemIds = () => ["01.mkv", "02.mkv"];
       return true;
     },
     invoke: recordRunJob(requests, 101),
@@ -364,13 +348,12 @@ test("Start from empty queue with unscanned first directory discovers and runs a
   installDom(t, makeElements(["remux"], { "remux-input-dir": "/anime/first-show" }));
 
   const requests = [];
-  const tracker = scannedTracker(null, [], [], { lastManifest: null });
+  const tracker = scannedTracker(null, [], []);
   const runtime = makeRuntime(tracker, {
     scanInputDirectory: async dir => {
       tracker.currentDirectory = dir;
-      tracker.lastScannedPath = dir;
       tracker.getSelectedOrderedItemIds = () => ["01.mkv", "02.mkv"];
-      tracker.lastManifest = manifest("01.mkv", "02.mkv");
+      tracker.manifestItemIds = () => ["01.mkv", "02.mkv"];
       tracker.state.totalCount = 2;
       return true;
     },
@@ -392,7 +375,7 @@ test("start rejects vanished selection when input is an alias of the scanned can
   const runtime = makeRuntime(tracker, {
     appendLog(_el, line) { logs.push(line.text); },
     scanInputDirectory: async () => {
-      tracker.lastManifest = manifest("ep1.mkv");
+      tracker.manifestItemIds = () => ["ep1.mkv"];
       tracker.getSelectedOrderedItemIds = () => ["ep1.mkv"];
       return true;
     },
@@ -435,7 +418,7 @@ test("start rejects when a vanished selection reappears during the forced rescan
   const runtime = makeRuntime(tracker, {
     appendLog(_el, line) { logs.push(line.text); },
     scanInputDirectory: async () => {
-      tracker.lastManifest = manifest("ep1.mkv", "ep2.mkv");
+      tracker.manifestItemIds = () => ["ep1.mkv", "ep2.mkv"];
       tracker.state = { totalCount: 2, vanishedSelectedIds: [] };
       tracker.getSelectedOrderedItemIds = () => ["ep1.mkv", "ep2.mkv"];
       return true;
