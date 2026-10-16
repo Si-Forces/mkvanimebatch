@@ -155,7 +155,7 @@ const JOB_SETTINGS = { workers: 3, io_jobs: 5, ffmpeg_threads: 2, bitrate: "256k
  * rows the Job Snapshot lists, which the reloaded queue's manifest does not.
  */
 function activeJob(core, status = "running") {
-  const jobOnly = (id, fields) => row(id, { name: `${id}.mkv`, release: "", metadata: null, participant: true, ...fields });
+  const jobOnly = (id, fields) => row(id, { name: `${id}.mkv`, release: "", metadata: null, in_manifest: false, participant: true, ...fields });
   core.state.job = jobView(["two", "one"], {
     job_id: 42, status, active: status === "running", start_time_ms: Date.now() - 2500, effective_settings: JOB_SETTINGS,
   });

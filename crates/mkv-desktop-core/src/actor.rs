@@ -43,7 +43,8 @@ pub enum Intent {
     /// Scan `path` into the queue: resolve it to its Directory Identity, reuse the manifest
     /// already held for it unless `force`, else inspect it. Answers once the scan settles:
     /// `true` when the queue took the inspection, `false` when a newer scan of the mode overtook
-    /// it, it failed, or an empty `path` reset the queue.
+    /// it, it failed, or an empty `path` reset the queue; an error when a job is running in the
+    /// same mode.
     ScanDirectory {
         mode: PipelineMode,
         path: String,
@@ -249,9 +250,12 @@ struct ModeState {
     scan: ScanView,
     /// The newest scan request: a request answered after a newer one began is overtaken.
     request: u64,
-    /// The scan the queue waits for: an inspection that settles after a newer scan, a reuse or a
-    /// reset is overtaken.
+    /// The scan the queue waits for: an inspection that settles after a newer scan began, a reuse
+    /// or a reset is overtaken.
     token: u64,
+    /// Whether the queue, the scan or the Job Snapshot laid over the rows changed since the last
+    /// publication. Only a changed mode's view is rebuilt; the other is published as last built.
+    changed: bool,
 }
 
 /// A scan waiting on an in-flight inspection.
@@ -283,14 +287,17 @@ pub struct Core<P, I> {
     last_published_at: Option<Instant>,
 }
 
+/// The answer to a scan of the running job's own mode.
+const SCAN_REFUSED: &str = "A batch is running; its folder cannot be scanned until it ends.";
+
 impl<P: Publisher, I: Inspector> Core<P, I> {
     /// Spawns the actor on `runtime`, publishing through `publisher` and scanning through
     /// `inspector`.
     pub fn spawn(runtime: Handle, publisher: P, inspector: I) -> CoreHandle {
         // Unbounded on purpose (ADR-0016, 2026-10-16 amendment). The engine already drops
-        // `ItemProgress` it cannot send (`try_send`), and the actor only applies events in memory
-        // and publishes at most about 15 times a second, so the queue drains faster than a job
-        // fills it. A bounded channel would need async `JobSink` methods and let a slow actor
+        // `ItemProgress` it cannot send (`try_send` in `crates/mkv-core/src/pipeline.rs`), and
+        // the actor only applies events in memory and publishes at most about 15 times a second,
+        // so the queue drains faster than a job fills it. A bounded channel would need async `JobSink` methods and let a slow actor
         // stall the supervisor's teardown, which must never depend on the actor.
         let (inbox_tx, inbox) = mpsc::unbounded_channel();
         let core = Core {
@@ -361,9 +368,11 @@ impl<P: Publisher, I: Inspector> Core<P, I> {
             } => self.resolved(mode, request, directory, force, no_cache, reply),
             Msg::Inspected { id, result } => self.inspected(id, result),
             Msg::JobStarted(job) => {
+                // The rows of the replaced snapshot's mode lose its overlay.
+                self.touch_job();
                 self.snapshot = Some(job.snapshot());
                 self.active = true;
-                self.dirty = true;
+                self.touch_job();
             }
             Msg::JobEvent { job_id, event } => {
                 // A stale sink's event is not this snapshot's.
@@ -373,7 +382,7 @@ impl<P: Publisher, I: Inspector> Core<P, I> {
                     .filter(|snapshot| snapshot.job_id == job_id)
                 {
                     snapshot.apply(&event);
-                    self.dirty = true;
+                    self.touch_job();
                 }
             }
             Msg::Logs(lines) => self.publisher.logs(&lines),
@@ -402,6 +411,26 @@ impl<P: Publisher, I: Inspector> Core<P, I> {
         match mode {
             PipelineMode::Remux => &mut self.remux,
             PipelineMode::Extract => &mut self.extract,
+        }
+    }
+
+    /// Marks `mode`'s view as changed, for the next publication.
+    fn touch(&mut self, mode: PipelineMode) {
+        self.mode(mode).changed = true;
+        self.dirty = true;
+    }
+
+    /// Marks the Job View, and the view of the Job Snapshot's mode, whose rows show it, as changed.
+    fn touch_job(&mut self) {
+        self.dirty = true;
+        for mode in [PipelineMode::Remux, PipelineMode::Extract] {
+            if self
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.mode == mode_name(mode))
+            {
+                self.touch(mode);
+            }
         }
     }
 
@@ -455,17 +484,21 @@ impl<P: Publisher, I: Inspector> Core<P, I> {
             QueueChange::Select(id, selected) => queue.set_selected(&id, selected),
             QueueChange::SelectAll(selected) => queue.set_all_selected(selected),
             QueueChange::Reorder(id, direction) => queue.reorder(&id, direction),
-            QueueChange::Assign(_) if mode == PipelineMode::Extract => {
+            QueueChange::Assign(_) | QueueChange::Clear(_) if mode == PipelineMode::Extract => {
                 return Err("Track Assignments are for remux only.".into());
             }
             QueueChange::Assign(assignment) => queue.assign(assignment),
             QueueChange::Clear(id) => queue.clear_assignment(&id),
         };
-        self.dirty |= changed;
+        if changed {
+            self.touch(mode);
+        }
         Ok(changed)
     }
 
-    /// Begins a scan: an empty path resets the queue at once, any other resolves off the actor.
+    /// Begins a scan: an empty path resets the queue at once, any other resolves off the actor. A
+    /// running job refuses a scan of its own mode, whose queue it runs, also one begun before the
+    /// job started and still resolving or inspecting.
     fn scan(
         &mut self,
         mode: PipelineMode,
@@ -474,16 +507,20 @@ impl<P: Publisher, I: Inspector> Core<P, I> {
         no_cache: bool,
         reply: Reply,
     ) {
+        if self.job_runs(mode) {
+            return self.answer(reply, Err(SCAN_REFUSED.into()));
+        }
         let state = self.mode(mode);
         state.request += 1;
+        // A scan still pending is overtaken, even one whose inspection settles before this
+        // request resolves: its token no longer matches.
+        state.token += 1;
         let request = state.request;
         let path = path.trim().to_string();
         if path.is_empty() {
-            // A scan still pending is overtaken: its token no longer matches.
-            state.token += 1;
             state.queue.reset();
             state.scan = ScanView::Idle;
-            self.dirty = true;
+            self.touch(mode);
             self.clear_snapshot(mode);
             return self.answer(reply, Ok(false));
         }
@@ -516,14 +553,17 @@ impl<P: Publisher, I: Inspector> Core<P, I> {
         no_cache: bool,
         reply: Reply,
     ) {
-        let state = self.mode(mode);
-        if state.request != request {
+        if self.mode(mode).request != request {
             return self.answer(reply, Ok(false));
         }
+        if self.job_runs(mode) {
+            return self.answer(reply, Err(SCAN_REFUSED.into()));
+        }
+        let state = self.mode(mode);
         state.token += 1;
         if !force && state.queue.reuse(&directory) {
             state.scan = ScanView::Idle;
-            self.dirty = true;
+            self.touch(mode);
             self.clear_snapshot(mode);
             return self.answer(reply, Ok(true));
         }
@@ -531,7 +571,7 @@ impl<P: Publisher, I: Inspector> Core<P, I> {
         state.scan = ScanView::Scanning {
             directory: directory.clone(),
         };
-        self.dirty = true;
+        self.touch(mode);
         let waiter = Waiter {
             mode,
             token,
@@ -562,11 +602,21 @@ impl<P: Publisher, I: Inspector> Core<P, I> {
     /// (under its `canonical_dir`, else the identity it asked for) or fails; an overtaken one only
     /// answers.
     fn inspected(&mut self, id: u64, result: Result<InspectionManifest, String>) {
+        // One manifest, shared by every queue that accepts it.
+        let result = result.map(Arc::new);
         let mut answers = Vec::new();
         for waiter in self.in_flight.settle(id) {
+            let job_runs = self.job_runs(waiter.mode);
             let state = self.mode(waiter.mode);
             if state.token != waiter.token {
                 answers.push((waiter.reply, Ok(false)));
+                continue;
+            }
+            if job_runs {
+                // A job started while this scan inspected: it keeps the rows it runs.
+                state.scan = ScanView::Idle;
+                self.touch(waiter.mode);
+                answers.push((waiter.reply, Err(SCAN_REFUSED.into())));
                 continue;
             }
             let accepted = result.as_ref().is_ok_and(|manifest| {
@@ -576,7 +626,7 @@ impl<P: Publisher, I: Inspector> Core<P, I> {
                     .and_then(|dir| dir.as_str())
                     .filter(|dir| !dir.is_empty())
                     .map_or(waiter.directory, str::to_string);
-                state.queue.accept(manifest.clone(), directory)
+                state.queue.accept(Arc::clone(manifest), directory)
             });
             if accepted {
                 state.scan = ScanView::Idle;
@@ -585,13 +635,22 @@ impl<P: Publisher, I: Inspector> Core<P, I> {
                 state.queue.fail();
                 state.scan = ScanView::Failed;
             }
-            self.dirty = true;
+            self.touch(waiter.mode);
             answers.push((waiter.reply, Ok(accepted)));
         }
         self.flush();
         for (reply, answer) in answers {
             let _ = reply.send(answer);
         }
+    }
+
+    /// Whether a job is running in `mode`, whose queue it runs.
+    fn job_runs(&self, mode: PipelineMode) -> bool {
+        self.active
+            && self
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.mode == mode_name(mode))
     }
 
     /// An accepted scan, an Inspection Reuse or a reset of `mode` drops the Job Snapshot of
@@ -603,8 +662,8 @@ impl<P: Publisher, I: Inspector> Core<P, I> {
                 .as_ref()
                 .is_some_and(|snapshot| snapshot.mode == mode_name(mode))
         {
+            self.touch(mode);
             self.snapshot = None;
-            self.dirty = true;
         }
     }
 
@@ -640,12 +699,16 @@ impl<P: Publisher, I: Inspector> Core<P, I> {
             effective_settings: snapshot.effective_settings.clone(),
             participants: snapshot.ordered_item_ids.clone(),
         });
-        self.last_published = ViewState {
-            seq: self.last_published.seq + 1,
-            job,
-            remux: self.mode_view(PipelineMode::Remux),
-            extract: self.mode_view(PipelineMode::Extract),
-        };
+        // Each mode's view is rebuilt only when it changed, so a job's progress costs the rows of
+        // its own mode, not those of the other.
+        if std::mem::take(&mut self.remux.changed) {
+            self.last_published.remux = self.mode_view(PipelineMode::Remux);
+        }
+        if std::mem::take(&mut self.extract.changed) {
+            self.last_published.extract = self.mode_view(PipelineMode::Extract);
+        }
+        self.last_published.seq += 1;
+        self.last_published.job = job;
         self.dirty = false;
         self.last_published_at = Some(Instant::now());
         self.publisher.state(&self.last_published);
@@ -1401,6 +1464,70 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn test_an_inspection_that_settles_while_a_newer_request_resolves_is_overtaken() {
+        let (core, publisher, _inspector) = scanning_core();
+        // `/anime` settles at 200 ms, while the newer `/slow` request resolves until 600 ms.
+        let (anime, slow) = tokio::join!(core.dispatch(scan(REMUX, "/anime", false)), async {
+            tokio::time::sleep(INSPECTION / 2).await;
+            core.dispatch(scan(REMUX, "/slow", false)).await
+        });
+        assert_eq!((anime, slow), (Ok(false), Ok(true)));
+        assert!(publisher
+            .states()
+            .iter()
+            .all(|state| !ids(&state.remux).contains(&"ep1")));
+        assert_eq!(ids(&core.state().await.unwrap().remux), ["slow"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_a_publication_rebuilds_only_the_view_of_a_mode_that_changed() {
+        /// The address of each mode's row buffer in every publication: a view rebuilt is a new
+        /// buffer, while one republished as last built keeps its own.
+        #[derive(Clone, Default)]
+        struct RowBuffers(Arc<Mutex<Vec<(usize, usize)>>>);
+
+        impl Publisher for RowBuffers {
+            fn state(&self, state: &ViewState) {
+                let buffers = (
+                    state.remux.rows.as_ptr() as usize,
+                    state.extract.rows.as_ptr() as usize,
+                );
+                self.0.lock().unwrap().push(buffers);
+            }
+
+            fn logs(&self, _lines: &[LogLine]) {}
+
+            fn done(&self, _done: &JobDone) {}
+        }
+
+        let inspector = FakeInspector::default().with("/anime", manifest_of(&["ep1", "ep2"]));
+        let publisher = RowBuffers::default();
+        let core = Core::spawn(Handle::current(), publisher.clone(), inspector);
+        core.dispatch(scan(REMUX, "/anime", false)).await.unwrap();
+        core.dispatch(scan(EXTRACT, "/anime", false)).await.unwrap();
+        let before = publisher.0.lock().unwrap().len();
+
+        let sink = core.job_sink();
+        sink.started(&started(1));
+        sink.event(&batch_start(&["ep1"]));
+        sink.event(&item_start("ep1"));
+        for step in 0..5 {
+            sink.event(&item_progress("ep1", f64::from(step)));
+            tokio::time::sleep(PUBLISH_INTERVAL * 2).await;
+        }
+
+        // From the extract scan's last publication on: the remux job rebuilt the remux rows
+        // every time, and never the extract ones.
+        let buffers = publisher.0.lock().unwrap()[before - 1..].to_vec();
+        assert!(buffers.len() > 5, "{} publications", buffers.len());
+        assert!(buffers.iter().all(|&(_, extract)| extract == buffers[0].1));
+        assert!(buffers.windows(2).all(|pair| pair[0].0 != pair[1].0));
+        let state = core.state().await.unwrap();
+        assert_eq!(state.remux.rows[0].progress, Some(4.0));
+        assert!(state.extract.rows.iter().all(|row| !row.participant));
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn test_a_scan_of_one_view_does_not_overtake_the_others() {
         let (core, _publisher, _inspector) = scanning_core();
         let (remux, extract) = tokio::join!(
@@ -1543,6 +1670,11 @@ mod tests {
         };
         assert_eq!(core.dispatch(clear.clone()).await, Ok(true));
         assert_eq!(core.dispatch(clear).await, Ok(false));
+        let clear_extract = Intent::ClearTrack {
+            mode: EXTRACT,
+            id: "ep2".into(),
+        };
+        assert!(core.dispatch(clear_extract).await.is_err());
         assert!(core.state().await.unwrap().remux.assignments.is_empty());
         assert_eq!(
             core.dispatch(Intent::SetAllSelected {
@@ -1608,10 +1740,16 @@ mod tests {
         sink.started(&started(1));
         sink.event(&batch_start(&["ep1"]));
 
-        // Refused while the job runs: an accepted scan, a reuse and a reset of its mode.
-        assert_eq!(core.dispatch(scan(REMUX, "/anime", false)).await, Ok(true));
-        assert_eq!(core.dispatch(scan(REMUX, "/anime", false)).await, Ok(true));
-        assert_eq!(core.dispatch(scan(REMUX, "", false)).await, Ok(false));
+        // While the job runs, a scan or a reset of its own mode is refused, so its queue stays.
+        for path in ["/anime", ""] {
+            let error = core.dispatch(scan(REMUX, path, false)).await.unwrap_err();
+            assert!(error.contains("running"), "{path:?}: {error}");
+        }
+        // Another mode's scan still runs, and leaves the snapshot.
+        assert_eq!(
+            core.dispatch(scan(EXTRACT, "/anime", false)).await,
+            Ok(true)
+        );
         assert!(core.state().await.unwrap().job.is_some());
 
         sink.done(&done(1, 0));
@@ -1634,6 +1772,27 @@ mod tests {
             assert!(core.state().await.unwrap().job.is_some());
             core.dispatch(scan(REMUX, path, force)).await.unwrap();
             assert_eq!(core.state().await.unwrap().job, None, "{path:?}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_a_scan_begun_before_a_job_of_its_mode_is_refused_once_the_job_runs() {
+        let (core, _publisher, _inspector) = scanning_core();
+        // One scan still resolving, then one still inspecting, when the job starts.
+        for (path, wait) in [("/slow", SLOW / 2), ("/anime", INSPECTION / 2)] {
+            let pending = tokio::spawn({
+                let core = core.clone();
+                async move { core.dispatch(scan(REMUX, path, false)).await }
+            });
+            tokio::time::sleep(wait).await;
+            let sink = core.job_sink();
+            sink.started(&started(1));
+            let error = pending.await.unwrap().unwrap_err();
+            assert!(error.contains("running"), "{path}: {error}");
+            let state = core.state().await.unwrap();
+            assert_eq!(state.remux.scan, ScanView::Idle, "{path}");
+            assert!(state.remux.rows.is_empty(), "{path}");
+            sink.done(&done(1, 0));
         }
     }
 }

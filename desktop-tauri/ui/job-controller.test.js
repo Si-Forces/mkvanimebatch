@@ -830,14 +830,14 @@ test("a Stop still pending when a job completes ends as done: only the terminal 
   assert.equal(coordinator.activeMode, null);
 });
 
-test("job-done ends as cancelled on the published status or code -1, as done only on success with code 0, else failed", async t => {
+test("job-done ends on its code alone, whatever the queue shows: -1 cancelled, 0 done, else failed", async t => {
+  // The code is the job's terminal status, so a View State that has not arrived yet changes nothing.
   for (const [state, code, lifecycle] of [
-    [{ batchCancelled: true, batchSuccess: false }, 1, "cancelled"],
     [{ batchCancelled: false, batchSuccess: false }, -1, "cancelled"],
-    [{ batchCancelled: false, batchSuccess: true }, 0, "done"],
-    [{ batchCancelled: false, batchSuccess: true }, 1, "failed"],
+    [{ batchCancelled: false, batchSuccess: false }, 0, "done"],
+    [{ batchCancelled: true, batchSuccess: false }, 0, "done"],
     // A request the engine refused: the bridge's failed terminal, then code 1.
-    [{ batchCancelled: false, batchSuccess: false }, 1, "failed"],
+    [{ batchCancelled: false, batchSuccess: true }, 1, "failed"],
   ]) {
     const { controller, done } = await adopted(t, 9, { tracker: makeTracker({ state }) });
     done(9, code);

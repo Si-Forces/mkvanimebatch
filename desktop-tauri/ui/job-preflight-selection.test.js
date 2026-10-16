@@ -98,6 +98,9 @@ function recordRunJob(requests, jobId) {
   };
 }
 
+/** A dispatch for a tracker whose test sends no Intent. */
+const noDispatch = async () => false;
+
 /** Mock tracker whose last inspection of `dir` found `ids`, with `selected` checked. */
 function scannedTracker(dir, ids, selected, overrides = {}) {
   return {
@@ -289,7 +292,7 @@ test("An idle coordinator freezes only the queue that is scanning, not the other
   for (const { id } of BULK_SELECTION_CONTROLS) elements.set(id, new FakeElement());
   installDom(t, elements);
 
-  const queues = { remux: new QueueTracker("remux"), extract: new QueueTracker("extract") };
+  const queues = { remux: new QueueTracker("remux", noDispatch), extract: new QueueTracker("extract", noDispatch) };
   const shown = mode => modeView([`${mode}.mkv`], { directory: `/anime/${mode}`, manifest_rev: 1 });
   for (const [mode, tracker] of Object.entries(queues)) tracker.applyView(shown(mode));
   const runtime = makeRuntime(null, { queueFor: mode => queues[mode] });

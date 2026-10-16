@@ -1,7 +1,6 @@
-import { isSameDirectory } from "./queue-view.js";
+import { isSameDirectory } from "./presentation.js";
 
 /** Webview event names emitted by the engine bridge; must match `src-tauri/src/publisher.rs` (`cleanup-error`: `commands.rs`). */
-export const VIEW_STATE = "view-state";
 const JOB_LOG = "job-log";
 export const JOB_DONE = "job-done";
 export const CLEANUP_ERROR = "cleanup-error";
@@ -36,6 +35,11 @@ const TERMINAL_LIFECYCLE = { completed: "done", cancelled: "cancelled" };
 
 /** The `job-done` code of a finished Job View's status (architecture.md §5.1). */
 const DONE_CODES = { completed: 0, cancelled: -1 };
+
+/** The status pill a `job-done` code ends on. */
+const DONE_LIFECYCLE = Object.fromEntries(
+  Object.entries(DONE_CODES).map(([status, code]) => [code, TERMINAL_LIFECYCLE[status]]),
+);
 
 /**
  * Converts the Remux view's seconds entry to the engine's `default_sub_offset_ms`, rounding
@@ -405,13 +409,10 @@ export class JobController {
 
   onDone(code) {
     if (!this.running || this.jobId === null) return;
-    const tracker = this.runtime.queueFor(this.mode);
-    // `job-done` codes: 0 completed, -1 cancelled, 1 otherwise (architecture.md §5.1). A Stop
-    // that lost the race to a completed job is no cancellation: only the terminal says so. The
-    // core publishes the state a job ended in before its `job-done`, so the queue holds it.
-    const cancelled = tracker.state?.batchCancelled === true || code === -1;
-    const succeeded = Boolean(tracker.state?.batchSuccess) && code === 0;
-    this.lifecycle = cancelled ? "cancelled" : (succeeded ? "done" : "failed");
+    // `job-done` codes: 0 completed, -1 cancelled, 1 otherwise (architecture.md §5.1). The code
+    // is the job's terminal status, so the outcome needs no View State, whichever arrives first.
+    // A Stop that lost the race to a completed job is no cancellation: only the terminal says so.
+    this.lifecycle = DONE_LIFECYCLE[code] ?? "failed";
     this.launched = false;
     this.jobId = null;
     this.launchPromise = null;

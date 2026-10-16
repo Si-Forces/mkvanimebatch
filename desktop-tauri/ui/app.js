@@ -1,7 +1,7 @@
 /* MKV Anime Batch desktop frontend.
    Talks to the Tauri host through window.__TAURI__ (withGlobalTauri: true in tauri.conf.json). */
 
-import { BULK_SELECTION_CONTROLS, CLEANUP_ERROR, JobController, VIEW_STATE } from "./job-controller.js";
+import { BULK_SELECTION_CONTROLS, CLEANUP_ERROR, JobController } from "./job-controller.js";
 import { QueueTracker } from "./queue-view.js";
 import { lineClass, pushCapped } from "./log-classify.js";
 import { createTelemetryLoop } from "./telemetry.js";
@@ -134,6 +134,10 @@ function initSteppers() {
 
 // ─── Desktop Core state ─────────────────────────────────────────────────────
 
+/** The event the Desktop Core publishes the View State on; must match `src-tauri/src/publisher.rs`. */
+const VIEW_STATE = "view-state";
+// The newest View State applied, which `syncState` hands out.
+let appliedState = null;
 // The `seq` of the last View State applied. A publication and a `get_state` answer can arrive in
 // either order, so one not newer than this is stale and dropped.
 let appliedSeq = -1;
@@ -141,28 +145,33 @@ let appliedSeq = -1;
 // Progress publications leave it unchanged, so they skip the DOM-wide control sync.
 let controlsKey = "";
 
-/** Renders a View State the Desktop Core published; returns false for a stale one. */
+/** Renders a View State the Desktop Core published, unless it is stale. */
 function applyState(state) {
-  if (!state || state.seq <= appliedSeq) return false;
+  if (!state || state.seq <= appliedSeq) return;
   appliedSeq = state.seq;
+  appliedState = state;
   remuxQueue.applyView(state.remux, state.job);
   extractQueue.applyView(state.extract, state.job);
-  const key = JSON.stringify([state.job?.job_id, state.job?.active, ...[remuxQueue, extractQueue].map(queue => [
-    queue.view?.manifest_rev, queue.isScanning, queue.state?.totalCount, queue.getSelectedCount(),
-  ])]);
+  // Every ModeView field but the rows, and from the rows only the counts the controls show, so a
+  // ModeView field added later syncs the controls too, while a progress publication does not.
+  const key = JSON.stringify([state.job?.job_id, state.job?.active, ...[remuxQueue, extractQueue].map(queue => {
+    const { rows, ...fields } = queue.view;
+    return [fields, queue.state.totalCount, queue.getSelectedCount()];
+  })]);
   if (key !== controlsKey) {
     controlsKey = key;
     jobCoordinator.syncControls();
   }
-  return true;
 }
 
-/** Fetches and applies the current View State; resolves to it, or null when the core is unreachable. */
+/**
+ * Fetches and applies the current View State. Resolves to the newest state applied, which is a
+ * publication that overtook the answer when it is stale, or null when the core is unreachable.
+ */
 async function syncState() {
   try {
-    const state = await invoke("get_state");
-    applyState(state);
-    return state;
+    applyState(await invoke("get_state"));
+    return appliedState;
   } catch (err) {
     console.error("[get_state] failed:", err);
     return null;
@@ -560,8 +569,7 @@ const telemetryLoop = createTelemetryLoop({
 // ─── Directory Scan ─────────────────────────────────────────────────────────
 
 const scanInputDirectory = createDirectoryScanner({
-  invoke,
-  syncState,
+  dispatch: dispatchIntent,
   onSettled: () => jobCoordinator.syncControls(),
 });
 

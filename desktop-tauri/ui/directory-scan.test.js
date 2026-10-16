@@ -5,19 +5,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createDirectoryScanner } from "./directory-scan.js";
 
-/** A scanner over a fake `invoke` whose `dispatch` answers with `reply` (a value, or a function of the intent). */
+/** A scanner over a fake `dispatch` that answers with `reply` (a value, or a function of the intent). */
 function scannerHarness(reply = true) {
   const log = [];
-  const invoke = async (command, args) => {
-    log.push([command, args]);
-    if (command !== "dispatch") throw new Error(`unexpected command: ${command}`);
-    return typeof reply === "function" ? reply(args.intent) : reply;
+  const dispatch = async intent => {
+    log.push(["dispatch", intent]);
+    return typeof reply === "function" ? reply(intent) : reply;
   };
-  const scan = createDirectoryScanner({
-    invoke,
-    syncState: async () => log.push(["sync"]),
-    onSettled: () => log.push(["settled"]),
-  });
+  const scan = createDirectoryScanner({ dispatch, onSettled: () => log.push(["settled"]) });
   return { scan, log };
 }
 
@@ -26,33 +21,22 @@ test("a scan sends the ScanDirectory Intent, with the preflight's force and no_c
   assert.equal(await scan(" /release ", "remux"), true);
   assert.equal(await scan("/release", "extract", { force: true, noCache: true }), true);
 
-  assert.deepEqual(log.filter(([command]) => command === "dispatch").map(([, args]) => args.intent), [
+  assert.deepEqual(log.filter(([name]) => name === "dispatch").map(([, intent]) => intent), [
     // The core trims and resolves the path itself.
     { type: "scan_directory", mode: "remux", path: " /release ", force: false, no_cache: false },
     { type: "scan_directory", mode: "extract", path: "/release", force: true, no_cache: true },
   ]);
 });
 
-test("the core's reply is the scan's answer: false for an overtaken, failed or reset scan", async () => {
+test("the core's reply is the scan's answer: false for an overtaken, failed, reset or refused scan", async () => {
   const { scan } = scannerHarness(intent => intent.path === "/accepted");
   assert.equal(await scan("/accepted", "remux"), true);
   assert.equal(await scan("/overtaken", "remux"), false);
   assert.equal(await scan("", "remux"), false);
 });
 
-test("the published state is applied before the scan answers, then the controls catch up", async () => {
+test("the controls catch up once the dispatch, which applied the published state, settled", async () => {
   const { scan, log } = scannerHarness();
   await scan("/release", "remux");
-  assert.deepEqual(log.map(([name]) => name), ["dispatch", "sync", "settled"]);
-});
-
-test("a refused or failed dispatch answers false, and still applies the state and settles", async t => {
-  const failure = "The Desktop Core is not running.";
-  const logged = t.mock.method(console, "error", () => {});
-  const { scan, log } = scannerHarness(() => { throw failure; });
-
-  assert.equal(await scan("/release", "remux"), false);
-
-  assert.deepEqual(log.map(([name]) => name), ["dispatch", "sync", "settled"]);
-  assert.deepEqual(logged.mock.calls.at(-1).arguments, ["[scan_directory] failed:", failure]);
+  assert.deepEqual(log.map(([name]) => name), ["dispatch", "settled"]);
 });

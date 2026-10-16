@@ -21,6 +21,7 @@ export function row(id, fields = {}) {
     release: ".",
     metadata: { ...METADATA },
     inspection_error: null,
+    in_manifest: true,
     selected: true,
     status: "queued",
     progress: null,
@@ -71,7 +72,8 @@ function published(assignment) {
  * A Desktop Core over a scripted View State. `state` is the next state to publish; change it, then
  * `publish()` bumps `seq` and hands a copy to every `onPublish` listener (the `view-state` event).
  * `invoke(command, args)` answers `get_state` and `dispatch`: a queue Intent is applied to
- * `state` as the core would (refused while a job runs or the mode scans), and a scan is answered by
+ * `state` as the core would: refused while a job runs or the mode scans, a Track Assignment is
+ * refused on extract, and only the manifest rows take Intents. A scan is answered by
  * `onScan(intent)`, which the test scripts and which publishes what it wants itself.
  */
 export function createFakeCore({ onScan = async () => true } = {}) {
@@ -102,6 +104,7 @@ export function createFakeCore({ onScan = async () => true } = {}) {
       if (core.state.job?.active) throw "A batch is running; the queue is locked until it ends.";
       const view = core.state[intent.mode];
       if (view.scan.state === "scanning") throw "The folder is being scanned; the queue is locked until it ends.";
+      if (intent.mode === "extract" && intent.type.endsWith("_track")) throw "Track Assignments are for remux only.";
       const changed = applyIntent(view, intent);
       if (changed) core.publish();
       return changed;
@@ -110,25 +113,32 @@ export function createFakeCore({ onScan = async () => true } = {}) {
   return core;
 }
 
+/** Applies a queue Intent to the manifest rows of `view`, as `Queue` does; false when nothing changed. */
 function applyIntent(view, intent) {
-  const at = view.rows.findIndex(candidate => candidate.id === (intent.id ?? intent.assignment?.target_video));
+  // Only the manifest rows are the queue's: the rows a job adds after them take no Intent.
+  const manifest = view.rows.filter(entry => entry.in_manifest);
+  const jobOnly = view.rows.filter(entry => !entry.in_manifest);
+  const at = manifest.findIndex(candidate => candidate.id === (intent.id ?? intent.assignment?.target_video));
   switch (intent.type) {
-    case "set_selected":
+    case "set_selected": {
       if (at === -1) return false;
-      view.rows[at].selected = intent.selected;
+      const changed = manifest[at].selected !== intent.selected || view.vanished_selected_ids.length > 0;
+      manifest[at].selected = intent.selected;
       view.vanished_selected_ids = [];
-      return true;
+      return changed;
+    }
     case "set_all_selected": {
-      const changed = view.rows.some(entry => entry.selected !== intent.selected)
+      const changed = manifest.some(entry => entry.selected !== intent.selected)
         || view.vanished_selected_ids.length > 0;
-      for (const entry of view.rows) entry.selected = intent.selected;
+      for (const entry of manifest) entry.selected = intent.selected;
       view.vanished_selected_ids = [];
       return changed;
     }
     case "reorder": {
       const target = intent.direction === "up" ? at - 1 : at + 1;
-      if (at === -1 || target < 0 || target >= view.rows.length) return false;
-      [view.rows[at], view.rows[target]] = [view.rows[target], view.rows[at]];
+      if (at === -1 || target < 0 || target >= manifest.length) return false;
+      [manifest[at], manifest[target]] = [manifest[target], manifest[at]];
+      view.rows = [...manifest, ...jobOnly];
       return true;
     }
     case "assign_track":

@@ -8,6 +8,7 @@ import {
   formatElapsedDuration,
   formatOutcomeDuration,
   inspectorCrumbs,
+  isSameDirectory,
   logDisplayText,
   matchesFilter,
   pathSegments,
@@ -20,6 +21,27 @@ import {
   subtitleLadder,
   subtitleSourceText,
 } from "./presentation.js";
+
+test("Directory Identities compare byte for byte, and a missing or empty one is never the same", () => {
+  // The same table as `queue::tests::test_directory_identities_compare_byte_for_byte`.
+  assert.equal(isSameDirectory("/anime/show", "/anime/show"), true);
+  assert.equal(isSameDirectory("C:\\Anime\\Show", "C:\\Anime\\Show"), true);
+  // Nothing normalizes: the bridge resolves every spelling to one identity first.
+  for (const [a, b] of [
+    ["/anime/show", "/anime/show/"],
+    ["/anime/show", "/anime/x/../show"],
+    ["/anime/Show", "/anime/show"],
+    ["C:\\Anime\\Show", "c:/anime/show"],
+    ["/anime/showA", "/anime/showB"],
+    ["", "/anime/show"],
+    ["", ""],
+    [null, "/anime/show"],
+    [null, null],
+    [undefined, undefined],
+  ]) {
+    assert.equal(isSameDirectory(a, b), false, `${a} vs ${b}`);
+  }
+});
 
 test("paths read Finder-style: no slashes, no dot segments, Windows separators too", () => {
   assert.deepEqual(pathSegments("/media/anime/Show (2023)/"), ["media", "anime", "Show (2023)"]);

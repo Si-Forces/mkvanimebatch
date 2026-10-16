@@ -1,5 +1,6 @@
 import {
   formatOutcomeDuration,
+  isSameDirectory,
   matchesFilter,
   prettyPath,
   remuxAudioText,
@@ -40,29 +41,16 @@ const OUTCOME_COUNTERS = new Map([
 const DEFAULT_REASONS = { skipped: "Skipped", cancelled: "Cancelled" };
 const DEFAULT_ERROR = "Failed";
 
-/**
- * Returns true if both Directory Identities name the same directory. The Engine Bridge
- * produces every identity in display-canonical form, so the UI compares them byte for byte
- * and never normalizes a path itself. An empty, null, or missing identity is never the same.
- *
- * @param {string|null|undefined} dirA
- * @param {string|null|undefined} dirB
- * @returns {boolean}
- */
-export function isSameDirectory(dirA, dirB) {
-  return Boolean(dirA) && dirA === dirB;
-}
-
 /** One published Row as the renderer and `presentation.js` read an item. */
 function projectRow(row) {
   return {
     id: row.id,
     name: row.name,
     release: row.release,
-    // Every manifest row carries its inspection metadata; only a row the Job Snapshot lists
-    // but the manifest does not has none.
+    // Only a row the Job Snapshot lists but the manifest does not has no inspection metadata.
     metadata: row.metadata ?? null,
     inspectionError: row.inspection_error ?? null,
+    inManifest: row.in_manifest === true,
     selected: row.selected,
     status: row.status,
     startTime: row.start_time_ms ?? null,
@@ -163,8 +151,12 @@ const CHEVRON = d => `<svg width="10" height="10" viewBox="0 0 24 24" fill="none
  * It holds no queue rules of its own.
  */
 export class QueueTracker {
-  /** @param {(intent: object) => Promise<unknown>} dispatch sends an Intent to the Desktop Core */
-  constructor(mode, dispatch = async () => false) {
+  /**
+   * @param {(intent: object) => Promise<unknown>} dispatch sends an Intent to the Desktop Core and
+   *   resolves to its reply once the state it published is applied
+   */
+  constructor(mode, dispatch) {
+    if (typeof dispatch !== "function") throw new TypeError(`QueueTracker(${mode}) needs a dispatch function`);
     this.mode = mode;
     this.dispatch = dispatch;
     this.listEl = document.getElementById(`${mode}-episode-list`);
@@ -204,17 +196,26 @@ export class QueueTracker {
     // Called after anything the surrounding chrome (inspector, library, bottom bar) shows changed.
     this.onChange = null;
     if (this.listEl) {
-      this.listEl.addEventListener("change", e => {
+      this.listEl.addEventListener("change", async e => {
         const check = e.target.closest(".ep-select-check");
         const id = check?.dataset.itemId;
         if (!id) return;
-        if (this.selectionLocked) {
-          // Put the DOM back in step with the state the request was built from.
+        // Puts the DOM back in step with the published selection.
+        const revert = () => {
           const item = this.state.items.get(id);
           check.checked = item ? item.selected !== false : false;
-          return;
+        };
+        // Locked: the request was built from the published selection.
+        if (this.selectionLocked) return revert();
+        // The core can refuse on its own (a job runs, the mode scans) and then publishes nothing,
+        // so no published view would correct the tick.
+        let applied = false;
+        try {
+          applied = await this.dispatch({ type: "set_selected", mode: this.mode, id, selected: check.checked });
+        } catch (err) {
+          console.error("[set_selected] failed:", err);
         }
-        this.dispatch({ type: "set_selected", mode: this.mode, id, selected: check.checked });
+        if (!applied) revert();
       });
 
       this.listEl.addEventListener("click", e => {
@@ -295,14 +296,19 @@ export class QueueTracker {
     });
   }
 
-  emptyStateMarkup(title, description, actionLabel = "Open folder…") {
-    return `
+  /** Replaces the list with an empty-state card. Its text is set as text, never parsed as HTML. */
+  showEmptyState(title, description, actionLabel = "Open folder…") {
+    this.clearList(`
       <div class="empty-state-card">
         <svg class="empty-icon" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
-        <div class="empty-state-title">${title}</div>
-        <div class="empty-state-desc">${description}</div>
-        <button class="btn btn-accent empty-state-action" type="button" data-target="${this.mode}-input-dir">${actionLabel}</button>
-      </div>`;
+        <div class="empty-state-title"></div>
+        <div class="empty-state-desc"></div>
+        <button class="btn btn-accent empty-state-action" type="button" data-target="${this.mode}-input-dir"></button>
+      </div>`);
+    if (!this.listEl) return;
+    this.listEl.querySelector(".empty-state-title").textContent = title;
+    this.listEl.querySelector(".empty-state-desc").textContent = description;
+    this.listEl.querySelector(".empty-state-action").textContent = actionLabel;
   }
 
   /**
@@ -366,11 +372,11 @@ export class QueueTracker {
     if (this.shown === "failed") return;
     this.shown = "failed";
     // A scan that kept its rows must not leave them registered once the failure markup replaces them.
-    this.clearList(this.emptyStateMarkup(
+    this.showEmptyState(
       "Scan failed",
       "That folder could not be inspected. Choose another folder and try again.",
       "Choose another folder…"
-    ));
+    );
   }
 
   /** No rows: an empty folder when a directory is shown, else no folder yet. */
@@ -382,7 +388,7 @@ export class QueueTracker {
     if (this.shown === "empty" && this.emptyTitle === title) return;
     this.shown = "empty";
     this.emptyTitle = title;
-    this.clearList(this.emptyStateMarkup(title, description));
+    this.showEmptyState(title, description);
     if (this.filterEmptyEl) this.filterEmptyEl.hidden = true;
   }
 
@@ -428,8 +434,11 @@ export class QueueTracker {
       const item = this.state.items.get(id);
       if (!item) continue;
       const selected = item.selected !== false;
-      if (card.checkbox.checked !== selected || card.renderedStatus !== item.status) changed = true;
-      card.checkbox.checked = selected;
+      if (card.checkbox.checked !== selected) {
+        card.checkbox.checked = selected;
+        changed = true;
+      }
+      if (card.renderedStatus !== item.status) changed = true;
       if (assignmentsChanged) this.applyCardMeta(card, item, card.bitrate ?? this.getBitrate());
       this.renderCardState(card, item);
     }
@@ -774,7 +783,7 @@ export class QueueTracker {
 
   /** The IDs of the manifest rows, in queue order: what the last accepted inspection found. */
   manifestItemIds() {
-    return this.state.order.filter(id => this.state.items.get(id).metadata !== null);
+    return this.state.order.filter(id => this.state.items.get(id).inManifest);
   }
 
   /** The Queue Selection: the selected manifest rows, in queue order. */

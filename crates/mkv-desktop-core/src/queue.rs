@@ -9,6 +9,7 @@ use mkv_core::manifest::{InspectionManifest, InspectionMetadata};
 use mkv_core::request::TrackAssignment;
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 
 /// The only Inspection Manifest version the queue accepts.
 const MANIFEST_VERSION: u64 = 2;
@@ -38,6 +39,8 @@ pub struct Row {
     pub release: String,
     pub metadata: Option<InspectionMetadata>,
     pub inspection_error: Option<String>,
+    /// Whether the accepted manifest lists the item: only such a row is in the Queue Selection.
+    pub in_manifest: bool,
     pub selected: bool,
     pub status: ItemStatus,
     pub progress: Option<f64>,
@@ -50,11 +53,34 @@ pub struct Row {
     pub participant: bool,
 }
 
+impl Row {
+    /// A queued row of `id`, named after it, before its manifest entry or job is laid over it.
+    fn queued(id: &str, in_manifest: bool, selected: bool) -> Self {
+        Row {
+            id: id.to_string(),
+            name: id.to_string(),
+            release: String::new(),
+            metadata: None,
+            inspection_error: None,
+            in_manifest,
+            selected,
+            status: ItemStatus::Queued,
+            progress: None,
+            start_time_ms: None,
+            duration_sec: None,
+            reason: None,
+            error: None,
+            participant: false,
+        }
+    }
+}
+
 /// The queue of one mode.
 #[derive(Debug, Default)]
 pub struct Queue {
-    /// The accepted Inspection Manifest, kept for Inspection Reuse.
-    manifest: Option<InspectionManifest>,
+    /// The accepted Inspection Manifest, kept for Inspection Reuse; shared with every queue that
+    /// accepted the same inspection.
+    manifest: Option<Arc<InspectionManifest>>,
     /// The Directory Identity the queue shows. It outlives a failed scan.
     directory: Option<String>,
     /// The Directory Identity `manifest` is an inspection of: `None` after a failed scan, so the
@@ -94,6 +120,8 @@ impl Queue {
     }
 
     pub fn subtitle_candidates(&self) -> BTreeMap<String, Vec<String>> {
+        // A folder with no episodes shows none: a candidate is offered per item's release, and the
+        // webview cleared them for an empty manifest before S2 too.
         self.manifest
             .as_ref()
             .filter(|manifest| !manifest.items.is_empty())
@@ -114,7 +142,12 @@ impl Queue {
     /// Accepts `manifest` as the inspection of `directory`. A rescan of the directory the queue
     /// shows keeps the surviving selection, order and Track Assignments; another directory starts
     /// over. Returns false, changing nothing, for a manifest of another version.
-    pub fn accept(&mut self, manifest: InspectionManifest, directory: String) -> bool {
+    pub fn accept(
+        &mut self,
+        manifest: impl Into<Arc<InspectionManifest>>,
+        directory: String,
+    ) -> bool {
+        let manifest = manifest.into();
         if manifest.version != MANIFEST_VERSION {
             return false;
         }
@@ -152,7 +185,7 @@ impl Queue {
         };
     }
 
-    fn populate(&mut self, manifest: InspectionManifest, preserve: bool) {
+    fn populate(&mut self, manifest: Arc<InspectionManifest>, preserve: bool) {
         let mut index = HashMap::with_capacity(manifest.items.len());
         let mut order = Vec::with_capacity(manifest.items.len());
         for (position, item) in manifest.items.iter().enumerate() {
@@ -218,11 +251,8 @@ impl Queue {
             if known.contains(&id) {
                 continue;
             }
-            // A reappearing vanished ID is in `known_order` already, so only a never-seen one
-            // gets here; it is selected only if it was remembered as selected.
-            if prior_vanished.contains(&id) {
-                selected.insert(id.clone());
-            }
+            // A vanished ID is always in `known_order`, so only a never-seen one gets here, and
+            // it is appended unselected.
             order.push(id.clone());
             known_order.push(id);
         }
@@ -235,18 +265,19 @@ impl Queue {
     }
 
     /// Selects or deselects one item. An explicit choice forgets the vanished selected IDs.
-    /// Returns false for an ID the queue does not hold.
+    /// Returns false for an ID the queue does not hold, or when nothing changed.
     pub fn set_selected(&mut self, id: &str, selected: bool) -> bool {
         if !self.index.contains_key(id) {
             return false;
         }
-        if selected {
-            self.selected.insert(id.to_string());
+        let toggled = if selected {
+            self.selected.insert(id.to_string())
         } else {
-            self.selected.remove(id);
-        }
+            self.selected.remove(id)
+        };
+        let changed = toggled || !self.vanished_selected_ids.is_empty();
         self.vanished_selected_ids.clear();
-        true
+        changed
     }
 
     /// Selects or deselects every item, and forgets the vanished selected IDs. Returns false
@@ -311,22 +342,13 @@ impl Queue {
             .order
             .iter()
             .map(|id| {
-                let entry = manifest.map(|manifest| &manifest.items[self.index[id]]);
-                let mut row = Row {
-                    id: id.clone(),
-                    name: entry.map_or_else(|| id.clone(), |entry| entry.name.clone()),
-                    release: entry.map_or_else(String::new, |entry| entry.release.clone()),
-                    metadata: entry.map(|entry| entry.metadata.clone()),
-                    inspection_error: entry.and_then(|entry| entry.inspection_error.clone()),
-                    selected: self.selected.contains(id),
-                    status: ItemStatus::Queued,
-                    progress: None,
-                    start_time_ms: None,
-                    duration_sec: None,
-                    reason: None,
-                    error: None,
-                    participant: false,
-                };
+                let mut row = Row::queued(id, true, self.selected.contains(id));
+                if let Some(entry) = manifest.map(|manifest| &manifest.items[self.index[id]]) {
+                    row.name = entry.name.clone();
+                    row.release = entry.release.clone();
+                    row.metadata = Some(entry.metadata.clone());
+                    row.inspection_error = entry.inspection_error.clone();
+                }
                 if let Some(item) = participant(id) {
                     overlay(&mut row, item);
                 }
@@ -339,21 +361,8 @@ impl Queue {
                     continue;
                 }
                 let item = &job.items[id];
-                let mut row = Row {
-                    id: id.clone(),
-                    name: item.file.clone(),
-                    release: String::new(),
-                    metadata: None,
-                    inspection_error: None,
-                    selected: true,
-                    status: ItemStatus::Queued,
-                    progress: None,
-                    start_time_ms: None,
-                    duration_sec: None,
-                    reason: None,
-                    error: None,
-                    participant: false,
-                };
+                let mut row = Row::queued(id, false, true);
+                row.name = item.file.clone();
                 overlay(&mut row, item);
                 rows.push(row);
             }
@@ -468,9 +477,10 @@ mod tests {
             rows[1].inspection_error.as_deref(),
             Some("mkvmerge inspection timed out")
         );
-        assert!(rows
-            .iter()
-            .all(|row| row.selected && row.status == ItemStatus::Queued && !row.participant));
+        assert!(rows.iter().all(|row| row.selected
+            && row.in_manifest
+            && row.status == ItemStatus::Queued
+            && !row.participant));
         assert_eq!(queue.directory(), Some("/anime"));
         assert_eq!(queue.manifest_rev(), 1);
     }
@@ -491,6 +501,8 @@ mod tests {
         assert!(queue.set_selected("e2", false));
         assert_eq!(shown(&queue), ["e1", "e2-", "e3"]);
         assert!(queue.set_selected("e2", true));
+        // An unchanged value is a no-op.
+        assert!(!queue.set_selected("e2", true));
         assert!(!queue.set_selected("missing", true));
 
         assert!(queue.set_all_selected(false));
@@ -677,6 +689,7 @@ mod tests {
         assert_eq!(rows[2].status, ItemStatus::Queued);
         assert_eq!(rows[3].name, "extra.mkv");
         assert_eq!(rows[3].metadata, None);
+        assert!(rows[0].in_manifest && !rows[3].in_manifest);
     }
 
     #[test]
@@ -727,6 +740,7 @@ mod tests {
                     "fonts_count": null
                 },
                 "inspection_error": null,
+                "in_manifest": true,
                 "selected": true,
                 "status": "queued",
                 "progress": null,

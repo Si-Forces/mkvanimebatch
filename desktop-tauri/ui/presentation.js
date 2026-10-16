@@ -5,6 +5,19 @@
  */
 
 /**
+ * Returns true if both Directory Identities name the same directory. The Engine Bridge
+ * produces every identity in display-canonical form, so the UI compares them byte for byte
+ * and never normalizes a path itself. An empty, null, or missing identity is never the same.
+ *
+ * @param {string|null|undefined} dirA
+ * @param {string|null|undefined} dirB
+ * @returns {boolean}
+ */
+export function isSameDirectory(dirA, dirB) {
+  return Boolean(dirA) && dirA === dirB;
+}
+
+/**
  * A path's segments as the Finder path bar shows them: split on `/` or `\`, with empty, `.`
  * and `..` segments left out. Display only: never compare or send the result.
  *
