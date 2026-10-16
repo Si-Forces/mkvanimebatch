@@ -1,6 +1,11 @@
-//! The telemetry sampler: CPU, memory, and the write rate of the app and its Media Tools.
+//! The System Telemetry Provider: CPU, memory, and the write rate of the app and its Media Tools.
+//! The `Sampler` port takes one sample off the actor, `EngineSampler` takes it with `sysinfo`,
+//! and `TelemetryView` is what the View State shows of the samples so far.
 
-use std::sync::Mutex;
+use serde::Serialize;
+use std::collections::VecDeque;
+use std::future::Future;
+use std::sync::{Arc, Mutex};
 
 use sysinfo::{
     CpuRefreshKind, MemoryRefreshKind, Pid, ProcessRefreshKind, ProcessesToUpdate, RefreshKind,
@@ -35,7 +40,7 @@ impl Default for TelemetryState {
     }
 }
 
-#[derive(serde::Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct TelemetryData {
     pub cpu_pct: f32,
     pub ram_used_mb: u64,
@@ -82,6 +87,89 @@ impl TelemetryState {
     pub fn sample(&self) -> Result<TelemetryData, String> {
         let mut guard = self.inner.lock().map_err(|e| e.to_string())?;
         Ok(poll(&mut guard, Pid::from_u32(std::process::id())))
+    }
+}
+
+/// What the actor needs to sample the system. It runs off the actor.
+pub trait Sampler: Send + Sync + 'static {
+    fn sample(&self) -> impl Future<Output = Result<TelemetryData, String>> + Send;
+}
+
+/// The `Sampler` of the app: `TelemetryState::sample` on the blocking pool, since it walks
+/// every process.
+#[derive(Clone, Default)]
+pub struct EngineSampler(pub Arc<TelemetryState>);
+
+impl Sampler for EngineSampler {
+    async fn sample(&self) -> Result<TelemetryData, String> {
+        let state = Arc::clone(&self.0);
+        tokio::task::spawn_blocking(move || state.sample())
+            .await
+            .map_err(|e| format!("Async runtime error: {e}"))?
+    }
+}
+
+/// How many samples of each series a sparkline shows.
+pub const SPARK_SAMPLES: usize = 40;
+
+/// The telemetry a view shows: the texts of the last sample and the newest `SPARK_SAMPLES` of
+/// each series, oldest first.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct TelemetryView {
+    /// `37%`.
+    pub cpu: String,
+    /// The memory in use: `5.12 GB`.
+    pub ram: String,
+    /// The engine's write rate, `3.4 MB/s`, or `Idle` when it writes nothing.
+    pub disk: String,
+    pub samples: TelemetrySamples,
+}
+
+/// The sparkline series: CPU and RAM in percent, the disk in MB/s.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct TelemetrySamples {
+    pub cpu: VecDeque<f32>,
+    pub ram: VecDeque<f32>,
+    pub disk: VecDeque<f32>,
+}
+
+impl TelemetryView {
+    /// Takes in one sample.
+    pub fn push(&mut self, data: &TelemetryData) {
+        // `max` also turns a NaN into 0.
+        let cpu = data.cpu_pct.max(0.0);
+        // The write rate of the engine's own processes is zero whenever no batch writes: that
+        // shows as idle rather than "0 MB/s".
+        let io = if data.io_mb_s > 0.0 {
+            data.io_mb_s
+        } else {
+            0.0
+        };
+        let ram = if data.ram_pct.is_nan() {
+            0.0
+        } else {
+            data.ram_pct
+        };
+        for (series, value) in [
+            (&mut self.samples.cpu, cpu),
+            (&mut self.samples.ram, ram),
+            (&mut self.samples.disk, io),
+        ] {
+            series.push_back(value);
+            if series.len() > SPARK_SAMPLES {
+                series.pop_front();
+            }
+        }
+        // `Math.round`: half up.
+        self.cpu = format!("{}%", (f64::from(cpu) + 0.5).floor());
+        self.ram = format!("{:.2} GB", data.ram_used_mb as f64 / 1024.0);
+        self.disk = if io > 0.0 {
+            // Through the shortest decimal, as the f32 reached JS over JSON before `toFixed(1)`.
+            let io: f64 = io.to_string().parse().unwrap_or(f64::from(io));
+            format!("{io:.1} MB/s")
+        } else {
+            "Idle".to_string()
+        };
     }
 }
 
@@ -153,6 +241,54 @@ fn poll(inner: &mut TelemetryInner, self_pid: Pid) -> TelemetryData {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    fn data(cpu_pct: f32, ram_used_mb: u64, ram_pct: f32, io_mb_s: f32) -> TelemetryData {
+        TelemetryData {
+            cpu_pct,
+            ram_used_mb,
+            ram_total_mb: 16_384,
+            ram_pct,
+            io_mb_s,
+        }
+    }
+
+    #[test]
+    fn test_the_view_shows_the_texts_of_the_last_sample_and_the_newest_samples() {
+        let mut view = TelemetryView::default();
+        view.push(&data(37.0, 5243, 32.0, 3.44));
+        assert_eq!(
+            (view.cpu.as_str(), view.ram.as_str(), view.disk.as_str()),
+            ("37%", "5.12 GB", "3.4 MB/s")
+        );
+        // Below zero or NaN reads 0; no write is idle.
+        view.push(&data(-3.0, 0, f32::NAN, 0.0));
+        assert_eq!(
+            (view.cpu.as_str(), view.ram.as_str(), view.disk.as_str()),
+            ("0%", "0.00 GB", "Idle")
+        );
+        view.push(&data(f32::NAN, 1024, 6.0, -1.0));
+        assert_eq!((view.cpu.as_str(), view.disk.as_str()), ("0%", "Idle"));
+        assert_eq!(Vec::from(view.samples.cpu.clone()), [37.0, 0.0, 0.0]);
+        assert_eq!(Vec::from(view.samples.ram.clone()), [32.0, 0.0, 6.0]);
+        assert_eq!(Vec::from(view.samples.disk.clone()), [3.44, 0.0, 0.0]);
+        // Half up, as `Math.round` rounds.
+        view.push(&data(12.5, 0, 0.0, 0.0));
+        assert_eq!(view.cpu, "13%");
+
+        for step in 0..SPARK_SAMPLES {
+            view.push(&data(step as f32, 0, 0.0, 0.0));
+        }
+        assert_eq!(view.samples.cpu.len(), SPARK_SAMPLES);
+        assert_eq!(view.samples.cpu.front(), Some(&0.0));
+        assert_eq!(view.samples.cpu.back(), Some(&((SPARK_SAMPLES - 1) as f32)));
+        assert_eq!(
+            serde_json::to_value(&view).unwrap()["samples"]["ram"]
+                .as_array()
+                .unwrap()
+                .len(),
+            SPARK_SAMPLES
+        );
+    }
 
     #[test]
     fn test_is_engine_process_ancestry_and_naming() {
