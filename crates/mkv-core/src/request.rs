@@ -12,7 +12,7 @@ use serde_json::Value;
 use crate::cpu::{default_workers_for, physical_core_count, transcode_governor_threads};
 use crate::item_id::ItemId;
 use crate::pipeline::{PipelineConfig, PipelineMode};
-use crate::preset::{lookup_preset, PresetProfile};
+use crate::preset::{require_preset, PresetProfile};
 
 /// Accepted explicit `workers` values.
 pub const WORKERS_RANGE: RangeInclusive<usize> = 1..=64;
@@ -329,7 +329,7 @@ impl BatchRequest {
     /// The Preset Profile the request names, else the `DEFAULT_PRESET_ID` one.
     fn preset_profile(&self) -> Result<PresetProfile, String> {
         let id = self.preset.as_deref().unwrap_or(DEFAULT_PRESET_ID);
-        lookup_preset(id).ok_or_else(|| format!("Unknown preset profile: '{id}'"))
+        require_preset(id)
     }
 
     /// Layers the explicit settings over `preset` and the defaults for a machine with `cores`
@@ -587,6 +587,7 @@ fn legacy_assignment_map(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::preset::lookup_preset;
     use tempfile::tempdir;
 
     fn minimal_request(dir: &Path) -> BatchRequest {

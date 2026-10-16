@@ -1,10 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { RING_CIRCUMFERENCE } from "./queue-view.js";
-import { createFakeCore, jobView, modeView, row } from "./fake-core.js";
-
-/** The Effective Settings the harness answers `get_default_settings` and `resolve_batch_request` with. */
-const DEFAULT_SETTINGS = { workers: 6, io_jobs: 2, ffmpeg_threads: 1, bitrate: "192k", complexity: 5 };
+import { DEFAULTS as DEFAULT_SETTINGS, createFakeCore, draft, jobView, modeView, row } from "./fake-core.js";
 
 class BootElement {
   constructor(value = "") {
@@ -22,7 +19,11 @@ class BootElement {
       toggle: (name, on) => on ? classes.add(name) : classes.delete(name),
     };
   }
-  addEventListener(name, handler) { this.handlers.set(name, handler); }
+  /** Like the DOM, every listener of an event runs; `handlers` returns what the last one returned. */
+  addEventListener(name, handler) {
+    const prior = this.handlers.get(name);
+    this.handlers.set(name, prior ? (...args) => { prior(...args); return handler(...args); } : handler);
+  }
   setAttribute() {}
   getAttribute() { return null; }
   appendChild(child) {
@@ -68,7 +69,7 @@ function bootstrapHarness(t, answers = {}, { onListen = () => {} } = {}) {
   const core = createFakeCore({
     async onScan({ mode, path }) {
       if (!path.trim()) {
-        core.state[mode] = modeView([], { manifest_rev: core.state[mode].manifest_rev + 1 });
+        core.state[mode] = modeView([], { manifest_rev: core.state[mode].manifest_rev + 1, draft: core.state[mode].draft });
         core.publish();
         return false;
       }
@@ -106,7 +107,7 @@ function bootstrapHarness(t, answers = {}, { onListen = () => {} } = {}) {
       core: { invoke: async (command, args) => {
         calls.push([command, args]);
         if (command in answers) return answers[command];
-        if (command === "get_default_settings" || command === "resolve_batch_request") return DEFAULT_SETTINGS;
+        if (command === "resolve_batch_request") return DEFAULT_SETTINGS;
         if (command === "get_state" && !booted) {
           booted = true;
           stateRequested();
@@ -272,7 +273,8 @@ test("with no job, a scan and a selection made before get_state answers stay, an
   assert.equal(list.children.length, 3);
   assert.equal(ipc.elements.get("remux-run").disabled, false);
   assert.equal(ipc.handlers.has("job-done"), false);
-  assert.deepEqual(ipc.core.intents.map(intent => intent.type), ["scan_directory", "set_selected"]);
+  // The typed folder reached the Settings Draft before its scan.
+  assert.deepEqual(ipc.core.intents.map(intent => intent.type), ["edit_draft", "scan_directory", "set_selected"]);
 
   // A publication older than the one applied changes nothing.
   ipc.emit("view-state", { ...structuredClone(ipc.core.state), seq: 1, remux: modeView() });
@@ -283,12 +285,9 @@ test("with no job, a scan and a selection made before get_state answers stay, an
 // settings-chips.test.js, preset-menu.test.js and theme.test.js. Each assertion below fails when
 // app.js drops the call or listener that connects its module.
 test("app.js wires the settings chips, the preset menu and the theme to their modules", async t => {
-  let answerDefaults;
   const fast = { id: "fast", name: "Fast muxing", bitrate: "128k", complexity: 3 };
-  const ipc = bootstrapHarness(t, {
-    get_default_settings: new Promise(resolve => { answerDefaults = resolve; }),
-    get_preset_profiles: [fast],
-  });
+  const ipc = bootstrapHarness(t);
+  ipc.core.state.presets = [fast];
 
   // theme-init.js published a stored dark choice, and localStorage records what the toggle saves.
   const attributes = new Map();
@@ -316,7 +315,7 @@ test("app.js wires the settings chips, the preset menu and the theme to their mo
   ipc.elements.set("btn-theme", themeButton);
   const pinnedThemes = () => ipc.calls.filter(([command]) => command === "set_window_theme").map(([, args]) => args.theme);
 
-  // The sidebar's preset rows (rendered into #preset-list once the catalog loads) and the
+  // The sidebar's preset rows (rendered into #preset-list from the published catalog) and the
   // fields a profile fills.
   const presetList = Object.assign(new BootElement(), { querySelectorAll: () => [] });
   ipc.elements.set("preset-list", presetList);
@@ -327,11 +326,9 @@ test("app.js wires the settings chips, the preset menu and the theme to their mo
   await ipc.mount("module-wiring");
   assert.deepEqual(pinnedThemes(), ["dark"], "startup applies and pins the published choice");
 
-  // An adopted running job owns the chips, and the defaults answer only after it was adopted.
+  // An adopted running job owns the chips, though the state that holds it holds the defaults too.
   activeJob(ipc.core);
   ipc.resolveState();
-  await ipc.flush();
-  answerDefaults(DEFAULT_SETTINGS);
   await ipc.flush();
   assert.equal(ipc.workerChip.innerText, "3 Workers Active");
   assert.equal(ipc.ioChip.innerText, "5 IO Jobs Active");
@@ -350,8 +347,86 @@ test("app.js wires the settings chips, the preset menu and the theme to their mo
   const fastRow = presetList.children[0];
   const matches = selector => selector === ".profile-option-item[data-preset]" &&
     fastRow.className.split(" ").includes("profile-option-item") && Boolean(fastRow.dataset.preset);
-  presetList.handlers.get("click")({ target: { closest: selector => (matches(selector) ? fastRow : null) } });
+  // The core applies the profile and the published draft fills the fields.
+  await presetList.handlers.get("click")({ target: { closest: selector => (matches(selector) ? fastRow : null) } });
+  assert.deepEqual(ipc.core.intents.at(-1), { type: "set_preset", mode: "remux", preset: "fast" });
   assert.equal(ipc.elements.get("remux-bitrate").value, "128k");
+  assert.equal(ipc.elements.get("remux-cplx-val").value, "3");
+});
+
+test("boot restores each mode's typed Settings Draft from get_state, and every Intent goes out in order", async t => {
+  const ipc = bootstrapHarness(t);
+  for (const id of ["remux-out-dir", "remux-bitrate", "extract-dry-run"]) ipc.elements.set(id, new BootElement());
+  ipc.elements.get("extract-dry-run").type = "checkbox";
+  await ipc.mount("draft-restore");
+  ipc.core.state.remux.draft = draft("remux", { input_dir: "/anime/typed", out_dir: "/out", bitrate: "256k", preset: "custom" });
+  ipc.core.state.extract.draft = draft("extract", { input_dir: "/other", dry_run: true });
+  ipc.core.state.seq = 3;
+  ipc.resolveState();
+  await ipc.flush();
+  assert.equal(ipc.elements.get("remux-input-dir").value, "/anime/typed");
+  assert.equal(ipc.elements.get("remux-out-dir").value, "/out");
+  assert.equal(ipc.elements.get("remux-bitrate").value, "256k");
+  assert.equal(ipc.elements.get("extract-input-dir").value, "/other");
+  assert.equal(ipc.elements.get("extract-dry-run").checked, true);
+  assert.match(ipc.elements.get("extract-run").textContent, /^Plan/, "the restored dry run relabels Run");
+  assert.equal(ipc.core.intents.length, 0, "boot scans and edits nothing");
+
+  // Held answers: the second Intent goes out only once the first is answered.
+  const held = [];
+  const coreInvoke = ipc.core.invoke.bind(ipc.core);
+  ipc.core.invoke = (command, args) => (command === "dispatch"
+    ? new Promise(resolve => held.push(() => resolve(coreInvoke(command, args))))
+    : coreInvoke(command, args));
+  const workers = ipc.elements.get("remux-workers");
+  workers.value = "4";
+  workers.handlers.get("input")();
+  const scanned = ipc.scan("extract", "/release");
+  await ipc.flush();
+  // Each goes out once the one before it was answered: the remux edit, then the extract field's
+  // edit, then its rescan.
+  for (const sent of [0, 1]) {
+    assert.equal(ipc.core.intents.length, sent);
+    assert.equal(held.length, 1);
+    held.shift()();
+    await ipc.flush();
+  }
+  assert.equal(held.length, 1, "the rescan is sent");
+  // A scan holds the chain only until it is sent: an edit during it goes out at once.
+  workers.value = "5";
+  workers.handlers.get("input")();
+  await ipc.flush();
+  assert.equal(held.length, 2, "the edit did not wait for the scan's answer");
+  held.shift()();
+  held.shift()();
+  assert.equal(await scanned, true);
+  await ipc.flush();
+  assert.deepEqual(ipc.core.intents.slice(0, 2), [
+    { type: "edit_draft", mode: "remux", changes: { workers: "4" } },
+    { type: "edit_draft", mode: "extract", changes: { input_dir: "/release" } },
+  ]);
+  assert.equal(ipc.core.state.remux.draft.workers, "5");
+});
+
+test("a draft Intent takes its state from the publication, with no get_state after its answer", async t => {
+  const ipc = bootstrapHarness(t);
+  await ipc.mount("draft-no-sync");
+  ipc.resolveState();
+  await ipc.flush();
+  const since = ipc.calls.length;
+  const commands = () => ipc.calls.slice(since).map(([command]) => command);
+  const workers = ipc.elements.get("remux-workers");
+  workers.value = "4";
+  workers.handlers.get("input")();
+  await ipc.flush();
+  assert.deepEqual(commands(), ["dispatch"]);
+  assert.equal(ipc.elements.get("remux-workers").value, "4");
+  assert.equal(ipc.core.state.remux.draft.workers, "4");
+
+  // Any other Intent, here the scan the input folder's edit sends, still reads the state after.
+  await ipc.scan("remux", "/anime");
+  await ipc.flush();
+  assert.ok(commands().slice(1).includes("get_state"), commands().join(", "));
 });
 
 for (const { label, input, expected } of [
@@ -438,6 +513,8 @@ test("choosing a custom language tag keeps the tag box open until the tag is typ
 
   langCustom.value = "may";
   langCustom.handlers.get("change")();
+  // The assignment's Intent goes out after the ones before it.
+  await ipc.flush();
   await ipc.elements.get("remux-run").handlers.get("click")();
   await ipc.flush();
   const request = ipc.calls.find(([command]) => command === "run_job")[1].request;
@@ -457,7 +534,7 @@ test("the inspector's Reset clears a Track Assignment and a running job refuses 
 
   assignSelect.value = "__browse__";
   await assignSelect.handlers.get("change")({ target: assignSelect });
-  reset.handlers.get("click")();
+  await reset.handlers.get("click")();
   await ipc.elements.get("remux-run").handlers.get("click")();
   await ipc.flush();
   const request = ipc.calls.find(([command]) => command === "run_job")[1].request;
