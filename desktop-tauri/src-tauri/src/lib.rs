@@ -2,17 +2,16 @@ mod commands;
 mod diagnostics;
 mod process;
 mod publisher;
-mod telemetry;
 mod window;
 
-use mkv_desktop_core::actor::Core;
+use mkv_desktop_core::actor::{Core, Ports};
 use mkv_desktop_core::control::{
     begin_shutdown, cancel_shutdown, cleanup_owned_processes, EngineLauncher, InspectCacheState,
     ScanState,
 };
 use mkv_desktop_core::inspection::EngineInspector;
 use mkv_desktop_core::job::JobState;
-use mkv_desktop_core::telemetry::TelemetryState;
+use mkv_desktop_core::telemetry::EngineSampler;
 use publisher::WebviewPublisher;
 use std::sync::Arc;
 use tauri::{Emitter, Manager};
@@ -82,7 +81,8 @@ pub fn run() {
             diagnostics::init(app.path().app_log_dir().ok().as_deref());
             // The Desktop Core actor runs on the tokio runtime Tauri runs its async commands on,
             // publishes to the webview, and inspects and runs jobs through the Job Slot, the
-            // Directory Inspection registry and the session cache that Close also tears down.
+            // Directory Inspection registry and the session cache that Close also tears down, and
+            // samples the System Telemetry Provider.
             let scan = Arc::clone(&app.state::<Arc<ScanState>>());
             let cache = app.state::<InspectCacheState>().inner().clone();
             let inspector = EngineInspector {
@@ -94,11 +94,15 @@ pub fn run() {
                 scan,
                 cache,
             };
+            let ports = Ports {
+                inspector,
+                launcher,
+                sampler: EngineSampler::default(),
+            };
             app.manage(Core::spawn(
                 tauri::async_runtime::handle().inner().clone(),
                 WebviewPublisher(app.handle().clone()),
-                inspector,
-                launcher,
+                ports,
             ));
             Ok(())
         })
@@ -108,12 +112,9 @@ pub fn run() {
         ))
         .manage(Arc::new(ScanState::default()))
         .manage(InspectCacheState::default())
-        .manage(TelemetryState::default())
         .invoke_handler(tauri::generate_handler![
-            commands::clear_cache,
             commands::pick_directory,
             commands::pick_subtitle_file,
-            telemetry::get_system_telemetry,
             process::close_window,
             window::minimize_window,
             window::toggle_maximize,
@@ -122,6 +123,7 @@ pub fn run() {
             window::start_resize,
             window::set_window_theme,
             commands::get_state,
+            commands::get_log,
             commands::dispatch,
         ])
         .build(tauri::generate_context!())

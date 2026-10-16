@@ -16,7 +16,8 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// What the actor needs to scan a directory. Both run off the actor.
+/// What the actor needs to scan a directory, and to clear the inspect cache those scans use. Each
+/// runs off the actor.
 pub trait Inspector: Send + Sync + 'static {
     /// The Directory Identity of `path`, or why it has none.
     fn identity(&self, path: String) -> impl Future<Output = Result<String, String>> + Send;
@@ -28,6 +29,9 @@ pub trait Inspector: Send + Sync + 'static {
         identity: String,
         no_cache: bool,
     ) -> impl Future<Output = Result<InspectionManifest, String>> + Send;
+
+    /// Empties the session inspect cache and deletes its file.
+    fn clear_cache(&self) -> impl Future<Output = Result<(), String>> + Send;
 }
 
 /// Canonicalizes `path` on the blocking pool and pairs the result with its Directory Identity:
@@ -78,6 +82,11 @@ impl Inspector for EngineInspector {
             .extra
             .insert("canonical_dir".to_string(), identity.into());
         Ok(manifest)
+    }
+
+    async fn clear_cache(&self) -> Result<(), String> {
+        // The shared instance, or the next save of it would write the cleared entries back.
+        self.cache.clear().await
     }
 }
 

@@ -8,7 +8,8 @@ import { QueueTracker } from "./queue-view.js";
 import { IDLE_RUN, draft, jobView, modeView } from "./fake-core.js";
 
 // Rendering and wiring only: the Job Coordinator, the request a Run builds and its preflight are
-// the Desktop Core's, tested in `crates/mkv-desktop-core/src/{coordinator,draft,actor}.rs`.
+// the Desktop Core's, tested in `crates/mkv-desktop-core/src/{coordinator,draft,actor}.rs`, and so
+// are the Run Log lines a Run, a Stop or a cache clear writes (`actor/start.rs`, `actor.rs`).
 
 class FakeElement {
   constructor(value = "") {
@@ -82,18 +83,15 @@ function viewState(fields = {}) {
 
 /**
  * A runtime of fakes over `page.state`, the View State applied last. `send` answers each Intent
- * with `reply(intent)` and records it in `page.sent`; the log lines go to `page.logs`.
+ * with `reply(intent)` and records it in `page.sent`.
  */
 function makeRuntime(tracker, { reply = async () => true, ...overrides } = {}) {
-  const page = { state: viewState(), sent: [], logs: [], cleared: 0, opened: [] };
+  const page = { state: viewState(), sent: [], opened: [] };
   page.runtime = {
-    appendLog: (_el, line) => page.logs.push(line),
-    clearLog: () => { page.cleared++; },
     queueFor: () => tracker,
     safeAddListener: (el, event, handler) => el?.addEventListener(event, handler),
     scanInputDirectory: async () => true,
     showModal: async () => true,
-    invoke: async () => null,
     openSettings: mode => page.opened.push(mode),
     send: async intent => {
       page.sent.push(intent);
@@ -132,7 +130,24 @@ test("Run and Stop send their Intents, with the mode and nothing else", async t 
   await elements.get("remux-run").handlers.get("click")();
   await elements.get("remux-stop").handlers.get("click")();
   assert.deepEqual(page.sent, [{ type: "run", mode: "remux" }, { type: "stop", mode: "remux" }]);
-  assert.deepEqual(page.logs, [], "an idle Stop announces no shutdown wait");
+});
+
+test("a confirmed cache clear sends its Intent and writes nothing itself; a refused Stop or clear throws nothing", async t => {
+  const clear = new FakeElement();
+  const elements = makeElements(["remux"], { "remux-clear-cache": clear });
+  installDom(t, elements);
+  let confirmed = false;
+  const page = makeRuntime(idleTracker(), {
+    showModal: async () => confirmed,
+    reply: async () => { throw "Permission denied"; },
+  });
+  new JobController("remux", page.runtime);
+  await clear.handlers.get("click")();
+  assert.deepEqual(page.sent, [], "a cancelled dialog sends nothing");
+  confirmed = true;
+  await clear.handlers.get("click")();
+  await elements.get("remux-stop").handlers.get("click")();
+  assert.deepEqual(page.sent, [{ type: "clear_cache", mode: "remux" }, { type: "stop", mode: "remux" }]);
 });
 
 test("a Run click locks Run and the settings until its answer, so a second click sends nothing", async t => {
@@ -165,7 +180,7 @@ test("a Run click locks Run and the settings until its answer, so a second click
   assert.equal(preset.disabled, false);
 });
 
-test("a refused or failed Run is logged as ERROR, and a flagged field opens the settings sheet on it", async t => {
+test("a Run refused over a flagged field opens the settings sheet on it, and a failed start opens nothing", async t => {
   const offset = new FakeElement();
   const elements = makeElements(["remux"], { "remux-sub-offset": offset });
   installDom(t, elements);
@@ -179,7 +194,6 @@ test("a refused or failed Run is logged as ERROR, and a flagged field opens the 
   });
   const controller = new JobController("remux", page.runtime);
   await controller.start();
-  assert.deepEqual(page.logs, [{ kind: "error", text: `ERROR: ${text}` }]);
   assert.deepEqual(page.opened, ["remux"]);
   assert.equal(offset.focused, true);
   controller.syncGlobalControls();
@@ -190,40 +204,10 @@ test("a refused or failed Run is logged as ERROR, and a flagged field opens the 
   controller.syncGlobalControls();
   assert.equal(offset.classList.contains("input-error"), false);
 
-  // A failed start flags nothing: it is only logged.
+  // A failed start flags nothing: the core only logs it.
   page.runtime.send = async () => { throw "No episodes selected in queue."; };
   await controller.start();
-  assert.deepEqual(page.logs.at(-1), { kind: "error", text: "ERROR: No episodes selected in queue." });
   assert.deepEqual(page.opened, ["remux"]);
-});
-
-test("the log clears when the mode's start publishes its settings, once per start", async t => {
-  installDom(t, makeElements(["remux", "extract"]));
-  const page = makeRuntime(idleTracker());
-  const remux = new JobController("remux", page.runtime);
-  const extract = new JobController("extract", page.runtime);
-  const cleared = page.cleared;
-  const settings = { workers: 8, io_jobs: 2, ffmpeg_threads: 1, bitrate: "192k", complexity: 5 };
-
-  // Starting, before the resolve: a refused request is logged into the log as it was.
-  page.state = viewState({ run: { phase: "starting", mode: "remux", settings: null } });
-  remux.syncGlobalControls();
-  extract.syncGlobalControls();
-  assert.equal(page.cleared, cleared);
-  page.state = viewState({ run: { phase: "starting", mode: "remux", settings } });
-  remux.syncGlobalControls();
-  extract.syncGlobalControls();
-  assert.equal(page.cleared, cleared + 1, "only the owner's log clears");
-  page.state = viewState({ run: { phase: "running", mode: "remux", settings }, job: jobView() });
-  remux.syncGlobalControls();
-  assert.equal(page.cleared, cleared + 1);
-
-  // The next start clears it again.
-  page.state = viewState();
-  remux.syncGlobalControls();
-  page.state = viewState({ run: { phase: "starting", mode: "remux", settings } });
-  remux.syncGlobalControls();
-  assert.equal(page.cleared, cleared + 2);
 });
 
 test("Run is disabled while its queue scans, while starting, or while another mode's job runs", async t => {
@@ -363,26 +347,4 @@ test("the status pill shows the mode's published outcome, and Idle before its fi
   page.state = viewState({ run: { phase: "running", mode: "extract", settings: null }, remux: modeView([], { outcome: "done" }) });
   controller.syncGlobalControls();
   assert.match(elements.get("remux-status").innerHTML, /Done/);
-});
-
-test("Stop of a launched job logs the shutdown wait before the core answers, and logs a failed teardown", async t => {
-  const elements = makeElements();
-  installDom(t, elements);
-  let settle;
-  const page = makeRuntime(idleTracker(), { reply: () => new Promise((resolve, reject) => { settle = { resolve, reject }; }) });
-  page.state = viewState({ run: { phase: "running", mode: "remux", settings: null }, job: jobView() });
-  const controller = new JobController("remux", page.runtime);
-
-  const stopping = controller.stop();
-  assert.deepEqual(page.logs, [{ kind: "note", text: "Stop requested; waiting for shutdown." }]);
-  settle.reject("Timed out waiting for the job to stop.");
-  await stopping;
-  assert.deepEqual(page.logs.at(-1), { kind: "error", text: "ERROR: Timed out waiting for the job to stop." });
-
-  // A start before its launch has no shutdown to wait for.
-  page.state = viewState({ run: { phase: "starting", mode: "remux", settings: null } });
-  const cancelling = controller.stop();
-  settle.resolve(true);
-  await cancelling;
-  assert.equal(page.logs.length, 2);
 });

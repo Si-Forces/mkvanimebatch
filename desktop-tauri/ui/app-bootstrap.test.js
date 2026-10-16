@@ -28,12 +28,21 @@ class BootElement {
   focus() {}
   getAttribute() { return null; }
   appendChild(child) {
-    if (child.fragment) this.children.push(...child.children);
-    else this.children.push(child);
+    for (const node of child.fragment ? child.children : [child]) {
+      node.parent = this;
+      this.children.push(node);
+    }
     return child;
   }
   append(...nodes) { this.children.push(...nodes); }
-  remove() {}
+  replaceChildren(...nodes) {
+    this.children = [];
+    for (const node of nodes) this.appendChild(node);
+  }
+  get firstElementChild() { return this.children[0] ?? null; }
+  remove() {
+    if (this.parent) this.parent.children = this.parent.children.filter(node => node !== this);
+  }
   querySelector(selector) {
     if (!this.queried.has(selector)) this.queried.set(selector, new BootElement());
     return this.queried.get(selector);
@@ -79,6 +88,7 @@ function bootstrapHarness(t, answers = {}, { onListen = () => {} } = {}) {
     },
   });
   core.onPublish(state => handlers.get("view-state")?.({ payload: state }));
+  core.onLog(batch => handlers.get("job-log")?.({ payload: batch }));
   let resolveState;
   let stateRequested;
   const stateGate = new Promise(resolve => { resolveState = resolve; });
@@ -129,7 +139,7 @@ function bootstrapHarness(t, answers = {}, { onListen = () => {} } = {}) {
     globalThis.requestAnimationFrame = prior.requestAnimationFrame;
   });
   return {
-    elements, handlers, removed, calls, core, workerChip, ioChip,
+    elements, handlers, removed, calls, core, workerChip, ioChip, documentHandlers,
     resolveState: () => resolveState(),
     emit: (name, payload) => handlers.get(name)({ payload }),
     async mount(name) {
@@ -190,6 +200,11 @@ test("boot listens to view-state and job-log, renders the running job get_state 
   activeJob(ipc.core);
   ipc.resolveState();
   await ipc.flush();
+  // The boot reads both Run Logs after the state, and tells the core the window is hidden.
+  const commands = ipc.calls.map(([command]) => command);
+  assert.ok(commands.indexOf("get_log") > commands.indexOf("get_state"), commands.join(", "));
+  assert.deepEqual(ipc.calls.filter(([command]) => command === "get_log").map(([, args]) => args.mode), ["remux", "extract"]);
+  assert.equal(ipc.core.visible, false);
 
   const list = ipc.elements.get("remux-episode-list");
   assert.deepEqual(list.children.map(card => card.querySelector(".ep-title").textContent), ["two.mkv", "one.mkv"]);
@@ -554,7 +569,7 @@ test("while a job runs, a refused draft edit puts the published value back into 
   settleJob(ipc.core, "completed");
 });
 
-test("the log shows paths Finder-style, Copy puts the real paths on the clipboard, and errors badge the Log button", async t => {
+test("the console draws the core's batches: the display text, the class from the kind, the badge from errors, Copy from the raw text", async t => {
   const ipc = bootstrapHarness(t);
   const copyBtn = new BootElement();
   const badge = new BootElement();
@@ -579,8 +594,12 @@ test("the log shows paths Finder-style, Copy puts the real paths on the clipboar
   await ipc.elements.get("remux-run").handlers.get("click")();
   await ipc.flush();
 
-  ipc.emit("job-log", [
-    { kind: "succeeded", text: "  Completed -> /media/anime/Show/Season 1/Output/Show - 01.mkv" },
+  ipc.core.log("remux", [
+    {
+      kind: "succeeded",
+      text: "  Completed -> /media/anime/Show/Season 1/Output/Show - 01.mkv",
+      display: "  Completed -> media › anime › Show › Season 1 › Output › Show - 01.mkv",
+    },
     { kind: "error", text: "ERROR: Pipeline failed: mkvmerge failed on Show - 02.mkv" },
   ]);
   const log = ipc.elements.get("remux-log");
@@ -589,7 +608,6 @@ test("the log shows paths Finder-style, Copy puts the real paths on the clipboar
     "ERROR: Pipeline failed: mkvmerge failed on Show - 02.mkv",
   ]);
   assert.deepEqual(log.children.map(line => line.className), ["log-line line-ok", "log-line line-err"]);
-  assert.deepEqual(log.children.map(line => line.dataset.kind), ["succeeded", "error"]);
   assert.equal(badge.hidden, false);
   assert.equal(badge.textContent, "1");
 
@@ -598,4 +616,47 @@ test("the log shows paths Finder-style, Copy puts the real paths on the clipboar
   assert.deepEqual(copied, [
     "  Completed -> /media/anime/Show/Season 1/Output/Show - 01.mkv\nERROR: Pipeline failed: mkvmerge failed on Show - 02.mkv",
   ]);
+});
+
+test("a reload draws the Run Log get_log holds, and a batch that arrived before it only once", async t => {
+  const ipc = bootstrapHarness(t);
+  ipc.core.log("extract", [{ kind: "note", text: "probing" }]);
+  await ipc.mount("log-reload");
+  // A batch sent after the listener is bound but before get_log is part of what get_log answers.
+  ipc.core.log("extract", [{ kind: "error", text: "ERROR: x" }]);
+  ipc.resolveState();
+  await ipc.flush();
+  const log = ipc.elements.get("extract-log");
+  assert.deepEqual(log.children.map(line => line.textContent), ["probing", "ERROR: x"]);
+  assert.deepEqual(ipc.elements.get("remux-log").children.map(line => line.textContent), [
+    "No output yet. Run a batch to see its output here.",
+  ]);
+});
+
+test("the window's visibility goes to the core as view_visible, with no get_state after it", async t => {
+  const ipc = bootstrapHarness(t);
+  await ipc.mount("visibility");
+  ipc.resolveState();
+  await ipc.flush();
+  const since = ipc.calls.length;
+  globalThis.document.hidden = false;
+  ipc.documentHandlers.get("visibilitychange")();
+  await ipc.flush();
+  assert.equal(ipc.core.visible, true);
+  assert.deepEqual(ipc.calls.slice(since), [["dispatch", { intent: { type: "view_visible", visible: true } }]]);
+});
+
+test("the telemetry shows the published texts and draws the published samples", async t => {
+  const ipc = bootstrapHarness(t);
+  for (const id of ["tel-cpu", "tel-ram", "tel-disk", "tel-cpu-line", "tel-ram-line", "tel-disk-line"]) ipc.elements.set(id, new BootElement());
+  const points = new Map();
+  for (const id of ["tel-cpu-line", "tel-ram-line", "tel-disk-line"]) ipc.elements.get(id).setAttribute = (_name, value) => points.set(id, value);
+  await ipc.mount("telemetry");
+  ipc.core.state.telemetry = { cpu: "37%", ram: "5.12 GB", disk: "Idle", samples: { cpu: [0, 100], ram: [50, 50], disk: [0, 25] } };
+  ipc.resolveState();
+  await ipc.flush();
+  assert.deepEqual(["tel-cpu", "tel-ram", "tel-disk"].map(id => ipc.elements.get(id).textContent), ["37%", "5.12 GB", "Idle"]);
+  assert.equal(points.get("tel-cpu-line"), "0.0,18.0 64.0,2.0");
+  // The disk line scales to at least 50 MB/s.
+  assert.equal(points.get("tel-disk-line"), "0.0,18.0 64.0,10.0");
 });

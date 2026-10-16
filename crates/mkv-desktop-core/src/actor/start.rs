@@ -1,11 +1,16 @@
 //! The start of a Run (ADR-0016): from its acceptance through resolving its request, the forced
 //! scan and preflight, to the launch of its job, and the Stop that cancels a start or tears its job
 //! down. The Desktop Core actor drives it from its inbox, and the Job Coordinator holds its phase.
+//! What a view shows of it in the Run Log is written here too: a Run's error, the Stop note and a
+//! failed teardown, and the clear of the log once a Run's request resolved.
 
 use super::{Core, CoreHandle, Msg, Outcome, Publisher, Reply, ScanReply, ScanView};
 use crate::control::Launcher;
 use crate::coordinator::{preflight, Captured, Phase};
 use crate::inspection::Inspector;
+use crate::log::error_line;
+use crate::telemetry::Sampler;
+use mkv_core::log_line::LogLine;
 use mkv_core::pipeline::PipelineMode;
 use mkv_core::request::{BatchRequest, EffectiveSettings};
 use std::future::Future;
@@ -42,12 +47,14 @@ const RUN_BUSY: &str = "A job is already running or stopping. Wait for it to fin
 const RUN_SCANNING: &str = "The folder is being scanned; a batch can start once the scan ends.";
 /// The answer to a Run whose forced scan failed.
 const INSPECTION_FAILED: &str = "Input inspection failed; job was not started.";
+/// The Run Log line of a Stop of a launched job, whose teardown can take a while.
+const STOP_REQUESTED: &str = "Stop requested; waiting for shutdown.";
 
-impl<P: Publisher, I: Inspector, L: Launcher> Core<P, I, L> {
+impl<P: Publisher, I: Inspector, L: Launcher, S: Sampler> Core<P, I, L, S> {
     /// Runs `task` in a task of its own and sends its result to the inbox as `message`. The inner
     /// task is what turns a panic in `task` itself (a fake, or adapter code outside its
     /// `spawn_blocking`) into an `Err`, so the Run or Stop still answers, as a failure.
-    fn off_actor<T: Send + 'static>(
+    pub(super) fn off_actor<T: Send + 'static>(
         &self,
         task: impl Future<Output = Result<T, String>> + Send + 'static,
         message: impl FnOnce(Result<T, String>) -> Msg + Send + 'static,
@@ -81,11 +88,11 @@ impl<P: Publisher, I: Inspector, L: Launcher> Core<P, I, L> {
     /// answers at once, with no start.
     pub(super) fn run_batch(&mut self, mode: PipelineMode, reply: Reply) {
         if self.busy() {
-            return self.answer(reply, Err(RUN_BUSY.into()));
+            return self.answer_run(mode, reply, Err(RUN_BUSY.into()));
         }
         let state = self.mode(mode);
         if matches!(state.scan, ScanView::Scanning { .. }) {
-            return self.answer(reply, Err(RUN_SCANNING.into()));
+            return self.answer_run(mode, reply, Err(RUN_SCANNING.into()));
         }
         // A Run clears the flag of the last one, and sets its own.
         let unflagged = state.draft.invalid.take().is_some();
@@ -95,7 +102,7 @@ impl<P: Publisher, I: Inspector, L: Launcher> Core<P, I, L> {
             Err((field, error)) => {
                 state.draft.invalid = Some(field);
                 self.dirty = true;
-                return self.answer(reply, Err(error));
+                return self.answer_run(mode, reply, Err(error));
             }
         };
         let captured = Captured::of(&state.queue);
@@ -124,8 +131,18 @@ impl<P: Publisher, I: Inspector, L: Launcher> Core<P, I, L> {
         self.flush();
     }
 
-    /// A start's request resolved: its Effective Settings are published, and the forced scan of
-    /// its input directory begins. A refused one ends the start.
+    /// Answers a Run of `mode` like `answer`, writing a refusal or a failed start into the mode's
+    /// Run Log first.
+    fn answer_run(&mut self, mode: PipelineMode, reply: Reply, answer: Result<bool, String>) {
+        if let Err(error) = &answer {
+            self.log(mode, &[error_line(error)]);
+        }
+        self.answer(reply, answer);
+    }
+
+    /// A start's request resolved: its Effective Settings are published, the mode's Run Log is
+    /// cleared for the batch, and the forced scan of its input directory begins. A refused one
+    /// ends the start, and its error stays under the lines before it.
     pub(super) fn request_resolved(
         &mut self,
         attempt: u64,
@@ -147,8 +164,10 @@ impl<P: Publisher, I: Inspector, L: Launcher> Core<P, I, L> {
                 let no_cache = start.request.no_cache == Some(true);
                 self.run_settings = Some(settings);
                 self.dirty = true;
-                // Published at once: the view clears its log when they appear, and a quick
-                // preflight would otherwise end the start within one publication interval.
+                let cleared = self.mode(mode).log.clear();
+                self.publisher.logs(&cleared);
+                // Published at once: a quick preflight would otherwise end the start within one
+                // publication interval, and the view would never see its settings.
                 self.flush();
                 self.scan(mode, path, true, no_cache, ScanReply::Preflight(attempt));
             }
@@ -226,6 +245,11 @@ impl<P: Publisher, I: Inspector, L: Launcher> Core<P, I, L> {
         let Some((attempt, step, job_id)) = owned else {
             return self.answer(reply, Ok(false));
         };
+        // Only a launched job's teardown is announced: a start still launching stops once it
+        // has, and one before that is cancelled at once.
+        if self.coordinator.phase() == Phase::Running {
+            self.log(mode, &[LogLine::note(STOP_REQUESTED)]);
+        }
         self.stop_waiters.push((attempt, reply));
         // A Stop while one is pending waits on the same teardown.
         if self.coordinator.request_stop() {
@@ -242,19 +266,35 @@ impl<P: Publisher, I: Inspector, L: Launcher> Core<P, I, L> {
     /// Tears down the start of `attempt` off the actor: job `job_id`, or none yet, and the
     /// Directory Inspection.
     fn issue_stop(&mut self, attempt: u64, job_id: Option<u64>) {
-        if let Some(start) = self.current(attempt) {
-            start.stop_issued = true;
-        }
+        let Some(start) = self.current(attempt) else {
+            return;
+        };
+        start.stop_issued = true;
+        let mode = start.mode;
         let launcher = Arc::clone(&self.launcher);
         self.off_actor(async move { launcher.stop(job_id).await }, move |result| {
-            Msg::StopSettled { attempt, result }
+            Msg::StopSettled {
+                attempt,
+                mode,
+                result,
+            }
         });
     }
 
     /// A teardown is over. Before the launch it cancelled the start. After it the job's `Done`
     /// came first (the supervisor sends it before it releases the Job Slot, which the teardown
     /// waits on) and ended the start, unless the teardown failed, which leaves the job running.
-    pub(super) fn stop_settled(&mut self, attempt: u64, result: Result<(), String>) {
+    /// A failed teardown is written into the Run Log of the start's `mode` once, however many
+    /// Stops wait on it.
+    pub(super) fn stop_settled(
+        &mut self,
+        attempt: u64,
+        mode: PipelineMode,
+        result: Result<(), String>,
+    ) {
+        if let Err(error) = &result {
+            self.log(mode, &[error_line(error)]);
+        }
         let waiters = self.take_stop_waiters(attempt);
         let step = self.current(attempt).map(|start| start.step);
         match (step, &result) {
@@ -300,17 +340,17 @@ impl<P: Publisher, I: Inspector, L: Launcher> Core<P, I, L> {
         self.run_settings = None;
         self.dirty = true;
         self.set_outcome(start.mode, Some(outcome));
-        let mut replies: Vec<(Reply, Result<bool, String>)> = Vec::new();
-        if let Some(reply) = start.run_reply {
-            replies.push((reply, run_answer));
-        }
-        if !start.stop_issued {
-            let stops = self.take_stop_waiters(start.attempt);
-            replies.extend(stops.into_iter().map(|reply| (reply, Ok(true))));
-        }
+        let stops = if start.stop_issued {
+            Vec::new()
+        } else {
+            self.take_stop_waiters(start.attempt)
+        };
         self.flush();
-        for (reply, answer) in replies {
-            let _ = reply.send(answer);
+        if let Some(reply) = start.run_reply {
+            self.answer_run(start.mode, reply, run_answer);
+        }
+        for reply in stops {
+            let _ = reply.send(Ok(true));
         }
     }
 }
@@ -1068,5 +1108,157 @@ mod tests {
             std::fs::canonicalize(&job.input_dir).unwrap(),
             std::fs::canonicalize(tmp.path()).unwrap()
         );
+    }
+
+    /// The texts of `mode`'s Run Log, with its generation.
+    async fn log_of(core: &CoreHandle, mode: PipelineMode) -> (u64, Vec<String>) {
+        let log = core.log(mode).await.unwrap();
+        let texts = log.lines.into_iter().map(|line| line.text).collect();
+        (log.generation, texts)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_every_run_answered_with_an_error_writes_it_into_its_modes_run_log() {
+        let launcher = FakeLauncher::default();
+        let (core, _publisher, _inspector) = run_core(&launcher).await;
+
+        // Refused before its request resolved: logged, with nothing cleared.
+        let refused = "Worker thread count must be between 1 and 64";
+        launcher.script().resolve_error = Some(refused.into());
+        assert!(core.dispatch(run(REMUX)).await.is_err());
+        assert_eq!(
+            log_of(&core, REMUX).await,
+            (0, vec![format!("ERROR: {refused}")])
+        );
+        let line = &core.log(REMUX).await.unwrap().lines[0];
+        assert_eq!(line.kind, mkv_core::log_line::LogKind::Error);
+
+        // A failed launch, after the resolve cleared the log.
+        launcher.script().resolve_error = None;
+        let closing = "Application is closing; no new job can start.";
+        launcher.script().launch_error = Some(closing.into());
+        assert!(core.dispatch(run(REMUX)).await.is_err());
+        assert_eq!(
+            log_of(&core, REMUX).await,
+            (1, vec![format!("ERROR: {closing}")])
+        );
+        launcher.script().launch_error = None;
+
+        // A draft that builds no request, a scan in progress and a held batch.
+        type_input(&core, EXTRACT, "").await;
+        assert!(core.dispatch(run(EXTRACT)).await.is_err());
+        let scanning = pending(&core, scan(EXTRACT, "/fast", false));
+        tokio::time::sleep(INSPECTION / 2).await;
+        assert!(core.dispatch(run(EXTRACT)).await.is_err());
+        assert_eq!(scanning.await.unwrap(), Ok(true));
+        assert_eq!(core.dispatch(run(REMUX)).await, Ok(true));
+        assert!(core.dispatch(run(EXTRACT)).await.is_err());
+        assert_eq!(
+            log_of(&core, EXTRACT).await,
+            (
+                0,
+                vec![
+                    "ERROR: Input directory is required.".to_string(),
+                    "ERROR: The folder is being scanned; a batch can start once the scan ends."
+                        .into(),
+                    "ERROR: A job is already running or stopping. Wait for it to finish.".into(),
+                ]
+            )
+        );
+        // The remux Run that launched wrote nothing but cleared its own log.
+        assert_eq!(log_of(&core, REMUX).await, (2, Vec::<String>::new()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_a_failed_forced_scan_writes_its_error() {
+        let launcher = FakeLauncher::default();
+        let (core, _publisher, inspector) = run_core(&launcher).await;
+        inspector.manifests.lock().unwrap().remove("/anime");
+        assert!(core.dispatch(run(REMUX)).await.is_err());
+        assert_eq!(
+            log_of(&core, REMUX).await,
+            (
+                1,
+                vec!["ERROR: Input inspection failed; job was not started.".to_string()]
+            )
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_a_stop_of_a_launched_job_writes_the_note_and_one_while_launching_does_not() {
+        let launcher = FakeLauncher::default();
+        let (core, _publisher, _inspector) = run_core(&launcher).await;
+        let running = pending(&core, run(REMUX));
+        tokio::time::sleep(RESOLVE + INSPECTION + LAUNCH / 2).await;
+        assert_eq!(core.dispatch(stop(REMUX)).await, Ok(true));
+        assert_eq!(running.await.unwrap(), Ok(true));
+        assert_eq!(log_of(&core, REMUX).await.1, Vec::<String>::new());
+
+        assert_eq!(core.dispatch(run(REMUX)).await, Ok(true));
+        assert_eq!(core.dispatch(stop(REMUX)).await, Ok(true));
+        assert_eq!(
+            log_of(&core, REMUX).await.1,
+            ["Stop requested; waiting for shutdown."]
+        );
+        let line = &core.log(REMUX).await.unwrap().lines[0];
+        assert_eq!(line.kind, mkv_core::log_line::LogKind::Note);
+        // A Stop with nothing to stop writes nothing.
+        assert_eq!(core.dispatch(stop(REMUX)).await, Ok(false));
+        assert_eq!(log_of(&core, REMUX).await.1.len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_a_failed_teardown_is_written_once_however_many_stops_wait_on_it() {
+        let launcher = FakeLauncher::default();
+        let (core, _publisher, _inspector) = run_core(&launcher).await;
+        assert_eq!(core.dispatch(run(REMUX)).await, Ok(true));
+        let timeout = "Timed out waiting for job cleanup to finish.";
+        launcher.script().stop_error = Some(timeout.into());
+
+        let first = pending(&core, stop(REMUX));
+        tokio::time::sleep(STOP / 2).await;
+        // Stopping already: no second note.
+        assert_eq!(core.dispatch(stop(REMUX)).await, Err(timeout.into()));
+        assert_eq!(first.await.unwrap(), Err(timeout.into()));
+        assert_eq!(
+            log_of(&core, REMUX).await.1,
+            [
+                "Stop requested; waiting for shutdown.".to_string(),
+                format!("ERROR: {timeout}"),
+            ]
+        );
+        assert_eq!(core.log(REMUX).await.unwrap().errors, 1);
+        assert_eq!(log_of(&core, EXTRACT).await.1, Vec::<String>::new());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_the_log_clears_once_per_start_when_its_request_resolves_and_only_its_own() {
+        let launcher = FakeLauncher::default();
+        let (core, publisher, _inspector) = run_core(&launcher).await;
+        type_input(&core, EXTRACT, "").await;
+        assert!(core.dispatch(run(EXTRACT)).await.is_err());
+        launcher.script().resolve_error = Some("refused".into());
+        assert!(core.dispatch(run(REMUX)).await.is_err());
+        launcher.script().resolve_error = None;
+        let before = publisher.logs().len();
+
+        assert_eq!(core.dispatch(run(REMUX)).await, Ok(true));
+        let batches = publisher.logs()[before..].to_vec();
+        assert_eq!(batches.len(), 1, "{batches:?}");
+        let clear = &batches[0];
+        assert_eq!(clear.mode, REMUX);
+        assert_eq!((clear.generation, clear.first, clear.keep_from), (1, 0, 0));
+        assert!(clear.lines.is_empty());
+        assert_eq!(log_of(&core, REMUX).await, (1, Vec::<String>::new()));
+        // The other mode keeps its lines.
+        assert_eq!(
+            log_of(&core, EXTRACT).await,
+            (0, vec!["ERROR: Input directory is required.".to_string()])
+        );
+        // The job's lines follow, under the new generation.
+        launcher.script().jobs[0]
+            .2
+            .logs(&[mkv_core::log_line::LogLine::note("probing")]);
+        assert_eq!(log_of(&core, REMUX).await, (1, vec!["probing".to_string()]));
     }
 }

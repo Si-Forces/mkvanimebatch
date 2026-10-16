@@ -4,11 +4,11 @@
 use serde::Serialize;
 
 /// What a Log Channel line reports, which decides how a console shows it. `Note` is the plain
-/// default. No engine code writes `Cache` lines today; the webview's clear-cache line is
-/// their only producer.
+/// default. No engine code writes `Cache` lines; the Desktop Core's clear-cache line is their
+/// only producer.
 ///
-/// The serialized names are read by `desktop-tauri/ui/log-classify.js`, whose `KIND_CLASS`
-/// must list the same names. TODO(S3, #113): the Desktop Core owns the kind->class map in Rust.
+/// The serialized names are read by `desktop-tauri/ui/log-view.js`, whose `KIND_CLASS` must
+/// list the same names (its Node test checks this file).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LogKind {

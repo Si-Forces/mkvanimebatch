@@ -3,8 +3,7 @@
 
 import { BULK_SELECTION_CONTROLS, JobController } from "./job-controller.js";
 import { QueueTracker } from "./queue-view.js";
-import { lineClass, pushCapped } from "./log-classify.js";
-import { createTelemetryLoop } from "./telemetry.js";
+import { createRunLogs } from "./log-view.js";
 import { createDirectoryScanner } from "./directory-scan.js";
 import { nextStepValue } from "./stepper.js";
 import { createSettingsChips } from "./settings-chips.js";
@@ -17,7 +16,6 @@ import {
   filterCounts,
   inspectorCrumbs,
   isBusy,
-  logDisplayText,
   pathSegments,
   prettyPath,
   progressSegments,
@@ -161,7 +159,6 @@ function busy() {
 /** Re-renders every control a busy batch, a scan or the Job Coordinator moves. */
 function syncControls() {
   for (const controller of Object.values(controllers)) controller.syncGlobalControls();
-  telemetryLoop.setJobActive(busy());
 }
 
 /** Renders a View State the Desktop Core published, unless it is stale. */
@@ -174,6 +171,7 @@ function applyState(state) {
   draftForm.apply("extract", state.extract.draft);
   chips.render(state);
   presets.render(state.presets, state.remux.draft);
+  renderTelemetry(state.telemetry);
   remuxQueue.applyView(state.remux, state.job);
   extractQueue.applyView(state.extract, state.job);
   // The rows show the bitrate and the subtitle ladder the assets dir is part of.
@@ -221,14 +219,14 @@ let dispatchChain = Promise.resolve();
 // The Intents the chain does not wait on.
 const UNCHAINED_INTENTS = new Set(["scan_directory", "run", "stop"]);
 
-// The draft Intents: the core answers them before it publishes their change, which reaches the
-// page as a coalesced `view-state` publication (ADR-0016, S3).
-const DRAFT_INTENTS = new Set(["edit_draft", "set_preset"]);
+// The Intents the core answers before it publishes their change, which reaches the page as a
+// coalesced `view-state` publication (ADR-0016, S3 and S4): the draft Intents and `view_visible`.
+const UNSYNCED_INTENTS = new Set(["edit_draft", "set_preset", "view_visible"]);
 
 /**
  * Sends an Intent to the Desktop Core after every Intent sent before it was answered (a scan, a
- * Run or a Stop only sent), then applies the state it published for it, but for a draft Intent,
- * whose state arrives as a publication. Resolves to the core's reply, and rejects with its
+ * Run or a Stop only sent), then applies the state it published for it, but for a draft Intent or
+ * `view_visible`, whose state arrives as a publication. Resolves to the core's reply, and rejects with its
  * refusal (the queue or the settings are locked, a Run failed) once that state is applied.
  */
 function sendIntent(intent) {
@@ -236,7 +234,7 @@ function sendIntent(intent) {
     try {
       return await invoke("dispatch", { intent });
     } finally {
-      if (!DRAFT_INTENTS.has(intent.type)) await syncState();
+      if (!UNSYNCED_INTENTS.has(intent.type)) await syncState();
     }
   });
   if (!UNCHAINED_INTENTS.has(intent.type)) dispatchChain = answer.catch(() => {});
@@ -272,6 +270,8 @@ function switchView(viewId) {
   });
   lastLibraryKey = null;
   lastAssignKey = null;
+  // The badge counts the shown mode's errors: not a frame late on a switch.
+  renderLogBadge();
   scheduleChrome(currentView);
 }
 
@@ -589,40 +589,28 @@ function onAssignOptions() {
 
 // ─── System Telemetry ───────────────────────────────────────────────────────
 
-const SPARK_SAMPLES = 40;
-const telemetrySamples = { cpu: [], ram: [], disk: [] };
+// The texts and samples are the core's (`crates/mkv-desktop-core/src/telemetry.rs`), which also
+// sets the cadence; only the sparkline drawing is the page's. Null until the first sample.
+let lastTelemetry = "";
 
-function pushSample(name, value) {
-  const list = telemetrySamples[name];
-  list.push(value);
-  if (list.length > SPARK_SAMPLES) list.shift();
-}
-
-function applyTelemetryData(data) {
-  const cpu = Math.max(0, data.cpu_pct || 0);
-  const ramUsedMb = data.ram_used_mb || 0;
-  // `io_mb_s` is the write rate of the engine's own processes, so it is zero whenever no batch
-  // is writing; show that as idle rather than "0 MB/s".
-  const io = typeof data.io_mb_s === "number" && data.io_mb_s > 0 ? data.io_mb_s : 0;
-  pushSample("cpu", cpu);
-  pushSample("ram", data.ram_pct || 0);
-  pushSample("disk", io);
-
-  setText("tel-cpu", `${Math.round(cpu)}%`);
-  setText("tel-ram", `${(ramUsedMb / 1024).toFixed(2)} GB`);
-  setText("tel-disk", io > 0 ? `${io.toFixed(1)} MB/s` : "Idle");
-  byId("tel-cpu-line")?.setAttribute("points", sparkPoints(telemetrySamples.cpu, 100));
-  byId("tel-ram-line")?.setAttribute("points", sparkPoints(telemetrySamples.ram, 100));
+function renderTelemetry(telemetry) {
+  const key = JSON.stringify(telemetry ?? null);
+  if (!telemetry || key === lastTelemetry) return;
+  lastTelemetry = key;
+  const { cpu, ram, disk, samples } = telemetry;
+  setText("tel-cpu", cpu);
+  setText("tel-ram", ram);
+  setText("tel-disk", disk);
+  byId("tel-cpu-line")?.setAttribute("points", sparkPoints(samples.cpu, 100));
+  byId("tel-ram-line")?.setAttribute("points", sparkPoints(samples.ram, 100));
   // The disk line scales to at least 50 MB/s, so a few MB/s of idle writes stay near the floor.
-  byId("tel-disk-line")?.setAttribute("points", sparkPoints(telemetrySamples.disk, Math.max(50, ...telemetrySamples.disk)));
+  byId("tel-disk-line")?.setAttribute("points", sparkPoints(samples.disk, Math.max(50, ...samples.disk)));
 }
 
-const telemetryLoop = createTelemetryLoop({
-  invoke,
-  onData: applyTelemetryData,
-  onError: err => console.error("[get_system_telemetry] failed:", err),
-  doc: document,
-});
+/** Tells the core whether the window shows, so it samples no telemetry while hidden. */
+function sendVisibility() {
+  dispatchIntent({ type: "view_visible", visible: !document.hidden });
+}
 
 // ─── Directory Scan ─────────────────────────────────────────────────────────
 
@@ -653,80 +641,13 @@ async function chooseInputDirectory(targetId) {
 
 // ─── Log Drawer ─────────────────────────────────────────────────────────────
 
-const MAX_LOG_LINES = 2000;
-const _logQueues = new WeakMap();
-const _logRafIds = new WeakMap();
-// What each console holds, as the engine wrote it (Copy uses these, with their real paths), and
-// how many of those lines are errors (the Log button's badge).
-const _rawLogs = new WeakMap();
-const _logErrors = new WeakMap();
-
-/**
- * Queues one `{kind, text}` line or a `job-log` batch and flushes it on the next animation frame.
- * The queue keeps only the newest MAX_LOG_LINES: no frame fires while the window
- * is hidden, and the console would drop the older lines on flush anyway.
- */
-function appendLog(logEl, lines) {
-  if (!logEl) return;
-
-  _logQueues.set(logEl, pushCapped(_logQueues.get(logEl) ?? [], lines, MAX_LOG_LINES));
-
-  if (!_logRafIds.has(logEl)) {
-    const rafId = requestAnimationFrame(() => {
-      _logRafIds.delete(logEl);
-      const pending = _logQueues.get(logEl);
-      if (!pending || pending.length === 0) return;
-      _logQueues.set(logEl, []);
-
-      logEl.querySelector(".console-empty-prompt")?.remove();
-
-      const frag = document.createDocumentFragment();
-      let errors = _logErrors.get(logEl) ?? 0;
-      for (const line of pending) {
-        const div = document.createElement("div");
-        if (line.kind === "error") errors++;
-        // The kind, not the cosmetic class, is what the trim below counts errors by.
-        div.dataset.kind = line.kind;
-        div.className = `log-line ${lineClass(line.kind)}`;
-        // Paths display Finder-style; the raw line is kept for Copy.
-        div.textContent = logDisplayText(line.text);
-        frag.appendChild(div);
-      }
-      _rawLogs.set(logEl, pushCapped(_rawLogs.get(logEl) ?? [], pending, MAX_LOG_LINES));
-      const shouldFollow = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 32;
-      logEl.appendChild(frag);
-
-      // The badge counts only errors the console still shows.
-      while (logEl.childElementCount > MAX_LOG_LINES) {
-        if (logEl.firstElementChild.dataset.kind === "error") errors--;
-        logEl.firstElementChild.remove();
-      }
-      _logErrors.set(logEl, errors);
-
-      if (shouldFollow) logEl.scrollTop = logEl.scrollHeight;
-      renderLogBadge();
-    });
-    _logRafIds.set(logEl, rafId);
-  }
-}
-
-function clearLog(logEl) {
-  if (!logEl) return;
-  _rawLogs.set(logEl, []);
-  _logErrors.set(logEl, 0);
-  logEl.innerHTML = `<div class="console-empty-prompt">No output yet. Run a batch to see its output here.</div>`;
-  renderLogBadge();
-}
-
-/** The current view's log as the engine wrote it, real `/` paths included. */
-function rawLogText(logEl) {
-  return [...(_rawLogs.get(logEl) ?? []), ...(_logQueues.get(logEl) ?? [])].map(line => line.text).join("\n");
-}
+// Each mode's console draws the Run Log the core keeps, which a reload reads back with `get_log`.
+const runLogs = createRunLogs({ doc: document, onErrors: () => renderLogBadge() });
 
 function renderLogBadge() {
   const badge = byId("log-badge");
   if (!badge) return;
-  const errors = _logErrors.get(byId(`${currentView}-log`)) ?? 0;
+  const errors = runLogs.errors(currentView);
   badge.hidden = errors === 0;
   badge.textContent = String(errors);
 }
@@ -744,7 +665,8 @@ async function copyLog() {
   const btn = byId("log-copy");
   let label = "Copied";
   try {
-    await navigator.clipboard.writeText(rawLogText(byId(`${currentView}-log`)));
+    // No await before this: WebKit may refuse a write that lost the click's user activation.
+    await navigator.clipboard.writeText(runLogs.text(currentView));
   } catch (err) {
     console.error("[log] copy failed:", err);
     label = "Copy failed";
@@ -969,9 +891,6 @@ function initApp() {
   }
 
   const jobRuntime = {
-    appendLog,
-    clearLog,
-    invoke,
     queueFor,
     safeAddListener,
     scanInputDirectory,
@@ -988,7 +907,8 @@ function initApp() {
     safeAddListener(id, "click", () => controllers[mode].applyBulkSelection(mode, select));
   }
   syncControls();
-  telemetryLoop.start();
+  sendVisibility();
+  document.addEventListener("visibilitychange", sendVisibility);
   boot();
 
   document.addEventListener("keydown", e => {
@@ -1006,7 +926,7 @@ function initApp() {
 /**
  * Loads the queues, the Job Coordinator and any job from the Desktop Core, which outlives a
  * webview reload: listens to `view-state` and `job-log` first, so no publication after
- * `get_state` is missed, then renders the current state.
+ * `get_state` is missed, then renders the current state and each mode's Run Log.
  */
 async function boot() {
   try {
@@ -1014,16 +934,23 @@ async function boot() {
   } catch (err) {
     console.error("[view-state] listener failed:", err);
   }
-  // A job's log lines go to the console of the mode that owns the batch, or ran the last job.
+  // Each Run Log batch names the console it goes to.
   try {
-    await listen(JOB_LOG, event => {
-      const mode = appliedState?.run?.mode ?? appliedState?.job?.mode;
-      if (mode) appendLog(byId(`${mode}-log`), event.payload);
-    });
+    await listen(JOB_LOG, event => runLogs.apply(event.payload));
   } catch (err) {
     console.error("[job-log] listener failed:", err);
   }
   const state = await syncState();
+  // The lines kept so far; a batch the answer already holds is not drawn twice.
+  await Promise.all(["remux", "extract"].map(async mode => {
+    let view = null;
+    try {
+      view = await invoke("get_log", { mode });
+    } catch (err) {
+      console.error("[get_log] failed:", err);
+    }
+    runLogs.load(mode, view);
+  }));
   // An extract batch is shown in its own view.
   if ((state?.run?.mode ?? state?.job?.mode) === "extract") switchView("extract");
 }

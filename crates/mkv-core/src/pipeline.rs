@@ -1340,7 +1340,7 @@ mod tests {
         );
     }
 
-    /// `desktop-tauri/ui/log-classify.js` KIND_CLASS keys on these names.
+    /// `desktop-tauri/ui/log-view.js` KIND_CLASS keys on these names.
     #[test]
     fn log_kind_serializes_to_the_names_the_console_maps() {
         let kinds = [

@@ -10,7 +10,6 @@ import {
   inspectorCrumbs,
   isBusy,
   isSameDirectory,
-  logDisplayText,
   matchesFilter,
   pathSegments,
   prettyPath,
@@ -65,19 +64,6 @@ test("paths read Finder-style: no slashes, no dot segments, Windows separators t
 test("the Inspector crumbs show the episode folder, not the file name the title already shows", () => {
   assert.deepEqual(inspectorCrumbs("Show - 01.mkv"), []);
   assert.deepEqual(inspectorCrumbs("Show/Season 1/Show - 01.mkv"), ["Show", "Season 1"]);
-});
-
-test("the log shows › for path separators, keeps digit fractions, and leaves the raw line alone", () => {
-  const raw = "Remuxed: /media/anime/Season 1/Show - 01.mkv (3/12)";
-  assert.equal(logDisplayText(raw), "Remuxed: media › anime › Season 1 › Show - 01.mkv (3/12)");
-  assert.equal(logDisplayText("Output/Show.mkv"), "Output › Show.mkv");
-  assert.equal(logDisplayText("C:\\Anime\\Show.mkv"), "C: › Anime › Show.mkv");
-  assert.equal(logDisplayText("no paths here"), "no paths here");
-  // A run of separators is one separator: between digits it stays whole, elsewhere one chevron.
-  assert.equal(logDisplayText("16/9 and 2//1"), "16/9 and 2//1");
-  assert.equal(logDisplayText("a//b C:\\Anime\\ trailing/"), "a › b C: › Anime ›  trailing › ");
-  // Display is a pure function of the raw line: the caller still holds the original for Copy.
-  assert.match(raw, /\/media\/anime\/Season 1\//);
 });
 
 test("status colors: running blue, done green, failed red, everything else muted", () => {
