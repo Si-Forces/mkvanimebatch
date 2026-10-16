@@ -139,7 +139,10 @@ function applyDraftIntent(view, intent, presets) {
   return changed.length > 0 || unflagged;
 }
 
-/** The answers the core gives a Run it refuses, or whose start fails (`actor.rs`). */
+/**
+ * The answers the core gives a Run it refuses, or whose start fails (`actor/start.rs`), and a scan
+ * it refuses while a start is before its launch (`actor.rs`).
+ */
 const RUN_BUSY = "A job is already running or stopping. Wait for it to finish.";
 const RUN_SCANNING = "The folder is being scanned; a batch can start once the scan ends.";
 const SCAN_STARTING = "A batch is starting; no folder can be scanned until it has started.";
@@ -154,7 +157,7 @@ const SCAN_STARTING = "A batch is starting; no folder can be scanned until it ha
  * `onScan(intent)`, which the test scripts and which publishes what it wants itself; every scan
  * is refused while a start is before its launch.
  *
- * Run and Stop mirror the Job Coordinator (`crates/mkv-desktop-core/src/actor.rs` and
+ * Run and Stop mirror the Job Coordinator (`crates/mkv-desktop-core/src/actor/start.rs` and
  * `coordinator.rs` hold the rules; change them there first). A Run is refused while busy or while
  * its mode scans; a draft with no input folder flags `input_dir` (the only build check mirrored;
  * `draft.rs` holds the rest); otherwise the start begins
