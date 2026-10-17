@@ -71,6 +71,7 @@ fn mode_patch(prev: &ModeView, next: &ModeView) -> Result<Option<Value>> {
         selected_count,
         total_count,
         library,
+        empty,
         inspector,
         controls,
     } = next;
@@ -128,6 +129,7 @@ fn mode_patch(prev: &ModeView, next: &ModeView) -> Result<Option<Value>> {
     )?;
     changed(&mut patch, "total_count", &prev.total_count, total_count)?;
     changed(&mut patch, "library", &prev.library, library)?;
+    changed(&mut patch, "empty", &prev.empty, empty)?;
     changed(&mut patch, "inspector", &prev.inspector, inspector)?;
     changed(&mut patch, "controls", &prev.controls, controls)?;
     Ok((!patch.is_empty()).then_some(Value::Object(patch)))
@@ -155,7 +157,7 @@ mod tests {
     use mkv_desktop_core::coordinator::Phase;
     use mkv_desktop_core::inspector::inspector_view;
     use mkv_desktop_core::presentation::{
-        chips, controls, Bucket, Filters, Hold, LibraryEntry, Progress, Tone,
+        chips, controls, empty_list, Bucket, Filters, Hold, LibraryEntry, Progress, Tone,
     };
     use mkv_desktop_core::queue::Row;
     use mkv_desktop_core::snapshot::{BatchStatus, ItemStatus};
@@ -330,12 +332,30 @@ mod tests {
         let mut failed = next(&prev);
         failed.extract.scan = ScanView::Failed;
         failed.extract.outcome = Some(Outcome::Failed);
+        failed.extract.empty = None;
         assert_eq!(
             patch(&prev, &failed),
             json!({
                 "seq": 2,
                 "base": 1,
-                "extract": { "scan": { "state": "failed" }, "outcome": "failed" },
+                "extract": { "scan": { "state": "failed" }, "outcome": "failed", "empty": null },
+            })
+        );
+        let mut idle = next(&failed);
+        idle.extract.scan = ScanView::Idle;
+        idle.extract.empty = empty_list(None, &ScanView::Idle, &[]);
+        assert_eq!(
+            patch(&failed, &idle),
+            json!({
+                "seq": 3,
+                "base": 2,
+                "extract": {
+                    "scan": { "state": "idle" },
+                    "empty": {
+                        "title": "No episodes yet",
+                        "description": "Open a release folder to scan its MKV episodes into this batch.",
+                    },
+                },
             })
         );
     }
@@ -424,6 +444,7 @@ mod tests {
         scanning.remux.scan = ScanView::Scanning {
             directory: "/anime".into(),
         };
+        scanning.remux.empty = None;
         let mut scanned = next(&scanning);
         scanned.remux.scan = ScanView::Idle;
         scanned.remux.manifest_rev = 1;
@@ -498,6 +519,7 @@ mod tests {
         reset.remux.library = Vec::new();
         reset.remux.clock = "Not started".into();
         reset.remux.inspector = None;
+        reset.remux.empty = empty_list(Some("/anime"), &ScanView::Idle, &[]);
 
         let states = [
             empty, scanning, scanned, starting, running, beat, progressed, ended, reset,

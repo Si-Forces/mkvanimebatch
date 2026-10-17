@@ -388,15 +388,16 @@ test("a scan keeps the cards of the same Directory Identity and clears them for 
   }
 });
 
-test("an empty queue says whether a folder is open", t => {
+test("an empty queue shows the published empty list's title and description", t => {
   const { elements } = setupMockEnvironment(t);
   const tracker = new QueueTracker("remux", noDispatch);
   const list = elements.get("remux-episode-list");
   const title = () => list.querySelector(".empty-state-title").textContent;
   tracker.applyView(modeView());
   assert.equal(title(), "No episodes yet");
-  tracker.applyView(modeView([], { directory: DIR, manifest_rev: 1 }));
+  tracker.applyView(modeView([], { directory: DIR, manifest_rev: 1, empty: { title: "No MKV files found", description: "Elsewhere." } }));
   assert.equal(title(), "No MKV files found");
+  assert.equal(list.querySelector(".empty-state-desc").textContent, "Elsewhere.");
   // The text is set as text, never written into the markup.
   assert.doesNotMatch(list.innerHTML, /No MKV files found/);
   assert.equal(elements.get("remux-queue-count").textContent, "Ready");

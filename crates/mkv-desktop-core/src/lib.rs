@@ -15,3 +15,4 @@ pub mod presentation;
 pub mod queue;
 pub mod snapshot;
 pub mod telemetry;
+mod text;

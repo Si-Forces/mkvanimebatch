@@ -532,6 +532,7 @@ fn test_view_state_wire_shape() {
             count: 1,
             group_label: "anime".into(),
         }],
+        empty: None,
         ..empty(REMUX)
     };
     let row = serde_json::to_value(&remux.rows[0]).unwrap();
@@ -579,6 +580,8 @@ fn test_view_state_wire_shape() {
             label: "Automatic (follow the ladder)".into(),
         }],
         assignment: None,
+        language_choice: "custom",
+        custom_language: "may".into(),
     });
     remux.controls = controls(
         REMUX,
@@ -624,6 +627,7 @@ fn test_view_state_wire_shape() {
         remux,
         extract: ModeView {
             scan: ScanView::Failed,
+            empty: None,
             ..empty(EXTRACT)
         },
         telemetry: Some(telemetry),
@@ -651,7 +655,9 @@ fn test_view_state_wire_shape() {
             "tag": "Used"
         }],
         "options": [{ "value": "", "label": "Automatic (follow the ladder)" }],
-        "assignment": null
+        "assignment": null,
+        "language_choice": "custom",
+        "custom_language": "may"
     });
     let controls_json = serde_json::json!({
         "run_label": "Run remux · 1",
@@ -740,6 +746,7 @@ fn test_view_state_wire_shape() {
                     "count": 1,
                     "group_label": "anime"
                 }],
+                "empty": null,
                 "inspector": inspector,
                 "controls": controls_json
             },
@@ -765,6 +772,7 @@ fn test_view_state_wire_shape() {
                 "selected_count": 0,
                 "total_count": 0,
                 "library": [],
+                "empty": null,
                 "inspector": null,
                 "controls": {
                     "run_label": "Run extract",
@@ -790,6 +798,13 @@ fn test_view_state_wire_shape() {
     assert_eq!(idle["defaults"], Value::Null);
     assert_eq!(idle["telemetry"], Value::Null);
     assert_eq!(idle["busy"], false);
+    assert_eq!(
+        idle["remux"]["empty"],
+        serde_json::json!({
+            "title": "No episodes yet",
+            "description": "Open a release folder to scan its MKV episodes into this batch."
+        })
+    );
     assert_eq!(
         idle["run"],
         serde_json::json!({ "phase": "idle", "mode": null, "settings": null })
@@ -868,17 +883,32 @@ fn test_intent_wire_shape() {
     );
     assert_eq!(
         intent(serde_json::json!({
-            "type": "assign_track", "mode": "remux",
-            "assignment": {
-                "target_video": "ep1", "asset_path": "/subs/ep1.ass", "track_type": "subtitle",
-                "language": null, "title": "Signs", "offset_ms": null
-            }
+            "type": "assign_subtitle", "mode": "remux", "id": "ep1", "path": "/subs/ep1.ass",
+            "language": "custom", "custom_language": "may", "title": " Signs", "offset": "1.5"
         })),
-        Intent::AssignTrack {
+        Intent::AssignSubtitle {
             mode: PipelineMode::Remux,
-            assignment: subtitle("ep1", "/subs/ep1.ass", Some("Signs")),
+            id: "ep1".into(),
+            path: "/subs/ep1.ass".into(),
+            language: "custom".into(),
+            custom_language: "may".into(),
+            title: " Signs".into(),
+            offset: "1.5".into(),
         }
     );
+    // The old Intent is gone, and every field is required.
+    for json in [
+        serde_json::json!({
+            "type": "assign_track", "mode": "remux",
+            "assignment": { "target_video": "ep1", "asset_path": "/subs/ep1.ass" }
+        }),
+        serde_json::json!({
+            "type": "assign_subtitle", "mode": "remux", "id": "ep1", "path": "/subs/ep1.ass",
+            "language": "ind", "custom_language": "", "title": ""
+        }),
+    ] {
+        assert!(serde_json::from_value::<Intent>(json).is_err());
+    }
     assert_eq!(
         intent(serde_json::json!({ "type": "clear_track", "mode": "remux", "id": "ep1" })),
         Intent::ClearTrack {
@@ -967,6 +997,20 @@ fn test_intent_wire_shape() {
         "type": "reorder", "mode": "remux", "id": "ep1", "direction": "left"
     }))
     .is_err());
+}
+
+/// The `AssignSubtitle` Intent of `path` to `id` with the custom language left empty, so it
+/// assigns `subtitle(id, path, None)`.
+pub(super) fn assign_subtitle(mode: PipelineMode, id: &str, path: &str) -> Intent {
+    Intent::AssignSubtitle {
+        mode,
+        id: id.into(),
+        path: path.into(),
+        language: "custom".into(),
+        custom_language: String::new(),
+        title: String::new(),
+        offset: String::new(),
+    }
 }
 
 /// A Track Assignment of `path` to `id`, with no language.
@@ -1405,20 +1449,38 @@ async fn test_queue_intents_apply_and_publish_before_they_answer() {
     };
     assert_eq!(core.dispatch(reorder(Direction::Up)).await, Ok(true));
     assert_eq!(core.dispatch(reorder(Direction::Up)).await, Ok(false));
-    let assignment = subtitle("ep2", "/subs/ep2.ass", None);
-    let assign = |mode| Intent::AssignTrack {
-        mode,
-        assignment: assignment.clone(),
-    };
+    let assign = |mode| assign_subtitle(mode, "ep2", "/subs/ep2.ass");
     assert_eq!(core.dispatch(assign(REMUX)).await, Ok(true));
     assert!(core.dispatch(assign(EXTRACT)).await.is_err());
+    // The core builds the Track Assignment from the inspector's fields.
+    let typed = Intent::AssignSubtitle {
+        mode: REMUX,
+        id: "ep1".into(),
+        path: "/subs/ep1.ass".into(),
+        language: "jpn".into(),
+        custom_language: "may".into(),
+        title: " Signs ".into(),
+        offset: "-250.9".into(),
+    };
+    assert_eq!(core.dispatch(typed).await, Ok(true));
 
     // No sleep: each answer came after its publication.
     let state = core.state().await.unwrap();
     assert_eq!(&state, publisher.states().last().unwrap());
     assert_eq!(ids(&state.remux), ["ep2", "ep1"]);
     assert!(!state.remux.rows[1].selected);
-    assert_eq!(state.remux.assignments["ep2"], assignment);
+    assert_eq!(
+        state.remux.assignments["ep2"],
+        subtitle("ep2", "/subs/ep2.ass", None)
+    );
+    assert_eq!(
+        state.remux.assignments["ep1"],
+        TrackAssignment {
+            language: Some("jpn".into()),
+            offset_ms: Some(-250),
+            ..subtitle("ep1", "/subs/ep1.ass", Some("Signs"))
+        }
+    );
 
     let clear = Intent::ClearTrack {
         mode: REMUX,
@@ -1431,7 +1493,8 @@ async fn test_queue_intents_apply_and_publish_before_they_answer() {
         id: "ep2".into(),
     };
     assert!(core.dispatch(clear_extract).await.is_err());
-    assert!(core.state().await.unwrap().remux.assignments.is_empty());
+    let assigned = core.state().await.unwrap().remux.assignments;
+    assert_eq!(assigned.keys().collect::<Vec<_>>(), ["ep1"]);
     assert_eq!(
         core.dispatch(Intent::SetAllSelected {
             mode: REMUX,

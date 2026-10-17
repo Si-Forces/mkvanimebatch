@@ -157,7 +157,7 @@ export class QueueTracker {
 
     if (view.scan?.state === "scanning") this.showScanning(previous, view.scan.directory);
     else if (view.scan?.state === "failed") this.showFailure();
-    else if (this.order.length === 0) this.showEmpty();
+    else if (view.empty) this.showEmpty(view.empty);
     else this.showRows(previous, changedRows);
     // The published inspector may name another row than the last view's.
     this.markInspected();
@@ -200,12 +200,8 @@ export class QueueTracker {
     );
   }
 
-  /** No rows: an empty folder when a directory is shown, else no folder yet. */
-  showEmpty() {
-    // The title choice is still the view's (out of S4); the core could publish it.
-    const [title, description] = this.view.directory
-      ? ["No MKV files found", "This folder holds no MKV episodes. Open another release folder to continue."]
-      : ["No episodes yet", "Open a release folder to scan its MKV episodes into this batch."];
+  /** No rows: the published empty list's `title` and `description`. */
+  showEmpty({ title, description }) {
     if (this.shown === "empty" && this.emptyTitle === title) return;
     this.shown = "empty";
     this.emptyTitle = title;

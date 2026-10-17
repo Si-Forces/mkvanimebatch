@@ -2,6 +2,7 @@
 //! Desktop Core writes itself, kept across a webview reload. Each push or clear yields the
 //! `LogBatch` a view appends; `get_log` reads the whole log back.
 
+use crate::text::is_js_whitespace;
 use mkv_core::log_line::{LogKind, LogLine};
 use mkv_core::pipeline::PipelineMode;
 use serde::Serialize;
@@ -141,11 +142,6 @@ impl RunLog {
     }
 }
 
-/// Whether `c` is whitespace to a JavaScript `\s`: Unicode White_Space less U+0085, plus U+FEFF.
-fn is_js_space(c: char) -> bool {
-    (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}'
-}
-
 fn is_separator(c: char) -> bool {
     c == '/' || c == '\\'
 }
@@ -185,8 +181,8 @@ pub fn log_display_text(text: &str) -> Cow<'_, str> {
     while at < chars.len() {
         if let Some(&&(start, end)) = next_run.peek().filter(|run| run.0 == at) {
             next_run.next();
-            let after_space = start == 0 || is_js_space(chars[start - 1]);
-            let before_name = chars.get(end).is_some_and(|&c| !is_js_space(c));
+            let after_space = start == 0 || is_js_whitespace(chars[start - 1]);
+            let before_name = chars.get(end).is_some_and(|&c| !is_js_whitespace(c));
             if !(after_space && before_name) {
                 stripped.extend_from_slice(&chars[start..end]);
             }
