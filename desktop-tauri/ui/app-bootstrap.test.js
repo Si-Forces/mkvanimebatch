@@ -963,12 +963,19 @@ test("a stepper click sends step_draft with the field its input names, and the p
   await ipc.flush();
 
   const since = ipc.calls.length;
-  plus.handlers.get("mousedown")();
+  const intentsSince = ipc.core.intents.length;
+  plus.handlers.get("mousedown")({ button: 0 });
   plus.handlers.get("mouseup")();
-  // The click a mouse press ends with has `detail` >= 1 and must not step again.
+  // The click a mouse press ends with has `detail` >= 1 (2 on a double click) and must not step again.
   plus.handlers.get("click")({ detail: 1 });
+  plus.handlers.get("click")({ detail: 2 });
+  // A right-button press does not step.
+  plus.handlers.get("mousedown")({ button: 2 });
+  plus.handlers.get("mouseup")();
   await ipc.flush();
-  assert.deepEqual(ipc.core.intents.at(-1), { type: "step_draft", mode: "remux", field: "sub_offset", direction: "up" });
+  assert.deepEqual(ipc.core.intents.slice(intentsSince), [
+    { type: "step_draft", mode: "remux", field: "sub_offset", direction: "up" },
+  ]);
   // A draft Intent: its state comes from the publication, with no get_state after it.
   assert.deepEqual(ipc.calls.slice(since).map(([command]) => command), ["dispatch"]);
   assert.equal(offset.value, "0.5");

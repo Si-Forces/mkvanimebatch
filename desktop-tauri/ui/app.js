@@ -101,7 +101,8 @@ function initSteppers() {
     let stepInterval = null;
     let stepTimeout = null;
 
-    const startStepping = () => {
+    const startStepping = event => {
+      if (event.button !== 0) return; // Only the primary button steps.
       stepNumber(btn, dir);
       stepTimeout = setTimeout(() => {
         stepInterval = setInterval(() => stepNumber(btn, dir), 80);
@@ -116,7 +117,8 @@ function initSteppers() {
     btn.addEventListener('mousedown', startStepping);
     btn.addEventListener('mouseup', stopStepping);
     btn.addEventListener('mouseleave', stopStepping);
-    // Enter or Space fires only a click, with `detail` 0; a mouse click (`detail` >= 1) already stepped on mousedown.
+    // Per UI Events, a keyboard-activated click (Enter, Space) has `detail` 0 in WebKit,
+    // Chromium and Gecko; a pointer click has `detail` >= 1 and already stepped on mousedown.
     btn.addEventListener('click', event => {
       if (event.detail === 0) stepNumber(btn, dir);
     });
