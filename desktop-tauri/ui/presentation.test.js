@@ -8,7 +8,6 @@ import {
   formatElapsedDuration,
   formatOutcomeDuration,
   inspectorCrumbs,
-  isBusy,
   isSameDirectory,
   matchesFilter,
   pathSegments,
@@ -21,15 +20,6 @@ import {
   subtitleLadder,
   subtitleSourceText,
 } from "./presentation.js";
-
-test("busy is a start, a running or stopping phase, or an active job, as the core reads it", () => {
-  assert.equal(isBusy(null), false);
-  assert.equal(isBusy({ run: { phase: "idle" }, job: { active: false } }), false);
-  for (const phase of ["starting", "running", "stopping"]) {
-    assert.equal(isBusy({ run: { phase }, job: null }), true, phase);
-  }
-  assert.equal(isBusy({ run: { phase: "idle" }, job: { active: true } }), true);
-});
 
 test("Directory Identities compare byte for byte, and a missing or empty one is never the same", () => {
   // The same table as `queue::tests::test_directory_identities_compare_byte_for_byte`.

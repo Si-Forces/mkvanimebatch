@@ -19,7 +19,8 @@ test-support = ["tokio/rt-multi-thread"]
 
 [dependencies]
 mkv-core = { path = "../mkv-core" }
-serde = { version = "1", features = ["derive"] }
+# `rc` serializes the Arc that shares a ModeView's rows as the rows themselves.
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 sysinfo = "0.33"
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }

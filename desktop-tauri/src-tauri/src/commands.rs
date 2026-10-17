@@ -67,7 +67,7 @@ mod tests {
         };
         app.manage(Core::spawn(
             tauri::async_runtime::handle().inner().clone(),
-            WebviewPublisher(app.handle().clone()),
+            WebviewPublisher::new(app.handle().clone()),
             ports,
         ));
         let tmp = tempfile::tempdir().unwrap();

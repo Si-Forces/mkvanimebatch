@@ -18,19 +18,6 @@ export function isSameDirectory(dirA, dirB) {
 }
 
 /**
- * Whether a start or a job holds the batch in the published View State `state`, which locks both
- * queues and both Settings Drafts: the Desktop Core's own rule (`busy` in
- * `crates/mkv-desktop-core/src/actor.rs`; `busy` in `fake-core.js` mirrors it too). False before
- * the first View State.
- *
- * @param {object|null|undefined} state
- * @returns {boolean}
- */
-export function isBusy(state) {
-  return (state?.run?.phase ?? "idle") !== "idle" || Boolean(state?.job?.active);
-}
-
-/**
  * A path's segments as the Finder path bar shows them: split on `/` or `\`, with empty, `.`
  * and `..` segments left out. Display only: never compare or send the result.
  *

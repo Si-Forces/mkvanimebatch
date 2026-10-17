@@ -49,14 +49,18 @@ class BootElement {
   }
 }
 
+/** More `get_state` reads than any test makes. */
+const MAX_STATE_READS = 20;
+
 /** The rows a scan of any folder finds. */
 const SCANNED = ["one", "two", "three"].map(id => row(id, { name: `${id}.mkv` }));
 
 /**
- * The app over a fake Desktop Core. `answers` overrides what a command returns; a promise holds the
- * answer back until the test settles it. The first `get_state`, the boot's, waits for
- * `resolveState()`; set `core.state` before calling it. A scan accepts `SCANNED` (an empty path
- * resets the queue). `onListen(name)` runs once a listener is bound.
+ * The app over a fake Desktop Core. `answers` overrides what a command returns, read at each call
+ * (so a test can set one after boot); a promise holds the answer back until the test settles it.
+ * The first `get_state`, the boot's, waits for `resolveState()`; set `core.state` before
+ * calling it. A scan accepts `SCANNED` (an empty path resets the queue). `onListen(name)` runs
+ * once a listener is bound, and `listen` resolves once it settles.
  */
 function bootstrapHarness(t, answers = {}, { onListen = () => {} } = {}) {
   const prior = {
@@ -94,6 +98,7 @@ function bootstrapHarness(t, answers = {}, { onListen = () => {} } = {}) {
   const stateGate = new Promise(resolve => { resolveState = resolve; });
   const requestPromise = new Promise(resolve => { stateRequested = resolve; });
   let booted = false;
+  let stateReads = 0;
   globalThis.document = {
     readyState: "loading",
     hidden: true,
@@ -117,18 +122,21 @@ function bootstrapHarness(t, answers = {}, { onListen = () => {} } = {}) {
     __TAURI__: {
       core: { invoke: async (command, args) => {
         calls.push([command, args]);
-        if (command in answers) return answers[command];
+        // A resync that never converges re-reads get_state in microtasks only, which no bounded
+        // wait or test timeout interrupts; refusing past a cap ends it, and the test fails.
+        if (command === "get_state" && ++stateReads > MAX_STATE_READS) throw new Error("get_state read in a loop");
         if (command === "get_state" && !booted) {
           booted = true;
           stateRequested();
           await stateGate;
         }
+        if (command in answers) return answers[command];
         return core.invoke(command, args);
       } },
       event: { listen: async (name, handler) => {
         assert.equal(handlers.has(name), false, `duplicate listener: ${name}`);
         handlers.set(name, handler);
-        onListen(name);
+        await onListen(name);
         return () => { handlers.delete(name); removed.push(name); };
       } },
     },
@@ -277,6 +285,140 @@ test("with no job, a scan and a selection made before get_state answers stay, an
   // A publication older than the one applied changes nothing.
   ipc.emit("view-state", { ...structuredClone(ipc.core.state), seq: 1, remux: modeView() });
   assert.equal(list.children.length, 3);
+});
+
+test("a view-state patch redraws only the cards of the rows it changes", async t => {
+  const ipc = bootstrapHarness(t);
+  await ipc.mount("patch-rows");
+  activeJob(ipc.core);
+  ipc.resolveState();
+  await ipc.flush();
+  const list = ipc.elements.get("remux-episode-list");
+  const check = index => list.children[index].querySelector(".ep-select-check");
+  const arc = index => list.children[index].querySelector(".ep-ring-arc");
+  // A mark a redraw of the first card would overwrite.
+  check(0).checked = "untouched";
+
+  ipc.core.state.remux.rows[1].progress = 85;
+  ipc.core.publishPatch({ remux: { row_changes: [[1, ipc.core.state.remux.rows[1]]] } });
+  assert.equal(arc(1).style.strokeDashoffset, (RING_CIRCUMFERENCE * 0.15).toFixed(2));
+  assert.equal(check(0).checked, "untouched");
+  assert.equal(ipc.calls.filter(([command]) => command === "get_state").length, 1);
+
+  // A whole state redraws every card; this one ends the job, and the heartbeat with it.
+  settleJob(ipc.core, "completed");
+  assert.equal(check(0).checked, true);
+});
+
+test("a patch of a state the page missed reads get_state once, and the patches meanwhile wait for it", async t => {
+  const ipc = bootstrapHarness(t);
+  await ipc.mount("patch-resync");
+  ipc.resolveState();
+  await ipc.flush();
+  const reads = () => ipc.calls.filter(([command]) => command === "get_state").length;
+  const before = reads();
+  // The page missed the patch at seq + 1: the next two cannot apply.
+  const seq = ipc.core.state.seq;
+  ipc.core.state.seq = seq + 3;
+  ipc.core.state.remux.outcome = "done";
+  ipc.emit("view-state", { seq: seq + 2, base: seq + 1 });
+  ipc.emit("view-state", { seq: seq + 3, base: seq + 2, remux: { outcome: "done" } });
+  await ipc.flush();
+  assert.equal(reads(), before + 1);
+  assert.match(ipc.elements.get("remux-status").innerHTML, /Done/);
+
+  // The next patch builds on the state get_state answered with.
+  ipc.core.state.remux.outcome = null;
+  ipc.core.publishPatch({ remux: { outcome: null } });
+  await ipc.flush();
+  assert.equal(reads(), before + 1);
+  assert.doesNotMatch(ipc.elements.get("remux-status").innerHTML, /Done/);
+});
+
+test("a resync whose get_state answer is older than a patch that arrived during the read still applies that patch", async t => {
+  const answers = {};
+  const ipc = bootstrapHarness(t, answers);
+  await ipc.mount("patch-stale-answer");
+  ipc.resolveState();
+  await ipc.flush();
+  const reads = () => ipc.calls.filter(([command]) => command === "get_state").length;
+  const before = reads();
+  const seq = ipc.core.state.seq;
+  // The read is answered with the state at seq + 1, produced before the two patches below.
+  let answer;
+  answers.get_state = new Promise(resolve => { answer = resolve; });
+  const stale = { ...structuredClone(ipc.core.state), seq: seq + 1 };
+  ipc.emit("view-state", { seq: seq + 2, base: seq + 1, remux: { outcome: "cancelled" } });
+  // Arrives while the read is in flight, so it is held too.
+  ipc.emit("view-state", { seq: seq + 3, base: seq + 2, remux: { outcome: "done" } });
+  answer(stale);
+  await ipc.flush();
+  assert.equal(reads(), before + 1);
+  // Both held patches merged onto the answer, the later one last.
+  assert.match(ipc.elements.get("remux-status").innerHTML, /Done/);
+});
+
+test("a held payload that throws while it is applied is logged, and the next patch still resyncs", async t => {
+  const answers = {};
+  const ipc = bootstrapHarness(t, answers);
+  await ipc.mount("patch-held-throws");
+  ipc.resolveState();
+  await ipc.flush();
+  const errors = t.mock.method(console, "error", () => {});
+  const reads = () => ipc.calls.filter(([command]) => command === "get_state").length;
+  const before = reads();
+  const seq = ipc.core.state.seq;
+  answers.get_state = { ...structuredClone(ipc.core.state), seq: seq + 1 };
+  // `row_changes` that is not a list makes the merge throw.
+  ipc.emit("view-state", { seq: seq + 2, base: seq + 1, remux: { row_changes: 5 } });
+  await ipc.flush();
+  assert.equal(reads(), before + 1);
+  assert.match(String(errors.mock.calls.at(-1)?.arguments[0]), /held payload failed/);
+
+  // The resync is not wedged: the next patch the page cannot apply reads get_state again.
+  answers.get_state = { ...structuredClone(ipc.core.state), seq: seq + 4, remux: { ...ipc.core.state.remux, outcome: "done" } };
+  ipc.emit("view-state", { seq: seq + 3, base: seq + 2 });
+  await ipc.flush();
+  assert.equal(reads(), before + 2);
+  assert.match(ipc.elements.get("remux-status").innerHTML, /Done/);
+});
+
+test("a patch that arrives before the boot's get_state answers waits for it, with no second get_state", async t => {
+  const ipc = bootstrapHarness(t);
+  await ipc.mount("patch-early");
+  activeJob(ipc.core);
+  ipc.core.state.remux.rows[1].progress = 85;
+  ipc.core.publishPatch({ remux: { row_changes: [[1, ipc.core.state.remux.rows[1]]] } });
+  ipc.resolveState();
+  await ipc.flush();
+  assert.equal(ipc.calls.filter(([command]) => command === "get_state").length, 1);
+  const list = ipc.elements.get("remux-episode-list");
+  assert.equal(list.children[1].querySelector(".ep-ring-arc").style.strokeDashoffset, (RING_CIRCUMFERENCE * 0.15).toFixed(2));
+  settleJob(ipc.core, "completed");
+});
+
+test("a patch that arrives while boot binds its listeners and resyncs before it reads get_state issues no second get_state", async t => {
+  let ipc;
+  ipc = bootstrapHarness(t, {}, {
+    async onListen(name) {
+      if (name === "view-state") {
+        activeJob(ipc.core);
+        ipc.core.publishPatch({ remux: { outcome: null } });
+      } else if (name === "job-log") {
+        // The resync the patch started answers before the job-log listener is bound.
+        ipc.resolveState();
+        await ipc.flush();
+      }
+    },
+  });
+  await ipc.mount("patch-listen");
+  // Boot goes on once the job-log listener settles.
+  // Bounded, so a boot that never reaches get_log fails instead of hanging the suite.
+  for (let i = 0; i < 50 && !ipc.calls.some(([command]) => command === "get_log"); i++) await ipc.flush();
+  assert.ok(ipc.calls.some(([command]) => command === "get_log"), "boot reads the Run Logs");
+  assert.equal(ipc.calls.filter(([command]) => command === "get_state").length, 1);
+  assert.equal(ipc.elements.get("remux-episode-list").children.length, 2);
+  settleJob(ipc.core, "completed");
 });
 
 // Wiring only: the chips', the preset menu's and the theme's own rules are tested in

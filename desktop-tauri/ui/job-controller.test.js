@@ -73,6 +73,7 @@ function viewState(fields = {}) {
     seq: 1,
     job: null,
     run: { ...IDLE_RUN },
+    busy: false,
     defaults: null,
     presets: [],
     remux: modeView(),
@@ -235,14 +236,14 @@ test("Run is disabled while its queue scans, while starting, or while another mo
   assert.equal(runBtn.textContent, "Plan remux · 2");
 
   // The other mode's start blocks this Run, and its tooltip says so.
-  page.state = viewState({ run: { phase: "starting", mode: "extract", settings: null } });
+  page.state = viewState({ run: { phase: "starting", mode: "extract", settings: null }, busy: true });
   controller.syncGlobalControls();
   assert.equal(runBtn.disabled, true);
   assert.equal(runBtn.title, "Extract batch is running");
   assert.equal(runBtn.hidden, false);
 
   // An active job with an idle coordinator still holds the batch.
-  page.state = viewState({ job: jobView([], { mode: "extract" }) });
+  page.state = viewState({ job: jobView([], { mode: "extract" }), busy: true });
   controller.syncGlobalControls();
   assert.equal(runBtn.disabled, true);
   assert.equal(runBtn.title, "Extract batch is running");
@@ -264,7 +265,7 @@ test("while a start is before its launch every control a batch locks is disabled
   const remux = new JobController("remux", page.runtime);
   const extract = new JobController("extract", page.runtime);
 
-  page.state = viewState({ run: { phase: "starting", mode: "remux", settings: null } });
+  page.state = viewState({ run: { phase: "starting", mode: "remux", settings: null }, busy: true });
   remux.syncGlobalControls();
   extract.syncGlobalControls();
   for (const [id, button] of bulk) assert.equal(button.disabled, true, id);
@@ -281,7 +282,7 @@ test("while a start is before its launch every control a batch locks is disabled
   assert.equal(elements.get("extract-stop").hidden, true);
 
   // A Stop pending: Stopping, and no second Stop.
-  page.state = viewState({ run: { phase: "stopping", mode: "remux", settings: null } });
+  page.state = viewState({ run: { phase: "stopping", mode: "remux", settings: null }, busy: true });
   remux.syncGlobalControls();
   assert.equal(elements.get("remux-stop").disabled, true);
   assert.equal(elements.get("remux-stop").textContent, "Stopping…");
@@ -344,7 +345,7 @@ test("the status pill shows the mode's published outcome, and Idle before its fi
     assert.match(elements.get("remux-status").innerHTML, new RegExp(label), String(outcome));
   }
   // Another mode's batch leaves this pill on this mode's own outcome.
-  page.state = viewState({ run: { phase: "running", mode: "extract", settings: null }, remux: modeView([], { outcome: "done" }) });
+  page.state = viewState({ run: { phase: "running", mode: "extract", settings: null }, busy: true, remux: modeView([], { outcome: "done" }) });
   controller.syncGlobalControls();
   assert.match(elements.get("remux-status").innerHTML, /Done/);
 });

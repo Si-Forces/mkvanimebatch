@@ -9,7 +9,7 @@ const DEFAULTS = { workers: 6, io_jobs: 4, ffmpeg_threads: 1, bitrate: "192k", c
 const RUN_SETTINGS = { workers: 3, io_jobs: 5, ffmpeg_threads: 2, bitrate: "256k", complexity: 8 };
 
 /** The View State fields the chips read, idle with `DEFAULTS` unless `fields` say otherwise. */
-const state = (fields = {}) => ({ job: null, run: { ...IDLE_RUN }, defaults: DEFAULTS, ...fields });
+const state = (fields = {}) => ({ job: null, run: { ...IDLE_RUN }, busy: false, defaults: DEFAULTS, ...fields });
 
 /** A page with the workers and Disk I/O inputs of both views and one chip of each kind. */
 function chipsHarness() {
@@ -60,10 +60,10 @@ test("a View State without defaults yet leaves the inputs on plain auto and the 
 
 test("a start shows its resolved run settings, and none before its request resolved", () => {
   const page = chipsHarness();
-  page.chips.render(state({ run: { phase: "starting", mode: "remux", settings: null } }));
+  page.chips.render(state({ run: { phase: "starting", mode: "remux", settings: null }, busy: true }));
   assert.equal(page.workerChip.innerText, "Workers Active");
   assert.equal(page.ioChip.innerText, "IO Jobs Active");
-  page.chips.render(state({ run: { phase: "starting", mode: "remux", settings: RUN_SETTINGS } }));
+  page.chips.render(state({ run: { phase: "starting", mode: "remux", settings: RUN_SETTINGS }, busy: true }));
   assert.equal(page.workerChip.innerText, "3 Workers Active");
   assert.equal(page.ioChip.innerText, "5 IO Jobs Active");
   // The inputs still learn the defaults; only the chips belong to the batch.
@@ -72,7 +72,7 @@ test("a start shows its resolved run settings, and none before its request resol
 
 test("an active job with no run settings shows the Job View's own Effective Settings", () => {
   const page = chipsHarness();
-  page.chips.render(state({ job: jobView() }));
+  page.chips.render(state({ job: jobView(), busy: true }));
   assert.equal(page.workerChip.innerText, "3 Workers Active");
   // A job that ended no longer owns the chips: they return to the defaults.
   page.chips.render(state({ job: jobView([], { active: false, status: "completed" }) }));
