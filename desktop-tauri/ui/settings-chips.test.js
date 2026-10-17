@@ -1,21 +1,23 @@
+// Rendering only: which texts the chips and hints show is the Desktop Core's, tested in
+// `crates/mkv-desktop-core/src/presentation.rs` (`chips`).
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createSettingsChips } from "./settings-chips.js";
-import { IDLE_RUN, jobView } from "./fake-core.js";
 
-/** The View State's `defaults` in these tests. */
-const DEFAULTS = { workers: 6, io_jobs: 4, ffmpeg_threads: 1, bitrate: "192k", complexity: 5 };
-/** What a start resolved its request to: nothing like `DEFAULTS`. */
-const RUN_SETTINGS = { workers: 3, io_jobs: 5, ffmpeg_threads: 2, bitrate: "256k", complexity: 8 };
-
-/** The View State fields the chips read, idle with `DEFAULTS` unless `fields` say otherwise. */
-const state = (fields = {}) => ({ job: null, run: { ...IDLE_RUN }, busy: false, defaults: DEFAULTS, ...fields });
+/** Published chips with idle defaults of 6 workers and 4 IO jobs, with `fields` over them. */
+const chips = (fields = {}) => ({
+  workers: "Standby (6 Workers)",
+  io_jobs: "Idle (4 IO Jobs)",
+  workers_hint: "auto (6)",
+  io_jobs_hint: "auto (4)",
+  ...fields,
+});
 
 /** A page with the workers and Disk I/O inputs of both views and one chip of each kind. */
 function chipsHarness() {
   const inputs = new Map();
   for (const mode of ["remux", "extract"]) {
-    for (const id of ["workers", "io-jobs"]) inputs.set(`${mode}-${id}`, { dataset: {} });
+    for (const id of ["workers", "io-jobs"]) inputs.set(`${mode}-${id}`, {});
   }
   const workerChip = {};
   const ioChip = {};
@@ -27,66 +29,39 @@ function chipsHarness() {
       return [];
     },
   };
-  const chips = createSettingsChips({ doc });
-  return { chips, inputs, workerChip, ioChip };
+  return { chips: createSettingsChips({ doc }), inputs, workerChip, ioChip };
 }
 
-test("published defaults put auto (N) on the workers and Disk I/O inputs and the defaults on the idle chips", () => {
+test("the published chips fill the bottom bar and their hints the workers and Disk I/O inputs of both views", () => {
   const page = chipsHarness();
-  page.chips.render(state());
+  page.chips.render({ chips: chips() });
   for (const mode of ["remux", "extract"]) {
-    const workers = page.inputs.get(`${mode}-workers`);
-    assert.equal(workers.placeholder, "auto (6)");
-    assert.equal(workers.dataset.autoValue, "6");
-    const ioJobs = page.inputs.get(`${mode}-io-jobs`);
-    assert.equal(ioJobs.placeholder, "auto (4)");
-    assert.equal(ioJobs.dataset.autoValue, "4");
+    assert.equal(page.inputs.get(`${mode}-workers`).placeholder, "auto (6)");
+    assert.equal(page.inputs.get(`${mode}-io-jobs`).placeholder, "auto (4)");
   }
   assert.equal(page.workerChip.innerText, "Standby (6 Workers)");
   assert.equal(page.ioChip.innerText, "Idle (4 IO Jobs)");
-});
 
-test("a View State without defaults yet leaves the inputs on plain auto and the chips without counts", () => {
-  const page = chipsHarness();
-  page.chips.render(state({ defaults: null }));
-  for (const mode of ["remux", "extract"]) {
-    const input = page.inputs.get(`${mode}-workers`);
-    assert.equal(input.placeholder, undefined);
-    assert.equal("autoValue" in input.dataset, false);
-  }
-  assert.equal(page.workerChip.innerText, "Standby");
-  assert.equal(page.ioChip.innerText, "Idle");
-});
-
-test("a start shows its resolved run settings, and none before its request resolved", () => {
-  const page = chipsHarness();
-  page.chips.render(state({ run: { phase: "starting", mode: "remux", settings: null }, busy: true }));
-  assert.equal(page.workerChip.innerText, "Workers Active");
-  assert.equal(page.ioChip.innerText, "IO Jobs Active");
-  page.chips.render(state({ run: { phase: "starting", mode: "remux", settings: RUN_SETTINGS }, busy: true }));
+  page.chips.render({ chips: chips({ workers: "3 Workers Active", io_jobs: "5 IO Jobs Active" }) });
   assert.equal(page.workerChip.innerText, "3 Workers Active");
   assert.equal(page.ioChip.innerText, "5 IO Jobs Active");
-  // The inputs still learn the defaults; only the chips belong to the batch.
-  assert.equal(page.inputs.get("remux-workers").placeholder, "auto (6)");
 });
 
-test("an active job with no run settings shows the Job View's own Effective Settings", () => {
+test("a null hint leaves the input on its own placeholder, and a View State without chips renders nothing", () => {
   const page = chipsHarness();
-  page.chips.render(state({ job: jobView(), busy: true }));
-  assert.equal(page.workerChip.innerText, "3 Workers Active");
-  // A job that ended no longer owns the chips: they return to the defaults.
-  page.chips.render(state({ job: jobView([], { active: false, status: "completed" }) }));
-  assert.equal(page.workerChip.innerText, "Standby (6 Workers)");
-  assert.equal(page.ioChip.innerText, "Idle (4 IO Jobs)");
+  page.chips.render(null);
+  assert.equal(page.workerChip.innerText, undefined);
+  page.chips.render({ chips: chips({ workers: "Standby", io_jobs: "Idle", workers_hint: null, io_jobs_hint: null }) });
+  assert.equal(page.inputs.get("remux-workers").placeholder, undefined);
+  assert.equal(page.workerChip.innerText, "Standby");
 });
 
-test("the same defaults published again rewrite nothing, and an input the page does not have is skipped", () => {
+test("the same hints published again rewrite nothing, and an input the page does not have is skipped", () => {
   const page = chipsHarness();
   page.inputs.delete("extract-io-jobs");
-  page.chips.render(state());
-  assert.equal(page.inputs.get("remux-io-jobs").placeholder, "auto (4)");
+  page.chips.render({ chips: chips() });
   assert.equal(page.inputs.get("extract-workers").placeholder, "auto (6)");
   page.inputs.get("remux-workers").placeholder = "edited";
-  page.chips.render(state({ defaults: { ...DEFAULTS } }));
+  page.chips.render({ chips: chips({ workers: "Workers Active" }) });
   assert.equal(page.inputs.get("remux-workers").placeholder, "edited");
 });

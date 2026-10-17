@@ -5,25 +5,12 @@ import { BULK_SELECTION_CONTROLS, JobController } from "./job-controller.js";
 import { QueueTracker } from "./queue-view.js";
 import { createRunLogs } from "./log-view.js";
 import { createDirectoryScanner } from "./directory-scan.js";
-import { nextStepValue } from "./stepper.js";
 import { createSettingsChips } from "./settings-chips.js";
 import { createPresetMenu } from "./preset-menu.js";
 import { createSettingsDraft } from "./settings-draft.js";
 import { createTheme } from "./theme.js";
 import { ALL_ROWS, nextState } from "./view-patch.js";
-import {
-  batchClock,
-  candidateTier,
-  filterCounts,
-  inspectorCrumbs,
-  pathSegments,
-  prettyPath,
-  progressSegments,
-  remuxAudioText,
-  sparkPoints,
-  statusLabel,
-  statusTone,
-} from "./presentation.js";
+import { sparkPoints } from "./presentation.js";
 
 // ─── Tauri API helpers ──────────────────────────────────────────────────────
 
@@ -95,18 +82,17 @@ const theme = createTheme({
 
 // ─── Number Stepper Helper ──────────────────────────────────────────────────
 
+/**
+ * One stepper click: the core steps the Settings Draft field (`draft.rs`, its bounds and its
+ * auto value) and publishes the new value into the input. Only the hold-to-repeat timing is here.
+ */
 function stepNumber(btn, dir) {
   const input = btn.parentElement.querySelector('input[type="number"]');
   if (!input || input.disabled) return;
-
-  const step = parseFloat(input.getAttribute('step') || '1');
-  const min = parseFloat(input.getAttribute('min'));
-  const max = parseFloat(input.getAttribute('max'));
-  // Set only on inputs whose empty state means "auto" and whose resolved value is known.
-  const autoValue = parseFloat(input.dataset.autoValue);
-
-  input.value = nextStepValue(input.value, autoValue, dir, step, min, max);
-  input.dispatchEvent(new Event('input'));
+  // `remux-sub-offset` steps the remux draft's `sub_offset`.
+  const [, mode, suffix] = input.id?.match(/^(remux|extract)-(.+)$/) ?? [];
+  if (!mode) return;
+  draftForm.step(mode, suffix.replaceAll("-", "_"), dir > 0 ? "up" : "down");
 }
 
 function initSteppers() {
@@ -147,8 +133,8 @@ let appliedState = null;
 // evaluated again against its answer.
 let resyncing = null;
 let heldPayloads = [];
-// What the global controls read from the queues and the Job View when they were last synced.
-// Progress publications leave it unchanged, so they skip the DOM-wide control sync.
+// What the global controls read from the View State when they were last synced. Progress and
+// heartbeat publications leave it unchanged, so they skip the DOM-wide control sync.
 let controlsKey = "";
 // The Job Controllers by mode, once `initApp` made them.
 let controllers = {};
@@ -213,22 +199,18 @@ function resync() {
 function applyState(state, rows = ALL_ROWS) {
   appliedState = state;
   // The fields first, so the queues and the chrome below read the published draft.
-  const remuxWritten = draftForm.apply("remux", state.remux.draft);
+  draftForm.apply("remux", state.remux.draft);
   draftForm.apply("extract", state.extract.draft);
   chips.render(state);
   presets.render(state.presets, state.remux.draft);
   renderTelemetry(state.telemetry);
-  remuxQueue.applyView(state.remux, state.job, rows.remux);
-  extractQueue.applyView(state.extract, state.job, rows.extract);
-  // The rows show the bitrate and the subtitle ladder the assets dir is part of.
-  if (remuxWritten.has("bitrate") || remuxWritten.has("assets_dir")) remuxQueue.refreshMeta();
-  // The Job Coordinator, every ModeView field but the rows and the draft, and from the rows only
-  // the counts the controls show, so a ModeView field added later syncs the controls too, while a
-  // progress publication or a keystroke does not. Of the draft, only dry_run (the Run label) and
-  // the flagged field are on the controls.
-  const key = JSON.stringify([state.run, state.job?.job_id, state.job?.active, ...[remuxQueue, extractQueue].map(queue => {
-    const { rows, draft, ...fields } = queue.view;
-    return [fields, draft?.dry_run, draft?.invalid, queue.state.totalCount, queue.getSelectedCount()];
+  remuxQueue.applyView(state.remux, rows.remux);
+  extractQueue.applyView(state.extract, rows.extract);
+  // What the controls render: `busy`, each mode's published controls and flagged field, and its
+  // manifest, whose fresh row checkboxes take the selection lock.
+  const key = JSON.stringify([state.busy, ...["remux", "extract"].map(mode => {
+    const { controls, draft, manifest_rev: rev } = state[mode];
+    return [controls, draft?.invalid, rev];
   })]);
   if (key !== controlsKey) {
     controlsKey = key;
@@ -267,7 +249,7 @@ const UNCHAINED_INTENTS = new Set(["scan_directory", "run", "stop"]);
 
 // The Intents the core answers before it publishes their change, which reaches the page as a
 // coalesced `view-state` publication (ADR-0016, S3 and S4): the draft Intents and `view_visible`.
-const UNSYNCED_INTENTS = new Set(["edit_draft", "set_preset", "view_visible"]);
+const UNSYNCED_INTENTS = new Set(["edit_draft", "set_preset", "step_draft", "view_visible"]);
 
 /**
  * Sends an Intent to the Desktop Core after every Intent sent before it was answered (a scan, a
@@ -322,7 +304,7 @@ function switchView(viewId) {
 }
 
 // The chrome (list header, filters, progress, library, inspector) redraws at most once a frame,
-// from the queue's state, after the Queue Tracker reports a change.
+// from the queue's published ModeView, after the Queue Tracker reports a change.
 const pendingChrome = new Set();
 let chromeScheduled = false;
 
@@ -342,19 +324,18 @@ for (const mode of ["remux", "extract"]) queueFor(mode).onChange = () => schedul
 
 const listHeadKeys = { remux: null, extract: null };
 
+/** Draws the published list header, filter counts, progress bar and clock of `mode`. */
 function renderChrome(mode) {
   const queue = queueFor(mode);
-  const { state } = queue;
-  const dir = queue.currentDirectory;
+  const { view } = queue;
 
-  if (listHeadKeys[mode] !== dir) {
-    listHeadKeys[mode] = dir;
-    const segments = pathSegments(dir);
-    setText(`${mode}-title`, segments.at(-1) ?? "No folder open");
-    renderCrumbs(byId(`${mode}-path`), segments);
+  const headKey = JSON.stringify([view.title, view.crumbs]);
+  if (listHeadKeys[mode] !== headKey) {
+    listHeadKeys[mode] = headKey;
+    setText(`${mode}-title`, view.title ?? "No folder open");
+    renderCrumbs(byId(`${mode}-path`), view.crumbs ?? []);
   }
 
-  const counts = filterCounts(state);
   // Every write below is skipped when the value is unchanged: this runs on each progress frame.
   document.querySelectorAll(`.filter-chip[data-mode="${mode}"]`).forEach(chip => {
     const on = chip.dataset.filter === queue.filter;
@@ -363,20 +344,20 @@ function renderChrome(mode) {
       chip.setAttribute("aria-pressed", String(on));
     }
     const n = chip.querySelector(".n");
-    const count = String(counts[chip.dataset.filter] ?? 0);
+    const count = String(view.filters?.[chip.dataset.filter] ?? 0);
     if (n && n.textContent !== count) n.textContent = count;
   });
 
   const stack = byId(`${mode}-stack`);
-  if (stack) {
-    const parts = progressSegments(state);
+  if (stack && view.progress) {
+    const parts = view.progress;
     [parts.done, parts.skipped, parts.failed, parts.live].forEach((pct, i) => {
       const seg = stack.children[i];
       const width = `${pct.toFixed(2)}%`;
       if (seg && seg.style.width !== width) seg.style.width = width;
     });
   }
-  setText(`${mode}-clock`, batchClock(state));
+  if (view.clock != null) setText(`${mode}-clock`, view.clock);
 
   if (mode !== currentView) return;
   renderLibrary(queue);
@@ -386,128 +367,110 @@ function renderChrome(mode) {
 
 let lastLibraryKey = null;
 
+/** Draws the published Library: the folder, then each other Release Directory. */
 function renderLibrary(queue) {
   const tree = byId("library-tree");
-  const dir = queue.currentDirectory;
-  const releases = queue.releaseCounts();
-  const key = JSON.stringify([queue.mode, dir, [...releases]]);
+  const library = queue.view.library ?? [];
+  const key = JSON.stringify([queue.mode, library]);
   if (!tree || key === lastLibraryKey) return;
   lastLibraryKey = key;
   tree.textContent = "";
-  if (!dir) return;
-
-  const row = (className, name, count, release) => {
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = `nav ${className}`;
-    if (release) btn.dataset.release = release;
-    btn.title = release ? prettyPath(release) : prettyPath(dir);
-    const label = document.createElement("span");
-    label.className = "lib-name";
-    label.textContent = name;
-    const n = document.createElement("span");
-    n.className = "lib-count";
-    n.textContent = String(count);
-    btn.append(label, n);
-    tree.appendChild(btn);
-  };
   // These counts are each release's total; the list's group headers count only the rows the
   // filter shows, so the two differ under To do, Done and Failed.
-  row("lib-root", pathSegments(dir).at(-1) ?? dir, queue.state.totalCount, null);
-  for (const [release, count] of releases) {
-    if (release !== ".") row("lib-release", prettyPath(release), count, release);
+  for (const entry of library) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = `nav ${entry.release === null ? "lib-root" : "lib-release"}`;
+    if (entry.release !== null) btn.dataset.release = entry.release;
+    btn.title = entry.tooltip;
+    const label = document.createElement("span");
+    label.className = "lib-name";
+    label.textContent = entry.label;
+    const n = document.createElement("span");
+    n.className = "lib-count";
+    n.textContent = String(entry.count);
+    btn.append(label, n);
+    tree.appendChild(btn);
   }
 }
 
 // ─── Inspector ──────────────────────────────────────────────────────────────
 
-const TIER_NAMES = { same: "Same folder", ancestor: "Parent folder" };
 let lastAssignKey = null;
 
+/**
+ * Draws the Episode Inspector the core published for the queue's mode (`inspector.rs`), or its
+ * empty state while the queue has no rows.
+ */
 function renderInspector(queue) {
   const body = byId("insp-body");
   const empty = byId("insp-empty");
-  const item = queue.inspectedItem();
-  if (body) body.hidden = !item;
-  if (empty) empty.hidden = Boolean(item);
-  if (!item || !body) return;
+  const insp = queue.view.inspector ?? null;
+  if (body) body.hidden = !insp;
+  if (empty) empty.hidden = Boolean(insp);
+  if (!insp || !body) return;
 
   const mode = queue.mode;
-  const meta = item.metadata;
-  setText("insp-num", String(queue.state.order.indexOf(item.id) + 1).padStart(2, "0"));
-  setText("insp-title", item.name);
+  setText("insp-num", insp.number);
+  setText("insp-title", insp.title);
   const pathEl = byId("insp-path");
-  if (pathEl && pathEl.dataset.path !== item.id) {
-    pathEl.dataset.path = item.id;
-    // From the ID, not `release`: a row the manifest does not list has an empty release.
-    renderCrumbs(pathEl, inspectorCrumbs(item.id));
+  if (pathEl && pathEl.dataset.path !== insp.id) {
+    pathEl.dataset.path = insp.id;
+    renderCrumbs(pathEl, insp.crumbs);
   }
 
-  const error = item.status === "error" ? item.error : item.inspectionError;
   const errorEl = byId("insp-error");
-  if (errorEl) errorEl.hidden = !error;
-  setText("insp-error", error || "");
+  if (errorEl) errorEl.hidden = insp.error === null;
+  setText("insp-error", insp.error ?? "");
 
   const pill = byId("insp-status");
-  const included = item.selected !== false;
-  const pillClass = `pill tone-${included ? statusTone(item.status) : "mute"}`;
+  const pillClass = `pill tone-${insp.pill.tone}`;
   if (pill && pill.className !== pillClass) pill.className = pillClass;
-  setText("insp-status", included ? statusLabel(item) : "Not in batch");
+  setText("insp-status", insp.pill.label);
 
-  const video = meta?.video_tag || (item.inspectionError ? "Inspection failed" : "Unknown");
-  setText("insp-video", mode === "remux" && meta?.video_tag ? `${video} · copied` : video);
-  setText("insp-audio-label", mode === "remux" ? "Audio" : "Subtitles");
-  setText("insp-audio", mode === "remux"
-    ? (meta ? remuxAudioText(meta, queue.getBitrate()) : "Unknown")
-    : (meta?.sub_summary || (meta ? "None" : "Unknown")));
+  setText("insp-video", insp.video);
+  setText("insp-audio-label", insp.audio_label);
+  setText("insp-audio", insp.audio);
 
   // The output folder setting, or the setting's own description of its default. Where the file
   // lands inside it, and its name, are the engine's to decide.
-  const outInput = byId(`${mode}-out-dir`);
-  const outDir = outInput?.value?.trim() ?? "";
   const outEl = byId("insp-out");
-  const outKey = `${mode}:${outDir}`;
+  const outKey = JSON.stringify([mode, insp.out_crumbs]);
   if (outEl && outEl.dataset.path !== outKey) {
     outEl.dataset.path = outKey;
-    if (outDir) renderCrumbs(outEl, pathSegments(outDir));
-    else outEl.textContent = outInput?.placeholder ?? "Default";
+    if (insp.out_crumbs) renderCrumbs(outEl, insp.out_crumbs);
+    else outEl.textContent = byId(`${mode}-out-dir`)?.placeholder ?? "Default";
   }
 
-  const fonts = meta?.fonts_count;
-  setText("insp-fonts-head", fonts == null ? "Fonts" : `Fonts · ${fonts}`);
-  const fontsDir = byId(`${mode}-fonts-dir`)?.value?.trim();
-  setText("insp-fonts", fonts == null
-    ? "Not inspected"
-    : `${fonts} attached ${fonts === 1 ? "font" : "fonts"} · folder: ${fontsDir ? prettyPath(fontsDir) : "auto"}`);
+  setText("insp-fonts-head", insp.fonts_head);
+  setText("insp-fonts", insp.fonts);
 
-  if (mode === "remux") renderSubtitleSection(queue, item);
+  if (mode === "remux") renderSubtitleSection(insp);
 }
 
-function renderSubtitleSection(queue, item) {
-  const assignment = queue.assignments.get(item.id) ?? null;
-  const candidates = queue.candidatesForItem(item.id);
-  const ladder = queue.ladderFor(item.id);
+function renderSubtitleSection(insp) {
+  const { assignment } = insp;
   // Everything below depends only on these, so a progress event redraws none of it.
-  const key = JSON.stringify([item.id, ladder, assignment, candidates]);
+  const key = JSON.stringify([insp.id, insp.ladder, insp.options, assignment]);
   if (key === lastAssignKey) return;
   lastAssignKey = key;
 
   const ladderEl = byId("insp-ladder");
   if (ladderEl) {
     ladderEl.textContent = "";
-    ladder.forEach((rung, i) => {
+    insp.ladder.forEach((rung, i) => {
       const li = document.createElement("li");
-      li.className = rung.chosen ? "is-chosen" : rung.detail ? "is-found" : "";
+      li.className = rung.chosen ? "is-chosen" : rung.found ? "is-found" : "";
       const n = document.createElement("span");
       n.className = "rung-n";
       n.textContent = String(i + 1);
       const label = document.createElement("span");
       label.className = "rung-label";
       label.textContent = rung.label;
-      if (rung.detail) {
+      if (rung.found) {
         const detail = document.createElement("small");
         detail.className = "rung-detail";
-        detail.textContent = rung.key === "embedded" ? rung.detail : prettyPath(rung.detail);
+        detail.textContent = rung.detail;
         detail.title = detail.textContent;
         label.appendChild(detail);
       }
@@ -528,13 +491,8 @@ function renderSubtitleSection(queue, item) {
       opt.textContent = label;
       select.appendChild(opt);
     };
-    option("", "Automatic (follow the ladder)");
-    for (const path of candidates) {
-      option(path, `${prettyPath(path)} (${TIER_NAMES[candidateTier(path, item.release)]})`);
-    }
-    if (assignment && !candidates.includes(assignment.asset_path)) {
-      option(assignment.asset_path, `${prettyPath(assignment.asset_path)} (Custom file)`);
-    }
+    for (const { value, label } of insp.options) option(value, label);
+    // The file picker is the view's own action, not a choice the core publishes.
     option(BROWSE_SUBTITLE, "Choose a file…");
     select.value = assignment?.asset_path ?? "";
   }
@@ -564,7 +522,10 @@ function renderSubtitleSection(queue, item) {
 const PRESET_SUBTITLE_LANGUAGES = ["ind", "eng", "jpn"];
 const BROWSE_SUBTITLE = "__browse__";
 
-/** The Track Assignment for `itemId` and `path`, from the inspector's language, title and offset. */
+/**
+ * The Track Assignment for `itemId` and `path`, from the inspector's language, title and offset.
+ * Still the view's (out of S4): a view that builds a request is logic the core could own.
+ */
 function subtitleAssignment(itemId, path) {
   let language = byId("sub-lang-select")?.value || "ind";
   if (language === "custom") {
@@ -588,11 +549,11 @@ function subtitleAssignment(itemId, path) {
 
 /** Sets (or, with no path, clears) the inspected item's Track Assignment. Refused while a job runs. */
 async function assignSubtitle(path) {
-  const item = remuxQueue.inspectedItem();
-  if (!item || busy()) return;
+  const insp = remuxQueue.view.inspector;
+  if (!insp || busy()) return;
   await dispatchIntent(path
-    ? { type: "assign_track", mode: "remux", assignment: subtitleAssignment(item.id, path) }
-    : { type: "clear_track", mode: "remux", id: item.id });
+    ? { type: "assign_track", mode: "remux", assignment: subtitleAssignment(insp.id, path) }
+    : { type: "clear_track", mode: "remux", id: insp.id });
   // Redraw the inspector even when the core refused the change, so it shows what is assigned.
   lastAssignKey = null;
   scheduleChrome("remux");
@@ -623,8 +584,7 @@ async function onAssignSelect(e) {
 
 /** A language, title or offset edit re-applies the current assignment with the new fields. */
 function onAssignOptions() {
-  const item = remuxQueue.inspectedItem();
-  const assignment = item && remuxQueue.assignments.get(item.id);
+  const assignment = remuxQueue.view.inspector?.assignment;
   const custom = byId("sub-lang-select")?.value === "custom";
   const customLabel = byId("sub-lang-custom-label");
   if (customLabel) customLabel.hidden = !custom;
@@ -902,6 +862,7 @@ function initApp() {
   draftForm.bind();
 
   // ─── Complexity Slider & Number Synchronization ──────────────────────────
+  // Still the view's (out of S4): the clamp and normalize are rules the core could own.
   const cplxSlider = document.getElementById("remux-complexity");
   const cplxNumber = document.getElementById("remux-cplx-val");
   if (cplxSlider && cplxNumber) {
@@ -927,13 +888,6 @@ function initApp() {
     cplxNumber.addEventListener("input", syncFromNumber);
     cplxNumber.addEventListener("change", normalizeNumber);
     cplxNumber.addEventListener("blur", normalizeNumber);
-  }
-
-  // The rows and the inspector show the bitrate and the subtitle ladder; the inspector the folders.
-  safeAddListener("remux-bitrate", "change", () => remuxQueue.refreshMeta());
-  safeAddListener("remux-assets-dir", "change", () => remuxQueue.refreshMeta());
-  for (const id of ["remux-out-dir", "remux-fonts-dir", "extract-out-dir", "extract-fonts-dir"]) {
-    safeAddListener(id, "change", () => scheduleChrome(currentView));
   }
 
   const jobRuntime = {

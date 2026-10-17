@@ -109,6 +109,21 @@ test("a key whose edit is still on its way is not written back until the core an
   assert.equal(page.get("remux-out-dir").value, "/new2");
 });
 
+test("a stepped key is not written back until the core answered the step", async () => {
+  const page = draftHarness();
+  page.get("remux-cplx-val").value = "6";
+  page.form.step("remux", "complexity", "up");
+  assert.deepEqual(page.intents.at(-1), { type: "step_draft", mode: "remux", field: "complexity", direction: "up" });
+  // A publication from before the core applied the step holds an older value.
+  page.form.apply("remux", draft("remux", { complexity: "5" }));
+  assert.equal(page.get("remux-cplx-val").value, "6");
+
+  page.answers.shift()(true);
+  await flush();
+  page.form.apply("remux", draft("remux", { complexity: "7" }));
+  assert.equal(page.get("remux-cplx-val").value, "7");
+});
+
 test("the complexity slider takes only a value that parses, so a cleared box does not move it", () => {
   const page = draftHarness();
   page.form.apply("remux", draft("remux", { complexity: "" }));

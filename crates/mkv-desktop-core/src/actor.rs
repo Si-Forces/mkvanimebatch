@@ -4,15 +4,22 @@
 //! reaches it through one inbox, so a job's start, events, log batches and completion arrive in
 //! the order the supervisor sent them, and an Intent sees every change sent before it. A UI
 //! adapter spawns it once with `Core::spawn` and talks to it through the `CoreHandle`. The start
-//! of a Run and the Stop that ends it are in `start`, the telemetry cadence in `timers`. Each
-//! mode's Run Log is published batch by batch, outside the View State.
+//! of a Run and the Stop that ends it are in `start`, the telemetry cadence and the Presentation
+//! Heartbeat in `timers`, the presentation values and controls in `crate::presentation`, the
+//! Episode Inspector in `crate::inspector`. Each mode's Run Log is published batch by batch,
+//! outside the View State.
 
 use crate::control::{mode_name, Launcher};
 use crate::coordinator::{JobCoordinator, Phase};
-use crate::draft::{DraftChanges, SettingsDraft};
+use crate::draft::{DraftChanges, SettingsDraft, StepField};
 use crate::inspection::{InFlight, Inspector};
+use crate::inspector::{inspected_row, inspector_view, InspectorView};
 use crate::job::{JobDone, JobSink, JobStarted};
 use crate::log::{error_line, LogBatch, LogView, RunLog};
+use crate::presentation::{
+    batch, batch_clock, chips, controls, count_text, filter_counts, library, list_crumbs,
+    list_title, progress_segments, Chips, Controls, Filters, Hold, LibraryEntry, Progress,
+};
 use crate::queue::{Direction, Queue, Row};
 use crate::snapshot::{BatchStatus, JobSnapshot};
 use crate::telemetry::{Sampler, TelemetryData, TelemetryView};
@@ -24,7 +31,7 @@ use mkv_core::request::{EffectiveSettings, TrackAssignment};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant as StdInstant};
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
@@ -92,6 +99,12 @@ pub enum Intent {
         mode: PipelineMode,
         changes: DraftChanges,
     },
+    /// Steps a Settings Draft field up or down, as an `EditDraft` of it; see `SettingsDraft::step`.
+    StepDraft {
+        mode: PipelineMode,
+        field: StepField,
+        direction: Direction,
+    },
     /// Puts the Settings Draft on a Preset Profile (remux only); see `SettingsDraft::set_preset`.
     SetPreset {
         mode: PipelineMode,
@@ -117,6 +130,12 @@ pub enum Intent {
     ClearCache {
         mode: PipelineMode,
     },
+    /// Shows row `id` in the mode's Episode Inspector, or with `None` the first row again.
+    /// Answers whether that changed what it picked: `false` for a row the queue does not hold.
+    Inspect {
+        mode: PipelineMode,
+        id: Option<String>,
+    },
     /// The view was shown or hidden: telemetry is not sampled while it is hidden. Answers whether
     /// that changed, at once and without a publication of its own, like a draft Intent.
     ViewVisible {
@@ -137,6 +156,8 @@ pub struct ViewState {
     /// The Effective Settings of a request that sets nothing, for the `auto (N)` hints: `None`
     /// until the actor has read the CPU topology once it started.
     pub defaults: Option<EffectiveSettings>,
+    /// The worker and I/O job chips and the `auto (N)` hints.
+    pub chips: Chips,
     /// The built-in Preset Profiles.
     pub presets: Vec<PresetProfile>,
     pub remux: ModeView,
@@ -185,11 +206,8 @@ pub struct JobView {
     /// Whether the job still runs: from its start until its `job-done`, or until
     /// its sink is dropped without one.
     pub active: bool,
-    pub start_time_ms: u64,
     pub input_dir: String,
     pub effective_settings: EffectiveSettings,
-    /// The item IDs of the job's batch, in batch order.
-    pub participants: Vec<String>,
 }
 
 /// The queue of one mode as a view renders it.
@@ -211,23 +229,54 @@ pub struct ModeView {
     pub draft: SettingsDraft,
     /// How the mode's last start or job ended: `None` before the first and while one runs.
     pub outcome: Option<Outcome>,
+    /// The list header: the folder's name, or `No folder open`.
+    pub title: String,
+    /// The list header's path crumbs: the folder's path segments.
+    pub crumbs: Vec<String>,
+    /// The queue count beside the header: the scan, the Queue Selection or the batch's tally.
+    pub count_text: String,
+    /// The bottom bar's batch clock; it advances with the Presentation Heartbeat.
+    pub clock: String,
+    /// The stacked progress bar's widths, in percent.
+    pub progress: Progress,
+    /// How many rows each filter chip shows.
+    pub filters: Filters,
+    pub selected_count: usize,
+    pub total_count: usize,
+    /// The Library: the folder, then each other Release Directory; empty with no folder open.
+    pub library: Vec<LibraryEntry>,
+    /// The Episode Inspector: `None` while the queue has no rows.
+    pub inspector: Option<InspectorView>,
+    /// The Run and Stop buttons, the status pill and the selection lock.
+    pub controls: Controls,
 }
 
 impl ViewState {
     /// What a core that holds nothing yet publishes: empty queues, each mode's draft as it
     /// starts, the catalog and `defaults`.
     pub fn new(defaults: Option<EffectiveSettings>) -> Self {
-        Self {
+        let mut state = Self {
             seq: 0,
             job: None,
             run: RunView::default(),
             busy: false,
+            chips: Chips::default(),
             defaults,
             presets: get_preset_profiles(),
-            remux: ModeState::new(PipelineMode::Remux).view(None),
-            extract: ModeState::new(PipelineMode::Extract).view(None),
+            remux: ModeState::new(PipelineMode::Remux).view(None, StdInstant::now()),
+            extract: ModeState::new(PipelineMode::Extract).view(None, StdInstant::now()),
             telemetry: None,
-        }
+        };
+        state.lay_controls(&Hold::default(), None);
+        state
+    }
+
+    /// Lays each mode's controls over its view and the chips, while `hold` holds the batch,
+    /// whose Effective Settings are `batch` once known.
+    fn lay_controls(&mut self, hold: &Hold, batch: Option<&EffectiveSettings>) {
+        self.remux.controls = controls(PipelineMode::Remux, &self.remux, hold);
+        self.extract.controls = controls(PipelineMode::Extract, &self.extract, hold);
+        self.chips = chips(hold.busy, batch, self.defaults.as_ref());
     }
 }
 
@@ -350,10 +399,10 @@ impl CoreHandle {
         self.ask(|reply| Msg::GetLog(mode, reply)).await
     }
 
-    /// Applies `intent`. Its effect is published before the answer, but for a draft Intent
-    /// (`EditDraft`, `SetPreset`) and `ViewVisible`, which answer at once and are published with
-    /// the next coalesced publication: `Ok(true)` when it applied, `Ok(false)` when it changed nothing
-    /// (see `Intent::ScanDirectory`, `Intent::Run` and `Intent::Stop` for those), and an error
+    /// Applies `intent`. Its effect is published before the answer, except that a draft Intent
+    /// (`EditDraft`, `StepDraft`, `SetPreset`) and `ViewVisible` answer at once and go out with
+    /// the next coalesced publication. The answer is `Ok(true)` when it applied, `Ok(false)` when
+    /// it changed nothing (see `Intent::ScanDirectory`, `Intent::Run` and `Intent::Stop` for those), and an error
     /// when the core refuses it.
     pub async fn dispatch(&self, intent: Intent) -> Result<bool, String> {
         self.ask(|reply| Msg::Dispatch(intent, reply)).await?
@@ -409,48 +458,71 @@ impl Drop for ActorSink {
 
 /// One mode's queue, scan, Settings Draft, outcome and Run Log.
 struct ModeState {
+    mode: PipelineMode,
     queue: Queue,
     draft: SettingsDraft,
     log: RunLog,
     scan: ScanView,
     outcome: Option<Outcome>,
+    /// The row an `Inspect` Intent picked for the Episode Inspector, if any.
+    inspected: Option<String>,
     /// The newest scan request: a request answered after a newer one began is overtaken.
     request: u64,
     /// The scan the queue waits for: an inspection that settles after a newer scan began, a reuse
     /// or a reset is overtaken.
     token: u64,
-    /// Whether the queue, the scan or the Job Snapshot laid over the rows changed since the last
-    /// publication. Only a changed mode's view is rebuilt; the other is published as last built.
+    /// Whether the queue, the scan, the Job Snapshot laid over the rows, the draft values the rows
+    /// show or the time they show (a heartbeat beat) changed since the last publication. Only a
+    /// changed mode's view is rebuilt; the other is published as last built.
     changed: bool,
 }
 
 impl ModeState {
     fn new(mode: PipelineMode) -> Self {
         Self {
+            mode,
             queue: Queue::default(),
             draft: SettingsDraft::new(mode),
             log: RunLog::new(mode),
             scan: ScanView::Idle,
             outcome: None,
+            inspected: None,
             request: 0,
             token: 0,
             changed: false,
         }
     }
 
-    /// The view of this mode, with `job`, the Job Snapshot of this mode if any, over its rows.
-    fn view(&self, job: Option<&JobSnapshot>) -> ModeView {
+    /// The view of this mode, with `job`, the Job Snapshot of this mode if any, and when it
+    /// started, over its rows, presented at `now`. With no job, the time does not show.
+    fn view(&mut self, job: Option<(&JobSnapshot, StdInstant)>, now: StdInstant) -> ModeView {
+        let inputs = self.draft.meta_inputs(self.mode);
+        let rows = self.queue.rows(job.map(|(job, _)| job), &inputs, now);
+        let batch = job.and_then(|(job, started_at)| batch(job, started_at, now));
         let queue = &self.queue;
+        let directory = queue.directory();
         ModeView {
-            directory: queue.directory().map(str::to_string),
+            directory: directory.map(str::to_string),
             scan: self.scan.clone(),
             manifest_rev: queue.manifest_rev(),
             subtitle_candidates: queue.subtitle_candidates(),
-            rows: Arc::new(queue.rows(job)),
             vanished_selected_ids: queue.vanished_selected_ids().to_vec(),
             assignments: queue.assignments().clone(),
             draft: self.draft.clone(),
             outcome: self.outcome,
+            title: list_title(directory),
+            crumbs: list_crumbs(directory),
+            count_text: count_text(&self.scan, &rows, batch.as_ref()),
+            clock: batch_clock(batch.as_ref()),
+            progress: progress_segments(&rows, batch.as_ref()),
+            filters: filter_counts(&rows),
+            selected_count: rows.iter().filter(|row| row.selected).count(),
+            total_count: rows.len(),
+            library: library(directory, &rows),
+            rows: Arc::new(rows),
+            // Laid over the view on each publication: they follow the draft and the batch's holder.
+            inspector: None,
+            controls: Controls::default(),
         }
     }
 }
@@ -487,6 +559,11 @@ pub struct Core<P, I, L, S> {
     extract: ModeState,
     in_flight: InFlight<Waiter>,
     snapshot: Option<JobSnapshot>,
+    /// When the actor heard the snapshot's job start: the origin of its batch clock and of the
+    /// Presentation Heartbeat's beats.
+    job_started_at: Option<Instant>,
+    /// When the Presentation Heartbeat beats next: `None` while it does not run.
+    beat_at: Option<Instant>,
     /// Whether a job runs: from its `JobStarted` until its `Done`, or until its sink is dropped
     /// when a supervisor that died before `finish` sent no `Done`.
     active: bool,
@@ -547,6 +624,8 @@ impl<P: Publisher, I: Inspector, L: Launcher, S: Sampler> Core<P, I, L, S> {
             extract: ModeState::new(PipelineMode::Extract),
             in_flight: InFlight::default(),
             snapshot: None,
+            job_started_at: None,
+            beat_at: None,
             active: false,
             coordinator: JobCoordinator::default(),
             start: None,
@@ -583,16 +662,22 @@ impl<P: Publisher, I: Inspector, L: Launcher, S: Sampler> Core<P, I, L, S> {
         let mut armed = false;
         let poll = tokio::time::sleep(Duration::ZERO);
         tokio::pin!(poll);
+        let beat = tokio::time::sleep(Duration::ZERO);
+        tokio::pin!(beat);
         self.restart_telemetry();
         loop {
-            // The telemetry poll's deadline, if one is due at all.
+            // The telemetry poll's and the heartbeat's deadlines, if one is due at all.
             let poll_at = self.telemetry.poll_at;
             if let Some(at) = poll_at.filter(|&at| poll.deadline() != at) {
                 poll.as_mut().reset(at);
             }
-            // Biased: messages already queued go before the tick and the poll. A steady stream
-            // cannot starve publication or the poll, since the due checks below run after every
-            // step, whichever arm ran: the two timer arms only wake an idle actor.
+            let beat_at = self.beat_at;
+            if let Some(at) = beat_at.filter(|&at| beat.deadline() != at) {
+                beat.as_mut().reset(at);
+            }
+            // Biased: messages already queued go before the timers. A steady stream cannot
+            // starve publication, the poll or the beat, since the due checks below run after
+            // every step, whichever arm ran: the timer arms only wake an idle actor.
             tokio::select! {
                 biased;
                 msg = inbox.recv() => match msg {
@@ -601,9 +686,11 @@ impl<P: Publisher, I: Inspector, L: Launcher, S: Sampler> Core<P, I, L, S> {
                 },
                 () = &mut tick, if armed => armed = false,
                 () = &mut poll, if poll_at.is_some() => {}
+                () = &mut beat, if beat_at.is_some() => {}
             }
             self.follow_busy();
             self.poll_if_due();
+            self.beat_if_due();
             if self.dirty {
                 let due = self
                     .last_published_at
@@ -649,6 +736,7 @@ impl<P: Publisher, I: Inspector, L: Launcher, S: Sampler> Core<P, I, L, S> {
                 // The rows of the replaced snapshot's mode lose its overlay.
                 self.touch_job();
                 self.snapshot = Some(job.snapshot());
+                self.job_started_at = Some(Instant::now());
                 self.active = true;
                 self.touch_job();
             }
@@ -659,7 +747,7 @@ impl<P: Publisher, I: Inspector, L: Launcher, S: Sampler> Core<P, I, L, S> {
                     .as_mut()
                     .filter(|snapshot| snapshot.job_id == job_id)
                 {
-                    snapshot.apply(&event);
+                    snapshot.apply_at(&event, Instant::now().into_std());
                     self.touch_job();
                 }
             }
@@ -808,6 +896,10 @@ impl<P: Publisher, I: Inspector, L: Launcher, S: Sampler> Core<P, I, L, S> {
                     },
                 );
             }
+            Intent::Inspect { mode, id } => {
+                let answer = Ok(self.inspect(mode, id));
+                return self.answer(reply, answer);
+            }
             Intent::ViewVisible { visible } => {
                 let _ = reply.send(Ok(self.view_visible(visible)));
                 return;
@@ -825,6 +917,17 @@ impl<P: Publisher, I: Inspector, L: Launcher, S: Sampler> Core<P, I, L, S> {
             // coalesced into the run loop's publications instead of forcing one each.
             Intent::EditDraft { mode, changes } => {
                 let _ = reply.send(self.change_draft(mode, |draft| draft.edit(changes)));
+                return;
+            }
+            Intent::StepDraft {
+                mode,
+                field,
+                direction,
+            } => {
+                let defaults = self.defaults.clone();
+                let step =
+                    |draft: &mut SettingsDraft| draft.step(field, direction, defaults.as_ref());
+                let _ = reply.send(self.change_draft(mode, step));
                 return;
             }
             Intent::SetPreset { mode, preset } => {
@@ -879,10 +982,39 @@ impl<P: Publisher, I: Inspector, L: Launcher, S: Sampler> Core<P, I, L, S> {
         if self.busy() {
             return Err(DRAFT_REFUSED.into());
         }
-        let changed = change(&mut self.mode(mode).draft)?;
-        // Only the draft changed, which `publish` copies in, so a keystroke rebuilds no rows.
+        let draft = &mut self.mode(mode).draft;
+        let inputs = draft.meta_inputs(mode);
+        let changed = change(draft)?;
+        // Only the draft changed, which `publish` copies in, so a keystroke rebuilds no rows,
+        // unless it changed the bitrate or the assets dir a remux row's meta line names.
+        if self.mode(mode).draft.meta_inputs(mode) != inputs {
+            self.touch(mode);
+        }
         self.dirty |= changed;
         Ok(changed)
+    }
+
+    /// Picks row `id` of `mode` for its Episode Inspector, or with `None` none, so it shows the
+    /// first row: true when that changed the pick. Not refused while a batch runs: it changes
+    /// nothing a batch reads.
+    fn inspect(&mut self, mode: PipelineMode, id: Option<String>) -> bool {
+        let job = self
+            .snapshot
+            .as_ref()
+            .filter(|snapshot| snapshot.mode == mode_name(mode));
+        let state = self.state(mode);
+        if let Some(id) = &id {
+            let in_job = job.is_some_and(|job| job.items.contains_key(id));
+            if !state.queue.contains(id) && !in_job {
+                return false;
+            }
+        }
+        if state.inspected == id {
+            return false;
+        }
+        self.mode(mode).inspected = id;
+        self.dirty = true;
+        true
     }
 
     /// Begins a scan: an empty path resets the queue at once, any other resolves off the actor. A
@@ -1103,16 +1235,22 @@ impl<P: Publisher, I: Inspector, L: Launcher, S: Sampler> Core<P, I, L, S> {
         {
             self.touch(mode);
             self.snapshot = None;
+            self.job_started_at = None;
         }
     }
 
-    fn mode_view(&self, mode: PipelineMode) -> ModeView {
-        let state = self.state(mode);
+    /// The view of `mode` at `now`.
+    fn mode_view(&mut self, mode: PipelineMode, now: StdInstant) -> ModeView {
         let job = self
             .snapshot
             .as_ref()
-            .filter(|snapshot| snapshot.mode == mode_name(mode));
-        state.view(job)
+            .filter(|snapshot| snapshot.mode == mode_name(mode))
+            .zip(self.job_started_at.map(Instant::into_std));
+        let state = match mode {
+            PipelineMode::Remux => &mut self.remux,
+            PipelineMode::Extract => &mut self.extract,
+        };
+        state.view(job, now)
     }
 
     fn publish(&mut self) {
@@ -1121,18 +1259,17 @@ impl<P: Publisher, I: Inspector, L: Launcher, S: Sampler> Core<P, I, L, S> {
             mode: snapshot.mode.clone(),
             status: snapshot.status,
             active: self.active,
-            start_time_ms: snapshot.start_time_ms,
             input_dir: snapshot.input_dir.clone(),
             effective_settings: snapshot.effective_settings.clone(),
-            participants: snapshot.ordered_item_ids.clone(),
         });
         // Each mode's view is rebuilt only when it changed, so a job's progress costs the rows of
-        // its own mode, not those of the other.
+        // its own mode, not those of the other. Its elapsed times are those of now.
+        let now = Instant::now().into_std();
         if std::mem::take(&mut self.remux.changed) {
-            self.last_published.remux = self.mode_view(PipelineMode::Remux);
+            self.last_published.remux = self.mode_view(PipelineMode::Remux, now);
         }
         if std::mem::take(&mut self.extract.changed) {
-            self.last_published.extract = self.mode_view(PipelineMode::Extract);
+            self.last_published.extract = self.mode_view(PipelineMode::Extract, now);
         }
         self.last_published.seq += 1;
         self.last_published.job = job;
@@ -1154,9 +1291,51 @@ impl<P: Publisher, I: Inspector, L: Launcher, S: Sampler> Core<P, I, L, S> {
             .extract
             .draft
             .clone_from(&self.extract.draft);
+        // Laid over on every publication, at the cost of one row each: they follow the draft, the
+        // pick and who holds the batch, none of which rebuilds a mode.
+        let hold = Hold {
+            owner: self.coordinator.owner().or_else(|| {
+                let snapshot = self.snapshot.as_ref().filter(|_| self.active)?;
+                mode_of(&snapshot.mode)
+            }),
+            stopping: self.coordinator.phase() == Phase::Stopping,
+            busy: self.busy(),
+        };
+        let batch = self.run_settings.as_ref().or_else(|| {
+            let snapshot = self.snapshot.as_ref().filter(|_| self.active)?;
+            Some(&snapshot.effective_settings)
+        });
+        self.last_published.lay_controls(&hold, batch);
+        self.last_published.remux.inspector = self.inspector(PipelineMode::Remux);
+        self.last_published.extract.inspector = self.inspector(PipelineMode::Extract);
         self.dirty = false;
         self.last_published_at = Some(Instant::now());
         self.publisher.state(&self.last_published);
+    }
+
+    /// The Episode Inspector of `mode` over its view as it is about to be published.
+    fn inspector(&self, mode: PipelineMode) -> Option<InspectorView> {
+        let state = self.state(mode);
+        let view = match mode {
+            PipelineMode::Remux => &self.last_published.remux,
+            PipelineMode::Extract => &self.last_published.extract,
+        };
+        let (at, row) = inspected_row(&view.rows, state.inspected.as_deref())?;
+        let job_error = self
+            .snapshot
+            .as_ref()
+            .filter(|snapshot| snapshot.mode == mode_name(mode))
+            .and_then(|snapshot| snapshot.items.get(&row.id))
+            .and_then(|item| item.error.as_deref());
+        let entry = state.queue.entry(&row.id);
+        Some(inspector_view(
+            mode == PipelineMode::Remux,
+            view,
+            at,
+            row,
+            entry,
+            job_error,
+        ))
     }
 
     fn set_outcome(&mut self, mode: PipelineMode, outcome: Option<Outcome>) {
@@ -1185,1645 +1364,4 @@ enum QueueChange {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::queue::test_support::manifest_of;
-    use crate::snapshot::test_support::{
-        batch_complete, batch_start, effective_settings, item_complete, item_progress, item_start,
-    };
-    use crate::snapshot::ItemStatus;
-    use mkv_core::request::BatchRequest;
-    use serde_json::Value;
-    use std::collections::HashMap;
-    use std::sync::Mutex;
-    use tokio::sync::Notify;
-
-    /// One thing the actor published, dones as JSON.
-    #[derive(Debug, Clone)]
-    pub(super) enum Published {
-        State(Box<ViewState>),
-        Logs(LogBatch),
-        Done(Value),
-    }
-
-    #[derive(Clone, Default)]
-    pub(super) struct RecordingPublisher {
-        published: Arc<Mutex<Vec<Published>>>,
-        /// Notified on every state publication.
-        pub(super) stated: Arc<Notify>,
-    }
-
-    impl RecordingPublisher {
-        pub(super) fn all(&self) -> Vec<Published> {
-            self.published.lock().unwrap().clone()
-        }
-
-        pub(super) fn states(&self) -> Vec<ViewState> {
-            self.all()
-                .into_iter()
-                .filter_map(|published| match published {
-                    Published::State(state) => Some(*state),
-                    _ => None,
-                })
-                .collect()
-        }
-
-        /// The log batches published, in order.
-        pub(super) fn logs(&self) -> Vec<LogBatch> {
-            self.all()
-                .into_iter()
-                .filter_map(|published| match published {
-                    Published::Logs(batch) => Some(batch),
-                    _ => None,
-                })
-                .collect()
-        }
-    }
-
-    impl Publisher for RecordingPublisher {
-        fn state(&self, state: &ViewState) {
-            self.published
-                .lock()
-                .unwrap()
-                .push(Published::State(Box::new(state.clone())));
-            self.stated.notify_one();
-        }
-
-        fn logs(&self, batch: &LogBatch) {
-            let batch = Published::Logs(batch.clone());
-            self.published.lock().unwrap().push(batch);
-        }
-
-        fn done(&self, done: &JobDone) {
-            let done = serde_json::to_value(done).unwrap();
-            self.published.lock().unwrap().push(Published::Done(done));
-        }
-    }
-
-    /// A core whose defaults are known from the start, so they publish nothing of their own.
-    fn ready<P: Publisher, I: Inspector>(publisher: P, inspector: I) -> CoreHandle {
-        ready_with(publisher, inspector, FakeLauncher::default())
-    }
-
-    pub(super) fn ready_with<P: Publisher, I: Inspector, L: Launcher>(
-        publisher: P,
-        inspector: I,
-        launcher: L,
-    ) -> CoreHandle {
-        ready_with_ports(publisher, inspector, launcher, NoSampler)
-    }
-
-    pub(super) fn ready_with_ports<P: Publisher, I: Inspector, L: Launcher, S: Sampler>(
-        publisher: P,
-        inspector: I,
-        launcher: L,
-        sampler: S,
-    ) -> CoreHandle {
-        let ports = Ports {
-            inspector,
-            launcher,
-            sampler,
-        };
-        Core::start(
-            Handle::current(),
-            publisher,
-            ports,
-            Some(effective_settings()),
-        )
-    }
-
-    /// A `Sampler` whose first sample never comes back, so telemetry publishes nothing and only
-    /// `actor::timers` tests see it.
-    pub(super) struct NoSampler;
-
-    impl Sampler for NoSampler {
-        async fn sample(&self) -> Result<TelemetryData, String> {
-            std::future::pending().await
-        }
-    }
-
-    fn spawn_core() -> (CoreHandle, RecordingPublisher) {
-        let publisher = RecordingPublisher::default();
-        let core = ready(publisher.clone(), FakeInspector::default());
-        (core, publisher)
-    }
-
-    pub(super) fn started(job_id: u64) -> JobStarted {
-        JobStarted {
-            job_id,
-            mode: "remux",
-            input_dir: "/anime".into(),
-            effective_settings: effective_settings(),
-            start_time_ms: 1_700_000_000_000,
-        }
-    }
-
-    pub(super) fn done(job_id: u64, code: i32) -> JobDone {
-        JobDone {
-            mode: "remux",
-            job_id,
-            code,
-        }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn test_a_burst_of_events_publishes_at_most_once_per_interval_and_ends_on_the_final_state(
-    ) {
-        let (core, publisher) = spawn_core();
-        let sink = core.job_sink();
-        let begun = Instant::now();
-
-        sink.started(&started(1));
-        sink.event(&batch_start(&["ep1"]));
-        sink.event(&item_start("ep1"));
-        for step in 0..10_000 {
-            sink.event(&item_progress("ep1", f64::from(step) / 100.0));
-            // Spread the burst over about a second of paused time.
-            if step % 100 == 0 {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        }
-        sink.event(&item_complete("ep1", 9.0));
-        sink.event(&batch_complete(true, false));
-        tokio::time::sleep(PUBLISH_INTERVAL * 2).await;
-
-        let elapsed = begun.elapsed();
-        let states = publisher.states();
-        let bound = elapsed.as_millis().div_ceil(PUBLISH_INTERVAL.as_millis()) + 1;
-        assert!(
-            states.len() as u128 <= bound,
-            "{} publications in {elapsed:?}",
-            states.len()
-        );
-        assert!(states.len() > 2, "the burst published only at its edges");
-        // The last publication holds the final snapshot, and nothing is left unpublished.
-        let last = states.last().unwrap().clone();
-        let job = last.job.clone().unwrap();
-        assert_eq!(job.status, BatchStatus::Completed);
-        assert_eq!(job.participants, ["ep1"]);
-        assert_eq!(core.state().await.unwrap(), last);
-        let row = &last.remux.rows[0];
-        assert_eq!(row.progress, Some(99.99));
-        assert_eq!(row.duration_sec, Some(9.0));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn test_a_steady_stream_that_never_drains_the_inbox_still_publishes_every_interval() {
-        let (core, publisher) = spawn_core();
-        let sink = core.job_sink();
-        let begun = Instant::now();
-
-        sink.started(&started(1));
-        sink.event(&batch_start(&["ep1"]));
-        sink.event(&item_start("ep1"));
-        for step in 0..300 {
-            // More than the actor's cooperative budget per turn, so the queue only grows and
-            // the biased inbox arm is always ready.
-            for _ in 0..200 {
-                sink.event(&item_progress("ep1", f64::from(step) / 10.0));
-            }
-            tokio::time::advance(Duration::from_millis(2)).await;
-        }
-
-        let elapsed = begun.elapsed();
-        let states = publisher.states().len() as u128;
-        let interval = PUBLISH_INTERVAL.as_millis();
-        let bound = elapsed.as_millis().div_ceil(interval) + 1;
-        assert!(states <= bound, "{states} publications in {elapsed:?}");
-        assert!(
-            states + 2 >= elapsed.as_millis() / interval,
-            "a steady stream starved publication: {states} in {elapsed:?}"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn test_a_sink_dropped_without_done_ends_the_active_job() {
-        let (core, publisher) = spawn_core();
-        let sink = core.job_sink();
-        sink.started(&started(1));
-        sink.event(&batch_start(&["ep1"]));
-        // A supervisor that panicked inside a sink call drops it without `done`.
-        drop(sink);
-        tokio::time::sleep(PUBLISH_INTERVAL * 2).await;
-
-        let state = core.state().await.unwrap();
-        assert!(!state.job.unwrap().active);
-        assert!(!publisher
-            .all()
-            .iter()
-            .any(|published| matches!(published, Published::Done(_))));
-        // No longer active, so a reset of its mode drops the snapshot.
-        let reset = Intent::ScanDirectory {
-            mode: PipelineMode::Remux,
-            path: String::new(),
-            force: false,
-            no_cache: false,
-        };
-        assert_eq!(core.dispatch(reset).await, Ok(false));
-        assert_eq!(core.state().await.unwrap().job, None);
-    }
-
-    /// What `busy` must read in every published state: the run phase is not idle, or a job is
-    /// active. `actor::start` tests check it over the starting, running and stopping phases.
-    pub(super) fn assert_busy_follows_the_phase_and_the_job(states: &[ViewState]) {
-        for state in states {
-            let active = state.job.as_ref().is_some_and(|job| job.active);
-            assert_eq!(
-                state.busy,
-                state.run.phase != Phase::Idle || active,
-                "{state:?}"
-            );
-        }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn test_busy_is_published_while_a_job_is_active_even_with_the_phase_idle() {
-        let (core, publisher) = spawn_core();
-        assert!(!core.state().await.unwrap().busy);
-        // A job the actor did not start, as a sink reports it: the phase stays idle.
-        let sink = core.job_sink();
-        sink.started(&started(1));
-        let state = core.state().await.unwrap();
-        assert_eq!(state.run.phase, Phase::Idle);
-        assert!(state.busy);
-        sink.done(&done(1, 0));
-        assert!(!core.state().await.unwrap().busy);
-        assert_busy_follows_the_phase_and_the_job(&publisher.states());
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn test_a_sink_dropped_after_done_publishes_nothing_more() {
-        let (core, publisher) = spawn_core();
-        let sink = core.job_sink();
-        sink.started(&started(1));
-        sink.done(&done(1, 0));
-        core.state().await.unwrap();
-        let before = publisher.all().len();
-
-        drop(sink);
-        tokio::time::sleep(PUBLISH_INTERVAL * 2).await;
-        core.state().await.unwrap();
-        assert_eq!(publisher.all().len(), before);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn test_a_single_change_after_idle_publishes_at_once() {
-        let (core, publisher) = spawn_core();
-        let sink = core.job_sink();
-        let begun = Instant::now();
-
-        sink.started(&started(1));
-        // The state is read after the start in the same inbox, with the clock not moved: the
-        // start was published on the leading edge, not after an interval.
-        let state = core.state().await.unwrap();
-        assert_eq!(begun.elapsed(), Duration::ZERO);
-        assert_eq!(state.seq, 1);
-        assert_eq!(state.job.as_ref().unwrap().job_id, 1);
-        assert!(state.job.unwrap().active);
-
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        let idle_until = Instant::now();
-        sink.event(&batch_start(&["ep1", "ep2"]));
-        let state = core.state().await.unwrap();
-        assert_eq!(idle_until.elapsed(), Duration::ZERO);
-        assert_eq!(state.seq, 2);
-        assert_eq!(state.job.unwrap().participants, ["ep1", "ep2"]);
-        assert_eq!(publisher.states().len(), 2);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn test_events_logs_and_done_keep_the_supervisors_order_and_the_last_state_precedes_done()
-    {
-        let (core, publisher) = spawn_core();
-        let sink = core.job_sink();
-
-        sink.started(&started(1));
-        sink.event(&batch_start(&["ep1"]));
-        sink.logs(&[LogLine::note("one")]);
-        sink.event(&item_start("ep1"));
-        sink.logs(&[LogLine::note("two")]);
-        sink.event(&batch_complete(false, true));
-        sink.done(&done(1, -1));
-        core.state().await.unwrap();
-
-        let published = publisher.all();
-        let order: Vec<String> = published
-            .iter()
-            .filter_map(|published| match published {
-                Published::State(_) => None,
-                Published::Logs(batch) => Some(format!(
-                    "log {} {:?} at {}",
-                    batch.lines[0].text, batch.mode, batch.first
-                )),
-                Published::Done(done) => Some(format!("done {}", done["code"])),
-            })
-            .collect();
-        // Each batch goes into the Run Log of the job's mode, after the lines before it.
-        assert_eq!(
-            order,
-            ["log one Remux at 0", "log two Remux at 1", "done -1"]
-        );
-        // The trailing changes were not yet due, so `done` flushed them first.
-        let Published::State(last) = &published[published.len() - 2] else {
-            panic!("done was not preceded by a state publication: {published:?}");
-        };
-        let job = last.job.as_ref().unwrap();
-        assert!(!job.active);
-        assert_eq!(job.status, BatchStatus::Cancelled);
-        assert!(matches!(published.last(), Some(Published::Done(_))));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn test_a_jobs_lines_go_into_the_run_log_of_its_own_mode_and_get_log_reads_them_back() {
-        let (core, publisher) = spawn_core();
-        let sink = core.job_sink();
-        sink.started(&JobStarted {
-            mode: "extract",
-            ..started(1)
-        });
-        sink.logs(&[LogLine::step("Extracting /anime/ep1.mkv")]);
-        // A bridge error line takes the same way.
-        sink.logs(&[LogLine::error("ERROR: Pipeline failed: x")]);
-
-        let log = core.log(EXTRACT).await.unwrap();
-        assert_eq!(
-            serde_json::to_value(&log).unwrap(),
-            serde_json::json!({
-                "mode": "extract",
-                "generation": 0,
-                "first": 0,
-                "errors": 1,
-                "lines": [
-                    {
-                        "kind": "step",
-                        "text": "Extracting /anime/ep1.mkv",
-                        "display": "Extracting anime › ep1.mkv"
-                    },
-                    { "kind": "error", "text": "ERROR: Pipeline failed: x" },
-                ]
-            })
-        );
-        assert!(core.log(REMUX).await.unwrap().lines.is_empty());
-        let batches = publisher.logs();
-        assert_eq!(batches.len(), 2);
-        assert_eq!(
-            serde_json::to_value(&batches[1]).unwrap(),
-            serde_json::json!({
-                "mode": "extract",
-                "generation": 0,
-                "first": 1,
-                "keep_from": 0,
-                "errors": 1,
-                "lines": [{ "kind": "error", "text": "ERROR: Pipeline failed: x" }]
-            })
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn test_clear_cache_writes_its_line_or_its_error_into_the_modes_run_log() {
-        let inspector = FakeInspector::default();
-        let publisher = RecordingPublisher::default();
-        let core = ready(publisher.clone(), inspector.clone());
-        let clear = |mode| Intent::ClearCache { mode };
-
-        assert_eq!(core.dispatch(clear(REMUX)).await, Ok(true));
-        *inspector.clear_error.lock().unwrap() = Some("Permission denied".into());
-        assert_eq!(
-            core.dispatch(clear(REMUX)).await,
-            Err("Permission denied".into())
-        );
-        let log = core.log(REMUX).await.unwrap();
-        let lines: Vec<_> = log
-            .lines
-            .iter()
-            .map(|line| (line.kind, line.text.as_str()))
-            .collect();
-        assert_eq!(
-            lines,
-            [
-                (LogKind::Cache, "Persistent inspection cache cleared."),
-                (LogKind::Error, "ERROR: Permission denied"),
-            ]
-        );
-        assert!(core.log(EXTRACT).await.unwrap().lines.is_empty());
-        // Nothing in the View State changed.
-        assert!(publisher.states().is_empty());
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn test_a_tick_armed_before_a_done_flush_waits_a_full_interval_after_it() {
-        let (core, _publisher) = spawn_core();
-        let ms = Duration::from_millis;
-        let first = core.job_sink();
-        first.started(&started(1)); // t=0: leading edge, seq 1
-        tokio::time::sleep(ms(10)).await;
-        first.event(&batch_start(&["ep1"])); // t=10: the tick is armed for t=66
-        tokio::time::sleep(ms(10)).await;
-        first.done(&done(1, 0)); // t=20: the flush, seq 2
-        tokio::time::sleep(ms(10)).await;
-        let second = core.job_sink(); // lives to the end, so job 2 stays active
-        second.started(&started(2)); // t=30: due at t=86, not at the stale t=66
-
-        tokio::time::sleep(ms(40)).await; // t=70
-        assert_eq!(core.state().await.unwrap().seq, 2);
-        tokio::time::sleep(ms(20)).await; // t=90
-        let state = core.state().await.unwrap();
-        assert_eq!(state.seq, 3);
-        assert_eq!(state.job.unwrap().job_id, 2);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn test_get_state_mid_job_is_the_last_published_state() {
-        let (core, publisher) = spawn_core();
-        let sink = core.job_sink();
-
-        sink.started(&started(1));
-        sink.event(&batch_start(&["ep1"]));
-        // Not due yet: the batch waits for the trailing edge.
-        let state = core.state().await.unwrap();
-        assert_eq!(&state, publisher.states().last().unwrap());
-        assert!(state.job.as_ref().unwrap().participants.is_empty());
-
-        // Past the trailing edge, not on it, so the tick cannot race the read.
-        tokio::time::sleep(PUBLISH_INTERVAL * 2).await;
-        let state = core.state().await.unwrap();
-        assert_eq!(&state, publisher.states().last().unwrap());
-        assert_eq!(state.job.unwrap().participants, ["ep1"]);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn test_a_later_job_replaces_the_snapshot_and_stale_events_are_dropped() {
-        let (core, _publisher) = spawn_core();
-        let first = core.job_sink();
-        first.started(&started(1));
-        first.event(&batch_start(&["ep1"]));
-        first.done(&done(1, 0));
-
-        let second = core.job_sink();
-        second.started(&JobStarted {
-            job_id: 2,
-            mode: "extract",
-            input_dir: "/other".into(),
-            effective_settings: EffectiveSettings::defaults(),
-            start_time_ms: 1_700_000_000_001,
-        });
-        // A late event of the first job does not touch the second's snapshot.
-        first.event(&batch_start(&["ep9"]));
-        // Past the trailing edge, not on it, so the tick cannot race the read.
-        tokio::time::sleep(PUBLISH_INTERVAL * 2).await;
-
-        let job = core.state().await.unwrap().job.unwrap();
-        assert_eq!(job.job_id, 2);
-        assert_eq!(job.mode, "extract");
-        assert_eq!(job.input_dir, "/other");
-        // The supervisor's start time, not the actor's.
-        assert_eq!(job.start_time_ms, 1_700_000_000_001);
-        assert_eq!(job.effective_settings, EffectiveSettings::defaults());
-        assert!(job.participants.is_empty());
-    }
-
-    #[test]
-    fn test_view_state_wire_shape() {
-        let mut remux = ModeView {
-            directory: Some("/anime".into()),
-            scan: ScanView::Scanning {
-                directory: "/anime".into(),
-            },
-            manifest_rev: 2,
-            rows: Arc::new(vec![Row {
-                id: "ep1".into(),
-                name: "ep1.mkv".into(),
-                release: ".".into(),
-                metadata: None,
-                inspection_error: None,
-                in_manifest: true,
-                selected: true,
-                status: ItemStatus::Processing,
-                progress: Some(40.0),
-                start_time_ms: Some(1_700_000_000_500),
-                duration_sec: None,
-                reason: None,
-                error: None,
-                participant: true,
-            }]),
-            vanished_selected_ids: vec!["ep9".into()],
-            ..empty(REMUX)
-        };
-        let row = serde_json::to_value(&remux.rows[0]).unwrap();
-        remux
-            .subtitle_candidates
-            .insert(".".into(), vec!["ep1.ass".into()]);
-        remux.assignments.insert(
-            "ep1".into(),
-            TrackAssignment {
-                target_video: "ep1".into(),
-                asset_path: "/subs/ep1.ass".into(),
-                track_type: Default::default(),
-                language: Some("ind".into()),
-                title: None,
-                offset_ms: Some(-250),
-            },
-        );
-        remux.outcome = Some(Outcome::Failed);
-        let mut telemetry = TelemetryView::default();
-        telemetry.push(&TelemetryData {
-            cpu_pct: 37.0,
-            ram_used_mb: 5243,
-            ram_total_mb: 16_384,
-            ram_pct: 32.0,
-            io_mb_s: 0.0,
-        });
-        let state = ViewState {
-            seq: 3,
-            run: RunView {
-                phase: Phase::Running,
-                mode: Some(REMUX),
-                settings: Some(effective_settings()),
-            },
-            busy: true,
-            job: Some(JobView {
-                job_id: 7,
-                mode: "remux".into(),
-                status: BatchStatus::Running,
-                active: true,
-                start_time_ms: 1_700_000_000_000,
-                input_dir: "/anime".into(),
-                effective_settings: effective_settings(),
-                participants: vec!["ep2".into(), "ep1".into()],
-            }),
-            defaults: Some(EffectiveSettings::defaults()),
-            presets: get_preset_profiles()[..1].to_vec(),
-            remux,
-            extract: ModeView {
-                scan: ScanView::Failed,
-                ..empty(EXTRACT)
-            },
-            telemetry: Some(telemetry),
-        };
-        // Rows have their own pin: `queue::tests::test_row_wire_shape`.
-        assert_eq!(
-            serde_json::to_value(&state).unwrap(),
-            serde_json::json!({
-                "seq": 3,
-                "job": {
-                    "job_id": 7,
-                    "mode": "remux",
-                    "status": "running",
-                    "active": true,
-                    "start_time_ms": 1_700_000_000_000_u64,
-                    "input_dir": "/anime",
-                    "effective_settings": {
-                        "workers": 3,
-                        "io_jobs": 5,
-                        "ffmpeg_threads": 2,
-                        "bitrate": "256k",
-                        "complexity": 8
-                    },
-                    "participants": ["ep2", "ep1"]
-                },
-                "run": {
-                    "phase": "running",
-                    "mode": "remux",
-                    "settings": {
-                        "workers": 3,
-                        "io_jobs": 5,
-                        "ffmpeg_threads": 2,
-                        "bitrate": "256k",
-                        "complexity": 8
-                    }
-                },
-                "busy": true,
-                "defaults": serde_json::to_value(EffectiveSettings::defaults()).unwrap(),
-                "presets": [
-                    { "id": "balanced", "name": "Balanced", "bitrate": "192k", "complexity": 5 }
-                ],
-                "remux": {
-                    "directory": "/anime",
-                    "scan": { "state": "scanning", "directory": "/anime" },
-                    "manifest_rev": 2,
-                    "subtitle_candidates": { ".": ["ep1.ass"] },
-                    // The shared rows serialize as the list itself.
-                    "rows": [row],
-                    "vanished_selected_ids": ["ep9"],
-                    "assignments": {
-                        "ep1": {
-                            "target_video": "ep1",
-                            "asset_path": "/subs/ep1.ass",
-                            "track_type": "subtitle",
-                            "language": "ind",
-                            "offset_ms": -250
-                        }
-                    },
-                    // The draft has its own pin: `draft::tests::test_draft_wire_shape`.
-                    "draft": serde_json::to_value(SettingsDraft::new(REMUX)).unwrap(),
-                    "outcome": "failed"
-                },
-                "extract": {
-                    "directory": null,
-                    "scan": { "state": "failed" },
-                    "manifest_rev": 0,
-                    "subtitle_candidates": {},
-                    "rows": [],
-                    "vanished_selected_ids": [],
-                    "assignments": {},
-                    "draft": {
-                        "input_dir": "", "out_dir": "", "fonts_dir": "", "workers": "",
-                        "io_jobs": "", "dry_run": false, "no_cache": false, "invalid": null
-                    },
-                    "outcome": null
-                },
-                "telemetry": {
-                    "cpu": "37%",
-                    "ram": "5.12 GB",
-                    "disk": "Idle",
-                    "samples": { "cpu": [37.0], "ram": [32.0], "disk": [0.0] }
-                }
-            })
-        );
-        let idle = serde_json::to_value(ViewState::new(None)).unwrap();
-        assert_eq!(idle["job"], Value::Null);
-        assert_eq!(idle["defaults"], Value::Null);
-        assert_eq!(idle["telemetry"], Value::Null);
-        assert_eq!(idle["busy"], false);
-        assert_eq!(
-            idle["run"],
-            serde_json::json!({ "phase": "idle", "mode": null, "settings": null })
-        );
-        for (outcome, wire) in [
-            (Outcome::Done, "done"),
-            (Outcome::Cancelled, "cancelled"),
-            (Outcome::Failed, "failed"),
-        ] {
-            assert_eq!(serde_json::to_value(outcome).unwrap(), wire);
-        }
-        for (phase, wire) in [(Phase::Starting, "starting"), (Phase::Stopping, "stopping")] {
-            assert_eq!(serde_json::to_value(phase).unwrap(), wire);
-        }
-        assert_eq!(
-            idle["remux"]["scan"],
-            serde_json::json!({ "state": "idle" })
-        );
-    }
-
-    #[test]
-    fn test_intent_wire_shape() {
-        let intent = |json: Value| serde_json::from_value::<Intent>(json).unwrap();
-        // `no_cache` may be left out.
-        assert_eq!(
-            intent(serde_json::json!({
-                "type": "scan_directory", "mode": "remux", "path": "/anime", "force": true
-            })),
-            Intent::ScanDirectory {
-                mode: PipelineMode::Remux,
-                path: "/anime".into(),
-                force: true,
-                no_cache: false,
-            }
-        );
-        assert_eq!(
-            intent(serde_json::json!({
-                "type": "scan_directory", "mode": "extract", "path": "/anime", "force": false,
-                "no_cache": true
-            })),
-            Intent::ScanDirectory {
-                mode: PipelineMode::Extract,
-                path: "/anime".into(),
-                force: false,
-                no_cache: true,
-            }
-        );
-        assert_eq!(
-            intent(serde_json::json!({
-                "type": "set_selected", "mode": "remux", "id": "ep1", "selected": false
-            })),
-            Intent::SetSelected {
-                mode: PipelineMode::Remux,
-                id: "ep1".into(),
-                selected: false,
-            }
-        );
-        assert_eq!(
-            intent(
-                serde_json::json!({ "type": "set_all_selected", "mode": "remux", "selected": true })
-            ),
-            Intent::SetAllSelected {
-                mode: PipelineMode::Remux,
-                selected: true,
-            }
-        );
-        assert_eq!(
-            intent(serde_json::json!({
-                "type": "reorder", "mode": "extract", "id": "ep1", "direction": "up"
-            })),
-            Intent::Reorder {
-                mode: PipelineMode::Extract,
-                id: "ep1".into(),
-                direction: Direction::Up,
-            }
-        );
-        assert_eq!(
-            intent(serde_json::json!({
-                "type": "assign_track", "mode": "remux",
-                "assignment": {
-                    "target_video": "ep1", "asset_path": "/subs/ep1.ass", "track_type": "subtitle",
-                    "language": null, "title": "Signs", "offset_ms": null
-                }
-            })),
-            Intent::AssignTrack {
-                mode: PipelineMode::Remux,
-                assignment: subtitle("ep1", "/subs/ep1.ass", Some("Signs")),
-            }
-        );
-        assert_eq!(
-            intent(serde_json::json!({ "type": "clear_track", "mode": "remux", "id": "ep1" })),
-            Intent::ClearTrack {
-                mode: PipelineMode::Remux,
-                id: "ep1".into(),
-            }
-        );
-        assert_eq!(
-            intent(serde_json::json!({
-                "type": "edit_draft", "mode": "remux",
-                "changes": { "input_dir": "/anime", "dry_run": true }
-            })),
-            Intent::EditDraft {
-                mode: PipelineMode::Remux,
-                changes: DraftChanges {
-                    input_dir: Some("/anime".into()),
-                    dry_run: Some(true),
-                    ..DraftChanges::default()
-                },
-            }
-        );
-        assert_eq!(
-            intent(serde_json::json!({ "type": "set_preset", "mode": "remux", "preset": "fast" })),
-            Intent::SetPreset {
-                mode: PipelineMode::Remux,
-                preset: "fast".into(),
-            }
-        );
-        assert_eq!(
-            intent(serde_json::json!({ "type": "run", "mode": "extract" })),
-            Intent::Run { mode: EXTRACT }
-        );
-        assert_eq!(
-            intent(serde_json::json!({ "type": "stop", "mode": "remux" })),
-            Intent::Stop { mode: REMUX }
-        );
-        assert_eq!(
-            intent(serde_json::json!({ "type": "clear_cache", "mode": "extract" })),
-            Intent::ClearCache { mode: EXTRACT }
-        );
-        assert_eq!(
-            intent(serde_json::json!({ "type": "view_visible", "visible": false })),
-            Intent::ViewVisible { visible: false }
-        );
-        assert!(serde_json::from_value::<Intent>(serde_json::json!({
-            "type": "reorder", "mode": "remux", "id": "ep1", "direction": "left"
-        }))
-        .is_err());
-    }
-
-    /// A Track Assignment of `path` to `id`, with no language.
-    pub(super) fn subtitle(id: &str, path: &str, title: Option<&str>) -> TrackAssignment {
-        TrackAssignment {
-            target_video: id.into(),
-            asset_path: path.into(),
-            track_type: Default::default(),
-            language: None,
-            title: title.map(str::to_string),
-            offset_ms: None,
-        }
-    }
-
-    /// An `Inspector` that answers from a script, after a delay on the paused clock. A path
-    /// resolves to itself less any trailing `/` or `/.`, after `slow` when it is `/slow`; a
-    /// directory without a scripted manifest fails to inspect.
-    #[derive(Clone, Default)]
-    pub(super) struct FakeInspector {
-        pub(super) manifests: Arc<Mutex<HashMap<String, InspectionManifest>>>,
-        inspected: Arc<Mutex<Vec<(String, bool)>>>,
-        /// What `clear_cache` answers: `Ok` when `None`.
-        pub(super) clear_error: Arc<Mutex<Option<String>>>,
-    }
-
-    pub(super) const SLOW: Duration = Duration::from_millis(500);
-    pub(super) const INSPECTION: Duration = Duration::from_millis(200);
-
-    impl FakeInspector {
-        pub(super) fn with(self, directory: &str, manifest: InspectionManifest) -> Self {
-            self.manifests
-                .lock()
-                .unwrap()
-                .insert(directory.into(), manifest);
-            self
-        }
-
-        pub(super) fn inspected(&self) -> Vec<(String, bool)> {
-            self.inspected.lock().unwrap().clone()
-        }
-    }
-
-    impl Inspector for FakeInspector {
-        async fn identity(&self, path: String) -> Result<String, String> {
-            if path == "/slow" {
-                tokio::time::sleep(SLOW).await;
-            }
-            if path.starts_with("/gone") {
-                return Err("Invalid directory path: missing".into());
-            }
-            let trimmed = path.trim_end_matches("/.").trim_end_matches('/');
-            Ok(trimmed.to_string())
-        }
-
-        async fn inspect(
-            &self,
-            identity: String,
-            no_cache: bool,
-        ) -> Result<InspectionManifest, String> {
-            self.inspected
-                .lock()
-                .unwrap()
-                .push((identity.clone(), no_cache));
-            tokio::time::sleep(INSPECTION).await;
-            assert!(identity != "/panic", "inspector panicked");
-            let manifest = self.manifests.lock().unwrap().get(&identity).cloned();
-            manifest.ok_or_else(|| format!("cannot inspect {identity}"))
-        }
-
-        async fn clear_cache(&self) -> Result<(), String> {
-            tokio::time::sleep(INSPECTION).await;
-            self.clear_error.lock().unwrap().clone().map_or(Ok(()), Err)
-        }
-    }
-
-    pub(super) fn scan(mode: PipelineMode, path: &str, force: bool) -> Intent {
-        Intent::ScanDirectory {
-            mode,
-            path: path.into(),
-            force,
-            no_cache: false,
-        }
-    }
-
-    pub(super) const REMUX: PipelineMode = PipelineMode::Remux;
-    pub(super) const EXTRACT: PipelineMode = PipelineMode::Extract;
-
-    /// A core over `inspector` whose `/anime` holds `ep1` and `ep2`, and `/fast` and `/slow` one
-    /// episode each.
-    fn scanning_core() -> (CoreHandle, RecordingPublisher, FakeInspector) {
-        let inspector = FakeInspector::default()
-            .with("/anime", manifest_of(&["ep1", "ep2"]))
-            .with("/fast", manifest_of(&["fast"]))
-            .with("/slow", manifest_of(&["slow"]));
-        let publisher = RecordingPublisher::default();
-        let core = ready(publisher.clone(), inspector.clone());
-        (core, publisher, inspector)
-    }
-
-    /// The view of a mode with nothing in its queue and its draft as it starts.
-    fn empty(mode: PipelineMode) -> ModeView {
-        ModeState::new(mode).view(None)
-    }
-
-    pub(super) fn ids(view: &ModeView) -> Vec<&str> {
-        view.rows.iter().map(|row| row.id.as_str()).collect()
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn test_a_scan_shows_scanning_then_accepts_the_inspection_of_the_identity() {
-        let (core, publisher, inspector) = scanning_core();
-
-        let pending = tokio::spawn({
-            let core = core.clone();
-            async move { core.dispatch(scan(REMUX, " /anime/. ", false)).await }
-        });
-        tokio::time::sleep(INSPECTION / 2).await;
-        let state = core.state().await.unwrap();
-        assert_eq!(
-            state.remux.scan,
-            ScanView::Scanning {
-                directory: "/anime".into()
-            }
-        );
-        // The queue is the scan's until it settles.
-        assert!(core
-            .dispatch(Intent::SetAllSelected {
-                mode: REMUX,
-                selected: false,
-            })
-            .await
-            .unwrap_err()
-            .contains("scanned"));
-
-        assert_eq!(pending.await.unwrap(), Ok(true));
-        // The answer follows the publication of the accepted queue.
-        let state = core.state().await.unwrap();
-        assert_eq!(&state, publisher.states().last().unwrap());
-        assert_eq!(state.remux.scan, ScanView::Idle);
-        assert_eq!(state.remux.directory.as_deref(), Some("/anime"));
-        assert_eq!(ids(&state.remux), ["ep1", "ep2"]);
-        assert_eq!(state.remux.manifest_rev, 1);
-        assert_eq!(state.extract, empty(EXTRACT));
-        assert_eq!(inspector.inspected(), [("/anime".to_string(), false)]);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn test_a_manifest_is_accepted_under_its_canonical_dir_else_the_identity() {
-        let mut manifest = manifest_of(&["ep1"]);
-        manifest
-            .extra
-            .insert("canonical_dir".into(), "/real/anime".into());
-        let inspector = FakeInspector::default()
-            .with("/anime", manifest)
-            .with("/plain", manifest_of(&["ep1"]));
-        let core = ready(RecordingPublisher::default(), inspector.clone());
-
-        assert_eq!(core.dispatch(scan(REMUX, "/anime", false)).await, Ok(true));
-        let state = core.state().await.unwrap();
-        assert_eq!(state.remux.directory.as_deref(), Some("/real/anime"));
-        assert_eq!(
-            core.dispatch(scan(EXTRACT, "/plain/", false)).await,
-            Ok(true)
-        );
-        let state = core.state().await.unwrap();
-        assert_eq!(state.extract.directory.as_deref(), Some("/plain"));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn test_a_rescan_reuses_the_held_inspection_unless_forced() {
-        let (core, _publisher, inspector) = scanning_core();
-        assert_eq!(core.dispatch(scan(REMUX, "/anime", false)).await, Ok(true));
-        core.dispatch(Intent::SetSelected {
-            mode: REMUX,
-            id: "ep2".into(),
-            selected: false,
-        })
-        .await
-        .unwrap();
-
-        // Another spelling of the same identity reuses it.
-        assert_eq!(core.dispatch(scan(REMUX, "/anime/", false)).await, Ok(true));
-        assert_eq!(inspector.inspected().len(), 1);
-        let state = core.state().await.unwrap();
-        assert_eq!(state.remux.manifest_rev, 2);
-        assert!(!state.remux.rows[1].selected);
-
-        // A forced scan inspects again, keeping the selection of the same directory.
-        assert_eq!(core.dispatch(scan(REMUX, "/anime", true)).await, Ok(true));
-        assert_eq!(inspector.inspected().len(), 2);
-        let state = core.state().await.unwrap();
-        assert!(!state.remux.rows[1].selected);
-        // The other mode holds no inspection to reuse.
-        assert_eq!(
-            core.dispatch(scan(EXTRACT, "/anime", false)).await,
-            Ok(true)
-        );
-        assert_eq!(inspector.inspected().len(), 3);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn test_scans_of_one_key_share_one_inspection_across_views_but_a_forced_one_does_not() {
-        let (core, _publisher, inspector) = scanning_core();
-        let (remux, extract, other_spelling) = tokio::join!(
-            core.dispatch(scan(REMUX, "/anime", false)),
-            core.dispatch(scan(EXTRACT, "/anime", false)),
-            core.dispatch(scan(EXTRACT, "/anime/.", false)),
-        );
-        assert_eq!(
-            (remux, extract, other_spelling),
-            (Ok(true), Ok(false), Ok(true))
-        );
-        assert_eq!(inspector.inspected(), [("/anime".to_string(), false)]);
-        let state = core.state().await.unwrap();
-        assert_eq!(ids(&state.remux), ["ep1", "ep2"]);
-        assert_eq!(ids(&state.extract), ["ep1", "ep2"]);
-
-        let (browse, forced) = tokio::join!(
-            core.dispatch(scan(REMUX, "/fast", false)),
-            core.dispatch(scan(EXTRACT, "/fast", true)),
-        );
-        assert_eq!((browse, forced), (Ok(true), Ok(true)));
-        assert_eq!(inspector.inspected().len(), 3);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn test_a_late_resolving_scan_does_not_overtake_a_newer_request() {
-        let (core, _publisher, inspector) = scanning_core();
-        let (slow, fast) = tokio::join!(core.dispatch(scan(REMUX, "/slow", false)), async {
-            tokio::task::yield_now().await;
-            core.dispatch(scan(REMUX, "/fast", false)).await
-        },);
-        assert_eq!((slow, fast), (Ok(false), Ok(true)));
-        assert_eq!(inspector.inspected(), [("/fast".to_string(), false)]);
-        let state = core.state().await.unwrap();
-        assert_eq!(ids(&state.remux), ["fast"]);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn test_an_inspection_that_settles_while_a_newer_request_resolves_is_overtaken() {
-        let (core, publisher, _inspector) = scanning_core();
-        // `/anime` settles at 200 ms, while the newer `/slow` request resolves until 600 ms.
-        let (anime, slow) = tokio::join!(core.dispatch(scan(REMUX, "/anime", false)), async {
-            tokio::time::sleep(INSPECTION / 2).await;
-            core.dispatch(scan(REMUX, "/slow", false)).await
-        });
-        assert_eq!((anime, slow), (Ok(false), Ok(true)));
-        assert!(publisher
-            .states()
-            .iter()
-            .all(|state| !ids(&state.remux).contains(&"ep1")));
-        assert_eq!(ids(&core.state().await.unwrap().remux), ["slow"]);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn test_a_publication_rebuilds_only_the_view_of_a_mode_that_changed() {
-        /// The address of each mode's row buffer in every publication: a view rebuilt is a new
-        /// buffer, while one republished as last built keeps its own.
-        #[derive(Clone, Default)]
-        struct RowBuffers(Arc<Mutex<Vec<(usize, usize)>>>);
-
-        impl Publisher for RowBuffers {
-            fn state(&self, state: &ViewState) {
-                let buffers = (
-                    state.remux.rows.as_ptr() as usize,
-                    state.extract.rows.as_ptr() as usize,
-                );
-                self.0.lock().unwrap().push(buffers);
-            }
-
-            fn logs(&self, _batch: &LogBatch) {}
-
-            fn done(&self, _done: &JobDone) {}
-        }
-
-        let inspector = FakeInspector::default().with("/anime", manifest_of(&["ep1", "ep2"]));
-        let publisher = RowBuffers::default();
-        let core = ready(publisher.clone(), inspector);
-        core.dispatch(scan(REMUX, "/anime", false)).await.unwrap();
-        core.dispatch(scan(EXTRACT, "/anime", false)).await.unwrap();
-        let before = publisher.0.lock().unwrap().len();
-        // A draft edit rebuilds no rows either.
-        let out_dir = DraftChanges {
-            out_dir: Some("/out".into()),
-            ..DraftChanges::default()
-        };
-        assert_eq!(core.dispatch(edit(EXTRACT, out_dir)).await, Ok(true));
-        tokio::time::sleep(PUBLISH_INTERVAL * 2).await;
-
-        let sink = core.job_sink();
-        sink.started(&started(1));
-        sink.event(&batch_start(&["ep1"]));
-        sink.event(&item_start("ep1"));
-        for step in 0..5 {
-            sink.event(&item_progress("ep1", f64::from(step)));
-            tokio::time::sleep(PUBLISH_INTERVAL * 2).await;
-        }
-
-        // From the extract scan's last publication on: the remux job rebuilt the remux rows
-        // every time it published, and nothing rebuilt the extract ones.
-        let buffers = publisher.0.lock().unwrap()[before - 1..].to_vec();
-        assert!(buffers.len() > 6, "{} publications", buffers.len());
-        assert!(buffers.iter().all(|&(_, extract)| extract == buffers[0].1));
-        // The draft edit's publication, then the job's.
-        assert_eq!(buffers[1].0, buffers[0].0);
-        assert!(buffers[1..].windows(2).all(|pair| pair[0].0 != pair[1].0));
-        let state = core.state().await.unwrap();
-        assert_eq!(state.extract.draft.out_dir, "/out");
-        assert_eq!(state.remux.rows[0].progress, Some(4.0));
-        assert!(state.extract.rows.iter().all(|row| !row.participant));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn test_a_scan_of_one_view_does_not_overtake_the_others() {
-        let (core, _publisher, _inspector) = scanning_core();
-        let (remux, extract) = tokio::join!(
-            core.dispatch(scan(REMUX, "/slow", false)),
-            core.dispatch(scan(EXTRACT, "/fast", false)),
-        );
-        assert_eq!((remux, extract), (Ok(true), Ok(true)));
-        let state = core.state().await.unwrap();
-        assert_eq!(ids(&state.remux), ["slow"]);
-        assert_eq!(ids(&state.extract), ["fast"]);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn test_an_empty_path_resets_the_queue_and_overtakes_a_pending_scan() {
-        let (core, _publisher, inspector) = scanning_core();
-        assert_eq!(core.dispatch(scan(REMUX, "/anime", false)).await, Ok(true));
-
-        // One still resolving, and one still inspecting.
-        let (resolving, inspecting, reset) = tokio::join!(
-            core.dispatch(scan(REMUX, "/slow", false)),
-            core.dispatch(scan(EXTRACT, "/fast", false)),
-            async {
-                tokio::time::sleep(INSPECTION / 2).await;
-                let reset = core.dispatch(scan(REMUX, "   ", false)).await;
-                (reset, core.dispatch(scan(EXTRACT, "", true)).await)
-            },
-        );
-        assert_eq!((resolving, inspecting), (Ok(false), Ok(false)));
-        assert_eq!(reset, (Ok(false), Ok(false)));
-        assert_eq!(
-            inspector.inspected(),
-            [("/anime".to_string(), false), ("/fast".to_string(), false)]
-        );
-        let state = core.state().await.unwrap();
-        assert_eq!(
-            state.remux,
-            ModeView {
-                manifest_rev: 2,
-                ..empty(REMUX)
-            }
-        );
-        assert_eq!(state.extract.scan, ScanView::Idle);
-        assert!(state.extract.rows.is_empty());
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn test_a_failed_scan_keeps_the_rows_and_inspects_again_next_time() {
-        let (core, _publisher, inspector) = scanning_core();
-        assert_eq!(core.dispatch(scan(REMUX, "/anime", false)).await, Ok(true));
-        inspector.manifests.lock().unwrap().remove("/anime");
-
-        assert_eq!(core.dispatch(scan(REMUX, "/anime", true)).await, Ok(false));
-        let state = core.state().await.unwrap();
-        assert_eq!(state.remux.scan, ScanView::Failed);
-        assert_eq!(ids(&state.remux), ["ep1", "ep2"]);
-        assert_eq!(state.remux.directory.as_deref(), Some("/anime"));
-
-        // No reuse after a failure.
-        assert_eq!(core.dispatch(scan(REMUX, "/anime", false)).await, Ok(false));
-        assert_eq!(inspector.inspected().len(), 3);
-
-        // A path with no identity is inspected as typed (trimmed), and fails there.
-        assert_eq!(
-            core.dispatch(scan(EXTRACT, " /gone/ ", false)).await,
-            Ok(false)
-        );
-        assert_eq!(inspector.inspected()[3], ("/gone/".to_string(), false));
-        assert_eq!(core.state().await.unwrap().extract.scan, ScanView::Failed);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn test_a_panicking_inspection_fails_the_scan_and_leaves_no_key_in_flight() {
-        let (core, _publisher, inspector) = scanning_core();
-        assert_eq!(core.dispatch(scan(REMUX, "/panic", false)).await, Ok(false));
-        assert_eq!(core.state().await.unwrap().remux.scan, ScanView::Failed);
-        // The key is free again: the next scan inspects anew instead of joining the dead one.
-        assert_eq!(core.dispatch(scan(REMUX, "/panic", false)).await, Ok(false));
-        assert_eq!(inspector.inspected().len(), 2);
-        // And the queue is not locked.
-        assert_eq!(
-            core.dispatch(Intent::SetAllSelected {
-                mode: REMUX,
-                selected: true,
-            })
-            .await,
-            Ok(false)
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn test_a_manifest_of_another_version_fails_the_scan() {
-        let mut manifest = manifest_of(&["ep1"]);
-        manifest.version = 1;
-        let inspector = FakeInspector::default().with("/anime", manifest);
-        let core = ready(RecordingPublisher::default(), inspector);
-
-        assert_eq!(core.dispatch(scan(REMUX, "/anime", false)).await, Ok(false));
-        let state = core.state().await.unwrap();
-        assert_eq!(state.remux.scan, ScanView::Failed);
-        assert!(state.remux.rows.is_empty());
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn test_queue_intents_apply_and_publish_before_they_answer() {
-        let (core, publisher, _inspector) = scanning_core();
-        core.dispatch(scan(REMUX, "/anime", false)).await.unwrap();
-        let select = |id: &str, selected| Intent::SetSelected {
-            mode: REMUX,
-            id: id.into(),
-            selected,
-        };
-
-        assert_eq!(core.dispatch(select("ep1", false)).await, Ok(true));
-        assert_eq!(core.dispatch(select("missing", false)).await, Ok(false));
-        let reorder = |direction| Intent::Reorder {
-            mode: REMUX,
-            id: "ep2".into(),
-            direction,
-        };
-        assert_eq!(core.dispatch(reorder(Direction::Up)).await, Ok(true));
-        assert_eq!(core.dispatch(reorder(Direction::Up)).await, Ok(false));
-        let assignment = subtitle("ep2", "/subs/ep2.ass", None);
-        let assign = |mode| Intent::AssignTrack {
-            mode,
-            assignment: assignment.clone(),
-        };
-        assert_eq!(core.dispatch(assign(REMUX)).await, Ok(true));
-        assert!(core.dispatch(assign(EXTRACT)).await.is_err());
-
-        // No sleep: each answer came after its publication.
-        let state = core.state().await.unwrap();
-        assert_eq!(&state, publisher.states().last().unwrap());
-        assert_eq!(ids(&state.remux), ["ep2", "ep1"]);
-        assert!(!state.remux.rows[1].selected);
-        assert_eq!(state.remux.assignments["ep2"], assignment);
-
-        let clear = Intent::ClearTrack {
-            mode: REMUX,
-            id: "ep2".into(),
-        };
-        assert_eq!(core.dispatch(clear.clone()).await, Ok(true));
-        assert_eq!(core.dispatch(clear).await, Ok(false));
-        let clear_extract = Intent::ClearTrack {
-            mode: EXTRACT,
-            id: "ep2".into(),
-        };
-        assert!(core.dispatch(clear_extract).await.is_err());
-        assert!(core.state().await.unwrap().remux.assignments.is_empty());
-        assert_eq!(
-            core.dispatch(Intent::SetAllSelected {
-                mode: REMUX,
-                selected: true,
-            })
-            .await,
-            Ok(true)
-        );
-        assert!(core
-            .state()
-            .await
-            .unwrap()
-            .remux
-            .rows
-            .iter()
-            .all(|row| row.selected));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn test_a_running_job_locks_both_queues_and_lays_its_items_over_its_own_mode() {
-        let (core, _publisher, _inspector) = scanning_core();
-        core.dispatch(scan(REMUX, "/anime", false)).await.unwrap();
-        core.dispatch(scan(EXTRACT, "/anime", false)).await.unwrap();
-        let sink = core.job_sink();
-        sink.started(&started(1));
-        sink.event(&batch_start(&["ep2"]));
-        sink.event(&item_start("ep2"));
-
-        for mode in [REMUX, EXTRACT] {
-            let error = core
-                .dispatch(Intent::SetAllSelected {
-                    mode,
-                    selected: false,
-                })
-                .await
-                .unwrap_err();
-            assert!(error.contains("running"), "{error}");
-        }
-        tokio::time::sleep(PUBLISH_INTERVAL * 2).await;
-        let state = core.state().await.unwrap();
-        assert_eq!(state.remux.rows[1].status, ItemStatus::Processing);
-        assert!(state.remux.rows[1].participant);
-        assert!(!state.remux.rows[0].participant);
-        // The extract queue shows the same directory, but the job is not its.
-        assert!(state.extract.rows.iter().all(|row| !row.participant));
-
-        sink.done(&done(1, 0));
-        assert_eq!(
-            core.dispatch(Intent::SetAllSelected {
-                mode: REMUX,
-                selected: false,
-            })
-            .await,
-            Ok(true)
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn test_the_job_snapshot_clears_only_for_its_own_mode_and_never_while_it_runs() {
-        let (core, _publisher, _inspector) = scanning_core();
-        let sink = core.job_sink();
-        sink.started(&started(1));
-        sink.event(&batch_start(&["ep1"]));
-
-        // While the job runs, a scan or a reset of its own mode is refused, so its queue stays.
-        for path in ["/anime", ""] {
-            let error = core.dispatch(scan(REMUX, path, false)).await.unwrap_err();
-            assert!(error.contains("running"), "{path:?}: {error}");
-        }
-        // Another mode's scan still runs, and leaves the snapshot.
-        assert_eq!(
-            core.dispatch(scan(EXTRACT, "/anime", false)).await,
-            Ok(true)
-        );
-        assert!(core.state().await.unwrap().job.is_some());
-
-        sink.done(&done(1, 0));
-        // Another mode's scan and reset leave it.
-        assert_eq!(
-            core.dispatch(scan(EXTRACT, "/anime", false)).await,
-            Ok(true)
-        );
-        assert_eq!(core.dispatch(scan(EXTRACT, "", false)).await, Ok(false));
-        let state = core.state().await.unwrap();
-        assert!(state.job.is_some());
-        // A failed scan of its own mode leaves it too.
-        assert_eq!(core.dispatch(scan(REMUX, "/gone", false)).await, Ok(false));
-        assert!(core.state().await.unwrap().job.is_some());
-
-        // Each of an accepted scan, a reuse and a reset of its own mode clears it.
-        for (path, force) in [("/anime", true), ("/anime", false), ("", false)] {
-            core.job_sink().started(&started(2));
-            core.job_sink().done(&done(2, 0));
-            assert!(core.state().await.unwrap().job.is_some());
-            core.dispatch(scan(REMUX, path, force)).await.unwrap();
-            assert_eq!(core.state().await.unwrap().job, None, "{path:?}");
-        }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn test_a_scan_begun_before_a_job_of_its_mode_is_refused_once_the_job_runs() {
-        let (core, _publisher, _inspector) = scanning_core();
-        // One scan still resolving, then one still inspecting, when the job starts.
-        for (path, wait) in [("/slow", SLOW / 2), ("/anime", INSPECTION / 2)] {
-            let pending = tokio::spawn({
-                let core = core.clone();
-                async move { core.dispatch(scan(REMUX, path, false)).await }
-            });
-            tokio::time::sleep(wait).await;
-            let sink = core.job_sink();
-            sink.started(&started(1));
-            let error = pending.await.unwrap().unwrap_err();
-            assert!(error.contains("running"), "{path}: {error}");
-            let state = core.state().await.unwrap();
-            assert_eq!(state.remux.scan, ScanView::Idle, "{path}");
-            assert!(state.remux.rows.is_empty(), "{path}");
-            sink.done(&done(1, 0));
-        }
-    }
-
-    pub(super) fn edit(mode: PipelineMode, changes: DraftChanges) -> Intent {
-        Intent::EditDraft { mode, changes }
-    }
-
-    pub(super) fn set_preset(mode: PipelineMode, preset: &str) -> Intent {
-        Intent::SetPreset {
-            mode,
-            preset: preset.into(),
-        }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn test_draft_intents_apply_and_publish_with_the_next_publication() {
-        let (core, publisher) = spawn_core();
-        // Before any publication, `get_state` already holds each mode's draft and the catalog.
-        let state = core.state().await.unwrap();
-        assert_eq!(state.remux.draft, SettingsDraft::new(REMUX));
-        assert_eq!(state.extract.draft, SettingsDraft::new(EXTRACT));
-        assert_eq!(state.presets, get_preset_profiles());
-
-        let typed = DraftChanges {
-            input_dir: Some("/anime".into()),
-            bitrate: Some("256k".into()),
-            ..DraftChanges::default()
-        };
-        assert_eq!(core.dispatch(edit(REMUX, typed.clone())).await, Ok(true));
-        tokio::time::sleep(PUBLISH_INTERVAL * 2).await;
-        let state = core.state().await.unwrap();
-        assert_eq!(&state, publisher.states().last().unwrap());
-        assert_eq!(state.remux.draft.input_dir, "/anime");
-        assert_eq!(state.remux.draft.preset.as_deref(), Some("custom"));
-        // The other mode keeps its own draft.
-        assert_eq!(state.extract.draft, SettingsDraft::new(EXTRACT));
-        let published = publisher.states().len();
-        assert_eq!(core.dispatch(edit(REMUX, typed)).await, Ok(false));
-        tokio::time::sleep(PUBLISH_INTERVAL * 2).await;
-        assert_eq!(
-            publisher.states().len(),
-            published,
-            "nothing changed, nothing published"
-        );
-
-        assert_eq!(core.dispatch(set_preset(REMUX, "hifi")).await, Ok(true));
-        tokio::time::sleep(PUBLISH_INTERVAL * 2).await;
-        let draft = core.state().await.unwrap().remux.draft;
-        assert_eq!(draft.bitrate.as_deref(), Some("320k"));
-        assert!(core.dispatch(set_preset(REMUX, "studio")).await.is_err());
-        assert!(core.dispatch(set_preset(EXTRACT, "fast")).await.is_err());
-        let assets = DraftChanges {
-            assets_dir: Some("/subs".into()),
-            ..DraftChanges::default()
-        };
-        assert!(core.dispatch(edit(EXTRACT, assets)).await.is_err());
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn test_a_burst_of_draft_intents_answers_each_and_is_coalesced_into_the_publications() {
-        let (core, publisher) = spawn_core();
-        let begun = Instant::now();
-        let typed = |step: u32| DraftChanges {
-            input_dir: Some(format!("/anime{step}")),
-            ..DraftChanges::default()
-        };
-        for step in 0..1_000 {
-            assert_eq!(core.dispatch(edit(REMUX, typed(step))).await, Ok(true));
-            // Spread the burst over about a second of paused time.
-            if step % 10 == 0 {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        }
-        tokio::time::sleep(PUBLISH_INTERVAL * 2).await;
-
-        let elapsed = begun.elapsed();
-        let states = publisher.states();
-        let bound = elapsed.as_millis().div_ceil(PUBLISH_INTERVAL.as_millis()) + 1;
-        assert!(
-            states.len() as u128 <= bound,
-            "{} publications in {elapsed:?}",
-            states.len()
-        );
-        let last = states.last().unwrap();
-        assert_eq!(last.remux.draft.input_dir, "/anime999");
-        assert_eq!(&core.state().await.unwrap(), last);
-
-        // An Intent of another kind still publishes the pending draft before it answers. The first
-        // edit goes out on the leading edge, so the second lands inside the interval and waits.
-        assert_eq!(core.dispatch(edit(REMUX, typed(1_000))).await, Ok(true));
-        assert_eq!(core.dispatch(edit(REMUX, typed(0))).await, Ok(true));
-        let published = publisher.states().len();
-        let last = publisher
-            .states()
-            .last()
-            .unwrap()
-            .remux
-            .draft
-            .input_dir
-            .clone();
-        assert_eq!(last, "/anime1000");
-        let select = Intent::SetAllSelected {
-            mode: REMUX,
-            selected: true,
-        };
-        assert_eq!(core.dispatch(select).await, Ok(false));
-        let states = publisher.states();
-        assert_eq!(states.len(), published + 1);
-        assert_eq!(states.last().unwrap().remux.draft.input_dir, "/anime0");
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn test_a_running_job_refuses_draft_intents() {
-        let (core, _publisher) = spawn_core();
-        let sink = core.job_sink();
-        sink.started(&started(1));
-        let workers = || DraftChanges {
-            workers: Some("4".into()),
-            ..DraftChanges::default()
-        };
-        for mode in [REMUX, EXTRACT] {
-            let error = core.dispatch(edit(mode, workers())).await.unwrap_err();
-            assert!(error.contains("running"), "{error}");
-        }
-        let error = core.dispatch(set_preset(REMUX, "fast")).await.unwrap_err();
-        assert!(error.contains("running"), "{error}");
-        assert_eq!(
-            core.state().await.unwrap().remux.draft,
-            SettingsDraft::new(REMUX)
-        );
-
-        sink.done(&done(1, 0));
-        assert_eq!(core.dispatch(edit(REMUX, workers())).await, Ok(true));
-    }
-
-    #[tokio::test]
-    async fn test_the_defaults_are_published_once_the_actor_has_read_them() {
-        let publisher = RecordingPublisher::default();
-        let ports = Ports {
-            inspector: FakeInspector::default(),
-            launcher: FakeLauncher::default(),
-            sampler: NoSampler,
-        };
-        let core = Core::spawn(Handle::current(), publisher.clone(), ports);
-        // Read on the blocking pool after the spawn, then published at once: each publication
-        // wakes the wait, and the timeout only bounds a hang.
-        let published = tokio::time::timeout(Duration::from_secs(30), async {
-            loop {
-                let defaults = publisher
-                    .states()
-                    .into_iter()
-                    .find_map(|state| state.defaults);
-                if defaults.is_some() {
-                    return defaults;
-                }
-                publisher.stated.notified().await;
-            }
-        })
-        .await
-        .expect("the defaults were never published");
-        assert_eq!(published, Some(EffectiveSettings::defaults()));
-        assert_eq!(
-            core.state().await.unwrap().defaults,
-            Some(EffectiveSettings::defaults())
-        );
-    }
-
-    /// What a `FakeLauncher` was told, and how it answers.
-    #[derive(Default)]
-    pub(super) struct LauncherScript {
-        /// Each call, in order: `resolve`, `launch`, `stop None` or `stop Some(id)`.
-        calls: Vec<String>,
-        launched: Vec<BatchRequest>,
-        pub(super) resolve_error: Option<String>,
-        pub(super) launch_error: Option<String>,
-        pub(super) stop_error: Option<String>,
-        /// Ends each job with this `job-done` code before its launch returns.
-        pub(super) end_at_launch: Option<i32>,
-        /// The jobs still running: ID, mode and sink.
-        pub(super) jobs: Vec<(u64, &'static str, ActorSink)>,
-        next_id: u64,
-    }
-
-    /// A `Launcher` that answers from a script, after a delay on the paused clock. A launched job
-    /// runs until the test ends it or a Stop does, which ends it cancelled before the Stop
-    /// settles, as the supervisor's `done` precedes the slot release.
-    #[derive(Clone, Default)]
-    pub(super) struct FakeLauncher(Arc<Mutex<LauncherScript>>);
-
-    pub(super) const RESOLVE: Duration = Duration::from_millis(100);
-    pub(super) const LAUNCH: Duration = Duration::from_millis(100);
-    pub(super) const STOP: Duration = Duration::from_millis(50);
-
-    impl FakeLauncher {
-        pub(super) fn script(&self) -> std::sync::MutexGuard<'_, LauncherScript> {
-            self.0.lock().unwrap()
-        }
-
-        pub(super) fn calls(&self) -> Vec<String> {
-            self.script().calls.clone()
-        }
-
-        pub(super) fn launched(&self) -> Vec<BatchRequest> {
-            self.script().launched.clone()
-        }
-
-        /// Ends the running job with `code`, as its supervisor would.
-        pub(super) fn end_job(&self, code: i32) {
-            let (job_id, mode, sink) = self.script().jobs.remove(0);
-            sink.done(&JobDone { mode, job_id, code });
-        }
-    }
-
-    impl Launcher for FakeLauncher {
-        async fn resolve(&self, _request: BatchRequest) -> Result<EffectiveSettings, String> {
-            self.script().calls.push("resolve".into());
-            tokio::time::sleep(RESOLVE).await;
-            match self.script().resolve_error.clone() {
-                Some(error) => Err(error),
-                None => Ok(effective_settings()),
-            }
-        }
-
-        async fn launch(&self, request: BatchRequest, sink: ActorSink) -> Result<u64, String> {
-            self.script().calls.push("launch".into());
-            tokio::time::sleep(LAUNCH).await;
-            let mut script = self.script();
-            if let Some(error) = script.launch_error.clone() {
-                return Err(error);
-            }
-            script.next_id += 1;
-            let job_id = script.next_id;
-            let mode = mode_name(request.mode);
-            sink.started(&JobStarted {
-                job_id,
-                mode,
-                input_dir: request.input_dir.to_string_lossy().into_owned(),
-                effective_settings: effective_settings(),
-                start_time_ms: 1_700_000_000_000,
-            });
-            script.launched.push(request);
-            match script.end_at_launch {
-                Some(code) => sink.done(&JobDone { mode, job_id, code }),
-                None => script.jobs.push((job_id, mode, sink)),
-            }
-            Ok(job_id)
-        }
-
-        async fn stop(&self, job_id: Option<u64>) -> Result<(), String> {
-            self.script().calls.push(format!("stop {job_id:?}"));
-            tokio::time::sleep(STOP).await;
-            let mut script = self.script();
-            if let Some(error) = script.stop_error.clone() {
-                return Err(error);
-            }
-            if let Some(at) = script.jobs.iter().position(|job| Some(job.0) == job_id) {
-                let (job_id, mode, sink) = script.jobs.remove(at);
-                sink.done(&JobDone {
-                    mode,
-                    job_id,
-                    code: -1,
-                });
-            }
-            Ok(())
-        }
-    }
-}
+mod tests;
