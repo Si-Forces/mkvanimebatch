@@ -10,12 +10,12 @@ import { createSettingsChips } from "./settings-chips.js";
 import { createPresetMenu } from "./preset-menu.js";
 import { createSettingsDraft } from "./settings-draft.js";
 import { createTheme } from "./theme.js";
+import { ALL_ROWS, nextState } from "./view-patch.js";
 import {
   batchClock,
   candidateTier,
   filterCounts,
   inspectorCrumbs,
-  isBusy,
   pathSegments,
   prettyPath,
   progressSegments,
@@ -140,11 +140,13 @@ const VIEW_STATE = "view-state";
 /** Webview event names emitted by the engine bridge; must match `src-tauri/src/publisher.rs` (`cleanup-error`: `commands.rs`). */
 const JOB_LOG = "job-log";
 const CLEANUP_ERROR = "cleanup-error";
-// The newest View State applied, which `syncState` hands out.
+// The newest View State applied, which `syncState` hands out. A publication and a `get_state`
+// answer can arrive in either order, so one not newer than this is stale and dropped.
 let appliedState = null;
-// The `seq` of the last View State applied. A publication and a `get_state` answer can arrive in
-// either order, so one not newer than this is stale and dropped.
-let appliedSeq = -1;
+// The resync `get_state` in flight, and the payloads that asked for one meanwhile, which are
+// evaluated again against its answer.
+let resyncing = null;
+let heldPayloads = [];
 // What the global controls read from the queues and the Job View when they were last synced.
 // Progress publications leave it unchanged, so they skip the DOM-wide control sync.
 let controlsKey = "";
@@ -153,7 +155,7 @@ let controllers = {};
 
 /** Whether a start or a job holds the batch in the View State applied last. */
 function busy() {
-  return isBusy(appliedState);
+  return appliedState?.busy === true;
 }
 
 /** Re-renders every control a busy batch, a scan or the Job Coordinator moves. */
@@ -161,10 +163,44 @@ function syncControls() {
   for (const controller of Object.values(controllers)) controller.syncGlobalControls();
 }
 
-/** Renders a View State the Desktop Core published, unless it is stale. */
-function applyState(state) {
-  if (!state || state.seq <= appliedSeq) return;
-  appliedSeq = state.seq;
+/**
+ * Takes one `view-state` payload or `get_state` answer, a whole View State or a patch of the
+ * one applied (`view-patch.js`): drops a stale one, renders a newer one, and resyncs for a patch
+ * of a state this page does not hold.
+ */
+function receiveState(payload) {
+  if (!payload) return;
+  const next = nextState(appliedState, payload);
+  if (next.action === "resync") {
+    heldPayloads.push(payload);
+    resync();
+  } else if (next.action !== "drop") {
+    applyState(next.state, next.rows);
+  }
+}
+
+/**
+ * Reads the whole View State once, however many patches ask for it meanwhile: a `get_state`
+ * answer is a state the publisher already emitted, so the next patch's base is that answer's seq,
+ * and the patches held meanwhile are dropped or merged against it. Resolves as `syncState`.
+ */
+function resync() {
+  resyncing ??= syncState().then(state => {
+    resyncing = null;
+    // An unreachable core is not asked again for the held patches; the next payload asks.
+    const held = heldPayloads;
+    heldPayloads = [];
+    if (state) for (const payload of held) receiveState(payload);
+    return state;
+  });
+  return resyncing;
+}
+
+/**
+ * Renders the View State `state`, redrawing only the queue cards of `rows` (per mode, the
+ * changed row indices or "all", from `nextState`).
+ */
+function applyState(state, rows = ALL_ROWS) {
   appliedState = state;
   // The fields first, so the queues and the chrome below read the published draft.
   const remuxWritten = draftForm.apply("remux", state.remux.draft);
@@ -172,8 +208,8 @@ function applyState(state) {
   chips.render(state);
   presets.render(state.presets, state.remux.draft);
   renderTelemetry(state.telemetry);
-  remuxQueue.applyView(state.remux, state.job);
-  extractQueue.applyView(state.extract, state.job);
+  remuxQueue.applyView(state.remux, state.job, rows.remux);
+  extractQueue.applyView(state.extract, state.job, rows.extract);
   // The rows show the bitrate and the subtitle ladder the assets dir is part of.
   if (remuxWritten.has("bitrate") || remuxWritten.has("assets_dir")) remuxQueue.refreshMeta();
   // The Job Coordinator, every ModeView field but the rows and the draft, and from the rows only
@@ -196,7 +232,7 @@ function applyState(state) {
  */
 async function syncState() {
   try {
-    applyState(await invoke("get_state"));
+    receiveState(await invoke("get_state"));
     return appliedState;
   } catch (err) {
     console.error("[get_state] failed:", err);
@@ -930,7 +966,7 @@ function initApp() {
  */
 async function boot() {
   try {
-    await listen(VIEW_STATE, event => applyState(event.payload));
+    await listen(VIEW_STATE, event => receiveState(event.payload));
   } catch (err) {
     console.error("[view-state] listener failed:", err);
   }
@@ -940,7 +976,9 @@ async function boot() {
   } catch (err) {
     console.error("[job-log] listener failed:", err);
   }
-  const state = await syncState();
+  // The boot's read is the resync a patch that arrives before it waits for, or none when a patch
+  // that arrived while the listeners were bound already finished one.
+  const state = appliedState ?? await resync();
   // The lines kept so far; a batch the answer already holds is not drawn twice.
   await Promise.all(["remux", "extract"].map(async mode => {
     let view = null;

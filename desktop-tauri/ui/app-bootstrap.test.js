@@ -56,7 +56,8 @@ const SCANNED = ["one", "two", "three"].map(id => row(id, { name: `${id}.mkv` })
  * The app over a fake Desktop Core. `answers` overrides what a command returns; a promise holds the
  * answer back until the test settles it. The first `get_state`, the boot's, waits for
  * `resolveState()`; set `core.state` before calling it. A scan accepts `SCANNED` (an empty path
- * resets the queue). `onListen(name)` runs once a listener is bound.
+ * resets the queue). `onListen(name)` runs once a listener is bound, and `listen` resolves once it
+ * settles.
  */
 function bootstrapHarness(t, answers = {}, { onListen = () => {} } = {}) {
   const prior = {
@@ -128,7 +129,7 @@ function bootstrapHarness(t, answers = {}, { onListen = () => {} } = {}) {
       event: { listen: async (name, handler) => {
         assert.equal(handlers.has(name), false, `duplicate listener: ${name}`);
         handlers.set(name, handler);
-        onListen(name);
+        await onListen(name);
         return () => { handlers.delete(name); removed.push(name); };
       } },
     },
@@ -277,6 +278,90 @@ test("with no job, a scan and a selection made before get_state answers stay, an
   // A publication older than the one applied changes nothing.
   ipc.emit("view-state", { ...structuredClone(ipc.core.state), seq: 1, remux: modeView() });
   assert.equal(list.children.length, 3);
+});
+
+test("a view-state patch redraws only the cards of the rows it changes", async t => {
+  const ipc = bootstrapHarness(t);
+  await ipc.mount("patch-rows");
+  activeJob(ipc.core);
+  ipc.resolveState();
+  await ipc.flush();
+  const list = ipc.elements.get("remux-episode-list");
+  const check = index => list.children[index].querySelector(".ep-select-check");
+  const arc = index => list.children[index].querySelector(".ep-ring-arc");
+  // A mark a redraw of the first card would overwrite.
+  check(0).checked = "untouched";
+
+  ipc.core.state.remux.rows[1].progress = 85;
+  ipc.core.publishPatch({ remux: { row_changes: [[1, ipc.core.state.remux.rows[1]]] } });
+  assert.equal(arc(1).style.strokeDashoffset, (RING_CIRCUMFERENCE * 0.15).toFixed(2));
+  assert.equal(check(0).checked, "untouched");
+  assert.equal(ipc.calls.filter(([command]) => command === "get_state").length, 1);
+
+  // A whole state redraws every card; this one ends the job, and the heartbeat with it.
+  settleJob(ipc.core, "completed");
+  assert.equal(check(0).checked, true);
+});
+
+test("a patch of a state the page missed reads get_state once, and the patches meanwhile wait for it", async t => {
+  const ipc = bootstrapHarness(t);
+  await ipc.mount("patch-resync");
+  ipc.resolveState();
+  await ipc.flush();
+  const reads = () => ipc.calls.filter(([command]) => command === "get_state").length;
+  const before = reads();
+  // The page missed the patch at seq + 1: the next two cannot apply.
+  const seq = ipc.core.state.seq;
+  ipc.core.state.seq = seq + 3;
+  ipc.core.state.remux.outcome = "done";
+  ipc.emit("view-state", { seq: seq + 2, base: seq + 1 });
+  ipc.emit("view-state", { seq: seq + 3, base: seq + 2, remux: { outcome: "done" } });
+  await ipc.flush();
+  assert.equal(reads(), before + 1);
+  assert.match(ipc.elements.get("remux-status").innerHTML, /Done/);
+
+  // The next patch builds on the state get_state answered with.
+  ipc.core.state.remux.outcome = null;
+  ipc.core.publishPatch({ remux: { outcome: null } });
+  await ipc.flush();
+  assert.equal(reads(), before + 1);
+  assert.doesNotMatch(ipc.elements.get("remux-status").innerHTML, /Done/);
+});
+
+test("a patch that arrives before the boot's get_state answers waits for it, with no second get_state", async t => {
+  const ipc = bootstrapHarness(t);
+  await ipc.mount("patch-early");
+  activeJob(ipc.core);
+  ipc.core.state.remux.rows[1].progress = 85;
+  ipc.core.publishPatch({ remux: { row_changes: [[1, ipc.core.state.remux.rows[1]]] } });
+  ipc.resolveState();
+  await ipc.flush();
+  assert.equal(ipc.calls.filter(([command]) => command === "get_state").length, 1);
+  const list = ipc.elements.get("remux-episode-list");
+  assert.equal(list.children[1].querySelector(".ep-ring-arc").style.strokeDashoffset, (RING_CIRCUMFERENCE * 0.15).toFixed(2));
+  settleJob(ipc.core, "completed");
+});
+
+test("a patch that arrives while boot binds its listeners and resyncs before it reads get_state issues no second get_state", async t => {
+  let ipc;
+  ipc = bootstrapHarness(t, {}, {
+    async onListen(name) {
+      if (name === "view-state") {
+        activeJob(ipc.core);
+        ipc.core.publishPatch({ remux: { outcome: null } });
+      } else if (name === "job-log") {
+        // The resync the patch started answers before the job-log listener is bound.
+        ipc.resolveState();
+        await ipc.flush();
+      }
+    },
+  });
+  await ipc.mount("patch-listen");
+  // Boot goes on once the job-log listener settles.
+  while (!ipc.calls.some(([command]) => command === "get_log")) await ipc.flush();
+  assert.equal(ipc.calls.filter(([command]) => command === "get_state").length, 1);
+  assert.equal(ipc.elements.get("remux-episode-list").children.length, 2);
+  settleJob(ipc.core, "completed");
 });
 
 // Wiring only: the chips', the preset menu's and the theme's own rules are tested in

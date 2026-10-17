@@ -1,4 +1,3 @@
-import { isBusy } from "./presentation.js";
 import { DRAFT_FIELDS } from "./settings-draft.js";
 
 // The modes with a Run sent and not answered yet. Module-wide because both controllers sync the
@@ -140,7 +139,7 @@ export class JobController {
    * the other tab's selection alone.
    */
   canMutateQueueSelection(mode) {
-    if (isBusy(this.runtime.state())) return false;
+    if (this.runtime.state()?.busy) return false;
     return !this.runtime.queueFor(mode).isScanning;
   }
 
@@ -157,7 +156,7 @@ export class JobController {
     const state = this.runtime.state();
     const run = this.run;
     const owner = this.owner;
-    const busy = isBusy(state);
+    const busy = state?.busy === true;
     const tracker = this.runtime.queueFor(this.mode);
     const hasItems = (tracker.state?.totalCount ?? 0) > 0;
     const selectionDisabled = hasItems && (tracker.getSelectedCount?.() ?? 0) === 0;

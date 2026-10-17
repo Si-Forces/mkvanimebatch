@@ -435,13 +435,18 @@ mod tests {
         assert_eq!(runs.first(), Some(&(Phase::Starting, false)));
         assert!(runs.contains(&(Phase::Starting, true)));
         assert_eq!(runs.last(), Some(&(Phase::Running, true)));
+        assert!(publisher.states()[published..]
+            .iter()
+            .all(|state| state.busy));
 
         launcher.end_job(0);
         let state = core.state().await.unwrap();
         assert_eq!(state.run, RunView::default());
         assert_eq!(state.remux.outcome, Some(Outcome::Done));
         assert_eq!(state.extract.outcome, None);
-        assert!(!state.job.unwrap().active);
+        assert!(!state.job.as_ref().unwrap().active);
+        assert!(!state.busy);
+        assert_busy_follows_the_phase_and_the_job(&publisher.states());
         // The `job-done` is still published.
         assert!(publisher
             .all()
@@ -507,7 +512,9 @@ mod tests {
 
         let stopping = pending(&core, stop(REMUX));
         tokio::time::sleep(STOP / 2).await;
-        assert_eq!(core.state().await.unwrap().run.phase, Phase::Stopping);
+        let state = core.state().await.unwrap();
+        assert_eq!(state.run.phase, Phase::Stopping);
+        assert!(state.busy);
         // A second Stop waits on the same teardown.
         assert_eq!(core.dispatch(stop(REMUX)).await, Ok(true));
         assert_eq!(stopping.await.unwrap(), Ok(true));
