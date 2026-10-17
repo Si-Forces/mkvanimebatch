@@ -1,24 +1,17 @@
-/** Inputs whose empty state means the engine's default, as [input id, Effective Settings key]. */
+/** The inputs whose empty state means the engine's default, as [input id, published hint key]. */
 const AUTO_INPUTS = ["remux", "extract"].flatMap(mode => [
-  [`${mode}-workers`, "workers"],
-  [`${mode}-io-jobs`, "io_jobs"],
+  [`${mode}-workers`, "workers_hint"],
+  [`${mode}-io-jobs`, "io_jobs_hint"],
 ]);
 
-/** A chip's text: `count` is shown when known, and otherwise left out rather than guessed. */
-function chipText(isJobActive, idleWord, count, noun) {
-  const counted = count == null ? null : `${count} ${noun}`;
-  if (isJobActive) return `${counted ?? noun} Active`;
-  return counted ? `${idleWord} (${counted})` : idleWord;
-}
-
 /**
- * The worker and I/O job chips and the `auto (N)` hints on the workers and Disk I/O inputs, which
- * show Effective Settings, all read from the View State: the published `defaults` while nothing
- * holds the batch, else the start's or the job's own (`run.settings`, else the Job View's).
+ * The worker and I/O job chips and the `auto (N)` hints on the workers and Disk I/O inputs, as
+ * the View State's `chips` publishes them (`crates/mkv-desktop-core/src/presentation.rs` holds
+ * their texts and which Effective Settings they show).
  */
 export function createSettingsChips({ doc }) {
-  // The `defaults` the inputs show, as JSON.
-  let defaultsKey = null;
+  // The hints the inputs show, as JSON.
+  let hintsKey = null;
 
   function setChips(selector, text) {
     doc.querySelectorAll(selector).forEach(chip => {
@@ -27,26 +20,21 @@ export function createSettingsChips({ doc }) {
   }
 
   /**
-   * Renders `state`. Its `defaults` are `null` until the core has read them, which leaves the
-   * inputs on plain `auto`; an empty workers field sends no value, which the engine resolves to
-   * these. A busy batch with no settings known yet (a start still resolving) shows no counts.
+   * Renders `state.chips`. A hint is null until the core has read the defaults, which leaves the
+   * input on its own plain `auto`.
    */
   function render(state) {
-    const defaults = state?.defaults ?? null;
-    const key = JSON.stringify(defaults);
-    if (defaults && key !== defaultsKey) {
-      defaultsKey = key;
-      for (const [id, field] of AUTO_INPUTS) {
-        const input = doc.getElementById(id);
-        if (!input) continue;
-        input.placeholder = `auto (${defaults[field]})`;
-        input.dataset.autoValue = String(defaults[field]);
-      }
+    const chips = state?.chips;
+    if (!chips) return;
+    setChips(".metric-workers-chip", chips.workers);
+    setChips(".metric-iojobs-chip", chips.io_jobs);
+    const key = JSON.stringify([chips.workers_hint, chips.io_jobs_hint]);
+    if (key === hintsKey) return;
+    hintsKey = key;
+    for (const [id, hint] of AUTO_INPUTS) {
+      const input = doc.getElementById(id);
+      if (input && chips[hint] != null) input.placeholder = chips[hint];
     }
-    const busy = state?.busy === true;
-    const settings = busy ? state.run?.settings ?? (state.job?.active ? state.job.effective_settings : null) ?? null : defaults;
-    setChips(".metric-workers-chip", chipText(busy, "Standby", settings?.workers, "Workers"));
-    setChips(".metric-iojobs-chip", chipText(busy, "Idle", settings?.io_jobs, "IO Jobs"));
   }
 
   return { render };

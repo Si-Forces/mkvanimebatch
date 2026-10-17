@@ -1,35 +1,44 @@
 // Test support, not part of the app: published View State shapes, and a Desktop Core that serves
-// scripted ones. The queue rules themselves are the core's and are tested in Rust; this fake only
-// applies the Intents a test needs, so the webview can be driven end to end.
+// scripted ones. The queue rules and every displayed text are the core's and are tested in Rust
+// (`crates/mkv-desktop-core/src/{presentation,inspector,draft}.rs` are the source of truth); this
+// fake only applies the Intents a test needs and derives the published values a test reads (see
+// `derive` for which, and which it does not mirror), so the webview can be driven end to end.
 
-/** The inspection metadata a manifest row carries; a row the manifest does not list has none. */
-const METADATA = {
-  resolution: null,
-  video_codec: null,
-  video_tag: null,
-  audio_summary: null,
-  has_flac: null,
-  sub_summary: null,
-  fonts_count: null,
-};
-
-/** A published Row: a queued, selected manifest row named after its ID unless `fields` say otherwise. */
+/**
+ * A published Row: a queued, selected manifest row named after its ID, with the texts the core
+ * gives such a row, unless `fields` say otherwise. A test that sets another status sets its texts.
+ */
 export function row(id, fields = {}) {
   return {
     id,
     name: id,
     release: ".",
-    metadata: { ...METADATA },
-    inspection_error: null,
     in_manifest: true,
     selected: true,
     status: "queued",
     progress: null,
-    start_time_ms: null,
-    duration_sec: null,
-    reason: null,
-    error: null,
     participant: false,
+    label: "Queued",
+    tone: "mute",
+    title: "",
+    meta: "",
+    meta_error: false,
+    bucket: "todo",
+    ...fields,
+  };
+}
+
+/** A mode's published controls while nothing holds the batch and its queue is empty, with `fields` over them. */
+export function controls(mode = "remux", fields = {}) {
+  return {
+    run_label: `Run ${mode}`,
+    run_title: "",
+    run_disabled: false,
+    owns: false,
+    stop_label: "Stop",
+    stop_disabled: true,
+    selection_locked: false,
+    status: { class: "status-idle", label: "Idle" },
     ...fields,
   };
 }
@@ -55,33 +64,72 @@ export function draft(mode, fields = {}) {
   };
 }
 
-/** A published ModeView with `rows` (Rows or IDs), an idle scan and `mode`'s initial draft. */
+/**
+ * A published ModeView with `rows` (Rows or IDs), an idle scan and `mode`'s initial draft, and
+ * the presentation values of a queue with no folder open; `fields` go over it.
+ */
 export function modeView(rows = [], fields = {}, mode = "remux") {
+  const published = rows.map(entry => (typeof entry === "string" ? row(entry) : entry));
   return {
     directory: null,
     scan: { state: "idle" },
     manifest_rev: 0,
     subtitle_candidates: {},
-    rows: rows.map(entry => (typeof entry === "string" ? row(entry) : entry)),
+    rows: published,
     vanished_selected_ids: [],
     assignments: {},
     draft: draft(mode),
     outcome: null,
+    title: "No folder open",
+    crumbs: [],
+    count_text: "Ready",
+    clock: "Not started",
+    progress: { done: 0, skipped: 0, failed: 0, live: 0 },
+    filters: { all: 0, todo: 0, done: 0, failed: 0 },
+    selected_count: 0,
+    total_count: 0,
+    library: [],
+    inspector: null,
+    controls: controls(mode),
     ...fields,
   };
 }
 
-/** A published Job View of a running remux job over `participants`. */
-export function jobView(participants = [], fields = {}) {
+/** A published Job View of a running remux job. */
+export function jobView(fields = {}) {
   return {
     job_id: 1,
     mode: "remux",
     status: "running",
     active: true,
-    start_time_ms: Date.now(),
     input_dir: "/anime/show",
     effective_settings: { workers: 3, io_jobs: 5, ffmpeg_threads: 2, bitrate: "256k", complexity: 8 },
-    participants,
+    ...fields,
+  };
+}
+
+/**
+ * A published Episode Inspector of `row` at `index` in a `mode` queue, with the texts left empty
+ * unless `fields` set them. Extract has no Audio row and no subtitle choice.
+ */
+export function inspectorView(row, index = 0, fields = {}, mode = "remux") {
+  const remux = mode === "remux";
+  return {
+    id: row.id,
+    number: String(index + 1).padStart(2, "0"),
+    title: row.name,
+    crumbs: [],
+    error: null,
+    pill: { tone: row.selected ? row.tone : "mute", label: row.selected ? row.label : "Not in batch" },
+    video: "Unknown",
+    audio_label: remux ? "Audio" : "Subtitles",
+    audio: "Unknown",
+    out_crumbs: null,
+    fonts_head: "Fonts",
+    fonts: "Not inspected",
+    ladder: [],
+    options: remux ? [{ value: "", label: "Automatic (follow the ladder)" }] : [],
+    assignment: null,
     ...fields,
   };
 }
@@ -147,6 +195,9 @@ const RUN_BUSY = "A job is already running or stopping. Wait for it to finish.";
 const RUN_SCANNING = "The folder is being scanned; a batch can start once the scan ends.";
 const SCAN_STARTING = "A batch is starting; no folder can be scanned until it has started.";
 
+/** The steps `step_draft` takes; `draft.rs` holds the bounds and the auto value, not mirrored. */
+const STEPS = { sub_offset: 0.5, workers: 1, io_jobs: 1, ffmpeg_threads: 1 };
+
 /** The lines the core writes into a Run Log (`actor/start.rs`, `actor.rs`). */
 const STOP_REQUESTED = "Stop requested; waiting for shutdown.";
 const CACHE_CLEARED = "Persistent inspection cache cleared.";
@@ -200,6 +251,12 @@ function runLog(mode) {
  * with an error logs `ERROR: …`, a Run that passes the input folder check clears its log, a Stop of
  * a running batch logs the wait, and `clear_cache` logs its line. `view_visible` is recorded in
  * `visible`, not in `intents`.
+ *
+ * A whole state (`snapshot`) derives from `state` what the core lays over each publication
+ * (`derive`, which lists the values it lays; `inspect` picks the inspector's row, as the core
+ * does, even while busy). `step_draft` steps a draft field by its step, with no bounds and no auto
+ * value, as an `edit_draft` of the result. A draft Intent is answered before its publication,
+ * as the core answers it.
  */
 export function createFakeCore({ onScan = async () => true, onStart = null } = {}) {
   const listeners = new Set();
@@ -220,6 +277,8 @@ export function createFakeCore({ onScan = async () => true, onStart = null } = {
       telemetry: null,
     },
     visible: null,
+    // The row each mode's `inspect` picked, as the core keeps it.
+    picks: { remux: null, extract: null },
     onScan,
     onStart: onStart ?? (({ mode }) => core.launch(mode)),
     intents: [],
@@ -228,9 +287,9 @@ export function createFakeCore({ onScan = async () => true, onStart = null } = {
     busy: () => core.state.run.phase !== "idle" || Boolean(core.state.job?.active),
     /** Launches job `job_id` of the starting `mode` over its selected rows, and publishes it running. */
     launch(mode, job_id = (core.state.job?.job_id ?? 0) + 1) {
-      const participants = core.state[mode].rows.filter(entry => entry.in_manifest && entry.selected).map(entry => entry.id);
+      for (const entry of core.state[mode].rows) entry.participant = entry.in_manifest && entry.selected;
       core.state.run = { phase: "running", mode, settings: structuredClone(DEFAULTS) };
-      core.state.job = jobView(participants, {
+      core.state.job = jobView({
         job_id, mode, input_dir: core.state[mode].directory, effective_settings: structuredClone(DEFAULTS),
       });
       core.publish();
@@ -251,7 +310,7 @@ export function createFakeCore({ onScan = async () => true, onStart = null } = {
       emitLog(logs[mode].push(lines));
     },
     /** The whole View State as the core publishes it. */
-    snapshot: () => ({ ...structuredClone(core.state), busy: core.busy() }),
+    snapshot: () => derive(structuredClone(core.state), core.busy(), core.picks),
     publish() {
       core.state.seq++;
       const copy = core.snapshot();
@@ -281,6 +340,13 @@ export function createFakeCore({ onScan = async () => true, onStart = null } = {
         return changed;
       }
       core.intents.push(intent);
+      if (intent.type === "inspect") {
+        if (intent.id !== null && !core.state[intent.mode].rows.some(entry => entry.id === intent.id)) return false;
+        const changed = core.picks[intent.mode] !== intent.id;
+        core.picks[intent.mode] = intent.id;
+        core.publish();
+        return changed;
+      }
       if (intent.type === "scan_directory") {
         if (core.state.run.phase === "starting") throw SCAN_STARTING;
         return core.onScan(intent);
@@ -304,10 +370,12 @@ export function createFakeCore({ onScan = async () => true, onStart = null } = {
         core.log(intent.mode, [{ kind: "cache", text: CACHE_CLEARED }]);
         return true;
       }
-      if (intent.type === "edit_draft" || intent.type === "set_preset") {
+      if (intent.type === "edit_draft" || intent.type === "set_preset" || intent.type === "step_draft") {
         if (core.busy()) throw "A batch is running; the settings are locked until it ends.";
-        const changed = applyDraftIntent(view, intent, core.state.presets);
-        if (changed) core.publish();
+        const changed = applyDraftIntent(view, intent.type === "step_draft" ? stepped(view, intent) : intent, core.state.presets);
+        // Like the core, the answer comes first and the publication after it (`settings-draft.js`
+        // guards the key until the answer).
+        if (changed) setImmediate(() => core.publish());
         return changed;
       }
       if (core.busy()) throw "A batch is running; the queue is locked until it ends.";
@@ -336,6 +404,117 @@ export function createFakeCore({ onScan = async () => true, onStart = null } = {
     return core.onStart(intent);
   }
   return core;
+}
+
+/**
+ * The `edit_draft` a `step_draft` Intent makes: the field's number, else 0, plus or minus its
+ * step, rounded to 10 significant digits as `draft.rs` does.
+ */
+function stepped(view, { mode, field, direction }) {
+  const current = Number.parseFloat(view.draft[field] ?? "");
+  const next = (Number.isFinite(current) ? current : 0) + (direction === "up" ? STEPS[field] : -STEPS[field]);
+  return { type: "edit_draft", mode, changes: { [field]: String(Number(next.toPrecision(10)) + 0) } };
+}
+
+/** A path's segments as `presentation::path_segments` splits them, and their `pretty_path` line. */
+const segments = path => (path ?? "").split(/[/\\]/).filter(segment => !["", ".", ".."].includes(segment));
+const pretty = path => segments(path).join(" › ");
+
+/** The Library of `rows` on `directory`, as `presentation::library` lays it. */
+function library(directory, rows) {
+  if (!directory) return [];
+  const label = release => pretty(release) || pretty(directory) || "Episodes";
+  const root = { release: null, label: segments(directory).at(-1) ?? directory, tooltip: pretty(directory), count: rows.length, group_label: label(".") };
+  const entries = [root];
+  for (const entry of rows) {
+    const release = entry.release || ".";
+    if (release === ".") continue;
+    let found = entries.find(candidate => candidate.release === release);
+    if (!found) entries.push(found = { release, label: pretty(release), tooltip: pretty(release), count: 0, group_label: label(release) });
+    found.count++;
+  }
+  return entries;
+}
+
+/** The batch tally of `count_text` over the participant rows, as `presentation::count_text` writes it. */
+function tally(rows) {
+  const participants = rows.filter(entry => entry.participant);
+  const count = (...statuses) => participants.filter(entry => statuses.includes(entry.status)).length;
+  const done = count("completed", "planned");
+  const parts = [`${done} done`];
+  let settled = done;
+  for (const [status, word] of [["skipped", "skipped"], ["cancelled", "cancelled"], ["error", "failed"]]) {
+    const n = count(status);
+    settled += n;
+    if (n > 0) parts.push(`${n} ${word}`);
+  }
+  return `${settled} of ${participants.length} · ${parts.join(" · ")}`;
+}
+
+/**
+ * What the core is in charge of laying over a whole `state`, which `busy` holds or not; `picks` are
+ * the inspected rows. Laid: each mode's title, crumbs, Library, filter counts, selection counts,
+ * count text, controls and inspector (unless a test set one), and the chips. Not mirrored, so a
+ * test that needs them sets them: the rows' own texts and buckets, the clock and the progress bar.
+ */
+function derive(state, busy, picks) {
+  const owner = state.run.mode ?? (state.job?.active ? state.job.mode : null);
+  for (const mode of ["remux", "extract"]) {
+    const view = state[mode];
+    const scanning = view.scan.state === "scanning";
+    const total = view.rows.length;
+    const selected = view.rows.filter(entry => entry.selected).length;
+    const unticked = total > 0 && selected === 0;
+    const owns = owner === mode;
+    const stopping = state.run.phase === "stopping";
+    const verb = view.draft.dry_run ? "Plan" : "Run";
+    const pill = owns
+      ? { class: "status-running", label: stopping ? "Stopping" : "Running" }
+      : { done: { class: "status-success", label: "Done" }, cancelled: { class: "status-cancelled", label: "Cancelled" }, failed: { class: "status-error", label: "Failed" } }[view.outcome]
+        ?? { class: "status-idle", label: "Idle" };
+    const runTitle = owner && !owns ? `${owner === "remux" ? "Remux" : "Extract"} batch is running`
+      : scanning ? "Scanning the folder" : unticked ? "Tick at least one episode" : "";
+    // The job's batch, once its BatchStart named the rows that take part.
+    const batch = state.job?.mode === mode && view.rows.some(entry => entry.participant);
+    const filters = { all: total, todo: 0, done: 0, failed: 0 };
+    for (const entry of view.rows) if (entry.bucket) filters[entry.bucket]++;
+    Object.assign(view, {
+      title: segments(view.directory).at(-1) ?? "No folder open",
+      crumbs: segments(view.directory),
+      library: library(view.directory, view.rows),
+      filters,
+      selected_count: selected,
+      total_count: total,
+      count_text: scanning ? "Scanning…"
+        : view.scan.state === "failed" ? "Scan failed"
+          : batch ? tally(view.rows)
+            : total === 0 ? "Ready" : `${selected} / ${total} Selected`,
+      controls: {
+        run_label: total > 0 ? `${verb} ${mode} · ${selected}` : `${verb} ${mode}`,
+        run_title: runTitle,
+        run_disabled: busy || scanning || unticked,
+        owns,
+        stop_label: owns && stopping ? "Stopping…" : "Stop",
+        stop_disabled: !owns || stopping,
+        selection_locked: busy || scanning,
+        status: pill,
+      },
+    });
+    const at = Math.max(0, view.rows.findIndex(entry => entry.id === picks[mode]));
+    // An inspector a test set is kept.
+    view.inspector ??= total === 0
+      ? null
+      : inspectorView(view.rows[at], at, { assignment: view.assignments[view.rows[at].id] ?? null }, mode);
+  }
+  const shown = busy ? state.run.settings ?? (state.job?.active ? state.job.effective_settings : null) : state.defaults;
+  const chip = (idle, count, noun) => (busy ? `${count == null ? noun : `${count} ${noun}`} Active` : count == null ? idle : `${idle} (${count} ${noun})`);
+  state.chips = {
+    workers: chip("Standby", shown?.workers, "Workers"),
+    io_jobs: chip("Idle", shown?.io_jobs, "IO Jobs"),
+    workers_hint: state.defaults ? `auto (${state.defaults.workers})` : null,
+    io_jobs_hint: state.defaults ? `auto (${state.defaults.io_jobs})` : null,
+  };
+  return { ...state, busy };
 }
 
 /** Applies a queue Intent to the manifest rows of `view`, as `Queue` does; false when nothing changed. */

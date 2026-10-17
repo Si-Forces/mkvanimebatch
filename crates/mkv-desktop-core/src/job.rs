@@ -4,7 +4,7 @@
 //! without a UI toolkit; its tasks run on the tokio runtime the adapter hands `JobState::new`.
 
 use crate::log::error_line;
-use crate::snapshot::{attach_context, timestamp_ms, BatchStatus, JobSnapshot};
+use crate::snapshot::{attach_context, BatchStatus, JobSnapshot};
 use mkv_core::log_line::LogLine;
 use mkv_core::pipeline::{
     CancellationToken, EventReceiver, JobEvent, LogReceiver, PipelineSummary,
@@ -40,9 +40,6 @@ pub struct JobStarted {
     pub mode: &'static str,
     pub input_dir: String,
     pub effective_settings: EffectiveSettings,
-    /// The job's wall-clock start, read once, so the supervisor's ledger and every sink's copy
-    /// share it.
-    pub start_time_ms: u64,
 }
 
 impl JobStarted {
@@ -51,7 +48,6 @@ impl JobStarted {
         JobSnapshot::begin(
             self.job_id,
             self.mode,
-            self.start_time_ms,
             self.input_dir.clone(),
             self.effective_settings.clone(),
         )
@@ -136,7 +132,6 @@ impl JobState {
             mode,
             input_dir,
             effective_settings,
-            start_time_ms: timestamp_ms(),
         };
         let mut ledger = started.snapshot();
         sink.started(&started);

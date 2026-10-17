@@ -23,6 +23,7 @@ pub(crate) fn view_patch(prev: &ViewState, next: &ViewState) -> Result<Value> {
         run,
         busy,
         defaults,
+        chips,
         presets,
         remux,
         extract,
@@ -35,6 +36,7 @@ pub(crate) fn view_patch(prev: &ViewState, next: &ViewState) -> Result<Value> {
     changed(&mut patch, "run", &prev.run, run)?;
     changed(&mut patch, "busy", &prev.busy, busy)?;
     changed(&mut patch, "defaults", &prev.defaults, defaults)?;
+    changed(&mut patch, "chips", &prev.chips, chips)?;
     changed(&mut patch, "presets", &prev.presets, presets)?;
     for (key, prev, next) in [
         ("remux", &prev.remux, remux),
@@ -60,6 +62,17 @@ fn mode_patch(prev: &ModeView, next: &ModeView) -> Result<Option<Value>> {
         assignments,
         draft,
         outcome,
+        title,
+        crumbs,
+        count_text,
+        clock,
+        progress,
+        filters,
+        selected_count,
+        total_count,
+        library,
+        inspector,
+        controls,
     } = next;
     let mut patch = Map::new();
     changed(&mut patch, "directory", &prev.directory, directory)?;
@@ -101,6 +114,22 @@ fn mode_patch(prev: &ModeView, next: &ModeView) -> Result<Option<Value>> {
     changed(&mut patch, "assignments", &prev.assignments, assignments)?;
     changed(&mut patch, "draft", &prev.draft, draft)?;
     changed(&mut patch, "outcome", &prev.outcome, outcome)?;
+    changed(&mut patch, "title", &prev.title, title)?;
+    changed(&mut patch, "crumbs", &prev.crumbs, crumbs)?;
+    changed(&mut patch, "count_text", &prev.count_text, count_text)?;
+    changed(&mut patch, "clock", &prev.clock, clock)?;
+    changed(&mut patch, "progress", &prev.progress, progress)?;
+    changed(&mut patch, "filters", &prev.filters, filters)?;
+    changed(
+        &mut patch,
+        "selected_count",
+        &prev.selected_count,
+        selected_count,
+    )?;
+    changed(&mut patch, "total_count", &prev.total_count, total_count)?;
+    changed(&mut patch, "library", &prev.library, library)?;
+    changed(&mut patch, "inspector", &prev.inspector, inspector)?;
+    changed(&mut patch, "controls", &prev.controls, controls)?;
     Ok((!patch.is_empty()).then_some(Value::Object(patch)))
 }
 
@@ -120,9 +149,14 @@ fn changed<T: Serialize + PartialEq>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mkv_core::pipeline::PipelineMode;
     use mkv_core::request::EffectiveSettings;
     use mkv_desktop_core::actor::{JobView, Outcome, ScanView};
     use mkv_desktop_core::coordinator::Phase;
+    use mkv_desktop_core::inspector::inspector_view;
+    use mkv_desktop_core::presentation::{
+        chips, controls, Bucket, Filters, Hold, LibraryEntry, Progress, Tone,
+    };
     use mkv_desktop_core::queue::Row;
     use mkv_desktop_core::snapshot::{BatchStatus, ItemStatus};
     use serde_json::json;
@@ -132,17 +166,17 @@ mod tests {
             id: id.into(),
             name: format!("{id}.mkv"),
             release: ".".into(),
-            metadata: None,
-            inspection_error: None,
             in_manifest: true,
             selected: true,
             status: ItemStatus::Queued,
             progress: None,
-            start_time_ms: None,
-            duration_sec: None,
-            reason: None,
-            error: None,
             participant: false,
+            label: "Queued".into(),
+            tone: Tone::Mute,
+            title: String::new(),
+            meta: "No subs · 0 fonts".into(),
+            meta_error: false,
+            bucket: Some(Bucket::Todo),
         }
     }
 
@@ -173,10 +207,8 @@ mod tests {
             mode: "remux".into(),
             status: BatchStatus::Running,
             active: true,
-            start_time_ms: 1_700_000_000_000,
             input_dir: "/anime".into(),
             effective_settings: EffectiveSettings::defaults(),
-            participants: vec!["ep1".into(), "ep2".into()],
         }
     }
 
@@ -309,6 +341,81 @@ mod tests {
     }
 
     #[test]
+    fn test_a_heartbeat_sends_the_processing_rows_and_the_clock_alone() {
+        let mut prev = state(1, &["ep1", "ep2"]);
+        let mut rows = (*prev.remux.rows).clone();
+        rows[0].status = ItemStatus::Processing;
+        rows[0].label = "Processing · 4s".into();
+        prev.remux.rows = Arc::new(rows.clone());
+        prev.remux.clock = "4s elapsed".into();
+        let mut beat = next(&prev);
+        rows[0].label = "Processing · 5s".into();
+        beat.remux.rows = Arc::new(rows);
+        beat.remux.clock = "5s elapsed".into();
+        assert_eq!(
+            patch(&prev, &beat),
+            json!({
+                "seq": 2,
+                "base": 1,
+                "remux": {
+                    "row_changes": [[0, serde_json::to_value(&beat.remux.rows[0]).unwrap()]],
+                    "clock": "5s elapsed",
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn test_the_inspector_the_controls_and_the_chips_go_as_whole_values() {
+        let prev = state(1, &["ep1", "ep2"]);
+        let mut picked = next(&prev);
+        let view = &picked.remux;
+        let inspector = inspector_view(true, view, 1, &view.rows[1], None, None);
+        picked.remux.inspector = Some(inspector.clone());
+        let hold = Hold {
+            owner: Some(PipelineMode::Remux),
+            stopping: false,
+            busy: true,
+        };
+        picked.remux.controls = controls(PipelineMode::Remux, &picked.remux, &hold);
+        picked.chips = chips(true, None, None);
+        assert_eq!(
+            patch(&prev, &picked),
+            json!({
+                "seq": 2,
+                "base": 1,
+                // Literal, so a renamed key fails here; the inspector's own shape is pinned in
+                // the core's inspector tests.
+                "chips": {
+                    "workers": "Workers Active",
+                    "workers_hint": null,
+                    "io_jobs": "IO Jobs Active",
+                    "io_jobs_hint": null,
+                },
+                "remux": {
+                    "inspector": serde_json::to_value(&inspector).unwrap(),
+                    "controls": {
+                        "owns": true,
+                        "run_disabled": true,
+                        "run_label": "Run remux",
+                        "run_title": "",
+                        "selection_locked": true,
+                        "status": { "class": "status-running", "label": "Running" },
+                        "stop_disabled": false,
+                        "stop_label": "Stop",
+                    },
+                },
+            })
+        );
+        let mut cleared = next(&picked);
+        cleared.remux.inspector = None;
+        assert_eq!(
+            patch(&picked, &cleared),
+            json!({ "seq": 3, "base": 2, "remux": { "inspector": null } })
+        );
+    }
+
+    #[test]
     fn test_each_patch_merged_into_the_previous_state_is_the_next_state() {
         // A scan, a start, a job's progress and its end, as the actor publishes them.
         let empty = ViewState::new(Some(EffectiveSettings::defaults()));
@@ -321,9 +428,35 @@ mod tests {
         scanned.remux.scan = ScanView::Idle;
         scanned.remux.manifest_rev = 1;
         scanned.remux.rows = Arc::new(vec![row("ep1"), row("ep2"), row("ep3")]);
+        scanned.remux.title = "anime".into();
+        scanned.remux.crumbs = vec!["anime".into()];
+        scanned.remux.count_text = "3 / 3 Selected".into();
+        scanned.remux.filters = Filters {
+            all: 3,
+            todo: 3,
+            ..Filters::default()
+        };
+        scanned.remux.selected_count = 3;
+        scanned.remux.total_count = 3;
+        scanned.remux.library = vec![LibraryEntry {
+            release: None,
+            label: "anime".into(),
+            tooltip: "anime".into(),
+            count: 3,
+            group_label: "anime".into(),
+        }];
+        let view = &scanned.remux;
+        scanned.remux.inspector = Some(inspector_view(true, view, 0, &view.rows[0], None, None));
         let mut starting = next(&scanned);
         starting.run.phase = Phase::Starting;
         starting.busy = true;
+        let hold = Hold {
+            owner: Some(PipelineMode::Remux),
+            stopping: false,
+            busy: true,
+        };
+        starting.remux.controls = controls(PipelineMode::Remux, &starting.remux, &hold);
+        starting.chips = chips(true, None, Some(&EffectiveSettings::defaults()));
         let mut running = next(&starting);
         running.run.phase = Phase::Running;
         running.job = Some(job());
@@ -332,12 +465,27 @@ mod tests {
             row.participant = true;
         }
         rows[0].status = ItemStatus::Processing;
+        rows[0].label = "Processing · 0s".into();
         running.remux.rows = Arc::new(rows.clone());
-        let mut progressed = next(&running);
+        running.remux.count_text = "0 of 2 · 0 done".into();
+        running.remux.clock = "0s elapsed".into();
+        running.remux.progress = Progress {
+            live: 2.5,
+            ..Progress::default()
+        };
+        // A beat: only the label and the clock move.
+        let mut beat = next(&running);
+        rows[0].label = "Processing · 1s".into();
+        beat.remux.rows = Arc::new(rows.clone());
+        beat.remux.clock = "1s elapsed".into();
+        let mut progressed = next(&beat);
         rows[0].status = ItemStatus::Completed;
         rows[1].status = ItemStatus::Processing;
         rows[1].progress = Some(12.5);
         progressed.remux.rows = Arc::new(rows);
+        progressed.remux.count_text = "1 of 2 · 1 done".into();
+        progressed.remux.filters.done = 1;
+        progressed.remux.filters.todo = 2;
         let mut ended = next(&progressed);
         ended.run.phase = Phase::Idle;
         ended.busy = false;
@@ -347,9 +495,12 @@ mod tests {
         reset.job = None;
         reset.remux.rows = Arc::new(Vec::new());
         reset.remux.manifest_rev = 2;
+        reset.remux.library = Vec::new();
+        reset.remux.clock = "Not started".into();
+        reset.remux.inspector = None;
 
         let states = [
-            empty, scanning, scanned, starting, running, progressed, ended, reset,
+            empty, scanning, scanned, starting, running, beat, progressed, ended, reset,
         ];
         let mut applied = serde_json::to_value(&states[0]).unwrap();
         for pair in states.windows(2) {

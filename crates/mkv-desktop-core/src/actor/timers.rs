@@ -3,10 +3,17 @@
 //! never while the view is hidden, and never twice at once. A sample is taken at once when the
 //! actor starts, when the view is shown again and when the batch is taken or released (or as soon
 //! as the sample in flight is back).
+//!
+//! The Presentation Heartbeat (S4c) beats once a second while the batch clock runs (a job is
+//! active, past a `BatchStart` that named an item, and its batch has not ended) and the view is
+//! visible, on whole seconds of the job's clock. A beat only marks the job's mode changed: the
+//! publication it leads to presents the elapsed times and the clock as of then, within the
+//! publication cap. Showing the view again refreshes them at once.
 
 use super::{Core, Msg, Publisher};
 use crate::control::Launcher;
 use crate::inspection::Inspector;
+use crate::snapshot::BatchStatus;
 use crate::telemetry::{Sampler, TelemetryData, TelemetryView};
 use std::sync::Arc;
 use std::time::Duration;
@@ -102,7 +109,39 @@ impl<P: Publisher, I: Inspector, L: Launcher, S: Sampler> Core<P, I, L, S> {
         }
         self.telemetry.visible = visible;
         self.restart_telemetry();
+        // The labels and the clock stood still while hidden.
+        if self.beat_runs() {
+            self.touch_job();
+        }
         true
+    }
+
+    /// Whether the Presentation Heartbeat runs: the view is visible and the batch clock runs.
+    fn beat_runs(&self) -> bool {
+        self.telemetry.visible
+            && self.active
+            && self.snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot.status == BatchStatus::Running && !snapshot.ordered_item_ids.is_empty()
+            })
+    }
+
+    /// Fires a due beat, then arms the next on the job clock's next whole second, or disarms
+    /// the heartbeat when it no longer runs. Called after every step of the loop, so a steady
+    /// inbox cannot starve it.
+    pub(super) fn beat_if_due(&mut self) {
+        let (true, Some(started_at)) = (self.beat_runs(), self.job_started_at) else {
+            self.beat_at = None;
+            return;
+        };
+        let now = Instant::now();
+        if self.beat_at.is_some_and(|at| at <= now) {
+            self.touch_job();
+            self.beat_at = None;
+        }
+        if self.beat_at.is_none() {
+            let beats = now.saturating_duration_since(started_at).as_secs() + 1;
+            self.beat_at = Some(started_at + Duration::from_secs(beats));
+        }
     }
 
     /// Takes a sample off the actor, unless one is in flight.
@@ -137,6 +176,7 @@ mod tests {
     use super::{BUSY_PERIOD, IDLE_PERIOD};
     use crate::actor::tests::*;
     use crate::actor::*;
+    use crate::snapshot::test_support::{batch_complete, batch_start, item_complete, item_start};
     use crate::telemetry::TelemetryData;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
@@ -189,6 +229,115 @@ mod tests {
         Intent::ViewVisible { visible }
     }
 
+    const BEAT: Duration = Duration::from_secs(1);
+
+    /// A core whose telemetry sample never comes back, so only the job and the heartbeat
+    /// publish, with job 1 started at the instant it returns last.
+    async fn beating_core() -> (CoreHandle, RecordingPublisher, ActorSink, Instant) {
+        let publisher = RecordingPublisher::default();
+        let core = ready(publisher.clone(), FakeInspector::default());
+        let sink = core.job_sink();
+        let start = Instant::now();
+        sink.started(&started(1));
+        settle().await;
+        (core, publisher, sink, start)
+    }
+
+    /// The first remux row's status label and the remux clock, as last published.
+    async fn shown(core: &CoreHandle) -> (String, String) {
+        let state = core.state().await.unwrap();
+        (state.remux.rows[0].label.clone(), state.remux.clock)
+    }
+
+    fn pair(label: &str, clock: &str) -> (String, String) {
+        (label.into(), clock.into())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_the_heartbeat_advances_the_labels_and_the_clock_each_second() {
+        let (core, publisher, sink, start) = beating_core().await;
+        sink.event(&batch_start(&["ep1", "ep2"]));
+        sink.event(&item_start("ep1"));
+        tokio::time::sleep(PUBLISH_INTERVAL * 2).await;
+        assert_eq!(shown(&core).await, pair("Processing · 0s", "0s elapsed"));
+        let published = publisher.states().len();
+        for second in 1..=3u32 {
+            tokio::time::sleep_until(start + BEAT * second).await;
+            settle().await;
+            assert_eq!(
+                shown(&core).await,
+                pair(
+                    &format!("Processing · {second}s"),
+                    &format!("{second}s elapsed")
+                )
+            );
+            // One publication a beat, and only the job's rows and clock changed.
+            assert_eq!(publisher.states().len(), published + second as usize);
+        }
+        // A queued participant shows no time.
+        assert_eq!(core.state().await.unwrap().remux.rows[1].label, "Queued");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_the_beats_fall_on_whole_seconds_of_the_jobs_clock() {
+        let (core, _publisher, sink, start) = beating_core().await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        sink.event(&batch_start(&["ep1"]));
+        sink.event(&item_start("ep1"));
+        tokio::time::sleep_until(start + BEAT - Duration::from_millis(1)).await;
+        settle().await;
+        assert_eq!(shown(&core).await, pair("Processing · 0s", "0s elapsed"));
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        settle().await;
+        // The item started 300 ms into the job: its label lags the clock.
+        assert_eq!(shown(&core).await, pair("Processing · 0s", "1s elapsed"));
+        tokio::time::sleep_until(start + BEAT * 2).await;
+        settle().await;
+        assert_eq!(shown(&core).await, pair("Processing · 1s", "2s elapsed"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_the_heartbeat_runs_only_while_the_batch_clock_runs() {
+        let (core, publisher, sink, _) = beating_core().await;
+        // Before `BatchStart` the clock has not started.
+        tokio::time::sleep(BEAT * 3).await;
+        assert_eq!(publisher.states().len(), 1);
+        sink.event(&batch_start(&["ep1"]));
+        sink.event(&item_start("ep1"));
+        tokio::time::sleep(BEAT * 2).await;
+        sink.event(&item_complete("ep1", 2.5));
+        sink.event(&batch_complete(true, false));
+        tokio::time::sleep(PUBLISH_INTERVAL * 2).await;
+        assert_eq!(shown(&core).await, pair("Done in 2.5s", "Finished"));
+        let published = publisher.states().len();
+        // The batch ended, though the job is still active until its done.
+        tokio::time::sleep(BEAT * 10).await;
+        assert_eq!(publisher.states().len(), published);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_hiding_the_view_pauses_the_heartbeat_and_showing_it_refreshes_at_once() {
+        let (core, publisher, sink, start) = beating_core().await;
+        sink.event(&batch_start(&["ep1"]));
+        sink.event(&item_start("ep1"));
+        tokio::time::sleep(PUBLISH_INTERVAL * 2).await;
+        assert_eq!(core.dispatch(visible(false)).await, Ok(true));
+        let published = publisher.states().len();
+        tokio::time::sleep(BEAT * 5).await;
+        assert_eq!(publisher.states().len(), published);
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(core.dispatch(visible(true)).await, Ok(true));
+        // At once, not at the next beat: the last publication is long past.
+        settle().await;
+        assert_eq!(publisher.states().len(), published + 1);
+        assert_eq!(shown(&core).await, pair("Processing · 5s", "5s elapsed"));
+        // Then on the job clock's whole seconds again.
+        tokio::time::sleep_until(start + BEAT * 6).await;
+        settle().await;
+        assert_eq!(shown(&core).await, pair("Processing · 6s", "6s elapsed"));
+    }
+
     #[tokio::test(start_paused = true)]
     async fn test_telemetry_is_sampled_at_once_then_every_idle_period() {
         let sampler = FakeSampler::default();
@@ -202,7 +351,7 @@ mod tests {
         settle().await;
         assert_eq!(sampler.calls(), 2);
         // The sample is published, not forced: within one publication interval.
-        tokio::time::sleep(PUBLISH_INTERVAL).await;
+        tokio::time::sleep(PUBLISH_INTERVAL * 2).await;
         let telemetry = core.state().await.unwrap().telemetry.unwrap();
         assert_eq!(telemetry.cpu, "2%");
         assert_eq!(Vec::from(telemetry.samples.cpu), [1.0, 2.0]);
@@ -414,12 +563,12 @@ mod tests {
 
         tokio::time::sleep(IDLE_PERIOD).await;
         settle().await;
-        tokio::time::sleep(PUBLISH_INTERVAL).await;
+        tokio::time::sleep(PUBLISH_INTERVAL * 2).await;
         let shown = core.state().await.unwrap().telemetry.unwrap();
         assert_eq!(shown.cpu, "2%");
         tokio::time::sleep(IDLE_PERIOD).await;
         settle().await;
-        tokio::time::sleep(PUBLISH_INTERVAL).await;
+        tokio::time::sleep(PUBLISH_INTERVAL * 2).await;
         assert_eq!(sampler.calls(), 3);
         assert_eq!(core.state().await.unwrap().telemetry, Some(shown));
         tokio::time::sleep(IDLE_PERIOD).await;
@@ -434,9 +583,20 @@ mod tests {
         let sampler = FakeSampler::default();
         let (core, publisher) = core_with(sampler.clone(), FakeLauncher::default());
         settle().await;
+        // A job that ran a batch and ended leaves no heartbeat behind.
+        let sink = core.job_sink();
+        sink.started(&started(1));
+        sink.event(&batch_start(&["ep1"]));
+        sink.event(&item_start("ep1"));
+        tokio::time::sleep(BEAT * 2).await;
+        sink.event(&item_complete("ep1", 2.0));
+        sink.event(&batch_complete(true, false));
+        sink.done(&done(1, 0));
+        drop(sink);
+        settle().await;
         assert_eq!(core.dispatch(visible(false)).await, Ok(true));
         // The first sample's publication.
-        tokio::time::sleep(PUBLISH_INTERVAL).await;
+        tokio::time::sleep(PUBLISH_INTERVAL * 2).await;
         let (calls, published) = (sampler.calls(), publisher.all().len());
 
         tokio::time::sleep(Duration::from_secs(3600)).await;

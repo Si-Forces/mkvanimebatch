@@ -1,7 +1,7 @@
 /**
  * The settings sheet as a mirror of each mode's Settings Draft, which the Desktop Core holds: every
  * edit of a field sends `edit_draft` (a checkbox on change, any other field on input and change),
- * and every published draft is written back into the fields.
+ * a stepper click sends `step_draft`, and every published draft is written back into the fields.
  * The draft keys a mode does not have are not in its draft, and their fields are not on the page.
  */
 
@@ -39,18 +39,18 @@ export function createSettingsDraft({ doc, dispatch, published }) {
   const pending = new Map();
 
   /**
-   * Sends the value `el` now holds as the draft's `key`; call it after setting a field from code.
+   * Sends `intent`, which edits the draft's `key`, marking the key pending until it is answered.
    * A refused edit (a busy batch locks the draft) changed nothing in the core, which then
    * publishes nothing, so the field gets the published value back unless a later edit is pending.
    */
-  async function send(mode, key, el) {
+  async function guarded(mode, key, intent) {
     const id = `${mode}:${key}`;
     pending.set(id, (pending.get(id) ?? 0) + 1);
     let refused = false;
     try {
-      await dispatch({ type: "edit_draft", mode, changes: { [key]: isCheckbox(el) ? el.checked : el.value } });
+      await dispatch(intent);
     } catch (err) {
-      console.error("[edit_draft] refused:", err);
+      console.error(`[${intent.type}] refused:`, err);
       refused = true;
     } finally {
       if (pending.get(id) === 1) pending.delete(id);
@@ -60,6 +60,16 @@ export function createSettingsDraft({ doc, dispatch, published }) {
       const value = published(mode)?.[key];
       if (value !== undefined) apply(mode, { [key]: value }, { force: true });
     }
+  }
+
+  /** Sends the value `el` now holds as the draft's `key`; call it after setting a field from code. */
+  function send(mode, key, el) {
+    return guarded(mode, key, { type: "edit_draft", mode, changes: { [key]: isCheckbox(el) ? el.checked : el.value } });
+  }
+
+  /** Steps the draft's `key` one step `direction` ("up" or "down"); the core does the arithmetic. */
+  function step(mode, key, direction) {
+    return guarded(mode, key, { type: "step_draft", mode, field: key, direction });
   }
 
   /**
@@ -103,5 +113,5 @@ export function createSettingsDraft({ doc, dispatch, published }) {
     return written;
   }
 
-  return { bind, apply, send };
+  return { bind, apply, send, step };
 }
