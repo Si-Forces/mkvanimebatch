@@ -2,6 +2,7 @@ mod commands;
 mod diagnostics;
 mod process;
 mod publisher;
+mod view_patch;
 mod window;
 
 use mkv_desktop_core::actor::{Core, Ports};
@@ -101,7 +102,7 @@ pub fn run() {
             };
             app.manage(Core::spawn(
                 tauri::async_runtime::handle().inner().clone(),
-                WebviewPublisher(app.handle().clone()),
+                WebviewPublisher::new(app.handle().clone()),
                 ports,
             ));
             Ok(())

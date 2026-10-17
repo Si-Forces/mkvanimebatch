@@ -1,5 +1,3 @@
-import { isBusy } from "./presentation.js";
-
 /** Inputs whose empty state means the engine's default, as [input id, Effective Settings key]. */
 const AUTO_INPUTS = ["remux", "extract"].flatMap(mode => [
   [`${mode}-workers`, "workers"],
@@ -45,7 +43,7 @@ export function createSettingsChips({ doc }) {
         input.dataset.autoValue = String(defaults[field]);
       }
     }
-    const busy = isBusy(state);
+    const busy = state?.busy === true;
     const settings = busy ? state.run?.settings ?? (state.job?.active ? state.job.effective_settings : null) ?? null : defaults;
     setChips(".metric-workers-chip", chipText(busy, "Standby", settings?.workers, "Workers"));
     setChips(".metric-iojobs-chip", chipText(busy, "Idle", settings?.io_jobs, "IO Jobs"));

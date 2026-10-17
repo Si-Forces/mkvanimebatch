@@ -175,7 +175,10 @@ function runLog(mode) {
 
 /**
  * A Desktop Core over a scripted View State. `state` is the next state to publish; change it, then
- * `publish()` bumps `seq` and hands a copy to every `onPublish` listener (the `view-state` event).
+ * `publish()` bumps `seq` and hands a copy to every `onPublish` listener (the `view-state` event);
+ * `publishPatch(changes)` bumps it and hands them over as a patch, `{seq, base, ...changes}`, the
+ * way `src-tauri/src/view_patch.rs` sends what changed (the test changes `state` to match). Every
+ * whole state carries `busy`.
  * `invoke(command, args)` answers `get_state` and `dispatch`: a queue Intent is applied to
  * `state` as the core would: refused while a job runs or the mode scans, a Track Assignment is
  * refused on extract, and only the manifest rows take Intents. A Settings Draft Intent follows
@@ -190,7 +193,7 @@ function runLog(mode) {
  * (`starting`, its outcome reset) and `onStart(intent)` scripts the rest: by default
  * `launch(mode)`, which runs a job over the mode's selected rows. Its answer is the Run's. A Stop
  * of the owning mode ends the job, or the start, as cancelled (`end`) and answers true; of any
- * other, false. Busy is `run.phase` not idle, or an active job, as `isBusy` reads it.
+ * other, false. Busy is `run.phase` not idle, or an active job.
  *
  * Each mode has a Run Log (`runLog`): `log(mode, lines)` appends to it and hands the batch to every
  * `onLog` listener (the `job-log` event), and `get_log` answers it. Like the core, a Run answered
@@ -220,7 +223,8 @@ export function createFakeCore({ onScan = async () => true, onStart = null } = {
     onScan,
     onStart: onStart ?? (({ mode }) => core.launch(mode)),
     intents: [],
-    // The core's `busy()` (`crates/mkv-desktop-core/src/actor.rs`), as `isBusy` in `presentation.js` reads it.
+    // The published `busy`, from the core's `busy()` (`crates/mkv-desktop-core/src/actor.rs`
+    // holds the rule; change it there first).
     busy: () => core.state.run.phase !== "idle" || Boolean(core.state.job?.active),
     /** Launches job `job_id` of the starting `mode` over its selected rows, and publishes it running. */
     launch(mode, job_id = (core.state.job?.job_id ?? 0) + 1) {
@@ -246,11 +250,19 @@ export function createFakeCore({ onScan = async () => true, onStart = null } = {
     log(mode, lines) {
       emitLog(logs[mode].push(lines));
     },
+    /** The whole View State as the core publishes it. */
+    snapshot: () => ({ ...structuredClone(core.state), busy: core.busy() }),
     publish() {
       core.state.seq++;
-      const copy = structuredClone(core.state);
+      const copy = core.snapshot();
       for (const listener of listeners) listener(copy);
       return copy;
+    },
+    publishPatch(changes = {}) {
+      core.state.seq++;
+      const patch = { seq: core.state.seq, base: core.state.seq - 1, ...structuredClone(changes) };
+      for (const listener of listeners) listener(patch);
+      return patch;
     },
     /** Accepts `rows` as the inspection of `directory` for `mode`, as a new manifest. */
     accept(mode, directory, rows, fields = {}) {
@@ -259,7 +271,7 @@ export function createFakeCore({ onScan = async () => true, onStart = null } = {
       return core.publish();
     },
     async invoke(command, args) {
-      if (command === "get_state") return structuredClone(core.state);
+      if (command === "get_state") return core.snapshot();
       if (command === "get_log") return logs[args.mode].view();
       if (command !== "dispatch") return undefined;
       const { intent } = args;

@@ -317,8 +317,10 @@ export class QueueTracker {
    *
    * @param {object} view a ModeView
    * @param {object|null} job the Job View, or null
+   * @param {"all"|number[]} changedRows the indices of the rows that changed since the last view
+   *   (`nextState` in `view-patch.js`), or "all"; only their cards are redrawn
    */
-  applyView(view, job = null) {
+  applyView(view, job = null, changedRows = "all") {
     const previous = this.view;
     this.view = view;
     this.state = projectState(view, job?.mode === this.mode ? job : null);
@@ -333,7 +335,7 @@ export class QueueTracker {
     if (this.isScanning) this.showScanning(previous, view.scan.directory);
     else if (view.scan?.state === "failed") this.showFailure();
     else if (this.state.order.length === 0) this.showEmpty();
-    else this.showRows(previous, assignmentsChanged);
+    else this.showRows(previous, assignmentsChanged, changedRows);
     // A view with nothing processing ends the heartbeat at once, as a finished job's does.
     if (!this.hasProcessingItems()) this.stopHeartbeat();
     this.onChange?.();
@@ -397,7 +399,7 @@ export class QueueTracker {
    * shown, with the same IDs in the same order, updates the rows in place; the same rows in
    * another order are moved; any other row set rebuilds the list.
    */
-  showRows(previous, assignmentsChanged) {
+  showRows(previous, assignmentsChanged, changedRows) {
     const { order } = this.state;
     const wasRows = this.shown === "rows";
     this.shown = "rows";
@@ -407,7 +409,7 @@ export class QueueTracker {
       // A pending render mounts each row from the current state, so only another row set or
       // another manifest restarts it; otherwise the rows already mounted are redrawn.
       if (sameSequence(this.renderingOrder, order) && previous.manifest_rev === this.view.manifest_rev) {
-        this.updateCards(assignmentsChanged);
+        this.updateCards(assignmentsChanged, changedRows);
       }
       else this.renderCardsIncrementally();
     } else if (previous.manifest_rev !== this.view.manifest_rev) {
@@ -417,7 +419,7 @@ export class QueueTracker {
         this.renderCardsIncrementally();
       }
     } else if (sameSequence(this.renderedOrder, order)) {
-      this.updateCards(assignmentsChanged);
+      this.updateCards(assignmentsChanged, changedRows);
     } else if (this.renderedOrder.length === order.length && order.every(id => this.cards.has(id))) {
       this.moveCards();
       this.updateCards(assignmentsChanged);
@@ -427,12 +429,21 @@ export class QueueTracker {
     this.renderQueueCount();
   }
 
-  /** Redraws each mounted row's selection and status, and its meta line when the assignments changed. */
-  updateCards(assignmentsChanged) {
+  /**
+   * Redraws the selection and status of the mounted rows in `changedRows` (indices, or "all"), and
+   * every row's meta line when the assignments changed.
+   */
+  updateCards(assignmentsChanged, changedRows = "all") {
     let changed = false;
-    for (const [id, card] of this.cards) {
+    // New assignments change every card's meta line, whichever rows changed.
+    const all = assignmentsChanged || changedRows === "all";
+    const ids = all
+      ? this.cards.keys()
+      : changedRows.map(index => this.state.order[index]);
+    for (const id of ids) {
+      const card = this.cards.get(id);
       const item = this.state.items.get(id);
-      if (!item) continue;
+      if (!card || !item) continue;
       const selected = item.selected !== false;
       if (card.checkbox.checked !== selected) {
         card.checkbox.checked = selected;

@@ -131,6 +131,9 @@ pub struct ViewState {
     pub seq: u64,
     pub job: Option<JobView>,
     pub run: RunView,
+    /// Whether a start or a job holds the batch, which locks both queues and both drafts: the
+    /// run phase is not idle, or a job is active.
+    pub busy: bool,
     /// The Effective Settings of a request that sets nothing, for the `auto (N)` hints: `None`
     /// until the actor has read the CPU topology once it started.
     pub defaults: Option<EffectiveSettings>,
@@ -199,7 +202,9 @@ pub struct ModeView {
     pub manifest_rev: u64,
     /// External subtitles a human can assign, by Release Directory.
     pub subtitle_candidates: BTreeMap<String, Vec<String>>,
-    pub rows: Vec<Row>,
+    /// Shared, so a copy of an unchanged mode, such as the one a webview adapter keeps to diff
+    /// against, is a pointer copy. Serializes as the list itself.
+    pub rows: Arc<Vec<Row>>,
     pub vanished_selected_ids: Vec<String>,
     /// Track Assignments by item ID (remux only).
     pub assignments: BTreeMap<String, TrackAssignment>,
@@ -216,6 +221,7 @@ impl ViewState {
             seq: 0,
             job: None,
             run: RunView::default(),
+            busy: false,
             defaults,
             presets: get_preset_profiles(),
             remux: ModeState::new(PipelineMode::Remux).view(None),
@@ -440,7 +446,7 @@ impl ModeState {
             scan: self.scan.clone(),
             manifest_rev: queue.manifest_rev(),
             subtitle_candidates: queue.subtitle_candidates(),
-            rows: queue.rows(job),
+            rows: Arc::new(queue.rows(job)),
             vanished_selected_ids: queue.vanished_selected_ids().to_vec(),
             assignments: queue.assignments().clone(),
             draft: self.draft.clone(),
@@ -1135,6 +1141,7 @@ impl<P: Publisher, I: Inspector, L: Launcher, S: Sampler> Core<P, I, L, S> {
             mode: self.coordinator.owner(),
             settings: self.run_settings.clone(),
         };
+        self.last_published.busy = self.busy();
         self.last_published.defaults.clone_from(&self.defaults);
         self.last_published
             .telemetry
@@ -1416,6 +1423,34 @@ mod tests {
         assert_eq!(core.state().await.unwrap().job, None);
     }
 
+    /// What `busy` must read in every published state: the run phase is not idle, or a job is
+    /// active. `actor::start` tests check it over the starting, running and stopping phases.
+    pub(super) fn assert_busy_follows_the_phase_and_the_job(states: &[ViewState]) {
+        for state in states {
+            let active = state.job.as_ref().is_some_and(|job| job.active);
+            assert_eq!(
+                state.busy,
+                state.run.phase != Phase::Idle || active,
+                "{state:?}"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_busy_is_published_while_a_job_is_active_even_with_the_phase_idle() {
+        let (core, publisher) = spawn_core();
+        assert!(!core.state().await.unwrap().busy);
+        // A job the actor did not start, as a sink reports it: the phase stays idle.
+        let sink = core.job_sink();
+        sink.started(&started(1));
+        let state = core.state().await.unwrap();
+        assert_eq!(state.run.phase, Phase::Idle);
+        assert!(state.busy);
+        sink.done(&done(1, 0));
+        assert!(!core.state().await.unwrap().busy);
+        assert_busy_follows_the_phase_and_the_job(&publisher.states());
+    }
+
     #[tokio::test(start_paused = true)]
     async fn test_a_sink_dropped_after_done_publishes_nothing_more() {
         let (core, publisher) = spawn_core();
@@ -1655,9 +1690,26 @@ mod tests {
                 directory: "/anime".into(),
             },
             manifest_rev: 2,
+            rows: Arc::new(vec![Row {
+                id: "ep1".into(),
+                name: "ep1.mkv".into(),
+                release: ".".into(),
+                metadata: None,
+                inspection_error: None,
+                in_manifest: true,
+                selected: true,
+                status: ItemStatus::Processing,
+                progress: Some(40.0),
+                start_time_ms: Some(1_700_000_000_500),
+                duration_sec: None,
+                reason: None,
+                error: None,
+                participant: true,
+            }]),
             vanished_selected_ids: vec!["ep9".into()],
             ..empty(REMUX)
         };
+        let row = serde_json::to_value(&remux.rows[0]).unwrap();
         remux
             .subtitle_candidates
             .insert(".".into(), vec!["ep1.ass".into()]);
@@ -1688,6 +1740,7 @@ mod tests {
                 mode: Some(REMUX),
                 settings: Some(effective_settings()),
             },
+            busy: true,
             job: Some(JobView {
                 job_id: 7,
                 mode: "remux".into(),
@@ -1739,6 +1792,7 @@ mod tests {
                         "complexity": 8
                     }
                 },
+                "busy": true,
                 "defaults": serde_json::to_value(EffectiveSettings::defaults()).unwrap(),
                 "presets": [
                     { "id": "balanced", "name": "Balanced", "bitrate": "192k", "complexity": 5 }
@@ -1748,7 +1802,8 @@ mod tests {
                     "scan": { "state": "scanning", "directory": "/anime" },
                     "manifest_rev": 2,
                     "subtitle_candidates": { ".": ["ep1.ass"] },
-                    "rows": [],
+                    // The shared rows serialize as the list itself.
+                    "rows": [row],
                     "vanished_selected_ids": ["ep9"],
                     "assignments": {
                         "ep1": {
@@ -1789,6 +1844,7 @@ mod tests {
         assert_eq!(idle["job"], Value::Null);
         assert_eq!(idle["defaults"], Value::Null);
         assert_eq!(idle["telemetry"], Value::Null);
+        assert_eq!(idle["busy"], false);
         assert_eq!(
             idle["run"],
             serde_json::json!({ "phase": "idle", "mode": null, "settings": null })
