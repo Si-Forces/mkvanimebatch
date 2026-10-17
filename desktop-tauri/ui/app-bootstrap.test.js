@@ -580,51 +580,43 @@ test("a draft Intent takes its state from the publication, with no get_state aft
   assert.ok(commands().slice(1).includes("get_state"), commands().join(", "));
 });
 
-for (const { label, input, expected } of [
-  { label: "empty string", input: "", expected: null },
-  { label: "whitespace string", input: "   ", expected: null },
-  { label: "exponential notation 1e3", input: "1e3", expected: 1000 },
-  { label: "negative fraction -250.9", input: "-250.9", expected: -250 },
-  { label: "beyond the safe-integer range 1e20", input: "1e20", expected: null },
-]) {
-  test(`track-assignment offset parsing: ${label} produces ${expected}`, async t => {
-    const ipc = bootstrapHarness(t, { pick_subtitle_file: "/custom/sub.ass" });
-    const assignSelect = new BootElement();
-    const offsetInput = new BootElement();
-    const langSelect = new BootElement("ind");
-    const titleInput = new BootElement();
-    ipc.elements.set("sub-assign-select", assignSelect);
-    ipc.elements.set("sub-offset-input", offsetInput);
-    ipc.elements.set("sub-lang-select", langSelect);
-    ipc.elements.set("sub-title-input", titleInput);
+test("a picked subtitle goes to the core as assign_subtitle with the inspector's fields as typed", async t => {
+  const ipc = bootstrapHarness(t, { pick_subtitle_file: "/custom/sub.ass" });
+  const assignSelect = new BootElement();
+  const fields = {
+    "sub-lang-select": new BootElement("custom"),
+    "sub-lang-custom": new BootElement(" may "),
+    "sub-title-input": new BootElement(" Signs "),
+    "sub-offset-input": new BootElement(" -250.9 "),
+  };
+  ipc.elements.set("sub-assign-select", assignSelect);
+  for (const [id, el] of Object.entries(fields)) ipc.elements.set(id, el);
 
-    await ipc.mount(`sub-offset-${label.replace(/\s+/g, "-")}`);
-    assert.equal(await ipc.scan("remux", "/release"), true);
-    ipc.resolveState();
-    await ipc.flush();
+  await ipc.mount("sub-assign-raw");
+  assert.equal(await ipc.scan("remux", "/release"), true);
+  ipc.resolveState();
+  await ipc.flush();
 
-    // Pick the row into the inspector, then choose a subtitle file from its assign select.
-    const list = ipc.elements.get("remux-episode-list");
-    list.handlers.get("click")({
-      target: { closest: selector => (selector === ".ep-pick" ? { dataset: { itemId: "one" } } : null) },
-    });
-    offsetInput.value = input;
-    assignSelect.value = "__browse__";
-    await assignSelect.handlers.get("change")({ target: assignSelect });
-
-    await ipc.flush();
-
-    // The core builds the request from what it holds; the Intent carries the parsed offset.
-    assert.deepEqual(ipc.core.intents.find(intent => intent.type === "assign_track").assignment, {
-      target_video: "one",
-      asset_path: "/custom/sub.ass",
-      track_type: "subtitle",
-      language: "ind",
-      title: null,
-      offset_ms: expected,
-    });
+  // Pick the row into the inspector, then choose a subtitle file from its assign select.
+  ipc.elements.get("remux-episode-list").handlers.get("click")({
+    target: { closest: selector => (selector === ".ep-pick" ? { dataset: { itemId: "one" } } : null) },
   });
-}
+  assignSelect.value = "__browse__";
+  await assignSelect.handlers.get("change")({ target: assignSelect });
+  await ipc.flush();
+
+  // The core trims and parses them (`inspector::subtitle_assignment`); the view sends them raw.
+  assert.deepEqual(ipc.core.intents.find(intent => intent.type === "assign_subtitle"), {
+    type: "assign_subtitle",
+    mode: "remux",
+    id: "one",
+    path: "/custom/sub.ass",
+    language: "custom",
+    custom_language: " may ",
+    title: " Signs ",
+    offset: " -250.9 ",
+  });
+});
 
 test("choosing a custom language tag keeps the tag box open until the tag is typed", async t => {
   const ipc = bootstrapHarness(t, { pick_subtitle_file: "/custom/sub.ass" });
@@ -661,7 +653,7 @@ test("choosing a custom language tag keeps the tag box open until the tag is typ
   langCustom.value = "may";
   langCustom.handlers.get("change")();
   await ipc.flush();
-  assert.equal(ipc.core.intents.at(-1).assignment.language, "may");
+  assert.equal(ipc.core.intents.at(-1).custom_language, "may");
   assert.equal(ipc.core.state.remux.assignments.one.language, "may");
 });
 

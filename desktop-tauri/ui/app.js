@@ -508,15 +508,12 @@ function renderSubtitleSection(insp) {
   const opts = byId("sub-assign-opts");
   if (opts) opts.hidden = !assignment;
 
-  // An assignment's null language is a custom tag not typed yet, not the "ind" default.
-  const lang = assignment ? assignment.language : "ind";
-  const preset = PRESET_SUBTITLE_LANGUAGES.includes(lang);
   const langSelect = byId("sub-lang-select");
-  if (langSelect) langSelect.value = preset ? lang : "custom";
+  if (langSelect) langSelect.value = insp.language_choice;
   const langCustom = byId("sub-lang-custom");
-  if (langCustom) langCustom.value = preset ? "" : (lang || "");
+  if (langCustom) langCustom.value = insp.custom_language;
   const customLabel = byId("sub-lang-custom-label");
-  if (customLabel) customLabel.hidden = preset;
+  if (customLabel) customLabel.hidden = insp.language_choice !== "custom";
   const title = byId("sub-title-input");
   if (title) title.value = assignment?.title || "";
   const offset = byId("sub-offset-input");
@@ -525,40 +522,26 @@ function renderSubtitleSection(insp) {
 
 // ─── GUI Manual Subtitle Selection ──────────────────────────────────────────
 
-const PRESET_SUBTITLE_LANGUAGES = ["ind", "eng", "jpn"];
 const BROWSE_SUBTITLE = "__browse__";
 
 /**
- * The Track Assignment for `itemId` and `path`, from the inspector's language, title and offset.
- * Still the view's (out of S4): a view that builds a request is logic the core could own.
+ * Sets (or, with no path, clears) the inspected item's Track Assignment. The core builds it from the
+ * inspector's fields as typed (`inspector::subtitle_assignment`). Refused while a job runs.
  */
-function subtitleAssignment(itemId, path) {
-  let language = byId("sub-lang-select")?.value || "ind";
-  if (language === "custom") {
-    language = byId("sub-lang-custom")?.value?.trim() || null;
-  }
-  // `offset_ms` is an i64 and serde rejects a float, so a fraction is truncated. An
-  // empty field must stay null (Number("") is 0, which would suppress the global offset),
-  // and a value beyond the safe-integer range would fail the whole Intent.
-  const raw = byId("sub-offset-input")?.value?.trim() ?? "";
-  const truncatedMs = Math.trunc(Number(raw));
-  const offsetMs = raw !== "" && Number.isSafeInteger(truncatedMs) ? truncatedMs : null;
-  return {
-    target_video: itemId,
-    asset_path: path,
-    track_type: "subtitle",
-    language,
-    title: byId("sub-title-input")?.value?.trim() || null,
-    offset_ms: offsetMs,
-  };
-}
-
-/** Sets (or, with no path, clears) the inspected item's Track Assignment. Refused while a job runs. */
 async function assignSubtitle(path) {
   const insp = remuxQueue.view.inspector;
   if (!insp || busy()) return;
   await dispatchIntent(path
-    ? { type: "assign_track", mode: "remux", assignment: subtitleAssignment(insp.id, path) }
+    ? {
+      type: "assign_subtitle",
+      mode: "remux",
+      id: insp.id,
+      path,
+      language: byId("sub-lang-select")?.value ?? "",
+      custom_language: byId("sub-lang-custom")?.value ?? "",
+      title: byId("sub-title-input")?.value ?? "",
+      offset: byId("sub-offset-input")?.value ?? "",
+    }
     : { type: "clear_track", mode: "remux", id: insp.id });
   // Redraw the inspector even when the core refused the change, so it shows what is assigned.
   lastAssignKey = null;
@@ -866,35 +849,6 @@ function initApp() {
   // Bound before the Job Controllers, so a field's edit is sent before the rescan its change starts.
   presets.bind();
   draftForm.bind();
-
-  // ─── Complexity Slider & Number Synchronization ──────────────────────────
-  // Still the view's (out of S4): the clamp and normalize are rules the core could own.
-  const cplxSlider = document.getElementById("remux-complexity");
-  const cplxNumber = document.getElementById("remux-cplx-val");
-  if (cplxSlider && cplxNumber) {
-    const clamp = v => Math.min(Number(cplxSlider.max), Math.max(Number(cplxSlider.min), v));
-    const syncFromSlider = () => {
-      cplxNumber.value = cplxSlider.value;
-    };
-    const syncFromNumber = () => {
-      const v = parseInt(cplxNumber.value, 10);
-      if (!isNaN(v)) cplxSlider.value = String(clamp(v));
-    };
-    const normalizeNumber = () => {
-      const v = parseInt(cplxNumber.value, 10);
-      const normalized = String(isNaN(v) ? Number(cplxSlider.min) : clamp(v));
-      if (cplxNumber.value === normalized && cplxSlider.value === normalized) return;
-      cplxNumber.value = normalized;
-      cplxSlider.value = normalized;
-      draftForm.send("remux", "complexity", cplxNumber);
-    };
-
-    cplxSlider.addEventListener("input", syncFromSlider);
-    cplxSlider.addEventListener("change", syncFromSlider);
-    cplxNumber.addEventListener("input", syncFromNumber);
-    cplxNumber.addEventListener("change", normalizeNumber);
-    cplxNumber.addEventListener("blur", normalizeNumber);
-  }
 
   const jobRuntime = {
     queueFor,

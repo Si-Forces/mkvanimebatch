@@ -13,12 +13,13 @@ use crate::control::{mode_name, Launcher};
 use crate::coordinator::{JobCoordinator, Phase};
 use crate::draft::{DraftChanges, SettingsDraft, StepField};
 use crate::inspection::{InFlight, Inspector};
-use crate::inspector::{inspected_row, inspector_view, InspectorView};
+use crate::inspector::{inspected_row, inspector_view, subtitle_assignment, InspectorView};
 use crate::job::{JobDone, JobSink, JobStarted};
 use crate::log::{error_line, LogBatch, LogView, RunLog};
 use crate::presentation::{
-    batch, batch_clock, chips, controls, count_text, filter_counts, library, list_crumbs,
-    list_title, progress_segments, Chips, Controls, Filters, Hold, LibraryEntry, Progress,
+    batch, batch_clock, chips, controls, count_text, empty_list, filter_counts, library,
+    list_crumbs, list_title, progress_segments, Chips, Controls, EmptyList, Filters, Hold,
+    LibraryEntry, Progress,
 };
 use crate::queue::{Direction, Queue, Row};
 use crate::snapshot::{BatchStatus, JobSnapshot};
@@ -85,10 +86,17 @@ pub enum Intent {
         id: String,
         direction: Direction,
     },
-    /// Remux only.
-    AssignTrack {
+    /// Assigns the subtitle `path` to item `id` (remux only), with the Episode Inspector's
+    /// fields as typed: the language select's value, the custom tag, the title and the offset in
+    /// milliseconds. The core builds the Track Assignment; see `subtitle_assignment`.
+    AssignSubtitle {
         mode: PipelineMode,
-        assignment: TrackAssignment,
+        id: String,
+        path: String,
+        language: String,
+        custom_language: String,
+        title: String,
+        offset: String,
     },
     ClearTrack {
         mode: PipelineMode,
@@ -245,6 +253,8 @@ pub struct ModeView {
     pub total_count: usize,
     /// The Library: the folder, then each other Release Directory; empty with no folder open.
     pub library: Vec<LibraryEntry>,
+    /// The empty list's card: set only while the queue has no rows and its scan is idle.
+    pub empty: Option<EmptyList>,
     /// The Episode Inspector: `None` while the queue has no rows.
     pub inspector: Option<InspectorView>,
     /// The Run and Stop buttons, the status pill and the selection lock.
@@ -519,6 +529,7 @@ impl ModeState {
             selected_count: rows.iter().filter(|row| row.selected).count(),
             total_count: rows.len(),
             library: library(directory, &rows),
+            empty: empty_list(directory, &self.scan, &rows),
             rows: Arc::new(rows),
             // Laid over the view on each publication: they follow the draft and the batch's holder.
             inspector: None,
@@ -911,7 +922,19 @@ impl<P: Publisher, I: Inspector, L: Launcher, S: Sampler> Core<P, I, L, S> {
                 id,
                 direction,
             } => (mode, QueueChange::Reorder(id, direction)),
-            Intent::AssignTrack { mode, assignment } => (mode, QueueChange::Assign(assignment)),
+            Intent::AssignSubtitle {
+                mode,
+                id,
+                path,
+                language,
+                custom_language,
+                title,
+                offset,
+            } => {
+                let assignment =
+                    subtitle_assignment(&id, &path, &language, &custom_language, &title, &offset);
+                (mode, QueueChange::Assign(assignment))
+            }
             Intent::ClearTrack { mode, id } => (mode, QueueChange::Clear(id)),
             // A draft Intent answers without a flush (ADR-0016, S3): a burst of keystrokes is
             // coalesced into the run loop's publications instead of forcing one each.

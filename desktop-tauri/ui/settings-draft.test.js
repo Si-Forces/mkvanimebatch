@@ -164,3 +164,42 @@ test("a refused edit gets the published value back, even in the focused field, o
   await flush();
   assert.equal(page.get("remux-cplx-val").value, "7");
 });
+
+test("the complexity slider is a draft field, and a field left shows the value the core normalized", async () => {
+  const page = draftHarness();
+  const slider = page.get("remux-complexity");
+  slider.value = "8";
+  slider.handlers.get("input")();
+  assert.deepEqual(page.intents.at(-1), { type: "edit_draft", mode: "remux", changes: { complexity: "8" } });
+  page.answers.at(-1)(true);
+  await flush();
+
+  // While focused the box keeps "15" though the core clamped it to "10".
+  const box = page.get("remux-cplx-val");
+  page.doc.activeElement = box;
+  box.value = "15";
+  box.handlers.get("input")();
+  page.answers.at(-1)(true);
+  await flush();
+  page.published.remux = draft("remux", { complexity: "10" });
+  page.form.apply("remux", page.published.remux);
+  assert.equal(box.value, "15");
+  assert.equal(slider.value, "10");
+  // Leaving it sends the same text again, a no-op the core answers false, and writes "10" back.
+  page.doc.activeElement = null;
+  box.handlers.get("change")();
+  box.handlers.get("blur")();
+  assert.equal(box.value, "15", "the edit is still pending");
+  page.answers.at(-1)(false);
+  await flush();
+  assert.equal(box.value, "10");
+
+  // An emptied box ends as the core's "0" once left.
+  page.published.remux = draft("remux", { complexity: "0" });
+  box.value = "";
+  box.handlers.get("blur")();
+  assert.equal(box.value, "0");
+  // Only the normalized complexity is restored on blur: a text field left right after a keystroke
+  // would flash the value from before the edit.
+  assert.equal(page.get("remux-out-dir").handlers.has("blur"), false);
+});

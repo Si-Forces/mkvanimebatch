@@ -584,6 +584,39 @@ pub fn list_title(directory: Option<&str>) -> String {
         .map_or_else(|| "No folder open".into(), |name| name.to_string())
 }
 
+/// The card an empty list shows in place of its rows.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct EmptyList {
+    pub title: &'static str,
+    pub description: &'static str,
+}
+
+/// The empty list's card: `None` while the queue has rows or its scan is running or failed,
+/// which a view draws itself; else an empty folder when one is open, or no folder yet.
+pub fn empty_list(directory: Option<&str>, scan: &ScanView, rows: &[Row]) -> Option<EmptyList> {
+    if !rows.is_empty() || *scan != ScanView::Idle {
+        return None;
+    }
+    Some(if directory.is_some_and(|dir| !dir.is_empty()) {
+        EmptyList {
+            title: "No MKV files found",
+            description:
+                "This folder holds no MKV episodes. Open another release folder to continue.",
+        }
+    } else {
+        EmptyList {
+            title: "No episodes yet",
+            description: "Open a release folder to scan its MKV episodes into this batch.",
+        }
+    })
+}
+
+/// Whether JavaScript's `trim` and `parseInt` skip `c`: its WhiteSpace and LineTerminator, which
+/// add U+FEFF to Rust's White_Space and lack U+0085. Shared by `draft.rs` and `inspector.rs`.
+pub(crate) fn is_js_whitespace(c: char) -> bool {
+    c == '\u{feff}' || (c != '\u{85}' && c.is_whitespace())
+}
+
 /// Who holds the batch, which every mode's controls follow.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Hold {
@@ -761,6 +794,42 @@ mod tests {
         assert_eq!(list_title(Some("/media/anime/Show")), "Show");
         assert_eq!(list_title(Some("/")), "No folder open");
         assert_eq!(list_title(None), "No folder open");
+    }
+
+    // The webview's former empty-list choice (queue-view.js `showEmpty`).
+    #[test]
+    fn test_an_empty_idle_list_names_an_empty_folder_or_no_folder_yet() {
+        let idle = ScanView::Idle;
+        let title = |directory, scan: &ScanView, rows: &[Row]| {
+            empty_list(directory, scan, rows).map(|empty| empty.title)
+        };
+        assert_eq!(
+            title(Some("/anime"), &idle, &[]),
+            Some("No MKV files found")
+        );
+        assert_eq!(
+            empty_list(None, &idle, &[]),
+            Some(EmptyList {
+                title: "No episodes yet",
+                description: "Open a release folder to scan its MKV episodes into this batch.",
+            })
+        );
+        // An empty directory is none, as JavaScript reads "".
+        assert_eq!(title(Some(""), &idle, &[]), Some("No episodes yet"));
+        // A scan's own card, or rows, show instead.
+        let scanning = ScanView::Scanning {
+            directory: "/anime".into(),
+        };
+        assert_eq!(title(Some("/anime"), &scanning, &[]), None);
+        assert_eq!(title(Some("/anime"), &ScanView::Failed, &[]), None);
+        assert_eq!(title(Some("/anime"), &idle, &[Row::test("ep1")]), None);
+        assert_eq!(
+            serde_json::to_value(empty_list(Some("/anime"), &idle, &[])).unwrap(),
+            serde_json::json!({
+                "title": "No MKV files found",
+                "description": "This folder holds no MKV episodes. Open another release folder to continue.",
+            })
+        );
     }
 
     #[test]

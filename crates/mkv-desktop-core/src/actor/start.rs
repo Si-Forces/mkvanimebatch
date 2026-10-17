@@ -868,11 +868,7 @@ mod tests {
         };
         core.dispatch(reorder).await.unwrap();
         for id in ["ep1", "ep2"] {
-            let assignment = subtitle(id, &format!("/subs/{id}.ass"), None);
-            let assign = Intent::AssignTrack {
-                mode: REMUX,
-                assignment,
-            };
+            let assign = assign_subtitle(REMUX, id, &format!("/subs/{id}.ass"));
             core.dispatch(assign).await.unwrap();
         }
         let deselect = Intent::SetSelected {
@@ -896,10 +892,7 @@ mod tests {
     async fn test_a_run_of_another_directory_runs_all_it_finds_without_the_old_assignments() {
         let launcher = FakeLauncher::default();
         let (core, _publisher, _inspector) = run_core(&launcher).await;
-        let assign = Intent::AssignTrack {
-            mode: REMUX,
-            assignment: subtitle("ep1", "/subs/ep1.ass", None),
-        };
+        let assign = assign_subtitle(REMUX, "ep1", "/subs/ep1.ass");
         core.dispatch(assign).await.unwrap();
         type_input(&core, REMUX, "/fast").await;
 
