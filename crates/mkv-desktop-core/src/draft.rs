@@ -1,13 +1,14 @@
 //! The Settings Draft of each mode (ADR-0016): the values of its settings form, held as typed, so a
-//! view only mirrors them. Edits arrive as Intents; nothing is parsed until a run builds its
-//! `BatchRequest` from them, and nothing is persisted.
+//! view only mirrors them. Edits arrive as Intents; only the complexity is normalized (clamped) on
+//! edit, everything else is parsed when a Run builds its `BatchRequest`, and nothing is persisted.
 
 use crate::queue::{Direction, MetaInputs};
+use crate::text::is_js_whitespace;
 use mkv_core::pipeline::PipelineMode;
 use mkv_core::preset::require_preset;
 use mkv_core::request::{
-    seconds_to_ms, BatchRequest, EffectiveSettings, DEFAULT_PRESET_ID, FFMPEG_THREADS_RANGE,
-    IO_JOBS_RANGE, WORKERS_RANGE,
+    seconds_to_ms, BatchRequest, EffectiveSettings, COMPLEXITY_RANGE, DEFAULT_PRESET_ID,
+    FFMPEG_THREADS_RANGE, IO_JOBS_RANGE, WORKERS_RANGE,
 };
 use serde::{Deserialize, Serialize};
 use std::ops::RangeInclusive;
@@ -116,9 +117,9 @@ impl SettingsDraft {
         }
     }
 
-    /// Applies `changes`, all or none: true when a field changed. A changed bitrate or complexity
-    /// is a hand-edited encode, so the preset becomes custom. A field the mode does not have is an
-    /// error.
+    /// Applies `changes`, all or none: true when a field changed. The complexity is clamped to the
+    /// engine's range (see `clamp_complexity`). A changed bitrate or complexity is a hand-edited
+    /// encode, so the preset becomes custom. A field the mode does not have is an error.
     pub fn edit(&mut self, changes: DraftChanges) -> Result<bool, String> {
         let DraftChanges {
             input_dir,
@@ -145,6 +146,7 @@ impl SettingsDraft {
             _ => false,
         };
         let unflag = self.invalid.is_some_and(edited);
+        let complexity = complexity.as_deref().map(clamp_complexity);
         let encode = (self.bitrate.clone(), self.complexity.clone());
         // A field that is `None` is one the mode lacks: an extract draft has none of these.
         let remux_only = [
@@ -309,6 +311,8 @@ impl SettingsDraft {
             assets_dir: path(self.assets_dir.as_deref()),
             preset: self.preset.clone(),
             bitrate: text(self.bitrate.as_deref()).map(str::to_string),
+            // `new`, `set_preset` and `edit` (which clamps, #126) store a whole number in range;
+            // only a direct write to the field can reach this error.
             complexity: whole(
                 self.complexity.as_deref(),
                 "complexity",
@@ -355,6 +359,26 @@ fn next_step_value(
     }
     // Plus zero, so the field never reads `-0`.
     format!("{value:.9e}").parse::<f64>().unwrap_or(value) + 0.0
+}
+
+/// A typed complexity as the form held it before (ADR-0016, #126): its leading integer, as
+/// JavaScript's `parseInt(raw, 10)` reads it, clamped to `COMPLEXITY_RANGE`; the range's minimum
+/// when it has none.
+fn clamp_complexity(raw: &str) -> String {
+    let (min, max) = (*COMPLEXITY_RANGE.start(), *COMPLEXITY_RANGE.end());
+    let raw = raw.trim_start_matches(is_js_whitespace);
+    let (negative, raw) = match raw.as_bytes().first() {
+        Some(b'-') => (true, &raw[1..]),
+        Some(b'+') => (false, &raw[1..]),
+        _ => (false, raw),
+    };
+    let digits = raw.len() - raw.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    if digits == 0 {
+        return min.to_string();
+    }
+    // Only an overflow fails to parse a run of digits: past the maximum either way.
+    let value = raw[..digits].parse::<u32>().unwrap_or(u32::MAX);
+    if negative { min } else { value.clamp(min, max) }.to_string()
 }
 
 /// `value` trimmed, or `None` when the mode lacks the field or it is empty.
@@ -704,6 +728,15 @@ mod tests {
         assert_eq!(draft.invalid, None);
         assert_eq!(draft.edit(same), Ok(false));
 
+        // An edit of a flagged complexity clears it too.
+        draft.invalid = Some("complexity");
+        let complexity = DraftChanges {
+            complexity: Some("5".into()),
+            ..DraftChanges::default()
+        };
+        assert_eq!(draft.edit(complexity), Ok(true));
+        assert_eq!(draft.invalid, None);
+
         // A profile replaces a flagged complexity; custom keeps it.
         draft.invalid = Some("complexity");
         assert_eq!(draft.set_preset("custom"), Ok(true));
@@ -711,6 +744,48 @@ mod tests {
         assert_eq!(draft.set_preset("custom"), Ok(false));
         assert_eq!(draft.set_preset("balanced"), Ok(true));
         assert_eq!(draft.invalid, None);
+    }
+
+    // The webview's former complexity normalization (app.js `normalizeNumber`).
+    #[test]
+    fn test_an_edit_clamps_the_complexity_to_the_engines_range() {
+        for (raw, expected) in [
+            ("7", "7"),
+            ("15", "10"),
+            ("-3", "0"),
+            ("-0", "0"),
+            ("", "0"),
+            ("  ", "0"),
+            ("abc", "0"),
+            ("-", "0"),
+            // parseInt reads the leading integer and ignores the rest.
+            (" 8 ", "8"),
+            ("\u{feff}\u{a0}9", "9"),
+            ("+4", "4"),
+            ("2.9", "2"),
+            ("1e3", "1"),
+            ("06", "6"),
+            ("0x10", "0"),
+            ("99999999999999999999", "10"),
+            ("-99999999999999999999", "0"),
+        ] {
+            let mut draft = remux();
+            draft
+                .edit(DraftChanges {
+                    complexity: Some(raw.into()),
+                    ..DraftChanges::default()
+                })
+                .unwrap();
+            assert_eq!(draft.complexity.as_deref(), Some(expected), "{raw:?}");
+        }
+        // A value the clamp keeps as it was changes nothing, so the preset stays.
+        let mut draft = remux();
+        let same = DraftChanges {
+            complexity: Some("05".into()),
+            ..DraftChanges::default()
+        };
+        assert_eq!(draft.edit(same), Ok(false));
+        assert_eq!(draft.preset.as_deref(), Some("balanced"));
     }
 
     /// `next_step_value` with `step` in `dir` and the bounds `min..=max`.

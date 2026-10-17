@@ -164,3 +164,70 @@ test("a refused edit gets the published value back, even in the focused field, o
   await flush();
   assert.equal(page.get("remux-cplx-val").value, "7");
 });
+
+test("the complexity slider is a draft field, and a field left shows the value the core normalized", async () => {
+  const page = draftHarness();
+  const slider = page.get("remux-complexity");
+  slider.value = "8";
+  slider.handlers.get("input")();
+  assert.deepEqual(page.intents.at(-1), { type: "edit_draft", mode: "remux", changes: { complexity: "8" } });
+  page.answers.at(-1)(true);
+  await flush();
+
+  // While focused the box keeps "15" though the core clamped it to "10".
+  const box = page.get("remux-cplx-val");
+  page.doc.activeElement = box;
+  box.value = "15";
+  box.handlers.get("input")();
+  page.answers.at(-1)(true);
+  await flush();
+  page.published.remux = draft("remux", { complexity: "10" });
+  page.form.apply("remux", page.published.remux);
+  assert.equal(box.value, "15");
+  assert.equal(slider.value, "10");
+  // Leaving it sends the same text again, a no-op the core answers false, and writes "10" back.
+  page.doc.activeElement = null;
+  box.handlers.get("change")();
+  box.handlers.get("blur")();
+  assert.equal(box.value, "15", "the edit is still pending");
+  page.answers.at(-1)(false);
+  await flush();
+  assert.equal(box.value, "10");
+
+  // An emptied box ends as the core's "0" once left.
+  page.published.remux = draft("remux", { complexity: "0" });
+  box.value = "";
+  box.handlers.get("blur")();
+  assert.equal(box.value, "0");
+  // Only the normalized complexity is restored on blur: a text field left right after a keystroke
+  // would flash the value from before the edit.
+  assert.equal(page.get("remux-out-dir").handlers.has("blur"), false);
+});
+
+test("the box follows the slider on each input, before any publication", () => {
+  const page = draftHarness();
+  const slider = page.get("remux-complexity");
+  slider.value = "3";
+  slider.handlers.get("input")();
+  assert.equal(page.get("remux-cplx-val").value, "3");
+  assert.deepEqual(page.intents.at(-1), { type: "edit_draft", mode: "remux", changes: { complexity: "3" } });
+});
+
+test("a no-op edit restores only a normalized key, since any other field already holds the core's value", async () => {
+  const page = draftHarness();
+  // A publication from before the edit that the no-op repeats.
+  page.published.remux = draft("remux", { out_dir: "/old", complexity: "10" });
+  const out = page.get("remux-out-dir");
+  out.value = "/new";
+  out.handlers.get("change")();
+  page.answers.at(-1)(false);
+  await flush();
+  assert.equal(out.value, "/new");
+
+  const box = page.get("remux-cplx-val");
+  box.value = "15";
+  box.handlers.get("change")();
+  page.answers.at(-1)(false);
+  await flush();
+  assert.equal(box.value, "10");
+});

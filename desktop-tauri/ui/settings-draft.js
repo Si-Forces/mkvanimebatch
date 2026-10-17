@@ -28,27 +28,46 @@ const isCheckbox = el => el.type === "checkbox";
  * `published(mode)` is the mode's draft in the View State applied last. Two guards keep a published draft from
  * undoing what the user is doing: a field with focus is never written, so typing keeps its caret,
  * and neither is a key whose edit is still on its way to the core, since a state published before
- * the core applied it holds the value from before the edit. The core answers a draft Intent once it
+ * the core applied it holds the value from before the edit. A field of a normalized key the user leaves (blur), or
+ * whose edit the core answers as a no-op, gets the published value back unless it has focus, so a value
+ * the core normalized (the complexity, clamped to its range) replaces the typed one once the field
+ * is left. The core answers a draft Intent once it
  * applied it, before it publishes it, so every state it publishes after the answer holds the edit.
  * A publication sent before the answer can still arrive after it, since Tauri does not order events
  * against invoke replies: an unfocused field then shows the old value until the publication the
  * edit armed, at most one interval (66 ms) later. That flicker is accepted.
  */
+// The keys the core normalizes on edit (draft.rs `clamp_complexity`): a field left gets their
+// published value back. Only them, since a text field left within 66 ms of its last keystroke
+// would flash the value from before the edit.
+const NORMALIZED = new Set(["complexity"]);
+
 export function createSettingsDraft({ doc, dispatch, published }) {
   // Edits sent and not answered yet, by `${mode}:${key}`.
   const pending = new Map();
 
+  /** Writes the published `key` back into `mode`'s fields (the focused one too, with `force`). */
+  function restore(mode, key, force = false) {
+    const value = published(mode)?.[key];
+    if (value !== undefined) apply(mode, { [key]: value }, { force });
+  }
+
   /**
    * Sends `intent`, which edits the draft's `key`, marking the key pending until it is answered.
-   * A refused edit (a busy batch locks the draft) changed nothing in the core, which then
-   * publishes nothing, so the field gets the published value back unless a later edit is pending.
+   * A refused edit (a busy batch locks the draft) or a no-op one (`false`: the core already holds
+   * the value, maybe normalized) changed nothing in the core, which then publishes nothing, so the
+   * field gets the published value back unless a later edit is pending: a refused one for any key,
+   * the focused field too, and a no-op one only for a normalized key, sparing the focused field.
+   * A no-op on any other key means the field already holds the core's value, and a restore could
+   * write back a publication older than the edit.
    */
   async function guarded(mode, key, intent) {
     const id = `${mode}:${key}`;
     pending.set(id, (pending.get(id) ?? 0) + 1);
     let refused = false;
+    let answer;
     try {
-      await dispatch(intent);
+      answer = await dispatch(intent);
     } catch (err) {
       console.error(`[${intent.type}] refused:`, err);
       refused = true;
@@ -56,13 +75,12 @@ export function createSettingsDraft({ doc, dispatch, published }) {
       if (pending.get(id) === 1) pending.delete(id);
       else pending.set(id, pending.get(id) - 1);
     }
-    if (refused && !pending.has(id)) {
-      const value = published(mode)?.[key];
-      if (value !== undefined) apply(mode, { [key]: value }, { force: true });
-    }
+    if (pending.has(id)) return;
+    if (refused) restore(mode, key, true);
+    else if (answer === false && NORMALIZED.has(key)) restore(mode, key);
   }
 
-  /** Sends the value `el` now holds as the draft's `key`; call it after setting a field from code. */
+  /** Sends the value `el` now holds as the draft's `key`. */
   function send(mode, key, el) {
     return guarded(mode, key, { type: "edit_draft", mode, changes: { [key]: isCheckbox(el) ? el.checked : el.value } });
   }
@@ -74,7 +92,7 @@ export function createSettingsDraft({ doc, dispatch, published }) {
 
   /**
    * Sends an edit on each change of every field the page has, and on each input of any field but a
-   * checkbox, whose click already fires change.
+   * checkbox, whose click already fires change. A complexity field left gets the published value back.
    */
   function bind() {
     for (const mode of ["remux", "extract"]) {
@@ -82,9 +100,20 @@ export function createSettingsDraft({ doc, dispatch, published }) {
         for (const suffix of suffixes) {
           const el = doc.getElementById(`${mode}-${suffix}`);
           if (!el) continue;
-          const onEdit = () => { send(mode, key, el); };
+          const onEdit = () => {
+            // View-local display mirroring: the box follows the slider on every input, not at the
+            // publication cadence. The slider's value is already in range; the core still clamps.
+            if (el.type === "range") {
+              for (const other of suffixes) {
+                const box = doc.getElementById(`${mode}-${other}`);
+                if (box && box !== el) box.value = el.value;
+              }
+            }
+            send(mode, key, el);
+          };
           if (!isCheckbox(el)) el.addEventListener("input", onEdit);
           el.addEventListener("change", onEdit);
+          if (NORMALIZED.has(key)) el.addEventListener("blur", () => restore(mode, key));
         }
       }
     }
@@ -113,5 +142,5 @@ export function createSettingsDraft({ doc, dispatch, published }) {
     return written;
   }
 
-  return { bind, apply, send, step };
+  return { bind, apply, step };
 }

@@ -10,8 +10,9 @@ use crate::presentation::{
 };
 use crate::queue::Row;
 use crate::snapshot::ItemStatus;
+use crate::text::is_js_whitespace;
 use mkv_core::manifest::ManifestItem;
-use mkv_core::request::TrackAssignment;
+use mkv_core::request::{AssignmentKind, TrackAssignment};
 use serde::Serialize;
 
 /// The Episode Inspector as a view renders it.
@@ -41,6 +42,79 @@ pub struct InspectorView {
     /// when it is none of them. A view adds its own file picker entry.
     pub options: Vec<Choice>,
     pub assignment: Option<TrackAssignment>,
+    /// The language select's value: one of `PRESET_SUBTITLE_LANGUAGES` or `custom`.
+    pub language_choice: &'static str,
+    /// The custom tag field's text, which a view shows only for `custom`.
+    pub custom_language: String,
+}
+
+/// The subtitle languages the inspector's select offers; any other is a custom tag.
+pub const PRESET_SUBTITLE_LANGUAGES: [&str; 3] = ["ind", "eng", "jpn"];
+
+/// The language select's value and the custom tag field's text for `assignment`. With none, the
+/// default `ind`; an assignment without a language is a custom tag not typed yet.
+fn language_choice(assignment: Option<&TrackAssignment>) -> (&'static str, String) {
+    let language = match assignment {
+        None => Some("ind"),
+        Some(assignment) => assignment.language.as_deref(),
+    };
+    match PRESET_SUBTITLE_LANGUAGES
+        .into_iter()
+        .find(|preset| Some(*preset) == language)
+    {
+        Some(preset) => (preset, String::new()),
+        None => ("custom", language.unwrap_or_default().to_string()),
+    }
+}
+
+/// The Episode Inspector's subtitle fields as typed, named so that no two can be swapped.
+#[derive(Debug, Clone, Copy)]
+pub struct SubtitleFields<'a> {
+    /// The language select's value: `custom` reads `custom_language`, an empty one is `ind`.
+    pub language: &'a str,
+    pub custom_language: &'a str,
+    pub title: &'a str,
+    /// The offset in milliseconds.
+    pub offset: &'a str,
+}
+
+/// The Track Assignment of the subtitle `path` to item `id`, from the inspector's `fields`.
+/// Empty text is none.
+pub fn subtitle_assignment(id: &str, path: &str, fields: SubtitleFields) -> TrackAssignment {
+    let SubtitleFields {
+        language,
+        custom_language,
+        title,
+        offset,
+    } = fields;
+    let trimmed = |text: &str| {
+        Some(text.trim_matches(is_js_whitespace).to_string()).filter(|text| !text.is_empty())
+    };
+    let language = match language {
+        "" => Some("ind".into()),
+        "custom" => trimmed(custom_language),
+        language => Some(language.into()),
+    };
+    TrackAssignment {
+        target_video: id.into(),
+        asset_path: path.into(),
+        track_type: AssignmentKind::Subtitle,
+        language,
+        title: trimmed(title),
+        offset_ms: trimmed(offset).and_then(|raw| offset_ms(&raw)),
+    }
+}
+
+/// The largest integer a JavaScript number holds exactly (`Number.MAX_SAFE_INTEGER`).
+const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+
+/// A typed offset as JavaScript's `Math.trunc(Number(raw))` reads it, which the inspector sent
+/// before: a decimal with an optional exponent, truncated to whole milliseconds; none when it
+/// is no number or beyond the safe-integer range. Rust's `inf` and `nan` read as no number
+/// either way, and a number field holds no hex literal.
+fn offset_ms(raw: &str) -> Option<i64> {
+    let ms = raw.parse::<f64>().ok()?.trunc();
+    (ms.abs() <= MAX_SAFE_INTEGER).then_some(ms as i64)
 }
 
 /// The status pill: the row's status, or `Not in batch` for an unselected row.
@@ -138,6 +212,7 @@ pub fn inspector_view(
     } else {
         (Vec::new(), Vec::new())
     };
+    let (language_choice, custom_language) = language_choice(assignment.as_ref());
     let strings = |segments: Vec<&str>| segments.into_iter().map(str::to_string).collect();
     InspectorView {
         id: row.id.clone(),
@@ -167,6 +242,8 @@ pub fn inspector_view(
         ladder,
         options,
         assignment,
+        language_choice,
+        custom_language,
     }
 }
 
@@ -380,6 +457,92 @@ mod tests {
         view.assignments.get_mut(&row.id).unwrap().asset_path = "".into();
         let inspector = inspector_view(true, &view, 0, &row, Some(&entry), None);
         assert_eq!(inspector.options.len(), 3);
+    }
+
+    // The webview's former renderSubtitleSection language cases.
+    #[test]
+    fn test_the_language_select_shows_a_preset_else_the_custom_tag() {
+        let with = |language: Option<&str>| TrackAssignment {
+            target_video: "ep1".into(),
+            asset_path: "/subs/ep1.ass".into(),
+            track_type: AssignmentKind::Subtitle,
+            language: language.map(str::to_string),
+            title: None,
+            offset_ms: None,
+        };
+        let choice = |assignment: Option<TrackAssignment>| language_choice(assignment.as_ref());
+        assert_eq!(choice(None), ("ind", String::new()));
+        assert_eq!(choice(Some(with(Some("jpn")))), ("jpn", String::new()));
+        assert_eq!(choice(Some(with(Some("may")))), ("custom", "may".into()));
+        // An assignment without a language is a custom tag not typed yet, not the default.
+        assert_eq!(choice(Some(with(None))), ("custom", String::new()));
+        assert_eq!(choice(Some(with(Some("")))), ("custom", String::new()));
+
+        let (mut view, entry) = remux_view();
+        let row = remux_row();
+        view.assignments.insert(row.id.clone(), with(Some("fre")));
+        let inspector = inspector_view(true, &view, 0, &row, Some(&entry), None);
+        let wire = serde_json::to_value(&inspector).unwrap();
+        assert_eq!(
+            (&wire["language_choice"], &wire["custom_language"]),
+            (&serde_json::json!("custom"), &serde_json::json!("fre"))
+        );
+    }
+
+    // The webview's former subtitleAssignment cases.
+    #[test]
+    fn test_a_subtitle_assignment_reads_the_inspectors_fields_as_typed() {
+        let assign = |language, custom, title, offset| {
+            let fields = SubtitleFields {
+                language,
+                custom_language: custom,
+                title,
+                offset,
+            };
+            subtitle_assignment("ep1", "/subs/ep1.ass", fields)
+        };
+        assert_eq!(
+            assign("eng", "may", "  Signs ", ""),
+            TrackAssignment {
+                target_video: "ep1".into(),
+                asset_path: "/subs/ep1.ass".into(),
+                track_type: AssignmentKind::Subtitle,
+                language: Some("eng".into()),
+                title: Some("Signs".into()),
+                offset_ms: None,
+            }
+        );
+        let language = |language, custom| assign(language, custom, "", "").language;
+        assert_eq!(language("", "may"), Some("ind".into()));
+        assert_eq!(language("custom", " may "), Some("may".into()));
+        assert_eq!(language("custom", "  "), None);
+        assert_eq!(assign("ind", "", " \t", "").title, None);
+        // The offset as Math.trunc(Number(raw)): none when empty, no number or not a safe integer.
+        for (raw, expected) in [
+            ("", None),
+            ("   ", None),
+            ("1e3", Some(1000)),
+            ("-250.9", Some(-250)),
+            (" 42 ", Some(42)),
+            ("\u{feff}7\u{a0}", Some(7)),
+            (".5", Some(0)),
+            ("-0.4", Some(0)),
+            ("5.", Some(5)),
+            ("+12", Some(12)),
+            ("9007199254740991", Some(9_007_199_254_740_991)),
+            ("-9007199254740991", Some(-9_007_199_254_740_991)),
+            ("9007199254740992", None),
+            ("1e20", None),
+            ("1e400", None),
+            ("abc", None),
+            ("12abc", None),
+            ("-", None),
+            ("Infinity", None),
+            ("inf", None),
+            ("NaN", None),
+        ] {
+            assert_eq!(assign("ind", "", "", raw).offset_ms, expected, "{raw:?}");
+        }
     }
 
     #[test]

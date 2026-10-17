@@ -70,7 +70,7 @@ export function draft(mode, fields = {}) {
  */
 export function modeView(rows = [], fields = {}, mode = "remux") {
   const published = rows.map(entry => (typeof entry === "string" ? row(entry) : entry));
-  return {
+  const view = {
     directory: null,
     scan: { state: "idle" },
     manifest_rev: 0,
@@ -93,6 +93,16 @@ export function modeView(rows = [], fields = {}, mode = "remux") {
     controls: controls(mode),
     ...fields,
   };
+  if (!("empty" in fields)) view.empty = emptyList(view);
+  return view;
+}
+
+/** The published empty list of `view`, as `presentation::empty_list` writes it. */
+function emptyList(view) {
+  if (view.rows.length > 0 || view.scan.state !== "idle") return null;
+  return view.directory
+    ? { title: "No MKV files found", description: "This folder holds no MKV episodes. Open another release folder to continue." }
+    : { title: "No episodes yet", description: "Open a release folder to scan its MKV episodes into this batch." };
 }
 
 /** A published Job View of a running remux job. */
@@ -114,7 +124,7 @@ export function jobView(fields = {}) {
  */
 export function inspectorView(row, index = 0, fields = {}, mode = "remux") {
   const remux = mode === "remux";
-  return {
+  const view = {
     id: row.id,
     number: String(index + 1).padStart(2, "0"),
     title: row.name,
@@ -132,6 +142,13 @@ export function inspectorView(row, index = 0, fields = {}, mode = "remux") {
     assignment: null,
     ...fields,
   };
+  // The language select's value, as `inspector::language_choice` derives it: with no
+  // assignment "ind", and an assignment's null language a custom tag not typed yet.
+  const language = view.assignment ? view.assignment.language ?? null : "ind";
+  const preset = ["ind", "eng", "jpn"].includes(language);
+  view.language_choice ??= preset ? language : "custom";
+  view.custom_language ??= preset ? "" : language ?? "";
+  return view;
 }
 
 /** The published Job Coordinator while nothing holds the batch. */
@@ -152,7 +169,8 @@ const DRAFT_KEYS = new Set([
  * Applies a draft Intent to `view.draft` as `SettingsDraft` does; false when nothing changed.
  * Throws the core's error for a field or a preset the mode does not have. A mirror for tests:
  * `crates/mkv-desktop-core/src/draft.rs` holds the rules, so change them there first. Presets are
- * looked up by exact id, without `lookup_preset`'s aliases.
+ * looked up by exact id, without `lookup_preset`'s aliases, and the complexity is not clamped
+ * (`clamp_complexity` is the source of truth).
  */
 function applyDraftIntent(view, intent, presets) {
   const current = view.draft;
@@ -167,8 +185,6 @@ function applyDraftIntent(view, intent, presets) {
         preset: profile.id,
         bitrate: profile.bitrate,
         complexity: String(profile.complexity),
-        // The profile replaced a flagged complexity.
-        ...(current.invalid === "complexity" ? { invalid: null } : {}),
       };
     view.draft = next;
     return JSON.stringify(next) !== JSON.stringify(current);
@@ -380,7 +396,7 @@ export function createFakeCore({ onScan = async () => true, onStart = null } = {
       }
       if (core.busy()) throw "A batch is running; the queue is locked until it ends.";
       if (view.scan.state === "scanning") throw "The folder is being scanned; the queue is locked until it ends.";
-      if (intent.mode === "extract" && intent.type.endsWith("_track")) throw "Track Assignments are for remux only.";
+      if (intent.mode === "extract" && ["assign_subtitle", "clear_track"].includes(intent.type)) throw "Track Assignments are for remux only.";
       const changed = applyIntent(view, intent);
       if (changed) core.publish();
       return changed;
@@ -454,7 +470,7 @@ function tally(rows) {
 /**
  * What the core is in charge of laying over a whole `state`, which `busy` holds or not; `picks` are
  * the inspected rows. Laid: each mode's title, crumbs, Library, filter counts, selection counts,
- * count text, controls and inspector (unless a test set one), and the chips. Not mirrored, so a
+ * count text, empty list, controls and inspector (unless a test set one), and the chips. Not mirrored, so a
  * test that needs them sets them: the rows' own texts and buckets, the clock and the progress bar.
  */
 function derive(state, busy, picks) {
@@ -485,6 +501,7 @@ function derive(state, busy, picks) {
       filters,
       selected_count: selected,
       total_count: total,
+      empty: emptyList(view),
       count_text: scanning ? "Scanning…"
         : view.scan.state === "failed" ? "Scan failed"
           : batch ? tally(view.rows)
@@ -522,7 +539,7 @@ function applyIntent(view, intent) {
   // Only the manifest rows are the queue's: the rows a job adds after them take no Intent.
   const manifest = view.rows.filter(entry => entry.in_manifest);
   const jobOnly = view.rows.filter(entry => !entry.in_manifest);
-  const at = manifest.findIndex(candidate => candidate.id === (intent.id ?? intent.assignment?.target_video));
+  const at = manifest.findIndex(candidate => candidate.id === intent.id);
   switch (intent.type) {
     case "set_selected": {
       if (at === -1) return false;
@@ -545,9 +562,17 @@ function applyIntent(view, intent) {
       view.rows = [...manifest, ...jobOnly];
       return true;
     }
-    case "assign_track":
+    case "assign_subtitle":
       if (at === -1) return false;
-      view.assignments[intent.assignment.target_video] = published(intent.assignment);
+      // The language and title as `inspector::subtitle_assignment` builds them; the offset is not
+      // mirrored (left out, as null).
+      view.assignments[intent.id] = published({
+        target_video: intent.id,
+        asset_path: intent.path,
+        track_type: "subtitle",
+        language: intent.language === "custom" ? intent.custom_language.trim() || null : intent.language || "ind",
+        title: intent.title.trim() || null,
+      });
       return true;
     case "clear_track":
       if (!(intent.id in view.assignments)) return false;
