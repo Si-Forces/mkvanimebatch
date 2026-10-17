@@ -22,6 +22,7 @@ test("a payload not newer than the applied state is dropped, whole or patch", ()
   const applied = whole(5);
   assert.deepEqual(nextState(applied, whole(5)), { action: "drop" });
   assert.deepEqual(nextState(applied, { seq: 4, base: 3 }), { action: "drop" });
+  assert.deepEqual(nextState(applied, { seq: 5, base: 4 }), { action: "drop" });
 });
 
 test("a payload with no base is a whole state, with or without one applied", () => {

@@ -185,12 +185,22 @@ function receiveState(payload) {
  * and the patches held meanwhile are dropped or merged against it. Resolves as `syncState`.
  */
 function resync() {
+  // `syncState` never rejects (a failed read answers null) and a held payload that throws is
+  // logged, so this promise always fulfils and the flag is cleared on every path.
   resyncing ??= syncState().then(state => {
-    resyncing = null;
-    // An unreachable core is not asked again for the held patches; the next payload asks.
+    // Swapped and cleared before the drain, so a held payload that needs another read starts its own.
     const held = heldPayloads;
     heldPayloads = [];
-    if (state) for (const payload of held) receiveState(payload);
+    resyncing = null;
+    // An unreachable core is not asked again for the held patches; the next payload asks.
+    if (!state) return state;
+    for (const payload of held) {
+      try {
+        receiveState(payload);
+      } catch (err) {
+        console.error("[view-state] held payload failed:", err);
+      }
+    }
     return state;
   });
   return resyncing;

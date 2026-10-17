@@ -33,8 +33,10 @@ impl<R: Runtime> Publisher for WebviewPublisher<R> {
     /// Emits the patch from the last emission, or the whole state when there is none or the
     /// patch does not serialize. A patch the webview cannot apply makes it read `get_state`.
     fn state(&self, state: &ViewState) {
-        // A panic while the lock was held leaves `last` as it was: at worst the next patch has
-        // a base the webview never saw, and it resyncs.
+        // A panic while the lock is held leaves `last` as it was. One before the emit sends
+        // nothing, so the next patch still builds on the state the page holds. An emit that panics
+        // after queueing its payload may reach the page while `last` does not move, so the next
+        // patch's base is one the page no longer holds, and it resyncs.
         let mut last = self.last.lock().unwrap_or_else(PoisonError::into_inner);
         let _ = match last.as_ref().map(|prev| view_patch(prev, state)) {
             Some(Ok(patch)) => self.app.emit(VIEW_STATE, patch),

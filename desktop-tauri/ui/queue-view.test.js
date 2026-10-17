@@ -126,7 +126,9 @@ function setupMockEnvironment(t, { deferFrames = false } = {}) {
     callback();
   };
   const renderFrames = () => {
-    while (frames.size) renderFrame();
+    // Bounded, so a render that keeps scheduling frames fails instead of hanging the suite.
+    for (let i = 0; frames.size && i < 1000; i++) renderFrame();
+    assert.equal(frames.size, 0, "the render settles within 1000 frames");
   };
 
   t.after(() => Object.assign(globalThis, previous));
@@ -135,6 +137,7 @@ function setupMockEnvironment(t, { deferFrames = false } = {}) {
 }
 
 const DIR = "/anime/show";
+const PATCHED_IDS = ["01.mkv", "02.mkv", "03.mkv"];
 
 /** Rows with the track metadata a card renders. */
 const detailedRow = (id, fields = {}) => row(id, {
@@ -496,6 +499,34 @@ test("a published Track Assignment redraws the meta line of its row", t => {
   }));
   assert.match(tracker.cards.get("01.mkv").meta.textContent, /Manual subs/);
   assert.equal(tracker.assignments.get("01.mkv").asset_path, "/subs/01.ass");
+});
+
+test("a patch's changed-rows indices redraw only those cards, and leave the others untouched", t => {
+  setupMockEnvironment(t);
+  const tracker = new QueueTracker("remux", noDispatch);
+  tracker.applyView(accepted(PATCHED_IDS.map(id => detailedRow(id))));
+  const check = id => tracker.cards.get(id).checkbox;
+  // Marks a redraw of these cards would overwrite.
+  check("01.mkv").checked = "untouched";
+  check("03.mkv").checked = "untouched";
+
+  tracker.applyView(accepted(PATCHED_IDS.map(id => detailedRow(id, { selected: id !== "02.mkv" }))), null, [1]);
+  assert.equal(check("02.mkv").checked, false);
+  assert.equal(check("01.mkv").checked, "untouched");
+  assert.equal(check("03.mkv").checked, "untouched");
+});
+
+test("a patch that changes the assignments and one row refreshes every card's meta line", t => {
+  setupMockEnvironment(t);
+  const tracker = new QueueTracker("remux", noDispatch);
+  tracker.applyView(accepted(PATCHED_IDS.map(id => detailedRow(id))));
+  for (const id of PATCHED_IDS) tracker.cards.get(id).meta.textContent = "stale";
+
+  tracker.applyView(accepted(PATCHED_IDS.map(id => detailedRow(id, { selected: id !== "02.mkv" })), 1, {
+    assignments: { "01.mkv": { target_video: "01.mkv", asset_path: "/subs/01.ass", track_type: "subtitle" } },
+  }), null, [1]);
+  assert.match(tracker.cards.get("01.mkv").meta.textContent, /Manual subs/);
+  assert.match(tracker.cards.get("03.mkv").meta.textContent, /Embedded subs/);
 });
 
 test("a re-inspection of the directory shown remounts only the card whose manifest entry changed, in place", t => {

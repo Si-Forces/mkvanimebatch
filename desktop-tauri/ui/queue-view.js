@@ -435,7 +435,9 @@ export class QueueTracker {
    */
   updateCards(assignmentsChanged, changedRows = "all") {
     let changed = false;
-    const ids = assignmentsChanged || changedRows === "all"
+    // New assignments change every card's meta line, whichever rows changed.
+    const all = assignmentsChanged || changedRows === "all";
+    const ids = all
       ? this.cards.keys()
       : changedRows.map(index => this.state.order[index]);
     for (const id of ids) {
