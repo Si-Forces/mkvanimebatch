@@ -139,6 +139,7 @@ impl SettingsDraft {
         let edited = |field: &str| match field {
             "input_dir" => input_dir.is_some(),
             "sub_offset" => sub_offset.is_some(),
+            "complexity" => complexity.is_some(),
             "workers" => workers.is_some(),
             "io_jobs" => io_jobs.is_some(),
             "ffmpeg_threads" => ffmpeg_threads.is_some(),
@@ -203,6 +204,11 @@ impl SettingsDraft {
             changed |= self.bitrate != bitrate || self.complexity != complexity;
             self.bitrate = bitrate;
             self.complexity = complexity;
+            // The profile replaced a flagged complexity.
+            if self.invalid == Some("complexity") {
+                self.invalid = None;
+                changed = true;
+            }
         }
         Ok(changed)
     }
@@ -305,9 +311,13 @@ impl SettingsDraft {
             assets_dir: path(self.assets_dir.as_deref()),
             preset: self.preset.clone(),
             bitrate: text(self.bitrate.as_deref()).map(str::to_string),
-            // Always a whole number in range: `new` and `set_preset` store a profile's, `edit`
-            // clamps (#126), so it has no error to flag.
-            complexity: text(self.complexity.as_deref()).and_then(|raw| raw.parse().ok()),
+            // `new`, `set_preset` and `edit` (which clamps, #126) store a whole number in range;
+            // only a direct write to the field can reach this error.
+            complexity: whole(
+                self.complexity.as_deref(),
+                "complexity",
+                "encoder complexity",
+            )?,
             workers: whole(Some(&self.workers), "workers", "workers")?,
             io_jobs: whole(Some(&self.io_jobs), "io_jobs", "Disk I/O")?,
             ffmpeg_threads: whole(
@@ -678,6 +688,7 @@ mod tests {
     #[test]
     fn test_a_count_that_is_no_whole_number_builds_no_request() {
         let cases = [
+            ("complexity", "encoder complexity"),
             ("workers", "workers"),
             ("io_jobs", "Disk I/O"),
             ("ffmpeg_threads", "FFmpeg threads"),
@@ -687,6 +698,7 @@ mod tests {
                 let mut draft = typed(DraftChanges::default());
                 let value = Some(raw.to_string());
                 match field {
+                    "complexity" => draft.complexity = value,
                     "workers" => draft.workers = raw.into(),
                     "io_jobs" => draft.io_jobs = raw.into(),
                     _ => draft.ffmpeg_threads = value,
@@ -715,6 +727,23 @@ mod tests {
         assert_eq!(draft.edit(same.clone()), Ok(true));
         assert_eq!(draft.invalid, None);
         assert_eq!(draft.edit(same), Ok(false));
+
+        // An edit of a flagged complexity clears it too.
+        draft.invalid = Some("complexity");
+        let complexity = DraftChanges {
+            complexity: Some("5".into()),
+            ..DraftChanges::default()
+        };
+        assert_eq!(draft.edit(complexity), Ok(true));
+        assert_eq!(draft.invalid, None);
+
+        // A profile replaces a flagged complexity; custom keeps it.
+        draft.invalid = Some("complexity");
+        assert_eq!(draft.set_preset("custom"), Ok(true));
+        assert_eq!(draft.invalid, Some("complexity"));
+        assert_eq!(draft.set_preset("custom"), Ok(false));
+        assert_eq!(draft.set_preset("balanced"), Ok(true));
+        assert_eq!(draft.invalid, None);
     }
 
     // The webview's former complexity normalization (app.js `normalizeNumber`).
