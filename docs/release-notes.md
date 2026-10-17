@@ -2,6 +2,34 @@
 
 <!-- scripts/release-body.sh, run by .github/workflows/release.yml, publishes each "## <version>" section on that release's page, without its "### Downloads" subsection: the page generates its own download table. A tag with no section here fails the release before it builds. -->
 
+## 1.1.0
+
+The desktop app's logic now runs in a Rust core inside the app ([ADR-0016](https://github.com/Si-Forces/mkvanimebatch/blob/main/docs/adr/0016-toolkit-agnostic-desktop-core.md)). The window only shows what the core publishes, which makes way for a native UI later. The files a batch writes are the same as in 1.0.1; the changes below are what you can see in the app.
+
+### Improvements
+
+- **Reloading the window** keeps the opened folder, the settings you typed, the run log and the episode open in the inspector, as well as a running batch. A reload loses only what the window alone holds, such as the open log drawer, the scroll position and the chosen filter.
+- **Steppers** (Workers, Disk I/O, FFmpeg threads, Subtitle offset) now work from the keyboard: Enter or Space steps once, and holding Enter repeats ([#127](https://github.com/Si-Forces/mkvanimebatch/pull/127)).
+- **A hidden window** stops updating the batch clock and the elapsed times, and refreshes them as soon as it is shown again.
+- **Settings errors** for Workers, Disk I/O and FFmpeg threads name the field and the value, such as `Invalid workers value '2.5': must be a whole number.`
+
+### Fixes
+
+- A right or middle click on a stepper no longer changes its field ([#127](https://github.com/Si-Forces/mkvanimebatch/pull/127)).
+- Closing the window while the first scan is still loading the inspection cache now waits up to 2 seconds for that scan to stop, instead of closing over it. If it has not stopped by then, the window stays open with a cleanup error.
+
+### Behavior changes
+
+- **Log colours and the error count**: a chapters or cover file that could not be moved into place during extract, and a `Warning:` line from MKVToolNix or about chapters, are now always yellow and no longer count toward the error badge, since the episode itself succeeded. A batch that crashes now logs a red `ERROR: Pipeline panicked: …` line that counts as an error.
+- Setting the bitrate or complexity to the value it already has, or to a complexity that clamps to it, no longer switches the preset to Custom.
+- Pressing Enter in the complexity box keeps the typed text until you leave the box, then shows the clamped value.
+- An episode that failed with no error message reads "Failed · Failed" instead of "Failed · Error".
+
+### Known issues
+
+- **Windows testing**: 1.1.0 was tested by hand on Linux only. On Windows, the automated tests pass and the app builds, but it was not run by hand.
+- **CPU use on Linux**: during a large batch, the window's rendering uses close to one CPU core even when nothing is scrolling ([#122](https://github.com/Si-Forces/mkvanimebatch/issues/122)).
+
 ## 1.0.1
 
 A bug-fix release for 1.0.0.
