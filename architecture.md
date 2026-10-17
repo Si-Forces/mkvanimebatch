@@ -1,6 +1,6 @@
 # System Architecture Specification (`mkvanimebatch`)
 
-> **Version**: 1.0.1  
+> **Version**: 1.1.0  
 > **Topology**: Rust workspace (engine library + Tauri v2 desktop app + CLI)  
 > **Reference Contexts**: [Context Map](./CONTEXT-MAP.md) · [Media Engine](./crates/mkv-core/CONTEXT.md) · [Desktop Application](./desktop-tauri/CONTEXT.md)
 

@@ -2191,7 +2191,7 @@ dependencies = [
 
 [[package]]
 name = "mkv-anime-batch"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "mkv-core",
  "mkv-desktop-core",
@@ -2208,7 +2208,7 @@ dependencies = [
 
 [[package]]
 name = "mkv-cli"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "mkv-core",
  "serde_json",
@@ -2219,7 +2219,7 @@ dependencies = [
 
 [[package]]
 name = "mkv-core"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "blake2",
  "fancy-regex",
@@ -2235,7 +2235,7 @@ dependencies = [
 
 [[package]]
 name = "mkv-desktop-core"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "mkv-core",
  "serde",
