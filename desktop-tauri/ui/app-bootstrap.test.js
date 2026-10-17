@@ -73,6 +73,8 @@ function bootstrapHarness(t, answers = {}, { onListen = () => {} } = {}) {
     for (const id of ["run", "stop", "status", "log", "episode-list", "queue-count", "input-dir", "workers", "io-jobs"]) {
       elements.set(`${mode}-${id}`, new BootElement());
     }
+    // The status pill's markup: the dot, then the label's text node.
+    elements.get(`${mode}-status`).lastChild = { textContent: " Idle" };
   }
   const workerChip = new BootElement();
   const ioChip = new BootElement();
@@ -155,7 +157,10 @@ function bootstrapHarness(t, answers = {}, { onListen = () => {} } = {}) {
       documentHandlers.get("DOMContentLoaded")();
       await requestPromise;
     },
-    async flush() { await new Promise(resolve => setImmediate(resolve)); },
+    /** Settles what the app sent, and the publication the fake core makes after a draft Intent's answer. */
+    async flush() {
+      for (let turn = 0; turn < 2; turn++) await new Promise(resolve => setImmediate(resolve));
+    },
     /** Types `path` into the mode's input directory and leaves the field, which rescans it. */
     scan(mode, path) {
       const input = elements.get(`${mode}-input-dir`);
@@ -231,14 +236,14 @@ test("boot listens to view-state and job-log, renders the running job get_state 
   ipc.core.publish();
   assert.equal(list.children[1].querySelector(".ep-ring-arc").style.strokeDashoffset, (RING_CIRCUMFERENCE * 0.15).toFixed(2));
 
-  assert.match(ipc.elements.get("remux-status").innerHTML, /Running/);
+  assert.match(ipc.elements.get("remux-status").lastChild.textContent, /Running/);
   // The page no longer listens to job-done: the published outcome ends the job.
   assert.equal(ipc.handlers.has("job-done"), false);
   // The fake core ends the job at Stop; its row ends with it, as the job's own events settle it.
   ipc.core.state.remux.rows[1].status = "cancelled";
   await ipc.elements.get("remux-stop").handlers.get("click")();
   assert.deepEqual(ipc.core.intents.at(-1), { type: "stop", mode: "remux" });
-  assert.match(ipc.elements.get("remux-status").innerHTML, /Cancelled/);
+  assert.match(ipc.elements.get("remux-status").lastChild.textContent, /Cancelled/);
   assert.equal(ipc.elements.get("remux-stop").disabled, true);
   assert.equal(ipc.elements.get("remux-run").disabled, false);
 });
@@ -249,7 +254,7 @@ test("a finished job sets the status pill and its rows, and binds no job-done", 
   activeJob(ipc.core, "completed");
   ipc.resolveState();
   await ipc.flush();
-  assert.match(ipc.elements.get("remux-status").innerHTML, /Done/);
+  assert.match(ipc.elements.get("remux-status").lastChild.textContent, /Done/);
   assert.equal(ipc.elements.get("remux-run").disabled, false);
   assert.equal(ipc.elements.get("remux-stop").disabled, true);
   assert.equal(ipc.handlers.has("job-done"), false);
@@ -265,7 +270,7 @@ test("an extract job is shown in the extract view", async t => {
   ipc.resolveState();
   await ipc.flush();
   assert.equal(globalThis.document.documentElement.dataset.view, "extract");
-  assert.match(ipc.elements.get("extract-status").innerHTML, /Done/);
+  assert.match(ipc.elements.get("extract-status").lastChild.textContent, /Done/);
 });
 
 test("with no job, a scan and a selection made before get_state answers stay, and a stale publication is dropped", async t => {
@@ -330,14 +335,14 @@ test("a patch of a state the page missed reads get_state once, and the patches m
   ipc.emit("view-state", { seq: seq + 3, base: seq + 2, remux: outcomePatch("done", "Done") });
   await ipc.flush();
   assert.equal(reads(), before + 1);
-  assert.match(ipc.elements.get("remux-status").innerHTML, /Done/);
+  assert.match(ipc.elements.get("remux-status").lastChild.textContent, /Done/);
 
   // The next patch builds on the state get_state answered with.
   ipc.core.state.remux.outcome = null;
   ipc.core.publishPatch({ remux: outcomePatch(null) });
   await ipc.flush();
   assert.equal(reads(), before + 1);
-  assert.doesNotMatch(ipc.elements.get("remux-status").innerHTML, /Done/);
+  assert.doesNotMatch(ipc.elements.get("remux-status").lastChild.textContent, /Done/);
 });
 
 test("a resync whose get_state answer is older than a patch that arrived during the read still applies that patch", async t => {
@@ -360,7 +365,7 @@ test("a resync whose get_state answer is older than a patch that arrived during 
   await ipc.flush();
   assert.equal(reads(), before + 1);
   // Both held patches merged onto the answer, the later one last.
-  assert.match(ipc.elements.get("remux-status").innerHTML, /Done/);
+  assert.match(ipc.elements.get("remux-status").lastChild.textContent, /Done/);
 });
 
 test("a held payload that throws while it is applied is logged, and the next patch still resyncs", async t => {
@@ -385,7 +390,7 @@ test("a held payload that throws while it is applied is logged, and the next pat
   ipc.emit("view-state", { seq: seq + 3, base: seq + 2 });
   await ipc.flush();
   assert.equal(reads(), before + 2);
-  assert.match(ipc.elements.get("remux-status").innerHTML, /Done/);
+  assert.match(ipc.elements.get("remux-status").lastChild.textContent, /Done/);
 });
 
 test("a patch that arrives before the boot's get_state answers waits for it, with no second get_state", async t => {
@@ -495,6 +500,7 @@ test("app.js wires the settings chips, the preset menu and the theme to their mo
   // The core applies the profile and the published draft fills the fields.
   await presetList.handlers.get("click")({ target: { closest: selector => (matches(selector) ? fastRow : null) } });
   assert.deepEqual(ipc.core.intents.at(-1), { type: "set_preset", mode: "remux", preset: "fast" });
+  await ipc.flush();
   assert.equal(ipc.elements.get("remux-bitrate").value, "128k");
   assert.equal(ipc.elements.get("remux-cplx-val").value, "3");
 });
@@ -806,6 +812,26 @@ test("the telemetry shows the published texts and draws the published samples", 
   assert.equal(points.get("tel-cpu-line"), "0.0,18.0 64.0,2.0");
   // The disk line scales to at least 50 MB/s.
   assert.equal(points.get("tel-disk-line"), "0.0,18.0 64.0,10.0");
+});
+
+test("each filter chip shows its count from the published filters", async t => {
+  const ipc = bootstrapHarness(t);
+  const chips = ["all", "todo", "done", "failed"].map(filter => Object.assign(new BootElement(), { dataset: { mode: "remux", filter } }));
+  const querySelectorAll = globalThis.document.querySelectorAll;
+  globalThis.document.querySelectorAll = selector => (selector === '.filter-chip[data-mode="remux"]' ? chips : querySelectorAll(selector));
+  await ipc.mount("filter-chips");
+  ipc.resolveState();
+  await ipc.flush();
+
+  // The fake lays the counts over the rows' buckets, as `presentation::filter_counts` does.
+  ipc.core.accept("remux", "/anime", [
+    row("a", { status: "completed", bucket: "done" }),
+    row("b", { status: "error", bucket: "failed" }),
+    row("c"),
+    row("d", { selected: false, bucket: null }),
+  ]);
+  await ipc.flush();
+  assert.deepEqual(chips.map(chip => chip.querySelector(".n").textContent), ["4", "1", "1", "1"]);
 });
 
 // Rendering only: every text below is the core's (`presentation.rs`, `inspector.rs`).

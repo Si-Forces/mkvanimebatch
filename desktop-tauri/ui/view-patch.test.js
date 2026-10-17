@@ -15,6 +15,7 @@ function whole(seq, ids = ["01", "02", "03"]) {
     remux: modeView(ids.map(id => row(id)), { directory: "/anime/show", manifest_rev: 1 }),
     extract: modeView([], {}, "extract"),
     telemetry: null,
+    chips: { workers: "Standby (6 Workers)", io_jobs: "Idle (2 IO Jobs)", workers_hint: "auto (6)", io_jobs_hint: "auto (2)" },
   };
 }
 
@@ -55,6 +56,11 @@ test("a top-level key replaces its value, and a job sent as null clears it", () 
   ({ state } = nextState(state, { seq: 7, base: 6, job: null, busy: false }));
   assert.equal(state.job, null);
   assert.equal(state.busy, false);
+  // The chips go as one whole value, like any top-level key.
+  const chips = { ...applied.chips, workers: "3 Workers Active", io_jobs: "5 IO Jobs Active" };
+  ({ state } = nextState(state, { seq: 8, base: 7, chips }));
+  assert.deepEqual(state.chips, chips);
+  assert.equal(state.remux, applied.remux);
 });
 
 test("row_changes replace the rows at their indices and name them, the other mode untouched", () => {

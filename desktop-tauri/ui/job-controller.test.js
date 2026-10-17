@@ -43,7 +43,11 @@ class FakeElement {
 function makeElements(modes = ["remux"], extra = {}) {
   const elements = new Map();
   for (const mode of modes) {
-    for (const id of ["run", "stop", "log", "status"]) elements.set(`${mode}-${id}`, new FakeElement());
+    for (const id of ["run", "stop", "log"]) elements.set(`${mode}-${id}`, new FakeElement());
+    // The pill's markup: the dot, then the label's text node.
+    const status = new FakeElement();
+    status.lastChild = { textContent: " Idle" };
+    elements.set(`${mode}-status`, status);
   }
   for (const [id, value] of Object.entries(extra)) elements.set(id, value instanceof FakeElement ? value : new FakeElement(value));
   return elements;
@@ -240,7 +244,8 @@ test("Run, Stop and the status pill render the published controls, and a pending
   assert.equal(stopBtn.disabled, true);
   assert.equal(stopBtn.textContent, "Stopping…");
   assert.equal(elements.get("remux-status").className, "status-pill status-running");
-  assert.equal(elements.get("remux-status").innerHTML, '<span class="status-dot"></span> Stopping');
+  assert.equal(elements.get("remux-status").lastChild.textContent, " Stopping");
+  assert.equal(elements.get("remux-status").innerHTML, "", "the label is never written as markup");
 
   // An enabled Run stays disabled while a Run sent is not answered.
   page.state = withControls("remux", {});
@@ -305,5 +310,5 @@ test("before the first View State the markup's labels stand and the queues stay 
   assert.equal(runBtn.textContent, "Run");
   assert.equal(runBtn.disabled, false);
   assert.equal(tracker.selectionLocked, false);
-  assert.equal(elements.get("remux-status").innerHTML, "");
+  assert.equal(elements.get("remux-status").lastChild.textContent, " Idle");
 });

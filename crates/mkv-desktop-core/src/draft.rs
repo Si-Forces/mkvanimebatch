@@ -331,8 +331,8 @@ impl SettingsDraft {
 }
 
 /// The value a stepper click puts in a field holding `current`: `current` plus `delta`, where a
-/// field that holds no number starts from `auto`, else 0, clamped to `bounds` and rounded to 10
-/// significant digits, which drops noise such as 0.30000000000000004. A typed 0 is a value. A
+/// field that holds no finite number starts from `auto`, else 0, clamped to `bounds` and
+/// rounded to 10 significant digits, which drops noise such as 0.30000000000000004. A typed 0 is a value. A
 /// number field holds a number or nothing, so a strict parse stands in for JavaScript's lenient
 /// `parseFloat`; Rust's exact decimal rounding and `toPrecision` differ only on an exact binary
 /// tie at the tenth digit.
@@ -346,7 +346,7 @@ fn next_step_value(
         .trim()
         .parse::<f64>()
         .ok()
-        .filter(|value| !value.is_nan())
+        .filter(|value| value.is_finite())
         .or(auto)
         .unwrap_or(0.0);
     let mut value = start + delta;
@@ -733,6 +733,9 @@ mod tests {
         assert_eq!(stepped("", Some(6.0), -1.0, 1.0, WORKERS), 5.0);
         // A number input reports an unparsable entry as "", and a lone sign parses as nothing too.
         assert_eq!(stepped("-", Some(6.0), 1.0, 1.0, WORKERS), 7.0);
+        // Rust parses "inf"; a value that is not finite is no number either.
+        assert_eq!(stepped("inf", Some(6.0), 1.0, 1.0, WORKERS), 7.0);
+        assert_eq!(stepped("-infinity", None, 1.0, 0.5, None), 0.5);
     }
 
     #[test]

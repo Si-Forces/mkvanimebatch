@@ -65,7 +65,6 @@ pub struct ItemSnapshot {
     pub status: ItemStatus,
     pub outcome: Option<ItemOutcome>,
     pub progress: Option<f64>,
-    pub start_time_ms: Option<u64>,
     pub duration_sec: Option<f64>,
     pub reason: Option<String>,
     pub error: Option<String>,
@@ -86,7 +85,6 @@ pub struct JobSnapshot {
     pub job_id: u64,
     pub mode: String,
     pub status: BatchStatus,
-    pub start_time_ms: u64,
     pub input_dir: String,
     /// What the job runs with, fixed when it starts.
     pub effective_settings: EffectiveSettings,
@@ -95,11 +93,10 @@ pub struct JobSnapshot {
 }
 
 impl JobSnapshot {
-    /// The snapshot of job `job_id`, started at `start_time_ms`: running, with no batch yet.
+    /// The snapshot of job `job_id`: running, with no batch yet.
     pub fn begin(
         job_id: u64,
         mode: &str,
-        start_time_ms: u64,
         input_dir: String,
         effective_settings: EffectiveSettings,
     ) -> Self {
@@ -107,7 +104,6 @@ impl JobSnapshot {
             job_id,
             mode: mode.to_string(),
             status: BatchStatus::Running,
-            start_time_ms,
             input_dir,
             effective_settings,
             ordered_item_ids: Vec::new(),
@@ -117,7 +113,7 @@ impl JobSnapshot {
 
     /// Applies `event`, one of this job's, to the snapshot. Drops an event of another event
     /// version, and any but a `BatchStart` once the batch has ended. A `BatchStart` replaces the
-    /// batch but keeps the job's start time, input directory and Effective Settings.
+    /// batch but keeps the job's input directory and Effective Settings.
     pub fn apply(&mut self, event: &JobEvent) {
         self.apply_at(event, Instant::now());
     }
@@ -156,7 +152,6 @@ impl JobSnapshot {
                             status: ItemStatus::Queued,
                             outcome: None,
                             progress: None,
-                            start_time_ms: None,
                             duration_sec: None,
                             reason: None,
                             error: None,
@@ -170,7 +165,6 @@ impl JobSnapshot {
                     if !item.status.is_terminal() {
                         item.file = file.clone();
                         item.status = ItemStatus::Processing;
-                        item.start_time_ms.get_or_insert_with(timestamp_ms);
                         item.started_at.get_or_insert(now);
                     }
                 }
@@ -303,13 +297,6 @@ impl JobSnapshot {
     }
 }
 
-pub(crate) fn timestamp_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0)
-}
-
 /// Tags an engine event with the job that produced it so the UI can route it.
 pub(crate) fn attach_context(event: &mut JobEvent, mode: &str, job_id: u64) {
     let (JobEvent::BatchStart { extra, .. }
@@ -353,13 +340,7 @@ pub mod test_support {
 
     /// The snapshot of remux job `job_id` of `/anime` as it starts, with `effective_settings`.
     pub fn begun(job_id: u64) -> JobSnapshot {
-        JobSnapshot::begin(
-            job_id,
-            "remux",
-            1_700_000_000_000,
-            "/anime".into(),
-            effective_settings(),
-        )
+        JobSnapshot::begin(job_id, "remux", "/anime".into(), effective_settings())
     }
 
     /// A `BatchStart` listing `ids` in engine order; each item's file is `<id>.mkv`.
@@ -471,14 +452,12 @@ mod tests {
         snap.apply(&batch_complete(true, false));
         assert_eq!(snap.effective_settings, settings);
 
-        // A second BatchStart replaces the batch, never the job: its start time, input directory
+        // A second BatchStart replaces the batch, never the job: its input directory
         // and settings stay. A later job begins its own snapshot, so it inherits none of them
         // (the actor's `test_a_later_job_replaces_the_snapshot_and_stale_events_are_dropped`).
-        let start_time_ms = snap.start_time_ms;
         snap.apply(&batch_start(&["ep2"]));
         assert_eq!(snap.effective_settings, settings);
         assert_eq!(snap.input_dir, "/anime");
-        assert_eq!(snap.start_time_ms, start_time_ms);
         assert_eq!(snap.ordered_item_ids, ["ep2"]);
     }
 
@@ -731,7 +710,6 @@ mod tests {
     #[test]
     fn test_live_snapshot_retains_only_active_order_and_clamped_progress() {
         let mut snap = begun(10);
-        let start_time_ms = snap.start_time_ms;
         snap.apply(&batch_start(&["ep2", "ep1"]));
         for id in ["ep3", "ep2"] {
             snap.apply(&item_start(id));
@@ -741,7 +719,6 @@ mod tests {
             assert_eq!(snap.items["ep2"].progress, Some(progress.clamp(0.0, 100.0)));
         }
 
-        assert_eq!(snap.start_time_ms, start_time_ms);
         assert_eq!(
             snap.ordered_item_ids,
             vec!["ep2".to_string(), "ep1".to_string()]
@@ -750,10 +727,8 @@ mod tests {
         assert_eq!(snap.input_dir, "/anime");
         assert!(!snap.items.contains_key("ep3"));
         assert_eq!(snap.items["ep2"].status, ItemStatus::Processing);
-        assert!(snap.items["ep2"].start_time_ms.is_some());
         assert_eq!(snap.items["ep1"].status, ItemStatus::Queued);
         assert_eq!(snap.items["ep1"].file, "ep1.mkv");
-        assert_eq!(snap.items["ep1"].start_time_ms, None);
         assert_eq!(snap.items["ep2"].progress, Some(70.0));
     }
 

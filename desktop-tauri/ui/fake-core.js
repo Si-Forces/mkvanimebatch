@@ -1,8 +1,8 @@
 // Test support, not part of the app: published View State shapes, and a Desktop Core that serves
 // scripted ones. The queue rules and every displayed text are the core's and are tested in Rust
 // (`crates/mkv-desktop-core/src/{presentation,inspector,draft}.rs` are the source of truth); this
-// fake only applies the Intents a test needs and derives the few published values a test reads,
-// so the webview can be driven end to end.
+// fake only applies the Intents a test needs and derives the published values a test reads (see
+// `derive` for which, and which it does not mirror), so the webview can be driven end to end.
 
 /**
  * A published Row: a queued, selected manifest row named after its ID, with the texts the core
@@ -108,8 +108,12 @@ export function jobView(fields = {}) {
   };
 }
 
-/** A published Episode Inspector of `row` at `index`, with the texts left empty unless `fields` set them. */
-export function inspectorView(row, index = 0, fields = {}) {
+/**
+ * A published Episode Inspector of `row` at `index` in a `mode` queue, with the texts left empty
+ * unless `fields` set them. Extract has no Audio row and no subtitle choice.
+ */
+export function inspectorView(row, index = 0, fields = {}, mode = "remux") {
+  const remux = mode === "remux";
   return {
     id: row.id,
     number: String(index + 1).padStart(2, "0"),
@@ -118,13 +122,13 @@ export function inspectorView(row, index = 0, fields = {}) {
     error: null,
     pill: { tone: row.selected ? row.tone : "mute", label: row.selected ? row.label : "Not in batch" },
     video: "Unknown",
-    audio_label: "Audio",
+    audio_label: remux ? "Audio" : "Subtitles",
     audio: "Unknown",
     out_crumbs: null,
     fonts_head: "Fonts",
     fonts: "Not inspected",
     ladder: [],
-    options: [{ value: "", label: "Automatic (follow the ladder)" }],
+    options: remux ? [{ value: "", label: "Automatic (follow the ladder)" }] : [],
     assignment: null,
     ...fields,
   };
@@ -249,9 +253,10 @@ function runLog(mode) {
  * `visible`, not in `intents`.
  *
  * A whole state (`snapshot`) derives from `state` what the core lays over each publication
- * (`derive`): each mode's selection counts, count text before a batch, controls and inspector
- * (`inspect` picks its row, as the core does, even while busy), and the chips. `step_draft` steps
- * a draft field by its step, with no bounds and no auto value, as an `edit_draft` of the result.
+ * (`derive`, which lists the values it lays; `inspect` picks the inspector's row, as the core
+ * does, even while busy). `step_draft` steps a draft field by its step, with no bounds and no auto
+ * value, as an `edit_draft` of the result. A draft Intent is answered before its publication,
+ * as the core answers it.
  */
 export function createFakeCore({ onScan = async () => true, onStart = null } = {}) {
   const listeners = new Set();
@@ -368,7 +373,9 @@ export function createFakeCore({ onScan = async () => true, onStart = null } = {
       if (intent.type === "edit_draft" || intent.type === "set_preset" || intent.type === "step_draft") {
         if (core.busy()) throw "A batch is running; the settings are locked until it ends.";
         const changed = applyDraftIntent(view, intent.type === "step_draft" ? stepped(view, intent) : intent, core.state.presets);
-        if (changed) core.publish();
+        // Like the core, the answer comes first and the publication after it (`settings-draft.js`
+        // guards the key until the answer).
+        if (changed) setImmediate(() => core.publish());
         return changed;
       }
       if (core.busy()) throw "A batch is running; the queue is locked until it ends.";
@@ -399,14 +406,57 @@ export function createFakeCore({ onScan = async () => true, onStart = null } = {
   return core;
 }
 
-/** The `edit_draft` a `step_draft` Intent makes: the field's number, else 0, plus or minus its step. */
+/**
+ * The `edit_draft` a `step_draft` Intent makes: the field's number, else 0, plus or minus its
+ * step, rounded to 10 significant digits as `draft.rs` does.
+ */
 function stepped(view, { mode, field, direction }) {
   const current = Number.parseFloat(view.draft[field] ?? "");
-  const next = (Number.isNaN(current) ? 0 : current) + (direction === "up" ? STEPS[field] : -STEPS[field]);
-  return { type: "edit_draft", mode, changes: { [field]: String(next) } };
+  const next = (Number.isFinite(current) ? current : 0) + (direction === "up" ? STEPS[field] : -STEPS[field]);
+  return { type: "edit_draft", mode, changes: { [field]: String(Number(next.toPrecision(10)) + 0) } };
 }
 
-/** What the core is in charge of laying over a whole `state`, which `busy` holds or not; `picks` are the inspected rows. */
+/** A path's segments as `presentation::path_segments` splits them, and their `pretty_path` line. */
+const segments = path => (path ?? "").split(/[/\\]/).filter(segment => !["", ".", ".."].includes(segment));
+const pretty = path => segments(path).join(" › ");
+
+/** The Library of `rows` on `directory`, as `presentation::library` lays it. */
+function library(directory, rows) {
+  if (!directory) return [];
+  const label = release => pretty(release) || pretty(directory) || "Episodes";
+  const root = { release: null, label: segments(directory).at(-1) ?? directory, tooltip: pretty(directory), count: rows.length, group_label: label(".") };
+  const entries = [root];
+  for (const entry of rows) {
+    const release = entry.release || ".";
+    if (release === ".") continue;
+    let found = entries.find(candidate => candidate.release === release);
+    if (!found) entries.push(found = { release, label: pretty(release), tooltip: pretty(release), count: 0, group_label: label(release) });
+    found.count++;
+  }
+  return entries;
+}
+
+/** The batch tally of `count_text` over the participant rows, as `presentation::count_text` writes it. */
+function tally(rows) {
+  const participants = rows.filter(entry => entry.participant);
+  const count = (...statuses) => participants.filter(entry => statuses.includes(entry.status)).length;
+  const done = count("completed", "planned");
+  const parts = [`${done} done`];
+  let settled = done;
+  for (const [status, word] of [["skipped", "skipped"], ["cancelled", "cancelled"], ["error", "failed"]]) {
+    const n = count(status);
+    settled += n;
+    if (n > 0) parts.push(`${n} ${word}`);
+  }
+  return `${settled} of ${participants.length} · ${parts.join(" · ")}`;
+}
+
+/**
+ * What the core is in charge of laying over a whole `state`, which `busy` holds or not; `picks` are
+ * the inspected rows. Laid: each mode's title, crumbs, Library, filter counts, selection counts,
+ * count text, controls and inspector (unless a test set one), and the chips. Not mirrored, so a
+ * test that needs them sets them: the rows' own texts and buckets, the clock and the progress bar.
+ */
 function derive(state, busy, picks) {
   const owner = state.run.mode ?? (state.job?.active ? state.job.mode : null);
   for (const mode of ["remux", "extract"]) {
@@ -424,11 +474,21 @@ function derive(state, busy, picks) {
         ?? { class: "status-idle", label: "Idle" };
     const runTitle = owner && !owns ? `${owner === "remux" ? "Remux" : "Extract"} batch is running`
       : scanning ? "Scanning the folder" : unticked ? "Tick at least one episode" : "";
+    // The job's batch, once its BatchStart named the rows that take part.
+    const batch = state.job?.mode === mode && view.rows.some(entry => entry.participant);
+    const filters = { all: total, todo: 0, done: 0, failed: 0 };
+    for (const entry of view.rows) if (entry.bucket) filters[entry.bucket]++;
     Object.assign(view, {
+      title: segments(view.directory).at(-1) ?? "No folder open",
+      crumbs: segments(view.directory),
+      library: library(view.directory, view.rows),
+      filters,
       selected_count: selected,
       total_count: total,
-      // The batch tally is not mirrored; a test that needs it sets the rows' state, not the text.
-      count_text: scanning ? "Scanning…" : view.scan.state === "failed" ? "Scan failed" : total === 0 ? "Ready" : `${selected} / ${total} Selected`,
+      count_text: scanning ? "Scanning…"
+        : view.scan.state === "failed" ? "Scan failed"
+          : batch ? tally(view.rows)
+            : total === 0 ? "Ready" : `${selected} / ${total} Selected`,
       controls: {
         run_label: total > 0 ? `${verb} ${mode} · ${selected}` : `${verb} ${mode}`,
         run_title: runTitle,
@@ -444,7 +504,7 @@ function derive(state, busy, picks) {
     // An inspector a test set is kept.
     view.inspector ??= total === 0
       ? null
-      : inspectorView(view.rows[at], at, { assignment: view.assignments[view.rows[at].id] ?? null });
+      : inspectorView(view.rows[at], at, { assignment: view.assignments[view.rows[at].id] ?? null }, mode);
   }
   const shown = busy ? state.run.settings ?? (state.job?.active ? state.job.effective_settings : null) : state.defaults;
   const chip = (idle, count, noun) => (busy ? `${count == null ? noun : `${count} ${noun}`} Active` : count == null ? idle : `${idle} (${count} ${noun})`);

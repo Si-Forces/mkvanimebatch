@@ -181,13 +181,13 @@ export class JobController {
     if (controls) this.renderStatus(controls.status);
   }
 
-  /** Draws the published status pill, `{class, label}`. */
+  /**
+   * Draws the published status pill, `{class, label}`. The `.status-dot` stays from the markup;
+   * the label goes into the text node after it, as text, never as markup.
+   */
   renderStatus(status) {
     if (!this.statusEl) return;
-    const className = `status-pill ${status.class}`;
-    const html = `<span class="status-dot"></span> ${status.label}`;
-    if (this.statusEl.innerHTML === html && this.statusEl.className === className) return;
-    this.statusEl.className = className;
-    this.statusEl.innerHTML = html;
+    this.statusEl.className = `status-pill ${status.class}`;
+    this.statusEl.lastChild.textContent = ` ${status.label}`;
   }
 }

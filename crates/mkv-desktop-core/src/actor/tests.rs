@@ -128,7 +128,6 @@ pub(super) fn started(job_id: u64) -> JobStarted {
         mode: "remux",
         input_dir: "/anime".into(),
         effective_settings: effective_settings(),
-        start_time_ms: 1_700_000_000_000,
     }
 }
 
@@ -477,7 +476,6 @@ async fn test_a_later_job_replaces_the_snapshot_and_stale_events_are_dropped() {
         mode: "extract",
         input_dir: "/other".into(),
         effective_settings: EffectiveSettings::defaults(),
-        start_time_ms: 1_700_000_000_001,
     });
     // A late event of the first job does not touch the second's snapshot.
     first.event(&batch_start(&["ep9"]));
@@ -1095,6 +1093,7 @@ async fn test_a_scan_shows_scanning_then_accepts_the_inspection_of_the_identity(
             directory: "/anime".into()
         }
     );
+    assert_eq!(state.remux.count_text, "Scanning…");
     // The queue is the scan's until it settles.
     assert!(core
         .dispatch(Intent::SetAllSelected {
@@ -1110,6 +1109,7 @@ async fn test_a_scan_shows_scanning_then_accepts_the_inspection_of_the_identity(
     let state = core.state().await.unwrap();
     assert_eq!(&state, publisher.states().last().unwrap());
     assert_eq!(state.remux.scan, ScanView::Idle);
+    assert_eq!(state.remux.count_text, "2 / 2 Selected");
     assert_eq!(state.remux.directory.as_deref(), Some("/anime"));
     assert_eq!(ids(&state.remux), ["ep1", "ep2"]);
     assert_eq!(state.remux.manifest_rev, 1);
@@ -1787,7 +1787,6 @@ impl Launcher for FakeLauncher {
             mode,
             input_dir: request.input_dir.to_string_lossy().into_owned(),
             effective_settings: effective_settings(),
-            start_time_ms: 1_700_000_000_000,
         });
         script.launched.push(request);
         match script.end_at_launch {

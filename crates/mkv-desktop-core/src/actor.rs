@@ -1235,6 +1235,7 @@ impl<P: Publisher, I: Inspector, L: Launcher, S: Sampler> Core<P, I, L, S> {
         {
             self.touch(mode);
             self.snapshot = None;
+            self.job_started_at = None;
         }
     }
 

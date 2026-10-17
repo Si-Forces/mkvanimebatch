@@ -62,13 +62,6 @@ class FakeElement {
     return child;
   }
 
-  replaceWith(other) {
-    const siblings = this.parent.children;
-    siblings[siblings.indexOf(this)] = other;
-    other.parent = this.parent;
-    this.parent = null;
-  }
-
   addEventListener(type, handler) { (this.handlers ??= new Map()).set(type, handler); }
 
   remove() {

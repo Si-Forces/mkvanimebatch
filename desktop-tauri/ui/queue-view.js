@@ -5,9 +5,7 @@ export const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS;
 /** A mode's queue before the Desktop Core published one. */
 const EMPTY_VIEW = {
   directory: null,
-  scan: { state: "idle" },
   manifest_rev: 0,
-  rows: [],
   library: [],
   inspector: null,
 };
@@ -69,7 +67,6 @@ export class QueueTracker {
     // The order an incremental render is mounting, or null when none is pending.
     this.renderingOrder = null;
     this.renderRafId = null;
-    this.isScanning = false;
     // Set by the owning JobController from the published `controls.selection_locked`. While true,
     // every user selection or order change is refused: the core captured the ordered selected IDs
     // at Run. The guard lives on the mutation, not only on the disabled controls, because a row
@@ -156,10 +153,9 @@ export class QueueTracker {
     this.view = view;
     this.rows = new Map(view.rows.map(row => [row.id, row]));
     this.order = view.rows.map(row => row.id);
-    this.isScanning = view.scan?.state === "scanning";
     this.setCountText(view.count_text);
 
-    if (this.isScanning) this.showScanning(previous, view.scan.directory);
+    if (view.scan?.state === "scanning") this.showScanning(previous, view.scan.directory);
     else if (view.scan?.state === "failed") this.showFailure();
     else if (this.order.length === 0) this.showEmpty();
     else this.showRows(previous, changedRows);
@@ -336,7 +332,8 @@ export class QueueTracker {
    * bucket changed.
    */
   drawCard(card, row) {
-    if (card.title.textContent !== row.name) {
+    if (card.name !== row.name) {
+      card.name = row.name;
       card.title.textContent = row.name;
       card.checkbox.setAttribute?.("aria-label", `Include ${row.name} in the batch`);
     }
@@ -378,6 +375,8 @@ export class QueueTracker {
       epNum,
       // The filter bucket drawCard last drew; none yet.
       bucket: undefined,
+      // The name drawCard last drew; none yet, so an empty name still gets its aria-label.
+      name: undefined,
     };
     card.num.textContent = episodeNumberText(epNum);
     for (const control of [card.checkbox, card.pick, el.querySelector(".ep-up-btn"), el.querySelector(".ep-down-btn")]) {

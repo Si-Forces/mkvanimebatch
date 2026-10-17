@@ -384,10 +384,26 @@ mod tests {
             json!({
                 "seq": 2,
                 "base": 1,
-                "chips": serde_json::to_value(&picked.chips).unwrap(),
+                // Literal, so a renamed key fails here; the inspector's own shape is pinned in
+                // the core's inspector tests.
+                "chips": {
+                    "workers": "Workers Active",
+                    "workers_hint": null,
+                    "io_jobs": "IO Jobs Active",
+                    "io_jobs_hint": null,
+                },
                 "remux": {
                     "inspector": serde_json::to_value(&inspector).unwrap(),
-                    "controls": serde_json::to_value(&picked.remux.controls).unwrap(),
+                    "controls": {
+                        "owns": true,
+                        "run_disabled": true,
+                        "run_label": "Run remux",
+                        "run_title": "",
+                        "selection_locked": true,
+                        "status": { "class": "status-running", "label": "Running" },
+                        "stop_disabled": false,
+                        "stop_label": "Stop",
+                    },
                 },
             })
         );

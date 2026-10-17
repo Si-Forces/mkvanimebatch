@@ -92,7 +92,7 @@ function stepNumber(btn, dir) {
   // `remux-sub-offset` steps the remux draft's `sub_offset`.
   const [, mode, suffix] = input.id?.match(/^(remux|extract)-(.+)$/) ?? [];
   if (!mode) return;
-  dispatchIntent({ type: "step_draft", mode, field: suffix.replaceAll("-", "_"), direction: dir > 0 ? "up" : "down" });
+  draftForm.step(mode, suffix.replaceAll("-", "_"), dir > 0 ? "up" : "down");
 }
 
 function initSteppers() {

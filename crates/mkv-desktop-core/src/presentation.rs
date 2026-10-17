@@ -30,7 +30,7 @@ pub fn format_outcome_duration(seconds: f64) -> String {
     if rounded < 60.0 {
         return format!("{rounded:.1}s");
     }
-    format!("{}m {:.1}s", (rounded / 60.0).floor(), rounded % 60.0)
+    format!("{}m {:.1}s", (rounded / 60.0) as u64, rounded % 60.0)
 }
 
 /// An elapsed time in whole seconds: `5s`, `1m 15s`.
@@ -75,8 +75,10 @@ pub fn status_label(
         ItemStatus::Processing => {
             let elapsed = format_elapsed(elapsed.unwrap_or_default());
             match progress {
-                Some(progress) => format!("{}% · {elapsed}", progress.round()),
-                None => format!("Processing · {elapsed}"),
+                Some(progress) if progress.is_finite() => {
+                    format!("{}% · {elapsed}", progress.clamp(0.0, 100.0).round())
+                }
+                _ => format!("Processing · {elapsed}"),
             }
         }
         ItemStatus::Completed => match duration_sec {
@@ -91,14 +93,17 @@ pub fn status_label(
     }
 }
 
-/// The error a failed row shows: the engine's, else the default.
+/// The error a failed row shows: the engine's, else the default; an empty one is none.
 pub fn row_error(status: ItemStatus, error: Option<&str>) -> Option<&str> {
-    error.or((status == ItemStatus::Error).then_some(DEFAULT_FAILED))
+    error
+        .filter(|error| !error.is_empty())
+        .or((status == ItemStatus::Error).then_some(DEFAULT_FAILED))
 }
 
-/// The reason a row shows: the engine's, else the default of a skipped or cancelled item.
+/// The reason a row shows: the engine's, else the default of a skipped or cancelled item; an
+/// empty one is none.
 pub fn row_reason(status: ItemStatus, reason: Option<&str>) -> Option<&str> {
-    reason.or(match status {
+    reason.filter(|reason| !reason.is_empty()).or(match status {
         ItemStatus::Skipped => Some(DEFAULT_SKIPPED),
         ItemStatus::Cancelled => Some(DEFAULT_CANCELLED),
         _ => None,
@@ -127,7 +132,7 @@ pub fn status_title(status: ItemStatus, error: Option<&str>, reason: Option<&str
 pub fn failed_meta(error: Option<&str>) -> String {
     format!(
         "Failed · {}",
-        first_text(&[row_error(ItemStatus::Error, error)], "Error")
+        row_error(ItemStatus::Error, error).unwrap_or(DEFAULT_FAILED)
     )
 }
 
@@ -140,14 +145,14 @@ pub fn job_only_meta(
     reason: Option<&str>,
     error: Option<&str>,
 ) -> String {
-    let reason = row_reason(status, reason);
+    let reason = row_reason(status, reason).unwrap_or_default();
     match status {
         ItemStatus::Completed => match duration_sec {
             Some(duration) => format!("Processed · Done in {}", format_outcome_duration(duration)),
             None => "Processed".into(),
         },
-        ItemStatus::Skipped => format!("Skipped · {}", first_text(&[reason], "Already processed")),
-        ItemStatus::Cancelled => format!("Cancelled · {}", first_text(&[reason], "Cancelled")),
+        ItemStatus::Skipped => format!("Skipped · {reason}"),
+        ItemStatus::Cancelled => format!("Cancelled · {reason}"),
         ItemStatus::Error => failed_meta(error),
         _ => "Queued".into(),
     }
@@ -484,7 +489,12 @@ pub fn progress_segments(rows: &[Row], batch: Option<&Batch>) -> Progress {
             ItemStatus::Completed | ItemStatus::Planned => parts.done += 1.0,
             ItemStatus::Skipped | ItemStatus::Cancelled => parts.skipped += 1.0,
             ItemStatus::Error => parts.failed += 1.0,
-            ItemStatus::Processing => parts.live += row.progress.map_or(0.05, |p| p / 100.0),
+            ItemStatus::Processing => {
+                parts.live += row
+                    .progress
+                    .filter(|p| p.is_finite())
+                    .map_or(0.05, |p| p.clamp(0.0, 100.0) / 100.0)
+            }
             ItemStatus::Queued => {}
         }
     }
@@ -781,6 +791,15 @@ mod tests {
             "Processing · 6s"
         );
         assert_eq!(status_label(Processing, Some(64.5), None, None), "65% · 0s");
+        // A progress out of range is clamped; one that is not finite is none.
+        assert_eq!(
+            status_label(Processing, Some(130.0), None, None),
+            "100% · 0s"
+        );
+        assert_eq!(
+            status_label(Processing, Some(f64::NAN), None, None),
+            "Processing · 0s"
+        );
         assert_eq!(
             status_label(Completed, None, None, Some(48.0)),
             "Done in 48.0s"
@@ -833,9 +852,10 @@ mod tests {
             job_only_meta(Skipped, None, None, None),
             "Skipped · Skipped"
         );
+        // An empty reason is none.
         assert_eq!(
             job_only_meta(Skipped, None, Some(""), None),
-            "Skipped · Already processed"
+            "Skipped · Skipped"
         );
         assert_eq!(
             job_only_meta(Cancelled, None, None, None),
@@ -850,7 +870,10 @@ mod tests {
             "Failed · mkvmerge exited with 2"
         );
         assert_eq!(failed_meta(None), "Failed · Failed");
-        assert_eq!(failed_meta(Some("")), "Failed · Error");
+        // An empty error is none.
+        assert_eq!(failed_meta(Some("")), "Failed · Failed");
+        assert_eq!(status_title(Error, Some(""), None), "Failed");
+        assert_eq!(status_title(Cancelled, None, Some("")), "Cancelled");
     }
 
     // The webview's former filter cases.
@@ -917,6 +940,10 @@ mod tests {
             row("b", ItemStatus::Queued, false, false),
         ];
         assert_eq!(progress_segments(&rows, None).live, 5.0);
+        // A progress that is not finite is a sliver too, not a full bar.
+        let mut nan = row("a", ItemStatus::Processing, false, true);
+        nan.progress = Some(f64::NAN);
+        assert_eq!(progress_segments(&[nan], None).live, 5.0);
         assert_eq!(progress_segments(&[], None), Progress::default());
     }
 
@@ -952,6 +979,13 @@ mod tests {
         );
         assert_eq!(count_text(&ScanView::Idle, &[], None), "Ready");
         assert_eq!(count_text(&ScanView::Failed, &[], None), "Scan failed");
+        let scanning = ScanView::Scanning {
+            directory: "/anime".into(),
+        };
+        assert_eq!(
+            count_text(&scanning, &rows(ItemStatus::Queued), None),
+            "Scanning…"
+        );
         let mixed = [
             row("a", ItemStatus::Completed, true, true),
             row("b", ItemStatus::Planned, true, true),
@@ -980,6 +1014,7 @@ mod tests {
             (60.0, "1m 0.0s"),
             (75.4, "1m 15.4s"),
             (119.96, "2m 0.0s"),
+            (3725.0, "62m 5.0s"),
         ] {
             assert_eq!(format_outcome_duration(seconds), text, "{seconds}");
         }

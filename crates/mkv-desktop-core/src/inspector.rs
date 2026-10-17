@@ -144,7 +144,7 @@ pub fn inspector_view(
         number: format!("{:02}", at + 1),
         title: row.name.clone(),
         crumbs: strings(inspector_crumbs(&row.id)),
-        error: error.filter(|error| !error.is_empty()).map(str::to_string),
+        error: error.map(str::to_string),
         pill: if row.selected {
             Pill {
                 tone: status_tone(row.status),
@@ -217,7 +217,9 @@ fn subtitle_section(
         };
         options.push(choice(path, format!("{} ({tier})", pretty_path(path))));
     }
-    if let Some(path) = assigned.filter(|path| !candidates.iter().any(|c| c == path.as_ref())) {
+    if let Some(path) =
+        assigned.filter(|path| !path.is_empty() && !candidates.iter().any(|c| c == path.as_ref()))
+    {
         options.push(choice(
             &path,
             format!("{} (Custom file)", pretty_path(&path)),
@@ -374,6 +376,10 @@ mod tests {
         view.assignments.get_mut(&row.id).unwrap().asset_path = "Season 1/ep1.ass".into();
         let inspector = inspector_view(true, &view, 0, &row, Some(&entry), None);
         assert_eq!(inspector.options.len(), 3);
+        // An empty path is no custom file: Automatic is the only empty option.
+        view.assignments.get_mut(&row.id).unwrap().asset_path = "".into();
+        let inspector = inspector_view(true, &view, 0, &row, Some(&entry), None);
+        assert_eq!(inspector.options.len(), 3);
     }
 
     #[test]
@@ -387,11 +393,11 @@ mod tests {
         let inspector = inspector_view(true, &view, 0, &failed, Some(&entry), Some("mkvmerge 2"));
         assert_eq!(inspector.error.as_deref(), Some("mkvmerge 2"));
         assert_eq!(inspector.pill.tone, Tone::Err);
-        // A failure without an error text reads the default one; an empty one hides the box.
-        let inspector = inspector_view(true, &view, 0, &failed, Some(&entry), None);
-        assert_eq!(inspector.error.as_deref(), Some("Failed"));
-        let inspector = inspector_view(true, &view, 0, &failed, Some(&entry), Some(""));
-        assert_eq!(inspector.error, None);
+        // A failure without an error text, or with an empty one, reads the default one.
+        for error in [None, Some("")] {
+            let inspector = inspector_view(true, &view, 0, &failed, Some(&entry), error);
+            assert_eq!(inspector.error.as_deref(), Some("Failed"), "{error:?}");
+        }
 
         entry.metadata = Default::default();
         entry.inspection_error = Some("EBML header missing".into());

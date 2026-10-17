@@ -494,11 +494,15 @@ fn present(
     let elapsed = item
         .and_then(ItemSnapshot::started_at)
         .map(|started_at| now.saturating_duration_since(started_at));
-    // A failed row says why, so a batch with several failures reads without opening each row.
-    let (meta, meta_error) = match base {
-        _ if status == ItemStatus::Error => (failed_meta(error), true),
-        Some(base) => (base.meta.clone(), base.meta_error),
-        None => (job_only_meta(status, duration_sec, reason, error), false),
+    // A failed row says why, in place of a manifest row's inspected meta, so a batch with several
+    // failures reads without opening each row.
+    let (meta, meta_error) = if status == ItemStatus::Error {
+        (failed_meta(error), true)
+    } else {
+        match base {
+            Some(base) => (base.meta.clone(), base.meta_error),
+            None => (job_only_meta(status, duration_sec, reason, error), false),
+        }
     };
     let name = match (base, item) {
         (Some(base), _) => base.name.clone(),
