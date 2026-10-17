@@ -47,7 +47,7 @@ test("a patch with no change only moves seq", () => {
 });
 
 test("a top-level key replaces its value, and a job sent as null clears it", () => {
-  const applied = { ...whole(5), job: jobView(["01"]), busy: true };
+  const applied = { ...whole(5), job: jobView(), busy: true };
   const run = { phase: "running", mode: "remux", settings: null };
   let { state } = nextState(applied, { seq: 6, base: 5, run });
   assert.deepEqual(state.run, run);

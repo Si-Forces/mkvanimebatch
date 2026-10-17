@@ -70,8 +70,15 @@ pub struct ItemSnapshot {
     pub reason: Option<String>,
     pub error: Option<String>,
     /// When the bridge saw the item start, on a monotonic clock: the origin of the duration of
-    /// an item the bridge settles; `start_time_ms` is the wall-clock value a row shows.
+    /// an item the bridge settles, and of the elapsed time a processing row shows.
     started_at: Option<Instant>,
+}
+
+impl ItemSnapshot {
+    /// When the bridge saw the item start, on the clock `JobSnapshot::apply_at` was given.
+    pub(crate) fn started_at(&self) -> Option<Instant> {
+        self.started_at
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -112,6 +119,13 @@ impl JobSnapshot {
     /// version, and any but a `BatchStart` once the batch has ended. A `BatchStart` replaces the
     /// batch but keeps the job's start time, input directory and Effective Settings.
     pub fn apply(&mut self, event: &JobEvent) {
+        self.apply_at(event, Instant::now());
+    }
+
+    /// `apply` at `now`: the monotonic time an item start is stamped with, and an outcome without
+    /// a duration is measured to. The Desktop Core actor passes the tokio clock, so a test with
+    /// paused time moves it; the supervisor's ledger uses `apply`.
+    pub fn apply_at(&mut self, event: &JobEvent, now: Instant) {
         let (JobEvent::BatchStart { version, .. }
         | JobEvent::ItemStart { version, .. }
         | JobEvent::ItemProgress { version, .. }
@@ -157,7 +171,7 @@ impl JobSnapshot {
                         item.file = file.clone();
                         item.status = ItemStatus::Processing;
                         item.start_time_ms.get_or_insert_with(timestamp_ms);
-                        item.started_at.get_or_insert_with(Instant::now);
+                        item.started_at.get_or_insert(now);
                     }
                 }
             }
@@ -185,11 +199,12 @@ impl JobSnapshot {
                         // An outcome without a duration falls back to how long the item ran
                         // since the bridge saw it start, on the monotonic clock.
                         item.duration_sec = duration_sec.or_else(|| {
-                            item.started_at
-                                .map(|started_at| started_at.elapsed().as_secs_f64())
+                            item.started_at.map(|started_at| {
+                                now.saturating_duration_since(started_at).as_secs_f64()
+                            })
                         });
-                        // Only the reason the event carries: a default is a label for the UI to
-                        // show, not a stored value.
+                        // Only the reason the event carries: a default is a label the row shows
+                        // (`presentation::row_reason`), not a stored value.
                         item.reason = reason.clone();
                         item.error = error.clone();
                     }

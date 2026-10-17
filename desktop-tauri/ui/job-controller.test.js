@@ -4,12 +4,12 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { BULK_SELECTION_CONTROLS, JobController } from "./job-controller.js";
-import { QueueTracker } from "./queue-view.js";
-import { IDLE_RUN, draft, jobView, modeView } from "./fake-core.js";
+import { IDLE_RUN, controls, draft, modeView } from "./fake-core.js";
 
 // Rendering and wiring only: the Job Coordinator, the request a Run builds and its preflight are
 // the Desktop Core's, tested in `crates/mkv-desktop-core/src/{coordinator,draft,actor}.rs`, and so
-// are the Run Log lines a Run, a Stop or a cache clear writes (`actor/start.rs`, `actor.rs`).
+// are the Run Log lines a Run, a Stop or a cache clear writes (`actor/start.rs`, `actor.rs`) and
+// the controls' texts and rules (`presentation.rs`, `controls`).
 
 class FakeElement {
   constructor(value = "") {
@@ -49,21 +49,15 @@ function makeElements(modes = ["remux"], extra = {}) {
   return elements;
 }
 
-/** Installs a DOM stub that also lets a real QueueTracker render synchronously. */
+/** Installs a DOM stub. */
 function installDom(t, elements) {
   const previousDocument = globalThis.document;
-  const previousRaf = globalThis.requestAnimationFrame;
   globalThis.document = {
     getElementById: id => elements.get(id) ?? null,
     querySelectorAll: () => [],
-    querySelector: () => null,
-    createElement: () => new FakeElement(),
-    createDocumentFragment: () => new FakeElement(),
   };
-  globalThis.requestAnimationFrame = callback => callback();
   t.after(() => {
     globalThis.document = previousDocument;
-    globalThis.requestAnimationFrame = previousRaf;
   });
 }
 
@@ -104,7 +98,14 @@ function makeRuntime(tracker, { reply = async () => true, ...overrides } = {}) {
   return page;
 }
 
-const idleTracker = (fields = {}) => ({ state: { totalCount: 2 }, getSelectedCount: () => 2, isScanning: false, ...fields });
+/** A queue a controller sets the selection lock on and selects all of. */
+const idleTracker = () => ({ selectionLocked: false, selectAll() {}, deselectAll() {} });
+
+/** A View State whose `mode` view publishes `fields` over its idle controls. */
+const withControls = (mode, fields, state = {}) => viewState({
+  ...state,
+  [mode]: modeView([], { controls: controls(mode, fields) }, mode),
+});
 
 test("index.html chips name their state without inventing a worker or I/O job count", () => {
   const html = fs.readFileSync(path.join(import.meta.dirname, "index.html"), "utf8");
@@ -211,141 +212,98 @@ test("a Run refused over a flagged field opens the settings sheet on it, and a f
   assert.deepEqual(page.opened, ["remux"]);
 });
 
-test("Run is disabled while its queue scans, while starting, or while another mode's job runs", async t => {
-  const dryRun = new FakeElement();
-  const elements = makeElements(["remux"], { "remux-dry-run": dryRun });
-  installDom(t, elements);
-  const tracker = idleTracker({ isScanning: true });
-  const page = makeRuntime(tracker);
-  const runBtn = elements.get("remux-run");
-
-  const controller = new JobController("remux", page.runtime);
-  controller.syncGlobalControls();
-  assert.equal(runBtn.disabled, true);
-  assert.equal(runBtn.title, "Scanning the folder");
-  assert.equal(runBtn.textContent, "Run remux · 2");
-
-  tracker.isScanning = false;
-  controller.syncGlobalControls();
-  assert.equal(runBtn.disabled, false);
-  assert.equal(runBtn.title, "");
-
-  // A dry run plans; the label follows the checkbox.
-  dryRun.checked = true;
-  dryRun.handlers.get("change")();
-  assert.equal(runBtn.textContent, "Plan remux · 2");
-
-  // The other mode's start blocks this Run, and its tooltip says so.
-  page.state = viewState({ run: { phase: "starting", mode: "extract", settings: null }, busy: true });
-  controller.syncGlobalControls();
-  assert.equal(runBtn.disabled, true);
-  assert.equal(runBtn.title, "Extract batch is running");
-  assert.equal(runBtn.hidden, false);
-
-  // An active job with an idle coordinator still holds the batch.
-  page.state = viewState({ job: jobView([], { mode: "extract" }), busy: true });
-  controller.syncGlobalControls();
-  assert.equal(runBtn.disabled, true);
-  assert.equal(runBtn.title, "Extract batch is running");
-});
-
-test("while a start is before its launch every control a batch locks is disabled, in both modes", async t => {
-  const bulk = BULK_SELECTION_CONTROLS.map(({ id }) => [id, new FakeElement()]);
-  const elements = makeElements(["remux", "extract"], {
-    "remux-episode-list": "",
-    "remux-queue-count": "",
-    "extract-episode-list": "",
-    "extract-queue-count": "",
-  });
-  for (const [id, button] of bulk) elements.set(id, button);
-  installDom(t, elements);
-  const queues = { remux: new QueueTracker("remux", async () => false), extract: new QueueTracker("extract", async () => false) };
-  for (const [mode, queue] of Object.entries(queues)) queue.applyView(modeView([`${mode}.mkv`], { directory: `/anime/${mode}`, manifest_rev: 1 }));
-  const page = makeRuntime(null, { queueFor: mode => queues[mode] });
-  const remux = new JobController("remux", page.runtime);
-  const extract = new JobController("extract", page.runtime);
-
-  page.state = viewState({ run: { phase: "starting", mode: "remux", settings: null }, busy: true });
-  remux.syncGlobalControls();
-  extract.syncGlobalControls();
-  for (const [id, button] of bulk) assert.equal(button.disabled, true, id);
-  assert.equal(queues.remux.selectionLocked, true);
-  assert.equal(queues.extract.selectionLocked, true);
-  assert.equal(remux.applyBulkSelection("remux", false), false);
-  assert.equal(remux.applyBulkSelection("extract", false), false);
-  assert.equal(elements.get("extract-run").disabled, true);
-  // The owner shows Stop, and its pill reads Running from the start on.
-  assert.equal(elements.get("remux-run").hidden, true);
-  assert.equal(elements.get("remux-stop").hidden, false);
-  assert.equal(elements.get("remux-stop").disabled, false);
-  assert.match(elements.get("remux-status").innerHTML, /Running/);
-  assert.equal(elements.get("extract-stop").hidden, true);
-
-  // A Stop pending: Stopping, and no second Stop.
-  page.state = viewState({ run: { phase: "stopping", mode: "remux", settings: null }, busy: true });
-  remux.syncGlobalControls();
-  assert.equal(elements.get("remux-stop").disabled, true);
-  assert.equal(elements.get("remux-stop").textContent, "Stopping…");
-  assert.match(elements.get("remux-status").innerHTML, /Stopping/);
-
-  // Cancelled before the launch: the lock lifts and the pill shows the outcome.
-  page.state = viewState({ remux: modeView([], { outcome: "cancelled" }) });
-  remux.syncGlobalControls();
-  extract.syncGlobalControls();
-  for (const [id, button] of bulk) assert.equal(button.disabled, false, id);
-  assert.equal(queues.remux.selectionLocked, false);
-  assert.equal(elements.get("remux-stop").hidden, true);
-  assert.match(elements.get("remux-status").innerHTML, /Cancelled/);
-});
-
-test("an idle batch freezes only the queue that is scanning, not the other tab", t => {
-  const elements = makeElements(["remux", "extract"], {
-    "remux-episode-list": "",
-    "remux-queue-count": "",
-    "extract-episode-list": "",
-    "extract-queue-count": "",
-  });
-  for (const { id } of BULK_SELECTION_CONTROLS) elements.set(id, new FakeElement());
-  installDom(t, elements);
-
-  const queues = { remux: new QueueTracker("remux", async () => false), extract: new QueueTracker("extract", async () => false) };
-  const shown = mode => modeView([`${mode}.mkv`], { directory: `/anime/${mode}`, manifest_rev: 1 });
-  for (const [mode, tracker] of Object.entries(queues)) tracker.applyView(shown(mode));
-  const page = makeRuntime(null, { queueFor: mode => queues[mode] });
-  const remuxController = new JobController("remux", page.runtime);
-  const extractController = new JobController("extract", page.runtime);
-  const sync = () => [remuxController, extractController].forEach(controller => controller.syncGlobalControls());
-
-  // The remux queue is mid-rescan while nothing holds the batch.
-  queues.remux.applyView({ ...shown("remux"), scan: { state: "scanning", directory: "/anime/remux" } });
-  sync();
-  for (const { id, mode } of BULK_SELECTION_CONTROLS) {
-    // The scanning queue is frozen; the idle one keeps its controls live.
-    assert.equal(elements.get(id).disabled, mode === "remux", `${id} must follow its own queue's scan state`);
-  }
-  assert.equal(queues.remux.selectionLocked, true, "the scanning queue is frozen");
-  assert.equal(queues.extract.selectionLocked, false, "an idle extract queue must stay editable");
-  assert.equal(remuxController.applyBulkSelection("extract", false), true, "the other tab must accept bulk selection");
-
-  // Once the rescan lands, both queues are editable again.
-  queues.remux.applyView({ ...shown("remux"), manifest_rev: 2 });
-  sync();
-  for (const { id } of BULK_SELECTION_CONTROLS) assert.equal(elements.get(id).disabled, false);
-  assert.equal(queues.remux.selectionLocked, false);
-});
-
-test("the status pill shows the mode's published outcome, and Idle before its first batch", t => {
+test("Run, Stop and the status pill render the published controls, and a pending Run keeps Run disabled", async t => {
   const elements = makeElements();
   installDom(t, elements);
   const page = makeRuntime(idleTracker());
+  const runBtn = elements.get("remux-run");
+  const stopBtn = elements.get("remux-stop");
   const controller = new JobController("remux", page.runtime);
-  for (const [outcome, label] of [[null, "Idle"], ["done", "Done"], ["cancelled", "Cancelled"], ["failed", "Failed"]]) {
-    page.state = viewState({ remux: modeView([], { outcome }) });
-    controller.syncGlobalControls();
-    assert.match(elements.get("remux-status").innerHTML, new RegExp(label), String(outcome));
-  }
-  // Another mode's batch leaves this pill on this mode's own outcome.
-  page.state = viewState({ run: { phase: "running", mode: "extract", settings: null }, busy: true, remux: modeView([], { outcome: "done" }) });
+
+  page.state = withControls("remux", { run_label: "Plan remux · 2", run_title: "Scanning the folder", run_disabled: true });
   controller.syncGlobalControls();
-  assert.match(elements.get("remux-status").innerHTML, /Done/);
+  assert.equal(runBtn.disabled, true);
+  assert.equal(runBtn.textContent, "Plan remux · 2");
+  assert.equal(runBtn.title, "Scanning the folder");
+  assert.equal(runBtn.hidden, false);
+  assert.equal(stopBtn.hidden, true);
+
+  page.state = withControls("remux", {
+    owns: true,
+    stop_label: "Stopping…",
+    stop_disabled: true,
+    status: { class: "status-running", label: "Stopping" },
+  });
+  controller.syncGlobalControls();
+  assert.equal(runBtn.hidden, true);
+  assert.equal(stopBtn.hidden, false);
+  assert.equal(stopBtn.disabled, true);
+  assert.equal(stopBtn.textContent, "Stopping…");
+  assert.equal(elements.get("remux-status").className, "status-pill status-running");
+  assert.equal(elements.get("remux-status").innerHTML, '<span class="status-dot"></span> Stopping');
+
+  // An enabled Run stays disabled while a Run sent is not answered.
+  page.state = withControls("remux", {});
+  let answer;
+  page.runtime.send = () => new Promise(resolve => { answer = resolve; });
+  const running = controller.start();
+  assert.equal(runBtn.disabled, true);
+  answer(true);
+  await running;
+  assert.equal(runBtn.disabled, false);
+});
+
+test("a busy batch locks the settings and every control a batch locks, and each queue follows its own selection lock", async t => {
+  const bulk = BULK_SELECTION_CONTROLS.map(({ id }) => [id, new FakeElement()]);
+  const elements = makeElements(["remux", "extract"]);
+  for (const [id, button] of bulk) elements.set(id, button);
+  installDom(t, elements);
+  const queues = { remux: idleTracker(), extract: idleTracker() };
+  const page = makeRuntime(null, { queueFor: mode => queues[mode] });
+  const remux = new JobController("remux", page.runtime);
+  const field = new FakeElement();
+  remux.formControls = [field];
+  const preset = new FakeElement();
+  globalThis.document.querySelectorAll = selector => (selector.includes(".lock-while-job") ? [preset] : []);
+
+  // A start holds the batch: both queues are locked.
+  page.state = viewState({
+    busy: true,
+    remux: modeView([], { controls: controls("remux", { selection_locked: true }) }),
+    extract: modeView([], { controls: controls("extract", { selection_locked: true }) }, "extract"),
+  });
+  remux.syncGlobalControls();
+  for (const [id, button] of bulk) assert.equal(button.disabled, true, id);
+  assert.equal(queues.remux.selectionLocked, true);
+  assert.equal(queues.extract.selectionLocked, true);
+  assert.equal(remux.applyBulkSelection("extract", false), false);
+  assert.equal(field.disabled, true);
+  assert.equal(preset.disabled, true);
+
+  // Idle, with only the remux queue rescanning: the other tab keeps its controls live.
+  page.state = withControls("remux", { selection_locked: true });
+  remux.syncGlobalControls();
+  for (const { id, mode } of BULK_SELECTION_CONTROLS) {
+    assert.equal(elements.get(id).disabled, mode === "remux", `${id} must follow its own queue's lock`);
+  }
+  assert.equal(queues.remux.selectionLocked, true);
+  assert.equal(queues.extract.selectionLocked, false);
+  assert.equal(remux.applyBulkSelection("extract", true), true);
+  assert.equal(field.disabled, false);
+  assert.equal(preset.disabled, false);
+});
+
+test("before the first View State the markup's labels stand and the queues stay unlocked", t => {
+  const elements = makeElements();
+  installDom(t, elements);
+  const tracker = idleTracker();
+  const page = makeRuntime(tracker);
+  page.state = null;
+  const runBtn = elements.get("remux-run");
+  runBtn.textContent = "Run";
+  new JobController("remux", page.runtime).syncGlobalControls();
+  assert.equal(runBtn.textContent, "Run");
+  assert.equal(runBtn.disabled, false);
+  assert.equal(tracker.selectionLocked, false);
+  assert.equal(elements.get("remux-status").innerHTML, "");
 });

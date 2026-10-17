@@ -2,10 +2,15 @@
 //! view only mirrors them. Edits arrive as Intents; nothing is parsed until a run builds its
 //! `BatchRequest` from them, and nothing is persisted.
 
+use crate::queue::{Direction, MetaInputs};
 use mkv_core::pipeline::PipelineMode;
 use mkv_core::preset::require_preset;
-use mkv_core::request::{seconds_to_ms, BatchRequest, DEFAULT_PRESET_ID};
+use mkv_core::request::{
+    seconds_to_ms, BatchRequest, EffectiveSettings, DEFAULT_PRESET_ID, FFMPEG_THREADS_RANGE,
+    IO_JOBS_RANGE, WORKERS_RANGE,
+};
 use serde::{Deserialize, Serialize};
+use std::ops::RangeInclusive;
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -63,6 +68,16 @@ pub struct DraftChanges {
     pub ffmpeg_threads: Option<String>,
     pub dry_run: Option<bool>,
     pub no_cache: Option<bool>,
+}
+
+/// A Settings Draft field a stepper steps, by one, or the subtitle offset by half a second.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StepField {
+    SubOffset,
+    Workers,
+    IoJobs,
+    FfmpegThreads,
 }
 
 /// Sets `field` to `value` when there is one; true when that changed it.
@@ -196,6 +211,75 @@ impl SettingsDraft {
         Ok(changed)
     }
 
+    /// Steps `field` one step `up` or down, as an edit of it (see `edit`): from its value, else
+    /// from the engine's default behind its `auto` hint (the workers and Disk I/O, from
+    /// `defaults`), else from 0, clamped to the range the engine accepts.
+    pub fn step(
+        &mut self,
+        field: StepField,
+        direction: Direction,
+        defaults: Option<&EffectiveSettings>,
+    ) -> Result<bool, String> {
+        let bounds =
+            |range: RangeInclusive<usize>| Some((*range.start() as f64, *range.end() as f64));
+        let (current, step, bounds, auto) = match field {
+            StepField::SubOffset => (self.sub_offset.as_deref(), 0.5, None, None),
+            StepField::Workers => (
+                Some(self.workers.as_str()),
+                1.0,
+                bounds(WORKERS_RANGE),
+                defaults.map(|defaults| defaults.workers),
+            ),
+            StepField::IoJobs => (
+                Some(self.io_jobs.as_str()),
+                1.0,
+                bounds(IO_JOBS_RANGE),
+                defaults.map(|defaults| defaults.io_jobs),
+            ),
+            StepField::FfmpegThreads => (
+                self.ffmpeg_threads.as_deref(),
+                1.0,
+                bounds(FFMPEG_THREADS_RANGE),
+                None,
+            ),
+        };
+        let sign = match direction {
+            Direction::Up => 1.0,
+            Direction::Down => -1.0,
+        };
+        // A field the mode lacks steps nothing: `edit` refuses it.
+        let value = next_step_value(
+            current.unwrap_or_default(),
+            auto.map(|auto| auto as f64),
+            sign * step,
+            bounds,
+        )
+        .to_string();
+        let mut changes = DraftChanges::default();
+        *match field {
+            StepField::SubOffset => &mut changes.sub_offset,
+            StepField::Workers => &mut changes.workers,
+            StepField::IoJobs => &mut changes.io_jobs,
+            StepField::FfmpegThreads => &mut changes.ffmpeg_threads,
+        } = Some(value);
+        self.edit(changes)
+    }
+
+    /// What the rows of `mode` read from the draft for their meta lines: the remux bitrate and
+    /// assets dir, trimmed, as a run would send them; nothing for extract.
+    pub fn meta_inputs(&self, mode: PipelineMode) -> MetaInputs {
+        let trimmed =
+            |value: &Option<String>| value.as_deref().unwrap_or_default().trim().to_string();
+        match mode {
+            PipelineMode::Remux => MetaInputs {
+                remux: true,
+                bitrate: trimmed(&self.bitrate),
+                assets_dir: trimmed(&self.assets_dir),
+            },
+            PipelineMode::Extract => MetaInputs::default(),
+        }
+    }
+
     /// The `BatchRequest` a Run of `mode` sends, before preflight sets its Queue Selection and
     /// Track Assignments. Every value is trimmed and an empty one is unset; the sub-offset is read
     /// as seconds, and the counts as whole numbers. Extract sends no preset.
@@ -244,6 +328,33 @@ impl SettingsDraft {
             selected_items: None,
         })
     }
+}
+
+/// The value a stepper click puts in a field holding `current`: `current` plus `delta`, where a
+/// field that holds no number starts from `auto`, else 0, clamped to `bounds` and rounded to 10
+/// significant digits, which drops noise such as 0.30000000000000004. A typed 0 is a value. A
+/// number field holds a number or nothing, so a strict parse stands in for JavaScript's lenient
+/// `parseFloat`; Rust's exact decimal rounding and `toPrecision` differ only on an exact binary
+/// tie at the tenth digit.
+fn next_step_value(
+    current: &str,
+    auto: Option<f64>,
+    delta: f64,
+    bounds: Option<(f64, f64)>,
+) -> f64 {
+    let start = current
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|value| !value.is_nan())
+        .or(auto)
+        .unwrap_or(0.0);
+    let mut value = start + delta;
+    if let Some((min, max)) = bounds {
+        value = value.clamp(min, max);
+    }
+    // Plus zero, so the field never reads `-0`.
+    format!("{value:.9e}").parse::<f64>().unwrap_or(value) + 0.0
 }
 
 /// `value` trimmed, or `None` when the mode lacks the field or it is empty.
@@ -600,5 +711,132 @@ mod tests {
         assert_eq!(draft.set_preset("custom"), Ok(false));
         assert_eq!(draft.set_preset("balanced"), Ok(true));
         assert_eq!(draft.invalid, None);
+    }
+
+    /// `next_step_value` with `step` in `dir` and the bounds `min..=max`.
+    fn stepped(
+        current: &str,
+        auto: Option<f64>,
+        dir: f64,
+        step: f64,
+        range: Option<(f64, f64)>,
+    ) -> f64 {
+        next_step_value(current, auto, dir * step, range)
+    }
+
+    const WORKERS: Option<(f64, f64)> = Some((1.0, 64.0));
+
+    // The webview's former stepper cases.
+    #[test]
+    fn test_an_empty_field_with_an_auto_value_starts_from_it() {
+        assert_eq!(stepped("", Some(6.0), 1.0, 1.0, WORKERS), 7.0);
+        assert_eq!(stepped("", Some(6.0), -1.0, 1.0, WORKERS), 5.0);
+        // A number input reports an unparsable entry as "", and a lone sign parses as nothing too.
+        assert_eq!(stepped("-", Some(6.0), 1.0, 1.0, WORKERS), 7.0);
+    }
+
+    #[test]
+    fn test_an_empty_field_without_an_auto_value_starts_from_0() {
+        let io_jobs = Some((0.0, 64.0));
+        let threads = Some((1.0, 32.0));
+        assert_eq!(stepped("", None, 1.0, 1.0, io_jobs), 1.0);
+        assert_eq!(stepped("", None, -1.0, 1.0, io_jobs), 0.0);
+        // FFmpeg threads (min 1): + lands on the minimum, - is clamped to it.
+        assert_eq!(stepped("", None, 1.0, 1.0, threads), 1.0);
+        assert_eq!(stepped("", None, -1.0, 1.0, threads), 1.0);
+        assert_eq!(stepped("", None, 1.0, 0.5, None), 0.5);
+    }
+
+    #[test]
+    fn test_a_value_steps_from_itself_and_ignores_the_auto_value() {
+        assert_eq!(stepped("4", Some(6.0), 1.0, 1.0, WORKERS), 5.0);
+        assert_eq!(stepped("4", Some(6.0), -1.0, 1.0, WORKERS), 3.0);
+        // A typed 0 is a value: the auto value does not replace it.
+        assert_eq!(stepped("0", Some(6.0), 1.0, 1.0, Some((0.0, 64.0))), 1.0);
+        assert_eq!(stepped("0", Some(6.0), -1.0, 1.0, Some((0.0, 64.0))), 0.0);
+    }
+
+    #[test]
+    fn test_a_step_is_clamped_to_the_bounds() {
+        assert_eq!(stepped("64", Some(6.0), 1.0, 1.0, WORKERS), 64.0);
+        assert_eq!(stepped("1", Some(6.0), -1.0, 1.0, WORKERS), 1.0);
+        assert_eq!(stepped("", Some(1.0), -1.0, 1.0, WORKERS), 1.0);
+        assert_eq!(stepped("", Some(64.0), 1.0, 1.0, WORKERS), 64.0);
+        // A typed value outside the bounds is pulled in, not just stepped.
+        assert_eq!(stepped("100", Some(6.0), 1.0, 1.0, WORKERS), 64.0);
+        assert_eq!(stepped("-5", Some(6.0), -1.0, 1.0, WORKERS), 1.0);
+    }
+
+    #[test]
+    fn test_no_bounds_leave_a_step_unbounded_and_fractions_drop_their_noise() {
+        assert_eq!(stepped("-3", None, -1.0, 1.0, None), -4.0);
+        assert_eq!(stepped("1000", None, 1.0, 1.0, None), 1001.0);
+        // Rounded to ten significant digits like toPrecision(10); the two could differ only on an
+        // exact binary tie at the tenth digit, which steps of 0.5 or 1 from typed values never meet.
+        assert_eq!(stepped("0.2", None, 1.0, 0.1, None), 0.3);
+        assert_eq!(stepped("0.3", None, -1.0, 0.1, None), 0.2);
+        assert_eq!(stepped("-0.5", None, 1.0, 0.5, None).to_string(), "0");
+    }
+
+    #[test]
+    fn test_a_step_edits_the_field_within_the_engines_range_from_the_published_defaults() {
+        let defaults = EffectiveSettings {
+            workers: 6,
+            io_jobs: 4,
+            ffmpeg_threads: 2,
+            bitrate: "192k".into(),
+            complexity: 5,
+        };
+        let mut draft = remux();
+        assert_eq!(
+            draft.step(StepField::Workers, Direction::Up, Some(&defaults)),
+            Ok(true)
+        );
+        assert_eq!(draft.workers, "7");
+        assert_eq!(
+            draft.step(StepField::IoJobs, Direction::Down, Some(&defaults)),
+            Ok(true)
+        );
+        assert_eq!(draft.io_jobs, "3");
+        // No auto value for FFmpeg threads: from 0, up to the minimum of 1.
+        draft
+            .step(StepField::FfmpegThreads, Direction::Up, Some(&defaults))
+            .unwrap();
+        assert_eq!(draft.ffmpeg_threads.as_deref(), Some("1"));
+        assert_eq!(
+            draft.step(StepField::FfmpegThreads, Direction::Down, None),
+            Ok(false)
+        );
+        // The subtitle offset steps by half a second, unbounded.
+        for _ in 0..3 {
+            draft
+                .step(StepField::SubOffset, Direction::Down, None)
+                .unwrap();
+        }
+        assert_eq!(draft.sub_offset.as_deref(), Some("-1.5"));
+        draft.workers = "64".into();
+        assert_eq!(
+            draft.step(StepField::Workers, Direction::Up, None),
+            Ok(false)
+        );
+        // A step is an edit: it clears the flag of the field it steps.
+        draft.invalid = Some("workers");
+        draft.workers = "x".into();
+        assert_eq!(
+            draft.step(StepField::Workers, Direction::Up, None),
+            Ok(true)
+        );
+        assert_eq!((draft.workers.as_str(), draft.invalid), ("1", None));
+
+        let mut extract = SettingsDraft::new(PipelineMode::Extract);
+        assert_eq!(
+            extract.step(StepField::SubOffset, Direction::Up, None),
+            Err("Extract has no sub_offset setting.".into())
+        );
+        assert_eq!(
+            extract.step(StepField::Workers, Direction::Up, Some(&defaults)),
+            Ok(true)
+        );
+        assert_eq!(extract.workers, "7");
     }
 }

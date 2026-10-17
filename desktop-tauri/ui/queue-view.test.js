@@ -1,9 +1,11 @@
 // Rendering only: the queue rules behind each published view (selection, order, reconcile,
-// Directory Identity, the job overlay) are the Desktop Core's, tested in `queue.rs` and `actor.rs`.
+// Directory Identity, the job overlay) and every text a row shows (its label, tone, hover text,
+// meta line and bucket) are the Desktop Core's, tested in `queue.rs`, `presentation.rs`,
+// `inspector.rs` and `actor/tests.rs`.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { QueueTracker, RING_CIRCUMFERENCE } from "./queue-view.js";
-import { jobView, modeView, row } from "./fake-core.js";
+import { modeView, row } from "./fake-core.js";
 
 /** A dispatch for a tracker whose test sends no Intent. */
 const noDispatch = async () => false;
@@ -99,7 +101,6 @@ function setupMockEnvironment(t, { deferFrames = false } = {}) {
   const elements = new Map([
     ["remux-episode-list", new FakeElement()],
     ["remux-queue-count", new FakeElement()],
-    ["remux-bitrate", new FakeElement("192k")],
     ["remux-filter-empty", new FakeElement()],
   ]);
 
@@ -139,26 +140,19 @@ function setupMockEnvironment(t, { deferFrames = false } = {}) {
 const DIR = "/anime/show";
 const PATCHED_IDS = ["01.mkv", "02.mkv", "03.mkv"];
 
-/** Rows with the track metadata a card renders. */
-const detailedRow = (id, fields = {}) => row(id, {
-  name: `Show - ${id}`,
-  metadata: {
-    resolution: "1920x1080",
-    video_codec: "HEVC",
-    video_tag: "1080p HEVC",
-    audio_summary: "FLAC 2.0",
-    has_flac: true,
-    sub_summary: "ASS (ind)",
-    fonts_count: 3,
-  },
-  ...fields,
-});
+/** The meta line the core publishes for an inspected FLAC row at 192k with embedded subs. */
+const META = "FLAC 2.0 → Opus 192k · Embedded subs · 3 fonts";
+
+/** A row with the meta line the core gives an inspected one. */
+const detailedRow = (id, fields = {}) => row(id, { name: `Show - ${id}`, meta: META, ...fields });
 
 /** A ModeView of `rows` as the accepted inspection `rev` of `DIR`. */
 const accepted = (rows, rev = 1, fields = {}) => modeView(rows, { directory: DIR, manifest_rev: rev, ...fields });
-const scanning = (previous, directory = DIR) => ({ ...previous, scan: { state: "scanning", directory } });
-/** A participant row of a job, at `status`. */
-const running = (id, fields = {}) => row(id, { participant: true, status: "processing", ...fields });
+const scanning = (previous, directory = DIR) => ({ ...previous, scan: { state: "scanning", directory }, count_text: "Scanning…" });
+/** A participant row of a job, processing with the label the core gives it. */
+const running = (id, fields = {}) => row(id, { participant: true, status: "processing", tone: "info", label: "Processing · 0s", ...fields });
+/** A participant row that completed, as the core labels it. */
+const completed = (id, fields = {}) => row(id, { participant: true, status: "completed", tone: "ok", label: "Done", bucket: "done", ...fields });
 
 const cardTitles = list => list.children.map(el => el.querySelector(".ep-title").textContent);
 
@@ -184,97 +178,60 @@ function trackerWithIntents(mode = "remux") {
   return { tracker, intents };
 }
 
-test("rows the Job Snapshot lists but the manifest does not render in their outcome state, with a job meta line", t => {
+test("a row draws its published label, tone, hover text and meta line", t => {
   setupMockEnvironment(t);
   const tracker = new QueueTracker("remux", noDispatch);
-  const job = jobView(["ep1", "ep2", "ep3", "ep4", "ep5"], { status: "completed", active: false });
-  const jobOnly = (id, fields) => row(id, { name: `Show - ${id}.mkv`, release: "", metadata: null, in_manifest: false, participant: true, ...fields });
-
   tracker.applyView(modeView([
-    jobOnly("ep1", { status: "completed", duration_sec: 10.2 }),
-    jobOnly("ep2", { status: "skipped", reason: "Already up to date" }),
-    jobOnly("ep3", { status: "cancelled" }),
-    jobOnly("ep4", { status: "error", error: "FFmpeg encoding failed" }),
-    jobOnly("ep5", { status: "skipped" }),
-  ], { directory: DIR }), job);
+    completed("ep1", { in_manifest: false, label: "Done in 10.2s", meta: "Processed · Done in 10.2s" }),
+    row("ep2", { participant: true, status: "skipped", label: "Skipped", title: "Already up to date", meta: "Skipped · Already up to date", bucket: "done" }),
+    row("ep3", { participant: true, status: "error", tone: "err", label: "Failed", title: "FFmpeg encoding failed", meta: "Failed · FFmpeg encoding failed", meta_error: true, bucket: "failed" }),
+  ], { directory: DIR }));
 
-  assert.equal(tracker.cards.size, 5);
+  assert.equal(tracker.cards.size, 3);
   const card1 = tracker.cards.get("ep1");
   assert.equal(card1.el.dataset.status, "completed");
   assert.equal(card1.status.className, "ep-status tone-ok");
   assert.equal(card1.statusTag.textContent, "Done in 10.2s");
   assert.equal(card1.meta.textContent, "Processed · Done in 10.2s");
+  assert.equal(card1.meta.className, "ep-meta");
 
   const card2 = tracker.cards.get("ep2");
   assert.equal(card2.status.className, "ep-status tone-mute");
-  assert.equal(card2.statusTag.textContent, "Skipped");
   assert.equal(card2.status.title, "Already up to date");
-  assert.equal(card2.meta.textContent, "Skipped · Already up to date");
 
-  // The core keeps only what the engine sent; the view supplies the default labels.
-  assert.equal(tracker.cards.get("ep3").status.title, "Cancelled");
-  assert.equal(tracker.cards.get("ep5").status.title, "Skipped");
-
-  const card4 = tracker.cards.get("ep4");
-  assert.equal(card4.el.dataset.status, "error");
-  assert.equal(card4.status.className, "ep-status tone-err");
-  assert.equal(card4.statusTag.textContent, "Failed");
-  assert.equal(card4.status.title, "FFmpeg encoding failed");
-  // None of them are manifest rows, so none is in the Queue Selection.
-  assert.deepEqual(tracker.getSelectedOrderedItemIds(), []);
+  const card3 = tracker.cards.get("ep3");
+  assert.equal(card3.el.dataset.status, "error");
+  assert.equal(card3.status.className, "ep-status tone-err");
+  assert.equal(card3.status.title, "FFmpeg encoding failed");
+  assert.equal(card3.meta.className, "ep-meta is-error");
 });
 
-test("a failed row with no error text shows the default one", t => {
+test("a processing row spins, then shows its progress, then its outcome, each with the published label", t => {
   setupMockEnvironment(t);
   const tracker = new QueueTracker("remux", noDispatch);
-  tracker.applyView(accepted([running("ep1", { status: "error" })]), jobView(["ep1"]));
+  tracker.applyView(accepted([row("ep1", { name: "Show - 01.mkv" })]));
   const card = tracker.cards.get("ep1");
-  assert.equal(card.status.title, "Failed");
-  assert.equal(card.meta.textContent, "Failed · Failed");
-});
 
-test("a processing row spins, then shows its progress, then its outcome, which stops the heartbeat", t => {
-  setupMockEnvironment(t);
-  const tracker = new QueueTracker("remux", noDispatch);
-  const job = jobView(["ep1"]);
-  tracker.applyView(accepted([row("ep1", { name: "Show - 01.mkv" })]), job);
-  const card = tracker.cards.get("ep1");
-  assert.equal(tracker.heartbeatTimer, null);
-
-  tracker.applyView(accepted([running("ep1", { name: "Show - 01.mkv", start_time_ms: Date.now() - 5000 })]), job);
+  tracker.applyView(accepted([running("ep1", { name: "Show - 01.mkv", label: "Processing · 5s" })]));
   assert.equal(card.el.dataset.status, "processing");
   assert.equal(card.status.className, "ep-status tone-info is-spinning");
   assert.equal(card.arc.style.strokeDashoffset, "");
   assert.equal(card.statusTag.textContent, "Processing · 5s");
-  assert.notEqual(tracker.heartbeatTimer, null);
 
-  tracker.applyView(accepted([running("ep1", { name: "Show - 01.mkv", start_time_ms: Date.now() - 12000, progress: 64.2 })]), job);
+  tracker.applyView(accepted([running("ep1", { name: "Show - 01.mkv", progress: 64.2, label: "64% · 12s" })]));
   assert.equal(card.status.className, "ep-status tone-info");
   assert.equal(card.arc.style.strokeDashoffset, ringOffset(64.2));
   assert.equal(card.statusTag.textContent, "64% · 12s");
-  tracker.state.items.get("ep1").startTime = Date.now() - 20000;
-  tracker.tickHeartbeat();
-  assert.equal(card.statusTag.textContent, "64% · 20s");
+  // A Presentation Heartbeat publication moves only the label.
+  tracker.applyView(accepted([running("ep1", { name: "Show - 01.mkv", progress: 64.2, label: "64% · 13s" })]), [0]);
+  assert.equal(card.statusTag.textContent, "64% · 13s");
 
-  tracker.applyView(accepted([running("ep1", { name: "Show - 01.mkv", status: "completed", duration_sec: 14.8 })]), job);
+  tracker.applyView(accepted([completed("ep1", { name: "Show - 01.mkv", label: "Done in 14.8s" })]));
   assert.equal(tracker.cards.get("ep1"), card, "a status change redraws the row in place");
   assert.equal(card.el.dataset.status, "completed");
   assert.equal(card.status.className, "ep-status tone-ok");
   assert.equal(card.arc.style.strokeDashoffset, "");
   assert.equal(card.statusTag.textContent, "Done in 14.8s");
-  assert.equal(tracker.heartbeatTimer, null);
-});
-
-test("a scan, a failed scan and an empty queue stop the heartbeat", t => {
-  setupMockEnvironment(t);
-  const tracker = new QueueTracker("remux", noDispatch);
-  const processing = accepted([running("ep1")]);
-  for (const next of [scanning(processing, "/other"), { ...processing, scan: { state: "failed" } }, modeView()]) {
-    tracker.applyView(processing, jobView(["ep1"]));
-    assert.notEqual(tracker.heartbeatTimer, null);
-    tracker.applyView(next, null);
-    assert.equal(tracker.heartbeatTimer, null);
-  }
 });
 
 test("rows mount over animation frames in published order, each from the latest view", t => {
@@ -286,15 +243,14 @@ test("rows mount over animation frames in published order, each from the latest 
   globalThis.performance = { now: () => (clock += 10) }; // One card per animation frame.
   t.after(() => { globalThis.performance = oldPerformance; });
 
-  const job = jobView(["02", "01"]);
-  tracker.applyView(accepted([running("02", { progress: 70 }), row("01", { participant: true })]), job);
+  tracker.applyView(accepted([running("02", { progress: 70 }), row("01", { participant: true })]));
   assert.equal(list.children.length, 0);
   renderFrame();
   assert.deepEqual(cardTitles(list), ["02"]);
   assert.equal(tracker.cards.get("02").arc.style.strokeDashoffset, ringOffset(70));
 
   // A view applied mid-render reaches the rows still to mount, and the mounted ones.
-  tracker.applyView(accepted([running("02", { progress: 76 }), row("01", { participant: true, status: "completed", duration_sec: 75.4 })]), job);
+  tracker.applyView(accepted([running("02", { progress: 76 }), completed("01", { label: "Done in 1m 15.4s" })]));
   renderFrames();
   assert.deepEqual(cardTitles(list), ["02", "01"]);
   assert.equal(tracker.cards.size, 2);
@@ -302,21 +258,14 @@ test("rows mount over animation frames in published order, each from the latest 
   assert.equal(tracker.cards.get("02").arc.style.strokeDashoffset, ringOffset(76));
 });
 
-test("an instantaneous item shows <0.1s", t => {
-  setupMockEnvironment(t);
-  const tracker = new QueueTracker("remux", noDispatch);
-  tracker.applyView(accepted([running("ep1", { status: "completed", duration_sec: 0 })]), jobView(["ep1"]));
-  assert.equal(tracker.cards.get("ep1").statusTag.textContent, "Done in <0.1s");
-});
-
 test("selection and reorder clicks dispatch Intents, and the published view redraws the rows", t => {
   const { elements } = setupMockEnvironment(t);
   const { tracker, intents } = trackerWithIntents();
   const list = elements.get("remux-episode-list");
   const countEl = elements.get("remux-queue-count");
-  tracker.applyView(accepted(["ep1", "ep2", "ep3"]));
+  tracker.applyView(accepted(["ep1", "ep2", "ep3"], 1, { count_text: "3 / 3 Selected" }));
   assert.equal(countEl.textContent, "3 / 3 Selected");
-  assert.deepEqual(tracker.getSelectedOrderedItemIds(), ["ep1", "ep2", "ep3"]);
+  assert.equal(countEl.title, "3 / 3 Selected");
   const cards = new Map(tracker.cards);
 
   const checkbox = { dataset: { itemId: "ep3" }, checked: false };
@@ -332,9 +281,8 @@ test("selection and reorder clicks dispatch Intents, and the published view redr
     { type: "set_all_selected", mode: "remux", selected: true },
   ]);
 
-  tracker.applyView(accepted(["ep2", "ep1", row("ep3", { selected: false })]));
+  tracker.applyView(accepted(["ep2", "ep1", row("ep3", { selected: false, bucket: null })], 1, { count_text: "2 / 3 Selected" }));
   assert.equal(countEl.textContent, "2 / 3 Selected");
-  assert.deepEqual(tracker.getSelectedOrderedItemIds(), ["ep2", "ep1"]);
   assert.equal(tracker.cards.get("ep3").checkbox.checked, false);
   // The rows are moved, not rebuilt.
   assert.deepEqual(list.children, ["ep2", "ep1", "ep3"].map(id => cards.get(id).el));
@@ -385,10 +333,13 @@ test("a re-inspection of the directory shown keeps every card and never shows th
   const tracker = new QueueTracker("remux", noDispatch);
   const list = elements.get("remux-episode-list");
   const ids = ["01.mkv", "02.mkv", "03.mkv"];
-  const job = jobView(ids, { status: "completed", active: false });
   // A finished batch left a terminal row; a deselected row shows its checkbox off.
-  const before = accepted([detailedRow("01.mkv", { participant: true, status: "completed", duration_sec: 4.2 }), detailedRow("02.mkv", { selected: false }), detailedRow("03.mkv")]);
-  tracker.applyView(before, job);
+  const before = accepted([
+    detailedRow("01.mkv", { participant: true, status: "completed", tone: "ok", label: "Done in 4.2s", bucket: "done" }),
+    detailedRow("02.mkv", { selected: false, bucket: null }),
+    detailedRow("03.mkv"),
+  ]);
+  tracker.applyView(before);
   renderFrames();
   const cardsBefore = new Map(tracker.cards);
   const elementsBefore = [...list.children];
@@ -397,10 +348,10 @@ test("a re-inspection of the directory shown keeps every card and never shows th
 
   // Every Run forces a re-inspection of the shown directory; a deep-equal manifest arrives, and
   // the accepted scan dropped the finished job's snapshot.
-  tracker.applyView(scanning(before), job);
+  tracker.applyView(scanning(before));
   assert.equal(elements.get("remux-queue-count").textContent, "Scanning…");
   elementsBefore.forEach((el, i) => assert.equal(list.children[i], el));
-  tracker.applyView(accepted([detailedRow("01.mkv"), detailedRow("02.mkv", { selected: false }), detailedRow("03.mkv")], 2), null);
+  tracker.applyView(accepted([detailedRow("01.mkv"), detailedRow("02.mkv", { selected: false, bucket: null }), detailedRow("03.mkv")], 2));
   renderFrames();
 
   assert.deepEqual(listWrites, []);
@@ -465,40 +416,32 @@ test("a freshly mounted card is drawn in the queued look", t => {
   renderFrames();
 
   const card = tracker.cards.get("02.mkv");
-  assert.equal(card.renderedStatus, "queued");
   assert.equal(card.el.dataset.status, "queued");
   assert.equal(card.status.className, "ep-status tone-mute");
   assert.equal(card.num.textContent, "02");
   assert.equal(card.statusTag.textContent, "Queued");
+  assert.equal(card.meta.textContent, META);
 });
 
-test("a Remux card names the bitrate control's value, and only that, for a FLAC track", t => {
-  const { elements } = setupMockEnvironment(t);
-  const tracker = new QueueTracker("remux", noDispatch);
-  tracker.applyView(accepted([detailedRow("01.mkv")]));
-  assert.equal(tracker.cards.get("01.mkv").meta.textContent, "FLAC 2.0 → Opus 192k · Embedded subs · 3 fonts");
-
-  // With no bitrate to show, the row omits it rather than assume one.
-  elements.get("remux-bitrate").value = "";
-  tracker.applyView(accepted([detailedRow("01.mkv"), detailedRow("02.mkv")], 2));
-  assert.equal(tracker.cards.get("02.mkv").meta.textContent, "FLAC 2.0 → Opus · Embedded subs · 3 fonts");
-
-  // A bitrate change redraws every row's meta line in place.
-  elements.get("remux-bitrate").value = "256k";
-  tracker.refreshMeta();
-  assert.equal(tracker.cards.get("01.mkv").meta.textContent, "FLAC 2.0 → Opus 256k · Embedded subs · 3 fonts");
-});
-
-test("a published Track Assignment redraws the meta line of its row", t => {
+test("a published meta line redraws its card in place, a failure's in the error style and back", t => {
   setupMockEnvironment(t);
   const tracker = new QueueTracker("remux", noDispatch);
   tracker.applyView(accepted([detailedRow("01.mkv")]));
-  assert.match(tracker.cards.get("01.mkv").meta.textContent, /Embedded subs/);
-  tracker.applyView(accepted([detailedRow("01.mkv")], 1, {
-    assignments: { "01.mkv": { target_video: "01.mkv", asset_path: "/subs/01.ass", track_type: "subtitle" } },
-  }));
-  assert.match(tracker.cards.get("01.mkv").meta.textContent, /Manual subs/);
-  assert.equal(tracker.assignments.get("01.mkv").asset_path, "/subs/01.ass");
+  const card = tracker.cards.get("01.mkv");
+
+  // A bitrate edit, or a Track Assignment, changes the published meta line.
+  tracker.applyView(accepted([detailedRow("01.mkv", { meta: "FLAC 2.0 → Opus 256k · Manual subs · 3 fonts" })]), [0]);
+  assert.equal(card.meta.textContent, "FLAC 2.0 → Opus 256k · Manual subs · 3 fonts");
+
+  tracker.applyView(accepted([detailedRow("01.mkv", { participant: true, status: "error", tone: "err", label: "Failed", meta: "Failed · mkvmerge exited with 2", meta_error: true, bucket: "failed" })]), [0]);
+  assert.equal(card.meta.textContent, "Failed · mkvmerge exited with 2");
+  assert.equal(card.meta.className, "ep-meta is-error");
+
+  // Every Run re-inspects the folder first, which puts the item back to queued.
+  tracker.applyView(accepted([detailedRow("01.mkv")], 2));
+  assert.equal(tracker.cards.get("01.mkv"), card);
+  assert.equal(card.meta.textContent, META);
+  assert.equal(card.meta.className, "ep-meta");
 });
 
 test("a patch's changed-rows indices redraw only those cards, and leave the others untouched", t => {
@@ -510,44 +453,30 @@ test("a patch's changed-rows indices redraw only those cards, and leave the othe
   check("01.mkv").checked = "untouched";
   check("03.mkv").checked = "untouched";
 
-  tracker.applyView(accepted(PATCHED_IDS.map(id => detailedRow(id, { selected: id !== "02.mkv" }))), null, [1]);
+  tracker.applyView(accepted(PATCHED_IDS.map(id => detailedRow(id, { selected: id !== "02.mkv" }))), [1]);
   assert.equal(check("02.mkv").checked, false);
   assert.equal(check("01.mkv").checked, "untouched");
   assert.equal(check("03.mkv").checked, "untouched");
 });
 
-test("a patch that changes the assignments and one row refreshes every card's meta line", t => {
-  setupMockEnvironment(t);
-  const tracker = new QueueTracker("remux", noDispatch);
-  tracker.applyView(accepted(PATCHED_IDS.map(id => detailedRow(id))));
-  for (const id of PATCHED_IDS) tracker.cards.get(id).meta.textContent = "stale";
-
-  tracker.applyView(accepted(PATCHED_IDS.map(id => detailedRow(id, { selected: id !== "02.mkv" })), 1, {
-    assignments: { "01.mkv": { target_video: "01.mkv", asset_path: "/subs/01.ass", track_type: "subtitle" } },
-  }), null, [1]);
-  assert.match(tracker.cards.get("01.mkv").meta.textContent, /Manual subs/);
-  assert.match(tracker.cards.get("03.mkv").meta.textContent, /Embedded subs/);
-});
-
-test("a re-inspection of the directory shown remounts only the card whose manifest entry changed, in place", t => {
+test("a re-inspection of the directory shown redraws a changed row in place and keeps every card", t => {
   const { elements, renderFrames } = setupMockEnvironment(t, { deferFrames: true });
   const tracker = new QueueTracker("remux", noDispatch);
   const list = elements.get("remux-episode-list");
-  tracker.applyView(accepted(["01.mkv", "02.mkv", "03.mkv"].map(id => detailedRow(id))));
+  tracker.applyView(accepted(PATCHED_IDS.map(id => detailedRow(id))));
   renderFrames();
   const cardsBefore = new Map(tracker.cards);
 
-  const changed = ["01.mkv", "02.mkv", "03.mkv"].map(id => detailedRow(id));
-  changed[1].metadata.fonts_count = 5;
+  const changed = PATCHED_IDS.map(id => detailedRow(id));
+  changed[1] = detailedRow("02.mkv", { name: "Show - 02 v2.mkv", meta: "FLAC 2.0 → Opus 192k · Embedded subs · 5 fonts" });
   tracker.applyView(accepted(changed, 2));
   renderFrames();
 
-  assert.equal(tracker.cards.get("01.mkv"), cardsBefore.get("01.mkv"));
-  assert.equal(tracker.cards.get("03.mkv"), cardsBefore.get("03.mkv"));
-  const fresh = tracker.cards.get("02.mkv");
-  assert.notEqual(fresh, cardsBefore.get("02.mkv"));
-  assert.equal(fresh.meta.textContent, "FLAC 2.0 → Opus 192k · Embedded subs · 5 fonts");
-  assert.deepEqual(list.children, [cardsBefore.get("01.mkv").el, fresh.el, cardsBefore.get("03.mkv").el]);
+  for (const id of PATCHED_IDS) assert.equal(tracker.cards.get(id), cardsBefore.get(id));
+  const card = tracker.cards.get("02.mkv");
+  assert.equal(card.title.textContent, "Show - 02 v2.mkv");
+  assert.equal(card.meta.textContent, "FLAC 2.0 → Opus 192k · Embedded subs · 5 fonts");
+  assert.deepEqual(list.children, PATCHED_IDS.map(id => cardsBefore.get(id).el));
 });
 
 test("a new manifest accepted mid-render restarts the render, so no mounted card keeps the old one", t => {
@@ -564,7 +493,7 @@ test("a new manifest accepted mid-render restarts the render, so no mounted card
   assert.equal(list.children.length, 1);
 
   const changed = ["01.mkv", "02.mkv"].map(id => detailedRow(id));
-  changed[0].metadata.fonts_count = 5;
+  changed[0].meta = "FLAC 2.0 → Opus 192k · Embedded subs · 5 fonts";
   tracker.applyView(accepted(changed, 2));
   renderFrames();
   assert.equal(tracker.cards.size, 2);
@@ -579,14 +508,14 @@ test("a re-inspection with a different ID set, or of another directory, rebuilds
   renderFrames();
   let cardsBefore = new Map(tracker.cards);
 
-  tracker.applyView(accepted(rows(["01.mkv", "02.mkv", "03.mkv"]), 2));
+  tracker.applyView(accepted(rows(PATCHED_IDS), 2));
   renderFrames();
   assert.equal(tracker.cards.size, 3);
   for (const [id, card] of cardsBefore) assert.notEqual(tracker.cards.get(id), card);
   assert.deepEqual(cardTitles(elements.get("remux-episode-list")), ["Show - 01.mkv", "Show - 02.mkv", "Show - 03.mkv"]);
 
   cardsBefore = new Map(tracker.cards);
-  tracker.applyView(modeView(rows(["01.mkv", "02.mkv", "03.mkv"]), { directory: "/anime/other", manifest_rev: 3 }));
+  tracker.applyView(modeView(rows(PATCHED_IDS), { directory: "/anime/other", manifest_rev: 3 }));
   renderFrames();
   for (const [id, card] of cardsBefore) assert.notEqual(tracker.cards.get(id), card);
 });
@@ -601,7 +530,7 @@ test("a failed re-inspection that kept its cards drops them, and the next scan r
 
   tracker.applyView(scanning(view));
   // The core keeps the previous rows after a failed scan; the list says the scan failed.
-  tracker.applyView({ ...view, scan: { state: "failed" } });
+  tracker.applyView({ ...view, scan: { state: "failed" }, count_text: "Scan failed" });
   assert.equal(tracker.cards.size, 0);
   assert.equal(elements.get("remux-queue-count").textContent, "Scan failed");
   const list = elements.get("remux-episode-list");
@@ -617,68 +546,49 @@ test("a failed re-inspection that kept its cards drops them, and the next scan r
 test("progress on a processing row writes only the ring and the status text", t => {
   setupMockEnvironment(t);
   const tracker = new QueueTracker("remux", noDispatch);
-  const job = jobView(["ep1"]);
-  const at = fields => accepted([running("ep1", { start_time_ms: Date.now(), ...fields })]);
-  tracker.applyView(at({ progress: 10 }), job);
+  const at = fields => accepted([running("ep1", fields)]);
+  tracker.applyView(at({ progress: 10, label: "10% · 1s" }));
   const card = tracker.cards.get("ep1");
 
   const writes = [];
   recordWrites(card.el.dataset, "row", ["status"], writes);
   recordWrites(card.status, "status", ["className", "title"], writes);
-  for (const progress of [20, 30, 40]) tracker.applyView(at({ progress }), job);
+  recordWrites(card.meta, "meta", ["className", "textContent"], writes);
+  for (const progress of [20, 30, 40]) tracker.applyView(at({ progress, label: `${progress}% · 2s` }));
 
   assert.deepEqual(writes, []);
   assert.equal(card.arc.style.strokeDashoffset, ringOffset(40));
-  assert.match(card.statusTag.textContent, /^40% · \d+s$/);
+  assert.equal(card.statusTag.textContent, "40% · 2s");
 
-  // A status change after the run of same-status updates still writes the status and tone.
-  const done = at({ status: "completed", duration_sec: 3 });
-  tracker.applyView(done, job);
-  assert.deepEqual(writes, ["row.status", "status.className", "status.title"]);
+  // A status change after the run of same-status updates writes the status and tone.
+  const done = accepted([completed("ep1", { label: "Done in 3.0s" })]);
+  tracker.applyView(done);
+  assert.deepEqual(writes, ["row.status", "status.className"]);
   assert.equal(card.status.className, "ep-status tone-ok");
 
   // Re-publishing the same terminal status writes nothing more, its status text included.
   recordWrites(card.statusTag, "tag", ["textContent"], writes);
-  tracker.applyView(done, { ...job, status: "completed", active: false });
-  assert.deepEqual(writes, ["row.status", "status.className", "status.title"]);
+  tracker.applyView(done);
+  assert.deepEqual(writes, ["row.status", "status.className"]);
 });
 
-test("the count follows the job's own batch, and a job that ended before BatchStart leaves the selection count", t => {
+test("filter chips hide the rows whose published bucket they do not match, and say so when none match", t => {
   const { elements } = setupMockEnvironment(t);
   const tracker = new QueueTracker("remux", noDispatch);
-  const countEl = elements.get("remux-queue-count");
-  const rows = fields => [row("ep1", { participant: true, ...fields }), row("ep2", { selected: false }), row("ep3", { selected: false })];
-
-  tracker.applyView(accepted(rows({})), jobView(["ep1"]));
-  assert.equal(countEl.textContent, "0 of 1 · 0 done");
-  tracker.applyView(accepted(rows({ status: "completed", duration_sec: 14.8 })), jobView(["ep1"], { status: "completed", active: false }));
-  assert.equal(countEl.textContent, "1 of 1 · 1 done");
-
-  tracker.applyView(accepted(["ep1", row("ep2", { selected: false })]), jobView([], { status: "error", active: false }));
-  assert.equal(countEl.textContent, "1 / 2 Selected");
-  assert.deepEqual([...tracker.state.items.values()].map(item => item.status), ["queued", "queued"]);
-
-  // Another mode's job is not this queue's batch.
-  tracker.applyView(accepted(["ep1", "ep2"]), jobView(["ep1"], { mode: "extract" }));
-  assert.equal(countEl.textContent, "2 / 2 Selected");
-  assert.equal(tracker.state.batchItemIds, null);
-});
-
-test("filter chips hide the rows they do not match, and say so when none match", t => {
-  const { elements } = setupMockEnvironment(t);
-  const tracker = new QueueTracker("remux", noDispatch);
-  const job = jobView(["ep1", "ep2", "ep3"]);
-  const done = id => row(id, { participant: true, status: "completed" });
-  tracker.applyView(accepted([done("ep1"), row("ep2", { participant: true }), row("ep3", { participant: true })]), job);
+  const todo = id => row(id, { participant: true });
+  tracker.applyView(accepted([completed("ep1"), todo("ep2"), row("ep3", { selected: false, bucket: null })]));
   const hidden = () => ["ep1", "ep2", "ep3"].map(id => tracker.cards.get(id).el.hidden);
 
   tracker.setFilter("done");
   assert.deepEqual(hidden(), [false, true, true]);
   assert.equal(elements.get("remux-filter-empty").hidden, true);
 
-  // A status change while filtered re-applies the filter.
-  tracker.applyView(accepted([done("ep1"), done("ep2"), row("ep3", { participant: true })]), job);
+  // A bucket change while filtered re-applies the filter.
+  tracker.applyView(accepted([completed("ep1"), completed("ep2"), row("ep3", { selected: false, bucket: null })]));
   assert.deepEqual(hidden(), [false, false, true]);
+
+  tracker.setFilter("todo");
+  assert.deepEqual(hidden(), [true, true, true], "an unselected row shows only under All");
 
   tracker.setFilter("failed");
   assert.deepEqual(hidden(), [true, true, true]);
@@ -690,63 +600,63 @@ test("filter chips hide the rows they do not match, and say so when none match",
   assert.equal(elements.get("remux-filter-empty").hidden, true);
 });
 
-test("a queue spanning release directories gets one header per run of rows, and a published reorder keeps them in place", t => {
+test("a queue spanning release directories gets one published header per run of rows, and a published reorder keeps them in place", t => {
   const { elements } = setupMockEnvironment(t);
   const tracker = new QueueTracker("remux", noDispatch);
   const list = elements.get("remux-episode-list");
   const s1 = row("S1/01.mkv", { name: "01.mkv", release: "Season 1" });
   const s2 = row("S1/02.mkv", { name: "02.mkv", release: "Season 1" });
   const sp = row("SP/01.mkv", { name: "SP1.mkv", release: "Specials" });
-  tracker.applyView(accepted([s1, s2, sp]));
+  const root = row("00.mkv", { release: "." });
+  const library = [
+    { release: null, label: "show", tooltip: "anime › show", count: 4, group_label: "anime › show" },
+    { release: "Season 1", label: "Season 1", tooltip: "Season 1", count: 2, group_label: "Season 1 (published)" },
+    { release: "Specials", label: "Specials", tooltip: "Specials", count: 1, group_label: "Specials" },
+  ];
+  tracker.applyView(accepted([root, s1, s2, sp], 1, { library }));
   const layout = () => list.children.map(el => (el.className === "ep-group-head"
     ? `[${el.children.map(part => part.textContent).join(" ")}]`
     : el.querySelector(".ep-title").textContent));
-  assert.deepEqual(layout(), ["[Season 1 2]", "01.mkv", "02.mkv", "[Specials 1]", "SP1.mkv"]);
+  assert.deepEqual(layout(), ["[anime › show 1]", "00.mkv", "[Season 1 (published) 2]", "01.mkv", "02.mkv", "[Specials 1]", "SP1.mkv"]);
 
-  tracker.applyView(accepted([s1, sp, s2]));
-  assert.deepEqual(layout(), ["[Season 1 1]", "01.mkv", "[Specials 1]", "SP1.mkv", "[Season 1 1]", "02.mkv"]);
+  tracker.applyView(accepted([root, s1, sp, s2], 1, { library }));
+  assert.deepEqual(layout(), ["[anime › show 1]", "00.mkv", "[Season 1 (published) 1]", "01.mkv", "[Specials 1]", "SP1.mkv", "[Season 1 (published) 1]", "02.mkv"]);
 
   // A single-release queue has no headers at all.
   tracker.applyView(accepted(["a", "b"], 2));
   assert.deepEqual(list.children.map(el => el.className), ["ep-row", "ep-row"]);
 });
 
-test("picking a row puts it in the inspector, which shows the first row until then", t => {
+test("picking a row sends inspect and highlights it at once, and the highlight then follows the published inspector", async t => {
   const { elements } = setupMockEnvironment(t);
-  const tracker = new QueueTracker("remux", noDispatch);
-  const changes = [];
-  tracker.onChange = () => changes.push(tracker.inspectedItem()?.id);
-  tracker.applyView(accepted(["ep1", "ep2"]));
-  assert.equal(tracker.inspectedItem().id, "ep1");
-  assert.ok(tracker.cards.get("ep1").el.classList.contains("is-inspected"), "the default row is highlighted too");
+  let answer;
+  const intents = [];
+  const tracker = new QueueTracker("remux", intent => {
+    intents.push(intent);
+    return new Promise(resolve => { answer = resolve; });
+  });
+  const inspected = id => tracker.cards.get(id).el.classList.contains("is-inspected");
+  const view = pick => accepted(["ep1", "ep2"], 1, { inspector: { id: pick } });
+  tracker.applyView(view("ep1"));
+  assert.ok(inspected("ep1"), "the published row is highlighted, the first one before any pick");
 
   const pick = tracker.cards.get("ep2").pick;
   elements.get("remux-episode-list").handlers.get("click")({ target: { closest: sel => (sel === ".ep-pick" ? pick : null) } });
-  assert.equal(tracker.inspectedId, "ep2");
-  assert.equal(tracker.inspectedItem().id, "ep2");
-  assert.ok(tracker.cards.get("ep2").el.classList.contains("is-inspected"));
-  assert.equal(changes.at(-1), "ep2");
+  assert.deepEqual(intents, [{ type: "inspect", mode: "remux", id: "ep2" }]);
+  assert.ok(inspected("ep2"), "highlighted before the core answers");
+  assert.equal(inspected("ep1"), false);
 
+  // The core published the pick before it answered.
+  tracker.applyView(view("ep2"));
+  answer(true);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(inspected("ep2"));
+
+  // A pick the core does not take falls back to the published one once answered.
   tracker.inspect("ep1");
-  assert.equal(tracker.cards.get("ep2").el.classList.contains("is-inspected"), false);
-  assert.ok(tracker.cards.get("ep1").el.classList.contains("is-inspected"));
-});
-
-test("a row that fails mid-batch says why in its meta line, and the next Run's re-inspection restores it", t => {
-  setupMockEnvironment(t);
-  const tracker = new QueueTracker("remux", noDispatch);
-  const job = jobView(["01.mkv"]);
-  tracker.applyView(accepted([detailedRow("01.mkv")]), job);
-  const card = tracker.cards.get("01.mkv");
-  const inspected = card.meta.textContent;
-
-  tracker.applyView(accepted([detailedRow("01.mkv", { participant: true, status: "error", error: "mkvmerge exited with 2" })]), job);
-  assert.equal(card.meta.textContent, "Failed · mkvmerge exited with 2");
-  assert.equal(card.meta.className, "ep-meta is-error");
-
-  // Every Run re-inspects the folder first, which puts the item back to queued.
-  tracker.applyView(accepted([detailedRow("01.mkv")], 2), null);
-  const reused = tracker.cards.get("01.mkv");
-  assert.equal(reused.meta.textContent, inspected);
-  assert.equal(reused.meta.className, "ep-meta");
+  assert.ok(inspected("ep1"));
+  answer(false);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(inspected("ep2"));
+  assert.equal(inspected("ep1"), false);
 });
