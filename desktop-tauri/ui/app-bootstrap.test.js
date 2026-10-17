@@ -965,9 +965,32 @@ test("a stepper click sends step_draft with the field its input names, and the p
   const since = ipc.calls.length;
   plus.handlers.get("mousedown")();
   plus.handlers.get("mouseup")();
+  // The click a mouse press ends with has `detail` >= 1 and must not step again.
+  plus.handlers.get("click")({ detail: 1 });
   await ipc.flush();
   assert.deepEqual(ipc.core.intents.at(-1), { type: "step_draft", mode: "remux", field: "sub_offset", direction: "up" });
   // A draft Intent: its state comes from the publication, with no get_state after it.
   assert.deepEqual(ipc.calls.slice(since).map(([command]) => command), ["dispatch"]);
   assert.equal(offset.value, "0.5");
+});
+
+test("a keyboard-activated stepper click sends one step_draft", async t => {
+  const ipc = bootstrapHarness(t);
+  const workers = new BootElement("");
+  workers.id = "extract-workers";
+  const minus = new BootElement();
+  minus.classList.add("minus");
+  minus.parentElement = { querySelector: () => workers };
+  ipc.elements.set("extract-workers", workers);
+  const querySelectorAll = globalThis.document.querySelectorAll;
+  globalThis.document.querySelectorAll = selector => (selector === ".stepper-btn" ? [minus] : querySelectorAll(selector));
+  await ipc.mount("stepper-keyboard");
+  ipc.resolveState();
+  await ipc.flush();
+
+  const since = ipc.core.intents.length;
+  // Enter or Space fires only a click, with `detail` 0.
+  minus.handlers.get("click")({ detail: 0 });
+  await ipc.flush();
+  assert.deepEqual(ipc.core.intents.slice(since), [{ type: "step_draft", mode: "extract", field: "workers", direction: "down" }]);
 });

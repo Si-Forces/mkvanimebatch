@@ -116,6 +116,10 @@ function initSteppers() {
     btn.addEventListener('mousedown', startStepping);
     btn.addEventListener('mouseup', stopStepping);
     btn.addEventListener('mouseleave', stopStepping);
+    // Enter or Space fires only a click, with `detail` 0; a mouse click (`detail` >= 1) already stepped on mousedown.
+    btn.addEventListener('click', event => {
+      if (event.detail === 0) stepNumber(btn, dir);
+    });
   });
 }
 
