@@ -56,8 +56,10 @@ export function createSettingsDraft({ doc, dispatch, published }) {
    * Sends `intent`, which edits the draft's `key`, marking the key pending until it is answered.
    * A refused edit (a busy batch locks the draft) or a no-op one (`false`: the core already holds
    * the value, maybe normalized) changed nothing in the core, which then publishes nothing, so the
-   * field gets the published value back unless a later edit is pending; a no-op one spares the
-   * focused field.
+   * field gets the published value back unless a later edit is pending: a refused one for any key,
+   * the focused field too, and a no-op one only for a normalized key, sparing the focused field.
+   * A no-op on any other key means the field already holds the core's value, and a restore could
+   * write back a publication older than the edit.
    */
   async function guarded(mode, key, intent) {
     const id = `${mode}:${key}`;
@@ -73,10 +75,12 @@ export function createSettingsDraft({ doc, dispatch, published }) {
       if (pending.get(id) === 1) pending.delete(id);
       else pending.set(id, pending.get(id) - 1);
     }
-    if ((refused || answer === false) && !pending.has(id)) restore(mode, key, refused);
+    if (pending.has(id)) return;
+    if (refused) restore(mode, key, true);
+    else if (answer === false && NORMALIZED.has(key)) restore(mode, key);
   }
 
-  /** Sends the value `el` now holds as the draft's `key`; call it after setting a field from code. */
+  /** Sends the value `el` now holds as the draft's `key`. */
   function send(mode, key, el) {
     return guarded(mode, key, { type: "edit_draft", mode, changes: { [key]: isCheckbox(el) ? el.checked : el.value } });
   }
@@ -96,7 +100,17 @@ export function createSettingsDraft({ doc, dispatch, published }) {
         for (const suffix of suffixes) {
           const el = doc.getElementById(`${mode}-${suffix}`);
           if (!el) continue;
-          const onEdit = () => { send(mode, key, el); };
+          const onEdit = () => {
+            // View-local display mirroring: the box follows the slider on every input, not at the
+            // publication cadence. The slider's value is already in range; the core still clamps.
+            if (el.type === "range") {
+              for (const other of suffixes) {
+                const box = doc.getElementById(`${mode}-${other}`);
+                if (box && box !== el) box.value = el.value;
+              }
+            }
+            send(mode, key, el);
+          };
           if (!isCheckbox(el)) el.addEventListener("input", onEdit);
           el.addEventListener("change", onEdit);
           if (NORMALIZED.has(key)) el.addEventListener("blur", () => restore(mode, key));
@@ -128,5 +142,5 @@ export function createSettingsDraft({ doc, dispatch, published }) {
     return written;
   }
 
-  return { bind, apply, send, step };
+  return { bind, apply, step };
 }

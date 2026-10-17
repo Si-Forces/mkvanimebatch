@@ -611,12 +611,6 @@ pub fn empty_list(directory: Option<&str>, scan: &ScanView, rows: &[Row]) -> Opt
     })
 }
 
-/// Whether JavaScript's `trim` and `parseInt` skip `c`: its WhiteSpace and LineTerminator, which
-/// add U+FEFF to Rust's White_Space and lack U+0085. Shared by `draft.rs` and `inspector.rs`.
-pub(crate) fn is_js_whitespace(c: char) -> bool {
-    c == '\u{feff}' || (c != '\u{85}' && c.is_whitespace())
-}
-
 /// Who holds the batch, which every mode's controls follow.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Hold {

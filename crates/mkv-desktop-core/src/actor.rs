@@ -13,7 +13,9 @@ use crate::control::{mode_name, Launcher};
 use crate::coordinator::{JobCoordinator, Phase};
 use crate::draft::{DraftChanges, SettingsDraft, StepField};
 use crate::inspection::{InFlight, Inspector};
-use crate::inspector::{inspected_row, inspector_view, subtitle_assignment, InspectorView};
+use crate::inspector::{
+    inspected_row, inspector_view, subtitle_assignment, InspectorView, SubtitleFields,
+};
 use crate::job::{JobDone, JobSink, JobStarted};
 use crate::log::{error_line, LogBatch, LogView, RunLog};
 use crate::presentation::{
@@ -931,8 +933,13 @@ impl<P: Publisher, I: Inspector, L: Launcher, S: Sampler> Core<P, I, L, S> {
                 title,
                 offset,
             } => {
-                let assignment =
-                    subtitle_assignment(&id, &path, &language, &custom_language, &title, &offset);
+                let fields = SubtitleFields {
+                    language: &language,
+                    custom_language: &custom_language,
+                    title: &title,
+                    offset: &offset,
+                };
+                let assignment = subtitle_assignment(&id, &path, fields);
                 (mode, QueueChange::Assign(assignment))
             }
             Intent::ClearTrack { mode, id } => (mode, QueueChange::Clear(id)),

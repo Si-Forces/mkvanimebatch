@@ -5,11 +5,12 @@
 
 use crate::actor::ModeView;
 use crate::presentation::{
-    candidate_tier, first_text, inspector_crumbs, is_js_whitespace, path_segments, pretty_path,
-    remux_audio_text, row_error, status_tone, subtitle_ladder, Tier, Tone,
+    candidate_tier, first_text, inspector_crumbs, path_segments, pretty_path, remux_audio_text,
+    row_error, status_tone, subtitle_ladder, Tier, Tone,
 };
 use crate::queue::Row;
 use crate::snapshot::ItemStatus;
+use crate::text::is_js_whitespace;
 use mkv_core::manifest::ManifestItem;
 use mkv_core::request::{AssignmentKind, TrackAssignment};
 use serde::Serialize;
@@ -66,17 +67,26 @@ fn language_choice(assignment: Option<&TrackAssignment>) -> (&'static str, Strin
     }
 }
 
-/// The Track Assignment of the subtitle `path` to item `id`, from the inspector's fields as
-/// typed: the language select's value (`custom` reads the custom tag), the title and the offset
-/// in milliseconds. Empty text is none; an empty select is `ind`.
-pub fn subtitle_assignment(
-    id: &str,
-    path: &str,
-    language: &str,
-    custom_language: &str,
-    title: &str,
-    offset: &str,
-) -> TrackAssignment {
+/// The Episode Inspector's subtitle fields as typed, named so that no two can be swapped.
+#[derive(Debug, Clone, Copy)]
+pub struct SubtitleFields<'a> {
+    /// The language select's value: `custom` reads `custom_language`, an empty one is `ind`.
+    pub language: &'a str,
+    pub custom_language: &'a str,
+    pub title: &'a str,
+    /// The offset in milliseconds.
+    pub offset: &'a str,
+}
+
+/// The Track Assignment of the subtitle `path` to item `id`, from the inspector's `fields`.
+/// Empty text is none.
+pub fn subtitle_assignment(id: &str, path: &str, fields: SubtitleFields) -> TrackAssignment {
+    let SubtitleFields {
+        language,
+        custom_language,
+        title,
+        offset,
+    } = fields;
     let trimmed = |text: &str| {
         Some(text.trim_matches(is_js_whitespace).to_string()).filter(|text| !text.is_empty())
     };
@@ -483,7 +493,13 @@ mod tests {
     #[test]
     fn test_a_subtitle_assignment_reads_the_inspectors_fields_as_typed() {
         let assign = |language, custom, title, offset| {
-            subtitle_assignment("ep1", "/subs/ep1.ass", language, custom, title, offset)
+            let fields = SubtitleFields {
+                language,
+                custom_language: custom,
+                title,
+                offset,
+            };
+            subtitle_assignment("ep1", "/subs/ep1.ass", fields)
         };
         assert_eq!(
             assign("eng", "may", "  Signs ", ""),

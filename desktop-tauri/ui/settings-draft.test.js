@@ -203,3 +203,31 @@ test("the complexity slider is a draft field, and a field left shows the value t
   // would flash the value from before the edit.
   assert.equal(page.get("remux-out-dir").handlers.has("blur"), false);
 });
+
+test("the box follows the slider on each input, before any publication", () => {
+  const page = draftHarness();
+  const slider = page.get("remux-complexity");
+  slider.value = "3";
+  slider.handlers.get("input")();
+  assert.equal(page.get("remux-cplx-val").value, "3");
+  assert.deepEqual(page.intents.at(-1), { type: "edit_draft", mode: "remux", changes: { complexity: "3" } });
+});
+
+test("a no-op edit restores only a normalized key, since any other field already holds the core's value", async () => {
+  const page = draftHarness();
+  // A publication from before the edit that the no-op repeats.
+  page.published.remux = draft("remux", { out_dir: "/old", complexity: "10" });
+  const out = page.get("remux-out-dir");
+  out.value = "/new";
+  out.handlers.get("change")();
+  page.answers.at(-1)(false);
+  await flush();
+  assert.equal(out.value, "/new");
+
+  const box = page.get("remux-cplx-val");
+  box.value = "15";
+  box.handlers.get("change")();
+  page.answers.at(-1)(false);
+  await flush();
+  assert.equal(box.value, "10");
+});

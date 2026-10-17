@@ -650,10 +650,11 @@ test("choosing a custom language tag keeps the tag box open until the tag is typ
   assert.equal(langSelect.value, "custom");
   assert.equal(customLabel.hidden, false);
 
-  langCustom.value = "may";
+  // The view sends the tag as typed; the core trims it.
+  langCustom.value = "  may  ";
   langCustom.handlers.get("change")();
   await ipc.flush();
-  assert.equal(ipc.core.intents.at(-1).custom_language, "may");
+  assert.equal(ipc.core.intents.at(-1).custom_language, "  may  ");
   assert.equal(ipc.core.state.remux.assignments.one.language, "may");
 });
 

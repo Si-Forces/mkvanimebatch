@@ -2,8 +2,8 @@
 //! view only mirrors them. Edits arrive as Intents; only the complexity is normalized (clamped) on
 //! edit, everything else is parsed when a Run builds its `BatchRequest`, and nothing is persisted.
 
-use crate::presentation::is_js_whitespace;
 use crate::queue::{Direction, MetaInputs};
+use crate::text::is_js_whitespace;
 use mkv_core::pipeline::PipelineMode;
 use mkv_core::preset::require_preset;
 use mkv_core::request::{
