@@ -4,10 +4,12 @@
 #
 # Usage:
 #   scripts/jj-gate.sh check              fast gates over trunk()..@ (the pre-commit + commit-msg checks)
-#   scripts/jj-gate.sh push [push args]   review ledger + test suites, then `jj git push [push args]`
+#   scripts/jj-gate.sh push [push args]   review ledger + test suites, then `jj git push [push args]` with no new snapshot
 #
 # jj has no index, so "what is being committed" is the working-copy commit @. Every jj command
-# snapshots the tree first, so cargo and node below always see exactly @.
+# snapshots the tree first, so the gates check @ as of that snapshot; the push reads its plan and
+# pushes without a new one, so an edit made while the tests run is not pushed (though the tests
+# may have seen it).
 # Bypasses match the hooks: SKIP_REVIEW_GATE=1, SKIP_SLOW_GATES=1.
 set -euo pipefail
 
@@ -80,7 +82,7 @@ check() {
 commit_id() { jj log -r "$1" --no-graph -T 'commit_id'; }
 
 push() {
-  local dry line u in_plan=0 deletes=0 kind name what remote_sha to_id
+  local dry again line u in_plan=0 deletes=0 kind name what remote_sha to_id
   local -a updates=() # "<remote sha, or 0 for a new ref> <local sha>", as the pre-push hook gets them
 
   [ -x scripts/review-gate.sh ] ||
@@ -92,7 +94,10 @@ push() {
   # likewise); X, A and B are abbreviated commit ids. Fails closed: a plan line, or an output
   # with neither a plan nor "Nothing changed.", that this cannot read stops the push, so a
   # reworded jj never lets an unreviewed commit through.
-  dry=$(jj git push --dry-run "$@" 2>&1) || { printf '%s\n' "$dry" >&2; exit 1; }
+  # One deliberate snapshot (its warnings show once), then the plan is read without one, so it
+  # compares byte for byte with the second read before the push.
+  jj log -r @ --no-graph -T '' > /dev/null || exit 1
+  dry=$(jj --ignore-working-copy git push --dry-run "$@" 2>&1) || { printf '%s\n' "$dry" >&2; exit 1; }
   while IFS= read -r line; do
     if [[ "$line" =~ ^Changes\ to\ push\  ]]; then in_plan=1; continue; fi
     [[ "$line" =~ ^[[:space:]] && "$in_plan" -eq 1 ]] || { in_plan=0; continue; }
@@ -131,7 +136,12 @@ push() {
     slow_gates "${updates[@]}"
   fi
 
-  jj git push "$@"
+  # Push exactly the plan the gates checked. A plain push would snapshot @ again, so a file
+  # edited while the tests ran would land in a commit nobody checked; and a bookmark another
+  # jj process moved meanwhile would change the plan, so refuse then.
+  again=$(jj --ignore-working-copy git push --dry-run "$@" 2>&1) || { printf '%s\n' "$again" >&2; exit 1; }
+  [ "$again" = "$dry" ] || die "the push plan changed while the gates ran; rerun jj gpush."
+  jj --ignore-working-copy git push "$@"
 }
 
 # The suites read the working tree, so they can only vouch for @ (or @- when @ is empty).
