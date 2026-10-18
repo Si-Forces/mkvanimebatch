@@ -58,6 +58,18 @@ scripts/review-gate.sh status    # commits since origin/main that still lack a r
 
 The ledger keys each commit on the `git patch-id` of its diff, so a review survives a rebase or amend that leaves the diff unchanged. Repo scripts use `node`, not Python: ADR-0010 removed Python from dev and CI environments.
 
+### Jujutsu (jj)
+
+The repo is a colocated jj repo (`jj git init --colocate`): `.git` stays, so GitHub, `gh`, CI and `git push` work unchanged. **jj never runs git hooks**, so `jj commit` and `jj git push` bypass everything above. Run `scripts/install-jj-aliases.sh` once per clone to set the repo-level jj config:
+
+- `jj gate` runs `scripts/jj-gate.sh check` over `trunk()..@`: the commit-msg trailer ban on each description (it calls `scripts/hooks/commit-msg`), workspace fmt and clippy when Rust or Cargo files changed since trunk, and `node --check` on changed UI modules. jj has no index, so the gate checks the working-copy commit `@`, which every jj command snapshots first.
+- `jj gpush [args]` asks `jj git push --dry-run [args]` what would move (it refuses to push when it cannot read that plan), runs the trailer ban on each pushed ref's changes and the review-gate ledger check on each pushed ref, then `cargo test --workspace` and `node --test` when `@` (or `@-` with `@` empty) is a pushed tip. It refuses when `@` has changes on top of the pushed `@-`, warns for other tips, then runs `jj git push [args]`. Use it instead of `jj git push`. `SKIP_REVIEW_GATE=1` and `SKIP_SLOW_GATES=1` skip the same gates as before. `git push` still fires `scripts/hooks/pre-push`.
+- `working-copy.eol-conversion = "input"` is set because `.gitattributes` normalizes CRLF to LF: git applies it on its own, jj shows every CRLF file as modified without it. Never use `input-output`; it writes CRLF into every checkout and breaks shell shebangs. jj also records the executable bit that `core.fileMode=false` hides from git.
+- Nothing stops an AI trailer at `jj describe` time; `jj gate` and `jj gpush` refuse it afterwards. There is no counterpart to the hooks' untracked-file and hidden-edit checks: jj snapshots every non-ignored file into `@`, so the tests always run on what is pushed.
+- Scope `jj restore` to paths (`jj restore <path>`); a bare `jj restore` also discards new files in `@`.
+
+Under jj the ledger records commits, and `HEAD` is `@-` only once the work is committed (`jj commit`, or `jj describe` then `jj new`). Review and record `<base>..HEAD` (`review-gate.sh` is plain git and cannot resolve `@-`) after that, not `@` before it.
+
 ## Architecture
 
 A Cargo workspace with four members that share one version:
