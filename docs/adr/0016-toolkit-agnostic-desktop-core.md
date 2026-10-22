@@ -1,6 +1,6 @@
 # 0016. Toolkit-Agnostic Desktop Core Owns UI State
 
-> **Status**: Accepted (S0–S4 implemented; amended 2026-10-15, 2026-10-16, 2026-10-17)
+> **Status**: Accepted (S0–S4 implemented; amended by ADR-0017 at the Slint switch; amended 2026-10-15, 2026-10-16, 2026-10-17)
 > **Date**: 2026-10-15
 > **Context**: Desktop Application Context
 > **Amends**: ADR-0001, ADR-0007, ADR-0008, ADR-0009, ADR-0011, ADR-0013
@@ -57,7 +57,7 @@ The toolkit spike starts after S1, so it can render real queue state.
   - **ADR-0009**: decisions 2 and 4 and the 2026-09-28 and 2026-10-11 amendments: the Presentation Heartbeat (formerly in the JS `QueueTracker`), its batch clock redraw, the adaptive duration formatting and the reducer's `item_start` duration fallback move into the Desktop Core, and a webview reload calls `get_state` instead of restoring the Job Snapshot from `get_job_snapshot()`.
   - **ADR-0011**: decision 4: queue selection and reordering in the JS `QueueTracker` become Desktop Core state and Intents.
   - **ADR-0013**: Amendment 11 (2026-10-06): after a webview reload the chips show the Effective Settings from `get_state`, not from a restored Job Snapshot's `effective_settings`, and the frontend tests that cover them move to Rust.
-- The toolkit ADR (the spike winner, and packaging for deb/rpm/AppImage/msi) follows the spike, per #102, and supersedes ADR-0007 and ADR-0015.
+- The toolkit ADR (the spike winner, and packaging for deb/rpm/AppImage/msi) follows the spike, per #102, and supersedes ADR-0007 and ADR-0015. It is ADR-0017 (Slint): it supersedes both at the switch, restating ADR-0007's engine-bridge rules, and ships Windows as an exe and a portable zip with no msi.
 - The glossary's Queue Tracker, Job Coordinator, Presentation Heartbeat and Job Snapshot now describe Desktop Core components, not frontend ones.
 - Several known JS-only bugs go away because the behaviour they live in goes away: `release`/`metadata` lost on restore, and unguarded non-finite progress.
 - The Log Channel type change touches `mkv-core`, the CLI and the desktop.

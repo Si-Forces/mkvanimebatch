@@ -1,6 +1,6 @@
 # 0015. Per-Package WebKitGTK DMABUF Renderer Scoping
 
-> **Status**: Accepted (amended 2026-10-11)
+> **Status**: Accepted (amended 2026-10-11; superseded by ADR-0017 at the Slint switch)
 > **Date**: 2026-09-27
 > **Context**: Desktop Application Context
 
