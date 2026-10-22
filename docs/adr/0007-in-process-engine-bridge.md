@@ -1,8 +1,11 @@
 # 0007. In-Process Engine Bridge and Sidecar Retirement
 
-> **Status**: Accepted (partially superseded by ADR-0008; amended 2026-09-28, 2026-10-04, 2026-10-09; corrected 2026-10-13)
+> **Status**: Accepted (partially superseded by ADR-0008; amended by ADR-0016; superseded by ADR-0017 at the Slint switch; amended 2026-09-28, 2026-10-04, 2026-10-09; corrected 2026-10-13)
 > **Date**: 2026-05-01
 > **Context**: Desktop Application Bridge
+
+> [!WARNING]
+> **SUPERSEDED AT THE SLINT SWITCH** by ADR-0017. Until the Slint host replaces the Tauri host, this ADR governs the Tauri host. Its engine-bridge rules (the engine in-process with no sidecar, the three output streams, panic isolation and no `panic = "abort"`, the two-phase teardown off the UI thread, the diagnostics log path) do not end at the switch: ADR-0017 decision 9 restates them for the Slint host.
 
 ## Context
 Following the Rust media engine migration (ADR-0005), the desktop application (`desktop-tauri`) retained legacy sidecar subprocess execution (`mkv-cli`), requiring OS-specific process group signals (`libc::kill`, Windows `taskkill`), NDJSON parsing, and dedicated sidecar compilation scripts. This caused packaging complexity, slow CI runs, and unnecessary inter-process serialization overhead.
