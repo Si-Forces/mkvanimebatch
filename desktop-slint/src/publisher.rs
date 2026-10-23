@@ -75,10 +75,12 @@ impl SlintPublisher {
 
     fn schedule(&self) {
         let pending = Arc::clone(&self.pending);
-        let hop = Arc::clone(&pending);
-        let scheduled = self.window.upgrade_in_event_loop(move |app| {
-            let (state, _dones) = hop.take();
-            if let Some(state) = state {
+        let window = self.window.clone();
+        // Not `upgrade_in_event_loop`: it drops the closure when the window is gone, which would
+        // leave the slot scheduled for good. The take always runs; only the apply needs the window.
+        let scheduled = slint::invoke_from_event_loop(move || {
+            let (state, _dones) = pending.take();
+            if let (Some(app), Some(state)) = (window.upgrade(), state) {
                 apply(&app, &state);
             }
             // The job controller renders a job's end (P5); nothing shows it yet.
@@ -86,7 +88,7 @@ impl SlintPublisher {
         // Fails only once the event loop is gone, when nothing is left to show. Clear the flag all
         // the same, so a later push never waits on a hop that will not come.
         if scheduled.is_err() {
-            pending.take();
+            self.pending.take();
         }
     }
 }

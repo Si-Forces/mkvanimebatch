@@ -22,6 +22,8 @@ component TrafficLight inherits Rectangle {
     accessible-action-default => { root.clicked(); }
 
     Path {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
         width: 8px;
         height: 8px;
         viewbox-width: 8;
@@ -44,6 +46,8 @@ export component TitleBar inherits Rectangle {
 
     height: 46px;
     background: Theme.side;
+    accessible-role: window-title-bar;
+    accessible-label: "MKV Anime Batch";
 
     // Behind the buttons, so pressing one never starts a window move.
     WindowMoveArea {

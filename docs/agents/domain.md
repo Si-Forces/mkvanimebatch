@@ -6,7 +6,7 @@ How the engineering skills should consume this repo's domain documentation when 
 
 - **`CONTEXT-MAP.md`** at the repo root — it points to bounded contexts across the workspace. Read each context file relevant to the task:
   - [`crates/mkv-core/CONTEXT.md`](../../crates/mkv-core/CONTEXT.md) for media probing, scoring, asset resolution, font extraction, and batch remuxing.
-  - [`desktop-tauri/CONTEXT.md`](../../desktop-tauri/CONTEXT.md) for desktop GUI, queue state projection, and the in-process Engine Bridge.
+  - [`desktop-tauri/CONTEXT.md`](../../desktop-tauri/CONTEXT.md) for desktop GUI, queue state projection, and the in-process Engine Bridge. Its terms also apply to `desktop-slint`, the Slint host being ported beside the Tauri one ([CONTEXT-MAP.md](../../CONTEXT-MAP.md), ADR-0017); the glossary moves with the host at the switch.
 - **`docs/adr/`** — read ADRs that touch the area you're about to work in (`0001` through `0017`, noting the 2026-09-24 ratified amendments to ADR-0004 for subtitle/cover precedence and to ADR-0008 for font retention removal and typed track assignments).
 
 If any of these files don't exist, **proceed silently**. Don't flag their absence; don't suggest creating them upfront. They are created lazily, when terms or decisions actually get resolved.

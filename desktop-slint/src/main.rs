@@ -16,6 +16,7 @@ use publisher::SlintPublisher;
 use slint::winit_030::WinitWindowAccessor;
 use slint::{CloseRequestResponse, ComponentHandle};
 use std::error::Error;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -37,7 +38,15 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let close = {
         let (window, job, scan) = (app.as_weak(), job.clone(), Arc::clone(&scan));
-        move || start_close(window.clone(), job.clone(), Arc::clone(&scan))
+        let closing = Arc::new(AtomicBool::new(false));
+        move || {
+            start_close(
+                window.clone(),
+                job.clone(),
+                Arc::clone(&scan),
+                Arc::clone(&closing),
+            )
+        }
     };
     app.on_close_window(close.clone());
     app.window().on_close_requested(move || {
@@ -75,23 +84,42 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 /// Close: refuse new starts at once, tear down on a thread of its own (never the UI thread or a
-/// tokio worker, ADR-0017 decision 9), then quit; on failure reopen starts and say why.
-fn start_close(window: slint::Weak<App>, job: JobState, scan: Arc<ScanState>) {
+/// tokio worker, ADR-0017 decision 9), then quit; on failure reopen starts and say why. The
+/// window stays up during the teardown, so a second Close or Alt+F4 meanwhile is ignored rather
+/// than racing a second teardown; `closing` clears only when the teardown failed.
+fn start_close(
+    window: slint::Weak<App>,
+    job: JobState,
+    scan: Arc<ScanState>,
+    closing: Arc<AtomicBool>,
+) {
+    if closing.swap(true, Ordering::SeqCst) {
+        return;
+    }
     if let Some(app) = window.upgrade() {
         app.set_notice_text("".into());
     }
     begin_shutdown(&job, &scan);
-    std::thread::spawn(move || match cleanup_owned_processes(&job, &scan) {
-        Ok(()) => {
-            let _ = slint::quit_event_loop();
-        }
-        Err(error) => {
-            cancel_shutdown(&job, &scan);
-            tracing::error!("Close failed: {error}");
-            let _ = window.upgrade_in_event_loop(move |app| {
-                app.set_notice_title(CLOSE_FAILED_TITLE.into());
-                app.set_notice_text(close_failed_text(&error).into());
-            });
+    std::thread::spawn(move || {
+        // A panicking teardown takes the failure path too: left set, `closing` would refuse every
+        // later Close and the window could not be closed at all.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            cleanup_owned_processes(&job, &scan)
+        }))
+        .unwrap_or_else(|_| Err("the teardown panicked".to_string()));
+        match result {
+            Ok(()) => {
+                let _ = slint::quit_event_loop();
+            }
+            Err(error) => {
+                cancel_shutdown(&job, &scan);
+                closing.store(false, Ordering::SeqCst);
+                tracing::error!("Close failed: {error}");
+                let _ = window.upgrade_in_event_loop(move |app| {
+                    app.set_notice_title(CLOSE_FAILED_TITLE.into());
+                    app.set_notice_text(close_failed_text(&error).into());
+                });
+            }
         }
     });
 }
