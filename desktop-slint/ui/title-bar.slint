@@ -1,0 +1,131 @@
+// Redesign C's title bar (desktop-tauri/ui/index.html .titlebar): the traffic lights, the brand and
+// a drag area behind them. Layout and bindings only; the host does what the buttons ask.
+import { Theme } from "theme.slint";
+
+component TrafficLight inherits Rectangle {
+    in property <color> fill;
+    in property <color> glyph-color;
+    // An SVG path in an 8x8 box.
+    in property <string> glyph;
+    // Shows the glyph: the whole group is hovered, as on macOS.
+    in property <bool> lit;
+    out property <bool> has-hover: touch.has-hover;
+    callback clicked();
+
+    width: 14px;
+    height: 14px;
+    border-radius: self.width / 2;
+    background: touch.has-hover ? fill.brighter(0.12) : fill;
+    border-width: 0.5px;
+    border-color: #00000038;
+    accessible-role: button;
+    accessible-action-default => { root.clicked(); }
+
+    Path {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 8px;
+        height: 8px;
+        viewbox-width: 8;
+        viewbox-height: 8;
+        commands: root.glyph;
+        stroke: root.glyph-color;
+        stroke-width: 1.8px;
+        opacity: root.lit ? 1 : 0;
+    }
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+export component TitleBar inherits Rectangle {
+    callback close();
+    callback minimize();
+    callback toggle-maximize();
+
+    height: 46px;
+    background: Theme.side;
+    accessible-role: window-title-bar;
+    accessible-label: "MKV Anime Batch";
+
+    // Behind the buttons, so pressing one never starts a window move.
+    WindowMoveArea {
+        TouchArea {
+            double-clicked => { root.toggle-maximize(); }
+        }
+    }
+
+    Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: Theme.line;
+    }
+
+    HorizontalLayout {
+        x: 14px;
+        y: (parent.height - self.height) / 2;
+        width: self.preferred-width;
+        height: 14px;
+        spacing: 8px;
+        property <bool> lit: close-button.has-hover || minimize-button.has-hover || maximize-button.has-hover;
+
+        close-button := TrafficLight {
+            fill: #ff5f57;
+            glyph-color: #500000eb;
+            glyph: "M2 2l4 4M6 2L2 6";
+            lit: parent.lit;
+            accessible-label: "Close window";
+            clicked => { root.close(); }
+        }
+        minimize-button := TrafficLight {
+            fill: #febc2e;
+            glyph-color: #643200eb;
+            glyph: "M1.6 4h4.8";
+            lit: parent.lit;
+            accessible-label: "Minimize window";
+            clicked => { root.minimize(); }
+        }
+        maximize-button := TrafficLight {
+            fill: #28c840;
+            glyph-color: #004600eb;
+            glyph: "M4 1.6v4.8M1.6 4h4.8";
+            lit: parent.lit;
+            accessible-label: "Maximize window";
+            clicked => { root.toggle-maximize(); }
+        }
+    }
+
+    // The brand, centred on the bar (.brand): the mark, then the name over "by Sifahaz".
+    HorizontalLayout {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: self.preferred-width;
+        height: self.preferred-height;
+        spacing: 10px;
+
+        Image {
+            width: 32px;
+            height: 32px;
+            source: @image-url("brand-mark.svg");
+            accessible-role: none;
+        }
+        VerticalLayout {
+            alignment: center;
+            Text {
+                text: "MKV Anime Batch";
+                color: Theme.fg;
+                font-size: 14px;
+                font-weight: 700;
+                horizontal-alignment: center;
+            }
+            Text {
+                text: "by Sifahaz";
+                color: Theme.mute;
+                font-size: 11px;
+                font-weight: 400;
+                horizontal-alignment: center;
+            }
+        }
+    }
+}

@@ -1,5 +1,7 @@
 //! Engine Diagnostics for the desktop app: `tracing` output from `mkv-core` and this crate goes to
-//! `mkv-anime-batch.log` in Tauri's app log directory and to stderr (ADR-0007).
+//! `mkv-anime-batch.log` in Tauri's app log directory and to stderr (ADR-0007). The Slint host has a
+//! port of this file (`desktop-slint/src/diagnostics.rs`); until this one leaves at P9 (#142), a fix
+//! here goes into both.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, IsTerminal};

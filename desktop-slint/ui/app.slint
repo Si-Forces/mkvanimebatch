@@ -1,0 +1,136 @@
+// The Slint host's window (ADR-0017). Layout and bindings only: every text it shows beyond the
+// brand and the buttons' accessible labels comes from the published View State.
+import "fonts/Onest-wght.ttf";
+import "fonts/Unbounded-wght.ttf";
+import "fonts/JetBrainsMono-wght.ttf";
+import { Theme } from "theme.slint";
+import { TitleBar } from "title-bar.slint";
+import { FontProbe } from "font-probe.slint";
+
+// FontProbe is test only; a .slint file cannot be compiled per cfg, so it ships (a few bytes).
+export { Theme, FontProbe }
+
+export component App inherits Window {
+    // tauri.conf.json's window: 920x640, at least 760x520, frameless.
+    title: "MKV Anime Batch";
+    preferred-width: 920px;
+    preferred-height: 640px;
+    min-width: 760px;
+    min-height: 520px;
+    no-frame: true;
+    // Transparent outside the rounded surface below, as the Linux webview window is.
+    background: transparent;
+    resize-border-width: root.maximized ? 0px : 6px;
+    default-font-family: "Onest";
+    default-font-size: 13px;
+
+    // From the published View State (P0 proves the Publisher path with these three).
+    in property <string> mode-title;
+    in property <string> count-text;
+    in property <bool> busy;
+    // A Close whose teardown failed: the window stays open and says why.
+    in property <string> notice-title;
+    in property <string> notice-text;
+
+    callback close-window();
+    // Through winit, not `minimized`: see the host's `minimize`.
+    callback minimize-window();
+
+    Rectangle {
+        // A maximized window is square, or the desktop shows through the corners.
+        border-radius: root.maximized ? 0px : Theme.window-radius;
+        clip: true;
+        background: Theme.wall-base;
+
+        // The wallpaper (--wall): three soft blobs over the base.
+        Rectangle {
+            x: -460px;
+            y: -550px;
+            width: 1100px;
+            height: 1100px;
+            background: @radial-gradient(circle, Theme.wall-a 0%, Theme.wall-a.transparentize(100%) 60%);
+        }
+        Rectangle {
+            x: parent.width - 450px;
+            y: parent.height - 450px;
+            width: 900px;
+            height: 900px;
+            background: @radial-gradient(circle, Theme.wall-b 0%, Theme.wall-b.transparentize(100%) 58%);
+        }
+        Rectangle {
+            x: parent.width * 0.58 - 380px;
+            y: parent.height * 0.42 - 380px;
+            width: 760px;
+            height: 760px;
+            background: @radial-gradient(circle, Theme.wall-c 0%, Theme.wall-c.transparentize(100%) 62%);
+        }
+
+        VerticalLayout {
+            TitleBar {
+                close => { root.close-window(); }
+                minimize => { root.minimize-window(); }
+                toggle-maximize => { root.maximized = !root.maximized; }
+            }
+
+            // A long teardown error wraps and pushes the list down. The height is bound to the
+            // texts' preferred heights at their final width: the layout alone sizes a wrapped text
+            // before it knows the width, and stretches both texts to fill the guess.
+            if root.notice-text != "": Rectangle {
+                height: notice-title.preferred-height + notice-body.preferred-height + 2 * 12px + 2px;
+                background: Theme.head;
+                VerticalLayout {
+                    padding: 12px;
+                    spacing: 2px;
+                    notice-title := Text {
+                        text: root.notice-title;
+                        color: Theme.err;
+                        font-weight: 700;
+                    }
+                    notice-body := Text {
+                        text: root.notice-text;
+                        color: Theme.fg;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+
+            // The list header (.list-head), until P2 brings the queue.
+            Rectangle {
+                background: Theme.content;
+                VerticalLayout {
+                    padding-left: 20px;
+                    padding-right: 20px;
+                    padding-top: 16px;
+                    alignment: start;
+                    spacing: 4px;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: start;
+                        Text {
+                            text: root.mode-title;
+                            color: Theme.fg;
+                            font-size: 18px;
+                            font-weight: 700;
+                            overflow: elide;
+                        }
+                        // The batch is held: a dot, no text (the status pill's text is P5's).
+                        if root.busy: VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 8px;
+                                height: 8px;
+                                border-radius: 4px;
+                                background: Theme.info;
+                            }
+                        }
+                    }
+                    Text {
+                        text: root.count-text;
+                        color: Theme.mute;
+                        font-size: 12px;
+                    }
+                }
+            }
+        }
+    }
+}

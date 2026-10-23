@@ -31,6 +31,7 @@ jobs:
     # A release usually starts on a cold cache: Windows verify took up to 23.5 minutes (issue #95).
     with:
       windows-timeout: 35
+      skip-desktop-slint: true
 
   # ────────────────────────────────────────────────────────────────────────────
   # 2. Release Notes and Version Check
