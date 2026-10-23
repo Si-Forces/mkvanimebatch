@@ -57,7 +57,7 @@ CI also runs `cargo audit` (ignores in `.cargo/audit.toml`) and actionlint. Its 
   - Panics are isolated, so never set `panic = "abort"`.
   - `unsafe_code = "forbid"` workspace-wide, except the generated Slint UI crate `desktop-slint/ui` on `deny`, where no hand-written code goes (ADR-0017, 2026-10-23 amendment).
 - Desktop directory identities must use `display_canonical_path` (the canonical path without `\\?\`) and match byte-for-byte; the queue and Run preflight never normalize paths.
-- All Intents are sent through the one promise chain in `app.js`; for `scan_directory`, `run`, and `stop`, the chain waits until they are sent, not answered (`UNCHAINED_INTENTS`).
+- All Intents are sent through the one promise chain in `app.js`, each once the chained Intents before it were answered. `scan_directory`, `run`, and `stop` are unchained (`UNCHAINED_INTENTS`): the next Intent is sent right after one of them, not after its answer, so it can reach the core first.
 - Linux packaging: the WebKitGTK DMABUF workaround is AppImage-on-NVIDIA only; don't extend it to deb/rpm (ADR-0015).
 
 ## Workflow rules
