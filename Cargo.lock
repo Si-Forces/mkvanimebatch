@@ -3798,6 +3798,7 @@ dependencies = [
  "i-slint-backend-testing",
  "mkv-anime-batch-slint-ui",
  "mkv-desktop-core",
+ "rfd",
  "slint",
  "tempfile",
  "tokio",
