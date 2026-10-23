@@ -3794,10 +3794,16 @@ dependencies = [
 name = "mkv-anime-batch-slint"
 version = "1.1.0"
 dependencies = [
+ "dirs",
  "i-slint-backend-testing",
  "mkv-anime-batch-slint-ui",
+ "mkv-desktop-core",
  "skia-bindings",
  "slint",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

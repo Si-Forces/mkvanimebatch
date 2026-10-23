@@ -1,0 +1,63 @@
+// Redesign C's tokens, hand-ported from desktop-tauri/ui/style.css (:root and [data-theme="dark"]).
+// The host's contrast test reads them back through this global: keep every text and surface token
+// here, not inline in a component. Departures from style.css are marked "AA:" (WCAG AA contrast).
+import { Palette as StylePalette } from "std-widgets.slint";
+
+export global Theme {
+    // Follows the system's colour scheme until `set-dark` pins one (the toggle, P6).
+    out property <bool> dark: StylePalette.color-scheme == ColorScheme.dark;
+
+    public function set-dark(dark: bool) {
+        StylePalette.color-scheme = dark ? ColorScheme.dark : ColorScheme.light;
+    }
+
+    out property <length> window-radius: 14px;
+    out property <length> pane-radius: 22px;
+
+    // The wallpaper (--wall): three radial gradients over a base.
+    out property <color> wall-a: dark ? #1c3d57 : #bfe3ff;
+    out property <color> wall-b: dark ? #3d1f57 : #f3cfff;
+    out property <color> wall-c: dark ? #113d34 : #cff7e8;
+    out property <color> wall-base: dark ? #0b0e13 : #e8edf4;
+
+    // Surfaces, translucent over the wallpaper.
+    out property <color> bg: dark ? #13171b : #f0f3f5;
+    out property <color> side: dark ? #22283275 : #ffffff6b;
+    out property <color> panel: dark ? #22283285 : #ffffff85;
+    out property <color> content: dark ? #12161c94 : #ffffffa3;
+    out property <color> head: dark ? #161b22f0 : #f8fafcf0;
+    out property <color> float: dark ? #1a1f27f2 : #fafbfdf2;
+    out property <color> field: dark ? #ffffff12 : #ffffff99;
+    out property <color> sel: dark ? #ffffff1a : #6e7a9129;
+    out property <color> edge: dark ? #ffffff21 : #ffffffb3;
+    out property <color> hi: dark ? #ffffff29 : #ffffffe6;
+    // The first of --shadow's two layers.
+    out property <color> shadow: dark ? #00000080 : #1e2a4024;
+
+    // Text and lines.
+    out property <color> fg: dark ? #e8edf2 : #121820;
+    out property <color> mute: dark ? #b0bbc5 : #3f4a56;
+    out property <color> path: dark ? #c3cdd6 : #2f3b47;
+    out property <color> sep: dark ? #ffffff33 : #14203033;
+    out property <color> line: dark ? #ffffff17 : #1420301a;
+    out property <color> hover: dark ? #ffffff0f : #6e7a911a;
+    out property <color> scroll: dark ? #ffffff33 : #14203038;
+    out property <color> scroll-hover: dark ? #ffffff61 : #14203066;
+
+    // Accents and tones. AA: light --accent #0d826d, --ok #1e7a4c and --run #0e8fb0 are darkened
+    // to pass 4.5:1 over the light panes (the accent and ok as text) and under white button text.
+    out property <color> accent: dark ? #4cc7ad : #0b7764;
+    out property <color> accent-fg: dark ? #06201a : #ffffff;
+    out property <color> accent-soft: dark ? #4cc7ad29 : #0b776424;
+    out property <color> accent-ring: dark ? #4cc7ad73 : #0b776461;
+    out property <color> ok: dark ? #4fc98a : #1c7549;
+    out property <color> warn: dark ? #e5a63c : #9a5b00;
+    out property <color> err: dark ? #f0776b : #c0372c;
+    // AA: style.css draws the Stop button's text #ffffff on --err, 2.8:1 in the dark theme.
+    out property <color> err-fg: dark ? #2a0905 : #ffffff;
+    out property <color> err-soft: dark ? #f0776b24 : #c0372c1f;
+    out property <color> info: dark ? #6aa8ea : #2a66a8;
+    out property <color> done: dark ? #b195ee : #6b45b5;
+    out property <color> run: dark ? #3cc8e6 : #0b7f99;
+    out property <color> run-fg: dark ? #04222b : #ffffff;
+}

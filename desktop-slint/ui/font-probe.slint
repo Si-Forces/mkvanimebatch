@@ -1,0 +1,18 @@
+// Test only: one line of text in a given family and weight, which the host's font test renders
+// headlessly to check that the embedded variable fonts resolve their weights.
+export component FontProbe inherits Window {
+    in property <string> family;
+    in property <int> weight;
+    width: 480px;
+    height: 64px;
+    background: white;
+
+    Text {
+        x: 8px;
+        text: "Hamburgefonstiv 0123";
+        font-family: root.family;
+        font-weight: root.weight;
+        font-size: 32px;
+        color: black;
+    }
+}
