@@ -52,6 +52,40 @@ fn the_window_shows_published_values_and_its_title_bar_buttons_answer() {
     app.hide().unwrap();
 }
 
+/// A long teardown error wraps, and the notice grows to hold it: the list header starts below it.
+#[test]
+fn a_long_close_notice_wraps_and_pushes_the_list_down() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = App::new().unwrap();
+    let mut state = ViewState::new(None);
+    state.remux.title = "Frieren".into();
+    apply(&app, &state);
+    let error = "process cleanup failed: ".repeat(30);
+    app.set_notice_title("Could not close safely".into());
+    app.set_notice_text(error.as_str().into());
+    app.show().unwrap();
+
+    let only = |label: &str| {
+        let mut found: Vec<_> = ElementHandle::find_by_accessible_label(&app, label).collect();
+        assert_eq!(found.len(), 1, "one {label:?}");
+        found.pop().unwrap()
+    };
+    let (title, body, header) = (
+        only("Could not close safely"),
+        only(&error),
+        only("Frieren"),
+    );
+    assert!(
+        body.size().height >= 3.0 * title.size().height,
+        "the error wraps onto several lines"
+    );
+    assert!(
+        header.absolute_position().y >= body.absolute_position().y + body.size().height,
+        "the list header starts below the notice's last line"
+    );
+    app.hide().unwrap();
+}
+
 /// Publications from another thread hop to the event loop, where the newest one is bound. The only
 /// test with a threaded platform: Slint keeps one event loop proxy per process.
 #[test]

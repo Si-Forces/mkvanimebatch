@@ -72,21 +72,24 @@ export component App inherits Window {
                 toggle-maximize => { root.maximized = !root.maximized; }
             }
 
+            // A long teardown error wraps and pushes the list down. The height is bound to the
+            // texts' preferred heights at their final width: the layout alone sizes a wrapped text
+            // before it knows the width, and stretches both texts to fill the guess.
             if root.notice-text != "": Rectangle {
-                height: self.preferred-height;
+                height: notice-title.preferred-height + notice-body.preferred-height + 2 * 12px + 2px;
                 background: Theme.head;
                 VerticalLayout {
                     padding: 12px;
                     spacing: 2px;
-                    Text {
+                    notice-title := Text {
                         text: root.notice-title;
                         color: Theme.err;
                         font-weight: 700;
                     }
-                    Text {
+                    notice-body := Text {
                         text: root.notice-text;
                         color: Theme.fg;
-                        overflow: elide;
+                        wrap: word-wrap;
                     }
                 }
             }
