@@ -20,6 +20,14 @@ pub const DEFAULT_CANCELLED: &str = "Cancelled";
 /// The status label of a failed item, and its error when the engine gave none.
 pub const DEFAULT_FAILED: &str = "Failed";
 
+/// The heading of the notice a Close shows when its teardown failed and the window stays open.
+pub const CLOSE_FAILED_TITLE: &str = "Could not close safely";
+
+/// The text of that notice, naming the teardown's error.
+pub fn close_failed_text(error: &str) -> String {
+    format!("MKV Anime Batch is still open because process cleanup failed: {error}")
+}
+
 /// A measured item duration: `<0.1s`, `4.2s`, `1m 15.4s`.
 pub fn format_outcome_duration(seconds: f64) -> String {
     if seconds < 0.1 {
@@ -741,6 +749,14 @@ pub fn chips(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_close_failed_notice_keeps_the_webview_wording() {
+        assert_eq!(
+            close_failed_text("Job cleanup failed: Timed out"),
+            "MKV Anime Batch is still open because process cleanup failed: Job cleanup failed: Timed out"
+        );
+    }
 
     fn secs(secs: u64) -> Option<Duration> {
         Some(Duration::from_secs(secs))
