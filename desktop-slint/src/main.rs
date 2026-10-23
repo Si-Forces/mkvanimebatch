@@ -16,7 +16,7 @@ use mkv_desktop_core::presentation::{close_failed_text, CLOSE_FAILED_TITLE};
 use publisher::SlintPublisher;
 use renderer::{Answer, Choice, Renderer, Start};
 use slint::winit_030::WinitWindowAccessor;
-use slint::{CloseRequestResponse, ComponentHandle, RenderingState, Timer, TimerMode};
+use slint::{CloseRequestResponse, ComponentHandle, RenderingState, Timer};
 use std::cell::Cell;
 use std::error::Error;
 use std::path::{Path, PathBuf};
@@ -52,7 +52,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         tracing::warn!("Running on the software renderer ({why}); the glass is faked");
     }
 
-    let start = Rc::new(Cell::new(Start::Pending));
+    let start = Rc::new(Cell::new(Start::Setup));
     let result = run(&choice, config.clone(), Rc::clone(&start));
     if renderer::gpu_failed_at_start(choice.renderer, start.get(), result.is_err()) {
         let error = match result {
@@ -68,12 +68,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     result.inspect_err(|error| tracing::error!("The app stopped with an error: {error}"))
 }
 
-/// OpenGL failed before the first frame: ask, then re-launch in software mode, saving the choice
-/// on yes. When no dialog can be shown at all, it re-launches without saving and says why.
+/// OpenGL failed before the first frame: ask, then on yes save the choice and re-launch in
+/// software mode. No, or no dialog at all, exits with the error: there is no silent re-launch.
 fn gpu_failed(error: &str, config: Option<&Path>) -> Result<(), Box<dyn Error>> {
     tracing::error!("The GPU renderer could not start: {error}");
     match renderer::ask_restart() {
         Answer::No => return Err(format!("The GPU renderer could not start: {error}").into()),
+        Answer::Unavailable(reason) => {
+            tracing::error!("No dialog could be shown to offer software mode: {reason}");
+            return Err(format!("The GPU renderer could not start: {error}").into());
+        }
         Answer::Yes => match config.map(|dir| (dir, renderer::save_software(dir))) {
             Some((_, Ok(()))) => {}
             Some((dir, Err(error))) => tracing::warn!(
@@ -84,18 +88,22 @@ fn gpu_failed(error: &str, config: Option<&Path>) -> Result<(), Box<dyn Error>> 
                 tracing::warn!("No config directory: the software renderer choice is not saved")
             }
         },
-        Answer::Unavailable(reason) => tracing::warn!(
-            "No dialog could be shown ({reason}); restarting in software mode without saving it"
-        ),
     }
-    renderer::relaunch_command(
-        &std::env::current_exe()?,
-        std::env::var_os("APPIMAGE"),
-        std::env::var_os("ARGV0"),
-        std::env::args_os().skip(1),
-    )
-    .spawn()?;
-    Ok(())
+    std::env::current_exe()
+        .and_then(|exe| {
+            renderer::relaunch_command(
+                &exe,
+                std::env::var_os("APPIMAGE"),
+                std::env::var_os("ARGV0"),
+                std::env::args_os().skip(1),
+            )
+            .spawn()
+        })
+        .map(drop)
+        .map_err(|error| {
+            tracing::error!("Cannot restart in software mode: {error}");
+            error.into()
+        })
 }
 
 /// Builds the window and the Desktop Core, runs the event loop, then tears down. On OpenGL,
@@ -114,9 +122,13 @@ fn run(
     let app = App::new()?;
     app.global::<Theme>()
         .set_glass(choice.renderer == Renderer::OpenGl);
-    // Held until the event loop ends.
-    let _watchdog = (choice.renderer == Renderer::OpenGl)
-        .then(|| watch_start(&app, config.filter(|_| choice.forget_saved), start));
+    if choice.renderer == Renderer::OpenGl {
+        watch_start(
+            &app,
+            config.filter(|_| choice.forget_saved),
+            Rc::clone(&start),
+        );
+    }
     // Held until the end: the actor stops once every handle is gone.
     let _core = Core::spawn(
         runtime.handle().clone(),
@@ -154,7 +166,9 @@ fn run(
         }
     })?;
 
-    // Kept for the end: a failed event loop still tears down first.
+    // Kept for the end: a failed event loop still tears down first. From here an error before
+    // the first frame is the GPU's.
+    start.set(Start::Pending);
     let result = app.run();
 
     // The event loop can end without a close request, or fail; tear down all the same. Idempotent
@@ -171,9 +185,10 @@ fn run(
     result.map_err(Into::into)
 }
 
-/// How long the OpenGL window may take to appear. Skia creates its OpenGL surface on the event
-/// loop thread, in the same step that creates the window, once Slint's 500 ms wait for the
-/// desktop appearance is over; a slow driver delays this timer as much as the window.
+/// How long the OpenGL window may take to appear, counted from the event loop's first pass. Skia
+/// creates its OpenGL surface on the event loop thread, in the same step that creates the window,
+/// once Slint's wait of at most 500 ms for the desktop appearance is over; a slow driver delays
+/// this timer as much as the window.
 const WINDOW_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Watches an OpenGL start. A failed OpenGL surface ends the event loop with an error when
@@ -182,7 +197,7 @@ const WINDOW_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
 /// So: the first drawn frame marks `Drew` (and forgets a saved software choice when
 /// `forget` names its directory); no window by [`WINDOW_DEADLINE`] marks `NoWindow` and quits
 /// the loop, which then returns the error Slint kept.
-fn watch_start(app: &App, forget: Option<PathBuf>, start: Rc<Cell<Start>>) -> Timer {
+fn watch_start(app: &App, forget: Option<PathBuf>, start: Rc<Cell<Start>>) {
     let drawn = Rc::clone(&start);
     // Skia answers the notifier; only the software renderer would refuse it.
     let watched = app.window().set_rendering_notifier(move |state, _| {
@@ -204,17 +219,19 @@ fn watch_start(app: &App, forget: Option<PathBuf>, start: Rc<Cell<Start>>) -> Ti
         tracing::warn!("Cannot watch for the first frame: {error:?}");
     }
     let window = app.as_weak();
-    let watchdog = Timer::default();
-    watchdog.start(TimerMode::SingleShot, WINDOW_DEADLINE, move || {
-        let created = window
-            .upgrade()
-            .is_some_and(|app| app.window().with_winit_window(|_| ()).is_some());
-        if !created && start.get() == Start::Pending {
-            start.set(Start::NoWindow);
-            let _ = slint::quit_event_loop();
-        }
+    // A timer counts from when it is armed, so arm the deadline on the loop's first pass: time
+    // spent before the loop (a loaded machine, a slow Wayland connect) must not count.
+    Timer::single_shot(std::time::Duration::ZERO, move || {
+        Timer::single_shot(WINDOW_DEADLINE, move || {
+            let created = window
+                .upgrade()
+                .is_some_and(|app| app.window().with_winit_window(|_| ()).is_some());
+            if !created && start.get() == Start::Pending {
+                start.set(Start::NoWindow);
+                let _ = slint::quit_event_loop();
+            }
+        });
     });
-    watchdog
 }
 
 /// Close: refuse new starts at once, tear down on a thread of its own (never the UI thread or a
