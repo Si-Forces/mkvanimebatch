@@ -1626,6 +1626,38 @@ pub(super) fn set_preset(mode: PipelineMode, preset: &str) -> Intent {
     }
 }
 
+fn typed_input_dir(dir: &str) -> Intent {
+    edit(
+        REMUX,
+        DraftChanges {
+            input_dir: Some(dir.into()),
+            ..DraftChanges::default()
+        },
+    )
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_intents_dispatched_without_awaiting_reach_the_actor_in_call_order() {
+    let (core, _publisher) = spawn_core();
+    let first = core.dispatch(typed_input_dir("/first"));
+    let second = core.dispatch(typed_input_dir("/second"));
+    // Awaited in reverse: the order of the calls, not of the polls, decides.
+    assert_eq!(second.await, Ok(true));
+    assert_eq!(first.await, Ok(true));
+    tokio::time::sleep(PUBLISH_INTERVAL * 2).await;
+    let state = core.state().await.unwrap();
+    assert_eq!(state.remux.draft.input_dir, "/second");
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_dropping_a_dispatch_future_does_not_cancel_its_intent() {
+    let (core, _publisher) = spawn_core();
+    drop(core.dispatch(typed_input_dir("/dropped")));
+    tokio::time::sleep(PUBLISH_INTERVAL * 2).await;
+    let state = core.state().await.unwrap();
+    assert_eq!(state.remux.draft.input_dir, "/dropped");
+}
+
 #[tokio::test(start_paused = true)]
 async fn test_draft_intents_apply_and_publish_with_the_next_publication() {
     let (core, publisher) = spawn_core();

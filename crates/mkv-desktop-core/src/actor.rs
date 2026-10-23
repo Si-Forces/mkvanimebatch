@@ -9,14 +9,14 @@
 //! Episode Inspector in `crate::inspector`. Each mode's Run Log is published batch by batch,
 //! outside the View State.
 
-use crate::control::{mode_name, Launcher};
+use crate::control::{mode_name, EngineLauncher, InspectCacheState, Launcher, ScanState};
 use crate::coordinator::{JobCoordinator, Phase};
 use crate::draft::{DraftChanges, SettingsDraft, StepField};
-use crate::inspection::{InFlight, Inspector};
+use crate::inspection::{EngineInspector, InFlight, Inspector};
 use crate::inspector::{
     inspected_row, inspector_view, subtitle_assignment, InspectorView, SubtitleFields,
 };
-use crate::job::{JobDone, JobSink, JobStarted};
+use crate::job::{JobDone, JobSink, JobStarted, JobState};
 use crate::log::{error_line, LogBatch, LogView, RunLog};
 use crate::presentation::{
     batch, batch_clock, chips, controls, count_text, empty_list, filter_counts, library,
@@ -25,7 +25,7 @@ use crate::presentation::{
 };
 use crate::queue::{Direction, Queue, Row};
 use crate::snapshot::{BatchStatus, JobSnapshot};
-use crate::telemetry::{Sampler, TelemetryData, TelemetryView};
+use crate::telemetry::{EngineSampler, Sampler, TelemetryData, TelemetryView};
 use mkv_core::log_line::{LogKind, LogLine};
 use mkv_core::manifest::InspectionManifest;
 use mkv_core::pipeline::{JobEvent, PipelineMode};
@@ -33,6 +33,7 @@ use mkv_core::preset::{get_preset_profiles, PresetProfile};
 use mkv_core::request::{EffectiveSettings, TrackAssignment};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant as StdInstant};
 use tokio::runtime::Handle;
@@ -385,12 +386,19 @@ impl CoreHandle {
         let _ = self.0.send(msg);
     }
 
-    async fn ask<T>(&self, msg: impl FnOnce(oneshot::Sender<T>) -> Msg) -> Result<T, String> {
+    /// Sends `msg` at call time and returns its answer, so messages reach the actor in call
+    /// order however their answers are awaited, or if they are dropped.
+    fn ask<T: Send + 'static>(
+        &self,
+        msg: impl FnOnce(oneshot::Sender<T>) -> Msg,
+    ) -> impl Future<Output = Result<T, String>> + Send + 'static {
         let (reply, answer) = oneshot::channel();
         self.send(msg(reply));
-        answer
-            .await
-            .map_err(|_| "The Desktop Core is not running.".to_string())
+        async move {
+            answer
+                .await
+                .map_err(|_| "The Desktop Core is not running.".to_string())
+        }
     }
 
     /// A `JobSink` for one job that feeds this actor.
@@ -416,8 +424,15 @@ impl CoreHandle {
     /// the next coalesced publication. The answer is `Ok(true)` when it applied, `Ok(false)` when
     /// it changed nothing (see `Intent::ScanDirectory`, `Intent::Run` and `Intent::Stop` for those), and an error
     /// when the core refuses it.
-    pub async fn dispatch(&self, intent: Intent) -> Result<bool, String> {
-        self.ask(|reply| Msg::Dispatch(intent, reply)).await?
+    ///
+    /// The Intent is sent at call time, so Intents reach the actor in call order; dropping the
+    /// returned future drops only the answer, never the Intent.
+    pub fn dispatch(
+        &self,
+        intent: Intent,
+    ) -> impl Future<Output = Result<bool, String>> + Send + 'static {
+        let answer = self.ask(|reply| Msg::Dispatch(intent, reply));
+        async move { answer.await? }
     }
 }
 
@@ -556,6 +571,21 @@ pub struct Ports<I, L, S> {
     pub launcher: L,
     /// Samples the System Telemetry Provider.
     pub sampler: S,
+}
+
+impl Ports<EngineInspector, EngineLauncher, EngineSampler> {
+    /// The engine ports of a desktop host. Scans and Runs share `scan` and `cache`, which the
+    /// host's Close also tears down; jobs run through `job`, the Job Slot.
+    pub fn engine(scan: Arc<ScanState>, cache: InspectCacheState, job: JobState) -> Self {
+        Self {
+            inspector: EngineInspector {
+                scan: Arc::clone(&scan),
+                cache: cache.clone(),
+            },
+            launcher: EngineLauncher { job, scan, cache },
+            sampler: EngineSampler::default(),
+        }
+    }
 }
 
 /// The actor's state.
