@@ -205,6 +205,24 @@ jobs:
           key: desktop-slint-${{ matrix.target }}
           workspaces: ${{ env.BUILD_DIR }}
 
+      # Cargo.lock must give gpu-allocator the `windows` crate wgpu-hal uses, or the Windows build
+      # fails in wgpu-hal; a `cargo update` can quietly undo it (see desktop-slint/Cargo.toml).
+      # `cargo tree --target` needs no Windows toolchain, so the Linux leg checks it up front.
+      - name: Check gpu-allocator and wgpu-hal share one windows crate
+        if: runner.os == 'Linux'
+        working-directory: ${{ env.BUILD_DIR }}
+        run: |
+          windows_of() {
+            cargo tree --locked --target x86_64-pc-windows-msvc -e normal --depth 1 -p "$1" \
+              | grep -o 'windows v[0-9.]*' | head -1
+          }
+          allocator=$(windows_of gpu-allocator)
+          hal=$(windows_of wgpu-hal)
+          if [ -z "$allocator" ] || [ "$allocator" != "$hal" ]; then
+            echo "::error::gpu-allocator uses '$allocator' but wgpu-hal uses '$hal' (see desktop-slint/Cargo.toml)"
+            exit 1
+          fi
+
       - name: Run Clippy linter
         working-directory: ${{ env.BUILD_DIR }}
         run: cargo clippy -p mkv-anime-batch-slint -p mkv-anime-batch-slint-ui --all-targets -- -D warnings
