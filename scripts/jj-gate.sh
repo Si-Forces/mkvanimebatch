@@ -54,7 +54,7 @@ check() {
 
   for f in "${changed[@]}"; do
     case "$f" in
-      *.rs | Cargo.toml | */Cargo.toml | Cargo.lock) rust=1 ;;
+      *.rs | Cargo.toml | */Cargo.toml | Cargo.lock | desktop-slint/ui/*) rust=1 ;; # .slint and fonts compile into the crate
       desktop-tauri/ui/*.js | scripts/*.js) [ -f "$f" ] && js+=("$f") ;; # skip deletions
     esac
   done

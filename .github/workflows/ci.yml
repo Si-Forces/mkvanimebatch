@@ -98,18 +98,18 @@ jobs:
 
       - name: Run Clippy linter
         working-directory: ${{ env.BUILD_DIR }}
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --exclude mkv-anime-batch-slint --exclude mkv-anime-batch-slint-ui --all-targets -- -D warnings
 
       # The Desktop Core stays toolkit-agnostic (ADR-0016 decision 1). The tree is captured first,
       # so a failing `cargo tree` fails the step and `grep -q` cannot SIGPIPE it under pipefail.
-      - name: Check the Desktop Core does not depend on Tauri (Linux only)
+      - name: Check the Desktop Core does not depend on a UI toolkit (Linux only)
         if: runner.os == 'Linux'
         shell: bash
         working-directory: ${{ env.BUILD_DIR }}
         run: |
           deps="$(cargo tree -p mkv-desktop-core -e normal --prefix none)"
-          if grep -qi '^tauri' <<< "$deps"; then
-            echo "::error::mkv-desktop-core depends on tauri; ADR-0016 keeps the Desktop Core toolkit-agnostic."
+          if grep -qiE '^(tauri|slint|i-slint|winit|skia)' <<< "$deps"; then
+            echo "::error::mkv-desktop-core depends on a UI toolkit (tauri, slint, winit or skia); ADR-0016 keeps the Desktop Core toolkit-agnostic."
             exit 1
           fi
 
@@ -119,7 +119,7 @@ jobs:
         working-directory: ${{ env.BUILD_DIR }}
         env:
           MKV_REQUIRE_MEDIA_TOOLS: ${{ runner.os == 'Linux' && '1' || '' }}
-        run: cargo test --workspace
+        run: cargo test --workspace --exclude mkv-anime-batch-slint --exclude mkv-anime-batch-slint-ui
 
       # The real-media bench never runs a cell here: it runs its self-check asserts, then skips
       # because MKV_BENCH_CORPUS is unset. `cargo test --workspace` does not build bench targets.
@@ -144,6 +144,68 @@ jobs:
           "$CLI" --plan --no-cache --input-dir "$EMPTY" > "$EMPTY/manifest.json"
           grep -q '"version": 2' "$EMPTY/manifest.json"
           grep -q '"items": \[\]' "$EMPTY/manifest.json"
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 1b. Slint Desktop Host (Linux Ubuntu 24.04 & Windows), ADR-0017
+  # ────────────────────────────────────────────────────────────────────────────
+  # The Slint port builds beside the Tauri app until the switch. Its own job and cache keep the
+  # Skia prebuilt download and the Slint tree out of workspace-checks. skia-bindings has the
+  # no-compile feature, so a failed prebuilt download fails the build instead of a source build.
+  desktop-slint:
+    name: Slint Desktop Host (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ matrix.timeout || 30 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+            timeout: ${{ inputs.windows-timeout }}
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up the build directory
+        uses: ./.github/actions/setup-build-dir
+
+      # Skia links libstdc++, fontconfig and freetype; the rest (EGL, Wayland, X11, xkbcommon)
+      # is loaded at run time.
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        uses: ./.github/actions/install-linux-deps
+        with:
+          packages: >-
+            build-essential libfontconfig-dev libfreetype-dev
+
+      - name: Install Rust stable
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update --component clippy --target "$TARGET"
+          rustup default stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: desktop-slint-${{ matrix.target }}
+          workspaces: ${{ env.BUILD_DIR }}
+
+      - name: Run Clippy linter
+        working-directory: ${{ env.BUILD_DIR }}
+        run: cargo clippy -p mkv-anime-batch-slint -p mkv-anime-batch-slint-ui --all-targets -- -D warnings
+
+      - name: Run tests
+        working-directory: ${{ env.BUILD_DIR }}
+        run: cargo test -p mkv-anime-batch-slint -p mkv-anime-batch-slint-ui
 
   # ────────────────────────────────────────────────────────────────────────────
   # 2. Windows Desktop Release Build
@@ -249,7 +311,7 @@ jobs:
   # ────────────────────────────────────────────────────────────────────────────
   ci-status:
     name: CI Status Gate
-    needs: [workspace-checks, windows-desktop, ui-tests, workflow-lint, security-audit]
+    needs: [workspace-checks, desktop-slint, windows-desktop, ui-tests, workflow-lint, security-audit]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: always()
@@ -257,6 +319,7 @@ jobs:
       - name: Evaluate status
         run: |
           if [ "${{ needs.workspace-checks.result }}" != "success" ] || \
+             [ "${{ needs.desktop-slint.result }}" != "success" ] || \
              [ "${{ needs.windows-desktop.result }}" != "success" ] || \
              [ "${{ needs.ui-tests.result }}" != "success" ] || \
              [ "${{ needs.workflow-lint.result }}" != "success" ] || \

@@ -1,0 +1,36 @@
+[package]
+name = "mkv-anime-batch-slint"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Batch anime fansub processing desktop application (Slint host, ADR-0017)"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+# The generated UI (`App`), in its own crate because of its `unsafe_code` lint (ADR-0017 amendment).
+mkv-anime-batch-slint-ui = { path = "ui" }
+
+# `no-compile`: a failed Skia prebuilt download panics instead of falling back to a source build
+# (which needs clang and Python, ADR-0010). Keep the version equal to the one Slint resolves.
+skia-bindings = { version = "=0.153.3", features = ["no-compile"] }
+
+# Slint master 45cb2b3 until 1.19 ships `backdrop-blur` (ADR-0017 decision 2). A Slint bump moves
+# slint here and in ui/Cargo.toml, slint-build and i-slint-backend-testing together, in its own commit.
+# ADR-0017 decision 3: no FemtoVG, no system tray; Skia on OpenGL with the software renderer.
+slint = { git = "https://github.com/slint-ui/slint", rev = "45cb2b33420e1b3c8a13b6a765d2b5077d9c9608", default-features = false, features = [
+    "std",
+    "compat-1-2",
+    "backend-winit",
+    "renderer-skia-opengl",
+    "renderer-software",
+    "accessibility",
+    "unstable-winit-030",
+] }
+
+[dev-dependencies]
+i-slint-backend-testing = { git = "https://github.com/slint-ui/slint", rev = "45cb2b33420e1b3c8a13b6a765d2b5077d9c9608" }
