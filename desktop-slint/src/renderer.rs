@@ -173,6 +173,13 @@ pub enum Answer {
     Yes,
     No,
     /// No dialog could be shown; the reason, for the log.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(
+            dead_code,
+            reason = "rfd's MessageDialog always answers; only the Linux tools can fail"
+        )
+    )]
     Unavailable(String),
 }
 
