@@ -40,6 +40,7 @@ slint = { git = "https://github.com/slint-ui/slint", rev = "45cb2b33420e1b3c8a13
 ] }
 
 # The GPU fallback dialog: a MessageBoxW on Windows. Linux runs zenity or kdialog itself (renderer.rs).
+# P2 widens this cfg to every target for the file and folder pickers.
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 rfd = "0.15"
 

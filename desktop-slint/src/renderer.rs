@@ -74,6 +74,9 @@ pub fn choose(forced: Option<Renderer>, saved_software: bool) -> Choice {
 /// How far an OpenGL start got.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Start {
+    /// Still setting up before the event loop: an error here is not the GPU's.
+    Setup,
+    /// In the event loop, no frame yet.
     Pending,
     /// A frame was drawn: OpenGL works.
     Drew,
@@ -81,11 +84,13 @@ pub enum Start {
     NoWindow,
 }
 
-/// Whether OpenGL failed at startup: an OpenGL run that drew no frame and either ended with an
-/// error or never got its window. An error after the first frame is an ordinary one.
+/// Whether OpenGL failed at startup: an OpenGL event loop that drew no frame and either ended with
+/// an error or never got its window. An error before the loop or after the first frame is an
+/// ordinary one.
 pub fn gpu_failed_at_start(renderer: Renderer, start: Start, run_failed: bool) -> bool {
     renderer == Renderer::OpenGl
         && match start {
+            Start::Setup => false,
             Start::Pending => run_failed,
             Start::Drew => false,
             Start::NoWindow => true,
@@ -170,15 +175,34 @@ pub fn ask_restart() -> Answer {
     ];
     let mut reasons = Vec::new();
     for (tool, args) in tools {
-        match Command::new(tool).args(args).status() {
-            // Both answer 0 for yes and 1 for no or a closed dialog.
-            Ok(status) if status.code() == Some(0) => return Answer::Yes,
-            Ok(status) if status.code() == Some(1) => return Answer::No,
-            Ok(status) => reasons.push(format!("{tool} ended with {status}")),
+        match Command::new(tool).args(args).output() {
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                match read_answer(output.status.code(), &stderr) {
+                    Some(answer) => return answer,
+                    None => reasons.push(format!(
+                        "{tool} ended with {}: {}",
+                        output.status,
+                        stderr.trim().lines().last().unwrap_or_default()
+                    )),
+                }
+            }
             Err(error) => reasons.push(format!("{tool}: {error}")),
         }
     }
     Answer::Unavailable(reasons.join("; "))
+}
+
+/// zenity and kdialog answer 0 for yes and 1 for no or a closed dialog, but zenity also ends with
+/// 1 when GTK cannot open the display, which it says on stderr ("Failed to open display"). Any
+/// other stderr is no sign of failure: Mesa warns there on a healthy start. `None`: not shown.
+#[cfg(any(target_os = "linux", test))]
+fn read_answer(code: Option<i32>, stderr: &str) -> Option<Answer> {
+    match code {
+        Some(0) => Some(Answer::Yes),
+        Some(1) if !stderr.contains("open display") => Some(Answer::No),
+        _ => None,
+    }
 }
 
 /// Asks [`DIALOG_TEXT`], blocking: on Windows rfd shows a `MessageBoxW`.
@@ -241,6 +265,8 @@ mod tests {
     #[test]
     fn only_an_opengl_run_that_drew_nothing_is_a_gpu_failure() {
         assert!(gpu_failed_at_start(OpenGl, Start::Pending, true));
+        // A setup error before the event loop (runtime, component) is not the GPU's.
+        assert!(!gpu_failed_at_start(OpenGl, Start::Setup, true));
         assert!(gpu_failed_at_start(OpenGl, Start::NoWindow, false));
         assert!(gpu_failed_at_start(OpenGl, Start::NoWindow, true));
         assert!(!gpu_failed_at_start(OpenGl, Start::Pending, false));
@@ -291,10 +317,10 @@ mod tests {
         let command = relaunch_command(Path::new("/opt/app/bin"), None, None, args());
         assert_eq!(command.get_program(), "/opt/app/bin");
         assert_eq!(command.get_args().collect::<Vec<_>>(), ["--flag", "a b"]);
-        let mut envs = envs(&command);
-        envs.sort();
+        let mut sorted = envs(&command);
+        sorted.sort();
         assert_eq!(
-            envs,
+            sorted,
             [
                 (RENDERER_ENV.into(), "software".into()),
                 (RELAUNCHED_ENV.into(), "1".into())
@@ -308,6 +334,33 @@ mod tests {
             args(),
         );
         assert_eq!(command.get_program(), "/home/u/App.AppImage");
-        assert_eq!(command.get_args().count(), 2);
+        assert_eq!(command.get_args().collect::<Vec<_>>(), ["--flag", "a b"]);
+        assert_eq!(envs(&command).len(), 2);
+        // std's Debug shows an argv[0] that differs from the program.
+        #[cfg(unix)]
+        assert!(format!("{command:?}").contains("\"App.AppImage\""));
+
+        // `$ARGV0` without `$APPIMAGE` is not an AppImage run: ignored.
+        let command = relaunch_command(
+            Path::new("/opt/app/bin"),
+            None,
+            Some("App.AppImage".into()),
+            args(),
+        );
+        assert_eq!(command.get_program(), "/opt/app/bin");
+        assert!(!format!("{command:?}").contains("App.AppImage"));
+    }
+
+    #[test]
+    fn a_dialog_tool_that_could_not_open_the_display_did_not_answer() {
+        assert_eq!(read_answer(Some(0), ""), Some(Answer::Yes));
+        // A healthy "no" can still carry Mesa's warnings on stderr.
+        let mesa = "MESA-INTEL: warning: Ivy Bridge Vulkan support is incomplete\n";
+        assert_eq!(read_answer(Some(1), mesa), Some(Answer::No));
+        let gtk = "(zenity:1): Gtk-WARNING **: 13:35:51.009: Failed to open display\n";
+        assert_eq!(read_answer(Some(1), gtk), None);
+        // kdialog aborts without a display.
+        assert_eq!(read_answer(None, ""), None);
+        assert_eq!(read_answer(Some(255), ""), None);
     }
 }
