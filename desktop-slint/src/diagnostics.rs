@@ -1,6 +1,8 @@
 //! Engine Diagnostics for the Slint host: `tracing` output from `mkv-core` and this crate goes to
 //! `mkv-anime-batch.log` in the app log directory the Tauri host uses and to stderr (ADR-0017
-//! decision 9). A port of `desktop-tauri`'s `diagnostics.rs`, which leaves with Tauri.
+//! decision 9). A port of `desktop-tauri/src-tauri/src/diagnostics.rs`: until that file leaves with
+//! Tauri at P9 (#142), a fix to the truncation, the Windows append, ANSI handling or the path goes
+//! into both.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, IsTerminal};
@@ -151,16 +153,14 @@ mod tests {
         stderr.text()
     }
 
+    // Parity with the Tauri host is by inspection, not by this test: Tauri's `app_log_dir` is the
+    // local data directory joined with the identifier and `logs` (tauri path/desktop.rs), and the
+    // identifier is `tauri.conf.json`'s.
     #[test]
-    fn test_the_log_dir_is_the_tauri_hosts() {
+    fn test_the_log_dir_is_the_identifier_logs_dir_under_the_local_data_dir() {
         let dir = log_dir().expect("a local data directory");
-        assert_eq!(
-            dir,
-            dirs::data_local_dir()
-                .unwrap()
-                .join("com.mkvanimebatch.desktop")
-                .join("logs")
-        );
+        assert!(dir.starts_with(dirs::data_local_dir().unwrap()));
+        assert!(dir.ends_with(Path::new("com.mkvanimebatch.desktop").join("logs")));
     }
 
     #[test]

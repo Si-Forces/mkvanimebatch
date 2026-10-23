@@ -1,6 +1,6 @@
 # 0017. Slint Native Desktop Host and Packaging
 
-> **Status**: Accepted (the port has not started; the Tauri host ships until the switch)
+> **Status**: Accepted (port in progress from P0, #133; the Tauri host ships until the switch; amended 2026-10-23 twice)
 > **Date**: 2026-10-22
 > **Context**: Desktop Application Context
 > **Supersedes**: ADR-0007 and ADR-0015, at the switch; ADR-0007's engine-bridge rules carry over in decision 9
@@ -101,3 +101,12 @@ Both flicker while resizing under Xwayland and are smooth on native Wayland. X11
 
 - **The whole host crate on `deny`**: it would compile, but the host's hand-written code (the Publisher, the models, the window chrome) would lose `forbid`, so a local `#[allow(unsafe_code)]` there would pass review unnoticed. The separate crate keeps that surface at zero hand-written lines.
 - **Waiting for upstream** to stop emitting `#[allow(unsafe_code)]` (or to make the generated `unsafe impl` avoidable): the port cannot start on it, and no Slint release is promised to change it.
+
+## Amendment — 2026-10-23 (CI during the port)
+
+**Decision 7's "CI during the port" is narrowed.** It says CI and the release job build both hosts, and that `cargo clippy` and `cargo test --workspace` build Slint and Skia beside Tauri "locally on the 4-core, 8 GB laptop and in CI". From P0 on:
+
+- **Locally, unchanged.** `jj gate`, the git hooks and `jj gpush` still run workspace-wide, so they compile Slint and download the Skia prebuilt beside Tauri.
+- **CI isolates the Slint crates in their own job.** `workspace-checks` runs clippy and the tests with `--exclude` for `mkv-anime-batch-slint` and `mkv-anime-batch-slint-ui`. The `desktop-slint` job lints and tests those two crates on Linux and Windows, with its own cache and timeout. `ci-status` needs it on pull requests and pushes, and accepts it as skipped, which is what lets release verification pass without it. A Skia download or build failure therefore fails one job instead of the Tauri workspace job, and the Tauri job's feedback stays as fast as before.
+- **Release verification skips the unreleased host.** `release.yml` calls `ci.yml` with `skip-desktop-slint: true`, so a Tauri release is verified exactly as before P0. No release ships the Slint host before the switch (decision 2), so nothing released goes unverified.
+- **The switch restores it.** From the switch release on, release verification builds the Slint host again, and P10 (#143) may fold the separate job back into `workspace-checks`.

@@ -67,7 +67,9 @@ Paths: `ui/` is `desktop-tauri/ui/`, `src/` is `desktop-tauri/src-tauri/src/`, `
 | [ ] | Double-click on the title bar toggles maximize | none (Slint only) | P0 | New in the Slint host, the native title-bar convention; drop it at P9 if unwanted. |
 | [ ] | Brand mark and "MKV Anime Batch by Sifahaz" | `ui/index.html:37-50` | P0 | |
 | [ ] | Closing exits cleanly; process cleanup error keeps the window open with a notice "Could not close safely" | `src/lib.rs:133-149`, `ui/app.js:732`, `ui/app.js:796` | P0 | `cancel_shutdown` on error, then show it. Tauri shows a modal with a confirm button (`showModal`); P0 shows a banner in the window that the next Close clears. |
-| [ ] | Engine Diagnostics log file (`com.mkvanimebatch.desktop/logs/mkv-anime-batch.log`, 1 MB truncate, `RUST_LOG`, stderr) | `src/diagnostics.rs` | P0 | |
+| [ ] | Engine Diagnostics log file (`com.mkvanimebatch.desktop/logs/mkv-anime-batch.log`, 1 MB truncate, `RUST_LOG`, stderr) | `src/diagnostics.rs` | P0 | `desktop-slint/src/diagnostics.rs` is a port; until P9 deletes the Tauri copy, a fix goes into both. |
+| [ ] | Transparent frameless window with rounded corners | `tauri.linux.conf.json` (`transparent: true`; Windows opaque) | P6 | The Slint window is transparent on every OS. Check Windows (DWM corner wedges); if wrong, set transparency per OS from the host. |
+| [ ] | Test-only `FontProbe` exported from the UI crate | none (Slint only) | P9 | Ships in the binary because `.slint` has no cfg; drop it or move it to a test-only crate if the probe surface grows. |
 | [ ] | OS detection classes (`is-windows`, `is-linux`, `is-mac`) for platform-specific styling | `ui/os-detect.js` | P6 | `cfg!` in the host if any styling still differs. |
 | [ ] | Windows: no console window | `src/main.rs:2` (`windows_subsystem`) | P6 | Plus the in-window notice when the log file cannot be opened (ADR-0017 decision 9). |
 | [ ] | GPU renderer failure fallback | none (webview) | P1 | Software renderer, faked glass, one warning. |
