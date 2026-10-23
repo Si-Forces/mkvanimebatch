@@ -14,12 +14,13 @@ use mkv_desktop_core::control::{
 use mkv_desktop_core::job::JobState;
 use mkv_desktop_core::presentation::{close_failed_text, CLOSE_FAILED_TITLE};
 use publisher::SlintPublisher;
-use renderer::{Answer, Choice, Renderer, Start};
-use slint::winit_030::WinitWindowAccessor;
+use renderer::{Answer, Choice, GpuStart, Renderer};
+use slint::winit_030::winit::event::WindowEvent;
+use slint::winit_030::{EventResult, WinitWindowAccessor};
 use slint::{CloseRequestResponse, ComponentHandle, RenderingState, Timer};
 use std::cell::Cell;
 use std::error::Error;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -39,7 +40,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     slint::BackendSelector::new()
         .backend_name("winit".into())
         .renderer_name(choice.renderer.slint_name().into())
-        .select()?;
+        .select()
+        .inspect_err(|error| {
+            tracing::error!(
+                "Cannot select the {} renderer: {error}",
+                choice.renderer.slint_name()
+            )
+        })?;
     if choice.renderer == Renderer::Software {
         let why = match (relaunched, forced) {
             (true, _) => "restarted after a GPU failure".to_string(),
@@ -52,15 +59,24 @@ fn main() -> Result<(), Box<dyn Error>> {
         tracing::warn!("Running on the software renderer ({why}); the glass is faked");
     }
 
-    let start = Rc::new(Cell::new(Start::Setup));
-    let result = run(&choice, config.clone(), Rc::clone(&start));
+    // A re-launched child saves the software choice once it has drawn (save_once_drawn).
+    let save = match (std::env::var_os(renderer::SAVE_ENV), &config) {
+        (Some(_), Some(dir)) if choice.renderer == Renderer::Software => Some(dir.clone()),
+        (Some(_), None) => {
+            tracing::warn!("No config directory: the software renderer choice is not saved");
+            None
+        }
+        _ => None,
+    };
+    let start = Rc::new(Cell::new(GpuStart::Setup));
+    let result = run(&choice, config.clone(), save, Rc::clone(&start));
     if renderer::gpu_failed_at_start(choice.renderer, start.get(), result.is_err()) {
         let error = match result {
             Err(error) => error.to_string(),
             Ok(()) => "no window was created".to_string(),
         };
         if renderer::may_offer_restart(choice.renderer, relaunched) {
-            return gpu_failed(&error, config.as_deref());
+            return gpu_failed(&error);
         }
         tracing::error!("The GPU renderer could not start: {error}");
         return Err(error.into());
@@ -68,9 +84,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     result.inspect_err(|error| tracing::error!("The app stopped with an error: {error}"))
 }
 
-/// OpenGL failed before the first frame: ask, then on yes save the choice and re-launch in
-/// software mode. No, or no dialog at all, exits with the error: there is no silent re-launch.
-fn gpu_failed(error: &str, config: Option<&Path>) -> Result<(), Box<dyn Error>> {
+/// OpenGL failed before the first frame: ask, then on yes re-launch in software mode; the child
+/// saves the choice once it has drawn, so a restart that fails too saves nothing. No, or no dialog
+/// at all, exits with the error: there is no silent re-launch.
+fn gpu_failed(error: &str) -> Result<(), Box<dyn Error>> {
     tracing::error!("The GPU renderer could not start: {error}");
     match renderer::ask_restart() {
         Answer::No => return Err(format!("The GPU renderer could not start: {error}").into()),
@@ -78,22 +95,14 @@ fn gpu_failed(error: &str, config: Option<&Path>) -> Result<(), Box<dyn Error>> 
             tracing::error!("No dialog could be shown to offer software mode: {reason}");
             return Err(format!("The GPU renderer could not start: {error}").into());
         }
-        Answer::Yes => match config.map(|dir| (dir, renderer::save_software(dir))) {
-            Some((_, Ok(()))) => {}
-            Some((dir, Err(error))) => tracing::warn!(
-                "Cannot save the software renderer choice in {}: {error}",
-                dir.display()
-            ),
-            None => {
-                tracing::warn!("No config directory: the software renderer choice is not saved")
-            }
-        },
+        Answer::Yes => {}
     }
     std::env::current_exe()
         .and_then(|exe| {
             renderer::relaunch_command(
                 &exe,
                 std::env::var_os("APPIMAGE"),
+                std::env::var_os("APPDIR"),
                 std::env::var_os("ARGV0"),
                 std::env::args_os().skip(1),
             )
@@ -108,10 +117,12 @@ fn gpu_failed(error: &str, config: Option<&Path>) -> Result<(), Box<dyn Error>> 
 
 /// Builds the window and the Desktop Core, runs the event loop, then tears down. On OpenGL,
 /// `start` says whether a frame was drawn or the window never came up (see [`watch_start`]).
+/// `save` names the directory to save the software choice in once a frame is drawn.
 fn run(
     choice: &Choice,
     config: Option<PathBuf>,
-    start: Rc<Cell<Start>>,
+    save: Option<PathBuf>,
+    start: Rc<Cell<GpuStart>>,
 ) -> Result<(), Box<dyn Error>> {
     // The Desktop Core actor, its scans and its jobs run here; Slint keeps the main thread.
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -128,6 +139,9 @@ fn run(
             config.filter(|_| choice.forget_saved),
             Rc::clone(&start),
         );
+    }
+    if let Some(dir) = save {
+        save_once_drawn(&app, dir);
     }
     // Held until the end: the actor stops once every handle is gone.
     let _core = Core::spawn(
@@ -167,8 +181,10 @@ fn run(
     })?;
 
     // Kept for the end: a failed event loop still tears down first. From here an error before
-    // the first frame is the GPU's.
-    start.set(Start::Pending);
+    // the first frame is the GPU's, unless the first frame cannot be watched.
+    if start.get() == GpuStart::Setup {
+        start.set(GpuStart::Pending);
+    }
     let result = app.run();
 
     // The event loop can end without a close request, or fail; tear down all the same. Idempotent
@@ -197,12 +213,13 @@ const WINDOW_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
 /// So: the first drawn frame marks `Drew` (and forgets a saved software choice when
 /// `forget` names its directory); no window by [`WINDOW_DEADLINE`] marks `NoWindow` and quits
 /// the loop, which then returns the error Slint kept.
-fn watch_start(app: &App, forget: Option<PathBuf>, start: Rc<Cell<Start>>) {
+fn watch_start(app: &App, forget: Option<PathBuf>, start: Rc<Cell<GpuStart>>) {
     let drawn = Rc::clone(&start);
+    let forgetting = forget.is_some();
     // Skia answers the notifier; only the software renderer would refuse it.
-    let watched = app.window().set_rendering_notifier(move |state, _| {
-        if matches!(state, RenderingState::AfterRendering) && drawn.get() == Start::Pending {
-            drawn.set(Start::Drew);
+    let notified = app.window().set_rendering_notifier(move |state, _| {
+        if matches!(state, RenderingState::AfterRendering) && drawn.get() == GpuStart::Pending {
+            drawn.set(GpuStart::Drew);
             if let Some(dir) = &forget {
                 match renderer::forget_saved(dir) {
                     Ok(()) => {
@@ -215,8 +232,15 @@ fn watch_start(app: &App, forget: Option<PathBuf>, start: Rc<Cell<Start>>) {
             }
         }
     });
-    if let Err(error) = watched {
-        tracing::warn!("Cannot watch for the first frame: {error:?}");
+    if let Err(error) = notified {
+        // Unwatched, no error counts as the GPU's: no fallback rather than a false one.
+        tracing::warn!("Cannot watch for the first frame, so no GPU fallback: {error:?}");
+        if forgetting {
+            tracing::warn!(
+                "The saved software renderer choice is kept: no frame can confirm the GPU"
+            );
+        }
+        start.set(GpuStart::Unwatched);
     }
     let window = app.as_weak();
     // A timer counts from when it is armed, so arm the deadline on the loop's first pass: time
@@ -226,11 +250,39 @@ fn watch_start(app: &App, forget: Option<PathBuf>, start: Rc<Cell<Start>>) {
             let created = window
                 .upgrade()
                 .is_some_and(|app| app.window().with_winit_window(|_| ()).is_some());
-            if !created && start.get() == Start::Pending {
-                start.set(Start::NoWindow);
+            if !created && start.get() == GpuStart::Pending {
+                start.set(GpuStart::NoWindow);
                 let _ = slint::quit_event_loop();
             }
         });
+    });
+}
+
+/// Saves the software choice once the re-launched child has drawn. Slint's software renderer
+/// refuses the rendering notifier, so this watches winit's first `RedrawRequested` and saves on a
+/// later loop pass, after Slint has drawn: a failed draw ends the loop first, and nothing is saved.
+/// A first redraw that drew nothing (the window occluded at start) still saves; the software
+/// renderer it saves is the one that does not fail to start.
+fn save_once_drawn(app: &App, dir: PathBuf) {
+    let mut pending = Some(dir);
+    app.window().on_winit_window_event(move |_, event| {
+        if matches!(event, WindowEvent::RedrawRequested) {
+            if let Some(dir) = pending.take() {
+                Timer::single_shot(
+                    std::time::Duration::ZERO,
+                    move || match renderer::save_software(&dir) {
+                        Ok(()) => {
+                            tracing::info!("Software drew: the software renderer choice is saved")
+                        }
+                        Err(error) => tracing::warn!(
+                            "Cannot save the software renderer choice in {}: {error}",
+                            dir.display()
+                        ),
+                    },
+                );
+            }
+        }
+        EventResult::Propagate
     });
 }
 
