@@ -1,6 +1,11 @@
 # AGENTS.md
 
-Cargo workspace for MKV Anime Batch: a media engine (`crates/mkv-core`), a thin CLI (`crates/mkv-cli`), a toolkit-agnostic Desktop Core (`crates/mkv-desktop-core`), and a Tauri v2 desktop app (`desktop-tauri`). `CLAUDE.md` carries the deeper architecture and hook details; `architecture.md` is the full system spec.
+Cargo workspace for MKV Anime Batch: a media engine (`crates/mkv-core`), a thin CLI (`crates/mkv-cli`), a toolkit-agnostic Desktop Core (`crates/mkv-desktop-core`), and a Tauri v2 desktop app (`desktop-tauri`). `architecture.md` is the full system spec. Area docs, to read before changing:
+
+- the git hooks or jj gates: `scripts/CLAUDE.md`
+- the `mkv-core` batch pipeline: `crates/mkv-core/CLAUDE.md`
+- the Engine Bridge or either desktop host (Tauri or Slint): `crates/mkv-desktop-core/CLAUDE.md`
+- the Tauri host (`desktop-tauri/src-tauri`) or the webview frontend (`desktop-tauri/ui`): `desktop-tauri/CLAUDE.md`
 
 ## Commands
 
@@ -45,9 +50,14 @@ CI also runs `cargo audit` (ignores in `.cargo/audit.toml`) and actionlint. Its 
 - The Slint host (`desktop-slint`, ADR-0017) is being ported beside the Tauri one. Its generated UI crate (`desktop-slint/ui`) alone uses `unsafe_code = "deny"`. Workspace-wide cargo commands now compile Slint and download Skia; CI builds the two Slint crates only in the `desktop-slint` job.
 - External media work goes through `media_tool.rs`: the `MediaToolRunner` port, `SubprocessRunner` as its adapter, and `ScriptedRunner` in tests. Exit code 1 from MKVToolNix is success with warnings; exit code 1 from `ffmpeg` is a failure.
 - Concurrency: `workers` caps in-flight items; the `io_jobs` semaphore gates only mkvmerge/mkvextract and promotion, so FLAC→Opus transcoding overlaps with other items' muxing (ADR-0011). Only one desktop job runs at a time; Stop is two-phase: a 2 s cooperative cancel, then an abort.
-- Invariants: the subtitle precedence ladder (manual > same-directory external > embedded > nearest-ancestor external > `--assets-dir`; source tier beats language, ADR-0004/0008); outputs stage in `TempDir`s inside the destination and move with `promote_file`; panics are isolated, so never set `panic = "abort"`; `unsafe_code = "forbid"` workspace-wide, except the generated Slint UI crate `desktop-slint/ui` on `deny` (ADR-0017, 2026-10-23 amendment).
+- Invariants:
+  - The subtitle precedence ladder: manual > same-directory external > embedded > nearest-ancestor external > `--assets-dir`; source tier beats language (ADR-0004/0008).
+  - Outputs stage in `TempDir`s inside the destination and move with `promote_file`; cancellation cleans up by dropping (child processes are `kill_on_drop(true)`).
+  - The font registry (`fonts.rs`) runs claim → stage → BLAKE2b dedup → promote/release; `FontClaimsGuard` releases any unpromoted claim on drop.
+  - Panics are isolated, so never set `panic = "abort"`.
+  - `unsafe_code = "forbid"` workspace-wide, except the generated Slint UI crate `desktop-slint/ui` on `deny`, where no hand-written code goes (ADR-0017, 2026-10-23 amendment).
 - Desktop directory identities must use `display_canonical_path` (the canonical path without `\\?\`) and match byte-for-byte; the queue and Run preflight never normalize paths.
-- All Intents are sent through the one promise chain in `app.js`; for `scan_directory`, `run`, and `stop`, the chain waits until they are sent, not answered (`UNCHAINED_INTENTS`).
+- All Intents are sent through the one promise chain in `app.js`, each once the chained Intents before it were answered. `scan_directory`, `run`, and `stop` are unchained (`UNCHAINED_INTENTS`): the next Intent is sent right after one of them, not after its answer, so it can reach the core first.
 - Linux packaging: the WebKitGTK DMABUF workaround is AppImage-on-NVIDIA only; don't extend it to deb/rpm (ADR-0015).
 
 ## Workflow rules
