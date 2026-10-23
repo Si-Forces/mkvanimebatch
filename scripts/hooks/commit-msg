@@ -37,7 +37,7 @@ parsed=$(git interpret-trailers --no-divider --parse <"$msg" || true)
 trailers=$(
   {
     printf '%s\n' "$parsed" | grep -iE "$trailer.*($address)" || true
-    grep -iE "$by_name" "$msg" || true
+    printf '%s\n' "$parsed" | grep -iE "$by_name" || true
   } | sed '/^[[:space:]]*$/d'
 )
 
