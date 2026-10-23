@@ -1,8 +1,14 @@
 # desktop-tauri/CLAUDE.md
 
-The webview frontend and the Tauri host. The Desktop Core side of the bridge (the View State, the Intents, the publication cadence) is in `crates/mkv-desktop-core/CLAUDE.md`.
+The Tauri host and the webview frontend. The Desktop Core side of the bridge (the View State, the Intents, the publication cadence) is in `crates/mkv-desktop-core/CLAUDE.md`; read it before changing either.
 
-## Frontend
+## Tauri host (`src-tauri/src`)
+
+- `commands.rs` and `process.rs` define the thin Tauri commands that call the Desktop Core (`dispatch`, `get_state`, `get_log`, `close_window`, …), and `publisher.rs` holds the `AppHandle` `Publisher`, which sends `view-state` as a patch of the state it emitted last (`view_patch.rs`).
+- The webview adapter emits the first state whole and each later one as a patch, `{seq, base, ...changed keys}`, with a changed mode's rows as `rows` (whole, on a `manifest_rev`, length or id-order change) or `row_changes` (`[[index, Row], ...]`). `get_state` is always whole. A webview reload calls `get_state` and `get_log`, so it loses only view-local state (the open drawer, the scroll position).
+- Linux-only env defaults, including the WebKitGTK DMABUF workaround whose scope `AGENTS.md` sets, are in `lib.rs` (`init_linux_env`, ADR-0015).
+
+## Frontend (`ui/`)
 
 - `app.js` takes each `view-state` through `view-patch.js` (`nextState`): it drops one whose `seq` is not newer, applies a whole one, merges a patch whose `base` is the applied `seq`, and otherwise resyncs through one `get_state` at a time (an Intent's own read aside); it boots from `get_state`. It reads `busy` from the published state, and draws each mode's published list header, filter counts, progress widths, clock, Library and Episode Inspector; its only texts of its own are `Choose a file…`, the fallbacks before the first state, the subtitle language labels and the row checkboxes' screen-reader labels. A stepper click sends `step_draft`; only the hold-to-repeat timing is the view's.
 - `queue-view.js` renders the published rows (`label`, `tone`, `title`, `meta`, the ring from `status` and `progress`), redrawing only the cards of the rows a patch changed, and turns selection, reorder and row clicks (`inspect`, highlighted at once) into Intents; it holds no queue rules or texts. It keeps only view-local state: the filter chip shown (matching the published `bucket`), the group heads (with the published `group_label`), card reuse and incremental mounting. The Inspector in `app.js` sends the Track Assignment Intents (`assign_subtitle` with its fields as typed, which the core builds the assignment from, and `clear_track`) and renders the published language choice; the empty list text is the published `empty`.
@@ -11,5 +17,3 @@ The webview frontend and the Tauri host. The Desktop Core side of the bridge (th
 - `job-controller.js` sends Run, Stop and `clear_cache` as Intents and renders each mode's published `controls` (Run label and tooltip, Stop, the status pill, the selection lock) and the draft's flagged field; only a Run sent and not yet answered is its own, locking Run and the settings meanwhile. It writes no log line.
 - `presentation.js` holds only `sparkPoints`, the sparklines' geometry.
 - `log-view.js` draws each `job-log` batch in the console of `batch.mode` (a new generation clears it, `keep_from` trims it), loads `get_log` at boot and keeps the raw text Copy writes. `app.js` renders the published `telemetry` and sends `view_visible` at boot and on every `visibilitychange`.
-
-Linux-only env defaults are set in `lib.rs` (`init_linux_env`, ADR-0015). The WebKitGTK DMABUF workaround is scoped to the AppImage on an NVIDIA driver on purpose. Don't extend it to deb/rpm.
