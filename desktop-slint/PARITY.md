@@ -72,7 +72,7 @@ Paths: `ui/` is `desktop-tauri/ui/`, `src/` is `desktop-tauri/src-tauri/src/`, `
 | [ ] | Test-only `FontProbe` exported from the UI crate | none (Slint only) | P9 | Ships in the binary because `.slint` has no cfg; drop it or move it to a test-only crate if the probe surface grows. |
 | [ ] | OS detection classes (`is-windows`, `is-linux`, `is-mac`) for platform-specific styling | `ui/os-detect.js` | P6 | `cfg!` in the host if any styling still differs. |
 | [ ] | Windows: no console window | `src/main.rs:2` (`windows_subsystem`) | P6 | Plus the in-window notice when the log file cannot be opened (ADR-0017 decision 9). |
-| [ ] | GPU renderer failure fallback | none (webview) | P1 | Software renderer, faked glass, one warning. |
+| [ ] | GPU renderer failure fallback | none (webview) | P1 | OpenGL failure at startup: a dialog offers a restart in software mode and remembers it (`<config>/com.mkvanimebatch.desktop/renderer`). `MKV_RENDERER=software` forces it; `MKV_RENDERER=opengl` tries the GPU and, once it draws, forgets the saved choice. `Theme.glass` false, one warning (ADR-0017 renderer fallback amendment). |
 | [ ] | Linux env workaround (`init_linux_env`, DMABUF, `GDK_BACKEND`, preload) | `src/lib.rs` | P9 | Dropped with Tauri (ADR-0017 Consequences); no counterpart. |
 
 ## Navigation, queue and scan

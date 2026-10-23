@@ -11,6 +11,10 @@ export global Theme {
         StylePalette.color-scheme = dark ? ColorScheme.dark : ColorScheme.light;
     }
 
+    // Whether the real glass (backdrop-blur, Skia only) is drawn. The host clears it on the software
+    // renderer, where the panes draw the faked glass instead (ADR-0017 decision 3; P5/P6 read it).
+    in-out property <bool> glass: true;
+
     out property <length> window-radius: 14px;
     out property <length> pane-radius: 22px;
 
