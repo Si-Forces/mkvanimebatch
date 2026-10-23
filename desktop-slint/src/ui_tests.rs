@@ -1,10 +1,10 @@
 //! Headless tests of the generated UI through Slint's testing backend. Each test runs on its own
 //! thread, where it installs its own platform.
 
-use crate::publisher::apply;
+use crate::publisher::{apply, SlintPublisher};
 use i_slint_backend_testing::{ElementHandle, TestingBackend, TestingBackendOptions};
 use mkv_anime_batch_slint_ui::{App, FontProbe, Theme};
-use mkv_desktop_core::actor::ViewState;
+use mkv_desktop_core::actor::{Publisher, ViewState};
 use slint::{Color, ComponentHandle};
 use std::cell::Cell;
 use std::rc::Rc;
@@ -52,6 +52,35 @@ fn the_window_shows_published_values_and_its_title_bar_buttons_answer() {
     app.hide().unwrap();
 }
 
+/// Publications from another thread hop to the event loop, where the newest one is bound. The only
+/// test with a threaded platform: Slint keeps one event loop proxy per process.
+#[test]
+fn a_publication_from_another_thread_reaches_the_window() {
+    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
+        mock_time: true,
+        threading: true,
+        ..Default::default()
+    })))
+    .unwrap();
+    let app = App::new().unwrap();
+    let publisher = SlintPublisher::new(app.as_weak());
+    let worker = std::thread::spawn(move || {
+        for (seq, title) in [(1, "Older"), (2, "Frieren")] {
+            let mut state = ViewState::new(None);
+            state.seq = seq;
+            state.remux.title = title.into();
+            state.busy = true;
+            publisher.state(&state);
+        }
+        // Queued behind the hop, so the loop applies it first.
+        slint::quit_event_loop().unwrap();
+    });
+    slint::run_event_loop().unwrap();
+    worker.join().unwrap();
+    assert_eq!(app.get_mode_title(), "Frieren");
+    assert!(app.get_busy());
+}
+
 /// WCAG relative luminance of an sRGB colour.
 fn luminance(color: Color) -> f64 {
     let channel = |value: u8| {
@@ -83,9 +112,9 @@ fn over(top: Color, below: Color) -> Color {
     )
 }
 
-/// Every text token over every surface it is drawn on, each surface over each colour of the
-/// wallpaper it sits on (its base and the three gradients' peaks), and each button's text over its
-/// fill: 4.5:1 (WCAG AA body text) in both themes. Reads the tokens from the generated `Theme`, the
+/// Every text token over every surface, bare or under each tint drawn on it (field, sel, hover and
+/// the soft tones), each surface over each colour of the wallpaper (its base and the three
+/// gradients' peaks), and each button's text over its fill: 4.5:1 (WCAG AA body text) in both themes. Reads the tokens from the generated `Theme`, the
 /// one place they are defined.
 #[test]
 fn every_text_token_meets_wcag_aa_on_every_surface_in_both_themes() {
@@ -122,12 +151,28 @@ fn every_text_token_meets_wcag_aa_on_every_surface_in_both_themes() {
             ("head", theme.get_head()),
             ("float", theme.get_float()),
         ];
+        let tints = [
+            ("field", theme.get_field()),
+            ("sel", theme.get_sel()),
+            ("hover", theme.get_hover()),
+            ("accent-soft", theme.get_accent_soft()),
+            ("err-soft", theme.get_err_soft()),
+        ];
         let mut pairs = Vec::new();
         for (surface, fill) in surfaces {
             for (wall, below) in walls {
-                for (text, color) in texts {
-                    let on = format!("{surface} over {wall}");
-                    pairs.push((text, on, color, over(fill, below)));
+                let pane = over(fill, below);
+                let mut backgrounds = vec![(format!("{surface} over {wall}"), pane)];
+                for (tint, tinted) in tints {
+                    backgrounds.push((
+                        format!("{tint} on {surface} over {wall}"),
+                        over(tinted, pane),
+                    ));
+                }
+                for (on, background) in backgrounds {
+                    for (text, color) in texts {
+                        pairs.push((text, on.clone(), color, background));
+                    }
                 }
             }
         }

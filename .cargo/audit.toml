@@ -27,4 +27,17 @@ ignore = [
     "RUSTSEC-2025-0081",
     "RUSTSEC-2025-0098",
     "RUSTSEC-2025-0100",
+
+    # RUSTSEC-2025-0141: bincode is unmaintained
+    # Upstream constraint: Pulled in through typed-index-collections by i-slint-compiler, which
+    # slint-build runs at build time for the Slint host (desktop-slint, ADR-0017).
+    # Impact: Informational warning only; build-time code, no security vulnerability.
+    "RUSTSEC-2025-0141",
+
+    # RUSTSEC-2026-0192: ttf-parser is unmaintained
+    # Upstream constraint: Pulled in through ab_glyph by sctk-adwaita, winit's Wayland client-side
+    # decorations, in the Slint host (desktop-slint, ADR-0017).
+    # Impact: Informational warning only; no security vulnerability. The Slint host draws its own
+    # frameless title bar, so those decorations are not shown.
+    "RUSTSEC-2026-0192",
 ]

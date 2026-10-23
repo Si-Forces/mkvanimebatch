@@ -44,20 +44,22 @@ export global Theme {
     out property <color> scroll: dark ? #ffffff33 : #14203038;
     out property <color> scroll-hover: dark ? #ffffff61 : #14203066;
 
-    // Accents and tones. AA: light --accent #0d826d, --ok #1e7a4c and --run #0e8fb0 are darkened
-    // to pass 4.5:1 over the light panes (the accent and ok as text) and under white button text.
-    out property <color> accent: dark ? #4cc7ad : #0b7764;
+    // Accents and tones. AA: every tone departs from style.css (light ones darker, dark err, warn,
+    // info and done lighter) to pass 4.5:1 as text on every pane and on the field, sel, hover and
+    // soft tints over it, and light --run #0e8fb0 is darkened under white button text. The soft
+    // tints keep their tone's colour.
+    out property <color> accent: dark ? #4cc7ad : #0b6956;
     out property <color> accent-fg: dark ? #06201a : #ffffff;
-    out property <color> accent-soft: dark ? #4cc7ad29 : #0b776424;
-    out property <color> accent-ring: dark ? #4cc7ad73 : #0b776461;
-    out property <color> ok: dark ? #4fc98a : #1c7549;
-    out property <color> warn: dark ? #e5a63c : #9a5b00;
-    out property <color> err: dark ? #f0776b : #c0372c;
+    out property <color> accent-soft: dark ? #4cc7ad29 : #0b695624;
+    out property <color> accent-ring: dark ? #4cc7ad73 : #0b695661;
+    out property <color> ok: dark ? #4fc98a : #196943;
+    out property <color> warn: dark ? #e6a840 : #884f00;
+    out property <color> err: dark ? #f09f97 : #a93126;
     // AA: style.css draws the Stop button's text #ffffff on --err, 2.8:1 in the dark theme.
     out property <color> err-fg: dark ? #2a0905 : #ffffff;
-    out property <color> err-soft: dark ? #f0776b24 : #c0372c1f;
-    out property <color> info: dark ? #6aa8ea : #2a66a8;
-    out property <color> done: dark ? #b195ee : #6b45b5;
+    out property <color> err-soft: dark ? #f09f9724 : #a931261f;
+    out property <color> info: dark ? #85b8ea : #265e9c;
+    out property <color> done: dark ? #bda9ee : #6b45b5;
     out property <color> run: dark ? #3cc8e6 : #0b7f99;
     out property <color> run-fg: dark ? #04222b : #ffffff;
 }

@@ -29,6 +29,15 @@ Paths: `ui/` is `desktop-tauri/ui/`, `src/` is `desktop-tauri/src-tauri/src/`, `
 | [ ] | `start_resize`: 8 edge/corner handles | `src/window.rs:46`, `ui/app.js:781`, `ui/index.html:15-22` | P0 | `resize-border-width`. |
 | [ ] | `set_window_theme`: pin the native window theme to the chosen one | `src/window.rs:65`, `ui/theme.js:25` | P6 | Frameless, so it only matters for native dialogs and the compositor; set `StylePalette.color-scheme` and the winit theme. |
 
+## Tauri events
+
+| ✓ | Event | Where today | Slice | Notes |
+|---|---|---|---|---|
+| [ ] | `view-state`: each publication, whole or as a patch | `src/publisher.rs:42`, `ui/app.js` (`nextState`) | P0 | `SlintPublisher`: no patch, the coalescer keeps the newest `seq`. |
+| [ ] | `job-log`: each Run Log batch | `src/publisher.rs:50`, `ui/log-view.js` | P5 | `Publisher::logs` is a no-op until then. |
+| [ ] | `job-done`: a job's end | `src/publisher.rs:54`, `ui/job-controller.js` | P5 | The coalescer already takes it after its state; nothing renders it yet. |
+| [ ] | `cleanup-error` (`commands::CLEANUP_ERROR`): the close-failed notice | `src/lib.rs:132`, `ui/app.js:796` | P0 | Set from the Close thread through `upgrade_in_event_loop`. |
+
 ## Intents (`Intent` enum, `actor.rs:64`)
 
 | ✓ | Intent | Sent from today | Slice | Notes |
@@ -53,9 +62,11 @@ Paths: `ui/` is `desktop-tauri/ui/`, `src/` is `desktop-tauri/src-tauri/src/`, `
 | ✓ | What | Where today | Slice | Notes |
 |---|---|---|---|---|
 | [ ] | Frameless window 920×640, min 760×520, centred, title "MKV Anime Batch" | `src-tauri/tauri.conf.json` (`app.windows`) | P0 | |
-| [ ] | Traffic-light close/minimize/maximize buttons with tooltips and labels | `ui/index.html:26-36` | P0 | Accessible labels "Close window", "Minimize window", "Maximize window". |
+| [ ] | Traffic-light close/minimize/maximize buttons with accessible labels | `ui/index.html:26-36` | P0 | Accessible labels "Close window", "Minimize window", "Maximize window". |
+| [ ] | Traffic-light buttons reachable by Tab, Enter/Space activates, focus ring, tooltips (`title`) | `ui/index.html:26-36` | P6 | P0 buttons are pointer and AccessKit only. |
+| [ ] | Double-click on the title bar toggles maximize | none (Slint only) | P0 | New in the Slint host, the native title-bar convention; drop it at P9 if unwanted. |
 | [ ] | Brand mark and "MKV Anime Batch by Sifahaz" | `ui/index.html:37-50` | P0 | |
-| [ ] | Closing exits cleanly; process cleanup error keeps the window open with a notice "Could not close safely" | `src/lib.rs:133-149`, `ui/app.js:732`, `ui/app.js:796` | P0 | `cancel_shutdown` on error, then show it. |
+| [ ] | Closing exits cleanly; process cleanup error keeps the window open with a notice "Could not close safely" | `src/lib.rs:133-149`, `ui/app.js:732`, `ui/app.js:796` | P0 | `cancel_shutdown` on error, then show it. Tauri shows a modal with a confirm button (`showModal`); P0 shows a banner in the window that the next Close clears. |
 | [ ] | Engine Diagnostics log file (`com.mkvanimebatch.desktop/logs/mkv-anime-batch.log`, 1 MB truncate, `RUST_LOG`, stderr) | `src/diagnostics.rs` | P0 | |
 | [ ] | OS detection classes (`is-windows`, `is-linux`, `is-mac`) for platform-specific styling | `ui/os-detect.js` | P6 | `cfg!` in the host if any styling still differs. |
 | [ ] | Windows: no console window | `src/main.rs:2` (`windows_subsystem`) | P6 | Plus the in-window notice when the log file cannot be opened (ADR-0017 decision 9). |

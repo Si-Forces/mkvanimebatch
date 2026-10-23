@@ -57,10 +57,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     })?;
 
-    app.run()?;
+    // Kept for the end: a failed event loop still tears down first.
+    let result = app.run();
 
-    // The event loop can end without a close request; tear down all the same. Idempotent after
-    // a Close that already did.
+    // The event loop can end without a close request, or fail; tear down all the same. Idempotent
+    // after a Close that already did.
     begin_shutdown(&job, &scan);
     let scan_state = Arc::clone(&scan);
     match std::thread::spawn(move || cleanup_owned_processes(&job, &scan_state)).join() {
@@ -70,7 +71,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     // Nothing the teardown stopped is left to wait for; a stuck blocking task must not hold exit.
     runtime.shutdown_background();
-    Ok(())
+    result.map_err(Into::into)
 }
 
 /// Close: refuse new starts at once, tear down on a thread of its own (never the UI thread or a
