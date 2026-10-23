@@ -103,7 +103,7 @@ Invariants to preserve:
 - **Atomic outputs**: work is staged in `TempDir`s inside the destination and moved into place with `promote_file`. `SubprocessRunner` spawns child processes with `kill_on_drop(true)`, so cancellation (`CancellationToken`, raced with `tokio::select!`) cleans up by dropping.
 - **Font registry (`fonts.rs`)**: claim → stage → BLAKE2b dedup → promote/release. `FontClaimsGuard` releases any unpromoted claim on drop.
 - **Panics are isolated**: a panicking item task becomes an `error` outcome, and the desktop supervisor catches pipeline panics at the `JoinHandle`. **Never set `panic = "abort"`** in the release profile.
-- `unsafe_code = "forbid"` is set across the workspace.
+- `unsafe_code = "forbid"` is set across the workspace. The one exception is the generated Slint UI crate `desktop-slint/ui` (`mkv-anime-batch-slint-ui`), on `deny` because Slint's generated code needs `#[allow(unsafe_code)]`; no hand-written code goes there (ADR-0017, 2026-10-23 amendment).
 
 ### Engine ↔ desktop bridge
 
