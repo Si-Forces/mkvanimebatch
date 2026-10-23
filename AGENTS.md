@@ -13,6 +13,7 @@ cargo test -p mkv-core --test test_domain test_promote_file_basic_and_overwrite
 cargo test -p mkv-core --lib remux_plan::
 cargo test -p mkv-cli
 cargo test -p mkv-desktop-core
+cargo test -p mkv-anime-batch-slint -p mkv-anime-batch-slint-ui
 cargo test -p mkv-anime-batch
 
 # Real ffmpeg/MKVToolNix regression; fails if the tools are missing
@@ -40,10 +41,11 @@ CI also runs `cargo audit` (ignores in `.cargo/audit.toml`) and actionlint. Its 
 ## Architecture
 
 - `mkv-core` owns the domain logic and batch pipeline. `mkv-cli` is a thin adapter (`args.rs`, `main.rs`); a binary named `mkv-extract` defaults to extract mode. `mkv-desktop-core` is the toolkit-agnostic Desktop Core (ADR-0016), including the Engine Bridge; `desktop-tauri/src-tauri` is a thin Tauri v2 host, and `desktop-tauri/ui` is plain JavaScript.
-- The desktop host runs `mkv-core` in-process through `mkv-desktop-core`; there is no sidecar (ADR-0007). `mkv-desktop-core` must not depend on Tauri; CI checks this with `cargo tree`.
+- The desktop host runs `mkv-core` in-process through `mkv-desktop-core`; there is no sidecar (ADR-0007). `mkv-desktop-core` must not depend on Tauri, Slint, winit or Skia; CI checks this with `cargo tree`.
+- The Slint host (`desktop-slint`, ADR-0017) is being ported beside the Tauri one. Its generated UI crate (`desktop-slint/ui`) alone uses `unsafe_code = "deny"`. Workspace-wide cargo commands now compile Slint and download Skia; CI builds the two Slint crates only in the `desktop-slint` job.
 - External media work goes through `media_tool.rs`: the `MediaToolRunner` port, `SubprocessRunner` as its adapter, and `ScriptedRunner` in tests. Exit code 1 from MKVToolNix is success with warnings; exit code 1 from `ffmpeg` is a failure.
 - Concurrency: `workers` caps in-flight items; the `io_jobs` semaphore gates only mkvmerge/mkvextract and promotion, so FLAC→Opus transcoding overlaps with other items' muxing (ADR-0011). Only one desktop job runs at a time; Stop is two-phase: a 2 s cooperative cancel, then an abort.
-- Invariants: the subtitle precedence ladder (manual > same-directory external > embedded > nearest-ancestor external > `--assets-dir`; source tier beats language, ADR-0004/0008); outputs stage in `TempDir`s inside the destination and move with `promote_file`; panics are isolated, so never set `panic = "abort"`; `unsafe_code = "forbid"` workspace-wide.
+- Invariants: the subtitle precedence ladder (manual > same-directory external > embedded > nearest-ancestor external > `--assets-dir`; source tier beats language, ADR-0004/0008); outputs stage in `TempDir`s inside the destination and move with `promote_file`; panics are isolated, so never set `panic = "abort"`; `unsafe_code = "forbid"` workspace-wide, except the generated Slint UI crate `desktop-slint/ui` on `deny` (ADR-0017, 2026-10-23 amendment).
 - Desktop directory identities must use `display_canonical_path` (the canonical path without `\\?\`) and match byte-for-byte; the queue and Run preflight never normalize paths.
 - All Intents are sent through the one promise chain in `app.js`; for `scan_directory`, `run`, and `stop`, the chain waits until they are sent, not answered (`UNCHAINED_INTENTS`).
 - Linux packaging: the WebKitGTK DMABUF workaround is AppImage-on-NVIDIA only; don't extend it to deb/rpm (ADR-0015).

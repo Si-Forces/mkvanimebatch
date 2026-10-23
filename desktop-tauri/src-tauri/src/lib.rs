@@ -7,12 +7,9 @@ mod window;
 
 use mkv_desktop_core::actor::{Core, Ports};
 use mkv_desktop_core::control::{
-    begin_shutdown, cancel_shutdown, cleanup_owned_processes, EngineLauncher, InspectCacheState,
-    ScanState,
+    begin_shutdown, cancel_shutdown, cleanup_owned_processes, InspectCacheState, ScanState,
 };
-use mkv_desktop_core::inspection::EngineInspector;
 use mkv_desktop_core::job::JobState;
-use mkv_desktop_core::telemetry::EngineSampler;
 use publisher::WebviewPublisher;
 use std::sync::Arc;
 use tauri::{Emitter, Manager};
@@ -84,22 +81,11 @@ pub fn run() {
             // publishes to the webview, and inspects and runs jobs through the Job Slot, the
             // Directory Inspection registry and the session cache that Close also tears down, and
             // samples the System Telemetry Provider.
-            let scan = Arc::clone(&app.state::<Arc<ScanState>>());
-            let cache = app.state::<InspectCacheState>().inner().clone();
-            let inspector = EngineInspector {
-                scan: Arc::clone(&scan),
-                cache: cache.clone(),
-            };
-            let launcher = EngineLauncher {
-                job: app.state::<JobState>().inner().clone(),
-                scan,
-                cache,
-            };
-            let ports = Ports {
-                inspector,
-                launcher,
-                sampler: EngineSampler::default(),
-            };
+            let ports = Ports::engine(
+                Arc::clone(&app.state::<Arc<ScanState>>()),
+                app.state::<InspectCacheState>().inner().clone(),
+                app.state::<JobState>().inner().clone(),
+            );
             app.manage(Core::spawn(
                 tauri::async_runtime::handle().inner().clone(),
                 WebviewPublisher::new(app.handle().clone()),

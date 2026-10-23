@@ -12,7 +12,7 @@ rust=0
 staged_js=()
 for f in "${staged[@]}"; do
   case "$f" in
-    *.rs | Cargo.toml | */Cargo.toml | Cargo.lock) rust=1 ;;
+    *.rs | Cargo.toml | */Cargo.toml | Cargo.lock | desktop-slint/ui/*) rust=1 ;; # .slint and fonts compile into the crate
     desktop-tauri/ui/*.js | scripts/*.js) staged_js+=("$f") ;;
   esac
 done
@@ -22,11 +22,11 @@ fail=0
 if [ "$rust" -eq 1 ]; then
   # cargo reads the working tree, so it must hold exactly what is being committed.
   # Scoped to the paths cargo reads; the UI check below reads staged blobs, not the tree.
-  unstaged=$(git diff --name-only -- '*.rs' '*Cargo.toml' Cargo.lock)
-  untracked=$(git ls-files --others --exclude-standard -- '*.rs' '*Cargo.toml')
+  unstaged=$(git diff --name-only -- '*.rs' '*Cargo.toml' Cargo.lock 'desktop-slint/ui/*')
+  untracked=$(git ls-files --others --exclude-standard -- '*.rs' '*Cargo.toml' 'desktop-slint/ui/*')
   helper="$(dirname "$0")/hidden-changes.sh"
   source "$helper" || { echo "❌ [pre-commit] cannot load $helper. Restore it: git checkout -- scripts/hooks/hidden-changes.sh" >&2; exit 1; }
-  hidden=$(hidden_changes '*.rs' '*Cargo.toml' Cargo.lock) || { echo "❌ [pre-commit] cannot list the index to check for hidden edits." >&2; exit 1; }
+  hidden=$(hidden_changes '*.rs' '*Cargo.toml' Cargo.lock 'desktop-slint/ui/*') || { echo "❌ [pre-commit] cannot list the index to check for hidden edits." >&2; exit 1; }
   if [ -n "$unstaged$untracked$hidden" ]; then
     echo "❌ [pre-commit] Rust/Cargo files differ from the index, so cargo would not check the commit." >&2
     if [ -n "$unstaged$untracked" ]; then

@@ -15,8 +15,9 @@ windows-artifacts/
 # Output directories & scratch files
 Output/
 fonts/
-# The desktop UI's vendored fonts are source, not engine output.
+# The desktop UIs' vendored fonts are source, not engine output.
 !/desktop-tauri/ui/fonts/
+!/desktop-slint/ui/fonts/
 *.tmp*
 .font_staging/
 
