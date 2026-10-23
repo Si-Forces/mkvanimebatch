@@ -17,4 +17,6 @@ Fetched on 2026-10-23 from [google/fonts](https://github.com/google/fonts) at co
 
 `https://raw.githubusercontent.com/google/fonts/<commit>/<source>` downloads each one (brackets
 URL-encoded as `%5B`/`%5D`). The host's `fonts_resolve_their_weights` test checks that the weights
-resolve from the variable axis.
+resolve from the variable axis through the software renderer only; the Skia renderer the app
+ships with is checked by hand (weights 200, 400 and 800 on the Skia OpenGL build). If Skia ignores
+the axis, switch to static instances per weight (#133).

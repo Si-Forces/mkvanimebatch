@@ -75,14 +75,19 @@ impl SlintPublisher {
 
     fn schedule(&self) {
         let pending = Arc::clone(&self.pending);
-        // Fails only once the event loop is gone, when nothing is left to show.
-        let _ = self.window.upgrade_in_event_loop(move |app| {
-            let (state, _dones) = pending.take();
+        let hop = Arc::clone(&pending);
+        let scheduled = self.window.upgrade_in_event_loop(move |app| {
+            let (state, _dones) = hop.take();
             if let Some(state) = state {
                 apply(&app, &state);
             }
             // The job controller renders a job's end (P5); nothing shows it yet.
         });
+        // Fails only once the event loop is gone, when nothing is left to show. Clear the flag all
+        // the same, so a later push never waits on a hop that will not come.
+        if scheduled.is_err() {
+            pending.take();
+        }
     }
 }
 

@@ -21,10 +21,6 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 # The generated UI (`App`), in its own crate because of its `unsafe_code` lint (ADR-0017 amendment).
 mkv-anime-batch-slint-ui = { path = "ui" }
 
-# `no-compile`: a failed Skia prebuilt download panics instead of falling back to a source build
-# (which needs clang and Python, ADR-0010). Keep the version equal to the one Slint resolves.
-skia-bindings = { version = "=0.153.3", features = ["no-compile"] }
-
 # Slint master 45cb2b3 until 1.19 ships `backdrop-blur` (ADR-0017 decision 2). A Slint bump moves
 # slint here and in ui/Cargo.toml, slint-build and i-slint-backend-testing together, in its own commit.
 # ADR-0017 decision 3: no FemtoVG, no system tray; Skia on OpenGL with the software renderer.

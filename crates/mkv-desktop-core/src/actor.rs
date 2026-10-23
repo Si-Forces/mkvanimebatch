@@ -409,14 +409,18 @@ impl CoreHandle {
         }
     }
 
-    /// The last published View State.
-    pub async fn state(&self) -> Result<ViewState, String> {
-        self.ask(Msg::GetState).await
+    /// The last published View State. Asked at call time, as `dispatch` is.
+    pub fn state(&self) -> impl Future<Output = Result<ViewState, String>> + Send + 'static {
+        self.ask(Msg::GetState)
     }
 
-    /// The whole of `mode`'s Run Log, as every batch published so far left it.
-    pub async fn log(&self, mode: PipelineMode) -> Result<LogView, String> {
-        self.ask(|reply| Msg::GetLog(mode, reply)).await
+    /// The whole of `mode`'s Run Log, as every batch published so far left it. Asked at call
+    /// time, as `dispatch` is.
+    pub fn log(
+        &self,
+        mode: PipelineMode,
+    ) -> impl Future<Output = Result<LogView, String>> + Send + 'static {
+        self.ask(move |reply| Msg::GetLog(mode, reply))
     }
 
     /// Applies `intent`. Its effect is published before the answer, except that a draft Intent

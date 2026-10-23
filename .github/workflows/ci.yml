@@ -18,6 +18,11 @@ on:
       windows-timeout:
         description: timeout-minutes for the Windows leg.
         type: number
+      # release.yml sets it, so the unreleased Slint port never gates a Tauri release (#133).
+      skip-desktop-slint:
+        description: Skip the Slint desktop host job.
+        type: boolean
+        default: false
 
 # A called workflow sees the caller's github context, so without the "ci-" prefix this
 # group would equal release.yml's own, and GitHub would cancel the run as a concurrency deadlock.
@@ -153,6 +158,7 @@ jobs:
   # no-compile feature, so a failed prebuilt download fails the build instead of a source build.
   desktop-slint:
     name: Slint Desktop Host (${{ matrix.os }})
+    if: ${{ !inputs.skip-desktop-slint }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.timeout || 30 }}
     strategy:
@@ -319,7 +325,8 @@ jobs:
       - name: Evaluate status
         run: |
           if [ "${{ needs.workspace-checks.result }}" != "success" ] || \
-             [ "${{ needs.desktop-slint.result }}" != "success" ] || \
+             { [ "${{ needs.desktop-slint.result }}" != "success" ] && \
+               [ "${{ needs.desktop-slint.result }}" != "skipped" ]; } || \
              [ "${{ needs.windows-desktop.result }}" != "success" ] || \
              [ "${{ needs.ui-tests.result }}" != "success" ] || \
              [ "${{ needs.workflow-lint.result }}" != "success" ] || \

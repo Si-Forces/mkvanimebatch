@@ -11,6 +11,7 @@ The fmt/clippy/test gate commands are listed in AGENTS.md.
 ```bash
 # One package / one integration suite / one test
 cargo test -p mkv-desktop-core
+cargo test -p mkv-anime-batch-slint -p mkv-anime-batch-slint-ui   # always both: Slint host and its generated UI
 cargo test -p mkv-core
 cargo test -p mkv-core --test test_assets
 cargo test -p mkv-core --test test_domain <test_name_substring>
@@ -72,12 +73,13 @@ Under jj the ledger records commits, and `HEAD` is `@-` only once the work is co
 
 ## Architecture
 
-A Cargo workspace with four members that share one version:
+A Cargo workspace with six members that share one version:
 
 - `crates/mkv-core`: the media engine library, which holds all the domain logic.
 - `crates/mkv-cli`: a thin CLI adapter (`args.rs` parses the flags, `main.rs` runs the batch or `--plan`). If the binary is renamed to `mkv-extract`, it defaults to extract mode.
 - `crates/mkv-desktop-core`: the toolkit-agnostic Desktop Core (ADR-0016), which holds the Engine Bridge and depends on no UI toolkit.
 - `desktop-tauri/src-tauri` (package `mkv-anime-batch`): a Tauri v2 host that runs `mkv-core` **in-process** through `mkv-desktop-core` (no sidecar, ADR-0007), with a plain-ES-module frontend in `desktop-tauri/ui` (no framework, no bundler).
+- `desktop-slint` (package `mkv-anime-batch-slint`) and `desktop-slint/ui` (package `mkv-anime-batch-slint-ui`, the generated Slint code, the only crate on `unsafe_code = "deny"`): the Slint host being ported beside the Tauri one (ADR-0017). Workspace-wide cargo commands, the gates included, compile Slint and download the Skia prebuilt; CI builds these two crates only in its `desktop-slint` job.
 
 Media Tools (`mkvmerge`, `mkvextract`, and `ffmpeg` with libopus) run as child processes. Every run goes through `media_tool.rs`: the `MediaToolRunner` port, `SubprocessRunner` as its adapter, and one exit-code policy per tool family (exit 1 is success with warnings for MKVToolNix, a failure for `ffmpeg`). Tests script the port with `ScriptedRunner` in `tests/common`.
 
