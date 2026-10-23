@@ -19,7 +19,7 @@ use tracing_subscriber::{fmt, Layer};
 const LOG_FILE_NAME: &str = "mkv-anime-batch.log";
 
 /// The app's identifier, which names its directory under the local data directory.
-const IDENTIFIER: &str = "com.mkvanimebatch.desktop";
+pub(crate) const IDENTIFIER: &str = "com.mkvanimebatch.desktop";
 
 /// A log file larger than this is emptied at startup; there is no rotation.
 const MAX_LOG_BYTES: u64 = 1_048_576;
