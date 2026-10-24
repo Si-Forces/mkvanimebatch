@@ -1,7 +1,9 @@
 //! MKV Anime Batch desktop host on Slint (ADR-0017), beside the Tauri host until the switch.
 
 mod diagnostics;
+mod intents;
 mod publisher;
+mod queue;
 mod renderer;
 #[cfg(test)]
 mod ui_tests;
@@ -143,12 +145,21 @@ fn run(
     if let Some(dir) = save {
         save_once_drawn(&app, dir);
     }
+    publisher::install_models(&app);
     // Held until the end: the actor stops once every handle is gone.
-    let _core = Core::spawn(
+    let publisher = SlintPublisher::new(&app);
+    let core = Core::spawn(
         runtime.handle().clone(),
-        SlintPublisher::new(app.as_weak()),
+        publisher.clone(),
         Ports::engine(Arc::clone(&scan), InspectCacheState::default(), job.clone()),
     );
+    intents::wire(&app, core.clone(), runtime.handle().clone(), publisher);
+    let (window, boot) = (app.as_weak(), core.state());
+    slint::spawn_local(async move {
+        if let (Ok(state), Some(app)) = (boot.await, window.upgrade()) {
+            app.set_mode(intents::boot_mode(&state));
+        }
+    })?;
 
     let close = {
         let (window, job, scan) = (app.as_weak(), job.clone(), Arc::clone(&scan));
