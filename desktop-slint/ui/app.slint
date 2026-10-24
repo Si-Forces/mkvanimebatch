@@ -45,6 +45,33 @@ component ModeTab inherits Rectangle {
     }
 }
 
+// The Library's "+ Open folder…" (.nav.lib-open): a muted nav row, locked while a batch runs.
+component OpenFolderNav inherits Rectangle {
+    in property <bool> enabled: true;
+    callback clicked();
+    height: 32px;
+    border-radius: 8px;
+    background: touch.has-hover && enabled ? Theme.hover : transparent;
+    opacity: enabled ? 1 : 0.75;
+    accessible-role: button;
+    accessible-label: "Open folder…";
+    accessible-enabled: enabled;
+    accessible-action-default => { if enabled { root.clicked(); } }
+    Text {
+        x: 8px;
+        text: "+ Open folder…";
+        color: Theme.mute;
+        font-weight: 500;
+        vertical-alignment: center;
+        accessible-role: none;
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? default : not-allowed;
+        clicked => { root.clicked(); }
+    }
+}
+
 export component App inherits Window {
     // tauri.conf.json's window: 920x640, at least 760x520, frameless.
     title: "MKV Anime Batch";
@@ -165,7 +192,8 @@ export component App inherits Window {
             }
 
             HorizontalLayout {
-                // The sidebar (.side): the Pipeline's mode tabs. The Library and the presets are P3/P4.
+                // The sidebar (.side): the Pipeline's mode tabs and the Library's Open folder. The
+                // Library tree (P3) goes above Open folder; the presets are P4.
                 Rectangle {
                     width: 220px;
                     background: Theme.side;
@@ -193,6 +221,19 @@ export component App inherits Window {
                             subtitle: "Subs, fonts, chapters";
                             active: root.mode == Mode.extract;
                             clicked => { root.mode = Mode.extract; }
+                        }
+                        // .side's 18px gap between groups, less the group's own 2px spacing.
+                        Rectangle { height: 16px; }
+                        Text {
+                            text: "LIBRARY";
+                            color: Theme.mute;
+                            font-size: 11px;
+                            font-weight: 600;
+                            letter-spacing: 0.77px;
+                        }
+                        OpenFolderNav {
+                            enabled: !root.busy;
+                            clicked => { root.open-folder(); }
                         }
                     }
                     Rectangle {

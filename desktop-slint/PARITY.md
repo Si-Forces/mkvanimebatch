@@ -42,7 +42,7 @@ Paths: `ui/` is `desktop-tauri/ui/`, `src/` is `desktop-tauri/src-tauri/src/`, `
 
 | ✓ | Intent | Sent from today | Slice | Notes |
 |---|---|---|---|---|
-| [x] | `ScanDirectory` (path, force, no_cache) | `ui/directory-scan.js:14` | P2 | From the folder picker of the empty state and the failed-scan card; the Library's Open folder (P3) and the input-dir field (P4) reuse `open-folder`. |
+| [x] | `ScanDirectory` (path, force, no_cache) | `ui/directory-scan.js:14` | P2 | From the folder picker of the empty state and the failed-scan card; the Library's Open folder (brought into P2) and the input-dir field (P4) reuse `open-folder`. |
 | [x] | `SetSelected` | `ui/queue-view.js:99` | P2 | The tick is drawn from the published row only, so a refused change has nothing to revert. |
 | [x] | `SetAllSelected` | `ui/queue-view.js:521` | P2 | Select all / None. |
 | [x] | `Reorder` (up/down) | `ui/queue-view.js:526` | P2 | |
@@ -101,7 +101,7 @@ Paths: `ui/` is `desktop-tauri/ui/`, `src/` is `desktop-tauri/src-tauri/src/`, `
 | ✓ | What | Where today | Slice | Notes |
 |---|---|---|---|---|
 | [ ] | Library tree; click reveals that release (filter back to All) | `ui/index.html:88`, `ui/app.js:377`, `ui/queue-view.js:418` | P3 | |
-| [ ] | "+ Open folder…" in the Library | `ui/index.html:89` | P3 | Uses P2's picker. |
+| [x] | "+ Open folder…" in the Library | `ui/index.html:89` | P2 | Brought forward from P3 so a loaded queue can open another folder; locked while a batch runs (`lock-while-job`). The tree (P3) goes above it. |
 | [ ] | Inspector empty text, number, title, path, error | `ui/index.html:166-179`, `ui/app.js:411` | P3 | |
 | [ ] | Inspector status, video, audio, output folder | `ui/index.html:184-187` | P3 | |
 | [ ] | Subtitle ladder | `ui/index.html:193` | P3 | |
