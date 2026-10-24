@@ -7,9 +7,10 @@ import { Theme } from "theme.slint";
 import { TitleBar } from "title-bar.slint";
 import { FontProbe } from "font-probe.slint";
 import { Mode, QueueFilter, QueueHead, QueuePane, QueueRow, RowMark, RowTone } from "queue.slint";
+import { Inspector, InspectorPane, LibraryEntry, LibraryItem, Rung } from "inspector.slint";
 
 // FontProbe is test only; a .slint file cannot be compiled per cfg, so it ships (a few bytes).
-export { Theme, FontProbe, Mode, QueueFilter, QueueHead, QueueRow, RowMark, RowTone }
+export { Theme, FontProbe, Inspector, LibraryItem, Mode, QueueFilter, QueueHead, QueueRow, RowMark, RowTone, Rung }
 
 // A mode's tab in the sidebar (.task-row .nav): its name over what it does.
 component ModeTab inherits Rectangle {
@@ -108,6 +109,23 @@ export component App inherits Window {
     in property <[QueueRow]> remux-rows;
     in property <[QueueRow]> extract-rows;
     in property <bool> busy;
+    // Each mode's Library and Episode Inspector; the subtitle section's ladder and select entries
+    // (remux only), and the language select's.
+    in property <[LibraryItem]> remux-library;
+    in property <[LibraryItem]> extract-library;
+    in property <Inspector> remux-inspector;
+    in property <Inspector> extract-inspector;
+    in property <[Rung]> sub-ladder;
+    in property <[string]> sub-options;
+    // The value of each `sub-options` entry but the last ("Choose a file…"); for the host.
+    in property <[string]> sub-values;
+    in property <[string]> sub-languages;
+    // The subtitle fields as typed (the remux inspector's); the host writes the published ones.
+    in-out property <int> sub-choice;
+    in-out property <int> sub-language;
+    in-out property <string> sub-custom;
+    in-out property <string> sub-title;
+    in-out property <string> sub-offset;
     // The mode shown.
     in-out property <Mode> mode;
     // A row picked for the Episode Inspector whose Inspect is not answered yet.
@@ -116,8 +134,8 @@ export component App inherits Window {
     in property <string> notice-title;
     in property <string> notice-text;
     // Each mode's list scroll offset (negative going down), kept across mode switches as the
-    // webview's two lists keep theirs. The host resets it when a card replaces the rows; its bench
-    // (desktop-slint/benches/queue_scroll.rs) drives it.
+    // webview's two lists keep theirs. The host puts it back at the top (`reveal`) when a card
+    // replaces the rows; its bench (desktop-slint/benches/queue_scroll.rs) drives it.
     in-out property <length> remux-scroll;
     in-out property <length> extract-scroll;
     // Whether the CJK fallback fonts were drawn once (below).
@@ -130,9 +148,31 @@ export component App inherits Window {
     callback inspect(id: string);
     callback set-filter(filter: QueueFilter);
     callback open-folder();
+    // A Library entry: `release` is empty for the input folder (`root`).
+    callback reveal-release(release: string, root: bool);
+    // The subtitle select's entry `index` was picked, Reset, or a language, tag, title or offset
+    // committed; the host sends the remux AssignSubtitle or ClearTrack.
+    callback choose-subtitle(index: int);
+    callback reset-subtitle();
+    callback subtitle-options-changed();
     callback close-window();
     // Through winit, not `minimized`: see the host's `minimize`.
     callback minimize-window();
+
+    // Scrolls `mode`'s list so its row `row` heads it.
+    public function reveal(mode: Mode, row: int) {
+        if mode == Mode.remux {
+            remux-pane.reveal(row);
+        } else {
+            extract-pane.reveal(row);
+        }
+    }
+
+    // The Library and Inspector of the mode shown.
+    property <[LibraryItem]> library: root.mode == Mode.remux ? root.remux-library : root.extract-library;
+    // style.css's .panes columns: narrower panes in a narrower window.
+    property <length> side-width: root.width >= 1180px ? 220px : root.width >= 980px ? 200px : 196px;
+    property <length> insp-width: root.width >= 1180px ? 320px : root.width >= 980px ? 280px : 248px;
 
     // Marks the row at once, then asks the host.
     function pick(id: string) {
@@ -141,6 +181,11 @@ export component App inherits Window {
     }
 
     Rectangle {
+        // Placed, so the window's size (which picks the pane widths above) is not its content's.
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
         // A maximized window is square, or the desktop shows through the corners.
         border-radius: root.maximized ? 0px : Theme.window-radius;
         clip: true;
@@ -215,10 +260,10 @@ export component App inherits Window {
             }
 
             HorizontalLayout {
-                // The sidebar (.side): the Pipeline's mode tabs and the Library's Open folder. The
-                // Library tree (P3) goes above Open folder; the presets are P4.
+                // The sidebar (.side): the Pipeline's mode tabs, then the Library: its tree and Open
+                // folder. The presets are P4.
                 Rectangle {
-                    width: 220px;
+                    width: root.side-width;
                     background: Theme.side;
                     VerticalLayout {
                         padding-top: 14px;
@@ -242,6 +287,10 @@ export component App inherits Window {
                         // .side's 18px gap between groups, less the group's own 2px spacing.
                         Rectangle { height: 16px; }
                         SideHeading { text: "LIBRARY"; }
+                        for item in root.library: LibraryEntry {
+                            item: item;
+                            clicked => { root.reveal-release(item.release, item.root); }
+                        }
                         OpenFolderNav {
                             enabled: !root.busy;
                             clicked => { root.open-folder(); }
@@ -259,7 +308,7 @@ export component App inherits Window {
                 // estimated row height).
                 Rectangle {
                     horizontal-stretch: 1;
-                    QueuePane {
+                    remux-pane := QueuePane {
                         width: parent.width;
                         height: parent.height;
                         visible: root.mode == Mode.remux;
@@ -275,7 +324,7 @@ export component App inherits Window {
                         set-filter(filter) => { root.set-filter(filter); }
                         open-folder => { root.open-folder(); }
                     }
-                    QueuePane {
+                    extract-pane := QueuePane {
                         width: parent.width;
                         height: parent.height;
                         visible: root.mode == Mode.extract;
@@ -291,6 +340,24 @@ export component App inherits Window {
                         set-filter(filter) => { root.set-filter(filter); }
                         open-folder => { root.open-folder(); }
                     }
+                }
+
+                // The Episode Inspector (.insp) of the mode shown; the subtitle section is remux's.
+                InspectorPane {
+                    width: root.insp-width;
+                    insp: root.mode == Mode.remux ? root.remux-inspector : root.extract-inspector;
+                    ladder: root.sub-ladder;
+                    options: root.sub-options;
+                    languages: root.sub-languages;
+                    busy: root.busy;
+                    choice <=> root.sub-choice;
+                    language <=> root.sub-language;
+                    custom-language <=> root.sub-custom;
+                    track-title <=> root.sub-title;
+                    offset <=> root.sub-offset;
+                    choose(index) => { root.choose-subtitle(index); }
+                    reset => { root.reset-subtitle(); }
+                    options-changed => { root.subtitle-options-changed(); }
                 }
             }
         }

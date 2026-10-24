@@ -1,11 +1,12 @@
 //! Headless tests of the generated UI through Slint's testing backend. Each test runs on its own
 //! thread, where it installs its own platform.
 
+use crate::inspector::sample_view;
 use crate::publisher::{install_models, SlintPublisher};
 use i_slint_backend_testing::{ElementHandle, TestingBackend, TestingBackendOptions};
 use mkv_anime_batch_slint_ui::{App, FontProbe, Mode, QueueFilter, Theme};
 use mkv_desktop_core::actor::{Publisher, ScanView, ViewState};
-use mkv_desktop_core::presentation::{Bucket, Tone};
+use mkv_desktop_core::presentation::{self, Bucket, Tone};
 use mkv_desktop_core::queue::Row;
 use mkv_desktop_core::snapshot::ItemStatus;
 use slint::{Color, ComponentHandle, Model};
@@ -424,6 +425,166 @@ fn each_mode_keeps_its_scroll_and_a_new_folder_starts_at_the_top() {
     app.hide().unwrap();
 }
 
+/// Three releases of 20, 20 and 4 rows, in one folder, with the Library the core publishes for
+/// them.
+fn three_releases() -> ViewState {
+    let rows: Vec<Row> = (0..44)
+        .map(|i| Row {
+            release: [".", "S2", "S3"][i / 20].into(),
+            ..row(&format!("{}{:02}", ["a", "b", "c"][i / 20], i % 20))
+        })
+        .collect();
+    let mut state = ViewState::new(None);
+    state.remux.library = presentation::library(Some("/media/Show"), &rows);
+    state.remux.rows = Arc::new(rows);
+    state.remux.manifest_rev = 1;
+    state.remux.empty = None;
+    state.remux.directory = Some("/media/Show".into());
+    state
+}
+
+/// The Library lists the folder and its releases; a release's entry shows every row again and
+/// puts the release's first row at the top of the list, to the pixel, with rows of two heights.
+#[test]
+fn the_library_reveals_a_release_at_the_top_of_its_list() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    let publisher = SlintPublisher::new(&app);
+    publisher.show(&three_releases());
+    app.show().unwrap();
+    let y = |id: &str| {
+        only(&app, &format!("Include {id} in the batch"))
+            .absolute_position()
+            .y
+    };
+    let top = y("a00");
+
+    let clicks = Rc::new(RefCell::new(Vec::new()));
+    let log = Rc::clone(&clicks);
+    app.on_reveal_release(move |release, root| log.borrow_mut().push((release.to_string(), root)));
+    only(&app, "Show 44").invoke_accessible_default_action();
+    only(&app, "S2 20").invoke_accessible_default_action();
+    assert_eq!(
+        *clicks.borrow(),
+        [(String::new(), true), ("S2".to_string(), false)]
+    );
+
+    // From a filter: the reveal shows every row again.
+    publisher.show_filter(Mode::Remux, QueueFilter::Done);
+    publisher.show_reveal(Mode::Remux, "S2");
+    assert_eq!(app.get_remux_head().filter, QueueFilter::All);
+    assert_eq!(y("b00"), top, "S2's head is the list's first line");
+    // Back up from below.
+    publisher.show_reveal(Mode::Remux, "S2");
+    assert_eq!(y("b00"), top);
+    // The last release cannot reach the top: the list ends at its last row, as scrolling into
+    // view stops at the end.
+    publisher.show_reveal(Mode::Remux, "S3");
+    let last = only(&app, "Include c03 in the batch");
+    assert!(y("c00") > top && last.absolute_position().y < 640.0);
+    app.hide().unwrap();
+}
+
+/// A published remux Inspector at the narrowest window: every field shows, the subtitle controls
+/// carry their labels and fit the pane; an assignment brings Reset and its options.
+#[test]
+fn the_inspector_shows_every_field_and_fits_the_narrowest_window() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(760.0, 520.0));
+    let publisher = SlintPublisher::new(&app);
+    let mut state = ViewState::new(None);
+    app.show().unwrap();
+    publisher.show(&state);
+    only(
+        &app,
+        "Open a folder, then pick an episode to see what the batch does with it.",
+    );
+
+    state.seq = 1;
+    state.remux.rows = Arc::new(vec![row("Show - 01.mkv")]);
+    state.remux.empty = None;
+    state.remux.inspector = Some(sample_view());
+    publisher.show(&state);
+    for label in [
+        "03",
+        "ep1.mkv",
+        "media › Season 1",
+        "40% · 3s",
+        "HEVC 1080p · copied",
+        "FLAC 2.0 → Opus 192k",
+        "Output folder next to the input",
+        "2 Same folder, Season 1 › ep1.ass, Auto",
+        "FONTS · 2",
+        "2 attached fonts · folder: auto",
+        "Assign subtitle",
+    ] {
+        only(&app, label);
+    }
+    assert_eq!(
+        ElementHandle::find_by_accessible_label(&app, "Reset").count(),
+        0
+    );
+    assert_eq!(app.get_sub_options().row_count(), 3);
+
+    let mut assigned = sample_view();
+    assigned.assignment = Some(mkv_core::request::TrackAssignment {
+        target_video: "Season 1/ep1.mkv".into(),
+        asset_path: "Season 1/ep1.ass".into(),
+        track_type: Default::default(),
+        language: Some("may".into()),
+        title: Some("Signs".into()),
+        offset_ms: Some(120),
+    });
+    assigned.language_choice = "custom";
+    assigned.custom_language = "may".into();
+    state.seq = 2;
+    state.remux.inspector = Some(assigned);
+    publisher.show(&state);
+    assert_eq!(
+        (app.get_sub_choice(), app.get_sub_language()),
+        (1, 3),
+        "the published fields are written back"
+    );
+    assert_eq!(
+        (
+            app.get_sub_custom(),
+            app.get_sub_title(),
+            app.get_sub_offset()
+        ),
+        ("may".into(), "Signs".into(), "120".into())
+    );
+    for label in [
+        "Reset",
+        "Language",
+        "Language tag",
+        "Track title",
+        "Offset (ms)",
+    ] {
+        let control = only(&app, label);
+        let right = control.absolute_position().x + control.size().width;
+        assert!(
+            right <= 760.0,
+            "{label} ends at {right}, past the window's 760"
+        );
+    }
+
+    // The extract Inspector has no subtitle section.
+    state.seq = 3;
+    state.extract.rows = Arc::new(vec![row("Show - 01.mkv")]);
+    state.extract.empty = None;
+    state.extract.inspector = Some(sample_view());
+    publisher.show(&state);
+    app.set_mode(Mode::Extract);
+    assert_eq!(
+        ElementHandle::find_by_accessible_label(&app, "Assign subtitle").count(),
+        0
+    );
+    only(&app, "Same folder as the input");
+    app.hide().unwrap();
+}
+
 /// WCAG relative luminance of an sRGB colour.
 fn luminance(color: Color) -> f64 {
     let channel = |value: u8| {
@@ -500,6 +661,8 @@ fn every_text_token_meets_wcag_aa_on_every_surface_in_both_themes() {
             ("hover", theme.get_hover()),
             ("accent-soft", theme.get_accent_soft()),
             ("err-soft", theme.get_err_soft()),
+            ("info-soft", theme.get_info_soft()),
+            ("ok-soft", theme.get_ok_soft()),
         ];
         let mut pairs = Vec::new();
         for (surface, fill) in surfaces {

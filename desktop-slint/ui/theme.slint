@@ -63,6 +63,10 @@ export global Theme {
     out property <color> err-fg: dark ? #2a0905 : #ffffff;
     out property <color> err-soft: dark ? #f09f9724 : #a931261f;
     out property <color> info: dark ? #85b8ea : #265e9c;
+    // The status pill's tints (.pill.tone-info, .tone-ok: the tone at 18%). AA: as err-soft, 12%
+    // light and 14% dark, so every tone stays 4.5:1 on them.
+    out property <color> info-soft: dark ? #85b8ea24 : #265e9c1f;
+    out property <color> ok-soft: dark ? #4fc98a24 : #1969431f;
     out property <color> done: dark ? #bda9ee : #6b45b5;
     out property <color> run: dark ? #3cc8e6 : #0b7f99;
     out property <color> run-fg: dark ? #04222b : #ffffff;
