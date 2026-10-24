@@ -49,3 +49,8 @@ rfd = "0.15"
 # `renderer-software`: headless snapshots for the font test.
 i-slint-backend-testing = { git = "https://github.com/slint-ui/slint", rev = "45cb2b33420e1b3c8a13b6a765d2b5077d9c9608", features = ["renderer-software"] }
 tempfile = "3"
+
+# The FrameStats bench (P2, reused by P7 and the P9 gate): run by hand, never by `cargo test`.
+[[bench]]
+name = "queue_scroll"
+harness = false

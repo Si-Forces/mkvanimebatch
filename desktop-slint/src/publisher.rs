@@ -154,7 +154,7 @@ impl SlintPublisher {
 }
 
 /// Applies everything pending to the window, on the event loop.
-fn hop(pending: &Coalescer, window: &slint::Weak<App>) {
+pub(crate) fn hop(pending: &Coalescer, window: &slint::Weak<App>) {
     let (state, [remux, extract], _dones) = pending.take();
     let Some(app) = window.upgrade() else {
         return;

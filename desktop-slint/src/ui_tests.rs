@@ -400,9 +400,17 @@ fn every_text_token_meets_wcag_aa_on_every_surface_in_both_themes() {
 
 /// Renders the probe line in `family` at `weight` and sums its ink: black text on white.
 fn ink(family: &str, weight: i32) -> u64 {
+    ink_of(family, weight, None)
+}
+
+/// Renders `text`, or the probe's own line, as [`ink`] does.
+fn ink_of(family: &str, weight: i32, text: Option<&str>) -> u64 {
     let probe = FontProbe::new().unwrap();
     probe.set_family(family.into());
     probe.set_weight(weight);
+    if let Some(text) = text {
+        probe.set_text(text.into());
+    }
     probe.show().unwrap();
     let shot = probe.window().take_snapshot().unwrap();
     probe.hide().unwrap();
@@ -429,6 +437,40 @@ fn fonts_resolve_their_weights() {
         assert!(
             light < regular && regular < heavy && heavy > light * 2,
             "{family}: ink at 200/400/800 is {light}/{regular}/{heavy}"
+        );
+    }
+}
+
+/// Chinese and Japanese file names render through the system's font fallback (the embedded fonts
+/// are Latin-only): each draws differently from as many missing glyphs, which all look alike.
+#[test]
+fn cjk_names_render_through_the_system_font_fallback() {
+    // A Linux machine without a CJK font (a bare CI runner) has nothing to fall back to.
+    let no_cjk_font = cfg!(target_os = "linux")
+        && std::process::Command::new("fc-list")
+            .args([":lang=ja", "family"])
+            .output()
+            .map_or(true, |out| out.stdout.is_empty());
+    if no_cjk_font {
+        eprintln!("skipped: no CJK system font (fc-list :lang=ja is empty)");
+        return;
+    }
+    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
+        mock_time: true,
+        threading: false,
+        renderer_name: Some("software".into()),
+    })))
+    .unwrap();
+    for name in ["葬送のフリーレン", "药屋少女的呢喃"] {
+        // Private Use Area code points: no font has them.
+        let missing: String = name.chars().map(|_| '\u{E000}').collect();
+        let (shown, tofu) = (
+            ink_of("Onest", 400, Some(name)),
+            ink_of("Onest", 400, Some(&missing)),
+        );
+        assert!(
+            shown > 0 && shown != tofu,
+            "{name}: ink {shown}, missing glyphs {tofu}"
         );
     }
 }

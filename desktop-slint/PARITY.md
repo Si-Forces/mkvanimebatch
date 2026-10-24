@@ -91,7 +91,7 @@ Paths: `ui/` is `desktop-tauri/ui/`, `src/` is `desktop-tauri/src-tauri/src/`, `
 | [x] | Row click inspects | `ui/queue-view.js:106` | P2 | |
 | [x] | Empty state card with "Open folder…" | `ui/index.html:128`, `ui/queue-view.js:130` | P2 | Text is the published `empty`; the scanning and failed-scan cards too (`queue::map_head`). |
 | [ ] | Folder picker from Browse… on input-dir fields | `ui/index.html:311,403`, `ui/app.js:617` | P2 | Picker on a worker; scans after. The picker is P2's `open-folder`; the fields and their Browse… buttons come with the settings sheet (P4). |
-| [ ] | CJK filenames render | — | P2 | Font fallback. Checked in P2 stage B with the bench harness. |
+| [x] | CJK filenames render | — | P2 | System font fallback: `ui_tests::cjk_names_render_through_the_system_font_fallback` (skips on a Linux machine with no CJK font, such as the CI runner); the bench's rows include CJK names. The first CJK glyph a process draws loads the fallback font in that frame (about 28 ms warm, 220 ms cold on the HD 4000 laptop). |
 
 ## Library and Episode Inspector
 
