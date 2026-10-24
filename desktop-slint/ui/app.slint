@@ -46,6 +46,21 @@ component ModeTab inherits Rectangle {
 }
 
 // The Library's "+ Open folder…" (.nav.lib-open): a muted nav row, locked while a batch runs.
+// A sidebar group's heading (.side-group h2): 8px in, like the nav labels, and 4px above them.
+component SideHeading inherits VerticalLayout {
+    in property <string> text;
+    padding-left: 8px;
+    padding-right: 8px;
+    padding-bottom: 4px;
+    Text {
+        text: root.text;
+        color: Theme.mute;
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.77px;
+    }
+}
+
 component OpenFolderNav inherits Rectangle {
     in property <bool> enabled: true;
     callback clicked();
@@ -211,13 +226,7 @@ export component App inherits Window {
                         padding-right: 10px;
                         spacing: 2px;
                         alignment: start;
-                        Text {
-                            text: "PIPELINE";
-                            color: Theme.mute;
-                            font-size: 11px;
-                            font-weight: 600;
-                            letter-spacing: 0.77px;
-                        }
+                        SideHeading { text: "PIPELINE"; }
                         ModeTab {
                             title: "Remux";
                             subtitle: "FLAC → Opus, mux subs";
@@ -232,13 +241,7 @@ export component App inherits Window {
                         }
                         // .side's 18px gap between groups, less the group's own 2px spacing.
                         Rectangle { height: 16px; }
-                        Text {
-                            text: "LIBRARY";
-                            color: Theme.mute;
-                            font-size: 11px;
-                            font-weight: 600;
-                            letter-spacing: 0.77px;
-                        }
+                        SideHeading { text: "LIBRARY"; }
                         OpenFolderNav {
                             enabled: !root.busy;
                             clicked => { root.open-folder(); }

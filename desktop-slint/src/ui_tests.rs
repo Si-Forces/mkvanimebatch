@@ -399,6 +399,21 @@ fn each_mode_keeps_its_scroll_and_a_new_folder_starts_at_the_top() {
     assert_eq!(y("c05"), top);
     // The other mode's offset is its own.
     assert_eq!(app.get_extract_scroll(), -52.0);
+
+    // The card and the next folder's rows taken in one hop still start the rows at the top.
+    app.set_remux_scroll(-600.0);
+    let mut scanning = state.clone();
+    scanning.seq = 3;
+    scanning.remux.scan = ScanView::Scanning {
+        directory: "/d".into(),
+    };
+    state.seq = 4;
+    state.remux.rows = rows("d");
+    state.remux.manifest_rev = 3;
+    state.remux.directory = Some("/d".into());
+    publisher.show_coalesced(&[&scanning, &state]);
+    assert_eq!(y("d05"), top);
+    assert_eq!(app.get_extract_scroll(), -52.0);
     app.hide().unwrap();
 }
 

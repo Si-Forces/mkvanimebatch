@@ -266,6 +266,9 @@ pub(crate) fn diff_rows(old: &Rows, new: &Rows) -> RowPatch {
 pub(crate) struct Update {
     pub(crate) head: Option<QueueHead>,
     pub(crate) rows: Option<RowPatch>,
+    /// Whether a head staged since the last take showed a card, so the list starts at the top
+    /// again, even when a later head replaced that one before the take.
+    pub(crate) to_top: bool,
 }
 
 /// One mode's list between the Publisher and the window: its filter, the newest view, what the
@@ -282,6 +285,8 @@ pub(crate) struct ModeList {
     head: Option<QueueHead>,
     /// Whether the newest head shows the rows rather than a card.
     rows_shown: bool,
+    /// Whether a card head was staged since the last take.
+    to_top: bool,
 }
 
 impl ModeList {
@@ -339,6 +344,7 @@ impl ModeList {
 
     fn set_head(&mut self, head: QueueHead) {
         self.rows_shown = !head.card_shown;
+        self.to_top |= head.card_shown;
         self.head = Some(head);
     }
 
@@ -355,6 +361,7 @@ impl ModeList {
         Update {
             head: self.head.take(),
             rows: self.patch.take(),
+            to_top: std::mem::take(&mut self.to_top),
         }
     }
 }
