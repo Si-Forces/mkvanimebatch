@@ -243,8 +243,16 @@ fn an_empty_queue_shows_the_empty_card_and_each_mode_its_own_list() {
     let opened = Rc::new(Cell::new(0));
     let counter = Rc::clone(&opened);
     app.on_open_folder(move || counter.set(counter.get() + 1));
-    only(&app, "Open folder…").invoke_accessible_default_action();
-    assert_eq!(opened.get(), 1);
+    // The empty card's button and the Library's.
+    let open_folder = || ElementHandle::find_by_accessible_label(&app, "Open folder…");
+    assert_eq!(open_folder().count(), 2);
+    open_folder().for_each(|button| button.invoke_accessible_default_action());
+    assert_eq!(opened.get(), 2);
+    // A batch locks both.
+    app.set_busy(true);
+    open_folder().for_each(|button| button.invoke_accessible_default_action());
+    assert_eq!(opened.get(), 2);
+    app.set_busy(false);
     assert_eq!(
         ElementHandle::find_by_accessible_label(&app, "Frieren - 01.mkv").count(),
         0
@@ -258,6 +266,9 @@ fn an_empty_queue_shows_the_empty_card_and_each_mode_its_own_list() {
         ElementHandle::find_by_accessible_label(&app, "No episodes yet").count(),
         0
     );
+    // A loaded queue opens another folder from the Library.
+    only(&app, "Open folder…").invoke_accessible_default_action();
+    assert_eq!(opened.get(), 3);
     app.hide().unwrap();
 }
 
