@@ -100,9 +100,11 @@ export component App inherits Window {
     // A Close whose teardown failed: the window stays open and says why.
     in property <string> notice-title;
     in property <string> notice-text;
-    // The shown list's scroll offset (negative going down), for the host's bench
-    // (desktop-slint/benches/queue_scroll.rs).
-    in-out property <length> list-scroll;
+    // Each mode's list scroll offset (negative going down), kept across mode switches as the
+    // webview's two lists keep theirs. The host resets it when a card replaces the rows; its bench
+    // (desktop-slint/benches/queue_scroll.rs) drives it.
+    in-out property <length> remux-scroll;
+    in-out property <length> extract-scroll;
     // Whether the CJK fallback fonts were drawn once (below).
     property <bool> fonts-warm;
 
@@ -116,6 +118,12 @@ export component App inherits Window {
     callback close-window();
     // Through winit, not `minimized`: see the host's `minimize`.
     callback minimize-window();
+
+    // Marks the row at once, then asks the host.
+    function pick(id: string) {
+        root.pending-inspect = id;
+        root.inspect(id);
+    }
 
     Rectangle {
         // A maximized window is square, or the desktop shows through the corners.
@@ -243,21 +251,43 @@ export component App inherits Window {
                     }
                 }
 
-                QueuePane {
-                    head: root.mode == Mode.remux ? root.remux-head : root.extract-head;
-                    rows: root.mode == Mode.remux ? root.remux-rows : root.extract-rows;
-                    busy: root.busy;
-                    pending-inspect: root.pending-inspect;
-                    list-scroll <=> root.list-scroll;
-                    set-selected(id, selected) => { root.set-selected(id, selected); }
-                    set-all-selected(selected) => { root.set-all-selected(selected); }
-                    reorder(id, up) => { root.reorder(id, up); }
-                    inspect(id) => {
-                        root.pending-inspect = id;
-                        root.inspect(id);
+                // One pane per mode, as the webview has one list per mode: both stay alive, so the
+                // hidden one keeps its scroll exactly (a ListView made again places its rows by an
+                // estimated row height).
+                Rectangle {
+                    horizontal-stretch: 1;
+                    QueuePane {
+                        width: parent.width;
+                        height: parent.height;
+                        visible: root.mode == Mode.remux;
+                        head: root.remux-head;
+                        rows: root.remux-rows;
+                        list-scroll <=> root.remux-scroll;
+                        busy: root.busy;
+                        pending-inspect: root.pending-inspect;
+                        set-selected(id, selected) => { root.set-selected(id, selected); }
+                        set-all-selected(selected) => { root.set-all-selected(selected); }
+                        reorder(id, up) => { root.reorder(id, up); }
+                        inspect(id) => { root.pick(id); }
+                        set-filter(filter) => { root.set-filter(filter); }
+                        open-folder => { root.open-folder(); }
                     }
-                    set-filter(filter) => { root.set-filter(filter); }
-                    open-folder => { root.open-folder(); }
+                    QueuePane {
+                        width: parent.width;
+                        height: parent.height;
+                        visible: root.mode == Mode.extract;
+                        head: root.extract-head;
+                        rows: root.extract-rows;
+                        list-scroll <=> root.extract-scroll;
+                        busy: root.busy;
+                        pending-inspect: root.pending-inspect;
+                        set-selected(id, selected) => { root.set-selected(id, selected); }
+                        set-all-selected(selected) => { root.set-all-selected(selected); }
+                        reorder(id, up) => { root.reorder(id, up); }
+                        inspect(id) => { root.pick(id); }
+                        set-filter(filter) => { root.set-filter(filter); }
+                        open-folder => { root.open-folder(); }
+                    }
                 }
             }
         }

@@ -1,10 +1,10 @@
 //! Headless tests of the generated UI through Slint's testing backend. Each test runs on its own
 //! thread, where it installs its own platform.
 
-use crate::publisher::SlintPublisher;
+use crate::publisher::{install_models, SlintPublisher};
 use i_slint_backend_testing::{ElementHandle, TestingBackend, TestingBackendOptions};
 use mkv_anime_batch_slint_ui::{App, FontProbe, Mode, QueueFilter, Theme};
-use mkv_desktop_core::actor::{Publisher, ViewState};
+use mkv_desktop_core::actor::{Publisher, ScanView, ViewState};
 use mkv_desktop_core::presentation::{Bucket, Tone};
 use mkv_desktop_core::queue::Row;
 use mkv_desktop_core::snapshot::ItemStatus;
@@ -13,7 +13,15 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
-/// Applies `state` to `app` as a hop to the event loop would.
+/// A window with its row models, as `main` builds it.
+fn new_app() -> App {
+    let app = App::new().unwrap();
+    install_models(&app);
+    app
+}
+
+/// Applies `state` to `app` as a hop to the event loop would, through a fresh publisher: its rows
+/// replace the model's. A test of the in-place path keeps one publisher instead.
 fn apply(app: &App, state: &ViewState) {
     SlintPublisher::new(app).show(state);
 }
@@ -21,7 +29,7 @@ fn apply(app: &App, state: &ViewState) {
 #[test]
 fn the_window_shows_published_values_and_its_title_bar_buttons_answer() {
     i_slint_backend_testing::init_no_event_loop();
-    let app = App::new().unwrap();
+    let app = new_app();
     let mut state = ViewState::new(None);
     state.remux.title = "Frieren".into();
     state.remux.count_text = "12 episodes".into();
@@ -65,7 +73,7 @@ fn the_window_shows_published_values_and_its_title_bar_buttons_answer() {
 #[test]
 fn a_long_close_notice_wraps_and_pushes_the_list_down() {
     i_slint_backend_testing::init_no_event_loop();
-    let app = App::new().unwrap();
+    let app = new_app();
     let mut state = ViewState::new(None);
     state.remux.title = "Frieren".into();
     apply(&app, &state);
@@ -105,7 +113,7 @@ fn a_publication_from_another_thread_reaches_the_window() {
         ..Default::default()
     })))
     .unwrap();
-    let app = App::new().unwrap();
+    let app = new_app();
     let publisher = SlintPublisher::new(&app);
     let worker = std::thread::spawn(move || {
         for (seq, title) in [(1, "Older"), (2, "Frieren")] {
@@ -154,7 +162,7 @@ fn only(app: &App, label: &str) -> ElementHandle {
 #[test]
 fn rows_render_with_their_accessible_labels_and_their_controls_answer() {
     i_slint_backend_testing::init_no_event_loop();
-    let app = App::new().unwrap();
+    let app = new_app();
     let mut state = ViewState::new(None);
     let mut running = row("Frieren - 02.mkv");
     running.status = ItemStatus::Processing;
@@ -164,7 +172,8 @@ fn rows_render_with_their_accessible_labels_and_their_controls_answer() {
     state.remux.rows = Arc::new(vec![row("Frieren - 01.mkv"), running]);
     state.remux.manifest_rev = 1;
     state.remux.empty = None;
-    apply(&app, &state);
+    let publisher = SlintPublisher::new(&app);
+    publisher.show(&state);
     app.show().unwrap();
 
     for label in [
@@ -220,7 +229,7 @@ fn rows_render_with_their_accessible_labels_and_their_controls_answer() {
     // A locked selection refuses the checkbox and the bulk buttons.
     state.seq = 1;
     state.remux.controls.selection_locked = true;
-    apply(&app, &state);
+    publisher.show(&state);
     calls.borrow_mut().clear();
     only(&app, "Include Frieren - 01.mkv in the batch").invoke_accessible_default_action();
     only(&app, "Select all").invoke_accessible_default_action();
@@ -231,7 +240,7 @@ fn rows_render_with_their_accessible_labels_and_their_controls_answer() {
 #[test]
 fn an_empty_queue_shows_the_empty_card_and_each_mode_its_own_list() {
     i_slint_backend_testing::init_no_event_loop();
-    let app = App::new().unwrap();
+    let app = new_app();
     let mut state = ViewState::new(None);
     state.extract.rows = Arc::new(vec![row("Frieren - 01.mkv")]);
     state.extract.empty = None;
@@ -276,7 +285,7 @@ fn an_empty_queue_shows_the_empty_card_and_each_mode_its_own_list() {
 #[test]
 fn a_filter_with_no_match_says_so() {
     i_slint_backend_testing::init_no_event_loop();
-    let app = App::new().unwrap();
+    let app = new_app();
     let publisher = SlintPublisher::new(&app);
     let mut state = ViewState::new(None);
     state.remux.rows = Arc::new(vec![row("Frieren - 01.mkv")]);
@@ -295,7 +304,7 @@ fn a_filter_with_no_match_says_so() {
 #[test]
 fn a_kept_model_takes_each_publication_in_place() {
     i_slint_backend_testing::init_no_event_loop();
-    let app = App::new().unwrap();
+    let app = new_app();
     let publisher = SlintPublisher::new(&app);
     let mut state = ViewState::new(None);
     state.remux.rows = Arc::new(vec![row("a"), row("b"), row("c")]);
@@ -327,6 +336,70 @@ fn a_kept_model_takes_each_publication_in_place() {
     publisher.show(&state);
     assert_eq!(labels(), ["c Queued", "b 40% · 3s", "a Queued"]);
     assert!(app.get_remux_rows() == model);
+}
+
+/// Each mode keeps its own scroll offset, as the webview's two lists do, to the pixel with rows
+/// of different heights (a ListView made again would place them by an estimated height); a card
+/// (a scan of another folder) puts its list back at the top.
+#[test]
+fn each_mode_keeps_its_scroll_and_a_new_folder_starts_at_the_top() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    let publisher = SlintPublisher::new(&app);
+    // Two releases, so the first row and the 21st carry a group head.
+    let rows = |prefix: &str| {
+        Arc::new(
+            (0..40)
+                .map(|i| Row {
+                    release: if i < 20 { "." } else { "S2" }.into(),
+                    ..row(&format!("{prefix}{i:02}"))
+                })
+                .collect::<Vec<_>>(),
+        )
+    };
+    let mut state = ViewState::new(None);
+    for (view, prefix) in [(&mut state.remux, "a"), (&mut state.extract, "b")] {
+        view.rows = rows(prefix);
+        view.manifest_rev = 1;
+        view.empty = None;
+        view.directory = Some(format!("/{prefix}"));
+    }
+    publisher.show(&state);
+    app.show().unwrap();
+    // Where a row's checkbox is drawn.
+    let y = |id: &str| {
+        only(&app, &format!("Include {id} in the batch"))
+            .absolute_position()
+            .y
+    };
+    let top = y("a05");
+
+    app.set_remux_scroll(-600.0);
+    let scrolled = y("a14");
+    only(&app, "Extract").invoke_accessible_default_action();
+    assert_eq!(y("b05"), top, "Extract has its own offset");
+    app.set_extract_scroll(-52.0);
+    only(&app, "Remux").invoke_accessible_default_action();
+    assert_eq!(y("a14"), scrolled, "Remux keeps its offset");
+
+    // Another folder: the scanning card, then its rows, from the top.
+    state.seq = 1;
+    state.remux.scan = ScanView::Scanning {
+        directory: "/c".into(),
+    };
+    publisher.show(&state);
+    only(&app, "Scanning folder");
+    state.seq = 2;
+    state.remux.scan = ScanView::Idle;
+    state.remux.rows = rows("c");
+    state.remux.manifest_rev = 2;
+    state.remux.directory = Some("/c".into());
+    publisher.show(&state);
+    assert_eq!(y("c05"), top);
+    // The other mode's offset is its own.
+    assert_eq!(app.get_extract_scroll(), -52.0);
+    app.hide().unwrap();
 }
 
 /// WCAG relative luminance of an sRGB colour.
@@ -367,7 +440,7 @@ fn over(top: Color, below: Color) -> Color {
 #[test]
 fn every_text_token_meets_wcag_aa_on_every_surface_in_both_themes() {
     i_slint_backend_testing::init_no_event_loop();
-    let app = App::new().unwrap();
+    let app = new_app();
     let theme = app.global::<Theme>();
     let mut failures = Vec::new();
     for dark in [false, true] {
@@ -433,6 +506,8 @@ fn every_text_token_meets_wcag_aa_on_every_surface_in_both_themes() {
             ),
             ("run-fg", "run", theme.get_run_fg(), theme.get_run()),
             ("err-fg", "err", theme.get_err_fg(), theme.get_err()),
+            // The filter chip that is on.
+            ("bg", "fg", theme.get_bg(), theme.get_fg()),
         ] {
             pairs.push((text, fill.to_string(), color, background));
         }

@@ -52,7 +52,7 @@ Paths: `ui/` is `desktop-tauri/ui/`, `src/` is `desktop-tauri/src-tauri/src/`, `
 | [ ] | `EditDraft` | `ui/settings-draft.js:85` | P4 | `false` answer restores the published value. |
 | [ ] | `StepDraft` | `ui/settings-draft.js:90` | P4 | Stepper click; hold-to-repeat is the view's (400 ms, then 80 ms). |
 | [ ] | `SetPreset` | `ui/preset-menu.js:62` | P4 | Remux only. |
-| [ ] | `Run` | `ui/job-controller.js:74` | P5 | Run pending locks Run and the settings until answered. |
+| [ ] | `Run` | `ui/job-controller.js:74` | P5 | Run pending locks Run and the settings until answered. Every Run forces a scan, so a new `manifest_rev`, and `queue::diff_rows` then resets the whole row model where the webview redraws in place (same directory, same id order; `ui/queue-view.js:231-238`). Measure that reset in P5's bench; if it hitches, patch in place on the same directory and id sequence. |
 | [ ] | `Stop` | `ui/job-controller.js:96` | P5 | |
 | [ ] | `ClearCache` | `ui/job-controller.js:110` | P5 | After the confirm dialog. |
 | [ ] | `ViewVisible` | `ui/app.js:607` | P6 | From winit `Occluded` / minimize instead of `visibilitychange`. |
@@ -79,7 +79,7 @@ Paths: `ui/` is `desktop-tauri/ui/`, `src/` is `desktop-tauri/src-tauri/src/`, `
 
 | ✓ | What | Where today | Slice | Notes |
 |---|---|---|---|---|
-| [x] | Mode tabs Remux / Extract | `ui/index.html:65-79`, `ui/app.js:296` | P2 | The status pill is its own row (P5); the gear buttons come with the sheet (P4). |
+| [x] | Mode tabs Remux / Extract | `ui/index.html:65-79`, `ui/app.js:296` | P2 | The status pill is its own row (P5); the gear buttons come with the sheet (P4). One pane per mode, both kept (the hidden one invisible), so each list keeps its own scroll as the webview's two lists do; a card puts the list back at the top, as `clearList` does. |
 | [ ] | Mode tab icons | `ui/index.html:65-79` | P5 | Not drawn yet. |
 | [x] | Boot shows the extract view when a run or job is in extract | `ui/app.js:916` | P2 | `intents::boot_mode`. |
 | [x] | List header: release title, crumbs path, `count_text` | `ui/index.html:105-106`, `ui/app.js:334` | P2 | `count_text` sits beside the title until P5 brings the bottom bar. Crumbs elide instead of wrapping. |
@@ -151,6 +151,7 @@ Paths: `ui/` is `desktop-tauri/ui/`, `src/` is `desktop-tauri/src-tauri/src/`, `
 | [ ] | Glass log drawer | `ui/style.css` (`.glass`) | P6 | `backdrop-blur` (Slint 1.19, P7 for the release pin). |
 | [ ] | Fonts Onest, Unbounded, JetBrains Mono | `ui/fonts/*.woff2` | P0 | Variable TTFs embedded; OFL texts beside them. |
 | [ ] | Screen-reader labels (row checkbox, stepper buttons, title bar buttons, theme, complexity) | `ui/index.html`, `ui/queue-view.js:334` | P6 | AccessKit; one Orca pass at the P9 gate. |
+| [ ] | Keyboard focus reveals a row's Move up / Move down buttons | `ui/style.css:430` (`:focus-within`) | P6 | P2 reveals them on hover only (`queue.slint`); with the P6 focus rings. |
 
 ## Packaging and release
 

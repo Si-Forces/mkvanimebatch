@@ -9,7 +9,6 @@ use mkv_desktop_core::actor::{ModeView, ScanView};
 use mkv_desktop_core::presentation::{Bucket, LibraryEntry, Tone, NOT_IN_BATCH};
 use mkv_desktop_core::queue::Row;
 use mkv_desktop_core::snapshot::ItemStatus;
-use std::collections::HashSet;
 
 /// The group header of a release the Library does not name.
 const DEFAULT_GROUP: &str = "Episodes";
@@ -41,7 +40,8 @@ fn shows(row: &Row, filter: QueueFilter) -> bool {
     bucket_of(filter).is_none_or(|bucket| row.bucket == Some(bucket))
 }
 
-fn count(n: usize) -> i32 {
+/// A count as a Slint `int`, saturating.
+fn to_slint_count(n: usize) -> i32 {
     i32::try_from(n).unwrap_or(i32::MAX)
 }
 
@@ -87,11 +87,8 @@ pub(crate) fn map_rows(
     filter: QueueFilter,
 ) -> Vec<QueueRow> {
     let grouped = rows
-        .iter()
-        .map(|row| row.release.as_str())
-        .collect::<HashSet<_>>()
-        .len()
-        > 1;
+        .first()
+        .is_some_and(|first| rows.iter().any(|row| row.release != first.release));
     let shown: Vec<usize> = (0..rows.len())
         .filter(|&i| shows(&rows[i], filter))
         .collect();
@@ -131,7 +128,7 @@ pub(crate) fn map_rows(
             check_label: format!("Include {} in the batch", row.name).into(),
             shown: shows(row, filter),
             head: head.as_ref().map_or("", |(label, _)| label.as_str()).into(),
-            head_count: head.map_or(0, |(_, n)| count(n)),
+            head_count: head.map_or(0, |(_, n)| to_slint_count(n)),
         })
         .collect()
 }
@@ -150,49 +147,75 @@ fn crumbs(crumbs: &[String]) -> (String, String) {
     }
 }
 
-/// The card shown in place of the rows: `(title, text, action, spinner)`, or `None` for the rows.
-/// A rescan of the folder shown (every Run forces one) keeps its rows on screen.
-fn card(view: &ModeView) -> Option<(&str, &str, &str, bool)> {
+/// The card shown in place of the rows; its action is empty for none.
+#[derive(Default)]
+struct Card<'a> {
+    title: &'a str,
+    text: &'a str,
+    action: &'a str,
+    spinner: bool,
+}
+
+/// The card shown in place of the rows, or `None` for the rows. A rescan of the folder whose rows
+/// are on screen (every Run forces one) keeps them there; after a card, it shows its own
+/// (queue-view.js `showScanning`).
+fn card(view: &ModeView, rows_shown: bool) -> Option<Card<'_>> {
+    let card = |title, text, action, spinner| {
+        Some(Card {
+            title,
+            text,
+            action,
+            spinner,
+        })
+    };
     match &view.scan {
         ScanView::Scanning { directory }
-            if !view.rows.is_empty() && view.directory.as_ref() == Some(directory) =>
+            if rows_shown
+                && !view.rows.is_empty()
+                && view.directory.as_ref() == Some(directory) =>
         {
             None
         }
-        ScanView::Scanning { .. } => Some((SCANNING_TITLE, SCANNING_TEXT, "", true)),
-        ScanView::Failed => Some((FAILED_TITLE, FAILED_TEXT, FAILED_ACTION, false)),
+        ScanView::Scanning { .. } => card(SCANNING_TITLE, SCANNING_TEXT, "", true),
+        ScanView::Failed => card(FAILED_TITLE, FAILED_TEXT, FAILED_ACTION, false),
         ScanView::Idle => view
             .empty
             .as_ref()
-            .map(|empty| (empty.title, empty.description, OPEN_FOLDER, false)),
+            .and_then(|empty| card(empty.title, empty.description, OPEN_FOLDER, false)),
     }
 }
 
 /// The list header, the filter chips, the card and the row the Episode Inspector shows.
-pub(crate) fn map_head(view: &ModeView, filter: QueueFilter) -> QueueHead {
+/// `rows_shown`: whether the last head showed the rows rather than a card.
+pub(crate) fn map_head(view: &ModeView, filter: QueueFilter, rows_shown: bool) -> QueueHead {
     let (crumbs_lead, crumbs_end) = crumbs(&view.crumbs);
-    let card = card(view);
-    let (card_title, card_text, card_action, card_spinner) = card.unwrap_or_default();
+    let card = card(view, rows_shown);
+    let card_shown = card.is_some();
+    let card = card.unwrap_or_default();
+    // From the chips' counts, so the message agrees with the chip.
+    let none_match = match filter {
+        QueueFilter::All => false,
+        QueueFilter::Todo => view.filters.todo == 0,
+        QueueFilter::Done => view.filters.done == 0,
+        QueueFilter::Failed => view.filters.failed == 0,
+    };
     QueueHead {
         title: view.title.as_str().into(),
         crumbs_lead: crumbs_lead.into(),
         crumbs_end: crumbs_end.into(),
         count_text: view.count_text.as_str().into(),
-        all: count(view.filters.all),
-        todo: count(view.filters.todo),
-        done: count(view.filters.done),
-        failed: count(view.filters.failed),
+        all: to_slint_count(view.filters.all),
+        todo: to_slint_count(view.filters.todo),
+        done: to_slint_count(view.filters.done),
+        failed: to_slint_count(view.filters.failed),
         filter,
         // Only beside rows: a card replaces them (queue-view.js hides it with no row mounted).
-        filter_empty: card.is_none()
-            && filter != QueueFilter::All
-            && !view.rows.is_empty()
-            && !view.rows.iter().any(|row| shows(row, filter)),
-        card_shown: card.is_some(),
-        card_title: card_title.into(),
-        card_text: card_text.into(),
-        card_action: card_action.into(),
-        card_spinner,
+        filter_empty: !card_shown && none_match && !view.rows.is_empty(),
+        card_shown,
+        card_title: card.title.into(),
+        card_text: card.text.into(),
+        card_action: card.action.into(),
+        card_spinner: card.spinner,
         selection_locked: view.controls.selection_locked,
         inspected: view
             .inspector
@@ -257,6 +280,8 @@ pub(crate) struct ModeList {
     pending: Option<Rows>,
     patch: Option<RowPatch>,
     head: Option<QueueHead>,
+    /// Whether the newest head shows the rows rather than a card.
+    rows_shown: bool,
 }
 
 impl ModeList {
@@ -285,7 +310,7 @@ impl ModeList {
                 rows,
             });
         }
-        self.head = Some(map_head(&view, self.filter));
+        self.set_head(map_head(&view, self.filter, self.rows_shown));
         self.view = Some(view);
     }
 
@@ -303,10 +328,18 @@ impl ModeList {
         let Some(newest) = &self.view else {
             return false;
         };
-        self.head = Some(map_head(newest, filter));
-        let manifest_rev = newest.manifest_rev;
+        let (head, manifest_rev) = (
+            map_head(newest, filter, self.rows_shown),
+            newest.manifest_rev,
+        );
+        self.set_head(head);
         self.stage(Rows { manifest_rev, rows });
         true
+    }
+
+    fn set_head(&mut self, head: QueueHead) {
+        self.rows_shown = !head.card_shown;
+        self.head = Some(head);
     }
 
     fn stage(&mut self, rows: Rows) {
@@ -484,7 +517,7 @@ mod tests {
     fn the_head_says_what_the_list_shows_instead_of_rows() {
         let mut view = ViewState::new(None).remux;
         view.crumbs = vec!["media".into(), "anime".into(), "Show".into()];
-        let head = map_head(&view, QueueFilter::All);
+        let head = map_head(&view, QueueFilter::All, false);
         assert_eq!(
             (head.crumbs_lead.as_str(), head.crumbs_end.as_str()),
             ("media › anime › ", "Show")
@@ -500,16 +533,19 @@ mod tests {
         view.scan = ScanView::Scanning {
             directory: "/media/Show".into(),
         };
-        let head = map_head(&view, QueueFilter::All);
+        let head = map_head(&view, QueueFilter::All, false);
         assert!(head.card_shown && head.card_spinner);
         assert_eq!(head.card_title, SCANNING_TITLE);
-        // A rescan of the folder shown keeps its rows.
+        // A rescan of the folder whose rows are shown keeps them; after a card, it shows its own.
         view.rows = Arc::new(vec![row("a", ".", Some(Bucket::Todo))]);
+        view.filters.all = 1;
+        view.filters.todo = 1;
         view.directory = Some("/media/Show".into());
-        assert!(!map_head(&view, QueueFilter::All).card_shown);
+        assert!(!map_head(&view, QueueFilter::All, true).card_shown);
+        assert!(map_head(&view, QueueFilter::All, false).card_shown);
 
         view.scan = ScanView::Failed;
-        let head = map_head(&view, QueueFilter::Failed);
+        let head = map_head(&view, QueueFilter::Failed, true);
         assert_eq!(
             (head.card_title.as_str(), head.card_action.as_str()),
             (FAILED_TITLE, FAILED_ACTION)
@@ -519,11 +555,34 @@ mod tests {
         view.scan = ScanView::Scanning {
             directory: "/media/Other".into(),
         };
-        assert!(!map_head(&view, QueueFilter::Failed).filter_empty);
+        assert!(!map_head(&view, QueueFilter::Failed, true).filter_empty);
         // With the rows shown, it says so.
         view.scan = ScanView::Idle;
-        assert!(map_head(&view, QueueFilter::Failed).filter_empty);
-        assert!(!map_head(&view, QueueFilter::Todo).filter_empty);
+        assert!(map_head(&view, QueueFilter::Failed, true).filter_empty);
+        assert!(!map_head(&view, QueueFilter::Todo, true).filter_empty);
+    }
+
+    /// queue-view.js keeps the rows through a rescan only when they were on screen: after a failed
+    /// scan, a retry of the same folder shows the scanning card.
+    #[test]
+    fn a_retry_after_a_failed_scan_shows_the_scanning_card() {
+        let mut view = ViewState::new(None).remux;
+        view.rows = Arc::new(vec![row("a", ".", Some(Bucket::Todo))]);
+        view.directory = Some("/media/Show".into());
+        view.empty = None;
+        let mut list = ModeList::default();
+        let mut shown = |scan| {
+            view.scan = scan;
+            list.put(view.clone(), None);
+            list.take().head.map(|head| head.card_shown)
+        };
+        let rescan = || ScanView::Scanning {
+            directory: "/media/Show".into(),
+        };
+        assert_eq!(shown(ScanView::Idle), Some(false));
+        assert_eq!(shown(rescan()), Some(false));
+        assert_eq!(shown(ScanView::Failed), Some(true));
+        assert_eq!(shown(rescan()), Some(true));
     }
 
     #[test]

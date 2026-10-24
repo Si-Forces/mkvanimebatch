@@ -145,6 +145,7 @@ fn run(
     if let Some(dir) = save {
         save_once_drawn(&app, dir);
     }
+    publisher::install_models(&app);
     // Held until the end: the actor stops once every handle is gone.
     let publisher = SlintPublisher::new(&app);
     let core = Core::spawn(
