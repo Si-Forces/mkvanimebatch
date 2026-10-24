@@ -455,8 +455,9 @@ export component QueuePane inherits Rectangle {
     background: Theme.content;
 
     VerticalLayout {
-        // The list header (.list-head).
+        // The list header (.list-head): its own height; the list or the card takes the rest.
         VerticalLayout {
+            vertical-stretch: 0;
             padding-left: 20px;
             padding-right: 20px;
             padding-top: 16px;
@@ -545,6 +546,7 @@ export component QueuePane inherits Rectangle {
         }
 
         if root.head.card-shown: VerticalLayout {
+            vertical-stretch: 1;
             padding: 48px;
             spacing: 8px;
             alignment: start;
