@@ -1,13 +1,22 @@
 //! Headless tests of the generated UI through Slint's testing backend. Each test runs on its own
 //! thread, where it installs its own platform.
 
-use crate::publisher::{apply, SlintPublisher};
+use crate::publisher::SlintPublisher;
 use i_slint_backend_testing::{ElementHandle, TestingBackend, TestingBackendOptions};
-use mkv_anime_batch_slint_ui::{App, FontProbe, Theme};
+use mkv_anime_batch_slint_ui::{App, FontProbe, Mode, QueueFilter, Theme};
 use mkv_desktop_core::actor::{Publisher, ViewState};
-use slint::{Color, ComponentHandle};
-use std::cell::Cell;
+use mkv_desktop_core::presentation::{Bucket, Tone};
+use mkv_desktop_core::queue::Row;
+use mkv_desktop_core::snapshot::ItemStatus;
+use slint::{Color, ComponentHandle, Model};
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::Arc;
+
+/// Applies `state` to `app` as a hop to the event loop would.
+fn apply(app: &App, state: &ViewState) {
+    SlintPublisher::new(app).show(state);
+}
 
 #[test]
 fn the_window_shows_published_values_and_its_title_bar_buttons_answer() {
@@ -97,7 +106,7 @@ fn a_publication_from_another_thread_reaches_the_window() {
     })))
     .unwrap();
     let app = App::new().unwrap();
-    let publisher = SlintPublisher::new(app.as_weak());
+    let publisher = SlintPublisher::new(&app);
     let worker = std::thread::spawn(move || {
         for (seq, title) in [(1, "Older"), (2, "Frieren")] {
             let mut state = ViewState::new(None);
@@ -111,8 +120,165 @@ fn a_publication_from_another_thread_reaches_the_window() {
     });
     slint::run_event_loop().unwrap();
     worker.join().unwrap();
-    assert_eq!(app.get_mode_title(), "Frieren");
+    assert_eq!(app.get_remux_head().title, "Frieren");
     assert!(app.get_busy());
+}
+
+/// A selected, queued row named `id`.
+fn row(id: &str) -> Row {
+    Row {
+        id: id.into(),
+        name: id.into(),
+        release: ".".into(),
+        in_manifest: true,
+        selected: true,
+        status: ItemStatus::Queued,
+        progress: None,
+        participant: false,
+        label: "Queued".into(),
+        tone: Tone::Mute,
+        title: String::new(),
+        meta: String::new(),
+        meta_error: false,
+        bucket: Some(Bucket::Todo),
+    }
+}
+
+/// The one element labelled `label`.
+fn only(app: &App, label: &str) -> ElementHandle {
+    let mut found: Vec<_> = ElementHandle::find_by_accessible_label(app, label).collect();
+    assert_eq!(found.len(), 1, "one {label:?}");
+    found.pop().unwrap()
+}
+
+#[test]
+fn rows_render_with_their_accessible_labels_and_their_controls_answer() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = App::new().unwrap();
+    let mut state = ViewState::new(None);
+    let mut running = row("Frieren - 02.mkv");
+    running.status = ItemStatus::Processing;
+    running.progress = Some(40.0);
+    running.label = "40% · 3s".into();
+    running.tone = Tone::Info;
+    state.remux.rows = Arc::new(vec![row("Frieren - 01.mkv"), running]);
+    state.remux.manifest_rev = 1;
+    state.remux.empty = None;
+    apply(&app, &state);
+    app.show().unwrap();
+
+    for label in [
+        "Include Frieren - 01.mkv in the batch",
+        "Include Frieren - 02.mkv in the batch",
+        "Frieren - 01.mkv",
+        "40% · 3s",
+    ] {
+        only(&app, label);
+    }
+    assert_eq!(
+        ElementHandle::find_by_accessible_label(&app, "Move up").count(),
+        2
+    );
+    assert_eq!(app.get_remux_rows().row_count(), 2);
+
+    let calls = Rc::new(RefCell::new(Vec::<String>::new()));
+    let log = Rc::clone(&calls);
+    app.on_set_selected(move |id, selected| {
+        log.borrow_mut().push(format!("select {id} {selected}"))
+    });
+    let log = Rc::clone(&calls);
+    app.on_set_all_selected(move |selected| log.borrow_mut().push(format!("all {selected}")));
+    let log = Rc::clone(&calls);
+    app.on_reorder(move |id, up| log.borrow_mut().push(format!("reorder {id} {up}")));
+    let log = Rc::clone(&calls);
+    app.on_inspect(move |id| log.borrow_mut().push(format!("inspect {id}")));
+    let log = Rc::clone(&calls);
+    app.on_set_filter(move |filter| log.borrow_mut().push(format!("filter {filter:?}")));
+
+    only(&app, "Include Frieren - 01.mkv in the batch").invoke_accessible_default_action();
+    only(&app, "Select all").invoke_accessible_default_action();
+    only(&app, "None").invoke_accessible_default_action();
+    let downs: Vec<_> = ElementHandle::find_by_accessible_label(&app, "Move down").collect();
+    downs[0].invoke_accessible_default_action();
+    only(&app, "Frieren - 02.mkv").invoke_accessible_default_action();
+    only(&app, "Done").invoke_accessible_default_action();
+    assert_eq!(
+        *calls.borrow(),
+        [
+            "select Frieren - 01.mkv false",
+            "all true",
+            "all false",
+            "reorder Frieren - 01.mkv false",
+            "inspect Frieren - 02.mkv",
+            "filter Done",
+        ]
+    );
+    // Marked at once, before the core answers.
+    assert_eq!(app.get_pending_inspect(), "Frieren - 02.mkv");
+
+    // A locked selection refuses the checkbox and the bulk buttons.
+    state.seq = 1;
+    state.remux.controls.selection_locked = true;
+    apply(&app, &state);
+    calls.borrow_mut().clear();
+    only(&app, "Include Frieren - 01.mkv in the batch").invoke_accessible_default_action();
+    only(&app, "Select all").invoke_accessible_default_action();
+    assert!(calls.borrow().is_empty());
+    app.hide().unwrap();
+}
+
+#[test]
+fn an_empty_queue_shows_the_empty_card_and_each_mode_its_own_list() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = App::new().unwrap();
+    let mut state = ViewState::new(None);
+    state.extract.rows = Arc::new(vec![row("Frieren - 01.mkv")]);
+    state.extract.empty = None;
+    state.extract.title = "Frieren".into();
+    apply(&app, &state);
+    app.show().unwrap();
+
+    only(&app, "No episodes yet");
+    let opened = Rc::new(Cell::new(0));
+    let counter = Rc::clone(&opened);
+    app.on_open_folder(move || counter.set(counter.get() + 1));
+    only(&app, "Open folder…").invoke_accessible_default_action();
+    assert_eq!(opened.get(), 1);
+    assert_eq!(
+        ElementHandle::find_by_accessible_label(&app, "Frieren - 01.mkv").count(),
+        0
+    );
+
+    only(&app, "Extract").invoke_accessible_default_action();
+    assert_eq!(app.get_mode(), Mode::Extract);
+    only(&app, "Frieren");
+    only(&app, "Frieren - 01.mkv");
+    assert_eq!(
+        ElementHandle::find_by_accessible_label(&app, "No episodes yet").count(),
+        0
+    );
+    app.hide().unwrap();
+}
+
+/// A filter that matches no row says so; the rows stay in the model, hidden.
+#[test]
+fn a_filter_with_no_match_says_so() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = App::new().unwrap();
+    let publisher = SlintPublisher::new(&app);
+    let mut state = ViewState::new(None);
+    state.remux.rows = Arc::new(vec![row("Frieren - 01.mkv")]);
+    state.remux.empty = None;
+    publisher.show(&state);
+    publisher.set_filter(Mode::Remux, QueueFilter::Failed);
+    // set_filter schedules a hop; apply it as the event loop would.
+    state.seq = 1;
+    publisher.show(&state);
+    app.show().unwrap();
+    assert_eq!(app.get_remux_head().filter, QueueFilter::Failed);
+    only(&app, "No episodes match this filter.");
+    assert_eq!(app.get_remux_rows().row_count(), 1);
+    app.hide().unwrap();
 }
 
 /// WCAG relative luminance of an sRGB colour.
