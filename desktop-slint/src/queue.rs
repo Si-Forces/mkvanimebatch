@@ -4,7 +4,10 @@
 //! model writes an [`Update`] carries run on it. Every text and rule the list shows that the
 //! published `ModeView` does not already carry is here; `queue-view.js` is the reference.
 
-use mkv_anime_batch_slint_ui::{QueueFilter, QueueHead, QueueRow, RowMark, RowTone};
+use crate::inspector::{InspectorList, InspectorUpdate};
+use mkv_anime_batch_slint_ui::{
+    LibraryItem, Mode, QueueFilter, QueueHead, QueueRow, RowMark, RowTone,
+};
 use mkv_desktop_core::actor::{ModeView, ScanView};
 use mkv_desktop_core::presentation::{Bucket, LibraryEntry, Tone, NOT_IN_BATCH};
 use mkv_desktop_core::queue::Row;
@@ -69,7 +72,7 @@ fn mark(row: &Row) -> RowMark {
     }
 }
 
-fn tone(tone: Tone) -> RowTone {
+pub(crate) fn tone(tone: Tone) -> RowTone {
     match tone {
         Tone::Info => RowTone::Info,
         Tone::Ok => RowTone::Ok,
@@ -135,7 +138,7 @@ pub(crate) fn map_rows(
 
 /// The list header's path: every crumb but the last, each followed by the separator, then the
 /// last, which the header draws bold.
-fn crumbs(crumbs: &[String]) -> (String, String) {
+pub(crate) fn crumbs(crumbs: &[String]) -> (String, String) {
     match crumbs.split_last() {
         Some((end, lead)) => (
             lead.iter()
@@ -269,6 +272,10 @@ pub(crate) struct Update {
     /// Whether a head staged since the last take showed a card, so the list starts at the top
     /// again, even when a later head replaced that one before the take.
     pub(crate) to_top: bool,
+    pub(crate) library: Option<Vec<LibraryItem>>,
+    pub(crate) inspector: Option<InspectorUpdate>,
+    /// The row to scroll the list to, once `rows` are applied: a revealed release's first.
+    pub(crate) reveal: Option<usize>,
 }
 
 /// One mode's list between the Publisher and the window: its filter, the newest view, what the
@@ -277,6 +284,7 @@ pub(crate) struct Update {
 /// patches the model correctly.
 #[derive(Default)]
 pub(crate) struct ModeList {
+    mode: Mode,
     pub(crate) filter: QueueFilter,
     pub(crate) view: Option<ModeView>,
     applied: Rows,
@@ -287,9 +295,22 @@ pub(crate) struct ModeList {
     rows_shown: bool,
     /// Whether a card head was staged since the last take.
     to_top: bool,
+    /// The Library and the Episode Inspector.
+    inspector: InspectorList,
+    /// A release the Library revealed, until rows mapped with every row shown are staged.
+    reveal: Option<String>,
+    /// Its first row's index, with those rows.
+    reveal_row: Option<usize>,
 }
 
 impl ModeList {
+    pub(crate) fn new(mode: Mode) -> Self {
+        Self {
+            mode,
+            ..Self::default()
+        }
+    }
+
     /// The filter to map `view`'s rows with, or `None` when they are the rows last mapped. The
     /// actor shares the rows of a mode it did not rebuild, so that is most publications.
     pub(crate) fn wants_rows(&self, view: &ModeView) -> Option<QueueFilter> {
@@ -314,9 +335,25 @@ impl ModeList {
                 manifest_rev: view.manifest_rev,
                 rows,
             });
+            self.resolve_reveal(&view);
         }
         self.set_head(map_head(&view, self.filter, self.rows_shown));
+        self.inspector.put(&view, self.mode);
         self.view = Some(view);
+    }
+
+    /// Shows every row again and, once they are staged, scrolls the list to `release`'s first
+    /// row (queue-view.js `revealRelease`). The caller maps the rows again (`Coalescer::remap`).
+    pub(crate) fn reveal(&mut self, release: String) {
+        self.filter = QueueFilter::All;
+        self.reveal = Some(release);
+    }
+
+    /// The pending reveal's row in `view`, whose rows were just staged with the newest filter.
+    fn resolve_reveal(&mut self, view: &ModeView) {
+        if let Some(release) = self.reveal.take() {
+            self.reveal_row = view.rows.iter().position(|row| row.release == release);
+        }
     }
 
     /// Takes `rows`, `view`'s rows mapped with `filter`, unless the filter or the rows changed
@@ -339,6 +376,7 @@ impl ModeList {
         );
         self.set_head(head);
         self.stage(Rows { manifest_rev, rows });
+        self.resolve_reveal(view);
         true
     }
 
@@ -358,10 +396,14 @@ impl ModeList {
         if let Some(rows) = self.pending.take() {
             self.applied = rows;
         }
+        let (library, inspector) = self.inspector.take();
         Update {
             head: self.head.take(),
             rows: self.patch.take(),
             to_top: std::mem::take(&mut self.to_top),
+            library,
+            inspector,
+            reveal: self.reveal_row.take(),
         }
     }
 }

@@ -382,7 +382,7 @@ component Chip inherits Rectangle {
 }
 
 // A text button (.link-btn).
-component LinkButton inherits Rectangle {
+export component LinkButton inherits Rectangle {
     in property <string> text;
     in property <bool> enabled: true;
     callback clicked();
@@ -450,6 +450,19 @@ export component QueuePane inherits Rectangle {
     // The list's scroll offset (negative going down), kept by the window per mode.
     in-out property <length> list-scroll;
 
+    // Scrolls the list so row `row` heads it (queue-view.js `revealRelease`), or as near as the
+    // end of the list lets it. `ensure-row-visible` puts a row above the viewport at its top
+    // edge, measuring the rows it lays out, where a scroll offset would be placed by the
+    // ListView's estimated row height: so the list first moves past every row.
+    public function reveal(row: int) {
+        if row >= root.rows.length {
+            root.list-scroll = 0;
+            return;
+        }
+        root.list-scroll = -1000000px;
+        list.ensure-row-visible(row, ScrollBehavior.instant);
+    }
+
     property <string> marked: pending-inspect != "" ? pending-inspect : head.inspected;
     property <bool> filtered: head.filter != QueueFilter.all;
     background: Theme.content;
@@ -496,8 +509,11 @@ export component QueuePane inherits Rectangle {
                     overflow: elide;
                 }
             }
-            HorizontalLayout {
+            // .list-tools: the chips, then Select all / None at the end, wrapping in a narrow list.
+            FlexboxLayout {
                 spacing: 6px;
+                alignment: stretch;
+                cross-axis-alignment: center;
                 Chip {
                     label: "All";
                     count: root.head.all;
@@ -538,45 +554,13 @@ export component QueuePane inherits Rectangle {
                 text: root.busy ? "Selection is locked while the batch runs." : "Tick episodes to include them. Click a row to inspect it.";
                 color: Theme.mute;
                 font-size: 12px;
+                // Wraps in a narrow list, as the webview's hint does.
+                wrap: word-wrap;
             }
         }
         Rectangle {
             height: 1px;
             background: Theme.line;
-        }
-
-        if root.head.card-shown: VerticalLayout {
-            vertical-stretch: 1;
-            padding: 48px;
-            spacing: 8px;
-            alignment: start;
-            if root.head.card-spinner: HorizontalLayout {
-                alignment: center;
-                Ring { spinning: true; }
-            }
-            Text {
-                text: root.head.card-title;
-                color: Theme.fg;
-                font-size: 15px;
-                font-weight: 700;
-                horizontal-alignment: center;
-                wrap: word-wrap;
-            }
-            Text {
-                text: root.head.card-text;
-                color: Theme.mute;
-                horizontal-alignment: center;
-                wrap: word-wrap;
-            }
-            if root.head.card-action != "": HorizontalLayout {
-                alignment: center;
-                padding-top: 6px;
-                AccentButton {
-                    text: root.head.card-action;
-                    enabled: !root.busy;
-                    clicked => { root.open-folder(); }
-                }
-            }
         }
 
         if root.head.filter-empty: HorizontalLayout {
@@ -589,17 +573,60 @@ export component QueuePane inherits Rectangle {
             }
         }
 
-        if !root.head.card-shown: ListView {
-            content-y <=> root.list-scroll;
-            for row in root.rows: EpRow {
-                item: row;
-                inspected: row.id == root.marked;
-                locked: root.head.selection-locked;
-                filtered: root.filtered;
-                toggle => { root.set-selected(row.id, !row.selected); }
-                pick => { root.inspect(row.id); }
-                move-up => { root.reorder(row.id, true); }
-                move-down => { root.reorder(row.id, false); }
+        // The rows, or a card over the hidden list. The list stays made, so the host can scroll
+        // it to a row (`reveal`).
+        Rectangle {
+            vertical-stretch: 1;
+            list := ListView {
+                width: parent.width;
+                height: parent.height;
+                visible: !root.head.card-shown;
+                content-y <=> root.list-scroll;
+                for row in root.rows: EpRow {
+                    item: row;
+                    inspected: row.id == root.marked;
+                    locked: root.head.selection-locked;
+                    filtered: root.filtered;
+                    toggle => { root.set-selected(row.id, !row.selected); }
+                    pick => { root.inspect(row.id); }
+                    move-up => { root.reorder(row.id, true); }
+                    move-down => { root.reorder(row.id, false); }
+                }
+            }
+
+            if root.head.card-shown: VerticalLayout {
+                width: parent.width;
+                height: parent.height;
+                padding: 48px;
+                spacing: 8px;
+                alignment: start;
+                if root.head.card-spinner: HorizontalLayout {
+                    alignment: center;
+                    Ring { spinning: true; }
+                }
+                Text {
+                    text: root.head.card-title;
+                    color: Theme.fg;
+                    font-size: 15px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                }
+                Text {
+                    text: root.head.card-text;
+                    color: Theme.mute;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                }
+                if root.head.card-action != "": HorizontalLayout {
+                    alignment: center;
+                    padding-top: 6px;
+                    AccentButton {
+                        text: root.head.card-action;
+                        enabled: !root.busy;
+                        clicked => { root.open-folder(); }
+                    }
+                }
             }
         }
 
