@@ -36,8 +36,15 @@ fn index(mode: Mode) -> usize {
     }
 }
 
-/// What a hop takes: the newest state, each mode's update, and the dones.
-pub(crate) type Taken = (Option<ViewState>, [Update; 2], Vec<JobDone>);
+/// What a hop takes.
+pub(crate) struct Taken {
+    /// The newest state, if one was pushed since.
+    pub(crate) state: Option<ViewState>,
+    /// The remux and the extract list's update.
+    pub(crate) lists: [Update; 2],
+    /// The ends of jobs, applied after the state.
+    pub(crate) dones: Vec<JobDone>,
+}
 
 /// The pending slot. A push answers whether the caller must schedule a hop; the hop calls `take`.
 #[derive(Default)]
@@ -116,12 +123,11 @@ impl Coalescer {
     pub(crate) fn take(&self) -> Taken {
         let mut pending = self.lock();
         pending.scheduled = false;
-        let lists = pending.lists.each_mut().map(ModeList::take);
-        (
-            pending.state.take(),
-            lists,
-            std::mem::take(&mut pending.dones),
-        )
+        Taken {
+            lists: pending.lists.each_mut().map(ModeList::take),
+            state: pending.state.take(),
+            dones: std::mem::take(&mut pending.dones),
+        }
     }
 }
 
@@ -132,11 +138,16 @@ pub(crate) struct SlintPublisher {
     pending: Arc<Coalescer>,
 }
 
+/// Gives `app` the two modes' row models, which every publication then updates in place. Call it
+/// once, before the first publication: rows written into another model are lost.
+pub(crate) fn install_models(app: &App) {
+    app.set_remux_rows(ModelRc::from(Rc::new(VecModel::<QueueRow>::default())));
+    app.set_extract_rows(ModelRc::from(Rc::new(VecModel::<QueueRow>::default())));
+}
+
 impl SlintPublisher {
-    /// Gives `app` the two modes' row models, which every publication then updates in place.
+    /// Publishes to `app`, whose row models [`install_models`] put in place.
     pub(crate) fn new(app: &App) -> Self {
-        app.set_remux_rows(ModelRc::from(Rc::new(VecModel::<QueueRow>::default())));
-        app.set_extract_rows(ModelRc::from(Rc::new(VecModel::<QueueRow>::default())));
         Self {
             window: app.as_weak(),
             pending: Arc::default(),
@@ -187,7 +198,11 @@ impl SlintPublisher {
 
 /// Applies everything pending to the window, on the event loop.
 pub(crate) fn hop(pending: &Coalescer, window: &slint::Weak<App>) {
-    let (state, [remux, extract], _dones) = pending.take();
+    let Taken {
+        state,
+        lists: [remux, extract],
+        dones: _unshown,
+    } = pending.take();
     let Some(app) = window.upgrade() else {
         return;
     };
@@ -216,16 +231,25 @@ impl Publisher for SlintPublisher {
     }
 }
 
-/// Writes `mode`'s update: its header when it changed, and its rows into the mode's model.
+/// Writes `mode`'s update: its header when it changed, and its rows into the mode's model. A card
+/// puts the list back at the top, as the webview's `clearList` does: the rows that come after it
+/// (another folder's, most often) start there.
 fn apply(app: &App, mode: Mode, update: Update) {
     let (rows, head) = match mode {
         Mode::Remux => (app.get_remux_rows(), app.get_remux_head()),
         Mode::Extract => (app.get_extract_rows(), app.get_extract_head()),
     };
     if let Some(new) = update.head.filter(|new| *new != head) {
+        let top = new.card_shown;
         match mode {
             Mode::Remux => app.set_remux_head(new),
             Mode::Extract => app.set_extract_head(new),
+        }
+        if top {
+            match mode {
+                Mode::Remux => app.set_remux_scroll(0.0),
+                Mode::Extract => app.set_extract_scroll(0.0),
+            }
         }
     }
     let Some(model) = rows.as_any().downcast_ref::<VecModel<QueueRow>>() else {
@@ -269,15 +293,15 @@ mod tests {
         // An older state never replaces a newer one.
         assert!(!pending.push_state(&state(2)));
 
-        let (taken, _, dones) = pending.take();
-        assert_eq!(taken.map(|s| s.seq), Some(3));
-        assert!(dones.is_empty());
+        let taken = pending.take();
+        assert_eq!(taken.state.map(|s| s.seq), Some(3));
+        assert!(taken.dones.is_empty());
         // Nothing is left, and an older state after the take is still dropped.
         assert!(!pending.push_state(&state(2)));
-        assert_eq!(pending.take().0.map(|s| s.seq), None);
+        assert_eq!(pending.take().state.map(|s| s.seq), None);
         // A newer one after the take schedules its own hop.
         assert!(pending.push_state(&state(4)));
-        assert_eq!(pending.take().0.map(|s| s.seq), Some(4));
+        assert_eq!(pending.take().state.map(|s| s.seq), Some(4));
     }
 
     #[test]
@@ -286,14 +310,14 @@ mod tests {
         assert!(pending.push_state(&state(5)));
         assert!(!pending.push_done(&done(7)));
 
-        let (taken, _, dones) = pending.take();
-        assert_eq!(taken.map(|s| s.seq), Some(5));
+        let Taken { state, dones, .. } = pending.take();
+        assert_eq!(state.map(|s| s.seq), Some(5));
         assert_eq!(dones.iter().map(|d| d.job_id).collect::<Vec<_>>(), [7]);
 
         // A done alone schedules a hop; the state it ended in went out with an earlier one.
         assert!(pending.push_done(&done(8)));
-        let (taken, _, dones) = pending.take();
-        assert!(taken.is_none());
+        let Taken { state, dones, .. } = pending.take();
+        assert!(state.is_none());
         assert_eq!(dones.iter().map(|d| d.job_id).collect::<Vec<_>>(), [8]);
     }
 }

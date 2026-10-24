@@ -37,6 +37,7 @@ pub(crate) fn boot_mode(state: &ViewState) -> Mode {
 struct Intents {
     core: CoreHandle,
     runtime: Handle,
+    window: slint::Weak<App>,
 }
 
 impl Intents {
@@ -50,81 +51,84 @@ impl Intents {
             answered();
         });
     }
+
+    /// Sends the Intent `make` builds for the mode the window shows; nothing once it is closed.
+    fn send_shown(
+        &self,
+        name: &'static str,
+        make: impl FnOnce(PipelineMode) -> Intent,
+        answered: impl FnOnce() + Send + 'static,
+    ) {
+        if let Some(app) = self.window.upgrade() {
+            self.send(name, make(pipeline(app.get_mode())), answered);
+        }
+    }
+}
+
+/// Clears the one-dialog flag when dropped, so a dialog that panics cannot leave Open folder dead.
+struct Picking(Arc<AtomicBool>);
+
+impl Drop for Picking {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
 }
 
 /// Wires the window's queue callbacks to the core. Each acts on the mode the window shows.
 pub(crate) fn wire(app: &App, core: CoreHandle, runtime: Handle, publisher: SlintPublisher) {
-    let intents = Intents { core, runtime };
     let window = app.as_weak();
-    // The shown mode; only read in a callback, while the window is up.
-    let shown = move || window.upgrade().map(|app| app.get_mode());
+    let intents = Intents {
+        core,
+        runtime,
+        window: window.clone(),
+    };
 
-    let (send, mode) = (intents.clone(), shown.clone());
+    let send = intents.clone();
     app.on_set_selected(move |id, selected| {
-        if let Some(mode) = mode() {
-            let id = id.into();
-            let mode = pipeline(mode);
-            send.send(
-                "set_selected",
-                Intent::SetSelected { mode, id, selected },
-                || {},
-            );
-        }
+        let id = id.into();
+        let intent = |mode| Intent::SetSelected { mode, id, selected };
+        send.send_shown("set_selected", intent, || {});
     });
 
-    let (send, mode) = (intents.clone(), shown.clone());
+    let send = intents.clone();
     app.on_set_all_selected(move |selected| {
-        if let Some(mode) = mode() {
-            let mode = pipeline(mode);
-            send.send(
-                "set_all_selected",
-                Intent::SetAllSelected { mode, selected },
-                || {},
-            );
-        }
+        let intent = |mode| Intent::SetAllSelected { mode, selected };
+        send.send_shown("set_all_selected", intent, || {});
     });
 
-    let (send, mode) = (intents.clone(), shown.clone());
+    let send = intents.clone();
     app.on_reorder(move |id, up| {
-        if let Some(mode) = mode() {
-            let direction = if up { Direction::Up } else { Direction::Down };
-            let (mode, id) = (pipeline(mode), id.into());
-            send.send(
-                "reorder",
-                Intent::Reorder {
-                    mode,
-                    id,
-                    direction,
-                },
-                || {},
-            );
-        }
+        let direction = if up { Direction::Up } else { Direction::Down };
+        let id = id.into();
+        let intent = |mode| Intent::Reorder {
+            mode,
+            id,
+            direction,
+        };
+        send.send_shown("reorder", intent, || {});
     });
 
     // The window marks the row at once; the mark is dropped once the core answered, by then the
     // published Episode Inspector names the row, unless a later pick is still pending.
-    let (send, mode, window) = (intents.clone(), shown.clone(), app.as_weak());
+    let send = intents.clone();
     app.on_inspect(move |id| {
-        if let Some(mode) = mode() {
-            let window = window.clone();
-            let picked = id.clone();
-            let intent = Intent::Inspect {
-                mode: pipeline(mode),
-                id: Some(id.into()),
-            };
-            send.send("inspect", intent, move || {
-                let _ = window.upgrade_in_event_loop(move |app| {
-                    if app.get_pending_inspect() == picked {
-                        app.set_pending_inspect("".into());
-                    }
-                });
+        let (window, picked) = (send.window.clone(), id.clone());
+        let intent = |mode| Intent::Inspect {
+            mode,
+            id: Some(id.into()),
+        };
+        send.send_shown("inspect", intent, move || {
+            let _ = window.upgrade_in_event_loop(move |app| {
+                if app.get_pending_inspect() == picked {
+                    app.set_pending_inspect("".into());
+                }
             });
-        }
+        });
     });
 
-    let (runtime, mode) = (intents.runtime.clone(), shown.clone());
+    let (runtime, shown) = (intents.runtime.clone(), window.clone());
     app.on_set_filter(move |filter| {
-        if let Some(mode) = mode() {
+        if let Some(mode) = shown.upgrade().map(|app| app.get_mode()) {
             // Kept now, so the last click wins; the rows are mapped again off the event loop, as
             // every publication's are, with whatever filter is newest by then.
             publisher.set_filter(mode, filter);
@@ -135,7 +139,6 @@ pub(crate) fn wire(app: &App, core: CoreHandle, runtime: Handle, publisher: Slin
 
     // One folder dialog at a time: it has no parent window, so it does not block a second click.
     let picking = Arc::new(AtomicBool::new(false));
-    let window = app.as_weak();
     app.on_open_folder(move || {
         let Some(app) = window.upgrade() else {
             return;
@@ -144,13 +147,17 @@ pub(crate) fn wire(app: &App, core: CoreHandle, runtime: Handle, publisher: Slin
             return;
         }
         let mode = pipeline(app.get_mode());
-        let (send, picking, window) = (intents.clone(), Arc::clone(&picking), window.clone());
+        let (send, picking, window) = (
+            intents.clone(),
+            Picking(Arc::clone(&picking)),
+            window.clone(),
+        );
         // The dialog blocks until it is answered: never on the event loop.
         intents.runtime.spawn_blocking(move || {
             let picked = rfd::FileDialog::new().pick_folder();
             // Back on the event loop, so the Intents keep their order with the other callbacks'.
             let _ = window.upgrade_in_event_loop(move |app| {
-                picking.store(false, Ordering::Relaxed);
+                drop(picking);
                 // A batch may have started while the dialog was open (app.js re-checks too).
                 let Some(path) = picked.filter(|_| !app.get_busy()) else {
                     return;

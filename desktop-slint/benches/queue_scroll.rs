@@ -13,12 +13,16 @@
 //! does not exist), with the release profile's LTO; to repeat a run, start the executable it
 //! printed (`target/release/deps/queue_scroll-*`) directly.
 //!
-//! `pub_ms` is the UI-thread time of each publication's hop (the take and the model writes), not
-//! the layout those writes cause, which the next frame's `render_ms` carries; `reset_ms` the first
-//! hop, which puts all 1000 rows into the empty model; `filter_ms` the hop of a filter change to
-//! Failed at the end, which writes nearly every row (its mapping runs off the UI thread, as in the
-//! app). `interval_ms` is the time between presented frames (vsync-bound, so a hair over 16.67 ms
-//! is jitter, and over 25 ms a missed vsync); `render_ms` each frame's rendering on the UI thread.
+//! `map_ms` is each publication's push on the publishing thread, off the UI thread: the rows
+//! mapped, then the diff against the model under the coalescer's lock. `pub_ms` is the UI-thread
+//! time of each publication's hop (the take and the model writes), not the layout those writes
+//! cause, which the next frame's `render_ms` carries; `reset_ms` the first hop, which puts all
+//! 1000 rows into the empty model; `filter_ms` the hop of a filter change to Failed at the end,
+//! which writes nearly every row (the bench maps it on the UI thread before the timed hop; the app
+//! maps it off the UI thread). The Library is the core's for these rows, so each release's group
+//! header is its own. `interval_ms` is the time between presented frames (vsync-bound, so a hair
+//! over 16.67 ms is jitter, and over 25 ms a missed vsync); `render_ms` each frame's rendering on
+//! the UI thread.
 //! Budget (#135): publication p99 < 4 ms, and no frame over 16.7 ms, read as no render over
 //! 16.7 ms and no missed vsync. The line ends with PASS or FAIL for each.
 
@@ -32,13 +36,15 @@ mod publisher;
 #[path = "../src/queue.rs"]
 mod queue;
 
-use mkv_anime_batch_slint_ui::{App, Mode, QueueFilter, QueueRow, Theme};
+use mkv_anime_batch_slint_ui::{App, Mode, QueueFilter, Theme};
 use mkv_desktop_core::actor::ViewState;
-use mkv_desktop_core::presentation::{bucket, status_label, status_title, status_tone, Tone};
+use mkv_desktop_core::presentation::{
+    bucket, library, status_label, status_title, status_tone, Tone,
+};
 use mkv_desktop_core::queue::Row;
 use mkv_desktop_core::snapshot::ItemStatus;
 use publisher::Coalescer;
-use slint::{ComponentHandle, ModelRc, RenderingState, VecModel};
+use slint::{ComponentHandle, RenderingState};
 use std::error::Error;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -225,8 +231,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .select()?;
     let app = App::new()?;
     app.global::<Theme>().set_glass(false);
-    app.set_remux_rows(ModelRc::new(VecModel::<QueueRow>::default()));
-    app.set_extract_rows(ModelRc::new(VecModel::<QueueRow>::default()));
+    publisher::install_models(&app);
     app.window().set_maximized(true);
 
     let rows = synthetic_rows(ROWS);
@@ -236,16 +241,21 @@ fn main() -> Result<(), Box<dyn Error>> {
     state.remux.title = "Bench".into();
     state.remux.empty = None;
     state.remux.manifest_rev = 1;
+    state.remux.library = library(Some("/media/anime"), &rows);
     state.remux.rows = Arc::new(rows);
 
     // SlintPublisher's push and schedule, with the hop timed: its time is the publication's
     // UI-thread time.
     let pending = Arc::new(Coalescer::default());
     let hops: Arc<Mutex<Vec<f64>>> = Arc::default();
-    let (window, timed) = (app.as_weak(), Arc::clone(&hops));
+    let maps: Arc<Mutex<Vec<f64>>> = Arc::default();
+    let (window, timed, mapped) = (app.as_weak(), Arc::clone(&hops), Arc::clone(&maps));
     let (filtered, filter_window) = (Arc::clone(&pending), app.as_weak());
     spawn_churn(state, move |state| {
-        if pending.push_state(state) {
+        let start = Instant::now();
+        let scheduled = pending.push_state(state);
+        mapped.lock().unwrap().push(ms(start.elapsed()));
+        if scheduled {
             let (pending, window, hops) =
                 (Arc::clone(&pending), window.clone(), Arc::clone(&timed));
             let _ = slint::invoke_from_event_loop(move || {
@@ -281,6 +291,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         let mut hops = hops.lock().unwrap();
                         reset = hops.first().copied().unwrap_or(f64::NAN);
                         hops.clear();
+                        maps.lock().unwrap().clear();
                     }
                 }
                 renders.push(ms(now.duration_since(before)));
@@ -288,18 +299,19 @@ fn main() -> Result<(), Box<dyn Error>> {
                 // window by its header), and 30 s at 6 px a frame (about 10.7k px, into the third
                 // release) does not reach it anyway.
                 let max = content - app.window().size().to_logical(app.window().scale_factor()).height;
-                let y = (-app.get_list_scroll() + STEP * dir).clamp(0.0, max.max(0.0));
+                let y = (-app.get_remux_scroll() + STEP * dir).clamp(0.0, max.max(0.0));
                 if y <= 0.0 || y >= max {
                     dir = -dir;
                 }
-                app.set_list_scroll(-y);
+                app.set_remux_scroll(-y);
             }
             if since >= WARMUP + WINDOW {
                 reported = true;
                 let over = |ms: f64| intervals.iter().filter(|&&i| i > ms).count();
                 let (over_frame, over_vsync) = (over(16.7), over(25.0));
                 let mut hops = std::mem::take(&mut *hops.lock().unwrap());
-                // A filter change: kept on the UI thread, mapped as off it, then the hop timed.
+                let mut maps = std::mem::take(&mut *maps.lock().unwrap());
+                // A filter change: kept and mapped on the UI thread, then the hop timed.
                 filtered.set_filter(Mode::Remux, QueueFilter::Failed);
                 filtered.remap(Mode::Remux);
                 let start = Instant::now();
@@ -313,9 +325,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                     sorted[((sorted.len() - 1) as f64 * 0.99).round() as usize] < 4.0
                 };
                 println!(
-                    "BENCH session={} renderer=skia-opengl rows={ROWS} publications={} {} reset_ms={reset:.2} filter_ms={filter:.2} frames={} {} over_16.7ms={over_frame} over_25ms={over_vsync} {} budget_pub={} budget_frame={}",
+                    "BENCH session={} renderer=skia-opengl rows={ROWS} publications={} {} {} reset_ms={reset:.2} filter_ms={filter:.2} frames={} {} over_16.7ms={over_frame} over_25ms={over_vsync} {} budget_pub={} budget_frame={}",
                     if std::env::var_os("WAYLAND_DISPLAY").is_some() { "wayland" } else { "x11" },
                     hops.len(),
+                    summary("map", &mut maps),
                     summary("pub", &mut hops),
                     intervals.len(),
                     summary("interval", &mut intervals),
