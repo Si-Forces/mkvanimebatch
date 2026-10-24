@@ -187,6 +187,15 @@ impl SlintPublisher {
         hop(&self.pending, &self.window);
     }
 
+    /// Applies `states` in one hop, as when they all land before the event loop takes them.
+    #[cfg(test)]
+    pub(crate) fn show_coalesced(&self, states: &[&ViewState]) {
+        for state in states {
+            self.pending.push_state(state);
+        }
+        hop(&self.pending, &self.window);
+    }
+
     /// Shows `filter`'s rows of `mode` at once, on the event loop's thread, as a click would.
     #[cfg(test)]
     pub(crate) fn show_filter(&self, mode: Mode, filter: QueueFilter) {
@@ -232,24 +241,24 @@ impl Publisher for SlintPublisher {
 }
 
 /// Writes `mode`'s update: its header when it changed, and its rows into the mode's model. A card
-/// puts the list back at the top, as the webview's `clearList` does: the rows that come after it
-/// (another folder's, most often) start there.
+/// staged since the last hop puts the list back at the top, as the webview's `clearList` does: the
+/// rows that come after it (another folder's, most often) start there, even when they replaced
+/// the card in the pending slot before this hop.
 fn apply(app: &App, mode: Mode, update: Update) {
     let (rows, head) = match mode {
         Mode::Remux => (app.get_remux_rows(), app.get_remux_head()),
         Mode::Extract => (app.get_extract_rows(), app.get_extract_head()),
     };
     if let Some(new) = update.head.filter(|new| *new != head) {
-        let top = new.card_shown;
         match mode {
             Mode::Remux => app.set_remux_head(new),
             Mode::Extract => app.set_extract_head(new),
         }
-        if top {
-            match mode {
-                Mode::Remux => app.set_remux_scroll(0.0),
-                Mode::Extract => app.set_extract_scroll(0.0),
-            }
+    }
+    if update.to_top {
+        match mode {
+            Mode::Remux => app.set_remux_scroll(0.0),
+            Mode::Extract => app.set_extract_scroll(0.0),
         }
     }
     let Some(model) = rows.as_any().downcast_ref::<VecModel<QueueRow>>() else {
