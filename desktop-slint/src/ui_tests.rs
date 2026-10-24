@@ -246,9 +246,16 @@ fn an_empty_queue_shows_the_empty_card_and_each_mode_its_own_list() {
     state.extract.empty = None;
     state.extract.title = "Frieren".into();
     apply(&app, &state);
+    // The window's real size, so the card has room to stretch into.
+    app.window().set_size(slint::PhysicalSize::new(920, 640));
     app.show().unwrap();
 
-    only(&app, "No episodes yet");
+    let card = only(&app, "No episodes yet");
+    // The header keeps its own height over a card: the chips stay right under the title.
+    let (title, chip) = (only(&app, "No folder open"), only(&app, "All 0"));
+    let gap = chip.absolute_position().y - title.absolute_position().y;
+    assert!(gap < 60.0, "the chips sit {gap}px below the title");
+    assert!(card.absolute_position().y > chip.absolute_position().y);
     let opened = Rc::new(Cell::new(0));
     let counter = Rc::clone(&opened);
     app.on_open_folder(move || counter.set(counter.get() + 1));
