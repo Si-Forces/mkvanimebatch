@@ -1,14 +1,49 @@
-// The Slint host's window (ADR-0017). Layout and bindings only: every text it shows beyond the
-// brand and the buttons' accessible labels comes from the published View State.
+// The Slint host's window (ADR-0017). Layout and bindings only: beyond fixed markup labels (as
+// index.html has), every text it shows comes from the published View State through the host.
 import "fonts/Onest-wght.ttf";
 import "fonts/Unbounded-wght.ttf";
 import "fonts/JetBrainsMono-wght.ttf";
 import { Theme } from "theme.slint";
 import { TitleBar } from "title-bar.slint";
 import { FontProbe } from "font-probe.slint";
+import { Mode, QueueFilter, QueueHead, QueuePane, QueueRow, RowMark, RowTone } from "queue.slint";
 
 // FontProbe is test only; a .slint file cannot be compiled per cfg, so it ships (a few bytes).
-export { Theme, FontProbe }
+export { Theme, FontProbe, Mode, QueueFilter, QueueHead, QueueRow, RowMark, RowTone }
+
+// A mode's tab in the sidebar (.task-row .nav): its name over what it does.
+component ModeTab inherits Rectangle {
+    in property <string> title;
+    in property <string> subtitle;
+    in property <bool> active;
+    callback clicked();
+    height: 44px;
+    border-radius: 8px;
+    background: touch.has-hover ? Theme.hover : active ? Theme.sel : transparent;
+    accessible-role: tab;
+    accessible-label: title;
+    accessible-item-selected: active;
+    accessible-action-default => { root.clicked(); }
+    VerticalLayout {
+        padding-left: 8px;
+        alignment: center;
+        Text {
+            text: root.title;
+            color: Theme.fg;
+            font-weight: 500;
+            accessible-role: none;
+        }
+        Text {
+            text: root.subtitle;
+            color: Theme.mute;
+            font-size: 11px;
+            accessible-role: none;
+        }
+    }
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
 
 export component App inherits Window {
     // tauri.conf.json's window: 920x640, at least 760x520, frameless.
@@ -24,14 +59,28 @@ export component App inherits Window {
     default-font-family: "Onest";
     default-font-size: 13px;
 
-    // From the published View State (P0 proves the Publisher path with these three).
-    in property <string> mode-title;
-    in property <string> count-text;
+    // From the published View State: each mode's list header and rows, and whether a start or a
+    // job holds the batch.
+    in property <QueueHead> remux-head;
+    in property <QueueHead> extract-head;
+    in property <[QueueRow]> remux-rows;
+    in property <[QueueRow]> extract-rows;
     in property <bool> busy;
+    // The mode shown.
+    in-out property <Mode> mode;
+    // A row picked for the Episode Inspector whose Inspect is not answered yet.
+    in-out property <string> pending-inspect;
     // A Close whose teardown failed: the window stays open and says why.
     in property <string> notice-title;
     in property <string> notice-text;
 
+    // The shown mode's list asks; the host sends the Intent for `mode`.
+    callback set-selected(id: string, selected: bool);
+    callback set-all-selected(selected: bool);
+    callback reorder(id: string, up: bool);
+    callback inspect(id: string);
+    callback set-filter(filter: QueueFilter);
+    callback open-folder();
     callback close-window();
     // Through winit, not `minimized`: see the host's `minimize`.
     callback minimize-window();
@@ -94,41 +143,58 @@ export component App inherits Window {
                 }
             }
 
-            // The list header (.list-head), until P2 brings the queue.
-            Rectangle {
-                background: Theme.content;
-                VerticalLayout {
-                    padding-left: 20px;
-                    padding-right: 20px;
-                    padding-top: 16px;
-                    alignment: start;
-                    spacing: 4px;
-                    HorizontalLayout {
-                        spacing: 8px;
+            HorizontalLayout {
+                // The sidebar (.side): the Pipeline's mode tabs. The Library and the presets are P3/P4.
+                Rectangle {
+                    width: 220px;
+                    background: Theme.side;
+                    VerticalLayout {
+                        padding-top: 14px;
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        spacing: 2px;
                         alignment: start;
                         Text {
-                            text: root.mode-title;
-                            color: Theme.fg;
-                            font-size: 18px;
-                            font-weight: 700;
-                            overflow: elide;
+                            text: "PIPELINE";
+                            color: Theme.mute;
+                            font-size: 11px;
+                            font-weight: 600;
+                            letter-spacing: 0.77px;
                         }
-                        // The batch is held: a dot, no text (the status pill's text is P5's).
-                        if root.busy: VerticalLayout {
-                            alignment: center;
-                            Rectangle {
-                                width: 8px;
-                                height: 8px;
-                                border-radius: 4px;
-                                background: Theme.info;
-                            }
+                        ModeTab {
+                            title: "Remux";
+                            subtitle: "FLAC → Opus, mux subs";
+                            active: root.mode == Mode.remux;
+                            clicked => { root.mode = Mode.remux; }
+                        }
+                        ModeTab {
+                            title: "Extract";
+                            subtitle: "Subs, fonts, chapters";
+                            active: root.mode == Mode.extract;
+                            clicked => { root.mode = Mode.extract; }
                         }
                     }
-                    Text {
-                        text: root.count-text;
-                        color: Theme.mute;
-                        font-size: 12px;
+                    Rectangle {
+                        x: parent.width - 1px;
+                        width: 1px;
+                        background: Theme.line;
                     }
+                }
+
+                QueuePane {
+                    head: root.mode == Mode.remux ? root.remux-head : root.extract-head;
+                    rows: root.mode == Mode.remux ? root.remux-rows : root.extract-rows;
+                    busy: root.busy;
+                    pending-inspect: root.pending-inspect;
+                    set-selected(id, selected) => { root.set-selected(id, selected); }
+                    set-all-selected(selected) => { root.set-all-selected(selected); }
+                    reorder(id, up) => { root.reorder(id, up); }
+                    inspect(id) => {
+                        root.pending-inspect = id;
+                        root.inspect(id);
+                    }
+                    set-filter(filter) => { root.set-filter(filter); }
+                    open-folder => { root.open-folder(); }
                 }
             }
         }

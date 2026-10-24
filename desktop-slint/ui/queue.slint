@@ -1,0 +1,602 @@
+// Redesign C's episode list (desktop-tauri/ui/index.html .main, queue-view.js, style.css). Layout
+// and bindings only: the host maps every row and the header (desktop-slint/src/queue.rs) and does
+// what the controls ask.
+import { ListView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+export enum Mode { remux, extract }
+
+export enum QueueFilter { all, todo, done, failed }
+
+export enum RowTone { info, ok, err, mute }
+
+// The status mark beside the label.
+export enum RowMark { none, ring, spin, ok, err }
+
+export struct QueueRow {
+    id: string,
+    num: string,
+    name: string,
+    meta: string,
+    meta-error: bool,
+    label: string,
+    tone: RowTone,
+    mark: RowMark,
+    // Percent, for the ring's arc.
+    progress: float,
+    // The status hover text.
+    title: string,
+    selected: bool,
+    check-label: string,
+    // Whether the filter shows the row; a hidden row stays in the model with no height.
+    shown: bool,
+    // The release header drawn above the row, if any, and how many rows it heads.
+    head: string,
+    head-count: int,
+}
+
+export struct QueueHead {
+    title: string,
+    crumbs-lead: string,
+    crumbs-end: string,
+    count-text: string,
+    all: int,
+    todo: int,
+    done: int,
+    failed: int,
+    filter: QueueFilter,
+    filter-empty: bool,
+    // The card shown instead of the rows: its texts, its button (none when empty) and a spinner.
+    card-shown: bool,
+    card-title: string,
+    card-text: string,
+    card-action: string,
+    card-spinner: bool,
+    selection-locked: bool,
+    // The row the Episode Inspector shows.
+    inspected: string,
+}
+
+// The status ring (.ep-ring): a track and the progress arc, or a spinning quarter.
+component Ring inherits Rectangle {
+    in property <float> progress;
+    in property <bool> spinning;
+    property <angle> end: spinning ? 90deg : clamp(progress, 0.5, 99.9) / 100 * 360deg;
+    width: 20px;
+    height: 20px;
+
+    Path {
+        width: 20px;
+        height: 20px;
+        viewbox-width: 20;
+        viewbox-height: 20;
+        stroke: Theme.line;
+        stroke-width: 3px;
+        commands: "M 10 2 A 8 8 0 1 1 9.99 2";
+    }
+    Path {
+        width: 20px;
+        height: 20px;
+        viewbox-width: 20;
+        viewbox-height: 20;
+        stroke: Theme.info;
+        stroke-width: 3px;
+        stroke-line-cap: round;
+        transform-rotation: root.spinning ? mod(animation-tick(), 1100ms) / 1100ms * 360deg : 0deg;
+        MoveTo { x: 10; y: 2; }
+        ArcTo {
+            x: 10 + 8 * Math.sin(root.end);
+            y: 10 - 8 * Math.cos(root.end);
+            radius-x: 8;
+            radius-y: 8;
+            large-arc: root.end > 180deg;
+            sweep: true;
+        }
+    }
+}
+
+component Glyph inherits Path {
+    in property <string> glyph;
+    width: 14px;
+    height: 14px;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    stroke-width: 2.5px;
+    stroke-line-cap: round;
+    commands: glyph;
+}
+
+component ReorderButton inherits Rectangle {
+    in property <string> glyph;
+    in property <bool> enabled;
+    callback clicked();
+    width: 22px;
+    height: 18px;
+    border-radius: 5px;
+    background: touch.has-hover && enabled ? Theme.sel : transparent;
+    accessible-role: button;
+    accessible-enabled: enabled;
+    accessible-action-default => { if enabled { root.clicked(); } }
+
+    Path {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 10px;
+        height: 10px;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        stroke: touch.has-hover && enabled ? Theme.fg : Theme.mute;
+        stroke-width: 3px;
+        stroke-line-cap: round;
+        commands: glyph;
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+// One row (.ep-row) with the release header above it when it starts a run.
+component EpRow inherits Rectangle {
+    in property <QueueRow> item;
+    in property <bool> inspected;
+    in property <bool> locked;
+    // A filter shows: the order cannot change.
+    in property <bool> filtered;
+    callback toggle();
+    callback pick();
+    callback move-up();
+    callback move-down();
+
+    property <length> head-height: item.head != "" ? 30px : 0px;
+    property <color> tone-color: item.tone == RowTone.info ? Theme.info
+        : item.tone == RowTone.ok ? Theme.ok
+        : item.tone == RowTone.err ? Theme.err
+        : Theme.mute;
+    // Not `visible`: on a ListView row's root it wraps the row, and the ListView then cannot
+    // place it. A hidden row has no height and draws nothing.
+    height: item.shown ? self.head-height + 52px : 0px;
+
+    if item.shown && item.head != "": Rectangle {
+        x: 12px;
+        y: 0;
+        width: parent.width - 24px;
+        height: root.head-height;
+        border-radius: 10px;
+        background: Theme.head;
+        HorizontalLayout {
+            padding-left: 8px;
+            padding-right: 8px;
+            Text {
+                text: root.item.head;
+                color: Theme.mute;
+                font-size: 11px;
+                font-weight: 600;
+                letter-spacing: 0.66px;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            Text {
+                text: root.item.head-count;
+                color: Theme.mute;
+                font-size: 11px;
+                font-weight: 600;
+                horizontal-alignment: right;
+                vertical-alignment: center;
+            }
+        }
+    }
+
+    // The list's side padding (.list: 0 12px).
+    if item.shown: body := TouchArea {
+        x: 12px;
+        y: root.head-height;
+        width: parent.width - 24px;
+        height: 52px;
+
+        Rectangle {
+            border-radius: 10px;
+            background: root.inspected ? Theme.accent-soft : body.has-hover ? Theme.hover : transparent;
+            border-width: root.inspected ? 1px : 0px;
+            border-color: Theme.accent-ring;
+        }
+
+        HorizontalLayout {
+            padding-left: 10px;
+            padding-right: 4px;
+            spacing: 10px;
+
+            // The checkbox (.ep-select-check).
+            VerticalLayout {
+                alignment: center;
+                check := Rectangle {
+                    width: 16px;
+                    height: 16px;
+                    border-radius: 4px;
+                    background: root.item.selected ? Theme.accent : Theme.field;
+                    border-width: root.item.selected ? 0px : 1.5px;
+                    border-color: Theme.mute;
+                    opacity: root.locked ? 0.5 : 1;
+                    accessible-role: checkbox;
+                    accessible-checkable: true;
+                    accessible-checked: root.item.selected;
+                    accessible-label: root.item.check-label;
+                    accessible-enabled: !root.locked;
+                    accessible-action-default => { if !root.locked { root.toggle(); } }
+
+                    if root.item.selected: Path {
+                        width: 10px;
+                        height: 10px;
+                        viewbox-width: 10;
+                        viewbox-height: 10;
+                        commands: "M 1.5 5.2 L 4 7.7 L 8.5 2.5";
+                        stroke: Theme.accent-fg;
+                        stroke-width: 1.8px;
+                    }
+                    TouchArea {
+                        enabled: !root.locked;
+                        clicked => { root.toggle(); }
+                    }
+                }
+            }
+
+            // The pick (.ep-pick): number, name and meta line; clicking inspects the row.
+            Rectangle {
+                horizontal-stretch: 1;
+                accessible-role: button;
+                accessible-label: root.item.name;
+                accessible-action-default => { root.pick(); }
+                TouchArea {
+                    clicked => { root.pick(); }
+                }
+                HorizontalLayout {
+                    spacing: 12px;
+                    opacity: root.item.selected ? 1 : 0.45;
+                    Text {
+                        width: 44px;
+                        text: root.item.num;
+                        color: Theme.fg;
+                        font-family: "Unbounded";
+                        font-size: 17px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                        accessible-role: none;
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        Text {
+                            text: root.item.name;
+                            color: Theme.fg;
+                            font-weight: 600;
+                            overflow: elide;
+                            accessible-role: none;
+                        }
+                        Text {
+                            text: root.item.meta;
+                            color: root.item.meta-error ? Theme.err : Theme.path;
+                            font-size: 12px;
+                            overflow: elide;
+                        }
+                    }
+                }
+            }
+
+            // The status (.ep-status): the mark, then the label in the row's tone.
+            Rectangle {
+                max-width: 150px;
+                accessible-role: text;
+                accessible-label: root.item.label;
+                accessible-description: root.item.title;
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: end;
+                    if root.item.mark == RowMark.ring || root.item.mark == RowMark.spin: VerticalLayout {
+                        alignment: center;
+                        Ring {
+                            progress: root.item.progress;
+                            spinning: root.item.mark == RowMark.spin;
+                        }
+                    }
+                    if root.item.mark == RowMark.ok || root.item.mark == RowMark.err: VerticalLayout {
+                        alignment: center;
+                        Glyph {
+                            stroke: root.tone-color;
+                            glyph: root.item.mark == RowMark.ok ? "M5 12.5l4.5 4.5L19 7.5" : "M6 6l12 12M18 6L6 18";
+                        }
+                    }
+                    Text {
+                        text: root.item.label;
+                        color: root.tone-color;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        accessible-role: none;
+                    }
+                }
+            }
+
+            // Move up / Move down (.ep-reorder): shown on hover, gone while a filter shows.
+            VerticalLayout {
+                alignment: center;
+                opacity: body.has-hover && !root.filtered ? 1 : 0;
+                ReorderButton {
+                    glyph: "M6 15l6-6 6 6";
+                    enabled: !root.locked && !root.filtered;
+                    accessible-label: "Move up";
+                    clicked => { root.move-up(); }
+                }
+                ReorderButton {
+                    glyph: "M6 9l6 6 6-6";
+                    enabled: !root.locked && !root.filtered;
+                    accessible-label: "Move down";
+                    clicked => { root.move-down(); }
+                }
+            }
+        }
+    }
+}
+
+// A filter chip (.chip): its label and how many rows it shows.
+component Chip inherits Rectangle {
+    in property <string> label;
+    in property <int> count;
+    in property <bool> on;
+    callback clicked();
+    height: 24px;
+    width: content.preferred-width + 24px;
+    border-radius: self.height / 2;
+    background: on ? Theme.fg : Theme.sel;
+    border-width: 1px;
+    border-color: on ? Theme.fg : touch.has-hover ? Theme.mute : Theme.line;
+    accessible-role: button;
+    accessible-label: label;
+    accessible-checkable: true;
+    accessible-checked: on;
+    accessible-action-default => { root.clicked(); }
+
+    content := HorizontalLayout {
+        x: 12px;
+        width: self.preferred-width;
+        spacing: 4px;
+        Text {
+            text: root.label;
+            color: root.on ? Theme.bg : Theme.mute;
+            font-size: 12px;
+            font-weight: 500;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+        Text {
+            text: root.count;
+            color: root.on ? Theme.bg : Theme.mute;
+            font-size: 12px;
+            font-weight: 500;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+    }
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+// A text button (.link-btn).
+component LinkButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    callback clicked();
+    width: label.preferred-width + 8px;
+    height: 24px;
+    accessible-role: button;
+    accessible-label: text;
+    accessible-enabled: enabled;
+    accessible-action-default => { if enabled { root.clicked(); } }
+    label := Text {
+        text: root.text;
+        color: Theme.accent;
+        opacity: root.enabled ? 1 : 0.5;
+        font-size: 12px;
+        font-weight: 600;
+        vertical-alignment: center;
+        accessible-role: none;
+    }
+    TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+// The accent button (.btn.btn-accent).
+component AccentButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    callback clicked();
+    width: label.preferred-width + 36px;
+    height: 36px;
+    border-radius: self.height / 2;
+    background: Theme.accent;
+    opacity: enabled ? 1 : 0.5;
+    accessible-role: button;
+    accessible-label: text;
+    accessible-enabled: enabled;
+    accessible-action-default => { if enabled { root.clicked(); } }
+    label := Text {
+        text: root.text;
+        color: Theme.accent-fg;
+        font-weight: 700;
+        accessible-role: none;
+    }
+    TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+// One mode's list pane (.main): the list header, the filters, then the rows or a card.
+export component QueuePane inherits Rectangle {
+    in property <QueueHead> head;
+    in property <[QueueRow]> rows;
+    // A start or a job holds the batch: the selection hint says so and Open folder is locked.
+    in property <bool> busy;
+    // A row picked for the Episode Inspector whose Inspect is not answered yet: marked at once.
+    in property <string> pending-inspect;
+    callback set-selected(id: string, selected: bool);
+    callback set-all-selected(selected: bool);
+    callback reorder(id: string, up: bool);
+    callback inspect(id: string);
+    callback set-filter(filter: QueueFilter);
+    callback open-folder();
+
+    property <string> marked: pending-inspect != "" ? pending-inspect : head.inspected;
+    property <bool> filtered: head.filter != QueueFilter.all;
+    background: Theme.content;
+
+    VerticalLayout {
+        // The list header (.list-head).
+        VerticalLayout {
+            padding-left: 20px;
+            padding-right: 20px;
+            padding-top: 16px;
+            padding-bottom: 10px;
+            spacing: 10px;
+            HorizontalLayout {
+                spacing: 12px;
+                Text {
+                    text: root.head.title;
+                    color: Theme.fg;
+                    font-size: 18px;
+                    font-weight: 700;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
+                Text {
+                    text: root.head.count-text;
+                    color: Theme.mute;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+            }
+            if root.head.crumbs-end != "": HorizontalLayout {
+                alignment: start;
+                Text {
+                    text: root.head.crumbs-lead;
+                    color: Theme.path;
+                    font-size: 12px;
+                    overflow: elide;
+                }
+                Text {
+                    text: root.head.crumbs-end;
+                    color: Theme.fg;
+                    font-size: 12px;
+                    font-weight: 600;
+                    overflow: elide;
+                }
+            }
+            HorizontalLayout {
+                spacing: 6px;
+                Chip {
+                    label: "All";
+                    count: root.head.all;
+                    on: root.head.filter == QueueFilter.all;
+                    clicked => { root.set-filter(QueueFilter.all); }
+                }
+                Chip {
+                    label: "To do";
+                    count: root.head.todo;
+                    on: root.head.filter == QueueFilter.todo;
+                    clicked => { root.set-filter(QueueFilter.todo); }
+                }
+                Chip {
+                    label: "Done";
+                    count: root.head.done;
+                    on: root.head.filter == QueueFilter.done;
+                    clicked => { root.set-filter(QueueFilter.done); }
+                }
+                Chip {
+                    label: "Failed";
+                    count: root.head.failed;
+                    on: root.head.filter == QueueFilter.failed;
+                    clicked => { root.set-filter(QueueFilter.failed); }
+                }
+                Rectangle { horizontal-stretch: 1; }
+                LinkButton {
+                    text: "Select all";
+                    enabled: !root.head.selection-locked;
+                    clicked => { root.set-all-selected(true); }
+                }
+                LinkButton {
+                    text: "None";
+                    enabled: !root.head.selection-locked;
+                    clicked => { root.set-all-selected(false); }
+                }
+            }
+            Text {
+                text: root.busy ? "Selection is locked while the batch runs." : "Tick episodes to include them. Click a row to inspect it.";
+                color: Theme.mute;
+                font-size: 12px;
+            }
+        }
+        Rectangle {
+            height: 1px;
+            background: Theme.line;
+        }
+
+        if root.head.card-shown: VerticalLayout {
+            padding: 48px;
+            spacing: 8px;
+            alignment: start;
+            if root.head.card-spinner: HorizontalLayout {
+                alignment: center;
+                Ring { spinning: true; }
+            }
+            Text {
+                text: root.head.card-title;
+                color: Theme.fg;
+                font-size: 15px;
+                font-weight: 700;
+                horizontal-alignment: center;
+                wrap: word-wrap;
+            }
+            Text {
+                text: root.head.card-text;
+                color: Theme.mute;
+                horizontal-alignment: center;
+                wrap: word-wrap;
+            }
+            if root.head.card-action != "": HorizontalLayout {
+                alignment: center;
+                padding-top: 6px;
+                AccentButton {
+                    text: root.head.card-action;
+                    enabled: !root.busy;
+                    clicked => { root.open-folder(); }
+                }
+            }
+        }
+
+        if root.head.filter-empty: HorizontalLayout {
+            padding-left: 32px;
+            padding-right: 32px;
+            padding-top: 12px;
+            Text {
+                text: "No episodes match this filter.";
+                color: Theme.mute;
+            }
+        }
+
+        if !root.head.card-shown: ListView {
+            for row in root.rows: EpRow {
+                item: row;
+                inspected: row.id == root.marked;
+                locked: root.head.selection-locked;
+                filtered: root.filtered;
+                toggle => { root.set-selected(row.id, !row.selected); }
+                pick => { root.inspect(row.id); }
+                move-up => { root.reorder(row.id, true); }
+                move-down => { root.reorder(row.id, false); }
+            }
+        }
+
+    }
+}

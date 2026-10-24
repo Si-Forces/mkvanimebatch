@@ -19,7 +19,7 @@ Paths: `ui/` is `desktop-tauri/ui/`, `src/` is `desktop-tauri/src-tauri/src/`, `
 | [ ] | `dispatch`: send an Intent, answer `bool` or the refusal | `src/commands.rs:37`, `ui/app.js:266` | P0 | Host calls `CoreHandle::dispatch` directly; it sends at call time (P0 core commit), so call order is Intent order and `UNCHAINED_INTENTS` has no equivalent to keep. |
 | [ ] | `get_state`: whole View State | `src/commands.rs:25`, `ui/app.js:233` | P0 | No reload in a native host: the `Publisher` delivers every state; the coalescer keeps the newest `seq`. |
 | [ ] | `get_log`: a mode's whole Run Log | `src/commands.rs:31`, `ui/app.js:910` | P5 | Read at boot into the log model. |
-| [ ] | `pick_directory`: native folder dialog | `src/commands.rs:9`, `ui/app.js:619` | P2 | rfd (XDG portal), off the event loop; result sent back as an Intent. |
+| [x] | `pick_directory`: native folder dialog | `src/commands.rs:9`, `ui/app.js:619` | P2 | rfd (XDG portal, the Tauri host's features) on the runtime's blocking pool, then `ScanDirectory` (`intents.rs`). Not opened while busy. |
 | [ ] | `pick_subtitle_file`: native subtitle file dialog | `src/commands.rs:16`, `ui/app.js:560` | P3 | Same as above, with the subtitle filter. |
 | [ ] | `close_window`: two-phase teardown, then exit | `src/process.rs:29`, `ui/app.js:760` | P0 | Close request: `KeepWindowShown`, `begin_shutdown`, teardown on its own thread, then quit. |
 | [ ] | `minimize_window` | `src/window.rs:2`, `ui/app.js:761` | P0 | Through `WinitWindowAccessor::set_minimized` (Wayland cache bug, ADR-0017 decision 4); repeated minimize must work. |
@@ -42,11 +42,11 @@ Paths: `ui/` is `desktop-tauri/ui/`, `src/` is `desktop-tauri/src-tauri/src/`, `
 
 | ✓ | Intent | Sent from today | Slice | Notes |
 |---|---|---|---|---|
-| [ ] | `ScanDirectory` (path, force, no_cache) | `ui/directory-scan.js:14` | P2 | From the folder picker, the Library's Open folder, the empty state and the input-dir field. |
-| [ ] | `SetSelected` | `ui/queue-view.js:99` | P2 | Revert the tick when the answer is `false`. |
-| [ ] | `SetAllSelected` | `ui/queue-view.js:521` | P2 | Select all / None. |
-| [ ] | `Reorder` (up/down) | `ui/queue-view.js:526` | P2 | |
-| [ ] | `Inspect` | `ui/queue-view.js:398` | P2 | Row highlighted at once. |
+| [x] | `ScanDirectory` (path, force, no_cache) | `ui/directory-scan.js:14` | P2 | From the folder picker of the empty state and the failed-scan card; the Library's Open folder (P3) and the input-dir field (P4) reuse `open-folder`. |
+| [x] | `SetSelected` | `ui/queue-view.js:99` | P2 | The tick is drawn from the published row only, so a refused change has nothing to revert. |
+| [x] | `SetAllSelected` | `ui/queue-view.js:521` | P2 | Select all / None. |
+| [x] | `Reorder` (up/down) | `ui/queue-view.js:526` | P2 | |
+| [x] | `Inspect` | `ui/queue-view.js:398` | P2 | Row highlighted at once (`pending-inspect`, cleared once answered). |
 | [ ] | `AssignSubtitle` | `ui/app.js:536` | P3 | Fields as typed; the core builds the assignment. |
 | [ ] | `ClearTrack` | `ui/app.js:545` | P3 | The Inspector's Reset. |
 | [ ] | `EditDraft` | `ui/settings-draft.js:85` | P4 | `false` answer restores the published value. |
@@ -79,19 +79,19 @@ Paths: `ui/` is `desktop-tauri/ui/`, `src/` is `desktop-tauri/src-tauri/src/`, `
 
 | ✓ | What | Where today | Slice | Notes |
 |---|---|---|---|---|
-| [ ] | Mode tabs Remux / Extract with status pill | `ui/index.html:65-79`, `ui/app.js:296` | P2 | The pill's text and tone are P5 (published `controls`). |
-| [ ] | Boot shows the extract view when a run or job is in extract | `ui/app.js:916` | P2 | |
-| [ ] | List header: release title, crumbs path, `count_text` | `ui/index.html:105-106`, `ui/app.js:334` | P2 | P0 binds title, `count_text` and `busy` to prove the Publisher path. |
-| [ ] | Filter chips All / To do / Done / Failed with counts | `ui/index.html:109-112`, `ui/queue-view.js:430` | P2 | |
-| [ ] | "No episodes match this filter." | `ui/index.html:131` | P2 | |
-| [ ] | Select all / None | `ui/index.html:115-116`, `ui/job-controller.js:123` | P2 | Locked while the selection is locked. |
-| [ ] | Rows: label, tone, title, meta, ring (status + progress), release group heads | `ui/queue-view.js:347` | P2 | Model reset only on `manifest_rev`/length/id change. |
-| [ ] | Row checkbox with label "Include {name} in the batch" | `ui/queue-view.js:334` | P2 | Accessible label. |
-| [ ] | Row reorder buttons Move up / Move down | `ui/queue-view.js:356-357` | P2 | |
-| [ ] | Row click inspects | `ui/queue-view.js:106` | P2 | |
-| [ ] | Empty state card with "Open folder…" | `ui/index.html:128`, `ui/queue-view.js:130` | P2 | Text is the published `empty`. |
-| [ ] | Folder picker from Browse… on input-dir fields | `ui/index.html:311,403`, `ui/app.js:617` | P2 | Picker on a worker; scans after. |
-| [ ] | CJK filenames render | — | P2 | Font fallback. |
+| [x] | Mode tabs Remux / Extract with status pill | `ui/index.html:65-79`, `ui/app.js:296` | P2 | The pill's text and tone are P5 (published `controls`); the tab icons and the gear buttons are not drawn yet (P4 brings the sheet). |
+| [x] | Boot shows the extract view when a run or job is in extract | `ui/app.js:916` | P2 | `intents::boot_mode`. |
+| [x] | List header: release title, crumbs path, `count_text` | `ui/index.html:105-106`, `ui/app.js:334` | P2 | `count_text` sits beside the title until P5 brings the bottom bar. Crumbs elide instead of wrapping. |
+| [x] | Filter chips All / To do / Done / Failed with counts | `ui/index.html:109-112`, `ui/queue-view.js:430` | P2 | A filter change maps the rows again off the event loop. |
+| [x] | "No episodes match this filter." | `ui/index.html:131` | P2 | |
+| [x] | Select all / None | `ui/index.html:115-116`, `ui/job-controller.js:123` | P2 | Locked while the selection is locked. |
+| [x] | Rows: label, tone, title, meta, ring (status + progress), release group heads | `ui/queue-view.js:347` | P2 | Model reset only on `manifest_rev`/length/id change (`queue::diff_rows`). The status `title` is the accessible description, with no hover tooltip yet (P6); the group heads scroll with the rows instead of sticking. |
+| [x] | Row checkbox with label "Include {name} in the batch" | `ui/queue-view.js:334` | P2 | Accessible label. |
+| [x] | Row reorder buttons Move up / Move down | `ui/queue-view.js:356-357` | P2 | Shown on hover, hidden while a filter shows. |
+| [x] | Row click inspects | `ui/queue-view.js:106` | P2 | |
+| [x] | Empty state card with "Open folder…" | `ui/index.html:128`, `ui/queue-view.js:130` | P2 | Text is the published `empty`; the scanning and failed-scan cards too (`queue::map_head`). |
+| [ ] | Folder picker from Browse… on input-dir fields | `ui/index.html:311,403`, `ui/app.js:617` | P2 | Picker on a worker; scans after. The picker is P2's `open-folder`; the fields and their Browse… buttons come with the settings sheet (P4). |
+| [ ] | CJK filenames render | — | P2 | Font fallback. Checked in P2 stage B with the bench harness. |
 
 ## Library and Episode Inspector
 

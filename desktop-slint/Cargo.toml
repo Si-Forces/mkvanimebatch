@@ -13,6 +13,8 @@ workspace = true
 
 [dependencies]
 mkv-desktop-core = { path = "../crates/mkv-desktop-core" }
+# `PipelineMode` and, in the Intent-order test, the fake Inspector's manifest.
+mkv-core = { path = "../crates/mkv-core" }
 # The host's own runtime for the Desktop Core actor and its jobs; the core enables only `rt`.
 tokio = { version = "1", features = ["rt-multi-thread"] }
 dirs = "6"
@@ -39,9 +41,8 @@ slint = { git = "https://github.com/slint-ui/slint", rev = "45cb2b33420e1b3c8a13
     "unstable-winit-030",
 ] }
 
-# The GPU fallback dialog: a MessageBoxW on Windows. Linux runs zenity or kdialog itself (renderer.rs).
-# P2 widens this cfg to every target for the file and folder pickers.
-[target.'cfg(not(target_os = "linux"))'.dependencies]
+# The folder picker (XDG portal on Linux, as the Tauri host's), and the GPU fallback dialog's
+# MessageBoxW on Windows; Linux runs zenity or kdialog for that dialog itself (renderer.rs).
 rfd = "0.15"
 
 [dev-dependencies]
