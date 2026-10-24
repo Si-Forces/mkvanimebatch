@@ -6,7 +6,7 @@
 use crate::actor::ModeView;
 use crate::presentation::{
     candidate_tier, first_text, inspector_crumbs, path_segments, pretty_path, remux_audio_text,
-    row_error, status_tone, subtitle_ladder, Tier, Tone,
+    row_error, status_tone, subtitle_ladder, Tier, Tone, NOT_IN_BATCH,
 };
 use crate::queue::Row;
 use crate::snapshot::ItemStatus;
@@ -228,7 +228,7 @@ pub fn inspector_view(
         } else {
             Pill {
                 tone: Tone::Mute,
-                label: "Not in batch".into(),
+                label: NOT_IN_BATCH.into(),
             }
         },
         video,
