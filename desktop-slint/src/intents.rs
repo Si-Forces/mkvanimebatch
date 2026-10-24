@@ -3,7 +3,7 @@
 //! call time), so Intents reach the core in the order the user made them; only their answers are
 //! awaited, on the host's runtime.
 
-use crate::inspector::{restore_form, typed_fields, SUBTITLE_FILTER};
+use crate::inspector::{capped_tag, restore_form, typed_fields, SUBTITLE_FILTER};
 use crate::publisher::SlintPublisher;
 use mkv_anime_batch_slint_ui::{App, Mode};
 use mkv_core::pipeline::PipelineMode;
@@ -100,6 +100,15 @@ fn assign_subtitle(send: &Intents, app: &App, path: &str) {
     send.send(name, intent, move || {
         let _ = window.upgrade_in_event_loop(|app| restore_form(&app));
     });
+}
+
+/// Sends the remux Inspector's assignment again with the fields as typed (app.js
+/// `onAssignOptions`); nothing while none is assigned.
+fn resend_assignment(send: &Intents, app: &App) {
+    let inspector = app.get_remux_inspector();
+    if inspector.assigned {
+        assign_subtitle(send, app, &inspector.asset_path);
+    }
 }
 
 /// Clears the one-dialog flag when dropped, so a dialog that panics cannot leave Open folder dead.
@@ -232,16 +241,30 @@ pub(crate) fn wire(app: &App, core: CoreHandle, runtime: Handle, publisher: Slin
         }
     });
 
-    // A language, tag, title or offset committed: the assignment again, with the new fields
-    // (app.js `onAssignOptions`).
+    // A tag, title or offset committed: the assignment again, with the new fields.
     let (send, shown) = (intents.clone(), window.clone());
     app.on_subtitle_options_changed(move || {
-        let Some(app) = shown.upgrade() else {
-            return;
-        };
-        let inspector = app.get_remux_inspector();
-        if inspector.assigned {
-            assign_subtitle(&send, &app, &inspector.asset_path);
+        if let Some(app) = shown.upgrade() {
+            resend_assignment(&send, &app);
+        }
+    });
+
+    // A language picked: the same, unless it is the one shown (a select sends no change for the
+    // value it holds).
+    let (send, shown) = (intents.clone(), window.clone());
+    app.on_choose_language(move |index| {
+        if let Some(app) = shown.upgrade() {
+            if index != app.get_remux_inspector().language {
+                resend_assignment(&send, &app);
+            }
+        }
+    });
+
+    // The tag field holds an ISO 639-2 code at most, as the webview's `maxlength` keeps it.
+    let shown = window.clone();
+    app.on_language_tag_edited(move |text| {
+        if let (Some(app), Some(capped)) = (shown.upgrade(), capped_tag(&text)) {
+            app.set_sub_custom(capped.into());
         }
     });
 
@@ -410,10 +433,10 @@ mod tests {
     }
 
     /// The subtitle callbacks send the remux Inspector's row's AssignSubtitle with the fields as
-    /// typed, and ClearTrack, in call order; a choice picked again, or the file dialog while a
-    /// batch runs, sends nothing and puts the select back.
+    /// typed, and ClearTrack; a choice or a language picked again, or the file dialog while a
+    /// batch runs, sends nothing.
     #[test]
-    fn subtitle_callbacks_send_the_fields_as_typed_in_call_order() {
+    fn subtitle_callbacks_send_the_fields_as_typed() {
         i_slint_backend_testing::init_no_event_loop();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -461,29 +484,49 @@ mod tests {
         app.set_sub_title("A".into());
         app.set_sub_offset("1e3".into());
 
-        // Automatic, already shown: nothing.
-        app.invoke_choose_subtitle(0);
+        // A choice picked: assigned with the fields as typed.
         app.invoke_choose_subtitle(1);
-        // The Inspector now shows the assignment; a committed title sends it again.
+        let typed = |title: &str| {
+            Some((
+                "/subs/b.ass".to_string(),
+                Some("may".to_string()),
+                Some(title.to_string()),
+                Some(1000),
+            ))
+        };
+        assert_eq!(assignment(), typed("A"));
+
+        // The Inspector now shows the assignment, with the custom tag.
         app.set_remux_inspector(InspectorPane {
             shown: true,
             id: "b".into(),
             assigned: true,
             asset_path: "/subs/b.ass".into(),
             choice: 1,
+            language: 3,
             ..InspectorPane::default()
         });
+        app.set_sub_title("Z".into());
+        // The choice and the language shown, picked again: nothing is sent.
+        app.invoke_choose_subtitle(1);
+        app.invoke_choose_language(3);
+        assert_eq!(assignment(), typed("A"));
+        // A committed title sends the assignment again.
         app.set_sub_title("B".into());
         app.invoke_subtitle_options_changed();
-        assert_eq!(
-            assignment(),
-            Some((
-                "/subs/b.ass".into(),
-                Some("may".into()),
-                Some("B".into()),
-                Some(1000)
-            ))
-        );
+        assert_eq!(assignment(), typed("B"));
+        // Each preset language is sent as its code.
+        for (index, code) in [(0, "ind"), (1, "eng"), (2, "jpn")] {
+            app.set_sub_language(index);
+            app.invoke_choose_language(index);
+            let language = assignment().and_then(|(_, language, _, _)| language);
+            assert_eq!(language.as_deref(), Some(code));
+        }
+
+        // The tag field is cut to an ISO 639-2 code.
+        app.invoke_language_tag_edited("mayxx".into());
+        assert_eq!(app.get_sub_custom(), "may");
+
         app.invoke_reset_subtitle();
         assert_eq!(assignment(), None);
 
