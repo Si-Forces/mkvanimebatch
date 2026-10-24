@@ -447,6 +447,8 @@ export component QueuePane inherits Rectangle {
     callback inspect(id: string);
     callback set-filter(filter: QueueFilter);
     callback open-folder();
+    // The list's scroll offset (negative going down). Only the host's bench sets it.
+    in-out property <length> list-scroll;
 
     property <string> marked: pending-inspect != "" ? pending-inspect : head.inspected;
     property <bool> filtered: head.filter != QueueFilter.all;
@@ -586,6 +588,7 @@ export component QueuePane inherits Rectangle {
         }
 
         if !root.head.card-shown: ListView {
+            content-y <=> root.list-scroll;
             for row in root.rows: EpRow {
                 item: row;
                 inspected: row.id == root.marked;

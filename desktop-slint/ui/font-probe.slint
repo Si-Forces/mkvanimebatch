@@ -1,15 +1,17 @@
-// Test only: one line of text in a given family and weight, which the host's font test renders
-// headlessly to check that the embedded variable fonts resolve their weights.
+// Test only: one line of text in a given family and weight, which the host's font tests render
+// headlessly to check that the embedded variable fonts resolve their weights and that CJK text
+// falls back to a system font.
 export component FontProbe inherits Window {
     in property <string> family;
     in property <int> weight;
+    in property <string> text: "Hamburgefonstiv 0123";
     width: 480px;
     height: 64px;
     background: white;
 
     Text {
         x: 8px;
-        text: "Hamburgefonstiv 0123";
+        text: root.text;
         font-family: root.family;
         font-weight: root.weight;
         font-size: 32px;
