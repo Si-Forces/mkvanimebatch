@@ -20,6 +20,9 @@ pub const DEFAULT_CANCELLED: &str = "Cancelled";
 /// The status label of a failed item, and its error when the engine gave none.
 pub const DEFAULT_FAILED: &str = "Failed";
 
+/// The status of a row left out of the Queue Selection, whatever it did before.
+pub const NOT_IN_BATCH: &str = "Not in batch";
+
 /// The heading of the notice a Close shows when its teardown failed and the window stays open.
 pub const CLOSE_FAILED_TITLE: &str = "Could not close safely";
 

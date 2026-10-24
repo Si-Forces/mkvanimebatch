@@ -3797,6 +3797,7 @@ dependencies = [
  "dirs",
  "i-slint-backend-testing",
  "mkv-anime-batch-slint-ui",
+ "mkv-core",
  "mkv-desktop-core",
  "rfd",
  "slint",

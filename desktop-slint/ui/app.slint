@@ -1,14 +1,91 @@
-// The Slint host's window (ADR-0017). Layout and bindings only: every text it shows beyond the
-// brand and the buttons' accessible labels comes from the published View State.
+// The Slint host's window (ADR-0017). Layout and bindings only: beyond fixed markup labels (as
+// index.html has), every text it shows comes from the published View State through the host.
 import "fonts/Onest-wght.ttf";
 import "fonts/Unbounded-wght.ttf";
 import "fonts/JetBrainsMono-wght.ttf";
 import { Theme } from "theme.slint";
 import { TitleBar } from "title-bar.slint";
 import { FontProbe } from "font-probe.slint";
+import { Mode, QueueFilter, QueueHead, QueuePane, QueueRow, RowMark, RowTone } from "queue.slint";
 
 // FontProbe is test only; a .slint file cannot be compiled per cfg, so it ships (a few bytes).
-export { Theme, FontProbe }
+export { Theme, FontProbe, Mode, QueueFilter, QueueHead, QueueRow, RowMark, RowTone }
+
+// A mode's tab in the sidebar (.task-row .nav): its name over what it does.
+component ModeTab inherits Rectangle {
+    in property <string> title;
+    in property <string> subtitle;
+    in property <bool> active;
+    callback clicked();
+    height: 44px;
+    border-radius: 8px;
+    background: touch.has-hover ? Theme.hover : active ? Theme.sel : transparent;
+    accessible-role: tab;
+    accessible-label: title;
+    accessible-item-selected: active;
+    accessible-action-default => { root.clicked(); }
+    VerticalLayout {
+        padding-left: 8px;
+        alignment: center;
+        Text {
+            text: root.title;
+            color: Theme.fg;
+            font-weight: 500;
+            accessible-role: none;
+        }
+        Text {
+            text: root.subtitle;
+            color: Theme.mute;
+            font-size: 11px;
+            accessible-role: none;
+        }
+    }
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+// The Library's "+ Open folder…" (.nav.lib-open): a muted nav row, locked while a batch runs.
+// A sidebar group's heading (.side-group h2): 8px in, like the nav labels, and 4px above them.
+component SideHeading inherits VerticalLayout {
+    in property <string> text;
+    padding-left: 8px;
+    padding-right: 8px;
+    padding-bottom: 4px;
+    Text {
+        text: root.text;
+        color: Theme.mute;
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.77px;
+    }
+}
+
+component OpenFolderNav inherits Rectangle {
+    in property <bool> enabled: true;
+    callback clicked();
+    height: 32px;
+    border-radius: 8px;
+    background: touch.has-hover && enabled ? Theme.hover : transparent;
+    opacity: enabled ? 1 : 0.75;
+    accessible-role: button;
+    accessible-label: "Open folder…";
+    accessible-enabled: enabled;
+    accessible-action-default => { if enabled { root.clicked(); } }
+    Text {
+        x: 8px;
+        text: "+ Open folder…";
+        color: Theme.mute;
+        font-weight: 500;
+        vertical-alignment: center;
+        accessible-role: none;
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? default : not-allowed;
+        clicked => { root.clicked(); }
+    }
+}
 
 export component App inherits Window {
     // tauri.conf.json's window: 920x640, at least 760x520, frameless.
@@ -24,23 +101,66 @@ export component App inherits Window {
     default-font-family: "Onest";
     default-font-size: 13px;
 
-    // From the published View State (P0 proves the Publisher path with these three).
-    in property <string> mode-title;
-    in property <string> count-text;
+    // From the published View State: each mode's list header and rows, and whether a start or a
+    // job holds the batch.
+    in property <QueueHead> remux-head;
+    in property <QueueHead> extract-head;
+    in property <[QueueRow]> remux-rows;
+    in property <[QueueRow]> extract-rows;
     in property <bool> busy;
+    // The mode shown.
+    in-out property <Mode> mode;
+    // A row picked for the Episode Inspector whose Inspect is not answered yet.
+    in-out property <string> pending-inspect;
     // A Close whose teardown failed: the window stays open and says why.
     in property <string> notice-title;
     in property <string> notice-text;
+    // Each mode's list scroll offset (negative going down), kept across mode switches as the
+    // webview's two lists keep theirs. The host resets it when a card replaces the rows; its bench
+    // (desktop-slint/benches/queue_scroll.rs) drives it.
+    in-out property <length> remux-scroll;
+    in-out property <length> extract-scroll;
+    // Whether the CJK fallback fonts were drawn once (below).
+    property <bool> fonts-warm;
 
+    // The shown mode's list asks; the host sends the Intent for `mode`.
+    callback set-selected(id: string, selected: bool);
+    callback set-all-selected(selected: bool);
+    callback reorder(id: string, up: bool);
+    callback inspect(id: string);
+    callback set-filter(filter: QueueFilter);
+    callback open-folder();
     callback close-window();
     // Through winit, not `minimized`: see the host's `minimize`.
     callback minimize-window();
+
+    // Marks the row at once, then asks the host.
+    function pick(id: string) {
+        root.pending-inspect = id;
+        root.inspect(id);
+    }
 
     Rectangle {
         // A maximized window is square, or the desktop shows through the corners.
         border-radius: root.maximized ? 0px : Theme.window-radius;
         clip: true;
         background: Theme.wall-base;
+
+        // A few CJK glyphs, drawn all but transparent for the first second, so the system's
+        // fallback fonts load at boot and not in the frame where a CJK name first scrolls in
+        // (#135). An invisible Text loads nothing: it is never drawn.
+        if !root.fonts-warm: Text {
+            x: 0;
+            y: 0;
+            text: "あア漢药【】";
+            color: #00000001;
+            accessible-role: none;
+        }
+        Timer {
+            interval: 1s;
+            running: !root.fonts-warm;
+            triggered => { root.fonts-warm = true; }
+        }
 
         // The wallpaper (--wall): three soft blobs over the base.
         Rectangle {
@@ -94,40 +214,82 @@ export component App inherits Window {
                 }
             }
 
-            // The list header (.list-head), until P2 brings the queue.
-            Rectangle {
-                background: Theme.content;
-                VerticalLayout {
-                    padding-left: 20px;
-                    padding-right: 20px;
-                    padding-top: 16px;
-                    alignment: start;
-                    spacing: 4px;
-                    HorizontalLayout {
-                        spacing: 8px;
+            HorizontalLayout {
+                // The sidebar (.side): the Pipeline's mode tabs and the Library's Open folder. The
+                // Library tree (P3) goes above Open folder; the presets are P4.
+                Rectangle {
+                    width: 220px;
+                    background: Theme.side;
+                    VerticalLayout {
+                        padding-top: 14px;
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        spacing: 2px;
                         alignment: start;
-                        Text {
-                            text: root.mode-title;
-                            color: Theme.fg;
-                            font-size: 18px;
-                            font-weight: 700;
-                            overflow: elide;
+                        SideHeading { text: "PIPELINE"; }
+                        ModeTab {
+                            title: "Remux";
+                            subtitle: "FLAC → Opus, mux subs";
+                            active: root.mode == Mode.remux;
+                            clicked => { root.mode = Mode.remux; }
                         }
-                        // The batch is held: a dot, no text (the status pill's text is P5's).
-                        if root.busy: VerticalLayout {
-                            alignment: center;
-                            Rectangle {
-                                width: 8px;
-                                height: 8px;
-                                border-radius: 4px;
-                                background: Theme.info;
-                            }
+                        ModeTab {
+                            title: "Extract";
+                            subtitle: "Subs, fonts, chapters";
+                            active: root.mode == Mode.extract;
+                            clicked => { root.mode = Mode.extract; }
+                        }
+                        // .side's 18px gap between groups, less the group's own 2px spacing.
+                        Rectangle { height: 16px; }
+                        SideHeading { text: "LIBRARY"; }
+                        OpenFolderNav {
+                            enabled: !root.busy;
+                            clicked => { root.open-folder(); }
                         }
                     }
-                    Text {
-                        text: root.count-text;
-                        color: Theme.mute;
-                        font-size: 12px;
+                    Rectangle {
+                        x: parent.width - 1px;
+                        width: 1px;
+                        background: Theme.line;
+                    }
+                }
+
+                // One pane per mode, as the webview has one list per mode: both stay alive, so the
+                // hidden one keeps its scroll exactly (a ListView made again places its rows by an
+                // estimated row height).
+                Rectangle {
+                    horizontal-stretch: 1;
+                    QueuePane {
+                        width: parent.width;
+                        height: parent.height;
+                        visible: root.mode == Mode.remux;
+                        head: root.remux-head;
+                        rows: root.remux-rows;
+                        list-scroll <=> root.remux-scroll;
+                        busy: root.busy;
+                        pending-inspect: root.pending-inspect;
+                        set-selected(id, selected) => { root.set-selected(id, selected); }
+                        set-all-selected(selected) => { root.set-all-selected(selected); }
+                        reorder(id, up) => { root.reorder(id, up); }
+                        inspect(id) => { root.pick(id); }
+                        set-filter(filter) => { root.set-filter(filter); }
+                        open-folder => { root.open-folder(); }
+                    }
+                    QueuePane {
+                        width: parent.width;
+                        height: parent.height;
+                        visible: root.mode == Mode.extract;
+                        head: root.extract-head;
+                        rows: root.extract-rows;
+                        list-scroll <=> root.extract-scroll;
+                        busy: root.busy;
+                        pending-inspect: root.pending-inspect;
+                        set-selected(id, selected) => { root.set-selected(id, selected); }
+                        set-all-selected(selected) => { root.set-all-selected(selected); }
+                        reorder(id, up) => { root.reorder(id, up); }
+                        inspect(id) => { root.pick(id); }
+                        set-filter(filter) => { root.set-filter(filter); }
+                        open-folder => { root.open-folder(); }
                     }
                 }
             }
