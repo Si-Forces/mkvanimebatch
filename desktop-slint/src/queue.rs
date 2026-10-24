@@ -6,13 +6,11 @@
 
 use mkv_anime_batch_slint_ui::{QueueFilter, QueueHead, QueueRow, RowMark, RowTone};
 use mkv_desktop_core::actor::{ModeView, ScanView};
-use mkv_desktop_core::presentation::{Bucket, LibraryEntry, Tone};
+use mkv_desktop_core::presentation::{Bucket, LibraryEntry, Tone, NOT_IN_BATCH};
 use mkv_desktop_core::queue::Row;
 use mkv_desktop_core::snapshot::ItemStatus;
 use std::collections::HashSet;
 
-/// The status of a row left out of the Queue Selection, whatever it did before.
-const NOT_IN_BATCH: &str = "Not in batch";
 /// The group header of a release the Library does not name.
 const DEFAULT_GROUP: &str = "Episodes";
 /// The card while the folder is inspected.
@@ -185,7 +183,9 @@ pub(crate) fn map_head(view: &ModeView, filter: QueueFilter) -> QueueHead {
         done: count(view.filters.done),
         failed: count(view.filters.failed),
         filter,
-        filter_empty: filter != QueueFilter::All
+        // Only beside rows: a card replaces them (queue-view.js hides it with no row mounted).
+        filter_empty: card.is_none()
+            && filter != QueueFilter::All
             && !view.rows.is_empty()
             && !view.rows.iter().any(|row| shows(row, filter)),
         card_shown: card.is_some(),
@@ -251,8 +251,8 @@ pub(crate) struct Update {
 /// patches the model correctly.
 #[derive(Default)]
 pub(crate) struct ModeList {
-    filter: QueueFilter,
-    view: Option<ModeView>,
+    pub(crate) filter: QueueFilter,
+    pub(crate) view: Option<ModeView>,
     applied: Rows,
     pending: Option<Rows>,
     patch: Option<RowPatch>,
@@ -289,15 +289,24 @@ impl ModeList {
         self.view = Some(view);
     }
 
-    /// Shows `filter`'s rows of the newest view.
-    pub(crate) fn set_filter(&mut self, filter: QueueFilter) {
-        self.filter = filter;
-        if let Some(view) = &self.view {
-            let rows = map_rows(&view.rows, &view.library, filter);
-            self.head = Some(map_head(view, filter));
-            let manifest_rev = view.manifest_rev;
-            self.stage(Rows { manifest_rev, rows });
+    /// Takes `rows`, `view`'s rows mapped with `filter`, unless the filter or the rows changed
+    /// since. Returns whether it took them.
+    pub(crate) fn put_filtered(
+        &mut self,
+        view: &ModeView,
+        filter: QueueFilter,
+        rows: Vec<QueueRow>,
+    ) -> bool {
+        if filter != self.filter || self.wants_rows(view).is_some() {
+            return false;
         }
+        let Some(newest) = &self.view else {
+            return false;
+        };
+        self.head = Some(map_head(newest, filter));
+        let manifest_rev = newest.manifest_rev;
+        self.stage(Rows { manifest_rev, rows });
+        true
     }
 
     fn stage(&mut self, rows: Rows) {
@@ -505,8 +514,15 @@ mod tests {
             (head.card_title.as_str(), head.card_action.as_str()),
             (FAILED_TITLE, FAILED_ACTION)
         );
-        // The filter shows none of the rows.
-        assert!(head.filter_empty);
+        // The filter shows none of the kept rows, but the card replaces them, so it says nothing.
+        assert!(!head.filter_empty);
+        view.scan = ScanView::Scanning {
+            directory: "/media/Other".into(),
+        };
+        assert!(!map_head(&view, QueueFilter::Failed).filter_empty);
+        // With the rows shown, it says so.
+        view.scan = ScanView::Idle;
+        assert!(map_head(&view, QueueFilter::Failed).filter_empty);
         assert!(!map_head(&view, QueueFilter::Todo).filter_empty);
     }
 
@@ -550,7 +566,11 @@ mod tests {
         );
 
         // A filter change patches the rows it hides and the filter a mapping raced with is redone.
-        list.set_filter(QueueFilter::Done);
+        list.filter = QueueFilter::Done;
+        let remapped = map_rows(&view.rows, &view.library, QueueFilter::Done);
+        // Mapped with a filter that changed since: dropped, the newer remap stages its own.
+        assert!(!list.put_filtered(&view, QueueFilter::All, remapped.clone()));
+        assert!(list.put_filtered(&view, QueueFilter::Done, remapped));
         let update = list.take();
         assert_eq!(update.head.map(|head| head.filter), Some(QueueFilter::Done));
         assert!(

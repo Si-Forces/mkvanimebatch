@@ -350,7 +350,7 @@ component Chip inherits Rectangle {
     border-width: 1px;
     border-color: on ? Theme.fg : touch.has-hover ? Theme.mute : Theme.line;
     accessible-role: button;
-    accessible-label: label;
+    accessible-label: label + " " + count;
     accessible-checkable: true;
     accessible-checked: on;
     accessible-action-default => { root.clicked(); }

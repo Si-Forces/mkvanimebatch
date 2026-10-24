@@ -201,7 +201,8 @@ fn rows_render_with_their_accessible_labels_and_their_controls_answer() {
     let downs: Vec<_> = ElementHandle::find_by_accessible_label(&app, "Move down").collect();
     downs[0].invoke_accessible_default_action();
     only(&app, "Frieren - 02.mkv").invoke_accessible_default_action();
-    only(&app, "Done").invoke_accessible_default_action();
+    // The chip's label carries its count, as the webview chip's text does.
+    only(&app, "Done 0").invoke_accessible_default_action();
     assert_eq!(
         *calls.borrow(),
         [
@@ -270,15 +271,51 @@ fn a_filter_with_no_match_says_so() {
     state.remux.rows = Arc::new(vec![row("Frieren - 01.mkv")]);
     state.remux.empty = None;
     publisher.show(&state);
-    publisher.set_filter(Mode::Remux, QueueFilter::Failed);
-    // set_filter schedules a hop; apply it as the event loop would.
-    state.seq = 1;
-    publisher.show(&state);
+    publisher.show_filter(Mode::Remux, QueueFilter::Failed);
     app.show().unwrap();
     assert_eq!(app.get_remux_head().filter, QueueFilter::Failed);
     only(&app, "No episodes match this filter.");
     assert_eq!(app.get_remux_rows().row_count(), 1);
     app.hide().unwrap();
+}
+
+/// One kept publisher across publications: a changed row and a reorder are written into the same
+/// model the window binds.
+#[test]
+fn a_kept_model_takes_each_publication_in_place() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = App::new().unwrap();
+    let publisher = SlintPublisher::new(&app);
+    let mut state = ViewState::new(None);
+    state.remux.rows = Arc::new(vec![row("a"), row("b"), row("c")]);
+    state.remux.manifest_rev = 1;
+    state.remux.empty = None;
+    publisher.show(&state);
+    let model = app.get_remux_rows();
+    let labels = || {
+        (0..model.row_count())
+            .map(|i| model.row_data(i).unwrap())
+            .map(|row| format!("{} {}", row.id, row.label))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(labels(), ["a Queued", "b Queued", "c Queued"]);
+
+    let mut rows = (*state.remux.rows).clone();
+    rows[1].label = "40% · 3s".into();
+    state.seq = 1;
+    state.remux.rows = Arc::new(rows.clone());
+    publisher.show(&state);
+    assert_eq!(labels(), ["a Queued", "b 40% · 3s", "c Queued"]);
+    // The window still binds the model the rows were written into (which rows a patch writes is
+    // `queue::diff_rows`'s test).
+    assert!(app.get_remux_rows() == model);
+
+    rows.swap(0, 2);
+    state.seq = 2;
+    state.remux.rows = Arc::new(rows);
+    publisher.show(&state);
+    assert_eq!(labels(), ["c Queued", "b 40% · 3s", "a Queued"]);
+    assert!(app.get_remux_rows() == model);
 }
 
 /// WCAG relative luminance of an sRGB colour.

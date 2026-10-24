@@ -79,19 +79,22 @@ Paths: `ui/` is `desktop-tauri/ui/`, `src/` is `desktop-tauri/src-tauri/src/`, `
 
 | ✓ | What | Where today | Slice | Notes |
 |---|---|---|---|---|
-| [x] | Mode tabs Remux / Extract with status pill | `ui/index.html:65-79`, `ui/app.js:296` | P2 | The pill's text and tone are P5 (published `controls`); the tab icons and the gear buttons are not drawn yet (P4 brings the sheet). |
+| [x] | Mode tabs Remux / Extract | `ui/index.html:65-79`, `ui/app.js:296` | P2 | The status pill is its own row (P5); the gear buttons come with the sheet (P4). |
+| [ ] | Mode tab icons | `ui/index.html:65-79` | P5 | Not drawn yet. |
 | [x] | Boot shows the extract view when a run or job is in extract | `ui/app.js:916` | P2 | `intents::boot_mode`. |
 | [x] | List header: release title, crumbs path, `count_text` | `ui/index.html:105-106`, `ui/app.js:334` | P2 | `count_text` sits beside the title until P5 brings the bottom bar. Crumbs elide instead of wrapping. |
-| [x] | Filter chips All / To do / Done / Failed with counts | `ui/index.html:109-112`, `ui/queue-view.js:430` | P2 | A filter change maps the rows again off the event loop. |
+| [x] | Filter chips All / To do / Done / Failed with counts | `ui/index.html:109-112`, `ui/queue-view.js:430` | P2 | The click keeps the filter on the event loop, so the last click wins; the rows are mapped again off it. Accessible label "To do 3", as the webview chip's text. |
 | [x] | "No episodes match this filter." | `ui/index.html:131` | P2 | |
 | [x] | Select all / None | `ui/index.html:115-116`, `ui/job-controller.js:123` | P2 | Locked while the selection is locked. |
-| [x] | Rows: label, tone, title, meta, ring (status + progress), release group heads | `ui/queue-view.js:347` | P2 | Model reset only on `manifest_rev`/length/id change (`queue::diff_rows`). The status `title` is the accessible description, with no hover tooltip yet (P6); the group heads scroll with the rows instead of sticking. |
+| [x] | Rows: label, tone, title, meta, ring (status + progress), release group heads | `ui/queue-view.js:347` | P2 | Model reset only on `manifest_rev`/length/id change (`queue::diff_rows`). The status `title` is the accessible description. An unselected row reads `presentation::NOT_IN_BATCH`, the Inspector's const. |
+| [ ] | Row status hover tooltip (`title`) | `ui/queue-view.js:347` | P6 | |
+| [ ] | Sticky release group heads | `ui/queue-view.js:443` | P6 | The heads scroll with the rows. |
 | [x] | Row checkbox with label "Include {name} in the batch" | `ui/queue-view.js:334` | P2 | Accessible label. |
 | [x] | Row reorder buttons Move up / Move down | `ui/queue-view.js:356-357` | P2 | Shown on hover, hidden while a filter shows. |
 | [x] | Row click inspects | `ui/queue-view.js:106` | P2 | |
 | [x] | Empty state card with "Open folder…" | `ui/index.html:128`, `ui/queue-view.js:130` | P2 | Text is the published `empty`; the scanning and failed-scan cards too (`queue::map_head`). |
-| [ ] | Folder picker from Browse… on input-dir fields | `ui/index.html:311,403`, `ui/app.js:617` | P2 | Picker on a worker; scans after. The picker is P2's `open-folder`; the fields and their Browse… buttons come with the settings sheet (P4). |
-| [x] | CJK filenames render | — | P2 | System font fallback: `ui_tests::cjk_names_render_through_the_system_font_fallback` (skips on a Linux machine with no CJK font, such as the CI runner); the bench's rows include CJK names. The first CJK glyph a process draws loads the fallback font in that frame (about 28 ms warm, 220 ms cold on the HD 4000 laptop). |
+| [ ] | Folder picker from Browse… on input-dir fields | `ui/index.html:311,403`, `ui/app.js:617` | P2 | Picker on a worker, one at a time; busy is checked again when it answers; then `EditDraft { input_dir }` and the scan, as app.js does. The picker is P2's `open-folder`; the fields and their Browse… buttons come with the settings sheet (P4). |
+| [x] | CJK filenames render | — | P2 | System font fallback: `ui_tests::cjk_names_render_through_the_system_font_fallback` checks it on the software renderer only (skips on a Linux machine with no CJK font, such as the CI runner); Skia is checked by eye. The first CJK glyph a process draws loads the fallback font in that frame (28 ms warm, 220 ms cold on the HD 4000 laptop), so `app.slint` draws a few, all but transparent, in the window's first second. The bench scrolls through Japanese and Simplified Chinese names. |
 
 ## Library and Episode Inspector
 

@@ -61,7 +61,8 @@ impl Coalescer {
             }
             [0, 1].map(|i| pending.lists[i].wants_rows(views[i]))
         };
-        // Mapped off the lock, so a hop's take never waits on it.
+        // Mapped off the lock, so a hop's take never waits on the mapping; the diff against the
+        // model and a remap for a filter that changed meanwhile run under it.
         let mut mapped = [0, 1].map(|i| {
             filters[i].map(|filter| (filter, map_rows(&views[i].rows, &views[i].library, filter)))
         });
@@ -77,10 +78,28 @@ impl Coalescer {
         !std::mem::replace(&mut pending.scheduled, true)
     }
 
-    /// Shows `filter`'s rows of `mode`. Returns whether to schedule a hop.
-    pub(crate) fn set_filter(&self, mode: Mode, filter: QueueFilter) -> bool {
+    /// Keeps `filter` for `mode`; its rows show once [`remap`](Self::remap) mapped them.
+    pub(crate) fn set_filter(&self, mode: Mode, filter: QueueFilter) {
+        self.lock().lists[index(mode)].filter = filter;
+    }
+
+    /// Maps `mode`'s newest rows with its newest filter, off the lock. A filter or rows that
+    /// changed meanwhile were mapped by whoever changed them, so a late remap stages nothing.
+    /// Returns whether to schedule a hop.
+    pub(crate) fn remap(&self, mode: Mode) -> bool {
+        let (filter, view) = {
+            let pending = self.lock();
+            let list = &pending.lists[index(mode)];
+            match &list.view {
+                Some(view) => (list.filter, view.clone()),
+                None => return false,
+            }
+        };
+        let rows = map_rows(&view.rows, &view.library, filter);
         let mut pending = self.lock();
-        pending.lists[index(mode)].set_filter(filter);
+        if !pending.lists[index(mode)].put_filtered(&view, filter, rows) {
+            return false;
+        }
         !std::mem::replace(&mut pending.scheduled, true)
     }
 
@@ -137,10 +156,15 @@ impl SlintPublisher {
         }
     }
 
-    /// Shows `filter`'s rows of `mode`. Maps them on the calling thread, so call it off the event
-    /// loop.
+    /// Keeps `filter` for `mode`, in click order: call it on the event loop, then [`remap`](Self::remap).
     pub(crate) fn set_filter(&self, mode: Mode, filter: QueueFilter) {
-        if self.pending.set_filter(mode, filter) {
+        self.pending.set_filter(mode, filter);
+    }
+
+    /// Shows `mode`'s rows with its newest filter. Maps them on the calling thread, so call it
+    /// off the event loop.
+    pub(crate) fn remap(&self, mode: Mode) {
+        if self.pending.remap(mode) {
             self.schedule();
         }
     }
@@ -149,6 +173,14 @@ impl SlintPublisher {
     #[cfg(test)]
     pub(crate) fn show(&self, state: &ViewState) {
         self.pending.push_state(state);
+        hop(&self.pending, &self.window);
+    }
+
+    /// Shows `filter`'s rows of `mode` at once, on the event loop's thread, as a click would.
+    #[cfg(test)]
+    pub(crate) fn show_filter(&self, mode: Mode, filter: QueueFilter) {
+        self.set_filter(mode, filter);
+        self.pending.remap(mode);
         hop(&self.pending, &self.window);
     }
 }

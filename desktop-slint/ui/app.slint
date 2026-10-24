@@ -76,6 +76,8 @@ export component App inherits Window {
     // The shown list's scroll offset (negative going down), for the host's bench
     // (desktop-slint/benches/queue_scroll.rs).
     in-out property <length> list-scroll;
+    // Whether the CJK fallback fonts were drawn once (below).
+    property <bool> fonts-warm;
 
     // The shown mode's list asks; the host sends the Intent for `mode`.
     callback set-selected(id: string, selected: bool);
@@ -93,6 +95,22 @@ export component App inherits Window {
         border-radius: root.maximized ? 0px : Theme.window-radius;
         clip: true;
         background: Theme.wall-base;
+
+        // A few CJK glyphs, drawn all but transparent for the first second, so the system's
+        // fallback fonts load at boot and not in the frame where a CJK name first scrolls in
+        // (#135). An invisible Text loads nothing: it is never drawn.
+        if !root.fonts-warm: Text {
+            x: 0;
+            y: 0;
+            text: "あア漢药【】";
+            color: #00000001;
+            accessible-role: none;
+        }
+        Timer {
+            interval: 1s;
+            running: !root.fonts-warm;
+            triggered => { root.fonts-warm = true; }
+        }
 
         // The wallpaper (--wall): three soft blobs over the base.
         Rectangle {

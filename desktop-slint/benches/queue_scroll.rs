@@ -13,10 +13,14 @@
 //! does not exist), with the release profile's LTO; to repeat a run, start the executable it
 //! printed (`target/release/deps/queue_scroll-*`) directly.
 //!
-//! `pub_ms` is the UI-thread time of each publication's hop (the take and the model writes);
-//! `interval_ms` the time between presented frames (vsync-bound, so a hair over 16.67 ms is
-//! jitter, and over 25 ms a missed vsync); `render_ms` each frame's rendering on the UI thread.
-//! Budget (#135): publication p99 < 4 ms, and no frame over 16.7 ms.
+//! `pub_ms` is the UI-thread time of each publication's hop (the take and the model writes), not
+//! the layout those writes cause, which the next frame's `render_ms` carries; `reset_ms` the first
+//! hop, which puts all 1000 rows into the empty model; `filter_ms` the hop of a filter change to
+//! Failed at the end, which writes nearly every row (its mapping runs off the UI thread, as in the
+//! app). `interval_ms` is the time between presented frames (vsync-bound, so a hair over 16.67 ms
+//! is jitter, and over 25 ms a missed vsync); `render_ms` each frame's rendering on the UI thread.
+//! Budget (#135): publication p99 < 4 ms, and no frame over 16.7 ms, read as no render over
+//! 16.7 ms and no missed vsync. The line ends with PASS or FAIL for each.
 
 // Only the hop's path is driven here; the rest of these host modules is unused. `clippy
 // --all-targets` checks a bench with cfg(test) but without its #[test] items, which leaves their
@@ -28,7 +32,7 @@ mod publisher;
 #[path = "../src/queue.rs"]
 mod queue;
 
-use mkv_anime_batch_slint_ui::{App, QueueRow, Theme};
+use mkv_anime_batch_slint_ui::{App, Mode, QueueFilter, QueueRow, Theme};
 use mkv_desktop_core::actor::ViewState;
 use mkv_desktop_core::presentation::{bucket, status_label, status_title, status_tone, Tone};
 use mkv_desktop_core::queue::Row;
@@ -55,8 +59,9 @@ const HEAD_H: f32 = 30.0;
 const SHOWS: &[(&str, &str)] = &[
     ("SubsPlease", "Frieren - Beyond Journey's End"),
     ("Nekomoe kissaten", "葬送のフリーレン"),
-    ("Judas", "Mushoku Tensei - Jobless Reincarnation"),
+    // Third, so the 30 s scroll reaches its Simplified Chinese names after the Japanese ones.
     ("LoliHouse", "药屋少女的呢喃"),
+    ("Judas", "Mushoku Tensei - Jobless Reincarnation"),
     ("EMBER", "Dungeon Meshi"),
     ("Sakurato", "ダンジョン飯"),
     ("SubsPlease", "Spy x Family"),
@@ -238,6 +243,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let pending = Arc::new(Coalescer::default());
     let hops: Arc<Mutex<Vec<f64>>> = Arc::default();
     let (window, timed) = (app.as_weak(), Arc::clone(&hops));
+    let (filtered, filter_window) = (Arc::clone(&pending), app.as_weak());
     spawn_churn(state, move |state| {
         if pending.push_state(state) {
             let (pending, window, hops) =
@@ -254,7 +260,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let (mut first, mut before, mut last) = (None::<Instant>, Instant::now(), None::<Instant>);
     let (mut intervals, mut renders) = (Vec::new(), Vec::new());
     let mut dir = 1.0;
-    let mut reported = false;
+    let (mut reported, mut reset) = (false, f64::NAN);
     app.window()
         .set_rendering_notifier(move |state, _| {
             match state {
@@ -270,12 +276,17 @@ fn main() -> Result<(), Box<dyn Error>> {
             if since >= WARMUP {
                 match last.replace(now) {
                     Some(last) => intervals.push(ms(now.duration_since(last))),
-                    // The warm-up's publications, the first reset among them, do not count.
-                    None => hops.lock().unwrap().clear(),
+                    // The warm-up's publications do not count; the first is the reset.
+                    None => {
+                        let mut hops = hops.lock().unwrap();
+                        reset = hops.first().copied().unwrap_or(f64::NAN);
+                        hops.clear();
+                    }
                 }
                 renders.push(ms(now.duration_since(before)));
                 // Bounce between the ends; the bottom is approximate (the list is shorter than the
-                // window by its header), and 30 s at 6 px a frame does not reach it anyway.
+                // window by its header), and 30 s at 6 px a frame (about 10.7k px, into the third
+                // release) does not reach it anyway.
                 let max = content - app.window().size().to_logical(app.window().scale_factor()).height;
                 let y = (-app.get_list_scroll() + STEP * dir).clamp(0.0, max.max(0.0));
                 if y <= 0.0 || y >= max {
@@ -288,14 +299,29 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let over = |ms: f64| intervals.iter().filter(|&&i| i > ms).count();
                 let (over_frame, over_vsync) = (over(16.7), over(25.0));
                 let mut hops = std::mem::take(&mut *hops.lock().unwrap());
+                // A filter change: kept on the UI thread, mapped as off it, then the hop timed.
+                filtered.set_filter(Mode::Remux, QueueFilter::Failed);
+                filtered.remap(Mode::Remux);
+                let start = Instant::now();
+                publisher::hop(&filtered, &filter_window);
+                let filter = ms(start.elapsed());
+                let verdict = |pass: bool| if pass { "PASS" } else { "FAIL" };
+                let render_max = renders.iter().copied().fold(0.0, f64::max);
+                let pub_budget = hops.len() > 1 && {
+                    let mut sorted = hops.clone();
+                    sorted.sort_by(f64::total_cmp);
+                    sorted[((sorted.len() - 1) as f64 * 0.99).round() as usize] < 4.0
+                };
                 println!(
-                    "BENCH session={} renderer=skia-opengl rows={ROWS} publications={} {} frames={} {} over_16.7ms={over_frame} over_25ms={over_vsync} {}",
+                    "BENCH session={} renderer=skia-opengl rows={ROWS} publications={} {} reset_ms={reset:.2} filter_ms={filter:.2} frames={} {} over_16.7ms={over_frame} over_25ms={over_vsync} {} budget_pub={} budget_frame={}",
                     if std::env::var_os("WAYLAND_DISPLAY").is_some() { "wayland" } else { "x11" },
                     hops.len(),
                     summary("pub", &mut hops),
                     intervals.len(),
                     summary("interval", &mut intervals),
                     summary("render", &mut renders),
+                    verdict(pub_budget),
+                    verdict(render_max <= 16.7 && over_vsync == 0),
                 );
                 let _ = slint::quit_event_loop();
                 return;

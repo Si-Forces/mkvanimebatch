@@ -6,8 +6,11 @@ use crate::publisher::SlintPublisher;
 use mkv_anime_batch_slint_ui::{App, Mode};
 use mkv_core::pipeline::PipelineMode;
 use mkv_desktop_core::actor::{CoreHandle, Intent, ViewState};
+use mkv_desktop_core::draft::DraftChanges;
 use mkv_desktop_core::queue::Direction;
 use slint::ComponentHandle;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio::runtime::Handle;
 
 fn pipeline(mode: Mode) -> PipelineMode {
@@ -122,35 +125,51 @@ pub(crate) fn wire(app: &App, core: CoreHandle, runtime: Handle, publisher: Slin
     let (runtime, mode) = (intents.runtime.clone(), shown.clone());
     app.on_set_filter(move |filter| {
         if let Some(mode) = mode() {
+            // Kept now, so the last click wins; the rows are mapped again off the event loop, as
+            // every publication's are, with whatever filter is newest by then.
+            publisher.set_filter(mode, filter);
             let publisher = publisher.clone();
-            // Maps the mode's rows again: off the event loop, as every publication is.
-            runtime.spawn_blocking(move || publisher.set_filter(mode, filter));
+            runtime.spawn_blocking(move || publisher.remap(mode));
         }
     });
 
+    // One folder dialog at a time: it has no parent window, so it does not block a second click.
+    let picking = Arc::new(AtomicBool::new(false));
     let window = app.as_weak();
     app.on_open_folder(move || {
         let Some(app) = window.upgrade() else {
             return;
         };
-        if app.get_busy() {
+        if app.get_busy() || picking.swap(true, Ordering::Relaxed) {
             return;
         }
         let mode = pipeline(app.get_mode());
-        let send = intents.clone();
+        let (send, picking, window) = (intents.clone(), Arc::clone(&picking), window.clone());
         // The dialog blocks until it is answered: never on the event loop.
         intents.runtime.spawn_blocking(move || {
-            let Some(path) = rfd::FileDialog::new().pick_folder() else {
-                return;
-            };
-            let path = path.to_string_lossy().into_owned();
-            let intent = Intent::ScanDirectory {
-                mode,
-                path,
-                force: false,
-                no_cache: false,
-            };
-            send.send("scan_directory", intent, || {});
+            let picked = rfd::FileDialog::new().pick_folder();
+            // Back on the event loop, so the Intents keep their order with the other callbacks'.
+            let _ = window.upgrade_in_event_loop(move |app| {
+                picking.store(false, Ordering::Relaxed);
+                // A batch may have started while the dialog was open (app.js re-checks too).
+                let Some(path) = picked.filter(|_| !app.get_busy()) else {
+                    return;
+                };
+                let path = path.to_string_lossy().into_owned();
+                // The picked folder is the Settings Draft's input folder, which Run reads.
+                let changes = DraftChanges {
+                    input_dir: Some(path.clone()),
+                    ..DraftChanges::default()
+                };
+                send.send("edit_draft", Intent::EditDraft { mode, changes }, || {});
+                let intent = Intent::ScanDirectory {
+                    mode,
+                    path,
+                    force: false,
+                    no_cache: false,
+                };
+                send.send("scan_directory", intent, || {});
+            });
         });
     });
 }
