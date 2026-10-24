@@ -6,6 +6,7 @@ import "fonts/JetBrainsMono-wght.ttf";
 import { Theme } from "theme.slint";
 import { TitleBar } from "title-bar.slint";
 import { FontProbe } from "font-probe.slint";
+import { ScrollView } from "std-widgets.slint";
 import { Mode, QueueFilter, QueueHead, QueuePane, QueueRow, RowMark, RowTone } from "queue.slint";
 import { Inspector, InspectorPane, LibraryEntry, LibraryItem, Rung } from "inspector.slint";
 
@@ -126,6 +127,8 @@ export component App inherits Window {
     in-out property <string> sub-custom;
     in-out property <string> sub-title;
     in-out property <string> sub-offset;
+    // A subtitle field edited since its last commit; the host clears it when it writes them.
+    in-out property <bool> sub-dirty;
     // The mode shown.
     in-out property <Mode> mode;
     // A row picked for the Episode Inspector whose Inspect is not answered yet.
@@ -155,6 +158,10 @@ export component App inherits Window {
     callback choose-subtitle(index: int);
     callback reset-subtitle();
     callback subtitle-options-changed();
+    // The language select's entry `index` was picked.
+    callback choose-language(index: int);
+    // The language tag field was typed into; the host caps it.
+    callback language-tag-edited(text: string);
     callback close-window();
     // Through winit, not `minimized`: see the host's `minimize`.
     callback minimize-window();
@@ -174,8 +181,10 @@ export component App inherits Window {
     property <length> side-width: root.width >= 1180px ? 220px : root.width >= 980px ? 200px : 196px;
     property <length> insp-width: root.width >= 1180px ? 320px : root.width >= 980px ? 280px : 248px;
 
-    // Marks the row at once, then asks the host.
+    // Commits a subtitle field edited but not committed, as the webview's blur does before the
+    // click lands; then marks the row at once and asks the host.
     function pick(id: string) {
+        insp-pane.flush();
         root.pending-inspect = id;
         root.inspect(id);
     }
@@ -265,35 +274,42 @@ export component App inherits Window {
                 Rectangle {
                     width: root.side-width;
                     background: Theme.side;
-                    VerticalLayout {
-                        padding-top: 14px;
-                        padding-left: 10px;
-                        padding-right: 10px;
-                        spacing: 2px;
-                        alignment: start;
-                        SideHeading { text: "PIPELINE"; }
-                        ModeTab {
-                            title: "Remux";
-                            subtitle: "FLAC → Opus, mux subs";
-                            active: root.mode == Mode.remux;
-                            clicked => { root.mode = Mode.remux; }
-                        }
-                        ModeTab {
-                            title: "Extract";
-                            subtitle: "Subs, fonts, chapters";
-                            active: root.mode == Mode.extract;
-                            clicked => { root.mode = Mode.extract; }
-                        }
-                        // .side's 18px gap between groups, less the group's own 2px spacing.
-                        Rectangle { height: 16px; }
-                        SideHeading { text: "LIBRARY"; }
-                        for item in root.library: LibraryEntry {
-                            item: item;
-                            clicked => { root.reveal-release(item.release, item.root); }
-                        }
-                        OpenFolderNav {
-                            enabled: !root.busy;
-                            clicked => { root.open-folder(); }
+                    // The sidebar scrolls, as .side's overflow does: a folder of many releases
+                    // keeps Open folder reachable.
+                    ScrollView {
+                        content-width: self.visible-width;
+                        content-height: side.preferred-height;
+                        side := VerticalLayout {
+                            width: parent.width;
+                            padding-top: 14px;
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            spacing: 2px;
+                            alignment: start;
+                            SideHeading { text: "PIPELINE"; }
+                            ModeTab {
+                                title: "Remux";
+                                subtitle: "FLAC → Opus, mux subs";
+                                active: root.mode == Mode.remux;
+                                clicked => { root.mode = Mode.remux; }
+                            }
+                            ModeTab {
+                                title: "Extract";
+                                subtitle: "Subs, fonts, chapters";
+                                active: root.mode == Mode.extract;
+                                clicked => { root.mode = Mode.extract; }
+                            }
+                            // .side's 18px gap between groups, less the group's own 2px spacing.
+                            Rectangle { height: 16px; }
+                            SideHeading { text: "LIBRARY"; }
+                            for item in root.library: LibraryEntry {
+                                item: item;
+                                clicked => { root.reveal-release(item.release, item.root); }
+                            }
+                            OpenFolderNav {
+                                enabled: !root.busy;
+                                clicked => { root.open-folder(); }
+                            }
                         }
                     }
                     Rectangle {
@@ -343,7 +359,7 @@ export component App inherits Window {
                 }
 
                 // The Episode Inspector (.insp) of the mode shown; the subtitle section is remux's.
-                InspectorPane {
+                insp-pane := InspectorPane {
                     width: root.insp-width;
                     insp: root.mode == Mode.remux ? root.remux-inspector : root.extract-inspector;
                     ladder: root.sub-ladder;
@@ -355,7 +371,10 @@ export component App inherits Window {
                     custom-language <=> root.sub-custom;
                     track-title <=> root.sub-title;
                     offset <=> root.sub-offset;
+                    dirty <=> root.sub-dirty;
                     choose(index) => { root.choose-subtitle(index); }
+                    choose-language(index) => { root.choose-language(index); }
+                    language-tag-edited(text) => { root.language-tag-edited(text); }
                     reset => { root.reset-subtitle(); }
                     options-changed => { root.subtitle-options-changed(); }
                 }

@@ -106,28 +106,70 @@ component SectionHead inherits Text {
     letter-spacing: 0.77px;
 }
 
-// A path as crumbs on one line: every crumb but the last, then the last in bold (.crumbs). Read
-// as one text.
+// A path as crumbs: every crumb but the last, then the last in bold (.crumbs). On one line when
+// they fit, else the last below; each wraps anywhere, as .crumbs's flex-wrap and overflow-wrap do,
+// so no part of the path is cut. Read as one text.
 component Crumbs inherits Rectangle {
     in property <string> lead;
     in property <string> end;
+    property <bool> one-line: lead-probe.preferred-width + end-probe.preferred-width <= self.width;
+    // Takes the width it is given and the height its lines need: placed below, so its size is
+    // not its content's (which `one-line` picks from that width).
+    min-width: 0px;
+    preferred-width: 0px;
+    horizontal-stretch: 1;
+    height: lines.preferred-height;
     accessible-role: text;
     accessible-label: root.lead + root.end;
-    HorizontalLayout {
-        alignment: start;
-        Text {
+    lines := VerticalLayout {
+        x: 0;
+        y: 0;
+        width: root.width;
+        // The two texts' one-line widths; drawn at no height.
+        lead-probe := Text {
+            text: root.lead;
+            font-size: 12px;
+            height: 0px;
+            visible: false;
+            accessible-role: none;
+        }
+        end-probe := Text {
+            text: root.end;
+            font-size: 12px;
+            font-weight: 600;
+            height: 0px;
+            visible: false;
+            accessible-role: none;
+        }
+        if root.one-line: HorizontalLayout {
+            alignment: start;
+            Text {
+                text: root.lead;
+                color: Theme.path;
+                font-size: 12px;
+                accessible-role: none;
+            }
+            Text {
+                text: root.end;
+                color: Theme.fg;
+                font-size: 12px;
+                font-weight: 600;
+                accessible-role: none;
+            }
+        }
+        if !root.one-line && root.lead != "": Text {
             text: root.lead;
             color: Theme.path;
             font-size: 12px;
-            overflow: elide;
+            wrap: char-wrap;
             accessible-role: none;
         }
-        Text {
+        if !root.one-line && root.end != "": Text {
             text: root.end;
             color: Theme.fg;
             font-size: 12px;
             font-weight: 600;
-            overflow: elide;
+            wrap: char-wrap;
             accessible-role: none;
         }
     }
@@ -160,11 +202,16 @@ component Labelled inherits VerticalLayout {
 
 // A text field that commits as a webview `change` does: on Enter or when it loses focus, once
 // edited since the last commit.
+// `dirty` is the pane's, shared by its fields: a commit sends them all.
 component CommitEdit inherits LineEdit {
+    in-out property <bool> dirty;
     callback committed();
-    property <bool> dirty;
+    callback typed(text: string);
     min-width: 0px;
-    edited => { self.dirty = true; }
+    edited(text) => {
+        self.dirty = true;
+        root.typed(text);
+    }
     accepted => { self.commit(); }
     changed has-focus => {
         if !self.has-focus {
@@ -194,9 +241,21 @@ export component InspectorPane inherits Rectangle {
     in-out property <string> custom-language;
     in-out property <string> track-title;
     in-out property <string> offset;
+    // A field edited since its last commit.
+    in-out property <bool> dirty;
     callback choose(index: int);
     callback reset();
     callback options-changed();
+    callback choose-language(index: int);
+    callback language-tag-edited(text: string);
+
+    // Commits a field edited but not committed (a row is picked: the field's blur comes first).
+    public function flush() {
+        if root.dirty {
+            root.dirty = false;
+            root.options-changed();
+        }
+    }
 
     // The language select's "Custom tag…", its last entry: the tag field shows.
     property <bool> custom: root.language == root.languages.length - 1;
@@ -471,7 +530,7 @@ export component InspectorPane inherits Rectangle {
                                         accessible-label: "Language";
                                         selected => {
                                             root.focus-custom = root.custom;
-                                            root.options-changed();
+                                            root.choose-language(self.current-index);
                                         }
                                     }
                                 }
@@ -482,6 +541,8 @@ export component InspectorPane inherits Rectangle {
                                         placeholder-text: "ISO 639-2, e.g. may";
                                         enabled: !root.busy;
                                         accessible-label: "Language tag";
+                                        dirty <=> root.dirty;
+                                        typed(text) => { root.language-tag-edited(text); }
                                         committed => { root.options-changed(); }
                                         init => {
                                             if root.focus-custom {
@@ -498,6 +559,7 @@ export component InspectorPane inherits Rectangle {
                                         placeholder-text: "e.g. Dialogue";
                                         enabled: !root.busy;
                                         accessible-label: "Track title";
+                                        dirty <=> root.dirty;
                                         committed => { root.options-changed(); }
                                     }
                                 }
@@ -511,6 +573,7 @@ export component InspectorPane inherits Rectangle {
                                         placeholder-text: "e.g. Dialogue";
                                         enabled: !root.busy;
                                         accessible-label: "Track title";
+                                        dirty <=> root.dirty;
                                         committed => { root.options-changed(); }
                                     }
                                 }
@@ -521,6 +584,7 @@ export component InspectorPane inherits Rectangle {
                                         placeholder-text: "0";
                                         enabled: !root.busy;
                                         accessible-label: "Offset (ms)";
+                                        dirty <=> root.dirty;
                                         committed => { root.options-changed(); }
                                     }
                                 }

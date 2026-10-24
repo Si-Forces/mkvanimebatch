@@ -555,6 +555,8 @@ fn the_inspector_shows_every_field_and_fits_the_narrowest_window() {
         ),
         ("may".into(), "Signs".into(), "120".into())
     );
+    // The pane's sections scroll; the subtitle options are at their end.
+    scroll(&app, 640.0, false);
     for label in [
         "Reset",
         "Language",
@@ -570,6 +572,8 @@ fn the_inspector_shows_every_field_and_fits_the_narrowest_window() {
         );
     }
 
+    scroll(&app, 640.0, true);
+
     // The extract Inspector has no subtitle section.
     state.seq = 3;
     state.extract.rows = Arc::new(vec![row("Show - 01.mkv")]);
@@ -582,6 +586,95 @@ fn the_inspector_shows_every_field_and_fits_the_narrowest_window() {
         0
     );
     only(&app, "Same folder as the input");
+    app.hide().unwrap();
+}
+
+/// Scrolls the pane at `x` to its end with the mouse wheel, or back to its top for `up`.
+fn scroll(app: &App, x: f32, up: bool) {
+    app.window()
+        .dispatch_event(slint::platform::WindowEvent::PointerScrolled {
+            position: slint::LogicalPosition::new(x, 300.0),
+            delta_x: 0.0,
+            delta_y: if up { 5000.0 } else { -5000.0 },
+        });
+}
+
+/// A folder of 30 releases overflows the sidebar at the narrowest window: it scrolls, so Open
+/// folder stays reachable, as `.side`'s overflow keeps it.
+#[test]
+fn the_sidebar_scrolls_to_open_folder_past_many_releases() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(760.0, 520.0));
+    let rows: Vec<Row> = (0..30)
+        .map(|i| Row {
+            release: format!("R{i:02}"),
+            ..row(&format!("e{i:02}"))
+        })
+        .collect();
+    let mut state = ViewState::new(None);
+    state.remux.library = presentation::library(Some("/media/Show"), &rows);
+    state.remux.rows = Arc::new(rows);
+    state.remux.empty = None;
+    apply(&app, &state);
+    app.show().unwrap();
+    // Clipped out of the sidebar: the search finds only what shows.
+    let open_folder = || ElementHandle::find_by_accessible_label(&app, "Open folder…").count();
+    assert_eq!(open_folder(), 0, "30 releases overflow the window");
+    scroll(&app, 90.0, false);
+    let open = only(&app, "Open folder…");
+    let end = open.absolute_position().y + open.size().height;
+    assert!(end <= 520.0, "Open folder ends at {end}, past the window");
+    app.hide().unwrap();
+}
+
+/// A title typed and not committed is committed when another row is picked, before the pick, as
+/// the webview's blur commits it before the click lands; a written-back form drops the edit.
+#[test]
+fn a_typed_subtitle_field_is_committed_before_a_row_is_picked() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    let mut assigned = sample_view();
+    assigned.assignment = Some(mkv_core::request::TrackAssignment {
+        target_video: "Season 1/ep1.mkv".into(),
+        asset_path: "Season 1/ep1.ass".into(),
+        track_type: Default::default(),
+        language: Some("eng".into()),
+        title: None,
+        offset_ms: None,
+    });
+    let mut state = ViewState::new(None);
+    state.remux.rows = Arc::new(vec![row("Show - 01.mkv"), row("Show - 02.mkv")]);
+    state.remux.empty = None;
+    state.remux.inspector = Some(assigned);
+    apply(&app, &state);
+    app.show().unwrap();
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let log = Rc::clone(&calls);
+    app.on_subtitle_options_changed(move || log.borrow_mut().push("options".to_string()));
+    let log = Rc::clone(&calls);
+    app.on_inspect(move |id| log.borrow_mut().push(id.to_string()));
+
+    only(&app, "Track title").set_accessible_value("Signs");
+    assert_eq!(app.get_sub_title(), "Signs");
+    only(&app, "Show - 02.mkv").invoke_accessible_default_action();
+    only(&app, "Show - 01.mkv").invoke_accessible_default_action();
+    assert_eq!(
+        *calls.borrow(),
+        ["options", "Show - 02.mkv", "Show - 01.mkv"],
+        "committed once, before the pick"
+    );
+
+    only(&app, "Track title").set_accessible_value("Sig");
+    crate::inspector::restore_form(&app);
+    only(&app, "Show - 02.mkv").invoke_accessible_default_action();
+    assert_eq!(calls.borrow().last().unwrap(), "Show - 02.mkv");
+    assert_eq!(
+        calls.borrow().len(),
+        4,
+        "a written-back form has nothing to commit"
+    );
     app.hide().unwrap();
 }
 

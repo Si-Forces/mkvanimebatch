@@ -239,8 +239,21 @@ impl InspectorList {
     }
 }
 
-/// Writes `inspector`'s published subtitle fields into the typed ones.
+/// The language tag field's longest text: an ISO 639-2 code (index.html `#sub-lang-custom`
+/// `maxlength="3"`).
+const TAG_LEN: usize = 3;
+
+/// `text` cut to the language tag field's length, or none when it fits.
+pub(crate) fn capped_tag(text: &str) -> Option<String> {
+    text.char_indices()
+        .nth(TAG_LEN)
+        .map(|(at, _)| text[..at].to_string())
+}
+
+/// Writes `inspector`'s published subtitle fields into the typed ones; what was typed and not
+/// committed is dropped with them.
 pub(crate) fn write_form(app: &App, inspector: &Inspector) {
+    app.set_sub_dirty(false);
     app.set_sub_choice(inspector.choice);
     app.set_sub_language(inspector.language);
     app.set_sub_custom(inspector.custom_language.clone());
@@ -332,6 +345,25 @@ mod tests {
             title: Some("Signs".into()),
             offset_ms: Some(-250),
         }
+    }
+
+    /// The language select's presets are the core's, in its order, then the custom tag.
+    #[test]
+    fn the_language_select_holds_the_core_presets_then_custom() {
+        let values: Vec<_> = LANGUAGES.iter().map(|(value, _)| *value).collect();
+        assert_eq!(
+            values[..3],
+            mkv_desktop_core::inspector::PRESET_SUBTITLE_LANGUAGES
+        );
+        assert_eq!(values[3], "custom");
+    }
+
+    #[test]
+    fn the_language_tag_is_cut_to_three_characters() {
+        assert_eq!(capped_tag("may"), None);
+        assert_eq!(capped_tag("ma"), None);
+        assert_eq!(capped_tag("mayxx"), Some("may".into()));
+        assert_eq!(capped_tag("ábcd"), Some("ábc".into()));
     }
 
     #[test]
