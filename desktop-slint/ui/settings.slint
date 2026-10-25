@@ -264,7 +264,9 @@ component Field inherits VerticalLayout {
 component DraftEdit inherits Rectangle {
     in property <string> key;
     in-out property <string> text <=> edit.text;
-    in property <string> placeholder <=> edit.placeholder-text;
+    // Drawn here in Theme.hint rather than as the LineEdit's placeholder-text, whose colour
+    // cannot be set.
+    in property <string> placeholder;
     in property <bool> enabled <=> edit.enabled;
     in property <string> label;
     in property <string> description;
@@ -297,6 +299,7 @@ component DraftEdit inherits Rectangle {
         horizontal-alignment: root.align;
         accessible-label: root.label;
         accessible-description: root.description;
+        accessible-placeholder-text: root.placeholder;
         edited => {
             Sheet.changed-since = true;
             Sheet.edited(root.key);
@@ -310,6 +313,19 @@ component DraftEdit inherits Rectangle {
                 Sheet.leave(root.key);
             }
         }
+    }
+    // The placeholder, inset as the LineEdit's text (fluent pads it 12px). Hidden while the field
+    // has the focus, where an input method's preedit text would draw over it.
+    if edit.text == "" && !edit.has-focus: Text {
+        x: 12px;
+        width: root.width - 24px;
+        text: root.placeholder;
+        color: root.enabled ? Theme.hint : Theme.hint.with-alpha(0.6);
+        font-family: edit.font-family;
+        horizontal-alignment: root.align;
+        vertical-alignment: center;
+        overflow: elide;
+        accessible-role: none;
     }
     // The flag's ring, over the field's own border.
     if root.flagged: Rectangle {
@@ -525,9 +541,17 @@ export component SettingsSheet inherits Rectangle {
             root.complexity = root.form.complexity.to-float();
         }
     }
+    // Done takes the focus unless a field took it for `Sheet.focus-key`: on opening, and again
+    // when the host moves the cursor (`focus-serial`). Whichever of this and the fields' grab runs
+    // first, the field's focus wins.
     init => {
         self.follow();
-        if Sheet.focus-key == "" {
+        self.focus-done();
+    }
+    property <int> serial: Sheet.focus-serial;
+    changed serial => { self.focus-done(); }
+    function focus-done() {
+        if Sheet.focused == "" {
             done-button.focus();
         }
     }

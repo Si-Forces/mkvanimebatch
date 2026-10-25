@@ -856,8 +856,9 @@ fn over(top: Color, below: Color) -> Color {
 
 /// Every text token over every surface, bare or under each tint drawn on it (field, sel, hover and
 /// the soft tones), each surface over each colour of the wallpaper (its base and the three
-/// gradients' peaks), and each button's text over its fill: 4.5:1 (WCAG AA body text) in both themes. Reads the tokens from the generated `Theme`, the
-/// one place they are defined.
+/// gradients' peaks), the placeholder hint on the sheet's fields, and each button's text over its
+/// fill: 4.5:1 (WCAG AA body text) in both themes. Reads the tokens from the generated `Theme`,
+/// the one place they are defined.
 #[test]
 fn every_text_token_meets_wcag_aa_on_every_surface_in_both_themes() {
     i_slint_backend_testing::init_no_event_loop();
@@ -919,6 +920,12 @@ fn every_text_token_meets_wcag_aa_on_every_surface_in_both_themes() {
                     }
                 }
             }
+        }
+        // A placeholder (hint) is drawn on the sheet's fields alone: field on float.
+        for (wall, below) in walls {
+            let field = over(theme.get_field(), over(theme.get_float(), below));
+            let on = format!("field on float over {wall}");
+            pairs.push(("hint", on, theme.get_hint(), field));
         }
         for (text, fill, color, background) in [
             (
