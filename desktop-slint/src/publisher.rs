@@ -5,6 +5,7 @@
 //! so the event loop only writes the rows that changed into the mode's kept `VecModel`.
 
 use crate::inspector::{map_inspector, write_form, LANGUAGES};
+use crate::jobs;
 use crate::queue::{map_rows, ModeList, RowPatch, Update};
 use crate::settings::{self, Edits, BITRATES};
 use mkv_anime_batch_slint_ui::{App, Mode, QueueFilter, QueueRow};
@@ -276,11 +277,12 @@ pub(crate) fn hop(pending: &Coalescer, edits: &Edits, window: &slint::Weak<App>)
     };
     if let Some(state) = state {
         app.set_busy(state.busy);
+        jobs::show(&app, &state);
         settings::show(&app, &state, edits);
     }
     apply(&app, Mode::Remux, remux);
     apply(&app, Mode::Extract, extract);
-    // The job controller renders a job's end (P5); nothing shows it yet.
+    // Nothing renders a job's end, as in the webview: the state it ended in shows it.
 }
 
 impl Publisher for SlintPublisher {

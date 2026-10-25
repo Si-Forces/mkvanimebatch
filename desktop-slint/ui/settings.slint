@@ -5,6 +5,7 @@
 // hints and the preset texts.
 import { Button, CheckBox, ComboBox, LineEdit, ScrollView, Slider } from "std-widgets.slint";
 import { Theme } from "theme.slint";
+import { PillButton } from "jobs.slint";
 
 // One mode's Settings Draft as the sheet shows it, every field as typed but the two checkboxes.
 // The remux-only fields stay empty in extract's. `bitrate` is the index of the bitrate select's
@@ -82,6 +83,10 @@ export global Sheet {
     callback step-key(key: string, up: bool);
     callback browse(key: string);
     callback pick-preset(id: string);
+    // "Clear inspection cache…": the host asks to confirm, then clears it.
+    callback clear-cache();
+    // Bumped when the confirm dialog closes over the sheet: its button takes the focus back.
+    in-out property <int> cache-focus-serial;
 
     // A field took the focus: the one that had it is left first.
     public function enter(key: string) {
@@ -588,6 +593,9 @@ export component SettingsSheet inherits Rectangle {
     // Takes the clicks the backdrop behind it would close the sheet on.
     TouchArea { }
 
+    property <int> cache-focus: Sheet.cache-focus-serial;
+    changed cache-focus => { clear-cache.focus(); }
+
     // Keeps Tab and Shift+Tab inside the sheet, as a modal dialog does: past its last control the
     // focus wraps to Done, and back from Done to the last one. Locked, Done is the only one.
     FocusScope {
@@ -599,11 +607,11 @@ export component SettingsSheet inherits Rectangle {
                 if root.busy {
                     done-button.focus();
                 } else {
-                    no-cache.focus();
+                    clear-cache.focus();
                 }
                 return accept;
             }
-            if !back && event.text == Key.Tab && (no-cache.has-focus || (root.busy && done-button.focused)) {
+            if !back && event.text == Key.Tab && (clear-cache.focused || (root.busy && done-button.focused)) {
                 done-button.focus();
                 return accept;
             }
@@ -855,7 +863,7 @@ export component SettingsSheet inherits Rectangle {
                         }
                     }
 
-                    // Run options. "Clear inspection cache…" comes with its confirm dialog (P5).
+                    // Run options.
                     Divider { }
                     VerticalLayout {
                         padding-top: 16px;
@@ -873,7 +881,7 @@ export component SettingsSheet inherits Rectangle {
                                 }
                             }
                         }
-                        no-cache := CheckBox {
+                        CheckBox {
                             text: "Bypass inspection cache";
                             checked <=> root.form.no-cache;
                             enabled: !root.busy;
@@ -881,6 +889,19 @@ export component SettingsSheet inherits Rectangle {
                             changed has-focus => {
                                 if self.has-focus {
                                     Sheet.reveal(self.absolute-position.y, self.height);
+                                }
+                            }
+                        }
+                        HorizontalLayout {
+                            alignment: start;
+                            clear-cache := PillButton {
+                                text: "Clear inspection cache…";
+                                enabled: !root.busy;
+                                clicked => { Sheet.clear-cache(); }
+                                changed focused => {
+                                    if self.focused {
+                                        Sheet.reveal(self.absolute-position.y, self.height);
+                                    }
                                 }
                             }
                         }

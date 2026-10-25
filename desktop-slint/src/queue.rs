@@ -206,7 +206,6 @@ pub(crate) fn map_head(view: &ModeView, filter: QueueFilter, rows_shown: bool) -
         title: view.title.as_str().into(),
         crumbs_lead: crumbs_lead.into(),
         crumbs_end: crumbs_end.into(),
-        count_text: view.count_text.as_str().into(),
         all: to_slint_count(view.filters.all),
         todo: to_slint_count(view.filters.todo),
         done: to_slint_count(view.filters.done),

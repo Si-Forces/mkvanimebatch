@@ -3,6 +3,7 @@
 mod diagnostics;
 mod inspector;
 mod intents;
+mod jobs;
 mod publisher;
 mod queue;
 mod renderer;

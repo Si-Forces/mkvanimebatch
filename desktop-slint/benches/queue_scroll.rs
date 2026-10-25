@@ -35,6 +35,10 @@ mod inspector;
 #[allow(dead_code, unused_imports)]
 #[path = "../src/intents.rs"]
 mod intents;
+// The hop writes the job controls too (P5).
+#[allow(dead_code, unused_imports)]
+#[path = "../src/jobs.rs"]
+mod jobs;
 #[allow(dead_code, unused_imports)]
 #[path = "../src/publisher.rs"]
 mod publisher;

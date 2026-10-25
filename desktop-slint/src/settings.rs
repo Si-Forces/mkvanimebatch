@@ -471,10 +471,6 @@ fn settle(app: &App, edits: &Edits, mode: Mode, key: DraftKey, answer: Result<bo
 
 /// After a refused Run of `mode`: opens the sheet on the field its draft flags, so the error
 /// shows (job-controller.js `start`). False when none is flagged.
-#[allow(
-    dead_code,
-    reason = "the Run button (P5) calls it once a Run is refused"
-)]
 pub(crate) fn open_on_flagged(app: &App, mode: Mode) -> bool {
     let invalid = match mode {
         Mode::Remux => app.get_remux_invalid(),
@@ -548,7 +544,7 @@ impl Drafts {
 
     /// Steps `mode`'s `key` once; nothing while a batch locks the fields.
     fn step(&self, app: &App, mode: Mode, key: DraftKey, up: bool) {
-        let Some(field) = step_field(key).filter(|_| !app.get_busy()) else {
+        let Some(field) = step_field(key).filter(|_| !app.get_locked()) else {
             return;
         };
         let direction = if up { Direction::Up } else { Direction::Down };
@@ -585,7 +581,7 @@ impl Drafts {
             key,
             DraftKey::InputDir | DraftKey::OutDir | DraftKey::FontsDir | DraftKey::AssetsDir
         );
-        let Some(path) = picked.filter(|_| folder && !app.get_busy()) else {
+        let Some(path) = picked.filter(|_| folder && !app.get_locked()) else {
             return;
         };
         let mut typed = form(app, mode);
@@ -602,7 +598,7 @@ impl Drafts {
 
 /// Opens the folder dialog for `mode`'s `key`, one dialog at a time and not while a batch runs.
 fn browse(drafts: &Drafts, picking: &Arc<AtomicBool>, app: &App, mode: Mode, key: DraftKey) {
-    if app.get_busy() || picking.swap(true, Ordering::Relaxed) {
+    if app.get_locked() || picking.swap(true, Ordering::Relaxed) {
         return;
     }
     let (drafts, picking, window) = (drafts.clone(), Picking(Arc::clone(picking)), app.as_weak());
@@ -692,7 +688,7 @@ pub(crate) fn wire(app: &App, send: Intents, edits: Edits) {
             let Some(app) = window.upgrade() else {
                 return;
             };
-            if !app.get_sheet_open() || app.get_busy() {
+            if !app.get_sheet_open() || app.get_locked() {
                 if let Some(repeater) = stop.upgrade() {
                     repeater.release();
                 }
@@ -731,7 +727,7 @@ pub(crate) fn wire(app: &App, send: Intents, edits: Edits) {
     // A Preset Profile: remux's, unless a batch locks the form.
     let shown = app.as_weak();
     sheet.on_pick_preset(move |id| {
-        if shown.upgrade().is_some_and(|app| !app.get_busy()) {
+        if shown.upgrade().is_some_and(|app| !app.get_locked()) {
             let intent = Intent::SetPreset {
                 mode: pipeline(Mode::Remux),
                 preset: id.into(),

@@ -10,16 +10,25 @@ import { ScrollView } from "std-widgets.slint";
 import { Mode, QueueFilter, QueueHead, QueuePane, QueueRow, RowMark, RowTone } from "queue.slint";
 import { Inspector, InspectorPane, LibraryEntry, LibraryItem, Rung } from "inspector.slint";
 import { ChipTexts, DraftForm, GearButton, PresetItem, PresetRow, SettingsSheet, Sheet, SheetLimits } from "settings.slint";
+import { BottomBar, ConfirmDialog, DialogTexts, JobBar, StatusDot, StatusTone } from "jobs.slint";
 
 // FontProbe is test only; a .slint file cannot be compiled per cfg, so it ships (a few bytes).
-export { Theme, FontProbe, Inspector, LibraryItem, Mode, QueueFilter, QueueHead, QueueRow, RowMark, RowTone, Rung, ChipTexts, DraftForm, PresetItem, Sheet, SheetLimits }
+export { Theme, FontProbe, Inspector, LibraryItem, Mode, QueueFilter, QueueHead, QueueRow, RowMark, RowTone, Rung, ChipTexts, DraftForm, PresetItem, Sheet, SheetLimits, DialogTexts, JobBar, StatusTone }
 
-// A mode's tab in the sidebar (.task-row): its name over what it does, then the gear that opens
-// its settings sheet.
+// Who opened the settings sheet, to take the focus back when it closes: a mode's gear, Run (after
+// a refused Run), or nothing to give it back to.
+enum Opener { none, remux-gear, extract-gear, run }
+
+// A mode's tab in the sidebar (.task-row): its icon, its name over what it does and its status
+// pill (a dot), then the gear that opens its settings sheet.
 component ModeTab inherits Rectangle {
     in property <string> title;
     in property <string> subtitle;
+    // The icon's path, in a 24x24 viewbox.
+    in property <string> icon;
     in property <bool> active;
+    in property <StatusTone> tone;
+    in property <string> status;
     callback clicked();
     callback settings();
     // The sheet closed: the gear that opened it takes the focus back.
@@ -34,6 +43,8 @@ component ModeTab inherits Rectangle {
         width: parent.width - gear.width - 4px;
         accessible-role: tab;
         accessible-label: root.title;
+        // The pill's text, which the webview's tab reads out unless idle.
+        accessible-description: root.tone == StatusTone.idle ? "" : root.status;
         accessible-item-selected: root.active;
         accessible-action-default => { root.clicked(); }
         touch := TouchArea {
@@ -45,22 +56,47 @@ component ModeTab inherits Rectangle {
         label: root.title + " settings";
         clicked => { root.settings(); }
     }
-    VerticalLayout {
+    // .nav: the icon, the texts, then the pill at the end.
+    HorizontalLayout {
         x: 0;
         width: tab-area.width;
         padding-left: 8px;
-        alignment: center;
-        Text {
-            text: root.title;
-            color: Theme.fg;
-            font-weight: 500;
+        padding-right: 8px;
+        spacing: 10px;
+        Path {
+            y: (parent.height - self.height) / 2;
+            width: 16px;
+            height: 16px;
+            viewbox-width: 24;
+            viewbox-height: 24;
+            stroke: Theme.fg;
+            // The SVG's 2 in its 24-unit viewbox: a Path's stroke is not scaled with it.
+            stroke-width: 2px * 16 / 24;
+            stroke-line-cap: round;
+            commands: root.icon;
             accessible-role: none;
         }
-        Text {
-            text: root.subtitle;
-            color: Theme.mute;
-            font-size: 11px;
-            accessible-role: none;
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            Text {
+                text: root.title;
+                color: Theme.fg;
+                font-weight: 500;
+                overflow: elide;
+                accessible-role: none;
+            }
+            Text {
+                text: root.subtitle;
+                color: Theme.mute;
+                font-size: 11px;
+                overflow: elide;
+                accessible-role: none;
+            }
+        }
+        StatusDot {
+            y: (parent.height - self.height) / 2;
+            tone: root.tone;
         }
     }
 }
@@ -128,6 +164,19 @@ export component App inherits Window {
     in property <[QueueRow]> remux-rows;
     in property <[QueueRow]> extract-rows;
     in property <bool> busy;
+    // A Run sent and not answered yet (the host's): Run and every control a batch locks stay
+    // locked from the click on, as the start will lock them (job-controller.js `runPending`).
+    in-out property <bool> run-pending;
+    // What a batch locks: the settings, the presets, the subtitle controls and Open folder.
+    out property <bool> locked: busy || run-pending;
+    // Each mode's job controls: the bottom bar's and the tab's status pill. Before the first
+    // publication, the markup's own labels (index.html).
+    in property <JobBar> remux-job: { run-label: "Run remux", count-text: "Ready", clock: "Not started" };
+    in property <JobBar> extract-job: { run-label: "Run extract", count-text: "Ready", clock: "Not started" };
+    // The confirm dialog shown, if open; the host bumps `dialog-serial` for each it shows.
+    in property <bool> dialog-open;
+    in property <DialogTexts> dialog;
+    in property <int> dialog-serial;
     // Each mode's Library and Episode Inspector; the subtitle section's ladder and select entries
     // (remux only), and the language select's.
     in property <[LibraryItem]> remux-library;
@@ -175,9 +224,8 @@ export component App inherits Window {
     in property <SheetLimits> sheet-limits;
     // The settings sheet of the mode shown is open.
     in-out property <bool> sheet-open;
-    // Which gear opened the sheet, to take the focus back; none for a sheet the host opened.
-    property <bool> opened-by-gear;
-    property <Mode> opener;
+    // Who opened the sheet, to take the focus back.
+    property <Opener> opener;
 
     // The shown mode's list asks; the host sends the Intent for `mode`.
     callback set-selected(id: string, selected: bool);
@@ -197,14 +245,20 @@ export component App inherits Window {
     callback choose-language(index: int);
     // The language tag field was typed into; the host caps it.
     callback language-tag-edited(text: string);
+    // Run, or Stop, of the mode shown; the host sends the Intent.
+    callback run();
+    callback stop();
+    // The confirm dialog was answered: Clear cache (`true`), Cancel or Esc.
+    callback dialog-answered(confirmed: bool);
     callback close-window();
     // Through winit, not `minimized`: see the host's `minimize`.
     callback minimize-window();
 
     // Shows `mode` and opens its settings sheet with the cursor in the field of draft `key` (the
-    // flagged field after a refused Run), or on Done for an empty `key` or one it shows no field
-    // of. Already open, it moves the cursor there, leaving the focused field first under the mode
-    // it belongs to (it changes if edited); a field that keeps the focus is not left.
+    // flagged field after a refused Run, so Run takes the focus back when it closes), or on Done
+    // for an empty `key` or one it shows no field of. Already open, it moves the cursor there,
+    // leaving the focused field first under the mode it belongs to (it changes if edited); a field
+    // that keeps the focus is not left.
     public function open-sheet(mode: Mode, key: string) {
         if Sheet.focused != key || mode != root.mode {
             Sheet.leave(Sheet.focused);
@@ -214,7 +268,7 @@ export component App inherits Window {
         Sheet.focus-key = key;
         Sheet.focus-serial += 1;
         if !root.sheet-open {
-            root.opened-by-gear = false;
+            root.opener = Opener.run;
             root.sheet-open = true;
         }
     }
@@ -224,19 +278,25 @@ export component App inherits Window {
     public function close-sheet() {
         Sheet.leave(Sheet.focused);
         root.sheet-open = false;
-        if root.opened-by-gear {
-            if root.opener == Mode.remux {
-                remux-tab.focus-gear();
-            } else {
-                extract-tab.focus-gear();
-            }
+        if root.opener == Opener.remux-gear {
+            remux-tab.focus-gear();
+        } else if root.opener == Opener.extract-gear {
+            extract-tab.focus-gear();
+        } else if root.opener == Opener.run {
+            bottom-bar.focus-run();
         }
     }
 
     function open-from-gear(mode: Mode) {
         root.open-sheet(mode, "");
-        root.opened-by-gear = true;
-        root.opener = mode;
+        root.opener = mode == Mode.remux ? Opener.remux-gear : Opener.extract-gear;
+    }
+
+    // The confirm dialog closed over the sheet: the button that opened it takes the focus back.
+    changed dialog-open => {
+        if !self.dialog-open && self.sheet-open {
+            Sheet.cache-focus-serial += 1;
+        }
     }
 
     // Scrolls `mode`'s list so its row `row` heads it.
@@ -369,7 +429,11 @@ export component App inherits Window {
                             remux-tab := ModeTab {
                                 title: "Remux";
                                 subtitle: "FLAC → Opus, mux subs";
+                                // A film strip.
+                                icon: "M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z M7 4v16 M17 4v16 M3 9h4 M3 15h4 M17 9h4 M17 15h4";
                                 active: root.mode == Mode.remux;
+                                tone: root.remux-job.tone;
+                                status: root.remux-job.status;
                                 clicked => {
                                     root.leave-field();
                                     root.mode = Mode.remux;
@@ -379,7 +443,11 @@ export component App inherits Window {
                             extract-tab := ModeTab {
                                 title: "Extract";
                                 subtitle: "Subs, fonts, chapters";
+                                // A screen with subtitle lines.
+                                icon: "M5 5h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z M7 15h4 M13 15h4 M7 11h10";
                                 active: root.mode == Mode.extract;
+                                tone: root.extract-job.tone;
+                                status: root.extract-job.status;
                                 clicked => {
                                     root.leave-field();
                                     root.mode = Mode.extract;
@@ -397,7 +465,7 @@ export component App inherits Window {
                                 }
                             }
                             OpenFolderNav {
-                                enabled: !root.busy;
+                                enabled: !root.locked;
                                 clicked => {
                                     root.leave-field();
                                     root.open-folder();
@@ -436,7 +504,7 @@ export component App inherits Window {
                                 }
                                 for item in root.presets: PresetRow {
                                     item: item;
-                                    enabled: !root.busy;
+                                    enabled: !root.locked;
                                     clicked => {
                                         root.leave-field();
                                         Sheet.pick-preset(item.id);
@@ -464,7 +532,7 @@ export component App inherits Window {
                         head: root.remux-head;
                         rows: root.remux-rows;
                         list-scroll <=> root.remux-scroll;
-                        busy: root.busy;
+                        busy: root.locked;
                         pending-inspect: root.pending-inspect;
                         set-selected(id, selected) => { root.set-selected(id, selected); }
                         set-all-selected(selected) => { root.set-all-selected(selected); }
@@ -486,7 +554,7 @@ export component App inherits Window {
                         head: root.extract-head;
                         rows: root.extract-rows;
                         list-scroll <=> root.extract-scroll;
-                        busy: root.busy;
+                        busy: root.locked;
                         pending-inspect: root.pending-inspect;
                         set-selected(id, selected) => { root.set-selected(id, selected); }
                         set-all-selected(selected) => { root.set-all-selected(selected); }
@@ -510,7 +578,7 @@ export component App inherits Window {
                     ladder: root.sub-ladder;
                     options: root.sub-options;
                     languages: root.sub-languages;
-                    busy: root.busy;
+                    busy: root.locked;
                     choice <=> root.sub-choice;
                     language <=> root.sub-language;
                     custom-language <=> root.sub-custom;
@@ -529,31 +597,20 @@ export component App inherits Window {
                 }
             }
 
-            // The bottom bar (.bar). P4 brings its worker and I/O job chips (.bar-chips), which a
-            // window under 900px hides; P5 adds Run, the progress and the Log, and shows the bar
-            // at every width.
-            if root.width >= 900px: Rectangle {
-                height: chips.preferred-height + 16px;
-                background: Theme.side;
-                Rectangle {
-                    y: 0;
-                    height: 1px;
-                    background: Theme.line;
+            // The bottom bar (.bar) of the mode shown.
+            bottom-bar := BottomBar {
+                job: root.mode == Mode.remux ? root.remux-job : root.extract-job;
+                workers: root.chips.workers;
+                io-jobs: root.chips.io-jobs;
+                run-pending: root.run-pending;
+                // A typed subtitle field commits first, as the webview's blur does.
+                run => {
+                    root.leave-field();
+                    root.run();
                 }
-                chips := VerticalLayout {
-                    x: parent.width - self.preferred-width - 14px;
-                    width: self.preferred-width;
-                    alignment: center;
-                    Text {
-                        text: root.chips.workers;
-                        color: Theme.mute;
-                        font-size: 11px;
-                    }
-                    Text {
-                        text: root.chips.io-jobs;
-                        color: Theme.mute;
-                        font-size: 11px;
-                    }
+                stop => {
+                    root.leave-field();
+                    root.stop();
                 }
             }
         }
@@ -585,7 +642,7 @@ export component App inherits Window {
                     bitrates: root.bitrates;
                     chips: root.chips;
                     limits: root.sheet-limits;
-                    busy: root.busy;
+                    busy: root.locked;
                     done => { root.close-sheet(); }
                 }
                 if root.mode == Mode.extract: SettingsSheet {
@@ -599,10 +656,17 @@ export component App inherits Window {
                     bitrates: root.bitrates;
                     chips: root.chips;
                     limits: root.sheet-limits;
-                    busy: root.busy;
+                    busy: root.locked;
                     done => { root.close-sheet(); }
                 }
             }
+        }
+
+        // The confirm dialog (#confirm-modal), over the sheet too.
+        if root.dialog-open: ConfirmDialog {
+            texts: root.dialog;
+            serial: root.dialog-serial;
+            answered(confirmed) => { root.dialog-answered(confirmed); }
         }
     }
 }
