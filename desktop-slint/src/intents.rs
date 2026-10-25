@@ -10,7 +10,7 @@ use mkv_core::pipeline::PipelineMode;
 use mkv_desktop_core::actor::{CoreHandle, Intent, ViewState};
 use mkv_desktop_core::draft::DraftChanges;
 use mkv_desktop_core::queue::Direction;
-use slint::{ComponentHandle, Model};
+use slint::{ComponentHandle, Model, SharedString};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::runtime::Handle;
@@ -102,12 +102,28 @@ fn assign_subtitle(send: &Intents, app: &App, path: &str) {
     });
 }
 
-/// The subtitle file dialog answered: `picked` is assigned to the row `target`, the remux
-/// Inspector's when the dialog opened. Cancelled, or the Inspector moved on to another row while it
-/// was open, the select goes back on what is assigned.
-fn subtitle_picked(send: &Intents, app: &App, target: &str, picked: Option<&str>) {
+/// The remux Inspector's episode: its id, which is relative to the folder, and the folder's
+/// crumbs, so the same relative path in another folder is another episode.
+fn inspected(app: &App) -> (SharedString, SharedString, SharedString) {
+    let head = app.get_remux_head();
+    (
+        app.get_remux_inspector().id,
+        head.crumbs_lead,
+        head.crumbs_end,
+    )
+}
+
+/// The subtitle file dialog answered: `picked` is assigned to `target`, the episode the remux
+/// Inspector showed when the dialog opened (see [`inspected`]). Cancelled, or the Inspector moved
+/// on to another episode or folder while it was open, the select goes back on what is assigned.
+fn subtitle_picked(
+    send: &Intents,
+    app: &App,
+    target: &(SharedString, SharedString, SharedString),
+    picked: Option<&str>,
+) {
     match picked {
-        Some(path) if app.get_remux_inspector().id == target => assign_subtitle(send, app, path),
+        Some(path) if inspected(app) == *target => assign_subtitle(send, app, path),
         _ => restore_form(app),
     }
 }
@@ -226,7 +242,7 @@ pub(crate) fn wire(app: &App, core: CoreHandle, runtime: Handle, publisher: Slin
             send.clone(),
             Picking(Arc::clone(&picking_subtitle)),
             shown.clone(),
-            app.get_remux_inspector().id,
+            inspected(&app),
         );
         // The dialog blocks until it is answered: never on the event loop.
         send.runtime.clone().spawn_blocking(move || {
@@ -539,15 +555,20 @@ mod tests {
         app.invoke_reset_subtitle();
         assert_eq!(assignment(), None);
 
-        // A file picked once the Inspector moved on to another row is not that row's.
+        // A file picked once the Inspector moved on to another row, or to the same relative id in
+        // another folder, is not that row's.
         let send = Intents {
             core: core.clone(),
             runtime: runtime.handle().clone(),
             window: app.as_weak(),
         };
-        subtitle_picked(&send, &app, "a", Some("/subs/b.ass"));
+        let (_, lead, end) = inspected(&app);
+        subtitle_picked(&send, &app, &("a".into(), lead, end), Some("/subs/b.ass"));
         assert_eq!(assignment(), None);
-        subtitle_picked(&send, &app, "b", Some("/subs/b.ass"));
+        let other_folder = ("b".into(), "/other/".into(), "show".into());
+        subtitle_picked(&send, &app, &other_folder, Some("/subs/b.ass"));
+        assert_eq!(assignment(), None);
+        subtitle_picked(&send, &app, &inspected(&app), Some("/subs/b.ass"));
         let path = assignment().map(|(path, ..)| path);
         assert_eq!(path.as_deref(), Some("/subs/b.ass"));
 
