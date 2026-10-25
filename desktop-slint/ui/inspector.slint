@@ -35,17 +35,19 @@ export struct Inspector {
     id: string,
     number: string,
     title: string,
-    crumbs-lead: string,
-    crumbs-end: string,
+    // The path's crumbs, and the path as one text.
+    crumbs: [string],
+    path: string,
     error: string,
     pill-label: string,
     pill-tone: RowTone,
     video: string,
     audio-label: string,
     audio: string,
-    // The output folder's crumbs, or (in `out-lead` alone) the setting's default.
-    out-lead: string,
-    out-end: string,
+    // The output folder's crumbs and path, or (`out-plain`) the setting's default as one text.
+    out-crumbs: [string],
+    out-path: string,
+    out-plain: bool,
     fonts-head: string,
     fonts: string,
     // Remux: the subtitle section shows.
@@ -106,70 +108,34 @@ component SectionHead inherits Text {
     letter-spacing: 0.77px;
 }
 
-// A path as crumbs: every crumb but the last, then the last in bold (.crumbs). On one line when
-// they fit, else the last below; each wraps anywhere, as .crumbs's flex-wrap and overflow-wrap do,
-// so no part of the path is cut. Read as one text.
+// A path as crumbs (.crumbs): each crumb but the last followed by "›", the last in bold. A line
+// breaks between crumbs, as .crumbs's flex-wrap does, and a crumb wider than the line wraps on its
+// own, at a space, else anywhere (overflow-wrap: anywhere), so no part of the path is cut.
+// `plain`: one text in place of a path, not bold. Read as one text, `label`.
 component Crumbs inherits Rectangle {
-    in property <string> lead;
-    in property <string> end;
-    property <bool> one-line: lead-probe.preferred-width + end-probe.preferred-width <= self.width;
-    // Takes the width it is given and the height its lines need: placed below, so its size is
-    // not its content's (which `one-line` picks from that width).
+    in property <[string]> parts;
+    in property <bool> plain;
+    in property <string> label;
+    // Takes the width it is given and the height its lines need there.
     min-width: 0px;
     preferred-width: 0px;
     horizontal-stretch: 1;
-    height: lines.preferred-height;
+    height: flow.preferred-height;
     accessible-role: text;
-    accessible-label: root.lead + root.end;
-    lines := VerticalLayout {
+    accessible-label: root.label;
+    flow := FlexboxLayout {
         x: 0;
         y: 0;
         width: root.width;
-        // The two texts' one-line widths; drawn at no height.
-        lead-probe := Text {
-            text: root.lead;
+        spacing-horizontal: 6px;
+        spacing-vertical: 2px;
+        for part[i] in root.parts: Text {
+            property <bool> last: i == root.parts.length - 1;
+            text: self.last ? part : part + " ›";
+            color: self.last && !root.plain ? Theme.fg : Theme.path;
             font-size: 12px;
-            height: 0px;
-            visible: false;
-            accessible-role: none;
-        }
-        end-probe := Text {
-            text: root.end;
-            font-size: 12px;
-            font-weight: 600;
-            height: 0px;
-            visible: false;
-            accessible-role: none;
-        }
-        if root.one-line: HorizontalLayout {
-            alignment: start;
-            Text {
-                text: root.lead;
-                color: Theme.path;
-                font-size: 12px;
-                accessible-role: none;
-            }
-            Text {
-                text: root.end;
-                color: Theme.fg;
-                font-size: 12px;
-                font-weight: 600;
-                accessible-role: none;
-            }
-        }
-        if !root.one-line && root.lead != "": Text {
-            text: root.lead;
-            color: Theme.path;
-            font-size: 12px;
-            wrap: char-wrap;
-            accessible-role: none;
-        }
-        if !root.one-line && root.end != "": Text {
-            text: root.end;
-            color: Theme.fg;
-            font-size: 12px;
-            font-weight: 600;
-            wrap: char-wrap;
+            font-weight: self.last && !root.plain ? 600 : 400;
+            wrap: word-wrap;
             accessible-role: none;
         }
     }
@@ -205,9 +171,19 @@ component Labelled inherits VerticalLayout {
 // `dirty` is the pane's, shared by its fields: a commit sends them all.
 component CommitEdit inherits LineEdit {
     in-out property <bool> dirty;
+    // Takes the focus when set, or when the field is made with it set, and clears it.
+    in-out property <bool> grab-focus;
     callback committed();
     callback typed(text: string);
     min-width: 0px;
+    init => { self.take-focus(); }
+    changed grab-focus => { self.take-focus(); }
+    function take-focus() {
+        if self.grab-focus {
+            self.grab-focus = false;
+            self.focus();
+        }
+    }
     edited(text) => {
         self.dirty = true;
         root.typed(text);
@@ -249,7 +225,8 @@ export component InspectorPane inherits Rectangle {
     callback choose-language(index: int);
     callback language-tag-edited(text: string);
 
-    // Commits a field edited but not committed (a row is picked: the field's blur comes first).
+    // Commits a field edited but not committed: the window calls it before a click on a control
+    // that takes no focus, which the field's own blur would otherwise miss.
     public function flush() {
         if root.dirty {
             root.dirty = false;
@@ -259,7 +236,7 @@ export component InspectorPane inherits Rectangle {
 
     // The language select's "Custom tag…", its last entry: the tag field shows.
     property <bool> custom: root.language == root.languages.length - 1;
-    // Picking "Custom tag…" puts the cursor in the tag field once it is made.
+    // Picking "Custom tag…" puts the cursor in the tag field, made or already there.
     property <bool> focus-custom;
 
     background: Theme.panel;
@@ -307,12 +284,15 @@ export component InspectorPane inherits Rectangle {
                     color: Theme.fg;
                     font-size: 15px;
                     font-weight: 700;
-                    // A file name may have no space to break at; char-wrap never clips it.
-                    wrap: char-wrap;
+                    // At a space, else anywhere, as overflow-wrap: anywhere does: a file name may
+                    // have no space to break at, and is never cut.
+                    wrap: word-wrap;
+                    // Not its longest word's width: the pane's width is the header's.
+                    min-width: 0px;
                 }
-                if root.insp.crumbs-end != "": Crumbs {
-                    lead: root.insp.crumbs-lead;
-                    end: root.insp.crumbs-end;
+                if root.insp.crumbs.length > 0: Crumbs {
+                    parts: root.insp.crumbs;
+                    label: root.insp.path;
                 }
             }
         }
@@ -344,7 +324,7 @@ export component InspectorPane inherits Rectangle {
                             color: Theme.err;
                             font-family: "JetBrains Mono";
                             font-size: 12px;
-                            wrap: char-wrap;
+                            wrap: word-wrap;
                         }
                     }
                 }
@@ -420,8 +400,9 @@ export component InspectorPane inherits Rectangle {
                         Row {
                             Term { text: "Folder"; }
                             Crumbs {
-                                lead: root.insp.out-lead;
-                                end: root.insp.out-end;
+                                parts: root.insp.out-crumbs;
+                                plain: root.insp.out-plain;
+                                label: root.insp.out-path;
                             }
                         }
                     }
@@ -544,12 +525,7 @@ export component InspectorPane inherits Rectangle {
                                         dirty <=> root.dirty;
                                         typed(text) => { root.language-tag-edited(text); }
                                         committed => { root.options-changed(); }
-                                        init => {
-                                            if root.focus-custom {
-                                                root.focus-custom = false;
-                                                self.focus();
-                                            }
-                                        }
+                                        grab-focus <=> root.focus-custom;
                                     }
                                 }
                                 if !root.custom: Labelled {
@@ -588,7 +564,8 @@ export component InspectorPane inherits Rectangle {
                                         committed => { root.options-changed(); }
                                     }
                                 }
-                                if !root.custom: Labelled { }
+                                // An empty half, so Offset keeps the width of one column.
+                                if !root.custom: Rectangle { horizontal-stretch: 1; }
                             }
                         }
                     }

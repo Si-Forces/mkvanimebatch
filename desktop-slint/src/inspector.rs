@@ -1,15 +1,17 @@
 //! The Library and the Episode Inspector (P3): the published `LibraryEntry`s and `InspectorView`
-//! mapped into the window's structs, off the UI thread in the Publisher as the rows are, and the
+//! mapped into the window's structs (the Library and the subtitle section off the UI thread in the
+//! Publisher, as the rows are; the Inspector, whose crumbs are models, on the event loop), and the
 //! subtitle fields written back into the typed ones. Every text the two show that the published
-//! view does not carry is here; `app.js` (`renderLibrary`, `renderInspector`) is the reference.
+//! view does not carry is here; `app.js` (`renderLibrary`, `renderInspector`) is the reference,
+//! and `index.html` holds the webview's copy of each fixed text named below.
 
-use crate::queue::{crumbs, tone};
+use crate::queue::tone;
 use mkv_anime_batch_slint_ui::{App, Inspector, LibraryItem, Mode, Rung};
 use mkv_core::request::TrackAssignment;
 use mkv_desktop_core::actor::ModeView;
 use mkv_desktop_core::inspector::{Choice, InspectorView, LadderRung};
 use mkv_desktop_core::presentation::LibraryEntry;
-use slint::SharedString;
+use slint::{ModelRc, SharedString, VecModel};
 
 /// The assignment select's last entry, which opens the subtitle file dialog: the view's own
 /// action, not a choice the core publishes (app.js `BROWSE_SUBTITLE`).
@@ -29,7 +31,8 @@ pub(crate) const SUBTITLE_FILTER: (&str, [&str; 5]) =
     ("Subtitle Files", ["ass", "ssa", "srt", "vtt", "sub"]);
 
 /// What the Inspector's output folder shows when none is set: the output field's own
-/// description of its default (index.html `#remux-out-dir`, `#extract-out-dir` placeholders).
+/// description of its default (index.html `#remux-out-dir`, `#extract-out-dir` placeholders; P4's
+/// settings sheet shows the same texts, so keep the three in step).
 fn default_out(mode: Mode) -> &'static str {
     match mode {
         Mode::Remux => "Output folder next to the input",
@@ -39,6 +42,18 @@ fn default_out(mode: Mode) -> &'static str {
 
 fn to_int(n: usize) -> i32 {
     i32::try_from(n).unwrap_or(i32::MAX)
+}
+
+/// A select's index when no entry holds the value: the `ComboBox` shows nothing.
+const NO_SELECTION: i32 = -1;
+
+/// The path between ` › `, as the webview's crumbs `title` joins them.
+fn joined(crumbs: &[String]) -> SharedString {
+    crumbs.join(crate::queue::CRUMB_SEPARATOR).into()
+}
+
+fn model(texts: Vec<SharedString>) -> ModelRc<SharedString> {
+    ModelRc::new(VecModel::from(texts))
 }
 
 /// The Library's entries: the input folder first, each with its count.
@@ -56,15 +71,19 @@ pub(crate) fn map_library(library: &[LibraryEntry]) -> Vec<LibraryItem> {
         .collect()
 }
 
-/// The Inspector of `mode`, or its empty state for none.
+/// The Inspector of `mode`, or its empty state for none. Its crumbs are models: call it on the
+/// event loop.
 pub(crate) fn map_inspector(view: Option<&InspectorView>, mode: Mode) -> Inspector {
     let Some(view) = view else {
         return Inspector::default();
     };
-    let (crumbs_lead, crumbs_end) = crumbs(&view.crumbs);
-    let (out_lead, out_end) = match &view.out_crumbs {
-        Some(out) => crumbs(out),
-        None => (default_out(mode).to_string(), String::new()),
+    let texts = |crumbs: &[String]| crumbs.iter().map(SharedString::from).collect();
+    let (out_crumbs, out_path, out_plain) = match &view.out_crumbs {
+        Some(out) => (texts(out), joined(out), false),
+        None => {
+            let default = SharedString::from(default_out(mode));
+            (vec![default.clone()], default, true)
+        }
     };
     let assignment = view.assignment.as_ref();
     let asset_path = assignment.map_or_else(String::new, |assignment| {
@@ -75,16 +94,17 @@ pub(crate) fn map_inspector(view: Option<&InspectorView>, mode: Mode) -> Inspect
         id: view.id.as_str().into(),
         number: view.number.as_str().into(),
         title: view.title.as_str().into(),
-        crumbs_lead: crumbs_lead.into(),
-        crumbs_end: crumbs_end.into(),
+        crumbs: model(texts(&view.crumbs)),
+        path: joined(&view.crumbs),
         error: view.error.as_deref().unwrap_or_default().into(),
         pill_label: view.pill.label.as_str().into(),
         pill_tone: tone(view.pill.tone),
         video: view.video.as_str().into(),
         audio_label: view.audio_label.into(),
         audio: view.audio.as_str().into(),
-        out_lead: out_lead.into(),
-        out_end: out_end.into(),
+        out_crumbs: model(out_crumbs),
+        out_path,
+        out_plain,
         // Upper case, as style.css draws the section headings.
         fonts_head: view.fonts_head.to_uppercase().into(),
         fonts: view.fonts.as_str().into(),
@@ -96,11 +116,11 @@ pub(crate) fn map_inspector(view: Option<&InspectorView>, mode: Mode) -> Inspect
             .options
             .iter()
             .position(|choice| choice.value == asset_path)
-            .map_or(-1, to_int),
+            .map_or(NO_SELECTION, to_int),
         language: LANGUAGES
             .iter()
             .position(|(value, _)| *value == view.language_choice)
-            .map_or(-1, to_int),
+            .map_or(NO_SELECTION, to_int),
         asset_path: asset_path.into(),
         custom_language: view.custom_language.as_str().into(),
         track_title: assignment
@@ -186,7 +206,8 @@ fn form_key(view: &InspectorView) -> FormKey {
 /// What the event loop writes into a mode's Inspector.
 #[derive(Debug)]
 pub(crate) struct InspectorUpdate {
-    pub(crate) inspector: Inspector,
+    /// The Inspector to show ([`map_inspector`] on the event loop); none for its empty state.
+    pub(crate) view: Option<InspectorView>,
     /// The subtitle section to redraw, with the typed fields written back from `inspector`;
     /// none while it keeps what it shows.
     pub(crate) subtitles: Option<Subtitles>,
@@ -219,7 +240,7 @@ impl InspectorList {
         self.form |= key != self.key && mode == Mode::Remux;
         self.key = key;
         self.staged = Some(InspectorUpdate {
-            inspector: map_inspector(view.inspector.as_ref(), mode),
+            view: view.inspector.clone(),
             subtitles: view
                 .inspector
                 .as_ref()
@@ -250,12 +271,16 @@ pub(crate) fn capped_tag(text: &str) -> Option<String> {
         .map(|(at, _)| text[..at].to_string())
 }
 
-/// Writes `inspector`'s published subtitle fields into the typed ones; what was typed and not
-/// committed is dropped with them.
+/// Writes `inspector`'s published subtitle fields into the typed ones. A text field typed into
+/// and not committed yet keeps what is typed while the row stays the same, for its commit to
+/// send (app.js redraws over it); another row's drops it.
 pub(crate) fn write_form(app: &App, inspector: &Inspector) {
-    app.set_sub_dirty(false);
     app.set_sub_choice(inspector.choice);
     app.set_sub_language(inspector.language);
+    if app.get_sub_dirty() && app.get_remux_inspector().id == inspector.id {
+        return;
+    }
+    app.set_sub_dirty(false);
     app.set_sub_custom(inspector.custom_language.clone());
     app.set_sub_title(inspector.track_title.clone());
     app.set_sub_offset(inspector.offset.clone());
@@ -335,6 +360,7 @@ mod tests {
     use mkv_anime_batch_slint_ui::RowTone;
     use mkv_core::request::AssignmentKind;
     use mkv_desktop_core::actor::ViewState;
+    use slint::Model;
 
     fn assignment(language: Option<&str>) -> TrackAssignment {
         TrackAssignment {
@@ -407,10 +433,9 @@ mod tests {
             (insp.number.as_str(), insp.title.as_str()),
             ("03", "ep1.mkv")
         );
-        assert_eq!(
-            (insp.crumbs_lead.as_str(), insp.crumbs_end.as_str()),
-            ("media › ", "Season 1")
-        );
+        let texts = |model: &ModelRc<SharedString>| model.iter().collect::<Vec<_>>();
+        assert_eq!(texts(&insp.crumbs), ["media", "Season 1"]);
+        assert_eq!(insp.path, "media › Season 1");
         assert_eq!(insp.error, "");
         assert_eq!(
             (insp.pill_label.as_str(), insp.pill_tone),
@@ -422,11 +447,19 @@ mod tests {
         );
         // No output folder: the setting's default, as the field's placeholder says it.
         assert_eq!(
-            (insp.out_lead.as_str(), insp.out_end.as_str()),
-            ("Output folder next to the input", "")
+            (
+                texts(&insp.out_crumbs),
+                insp.out_path.as_str(),
+                insp.out_plain
+            ),
+            (
+                vec!["Output folder next to the input".into()],
+                "Output folder next to the input",
+                true
+            )
         );
         let extract = map_inspector(Some(&view), Mode::Extract);
-        assert_eq!(extract.out_lead, "Same folder as the input");
+        assert_eq!(extract.out_path, "Same folder as the input");
         assert!(!extract.subtitles);
         assert_eq!(insp.fonts_head, "FONTS · 2");
         // Automatic, Indonesian, nothing typed.
@@ -441,8 +474,12 @@ mod tests {
         let insp = map_inspector(Some(&view), Mode::Remux);
         assert_eq!(insp.error, "mkvmerge 2");
         assert_eq!(
-            (insp.out_lead.as_str(), insp.out_end.as_str()),
-            ("out › ", "Show")
+            (
+                texts(&insp.out_crumbs),
+                insp.out_path.as_str(),
+                insp.out_plain
+            ),
+            (vec!["out".into(), "Show".into()], "out › Show", false)
         );
         assert!(insp.assigned);
         assert_eq!(insp.asset_path, "Season 1/ep1.ass");
@@ -503,7 +540,7 @@ mod tests {
         };
         let (library, inspector) = put(&view);
         assert_eq!(library.map(|items| items.len()), Some(0));
-        assert!(inspector.is_some_and(|update| !update.inspector.shown));
+        assert!(inspector.is_some_and(|update| update.view.is_none()));
 
         view.inspector = Some(sample_view());
         let (library, inspector) = put(&view);
@@ -516,7 +553,7 @@ mod tests {
         view.inspector.as_mut().unwrap().pill.label = "50% · 2s".into();
         let (_, inspector) = put(&view);
         let update = inspector.unwrap();
-        assert_eq!(update.inspector.pill_label, "50% · 2s");
+        assert_eq!(update.view.unwrap().pill.label, "50% · 2s");
         assert!(update.subtitles.is_none());
         // Nothing changed: nothing is written.
         assert!(put(&view).1.is_none());

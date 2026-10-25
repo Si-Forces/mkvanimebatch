@@ -155,7 +155,8 @@ component EpRow inherits Rectangle {
         : item.tone == RowTone.err ? Theme.err
         : Theme.mute;
     // Not `visible`: on a ListView row's root it wraps the row, and the ListView then cannot
-    // place it. A hidden row has no height and draws nothing.
+    // place it. A hidden row has no height and draws nothing; a filter that hides every row makes
+    // the ListView make and lay out all of them, looking for one to fill its height with.
     height: item.shown ? self.head-height + 52px : 0px;
 
     if item.shown && item.head != "": Rectangle {
@@ -450,19 +451,39 @@ export component QueuePane inherits Rectangle {
     // The list's scroll offset (negative going down), kept by the window per mode.
     in-out property <length> list-scroll;
 
-    // Scrolls the list so row `row` heads it (queue-view.js `revealRelease`), or as near as the
-    // end of the list lets it. `ensure-row-visible` puts a row above the viewport at its top
-    // edge, measuring the rows it lays out, where a scroll offset would be placed by the
-    // ListView's estimated row height: so the list first moves past every row.
+    // Scrolls the list so row `row` heads it (queue-view.js `revealRelease`; row 0 for the top, as
+    // the folder's Library entry and a card put it), or as near as the end of the list lets it.
+    // `ensure-row-visible` puts a row above the viewport at its top edge, measuring the rows it
+    // lays out, where a scroll offset (even 0, after the rows were replaced) is placed by the
+    // ListView's estimated row height: so the list first moves past every row. It measures only
+    // once the list laid out a row with a height: after a filter that hid every row, its content
+    // has none (`content-height` 0) and the row would land at the bottom, so the reveal waits for
+    // the layout that shows the rows again (`changed content-height` below), in that same frame.
     public function reveal(row: int) {
-        if row >= root.rows.length {
+        root.reveal-pending = -1;
+        if row < 0 || row >= root.rows.length {
             root.list-scroll = 0;
             return;
         }
-        root.list-scroll = -1000000px;
+        if list.content-height <= 0 {
+            root.reveal-pending = row;
+            return;
+        }
+        // Past the end of every row: no row is taller than a release head over a row.
+        root.list-scroll = -root.rows.length * root.tallest-row;
         list.ensure-row-visible(row, ScrollBehavior.instant);
     }
 
+    // A filter chip clicked: the filter wins over a reveal still waiting for its layout.
+    function filter(filter: QueueFilter) {
+        root.reveal-pending = -1;
+        root.set-filter(filter);
+    }
+
+    // The row a reveal waits to scroll to, or -1.
+    property <int> reveal-pending: -1;
+    // EpRow at its tallest: a release head over the row.
+    property <length> tallest-row: 30px + 52px;
     property <string> marked: pending-inspect != "" ? pending-inspect : head.inspected;
     property <bool> filtered: head.filter != QueueFilter.all;
     background: Theme.content;
@@ -518,25 +539,25 @@ export component QueuePane inherits Rectangle {
                     label: "All";
                     count: root.head.all;
                     on: root.head.filter == QueueFilter.all;
-                    clicked => { root.set-filter(QueueFilter.all); }
+                    clicked => { root.filter(QueueFilter.all); }
                 }
                 Chip {
                     label: "To do";
                     count: root.head.todo;
                     on: root.head.filter == QueueFilter.todo;
-                    clicked => { root.set-filter(QueueFilter.todo); }
+                    clicked => { root.filter(QueueFilter.todo); }
                 }
                 Chip {
                     label: "Done";
                     count: root.head.done;
                     on: root.head.filter == QueueFilter.done;
-                    clicked => { root.set-filter(QueueFilter.done); }
+                    clicked => { root.filter(QueueFilter.done); }
                 }
                 Chip {
                     label: "Failed";
                     count: root.head.failed;
                     on: root.head.filter == QueueFilter.failed;
-                    clicked => { root.set-filter(QueueFilter.failed); }
+                    clicked => { root.filter(QueueFilter.failed); }
                 }
                 Rectangle { horizontal-stretch: 1; }
                 LinkButton {
@@ -582,6 +603,11 @@ export component QueuePane inherits Rectangle {
                 height: parent.height;
                 visible: !root.head.card-shown;
                 content-y <=> root.list-scroll;
+                changed content-height => {
+                    if root.reveal-pending >= 0 && self.content-height > 0 {
+                        root.reveal(root.reveal-pending);
+                    }
+                }
                 for row in root.rows: EpRow {
                     item: row;
                     inspected: row.id == root.marked;
