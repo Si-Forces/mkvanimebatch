@@ -335,16 +335,15 @@ impl PendingEdits {
     }
 
     /// One edit of `key` was answered. Once none is left: `Some(moved)`, whether a publication
-    /// passed over a value the core moved the key to meanwhile.
+    /// passed over a value the core moved the key to meanwhile; `None` for a key none is pending of.
     fn end(&mut self, mode: Mode, key: DraftKey) -> Option<bool> {
         let pending = &mut self.0[index(mode)];
-        match pending.get_mut(&key) {
-            Some(entry) if entry.count > 1 => {
-                entry.count -= 1;
-                None
-            }
-            _ => Some(pending.remove(&key).is_some_and(|entry| entry.moved)),
+        let entry = pending.get_mut(&key)?;
+        if entry.count > 1 {
+            entry.count -= 1;
+            return None;
         }
+        pending.remove(&key).map(|entry| entry.moved)
     }
 
     /// A publication of `draft` passes over `key` if it is pending; true when it is.
@@ -579,9 +578,14 @@ impl Drafts {
 
     /// The folder dialog behind Browse… (and Open folder) answered for `mode`'s `key`, which
     /// opened it: the folder goes into that field and is sent, and an input folder is scanned
-    /// (app.js `chooseInputDirectory`). Nothing once a batch started meanwhile.
+    /// (app.js `chooseInputDirectory`). Nothing once a batch started meanwhile, nor for a key that
+    /// is no folder.
     fn folder_picked(&self, app: &App, mode: Mode, key: DraftKey, picked: Option<String>) {
-        let Some(path) = picked.filter(|_| !app.get_busy()) else {
+        let folder = matches!(
+            key,
+            DraftKey::InputDir | DraftKey::OutDir | DraftKey::FontsDir | DraftKey::AssetsDir
+        );
+        let Some(path) = picked.filter(|_| folder && !app.get_busy()) else {
             return;
         };
         let mut typed = form(app, mode);
@@ -1082,6 +1086,14 @@ mod tests {
             state.remux.directory.as_deref() == Some("/show")
         });
 
+        // Left unchanged, the input folder rescans what it holds, trimmed.
+        type_into(&app, InputDir, " /other ");
+        sheet.invoke_enter("input_dir".into());
+        sheet.invoke_leave("input_dir".into());
+        state_once(&runtime, &core, |state| {
+            state.remux.directory.as_deref() == Some("/other")
+        });
+
         // A picked folder goes into the field and the mode that asked for it, and an input
         // folder is scanned.
         let drafts = Drafts {
@@ -1097,6 +1109,12 @@ mod tests {
         assert_eq!(app.get_remux_form().out_dir, "", "remux's is left alone");
         drafts.folder_picked(&app, Mode::Extract, InputDir, Some("/extract".into()));
         drafts.folder_picked(&app, Mode::Extract, FontsDir, None);
+        drafts.folder_picked(&app, Mode::Remux, Workers, Some("/no-folder".into()));
+        assert_eq!(
+            app.get_remux_form().workers,
+            "13",
+            "a key that is no folder"
+        );
         let state = state_once(&runtime, &core, |state| {
             state.extract.directory.as_deref() == Some("/extract")
         });
@@ -1349,6 +1367,145 @@ mod tests {
         assert_eq!(pending.end(Mode::Remux, Workers), None, "one is left");
         assert_eq!(pending.end(Mode::Remux, Workers), Some(false));
         assert!(!pending.has(Mode::Remux, Workers));
+        assert_eq!(
+            pending.end(Mode::Remux, Workers),
+            None,
+            "an answer of a key none is pending of settles nothing"
+        );
+        assert_eq!(pending.end(Mode::Extract, IoJobs), None);
+    }
+
+    /// Ticks the mock clock until the sheet made or moved its focus: a tick makes the sheet,
+    /// whose field takes the focus; the next runs its focus handler, the last the sheet's scroll.
+    fn ticks() {
+        for _ in 0..3 {
+            mock_elapsed_time(Duration::from_millis(1));
+        }
+    }
+
+    /// Return pressed, and released, in the window.
+    fn press_return(app: &App) {
+        use slint::platform::{Key, WindowEvent};
+        let text: SharedString = Key::Return.into();
+        app.window()
+            .dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
+        app.window()
+            .dispatch_event(WindowEvent::KeyReleased { text });
+        ticks();
+    }
+
+    /// Opened on another mode, the sheet leaves its focused field first, under the field's own
+    /// mode: an edited one is committed there, not into the mode shown next.
+    #[test]
+    fn opening_the_sheet_on_another_mode_leaves_the_focused_field_under_its_own() {
+        i_slint_backend_testing::init_no_event_loop();
+        let app = new_app();
+        let sheet = app.global::<Sheet>();
+        let calls = Rc::new(std::cell::RefCell::new(Vec::new()));
+        for left in [false, true] {
+            let (calls, shown) = (Rc::clone(&calls), app.as_weak());
+            let record = move |key: SharedString| {
+                let mode = shown.upgrade().unwrap().get_mode();
+                calls.borrow_mut().push((left, key.to_string(), mode));
+            };
+            if left {
+                sheet.on_left(move |key, _| record(key));
+            } else {
+                sheet.on_committed(record);
+            }
+        }
+        app.invoke_open_sheet(Mode::Remux, "".into());
+        sheet.invoke_enter("input_dir".into());
+        sheet.set_changed_since(true);
+
+        app.invoke_open_sheet(Mode::Extract, "input_dir".into());
+        assert_eq!(
+            *calls.borrow(),
+            [
+                (false, "input_dir".to_string(), Mode::Remux),
+                (true, "input_dir".to_string(), Mode::Remux),
+            ],
+            "committed, then left, as remux's"
+        );
+        assert_eq!(app.get_mode(), Mode::Extract);
+        assert!(!sheet.get_changed_since());
+    }
+
+    /// Done takes the focus when the sheet opens on no field, or on a key it shows no field of,
+    /// and when an open sheet is asked for no field; a field asked for again keeps it.
+    #[test]
+    fn the_sheet_focuses_done_unless_a_field_takes_the_focus() {
+        i_slint_backend_testing::init_no_event_loop();
+        let app = new_app();
+        app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+        app.show().unwrap();
+        let sheet = app.global::<Sheet>();
+        let open = |key: &str| {
+            app.invoke_open_sheet(Mode::Remux, key.into());
+            ticks();
+        };
+
+        open("nope");
+        assert!(app.get_sheet_open());
+        press_return(&app);
+        assert!(
+            !app.get_sheet_open(),
+            "Done had the focus: Return closed it"
+        );
+
+        open("input_dir");
+        open("input_dir");
+        assert_eq!(
+            sheet.get_focused(),
+            "input_dir",
+            "the field keeps the focus"
+        );
+        open("");
+        assert_eq!(sheet.get_focused(), "");
+        press_return(&app);
+        assert!(!app.get_sheet_open(), "Done took the focus from the field");
+        app.hide().unwrap();
+    }
+
+    /// The checkboxes send their edits when activated as a user does, here through a screen
+    /// reader's default action; a field drawing its own placeholder still reads it out.
+    #[test]
+    fn the_checkboxes_send_their_edits_and_the_fields_read_their_placeholders() {
+        use i_slint_backend_testing::{AccessibleRole, ElementHandle};
+        i_slint_backend_testing::init_no_event_loop();
+        let app = new_app();
+        // Tall enough for the whole sheet: a search skips the controls scrolled out of view.
+        app.window()
+            .set_size(slint::LogicalSize::new(920.0, 1200.0));
+        app.show().unwrap();
+        let edited = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sent = Rc::clone(&edited);
+        app.global::<Sheet>()
+            .on_edited(move |key| sent.borrow_mut().push(key.to_string()));
+        app.invoke_open_sheet(Mode::Remux, "".into());
+        ticks();
+
+        for label in [
+            "Dry run (plan only, write nothing)",
+            "Bypass inspection cache",
+        ] {
+            ElementHandle::find_by_accessible_label(&app, label)
+                .find(|element| element.accessible_role() == Some(AccessibleRole::Checkbox))
+                .unwrap()
+                .invoke_accessible_default_action();
+        }
+        assert_eq!(*edited.borrow(), ["dry_run", "no_cache"]);
+        let typed = app.get_remux_form();
+        assert!(typed.dry_run && typed.no_cache);
+
+        let input = ElementHandle::find_by_accessible_label(&app, "Input folder")
+            .find(|element| element.accessible_role() == Some(AccessibleRole::TextInput))
+            .unwrap();
+        assert_eq!(
+            input.accessible_placeholder_text().as_deref(),
+            Some("Release folder with the MKV episodes")
+        );
+        app.hide().unwrap();
     }
 
     /// The box and the slider of the complexity have focus ids of their own, so a focus moving
