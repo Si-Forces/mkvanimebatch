@@ -523,6 +523,31 @@ pub(crate) mod tests {
         app.hide().unwrap();
     }
 
+    /// A batch that starts while the cache dialog is open disables the sheet's button: once the
+    /// dialog closes, Done has the focus instead (Return closes the sheet).
+    #[test]
+    fn a_batch_started_under_the_cache_dialog_gives_the_focus_to_done() {
+        i_slint_backend_testing::init_no_event_loop();
+        let runtime = runtime();
+        let (app, _core) = wired(&runtime, NoJobs);
+        app.window()
+            .set_size(slint::LogicalSize::new(920.0, 1200.0));
+        app.invoke_open_sheet(Mode::Remux, "no_cache".into());
+        ticks();
+        button(&app, "Clear inspection cache…").invoke_accessible_default_action();
+        ticks();
+        assert!(app.get_dialog_open());
+
+        app.set_busy(true);
+        ticks();
+        key(&app, slint::platform::Key::Escape);
+        assert!(!app.get_dialog_open());
+        assert!(app.get_sheet_open());
+        key(&app, slint::platform::Key::Return);
+        assert!(!app.get_sheet_open(), "Return on Done closed the sheet");
+        app.hide().unwrap();
+    }
+
     /// A failed Close's notice waits behind a dialog shown, then shows OK alone, with the focus:
     /// Return answers it at once.
     #[test]

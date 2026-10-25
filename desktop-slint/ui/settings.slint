@@ -594,7 +594,14 @@ export component SettingsSheet inherits Rectangle {
     TouchArea { }
 
     property <int> cache-focus: Sheet.cache-focus-serial;
-    changed cache-focus => { clear-cache.focus(); }
+    // A batch that started while the dialog was open disables the button: Done takes the focus.
+    changed cache-focus => {
+        if root.busy {
+            done-button.focus();
+        } else {
+            clear-cache.focus();
+        }
+    }
 
     // Keeps Tab and Shift+Tab inside the sheet, as a modal dialog does: past its last control the
     // focus wraps to Done, and back from Done to the last one. Locked, Done is the only one.

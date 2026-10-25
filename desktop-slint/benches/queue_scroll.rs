@@ -68,7 +68,7 @@ use mkv_desktop_core::snapshot::ItemStatus;
 use publisher::Coalescer;
 use slint::{ComponentHandle, RenderingState};
 use std::error::Error;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -156,12 +156,13 @@ fn refresh(row: &mut Row, elapsed: Duration, duration_sec: Option<f64>) {
 /// Starts a thread that advances `IN_FLIGHT` processing rows and publishes `state` with them every
 /// `PUBLISH_INTERVAL`, like a remux run seen through the core. Labels tick once a second; when a
 /// row finishes the next queued one starts, and a finished batch starts again.
-/// Once `reset` is set, the next publication bumps `manifest_rev`; `publish` answers whether it
-/// scheduled the hop that takes it, else the next one bumps it again.
+/// Once `reset` is set, the next publication made while no hop is in flight (`in_flight` is 0)
+/// bumps `manifest_rev`, so the hop it schedules is the one that applies the reset.
 fn spawn_churn(
     mut state: ViewState,
     reset: Arc<AtomicBool>,
-    mut publish: impl FnMut(&ViewState, bool) -> bool + Send + 'static,
+    in_flight: Arc<AtomicUsize>,
+    mut publish: impl FnMut(&ViewState, bool) + Send + 'static,
 ) {
     std::thread::spawn(move || {
         let mut rows = (*state.remux.rows).clone();
@@ -228,13 +229,12 @@ fn spawn_churn(
             state.remux.progress.done = done as f64 * 100.0 / rows.len() as f64;
             state.remux.progress.live = started.len() as f64 * 100.0 / rows.len() as f64;
             state.remux.rows = Arc::new(rows.clone());
-            let resetting = reset.load(Ordering::Relaxed);
+            let resetting = reset.load(Ordering::Relaxed) && in_flight.load(Ordering::Acquire) == 0;
             if resetting {
                 state.remux.manifest_rev += 1;
-            }
-            if publish(&state, resetting) && resetting {
                 reset.store(false, Ordering::Relaxed);
             }
+            publish(&state, resetting);
             std::thread::sleep(PUBLISH_INTERVAL);
         }
     });
@@ -294,36 +294,53 @@ fn main() -> Result<(), Box<dyn Error>> {
     // The Run reset's hop: its UI-thread time and when it ended.
     let run_reset: Arc<Mutex<Option<(f64, Instant)>>> = Arc::default();
     let reset_hop = Arc::clone(&run_reset);
-    spawn_churn(state, Arc::clone(&want_reset), move |state, resetting| {
-        let start = Instant::now();
-        let scheduled = pending.push_state(state);
-        mapped.lock().unwrap().push(ms(start.elapsed()));
-        if scheduled {
-            let (pending, window, hops, edits) = (
-                Arc::clone(&pending),
-                window.clone(),
-                Arc::clone(&timed),
-                Arc::clone(&edits),
-            );
-            let reset_hop = resetting.then(|| Arc::clone(&reset_hop));
-            let _ = slint::invoke_from_event_loop(move || {
-                let start = Instant::now();
-                publisher::hop(&pending, &edits, &window);
-                let took = ms(start.elapsed());
-                hops.lock().unwrap().push(took);
-                if let Some(reset_hop) = reset_hop {
-                    *reset_hop.lock().unwrap() = Some((took, Instant::now()));
+    // Hops scheduled and not yet finished: at 0 a publication schedules the hop that takes it. A
+    // count, not a flag, as a hop that ends may have a later one queued behind it.
+    let in_flight = Arc::new(AtomicUsize::new(0));
+    spawn_churn(
+        state,
+        Arc::clone(&want_reset),
+        Arc::clone(&in_flight),
+        move |state, resetting| {
+            let start = Instant::now();
+            let scheduled = pending.push_state(state);
+            mapped.lock().unwrap().push(ms(start.elapsed()));
+            // Published only with no hop in flight, so the reset always schedules its own hop.
+            debug_assert!(scheduled || !resetting);
+            if scheduled {
+                in_flight.fetch_add(1, Ordering::AcqRel);
+                let (pending, window, hops, edits, done) = (
+                    Arc::clone(&pending),
+                    window.clone(),
+                    Arc::clone(&timed),
+                    Arc::clone(&edits),
+                    Arc::clone(&in_flight),
+                );
+                let reset_hop = resetting.then(|| Arc::clone(&reset_hop));
+                let queued = slint::invoke_from_event_loop(move || {
+                    let start = Instant::now();
+                    publisher::hop(&pending, &edits, &window);
+                    let took = ms(start.elapsed());
+                    hops.lock().unwrap().push(took);
+                    if let Some(reset_hop) = reset_hop {
+                        *reset_hop.lock().unwrap() = Some((took, Instant::now()));
+                    }
+                    done.fetch_sub(1, Ordering::AcqRel);
+                });
+                if queued.is_err() {
+                    in_flight.fetch_sub(1, Ordering::AcqRel);
                 }
-            });
-        }
-        scheduled
-    });
+            }
+        },
+    );
 
     let weak = app.as_weak();
     let (mut first, mut before, mut last) = (None::<Instant>, Instant::now(), None::<Instant>);
     let (mut intervals, mut renders) = (Vec::new(), Vec::new());
     let mut dir = 1.0;
     let (mut reported, mut reset) = (false, f64::NAN);
+    // The Run reset is asked for once: a frame between the bump and its hop must not ask again.
+    let mut reset_asked = false;
     // The render and interval of the frame the Run reset lands in.
     let mut reset_frame: Option<(f64, f64)> = None;
     app.window()
@@ -350,7 +367,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                 }
                 renders.push(ms(now.duration_since(before)));
-                if since >= WARMUP + WINDOW / 2 && run_reset.lock().unwrap().is_none() {
+                if since >= WARMUP + WINDOW / 2 && !reset_asked {
+                    reset_asked = true;
                     want_reset.store(true, Ordering::Relaxed);
                 }
                 if let (None, Some((_, at))) = (reset_frame, *run_reset.lock().unwrap()) {
