@@ -13,12 +13,18 @@ export struct LogRow {
     tone: LogTone,
 }
 
+// The Log toggle's error badge: the count it shows, empty for none, and what a screen reader
+// reads out ("1 error").
+export struct LogBadge {
+    count: string,
+    description: string,
+}
+
 // The Log toggle in the bottom bar (.pill-btn #btn-log): a lines icon, "Log" and the error badge,
 // none while it is empty. Takes the focus; Enter or Space toggles the drawer.
 export component LogToggle inherits Rectangle {
     in property <bool> open;
-    // The error count, or empty for none.
-    in property <string> badge;
+    in property <LogBadge> badge;
     callback clicked();
     public function focus-toggle() {
         keys.focus();
@@ -32,7 +38,7 @@ export component LogToggle inherits Rectangle {
     forward-focus: keys;
     accessible-role: button;
     accessible-label: "Log";
-    accessible-description: badge;
+    accessible-description: badge.description;
     accessible-expandable: true;
     accessible-expanded: open;
     accessible-action-default => { root.clicked(); }
@@ -60,14 +66,14 @@ export component LogToggle inherits Rectangle {
             vertical-alignment: center;
             accessible-role: none;
         }
-        if root.badge != "": Rectangle {
+        if root.badge.count != "": Rectangle {
             y: (parent.height - self.height) / 2;
             width: max(self.height, count.preferred-width + 12px);
             height: count.preferred-height + 2px;
             border-radius: self.height / 2;
             background: Theme.err;
             count := Text {
-                text: root.badge;
+                text: root.badge.count;
                 color: Theme.err-fg;
                 font-size: 10px;
                 font-weight: 600;
@@ -159,6 +165,10 @@ component LogConsole inherits Rectangle {
         }
         // Lines added (or the view resized) while following: the newest is shown, measured.
         changed content-height => {
+            // Content that fits (a new generation emptied the console) is at its bottom.
+            if self.content-height <= self.visible-height + 32px {
+                root.follow = true;
+            }
             if root.follow && root.rows.length > 0 {
                 self.ensure-row-visible(root.rows.length - 1, ScrollBehavior.instant);
             }
