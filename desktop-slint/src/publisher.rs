@@ -176,6 +176,7 @@ pub(crate) fn install_models(app: &App) {
     app.set_sub_languages(ModelRc::from(Rc::new(VecModel::from(languages))));
     let bitrates: Vec<slint::SharedString> = BITRATES.iter().map(|&entry| entry.into()).collect();
     app.set_bitrates(ModelRc::from(Rc::new(VecModel::from(bitrates))));
+    app.set_sheet_limits(settings::limits());
 }
 
 impl SlintPublisher {

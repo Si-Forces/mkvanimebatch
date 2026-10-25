@@ -9,10 +9,10 @@ import { FontProbe } from "font-probe.slint";
 import { ScrollView } from "std-widgets.slint";
 import { Mode, QueueFilter, QueueHead, QueuePane, QueueRow, RowMark, RowTone } from "queue.slint";
 import { Inspector, InspectorPane, LibraryEntry, LibraryItem, Rung } from "inspector.slint";
-import { ChipTexts, DraftForm, GearButton, PresetItem, PresetRow, SettingsSheet, Sheet } from "settings.slint";
+import { ChipTexts, DraftForm, GearButton, PresetItem, PresetRow, SettingsSheet, Sheet, SheetLimits } from "settings.slint";
 
 // FontProbe is test only; a .slint file cannot be compiled per cfg, so it ships (a few bytes).
-export { Theme, FontProbe, Inspector, LibraryItem, Mode, QueueFilter, QueueHead, QueueRow, RowMark, RowTone, Rung, ChipTexts, DraftForm, PresetItem, Sheet }
+export { Theme, FontProbe, Inspector, LibraryItem, Mode, QueueFilter, QueueHead, QueueRow, RowMark, RowTone, Rung, ChipTexts, DraftForm, PresetItem, Sheet, SheetLimits }
 
 // A mode's tab in the sidebar (.task-row): its name over what it does, then the gear that opens
 // its settings sheet.
@@ -172,6 +172,7 @@ export component App inherits Window {
     in property <[string]> bitrates;
     in property <[PresetItem]> presets;
     in property <ChipTexts> chips;
+    in property <SheetLimits> sheet-limits;
     // The settings sheet of the mode shown is open.
     in-out property <bool> sheet-open;
     // Which gear opened the sheet, to take the focus back; none for a sheet the host opened.
@@ -405,11 +406,27 @@ export component App inherits Window {
                                 HorizontalLayout {
                                     spacing: 8px;
                                     SideHeading { text: "PRESET"; }
-                                    if root.busy: Text {
-                                        text: "Locked";
-                                        color: Theme.warn;
-                                        font-size: 11px;
-                                        font-weight: 500;
+                                    // .locked-label: a lock before the word.
+                                    if root.busy: HorizontalLayout {
+                                        spacing: 4px;
+                                        Path {
+                                            y: (parent.height - self.height) / 2;
+                                            width: 11px;
+                                            height: 11px;
+                                            viewbox-width: 24;
+                                            viewbox-height: 24;
+                                            stroke: Theme.warn;
+                                            stroke-width: 2.4px;
+                                            stroke-line-cap: round;
+                                            commands: "M7 11h10a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-6a2 2 0 0 1 2-2z M8 11V7a4 4 0 0 1 8 0v4";
+                                            accessible-role: none;
+                                        }
+                                        Text {
+                                            text: "Locked";
+                                            color: Theme.warn;
+                                            font-size: 11px;
+                                            font-weight: 500;
+                                        }
                                     }
                                     Rectangle { horizontal-stretch: 1; }
                                 }
@@ -563,6 +580,7 @@ export component App inherits Window {
                     out-placeholder: "Output folder next to the input";
                     bitrates: root.bitrates;
                     chips: root.chips;
+                    limits: root.sheet-limits;
                     busy: root.busy;
                     done => { root.close-sheet(); }
                 }
@@ -576,6 +594,7 @@ export component App inherits Window {
                     out-placeholder: "Same folder as the input";
                     bitrates: root.bitrates;
                     chips: root.chips;
+                    limits: root.sheet-limits;
                     busy: root.busy;
                     done => { root.close-sheet(); }
                 }

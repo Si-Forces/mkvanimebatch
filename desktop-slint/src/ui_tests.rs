@@ -1126,7 +1126,7 @@ fn the_sheet_opens_from_its_gear_closes_every_way_and_gives_the_focus_back() {
     assert_eq!(sheet.get_focused(), "input_dir");
     let left = Rc::new(RefCell::new(Vec::<String>::new()));
     let log = Rc::clone(&left);
-    sheet.on_left(move |key| log.borrow_mut().push(key.into()));
+    sheet.on_left(move |key, _| log.borrow_mut().push(key.into()));
     key(&app, slint::platform::Key::Escape);
     tick();
     assert!(!app.get_sheet_open());
@@ -1206,5 +1206,72 @@ fn the_steppers_answer_the_pointer_the_keyboard_and_a_screen_reader() {
             "{label:?} is labelled"
         );
     }
+    app.hide().unwrap();
+}
+
+/// Tab and Shift+Tab stay inside the open sheet, wrapping between Done and its last control, so
+/// Esc still closes it; keys typed into a field reach the form and are sent as edits, in order.
+#[test]
+fn the_sheet_keeps_the_focus_and_its_fields_take_typed_keys() {
+    use slint::platform::Key;
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(760.0, 520.0));
+    apply(&app, &ViewState::new(None));
+    app.show().unwrap();
+    let tick = || i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1));
+    let sheet = app.global::<Sheet>();
+    let edited = Rc::new(RefCell::new(Vec::<String>::new()));
+    let log = Rc::clone(&edited);
+    sheet.on_edited(move |key| log.borrow_mut().push(key.into()));
+
+    app.invoke_open_sheet(Mode::Remux, "".into());
+    tick();
+    tick();
+    // Done has the focus: Tab moves on to the input folder.
+    key(&app, Key::Tab);
+    tick();
+    assert_eq!(sheet.get_focused(), "input_dir");
+    // Back to Done, then back once more wraps to the last control, not out of the sheet.
+    let back = |app: &App| key(app, Key::Backtab);
+    back(&app);
+    tick();
+    assert_eq!(sheet.get_focused(), "");
+    // Back from Done wraps to the last control, and on to the one before it (without the wrap,
+    // the backdrop and then the window behind it): Esc still closes the sheet.
+    back(&app);
+    tick();
+    back(&app);
+    tick();
+    key(&app, Key::Escape);
+    tick();
+    assert!(!app.get_sheet_open(), "the focus stayed inside the sheet");
+    // From the last control, Tab wraps to Done, and on to the input folder.
+    app.invoke_open_sheet(Mode::Remux, "".into());
+    tick();
+    tick();
+    back(&app);
+    tick();
+    key(&app, Key::Tab);
+    tick();
+    key(&app, Key::Tab);
+    tick();
+    assert_eq!(
+        sheet.get_focused(),
+        "input_dir",
+        "the focus wrapped inside the sheet"
+    );
+
+    // Typed keys reach the form, each an edit.
+    key(&app, "/");
+    key(&app, "a");
+    tick();
+    assert_eq!(app.get_remux_form().input_dir, "/a");
+    assert_eq!(*edited.borrow(), ["input_dir", "input_dir"]);
+
+    // Esc still closes it.
+    key(&app, Key::Escape);
+    tick();
+    assert!(!app.get_sheet_open());
     app.hide().unwrap();
 }
