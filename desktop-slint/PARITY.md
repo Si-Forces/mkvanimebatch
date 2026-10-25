@@ -20,7 +20,7 @@ Paths: `ui/` is `desktop-tauri/ui/`, `src/` is `desktop-tauri/src-tauri/src/`, `
 | [ ] | `get_state`: whole View State | `src/commands.rs:25`, `ui/app.js:233` | P0 | No reload in a native host: the `Publisher` delivers every state; the coalescer keeps the newest `seq`. |
 | [ ] | `get_log`: a mode's whole Run Log | `src/commands.rs:31`, `ui/app.js:910` | P5 | Read at boot into the log model. |
 | [x] | `pick_directory`: native folder dialog | `src/commands.rs:9`, `ui/app.js:619` | P2 | rfd (XDG portal, the Tauri host's features) on the runtime's blocking pool, then `ScanDirectory` (`intents.rs`). Not opened while busy. |
-| [ ] | `pick_subtitle_file`: native subtitle file dialog | `src/commands.rs:16`, `ui/app.js:560` | P3 | Same as above, with the subtitle filter. |
+| [x] | `pick_subtitle_file`: native subtitle file dialog | `src/commands.rs:16`, `ui/app.js:560` | P3 | Same as above, with the subtitle filter (`inspector::SUBTITLE_FILTER`), one dialog at a time; not opened while busy, and a pick that answers after a batch started, or once the Inspector moved on to another row, is dropped. Cancel puts the select back on what is assigned. |
 | [ ] | `close_window`: two-phase teardown, then exit | `src/process.rs:29`, `ui/app.js:760` | P0 | Close request: `KeepWindowShown`, `begin_shutdown`, teardown on its own thread, then quit. |
 | [ ] | `minimize_window` | `src/window.rs:2`, `ui/app.js:761` | P0 | Through `WinitWindowAccessor::set_minimized` (Wayland cache bug, ADR-0017 decision 4); repeated minimize must work. |
 | [ ] | `toggle_maximize` | `src/window.rs:7`, `ui/app.js:762` | P0 | |
@@ -47,8 +47,8 @@ Paths: `ui/` is `desktop-tauri/ui/`, `src/` is `desktop-tauri/src-tauri/src/`, `
 | [x] | `SetAllSelected` | `ui/queue-view.js:521` | P2 | Select all / None. |
 | [x] | `Reorder` (up/down) | `ui/queue-view.js:526` | P2 | |
 | [x] | `Inspect` | `ui/queue-view.js:398` | P2 | Row highlighted at once (`pending-inspect`, cleared once answered). |
-| [ ] | `AssignSubtitle` | `ui/app.js:536` | P3 | Fields as typed; the core builds the assignment. |
-| [ ] | `ClearTrack` | `ui/app.js:545` | P3 | The Inspector's Reset. |
+| [x] | `AssignSubtitle` | `ui/app.js:536` | P3 | Fields as typed, read when sent; the core builds the assignment. Sent when a choice or a language is picked (not the one shown), a file is picked, or a tag, title or offset is committed (Enter or focus out, once edited, as a webview `change`; a click on a control that takes no focus (a row, Open folder, a filter chip, a Library entry, a mode tab, Reset) commits it first, as the webview's blur does). Answered or refused, the fields are put back on what is published (`inspector::restore_form`), but a text field typed into since its last commit keeps its text on the same row (app.js redraws over it); a progress publication leaves typed fields alone (the `lastAssignKey` rule, `InspectorList`). |
+| [x] | `ClearTrack` | `ui/app.js:545` | P3 | The Inspector's Reset, and Automatic in the select. |
 | [ ] | `EditDraft` | `ui/settings-draft.js:85` | P4 | `false` answer restores the published value. |
 | [ ] | `StepDraft` | `ui/settings-draft.js:90` | P4 | Stepper click; hold-to-repeat is the view's (400 ms, then 80 ms). |
 | [ ] | `SetPreset` | `ui/preset-menu.js:62` | P4 | Remux only. |
@@ -83,7 +83,7 @@ Paths: `ui/` is `desktop-tauri/ui/`, `src/` is `desktop-tauri/src-tauri/src/`, `
 | [ ] | Mode tab icons | `ui/index.html:65-79` | P5 | Not drawn yet. |
 | [x] | Boot shows the extract view when a run or job is in extract | `ui/app.js:916` | P2 | `intents::boot_mode`. |
 | [x] | List header: release title, crumbs path, `count_text` | `ui/index.html:105-106`, `ui/app.js:334` | P2 | `count_text` sits beside the title until P5 brings the bottom bar. Crumbs elide instead of wrapping. |
-| [x] | Filter chips All / To do / Done / Failed with counts | `ui/index.html:109-112`, `ui/queue-view.js:430` | P2 | The click keeps the filter on the event loop, so the last click wins; the rows are mapped again off it. Accessible label "To do 3", as the webview chip's text. |
+| [x] | Filter chips All / To do / Done / Failed with counts | `ui/index.html:109-112`, `ui/queue-view.js:430` | P2 | The click keeps the filter on the event loop, so the last click wins; the rows are mapped again off it. Accessible label "To do 3", as the webview chip's text. The chips, Select all and None wrap in a narrow list, as `.list-tools` does (P3, for the 760 px window with the Inspector), and so does the hint below them. |
 | [x] | "No episodes match this filter." | `ui/index.html:131` | P2 | |
 | [x] | Select all / None | `ui/index.html:115-116`, `ui/job-controller.js:123` | P2 | Locked while the selection is locked. |
 | [x] | Rows: label, tone, title, meta, ring (status + progress), release group heads | `ui/queue-view.js:347` | P2 | Model reset only on `manifest_rev`/length/id change (`queue::diff_rows`). The status `title` is the accessible description. An unselected row reads `presentation::NOT_IN_BATCH`, the Inspector's const. |
@@ -94,20 +94,20 @@ Paths: `ui/` is `desktop-tauri/ui/`, `src/` is `desktop-tauri/src-tauri/src/`, `
 | [x] | Row click inspects | `ui/queue-view.js:106` | P2 | |
 | [x] | Empty state card with "Open folder…" | `ui/index.html:128`, `ui/queue-view.js:130` | P2 | Text is the published `empty`; the scanning and failed-scan cards too (`queue::map_head`). |
 | [ ] | Folder picker from Browse… on input-dir fields | `ui/index.html:311,403`, `ui/app.js:617` | P2 | Picker on a worker, one at a time; busy is checked again when it answers; then `EditDraft { input_dir }` and the scan, as app.js does. The picker is P2's `open-folder`; the fields and their Browse… buttons come with the settings sheet (P4). |
-| [x] | CJK filenames render | — | P2 | System font fallback: `ui_tests::cjk_names_render_through_the_system_font_fallback` checks it on the software renderer only (skips on a Linux machine with no CJK font, such as the CI runner); Skia is checked by eye. The first CJK glyph a process draws loads the fallback font in that frame (28 ms warm, 220 ms cold on the HD 4000 laptop), so `app.slint` draws a few, all but transparent, in the window's first second. The bench scrolls through Japanese and Simplified Chinese names. |
+| [x] | CJK filenames render | — | P2 | System font fallback: `ui_tests::cjk_names_render_through_the_system_font_fallback` checks it on the software renderer only (skips on a Linux machine with no CJK font, such as the CI runner); Skia is checked by eye. The first CJK glyph a process draws loads the fallback font in that frame (28 ms warm, 220 ms cold on the HD 4000 laptop), and each weight its own fallback candidates (600 and 700 open the bold ones), so `app.slint` draws a few at 400, 600 and 700, all but transparent, from the first frame on (a timer from the window's creation could run out before a slow cold first frame, and nothing was drawn). Parley prunes the candidates it does not draw with (`SourceCache::prune(128)` per layout), so the first CJK text shaped mid-run opens about 20 font files again (16 s into the bench); the pre-warm only makes those reads page-cache hits. The bench scrolls through Japanese and Simplified Chinese names. |
 
 ## Library and Episode Inspector
 
 | ✓ | What | Where today | Slice | Notes |
 |---|---|---|---|---|
-| [ ] | Library tree; click reveals that release (filter back to All) | `ui/index.html:88`, `ui/app.js:377`, `ui/queue-view.js:418` | P3 | |
+| [x] | Library tree; click reveals that release (filter back to All) | `ui/index.html:88`, `ui/app.js:377`, `ui/queue-view.js:418` | P3 | The sidebar scrolls, as `.side` does, so Open folder stays reachable past many releases. The folder's entry scrolls to the top, as the webview's does, without a filter change. A release's entry sets All, and once the rows are mapped again scrolls with `ListView::ensure-row-visible` from below every row, so the release's first row heads the list, measured rather than placed by the ListView's estimated row height; after a filter that hid every row the list has no row height to measure by, so the scroll waits for the layout that shows the rows, in the same frame (`ui_tests::the_library_reveals_a_release_at_the_top_of_its_list`). A filter clicked, the folder's entry or another folder after it cancels a reveal not shown yet. The entry's `title` tooltip is its accessible description; the hover tooltip comes with P6's. |
 | [x] | "+ Open folder…" in the Library | `ui/index.html:89` | P2 | Brought forward from P3 so a loaded queue can open another folder; locked while a batch runs (`lock-while-job`). The tree (P3) goes above it. |
-| [ ] | Inspector empty text, number, title, path, error | `ui/index.html:166-179`, `ui/app.js:411` | P3 | |
-| [ ] | Inspector status, video, audio, output folder | `ui/index.html:184-187` | P3 | |
-| [ ] | Subtitle ladder | `ui/index.html:193` | P3 | |
-| [ ] | Subtitle assignment select, "Choose a file…" opens the subtitle picker, Reset | `ui/index.html:196-197`, `ui/app.js:551` | P3 | "Choose a file…" is a view text. |
-| [ ] | Language select / custom tag / title / offset | `ui/index.html:199-215`, `ui/app.js:575` | P3 | Language labels are view texts. |
-| [ ] | Fonts chips | `ui/index.html:221-222` | P3 | |
+| [x] | Inspector empty text, number, title, path, error | `ui/index.html:166-179`, `ui/app.js:411` | P3 | The path, and the output folder's, wrap as `.crumbs` does (a `FlexboxLayout` of crumbs): a line breaks between crumbs, and a crumb wider than the line wraps at a space, else anywhere; the title and the error too. Columns follow `.panes` at each width (196/248 px below 980 px). |
+| [x] | Inspector status, video, audio, output folder | `ui/index.html:184-187` | P3 | An unset output folder shows the output field's placeholder, per mode (`inspector::default_out`). |
+| [x] | Subtitle ladder | `ui/index.html:193` | P3 | Each rung's accessible label names its number, source, what it found and its tag. |
+| [x] | Subtitle assignment select, "Choose a file…" opens the subtitle picker, Reset | `ui/index.html:196-197`, `ui/app.js:551` | P3 | "Choose a file…" is a view text (`inspector::CHOOSE_FILE`). std-widgets `ComboBox` (fluent style), locked while busy. |
+| [x] | Language select / custom tag / title / offset | `ui/index.html:199-215`, `ui/app.js:575` | P3 | Language labels are view texts (`inspector::LANGUAGES`). Picking "Custom tag…" focuses the tag field, which holds three characters at most (`maxlength`, `inspector::capped_tag`); the presets are checked against the core's `PRESET_SUBTITLE_LANGUAGES`. The offset is a text field; the core reads it as the number field's value was read (an unparsable offset is none). |
+| [x] | Fonts chips | `ui/index.html:221-222` | P3 | |
 
 ## Settings
 
@@ -150,7 +150,7 @@ Paths: `ui/` is `desktop-tauri/ui/`, `src/` is `desktop-tauri/src-tauri/src/`, `
 | [ ] | `prefers-reduced-motion`: no animations | `ui/style.css:243,648` | P6 | In-app "Reduce motion" setting (Q105). |
 | [ ] | Glass log drawer | `ui/style.css` (`.glass`) | P6 | `backdrop-blur` (Slint 1.19, P7 for the release pin). |
 | [ ] | Fonts Onest, Unbounded, JetBrains Mono | `ui/fonts/*.woff2` | P0 | Variable TTFs embedded; OFL texts beside them. |
-| [ ] | Screen-reader labels (row checkbox, stepper buttons, title bar buttons, theme, complexity) | `ui/index.html`, `ui/queue-view.js:334` | P6 | AccessKit; one Orca pass at the P9 gate. |
+| [ ] | Screen-reader labels (row checkbox, stepper buttons, title bar buttons, theme, complexity) | `ui/index.html`, `ui/queue-view.js:334` | P6 | AccessKit; one Orca pass at the P9 gate. The subtitle ladder is read as text nodes, one per rung, not as a list of list items (`ol`); the custom controls (filter chips, Select all / None, Library entries, mode tabs, Open folder, the row pick and checkbox) answer AccessKit's default action but take no keyboard focus: give them list semantics and Tab focus with the P6 focus rings. |
 | [ ] | Keyboard focus reveals a row's Move up / Move down buttons | `ui/style.css:430` (`:focus-within`) | P6 | P2 reveals them on hover only (`queue.slint`); with the P6 focus rings. |
 
 ## Packaging and release

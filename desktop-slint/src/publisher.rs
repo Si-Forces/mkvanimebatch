@@ -4,6 +4,7 @@
 //! gathered there meanwhile. Each mode's rows are mapped and diffed before the hop (`queue.rs`),
 //! so the event loop only writes the rows that changed into the mode's kept `VecModel`.
 
+use crate::inspector::{map_inspector, write_form, LANGUAGES};
 use crate::queue::{map_rows, ModeList, RowPatch, Update};
 use mkv_anime_batch_slint_ui::{App, Mode, QueueFilter, QueueRow};
 use mkv_desktop_core::actor::{Publisher, ViewState};
@@ -14,7 +15,6 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex, PoisonError};
 
 /// What waits for the next hop to the event loop.
-#[derive(Default)]
 struct Pending {
     /// The newest View State not yet taken.
     state: Option<ViewState>,
@@ -26,6 +26,18 @@ struct Pending {
     scheduled: bool,
     /// The remux and the extract list.
     lists: [ModeList; 2],
+}
+
+impl Default for Pending {
+    fn default() -> Self {
+        Self {
+            state: None,
+            dones: Vec::new(),
+            newest: None,
+            scheduled: false,
+            lists: [ModeList::new(Mode::Remux), ModeList::new(Mode::Extract)],
+        }
+    }
 }
 
 /// The index of `mode`'s list.
@@ -85,9 +97,21 @@ impl Coalescer {
         !std::mem::replace(&mut pending.scheduled, true)
     }
 
-    /// Keeps `filter` for `mode`; its rows show once [`remap`](Self::remap) mapped them.
+    /// Keeps `filter` for `mode`, which cancels a reveal not shown yet; its rows show once
+    /// [`remap`](Self::remap) mapped them.
     pub(crate) fn set_filter(&self, mode: Mode, filter: QueueFilter) {
-        self.lock().lists[index(mode)].filter = filter;
+        self.lock().lists[index(mode)].set_filter(filter);
+    }
+
+    /// Cancels `mode`'s reveal not shown yet: the folder's Library entry scrolls to the top.
+    pub(crate) fn cancel_reveal(&self, mode: Mode) {
+        self.lock().lists[index(mode)].cancel_reveal();
+    }
+
+    /// Shows every row of `mode` and scrolls its list to `release`, once [`remap`](Self::remap)
+    /// mapped them.
+    pub(crate) fn reveal(&self, mode: Mode, release: String) {
+        self.lock().lists[index(mode)].reveal(release);
     }
 
     /// Maps `mode`'s newest rows with its newest filter, off the lock. A filter or rows that
@@ -98,7 +122,7 @@ impl Coalescer {
             let pending = self.lock();
             let list = &pending.lists[index(mode)];
             match &list.view {
-                Some(view) => (list.filter, view.clone()),
+                Some(view) => (list.filter(), view.clone()),
                 None => return false,
             }
         };
@@ -138,11 +162,15 @@ pub(crate) struct SlintPublisher {
     pending: Arc<Coalescer>,
 }
 
-/// Gives `app` the two modes' row models, which every publication then updates in place. Call it
-/// once, before the first publication: rows written into another model are lost.
+/// Gives `app` the two modes' row models, which every publication then updates in place, and the
+/// language select's entries. Call it once, before the first publication: rows written into
+/// another model are lost.
 pub(crate) fn install_models(app: &App) {
     app.set_remux_rows(ModelRc::from(Rc::new(VecModel::<QueueRow>::default())));
     app.set_extract_rows(ModelRc::from(Rc::new(VecModel::<QueueRow>::default())));
+    let languages: Vec<slint::SharedString> =
+        LANGUAGES.iter().map(|(_, label)| (*label).into()).collect();
+    app.set_sub_languages(ModelRc::from(Rc::new(VecModel::from(languages))));
 }
 
 impl SlintPublisher {
@@ -172,6 +200,17 @@ impl SlintPublisher {
         self.pending.set_filter(mode, filter);
     }
 
+    /// Shows every row of `mode` and scrolls its list to `release`'s first, in click order: call
+    /// it on the event loop, then [`remap`](Self::remap).
+    pub(crate) fn reveal(&self, mode: Mode, release: String) {
+        self.pending.reveal(mode, release);
+    }
+
+    /// Cancels `mode`'s reveal not shown yet, in click order: call it on the event loop.
+    pub(crate) fn cancel_reveal(&self, mode: Mode) {
+        self.pending.cancel_reveal(mode);
+    }
+
     /// Shows `mode`'s rows with its newest filter. Maps them on the calling thread, so call it
     /// off the event loop.
     pub(crate) fn remap(&self, mode: Mode) {
@@ -193,6 +232,14 @@ impl SlintPublisher {
         for state in states {
             self.pending.push_state(state);
         }
+        hop(&self.pending, &self.window);
+    }
+
+    /// Reveals `release` in `mode` at once, on the event loop's thread, as a Library click would.
+    #[cfg(test)]
+    pub(crate) fn show_reveal(&self, mode: Mode, release: &str) {
+        self.reveal(mode, release.into());
+        self.pending.remap(mode);
         hop(&self.pending, &self.window);
     }
 
@@ -240,7 +287,8 @@ impl Publisher for SlintPublisher {
     }
 }
 
-/// Writes `mode`'s update: its header when it changed, and its rows into the mode's model. A card
+/// Writes `mode`'s update: its header when it changed, its rows into the mode's model, its Library
+/// and Inspector when they changed, then scrolls to a revealed release. A card
 /// staged since the last hop puts the list back at the top, as the webview's `clearList` does: the
 /// rows that come after it (another folder's, most often) start there, even when they replaced
 /// the card in the pending slot before this hop.
@@ -255,23 +303,43 @@ fn apply(app: &App, mode: Mode, update: Update) {
             Mode::Extract => app.set_extract_head(new),
         }
     }
-    if update.to_top {
+    if let Some(items) = update.library {
+        let items = ModelRc::new(VecModel::from(items));
         match mode {
-            Mode::Remux => app.set_remux_scroll(0.0),
-            Mode::Extract => app.set_extract_scroll(0.0),
+            Mode::Remux => app.set_remux_library(items),
+            Mode::Extract => app.set_extract_library(items),
         }
     }
-    let Some(model) = rows.as_any().downcast_ref::<VecModel<QueueRow>>() else {
-        return;
-    };
-    match update.rows {
-        Some(RowPatch::Reset(rows)) => model.set_vec(rows),
-        Some(RowPatch::Rows(rows)) => {
-            for (index, row) in rows {
-                model.set_row_data(index, row);
-            }
+    if let Some(update) = update.inspector {
+        let inspector = map_inspector(update.view.as_ref(), mode);
+        if let Some(subtitles) = update.subtitles {
+            app.set_sub_ladder(ModelRc::new(VecModel::from(subtitles.ladder)));
+            app.set_sub_options(ModelRc::new(VecModel::from(subtitles.options)));
+            app.set_sub_values(ModelRc::new(VecModel::from(subtitles.values)));
+            write_form(app, &inspector);
         }
-        None => {}
+        match mode {
+            Mode::Remux => app.set_remux_inspector(inspector),
+            Mode::Extract => app.set_extract_inspector(inspector),
+        }
+    }
+    if let Some(model) = rows.as_any().downcast_ref::<VecModel<QueueRow>>() {
+        match update.rows {
+            Some(RowPatch::Reset(rows)) => model.set_vec(rows),
+            Some(RowPatch::Rows(rows)) => {
+                for (index, row) in rows {
+                    model.set_row_data(index, row);
+                }
+            }
+            None => {}
+        }
+    }
+    // After the rows, so the row is the new model's. A row the list scrolls to is measured, where
+    // a scroll offset set on a ListView whose rows were replaced lands by its estimated row
+    // height (the top's too).
+    let reveal = update.reveal.or(update.to_top.then_some(0));
+    if let Some(row) = reveal {
+        app.invoke_reveal(mode, i32::try_from(row).unwrap_or(i32::MAX));
     }
 }
 

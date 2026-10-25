@@ -1,0 +1,596 @@
+// Redesign C's Episode Inspector (desktop-tauri/ui/index.html .insp, style.css) and the Library's
+// entries (.library-tree). Layout and bindings only: the host maps every text
+// (desktop-slint/src/inspector.rs) and does what the controls ask.
+import { ComboBox, LineEdit, ScrollView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { LinkButton, RowTone } from "queue.slint";
+
+// One Library entry (.lib-root, .lib-release): the input folder, then each other release.
+export struct LibraryItem {
+    // The release it reveals; empty for the input folder (`root`).
+    release: string,
+    root: bool,
+    label: string,
+    tooltip: string,
+    count: int,
+    // What a screen reader says: the label and the count, as the webview button's text.
+    a11y: string,
+}
+
+// One rung of the subtitle ladder (.ladder li).
+export struct Rung {
+    num: string,
+    label: string,
+    detail: string,
+    tag: string,
+    found: bool,
+    chosen: bool,
+    a11y: string,
+}
+
+// The Episode Inspector of a mode, as published.
+export struct Inspector {
+    // Whether a row is inspected; else the empty text shows.
+    shown: bool,
+    id: string,
+    number: string,
+    title: string,
+    // The path's crumbs, and the path as one text.
+    crumbs: [string],
+    path: string,
+    error: string,
+    pill-label: string,
+    pill-tone: RowTone,
+    video: string,
+    audio-label: string,
+    audio: string,
+    // The output folder's crumbs and path, or (`out-plain`) the setting's default as one text.
+    out-crumbs: [string],
+    out-path: string,
+    out-plain: bool,
+    fonts-head: string,
+    fonts: string,
+    // Remux: the subtitle section shows.
+    subtitles: bool,
+    // A Track Assignment is set: Reset and its options show.
+    assigned: bool,
+    asset-path: string,
+    // The published subtitle fields, which the host writes into the typed ones below.
+    choice: int,
+    language: int,
+    custom-language: string,
+    track-title: string,
+    offset: string,
+}
+
+// A Library entry (.nav.lib-root / .nav.lib-release).
+export component LibraryEntry inherits Rectangle {
+    in property <LibraryItem> item;
+    callback clicked();
+    height: 32px;
+    border-radius: 8px;
+    background: touch.has-hover ? Theme.hover : item.root ? Theme.sel : transparent;
+    accessible-role: button;
+    accessible-label: item.a11y;
+    accessible-description: item.tooltip;
+    accessible-action-default => { root.clicked(); }
+    HorizontalLayout {
+        padding-left: root.item.root ? 8px : 32px;
+        padding-right: 8px;
+        spacing: 6px;
+        Text {
+            text: root.item.label;
+            color: Theme.fg;
+            font-weight: root.item.root ? 500 : 400;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+            accessible-role: none;
+        }
+        Text {
+            text: root.item.count;
+            color: Theme.mute;
+            font-size: 11px;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+    }
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+// A section heading (.insp-section h4).
+component SectionHead inherits Text {
+    color: Theme.mute;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.77px;
+}
+
+// A path as crumbs (.crumbs): each crumb but the last followed by "›" (the host's), the last in
+// bold. A line breaks between crumbs, as .crumbs's flex-wrap does, and a crumb wider than the
+// line wraps on its own, at a space, else anywhere (overflow-wrap: anywhere), so no part of the
+// path is cut.
+// `plain`: one text in place of a path, not bold. Read as one text, `label`.
+component Crumbs inherits Rectangle {
+    in property <[string]> parts;
+    in property <bool> plain;
+    in property <string> label;
+    // Takes the width it is given and the height its lines need there.
+    min-width: 0px;
+    preferred-width: 0px;
+    horizontal-stretch: 1;
+    height: flow.preferred-height;
+    accessible-role: text;
+    accessible-label: root.label;
+    flow := FlexboxLayout {
+        x: 0;
+        y: 0;
+        width: root.width;
+        spacing-horizontal: 6px;
+        spacing-vertical: 2px;
+        for part[i] in root.parts: Text {
+            property <bool> last: i == root.parts.length - 1;
+            text: part;
+            color: self.last && !root.plain ? Theme.fg : Theme.path;
+            font-size: 12px;
+            font-weight: self.last && !root.plain ? 600 : 400;
+            wrap: word-wrap;
+            accessible-role: none;
+        }
+    }
+}
+
+// A definition list term (.insp-dl dt).
+component Term inherits Text {
+    color: Theme.mute;
+    font-size: 12px;
+    vertical-alignment: center;
+}
+
+// A labelled field (.field-label): its label over the control.
+component Labelled inherits VerticalLayout {
+    in property <string> label;
+    spacing: 4px;
+    // The two columns of .assign-opts share the width equally.
+    horizontal-stretch: 1;
+    preferred-width: 0px;
+    min-width: 0px;
+    Text {
+        text: root.label;
+        color: Theme.mute;
+        font-size: 12px;
+        font-weight: 500;
+        accessible-role: none;
+    }
+    @children
+}
+
+// A text field that commits as a webview `change` does: on Enter or when it loses focus, once
+// edited since the last commit.
+// `dirty` is the pane's, shared by its fields: a commit sends them all.
+component CommitEdit inherits LineEdit {
+    in-out property <bool> dirty;
+    // Takes the focus when set, or when the field is made with it set, and clears it.
+    in-out property <bool> grab-focus;
+    callback committed();
+    callback typed(text: string);
+    min-width: 0px;
+    init => { self.take-focus(); }
+    changed grab-focus => { self.take-focus(); }
+    function take-focus() {
+        if self.grab-focus {
+            self.grab-focus = false;
+            self.focus();
+        }
+    }
+    edited(text) => {
+        self.dirty = true;
+        root.typed(text);
+    }
+    accepted => { self.commit(); }
+    changed has-focus => {
+        if !self.has-focus {
+            self.commit();
+        }
+    }
+    function commit() {
+        if self.dirty {
+            self.dirty = false;
+            root.committed();
+        }
+    }
+}
+
+// The Episode Inspector (.insp): the inspected row's header, then its sections, which scroll.
+export component InspectorPane inherits Rectangle {
+    in property <Inspector> insp;
+    in property <[Rung]> ladder;
+    // The assignment select's entries, "Choose a file…" last.
+    in property <[string]> options;
+    in property <[string]> languages;
+    // A start or a job holds the batch: the subtitle controls are locked (.lock-while-job).
+    in property <bool> busy;
+    // The subtitle fields as typed; the host writes the published ones back.
+    in-out property <int> choice;
+    in-out property <int> language;
+    in-out property <string> custom-language;
+    in-out property <string> track-title;
+    in-out property <string> offset;
+    // A field edited since its last commit.
+    in-out property <bool> dirty;
+    callback choose(index: int);
+    callback reset();
+    callback options-changed();
+    callback choose-language(index: int);
+    callback language-tag-edited(text: string);
+
+    // Commits a field edited but not committed: the window calls it before a click on a control
+    // that takes no focus, which the field's own blur would otherwise miss.
+    public function flush() {
+        if root.dirty {
+            root.dirty = false;
+            root.options-changed();
+        }
+    }
+
+    // The language select's "Custom tag…", its last entry: the tag field shows.
+    property <bool> custom: root.language == root.languages.length - 1;
+    // Picking "Custom tag…" puts the cursor in the tag field, made or already there.
+    property <bool> focus-custom;
+
+    background: Theme.panel;
+
+    Rectangle {
+        x: 0;
+        width: 1px;
+        background: Theme.line;
+    }
+
+    if !root.insp.shown: VerticalLayout {
+        padding-top: 24px;
+        padding-bottom: 24px;
+        padding-left: 18px;
+        padding-right: 18px;
+        alignment: start;
+        Text {
+            text: "Open a folder, then pick an episode to see what the batch does with it.";
+            color: Theme.mute;
+            wrap: word-wrap;
+        }
+    }
+
+    if root.insp.shown: VerticalLayout {
+        // The episode header (.insp-head) stays put; only the sections below it scroll.
+        HorizontalLayout {
+            padding-top: 18px;
+            padding-bottom: 14px;
+            padding-left: 16px;
+            padding-right: 16px;
+            spacing: 12px;
+            Text {
+                text: root.insp.number;
+                color: Theme.fg;
+                font-family: "Unbounded";
+                font-size: 30px;
+                font-weight: 700;
+                vertical-alignment: top;
+            }
+            VerticalLayout {
+                spacing: 4px;
+                alignment: start;
+                Text {
+                    text: root.insp.title;
+                    color: Theme.fg;
+                    font-size: 15px;
+                    font-weight: 700;
+                    // At a space, else anywhere, as overflow-wrap: anywhere does: a file name may
+                    // have no space to break at, and is never cut.
+                    wrap: word-wrap;
+                    // Not its longest word's width: the pane's width is the header's.
+                    min-width: 0px;
+                }
+                if root.insp.crumbs.length > 0: Crumbs {
+                    parts: root.insp.crumbs;
+                    label: root.insp.path;
+                }
+            }
+        }
+        Rectangle {
+            height: 1px;
+            background: Theme.sep;
+        }
+
+        ScrollView {
+            vertical-stretch: 1;
+            content-width: self.visible-width;
+            content-height: sections.preferred-height;
+            sections := VerticalLayout {
+                width: parent.width;
+                padding: 16px;
+                spacing: 18px;
+                alignment: start;
+
+                if root.insp.error != "": Rectangle {
+                    border-radius: 10px;
+                    background: Theme.err-soft;
+                    HorizontalLayout {
+                        padding-top: 10px;
+                        padding-bottom: 10px;
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        Text {
+                            text: root.insp.error;
+                            color: Theme.err;
+                            font-family: "JetBrains Mono";
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
+                // Output (.insp-dl): the status pill, the video, audio and output folder.
+                VerticalLayout {
+                    spacing: 8px;
+                    SectionHead { text: "OUTPUT"; }
+                    GridLayout {
+                        spacing-horizontal: 12px;
+                        spacing-vertical: 6px;
+                        Row {
+                            Term { text: "Status"; }
+                            HorizontalLayout {
+                                alignment: start;
+                                Rectangle {
+                                    border-radius: self.height / 2;
+                                    background: root.insp.pill-tone == RowTone.info ? Theme.info-soft
+                                        : root.insp.pill-tone == RowTone.ok ? Theme.ok-soft
+                                        : root.insp.pill-tone == RowTone.err ? Theme.err-soft
+                                        : Theme.sel;
+                                    accessible-role: text;
+                                    accessible-label: root.insp.pill-label;
+                                    HorizontalLayout {
+                                        padding-top: 2px;
+                                        padding-bottom: 2px;
+                                        padding-left: 8px;
+                                        padding-right: 10px;
+                                        spacing: 6px;
+                                        VerticalLayout {
+                                            alignment: center;
+                                            Rectangle {
+                                                width: 7px;
+                                                height: 7px;
+                                                border-radius: 3.5px;
+                                                background: pill-text.color;
+                                            }
+                                        }
+                                        pill-text := Text {
+                                            text: root.insp.pill-label;
+                                            color: root.insp.pill-tone == RowTone.info ? Theme.info
+                                                : root.insp.pill-tone == RowTone.ok ? Theme.ok
+                                                : root.insp.pill-tone == RowTone.err ? Theme.err
+                                                : Theme.mute;
+                                            font-size: 12px;
+                                            font-weight: 600;
+                                            accessible-role: none;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Row {
+                            Term { text: "Video"; }
+                            Text {
+                                text: root.insp.video;
+                                color: Theme.fg;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                                horizontal-stretch: 1;
+                            }
+                        }
+                        Row {
+                            Term { text: root.insp.audio-label; }
+                            Text {
+                                text: root.insp.audio;
+                                color: Theme.fg;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                                horizontal-stretch: 1;
+                            }
+                        }
+                        Row {
+                            Term { text: "Folder"; }
+                            Crumbs {
+                                parts: root.insp.out-crumbs;
+                                plain: root.insp.out-plain;
+                                label: root.insp.out-path;
+                            }
+                        }
+                    }
+                }
+
+                // Subtitle (remux only): the ladder, the assignment and its options.
+                if root.insp.subtitles: VerticalLayout {
+                    Rectangle {
+                        height: 1px;
+                        background: Theme.sep;
+                    }
+                    VerticalLayout {
+                        padding-top: 16px;
+                        spacing: 8px;
+                        SectionHead { text: "SUBTITLE · WHY THIS ONE"; }
+                        VerticalLayout {
+                            spacing: 4px;
+                            for rung in root.ladder: Rectangle {
+                                border-radius: 8px;
+                                background: rung.chosen ? Theme.accent-soft : transparent;
+                                accessible-role: text;
+                                accessible-label: rung.a11y;
+                                HorizontalLayout {
+                                    padding-top: 6px;
+                                    padding-bottom: 6px;
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    spacing: 8px;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        Rectangle {
+                                            width: 20px;
+                                            height: 20px;
+                                            border-radius: 10px;
+                                            border-width: 1px;
+                                            border-color: rung.chosen ? Theme.accent : Theme.line;
+                                            background: rung.chosen ? Theme.accent : transparent;
+                                            Text {
+                                                text: rung.num;
+                                                color: rung.chosen ? Theme.accent-fg : rung.found ? Theme.fg : Theme.mute;
+                                                font-family: "Unbounded";
+                                                font-size: 10px;
+                                                font-weight: 600;
+                                                accessible-role: none;
+                                            }
+                                        }
+                                    }
+                                    VerticalLayout {
+                                        alignment: center;
+                                        horizontal-stretch: 1;
+                                        Text {
+                                            text: rung.label;
+                                            color: rung.chosen || rung.found ? Theme.fg : Theme.mute;
+                                            font-size: 12px;
+                                            font-weight: rung.chosen ? 600 : 400;
+                                            overflow: elide;
+                                            accessible-role: none;
+                                        }
+                                        if rung.found: Text {
+                                            text: rung.detail;
+                                            color: Theme.path;
+                                            font-size: 12px;
+                                            overflow: elide;
+                                            accessible-role: none;
+                                        }
+                                    }
+                                    Text {
+                                        text: rung.tag;
+                                        color: rung.chosen || rung.found ? Theme.fg : Theme.mute;
+                                        font-size: 11px;
+                                        font-weight: 500;
+                                        vertical-alignment: center;
+                                        accessible-role: none;
+                                    }
+                                }
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            ComboBox {
+                                min-width: 0px;
+                                model: root.options;
+                                current-index <=> root.choice;
+                                enabled: !root.busy;
+                                accessible-label: "Assign subtitle";
+                                selected => { root.choose(self.current-index); }
+                            }
+                            if root.insp.assigned: LinkButton {
+                                text: "Reset";
+                                enabled: !root.busy;
+                                clicked => { root.reset(); }
+                            }
+                        }
+                        if root.insp.assigned: VerticalLayout {
+                            padding-top: 2px;
+                            spacing: 8px;
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Labelled {
+                                    label: "Language";
+                                    ComboBox {
+                                        min-width: 0px;
+                                        model: root.languages;
+                                        current-index <=> root.language;
+                                        enabled: !root.busy;
+                                        accessible-label: "Language";
+                                        selected => {
+                                            root.focus-custom = root.custom;
+                                            root.choose-language(self.current-index);
+                                        }
+                                    }
+                                }
+                                if root.custom: Labelled {
+                                    label: "Language tag";
+                                    CommitEdit {
+                                        text <=> root.custom-language;
+                                        placeholder-text: "ISO 639-2, e.g. may";
+                                        enabled: !root.busy;
+                                        accessible-label: "Language tag";
+                                        dirty <=> root.dirty;
+                                        typed(text) => { root.language-tag-edited(text); }
+                                        committed => { root.options-changed(); }
+                                        grab-focus <=> root.focus-custom;
+                                    }
+                                }
+                                if !root.custom: Labelled {
+                                    label: "Track title";
+                                    CommitEdit {
+                                        text <=> root.track-title;
+                                        placeholder-text: "e.g. Dialogue";
+                                        enabled: !root.busy;
+                                        accessible-label: "Track title";
+                                        dirty <=> root.dirty;
+                                        committed => { root.options-changed(); }
+                                    }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                if root.custom: Labelled {
+                                    label: "Track title";
+                                    CommitEdit {
+                                        text <=> root.track-title;
+                                        placeholder-text: "e.g. Dialogue";
+                                        enabled: !root.busy;
+                                        accessible-label: "Track title";
+                                        dirty <=> root.dirty;
+                                        committed => { root.options-changed(); }
+                                    }
+                                }
+                                Labelled {
+                                    label: "Offset (ms)";
+                                    CommitEdit {
+                                        text <=> root.offset;
+                                        placeholder-text: "0";
+                                        enabled: !root.busy;
+                                        accessible-label: "Offset (ms)";
+                                        dirty <=> root.dirty;
+                                        committed => { root.options-changed(); }
+                                    }
+                                }
+                                // An empty half, so Offset keeps the width of one column.
+                                if !root.custom: Rectangle { horizontal-stretch: 1; }
+                            }
+                        }
+                    }
+                }
+
+                // Fonts (.font-chips).
+                VerticalLayout {
+                    Rectangle {
+                        height: 1px;
+                        background: Theme.sep;
+                    }
+                    VerticalLayout {
+                        padding-top: 16px;
+                        spacing: 8px;
+                        SectionHead { text: root.insp.fonts-head; }
+                        Text {
+                            text: root.insp.fonts;
+                            color: Theme.path;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -1,11 +1,12 @@
 //! Headless tests of the generated UI through Slint's testing backend. Each test runs on its own
 //! thread, where it installs its own platform.
 
+use crate::inspector::sample_view;
 use crate::publisher::{install_models, SlintPublisher};
 use i_slint_backend_testing::{ElementHandle, TestingBackend, TestingBackendOptions};
 use mkv_anime_batch_slint_ui::{App, FontProbe, Mode, QueueFilter, Theme};
 use mkv_desktop_core::actor::{Publisher, ScanView, ViewState};
-use mkv_desktop_core::presentation::{Bucket, Tone};
+use mkv_desktop_core::presentation::{self, Bucket, Tone};
 use mkv_desktop_core::queue::Row;
 use mkv_desktop_core::snapshot::ItemStatus;
 use slint::{Color, ComponentHandle, Model};
@@ -424,6 +425,404 @@ fn each_mode_keeps_its_scroll_and_a_new_folder_starts_at_the_top() {
     app.hide().unwrap();
 }
 
+/// Three releases of 20, 20 and 4 rows, in one folder, with the Library the core publishes for
+/// them.
+fn three_releases() -> ViewState {
+    let rows: Vec<Row> = (0..44)
+        .map(|i| Row {
+            release: [".", "S2", "S3"][i / 20].into(),
+            ..row(&format!("{}{:02}", ["a", "b", "c"][i / 20], i % 20))
+        })
+        .collect();
+    let mut state = ViewState::new(None);
+    state.remux.library = presentation::library(Some("/media/Show"), &rows);
+    state.remux.rows = Arc::new(rows);
+    state.remux.manifest_rev = 1;
+    state.remux.empty = None;
+    state.remux.directory = Some("/media/Show".into());
+    state
+}
+
+/// Lays the window out and runs the change handlers its layout set off, as a frame does.
+fn frame(app: &App) {
+    for _ in 0..2 {
+        // A search visits the whole tree, which lays the lists out.
+        ElementHandle::find_by_accessible_label(app, "").count();
+        slint::platform::update_timers_and_animations();
+    }
+}
+
+/// The Library lists the folder and its releases; a release's entry shows every row again and
+/// puts the release's first row at the top of the list, to the pixel, with rows of two heights,
+/// even from a filter that hid every row (which leaves the list no row height to measure by).
+#[test]
+fn the_library_reveals_a_release_at_the_top_of_its_list() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    let publisher = SlintPublisher::new(&app);
+    publisher.show(&three_releases());
+    app.show().unwrap();
+    let y = |id: &str| {
+        only(&app, &format!("Include {id} in the batch"))
+            .absolute_position()
+            .y
+    };
+    let top = y("a00");
+
+    let clicks = Rc::new(RefCell::new(Vec::new()));
+    let log = Rc::clone(&clicks);
+    app.on_reveal_release(move |release, root| log.borrow_mut().push((release.to_string(), root)));
+    only(&app, "Show 44").invoke_accessible_default_action();
+    only(&app, "S2 20").invoke_accessible_default_action();
+    assert_eq!(
+        *clicks.borrow(),
+        [(String::new(), true), ("S2".to_string(), false)]
+    );
+
+    // From a filter that hid every row, laid out: the reveal shows every row again.
+    publisher.show_filter(Mode::Remux, QueueFilter::Done);
+    frame(&app);
+    publisher.show_reveal(Mode::Remux, "S2");
+    frame(&app);
+    assert_eq!(app.get_remux_head().filter, QueueFilter::All);
+    assert_eq!(y("b00"), top, "S2's head is the list's first line");
+    // Back up from below.
+    publisher.show_reveal(Mode::Remux, "S2");
+    assert_eq!(y("b00"), top);
+    // The last release cannot reach the top: the list ends at its last row, as scrolling into
+    // view stops at the end.
+    publisher.show_reveal(Mode::Remux, "S3");
+    let last = only(&app, "Include c03 in the batch");
+    assert!(y("c00") > top && last.absolute_position().y < 640.0);
+
+    // The top (the folder's entry, or a card), from a filter that hid every row.
+    publisher.show_filter(Mode::Remux, QueueFilter::Done);
+    frame(&app);
+    publisher.show_filter(Mode::Remux, QueueFilter::All);
+    app.invoke_reveal(Mode::Remux, 0);
+    frame(&app);
+    assert_eq!(y("a00"), top, "the folder's first row heads the list");
+
+    // A filter clicked after a release's entry wins: the list does not scroll to the release.
+    publisher.reveal(Mode::Remux, "S2".into());
+    publisher.show_filter(Mode::Remux, QueueFilter::All);
+    frame(&app);
+    assert_eq!(y("a00"), top);
+    // So does one clicked while the reveal waits for the rows' layout.
+    publisher.show_filter(Mode::Remux, QueueFilter::Done);
+    frame(&app);
+    publisher.show_reveal(Mode::Remux, "S2");
+    only(&app, "Done 0").invoke_accessible_default_action();
+    frame(&app);
+    assert_eq!(y("a00"), top);
+    app.hide().unwrap();
+}
+
+/// A published remux Inspector at the narrowest window: every field shows, the subtitle controls
+/// carry their labels and fit the pane; an assignment brings Reset and its options.
+#[test]
+fn the_inspector_shows_every_field_and_fits_the_narrowest_window() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(760.0, 520.0));
+    let publisher = SlintPublisher::new(&app);
+    let mut state = ViewState::new(None);
+    app.show().unwrap();
+    publisher.show(&state);
+    only(
+        &app,
+        "Open a folder, then pick an episode to see what the batch does with it.",
+    );
+
+    state.seq = 1;
+    state.remux.rows = Arc::new(vec![row("Show - 01.mkv")]);
+    state.remux.empty = None;
+    state.remux.inspector = Some(sample_view());
+    publisher.show(&state);
+    for label in [
+        "03",
+        "ep1.mkv",
+        "media › Season 1",
+        "40% · 3s",
+        "HEVC 1080p · copied",
+        "FLAC 2.0 → Opus 192k",
+        "Output folder next to the input",
+        "2 Same folder, Season 1 › ep1.ass, Auto",
+        "FONTS · 2",
+        "2 attached fonts · folder: auto",
+        "Assign subtitle",
+    ] {
+        only(&app, label);
+    }
+    assert_eq!(
+        ElementHandle::find_by_accessible_label(&app, "Reset").count(),
+        0
+    );
+    assert_eq!(app.get_sub_options().row_count(), 3);
+    // The list's tools wrap in the list left beside the Inspector (.list-tools): every chip and
+    // link shows whole, inside the list, none over another.
+    let list_end = 760.0 - 248.0;
+    let tools: Vec<_> = [
+        "All 0",
+        "To do 0",
+        "Done 0",
+        "Failed 0",
+        "Select all",
+        "None",
+    ]
+    .map(|label| only(&app, label))
+    .into_iter()
+    .map(|tool| (tool.absolute_position(), tool.size()))
+    .collect();
+    for (at, size) in &tools {
+        assert!(
+            at.x >= 196.0 && at.x + size.width <= list_end,
+            "{at:?} {size:?}"
+        );
+    }
+    for (i, (a, a_size)) in tools.iter().enumerate() {
+        for (b, b_size) in &tools[i + 1..] {
+            let apart = a.x + a_size.width <= b.x
+                || b.x + b_size.width <= a.x
+                || a.y + a_size.height <= b.y
+                || b.y + b_size.height <= a.y;
+            assert!(apart, "{a:?} overlaps {b:?}");
+        }
+    }
+    assert!(
+        tools[5].0.y > tools[0].0.y,
+        "the tools wrap onto a second line"
+    );
+
+    let mut assigned = sample_view();
+    assigned.assignment = Some(mkv_core::request::TrackAssignment {
+        target_video: "Season 1/ep1.mkv".into(),
+        asset_path: "Season 1/ep1.ass".into(),
+        track_type: Default::default(),
+        language: Some("may".into()),
+        title: Some("Signs".into()),
+        offset_ms: Some(120),
+    });
+    assigned.language_choice = "custom";
+    assigned.custom_language = "may".into();
+    state.seq = 2;
+    state.remux.inspector = Some(assigned);
+    publisher.show(&state);
+    assert_eq!(
+        (app.get_sub_choice(), app.get_sub_language()),
+        (1, 3),
+        "the published fields are written back"
+    );
+    assert_eq!(
+        (
+            app.get_sub_custom(),
+            app.get_sub_title(),
+            app.get_sub_offset()
+        ),
+        ("may".into(), "Signs".into(), "120".into())
+    );
+    // The pane's sections scroll; the subtitle options are at their end.
+    scroll(&app, 640.0, false);
+    for label in [
+        "Reset",
+        "Language",
+        "Language tag",
+        "Track title",
+        "Offset (ms)",
+    ] {
+        let control = only(&app, label);
+        let right = control.absolute_position().x + control.size().width;
+        assert!(
+            right <= 760.0,
+            "{label} ends at {right}, past the window's 760"
+        );
+    }
+
+    scroll(&app, 640.0, true);
+
+    // The extract Inspector has no subtitle section.
+    state.seq = 3;
+    state.extract.rows = Arc::new(vec![row("Show - 01.mkv")]);
+    state.extract.empty = None;
+    state.extract.inspector = Some(sample_view());
+    publisher.show(&state);
+    app.set_mode(Mode::Extract);
+    assert_eq!(
+        ElementHandle::find_by_accessible_label(&app, "Assign subtitle").count(),
+        0
+    );
+    only(&app, "Same folder as the input");
+    app.hide().unwrap();
+}
+
+/// Scrolls the pane at `x` to its end with the mouse wheel, or back to its top for `up`.
+fn scroll(app: &App, x: f32, up: bool) {
+    app.window()
+        .dispatch_event(slint::platform::WindowEvent::PointerScrolled {
+            position: slint::LogicalPosition::new(x, 300.0),
+            delta_x: 0.0,
+            delta_y: if up { 5000.0 } else { -5000.0 },
+        });
+}
+
+/// A folder of 30 releases overflows the sidebar at the narrowest window: it scrolls, so Open
+/// folder stays reachable, as `.side`'s overflow keeps it.
+#[test]
+fn the_sidebar_scrolls_to_open_folder_past_many_releases() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(760.0, 520.0));
+    let rows: Vec<Row> = (0..30)
+        .map(|i| Row {
+            release: format!("R{i:02}"),
+            ..row(&format!("e{i:02}"))
+        })
+        .collect();
+    let mut state = ViewState::new(None);
+    state.remux.library = presentation::library(Some("/media/Show"), &rows);
+    state.remux.rows = Arc::new(rows);
+    state.remux.empty = None;
+    apply(&app, &state);
+    app.show().unwrap();
+    // Clipped out of the sidebar: the search finds only what shows.
+    let open_folder = || ElementHandle::find_by_accessible_label(&app, "Open folder…").count();
+    assert_eq!(open_folder(), 0, "30 releases overflow the window");
+    scroll(&app, 90.0, false);
+    let open = only(&app, "Open folder…");
+    let end = open.absolute_position().y + open.size().height;
+    assert!(end <= 520.0, "Open folder ends at {end}, past the window");
+    app.hide().unwrap();
+}
+
+/// A title typed and not committed is committed before a click on a control that takes no focus
+/// (a row, Open folder, a filter chip, a Library entry, a mode tab, Reset), as the webview's blur
+/// commits it before the click lands; an answered Intent's write-back keeps what is typed
+/// meanwhile.
+#[test]
+fn a_typed_subtitle_field_is_committed_before_a_click_elsewhere() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    let mut assigned = sample_view();
+    assigned.assignment = Some(mkv_core::request::TrackAssignment {
+        target_video: "Season 1/ep1.mkv".into(),
+        asset_path: "Season 1/ep1.ass".into(),
+        track_type: Default::default(),
+        language: Some("eng".into()),
+        title: None,
+        offset_ms: None,
+    });
+    let mut state = ViewState::new(None);
+    state.remux.rows = Arc::new(vec![row("Show - 01.mkv"), row("Show - 02.mkv")]);
+    state.remux.empty = None;
+    state.remux.library = presentation::library(Some("/media/Show"), &state.remux.rows);
+    state.remux.inspector = Some(assigned);
+    apply(&app, &state);
+    app.show().unwrap();
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let log = Rc::clone(&calls);
+    app.on_subtitle_options_changed(move || {
+        let title = log.borrow().len();
+        log.borrow_mut().push(format!("options {title}"))
+    });
+    let log = Rc::clone(&calls);
+    app.on_inspect(move |id| log.borrow_mut().push(id.to_string()));
+    let log = Rc::clone(&calls);
+    app.on_open_folder(move || log.borrow_mut().push("open".into()));
+    let log = Rc::clone(&calls);
+    app.on_set_filter(move |filter| log.borrow_mut().push(format!("{filter:?}")));
+    let log = Rc::clone(&calls);
+    app.on_reveal_release(move |_, _| log.borrow_mut().push("library".into()));
+
+    only(&app, "Show - 02.mkv").invoke_accessible_default_action();
+    only(&app, "Track title").set_accessible_value("Signs");
+    // An answer's write-back on the same row keeps the typed title for its commit.
+    crate::inspector::restore_form(&app);
+    assert_eq!(app.get_sub_title(), "Signs");
+    only(&app, "Show - 01.mkv").invoke_accessible_default_action();
+    for click in ["Open folder…", "Done 0", "Show 2", "Extract"] {
+        only(&app, "Track title").set_accessible_value(click);
+        only(&app, click).invoke_accessible_default_action();
+        if click == "Extract" {
+            only(&app, "Remux").invoke_accessible_default_action();
+        }
+    }
+    assert_eq!(
+        *calls.borrow(),
+        [
+            "Show - 02.mkv",
+            "options 1",
+            "Show - 01.mkv",
+            "options 3",
+            "open",
+            "options 5",
+            "Done",
+            "options 7",
+            "library",
+            "options 9",
+        ],
+        "committed once, before each click"
+    );
+    // Reset commits the typed title, then clears; the answer's write-back drops the title.
+    let log = Rc::clone(&calls);
+    app.on_reset_subtitle(move || log.borrow_mut().push("reset".into()));
+    only(&app, "Track title").set_accessible_value("Signs");
+    only(&app, "Reset").invoke_accessible_default_action();
+    assert_eq!(calls.borrow()[10..], ["options 10", "reset"]);
+    crate::inspector::restore_form(&app);
+    assert_eq!(
+        (app.get_sub_title().as_str(), app.get_sub_dirty()),
+        ("", false)
+    );
+    // Nothing typed since: nothing to commit.
+    only(&app, "Show - 02.mkv").invoke_accessible_default_action();
+    assert_eq!(calls.borrow().last().unwrap(), "Show - 02.mkv");
+    app.hide().unwrap();
+}
+
+/// Picking "Custom tag…" puts the cursor in the tag field, also when it already shows.
+#[test]
+fn picking_the_custom_tag_focuses_the_tag_field() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    let mut assigned = sample_view();
+    assigned.assignment = Some(mkv_core::request::TrackAssignment {
+        target_video: "Season 1/ep1.mkv".into(),
+        asset_path: "Season 1/ep1.ass".into(),
+        track_type: Default::default(),
+        language: Some("may".into()),
+        title: None,
+        offset_ms: None,
+    });
+    assigned.language_choice = "custom";
+    assigned.custom_language = "ma".into();
+    let mut state = ViewState::new(None);
+    state.remux.rows = Arc::new(vec![row("Show - 01.mkv")]);
+    state.remux.empty = None;
+    state.remux.inspector = Some(assigned);
+    apply(&app, &state);
+    app.show().unwrap();
+    frame(&app);
+
+    // The language select's "Custom tag…" picked again, from its popup.
+    only(&app, "Language").invoke_accessible_expand_action();
+    frame(&app);
+    only(&app, "Custom tag…").mock_single_click(slint::platform::PointerEventButton::Left);
+    frame(&app);
+    // Typing goes to the field with the focus.
+    app.window()
+        .dispatch_event(slint::platform::WindowEvent::KeyPressed { text: "y".into() });
+    app.window()
+        .dispatch_event(slint::platform::WindowEvent::KeyReleased { text: "y".into() });
+    assert!(
+        app.get_sub_custom().contains('y'),
+        "typed into the tag field"
+    );
+    app.hide().unwrap();
+}
+
 /// WCAG relative luminance of an sRGB colour.
 fn luminance(color: Color) -> f64 {
     let channel = |value: u8| {
@@ -500,6 +899,8 @@ fn every_text_token_meets_wcag_aa_on_every_surface_in_both_themes() {
             ("hover", theme.get_hover()),
             ("accent-soft", theme.get_accent_soft()),
             ("err-soft", theme.get_err_soft()),
+            ("info-soft", theme.get_info_soft()),
+            ("ok-soft", theme.get_ok_soft()),
         ];
         let mut pairs = Vec::new();
         for (surface, fill) in surfaces {
