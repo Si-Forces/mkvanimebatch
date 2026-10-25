@@ -23,6 +23,10 @@
 //! header is its own. `interval_ms` is the time between presented frames (vsync-bound, so a hair
 //! over 16.67 ms is jitter, and over 25 ms a missed vsync); `render_ms` each frame's rendering on
 //! the UI thread.
+//! Halfway through the window a Run's forced scan publishes a new `manifest_rev` with the same
+//! rows, which resets the whole row model (`queue::diff_rows`): `run_reset_ms` is that hop's
+//! UI-thread time, and `run_reset_frame` the render and interval of the frame it lands in (the
+//! first presented after it). The churn's clock and progress stack redraw the bottom bar (P5).
 //! Budget (#135): publication p99 < 4 ms, and no frame over 16.7 ms, read as no render over
 //! 16.7 ms and no missed vsync. The line ends with PASS or FAIL for each.
 
@@ -64,6 +68,7 @@ use mkv_desktop_core::snapshot::ItemStatus;
 use publisher::Coalescer;
 use slint::{ComponentHandle, RenderingState};
 use std::error::Error;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -151,7 +156,13 @@ fn refresh(row: &mut Row, elapsed: Duration, duration_sec: Option<f64>) {
 /// Starts a thread that advances `IN_FLIGHT` processing rows and publishes `state` with them every
 /// `PUBLISH_INTERVAL`, like a remux run seen through the core. Labels tick once a second; when a
 /// row finishes the next queued one starts, and a finished batch starts again.
-fn spawn_churn(mut state: ViewState, mut publish: impl FnMut(&ViewState) + Send + 'static) {
+/// Once `reset` is set, the next publication bumps `manifest_rev`; `publish` answers whether it
+/// scheduled the hop that takes it, else the next one bumps it again.
+fn spawn_churn(
+    mut state: ViewState,
+    reset: Arc<AtomicBool>,
+    mut publish: impl FnMut(&ViewState, bool) -> bool + Send + 'static,
+) {
     std::thread::spawn(move || {
         let mut rows = (*state.remux.rows).clone();
         let mut started: Vec<(usize, Instant)> = Vec::new();
@@ -213,8 +224,17 @@ fn spawn_churn(mut state: ViewState, mut publish: impl FnMut(&ViewState) + Send 
                 .count();
             state.seq += 1;
             state.remux.count_text = format!("{done} of {} done", rows.len());
+            state.remux.clock = format!("{}:{:02} elapsed", second / 60, second % 60);
+            state.remux.progress.done = done as f64 * 100.0 / rows.len() as f64;
+            state.remux.progress.live = started.len() as f64 * 100.0 / rows.len() as f64;
             state.remux.rows = Arc::new(rows.clone());
-            publish(&state);
+            let resetting = reset.load(Ordering::Relaxed);
+            if resetting {
+                state.remux.manifest_rev += 1;
+            }
+            if publish(&state, resetting) && resetting {
+                reset.store(false, Ordering::Relaxed);
+            }
             std::thread::sleep(PUBLISH_INTERVAL);
         }
     });
@@ -270,7 +290,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let maps: Arc<Mutex<Vec<f64>>> = Arc::default();
     let (window, timed, mapped) = (app.as_weak(), Arc::clone(&hops), Arc::clone(&maps));
     let (filtered, filter_window) = (Arc::clone(&pending), app.as_weak());
-    spawn_churn(state, move |state| {
+    let want_reset = Arc::new(AtomicBool::new(false));
+    // The Run reset's hop: its UI-thread time and when it ended.
+    let run_reset: Arc<Mutex<Option<(f64, Instant)>>> = Arc::default();
+    let reset_hop = Arc::clone(&run_reset);
+    spawn_churn(state, Arc::clone(&want_reset), move |state, resetting| {
         let start = Instant::now();
         let scheduled = pending.push_state(state);
         mapped.lock().unwrap().push(ms(start.elapsed()));
@@ -281,12 +305,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Arc::clone(&timed),
                 Arc::clone(&edits),
             );
+            let reset_hop = resetting.then(|| Arc::clone(&reset_hop));
             let _ = slint::invoke_from_event_loop(move || {
                 let start = Instant::now();
                 publisher::hop(&pending, &edits, &window);
-                hops.lock().unwrap().push(ms(start.elapsed()));
+                let took = ms(start.elapsed());
+                hops.lock().unwrap().push(took);
+                if let Some(reset_hop) = reset_hop {
+                    *reset_hop.lock().unwrap() = Some((took, Instant::now()));
+                }
             });
         }
+        scheduled
     });
 
     let weak = app.as_weak();
@@ -294,6 +324,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let (mut intervals, mut renders) = (Vec::new(), Vec::new());
     let mut dir = 1.0;
     let (mut reported, mut reset) = (false, f64::NAN);
+    // The render and interval of the frame the Run reset lands in.
+    let mut reset_frame: Option<(f64, f64)> = None;
     app.window()
         .set_rendering_notifier(move |state, _| {
             match state {
@@ -318,6 +350,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                 }
                 renders.push(ms(now.duration_since(before)));
+                if since >= WARMUP + WINDOW / 2 && run_reset.lock().unwrap().is_none() {
+                    want_reset.store(true, Ordering::Relaxed);
+                }
+                if let (None, Some((_, at))) = (reset_frame, *run_reset.lock().unwrap()) {
+                    if now > at {
+                        let interval = intervals.last().copied().unwrap_or(f64::NAN);
+                        reset_frame = Some((ms(now.duration_since(before)), interval));
+                    }
+                }
                 // Bounce between the ends; the bottom is approximate (the list is shorter than the
                 // window by its header), and 30 s at 6 px a frame (about 10.7k px, into the third
                 // release) does not reach it anyway.
@@ -342,13 +383,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let filter = ms(start.elapsed());
                 let verdict = |pass: bool| if pass { "PASS" } else { "FAIL" };
                 let render_max = renders.iter().copied().fold(0.0, f64::max);
+                let run_reset_ms = run_reset.lock().unwrap().map_or(f64::NAN, |(took, _)| took);
+                let (reset_render, reset_interval) = reset_frame.unwrap_or((f64::NAN, f64::NAN));
                 let pub_budget = hops.len() > 1 && {
                     let mut sorted = hops.clone();
                     sorted.sort_by(f64::total_cmp);
                     sorted[((sorted.len() - 1) as f64 * 0.99).round() as usize] < 4.0
                 };
                 println!(
-                    "BENCH session={} renderer=skia-opengl rows={ROWS} publications={} {} {} reset_ms={reset:.2} filter_ms={filter:.2} frames={} {} over_16.7ms={over_frame} over_25ms={over_vsync} {} budget_pub={} budget_frame={}",
+                    "BENCH session={} renderer=skia-opengl rows={ROWS} publications={} {} {} reset_ms={reset:.2} filter_ms={filter:.2} run_reset_ms={run_reset_ms:.2} run_reset_frame=render:{reset_render:.2},interval:{reset_interval:.2} frames={} {} over_16.7ms={over_frame} over_25ms={over_vsync} {} budget_pub={} budget_frame={}",
                     if std::env::var_os("WAYLAND_DISPLAY").is_some() { "wayland" } else { "x11" },
                     hops.len(),
                     summary("map", &mut maps),
