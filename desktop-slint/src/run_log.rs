@@ -4,12 +4,12 @@
 //! reference; the core decides what a console keeps, its display text and its error count.
 
 use crate::publisher::SlintPublisher;
-use mkv_anime_batch_slint_ui::{App, LogRow, LogTone, Mode};
+use mkv_anime_batch_slint_ui::{App, LogBadge, LogRow, LogTone, Mode};
 use mkv_core::log_line::LogKind;
 use mkv_core::pipeline::PipelineMode;
 use mkv_desktop_core::actor::CoreHandle;
 use mkv_desktop_core::log::{LogBatch, LogView, ShownLine};
-use slint::{ComponentHandle, Model, SharedString, Timer, TimerMode, VecModel};
+use slint::{ComponentHandle, Model, Timer, TimerMode, VecModel};
 use std::collections::VecDeque;
 use std::rc::Rc;
 use std::time::Duration;
@@ -38,12 +38,19 @@ fn map_line(line: &ShownLine) -> LogRow {
     }
 }
 
-/// The Log toggle's badge: the error count, or empty, which hides it.
-fn badge(errors: usize) -> SharedString {
-    if errors == 0 {
-        SharedString::new()
-    } else {
-        errors.to_string().into()
+/// The Log toggle's badge: the error count and its spoken form ("1 error"), or empty, which
+/// hides it.
+fn badge(errors: usize) -> LogBadge {
+    match errors {
+        0 => LogBadge::default(),
+        1 => LogBadge {
+            count: "1".into(),
+            description: "1 error".into(),
+        },
+        n => LogBadge {
+            count: n.to_string().into(),
+            description: format!("{n} errors").into(),
+        },
     }
 }
 
@@ -55,7 +62,7 @@ pub(crate) struct LogPatch {
     drop: usize,
     rows: Vec<LogRow>,
     /// The badge, when the error count may have changed.
-    badge: Option<SharedString>,
+    badge: Option<LogBadge>,
 }
 
 /// A mode's console, as log-view.js keeps one: the lines the core keeps from `first` on, under
@@ -196,6 +203,8 @@ pub(crate) fn apply(app: &App, mode: Mode, patch: LogPatch) {
             model.remove(0);
         }
         model.extend(patch.rows);
+    } else {
+        tracing::error!("[run_log] the line model is not installed; a log patch is lost");
     }
     if let Some(badge) = patch.badge {
         match mode {
@@ -348,7 +357,7 @@ mod tests {
             console.take_patch(),
             LogPatch {
                 rows: vec![row(LogTone::Plain, "a"), row(LogTone::Err, "ERROR: b")],
-                badge: Some("1".into()),
+                badge: Some(badge(1)),
                 ..LogPatch::default()
             }
         );
@@ -363,7 +372,7 @@ mod tests {
             LogPatch {
                 drop: 1,
                 rows: vec![row(LogTone::Info, "Remuxing x › y.mkv")],
-                badge: Some(SharedString::new()),
+                badge: Some(LogBadge::default()),
                 ..LogPatch::default()
             }
         );
@@ -391,7 +400,7 @@ mod tests {
             console.take_patch(),
             LogPatch {
                 clear: true,
-                badge: Some(SharedString::new()),
+                badge: Some(LogBadge::default()),
                 ..LogPatch::default()
             }
         );
@@ -435,10 +444,11 @@ mod tests {
         let lines = [(Step, "Remuxing /a/b.mkv"), (Error, "ERROR: broke")];
         publisher.show_logs(&[batch(0, 0, 0, &lines)]);
         assert_eq!(app.get_remux_log().row_count(), 2);
-        assert_eq!(app.get_remux_log_badge(), "1");
-        assert_eq!(app.get_extract_log_badge(), "");
+        assert_eq!(app.get_remux_log_badge().count, "1");
+        assert_eq!(app.get_extract_log_badge().count, "");
         let toggle = button(&app, "Log");
-        assert_eq!(toggle.accessible_description().as_deref(), Some("1"));
+        assert_eq!(toggle.accessible_description().as_deref(), Some("1 error"));
+        assert_eq!(badge(3).description, "3 errors");
 
         toggle.invoke_accessible_default_action();
         ticks();
@@ -497,7 +507,7 @@ mod tests {
         assert!(!app.get_log_open());
         publisher.show_logs(&[batch(1, 0, 0, &[])]);
         assert_eq!(app.get_remux_log().row_count(), 0);
-        assert_eq!(app.get_remux_log_badge(), "");
+        assert_eq!(app.get_remux_log_badge().count, "");
         app.hide().unwrap();
     }
 
@@ -528,10 +538,68 @@ mod tests {
         let lines = app.get_remux_log();
         let tones: Vec<_> = lines.iter().map(|line| line.tone).collect();
         assert_eq!(tones, [LogTone::Err, LogTone::Done], "each line once");
-        assert_eq!(app.get_remux_log_badge(), "1");
+        assert_eq!(app.get_remux_log_badge().count, "1");
         assert_eq!(app.get_extract_log().row_count(), 0);
         let text = publisher.log_text(REMUX);
         assert_eq!(text.lines().count(), 2);
         assert!(text.starts_with("ERROR: "), "{text}");
+    }
+
+    /// A console scrolled up stops following; a new generation (a Run's start) empties it, and
+    /// it follows the next Run's lines again.
+    #[test]
+    fn a_new_generation_follows_again_after_a_scroll_up() {
+        use i_slint_backend_testing::AccessibleLiveness;
+        use slint::platform::WindowEvent;
+        i_slint_backend_testing::init_no_event_loop();
+        let runtime = runtime();
+        let (app, _core) = wired(&runtime, NoJobs);
+        app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+        let publisher = SlintPublisher::new(&app);
+        publisher.show_load(REMUX, None);
+        app.set_log_open(true);
+        let texts = |from: usize| {
+            (from..from + 200)
+                .map(|n| format!("line {n}"))
+                .collect::<Vec<_>>()
+        };
+        let run = |generation, first, texts: &[String]| {
+            let lines: Vec<_> = texts
+                .iter()
+                .map(|text| (LogKind::Note, text.as_str()))
+                .collect();
+            publisher.show_logs(&[batch(generation, first, 0, &lines)]);
+            ticks();
+        };
+        let shown = |text: &str| labels(&app, text) == 1;
+        run(0, 0, &texts(0));
+        assert!(shown("line 199"), "it follows");
+
+        // Scrolled up over the console: the newest lines are out of view and stay so.
+        let list = ElementHandle::find_by_accessible_label(&app, "Log")
+            .find(|element| element.accessible_live_region() == Some(AccessibleLiveness::Polite))
+            .unwrap();
+        let (at, size) = (list.absolute_position(), list.size());
+        let position =
+            slint::LogicalPosition::new(at.x + size.width / 2.0, at.y + size.height / 2.0);
+        app.window()
+            .dispatch_event(WindowEvent::PointerMoved { position });
+        for _ in 0..20 {
+            app.window().dispatch_event(WindowEvent::PointerScrolled {
+                position,
+                delta_x: 0.0,
+                delta_y: 400.0,
+            });
+            ticks();
+        }
+        run(0, 200, &texts(200));
+        assert!(!shown("line 399"), "scrolled up, it does not follow");
+
+        // A new Run: emptied, then its lines are followed.
+        publisher.show_logs(&[batch(1, 0, 0, &[])]);
+        ticks();
+        run(1, 0, &texts(1000));
+        assert!(shown("line 1199"), "the next Run is followed");
+        app.hide().unwrap();
     }
 }

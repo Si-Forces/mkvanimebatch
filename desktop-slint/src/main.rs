@@ -18,7 +18,6 @@ use mkv_desktop_core::control::{
     begin_shutdown, cancel_shutdown, cleanup_owned_processes, InspectCacheState, ScanState,
 };
 use mkv_desktop_core::job::JobState;
-use mkv_desktop_core::presentation::{close_failed_text, CLOSE_FAILED_TITLE};
 use publisher::SlintPublisher;
 use renderer::{Answer, Choice, GpuStart, Renderer};
 use slint::winit_030::winit::event::WindowEvent;
@@ -316,9 +315,6 @@ fn start_close(
     if closing.swap(true, Ordering::SeqCst) {
         return;
     }
-    if let Some(app) = window.upgrade() {
-        app.set_notice_text("".into());
-    }
     begin_shutdown(&job, &scan);
     std::thread::spawn(move || {
         // A panicking teardown takes the failure path too: left set, `closing` would refuse every
@@ -335,10 +331,8 @@ fn start_close(
                 cancel_shutdown(&job, &scan);
                 closing.store(false, Ordering::SeqCst);
                 tracing::error!("Close failed: {error}");
-                let _ = window.upgrade_in_event_loop(move |app| {
-                    app.set_notice_title(CLOSE_FAILED_TITLE.into());
-                    app.set_notice_text(close_failed_text(&error).into());
-                });
+                let _ =
+                    window.upgrade_in_event_loop(move |app| app.invoke_close_failed(error.into()));
             }
         }
     });

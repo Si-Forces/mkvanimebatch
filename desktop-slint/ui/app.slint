@@ -11,10 +11,10 @@ import { Mode, QueueFilter, QueueHead, QueuePane, QueueRow, RowMark, RowTone } f
 import { Inspector, InspectorPane, LibraryEntry, LibraryItem, Rung } from "inspector.slint";
 import { ChipTexts, DraftForm, GearButton, PresetItem, PresetRow, SettingsSheet, Sheet, SheetLimits } from "settings.slint";
 import { BottomBar, ConfirmDialog, DialogTexts, JobBar, StatusDot, StatusTone } from "jobs.slint";
-import { LogDrawer, LogRow, LogTone, LogToggle } from "log.slint";
+import { LogBadge, LogDrawer, LogRow, LogTone, LogToggle } from "log.slint";
 
 // FontProbe is test only; a .slint file cannot be compiled per cfg, so it ships (a few bytes).
-export { Theme, FontProbe, Inspector, LibraryItem, Mode, QueueFilter, QueueHead, QueueRow, RowMark, RowTone, Rung, ChipTexts, DraftForm, PresetItem, Sheet, SheetLimits, DialogTexts, JobBar, StatusTone, LogRow, LogTone }
+export { Theme, FontProbe, Inspector, LibraryItem, Mode, QueueFilter, QueueHead, QueueRow, RowMark, RowTone, Rung, ChipTexts, DraftForm, PresetItem, Sheet, SheetLimits, DialogTexts, JobBar, StatusTone, LogBadge, LogRow, LogTone }
 
 // Who opened the settings sheet, to take the focus back when it closes: a mode's gear, Run (after
 // a refused Run), or nothing to give it back to.
@@ -95,7 +95,8 @@ component ModeTab inherits Rectangle {
                 accessible-role: none;
             }
         }
-        StatusDot {
+        // None while idle, taking no room, as `.status-idle { display: none }`.
+        if root.tone != StatusTone.idle: StatusDot {
             y: (parent.height - self.height) / 2;
             tone: root.tone;
         }
@@ -175,11 +176,11 @@ export component App inherits Window {
     in property <JobBar> remux-job: { run-label: "Run remux", count-text: "Ready", clock: "Not started" };
     in property <JobBar> extract-job: { run-label: "Run extract", count-text: "Ready", clock: "Not started" };
     // Each mode's Run Log lines (the host keeps each model and its raw text for Copy), and its
-    // error badge: the count, or empty for none.
+    // error badge.
     in property <[LogRow]> remux-log;
     in property <[LogRow]> extract-log;
-    in property <string> remux-log-badge;
-    in property <string> extract-log-badge;
+    in property <LogBadge> remux-log-badge;
+    in property <LogBadge> extract-log-badge;
     // The Log drawer is open.
     in-out property <bool> log-open;
     // The drawer's Copy: "Copied" or "Copy failed" for a while after a Copy (the host's).
@@ -211,9 +212,6 @@ export component App inherits Window {
     in-out property <Mode> mode;
     // A row picked for the Episode Inspector whose Inspect is not answered yet.
     in-out property <string> pending-inspect;
-    // A Close whose teardown failed: the window stays open and says why.
-    in property <string> notice-title;
-    in property <string> notice-text;
     // Each mode's list scroll offset (negative going down), kept across mode switches as the
     // webview's two lists keep theirs. The host puts it back at the top (`reveal`) when a card
     // replaces the rows; its bench (desktop-slint/benches/queue_scroll.rs) drives it.
@@ -261,9 +259,12 @@ export component App inherits Window {
     callback stop();
     // Copy: the shown mode's Run Log, with its real paths, to the clipboard.
     callback copy-log();
-    // The confirm dialog was answered: Clear cache (`true`), Cancel or Esc.
+    // The confirm dialog was answered: Clear cache or OK (`true`), Cancel or Esc.
     callback dialog-answered(confirmed: bool);
     callback close-window();
+    // A Close whose teardown failed with `error`: the window stays open and a notice says why
+    // (the host's, queued with the other dialogs).
+    callback close-failed(error: string);
     // Through winit, not `minimized`: see the host's `minimize`.
     callback minimize-window();
 
@@ -418,28 +419,6 @@ export component App inherits Window {
                     close => { root.close-window(); }
                     minimize => { root.minimize-window(); }
                     toggle-maximize => { root.maximized = !root.maximized; }
-                }
-
-                // A long teardown error wraps and pushes the list down. The height is bound to the
-                // texts' preferred heights at their final width: the layout alone sizes a wrapped text
-                // before it knows the width, and stretches both texts to fill the guess.
-                if root.notice-text != "": Rectangle {
-                    height: notice-title.preferred-height + notice-body.preferred-height + 2 * 12px + 2px;
-                    background: Theme.head;
-                    VerticalLayout {
-                        padding: 12px;
-                        spacing: 2px;
-                        notice-title := Text {
-                            text: root.notice-title;
-                            color: Theme.err;
-                            font-weight: 700;
-                        }
-                        notice-body := Text {
-                            text: root.notice-text;
-                            color: Theme.fg;
-                            wrap: word-wrap;
-                        }
-                    }
                 }
 
                 HorizontalLayout {

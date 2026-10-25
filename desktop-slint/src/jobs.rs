@@ -7,6 +7,7 @@ use crate::intents::{pipeline, Intents};
 use crate::settings::open_on_flagged;
 use mkv_anime_batch_slint_ui::{App, DialogTexts, JobBar, Mode, Sheet, StatusTone};
 use mkv_desktop_core::actor::{Intent, ModeView, ViewState, RUN_BUSY, RUN_SCANNING};
+use mkv_desktop_core::presentation::{close_failed_text, CLOSE_FAILED_TITLE};
 use slint::ComponentHandle;
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -68,6 +69,8 @@ pub(crate) fn run_answered(app: &App, mode: Mode, answer: Result<bool, String>) 
     // Unlocked first, so the flagged field can take the focus.
     app.set_run_pending(false);
     if let Err(error) = answer {
+        // ponytail: told by the core's exported texts (pinned by start.rs's tests), as the answer
+        // is the Tauri contract's `Result<bool, String>`; a typed refusal if a third kind comes.
         if error != RUN_BUSY && error != RUN_SCANNING {
             open_on_flagged(app, mode);
         }
@@ -80,6 +83,17 @@ fn clear_cache_dialog() -> DialogTexts {
         title: "Clear inspection cache".into(),
         text: "Are you sure you want to clear the persistent inspection cache?".into(),
         confirm: "Clear cache".into(),
+        notice: false,
+    }
+}
+
+/// The notice after a failed Close teardown (app.js `showCleanupError`): OK alone.
+fn close_failed_dialog(error: &str) -> DialogTexts {
+    DialogTexts {
+        title: CLOSE_FAILED_TITLE.into(),
+        text: close_failed_text(error).into(),
+        confirm: "OK".into(),
+        notice: true,
     }
 }
 
@@ -179,6 +193,12 @@ pub(crate) fn wire(app: &App, send: Intents) {
                 s.send("clear_cache", intent, || {});
             }
         });
+    });
+    let (queue, shown) = (Rc::clone(&dialogs), app.as_weak());
+    app.on_close_failed(move |error| {
+        if let Some(app) = shown.upgrade() {
+            queue.confirm(&app, close_failed_dialog(&error), |_, _| {});
+        }
     });
     let shown = app.as_weak();
     app.on_dialog_answered(move |confirmed| {
@@ -498,6 +518,38 @@ pub(crate) mod tests {
         ticks();
         assert!(!app.get_dialog_open());
         assert_eq!(log_lines(&runtime, &core), 1, "the cache line");
+        app.hide().unwrap();
+    }
+
+    /// A failed Close's notice waits behind a dialog shown, then shows OK alone, with the focus:
+    /// Tab stays on it and Return answers it.
+    #[test]
+    fn a_failed_close_shows_an_ok_notice_queued_with_the_dialogs() {
+        i_slint_backend_testing::init_no_event_loop();
+        let runtime = runtime();
+        let (app, _core) = wired(&runtime, NoJobs);
+        app.window()
+            .set_size(slint::LogicalSize::new(920.0, 1200.0));
+        app.invoke_open_sheet(Mode::Remux, "no_cache".into());
+        ticks();
+        app.global::<Sheet>().invoke_clear_cache();
+        ticks();
+        app.invoke_close_failed("cleanup broke".into());
+        ticks();
+        assert_eq!(app.get_dialog().confirm, "Clear cache", "the notice waits");
+
+        key(&app, slint::platform::Key::Escape);
+        assert!(app.get_dialog_open());
+        assert_eq!(app.get_dialog(), close_failed_dialog("cleanup broke"));
+        assert!(app.get_dialog().text.contains("cleanup broke"));
+        let cancels = ElementHandle::find_by_accessible_label(&app, "Cancel")
+            .filter(|element| element.accessible_role() == Some(AccessibleRole::Button))
+            .count();
+        assert_eq!(cancels, 0, "no Cancel");
+        button(&app, "OK");
+        key(&app, slint::platform::Key::Tab);
+        key(&app, slint::platform::Key::Return);
+        assert!(!app.get_dialog_open(), "Return on OK answered it");
         app.hide().unwrap();
     }
 }

@@ -170,9 +170,12 @@ impl Coalescer {
         self.lock().logs[run_log::slot(mode)].text()
     }
 
-    /// No hop is on its way any more.
+    /// No hop is on its way any more, nor will one come: the dones, which only grow, go. The
+    /// rest stays bounded (the newest state, each list's update, the consoles' kept lines).
     fn unschedule(&self) {
-        self.lock().scheduled = false;
+        let mut pending = self.lock();
+        pending.scheduled = false;
+        pending.dones.clear();
     }
 
     /// Everything pushed since the last take: the state and each mode's update to apply first,
@@ -236,8 +239,8 @@ impl SlintPublisher {
         // leave the slot scheduled for good. The take always runs; only the apply needs the window.
         let scheduled = slint::invoke_from_event_loop(move || hop(&pending, &edits, &window));
         // Fails only once the event loop is gone, when nothing is left to show. Clear the flag all
-        // the same, so a later push never waits on a hop that will not come; what is pending stays
-        // for one (a test's `flush`).
+        // the same, so a later push never waits on a hop that will not come; the bounded rest of
+        // what is pending stays for one (a test's `flush`).
         if scheduled.is_err() {
             self.pending.unschedule();
         }
