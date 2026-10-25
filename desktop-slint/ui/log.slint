@@ -20,6 +20,14 @@ export struct LogBadge {
     description: string,
 }
 
+// What the host last wrote into a console's lines, each counted: a new generation emptied it
+// (`cleared`), lines were appended (`appended`). The console follows on these, as the rows' height
+// misses a clear that lands with its first lines, and appends at the cap that drop as many.
+export struct LogSerials {
+    cleared: int,
+    appended: int,
+}
+
 // The Log toggle in the bottom bar (.pill-btn #btn-log): a lines icon, "Log" and the error badge,
 // none while it is empty. Takes the focus; Enter or Space toggles the drawer.
 export component LogToggle inherits Rectangle {
@@ -154,7 +162,29 @@ component DrawerLink inherits Rectangle {
 // newest line while scrolled to within 32px of the bottom, as log-view.js `flush` does.
 component LogConsole inherits Rectangle {
     in property <[LogRow]> rows;
+    in property <LogSerials> serials;
     property <bool> follow: true;
+    // The host wrote lines the list has not laid out yet. `ensure-row-visible` measures the rows
+    // laid out last, so a layout that then moves the view off the bottom (rows dropped above keep
+    // the rows shown, as at the cap) shows the newest row again. A scroll ends it.
+    property <bool> settling;
+    // The host wrote into the lines: a new generation follows again, then the newest line is
+    // shown while following. One handler for both, as a second `ensure-row-visible` before the
+    // layout would cancel the first: it measures the old rows under the new offset.
+    property <int> cleared;
+    changed serials => {
+        if root.serials.cleared != root.cleared {
+            root.cleared = root.serials.cleared;
+            root.follow = true;
+        }
+        root.settling = true;
+        root.to-newest();
+    }
+    function to-newest() {
+        if root.follow && root.rows.length > 0 {
+            list.ensure-row-visible(root.rows.length - 1, ScrollBehavior.instant);
+        }
+    }
     if root.rows.length == 0: Text {
         x: 14px;
         y: 8px;
@@ -175,16 +205,15 @@ component LogConsole inherits Rectangle {
         accessible-live-region: polite;
         // The user scrolled: follow again only once back at the bottom.
         scrolled => {
+            root.settling = false;
             root.follow = -self.content-y + self.visible-height >= self.content-height - 32px;
         }
-        // Lines added (or the view resized) while following: the newest is shown, measured.
-        changed content-height => {
-            // Content that fits (a new generation emptied the console) is at its bottom.
-            if self.content-height <= self.visible-height + 32px {
-                root.follow = true;
-            }
-            if root.follow && root.rows.length > 0 {
-                self.ensure-row-visible(root.rows.length - 1, ScrollBehavior.instant);
+        // Lines laid out (or the view resized) while following: the newest is shown, measured.
+        changed content-height => { root.to-newest(); }
+        changed content-y => {
+            if root.settling && -self.content-y + self.visible-height < self.content-height - 1px {
+                root.settling = false;
+                root.to-newest();
             }
         }
         // 12px mono at about style.css's 1.6 line height: 2px above and below each line.
@@ -220,6 +249,8 @@ export component LogDrawer inherits Rectangle {
     in property <string> copy-label;
     in property <[LogRow]> remux-rows;
     in property <[LogRow]> extract-rows;
+    in property <LogSerials> remux-serials;
+    in property <LogSerials> extract-serials;
     // The extract console is shown, else the remux one.
     in property <bool> extract;
     callback copy();
@@ -274,12 +305,14 @@ export component LogDrawer inherits Rectangle {
                 height: parent.height;
                 visible: !root.extract;
                 rows: root.remux-rows;
+                serials: root.remux-serials;
             }
             LogConsole {
                 width: parent.width;
                 height: parent.height;
                 visible: root.extract;
                 rows: root.extract-rows;
+                serials: root.extract-serials;
             }
         }
     }

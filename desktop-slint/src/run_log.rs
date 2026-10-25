@@ -101,10 +101,11 @@ impl Console {
     }
 
     /// Draws `view` (`get_log`'s answer, `None` when it failed), then the batches that waited for
-    /// it: a line the answer already holds is not drawn twice. Only the first load counts.
-    pub(crate) fn load(&mut self, view: Option<LogView>) {
+    /// it: a line the answer already holds is not drawn twice. Only the first load counts:
+    /// returns whether this one did.
+    pub(crate) fn load(&mut self, view: Option<LogView>) -> bool {
         let Some(waiting) = self.waiting.take() else {
-            return;
+            return false;
         };
         if let Some(view) = view {
             self.draw(&LogBatch {
@@ -119,6 +120,7 @@ impl Console {
         for batch in &waiting {
             self.draw(batch);
         }
+        true
     }
 
     /// log-view.js `draw`: a newer generation empties the console, the lines it does not hold
@@ -187,24 +189,38 @@ pub(crate) fn slot(mode: PipelineMode) -> usize {
     }
 }
 
-/// Writes `patch` into `mode`'s line model and badge, on the event loop.
+/// Writes `patch` into `mode`'s line model, its serials (which its console follows on) and its
+/// badge, on the event loop. Without the model nothing is written, so no patch half-applies.
 pub(crate) fn apply(app: &App, mode: Mode, patch: LogPatch) {
-    let lines = match mode {
-        Mode::Remux => app.get_remux_log(),
-        Mode::Extract => app.get_extract_log(),
+    let (lines, mut serials) = match mode {
+        Mode::Remux => (app.get_remux_log(), app.get_remux_log_serials()),
+        Mode::Extract => (app.get_extract_log(), app.get_extract_log_serials()),
     };
-    if let Some(model) = lines.as_any().downcast_ref::<VecModel<LogRow>>() {
-        if patch.clear {
-            model.clear();
-        }
-        // ponytail: one removal per line, each a Vec shift of at most RUN_LOG_CAP rows; a burst
-        // larger than the cap pays that once. Rebuild with `set_vec` if a profile ever shows it.
-        for _ in 0..patch.drop.min(model.row_count()) {
-            model.remove(0);
-        }
-        model.extend(patch.rows);
-    } else {
+    let Some(model) = lines.as_any().downcast_ref::<VecModel<LogRow>>() else {
         tracing::error!("[run_log] the line model is not installed; a log patch is lost");
+        return;
+    };
+    let wrote = patch.clear || !patch.rows.is_empty();
+    if patch.clear {
+        model.clear();
+        serials.cleared = serials.cleared.wrapping_add(1);
+    }
+    // ponytail: one removal per line, each a Vec shift of at most RUN_LOG_CAP rows; a burst
+    // larger than the cap pays that once. Rebuild with `set_vec` if a profile ever shows it.
+    for _ in 0..patch.drop.min(model.row_count()) {
+        model.remove(0);
+    }
+    if !patch.rows.is_empty() {
+        model.extend(patch.rows);
+        serials.appended = serials.appended.wrapping_add(1);
+    }
+    // Each hop that wrote lines bumps one: the console follows once, after both the clear and the
+    // lines are in.
+    if wrote {
+        match mode {
+            Mode::Remux => app.set_remux_log_serials(serials),
+            Mode::Extract => app.set_extract_log_serials(serials),
+        }
     }
     if let Some(badge) = patch.badge {
         match mode {
@@ -351,13 +367,13 @@ mod tests {
 
         // The answer holds `a`: the first batch adds nothing, the second `b`.
         let view = batch(0, 0, 0, &[a]);
-        console.load(Some(LogView {
+        assert!(console.load(Some(LogView {
             mode: REMUX,
             generation: 0,
             first: 0,
             errors: 0,
             lines: view.lines,
-        }));
+        })));
         assert_eq!(
             console.take_patch(),
             LogPatch {
@@ -367,7 +383,7 @@ mod tests {
             }
         );
         // A second load is ignored.
-        console.load(None);
+        assert!(!console.load(None));
         assert_eq!(console.take_patch(), LogPatch::default());
 
         // `a` is below keep_from: one model row goes; the display text is Finder-style.
@@ -574,38 +590,44 @@ mod tests {
         app.hide().unwrap();
     }
 
-    /// A console scrolled up stops following; a new generation (a Run's start) empties it, and
-    /// it follows the next Run's lines again.
-    #[test]
-    fn a_new_generation_follows_again_after_a_scroll_up() {
-        use i_slint_backend_testing::AccessibleLiveness;
-        use slint::platform::WindowEvent;
-        i_slint_backend_testing::init_no_event_loop();
-        let runtime = runtime();
-        let (app, _core) = wired(&runtime, NoJobs);
+    /// `count` notes from `line {from}` on, as one batch of `generation` starting at `first`.
+    fn notes(generation: u64, first: u64, keep_from: u64, from: usize, count: usize) -> LogBatch {
+        let texts: Vec<_> = (from..from + count).map(|n| format!("line {n}")).collect();
+        let lines: Vec<_> = texts.iter().map(|t| (LogKind::Note, t.as_str())).collect();
+        batch(generation, first, keep_from, &lines)
+    }
+
+    /// A wired window at 920x640 with remux's console loaded, its drawer open. It renders, so a
+    /// frame lays the console out as the event loop's would.
+    fn open_console(runtime: &tokio::runtime::Runtime) -> (App, CoreHandle, SlintPublisher) {
+        use i_slint_backend_testing::{TestingBackend, TestingBackendOptions};
+        slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
+            mock_time: true,
+            threading: false,
+            renderer_name: Some("software".into()),
+        })))
+        .unwrap();
+        let (app, core) = wired(runtime, NoJobs);
         app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
         let publisher = SlintPublisher::new(&app);
         publisher.show_load(REMUX, None);
         app.set_log_open(true);
-        let texts = |from: usize| {
-            (from..from + 200)
-                .map(|n| format!("line {n}"))
-                .collect::<Vec<_>>()
-        };
-        let run = |generation, first, texts: &[String]| {
-            let lines: Vec<_> = texts
-                .iter()
-                .map(|text| (LogKind::Note, text.as_str()))
-                .collect();
-            publisher.show_logs(&[batch(generation, first, 0, &lines)]);
-            ticks();
-        };
-        let shown = |text: &str| labels(&app, text) == 1;
-        run(0, 0, &texts(0));
-        assert!(shown("line 199"), "it follows");
+        (app, core, publisher)
+    }
 
-        // Scrolled up over the console: the newest lines are out of view and stay so.
-        let list = ElementHandle::find_by_accessible_label(&app, "Log")
+    /// A few frames, each as the event loop runs one: the change handlers, then a render.
+    fn frames(app: &App) {
+        for _ in 0..3 {
+            mock_elapsed_time(Duration::from_millis(1));
+            app.window().take_snapshot().unwrap();
+        }
+    }
+
+    /// Scrolls the open console up, well off its newest lines.
+    fn scroll_up(app: &App) {
+        use i_slint_backend_testing::AccessibleLiveness;
+        use slint::platform::WindowEvent;
+        let list = ElementHandle::find_by_accessible_label(app, "Log")
             .find(|element| element.accessible_live_region() == Some(AccessibleLiveness::Polite))
             .unwrap();
         let (at, size) = (list.absolute_position(), list.size());
@@ -619,16 +641,74 @@ mod tests {
                 delta_x: 0.0,
                 delta_y: 400.0,
             });
-            ticks();
+            frames(app);
         }
-        run(0, 200, &texts(200));
+    }
+
+    /// A console scrolled up stops following; a new generation (a Run's start) empties it, and
+    /// it follows the next Run's lines again.
+    #[test]
+    fn a_new_generation_follows_again_after_a_scroll_up() {
+        let runtime = runtime();
+        let (app, _core, publisher) = open_console(&runtime);
+        let shown = |text: &str| labels(&app, text) == 1;
+        publisher.show_logs(&[notes(0, 0, 0, 0, 200)]);
+        frames(&app);
+        assert!(shown("line 199"), "it follows");
+
+        // Scrolled up over the console: the newest lines are out of view and stay so.
+        scroll_up(&app);
+        publisher.show_logs(&[notes(0, 200, 0, 200, 200)]);
+        frames(&app);
         assert!(!shown("line 399"), "scrolled up, it does not follow");
 
         // A new Run: emptied, then its lines are followed.
-        publisher.show_logs(&[batch(1, 0, 0, &[])]);
-        ticks();
-        run(1, 0, &texts(1000));
+        publisher.show_logs(&[notes(1, 0, 0, 0, 0)]);
+        frames(&app);
+        publisher.show_logs(&[notes(1, 0, 0, 1000, 200)]);
+        frames(&app);
         assert!(shown("line 1199"), "the next Run is followed");
+        app.hide().unwrap();
+    }
+
+    /// A new generation's clear that lands in one hop with its first lines (the console never
+    /// shows empty) still follows them.
+    #[test]
+    fn a_coalesced_clear_and_lines_follow_after_a_scroll_up() {
+        let runtime = runtime();
+        let (app, _core, publisher) = open_console(&runtime);
+        publisher.show_logs(&[notes(0, 0, 0, 0, 200)]);
+        frames(&app);
+        scroll_up(&app);
+        assert_eq!(labels(&app, "line 199"), 0, "scrolled up");
+
+        publisher.show_logs(&[notes(1, 0, 0, 0, 0), notes(1, 0, 0, 1000, 200)]);
+        frames(&app);
+        assert_eq!(labels(&app, "line 1199"), 1, "the next Run is followed");
+        app.hide().unwrap();
+    }
+
+    /// At the core's cap each batch drops as many lines as it adds, so the content keeps its
+    /// height: the newest lines are followed all the same.
+    #[test]
+    fn appends_at_the_cap_are_followed() {
+        use mkv_desktop_core::log::RUN_LOG_CAP;
+        let cap = RUN_LOG_CAP as u64;
+        let runtime = runtime();
+        let (app, _core, publisher) = open_console(&runtime);
+        publisher.show_logs(&[notes(0, 0, 0, 0, RUN_LOG_CAP)]);
+        frames(&app);
+        assert_eq!(labels(&app, &format!("line {}", RUN_LOG_CAP - 1)), 1);
+
+        for step in 0..3u64 {
+            let first = cap + step * 5;
+            let from = usize::try_from(first).unwrap();
+            publisher.show_logs(&[notes(0, first, first + 5 - cap, from, 5)]);
+            frames(&app);
+            assert_eq!(app.get_remux_log().row_count(), RUN_LOG_CAP);
+            let newest = format!("line {}", from + 4);
+            assert_eq!(labels(&app, &newest), 1, "{newest} is shown");
+        }
         app.hide().unwrap();
     }
 }

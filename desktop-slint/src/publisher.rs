@@ -158,11 +158,12 @@ impl Coalescer {
         !std::mem::replace(&mut pending.scheduled, true)
     }
 
-    /// Loads `mode`'s console with `get_log`'s answer. Returns whether to schedule a hop.
+    /// Loads `mode`'s console with `get_log`'s answer. Returns whether to schedule a hop: not for
+    /// a second load, which changes nothing.
     pub(crate) fn load_log(&self, mode: PipelineMode, view: Option<LogView>) -> bool {
         let mut pending = self.lock();
-        pending.logs[run_log::slot(mode)].load(view);
-        !std::mem::replace(&mut pending.scheduled, true)
+        pending.logs[run_log::slot(mode)].load(view)
+            && !std::mem::replace(&mut pending.scheduled, true)
     }
 
     /// `mode`'s console's raw text, for Copy.

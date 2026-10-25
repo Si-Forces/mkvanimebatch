@@ -164,7 +164,11 @@ pub(crate) fn wire(app: &App, send: Intents) {
             mode: pipeline(mode),
         };
         s.send_answered("run", intent, move |answer| {
-            let _ = window.upgrade_in_event_loop(move |app| run_answered(&app, mode, answer));
+            let hop = window.upgrade_in_event_loop(move |app| run_answered(&app, mode, answer));
+            // Only once the event loop is gone, with nothing left to unlock.
+            if let Err(error) = hop {
+                tracing::debug!("[run] the answer was dropped: {error}");
+            }
         });
     });
 
@@ -416,6 +420,12 @@ pub(crate) mod tests {
         assert!(app.get_run_pending() && app.get_locked() && !app.get_busy());
         ticks();
         assert_eq!(run.accessible_enabled(), Some(false), "Run is locked");
+        // The notes that a batch runs follow `busy` alone, as html.job-locked does.
+        let hint = "Selection is locked while the batch runs.";
+        assert_eq!(
+            ElementHandle::find_by_accessible_label(&app, hint).count(),
+            0
+        );
         run.invoke_accessible_default_action();
         app.invoke_run();
         assert_eq!(log_lines(&runtime, &core), 1, "one Run was sent");
@@ -577,6 +587,63 @@ pub(crate) mod tests {
         button(&app, "OK");
         key(&app, slint::platform::Key::Return);
         assert!(!app.get_dialog_open(), "Return on OK answered it");
+        app.hide().unwrap();
+    }
+
+    /// A notice answered over the open sheet gives the focus to Done, not to "Clear inspection
+    /// cache…": Return closes the sheet and asks nothing.
+    #[test]
+    fn a_notice_answered_over_the_sheet_gives_the_focus_to_done() {
+        i_slint_backend_testing::init_no_event_loop();
+        let runtime = runtime();
+        let (app, _core) = wired(&runtime, NoJobs);
+        app.invoke_open_sheet(Mode::Remux, "no_cache".into());
+        ticks();
+        app.invoke_close_failed("cleanup broke".into());
+        ticks();
+        key(&app, slint::platform::Key::Return);
+        assert!(!app.get_dialog_open(), "Return on OK answered it");
+        key(&app, slint::platform::Key::Return);
+        assert!(!app.get_dialog_open(), "no cache dialog");
+        assert!(!app.get_sheet_open(), "Return on Done closed the sheet");
+        app.hide().unwrap();
+    }
+
+    /// A sheet closed with no opener to take the focus back (opened for no field, or by a refused
+    /// Run that a scan then disabled) leaves the focus with the window: Esc still closes the Log
+    /// drawer.
+    #[test]
+    fn a_sheet_closed_with_no_opener_leaves_esc_closing_the_drawer() {
+        i_slint_backend_testing::init_no_event_loop();
+        let runtime = runtime();
+        let (app, core) = wired(&runtime, Held);
+        app.set_log_open(true);
+        app.set_run_pending(true);
+        let answer = runtime.block_on(core.dispatch(Intent::Run {
+            mode: PipelineMode::Remux,
+        }));
+        show_published(&app, &runtime, &core);
+        run_answered(&app, Mode::Remux, answer);
+        ticks();
+        assert!(app.get_sheet_open());
+        // A scan of the folder typed disables Run.
+        app.set_remux_job(JobBar {
+            run_disabled: true,
+            ..app.get_remux_job()
+        });
+        ticks();
+        key(&app, slint::platform::Key::Escape);
+        assert!(!app.get_sheet_open() && app.get_log_open());
+        key(&app, slint::platform::Key::Escape);
+        assert!(!app.get_log_open(), "Esc closed the drawer");
+
+        app.set_log_open(true);
+        app.invoke_open_sheet(Mode::Remux, "".into());
+        ticks();
+        key(&app, slint::platform::Key::Escape);
+        assert!(!app.get_sheet_open() && app.get_log_open());
+        key(&app, slint::platform::Key::Escape);
+        assert!(!app.get_log_open(), "Esc closed the drawer again");
         app.hide().unwrap();
     }
 
