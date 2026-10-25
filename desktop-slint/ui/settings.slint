@@ -33,6 +33,16 @@ export struct PresetItem {
     a11y: string,
 }
 
+// The sheet's limits from the core's ranges: the complexity slider's, and the tooltips of the
+// number fields that name theirs.
+export struct SheetLimits {
+    complexity-min: int,
+    complexity-max: int,
+    workers-tip: string,
+    io-jobs-tip: string,
+    ffmpeg-threads-tip: string,
+}
+
 // The worker and I/O job chips, and the placeholders of the Workers and Disk I/O fields.
 export struct ChipTexts {
     workers: string,
@@ -51,13 +61,18 @@ export global Sheet {
     // The field to put the cursor in when the sheet opens, or now with `focus-serial` bumped.
     in-out property <string> focus-key;
     in-out property <int> focus-serial;
+    // The window y of the top and the bottom of the sheet's control that took the focus last,
+    // which the sheet's body scrolls into view; `reveal-serial` counts them.
+    in-out property <length> reveal-top;
+    in-out property <length> reveal-bottom;
+    in-out property <int> reveal-serial;
 
     // A field was edited (a webview `input`, a checkbox's or a select's change).
     callback edited(key: string);
     // A field was changed: Enter, or left once edited.
     callback committed(key: string);
-    // A field lost the focus.
-    callback left(key: string);
+    // A field lost the focus; `changed`: it was just committed for it.
+    callback left(key: string, changed: bool);
     // The complexity slider moved to `value`.
     callback slid(value: float);
     // A stepper button was pressed with the pointer, then released (or the pointer left it).
@@ -81,12 +96,20 @@ export global Sheet {
     public function leave(key: string) {
         if key != "" && self.focused == key {
             self.focused = "";
-            if self.changed-since {
+            let changed = self.changed-since;
+            if changed {
                 self.changed-since = false;
                 self.committed(key);
             }
-            self.left(key);
+            self.left(key, changed);
         }
+    }
+
+    // A control of the sheet that spans `top` (window y) to `top + height` took the focus.
+    public function reveal(top: length, height: length) {
+        self.reveal-top = top;
+        self.reveal-bottom = top + height;
+        self.reveal-serial += 1;
     }
 
     // Enter in the focused field: a change, if edited.
@@ -248,6 +271,8 @@ component DraftEdit inherits Rectangle {
     in property <bool> flagged;
     in property <bool> mono;
     in property <TextHorizontalAlignment> align: left;
+    // `number` for the integer fields, which then take digits alone (input type="number").
+    in property <InputType> input-type <=> edit.input-type;
     // Mirrors Sheet.focus-serial, which a change of fires on.
     property <int> serial: Sheet.focus-serial;
     min-width: 0px;
@@ -262,6 +287,7 @@ component DraftEdit inherits Rectangle {
             edit.focus();
             // A field made with the focus reports no change of it.
             Sheet.enter(root.key);
+            Sheet.reveal(root.absolute-position.y, root.height);
         }
     }
     edit := LineEdit {
@@ -279,6 +305,7 @@ component DraftEdit inherits Rectangle {
         changed has-focus => {
             if self.has-focus {
                 Sheet.enter(root.key);
+                Sheet.reveal(root.absolute-position.y, root.height);
             } else {
                 Sheet.leave(root.key);
             }
@@ -314,6 +341,11 @@ component FolderField inherits Field {
             text: "Browse…";
             enabled: root.enabled;
             accessible-label: "Browse for the " + root.label;
+            changed has-focus => {
+                if self.has-focus {
+                    Sheet.reveal(self.absolute-position.y, self.height);
+                }
+            }
             clicked => {
                 Sheet.leave(Sheet.focused);
                 Sheet.browse(root.key);
@@ -355,6 +387,11 @@ component StepButton inherits Rectangle {
     }
     keys := FocusScope {
         enabled: root.enabled;
+        changed has-focus => {
+            if self.has-focus {
+                Sheet.reveal(root.absolute-position.y, root.height);
+            }
+        }
         key-pressed(event) => {
             if event.text == Key.Return || event.text == Key.Space {
                 Sheet.step-key(root.key, root.up);
@@ -392,6 +429,7 @@ component StepperField inherits Field {
     in property <string> noun;
     // The field's tooltip in index.html, read out by a screen reader.
     in property <string> description;
+    in property <InputType> input-type: number;
     HorizontalLayout {
         StepButton {
             key: root.key;
@@ -407,6 +445,7 @@ component StepperField inherits Field {
             label: root.label;
             flagged: root.flagged;
             description: root.description;
+            input-type: root.input-type;
             align: center;
         }
         StepButton {
@@ -422,6 +461,7 @@ component StepperField inherits Field {
 // closes it at once.
 component DoneButton inherits Rectangle {
     callback clicked();
+    out property <bool> focused: keys.has-focus;
     width: label.preferred-width + 36px;
     height: 36px;
     border-radius: self.height / 2;
@@ -466,6 +506,7 @@ export component SettingsSheet inherits Rectangle {
     // The bitrate select's entries.
     in property <[string]> bitrates;
     in property <ChipTexts> chips;
+    in property <SheetLimits> limits;
     // The draft key the last Run could not read: its field is flagged.
     in property <string> invalid;
     // A start or a job holds the batch: the fields are locked (.lock-while-job).
@@ -491,267 +532,334 @@ export component SettingsSheet inherits Rectangle {
         }
     }
 
+    // The sheet's control that took the focus last scrolls into view (the browser does it for a
+    // focused field).
+    property <int> reveal: Sheet.reveal-serial;
+    changed reveal => { self.scroll-into-view(); }
+    function scroll-into-view() {
+        let top = Sheet.reveal-top - scroller.absolute-position.y - 8px;
+        let bottom = Sheet.reveal-bottom - scroller.absolute-position.y + 8px;
+        if top < 0px {
+            scroller.content-y = min(0px, scroller.content-y - top);
+        } else if bottom > scroller.visible-height {
+            scroller.content-y = max(scroller.visible-height - scroller.content-height, scroller.content-y - (bottom - scroller.visible-height));
+        }
+    }
+
     width: 580px;
     border-radius: 26px;
     clip: true;
-    background: Theme.float;
+    // .glass blurs what is behind the sheet. With no blur here, a near opaque fill keeps the
+    // window behind from reading through.
+    background: Theme.float.with-alpha(0.985);
+    // .glass: the edge and the shadow.
+    border-width: 1px;
+    border-color: Theme.edge;
+    drop-shadow-blur: 40px;
+    drop-shadow-offset-y: 18px;
+    drop-shadow-color: Theme.shadow;
     accessible-role: groupbox;
     accessible-label: root.title;
 
     // Takes the clicks the backdrop behind it would close the sheet on.
     TouchArea { }
 
-    VerticalLayout {
-        // .sheet-head
-        head := HorizontalLayout {
-            padding-top: 16px;
-            padding-bottom: 16px;
-            padding-left: 20px;
-            padding-right: 20px;
-            spacing: 12px;
-            VerticalLayout {
-                horizontal-stretch: 1;
-                alignment: center;
-                spacing: 2px;
-                Text {
-                    text: root.title;
-                    color: Theme.fg;
-                    font-size: 16px;
-                    font-weight: 700;
-                    // The sheet carries it as its label.
-                    accessible-role: none;
+    // Keeps Tab and Shift+Tab inside the sheet, as a modal dialog does: past its last control the
+    // focus wraps to Done, and back from Done to the last one. Locked, Done is the only one.
+    FocusScope {
+        focus-on-click: false;
+        focus-on-tab-navigation: false;
+        capture-key-pressed(event) => {
+            let back = event.text == Key.Backtab || (event.text == Key.Tab && event.modifiers.shift);
+            if back && done-button.focused {
+                if root.busy {
+                    done-button.focus();
+                } else {
+                    no-cache.focus();
                 }
-                Text {
-                    text: "Applies to every episode in the next batch.";
-                    color: Theme.mute;
-                    font-size: 12px;
-                    wrap: word-wrap;
-                }
+                return accept;
             }
-            done-button := DoneButton {
-                clicked => { root.done(); }
+            if !back && event.text == Key.Tab && (no-cache.has-focus || (root.busy && done-button.focused)) {
+                done-button.focus();
+                return accept;
             }
+            reject
         }
-        Divider { }
 
-        // .sheet-body: only the body scrolls.
-        ScrollView {
-            vertical-stretch: 1;
-            content-width: self.visible-width;
-            content-height: body.preferred-height;
-            body := VerticalLayout {
-                width: parent.width;
-                padding-top: 4px;
-                padding-bottom: 20px;
+        VerticalLayout {
+            // .sheet-head
+            head := HorizontalLayout {
+                padding-top: 16px;
+                padding-bottom: 16px;
                 padding-left: 20px;
                 padding-right: 20px;
-                alignment: start;
-
-                if root.busy: VerticalLayout {
-                    padding-top: 14px;
-                    Rectangle {
-                        border-radius: 10px;
-                        background: Theme.warn.transparentize(86%);
-                        height: note.preferred-height + 16px;
-                        note := Text {
-                            x: 12px;
-                            width: parent.width - 24px;
-                            text: "Locked while a batch runs. Changes apply to the next batch.";
-                            color: Theme.warn;
-                            font-size: 12px;
-                            wrap: word-wrap;
-                        }
-                    }
-                }
-                if !root.remux: VerticalLayout {
-                    padding-top: 14px;
+                spacing: 12px;
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    alignment: center;
+                    spacing: 2px;
                     Text {
-                        text: "Extracts the best subtitle track, deduplicated fonts, chapters and cover art.";
+                        text: root.title;
+                        color: Theme.fg;
+                        font-size: 16px;
+                        font-weight: 700;
+                        // The sheet carries it as its label.
+                        accessible-role: none;
+                    }
+                    Text {
+                        text: "Applies to every episode in the next batch.";
                         color: Theme.mute;
                         font-size: 12px;
                         wrap: word-wrap;
                     }
                 }
-
-                // Folders
-                VerticalLayout {
-                    padding-top: 16px;
-                    padding-bottom: 16px;
-                    spacing: 12px;
-                    SectionHead { text: "FOLDERS"; }
-                    FolderField {
-                        label: "Input folder";
-                        required: true;
-                        key: "input_dir";
-                        value <=> root.form.input-dir;
-                        placeholder: "Release folder with the MKV episodes";
-                        enabled: !root.busy;
-                        flagged: root.invalid == "input_dir";
-                    }
-                    FolderField {
-                        label: "Output directory";
-                        key: "out_dir";
-                        value <=> root.form.out-dir;
-                        placeholder: root.out-placeholder;
-                        enabled: !root.busy;
-                    }
-                    FolderField {
-                        label: "Fonts directory";
-                        key: "fonts_dir";
-                        value <=> root.form.fonts-dir;
-                        placeholder: "Auto: fonts folder";
-                        enabled: !root.busy;
-                    }
-                    if root.remux: FolderField {
-                        label: "Assets directory";
-                        key: "assets_dir";
-                        value <=> root.form.assets-dir;
-                        placeholder: "Optional fallback for subtitles";
-                        enabled: !root.busy;
-                    }
+                done-button := DoneButton {
+                    clicked => { root.done(); }
                 }
+            }
+            Divider { }
 
-                // Audio & subtitles (remux)
-                if root.remux: VerticalLayout {
+            // .sheet-body: only the body scrolls.
+            scroller := ScrollView {
+                vertical-stretch: 1;
+                content-width: self.visible-width;
+                content-height: body.preferred-height;
+                body := VerticalLayout {
+                    width: parent.width;
+                    padding-top: 4px;
+                    padding-bottom: 20px;
+                    padding-left: 20px;
+                    padding-right: 20px;
+                    alignment: start;
+
+                    if root.busy: VerticalLayout {
+                        padding-top: 14px;
+                        Rectangle {
+                            border-radius: 10px;
+                            background: Theme.warn.transparentize(86%);
+                            height: note.preferred-height + 16px;
+                            note := Text {
+                                x: 12px;
+                                width: parent.width - 24px;
+                                text: "Locked while a batch runs. Changes apply to the next batch.";
+                                color: Theme.warn;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                    if !root.remux: VerticalLayout {
+                        padding-top: 14px;
+                        Text {
+                            text: "Extracts the best subtitle track, deduplicated fonts, chapters and cover art.";
+                            color: Theme.mute;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                    }
+
+                    // Folders
+                    VerticalLayout {
+                        padding-top: 16px;
+                        padding-bottom: 16px;
+                        spacing: 12px;
+                        SectionHead { text: "FOLDERS"; }
+                        FolderField {
+                            label: "Input folder";
+                            required: true;
+                            key: "input_dir";
+                            value <=> root.form.input-dir;
+                            placeholder: "Release folder with the MKV episodes";
+                            enabled: !root.busy;
+                            flagged: root.invalid == "input_dir";
+                        }
+                        FolderField {
+                            label: "Output directory";
+                            key: "out_dir";
+                            value <=> root.form.out-dir;
+                            placeholder: root.out-placeholder;
+                            enabled: !root.busy;
+                        }
+                        FolderField {
+                            label: "Fonts directory";
+                            key: "fonts_dir";
+                            value <=> root.form.fonts-dir;
+                            placeholder: "Auto: fonts folder";
+                            enabled: !root.busy;
+                        }
+                        if root.remux: FolderField {
+                            label: "Assets directory";
+                            key: "assets_dir";
+                            value <=> root.form.assets-dir;
+                            placeholder: "Optional fallback for subtitles";
+                            enabled: !root.busy;
+                        }
+                    }
+
+                    // Audio & subtitles (remux)
+                    if root.remux: VerticalLayout {
+                        Divider { }
+                        VerticalLayout {
+                            padding-top: 16px;
+                            padding-bottom: 16px;
+                            spacing: 12px;
+                            SectionHead { text: "AUDIO & SUBTITLES"; }
+                            HorizontalLayout {
+                                spacing: 12px;
+                                Field {
+                                    label: "Opus bitrate";
+                                    ComboBox {
+                                        min-width: 0px;
+                                        model: root.bitrates;
+                                        current-index <=> root.form.bitrate;
+                                        enabled: !root.busy;
+                                        accessible-label: "Opus bitrate";
+                                        changed has-focus => {
+                                            if self.has-focus {
+                                                Sheet.reveal(self.absolute-position.y, self.height);
+                                            }
+                                        }
+                                        selected => {
+                                            Sheet.edited("bitrate");
+                                            Sheet.committed("bitrate");
+                                        }
+                                    }
+                                }
+                                StepperField {
+                                    label: "Subtitle offset (seconds)";
+                                    noun: "offset";
+                                    key: "sub_offset";
+                                    value <=> root.form.sub-offset;
+                                    placeholder: "0.0";
+                                    // A decimal field would follow the locale's separator, where
+                                    // the core reads a point: any text, as typed.
+                                    input-type: text;
+                                    enabled: !root.busy;
+                                    flagged: root.invalid == "sub_offset";
+                                }
+                            }
+                            Field {
+                                label: "Encoder complexity";
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    Rectangle {
+                                        horizontal-stretch: 1;
+                                        border-radius: 6px;
+                                        border-width: root.invalid == "complexity" ? 2px : 0px;
+                                        border-color: Theme.err;
+                                        Slider {
+                                            x: 4px;
+                                            width: parent.width - 8px;
+                                            minimum: root.limits.complexity-min;
+                                            maximum: root.limits.complexity-max;
+                                            step: 1;
+                                            value <=> root.complexity;
+                                            enabled: !root.busy;
+                                            accessible-label: "Encoder complexity";
+                                            accessible-description: "libopus encoding complexity: 0 is fastest, 10 is best quality";
+                                            changed(value) => { Sheet.slid(value); }
+                                            released => { Sheet.committed("complexity"); }
+                                            // A focus id of its own, so moving between the
+                                            // slider and the box leaves one and enters the other.
+                                            changed has-focus => {
+                                                if self.has-focus {
+                                                    Sheet.enter("complexity_slider");
+                                                    Sheet.reveal(self.absolute-position.y, self.height);
+                                                } else {
+                                                    Sheet.leave("complexity_slider");
+                                                }
+                                            }
+                                        }
+                                    }
+                                    DraftEdit {
+                                        width: 52px;
+                                        horizontal-stretch: 0;
+                                        key: "complexity";
+                                        text <=> root.form.complexity;
+                                        enabled: !root.busy;
+                                        label: "Encoder complexity value";
+                                        flagged: root.invalid == "complexity";
+                                        input-type: number;
+                                        align: center;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Performance
                     Divider { }
                     VerticalLayout {
                         padding-top: 16px;
                         padding-bottom: 16px;
                         spacing: 12px;
-                        SectionHead { text: "AUDIO & SUBTITLES"; }
+                        SectionHead { text: "PERFORMANCE"; }
                         HorizontalLayout {
                             spacing: 12px;
-                            Field {
-                                label: "Opus bitrate";
-                                ComboBox {
-                                    min-width: 0px;
-                                    model: root.bitrates;
-                                    current-index <=> root.form.bitrate;
-                                    enabled: !root.busy;
-                                    accessible-label: "Opus bitrate";
-                                    selected => {
-                                        Sheet.edited("bitrate");
-                                        Sheet.committed("bitrate");
-                                    }
-                                }
+                            StepperField {
+                                label: "Workers";
+                                noun: "workers";
+                                key: "workers";
+                                value <=> root.form.workers;
+                                placeholder: root.chips.workers-hint;
+                                enabled: !root.busy;
+                                flagged: root.invalid == "workers";
+                                description: root.limits.workers-tip;
                             }
                             StepperField {
-                                label: "Subtitle offset (seconds)";
-                                noun: "offset";
-                                key: "sub_offset";
-                                value <=> root.form.sub-offset;
-                                placeholder: "0.0";
+                                label: "Disk I/O";
+                                noun: "disk I/O jobs";
+                                key: "io_jobs";
+                                value <=> root.form.io-jobs;
+                                placeholder: root.chips.io-jobs-hint;
                                 enabled: !root.busy;
-                                flagged: root.invalid == "sub_offset";
+                                flagged: root.invalid == "io_jobs";
+                                description: root.limits.io-jobs-tip;
                             }
-                        }
-                        Field {
-                            label: "Encoder complexity";
-                            HorizontalLayout {
-                                spacing: 6px;
-                                Rectangle {
-                                    horizontal-stretch: 1;
-                                    border-radius: 6px;
-                                    border-width: root.invalid == "complexity" ? 2px : 0px;
-                                    border-color: Theme.err;
-                                    Slider {
-                                        x: 4px;
-                                        width: parent.width - 8px;
-                                        minimum: 0;
-                                        maximum: 10;
-                                        step: 1;
-                                        value <=> root.complexity;
-                                        enabled: !root.busy;
-                                        accessible-label: "Encoder complexity";
-                                        accessible-description: "libopus encoding complexity: 0 is fastest, 10 is best quality";
-                                        changed(value) => { Sheet.slid(value); }
-                                        released => { Sheet.committed("complexity"); }
-                                        changed has-focus => {
-                                            if self.has-focus {
-                                                Sheet.enter("complexity");
-                                            } else {
-                                                Sheet.leave("complexity");
-                                            }
-                                        }
-                                    }
-                                }
-                                DraftEdit {
-                                    width: 52px;
-                                    horizontal-stretch: 0;
-                                    key: "complexity";
-                                    text <=> root.form.complexity;
-                                    enabled: !root.busy;
-                                    label: "Encoder complexity value";
-                                    flagged: root.invalid == "complexity";
-                                    align: center;
-                                }
+                            if root.remux: StepperField {
+                                label: "FFmpeg threads";
+                                noun: "FFmpeg threads";
+                                key: "ffmpeg_threads";
+                                value <=> root.form.ffmpeg-threads;
+                                placeholder: "auto";
+                                enabled: !root.busy;
+                                flagged: root.invalid == "ffmpeg_threads";
+                                description: root.limits.ffmpeg-threads-tip;
                             }
+                            // Extract has two of the three columns (.grid-3).
+                            if !root.remux: Rectangle { horizontal-stretch: 1; }
                         }
                     }
-                }
 
-                // Performance
-                Divider { }
-                VerticalLayout {
-                    padding-top: 16px;
-                    padding-bottom: 16px;
-                    spacing: 12px;
-                    SectionHead { text: "PERFORMANCE"; }
-                    HorizontalLayout {
+                    // Run options. "Clear inspection cache…" comes with its confirm dialog (P5).
+                    Divider { }
+                    VerticalLayout {
+                        padding-top: 16px;
+                        padding-bottom: 16px;
                         spacing: 12px;
-                        StepperField {
-                            label: "Workers";
-                            noun: "workers";
-                            key: "workers";
-                            value <=> root.form.workers;
-                            placeholder: root.chips.workers-hint;
+                        SectionHead { text: "RUN OPTIONS"; }
+                        CheckBox {
+                            text: "Dry run (plan only, write nothing)";
+                            checked <=> root.form.dry-run;
                             enabled: !root.busy;
-                            flagged: root.invalid == "workers";
-                            description: "Episodes processed at once (1–64; empty is auto)";
+                            toggled => { Sheet.edited("dry_run"); }
+                            changed has-focus => {
+                                if self.has-focus {
+                                    Sheet.reveal(self.absolute-position.y, self.height);
+                                }
+                            }
                         }
-                        StepperField {
-                            label: "Disk I/O";
-                            noun: "disk I/O jobs";
-                            key: "io_jobs";
-                            value <=> root.form.io-jobs;
-                            placeholder: root.chips.io-jobs-hint;
+                        no-cache := CheckBox {
+                            text: "Bypass inspection cache";
+                            checked <=> root.form.no-cache;
                             enabled: !root.busy;
-                            flagged: root.invalid == "io_jobs";
-                            description: "Concurrent disk I/O streams (0–64; 0 is the same as Workers)";
+                            toggled => { Sheet.edited("no_cache"); }
+                            changed has-focus => {
+                                if self.has-focus {
+                                    Sheet.reveal(self.absolute-position.y, self.height);
+                                }
+                            }
                         }
-                        if root.remux: StepperField {
-                            label: "FFmpeg threads";
-                            noun: "FFmpeg threads";
-                            key: "ffmpeg_threads";
-                            value <=> root.form.ffmpeg-threads;
-                            placeholder: "auto";
-                            enabled: !root.busy;
-                            flagged: root.invalid == "ffmpeg_threads";
-                            description: "FLAC decoder threads per transcode (1–32; empty is auto). Opus encoding is single-threaded";
-                        }
-                        // Extract has two of the three columns (.grid-3).
-                        if !root.remux: Rectangle { horizontal-stretch: 1; }
-                    }
-                }
-
-                // Run options. "Clear inspection cache…" comes with its confirm dialog (P5).
-                Divider { }
-                VerticalLayout {
-                    padding-top: 16px;
-                    padding-bottom: 16px;
-                    spacing: 12px;
-                    SectionHead { text: "RUN OPTIONS"; }
-                    CheckBox {
-                        text: "Dry run (plan only, write nothing)";
-                        checked <=> root.form.dry-run;
-                        enabled: !root.busy;
-                        toggled => { Sheet.edited("dry_run"); }
-                    }
-                    CheckBox {
-                        text: "Bypass inspection cache";
-                        checked <=> root.form.no-cache;
-                        enabled: !root.busy;
-                        toggled => { Sheet.edited("no_cache"); }
                     }
                 }
             }
