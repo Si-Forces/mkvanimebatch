@@ -7,6 +7,7 @@ mod jobs;
 mod publisher;
 mod queue;
 mod renderer;
+mod run_log;
 mod settings;
 #[cfg(test)]
 mod ui_tests;
@@ -156,6 +157,8 @@ fn run(
         publisher.clone(),
         Ports::engine(Arc::clone(&scan), InspectCacheState::default(), job.clone()),
     );
+    run_log::wire(&app, &publisher, run_log::system_clipboard());
+    runtime.spawn(run_log::load(&core, &publisher));
     intents::wire(&app, core.clone(), runtime.handle().clone(), publisher);
     let (window, boot) = (app.as_weak(), core.state());
     slint::spawn_local(async move {

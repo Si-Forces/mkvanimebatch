@@ -189,7 +189,7 @@ pub(crate) fn wire(app: &App, send: Intents) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::intents::tests::{Episodes, NoJobs, NoSamples};
     use crate::publisher::{install_models, SlintPublisher};
@@ -208,14 +208,14 @@ mod tests {
         app
     }
 
-    fn ticks() {
+    pub(crate) fn ticks() {
         for _ in 0..3 {
             mock_elapsed_time(Duration::from_millis(1));
         }
     }
 
     /// A key pressed and released in the window.
-    fn key(app: &App, key: slint::platform::Key) {
+    pub(crate) fn key(app: &App, key: slint::platform::Key) {
         use slint::platform::WindowEvent;
         let text: slint::SharedString = key.into();
         app.window()
@@ -226,7 +226,7 @@ mod tests {
     }
 
     /// The one button labelled `label`.
-    fn button(app: &App, label: &str) -> ElementHandle {
+    pub(crate) fn button(app: &App, label: &str) -> ElementHandle {
         let mut found: Vec<_> = ElementHandle::find_by_accessible_label(app, label)
             .filter(|element| element.accessible_role() == Some(AccessibleRole::Button))
             .collect();
@@ -337,7 +337,10 @@ mod tests {
     }
 
     /// A wired window over a core whose launcher is `launcher`, shown at the narrowest size.
-    fn wired<L: Launcher>(runtime: &tokio::runtime::Runtime, launcher: L) -> (App, CoreHandle) {
+    pub(crate) fn wired<L: Launcher>(
+        runtime: &tokio::runtime::Runtime,
+        launcher: L,
+    ) -> (App, CoreHandle) {
         let app = new_app();
         let publisher = SlintPublisher::new(&app);
         let ports = Ports {
@@ -353,7 +356,7 @@ mod tests {
         (app, core)
     }
 
-    fn runtime() -> tokio::runtime::Runtime {
+    pub(crate) fn runtime() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
