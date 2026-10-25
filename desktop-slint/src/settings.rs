@@ -1427,8 +1427,8 @@ mod tests {
         assert!(!sheet.get_changed_since());
     }
 
-    /// Done takes the focus when the sheet opens on no field, or on a key it shows no field of,
-    /// and when an open sheet is asked for no field; a field asked for again keeps it.
+    /// Done takes the focus when the sheet opens on no field, or on a key it shows no field of
+    /// (one only the other mode's form has too), and when an open sheet is asked for no field; a field asked for again keeps it.
     #[test]
     fn the_sheet_focuses_done_unless_a_field_takes_the_focus() {
         i_slint_backend_testing::init_no_event_loop();
@@ -1448,6 +1448,12 @@ mod tests {
             !app.get_sheet_open(),
             "Done had the focus: Return closed it"
         );
+        // A key only the other mode's form has (a flag from remux, the extract sheet open).
+        app.invoke_open_sheet(Mode::Extract, "assets_dir".into());
+        ticks();
+        assert_eq!(sheet.get_focused(), "");
+        press_return(&app);
+        assert!(!app.get_sheet_open(), "Done had the focus");
 
         let left = Rc::new(std::cell::Cell::new(0));
         let count = Rc::clone(&left);

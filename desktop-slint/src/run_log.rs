@@ -239,15 +239,20 @@ pub(crate) type Clipboard = Box<dyn FnMut(&str) -> Result<(), String>>;
 
 /// The system clipboard (arboard, which Slint's winit backend uses too: Slint has no app-level
 /// clipboard call and drops the write's error). It is opened at the first Copy and kept, since on
-/// X11 the copied text lives as long as its owner.
+/// X11 the copied text lives as long as its owner. A failed write drops it, so the next Copy
+/// opens a fresh one (a lost connection does not fail every Copy after it).
 pub(crate) fn system_clipboard() -> Clipboard {
     let mut board: Option<arboard::Clipboard> = None;
     Box::new(move |text| {
-        let board = match &mut board {
-            Some(board) => board,
+        let open = match &mut board {
+            Some(open) => open,
             None => board.insert(arboard::Clipboard::new().map_err(|error| error.to_string())?),
         };
-        board.set_text(text).map_err(|error| error.to_string())
+        let written = open.set_text(text).map_err(|error| error.to_string());
+        if written.is_err() {
+            board = None;
+        }
+        written
     })
 }
 
@@ -543,6 +548,30 @@ mod tests {
         let text = publisher.log_text(REMUX);
         assert_eq!(text.lines().count(), 2);
         assert!(text.starts_with("ERROR: "), "{text}");
+    }
+
+    /// Lines added while the drawer is closed: it opens on the newest.
+    #[test]
+    fn a_closed_drawer_opens_on_the_newest_line() {
+        i_slint_backend_testing::init_no_event_loop();
+        let runtime = runtime();
+        let (app, _core) = wired(&runtime, NoJobs);
+        app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+        let publisher = SlintPublisher::new(&app);
+        publisher.show_load(REMUX, None);
+        let texts: Vec<_> = (0..200).map(|n| format!("line {n}")).collect();
+        let lines: Vec<_> = texts
+            .iter()
+            .map(|text| (LogKind::Note, text.as_str()))
+            .collect();
+        publisher.show_logs(&[batch(0, 0, 0, &lines)]);
+        ticks();
+        assert!(!app.get_log_open());
+        app.set_log_open(true);
+        ticks();
+        assert_eq!(labels(&app, "line 199"), 1, "the newest line is shown");
+        assert_eq!(labels(&app, "line 0"), 0, "the oldest is scrolled out");
+        app.hide().unwrap();
     }
 
     /// A console scrolled up stops following; a new generation (a Run's start) empties it, and

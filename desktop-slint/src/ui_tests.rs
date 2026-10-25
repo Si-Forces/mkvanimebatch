@@ -1012,7 +1012,7 @@ fn key(app: &App, text: impl Into<slint::SharedString>) {
 }
 
 /// The pointer pressed, or released, at `element`'s centre.
-fn pointer(app: &App, element: &ElementHandle, pressed: bool) {
+pub(crate) fn pointer(app: &App, element: &ElementHandle, pressed: bool) {
     use slint::platform::{PointerEventButton, WindowEvent};
     let (at, size) = (element.absolute_position(), element.size());
     let position = slint::LogicalPosition::new(at.x + size.width / 2.0, at.y + size.height / 2.0);
