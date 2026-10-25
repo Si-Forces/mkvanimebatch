@@ -1428,7 +1428,8 @@ mod tests {
     }
 
     /// Done takes the focus when the sheet opens on no field, or on a key it shows no field of
-    /// (one only the other mode's form has too), and when an open sheet is asked for no field; a field asked for again keeps it.
+    /// (here a key only remux's form has, with the extract sheet open), and when an open sheet is
+    /// asked for no field; a field asked for again keeps it.
     #[test]
     fn the_sheet_focuses_done_unless_a_field_takes_the_focus() {
         i_slint_backend_testing::init_no_event_loop();
