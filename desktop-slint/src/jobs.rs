@@ -3,7 +3,7 @@
 //! `job-controller.js` and `app.js` (`showModal`) are the reference. The controls' labels,
 //! counts, status and progress are the core's (`presentation.rs`), as is the Close-failed
 //! notice's title and text; the cache dialog's texts mirror `index.html`'s markup, and the
-//! notice's OK `app.js` `showCleanupError`.
+//! notice's OK mirrors `app.js` `showCleanupError`.
 
 use crate::intents::{pipeline, Intents};
 use crate::settings::open_on_flagged;
