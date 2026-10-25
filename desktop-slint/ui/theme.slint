@@ -42,6 +42,9 @@ export global Theme {
     out property <color> fg: dark ? #e8edf2 : #121820;
     out property <color> mute: dark ? #b0bbc5 : #3f4a56;
     out property <color> path: dark ? #c3cdd6 : #2f3b47;
+    // A field's placeholder (the browser's default ::placeholder grey): dimmer than mute, so it
+    // never reads as a typed value. The fluent LineEdit's own is near white in the dark theme.
+    out property <color> hint: dark ? #939da7 : #5c6670;
     out property <color> sep: dark ? #ffffff33 : #14203033;
     out property <color> line: dark ? #ffffff17 : #1420301a;
     out property <color> hover: dark ? #ffffff0f : #6e7a911a;

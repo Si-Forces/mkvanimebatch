@@ -9,24 +9,45 @@ import { FontProbe } from "font-probe.slint";
 import { ScrollView } from "std-widgets.slint";
 import { Mode, QueueFilter, QueueHead, QueuePane, QueueRow, RowMark, RowTone } from "queue.slint";
 import { Inspector, InspectorPane, LibraryEntry, LibraryItem, Rung } from "inspector.slint";
+import { ChipTexts, DraftForm, GearButton, PresetItem, PresetRow, SettingsSheet, Sheet, SheetLimits } from "settings.slint";
 
 // FontProbe is test only; a .slint file cannot be compiled per cfg, so it ships (a few bytes).
-export { Theme, FontProbe, Inspector, LibraryItem, Mode, QueueFilter, QueueHead, QueueRow, RowMark, RowTone, Rung }
+export { Theme, FontProbe, Inspector, LibraryItem, Mode, QueueFilter, QueueHead, QueueRow, RowMark, RowTone, Rung, ChipTexts, DraftForm, PresetItem, Sheet, SheetLimits }
 
-// A mode's tab in the sidebar (.task-row .nav): its name over what it does.
+// A mode's tab in the sidebar (.task-row): its name over what it does, then the gear that opens
+// its settings sheet.
 component ModeTab inherits Rectangle {
     in property <string> title;
     in property <string> subtitle;
     in property <bool> active;
     callback clicked();
+    callback settings();
+    // The sheet closed: the gear that opened it takes the focus back.
+    public function focus-gear() {
+        gear.focus();
+    }
     height: 44px;
     border-radius: 8px;
-    background: touch.has-hover ? Theme.hover : active ? Theme.sel : transparent;
-    accessible-role: tab;
-    accessible-label: title;
-    accessible-item-selected: active;
-    accessible-action-default => { root.clicked(); }
+    background: touch.has-hover || gear.hovered ? Theme.hover : active ? Theme.sel : transparent;
+    tab-area := Rectangle {
+        x: 0;
+        width: parent.width - gear.width - 4px;
+        accessible-role: tab;
+        accessible-label: root.title;
+        accessible-item-selected: root.active;
+        accessible-action-default => { root.clicked(); }
+        touch := TouchArea {
+            clicked => { root.clicked(); }
+        }
+    }
+    gear := GearButton {
+        x: parent.width - self.width - 4px;
+        label: root.title + " settings";
+        clicked => { root.settings(); }
+    }
     VerticalLayout {
+        x: 0;
+        width: tab-area.width;
         padding-left: 8px;
         alignment: center;
         Text {
@@ -41,9 +62,6 @@ component ModeTab inherits Rectangle {
             font-size: 11px;
             accessible-role: none;
         }
-    }
-    touch := TouchArea {
-        clicked => { root.clicked(); }
     }
 }
 
@@ -141,6 +159,25 @@ export component App inherits Window {
     // replaces the rows; its bench (desktop-slint/benches/queue_scroll.rs) drives it.
     in-out property <length> remux-scroll;
     in-out property <length> extract-scroll;
+    // Each mode's Settings Draft: as published, and as the sheet's fields hold it (the host writes
+    // the published one back into the fields it may write).
+    in property <DraftForm> remux-draft;
+    in property <DraftForm> extract-draft;
+    in-out property <DraftForm> remux-form;
+    in-out property <DraftForm> extract-form;
+    // The draft key the last Run of each mode could not read; empty for none.
+    in property <string> remux-invalid;
+    in property <string> extract-invalid;
+    // The bitrate select's entries, the Preset Profiles, the worker and I/O job chips.
+    in property <[string]> bitrates;
+    in property <[PresetItem]> presets;
+    in property <ChipTexts> chips;
+    in property <SheetLimits> sheet-limits;
+    // The settings sheet of the mode shown is open.
+    in-out property <bool> sheet-open;
+    // Which gear opened the sheet, to take the focus back; none for a sheet the host opened.
+    property <bool> opened-by-gear;
+    property <Mode> opener;
 
     // The shown mode's list asks; the host sends the Intent for `mode`.
     callback set-selected(id: string, selected: bool);
@@ -163,6 +200,44 @@ export component App inherits Window {
     callback close-window();
     // Through winit, not `minimized`: see the host's `minimize`.
     callback minimize-window();
+
+    // Shows `mode` and opens its settings sheet with the cursor in the field of draft `key` (the
+    // flagged field after a refused Run), or on Done for an empty `key` or one it shows no field
+    // of. Already open, it moves the cursor there, leaving the focused field first under the mode
+    // it belongs to (it changes if edited); a field that keeps the focus is not left.
+    public function open-sheet(mode: Mode, key: string) {
+        if Sheet.focused != key || mode != root.mode {
+            Sheet.leave(Sheet.focused);
+        }
+        root.leave-field();
+        root.mode = mode;
+        Sheet.focus-key = key;
+        Sheet.focus-serial += 1;
+        if !root.sheet-open {
+            root.opened-by-gear = false;
+            root.sheet-open = true;
+        }
+    }
+
+    // Done, a backdrop click or Esc: the focused field is left first (it changes if edited), as
+    // a closing dialog blurs it, then the gear that opened the sheet takes the focus back.
+    public function close-sheet() {
+        Sheet.leave(Sheet.focused);
+        root.sheet-open = false;
+        if root.opened-by-gear {
+            if root.opener == Mode.remux {
+                remux-tab.focus-gear();
+            } else {
+                extract-tab.focus-gear();
+            }
+        }
+    }
+
+    function open-from-gear(mode: Mode) {
+        root.open-sheet(mode, "");
+        root.opened-by-gear = true;
+        root.opener = mode;
+    }
 
     // Scrolls `mode`'s list so its row `row` heads it.
     public function reveal(mode: Mode, row: int) {
@@ -291,7 +366,7 @@ export component App inherits Window {
                             spacing: 2px;
                             alignment: start;
                             SideHeading { text: "PIPELINE"; }
-                            ModeTab {
+                            remux-tab := ModeTab {
                                 title: "Remux";
                                 subtitle: "FLAC → Opus, mux subs";
                                 active: root.mode == Mode.remux;
@@ -299,8 +374,9 @@ export component App inherits Window {
                                     root.leave-field();
                                     root.mode = Mode.remux;
                                 }
+                                settings => { root.open-from-gear(Mode.remux); }
                             }
-                            ModeTab {
+                            extract-tab := ModeTab {
                                 title: "Extract";
                                 subtitle: "Subs, fonts, chapters";
                                 active: root.mode == Mode.extract;
@@ -308,6 +384,7 @@ export component App inherits Window {
                                     root.leave-field();
                                     root.mode = Mode.extract;
                                 }
+                                settings => { root.open-from-gear(Mode.extract); }
                             }
                             // .side's 18px gap between groups, less the group's own 2px spacing.
                             Rectangle { height: 16px; }
@@ -324,6 +401,46 @@ export component App inherits Window {
                                 clicked => {
                                     root.leave-field();
                                     root.open-folder();
+                                }
+                            }
+                            // The Preset Profiles (#preset-list), remux's only.
+                            if root.mode == Mode.remux: VerticalLayout {
+                                spacing: 2px;
+                                Rectangle { height: 16px; }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    SideHeading { text: "PRESET"; }
+                                    // .locked-label: a lock before the word.
+                                    if root.busy: HorizontalLayout {
+                                        spacing: 4px;
+                                        Path {
+                                            y: (parent.height - self.height) / 2;
+                                            width: 11px;
+                                            height: 11px;
+                                            viewbox-width: 24;
+                                            viewbox-height: 24;
+                                            stroke: Theme.warn;
+                                            stroke-width: 2.4px;
+                                            stroke-line-cap: round;
+                                            commands: "M7 11h10a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-6a2 2 0 0 1 2-2z M8 11V7a4 4 0 0 1 8 0v4";
+                                            accessible-role: none;
+                                        }
+                                        Text {
+                                            text: "Locked";
+                                            color: Theme.warn;
+                                            font-size: 11px;
+                                            font-weight: 500;
+                                        }
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+                                for item in root.presets: PresetRow {
+                                    item: item;
+                                    enabled: !root.busy;
+                                    clicked => {
+                                        root.leave-field();
+                                        Sheet.pick-preset(item.id);
+                                    }
                                 }
                             }
                         }
@@ -409,6 +526,81 @@ export component App inherits Window {
                         root.reset-subtitle();
                     }
                     options-changed => { root.subtitle-options-changed(); }
+                }
+            }
+
+            // The bottom bar (.bar). P4 brings its worker and I/O job chips (.bar-chips), which a
+            // window under 900px hides; P5 adds Run, the progress and the Log, and shows the bar
+            // at every width.
+            if root.width >= 900px: Rectangle {
+                height: chips.preferred-height + 16px;
+                background: Theme.side;
+                Rectangle {
+                    y: 0;
+                    height: 1px;
+                    background: Theme.line;
+                }
+                chips := VerticalLayout {
+                    x: parent.width - self.preferred-width - 14px;
+                    width: self.preferred-width;
+                    alignment: center;
+                    Text {
+                        text: root.chips.workers;
+                        color: Theme.mute;
+                        font-size: 11px;
+                    }
+                    Text {
+                        text: root.chips.io-jobs;
+                        color: Theme.mute;
+                        font-size: 11px;
+                    }
+                }
+            }
+        }
+
+        // The settings sheet of the mode shown (#settings-sheet), over a backdrop that covers the
+        // window: a click on it or Esc closes the sheet.
+        if root.sheet-open: Rectangle {
+            background: #080c1252;
+            FocusScope {
+                key-pressed(event) => {
+                    if event.text == Key.Escape {
+                        root.close-sheet();
+                        return accept;
+                    }
+                    reject
+                }
+                TouchArea {
+                    clicked => { root.close-sheet(); }
+                }
+                if root.mode == Mode.remux: SettingsSheet {
+                    y: 36px;
+                    width: min(580px, parent.width - 32px);
+                    height: min(self.natural-height, parent.height - 72px);
+                    title: "Remux settings";
+                    remux: true;
+                    form <=> root.remux-form;
+                    invalid: root.remux-invalid;
+                    out-placeholder: "Output folder next to the input";
+                    bitrates: root.bitrates;
+                    chips: root.chips;
+                    limits: root.sheet-limits;
+                    busy: root.busy;
+                    done => { root.close-sheet(); }
+                }
+                if root.mode == Mode.extract: SettingsSheet {
+                    y: 36px;
+                    width: min(580px, parent.width - 32px);
+                    height: min(self.natural-height, parent.height - 72px);
+                    title: "Extract settings";
+                    form <=> root.extract-form;
+                    invalid: root.extract-invalid;
+                    out-placeholder: "Same folder as the input";
+                    bitrates: root.bitrates;
+                    chips: root.chips;
+                    limits: root.sheet-limits;
+                    busy: root.busy;
+                    done => { root.close-sheet(); }
                 }
             }
         }
