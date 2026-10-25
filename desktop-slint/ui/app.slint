@@ -188,8 +188,8 @@ export component App inherits Window {
     }
 
     // Commits a subtitle field edited but not committed, as the webview's blur does before a
-    // click lands. The custom controls (rows, chips, tabs, the Library, Open folder) take no
-    // focus, so the field keeps it through their click and never commits on its own.
+    // click lands. The custom controls (rows, chips, tabs, the Library, Open folder, Reset) take
+    // no focus, so the field keeps it through their click and never commits on its own.
     function leave-field() {
         insp-pane.flush();
     }
@@ -403,7 +403,11 @@ export component App inherits Window {
                     choose(index) => { root.choose-subtitle(index); }
                     choose-language(index) => { root.choose-language(index); }
                     language-tag-edited(text) => { root.language-tag-edited(text); }
-                    reset => { root.reset-subtitle(); }
+                    // Reset takes no focus: a typed field commits first, then clears.
+                    reset => {
+                        root.leave-field();
+                        root.reset-subtitle();
+                    }
                     options-changed => { root.subtitle-options-changed(); }
                 }
             }

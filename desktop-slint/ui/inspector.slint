@@ -108,9 +108,10 @@ component SectionHead inherits Text {
     letter-spacing: 0.77px;
 }
 
-// A path as crumbs (.crumbs): each crumb but the last followed by "›", the last in bold. A line
-// breaks between crumbs, as .crumbs's flex-wrap does, and a crumb wider than the line wraps on its
-// own, at a space, else anywhere (overflow-wrap: anywhere), so no part of the path is cut.
+// A path as crumbs (.crumbs): each crumb but the last followed by "›" (the host's), the last in
+// bold. A line breaks between crumbs, as .crumbs's flex-wrap does, and a crumb wider than the
+// line wraps on its own, at a space, else anywhere (overflow-wrap: anywhere), so no part of the
+// path is cut.
 // `plain`: one text in place of a path, not bold. Read as one text, `label`.
 component Crumbs inherits Rectangle {
     in property <[string]> parts;
@@ -131,7 +132,7 @@ component Crumbs inherits Rectangle {
         spacing-vertical: 2px;
         for part[i] in root.parts: Text {
             property <bool> last: i == root.parts.length - 1;
-            text: self.last ? part : part + " ›";
+            text: part;
             color: self.last && !root.plain ? Theme.fg : Theme.path;
             font-size: 12px;
             font-weight: self.last && !root.plain ? 600 : 400;
