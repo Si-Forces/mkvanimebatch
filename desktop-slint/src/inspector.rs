@@ -77,7 +77,22 @@ pub(crate) fn map_inspector(view: Option<&InspectorView>, mode: Mode) -> Inspect
     let Some(view) = view else {
         return Inspector::default();
     };
-    let texts = |crumbs: &[String]| crumbs.iter().map(SharedString::from).collect();
+    // Each crumb but the last followed by "›"; the layout spaces the crumbs.
+    let texts = |crumbs: &[String]| {
+        let last = crumbs.len().saturating_sub(1);
+        let separator = crate::queue::CRUMB_SEPARATOR.trim_end();
+        crumbs
+            .iter()
+            .enumerate()
+            .map(|(at, crumb)| {
+                if at < last {
+                    format!("{crumb}{separator}").into()
+                } else {
+                    SharedString::from(crumb)
+                }
+            })
+            .collect()
+    };
     let (out_crumbs, out_path, out_plain) = match &view.out_crumbs {
         Some(out) => (texts(out), joined(out), false),
         None => {
@@ -208,7 +223,8 @@ fn form_key(view: &InspectorView) -> FormKey {
 pub(crate) struct InspectorUpdate {
     /// The Inspector to show ([`map_inspector`] on the event loop); none for its empty state.
     pub(crate) view: Option<InspectorView>,
-    /// The subtitle section to redraw, with the typed fields written back from `inspector`;
+    /// The subtitle section to redraw, with the typed fields written back from the Inspector
+    /// mapped from `view`;
     /// none while it keeps what it shows.
     pub(crate) subtitles: Option<Subtitles>,
 }
@@ -434,7 +450,7 @@ mod tests {
             ("03", "ep1.mkv")
         );
         let texts = |model: &ModelRc<SharedString>| model.iter().collect::<Vec<_>>();
-        assert_eq!(texts(&insp.crumbs), ["media", "Season 1"]);
+        assert_eq!(texts(&insp.crumbs), ["media ›", "Season 1"]);
         assert_eq!(insp.path, "media › Season 1");
         assert_eq!(insp.error, "");
         assert_eq!(
@@ -479,7 +495,7 @@ mod tests {
                 insp.out_path.as_str(),
                 insp.out_plain
             ),
-            (vec!["out".into(), "Show".into()], "out › Show", false)
+            (vec!["out ›".into(), "Show".into()], "out › Show", false)
         );
         assert!(insp.assigned);
         assert_eq!(insp.asset_path, "Season 1/ep1.ass");

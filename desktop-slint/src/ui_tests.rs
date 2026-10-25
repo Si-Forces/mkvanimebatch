@@ -696,8 +696,9 @@ fn the_sidebar_scrolls_to_open_folder_past_many_releases() {
 }
 
 /// A title typed and not committed is committed before a click on a control that takes no focus
-/// (a row, Open folder, a filter chip, a Library entry, a mode tab), as the webview's blur commits
-/// it before the click lands; an answered Intent's write-back keeps what is typed meanwhile.
+/// (a row, Open folder, a filter chip, a Library entry, a mode tab, Reset), as the webview's blur
+/// commits it before the click lands; an answered Intent's write-back keeps what is typed
+/// meanwhile.
 #[test]
 fn a_typed_subtitle_field_is_committed_before_a_click_elsewhere() {
     i_slint_backend_testing::init_no_event_loop();
@@ -762,6 +763,17 @@ fn a_typed_subtitle_field_is_committed_before_a_click_elsewhere() {
             "options 9",
         ],
         "committed once, before each click"
+    );
+    // Reset commits the typed title, then clears; the answer's write-back drops the title.
+    let log = Rc::clone(&calls);
+    app.on_reset_subtitle(move || log.borrow_mut().push("reset".into()));
+    only(&app, "Track title").set_accessible_value("Signs");
+    only(&app, "Reset").invoke_accessible_default_action();
+    assert_eq!(calls.borrow()[10..], ["options 10", "reset"]);
+    crate::inspector::restore_form(&app);
+    assert_eq!(
+        (app.get_sub_title().as_str(), app.get_sub_dirty()),
+        ("", false)
     );
     // Nothing typed since: nothing to commit.
     only(&app, "Show - 02.mkv").invoke_accessible_default_action();
