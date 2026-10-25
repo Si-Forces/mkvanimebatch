@@ -5,6 +5,7 @@
 // hints and the preset texts.
 import { Button, CheckBox, ComboBox, LineEdit, ScrollView, Slider } from "std-widgets.slint";
 import { Theme } from "theme.slint";
+import { CapButton, PillButton } from "jobs.slint";
 
 // One mode's Settings Draft as the sheet shows it, every field as typed but the two checkboxes.
 // The remux-only fields stay empty in extract's. `bitrate` is the index of the bitrate select's
@@ -82,6 +83,12 @@ export global Sheet {
     callback step-key(key: string, up: bool);
     callback browse(key: string);
     callback pick-preset(id: string);
+    // "Clear inspection cache…": the host asks to confirm, then clears it.
+    callback clear-cache();
+    // Bumped when the cache dialog closes over the sheet: its button takes the focus back.
+    in-out property <int> cache-focus-serial;
+    // Bumped when a notice closes over the sheet: Done takes the focus.
+    in-out property <int> done-focus-serial;
 
     // A field took the focus: the one that had it is left first.
     public function enter(key: string) {
@@ -473,41 +480,6 @@ component StepperField inherits Field {
     }
 }
 
-// The sheet's Done (.cap.btn-accent): takes the focus when the sheet opens, so Enter or Space
-// closes it at once.
-component DoneButton inherits Rectangle {
-    callback clicked();
-    out property <bool> focused: keys.has-focus;
-    width: label.preferred-width + 36px;
-    height: 36px;
-    border-radius: self.height / 2;
-    background: touch.has-hover ? Theme.accent.darker(10%) : Theme.accent;
-    border-width: keys.has-focus ? 2px : 0px;
-    border-color: Theme.accent-ring;
-    forward-focus: keys;
-    accessible-role: button;
-    accessible-label: "Done";
-    accessible-action-default => { root.clicked(); }
-    label := Text {
-        text: "Done";
-        color: Theme.accent-fg;
-        font-weight: 700;
-        accessible-role: none;
-    }
-    keys := FocusScope {
-        key-pressed(event) => {
-            if event.text == Key.Return || event.text == Key.Space {
-                root.clicked();
-                return accept;
-            }
-            reject
-        }
-    }
-    touch := TouchArea {
-        clicked => { root.clicked(); }
-    }
-}
-
 component Divider inherits Rectangle {
     height: 1px;
     background: Theme.sep;
@@ -525,8 +497,10 @@ export component SettingsSheet inherits Rectangle {
     in property <SheetLimits> limits;
     // The draft key the last Run could not read: its field is flagged.
     in property <string> invalid;
-    // A start or a job holds the batch: the fields are locked (.lock-while-job).
+    // A start or a job holds the batch: the locked note shows (html.job-locked).
     in property <bool> busy;
+    // That, or a Run not answered yet: the fields are locked (.lock-while-job).
+    in property <bool> locked;
     // The output folder's placeholder, which differs per mode.
     in property <string> out-placeholder;
     callback done();
@@ -588,6 +562,19 @@ export component SettingsSheet inherits Rectangle {
     // Takes the clicks the backdrop behind it would close the sheet on.
     TouchArea { }
 
+    property <int> cache-focus: Sheet.cache-focus-serial;
+    // A batch that started while the dialog was open disables the button: Done takes the focus.
+    changed cache-focus => {
+        if root.locked {
+            done-button.focus();
+        } else {
+            clear-cache.focus();
+        }
+    }
+
+    property <int> done-focus: Sheet.done-focus-serial;
+    changed done-focus => { done-button.focus(); }
+
     // Keeps Tab and Shift+Tab inside the sheet, as a modal dialog does: past its last control the
     // focus wraps to Done, and back from Done to the last one. Locked, Done is the only one.
     FocusScope {
@@ -596,14 +583,14 @@ export component SettingsSheet inherits Rectangle {
         capture-key-pressed(event) => {
             let back = event.text == Key.Backtab || (event.text == Key.Tab && event.modifiers.shift);
             if back && done-button.focused {
-                if root.busy {
+                if root.locked {
                     done-button.focus();
                 } else {
-                    no-cache.focus();
+                    clear-cache.focus();
                 }
                 return accept;
             }
-            if !back && event.text == Key.Tab && (no-cache.has-focus || (root.busy && done-button.focused)) {
+            if !back && event.text == Key.Tab && (clear-cache.focused || (root.locked && done-button.focused)) {
                 done-button.focus();
                 return accept;
             }
@@ -637,7 +624,9 @@ export component SettingsSheet inherits Rectangle {
                         wrap: word-wrap;
                     }
                 }
-                done-button := DoneButton {
+                // .cap.btn-accent: takes the focus when the sheet opens, so Enter or Space closes it.
+                done-button := CapButton {
+                    text: "Done";
                     clicked => { root.done(); }
                 }
             }
@@ -694,7 +683,7 @@ export component SettingsSheet inherits Rectangle {
                             key: "input_dir";
                             value <=> root.form.input-dir;
                             placeholder: "Release folder with the MKV episodes";
-                            enabled: !root.busy;
+                            enabled: !root.locked;
                             flagged: root.invalid == "input_dir";
                         }
                         FolderField {
@@ -702,21 +691,21 @@ export component SettingsSheet inherits Rectangle {
                             key: "out_dir";
                             value <=> root.form.out-dir;
                             placeholder: root.out-placeholder;
-                            enabled: !root.busy;
+                            enabled: !root.locked;
                         }
                         FolderField {
                             label: "Fonts directory";
                             key: "fonts_dir";
                             value <=> root.form.fonts-dir;
                             placeholder: "Auto: fonts folder";
-                            enabled: !root.busy;
+                            enabled: !root.locked;
                         }
                         if root.remux: FolderField {
                             label: "Assets directory";
                             key: "assets_dir";
                             value <=> root.form.assets-dir;
                             placeholder: "Optional fallback for subtitles";
-                            enabled: !root.busy;
+                            enabled: !root.locked;
                         }
                     }
 
@@ -736,7 +725,7 @@ export component SettingsSheet inherits Rectangle {
                                         min-width: 0px;
                                         model: root.bitrates;
                                         current-index <=> root.form.bitrate;
-                                        enabled: !root.busy;
+                                        enabled: !root.locked;
                                         accessible-label: "Opus bitrate";
                                         changed has-focus => {
                                             if self.has-focus {
@@ -758,7 +747,7 @@ export component SettingsSheet inherits Rectangle {
                                     // A decimal field would follow the locale's separator, where
                                     // the core reads a point: any text, as typed.
                                     input-type: text;
-                                    enabled: !root.busy;
+                                    enabled: !root.locked;
                                     flagged: root.invalid == "sub_offset";
                                 }
                             }
@@ -778,7 +767,7 @@ export component SettingsSheet inherits Rectangle {
                                             maximum: root.limits.complexity-max;
                                             step: 1;
                                             value <=> root.complexity;
-                                            enabled: !root.busy;
+                                            enabled: !root.locked;
                                             accessible-label: "Encoder complexity";
                                             accessible-description: "libopus encoding complexity: 0 is fastest, 10 is best quality";
                                             changed(value) => { Sheet.slid(value); }
@@ -800,7 +789,7 @@ export component SettingsSheet inherits Rectangle {
                                         horizontal-stretch: 0;
                                         key: "complexity";
                                         text <=> root.form.complexity;
-                                        enabled: !root.busy;
+                                        enabled: !root.locked;
                                         label: "Encoder complexity value";
                                         flagged: root.invalid == "complexity";
                                         input-type: number;
@@ -826,7 +815,7 @@ export component SettingsSheet inherits Rectangle {
                                 key: "workers";
                                 value <=> root.form.workers;
                                 placeholder: root.chips.workers-hint;
-                                enabled: !root.busy;
+                                enabled: !root.locked;
                                 flagged: root.invalid == "workers";
                                 description: root.limits.workers-tip;
                             }
@@ -836,7 +825,7 @@ export component SettingsSheet inherits Rectangle {
                                 key: "io_jobs";
                                 value <=> root.form.io-jobs;
                                 placeholder: root.chips.io-jobs-hint;
-                                enabled: !root.busy;
+                                enabled: !root.locked;
                                 flagged: root.invalid == "io_jobs";
                                 description: root.limits.io-jobs-tip;
                             }
@@ -846,7 +835,7 @@ export component SettingsSheet inherits Rectangle {
                                 key: "ffmpeg_threads";
                                 value <=> root.form.ffmpeg-threads;
                                 placeholder: "auto";
-                                enabled: !root.busy;
+                                enabled: !root.locked;
                                 flagged: root.invalid == "ffmpeg_threads";
                                 description: root.limits.ffmpeg-threads-tip;
                             }
@@ -855,7 +844,7 @@ export component SettingsSheet inherits Rectangle {
                         }
                     }
 
-                    // Run options. "Clear inspection cache…" comes with its confirm dialog (P5).
+                    // Run options.
                     Divider { }
                     VerticalLayout {
                         padding-top: 16px;
@@ -865,7 +854,7 @@ export component SettingsSheet inherits Rectangle {
                         CheckBox {
                             text: "Dry run (plan only, write nothing)";
                             checked <=> root.form.dry-run;
-                            enabled: !root.busy;
+                            enabled: !root.locked;
                             toggled => { Sheet.edited("dry_run"); }
                             changed has-focus => {
                                 if self.has-focus {
@@ -873,14 +862,27 @@ export component SettingsSheet inherits Rectangle {
                                 }
                             }
                         }
-                        no-cache := CheckBox {
+                        CheckBox {
                             text: "Bypass inspection cache";
                             checked <=> root.form.no-cache;
-                            enabled: !root.busy;
+                            enabled: !root.locked;
                             toggled => { Sheet.edited("no_cache"); }
                             changed has-focus => {
                                 if self.has-focus {
                                     Sheet.reveal(self.absolute-position.y, self.height);
+                                }
+                            }
+                        }
+                        HorizontalLayout {
+                            alignment: start;
+                            clear-cache := PillButton {
+                                text: "Clear inspection cache…";
+                                enabled: !root.locked;
+                                clicked => { Sheet.clear-cache(); }
+                                changed focused => {
+                                    if self.focused {
+                                        Sheet.reveal(self.absolute-position.y, self.height);
+                                    }
                                 }
                             }
                         }

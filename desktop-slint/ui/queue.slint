@@ -39,7 +39,6 @@ export struct QueueHead {
     title: string,
     crumbs-lead: string,
     crumbs-end: string,
-    count-text: string,
     all: int,
     todo: int,
     done: int,
@@ -438,8 +437,10 @@ component AccentButton inherits Rectangle {
 export component QueuePane inherits Rectangle {
     in property <QueueHead> head;
     in property <[QueueRow]> rows;
-    // A start or a job holds the batch: the selection hint says so and Open folder is locked.
+    // A start or a job holds the batch: the selection hint says so (html.job-locked).
     in property <bool> busy;
+    // That, or a Run not answered yet: the card's Open folder is locked.
+    in property <bool> locked;
     // A row picked for the Episode Inspector whose Inspect is not answered yet: marked at once.
     in property <string> pending-inspect;
     callback set-selected(id: string, selected: bool);
@@ -506,12 +507,6 @@ export component QueuePane inherits Rectangle {
                     font-weight: 700;
                     overflow: elide;
                     horizontal-stretch: 1;
-                }
-                Text {
-                    text: root.head.count-text;
-                    color: Theme.mute;
-                    font-size: 12px;
-                    vertical-alignment: center;
                 }
             }
             if root.head.crumbs-end != "": HorizontalLayout {
@@ -649,7 +644,7 @@ export component QueuePane inherits Rectangle {
                     padding-top: 6px;
                     AccentButton {
                         text: root.head.card-action;
-                        enabled: !root.busy;
+                        enabled: !root.locked;
                         clicked => { root.open-folder(); }
                     }
                 }

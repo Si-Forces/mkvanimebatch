@@ -5,12 +5,15 @@
 //! so the event loop only writes the rows that changed into the mode's kept `VecModel`.
 
 use crate::inspector::{map_inspector, write_form, LANGUAGES};
+use crate::jobs;
 use crate::queue::{map_rows, ModeList, RowPatch, Update};
+use crate::run_log::{self, Console, LogPatch};
 use crate::settings::{self, Edits, BITRATES};
 use mkv_anime_batch_slint_ui::{App, Mode, QueueFilter, QueueRow};
+use mkv_core::pipeline::PipelineMode;
 use mkv_desktop_core::actor::{Publisher, ViewState};
 use mkv_desktop_core::job::JobDone;
-use mkv_desktop_core::log::LogBatch;
+use mkv_desktop_core::log::{LogBatch, LogView};
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -27,6 +30,8 @@ struct Pending {
     scheduled: bool,
     /// The remux and the extract list.
     lists: [ModeList; 2],
+    /// The remux and the extract console.
+    logs: [Console; 2],
 }
 
 impl Default for Pending {
@@ -37,6 +42,7 @@ impl Default for Pending {
             newest: None,
             scheduled: false,
             lists: [ModeList::new(Mode::Remux), ModeList::new(Mode::Extract)],
+            logs: Default::default(),
         }
     }
 }
@@ -57,6 +63,8 @@ pub(crate) struct Taken {
     pub(crate) lists: [Update; 2],
     /// The ends of jobs, applied after the state.
     pub(crate) dones: Vec<JobDone>,
+    /// The remux and the extract console's patch.
+    pub(crate) logs: [LogPatch; 2],
 }
 
 /// The pending slot. A push answers whether the caller must schedule a hop; the hop calls `take`.
@@ -142,6 +150,35 @@ impl Coalescer {
         !std::mem::replace(&mut pending.scheduled, true)
     }
 
+    /// Draws `batch` in its mode's console, or keeps it for after the load. Returns whether to
+    /// schedule a hop.
+    pub(crate) fn push_log(&self, batch: &LogBatch) -> bool {
+        let mut pending = self.lock();
+        pending.logs[run_log::slot(batch.mode)].apply(batch);
+        !std::mem::replace(&mut pending.scheduled, true)
+    }
+
+    /// Loads `mode`'s console with `get_log`'s answer. Returns whether to schedule a hop: not for
+    /// a second load, which changes nothing.
+    pub(crate) fn load_log(&self, mode: PipelineMode, view: Option<LogView>) -> bool {
+        let mut pending = self.lock();
+        pending.logs[run_log::slot(mode)].load(view)
+            && !std::mem::replace(&mut pending.scheduled, true)
+    }
+
+    /// `mode`'s console's raw text, for Copy.
+    pub(crate) fn log_text(&self, mode: PipelineMode) -> String {
+        self.lock().logs[run_log::slot(mode)].text()
+    }
+
+    /// No hop is on its way any more, nor will one come: the dones, which only grow, go. The
+    /// rest stays bounded (the newest state, each list's update, the consoles' kept lines).
+    fn unschedule(&self) {
+        let mut pending = self.lock();
+        pending.scheduled = false;
+        pending.dones.clear();
+    }
+
     /// Everything pushed since the last take: the state and each mode's update to apply first,
     /// then the dones. Clears the scheduled flag under the same lock, so a push after this
     /// schedules its own hop.
@@ -152,6 +189,7 @@ impl Coalescer {
             lists: pending.lists.each_mut().map(ModeList::take),
             state: pending.state.take(),
             dones: std::mem::take(&mut pending.dones),
+            logs: pending.logs.each_mut().map(Console::take_patch),
         }
     }
 }
@@ -177,6 +215,7 @@ pub(crate) fn install_models(app: &App) {
     let bitrates: Vec<slint::SharedString> = BITRATES.iter().map(|&entry| entry.into()).collect();
     app.set_bitrates(ModelRc::from(Rc::new(VecModel::from(bitrates))));
     app.set_sheet_limits(settings::limits());
+    run_log::install_models(app);
 }
 
 impl SlintPublisher {
@@ -201,10 +240,23 @@ impl SlintPublisher {
         // leave the slot scheduled for good. The take always runs; only the apply needs the window.
         let scheduled = slint::invoke_from_event_loop(move || hop(&pending, &edits, &window));
         // Fails only once the event loop is gone, when nothing is left to show. Clear the flag all
-        // the same, so a later push never waits on a hop that will not come.
+        // the same, so a later push never waits on a hop that will not come; the bounded rest of
+        // what is pending stays for one (a test's `flush`).
         if scheduled.is_err() {
-            self.pending.take();
+            self.pending.unschedule();
         }
+    }
+
+    /// Loads `mode`'s console with `get_log`'s answer (`None` when it failed).
+    pub(crate) fn load_log(&self, mode: PipelineMode, view: Option<LogView>) {
+        if self.pending.load_log(mode, view) {
+            self.schedule();
+        }
+    }
+
+    /// `mode`'s Run Log as Copy writes it.
+    pub(crate) fn log_text(&self, mode: PipelineMode) -> String {
+        self.pending.log_text(mode)
     }
 
     /// Keeps `filter` for `mode`, in click order: call it on the event loop, then [`remap`](Self::remap).
@@ -247,6 +299,28 @@ impl SlintPublisher {
         hop(&self.pending, &self.edits, &self.window);
     }
 
+    /// Loads `mode`'s console with `view` at once, on the event loop's thread.
+    #[cfg(test)]
+    pub(crate) fn show_load(&self, mode: PipelineMode, view: Option<LogView>) {
+        self.pending.load_log(mode, view);
+        hop(&self.pending, &self.edits, &self.window);
+    }
+
+    /// Draws `batches` at once, on the event loop's thread, as one hop would.
+    #[cfg(test)]
+    pub(crate) fn show_logs(&self, batches: &[LogBatch]) {
+        for batch in batches {
+            self.pending.push_log(batch);
+        }
+        hop(&self.pending, &self.edits, &self.window);
+    }
+
+    /// Applies what is pending at once, on the event loop's thread.
+    #[cfg(test)]
+    pub(crate) fn flush(&self) {
+        hop(&self.pending, &self.edits, &self.window);
+    }
+
     /// Reveals `release` in `mode` at once, on the event loop's thread, as a Library click would.
     #[cfg(test)]
     pub(crate) fn show_reveal(&self, mode: Mode, release: &str) {
@@ -270,17 +344,21 @@ pub(crate) fn hop(pending: &Coalescer, edits: &Edits, window: &slint::Weak<App>)
         state,
         lists: [remux, extract],
         dones: _unshown,
+        logs: [remux_log, extract_log],
     } = pending.take();
     let Some(app) = window.upgrade() else {
         return;
     };
     if let Some(state) = state {
         app.set_busy(state.busy);
+        jobs::show(&app, &state);
         settings::show(&app, &state, edits);
     }
     apply(&app, Mode::Remux, remux);
     apply(&app, Mode::Extract, extract);
-    // The job controller renders a job's end (P5); nothing shows it yet.
+    run_log::apply(&app, Mode::Remux, remux_log);
+    run_log::apply(&app, Mode::Extract, extract_log);
+    // Nothing renders a job's end, as in the webview: the state it ended in shows it.
 }
 
 impl Publisher for SlintPublisher {
@@ -290,8 +368,11 @@ impl Publisher for SlintPublisher {
         }
     }
 
-    // The Run Log view (P5) reads `get_log` at boot and renders each batch; nothing shows one yet.
-    fn logs(&self, _batch: &LogBatch) {}
+    fn logs(&self, batch: &LogBatch) {
+        if self.pending.push_log(batch) {
+            self.schedule();
+        }
+    }
 
     fn done(&self, done: &JobDone) {
         if self.pending.push_done(done) {

@@ -1,0 +1,319 @@
+// Redesign C's Run Log (desktop-tauri/ui/index.html #btn-log, #log-drawer; style.css .pill-btn,
+// .badge, .logdrawer, .log-body, .log-line). Layout and bindings only: the host
+// (desktop-slint/src/run_log.rs) maps each line's display text and tone, and the badge's text.
+import { Theme } from "theme.slint";
+import { ListView } from "std-widgets.slint";
+
+// A line's kind as the console colours it (log-view.js KIND_CLASS): a note is plain.
+export enum LogTone { plain, err, warn, skip, ok, info, done }
+
+// One console line: its display text (paths Finder-style) and tone.
+export struct LogRow {
+    text: string,
+    tone: LogTone,
+}
+
+// The Log toggle's error badge: the count it shows, empty for none, and what a screen reader
+// reads out ("1 error").
+export struct LogBadge {
+    count: string,
+    description: string,
+}
+
+// What the host last wrote into a console's lines, each counted: a new generation emptied it
+// (`cleared`), lines were appended (`appended`). The console follows on these, as the rows' height
+// misses a clear that lands with its first lines, and appends at the cap that drop as many.
+export struct LogSerials {
+    cleared: int,
+    appended: int,
+}
+
+// The Log toggle in the bottom bar (.pill-btn #btn-log): a lines icon, "Log" and the error badge,
+// none while it is empty. Takes the focus; Enter or Space toggles the drawer.
+export component LogToggle inherits Rectangle {
+    in property <bool> open;
+    in property <LogBadge> badge;
+    callback clicked();
+    public function focus-toggle() {
+        keys.focus();
+    }
+    width: row.preferred-width + 28px;
+    height: 36px;
+    border-radius: self.height / 2;
+    background: touch.has-hover ? Theme.hover : Theme.field;
+    border-width: keys.has-focus ? 2px : 1px;
+    border-color: keys.has-focus ? Theme.accent-ring : Theme.edge;
+    forward-focus: keys;
+    accessible-role: button;
+    accessible-label: "Log";
+    accessible-description: badge.description;
+    accessible-expandable: true;
+    accessible-expanded: open;
+    accessible-action-default => { root.clicked(); }
+    accessible-action-expand => { root.clicked(); }
+    row := HorizontalLayout {
+        alignment: center;
+        spacing: 6px;
+        Path {
+            y: (parent.height - self.height) / 2;
+            width: 14px;
+            height: 14px;
+            viewbox-width: 24;
+            viewbox-height: 24;
+            stroke: Theme.fg;
+            stroke-width: 2px * 14 / 24;
+            stroke-line-cap: round;
+            commands: "M4 6h16M4 12h16M4 18h10";
+            accessible-role: none;
+        }
+        Text {
+            text: "Log";
+            color: Theme.fg;
+            font-size: 12px;
+            font-weight: 600;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+        if root.badge.count != "": Rectangle {
+            y: (parent.height - self.height) / 2;
+            width: max(self.height, count.preferred-width + 12px);
+            height: count.preferred-height + 2px;
+            border-radius: self.height / 2;
+            background: Theme.err;
+            count := Text {
+                text: root.badge.count;
+                color: Theme.err-fg;
+                font-size: 10px;
+                font-weight: 600;
+                accessible-role: none;
+            }
+        }
+    }
+    keys := FocusScope {
+        key-pressed(event) => {
+            if event.text == Key.Return || event.text == Key.Space {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        // A left press takes the focus, as a browser's button does (the StepButton pattern): the
+        // TouchArea above the FocusScope grabs the press before it.
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
+                keys.focus();
+            }
+        }
+        clicked => { root.clicked(); }
+    }
+}
+
+// A text button in the drawer's head (.link-btn): it takes the focus, unlike the queue's.
+component DrawerLink inherits Rectangle {
+    in property <string> text;
+    // The hover tooltip's text, read out as the accessible description.
+    in property <string> tip;
+    callback clicked();
+    out property <bool> focused: keys.has-focus;
+    width: label.preferred-width + 8px;
+    height: 24px;
+    border-radius: 6px;
+    border-width: keys.has-focus ? 2px : 0px;
+    border-color: Theme.accent-ring;
+    forward-focus: keys;
+    accessible-role: button;
+    accessible-label: text;
+    accessible-description: tip;
+    accessible-action-default => { root.clicked(); }
+    label := Text {
+        text: root.text;
+        color: Theme.accent;
+        font-size: 12px;
+        font-weight: 600;
+        vertical-alignment: center;
+        accessible-role: none;
+    }
+    keys := FocusScope {
+        key-pressed(event) => {
+            if event.text == Key.Return || event.text == Key.Space {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+    TouchArea {
+        mouse-cursor: pointer;
+        // A left press takes the focus, as a browser's button does (the StepButton pattern): the
+        // TouchArea above the FocusScope grabs the press before it.
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
+                keys.focus();
+            }
+        }
+        clicked => { root.clicked(); }
+    }
+}
+
+// One mode's console (.log-body): its lines, virtualised, or the empty prompt. It follows the
+// newest line while scrolled to within 32px of the bottom, as log-view.js `flush` does.
+component LogConsole inherits Rectangle {
+    in property <[LogRow]> rows;
+    in property <LogSerials> serials;
+    property <bool> follow: true;
+    // The host wrote lines the list has not laid out yet. `ensure-row-visible` measures the rows
+    // laid out last, so a layout that then moves the view off the bottom (rows dropped above keep
+    // the rows shown, as at the cap) shows the newest row again. A scroll ends it.
+    property <bool> settling;
+    // The host wrote into the lines: a new generation follows again, then the newest line is
+    // shown while following. One handler for both, as a second `ensure-row-visible` before the
+    // layout would cancel the first: it measures the old rows under the new offset.
+    property <int> cleared;
+    changed serials => {
+        if root.serials.cleared != root.cleared {
+            root.cleared = root.serials.cleared;
+            root.follow = true;
+        }
+        root.settling = true;
+        root.to-newest();
+    }
+    function to-newest() {
+        if root.follow && root.rows.length > 0 {
+            list.ensure-row-visible(root.rows.length - 1, ScrollBehavior.instant);
+        }
+    }
+    if root.rows.length == 0: Text {
+        x: 14px;
+        y: 8px;
+        width: parent.width - 28px;
+        text: "No output yet. Run a batch to see its output here.";
+        color: Theme.mute;
+        font-family: "JetBrains Mono";
+        font-size: 12px;
+        wrap: word-wrap;
+    }
+    // .log-body's 8px above and below, less the 2px each line has.
+    list := ListView {
+        y: 6px;
+        width: parent.width;
+        height: parent.height - 12px;
+        // A screen reader reads the lines added out, as the console's aria-live="polite" does.
+        accessible-label: "Log";
+        accessible-live-region: polite;
+        // The user scrolled: follow again only once back at the bottom.
+        scrolled => {
+            root.settling = false;
+            root.follow = -self.content-y + self.visible-height >= self.content-height - 32px;
+        }
+        // Lines laid out (or the view resized) while following: the newest is shown, measured.
+        changed content-height => { root.to-newest(); }
+        changed content-y => {
+            if root.settling && -self.content-y + self.visible-height < self.content-height - 1px {
+                root.settling = false;
+                root.to-newest();
+            }
+        }
+        // 12px mono at about style.css's 1.6 line height: 2px above and below each line.
+        for line in root.rows: Rectangle {
+            height: text.preferred-height + 4px;
+            text := Text {
+                x: 14px;
+                y: 2px;
+                width: parent.width - 28px;
+                text: line.text;
+                font-family: "JetBrains Mono";
+                font-size: 12px;
+                wrap: word-wrap;
+                color: line.tone == LogTone.err ? Theme.err
+                    : line.tone == LogTone.warn ? Theme.warn
+                    : line.tone == LogTone.ok ? Theme.ok
+                    : line.tone == LogTone.info ? Theme.info
+                    : line.tone == LogTone.skip ? Theme.mute
+                    : line.tone == LogTone.done ? Theme.done
+                    : Theme.fg;
+            }
+        }
+    }
+}
+
+// The drawer (.logdrawer): its head with Copy and Close over the console of the mode shown. One
+// console per mode, both kept, so each keeps its own scroll. Glass comes with P6: a near opaque
+// pane with the .glass edge and shadow.
+export component LogDrawer inherits Rectangle {
+    // "Log · Remux" or "Log · Extract".
+    in property <string> title;
+    // "Copy", or "Copied" / "Copy failed" for 1.5 s after a Copy.
+    in property <string> copy-label;
+    in property <[LogRow]> remux-rows;
+    in property <[LogRow]> extract-rows;
+    in property <LogSerials> remux-serials;
+    in property <LogSerials> extract-serials;
+    // The extract console is shown, else the remux one.
+    in property <bool> extract;
+    callback copy();
+    callback close();
+    // The Copy or Close button has the focus: closing hands it to the Log toggle.
+    out property <bool> focus-inside: copy.focused || close.focused;
+    border-radius: Theme.pane-radius;
+    background: Theme.float.with-alpha(0.985);
+    border-width: 1px;
+    border-color: Theme.edge;
+    drop-shadow-blur: 40px;
+    drop-shadow-offset-y: 18px;
+    drop-shadow-color: Theme.shadow;
+    clip: true;
+    accessible-role: groupbox;
+    accessible-label: "Log";
+    // Takes the clicks meant for the panes behind.
+    TouchArea { }
+    VerticalLayout {
+        HorizontalLayout {
+            padding-top: 8px;
+            padding-bottom: 8px;
+            padding-left: 14px;
+            padding-right: 14px;
+            spacing: 4px;
+            Text {
+                text: root.title;
+                color: Theme.fg;
+                font-weight: 600;
+                vertical-alignment: center;
+                overflow: elide;
+                horizontal-stretch: 1;
+            }
+            copy := DrawerLink {
+                text: root.copy-label;
+                tip: "Copies the log with its real file paths, for bug reports";
+                clicked => { root.copy(); }
+            }
+            close := DrawerLink {
+                text: "Close";
+                clicked => { root.close(); }
+            }
+        }
+        Rectangle {
+            height: 1px;
+            background: Theme.line;
+        }
+        Rectangle {
+            vertical-stretch: 1;
+            LogConsole {
+                width: parent.width;
+                height: parent.height;
+                visible: !root.extract;
+                rows: root.remux-rows;
+                serials: root.remux-serials;
+            }
+            LogConsole {
+                width: parent.width;
+                height: parent.height;
+                visible: root.extract;
+                rows: root.extract-rows;
+                serials: root.extract-serials;
+            }
+        }
+    }
+}

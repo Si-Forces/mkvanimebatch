@@ -1,0 +1,427 @@
+// Redesign C's job controls (desktop-tauri/ui/index.html .bar, #confirm-modal; style.css .cap,
+// .pill-btn, .stack, .status-pill, .modal-card). Layout and bindings only: the host
+// (desktop-slint/src/jobs.rs) maps every text, count, width and tone from the published controls.
+import { Theme } from "theme.slint";
+
+// The status pill's style (presentation.rs `StatusPill::class`).
+export enum StatusTone { idle, running, success, error, cancelled }
+
+// One mode's job controls as the bottom bar and its tab show them.
+export struct JobBar {
+    run-label: string,
+    // Why Run is disabled: its tooltip.
+    run-title: string,
+    run-disabled: bool,
+    // The mode owns the batch: the bar shows its Stop instead of its Run.
+    owns: bool,
+    stop-label: string,
+    stop-disabled: bool,
+    tone: StatusTone,
+    status: string,
+    count-text: string,
+    clock: string,
+    // The stacked progress bar's widths, in percent.
+    done: float,
+    skipped: float,
+    failed: float,
+    live: float,
+}
+
+// The confirm dialog's texts.
+export struct DialogTexts {
+    title: string,
+    text: string,
+    confirm: string,
+    // A notice: its confirm button (OK) alone, with no Cancel.
+    notice: bool,
+}
+
+export enum CapKind { accent, run, stop }
+
+// A tooltip's card with plain text: a `Tooltip`'s own `text` is markdown.
+component TipCard inherits Rectangle {
+    in property <string> text;
+    width: tip-text.preferred-width + 16px;
+    height: tip-text.preferred-height + 10px;
+    border-radius: 6px;
+    background: Theme.float;
+    border-width: 1px;
+    border-color: Theme.sep;
+    tip-text := Text {
+        text: root.text;
+        color: Theme.fg;
+        font-size: 12px;
+    }
+}
+
+// A pill button with a strong fill (.cap): Run (a play glyph), Stop (a square glyph) or an accent
+// one. Takes the focus, with a ring; Enter or Space activates it. P6 quiets the ring for the pointer.
+export component CapButton inherits Rectangle {
+    in property <string> text;
+    in property <CapKind> kind: accent;
+    in property <bool> enabled: true;
+    // The hover tooltip and accessible description; none when empty.
+    in property <string> tip;
+    callback clicked();
+    out property <bool> focused: keys.has-focus;
+    property <color> ink: kind == CapKind.run ? Theme.run-fg : kind == CapKind.stop ? Theme.err-fg : Theme.accent-fg;
+    property <color> fill: kind == CapKind.run ? Theme.run : kind == CapKind.stop ? Theme.err : Theme.accent;
+    width: row.preferred-width + 36px;
+    height: 36px;
+    border-radius: self.height / 2;
+    background: touch.has-hover && enabled ? fill.darker(10%) : fill;
+    opacity: enabled ? 1 : 0.75;
+    border-width: keys.has-focus ? 2px : 0px;
+    border-color: Theme.accent-ring;
+    forward-focus: keys;
+    accessible-role: button;
+    accessible-label: text;
+    accessible-description: tip;
+    accessible-enabled: enabled;
+    accessible-action-default => { if enabled { root.clicked(); } }
+    row := HorizontalLayout {
+        alignment: center;
+        spacing: 8px;
+        if root.kind == CapKind.run: Path {
+            y: (parent.height - self.height) / 2;
+            width: 10px;
+            height: 12px;
+            viewbox-width: 10;
+            viewbox-height: 12;
+            fill: root.ink;
+            commands: "M0 0L10 6L0 12z";
+            accessible-role: none;
+        }
+        if root.kind == CapKind.stop: Rectangle {
+            y: (parent.height - self.height) / 2;
+            width: 11px;
+            height: 11px;
+            border-radius: 2px;
+            background: root.ink;
+        }
+        Text {
+            text: root.text;
+            color: root.ink;
+            font-weight: 700;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+    }
+    keys := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == Key.Return || event.text == Key.Space {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : not-allowed;
+        // A left press takes the focus, as a browser's button does (the StepButton pattern): the
+        // TouchArea above the FocusScope grabs the press before it.
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
+                keys.focus();
+            }
+        }
+        clicked => { root.clicked(); }
+    }
+    if root.tip != "": Tooltip {
+        TipCard {
+            text: root.tip;
+        }
+    }
+}
+
+// A quiet pill button (.pill-btn): Cancel, "Clear inspection cache…". Takes the focus; Enter or
+// Space activates it.
+export component PillButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    callback clicked();
+    out property <bool> focused: keys.has-focus;
+    width: label.preferred-width + 30px;
+    height: 36px;
+    border-radius: self.height / 2;
+    background: touch.has-hover && enabled ? Theme.hover : Theme.field;
+    opacity: enabled ? 1 : 0.75;
+    border-width: keys.has-focus ? 2px : 1px;
+    border-color: keys.has-focus ? Theme.accent-ring : Theme.edge;
+    forward-focus: keys;
+    accessible-role: button;
+    accessible-label: text;
+    accessible-enabled: enabled;
+    accessible-action-default => { if enabled { root.clicked(); } }
+    label := Text {
+        text: root.text;
+        color: Theme.fg;
+        font-size: 12px;
+        font-weight: 600;
+        accessible-role: none;
+    }
+    keys := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == Key.Return || event.text == Key.Space {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : not-allowed;
+        // A left press takes the focus, as a browser's button does (the StepButton pattern): the
+        // TouchArea above the FocusScope grabs the press before it.
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
+                keys.focus();
+            }
+        }
+        clicked => { root.clicked(); }
+    }
+}
+
+// The status pill in a mode tab (.task-row .status-pill): a dot in the tone's colour; the tab
+// makes none while idle and reads its text out.
+export component StatusDot inherits Rectangle {
+    in property <StatusTone> tone;
+    width: 7px;
+    height: 7px;
+    border-radius: 3.5px;
+    background: tone == StatusTone.running ? Theme.info : tone == StatusTone.success ? Theme.ok : tone == StatusTone.error ? Theme.err : Theme.mute;
+}
+
+// The stacked progress bar (.stack): done, skipped, failed, then the live sliver.
+component ProgressStack inherits Rectangle {
+    in property <JobBar> job;
+    height: 6px;
+    border-radius: 3px;
+    clip: true;
+    background: Theme.line;
+    done := Rectangle {
+        x: 0;
+        width: parent.width * root.job.done / 100;
+        background: Theme.accent;
+    }
+    skipped := Rectangle {
+        x: done.x + done.width;
+        width: parent.width * root.job.skipped / 100;
+        background: Theme.mute;
+    }
+    failed := Rectangle {
+        x: skipped.x + skipped.width;
+        width: parent.width * root.job.failed / 100;
+        background: Theme.err;
+    }
+    Rectangle {
+        x: failed.x + failed.width;
+        width: parent.width * root.job.live / 100;
+        background: Theme.info;
+        opacity: 0.6;
+    }
+}
+
+// The bottom bar (.bar) for the mode shown: its Run (or Stop, while it owns the batch), its
+// queue count, clock and progress, then the worker and I/O job chips from 900px.
+export component BottomBar inherits Rectangle {
+    in property <JobBar> job;
+    // The worker and I/O job chips.
+    in property <string> workers;
+    in property <string> io-jobs;
+    // A Run sent and not answered yet: Run stays locked.
+    in property <bool> run-pending;
+    callback run();
+    callback stop();
+    // The sheet a refused Run opened closed: Run takes the focus back.
+    public function focus-run() {
+        button.focus();
+    }
+    property <bool> wide: root.width >= 900px;
+    height: bar.preferred-height;
+    background: Theme.side;
+    Rectangle {
+        y: 0;
+        height: 1px;
+        background: Theme.line;
+    }
+    bar := HorizontalLayout {
+        padding-top: 8px;
+        padding-bottom: 8px;
+        padding-left: 14px;
+        padding-right: 14px;
+        spacing: root.wide ? 18px : 12px;
+        button := CapButton {
+            y: (parent.height - self.height) / 2;
+            height: 40px;
+            kind: root.job.owns ? CapKind.stop : CapKind.run;
+            text: root.job.owns ? root.job.stop-label : root.job.run-label;
+            enabled: root.job.owns ? !root.job.stop-disabled : !root.job.run-disabled && !root.run-pending;
+            tip: root.job.owns ? "" : root.job.run-title;
+            clicked => {
+                if root.job.owns {
+                    root.stop();
+                } else {
+                    root.run();
+                }
+            }
+        }
+        // .bar-progress
+        VerticalLayout {
+            horizontal-stretch: 1;
+            min-width: 0px;
+            alignment: center;
+            spacing: 5px;
+            HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    text: root.job.count-text;
+                    color: Theme.fg;
+                    font-size: 12px;
+                    font-weight: 700;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
+                Text {
+                    text: root.job.clock;
+                    color: Theme.mute;
+                    font-size: 12px;
+                }
+            }
+            ProgressStack {
+                job: root.job;
+            }
+        }
+        // .bar-chips: hidden under 900px.
+        if root.wide: chip-block := Rectangle {
+            property <string> tip: "Workers and disk I/O jobs: the engine's defaults, or the running batch's own";
+            width: chips.preferred-width;
+            accessible-role: groupbox;
+            accessible-description: self.tip;
+            chips := VerticalLayout {
+                alignment: center;
+                Text {
+                    text: root.workers;
+                    color: Theme.mute;
+                    font-size: 11px;
+                }
+                Text {
+                    text: root.io-jobs;
+                    color: Theme.mute;
+                    font-size: 11px;
+                }
+            }
+            Tooltip {
+                TipCard {
+                    text: chip-block.tip;
+                }
+            }
+        }
+        // The telemetry (P6), then the Log toggle, at the end of the bar.
+        @children
+    }
+}
+
+// The confirm dialog (#confirm-modal) over a backdrop that covers the window. Cancel (a notice's
+// OK) takes the focus as it shows; Tab and Shift+Tab stay on its buttons, Esc cancels.
+export component ConfirmDialog inherits Rectangle {
+    in property <DialogTexts> texts;
+    // Bumped by the host for each dialog shown, which puts the focus back on its first button.
+    in property <int> serial;
+    callback answered(confirmed: bool);
+    function focus-first() {
+        if root.texts.notice {
+            confirm.focus();
+        } else {
+            cancel.focus();
+        }
+    }
+    changed serial => { root.focus-first(); }
+    init => { root.focus-first(); }
+    background: #080c1252;
+    // Takes the clicks meant for the window behind.
+    TouchArea { }
+    FocusScope {
+        focus-on-click: false;
+        focus-on-tab-navigation: false;
+        capture-key-pressed(event) => {
+            // Two buttons: a step back is a step forward. Directional if a third ever comes.
+            if event.text == Key.Tab || event.text == Key.Backtab {
+                if cancel.focused || root.texts.notice {
+                    confirm.focus();
+                } else {
+                    cancel.focus();
+                }
+                return accept;
+            }
+            reject
+        }
+        key-pressed(event) => {
+            if event.text == Key.Escape {
+                root.answered(false);
+                return accept;
+            }
+            reject
+        }
+        // .modal-card, 12% of the window below the overlay's 36px padding.
+        card := Rectangle {
+            y: 36px + parent.height * 0.12;
+            width: min(400px, parent.width - 32px);
+            // At most down to the overlay's bottom padding: a long text elides, so OK stays in
+            // the window (the full text is the card's accessible description).
+            height: min(body.preferred-height, parent.height - self.y - 36px);
+            border-radius: 22px;
+            // As the sheet: near opaque with the .glass edge and shadow, with no blur behind it.
+            background: Theme.float.with-alpha(0.985);
+            border-width: 1px;
+            border-color: Theme.edge;
+            drop-shadow-blur: 40px;
+            drop-shadow-offset-y: 18px;
+            drop-shadow-color: Theme.shadow;
+            accessible-role: groupbox;
+            accessible-label: root.texts.title;
+            accessible-description: root.texts.text;
+            TouchArea { }
+            body := VerticalLayout {
+                padding: 22px;
+                spacing: 10px;
+                Text {
+                    text: root.texts.title;
+                    color: Theme.fg;
+                    font-size: 16px;
+                    font-weight: 700;
+                    wrap: word-wrap;
+                    accessible-role: none;
+                }
+                Text {
+                    text: root.texts.text;
+                    color: Theme.mute;
+                    wrap: word-wrap;
+                    overflow: elide;
+                    min-height: 0px;
+                    vertical-stretch: 1;
+                    accessible-role: none;
+                }
+                HorizontalLayout {
+                    padding-top: 8px;
+                    spacing: 8px;
+                    alignment: end;
+                    // Hidden, it keeps its place left of the confirm button, which stays at the end.
+                    cancel := PillButton {
+                        visible: !root.texts.notice;
+                        text: "Cancel";
+                        clicked => { root.answered(false); }
+                    }
+                    confirm := CapButton {
+                        text: root.texts.confirm;
+                        clicked => { root.answered(true); }
+                    }
+                }
+            }
+        }
+    }
+}

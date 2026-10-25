@@ -70,40 +70,6 @@ fn the_window_shows_published_values_and_its_title_bar_buttons_answer() {
     app.hide().unwrap();
 }
 
-/// A long teardown error wraps, and the notice grows to hold it: the list header starts below it.
-#[test]
-fn a_long_close_notice_wraps_and_pushes_the_list_down() {
-    i_slint_backend_testing::init_no_event_loop();
-    let app = new_app();
-    let mut state = ViewState::new(None);
-    state.remux.title = "Frieren".into();
-    apply(&app, &state);
-    let error = "process cleanup failed: ".repeat(30);
-    app.set_notice_title("Could not close safely".into());
-    app.set_notice_text(error.as_str().into());
-    app.show().unwrap();
-
-    let only = |label: &str| {
-        let mut found: Vec<_> = ElementHandle::find_by_accessible_label(&app, label).collect();
-        assert_eq!(found.len(), 1, "one {label:?}");
-        found.pop().unwrap()
-    };
-    let (title, body, header) = (
-        only("Could not close safely"),
-        only(&error),
-        only("Frieren"),
-    );
-    assert!(
-        body.size().height >= 3.0 * title.size().height,
-        "the error wraps onto several lines"
-    );
-    assert!(
-        header.absolute_position().y >= body.absolute_position().y + body.size().height,
-        "the list header starts below the notice's last line"
-    );
-    app.hide().unwrap();
-}
-
 /// Publications from another thread hop to the event loop, where the newest one is bound. The only
 /// test with a threaded platform: Slint keeps one event loop proxy per process.
 #[test]
@@ -549,12 +515,19 @@ fn the_inspector_shows_every_field_and_fits_the_narrowest_window() {
         "FLAC 2.0 → Opus 192k",
         "Output folder next to the input",
         "2 Same folder, Season 1 › ep1.ass, Auto",
+    ] {
+        only(&app, label);
+    }
+    // Below the fold over the bottom bar: the pane scrolls to them.
+    scroll(&app, 640.0, false);
+    for label in [
         "FONTS · 2",
         "2 attached fonts · folder: auto",
         "Assign subtitle",
     ] {
         only(&app, label);
     }
+    scroll(&app, 640.0, true);
     assert_eq!(
         ElementHandle::find_by_accessible_label(&app, "Reset").count(),
         0
@@ -1039,7 +1012,7 @@ fn key(app: &App, text: impl Into<slint::SharedString>) {
 }
 
 /// The pointer pressed, or released, at `element`'s centre.
-fn pointer(app: &App, element: &ElementHandle, pressed: bool) {
+pub(crate) fn pointer(app: &App, element: &ElementHandle, pressed: bool) {
     use slint::platform::{PointerEventButton, WindowEvent};
     let (at, size) = (element.absolute_position(), element.size());
     let position = slint::LogicalPosition::new(at.x + size.width / 2.0, at.y + size.height / 2.0);

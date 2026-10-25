@@ -91,7 +91,7 @@ fn assign_subtitle(send: &Intents, app: &App, path: &str) {
     if !inspector.shown {
         return;
     }
-    if app.get_busy() {
+    if app.get_locked() {
         restore_form(app);
         return;
     }
@@ -250,7 +250,7 @@ pub(crate) fn wire(app: &App, core: CoreHandle, runtime: Handle, publisher: Slin
             }
             return;
         }
-        if app.get_busy() || picking_subtitle.swap(true, Ordering::Relaxed) {
+        if app.get_locked() || picking_subtitle.swap(true, Ordering::Relaxed) {
             restore_form(&app);
             return;
         }
@@ -320,7 +320,8 @@ pub(crate) fn wire(app: &App, core: CoreHandle, runtime: Handle, publisher: Slin
         }
     });
 
-    // The settings sheet, the Preset Profiles and Open folder.
+    // Run, Stop and the cache clear; the settings sheet, the Preset Profiles and Open folder.
+    crate::jobs::wire(app, intents.clone());
     crate::settings::wire(app, intents, edits);
 }
 

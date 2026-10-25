@@ -43,6 +43,8 @@ use tokio::time::Instant;
 mod start;
 mod timers;
 use start::{Start, Step};
+// A view tells these refusals, which come before the draft is read, from a draft refusal.
+pub use start::{RUN_BUSY, RUN_SCANNING};
 use timers::Telemetry;
 
 /// The shortest gap between two View State publications: at most about 15 a second.
