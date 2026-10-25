@@ -33,11 +33,18 @@
 #[path = "../src/inspector.rs"]
 mod inspector;
 #[allow(dead_code, unused_imports)]
+#[path = "../src/intents.rs"]
+mod intents;
+#[allow(dead_code, unused_imports)]
 #[path = "../src/publisher.rs"]
 mod publisher;
 #[allow(dead_code, unused_imports)]
 #[path = "../src/queue.rs"]
 mod queue;
+// The hop writes the drafts, chips and presets too (P4).
+#[allow(dead_code, unused_imports)]
+#[path = "../src/settings.rs"]
+mod settings;
 
 use mkv_anime_batch_slint_ui::{App, Mode, QueueFilter, Theme};
 use mkv_desktop_core::actor::ViewState;
@@ -250,6 +257,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // SlintPublisher's push and schedule, with the hop timed: its time is the publication's
     // UI-thread time.
     let pending = Arc::new(Coalescer::default());
+    let (edits, filter_edits) = (settings::Edits::default(), settings::Edits::default());
     let hops: Arc<Mutex<Vec<f64>>> = Arc::default();
     let maps: Arc<Mutex<Vec<f64>>> = Arc::default();
     let (window, timed, mapped) = (app.as_weak(), Arc::clone(&hops), Arc::clone(&maps));
@@ -259,11 +267,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         let scheduled = pending.push_state(state);
         mapped.lock().unwrap().push(ms(start.elapsed()));
         if scheduled {
-            let (pending, window, hops) =
-                (Arc::clone(&pending), window.clone(), Arc::clone(&timed));
+            let (pending, window, hops, edits) = (
+                Arc::clone(&pending),
+                window.clone(),
+                Arc::clone(&timed),
+                Arc::clone(&edits),
+            );
             let _ = slint::invoke_from_event_loop(move || {
                 let start = Instant::now();
-                publisher::hop(&pending, &window);
+                publisher::hop(&pending, &edits, &window);
                 hops.lock().unwrap().push(ms(start.elapsed()));
             });
         }
@@ -318,7 +330,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 filtered.set_filter(Mode::Remux, QueueFilter::Failed);
                 filtered.remap(Mode::Remux);
                 let start = Instant::now();
-                publisher::hop(&filtered, &filter_window);
+                publisher::hop(&filtered, &filter_edits, &filter_window);
                 let filter = ms(start.elapsed());
                 let verdict = |pass: bool| if pass { "PASS" } else { "FAIL" };
                 let render_max = renders.iter().copied().fold(0.0, f64::max);
