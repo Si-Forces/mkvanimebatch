@@ -6,6 +6,7 @@ mod intents;
 mod publisher;
 mod queue;
 mod renderer;
+mod settings;
 #[cfg(test)]
 mod ui_tests;
 

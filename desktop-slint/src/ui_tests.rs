@@ -4,7 +4,7 @@
 use crate::inspector::sample_view;
 use crate::publisher::{install_models, SlintPublisher};
 use i_slint_backend_testing::{ElementHandle, TestingBackend, TestingBackendOptions};
-use mkv_anime_batch_slint_ui::{App, FontProbe, Mode, QueueFilter, Theme};
+use mkv_anime_batch_slint_ui::{App, FontProbe, Mode, QueueFilter, Sheet, Theme};
 use mkv_desktop_core::actor::{Publisher, ScanView, ViewState};
 use mkv_desktop_core::presentation::{self, Bucket, Tone};
 use mkv_desktop_core::queue::Row;
@@ -1019,4 +1019,192 @@ fn cjk_names_render_through_the_system_font_fallback() {
             "{name}: ink {shown}, missing glyphs {tofu}"
         );
     }
+}
+
+/// A key pressed and released in the window.
+fn key(app: &App, text: impl Into<slint::SharedString>) {
+    use slint::platform::WindowEvent;
+    let text = text.into();
+    app.window()
+        .dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
+    app.window()
+        .dispatch_event(WindowEvent::KeyReleased { text });
+}
+
+/// The pointer pressed, or released, at `element`'s centre.
+fn pointer(app: &App, element: &ElementHandle, pressed: bool) {
+    use slint::platform::{PointerEventButton, WindowEvent};
+    let (at, size) = (element.absolute_position(), element.size());
+    let position = slint::LogicalPosition::new(at.x + size.width / 2.0, at.y + size.height / 2.0);
+    let button = PointerEventButton::Left;
+    app.window().dispatch_event(if pressed {
+        WindowEvent::PointerPressed { position, button }
+    } else {
+        WindowEvent::PointerReleased { position, button }
+    });
+}
+
+/// The settings sheet, found by its label: the gear that opens it is labelled the same.
+fn sheet_panel(app: &App, label: &str) -> Option<ElementHandle> {
+    ElementHandle::find_by_accessible_label(app, label).find(|element| {
+        element.accessible_role() == Some(i_slint_backend_testing::AccessibleRole::Groupbox)
+    })
+}
+
+/// Each gear opens its mode's sheet; Done, a click on the backdrop and Esc (from a text field
+/// too) close it, and the gear that opened it has the focus again: Enter opens it once more. The
+/// sheet fits the narrowest window, its body scrolling.
+#[test]
+fn the_sheet_opens_from_its_gear_closes_every_way_and_gives_the_focus_back() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(760.0, 520.0));
+    apply(&app, &ViewState::new(None));
+    app.show().unwrap();
+    let tick = || i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1));
+    let gear = |label: &str| {
+        ElementHandle::find_by_accessible_label(&app, label)
+            .find(|element| {
+                element.accessible_role() == Some(i_slint_backend_testing::AccessibleRole::Button)
+            })
+            .unwrap()
+    };
+
+    gear("Extract settings").invoke_accessible_default_action();
+    tick();
+    assert!(app.get_sheet_open());
+    assert_eq!(app.get_mode(), Mode::Extract);
+    let panel = sheet_panel(&app, "Extract settings").expect("the extract sheet shows");
+    assert!(
+        panel.absolute_position().y + panel.size().height <= 520.0,
+        "it fits the window"
+    );
+    only(&app, "Done").invoke_accessible_default_action();
+    tick();
+    assert!(!app.get_sheet_open());
+    // The gear has the focus back: Enter opens the sheet again.
+    key(&app, slint::platform::Key::Return);
+    tick();
+    assert!(app.get_sheet_open(), "Enter on the focused gear opens it");
+    assert_eq!(app.get_mode(), Mode::Extract);
+
+    // Esc, with Done focused as the sheet opens.
+    key(&app, slint::platform::Key::Escape);
+    tick();
+    assert!(!app.get_sheet_open());
+
+    // A click on the backdrop closes it; one on the sheet does not.
+    gear("Remux settings").invoke_accessible_default_action();
+    tick();
+    assert_eq!(app.get_mode(), Mode::Remux);
+    let panel = sheet_panel(&app, "Remux settings").unwrap();
+    pointer(&app, &panel, true);
+    pointer(&app, &panel, false);
+    tick();
+    assert!(app.get_sheet_open(), "a click on the sheet keeps it open");
+    // Bottom left, beside the sheet.
+    for pressed in [true, false] {
+        use slint::platform::{PointerEventButton, WindowEvent};
+        let (position, button) = (
+            slint::LogicalPosition::new(20.0, 505.0),
+            PointerEventButton::Left,
+        );
+        app.window().dispatch_event(if pressed {
+            WindowEvent::PointerPressed { position, button }
+        } else {
+            WindowEvent::PointerReleased { position, button }
+        });
+    }
+    tick();
+    assert!(!app.get_sheet_open(), "a click on the backdrop closes it");
+
+    // Esc from a text field: the field is left (an input folder left rescans, P4), then closed.
+    app.invoke_open_sheet(Mode::Remux, "input_dir".into());
+    tick();
+    tick();
+    let sheet = app.global::<Sheet>();
+    assert_eq!(sheet.get_focused(), "input_dir");
+    let left = Rc::new(RefCell::new(Vec::<String>::new()));
+    let log = Rc::clone(&left);
+    sheet.on_left(move |key| log.borrow_mut().push(key.into()));
+    key(&app, slint::platform::Key::Escape);
+    tick();
+    assert!(!app.get_sheet_open());
+    assert_eq!(sheet.get_focused(), "");
+    assert_eq!(left.borrow().first().map(String::as_str), Some("input_dir"));
+    app.hide().unwrap();
+}
+
+/// A stepper's − and + step on a pointer press and stop on its release, take the focus, and step
+/// once on Enter, Space or a screen reader's action; every control is labelled.
+#[test]
+fn the_steppers_answer_the_pointer_the_keyboard_and_a_screen_reader() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window()
+        .set_size(slint::LogicalSize::new(920.0, 1100.0));
+    apply(&app, &ViewState::new(None));
+    app.show().unwrap();
+    app.invoke_open_sheet(Mode::Remux, "".into());
+    let tick = || i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1));
+    tick();
+    let calls = Rc::new(RefCell::new(Vec::<String>::new()));
+    let sheet = app.global::<Sheet>();
+    let log = Rc::clone(&calls);
+    sheet.on_step_pressed(move |key, up| log.borrow_mut().push(format!("press {key} {up}")));
+    let log = Rc::clone(&calls);
+    sheet.on_step_released(move || log.borrow_mut().push("release".into()));
+    let log = Rc::clone(&calls);
+    sheet.on_step_key(move |key, up| log.borrow_mut().push(format!("key {key} {up}")));
+
+    let plus = only(&app, "Increase workers");
+    pointer(&app, &plus, true);
+    pointer(&app, &plus, false);
+    tick();
+    key(&app, slint::platform::Key::Return);
+    key(&app, " ");
+    only(&app, "Decrease offset").invoke_accessible_default_action();
+    let calls = calls.borrow();
+    assert_eq!(calls[0], "press workers true");
+    assert!(calls.contains(&"release".to_string()));
+    let keys: Vec<_> = calls
+        .iter()
+        .filter(|call| call.starts_with("key"))
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            "key workers true",
+            "key workers true",
+            "key sub_offset false"
+        ]
+    );
+
+    for label in [
+        "Input folder",
+        "Output directory",
+        "Fonts directory",
+        "Assets directory",
+        "Browse for the Input folder",
+        "Opus bitrate",
+        "Subtitle offset (seconds)",
+        "Increase offset",
+        "Encoder complexity",
+        "Encoder complexity value",
+        "Workers",
+        "Decrease workers",
+        "Disk I/O",
+        "Increase disk I/O jobs",
+        "FFmpeg threads",
+        "Decrease FFmpeg threads",
+        "Dry run (plan only, write nothing)",
+        "Bypass inspection cache",
+        "Done",
+    ] {
+        assert!(
+            ElementHandle::find_by_accessible_label(&app, label).count() >= 1,
+            "{label:?} is labelled"
+        );
+    }
+    app.hide().unwrap();
 }
