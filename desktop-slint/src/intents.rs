@@ -8,14 +8,13 @@ use crate::publisher::SlintPublisher;
 use mkv_anime_batch_slint_ui::{App, Mode};
 use mkv_core::pipeline::PipelineMode;
 use mkv_desktop_core::actor::{CoreHandle, Intent, ViewState};
-use mkv_desktop_core::draft::DraftChanges;
 use mkv_desktop_core::queue::Direction;
 use slint::{ComponentHandle, Model, SharedString};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::runtime::Handle;
 
-fn pipeline(mode: Mode) -> PipelineMode {
+pub(crate) fn pipeline(mode: Mode) -> PipelineMode {
     match mode {
         Mode::Remux => PipelineMode::Remux,
         Mode::Extract => PipelineMode::Extract,
@@ -36,21 +35,37 @@ pub(crate) fn boot_mode(state: &ViewState) -> Mode {
 }
 
 #[derive(Clone)]
-struct Intents {
-    core: CoreHandle,
-    runtime: Handle,
-    window: slint::Weak<App>,
+pub(crate) struct Intents {
+    pub(crate) core: CoreHandle,
+    pub(crate) runtime: Handle,
+    pub(crate) window: slint::Weak<App>,
 }
 
 impl Intents {
     /// Sends `intent` now; awaits its answer on the runtime, logs a refusal, then runs `answered`.
-    fn send(&self, name: &'static str, intent: Intent, answered: impl FnOnce() + Send + 'static) {
+    pub(crate) fn send(
+        &self,
+        name: &'static str,
+        intent: Intent,
+        answered: impl FnOnce() + Send + 'static,
+    ) {
+        self.send_answered(name, intent, |_| answered());
+    }
+
+    /// As [`send`](Self::send), with the answer.
+    pub(crate) fn send_answered(
+        &self,
+        name: &'static str,
+        intent: Intent,
+        answered: impl FnOnce(Result<bool, String>) + Send + 'static,
+    ) {
         let answer = self.core.dispatch(intent);
         self.runtime.spawn(async move {
-            if let Err(error) = answer.await {
+            let answer = answer.await;
+            if let Err(error) = &answer {
                 tracing::warn!("[{name}] refused: {error}");
             }
-            answered();
+            answered(answer);
         });
     }
 
@@ -138,7 +153,7 @@ fn resend_assignment(send: &Intents, app: &App) {
 }
 
 /// Clears the one-dialog flag when dropped, so a dialog that panics cannot leave Open folder dead.
-struct Picking(Arc<AtomicBool>);
+pub(crate) struct Picking(pub(crate) Arc<AtomicBool>);
 
 impl Drop for Picking {
     fn drop(&mut self) {
@@ -148,6 +163,7 @@ impl Drop for Picking {
 
 /// Wires the window's queue callbacks to the core. Each acts on the mode the window shows.
 pub(crate) fn wire(app: &App, core: CoreHandle, runtime: Handle, publisher: SlintPublisher) {
+    let edits = publisher.edits();
     let window = app.as_weak();
     let intents = Intents {
         core,
@@ -304,52 +320,12 @@ pub(crate) fn wire(app: &App, core: CoreHandle, runtime: Handle, publisher: Slin
         }
     });
 
-    // One folder dialog at a time: it has no parent window, so it does not block a second click.
-    let picking = Arc::new(AtomicBool::new(false));
-    app.on_open_folder(move || {
-        let Some(app) = window.upgrade() else {
-            return;
-        };
-        if app.get_busy() || picking.swap(true, Ordering::Relaxed) {
-            return;
-        }
-        let mode = pipeline(app.get_mode());
-        let (send, picking, window) = (
-            intents.clone(),
-            Picking(Arc::clone(&picking)),
-            window.clone(),
-        );
-        // The dialog blocks until it is answered: never on the event loop.
-        intents.runtime.spawn_blocking(move || {
-            let picked = rfd::FileDialog::new().pick_folder();
-            // Back on the event loop, so the Intents keep their order with the other callbacks'.
-            let _ = window.upgrade_in_event_loop(move |app| {
-                drop(picking);
-                // A batch may have started while the dialog was open (app.js re-checks too).
-                let Some(path) = picked.filter(|_| !app.get_busy()) else {
-                    return;
-                };
-                let path = path.to_string_lossy().into_owned();
-                // The picked folder is the Settings Draft's input folder, which Run reads.
-                let changes = DraftChanges {
-                    input_dir: Some(path.clone()),
-                    ..DraftChanges::default()
-                };
-                send.send("edit_draft", Intent::EditDraft { mode, changes }, || {});
-                let intent = Intent::ScanDirectory {
-                    mode,
-                    path,
-                    force: false,
-                    no_cache: false,
-                };
-                send.send("scan_directory", intent, || {});
-            });
-        });
-    });
+    // The settings sheet, the Preset Profiles and Open folder.
+    crate::settings::wire(app, intents, edits);
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use mkv_anime_batch_slint_ui::Inspector as InspectorPane;
     use mkv_core::item_id::ItemId;
@@ -361,7 +337,7 @@ mod tests {
     use mkv_desktop_core::telemetry::{Sampler, TelemetryData};
 
     /// Every directory holds episodes `a`, `b` and `c`.
-    struct Episodes;
+    pub(crate) struct Episodes;
 
     impl Inspector for Episodes {
         async fn identity(&self, path: String) -> Result<String, String> {
@@ -391,7 +367,7 @@ mod tests {
     }
 
     /// Runs nothing; the test never asks it to.
-    struct NoJobs;
+    pub(crate) struct NoJobs;
 
     impl Launcher for NoJobs {
         async fn resolve(&self, _: BatchRequest) -> Result<EffectiveSettings, String> {
@@ -407,7 +383,7 @@ mod tests {
         }
     }
 
-    struct NoSamples;
+    pub(crate) struct NoSamples;
 
     impl Sampler for NoSamples {
         async fn sample(&self) -> Result<TelemetryData, String> {

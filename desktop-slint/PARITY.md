@@ -49,9 +49,9 @@ Paths: `ui/` is `desktop-tauri/ui/`, `src/` is `desktop-tauri/src-tauri/src/`, `
 | [x] | `Inspect` | `ui/queue-view.js:398` | P2 | Row highlighted at once (`pending-inspect`, cleared once answered). |
 | [x] | `AssignSubtitle` | `ui/app.js:536` | P3 | Fields as typed, read when sent; the core builds the assignment. Sent when a choice or a language is picked (not the one shown), a file is picked, or a tag, title or offset is committed (Enter or focus out, once edited, as a webview `change`; a click on a control that takes no focus (a row, Open folder, a filter chip, a Library entry, a mode tab, Reset) commits it first, as the webview's blur does). Answered or refused, the fields are put back on what is published (`inspector::restore_form`), but a text field typed into since its last commit keeps its text on the same row (app.js redraws over it); a progress publication leaves typed fields alone (the `lastAssignKey` rule, `InspectorList`). |
 | [x] | `ClearTrack` | `ui/app.js:545` | P3 | The Inspector's Reset, and Automatic in the select. |
-| [ ] | `EditDraft` | `ui/settings-draft.js:85` | P4 | `false` answer restores the published value. |
-| [ ] | `StepDraft` | `ui/settings-draft.js:90` | P4 | Stepper click; hold-to-repeat is the view's (400 ms, then 80 ms). |
-| [ ] | `SetPreset` | `ui/preset-menu.js:62` | P4 | Remux only. |
+| [x] | `EditDraft` | `ui/settings-draft.js:85` | P4 | Sent as typed on each keystroke, again on Enter or when the field is left once edited (a `change`), on a checkbox's toggle and twice on a bitrate pick (input, change), as the webview does; the slider sends its whole value and the box follows it. Guarded per key until answered (`settings::PendingEdits`): a refusal puts the published value back (into the focused field too), a `false` does only for the complexity (`settings::settle`). |
+| [x] | `StepDraft` | `ui/settings-draft.js:90` | P4 | Stepper press; hold-to-repeat is the host's `settings::Repeater` (400 ms, then 80 ms; tested on mock time). Guarded like `EditDraft`; nothing while a batch runs. |
+| [x] | `SetPreset` | `ui/preset-menu.js:62` | P4 | Remux only; not sent while a batch runs. |
 | [ ] | `Run` | `ui/job-controller.js:74` | P5 | Run pending locks Run and the settings until answered. Every Run forces a scan, so a new `manifest_rev`, and `queue::diff_rows` then resets the whole row model where the webview redraws in place (same directory, same id order; `ui/queue-view.js:231-238`). Measure that reset in P5's bench; if it hitches, patch in place on the same directory and id sequence. |
 | [ ] | `Stop` | `ui/job-controller.js:96` | P5 | |
 | [ ] | `ClearCache` | `ui/job-controller.js:110` | P5 | After the confirm dialog. |
@@ -79,7 +79,7 @@ Paths: `ui/` is `desktop-tauri/ui/`, `src/` is `desktop-tauri/src-tauri/src/`, `
 
 | ✓ | What | Where today | Slice | Notes |
 |---|---|---|---|---|
-| [x] | Mode tabs Remux / Extract | `ui/index.html:65-79`, `ui/app.js:296` | P2 | The status pill is its own row (P5); the gear buttons come with the sheet (P4). One pane per mode, both kept (the hidden one invisible), so each list keeps its own scroll as the webview's two lists do; a card puts the list back at the top, as `clearList` does. |
+| [x] | Mode tabs Remux / Extract | `ui/index.html:65-79`, `ui/app.js:296` | P2 | The status pill is its own row (P5); each tab's gear opens its settings sheet (P4). One pane per mode, both kept (the hidden one invisible), so each list keeps its own scroll as the webview's two lists do; a card puts the list back at the top, as `clearList` does. |
 | [ ] | Mode tab icons | `ui/index.html:65-79` | P5 | Not drawn yet. |
 | [x] | Boot shows the extract view when a run or job is in extract | `ui/app.js:916` | P2 | `intents::boot_mode`. |
 | [x] | List header: release title, crumbs path, `count_text` | `ui/index.html:105-106`, `ui/app.js:334` | P2 | `count_text` sits beside the title until P5 brings the bottom bar. Crumbs elide instead of wrapping. |
@@ -93,7 +93,7 @@ Paths: `ui/` is `desktop-tauri/ui/`, `src/` is `desktop-tauri/src-tauri/src/`, `
 | [x] | Row reorder buttons Move up / Move down | `ui/queue-view.js:356-357` | P2 | Shown on hover, hidden while a filter shows. |
 | [x] | Row click inspects | `ui/queue-view.js:106` | P2 | |
 | [x] | Empty state card with "Open folder…" | `ui/index.html:128`, `ui/queue-view.js:130` | P2 | Text is the published `empty`; the scanning and failed-scan cards too (`queue::map_head`). |
-| [ ] | Folder picker from Browse… on input-dir fields | `ui/index.html:311,403`, `ui/app.js:617` | P2 | Picker on a worker, one at a time; busy is checked again when it answers; then `EditDraft { input_dir }` and the scan, as app.js does. The picker is P2's `open-folder`; the fields and their Browse… buttons come with the settings sheet (P4). |
+| [x] | Folder picker from Browse… on input-dir fields | `ui/index.html:311,403`, `ui/app.js:617` | P2 | Picker on a worker, one at a time (Browse… and Open folder share it, `settings::browse`); busy is checked again when it answers, and the folder goes to the field and mode that opened it: written into the field, then `EditDraft` (guarded) and, for the input folder, the scan, as `chooseInputDirectory` does. |
 | [x] | CJK filenames render | — | P2 | System font fallback: `ui_tests::cjk_names_render_through_the_system_font_fallback` checks it on the software renderer only (skips on a Linux machine with no CJK font, such as the CI runner); Skia is checked by eye. The first CJK glyph a process draws loads the fallback font in that frame (28 ms warm, 220 ms cold on the HD 4000 laptop), and each weight its own fallback candidates (600 and 700 open the bold ones), so `app.slint` draws a few at 400, 600 and 700, all but transparent, from the first frame on (a timer from the window's creation could run out before a slow cold first frame, and nothing was drawn). Parley prunes the candidates it does not draw with (`SourceCache::prune(128)` per layout), so the first CJK text shaped mid-run opens about 20 font files again (16 s into the bench); the pre-warm only makes those reads page-cache hits. The bench scrolls through Japanese and Simplified Chinese names. |
 
 ## Library and Episode Inspector
@@ -113,21 +113,21 @@ Paths: `ui/` is `desktop-tauri/ui/`, `src/` is `desktop-tauri/src-tauri/src/`, `
 
 | ✓ | What | Where today | Slice | Notes |
 |---|---|---|---|---|
-| [ ] | Settings sheet per mode (gear button), Done, backdrop click / Esc closes, focus back to opener | `ui/index.html:70,80,291-298`, `ui/app.js:682,817-833` | P4 | |
-| [ ] | Remux fields: input/out/fonts/assets dirs with Browse…, bitrate, subtitle offset, complexity slider + value, workers, I/O jobs, FFmpeg threads, dry run, no cache | `ui/index.html:304-391` | P4 | Browse… for non-input dirs sends `EditDraft`. |
-| [ ] | Extract fields: input/out/fonts dirs with Browse…, workers, I/O jobs, dry run, no cache | `ui/index.html:395-444` | P4 | |
-| [ ] | Draft write-back into unfocused fields; complexity restored on blur | `ui/settings-draft.js:114-116` | P4 | |
-| [ ] | Input-dir field change/blur rescans | `ui/job-controller.js:51-52` | P4 | With P2's scan. |
-| [ ] | Steppers −/+ with hold-to-repeat and keyboard activation | `ui/app.js:98-125` | P4 | |
-| [ ] | Preset menu (remux) | `ui/index.html:92`, `ui/preset-menu.js` | P4 | |
-| [ ] | Worker / I/O chips and `auto (N)` hints | `ui/settings-chips.js` | P4 | |
-| [ ] | Flagged field (`input-error`) and the sheet opened on it after a refused Run | `ui/job-controller.js:178` | P4 | |
+| [x] | Settings sheet per mode (gear button), Done, backdrop click / Esc closes, focus back to opener | `ui/index.html:70,80,291-298`, `ui/app.js:682,817-833` | P4 | `settings.slint` `SettingsSheet` over a backdrop; opens with Done focused; a closing sheet leaves the focused field first (it changes if edited, as a closing dialog blurs it). The gear takes the focus back (Enter or Space opens it again); its focus ring, and the webview's quiet focus after a pointer close, come with P6's rings. Fits 760x520: the body scrolls. A sheet the host opens (`open-sheet`) gives the focus back to nothing until P5's Run button is its opener. |
+| [x] | Remux fields: input/out/fonts/assets dirs with Browse…, bitrate, subtitle offset, complexity slider + value, workers, I/O jobs, FFmpeg threads, dry run, no cache | `ui/index.html:304-391` | P4 | Browse… for non-input dirs sends `EditDraft`. The bitrate entries are the host's (`settings::BITRATES`). "Clear inspection cache…" is P5's, with its confirm dialog. Tooltips are the fields' accessible descriptions. |
+| [x] | Extract fields: input/out/fonts dirs with Browse…, workers, I/O jobs, dry run, no cache | `ui/index.html:395-444` | P4 | With the extract note. |
+| [x] | Draft write-back into unfocused fields; complexity restored on blur | `ui/settings-draft.js:114-116` | P4 | `settings::show` in the hop: every key but the focused field's (`Sheet.focused`) and the pending ones. The slider and the box share the `complexity` key, so a focused slider spares the box too. |
+| [x] | Input-dir field change/blur rescans | `ui/job-controller.js:51-52` | P4 | With P2's scan, of the trimmed path: on a change (Enter, or left once edited) and on every blur. |
+| [x] | Steppers −/+ with hold-to-repeat and keyboard activation | `ui/app.js:98-125` | P4 | A left press steps and repeats until release or the pointer leaves; the button takes the focus; Enter, Space or the screen reader's action steps once. A sheet closed under a held button stops its repeat. |
+| [x] | Preset menu (remux) | `ui/index.html:92`, `ui/preset-menu.js` | P4 | In the sidebar under the Library, while remux shows; "Locked" in its heading while a batch runs. Row texts from `settings::map_presets`. |
+| [x] | Worker / I/O chips and `auto (N)` hints | `ui/settings-chips.js` | P4 | The chips sit in a bottom bar shown from 900 px, as `.bar-chips` is; P5 fills the bar and shows it at every width. The hints are the Workers and Disk I/O placeholders (`settings::map_chips`), `auto` until known. |
+| [x] | Flagged field (`input-error`) and the sheet opened on it after a refused Run | `ui/job-controller.js:178` | P4 | An error ring on the flagged field (both complexity controls for `complexity`). `settings::open_on_flagged` opens the sheet on it (the cursor in the box), tested directly; P5's Run button calls it once a Run is refused. |
 
 ## Jobs and Run Log
 
 | ✓ | What | Where today | Slice | Notes |
 |---|---|---|---|---|
-| [ ] | Run remux / Run extract (label, tooltip), Stop | `ui/index.html:232-237`, `ui/job-controller.js` | P5 | |
+| [ ] | Run remux / Run extract (label, tooltip), Stop | `ui/index.html:232-237`, `ui/job-controller.js` | P5 | A refused Run calls `settings::open_on_flagged` (P4), with the Run button as the sheet's opener, so the focus goes back to it. |
 | [ ] | Queue count, clock, progress stack (done/skip/fail/live) | `ui/index.html:241-246` | P5 | |
 | [ ] | Status pill per mode | `ui/index.html:68,78` | P5 | |
 | [ ] | "Clear inspection cache…" with confirm dialog (Cancel / Clear cache, Esc cancels) | `ui/index.html:391,444,452-458`, `ui/job-controller.js:102` | P5 | Dialogs queue: a second waits for the first. |

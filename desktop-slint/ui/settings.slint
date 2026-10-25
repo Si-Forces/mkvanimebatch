@@ -1,0 +1,760 @@
+// Redesign C's settings sheet (desktop-tauri/ui/index.html #settings-sheet, style.css .sheet), the
+// sidebar's Preset Profiles (.preset-row) and the gear buttons (.task-settings-btn). Layout and
+// bindings only: the host (desktop-slint/src/settings.rs) maps the published Settings Draft, sends
+// the edits and holds every rule: which field a publication writes back, the steppers' repeat, the
+// hints and the preset texts.
+import { Button, CheckBox, ComboBox, LineEdit, ScrollView, Slider } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+// One mode's Settings Draft as the sheet shows it, every field as typed but the two checkboxes.
+// The remux-only fields stay empty in extract's. `bitrate` is the index of the bitrate select's
+// entry (-1: none of them).
+export struct DraftForm {
+    input-dir: string,
+    out-dir: string,
+    fonts-dir: string,
+    assets-dir: string,
+    bitrate: int,
+    complexity: string,
+    sub-offset: string,
+    workers: string,
+    io-jobs: string,
+    ffmpeg-threads: string,
+    dry-run: bool,
+    no-cache: bool,
+}
+
+// One Preset Profile row: its name over the encode it sets, `active` when the remux draft is on it.
+export struct PresetItem {
+    id: string,
+    name: string,
+    sub: string,
+    active: bool,
+    a11y: string,
+}
+
+// The worker and I/O job chips, and the placeholders of the Workers and Disk I/O fields.
+export struct ChipTexts {
+    workers: string,
+    io-jobs: string,
+    workers-hint: string,
+    io-jobs-hint: string,
+}
+
+// The sheet's fields talk to the host through this global. Each field is named by its draft key
+// (`input_dir`, `complexity`, …), and the sheet shows the mode the window shows.
+export global Sheet {
+    // The key of the field with the focus, which a publication leaves alone; empty for none.
+    in-out property <string> focused;
+    // The focused field was edited since its last change (a webview `change`).
+    in-out property <bool> changed-since;
+    // The field to put the cursor in when the sheet opens, or now with `focus-serial` bumped.
+    in-out property <string> focus-key;
+    in-out property <int> focus-serial;
+
+    // A field was edited (a webview `input`, a checkbox's or a select's change).
+    callback edited(key: string);
+    // A field was changed: Enter, or left once edited.
+    callback committed(key: string);
+    // A field lost the focus.
+    callback left(key: string);
+    // The complexity slider moved to `value`.
+    callback slid(value: float);
+    // A stepper button was pressed with the pointer, then released (or the pointer left it).
+    callback step-pressed(key: string, up: bool);
+    callback step-released();
+    // A stepper button was activated from the keyboard or a screen reader: one step.
+    callback step-key(key: string, up: bool);
+    callback browse(key: string);
+    callback pick-preset(id: string);
+
+    // A field took the focus: the one that had it is left first.
+    public function enter(key: string) {
+        if self.focused != key {
+            self.leave(self.focused);
+            self.focused = key;
+        }
+    }
+
+    // The field `key` lost the focus, or the sheet closes over it: it changes if edited, then is
+    // left. Nothing when another field already took the focus (it left this one).
+    public function leave(key: string) {
+        if key != "" && self.focused == key {
+            self.focused = "";
+            if self.changed-since {
+                self.changed-since = false;
+                self.committed(key);
+            }
+            self.left(key);
+        }
+    }
+
+    // Enter in the focused field: a change, if edited.
+    public function accept(key: string) {
+        if self.changed-since && self.focused == key {
+            self.changed-since = false;
+            self.committed(key);
+        }
+    }
+}
+
+// The gear icon (index.html .task-settings-btn svg): a cog around a circle.
+component GearIcon inherits Path {
+    width: 17px;
+    height: 17px;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    stroke-width: 1.9px;
+    stroke-line-cap: round;
+    stroke-line-join: round;
+    commands: "M15 12a3 3 0 1 1-6 0a3 3 0 1 1 6 0z M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z";
+}
+
+// A mode tab's gear (.icon-btn.task-settings-btn): opens the mode's settings sheet, from a click,
+// Enter or Space. Takes the focus back when the sheet closes. Its focus ring comes with P6's.
+export component GearButton inherits Rectangle {
+    in property <string> label;
+    out property <bool> hovered: touch.has-hover;
+    callback clicked();
+    width: 36px;
+    height: 36px;
+    border-radius: 8px;
+    forward-focus: keys;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-action-default => { root.clicked(); }
+    keys := FocusScope {
+        key-pressed(event) => {
+            if event.text == Key.Return || event.text == Key.Space {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+    GearIcon {
+        stroke: touch.has-hover ? Theme.fg : Theme.mute;
+    }
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+// A Preset Profile row (.nav.preset-row): a dot, the name over the encode it sets. Locked while a
+// batch runs (.lock-while-job).
+export component PresetRow inherits Rectangle {
+    in property <PresetItem> item;
+    in property <bool> enabled: true;
+    callback clicked();
+    height: 44px;
+    border-radius: 8px;
+    background: item.active ? Theme.accent-soft : touch.has-hover && enabled ? Theme.hover : transparent;
+    border-width: item.active ? 1px : 0px;
+    border-color: Theme.accent-ring;
+    opacity: enabled ? 1 : 0.75;
+    accessible-role: button;
+    accessible-label: item.a11y;
+    accessible-checkable: true;
+    accessible-checked: item.active;
+    accessible-enabled: enabled;
+    accessible-action-default => { if enabled { root.clicked(); } }
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 10px;
+        Rectangle {
+            y: (parent.height - self.height) / 2;
+            width: 9px;
+            height: 9px;
+            border-radius: 4.5px;
+            border-width: 2px;
+            border-color: root.item.active ? Theme.accent : Theme.mute;
+            background: root.item.active ? Theme.accent : transparent;
+        }
+        VerticalLayout {
+            alignment: center;
+            Text {
+                text: root.item.name;
+                color: Theme.fg;
+                font-weight: root.item.active ? 600 : 500;
+                overflow: elide;
+                accessible-role: none;
+            }
+            Text {
+                text: root.item.sub;
+                color: Theme.mute;
+                font-size: 11px;
+                overflow: elide;
+                accessible-role: none;
+            }
+        }
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? default : not-allowed;
+        clicked => { root.clicked(); }
+    }
+}
+
+// A section heading (.sheet-section h3).
+component SectionHead inherits Text {
+    color: Theme.mute;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.77px;
+}
+
+// A labelled field (.field-label): the label, and a "required" tag, over its control.
+component Field inherits VerticalLayout {
+    in property <string> label;
+    in property <bool> required;
+    spacing: 4px;
+    // Columns of fields share the width evenly (.grid-2, .grid-3).
+    min-width: 0px;
+    preferred-width: 0px;
+    horizontal-stretch: 1;
+    HorizontalLayout {
+        spacing: 6px;
+        alignment: start;
+        Text {
+            text: root.label;
+            color: Theme.mute;
+            font-size: 12px;
+            font-weight: 500;
+            accessible-role: none;
+        }
+        if root.required: Text {
+            text: "REQUIRED";
+            color: Theme.warn;
+            font-size: 10px;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+    }
+    @children
+}
+
+// A text field of the draft `key`: each keystroke is an edit, Enter or leaving it once edited a
+// change (Sheet). `flagged`: the field the last Run could not read (.input-error).
+component DraftEdit inherits Rectangle {
+    in property <string> key;
+    in-out property <string> text <=> edit.text;
+    in property <string> placeholder <=> edit.placeholder-text;
+    in property <bool> enabled <=> edit.enabled;
+    in property <string> label;
+    in property <string> description;
+    in property <bool> flagged;
+    in property <bool> mono;
+    in property <TextHorizontalAlignment> align: left;
+    // Mirrors Sheet.focus-serial, which a change of fires on.
+    property <int> serial: Sheet.focus-serial;
+    min-width: 0px;
+    horizontal-stretch: 1;
+    min-height: edit.min-height;
+    preferred-height: edit.preferred-height;
+    forward-focus: edit;
+    init => { self.grab(); }
+    changed serial => { self.grab(); }
+    function grab() {
+        if Sheet.focus-key == root.key && root.key != "" {
+            edit.focus();
+            // A field made with the focus reports no change of it.
+            Sheet.enter(root.key);
+        }
+    }
+    edit := LineEdit {
+        width: root.width;
+        height: root.height;
+        font-family: root.mono ? "JetBrains Mono" : "Onest";
+        horizontal-alignment: root.align;
+        accessible-label: root.label;
+        accessible-description: root.description;
+        edited => {
+            Sheet.changed-since = true;
+            Sheet.edited(root.key);
+        }
+        accepted => { Sheet.accept(root.key); }
+        changed has-focus => {
+            if self.has-focus {
+                Sheet.enter(root.key);
+            } else {
+                Sheet.leave(root.key);
+            }
+        }
+    }
+    // The flag's ring, over the field's own border.
+    if root.flagged: Rectangle {
+        border-radius: 6px;
+        border-width: 2px;
+        border-color: Theme.err;
+    }
+}
+
+// A folder field with its Browse… button (.input-row).
+component FolderField inherits Field {
+    in property <string> key;
+    in-out property <string> value;
+    in property <string> placeholder;
+    in property <bool> enabled;
+    in property <bool> flagged;
+    HorizontalLayout {
+        spacing: 6px;
+        DraftEdit {
+            key: root.key;
+            text <=> root.value;
+            placeholder: root.placeholder;
+            enabled: root.enabled;
+            label: root.label;
+            flagged: root.flagged;
+            mono: true;
+        }
+        Button {
+            text: "Browse…";
+            enabled: root.enabled;
+            accessible-label: "Browse for the " + root.label;
+            clicked => {
+                Sheet.leave(Sheet.focused);
+                Sheet.browse(root.key);
+            }
+        }
+    }
+}
+
+// A stepper's − or + (.stepper-btn): a press steps once, a hold repeats (the host's timer); Enter,
+// Space or a screen reader's action steps once.
+component StepButton inherits Rectangle {
+    in property <string> key;
+    in property <bool> up;
+    in property <string> label;
+    in property <bool> enabled;
+    width: 30px;
+    border-top-left-radius: root.up ? 0px : 8px;
+    border-bottom-left-radius: root.up ? 0px : 8px;
+    border-top-right-radius: root.up ? 8px : 0px;
+    border-bottom-right-radius: root.up ? 8px : 0px;
+    border-width: 1px;
+    border-color: keys.has-focus ? Theme.accent : Theme.line;
+    background: touch.pressed ? Theme.sel : touch.has-hover && root.enabled ? Theme.hover : Theme.field;
+    opacity: root.enabled ? 1 : 0.5;
+    forward-focus: keys;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-enabled: root.enabled;
+    accessible-action-default => {
+        if root.enabled {
+            Sheet.step-key(root.key, root.up);
+        }
+    }
+    Text {
+        text: root.up ? "+" : "−";
+        color: Theme.fg;
+        font-weight: 700;
+        accessible-role: none;
+    }
+    keys := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == Key.Return || event.text == Key.Space {
+                Sheet.step-key(root.key, root.up);
+                return accept;
+            }
+            reject
+        }
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
+                keys.focus();
+                Sheet.step-pressed(root.key, root.up);
+            } else if event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel {
+                Sheet.step-released();
+            }
+        }
+        changed has-hover => {
+            if !self.has-hover {
+                Sheet.step-released();
+            }
+        }
+    }
+}
+
+// A number field between its − and + (.number-stepper).
+component StepperField inherits Field {
+    in property <string> key;
+    in-out property <string> value;
+    in property <string> placeholder;
+    in property <bool> enabled;
+    in property <bool> flagged;
+    // What the buttons step, for their labels: "Decrease workers".
+    in property <string> noun;
+    // The field's tooltip in index.html, read out by a screen reader.
+    in property <string> description;
+    HorizontalLayout {
+        StepButton {
+            key: root.key;
+            up: false;
+            label: "Decrease " + root.noun;
+            enabled: root.enabled;
+        }
+        DraftEdit {
+            key: root.key;
+            text <=> root.value;
+            placeholder: root.placeholder;
+            enabled: root.enabled;
+            label: root.label;
+            flagged: root.flagged;
+            description: root.description;
+            align: center;
+        }
+        StepButton {
+            key: root.key;
+            up: true;
+            label: "Increase " + root.noun;
+            enabled: root.enabled;
+        }
+    }
+}
+
+// The sheet's Done (.cap.btn-accent): takes the focus when the sheet opens, so Enter or Space
+// closes it at once.
+component DoneButton inherits Rectangle {
+    callback clicked();
+    width: label.preferred-width + 36px;
+    height: 36px;
+    border-radius: self.height / 2;
+    background: touch.has-hover ? Theme.accent.darker(10%) : Theme.accent;
+    border-width: keys.has-focus ? 2px : 0px;
+    border-color: Theme.accent-ring;
+    forward-focus: keys;
+    accessible-role: button;
+    accessible-label: "Done";
+    accessible-action-default => { root.clicked(); }
+    label := Text {
+        text: "Done";
+        color: Theme.accent-fg;
+        font-weight: 700;
+        accessible-role: none;
+    }
+    keys := FocusScope {
+        key-pressed(event) => {
+            if event.text == Key.Return || event.text == Key.Space {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+component Divider inherits Rectangle {
+    height: 1px;
+    background: Theme.sep;
+}
+
+// One mode's settings sheet (.sheet): the head with Done, then the sections, which scroll. The
+// window shows it over a backdrop (app.slint).
+export component SettingsSheet inherits Rectangle {
+    in property <string> title;
+    in property <bool> remux;
+    in-out property <DraftForm> form;
+    // The bitrate select's entries.
+    in property <[string]> bitrates;
+    in property <ChipTexts> chips;
+    // The draft key the last Run could not read: its field is flagged.
+    in property <string> invalid;
+    // A start or a job holds the batch: the fields are locked (.lock-while-job).
+    in property <bool> busy;
+    // The output folder's placeholder, which differs per mode.
+    in property <string> out-placeholder;
+    callback done();
+    // The height the head and every section take, unscrolled.
+    out property <length> natural-height: head.preferred-height + 1px + body.preferred-height;
+
+    // The slider's value, which follows the typed complexity while it reads as a number.
+    property <float> complexity: 5;
+    changed form => { self.follow(); }
+    function follow() {
+        if root.form.complexity.is-float() {
+            root.complexity = root.form.complexity.to-float();
+        }
+    }
+    init => {
+        self.follow();
+        if Sheet.focus-key == "" {
+            done-button.focus();
+        }
+    }
+
+    width: 580px;
+    border-radius: 26px;
+    clip: true;
+    background: Theme.float;
+    accessible-role: groupbox;
+    accessible-label: root.title;
+
+    // Takes the clicks the backdrop behind it would close the sheet on.
+    TouchArea { }
+
+    VerticalLayout {
+        // .sheet-head
+        head := HorizontalLayout {
+            padding-top: 16px;
+            padding-bottom: 16px;
+            padding-left: 20px;
+            padding-right: 20px;
+            spacing: 12px;
+            VerticalLayout {
+                horizontal-stretch: 1;
+                alignment: center;
+                spacing: 2px;
+                Text {
+                    text: root.title;
+                    color: Theme.fg;
+                    font-size: 16px;
+                    font-weight: 700;
+                    // The sheet carries it as its label.
+                    accessible-role: none;
+                }
+                Text {
+                    text: "Applies to every episode in the next batch.";
+                    color: Theme.mute;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+            }
+            done-button := DoneButton {
+                clicked => { root.done(); }
+            }
+        }
+        Divider { }
+
+        // .sheet-body: only the body scrolls.
+        ScrollView {
+            vertical-stretch: 1;
+            content-width: self.visible-width;
+            content-height: body.preferred-height;
+            body := VerticalLayout {
+                width: parent.width;
+                padding-top: 4px;
+                padding-bottom: 20px;
+                padding-left: 20px;
+                padding-right: 20px;
+                alignment: start;
+
+                if root.busy: VerticalLayout {
+                    padding-top: 14px;
+                    Rectangle {
+                        border-radius: 10px;
+                        background: Theme.warn.transparentize(86%);
+                        height: note.preferred-height + 16px;
+                        note := Text {
+                            x: 12px;
+                            width: parent.width - 24px;
+                            text: "Locked while a batch runs. Changes apply to the next batch.";
+                            color: Theme.warn;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+                if !root.remux: VerticalLayout {
+                    padding-top: 14px;
+                    Text {
+                        text: "Extracts the best subtitle track, deduplicated fonts, chapters and cover art.";
+                        color: Theme.mute;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                }
+
+                // Folders
+                VerticalLayout {
+                    padding-top: 16px;
+                    padding-bottom: 16px;
+                    spacing: 12px;
+                    SectionHead { text: "FOLDERS"; }
+                    FolderField {
+                        label: "Input folder";
+                        required: true;
+                        key: "input_dir";
+                        value <=> root.form.input-dir;
+                        placeholder: "Release folder with the MKV episodes";
+                        enabled: !root.busy;
+                        flagged: root.invalid == "input_dir";
+                    }
+                    FolderField {
+                        label: "Output directory";
+                        key: "out_dir";
+                        value <=> root.form.out-dir;
+                        placeholder: root.out-placeholder;
+                        enabled: !root.busy;
+                    }
+                    FolderField {
+                        label: "Fonts directory";
+                        key: "fonts_dir";
+                        value <=> root.form.fonts-dir;
+                        placeholder: "Auto: fonts folder";
+                        enabled: !root.busy;
+                    }
+                    if root.remux: FolderField {
+                        label: "Assets directory";
+                        key: "assets_dir";
+                        value <=> root.form.assets-dir;
+                        placeholder: "Optional fallback for subtitles";
+                        enabled: !root.busy;
+                    }
+                }
+
+                // Audio & subtitles (remux)
+                if root.remux: VerticalLayout {
+                    Divider { }
+                    VerticalLayout {
+                        padding-top: 16px;
+                        padding-bottom: 16px;
+                        spacing: 12px;
+                        SectionHead { text: "AUDIO & SUBTITLES"; }
+                        HorizontalLayout {
+                            spacing: 12px;
+                            Field {
+                                label: "Opus bitrate";
+                                ComboBox {
+                                    min-width: 0px;
+                                    model: root.bitrates;
+                                    current-index <=> root.form.bitrate;
+                                    enabled: !root.busy;
+                                    accessible-label: "Opus bitrate";
+                                    selected => {
+                                        Sheet.edited("bitrate");
+                                        Sheet.committed("bitrate");
+                                    }
+                                }
+                            }
+                            StepperField {
+                                label: "Subtitle offset (seconds)";
+                                noun: "offset";
+                                key: "sub_offset";
+                                value <=> root.form.sub-offset;
+                                placeholder: "0.0";
+                                enabled: !root.busy;
+                                flagged: root.invalid == "sub_offset";
+                            }
+                        }
+                        Field {
+                            label: "Encoder complexity";
+                            HorizontalLayout {
+                                spacing: 6px;
+                                Rectangle {
+                                    horizontal-stretch: 1;
+                                    border-radius: 6px;
+                                    border-width: root.invalid == "complexity" ? 2px : 0px;
+                                    border-color: Theme.err;
+                                    Slider {
+                                        x: 4px;
+                                        width: parent.width - 8px;
+                                        minimum: 0;
+                                        maximum: 10;
+                                        step: 1;
+                                        value <=> root.complexity;
+                                        enabled: !root.busy;
+                                        accessible-label: "Encoder complexity";
+                                        accessible-description: "libopus encoding complexity: 0 is fastest, 10 is best quality";
+                                        changed(value) => { Sheet.slid(value); }
+                                        released => { Sheet.committed("complexity"); }
+                                        changed has-focus => {
+                                            if self.has-focus {
+                                                Sheet.enter("complexity");
+                                            } else {
+                                                Sheet.leave("complexity");
+                                            }
+                                        }
+                                    }
+                                }
+                                DraftEdit {
+                                    width: 52px;
+                                    horizontal-stretch: 0;
+                                    key: "complexity";
+                                    text <=> root.form.complexity;
+                                    enabled: !root.busy;
+                                    label: "Encoder complexity value";
+                                    flagged: root.invalid == "complexity";
+                                    align: center;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Performance
+                Divider { }
+                VerticalLayout {
+                    padding-top: 16px;
+                    padding-bottom: 16px;
+                    spacing: 12px;
+                    SectionHead { text: "PERFORMANCE"; }
+                    HorizontalLayout {
+                        spacing: 12px;
+                        StepperField {
+                            label: "Workers";
+                            noun: "workers";
+                            key: "workers";
+                            value <=> root.form.workers;
+                            placeholder: root.chips.workers-hint;
+                            enabled: !root.busy;
+                            flagged: root.invalid == "workers";
+                            description: "Episodes processed at once (1–64; empty is auto)";
+                        }
+                        StepperField {
+                            label: "Disk I/O";
+                            noun: "disk I/O jobs";
+                            key: "io_jobs";
+                            value <=> root.form.io-jobs;
+                            placeholder: root.chips.io-jobs-hint;
+                            enabled: !root.busy;
+                            flagged: root.invalid == "io_jobs";
+                            description: "Concurrent disk I/O streams (0–64; 0 is the same as Workers)";
+                        }
+                        if root.remux: StepperField {
+                            label: "FFmpeg threads";
+                            noun: "FFmpeg threads";
+                            key: "ffmpeg_threads";
+                            value <=> root.form.ffmpeg-threads;
+                            placeholder: "auto";
+                            enabled: !root.busy;
+                            flagged: root.invalid == "ffmpeg_threads";
+                            description: "FLAC decoder threads per transcode (1–32; empty is auto). Opus encoding is single-threaded";
+                        }
+                        // Extract has two of the three columns (.grid-3).
+                        if !root.remux: Rectangle { horizontal-stretch: 1; }
+                    }
+                }
+
+                // Run options. "Clear inspection cache…" comes with its confirm dialog (P5).
+                Divider { }
+                VerticalLayout {
+                    padding-top: 16px;
+                    padding-bottom: 16px;
+                    spacing: 12px;
+                    SectionHead { text: "RUN OPTIONS"; }
+                    CheckBox {
+                        text: "Dry run (plan only, write nothing)";
+                        checked <=> root.form.dry-run;
+                        enabled: !root.busy;
+                        toggled => { Sheet.edited("dry_run"); }
+                    }
+                    CheckBox {
+                        text: "Bypass inspection cache";
+                        checked <=> root.form.no-cache;
+                        enabled: !root.busy;
+                        toggled => { Sheet.edited("no_cache"); }
+                    }
+                }
+            }
+        }
+    }
+}

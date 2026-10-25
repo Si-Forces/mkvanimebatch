@@ -6,6 +6,7 @@
 
 use crate::inspector::{map_inspector, write_form, LANGUAGES};
 use crate::queue::{map_rows, ModeList, RowPatch, Update};
+use crate::settings::{self, Edits, BITRATES};
 use mkv_anime_batch_slint_ui::{App, Mode, QueueFilter, QueueRow};
 use mkv_desktop_core::actor::{Publisher, ViewState};
 use mkv_desktop_core::job::JobDone;
@@ -41,7 +42,7 @@ impl Default for Pending {
 }
 
 /// The index of `mode`'s list.
-fn index(mode: Mode) -> usize {
+pub(crate) fn index(mode: Mode) -> usize {
     match mode {
         Mode::Remux => 0,
         Mode::Extract => 1,
@@ -160,6 +161,8 @@ impl Coalescer {
 pub(crate) struct SlintPublisher {
     window: slint::Weak<App>,
     pending: Arc<Coalescer>,
+    /// The draft edits on their way to the core, whose fields a publication leaves alone.
+    edits: Edits,
 }
 
 /// Gives `app` the two modes' row models, which every publication then updates in place, and the
@@ -171,6 +174,8 @@ pub(crate) fn install_models(app: &App) {
     let languages: Vec<slint::SharedString> =
         LANGUAGES.iter().map(|(_, label)| (*label).into()).collect();
     app.set_sub_languages(ModelRc::from(Rc::new(VecModel::from(languages))));
+    let bitrates: Vec<slint::SharedString> = BITRATES.iter().map(|&entry| entry.into()).collect();
+    app.set_bitrates(ModelRc::from(Rc::new(VecModel::from(bitrates))));
 }
 
 impl SlintPublisher {
@@ -179,15 +184,21 @@ impl SlintPublisher {
         Self {
             window: app.as_weak(),
             pending: Arc::default(),
+            edits: Edits::default(),
         }
     }
 
+    /// The draft edits on their way to the core, which the settings sheet sends.
+    pub(crate) fn edits(&self) -> Edits {
+        Arc::clone(&self.edits)
+    }
+
     fn schedule(&self) {
-        let pending = Arc::clone(&self.pending);
+        let (pending, edits) = (Arc::clone(&self.pending), Arc::clone(&self.edits));
         let window = self.window.clone();
         // Not `upgrade_in_event_loop`: it drops the closure when the window is gone, which would
         // leave the slot scheduled for good. The take always runs; only the apply needs the window.
-        let scheduled = slint::invoke_from_event_loop(move || hop(&pending, &window));
+        let scheduled = slint::invoke_from_event_loop(move || hop(&pending, &edits, &window));
         // Fails only once the event loop is gone, when nothing is left to show. Clear the flag all
         // the same, so a later push never waits on a hop that will not come.
         if scheduled.is_err() {
@@ -223,7 +234,7 @@ impl SlintPublisher {
     #[cfg(test)]
     pub(crate) fn show(&self, state: &ViewState) {
         self.pending.push_state(state);
-        hop(&self.pending, &self.window);
+        hop(&self.pending, &self.edits, &self.window);
     }
 
     /// Applies `states` in one hop, as when they all land before the event loop takes them.
@@ -232,7 +243,7 @@ impl SlintPublisher {
         for state in states {
             self.pending.push_state(state);
         }
-        hop(&self.pending, &self.window);
+        hop(&self.pending, &self.edits, &self.window);
     }
 
     /// Reveals `release` in `mode` at once, on the event loop's thread, as a Library click would.
@@ -240,7 +251,7 @@ impl SlintPublisher {
     pub(crate) fn show_reveal(&self, mode: Mode, release: &str) {
         self.reveal(mode, release.into());
         self.pending.remap(mode);
-        hop(&self.pending, &self.window);
+        hop(&self.pending, &self.edits, &self.window);
     }
 
     /// Shows `filter`'s rows of `mode` at once, on the event loop's thread, as a click would.
@@ -248,12 +259,12 @@ impl SlintPublisher {
     pub(crate) fn show_filter(&self, mode: Mode, filter: QueueFilter) {
         self.set_filter(mode, filter);
         self.pending.remap(mode);
-        hop(&self.pending, &self.window);
+        hop(&self.pending, &self.edits, &self.window);
     }
 }
 
 /// Applies everything pending to the window, on the event loop.
-pub(crate) fn hop(pending: &Coalescer, window: &slint::Weak<App>) {
+pub(crate) fn hop(pending: &Coalescer, edits: &Edits, window: &slint::Weak<App>) {
     let Taken {
         state,
         lists: [remux, extract],
@@ -264,6 +275,7 @@ pub(crate) fn hop(pending: &Coalescer, window: &slint::Weak<App>) {
     };
     if let Some(state) = state {
         app.set_busy(state.busy);
+        settings::show(&app, &state, edits);
     }
     apply(&app, Mode::Remux, remux);
     apply(&app, Mode::Extract, extract);
