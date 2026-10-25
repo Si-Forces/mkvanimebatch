@@ -3794,6 +3794,7 @@ dependencies = [
 name = "mkv-anime-batch-slint"
 version = "1.1.0"
 dependencies = [
+ "arboard",
  "dirs",
  "i-slint-backend-testing",
  "mkv-anime-batch-slint-ui",

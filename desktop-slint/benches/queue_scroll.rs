@@ -45,6 +45,10 @@ mod publisher;
 #[allow(dead_code, unused_imports)]
 #[path = "../src/queue.rs"]
 mod queue;
+// The hop writes the Run Log consoles too (P5).
+#[allow(dead_code, unused_imports)]
+#[path = "../src/run_log.rs"]
+mod run_log;
 // The hop writes the drafts, chips and presets too (P4).
 #[allow(dead_code, unused_imports)]
 #[path = "../src/settings.rs"]

@@ -44,6 +44,10 @@ slint = { git = "https://github.com/slint-ui/slint", rev = "45cb2b33420e1b3c8a13
 # The folder picker (XDG portal on Linux, as the Tauri host's), and the GPU fallback dialog's
 # MessageBoxW on Windows; Linux runs zenity or kdialog for that dialog itself (renderer.rs).
 rfd = "0.15"
+# Copy in the Run Log drawer: Slint has no app-level clipboard call (only its backends' own,
+# which drop the write's error). Already in the tree through Slint's winit backend; its features
+# (Wayland data-control on Linux) come from there.
+arboard = { version = "3.6", default-features = false }
 
 [dev-dependencies]
 # `renderer-software`: headless snapshots for the font test.

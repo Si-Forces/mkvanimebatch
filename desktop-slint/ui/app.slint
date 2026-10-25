@@ -11,9 +11,10 @@ import { Mode, QueueFilter, QueueHead, QueuePane, QueueRow, RowMark, RowTone } f
 import { Inspector, InspectorPane, LibraryEntry, LibraryItem, Rung } from "inspector.slint";
 import { ChipTexts, DraftForm, GearButton, PresetItem, PresetRow, SettingsSheet, Sheet, SheetLimits } from "settings.slint";
 import { BottomBar, ConfirmDialog, DialogTexts, JobBar, StatusDot, StatusTone } from "jobs.slint";
+import { LogDrawer, LogRow, LogTone, LogToggle } from "log.slint";
 
 // FontProbe is test only; a .slint file cannot be compiled per cfg, so it ships (a few bytes).
-export { Theme, FontProbe, Inspector, LibraryItem, Mode, QueueFilter, QueueHead, QueueRow, RowMark, RowTone, Rung, ChipTexts, DraftForm, PresetItem, Sheet, SheetLimits, DialogTexts, JobBar, StatusTone }
+export { Theme, FontProbe, Inspector, LibraryItem, Mode, QueueFilter, QueueHead, QueueRow, RowMark, RowTone, Rung, ChipTexts, DraftForm, PresetItem, Sheet, SheetLimits, DialogTexts, JobBar, StatusTone, LogRow, LogTone }
 
 // Who opened the settings sheet, to take the focus back when it closes: a mode's gear, Run (after
 // a refused Run), or nothing to give it back to.
@@ -173,6 +174,16 @@ export component App inherits Window {
     // publication, the markup's own labels (index.html).
     in property <JobBar> remux-job: { run-label: "Run remux", count-text: "Ready", clock: "Not started" };
     in property <JobBar> extract-job: { run-label: "Run extract", count-text: "Ready", clock: "Not started" };
+    // Each mode's Run Log lines (the host keeps each model and its raw text for Copy), and its
+    // error badge: the count, or empty for none.
+    in property <[LogRow]> remux-log;
+    in property <[LogRow]> extract-log;
+    in property <string> remux-log-badge;
+    in property <string> extract-log-badge;
+    // The Log drawer is open.
+    in-out property <bool> log-open;
+    // The drawer's Copy: "Copied" or "Copy failed" for a while after a Copy (the host's).
+    in property <string> log-copy-label: "Copy";
     // The confirm dialog shown, if open; the host bumps `dialog-serial` for each it shows.
     in property <bool> dialog-open;
     in property <DialogTexts> dialog;
@@ -248,6 +259,8 @@ export component App inherits Window {
     // Run, or Stop, of the mode shown; the host sends the Intent.
     callback run();
     callback stop();
+    // Copy: the shown mode's Run Log, with its real paths, to the clipboard.
+    callback copy-log();
     // The confirm dialog was answered: Clear cache (`true`), Cancel or Esc.
     callback dialog-answered(confirmed: bool);
     callback close-window();
@@ -299,6 +312,14 @@ export component App inherits Window {
         }
     }
 
+    // Closes the Log drawer (Close, Esc); the Log toggle takes the focus when the drawer had it,
+    // as app.js `setLogOpen` does.
+    public function close-log() {
+        if log-drawer.focus-inside {
+            log-toggle.focus-toggle();
+        }
+        root.log-open = false;
+    }
     // Scrolls `mode`'s list so its row `row` heads it.
     public function reveal(mode: Mode, row: int) {
         if mode == Mode.remux {
@@ -378,240 +399,284 @@ export component App inherits Window {
             background: @radial-gradient(circle, Theme.wall-c 0%, Theme.wall-c.transparentize(100%) 62%);
         }
 
-        VerticalLayout {
-            TitleBar {
-                close => { root.close-window(); }
-                minimize => { root.minimize-window(); }
-                toggle-maximize => { root.maximized = !root.maximized; }
+        // Esc closes the Log drawer unless a dialog takes it (app.js's keydown): it bubbles here
+        // from whatever has the focus outside the sheet and the dialog, and this scope holds the
+        // focus from the start, so a key reaches it before anything took the focus.
+        keys := FocusScope {
+            focus-on-click: false;
+            focus-on-tab-navigation: false;
+            init => { self.focus(); }
+            key-pressed(event) => {
+                if event.text == Key.Escape && root.log-open && !root.sheet-open && !root.dialog-open {
+                    root.close-log();
+                    return accept;
+                }
+                reject
             }
+            VerticalLayout {
+                TitleBar {
+                    close => { root.close-window(); }
+                    minimize => { root.minimize-window(); }
+                    toggle-maximize => { root.maximized = !root.maximized; }
+                }
 
-            // A long teardown error wraps and pushes the list down. The height is bound to the
-            // texts' preferred heights at their final width: the layout alone sizes a wrapped text
-            // before it knows the width, and stretches both texts to fill the guess.
-            if root.notice-text != "": Rectangle {
-                height: notice-title.preferred-height + notice-body.preferred-height + 2 * 12px + 2px;
-                background: Theme.head;
-                VerticalLayout {
-                    padding: 12px;
-                    spacing: 2px;
-                    notice-title := Text {
-                        text: root.notice-title;
-                        color: Theme.err;
-                        font-weight: 700;
-                    }
-                    notice-body := Text {
-                        text: root.notice-text;
-                        color: Theme.fg;
-                        wrap: word-wrap;
+                // A long teardown error wraps and pushes the list down. The height is bound to the
+                // texts' preferred heights at their final width: the layout alone sizes a wrapped text
+                // before it knows the width, and stretches both texts to fill the guess.
+                if root.notice-text != "": Rectangle {
+                    height: notice-title.preferred-height + notice-body.preferred-height + 2 * 12px + 2px;
+                    background: Theme.head;
+                    VerticalLayout {
+                        padding: 12px;
+                        spacing: 2px;
+                        notice-title := Text {
+                            text: root.notice-title;
+                            color: Theme.err;
+                            font-weight: 700;
+                        }
+                        notice-body := Text {
+                            text: root.notice-text;
+                            color: Theme.fg;
+                            wrap: word-wrap;
+                        }
                     }
                 }
-            }
 
-            HorizontalLayout {
-                // The sidebar (.side): the Pipeline's mode tabs, then the Library: its tree and Open
-                // folder. The presets are P4.
-                Rectangle {
-                    width: root.side-width;
-                    background: Theme.side;
-                    // The sidebar scrolls, as .side's overflow does: a folder of many releases
-                    // keeps Open folder reachable.
-                    ScrollView {
-                        content-width: self.visible-width;
-                        content-height: side.preferred-height;
-                        side := VerticalLayout {
-                            width: parent.width;
-                            padding-top: 14px;
-                            padding-left: 10px;
-                            padding-right: 10px;
-                            spacing: 2px;
-                            alignment: start;
-                            SideHeading { text: "PIPELINE"; }
-                            remux-tab := ModeTab {
-                                title: "Remux";
-                                subtitle: "FLAC → Opus, mux subs";
-                                // A film strip.
-                                icon: "M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z M7 4v16 M17 4v16 M3 9h4 M3 15h4 M17 9h4 M17 15h4";
-                                active: root.mode == Mode.remux;
-                                tone: root.remux-job.tone;
-                                status: root.remux-job.status;
-                                clicked => {
-                                    root.leave-field();
-                                    root.mode = Mode.remux;
-                                }
-                                settings => { root.open-from-gear(Mode.remux); }
-                            }
-                            extract-tab := ModeTab {
-                                title: "Extract";
-                                subtitle: "Subs, fonts, chapters";
-                                // A screen with subtitle lines.
-                                icon: "M5 5h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z M7 15h4 M13 15h4 M7 11h10";
-                                active: root.mode == Mode.extract;
-                                tone: root.extract-job.tone;
-                                status: root.extract-job.status;
-                                clicked => {
-                                    root.leave-field();
-                                    root.mode = Mode.extract;
-                                }
-                                settings => { root.open-from-gear(Mode.extract); }
-                            }
-                            // .side's 18px gap between groups, less the group's own 2px spacing.
-                            Rectangle { height: 16px; }
-                            SideHeading { text: "LIBRARY"; }
-                            for item in root.library: LibraryEntry {
-                                item: item;
-                                clicked => {
-                                    root.leave-field();
-                                    root.reveal-release(item.release, item.root);
-                                }
-                            }
-                            OpenFolderNav {
-                                enabled: !root.locked;
-                                clicked => {
-                                    root.leave-field();
-                                    root.open-folder();
-                                }
-                            }
-                            // The Preset Profiles (#preset-list), remux's only.
-                            if root.mode == Mode.remux: VerticalLayout {
+                HorizontalLayout {
+                    // The sidebar (.side): the Pipeline's mode tabs, then the Library: its tree and Open
+                    // folder. The presets are P4.
+                    Rectangle {
+                        width: root.side-width;
+                        background: Theme.side;
+                        // The sidebar scrolls, as .side's overflow does: a folder of many releases
+                        // keeps Open folder reachable.
+                        ScrollView {
+                            content-width: self.visible-width;
+                            content-height: side.preferred-height;
+                            side := VerticalLayout {
+                                width: parent.width;
+                                padding-top: 14px;
+                                padding-left: 10px;
+                                padding-right: 10px;
                                 spacing: 2px;
-                                Rectangle { height: 16px; }
-                                HorizontalLayout {
-                                    spacing: 8px;
-                                    SideHeading { text: "PRESET"; }
-                                    // .locked-label: a lock before the word.
-                                    if root.busy: HorizontalLayout {
-                                        spacing: 4px;
-                                        Path {
-                                            y: (parent.height - self.height) / 2;
-                                            width: 11px;
-                                            height: 11px;
-                                            viewbox-width: 24;
-                                            viewbox-height: 24;
-                                            stroke: Theme.warn;
-                                            stroke-width: 2.4px;
-                                            stroke-line-cap: round;
-                                            commands: "M7 11h10a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-6a2 2 0 0 1 2-2z M8 11V7a4 4 0 0 1 8 0v4";
-                                            accessible-role: none;
-                                        }
-                                        Text {
-                                            text: "Locked";
-                                            color: Theme.warn;
-                                            font-size: 11px;
-                                            font-weight: 500;
-                                        }
+                                alignment: start;
+                                SideHeading { text: "PIPELINE"; }
+                                remux-tab := ModeTab {
+                                    title: "Remux";
+                                    subtitle: "FLAC → Opus, mux subs";
+                                    // A film strip.
+                                    icon: "M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z M7 4v16 M17 4v16 M3 9h4 M3 15h4 M17 9h4 M17 15h4";
+                                    active: root.mode == Mode.remux;
+                                    tone: root.remux-job.tone;
+                                    status: root.remux-job.status;
+                                    clicked => {
+                                        root.leave-field();
+                                        root.mode = Mode.remux;
                                     }
-                                    Rectangle { horizontal-stretch: 1; }
+                                    settings => { root.open-from-gear(Mode.remux); }
                                 }
-                                for item in root.presets: PresetRow {
+                                extract-tab := ModeTab {
+                                    title: "Extract";
+                                    subtitle: "Subs, fonts, chapters";
+                                    // A screen with subtitle lines.
+                                    icon: "M5 5h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z M7 15h4 M13 15h4 M7 11h10";
+                                    active: root.mode == Mode.extract;
+                                    tone: root.extract-job.tone;
+                                    status: root.extract-job.status;
+                                    clicked => {
+                                        root.leave-field();
+                                        root.mode = Mode.extract;
+                                    }
+                                    settings => { root.open-from-gear(Mode.extract); }
+                                }
+                                // .side's 18px gap between groups, less the group's own 2px spacing.
+                                Rectangle { height: 16px; }
+                                SideHeading { text: "LIBRARY"; }
+                                for item in root.library: LibraryEntry {
                                     item: item;
+                                    clicked => {
+                                        root.leave-field();
+                                        root.reveal-release(item.release, item.root);
+                                    }
+                                }
+                                OpenFolderNav {
                                     enabled: !root.locked;
                                     clicked => {
                                         root.leave-field();
-                                        Sheet.pick-preset(item.id);
+                                        root.open-folder();
+                                    }
+                                }
+                                // The Preset Profiles (#preset-list), remux's only.
+                                if root.mode == Mode.remux: VerticalLayout {
+                                    spacing: 2px;
+                                    Rectangle { height: 16px; }
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        SideHeading { text: "PRESET"; }
+                                        // .locked-label: a lock before the word.
+                                        if root.busy: HorizontalLayout {
+                                            spacing: 4px;
+                                            Path {
+                                                y: (parent.height - self.height) / 2;
+                                                width: 11px;
+                                                height: 11px;
+                                                viewbox-width: 24;
+                                                viewbox-height: 24;
+                                                stroke: Theme.warn;
+                                                stroke-width: 2.4px;
+                                                stroke-line-cap: round;
+                                                commands: "M7 11h10a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-6a2 2 0 0 1 2-2z M8 11V7a4 4 0 0 1 8 0v4";
+                                                accessible-role: none;
+                                            }
+                                            Text {
+                                                text: "Locked";
+                                                color: Theme.warn;
+                                                font-size: 11px;
+                                                font-weight: 500;
+                                            }
+                                        }
+                                        Rectangle { horizontal-stretch: 1; }
+                                    }
+                                    for item in root.presets: PresetRow {
+                                        item: item;
+                                        enabled: !root.locked;
+                                        clicked => {
+                                            root.leave-field();
+                                            Sheet.pick-preset(item.id);
+                                        }
                                     }
                                 }
                             }
                         }
+                        Rectangle {
+                            x: parent.width - 1px;
+                            width: 1px;
+                            background: Theme.line;
+                        }
                     }
+
+                    // One pane per mode, as the webview has one list per mode: both stay alive, so the
+                    // hidden one keeps its scroll exactly (a ListView made again places its rows by an
+                    // estimated row height).
                     Rectangle {
-                        x: parent.width - 1px;
-                        width: 1px;
-                        background: Theme.line;
+                        horizontal-stretch: 1;
+                        remux-pane := QueuePane {
+                            width: parent.width;
+                            height: parent.height;
+                            visible: root.mode == Mode.remux;
+                            head: root.remux-head;
+                            rows: root.remux-rows;
+                            list-scroll <=> root.remux-scroll;
+                            busy: root.locked;
+                            pending-inspect: root.pending-inspect;
+                            set-selected(id, selected) => { root.set-selected(id, selected); }
+                            set-all-selected(selected) => { root.set-all-selected(selected); }
+                            reorder(id, up) => { root.reorder(id, up); }
+                            inspect(id) => { root.pick(id); }
+                            set-filter(filter) => {
+                                root.leave-field();
+                                root.set-filter(filter);
+                            }
+                            open-folder => {
+                                root.leave-field();
+                                root.open-folder();
+                            }
+                        }
+                        extract-pane := QueuePane {
+                            width: parent.width;
+                            height: parent.height;
+                            visible: root.mode == Mode.extract;
+                            head: root.extract-head;
+                            rows: root.extract-rows;
+                            list-scroll <=> root.extract-scroll;
+                            busy: root.locked;
+                            pending-inspect: root.pending-inspect;
+                            set-selected(id, selected) => { root.set-selected(id, selected); }
+                            set-all-selected(selected) => { root.set-all-selected(selected); }
+                            reorder(id, up) => { root.reorder(id, up); }
+                            inspect(id) => { root.pick(id); }
+                            set-filter(filter) => {
+                                root.leave-field();
+                                root.set-filter(filter);
+                            }
+                            open-folder => {
+                                root.leave-field();
+                                root.open-folder();
+                            }
+                        }
+                    }
+
+                    // The Episode Inspector (.insp) of the mode shown; the subtitle section is remux's.
+                    insp-pane := InspectorPane {
+                        width: root.insp-width;
+                        insp: root.mode == Mode.remux ? root.remux-inspector : root.extract-inspector;
+                        ladder: root.sub-ladder;
+                        options: root.sub-options;
+                        languages: root.sub-languages;
+                        busy: root.locked;
+                        choice <=> root.sub-choice;
+                        language <=> root.sub-language;
+                        custom-language <=> root.sub-custom;
+                        track-title <=> root.sub-title;
+                        offset <=> root.sub-offset;
+                        dirty <=> root.sub-dirty;
+                        choose(index) => { root.choose-subtitle(index); }
+                        choose-language(index) => { root.choose-language(index); }
+                        language-tag-edited(text) => { root.language-tag-edited(text); }
+                        // Reset takes no focus: a typed field commits first, then clears.
+                        reset => {
+                            root.leave-field();
+                            root.reset-subtitle();
+                        }
+                        options-changed => { root.subtitle-options-changed(); }
                     }
                 }
 
-                // One pane per mode, as the webview has one list per mode: both stay alive, so the
-                // hidden one keeps its scroll exactly (a ListView made again places its rows by an
-                // estimated row height).
-                Rectangle {
-                    horizontal-stretch: 1;
-                    remux-pane := QueuePane {
-                        width: parent.width;
-                        height: parent.height;
-                        visible: root.mode == Mode.remux;
-                        head: root.remux-head;
-                        rows: root.remux-rows;
-                        list-scroll <=> root.remux-scroll;
-                        busy: root.locked;
-                        pending-inspect: root.pending-inspect;
-                        set-selected(id, selected) => { root.set-selected(id, selected); }
-                        set-all-selected(selected) => { root.set-all-selected(selected); }
-                        reorder(id, up) => { root.reorder(id, up); }
-                        inspect(id) => { root.pick(id); }
-                        set-filter(filter) => {
-                            root.leave-field();
-                            root.set-filter(filter);
-                        }
-                        open-folder => {
-                            root.leave-field();
-                            root.open-folder();
-                        }
-                    }
-                    extract-pane := QueuePane {
-                        width: parent.width;
-                        height: parent.height;
-                        visible: root.mode == Mode.extract;
-                        head: root.extract-head;
-                        rows: root.extract-rows;
-                        list-scroll <=> root.extract-scroll;
-                        busy: root.locked;
-                        pending-inspect: root.pending-inspect;
-                        set-selected(id, selected) => { root.set-selected(id, selected); }
-                        set-all-selected(selected) => { root.set-all-selected(selected); }
-                        reorder(id, up) => { root.reorder(id, up); }
-                        inspect(id) => { root.pick(id); }
-                        set-filter(filter) => {
-                            root.leave-field();
-                            root.set-filter(filter);
-                        }
-                        open-folder => {
-                            root.leave-field();
-                            root.open-folder();
-                        }
-                    }
-                }
-
-                // The Episode Inspector (.insp) of the mode shown; the subtitle section is remux's.
-                insp-pane := InspectorPane {
-                    width: root.insp-width;
-                    insp: root.mode == Mode.remux ? root.remux-inspector : root.extract-inspector;
-                    ladder: root.sub-ladder;
-                    options: root.sub-options;
-                    languages: root.sub-languages;
-                    busy: root.locked;
-                    choice <=> root.sub-choice;
-                    language <=> root.sub-language;
-                    custom-language <=> root.sub-custom;
-                    track-title <=> root.sub-title;
-                    offset <=> root.sub-offset;
-                    dirty <=> root.sub-dirty;
-                    choose(index) => { root.choose-subtitle(index); }
-                    choose-language(index) => { root.choose-language(index); }
-                    language-tag-edited(text) => { root.language-tag-edited(text); }
-                    // Reset takes no focus: a typed field commits first, then clears.
-                    reset => {
+                // The bottom bar (.bar) of the mode shown.
+                bottom-bar := BottomBar {
+                    job: root.mode == Mode.remux ? root.remux-job : root.extract-job;
+                    workers: root.chips.workers;
+                    io-jobs: root.chips.io-jobs;
+                    run-pending: root.run-pending;
+                    // A typed subtitle field commits first, as the webview's blur does.
+                    run => {
                         root.leave-field();
-                        root.reset-subtitle();
+                        root.run();
                     }
-                    options-changed => { root.subtitle-options-changed(); }
+                    stop => {
+                        root.leave-field();
+                        root.stop();
+                    }
+                    log-toggle := LogToggle {
+                        y: (parent.height - self.height) / 2;
+                        open: root.log-open;
+                        badge: root.mode == Mode.remux ? root.remux-log-badge : root.extract-log-badge;
+                        clicked => {
+                            if root.log-open {
+                                root.close-log();
+                            } else {
+                                root.log-open = true;
+                            }
+                        }
+                    }
                 }
             }
-
-            // The bottom bar (.bar) of the mode shown.
-            bottom-bar := BottomBar {
-                job: root.mode == Mode.remux ? root.remux-job : root.extract-job;
-                workers: root.chips.workers;
-                io-jobs: root.chips.io-jobs;
-                run-pending: root.run-pending;
-                // A typed subtitle field commits first, as the webview's blur does.
-                run => {
-                    root.leave-field();
-                    root.run();
-                }
-                stop => {
-                    root.leave-field();
-                    root.stop();
-                }
+            // The Log drawer (.logdrawer) over the list, between the sidebar and the Inspector, above
+            // the bar. Made from the start, so a console follows its newest line while the drawer
+            // is closed.
+            log-drawer := LogDrawer {
+                x: root.side-width + 12px;
+                y: root.height - bottom-bar.height - 12px - self.height;
+                width: root.width - root.side-width - root.insp-width - 24px;
+                height: root.height * 0.44;
+                visible: root.log-open;
+                title: root.mode == Mode.remux ? "Log · Remux" : "Log · Extract";
+                copy-label: root.log-copy-label;
+                copy => { root.copy-log(); }
+                close => { root.close-log(); }
+                remux-rows: root.remux-log;
+                extract-rows: root.extract-log;
+                extract: root.mode == Mode.extract;
             }
         }
 
