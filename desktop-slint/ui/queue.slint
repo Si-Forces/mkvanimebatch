@@ -39,7 +39,6 @@ export struct QueueHead {
     title: string,
     crumbs-lead: string,
     crumbs-end: string,
-    count-text: string,
     all: int,
     todo: int,
     done: int,
@@ -506,12 +505,6 @@ export component QueuePane inherits Rectangle {
                     font-weight: 700;
                     overflow: elide;
                     horizontal-stretch: 1;
-                }
-                Text {
-                    text: root.head.count-text;
-                    color: Theme.mute;
-                    font-size: 12px;
-                    vertical-alignment: center;
                 }
             }
             if root.head.crumbs-end != "": HorizontalLayout {

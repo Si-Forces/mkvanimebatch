@@ -42,9 +42,9 @@ pub(super) struct Start {
 }
 
 /// The answer to a Run while another start or job holds the batch.
-const RUN_BUSY: &str = "A job is already running or stopping. Wait for it to finish.";
+pub const RUN_BUSY: &str = "A job is already running or stopping. Wait for it to finish.";
 /// The answer to a Run while its mode scans.
-const RUN_SCANNING: &str = "The folder is being scanned; a batch can start once the scan ends.";
+pub const RUN_SCANNING: &str = "The folder is being scanned; a batch can start once the scan ends.";
 /// The answer to a Run whose forced scan failed.
 const INSPECTION_FAILED: &str = "Input inspection failed; job was not started.";
 /// The Run Log line of a Stop of a launched job, whose teardown can take a while.

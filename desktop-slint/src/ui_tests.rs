@@ -549,12 +549,19 @@ fn the_inspector_shows_every_field_and_fits_the_narrowest_window() {
         "FLAC 2.0 → Opus 192k",
         "Output folder next to the input",
         "2 Same folder, Season 1 › ep1.ass, Auto",
+    ] {
+        only(&app, label);
+    }
+    // Below the fold over the bottom bar: the pane scrolls to them.
+    scroll(&app, 640.0, false);
+    for label in [
         "FONTS · 2",
         "2 attached fonts · folder: auto",
         "Assign subtitle",
     ] {
         only(&app, label);
     }
+    scroll(&app, 640.0, true);
     assert_eq!(
         ElementHandle::find_by_accessible_label(&app, "Reset").count(),
         0
