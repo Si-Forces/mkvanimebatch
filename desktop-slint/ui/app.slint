@@ -36,7 +36,8 @@ component ModeTab inherits Rectangle {
     public function focus-gear() {
         gear.focus();
     }
-    height: 44px;
+    // .task-row .nav's 44px at least, taller when the subtitle wraps (its 7px padding each side).
+    height: max(44px, texts.preferred-height + 14px);
     border-radius: 8px;
     background: touch.has-hover || gear.hovered ? Theme.hover : active ? Theme.sel : transparent;
     tab-area := Rectangle {
@@ -77,7 +78,7 @@ component ModeTab inherits Rectangle {
             commands: root.icon;
             accessible-role: none;
         }
-        VerticalLayout {
+        texts := VerticalLayout {
             horizontal-stretch: 1;
             alignment: center;
             Text {
@@ -87,11 +88,12 @@ component ModeTab inherits Rectangle {
                 overflow: elide;
                 accessible-role: none;
             }
+            // Wraps onto a second line when narrow, as .nav-text small does.
             Text {
                 text: root.subtitle;
                 color: Theme.mute;
                 font-size: 11px;
-                overflow: elide;
+                wrap: word-wrap;
                 accessible-role: none;
             }
         }
@@ -307,9 +309,15 @@ export component App inherits Window {
     }
 
     // The confirm dialog closed over the sheet: the button that opened it takes the focus back.
+    // With no sheet, the window's key scope does, so Esc still reaches it (the removed dialog
+    // dropped the focus).
     changed dialog-open => {
-        if !self.dialog-open && self.sheet-open {
-            Sheet.cache-focus-serial += 1;
+        if !self.dialog-open {
+            if self.sheet-open {
+                Sheet.cache-focus-serial += 1;
+            } else {
+                keys.focus();
+            }
         }
     }
 

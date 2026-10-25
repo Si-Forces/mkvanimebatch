@@ -92,6 +92,13 @@ export component LogToggle inherits Rectangle {
     }
     touch := TouchArea {
         mouse-cursor: pointer;
+        // A left press takes the focus, as a browser's button does (the StepButton pattern): the
+        // TouchArea above the FocusScope grabs the press before it.
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
+                keys.focus();
+            }
+        }
         clicked => { root.clicked(); }
     }
 }
@@ -132,6 +139,13 @@ component DrawerLink inherits Rectangle {
     }
     TouchArea {
         mouse-cursor: pointer;
+        // A left press takes the focus, as a browser's button does (the StepButton pattern): the
+        // TouchArea above the FocusScope grabs the press before it.
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
+                keys.focus();
+            }
+        }
         clicked => { root.clicked(); }
     }
 }

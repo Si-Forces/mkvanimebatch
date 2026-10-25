@@ -1,7 +1,9 @@
 //! The job controls (P5): each mode's published controls mapped into the bottom bar and its tab's
 //! status pill, Run and Stop, and the confirm dialog behind "Clear inspection cache…".
-//! `job-controller.js` and `app.js` (`showModal`) are the reference; every text, count and width
-//! is the core's (`presentation.rs`).
+//! `job-controller.js` and `app.js` (`showModal`) are the reference. The controls' labels,
+//! counts, status and progress are the core's (`presentation.rs`), as is the Close-failed
+//! notice's title and text; the cache dialog's texts mirror `index.html`'s markup, and the
+//! notice's OK `app.js` `showCleanupError`.
 
 use crate::intents::{pipeline, Intents};
 use crate::settings::open_on_flagged;
@@ -522,7 +524,7 @@ pub(crate) mod tests {
     }
 
     /// A failed Close's notice waits behind a dialog shown, then shows OK alone, with the focus:
-    /// Tab stays on it and Return answers it.
+    /// Return answers it at once.
     #[test]
     fn a_failed_close_shows_an_ok_notice_queued_with_the_dialogs() {
         i_slint_backend_testing::init_no_event_loop();
@@ -546,10 +548,94 @@ pub(crate) mod tests {
             .filter(|element| element.accessible_role() == Some(AccessibleRole::Button))
             .count();
         assert_eq!(cancels, 0, "no Cancel");
+        // OK has the focus as it shows: Return answers it.
         button(&app, "OK");
-        key(&app, slint::platform::Key::Tab);
         key(&app, slint::platform::Key::Return);
         assert!(!app.get_dialog_open(), "Return on OK answered it");
+        app.hide().unwrap();
+    }
+
+    /// A notice too long for the narrowest window elides its text: OK stays in the window.
+    #[test]
+    fn a_long_close_notice_keeps_ok_in_the_narrowest_window() {
+        i_slint_backend_testing::init_no_event_loop();
+        let runtime = runtime();
+        let (app, _core) = wired(&runtime, NoJobs);
+        app.window().set_size(slint::LogicalSize::new(760.0, 520.0));
+        app.invoke_close_failed(
+            "Job cleanup failed: /a/long/path/to/an/episode.mkv; "
+                .repeat(40)
+                .into(),
+        );
+        ticks();
+        let ok = button(&app, "OK");
+        let bottom = ok.absolute_position().y + ok.size().height;
+        assert!(bottom <= 520.0 - 36.0, "OK ends at {bottom}");
+        app.hide().unwrap();
+    }
+
+    /// A notice answered with no sheet open gives the focus back to the window, so Esc still
+    /// closes the Log drawer, as the webview's document-wide Esc does.
+    #[test]
+    fn a_notice_answered_with_no_sheet_leaves_esc_closing_the_drawer() {
+        i_slint_backend_testing::init_no_event_loop();
+        let runtime = runtime();
+        let (app, _core) = wired(&runtime, NoJobs);
+        app.set_log_open(true);
+        app.invoke_close_failed("cleanup broke".into());
+        ticks();
+        key(&app, slint::platform::Key::Return);
+        assert!(!app.get_dialog_open(), "Return on OK answered it");
+        key(&app, slint::platform::Key::Escape);
+        assert!(!app.get_log_open(), "Esc closed the drawer");
+        app.hide().unwrap();
+    }
+
+    /// Run, the Log toggle and the drawer's Close take the focus from a pointer press, as a
+    /// browser's buttons do: Return then activates the one clicked, and Close hands the focus to
+    /// the toggle.
+    #[test]
+    fn the_job_buttons_take_the_focus_from_a_pointer_press() {
+        use crate::ui_tests::pointer;
+        use slint::platform::Key::Return;
+        i_slint_backend_testing::init_no_event_loop();
+        let runtime = runtime();
+        let (app, core) = wired(&runtime, NoJobs);
+        app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+        ticks();
+        let click = |label: &str| {
+            let element = button(&app, label);
+            pointer(&app, &element, true);
+            pointer(&app, &element, false);
+            ticks();
+        };
+        // No event loop: the answer never hops back, so it is answered here.
+        let answered = || run_answered(&app, Mode::Remux, Ok(true));
+
+        click("Run remux");
+        answered();
+        key(&app, Return);
+        answered();
+        assert_eq!(log_lines(&runtime, &core), 2, "Return on Run sent a Run");
+
+        app.set_log_open(true);
+        ticks();
+        click("Close");
+        assert!(!app.get_log_open());
+        key(&app, Return);
+        assert!(
+            app.get_log_open(),
+            "the toggle had the focus: Return opened it"
+        );
+        app.set_log_open(false);
+
+        click("Run remux");
+        answered();
+        click("Log");
+        assert!(app.get_log_open());
+        key(&app, Return);
+        assert!(!app.get_log_open(), "Return on the toggle closed it");
+        assert_eq!(log_lines(&runtime, &core), 3, "no Run from Return");
         app.hide().unwrap();
     }
 }
