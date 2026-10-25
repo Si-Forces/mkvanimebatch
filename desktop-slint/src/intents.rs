@@ -1,14 +1,16 @@
-//! The queue's Intents (P2). Each window callback sends its Intent to the Desktop Core at once, on
-//! the UI thread (`CoreHandle::dispatch` sends at call time), so Intents reach the core in the
-//! order the user made them; only their answers are awaited, on the host's runtime.
+//! The queue's (P2), the Library's and the Episode Inspector's (P3) Intents. Each window callback
+//! sends its Intent to the Desktop Core at once, on the UI thread (`CoreHandle::dispatch` sends at
+//! call time), so Intents reach the core in the order the user made them; only their answers are
+//! awaited, on the host's runtime.
 
+use crate::inspector::{capped_tag, restore_form, typed_fields, SUBTITLE_FILTER};
 use crate::publisher::SlintPublisher;
 use mkv_anime_batch_slint_ui::{App, Mode};
 use mkv_core::pipeline::PipelineMode;
 use mkv_desktop_core::actor::{CoreHandle, Intent, ViewState};
 use mkv_desktop_core::draft::DraftChanges;
 use mkv_desktop_core::queue::Direction;
-use slint::ComponentHandle;
+use slint::{ComponentHandle, Model, SharedString};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::runtime::Handle;
@@ -62,6 +64,76 @@ impl Intents {
         if let Some(app) = self.window.upgrade() {
             self.send(name, make(pipeline(app.get_mode())), answered);
         }
+    }
+}
+
+/// Sets the remux Inspector's row's Track Assignment to the subtitle `path` from the fields as
+/// typed, or clears it for an empty `path` (app.js `assignSubtitle`); then, answered or refused,
+/// puts the fields back on what is published. Nothing while a batch runs but that put-back (the
+/// subtitle controls are locked by then; the file dialog may answer after a batch started).
+fn assign_subtitle(send: &Intents, app: &App, path: &str) {
+    let inspector = app.get_remux_inspector();
+    if !inspector.shown {
+        return;
+    }
+    if app.get_busy() {
+        restore_form(app);
+        return;
+    }
+    let (mode, id) = (PipelineMode::Remux, inspector.id.to_string());
+    let (name, intent) = if path.is_empty() {
+        ("clear_track", Intent::ClearTrack { mode, id })
+    } else {
+        let (language, custom_language, title, offset) = typed_fields(app);
+        let intent = Intent::AssignSubtitle {
+            mode,
+            id,
+            path: path.into(),
+            language,
+            custom_language,
+            title,
+            offset,
+        };
+        ("assign_subtitle", intent)
+    };
+    let window = send.window.clone();
+    send.send(name, intent, move || {
+        let _ = window.upgrade_in_event_loop(|app| restore_form(&app));
+    });
+}
+
+/// The remux Inspector's episode: its id, which is relative to the folder, and the folder's
+/// crumbs, so the same relative path in another folder is another episode.
+fn inspected(app: &App) -> (SharedString, SharedString, SharedString) {
+    let head = app.get_remux_head();
+    (
+        app.get_remux_inspector().id,
+        head.crumbs_lead,
+        head.crumbs_end,
+    )
+}
+
+/// The subtitle file dialog answered: `picked` is assigned to `target`, the episode the remux
+/// Inspector showed when the dialog opened (see [`inspected`]). Cancelled, or the Inspector moved
+/// on to another episode or folder while it was open, the select goes back on what is assigned.
+fn subtitle_picked(
+    send: &Intents,
+    app: &App,
+    target: &(SharedString, SharedString, SharedString),
+    picked: Option<&str>,
+) {
+    match picked {
+        Some(path) if inspected(app) == *target => assign_subtitle(send, app, path),
+        _ => restore_form(app),
+    }
+}
+
+/// Sends the remux Inspector's assignment again with the fields as typed (app.js
+/// `onAssignOptions`); nothing while none is assigned.
+fn resend_assignment(send: &Intents, app: &App) {
+    let inspector = app.get_remux_inspector();
+    if inspector.assigned {
+        assign_subtitle(send, app, &inspector.asset_path);
     }
 }
 
@@ -126,6 +198,101 @@ pub(crate) fn wire(app: &App, core: CoreHandle, runtime: Handle, publisher: Slin
         });
     });
 
+    // The Library: the input folder scrolls its list to the top; a release shows every row again
+    // and scrolls to the release's first (queue-view.js `revealRelease`).
+    let (runtime, shown, revealing) = (intents.runtime.clone(), window.clone(), publisher.clone());
+    app.on_reveal_release(move |release, root| {
+        let Some(app) = shown.upgrade() else {
+            return;
+        };
+        let mode = app.get_mode();
+        if root {
+            revealing.cancel_reveal(mode);
+            app.invoke_reveal(mode, 0);
+            return;
+        }
+        revealing.reveal(mode, release.into());
+        let publisher = revealing.clone();
+        runtime.spawn_blocking(move || publisher.remap(mode));
+    });
+
+    // The subtitle select (app.js `onAssignSelect`): a published choice is assigned, Automatic
+    // clears it, "Choose a file…" opens the subtitle file dialog, one at a time.
+    let (send, shown) = (intents.clone(), window.clone());
+    let picking_subtitle = Arc::new(AtomicBool::new(false));
+    app.on_choose_subtitle(move |index| {
+        let Some(app) = shown.upgrade() else {
+            return;
+        };
+        let value = usize::try_from(index)
+            .ok()
+            .and_then(|at| app.get_sub_values().row_data(at));
+        if let Some(value) = value {
+            // Picked again: a select sends no change for the value it holds.
+            if index != app.get_remux_inspector().choice {
+                assign_subtitle(&send, &app, &value);
+            }
+            return;
+        }
+        if app.get_busy() || picking_subtitle.swap(true, Ordering::Relaxed) {
+            restore_form(&app);
+            return;
+        }
+        let (send, picking, window, target) = (
+            send.clone(),
+            Picking(Arc::clone(&picking_subtitle)),
+            shown.clone(),
+            inspected(&app),
+        );
+        // The dialog blocks until it is answered: never on the event loop.
+        send.runtime.clone().spawn_blocking(move || {
+            let (name, extensions) = SUBTITLE_FILTER;
+            let picked = rfd::FileDialog::new()
+                .add_filter(name, &extensions)
+                .pick_file();
+            // Back on the event loop, so the Intents keep their order with the other callbacks'.
+            let _ = window.upgrade_in_event_loop(move |app| {
+                drop(picking);
+                let picked = picked.map(|path| path.to_string_lossy().into_owned());
+                subtitle_picked(&send, &app, &target, picked.as_deref());
+            });
+        });
+    });
+
+    let (send, shown) = (intents.clone(), window.clone());
+    app.on_reset_subtitle(move || {
+        if let Some(app) = shown.upgrade() {
+            assign_subtitle(&send, &app, "");
+        }
+    });
+
+    // A tag, title or offset committed: the assignment again, with the new fields.
+    let (send, shown) = (intents.clone(), window.clone());
+    app.on_subtitle_options_changed(move || {
+        if let Some(app) = shown.upgrade() {
+            resend_assignment(&send, &app);
+        }
+    });
+
+    // A language picked: the same, unless it is the one shown (a select sends no change for the
+    // value it holds).
+    let (send, shown) = (intents.clone(), window.clone());
+    app.on_choose_language(move |index| {
+        if let Some(app) = shown.upgrade() {
+            if index != app.get_remux_inspector().language {
+                resend_assignment(&send, &app);
+            }
+        }
+    });
+
+    // The tag field holds an ISO 639-2 code at most, as the webview's `maxlength` keeps it.
+    let shown = window.clone();
+    app.on_language_tag_edited(move |text| {
+        if let (Some(app), Some(capped)) = (shown.upgrade(), capped_tag(&text)) {
+            app.set_sub_custom(capped.into());
+        }
+    });
+
     let (runtime, shown) = (intents.runtime.clone(), window.clone());
     app.on_set_filter(move |filter| {
         if let Some(mode) = shown.upgrade().map(|app| app.get_mode()) {
@@ -184,6 +351,7 @@ pub(crate) fn wire(app: &App, core: CoreHandle, runtime: Handle, publisher: Slin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mkv_anime_batch_slint_ui::Inspector as InspectorPane;
     use mkv_core::item_id::ItemId;
     use mkv_core::manifest::{InspectionManifest, ManifestItem};
     use mkv_core::request::{BatchRequest, EffectiveSettings};
@@ -287,6 +455,128 @@ mod tests {
             .map(|row| (row.id.as_str(), row.selected))
             .collect();
         assert_eq!(selected, [("a", true), ("b", false), ("c", true)]);
+    }
+
+    /// The subtitle callbacks send the remux Inspector's row's AssignSubtitle with the fields as
+    /// typed, and ClearTrack; a choice or a language picked again, or the file dialog while a
+    /// batch runs, sends nothing.
+    #[test]
+    fn subtitle_callbacks_send_the_fields_as_typed() {
+        i_slint_backend_testing::init_no_event_loop();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let app = App::new().unwrap();
+        crate::publisher::install_models(&app);
+        let publisher = SlintPublisher::new(&app);
+        let ports = Ports {
+            inspector: Episodes,
+            launcher: NoJobs,
+            sampler: NoSamples,
+        };
+        let core = Core::spawn(runtime.handle().clone(), publisher.clone(), ports);
+        wire(&app, core.clone(), runtime.handle().clone(), publisher);
+        let scan = Intent::ScanDirectory {
+            mode: PipelineMode::Remux,
+            path: "/show".into(),
+            force: false,
+            no_cache: false,
+        };
+        assert_eq!(runtime.block_on(core.dispatch(scan)), Ok(true));
+        let assignment = || {
+            let state = runtime.block_on(core.state()).unwrap();
+            state.remux.assignments.get("b").map(|assignment| {
+                (
+                    assignment.asset_path.to_string_lossy().into_owned(),
+                    assignment.language.clone(),
+                    assignment.title.clone(),
+                    assignment.offset_ms,
+                )
+            })
+        };
+        // What the window shows: row `b` inspected, Automatic, with a second choice.
+        let values = ["", "/subs/b.ass"].map(slint::SharedString::from);
+        app.set_sub_values(slint::ModelRc::new(slint::VecModel::from(values.to_vec())));
+        app.set_remux_inspector(InspectorPane {
+            shown: true,
+            id: "b".into(),
+            ..InspectorPane::default()
+        });
+        app.set_sub_language(3);
+        app.set_sub_custom(" may ".into());
+        app.set_sub_title("A".into());
+        app.set_sub_offset("1e3".into());
+
+        // A choice picked: assigned with the fields as typed.
+        app.invoke_choose_subtitle(1);
+        let typed = |title: &str| {
+            Some((
+                "/subs/b.ass".to_string(),
+                Some("may".to_string()),
+                Some(title.to_string()),
+                Some(1000),
+            ))
+        };
+        assert_eq!(assignment(), typed("A"));
+
+        // The Inspector now shows the assignment, with the custom tag.
+        app.set_remux_inspector(InspectorPane {
+            shown: true,
+            id: "b".into(),
+            assigned: true,
+            asset_path: "/subs/b.ass".into(),
+            choice: 1,
+            language: 3,
+            ..InspectorPane::default()
+        });
+        app.set_sub_title("Z".into());
+        // The choice and the language shown, picked again: nothing is sent.
+        app.invoke_choose_subtitle(1);
+        app.invoke_choose_language(3);
+        assert_eq!(assignment(), typed("A"));
+        // A committed title sends the assignment again.
+        app.set_sub_title("B".into());
+        app.invoke_subtitle_options_changed();
+        assert_eq!(assignment(), typed("B"));
+        // Each preset language is sent as its code.
+        for (index, code) in [(0, "ind"), (1, "eng"), (2, "jpn")] {
+            app.set_sub_language(index);
+            app.invoke_choose_language(index);
+            let language = assignment().and_then(|(_, language, _, _)| language);
+            assert_eq!(language.as_deref(), Some(code));
+        }
+
+        // The tag field is cut to an ISO 639-2 code.
+        app.invoke_language_tag_edited("mayxx".into());
+        assert_eq!(app.get_sub_custom(), "may");
+
+        app.invoke_reset_subtitle();
+        assert_eq!(assignment(), None);
+
+        // A file picked once the Inspector moved on to another row, or to the same relative id in
+        // another folder, is not that row's.
+        let send = Intents {
+            core: core.clone(),
+            runtime: runtime.handle().clone(),
+            window: app.as_weak(),
+        };
+        let (_, lead, end) = inspected(&app);
+        subtitle_picked(&send, &app, &("a".into(), lead, end), Some("/subs/b.ass"));
+        assert_eq!(assignment(), None);
+        let other_folder = ("b".into(), "/other/".into(), "show".into());
+        subtitle_picked(&send, &app, &other_folder, Some("/subs/b.ass"));
+        assert_eq!(assignment(), None);
+        subtitle_picked(&send, &app, &inspected(&app), Some("/subs/b.ass"));
+        let path = assignment().map(|(path, ..)| path);
+        assert_eq!(path.as_deref(), Some("/subs/b.ass"));
+
+        // "Choose a file…" while a batch runs: no dialog, the select goes back on what is shown.
+        app.set_busy(true);
+        app.set_sub_choice(2);
+        app.invoke_choose_subtitle(2);
+        assert_eq!(app.get_sub_choice(), 1);
     }
 
     #[test]

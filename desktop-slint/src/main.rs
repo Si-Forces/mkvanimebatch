@@ -1,6 +1,7 @@
 //! MKV Anime Batch desktop host on Slint (ADR-0017), beside the Tauri host until the switch.
 
 mod diagnostics;
+mod inspector;
 mod intents;
 mod publisher;
 mod queue;

@@ -30,6 +30,9 @@
 // --all-targets` checks a bench with cfg(test) but without its #[test] items, which leaves their
 // imports unused.
 #[allow(dead_code, unused_imports)]
+#[path = "../src/inspector.rs"]
+mod inspector;
+#[allow(dead_code, unused_imports)]
 #[path = "../src/publisher.rs"]
 mod publisher;
 #[allow(dead_code, unused_imports)]
