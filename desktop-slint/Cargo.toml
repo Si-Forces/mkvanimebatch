@@ -45,9 +45,12 @@ slint = { git = "https://github.com/slint-ui/slint", rev = "45cb2b33420e1b3c8a13
 # MessageBoxW on Windows; Linux runs zenity or kdialog for that dialog itself (renderer.rs).
 rfd = "0.15"
 # Copy in the Run Log drawer: Slint has no app-level clipboard call (only its backends' own,
-# which drop the write's error). Already in the tree through Slint's winit backend; its features
-# (Wayland data-control on Linux) come from there.
+# which drop the write's error). Already in the tree through Slint's winit backend.
 arboard = { version = "3.6", default-features = false }
+
+# Copy on Wayland without XWayland: declared here, not left to what Slint's backend selects.
+[target.'cfg(target_os = "linux")'.dependencies]
+arboard = { version = "3.6", default-features = false, features = ["wayland-data-control"] }
 
 [dev-dependencies]
 # `renderer-software`: headless snapshots for the font test.

@@ -11,10 +11,10 @@ import { Mode, QueueFilter, QueueHead, QueuePane, QueueRow, RowMark, RowTone } f
 import { Inspector, InspectorPane, LibraryEntry, LibraryItem, Rung } from "inspector.slint";
 import { ChipTexts, DraftForm, GearButton, PresetItem, PresetRow, SettingsSheet, Sheet, SheetLimits } from "settings.slint";
 import { BottomBar, ConfirmDialog, DialogTexts, JobBar, StatusDot, StatusTone } from "jobs.slint";
-import { LogBadge, LogDrawer, LogRow, LogTone, LogToggle } from "log.slint";
+import { LogBadge, LogDrawer, LogRow, LogSerials, LogTone, LogToggle } from "log.slint";
 
 // FontProbe is test only; a .slint file cannot be compiled per cfg, so it ships (a few bytes).
-export { Theme, FontProbe, Inspector, LibraryItem, Mode, QueueFilter, QueueHead, QueueRow, RowMark, RowTone, Rung, ChipTexts, DraftForm, PresetItem, Sheet, SheetLimits, DialogTexts, JobBar, StatusTone, LogBadge, LogRow, LogTone }
+export { Theme, FontProbe, Inspector, LibraryItem, Mode, QueueFilter, QueueHead, QueueRow, RowMark, RowTone, Rung, ChipTexts, DraftForm, PresetItem, Sheet, SheetLimits, DialogTexts, JobBar, StatusTone, LogBadge, LogRow, LogSerials, LogTone }
 
 // Who opened the settings sheet, to take the focus back when it closes: a mode's gear, Run (after
 // a refused Run), or nothing to give it back to.
@@ -183,6 +183,9 @@ export component App inherits Window {
     in property <[LogRow]> extract-log;
     in property <LogBadge> remux-log-badge;
     in property <LogBadge> extract-log-badge;
+    // What the host last wrote into each mode's lines, which its console follows on.
+    in property <LogSerials> remux-log-serials;
+    in property <LogSerials> extract-log-serials;
     // The Log drawer is open.
     in-out property <bool> log-open;
     // The drawer's Copy: "Copied" or "Copy failed" for a while after a Copy (the host's).
@@ -284,16 +287,18 @@ export component App inherits Window {
         Sheet.focus-key = key;
         Sheet.focus-serial += 1;
         if !root.sheet-open {
-            root.opener = Opener.run;
+            root.opener = key == "" ? Opener.none : Opener.run;
             root.sheet-open = true;
         }
     }
 
     // Done, a backdrop click or Esc: the focused field is left first (it changes if edited), as
-    // a closing dialog blurs it, then the gear that opened the sheet takes the focus back.
+    // a closing dialog blurs it, then the gear that opened the sheet takes the focus back. The
+    // window's key scope takes it first, so Esc still reaches it with no opener to give it to.
     public function close-sheet() {
         Sheet.leave(Sheet.focused);
         root.sheet-open = false;
+        keys.focus();
         if root.opener == Opener.remux-gear {
             remux-tab.focus-gear();
         } else if root.opener == Opener.extract-gear {
@@ -308,12 +313,14 @@ export component App inherits Window {
         root.opener = mode == Mode.remux ? Opener.remux-gear : Opener.extract-gear;
     }
 
-    // The confirm dialog closed over the sheet: the button that opened it takes the focus back.
-    // With no sheet, the window's key scope does, so Esc still reaches it (the removed dialog
-    // dropped the focus).
+    // The confirm dialog closed over the sheet: the button that opened it takes the focus back,
+    // and Done after a notice (OK alone), which no sheet button opened. With no sheet, the
+    // window's key scope does, so Esc still reaches it (the removed dialog dropped the focus).
     changed dialog-open => {
         if !self.dialog-open {
-            if self.sheet-open {
+            if self.sheet-open && self.dialog.notice {
+                Sheet.done-focus-serial += 1;
+            } else if self.sheet-open {
                 Sheet.cache-focus-serial += 1;
             } else {
                 keys.focus();
@@ -554,7 +561,8 @@ export component App inherits Window {
                             head: root.remux-head;
                             rows: root.remux-rows;
                             list-scroll <=> root.remux-scroll;
-                            busy: root.locked;
+                            busy: root.busy;
+                            locked: root.locked;
                             pending-inspect: root.pending-inspect;
                             set-selected(id, selected) => { root.set-selected(id, selected); }
                             set-all-selected(selected) => { root.set-all-selected(selected); }
@@ -576,7 +584,8 @@ export component App inherits Window {
                             head: root.extract-head;
                             rows: root.extract-rows;
                             list-scroll <=> root.extract-scroll;
-                            busy: root.locked;
+                            busy: root.busy;
+                            locked: root.locked;
                             pending-inspect: root.pending-inspect;
                             set-selected(id, selected) => { root.set-selected(id, selected); }
                             set-all-selected(selected) => { root.set-all-selected(selected); }
@@ -663,6 +672,8 @@ export component App inherits Window {
                 close => { root.close-log(); }
                 remux-rows: root.remux-log;
                 extract-rows: root.extract-log;
+                remux-serials: root.remux-log-serials;
+                extract-serials: root.extract-log-serials;
                 extract: root.mode == Mode.extract;
             }
         }
@@ -694,7 +705,8 @@ export component App inherits Window {
                     bitrates: root.bitrates;
                     chips: root.chips;
                     limits: root.sheet-limits;
-                    busy: root.locked;
+                    busy: root.busy;
+                    locked: root.locked;
                     done => { root.close-sheet(); }
                 }
                 if root.mode == Mode.extract: SettingsSheet {
@@ -708,7 +720,8 @@ export component App inherits Window {
                     bitrates: root.bitrates;
                     chips: root.chips;
                     limits: root.sheet-limits;
-                    busy: root.locked;
+                    busy: root.busy;
+                    locked: root.locked;
                     done => { root.close-sheet(); }
                 }
             }
