@@ -26,7 +26,7 @@ const FAILED_ACTION: &str = "Choose another folder…";
 /// The empty list's button: it opens the folder picker.
 const OPEN_FOLDER: &str = "Open folder…";
 /// Between the crumbs of the list header's path.
-const CRUMB_SEPARATOR: &str = " › ";
+pub(crate) const CRUMB_SEPARATOR: &str = " › ";
 
 /// The filter chip's bucket; `None` for All, which shows every row.
 fn bucket_of(filter: QueueFilter) -> Option<Bucket> {
@@ -138,7 +138,7 @@ pub(crate) fn map_rows(
 
 /// The list header's path: every crumb but the last, each followed by the separator, then the
 /// last, which the header draws bold.
-pub(crate) fn crumbs(crumbs: &[String]) -> (String, String) {
+fn crumbs(crumbs: &[String]) -> (String, String) {
     match crumbs.split_last() {
         Some((end, lead)) => (
             lead.iter()
@@ -282,10 +282,9 @@ pub(crate) struct Update {
 /// model holds once every taken update is applied, and the update not yet taken. An update is
 /// always against the applied rows, so a publication that replaces one not yet taken still
 /// patches the model correctly.
-#[derive(Default)]
 pub(crate) struct ModeList {
     mode: Mode,
-    pub(crate) filter: QueueFilter,
+    filter: QueueFilter,
     pub(crate) view: Option<ModeView>,
     applied: Rows,
     pending: Option<Rows>,
@@ -304,11 +303,39 @@ pub(crate) struct ModeList {
 }
 
 impl ModeList {
+    /// `mode`'s list, showing every row, before its first view.
     pub(crate) fn new(mode: Mode) -> Self {
         Self {
             mode,
-            ..Self::default()
+            filter: QueueFilter::All,
+            view: None,
+            applied: Rows::default(),
+            pending: None,
+            patch: None,
+            head: None,
+            rows_shown: false,
+            to_top: false,
+            inspector: InspectorList::default(),
+            reveal: None,
+            reveal_row: None,
         }
+    }
+
+    pub(crate) fn filter(&self) -> QueueFilter {
+        self.filter
+    }
+
+    /// Shows the rows `filter` matches once they are mapped again; a later click than a reveal
+    /// not shown yet, so it cancels it.
+    pub(crate) fn set_filter(&mut self, filter: QueueFilter) {
+        self.filter = filter;
+        self.cancel_reveal();
+    }
+
+    /// Drops a reveal not shown yet.
+    pub(crate) fn cancel_reveal(&mut self) {
+        self.reveal = None;
+        self.reveal_row = None;
     }
 
     /// The filter to map `view`'s rows with, or `None` when they are the rows last mapped. The
@@ -325,6 +352,14 @@ impl ModeList {
     /// Takes `view`, with its rows mapped by [`wants_rows`](Self::wants_rows)'s filter. Rows
     /// mapped with a filter that changed meanwhile are mapped again.
     pub(crate) fn put(&mut self, view: ModeView, mapped: Option<(QueueFilter, Vec<QueueRow>)>) {
+        // Another folder's rows: a release revealed in the last one is not this one's.
+        if self
+            .view
+            .as_ref()
+            .is_some_and(|last| last.directory != view.directory)
+        {
+            self.cancel_reveal();
+        }
         let rows = match mapped {
             Some((filter, rows)) if filter == self.filter => Some(rows),
             Some(_) => Some(map_rows(&view.rows, &view.library, self.filter)),
@@ -619,7 +654,7 @@ mod tests {
         view.rows = Arc::new(vec![row("a", ".", Some(Bucket::Todo))]);
         view.directory = Some("/media/Show".into());
         view.empty = None;
-        let mut list = ModeList::default();
+        let mut list = ModeList::new(Mode::Remux);
         let mut shown = |scan| {
             view.scan = scan;
             list.put(view.clone(), None);
@@ -642,7 +677,7 @@ mod tests {
             row("b", ".", Some(Bucket::Done)),
         ]);
         view.manifest_rev = 1;
-        let mut list = ModeList::default();
+        let mut list = ModeList::new(Mode::Remux);
         let map = |list: &ModeList, view: &ModeView| {
             list.wants_rows(view)
                 .map(|filter| (filter, map_rows(&view.rows, &view.library, filter)))
@@ -693,5 +728,40 @@ mod tests {
             )),
         );
         assert!(matches!(list.take().rows, Some(RowPatch::Rows(rows)) if rows.is_empty()));
+    }
+
+    /// A Library reveal scrolls once its rows are staged, unless a filter click, the folder's own
+    /// entry or another folder came after it.
+    #[test]
+    fn a_later_filter_root_click_or_folder_cancels_a_reveal() {
+        let mut view = ViewState::new(None).remux;
+        view.rows = Arc::new(vec![
+            row("a", ".", Some(Bucket::Todo)),
+            row("b", "S2", Some(Bucket::Todo)),
+        ]);
+        view.directory = Some("/a".into());
+        let mut list = ModeList::new(Mode::Remux);
+        list.put(view.clone(), None);
+        list.take();
+        let mut revealed = |cancel: &dyn Fn(&mut ModeList, &ModeView)| {
+            list.reveal("S2".into());
+            cancel(&mut list, &view);
+            let filter = list.filter();
+            list.put_filtered(&view, filter, map_rows(&view.rows, &[], filter));
+            list.take().reveal
+        };
+        assert_eq!(revealed(&|_, _| {}), Some(1));
+        assert_eq!(
+            revealed(&|list, _| list.set_filter(QueueFilter::Done)),
+            None
+        );
+        assert_eq!(revealed(&|list, _| list.cancel_reveal()), None);
+        let other_folder = |list: &mut ModeList, view: &ModeView| {
+            let mut other = view.clone();
+            other.directory = Some("/b".into());
+            let rows = map_rows(&other.rows, &[], QueueFilter::All);
+            list.put(other, Some((QueueFilter::All, rows)));
+        };
+        assert_eq!(revealed(&other_folder), None);
     }
 }

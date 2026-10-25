@@ -141,8 +141,6 @@ export component App inherits Window {
     // replaces the rows; its bench (desktop-slint/benches/queue_scroll.rs) drives it.
     in-out property <length> remux-scroll;
     in-out property <length> extract-scroll;
-    // Whether the CJK fallback fonts were drawn once (below).
-    property <bool> fonts-warm;
 
     // The shown mode's list asks; the host sends the Intent for `mode`.
     callback set-selected(id: string, selected: bool);
@@ -181,12 +179,19 @@ export component App inherits Window {
     property <length> side-width: root.width >= 1180px ? 220px : root.width >= 980px ? 200px : 196px;
     property <length> insp-width: root.width >= 1180px ? 320px : root.width >= 980px ? 280px : 248px;
 
-    // Commits a subtitle field edited but not committed, as the webview's blur does before the
-    // click lands; then marks the row at once and asks the host.
+    // A row picked: commits a typed subtitle field first, then marks the row at once and asks
+    // the host.
     function pick(id: string) {
-        insp-pane.flush();
+        root.leave-field();
         root.pending-inspect = id;
         root.inspect(id);
+    }
+
+    // Commits a subtitle field edited but not committed, as the webview's blur does before a
+    // click lands. The custom controls (rows, chips, tabs, the Library, Open folder) take no
+    // focus, so the field keeps it through their click and never commits on its own.
+    function leave-field() {
+        insp-pane.flush();
     }
 
     Rectangle {
@@ -200,20 +205,19 @@ export component App inherits Window {
         clip: true;
         background: Theme.wall-base;
 
-        // A few CJK glyphs, drawn all but transparent for the first second, so the system's
-        // fallback fonts load at boot and not in the frame where a CJK name first scrolls in
-        // (#135). An invisible Text loads nothing: it is never drawn.
-        if !root.fonts-warm: Text {
+        // A few CJK glyphs, drawn all but transparent under the wallpaper, so the system's
+        // fallback fonts load with the first frame and not in the frame where a CJK name first
+        // scrolls in (#135). Each weight a CJK name is drawn at loads its own fallbacks (a row's
+        // name and a release head at 600, the Inspector's title at 700). Drawn for good: a timer
+        // from the window's creation can run out before a slow first frame (a cold start, the
+        // bench), and the glyphs then never load early.
+        for weight in [400, 600, 700]: Text {
             x: 0;
             y: 0;
             text: "あア漢药【】";
+            font-weight: weight;
             color: #00000001;
             accessible-role: none;
-        }
-        Timer {
-            interval: 1s;
-            running: !root.fonts-warm;
-            triggered => { root.fonts-warm = true; }
         }
 
         // The wallpaper (--wall): three soft blobs over the base.
@@ -291,24 +295,36 @@ export component App inherits Window {
                                 title: "Remux";
                                 subtitle: "FLAC → Opus, mux subs";
                                 active: root.mode == Mode.remux;
-                                clicked => { root.mode = Mode.remux; }
+                                clicked => {
+                                    root.leave-field();
+                                    root.mode = Mode.remux;
+                                }
                             }
                             ModeTab {
                                 title: "Extract";
                                 subtitle: "Subs, fonts, chapters";
                                 active: root.mode == Mode.extract;
-                                clicked => { root.mode = Mode.extract; }
+                                clicked => {
+                                    root.leave-field();
+                                    root.mode = Mode.extract;
+                                }
                             }
                             // .side's 18px gap between groups, less the group's own 2px spacing.
                             Rectangle { height: 16px; }
                             SideHeading { text: "LIBRARY"; }
                             for item in root.library: LibraryEntry {
                                 item: item;
-                                clicked => { root.reveal-release(item.release, item.root); }
+                                clicked => {
+                                    root.leave-field();
+                                    root.reveal-release(item.release, item.root);
+                                }
                             }
                             OpenFolderNav {
                                 enabled: !root.busy;
-                                clicked => { root.open-folder(); }
+                                clicked => {
+                                    root.leave-field();
+                                    root.open-folder();
+                                }
                             }
                         }
                     }
@@ -337,8 +353,14 @@ export component App inherits Window {
                         set-all-selected(selected) => { root.set-all-selected(selected); }
                         reorder(id, up) => { root.reorder(id, up); }
                         inspect(id) => { root.pick(id); }
-                        set-filter(filter) => { root.set-filter(filter); }
-                        open-folder => { root.open-folder(); }
+                        set-filter(filter) => {
+                            root.leave-field();
+                            root.set-filter(filter);
+                        }
+                        open-folder => {
+                            root.leave-field();
+                            root.open-folder();
+                        }
                     }
                     extract-pane := QueuePane {
                         width: parent.width;
@@ -353,8 +375,14 @@ export component App inherits Window {
                         set-all-selected(selected) => { root.set-all-selected(selected); }
                         reorder(id, up) => { root.reorder(id, up); }
                         inspect(id) => { root.pick(id); }
-                        set-filter(filter) => { root.set-filter(filter); }
-                        open-folder => { root.open-folder(); }
+                        set-filter(filter) => {
+                            root.leave-field();
+                            root.set-filter(filter);
+                        }
+                        open-folder => {
+                            root.leave-field();
+                            root.open-folder();
+                        }
                     }
                 }
 

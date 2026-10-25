@@ -102,6 +102,16 @@ fn assign_subtitle(send: &Intents, app: &App, path: &str) {
     });
 }
 
+/// The subtitle file dialog answered: `picked` is assigned to the row `target`, the remux
+/// Inspector's when the dialog opened. Cancelled, or the Inspector moved on to another row while it
+/// was open, the select goes back on what is assigned.
+fn subtitle_picked(send: &Intents, app: &App, target: &str, picked: Option<&str>) {
+    match picked {
+        Some(path) if app.get_remux_inspector().id == target => assign_subtitle(send, app, path),
+        _ => restore_form(app),
+    }
+}
+
 /// Sends the remux Inspector's assignment again with the fields as typed (app.js
 /// `onAssignOptions`); nothing while none is assigned.
 fn resend_assignment(send: &Intents, app: &App) {
@@ -181,6 +191,7 @@ pub(crate) fn wire(app: &App, core: CoreHandle, runtime: Handle, publisher: Slin
         };
         let mode = app.get_mode();
         if root {
+            revealing.cancel_reveal(mode);
             app.invoke_reveal(mode, 0);
             return;
         }
@@ -211,10 +222,11 @@ pub(crate) fn wire(app: &App, core: CoreHandle, runtime: Handle, publisher: Slin
             restore_form(&app);
             return;
         }
-        let (send, picking, window) = (
+        let (send, picking, window, target) = (
             send.clone(),
             Picking(Arc::clone(&picking_subtitle)),
             shown.clone(),
+            app.get_remux_inspector().id,
         );
         // The dialog blocks until it is answered: never on the event loop.
         send.runtime.clone().spawn_blocking(move || {
@@ -225,11 +237,8 @@ pub(crate) fn wire(app: &App, core: CoreHandle, runtime: Handle, publisher: Slin
             // Back on the event loop, so the Intents keep their order with the other callbacks'.
             let _ = window.upgrade_in_event_loop(move |app| {
                 drop(picking);
-                match picked {
-                    Some(path) => assign_subtitle(&send, &app, &path.to_string_lossy()),
-                    // Nothing picked: the select goes back on what is assigned.
-                    None => restore_form(&app),
-                }
+                let picked = picked.map(|path| path.to_string_lossy().into_owned());
+                subtitle_picked(&send, &app, &target, picked.as_deref());
             });
         });
     });
@@ -529,6 +538,18 @@ mod tests {
 
         app.invoke_reset_subtitle();
         assert_eq!(assignment(), None);
+
+        // A file picked once the Inspector moved on to another row is not that row's.
+        let send = Intents {
+            core: core.clone(),
+            runtime: runtime.handle().clone(),
+            window: app.as_weak(),
+        };
+        subtitle_picked(&send, &app, "a", Some("/subs/b.ass"));
+        assert_eq!(assignment(), None);
+        subtitle_picked(&send, &app, "b", Some("/subs/b.ass"));
+        let path = assignment().map(|(path, ..)| path);
+        assert_eq!(path.as_deref(), Some("/subs/b.ass"));
 
         // "Choose a file…" while a batch runs: no dialog, the select goes back on what is shown.
         app.set_busy(true);
