@@ -1453,6 +1453,9 @@ mod tests {
             "Done had the focus: Return closed it"
         );
 
+        let left = Rc::new(std::cell::Cell::new(0));
+        let count = Rc::clone(&left);
+        sheet.on_left(move |_, _| count.set(count.get() + 1));
         open("input_dir");
         open("input_dir");
         assert_eq!(
@@ -1460,6 +1463,7 @@ mod tests {
             "input_dir",
             "the field keeps the focus"
         );
+        assert_eq!(left.get(), 0, "a field that keeps the focus is not left");
         open("");
         assert_eq!(sheet.get_focused(), "");
         press_return(&app);

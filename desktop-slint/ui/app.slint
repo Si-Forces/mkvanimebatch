@@ -204,9 +204,11 @@ export component App inherits Window {
     // Shows `mode` and opens its settings sheet with the cursor in the field of draft `key` (the
     // flagged field after a refused Run), or on Done for an empty `key` or one it shows no field
     // of. Already open, it moves the cursor there, leaving the focused field first under the mode
-    // it belongs to (it changes if edited).
+    // it belongs to (it changes if edited); a field that keeps the focus is not left.
     public function open-sheet(mode: Mode, key: string) {
-        Sheet.leave(Sheet.focused);
+        if Sheet.focused != key || mode != root.mode {
+            Sheet.leave(Sheet.focused);
+        }
         root.leave-field();
         root.mode = mode;
         Sheet.focus-key = key;
