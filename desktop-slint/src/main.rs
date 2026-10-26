@@ -9,11 +9,12 @@ mod queue;
 mod renderer;
 mod run_log;
 mod settings;
+mod telemetry;
 #[cfg(test)]
 mod ui_tests;
 
 use mkv_anime_batch_slint_ui::{App, Theme};
-use mkv_desktop_core::actor::{Core, Ports};
+use mkv_desktop_core::actor::{Core, Intent, Ports};
 use mkv_desktop_core::control::{
     begin_shutdown, cancel_shutdown, cleanup_owned_processes, InspectCacheState, ScanState,
 };
@@ -145,9 +146,6 @@ fn run(
             Rc::clone(&start),
         );
     }
-    if let Some(dir) = save {
-        save_once_drawn(&app, dir);
-    }
     publisher::install_models(&app);
     // Held until the end: the actor stops once every handle is gone.
     let publisher = SlintPublisher::new(&app);
@@ -158,6 +156,16 @@ fn run(
     );
     run_log::wire(&app, &publisher, run_log::system_clipboard());
     runtime.spawn(run_log::load(&core, &publisher));
+    // Kept until the end: it polls whether the window is minimized.
+    let _visibility = watch_window(
+        &app,
+        save,
+        intents::Intents {
+            core: core.clone(),
+            runtime: runtime.handle().clone(),
+            window: app.as_weak(),
+        },
+    );
     intents::wire(&app, core.clone(), runtime.handle().clone(), publisher);
     let (window, boot) = (app.as_weak(), core.state());
     slint::spawn_local(async move {
@@ -274,14 +282,31 @@ fn watch_start(app: &App, forget: Option<PathBuf>, start: Rc<Cell<GpuStart>>) {
     });
 }
 
-/// Saves the software choice once the re-launched child has drawn. Slint's software renderer
-/// refuses the rendering notifier, so this watches winit's first `RedrawRequested` and saves on a
-/// later loop pass, after Slint has drawn: a failed draw ends the loop first, and nothing is saved.
-/// A first redraw that drew nothing (the window occluded at start) still saves; the software
-/// renderer it saves is the one that does not fail to start.
-fn save_once_drawn(app: &App, dir: PathBuf) {
-    let mut pending = Some(dir);
+/// How often the window asks winit whether it is minimized (X11 and Windows), which no event says.
+const MINIMIZED_POLL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Watches winit's window events, through Slint's one window event filter:
+///
+/// - Tells the core whether the window shows (`Intent::ViewVisible`), so it samples no telemetry
+///   while hidden (`telemetry::Visibility`); the returned timer polls `is_minimized` and must be
+///   kept.
+/// - With `save`, saves the software choice once the re-launched child has drawn. Slint's
+///   software renderer refuses the rendering notifier, so this watches winit's first
+///   `RedrawRequested` and saves on a later loop pass, after Slint has drawn: a failed draw ends
+///   the loop first, and nothing is saved. A first redraw that drew nothing (the window occluded
+///   at start) still saves; the software renderer it saves is the one that does not fail to start.
+fn watch_window(app: &App, save: Option<PathBuf>, send: intents::Intents) -> Timer {
+    let visibility = Rc::new(std::cell::RefCell::new(telemetry::Visibility::default()));
+    let tell = move |visible: Option<bool>| {
+        if let Some(visible) = visible {
+            send.send("view_visible", Intent::ViewVisible { visible }, || {});
+        }
+    };
+    let tell = Rc::new(tell);
+    let (seen, told) = (Rc::clone(&visibility), Rc::clone(&tell));
+    let mut pending = save;
     app.window().on_winit_window_event(move |_, event| {
+        told(seen.borrow_mut().event(event));
         if matches!(event, WindowEvent::RedrawRequested) {
             if let Some(dir) = pending.take() {
                 Timer::single_shot(
@@ -300,6 +325,19 @@ fn save_once_drawn(app: &App, dir: PathBuf) {
         }
         EventResult::Propagate
     });
+    let poll = Timer::default();
+    let window = app.as_weak();
+    poll.start(slint::TimerMode::Repeated, MINIMIZED_POLL, move || {
+        let minimized = window
+            .upgrade()
+            .and_then(|app| {
+                app.window()
+                    .with_winit_window(|window| window.is_minimized())
+            })
+            .flatten();
+        tell(visibility.borrow_mut().minimized(minimized));
+    });
+    poll
 }
 
 /// Close: refuse new starts at once, tear down on a thread of its own (never the UI thread or a

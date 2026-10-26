@@ -57,6 +57,10 @@ mod run_log;
 #[allow(dead_code, unused_imports)]
 #[path = "../src/settings.rs"]
 mod settings;
+// The hop writes the telemetry too (P6).
+#[allow(dead_code, unused_imports)]
+#[path = "../src/telemetry.rs"]
+mod telemetry;
 
 use mkv_anime_batch_slint_ui::{App, Mode, QueueFilter, Theme};
 use mkv_desktop_core::actor::ViewState;

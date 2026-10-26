@@ -36,6 +36,17 @@ export struct DialogTexts {
     notice: bool,
 }
 
+// System Telemetry in the bottom bar (.tel): the core's texts and each sparkline's `Path` commands
+// in a 64x20 box (the host's), empty before two samples.
+export struct Telemetry {
+    cpu: string,
+    ram: string,
+    disk: string,
+    cpu-line: string,
+    ram-line: string,
+    disk-line: string,
+}
+
 export enum CapKind { accent, run, stop }
 
 // A tooltip's card with plain text: a `Tooltip`'s own `text` is markdown.
@@ -226,6 +237,46 @@ component ProgressStack inherits Rectangle {
     }
 }
 
+// One telemetry item (.tel-item): its sparkline (from 1100px), then its label over its value.
+component TelItem inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> value;
+    in property <string> line;
+    in property <color> tone;
+    in property <bool> spark;
+    spacing: 8px;
+    horizontal-stretch: 0;
+    if root.spark: Rectangle {
+        y: (parent.height - self.height) / 2;
+        width: 64px;
+        height: 20px;
+        if root.line != "": Path {
+            viewbox-width: 64;
+            viewbox-height: 20;
+            commands: root.line;
+            stroke: root.tone;
+            stroke-width: 1.4px;
+            stroke-line-join: round;
+            accessible-role: none;
+        }
+    }
+    VerticalLayout {
+        alignment: center;
+        horizontal-stretch: 0;
+        Text {
+            text: root.label;
+            color: Theme.mute;
+            font-size: 11px;
+        }
+        Text {
+            text: root.value;
+            color: Theme.fg;
+            font-size: 12px;
+            font-weight: 600;
+        }
+    }
+}
+
 // The bottom bar (.bar) for the mode shown: its Run (or Stop, while it owns the batch), its
 // queue count, clock and progress, then the worker and I/O job chips from 900px.
 export component BottomBar inherits Rectangle {
@@ -235,6 +286,7 @@ export component BottomBar inherits Rectangle {
     in property <string> io-jobs;
     // A Run sent and not answered yet: Run stays locked.
     in property <bool> run-pending;
+    in property <Telemetry> telemetry;
     callback run();
     callback stop();
     // The sheet a refused Run opened closed: Run takes the focus back.
@@ -321,7 +373,34 @@ export component BottomBar inherits Rectangle {
                 }
             }
         }
-        // The telemetry (P6), then the Log toggle, at the end of the bar.
+        // .tel: the sparklines show from 1100px.
+        HorizontalLayout {
+            property <bool> spark: root.width >= 1100px;
+            horizontal-stretch: 0;
+            spacing: self.spark ? 14px : 10px;
+            TelItem {
+                label: "CPU";
+                value: root.telemetry.cpu;
+                line: root.telemetry.cpu-line;
+                tone: Theme.accent;
+                spark: parent.spark;
+            }
+            TelItem {
+                label: "RAM";
+                value: root.telemetry.ram;
+                line: root.telemetry.ram-line;
+                tone: Theme.done;
+                spark: parent.spark;
+            }
+            TelItem {
+                label: "Disk write";
+                value: root.telemetry.disk;
+                line: root.telemetry.disk-line;
+                tone: Theme.info;
+                spark: parent.spark;
+            }
+        }
+        // The Log toggle, at the end of the bar.
         @children
     }
 }
