@@ -206,6 +206,18 @@ pub(crate) fn wire(app: &App, send: Intents) {
             queue.confirm(&app, close_failed_dialog(&error), |_, _| {});
         }
     });
+    let (queue, shown) = (Rc::clone(&dialogs), app.as_weak());
+    app.on_notice(move |title, text| {
+        if let Some(app) = shown.upgrade() {
+            let texts = DialogTexts {
+                title,
+                text,
+                confirm: "OK".into(),
+                notice: true,
+            };
+            queue.confirm(&app, texts, |_, _| {});
+        }
+    });
     let shown = app.as_weak();
     app.on_dialog_answered(move |confirmed| {
         if let Some(app) = shown.upgrade() {
@@ -588,6 +600,30 @@ pub(crate) mod tests {
         key(&app, slint::platform::Key::Return);
         assert!(!app.get_dialog_open(), "Return on OK answered it");
         app.hide().unwrap();
+    }
+
+    /// The host's notice (the log file that could not be opened) is an OK-only dialog, queued
+    /// with the others.
+    #[test]
+    fn a_host_notice_shows_ok_alone_behind_a_dialog_shown() {
+        i_slint_backend_testing::init_no_event_loop();
+        let runtime = runtime();
+        let (app, _core) = wired(&runtime, NoJobs);
+        app.invoke_close_failed("cleanup broke".into());
+        app.invoke_notice("Could not open the log file".into(), "C:\\logs".into());
+        assert_eq!(app.get_dialog(), close_failed_dialog("cleanup broke"));
+        app.invoke_dialog_answered(true);
+        assert_eq!(
+            app.get_dialog(),
+            DialogTexts {
+                title: "Could not open the log file".into(),
+                text: "C:\\logs".into(),
+                confirm: "OK".into(),
+                notice: true,
+            }
+        );
+        app.invoke_dialog_answered(true);
+        assert!(!app.get_dialog_open());
     }
 
     /// A notice answered over the open sheet gives the focus to Done, not to "Clear inspection

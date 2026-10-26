@@ -3802,6 +3802,7 @@ dependencies = [
  "mkv-desktop-core",
  "rfd",
  "slint",
+ "tauri-winres",
  "tempfile",
  "tokio",
  "tracing",
