@@ -2,7 +2,11 @@
 //! 1000 synthetic rows (some with CJK names) in the real P2 queue view; a batch publishes at about
 //! 15 Hz through the real Publisher path (rows mapped and diffed off the UI thread, then the hop's
 //! `set_row_data`); the list scrolls 6 px per frame for 30 s after a 3 s warm-up, on Skia OpenGL,
-//! maximized, without the glass. Prints one `BENCH` line and exits.
+//! maximized. P6's per-frame content is drawn too: the telemetry sparklines take a synthetic
+//! sample every second (the core's busy cadence), the sticky release head pins as the rows
+//! scroll, and the faked glass Log drawer is open over the scrolling list for the window's middle
+//! third (`glass_frame` is that third's render max and missed vsyncs). Prints one `BENCH` line
+//! and exits.
 //!
 //! ```text
 //! cargo bench -p mkv-anime-batch-slint --bench queue_scroll
@@ -69,6 +73,7 @@ use mkv_desktop_core::presentation::{
 };
 use mkv_desktop_core::queue::Row;
 use mkv_desktop_core::snapshot::ItemStatus;
+use mkv_desktop_core::telemetry::{TelemetryData, TelemetryView};
 use publisher::Coalescer;
 use slint::{ComponentHandle, RenderingState};
 use std::error::Error;
@@ -174,6 +179,7 @@ fn spawn_churn(
         let mut next = 0;
         let t0 = Instant::now();
         let mut last_second = 0;
+        let mut telemetry = TelemetryView::default();
         loop {
             while started.len() < IN_FLIGHT {
                 while next < rows.len()
@@ -192,6 +198,18 @@ fn spawn_churn(
             }
             let second = t0.elapsed().as_secs();
             let tick = std::mem::replace(&mut last_second, second) != second;
+            // A telemetry sample a second, as the core samples during a batch (`BUSY_PERIOD`).
+            if tick {
+                let wave = (second as f32 * 0.7).sin();
+                telemetry.push(&TelemetryData {
+                    cpu_pct: 55.0 + 30.0 * wave,
+                    ram_used_mb: 5_000 + (second % 7) * 40,
+                    ram_total_mb: 8_000,
+                    ram_pct: 62.0 + 3.0 * wave,
+                    io_mb_s: 40.0 + 35.0 * (second as f32 * 1.3).cos(),
+                });
+                state.telemetry = Some(telemetry.clone());
+            }
             let mut finished = Vec::new();
             for (slot, &(i, at)) in started.iter().enumerate() {
                 let row = &mut rows[i];
@@ -272,7 +290,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         .renderer_name("skia-opengl".into())
         .select()?;
     let app = App::new()?;
-    app.global::<Theme>().set_glass(false);
+    // The renderer's glass flag (the real blur, P7) as the app sets it on OpenGL; the faked
+    // glass draws either way.
+    app.global::<Theme>().set_glass(true);
     publisher::install_models(&app);
     app.window().set_maximized(true);
 
@@ -341,6 +361,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let weak = app.as_weak();
     let (mut first, mut before, mut last) = (None::<Instant>, Instant::now(), None::<Instant>);
     let (mut intervals, mut renders) = (Vec::new(), Vec::new());
+    // The frames drawn with the glass drawer open: their renders and intervals.
+    let (mut glass_intervals, mut glass_renders) = (Vec::new(), Vec::new());
     let mut dir = 1.0;
     let (mut reported, mut reset) = (false, f64::NAN);
     // The Run reset is asked for once: a frame between the bump and its hop must not ask again.
@@ -371,6 +393,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                 }
                 renders.push(ms(now.duration_since(before)));
+                if app.get_log_open() {
+                    glass_renders.push(ms(now.duration_since(before)));
+                    if let Some(&interval) = intervals.last() {
+                        glass_intervals.push(interval);
+                    }
+                }
+                // The glass drawer over the list for the middle third of the window.
+                let third = since >= WARMUP + WINDOW / 3 && since < WARMUP + WINDOW * 2 / 3;
+                if app.get_log_open() != third {
+                    app.set_log_open(third);
+                }
                 if since >= WARMUP + WINDOW / 2 && !reset_asked {
                     reset_asked = true;
                     want_reset.store(true, Ordering::Relaxed);
@@ -405,6 +438,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let filter = ms(start.elapsed());
                 let verdict = |pass: bool| if pass { "PASS" } else { "FAIL" };
                 let render_max = renders.iter().copied().fold(0.0, f64::max);
+                let glass_render_max = glass_renders.iter().copied().fold(0.0, f64::max);
+                let glass_over_vsync = glass_intervals.iter().filter(|&&i| i > 25.0).count();
                 let run_reset_ms = run_reset.lock().unwrap().map_or(f64::NAN, |(took, _)| took);
                 let (reset_render, reset_interval) = reset_frame.unwrap_or((f64::NAN, f64::NAN));
                 let pub_budget = hops.len() > 1 && {
@@ -413,7 +448,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     sorted[((sorted.len() - 1) as f64 * 0.99).round() as usize] < 4.0
                 };
                 println!(
-                    "BENCH session={} renderer=skia-opengl rows={ROWS} publications={} {} {} reset_ms={reset:.2} filter_ms={filter:.2} run_reset_ms={run_reset_ms:.2} run_reset_frame=render:{reset_render:.2},interval:{reset_interval:.2} frames={} {} over_16.7ms={over_frame} over_25ms={over_vsync} {} budget_pub={} budget_frame={}",
+                    "BENCH session={} renderer=skia-opengl rows={ROWS} publications={} {} {} reset_ms={reset:.2} filter_ms={filter:.2} run_reset_ms={run_reset_ms:.2} run_reset_frame=render:{reset_render:.2},interval:{reset_interval:.2} frames={} {} over_16.7ms={over_frame} over_25ms={over_vsync} {} glass_frame=frames:{},render_max:{glass_render_max:.2},over_25ms:{glass_over_vsync} budget_pub={} budget_frame={}",
                     if std::env::var_os("WAYLAND_DISPLAY").is_some() { "wayland" } else { "x11" },
                     hops.len(),
                     summary("map", &mut maps),
@@ -421,6 +456,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     intervals.len(),
                     summary("interval", &mut intervals),
                     summary("render", &mut renders),
+                    glass_renders.len(),
                     verdict(pub_budget),
                     verdict(render_max <= 16.7 && over_vsync == 0),
                 );
