@@ -22,8 +22,9 @@ export global Theme {
     in-out property <bool> reduce-motion;
     callback effects-changed();
 
-    // Whether the panes draw the faked .glass (Slint has no backdrop blur at this rev): the host's,
-    // false on the software renderer and under Reduce transparency (solid panes, edge and shadow).
+    // Whether the panes may draw a real backdrop blur (P7; Slint has none at this rev): the host's,
+    // false on the software renderer and under Reduce transparency. The faked .glass (GlassPane)
+    // draws on both renderers, as decision 3 of ADR-0017 asks.
     in-out property <bool> glass: true;
 
     out property <length> window-radius: 14px;
@@ -93,23 +94,24 @@ export global Theme {
 
 // A floating pane (.glass): the log drawer, the settings sheet and the dialog card. Faked, as
 // style.css fakes it: the translucent float with its edge, a top highlight (.glass::before and the
-// inset 1px line) and the shadow. Without Theme.glass, a solid float with its edge and shadow.
+// inset 1px line) and the shadow, on both renderers. Under Reduce transparency the float is solid
+// and the edge, highlight and inset line stay, as style.css keeps `.glass` there.
 export component GlassPane inherits Rectangle {
     border-radius: Theme.pane-radius;
-    background: Theme.glass ? Theme.float : Theme.float.with-alpha(1);
+    background: Theme.float;
     border-width: 1px;
     border-color: Theme.edge;
     drop-shadow-blur: 40px;
     drop-shadow-offset-y: 18px;
     drop-shadow-color: Theme.shadow;
-    if Theme.glass: Rectangle {
+    Rectangle {
         y: 0;
         height: parent.height * 0.38;
         border-radius: parent.border-radius;
         background: @linear-gradient(180deg, Theme.glass-hi 0%, Theme.glass-hi.transparentize(100%) 100%);
     }
     // The inset line, between the top corners.
-    if Theme.glass: Rectangle {
+    Rectangle {
         x: parent.border-radius;
         y: 1px;
         width: parent.width - 2 * parent.border-radius;

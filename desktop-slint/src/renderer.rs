@@ -124,8 +124,16 @@ pub fn saved_software(dir: &Path) -> bool {
 }
 
 pub fn save_software(dir: &Path) -> io::Result<()> {
+    save_file(dir, CHOICE_FILE, "software\n")
+}
+
+/// Writes `text` to `dir/name` through a temporary file renamed over it, so a crash mid-write
+/// leaves the old file whole, never an empty or partial one.
+pub fn save_file(dir: &Path, name: &str, text: &str) -> io::Result<()> {
     std::fs::create_dir_all(dir)?;
-    std::fs::write(dir.join(CHOICE_FILE), "software\n")
+    let temporary = dir.join(format!("{name}.tmp"));
+    std::fs::write(&temporary, text)?;
+    std::fs::rename(temporary, dir.join(name))
 }
 
 pub fn forget_saved(dir: &Path) -> io::Result<()> {

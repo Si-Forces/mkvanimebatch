@@ -171,11 +171,13 @@ component GroupHead inherits Rectangle {
 }
 
 // The release header pinned at the list's top: its text and count, none when `text` is empty;
-// `y`, the place of the row that pins it, so a row laid out anew reports it again.
+// `y`, the place of the row that pins it, so a row laid out anew reports it again; `row`, its
+// index in the rows, so a header whose row was replaced (another folder) is no longer shown.
 struct PinnedHead {
     text: string,
     count: int,
     y: length,
+    row: int,
 }
 
 // One row (.ep-row) with the release header above it when it starts a run.
@@ -187,6 +189,8 @@ component EpRow inherits Rectangle {
     in property <bool> filtered;
     // Names the row's controls for `Focus.restore`: the mode and the row's id.
     in property <string> key;
+    // The row's index in the list's rows.
+    in property <int> index;
     // The list's scroll offset (negative going down), against which the row finds the list's top.
     in property <length> scroll;
     callback toggle();
@@ -199,7 +203,7 @@ component EpRow inherits Rectangle {
     out property <PinnedHead> pinned: item.shown && item.head != ""
         && self.y + root.scroll <= 0 && self.y + self.height + root.scroll > 0
         && !(item.opens && self.y + root.scroll >= 0)
-        ? { text: item.head, count: item.head-count, y: self.y } : { text: "", count: 0, y: 0 };
+        ? { text: item.head, count: item.head-count, y: self.y, row: root.index } : { text: "", count: 0, y: 0, row: -1 };
 
     property <length> head-height: item.opens ? 30px : 0px;
     property <color> tone-color: item.tone == RowTone.info ? Theme.info
@@ -510,9 +514,13 @@ export component QueuePane inherits Rectangle {
     // The release header pinned at the list's top, and the row instance that pinned it: rows
     // report it as they cross the top (in no set order), and only the one that pinned it unpins
     // it. A ListView keeps its row instances as it scrolls, so each is numbered once, when made.
+    // New rows (another folder) make new instances, and the old one never unpins: the header shows
+    // only while the row it names still belongs to that release.
     property <PinnedHead> pinned-head;
     // The pinned header's text (empty for none shown) and count, for the host's tests.
-    out property <string> pinned-text: !root.head.card-shown && root.list-scroll < 0 ? root.pinned-head.text : "";
+    out property <string> pinned-text: !root.head.card-shown && root.list-scroll < 0
+        && root.pinned-head.row >= 0 && root.rows[root.pinned-head.row].head == root.pinned-head.text
+        ? root.pinned-head.text : "";
     out property <int> pinned-count: root.pinned-head.count;
     property <int> pinned-by: -1;
     property <int> rows-made;
@@ -521,7 +529,7 @@ export component QueuePane inherits Rectangle {
             root.pinned-head = head;
             root.pinned-by = instance;
         } else if root.pinned-by == instance {
-            root.pinned-head = { text: "", count: 0, y: 0 };
+            root.pinned-head = { text: "", count: 0, y: 0, row: -1 };
             root.pinned-by = -1;
         }
     }
@@ -548,20 +556,28 @@ export component QueuePane inherits Rectangle {
                     horizontal-stretch: 1;
                 }
             }
-            if root.head.crumbs-end != "": HorizontalLayout {
-                alignment: start;
-                Text {
-                    text: root.head.crumbs-lead;
-                    color: Theme.path;
-                    font-size: 12px;
-                    overflow: elide;
+            // The whole path on hover, as the crumbs' `title`: they elide.
+            if root.head.crumbs-end != "": Rectangle {
+                HorizontalLayout {
+                    alignment: start;
+                    Text {
+                        text: root.head.crumbs-lead;
+                        color: Theme.path;
+                        font-size: 12px;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: root.head.crumbs-end;
+                        color: Theme.fg;
+                        font-size: 12px;
+                        font-weight: 600;
+                        overflow: elide;
+                    }
                 }
-                Text {
-                    text: root.head.crumbs-end;
-                    color: Theme.fg;
-                    font-size: 12px;
-                    font-weight: 600;
-                    overflow: elide;
+                Tooltip {
+                    TipCard {
+                        text: root.head.crumbs-lead + root.head.crumbs-end;
+                    }
                 }
             }
             // .list-tools: the chips, then Select all / None at the end, wrapping in a narrow list.
@@ -648,7 +664,7 @@ export component QueuePane inherits Rectangle {
                         root.reveal(root.reveal-pending);
                     }
                 }
-                for row in root.rows: EpRow {
+                for row[index] in root.rows: EpRow {
                     property <int> instance;
                     // A row made already across the top reports it too: `changed` misses a first value.
                     init => {
@@ -657,6 +673,7 @@ export component QueuePane inherits Rectangle {
                         root.pin(self.instance, self.pinned);
                     }
                     item: row;
+                    index: index;
                     inspected: row.id == root.marked;
                     locked: root.head.selection-locked;
                     filtered: root.filtered;

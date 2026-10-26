@@ -754,6 +754,60 @@ fn a_typed_subtitle_field_is_committed_before_a_click_elsewhere() {
     app.hide().unwrap();
 }
 
+/// Reset removes itself when clicked: the window's keys keep working after it (Esc, Ctrl+T).
+#[test]
+fn the_window_keys_work_after_reset_removes_itself() {
+    use slint::platform::{Key, WindowEvent};
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    let mut assigned = sample_view();
+    assigned.assignment = Some(mkv_core::request::TrackAssignment {
+        target_video: "Season 1/ep1.mkv".into(),
+        asset_path: "Season 1/ep1.ass".into(),
+        track_type: Default::default(),
+        language: Some("eng".into()),
+        title: None,
+        offset_ms: None,
+    });
+    let mut state = ViewState::new(None);
+    state.remux.rows = Arc::new(vec![row("Show - 01.mkv")]);
+    state.remux.empty = None;
+    state.remux.inspector = Some(assigned);
+    apply(&app, &state);
+    app.show().unwrap();
+    // The core's answer: the assignment is gone, and Reset with it.
+    let weak = app.as_weak();
+    app.on_reset_subtitle(move || {
+        let mut state = ViewState::new(None);
+        state.remux.rows = Arc::new(vec![row("Show - 01.mkv")]);
+        state.remux.empty = None;
+        state.remux.inspector = Some(sample_view());
+        apply(&weak.upgrade().unwrap(), &state);
+    });
+    let toggles = Rc::new(Cell::new(0));
+    let count = Rc::clone(&toggles);
+    app.global::<Theme>()
+        .on_toggle(move || count.set(count.get() + 1));
+
+    let reset = only(&app, "Reset");
+    pointer(&app, &reset, true);
+    pointer(&app, &reset, false);
+    assert_eq!(
+        ElementHandle::find_by_accessible_label(&app, "Reset").count(),
+        0
+    );
+    app.set_log_open(true);
+    key(&app, Key::Escape);
+    assert!(!app.get_log_open(), "Esc closed the drawer");
+    app.window().dispatch_event(WindowEvent::KeyPressed {
+        text: Key::Control.into(),
+    });
+    key(&app, "t");
+    assert_eq!(toggles.get(), 1, "Ctrl+T toggled the theme");
+    app.hide().unwrap();
+}
+
 /// Picking "Custom tag…" puts the cursor in the tag field, also when it already shows.
 #[test]
 fn picking_the_custom_tag_focuses_the_tag_field() {
@@ -1343,8 +1397,8 @@ fn the_toggle_and_ctrl_t_flip_the_theme_and_save_the_choice() {
 }
 
 /// The sheet's two reduced effects apply at once and are saved with the theme: Reduce
-/// transparency solidifies the panes and drops the glass, Reduce motion stops the spinners. The
-/// software renderer draws no glass either way.
+/// transparency solidifies the panes and drops the blur, Reduce motion stops the spinners. The
+/// software renderer has no blur either way, but still draws the faked glass (a translucent float).
 #[test]
 fn the_reduced_effects_apply_at_once_and_are_saved() {
     use crate::appearance::{self, Appearance};
@@ -1390,6 +1444,7 @@ fn the_reduced_effects_apply_at_once_and_are_saved() {
     let theme = app.global::<Theme>();
     assert!(theme.get_reduce_motion() && !theme.get_reduce_transparency());
     assert!(!theme.get_glass());
+    assert!(theme.get_float().alpha() < 255, "the faked glass");
 }
 
 /// The `Focus` key of the custom control with the focus; empty for none of them.
@@ -1710,6 +1765,20 @@ fn the_current_release_header_stays_pinned_at_the_top_of_the_list() {
         Some("S2 20"),
         "S3's four rows fit below S2's last"
     );
+
+    // Another folder, of one release (no headers), replaces every row instance: the old
+    // folder's header must not stay pinned over its rows.
+    let mut one = three_releases();
+    let rows: Vec<Row> = (0..44).map(|i| row(&format!("d{i:02}"))).collect();
+    one.remux.library = presentation::library(Some("/media/Other"), &rows);
+    one.remux.rows = Arc::new(rows);
+    one.remux.manifest_rev = 2;
+    one.remux.directory = Some("/media/Other".into());
+    SlintPublisher::new(&app).show(&one);
+    frame(&app);
+    app.set_remux_scroll(-500.0);
+    frame(&app);
+    assert_eq!(pinned(&app), None, "no header pinned from the old folder");
     app.hide().unwrap();
 }
 

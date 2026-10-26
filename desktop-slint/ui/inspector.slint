@@ -3,7 +3,7 @@
 // (desktop-slint/src/inspector.rs) and does what the controls ask.
 import { ComboBox, LineEdit, ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { Pressable } from "focus.slint";
+import { Pressable, TipCard } from "focus.slint";
 import { LinkButton, RowTone } from "queue.slint";
 
 // One Library entry (.lib-root, .lib-release): the input folder, then each other release.
@@ -491,12 +491,21 @@ export component InspectorPane inherits Rectangle {
                                                 overflow: elide;
                                                 accessible-role: none;
                                             }
-                                            if rung.found: Text {
-                                                text: rung.detail;
-                                                color: Theme.path;
-                                                font-size: 12px;
-                                                overflow: elide;
-                                                accessible-role: none;
+                                            // The full detail on hover, as its `title`.
+                                            if rung.found: Rectangle {
+                                                Text {
+                                                    width: 100%;
+                                                    text: rung.detail;
+                                                    color: Theme.path;
+                                                    font-size: 12px;
+                                                    overflow: elide;
+                                                    accessible-role: none;
+                                                }
+                                                Tooltip {
+                                                    TipCard {
+                                                        text: rung.detail;
+                                                    }
+                                                }
                                             }
                                         }
                                         Text {

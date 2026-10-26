@@ -436,7 +436,7 @@ export component App inherits Window {
             focus-on-tab-navigation: false;
             init => { self.focus(); }
             capture-key-pressed(event) => {
-                if event.text == "t" && (event.modifiers.control || event.modifiers.meta) {
+                if event.text.to-lowercase() == "t" && !event.repeat && (event.modifiers.control || event.modifiers.meta) {
                     Theme.toggle();
                     return accept;
                 }
@@ -651,9 +651,12 @@ export component App inherits Window {
                         choose(index) => { root.choose-subtitle(index); }
                         choose-language(index) => { root.choose-language(index); }
                         language-tag-edited(text) => { root.language-tag-edited(text); }
-                        // A typed field commits first, then clears.
+                        // A typed field commits first, then clears. Reset goes with the
+                        // assignment, and a removed focused control leaves no key target: the
+                        // window's keys take the focus first, so Esc and Ctrl+T still act.
                         reset => {
                             root.leave-field();
+                            keys.focus();
                             root.reset-subtitle();
                         }
                         options-changed => { root.subtitle-options-changed(); }
