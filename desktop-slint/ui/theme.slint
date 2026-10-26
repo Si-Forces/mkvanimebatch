@@ -4,15 +4,26 @@
 import { Palette as StylePalette } from "std-widgets.slint";
 
 export global Theme {
-    // Follows the system's colour scheme until `set-dark` pins one (the toggle, P6).
+    // Follows the system's colour scheme until `set-dark` pins one: the host calls it at boot for a
+    // saved choice, before the first frame, and on the toggle (Ctrl+T), so the two never fight.
     out property <bool> dark: StylePalette.color-scheme == ColorScheme.dark;
 
     public function set-dark(dark: bool) {
         StylePalette.color-scheme = dark ? ColorScheme.dark : ColorScheme.light;
     }
 
-    // Whether the real glass (backdrop-blur, Skia only) is drawn. The host clears it on the software
-    // renderer, where the panes draw the faked glass instead (ADR-0017 decision 3; P5/P6 read it).
+    // The theme toggle or Ctrl+T: the host flips the theme and saves the choice.
+    callback toggle();
+
+    // The in-app reduced effects (Q105), for style.css's prefers-reduced-transparency and
+    // prefers-reduced-motion: solid panes, no glass; no spinning. The host loads and saves them;
+    // `effects-changed` says the sheet's checkboxes changed one.
+    in-out property <bool> reduce-transparency;
+    in-out property <bool> reduce-motion;
+    callback effects-changed();
+
+    // Whether the panes draw the faked .glass (Slint has no backdrop blur at this rev): the host's,
+    // false on the software renderer and under Reduce transparency (solid panes, edge and shadow).
     in-out property <bool> glass: true;
 
     out property <length> window-radius: 14px;
@@ -26,15 +37,19 @@ export global Theme {
 
     // Surfaces, translucent over the wallpaper.
     out property <color> bg: dark ? #13171b : #f0f3f5;
-    out property <color> side: dark ? #22283275 : #ffffff6b;
-    out property <color> panel: dark ? #22283285 : #ffffff85;
-    out property <color> content: dark ? #12161c94 : #ffffffa3;
-    out property <color> head: dark ? #161b22f0 : #f8fafcf0;
-    out property <color> float: dark ? #1a1f27f2 : #fafbfdf2;
+    // Solid under Reduce transparency, as style.css's prefers-reduced-transparency block.
+    out property <color> side: reduce-transparency ? (dark ? #1a1f26 : #e9eef2) : (dark ? #22283275 : #ffffff6b);
+    out property <color> panel: reduce-transparency ? (dark ? #1d232a : #f6f8fa) : (dark ? #22283285 : #ffffff85);
+    out property <color> content: reduce-transparency ? (dark ? #151a1f : #ffffff) : (dark ? #12161c94 : #ffffffa3);
+    out property <color> head: reduce-transparency ? (dark ? #151a1f : #ffffff) : (dark ? #161b22f0 : #f8fafcf0);
+    out property <color> float: reduce-transparency ? (dark ? #1a1f27 : #ffffff) : (dark ? #1a1f27f2 : #fafbfdf2);
     out property <color> field: dark ? #ffffff12 : #ffffff99;
     out property <color> sel: dark ? #ffffff1a : #6e7a9129;
     out property <color> edge: dark ? #ffffff21 : #ffffffb3;
     out property <color> hi: dark ? #ffffff29 : #ffffffe6;
+    // .glass::before's top highlight, fading out at 38% of the pane. AA: dark at 10% where
+    // style.css has 22%, which leaves mute at 4.2:1 on the dark float under it.
+    out property <color> glass-hi: dark ? #ffffff1a : #ffffff38;
     // The first of --shadow's two layers.
     out property <color> shadow: dark ? #00000080 : #1e2a4024;
 
@@ -44,7 +59,8 @@ export global Theme {
     out property <color> path: dark ? #c3cdd6 : #2f3b47;
     // A field's placeholder (the browser's default ::placeholder grey): dimmer than mute, so it
     // never reads as a typed value. The fluent LineEdit's own is near white in the dark theme.
-    out property <color> hint: dark ? #939da7 : #5c6670;
+    // AA: dark #a5afb9 (was #939da7) so it holds on the Inspector's fields too, over the panel.
+    out property <color> hint: dark ? #a5afb9 : #5c6670;
     out property <color> sep: dark ? #ffffff33 : #14203033;
     out property <color> line: dark ? #ffffff17 : #1420301a;
     out property <color> hover: dark ? #ffffff0f : #6e7a911a;
@@ -73,4 +89,32 @@ export global Theme {
     out property <color> done: dark ? #bda9ee : #6b45b5;
     out property <color> run: dark ? #3cc8e6 : #0b7f99;
     out property <color> run-fg: dark ? #04222b : #ffffff;
+}
+
+// A floating pane (.glass): the log drawer, the settings sheet and the dialog card. Faked, as
+// style.css fakes it: the translucent float with its edge, a top highlight (.glass::before and the
+// inset 1px line) and the shadow. Without Theme.glass, a solid float with its edge and shadow.
+export component GlassPane inherits Rectangle {
+    border-radius: Theme.pane-radius;
+    background: Theme.glass ? Theme.float : Theme.float.with-alpha(1);
+    border-width: 1px;
+    border-color: Theme.edge;
+    drop-shadow-blur: 40px;
+    drop-shadow-offset-y: 18px;
+    drop-shadow-color: Theme.shadow;
+    if Theme.glass: Rectangle {
+        y: 0;
+        height: parent.height * 0.38;
+        border-radius: parent.border-radius;
+        background: @linear-gradient(180deg, Theme.glass-hi 0%, Theme.glass-hi.transparentize(100%) 100%);
+    }
+    // The inset line, between the top corners.
+    if Theme.glass: Rectangle {
+        x: parent.border-radius;
+        y: 1px;
+        width: parent.width - 2 * parent.border-radius;
+        height: 1px;
+        background: Theme.hi;
+    }
+    @children
 }

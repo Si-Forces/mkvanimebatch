@@ -81,7 +81,9 @@ component Ring inherits Rectangle {
         stroke: Theme.info;
         stroke-width: 3px;
         stroke-line-cap: round;
-        transform-rotation: root.spinning ? mod(animation-tick(), 1100ms) / 1100ms * 360deg : 0deg;
+        // Still under Reduce motion, as style.css's prefers-reduced-motion stops .ep-ring and
+        // .scan-spinner.
+        transform-rotation: root.spinning && !Theme.reduce-motion ? mod(animation-tick(), 1100ms) / 1100ms * 360deg : 0deg;
         MoveTo { x: 10; y: 2; }
         ArcTo {
             x: 10 + 8 * Math.sin(root.end);

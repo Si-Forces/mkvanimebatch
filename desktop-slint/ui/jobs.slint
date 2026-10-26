@@ -1,7 +1,7 @@
 // Redesign C's job controls (desktop-tauri/ui/index.html .bar, #confirm-modal; style.css .cap,
 // .pill-btn, .stack, .status-pill, .modal-card). Layout and bindings only: the host
 // (desktop-slint/src/jobs.rs) maps every text, count, width and tone from the published controls.
-import { Theme } from "theme.slint";
+import { GlassPane, Theme } from "theme.slint";
 
 // The status pill's style (presentation.rs `StatusPill::class`).
 export enum StatusTone { idle, running, success, error, cancelled }
@@ -447,20 +447,14 @@ export component ConfirmDialog inherits Rectangle {
             reject
         }
         // .modal-card, 12% of the window below the overlay's 36px padding.
-        card := Rectangle {
+        card := GlassPane {
             y: 36px + parent.height * 0.12;
             width: min(400px, parent.width - 32px);
             // At most down to the overlay's bottom padding: a long text elides, so OK stays in
             // the window (the full text is the card's accessible description).
             height: min(body.preferred-height, parent.height - self.y - 36px);
+            // .modal-card.glass.
             border-radius: 22px;
-            // As the sheet: near opaque with the .glass edge and shadow, with no blur behind it.
-            background: Theme.float.with-alpha(0.985);
-            border-width: 1px;
-            border-color: Theme.edge;
-            drop-shadow-blur: 40px;
-            drop-shadow-offset-y: 18px;
-            drop-shadow-color: Theme.shadow;
             accessible-role: groupbox;
             accessible-label: root.texts.title;
             accessible-description: root.texts.text;
