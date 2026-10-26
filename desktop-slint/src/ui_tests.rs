@@ -4,7 +4,7 @@
 use crate::inspector::sample_view;
 use crate::publisher::{install_models, SlintPublisher};
 use i_slint_backend_testing::{ElementHandle, TestingBackend, TestingBackendOptions};
-use mkv_anime_batch_slint_ui::{App, FontProbe, Mode, QueueFilter, Sheet, Theme};
+use mkv_anime_batch_slint_ui::{App, Focus, FontProbe, Mode, QueueFilter, Sheet, Theme};
 use mkv_desktop_core::actor::{Publisher, ScanView, ViewState};
 use mkv_desktop_core::presentation::{self, Bucket, Tone};
 use mkv_desktop_core::queue::Row;
@@ -668,10 +668,10 @@ fn the_sidebar_scrolls_to_open_folder_past_many_releases() {
     app.hide().unwrap();
 }
 
-/// A title typed and not committed is committed before a click on a control that takes no focus
-/// (a row, Open folder, a filter chip, a Library entry, a mode tab, Reset), as the webview's blur
-/// commits it before the click lands; an answered Intent's write-back keeps what is typed
-/// meanwhile.
+/// A title typed and not committed is committed once before a screen reader's activation of a
+/// custom control (a row, Open folder, a filter chip, a Library entry, a mode tab, Reset), as the
+/// webview's blur commits it before the click lands; an answered Intent's write-back keeps what is
+/// typed meanwhile.
 #[test]
 fn a_typed_subtitle_field_is_committed_before_a_click_elsewhere() {
     i_slint_backend_testing::init_no_event_loop();
@@ -1390,4 +1390,378 @@ fn the_reduced_effects_apply_at_once_and_are_saved() {
     let theme = app.global::<Theme>();
     assert!(theme.get_reduce_motion() && !theme.get_reduce_transparency());
     assert!(!theme.get_glass());
+}
+
+/// The `Focus` key of the custom control with the focus; empty for none of them.
+fn focused(app: &App) -> String {
+    app.global::<Focus>().get_current().into()
+}
+
+/// Presses Tab until the custom control of `key` has the focus.
+fn tab_to(app: &App, key: &str) {
+    for _ in 0..400 {
+        self::key(app, slint::platform::Key::Tab);
+        if focused(app) == key {
+            return;
+        }
+    }
+    panic!("Tab never reached {key:?}");
+}
+
+/// The focus rings drawn, each as its top left corner and size.
+fn rings(app: &App) -> Vec<(f32, f32, f32, f32)> {
+    ElementHandle::find_by_element_type_name(app, "FocusRing")
+        .map(|ring| {
+            let (at, size) = (ring.absolute_position(), ring.size());
+            (at.x, at.y, size.width, size.height)
+        })
+        .collect()
+}
+
+/// Tab walks the custom controls in their visual order: the title bar, the sidebar, the list's
+/// filters and rows, then the bottom bar; a row control's focus shows its Move up / Move down.
+/// Enter and Space activate each kind of control.
+#[test]
+fn tab_walks_the_custom_controls_in_order_and_enter_or_space_activates_them() {
+    use slint::platform::Key;
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    SlintPublisher::new(&app).show(&three_releases());
+    app.show().unwrap();
+    frame(&app);
+
+    let mut walked = Vec::new();
+    while walked.last().is_none_or(|last: &String| last != "Log") {
+        key(&app, Key::Tab);
+        walked.push(focused(&app));
+        assert!(walked.len() < 400, "Tab reaches the Log toggle: {walked:?}");
+        if focused(&app) == "check:remux:a00" {
+            let shown = ElementHandle::find_by_accessible_label(&app, "Move up")
+                .filter(|up| up.computed_opacity() > 0.99)
+                .count();
+            assert_eq!(shown, 1, "the focused row's Move up shows, no other's");
+        }
+    }
+    let order = [
+        "Close window",
+        "Minimize window",
+        "Maximize window",
+        "Toggle theme",
+        "Remux",
+        "Remux settings",
+        "Extract",
+        "Extract settings",
+        "library:/",
+        "library:S2",
+        "library:S3",
+        "Open folder…",
+        "remux:All",
+        "remux:To do",
+        "remux:Done",
+        "remux:Failed",
+        "remux:Select all",
+        "remux:None",
+        "check:remux:a00",
+        "pick:remux:a00",
+        "up:remux:a00",
+        "down:remux:a00",
+        "check:remux:a01",
+        "run",
+        "Log",
+    ];
+    let at: Vec<usize> = order
+        .iter()
+        .map(|key| {
+            walked
+                .iter()
+                .position(|walked| walked == key)
+                .unwrap_or_else(|| panic!("{key:?} takes the focus: {walked:?}"))
+        })
+        .collect();
+    assert!(at.is_sorted(), "in visual order: {walked:?}");
+    assert!(
+        !walked.iter().any(|key| key.contains("extract:")),
+        "the hidden pane takes no focus"
+    );
+
+    let calls = Rc::new(RefCell::new(Vec::<String>::new()));
+    let log = Rc::clone(&calls);
+    app.on_close_window(move || log.borrow_mut().push("close".into()));
+    let log = Rc::clone(&calls);
+    app.on_set_filter(move |filter| log.borrow_mut().push(format!("filter {filter:?}")));
+    let log = Rc::clone(&calls);
+    app.on_set_selected(move |id, on| log.borrow_mut().push(format!("select {id} {on}")));
+    let log = Rc::clone(&calls);
+    app.on_inspect(move |id| log.borrow_mut().push(format!("inspect {id}")));
+    let log = Rc::clone(&calls);
+    app.on_reveal_release(move |release, _| log.borrow_mut().push(format!("reveal {release}")));
+    let log = Rc::clone(&calls);
+    app.on_open_folder(move || log.borrow_mut().push("open".into()));
+    for (to, press) in [
+        ("Close window", Key::Return),
+        ("library:S2", Key::Space),
+        ("Open folder…", Key::Return),
+        ("remux:Done", Key::Space),
+        ("check:remux:a00", Key::Space),
+        ("pick:remux:a00", Key::Return),
+    ] {
+        tab_to(&app, to);
+        key(&app, press);
+    }
+    assert_eq!(
+        *calls.borrow(),
+        [
+            "close",
+            "reveal S2",
+            "open",
+            "filter Done",
+            "select a00 false",
+            "inspect a00"
+        ]
+    );
+    tab_to(&app, "Extract");
+    key(&app, Key::Return);
+    assert_eq!(app.get_mode(), Mode::Extract);
+    app.hide().unwrap();
+}
+
+/// A control focused from the keyboard draws its ring; one pressed with the pointer does not,
+/// until a key is typed (a modifier alone does not count), as `:focus-visible` does.
+#[test]
+fn the_ring_shows_for_keyboard_focus_not_after_a_pointer_press() {
+    use slint::platform::Key;
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    SlintPublisher::new(&app).show(&three_releases());
+    app.show().unwrap();
+    assert!(rings(&app).is_empty(), "no ring at start");
+
+    tab_to(&app, "Toggle theme");
+    let theme = only(&app, "Toggle theme");
+    let (at, size) = (theme.absolute_position(), theme.size());
+    assert_eq!(
+        rings(&app),
+        [(at.x - 4.0, at.y - 4.0, size.width + 8.0, size.height + 8.0)],
+        "2px out from the button, 2px wide"
+    );
+
+    // Both panes' chips are found, the extract one hidden in the same place.
+    let chip = ElementHandle::find_by_accessible_label(&app, "All 0")
+        .next()
+        .unwrap();
+    pointer(&app, &chip, true);
+    pointer(&app, &chip, false);
+    assert_eq!(focused(&app), "remux:All", "a press takes the focus");
+    assert!(rings(&app).is_empty(), "with no ring");
+    key(&app, Key::Shift);
+    assert!(rings(&app).is_empty(), "a modifier alone shows none");
+    key(&app, "x");
+    assert_eq!(rings(&app).len(), 1, "a typed key shows it");
+    app.hide().unwrap();
+}
+
+/// A dialog and the sheet give the focus back to the exact control that had it, the ring only
+/// after a key closed them; the sheet's field takes it back after a dialog over the sheet. A
+/// control locked meanwhile leaves it with the window, where Esc still closes the Log drawer.
+#[test]
+fn a_closing_dialog_or_sheet_gives_the_focus_back_to_the_control_that_had_it() {
+    use mkv_anime_batch_slint_ui::DialogTexts;
+    use slint::platform::Key;
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    SlintPublisher::new(&app).show(&three_releases());
+    app.show().unwrap();
+    let tick = || i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1));
+    let notice = DialogTexts {
+        title: "Notice".into(),
+        text: "Something happened".into(),
+        confirm: "OK".into(),
+        notice: true,
+    };
+    let show_notice = || {
+        app.set_dialog(notice.clone());
+        app.invoke_show_dialog();
+        tick();
+    };
+    let close_dialog = || {
+        app.set_dialog_open(false);
+        tick();
+        tick();
+    };
+
+    // A dialog over the window: the Close button has it back.
+    tab_to(&app, "Close window");
+    show_notice();
+    assert_eq!(focused(&app), "OK", "OK takes it as the dialog shows");
+    close_dialog();
+    assert_eq!(focused(&app), "Close window");
+    assert_eq!(rings(&app).len(), 1);
+
+    // The sheet from a gear, closed by Esc: the gear, ringed.
+    tab_to(&app, "Remux settings");
+    key(&app, Key::Return);
+    tick();
+    assert!(app.get_sheet_open());
+    assert_eq!(focused(&app), "Done");
+    key(&app, Key::Escape);
+    tick();
+    assert!(!app.get_sheet_open());
+    assert_eq!(focused(&app), "Remux settings");
+    assert_eq!(rings(&app).len(), 1);
+    // Closed by a click on the backdrop: the gear, without a ring.
+    key(&app, Key::Return);
+    tick();
+    assert!(app.get_sheet_open());
+    for pressed in [true, false] {
+        use slint::platform::{PointerEventButton, WindowEvent};
+        let (position, button) = (
+            slint::LogicalPosition::new(20.0, 625.0),
+            PointerEventButton::Left,
+        );
+        app.window().dispatch_event(if pressed {
+            WindowEvent::PointerPressed { position, button }
+        } else {
+            WindowEvent::PointerReleased { position, button }
+        });
+    }
+    tick();
+    assert!(!app.get_sheet_open());
+    assert_eq!(focused(&app), "Remux settings");
+    assert!(rings(&app).is_empty(), "a pointer closed it");
+
+    // The sheet the host opens: the control that had the focus.
+    tab_to(&app, "remux:None");
+    app.invoke_open_sheet(Mode::Remux, "".into());
+    tick();
+    key(&app, Key::Escape);
+    tick();
+    assert_eq!(focused(&app), "remux:None");
+
+    // A dialog over the sheet's field: the field has the cursor back.
+    app.invoke_open_sheet(Mode::Remux, "input_dir".into());
+    tick();
+    tick();
+    let sheet = app.global::<Sheet>();
+    assert_eq!(sheet.get_focused(), "input_dir");
+    show_notice();
+    assert_eq!(sheet.get_focused(), "", "the dialog took the focus");
+    close_dialog();
+    assert_eq!(sheet.get_focused(), "input_dir");
+    key(&app, Key::Escape);
+    tick();
+    assert!(!app.get_sheet_open());
+
+    // Select all, locked while the dialog shows: the window keeps the focus, Esc still works.
+    tab_to(&app, "remux:Select all");
+    show_notice();
+    app.set_remux_head(mkv_anime_batch_slint_ui::QueueHead {
+        selection_locked: true,
+        ..app.get_remux_head()
+    });
+    app.set_log_open(true);
+    close_dialog();
+    assert_eq!(focused(&app), "", "no control took it");
+    key(&app, Key::Escape);
+    assert!(!app.get_log_open(), "Esc closed the drawer");
+    app.hide().unwrap();
+}
+
+/// The pinned release header: none at the top of the list, the folder's once its rows scroll
+/// under it, none while a release's first row shows its own header whole at the top, that
+/// release's once it scrolls on, and still that release's at the end of the list.
+#[test]
+fn the_current_release_header_stays_pinned_at_the_top_of_the_list() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    SlintPublisher::new(&app).show(&three_releases());
+    app.show().unwrap();
+    frame(&app);
+    let pinned = |app: &App| {
+        let text = app.get_remux_pinned();
+        (!text.is_empty()).then(|| format!("{text} {}", app.get_remux_pinned_count()))
+    };
+    let top = only(&app, "Include a00 in the batch").absolute_position().y - 30.0 - 18.0;
+
+    assert_eq!(pinned(&app), None, "the first header shows in place");
+    app.set_remux_scroll(-500.0);
+    frame(&app);
+    assert_eq!(pinned(&app).as_deref(), Some("MEDIA › SHOW 20"));
+    // The copy over the rows, which no screen reader reads (the row's own header is read).
+    let head = ElementHandle::find_by_element_type_name(&app, "GroupHead")
+        .find(|head| head.accessible_role() == Some(i_slint_backend_testing::AccessibleRole::None))
+        .unwrap();
+    assert_eq!(head.absolute_position().y, top, "at the list's top");
+
+    app.invoke_reveal(Mode::Remux, 20);
+    frame(&app);
+    assert_eq!(pinned(&app), None, "S2's own header shows whole at the top");
+    app.set_remux_scroll(app.get_remux_scroll() - 40.0);
+    frame(&app);
+    assert_eq!(pinned(&app).as_deref(), Some("S2 20"));
+
+    app.set_remux_scroll(-100_000.0);
+    frame(&app);
+    assert_eq!(
+        pinned(&app).as_deref(),
+        Some("S2 20"),
+        "S3's four rows fit below S2's last"
+    );
+    app.hide().unwrap();
+}
+
+/// The subtitle ladder is a list of list items, each numbered, as index.html's `ol`.
+#[test]
+fn the_subtitle_ladder_is_a_list_of_its_rungs() {
+    use i_slint_backend_testing::AccessibleRole;
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 900.0));
+    let mut state = ViewState::new(None);
+    state.remux.rows = Arc::new(vec![row("Show - 01.mkv")]);
+    state.remux.empty = None;
+    state.remux.inspector = Some(sample_view());
+    apply(&app, &state);
+    app.show().unwrap();
+    let rungs: Vec<_> = app.get_sub_ladder().iter().collect();
+    assert!(rungs.len() > 1, "the sample has a ladder");
+    // An element is found once per component it is the root of: one of each place.
+    let query = |role| {
+        let mut found: Vec<ElementHandle> = Vec::new();
+        for element in i_slint_backend_testing::ElementQuery::from_root(&app)
+            .match_descendants()
+            .match_accessible_role(role)
+            .find_all()
+        {
+            let place = |element: &ElementHandle| (element.absolute_position(), element.size());
+            if !found.iter().any(|seen| place(seen) == place(&element)) {
+                found.push(element);
+            }
+        }
+        found
+    };
+    let ladder: Vec<_> = query(AccessibleRole::List)
+        .into_iter()
+        .filter(|list| list.accessible_item_count() == Some(rungs.len()))
+        .collect();
+    assert_eq!(ladder.len(), 1, "one list of the rungs");
+    let items: Vec<_> = query(AccessibleRole::ListItem)
+        .iter()
+        .map(|item| {
+            (
+                item.accessible_item_index(),
+                item.accessible_label().unwrap().to_string(),
+            )
+        })
+        .collect();
+    let expected: Vec<_> = rungs
+        .iter()
+        .enumerate()
+        .map(|(index, rung)| (Some(index), rung.a11y.to_string()))
+        .collect();
+    assert_eq!(items, expected);
+    app.hide().unwrap();
 }

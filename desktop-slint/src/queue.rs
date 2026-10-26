@@ -81,8 +81,10 @@ pub(crate) fn tone(tone: Tone) -> RowTone {
     }
 }
 
-/// The rows `filter` shows, each under a header naming its release in upper case (style.css) and counting the rows of its
-/// run the filter shows, when the queue spans more than one release. A row the filter hides stays
+/// The rows `filter` shows, each run of one release under a header naming it in upper case
+/// (style.css) and counting the rows of the run the filter shows, when the queue spans more than
+/// one release. Every row of a run carries its header, which the list pins at its top while the
+/// run scrolls under it; the run's first row `opens` it. A row the filter hides stays
 /// in the list, not shown, so each index is the core's and a filter change rewrites rows in place.
 pub(crate) fn map_rows(
     rows: &[Row],
@@ -95,12 +97,16 @@ pub(crate) fn map_rows(
     let shown: Vec<usize> = (0..rows.len())
         .filter(|&i| shows(&rows[i], filter))
         .collect();
-    // Each shown row that starts a run of one release among the shown rows: its header and count.
+    // Each shown row of a run of one release among the shown rows: its header and count, and
+    // whether it starts the run.
     let mut heads = vec![None; rows.len()];
     if grouped {
         for run in shown.chunk_by(|&a, &b| rows[a].release == rows[b].release) {
             let release = rows[run[0]].release.as_str();
-            heads[run[0]] = Some((group_label(library, release).to_uppercase(), run.len()));
+            let label: slint::SharedString = group_label(library, release).to_uppercase().into();
+            for (n, &i) in run.iter().enumerate() {
+                heads[i] = Some((label.clone(), run.len(), n == 0));
+            }
         }
     }
     rows.iter()
@@ -130,8 +136,12 @@ pub(crate) fn map_rows(
             selected: row.selected,
             check_label: format!("Include {} in the batch", row.name).into(),
             shown: shows(row, filter),
-            head: head.as_ref().map_or("", |(label, _)| label.as_str()).into(),
-            head_count: head.map_or(0, |(_, n)| to_slint_count(n)),
+            head: head
+                .as_ref()
+                .map(|(label, ..)| label.clone())
+                .unwrap_or_default(),
+            head_count: head.as_ref().map_or(0, |&(_, n, _)| to_slint_count(n)),
+            opens: head.is_some_and(|(.., opens)| opens),
         })
         .collect()
 }
@@ -563,12 +573,12 @@ mod tests {
         let heads = |filter| {
             map_rows(&queue, &library, filter)
                 .iter()
-                .map(|row| (row.shown, row.head.to_string(), row.head_count))
+                .map(|row| (row.shown, row.head.to_string(), row.head_count, row.opens))
                 .collect::<Vec<_>>()
         };
-        let head = |label: &str, n| (true, label.to_string(), n);
-        let plain = (true, String::new(), 0);
-        let hidden = (false, String::new(), 0);
+        let head = |label: &str, n| (true, label.to_string(), n, true);
+        let under = |label: &str, n| (true, label.to_string(), n, false);
+        let hidden = (false, String::new(), 0, false);
         // "." and "" are one group to the Library but two runs here, as in queue-view.js.
         assert_eq!(
             heads(QueueFilter::All),
@@ -576,7 +586,7 @@ mod tests {
                 head("SHOW", 1),
                 head("SHOW", 1),
                 head("SEASON 2", 2),
-                plain,
+                under("SEASON 2", 2),
                 head("EPISODES", 1)
             ]
         );

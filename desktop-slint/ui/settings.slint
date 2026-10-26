@@ -6,6 +6,7 @@
 import { Button, CheckBox, ComboBox, LineEdit, ScrollView, Slider } from "std-widgets.slint";
 import { GlassPane, Theme } from "theme.slint";
 import { CapButton, PillButton } from "jobs.slint";
+import { Focus, Pressable } from "focus.slint";
 
 // One mode's Settings Draft as the sheet shows it, every field as typed but the two checkboxes.
 // The remux-only fields stay empty in extract's. `bitrate` is the index of the bitrate select's
@@ -85,10 +86,8 @@ export global Sheet {
     callback pick-preset(id: string);
     // "Clear inspection cache…": the host asks to confirm, then clears it.
     callback clear-cache();
-    // Bumped when the cache dialog closes over the sheet: its button takes the focus back.
-    in-out property <int> cache-focus-serial;
-    // Bumped when a notice closes over the sheet: Done takes the focus.
-    in-out property <int> done-focus-serial;
+    // Bumped when a dialog closes over the sheet, after `Focus.restore`: Done is the fallback.
+    in-out property <int> dialog-closed;
 
     // A field took the focus: the one that had it is left first.
     public function enter(key: string) {
@@ -140,54 +139,35 @@ component GearIcon inherits Path {
     commands: "M15 12a3 3 0 1 1-6 0a3 3 0 1 1 6 0z M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z";
 }
 
-// A mode tab's gear (.icon-btn.task-settings-btn): opens the mode's settings sheet, from a click,
-// Enter or Space. Takes the focus back when the sheet closes. Its focus ring comes with P6's.
-export component GearButton inherits Rectangle {
+// A mode tab's gear (.icon-btn.task-settings-btn): opens the mode's settings sheet, which gives the
+// focus back to it when it closes.
+export component GearButton inherits Pressable {
     in property <string> label;
-    out property <bool> hovered: touch.has-hover;
-    callback clicked();
     width: 36px;
     height: 36px;
     border-radius: 8px;
-    forward-focus: keys;
-    accessible-role: button;
     accessible-label: root.label;
-    accessible-action-default => { root.clicked(); }
-    keys := FocusScope {
-        key-pressed(event) => {
-            if event.text == Key.Return || event.text == Key.Space {
-                root.clicked();
-                return accept;
-            }
-            reject
-        }
-    }
+    tip: root.label;
     GearIcon {
-        stroke: touch.has-hover ? Theme.fg : Theme.mute;
-    }
-    touch := TouchArea {
-        clicked => { root.clicked(); }
+        stroke: root.hovered ? Theme.fg : Theme.mute;
+        accessible-role: none;
     }
 }
 
 // A Preset Profile row (.nav.preset-row): a dot, the name over the encode it sets. Locked while a
 // batch runs (.lock-while-job).
-export component PresetRow inherits Rectangle {
+export component PresetRow inherits Pressable {
     in property <PresetItem> item;
-    in property <bool> enabled: true;
-    callback clicked();
     height: 44px;
     border-radius: 8px;
-    background: item.active ? Theme.accent-soft : touch.has-hover && enabled ? Theme.hover : transparent;
+    background: item.active ? Theme.accent-soft : self.hovered && self.enabled ? Theme.hover : transparent;
     border-width: item.active ? 1px : 0px;
     border-color: Theme.accent-ring;
-    opacity: enabled ? 1 : 0.75;
-    accessible-role: button;
+    opacity: self.enabled ? 1 : 0.75;
     accessible-label: item.a11y;
     accessible-checkable: true;
     accessible-checked: item.active;
-    accessible-enabled: enabled;
-    accessible-action-default => { if enabled { root.clicked(); } }
+    focus-key: "preset:" + item.id;
     HorizontalLayout {
         padding-left: 8px;
         padding-right: 8px;
@@ -218,11 +198,6 @@ export component PresetRow inherits Rectangle {
                 accessible-role: none;
             }
         }
-    }
-    touch := TouchArea {
-        enabled: root.enabled;
-        mouse-cursor: root.enabled ? default : not-allowed;
-        clicked => { root.clicked(); }
     }
 }
 
@@ -379,27 +354,39 @@ component FolderField inherits Field {
 
 // A stepper's − or + (.stepper-btn): a press steps once, a hold repeats (the host's timer); Enter,
 // Space or a screen reader's action steps once.
-component StepButton inherits Rectangle {
+component StepButton inherits Pressable {
     in property <string> key;
     in property <bool> up;
     in property <string> label;
-    in property <bool> enabled;
     width: 30px;
     border-top-left-radius: root.up ? 0px : 8px;
     border-bottom-left-radius: root.up ? 0px : 8px;
     border-top-right-radius: root.up ? 8px : 0px;
     border-bottom-right-radius: root.up ? 8px : 0px;
     border-width: 1px;
-    border-color: keys.has-focus ? Theme.accent : Theme.line;
-    background: touch.pressed ? Theme.sel : touch.has-hover && root.enabled ? Theme.hover : Theme.field;
+    border-color: Theme.line;
+    background: self.pressed ? Theme.sel : self.hovered && root.enabled ? Theme.hover : Theme.field;
     opacity: root.enabled ? 1 : 0.5;
-    forward-focus: keys;
-    accessible-role: button;
+    cursor: default;
+    pointer-click: false;
     accessible-label: root.label;
-    accessible-enabled: root.enabled;
-    accessible-action-default => {
-        if root.enabled {
-            Sheet.step-key(root.key, root.up);
+    focus-key: "step:" + root.key + (root.up ? "+" : "-");
+    changed focused => {
+        if self.focused {
+            Sheet.reveal(root.absolute-position.y, root.height);
+        }
+    }
+    clicked => { Sheet.step-key(root.key, root.up); }
+    pointer(event) => {
+        if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
+            Sheet.step-pressed(root.key, root.up);
+        } else if event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel {
+            Sheet.step-released();
+        }
+    }
+    changed hovered => {
+        if !self.hovered {
+            Sheet.step-released();
         }
     }
     Text {
@@ -407,37 +394,6 @@ component StepButton inherits Rectangle {
         color: Theme.fg;
         font-weight: 700;
         accessible-role: none;
-    }
-    keys := FocusScope {
-        enabled: root.enabled;
-        changed has-focus => {
-            if self.has-focus {
-                Sheet.reveal(root.absolute-position.y, root.height);
-            }
-        }
-        key-pressed(event) => {
-            if event.text == Key.Return || event.text == Key.Space {
-                Sheet.step-key(root.key, root.up);
-                return accept;
-            }
-            reject
-        }
-    }
-    touch := TouchArea {
-        enabled: root.enabled;
-        pointer-event(event) => {
-            if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
-                keys.focus();
-                Sheet.step-pressed(root.key, root.up);
-            } else if event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel {
-                Sheet.step-released();
-            }
-        }
-        changed has-hover => {
-            if !self.has-hover {
-                Sheet.step-released();
-            }
-        }
     }
 }
 
@@ -554,18 +510,15 @@ export component SettingsSheet inherits GlassPane {
     // Takes the clicks the backdrop behind it would close the sheet on.
     TouchArea { }
 
-    property <int> cache-focus: Sheet.cache-focus-serial;
-    // A batch that started while the dialog was open disables the button: Done takes the focus.
-    changed cache-focus => {
-        if root.locked {
+    // A dialog closed over the sheet gives the focus back to the control that had it; Done takes
+    // it when that control is gone or locked (a batch that started meanwhile) or was not one that
+    // takes it back. Whichever of this and the control's own handler runs first, the control wins.
+    property <int> dialog-closed: Sheet.dialog-closed;
+    changed dialog-closed => {
+        if Focus.current != Focus.restore-key || Focus.restore-key == "" {
             done-button.focus();
-        } else {
-            clear-cache.focus();
         }
     }
-
-    property <int> done-focus: Sheet.done-focus-serial;
-    changed done-focus => { done-button.focus(); }
 
     // Keeps Tab and Shift+Tab inside the sheet, as a modal dialog does: past its last control
     // (Reduce motion, never locked) the focus wraps to Done, and back from Done to the last one.
