@@ -401,6 +401,19 @@ export component App inherits Window {
             color: #00000001;
             accessible-role: none;
         }
+        // The same for the floating panes' blurred shadow (GlassPane): its first draw costs a
+        // missed vsync on the HD 4000 (the Log drawer's first open in the FrameStats bench), so a
+        // tiny one is drawn, all but transparent, from the first frame.
+        Rectangle {
+            x: 0;
+            y: 0;
+            width: 1px;
+            height: 1px;
+            // A shadow needs a fill to cast it.
+            background: #00000001;
+            drop-shadow-blur: Theme.pane-shadow-blur;
+            drop-shadow-color: #00000001;
+        }
 
         // The wallpaper (--wall): three soft blobs over the base.
         Rectangle {

@@ -29,6 +29,8 @@ export global Theme {
 
     out property <length> window-radius: 14px;
     out property <length> pane-radius: 22px;
+    // GlassPane's shadow blur; app.slint draws one at this blur from the first frame (a pre-warm).
+    out property <length> pane-shadow-blur: 40px;
 
     // The wallpaper (--wall): three radial gradients over a base.
     out property <color> wall-a: dark ? #1c3d57 : #bfe3ff;
@@ -101,7 +103,7 @@ export component GlassPane inherits Rectangle {
     background: Theme.float;
     border-width: 1px;
     border-color: Theme.edge;
-    drop-shadow-blur: 40px;
+    drop-shadow-blur: Theme.pane-shadow-blur;
     drop-shadow-offset-y: 18px;
     drop-shadow-color: Theme.shadow;
     Rectangle {
