@@ -154,41 +154,50 @@ component ProgressStack inherits Rectangle {
 }
 
 // One telemetry item (.tel-item): its sparkline (from 1100px), then its label over its value.
-component TelItem inherits HorizontalLayout {
+component TelItem inherits Rectangle {
     in property <string> label;
+    // The hover tooltip (the item's `title`); none when empty.
+    in property <string> tip;
     in property <string> value;
     in property <string> line;
     in property <color> tone;
     in property <bool> spark;
-    spacing: 8px;
     horizontal-stretch: 0;
-    if root.spark: Rectangle {
-        y: (parent.height - self.height) / 2;
-        width: 64px;
-        height: 20px;
-        if root.line != "": Path {
-            viewbox-width: 64;
-            viewbox-height: 20;
-            commands: root.line;
-            stroke: root.tone;
-            stroke-width: 1.4px;
-            stroke-line-join: round;
-            accessible-role: none;
+    if root.tip != "": Tooltip {
+        TipCard {
+            text: root.tip;
         }
     }
-    VerticalLayout {
-        alignment: center;
-        horizontal-stretch: 0;
-        Text {
-            text: root.label;
-            color: Theme.mute;
-            font-size: 11px;
+    HorizontalLayout {
+        spacing: 8px;
+        if root.spark: Rectangle {
+            y: (parent.height - self.height) / 2;
+            width: 64px;
+            height: 20px;
+            if root.line != "": Path {
+                viewbox-width: 64;
+                viewbox-height: 20;
+                commands: root.line;
+                stroke: root.tone;
+                stroke-width: 1.4px;
+                stroke-line-join: round;
+                accessible-role: none;
+            }
         }
-        Text {
-            text: root.value;
-            color: Theme.fg;
-            font-size: 12px;
-            font-weight: 600;
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 0;
+            Text {
+                text: root.label;
+                color: Theme.mute;
+                font-size: 11px;
+            }
+            Text {
+                text: root.value;
+                color: Theme.fg;
+                font-size: 12px;
+                font-weight: 600;
+            }
         }
     }
 }
@@ -308,6 +317,7 @@ export component BottomBar inherits Rectangle {
             }
             TelItem {
                 label: "Disk write";
+                tip: "Write rate of the app and its media tools";
                 value: root.telemetry.disk;
                 line: root.telemetry.disk-line;
                 tone: Theme.info;

@@ -75,12 +75,12 @@ impl Appearance {
     }
 
     fn save(&self, dir: &Path) -> io::Result<()> {
-        std::fs::create_dir_all(dir)?;
-        std::fs::write(dir.join(FILE), self.text())
+        crate::renderer::save_file(dir, FILE, &self.text())
     }
 
-    /// Whether the panes draw the faked glass: on the GPU renderer, unless transparency is
-    /// reduced (the software renderer draws solid panes; ADR-0017 renderer fallback amendment).
+    /// `Theme.glass`: whether the panes may draw a real backdrop blur (P7), on the GPU renderer
+    /// unless transparency is reduced. The faked glass draws on both renderers (ADR-0017
+    /// decision 3); Reduce transparency makes it solid through the theme's tokens.
     pub(crate) fn glass(&self, renderer: Renderer) -> bool {
         renderer == Renderer::OpenGl && !self.reduce_transparency
     }
