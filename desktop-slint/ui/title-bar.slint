@@ -39,6 +39,56 @@ component TrafficLight inherits Rectangle {
     }
 }
 
+// The theme toggle (.icon-btn.theme-btn): a sun in the light theme, a moon in the dark one. Takes
+// the focus; Enter or Space toggles.
+component ThemeButton inherits Rectangle {
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    border-width: keys.has-focus ? 2px : 0px;
+    border-color: Theme.accent-ring;
+    forward-focus: keys;
+    accessible-role: button;
+    accessible-label: "Toggle theme";
+    accessible-description: "Toggle light and dark theme (Ctrl+T)";
+    accessible-action-default => { Theme.toggle(); }
+    Path {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 17px;
+        height: 17px;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        stroke: touch.has-hover ? Theme.fg : Theme.mute;
+        // The SVG's 2 in its 24-unit viewbox: a Path's stroke is not scaled with it.
+        stroke-width: 2px * 17 / 24;
+        stroke-line-cap: round;
+        stroke-line-join: round;
+        commands: Theme.dark
+            ? "M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"
+            : "M16 12a4 4 0 1 1-8 0a4 4 0 1 1 8 0z M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4";
+        accessible-role: none;
+    }
+    keys := FocusScope {
+        key-pressed(event) => {
+            if event.text == Key.Return || event.text == Key.Space {
+                Theme.toggle();
+                return accept;
+            }
+            reject
+        }
+    }
+    touch := TouchArea {
+        // A left press takes the focus, as a browser's button does (the CapButton pattern).
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
+                keys.focus();
+            }
+        }
+        clicked => { Theme.toggle(); }
+    }
+}
+
 export component TitleBar inherits Rectangle {
     callback close();
     callback minimize();
@@ -94,6 +144,11 @@ export component TitleBar inherits Rectangle {
             accessible-label: "Maximize window";
             clicked => { root.toggle-maximize(); }
         }
+    }
+
+    ThemeButton {
+        x: parent.width - self.width - 14px;
+        y: (parent.height - self.height) / 2;
     }
 
     // The brand, centred on the bar (.brand): the mark, then the name over "by Sifahaz".

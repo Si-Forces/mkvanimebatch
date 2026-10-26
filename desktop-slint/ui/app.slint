@@ -417,13 +417,23 @@ export component App inherits Window {
             background: @radial-gradient(circle, Theme.wall-c 0%, Theme.wall-c.transparentize(100%) 62%);
         }
 
-        // Esc closes the Log drawer unless a dialog takes it (app.js's keydown): it bubbles here
-        // from whatever has the focus outside the sheet and the dialog, and this scope holds the
-        // focus from the start, so a key reaches it before anything took the focus.
+        // The window's keys (app.js's keydown): this scope holds the focus from the start, so a
+        // key reaches it before anything took the focus. Ctrl+T (Cmd+T: Slint reads Cmd as
+        // control on macOS) toggles the theme from anywhere, a field, the sheet or a dialog
+        // included, so it is caught before the focused item. Esc closes the Log drawer unless the
+        // sheet or the dialog, which take it themselves, is open; it bubbles here from whatever
+        // has the focus.
         keys := FocusScope {
             focus-on-click: false;
             focus-on-tab-navigation: false;
             init => { self.focus(); }
+            capture-key-pressed(event) => {
+                if event.text == "t" && (event.modifiers.control || event.modifiers.meta) {
+                    Theme.toggle();
+                    return accept;
+                }
+                reject
+            }
             key-pressed(event) => {
                 if event.text == Key.Escape && root.log-open && !root.sheet-open && !root.dialog-open {
                     root.close-log();
@@ -679,62 +689,62 @@ export component App inherits Window {
                 extract-serials: root.extract-log-serials;
                 extract: root.mode == Mode.extract;
             }
-        }
 
-        // The settings sheet of the mode shown (#settings-sheet), over a backdrop that covers the
-        // window: a click on it or Esc closes the sheet.
-        if root.sheet-open: Rectangle {
-            background: #080c1252;
-            FocusScope {
-                key-pressed(event) => {
-                    if event.text == Key.Escape {
-                        root.close-sheet();
-                        return accept;
+            // The settings sheet of the mode shown (#settings-sheet), over a backdrop that covers the
+            // window: a click on it or Esc closes the sheet.
+            if root.sheet-open: Rectangle {
+                background: #080c1252;
+                FocusScope {
+                    key-pressed(event) => {
+                        if event.text == Key.Escape {
+                            root.close-sheet();
+                            return accept;
+                        }
+                        reject
                     }
-                    reject
-                }
-                TouchArea {
-                    clicked => { root.close-sheet(); }
-                }
-                if root.mode == Mode.remux: SettingsSheet {
-                    y: 36px;
-                    width: min(580px, parent.width - 32px);
-                    height: min(self.natural-height, parent.height - 72px);
-                    title: "Remux settings";
-                    remux: true;
-                    form <=> root.remux-form;
-                    invalid: root.remux-invalid;
-                    out-placeholder: "Output folder next to the input";
-                    bitrates: root.bitrates;
-                    chips: root.chips;
-                    limits: root.sheet-limits;
-                    busy: root.busy;
-                    locked: root.locked;
-                    done => { root.close-sheet(); }
-                }
-                if root.mode == Mode.extract: SettingsSheet {
-                    y: 36px;
-                    width: min(580px, parent.width - 32px);
-                    height: min(self.natural-height, parent.height - 72px);
-                    title: "Extract settings";
-                    form <=> root.extract-form;
-                    invalid: root.extract-invalid;
-                    out-placeholder: "Same folder as the input";
-                    bitrates: root.bitrates;
-                    chips: root.chips;
-                    limits: root.sheet-limits;
-                    busy: root.busy;
-                    locked: root.locked;
-                    done => { root.close-sheet(); }
+                    TouchArea {
+                        clicked => { root.close-sheet(); }
+                    }
+                    if root.mode == Mode.remux: SettingsSheet {
+                        y: 36px;
+                        width: min(580px, parent.width - 32px);
+                        height: min(self.natural-height, parent.height - 72px);
+                        title: "Remux settings";
+                        remux: true;
+                        form <=> root.remux-form;
+                        invalid: root.remux-invalid;
+                        out-placeholder: "Output folder next to the input";
+                        bitrates: root.bitrates;
+                        chips: root.chips;
+                        limits: root.sheet-limits;
+                        busy: root.busy;
+                        locked: root.locked;
+                        done => { root.close-sheet(); }
+                    }
+                    if root.mode == Mode.extract: SettingsSheet {
+                        y: 36px;
+                        width: min(580px, parent.width - 32px);
+                        height: min(self.natural-height, parent.height - 72px);
+                        title: "Extract settings";
+                        form <=> root.extract-form;
+                        invalid: root.extract-invalid;
+                        out-placeholder: "Same folder as the input";
+                        bitrates: root.bitrates;
+                        chips: root.chips;
+                        limits: root.sheet-limits;
+                        busy: root.busy;
+                        locked: root.locked;
+                        done => { root.close-sheet(); }
+                    }
                 }
             }
-        }
 
-        // The confirm dialog (#confirm-modal), over the sheet too.
-        if root.dialog-open: ConfirmDialog {
-            texts: root.dialog;
-            serial: root.dialog-serial;
-            answered(confirmed) => { root.dialog-answered(confirmed); }
+            // The confirm dialog (#confirm-modal), over the sheet too.
+            if root.dialog-open: ConfirmDialog {
+                texts: root.dialog;
+                serial: root.dialog-serial;
+                answered(confirmed) => { root.dialog-answered(confirmed); }
+            }
         }
     }
 }

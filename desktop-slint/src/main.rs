@@ -1,5 +1,6 @@
 //! MKV Anime Batch desktop host on Slint (ADR-0017), beside the Tauri host until the switch.
 
+mod appearance;
 mod diagnostics;
 mod inspector;
 mod intents;
@@ -13,7 +14,7 @@ mod telemetry;
 #[cfg(test)]
 mod ui_tests;
 
-use mkv_anime_batch_slint_ui::{App, Theme};
+use mkv_anime_batch_slint_ui::App;
 use mkv_desktop_core::actor::{Core, Intent, Ports};
 use mkv_desktop_core::control::{
     begin_shutdown, cancel_shutdown, cleanup_owned_processes, InspectCacheState, ScanState,
@@ -137,8 +138,8 @@ fn run(
     let job = JobState::new(runtime.handle().clone());
     let scan = Arc::new(ScanState::default());
     let app = App::new()?;
-    app.global::<Theme>()
-        .set_glass(choice.renderer == Renderer::OpenGl);
+    // Before the first frame: a saved theme pins the colour scheme from the start.
+    appearance::wire(&app, config.clone(), choice.renderer);
     if choice.renderer == Renderer::OpenGl {
         watch_start(
             &app,

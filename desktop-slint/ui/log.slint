@@ -1,7 +1,7 @@
 // Redesign C's Run Log (desktop-tauri/ui/index.html #btn-log, #log-drawer; style.css .pill-btn,
 // .badge, .logdrawer, .log-body, .log-line). Layout and bindings only: the host
 // (desktop-slint/src/run_log.rs) maps each line's display text and tone, and the badge's text.
-import { Theme } from "theme.slint";
+import { GlassPane, Theme } from "theme.slint";
 import { ListView } from "std-widgets.slint";
 
 // A line's kind as the console colours it (log-view.js KIND_CLASS): a note is plain.
@@ -240,9 +240,8 @@ component LogConsole inherits Rectangle {
 }
 
 // The drawer (.logdrawer): its head with Copy and Close over the console of the mode shown. One
-// console per mode, both kept, so each keeps its own scroll. Glass comes with P6: a near opaque
-// pane with the .glass edge and shadow.
-export component LogDrawer inherits Rectangle {
+// console per mode, both kept, so each keeps its own scroll. A .glass pane (GlassPane).
+export component LogDrawer inherits GlassPane {
     // "Log · Remux" or "Log · Extract".
     in property <string> title;
     // "Copy", or "Copied" / "Copy failed" for 1.5 s after a Copy.
@@ -257,13 +256,6 @@ export component LogDrawer inherits Rectangle {
     callback close();
     // The Copy or Close button has the focus: closing hands it to the Log toggle.
     out property <bool> focus-inside: copy.focused || close.focused;
-    border-radius: Theme.pane-radius;
-    background: Theme.float.with-alpha(0.985);
-    border-width: 1px;
-    border-color: Theme.edge;
-    drop-shadow-blur: 40px;
-    drop-shadow-offset-y: 18px;
-    drop-shadow-color: Theme.shadow;
     clip: true;
     accessible-role: groupbox;
     accessible-label: "Log";

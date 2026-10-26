@@ -4,7 +4,7 @@
 // the edits and holds every rule: which field a publication writes back, the steppers' repeat, the
 // hints and the preset texts.
 import { Button, CheckBox, ComboBox, LineEdit, ScrollView, Slider } from "std-widgets.slint";
-import { Theme } from "theme.slint";
+import { GlassPane, Theme } from "theme.slint";
 import { CapButton, PillButton } from "jobs.slint";
 
 // One mode's Settings Draft as the sheet shows it, every field as typed but the two checkboxes.
@@ -487,7 +487,7 @@ component Divider inherits Rectangle {
 
 // One mode's settings sheet (.sheet): the head with Done, then the sections, which scroll. The
 // window shows it over a backdrop (app.slint).
-export component SettingsSheet inherits Rectangle {
+export component SettingsSheet inherits GlassPane {
     in property <string> title;
     in property <bool> remux;
     in-out property <DraftForm> form;
@@ -545,17 +545,9 @@ export component SettingsSheet inherits Rectangle {
     }
 
     width: 580px;
+    // .sheet.glass (GlassPane).
     border-radius: 26px;
     clip: true;
-    // .glass blurs what is behind the sheet. With no blur here, a near opaque fill keeps the
-    // window behind from reading through.
-    background: Theme.float.with-alpha(0.985);
-    // .glass: the edge and the shadow.
-    border-width: 1px;
-    border-color: Theme.edge;
-    drop-shadow-blur: 40px;
-    drop-shadow-offset-y: 18px;
-    drop-shadow-color: Theme.shadow;
     accessible-role: groupbox;
     accessible-label: root.title;
 
@@ -575,22 +567,18 @@ export component SettingsSheet inherits Rectangle {
     property <int> done-focus: Sheet.done-focus-serial;
     changed done-focus => { done-button.focus(); }
 
-    // Keeps Tab and Shift+Tab inside the sheet, as a modal dialog does: past its last control the
-    // focus wraps to Done, and back from Done to the last one. Locked, Done is the only one.
+    // Keeps Tab and Shift+Tab inside the sheet, as a modal dialog does: past its last control
+    // (Reduce motion, never locked) the focus wraps to Done, and back from Done to the last one.
     FocusScope {
         focus-on-click: false;
         focus-on-tab-navigation: false;
         capture-key-pressed(event) => {
             let back = event.text == Key.Backtab || (event.text == Key.Tab && event.modifiers.shift);
             if back && done-button.focused {
-                if root.locked {
-                    done-button.focus();
-                } else {
-                    clear-cache.focus();
-                }
+                reduce-motion.focus();
                 return accept;
             }
-            if !back && event.text == Key.Tab && (clear-cache.focused || (root.locked && done-button.focused)) {
+            if !back && event.text == Key.Tab && reduce-motion.has-focus {
                 done-button.focus();
                 return accept;
             }
@@ -883,6 +871,41 @@ export component SettingsSheet inherits Rectangle {
                                     if self.focused {
                                         Sheet.reveal(self.absolute-position.y, self.height);
                                     }
+                                }
+                            }
+                        }
+                    }
+
+                    // Appearance (Q105): the whole app's, in both modes' sheets and never locked,
+                    // in place of the system's reduced transparency and motion the webview reads.
+                    Divider { }
+                    VerticalLayout {
+                        padding-top: 16px;
+                        spacing: 12px;
+                        SectionHead { text: "APPEARANCE"; }
+                        CheckBox {
+                            text: "Reduce transparency (solid panes)";
+                            checked: Theme.reduce-transparency;
+                            toggled => {
+                                Theme.reduce-transparency = self.checked;
+                                Theme.effects-changed();
+                            }
+                            changed has-focus => {
+                                if self.has-focus {
+                                    Sheet.reveal(self.absolute-position.y, self.height);
+                                }
+                            }
+                        }
+                        reduce-motion := CheckBox {
+                            text: "Reduce motion (no spinning)";
+                            checked: Theme.reduce-motion;
+                            toggled => {
+                                Theme.reduce-motion = self.checked;
+                                Theme.effects-changed();
+                            }
+                            changed has-focus => {
+                                if self.has-focus {
+                                    Sheet.reveal(self.absolute-position.y, self.height);
                                 }
                             }
                         }

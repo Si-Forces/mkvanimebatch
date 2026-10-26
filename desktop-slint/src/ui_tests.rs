@@ -829,8 +829,9 @@ fn over(top: Color, below: Color) -> Color {
 
 /// Every text token over every surface, bare or under each tint drawn on it (field, sel, hover and
 /// the soft tones), each surface over each colour of the wallpaper (its base and the three
-/// gradients' peaks), the placeholder hint on the sheet's fields, and each button's text over its
-/// fill: 4.5:1 (WCAG AA body text) in both themes. Reads the tokens from the generated `Theme`,
+/// gradients' peaks), the placeholder hint on the fields, the glass panes over a full queue and
+/// under their highlight, and each button's text over its fill: 4.5:1 (WCAG AA body text) in both
+/// themes, with transparency reduced or not. Reads the tokens from the generated `Theme`,
 /// the one place they are defined.
 #[test]
 fn every_text_token_meets_wcag_aa_on_every_surface_in_both_themes() {
@@ -838,10 +839,16 @@ fn every_text_token_meets_wcag_aa_on_every_surface_in_both_themes() {
     let app = new_app();
     let theme = app.global::<Theme>();
     let mut failures = Vec::new();
-    for dark in [false, true] {
+    for (dark, solid) in [(false, false), (true, false), (false, true), (true, true)] {
         theme.invoke_set_dark(dark);
+        theme.set_reduce_transparency(solid);
         assert_eq!(theme.get_dark(), dark);
-        let name = if dark { "dark" } else { "light" };
+        let name = match (dark, solid) {
+            (false, false) => "light",
+            (true, false) => "dark",
+            (false, true) => "light, reduced transparency",
+            (true, true) => "dark, reduced transparency",
+        };
         let walls = [
             ("wall-base", theme.get_wall_base()),
             ("wall-a", theme.get_wall_a()),
@@ -894,11 +901,30 @@ fn every_text_token_meets_wcag_aa_on_every_surface_in_both_themes() {
                 }
             }
         }
-        // A placeholder (hint) is drawn on the sheet's fields alone: field on float.
+        // A placeholder (hint) is drawn on the sheet's fields (field on float) and the
+        // Inspector's (field on panel).
         for (wall, below) in walls {
-            let field = over(theme.get_field(), over(theme.get_float(), below));
-            let on = format!("field on float over {wall}");
-            pairs.push(("hint", on, theme.get_hint(), field));
+            for (surface, fill) in [("float", theme.get_float()), ("panel", theme.get_panel())] {
+                let field = over(theme.get_field(), over(fill, below));
+                let on = format!("field on {surface} over {wall}");
+                pairs.push(("hint", on, theme.get_hint(), field));
+            }
+        }
+        // The glass panes (GlassPane): the float over a full queue behind (any text colour under
+        // it, not the wallpaper alone), under the top highlight at its strongest.
+        for (under, below) in texts.iter().chain(&walls) {
+            let pane = over(theme.get_float(), *below);
+            for (on, background) in [
+                (format!("float over {under}"), pane),
+                (
+                    format!("glass-hi on float over {under}"),
+                    over(theme.get_glass_hi(), pane),
+                ),
+            ] {
+                for (text, color) in texts {
+                    pairs.push((text, on.clone(), color, background));
+                }
+            }
         }
         for (text, fill, color, background) in [
             (
@@ -1254,4 +1280,114 @@ fn the_sheet_keeps_the_focus_and_its_fields_take_typed_keys() {
     tick();
     assert!(!app.get_sheet_open());
     app.hide().unwrap();
+}
+
+/// The theme toggle and Ctrl+T (from the window, and from a field of the open sheet) flip the
+/// theme and save the choice; a saved choice applies before the window shows.
+#[test]
+fn the_toggle_and_ctrl_t_flip_the_theme_and_save_the_choice() {
+    use crate::appearance::{self, Appearance};
+    use crate::renderer::Renderer;
+    use slint::platform::{Key, WindowEvent};
+    i_slint_backend_testing::init_no_event_loop();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("appearance"), "theme=light\n").unwrap();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(760.0, 520.0));
+    let theme = app.global::<Theme>();
+    theme.invoke_set_dark(true);
+    appearance::wire(&app, Some(dir.path().into()), Renderer::OpenGl);
+    // Applied before the first frame.
+    assert!(!theme.get_dark());
+    apply(&app, &ViewState::new(None));
+    app.show().unwrap();
+    let saved = || Appearance::load(dir.path()).dark;
+
+    only(&app, "Toggle theme").invoke_accessible_default_action();
+    assert!(theme.get_dark());
+    assert_eq!(saved(), Some(true));
+
+    let ctrl_t = |app: &App| {
+        let press = |text: slint::SharedString| {
+            app.window()
+                .dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
+            app.window()
+                .dispatch_event(WindowEvent::KeyReleased { text });
+        };
+        app.window().dispatch_event(WindowEvent::KeyPressed {
+            text: Key::Control.into(),
+        });
+        press("t".into());
+        app.window().dispatch_event(WindowEvent::KeyReleased {
+            text: Key::Control.into(),
+        });
+    };
+    ctrl_t(&app);
+    assert!(!theme.get_dark());
+    assert_eq!(saved(), Some(false));
+    // A plain t toggles nothing.
+    key(&app, "t");
+    assert!(!theme.get_dark());
+
+    // From the input folder field of the open sheet: the field takes no "t".
+    app.invoke_open_sheet(Mode::Remux, "input_dir".into());
+    for _ in 0..2 {
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1));
+    }
+    assert_eq!(app.global::<Sheet>().get_focused(), "input_dir");
+    ctrl_t(&app);
+    assert!(theme.get_dark());
+    assert_eq!(saved(), Some(true));
+    assert_eq!(app.get_remux_form().input_dir, "");
+    app.hide().unwrap();
+}
+
+/// The sheet's two reduced effects apply at once and are saved with the theme: Reduce
+/// transparency solidifies the panes and drops the glass, Reduce motion stops the spinners. The
+/// software renderer draws no glass either way.
+#[test]
+fn the_reduced_effects_apply_at_once_and_are_saved() {
+    use crate::appearance::{self, Appearance};
+    use crate::renderer::Renderer;
+    i_slint_backend_testing::init_no_event_loop();
+    let dir = tempfile::tempdir().unwrap();
+    let app = new_app();
+    // Tall enough for the whole sheet: a search finds no control scrolled out of view.
+    app.window()
+        .set_size(slint::LogicalSize::new(920.0, 1100.0));
+    appearance::wire(&app, Some(dir.path().into()), Renderer::OpenGl);
+    let theme = app.global::<Theme>();
+    assert!(theme.get_glass());
+    assert!(theme.get_float().alpha() < 255);
+    apply(&app, &ViewState::new(None));
+    app.show().unwrap();
+
+    app.invoke_open_sheet(Mode::Remux, "".into());
+    for _ in 0..2 {
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1));
+    }
+    only(&app, "Reduce transparency (solid panes)").invoke_accessible_default_action();
+    assert!(theme.get_reduce_transparency());
+    assert!(!theme.get_glass());
+    assert_eq!(theme.get_float().alpha(), 255);
+    only(&app, "Reduce motion (no spinning)").invoke_accessible_default_action();
+    assert!(theme.get_reduce_motion());
+    assert_eq!(
+        Appearance::load(dir.path()),
+        Appearance {
+            dark: None,
+            reduce_transparency: true,
+            reduce_motion: true,
+        }
+    );
+    only(&app, "Reduce transparency (solid panes)").invoke_accessible_default_action();
+    assert!(theme.get_glass());
+    app.hide().unwrap();
+
+    // A restart on the software renderer keeps the saved effects and draws no glass.
+    let app = new_app();
+    appearance::wire(&app, Some(dir.path().into()), Renderer::Software);
+    let theme = app.global::<Theme>();
+    assert!(theme.get_reduce_motion() && !theme.get_reduce_transparency());
+    assert!(!theme.get_glass());
 }
