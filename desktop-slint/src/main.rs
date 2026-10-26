@@ -1,5 +1,9 @@
 //! MKV Anime Batch desktop host on Slint (ADR-0017), beside the Tauri host until the switch.
 
+// No console window on Windows in a release build (desktop-tauri's main.rs); a debug build keeps
+// it for stderr.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod appearance;
 mod diagnostics;
 mod inspector;
@@ -33,7 +37,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    diagnostics::init(diagnostics::log_dir().as_deref());
+    let log_failed = diagnostics::init(diagnostics::log_dir().as_deref());
 
     let config = renderer::config_dir();
     let forced = renderer::forced_from_env(std::env::var_os(renderer::RENDERER_ENV).as_deref());
@@ -76,7 +80,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         _ => None,
     };
     let start = Rc::new(Cell::new(GpuStart::Setup));
-    let result = run(&choice, config.clone(), save, Rc::clone(&start));
+    let result = run(&choice, config.clone(), save, Rc::clone(&start), log_failed);
     if renderer::gpu_failed_at_start(choice.renderer, start.get(), result.is_err()) {
         let error = match result {
             Err(error) => error.to_string(),
@@ -130,6 +134,7 @@ fn run(
     config: Option<PathBuf>,
     save: Option<PathBuf>,
     start: Rc<Cell<GpuStart>>,
+    log_failed: Option<String>,
 ) -> Result<(), Box<dyn Error>> {
     // The Desktop Core actor, its scans and its jobs run here; Slint keeps the main thread.
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -168,6 +173,14 @@ fn run(
         },
     );
     intents::wire(&app, core.clone(), runtime.handle().clone(), publisher);
+    // A packaged Windows build has no console, so the log file is its only output: say once, in
+    // the window, that it could not be opened (ADR-0017 decision 9). Elsewhere stderr has it.
+    if let Some(text) = log_failed.filter(|_| cfg!(target_os = "windows")) {
+        app.invoke_notice(diagnostics::LOG_FAILED_TITLE.into(), text.into());
+    }
+    // Rounded corners over a transparent window on Linux alone, as the webview's `is-linux`
+    // styling; Windows and macOS draw a square, opaque window (tauri.conf.json `transparent`).
+    app.set_rounded(cfg!(target_os = "linux"));
     let (window, boot) = (app.as_weak(), core.state());
     slint::spawn_local(async move {
         if let (Ok(state), Some(app)) = (boot.await, window.upgrade()) {

@@ -26,14 +26,28 @@ pub(crate) const IDENTIFIER: &str = "com.mkvanimebatch.desktop";
 const MAX_LOG_BYTES: u64 = 1_048_576;
 
 /// Installs the app's subscriber as the global default. A subscriber that is already set is left
-/// alone. Never fails: with no usable log directory the output is stderr only.
-pub fn init(log_dir: Option<&Path>) {
-    let _ = tracing::dispatcher::set_global_default(build_dispatch(
+/// alone. Never fails: with no usable log directory the output is stderr only. Returns what the
+/// window says when the log file could not be opened (ADR-0017 decision 9), naming its path.
+pub fn init(log_dir: Option<&Path>) -> Option<String> {
+    let (dispatch, failed) = build_dispatch(
         log_dir,
         env_filter(),
         io::stderr,
         io::stderr().is_terminal(),
-    ));
+    );
+    let _ = tracing::dispatcher::set_global_default(dispatch);
+    failed
+}
+
+/// The title of the in-window notice that the log file could not be opened.
+pub const LOG_FAILED_TITLE: &str = "Could not open the log file";
+
+/// The notice's text: where the log file is and why it could not be opened.
+fn log_failed_text(dir: &Path, error: &io::Error) -> String {
+    format!(
+        "{} could not be opened ({error}). Engine Diagnostics are not saved until the next start.",
+        dir.join(LOG_FILE_NAME).display()
+    )
 }
 
 /// The log directory, as Tauri's `app_log_dir` computes it: `<local data>/<identifier>/logs`
@@ -80,7 +94,14 @@ where
 ///
 /// - File layer: see [`file_layer`]. Skipped, with a warning, when the file cannot be opened.
 /// - Stderr layer: level and message only, written to `stderr` and colored only when `ansi`.
-fn build_dispatch<W>(log_dir: Option<&Path>, filter: EnvFilter, stderr: W, ansi: bool) -> Dispatch
+///
+/// Also returns the notice's text when the file could not be opened.
+fn build_dispatch<W>(
+    log_dir: Option<&Path>,
+    filter: EnvFilter,
+    stderr: W,
+    ansi: bool,
+) -> (Dispatch, Option<String>)
 where
     W: for<'a> MakeWriter<'a> + Send + Sync + 'static,
 {
@@ -101,15 +122,16 @@ where
             .with(file_layer)
             .with(stderr_layer),
     );
-    if let Some((dir, error)) = file_error {
+    let failed = file_error.map(|(dir, error)| {
         tracing::dispatcher::with_default(&dispatch, || {
             tracing::warn!(
                 "Cannot open the log file in {}: {error}; logging to stderr only",
                 dir.display()
             );
         });
-    }
-    dispatch
+        log_failed_text(dir, &error)
+    });
+    (dispatch, failed)
 }
 
 #[cfg(test)]
@@ -149,7 +171,7 @@ mod tests {
     /// Logs one `warn!` through a fresh subscriber for `dir`; returns what reached stderr.
     fn log_in(dir: Option<&Path>, line: &str) -> String {
         let stderr = Captured::default();
-        let dispatch = build_dispatch(dir, EnvFilter::new("warn"), stderr.clone(), false);
+        let (dispatch, _) = build_dispatch(dir, EnvFilter::new("warn"), stderr.clone(), false);
         tracing::dispatcher::with_default(&dispatch, || tracing::warn!("{line}"));
         stderr.text()
     }
@@ -203,7 +225,7 @@ mod tests {
     fn test_filter_hides_events_below_it() {
         let dir = tempfile::tempdir().unwrap();
         let stderr = Captured::default();
-        let dispatch = build_dispatch(
+        let (dispatch, _) = build_dispatch(
             Some(dir.path()),
             EnvFilter::new("warn"),
             stderr.clone(),
@@ -222,7 +244,7 @@ mod tests {
         let path = dir.path().join(LOG_FILE_NAME);
         fs::write(&path, vec![b'x'; MAX_LOG_BYTES as usize + 1]).unwrap();
 
-        let _dispatch = build_dispatch(
+        let (_dispatch, _) = build_dispatch(
             Some(dir.path()),
             EnvFilter::new("warn"),
             Captured::default(),
@@ -261,6 +283,15 @@ mod tests {
         assert!(stderr.contains("Cannot open the log file"), "{stderr}");
         assert!(stderr.contains("logging to stderr only"), "{stderr}");
         assert!(stderr.contains("still logged"), "{stderr}");
+        // The window's notice names the file.
+        let (_, notice) = build_dispatch(Some(&bad_dir), EnvFilter::new("warn"), io::sink, false);
+        let notice = notice.expect("a notice");
+        assert!(
+            notice.starts_with(&bad_dir.join(LOG_FILE_NAME).display().to_string()),
+            "{notice}"
+        );
+        let (_, notice) = build_dispatch(Some(dir.path()), EnvFilter::new("warn"), io::sink, false);
+        assert_eq!(notice, None);
         // No directory at all behaves the same, minus the warning.
         let stderr = log_in(None, "still logged");
         assert!(!stderr.contains("Cannot open"), "{stderr}");

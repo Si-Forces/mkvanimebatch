@@ -155,8 +155,13 @@ export component App inherits Window {
     min-width: 760px;
     min-height: 520px;
     no-frame: true;
-    // Transparent outside the rounded surface below, as the Linux webview window is.
-    background: transparent;
+    // The window icon on every OS (the Tauri app's; the exe's on Windows comes from build.rs).
+    icon: @image-url("../../desktop-tauri/src-tauri/icons/128x128.png");
+    // Rounded corners (the host's: Linux alone, as the webview's is-linux styling). Transparent
+    // outside the rounded surface then, as the Linux webview window is; opaque and square
+    // elsewhere, as tauri.conf.json's Windows window.
+    in property <bool> rounded: true;
+    background: rounded ? transparent : Theme.wall-base;
     resize-border-width: root.maximized ? 0px : 6px;
     default-font-family: "Onest";
     default-font-size: 13px;
@@ -272,6 +277,9 @@ export component App inherits Window {
     // A Close whose teardown failed with `error`: the window stays open and a notice says why
     // (the host's, queued with the other dialogs).
     callback close-failed(error: string);
+    // A notice (OK alone) the host shows, queued with the other dialogs: the log file that could
+    // not be opened on Windows.
+    callback notice(title: string, text: string);
     // Through winit, not `minimized`: see the host's `minimize`.
     callback minimize-window();
 
@@ -375,7 +383,7 @@ export component App inherits Window {
         width: root.width;
         height: root.height;
         // A maximized window is square, or the desktop shows through the corners.
-        border-radius: root.maximized ? 0px : Theme.window-radius;
+        border-radius: root.maximized || !root.rounded ? 0px : Theme.window-radius;
         clip: true;
         background: Theme.wall-base;
 
