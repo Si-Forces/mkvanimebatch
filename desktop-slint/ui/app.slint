@@ -10,11 +10,11 @@ import { ScrollView } from "std-widgets.slint";
 import { Mode, QueueFilter, QueueHead, QueuePane, QueueRow, RowMark, RowTone } from "queue.slint";
 import { Inspector, InspectorPane, LibraryEntry, LibraryItem, Rung } from "inspector.slint";
 import { ChipTexts, DraftForm, GearButton, PresetItem, PresetRow, SettingsSheet, Sheet, SheetLimits } from "settings.slint";
-import { BottomBar, ConfirmDialog, DialogTexts, JobBar, StatusDot, StatusTone } from "jobs.slint";
+import { BottomBar, ConfirmDialog, DialogTexts, JobBar, StatusDot, StatusTone, Telemetry } from "jobs.slint";
 import { LogBadge, LogDrawer, LogRow, LogSerials, LogTone, LogToggle } from "log.slint";
 
 // FontProbe is test only; a .slint file cannot be compiled per cfg, so it ships (a few bytes).
-export { Theme, FontProbe, Inspector, LibraryItem, Mode, QueueFilter, QueueHead, QueueRow, RowMark, RowTone, Rung, ChipTexts, DraftForm, PresetItem, Sheet, SheetLimits, DialogTexts, JobBar, StatusTone, LogBadge, LogRow, LogSerials, LogTone }
+export { Theme, FontProbe, Inspector, LibraryItem, Mode, QueueFilter, QueueHead, QueueRow, RowMark, RowTone, Rung, ChipTexts, DraftForm, PresetItem, Sheet, SheetLimits, DialogTexts, JobBar, StatusTone, Telemetry, LogBadge, LogRow, LogSerials, LogTone }
 
 // Who opened the settings sheet, to take the focus back when it closes: a mode's gear, Run (after
 // a refused Run), or nothing to give it back to.
@@ -177,6 +177,8 @@ export component App inherits Window {
     // publication, the markup's own labels (index.html).
     in property <JobBar> remux-job: { run-label: "Run remux", count-text: "Ready", clock: "Not started" };
     in property <JobBar> extract-job: { run-label: "Run extract", count-text: "Ready", clock: "Not started" };
+    // System Telemetry: "–" before the first sample (index.html).
+    in property <Telemetry> telemetry: { cpu: "–", ram: "–", disk: "–" };
     // Each mode's Run Log lines (the host keeps each model and its raw text for Copy), and its
     // error badge.
     in property <[LogRow]> remux-log;
@@ -634,6 +636,7 @@ export component App inherits Window {
                     workers: root.chips.workers;
                     io-jobs: root.chips.io-jobs;
                     run-pending: root.run-pending;
+                    telemetry: root.telemetry;
                     // A typed subtitle field commits first, as the webview's blur does.
                     run => {
                         root.leave-field();

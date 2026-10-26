@@ -9,6 +9,7 @@ use crate::jobs;
 use crate::queue::{map_rows, ModeList, RowPatch, Update};
 use crate::run_log::{self, Console, LogPatch};
 use crate::settings::{self, Edits, BITRATES};
+use crate::telemetry;
 use mkv_anime_batch_slint_ui::{App, Mode, QueueFilter, QueueRow};
 use mkv_core::pipeline::PipelineMode;
 use mkv_desktop_core::actor::{Publisher, ViewState};
@@ -353,6 +354,7 @@ pub(crate) fn hop(pending: &Coalescer, edits: &Edits, window: &slint::Weak<App>)
         app.set_busy(state.busy);
         jobs::show(&app, &state);
         settings::show(&app, &state, edits);
+        telemetry::show(&app, state.telemetry.as_ref());
     }
     apply(&app, Mode::Remux, remux);
     apply(&app, Mode::Extract, extract);
