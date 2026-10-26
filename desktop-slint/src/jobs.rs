@@ -143,7 +143,7 @@ impl Dialogs {
 fn display(app: &App, texts: &DialogTexts) {
     app.set_dialog(texts.clone());
     app.set_dialog_serial(app.get_dialog_serial().wrapping_add(1));
-    app.set_dialog_open(true);
+    app.invoke_show_dialog();
 }
 
 /// Wires Run, Stop and "Clear inspection cache…", each for the mode the window shows.

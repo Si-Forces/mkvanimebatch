@@ -3,6 +3,7 @@
 // what the controls ask.
 import { ListView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
+import { Pressable, TipCard } from "focus.slint";
 
 export enum Mode { remux, extract }
 
@@ -30,9 +31,11 @@ export struct QueueRow {
     check-label: string,
     // Whether the filter shows the row; a hidden row stays in the model with no height.
     shown: bool,
-    // The release header drawn above the row, if any, and how many rows it heads.
+    // The header of the row's release, and how many rows of its run the filter shows, when the
+    // queue spans more than one release; `opens`: the row starts the run, with the header above.
     head: string,
     head-count: int,
+    opens: bool,
 }
 
 export struct QueueHead {
@@ -107,17 +110,12 @@ component Glyph inherits Path {
     commands: glyph;
 }
 
-component ReorderButton inherits Rectangle {
+component ReorderButton inherits Pressable {
     in property <string> glyph;
-    in property <bool> enabled;
-    callback clicked();
     width: 22px;
     height: 18px;
     border-radius: 5px;
-    background: touch.has-hover && enabled ? Theme.sel : transparent;
-    accessible-role: button;
-    accessible-enabled: enabled;
-    accessible-action-default => { if enabled { root.clicked(); } }
+    background: self.hovered && self.enabled ? Theme.sel : transparent;
 
     Path {
         x: (parent.width - self.width) / 2;
@@ -126,16 +124,58 @@ component ReorderButton inherits Rectangle {
         height: 10px;
         viewbox-width: 24;
         viewbox-height: 24;
-        stroke: touch.has-hover && enabled ? Theme.fg : Theme.mute;
+        stroke: root.hovered && root.enabled ? Theme.fg : Theme.mute;
         stroke-width: 3px;
         stroke-line-cap: round;
-        commands: glyph;
+        commands: root.glyph;
+        accessible-role: none;
     }
+}
 
-    touch := TouchArea {
-        enabled: root.enabled;
-        clicked => { root.clicked(); }
+// A release's header (.ep-group-head): its name and how many rows of its run the filter shows.
+component GroupHead inherits Rectangle {
+    in property <string> text;
+    in property <int> count;
+    // The copy pinned at the list's top: square at the top edge, and a click on it reaches no
+    // row. Only the row's own header is read out (its instance's label).
+    in property <bool> pinned;
+    height: 30px;
+    border-radius: 10px;
+    border-top-left-radius: self.pinned ? 0px : 10px;
+    border-top-right-radius: self.pinned ? 0px : 10px;
+    if root.pinned: TouchArea { }
+    background: Theme.head;
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        Text {
+            text: root.text;
+            color: Theme.mute;
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.66px;
+            vertical-alignment: center;
+            overflow: elide;
+            accessible-role: none;
+        }
+        Text {
+            text: root.count;
+            color: Theme.mute;
+            font-size: 11px;
+            font-weight: 600;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
     }
+}
+
+// The release header pinned at the list's top: its text and count, none when `text` is empty;
+// `y`, the place of the row that pins it, so a row laid out anew reports it again.
+struct PinnedHead {
+    text: string,
+    count: int,
+    y: length,
 }
 
 // One row (.ep-row) with the release header above it when it starts a run.
@@ -145,12 +185,23 @@ component EpRow inherits Rectangle {
     in property <bool> locked;
     // A filter shows: the order cannot change.
     in property <bool> filtered;
+    // Names the row's controls for `Focus.restore`: the mode and the row's id.
+    in property <string> key;
+    // The list's scroll offset (negative going down), against which the row finds the list's top.
+    in property <length> scroll;
     callback toggle();
     callback pick();
     callback move-up();
     callback move-down();
 
-    property <length> head-height: item.head != "" ? 30px : 0px;
+    // The row spans the list's top edge: its run's header pins there (`position: sticky`), unless
+    // the row's own header shows whole at the top. One comparison per row laid out, on a scroll.
+    out property <PinnedHead> pinned: item.shown && item.head != ""
+        && self.y + root.scroll <= 0 && self.y + self.height + root.scroll > 0
+        && !(item.opens && self.y + root.scroll >= 0)
+        ? { text: item.head, count: item.head-count, y: self.y } : { text: "", count: 0, y: 0 };
+
+    property <length> head-height: item.opens ? 30px : 0px;
     property <color> tone-color: item.tone == RowTone.info ? Theme.info
         : item.tone == RowTone.ok ? Theme.ok
         : item.tone == RowTone.err ? Theme.err
@@ -160,34 +211,14 @@ component EpRow inherits Rectangle {
     // the ListView make and lay out all of them, looking for one to fill its height with.
     height: item.shown ? self.head-height + 52px : 0px;
 
-    if item.shown && item.head != "": Rectangle {
+    if item.shown && item.opens: GroupHead {
         x: 12px;
         y: 0;
         width: parent.width - 24px;
-        height: root.head-height;
-        border-radius: 10px;
-        background: Theme.head;
-        HorizontalLayout {
-            padding-left: 8px;
-            padding-right: 8px;
-            Text {
-                text: root.item.head;
-                color: Theme.mute;
-                font-size: 11px;
-                font-weight: 600;
-                letter-spacing: 0.66px;
-                vertical-alignment: center;
-                overflow: elide;
-            }
-            Text {
-                text: root.item.head-count;
-                color: Theme.mute;
-                font-size: 11px;
-                font-weight: 600;
-                horizontal-alignment: right;
-                vertical-alignment: center;
-            }
-        }
+        accessible-role: text;
+        accessible-label: root.item.head + " " + root.item.head-count;
+        text: root.item.head;
+        count: root.item.head-count;
     }
 
     // The list's side padding (.list: 0 12px).
@@ -196,6 +227,8 @@ component EpRow inherits Rectangle {
         y: root.head-height;
         width: parent.width - 24px;
         height: 52px;
+        // A control of the row has the focus: Move up / Move down show (.ep-row:focus-within).
+        property <bool> focus-within: check.focused || pick.focused || up.focused || down.focused;
 
         Rectangle {
             border-radius: 10px;
@@ -212,7 +245,7 @@ component EpRow inherits Rectangle {
             // The checkbox (.ep-select-check).
             VerticalLayout {
                 alignment: center;
-                check := Rectangle {
+                check := Pressable {
                     width: 16px;
                     height: 16px;
                     border-radius: 4px;
@@ -220,12 +253,14 @@ component EpRow inherits Rectangle {
                     border-width: root.item.selected ? 0px : 1.5px;
                     border-color: Theme.mute;
                     opacity: root.locked ? 0.5 : 1;
+                    enabled: !root.locked;
+                    cursor: default;
+                    focus-key: "check:" + root.key;
                     accessible-role: checkbox;
                     accessible-checkable: true;
                     accessible-checked: root.item.selected;
                     accessible-label: root.item.check-label;
-                    accessible-enabled: !root.locked;
-                    accessible-action-default => { if !root.locked { root.toggle(); } }
+                    clicked => { root.toggle(); }
 
                     if root.item.selected: Path {
                         width: 10px;
@@ -235,23 +270,18 @@ component EpRow inherits Rectangle {
                         commands: "M 1.5 5.2 L 4 7.7 L 8.5 2.5";
                         stroke: Theme.accent-fg;
                         stroke-width: 1.8px;
-                    }
-                    TouchArea {
-                        enabled: !root.locked;
-                        clicked => { root.toggle(); }
+                        accessible-role: none;
                     }
                 }
             }
 
-            // The pick (.ep-pick): number, name and meta line; clicking inspects the row.
-            Rectangle {
+            // The pick (.ep-pick): number, name and meta line; it inspects the row.
+            pick := Pressable {
                 horizontal-stretch: 1;
-                accessible-role: button;
+                border-radius: 8px;
+                focus-key: "pick:" + root.key;
                 accessible-label: root.item.name;
-                accessible-action-default => { root.pick(); }
-                TouchArea {
-                    clicked => { root.pick(); }
-                }
+                clicked => { root.pick(); }
                 HorizontalLayout {
                     spacing: 12px;
                     opacity: root.item.selected ? 1 : 0.45;
@@ -284,7 +314,8 @@ component EpRow inherits Rectangle {
                 }
             }
 
-            // The status (.ep-status): the mark, then the label in the row's tone.
+            // The status (.ep-status): the mark, then the label in the row's tone; its `title`
+            // the hover tooltip.
             Rectangle {
                 max-width: 150px;
                 accessible-role: text;
@@ -316,21 +347,29 @@ component EpRow inherits Rectangle {
                         accessible-role: none;
                     }
                 }
+                if root.item.title != "": Tooltip {
+                    TipCard {
+                        text: root.item.title;
+                    }
+                }
             }
 
-            // Move up / Move down (.ep-reorder): shown on hover, gone while a filter shows.
+            // Move up / Move down (.ep-reorder): shown on hover or with a row control focused,
+            // gone while a filter shows.
             VerticalLayout {
                 alignment: center;
-                opacity: body.has-hover && !root.filtered ? 1 : 0;
-                ReorderButton {
+                opacity: (body.has-hover || body.focus-within) && !root.filtered ? 1 : 0;
+                up := ReorderButton {
                     glyph: "M6 15l6-6 6 6";
                     enabled: !root.locked && !root.filtered;
+                    focus-key: "up:" + root.key;
                     accessible-label: "Move up";
                     clicked => { root.move-up(); }
                 }
-                ReorderButton {
+                down := ReorderButton {
                     glyph: "M6 9l6 6 6-6";
                     enabled: !root.locked && !root.filtered;
+                    focus-key: "down:" + root.key;
                     accessible-label: "Move down";
                     clicked => { root.move-down(); }
                 }
@@ -340,22 +379,19 @@ component EpRow inherits Rectangle {
 }
 
 // A filter chip (.chip): its label and how many rows it shows.
-component Chip inherits Rectangle {
+component Chip inherits Pressable {
     in property <string> label;
     in property <int> count;
     in property <bool> on;
-    callback clicked();
     height: 24px;
     width: content.preferred-width + 24px;
     border-radius: self.height / 2;
     background: on ? Theme.fg : Theme.sel;
     border-width: 1px;
-    border-color: on ? Theme.fg : touch.has-hover ? Theme.mute : Theme.line;
-    accessible-role: button;
+    border-color: on ? Theme.fg : self.hovered ? Theme.mute : Theme.line;
     accessible-label: label + " " + count;
     accessible-checkable: true;
     accessible-checked: on;
-    accessible-action-default => { root.clicked(); }
 
     content := HorizontalLayout {
         x: 12px;
@@ -378,22 +414,15 @@ component Chip inherits Rectangle {
             accessible-role: none;
         }
     }
-    touch := TouchArea {
-        clicked => { root.clicked(); }
-    }
 }
 
 // A text button (.link-btn).
-export component LinkButton inherits Rectangle {
+export component LinkButton inherits Pressable {
     in property <string> text;
-    in property <bool> enabled: true;
-    callback clicked();
     width: label.preferred-width + 8px;
     height: 24px;
-    accessible-role: button;
+    border-radius: 6px;
     accessible-label: text;
-    accessible-enabled: enabled;
-    accessible-action-default => { if enabled { root.clicked(); } }
     label := Text {
         text: root.text;
         color: Theme.accent;
@@ -403,35 +432,22 @@ export component LinkButton inherits Rectangle {
         vertical-alignment: center;
         accessible-role: none;
     }
-    TouchArea {
-        enabled: root.enabled;
-        clicked => { root.clicked(); }
-    }
 }
 
 // The accent button (.btn.btn-accent).
-component AccentButton inherits Rectangle {
+component AccentButton inherits Pressable {
     in property <string> text;
-    in property <bool> enabled: true;
-    callback clicked();
     width: label.preferred-width + 36px;
     height: 36px;
     border-radius: self.height / 2;
     background: Theme.accent;
-    opacity: enabled ? 1 : 0.5;
-    accessible-role: button;
+    opacity: self.enabled ? 1 : 0.5;
     accessible-label: text;
-    accessible-enabled: enabled;
-    accessible-action-default => { if enabled { root.clicked(); } }
     label := Text {
         text: root.text;
         color: Theme.accent-fg;
         font-weight: 700;
         accessible-role: none;
-    }
-    TouchArea {
-        enabled: root.enabled;
-        clicked => { root.clicked(); }
     }
 }
 
@@ -453,6 +469,8 @@ export component QueuePane inherits Rectangle {
     callback open-folder();
     // The list's scroll offset (negative going down), kept by the window per mode.
     in-out property <length> list-scroll;
+    // The mode, which names the pane's controls for `Focus.restore` apart from the other pane's.
+    in property <string> name;
 
     // Scrolls the list so row `row` heads it (queue-view.js `revealRelease`; row 0 for the top, as
     // the folder's Library entry and a card put it), or as near as the end of the list lets it.
@@ -488,6 +506,25 @@ export component QueuePane inherits Rectangle {
     // EpRow at its tallest: a release head over the row.
     property <length> tallest-row: 30px + 52px;
     property <string> marked: pending-inspect != "" ? pending-inspect : head.inspected;
+
+    // The release header pinned at the list's top, and the row instance that pinned it: rows
+    // report it as they cross the top (in no set order), and only the one that pinned it unpins
+    // it. A ListView keeps its row instances as it scrolls, so each is numbered once, when made.
+    property <PinnedHead> pinned-head;
+    // The pinned header's text (empty for none shown) and count, for the host's tests.
+    out property <string> pinned-text: !root.head.card-shown && root.list-scroll < 0 ? root.pinned-head.text : "";
+    out property <int> pinned-count: root.pinned-head.count;
+    property <int> pinned-by: -1;
+    property <int> rows-made;
+    function pin(instance: int, head: PinnedHead) {
+        if head.text != "" {
+            root.pinned-head = head;
+            root.pinned-by = instance;
+        } else if root.pinned-by == instance {
+            root.pinned-head = { text: "", count: 0, y: 0 };
+            root.pinned-by = -1;
+        }
+    }
     property <bool> filtered: head.filter != QueueFilter.all;
     background: Theme.content;
 
@@ -534,24 +571,28 @@ export component QueuePane inherits Rectangle {
                 cross-axis-alignment: center;
                 Chip {
                     label: "All";
+                    focus-key: root.name + ":" + self.label;
                     count: root.head.all;
                     on: root.head.filter == QueueFilter.all;
                     clicked => { root.filter(QueueFilter.all); }
                 }
                 Chip {
                     label: "To do";
+                    focus-key: root.name + ":" + self.label;
                     count: root.head.todo;
                     on: root.head.filter == QueueFilter.todo;
                     clicked => { root.filter(QueueFilter.todo); }
                 }
                 Chip {
                     label: "Done";
+                    focus-key: root.name + ":" + self.label;
                     count: root.head.done;
                     on: root.head.filter == QueueFilter.done;
                     clicked => { root.filter(QueueFilter.done); }
                 }
                 Chip {
                     label: "Failed";
+                    focus-key: root.name + ":" + self.label;
                     count: root.head.failed;
                     on: root.head.filter == QueueFilter.failed;
                     clicked => { root.filter(QueueFilter.failed); }
@@ -559,11 +600,13 @@ export component QueuePane inherits Rectangle {
                 Rectangle { horizontal-stretch: 1; }
                 LinkButton {
                     text: "Select all";
+                    focus-key: root.name + ":" + self.text;
                     enabled: !root.head.selection-locked;
                     clicked => { root.set-all-selected(true); }
                 }
                 LinkButton {
                     text: "None";
+                    focus-key: root.name + ":" + self.text;
                     enabled: !root.head.selection-locked;
                     clicked => { root.set-all-selected(false); }
                 }
@@ -606,15 +649,38 @@ export component QueuePane inherits Rectangle {
                     }
                 }
                 for row in root.rows: EpRow {
+                    property <int> instance;
+                    // A row made already across the top reports it too: `changed` misses a first value.
+                    init => {
+                        self.instance = root.rows-made;
+                        root.rows-made += 1;
+                        root.pin(self.instance, self.pinned);
+                    }
                     item: row;
                     inspected: row.id == root.marked;
                     locked: root.head.selection-locked;
                     filtered: root.filtered;
+                    key: root.name + ":" + row.id;
+                    scroll: root.list-scroll;
+                    changed pinned => { root.pin(self.instance, self.pinned); }
                     toggle => { root.set-selected(row.id, !row.selected); }
                     pick => { root.inspect(row.id); }
                     move-up => { root.reorder(row.id, true); }
                     move-down => { root.reorder(row.id, false); }
                 }
+            }
+
+            // The pinned header (style.css's sticky .ep-group-head), over the rows at the list's
+            // top; a click on it reaches no row. Read out once, by the row's own header.
+            if root.pinned-text != "": GroupHead {
+                x: 12px;
+                y: 0;
+                width: parent.width - 24px;
+                pinned: true;
+                // Read out once, by the row's own header.
+                accessible-role: none;
+                text: root.pinned-head.text;
+                count: root.pinned-head.count;
             }
 
             if root.head.card-shown: VerticalLayout {

@@ -2,6 +2,7 @@
 // .pill-btn, .stack, .status-pill, .modal-card). Layout and bindings only: the host
 // (desktop-slint/src/jobs.rs) maps every text, count, width and tone from the published controls.
 import { GlassPane, Theme } from "theme.slint";
+import { Pressable, TipCard } from "focus.slint";
 
 // The status pill's style (presentation.rs `StatusPill::class`).
 export enum StatusTone { idle, running, success, error, cancelled }
@@ -49,47 +50,19 @@ export struct Telemetry {
 
 export enum CapKind { accent, run, stop }
 
-// A tooltip's card with plain text: a `Tooltip`'s own `text` is markdown.
-component TipCard inherits Rectangle {
-    in property <string> text;
-    width: tip-text.preferred-width + 16px;
-    height: tip-text.preferred-height + 10px;
-    border-radius: 6px;
-    background: Theme.float;
-    border-width: 1px;
-    border-color: Theme.sep;
-    tip-text := Text {
-        text: root.text;
-        color: Theme.fg;
-        font-size: 12px;
-    }
-}
-
 // A pill button with a strong fill (.cap): Run (a play glyph), Stop (a square glyph) or an accent
-// one. Takes the focus, with a ring; Enter or Space activates it. P6 quiets the ring for the pointer.
-export component CapButton inherits Rectangle {
+// one.
+export component CapButton inherits Pressable {
     in property <string> text;
     in property <CapKind> kind: accent;
-    in property <bool> enabled: true;
-    // The hover tooltip and accessible description; none when empty.
-    in property <string> tip;
-    callback clicked();
-    out property <bool> focused: keys.has-focus;
     property <color> ink: kind == CapKind.run ? Theme.run-fg : kind == CapKind.stop ? Theme.err-fg : Theme.accent-fg;
     property <color> fill: kind == CapKind.run ? Theme.run : kind == CapKind.stop ? Theme.err : Theme.accent;
     width: row.preferred-width + 36px;
     height: 36px;
     border-radius: self.height / 2;
-    background: touch.has-hover && enabled ? fill.darker(10%) : fill;
-    opacity: enabled ? 1 : 0.75;
-    border-width: keys.has-focus ? 2px : 0px;
-    border-color: Theme.accent-ring;
-    forward-focus: keys;
-    accessible-role: button;
+    background: self.hovered && self.enabled ? fill.darker(10%) : fill;
+    opacity: self.enabled ? 1 : 0.75;
     accessible-label: text;
-    accessible-description: tip;
-    accessible-enabled: enabled;
-    accessible-action-default => { if enabled { root.clicked(); } }
     row := HorizontalLayout {
         alignment: center;
         spacing: 8px;
@@ -118,82 +91,25 @@ export component CapButton inherits Rectangle {
             accessible-role: none;
         }
     }
-    keys := FocusScope {
-        enabled: root.enabled;
-        key-pressed(event) => {
-            if event.text == Key.Return || event.text == Key.Space {
-                root.clicked();
-                return accept;
-            }
-            reject
-        }
-    }
-    touch := TouchArea {
-        enabled: root.enabled;
-        mouse-cursor: root.enabled ? pointer : not-allowed;
-        // A left press takes the focus, as a browser's button does (the StepButton pattern): the
-        // TouchArea above the FocusScope grabs the press before it.
-        pointer-event(event) => {
-            if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
-                keys.focus();
-            }
-        }
-        clicked => { root.clicked(); }
-    }
-    if root.tip != "": Tooltip {
-        TipCard {
-            text: root.tip;
-        }
-    }
 }
 
-// A quiet pill button (.pill-btn): Cancel, "Clear inspection cache…". Takes the focus; Enter or
-// Space activates it.
-export component PillButton inherits Rectangle {
+// A quiet pill button (.pill-btn): Cancel, "Clear inspection cache…".
+export component PillButton inherits Pressable {
     in property <string> text;
-    in property <bool> enabled: true;
-    callback clicked();
-    out property <bool> focused: keys.has-focus;
     width: label.preferred-width + 30px;
     height: 36px;
     border-radius: self.height / 2;
-    background: touch.has-hover && enabled ? Theme.hover : Theme.field;
-    opacity: enabled ? 1 : 0.75;
-    border-width: keys.has-focus ? 2px : 1px;
-    border-color: keys.has-focus ? Theme.accent-ring : Theme.edge;
-    forward-focus: keys;
-    accessible-role: button;
+    background: self.hovered && self.enabled ? Theme.hover : Theme.field;
+    opacity: self.enabled ? 1 : 0.75;
+    border-width: 1px;
+    border-color: Theme.edge;
     accessible-label: text;
-    accessible-enabled: enabled;
-    accessible-action-default => { if enabled { root.clicked(); } }
     label := Text {
         text: root.text;
         color: Theme.fg;
         font-size: 12px;
         font-weight: 600;
         accessible-role: none;
-    }
-    keys := FocusScope {
-        enabled: root.enabled;
-        key-pressed(event) => {
-            if event.text == Key.Return || event.text == Key.Space {
-                root.clicked();
-                return accept;
-            }
-            reject
-        }
-    }
-    touch := TouchArea {
-        enabled: root.enabled;
-        mouse-cursor: root.enabled ? pointer : not-allowed;
-        // A left press takes the focus, as a browser's button does (the StepButton pattern): the
-        // TouchArea above the FocusScope grabs the press before it.
-        pointer-event(event) => {
-            if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
-                keys.focus();
-            }
-        }
-        clicked => { root.clicked(); }
     }
 }
 
@@ -289,10 +205,6 @@ export component BottomBar inherits Rectangle {
     in property <Telemetry> telemetry;
     callback run();
     callback stop();
-    // The sheet a refused Run opened closed: Run takes the focus back.
-    public function focus-run() {
-        button.focus();
-    }
     property <bool> wide: root.width >= 900px;
     height: bar.preferred-height;
     background: Theme.side;
@@ -310,6 +222,8 @@ export component BottomBar inherits Rectangle {
         button := CapButton {
             y: (parent.height - self.height) / 2;
             height: 40px;
+            // Run or Stop, whichever shows: the one the sheet a refused Run opened gives it back to.
+            focus-key: "run";
             kind: root.job.owns ? CapKind.stop : CapKind.run;
             text: root.job.owns ? root.job.stop-label : root.job.run-label;
             enabled: root.job.owns ? !root.job.stop-disabled : !root.job.run-disabled && !root.run-pending;
