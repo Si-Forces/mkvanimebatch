@@ -733,7 +733,7 @@ export component App inherits Window {
             // The settings sheet of the mode shown (#settings-sheet), over a backdrop that covers the
             // window: a click on it or Esc closes the sheet.
             if root.sheet-open: Rectangle {
-                background: #080c1252;
+                background: Theme.dim;
                 FocusScope {
                     key-pressed(event) => {
                         if event.text == Key.Escape {

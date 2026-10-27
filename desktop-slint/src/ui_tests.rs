@@ -974,7 +974,7 @@ fn every_text_token_meets_wcag_aa_on_every_surface_in_both_themes() {
         // glass-float over what a σ30 blur leaves of the queue behind a pane: the wallpaper, the
         // panes over it and their tints. Text and the small solid shapes (rings, checkboxes)
         // average out into those, and no large solid fill sits behind a pane (the bar's buttons
-        // are below the drawer).
+        // are below the drawer); the modal dimmer is, behind the sheet and a dialog.
         let sharp: Vec<(String, Color)> = texts
             .iter()
             .chain(&walls)
@@ -994,19 +994,47 @@ fn every_text_token_meets_wcag_aa_on_every_surface_in_both_themes() {
                 }
             }
         }
+        // The sheet and a dialog sit under the modal dimmer, the dialog over the sheet under two;
+        // the faked float and glass-float-dim (the panes' `dimmed`) are judged over those too.
+        let dimmed = |behind: &[(String, Color)], times: usize| {
+            let mut out = behind.to_vec();
+            for _ in 0..times {
+                for (name, color) in &mut out {
+                    *name = format!("dim over {name}");
+                    *color = over(theme.get_dim(), *color);
+                }
+            }
+            out
+        };
+        let sharp_all = [sharp.clone(), dimmed(&sharp, 1), dimmed(&sharp, 2)].concat();
+        let blurred_dim = [dimmed(&blurred, 1), dimmed(&blurred, 2)].concat();
+        // The tints drawn on a pane, with the sheet's lock note (warn at 14%, settings.slint).
+        let pane_tints: Vec<(&str, Color)> = tints
+            .iter()
+            .copied()
+            .chain([("warn 14%", theme.get_warn().transparentize(0.86))])
+            .collect();
         for (fill, float, behind) in [
-            ("float", theme.get_float(), &sharp),
+            ("float", theme.get_float(), &sharp_all),
             ("glass-float", theme.get_glass_float(), &blurred),
+            ("glass-float-dim", theme.get_glass_float_dim(), &blurred_dim),
         ] {
             for (under, below) in behind {
                 let pane = over(float, *below);
-                for (on, background) in [
+                let mut backgrounds = vec![
                     (format!("{fill} over {under}"), pane),
                     (
                         format!("glass-hi on {fill} over {under}"),
                         over(theme.get_glass_hi(), pane),
                     ),
-                ] {
+                ];
+                for (tint, tinted) in &pane_tints {
+                    backgrounds.push((
+                        format!("{tint} on {fill} over {under}"),
+                        over(*tinted, pane),
+                    ));
+                }
+                for (on, background) in backgrounds {
                     for (text, color) in texts {
                         pairs.push((text, on.clone(), color, background));
                     }
