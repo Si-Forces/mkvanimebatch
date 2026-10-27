@@ -808,6 +808,50 @@ fn the_window_keys_work_after_reset_removes_itself() {
     app.hide().unwrap();
 }
 
+/// A rescan that resets a mode's rows (every Run forces one) drops the row that had the focus;
+/// the window's key scope takes it, so Esc still closes the drawer. A row of the other mode
+/// keeps the focus.
+#[test]
+fn the_window_keys_work_after_a_reset_drops_the_focused_row() {
+    use slint::platform::Key;
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    let mut state = ViewState::new(None);
+    state.remux.rows = Arc::new(vec![row("Show - 01.mkv"), row("Show - 02.mkv")]);
+    state.remux.empty = None;
+    // One publisher, so a state whose remux rows did not change leaves their model alone.
+    let publisher = SlintPublisher::new(&app);
+    publisher.show(&state);
+    app.show().unwrap();
+    frame(&app);
+    app.global::<Focus>()
+        .invoke_restore("pick:remux:Show - 01.mkv".into());
+    frame(&app);
+    assert_eq!(focused(&app), "pick:remux:Show - 01.mkv");
+
+    // An extract reset leaves the remux row its focus.
+    let mut extract = state.clone();
+    extract.seq += 1;
+    extract.extract.rows = Arc::new(vec![row("Show - 01.mkv")]);
+    extract.extract.empty = None;
+    publisher.show(&extract);
+    frame(&app);
+    assert_eq!(focused(&app), "pick:remux:Show - 01.mkv");
+
+    // A rescan's new rows reset the remux model.
+    let mut rescan = extract.clone();
+    rescan.seq += 1;
+    rescan.remux.rows = Arc::new(vec![row("Show - 01.mkv"), row("Show - 03.mkv")]);
+    publisher.show(&rescan);
+    frame(&app);
+    assert_eq!(focused(&app), "", "the dropped row's key is cleared");
+    app.set_log_open(true);
+    key(&app, Key::Escape);
+    assert!(!app.get_log_open(), "Esc closed the drawer");
+    app.hide().unwrap();
+}
+
 /// Picking "Custom tag…" puts the cursor in the tag field, also when it already shows.
 #[test]
 fn picking_the_custom_tag_focuses_the_tag_field() {

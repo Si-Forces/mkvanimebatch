@@ -363,6 +363,14 @@ export component App inherits Window {
         }
         root.log-open = false;
     }
+    // Gives the focus to the window's key scope, for the host when the control that had it goes
+    // (a row the rescan's reset drops), so Esc and Ctrl+T still reach it. A destroyed control never
+    // runs its `focus-lost`, so its key is cleared here, or a later reset would take the focus
+    // from a field that has it since.
+    public function focus-keys() {
+        Focus.current = "";
+        keys.focus();
+    }
     // Scrolls `mode`'s list so its row `row` heads it.
     public function reveal(mode: Mode, row: int) {
         if mode == Mode.remux {
