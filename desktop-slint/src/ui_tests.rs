@@ -852,6 +852,65 @@ fn the_window_keys_work_after_a_reset_drops_the_focused_row() {
     app.hide().unwrap();
 }
 
+/// A status change that the filter no longer shows (a row done under To do, mid-run) hides the
+/// row with the focus; the window's key scope takes it. A row hidden beside it leaves the focus.
+#[test]
+fn the_window_keys_work_after_a_filter_hides_the_focused_row() {
+    use slint::platform::Key;
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    let mut state = ViewState::new(None);
+    let rows = vec![
+        row("Show - 01.mkv"),
+        row("Show - 02.mkv"),
+        row("Show - 03.mkv"),
+    ];
+    state.remux.rows = Arc::new(rows.clone());
+    state.remux.empty = None;
+    let publisher = SlintPublisher::new(&app);
+    publisher.show(&state);
+    publisher.show_filter(Mode::Remux, QueueFilter::Todo);
+    app.show().unwrap();
+    frame(&app);
+    app.global::<Focus>()
+        .invoke_restore("pick:remux:Show - 02.mkv".into());
+    frame(&app);
+    assert_eq!(focused(&app), "pick:remux:Show - 02.mkv");
+    let done = |mut row: Row| {
+        row.bucket = Some(Bucket::Done);
+        row
+    };
+
+    // Another row done: the focus stays.
+    let mut other = state.clone();
+    other.seq += 1;
+    other.remux.rows = Arc::new(vec![
+        done(rows[0].clone()),
+        rows[1].clone(),
+        rows[2].clone(),
+    ]);
+    publisher.show(&other);
+    frame(&app);
+    assert_eq!(focused(&app), "pick:remux:Show - 02.mkv");
+
+    // The focused row done: the window's keys take it.
+    let mut hidden = other.clone();
+    hidden.seq += 1;
+    hidden.remux.rows = Arc::new(vec![
+        done(rows[0].clone()),
+        done(rows[1].clone()),
+        rows[2].clone(),
+    ]);
+    publisher.show(&hidden);
+    frame(&app);
+    assert_eq!(focused(&app), "");
+    app.set_log_open(true);
+    key(&app, Key::Escape);
+    assert!(!app.get_log_open(), "Esc closed the drawer");
+    app.hide().unwrap();
+}
+
 /// Picking "Custom tag…" puts the cursor in the tag field, also when it already shows.
 #[test]
 fn picking_the_custom_tag_focuses_the_tag_field() {
