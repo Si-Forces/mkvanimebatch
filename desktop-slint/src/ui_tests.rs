@@ -911,6 +911,137 @@ fn the_window_keys_work_after_a_filter_hides_the_focused_row() {
     app.hide().unwrap();
 }
 
+/// Esc closes the open drawer: the window's key scope hears it.
+fn assert_window_keys(app: &App) {
+    app.set_log_open(true);
+    key(app, slint::platform::Key::Escape);
+    assert!(!app.get_log_open(), "Esc closed the drawer");
+}
+
+/// A preset picked from the keyboard is published active: its row is written in place, so it
+/// keeps the focus, and the window's keys still work.
+#[test]
+fn a_preset_picked_from_the_keyboard_keeps_the_focus() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    let state = ViewState::new(None);
+    let publisher = SlintPublisher::new(&app);
+    publisher.show(&state);
+    app.show().unwrap();
+    frame(&app);
+    app.global::<Focus>().invoke_restore("preset:fast".into());
+    frame(&app);
+    assert_eq!(focused(&app), "preset:fast");
+
+    let mut picked = state.clone();
+    picked.seq += 1;
+    picked.remux.draft.preset = Some("fast".into());
+    publisher.show(&picked);
+    frame(&app);
+    assert!(app
+        .get_presets()
+        .iter()
+        .any(|row| row.id == "fast" && row.active));
+    assert_eq!(focused(&app), "preset:fast");
+    assert_window_keys(&app);
+    app.hide().unwrap();
+}
+
+/// A Library whose counts change is written in place, so its focused entry keeps the focus; one
+/// with fewer entries is replaced, and the window's key scope takes the focus.
+#[test]
+fn a_library_update_keeps_a_focused_entry_or_hands_the_focus_on() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    let state = three_releases();
+    let publisher = SlintPublisher::new(&app);
+    publisher.show(&state);
+    app.show().unwrap();
+    frame(&app);
+    app.global::<Focus>().invoke_restore("library:S2".into());
+    frame(&app);
+    assert_eq!(focused(&app), "library:S2");
+
+    let mut rows = state.remux.rows.as_ref().clone();
+    rows.push(Row {
+        release: "S2".into(),
+        ..row("b20")
+    });
+    let mut counted = state.clone();
+    counted.seq += 1;
+    counted.remux.library = presentation::library(Some("/media/Show"), &rows);
+    counted.remux.rows = Arc::new(rows.clone());
+    publisher.show(&counted);
+    frame(&app);
+    only(&app, "S2 21");
+    assert_eq!(focused(&app), "library:S2");
+    assert_window_keys(&app);
+
+    // S3's rows gone: one entry fewer.
+    rows.retain(|row| row.release != "S3");
+    let mut fewer = counted.clone();
+    fewer.seq += 1;
+    fewer.remux.library = presentation::library(Some("/media/Show"), &rows);
+    fewer.remux.rows = Arc::new(rows);
+    publisher.show(&fewer);
+    frame(&app);
+    assert_eq!(focused(&app), "");
+    assert_window_keys(&app);
+    app.hide().unwrap();
+}
+
+/// Enter on the empty card's Open folder…, then the scan: the Scanning card has no button, and
+/// the window's key scope takes the focus.
+#[test]
+fn the_window_keys_work_after_the_card_drops_its_focused_button() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    let state = ViewState::new(None);
+    let publisher = SlintPublisher::new(&app);
+    publisher.show(&state);
+    app.show().unwrap();
+    frame(&app);
+    app.global::<Focus>()
+        .invoke_restore("remux:open-folder".into());
+    frame(&app);
+    assert_eq!(focused(&app), "remux:open-folder");
+
+    let mut scanning = state.clone();
+    scanning.seq += 1;
+    scanning.remux.empty = None;
+    scanning.remux.scan = ScanView::Scanning {
+        directory: "/media/Show".into(),
+    };
+    publisher.show(&scanning);
+    frame(&app);
+    assert_eq!(focused(&app), "");
+    assert_window_keys(&app);
+    app.hide().unwrap();
+}
+
+/// A screen reader's expand on the Log toggle focuses it first, as a click does, and opens the
+/// drawer.
+#[test]
+fn the_log_toggle_expand_action_takes_the_focus_first() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    apply(&app, &ViewState::new(None));
+    app.show().unwrap();
+    frame(&app);
+    app.global::<Focus>().invoke_restore("preset:fast".into());
+    frame(&app);
+    assert_eq!(focused(&app), "preset:fast");
+
+    only(&app, "Log").invoke_accessible_expand_action();
+    assert_eq!(focused(&app), "Log");
+    assert!(app.get_log_open());
+    app.hide().unwrap();
+}
+
 /// Picking "Custom tag…" puts the cursor in the tag field, also when it already shows.
 #[test]
 fn picking_the_custom_tag_focuses_the_tag_field() {

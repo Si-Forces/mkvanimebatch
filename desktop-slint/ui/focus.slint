@@ -86,13 +86,14 @@ export component Pressable inherits Rectangle {
     accessible-enabled: root.enabled;
     accessible-description: root.tip;
     // A screen reader's activation focuses it first, as a click does, so a dialog or the sheet it
-    // opens gives the focus back to it.
-    accessible-action-default => {
+    // opens gives the focus back to it, and a typed field it leaves commits.
+    protected function activate() {
         if root.enabled {
             keys.focus();
             root.clicked();
         }
     }
+    accessible-action-default => { root.activate(); }
 
     // A disabled control is passed over: a programmatic focus would move on to the next one.
     property <int> restore: Focus.restore-serial;

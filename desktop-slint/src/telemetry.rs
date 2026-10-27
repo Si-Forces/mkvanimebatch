@@ -43,7 +43,13 @@ fn spark_commands<'a>(samples: impl ExactSizeIterator<Item = &'a f32>, max: f32)
 /// scaled to its own peak, at least [`DISK_FLOOR`].
 pub(crate) fn map(view: &TelemetryView) -> Telemetry {
     let samples = &view.samples;
-    let disk_max = samples.disk.iter().copied().fold(DISK_FLOOR, f32::max);
+    // Finite only, as `spark_commands` reads the rest as 0: an infinite peak would flatten the line.
+    let disk_max = samples
+        .disk
+        .iter()
+        .copied()
+        .filter(|value| value.is_finite())
+        .fold(DISK_FLOOR, f32::max);
     Telemetry {
         cpu: view.cpu.as_str().into(),
         ram: view.ram.as_str().into(),
@@ -154,6 +160,9 @@ mod tests {
         // Over it: the peak is the top.
         view.samples.disk = VecDeque::from([100.0, 200.0]);
         assert_eq!(map(&view).disk_line, "M0.0 10.0 L64.0 2.0");
+        // A non-finite sample reads 0 and leaves the peak to the others.
+        view.samples.disk = VecDeque::from([100.0, f32::INFINITY, 200.0]);
+        assert_eq!(map(&view).disk_line, "M0.0 10.0 L32.0 18.0 L64.0 2.0");
     }
 
     #[test]

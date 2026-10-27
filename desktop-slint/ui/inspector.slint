@@ -5,6 +5,7 @@ import { ComboBox, LineEdit, ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Pressable, TipCard } from "focus.slint";
 import { LinkButton, RowTone } from "queue.slint";
+import { SectionHead } from "settings.slint";
 
 // One Library entry (.lib-root, .lib-release): the input folder, then each other release.
 export struct LibraryItem {
@@ -94,14 +95,6 @@ export component LibraryEntry inherits Pressable {
             accessible-role: none;
         }
     }
-}
-
-// A section heading (.insp-section h4).
-component SectionHead inherits Text {
-    color: Theme.mute;
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.77px;
 }
 
 // A path as crumbs (.crumbs): each crumb but the last followed by "›" (the host's), the last in
