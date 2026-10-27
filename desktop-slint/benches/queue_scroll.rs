@@ -36,7 +36,9 @@
 //! first presented after it). The churn's clock and progress stack redraw the bottom bar (P5).
 //! Budget (#135): publication p99 < 4 ms, and no frame over 16.7 ms, read as no render over
 //! 16.7 ms and no missed vsync. ADR-0017 decision 8's glass gate (`gate_glass`): the glass third
-//! at 50 fps or more on average and 45 fps or more at its 1% low. The line ends with PASS or FAIL
+//! at 50 fps or more on average and 45 fps or more at its 1% low. Decision 8 defines it on the
+//! real blur, so its verdict is that gate only with `MKV_BENCH_BLUR=1` (`glass_frame=blur:1` in the line);
+//! without, it judges the faked glass the app ships by the same numbers. The line ends with PASS or FAIL
 //! for each.
 
 // Only the hop's path is driven here; the rest of these host modules is unused. `clippy
@@ -308,8 +310,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let app = App::new()?;
     // The faked glass the app draws (appearance.rs REAL_BLUR off); MKV_BENCH_BLUR=1 draws the real
     // blur instead, for P9's gate.
-    app.global::<Theme>()
-        .set_glass(std::env::var_os("MKV_BENCH_BLUR").is_some_and(|v| v == "1"));
+    let blur = std::env::var_os("MKV_BENCH_BLUR").is_some_and(|v| v == "1");
+    app.global::<Theme>().set_glass(blur);
     publisher::install_models(&app);
     app.window().set_maximized(true);
 
@@ -468,7 +470,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     sorted[((sorted.len() - 1) as f64 * 0.99).round() as usize] < 4.0
                 };
                 println!(
-                    "BENCH session={} renderer=skia-opengl rows={ROWS} publications={} {} {} reset_ms={reset:.2} filter_ms={filter:.2} run_reset_ms={run_reset_ms:.2} run_reset_frame=render:{reset_render:.2},interval:{reset_interval:.2} frames={} {} over_16.7ms={over_frame} over_25ms={over_vsync} {} glass_frame=frames:{},render_max:{glass_render_max:.2},over_25ms:{glass_over_vsync},avg_fps:{glass_avg:.1},low1_fps:{glass_low:.1} budget_pub={} budget_frame={} gate_glass={}",
+                    "BENCH session={} renderer=skia-opengl rows={ROWS} publications={} {} {} reset_ms={reset:.2} filter_ms={filter:.2} run_reset_ms={run_reset_ms:.2} run_reset_frame=render:{reset_render:.2},interval:{reset_interval:.2} frames={} {} over_16.7ms={over_frame} over_25ms={over_vsync} {} glass_frame=blur:{},frames:{},render_max:{glass_render_max:.2},over_25ms:{glass_over_vsync},avg_fps:{glass_avg:.1},low1_fps:{glass_low:.1} budget_pub={} budget_frame={} gate_glass={}",
                     if std::env::var_os("WAYLAND_DISPLAY").is_some() { "wayland" } else { "x11" },
                     hops.len(),
                     summary("map", &mut maps),
@@ -476,6 +478,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     intervals.len(),
                     summary("interval", &mut intervals),
                     summary("render", &mut renders),
+                    u8::from(blur),
                     glass_renders.len(),
                     verdict(pub_budget),
                     verdict(render_max <= 16.7 && over_vsync == 0),
