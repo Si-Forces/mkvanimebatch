@@ -127,8 +127,9 @@ pub fn save_software(dir: &Path) -> io::Result<()> {
     save_file(dir, CHOICE_FILE, "software\n")
 }
 
-/// Writes `text` to `dir/name` through a temporary file renamed over it, so a crash mid-write
-/// leaves the old file whole, never an empty or partial one. The temporary file is this process's
+/// Writes `text` to `dir/name` through a temporary file renamed over it, so the app crashing or
+/// closing mid-write leaves the old file whole, never an empty or partial one (nothing is synced
+/// to disk, so a power loss may not). The temporary file is this process's
 /// own, so two instances saving at once never write into each other's; the last rename wins.
 pub fn save_file(dir: &Path, name: &str, text: &str) -> io::Result<()> {
     std::fs::create_dir_all(dir)?;

@@ -3,6 +3,7 @@
 // (desktop-slint/src/run_log.rs) maps each line's display text and tone, and the badge's text.
 import { GlassPane, Theme } from "theme.slint";
 import { Pressable } from "focus.slint";
+import { LinkButton } from "queue.slint";
 import { ListView } from "std-widgets.slint";
 
 // A line's kind as the console colours it (log-view.js KIND_CLASS): a note is plain.
@@ -44,7 +45,7 @@ export component LogToggle inherits Pressable {
     accessible-description: badge.description;
     accessible-expandable: true;
     accessible-expanded: open;
-    accessible-action-expand => { root.clicked(); }
+    accessible-action-expand => { root.activate(); }
     row := HorizontalLayout {
         alignment: center;
         spacing: 6px;
@@ -82,23 +83,6 @@ export component LogToggle inherits Pressable {
                 accessible-role: none;
             }
         }
-    }
-}
-
-// A text button in the drawer's head (.link-btn).
-component DrawerLink inherits Pressable {
-    in property <string> text;
-    width: label.preferred-width + 8px;
-    height: 24px;
-    border-radius: 6px;
-    accessible-label: text;
-    label := Text {
-        text: root.text;
-        color: Theme.accent;
-        font-size: 12px;
-        font-weight: 600;
-        vertical-alignment: center;
-        accessible-role: none;
     }
 }
 
@@ -220,14 +204,14 @@ export component LogDrawer inherits GlassPane {
                 overflow: elide;
                 horizontal-stretch: 1;
             }
-            copy := DrawerLink {
+            copy := LinkButton {
                 text: root.copy-label;
                 // Its label reads "Copied" for a while after a Copy.
                 focus-key: "copy";
                 tip: "Copies the log with its real file paths, for bug reports";
                 clicked => { root.copy(); }
             }
-            close := DrawerLink {
+            close := LinkButton {
                 text: "Close";
                 clicked => { root.close(); }
             }

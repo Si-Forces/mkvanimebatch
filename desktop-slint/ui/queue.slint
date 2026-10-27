@@ -522,7 +522,9 @@ export component QueuePane inherits Rectangle {
     // New rows (another folder) make new instances, and the old one never unpins: the header shows
     // only while the row it names still belongs to that release.
     property <PinnedHead> pinned-head;
-    // The pinned header's text (empty for none shown) and count, for the host's tests.
+    // The pinned header's text (empty for none shown) and count, for the host's tests. An index
+    // past the rows (a smaller folder's) reads a default row, whose empty head never matches:
+    // `pin` keeps only a non-empty head.
     out property <string> pinned-text: !root.head.card-shown && root.list-scroll < 0
         && root.pinned-head.row >= 0 && root.rows[root.pinned-head.row].head == root.pinned-head.text
         ? root.pinned-head.text : "";
