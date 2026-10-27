@@ -22,10 +22,10 @@ export global Theme {
     in-out property <bool> reduce-motion;
     callback effects-changed();
 
-    // Whether the floating panes (GlassPane) draw the real backdrop blur: the host's, true on Skia
-    // OpenGL, false on the software renderer (which cannot blur) and under Reduce transparency.
-    // Without it they draw the faked .glass, as ADR-0017 decision 3 asks of the fallback.
-    in-out property <bool> glass: true;
+    // Whether the floating panes (GlassPane) draw the real backdrop blur: the host's, false while
+    // its REAL_BLUR is off (appearance.rs), on the software renderer (which cannot blur) and under
+    // Reduce transparency. Without it they draw the faked .glass, as style.css does.
+    in-out property <bool> glass: false;
     // The blur's strength: Skia's sigma is this length in physical pixels, so 30px is the spike's
     // σ30 (ADR-0017's glass gate) at scale 1, as CSS's blur(30px).
     out property <length> glass-blur: 30px;
