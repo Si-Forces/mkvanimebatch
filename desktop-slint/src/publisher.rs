@@ -383,16 +383,17 @@ impl Publisher for SlintPublisher {
     }
 }
 
-/// Whether `current` (`Focus.current`) is a control of one of `mode`'s rows: queue.slint keys them
-/// `<control>:<mode>:<row id>`.
-fn holds_row_focus(current: &str, mode: Mode) -> bool {
+/// The id of `mode`'s row whose control has the focus, from `current` (`Focus.current`):
+/// queue.slint keys a row's controls `<control>:<mode>:<row id>`.
+fn focused_row(current: &str, mode: Mode) -> Option<&str> {
     let name = match mode {
         Mode::Remux => "remux:",
         Mode::Extract => "extract:",
     };
-    current.split_once(':').is_some_and(|(control, rest)| {
-        matches!(control, "check" | "pick" | "up" | "down") && rest.starts_with(name)
-    })
+    let (control, rest) = current.split_once(':')?;
+    matches!(control, "check" | "pick" | "up" | "down")
+        .then(|| rest.strip_prefix(name))
+        .flatten()
 }
 
 /// Writes `mode`'s update: its header when it changed, its rows into the mode's model, its Library
@@ -433,18 +434,27 @@ fn apply(app: &App, mode: Mode, update: Update) {
     }
     if let Some(model) = rows.as_any().downcast_ref::<VecModel<QueueRow>>() {
         match update.rows {
+            // A row whose controls go takes the focus with it, and Slint then delivers no key:
+            // the window's key scope takes it, so Esc and Ctrl+T still reach it. A reset drops
+            // every row (every Run's rescan resets them); a patch hides a row the filter no longer
+            // shows (a status change under To do, mid-run).
             Some(RowPatch::Reset(rows)) => {
-                // The reset drops the row with the focus (every Run's rescan resets the rows):
-                // the window's key scope takes it, so Esc and Ctrl+T still reach it.
-                let dropped = holds_row_focus(&app.global::<Focus>().get_current(), mode);
+                let dropped = focused_row(&app.global::<Focus>().get_current(), mode).is_some();
                 model.set_vec(rows);
                 if dropped {
                     app.invoke_focus_keys();
                 }
             }
             Some(RowPatch::Rows(rows)) => {
+                let current = app.global::<Focus>().get_current();
+                let focused = focused_row(&current, mode);
+                let mut dropped = false;
                 for (index, row) in rows {
+                    dropped |= !row.shown && focused == Some(row.id.as_str());
                     model.set_row_data(index, row);
+                }
+                if dropped {
+                    app.invoke_focus_keys();
                 }
             }
             None => {}
