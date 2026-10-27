@@ -10,7 +10,7 @@ use crate::queue::{map_rows, ModeList, RowPatch, Update};
 use crate::run_log::{self, Console, LogPatch};
 use crate::settings::{self, Edits, BITRATES};
 use crate::telemetry;
-use mkv_anime_batch_slint_ui::{App, Mode, QueueFilter, QueueRow};
+use mkv_anime_batch_slint_ui::{App, Focus, Mode, QueueFilter, QueueRow};
 use mkv_core::pipeline::PipelineMode;
 use mkv_desktop_core::actor::{Publisher, ViewState};
 use mkv_desktop_core::job::JobDone;
@@ -383,6 +383,18 @@ impl Publisher for SlintPublisher {
     }
 }
 
+/// Whether `current` (`Focus.current`) is a control of one of `mode`'s rows: queue.slint keys them
+/// `<control>:<mode>:<row id>`.
+fn holds_row_focus(current: &str, mode: Mode) -> bool {
+    let name = match mode {
+        Mode::Remux => "remux:",
+        Mode::Extract => "extract:",
+    };
+    current.split_once(':').is_some_and(|(control, rest)| {
+        matches!(control, "check" | "pick" | "up" | "down") && rest.starts_with(name)
+    })
+}
+
 /// Writes `mode`'s update: its header when it changed, its rows into the mode's model, its Library
 /// and Inspector when they changed, then scrolls to a revealed release. A card
 /// staged since the last hop puts the list back at the top, as the webview's `clearList` does: the
@@ -421,7 +433,15 @@ fn apply(app: &App, mode: Mode, update: Update) {
     }
     if let Some(model) = rows.as_any().downcast_ref::<VecModel<QueueRow>>() {
         match update.rows {
-            Some(RowPatch::Reset(rows)) => model.set_vec(rows),
+            Some(RowPatch::Reset(rows)) => {
+                // The reset drops the row with the focus (every Run's rescan resets the rows):
+                // the window's key scope takes it, so Esc and Ctrl+T still reach it.
+                let dropped = holds_row_focus(&app.global::<Focus>().get_current(), mode);
+                model.set_vec(rows);
+                if dropped {
+                    app.invoke_focus_keys();
+                }
+            }
             Some(RowPatch::Rows(rows)) => {
                 for (index, row) in rows {
                     model.set_row_data(index, row);
