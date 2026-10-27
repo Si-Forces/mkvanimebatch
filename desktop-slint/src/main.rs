@@ -174,7 +174,7 @@ fn run(
     );
     intents::wire(&app, core.clone(), runtime.handle().clone(), publisher);
     // A packaged Windows build has no console, so the log file is its only output: say once, in
-    // the window, that it could not be opened (ADR-0017 decision 9). Elsewhere stderr has it.
+    // the window, that there is none (ADR-0017 decision 9). Elsewhere stderr has it.
     if let Some(text) = log_failed.filter(|_| cfg!(target_os = "windows")) {
         app.invoke_notice(diagnostics::LOG_FAILED_TITLE.into(), text.into());
     }

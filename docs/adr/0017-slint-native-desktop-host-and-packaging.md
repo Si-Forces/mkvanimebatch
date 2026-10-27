@@ -132,7 +132,7 @@ Both flicker while resizing under Xwayland and are smooth on native Wayland. X11
 
 ## Amendment — 2026-10-27 (the faked glass ships until the gate)
 
-**The real blur hides what the glass should show.** P6 (#139) drew Slint's `backdrop-blur` (σ30, Skia OpenGL) on the Log drawer, the settings sheet and the dialog card. Over the queue it smears the rows into one colour, where the webview's faked glass (`--float` at 95%, no blur) lets them show through sharp; the maintainer preferred the webview's look. It also missed decision 8's glass gate on the target laptop: about 51.5 fps on average and 32–35 fps at the 1% low, against at least 50 and 45, while the same scene without the blur drew 57–58 and 40–44 (#142).
+**The real blur hides what the glass should show.** P6 (#139) drew Slint's `backdrop-blur` (σ30, Skia OpenGL) on the Log drawer, the settings sheet and the dialog card. Over the queue it smears the rows into one colour, where the webview's faked glass (`--float` at 95%, no blur) lets them show through sharp; the maintainer preferred the webview's look. It also missed decision 8's glass numbers on the target laptop, in the FrameStats bench's provisional read: about 51.5 fps on average and 32–35 fps at the 1% low, against at least 50 and 45, while the same scene without the blur drew 57–58 and 40–44 (#142).
 
 **Decision.** The Slint host ships the faked glass on every renderer, as the webview does and as decision 3 already asks of the software fallback. The real blur stays in the code behind one switch (`REAL_BLUR` in `desktop-slint/src/appearance.rs`, off) with its own thinner fills and their contrast tests, and the FrameStats bench draws it with `MKV_BENCH_BLUR=1`. P9's gate (#142) decides whether it comes back, on Slint 1.19.
 

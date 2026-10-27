@@ -27,7 +27,8 @@ const MAX_LOG_BYTES: u64 = 1_048_576;
 
 /// Installs the app's subscriber as the global default. A subscriber that is already set is left
 /// alone. Never fails: with no usable log directory the output is stderr only. Returns what the
-/// window says when the log file could not be opened (ADR-0017 decision 9), naming its path.
+/// window says when there is no log file (ADR-0017 decision 9): the file that could not be opened,
+/// naming its path, or no log directory at all.
 pub fn init(log_dir: Option<&Path>) -> Option<String> {
     let (dispatch, failed) = build_dispatch(
         log_dir,
@@ -39,8 +40,8 @@ pub fn init(log_dir: Option<&Path>) -> Option<String> {
     failed
 }
 
-/// The title of the in-window notice that the log file could not be opened.
-pub const LOG_FAILED_TITLE: &str = "Could not open the log file";
+/// The title of the in-window notice that there is no log file this session.
+pub const LOG_FAILED_TITLE: &str = "Could not save Engine Diagnostics";
 
 /// The notice's text: where the log file is and why it could not be opened.
 fn log_failed_text(dir: &Path, error: &io::Error) -> String {
@@ -49,6 +50,10 @@ fn log_failed_text(dir: &Path, error: &io::Error) -> String {
         dir.join(LOG_FILE_NAME).display()
     )
 }
+
+/// The notice's text when the OS names no local data directory, so there is no log file at all.
+const NO_LOG_DIR_TEXT: &str =
+    "The log directory could not be determined. Engine Diagnostics are not saved this session.";
 
 /// The log directory, as Tauri's `app_log_dir` computes it: `<local data>/<identifier>/logs`
 /// (`$XDG_DATA_HOME` on Linux, `%LOCALAPPDATA%` on Windows). `None` when the OS names none.
@@ -95,7 +100,7 @@ where
 /// - File layer: see [`file_layer`]. Skipped, with a warning, when the file cannot be opened.
 /// - Stderr layer: level and message only, written to `stderr` and colored only when `ansi`.
 ///
-/// Also returns the notice's text when the file could not be opened.
+/// Also returns the notice's text when the file could not be opened, or there is no directory.
 fn build_dispatch<W>(
     log_dir: Option<&Path>,
     filter: EnvFilter,
@@ -105,10 +110,28 @@ fn build_dispatch<W>(
 where
     W: for<'a> MakeWriter<'a> + Send + Sync + 'static,
 {
-    let (file_layer, file_error) = match log_dir.map(|dir| (dir, file_layer(dir))) {
-        Some((_, Ok(layer))) => (Some(layer), None),
-        Some((dir, Err(error))) => (None, Some((dir, error))),
-        None => (None, None),
+    // The file layer, or the warning for stderr and the window's notice.
+    let (file_layer, failed) = match log_dir {
+        Some(dir) => match file_layer(dir) {
+            Ok(layer) => (Some(layer), None),
+            Err(error) => (
+                None,
+                Some((
+                    format!(
+                        "Cannot open the log file in {}: {error}; logging to stderr only",
+                        dir.display()
+                    ),
+                    log_failed_text(dir, &error),
+                )),
+            ),
+        },
+        None => (
+            None,
+            Some((
+                "No log directory; logging to stderr only".to_owned(),
+                NO_LOG_DIR_TEXT.to_owned(),
+            )),
+        ),
     };
     let stderr_layer = fmt::layer()
         .with_writer(stderr)
@@ -122,14 +145,9 @@ where
             .with(file_layer)
             .with(stderr_layer),
     );
-    let failed = file_error.map(|(dir, error)| {
-        tracing::dispatcher::with_default(&dispatch, || {
-            tracing::warn!(
-                "Cannot open the log file in {}: {error}; logging to stderr only",
-                dir.display()
-            );
-        });
-        log_failed_text(dir, &error)
+    let failed = failed.map(|(warning, notice)| {
+        tracing::dispatcher::with_default(&dispatch, || tracing::warn!("{warning}"));
+        notice
     });
     (dispatch, failed)
 }
@@ -292,9 +310,11 @@ mod tests {
         );
         let (_, notice) = build_dispatch(Some(dir.path()), EnvFilter::new("warn"), io::sink, false);
         assert_eq!(notice, None);
-        // No directory at all behaves the same, minus the warning.
+        // No directory at all falls back too, with its own warning and notice.
         let stderr = log_in(None, "still logged");
-        assert!(!stderr.contains("Cannot open"), "{stderr}");
+        assert!(stderr.contains("No log directory"), "{stderr}");
         assert!(stderr.contains("still logged"), "{stderr}");
+        let (_, notice) = build_dispatch(None, EnvFilter::new("warn"), io::sink, false);
+        assert_eq!(notice.as_deref(), Some(NO_LOG_DIR_TEXT));
     }
 }
