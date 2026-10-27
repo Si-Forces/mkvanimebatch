@@ -1,7 +1,8 @@
 //! The appearance choices (P6): the theme picked with the toggle or Ctrl+T (theme.js), or in the
-//! title bar's Appearance menu, whose System follows the system's live again; and the in-app reduced effects that stand in for the webview's
-//! `prefers-reduced-transparency` and `prefers-reduced-motion` (Q105). All three are saved together
-//! in `<config dir>/com.mkvanimebatch.desktop/appearance` (Q96), as `key=value` lines. The webview's
+//! title bar's Appearance menu, whose System follows the system's scheme live again; and the in-app
+//! reduced effects that stand in for the webview's `prefers-reduced-transparency` and
+//! `prefers-reduced-motion` (Q105). All three are saved together in
+//! `<config dir>/com.mkvanimebatch.desktop/appearance` (Q96), as `key=value` lines. The webview's
 //! `mkv-theme` localStorage key is not migrated.
 
 use crate::renderer::Renderer;
