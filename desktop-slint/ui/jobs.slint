@@ -345,7 +345,7 @@ export component ConfirmDialog inherits Rectangle {
     }
     changed serial => { root.focus-first(); }
     init => { root.focus-first(); }
-    background: #080c1252;
+    background: Theme.dim;
     // Takes the clicks meant for the window behind.
     TouchArea { }
     FocusScope {
@@ -372,6 +372,7 @@ export component ConfirmDialog inherits Rectangle {
         }
         // .modal-card, 12% of the window below the overlay's 36px padding.
         card := GlassPane {
+            dimmed: true;
             y: 36px + parent.height * 0.12;
             width: min(400px, parent.width - 32px);
             // At most down to the overlay's bottom padding: a long text elides, so OK stays in

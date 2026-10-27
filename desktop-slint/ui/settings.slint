@@ -447,6 +447,7 @@ component Divider inherits Rectangle {
 // One mode's settings sheet (.sheet): the head with Done, then the sections, which scroll. The
 // window shows it over a backdrop (app.slint).
 export component SettingsSheet inherits GlassPane {
+    dimmed: true;
     in property <string> title;
     in property <bool> remux;
     in-out property <DraftForm> form;
