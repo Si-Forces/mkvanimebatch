@@ -4,7 +4,8 @@
 //! `set_row_data`); the list scrolls 6 px per frame for 30 s after a 3 s warm-up, on Skia OpenGL,
 //! maximized. P6's per-frame content is drawn too: the telemetry sparklines take a synthetic
 //! sample every second (the core's busy cadence), the sticky release head pins as the rows
-//! scroll, and the glass Log drawer, with its real backdrop blur, is open over the scrolling list
+//! scroll, and the glass Log drawer (faked as the app draws it; `MKV_BENCH_BLUR=1` for the real
+//! backdrop blur) is open over the scrolling list
 //! for the window's middle third (`glass_frame` is that third's render max, missed vsyncs, average
 //! fps and 1% low fps, the last two as the spike's FrameStats counts them). Prints one `BENCH` line
 //! and exits.
@@ -12,6 +13,7 @@
 //! ```text
 //! cargo bench -p mkv-anime-batch-slint --bench queue_scroll
 //! env -u WAYLAND_DISPLAY cargo bench -p mkv-anime-batch-slint --bench queue_scroll   # Xwayland
+//! MKV_BENCH_BLUR=1 cargo bench -p mkv-anime-batch-slint --bench queue_scroll          # real blur
 //! ```
 //!
 //! Each `cargo bench` builds the UI crate again (slint-build watches a `slint-project.json` that
@@ -304,8 +306,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         .renderer_name("skia-opengl".into())
         .select()?;
     let app = App::new()?;
-    // The renderer's glass flag as the app sets it on OpenGL: the panes draw the real blur.
-    app.global::<Theme>().set_glass(true);
+    // The faked glass the app draws (appearance.rs REAL_BLUR off); MKV_BENCH_BLUR=1 draws the real
+    // blur instead, for P9's gate.
+    app.global::<Theme>()
+        .set_glass(std::env::var_os("MKV_BENCH_BLUR").is_some_and(|v| v == "1"));
     publisher::install_models(&app);
     app.window().set_maximized(true);
 

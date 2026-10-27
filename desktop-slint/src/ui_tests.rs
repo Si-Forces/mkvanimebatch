@@ -1474,9 +1474,9 @@ fn the_toggle_and_ctrl_t_flip_the_theme_and_save_the_choice() {
 }
 
 /// The sheet's two reduced effects apply at once and are saved with the theme: Reduce
-/// transparency solidifies the panes and drops the blur (the Log drawer's reads `Theme.glass`),
-/// Reduce motion stops the spinners. The software renderer draws no blur, but still the faked glass
-/// (a translucent float).
+/// transparency solidifies the panes, Reduce motion stops the spinners. The real blur is off
+/// (`appearance::REAL_BLUR`), so OpenGL draws the faked glass (a translucent float) as the software
+/// renderer does; the panes still follow `Theme.glass` (the Log drawer's blur reads it).
 #[test]
 fn the_reduced_effects_apply_at_once_and_are_saved() {
     use crate::appearance::{self, Appearance};
@@ -1489,10 +1489,13 @@ fn the_reduced_effects_apply_at_once_and_are_saved() {
         .set_size(slint::LogicalSize::new(920.0, 1100.0));
     appearance::wire(&app, Some(dir.path().into()), Renderer::OpenGl);
     let theme = app.global::<Theme>();
-    assert!(theme.get_glass());
-    assert!(theme.get_float().alpha() < 255);
-    // The panes follow `Theme.glass`: the drawer draws the real blur.
+    assert!(!theme.get_glass());
+    assert!(theme.get_float().alpha() < 255, "the faked glass");
+    assert_eq!(app.get_log_blur(), 0.0);
+    // The panes follow `Theme.glass`: set, the drawer draws the real blur.
+    theme.set_glass(true);
     assert!(app.get_log_blur() > 0.0);
+    theme.set_glass(false);
     apply(&app, &ViewState::new(None));
     app.show().unwrap();
 
@@ -1516,8 +1519,7 @@ fn the_reduced_effects_apply_at_once_and_are_saved() {
         }
     );
     only(&app, "Reduce transparency (solid panes)").invoke_accessible_default_action();
-    assert!(theme.get_glass());
-    assert!(app.get_log_blur() > 0.0);
+    assert!(theme.get_float().alpha() < 255, "the faked glass again");
     app.hide().unwrap();
 
     // A restart on the software renderer keeps the saved effects and draws no glass.

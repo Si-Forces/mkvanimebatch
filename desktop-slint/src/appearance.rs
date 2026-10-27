@@ -79,12 +79,18 @@ impl Appearance {
     }
 
     /// `Theme.glass`: whether the panes draw the real backdrop blur, on the GPU renderer unless
-    /// transparency is reduced. Otherwise they draw the faked glass (ADR-0017 decision 3), solid
-    /// under Reduce transparency through the theme's tokens.
+    /// transparency is reduced, and only while [`REAL_BLUR`] is on. Otherwise they draw the faked
+    /// glass (ADR-0017 decision 3), solid under Reduce transparency through the theme's tokens.
     pub(crate) fn glass(&self, renderer: Renderer) -> bool {
-        renderer == Renderer::OpenGl && !self.reduce_transparency
+        REAL_BLUR && renderer == Renderer::OpenGl && !self.reduce_transparency
     }
 }
+
+/// The real backdrop blur, off: the maintainer chose the webview's look on 2026-10-27, the faked
+/// glass whose rows show through sharp, where a σ30 blur smears them into one colour; it also
+/// missed ADR-0017 decision 8's 1% low on the HD 4000 (#142). P9's gate decides whether it comes
+/// back; the bench draws it with `MKV_BENCH_BLUR=1`.
+const REAL_BLUR: bool = false;
 
 /// Applies `appearance` to the window's theme. Call it before the first frame: a picked theme
 /// then pins `StylePalette.color-scheme` from the start, so the system's never shows first.
@@ -231,12 +237,12 @@ mod tests {
     }
 
     #[test]
-    fn the_glass_needs_the_gpu_and_full_transparency() {
+    fn the_glass_needs_the_real_blur_the_gpu_and_full_transparency() {
         let reduced = Appearance {
             reduce_transparency: true,
             ..Appearance::default()
         };
-        assert!(Appearance::default().glass(Renderer::OpenGl));
+        assert_eq!(Appearance::default().glass(Renderer::OpenGl), REAL_BLUR);
         assert!(!Appearance::default().glass(Renderer::Software));
         assert!(!reduced.glass(Renderer::OpenGl));
         assert!(!reduced.glass(Renderer::Software));
