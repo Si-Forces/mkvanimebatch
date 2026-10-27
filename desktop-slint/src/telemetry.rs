@@ -22,7 +22,7 @@ fn spark_commands<'a>(samples: impl ExactSizeIterator<Item = &'a f32>, max: f32)
     if count < 2 {
         return String::new();
     }
-    // At most SPARK_SAMPLES (40) points: exact in f32.
+    // At most the core's `telemetry::SPARK_SAMPLES` points, far below 2^24: exact in f32.
     #[allow(clippy::cast_precision_loss)]
     let step = SPARK_WIDTH / (count - 1) as f32;
     let mut commands = String::with_capacity(count * 12);

@@ -116,6 +116,8 @@ component ReorderButton inherits Pressable {
     height: 18px;
     border-radius: 5px;
     background: self.hovered && self.enabled ? Theme.sel : transparent;
+    // Dimmed while locked, as the other buttons are.
+    opacity: self.enabled ? 1 : 0.5;
 
     Path {
         x: (parent.width - self.width) / 2;
@@ -136,13 +138,15 @@ component ReorderButton inherits Pressable {
 component GroupHead inherits Rectangle {
     in property <string> text;
     in property <int> count;
-    // The copy pinned at the list's top: square at the top edge, and a click on it reaches no
-    // row. Only the row's own header is read out (its instance's label).
+    // The copy pinned at the list's top: a click on it reaches no row. Only the row's own header
+    // is read out (its instance's label).
     in property <bool> pinned;
     height: 30px;
-    border-radius: 10px;
-    border-top-left-radius: self.pinned ? 0px : 10px;
-    border-top-right-radius: self.pinned ? 0px : 10px;
+    // Square at the top, as style.css's `border-radius: 0 0 10px 10px`.
+    border-top-left-radius: 0px;
+    border-top-right-radius: 0px;
+    border-bottom-left-radius: 10px;
+    border-bottom-right-radius: 10px;
     if root.pinned: TouchArea { }
     background: Theme.head;
     HorizontalLayout {
@@ -171,7 +175,8 @@ component GroupHead inherits Rectangle {
 }
 
 // The release header pinned at the list's top: its text and count, none when `text` is empty;
-// `y`, the place of the row that pins it, so a row laid out anew reports it again; `row`, its
+// `y`, the place of the row that pins it, so a row laid out anew reports it again (without it
+// a scroll that brings back the same text, count and row index pins nothing: tested); `row`, its
 // index in the rows, so a header whose row was replaced (another folder) is no longer shown.
 struct PinnedHead {
     text: string,
@@ -521,7 +526,7 @@ export component QueuePane inherits Rectangle {
     out property <string> pinned-text: !root.head.card-shown && root.list-scroll < 0
         && root.pinned-head.row >= 0 && root.rows[root.pinned-head.row].head == root.pinned-head.text
         ? root.pinned-head.text : "";
-    out property <int> pinned-count: root.pinned-head.count;
+    out property <int> pinned-count: root.pinned-text == "" ? 0 : root.pinned-head.count;
     property <int> pinned-by: -1;
     property <int> rows-made;
     function pin(instance: int, head: PinnedHead) {
@@ -728,6 +733,8 @@ export component QueuePane inherits Rectangle {
                     alignment: center;
                     padding-top: 6px;
                     AccentButton {
+                        // Not its label, which the Library's Open folder… has too.
+                        focus-key: root.name + ":open-folder";
                         text: root.head.card-action;
                         enabled: !root.locked;
                         clicked => { root.open-folder(); }

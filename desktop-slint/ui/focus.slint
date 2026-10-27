@@ -7,7 +7,8 @@ import { Theme } from "theme.slint";
 export global Focus {
     // The last input was a key, or a Tab moved the focus: the focused control draws its ring, as
     // `:focus-visible` does. The window's key scope sets it on a key (not a modifier alone, nor a
-    // shortcut); a left press on a control, or on the sheet's backdrop, clears it.
+    // shortcut); a left press anywhere clears it: on a control or the sheet's backdrop here, and
+    // anywhere in the window from the host's winit event filter (main.rs `watch_window`).
     in-out property <bool> keyboard;
     // The `focus-key` of the Pressable with the focus; empty when none of them has it.
     in-out property <string> current;
@@ -41,16 +42,20 @@ export component FocusRing inherits Rectangle {
 // A tooltip's card with plain text: a `Tooltip`'s own `text` is markdown.
 export component TipCard inherits Rectangle {
     in property <string> text;
-    width: tip-text.preferred-width + 16px;
+    // At most 320px wide: a longer text (a run's title with its path) wraps, anywhere in a path.
+    width: min(tip-text.preferred-width + 16px, 320px);
     height: tip-text.preferred-height + 10px;
     border-radius: 6px;
     background: Theme.float;
     border-width: 1px;
     border-color: Theme.sep;
     tip-text := Text {
+        x: 8px;
+        width: parent.width - 16px;
         text: root.text;
         color: Theme.fg;
         font-size: 12px;
+        wrap: word-wrap;
     }
 }
 
@@ -110,8 +115,10 @@ export component Pressable inherits Rectangle {
                 Focus.current = "";
             }
         }
+        // Return repeats while held, as on a browser's button; Space activates once a press, as
+        // the browser's does on its release.
         key-pressed(event) => {
-            if event.text == Key.Return || event.text == Key.Space {
+            if event.text == Key.Return || (event.text == Key.Space && !event.repeat) {
                 root.clicked();
                 return accept;
             }

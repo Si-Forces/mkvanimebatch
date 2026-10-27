@@ -269,9 +269,12 @@ component DraftEdit inherits Rectangle {
     function grab() {
         if Sheet.focus-key == root.key && root.key != "" {
             edit.focus();
-            // A field made with the focus reports no change of it.
-            Sheet.enter(root.key);
-            Sheet.reveal(root.absolute-position.y, root.height);
+            // A field made with the focus reports no change of it. A disabled one passes the
+            // focus on, and the control that took it reported its own key.
+            if edit.has-focus {
+                Sheet.enter(root.key);
+                Sheet.reveal(root.absolute-position.y, root.height);
+            }
         }
     }
     edit := LineEdit {

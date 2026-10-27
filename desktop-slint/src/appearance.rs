@@ -78,9 +78,9 @@ impl Appearance {
         crate::renderer::save_file(dir, FILE, &self.text())
     }
 
-    /// `Theme.glass`: whether the panes may draw a real backdrop blur (P7), on the GPU renderer
-    /// unless transparency is reduced. The faked glass draws on both renderers (ADR-0017
-    /// decision 3); Reduce transparency makes it solid through the theme's tokens.
+    /// `Theme.glass`: whether the panes draw the real backdrop blur, on the GPU renderer unless
+    /// transparency is reduced. Otherwise they draw the faked glass (ADR-0017 decision 3), solid
+    /// under Reduce transparency through the theme's tokens.
     pub(crate) fn glass(&self, renderer: Renderer) -> bool {
         renderer == Renderer::OpenGl && !self.reduce_transparency
     }
@@ -147,21 +147,23 @@ pub(crate) fn wire(app: &App, config: Option<PathBuf>, renderer: Renderer) {
     }
 
     let theme = app.global::<Theme>();
-    let (window, state, dir) = (app.as_weak(), Rc::clone(&current), config.clone());
-    theme.on_toggle(move || {
-        let Some(app) = window.upgrade() else {
-            return;
-        };
-        let theme = app.global::<Theme>();
-        let dark = !theme.get_dark();
-        theme.invoke_set_dark(dark);
-        pin_window_theme(&app, dark);
-        let appearance = Appearance {
-            dark: Some(dark),
-            ..state.get()
-        };
-        state.set(appearance);
-        save(dir.as_deref(), &appearance);
+    theme.on_toggle({
+        let (window, current, dir) = (app.as_weak(), Rc::clone(&current), config.clone());
+        move || {
+            let Some(app) = window.upgrade() else {
+                return;
+            };
+            let theme = app.global::<Theme>();
+            let dark = !theme.get_dark();
+            theme.invoke_set_dark(dark);
+            pin_window_theme(&app, dark);
+            let appearance = Appearance {
+                dark: Some(dark),
+                ..current.get()
+            };
+            current.set(appearance);
+            save(dir.as_deref(), &appearance);
+        }
     });
     let window = app.as_weak();
     theme.on_effects_changed(move || {

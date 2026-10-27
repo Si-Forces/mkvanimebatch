@@ -22,10 +22,13 @@ export global Theme {
     in-out property <bool> reduce-motion;
     callback effects-changed();
 
-    // Whether the panes may draw a real backdrop blur (P7; Slint has none at this rev): the host's,
-    // false on the software renderer and under Reduce transparency. The faked .glass (GlassPane)
-    // draws on both renderers, as decision 3 of ADR-0017 asks.
+    // Whether the floating panes (GlassPane) draw the real backdrop blur: the host's, true on Skia
+    // OpenGL, false on the software renderer (which cannot blur) and under Reduce transparency.
+    // Without it they draw the faked .glass, as ADR-0017 decision 3 asks of the fallback.
     in-out property <bool> glass: true;
+    // The blur's strength: Skia's sigma is this length in physical pixels, so 30px is the spike's
+    // σ30 (ADR-0017's glass gate) at scale 1, as CSS's blur(30px).
+    out property <length> glass-blur: 30px;
 
     out property <length> window-radius: 14px;
     out property <length> pane-radius: 22px;
@@ -46,6 +49,10 @@ export global Theme {
     out property <color> content: reduce-transparency ? (dark ? #151a1f : #ffffff) : (dark ? #12161c94 : #ffffffa3);
     out property <color> head: reduce-transparency ? (dark ? #151a1f : #ffffff) : (dark ? #161b22f0 : #f8fafcf0);
     out property <color> float: reduce-transparency ? (dark ? #1a1f27 : #ffffff) : (dark ? #1a1f27f2 : #fafbfdf2);
+    // The float while the real blur draws under it, thinner so the blur shows. AA: as thin as the
+    // contrast test lets it be over any text colour behind (84% light, 92% dark; the spike's 55%
+    // fails it).
+    out property <color> glass-float: dark ? #1a1f27eb : #fafbfdd6;
     out property <color> field: dark ? #ffffff12 : #ffffff99;
     out property <color> sel: dark ? #ffffff1a : #6e7a9129;
     out property <color> edge: dark ? #ffffff21 : #ffffffb3;
@@ -94,13 +101,17 @@ export global Theme {
     out property <color> run-fg: dark ? #04222b : #ffffff;
 }
 
-// A floating pane (.glass): the log drawer, the settings sheet and the dialog card. Faked, as
-// style.css fakes it: the translucent float with its edge, a top highlight (.glass::before and the
-// inset 1px line) and the shadow, on both renderers. Under Reduce transparency the float is solid
-// and the edge, highlight and inset line stay, as style.css keeps `.glass` there.
+// A floating pane (.glass): the log drawer, the settings sheet and the dialog card. While
+// `Theme.glass` holds, the real backdrop blur under the thinner glass-float; otherwise faked, as
+// style.css fakes it, with the near opaque float. Either way the edge, a top highlight
+// (.glass::before and the inset 1px line) and the shadow. Under Reduce transparency the float is
+// solid and the edge, highlight and inset line stay, as style.css keeps `.glass` there.
 export component GlassPane inherits Rectangle {
+    // The blur drawn; out for the host's test that the panes follow `Theme.glass`.
+    out property <length> blur: Theme.glass ? Theme.glass-blur : 0px;
     border-radius: Theme.pane-radius;
-    background: Theme.float;
+    backdrop-blur: self.blur;
+    background: Theme.glass ? Theme.glass-float : Theme.float;
     border-width: 1px;
     border-color: Theme.edge;
     drop-shadow-blur: Theme.pane-shadow-blur;

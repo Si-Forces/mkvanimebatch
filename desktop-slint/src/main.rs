@@ -1,7 +1,7 @@
 //! MKV Anime Batch desktop host on Slint (ADR-0017), beside the Tauri host until the switch.
 
-// No console window on Windows in a release build (desktop-tauri's main.rs); a debug build keeps
-// it for stderr.
+// No console window on Windows in a release build. desktop-tauri's main.rs hides it in a debug
+// build too; this host keeps it there for stderr.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod appearance;
@@ -18,7 +18,7 @@ mod telemetry;
 #[cfg(test)]
 mod ui_tests;
 
-use mkv_anime_batch_slint_ui::App;
+use mkv_anime_batch_slint_ui::{App, Focus};
 use mkv_desktop_core::actor::{Core, Intent, Ports};
 use mkv_desktop_core::control::{
     begin_shutdown, cancel_shutdown, cleanup_owned_processes, InspectCacheState, ScanState,
@@ -26,7 +26,7 @@ use mkv_desktop_core::control::{
 use mkv_desktop_core::job::JobState;
 use publisher::SlintPublisher;
 use renderer::{Answer, Choice, GpuStart, Renderer};
-use slint::winit_030::winit::event::WindowEvent;
+use slint::winit_030::winit::event::{ElementState, MouseButton, WindowEvent};
 use slint::winit_030::{EventResult, WinitWindowAccessor};
 use slint::{CloseRequestResponse, ComponentHandle, RenderingState, Timer};
 use std::cell::Cell;
@@ -297,10 +297,14 @@ fn watch_start(app: &App, forget: Option<PathBuf>, start: Rc<Cell<GpuStart>>) {
 }
 
 /// How often the window asks winit whether it is minimized (X11 and Windows), which no event says.
+/// On X11 each ask is one synchronous `_NET_WM_STATE` round-trip to the X server on the UI
+/// thread, once a second; on Wayland winit answers `None` at once, so the poll costs
+/// nothing there and is not skipped. A minimize is seen up to this late.
 const MINIMIZED_POLL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Watches winit's window events, through Slint's one window event filter:
 ///
+/// - Clears `Focus.keyboard` on any left press, so a later programmatic focus draws no ring.
 /// - Tells the core whether the window shows (`Intent::ViewVisible`), so it samples no telemetry
 ///   while hidden (`telemetry::Visibility`); the returned timer polls `is_minimized` and must be
 ///   kept.
@@ -319,8 +323,23 @@ fn watch_window(app: &App, save: Option<PathBuf>, send: intents::Intents) -> Tim
     let tell = Rc::new(tell);
     let (seen, told) = (Rc::clone(&visibility), Rc::clone(&tell));
     let mut pending = save;
+    let pressed = app.as_weak();
     app.window().on_winit_window_event(move |_, event| {
-        told(seen.borrow_mut().event(event));
+        // Any left press, on a fluent widget or a blank area too, hides the ring until a key
+        // (`Focus.keyboard`, :focus-visible); a Pressable's own press clears it as well.
+        if let WindowEvent::MouseInput {
+            state: ElementState::Pressed,
+            button: MouseButton::Left,
+            ..
+        } = event
+        {
+            if let Some(app) = pressed.upgrade() {
+                app.global::<Focus>().set_keyboard(false);
+            }
+        }
+        // The borrow ends before `told` sends.
+        let change = seen.borrow_mut().event(event);
+        told(change);
         if matches!(event, WindowEvent::RedrawRequested) {
             if let Some(dir) = pending.take() {
                 Timer::single_shot(
@@ -349,7 +368,8 @@ fn watch_window(app: &App, save: Option<PathBuf>, send: intents::Intents) -> Tim
                     .with_winit_window(|window| window.is_minimized())
             })
             .flatten();
-        tell(visibility.borrow_mut().minimized(minimized));
+        let change = visibility.borrow_mut().minimized(minimized);
+        tell(change);
     });
     poll
 }
