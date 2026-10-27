@@ -1692,12 +1692,7 @@ fn the_appearance_menu_picks_system_light_or_dark_and_saves_it() {
     use i_slint_core::window::WindowInner;
     i_slint_backend_testing::init_no_event_loop();
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(
-        dir.path().join("appearance"),
-        "theme=dark
-",
-    )
-    .unwrap();
+    std::fs::write(dir.path().join("appearance"), "theme=dark\n").unwrap();
     let app = new_app();
     app.window().set_size(slint::LogicalSize::new(760.0, 520.0));
     appearance::wire(&app, Some(dir.path().into()), Renderer::Software);
