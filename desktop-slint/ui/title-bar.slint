@@ -150,6 +150,8 @@ export component TitleBar inherits Rectangle {
                 font-size: 14px;
                 font-weight: 700;
                 horizontal-alignment: center;
+                // The title bar's label says it.
+                accessible-role: none;
             }
             Text {
                 text: "by Sifahaz";
@@ -157,6 +159,7 @@ export component TitleBar inherits Rectangle {
                 font-size: 11px;
                 font-weight: 400;
                 horizontal-alignment: center;
+                accessible-role: none;
             }
         }
     }

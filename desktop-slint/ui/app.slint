@@ -118,6 +118,8 @@ component OpenFolderNav inherits Pressable {
     background: self.hovered && self.enabled ? Theme.hover : transparent;
     opacity: self.enabled ? 1 : 0.75;
     accessible-label: "Open folder…";
+    // Not its label: the queue's card has an Open folder… too.
+    focus-key: "nav:open-folder";
     Text {
         x: 8px;
         text: "+ Open folder…";
@@ -180,6 +182,8 @@ export component App inherits Window {
     out property <int> remux-pinned-count: remux-pane.pinned-count;
     // The Log drawer is open.
     in-out property <bool> log-open;
+    // The drawer's backdrop blur (GlassPane), for the host's tests.
+    out property <length> log-blur: log-drawer.blur;
     // The drawer's Copy: "Copied" or "Copy failed" for a while after a Copy (the host's).
     in property <string> log-copy-label: "Copy";
     // The confirm dialog shown, if open (`show-dialog`); the host bumps `dialog-serial` for each it

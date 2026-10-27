@@ -4,8 +4,9 @@
 //! `set_row_data`); the list scrolls 6 px per frame for 30 s after a 3 s warm-up, on Skia OpenGL,
 //! maximized. P6's per-frame content is drawn too: the telemetry sparklines take a synthetic
 //! sample every second (the core's busy cadence), the sticky release head pins as the rows
-//! scroll, and the faked glass Log drawer is open over the scrolling list for the window's middle
-//! third (`glass_frame` is that third's render max and missed vsyncs). Prints one `BENCH` line
+//! scroll, and the glass Log drawer, with its real backdrop blur, is open over the scrolling list
+//! for the window's middle third (`glass_frame` is that third's render max, missed vsyncs, average
+//! fps and 1% low fps, the last two as the spike's FrameStats counts them). Prints one `BENCH` line
 //! and exits.
 //!
 //! ```text
@@ -32,7 +33,9 @@
 //! UI-thread time, and `run_reset_frame` the render and interval of the frame it lands in (the
 //! first presented after it). The churn's clock and progress stack redraw the bottom bar (P5).
 //! Budget (#135): publication p99 < 4 ms, and no frame over 16.7 ms, read as no render over
-//! 16.7 ms and no missed vsync. The line ends with PASS or FAIL for each.
+//! 16.7 ms and no missed vsync. ADR-0017 decision 8's glass gate (`gate_glass`): the glass third
+//! at 50 fps or more on average and 45 fps or more at its 1% low. The line ends with PASS or FAIL
+//! for each.
 
 // Only the hop's path is driven here; the rest of these host modules is unused. `clippy
 // --all-targets` checks a bench with cfg(test) but without its #[test] items, which leaves their
@@ -284,14 +287,24 @@ fn summary(name: &str, values: &mut [f64]) -> String {
     )
 }
 
+/// The spike's FrameStats figures over frame `intervals` (ms): the average fps (frames over their
+/// total time) and the 1% low (the fps of the mean of the slowest 1% of intervals).
+fn fps(intervals: &[f64]) -> (f64, f64) {
+    let total: f64 = intervals.iter().sum();
+    let mut sorted = intervals.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let worst = (sorted.len() / 100).max(1);
+    let worst_ms = sorted.iter().rev().take(worst).sum::<f64>() / worst as f64;
+    (intervals.len() as f64 * 1000.0 / total, 1000.0 / worst_ms)
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     slint::BackendSelector::new()
         .backend_name("winit".into())
         .renderer_name("skia-opengl".into())
         .select()?;
     let app = App::new()?;
-    // The renderer's glass flag (the real blur, P7) as the app sets it on OpenGL; the faked
-    // glass draws either way.
+    // The renderer's glass flag as the app sets it on OpenGL: the panes draw the real blur.
     app.global::<Theme>().set_glass(true);
     publisher::install_models(&app);
     app.window().set_maximized(true);
@@ -440,6 +453,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let render_max = renders.iter().copied().fold(0.0, f64::max);
                 let glass_render_max = glass_renders.iter().copied().fold(0.0, f64::max);
                 let glass_over_vsync = glass_intervals.iter().filter(|&&i| i > 25.0).count();
+                let (glass_avg, glass_low) = fps(&glass_intervals);
+                // ADR-0017 decision 8's glass gate.
+                let glass_gate = glass_avg >= 50.0 && glass_low >= 45.0;
                 let run_reset_ms = run_reset.lock().unwrap().map_or(f64::NAN, |(took, _)| took);
                 let (reset_render, reset_interval) = reset_frame.unwrap_or((f64::NAN, f64::NAN));
                 let pub_budget = hops.len() > 1 && {
@@ -448,7 +464,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     sorted[((sorted.len() - 1) as f64 * 0.99).round() as usize] < 4.0
                 };
                 println!(
-                    "BENCH session={} renderer=skia-opengl rows={ROWS} publications={} {} {} reset_ms={reset:.2} filter_ms={filter:.2} run_reset_ms={run_reset_ms:.2} run_reset_frame=render:{reset_render:.2},interval:{reset_interval:.2} frames={} {} over_16.7ms={over_frame} over_25ms={over_vsync} {} glass_frame=frames:{},render_max:{glass_render_max:.2},over_25ms:{glass_over_vsync} budget_pub={} budget_frame={}",
+                    "BENCH session={} renderer=skia-opengl rows={ROWS} publications={} {} {} reset_ms={reset:.2} filter_ms={filter:.2} run_reset_ms={run_reset_ms:.2} run_reset_frame=render:{reset_render:.2},interval:{reset_interval:.2} frames={} {} over_16.7ms={over_frame} over_25ms={over_vsync} {} glass_frame=frames:{},render_max:{glass_render_max:.2},over_25ms:{glass_over_vsync},avg_fps:{glass_avg:.1},low1_fps:{glass_low:.1} budget_pub={} budget_frame={} gate_glass={}",
                     if std::env::var_os("WAYLAND_DISPLAY").is_some() { "wayland" } else { "x11" },
                     hops.len(),
                     summary("map", &mut maps),
@@ -459,6 +475,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     glass_renders.len(),
                     verdict(pub_budget),
                     verdict(render_max <= 16.7 && over_vsync == 0),
+                    verdict(glass_gate),
                 );
                 let _ = slint::quit_event_loop();
                 return;

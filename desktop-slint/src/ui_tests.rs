@@ -927,6 +927,7 @@ fn every_text_token_meets_wcag_aa_on_every_surface_in_both_themes() {
             ("content", theme.get_content()),
             ("head", theme.get_head()),
             ("float", theme.get_float()),
+            ("glass-float", theme.get_glass_float()),
         ];
         let tints = [
             ("field", theme.get_field()),
@@ -958,25 +959,35 @@ fn every_text_token_meets_wcag_aa_on_every_surface_in_both_themes() {
         // A placeholder (hint) is drawn on the sheet's fields (field on float) and the
         // Inspector's (field on panel).
         for (wall, below) in walls {
-            for (surface, fill) in [("float", theme.get_float()), ("panel", theme.get_panel())] {
+            for (surface, fill) in [
+                ("float", theme.get_float()),
+                ("glass-float", theme.get_glass_float()),
+                ("panel", theme.get_panel()),
+            ] {
                 let field = over(theme.get_field(), over(fill, below));
                 let on = format!("field on {surface} over {wall}");
                 pairs.push(("hint", on, theme.get_hint(), field));
             }
         }
-        // The glass panes (GlassPane): the float over a full queue behind (any text colour under
-        // it, not the wallpaper alone), under the top highlight at its strongest.
-        for (under, below) in texts.iter().chain(&walls) {
-            let pane = over(theme.get_float(), *below);
-            for (on, background) in [
-                (format!("float over {under}"), pane),
-                (
-                    format!("glass-hi on float over {under}"),
-                    over(theme.get_glass_hi(), pane),
-                ),
-            ] {
-                for (text, color) in texts {
-                    pairs.push((text, on.clone(), color, background));
+        // The glass panes (GlassPane): the float, faked or over the real blur, over a full queue
+        // behind (any text colour under it, not the wallpaper alone; a blur never makes the
+        // backdrop more extreme than its colours), under the top highlight at its strongest.
+        for (fill, float) in [
+            ("float", theme.get_float()),
+            ("glass-float", theme.get_glass_float()),
+        ] {
+            for (under, below) in texts.iter().chain(&walls) {
+                let pane = over(float, *below);
+                for (on, background) in [
+                    (format!("{fill} over {under}"), pane),
+                    (
+                        format!("glass-hi on {fill} over {under}"),
+                        over(theme.get_glass_hi(), pane),
+                    ),
+                ] {
+                    for (text, color) in texts {
+                        pairs.push((text, on.clone(), color, background));
+                    }
                 }
             }
         }
@@ -1361,6 +1372,22 @@ fn the_toggle_and_ctrl_t_flip_the_theme_and_save_the_choice() {
     assert!(theme.get_dark());
     assert_eq!(saved(), Some(true));
 
+    // Space held on the focused toggle flips it once, as a browser's button activates once.
+    app.window().dispatch_event(WindowEvent::KeyPressed {
+        text: Key::Space.into(),
+    });
+    for _ in 0..3 {
+        app.window().dispatch_event(WindowEvent::KeyPressRepeated {
+            text: Key::Space.into(),
+        });
+    }
+    app.window().dispatch_event(WindowEvent::KeyReleased {
+        text: Key::Space.into(),
+    });
+    assert!(!theme.get_dark(), "one flip for a held Space");
+    key(&app, Key::Space);
+    assert!(theme.get_dark());
+
     let ctrl_t = |app: &App| {
         let press = |text: slint::SharedString| {
             app.window()
@@ -1397,8 +1424,9 @@ fn the_toggle_and_ctrl_t_flip_the_theme_and_save_the_choice() {
 }
 
 /// The sheet's two reduced effects apply at once and are saved with the theme: Reduce
-/// transparency solidifies the panes and drops the blur, Reduce motion stops the spinners. The
-/// software renderer has no blur either way, but still draws the faked glass (a translucent float).
+/// transparency solidifies the panes and drops the blur (the Log drawer's reads `Theme.glass`),
+/// Reduce motion stops the spinners. The software renderer draws no blur, but still the faked glass
+/// (a translucent float).
 #[test]
 fn the_reduced_effects_apply_at_once_and_are_saved() {
     use crate::appearance::{self, Appearance};
@@ -1413,6 +1441,8 @@ fn the_reduced_effects_apply_at_once_and_are_saved() {
     let theme = app.global::<Theme>();
     assert!(theme.get_glass());
     assert!(theme.get_float().alpha() < 255);
+    // The panes follow `Theme.glass`: the drawer draws the real blur.
+    assert!(app.get_log_blur() > 0.0);
     apply(&app, &ViewState::new(None));
     app.show().unwrap();
 
@@ -1424,6 +1454,7 @@ fn the_reduced_effects_apply_at_once_and_are_saved() {
     assert!(theme.get_reduce_transparency());
     assert!(!theme.get_glass());
     assert_eq!(theme.get_float().alpha(), 255);
+    assert_eq!(app.get_log_blur(), 0.0);
     only(&app, "Reduce motion (no spinning)").invoke_accessible_default_action();
     assert!(theme.get_reduce_motion());
     assert_eq!(
@@ -1436,6 +1467,7 @@ fn the_reduced_effects_apply_at_once_and_are_saved() {
     );
     only(&app, "Reduce transparency (solid panes)").invoke_accessible_default_action();
     assert!(theme.get_glass());
+    assert!(app.get_log_blur() > 0.0);
     app.hide().unwrap();
 
     // A restart on the software renderer keeps the saved effects and draws no glass.
@@ -1445,6 +1477,7 @@ fn the_reduced_effects_apply_at_once_and_are_saved() {
     assert!(theme.get_reduce_motion() && !theme.get_reduce_transparency());
     assert!(!theme.get_glass());
     assert!(theme.get_float().alpha() < 255, "the faked glass");
+    assert_eq!(app.get_log_blur(), 0.0);
 }
 
 /// The `Focus` key of the custom control with the focus; empty for none of them.
@@ -1510,7 +1543,7 @@ fn tab_walks_the_custom_controls_in_order_and_enter_or_space_activates_them() {
         "library:/",
         "library:S2",
         "library:S3",
-        "Open folder…",
+        "nav:open-folder",
         "remux:All",
         "remux:To do",
         "remux:Done",
@@ -1556,7 +1589,7 @@ fn tab_walks_the_custom_controls_in_order_and_enter_or_space_activates_them() {
     for (to, press) in [
         ("Close window", Key::Return),
         ("library:S2", Key::Space),
-        ("Open folder…", Key::Return),
+        ("nav:open-folder", Key::Return),
         ("remux:Done", Key::Space),
         ("check:remux:a00", Key::Space),
         ("pick:remux:a00", Key::Return),
@@ -1732,7 +1765,8 @@ fn the_current_release_header_stays_pinned_at_the_top_of_the_list() {
     i_slint_backend_testing::init_no_event_loop();
     let app = new_app();
     app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
-    SlintPublisher::new(&app).show(&three_releases());
+    let publisher = SlintPublisher::new(&app);
+    publisher.show(&three_releases());
     app.show().unwrap();
     frame(&app);
     let pinned = |app: &App| {
@@ -1750,6 +1784,35 @@ fn the_current_release_header_stays_pinned_at_the_top_of_the_list() {
         .find(|head| head.accessible_role() == Some(i_slint_backend_testing::AccessibleRole::None))
         .unwrap();
     assert_eq!(head.absolute_position().y, top, "at the list's top");
+
+    // A filter that hides the pinned release's rows unpins its header, and the count with it.
+    publisher.show_filter(Mode::Remux, QueueFilter::Done);
+    frame(&app);
+    assert_eq!(pinned(&app), None, "no row shows: no header pinned");
+    assert_eq!(app.get_remux_pinned_count(), 0);
+    publisher.show_filter(Mode::Remux, QueueFilter::All);
+    app.set_remux_scroll(-500.0);
+    frame(&app);
+    assert_eq!(pinned(&app).as_deref(), Some("MEDIA › SHOW 20"));
+
+    // The same number of rows under other release heads (the folder renamed): the row instances
+    // stay, and the header pinned is the new one, never the old.
+    let mut renamed = three_releases();
+    renamed.remux.library = presentation::library(Some("/media/Other"), &renamed.remux.rows);
+    renamed.remux.manifest_rev = 2;
+    renamed.remux.directory = Some("/media/Other".into());
+    // A later state: the publisher drops one no newer than the last.
+    renamed.seq = 1;
+    publisher.show(&renamed);
+    frame(&app);
+    app.set_remux_scroll(-500.0);
+    frame(&app);
+    assert_eq!(pinned(&app).as_deref(), Some("MEDIA › OTHER 20"));
+    publisher.show(&ViewState {
+        seq: 2,
+        ..three_releases()
+    });
+    frame(&app);
 
     app.invoke_reveal(Mode::Remux, 20);
     frame(&app);
