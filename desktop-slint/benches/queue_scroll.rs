@@ -35,11 +35,13 @@
 //! UI-thread time, and `run_reset_frame` the render and interval of the frame it lands in (the
 //! first presented after it). The churn's clock and progress stack redraw the bottom bar (P5).
 //! Budget (#135): publication p99 < 4 ms, and no frame over 16.7 ms, read as no render over
-//! 16.7 ms and no missed vsync. ADR-0017 decision 8's glass gate (`gate_glass`): the glass third
-//! at 50 fps or more on average and 45 fps or more at its 1% low. Decision 8 defines it on the
-//! real blur, so its verdict is that gate only with `MKV_BENCH_BLUR=1` (`glass_frame=blur:1` in the line);
-//! without, it judges the faked glass the app ships by the same numbers. The line ends with PASS or FAIL
-//! for each.
+//! 16.7 ms and no missed vsync. A provisional read of ADR-0017 decision 8's glass numbers
+//! (`glass_provisional`): the glass third at 50 fps or more on average and 45 fps or more at its
+//! 1% low. Provisional, not the gate: decision 8 keeps the drawer open for the whole 30 s with the
+//! real core publishing at 15 Hz, where this opens it for a third, under synthetic churn and
+//! telemetry; P9 (#142) runs the gate itself. Decision 8 defines its numbers on the real blur,
+//! drawn with `MKV_BENCH_BLUR=1` (`glass_frame=blur:1` in the line); without, the faked glass the
+//! app ships is read by the same numbers. The line ends with PASS or FAIL for each.
 
 // Only the hop's path is driven here; the rest of these host modules is unused. `clippy
 // --all-targets` checks a bench with cfg(test) but without its #[test] items, which leaves their
@@ -460,7 +462,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let glass_render_max = glass_renders.iter().copied().fold(0.0, f64::max);
                 let glass_over_vsync = glass_intervals.iter().filter(|&&i| i > 25.0).count();
                 let (glass_avg, glass_low) = fps(&glass_intervals);
-                // ADR-0017 decision 8's glass gate.
+                // ADR-0017 decision 8's glass numbers, read provisionally (see the header).
                 let glass_gate = glass_avg >= 50.0 && glass_low >= 45.0;
                 let run_reset_ms = run_reset.lock().unwrap().map_or(f64::NAN, |(took, _)| took);
                 let (reset_render, reset_interval) = reset_frame.unwrap_or((f64::NAN, f64::NAN));
@@ -470,7 +472,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     sorted[((sorted.len() - 1) as f64 * 0.99).round() as usize] < 4.0
                 };
                 println!(
-                    "BENCH session={} renderer=skia-opengl rows={ROWS} publications={} {} {} reset_ms={reset:.2} filter_ms={filter:.2} run_reset_ms={run_reset_ms:.2} run_reset_frame=render:{reset_render:.2},interval:{reset_interval:.2} frames={} {} over_16.7ms={over_frame} over_25ms={over_vsync} {} glass_frame=blur:{},frames:{},render_max:{glass_render_max:.2},over_25ms:{glass_over_vsync},avg_fps:{glass_avg:.1},low1_fps:{glass_low:.1} budget_pub={} budget_frame={} gate_glass={}",
+                    "BENCH session={} renderer=skia-opengl rows={ROWS} publications={} {} {} reset_ms={reset:.2} filter_ms={filter:.2} run_reset_ms={run_reset_ms:.2} run_reset_frame=render:{reset_render:.2},interval:{reset_interval:.2} frames={} {} over_16.7ms={over_frame} over_25ms={over_vsync} {} glass_frame=blur:{},frames:{},render_max:{glass_render_max:.2},over_25ms:{glass_over_vsync},avg_fps:{glass_avg:.1},low1_fps:{glass_low:.1} budget_pub={} budget_frame={} glass_provisional={}",
                     if std::env::var_os("WAYLAND_DISPLAY").is_some() { "wayland" } else { "x11" },
                     hops.len(),
                     summary("map", &mut maps),

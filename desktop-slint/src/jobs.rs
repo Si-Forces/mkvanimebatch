@@ -602,7 +602,7 @@ pub(crate) mod tests {
         app.hide().unwrap();
     }
 
-    /// The host's notice (the log file that could not be opened) is an OK-only dialog, queued
+    /// The host's notice (no log file this session) is an OK-only dialog, queued
     /// with the others.
     #[test]
     fn a_host_notice_shows_ok_alone_behind_a_dialog_shown() {
@@ -610,13 +610,16 @@ pub(crate) mod tests {
         let runtime = runtime();
         let (app, _core) = wired(&runtime, NoJobs);
         app.invoke_close_failed("cleanup broke".into());
-        app.invoke_notice("Could not open the log file".into(), "C:\\logs".into());
+        app.invoke_notice(
+            "Could not save Engine Diagnostics".into(),
+            "C:\\logs".into(),
+        );
         assert_eq!(app.get_dialog(), close_failed_dialog("cleanup broke"));
         app.invoke_dialog_answered(true);
         assert_eq!(
             app.get_dialog(),
             DialogTexts {
-                title: "Could not open the log file".into(),
+                title: "Could not save Engine Diagnostics".into(),
                 text: "C:\\logs".into(),
                 confirm: "OK".into(),
                 notice: true,
