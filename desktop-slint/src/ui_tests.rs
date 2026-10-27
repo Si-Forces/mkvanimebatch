@@ -969,14 +969,36 @@ fn every_text_token_meets_wcag_aa_on_every_surface_in_both_themes() {
                 pairs.push(("hint", on, theme.get_hint(), field));
             }
         }
-        // The glass panes (GlassPane): the float, faked or over the real blur, over a full queue
-        // behind (any text colour under it, not the wallpaper alone; a blur never makes the
-        // backdrop more extreme than its colours), under the top highlight at its strongest.
-        for (fill, float) in [
-            ("float", theme.get_float()),
-            ("glass-float", theme.get_glass_float()),
+        // The glass panes (GlassPane), under their top highlight at its strongest. The faked
+        // float over a full queue behind, sharp: any text colour under it. The real blur's
+        // glass-float over what a σ30 blur leaves of the queue behind a pane: the wallpaper, the
+        // panes over it and their tints. Text and the small solid shapes (rings, checkboxes)
+        // average out into those, and no large solid fill sits behind a pane (the bar's buttons
+        // are below the drawer).
+        let sharp: Vec<(String, Color)> = texts
+            .iter()
+            .chain(&walls)
+            .map(|&(name, color)| (name.to_string(), color))
+            .collect();
+        let mut blurred = Vec::new();
+        for (wall, below) in walls {
+            blurred.push((wall.to_string(), below));
+            for &(surface, fill) in surfaces.iter().filter(|(name, _)| !name.ends_with("float")) {
+                let pane = over(fill, below);
+                blurred.push((format!("{surface} over {wall}"), pane));
+                for (tint, tinted) in tints {
+                    blurred.push((
+                        format!("{tint} on {surface} over {wall}"),
+                        over(tinted, pane),
+                    ));
+                }
+            }
+        }
+        for (fill, float, behind) in [
+            ("float", theme.get_float(), &sharp),
+            ("glass-float", theme.get_glass_float(), &blurred),
         ] {
-            for (under, below) in texts.iter().chain(&walls) {
+            for (under, below) in behind {
                 let pane = over(float, *below);
                 for (on, background) in [
                     (format!("{fill} over {under}"), pane),

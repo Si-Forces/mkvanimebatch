@@ -49,10 +49,10 @@ export global Theme {
     out property <color> content: reduce-transparency ? (dark ? #151a1f : #ffffff) : (dark ? #12161c94 : #ffffffa3);
     out property <color> head: reduce-transparency ? (dark ? #151a1f : #ffffff) : (dark ? #161b22f0 : #f8fafcf0);
     out property <color> float: reduce-transparency ? (dark ? #1a1f27 : #ffffff) : (dark ? #1a1f27f2 : #fafbfdf2);
-    // The float while the real blur draws under it, thinner so the blur shows. AA: as thin as the
-    // contrast test lets it be over any text colour behind (84% light, 92% dark; the spike's 55%
-    // fails it).
-    out property <color> glass-float: dark ? #1a1f27eb : #fafbfdd6;
+    // The float while the real blur draws under it, thin so the blur shows (60% light, 65% dark;
+    // the spike's was 55%). AA: the contrast test passes it over what the blur leaves behind (the
+    // wallpaper, the panes and their tints) down to 40% light and 53% dark; this keeps a margin.
+    out property <color> glass-float: dark ? #1a1f27a6 : #fafbfd99;
     out property <color> field: dark ? #ffffff12 : #ffffff99;
     out property <color> sel: dark ? #ffffff1a : #6e7a9129;
     out property <color> edge: dark ? #ffffff21 : #ffffffb3;
