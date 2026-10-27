@@ -202,7 +202,7 @@ export component PresetRow inherits Pressable {
 }
 
 // A section heading (.sheet-section h3).
-component SectionHead inherits Text {
+export component SectionHead inherits Text {
     color: Theme.mute;
     font-size: 11px;
     font-weight: 600;
@@ -524,18 +524,22 @@ export component SettingsSheet inherits GlassPane {
         }
     }
 
-    // Keeps Tab and Shift+Tab inside the sheet, as a modal dialog does: past its last control
-    // (Reduce motion, never locked) the focus wraps to Done, and back from Done to the last one.
+    // Keeps Tab and Shift+Tab inside the sheet, as a modal dialog does: past its last control the
+    // focus wraps to Done, and back from Done to the last one. Locked, Done is the only one.
     FocusScope {
         focus-on-click: false;
         focus-on-tab-navigation: false;
         capture-key-pressed(event) => {
             let back = event.text == Key.Backtab || (event.text == Key.Tab && event.modifiers.shift);
             if back && done-button.focused {
-                reduce-motion.focus();
+                if root.locked {
+                    done-button.focus();
+                } else {
+                    clear-cache.focus();
+                }
                 return accept;
             }
-            if !back && event.text == Key.Tab && reduce-motion.has-focus {
+            if !back && event.text == Key.Tab && (clear-cache.focused || (root.locked && done-button.focused)) {
                 done-button.focus();
                 return accept;
             }
@@ -828,41 +832,6 @@ export component SettingsSheet inherits GlassPane {
                                     if self.focused {
                                         Sheet.reveal(self.absolute-position.y, self.height);
                                     }
-                                }
-                            }
-                        }
-                    }
-
-                    // Appearance (Q105): the whole app's, in both modes' sheets and never locked,
-                    // in place of the system's reduced transparency and motion the webview reads.
-                    Divider { }
-                    VerticalLayout {
-                        padding-top: 16px;
-                        spacing: 12px;
-                        SectionHead { text: "APPEARANCE"; }
-                        CheckBox {
-                            text: "Reduce transparency (solid panes)";
-                            checked: Theme.reduce-transparency;
-                            toggled => {
-                                Theme.reduce-transparency = self.checked;
-                                Theme.effects-changed();
-                            }
-                            changed has-focus => {
-                                if self.has-focus {
-                                    Sheet.reveal(self.absolute-position.y, self.height);
-                                }
-                            }
-                        }
-                        reduce-motion := CheckBox {
-                            text: "Reduce motion (no spinning)";
-                            checked: Theme.reduce-motion;
-                            toggled => {
-                                Theme.reduce-motion = self.checked;
-                                Theme.effects-changed();
-                            }
-                            changed has-focus => {
-                                if self.has-focus {
-                                    Sheet.reveal(self.absolute-position.y, self.height);
                                 }
                             }
                         }

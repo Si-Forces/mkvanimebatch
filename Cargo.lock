@@ -3797,6 +3797,7 @@ dependencies = [
  "arboard",
  "dirs",
  "i-slint-backend-testing",
+ "i-slint-core",
  "mkv-anime-batch-slint-ui",
  "mkv-core",
  "mkv-desktop-core",

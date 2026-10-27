@@ -1,11 +1,12 @@
-//! The appearance choices (P6): the theme picked with the toggle or Ctrl+T (theme.js), else the
-//! system's, live; and the in-app reduced effects that stand in for the webview's
+//! The appearance choices (P6): the theme picked with the toggle or Ctrl+T (theme.js), or in the
+//! title bar's Appearance menu, whose System follows the system's live again; and the in-app reduced effects that stand in for the webview's
 //! `prefers-reduced-transparency` and `prefers-reduced-motion` (Q105). All three are saved together
 //! in `<config dir>/com.mkvanimebatch.desktop/appearance` (Q96), as `key=value` lines. The webview's
 //! `mkv-theme` localStorage key is not migrated.
 
 use crate::renderer::Renderer;
 use mkv_anime_batch_slint_ui::{App, Theme};
+use slint::language::ColorScheme;
 use slint::winit_030::winit::window::Theme as WindowTheme;
 use slint::winit_030::WinitWindowAccessor;
 use slint::ComponentHandle;
@@ -100,26 +101,49 @@ const REAL_BLUR: bool = false;
 /// Applies `appearance` to the window's theme. Call it before the first frame: a picked theme
 /// then pins `StylePalette.color-scheme` from the start, so the system's never shows first.
 pub(crate) fn apply(app: &App, appearance: &Appearance, renderer: Renderer) {
+    set_theme(app, appearance.dark);
     let theme = app.global::<Theme>();
-    if let Some(dark) = appearance.dark {
-        theme.invoke_set_dark(dark);
-    }
     theme.set_reduce_transparency(appearance.reduce_transparency);
     theme.set_reduce_motion(appearance.reduce_motion);
     theme.set_glass(appearance.glass(renderer));
 }
 
-/// Pins the native window's theme to the picked one (window.rs `set_window_theme`): the window is
-/// frameless, so it only matters to the compositor and native dialogs. Nothing before the window
-/// exists.
-fn pin_window_theme(app: &App, dark: bool) {
-    let theme = if dark {
-        WindowTheme::Dark
-    } else {
-        WindowTheme::Light
-    };
+/// Pins the palette's scheme to the picked theme, or (`None`) lets it follow the system's live:
+/// Slint's `unknown` scheme.
+fn set_theme(app: &App, dark: Option<bool>) {
+    let theme = app.global::<Theme>();
+    match dark {
+        Some(dark) => theme.invoke_set_dark(dark),
+        None => theme.invoke_follow_system(),
+    }
+}
+
+/// Pins the native window's theme to the picked one (window.rs `set_window_theme`), or (`None`)
+/// unpins it, so winit follows the system's again: the window is frameless, so it only matters to
+/// the compositor and native dialogs. Nothing before the window exists.
+fn pin_window_theme(app: &App, dark: Option<bool>) {
+    let theme = dark.map(|dark| {
+        if dark {
+            WindowTheme::Dark
+        } else {
+            WindowTheme::Light
+        }
+    });
     app.window()
-        .with_winit_window(|window| window.set_theme(Some(theme)));
+        .with_winit_window(|window| window.set_theme(theme));
+}
+
+/// The theme `dark` picked (the toggle, Ctrl+T, the menu): applied to the palette and the window,
+/// and saved with the effects.
+fn choose(app: &App, current: &Cell<Appearance>, dir: Option<&Path>, dark: Option<bool>) {
+    set_theme(app, dark);
+    pin_window_theme(app, dark);
+    let appearance = Appearance {
+        dark,
+        ..current.get()
+    };
+    current.set(appearance);
+    save(dir, &appearance);
 }
 
 /// Saves `appearance` in `dir`, if there is one; a failure is logged, and the choice still holds
@@ -136,7 +160,7 @@ fn save(dir: Option<&Path>, appearance: &Appearance) {
 }
 
 /// Applies the choices saved in `config`, before the first frame, then wires the toggle (and
-/// Ctrl+T) and the reduced-effects checkboxes, each saving every choice.
+/// Ctrl+T), the menu's theme choice and its reduced-effects checkboxes, each saving every choice.
 pub(crate) fn wire(app: &App, config: Option<PathBuf>, renderer: Renderer) {
     let saved = config.as_deref().map(Appearance::load).unwrap_or_default();
     apply(app, &saved, renderer);
@@ -149,7 +173,7 @@ pub(crate) fn wire(app: &App, config: Option<PathBuf>, renderer: Renderer) {
                 return;
             };
             if app.window().winit_window().await.is_ok() {
-                pin_window_theme(&app, dark);
+                pin_window_theme(&app, Some(dark));
             }
         });
         if let Err(error) = pinned {
@@ -161,19 +185,23 @@ pub(crate) fn wire(app: &App, config: Option<PathBuf>, renderer: Renderer) {
     theme.on_toggle({
         let (window, current, dir) = (app.as_weak(), Rc::clone(&current), config.clone());
         move || {
-            let Some(app) = window.upgrade() else {
-                return;
-            };
-            let theme = app.global::<Theme>();
-            let dark = !theme.get_dark();
-            theme.invoke_set_dark(dark);
-            pin_window_theme(&app, dark);
-            let appearance = Appearance {
-                dark: Some(dark),
-                ..current.get()
-            };
-            current.set(appearance);
-            save(dir.as_deref(), &appearance);
+            if let Some(app) = window.upgrade() {
+                let dark = !app.global::<Theme>().get_dark();
+                choose(&app, &current, dir.as_deref(), Some(dark));
+            }
+        }
+    });
+    theme.on_pick({
+        let (window, current, dir) = (app.as_weak(), Rc::clone(&current), config.clone());
+        move |scheme| {
+            if let Some(app) = window.upgrade() {
+                let dark = match scheme {
+                    ColorScheme::Dark => Some(true),
+                    ColorScheme::Light => Some(false),
+                    _ => None,
+                };
+                choose(&app, &current, dir.as_deref(), dark);
+            }
         }
     });
     let window = app.as_weak();
