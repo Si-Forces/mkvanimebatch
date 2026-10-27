@@ -6,18 +6,31 @@ import { Palette as StylePalette } from "std-widgets.slint";
 export global Theme {
     // Follows the system's colour scheme until `set-dark` pins one: the host calls it at boot for a
     // saved choice, before the first frame, and on the toggle (Ctrl+T), so the two never fight.
-    out property <bool> dark: StylePalette.color-scheme == ColorScheme.dark;
+    // `follow-system` (the Appearance menu's System, and the boot without a saved choice) sets the
+    // palette's scheme to `unknown`, Slint's "the system's, live": the scheme then reads `unknown`,
+    // so the dark the palette draws is read from its background (fluent's #1c1c1c in dark).
+    out property <bool> dark: StylePalette.color-scheme == ColorScheme.unknown
+        ? StylePalette.background == #1c1c1c
+        : StylePalette.color-scheme == ColorScheme.dark;
+    // The theme follows the system's (the Appearance menu's System).
+    out property <bool> follows-system: StylePalette.color-scheme == ColorScheme.unknown;
 
     public function set-dark(dark: bool) {
         StylePalette.color-scheme = dark ? ColorScheme.dark : ColorScheme.light;
     }
+    public function follow-system() {
+        StylePalette.color-scheme = ColorScheme.unknown;
+    }
 
     // The theme toggle or Ctrl+T: the host flips the theme and saves the choice.
     callback toggle();
+    // The Appearance menu's theme: `unknown` for System, else the scheme picked; the host applies
+    // and saves it.
+    callback pick(scheme: ColorScheme);
 
     // The in-app reduced effects (Q105), for style.css's prefers-reduced-transparency and
     // prefers-reduced-motion: solid panes, no glass; no spinning. The host loads and saves them;
-    // `effects-changed` says the sheet's checkboxes changed one.
+    // `effects-changed` says the Appearance menu's checkboxes changed one.
     in-out property <bool> reduce-transparency;
     in-out property <bool> reduce-motion;
     callback effects-changed();

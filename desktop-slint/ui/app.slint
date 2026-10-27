@@ -4,7 +4,7 @@ import "fonts/Onest-wght.ttf";
 import "fonts/Unbounded-wght.ttf";
 import "fonts/JetBrainsMono-wght.ttf";
 import { Theme } from "theme.slint";
-import { TitleBar } from "title-bar.slint";
+import { AppearanceMenu, TitleBar } from "title-bar.slint";
 import { Focus, Pressable } from "focus.slint";
 import { FontProbe } from "font-probe.slint";
 import { ScrollView } from "std-widgets.slint";
@@ -235,6 +235,8 @@ export component App inherits Window {
     in property <SheetLimits> sheet-limits;
     // The settings sheet of the mode shown is open.
     in-out property <bool> sheet-open;
+    // The title bar's Appearance menu is open.
+    in-out property <bool> appearance-open;
     // The control that takes the focus back when the sheet closes (a `Focus` key): the gear that
     // opened it, Run after a refused Run, else the one that had the focus.
     property <string> sheet-return;
@@ -291,9 +293,10 @@ export component App inherits Window {
         Sheet.focus-key = key;
         Sheet.focus-serial += 1;
         if !root.sheet-open {
-            root.sheet-return = key == "" ? Focus.current : "run";
+            root.sheet-return = key != "" ? "run" : root.appearance-open ? "Appearance" : Focus.current;
             root.sheet-open = true;
         }
+        root.appearance-open = false;
     }
 
     // Done, a backdrop click or Esc: the focused field is left first (it changes if edited), as
@@ -313,9 +316,11 @@ export component App inherits Window {
 
     // Shows the dialog (the host's, for the first of its queue), noting what has the focus while
     // the dialog has not taken it yet.
+    // An open Appearance menu closes first: its button takes the focus back after the dialog.
     public function show-dialog() {
         if !root.dialog-open {
-            root.dialog-return = Focus.current;
+            root.dialog-return = root.appearance-open ? "Appearance" : Focus.current;
+            root.appearance-open = false;
             root.dialog-field = Sheet.focused;
             root.dialog-open = true;
         }
@@ -340,6 +345,14 @@ export component App inherits Window {
                 }
             }
         }
+    }
+
+    // Closes the Appearance menu (Esc, a click outside, its button); the button takes the focus,
+    // the window's key scope first in case it cannot.
+    function close-appearance() {
+        root.appearance-open = false;
+        keys.focus();
+        Focus.restore("Appearance");
     }
 
     // Closes the Log drawer (Close, Esc); the Log toggle takes the focus when the drawer had it,
@@ -444,10 +457,10 @@ export component App inherits Window {
 
         // The window's keys (app.js's keydown): this scope holds the focus from the start, so a
         // key reaches it before anything took the focus. Ctrl+T (Cmd+T: Slint reads Cmd as
-        // control on macOS) toggles the theme from anywhere, a field, the sheet or a dialog
-        // included, so it is caught before the focused item. Esc closes the Log drawer unless the
-        // sheet or the dialog, which take it themselves, is open; it bubbles here from whatever
-        // has the focus.
+        // control on macOS) toggles the theme from anywhere, a field, the sheet, a dialog or the
+        // Appearance menu included, so it is caught before the focused item. Esc closes the
+        // Appearance menu, else the Log drawer unless the sheet or the dialog, which take it
+        // themselves, is open; it bubbles here from whatever has the focus.
         keys := FocusScope {
             focus-on-click: false;
             focus-on-tab-navigation: false;
@@ -470,6 +483,10 @@ export component App inherits Window {
                 reject
             }
             key-pressed(event) => {
+                if event.text == Key.Escape && root.appearance-open {
+                    root.close-appearance();
+                    return accept;
+                }
                 if event.text == Key.Escape && root.log-open && !root.sheet-open && !root.dialog-open {
                     root.close-log();
                     return accept;
@@ -477,7 +494,15 @@ export component App inherits Window {
                 reject
             }
             VerticalLayout {
-                TitleBar {
+                title-bar := TitleBar {
+                    appearance-open: root.appearance-open;
+                    appearance => {
+                        if root.appearance-open {
+                            root.close-appearance();
+                        } else {
+                            root.appearance-open = true;
+                        }
+                    }
                     close => { root.close-window(); }
                     minimize => { root.minimize-window(); }
                     toggle-maximize => { root.maximized = !root.maximized; }
@@ -728,6 +753,19 @@ export component App inherits Window {
                 remux-serials: root.remux-log-serials;
                 extract-serials: root.extract-log-serials;
                 extract: root.mode == Mode.extract;
+            }
+
+            // The Appearance menu, under its button and right-aligned to it, kept in the window; not
+            // modal (no dimmer): a click outside it closes it, the pointer's close leaving no ring.
+            if root.appearance-open: TouchArea {
+                clicked => {
+                    Focus.keyboard = false;
+                    root.close-appearance();
+                }
+                AppearanceMenu {
+                    x: max(8px, min(title-bar.menu-right, root.width - 8px) - self.width);
+                    y: title-bar.menu-top + 6px;
+                }
             }
 
             // The settings sheet of the mode shown (#settings-sheet), over a backdrop that covers the

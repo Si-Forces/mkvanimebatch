@@ -1358,10 +1358,22 @@ fn the_sheet_keeps_the_focus_and_its_fields_take_typed_keys() {
     back(&app);
     tick();
     assert_eq!(sheet.get_focused(), "");
-    // Back from Done wraps to the last control, and on to the one before it (without the wrap,
-    // the backdrop and then the window behind it): Esc still closes the sheet.
+    // Back from Done wraps to the last control, Clear inspection cache (the reduced effects moved
+    // to the Appearance menu), and on to the one before it (without the wrap, the backdrop and
+    // then the window behind it): Esc still closes the sheet.
     back(&app);
     tick();
+    assert_eq!(focused(&app), "Clear inspection cache…");
+    for effect in [
+        "Reduce transparency (solid panes)",
+        "Reduce motion (no spinning)",
+    ] {
+        assert_eq!(
+            ElementHandle::find_by_accessible_label(&app, effect).count(),
+            0,
+            "the sheet shows no {effect:?}"
+        );
+    }
     back(&app);
     tick();
     key(&app, Key::Escape);
@@ -1473,7 +1485,7 @@ fn the_toggle_and_ctrl_t_flip_the_theme_and_save_the_choice() {
     app.hide().unwrap();
 }
 
-/// The sheet's two reduced effects apply at once and are saved with the theme: Reduce
+/// The Appearance menu's two reduced effects apply at once and are saved with the theme: Reduce
 /// transparency solidifies the panes, Reduce motion stops the spinners. The real blur is off
 /// (`appearance::REAL_BLUR`), so OpenGL draws the faked glass (a translucent float) as the software
 /// renderer does; the panes still follow `Theme.glass` (the Log drawer's blur reads it).
@@ -1484,9 +1496,7 @@ fn the_reduced_effects_apply_at_once_and_are_saved() {
     i_slint_backend_testing::init_no_event_loop();
     let dir = tempfile::tempdir().unwrap();
     let app = new_app();
-    // Tall enough for the whole sheet: a search finds no control scrolled out of view.
-    app.window()
-        .set_size(slint::LogicalSize::new(920.0, 1100.0));
+    app.window().set_size(slint::LogicalSize::new(760.0, 520.0));
     appearance::wire(&app, Some(dir.path().into()), Renderer::OpenGl);
     let theme = app.global::<Theme>();
     assert!(!theme.get_glass());
@@ -1499,10 +1509,8 @@ fn the_reduced_effects_apply_at_once_and_are_saved() {
     apply(&app, &ViewState::new(None));
     app.show().unwrap();
 
-    app.invoke_open_sheet(Mode::Remux, "".into());
-    for _ in 0..2 {
-        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1));
-    }
+    appearance_button(&app).invoke_accessible_default_action();
+    assert!(app.get_appearance_open());
     only(&app, "Reduce transparency (solid panes)").invoke_accessible_default_action();
     assert!(theme.get_reduce_transparency());
     assert!(!theme.get_glass());
@@ -1530,6 +1538,234 @@ fn the_reduced_effects_apply_at_once_and_are_saved() {
     assert!(!theme.get_glass());
     assert!(theme.get_float().alpha() < 255, "the faked glass");
     assert_eq!(app.get_log_blur(), 0.0);
+}
+
+/// The title bar's Appearance button (its menu is labelled the same).
+fn appearance_button(app: &App) -> ElementHandle {
+    ElementHandle::find_by_accessible_label(app, "Appearance")
+        .find(|element| {
+            element.accessible_role() == Some(i_slint_backend_testing::AccessibleRole::Button)
+        })
+        .expect("the Appearance button")
+}
+
+/// The Appearance menu, if open.
+fn appearance_menu(app: &App) -> Option<ElementHandle> {
+    ElementHandle::find_by_accessible_label(app, "Appearance").find(|element| {
+        element.accessible_role() == Some(i_slint_backend_testing::AccessibleRole::Groupbox)
+    })
+}
+
+/// A left click at `x`, `y` in the window.
+fn click_at(app: &App, x: f32, y: f32) {
+    use slint::platform::{PointerEventButton, WindowEvent};
+    let (position, button) = (slint::LogicalPosition::new(x, y), PointerEventButton::Left);
+    app.window()
+        .dispatch_event(WindowEvent::PointerPressed { position, button });
+    app.window()
+        .dispatch_event(WindowEvent::PointerReleased { position, button });
+}
+
+/// The Appearance menu opens from its button, by a click or Enter, under it and right-aligned to
+/// it in the narrowest window, with the focus on the current theme; Tab and Shift+Tab wrap
+/// inside it. Esc, a click outside and the button close it and give the focus back to the
+/// button, ringed after a key alone; a dialog opening closes it first; Esc closes it before the
+/// Log drawer.
+#[test]
+fn the_appearance_menu_opens_from_its_button_and_closes_every_way() {
+    use mkv_anime_batch_slint_ui::DialogTexts;
+    use slint::platform::Key;
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(760.0, 520.0));
+    apply(&app, &ViewState::new(None));
+    app.show().unwrap();
+    let tick = || i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1));
+    let button = appearance_button(&app);
+    assert_eq!(
+        button.accessible_description().as_deref(),
+        Some("Appearance")
+    );
+    assert!(appearance_menu(&app).is_none());
+
+    // A click opens it, under the button and right-aligned to it, inside the window.
+    pointer(&app, &button, true);
+    pointer(&app, &button, false);
+    tick();
+    assert!(app.get_appearance_open());
+    let menu = appearance_menu(&app).expect("the menu shows");
+    let (at, size) = (menu.absolute_position(), menu.size());
+    let (button_at, button_size) = (button.absolute_position(), button.size());
+    assert_eq!(at.x + size.width, button_at.x + button_size.width);
+    assert!(at.y >= button_at.y + button_size.height);
+    assert!(
+        at.x >= 0.0 && at.y + size.height <= 520.0,
+        "inside the window"
+    );
+    assert!(
+        focused(&app).starts_with("theme:"),
+        "the theme choice has it"
+    );
+    assert!(rings(&app).is_empty(), "opened by the pointer: no ring");
+
+    // Tab and Shift+Tab wrap inside it: the three choices, then the two checkboxes.
+    let first = focused(&app);
+    key(&app, Key::Backtab);
+    key(&app, Key::Tab);
+    assert_eq!(
+        focused(&app),
+        "theme:System",
+        "Tab past the last wraps to the first"
+    );
+    for _ in 0..5 {
+        key(&app, Key::Tab);
+    }
+    assert_eq!(focused(&app), "theme:System", "five stops, wrapping");
+    assert!(app.get_appearance_open());
+
+    // Esc closes it: the button has the focus back, ringed; Enter opens it again.
+    key(&app, Key::Escape);
+    tick();
+    assert!(!app.get_appearance_open());
+    assert!(appearance_menu(&app).is_none());
+    assert_eq!(focused(&app), "Appearance");
+    assert_eq!(rings(&app).len(), 1);
+    key(&app, Key::Return);
+    tick();
+    assert!(app.get_appearance_open(), "Enter on the button opens it");
+    assert_eq!(focused(&app), first);
+
+    // A click outside closes it, the button focused without a ring.
+    click_at(&app, 20.0, 505.0);
+    tick();
+    assert!(!app.get_appearance_open());
+    assert_eq!(focused(&app), "Appearance");
+    assert!(rings(&app).is_empty());
+
+    // The button again closes it.
+    for _ in 0..2 {
+        pointer(&app, &button, true);
+        pointer(&app, &button, false);
+        tick();
+    }
+    assert!(!app.get_appearance_open(), "the second click closes it");
+    assert_eq!(focused(&app), "Appearance");
+
+    // A dialog opening closes it; the button has the focus back after the dialog.
+    key(&app, Key::Return);
+    tick();
+    assert!(app.get_appearance_open());
+    app.set_dialog(DialogTexts {
+        title: "Notice".into(),
+        text: "Something happened".into(),
+        confirm: "OK".into(),
+        notice: true,
+    });
+    app.invoke_show_dialog();
+    tick();
+    assert!(!app.get_appearance_open());
+    assert_eq!(focused(&app), "OK");
+    app.set_dialog_open(false);
+    tick();
+    tick();
+    assert_eq!(focused(&app), "Appearance");
+
+    // Over the open Log drawer, Esc closes the menu alone.
+    app.set_log_open(true);
+    key(&app, Key::Return);
+    tick();
+    key(&app, Key::Escape);
+    tick();
+    assert!(!app.get_appearance_open());
+    assert!(app.get_log_open(), "the drawer stays open");
+    app.hide().unwrap();
+}
+
+/// The menu's System, Light and Dark set the theme and save it: System saves no theme and
+/// follows the system's scheme live again; the toggle and Ctrl+T still pin the other one, and the
+/// menu's choice follows them while open. A saved System applies as the window starts.
+#[test]
+fn the_appearance_menu_picks_system_light_or_dark_and_saves_it() {
+    use crate::appearance::{self, Appearance};
+    use crate::renderer::Renderer;
+    use i_slint_core::items::ColorScheme;
+    use i_slint_core::window::WindowInner;
+    i_slint_backend_testing::init_no_event_loop();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("appearance"),
+        "theme=dark
+",
+    )
+    .unwrap();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(760.0, 520.0));
+    appearance::wire(&app, Some(dir.path().into()), Renderer::Software);
+    let theme = app.global::<Theme>();
+    assert!(theme.get_dark() && !theme.get_follows_system());
+    apply(&app, &ViewState::new(None));
+    app.show().unwrap();
+    let saved = || Appearance::load(dir.path()).dark;
+    let system = |scheme| {
+        WindowInner::from_pub(app.window())
+            .context()
+            .set_color_scheme(scheme)
+    };
+    let choice = |label: &str| {
+        ElementHandle::find_by_accessible_label(&app, label)
+            .find(|element| {
+                element.accessible_role()
+                    == Some(i_slint_backend_testing::AccessibleRole::RadioButton)
+            })
+            .unwrap_or_else(|| panic!("the {label:?} choice"))
+    };
+    let checked = || {
+        ["System", "Light", "Dark"]
+            .into_iter()
+            .filter(|label| choice(label).accessible_checked() == Some(true))
+            .collect::<Vec<_>>()
+    };
+
+    appearance_button(&app).invoke_accessible_default_action();
+    assert_eq!(checked(), ["Dark"]);
+    choice("Light").invoke_accessible_default_action();
+    assert!(!theme.get_dark());
+    assert_eq!(saved(), Some(false));
+    assert_eq!(checked(), ["Light"]);
+
+    // System: the system's scheme, live, saved as no theme.
+    system(ColorScheme::Dark);
+    assert!(!theme.get_dark(), "Light stays pinned");
+    choice("System").invoke_accessible_default_action();
+    assert!(theme.get_follows_system());
+    assert!(theme.get_dark(), "the system's dark");
+    assert_eq!(saved(), None);
+    assert_eq!(checked(), ["System"]);
+    system(ColorScheme::Light);
+    assert!(!theme.get_dark(), "followed live");
+    system(ColorScheme::Dark);
+    assert!(theme.get_dark());
+
+    // The toggle still pins the other theme in one click; the open menu follows it.
+    only(&app, "Toggle theme").invoke_accessible_default_action();
+    assert!(!theme.get_dark() && !theme.get_follows_system());
+    assert_eq!(saved(), Some(false));
+    assert_eq!(checked(), ["Light"]);
+    choice("Dark").invoke_accessible_default_action();
+    assert!(theme.get_dark());
+    assert_eq!(saved(), Some(true));
+    choice("System").invoke_accessible_default_action();
+    app.hide().unwrap();
+
+    // A restart with System saved follows the system's from the start, the menu saying so.
+    let app = new_app();
+    appearance::wire(&app, Some(dir.path().into()), Renderer::Software);
+    let theme = app.global::<Theme>();
+    assert!(theme.get_follows_system());
+    WindowInner::from_pub(app.window())
+        .context()
+        .set_color_scheme(ColorScheme::Dark);
+    assert!(theme.get_dark());
 }
 
 /// The `Focus` key of the custom control with the focus; empty for none of them.
@@ -1588,6 +1824,7 @@ fn tab_walks_the_custom_controls_in_order_and_enter_or_space_activates_them() {
         "Minimize window",
         "Maximize window",
         "Toggle theme",
+        "Appearance",
         "Remux",
         "Remux settings",
         "Extract",

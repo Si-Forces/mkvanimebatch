@@ -60,6 +60,8 @@ tauri-winres = "0.3"
 # `renderer-software`: headless snapshots for the font test.
 i-slint-backend-testing = { git = "https://github.com/slint-ui/slint", rev = "45cb2b33420e1b3c8a13b6a765d2b5077d9c9608", features = ["renderer-software"] }
 tempfile = "3"
+# Sets the system's colour scheme in a test of the Appearance menu's System (no public API does).
+i-slint-core = { git = "https://github.com/slint-ui/slint", rev = "45cb2b33420e1b3c8a13b6a765d2b5077d9c9608", default-features = false }
 
 # The FrameStats bench (P2, reused by P7 and the P9 gate): run by hand, never by `cargo test`.
 [[bench]]
