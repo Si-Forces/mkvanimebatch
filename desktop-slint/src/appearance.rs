@@ -82,7 +82,12 @@ impl Appearance {
     /// transparency is reduced, and only while [`REAL_BLUR`] is on. Otherwise they draw the faked
     /// glass (ADR-0017 decision 3), solid under Reduce transparency through the theme's tokens.
     pub(crate) fn glass(&self, renderer: Renderer) -> bool {
-        REAL_BLUR && renderer == Renderer::OpenGl && !self.reduce_transparency
+        REAL_BLUR && self.can_blur(renderer)
+    }
+
+    /// Whether the real blur could draw: on the GPU renderer, with full transparency.
+    fn can_blur(&self, renderer: Renderer) -> bool {
+        renderer == Renderer::OpenGl && !self.reduce_transparency
     }
 }
 
@@ -243,6 +248,9 @@ mod tests {
             ..Appearance::default()
         };
         assert_eq!(Appearance::default().glass(Renderer::OpenGl), REAL_BLUR);
+        assert!(Appearance::default().can_blur(Renderer::OpenGl));
+        assert!(!Appearance::default().can_blur(Renderer::Software));
+        assert!(!reduced.can_blur(Renderer::OpenGl));
         assert!(!Appearance::default().glass(Renderer::Software));
         assert!(!reduced.glass(Renderer::OpenGl));
         assert!(!reduced.glass(Renderer::Software));
