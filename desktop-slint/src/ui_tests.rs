@@ -992,6 +992,38 @@ fn a_library_update_keeps_a_focused_entry_or_hands_the_focus_on() {
     app.hide().unwrap();
 }
 
+/// A Library entry renamed in place keeps the focus, and `Focus.current` names it by its new key:
+/// a stale key would outlive the focus and later take it from a field.
+#[test]
+fn a_library_entry_renamed_in_place_keeps_its_focus_key_current() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    let state = three_releases();
+    let publisher = SlintPublisher::new(&app);
+    publisher.show(&state);
+    app.show().unwrap();
+    frame(&app);
+    app.global::<Focus>().invoke_restore("library:S2".into());
+    frame(&app);
+    assert_eq!(focused(&app), "library:S2");
+
+    // S2 becomes S4: as many entries, the second one renamed.
+    let mut rows = state.remux.rows.as_ref().clone();
+    for row in rows.iter_mut().filter(|row| row.release == "S2") {
+        row.release = "S4".into();
+    }
+    let mut renamed = state.clone();
+    renamed.seq += 1;
+    renamed.remux.library = presentation::library(Some("/media/Show"), &rows);
+    renamed.remux.rows = Arc::new(rows);
+    publisher.show(&renamed);
+    frame(&app);
+    assert_eq!(focused(&app), "library:S4");
+    assert_window_keys(&app);
+    app.hide().unwrap();
+}
+
 /// Enter on the empty card's Open folder…, then the scan: the Scanning card has no button, and
 /// the window's key scope takes the focus.
 #[test]

@@ -102,6 +102,13 @@ export component Pressable inherits Rectangle {
             keys.focus();
         }
     }
+    // A row written in place can rename the focused control (a Library entry's release): its
+    // focus-lost would then miss the old key, so `Focus.current` follows.
+    changed focus-key => {
+        if keys.has-focus {
+            Focus.current = root.focus-key;
+        }
+    }
 
     keys := FocusScope {
         enabled: root.enabled;
