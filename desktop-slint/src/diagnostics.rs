@@ -55,8 +55,9 @@ fn log_failed_text(dir: &Path, error: &io::Error) -> String {
 const NO_LOG_DIR_TEXT: &str =
     "The log directory could not be determined. Engine Diagnostics are not saved this session.";
 
-/// The log directory, as Tauri's `app_log_dir` computes it: `<local data>/<identifier>/logs`
-/// (`$XDG_DATA_HOME` on Linux, `%LOCALAPPDATA%` on Windows). `None` when the OS names none.
+/// The log directory, as Tauri's `app_log_dir` computes it on Linux and Windows (macOS's is
+/// `~/Library/Logs`, no target here): `<local data>/<identifier>/logs` (`$XDG_DATA_HOME` on
+/// Linux, `%LOCALAPPDATA%` on Windows). `None` when the OS names none.
 pub fn log_dir() -> Option<PathBuf> {
     dirs::data_local_dir().map(|dir| dir.join(IDENTIFIER).join("logs"))
 }

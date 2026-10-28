@@ -541,7 +541,17 @@ pub(crate) mod tests {
         button(&app, "Clear cache").invoke_accessible_default_action();
         ticks();
         assert!(!app.get_dialog_open());
-        assert_eq!(log_lines(&runtime, &core), 1, "the cache line");
+        // The core clears off its actor and logs once the clear is over: wait for the line (at
+        // most a second), as a log read can reach the actor first.
+        let mut lines = 0;
+        for _ in 0..100 {
+            lines = log_lines(&runtime, &core);
+            if lines > 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(lines, 1, "the cache line");
         app.hide().unwrap();
     }
 
