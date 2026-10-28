@@ -39,12 +39,12 @@ use std::sync::Arc;
 fn main() -> Result<(), Box<dyn Error>> {
     let log_failed = diagnostics::init(diagnostics::log_dir().as_deref());
 
-    let config = renderer::config_dir();
+    let choice_dir = renderer::choice_dir();
     let forced = renderer::forced_from_env(std::env::var_os(renderer::RENDERER_ENV).as_deref());
     let relaunched = std::env::var_os(renderer::RELAUNCHED_ENV).is_some();
     let choice = renderer::choose(
         forced,
-        config.as_deref().is_some_and(renderer::saved_software),
+        choice_dir.as_deref().is_some_and(renderer::saved_software),
     );
     // Both names pinned, so neither SLINT_BACKEND nor Slint's or Skia's renderer chains pick
     // another renderer behind the host's back (renderer.rs).
@@ -71,16 +71,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     // A re-launched child saves the software choice once it has drawn (save_once_drawn).
-    let save = match (std::env::var_os(renderer::SAVE_ENV), &config) {
+    let save = match (std::env::var_os(renderer::SAVE_ENV), &choice_dir) {
         (Some(_), Some(dir)) if choice.renderer == Renderer::Software => Some(dir.clone()),
         (Some(_), None) => {
-            tracing::warn!("No config directory: the software renderer choice is not saved");
+            tracing::warn!("No local config directory: the software renderer choice is not saved");
             None
         }
         _ => None,
     };
     let start = Rc::new(Cell::new(GpuStart::Setup));
-    let result = run(&choice, config.clone(), save, Rc::clone(&start), log_failed);
+    let result = run(&choice, choice_dir, save, Rc::clone(&start), log_failed);
     if renderer::gpu_failed_at_start(choice.renderer, start.get(), result.is_err()) {
         let error = match result {
             Err(error) => error.to_string(),
@@ -128,10 +128,11 @@ fn gpu_failed(error: &str) -> Result<(), Box<dyn Error>> {
 
 /// Builds the window and the Desktop Core, runs the event loop, then tears down. On OpenGL,
 /// `start` says whether a frame was drawn or the window never came up (see [`watch_start`]).
-/// `save` names the directory to save the software choice in once a frame is drawn.
+/// `choice_dir` holds the saved software choice; `save` names the directory to save it in once a
+/// frame is drawn.
 fn run(
     choice: &Choice,
-    config: Option<PathBuf>,
+    choice_dir: Option<PathBuf>,
     save: Option<PathBuf>,
     start: Rc<Cell<GpuStart>>,
     log_failed: Option<String>,
@@ -144,11 +145,11 @@ fn run(
     let scan = Arc::new(ScanState::default());
     let app = App::new()?;
     // Before the first frame: a saved theme pins the colour scheme from the start.
-    appearance::wire(&app, config.clone(), choice.renderer);
+    appearance::wire(&app, renderer::config_dir(), choice.renderer);
     if choice.renderer == Renderer::OpenGl {
         watch_start(
             &app,
-            config.filter(|_| choice.forget_saved),
+            choice_dir.filter(|_| choice.forget_saved),
             Rc::clone(&start),
         );
     }
