@@ -82,6 +82,22 @@ impl Intents {
     }
 }
 
+/// `mode`'s Inspect of `picked` was answered: its list's mark is dropped, unless a later pick in
+/// that list is still pending. The other mode's list keeps its own (queue-view.js keeps one per
+/// list).
+pub(crate) fn inspect_answered(app: &App, mode: Mode, picked: &str) {
+    let pending = match mode {
+        Mode::Remux => app.get_remux_pending_inspect(),
+        Mode::Extract => app.get_extract_pending_inspect(),
+    };
+    if pending == picked {
+        match mode {
+            Mode::Remux => app.set_remux_pending_inspect("".into()),
+            Mode::Extract => app.set_extract_pending_inspect("".into()),
+        }
+    }
+}
+
 /// Sets the remux Inspector's row's Track Assignment to the subtitle `path` from the fields as
 /// typed, or clears it for an empty `path` (app.js `assignSubtitle`); then, answered or refused,
 /// puts the fields back on what is published. Nothing while a batch runs but that put-back (the
@@ -200,17 +216,16 @@ pub(crate) fn wire(app: &App, core: CoreHandle, runtime: Handle, publisher: Slin
     // published Episode Inspector names the row, unless a later pick is still pending.
     let send = intents.clone();
     app.on_inspect(move |id| {
-        let (window, picked) = (send.window.clone(), id.clone());
-        let intent = |mode| Intent::Inspect {
-            mode,
+        let Some(app) = send.window.upgrade() else {
+            return;
+        };
+        let (window, mode, picked) = (send.window.clone(), app.get_mode(), id.clone());
+        let intent = Intent::Inspect {
+            mode: pipeline(mode),
             id: Some(id.into()),
         };
-        send.send_shown("inspect", intent, move || {
-            let _ = window.upgrade_in_event_loop(move |app| {
-                if app.get_pending_inspect() == picked {
-                    app.set_pending_inspect("".into());
-                }
-            });
+        send.send("inspect", intent, move || {
+            let _ = window.upgrade_in_event_loop(move |app| inspect_answered(&app, mode, &picked));
         });
     });
 
