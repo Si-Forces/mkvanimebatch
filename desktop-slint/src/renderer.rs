@@ -211,12 +211,7 @@ pub fn ask_restart() -> Answer {
     ];
     let mut reasons = Vec::new();
     for (tool, args) in tools {
-        // The C locale keeps stderr untranslated for read_answer; the dialog text stays English.
-        // gettext still reads LANGUAGE unless the locale is exactly "C", so drop it too.
-        let child = Command::new(tool)
-            .args(args)
-            .env("LC_ALL", "C.UTF-8")
-            .env_remove("LANGUAGE")
+        let child = dialog_command(tool, args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -241,6 +236,25 @@ pub fn ask_restart() -> Answer {
         }
     }
     Answer::Unavailable(reasons.join("; "))
+}
+
+/// The dialog `tool` run with `args`, in an environment [`read_answer`] can read. The C locale
+/// keeps stderr untranslated; the dialog text stays English. gettext still reads LANGUAGE unless
+/// the locale is exactly "C", so it goes too. zenity takes each exit code from `ZENITY_<code>`,
+/// else `DIALOG_<code>` (zenity's util.c), so an inherited one could turn a yes into a no.
+#[cfg(any(target_os = "linux", test))]
+fn dialog_command(tool: &str, args: &[&str]) -> Command {
+    let mut command = Command::new(tool);
+    command
+        .args(args)
+        .env("LC_ALL", "C.UTF-8")
+        .env_remove("LANGUAGE");
+    for code in ["OK", "CANCEL", "ESC", "ERROR", "EXTRA", "TIMEOUT"] {
+        command
+            .env_remove(format!("ZENITY_{code}"))
+            .env_remove(format!("DIALOG_{code}"));
+    }
+    command
 }
 
 /// How long the dialog may stay unanswered: a hung zenity or kdialog must not hold a process that
@@ -569,5 +583,24 @@ mod tests {
         // kdialog aborts without a display.
         assert_eq!(read_answer(None, ""), None);
         assert_eq!(read_answer(Some(255), ""), None);
+    }
+
+    #[test]
+    fn a_dialog_runs_with_zenitys_exit_codes_at_their_defaults() {
+        let command = dialog_command("zenity", &["--question"]);
+        let removed: Vec<_> = command
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(key, _)| key.to_string_lossy().into_owned())
+            .collect();
+        for var in [
+            "ZENITY_OK",
+            "DIALOG_OK",
+            "ZENITY_CANCEL",
+            "DIALOG_ESC",
+            "LANGUAGE",
+        ] {
+            assert!(removed.iter().any(|key| key == var), "{var} is inherited");
+        }
     }
 }
