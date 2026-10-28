@@ -148,8 +148,9 @@ pub fn forget_saved(dir: &Path) -> io::Result<()> {
 /// The re-launch: the same program and arguments, the inherited environment plus the software
 /// renderer, the guard and the save request. Under an AppImage the program is `$APPIMAGE` (the
 /// running binary sits in a mount that ends with this process) and `argv[0]` stays `$ARGV0`,
-/// which the AppImage runtime sets from it. `$APPIMAGE` counts only when `exe` is under
-/// `$APPDIR`: one inherited from another AppImage (a terminal, an IDE) names that one instead.
+/// which the AppImage runtime sets from it. `$APPIMAGE` counts only when it is non-empty and
+/// `exe` is under `$APPDIR`: one inherited from another AppImage (a terminal, an IDE) names that
+/// one instead.
 pub fn relaunch_command(
     exe: &Path,
     appimage: Option<OsString>,
@@ -284,11 +285,11 @@ fn wait_for_dialog(
     )))
 }
 
-/// zenity and kdialog answer 0 for yes and 1 for no or a closed dialog (kdialog may end with 2
-/// when its dialog is dismissed), but both can also end with 1 when they cannot reach the
-/// display, which they say on stderr: GTK's "Failed to open display", Qt's "could not connect to
-/// display" or "cannot connect to X server". Any other stderr is no sign of failure: Mesa warns
-/// there on a healthy start. `None`: not shown.
+/// zenity and kdialog answer 0 for yes and 1 for no or a closed dialog (kdialog ends with 2
+/// for any other result, such as a dismissed dialog), but both can also end with 1 (kdialog with
+/// 2) when they cannot reach the display, which they say on stderr: GTK's "Failed to open
+/// display", Qt's "could not connect to display" or "cannot connect to X server". Any other
+/// stderr is no sign of failure: Mesa warns there on a healthy start. `None`: not shown.
 #[cfg(any(target_os = "linux", test))]
 fn read_answer(code: Option<i32>, stderr: &str) -> Option<Answer> {
     let stderr = stderr.to_ascii_lowercase();
@@ -549,12 +550,13 @@ mod tests {
     }
 
     #[test]
-    fn a_dialog_tool_that_could_not_open_the_display_did_not_answer() {
+    fn read_answer_maps_exit_codes_and_display_errors() {
         assert_eq!(read_answer(Some(0), ""), Some(Answer::Yes));
         // A healthy "no" can still carry Mesa's warnings on stderr.
         let mesa = "MESA-INTEL: warning: Ivy Bridge Vulkan support is incomplete\n";
         assert_eq!(read_answer(Some(1), mesa), Some(Answer::No));
-        // kdialog may end with 2 when its dialog is dismissed (Esc, the title bar's close).
+        // kdialog ends with 2 for any result other than yes or no, such as a dismissed dialog
+        // (kdialog.cpp).
         assert_eq!(read_answer(Some(2), mesa), Some(Answer::No));
         let gtk = "(zenity:1): Gtk-WARNING **: 13:35:51.009: Failed to open display\n";
         assert_eq!(read_answer(Some(1), gtk), None);
