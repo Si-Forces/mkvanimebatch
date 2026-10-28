@@ -469,12 +469,18 @@ fn apply(app: &App, mode: Mode, update: Update) {
         }
     }
     if let Some(update) = update.inspector {
-        let inspector = map_inspector(update.view.as_ref(), mode);
+        let inspector = map_inspector(update.view.as_ref(), mode, &update.directory);
+        // Only remux has the subtitle section; its typed fields are written over the Inspector
+        // shown until now, which is set below.
         if let Some(subtitles) = update.subtitles {
             app.set_sub_ladder(ModelRc::new(VecModel::from(subtitles.ladder)));
             app.set_sub_options(ModelRc::new(VecModel::from(subtitles.options)));
             app.set_sub_values(ModelRc::new(VecModel::from(subtitles.values)));
-            write_form(app, &inspector);
+            write_form(app, &app.get_remux_inspector(), &inspector);
+        }
+        // No episode inspected: nothing typed is left to commit.
+        if mode == Mode::Remux && !inspector.shown {
+            app.set_sub_dirty(false);
         }
         match mode {
             Mode::Remux => app.set_remux_inspector(inspector),

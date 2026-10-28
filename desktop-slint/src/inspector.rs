@@ -71,9 +71,13 @@ pub(crate) fn map_library(library: &[LibraryEntry]) -> Vec<LibraryItem> {
         .collect()
 }
 
-/// The Inspector of `mode`, or its empty state for none. Its crumbs are models: call it on the
-/// event loop.
-pub(crate) fn map_inspector(view: Option<&InspectorView>, mode: Mode) -> Inspector {
+/// The Inspector of `mode`, or its empty state for none, of an episode in `directory` (the
+/// mode's, as the core names it). Its crumbs are models: call it on the event loop.
+pub(crate) fn map_inspector(
+    view: Option<&InspectorView>,
+    mode: Mode,
+    directory: &str,
+) -> Inspector {
     let Some(view) = view else {
         return Inspector::default();
     };
@@ -106,6 +110,7 @@ pub(crate) fn map_inspector(view: Option<&InspectorView>, mode: Mode) -> Inspect
     });
     Inspector {
         shown: true,
+        directory: directory.into(),
         id: view.id.as_str().into(),
         number: view.number.as_str().into(),
         title: view.title.as_str().into(),
@@ -201,16 +206,19 @@ pub(crate) fn map_subtitles(view: &InspectorView) -> Subtitles {
 }
 
 /// What the subtitle section redraws on, so a progress publication redraws none of it and the
-/// typed fields keep what is typed (app.js `lastAssignKey`).
+/// typed fields keep what is typed (app.js `lastAssignKey`): the folder too, so the same id in
+/// another folder is another episode.
 type FormKey = (
+    Option<String>,
     String,
     Vec<LadderRung>,
     Vec<Choice>,
     Option<TrackAssignment>,
 );
 
-fn form_key(view: &InspectorView) -> FormKey {
+fn form_key(directory: &Option<String>, view: &InspectorView) -> FormKey {
     (
+        directory.clone(),
         view.id.clone(),
         view.ladder.clone(),
         view.options.clone(),
@@ -223,6 +231,8 @@ fn form_key(view: &InspectorView) -> FormKey {
 pub(crate) struct InspectorUpdate {
     /// The Inspector to show ([`map_inspector`] on the event loop); none for its empty state.
     pub(crate) view: Option<InspectorView>,
+    /// The mode's folder, the episode's (`ModeView::directory`).
+    pub(crate) directory: String,
     /// The subtitle section to redraw, with the typed fields written back from the Inspector
     /// mapped from `view`;
     /// none while it keeps what it shows.
@@ -234,7 +244,8 @@ pub(crate) struct InspectorUpdate {
 #[derive(Default)]
 pub(crate) struct InspectorList {
     library: Option<Vec<LibraryEntry>>,
-    inspector: Option<Option<InspectorView>>,
+    /// The folder and the Inspector last staged.
+    inspector: Option<(Option<String>, Option<InspectorView>)>,
     key: Option<FormKey>,
     /// Whether the form key changed since the last take.
     form: bool,
@@ -249,21 +260,26 @@ impl InspectorList {
             self.staged_library = Some(map_library(&view.library));
             self.library = Some(view.library.clone());
         }
-        if self.inspector.as_ref() == Some(&view.inspector) {
+        let shown = (view.directory.clone(), view.inspector.clone());
+        if self.inspector.as_ref() == Some(&shown) {
             return;
         }
-        let key = view.inspector.as_ref().map(form_key);
+        let key = view
+            .inspector
+            .as_ref()
+            .map(|inspector| form_key(&view.directory, inspector));
         self.form |= key != self.key && mode == Mode::Remux;
         self.key = key;
         self.staged = Some(InspectorUpdate {
             view: view.inspector.clone(),
+            directory: view.directory.clone().unwrap_or_default(),
             subtitles: view
                 .inspector
                 .as_ref()
                 .filter(|_| self.form)
                 .map(map_subtitles),
         });
-        self.inspector = Some(view.inspector.clone());
+        self.inspector = Some(shown);
     }
 
     /// The Library and the Inspector to apply now, if they changed.
@@ -287,13 +303,20 @@ pub(crate) fn capped_tag(text: &str) -> Option<String> {
         .map(|(at, _)| text[..at].to_string())
 }
 
-/// Writes `inspector`'s published subtitle fields into the typed ones. A text field typed into
-/// and not committed yet keeps what is typed while the row stays the same, for its commit to
-/// send (app.js redraws over it); another row's drops it.
-pub(crate) fn write_form(app: &App, inspector: &Inspector) {
+/// The same episode: the same id in the same folder, compared as the core names them (a relative
+/// id alone is no identity; the crumbs are display only).
+fn same_episode(a: &Inspector, b: &Inspector) -> bool {
+    a.shown && b.shown && a.directory == b.directory && a.id == b.id
+}
+
+/// Writes `inspector`'s published subtitle fields into the typed ones, over `previous`, the
+/// remux Inspector shown until now. A text field typed into and not committed yet keeps what is
+/// typed while the same episode stays assigned, for its commit to send (app.js redraws over it);
+/// another episode's, or one no longer assigned, drops it.
+pub(crate) fn write_form(app: &App, previous: &Inspector, inspector: &Inspector) {
     app.set_sub_choice(inspector.choice);
     app.set_sub_language(inspector.language);
-    if app.get_sub_dirty() && app.get_remux_inspector().id == inspector.id {
+    if app.get_sub_dirty() && inspector.assigned && same_episode(previous, inspector) {
         return;
     }
     app.set_sub_dirty(false);
@@ -305,7 +328,8 @@ pub(crate) fn write_form(app: &App, inspector: &Inspector) {
 /// Puts the typed subtitle fields back on what the remux Inspector shows, after an Intent was
 /// answered (refused too) or the file dialog was cancelled.
 pub(crate) fn restore_form(app: &App) {
-    write_form(app, &app.get_remux_inspector());
+    let shown = app.get_remux_inspector();
+    write_form(app, &shown, &shown);
 }
 
 /// The typed subtitle fields, as `AssignSubtitle` sends them: language, custom tag, title,
@@ -443,7 +467,7 @@ mod tests {
     #[test]
     fn the_inspector_maps_every_field_and_the_published_subtitle_fields() {
         let mut view = sample_view();
-        let insp = map_inspector(Some(&view), Mode::Remux);
+        let insp = map_inspector(Some(&view), Mode::Remux, "");
         assert!(insp.shown && insp.subtitles && !insp.assigned);
         assert_eq!(
             (insp.number.as_str(), insp.title.as_str()),
@@ -474,7 +498,7 @@ mod tests {
                 true
             )
         );
-        let extract = map_inspector(Some(&view), Mode::Extract);
+        let extract = map_inspector(Some(&view), Mode::Extract, "");
         assert_eq!(extract.out_path, "Same folder as the input");
         assert!(!extract.subtitles);
         assert_eq!(insp.fonts_head, "FONTS · 2");
@@ -487,7 +511,7 @@ mod tests {
         view.assignment = Some(assignment(Some("may")));
         view.language_choice = "custom";
         view.custom_language = "may".into();
-        let insp = map_inspector(Some(&view), Mode::Remux);
+        let insp = map_inspector(Some(&view), Mode::Remux, "");
         assert_eq!(insp.error, "mkvmerge 2");
         assert_eq!(
             (
@@ -508,7 +532,7 @@ mod tests {
             ),
             ("may", "Signs", "-250")
         );
-        assert!(!map_inspector(None, Mode::Remux).shown);
+        assert!(!map_inspector(None, Mode::Remux, "").shown);
     }
 
     #[test]

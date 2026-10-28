@@ -112,6 +112,8 @@ fn assign_subtitle(send: &Intents, app: &App, path: &str) {
         return;
     }
     let (mode, id) = (PipelineMode::Remux, inspector.id.to_string());
+    // The fields go with the Intent: nothing typed is left to commit.
+    app.set_sub_dirty(false);
     let (name, intent) = if path.is_empty() {
         ("clear_track", Intent::ClearTrack { mode, id })
     } else {
@@ -133,15 +135,11 @@ fn assign_subtitle(send: &Intents, app: &App, path: &str) {
     });
 }
 
-/// The remux Inspector's episode: its id, which is relative to the folder, and the folder's
-/// crumbs, so the same relative path in another folder is another episode.
-fn inspected(app: &App) -> (SharedString, SharedString, SharedString) {
-    let head = app.get_remux_head();
-    (
-        app.get_remux_inspector().id,
-        head.crumbs_lead,
-        head.crumbs_end,
-    )
+/// The remux Inspector's episode: the folder, as the core names it, and the id in it, so the
+/// same relative id in another folder is another episode (as `inspector::write_form` compares them).
+fn inspected(app: &App) -> (SharedString, SharedString) {
+    let inspector = app.get_remux_inspector();
+    (inspector.directory, inspector.id)
 }
 
 /// The subtitle file dialog answered: `picked` is assigned to `target`, the episode the remux
@@ -150,7 +148,7 @@ fn inspected(app: &App) -> (SharedString, SharedString, SharedString) {
 fn subtitle_picked(
     send: &Intents,
     app: &App,
-    target: &(SharedString, SharedString, SharedString),
+    target: &(SharedString, SharedString),
     picked: Option<&str>,
 ) {
     match picked {
@@ -501,8 +499,10 @@ pub(crate) mod tests {
         app.set_sub_title("A".into());
         app.set_sub_offset("1e3".into());
 
-        // A choice picked: assigned with the fields as typed.
+        // A choice picked: assigned with the fields as typed, which leaves nothing to commit.
+        app.set_sub_dirty(true);
         app.invoke_choose_subtitle(1);
+        assert!(!app.get_sub_dirty());
         let typed = |title: &str| {
             Some((
                 "/subs/b.ass".to_string(),
@@ -554,18 +554,27 @@ pub(crate) mod tests {
             runtime: runtime.handle().clone(),
             window: app.as_weak(),
         };
-        let (_, lead, end) = inspected(&app);
-        subtitle_picked(&send, &app, &("a".into(), lead, end), Some("/subs/b.ass"));
+        let (directory, _) = inspected(&app);
+        subtitle_picked(&send, &app, &(directory, "a".into()), Some("/subs/b.ass"));
         assert_eq!(assignment(), None);
-        let other_folder = ("b".into(), "/other/".into(), "show".into());
+        let other_folder = ("/other".into(), "b".into());
         subtitle_picked(&send, &app, &other_folder, Some("/subs/b.ass"));
         assert_eq!(assignment(), None);
         subtitle_picked(&send, &app, &inspected(&app), Some("/subs/b.ass"));
         let path = assignment().map(|(path, ..)| path);
         assert_eq!(path.as_deref(), Some("/subs/b.ass"));
 
-        // "Choose a file…" while a batch runs: no dialog, the select goes back on what is shown.
+        // Locked while a batch runs: neither Automatic nor a committed title is sent, and the
+        // fields go back on what is shown.
         app.set_busy(true);
+        let before = assignment();
+        app.set_sub_title("C".into());
+        app.invoke_choose_subtitle(0);
+        app.invoke_subtitle_options_changed();
+        assert_eq!(assignment(), before);
+        assert_eq!(app.get_sub_title(), "", "put back on what is shown");
+
+        // "Choose a file…" while a batch runs: no dialog, the select goes back on what is shown.
         app.set_sub_choice(2);
         app.invoke_choose_subtitle(2);
         assert_eq!(app.get_sub_choice(), 1);

@@ -183,3 +183,167 @@ export component Pressable inherits Rectangle {
         }
     }
 }
+
+// A select (index.html's `<select>`, style.css `.field`): it shows the entry picked, and a click,
+// Enter, Space or a screen reader's action opens the list of its entries under it. In the list the
+// arrows move the highlight only; a click, Enter or Space picks an entry, Esc or a click outside
+// closes it unchanged, and the select has the focus again. Closed, it takes neither the arrows nor
+// the wheel, so the wheel scrolls the pane under it: only a pick changes it, as a WebKitGTK
+// select's does. `picked` fires once a pick, for the entry shown too (a select sends no change for
+// that one: its host passes over it).
+export component Select inherits Pressable {
+    in property <[string]> model;
+    in-out property <int> current-index;
+    callback picked(index: int);
+    // The entry the list's arrows are on.
+    property <int> highlight;
+    property <length> entry-height: 28px;
+    property <string> value: root.current-index >= 0 && root.current-index < root.model.length
+        ? root.model[root.current-index] : "";
+
+    min-width: 0px;
+    horizontal-stretch: 1;
+    // The height of the fluent fields beside it.
+    height: 32px;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Theme.line;
+    background: self.hovered && root.enabled ? Theme.hover : Theme.field;
+    opacity: root.enabled ? 1 : 0.75;
+    cursor: default;
+    // A held Return would open the list again as it closes.
+    repeats: false;
+    accessible-role: combobox;
+    accessible-value: root.value;
+    accessible-expandable: true;
+    accessible-expanded: popup.is-open;
+    accessible-action-expand => { root.activate(); }
+    clicked => {
+        root.highlight = max(0, root.current-index);
+        popup.show();
+    }
+
+    function pick(index: int) {
+        popup.close();
+        root.current-index = index;
+        root.picked(index);
+    }
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 6px;
+        Text {
+            text: root.value;
+            color: Theme.fg;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+            accessible-role: none;
+        }
+        // A chevron down.
+        Path {
+            width: 10px;
+            height: 6px;
+            y: (parent.height - self.height) / 2;
+            viewbox-width: 10;
+            viewbox-height: 6;
+            commands: "M1 1L5 5L9 1";
+            stroke: Theme.mute;
+            stroke-width: 1.5px;
+            stroke-line-cap: round;
+            stroke-line-join: round;
+            accessible-role: none;
+        }
+    }
+
+    popup := PopupWindow {
+        x: 0;
+        y: root.height + 4px;
+        // Not narrower than its entries need, within reason, as a native select's list.
+        width: max(root.width, 180px);
+        height: min(8, root.model.length) * root.entry-height + 10px;
+        close-policy: close-on-click-outside;
+        forward-focus: list-keys;
+        list-keys := FocusScope {
+            key-pressed(event) => {
+                if event.text == Key.UpArrow {
+                    root.highlight = max(0, root.highlight - 1);
+                    return accept;
+                }
+                if event.text == Key.DownArrow {
+                    root.highlight = min(root.model.length - 1, root.highlight + 1);
+                    return accept;
+                }
+                if (event.text == Key.Return || event.text == Key.Space) && !event.repeat {
+                    root.pick(root.highlight);
+                    return accept;
+                }
+                if event.text == Key.Escape {
+                    popup.close();
+                    return accept;
+                }
+                reject
+            }
+            Rectangle {
+                border-radius: 8px;
+                background: Theme.menu;
+                border-width: 1px;
+                border-color: Theme.sep;
+                drop-shadow-blur: 12px;
+                drop-shadow-offset-y: 4px;
+                drop-shadow-color: #0000002e;
+                list := Flickable {
+                    x: 4px;
+                    y: 5px;
+                    width: parent.width - 8px;
+                    height: parent.height - 10px;
+                    content-height: root.model.length * root.entry-height;
+                    // The highlighted entry stays in view.
+                    property <int> highlight: root.highlight;
+                    init => { self.follow(); }
+                    changed highlight => { self.follow(); }
+                    function follow() {
+                        let top = root.highlight * root.entry-height;
+                        if top + self.content-y < 0px {
+                            self.content-y = -top;
+                        } else if top + root.entry-height + self.content-y > self.height {
+                            self.content-y = self.height - top - root.entry-height;
+                        }
+                    }
+                    for entry[index] in root.model: Rectangle {
+                        y: index * root.entry-height;
+                        width: parent.width;
+                        height: root.entry-height;
+                        border-radius: 6px;
+                        background: index == root.highlight ? Theme.sel : transparent;
+                        accessible-role: list-item;
+                        accessible-label: entry;
+                        accessible-item-index: index;
+                        accessible-item-selectable: true;
+                        accessible-item-selected: index == root.current-index;
+                        accessible-action-default => { root.pick(index); }
+                        Text {
+                            x: 8px;
+                            width: parent.width - 16px;
+                            text: entry;
+                            color: Theme.fg;
+                            font-weight: index == root.current-index ? 600 : 400;
+                            vertical-alignment: center;
+                            overflow: elide;
+                            accessible-role: none;
+                        }
+                        TouchArea {
+                            changed has-hover => {
+                                if self.has-hover {
+                                    root.highlight = index;
+                                }
+                            }
+                            clicked => { root.pick(index); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

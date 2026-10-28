@@ -824,6 +824,59 @@ fn a_typed_subtitle_field_is_committed_before_a_click_elsewhere() {
     app.hide().unwrap();
 }
 
+/// Text typed into the subtitle fields and not committed stays with its episode: the same id in
+/// another folder (the core keeps a folder's queue while the next one scans) gets its own
+/// published fields, and an Inspector that shows no episode leaves nothing to commit.
+#[test]
+fn typed_subtitle_text_stays_with_its_folders_episode() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    let publisher = SlintPublisher::new(&app);
+    let mut assigned = sample_view();
+    assigned.assignment = Some(mkv_core::request::TrackAssignment {
+        target_video: "Season 1/ep1.mkv".into(),
+        asset_path: "Season 1/ep1.ass".into(),
+        track_type: Default::default(),
+        language: Some("eng".into()),
+        title: Some("Dialogue".into()),
+        offset_ms: None,
+    });
+    let mut state = ViewState::new(None);
+    state.remux.directory = Some("/media/A".into());
+    state.remux.rows = Arc::new(vec![row("Season 1/ep1.mkv")]);
+    state.remux.empty = None;
+    state.remux.inspector = Some(assigned);
+    publisher.show(&state);
+    assert_eq!(app.get_sub_title(), "Dialogue");
+    let type_signs = || {
+        app.set_sub_title("Signs".into());
+        app.set_sub_offset("-500".into());
+        app.set_sub_dirty(true);
+    };
+    type_signs();
+    crate::inspector::restore_form(&app);
+    assert_eq!(app.get_sub_title(), "Signs", "kept on its own episode");
+
+    state.seq = 1;
+    state.remux.directory = Some("/media/B".into());
+    publisher.show(&state);
+    let fields = |app: &App| {
+        (
+            app.get_sub_title().to_string(),
+            app.get_sub_offset().to_string(),
+            app.get_sub_dirty(),
+        )
+    };
+    assert_eq!(fields(&app), ("Dialogue".into(), "".into(), false));
+    assert_eq!(app.get_remux_inspector().directory, "/media/B");
+
+    type_signs();
+    state.seq = 2;
+    state.remux.inspector = None;
+    publisher.show(&state);
+    assert!(!app.get_sub_dirty(), "no episode, nothing to commit");
+}
+
 /// Reset removes itself when clicked: the window's keys keep working after it (Esc, Ctrl+T).
 #[test]
 fn the_window_keys_work_after_reset_removes_itself() {
@@ -1186,6 +1239,131 @@ fn picking_the_custom_tag_focuses_the_tag_field() {
     app.hide().unwrap();
 }
 
+/// Drives the select labelled `label` as a user who scrolls or arrows over it does, `sent`
+/// counting what it sent: a click opens its list and Esc closes it unchanged, the focus back on
+/// it; the wheel over it and the arrows, closed or in its list, send nothing; Return in the list
+/// picks the entry highlighted, once, and the select has the focus again.
+fn a_select_sends_a_pick_alone(app: &App, label: &str, sent: &dyn Fn() -> usize) {
+    use slint::platform::{Key, WindowEvent};
+    let select = ElementHandle::find_by_accessible_label(app, label)
+        .find(|element| {
+            element.accessible_role() == Some(i_slint_backend_testing::AccessibleRole::Combobox)
+        })
+        .unwrap_or_else(|| panic!("a {label:?} select"));
+    let shown = select.accessible_value();
+    pointer(app, &select, true);
+    pointer(app, &select, false);
+    frame(app);
+    assert_eq!(
+        select.accessible_expanded(),
+        Some(true),
+        "{label}: a click opens it"
+    );
+    key(app, Key::Escape);
+    assert_eq!(
+        select.accessible_expanded(),
+        Some(false),
+        "{label}: Esc closes it"
+    );
+    assert_eq!(focused(app), label, "{label}: the focus is back on it");
+
+    let (at, size) = (select.absolute_position(), select.size());
+    let position = slint::LogicalPosition::new(at.x + size.width / 2.0, at.y + size.height / 2.0);
+    for delta_y in [-40.0, 40.0, -40.0, -40.0] {
+        app.window().dispatch_event(WindowEvent::PointerScrolled {
+            position,
+            delta_x: 0.0,
+            delta_y,
+        });
+    }
+    key(app, Key::DownArrow);
+    key(app, Key::UpArrow);
+    assert_eq!(sent(), 0, "{label}: the wheel and the arrows send nothing");
+    assert_eq!(select.accessible_value(), shown, "{label}: nor change it");
+
+    key(app, Key::Return);
+    frame(app);
+    assert_eq!(
+        select.accessible_expanded(),
+        Some(true),
+        "{label}: Return opens it"
+    );
+    for arrow in [Key::DownArrow, Key::UpArrow, Key::DownArrow] {
+        key(app, arrow);
+    }
+    assert_eq!(
+        sent(),
+        0,
+        "{label}: the arrows in its list move the highlight only"
+    );
+    key(app, Key::Return);
+    assert_eq!(sent(), 1, "{label}: a pick sends once");
+    assert_eq!(select.accessible_expanded(), Some(false));
+    assert_ne!(
+        select.accessible_value(),
+        shown,
+        "{label}: the next entry is picked"
+    );
+}
+
+/// The Inspector's selects change the Track Assignment on a pick alone: the wheel over them
+/// scrolls the pane, and the arrows in their list only move the highlight, as a WebKitGTK
+/// `<select>` does.
+#[test]
+fn the_inspector_selects_send_a_pick_alone() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    let mut assigned = sample_view();
+    assigned.assignment = Some(mkv_core::request::TrackAssignment {
+        target_video: "Season 1/ep1.mkv".into(),
+        asset_path: "Season 1/ep1.ass".into(),
+        track_type: Default::default(),
+        language: Some("eng".into()),
+        title: None,
+        offset_ms: None,
+    });
+    let mut state = ViewState::new(None);
+    state.remux.rows = Arc::new(vec![row("Show - 01.mkv")]);
+    state.remux.empty = None;
+    state.remux.inspector = Some(assigned);
+    apply(&app, &state);
+    app.show().unwrap();
+    frame(&app);
+    let calls = Rc::new(Cell::new(0));
+    let count = Rc::clone(&calls);
+    app.on_choose_subtitle(move |_| count.set(count.get() + 1));
+    let count = Rc::clone(&calls);
+    app.on_choose_language(move |_| count.set(count.get() + 1));
+
+    for label in ["Assign subtitle", "Language"] {
+        calls.set(0);
+        a_select_sends_a_pick_alone(&app, label, &|| calls.get());
+    }
+    app.hide().unwrap();
+}
+
+/// The sheet's bitrate select sends its edit on a pick alone, so the wheel over it never turns
+/// the preset custom; Esc in its list closes the list, not the sheet.
+#[test]
+fn the_bitrate_select_sends_a_pick_alone() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window()
+        .set_size(slint::LogicalSize::new(920.0, 1100.0));
+    apply(&app, &ViewState::new(None));
+    app.show().unwrap();
+    app.invoke_open_sheet(Mode::Remux, "".into());
+    frame(&app);
+    let calls = Rc::new(Cell::new(0));
+    let count = Rc::clone(&calls);
+    app.global::<Sheet>()
+        .on_committed(move |_| count.set(count.get() + 1));
+    a_select_sends_a_pick_alone(&app, "Opus bitrate", &|| calls.get());
+    assert!(app.get_sheet_open());
+    app.hide().unwrap();
+}
+
 /// WCAG relative luminance of an sRGB colour.
 fn luminance(color: Color) -> f64 {
     let channel = |value: u8| {
@@ -1264,6 +1442,7 @@ fn every_text_token_meets_wcag_aa_on_every_surface_in_both_themes() {
             ("head", theme.get_head()),
             ("float", theme.get_float()),
             ("glass-float", theme.get_glass_float()),
+            ("menu", theme.get_menu()),
         ];
         let tints = [
             ("field", theme.get_field()),

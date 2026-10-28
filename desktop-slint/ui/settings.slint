@@ -3,10 +3,10 @@
 // bindings only: the host (desktop-slint/src/settings.rs) maps the published Settings Draft, sends
 // the edits and holds every rule: which field a publication writes back, the steppers' repeat, the
 // hints and the preset texts.
-import { Button, CheckBox, ComboBox, LineEdit, ScrollView, Slider } from "std-widgets.slint";
+import { Button, CheckBox, LineEdit, ScrollView, Slider } from "std-widgets.slint";
 import { GlassPane, Theme } from "theme.slint";
 import { CapButton, PillButton } from "jobs.slint";
-import { Focus, Pressable } from "focus.slint";
+import { Focus, Pressable, Select } from "focus.slint";
 
 // One mode's Settings Draft as the sheet shows it, every field as typed but the two checkboxes.
 // The remux-only fields stay empty in extract's. `bitrate` is the index of the bitrate select's
@@ -671,18 +671,17 @@ export component SettingsSheet inherits GlassPane {
                                 spacing: 12px;
                                 Field {
                                     label: "Opus bitrate";
-                                    ComboBox {
-                                        min-width: 0px;
+                                    Select {
                                         model: root.bitrates;
                                         current-index <=> root.form.bitrate;
                                         enabled: !root.locked;
                                         accessible-label: "Opus bitrate";
-                                        changed has-focus => {
-                                            if self.has-focus {
+                                        changed focused => {
+                                            if self.focused {
                                                 Sheet.reveal(self.absolute-position.y, self.height);
                                             }
                                         }
-                                        selected => {
+                                        picked => {
                                             Sheet.edited("bitrate");
                                             Sheet.committed("bitrate");
                                         }
