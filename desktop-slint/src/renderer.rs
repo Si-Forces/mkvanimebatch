@@ -25,7 +25,8 @@ pub const RELAUNCHED_ENV: &str = "MKV_RENDERER_RELAUNCHED";
 /// Set on a re-launched child: save the software choice once a frame is drawn, so a restart that
 /// fails too leaves nothing saved.
 pub const SAVE_ENV: &str = "MKV_RENDERER_SAVE";
-/// The saved choice, under `<config dir>/com.mkvanimebatch.desktop/`; it holds `software`.
+/// The saved choice, under `<local config dir>/com.mkvanimebatch.desktop/` ([`choice_dir`]); it
+/// holds `software`.
 const CHOICE_FILE: &str = "renderer";
 
 pub const DIALOG_TITLE: &str = "MKV Anime Batch";
