@@ -4,6 +4,7 @@
 //! Tauri at P9 (#142), a fix to the truncation, the Windows append, ANSI handling or the path goes
 //! into both.
 
+use std::any::Any;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
@@ -25,10 +26,12 @@ pub(crate) const IDENTIFIER: &str = "com.mkvanimebatch.desktop";
 /// A log file larger than this is emptied at startup; there is no rotation.
 const MAX_LOG_BYTES: u64 = 1_048_576;
 
-/// Installs the app's subscriber as the global default. A subscriber that is already set is left
-/// alone. Never fails: with no usable log directory the output is stderr only. Returns what the
-/// window says when there is no log file (ADR-0017 decision 9): the file that could not be opened,
-/// naming its path, or no log directory at all.
+/// Installs the app's subscriber as the global default, and a panic hook that logs each panic's
+/// message and location before the default hook prints it: a Windows build has no console, so the
+/// log file is where a panic shows. A subscriber that is already set is left alone. Never fails:
+/// with no usable log directory the output is stderr only. Returns what the window says when there
+/// is no log file (ADR-0017 decision 9): the file that could not be opened, naming its path, or no
+/// log directory at all.
 pub fn init(log_dir: Option<&Path>) -> Option<String> {
     let (dispatch, failed) = build_dispatch(
         log_dir,
@@ -37,7 +40,22 @@ pub fn init(log_dir: Option<&Path>) -> Option<String> {
         io::stderr().is_terminal(),
     );
     let _ = tracing::dispatcher::set_global_default(dispatch);
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        tracing::error!("{info}");
+        default_hook(info);
+    }));
     failed
+}
+
+/// A caught panic's message: its payload when that is a `&str` or a `String` (what `panic!`
+/// makes), otherwise a placeholder.
+pub fn panic_text(payload: &(dyn Any + Send)) -> &str {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("a panic with no message")
 }
 
 /// The title of the in-window notice that there is no log file this session.
@@ -203,6 +221,18 @@ mod tests {
         let dir = log_dir().expect("a local data directory");
         assert!(dir.starts_with(dirs::data_local_dir().unwrap()));
         assert!(dir.ends_with(Path::new("com.mkvanimebatch.desktop").join("logs")));
+    }
+
+    #[test]
+    fn test_panic_text_keeps_a_str_or_string_payload() {
+        let caught = |f: fn()| std::panic::catch_unwind(f).unwrap_err();
+        let literal = caught(|| panic!("plain literal"));
+        let formatted = caught(|| panic!("formatted {}", 7));
+        let other = caught(|| std::panic::panic_any(7_u8));
+
+        assert_eq!(panic_text(&*literal), "plain literal");
+        assert_eq!(panic_text(&*formatted), "formatted 7");
+        assert_eq!(panic_text(&*other), "a panic with no message");
     }
 
     #[test]

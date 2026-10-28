@@ -236,7 +236,10 @@ fn run(
     match std::thread::spawn(move || cleanup_owned_processes(&job, &scan_state)).join() {
         Ok(Ok(())) => {}
         Ok(Err(error)) => tracing::error!("Teardown after the event loop failed: {error}"),
-        Err(_) => tracing::error!("Teardown after the event loop panicked"),
+        Err(payload) => tracing::error!(
+            "Teardown after the event loop panicked: {}",
+            diagnostics::panic_text(&*payload)
+        ),
     }
     // Nothing the teardown stopped is left to wait for; a stuck blocking task must not hold exit.
     runtime.shutdown_background();
@@ -398,7 +401,12 @@ fn start_close(
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             cleanup_owned_processes(&job, &scan)
         }))
-        .unwrap_or_else(|_| Err("the teardown panicked".to_string()));
+        .unwrap_or_else(|payload| {
+            Err(format!(
+                "the teardown panicked: {}",
+                diagnostics::panic_text(&*payload)
+            ))
+        });
         match result {
             Ok(()) => {
                 let _ = slint::quit_event_loop();
