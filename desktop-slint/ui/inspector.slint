@@ -3,7 +3,9 @@
 // (desktop-slint/src/inspector.rs) and does what the controls ask.
 import { ComboBox, LineEdit, ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
+import { Pressable, TipCard } from "focus.slint";
 import { LinkButton, RowTone } from "queue.slint";
+import { SectionHead } from "settings.slint";
 
 // One Library entry (.lib-root, .lib-release): the input folder, then each other release.
 export struct LibraryItem {
@@ -63,17 +65,15 @@ export struct Inspector {
     offset: string,
 }
 
-// A Library entry (.nav.lib-root / .nav.lib-release).
-export component LibraryEntry inherits Rectangle {
+// A Library entry (.nav.lib-root / .nav.lib-release), its `title` the hover tooltip.
+export component LibraryEntry inherits Pressable {
     in property <LibraryItem> item;
-    callback clicked();
     height: 32px;
     border-radius: 8px;
-    background: touch.has-hover ? Theme.hover : item.root ? Theme.sel : transparent;
-    accessible-role: button;
+    background: self.hovered ? Theme.hover : item.root ? Theme.sel : transparent;
     accessible-label: item.a11y;
-    accessible-description: item.tooltip;
-    accessible-action-default => { root.clicked(); }
+    tip: item.tooltip;
+    focus-key: "library:" + (item.root ? "/" : item.release);
     HorizontalLayout {
         padding-left: root.item.root ? 8px : 32px;
         padding-right: 8px;
@@ -95,17 +95,6 @@ export component LibraryEntry inherits Rectangle {
             accessible-role: none;
         }
     }
-    touch := TouchArea {
-        clicked => { root.clicked(); }
-    }
-}
-
-// A section heading (.insp-section h4).
-component SectionHead inherits Text {
-    color: Theme.mute;
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.77px;
 }
 
 // A path as crumbs (.crumbs): each crumb but the last followed by "›" (the host's), the last in
@@ -169,30 +158,30 @@ component Labelled inherits VerticalLayout {
 
 // A text field that commits as a webview `change` does: on Enter or when it loses focus, once
 // edited since the last commit.
-// `dirty` is the pane's, shared by its fields: a commit sends them all.
-component CommitEdit inherits LineEdit {
+// `dirty` is the pane's, shared by its fields: a commit sends them all. The placeholder is drawn
+// here in Theme.hint, as the sheet's DraftEdit does: the fluent LineEdit's own is near white in the
+// dark theme and its colour cannot be set.
+component CommitEdit inherits Rectangle {
+    in-out property <string> text <=> edit.text;
+    in property <string> placeholder;
+    in property <bool> enabled <=> edit.enabled;
+    in property <string> label;
     in-out property <bool> dirty;
     // Takes the focus when set, or when the field is made with it set, and clears it.
     in-out property <bool> grab-focus;
     callback committed();
     callback typed(text: string);
     min-width: 0px;
+    horizontal-stretch: 1;
+    min-height: edit.min-height;
+    preferred-height: edit.preferred-height;
+    forward-focus: edit;
     init => { self.take-focus(); }
     changed grab-focus => { self.take-focus(); }
     function take-focus() {
         if self.grab-focus {
             self.grab-focus = false;
-            self.focus();
-        }
-    }
-    edited(text) => {
-        self.dirty = true;
-        root.typed(text);
-    }
-    accepted => { self.commit(); }
-    changed has-focus => {
-        if !self.has-focus {
-            self.commit();
+            edit.focus();
         }
     }
     function commit() {
@@ -200,6 +189,33 @@ component CommitEdit inherits LineEdit {
             self.dirty = false;
             root.committed();
         }
+    }
+    edit := LineEdit {
+        width: root.width;
+        height: root.height;
+        accessible-label: root.label;
+        accessible-placeholder-text: root.placeholder;
+        edited(text) => {
+            root.dirty = true;
+            root.typed(text);
+        }
+        accepted => { root.commit(); }
+        changed has-focus => {
+            if !self.has-focus {
+                root.commit();
+            }
+        }
+    }
+    // Inset as the LineEdit's text (fluent pads it 12px); hidden while the field has the focus,
+    // where an input method's preedit text would draw over it.
+    if edit.text == "" && !edit.has-focus: Text {
+        x: 12px;
+        width: root.width - 24px;
+        text: root.placeholder;
+        color: root.enabled ? Theme.hint : Theme.hint.with-alpha(0.6);
+        vertical-alignment: center;
+        overflow: elide;
+        accessible-role: none;
     }
 }
 
@@ -226,8 +242,8 @@ export component InspectorPane inherits Rectangle {
     callback choose-language(index: int);
     callback language-tag-edited(text: string);
 
-    // Commits a field edited but not committed: the window calls it before a click on a control
-    // that takes no focus, which the field's own blur would otherwise miss.
+    // Commits a field edited but not committed: the window calls it before a control's action,
+    // which may come without the focus moving off the field (its blur commits it otherwise).
     public function flush() {
         if root.dirty {
             root.dirty = false;
@@ -419,64 +435,80 @@ export component InspectorPane inherits Rectangle {
                         padding-top: 16px;
                         spacing: 8px;
                         SectionHead { text: "SUBTITLE · WHY THIS ONE"; }
-                        VerticalLayout {
-                            spacing: 4px;
-                            for rung in root.ladder: Rectangle {
-                                border-radius: 8px;
-                                background: rung.chosen ? Theme.accent-soft : transparent;
-                                accessible-role: text;
-                                accessible-label: rung.a11y;
-                                HorizontalLayout {
-                                    padding-top: 6px;
-                                    padding-bottom: 6px;
-                                    padding-left: 8px;
-                                    padding-right: 8px;
-                                    spacing: 8px;
-                                    VerticalLayout {
-                                        alignment: center;
-                                        Rectangle {
-                                            width: 20px;
-                                            height: 20px;
-                                            border-radius: 10px;
-                                            border-width: 1px;
-                                            border-color: rung.chosen ? Theme.accent : Theme.line;
-                                            background: rung.chosen ? Theme.accent : transparent;
-                                            Text {
-                                                text: rung.num;
-                                                color: rung.chosen ? Theme.accent-fg : rung.found ? Theme.fg : Theme.mute;
-                                                font-family: "Unbounded";
-                                                font-size: 10px;
-                                                font-weight: 600;
-                                                accessible-role: none;
+                        // An ordered list of its rungs (index.html's `ol.ladder`).
+                        Rectangle {
+                            accessible-role: list;
+                            accessible-item-count: root.ladder.length;
+                            VerticalLayout {
+                                spacing: 4px;
+                                for rung[index] in root.ladder: Rectangle {
+                                    border-radius: 8px;
+                                    background: rung.chosen ? Theme.accent-soft : transparent;
+                                    accessible-role: list-item;
+                                    accessible-label: rung.a11y;
+                                    accessible-item-index: index;
+                                    accessible-item-selectable: false;
+                                    HorizontalLayout {
+                                        padding-top: 6px;
+                                        padding-bottom: 6px;
+                                        padding-left: 8px;
+                                        padding-right: 8px;
+                                        spacing: 8px;
+                                        VerticalLayout {
+                                            alignment: center;
+                                            Rectangle {
+                                                width: 20px;
+                                                height: 20px;
+                                                border-radius: 10px;
+                                                border-width: 1px;
+                                                border-color: rung.chosen ? Theme.accent : Theme.line;
+                                                background: rung.chosen ? Theme.accent : transparent;
+                                                Text {
+                                                    text: rung.num;
+                                                    color: rung.chosen ? Theme.accent-fg : rung.found ? Theme.fg : Theme.mute;
+                                                    font-family: "Unbounded";
+                                                    font-size: 10px;
+                                                    font-weight: 600;
+                                                    accessible-role: none;
+                                                }
                                             }
                                         }
-                                    }
-                                    VerticalLayout {
-                                        alignment: center;
-                                        horizontal-stretch: 1;
+                                        VerticalLayout {
+                                            alignment: center;
+                                            horizontal-stretch: 1;
+                                            Text {
+                                                text: rung.label;
+                                                color: rung.chosen || rung.found ? Theme.fg : Theme.mute;
+                                                font-size: 12px;
+                                                font-weight: rung.chosen ? 600 : 400;
+                                                overflow: elide;
+                                                accessible-role: none;
+                                            }
+                                            // The full detail on hover, as its `title`.
+                                            if rung.found: Rectangle {
+                                                Text {
+                                                    width: 100%;
+                                                    text: rung.detail;
+                                                    color: Theme.path;
+                                                    font-size: 12px;
+                                                    overflow: elide;
+                                                    accessible-role: none;
+                                                }
+                                                Tooltip {
+                                                    TipCard {
+                                                        text: rung.detail;
+                                                    }
+                                                }
+                                            }
+                                        }
                                         Text {
-                                            text: rung.label;
+                                            text: rung.tag;
                                             color: rung.chosen || rung.found ? Theme.fg : Theme.mute;
-                                            font-size: 12px;
-                                            font-weight: rung.chosen ? 600 : 400;
-                                            overflow: elide;
+                                            font-size: 11px;
+                                            font-weight: 500;
+                                            vertical-alignment: center;
                                             accessible-role: none;
                                         }
-                                        if rung.found: Text {
-                                            text: rung.detail;
-                                            color: Theme.path;
-                                            font-size: 12px;
-                                            overflow: elide;
-                                            accessible-role: none;
-                                        }
-                                    }
-                                    Text {
-                                        text: rung.tag;
-                                        color: rung.chosen || rung.found ? Theme.fg : Theme.mute;
-                                        font-size: 11px;
-                                        font-weight: 500;
-                                        vertical-alignment: center;
-                                        accessible-role: none;
                                     }
                                 }
                             }
@@ -520,9 +552,9 @@ export component InspectorPane inherits Rectangle {
                                     label: "Language tag";
                                     CommitEdit {
                                         text <=> root.custom-language;
-                                        placeholder-text: "ISO 639-2, e.g. may";
+                                        placeholder: "ISO 639-2, e.g. may";
                                         enabled: !root.busy;
-                                        accessible-label: "Language tag";
+                                        label: "Language tag";
                                         dirty <=> root.dirty;
                                         typed(text) => { root.language-tag-edited(text); }
                                         committed => { root.options-changed(); }
@@ -533,9 +565,9 @@ export component InspectorPane inherits Rectangle {
                                     label: "Track title";
                                     CommitEdit {
                                         text <=> root.track-title;
-                                        placeholder-text: "e.g. Dialogue";
+                                        placeholder: "e.g. Dialogue";
                                         enabled: !root.busy;
-                                        accessible-label: "Track title";
+                                        label: "Track title";
                                         dirty <=> root.dirty;
                                         committed => { root.options-changed(); }
                                     }
@@ -547,9 +579,9 @@ export component InspectorPane inherits Rectangle {
                                     label: "Track title";
                                     CommitEdit {
                                         text <=> root.track-title;
-                                        placeholder-text: "e.g. Dialogue";
+                                        placeholder: "e.g. Dialogue";
                                         enabled: !root.busy;
-                                        accessible-label: "Track title";
+                                        label: "Track title";
                                         dirty <=> root.dirty;
                                         committed => { root.options-changed(); }
                                     }
@@ -558,9 +590,9 @@ export component InspectorPane inherits Rectangle {
                                     label: "Offset (ms)";
                                     CommitEdit {
                                         text <=> root.offset;
-                                        placeholder-text: "0";
+                                        placeholder: "0";
                                         enabled: !root.busy;
-                                        accessible-label: "Offset (ms)";
+                                        label: "Offset (ms)";
                                         dirty <=> root.dirty;
                                         committed => { root.options-changed(); }
                                     }

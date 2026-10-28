@@ -1,0 +1,165 @@
+// The window's custom controls (style.css `:focus-visible`, `title`): one pressable base that takes
+// the focus from Tab and a left press, activates on Enter, Space, a click or a screen reader's
+// action, draws the focus ring only for keyboard focus, shows its tooltip, and takes the focus back
+// when a closing dialog or sheet asks for it. Layout and bindings only.
+import { Theme } from "theme.slint";
+
+export global Focus {
+    // The last input was a key, or a Tab moved the focus: the focused control draws its ring, as
+    // `:focus-visible` does. The window's key scope sets it on a key (not a modifier alone, nor a
+    // shortcut); a left press anywhere clears it: on a control or the sheet's backdrop here, and
+    // anywhere in the window from the host's winit event filter (main.rs `watch_window`).
+    in-out property <bool> keyboard;
+    // The `focus-key` of the Pressable with the focus; empty when none of them has it.
+    in-out property <string> current;
+    // `restore` asks the Pressable of `restore-key` to take the focus, unless it is disabled.
+    in-out property <string> restore-key;
+    in-out property <int> restore-serial;
+
+    public function restore(key: string) {
+        self.restore-key = key;
+        self.restore-serial += 1;
+    }
+}
+
+// style.css's `:focus-visible` outline: 2px of the accent, `gap` out from the control, which
+// sizes it (`around`).
+export component FocusRing inherits Rectangle {
+    in property <length> gap: 2px;
+    // The control's size and corner radius.
+    in property <length> around-width;
+    in property <length> around-height;
+    in property <length> radius;
+    x: -self.gap - 2px;
+    y: -self.gap - 2px;
+    width: self.around-width + 2 * (self.gap + 2px);
+    height: self.around-height + 2 * (self.gap + 2px);
+    border-radius: self.radius + self.gap + 2px;
+    border-width: 2px;
+    border-color: Theme.accent;
+}
+
+// A tooltip's card with plain text: a `Tooltip`'s own `text` is markdown.
+export component TipCard inherits Rectangle {
+    in property <string> text;
+    // At most 320px wide: a longer text (a run's title with its path) wraps, anywhere in a path.
+    width: min(tip-text.preferred-width + 16px, 320px);
+    height: tip-text.preferred-height + 10px;
+    border-radius: 6px;
+    background: Theme.float;
+    border-width: 1px;
+    border-color: Theme.sep;
+    tip-text := Text {
+        x: 8px;
+        width: parent.width - 16px;
+        text: root.text;
+        color: Theme.fg;
+        font-size: 12px;
+        wrap: word-wrap;
+    }
+}
+
+// A custom control: a button unless it says otherwise. Its content goes on top of the pointer
+// area; the ring and the tooltip over it.
+export component Pressable inherits Rectangle {
+    in property <bool> enabled: true;
+    // The hover tooltip (index.html's `title`), also the accessible description; none when empty.
+    in property <string> tip;
+    // Names the control for `Focus.restore`: its accessible label unless set; empty for never.
+    in property <string> focus-key: self.accessible-label;
+    // The ring's distance from the control (outline-offset).
+    in property <length> ring-gap: 2px;
+    // A click activates it; a stepper steps on the press instead (`pointer`).
+    in property <bool> pointer-click: true;
+    in property <MouseCursor> cursor: MouseCursor.pointer;
+    callback clicked();
+    // Every pointer event over it, after a left press took the focus.
+    callback pointer(event: PointerEvent);
+    out property <bool> focused: keys.has-focus;
+    // The ring shows: focused, and the last input was a key.
+    out property <bool> ring: keys.has-focus && Focus.keyboard;
+    out property <bool> hovered: touch.has-hover;
+    out property <bool> pressed: touch.pressed;
+
+    forward-focus: keys;
+    accessible-role: button;
+    accessible-enabled: root.enabled;
+    accessible-description: root.tip;
+    // A screen reader's activation focuses it first, as a click does, so a dialog or the sheet it
+    // opens gives the focus back to it, and a typed field it leaves commits.
+    protected function activate() {
+        if root.enabled {
+            keys.focus();
+            root.clicked();
+        }
+    }
+    accessible-action-default => { root.activate(); }
+
+    // A disabled control is passed over: a programmatic focus would move on to the next one.
+    property <int> restore: Focus.restore-serial;
+    changed restore => {
+        if root.enabled && root.focus-key != "" && Focus.restore-key == root.focus-key {
+            keys.focus();
+        }
+    }
+    // A row written in place can rename the focused control (a Library entry's release): its
+    // focus-lost would then miss the old key, so `Focus.current` follows.
+    changed focus-key => {
+        if keys.has-focus {
+            Focus.current = root.focus-key;
+        }
+    }
+
+    keys := FocusScope {
+        enabled: root.enabled;
+        focus-gained(reason) => {
+            Focus.current = root.focus-key;
+            if reason == FocusReason.tab-navigation {
+                Focus.keyboard = true;
+            }
+        }
+        focus-lost => {
+            if Focus.current == root.focus-key {
+                Focus.current = "";
+            }
+        }
+        // Return repeats while held, as on a browser's button; Space activates once a press, as
+        // the browser's does on its release.
+        key-pressed(event) => {
+            if event.text == Key.Return || (event.text == Key.Space && !event.repeat) {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? root.cursor : not-allowed;
+        // A left press takes the focus, as a browser's button does, without a ring.
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
+                Focus.keyboard = false;
+                keys.focus();
+            }
+            root.pointer(event);
+        }
+        clicked => {
+            if root.pointer-click {
+                root.clicked();
+            }
+        }
+    }
+    @children
+    if root.ring: FocusRing {
+        gap: root.ring-gap;
+        around-width: root.width;
+        around-height: root.height;
+        radius: root.border-radius;
+    }
+    if root.tip != "": Tooltip {
+        TipCard {
+            text: root.tip;
+        }
+    }
+}

@@ -4,7 +4,7 @@
 use crate::inspector::sample_view;
 use crate::publisher::{install_models, SlintPublisher};
 use i_slint_backend_testing::{ElementHandle, TestingBackend, TestingBackendOptions};
-use mkv_anime_batch_slint_ui::{App, FontProbe, Mode, QueueFilter, Sheet, Theme};
+use mkv_anime_batch_slint_ui::{App, Focus, FontProbe, Mode, QueueFilter, Sheet, Theme};
 use mkv_desktop_core::actor::{Publisher, ScanView, ViewState};
 use mkv_desktop_core::presentation::{self, Bucket, Tone};
 use mkv_desktop_core::queue::Row;
@@ -668,10 +668,10 @@ fn the_sidebar_scrolls_to_open_folder_past_many_releases() {
     app.hide().unwrap();
 }
 
-/// A title typed and not committed is committed before a click on a control that takes no focus
-/// (a row, Open folder, a filter chip, a Library entry, a mode tab, Reset), as the webview's blur
-/// commits it before the click lands; an answered Intent's write-back keeps what is typed
-/// meanwhile.
+/// A title typed and not committed is committed once before a screen reader's activation of a
+/// custom control (a row, Open folder, a filter chip, a Library entry, a mode tab, Reset), as the
+/// webview's blur commits it before the click lands; an answered Intent's write-back keeps what is
+/// typed meanwhile.
 #[test]
 fn a_typed_subtitle_field_is_committed_before_a_click_elsewhere() {
     i_slint_backend_testing::init_no_event_loop();
@@ -754,6 +754,326 @@ fn a_typed_subtitle_field_is_committed_before_a_click_elsewhere() {
     app.hide().unwrap();
 }
 
+/// Reset removes itself when clicked: the window's keys keep working after it (Esc, Ctrl+T).
+#[test]
+fn the_window_keys_work_after_reset_removes_itself() {
+    use slint::platform::{Key, WindowEvent};
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    let mut assigned = sample_view();
+    assigned.assignment = Some(mkv_core::request::TrackAssignment {
+        target_video: "Season 1/ep1.mkv".into(),
+        asset_path: "Season 1/ep1.ass".into(),
+        track_type: Default::default(),
+        language: Some("eng".into()),
+        title: None,
+        offset_ms: None,
+    });
+    let mut state = ViewState::new(None);
+    state.remux.rows = Arc::new(vec![row("Show - 01.mkv")]);
+    state.remux.empty = None;
+    state.remux.inspector = Some(assigned);
+    apply(&app, &state);
+    app.show().unwrap();
+    // The core's answer: the assignment is gone, and Reset with it.
+    let weak = app.as_weak();
+    app.on_reset_subtitle(move || {
+        let mut state = ViewState::new(None);
+        state.remux.rows = Arc::new(vec![row("Show - 01.mkv")]);
+        state.remux.empty = None;
+        state.remux.inspector = Some(sample_view());
+        apply(&weak.upgrade().unwrap(), &state);
+    });
+    let toggles = Rc::new(Cell::new(0));
+    let count = Rc::clone(&toggles);
+    app.global::<Theme>()
+        .on_toggle(move || count.set(count.get() + 1));
+
+    let reset = only(&app, "Reset");
+    pointer(&app, &reset, true);
+    pointer(&app, &reset, false);
+    assert_eq!(
+        ElementHandle::find_by_accessible_label(&app, "Reset").count(),
+        0
+    );
+    app.set_log_open(true);
+    key(&app, Key::Escape);
+    assert!(!app.get_log_open(), "Esc closed the drawer");
+    app.window().dispatch_event(WindowEvent::KeyPressed {
+        text: Key::Control.into(),
+    });
+    key(&app, "t");
+    assert_eq!(toggles.get(), 1, "Ctrl+T toggled the theme");
+    app.hide().unwrap();
+}
+
+/// A rescan that resets a mode's rows (every Run forces one) drops the row that had the focus;
+/// the window's key scope takes it, so Esc still closes the drawer. A row of the other mode
+/// keeps the focus.
+#[test]
+fn the_window_keys_work_after_a_reset_drops_the_focused_row() {
+    use slint::platform::Key;
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    let mut state = ViewState::new(None);
+    state.remux.rows = Arc::new(vec![row("Show - 01.mkv"), row("Show - 02.mkv")]);
+    state.remux.empty = None;
+    // One publisher, so a state whose remux rows did not change leaves their model alone.
+    let publisher = SlintPublisher::new(&app);
+    publisher.show(&state);
+    app.show().unwrap();
+    frame(&app);
+    app.global::<Focus>()
+        .invoke_restore("pick:remux:Show - 01.mkv".into());
+    frame(&app);
+    assert_eq!(focused(&app), "pick:remux:Show - 01.mkv");
+
+    // An extract reset leaves the remux row its focus.
+    let mut extract = state.clone();
+    extract.seq += 1;
+    extract.extract.rows = Arc::new(vec![row("Show - 01.mkv")]);
+    extract.extract.empty = None;
+    publisher.show(&extract);
+    frame(&app);
+    assert_eq!(focused(&app), "pick:remux:Show - 01.mkv");
+
+    // A rescan's new rows reset the remux model.
+    let mut rescan = extract.clone();
+    rescan.seq += 1;
+    rescan.remux.rows = Arc::new(vec![row("Show - 01.mkv"), row("Show - 03.mkv")]);
+    publisher.show(&rescan);
+    frame(&app);
+    assert_eq!(focused(&app), "", "the dropped row's key is cleared");
+    app.set_log_open(true);
+    key(&app, Key::Escape);
+    assert!(!app.get_log_open(), "Esc closed the drawer");
+    app.hide().unwrap();
+}
+
+/// A status change that the filter no longer shows (a row done under To do, mid-run) hides the
+/// row with the focus; the window's key scope takes it. A row hidden beside it leaves the focus.
+#[test]
+fn the_window_keys_work_after_a_filter_hides_the_focused_row() {
+    use slint::platform::Key;
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    let mut state = ViewState::new(None);
+    let rows = vec![
+        row("Show - 01.mkv"),
+        row("Show - 02.mkv"),
+        row("Show - 03.mkv"),
+    ];
+    state.remux.rows = Arc::new(rows.clone());
+    state.remux.empty = None;
+    let publisher = SlintPublisher::new(&app);
+    publisher.show(&state);
+    publisher.show_filter(Mode::Remux, QueueFilter::Todo);
+    app.show().unwrap();
+    frame(&app);
+    app.global::<Focus>()
+        .invoke_restore("pick:remux:Show - 02.mkv".into());
+    frame(&app);
+    assert_eq!(focused(&app), "pick:remux:Show - 02.mkv");
+    let done = |mut row: Row| {
+        row.bucket = Some(Bucket::Done);
+        row
+    };
+
+    // Another row done: the focus stays.
+    let mut other = state.clone();
+    other.seq += 1;
+    other.remux.rows = Arc::new(vec![
+        done(rows[0].clone()),
+        rows[1].clone(),
+        rows[2].clone(),
+    ]);
+    publisher.show(&other);
+    frame(&app);
+    assert_eq!(focused(&app), "pick:remux:Show - 02.mkv");
+
+    // The focused row done: the window's keys take it.
+    let mut hidden = other.clone();
+    hidden.seq += 1;
+    hidden.remux.rows = Arc::new(vec![
+        done(rows[0].clone()),
+        done(rows[1].clone()),
+        rows[2].clone(),
+    ]);
+    publisher.show(&hidden);
+    frame(&app);
+    assert_eq!(focused(&app), "");
+    app.set_log_open(true);
+    key(&app, Key::Escape);
+    assert!(!app.get_log_open(), "Esc closed the drawer");
+    app.hide().unwrap();
+}
+
+/// Esc closes the open drawer: the window's key scope hears it.
+fn assert_window_keys(app: &App) {
+    app.set_log_open(true);
+    key(app, slint::platform::Key::Escape);
+    assert!(!app.get_log_open(), "Esc closed the drawer");
+}
+
+/// A preset picked from the keyboard is published active: its row is written in place, so it
+/// keeps the focus, and the window's keys still work.
+#[test]
+fn a_preset_picked_from_the_keyboard_keeps_the_focus() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    let state = ViewState::new(None);
+    let publisher = SlintPublisher::new(&app);
+    publisher.show(&state);
+    app.show().unwrap();
+    frame(&app);
+    app.global::<Focus>().invoke_restore("preset:fast".into());
+    frame(&app);
+    assert_eq!(focused(&app), "preset:fast");
+
+    let mut picked = state.clone();
+    picked.seq += 1;
+    picked.remux.draft.preset = Some("fast".into());
+    publisher.show(&picked);
+    frame(&app);
+    assert!(app
+        .get_presets()
+        .iter()
+        .any(|row| row.id == "fast" && row.active));
+    assert_eq!(focused(&app), "preset:fast");
+    assert_window_keys(&app);
+    app.hide().unwrap();
+}
+
+/// A Library whose counts change is written in place, so its focused entry keeps the focus; one
+/// with fewer entries is replaced, and the window's key scope takes the focus.
+#[test]
+fn a_library_update_keeps_a_focused_entry_or_hands_the_focus_on() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    let state = three_releases();
+    let publisher = SlintPublisher::new(&app);
+    publisher.show(&state);
+    app.show().unwrap();
+    frame(&app);
+    app.global::<Focus>().invoke_restore("library:S2".into());
+    frame(&app);
+    assert_eq!(focused(&app), "library:S2");
+
+    let mut rows = state.remux.rows.as_ref().clone();
+    rows.push(Row {
+        release: "S2".into(),
+        ..row("b20")
+    });
+    let mut counted = state.clone();
+    counted.seq += 1;
+    counted.remux.library = presentation::library(Some("/media/Show"), &rows);
+    counted.remux.rows = Arc::new(rows.clone());
+    publisher.show(&counted);
+    frame(&app);
+    only(&app, "S2 21");
+    assert_eq!(focused(&app), "library:S2");
+    assert_window_keys(&app);
+
+    // S3's rows gone: one entry fewer.
+    rows.retain(|row| row.release != "S3");
+    let mut fewer = counted.clone();
+    fewer.seq += 1;
+    fewer.remux.library = presentation::library(Some("/media/Show"), &rows);
+    fewer.remux.rows = Arc::new(rows);
+    publisher.show(&fewer);
+    frame(&app);
+    assert_eq!(focused(&app), "");
+    assert_window_keys(&app);
+    app.hide().unwrap();
+}
+
+/// A Library entry renamed in place keeps the focus, and `Focus.current` names it by its new key:
+/// a stale key would outlive the focus and later take it from a field.
+#[test]
+fn a_library_entry_renamed_in_place_keeps_its_focus_key_current() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    let state = three_releases();
+    let publisher = SlintPublisher::new(&app);
+    publisher.show(&state);
+    app.show().unwrap();
+    frame(&app);
+    app.global::<Focus>().invoke_restore("library:S2".into());
+    frame(&app);
+    assert_eq!(focused(&app), "library:S2");
+
+    // S2 becomes S4: as many entries, the second one renamed.
+    let mut rows = state.remux.rows.as_ref().clone();
+    for row in rows.iter_mut().filter(|row| row.release == "S2") {
+        row.release = "S4".into();
+    }
+    let mut renamed = state.clone();
+    renamed.seq += 1;
+    renamed.remux.library = presentation::library(Some("/media/Show"), &rows);
+    renamed.remux.rows = Arc::new(rows);
+    publisher.show(&renamed);
+    frame(&app);
+    assert_eq!(focused(&app), "library:S4");
+    assert_window_keys(&app);
+    app.hide().unwrap();
+}
+
+/// Enter on the empty card's Open folder…, then the scan: the Scanning card has no button, and
+/// the window's key scope takes the focus.
+#[test]
+fn the_window_keys_work_after_the_card_drops_its_focused_button() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    let state = ViewState::new(None);
+    let publisher = SlintPublisher::new(&app);
+    publisher.show(&state);
+    app.show().unwrap();
+    frame(&app);
+    app.global::<Focus>()
+        .invoke_restore("remux:open-folder".into());
+    frame(&app);
+    assert_eq!(focused(&app), "remux:open-folder");
+
+    let mut scanning = state.clone();
+    scanning.seq += 1;
+    scanning.remux.empty = None;
+    scanning.remux.scan = ScanView::Scanning {
+        directory: "/media/Show".into(),
+    };
+    publisher.show(&scanning);
+    frame(&app);
+    assert_eq!(focused(&app), "");
+    assert_window_keys(&app);
+    app.hide().unwrap();
+}
+
+/// A screen reader's expand on the Log toggle focuses it first, as a click does, and opens the
+/// drawer.
+#[test]
+fn the_log_toggle_expand_action_takes_the_focus_first() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    apply(&app, &ViewState::new(None));
+    app.show().unwrap();
+    frame(&app);
+    app.global::<Focus>().invoke_restore("preset:fast".into());
+    frame(&app);
+    assert_eq!(focused(&app), "preset:fast");
+
+    only(&app, "Log").invoke_accessible_expand_action();
+    assert_eq!(focused(&app), "Log");
+    assert!(app.get_log_open());
+    app.hide().unwrap();
+}
+
 /// Picking "Custom tag…" puts the cursor in the tag field, also when it already shows.
 #[test]
 fn picking_the_custom_tag_focuses_the_tag_field() {
@@ -829,8 +1149,9 @@ fn over(top: Color, below: Color) -> Color {
 
 /// Every text token over every surface, bare or under each tint drawn on it (field, sel, hover and
 /// the soft tones), each surface over each colour of the wallpaper (its base and the three
-/// gradients' peaks), the placeholder hint on the sheet's fields, and each button's text over its
-/// fill: 4.5:1 (WCAG AA body text) in both themes. Reads the tokens from the generated `Theme`,
+/// gradients' peaks), the placeholder hint on the fields, the glass panes over a full queue and
+/// under their highlight, and each button's text over its fill: 4.5:1 (WCAG AA body text) in both
+/// themes, with transparency reduced or not. Reads the tokens from the generated `Theme`,
 /// the one place they are defined.
 #[test]
 fn every_text_token_meets_wcag_aa_on_every_surface_in_both_themes() {
@@ -838,10 +1159,16 @@ fn every_text_token_meets_wcag_aa_on_every_surface_in_both_themes() {
     let app = new_app();
     let theme = app.global::<Theme>();
     let mut failures = Vec::new();
-    for dark in [false, true] {
+    for (dark, solid) in [(false, false), (true, false), (false, true), (true, true)] {
         theme.invoke_set_dark(dark);
+        theme.set_reduce_transparency(solid);
         assert_eq!(theme.get_dark(), dark);
-        let name = if dark { "dark" } else { "light" };
+        let name = match (dark, solid) {
+            (false, false) => "light",
+            (true, false) => "dark",
+            (false, true) => "light, reduced transparency",
+            (true, true) => "dark, reduced transparency",
+        };
         let walls = [
             ("wall-base", theme.get_wall_base()),
             ("wall-a", theme.get_wall_a()),
@@ -866,6 +1193,7 @@ fn every_text_token_meets_wcag_aa_on_every_surface_in_both_themes() {
             ("content", theme.get_content()),
             ("head", theme.get_head()),
             ("float", theme.get_float()),
+            ("glass-float", theme.get_glass_float()),
         ];
         let tints = [
             ("field", theme.get_field()),
@@ -894,11 +1222,90 @@ fn every_text_token_meets_wcag_aa_on_every_surface_in_both_themes() {
                 }
             }
         }
-        // A placeholder (hint) is drawn on the sheet's fields alone: field on float.
+        // A placeholder (hint) is drawn on the sheet's fields (field on float) and the
+        // Inspector's (field on panel).
         for (wall, below) in walls {
-            let field = over(theme.get_field(), over(theme.get_float(), below));
-            let on = format!("field on float over {wall}");
-            pairs.push(("hint", on, theme.get_hint(), field));
+            for (surface, fill) in [
+                ("float", theme.get_float()),
+                ("glass-float", theme.get_glass_float()),
+                ("panel", theme.get_panel()),
+            ] {
+                let field = over(theme.get_field(), over(fill, below));
+                let on = format!("field on {surface} over {wall}");
+                pairs.push(("hint", on, theme.get_hint(), field));
+            }
+        }
+        // The glass panes (GlassPane), under their top highlight at its strongest. The faked
+        // float over a full queue behind, sharp: any text colour under it. The real blur's
+        // glass-float over what a σ30 blur leaves of the queue behind a pane: the wallpaper, the
+        // panes over it and their tints. Text and the small solid shapes (rings, checkboxes)
+        // average out into those, and no large solid fill sits behind a pane (the bar's buttons
+        // are below the drawer); the modal dimmer is, behind the sheet and a dialog.
+        let sharp: Vec<(String, Color)> = texts
+            .iter()
+            .chain(&walls)
+            .map(|&(name, color)| (name.to_string(), color))
+            .collect();
+        let mut blurred = Vec::new();
+        for (wall, below) in walls {
+            blurred.push((wall.to_string(), below));
+            for &(surface, fill) in surfaces.iter().filter(|(name, _)| !name.ends_with("float")) {
+                let pane = over(fill, below);
+                blurred.push((format!("{surface} over {wall}"), pane));
+                for (tint, tinted) in tints {
+                    blurred.push((
+                        format!("{tint} on {surface} over {wall}"),
+                        over(tinted, pane),
+                    ));
+                }
+            }
+        }
+        // The sheet and a dialog sit under the modal dimmer, the dialog over the sheet under two;
+        // the faked float and glass-float-dim (the panes' `dimmed`) are judged over those too.
+        let dimmed = |behind: &[(String, Color)], times: usize| {
+            let mut out = behind.to_vec();
+            for _ in 0..times {
+                for (name, color) in &mut out {
+                    *name = format!("dim over {name}");
+                    *color = over(theme.get_dim(), *color);
+                }
+            }
+            out
+        };
+        let sharp_all = [sharp.clone(), dimmed(&sharp, 1), dimmed(&sharp, 2)].concat();
+        let blurred_dim = [dimmed(&blurred, 1), dimmed(&blurred, 2)].concat();
+        // The tints drawn on a pane, with the sheet's lock note (warn at 14%, settings.slint).
+        let pane_tints: Vec<(&str, Color)> = tints
+            .iter()
+            .copied()
+            .chain([("warn 14%", theme.get_warn().transparentize(0.86))])
+            .collect();
+        for (fill, float, behind) in [
+            ("float", theme.get_float(), &sharp_all),
+            ("glass-float", theme.get_glass_float(), &blurred),
+            ("glass-float-dim", theme.get_glass_float_dim(), &blurred_dim),
+        ] {
+            for (under, below) in behind {
+                let pane = over(float, *below);
+                let mut backgrounds = vec![
+                    (format!("{fill} over {under}"), pane),
+                    (
+                        format!("glass-hi on {fill} over {under}"),
+                        over(theme.get_glass_hi(), pane),
+                    ),
+                ];
+                for (tint, tinted) in &pane_tints {
+                    backgrounds.push((
+                        format!("{tint} on {fill} over {under}"),
+                        over(*tinted, pane),
+                    ));
+                }
+                for (on, background) in backgrounds {
+                    for (text, color) in texts {
+                        pairs.push((text, on.clone(), color, background));
+                    }
+                }
+            }
         }
         for (text, fill, color, background) in [
             (
@@ -1217,10 +1624,22 @@ fn the_sheet_keeps_the_focus_and_its_fields_take_typed_keys() {
     back(&app);
     tick();
     assert_eq!(sheet.get_focused(), "");
-    // Back from Done wraps to the last control, and on to the one before it (without the wrap,
-    // the backdrop and then the window behind it): Esc still closes the sheet.
+    // Back from Done wraps to the last control, Clear inspection cache (the reduced effects moved
+    // to the Appearance menu), and on to the one before it (without the wrap, the backdrop and
+    // then the window behind it): Esc still closes the sheet.
     back(&app);
     tick();
+    assert_eq!(focused(&app), "Clear inspection cache…");
+    for effect in [
+        "Reduce transparency (solid panes)",
+        "Reduce motion (no spinning)",
+    ] {
+        assert_eq!(
+            ElementHandle::find_by_accessible_label(&app, effect).count(),
+            0,
+            "the sheet shows no {effect:?}"
+        );
+    }
     back(&app);
     tick();
     key(&app, Key::Escape);
@@ -1253,5 +1672,778 @@ fn the_sheet_keeps_the_focus_and_its_fields_take_typed_keys() {
     key(&app, Key::Escape);
     tick();
     assert!(!app.get_sheet_open());
+    app.hide().unwrap();
+}
+
+/// The theme toggle and Ctrl+T (from the window, and from a field of the open sheet) flip the
+/// theme and save the choice; a saved choice applies before the window shows.
+#[test]
+fn the_toggle_and_ctrl_t_flip_the_theme_and_save_the_choice() {
+    use crate::appearance::{self, Appearance};
+    use crate::renderer::Renderer;
+    use slint::platform::{Key, WindowEvent};
+    i_slint_backend_testing::init_no_event_loop();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("appearance"), "theme=light\n").unwrap();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(760.0, 520.0));
+    let theme = app.global::<Theme>();
+    theme.invoke_set_dark(true);
+    appearance::wire(&app, Some(dir.path().into()), Renderer::OpenGl);
+    // Applied before the first frame.
+    assert!(!theme.get_dark());
+    apply(&app, &ViewState::new(None));
+    app.show().unwrap();
+    let saved = || Appearance::load(dir.path()).dark;
+
+    only(&app, "Toggle theme").invoke_accessible_default_action();
+    assert!(theme.get_dark());
+    assert_eq!(saved(), Some(true));
+
+    // Space held on the focused toggle flips it once, as a browser's button activates once.
+    app.window().dispatch_event(WindowEvent::KeyPressed {
+        text: Key::Space.into(),
+    });
+    for _ in 0..3 {
+        app.window().dispatch_event(WindowEvent::KeyPressRepeated {
+            text: Key::Space.into(),
+        });
+    }
+    app.window().dispatch_event(WindowEvent::KeyReleased {
+        text: Key::Space.into(),
+    });
+    assert!(!theme.get_dark(), "one flip for a held Space");
+    key(&app, Key::Space);
+    assert!(theme.get_dark());
+
+    let ctrl_t = |app: &App| {
+        let press = |text: slint::SharedString| {
+            app.window()
+                .dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
+            app.window()
+                .dispatch_event(WindowEvent::KeyReleased { text });
+        };
+        app.window().dispatch_event(WindowEvent::KeyPressed {
+            text: Key::Control.into(),
+        });
+        press("t".into());
+        app.window().dispatch_event(WindowEvent::KeyReleased {
+            text: Key::Control.into(),
+        });
+    };
+    ctrl_t(&app);
+    assert!(!theme.get_dark());
+    assert_eq!(saved(), Some(false));
+    // A plain t toggles nothing.
+    key(&app, "t");
+    assert!(!theme.get_dark());
+
+    // From the input folder field of the open sheet: the field takes no "t".
+    app.invoke_open_sheet(Mode::Remux, "input_dir".into());
+    for _ in 0..2 {
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1));
+    }
+    assert_eq!(app.global::<Sheet>().get_focused(), "input_dir");
+    ctrl_t(&app);
+    assert!(theme.get_dark());
+    assert_eq!(saved(), Some(true));
+    assert_eq!(app.get_remux_form().input_dir, "");
+    app.hide().unwrap();
+}
+
+/// The Appearance menu's two reduced effects apply at once and are saved with the theme: Reduce
+/// transparency solidifies the panes, Reduce motion stops the spinners. The real blur is off
+/// (`appearance::REAL_BLUR`), so OpenGL draws the faked glass (a translucent float) as the software
+/// renderer does; the panes still follow `Theme.glass` (the Log drawer's blur reads it).
+#[test]
+fn the_reduced_effects_apply_at_once_and_are_saved() {
+    use crate::appearance::{self, Appearance};
+    use crate::renderer::Renderer;
+    i_slint_backend_testing::init_no_event_loop();
+    let dir = tempfile::tempdir().unwrap();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(760.0, 520.0));
+    appearance::wire(&app, Some(dir.path().into()), Renderer::OpenGl);
+    let theme = app.global::<Theme>();
+    assert!(!theme.get_glass());
+    assert!(theme.get_float().alpha() < 255, "the faked glass");
+    assert_eq!(app.get_log_blur(), 0.0);
+    // The panes follow `Theme.glass`: set, the drawer draws the real blur.
+    theme.set_glass(true);
+    assert!(app.get_log_blur() > 0.0);
+    theme.set_glass(false);
+    apply(&app, &ViewState::new(None));
+    app.show().unwrap();
+
+    appearance_button(&app).invoke_accessible_default_action();
+    assert!(app.get_appearance_open());
+    only(&app, "Reduce transparency (solid panes)").invoke_accessible_default_action();
+    assert!(theme.get_reduce_transparency());
+    assert!(!theme.get_glass());
+    assert_eq!(theme.get_float().alpha(), 255);
+    assert_eq!(app.get_log_blur(), 0.0);
+    only(&app, "Reduce motion (no spinning)").invoke_accessible_default_action();
+    assert!(theme.get_reduce_motion());
+    assert_eq!(
+        Appearance::load(dir.path()),
+        Appearance {
+            dark: None,
+            reduce_transparency: true,
+            reduce_motion: true,
+        }
+    );
+    only(&app, "Reduce transparency (solid panes)").invoke_accessible_default_action();
+    assert!(theme.get_float().alpha() < 255, "the faked glass again");
+    app.hide().unwrap();
+
+    // A restart on the software renderer keeps the saved effects and draws no glass.
+    let app = new_app();
+    appearance::wire(&app, Some(dir.path().into()), Renderer::Software);
+    let theme = app.global::<Theme>();
+    assert!(theme.get_reduce_motion() && !theme.get_reduce_transparency());
+    assert!(!theme.get_glass());
+    assert!(theme.get_float().alpha() < 255, "the faked glass");
+    assert_eq!(app.get_log_blur(), 0.0);
+}
+
+/// The title bar's Appearance button (its menu is labelled the same).
+fn appearance_button(app: &App) -> ElementHandle {
+    ElementHandle::find_by_accessible_label(app, "Appearance")
+        .find(|element| {
+            element.accessible_role() == Some(i_slint_backend_testing::AccessibleRole::Button)
+        })
+        .expect("the Appearance button")
+}
+
+/// The Appearance menu, if open.
+fn appearance_menu(app: &App) -> Option<ElementHandle> {
+    ElementHandle::find_by_accessible_label(app, "Appearance").find(|element| {
+        element.accessible_role() == Some(i_slint_backend_testing::AccessibleRole::Groupbox)
+    })
+}
+
+/// A left click at `x`, `y` in the window.
+fn click_at(app: &App, x: f32, y: f32) {
+    use slint::platform::{PointerEventButton, WindowEvent};
+    let (position, button) = (slint::LogicalPosition::new(x, y), PointerEventButton::Left);
+    app.window()
+        .dispatch_event(WindowEvent::PointerPressed { position, button });
+    app.window()
+        .dispatch_event(WindowEvent::PointerReleased { position, button });
+}
+
+/// The Appearance menu opens from its button, by a click or Enter, under it and right-aligned to
+/// it in the narrowest window, with the focus on the current theme; Tab and Shift+Tab wrap
+/// inside it. Esc, a click outside and the button close it and give the focus back to the
+/// button, ringed after a key alone; a dialog opening closes it first; Esc closes it before the
+/// Log drawer.
+#[test]
+fn the_appearance_menu_opens_from_its_button_and_closes_every_way() {
+    use mkv_anime_batch_slint_ui::DialogTexts;
+    use slint::platform::Key;
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(760.0, 520.0));
+    apply(&app, &ViewState::new(None));
+    app.show().unwrap();
+    let tick = || i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1));
+    let button = appearance_button(&app);
+    assert_eq!(
+        button.accessible_description().as_deref(),
+        Some("Appearance")
+    );
+    assert!(appearance_menu(&app).is_none());
+
+    // A click opens it, under the button and right-aligned to it, inside the window.
+    pointer(&app, &button, true);
+    pointer(&app, &button, false);
+    tick();
+    assert!(app.get_appearance_open());
+    let menu = appearance_menu(&app).expect("the menu shows");
+    let (at, size) = (menu.absolute_position(), menu.size());
+    let (button_at, button_size) = (button.absolute_position(), button.size());
+    assert_eq!(at.x + size.width, button_at.x + button_size.width);
+    assert!(at.y >= button_at.y + button_size.height);
+    assert!(
+        at.x >= 0.0 && at.y + size.height <= 520.0,
+        "inside the window"
+    );
+    assert!(
+        focused(&app).starts_with("theme:"),
+        "the theme choice has it"
+    );
+    assert!(rings(&app).is_empty(), "opened by the pointer: no ring");
+
+    // Tab and Shift+Tab wrap inside it: the three choices, then the two checkboxes.
+    let first = focused(&app);
+    key(&app, Key::Backtab);
+    key(&app, Key::Tab);
+    assert_eq!(
+        focused(&app),
+        "theme:System",
+        "Tab past the last wraps to the first"
+    );
+    for _ in 0..5 {
+        key(&app, Key::Tab);
+    }
+    assert_eq!(focused(&app), "theme:System", "five stops, wrapping");
+    assert!(app.get_appearance_open());
+
+    // Esc closes it: the button has the focus back, ringed; Enter opens it again.
+    key(&app, Key::Escape);
+    tick();
+    assert!(!app.get_appearance_open());
+    assert!(appearance_menu(&app).is_none());
+    assert_eq!(focused(&app), "Appearance");
+    assert_eq!(rings(&app).len(), 1);
+    key(&app, Key::Return);
+    tick();
+    assert!(app.get_appearance_open(), "Enter on the button opens it");
+    assert_eq!(focused(&app), first);
+
+    // A click outside closes it, the button focused without a ring.
+    click_at(&app, 20.0, 505.0);
+    tick();
+    assert!(!app.get_appearance_open());
+    assert_eq!(focused(&app), "Appearance");
+    assert!(rings(&app).is_empty());
+
+    // The button again closes it.
+    for _ in 0..2 {
+        pointer(&app, &button, true);
+        pointer(&app, &button, false);
+        tick();
+    }
+    assert!(!app.get_appearance_open(), "the second click closes it");
+    assert_eq!(focused(&app), "Appearance");
+
+    // A dialog opening closes it; the button has the focus back after the dialog.
+    key(&app, Key::Return);
+    tick();
+    assert!(app.get_appearance_open());
+    app.set_dialog(DialogTexts {
+        title: "Notice".into(),
+        text: "Something happened".into(),
+        confirm: "OK".into(),
+        notice: true,
+    });
+    app.invoke_show_dialog();
+    tick();
+    assert!(!app.get_appearance_open());
+    assert_eq!(focused(&app), "OK");
+    app.set_dialog_open(false);
+    tick();
+    tick();
+    assert_eq!(focused(&app), "Appearance");
+
+    // Over the open Log drawer, Esc closes the menu alone.
+    app.set_log_open(true);
+    key(&app, Key::Return);
+    tick();
+    key(&app, Key::Escape);
+    tick();
+    assert!(!app.get_appearance_open());
+    assert!(app.get_log_open(), "the drawer stays open");
+    app.hide().unwrap();
+}
+
+/// The menu's System, Light and Dark set the theme and save it: System saves no theme and
+/// follows the system's scheme live again; the toggle and Ctrl+T still pin the other one, and the
+/// menu's choice follows them while open. A saved System applies as the window starts.
+#[test]
+fn the_appearance_menu_picks_system_light_or_dark_and_saves_it() {
+    use crate::appearance::{self, Appearance};
+    use crate::renderer::Renderer;
+    use i_slint_core::items::ColorScheme;
+    use i_slint_core::window::WindowInner;
+    i_slint_backend_testing::init_no_event_loop();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("appearance"), "theme=dark\n").unwrap();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(760.0, 520.0));
+    appearance::wire(&app, Some(dir.path().into()), Renderer::Software);
+    let theme = app.global::<Theme>();
+    assert!(theme.get_dark() && !theme.get_follows_system());
+    apply(&app, &ViewState::new(None));
+    app.show().unwrap();
+    let saved = || Appearance::load(dir.path()).dark;
+    let system = |scheme| {
+        WindowInner::from_pub(app.window())
+            .context()
+            .set_color_scheme(scheme)
+    };
+    let choice = |label: &str| {
+        ElementHandle::find_by_accessible_label(&app, label)
+            .find(|element| {
+                element.accessible_role()
+                    == Some(i_slint_backend_testing::AccessibleRole::RadioButton)
+            })
+            .unwrap_or_else(|| panic!("the {label:?} choice"))
+    };
+    let checked = || {
+        ["System", "Light", "Dark"]
+            .into_iter()
+            .filter(|label| choice(label).accessible_checked() == Some(true))
+            .collect::<Vec<_>>()
+    };
+
+    appearance_button(&app).invoke_accessible_default_action();
+    assert_eq!(checked(), ["Dark"]);
+    choice("Light").invoke_accessible_default_action();
+    assert!(!theme.get_dark());
+    assert_eq!(saved(), Some(false));
+    assert_eq!(checked(), ["Light"]);
+
+    // System: the system's scheme, live, saved as no theme.
+    system(ColorScheme::Dark);
+    assert!(!theme.get_dark(), "Light stays pinned");
+    choice("System").invoke_accessible_default_action();
+    assert!(theme.get_follows_system());
+    assert!(theme.get_dark(), "the system's dark");
+    assert_eq!(saved(), None);
+    assert_eq!(checked(), ["System"]);
+    system(ColorScheme::Light);
+    assert!(!theme.get_dark(), "followed live");
+    system(ColorScheme::Dark);
+    assert!(theme.get_dark());
+
+    // The toggle still pins the other theme in one click; the open menu follows it.
+    only(&app, "Toggle theme").invoke_accessible_default_action();
+    assert!(!theme.get_dark() && !theme.get_follows_system());
+    assert_eq!(saved(), Some(false));
+    assert_eq!(checked(), ["Light"]);
+    choice("Dark").invoke_accessible_default_action();
+    assert!(theme.get_dark());
+    assert_eq!(saved(), Some(true));
+    choice("System").invoke_accessible_default_action();
+    app.hide().unwrap();
+
+    // A restart with System saved follows the system's from the start, the menu saying so.
+    let app = new_app();
+    appearance::wire(&app, Some(dir.path().into()), Renderer::Software);
+    let theme = app.global::<Theme>();
+    assert!(theme.get_follows_system());
+    WindowInner::from_pub(app.window())
+        .context()
+        .set_color_scheme(ColorScheme::Dark);
+    assert!(theme.get_dark());
+}
+
+/// The `Focus` key of the custom control with the focus; empty for none of them.
+fn focused(app: &App) -> String {
+    app.global::<Focus>().get_current().into()
+}
+
+/// Presses Tab until the custom control of `key` has the focus.
+fn tab_to(app: &App, key: &str) {
+    for _ in 0..400 {
+        self::key(app, slint::platform::Key::Tab);
+        if focused(app) == key {
+            return;
+        }
+    }
+    panic!("Tab never reached {key:?}");
+}
+
+/// The focus rings drawn, each as its top left corner and size.
+fn rings(app: &App) -> Vec<(f32, f32, f32, f32)> {
+    ElementHandle::find_by_element_type_name(app, "FocusRing")
+        .map(|ring| {
+            let (at, size) = (ring.absolute_position(), ring.size());
+            (at.x, at.y, size.width, size.height)
+        })
+        .collect()
+}
+
+/// Tab walks the custom controls in their visual order: the title bar, the sidebar, the list's
+/// filters and rows, then the bottom bar; a row control's focus shows its Move up / Move down.
+/// Enter and Space activate each kind of control.
+#[test]
+fn tab_walks_the_custom_controls_in_order_and_enter_or_space_activates_them() {
+    use slint::platform::Key;
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    SlintPublisher::new(&app).show(&three_releases());
+    app.show().unwrap();
+    frame(&app);
+
+    let mut walked = Vec::new();
+    while walked.last().is_none_or(|last: &String| last != "Log") {
+        key(&app, Key::Tab);
+        walked.push(focused(&app));
+        assert!(walked.len() < 400, "Tab reaches the Log toggle: {walked:?}");
+        if focused(&app) == "check:remux:a00" {
+            let shown = ElementHandle::find_by_accessible_label(&app, "Move up")
+                .filter(|up| up.computed_opacity() > 0.99)
+                .count();
+            assert_eq!(shown, 1, "the focused row's Move up shows, no other's");
+        }
+    }
+    let order = [
+        "Close window",
+        "Minimize window",
+        "Maximize window",
+        "Toggle theme",
+        "Appearance",
+        "Remux",
+        "Remux settings",
+        "Extract",
+        "Extract settings",
+        "library:/",
+        "library:S2",
+        "library:S3",
+        "nav:open-folder",
+        "remux:All",
+        "remux:To do",
+        "remux:Done",
+        "remux:Failed",
+        "remux:Select all",
+        "remux:None",
+        "check:remux:a00",
+        "pick:remux:a00",
+        "up:remux:a00",
+        "down:remux:a00",
+        "check:remux:a01",
+        "run",
+        "Log",
+    ];
+    let at: Vec<usize> = order
+        .iter()
+        .map(|key| {
+            walked
+                .iter()
+                .position(|walked| walked == key)
+                .unwrap_or_else(|| panic!("{key:?} takes the focus: {walked:?}"))
+        })
+        .collect();
+    assert!(at.is_sorted(), "in visual order: {walked:?}");
+    assert!(
+        !walked.iter().any(|key| key.contains("extract:")),
+        "the hidden pane takes no focus"
+    );
+
+    let calls = Rc::new(RefCell::new(Vec::<String>::new()));
+    let log = Rc::clone(&calls);
+    app.on_close_window(move || log.borrow_mut().push("close".into()));
+    let log = Rc::clone(&calls);
+    app.on_set_filter(move |filter| log.borrow_mut().push(format!("filter {filter:?}")));
+    let log = Rc::clone(&calls);
+    app.on_set_selected(move |id, on| log.borrow_mut().push(format!("select {id} {on}")));
+    let log = Rc::clone(&calls);
+    app.on_inspect(move |id| log.borrow_mut().push(format!("inspect {id}")));
+    let log = Rc::clone(&calls);
+    app.on_reveal_release(move |release, _| log.borrow_mut().push(format!("reveal {release}")));
+    let log = Rc::clone(&calls);
+    app.on_open_folder(move || log.borrow_mut().push("open".into()));
+    for (to, press) in [
+        ("Close window", Key::Return),
+        ("library:S2", Key::Space),
+        ("nav:open-folder", Key::Return),
+        ("remux:Done", Key::Space),
+        ("check:remux:a00", Key::Space),
+        ("pick:remux:a00", Key::Return),
+    ] {
+        tab_to(&app, to);
+        key(&app, press);
+    }
+    assert_eq!(
+        *calls.borrow(),
+        [
+            "close",
+            "reveal S2",
+            "open",
+            "filter Done",
+            "select a00 false",
+            "inspect a00"
+        ]
+    );
+    tab_to(&app, "Extract");
+    key(&app, Key::Return);
+    assert_eq!(app.get_mode(), Mode::Extract);
+    app.hide().unwrap();
+}
+
+/// A control focused from the keyboard draws its ring; one pressed with the pointer does not,
+/// until a key is typed (a modifier alone does not count), as `:focus-visible` does.
+#[test]
+fn the_ring_shows_for_keyboard_focus_not_after_a_pointer_press() {
+    use slint::platform::Key;
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    SlintPublisher::new(&app).show(&three_releases());
+    app.show().unwrap();
+    assert!(rings(&app).is_empty(), "no ring at start");
+
+    tab_to(&app, "Toggle theme");
+    let theme = only(&app, "Toggle theme");
+    let (at, size) = (theme.absolute_position(), theme.size());
+    assert_eq!(
+        rings(&app),
+        [(at.x - 4.0, at.y - 4.0, size.width + 8.0, size.height + 8.0)],
+        "2px out from the button, 2px wide"
+    );
+
+    // Both panes' chips are found, the extract one hidden in the same place.
+    let chip = ElementHandle::find_by_accessible_label(&app, "All 0")
+        .next()
+        .unwrap();
+    pointer(&app, &chip, true);
+    pointer(&app, &chip, false);
+    assert_eq!(focused(&app), "remux:All", "a press takes the focus");
+    assert!(rings(&app).is_empty(), "with no ring");
+    key(&app, Key::Shift);
+    assert!(rings(&app).is_empty(), "a modifier alone shows none");
+    key(&app, "x");
+    assert_eq!(rings(&app).len(), 1, "a typed key shows it");
+    app.hide().unwrap();
+}
+
+/// A dialog and the sheet give the focus back to the exact control that had it, the ring only
+/// after a key closed them; the sheet's field takes it back after a dialog over the sheet. A
+/// control locked meanwhile leaves it with the window, where Esc still closes the Log drawer.
+#[test]
+fn a_closing_dialog_or_sheet_gives_the_focus_back_to_the_control_that_had_it() {
+    use mkv_anime_batch_slint_ui::DialogTexts;
+    use slint::platform::Key;
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    SlintPublisher::new(&app).show(&three_releases());
+    app.show().unwrap();
+    let tick = || i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1));
+    let notice = DialogTexts {
+        title: "Notice".into(),
+        text: "Something happened".into(),
+        confirm: "OK".into(),
+        notice: true,
+    };
+    let show_notice = || {
+        app.set_dialog(notice.clone());
+        app.invoke_show_dialog();
+        tick();
+    };
+    let close_dialog = || {
+        app.set_dialog_open(false);
+        tick();
+        tick();
+    };
+
+    // A dialog over the window: the Close button has it back.
+    tab_to(&app, "Close window");
+    show_notice();
+    assert_eq!(focused(&app), "OK", "OK takes it as the dialog shows");
+    close_dialog();
+    assert_eq!(focused(&app), "Close window");
+    assert_eq!(rings(&app).len(), 1);
+
+    // The sheet from a gear, closed by Esc: the gear, ringed.
+    tab_to(&app, "Remux settings");
+    key(&app, Key::Return);
+    tick();
+    assert!(app.get_sheet_open());
+    assert_eq!(focused(&app), "Done");
+    key(&app, Key::Escape);
+    tick();
+    assert!(!app.get_sheet_open());
+    assert_eq!(focused(&app), "Remux settings");
+    assert_eq!(rings(&app).len(), 1);
+    // Closed by a click on the backdrop: the gear, without a ring.
+    key(&app, Key::Return);
+    tick();
+    assert!(app.get_sheet_open());
+    for pressed in [true, false] {
+        use slint::platform::{PointerEventButton, WindowEvent};
+        let (position, button) = (
+            slint::LogicalPosition::new(20.0, 625.0),
+            PointerEventButton::Left,
+        );
+        app.window().dispatch_event(if pressed {
+            WindowEvent::PointerPressed { position, button }
+        } else {
+            WindowEvent::PointerReleased { position, button }
+        });
+    }
+    tick();
+    assert!(!app.get_sheet_open());
+    assert_eq!(focused(&app), "Remux settings");
+    assert!(rings(&app).is_empty(), "a pointer closed it");
+
+    // The sheet the host opens: the control that had the focus.
+    tab_to(&app, "remux:None");
+    app.invoke_open_sheet(Mode::Remux, "".into());
+    tick();
+    key(&app, Key::Escape);
+    tick();
+    assert_eq!(focused(&app), "remux:None");
+
+    // A dialog over the sheet's field: the field has the cursor back.
+    app.invoke_open_sheet(Mode::Remux, "input_dir".into());
+    tick();
+    tick();
+    let sheet = app.global::<Sheet>();
+    assert_eq!(sheet.get_focused(), "input_dir");
+    show_notice();
+    assert_eq!(sheet.get_focused(), "", "the dialog took the focus");
+    close_dialog();
+    assert_eq!(sheet.get_focused(), "input_dir");
+    key(&app, Key::Escape);
+    tick();
+    assert!(!app.get_sheet_open());
+
+    // Select all, locked while the dialog shows: the window keeps the focus, Esc still works.
+    tab_to(&app, "remux:Select all");
+    show_notice();
+    app.set_remux_head(mkv_anime_batch_slint_ui::QueueHead {
+        selection_locked: true,
+        ..app.get_remux_head()
+    });
+    app.set_log_open(true);
+    close_dialog();
+    assert_eq!(focused(&app), "", "no control took it");
+    key(&app, Key::Escape);
+    assert!(!app.get_log_open(), "Esc closed the drawer");
+    app.hide().unwrap();
+}
+
+/// The pinned release header: none at the top of the list, the folder's once its rows scroll
+/// under it, none while a release's first row shows its own header whole at the top, that
+/// release's once it scrolls on, and still that release's at the end of the list.
+#[test]
+fn the_current_release_header_stays_pinned_at_the_top_of_the_list() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    let publisher = SlintPublisher::new(&app);
+    publisher.show(&three_releases());
+    app.show().unwrap();
+    frame(&app);
+    let pinned = |app: &App| {
+        let text = app.get_remux_pinned();
+        (!text.is_empty()).then(|| format!("{text} {}", app.get_remux_pinned_count()))
+    };
+    let top = only(&app, "Include a00 in the batch").absolute_position().y - 30.0 - 18.0;
+
+    assert_eq!(pinned(&app), None, "the first header shows in place");
+    app.set_remux_scroll(-500.0);
+    frame(&app);
+    assert_eq!(pinned(&app).as_deref(), Some("MEDIA › SHOW 20"));
+    // The copy over the rows, which no screen reader reads (the row's own header is read).
+    let head = ElementHandle::find_by_element_type_name(&app, "GroupHead")
+        .find(|head| head.accessible_role() == Some(i_slint_backend_testing::AccessibleRole::None))
+        .unwrap();
+    assert_eq!(head.absolute_position().y, top, "at the list's top");
+
+    // A filter that hides the pinned release's rows unpins its header, and the count with it.
+    publisher.show_filter(Mode::Remux, QueueFilter::Done);
+    frame(&app);
+    assert_eq!(pinned(&app), None, "no row shows: no header pinned");
+    assert_eq!(app.get_remux_pinned_count(), 0);
+    publisher.show_filter(Mode::Remux, QueueFilter::All);
+    app.set_remux_scroll(-500.0);
+    frame(&app);
+    assert_eq!(pinned(&app).as_deref(), Some("MEDIA › SHOW 20"));
+
+    // The same number of rows under other release heads (the folder renamed): the row instances
+    // stay, and the header pinned is the new one, never the old.
+    let mut renamed = three_releases();
+    renamed.remux.library = presentation::library(Some("/media/Other"), &renamed.remux.rows);
+    renamed.remux.manifest_rev = 2;
+    renamed.remux.directory = Some("/media/Other".into());
+    // A later state: the publisher drops one no newer than the last.
+    renamed.seq = 1;
+    publisher.show(&renamed);
+    frame(&app);
+    app.set_remux_scroll(-500.0);
+    frame(&app);
+    assert_eq!(pinned(&app).as_deref(), Some("MEDIA › OTHER 20"));
+    publisher.show(&ViewState {
+        seq: 2,
+        ..three_releases()
+    });
+    frame(&app);
+
+    app.invoke_reveal(Mode::Remux, 20);
+    frame(&app);
+    assert_eq!(pinned(&app), None, "S2's own header shows whole at the top");
+    app.set_remux_scroll(app.get_remux_scroll() - 40.0);
+    frame(&app);
+    assert_eq!(pinned(&app).as_deref(), Some("S2 20"));
+
+    app.set_remux_scroll(-100_000.0);
+    frame(&app);
+    assert_eq!(
+        pinned(&app).as_deref(),
+        Some("S2 20"),
+        "S3's four rows fit below S2's last"
+    );
+
+    // Another folder, of one release (no headers), replaces every row instance: the old
+    // folder's header must not stay pinned over its rows.
+    let mut one = three_releases();
+    let rows: Vec<Row> = (0..44).map(|i| row(&format!("d{i:02}"))).collect();
+    one.remux.library = presentation::library(Some("/media/Other"), &rows);
+    one.remux.rows = Arc::new(rows);
+    one.remux.manifest_rev = 2;
+    one.remux.directory = Some("/media/Other".into());
+    SlintPublisher::new(&app).show(&one);
+    frame(&app);
+    app.set_remux_scroll(-500.0);
+    frame(&app);
+    assert_eq!(pinned(&app), None, "no header pinned from the old folder");
+    app.hide().unwrap();
+}
+
+/// The subtitle ladder is a list of list items, each numbered, as index.html's `ol`.
+#[test]
+fn the_subtitle_ladder_is_a_list_of_its_rungs() {
+    use i_slint_backend_testing::AccessibleRole;
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 900.0));
+    let mut state = ViewState::new(None);
+    state.remux.rows = Arc::new(vec![row("Show - 01.mkv")]);
+    state.remux.empty = None;
+    state.remux.inspector = Some(sample_view());
+    apply(&app, &state);
+    app.show().unwrap();
+    let rungs: Vec<_> = app.get_sub_ladder().iter().collect();
+    assert!(rungs.len() > 1, "the sample has a ladder");
+    // An element is found once per component it is the root of: one of each place.
+    let query = |role| {
+        let mut found: Vec<ElementHandle> = Vec::new();
+        for element in i_slint_backend_testing::ElementQuery::from_root(&app)
+            .match_descendants()
+            .match_accessible_role(role)
+            .find_all()
+        {
+            let place = |element: &ElementHandle| (element.absolute_position(), element.size());
+            if !found.iter().any(|seen| place(seen) == place(&element)) {
+                found.push(element);
+            }
+        }
+        found
+    };
+    let ladder: Vec<_> = query(AccessibleRole::List)
+        .into_iter()
+        .filter(|list| list.accessible_item_count() == Some(rungs.len()))
+        .collect();
+    assert_eq!(ladder.len(), 1, "one list of the rungs");
+    let items: Vec<_> = query(AccessibleRole::ListItem)
+        .iter()
+        .map(|item| {
+            (
+                item.accessible_item_index(),
+                item.accessible_label().unwrap().to_string(),
+            )
+        })
+        .collect();
+    let expected: Vec<_> = rungs
+        .iter()
+        .enumerate()
+        .map(|(index, rung)| (Some(index), rung.a11y.to_string()))
+        .collect();
+    assert_eq!(items, expected);
     app.hide().unwrap();
 }
