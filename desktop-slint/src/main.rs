@@ -226,7 +226,8 @@ fn run(
     let result = app.run();
 
     // The event loop can end without a close request, or fail; tear down all the same. Idempotent
-    // after a Close that already did.
+    // after a Close that already did, and safe beside one still tearing down: both cancel, then
+    // wait (aborting the pipeline after the timeout) for the same job and scan to end.
     begin_shutdown(&job, &scan);
     let scan_state = Arc::clone(&scan);
     match std::thread::spawn(move || cleanup_owned_processes(&job, &scan_state)).join() {
@@ -401,10 +402,13 @@ fn start_close(
             }
             Err(error) => {
                 cancel_shutdown(&job, &scan);
-                closing.store(false, Ordering::SeqCst);
                 tracing::error!("Close failed: {error}");
-                let _ =
-                    window.upgrade_in_event_loop(move |app| app.invoke_close_failed(error.into()));
+                // `closing` clears as the failure shows, not before: a Close in between would
+                // start a second teardown under the first one's failure.
+                let _ = window.upgrade_in_event_loop(move |app| {
+                    closing.store(false, Ordering::SeqCst);
+                    app.invoke_close_failed(error.into());
+                });
             }
         }
     });
