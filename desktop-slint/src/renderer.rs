@@ -25,7 +25,8 @@ pub const RELAUNCHED_ENV: &str = "MKV_RENDERER_RELAUNCHED";
 /// Set on a re-launched child: save the software choice once a frame is drawn, so a restart that
 /// fails too leaves nothing saved.
 pub const SAVE_ENV: &str = "MKV_RENDERER_SAVE";
-/// The saved choice, under `<config dir>/com.mkvanimebatch.desktop/`; it holds `software`.
+/// The saved choice, under `<local config dir>/com.mkvanimebatch.desktop/` ([`choice_dir`]); it
+/// holds `software`.
 const CHOICE_FILE: &str = "renderer";
 
 pub const DIALOG_TITLE: &str = "MKV Anime Batch";
@@ -113,9 +114,17 @@ pub fn may_offer_restart(renderer: Renderer, relaunched: bool) -> bool {
     renderer == Renderer::OpenGl && !relaunched
 }
 
-/// `<config dir>/com.mkvanimebatch.desktop`; `None` when the OS names no config directory.
+/// `<config dir>/com.mkvanimebatch.desktop`, where the appearance choices live (they roam with a
+/// Windows profile); `None` when the OS names no config directory.
 pub fn config_dir() -> Option<PathBuf> {
     dirs::config_dir().map(|dir| dir.join(crate::diagnostics::IDENTIFIER))
+}
+
+/// `<local config dir>/com.mkvanimebatch.desktop`, where the software choice lives: a broken GPU
+/// is a fact about one machine, so on Windows it stays in LocalAppData rather than roaming (on
+/// Linux this is [`config_dir`]). `None` when the OS names no local config directory.
+pub fn choice_dir() -> Option<PathBuf> {
+    dirs::config_local_dir().map(|dir| dir.join(crate::diagnostics::IDENTIFIER))
 }
 
 /// Whether `dir` holds a saved software choice. An unreadable file counts as none.
@@ -131,11 +140,15 @@ pub fn save_software(dir: &Path) -> io::Result<()> {
 /// closing mid-write leaves the old file whole, never an empty or partial one (nothing is synced
 /// to disk, so a power loss may not). The temporary file is this process's
 /// own, so two instances saving at once never write into each other's; the last rename wins.
+/// A failed write or rename removes the temporary file before returning the error.
 pub fn save_file(dir: &Path, name: &str, text: &str) -> io::Result<()> {
     std::fs::create_dir_all(dir)?;
     let temporary = dir.join(format!("{name}.{}.tmp", std::process::id()));
-    std::fs::write(&temporary, text)?;
-    std::fs::rename(temporary, dir.join(name))
+    std::fs::write(&temporary, text)
+        .and_then(|()| std::fs::rename(&temporary, dir.join(name)))
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&temporary);
+        })
 }
 
 pub fn forget_saved(dir: &Path) -> io::Result<()> {
@@ -199,28 +212,37 @@ pub enum Answer {
 /// the host runs them itself, `zenity` first, and knows when neither could be shown.
 #[cfg(target_os = "linux")]
 pub fn ask_restart() -> Answer {
-    let tools: [(&str, &[&str]); 2] = [
-        (
-            "zenity",
-            &["--question", "--title", DIALOG_TITLE, "--text", DIALOG_TEXT],
-        ),
-        (
-            "kdialog",
-            &["--title", DIALOG_TITLE, "--yesno", DIALOG_TEXT],
-        ),
-    ];
+    ask_with(
+        &[
+            (
+                "zenity",
+                &["--question", "--title", DIALOG_TITLE, "--text", DIALOG_TEXT],
+            ),
+            (
+                "kdialog",
+                &["--title", DIALOG_TITLE, "--yesno", DIALOG_TEXT],
+            ),
+        ],
+        DIALOG_TIMEOUT,
+    )
+}
+
+/// Runs each `(tool, args)` in turn until one answers: one that cannot start or cannot reach the
+/// display passes to the next, and one left unanswered past `timeout` ends the asking, since a
+/// dialog may have shown.
+#[cfg(target_os = "linux")]
+fn ask_with(tools: &[(&str, &[&str])], timeout: Duration) -> Answer {
     let mut reasons = Vec::new();
-    for (tool, args) in tools {
+    for &(tool, args) in tools {
         let child = dialog_command(tool, args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn();
-        let (status, stderr) = match child.and_then(|child| wait_for_dialog(child, DIALOG_TIMEOUT))
-        {
+        let (status, stderr) = match child.and_then(|child| wait_for_dialog(child, timeout)) {
             Ok(Some(ended)) => ended,
             Ok(None) => {
-                return Answer::Unavailable(format!("{tool} timed out after {DIALOG_TIMEOUT:?}"));
+                return Answer::Unavailable(format!("{tool} timed out after {timeout:?}"));
             }
             Err(error) => {
                 reasons.push(format!("{tool}: {error}"));
@@ -564,6 +586,19 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_save_leaves_no_temporary_file() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory where the file goes makes the rename fail.
+        std::fs::create_dir_all(dir.path().join(CHOICE_FILE).join("taken")).unwrap();
+        assert!(save_software(dir.path()).is_err());
+        let left: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(left, [CHOICE_FILE], "{left:?}");
+    }
+
+    #[test]
     fn read_answer_maps_exit_codes_and_display_errors() {
         assert_eq!(read_answer(Some(0), ""), Some(Answer::Yes));
         // A healthy "no" can still carry Mesa's warnings on stderr.
@@ -585,9 +620,43 @@ mod tests {
         assert_eq!(read_answer(Some(255), ""), None);
     }
 
+    /// A tool that cannot reach the display passes to the next; stand-ins for zenity and kdialog.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_tool_without_a_display_passes_to_the_next() {
+        let answer = ask_with(
+            &[
+                ("sh", &["-c", "echo 'Failed to open display' >&2; exit 1"]),
+                ("sh", &["-c", "exit 0"]),
+            ],
+            Duration::from_secs(5),
+        );
+        assert_eq!(answer, Answer::Yes);
+    }
+
+    /// A tool left unanswered past the timeout ends the asking: the next one is never tried.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_tool_past_the_timeout_ends_the_asking() {
+        let answer = ask_with(
+            &[("sh", &["-c", "sleep 30"]), ("sh", &["-c", "exit 0"])],
+            Duration::from_millis(200),
+        );
+        assert!(
+            matches!(&answer, Answer::Unavailable(reason) if reason.contains("timed out")),
+            "{answer:?}"
+        );
+    }
+
     #[test]
     fn a_dialog_runs_with_zenitys_exit_codes_at_their_defaults() {
         let command = dialog_command("zenity", &["--question"]);
+        assert!(
+            command
+                .get_envs()
+                .any(|env| env == (OsStr::new("LC_ALL"), Some(OsStr::new("C.UTF-8")))),
+            "the dialog's stderr must stay untranslated"
+        );
         let removed: Vec<_> = command
             .get_envs()
             .filter(|(_, value)| value.is_none())

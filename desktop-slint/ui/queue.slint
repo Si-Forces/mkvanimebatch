@@ -284,12 +284,14 @@ component EpRow inherits Rectangle {
                 }
             }
 
-            // The pick (.ep-pick): number, name and meta line; it inspects the row.
+            // The pick (.ep-pick): number, name and meta line; it inspects the row. Read as the
+            // name, then the meta line (the button's content in the webview).
             pick := Pressable {
                 horizontal-stretch: 1;
                 border-radius: 8px;
                 focus-key: "pick:" + root.key;
                 accessible-label: root.item.name;
+                accessible-description: root.item.meta;
                 clicked => { root.pick(); }
                 HorizontalLayout {
                     spacing: 12px;
@@ -318,6 +320,7 @@ component EpRow inherits Rectangle {
                             color: root.item.meta-error ? Theme.err : Theme.path;
                             font-size: 12px;
                             overflow: elide;
+                            accessible-role: none;
                         }
                     }
                 }
@@ -363,24 +366,29 @@ component EpRow inherits Rectangle {
                 }
             }
 
-            // Move up / Move down (.ep-reorder): shown on hover or with a row control focused,
-            // gone while a filter shows.
-            VerticalLayout {
-                alignment: center;
-                opacity: (body.has-hover || body.focus-within) && !root.filtered ? 1 : 0;
-                up := ReorderButton {
-                    glyph: "M6 15l6-6 6 6";
-                    enabled: !root.locked && !root.filtered;
-                    focus-key: "up:" + root.key;
-                    accessible-label: "Move up";
-                    clicked => { root.move-up(); }
-                }
-                down := ReorderButton {
-                    glyph: "M6 9l6 6 6-6";
-                    enabled: !root.locked && !root.filtered;
-                    focus-key: "down:" + root.key;
-                    accessible-label: "Move down";
-                    clicked => { root.move-down(); }
+            // Move up / Move down (.ep-reorder): shown on hover or with a row control focused;
+            // while a filter shows, gone from the accessibility tree too, their width kept
+            // (style.css's `visibility: hidden`).
+            Rectangle {
+                width: 22px;
+                visible: !root.filtered;
+                opacity: body.has-hover || body.focus-within ? 1 : 0;
+                VerticalLayout {
+                    alignment: center;
+                    up := ReorderButton {
+                        glyph: "M6 15l6-6 6 6";
+                        enabled: !root.locked;
+                        focus-key: "up:" + root.key;
+                        accessible-label: "Move up";
+                        clicked => { root.move-up(); }
+                    }
+                    down := ReorderButton {
+                        glyph: "M6 9l6 6 6-6";
+                        enabled: !root.locked;
+                        focus-key: "down:" + root.key;
+                        accessible-label: "Move down";
+                        clicked => { root.move-down(); }
+                    }
                 }
             }
         }
@@ -514,7 +522,8 @@ export component QueuePane inherits Rectangle {
     property <int> reveal-pending: -1;
     // EpRow at its tallest: a release head over the row.
     property <length> tallest-row: 30px + 52px;
-    property <string> marked: pending-inspect != "" ? pending-inspect : head.inspected;
+    // The row marked as inspected: the one picked, until its Inspect is answered.
+    out property <string> marked: pending-inspect != "" ? pending-inspect : head.inspected;
 
     // The release header pinned at the list's top, and the row instance that pinned it: rows
     // report it as they cross the top (in no set order), and only the one that pinned it unpins
@@ -567,7 +576,10 @@ export component QueuePane inherits Rectangle {
             if root.head.crumbs-end != "": Rectangle {
                 HorizontalLayout {
                     alignment: start;
+                    // An overflow shrinks only the stretching lead, down to its ellipsis, before the
+                    // leaf: the leaf keeps its width while the lead elides.
                     Text {
+                        horizontal-stretch: 1;
                         text: root.head.crumbs-lead;
                         color: Theme.path;
                         font-size: 12px;
@@ -647,16 +659,6 @@ export component QueuePane inherits Rectangle {
             background: Theme.line;
         }
 
-        if root.head.filter-empty: HorizontalLayout {
-            padding-left: 32px;
-            padding-right: 32px;
-            padding-top: 12px;
-            Text {
-                text: "No episodes match this filter.";
-                color: Theme.mute;
-            }
-        }
-
         // The rows, or a card over the hidden list. The list stays made, so the host can scroll
         // it to a row (`reveal`).
         Rectangle {
@@ -707,43 +709,75 @@ export component QueuePane inherits Rectangle {
                 count: root.pinned-head.count;
             }
 
-            if root.head.card-shown: VerticalLayout {
+            // .empty-state-card: at most 340px wide, centred; the folder icon, or the spinner
+            // while scanning.
+            if root.head.card-shown: HorizontalLayout {
                 width: parent.width;
                 height: parent.height;
                 padding: 48px;
-                spacing: 8px;
-                alignment: start;
-                if root.head.card-spinner: HorizontalLayout {
-                    alignment: center;
-                    Ring { spinning: true; }
-                }
-                Text {
-                    text: root.head.card-title;
-                    color: Theme.fg;
-                    font-size: 15px;
-                    font-weight: 700;
-                    horizontal-alignment: center;
-                    wrap: word-wrap;
-                }
-                Text {
-                    text: root.head.card-text;
-                    color: Theme.mute;
-                    horizontal-alignment: center;
-                    wrap: word-wrap;
-                }
-                if root.head.card-action != "": HorizontalLayout {
-                    alignment: center;
-                    padding-top: 6px;
-                    AccentButton {
-                        // Not its label, which the Library's Open folder… has too.
-                        focus-key: root.name + ":open-folder";
-                        text: root.head.card-action;
-                        enabled: !root.locked;
-                        clicked => { root.open-folder(); }
+                alignment: center;
+                VerticalLayout {
+                    max-width: 340px;
+                    spacing: 8px;
+                    alignment: start;
+                    if root.head.card-spinner: HorizontalLayout {
+                        alignment: center;
+                        Ring { spinning: true; }
+                    }
+                    if !root.head.card-spinner: HorizontalLayout {
+                        alignment: center;
+                        Path {
+                            width: 28px;
+                            height: 28px;
+                            viewbox-width: 24;
+                            viewbox-height: 24;
+                            stroke: Theme.mute;
+                            // The SVG's 1.8 in its 24-unit viewbox: a Path's stroke is not scaled.
+                            stroke-width: 1.8px * 28 / 24;
+                            stroke-line-join: round;
+                            commands: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z";
+                            accessible-role: none;
+                        }
+                    }
+                    Text {
+                        text: root.head.card-title;
+                        color: Theme.fg;
+                        font-size: 15px;
+                        font-weight: 700;
+                        horizontal-alignment: center;
+                        wrap: word-wrap;
+                    }
+                    Text {
+                        text: root.head.card-text;
+                        color: Theme.mute;
+                        horizontal-alignment: center;
+                        wrap: word-wrap;
+                    }
+                    if root.head.card-action != "": HorizontalLayout {
+                        alignment: center;
+                        padding-top: 6px;
+                        AccentButton {
+                            // The mode's, as each pane has one.
+                            focus-key: root.name + ":open-folder";
+                            text: root.head.card-action;
+                            enabled: !root.locked;
+                            clicked => { root.open-folder(); }
+                        }
                     }
                 }
             }
         }
 
+        // After the list, as index.html's .filter-empty (padding 0 32px 20px).
+        if root.head.filter-empty: HorizontalLayout {
+            padding-left: 32px;
+            padding-right: 32px;
+            padding-bottom: 20px;
+            Text {
+                text: "No episodes match this filter.";
+                color: Theme.mute;
+                wrap: word-wrap;
+            }
+        }
     }
 }
