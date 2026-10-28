@@ -162,7 +162,7 @@ pub fn relaunch_command(
     let ours = appdir.filter(|dir| !dir.is_empty()).is_some_and(|dir| {
         exe.starts_with(std::fs::canonicalize(&dir).unwrap_or_else(|_| PathBuf::from(dir)))
     });
-    let appimage = appimage.filter(|_| ours);
+    let appimage = appimage.filter(|path| ours && !path.is_empty());
     let mut command = Command::new(appimage.as_deref().unwrap_or(exe.as_os_str()));
     #[cfg(unix)]
     if let (Some(_), Some(argv0)) = (&appimage, argv0) {
@@ -223,7 +223,9 @@ pub fn ask_restart() -> Answer {
         let (status, stderr) = match child.and_then(|child| wait_for_dialog(child, DIALOG_TIMEOUT))
         {
             Ok(Some(ended)) => ended,
-            Ok(None) => return Answer::Unavailable(format!("{tool} timed out after 5 minutes")),
+            Ok(None) => {
+                return Answer::Unavailable(format!("{tool} timed out after {DIALOG_TIMEOUT:?}"));
+            }
             Err(error) => {
                 reasons.push(format!("{tool}: {error}"));
                 continue;
@@ -282,10 +284,11 @@ fn wait_for_dialog(
     )))
 }
 
-/// zenity and kdialog answer 0 for yes and 1 for no or a closed dialog, but both can also end
-/// with 1 when they cannot reach the display, which they say on stderr: GTK's "Failed to open
-/// display", Qt's "could not connect to display" or "cannot connect to X server". Any other
-/// stderr is no sign of failure: Mesa warns there on a healthy start. `None`: not shown.
+/// zenity and kdialog answer 0 for yes and 1 for no or a closed dialog (kdialog may end with 2
+/// when its dialog is dismissed), but both can also end with 1 when they cannot reach the
+/// display, which they say on stderr: GTK's "Failed to open display", Qt's "could not connect to
+/// display" or "cannot connect to X server". Any other stderr is no sign of failure: Mesa warns
+/// there on a healthy start. `None`: not shown.
 #[cfg(any(target_os = "linux", test))]
 fn read_answer(code: Option<i32>, stderr: &str) -> Option<Answer> {
     let stderr = stderr.to_ascii_lowercase();
@@ -294,7 +297,7 @@ fn read_answer(code: Option<i32>, stderr: &str) -> Option<Answer> {
         .any(|sign| stderr.contains(sign));
     match code {
         Some(0) => Some(Answer::Yes),
-        Some(1) if !no_display => Some(Answer::No),
+        Some(1 | 2) if !no_display => Some(Answer::No),
         _ => None,
     }
 }
@@ -445,6 +448,31 @@ mod tests {
         #[cfg(unix)]
         assert!(format!("{command:?}").contains("\"App.AppImage\""));
 
+        // An empty `$APPIMAGE` names no program: the binary itself re-launches.
+        let command = relaunch_command(
+            Path::new("/tmp/.mount_x/usr/bin/app"),
+            Some("".into()),
+            Some("/tmp/.mount_x".into()),
+            Some("App.AppImage".into()),
+            args(),
+        );
+        assert_eq!(command.get_program(), "/tmp/.mount_x/usr/bin/app");
+
+        // A real, non-canonical `$APPDIR` holds the canonical binary once canonicalized.
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("usr")).unwrap();
+        let exe = std::fs::canonicalize(temp.path())
+            .unwrap()
+            .join("usr/bin/app");
+        let command = relaunch_command(
+            &exe,
+            Some("/home/u/App.AppImage".into()),
+            Some(temp.path().join("usr/..").into()),
+            Some("App.AppImage".into()),
+            args(),
+        );
+        assert_eq!(command.get_program(), "/home/u/App.AppImage");
+
         // `$ARGV0` without `$APPIMAGE` is not an AppImage run: ignored.
         let command = relaunch_command(
             Path::new("/opt/app/bin"),
@@ -493,12 +521,31 @@ mod tests {
         let pid = child.id();
         let started = Instant::now();
         let waited = wait_for_dialog(child, Duration::from_millis(200)).unwrap();
-        assert!(waited.is_none(), "timed out");
+        assert!(
+            waited.is_none(),
+            "a dialog past its deadline must be killed and return None, got {waited:?}"
+        );
         assert!(started.elapsed() < Duration::from_secs(5));
         assert!(
             !Path::new(&format!("/proc/{pid}")).exists(),
             "killed and reaped"
         );
+    }
+
+    /// A dialog tool that ends in time hands back its exit status and its stderr.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_dialog_that_ends_returns_its_status_and_stderr() {
+        let child = Command::new("sh")
+            .args(["-c", "echo 'Failed to open display' >&2; exit 1"])
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("sh runs");
+        let (status, stderr) = wait_for_dialog(child, Duration::from_secs(5))
+            .unwrap()
+            .expect("sh ends before the deadline");
+        assert_eq!(status.code(), Some(1));
+        assert_eq!(stderr, "Failed to open display\n");
     }
 
     #[test]
@@ -507,6 +554,8 @@ mod tests {
         // A healthy "no" can still carry Mesa's warnings on stderr.
         let mesa = "MESA-INTEL: warning: Ivy Bridge Vulkan support is incomplete\n";
         assert_eq!(read_answer(Some(1), mesa), Some(Answer::No));
+        // kdialog may end with 2 when its dialog is dismissed (Esc, the title bar's close).
+        assert_eq!(read_answer(Some(2), mesa), Some(Answer::No));
         let gtk = "(zenity:1): Gtk-WARNING **: 13:35:51.009: Failed to open display\n";
         assert_eq!(read_answer(Some(1), gtk), None);
         // Qt says it its own way, and the match ignores case.
@@ -514,6 +563,7 @@ mod tests {
         assert_eq!(read_answer(Some(1), qt), None);
         let x11 = "kdialog: Cannot connect to X server :0\n";
         assert_eq!(read_answer(Some(1), x11), None);
+        assert_eq!(read_answer(Some(2), x11), None);
         // kdialog aborts without a display.
         assert_eq!(read_answer(None, ""), None);
         assert_eq!(read_answer(Some(255), ""), None);

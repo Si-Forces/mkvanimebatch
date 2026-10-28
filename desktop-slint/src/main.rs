@@ -67,7 +67,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 renderer::RENDERER_ENV
             ),
         };
-        tracing::warn!("Running on the software renderer ({why}); the glass is faked");
+        tracing::warn!("Running on the software renderer ({why})");
     }
 
     // A re-launched child saves the software choice once it has drawn (save_once_drawn).
