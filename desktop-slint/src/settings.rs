@@ -11,15 +11,17 @@
 //! normalizes; the complexity also gets the published value back when it is left.
 
 use crate::intents::{pipeline, Intents, Picking};
-use crate::publisher::index;
-use mkv_anime_batch_slint_ui::{App, ChipTexts, DraftForm, Mode, PresetItem, Sheet, SheetLimits};
+use crate::publisher::{index, show_rows};
+use mkv_anime_batch_slint_ui::{
+    App, ChipTexts, DraftForm, Focus, Mode, PresetItem, Sheet, SheetLimits,
+};
 use mkv_core::preset::PresetProfile;
 use mkv_core::request::{COMPLEXITY_RANGE, FFMPEG_THREADS_RANGE, IO_JOBS_RANGE, WORKERS_RANGE};
 use mkv_desktop_core::actor::{Intent, ViewState};
 use mkv_desktop_core::draft::{DraftChanges, SettingsDraft, StepField};
 use mkv_desktop_core::presentation::Chips;
 use mkv_desktop_core::queue::Direction;
-use slint::{ComponentHandle, Model, ModelRc, SharedString, Timer, TimerMode, VecModel};
+use slint::{ComponentHandle, Model, SharedString, Timer, TimerMode};
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -448,8 +450,12 @@ pub(crate) fn show(app: &App, state: &ViewState, edits: &Edits) {
         .find(|row| row.id == "custom")
         .map(|row| row.sub);
     let presets = map_presets(&state.presets, &state.remux.draft, shown);
-    if !app.get_presets().iter().eq(presets.iter().cloned()) {
-        app.set_presets(ModelRc::new(VecModel::from(presets)));
+    // In place, so a preset picked from the keyboard keeps the focus.
+    let replaced = show_rows(&app.get_presets(), presets, |presets| {
+        app.set_presets(presets)
+    });
+    if replaced && app.global::<Focus>().get_current().starts_with("preset:") {
+        app.invoke_focus_keys();
     }
 }
 

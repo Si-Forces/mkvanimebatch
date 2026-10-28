@@ -1,7 +1,9 @@
 // Redesign C's Run Log (desktop-tauri/ui/index.html #btn-log, #log-drawer; style.css .pill-btn,
 // .badge, .logdrawer, .log-body, .log-line). Layout and bindings only: the host
 // (desktop-slint/src/run_log.rs) maps each line's display text and tone, and the badge's text.
-import { Theme } from "theme.slint";
+import { GlassPane, Theme } from "theme.slint";
+import { Pressable } from "focus.slint";
+import { LinkButton } from "queue.slint";
 import { ListView } from "std-widgets.slint";
 
 // A line's kind as the console colours it (log-view.js KIND_CLASS): a note is plain.
@@ -29,28 +31,21 @@ export struct LogSerials {
 }
 
 // The Log toggle in the bottom bar (.pill-btn #btn-log): a lines icon, "Log" and the error badge,
-// none while it is empty. Takes the focus; Enter or Space toggles the drawer.
-export component LogToggle inherits Rectangle {
+// none while it is empty. Its label is "Log", its description the error count spoken.
+export component LogToggle inherits Pressable {
     in property <bool> open;
     in property <LogBadge> badge;
-    callback clicked();
-    public function focus-toggle() {
-        keys.focus();
-    }
     width: row.preferred-width + 28px;
     height: 36px;
     border-radius: self.height / 2;
-    background: touch.has-hover ? Theme.hover : Theme.field;
-    border-width: keys.has-focus ? 2px : 1px;
-    border-color: keys.has-focus ? Theme.accent-ring : Theme.edge;
-    forward-focus: keys;
-    accessible-role: button;
+    background: self.hovered ? Theme.hover : Theme.field;
+    border-width: 1px;
+    border-color: Theme.edge;
     accessible-label: "Log";
     accessible-description: badge.description;
     accessible-expandable: true;
     accessible-expanded: open;
-    accessible-action-default => { root.clicked(); }
-    accessible-action-expand => { root.clicked(); }
+    accessible-action-expand => { root.activate(); }
     row := HorizontalLayout {
         alignment: center;
         spacing: 6px;
@@ -88,73 +83,6 @@ export component LogToggle inherits Rectangle {
                 accessible-role: none;
             }
         }
-    }
-    keys := FocusScope {
-        key-pressed(event) => {
-            if event.text == Key.Return || event.text == Key.Space {
-                root.clicked();
-                return accept;
-            }
-            reject
-        }
-    }
-    touch := TouchArea {
-        mouse-cursor: pointer;
-        // A left press takes the focus, as a browser's button does (the StepButton pattern): the
-        // TouchArea above the FocusScope grabs the press before it.
-        pointer-event(event) => {
-            if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
-                keys.focus();
-            }
-        }
-        clicked => { root.clicked(); }
-    }
-}
-
-// A text button in the drawer's head (.link-btn): it takes the focus, unlike the queue's.
-component DrawerLink inherits Rectangle {
-    in property <string> text;
-    // The hover tooltip's text, read out as the accessible description.
-    in property <string> tip;
-    callback clicked();
-    out property <bool> focused: keys.has-focus;
-    width: label.preferred-width + 8px;
-    height: 24px;
-    border-radius: 6px;
-    border-width: keys.has-focus ? 2px : 0px;
-    border-color: Theme.accent-ring;
-    forward-focus: keys;
-    accessible-role: button;
-    accessible-label: text;
-    accessible-description: tip;
-    accessible-action-default => { root.clicked(); }
-    label := Text {
-        text: root.text;
-        color: Theme.accent;
-        font-size: 12px;
-        font-weight: 600;
-        vertical-alignment: center;
-        accessible-role: none;
-    }
-    keys := FocusScope {
-        key-pressed(event) => {
-            if event.text == Key.Return || event.text == Key.Space {
-                root.clicked();
-                return accept;
-            }
-            reject
-        }
-    }
-    TouchArea {
-        mouse-cursor: pointer;
-        // A left press takes the focus, as a browser's button does (the StepButton pattern): the
-        // TouchArea above the FocusScope grabs the press before it.
-        pointer-event(event) => {
-            if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
-                keys.focus();
-            }
-        }
-        clicked => { root.clicked(); }
     }
 }
 
@@ -240,9 +168,8 @@ component LogConsole inherits Rectangle {
 }
 
 // The drawer (.logdrawer): its head with Copy and Close over the console of the mode shown. One
-// console per mode, both kept, so each keeps its own scroll. Glass comes with P6: a near opaque
-// pane with the .glass edge and shadow.
-export component LogDrawer inherits Rectangle {
+// console per mode, both kept, so each keeps its own scroll. A .glass pane (GlassPane).
+export component LogDrawer inherits GlassPane {
     // "Log · Remux" or "Log · Extract".
     in property <string> title;
     // "Copy", or "Copied" / "Copy failed" for 1.5 s after a Copy.
@@ -257,13 +184,6 @@ export component LogDrawer inherits Rectangle {
     callback close();
     // The Copy or Close button has the focus: closing hands it to the Log toggle.
     out property <bool> focus-inside: copy.focused || close.focused;
-    border-radius: Theme.pane-radius;
-    background: Theme.float.with-alpha(0.985);
-    border-width: 1px;
-    border-color: Theme.edge;
-    drop-shadow-blur: 40px;
-    drop-shadow-offset-y: 18px;
-    drop-shadow-color: Theme.shadow;
     clip: true;
     accessible-role: groupbox;
     accessible-label: "Log";
@@ -284,12 +204,14 @@ export component LogDrawer inherits Rectangle {
                 overflow: elide;
                 horizontal-stretch: 1;
             }
-            copy := DrawerLink {
+            copy := LinkButton {
                 text: root.copy-label;
+                // Its label reads "Copied" for a while after a Copy.
+                focus-key: "copy";
                 tip: "Copies the log with its real file paths, for bug reports";
                 clicked => { root.copy(); }
             }
-            close := DrawerLink {
+            close := LinkButton {
                 text: "Close";
                 clicked => { root.close(); }
             }

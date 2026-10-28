@@ -9,7 +9,8 @@ use crate::jobs;
 use crate::queue::{map_rows, ModeList, RowPatch, Update};
 use crate::run_log::{self, Console, LogPatch};
 use crate::settings::{self, Edits, BITRATES};
-use mkv_anime_batch_slint_ui::{App, Mode, QueueFilter, QueueRow};
+use crate::telemetry;
+use mkv_anime_batch_slint_ui::{App, Focus, Mode, QueueFilter, QueueRow};
 use mkv_core::pipeline::PipelineMode;
 use mkv_desktop_core::actor::{Publisher, ViewState};
 use mkv_desktop_core::job::JobDone;
@@ -353,6 +354,7 @@ pub(crate) fn hop(pending: &Coalescer, edits: &Edits, window: &slint::Weak<App>)
         app.set_busy(state.busy);
         jobs::show(&app, &state);
         settings::show(&app, &state, edits);
+        telemetry::show(&app, state.telemetry.as_ref());
     }
     apply(&app, Mode::Remux, remux);
     apply(&app, Mode::Extract, extract);
@@ -381,6 +383,51 @@ impl Publisher for SlintPublisher {
     }
 }
 
+/// Shows `rows` in `model`: in place when it is a `VecModel` of as many rows, writing only the rows
+/// that differ, so the repeated control with the focus keeps it (a replaced model makes every row
+/// again, and a destroyed control takes the focus with it). Else hands `set` a new model, unless
+/// `model` already shows `rows`. Returns whether it did: the caller then hands the focus on.
+pub(crate) fn show_rows<T: Clone + PartialEq + 'static>(
+    model: &ModelRc<T>,
+    rows: Vec<T>,
+    set: impl FnOnce(ModelRc<T>),
+) -> bool {
+    if let Some(kept) = model
+        .as_any()
+        .downcast_ref::<VecModel<T>>()
+        .filter(|kept| kept.row_count() == rows.len())
+    {
+        for (index, row) in rows.into_iter().enumerate() {
+            if kept.row_data(index).as_ref() != Some(&row) {
+                kept.set_row_data(index, row);
+            }
+        }
+        return false;
+    }
+    if model.iter().eq(rows.iter().cloned()) {
+        return false;
+    }
+    set(ModelRc::new(VecModel::from(rows)));
+    true
+}
+
+/// The name queue.slint keys `mode`'s controls by.
+fn name(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Remux => "remux",
+        Mode::Extract => "extract",
+    }
+}
+
+/// The id of `mode`'s row whose control has the focus, from `current` (`Focus.current`):
+/// queue.slint keys a row's controls `<control>:<mode>:<row id>`.
+fn focused_row(current: &str, mode: Mode) -> Option<&str> {
+    let (control, rest) = current.split_once(':')?;
+    matches!(control, "check" | "pick" | "up" | "down")
+        .then(|| rest.strip_prefix(name(mode))?.strip_prefix(':'))
+        .flatten()
+}
+
 /// Writes `mode`'s update: its header when it changed, its rows into the mode's model, its Library
 /// and Inspector when they changed, then scrolls to a revealed release. A card
 /// staged since the last hop puts the list back at the top, as the webview's `clearList` does: the
@@ -392,16 +439,33 @@ fn apply(app: &App, mode: Mode, update: Update) {
         Mode::Extract => (app.get_extract_rows(), app.get_extract_head()),
     };
     if let Some(new) = update.head.filter(|new| *new != head) {
+        // The card's button goes with its action (Open folder…, then the Scanning card).
+        let button_gone = !new.card_shown || new.card_action.is_empty();
         match mode {
             Mode::Remux => app.set_remux_head(new),
             Mode::Extract => app.set_extract_head(new),
         }
+        if button_gone
+            && app.global::<Focus>().get_current() == format!("{}:open-folder", name(mode))
+        {
+            app.invoke_focus_keys();
+        }
     }
     if let Some(items) = update.library {
-        let items = ModelRc::new(VecModel::from(items));
-        match mode {
+        let library = match mode {
+            Mode::Remux => app.get_remux_library(),
+            Mode::Extract => app.get_extract_library(),
+        };
+        let replaced = show_rows(&library, items, |items| match mode {
             Mode::Remux => app.set_remux_library(items),
             Mode::Extract => app.set_extract_library(items),
+        });
+        // app.slint shows the Library of `mode` only.
+        if replaced
+            && app.get_mode() == mode
+            && app.global::<Focus>().get_current().starts_with("library:")
+        {
+            app.invoke_focus_keys();
         }
     }
     if let Some(update) = update.inspector {
@@ -419,10 +483,27 @@ fn apply(app: &App, mode: Mode, update: Update) {
     }
     if let Some(model) = rows.as_any().downcast_ref::<VecModel<QueueRow>>() {
         match update.rows {
-            Some(RowPatch::Reset(rows)) => model.set_vec(rows),
+            // A row whose controls go takes the focus with it, and Slint then delivers no key:
+            // the window's key scope takes it, so Esc and Ctrl+T still reach it. A reset drops
+            // every row (every Run's rescan resets them); a patch hides a row the filter no longer
+            // shows (a status change under To do, mid-run).
+            Some(RowPatch::Reset(rows)) => {
+                let dropped = focused_row(&app.global::<Focus>().get_current(), mode).is_some();
+                model.set_vec(rows);
+                if dropped {
+                    app.invoke_focus_keys();
+                }
+            }
             Some(RowPatch::Rows(rows)) => {
+                let current = app.global::<Focus>().get_current();
+                let focused = focused_row(&current, mode);
+                let mut dropped = false;
                 for (index, row) in rows {
+                    dropped |= !row.shown && focused == Some(row.id.as_str());
                     model.set_row_data(index, row);
+                }
+                if dropped {
+                    app.invoke_focus_keys();
                 }
             }
             None => {}

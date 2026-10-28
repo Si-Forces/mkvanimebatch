@@ -2,11 +2,18 @@
 //! 1000 synthetic rows (some with CJK names) in the real P2 queue view; a batch publishes at about
 //! 15 Hz through the real Publisher path (rows mapped and diffed off the UI thread, then the hop's
 //! `set_row_data`); the list scrolls 6 px per frame for 30 s after a 3 s warm-up, on Skia OpenGL,
-//! maximized, without the glass. Prints one `BENCH` line and exits.
+//! maximized. P6's per-frame content is drawn too: the telemetry sparklines take a synthetic
+//! sample every second (the core's busy cadence), the sticky release head pins as the rows
+//! scroll, and the glass Log drawer (faked as the app draws it; `MKV_BENCH_BLUR=1` for the real
+//! backdrop blur) is open over the scrolling list
+//! for the window's middle third (`glass_frame` is that third's render max, missed vsyncs, average
+//! fps and 1% low fps, the last two as the spike's FrameStats counts them). Prints one `BENCH` line
+//! and exits.
 //!
 //! ```text
 //! cargo bench -p mkv-anime-batch-slint --bench queue_scroll
 //! env -u WAYLAND_DISPLAY cargo bench -p mkv-anime-batch-slint --bench queue_scroll   # Xwayland
+//! MKV_BENCH_BLUR=1 cargo bench -p mkv-anime-batch-slint --bench queue_scroll          # real blur
 //! ```
 //!
 //! Each `cargo bench` builds the UI crate again (slint-build watches a `slint-project.json` that
@@ -28,7 +35,13 @@
 //! UI-thread time, and `run_reset_frame` the render and interval of the frame it lands in (the
 //! first presented after it). The churn's clock and progress stack redraw the bottom bar (P5).
 //! Budget (#135): publication p99 < 4 ms, and no frame over 16.7 ms, read as no render over
-//! 16.7 ms and no missed vsync. The line ends with PASS or FAIL for each.
+//! 16.7 ms and no missed vsync. A provisional read of ADR-0017 decision 8's glass numbers
+//! (`glass_provisional`): the glass third at 50 fps or more on average and 45 fps or more at its
+//! 1% low. Provisional, not the gate: decision 8 keeps the drawer open for the whole 30 s with the
+//! real core publishing at 15 Hz, where this opens it for a third, under synthetic churn and
+//! telemetry; P9 (#142) runs the gate itself. Decision 8 defines its numbers on the real blur,
+//! drawn with `MKV_BENCH_BLUR=1` (`glass_frame=blur:1` in the line); without, the faked glass the
+//! app ships is read by the same numbers. The line ends with PASS or FAIL for each.
 
 // Only the hop's path is driven here; the rest of these host modules is unused. `clippy
 // --all-targets` checks a bench with cfg(test) but without its #[test] items, which leaves their
@@ -57,6 +70,10 @@ mod run_log;
 #[allow(dead_code, unused_imports)]
 #[path = "../src/settings.rs"]
 mod settings;
+// The hop writes the telemetry too (P6).
+#[allow(dead_code, unused_imports)]
+#[path = "../src/telemetry.rs"]
+mod telemetry;
 
 use mkv_anime_batch_slint_ui::{App, Mode, QueueFilter, Theme};
 use mkv_desktop_core::actor::ViewState;
@@ -65,6 +82,7 @@ use mkv_desktop_core::presentation::{
 };
 use mkv_desktop_core::queue::Row;
 use mkv_desktop_core::snapshot::ItemStatus;
+use mkv_desktop_core::telemetry::{TelemetryData, TelemetryView};
 use publisher::Coalescer;
 use slint::{ComponentHandle, RenderingState};
 use std::error::Error;
@@ -170,6 +188,7 @@ fn spawn_churn(
         let mut next = 0;
         let t0 = Instant::now();
         let mut last_second = 0;
+        let mut telemetry = TelemetryView::default();
         loop {
             while started.len() < IN_FLIGHT {
                 while next < rows.len()
@@ -188,6 +207,18 @@ fn spawn_churn(
             }
             let second = t0.elapsed().as_secs();
             let tick = std::mem::replace(&mut last_second, second) != second;
+            // A telemetry sample a second, as the core samples during a batch (`BUSY_PERIOD`).
+            if tick {
+                let wave = (second as f32 * 0.7).sin();
+                telemetry.push(&TelemetryData {
+                    cpu_pct: 55.0 + 30.0 * wave,
+                    ram_used_mb: 5_000 + (second % 7) * 40,
+                    ram_total_mb: 8_000,
+                    ram_pct: 62.0 + 3.0 * wave,
+                    io_mb_s: 40.0 + 35.0 * (second as f32 * 1.3).cos(),
+                });
+                state.telemetry = Some(telemetry.clone());
+            }
             let mut finished = Vec::new();
             for (slot, &(i, at)) in started.iter().enumerate() {
                 let row = &mut rows[i];
@@ -262,13 +293,27 @@ fn summary(name: &str, values: &mut [f64]) -> String {
     )
 }
 
+/// The spike's FrameStats figures over frame `intervals` (ms): the average fps (frames over their
+/// total time) and the 1% low (the fps of the mean of the slowest 1% of intervals).
+fn fps(intervals: &[f64]) -> (f64, f64) {
+    let total: f64 = intervals.iter().sum();
+    let mut sorted = intervals.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let worst = (sorted.len() / 100).max(1);
+    let worst_ms = sorted.iter().rev().take(worst).sum::<f64>() / worst as f64;
+    (intervals.len() as f64 * 1000.0 / total, 1000.0 / worst_ms)
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     slint::BackendSelector::new()
         .backend_name("winit".into())
         .renderer_name("skia-opengl".into())
         .select()?;
     let app = App::new()?;
-    app.global::<Theme>().set_glass(false);
+    // The faked glass the app draws (appearance.rs REAL_BLUR off); MKV_BENCH_BLUR=1 draws the real
+    // blur instead, for P9's gate.
+    let blur = std::env::var_os("MKV_BENCH_BLUR").is_some_and(|v| v == "1");
+    app.global::<Theme>().set_glass(blur);
     publisher::install_models(&app);
     app.window().set_maximized(true);
 
@@ -337,6 +382,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let weak = app.as_weak();
     let (mut first, mut before, mut last) = (None::<Instant>, Instant::now(), None::<Instant>);
     let (mut intervals, mut renders) = (Vec::new(), Vec::new());
+    // The frames drawn with the glass drawer open: their renders and intervals.
+    let (mut glass_intervals, mut glass_renders) = (Vec::new(), Vec::new());
     let mut dir = 1.0;
     let (mut reported, mut reset) = (false, f64::NAN);
     // The Run reset is asked for once: a frame between the bump and its hop must not ask again.
@@ -367,6 +414,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                 }
                 renders.push(ms(now.duration_since(before)));
+                if app.get_log_open() {
+                    glass_renders.push(ms(now.duration_since(before)));
+                    if let Some(&interval) = intervals.last() {
+                        glass_intervals.push(interval);
+                    }
+                }
+                // The glass drawer over the list for the middle third of the window.
+                let third = since >= WARMUP + WINDOW / 3 && since < WARMUP + WINDOW * 2 / 3;
+                if app.get_log_open() != third {
+                    app.set_log_open(third);
+                }
                 if since >= WARMUP + WINDOW / 2 && !reset_asked {
                     reset_asked = true;
                     want_reset.store(true, Ordering::Relaxed);
@@ -401,6 +459,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let filter = ms(start.elapsed());
                 let verdict = |pass: bool| if pass { "PASS" } else { "FAIL" };
                 let render_max = renders.iter().copied().fold(0.0, f64::max);
+                let glass_render_max = glass_renders.iter().copied().fold(0.0, f64::max);
+                let glass_over_vsync = glass_intervals.iter().filter(|&&i| i > 25.0).count();
+                let (glass_avg, glass_low) = fps(&glass_intervals);
+                // ADR-0017 decision 8's glass numbers, read provisionally (see the header).
+                let glass_gate = glass_avg >= 50.0 && glass_low >= 45.0;
                 let run_reset_ms = run_reset.lock().unwrap().map_or(f64::NAN, |(took, _)| took);
                 let (reset_render, reset_interval) = reset_frame.unwrap_or((f64::NAN, f64::NAN));
                 let pub_budget = hops.len() > 1 && {
@@ -409,7 +472,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     sorted[((sorted.len() - 1) as f64 * 0.99).round() as usize] < 4.0
                 };
                 println!(
-                    "BENCH session={} renderer=skia-opengl rows={ROWS} publications={} {} {} reset_ms={reset:.2} filter_ms={filter:.2} run_reset_ms={run_reset_ms:.2} run_reset_frame=render:{reset_render:.2},interval:{reset_interval:.2} frames={} {} over_16.7ms={over_frame} over_25ms={over_vsync} {} budget_pub={} budget_frame={}",
+                    "BENCH session={} renderer=skia-opengl rows={ROWS} publications={} {} {} reset_ms={reset:.2} filter_ms={filter:.2} run_reset_ms={run_reset_ms:.2} run_reset_frame=render:{reset_render:.2},interval:{reset_interval:.2} frames={} {} over_16.7ms={over_frame} over_25ms={over_vsync} {} glass_frame=blur:{},frames:{},render_max:{glass_render_max:.2},over_25ms:{glass_over_vsync},avg_fps:{glass_avg:.1},low1_fps:{glass_low:.1} budget_pub={} budget_frame={} glass_provisional={}",
                     if std::env::var_os("WAYLAND_DISPLAY").is_some() { "wayland" } else { "x11" },
                     hops.len(),
                     summary("map", &mut maps),
@@ -417,8 +480,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                     intervals.len(),
                     summary("interval", &mut intervals),
                     summary("render", &mut renders),
+                    u8::from(blur),
+                    glass_renders.len(),
                     verdict(pub_budget),
                     verdict(render_max <= 16.7 && over_vsync == 0),
+                    verdict(glass_gate),
                 );
                 let _ = slint::quit_event_loop();
                 return;

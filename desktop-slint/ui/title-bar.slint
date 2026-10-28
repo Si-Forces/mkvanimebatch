@@ -1,25 +1,27 @@
-// Redesign C's title bar (desktop-tauri/ui/index.html .titlebar): the traffic lights, the brand and
-// a drag area behind them. Layout and bindings only; the host does what the buttons ask.
-import { Theme } from "theme.slint";
+// Redesign C's title bar (desktop-tauri/ui/index.html .titlebar): the traffic lights, the brand, a
+// drag area behind them, the theme toggle and the Appearance button, and the Appearance menu the
+// window shows under it. Layout and bindings only; the host does what the buttons ask.
+import { CheckBox } from "std-widgets.slint";
+import { GlassPane, Theme } from "theme.slint";
+import { Pressable } from "focus.slint";
+import { SectionHead } from "settings.slint";
 
-component TrafficLight inherits Rectangle {
+component TrafficLight inherits Pressable {
     in property <color> fill;
     in property <color> glyph-color;
     // An SVG path in an 8x8 box.
     in property <string> glyph;
-    // Shows the glyph: the whole group is hovered, as on macOS.
+    // Shows the glyph: the whole group is hovered or has the ring, as on macOS (not after a
+    // pointer press: a clicked button keeps the focus).
     in property <bool> lit;
-    out property <bool> has-hover: touch.has-hover;
-    callback clicked();
 
     width: 14px;
     height: 14px;
     border-radius: self.width / 2;
-    background: touch.has-hover ? fill.brighter(0.12) : fill;
+    background: self.hovered ? fill.brighter(0.12) : fill;
     border-width: 0.5px;
     border-color: #00000038;
-    accessible-role: button;
-    accessible-action-default => { root.clicked(); }
+    cursor: default;
 
     Path {
         x: (parent.width - self.width) / 2;
@@ -32,10 +34,168 @@ component TrafficLight inherits Rectangle {
         stroke: root.glyph-color;
         stroke-width: 1.8px;
         opacity: root.lit ? 1 : 0;
+        accessible-role: none;
+    }
+}
+
+// A title-bar icon button (.icon-btn): a 17px glyph from a 24x24 viewbox, the foreground when
+// hovered or while its menu is open.
+component IconButton inherits Pressable {
+    in property <string> icon;
+    // Its menu is open: the glyph and a tint say so.
+    in property <bool> active;
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    background: root.active ? Theme.sel : transparent;
+    Path {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 17px;
+        height: 17px;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        stroke: root.hovered || root.active ? Theme.fg : Theme.mute;
+        // The SVG's 2 in its 24-unit viewbox: a Path's stroke is not scaled with it.
+        stroke-width: 2px * 17 / 24;
+        stroke-line-cap: round;
+        stroke-line-join: round;
+        commands: root.icon;
+        accessible-role: none;
+    }
+}
+
+// The theme toggle (.icon-btn.theme-btn): a sun in the light theme, a moon in the dark one.
+component ThemeButton inherits IconButton {
+    accessible-label: "Toggle theme";
+    tip: "Toggle light and dark theme (Ctrl+T)";
+    clicked => { Theme.toggle(); }
+    icon: Theme.dark
+        ? "M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"
+        : "M16 12a4 4 0 1 1-8 0a4 4 0 1 1 8 0z M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4";
+}
+
+// One of the Appearance menu's three theme choices, a segment of its row.
+component ThemeChoice inherits Pressable {
+    in property <string> text;
+    in property <ColorScheme> scheme;
+    property <bool> selected: Theme.follows-system
+        ? self.scheme == ColorScheme.unknown
+        : self.scheme == (Theme.dark ? ColorScheme.dark : ColorScheme.light);
+    height: 28px;
+    horizontal-stretch: 1;
+    border-radius: 7px;
+    ring-gap: 1px;
+    background: self.selected ? Theme.sel : self.hovered ? Theme.hover : transparent;
+    accessible-role: radio-button;
+    accessible-label: root.text;
+    accessible-checked: self.selected;
+    focus-key: "theme:" + root.text;
+    clicked => { Theme.pick(root.scheme); }
+    Text {
+        text: root.text;
+        color: root.selected ? Theme.fg : Theme.mute;
+        font-size: 12px;
+        font-weight: root.selected ? 600 : 400;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        accessible-role: none;
+    }
+}
+
+// The Appearance menu (the maintainer's of 2026-10-27), under its title-bar button: the theme, its
+// System following the OS live, and the in-app reduced effects (Q105) that stand in for the
+// webview's prefers-reduced-transparency and prefers-reduced-motion. Never locked, not modal: the
+// window closes it (Esc, a click outside, the button). Tab and Shift+Tab wrap inside it.
+export component AppearanceMenu inherits GlassPane {
+    width: 280px;
+    height: body.preferred-height;
+    border-radius: 16px;
+    accessible-role: groupbox;
+    accessible-label: "Appearance";
+
+    // The current choice takes the focus as it opens.
+    init => {
+        if Theme.follows-system {
+            system.focus();
+        } else if Theme.dark {
+            dark.focus();
+        } else {
+            light.focus();
+        }
     }
 
-    touch := TouchArea {
-        clicked => { root.clicked(); }
+    // Takes the clicks the window's backdrop would close it on.
+    TouchArea { }
+
+    FocusScope {
+        focus-on-click: false;
+        focus-on-tab-navigation: false;
+        capture-key-pressed(event) => {
+            let back = event.text == Key.Backtab || (event.text == Key.Tab && event.modifiers.shift);
+            if back && system.focused {
+                reduce-motion.focus();
+                return accept;
+            }
+            if !back && event.text == Key.Tab && reduce-motion.has-focus {
+                system.focus();
+                return accept;
+            }
+            reject
+        }
+
+        body := VerticalLayout {
+            padding: 16px;
+            spacing: 12px;
+            SectionHead { text: "APPEARANCE"; }
+            Text {
+                text: "Theme";
+                color: Theme.fg;
+                accessible-role: none;
+            }
+            // A segmented row (the webview's has none).
+            Rectangle {
+                height: choices.preferred-height;
+                border-radius: 9px;
+                background: Theme.field;
+                border-width: 1px;
+                border-color: Theme.sep;
+                accessible-role: radio-group;
+                accessible-label: "Theme";
+                choices := HorizontalLayout {
+                    padding: 2px;
+                    spacing: 2px;
+                    system := ThemeChoice {
+                        text: "System";
+                        scheme: ColorScheme.unknown;
+                    }
+                    light := ThemeChoice {
+                        text: "Light";
+                        scheme: ColorScheme.light;
+                    }
+                    dark := ThemeChoice {
+                        text: "Dark";
+                        scheme: ColorScheme.dark;
+                    }
+                }
+            }
+            CheckBox {
+                text: "Reduce transparency (solid panes)";
+                checked: Theme.reduce-transparency;
+                toggled => {
+                    Theme.reduce-transparency = self.checked;
+                    Theme.effects-changed();
+                }
+            }
+            reduce-motion := CheckBox {
+                text: "Reduce motion (no spinning)";
+                checked: Theme.reduce-motion;
+                toggled => {
+                    Theme.reduce-motion = self.checked;
+                    Theme.effects-changed();
+                }
+            }
+        }
     }
 }
 
@@ -43,6 +203,13 @@ export component TitleBar inherits Rectangle {
     callback close();
     callback minimize();
     callback toggle-maximize();
+    // The Appearance button: opens or closes its menu (the window's).
+    callback appearance();
+    in property <bool> appearance-open;
+    // Where the menu hangs: the button's right edge and bottom, in the window (the bar is at its
+    // top left).
+    out property <length> menu-right: appearance-button.x + appearance-button.width;
+    out property <length> menu-top: appearance-button.y + appearance-button.height;
 
     height: 46px;
     background: Theme.side;
@@ -68,7 +235,8 @@ export component TitleBar inherits Rectangle {
         width: self.preferred-width;
         height: 14px;
         spacing: 8px;
-        property <bool> lit: close-button.has-hover || minimize-button.has-hover || maximize-button.has-hover;
+        property <bool> lit: close-button.hovered || minimize-button.hovered || maximize-button.hovered
+            || close-button.ring || minimize-button.ring || maximize-button.ring;
 
         close-button := TrafficLight {
             fill: #ff5f57;
@@ -76,6 +244,7 @@ export component TitleBar inherits Rectangle {
             glyph: "M2 2l4 4M6 2L2 6";
             lit: parent.lit;
             accessible-label: "Close window";
+            tip: "Close";
             clicked => { root.close(); }
         }
         minimize-button := TrafficLight {
@@ -84,6 +253,7 @@ export component TitleBar inherits Rectangle {
             glyph: "M1.6 4h4.8";
             lit: parent.lit;
             accessible-label: "Minimize window";
+            tip: "Minimize";
             clicked => { root.minimize(); }
         }
         maximize-button := TrafficLight {
@@ -92,8 +262,25 @@ export component TitleBar inherits Rectangle {
             glyph: "M4 1.6v4.8M1.6 4h4.8";
             lit: parent.lit;
             accessible-label: "Maximize window";
+            tip: "Maximize";
             clicked => { root.toggle-maximize(); }
         }
+    }
+
+    // The toggle, then the Appearance button at the right edge: Tab takes them in that order.
+    ThemeButton {
+        x: appearance-button.x - self.width - 4px;
+        y: (parent.height - self.height) / 2;
+    }
+    appearance-button := IconButton {
+        x: parent.width - self.width - 14px;
+        y: (parent.height - self.height) / 2;
+        active: root.appearance-open;
+        accessible-label: "Appearance";
+        tip: "Appearance";
+        // Sliders (lucide's sliders-horizontal).
+        icon: "M21 4h-7M10 4H3M21 12h-9M8 12H3M21 20h-5M12 20H3M14 2v4M8 10v4M16 18v4";
+        clicked => { root.appearance(); }
     }
 
     // The brand, centred on the bar (.brand): the mark, then the name over "by Sifahaz".
@@ -118,6 +305,8 @@ export component TitleBar inherits Rectangle {
                 font-size: 14px;
                 font-weight: 700;
                 horizontal-alignment: center;
+                // The title bar's label says it.
+                accessible-role: none;
             }
             Text {
                 text: "by Sifahaz";
@@ -125,6 +314,7 @@ export component TitleBar inherits Rectangle {
                 font-size: 11px;
                 font-weight: 400;
                 horizontal-alignment: center;
+                accessible-role: none;
             }
         }
     }

@@ -1,5 +1,10 @@
 //! MKV Anime Batch desktop host on Slint (ADR-0017), beside the Tauri host until the switch.
 
+// No console window on Windows in a release build. desktop-tauri's main.rs hides it in a debug
+// build too; this host keeps it there for stderr.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+mod appearance;
 mod diagnostics;
 mod inspector;
 mod intents;
@@ -9,18 +14,19 @@ mod queue;
 mod renderer;
 mod run_log;
 mod settings;
+mod telemetry;
 #[cfg(test)]
 mod ui_tests;
 
-use mkv_anime_batch_slint_ui::{App, Theme};
-use mkv_desktop_core::actor::{Core, Ports};
+use mkv_anime_batch_slint_ui::{App, Focus};
+use mkv_desktop_core::actor::{Core, Intent, Ports};
 use mkv_desktop_core::control::{
     begin_shutdown, cancel_shutdown, cleanup_owned_processes, InspectCacheState, ScanState,
 };
 use mkv_desktop_core::job::JobState;
 use publisher::SlintPublisher;
 use renderer::{Answer, Choice, GpuStart, Renderer};
-use slint::winit_030::winit::event::WindowEvent;
+use slint::winit_030::winit::event::{ElementState, MouseButton, WindowEvent};
 use slint::winit_030::{EventResult, WinitWindowAccessor};
 use slint::{CloseRequestResponse, ComponentHandle, RenderingState, Timer};
 use std::cell::Cell;
@@ -31,7 +37,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    diagnostics::init(diagnostics::log_dir().as_deref());
+    let log_failed = diagnostics::init(diagnostics::log_dir().as_deref());
 
     let config = renderer::config_dir();
     let forced = renderer::forced_from_env(std::env::var_os(renderer::RENDERER_ENV).as_deref());
@@ -74,7 +80,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         _ => None,
     };
     let start = Rc::new(Cell::new(GpuStart::Setup));
-    let result = run(&choice, config.clone(), save, Rc::clone(&start));
+    let result = run(&choice, config.clone(), save, Rc::clone(&start), log_failed);
     if renderer::gpu_failed_at_start(choice.renderer, start.get(), result.is_err()) {
         let error = match result {
             Err(error) => error.to_string(),
@@ -128,6 +134,7 @@ fn run(
     config: Option<PathBuf>,
     save: Option<PathBuf>,
     start: Rc<Cell<GpuStart>>,
+    log_failed: Option<String>,
 ) -> Result<(), Box<dyn Error>> {
     // The Desktop Core actor, its scans and its jobs run here; Slint keeps the main thread.
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -136,17 +143,14 @@ fn run(
     let job = JobState::new(runtime.handle().clone());
     let scan = Arc::new(ScanState::default());
     let app = App::new()?;
-    app.global::<Theme>()
-        .set_glass(choice.renderer == Renderer::OpenGl);
+    // Before the first frame: a saved theme pins the colour scheme from the start.
+    appearance::wire(&app, config.clone(), choice.renderer);
     if choice.renderer == Renderer::OpenGl {
         watch_start(
             &app,
             config.filter(|_| choice.forget_saved),
             Rc::clone(&start),
         );
-    }
-    if let Some(dir) = save {
-        save_once_drawn(&app, dir);
     }
     publisher::install_models(&app);
     // Held until the end: the actor stops once every handle is gone.
@@ -158,7 +162,25 @@ fn run(
     );
     run_log::wire(&app, &publisher, run_log::system_clipboard());
     runtime.spawn(run_log::load(&core, &publisher));
+    // Kept until the end: it polls whether the window is minimized.
+    let _visibility = watch_window(
+        &app,
+        save,
+        intents::Intents {
+            core: core.clone(),
+            runtime: runtime.handle().clone(),
+            window: app.as_weak(),
+        },
+    );
     intents::wire(&app, core.clone(), runtime.handle().clone(), publisher);
+    // A packaged Windows build has no console, so the log file is its only output: say once, in
+    // the window, that there is none (ADR-0017 decision 9). Elsewhere stderr has it.
+    if let Some(text) = log_failed.filter(|_| cfg!(target_os = "windows")) {
+        app.invoke_notice(diagnostics::LOG_FAILED_TITLE.into(), text.into());
+    }
+    // Rounded corners over a transparent window on Linux alone, as the webview's `is-linux`
+    // styling; Windows and macOS draw a square, opaque window (tauri.conf.json `transparent`).
+    app.set_rounded(cfg!(target_os = "linux"));
     let (window, boot) = (app.as_weak(), core.state());
     slint::spawn_local(async move {
         if let (Ok(state), Some(app)) = (boot.await, window.upgrade()) {
@@ -274,14 +296,50 @@ fn watch_start(app: &App, forget: Option<PathBuf>, start: Rc<Cell<GpuStart>>) {
     });
 }
 
-/// Saves the software choice once the re-launched child has drawn. Slint's software renderer
-/// refuses the rendering notifier, so this watches winit's first `RedrawRequested` and saves on a
-/// later loop pass, after Slint has drawn: a failed draw ends the loop first, and nothing is saved.
-/// A first redraw that drew nothing (the window occluded at start) still saves; the software
-/// renderer it saves is the one that does not fail to start.
-fn save_once_drawn(app: &App, dir: PathBuf) {
-    let mut pending = Some(dir);
+/// How often the window asks winit whether it is minimized (X11 and Windows), which no event says.
+/// On X11 each ask is one synchronous `_NET_WM_STATE` round-trip to the X server on the UI
+/// thread, once a second; on Wayland winit answers `None` at once, so the poll costs
+/// nothing there and is not skipped. A minimize is seen up to this late.
+const MINIMIZED_POLL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Watches winit's window events, through Slint's one window event filter:
+///
+/// - Clears `Focus.keyboard` on any left press, so a later programmatic focus draws no ring.
+/// - Tells the core whether the window shows (`Intent::ViewVisible`), so it samples no telemetry
+///   while hidden (`telemetry::Visibility`); the returned timer polls `is_minimized` and must be
+///   kept.
+/// - With `save`, saves the software choice once the re-launched child has drawn. Slint's
+///   software renderer refuses the rendering notifier, so this watches winit's first
+///   `RedrawRequested` and saves on a later loop pass, after Slint has drawn: a failed draw ends
+///   the loop first, and nothing is saved. A first redraw that drew nothing (the window occluded
+///   at start) still saves; the software renderer it saves is the one that does not fail to start.
+fn watch_window(app: &App, save: Option<PathBuf>, send: intents::Intents) -> Timer {
+    let visibility = Rc::new(std::cell::RefCell::new(telemetry::Visibility::default()));
+    let tell = move |visible: Option<bool>| {
+        if let Some(visible) = visible {
+            send.send("view_visible", Intent::ViewVisible { visible }, || {});
+        }
+    };
+    let tell = Rc::new(tell);
+    let (seen, told) = (Rc::clone(&visibility), Rc::clone(&tell));
+    let mut pending = save;
+    let pressed = app.as_weak();
     app.window().on_winit_window_event(move |_, event| {
+        // Any left press, on a fluent widget or a blank area too, hides the ring until a key
+        // (`Focus.keyboard`, :focus-visible); a Pressable's own press clears it as well.
+        if let WindowEvent::MouseInput {
+            state: ElementState::Pressed,
+            button: MouseButton::Left,
+            ..
+        } = event
+        {
+            if let Some(app) = pressed.upgrade() {
+                app.global::<Focus>().set_keyboard(false);
+            }
+        }
+        // The borrow ends before `told` sends.
+        let change = seen.borrow_mut().event(event);
+        told(change);
         if matches!(event, WindowEvent::RedrawRequested) {
             if let Some(dir) = pending.take() {
                 Timer::single_shot(
@@ -300,6 +358,20 @@ fn save_once_drawn(app: &App, dir: PathBuf) {
         }
         EventResult::Propagate
     });
+    let poll = Timer::default();
+    let window = app.as_weak();
+    poll.start(slint::TimerMode::Repeated, MINIMIZED_POLL, move || {
+        let minimized = window
+            .upgrade()
+            .and_then(|app| {
+                app.window()
+                    .with_winit_window(|window| window.is_minimized())
+            })
+            .flatten();
+        let change = visibility.borrow_mut().minimized(minimized);
+        tell(change);
+    });
+    poll
 }
 
 /// Close: refuse new starts at once, tear down on a thread of its own (never the UI thread or a
