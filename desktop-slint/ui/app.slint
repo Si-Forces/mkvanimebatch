@@ -828,6 +828,7 @@ export component App inherits Window {
                         limits: root.sheet-limits;
                         busy: root.busy;
                         locked: root.locked;
+                        dialog-open: root.dialog-open;
                         done => { root.close-sheet(); }
                     }
                     if root.mode == Mode.extract: SettingsSheet {
@@ -843,6 +844,7 @@ export component App inherits Window {
                         limits: root.sheet-limits;
                         busy: root.busy;
                         locked: root.locked;
+                        dialog-open: root.dialog-open;
                         done => { root.close-sheet(); }
                     }
                 }

@@ -308,6 +308,7 @@ component DraftEdit inherits Rectangle {
         text: root.placeholder;
         color: root.enabled ? Theme.hint : Theme.hint.with-alpha(0.6);
         font-family: edit.font-family;
+        font-size: edit.font-size;
         horizontal-alignment: root.align;
         vertical-alignment: center;
         overflow: elide;
@@ -462,6 +463,8 @@ export component SettingsSheet inherits GlassPane {
     in property <bool> busy;
     // That, or a Run not answered yet: the fields are locked (.lock-while-job).
     in property <bool> locked;
+    // The confirm dialog is over the sheet, with the focus.
+    in property <bool> dialog-open;
     // The output folder's placeholder, which differs per mode.
     in property <string> out-placeholder;
     callback done();
@@ -485,6 +488,14 @@ export component SettingsSheet inherits GlassPane {
     }
     property <int> serial: Sheet.focus-serial;
     changed serial => { self.focus-done(); }
+    // Locked under a focused control, Done takes the focus, so Tab stays inside the sheet (locked,
+    // Done is its only control) and Esc keeps closing it. A dialog over the sheet keeps it: Done
+    // takes it as the dialog closes, when the control that had it is locked.
+    changed locked => {
+        if root.locked && !root.dialog-open {
+            done-button.focus();
+        }
+    }
     function focus-done() {
         if Sheet.focused == "" {
             done-button.focus();
@@ -719,7 +730,13 @@ export component SettingsSheet inherits GlassPane {
                                             enabled: !root.locked;
                                             accessible-label: "Encoder complexity";
                                             accessible-description: "libopus encoding complexity: 0 is fastest, 10 is best quality";
-                                            changed(value) => { Sheet.slid(value); }
+                                            // Whole steps alone, as a range input's: fluent's
+                                            // drag does not snap to `step`.
+                                            changed(value) => {
+                                                let step = Math.round(value);
+                                                self.value = step;
+                                                Sheet.slid(step);
+                                            }
                                             released => { Sheet.committed("complexity"); }
                                             // A focus id of its own, so moving between the
                                             // slider and the box leaves one and enters the other.

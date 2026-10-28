@@ -70,8 +70,9 @@ fn the_window_shows_published_values_and_its_title_bar_buttons_answer() {
     app.hide().unwrap();
 }
 
-/// Publications from another thread hop to the event loop, where the newest one is bound. The only
-/// test with a threaded platform: Slint keeps one event loop proxy per process.
+/// Publications from another thread hop to the event loop, where the newest one is bound, and so
+/// does a draft edit's answer. The only test with a threaded platform: Slint keeps one event loop
+/// proxy per process.
 #[test]
 fn a_publication_from_another_thread_reaches_the_window() {
     slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
@@ -82,6 +83,15 @@ fn a_publication_from_another_thread_reaches_the_window() {
     .unwrap();
     let app = new_app();
     let publisher = SlintPublisher::new(&app);
+    // A draft edit sent, whose answer comes from the runtime's thread too.
+    let edits = publisher.edits();
+    let workers = crate::settings::DraftKey::Workers;
+    edits
+        .lock()
+        .unwrap()
+        .begin(Mode::Remux, workers, &Default::default());
+    let answered =
+        crate::settings::settle_later(app.as_weak(), Arc::clone(&edits), Mode::Remux, workers);
     let worker = std::thread::spawn(move || {
         for (seq, title) in [(1, "Older"), (2, "Frieren")] {
             let mut state = ViewState::new(None);
@@ -90,13 +100,18 @@ fn a_publication_from_another_thread_reaches_the_window() {
             state.busy = true;
             publisher.state(&state);
         }
-        // Queued behind the hop, so the loop applies it first.
+        answered(Ok(false));
+        // Queued behind the hops, so the loop applies them first.
         slint::quit_event_loop().unwrap();
     });
     slint::run_event_loop().unwrap();
     worker.join().unwrap();
     assert_eq!(app.get_remux_head().title, "Frieren");
     assert!(app.get_busy());
+    assert!(
+        !edits.lock().unwrap().has(Mode::Remux, workers),
+        "the answer settled the edit on the event loop"
+    );
 }
 
 /// A selected, queued row named `id`.
@@ -1799,7 +1814,17 @@ fn the_steppers_answer_the_pointer_the_keyboard_and_a_screen_reader() {
     tick();
     key(&app, slint::platform::Key::Return);
     key(&app, " ");
+    // A screen reader's step takes the focus first, as a press does: the field is left, so the
+    // stepped value is written into it.
+    app.invoke_open_sheet(Mode::Remux, "sub_offset".into());
+    for _ in 0..3 {
+        tick();
+    }
+    assert_eq!(sheet.get_focused(), "sub_offset");
     only(&app, "Decrease offset").invoke_accessible_default_action();
+    tick();
+    assert_eq!(sheet.get_focused(), "");
+    assert_eq!(focused(&app), "step:sub_offset-");
     let calls = calls.borrow();
     assert_eq!(calls[0], "press workers true");
     assert!(calls.contains(&"release".to_string()));
