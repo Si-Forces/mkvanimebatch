@@ -18,9 +18,8 @@ export global Focus {
 
     // The control a reset's new rows make that takes the focus as it is made (a moved episode's
     // Move up / Move down): `restore` reaches only the controls already made. Any control's
-    // focus clears it, so one made later, scrolled into view, takes no focus.
-    // ponytail: a field's focus does not clear it; a field then loses its focus to the control
-    // if that row is first made later, scrolled into view.
+    // focus clears it, and so do the first rows the reset makes (QueuePane's `rows-made`), so one
+    // made later, scrolled into view, takes no focus.
     in-out property <string> follow-key;
 
     public function restore(key: string) {
@@ -188,9 +187,9 @@ export component Pressable inherits Rectangle {
 // Enter, Space or a screen reader's action opens the list of its entries under it. In the list the
 // arrows move the highlight only; a click, Enter or Space picks an entry, Esc or a click outside
 // closes it unchanged, and the select has the focus again. Closed, it takes neither the arrows nor
-// the wheel, so the wheel scrolls the pane under it: only a pick changes it, as a WebKitGTK
-// select's does. `picked` fires once a pick, for the entry shown too (a select sends no change for
-// that one: its host passes over it).
+// the wheel, so the wheel scrolls the pane under it, as over a WebKitGTK select; that select steps
+// on the arrows, this one deliberately does not: only a pick changes it. `picked` fires once a
+// pick, for the entry shown too (a select sends no change for that one: its host passes over it).
 export component Select inherits Pressable {
     in property <[string]> model;
     in-out property <int> current-index;

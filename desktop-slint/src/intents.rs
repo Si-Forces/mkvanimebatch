@@ -136,7 +136,8 @@ fn assign_subtitle(send: &Intents, app: &App, path: &str) {
 }
 
 /// The remux Inspector's episode: the folder, as the core names it, and the id in it, so the
-/// same relative id in another folder is another episode (as `inspector::write_form` compares them).
+/// same relative id in another folder is another episode (as `inspector::write_form` compares
+/// them).
 fn inspected(app: &App) -> (SharedString, SharedString) {
     let inspector = app.get_remux_inspector();
     (inspector.directory, inspector.id)

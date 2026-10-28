@@ -2596,6 +2596,35 @@ fn a_closing_dialog_or_sheet_gives_the_focus_back_to_the_control_that_had_it() {
     app.hide().unwrap();
 }
 
+/// A notice's hidden Cancel takes no focus: neither a restore nor Tab reaches it.
+#[test]
+fn a_notices_hidden_cancel_takes_no_focus() {
+    use mkv_anime_batch_slint_ui::DialogTexts;
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    SlintPublisher::new(&app).show(&three_releases());
+    app.show().unwrap();
+    let tick = || i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1));
+    app.set_dialog(DialogTexts {
+        title: "Notice".into(),
+        text: "Something happened".into(),
+        confirm: "OK".into(),
+        notice: true,
+    });
+    app.invoke_show_dialog();
+    tick();
+    assert_eq!(focused(&app), "OK");
+    app.global::<Focus>().invoke_restore("Cancel".into());
+    tick();
+    assert_eq!(focused(&app), "OK", "a restore passes it over");
+    for _ in 0..4 {
+        key(&app, slint::platform::Key::Tab);
+        assert_ne!(focused(&app), "Cancel", "Tab passes it over");
+    }
+    app.hide().unwrap();
+}
+
 /// The pinned release header: none at the top of the list, the folder's once its rows scroll
 /// under it, none while a release's first row shows its own header whole at the top, that
 /// release's once it scrolls on, and still that release's at the end of the list.
@@ -2773,6 +2802,46 @@ fn a_reorder_keeps_the_focus_on_the_moved_episodes_button() {
     publisher.show(&rescan);
     frame(&app);
     assert_eq!(focused(&app), "");
+    assert_window_keys(&app);
+    app.hide().unwrap();
+}
+
+/// A reorder that moves the episode out of view leaves the focus on the window's keys, and a
+/// later scroll that makes its row gives its Move down no focus.
+#[test]
+fn a_reorder_out_of_view_gives_a_row_made_later_no_focus() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    let mut state = ViewState::new(None);
+    let rows: Vec<Row> = (0..30).map(|i| row(&format!("r{i:02}"))).collect();
+    state.remux.rows = Arc::new(rows.clone());
+    state.remux.empty = None;
+    let publisher = SlintPublisher::new(&app);
+    publisher.show(&state);
+    app.show().unwrap();
+    frame(&app);
+    app.global::<Focus>()
+        .invoke_restore("down:remux:r00".into());
+    frame(&app);
+    assert_eq!(focused(&app), "down:remux:r00");
+
+    let mut moved = state.clone();
+    moved.seq = 1;
+    let mut order = rows[1..].to_vec();
+    order.push(rows[0].clone());
+    moved.remux.rows = Arc::new(order);
+    publisher.show(&moved);
+    frame(&app);
+    assert_eq!(focused(&app), "", "the moved row is out of view");
+
+    app.invoke_reveal(Mode::Remux, 29);
+    frame(&app);
+    assert_eq!(
+        focused(&app),
+        "",
+        "the row made by the scroll takes no focus"
+    );
     assert_window_keys(&app);
     app.hide().unwrap();
 }

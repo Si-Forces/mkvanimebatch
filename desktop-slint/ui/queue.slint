@@ -3,7 +3,7 @@
 // what the controls ask.
 import { ListView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { Pressable, TipCard } from "focus.slint";
+import { Focus, Pressable, TipCard } from "focus.slint";
 
 export enum Mode { remux, extract }
 
@@ -546,6 +546,12 @@ export component QueuePane inherits Rectangle {
     out property <int> pinned-count: root.pinned-text == "" ? 0 : root.pinned-head.count;
     property <int> pinned-by: -1;
     property <int> rows-made;
+    // The first rows made after a reset disarm `Focus.follow-key` (this handler runs once that
+    // pass made them): a moved episode's row not made then (scrolled out) or disabled takes no
+    // focus when a scroll makes it later.
+    changed rows-made => {
+        Focus.follow-key = "";
+    }
     // The rows were replaced (the instance that pinned the header is gone without unpinning it,
     // and a same-folder reset keeps the heads `pinned-text` checks), or a reveal puts a row at the
     // top: the rows made, or moved across the top, report again.

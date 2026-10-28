@@ -1715,4 +1715,37 @@ mod tests {
         assert!(!app.get_sheet_open(), "Esc closed it");
         app.hide().unwrap();
     }
+
+    /// Locked by a batch while a dialog shows over the sheet's focused field: the dialog keeps
+    /// the focus, and as it closes Done takes it, not a control behind the sheet.
+    #[test]
+    fn a_sheet_locked_under_a_dialog_gives_the_focus_to_done_as_it_closes() {
+        use mkv_anime_batch_slint_ui::{DialogTexts, Focus};
+        i_slint_backend_testing::init_no_event_loop();
+        let app = new_app();
+        app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+        app.show().unwrap();
+        let sheet = app.global::<Sheet>();
+        app.invoke_open_sheet(Mode::Remux, "workers".into());
+        ticks();
+        assert_eq!(sheet.get_focused(), "workers");
+        app.set_dialog(DialogTexts {
+            title: "Notice".into(),
+            text: "Something happened".into(),
+            confirm: "OK".into(),
+            notice: true,
+        });
+        app.invoke_show_dialog();
+        ticks();
+        let current = || app.global::<Focus>().get_current();
+        assert_eq!(current(), "OK");
+        app.set_busy(true);
+        ticks();
+        assert_eq!(current(), "OK", "the dialog keeps the focus");
+        app.set_dialog_open(false);
+        ticks();
+        ticks();
+        assert_eq!(current(), "Done", "Done has it, inside the sheet");
+        app.hide().unwrap();
+    }
 }
