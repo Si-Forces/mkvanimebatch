@@ -59,6 +59,13 @@ export struct QueueHead {
     inspected: string,
 }
 
+// The spinning rings' turn, one for all of them: still under Reduce motion, as style.css's
+// prefers-reduced-motion stops .ep-ring and .scan-spinner. Read only while a ring spins, so the
+// window draws no frame for it otherwise.
+export global Spin {
+    out property <angle> turn: Theme.reduce-motion ? 0deg : mod(animation-tick(), 1100ms) / 1100ms * 360deg;
+}
+
 // The status ring (.ep-ring): a track and the progress arc, or a spinning quarter.
 component Ring inherits Rectangle {
     in property <float> progress;
@@ -84,9 +91,7 @@ component Ring inherits Rectangle {
         stroke: Theme.info;
         stroke-width: 3px;
         stroke-line-cap: round;
-        // Still under Reduce motion, as style.css's prefers-reduced-motion stops .ep-ring and
-        // .scan-spinner.
-        transform-rotation: root.spinning && !Theme.reduce-motion ? mod(animation-tick(), 1100ms) / 1100ms * 360deg : 0deg;
+        transform-rotation: root.spinning ? Spin.turn : 0deg;
         MoveTo { x: 10; y: 2; }
         ArcTo {
             x: 10 + 8 * Math.sin(root.end);
@@ -498,6 +503,7 @@ export component QueuePane inherits Rectangle {
     // has none (`content-height` 0) and the row would land at the bottom, so the reveal waits for
     // the layout that shows the rows again (`changed content-height` below), in that same frame.
     public function reveal(row: int) {
+        root.unpin();
         root.reveal-pending = -1;
         if row < 0 || row >= root.rows.length {
             root.list-scroll = 0;
@@ -540,6 +546,13 @@ export component QueuePane inherits Rectangle {
     out property <int> pinned-count: root.pinned-text == "" ? 0 : root.pinned-head.count;
     property <int> pinned-by: -1;
     property <int> rows-made;
+    // The rows were replaced (the instance that pinned the header is gone without unpinning it,
+    // and a same-folder reset keeps the heads `pinned-text` checks), or a reveal puts a row at the
+    // top: the rows made, or moved across the top, report again.
+    public function unpin() {
+        root.pinned-head = { text: "", count: 0, y: 0, row: -1 };
+        root.pinned-by = -1;
+    }
     function pin(instance: int, head: PinnedHead) {
         if head.text != "" {
             root.pinned-head = head;

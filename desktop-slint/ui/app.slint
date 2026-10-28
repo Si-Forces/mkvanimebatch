@@ -8,14 +8,14 @@ import { AppearanceMenu, TitleBar } from "title-bar.slint";
 import { Focus, Pressable } from "focus.slint";
 import { FontProbe } from "font-probe.slint";
 import { ScrollView } from "std-widgets.slint";
-import { Mode, QueueFilter, QueueHead, QueuePane, QueueRow, RowMark, RowTone } from "queue.slint";
+import { Mode, QueueFilter, QueueHead, QueuePane, QueueRow, RowMark, RowTone, Spin } from "queue.slint";
 import { Inspector, InspectorPane, LibraryEntry, LibraryItem, Rung } from "inspector.slint";
 import { ChipTexts, DraftForm, GearButton, PresetItem, PresetRow, SettingsSheet, Sheet, SheetLimits } from "settings.slint";
 import { BottomBar, ConfirmDialog, DialogTexts, JobBar, StatusDot, StatusTone, Telemetry } from "jobs.slint";
 import { LogBadge, LogDrawer, LogRow, LogSerials, LogTone, LogToggle } from "log.slint";
 
 // FontProbe is test only; a .slint file cannot be compiled per cfg, so it ships (a few bytes).
-export { Theme, Focus, FontProbe, Inspector, LibraryItem, Mode, QueueFilter, QueueHead, QueueRow, RowMark, RowTone, Rung, ChipTexts, DraftForm, PresetItem, Sheet, SheetLimits, DialogTexts, JobBar, StatusTone, Telemetry, LogBadge, LogRow, LogSerials, LogTone }
+export { Theme, Focus, Spin, FontProbe, Inspector, LibraryItem, Mode, QueueFilter, QueueHead, QueueRow, RowMark, RowTone, Rung, ChipTexts, DraftForm, PresetItem, Sheet, SheetLimits, DialogTexts, JobBar, StatusTone, Telemetry, LogBadge, LogRow, LogSerials, LogTone }
 
 // A mode's tab in the sidebar (.task-row): its icon, its name over what it does and its status
 // pill (a dot), then the gear that opens its settings sheet.
@@ -375,7 +375,16 @@ export component App inherits Window {
     // from a field that has it since.
     public function focus-keys() {
         Focus.current = "";
+        Focus.follow-key = "";
         keys.focus();
+    }
+    // `mode`'s rows were replaced: the header the old rows pinned goes with them.
+    public function unpin(mode: Mode) {
+        if mode == Mode.remux {
+            remux-pane.unpin();
+        } else {
+            extract-pane.unpin();
+        }
     }
     // Scrolls `mode`'s list so its row `row` heads it.
     public function reveal(mode: Mode, row: int) {
@@ -739,6 +748,7 @@ export component App inherits Window {
                         root.leave-field();
                         root.stop();
                     }
+                    focus-left => { root.focus-keys(); }
                     log-toggle := LogToggle {
                         y: (parent.height - self.height) / 2;
                         open: root.log-open;

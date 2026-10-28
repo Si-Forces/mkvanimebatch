@@ -16,6 +16,13 @@ export global Focus {
     in-out property <string> restore-key;
     in-out property <int> restore-serial;
 
+    // The control a reset's new rows make that takes the focus as it is made (a moved episode's
+    // Move up / Move down): `restore` reaches only the controls already made. Any control's
+    // focus clears it, so one made later, scrolled into view, takes no focus.
+    // ponytail: a field's focus does not clear it; a field then loses its focus to the control
+    // if that row is first made later, scrolled into view.
+    in-out property <string> follow-key;
+
     public function restore(key: string) {
         self.restore-key = key;
         self.restore-serial += 1;
@@ -71,6 +78,9 @@ export component Pressable inherits Rectangle {
     in property <length> ring-gap: 2px;
     // A click activates it; a stepper steps on the press instead (`pointer`).
     in property <bool> pointer-click: true;
+    // A held Return activates it again at the key's repeat rate; a control that turns into
+    // another (Run into Stop) or flips the window (the theme toggle) activates once a press.
+    in property <bool> repeats: true;
     in property <MouseCursor> cursor: MouseCursor.pointer;
     callback clicked();
     // Every pointer event over it, after a left press took the focus.
@@ -102,6 +112,11 @@ export component Pressable inherits Rectangle {
             keys.focus();
         }
     }
+    init => {
+        if root.enabled && Focus.follow-key != "" && Focus.follow-key == root.focus-key {
+            keys.focus();
+        }
+    }
     // A row written in place can rename the focused control (a Library entry's release): its
     // focus-lost would then miss the old key, so `Focus.current` follows.
     changed focus-key => {
@@ -114,6 +129,7 @@ export component Pressable inherits Rectangle {
         enabled: root.enabled;
         focus-gained(reason) => {
             Focus.current = root.focus-key;
+            Focus.follow-key = "";
             if reason == FocusReason.tab-navigation {
                 Focus.keyboard = true;
             }
@@ -123,10 +139,14 @@ export component Pressable inherits Rectangle {
                 Focus.current = "";
             }
         }
-        // Return repeats while held, as on a browser's button; Space activates once a press, as
-        // the browser's does on its release.
+        // Return repeats while held, as on a browser's button, unless `repeats` is off; Space
+        // activates once a press, as the browser's does on its release. A disabled scope that
+        // keeps the focus still gets keys (Slint's `enabled` refuses only focus and presses).
         key-pressed(event) => {
-            if event.text == Key.Return || (event.text == Key.Space && !event.repeat) {
+            if !root.enabled {
+                return reject;
+            }
+            if (event.text == Key.Return && (root.repeats || !event.repeat)) || (event.text == Key.Space && !event.repeat) {
                 root.clicked();
                 return accept;
             }

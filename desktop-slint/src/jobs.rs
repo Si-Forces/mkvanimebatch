@@ -232,11 +232,13 @@ pub(crate) mod tests {
     use crate::intents::tests::{Episodes, NoJobs, NoSamples};
     use crate::publisher::{install_models, SlintPublisher};
     use i_slint_backend_testing::{mock_elapsed_time, AccessibleRole, ElementHandle};
+    use mkv_core::manifest::InspectionManifest;
     use mkv_core::pipeline::PipelineMode;
     use mkv_core::request::{BatchRequest, EffectiveSettings};
-    use mkv_desktop_core::actor::{ActorSink, Core, CoreHandle, Outcome, Ports};
+    use mkv_desktop_core::actor::{ActorSink, Core, CoreHandle, Outcome, Ports, ScanView};
     use mkv_desktop_core::control::Launcher;
     use mkv_desktop_core::draft::DraftChanges;
+    use mkv_desktop_core::inspection::Inspector;
     use mkv_desktop_core::presentation::{controls, Hold};
     use std::time::Duration;
 
@@ -379,10 +381,35 @@ pub(crate) mod tests {
         runtime: &tokio::runtime::Runtime,
         launcher: L,
     ) -> (App, CoreHandle) {
+        wired_with(runtime, Episodes, launcher)
+    }
+
+    /// Scans forever: a folder opened stays scanning.
+    struct Scanning;
+
+    impl Inspector for Scanning {
+        async fn identity(&self, path: String) -> Result<String, String> {
+            Ok(path)
+        }
+
+        async fn inspect(&self, _: String, _: bool) -> Result<InspectionManifest, String> {
+            std::future::pending().await
+        }
+
+        async fn clear_cache(&self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    fn wired_with<I: Inspector, L: Launcher>(
+        runtime: &tokio::runtime::Runtime,
+        inspector: I,
+        launcher: L,
+    ) -> (App, CoreHandle) {
         let app = new_app();
         let publisher = SlintPublisher::new(&app);
         let ports = Ports {
-            inspector: Episodes,
+            inspector,
             launcher,
             sampler: NoSamples,
         };
@@ -501,6 +528,148 @@ pub(crate) mod tests {
         ticks();
         assert!(!app.get_sheet_open(), "a busy refusal opens nothing");
         assert!(!app.get_run_pending());
+        app.hide().unwrap();
+    }
+
+    /// Sets `mode`'s input folder in the core's draft.
+    fn input_dir(runtime: &tokio::runtime::Runtime, core: &CoreHandle, mode: PipelineMode) {
+        let changes = DraftChanges {
+            input_dir: Some("/show".into()),
+            ..DraftChanges::default()
+        };
+        let edit = Intent::EditDraft { mode, changes };
+        assert_eq!(runtime.block_on(core.dispatch(edit)), Ok(true));
+    }
+
+    /// A Run refused while the folder scans is refused before the core reads the draft, which
+    /// still flags the last refusal's field: it opens nothing.
+    #[test]
+    fn a_run_refused_while_scanning_opens_nothing() {
+        i_slint_backend_testing::init_no_event_loop();
+        let runtime = runtime();
+        let (app, core) = wired_with(&runtime, Scanning, Held);
+        let run = || {
+            app.set_run_pending(true);
+            let answer = runtime.block_on(core.dispatch(Intent::Run {
+                mode: PipelineMode::Remux,
+            }));
+            show_published(&app, &runtime, &core);
+            run_answered(&app, Mode::Remux, answer.clone());
+            ticks();
+            answer
+        };
+        assert!(run().is_err());
+        assert!(app.get_sheet_open(), "a draft refusal opens the sheet");
+        key(&app, slint::platform::Key::Escape);
+        assert!(!app.get_sheet_open());
+
+        drop(core.dispatch(Intent::ScanDirectory {
+            mode: PipelineMode::Remux,
+            path: "/show".into(),
+            force: false,
+            no_cache: false,
+        }));
+        // The folder's identity is resolved off the actor first: wait for the scan (a second).
+        for _ in 0..100 {
+            let state = runtime.block_on(core.state()).unwrap();
+            if matches!(state.remux.scan, ScanView::Scanning { .. }) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(run(), Err(RUN_SCANNING.to_string()));
+        assert_eq!(app.get_remux_invalid(), "input_dir", "the old flag stands");
+        assert!(!app.get_sheet_open(), "a scanning refusal opens nothing");
+        assert!(!app.get_run_pending());
+        app.hide().unwrap();
+    }
+
+    /// The window's Run in extract starts extract's batch; its button turns into Stop, and a click
+    /// on Stop cancels the start.
+    #[test]
+    fn the_window_runs_and_stops_the_mode_it_shows() {
+        i_slint_backend_testing::init_no_event_loop();
+        let runtime = runtime();
+        let (app, core) = wired(&runtime, Held);
+        app.set_mode(Mode::Extract);
+        input_dir(&runtime, &core, PipelineMode::Extract);
+        show_published(&app, &runtime, &core);
+        ticks();
+        let label = app.get_extract_job().run_label;
+        button(&app, &label).invoke_accessible_default_action();
+        let state = runtime.block_on(core.state()).unwrap();
+        assert_eq!(state.run.mode, Some(PipelineMode::Extract));
+
+        show_published(&app, &runtime, &core);
+        ticks();
+        let stop = button(&app, "Stop");
+        assert_eq!(stop.accessible_enabled(), Some(true));
+        stop.invoke_accessible_default_action();
+        let mut outcome = None;
+        for _ in 0..100 {
+            outcome = runtime.block_on(core.state()).unwrap().extract.outcome;
+            if outcome.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(outcome, Some(Outcome::Cancelled));
+        app.hide().unwrap();
+    }
+
+    /// Return on Run starts the batch: the button turns into Stop under the focus, which the
+    /// window's keys then take, as the webview's hidden Run drops it. A second Return, and a held
+    /// one, send no Stop; nor does a held Return start a Run.
+    #[test]
+    fn a_second_or_held_return_on_run_sends_no_stop() {
+        use crate::ui_tests::{focused, tab_to};
+        use slint::platform::{Key, WindowEvent};
+        i_slint_backend_testing::init_no_event_loop();
+        let runtime = runtime();
+        let (app, core) = wired(&runtime, Held);
+        input_dir(&runtime, &core, PipelineMode::Remux);
+        show_published(&app, &runtime, &core);
+        ticks();
+        let repeat = || {
+            app.window().dispatch_event(WindowEvent::KeyPressRepeated {
+                text: Key::Return.into(),
+            });
+            ticks();
+        };
+        tab_to(&app, "run");
+        repeat();
+        assert!(!app.get_run_pending(), "a repeat alone starts nothing");
+
+        key(&app, Key::Return);
+        assert!(app.get_run_pending());
+        show_published(&app, &runtime, &core);
+        ticks();
+        assert!(app.get_remux_job().owns);
+        assert_eq!(focused(&app), "", "the window's keys have the focus");
+        key(&app, Key::Return);
+        repeat();
+        let state = runtime.block_on(core.state()).unwrap();
+        assert_eq!(state.run.mode, Some(PipelineMode::Remux), "still held");
+        assert_eq!(state.remux.outcome, None, "not cancelled");
+        app.hide().unwrap();
+    }
+
+    /// A control disabled while it keeps the focus takes no key: Slint still delivers keys to it.
+    #[test]
+    fn a_disabled_focused_control_ignores_return() {
+        use crate::ui_tests::{focused, tab_to};
+        i_slint_backend_testing::init_no_event_loop();
+        let runtime = runtime();
+        let (app, core) = wired(&runtime, NoJobs);
+        tab_to(&app, "run");
+        app.set_remux_job(JobBar {
+            run_disabled: true,
+            ..app.get_remux_job()
+        });
+        ticks();
+        assert_eq!(focused(&app), "run", "it keeps the focus");
+        key(&app, slint::platform::Key::Return);
+        assert_eq!(log_lines(&runtime, &core), 0, "no Run");
         app.hide().unwrap();
     }
 

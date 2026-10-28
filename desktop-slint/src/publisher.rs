@@ -487,11 +487,24 @@ fn apply(app: &App, mode: Mode, update: Update) {
             // the window's key scope takes it, so Esc and Ctrl+T still reach it. A reset drops
             // every row (every Run's rescan resets them); a patch hides a row the filter no longer
             // shows (a status change under To do, mid-run).
+            // A reorder resets them too: the moved episode's Move up / Move down takes the focus
+            // back as its new row is made, unless it is disabled or not made (scrolled out).
             Some(RowPatch::Reset(rows)) => {
-                let dropped = focused_row(&app.global::<Focus>().get_current(), mode).is_some();
+                let focus = app.global::<Focus>();
+                let current = focus.get_current();
+                let dropped = focused_row(&current, mode);
+                let follows = dropped.is_some_and(|id| {
+                    (current.starts_with("up:") || current.starts_with("down:"))
+                        && rows.iter().any(|row| row.id == id)
+                });
+                let dropped = dropped.is_some();
                 model.set_vec(rows);
+                app.invoke_unpin(mode);
                 if dropped {
                     app.invoke_focus_keys();
+                }
+                if follows {
+                    focus.set_follow_key(current);
                 }
             }
             Some(RowPatch::Rows(rows)) => {

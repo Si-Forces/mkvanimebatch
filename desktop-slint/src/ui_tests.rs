@@ -1785,6 +1785,21 @@ fn the_toggle_and_ctrl_t_flip_the_theme_and_save_the_choice() {
     assert!(!theme.get_dark(), "one flip for a held Space");
     key(&app, Key::Space);
     assert!(theme.get_dark());
+    // A held Return flips it once too: the window would flip at the key's repeat rate.
+    app.window().dispatch_event(WindowEvent::KeyPressed {
+        text: Key::Return.into(),
+    });
+    for _ in 0..3 {
+        app.window().dispatch_event(WindowEvent::KeyPressRepeated {
+            text: Key::Return.into(),
+        });
+    }
+    app.window().dispatch_event(WindowEvent::KeyReleased {
+        text: Key::Return.into(),
+    });
+    assert!(!theme.get_dark(), "one flip for a held Return");
+    key(&app, Key::Return);
+    assert!(theme.get_dark());
 
     let ctrl_t = |app: &App| {
         let press = |text: slint::SharedString| {
@@ -2100,12 +2115,12 @@ fn the_appearance_menu_picks_system_light_or_dark_and_saves_it() {
 }
 
 /// The `Focus` key of the custom control with the focus; empty for none of them.
-fn focused(app: &App) -> String {
+pub(crate) fn focused(app: &App) -> String {
     app.global::<Focus>().get_current().into()
 }
 
 /// Presses Tab until the custom control of `key` has the focus.
-fn tab_to(app: &App, key: &str) {
+pub(crate) fn tab_to(app: &App, key: &str) {
     for _ in 0..400 {
         self::key(app, slint::platform::Key::Tab);
         if focused(app) == key {
@@ -2515,5 +2530,116 @@ fn the_subtitle_ladder_is_a_list_of_its_rungs() {
         .map(|(index, rung)| (Some(index), rung.a11y.to_string()))
         .collect();
     assert_eq!(items, expected);
+    app.hide().unwrap();
+}
+
+/// Move down from the keyboard: the reorder resets the rows, and the moved episode's Move down
+/// takes the focus back as its new row is made, step after step. A row a rescan's reset drops
+/// still hands the focus to the window's keys.
+#[test]
+fn a_reorder_keeps_the_focus_on_the_moved_episodes_button() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    let mut state = ViewState::new(None);
+    let rows = vec![row("a"), row("b"), row("c")];
+    state.remux.rows = Arc::new(rows.clone());
+    state.remux.empty = None;
+    let publisher = SlintPublisher::new(&app);
+    publisher.show(&state);
+    app.show().unwrap();
+    frame(&app);
+    app.global::<Focus>().invoke_restore("down:remux:a".into());
+    frame(&app);
+    assert_eq!(focused(&app), "down:remux:a");
+
+    for (seq, order) in [(1, [1, 0, 2]), (2, [1, 2, 0])] {
+        let mut moved = state.clone();
+        moved.seq = seq;
+        moved.remux.rows = Arc::new(order.map(|i| rows[i].clone()).into());
+        publisher.show(&moved);
+        frame(&app);
+        assert_eq!(focused(&app), "down:remux:a", "after step {seq}");
+    }
+
+    // A rescan without the episode: the window's keys have the focus.
+    let mut rescan = state.clone();
+    rescan.seq = 3;
+    rescan.remux.rows = Arc::new(vec![row("b"), row("c")]);
+    publisher.show(&rescan);
+    frame(&app);
+    assert_eq!(focused(&app), "");
+    assert_window_keys(&app);
+    app.hide().unwrap();
+}
+
+/// Reduce motion stops the spinning rings: their turn advances with time, and stays at 0deg
+/// under Reduce motion.
+#[test]
+fn reduce_motion_stops_the_spinning_rings() {
+    use mkv_anime_batch_slint_ui::Spin;
+    use std::time::Duration;
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    let turn = || app.global::<Spin>().get_turn();
+    let later = || i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(300));
+    later();
+    let before = turn();
+    later();
+    assert_ne!(turn(), before, "the rings spin");
+    app.global::<Theme>().set_reduce_motion(true);
+    for _ in 0..2 {
+        assert_eq!(turn(), 0.0, "the rings stand still");
+        later();
+    }
+}
+
+/// Ctrl+T held flips the theme once, and Ctrl+Shift+T (an upper-case "T") flips it too.
+#[test]
+fn ctrl_t_ignores_its_repeats_and_takes_an_upper_case_t() {
+    use slint::platform::{Key, WindowEvent};
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(760.0, 520.0));
+    apply(&app, &ViewState::new(None));
+    app.show().unwrap();
+    let flips = Rc::new(Cell::new(0));
+    let count = Rc::clone(&flips);
+    app.global::<Theme>()
+        .on_toggle(move || count.set(count.get() + 1));
+    let send = |event| app.window().dispatch_event(event);
+    send(WindowEvent::KeyPressed {
+        text: Key::Control.into(),
+    });
+    send(WindowEvent::KeyPressed { text: "t".into() });
+    for _ in 0..3 {
+        send(WindowEvent::KeyPressRepeated { text: "t".into() });
+    }
+    send(WindowEvent::KeyReleased { text: "t".into() });
+    assert_eq!(flips.get(), 1, "one flip for a held Ctrl+T");
+    key(&app, "T");
+    assert_eq!(flips.get(), 2, "an upper-case T flips it");
+    send(WindowEvent::KeyReleased {
+        text: Key::Control.into(),
+    });
+    app.hide().unwrap();
+}
+
+/// The Appearance button reports its menu open or closed, and a screen reader's expand opens
+/// it, as the Log toggle's does.
+#[test]
+fn the_appearance_button_reports_its_menu_expanded() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(760.0, 520.0));
+    apply(&app, &ViewState::new(None));
+    app.show().unwrap();
+    let button = appearance_button(&app);
+    assert_eq!(button.accessible_expandable(), Some(true));
+    assert_eq!(button.accessible_expanded(), Some(false));
+    button.invoke_accessible_expand_action();
+    assert!(app.get_appearance_open());
+    assert_eq!(button.accessible_expanded(), Some(true));
+    assert_eq!(focused(&app), "Appearance");
     app.hide().unwrap();
 }

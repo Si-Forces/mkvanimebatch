@@ -266,11 +266,12 @@ component DraftEdit inherits Rectangle {
     forward-focus: edit;
     init => { self.grab(); }
     changed serial => { self.grab(); }
+    // A disabled field is passed over, as Pressable's restore does: its focus() would move the
+    // focus on, out of the sheet once every control after it is locked.
     function grab() {
-        if Sheet.focus-key == root.key && root.key != "" {
+        if root.enabled && Sheet.focus-key == root.key && root.key != "" {
             edit.focus();
-            // A field made with the focus reports no change of it. A disabled one passes the
-            // focus on, and the control that took it reported its own key.
+            // A field made with the focus reports no change of it.
             if edit.has-focus {
                 Sheet.enter(root.key);
                 Sheet.reveal(root.absolute-position.y, root.height);
