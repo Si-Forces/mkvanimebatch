@@ -580,8 +580,9 @@ pub struct Ports<I, L, S> {
 }
 
 impl Ports<EngineInspector, EngineLauncher, EngineSampler> {
-    /// The engine ports of a desktop host. Scans and Runs share `scan` and `cache`, which the
-    /// host's Close also tears down; jobs run through `job`, the Job Slot.
+    /// The engine ports of a desktop host. Scans and Runs share `scan` with the host's Close, which
+    /// tears it down; `cache` is the session's (Close does not tear it down). Jobs run through
+    /// `job`, the Job Slot.
     pub fn engine(scan: Arc<ScanState>, cache: InspectCacheState, job: JobState) -> Self {
         Self {
             inspector: EngineInspector {

@@ -105,16 +105,18 @@ jobs:
         working-directory: ${{ env.BUILD_DIR }}
         run: cargo clippy --workspace --exclude mkv-anime-batch-slint --exclude mkv-anime-batch-slint-ui --all-targets -- -D warnings
 
-      # The Desktop Core stays toolkit-agnostic (ADR-0016 decision 1). The tree is captured first,
-      # so a failing `cargo tree` fails the step and `grep -q` cannot SIGPIPE it under pipefail.
-      - name: Check the Desktop Core does not depend on a UI toolkit (Linux only)
+      # The Desktop Core stays toolkit-agnostic (ADR-0016 decision 1). `--target all` resolves every
+      # target's dependencies, Windows' too, so one Linux run checks them all. The tree is captured
+      # first, so a failing `cargo tree` fails the step and `grep -q` cannot SIGPIPE it under
+      # pipefail.
+      - name: Check the Desktop Core does not depend on a UI toolkit (all targets)
         if: runner.os == 'Linux'
         shell: bash
         working-directory: ${{ env.BUILD_DIR }}
         run: |
-          deps="$(cargo tree -p mkv-desktop-core -e normal --prefix none)"
-          if grep -qiE '^(tauri|slint|i-slint|winit|skia)' <<< "$deps"; then
-            echo "::error::mkv-desktop-core depends on a UI toolkit (tauri, slint, winit or skia); ADR-0016 keeps the Desktop Core toolkit-agnostic."
+          deps="$(cargo tree -p mkv-desktop-core -e normal --target all --prefix none)"
+          if grep -qiE '^(tauri|tao|wry|slint|i-slint|winit|skia|glutin|softbuffer|wgpu|femtovg)[ -]' <<< "$deps"; then
+            echo "::error::mkv-desktop-core depends on a UI toolkit (tauri, tao, wry, slint, winit, skia, glutin, softbuffer, wgpu or femtovg); ADR-0016 keeps the Desktop Core toolkit-agnostic."
             exit 1
           fi
 
