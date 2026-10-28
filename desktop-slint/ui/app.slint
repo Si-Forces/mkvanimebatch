@@ -96,7 +96,6 @@ component ModeTab inherits Rectangle {
     }
 }
 
-// The Library's "+ Open folder…" (.nav.lib-open): a muted nav row, locked while a batch runs.
 // A sidebar group's heading (.side-group h2): 8px in, like the nav labels, and 4px above them.
 component SideHeading inherits VerticalLayout {
     in property <string> text;
@@ -112,13 +111,14 @@ component SideHeading inherits VerticalLayout {
     }
 }
 
+// The Library's "+ Open folder…" (.nav.lib-open): a muted nav row, locked while a batch runs.
 component OpenFolderNav inherits Pressable {
     height: 32px;
     border-radius: 8px;
     background: self.hovered && self.enabled ? Theme.hover : transparent;
     opacity: self.enabled ? 1 : 0.75;
-    accessible-label: "Open folder…";
-    // Not its label: the queue's card has an Open folder… too.
+    // Its visible text, as the webview names it, apart from the queue card's "Open folder…".
+    accessible-label: "+ Open folder…";
     focus-key: "nav:open-folder";
     Text {
         x: 8px;
@@ -212,11 +212,17 @@ export component App inherits Window {
     in-out property <bool> sub-dirty;
     // The mode shown.
     in-out property <Mode> mode;
-    // A row picked for the Episode Inspector whose Inspect is not answered yet.
-    in-out property <string> pending-inspect;
+    // Each mode's row picked for the Episode Inspector whose Inspect is not answered yet, as the
+    // webview keeps one per list (queue-view.js `pendingInspect`).
+    in-out property <string> remux-pending-inspect;
+    in-out property <string> extract-pending-inspect;
+    // The row each list marks as inspected, for the host's tests.
+    out property <string> remux-marked: remux-pane.marked;
+    out property <string> extract-marked: extract-pane.marked;
     // Each mode's list scroll offset (negative going down), kept across mode switches as the
     // webview's two lists keep theirs. The host puts it back at the top (`reveal`) when a card
-    // replaces the rows; its bench (desktop-slint/benches/queue_scroll.rs) drives it.
+    // replaces the rows or another folder's rows come; its bench
+    // (desktop-slint/benches/queue_scroll.rs) drives it.
     in-out property <length> remux-scroll;
     in-out property <length> extract-scroll;
     // Each mode's Settings Draft: as published, and as the sheet's fields hold it (the host writes
@@ -386,11 +392,15 @@ export component App inherits Window {
     property <length> side-width: root.width >= 1180px ? 220px : root.width >= 980px ? 200px : 196px;
     property <length> insp-width: root.width >= 1180px ? 320px : root.width >= 980px ? 280px : 248px;
 
-    // A row picked: commits a typed subtitle field first, then marks the row at once and asks
-    // the host.
-    function pick(id: string) {
+    // A row picked in `mode`'s list: commits a typed subtitle field first, then marks the row at
+    // once and asks the host.
+    function pick(mode: Mode, id: string) {
         root.leave-field();
-        root.pending-inspect = id;
+        if mode == Mode.remux {
+            root.remux-pending-inspect = id;
+        } else {
+            root.extract-pending-inspect = id;
+        }
         root.inspect(id);
     }
 
@@ -644,11 +654,11 @@ export component App inherits Window {
                             list-scroll <=> root.remux-scroll;
                             busy: root.busy;
                             locked: root.locked;
-                            pending-inspect: root.pending-inspect;
+                            pending-inspect: root.remux-pending-inspect;
                             set-selected(id, selected) => { root.set-selected(id, selected); }
                             set-all-selected(selected) => { root.set-all-selected(selected); }
                             reorder(id, up) => { root.reorder(id, up); }
-                            inspect(id) => { root.pick(id); }
+                            inspect(id) => { root.pick(Mode.remux, id); }
                             set-filter(filter) => {
                                 root.leave-field();
                                 root.set-filter(filter);
@@ -668,11 +678,11 @@ export component App inherits Window {
                             list-scroll <=> root.extract-scroll;
                             busy: root.busy;
                             locked: root.locked;
-                            pending-inspect: root.pending-inspect;
+                            pending-inspect: root.extract-pending-inspect;
                             set-selected(id, selected) => { root.set-selected(id, selected); }
                             set-all-selected(selected) => { root.set-all-selected(selected); }
                             reorder(id, up) => { root.reorder(id, up); }
-                            inspect(id) => { root.pick(id); }
+                            inspect(id) => { root.pick(Mode.extract, id); }
                             set-filter(filter) => {
                                 root.leave-field();
                                 root.set-filter(filter);

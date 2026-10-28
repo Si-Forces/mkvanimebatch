@@ -191,7 +191,7 @@ fn rows_render_with_their_accessible_labels_and_their_controls_answer() {
         ]
     );
     // Marked at once, before the core answers.
-    assert_eq!(app.get_pending_inspect(), "Frieren - 02.mkv");
+    assert_eq!(app.get_remux_pending_inspect(), "Frieren - 02.mkv");
 
     // A locked selection refuses the checkbox and the bulk buttons.
     state.seq = 1;
@@ -226,14 +226,17 @@ fn an_empty_queue_shows_the_empty_card_and_each_mode_its_own_list() {
     let opened = Rc::new(Cell::new(0));
     let counter = Rc::clone(&opened);
     app.on_open_folder(move || counter.set(counter.get() + 1));
-    // The empty card's button and the Library's.
-    let open_folder = || ElementHandle::find_by_accessible_label(&app, "Open folder…");
-    assert_eq!(open_folder().count(), 2);
-    open_folder().for_each(|button| button.invoke_accessible_default_action());
+    // The empty card's button and the Library's, each named by its own text.
+    let open_folder = || ["Open folder…", "+ Open folder…"].map(|label| only(&app, label));
+    open_folder()
+        .iter()
+        .for_each(ElementHandle::invoke_accessible_default_action);
     assert_eq!(opened.get(), 2);
     // A batch locks both.
     app.set_busy(true);
-    open_folder().for_each(|button| button.invoke_accessible_default_action());
+    open_folder()
+        .iter()
+        .for_each(ElementHandle::invoke_accessible_default_action);
     assert_eq!(opened.get(), 2);
     app.set_busy(false);
     assert_eq!(
@@ -250,12 +253,13 @@ fn an_empty_queue_shows_the_empty_card_and_each_mode_its_own_list() {
         0
     );
     // A loaded queue opens another folder from the Library.
-    only(&app, "Open folder…").invoke_accessible_default_action();
+    only(&app, "+ Open folder…").invoke_accessible_default_action();
     assert_eq!(opened.get(), 3);
     app.hide().unwrap();
 }
 
-/// A filter that matches no row says so; the rows stay in the model, hidden.
+/// A filter that matches no row says so; the rows stay in the model, hidden. One that matches
+/// hides the reorder buttons.
 #[test]
 fn a_filter_with_no_match_says_so() {
     i_slint_backend_testing::init_no_event_loop();
@@ -270,6 +274,53 @@ fn a_filter_with_no_match_says_so() {
     assert_eq!(app.get_remux_head().filter, QueueFilter::Failed);
     only(&app, "No episodes match this filter.");
     assert_eq!(app.get_remux_rows().row_count(), 1);
+    // A filter that shows the row: the order cannot change, so Move up / Move down are out of
+    // the accessibility tree, as style.css's `visibility: hidden` takes them out.
+    let movers = || ElementHandle::find_by_accessible_label(&app, "Move up").count();
+    publisher.show_filter(Mode::Remux, QueueFilter::Todo);
+    only(&app, "Frieren - 01.mkv");
+    assert_eq!(movers(), 0);
+    publisher.show_filter(Mode::Remux, QueueFilter::All);
+    assert_eq!(movers(), 1);
+    app.hide().unwrap();
+}
+
+/// Each list marks its own pick, as the webview keeps one per list: a remux pick does not mark
+/// Extract's row of the same id, and remux's answer leaves an Extract pick alone.
+#[test]
+fn each_mode_marks_its_own_pick() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    let mut state = ViewState::new(None);
+    for view in [&mut state.remux, &mut state.extract] {
+        view.rows = Arc::new(vec![row("a"), row("b")]);
+        view.empty = None;
+    }
+    apply(&app, &state);
+    app.set_extract_head(mkv_anime_batch_slint_ui::QueueHead {
+        inspected: "b".into(),
+        ..app.get_extract_head()
+    });
+    app.show().unwrap();
+
+    only(&app, "a").invoke_accessible_default_action();
+    assert_eq!(app.get_remux_marked(), "a");
+    only(&app, "Extract").invoke_accessible_default_action();
+    assert_eq!(
+        app.get_extract_marked(),
+        "b",
+        "Extract keeps its own inspected row"
+    );
+
+    only(&app, "a").invoke_accessible_default_action();
+    crate::intents::inspect_answered(&app, Mode::Remux, "a");
+    assert_eq!(
+        app.get_extract_marked(),
+        "a",
+        "remux's answer is not Extract's"
+    );
+    crate::intents::inspect_answered(&app, Mode::Extract, "a");
+    assert_eq!(app.get_extract_marked(), "b");
     app.hide().unwrap();
 }
 
@@ -314,7 +365,7 @@ fn a_kept_model_takes_each_publication_in_place() {
 
 /// Each mode keeps its own scroll offset, as the webview's two lists do, to the pixel with rows
 /// of different heights (a ListView made again would place them by an estimated height); a card
-/// (a scan of another folder) puts its list back at the top.
+/// (a scan of another folder) or another folder's rows put its list back at the top.
 #[test]
 fn each_mode_keeps_its_scroll_and_a_new_folder_starts_at_the_top() {
     i_slint_backend_testing::init_no_event_loop();
@@ -388,6 +439,16 @@ fn each_mode_keeps_its_scroll_and_a_new_folder_starts_at_the_top() {
     publisher.show_coalesced(&[&scanning, &state]);
     assert_eq!(y("d05"), top);
     assert_eq!(app.get_extract_scroll(), -52.0);
+
+    // Another folder's rows with no scanning card published before them (a cached folder
+    // settles within one tick): still from the top.
+    app.set_remux_scroll(-600.0);
+    state.seq = 5;
+    state.remux.rows = rows("e");
+    state.remux.manifest_rev = 4;
+    state.remux.directory = Some("/e".into());
+    publisher.show(&state);
+    assert_eq!(y("e05"), top);
     app.hide().unwrap();
 }
 
@@ -659,10 +720,10 @@ fn the_sidebar_scrolls_to_open_folder_past_many_releases() {
     apply(&app, &state);
     app.show().unwrap();
     // Clipped out of the sidebar: the search finds only what shows.
-    let open_folder = || ElementHandle::find_by_accessible_label(&app, "Open folder…").count();
+    let open_folder = || ElementHandle::find_by_accessible_label(&app, "+ Open folder…").count();
     assert_eq!(open_folder(), 0, "30 releases overflow the window");
     scroll(&app, 90.0, false);
-    let open = only(&app, "Open folder…");
+    let open = only(&app, "+ Open folder…");
     let end = open.absolute_position().y + open.size().height;
     assert!(end <= 520.0, "Open folder ends at {end}, past the window");
     app.hide().unwrap();
@@ -714,7 +775,7 @@ fn a_typed_subtitle_field_is_committed_before_a_click_elsewhere() {
     crate::inspector::restore_form(&app);
     assert_eq!(app.get_sub_title(), "Signs");
     only(&app, "Show - 01.mkv").invoke_accessible_default_action();
-    for click in ["Open folder…", "Done 0", "Show 2", "Extract"] {
+    for click in ["+ Open folder…", "Done 0", "Show 2", "Extract"] {
         only(&app, "Track title").set_accessible_value(click);
         only(&app, click).invoke_accessible_default_action();
         if click == "Extract" {

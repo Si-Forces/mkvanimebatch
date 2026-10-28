@@ -84,8 +84,8 @@ pub(crate) fn tone(tone: Tone) -> RowTone {
 /// The rows `filter` shows, each run of one release under a header naming it in upper case
 /// (style.css) and counting the rows of the run the filter shows, when the queue spans more than
 /// one release. Every row of a run carries its header, which the list pins at its top while the
-/// run scrolls under it; the run's first row `opens` it. A row the filter hides stays
-/// in the list, not shown, so each index is the core's and a filter change rewrites rows in place.
+/// run scrolls under it; the run's first row `opens` it. A row the filter hides stays in the
+/// list, not shown, so each index is the core's and a filter change rewrites rows in place.
 pub(crate) fn map_rows(
     rows: &[Row],
     library: &[LibraryEntry],
@@ -278,8 +278,8 @@ pub(crate) fn diff_rows(old: &Rows, new: &Rows) -> RowPatch {
 pub(crate) struct Update {
     pub(crate) head: Option<QueueHead>,
     pub(crate) rows: Option<RowPatch>,
-    /// Whether a head staged since the last take showed a card, so the list starts at the top
-    /// again, even when a later head replaced that one before the take.
+    /// Whether a card replaced the rows, or another folder's view came, since the last take, so
+    /// the list starts at the top again, even when a later head replaced that one before the take.
     pub(crate) to_top: bool,
     pub(crate) library: Option<Vec<LibraryItem>>,
     pub(crate) inspector: Option<InspectorUpdate>,
@@ -301,7 +301,7 @@ pub(crate) struct ModeList {
     head: Option<QueueHead>,
     /// Whether the newest head shows the rows rather than a card.
     rows_shown: bool,
-    /// Whether a card head was staged since the last take.
+    /// Whether a card replaced the rows, or another folder's view came, since the last take.
     to_top: bool,
     /// The Library and the Episode Inspector.
     inspector: InspectorList,
@@ -361,13 +361,15 @@ impl ModeList {
     /// Takes `view`, with its rows mapped by [`wants_rows`](Self::wants_rows)'s filter. Rows
     /// mapped with a filter that changed meanwhile are mapped again.
     pub(crate) fn put(&mut self, view: ModeView, mapped: Option<(QueueFilter, Vec<QueueRow>)>) {
-        // Another folder's rows: a release revealed in the last one is not this one's.
+        // Another folder's rows: a release revealed in the last one is not this one's, and they
+        // start at the top, even with no scanning card published between (a cached folder).
         if self
             .view
             .as_ref()
             .is_some_and(|last| last.directory != view.directory)
         {
             self.cancel_reveal();
+            self.to_top = true;
         }
         let rows = match mapped {
             Some((filter, rows)) if filter == self.filter => Some(rows),
@@ -424,9 +426,10 @@ impl ModeList {
         true
     }
 
+    /// Stages `head`; a card that replaces the rows puts the list back at the top, once.
     fn set_head(&mut self, head: QueueHead) {
+        self.to_top |= head.card_shown && self.rows_shown;
         self.rows_shown = !head.card_shown;
-        self.to_top |= head.card_shown;
         self.head = Some(head);
     }
 
@@ -737,6 +740,39 @@ mod tests {
             )),
         );
         assert!(matches!(list.take().rows, Some(RowPatch::Rows(rows)) if rows.is_empty()));
+
+        // A remap of a view whose rows a newer publication replaced is stale: it stages nothing,
+        // or the old rows would stay under the new head.
+        let old = view.clone();
+        view.rows = Arc::new(vec![row("c", ".", Some(Bucket::Todo))]);
+        let mapped = map(&list, &view);
+        list.put(view.clone(), mapped);
+        list.take();
+        let filter = list.filter();
+        let stale = map_rows(&old.rows, &old.library, filter);
+        assert!(!list.put_filtered(&old, filter, stale));
+        assert!(list.take().rows.is_none());
+    }
+
+    /// A card that replaces the rows puts the list at the top once, not again on every
+    /// publication while it shows.
+    #[test]
+    fn a_card_scrolls_to_the_top_once() {
+        let mut view = ViewState::new(None).remux;
+        view.rows = Arc::new(vec![row("a", ".", Some(Bucket::Todo))]);
+        view.directory = Some("/a".into());
+        view.empty = None;
+        let mut list = ModeList::new(Mode::Remux);
+        list.put(view.clone(), None);
+        list.take();
+        let mut to_top = |scan| {
+            view.scan = scan;
+            list.put(view.clone(), None);
+            list.take().to_top
+        };
+        assert!(!to_top(ScanView::Idle));
+        assert!(to_top(ScanView::Failed));
+        assert!(!to_top(ScanView::Failed));
     }
 
     /// A Library reveal scrolls once its rows are staged, unless a filter click, the folder's own

@@ -18,7 +18,7 @@ mod telemetry;
 #[cfg(test)]
 mod ui_tests;
 
-use mkv_anime_batch_slint_ui::{App, Focus};
+use mkv_anime_batch_slint_ui::{App, Focus, Mode};
 use mkv_desktop_core::actor::{Core, Intent, Ports};
 use mkv_desktop_core::control::{
     begin_shutdown, cancel_shutdown, cleanup_owned_processes, InspectCacheState, ScanState,
@@ -183,8 +183,11 @@ fn run(
     app.set_rounded(cfg!(target_os = "linux"));
     let (window, boot) = (app.as_weak(), core.state());
     slint::spawn_local(async move {
+        // Only towards extract, as app.js does: a click on Extract before the answer stays.
         if let (Ok(state), Some(app)) = (boot.await, window.upgrade()) {
-            app.set_mode(intents::boot_mode(&state));
+            if intents::boot_mode(&state) == Mode::Extract {
+                app.set_mode(Mode::Extract);
+            }
         }
     })?;
 
