@@ -264,7 +264,12 @@ export component Select inherits Pressable {
         height: min(8, root.model.length) * root.entry-height + 10px;
         close-policy: close-on-click-outside;
         forward-focus: list-keys;
+        // A screen reader's list, whose focus follows the highlight (as Slint's ListView's
+        // `focus-item`): the arrows are read out, entry by entry.
         list-keys := FocusScope {
+            accessible-role: list;
+            accessible-delegate-focus: root.highlight;
+            accessible-item-count: root.model.length;
             key-pressed(event) => {
                 if event.text == Key.UpArrow {
                     root.highlight = max(0, root.highlight - 1);
@@ -292,7 +297,7 @@ export component Select inherits Pressable {
                 drop-shadow-blur: 12px;
                 drop-shadow-offset-y: 4px;
                 drop-shadow-color: #0000002e;
-                list := Flickable {
+                Flickable {
                     x: 4px;
                     y: 5px;
                     width: parent.width - 8px;
@@ -320,7 +325,8 @@ export component Select inherits Pressable {
                         accessible-label: entry;
                         accessible-item-index: index;
                         accessible-item-selectable: true;
-                        accessible-item-selected: index == root.current-index;
+                        // The highlighted entry is the selected one, as in a native select's list.
+                        accessible-item-selected: index == root.highlight;
                         accessible-action-default => { root.pick(index); }
                         Text {
                             x: 8px;

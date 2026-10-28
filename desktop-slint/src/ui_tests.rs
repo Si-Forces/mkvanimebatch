@@ -841,7 +841,8 @@ fn a_typed_subtitle_field_is_committed_before_a_click_elsewhere() {
 
 /// Text typed into the subtitle fields and not committed stays with its episode: the same id in
 /// another folder (the core keeps a folder's queue while the next one scans) gets its own
-/// published fields, and an Inspector that shows no episode leaves nothing to commit.
+/// published fields, as does the episode once its assignment is cleared, and an Inspector that
+/// shows no episode leaves nothing to commit.
 #[test]
 fn typed_subtitle_text_stays_with_its_folders_episode() {
     i_slint_backend_testing::init_no_event_loop();
@@ -885,8 +886,20 @@ fn typed_subtitle_text_stays_with_its_folders_episode() {
     assert_eq!(fields(&app), ("Dialogue".into(), "".into(), false));
     assert_eq!(app.get_remux_inspector().directory, "/media/B");
 
+    // The episode still shown, its assignment cleared: nothing is left to send the typing to.
     type_signs();
     state.seq = 2;
+    state.remux.inspector = Some(sample_view());
+    publisher.show(&state);
+    assert!(app.get_remux_inspector().shown);
+    assert_eq!(
+        fields(&app),
+        ("".into(), "".into(), false),
+        "no longer assigned"
+    );
+
+    type_signs();
+    state.seq = 3;
     state.remux.inspector = None;
     publisher.show(&state);
     assert!(!app.get_sub_dirty(), "no episode, nothing to commit");
@@ -1254,10 +1267,45 @@ fn picking_the_custom_tag_focuses_the_tag_field() {
     app.hide().unwrap();
 }
 
-/// Drives the select labelled `label` as a user who scrolls or arrows over it does, `sent`
-/// counting what it sent: a click opens its list and Esc closes it unchanged, the focus back on
-/// it; the wheel over it and the arrows, closed or in its list, send nothing; Return in the list
-/// picks the entry highlighted, once, and the select has the focus again.
+/// What a screen reader reads in an open select's list: the label of the entry selected in the
+/// one `list` whose entries mark a selection, the entry its focus is delegated to.
+fn heard(app: &App) -> Option<String> {
+    use i_slint_backend_testing::AccessibleRole;
+    i_slint_backend_testing::ElementQuery::from_root(app)
+        .match_descendants()
+        .match_accessible_role(AccessibleRole::List)
+        .find_all()
+        .into_iter()
+        .find_map(|list| {
+            let entries = list
+                .query_descendants()
+                .match_accessible_role(AccessibleRole::ListItem)
+                .find_all();
+            let selected = entries
+                .iter()
+                .find(|entry| entry.accessible_item_selected() == Some(true))?;
+            assert_eq!(list.accessible_item_count(), Some(entries.len()));
+            selected.accessible_label().map(String::from)
+        })
+}
+
+/// A held key: one press, `repeats` repeats, then the release.
+fn hold(app: &App, text: slint::platform::Key, repeats: usize) {
+    use slint::platform::WindowEvent;
+    let window = app.window();
+    window.dispatch_event(WindowEvent::KeyPressed { text: text.into() });
+    for _ in 0..repeats {
+        window.dispatch_event(WindowEvent::KeyPressRepeated { text: text.into() });
+    }
+    window.dispatch_event(WindowEvent::KeyReleased { text: text.into() });
+}
+
+/// Drives the select labelled `label`, in a pane that overflows, as a user who scrolls or arrows
+/// over it does, `sent` counting what it sent: a click opens its list and Esc closes it unchanged,
+/// the focus back on it; the wheel over it scrolls the pane and sends nothing, as the arrows do,
+/// closed or in its list, where a screen reader hears the entry highlighted; a held Return opens
+/// the list without picking, and picks the entry highlighted once, the select having the focus
+/// again, closed.
 fn a_select_sends_a_pick_alone(app: &App, label: &str, sent: &dyn Fn() -> usize) {
     use slint::platform::{Key, WindowEvent};
     let select = ElementHandle::find_by_accessible_label(app, label)
@@ -1291,33 +1339,55 @@ fn a_select_sends_a_pick_alone(app: &App, label: &str, sent: &dyn Fn() -> usize)
             delta_y,
         });
     }
+    frame(app);
+    assert!(
+        select.absolute_position().y < at.y,
+        "{label}: the wheel over it scrolls its pane"
+    );
     key(app, Key::DownArrow);
     key(app, Key::UpArrow);
     assert_eq!(sent(), 0, "{label}: the wheel and the arrows send nothing");
     assert_eq!(select.accessible_value(), shown, "{label}: nor change it");
 
-    key(app, Key::Return);
+    // Return held on the closed select: the list opens on the press, and its repeats pick nothing.
+    hold(app, Key::Return, 3);
     frame(app);
     assert_eq!(
         select.accessible_expanded(),
         Some(true),
         "{label}: Return opens it"
     );
-    for arrow in [Key::DownArrow, Key::UpArrow, Key::DownArrow] {
+    assert_eq!(sent(), 0, "{label}: a held Return opens it without a pick");
+    assert_eq!(
+        heard(app).as_deref(),
+        shown.as_deref(),
+        "{label}: its list is read from the entry shown"
+    );
+    key(app, Key::DownArrow);
+    let next = heard(app);
+    assert_ne!(
+        next,
+        shown.as_deref().map(String::from),
+        "{label}: Down is heard"
+    );
+    for arrow in [Key::UpArrow, Key::DownArrow] {
         key(app, arrow);
     }
+    assert_eq!(heard(app), next);
     assert_eq!(
         sent(),
         0,
         "{label}: the arrows in its list move the highlight only"
     );
-    key(app, Key::Return);
+    // Return held in the list: the press picks, and the repeats do not open it again.
+    hold(app, Key::Return, 3);
+    frame(app);
     assert_eq!(sent(), 1, "{label}: a pick sends once");
     assert_eq!(select.accessible_expanded(), Some(false));
-    assert_ne!(
-        select.accessible_value(),
-        shown,
-        "{label}: the next entry is picked"
+    assert_eq!(
+        select.accessible_value().map(String::from),
+        next,
+        "{label}: the entry heard is picked"
     );
 }
 
@@ -1353,6 +1423,9 @@ fn the_inspector_selects_send_a_pick_alone() {
 
     for label in ["Assign subtitle", "Language"] {
         calls.set(0);
+        // The Inspector back at its top: each select scrolls it.
+        scroll(&app, 800.0, true);
+        frame(&app);
         a_select_sends_a_pick_alone(&app, label, &|| calls.get());
     }
     app.hide().unwrap();
@@ -1364,8 +1437,7 @@ fn the_inspector_selects_send_a_pick_alone() {
 fn the_bitrate_select_sends_a_pick_alone() {
     i_slint_backend_testing::init_no_event_loop();
     let app = new_app();
-    app.window()
-        .set_size(slint::LogicalSize::new(920.0, 1100.0));
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
     apply(&app, &ViewState::new(None));
     app.show().unwrap();
     app.invoke_open_sheet(Mode::Remux, "".into());
@@ -2846,25 +2918,40 @@ fn a_reorder_out_of_view_gives_a_row_made_later_no_focus() {
     app.hide().unwrap();
 }
 
-/// Reduce motion stops the spinning rings: their turn advances with time, and stays at 0deg
-/// under Reduce motion.
+/// Reduce motion stops the spinning rings: a processing row's ring, drawn, turns with the
+/// animation tick, and stands still under Reduce motion, the window drawing no frame for it.
 #[test]
 fn reduce_motion_stops_the_spinning_rings() {
-    use mkv_anime_batch_slint_ui::Spin;
     use std::time::Duration;
-    i_slint_backend_testing::init_no_event_loop();
+    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
+        mock_time: true,
+        threading: false,
+        renderer_name: Some("software".into()),
+    })))
+    .unwrap();
     let app = new_app();
-    let turn = || app.global::<Spin>().get_turn();
-    let later = || i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(300));
-    later();
-    let before = turn();
-    later();
-    assert_ne!(turn(), before, "the rings spin");
+    app.window().set_size(slint::LogicalSize::new(760.0, 520.0));
+    let mut state = ViewState::new(None);
+    state.remux.rows = Arc::new(vec![Row {
+        status: ItemStatus::Processing,
+        label: "Processing".into(),
+        tone: Tone::Info,
+        ..row("Show - 01.mkv")
+    }]);
+    state.remux.empty = None;
+    apply(&app, &state);
+    app.show().unwrap();
+    // A frame drawn once the effects settled: does it read the animation tick? The software
+    // renderer does not rotate, so the turn itself cannot be seen in the pixels.
+    let animated = || {
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(1000));
+        app.window().take_snapshot().unwrap();
+        app.window().has_active_animations()
+    };
+    assert!(animated(), "the ring spins");
     app.global::<Theme>().set_reduce_motion(true);
-    for _ in 0..2 {
-        assert_eq!(turn(), 0.0, "the rings stand still");
-        later();
-    }
+    assert!(!animated(), "the ring stands still");
+    app.hide().unwrap();
 }
 
 /// Ctrl+T held flips the theme once, and Ctrl+Shift+T (an upper-case "T") flips it too.

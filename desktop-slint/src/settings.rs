@@ -1646,20 +1646,43 @@ mod tests {
         app.hide().unwrap();
     }
 
-    /// A stepper held as its sheet closes stops: its release never comes.
+    /// A stepper held as its sheet closes, or as a batch locks it, stops: its release never
+    /// comes, so it steps no more once the sheet opens again or the batch ends (a locked step
+    /// sends nothing, but a repeat left running would step again then).
     #[test]
-    fn a_held_stepper_stops_when_its_sheet_closes() {
+    fn a_held_stepper_stops_when_its_sheet_closes_or_locks() {
         i_slint_backend_testing::init_no_event_loop();
         let (_runtime, app, publisher) = wired();
+        // The sheet closed, or a batch running; and back.
+        let stop = |how: &str, stopped: bool| match how {
+            "closed" => app.set_sheet_open(!stopped),
+            _ => app.set_busy(stopped),
+        };
+        let later = || {
+            for _ in 0..20 {
+                mock_elapsed_time(Duration::from_millis(50));
+            }
+        };
         app.set_sheet_open(true);
-        app.global::<Sheet>()
-            .invoke_step_pressed("workers".into(), true);
-        assert_eq!(sent(&publisher, Workers), 1, "a press steps at once");
-        app.set_sheet_open(false);
-        for _ in 0..20 {
-            mock_elapsed_time(Duration::from_millis(50));
+        for how in ["closed", "locked"] {
+            let before = sent(&publisher, Workers);
+            app.global::<Sheet>()
+                .invoke_step_pressed("workers".into(), true);
+            assert_eq!(
+                sent(&publisher, Workers),
+                before + 1,
+                "a press steps at once"
+            );
+            stop(how, true);
+            later();
+            stop(how, false);
+            later();
+            assert_eq!(
+                sent(&publisher, Workers),
+                before + 1,
+                "{how}, it steps no more"
+            );
         }
-        assert_eq!(sent(&publisher, Workers), 1, "closed, it steps no more");
     }
 
     /// The sheet puts the cursor in the field of every text key it is opened on: each field's
