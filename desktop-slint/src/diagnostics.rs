@@ -29,10 +29,11 @@ const MAX_LOG_BYTES: u64 = 1_048_576;
 
 /// Installs the app's subscriber as the global default, and a panic hook that logs each panic's
 /// message and location before the default hook prints it: a Windows build has no console, so the
-/// log file is where a panic shows. A subscriber that is already set is left alone. Never fails:
-/// with no usable log directory the output is stderr only. Returns what the window says when there
-/// is no log file (ADR-0017 decision 9): the file that could not be opened, naming its path, or no
-/// log directory at all.
+/// log file is where a panic shows. A subscriber that is already set is left alone, and then so is
+/// the panic hook, so a second call does not log each panic twice. Never fails: with no usable log
+/// directory the output is stderr only. Returns what the window says when there is no log file
+/// (ADR-0017 decision 9): the file that could not be opened, naming its path, or no log directory
+/// at all.
 pub fn init(log_dir: Option<&Path>) -> Option<String> {
     let (dispatch, failed) = build_dispatch(
         log_dir,
@@ -40,12 +41,13 @@ pub fn init(log_dir: Option<&Path>) -> Option<String> {
         io::stderr,
         io::stderr().is_terminal(),
     );
-    let _ = tracing::dispatcher::set_global_default(dispatch);
-    let default_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        tracing::error!("{info}");
-        default_hook(info);
-    }));
+    if tracing::dispatcher::set_global_default(dispatch).is_ok() {
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            tracing::error!("{info}");
+            default_hook(info);
+        }));
+    }
     failed
 }
 
