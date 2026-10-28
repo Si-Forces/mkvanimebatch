@@ -148,8 +148,9 @@ pub fn forget_saved(dir: &Path) -> io::Result<()> {
 /// The re-launch: the same program and arguments, the inherited environment plus the software
 /// renderer, the guard and the save request. Under an AppImage the program is `$APPIMAGE` (the
 /// running binary sits in a mount that ends with this process) and `argv[0]` stays `$ARGV0`,
-/// which the AppImage runtime sets from it. `$APPIMAGE` counts only when `exe` is under
-/// `$APPDIR`: one inherited from another AppImage (a terminal, an IDE) names that one instead.
+/// which the AppImage runtime sets from it. `$APPIMAGE` counts only when it is non-empty and
+/// `exe` is under `$APPDIR`: one inherited from another AppImage (a terminal, an IDE) names that
+/// one instead.
 pub fn relaunch_command(
     exe: &Path,
     appimage: Option<OsString>,
@@ -162,7 +163,7 @@ pub fn relaunch_command(
     let ours = appdir.filter(|dir| !dir.is_empty()).is_some_and(|dir| {
         exe.starts_with(std::fs::canonicalize(&dir).unwrap_or_else(|_| PathBuf::from(dir)))
     });
-    let appimage = appimage.filter(|_| ours);
+    let appimage = appimage.filter(|path| ours && !path.is_empty());
     let mut command = Command::new(appimage.as_deref().unwrap_or(exe.as_os_str()));
     #[cfg(unix)]
     if let (Some(_), Some(argv0)) = (&appimage, argv0) {
@@ -210,12 +211,7 @@ pub fn ask_restart() -> Answer {
     ];
     let mut reasons = Vec::new();
     for (tool, args) in tools {
-        // The C locale keeps stderr untranslated for read_answer; the dialog text stays English.
-        // gettext still reads LANGUAGE unless the locale is exactly "C", so drop it too.
-        let child = Command::new(tool)
-            .args(args)
-            .env("LC_ALL", "C.UTF-8")
-            .env_remove("LANGUAGE")
+        let child = dialog_command(tool, args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -223,7 +219,9 @@ pub fn ask_restart() -> Answer {
         let (status, stderr) = match child.and_then(|child| wait_for_dialog(child, DIALOG_TIMEOUT))
         {
             Ok(Some(ended)) => ended,
-            Ok(None) => return Answer::Unavailable(format!("{tool} timed out after 5 minutes")),
+            Ok(None) => {
+                return Answer::Unavailable(format!("{tool} timed out after {DIALOG_TIMEOUT:?}"));
+            }
             Err(error) => {
                 reasons.push(format!("{tool}: {error}"));
                 continue;
@@ -238,6 +236,25 @@ pub fn ask_restart() -> Answer {
         }
     }
     Answer::Unavailable(reasons.join("; "))
+}
+
+/// The dialog `tool` run with `args`, in an environment [`read_answer`] can read. The C locale
+/// keeps stderr untranslated; the dialog text stays English. gettext still reads LANGUAGE unless
+/// the locale is exactly "C", so it goes too. zenity takes each exit code from `ZENITY_<code>`,
+/// else `DIALOG_<code>` (zenity's util.c), so an inherited one could turn a yes into a no.
+#[cfg(any(target_os = "linux", test))]
+fn dialog_command(tool: &str, args: &[&str]) -> Command {
+    let mut command = Command::new(tool);
+    command
+        .args(args)
+        .env("LC_ALL", "C.UTF-8")
+        .env_remove("LANGUAGE");
+    for code in ["OK", "CANCEL", "ESC", "ERROR", "EXTRA", "TIMEOUT"] {
+        command
+            .env_remove(format!("ZENITY_{code}"))
+            .env_remove(format!("DIALOG_{code}"));
+    }
+    command
 }
 
 /// How long the dialog may stay unanswered: a hung zenity or kdialog must not hold a process that
@@ -282,8 +299,9 @@ fn wait_for_dialog(
     )))
 }
 
-/// zenity and kdialog answer 0 for yes and 1 for no or a closed dialog, but both can also end
-/// with 1 when they cannot reach the display, which they say on stderr: GTK's "Failed to open
+/// zenity and kdialog answer 0 for yes and 1 for no or a closed dialog (kdialog ends with 2
+/// for any other result, such as a dismissed dialog), but both can also end with 1 (kdialog with
+/// 2) when they cannot reach the display, which they say on stderr: GTK's "Failed to open
 /// display", Qt's "could not connect to display" or "cannot connect to X server". Any other
 /// stderr is no sign of failure: Mesa warns there on a healthy start. `None`: not shown.
 #[cfg(any(target_os = "linux", test))]
@@ -294,7 +312,7 @@ fn read_answer(code: Option<i32>, stderr: &str) -> Option<Answer> {
         .any(|sign| stderr.contains(sign));
     match code {
         Some(0) => Some(Answer::Yes),
-        Some(1) if !no_display => Some(Answer::No),
+        Some(1 | 2) if !no_display => Some(Answer::No),
         _ => None,
     }
 }
@@ -445,6 +463,31 @@ mod tests {
         #[cfg(unix)]
         assert!(format!("{command:?}").contains("\"App.AppImage\""));
 
+        // An empty `$APPIMAGE` names no program: the binary itself re-launches.
+        let command = relaunch_command(
+            Path::new("/tmp/.mount_x/usr/bin/app"),
+            Some("".into()),
+            Some("/tmp/.mount_x".into()),
+            Some("App.AppImage".into()),
+            args(),
+        );
+        assert_eq!(command.get_program(), "/tmp/.mount_x/usr/bin/app");
+
+        // A real, non-canonical `$APPDIR` holds the canonical binary once canonicalized.
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("usr")).unwrap();
+        let exe = std::fs::canonicalize(temp.path())
+            .unwrap()
+            .join("usr/bin/app");
+        let command = relaunch_command(
+            &exe,
+            Some("/home/u/App.AppImage".into()),
+            Some(temp.path().join("usr/..").into()),
+            Some("App.AppImage".into()),
+            args(),
+        );
+        assert_eq!(command.get_program(), "/home/u/App.AppImage");
+
         // `$ARGV0` without `$APPIMAGE` is not an AppImage run: ignored.
         let command = relaunch_command(
             Path::new("/opt/app/bin"),
@@ -493,7 +536,10 @@ mod tests {
         let pid = child.id();
         let started = Instant::now();
         let waited = wait_for_dialog(child, Duration::from_millis(200)).unwrap();
-        assert!(waited.is_none(), "timed out");
+        assert!(
+            waited.is_none(),
+            "a dialog past its deadline must be killed and return None, got {waited:?}"
+        );
         assert!(started.elapsed() < Duration::from_secs(5));
         assert!(
             !Path::new(&format!("/proc/{pid}")).exists(),
@@ -501,12 +547,31 @@ mod tests {
         );
     }
 
+    /// A dialog tool that ends in time hands back its exit status and its stderr.
+    #[cfg(target_os = "linux")]
     #[test]
-    fn a_dialog_tool_that_could_not_open_the_display_did_not_answer() {
+    fn a_dialog_that_ends_returns_its_status_and_stderr() {
+        let child = Command::new("sh")
+            .args(["-c", "echo 'Failed to open display' >&2; exit 1"])
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("sh runs");
+        let (status, stderr) = wait_for_dialog(child, Duration::from_secs(5))
+            .unwrap()
+            .expect("sh ends before the deadline");
+        assert_eq!(status.code(), Some(1));
+        assert_eq!(stderr, "Failed to open display\n");
+    }
+
+    #[test]
+    fn read_answer_maps_exit_codes_and_display_errors() {
         assert_eq!(read_answer(Some(0), ""), Some(Answer::Yes));
         // A healthy "no" can still carry Mesa's warnings on stderr.
         let mesa = "MESA-INTEL: warning: Ivy Bridge Vulkan support is incomplete\n";
         assert_eq!(read_answer(Some(1), mesa), Some(Answer::No));
+        // kdialog ends with 2 for any result other than yes or no, such as a dismissed dialog
+        // (kdialog.cpp).
+        assert_eq!(read_answer(Some(2), mesa), Some(Answer::No));
         let gtk = "(zenity:1): Gtk-WARNING **: 13:35:51.009: Failed to open display\n";
         assert_eq!(read_answer(Some(1), gtk), None);
         // Qt says it its own way, and the match ignores case.
@@ -514,8 +579,28 @@ mod tests {
         assert_eq!(read_answer(Some(1), qt), None);
         let x11 = "kdialog: Cannot connect to X server :0\n";
         assert_eq!(read_answer(Some(1), x11), None);
+        assert_eq!(read_answer(Some(2), x11), None);
         // kdialog aborts without a display.
         assert_eq!(read_answer(None, ""), None);
         assert_eq!(read_answer(Some(255), ""), None);
+    }
+
+    #[test]
+    fn a_dialog_runs_with_zenitys_exit_codes_at_their_defaults() {
+        let command = dialog_command("zenity", &["--question"]);
+        let removed: Vec<_> = command
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(key, _)| key.to_string_lossy().into_owned())
+            .collect();
+        for var in [
+            "ZENITY_OK",
+            "DIALOG_OK",
+            "ZENITY_CANCEL",
+            "DIALOG_ESC",
+            "LANGUAGE",
+        ] {
+            assert!(removed.iter().any(|key| key == var), "{var} is inherited");
+        }
     }
 }
