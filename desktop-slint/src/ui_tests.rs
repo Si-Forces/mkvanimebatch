@@ -136,13 +136,22 @@ fn rows_render_with_their_accessible_labels_and_their_controls_answer() {
     running.progress = Some(40.0);
     running.label = "40% · 3s".into();
     running.tone = Tone::Info;
-    state.remux.rows = Arc::new(vec![row("Frieren - 01.mkv"), running]);
+    let mut first = row("Frieren - 01.mkv");
+    first.meta = "FLAC → Opus · 2 subtitles".into();
+    state.remux.rows = Arc::new(vec![first, running]);
     state.remux.manifest_rev = 1;
     state.remux.empty = None;
     let publisher = SlintPublisher::new(&app);
     publisher.show(&state);
     app.show().unwrap();
 
+    // The pick reads its meta line too, as the webview's button reads its content.
+    assert_eq!(
+        only(&app, "Frieren - 01.mkv")
+            .accessible_description()
+            .as_deref(),
+        Some("FLAC → Opus · 2 subtitles")
+    );
     for label in [
         "Include Frieren - 01.mkv in the batch",
         "Include Frieren - 02.mkv in the batch",

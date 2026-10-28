@@ -284,12 +284,14 @@ component EpRow inherits Rectangle {
                 }
             }
 
-            // The pick (.ep-pick): number, name and meta line; it inspects the row.
+            // The pick (.ep-pick): number, name and meta line; it inspects the row. Read as the
+            // name, then the meta line (the button's content in the webview).
             pick := Pressable {
                 horizontal-stretch: 1;
                 border-radius: 8px;
                 focus-key: "pick:" + root.key;
                 accessible-label: root.item.name;
+                accessible-description: root.item.meta;
                 clicked => { root.pick(); }
                 HorizontalLayout {
                     spacing: 12px;
