@@ -252,6 +252,8 @@ export component TitleBar inherits Rectangle {
             y: lights.y;
             width: lights.width;
             height: lights.height;
+            // It takes the clicks in the gaps, so it maximizes as the bar around it does.
+            double-clicked => { root.toggle-maximize(); }
         }
     }
 
