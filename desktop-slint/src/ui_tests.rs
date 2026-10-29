@@ -1436,7 +1436,8 @@ fn picking_the_custom_tag_focuses_the_tag_field() {
 }
 
 /// What a screen reader reads in an open select's list: the label of the entry selected in the
-/// one `list` whose entries mark a selection, the entry its focus is delegated to.
+/// one `list` whose entries mark a selection. The list's `accessible-delegate-focus` is not
+/// checked: the testing backend has no getter for it.
 fn heard(app: &App) -> Option<String> {
     use i_slint_backend_testing::AccessibleRole;
     i_slint_backend_testing::ElementQuery::from_root(app)
