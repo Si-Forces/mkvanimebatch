@@ -2300,7 +2300,7 @@ fn the_sheet_keeps_the_focus_and_its_fields_take_typed_keys() {
     assert_eq!(focused(&app), "Clear inspection cache…");
     for effect in [
         "Reduce transparency (solid panes)",
-        "Reduce motion (no spinning)",
+        "Reduce motion (fewer animations)",
     ] {
         assert_eq!(
             ElementHandle::find_by_accessible_label(&app, effect).count(),
@@ -2465,7 +2465,7 @@ fn the_reduced_effects_apply_at_once_and_are_saved() {
     assert!(!theme.get_glass());
     assert_eq!(theme.get_float().alpha(), 255);
     assert_eq!(app.get_log_blur(), 0.0);
-    only(&app, "Reduce motion (no spinning)").invoke_accessible_default_action();
+    only(&app, "Reduce motion (fewer animations)").invoke_accessible_default_action();
     assert!(theme.get_reduce_motion());
     assert_eq!(
         Appearance::load(dir.path()),

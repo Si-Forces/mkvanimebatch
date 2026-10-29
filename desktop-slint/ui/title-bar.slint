@@ -217,7 +217,7 @@ export component AppearanceMenu inherits GlassPane {
                 }
             }
             reduce-motion := CheckBox {
-                text: "Reduce motion (no spinning)";
+                text: "Reduce motion (fewer animations)";
                 checked: Theme.reduce-motion;
                 toggled => {
                     Theme.reduce-motion = self.checked;
