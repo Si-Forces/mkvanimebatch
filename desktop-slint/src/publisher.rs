@@ -429,10 +429,10 @@ fn focused_row(current: &str, mode: Mode) -> Option<&str> {
 }
 
 /// Writes `mode`'s update: its header when it changed, its rows into the mode's model, its Library
-/// and Inspector when they changed, then scrolls to a revealed release. A card
-/// staged since the last hop puts the list back at the top, as the webview's `clearList` does: the
-/// rows that come after it (another folder's, most often) start there, even when they replaced
-/// the card in the pending slot before this hop.
+/// and Inspector when they changed, then scrolls to a revealed release. A card that replaced the
+/// rows, or another folder's view, since the last hop puts the list back at the top, as the
+/// webview's `clearList` does: the rows that come after it start there, even when a later head
+/// replaced that one before this hop (`Update::to_top`).
 fn apply(app: &App, mode: Mode, update: Update) {
     let (rows, head) = match mode {
         Mode::Remux => (app.get_remux_rows(), app.get_remux_head()),
@@ -469,12 +469,18 @@ fn apply(app: &App, mode: Mode, update: Update) {
         }
     }
     if let Some(update) = update.inspector {
-        let inspector = map_inspector(update.view.as_ref(), mode);
+        let inspector = map_inspector(update.view.as_ref(), mode, &update.directory);
+        // Only remux has the subtitle section; its typed fields are written over the Inspector
+        // shown until now, which is set below.
         if let Some(subtitles) = update.subtitles {
             app.set_sub_ladder(ModelRc::new(VecModel::from(subtitles.ladder)));
             app.set_sub_options(ModelRc::new(VecModel::from(subtitles.options)));
             app.set_sub_values(ModelRc::new(VecModel::from(subtitles.values)));
-            write_form(app, &inspector);
+            write_form(app, &app.get_remux_inspector(), &inspector);
+        }
+        // No episode inspected: nothing typed is left to commit.
+        if mode == Mode::Remux && !inspector.shown {
+            app.set_sub_dirty(false);
         }
         match mode {
             Mode::Remux => app.set_remux_inspector(inspector),
@@ -487,11 +493,24 @@ fn apply(app: &App, mode: Mode, update: Update) {
             // the window's key scope takes it, so Esc and Ctrl+T still reach it. A reset drops
             // every row (every Run's rescan resets them); a patch hides a row the filter no longer
             // shows (a status change under To do, mid-run).
+            // A reorder resets them too: the moved episode's Move up / Move down takes the focus
+            // back as its new row is made, unless it is disabled or not made (scrolled out).
             Some(RowPatch::Reset(rows)) => {
-                let dropped = focused_row(&app.global::<Focus>().get_current(), mode).is_some();
+                let focus = app.global::<Focus>();
+                let current = focus.get_current();
+                let dropped = focused_row(&current, mode);
+                let follows = dropped.is_some_and(|id| {
+                    (current.starts_with("up:") || current.starts_with("down:"))
+                        && rows.iter().any(|row| row.id == id)
+                });
+                let dropped = dropped.is_some();
                 model.set_vec(rows);
+                app.invoke_unpin(mode);
                 if dropped {
                     app.invoke_focus_keys();
+                }
+                if follows {
+                    focus.set_follow_key(current);
                 }
             }
             Some(RowPatch::Rows(rows)) => {

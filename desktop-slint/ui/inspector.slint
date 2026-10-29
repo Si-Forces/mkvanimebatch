@@ -1,9 +1,9 @@
 // Redesign C's Episode Inspector (desktop-tauri/ui/index.html .insp, style.css) and the Library's
 // entries (.library-tree). Layout and bindings only: the host maps every text
 // (desktop-slint/src/inspector.rs) and does what the controls ask.
-import { ComboBox, LineEdit, ScrollView } from "std-widgets.slint";
+import { LineEdit, ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { Pressable, TipCard } from "focus.slint";
+import { Pressable, Select, TipCard } from "focus.slint";
 import { LinkButton, RowTone } from "queue.slint";
 import { SectionHead } from "settings.slint";
 
@@ -34,6 +34,8 @@ export struct Rung {
 export struct Inspector {
     // Whether a row is inspected; else the empty text shows.
     shown: bool,
+    // The episode: its folder, as the core names it (never shown), and its id in that folder.
+    directory: string,
     id: string,
     number: string,
     title: string,
@@ -126,6 +128,9 @@ component Crumbs inherits Rectangle {
             font-size: 12px;
             font-weight: self.last && !root.plain ? 600 : 400;
             wrap: word-wrap;
+            // A crumb with no space to break at wraps within the line, not past it.
+            min-width: 0px;
+            max-width: root.width;
             accessible-role: none;
         }
     }
@@ -293,9 +298,11 @@ export component InspectorPane inherits Rectangle {
                 font-weight: 700;
                 vertical-alignment: top;
             }
+            // Takes the header's width, with crumbs or without.
             VerticalLayout {
                 spacing: 4px;
                 alignment: start;
+                horizontal-stretch: 1;
                 Text {
                     text: root.insp.title;
                     color: Theme.fg;
@@ -342,6 +349,8 @@ export component InspectorPane inherits Rectangle {
                             font-family: "JetBrains Mono";
                             font-size: 12px;
                             wrap: word-wrap;
+                            // Not its longest word's width: a path with no space wraps anywhere.
+                            min-width: 0px;
                         }
                     }
                 }
@@ -515,13 +524,12 @@ export component InspectorPane inherits Rectangle {
                         }
                         HorizontalLayout {
                             spacing: 6px;
-                            ComboBox {
-                                min-width: 0px;
+                            Select {
                                 model: root.options;
                                 current-index <=> root.choice;
                                 enabled: !root.busy;
                                 accessible-label: "Assign subtitle";
-                                selected => { root.choose(self.current-index); }
+                                picked(index) => { root.choose(index); }
                             }
                             if root.insp.assigned: LinkButton {
                                 text: "Reset";
@@ -536,15 +544,14 @@ export component InspectorPane inherits Rectangle {
                                 spacing: 8px;
                                 Labelled {
                                     label: "Language";
-                                    ComboBox {
-                                        min-width: 0px;
+                                    Select {
                                         model: root.languages;
                                         current-index <=> root.language;
                                         enabled: !root.busy;
                                         accessible-label: "Language";
-                                        selected => {
+                                        picked(index) => {
                                             root.focus-custom = root.custom;
-                                            root.choose-language(self.current-index);
+                                            root.choose-language(index);
                                         }
                                     }
                                 }

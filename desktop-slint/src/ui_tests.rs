@@ -70,8 +70,9 @@ fn the_window_shows_published_values_and_its_title_bar_buttons_answer() {
     app.hide().unwrap();
 }
 
-/// Publications from another thread hop to the event loop, where the newest one is bound. The only
-/// test with a threaded platform: Slint keeps one event loop proxy per process.
+/// Publications from another thread hop to the event loop, where the newest one is bound, and so
+/// do a draft edit's answer and an Inspect's, through the window's wiring. The only test with a
+/// threaded platform: Slint keeps one event loop proxy per process.
 #[test]
 fn a_publication_from_another_thread_reaches_the_window() {
     slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
@@ -82,6 +83,15 @@ fn a_publication_from_another_thread_reaches_the_window() {
     .unwrap();
     let app = new_app();
     let publisher = SlintPublisher::new(&app);
+    // A draft edit sent, whose answer comes from the runtime's thread too.
+    let edits = publisher.edits();
+    let workers = crate::settings::DraftKey::Workers;
+    edits
+        .lock()
+        .unwrap()
+        .begin(Mode::Remux, workers, &Default::default());
+    let answered =
+        crate::settings::settle_later(app.as_weak(), Arc::clone(&edits), Mode::Remux, workers);
     let worker = std::thread::spawn(move || {
         for (seq, title) in [(1, "Older"), (2, "Frieren")] {
             let mut state = ViewState::new(None);
@@ -90,13 +100,69 @@ fn a_publication_from_another_thread_reaches_the_window() {
             state.busy = true;
             publisher.state(&state);
         }
-        // Queued behind the hop, so the loop applies it first.
+        answered(Ok(false));
+        // Queued behind the hops, so the loop applies them first.
         slint::quit_event_loop().unwrap();
     });
     slint::run_event_loop().unwrap();
     worker.join().unwrap();
     assert_eq!(app.get_remux_head().title, "Frieren");
     assert!(app.get_busy());
+    assert!(
+        !edits.lock().unwrap().has(Mode::Remux, workers),
+        "the answer settled the edit on the event loop"
+    );
+
+    // Through the window's wiring, each mode's pick is answered for that mode (pr-p2-review #1):
+    // `a` picked in Remux, then in Extract before Remux's answer; that answer drops Remux's mark
+    // and leaves Extract's pick marked.
+    use crate::intents::tests::{Episodes, NoJobs, NoSamples};
+    use mkv_desktop_core::actor::{Core, Ports};
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let publisher = SlintPublisher::new(&app);
+    let ports = Ports {
+        inspector: Episodes,
+        launcher: NoJobs,
+        sampler: NoSamples,
+    };
+    let core = Core::spawn(runtime.handle().clone(), publisher.clone(), ports);
+    crate::intents::wire(&app, core, runtime.handle().clone(), publisher);
+    app.set_mode(Mode::Remux);
+    app.set_remux_pending_inspect("a".into());
+    app.invoke_inspect("a".into());
+    app.set_mode(Mode::Extract);
+    app.set_extract_pending_inspect("a".into());
+    // The loop runs until a mark is dropped, or for 5 s.
+    let answered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (window, seen) = (app.as_weak(), Arc::clone(&answered));
+    let poll = std::thread::spawn(move || {
+        use std::sync::atomic::Ordering::Relaxed;
+        for _ in 0..500 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            if seen.load(Relaxed) {
+                return;
+            }
+            let seen = Arc::clone(&seen);
+            let _ = window.upgrade_in_event_loop(move |app| {
+                if app.get_remux_pending_inspect().is_empty()
+                    || app.get_extract_pending_inspect().is_empty()
+                {
+                    seen.store(true, Relaxed);
+                    slint::quit_event_loop().unwrap();
+                }
+            });
+        }
+        slint::quit_event_loop().unwrap();
+    });
+    slint::run_event_loop().unwrap();
+    poll.join().unwrap();
+    assert!(answered.load(std::sync::atomic::Ordering::Relaxed));
+    assert_eq!(app.get_remux_pending_inspect(), "", "Remux's answer");
+    assert_eq!(app.get_extract_marked(), "a", "Extract keeps its own pick");
 }
 
 /// A selected, queued row named `id`.
@@ -267,30 +333,83 @@ fn an_empty_queue_shows_the_empty_card_and_each_mode_its_own_list() {
     app.hide().unwrap();
 }
 
+/// A path too long for the list's head elides its lead; the leaf keeps the width it has under a
+/// short path.
+#[test]
+fn the_crumbs_elide_their_lead_before_the_leaf() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    app.show().unwrap();
+    // The lead's width and the leaf's, under `lead`.
+    let widths = |lead: &str| {
+        let mut state = ViewState::new(None);
+        state.remux.crumbs = vec![lead.into(), "Season 1".into()];
+        apply(&app, &state);
+        let lead = format!("{lead}{}", crate::queue::CRUMB_SEPARATOR);
+        (
+            only(&app, &lead).size().width,
+            only(&app, "Season 1").size().width,
+        )
+    };
+    let (_, fits) = widths("Anime");
+    let (lead, leaf) = widths(&["Anime"; 100].join(" "));
+    assert_eq!(leaf, fits, "the leaf keeps its width");
+    assert!(lead > 0.0 && lead + leaf < 920.0, "the lead elides: {lead}");
+    app.hide().unwrap();
+}
+
 /// A filter that matches no row says so; the rows stay in the model, hidden. One that matches
-/// hides the reorder buttons.
+/// hides the reorder buttons, from Tab too.
 #[test]
 fn a_filter_with_no_match_says_so() {
     i_slint_backend_testing::init_no_event_loop();
     let app = new_app();
     let publisher = SlintPublisher::new(&app);
     let mut state = ViewState::new(None);
-    state.remux.rows = Arc::new(vec![row("Frieren - 01.mkv")]);
+    state.remux.rows = Arc::new(vec![row("Frieren - 01.mkv"), row("Frieren - 02.mkv")]);
     state.remux.empty = None;
     publisher.show(&state);
     publisher.show_filter(Mode::Remux, QueueFilter::Failed);
     app.show().unwrap();
     assert_eq!(app.get_remux_head().filter, QueueFilter::Failed);
     only(&app, "No episodes match this filter.");
-    assert_eq!(app.get_remux_rows().row_count(), 1);
-    // A filter that shows the row: the order cannot change, so Move up / Move down are out of
-    // the accessibility tree, as style.css's `visibility: hidden` takes them out.
+    assert_eq!(app.get_remux_rows().row_count(), 2);
+    // A filter that shows the rows: the order cannot change, so Move up / Move down are out of
+    // the accessibility tree, as style.css's `visibility: hidden` takes them out, and Tab passes
+    // them.
     let movers = || ElementHandle::find_by_accessible_label(&app, "Move up").count();
+    // Every control Tab reaches, from the row's pick round to it again.
+    let walk = || {
+        let start = "pick:remux:Frieren - 01.mkv";
+        tab_to(&app, start);
+        let mut reached = vec![];
+        for _ in 0..400 {
+            key(&app, slint::platform::Key::Tab);
+            if focused(&app) == start {
+                return reached;
+            }
+            reached.push(focused(&app));
+        }
+        panic!("Tab never came back to {start:?}");
+    };
+    let reorder = |reached: &[String]| {
+        reached
+            .iter()
+            .any(|key| key.starts_with("up:") || key.starts_with("down:"))
+    };
     publisher.show_filter(Mode::Remux, QueueFilter::Todo);
     only(&app, "Frieren - 01.mkv");
+    assert!(!reorder(&walk()), "Tab passes them");
     assert_eq!(movers(), 0);
+    // Nor does a programmatic focus (a closing dialog's) reach them.
+    app.global::<Focus>()
+        .invoke_restore("up:remux:Frieren - 01.mkv".into());
+    frame(&app);
+    assert_eq!(focused(&app), "pick:remux:Frieren - 01.mkv");
     publisher.show_filter(Mode::Remux, QueueFilter::All);
-    assert_eq!(movers(), 1);
+    assert_eq!(movers(), 2);
+    assert!(reorder(&walk()), "Tab reaches them under All");
     app.hide().unwrap();
 }
 
@@ -552,6 +671,70 @@ fn the_library_reveals_a_release_at_the_top_of_its_list() {
     only(&app, "Done 0").invoke_accessible_default_action();
     frame(&app);
     assert_eq!(y("a00"), top);
+    app.hide().unwrap();
+}
+
+/// Another folder whose rows the filter hides every one of starts at the top once a chip shows
+/// them, not at the last folder's offset; so does a folder rescanned after its Scan failed card.
+#[test]
+fn rows_after_a_hidden_list_or_a_card_start_at_the_top() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    let publisher = SlintPublisher::new(&app);
+    // The last folder's rows all done, the next one's all to do.
+    let mut state = three_releases();
+    state.remux.rows = Arc::new(
+        state
+            .remux
+            .rows
+            .iter()
+            .map(|row| Row {
+                bucket: Some(Bucket::Done),
+                ..row.clone()
+            })
+            .collect(),
+    );
+    publisher.show(&state);
+    app.show().unwrap();
+    let y = |id: &str| {
+        only(&app, &format!("Include {id} in the batch"))
+            .absolute_position()
+            .y
+    };
+    let top = y("a00");
+    publisher.show_filter(Mode::Remux, QueueFilter::Done);
+    app.set_remux_scroll(-600.0);
+    frame(&app);
+    assert!(app.get_remux_scroll() < 0.0);
+
+    let mut other = three_releases();
+    other.seq = 1;
+    other.remux.manifest_rev = 2;
+    other.remux.directory = Some("/media/Other".into());
+    publisher.show(&other);
+    frame(&app);
+    // The chip clicked, then its rows mapped, as the host does.
+    only(&app, "All 0").invoke_accessible_default_action();
+    publisher.show_filter(Mode::Remux, QueueFilter::All);
+    frame(&app);
+    assert_eq!(y("a00"), top, "the new folder's first row heads the list");
+
+    // Scrolled, the Scan failed card, then the same folder's rows again.
+    app.set_remux_scroll(-600.0);
+    frame(&app);
+    other.seq = 2;
+    other.remux.scan = ScanView::Failed;
+    publisher.show(&other);
+    frame(&app);
+    only(&app, "Scan failed");
+    other.seq = 3;
+    other.remux.scan = ScanView::Idle;
+    other.remux.manifest_rev = 3;
+    other.remux.rows = Arc::new(other.remux.rows.to_vec());
+    publisher.show(&other);
+    frame(&app);
+    assert_eq!(y("a00"), top, "the rescanned rows start at the top");
     app.hide().unwrap();
 }
 
@@ -822,6 +1005,72 @@ fn a_typed_subtitle_field_is_committed_before_a_click_elsewhere() {
     only(&app, "Show - 02.mkv").invoke_accessible_default_action();
     assert_eq!(calls.borrow().last().unwrap(), "Show - 02.mkv");
     app.hide().unwrap();
+}
+
+/// Text typed into the subtitle fields and not committed stays with its episode: the same id in
+/// another folder (the core keeps a folder's queue while the next one scans) gets its own
+/// published fields, as does the episode once its assignment is cleared, and an Inspector that
+/// shows no episode leaves nothing to commit.
+#[test]
+fn typed_subtitle_text_stays_with_its_folders_episode() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    let publisher = SlintPublisher::new(&app);
+    let mut assigned = sample_view();
+    assigned.assignment = Some(mkv_core::request::TrackAssignment {
+        target_video: "Season 1/ep1.mkv".into(),
+        asset_path: "Season 1/ep1.ass".into(),
+        track_type: Default::default(),
+        language: Some("eng".into()),
+        title: Some("Dialogue".into()),
+        offset_ms: None,
+    });
+    let mut state = ViewState::new(None);
+    state.remux.directory = Some("/media/A".into());
+    state.remux.rows = Arc::new(vec![row("Season 1/ep1.mkv")]);
+    state.remux.empty = None;
+    state.remux.inspector = Some(assigned);
+    publisher.show(&state);
+    assert_eq!(app.get_sub_title(), "Dialogue");
+    let type_signs = || {
+        app.set_sub_title("Signs".into());
+        app.set_sub_offset("-500".into());
+        app.set_sub_dirty(true);
+    };
+    type_signs();
+    crate::inspector::restore_form(&app);
+    assert_eq!(app.get_sub_title(), "Signs", "kept on its own episode");
+
+    state.seq = 1;
+    state.remux.directory = Some("/media/B".into());
+    publisher.show(&state);
+    let fields = |app: &App| {
+        (
+            app.get_sub_title().to_string(),
+            app.get_sub_offset().to_string(),
+            app.get_sub_dirty(),
+        )
+    };
+    assert_eq!(fields(&app), ("Dialogue".into(), "".into(), false));
+    assert_eq!(app.get_remux_inspector().directory, "/media/B");
+
+    // The episode still shown, its assignment cleared: nothing is left to send the typing to.
+    type_signs();
+    state.seq = 2;
+    state.remux.inspector = Some(sample_view());
+    publisher.show(&state);
+    assert!(app.get_remux_inspector().shown);
+    assert_eq!(
+        fields(&app),
+        ("".into(), "".into(), false),
+        "no longer assigned"
+    );
+
+    type_signs();
+    state.seq = 3;
+    state.remux.inspector = None;
+    publisher.show(&state);
+    assert!(!app.get_sub_dirty(), "no episode, nothing to commit");
 }
 
 /// Reset removes itself when clicked: the window's keys keep working after it (Esc, Ctrl+T).
@@ -1186,6 +1435,283 @@ fn picking_the_custom_tag_focuses_the_tag_field() {
     app.hide().unwrap();
 }
 
+/// What a screen reader reads in an open select's list: the label of the entry selected in the
+/// one `list` whose entries mark a selection. The list's `accessible-delegate-focus` is not
+/// checked: the testing backend has no getter for it.
+fn heard(app: &App) -> Option<String> {
+    use i_slint_backend_testing::AccessibleRole;
+    i_slint_backend_testing::ElementQuery::from_root(app)
+        .match_descendants()
+        .match_accessible_role(AccessibleRole::List)
+        .find_all()
+        .into_iter()
+        .find_map(|list| {
+            let entries = list
+                .query_descendants()
+                .match_accessible_role(AccessibleRole::ListItem)
+                .find_all();
+            let selected = entries
+                .iter()
+                .find(|entry| entry.accessible_item_selected() == Some(true))?;
+            assert_eq!(list.accessible_item_count(), Some(entries.len()));
+            selected.accessible_label().map(String::from)
+        })
+}
+
+/// A held key: one press, `repeats` repeats, then the release.
+fn hold(app: &App, text: slint::platform::Key, repeats: usize) {
+    use slint::platform::WindowEvent;
+    let window = app.window();
+    window.dispatch_event(WindowEvent::KeyPressed { text: text.into() });
+    for _ in 0..repeats {
+        window.dispatch_event(WindowEvent::KeyPressRepeated { text: text.into() });
+    }
+    window.dispatch_event(WindowEvent::KeyReleased { text: text.into() });
+}
+
+/// The select labelled `label`.
+fn select_of(app: &App, label: &str) -> ElementHandle {
+    ElementHandle::find_by_accessible_label(app, label)
+        .find(|element| {
+            element.accessible_role() == Some(i_slint_backend_testing::AccessibleRole::Combobox)
+        })
+        .unwrap_or_else(|| panic!("a {label:?} select"))
+}
+
+/// Drives the select labelled `label`, in a pane that overflows, as a user who scrolls or arrows
+/// over it does, `sent` counting what it sent: a click opens its list and Esc closes it unchanged,
+/// the focus back on it; the wheel over it scrolls the pane and sends nothing, as the arrows do,
+/// closed or in its list, where a screen reader hears the entry highlighted; a held Return opens
+/// the list without picking, and picks the entry highlighted once, the select having the focus
+/// again, closed.
+fn a_select_sends_a_pick_alone(app: &App, label: &str, sent: &dyn Fn() -> usize) {
+    use slint::platform::{Key, WindowEvent};
+    let select = select_of(app, label);
+    let shown = select.accessible_value();
+    pointer(app, &select, true);
+    pointer(app, &select, false);
+    frame(app);
+    assert_eq!(
+        select.accessible_expanded(),
+        Some(true),
+        "{label}: a click opens it"
+    );
+    key(app, Key::Escape);
+    assert_eq!(
+        select.accessible_expanded(),
+        Some(false),
+        "{label}: Esc closes it"
+    );
+    assert_eq!(focused(app), label, "{label}: the focus is back on it");
+
+    let (at, size) = (select.absolute_position(), select.size());
+    let position = slint::LogicalPosition::new(at.x + size.width / 2.0, at.y + size.height / 2.0);
+    for delta_y in [-40.0, 40.0, -40.0, -40.0] {
+        app.window().dispatch_event(WindowEvent::PointerScrolled {
+            position,
+            delta_x: 0.0,
+            delta_y,
+        });
+    }
+    frame(app);
+    assert!(
+        select.absolute_position().y < at.y,
+        "{label}: the wheel over it scrolls its pane"
+    );
+    key(app, Key::DownArrow);
+    key(app, Key::UpArrow);
+    assert_eq!(sent(), 0, "{label}: the wheel and the arrows send nothing");
+    assert_eq!(select.accessible_value(), shown, "{label}: nor change it");
+
+    // Return held on the closed select: the list opens on the press, and its repeats pick nothing.
+    hold(app, Key::Return, 3);
+    frame(app);
+    assert_eq!(
+        select.accessible_expanded(),
+        Some(true),
+        "{label}: Return opens it"
+    );
+    assert_eq!(sent(), 0, "{label}: a held Return opens it without a pick");
+    assert_eq!(
+        heard(app).as_deref(),
+        shown.as_deref(),
+        "{label}: its list is read from the entry shown"
+    );
+    key(app, Key::DownArrow);
+    let next = heard(app);
+    assert_ne!(
+        next,
+        shown.as_deref().map(String::from),
+        "{label}: Down is heard"
+    );
+    for arrow in [Key::UpArrow, Key::DownArrow] {
+        key(app, arrow);
+    }
+    assert_eq!(heard(app), next);
+    assert_eq!(
+        sent(),
+        0,
+        "{label}: the arrows in its list move the highlight only"
+    );
+    // Return held in the list: the press picks, and the repeats do not open it again.
+    hold(app, Key::Return, 3);
+    frame(app);
+    assert_eq!(sent(), 1, "{label}: a pick sends once");
+    assert_eq!(select.accessible_expanded(), Some(false));
+    assert_eq!(
+        select.accessible_value().map(String::from),
+        next,
+        "{label}: the entry heard is picked"
+    );
+}
+
+/// The Inspector's selects change the Track Assignment on a pick alone: the wheel over them
+/// scrolls the pane, and the arrows in their list only move the highlight, as a WebKitGTK
+/// `<select>` does.
+#[test]
+fn the_inspector_selects_send_a_pick_alone() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    let mut assigned = sample_view();
+    assigned.assignment = Some(mkv_core::request::TrackAssignment {
+        target_video: "Season 1/ep1.mkv".into(),
+        asset_path: "Season 1/ep1.ass".into(),
+        track_type: Default::default(),
+        language: Some("eng".into()),
+        title: None,
+        offset_ms: None,
+    });
+    let mut state = ViewState::new(None);
+    state.remux.rows = Arc::new(vec![row("Show - 01.mkv")]);
+    state.remux.empty = None;
+    state.remux.inspector = Some(assigned);
+    apply(&app, &state);
+    app.show().unwrap();
+    frame(&app);
+    let calls = Rc::new(Cell::new(0));
+    let count = Rc::clone(&calls);
+    app.on_choose_subtitle(move |_| count.set(count.get() + 1));
+    let count = Rc::clone(&calls);
+    app.on_choose_language(move |_| count.set(count.get() + 1));
+
+    for label in ["Assign subtitle", "Language"] {
+        calls.set(0);
+        // The Inspector back at its top: each select scrolls it.
+        scroll(&app, 800.0, true);
+        frame(&app);
+        a_select_sends_a_pick_alone(&app, label, &|| calls.get());
+    }
+    app.hide().unwrap();
+}
+
+/// The sheet's bitrate select sends its edit on a pick alone, so the wheel over it never turns
+/// the preset custom; Esc in its list closes the list, not the sheet.
+#[test]
+fn the_bitrate_select_sends_a_pick_alone() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    apply(&app, &ViewState::new(None));
+    app.show().unwrap();
+    app.invoke_open_sheet(Mode::Remux, "".into());
+    frame(&app);
+    let calls = Rc::new(Cell::new(0));
+    let count = Rc::clone(&calls);
+    app.global::<Sheet>()
+        .on_committed(move |_| count.set(count.get() + 1));
+    a_select_sends_a_pick_alone(&app, "Opus bitrate", &|| calls.get());
+    assert!(app.get_sheet_open());
+    // The entry shown picked again sends nothing, as a `<select>` fires no change for it.
+    let edits = Rc::new(Cell::new(0));
+    let count = Rc::clone(&edits);
+    app.global::<Sheet>()
+        .on_edited(move |_| count.set(count.get() + 1));
+    let select = select_of(&app, "Opus bitrate");
+    key(&app, slint::platform::Key::Return);
+    frame(&app);
+    assert_eq!(select.accessible_expanded(), Some(true));
+    key(&app, slint::platform::Key::Return);
+    frame(&app);
+    assert_eq!(select.accessible_expanded(), Some(false));
+    assert_eq!(
+        (calls.get(), edits.get()),
+        (1, 0),
+        "a pick of the entry shown"
+    );
+    app.hide().unwrap();
+}
+
+/// A select locked while its list is open (the Inspector's, as a batch starts): a pick that lands
+/// before the list closes picks nothing, and the list closes.
+#[test]
+fn a_select_locked_while_open_closes_and_picks_nothing() {
+    use i_slint_backend_testing::AccessibleRole;
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    let mut state = ViewState::new(None);
+    state.remux.rows = Arc::new(vec![row("Show - 01.mkv")]);
+    state.remux.empty = None;
+    state.remux.inspector = Some(sample_view());
+    apply(&app, &state);
+    app.show().unwrap();
+    frame(&app);
+    let calls = Rc::new(Cell::new(0));
+    let count = Rc::clone(&calls);
+    app.on_choose_subtitle(move |_| count.set(count.get() + 1));
+    let select = select_of(&app, "Assign subtitle");
+    let shown = select.accessible_value();
+    pointer(&app, &select, true);
+    pointer(&app, &select, false);
+    frame(&app);
+    assert_eq!(select.accessible_expanded(), Some(true));
+    let other = i_slint_backend_testing::ElementQuery::from_root(&app)
+        .match_descendants()
+        .match_accessible_role(AccessibleRole::ListItem)
+        .find_all()
+        .into_iter()
+        .find(|entry| {
+            entry.accessible_item_selectable() == Some(true) && entry.accessible_label() != shown
+        })
+        .expect("an entry of its list not shown");
+    app.set_busy(true);
+    other.invoke_accessible_default_action();
+    assert_eq!(calls.get(), 0, "no pick while locked");
+    frame(&app);
+    assert_eq!(select.accessible_expanded(), Some(false), "the list closes");
+    assert_eq!(select.accessible_value(), shown);
+    app.hide().unwrap();
+}
+
+/// A select with no entry opens no list and picks nothing.
+#[test]
+fn a_select_with_no_entry_opens_nothing() {
+    use slint::platform::Key;
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    apply(&app, &ViewState::new(None));
+    app.set_bitrates(slint::ModelRc::default());
+    app.show().unwrap();
+    app.invoke_open_sheet(Mode::Remux, "".into());
+    frame(&app);
+    let calls = Rc::new(Cell::new(0));
+    let count = Rc::clone(&calls);
+    app.global::<Sheet>()
+        .on_committed(move |_| count.set(count.get() + 1));
+    let select = select_of(&app, "Opus bitrate");
+    select.invoke_accessible_default_action();
+    frame(&app);
+    assert_eq!(select.accessible_expanded(), Some(false));
+    for arrow in [Key::DownArrow, Key::Return] {
+        key(&app, arrow);
+    }
+    frame(&app);
+    assert_eq!(calls.get(), 0);
+    app.hide().unwrap();
+}
+
 /// WCAG relative luminance of an sRGB colour.
 fn luminance(color: Color) -> f64 {
     let channel = |value: u8| {
@@ -1264,6 +1790,7 @@ fn every_text_token_meets_wcag_aa_on_every_surface_in_both_themes() {
             ("head", theme.get_head()),
             ("float", theme.get_float()),
             ("glass-float", theme.get_glass_float()),
+            ("menu", theme.get_menu()),
         ];
         let tints = [
             ("field", theme.get_field()),
@@ -1620,7 +2147,17 @@ fn the_steppers_answer_the_pointer_the_keyboard_and_a_screen_reader() {
     tick();
     key(&app, slint::platform::Key::Return);
     key(&app, " ");
+    // A screen reader's step takes the focus first, as a press does: the field is left, so the
+    // stepped value is written into it.
+    app.invoke_open_sheet(Mode::Remux, "sub_offset".into());
+    for _ in 0..3 {
+        tick();
+    }
+    assert_eq!(sheet.get_focused(), "sub_offset");
     only(&app, "Decrease offset").invoke_accessible_default_action();
+    tick();
+    assert_eq!(sheet.get_focused(), "");
+    assert_eq!(focused(&app), "step:sub_offset-");
     let calls = calls.borrow();
     assert_eq!(calls[0], "press workers true");
     assert!(calls.contains(&"release".to_string()));
@@ -1784,6 +2321,21 @@ fn the_toggle_and_ctrl_t_flip_the_theme_and_save_the_choice() {
     });
     assert!(!theme.get_dark(), "one flip for a held Space");
     key(&app, Key::Space);
+    assert!(theme.get_dark());
+    // A held Return flips it once too: the window would flip at the key's repeat rate.
+    app.window().dispatch_event(WindowEvent::KeyPressed {
+        text: Key::Return.into(),
+    });
+    for _ in 0..3 {
+        app.window().dispatch_event(WindowEvent::KeyPressRepeated {
+            text: Key::Return.into(),
+        });
+    }
+    app.window().dispatch_event(WindowEvent::KeyReleased {
+        text: Key::Return.into(),
+    });
+    assert!(!theme.get_dark(), "one flip for a held Return");
+    key(&app, Key::Return);
     assert!(theme.get_dark());
 
     let ctrl_t = |app: &App| {
@@ -2100,12 +2652,12 @@ fn the_appearance_menu_picks_system_light_or_dark_and_saves_it() {
 }
 
 /// The `Focus` key of the custom control with the focus; empty for none of them.
-fn focused(app: &App) -> String {
+pub(crate) fn focused(app: &App) -> String {
     app.global::<Focus>().get_current().into()
 }
 
 /// Presses Tab until the custom control of `key` has the focus.
-fn tab_to(app: &App, key: &str) {
+pub(crate) fn tab_to(app: &App, key: &str) {
     for _ in 0..400 {
         self::key(app, slint::platform::Key::Tab);
         if focused(app) == key {
@@ -2377,6 +2929,35 @@ fn a_closing_dialog_or_sheet_gives_the_focus_back_to_the_control_that_had_it() {
     app.hide().unwrap();
 }
 
+/// A notice's hidden Cancel takes no focus: neither a restore nor Tab reaches it.
+#[test]
+fn a_notices_hidden_cancel_takes_no_focus() {
+    use mkv_anime_batch_slint_ui::DialogTexts;
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    SlintPublisher::new(&app).show(&three_releases());
+    app.show().unwrap();
+    let tick = || i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1));
+    app.set_dialog(DialogTexts {
+        title: "Notice".into(),
+        text: "Something happened".into(),
+        confirm: "OK".into(),
+        notice: true,
+    });
+    app.invoke_show_dialog();
+    tick();
+    assert_eq!(focused(&app), "OK");
+    app.global::<Focus>().invoke_restore("Cancel".into());
+    tick();
+    assert_eq!(focused(&app), "OK", "a restore passes it over");
+    for _ in 0..4 {
+        key(&app, slint::platform::Key::Tab);
+        assert_ne!(focused(&app), "Cancel", "Tab passes it over");
+    }
+    app.hide().unwrap();
+}
+
 /// The pinned release header: none at the top of the list, the folder's once its rows scroll
 /// under it, none while a release's first row shows its own header whole at the top, that
 /// release's once it scrolls on, and still that release's at the end of the list.
@@ -2448,6 +3029,12 @@ fn the_current_release_header_stays_pinned_at_the_top_of_the_list() {
         Some("S2 20"),
         "S3's four rows fit below S2's last"
     );
+    // S3 revealed again from there: the list stays at its end, and so does the header.
+    for _ in 0..2 {
+        app.invoke_reveal(Mode::Remux, 40);
+        frame(&app);
+        assert_eq!(pinned(&app).as_deref(), Some("S2 20"), "a repeat reveal");
+    }
 
     // Another folder, of one release (no headers), replaces every row instance: the old
     // folder's header must not stay pinned over its rows.
@@ -2515,5 +3102,171 @@ fn the_subtitle_ladder_is_a_list_of_its_rungs() {
         .map(|(index, rung)| (Some(index), rung.a11y.to_string()))
         .collect();
     assert_eq!(items, expected);
+    app.hide().unwrap();
+}
+
+/// Move down from the keyboard: the reorder resets the rows, and the moved episode's Move down
+/// takes the focus back as its new row is made, step after step. A row a rescan's reset drops
+/// still hands the focus to the window's keys.
+#[test]
+fn a_reorder_keeps_the_focus_on_the_moved_episodes_button() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    let mut state = ViewState::new(None);
+    let rows = vec![row("a"), row("b"), row("c")];
+    state.remux.rows = Arc::new(rows.clone());
+    state.remux.empty = None;
+    let publisher = SlintPublisher::new(&app);
+    publisher.show(&state);
+    app.show().unwrap();
+    frame(&app);
+    app.global::<Focus>().invoke_restore("down:remux:a".into());
+    frame(&app);
+    assert_eq!(focused(&app), "down:remux:a");
+
+    for (seq, order) in [(1, [1, 0, 2]), (2, [1, 2, 0])] {
+        let mut moved = state.clone();
+        moved.seq = seq;
+        moved.remux.rows = Arc::new(order.map(|i| rows[i].clone()).into());
+        publisher.show(&moved);
+        frame(&app);
+        assert_eq!(focused(&app), "down:remux:a", "after step {seq}");
+    }
+
+    // A rescan without the episode: the window's keys have the focus.
+    let mut rescan = state.clone();
+    rescan.seq = 3;
+    rescan.remux.rows = Arc::new(vec![row("b"), row("c")]);
+    publisher.show(&rescan);
+    frame(&app);
+    assert_eq!(focused(&app), "");
+    assert_window_keys(&app);
+    app.hide().unwrap();
+}
+
+/// A reorder that moves the episode out of view leaves the focus on the window's keys, and a
+/// later scroll that makes its row gives its Move down no focus.
+#[test]
+fn a_reorder_out_of_view_gives_a_row_made_later_no_focus() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    let mut state = ViewState::new(None);
+    let rows: Vec<Row> = (0..30).map(|i| row(&format!("r{i:02}"))).collect();
+    state.remux.rows = Arc::new(rows.clone());
+    state.remux.empty = None;
+    let publisher = SlintPublisher::new(&app);
+    publisher.show(&state);
+    app.show().unwrap();
+    frame(&app);
+    app.global::<Focus>()
+        .invoke_restore("down:remux:r00".into());
+    frame(&app);
+    assert_eq!(focused(&app), "down:remux:r00");
+
+    let mut moved = state.clone();
+    moved.seq = 1;
+    let mut order = rows[1..].to_vec();
+    order.push(rows[0].clone());
+    moved.remux.rows = Arc::new(order);
+    publisher.show(&moved);
+    frame(&app);
+    assert_eq!(focused(&app), "", "the moved row is out of view");
+
+    app.invoke_reveal(Mode::Remux, 29);
+    frame(&app);
+    assert_eq!(
+        focused(&app),
+        "",
+        "the row made by the scroll takes no focus"
+    );
+    assert_window_keys(&app);
+    app.hide().unwrap();
+}
+
+/// Reduce motion stops the spinning rings: a processing row's ring, drawn, turns with the
+/// animation tick, and stands still under Reduce motion, the window drawing no frame for it.
+#[test]
+fn reduce_motion_stops_the_spinning_rings() {
+    use std::time::Duration;
+    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
+        mock_time: true,
+        threading: false,
+        renderer_name: Some("software".into()),
+    })))
+    .unwrap();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(760.0, 520.0));
+    let mut state = ViewState::new(None);
+    state.remux.rows = Arc::new(vec![Row {
+        status: ItemStatus::Processing,
+        label: "Processing".into(),
+        tone: Tone::Info,
+        ..row("Show - 01.mkv")
+    }]);
+    state.remux.empty = None;
+    apply(&app, &state);
+    app.show().unwrap();
+    // A frame drawn once the effects settled: does it read the animation tick? The software
+    // renderer does not rotate, so the turn itself cannot be seen in the pixels.
+    let animated = || {
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(1000));
+        app.window().take_snapshot().unwrap();
+        app.window().has_active_animations()
+    };
+    assert!(animated(), "the ring spins");
+    app.global::<Theme>().set_reduce_motion(true);
+    assert!(!animated(), "the ring stands still");
+    app.hide().unwrap();
+}
+
+/// Ctrl+T held flips the theme once, and Ctrl+Shift+T (an upper-case "T") flips it too.
+#[test]
+fn ctrl_t_ignores_its_repeats_and_takes_an_upper_case_t() {
+    use slint::platform::{Key, WindowEvent};
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(760.0, 520.0));
+    apply(&app, &ViewState::new(None));
+    app.show().unwrap();
+    let flips = Rc::new(Cell::new(0));
+    let count = Rc::clone(&flips);
+    app.global::<Theme>()
+        .on_toggle(move || count.set(count.get() + 1));
+    let send = |event| app.window().dispatch_event(event);
+    send(WindowEvent::KeyPressed {
+        text: Key::Control.into(),
+    });
+    send(WindowEvent::KeyPressed { text: "t".into() });
+    for _ in 0..3 {
+        send(WindowEvent::KeyPressRepeated { text: "t".into() });
+    }
+    send(WindowEvent::KeyReleased { text: "t".into() });
+    assert_eq!(flips.get(), 1, "one flip for a held Ctrl+T");
+    key(&app, "T");
+    assert_eq!(flips.get(), 2, "an upper-case T flips it");
+    send(WindowEvent::KeyReleased {
+        text: Key::Control.into(),
+    });
+    app.hide().unwrap();
+}
+
+/// The Appearance button reports its menu open or closed, and a screen reader's expand opens
+/// it, as the Log toggle's does.
+#[test]
+fn the_appearance_button_reports_its_menu_expanded() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(760.0, 520.0));
+    apply(&app, &ViewState::new(None));
+    app.show().unwrap();
+    let button = appearance_button(&app);
+    assert_eq!(button.accessible_expandable(), Some(true));
+    assert_eq!(button.accessible_expanded(), Some(false));
+    button.invoke_accessible_expand_action();
+    assert!(app.get_appearance_open());
+    assert_eq!(button.accessible_expanded(), Some(true));
+    assert_eq!(focused(&app), "Appearance");
     app.hide().unwrap();
 }
