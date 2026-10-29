@@ -15,9 +15,8 @@ component TrafficLight inherits Pressable {
     // pointer press: a clicked button keeps the focus).
     in property <bool> lit;
 
-    // 16 px where the webview's .tl-btn is 14 px: the maintainer found 14 too small here.
-    width: 16px;
-    height: 16px;
+    width: 14px;
+    height: 14px;
     border-radius: self.width / 2;
     // The hovered light swells and brightens (.tl-btn:hover), with style.css's overshoot ease;
     // the swell stays off under Reduce motion, as its prefers-reduced-motion rule says.
@@ -29,18 +28,17 @@ component TrafficLight inherits Pressable {
     border-color: #00000038;
     cursor: default;
 
-    // The 8x8 glyph drawn at 10 px with round caps (.tl-btn svg's stroke-linecap), so it fills
-    // the 16 px light as the webview's 8 px glyph fills its 14 px one.
+    // The 8x8 glyph with round caps (.tl-btn svg's stroke-linecap).
     Path {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
-        width: 10px;
-        height: 10px;
+        width: 8px;
+        height: 8px;
         viewbox-width: 8;
         viewbox-height: 8;
         commands: root.glyph;
         stroke: root.glyph-color;
-        stroke-width: 2px;
+        stroke-width: 1.8px;
         stroke-line-cap: round;
         opacity: root.lit ? 1 : 0;
         animate opacity { duration: 120ms; easing: ease; }
@@ -257,7 +255,7 @@ export component TitleBar inherits Rectangle {
         x: 14px;
         y: (parent.height - self.height) / 2;
         width: self.preferred-width;
-        height: 16px;
+        height: 14px;
         spacing: 8px;
         property <bool> lit: close-button.hovered || minimize-button.hovered || maximize-button.hovered
             || close-button.ring || minimize-button.ring || maximize-button.ring;
