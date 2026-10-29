@@ -243,6 +243,16 @@ export component TitleBar inherits Rectangle {
         TouchArea {
             double-clicked => { root.toggle-maximize(); }
         }
+        // The lights' group as one hover zone, gaps included (.traffic-lights:hover), so the
+        // glyphs stay lit while the pointer moves from one light to the next. Inside the move
+        // area, which keeps watching a press its children accept and moves the window on a drag:
+        // a drag from a gap still moves it, as the webview's whole header does.
+        lights-hover := TouchArea {
+            x: lights.x;
+            y: lights.y;
+            width: lights.width;
+            height: lights.height;
+        }
     }
 
     Rectangle {
@@ -251,13 +261,14 @@ export component TitleBar inherits Rectangle {
         background: Theme.line;
     }
 
-    HorizontalLayout {
+    lights := HorizontalLayout {
         x: 14px;
         y: (parent.height - self.height) / 2;
         width: self.preferred-width;
         height: 14px;
         spacing: 8px;
-        property <bool> lit: close-button.hovered || minimize-button.hovered || maximize-button.hovered
+        property <bool> lit: lights-hover.has-hover || close-button.hovered
+            || minimize-button.hovered || maximize-button.hovered
             || close-button.ring || minimize-button.ring || maximize-button.ring;
 
         close-button := TrafficLight {
