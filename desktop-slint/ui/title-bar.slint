@@ -18,23 +18,38 @@ component TrafficLight inherits Pressable {
     width: 14px;
     height: 14px;
     border-radius: self.width / 2;
-    background: self.hovered ? fill.brighter(0.12) : fill;
-    border-width: 0.5px;
-    border-color: #00000038;
     cursor: default;
 
-    Path {
-        x: (parent.width - self.width) / 2;
-        y: (parent.height - self.height) / 2;
-        width: 8px;
-        height: 8px;
-        viewbox-width: 8;
-        viewbox-height: 8;
-        commands: root.glyph;
-        stroke: root.glyph-color;
-        stroke-width: 1.8px;
-        opacity: root.lit ? 1 : 0;
-        accessible-role: none;
+    // The light itself, a child: Slint applies a transform to a component's root only when the
+    // component happens to be inlined (lower_transform_properties), so the swell lives here.
+    Rectangle {
+        border-radius: self.width / 2;
+        // The hovered light swells and brightens (.tl-btn:hover), with style.css's
+        // cubic-bezier(.16, 1, .3, 1), a strong ease-out; the swell stays off under Reduce
+        // motion, as its prefers-reduced-motion rule says.
+        transform-scale: root.hovered && !Theme.reduce-motion ? 115% : 100%;
+        animate transform-scale { duration: 150ms; easing: cubic-bezier(0.16, 1, 0.3, 1); }
+        background: root.hovered ? root.fill.brighter(0.12) : root.fill;
+        animate background { duration: 150ms; easing: ease; }
+        border-width: 0.5px;
+        border-color: #00000038;
+
+        // The 8x8 glyph with round caps, fading as .tl-btn svg's opacity transition.
+        glyph-path := Path {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 8px;
+            height: 8px;
+            viewbox-width: 8;
+            viewbox-height: 8;
+            commands: root.glyph;
+            stroke: root.glyph-color;
+            stroke-width: 1.8px;
+            stroke-line-cap: round;
+            opacity: root.lit ? 1 : 0;
+            animate opacity { duration: 120ms; easing: ease; }
+            accessible-role: none;
+        }
     }
 }
 
@@ -202,7 +217,7 @@ export component AppearanceMenu inherits GlassPane {
                 }
             }
             reduce-motion := CheckBox {
-                text: "Reduce motion (no spinning)";
+                text: "Reduce motion (fewer animations)";
                 checked: Theme.reduce-motion;
                 toggled => {
                     Theme.reduce-motion = self.checked;
@@ -235,6 +250,21 @@ export component TitleBar inherits Rectangle {
         TouchArea {
             double-clicked => { root.toggle-maximize(); }
         }
+        // The lights' group as one hover zone, gaps included (.traffic-lights:hover), so the
+        // glyphs stay lit while the pointer moves from one light to the next. Inside the move
+        // area, which keeps watching a press its children accept and moves the window on a drag:
+        // a drag from a gap still moves it, as the webview's whole header does. Placed with
+        // `lights`' TitleBar coordinates, which holds while the move area fills the bar from
+        // its corner (no x, y or size of its own).
+        lights-hover := TouchArea {
+            x: lights.x;
+            y: lights.y;
+            width: lights.width;
+            height: lights.height;
+            // It takes the presses in the gaps, so a double-click there maximizes as the bar
+            // around it does.
+            double-clicked => { root.toggle-maximize(); }
+        }
     }
 
     Rectangle {
@@ -243,13 +273,16 @@ export component TitleBar inherits Rectangle {
         background: Theme.line;
     }
 
-    HorizontalLayout {
+    lights := HorizontalLayout {
         x: 14px;
         y: (parent.height - self.height) / 2;
         width: self.preferred-width;
         height: 14px;
         spacing: 8px;
-        property <bool> lit: close-button.hovered || minimize-button.hovered || maximize-button.hovered
+        // The lights sit in front of the hover zone, which loses its hover while the pointer is
+        // on one; their own hover keeps the glyphs lit there (both change in the same event).
+        property <bool> lit: lights-hover.has-hover || close-button.hovered
+            || minimize-button.hovered || maximize-button.hovered
             || close-button.ring || minimize-button.ring || maximize-button.ring;
 
         close-button := TrafficLight {

@@ -29,7 +29,7 @@ export global Theme {
     callback pick(scheme: ColorScheme);
 
     // The in-app reduced effects (Q105), for style.css's prefers-reduced-transparency and
-    // prefers-reduced-motion: solid panes, no glass; no spinning. The host loads and saves them;
+    // prefers-reduced-motion: solid panes, no glass; no spinning, no swell. The host loads and saves them;
     // `effects-changed` says the Appearance menu's checkboxes changed one.
     in-out property <bool> reduce-transparency;
     in-out property <bool> reduce-motion;
