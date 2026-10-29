@@ -426,8 +426,12 @@ impl ModeList {
         true
     }
 
-    /// Stages `head`; a card that replaces the rows puts the list back at the top, once.
+    /// Stages `head`; a card that replaces the rows puts the list back at the top, once. A card
+    /// drops a reveal not shown yet: the rows it would scroll to are not shown.
     fn set_head(&mut self, head: QueueHead) {
+        if head.card_shown {
+            self.cancel_reveal();
+        }
         self.to_top |= head.card_shown && self.rows_shown;
         self.rows_shown = !head.card_shown;
         self.head = Some(head);
@@ -776,7 +780,7 @@ mod tests {
     }
 
     /// A Library reveal scrolls once its rows are staged, unless a filter click, the folder's own
-    /// entry or another folder came after it.
+    /// entry, a card or another folder came after it.
     #[test]
     fn a_later_filter_root_click_or_folder_cancels_a_reveal() {
         let mut view = ViewState::new(None).remux;
@@ -785,6 +789,7 @@ mod tests {
             row("b", "S2", Some(Bucket::Todo)),
         ]);
         view.directory = Some("/a".into());
+        view.empty = None;
         let mut list = ModeList::new(Mode::Remux);
         list.put(view.clone(), None);
         list.take();
@@ -801,6 +806,15 @@ mod tests {
             None
         );
         assert_eq!(revealed(&|list, _| list.cancel_reveal()), None);
+        // A card of another folder, scanning, while the view still names this one.
+        let scanning = |list: &mut ModeList, view: &ModeView| {
+            let mut card = view.clone();
+            card.scan = ScanView::Scanning {
+                directory: "/c".into(),
+            };
+            list.put(card, None);
+        };
+        assert_eq!(revealed(&scanning), None);
         let other_folder = |list: &mut ModeList, view: &ModeView| {
             let mut other = view.clone();
             other.directory = Some("/b".into());

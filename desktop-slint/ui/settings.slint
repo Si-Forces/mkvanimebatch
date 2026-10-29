@@ -692,9 +692,12 @@ export component SettingsSheet inherits GlassPane {
                                                 Sheet.reveal(self.absolute-position.y, self.height);
                                             }
                                         }
-                                        picked => {
-                                            Sheet.edited("bitrate");
-                                            Sheet.committed("bitrate");
+                                        // The entry shown picked again sends nothing.
+                                        picked(index, changed) => {
+                                            if changed {
+                                                Sheet.edited("bitrate");
+                                                Sheet.committed("bitrate");
+                                            }
                                         }
                                     }
                                 }

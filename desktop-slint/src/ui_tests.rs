@@ -402,6 +402,11 @@ fn a_filter_with_no_match_says_so() {
     only(&app, "Frieren - 01.mkv");
     assert!(!reorder(&walk()), "Tab passes them");
     assert_eq!(movers(), 0);
+    // Nor does a programmatic focus (a closing dialog's) reach them.
+    app.global::<Focus>()
+        .invoke_restore("up:remux:Frieren - 01.mkv".into());
+    frame(&app);
+    assert_eq!(focused(&app), "pick:remux:Frieren - 01.mkv");
     publisher.show_filter(Mode::Remux, QueueFilter::All);
     assert_eq!(movers(), 2);
     assert!(reorder(&walk()), "Tab reaches them under All");
@@ -666,6 +671,70 @@ fn the_library_reveals_a_release_at_the_top_of_its_list() {
     only(&app, "Done 0").invoke_accessible_default_action();
     frame(&app);
     assert_eq!(y("a00"), top);
+    app.hide().unwrap();
+}
+
+/// Another folder whose rows the filter hides every one of starts at the top once a chip shows
+/// them, not at the last folder's offset; so does a folder rescanned after its Scan failed card.
+#[test]
+fn rows_after_a_hidden_list_or_a_card_start_at_the_top() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    let publisher = SlintPublisher::new(&app);
+    // The last folder's rows all done, the next one's all to do.
+    let mut state = three_releases();
+    state.remux.rows = Arc::new(
+        state
+            .remux
+            .rows
+            .iter()
+            .map(|row| Row {
+                bucket: Some(Bucket::Done),
+                ..row.clone()
+            })
+            .collect(),
+    );
+    publisher.show(&state);
+    app.show().unwrap();
+    let y = |id: &str| {
+        only(&app, &format!("Include {id} in the batch"))
+            .absolute_position()
+            .y
+    };
+    let top = y("a00");
+    publisher.show_filter(Mode::Remux, QueueFilter::Done);
+    app.set_remux_scroll(-600.0);
+    frame(&app);
+    assert!(app.get_remux_scroll() < 0.0);
+
+    let mut other = three_releases();
+    other.seq = 1;
+    other.remux.manifest_rev = 2;
+    other.remux.directory = Some("/media/Other".into());
+    publisher.show(&other);
+    frame(&app);
+    // The chip clicked, then its rows mapped, as the host does.
+    only(&app, "All 0").invoke_accessible_default_action();
+    publisher.show_filter(Mode::Remux, QueueFilter::All);
+    frame(&app);
+    assert_eq!(y("a00"), top, "the new folder's first row heads the list");
+
+    // Scrolled, the Scan failed card, then the same folder's rows again.
+    app.set_remux_scroll(-600.0);
+    frame(&app);
+    other.seq = 2;
+    other.remux.scan = ScanView::Failed;
+    publisher.show(&other);
+    frame(&app);
+    only(&app, "Scan failed");
+    other.seq = 3;
+    other.remux.scan = ScanView::Idle;
+    other.remux.manifest_rev = 3;
+    other.remux.rows = Arc::new(other.remux.rows.to_vec());
+    publisher.show(&other);
+    frame(&app);
+    assert_eq!(y("a00"), top, "the rescanned rows start at the top");
     app.hide().unwrap();
 }
 
@@ -1399,6 +1468,15 @@ fn hold(app: &App, text: slint::platform::Key, repeats: usize) {
     window.dispatch_event(WindowEvent::KeyReleased { text: text.into() });
 }
 
+/// The select labelled `label`.
+fn select_of(app: &App, label: &str) -> ElementHandle {
+    ElementHandle::find_by_accessible_label(app, label)
+        .find(|element| {
+            element.accessible_role() == Some(i_slint_backend_testing::AccessibleRole::Combobox)
+        })
+        .unwrap_or_else(|| panic!("a {label:?} select"))
+}
+
 /// Drives the select labelled `label`, in a pane that overflows, as a user who scrolls or arrows
 /// over it does, `sent` counting what it sent: a click opens its list and Esc closes it unchanged,
 /// the focus back on it; the wheel over it scrolls the pane and sends nothing, as the arrows do,
@@ -1407,11 +1485,7 @@ fn hold(app: &App, text: slint::platform::Key, repeats: usize) {
 /// again, closed.
 fn a_select_sends_a_pick_alone(app: &App, label: &str, sent: &dyn Fn() -> usize) {
     use slint::platform::{Key, WindowEvent};
-    let select = ElementHandle::find_by_accessible_label(app, label)
-        .find(|element| {
-            element.accessible_role() == Some(i_slint_backend_testing::AccessibleRole::Combobox)
-        })
-        .unwrap_or_else(|| panic!("a {label:?} select"));
+    let select = select_of(app, label);
     let shown = select.accessible_value();
     pointer(app, &select, true);
     pointer(app, &select, false);
@@ -1547,6 +1621,93 @@ fn the_bitrate_select_sends_a_pick_alone() {
         .on_committed(move |_| count.set(count.get() + 1));
     a_select_sends_a_pick_alone(&app, "Opus bitrate", &|| calls.get());
     assert!(app.get_sheet_open());
+    // The entry shown picked again sends nothing, as a `<select>` fires no change for it.
+    let edits = Rc::new(Cell::new(0));
+    let count = Rc::clone(&edits);
+    app.global::<Sheet>()
+        .on_edited(move |_| count.set(count.get() + 1));
+    let select = select_of(&app, "Opus bitrate");
+    key(&app, slint::platform::Key::Return);
+    frame(&app);
+    assert_eq!(select.accessible_expanded(), Some(true));
+    key(&app, slint::platform::Key::Return);
+    frame(&app);
+    assert_eq!(select.accessible_expanded(), Some(false));
+    assert_eq!(
+        (calls.get(), edits.get()),
+        (1, 0),
+        "a pick of the entry shown"
+    );
+    app.hide().unwrap();
+}
+
+/// A select locked while its list is open (the Inspector's, as a batch starts): a pick that lands
+/// before the list closes picks nothing, and the list closes.
+#[test]
+fn a_select_locked_while_open_closes_and_picks_nothing() {
+    use i_slint_backend_testing::AccessibleRole;
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    let mut state = ViewState::new(None);
+    state.remux.rows = Arc::new(vec![row("Show - 01.mkv")]);
+    state.remux.empty = None;
+    state.remux.inspector = Some(sample_view());
+    apply(&app, &state);
+    app.show().unwrap();
+    frame(&app);
+    let calls = Rc::new(Cell::new(0));
+    let count = Rc::clone(&calls);
+    app.on_choose_subtitle(move |_| count.set(count.get() + 1));
+    let select = select_of(&app, "Assign subtitle");
+    let shown = select.accessible_value();
+    pointer(&app, &select, true);
+    pointer(&app, &select, false);
+    frame(&app);
+    assert_eq!(select.accessible_expanded(), Some(true));
+    let other = i_slint_backend_testing::ElementQuery::from_root(&app)
+        .match_descendants()
+        .match_accessible_role(AccessibleRole::ListItem)
+        .find_all()
+        .into_iter()
+        .find(|entry| {
+            entry.accessible_item_selectable() == Some(true) && entry.accessible_label() != shown
+        })
+        .expect("an entry of its list not shown");
+    app.set_busy(true);
+    other.invoke_accessible_default_action();
+    assert_eq!(calls.get(), 0, "no pick while locked");
+    frame(&app);
+    assert_eq!(select.accessible_expanded(), Some(false), "the list closes");
+    assert_eq!(select.accessible_value(), shown);
+    app.hide().unwrap();
+}
+
+/// A select with no entry opens no list and picks nothing.
+#[test]
+fn a_select_with_no_entry_opens_nothing() {
+    use slint::platform::Key;
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    apply(&app, &ViewState::new(None));
+    app.set_bitrates(slint::ModelRc::default());
+    app.show().unwrap();
+    app.invoke_open_sheet(Mode::Remux, "".into());
+    frame(&app);
+    let calls = Rc::new(Cell::new(0));
+    let count = Rc::clone(&calls);
+    app.global::<Sheet>()
+        .on_committed(move |_| count.set(count.get() + 1));
+    let select = select_of(&app, "Opus bitrate");
+    select.invoke_accessible_default_action();
+    frame(&app);
+    assert_eq!(select.accessible_expanded(), Some(false));
+    for arrow in [Key::DownArrow, Key::Return] {
+        key(&app, arrow);
+    }
+    frame(&app);
+    assert_eq!(calls.get(), 0);
     app.hide().unwrap();
 }
 
@@ -2867,6 +3028,12 @@ fn the_current_release_header_stays_pinned_at_the_top_of_the_list() {
         Some("S2 20"),
         "S3's four rows fit below S2's last"
     );
+    // S3 revealed again from there: the list stays at its end, and so does the header.
+    for _ in 0..2 {
+        app.invoke_reveal(Mode::Remux, 40);
+        frame(&app);
+        assert_eq!(pinned(&app).as_deref(), Some("S2 20"), "a repeat reveal");
+    }
 
     // Another folder, of one release (no headers), replaces every row instance: the old
     // folder's header must not stay pinned over its rows.
