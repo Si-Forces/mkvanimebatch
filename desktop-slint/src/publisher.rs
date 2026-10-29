@@ -429,10 +429,10 @@ fn focused_row(current: &str, mode: Mode) -> Option<&str> {
 }
 
 /// Writes `mode`'s update: its header when it changed, its rows into the mode's model, its Library
-/// and Inspector when they changed, then scrolls to a revealed release. A card
-/// staged since the last hop puts the list back at the top, as the webview's `clearList` does: the
-/// rows that come after it (another folder's, most often) start there, even when they replaced
-/// the card in the pending slot before this hop.
+/// and Inspector when they changed, then scrolls to a revealed release. A card that replaced the
+/// rows, or another folder's view, since the last hop puts the list back at the top, as the
+/// webview's `clearList` does: the rows that come after it start there, even when a later head
+/// replaced that one before this hop (`Update::to_top`).
 fn apply(app: &App, mode: Mode, update: Update) {
     let (rows, head) = match mode {
         Mode::Remux => (app.get_remux_rows(), app.get_remux_head()),

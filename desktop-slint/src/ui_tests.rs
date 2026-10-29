@@ -71,8 +71,8 @@ fn the_window_shows_published_values_and_its_title_bar_buttons_answer() {
 }
 
 /// Publications from another thread hop to the event loop, where the newest one is bound, and so
-/// does a draft edit's answer. The only test with a threaded platform: Slint keeps one event loop
-/// proxy per process.
+/// do a draft edit's answer and an Inspect's, through the window's wiring. The only test with a
+/// threaded platform: Slint keeps one event loop proxy per process.
 #[test]
 fn a_publication_from_another_thread_reaches_the_window() {
     slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
@@ -112,6 +112,57 @@ fn a_publication_from_another_thread_reaches_the_window() {
         !edits.lock().unwrap().has(Mode::Remux, workers),
         "the answer settled the edit on the event loop"
     );
+
+    // Through the window's wiring, each mode's pick is answered for that mode (pr-p2-review #1):
+    // `a` picked in Remux, then in Extract before Remux's answer; that answer drops Remux's mark
+    // and leaves Extract's pick marked.
+    use crate::intents::tests::{Episodes, NoJobs, NoSamples};
+    use mkv_desktop_core::actor::{Core, Ports};
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let publisher = SlintPublisher::new(&app);
+    let ports = Ports {
+        inspector: Episodes,
+        launcher: NoJobs,
+        sampler: NoSamples,
+    };
+    let core = Core::spawn(runtime.handle().clone(), publisher.clone(), ports);
+    crate::intents::wire(&app, core, runtime.handle().clone(), publisher);
+    app.set_mode(Mode::Remux);
+    app.set_remux_pending_inspect("a".into());
+    app.invoke_inspect("a".into());
+    app.set_mode(Mode::Extract);
+    app.set_extract_pending_inspect("a".into());
+    // The loop runs until a mark is dropped, or for 5 s.
+    let answered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (window, seen) = (app.as_weak(), Arc::clone(&answered));
+    let poll = std::thread::spawn(move || {
+        use std::sync::atomic::Ordering::Relaxed;
+        for _ in 0..500 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            if seen.load(Relaxed) {
+                return;
+            }
+            let seen = Arc::clone(&seen);
+            let _ = window.upgrade_in_event_loop(move |app| {
+                if app.get_remux_pending_inspect().is_empty()
+                    || app.get_extract_pending_inspect().is_empty()
+                {
+                    seen.store(true, Relaxed);
+                    slint::quit_event_loop().unwrap();
+                }
+            });
+        }
+        slint::quit_event_loop().unwrap();
+    });
+    slint::run_event_loop().unwrap();
+    poll.join().unwrap();
+    assert!(answered.load(std::sync::atomic::Ordering::Relaxed));
+    assert_eq!(app.get_remux_pending_inspect(), "", "Remux's answer");
+    assert_eq!(app.get_extract_marked(), "a", "Extract keeps its own pick");
 }
 
 /// A selected, queued row named `id`.
@@ -282,30 +333,78 @@ fn an_empty_queue_shows_the_empty_card_and_each_mode_its_own_list() {
     app.hide().unwrap();
 }
 
+/// A path too long for the list's head elides its lead; the leaf keeps the width it has under a
+/// short path.
+#[test]
+fn the_crumbs_elide_their_lead_before_the_leaf() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    app.show().unwrap();
+    // The lead's width and the leaf's, under `lead`.
+    let widths = |lead: &str| {
+        let mut state = ViewState::new(None);
+        state.remux.crumbs = vec![lead.into(), "Season 1".into()];
+        apply(&app, &state);
+        let lead = format!("{lead}{}", crate::queue::CRUMB_SEPARATOR);
+        (
+            only(&app, &lead).size().width,
+            only(&app, "Season 1").size().width,
+        )
+    };
+    let (_, fits) = widths("Anime");
+    let (lead, leaf) = widths(&["Anime"; 100].join(" "));
+    assert_eq!(leaf, fits, "the leaf keeps its width");
+    assert!(lead > 0.0 && lead + leaf < 920.0, "the lead elides: {lead}");
+    app.hide().unwrap();
+}
+
 /// A filter that matches no row says so; the rows stay in the model, hidden. One that matches
-/// hides the reorder buttons.
+/// hides the reorder buttons, from Tab too.
 #[test]
 fn a_filter_with_no_match_says_so() {
     i_slint_backend_testing::init_no_event_loop();
     let app = new_app();
     let publisher = SlintPublisher::new(&app);
     let mut state = ViewState::new(None);
-    state.remux.rows = Arc::new(vec![row("Frieren - 01.mkv")]);
+    state.remux.rows = Arc::new(vec![row("Frieren - 01.mkv"), row("Frieren - 02.mkv")]);
     state.remux.empty = None;
     publisher.show(&state);
     publisher.show_filter(Mode::Remux, QueueFilter::Failed);
     app.show().unwrap();
     assert_eq!(app.get_remux_head().filter, QueueFilter::Failed);
     only(&app, "No episodes match this filter.");
-    assert_eq!(app.get_remux_rows().row_count(), 1);
-    // A filter that shows the row: the order cannot change, so Move up / Move down are out of
-    // the accessibility tree, as style.css's `visibility: hidden` takes them out.
+    assert_eq!(app.get_remux_rows().row_count(), 2);
+    // A filter that shows the rows: the order cannot change, so Move up / Move down are out of
+    // the accessibility tree, as style.css's `visibility: hidden` takes them out, and Tab passes
+    // them.
     let movers = || ElementHandle::find_by_accessible_label(&app, "Move up").count();
+    // Every control Tab reaches, from the row's pick round to it again.
+    let walk = || {
+        let start = "pick:remux:Frieren - 01.mkv";
+        tab_to(&app, start);
+        let mut reached = vec![];
+        for _ in 0..400 {
+            key(&app, slint::platform::Key::Tab);
+            if focused(&app) == start {
+                return reached;
+            }
+            reached.push(focused(&app));
+        }
+        panic!("Tab never came back to {start:?}");
+    };
+    let reorder = |reached: &[String]| {
+        reached
+            .iter()
+            .any(|key| key.starts_with("up:") || key.starts_with("down:"))
+    };
     publisher.show_filter(Mode::Remux, QueueFilter::Todo);
     only(&app, "Frieren - 01.mkv");
+    assert!(!reorder(&walk()), "Tab passes them");
     assert_eq!(movers(), 0);
     publisher.show_filter(Mode::Remux, QueueFilter::All);
-    assert_eq!(movers(), 1);
+    assert_eq!(movers(), 2);
+    assert!(reorder(&walk()), "Tab reaches them under All");
     app.hide().unwrap();
 }
 

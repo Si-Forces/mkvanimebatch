@@ -21,16 +21,15 @@ pub(crate) fn pipeline(mode: Mode) -> PipelineMode {
     }
 }
 
-/// The mode the window shows at boot: the extract view when a start or a job is in extract.
-pub(crate) fn boot_mode(state: &ViewState) -> Mode {
+/// Shows the extract view at boot when a start or a job is in extract; never switches to remux, so
+/// a click on Extract before the core's answer stays (app.js).
+pub(crate) fn show_boot_mode(app: &App, state: &ViewState) {
     let extract = match state.run.mode {
         Some(mode) => mode == PipelineMode::Extract,
         None => state.job.as_ref().is_some_and(|job| job.mode == "extract"),
     };
     if extract {
-        Mode::Extract
-    } else {
-        Mode::Remux
+        app.set_mode(Mode::Extract);
     }
 }
 
@@ -86,15 +85,14 @@ impl Intents {
 /// that list is still pending. The other mode's list keeps its own (queue-view.js keeps one per
 /// list).
 pub(crate) fn inspect_answered(app: &App, mode: Mode, picked: &str) {
-    let pending = match mode {
-        Mode::Remux => app.get_remux_pending_inspect(),
-        Mode::Extract => app.get_extract_pending_inspect(),
-    };
-    if pending == picked {
-        match mode {
-            Mode::Remux => app.set_remux_pending_inspect("".into()),
-            Mode::Extract => app.set_extract_pending_inspect("".into()),
+    match mode {
+        Mode::Remux if app.get_remux_pending_inspect() == picked => {
+            app.set_remux_pending_inspect("".into());
         }
+        Mode::Extract if app.get_extract_pending_inspect() == picked => {
+            app.set_extract_pending_inspect("".into());
+        }
+        Mode::Remux | Mode::Extract => {}
     }
 }
 
@@ -583,9 +581,18 @@ pub(crate) mod tests {
 
     #[test]
     fn boot_shows_the_extract_view_while_extract_holds_the_batch() {
+        i_slint_backend_testing::init_no_event_loop();
+        let app = App::new().unwrap();
         let mut state = ViewState::new(None);
-        assert_eq!(boot_mode(&state), Mode::Remux);
+        show_boot_mode(&app, &state);
+        assert_eq!(app.get_mode(), Mode::Remux);
+        // A click on Extract before the answer stays.
+        app.set_mode(Mode::Extract);
+        show_boot_mode(&app, &state);
+        assert_eq!(app.get_mode(), Mode::Extract);
+        app.set_mode(Mode::Remux);
         state.run.mode = Some(PipelineMode::Extract);
-        assert_eq!(boot_mode(&state), Mode::Extract);
+        show_boot_mode(&app, &state);
+        assert_eq!(app.get_mode(), Mode::Extract);
     }
 }
