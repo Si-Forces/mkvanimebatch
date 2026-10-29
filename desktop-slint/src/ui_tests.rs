@@ -70,6 +70,67 @@ fn the_window_shows_published_values_and_its_title_bar_buttons_answer() {
     app.hide().unwrap();
 }
 
+/// The middle of the gap between the close and the minimize lights.
+fn traffic_light_gap(app: &App) -> slint::LogicalPosition {
+    let light = only(app, "Close window");
+    let (at, size) = (light.absolute_position(), light.size());
+    slint::LogicalPosition::new(at.x + size.width + 4.0, at.y + size.height / 2.0)
+}
+
+/// The pointer moved to `at`, and the fades given time to end.
+fn hover_at(app: &App, at: slint::LogicalPosition) {
+    app.window()
+        .dispatch_event(slint::platform::WindowEvent::PointerMoved { position: at });
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(300));
+}
+
+/// The traffic lights' glyphs light while the pointer is anywhere over the group, the gaps
+/// between the lights included (.traffic-lights:hover), and go out away from it.
+#[test]
+fn the_traffic_lights_glyphs_stay_lit_across_the_gaps() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.show().unwrap();
+    let lit = || {
+        let glyphs: Vec<_> =
+            ElementHandle::find_by_element_id(&app, "TrafficLight::glyph-path").collect();
+        assert_eq!(glyphs.len(), 3, "three glyphs");
+        glyphs.iter().all(|glyph| glyph.computed_opacity() > 0.99)
+    };
+    let gap = traffic_light_gap(&app);
+    hover_at(&app, slint::LogicalPosition::new(gap.x + 200.0, gap.y));
+    assert!(!lit(), "away from the group");
+    hover_at(&app, slint::LogicalPosition::new(gap.x - 8.0, gap.y));
+    assert!(lit(), "on a light");
+    hover_at(&app, gap);
+    assert!(lit(), "in the gap");
+    app.hide().unwrap();
+}
+
+/// A double-click in a gap between the traffic lights maximizes, as on the rest of the title
+/// bar; a single click does nothing. (A drag from the gap moving the window rests on
+/// WindowMoveArea's filter: the testing window's move counter is behind Slint's internal
+/// feature.)
+#[test]
+fn a_double_click_between_the_traffic_lights_maximizes() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.show().unwrap();
+    let gap = traffic_light_gap(&app);
+
+    click_at(&app, gap.x, gap.y);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1000));
+    assert!(!app.window().is_maximized(), "a single click does nothing");
+    click_at(&app, gap.x, gap.y);
+    click_at(&app, gap.x, gap.y);
+    assert!(app.window().is_maximized(), "a double-click maximizes");
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1000));
+    click_at(&app, gap.x, gap.y);
+    click_at(&app, gap.x, gap.y);
+    assert!(!app.window().is_maximized(), "and restores");
+    app.hide().unwrap();
+}
+
 /// Publications from another thread hop to the event loop, where the newest one is bound, and so
 /// do a draft edit's answer and an Inspect's, through the window's wiring. The only test with a
 /// threaded platform: Slint keeps one event loop proxy per process.
@@ -2239,7 +2300,7 @@ fn the_sheet_keeps_the_focus_and_its_fields_take_typed_keys() {
     assert_eq!(focused(&app), "Clear inspection cache…");
     for effect in [
         "Reduce transparency (solid panes)",
-        "Reduce motion (no spinning)",
+        "Reduce motion (fewer animations)",
     ] {
         assert_eq!(
             ElementHandle::find_by_accessible_label(&app, effect).count(),
@@ -2404,7 +2465,7 @@ fn the_reduced_effects_apply_at_once_and_are_saved() {
     assert!(!theme.get_glass());
     assert_eq!(theme.get_float().alpha(), 255);
     assert_eq!(app.get_log_blur(), 0.0);
-    only(&app, "Reduce motion (no spinning)").invoke_accessible_default_action();
+    only(&app, "Reduce motion (fewer animations)").invoke_accessible_default_action();
     assert!(theme.get_reduce_motion());
     assert_eq!(
         Appearance::load(dir.path()),
