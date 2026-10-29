@@ -48,6 +48,11 @@ component IconButton inherits Pressable {
     height: 32px;
     border-radius: 8px;
     background: root.active ? Theme.sel : transparent;
+    // Pressable's activation, for a derived button's own accessible action: Slint lets only a
+    // direct base's protected function be called.
+    protected function press() {
+        root.activate();
+    }
     Path {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
@@ -69,10 +74,19 @@ component IconButton inherits Pressable {
 component ThemeButton inherits IconButton {
     accessible-label: "Toggle theme";
     tip: "Toggle light and dark theme (Ctrl+T)";
+    // A held Return flips the theme once, as Ctrl+T does.
+    repeats: false;
     clicked => { Theme.toggle(); }
     icon: Theme.dark
         ? "M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"
         : "M16 12a4 4 0 1 1-8 0a4 4 0 1 1 8 0z M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4";
+}
+
+// The Appearance button: it reports its menu open or closed, as the Log toggle does.
+component AppearanceButton inherits IconButton {
+    accessible-expandable: true;
+    accessible-expanded: root.active;
+    accessible-action-expand => { root.press(); }
 }
 
 // One of the Appearance menu's three theme choices, a segment of its row.
@@ -272,7 +286,7 @@ export component TitleBar inherits Rectangle {
         x: appearance-button.x - self.width - 4px;
         y: (parent.height - self.height) / 2;
     }
-    appearance-button := IconButton {
+    appearance-button := AppearanceButton {
         x: parent.width - self.width - 14px;
         y: (parent.height - self.height) / 2;
         active: root.appearance-open;

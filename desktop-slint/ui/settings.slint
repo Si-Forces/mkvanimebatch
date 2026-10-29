@@ -3,10 +3,10 @@
 // bindings only: the host (desktop-slint/src/settings.rs) maps the published Settings Draft, sends
 // the edits and holds every rule: which field a publication writes back, the steppers' repeat, the
 // hints and the preset texts.
-import { Button, CheckBox, ComboBox, LineEdit, ScrollView, Slider } from "std-widgets.slint";
+import { Button, CheckBox, LineEdit, ScrollView, Slider } from "std-widgets.slint";
 import { GlassPane, Theme } from "theme.slint";
 import { CapButton, PillButton } from "jobs.slint";
-import { Focus, Pressable } from "focus.slint";
+import { Focus, Pressable, Select } from "focus.slint";
 
 // One mode's Settings Draft as the sheet shows it, every field as typed but the two checkboxes.
 // The remux-only fields stay empty in extract's. `bitrate` is the index of the bitrate select's
@@ -266,11 +266,12 @@ component DraftEdit inherits Rectangle {
     forward-focus: edit;
     init => { self.grab(); }
     changed serial => { self.grab(); }
+    // A disabled field is passed over, as Pressable's restore does: its focus() would move the
+    // focus on, out of the sheet once every control after it is locked.
     function grab() {
-        if Sheet.focus-key == root.key && root.key != "" {
+        if root.enabled && Sheet.focus-key == root.key && root.key != "" {
             edit.focus();
-            // A field made with the focus reports no change of it. A disabled one passes the
-            // focus on, and the control that took it reported its own key.
+            // A field made with the focus reports no change of it.
             if edit.has-focus {
                 Sheet.enter(root.key);
                 Sheet.reveal(root.absolute-position.y, root.height);
@@ -307,6 +308,7 @@ component DraftEdit inherits Rectangle {
         text: root.placeholder;
         color: root.enabled ? Theme.hint : Theme.hint.with-alpha(0.6);
         font-family: edit.font-family;
+        font-size: edit.font-size;
         horizontal-alignment: root.align;
         vertical-alignment: center;
         overflow: elide;
@@ -461,6 +463,8 @@ export component SettingsSheet inherits GlassPane {
     in property <bool> busy;
     // That, or a Run not answered yet: the fields are locked (.lock-while-job).
     in property <bool> locked;
+    // The confirm dialog is over the sheet, with the focus.
+    in property <bool> dialog-open;
     // The output folder's placeholder, which differs per mode.
     in property <string> out-placeholder;
     callback done();
@@ -484,6 +488,14 @@ export component SettingsSheet inherits GlassPane {
     }
     property <int> serial: Sheet.focus-serial;
     changed serial => { self.focus-done(); }
+    // Locked under a focused control, Done takes the focus, so Tab stays inside the sheet (locked,
+    // Done is its only control) and Esc keeps closing it. A dialog over the sheet keeps it: Done
+    // takes it as the dialog closes, when the control that had it is locked.
+    changed locked => {
+        if root.locked && !root.dialog-open {
+            done-button.focus();
+        }
+    }
     function focus-done() {
         if Sheet.focused == "" {
             done-button.focus();
@@ -670,20 +682,22 @@ export component SettingsSheet inherits GlassPane {
                                 spacing: 12px;
                                 Field {
                                     label: "Opus bitrate";
-                                    ComboBox {
-                                        min-width: 0px;
+                                    Select {
                                         model: root.bitrates;
                                         current-index <=> root.form.bitrate;
                                         enabled: !root.locked;
                                         accessible-label: "Opus bitrate";
-                                        changed has-focus => {
-                                            if self.has-focus {
+                                        changed focused => {
+                                            if self.focused {
                                                 Sheet.reveal(self.absolute-position.y, self.height);
                                             }
                                         }
-                                        selected => {
-                                            Sheet.edited("bitrate");
-                                            Sheet.committed("bitrate");
+                                        // The entry shown picked again sends nothing.
+                                        picked(index, changed) => {
+                                            if changed {
+                                                Sheet.edited("bitrate");
+                                                Sheet.committed("bitrate");
+                                            }
                                         }
                                     }
                                 }
@@ -719,7 +733,13 @@ export component SettingsSheet inherits GlassPane {
                                             enabled: !root.locked;
                                             accessible-label: "Encoder complexity";
                                             accessible-description: "libopus encoding complexity: 0 is fastest, 10 is best quality";
-                                            changed(value) => { Sheet.slid(value); }
+                                            // Whole steps alone, as a range input's: fluent's
+                                            // drag does not snap to `step`.
+                                            changed(value) => {
+                                                let step = Math.round(value);
+                                                self.value = step;
+                                                Sheet.slid(step);
+                                            }
                                             released => { Sheet.committed("complexity"); }
                                             // A focus id of its own, so moving between the
                                             // slider and the box leaves one and enters the other.

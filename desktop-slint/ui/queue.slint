@@ -3,7 +3,7 @@
 // what the controls ask.
 import { ListView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { Pressable, TipCard } from "focus.slint";
+import { Focus, Pressable, TipCard } from "focus.slint";
 
 export enum Mode { remux, extract }
 
@@ -59,6 +59,13 @@ export struct QueueHead {
     inspected: string,
 }
 
+// The spinning rings' turn, one for all of them: still under Reduce motion, as style.css's
+// prefers-reduced-motion stops .ep-ring and .scan-spinner. Read only while a ring spins, so the
+// window draws no frame for it otherwise.
+export global Spin {
+    out property <angle> turn: Theme.reduce-motion ? 0deg : mod(animation-tick(), 1100ms) / 1100ms * 360deg;
+}
+
 // The status ring (.ep-ring): a track and the progress arc, or a spinning quarter.
 component Ring inherits Rectangle {
     in property <float> progress;
@@ -84,9 +91,7 @@ component Ring inherits Rectangle {
         stroke: Theme.info;
         stroke-width: 3px;
         stroke-line-cap: round;
-        // Still under Reduce motion, as style.css's prefers-reduced-motion stops .ep-ring and
-        // .scan-spinner.
-        transform-rotation: root.spinning && !Theme.reduce-motion ? mod(animation-tick(), 1100ms) / 1100ms * 360deg : 0deg;
+        transform-rotation: root.spinning ? Spin.turn : 0deg;
         MoveTo { x: 10; y: 2; }
         ArcTo {
             x: 10 + 8 * Math.sin(root.end);
@@ -285,7 +290,7 @@ component EpRow inherits Rectangle {
             }
 
             // The pick (.ep-pick): number, name and meta line; it inspects the row. Read as the
-            // name, then the meta line (the button's content in the webview).
+            // name, then the meta line; the webview's button also reads the row number.
             pick := Pressable {
                 horizontal-stretch: 1;
                 border-radius: 8px;
@@ -368,7 +373,8 @@ component EpRow inherits Rectangle {
 
             // Move up / Move down (.ep-reorder): shown on hover or with a row control focused;
             // while a filter shows, gone from the accessibility tree too, their width kept
-            // (style.css's `visibility: hidden`).
+            // (style.css's `visibility: hidden`), and disabled, so no programmatic focus
+            // (`Focus.restore`, `follow-key`) reaches them: a hidden scope still takes it.
             Rectangle {
                 width: 22px;
                 visible: !root.filtered;
@@ -377,14 +383,14 @@ component EpRow inherits Rectangle {
                     alignment: center;
                     up := ReorderButton {
                         glyph: "M6 15l6-6 6 6";
-                        enabled: !root.locked;
+                        enabled: !root.locked && !root.filtered;
                         focus-key: "up:" + root.key;
                         accessible-label: "Move up";
                         clicked => { root.move-up(); }
                     }
                     down := ReorderButton {
                         glyph: "M6 9l6 6 6-6";
-                        enabled: !root.locked;
+                        enabled: !root.locked && !root.filtered;
                         focus-key: "down:" + root.key;
                         accessible-label: "Move down";
                         clicked => { root.move-down(); }
@@ -497,7 +503,13 @@ export component QueuePane inherits Rectangle {
     // once the list laid out a row with a height: after a filter that hid every row, its content
     // has none (`content-height` 0) and the row would land at the bottom, so the reveal waits for
     // the layout that shows the rows again (`changed content-height` below), in that same frame.
+    // A reveal that leaves the list where it was (the last release again, at the list's end)
+    // moves no row across the top, so none reports its header again: it keeps the one pinned.
     public function reveal(row: int) {
+        let scroll = root.list-scroll;
+        let head = root.pinned-head;
+        let by = root.pinned-by;
+        root.unpin();
         root.reveal-pending = -1;
         if row < 0 || row >= root.rows.length {
             root.list-scroll = 0;
@@ -510,6 +522,10 @@ export component QueuePane inherits Rectangle {
         // Past the end of every row: no row is taller than a release head over a row.
         root.list-scroll = -root.rows.length * root.tallest-row;
         list.ensure-row-visible(row, ScrollBehavior.instant);
+        if root.list-scroll == scroll {
+            root.pinned-head = head;
+            root.pinned-by = by;
+        }
     }
 
     // A filter chip clicked: the filter wins over a reveal still waiting for its layout.
@@ -540,6 +556,19 @@ export component QueuePane inherits Rectangle {
     out property <int> pinned-count: root.pinned-text == "" ? 0 : root.pinned-head.count;
     property <int> pinned-by: -1;
     property <int> rows-made;
+    // The first rows made after a reset disarm `Focus.follow-key` (this handler runs once that
+    // pass made them): a moved episode's row not made then (scrolled out) or disabled takes no
+    // focus when a scroll makes it later.
+    changed rows-made => {
+        Focus.follow-key = "";
+    }
+    // The rows were replaced (the instance that pinned the header is gone without unpinning it,
+    // and a same-folder reset keeps the heads `pinned-text` checks), or a reveal puts a row at the
+    // top: the rows made, or moved across the top, report again.
+    public function unpin() {
+        root.pinned-head = { text: "", count: 0, y: 0, row: -1 };
+        root.pinned-by = -1;
+    }
     function pin(instance: int, head: PinnedHead) {
         if head.text != "" {
             root.pinned-head = head;

@@ -598,6 +598,20 @@ mod tests {
         assert_eq!(left, [CHOICE_FILE], "{left:?}");
     }
 
+    /// A write that fails once the temporary file is open leaves no temporary file either: one
+    /// standing for `/dev/full` takes the write and fails it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_failed_write_leaves_no_temporary_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let temporary = dir
+            .path()
+            .join(format!("{CHOICE_FILE}.{}.tmp", std::process::id()));
+        std::os::unix::fs::symlink("/dev/full", &temporary).unwrap();
+        assert!(save_software(dir.path()).is_err());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
     #[test]
     fn read_answer_maps_exit_codes_and_display_errors() {
         assert_eq!(read_answer(Some(0), ""), Some(Answer::Yes));
@@ -632,6 +646,39 @@ mod tests {
             Duration::from_secs(5),
         );
         assert_eq!(answer, Answer::Yes);
+    }
+
+    /// A tool that cannot be started passes to the next.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_tool_that_cannot_start_passes_to_the_next() {
+        let answer = ask_with(
+            &[("/nonexistent/zenity", &[]), ("sh", &["-c", "exit 0"])],
+            Duration::from_secs(5),
+        );
+        assert_eq!(answer, Answer::Yes);
+    }
+
+    /// When every tool fails, the reasons of all of them are joined.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn every_tool_failing_gives_all_the_reasons() {
+        let answer = ask_with(
+            &[
+                ("/nonexistent/zenity", &[]),
+                ("sh", &["-c", "echo 'Failed to open display' >&2; exit 1"]),
+            ],
+            Duration::from_secs(5),
+        );
+        let Answer::Unavailable(reasons) = answer else {
+            panic!("{answer:?}");
+        };
+        let (spawn, display) = reasons.split_once("; ").expect("two reasons");
+        assert!(spawn.starts_with("/nonexistent/zenity: "), "{reasons}");
+        assert!(
+            display.starts_with("sh ended with ") && display.ends_with("Failed to open display"),
+            "{reasons}"
+        );
     }
 
     /// A tool left unanswered past the timeout ends the asking: the next one is never tried.

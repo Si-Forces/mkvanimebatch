@@ -214,6 +214,15 @@ export component BottomBar inherits Rectangle {
     in property <Telemetry> telemetry;
     callback run();
     callback stop();
+    // Run turned into Stop, or back, under the focus: the window's keys take it, as the
+    // webview's hidden button drops its focus, so a held or second Return reaches neither.
+    callback focus-left();
+    property <bool> owns: root.job.owns;
+    changed owns => {
+        if button.focused {
+            root.focus-left();
+        }
+    }
     property <bool> wide: root.width >= 900px;
     height: bar.preferred-height;
     background: Theme.side;
@@ -233,6 +242,7 @@ export component BottomBar inherits Rectangle {
             height: 40px;
             // Run or Stop, whichever shows: the one the sheet a refused Run opened gives it back to.
             focus-key: "run";
+            repeats: false;
             kind: root.job.owns ? CapKind.stop : CapKind.run;
             text: root.job.owns ? root.job.stop-label : root.job.run-label;
             enabled: root.job.owns ? !root.job.stop-disabled : !root.job.run-disabled && !root.run-pending;
@@ -411,6 +421,7 @@ export component ConfirmDialog inherits Rectangle {
                     // Hidden, it keeps its place left of the confirm button, which stays at the end.
                     cancel := PillButton {
                         visible: !root.texts.notice;
+                        enabled: !root.texts.notice;
                         text: "Cancel";
                         clicked => { root.answered(false); }
                     }

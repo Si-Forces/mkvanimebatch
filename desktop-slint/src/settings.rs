@@ -85,7 +85,8 @@ impl DraftKey {
 
     /// The key a field of the sheet names, if it names one. The complexity slider has a focus id of
     /// its own (`complexity_slider`), so a focus moving between it and the box is seen leaving one
-    /// and entering the other, but it edits the complexity.
+    /// and entering the other, and a write-back spares the box only while the box has the focus
+    /// (`has_focus`), but it edits the complexity.
     pub(crate) fn parse(name: &str) -> Option<Self> {
         if name == "complexity_slider" {
             return Some(Self::Complexity);
@@ -325,7 +326,7 @@ pub(crate) struct PendingEdits([HashMap<DraftKey, Pending>; 2]);
 
 impl PendingEdits {
     /// An edit of `key` sent while `published` was the mode's published form.
-    fn begin(&mut self, mode: Mode, key: DraftKey, published: &DraftForm) {
+    pub(crate) fn begin(&mut self, mode: Mode, key: DraftKey, published: &DraftForm) {
         self.0[index(mode)]
             .entry(key)
             .or_insert_with(|| Pending {
@@ -357,7 +358,7 @@ impl PendingEdits {
         true
     }
 
-    fn has(&self, mode: Mode, key: DraftKey) -> bool {
+    pub(crate) fn has(&self, mode: Mode, key: DraftKey) -> bool {
         self.0[index(mode)].contains_key(&key)
     }
 }
@@ -390,11 +391,13 @@ fn published(app: &App, mode: Mode) -> DraftForm {
     }
 }
 
-/// Whether `mode`'s field of `key` has the focus: the sheet is open on `mode` and holds it there.
+/// Whether `mode`'s field of `key` has the focus, so a write-back spares it: the sheet is open on
+/// `mode` and holds it there. The complexity slider is not the box: the box, which it left for the
+/// slider, gets its published value back.
 fn has_focus(app: &App, mode: Mode, key: DraftKey) -> bool {
     app.get_sheet_open()
         && app.get_mode() == mode
-        && DraftKey::parse(&app.global::<Sheet>().get_focused()) == Some(key)
+        && app.global::<Sheet>().get_focused() == key.as_str()
 }
 
 /// Writes the published `key` of `mode` back into its field, unless it has the focus or an edit
@@ -421,7 +424,10 @@ pub(crate) fn show(app: &App, state: &ViewState, edits: &Edits) {
         {
             let mut pending = lock(edits);
             for key in DraftKey::ALL {
-                if !has_focus(app, mode, key) && !pending.pass_over(mode, key, &draft) {
+                // A focused key is passed over too: once left, its answer may have to show what
+                // this publication holds.
+                let passed_over = pending.pass_over(mode, key, &draft);
+                if !passed_over && !has_focus(app, mode, key) {
                     changed |= copy_key(&mut typed, &draft, key);
                 }
             }
@@ -472,6 +478,19 @@ fn settle(app: &App, edits: &Edits, mode: Mode, key: DraftKey, answer: Result<bo
         Ok(false) if key == NORMALIZED => restore(app, edits, mode, key, false),
         Ok(_) if moved => restore(app, edits, mode, key, false),
         Ok(_) => {}
+    }
+}
+
+/// The answer path of an edit of `mode`'s `key`: the answer hops to the event loop and settles
+/// there ([`settle`]).
+pub(crate) fn settle_later(
+    window: slint::Weak<App>,
+    edits: Edits,
+    mode: Mode,
+    key: DraftKey,
+) -> impl FnOnce(Result<bool, String>) + Send + 'static {
+    move |answer| {
+        let _ = window.upgrade_in_event_loop(move |app| settle(&app, &edits, mode, key, answer));
     }
 }
 
@@ -531,11 +550,8 @@ impl Drafts {
     /// edit of the key is left pending, puts the published value back as the rules say.
     fn guarded(&self, app: &App, mode: Mode, key: DraftKey, name: &'static str, intent: Intent) {
         lock(&self.edits).begin(mode, key, &published(app, mode));
-        let (window, edits) = (self.send.window.clone(), Arc::clone(&self.edits));
-        self.send.send_answered(name, intent, move |answer| {
-            let _ =
-                window.upgrade_in_event_loop(move |app| settle(&app, &edits, mode, key, answer));
-        });
+        let answered = settle_later(self.send.window.clone(), Arc::clone(&self.edits), mode, key);
+        self.send.send_answered(name, intent, answered);
     }
 
     /// Sends `key` as `mode`'s field holds it.
@@ -668,13 +684,18 @@ pub(crate) fn wire(app: &App, send: Intents, edits: Edits) {
         }
     });
 
-    // The slider: the box follows it at once, and the value is sent.
+    // The slider, on a whole step: the box follows it at once, and the value is sent once it
+    // changed, as a range input fires `input`.
     let (d, shown) = (drafts.clone(), app.as_weak());
     sheet.on_slid(move |value| {
         if let Some(app) = shown.upgrade() {
             let mode = app.get_mode();
             let mut typed = form(&app, mode);
-            typed.complexity = value.round().to_string().into();
+            let complexity = SharedString::from(value.round().to_string());
+            if typed.complexity == complexity {
+                return;
+            }
+            typed.complexity = complexity;
             set_form(&app, mode, typed);
             d.edit(&app, mode, NORMALIZED);
         }
@@ -869,6 +890,13 @@ mod tests {
             "5",
             "a no-op complexity gets the published value"
         );
+        // Left for the slider, the box gets it too: only the box itself is spared.
+        sheet.set_focused("complexity_slider".into());
+        type_into(&app, Complexity, "15");
+        begin(&app, &edits, Complexity);
+        settle(&app, &edits, Mode::Remux, Complexity, Ok(false));
+        assert_eq!(complexity(), "5", "the slider does not spare the box");
+        sheet.set_focused("".into());
 
         sheet.set_focused("workers".into());
         begin(&app, &edits, Workers);
@@ -925,6 +953,20 @@ mod tests {
             app.get_remux_form().dry_run,
             "the old value is not put back"
         );
+
+        // A focused field is passed over too: left before the answer, it shows the value the
+        // core moved it to.
+        app.set_mode(Mode::Remux);
+        app.set_sheet_open(true);
+        app.global::<Sheet>().set_focused("workers".into());
+        begin(&app, &edits, Workers);
+        state.seq = 3;
+        state.remux.draft.workers = "6".into();
+        publisher.show(&state);
+        assert_eq!(app.get_remux_form().workers, "5", "spared while focused");
+        app.global::<Sheet>().set_focused("".into());
+        settle(&app, &edits, Mode::Remux, Workers, Ok(true));
+        assert_eq!(app.get_remux_form().workers, "6");
     }
 
     #[test]
@@ -1522,7 +1564,8 @@ mod tests {
     }
 
     /// The box and the slider of the complexity have focus ids of their own, so a focus moving
-    /// between them, whichever handler runs first, leaves the complexity focused.
+    /// between them, whichever handler runs first, leaves the one entered focused; only the box
+    /// spares the box.
     #[test]
     fn the_focus_moves_between_the_complexity_box_and_slider() {
         i_slint_backend_testing::init_no_event_loop();
@@ -1531,16 +1574,201 @@ mod tests {
         app.set_sheet_open(true);
         let sheet = app.global::<Sheet>();
         let complexity_focused = || has_focus(&app, Mode::Remux, Complexity);
-        // Box to slider: the slider's handler first, then the box's.
+        // Box to slider: the slider's handler first, then the box's. The box, left, takes
+        // write-backs again.
         sheet.invoke_enter("complexity".into());
         sheet.invoke_enter("complexity_slider".into());
         sheet.invoke_leave("complexity".into());
         assert_eq!(sheet.get_focused(), "complexity_slider");
-        assert!(complexity_focused());
+        assert!(!complexity_focused());
         // Slider to box: the slider's handler first.
         sheet.invoke_leave("complexity_slider".into());
         sheet.invoke_enter("complexity".into());
         assert_eq!(sheet.get_focused(), "complexity");
         assert!(complexity_focused());
+    }
+
+    /// A window wired to a core over three episodes, as `main` wires it, with the remux sheet's
+    /// mode shown.
+    fn wired() -> (tokio::runtime::Runtime, App, SlintPublisher) {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let app = new_app();
+        let publisher = SlintPublisher::new(&app);
+        let ports = Ports {
+            inspector: Episodes,
+            launcher: NoJobs,
+            sampler: NoSamples,
+        };
+        let core = Core::spawn(runtime.handle().clone(), publisher.clone(), ports);
+        crate::intents::wire(&app, core, runtime.handle().clone(), publisher.clone());
+        app.set_mode(Mode::Remux);
+        (runtime, app, publisher)
+    }
+
+    /// The edits of remux's `key` sent and not answered: without an event loop no answer settles
+    /// one.
+    fn sent(publisher: &SlintPublisher, key: DraftKey) -> u32 {
+        lock(&publisher.edits()).0[index(Mode::Remux)]
+            .get(&key)
+            .map_or(0, |pending| pending.count)
+    }
+
+    /// The complexity slider moves in whole steps, as a range input does: a drag between two
+    /// steps sends one edit, on the step, and the thumb sits on it.
+    #[test]
+    fn the_complexity_slider_moves_in_whole_steps() {
+        use i_slint_backend_testing::{AccessibleRole, ElementHandle};
+        i_slint_backend_testing::init_no_event_loop();
+        let (_runtime, app, publisher) = wired();
+        type_into(&app, Complexity, "5");
+        let sheet = app.global::<Sheet>();
+        sheet.invoke_slid(5.4);
+        sheet.invoke_slid(5.6);
+        sheet.invoke_slid(6.2);
+        assert_eq!(sent(&publisher, Complexity), 1, "one edit, for 6");
+        assert_eq!(app.get_remux_form().complexity, "6");
+
+        app.window()
+            .set_size(slint::LogicalSize::new(920.0, 1100.0));
+        app.show().unwrap();
+        app.invoke_open_sheet(Mode::Remux, "".into());
+        ticks();
+        let slider = ElementHandle::find_by_accessible_label(&app, "Encoder complexity")
+            .find(|element| element.accessible_role() == Some(AccessibleRole::Slider))
+            .unwrap();
+        slider.set_accessible_value("7.4");
+        assert_eq!(slider.accessible_value().as_deref(), Some("7"));
+        assert_eq!(app.get_remux_form().complexity, "7");
+        app.hide().unwrap();
+    }
+
+    /// A stepper held as its sheet closes, or as a batch locks it, stops: its release never
+    /// comes, so it steps no more once the sheet opens again or the batch ends (a locked step
+    /// sends nothing, but a repeat left running would step again then).
+    #[test]
+    fn a_held_stepper_stops_when_its_sheet_closes_or_locks() {
+        i_slint_backend_testing::init_no_event_loop();
+        let (_runtime, app, publisher) = wired();
+        // The sheet closed, or a batch running; and back.
+        let stop = |how: &str, stopped: bool| match how {
+            "closed" => app.set_sheet_open(!stopped),
+            _ => app.set_busy(stopped),
+        };
+        let later = || {
+            for _ in 0..20 {
+                mock_elapsed_time(Duration::from_millis(50));
+            }
+        };
+        app.set_sheet_open(true);
+        for how in ["closed", "locked"] {
+            let before = sent(&publisher, Workers);
+            app.global::<Sheet>()
+                .invoke_step_pressed("workers".into(), true);
+            assert_eq!(
+                sent(&publisher, Workers),
+                before + 1,
+                "a press steps at once"
+            );
+            stop(how, true);
+            later();
+            stop(how, false);
+            later();
+            assert_eq!(
+                sent(&publisher, Workers),
+                before + 1,
+                "{how}, it steps no more"
+            );
+        }
+    }
+
+    /// The sheet puts the cursor in the field of every text key it is opened on: each field's
+    /// `key` is its draft key's name.
+    #[test]
+    fn every_text_field_takes_the_focus_for_its_key() {
+        i_slint_backend_testing::init_no_event_loop();
+        let app = new_app();
+        app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+        app.show().unwrap();
+        let sheet = app.global::<Sheet>();
+        let mut form = DraftForm::default();
+        for key in DraftKey::ALL {
+            if text_field(&mut form, key).is_none() {
+                continue;
+            }
+            app.invoke_open_sheet(Mode::Remux, key.as_str().into());
+            ticks();
+            assert_eq!(sheet.get_focused(), key.as_str());
+        }
+        app.hide().unwrap();
+    }
+
+    /// A key pressed and released in the window.
+    fn press(app: &App, text: impl Into<SharedString>) {
+        use slint::platform::WindowEvent;
+        let text = text.into();
+        app.window()
+            .dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
+        app.window()
+            .dispatch_event(WindowEvent::KeyReleased { text });
+        ticks();
+    }
+
+    /// Locked by a batch under a focused field, the sheet gives the focus to Done: Tab stays
+    /// inside it and Esc still closes it.
+    #[test]
+    fn a_sheet_locked_under_a_focused_field_keeps_the_focus() {
+        use slint::platform::Key;
+        i_slint_backend_testing::init_no_event_loop();
+        let app = new_app();
+        app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+        app.show().unwrap();
+        let sheet = app.global::<Sheet>();
+        app.invoke_open_sheet(Mode::Remux, "workers".into());
+        ticks();
+        assert_eq!(sheet.get_focused(), "workers");
+        app.set_busy(true);
+        ticks();
+        assert_eq!(sheet.get_focused(), "", "the field is left");
+        press(&app, Key::Tab);
+        press(&app, Key::Escape);
+        assert!(!app.get_sheet_open(), "Esc closed it");
+        app.hide().unwrap();
+    }
+
+    /// Locked by a batch while a dialog shows over the sheet's focused field: the dialog keeps
+    /// the focus, and as it closes Done takes it, not a control behind the sheet.
+    #[test]
+    fn a_sheet_locked_under_a_dialog_gives_the_focus_to_done_as_it_closes() {
+        use mkv_anime_batch_slint_ui::{DialogTexts, Focus};
+        i_slint_backend_testing::init_no_event_loop();
+        let app = new_app();
+        app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+        app.show().unwrap();
+        let sheet = app.global::<Sheet>();
+        app.invoke_open_sheet(Mode::Remux, "workers".into());
+        ticks();
+        assert_eq!(sheet.get_focused(), "workers");
+        app.set_dialog(DialogTexts {
+            title: "Notice".into(),
+            text: "Something happened".into(),
+            confirm: "OK".into(),
+            notice: true,
+        });
+        app.invoke_show_dialog();
+        ticks();
+        let current = || app.global::<Focus>().get_current();
+        assert_eq!(current(), "OK");
+        app.set_busy(true);
+        ticks();
+        assert_eq!(current(), "OK", "the dialog keeps the focus");
+        app.set_dialog_open(false);
+        ticks();
+        ticks();
+        assert_eq!(current(), "Done", "Done has it, inside the sheet");
+        app.hide().unwrap();
     }
 }

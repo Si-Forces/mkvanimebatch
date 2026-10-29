@@ -16,6 +16,12 @@ export global Focus {
     in-out property <string> restore-key;
     in-out property <int> restore-serial;
 
+    // The control a reset's new rows make that takes the focus as it is made (a moved episode's
+    // Move up / Move down): `restore` reaches only the controls already made. Any control's
+    // focus clears it, and so do the first rows the reset makes (QueuePane's `rows-made`), so one
+    // made later, scrolled into view, takes no focus.
+    in-out property <string> follow-key;
+
     public function restore(key: string) {
         self.restore-key = key;
         self.restore-serial += 1;
@@ -71,6 +77,9 @@ export component Pressable inherits Rectangle {
     in property <length> ring-gap: 2px;
     // A click activates it; a stepper steps on the press instead (`pointer`).
     in property <bool> pointer-click: true;
+    // A held Return activates it again at the key's repeat rate; a control that turns into
+    // another (Run into Stop) or flips the window (the theme toggle) activates once a press.
+    in property <bool> repeats: true;
     in property <MouseCursor> cursor: MouseCursor.pointer;
     callback clicked();
     // Every pointer event over it, after a left press took the focus.
@@ -102,6 +111,11 @@ export component Pressable inherits Rectangle {
             keys.focus();
         }
     }
+    init => {
+        if root.enabled && Focus.follow-key != "" && Focus.follow-key == root.focus-key {
+            keys.focus();
+        }
+    }
     // A row written in place can rename the focused control (a Library entry's release): its
     // focus-lost would then miss the old key, so `Focus.current` follows.
     changed focus-key => {
@@ -114,6 +128,7 @@ export component Pressable inherits Rectangle {
         enabled: root.enabled;
         focus-gained(reason) => {
             Focus.current = root.focus-key;
+            Focus.follow-key = "";
             if reason == FocusReason.tab-navigation {
                 Focus.keyboard = true;
             }
@@ -123,10 +138,14 @@ export component Pressable inherits Rectangle {
                 Focus.current = "";
             }
         }
-        // Return repeats while held, as on a browser's button; Space activates once a press, as
-        // the browser's does on its release.
+        // Return repeats while held, as on a browser's button, unless `repeats` is off; Space
+        // activates once a press, as the browser's does on its release. A disabled scope that
+        // keeps the focus still gets keys (Slint's `enabled` refuses only focus and presses).
         key-pressed(event) => {
-            if event.text == Key.Return || (event.text == Key.Space && !event.repeat) {
+            if !root.enabled {
+                return reject;
+            }
+            if (event.text == Key.Return && (root.repeats || !event.repeat)) || (event.text == Key.Space && !event.repeat) {
                 root.clicked();
                 return accept;
             }
@@ -160,6 +179,188 @@ export component Pressable inherits Rectangle {
     if root.tip != "": Tooltip {
         TipCard {
             text: root.tip;
+        }
+    }
+}
+
+// A select (index.html's `<select>`, style.css `.field`): it shows the entry picked, and a click,
+// Enter, Space or a screen reader's action opens the list of its entries under it. In the list the
+// arrows move the highlight only; a click, Enter or Space picks an entry, Esc or a click outside
+// closes it unchanged, and the select has the focus again. Closed, it takes neither the arrows nor
+// the wheel, so the wheel scrolls the pane under it, as over a WebKitGTK select; that select steps
+// on the arrows, this one deliberately does not: only a pick changes it. `picked` fires once a
+// pick, for the entry shown too, `changed` false for that one (a select sends no change for it:
+// its host passes over it). Disabled, or with no entry, it picks nothing, and a list open as it
+// is disabled closes.
+export component Select inherits Pressable {
+    in property <[string]> model;
+    in-out property <int> current-index;
+    callback picked(index: int, changed: bool);
+    // The entry the list's arrows are on.
+    property <int> highlight;
+    property <length> entry-height: 28px;
+    property <string> value: root.current-index >= 0 && root.current-index < root.model.length
+        ? root.model[root.current-index] : "";
+
+    min-width: 0px;
+    horizontal-stretch: 1;
+    // The height of the fluent fields beside it.
+    height: 32px;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Theme.line;
+    background: self.hovered && root.enabled ? Theme.hover : Theme.field;
+    opacity: root.enabled ? 1 : 0.75;
+    cursor: default;
+    // A held Return would open the list again as it closes.
+    repeats: false;
+    accessible-role: combobox;
+    accessible-value: root.value;
+    accessible-expandable: true;
+    accessible-expanded: popup.is-open;
+    accessible-action-expand => { root.activate(); }
+    clicked => {
+        if root.model.length > 0 {
+            root.highlight = max(0, root.current-index);
+            popup.show();
+        }
+    }
+    changed enabled => {
+        if !root.enabled {
+            popup.close();
+        }
+    }
+
+    function pick(index: int) {
+        popup.close();
+        if root.enabled && index >= 0 && index < root.model.length {
+            let changed = index != root.current-index;
+            root.current-index = index;
+            root.picked(index, changed);
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 6px;
+        Text {
+            text: root.value;
+            color: Theme.fg;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+            accessible-role: none;
+        }
+        // A chevron down.
+        Path {
+            width: 10px;
+            height: 6px;
+            y: (parent.height - self.height) / 2;
+            viewbox-width: 10;
+            viewbox-height: 6;
+            commands: "M1 1L5 5L9 1";
+            stroke: Theme.mute;
+            stroke-width: 1.5px;
+            stroke-line-cap: round;
+            stroke-line-join: round;
+            accessible-role: none;
+        }
+    }
+
+    popup := PopupWindow {
+        x: 0;
+        y: root.height + 4px;
+        // Not narrower than its entries need, within reason, as a native select's list.
+        width: max(root.width, 180px);
+        height: min(8, root.model.length) * root.entry-height + 10px;
+        close-policy: close-on-click-outside;
+        forward-focus: list-keys;
+        // A screen reader's list, whose focus follows the highlight (as Slint's ListView's
+        // `focus-item`): the arrows are read out, entry by entry.
+        list-keys := FocusScope {
+            accessible-role: list;
+            accessible-delegate-focus: root.highlight;
+            accessible-item-count: root.model.length;
+            key-pressed(event) => {
+                if event.text == Key.UpArrow {
+                    root.highlight = max(0, root.highlight - 1);
+                    return accept;
+                }
+                if event.text == Key.DownArrow {
+                    root.highlight = min(root.model.length - 1, root.highlight + 1);
+                    return accept;
+                }
+                if (event.text == Key.Return || event.text == Key.Space) && !event.repeat {
+                    root.pick(root.highlight);
+                    return accept;
+                }
+                if event.text == Key.Escape {
+                    popup.close();
+                    return accept;
+                }
+                reject
+            }
+            Rectangle {
+                border-radius: 8px;
+                background: Theme.menu;
+                border-width: 1px;
+                border-color: Theme.sep;
+                drop-shadow-blur: 12px;
+                drop-shadow-offset-y: 4px;
+                drop-shadow-color: #0000002e;
+                Flickable {
+                    x: 4px;
+                    y: 5px;
+                    width: parent.width - 8px;
+                    height: parent.height - 10px;
+                    content-height: root.model.length * root.entry-height;
+                    // The highlighted entry stays in view.
+                    property <int> highlight: root.highlight;
+                    init => { self.follow(); }
+                    changed highlight => { self.follow(); }
+                    function follow() {
+                        let top = root.highlight * root.entry-height;
+                        if top + self.content-y < 0px {
+                            self.content-y = -top;
+                        } else if top + root.entry-height + self.content-y > self.height {
+                            self.content-y = self.height - top - root.entry-height;
+                        }
+                    }
+                    for entry[index] in root.model: Rectangle {
+                        y: index * root.entry-height;
+                        width: parent.width;
+                        height: root.entry-height;
+                        border-radius: 6px;
+                        background: index == root.highlight ? Theme.sel : transparent;
+                        accessible-role: list-item;
+                        accessible-label: entry;
+                        accessible-item-index: index;
+                        accessible-item-selectable: true;
+                        // The highlighted entry is the selected one, as in a native select's list.
+                        accessible-item-selected: index == root.highlight;
+                        accessible-action-default => { root.pick(index); }
+                        Text {
+                            x: 8px;
+                            width: parent.width - 16px;
+                            text: entry;
+                            color: Theme.fg;
+                            font-weight: index == root.current-index ? 600 : 400;
+                            vertical-alignment: center;
+                            overflow: elide;
+                            accessible-role: none;
+                        }
+                        TouchArea {
+                            changed has-hover => {
+                                if self.has-hover {
+                                    root.highlight = index;
+                                }
+                            }
+                            clicked => { root.pick(index); }
+                        }
+                    }
+                }
+            }
         }
     }
 }

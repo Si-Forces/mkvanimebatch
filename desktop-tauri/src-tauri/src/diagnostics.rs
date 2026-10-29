@@ -5,11 +5,12 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, IsTerminal};
+use std::panic::PanicHookInfo;
 use std::path::Path;
 use std::sync::Mutex;
 
 use tracing::Dispatch;
-use tracing_subscriber::filter::{EnvFilter, LevelFilter};
+use tracing_subscriber::filter::{filter_fn, EnvFilter, LevelFilter};
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::registry::LookupSpan;
@@ -17,18 +18,38 @@ use tracing_subscriber::{fmt, Layer};
 
 const LOG_FILE_NAME: &str = "mkv-anime-batch.log";
 
+/// The target a panic is logged under: the file takes it whatever `RUST_LOG` says, stderr does not,
+/// where the default hook prints the panic already.
+const PANIC_TARGET: &str = "panic";
+
 /// A log file larger than this is emptied at startup; there is no rotation.
 const MAX_LOG_BYTES: u64 = 1_048_576;
 
-/// Installs the app's subscriber as the global default. A subscriber that is already set is left
-/// alone. Never fails: with no usable log directory the output is stderr only.
+/// Installs the app's subscriber as the global default, and a panic hook that logs each panic's
+/// message and location to the file before the default hook prints it: a Windows build has no
+/// console, so the log file is where a panic shows. A subscriber that is already set is left
+/// alone, and then so is the panic hook, so a second call does not log each panic twice. Never
+/// fails: with no usable log directory the output is stderr only.
 pub fn init(log_dir: Option<&Path>) {
-    let _ = tracing::dispatcher::set_global_default(build_dispatch(
+    let dispatch = build_dispatch(
         log_dir,
         env_filter(),
         io::stderr,
         io::stderr().is_terminal(),
-    ));
+    );
+    if tracing::dispatcher::set_global_default(dispatch).is_ok() {
+        std::panic::set_hook(Box::new(log_panics(std::panic::take_hook())));
+    }
+}
+
+/// A panic hook that logs the panic's message and location to the log file, then runs `prev`.
+fn log_panics(
+    prev: Box<dyn Fn(&PanicHookInfo<'_>) + Send + Sync>,
+) -> impl Fn(&PanicHookInfo<'_>) + Send + Sync + 'static {
+    move |info| {
+        tracing::error!(target: PANIC_TARGET, "{info}");
+        prev(info);
+    }
 }
 
 /// `RUST_LOG`, defaulting to `warn`.
@@ -68,7 +89,11 @@ where
 /// `tracing::dispatcher::with_default`.
 ///
 /// - File layer: see [`file_layer`]. Skipped, with a warning, when the file cannot be opened.
-/// - Stderr layer: level and message only, written to `stderr` and colored only when `ansi`.
+/// - Stderr layer: level and message only, written to `stderr` and colored only when `ansi`; not a
+///   panic, which the default hook prints there.
+///
+/// `filter` gets a `panic=error` directive on top, so no `RUST_LOG` (`off`, `mkv_core=info`)
+/// keeps a panic out of the file.
 fn build_dispatch<W>(log_dir: Option<&Path>, filter: EnvFilter, stderr: W, ansi: bool) -> Dispatch
 where
     W: for<'a> MakeWriter<'a> + Send + Sync + 'static,
@@ -78,11 +103,14 @@ where
         Some((dir, Err(error))) => (None, Some((dir, error))),
         None => (None, None),
     };
+    let panics = format!("{PANIC_TARGET}=error").parse();
+    let filter = filter.add_directive(panics.expect("a valid directive"));
     let stderr_layer = fmt::layer()
         .with_writer(stderr)
         .with_ansi(ansi)
         .without_time()
-        .with_target(false);
+        .with_target(false)
+        .with_filter(filter_fn(|meta| meta.target() != PANIC_TARGET));
 
     let dispatch = Dispatch::new(
         tracing_subscriber::registry()
@@ -141,6 +169,45 @@ mod tests {
         let dispatch = build_dispatch(dir, EnvFilter::new("warn"), stderr.clone(), false);
         tracing::dispatcher::with_default(&dispatch, || tracing::warn!("{line}"));
         stderr.text()
+    }
+
+    /// The hook logs a panic's message and location to the file, even under `RUST_LOG=off`, and
+    /// not to stderr, where the previous hook, run after it, prints the panic once.
+    #[test]
+    fn test_a_panic_is_logged_to_the_file_then_the_previous_hook_runs() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let stderr = Captured::default();
+        let dispatch = build_dispatch(
+            Some(dir.path()),
+            EnvFilter::new("off"),
+            stderr.clone(),
+            false,
+        );
+        let ran = Arc::new(AtomicBool::new(false));
+        let seen = Arc::clone(&ran);
+        // The hook is the process's: libtest's goes back once this panic is caught.
+        let saved = std::panic::take_hook();
+        std::panic::set_hook(Box::new(log_panics(Box::new(move |info| {
+            // Another test's panic meanwhile is not this one.
+            if info.payload_as_str() == Some("hooked 7") {
+                seen.store(true, Ordering::Relaxed);
+            }
+        }))));
+        let caught = tracing::dispatcher::with_default(&dispatch, || {
+            std::panic::catch_unwind(|| panic!("hooked {}", 7))
+        });
+        std::panic::set_hook(saved);
+
+        assert!(caught.is_err());
+        assert!(ran.load(Ordering::Relaxed), "the previous hook runs");
+        let log = fs::read_to_string(dir.path().join(LOG_FILE_NAME)).unwrap();
+        assert!(
+            log.contains("ERROR panic: panicked at") && log.contains("diagnostics.rs:"),
+            "{log}"
+        );
+        assert!(log.contains("hooked 7"), "{log}");
+        assert_eq!(stderr.text(), "", "printed once, by the previous hook");
     }
 
     #[test]

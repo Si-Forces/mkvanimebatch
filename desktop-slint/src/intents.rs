@@ -21,16 +21,15 @@ pub(crate) fn pipeline(mode: Mode) -> PipelineMode {
     }
 }
 
-/// The mode the window shows at boot: the extract view when a start or a job is in extract.
-pub(crate) fn boot_mode(state: &ViewState) -> Mode {
+/// Shows the extract view at boot when a start or a job is in extract; never switches to remux, so
+/// a click on Extract before the core's answer stays (app.js).
+pub(crate) fn show_boot_mode(app: &App, state: &ViewState) {
     let extract = match state.run.mode {
         Some(mode) => mode == PipelineMode::Extract,
         None => state.job.as_ref().is_some_and(|job| job.mode == "extract"),
     };
     if extract {
-        Mode::Extract
-    } else {
-        Mode::Remux
+        app.set_mode(Mode::Extract);
     }
 }
 
@@ -86,15 +85,14 @@ impl Intents {
 /// that list is still pending. The other mode's list keeps its own (queue-view.js keeps one per
 /// list).
 pub(crate) fn inspect_answered(app: &App, mode: Mode, picked: &str) {
-    let pending = match mode {
-        Mode::Remux => app.get_remux_pending_inspect(),
-        Mode::Extract => app.get_extract_pending_inspect(),
-    };
-    if pending == picked {
-        match mode {
-            Mode::Remux => app.set_remux_pending_inspect("".into()),
-            Mode::Extract => app.set_extract_pending_inspect("".into()),
+    match mode {
+        Mode::Remux if app.get_remux_pending_inspect() == picked => {
+            app.set_remux_pending_inspect("".into());
         }
+        Mode::Extract if app.get_extract_pending_inspect() == picked => {
+            app.set_extract_pending_inspect("".into());
+        }
+        Mode::Remux | Mode::Extract => {}
     }
 }
 
@@ -112,6 +110,8 @@ fn assign_subtitle(send: &Intents, app: &App, path: &str) {
         return;
     }
     let (mode, id) = (PipelineMode::Remux, inspector.id.to_string());
+    // The fields go with the Intent: nothing typed is left to commit.
+    app.set_sub_dirty(false);
     let (name, intent) = if path.is_empty() {
         ("clear_track", Intent::ClearTrack { mode, id })
     } else {
@@ -133,15 +133,12 @@ fn assign_subtitle(send: &Intents, app: &App, path: &str) {
     });
 }
 
-/// The remux Inspector's episode: its id, which is relative to the folder, and the folder's
-/// crumbs, so the same relative path in another folder is another episode.
-fn inspected(app: &App) -> (SharedString, SharedString, SharedString) {
-    let head = app.get_remux_head();
-    (
-        app.get_remux_inspector().id,
-        head.crumbs_lead,
-        head.crumbs_end,
-    )
+/// The remux Inspector's episode: the folder, as the core names it, and the id in it, so the
+/// same relative id in another folder is another episode (as `inspector::write_form` compares
+/// them).
+fn inspected(app: &App) -> (SharedString, SharedString) {
+    let inspector = app.get_remux_inspector();
+    (inspector.directory, inspector.id)
 }
 
 /// The subtitle file dialog answered: `picked` is assigned to `target`, the episode the remux
@@ -150,7 +147,7 @@ fn inspected(app: &App) -> (SharedString, SharedString, SharedString) {
 fn subtitle_picked(
     send: &Intents,
     app: &App,
-    target: &(SharedString, SharedString, SharedString),
+    target: &(SharedString, SharedString),
     picked: Option<&str>,
 ) {
     match picked {
@@ -501,8 +498,10 @@ pub(crate) mod tests {
         app.set_sub_title("A".into());
         app.set_sub_offset("1e3".into());
 
-        // A choice picked: assigned with the fields as typed.
+        // A choice picked: assigned with the fields as typed, which leaves nothing to commit.
+        app.set_sub_dirty(true);
         app.invoke_choose_subtitle(1);
+        assert!(!app.get_sub_dirty());
         let typed = |title: &str| {
             Some((
                 "/subs/b.ass".to_string(),
@@ -554,18 +553,27 @@ pub(crate) mod tests {
             runtime: runtime.handle().clone(),
             window: app.as_weak(),
         };
-        let (_, lead, end) = inspected(&app);
-        subtitle_picked(&send, &app, &("a".into(), lead, end), Some("/subs/b.ass"));
+        let (directory, _) = inspected(&app);
+        subtitle_picked(&send, &app, &(directory, "a".into()), Some("/subs/b.ass"));
         assert_eq!(assignment(), None);
-        let other_folder = ("b".into(), "/other/".into(), "show".into());
+        let other_folder = ("/other".into(), "b".into());
         subtitle_picked(&send, &app, &other_folder, Some("/subs/b.ass"));
         assert_eq!(assignment(), None);
         subtitle_picked(&send, &app, &inspected(&app), Some("/subs/b.ass"));
         let path = assignment().map(|(path, ..)| path);
         assert_eq!(path.as_deref(), Some("/subs/b.ass"));
 
-        // "Choose a file…" while a batch runs: no dialog, the select goes back on what is shown.
+        // Locked while a batch runs: neither Automatic nor a committed title is sent, and the
+        // fields go back on what is shown.
         app.set_busy(true);
+        let before = assignment();
+        app.set_sub_title("C".into());
+        app.invoke_choose_subtitle(0);
+        app.invoke_subtitle_options_changed();
+        assert_eq!(assignment(), before);
+        assert_eq!(app.get_sub_title(), "", "put back on what is shown");
+
+        // "Choose a file…" while a batch runs: no dialog, the select goes back on what is shown.
         app.set_sub_choice(2);
         app.invoke_choose_subtitle(2);
         assert_eq!(app.get_sub_choice(), 1);
@@ -573,9 +581,18 @@ pub(crate) mod tests {
 
     #[test]
     fn boot_shows_the_extract_view_while_extract_holds_the_batch() {
+        i_slint_backend_testing::init_no_event_loop();
+        let app = App::new().unwrap();
         let mut state = ViewState::new(None);
-        assert_eq!(boot_mode(&state), Mode::Remux);
+        show_boot_mode(&app, &state);
+        assert_eq!(app.get_mode(), Mode::Remux);
+        // A click on Extract before the answer stays.
+        app.set_mode(Mode::Extract);
+        show_boot_mode(&app, &state);
+        assert_eq!(app.get_mode(), Mode::Extract);
+        app.set_mode(Mode::Remux);
         state.run.mode = Some(PipelineMode::Extract);
-        assert_eq!(boot_mode(&state), Mode::Extract);
+        show_boot_mode(&app, &state);
+        assert_eq!(app.get_mode(), Mode::Extract);
     }
 }

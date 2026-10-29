@@ -62,6 +62,9 @@ export global Theme {
     out property <color> content: reduce-transparency ? (dark ? #151a1f : #ffffff) : (dark ? #12161c94 : #ffffffa3);
     out property <color> head: reduce-transparency ? (dark ? #151a1f : #ffffff) : (dark ? #161b22f0 : #f8fafcf0);
     out property <color> float: reduce-transparency ? (dark ? #1a1f27 : #ffffff) : (dark ? #1a1f27f2 : #fafbfdf2);
+    // A select's open list (Select): opaque, as a native select's popup is, so the field under it
+    // never shows through.
+    out property <color> menu: dark ? #1a1f27 : #fafbfd;
     // The float while the real blur draws under it, thin so the blur shows (60% light, 65% dark;
     // the spike's was 55%): the log drawer's. AA: the contrast test passes it over what the blur
     // leaves behind (the wallpaper, the panes and their tints), with the tints drawn on the pane,
