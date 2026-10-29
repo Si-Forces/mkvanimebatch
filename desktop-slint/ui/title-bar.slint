@@ -29,17 +29,19 @@ component TrafficLight inherits Pressable {
     border-color: #00000038;
     cursor: default;
 
-    // The 8x8 glyph drawn at 9 px, its stroke kept at 1.8 px.
+    // The 8x8 glyph drawn at 10 px with round caps (.tl-btn svg's stroke-linecap), so it fills
+    // the 16 px light as the webview's 8 px glyph fills its 14 px one.
     Path {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
-        width: 9px;
-        height: 9px;
+        width: 10px;
+        height: 10px;
         viewbox-width: 8;
         viewbox-height: 8;
         commands: root.glyph;
         stroke: root.glyph-color;
-        stroke-width: 1.8px;
+        stroke-width: 2px;
+        stroke-line-cap: round;
         opacity: root.lit ? 1 : 0;
         animate opacity { duration: 120ms; easing: ease; }
         accessible-role: none;
