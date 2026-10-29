@@ -44,7 +44,7 @@ fn to_int(n: usize) -> i32 {
     i32::try_from(n).unwrap_or(i32::MAX)
 }
 
-/// A select's index when no entry holds the value: the `ComboBox` shows nothing.
+/// A select's index when no entry holds the value: the `Select` shows nothing.
 const NO_SELECTION: i32 = -1;
 
 /// The path between ` › `, as the webview's crumbs `title` joins them.
