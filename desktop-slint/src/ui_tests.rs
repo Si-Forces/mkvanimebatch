@@ -943,6 +943,186 @@ fn the_inspector_shows_every_field_and_fits_the_narrowest_window() {
     app.hide().unwrap();
 }
 
+/// The Inspector's error can be selected and copied, as its `user-select: text`: a read-only
+/// text input with the error as its value, wrapped in the pane at the narrowest window. A Tab
+/// stop, it draws the ring for keyboard focus alone (`:focus-visible`).
+#[test]
+fn the_inspector_error_wraps_and_can_be_selected_and_copied() {
+    use i_slint_backend_testing::AccessibleRole;
+    use i_slint_core::platform::Clipboard;
+    use i_slint_core::window::WindowInner;
+    use slint::platform::{Key, WindowEvent};
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(760.0, 520.0));
+    app.show().unwrap();
+    let error = "Inspection failed: /media/Some.Long.Release.Name.With.No.Spaces/Season.1/ep1.mkv";
+    let mut state = ViewState::new(None);
+    state.remux.rows = Arc::new(vec![row("Show - 01.mkv")]);
+    state.remux.empty = None;
+    let mut view = sample_view();
+    view.error = Some(error.into());
+    state.remux.inspector = Some(view);
+    apply(&app, &state);
+
+    let found: Vec<_> = ElementHandle::find_by_element_type_name(&app, "TextInput")
+        .filter(|element| element.accessible_value().as_deref() == Some(error))
+        .collect();
+    assert_eq!(found.len(), 1, "one error field");
+    let field = &found[0];
+    assert_eq!(field.accessible_role(), Some(AccessibleRole::TextInput));
+    assert_eq!(field.accessible_read_only(), Some(true));
+    let (at, size) = (field.absolute_position(), field.size());
+    assert!(
+        at.x + size.width <= 760.0,
+        "inside the pane: {at:?} {size:?}"
+    );
+    assert!(size.height > 2.0 * 12.0 * 1.5, "it wraps: {size:?}");
+
+    // Focused by a click, Ctrl+A selects it all and Ctrl+C copies it.
+    pointer(&app, field, true);
+    pointer(&app, field, false);
+    let chord = |text: &str| {
+        let press = |text: slint::SharedString| {
+            app.window()
+                .dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
+            app.window()
+                .dispatch_event(WindowEvent::KeyReleased { text });
+        };
+        app.window().dispatch_event(WindowEvent::KeyPressed {
+            text: Key::Control.into(),
+        });
+        press(text.into());
+        app.window().dispatch_event(WindowEvent::KeyReleased {
+            text: Key::Control.into(),
+        });
+    };
+    chord("a");
+    chord("c");
+    let copied = WindowInner::from_pub(app.window())
+        .context()
+        .platform()
+        .clipboard_text(Clipboard::DefaultClipboard);
+    assert_eq!(copied.as_deref(), Some(error));
+
+    // The ring goes around the error's box: none after the click, one once Tab reaches it, none
+    // once Tab leaves it.
+    let around = |&(x, y, width, height): &(f32, f32, f32, f32)| {
+        x < at.x && y < at.y && x + width > at.x + size.width && y + height > at.y + size.height
+    };
+    assert!(!rings(&app).iter().any(around), "no ring after a click");
+    for _ in 0..400 {
+        if rings(&app).iter().any(around) {
+            break;
+        }
+        key(&app, Key::Tab);
+    }
+    assert!(rings(&app).iter().any(around), "Tab draws the ring");
+    key(&app, Key::Tab);
+    assert!(
+        !rings(&app).iter().any(around),
+        "no ring once the focus has left"
+    );
+    app.hide().unwrap();
+}
+
+/// A release title too long for the list at the narrowest window wraps, as .release-title does,
+/// a spaceless one too; it stays inside the list.
+#[test]
+fn a_long_release_title_wraps_at_the_narrowest_window() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(760.0, 520.0));
+    app.show().unwrap();
+    let title = |title: &str| {
+        let mut state = ViewState::new(None);
+        state.remux.title = title.into();
+        apply(&app, &state);
+        let element = only(&app, title);
+        let (at, size) = (element.absolute_position(), element.size());
+        assert!(
+            at.x + size.width <= 760.0 - 248.0,
+            "inside the list: {size:?}"
+        );
+        size.height
+    };
+    let line = title("Frieren");
+    for long in [
+        "Sousou no Frieren Season 2 BDRip 1080p HEVC FLAC Dual Audio",
+        "Sousou.no.Frieren.Season.2.BDRip.1080p.HEVC.FLAC.Dual.Audio",
+    ] {
+        let height = title(long);
+        assert!(
+            height > 1.5 * line,
+            "{long:?} wraps: {height} against {line}"
+        );
+    }
+    app.hide().unwrap();
+}
+
+/// The empty-state card takes the list's width less its 12px side padding, up to 340px
+/// (`margin: 48px auto` in `.list { padding: 0 12px }`): 292px at 760px, where the list is
+/// 760 - 196 (sidebar) - 248 (Inspector) wide.
+#[test]
+fn the_empty_card_follows_the_lists_side_padding() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(760.0, 520.0));
+    apply(&app, &ViewState::new(None));
+    app.show().unwrap();
+    let width = only(&app, "No episodes yet").size().width;
+    assert!((width - 292.0).abs() < 0.5, "the card is {width}px wide");
+    app.hide().unwrap();
+}
+
+/// The number fields and "Encoder complexity" show their label's `title` as a hover tooltip over
+/// the whole field, its buttons and box included; the complexity box reads it as its description.
+#[test]
+fn the_number_fields_and_the_complexity_show_their_tooltips_on_hover() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window()
+        .set_size(slint::LogicalSize::new(920.0, 1100.0));
+    apply(&app, &ViewState::new(None));
+    app.show().unwrap();
+    app.invoke_open_sheet(Mode::Remux, "".into());
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1));
+    let limits = crate::settings::limits();
+    let shown = |tip: &str| ElementHandle::find_by_accessible_label(&app, tip).count();
+    let over = |label: &str| {
+        let element = only(&app, label);
+        let (at, size) = (element.absolute_position(), element.size());
+        // In from outside the field, then the show delay.
+        hover_at(&app, slint::LogicalPosition::new(1.0, 1.0));
+        app.window()
+            .dispatch_event(slint::platform::WindowEvent::PointerMoved {
+                position: slint::LogicalPosition::new(
+                    at.x + size.width / 2.0,
+                    at.y + size.height / 2.0,
+                ),
+            });
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_secs(2));
+    };
+    for (label, tip) in [
+        ("Increase workers", &limits.workers_tip),
+        ("Workers", &limits.workers_tip),
+        ("Decrease disk I/O jobs", &limits.io_jobs_tip),
+        ("FFmpeg threads", &limits.ffmpeg_threads_tip),
+        ("Encoder complexity", &limits.complexity_tip),
+        ("Encoder complexity value", &limits.complexity_tip),
+    ] {
+        assert_eq!(shown(tip), 0, "{label}: hidden before the hover");
+        over(label);
+        assert_eq!(shown(tip), 1, "{label}: shown on hover");
+        hover_at(&app, slint::LogicalPosition::new(1.0, 1.0));
+    }
+    assert_eq!(
+        only(&app, "Encoder complexity value").accessible_description(),
+        Some(limits.complexity_tip.clone())
+    );
+    app.hide().unwrap();
+}
+
 /// Scrolls the pane at `x` to its end with the mouse wheel, or back to its top for `up`.
 fn scroll(app: &App, x: f32, up: bool) {
     app.window()

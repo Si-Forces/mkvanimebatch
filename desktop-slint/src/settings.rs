@@ -241,8 +241,8 @@ pub(crate) fn map_chips(chips: &Chips) -> ChipTexts {
     }
 }
 
-/// The sheet's limits: the complexity slider's range and the number fields' tooltips, from the
-/// core's ranges (mkv-core `request.rs`).
+/// The sheet's limits: the complexity slider's range and the number fields' and the complexity's
+/// tooltips, from the core's ranges (mkv-core `request.rs`).
 pub(crate) fn limits() -> SheetLimits {
     let range =
         |range: &std::ops::RangeInclusive<usize>| format!("{}–{}", range.start(), range.end());
@@ -250,6 +250,12 @@ pub(crate) fn limits() -> SheetLimits {
     SheetLimits {
         complexity_min: complexity(*COMPLEXITY_RANGE.start()),
         complexity_max: complexity(*COMPLEXITY_RANGE.end()),
+        complexity_tip: format!(
+            "libopus encoding complexity: {} is fastest, {} is best quality",
+            COMPLEXITY_RANGE.start(),
+            COMPLEXITY_RANGE.end()
+        )
+        .into(),
         workers_tip: format!(
             "Episodes processed at once ({}; empty is auto)",
             range(&WORKERS_RANGE)
@@ -1141,11 +1147,7 @@ mod tests {
         // A picked folder goes into the field and the mode that asked for it, and an input
         // folder is scanned.
         let drafts = Drafts {
-            send: Intents {
-                core: core.clone(),
-                runtime: runtime.handle().clone(),
-                window: app.as_weak(),
-            },
+            send: Intents::new(&app, core.clone(), runtime.handle().clone()),
             edits: publisher.edits(),
         };
         drafts.folder_picked(&app, Mode::Extract, OutDir, Some("/picked".into()));
@@ -1358,6 +1360,10 @@ mod tests {
     fn the_limits_come_from_the_cores_ranges() {
         let limits = limits();
         assert_eq!((limits.complexity_min, limits.complexity_max), (0, 10));
+        assert_eq!(
+            limits.complexity_tip,
+            "libopus encoding complexity: 0 is fastest, 10 is best quality"
+        );
         assert_eq!(
             limits.workers_tip,
             "Episodes processed at once (1–64; empty is auto)"

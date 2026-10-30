@@ -159,7 +159,9 @@ pub(crate) fn wire(app: &App, send: Intents) {
             return;
         }
         app.set_run_pending(true);
-        let (mode, window) = (app.get_mode(), shown.clone());
+        // A Run clicked while a confirmed clear is unanswered waits for it in `Intents`, locked
+        // from the click on all the same.
+        let (mode, window) = (app.get_mode(), s.window.clone());
         let intent = Intent::Run {
             mode: pipeline(mode),
         };
@@ -183,7 +185,8 @@ pub(crate) fn wire(app: &App, send: Intents) {
         }
     });
 
-    // Confirmed, the cache of the sheet's mode is cleared; the core logs it, or its error.
+    // Confirmed, the cache of the sheet's mode is cleared; the core logs it, or its error. Every
+    // Intent sent after it, a second clear too, waits for its answer in `Intents`.
     let dialogs = Rc::new(Dialogs::default());
     let (queue, shown) = (Rc::clone(&dialogs), app.as_weak());
     app.global::<Sheet>().on_clear_cache(move || {
@@ -229,7 +232,7 @@ pub(crate) fn wire(app: &App, send: Intents) {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::intents::tests::{Episodes, NoJobs, NoSamples};
+    use crate::intents::tests::{Episodes, HeldClear, NoJobs, NoSamples};
     use crate::publisher::{install_models, SlintPublisher};
     use i_slint_backend_testing::{mock_elapsed_time, AccessibleRole, ElementHandle};
     use mkv_core::manifest::InspectionManifest;
@@ -675,12 +678,24 @@ pub(crate) mod tests {
 
     /// "Clear inspection cache…" asks first: Clear cache clears the mode's cache, which the core
     /// logs; Cancel and Esc send nothing. Cancel takes the focus as the dialog shows, and the
-    /// sheet's button has it back once it closes.
+    /// sheet's button has it back once it closes. Clearing locks nothing, and a second clear asks
+    /// again. A Run clicked before the clear is answered locks at the click, and it and an untick
+    /// after it wait for the answer: then the Run reaches the core first, so the untick is
+    /// refused as the batch has started (the webview's Intent chain).
     #[test]
     fn clear_cache_asks_first_and_sends_only_once_confirmed() {
         i_slint_backend_testing::init_no_event_loop();
         let runtime = runtime();
-        let (app, core) = wired(&runtime, NoJobs);
+        let (inspector, clears) = HeldClear::new();
+        let (app, core) = wired_with(&runtime, inspector, Held);
+        input_dir(&runtime, &core, PipelineMode::Remux);
+        let scan = Intent::ScanDirectory {
+            mode: PipelineMode::Remux,
+            path: "/show".into(),
+            force: false,
+            no_cache: false,
+        };
+        assert_eq!(runtime.block_on(core.dispatch(scan)), Ok(true));
         // Tall enough for the whole sheet: a search skips the controls scrolled out of view.
         app.window()
             .set_size(slint::LogicalSize::new(920.0, 1200.0));
@@ -710,17 +725,34 @@ pub(crate) mod tests {
         button(&app, "Clear cache").invoke_accessible_default_action();
         ticks();
         assert!(!app.get_dialog_open());
-        // The core clears off its actor and logs once the clear is over: wait for the line (at
-        // most a second), as a log read can reach the actor first.
-        let mut lines = 0;
+        assert!(!app.get_locked(), "clearing locks nothing");
+        ask();
+        key(&app, slint::platform::Key::Escape);
+
+        // The clear is held: a Run clicked now locks at the click; it and an untick wait.
+        app.invoke_run();
+        assert!(app.get_run_pending() && app.get_locked());
+        app.invoke_set_selected("a".into(), false);
+        let state = || runtime.block_on(core.state()).unwrap();
+        let a_selected = || {
+            let rows = state().remux.rows;
+            rows.iter()
+                .any(|row| row.id.as_str() == "a" && row.selected)
+        };
+        assert_eq!(state().run.mode, None, "no Run while the clear is held");
+        assert!(a_selected(), "no untick while the clear is held");
+
+        // The Run reaches the core first: wait for its start (at most a second).
+        clears.send(Ok(())).unwrap();
         for _ in 0..100 {
-            lines = log_lines(&runtime, &core);
-            if lines > 0 {
+            if state().run.mode.is_some() {
                 break;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert_eq!(lines, 1, "the cache line");
+        assert_eq!(state().run.mode, Some(PipelineMode::Remux));
+        assert!(a_selected(), "the untick came after the start: refused");
+        assert_eq!(log_lines(&runtime, &core), 1, "the cache line");
         app.hide().unwrap();
     }
 
