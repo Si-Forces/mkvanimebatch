@@ -44,7 +44,7 @@ type Hold = Option<VecDeque<(&'static str, Intent, Answered)>>;
 
 #[derive(Clone)]
 pub(crate) struct Intents {
-    pub(crate) core: CoreHandle,
+    core: CoreHandle,
     pub(crate) runtime: Handle,
     pub(crate) window: slint::Weak<App>,
     /// Shared by every clone, so the window's Intents keep one order.
@@ -602,8 +602,11 @@ pub(crate) mod tests {
         assert!(a_selected(), "held behind the second clear");
 
         clears.send(Ok(())).unwrap();
-        assert_eq!(next(), ("clear again", Ok(true)));
-        assert_eq!(next(), ("set_selected", Ok(true)));
+        // The untick is sent before the clear's callback runs, but each answer arrives on its own
+        // runtime task, so the two may come in either order.
+        let mut got = [next(), next()];
+        got.sort_by_key(|(name, _)| *name);
+        assert_eq!(got, [("clear again", Ok(true)), ("set_selected", Ok(true))]);
         assert!(!a_selected());
     }
 
