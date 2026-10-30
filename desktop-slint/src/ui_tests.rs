@@ -1135,7 +1135,8 @@ fn text_input_of(app: &App, label: &str) -> ElementHandle {
 
 /// A focused field with text shows no clear button, as the webview's `<input>` has none: nothing
 /// a pointer can press appears in it, and the complexity box keeps its room for "10". The text
-/// starts at `.field`'s inset. Each field reads as a text input with its value and placeholder.
+/// starts at `.field`'s inset. Each field reads as a text input with its value and placeholder,
+/// and a locked one refuses a screen reader's edit.
 #[test]
 fn a_focused_field_shows_no_clear_button_and_reads_as_a_text_input() {
     use i_slint_backend_testing::AccessibleRole;
@@ -1190,6 +1191,16 @@ fn a_focused_field_shows_no_clear_button_and_reads_as_a_text_input() {
     assert_eq!(
         folder.accessible_placeholder_text().as_deref(),
         Some("Auto: fonts folder")
+    );
+
+    // Locked by a batch, a field refuses a screen reader's edit, as it refuses typing.
+    app.set_busy(true);
+    tick();
+    only(&app, label).set_accessible_value("3");
+    assert_eq!(
+        app.get_remux_form().complexity,
+        "10",
+        "a locked field keeps its text"
     );
     app.hide().unwrap();
 }

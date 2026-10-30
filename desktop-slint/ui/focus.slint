@@ -218,7 +218,11 @@ export component TextField inherits Rectangle {
     accessible-read-only: root.read-only;
     accessible-value: root.text;
     accessible-placeholder-text: root.placeholder;
+    // A screen reader's edit, refused as typing is: not in a disabled or read-only field.
     accessible-action-set-value(value) => {
+        if !root.enabled || root.read-only {
+            return;
+        }
         root.text = value;
         root.edited(value);
     }
