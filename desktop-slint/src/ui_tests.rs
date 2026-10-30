@@ -1134,8 +1134,8 @@ fn text_input_of(app: &App, label: &str) -> ElementHandle {
 }
 
 /// A focused field with text shows no clear button, as the webview's `<input>` has none: nothing
-/// a pointer can press appears in it, and the complexity box keeps its room for "10". Each field
-/// reads as a text input with its value and placeholder.
+/// a pointer can press appears in it, and the complexity box keeps its room for "10". The text
+/// starts at `.field`'s inset. Each field reads as a text input with its value and placeholder.
 #[test]
 fn a_focused_field_shows_no_clear_button_and_reads_as_a_text_input() {
     use i_slint_backend_testing::AccessibleRole;
@@ -1165,7 +1165,7 @@ fn a_focused_field_shows_no_clear_button_and_reads_as_a_text_input() {
     };
     let room = || text_input_of(&app, label).size().width;
     let unfocused = room();
-    assert_eq!(presses(), 0);
+    let unfocused_presses = presses();
     // The text starts where `.field`'s does: inside its 1px border and 10px padding.
     let inset = text_input_of(&app, label).absolute_position().x - field.absolute_position().x;
     assert_eq!(inset, 11.0, "the text's inset");
@@ -1173,7 +1173,11 @@ fn a_focused_field_shows_no_clear_button_and_reads_as_a_text_input() {
     pointer(&app, &field, false);
     tick();
     assert_eq!(app.global::<Sheet>().get_focused(), "complexity");
-    assert_eq!(presses(), 0, "no clear button in the focused field");
+    assert_eq!(
+        presses(),
+        unfocused_presses,
+        "no clear button in the focused field"
+    );
     assert_eq!(room(), unfocused, "the focus takes no room from the text");
     assert!(
         unfocused >= 24.0,
@@ -1191,7 +1195,8 @@ fn a_focused_field_shows_no_clear_button_and_reads_as_a_text_input() {
 }
 
 /// A text longer than its field slides left as it is typed, so its end, with the caret, stays in
-/// view.
+/// view; Home brings its start back, End its end, and a text cut back to fit sits at the start. A
+/// press in the field's side padding focuses it, as anywhere in an `<input>`'s box.
 #[test]
 fn a_text_longer_than_its_field_keeps_the_caret_in_view() {
     i_slint_backend_testing::init_no_event_loop();
@@ -1215,23 +1220,41 @@ fn a_text_longer_than_its_field_keeps_the_caret_in_view() {
     app.show().unwrap();
 
     let field = only(&app, "Track title");
-    pointer(&app, &field, true);
-    pointer(&app, &field, false);
+    let (at, size) = (field.absolute_position(), field.size());
+    // Pressed in the padding, outside the text's clip: the keys below reach it only if it focused.
+    click_at(&app, at.x + 4.0, at.y + size.height / 2.0);
     let typed = "W".repeat(40);
     for letter in typed.chars() {
         key(&app, letter.to_string());
     }
     i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1));
     assert_eq!(app.get_sub_title(), typed.as_str());
-    let (at, size) = (field.absolute_position(), field.size());
-    let text = text_input_of(&app, "Track title");
-    let (text_at, text_size) = (text.absolute_position(), text.size());
-    assert!(text_size.width > size.width, "longer than the field");
-    assert!(text_at.x < at.x, "slid left: {text_at:?} in {at:?}");
+    let text = || {
+        let text = text_input_of(&app, "Track title");
+        (text.absolute_position().x, text.size().width)
+    };
+    // The clip: the field less `.field`'s 11px inset on each side.
+    let (left, right) = (at.x + 11.0, at.x + size.width - 11.0);
+    let end_in_view = |(x, width): (f32, f32)| x < left && x + width <= right;
+    assert!(text().1 > size.width, "longer than the field");
     assert!(
-        text_at.x + text_size.width <= at.x + size.width,
-        "its end in view: {text_at:?} {text_size:?} in {at:?} {size:?}"
+        end_in_view(text()),
+        "its end in view: {:?} in {left}..{right}",
+        text()
     );
+    let tick = || i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1));
+    key(&app, slint::platform::Key::Home);
+    tick();
+    assert_eq!(text().0, left, "Home shows its start");
+    key(&app, slint::platform::Key::End);
+    tick();
+    assert!(end_in_view(text()), "End shows its end again: {:?}", text());
+    for _ in 0..36 {
+        key(&app, slint::platform::Key::Backspace);
+    }
+    tick();
+    assert_eq!(app.get_sub_title(), "WWWW");
+    assert_eq!(text().0, left, "a text that fits sits at the start");
     app.hide().unwrap();
 }
 

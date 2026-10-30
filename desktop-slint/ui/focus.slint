@@ -201,6 +201,8 @@ export component TextField inherits Rectangle {
     out property <bool> has-focus: input.has-focus;
     callback edited(text: string);
     callback accepted(text: string);
+    // .field's 1px border and 10px side padding, where the text and the placeholder start.
+    property <length> inset: 11px;
 
     min-width: 0px;
     horizontal-stretch: 1;
@@ -225,8 +227,8 @@ export component TextField inherits Rectangle {
     }
 
     if root.text == "" && !root.has-focus: Text {
-        x: 11px;
-        width: root.width - 22px;
+        x: root.inset;
+        width: root.width - 2 * root.inset;
         text: root.placeholder;
         color: Theme.hint;
         font-family: input.font-family;
@@ -270,12 +272,24 @@ export component TextField inherits Rectangle {
             }
         }
 
-        // The text inside .field's 1px border and 10px side padding, clipped: a text longer
-        // than the field slides so the caret stays in view. Both at least 1px wide: a TextInput
-        // of no width, or clipped away, cannot take the focus.
+        // A press in the side padding focuses the field too, as anywhere in an `<input>`'s box:
+        // the clip below takes only the presses inside it.
+        TouchArea {
+            enabled: root.enabled;
+            mouse-cursor: MouseCursor.text;
+            pointer-event(event) => {
+                if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
+                    input.focus();
+                }
+            }
+        }
+
+        // The text inside the inset, clipped: a text longer than the field slides so the caret
+        // stays in view. The clip is at least 1px wide: an empty clip hides the TextInput, which
+        // then cannot take the focus.
         Rectangle {
-            x: 11px;
-            width: max(1px, parent.width - 22px);
+            x: root.inset;
+            width: max(1px, parent.width - 2 * root.inset);
             clip: true;
             input := TextInput {
                 // How far the text slid left (zero or negative) to keep the caret in view.
@@ -292,8 +306,7 @@ export component TextField inherits Rectangle {
                 selection-foreground-color: Theme.fg;
                 // The field reads as the text input.
                 accessible-role: none;
-                // The least slide that brings the caret, at `at.x + scroll`, back within
-                // 0..room.
+                // The least slide that brings the caret, at `at.x + scroll`, back within 0..room.
                 cursor-position-changed(at) => {
                     self.scroll = self.scroll.clamp(-at.x, self.room - at.x);
                 }
