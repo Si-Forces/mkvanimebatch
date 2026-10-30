@@ -183,6 +183,133 @@ export component Pressable inherits Rectangle {
     }
 }
 
+// A text field (index.html's `<input>`, style.css `.field`): a bare TextInput in the field's box,
+// with no clear button, as the webview's input has none. Like the std LineEdit it has a context
+// menu (Undo, Redo, Cut, Copy, Paste, Select All), keeps the caret in view by scrolling a text
+// longer than the field, and reads as a text input with its value and placeholder, which a screen
+// reader can set as typed. The placeholder is drawn in Theme.hint and hidden while the field has
+// the focus, where an input method's preedit text would draw over it. Any focus draws the ring:
+// `:focus-visible` matches a focused text input whether a key or the pointer focused it.
+export component TextField inherits Rectangle {
+    in-out property <string> text <=> input.text;
+    in property <string> placeholder;
+    in property <bool> enabled <=> input.enabled;
+    in property <bool> read-only <=> input.read-only;
+    in property <string> font-family <=> input.font-family;
+    in property <TextHorizontalAlignment> horizontal-alignment <=> input.horizontal-alignment;
+    in property <InputType> input-type <=> input.input-type;
+    out property <bool> has-focus: input.has-focus;
+    callback edited(text: string);
+    callback accepted(text: string);
+
+    min-width: 0px;
+    horizontal-stretch: 1;
+    height: 34px;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Theme.line;
+    background: Theme.field;
+    opacity: root.enabled ? 1 : 0.75;
+    forward-focus: input;
+    accessible-role: text-input;
+    accessible-enabled: root.enabled;
+    accessible-read-only: root.read-only;
+    accessible-value: root.text;
+    accessible-placeholder-text: root.placeholder;
+    accessible-action-set-value(value) => {
+        root.text = value;
+        root.edited(value);
+    }
+    accessible-action-set-selection-offsets(anchor, focus) => {
+        input.set-selection-offsets(anchor, focus);
+    }
+
+    if root.text == "" && !root.has-focus: Text {
+        x: 10px;
+        width: root.width - 20px;
+        text: root.placeholder;
+        color: Theme.hint;
+        font-family: input.font-family;
+        font-size: input.font-size;
+        horizontal-alignment: root.horizontal-alignment;
+        vertical-alignment: center;
+        overflow: elide;
+        accessible-role: none;
+    }
+
+    ContextMenuArea {
+        enabled: root.enabled;
+        Menu {
+            if !root.read-only: MenuItem {
+                title: "Undo";
+                activated => { input.undo(); }
+            }
+            if !root.read-only: MenuItem {
+                title: "Redo";
+                activated => { input.redo(); }
+            }
+            if !root.read-only: MenuSeparator { }
+            if !root.read-only: MenuItem {
+                title: "Cut";
+                enabled: input.has-selection;
+                activated => { input.cut(); }
+            }
+            MenuItem {
+                title: "Copy";
+                enabled: input.has-selection;
+                activated => { input.copy(); }
+            }
+            if !root.read-only: MenuItem {
+                title: "Paste";
+                activated => { input.paste(); }
+            }
+            MenuItem {
+                title: "Select All";
+                enabled: root.text != "";
+                activated => { input.select-all(); }
+            }
+        }
+
+        // The text inside .field's 10px side padding, clipped: a text longer than the field
+        // slides so the caret stays in view.
+        Rectangle {
+            x: 10px;
+            width: parent.width - 20px;
+            clip: true;
+            input := TextInput {
+                // How far the text slid left (negative) to keep the caret in view.
+                property <length> scroll;
+                x: min(0px, max(parent.width - self.width - self.text-cursor-width, self.scroll));
+                // At least 1px: a TextInput of no width cannot take the focus.
+                width: max(1px, parent.width - self.text-cursor-width, self.preferred-width);
+                height: 100%;
+                vertical-alignment: center;
+                font-size: 12px;
+                color: Theme.fg;
+                selection-background-color: Theme.accent-ring;
+                selection-foreground-color: Theme.fg;
+                // The field reads as the text input.
+                accessible-role: none;
+                cursor-position-changed(at) => {
+                    if at.x + self.scroll < 0px {
+                        self.scroll = -at.x;
+                    } else if at.x + self.scroll > parent.width - self.text-cursor-width {
+                        self.scroll = parent.width - self.text-cursor-width - at.x;
+                    }
+                }
+                edited => { root.edited(self.text); }
+                accepted => { root.accepted(self.text); }
+            }
+        }
+    }
+
+    if root.has-focus: FocusRing {
+        around-width: root.width;
+        around-height: root.height;
+        radius: root.border-radius;
+    }
+}
+
 // A select (index.html's `<select>`, style.css `.field`): it shows the entry picked, and a click,
 // Enter, Space or a screen reader's action opens the list of its entries under it. In the list the
 // arrows move the highlight only; a click, Enter or Space picks an entry, Esc or a click outside

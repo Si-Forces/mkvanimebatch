@@ -3,10 +3,10 @@
 // bindings only: the host (desktop-slint/src/settings.rs) maps the published Settings Draft, sends
 // the edits and holds every rule: which field a publication writes back, the steppers' repeat, the
 // hints and the preset texts.
-import { Button, CheckBox, LineEdit, ScrollView, Slider } from "std-widgets.slint";
+import { Button, CheckBox, ScrollView, Slider } from "std-widgets.slint";
 import { GlassPane, Theme } from "theme.slint";
 import { CapButton, PillButton } from "jobs.slint";
-import { Focus, Pressable, Select, TipCard } from "focus.slint";
+import { Focus, Pressable, Select, TextField, TipCard } from "focus.slint";
 
 // One mode's Settings Draft as the sheet shows it, every field as typed but the two checkboxes.
 // The remux-only fields stay empty in extract's. `bitrate` is the index of the bitrate select's
@@ -255,82 +255,52 @@ component Field inherits Rectangle {
 
 // A text field of the draft `key`: each keystroke is an edit, Enter or leaving it once edited a
 // change (Sheet). `flagged`: the field the last Run could not read (.input-error).
-component DraftEdit inherits Rectangle {
+component DraftEdit inherits TextField {
     in property <string> key;
-    in-out property <string> text <=> edit.text;
-    // Drawn here in Theme.hint rather than as the LineEdit's placeholder-text, whose colour
-    // cannot be set.
-    in property <string> placeholder;
-    in property <bool> enabled <=> edit.enabled;
     in property <string> label;
     in property <string> description;
     in property <bool> flagged;
-    in property <bool> mono;
-    in property <TextHorizontalAlignment> align: left;
-    // `number` for the integer fields, which then take digits alone (input type="number").
-    in property <InputType> input-type <=> edit.input-type;
     // Mirrors Sheet.focus-serial, which a change of fires on.
     property <int> serial: Sheet.focus-serial;
-    min-width: 0px;
-    horizontal-stretch: 1;
-    min-height: edit.min-height;
-    preferred-height: edit.preferred-height;
-    forward-focus: edit;
+    accessible-label: root.label;
+    accessible-description: root.description;
+    border-color: root.flagged ? Theme.err : Theme.line;
     init => { self.grab(); }
     changed serial => { self.grab(); }
     // A disabled field is passed over, as Pressable's restore does: its focus() would move the
     // focus on, out of the sheet once every control after it is locked.
     function grab() {
         if root.enabled && Sheet.focus-key == root.key && root.key != "" {
-            edit.focus();
+            root.focus();
             // A field made with the focus reports no change of it.
-            if edit.has-focus {
+            if root.has-focus {
                 Sheet.enter(root.key);
                 Sheet.reveal(root.absolute-position.y, root.height);
             }
         }
     }
-    edit := LineEdit {
-        width: root.width;
-        height: root.height;
-        font-family: root.mono ? "JetBrains Mono" : "Onest";
-        horizontal-alignment: root.align;
-        accessible-label: root.label;
-        accessible-description: root.description;
-        accessible-placeholder-text: root.placeholder;
-        edited => {
-            Sheet.changed-since = true;
-            Sheet.edited(root.key);
-        }
-        accepted => { Sheet.accept(root.key); }
-        changed has-focus => {
-            if self.has-focus {
-                Sheet.enter(root.key);
-                Sheet.reveal(root.absolute-position.y, root.height);
-            } else {
-                Sheet.leave(root.key);
-            }
+    edited => {
+        Sheet.changed-since = true;
+        Sheet.edited(root.key);
+    }
+    accepted => { Sheet.accept(root.key); }
+    changed has-focus => {
+        if self.has-focus {
+            Sheet.enter(root.key);
+            Sheet.reveal(root.absolute-position.y, root.height);
+        } else {
+            Sheet.leave(root.key);
         }
     }
-    // The placeholder, inset as the LineEdit's text (fluent pads it 12px). Hidden while the field
-    // has the focus, where an input method's preedit text would draw over it.
-    if edit.text == "" && !edit.has-focus: Text {
-        x: 12px;
-        width: root.width - 24px;
-        text: root.placeholder;
-        color: root.enabled ? Theme.hint : Theme.hint.with-alpha(0.6);
-        font-family: edit.font-family;
-        font-size: edit.font-size;
-        horizontal-alignment: root.align;
-        vertical-alignment: center;
-        overflow: elide;
-        accessible-role: none;
-    }
-    // The flag's ring, over the field's own border.
+    // .input-error's 2px halo, around the err border.
     if root.flagged: Rectangle {
-        border-radius: 6px;
+        x: -2px;
+        y: -2px;
+        width: root.width + 4px;
+        height: root.height + 4px;
+        border-radius: root.border-radius + 2px;
         border-width: 2px;
-        border-color: Theme.err;
+        border-color: Theme.err-soft;
     }
 }
 
@@ -350,7 +320,8 @@ component FolderField inherits Field {
             enabled: root.enabled;
             label: root.label;
             flagged: root.flagged;
-            mono: true;
+            // .field.mono
+            font-family: "JetBrains Mono";
         }
         Button {
             text: "Browse…";
@@ -443,7 +414,7 @@ component StepperField inherits Field {
             flagged: root.flagged;
             description: root.description;
             input-type: root.input-type;
-            align: center;
+            horizontal-alignment: center;
         }
         StepButton {
             key: root.key;
@@ -777,7 +748,7 @@ export component SettingsSheet inherits GlassPane {
                                         description: root.limits.complexity-tip;
                                         flagged: root.invalid == "complexity";
                                         input-type: number;
-                                        align: center;
+                                        horizontal-alignment: center;
                                     }
                                 }
                             }
