@@ -351,8 +351,6 @@ component StepButton inherits Pressable {
     border-bottom-left-radius: root.up ? 0px : 8px;
     border-top-right-radius: root.up ? 8px : 0px;
     border-bottom-right-radius: root.up ? 8px : 0px;
-    border-width: 1px;
-    border-color: Theme.line;
     background: self.pressed ? Theme.sel : self.hovered && root.enabled ? Theme.hover : Theme.field;
     opacity: root.enabled ? 1 : 0.5;
     cursor: default;
@@ -375,6 +373,21 @@ component StepButton inherits Pressable {
     changed hovered => {
         if !self.hovered {
             Sheet.step-released();
+        }
+    }
+    // The border on three sides (.stepper-btn.minus has no right border, .plus no left one): the
+    // field's own border sits between them. Drawn 1px wider, the inner side clipped off.
+    Rectangle {
+        clip: true;
+        Rectangle {
+            x: root.up ? -1px : 0px;
+            width: parent.width + 1px;
+            border-top-left-radius: root.border-top-left-radius;
+            border-bottom-left-radius: root.border-bottom-left-radius;
+            border-top-right-radius: root.border-top-right-radius;
+            border-bottom-right-radius: root.border-bottom-right-radius;
+            border-width: 1px;
+            border-color: Theme.line;
         }
     }
     Text {
@@ -415,6 +428,9 @@ component StepperField inherits Field {
             description: root.description;
             input-type: root.input-type;
             horizontal-alignment: center;
+            // .number-stepper .field: square between its buttons, which draw no border of their
+            // own against it.
+            border-radius: 0px;
         }
         StepButton {
             key: root.key;
@@ -749,6 +765,8 @@ export component SettingsSheet inherits GlassPane {
                                         flagged: root.invalid == "complexity";
                                         input-type: number;
                                         horizontal-alignment: center;
+                                        // .cplx-val's --font-num.
+                                        font-family: "Unbounded";
                                     }
                                 }
                             }
