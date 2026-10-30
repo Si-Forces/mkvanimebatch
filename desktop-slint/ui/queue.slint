@@ -597,7 +597,12 @@ export component QueuePane inherits Rectangle {
                     color: Theme.fg;
                     font-size: 18px;
                     font-weight: 700;
-                    overflow: elide;
+                    // At a space, else anywhere, as .release-title's overflow-wrap: anywhere: a
+                    // folder name may have no space to break at. `text-wrap: balance` has no
+                    // counterpart.
+                    wrap: word-wrap;
+                    // Not its longest word's width: the list's width is the header's.
+                    min-width: 0px;
                     horizontal-stretch: 1;
                 }
             }
@@ -739,11 +744,15 @@ export component QueuePane inherits Rectangle {
             }
 
             // .empty-state-card: at most 340px wide, centred; the folder icon, or the spinner
-            // while scanning.
+            // while scanning. Its 48px margin is vertical alone at the sides, where the list's
+            // own 12px padding is all (`margin: 48px auto`, `.list { padding: 0 12px }`).
             if root.head.card-shown: HorizontalLayout {
                 width: parent.width;
                 height: parent.height;
-                padding: 48px;
+                padding-top: 48px;
+                padding-bottom: 48px;
+                padding-left: 12px;
+                padding-right: 12px;
                 alignment: center;
                 VerticalLayout {
                     max-width: 340px;

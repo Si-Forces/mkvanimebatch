@@ -241,7 +241,8 @@ pub(crate) fn map_chips(chips: &Chips) -> ChipTexts {
     }
 }
 
-/// The sheet's limits: the complexity slider's range and the number fields' tooltips, from the
+/// The sheet's limits: the complexity slider's range and the number fields' and the complexity's
+/// tooltips, from the
 /// core's ranges (mkv-core `request.rs`).
 pub(crate) fn limits() -> SheetLimits {
     let range =
@@ -250,6 +251,12 @@ pub(crate) fn limits() -> SheetLimits {
     SheetLimits {
         complexity_min: complexity(*COMPLEXITY_RANGE.start()),
         complexity_max: complexity(*COMPLEXITY_RANGE.end()),
+        complexity_tip: format!(
+            "libopus encoding complexity: {} is fastest, {} is best quality",
+            COMPLEXITY_RANGE.start(),
+            COMPLEXITY_RANGE.end()
+        )
+        .into(),
         workers_tip: format!(
             "Episodes processed at once ({}; empty is auto)",
             range(&WORKERS_RANGE)
@@ -1358,6 +1365,10 @@ mod tests {
     fn the_limits_come_from_the_cores_ranges() {
         let limits = limits();
         assert_eq!((limits.complexity_min, limits.complexity_max), (0, 10));
+        assert_eq!(
+            limits.complexity_tip,
+            "libopus encoding complexity: 0 is fastest, 10 is best quality"
+        );
         assert_eq!(
             limits.workers_tip,
             "Episodes processed at once (1–64; empty is auto)"
