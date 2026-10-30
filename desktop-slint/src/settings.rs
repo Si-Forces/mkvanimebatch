@@ -1147,11 +1147,7 @@ mod tests {
         // A picked folder goes into the field and the mode that asked for it, and an input
         // folder is scanned.
         let drafts = Drafts {
-            send: Intents {
-                core: core.clone(),
-                runtime: runtime.handle().clone(),
-                window: app.as_weak(),
-            },
+            send: Intents::new(&app, core.clone(), runtime.handle().clone()),
             edits: publisher.edits(),
         };
         drafts.folder_picked(&app, Mode::Extract, OutDir, Some("/picked".into()));
