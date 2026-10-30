@@ -943,8 +943,9 @@ fn the_inspector_shows_every_field_and_fits_the_narrowest_window() {
     app.hide().unwrap();
 }
 
-/// The Inspector's error can be selected and copied, as its `user-select: text` (D4): a read-only
-/// text input with the error as its value, wrapped in the pane at the narrowest window.
+/// The Inspector's error can be selected and copied, as its `user-select: text`: a read-only
+/// text input with the error as its value, wrapped in the pane at the narrowest window. A Tab
+/// stop, it draws the ring for keyboard focus alone (`:focus-visible`).
 #[test]
 fn the_inspector_error_wraps_and_can_be_selected_and_copied() {
     use i_slint_backend_testing::AccessibleRole;
@@ -1003,6 +1004,25 @@ fn the_inspector_error_wraps_and_can_be_selected_and_copied() {
         .platform()
         .clipboard_text(Clipboard::DefaultClipboard);
     assert_eq!(copied.as_deref(), Some(error));
+
+    // The ring goes around the error's box: none after the click, one once Tab reaches it, none
+    // once Tab leaves it.
+    let around = |&(x, y, width, height): &(f32, f32, f32, f32)| {
+        x < at.x && y < at.y && x + width > at.x + size.width && y + height > at.y + size.height
+    };
+    assert!(!rings(&app).iter().any(around), "no ring after a click");
+    for _ in 0..400 {
+        if rings(&app).iter().any(around) {
+            break;
+        }
+        key(&app, Key::Tab);
+    }
+    assert!(rings(&app).iter().any(around), "Tab draws the ring");
+    key(&app, Key::Tab);
+    assert!(
+        !rings(&app).iter().any(around),
+        "no ring once the focus has left"
+    );
     app.hide().unwrap();
 }
 

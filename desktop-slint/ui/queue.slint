@@ -744,8 +744,8 @@ export component QueuePane inherits Rectangle {
             }
 
             // .empty-state-card: at most 340px wide, centred; the folder icon, or the spinner
-            // while scanning. Its 48px margin is vertical alone at the sides, where the list's
-            // own 12px padding is all (`margin: 48px auto`, `.list { padding: 0 12px }`).
+            // while scanning. Its 48px margin is vertical only; at the sides the list's own 12px
+            // padding is all (`margin: 48px auto`, `.list`'s `padding: 0 12px 16px`).
             if root.head.card-shown: HorizontalLayout {
                 width: parent.width;
                 height: parent.height;

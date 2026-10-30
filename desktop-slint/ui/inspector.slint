@@ -3,7 +3,7 @@
 // (desktop-slint/src/inspector.rs) and does what the controls ask.
 import { LineEdit, ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { Pressable, Select, TipCard } from "focus.slint";
+import { Focus, FocusRing, Pressable, Select, TipCard } from "focus.slint";
 import { LinkButton, RowTone } from "queue.slint";
 import { SectionHead } from "settings.slint";
 
@@ -343,20 +343,24 @@ export component InspectorPane inherits Rectangle {
                         padding-bottom: 10px;
                         padding-left: 12px;
                         padding-right: 12px;
-                        // Selectable, as `user-select: text` (D4): a read-only TextInput, so
-                        // it is also a Tab stop (only a FocusScope can opt out at 45cb2b3). It
+                        // Selectable, as `user-select: text`: a read-only TextInput, so it is
+                        // also a Tab stop (only a FocusScope can opt out at 45cb2b3). It
                         // keeps its own role, a read-only text input with the error as its value:
                         // focused from Tab, a screen reader reads that, and its text navigation.
-                        TextInput {
+                        error-input := TextInput {
                             text: root.insp.error;
                             read-only: true;
                             color: Theme.err;
                             font-family: "JetBrains Mono";
                             font-size: 12px;
                             wrap: word-wrap;
-                            // Not its longest word's width: a path with no space wraps anywhere.
-                            min-width: 0px;
                         }
+                    }
+                    // A Tab stop, so the keyboard-focus ring (:focus-visible), not after a click.
+                    if error-input.has-focus && Focus.keyboard: FocusRing {
+                        around-width: parent.width;
+                        around-height: parent.height;
+                        radius: parent.border-radius;
                     }
                 }
 

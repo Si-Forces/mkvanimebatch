@@ -242,8 +242,7 @@ pub(crate) fn map_chips(chips: &Chips) -> ChipTexts {
 }
 
 /// The sheet's limits: the complexity slider's range and the number fields' and the complexity's
-/// tooltips, from the
-/// core's ranges (mkv-core `request.rs`).
+/// tooltips, from the core's ranges (mkv-core `request.rs`).
 pub(crate) fn limits() -> SheetLimits {
     let range =
         |range: &std::ops::RangeInclusive<usize>| format!("{}–{}", range.start(), range.end());
