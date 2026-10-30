@@ -1166,6 +1166,9 @@ fn a_focused_field_shows_no_clear_button_and_reads_as_a_text_input() {
     let room = || text_input_of(&app, label).size().width;
     let unfocused = room();
     assert_eq!(presses(), 0);
+    // The text starts where `.field`'s does: inside its 1px border and 10px padding.
+    let inset = text_input_of(&app, label).absolute_position().x - field.absolute_position().x;
+    assert_eq!(inset, 11.0, "the text's inset");
     pointer(&app, &field, true);
     pointer(&app, &field, false);
     tick();

@@ -225,8 +225,8 @@ export component TextField inherits Rectangle {
     }
 
     if root.text == "" && !root.has-focus: Text {
-        x: 10px;
-        width: root.width - 20px;
+        x: 11px;
+        width: root.width - 22px;
         text: root.placeholder;
         color: Theme.hint;
         font-family: input.font-family;
@@ -270,18 +270,20 @@ export component TextField inherits Rectangle {
             }
         }
 
-        // The text inside .field's 10px side padding, clipped: a text longer than the field
-        // slides so the caret stays in view.
+        // The text inside .field's 1px border and 10px side padding, clipped: a text longer
+        // than the field slides so the caret stays in view. Both at least 1px wide: a TextInput
+        // of no width, or clipped away, cannot take the focus.
         Rectangle {
-            x: 10px;
-            width: parent.width - 20px;
+            x: 11px;
+            width: max(1px, parent.width - 22px);
             clip: true;
             input := TextInput {
-                // How far the text slid left (negative) to keep the caret in view.
+                // How far the text slid left (zero or negative) to keep the caret in view.
                 property <length> scroll;
-                x: min(0px, max(parent.width - self.width - self.text-cursor-width, self.scroll));
-                // At least 1px: a TextInput of no width cannot take the focus.
-                width: max(1px, parent.width - self.text-cursor-width, self.preferred-width);
+                // Where the caret can sit, from the clip's left edge.
+                property <length> room: parent.width - self.text-cursor-width;
+                x: self.scroll.clamp(self.room - self.width, 0px);
+                width: max(1px, self.room, self.preferred-width);
                 height: 100%;
                 vertical-alignment: center;
                 font-size: 12px;
@@ -290,12 +292,10 @@ export component TextField inherits Rectangle {
                 selection-foreground-color: Theme.fg;
                 // The field reads as the text input.
                 accessible-role: none;
+                // The least slide that brings the caret, at `at.x + scroll`, back within
+                // 0..room.
                 cursor-position-changed(at) => {
-                    if at.x + self.scroll < 0px {
-                        self.scroll = -at.x;
-                    } else if at.x + self.scroll > parent.width - self.text-cursor-width {
-                        self.scroll = parent.width - self.text-cursor-width - at.x;
-                    }
+                    self.scroll = self.scroll.clamp(-at.x, self.room - at.x);
                 }
                 edited => { root.edited(self.text); }
                 accepted => { root.accepted(self.text); }
@@ -368,7 +368,8 @@ export component Select inherits Pressable {
     }
 
     HorizontalLayout {
-        padding-left: 10px;
+        // .field's 1px border and 10px padding.
+        padding-left: 11px;
         padding-right: 10px;
         spacing: 6px;
         Text {
