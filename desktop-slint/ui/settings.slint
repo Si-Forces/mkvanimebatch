@@ -6,7 +6,7 @@
 import { Button, CheckBox, LineEdit, ScrollView, Slider } from "std-widgets.slint";
 import { GlassPane, Theme } from "theme.slint";
 import { CapButton, PillButton } from "jobs.slint";
-import { Focus, Pressable, Select } from "focus.slint";
+import { Focus, Pressable, Select, TipCard } from "focus.slint";
 
 // One mode's Settings Draft as the sheet shows it, every field as typed but the two checkboxes.
 // The remux-only fields stay empty in extract's. `bitrate` is the index of the bitrate select's
@@ -40,6 +40,7 @@ export struct PresetItem {
 export struct SheetLimits {
     complexity-min: int,
     complexity-max: int,
+    complexity-tip: string,
     workers-tip: string,
     io-jobs-tip: string,
     ffmpeg-threads-tip: string,
@@ -209,36 +210,47 @@ export component SectionHead inherits Text {
     letter-spacing: 0.77px;
 }
 
-// A labelled field (.field-label): the label, and a "required" tag, over its control.
-component Field inherits VerticalLayout {
+// A labelled field (.field-label): the label, and a "required" tag, over its control. `tip` is
+// the label's `title`: a hover tooltip over the whole field, its control and buttons included, as
+// the webview's `<label>` wraps them. Not a layout itself: a `Tooltip` cannot sit in one.
+component Field inherits Rectangle {
     in property <string> label;
     in property <bool> required;
-    spacing: 4px;
+    in property <string> tip;
     // Columns of fields share the width evenly (.grid-2, .grid-3).
     min-width: 0px;
     preferred-width: 0px;
     horizontal-stretch: 1;
-    HorizontalLayout {
-        spacing: 6px;
-        alignment: start;
-        Text {
-            text: root.label;
-            color: Theme.mute;
-            font-size: 12px;
-            font-weight: 500;
-            accessible-role: none;
+    VerticalLayout {
+        spacing: 4px;
+        HorizontalLayout {
+            spacing: 6px;
+            alignment: start;
+            Text {
+                text: root.label;
+                color: Theme.mute;
+                font-size: 12px;
+                font-weight: 500;
+                accessible-role: none;
+            }
+            if root.required: Text {
+                text: "REQUIRED";
+                color: Theme.warn;
+                font-size: 10px;
+                font-weight: 600;
+                letter-spacing: 0.5px;
+                vertical-alignment: center;
+                accessible-role: none;
+            }
         }
-        if root.required: Text {
-            text: "REQUIRED";
-            color: Theme.warn;
-            font-size: 10px;
-            font-weight: 600;
-            letter-spacing: 0.5px;
-            vertical-alignment: center;
-            accessible-role: none;
+        @children
+    }
+    // Last, so it is over the field: it watches the pointer and passes every event on.
+    if root.tip != "": Tooltip {
+        TipCard {
+            text: root.tip;
         }
     }
-    @children
 }
 
 // A text field of the draft `key`: each keystroke is an edit, Enter or leaving it once edited a
@@ -414,6 +426,7 @@ component StepperField inherits Field {
     // The field's tooltip in index.html, read out by a screen reader.
     in property <string> description;
     in property <InputType> input-type: number;
+    tip: root.description;
     HorizontalLayout {
         StepButton {
             key: root.key;
@@ -716,6 +729,7 @@ export component SettingsSheet inherits GlassPane {
                             }
                             Field {
                                 label: "Encoder complexity";
+                                tip: root.limits.complexity-tip;
                                 HorizontalLayout {
                                     spacing: 6px;
                                     Rectangle {
@@ -732,7 +746,7 @@ export component SettingsSheet inherits GlassPane {
                                             value <=> root.complexity;
                                             enabled: !root.locked;
                                             accessible-label: "Encoder complexity";
-                                            accessible-description: "libopus encoding complexity: 0 is fastest, 10 is best quality";
+                                            accessible-description: root.limits.complexity-tip;
                                             // Whole steps alone, as a range input's: fluent's
                                             // drag does not snap to `step`.
                                             changed(value) => {
@@ -760,6 +774,7 @@ export component SettingsSheet inherits GlassPane {
                                         text <=> root.form.complexity;
                                         enabled: !root.locked;
                                         label: "Encoder complexity value";
+                                        description: root.limits.complexity-tip;
                                         flagged: root.invalid == "complexity";
                                         input-type: number;
                                         align: center;

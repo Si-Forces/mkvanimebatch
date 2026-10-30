@@ -1,7 +1,9 @@
 //! The queue's (P2), the Library's and the Episode Inspector's (P3) Intents. Each window callback
 //! sends its Intent to the Desktop Core at once, on the UI thread (`CoreHandle::dispatch` sends at
 //! call time), so Intents reach the core in the order the user made them; only their answers are
-//! awaited, on the host's runtime.
+//! awaited, on the host's runtime. The order holds behind a cache clear too: the core answers a
+//! `ClearCache` off its loop, so every Intent sent while one is unanswered waits for its answer,
+//! then goes in the order it was sent, as the webview's chain holds it (app.js `sendIntent`).
 
 use crate::inspector::{capped_tag, restore_form, typed_fields, SUBTITLE_FILTER};
 use crate::publisher::SlintPublisher;
@@ -10,8 +12,9 @@ use mkv_core::pipeline::PipelineMode;
 use mkv_desktop_core::actor::{CoreHandle, Intent, ViewState};
 use mkv_desktop_core::queue::Direction;
 use slint::{ComponentHandle, Model, SharedString};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use tokio::runtime::Handle;
 
 pub(crate) fn pipeline(mode: Mode) -> PipelineMode {
@@ -33,15 +36,34 @@ pub(crate) fn show_boot_mode(app: &App, state: &ViewState) {
     }
 }
 
+/// What runs once an Intent is answered, kept while the Intent waits behind a clear.
+type Answered = Box<dyn FnOnce(Result<bool, String>) + Send>;
+
+/// The Intents sent while a `ClearCache` is unanswered, in the order sent; `None` while none is.
+type Hold = Option<VecDeque<(&'static str, Intent, Answered)>>;
+
 #[derive(Clone)]
 pub(crate) struct Intents {
-    pub(crate) core: CoreHandle,
+    core: CoreHandle,
     pub(crate) runtime: Handle,
     pub(crate) window: slint::Weak<App>,
+    /// Shared by every clone, so the window's Intents keep one order.
+    hold: Arc<Mutex<Hold>>,
 }
 
 impl Intents {
-    /// Sends `intent` now; awaits its answer on the runtime, logs a refusal, then runs `answered`.
+    pub(crate) fn new(app: &App, core: CoreHandle, runtime: Handle) -> Self {
+        Self {
+            core,
+            runtime,
+            window: app.as_weak(),
+            hold: Arc::default(),
+        }
+    }
+
+    /// Sends `intent` now, unless a cache clear holds it (see
+    /// [`send_answered`](Self::send_answered)); awaits its answer on the runtime, logs a refusal,
+    /// then runs `answered`.
     pub(crate) fn send(
         &self,
         name: &'static str,
@@ -51,21 +73,59 @@ impl Intents {
         self.send_answered(name, intent, |_| answered());
     }
 
-    /// As [`send`](Self::send), with the answer.
+    /// As [`send`](Self::send), with the answer. While a `ClearCache` is unanswered, `intent`
+    /// waits behind it instead (a Run sent now could inspect with the old cache).
     pub(crate) fn send_answered(
         &self,
         name: &'static str,
         intent: Intent,
         answered: impl FnOnce(Result<bool, String>) + Send + 'static,
     ) {
+        let mut hold = self.lock();
+        match hold.as_mut() {
+            Some(held) => held.push_back((name, intent, Box::new(answered))),
+            None => self.dispatch(&mut hold, name, intent, Box::new(answered)),
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Hold> {
+        self.hold.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Sends `intent` now, under the hold's lock; a `ClearCache` starts holding. The answer is
+    /// awaited on the runtime: a refusal is logged; a clear's answer, or its refusal (the chain's
+    /// `catch`), sends what it held; then `answered` runs.
+    fn dispatch(&self, hold: &mut Hold, name: &'static str, intent: Intent, answered: Answered) {
+        let clear = matches!(intent, Intent::ClearCache { .. });
         let answer = self.core.dispatch(intent);
+        let release = clear.then(|| {
+            *hold = Some(VecDeque::new());
+            self.clone()
+        });
         self.runtime.spawn(async move {
             let answer = answer.await;
             if let Err(error) = &answer {
                 tracing::warn!("[{name}] refused: {error}");
             }
+            if let Some(intents) = release {
+                intents.release();
+            }
             answered(answer);
         });
+    }
+
+    /// A clear was answered: the Intents held behind it are sent in order, under the lock, so
+    /// none sent meanwhile overtakes them. A held `ClearCache` holds the ones after it again.
+    fn release(&self) {
+        let mut hold = self.lock();
+        let mut held = hold.take().unwrap_or_default();
+        while let Some((name, intent, answered)) = held.pop_front() {
+            self.dispatch(&mut hold, name, intent, answered);
+            if hold.is_some() {
+                *hold = Some(held);
+                return;
+            }
+        }
     }
 
     /// Sends the Intent `make` builds for the mode the window shows; nothing once it is closed.
@@ -174,15 +234,17 @@ impl Drop for Picking {
     }
 }
 
-/// Wires the window's queue callbacks to the core. Each acts on the mode the window shows.
-pub(crate) fn wire(app: &App, core: CoreHandle, runtime: Handle, publisher: SlintPublisher) {
+/// Wires the window's queue callbacks to the core. Each acts on the mode the window shows. Returns
+/// the Intents they send through, for the host's own.
+pub(crate) fn wire(
+    app: &App,
+    core: CoreHandle,
+    runtime: Handle,
+    publisher: SlintPublisher,
+) -> Intents {
     let edits = publisher.edits();
     let window = app.as_weak();
-    let intents = Intents {
-        core,
-        runtime,
-        window: window.clone(),
-    };
+    let intents = Intents::new(app, core, runtime);
 
     let send = intents.clone();
     app.on_set_selected(move |id, selected| {
@@ -334,7 +396,8 @@ pub(crate) fn wire(app: &App, core: CoreHandle, runtime: Handle, publisher: Slin
 
     // Run, Stop and the cache clear; the settings sheet, the Preset Profiles and Open folder.
     crate::jobs::wire(app, intents.clone());
-    crate::settings::wire(app, intents, edits);
+    crate::settings::wire(app, intents.clone(), edits);
+    intents
 }
 
 #[cfg(test)]
@@ -348,6 +411,8 @@ pub(crate) mod tests {
     use mkv_desktop_core::control::Launcher;
     use mkv_desktop_core::inspection::Inspector;
     use mkv_desktop_core::telemetry::{Sampler, TelemetryData};
+    use std::time::Duration;
+    use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
     /// Every directory holds episodes `a`, `b` and `c`.
     pub(crate) struct Episodes;
@@ -376,6 +441,33 @@ pub(crate) mod tests {
 
         async fn clear_cache(&self) -> Result<(), String> {
             Ok(())
+        }
+    }
+
+    /// [`Episodes`], with a cache clear answered only with what the test sends it, one answer per
+    /// clear, in order: until then the clear is held.
+    pub(crate) struct HeldClear(tokio::sync::Mutex<UnboundedReceiver<Result<(), String>>>);
+
+    impl HeldClear {
+        /// The inspector, and what sends its clears their answers.
+        pub(crate) fn new() -> (Self, UnboundedSender<Result<(), String>>) {
+            let (answers, held) = unbounded_channel();
+            (Self(tokio::sync::Mutex::new(held)), answers)
+        }
+    }
+
+    impl Inspector for HeldClear {
+        async fn identity(&self, path: String) -> Result<String, String> {
+            Episodes.identity(path).await
+        }
+
+        async fn inspect(&self, path: String, force: bool) -> Result<InspectionManifest, String> {
+            Episodes.inspect(path, force).await
+        }
+
+        async fn clear_cache(&self) -> Result<(), String> {
+            let answer = self.0.lock().await.recv().await;
+            answer.unwrap_or(Err("the test is over".into()))
         }
     }
 
@@ -444,6 +536,78 @@ pub(crate) mod tests {
             .map(|row| (row.id.as_str(), row.selected))
             .collect();
         assert_eq!(selected, [("a", true), ("b", false), ("c", true)]);
+    }
+
+    /// A cache clear holds every Intent sent after it until it is answered, a second clear too,
+    /// which then holds the ones after it again; a refused clear lets them go all the same (the
+    /// chain's `catch`).
+    #[test]
+    fn a_clear_holds_the_intents_after_it_until_answered() {
+        i_slint_backend_testing::init_no_event_loop();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let app = App::new().unwrap();
+        let (inspector, clears) = HeldClear::new();
+        let ports = Ports {
+            inspector,
+            launcher: NoJobs,
+            sampler: NoSamples,
+        };
+        let core = Core::spawn(runtime.handle().clone(), SlintPublisher::new(&app), ports);
+        let scan = Intent::ScanDirectory {
+            mode: PipelineMode::Remux,
+            path: "/show".into(),
+            force: false,
+            no_cache: false,
+        };
+        assert_eq!(runtime.block_on(core.dispatch(scan)), Ok(true));
+        let send = Intents::new(&app, core.clone(), runtime.handle().clone());
+        let (answers, answered) = std::sync::mpsc::channel();
+        let sent = |name: &'static str, intent: Intent| {
+            let answers = answers.clone();
+            send.send_answered(name, intent, move |answer| {
+                let _ = answers.send((name, answer));
+            });
+        };
+        let next = || answered.recv_timeout(Duration::from_secs(1)).unwrap();
+        // Asked after every Intent the core was sent, so it sees each one sent.
+        let a_selected = || {
+            let state = runtime.block_on(core.state()).unwrap();
+            state
+                .remux
+                .rows
+                .iter()
+                .any(|row| row.id.as_str() == "a" && row.selected)
+        };
+        let clear = || Intent::ClearCache {
+            mode: PipelineMode::Remux,
+        };
+
+        sent("clear", clear());
+        sent("clear again", clear());
+        let untick = Intent::SetSelected {
+            mode: PipelineMode::Remux,
+            id: "a".into(),
+            selected: false,
+        };
+        sent("set_selected", untick);
+        assert!(a_selected(), "held behind the first clear");
+
+        clears.send(Err("cannot clear".into())).unwrap();
+        assert_eq!(next(), ("clear", Err("cannot clear".into())));
+        // Answered once the second clear was sent: the untick waits for that one now.
+        assert!(a_selected(), "held behind the second clear");
+
+        clears.send(Ok(())).unwrap();
+        // The untick is sent before the clear's callback runs, but each answer arrives on its own
+        // runtime task, so the two may come in either order.
+        let mut got = [next(), next()];
+        got.sort_by_key(|(name, _)| *name);
+        assert_eq!(got, [("clear again", Ok(true)), ("set_selected", Ok(true))]);
+        assert!(!a_selected());
     }
 
     /// The subtitle callbacks send the remux Inspector's row's AssignSubtitle with the fields as
@@ -548,11 +712,7 @@ pub(crate) mod tests {
 
         // A file picked once the Inspector moved on to another row, or to the same relative id in
         // another folder, is not that row's.
-        let send = Intents {
-            core: core.clone(),
-            runtime: runtime.handle().clone(),
-            window: app.as_weak(),
-        };
+        let send = Intents::new(&app, core.clone(), runtime.handle().clone());
         let (directory, _) = inspected(&app);
         subtitle_picked(&send, &app, &(directory, "a".into()), Some("/subs/b.ass"));
         assert_eq!(assignment(), None);

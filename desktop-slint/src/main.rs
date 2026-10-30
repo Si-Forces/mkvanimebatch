@@ -163,17 +163,9 @@ fn run(
     );
     run_log::wire(&app, &publisher, run_log::system_clipboard());
     runtime.spawn(run_log::load(&core, &publisher));
+    let send = intents::wire(&app, core.clone(), runtime.handle().clone(), publisher);
     // Kept until the end: it polls whether the window is minimized.
-    let _visibility = watch_window(
-        &app,
-        save,
-        intents::Intents {
-            core: core.clone(),
-            runtime: runtime.handle().clone(),
-            window: app.as_weak(),
-        },
-    );
-    intents::wire(&app, core.clone(), runtime.handle().clone(), publisher);
+    let _visibility = watch_window(&app, save, send);
     // A packaged Windows build has no console, so the log file is its only output: say once, in
     // the window, that there is none (ADR-0017 decision 9). Elsewhere stderr has it.
     if let Some(text) = log_failed.filter(|_| cfg!(target_os = "windows")) {
