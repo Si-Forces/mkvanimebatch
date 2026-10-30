@@ -159,6 +159,12 @@ export component App inherits Window {
     // A Run sent and not answered yet (the host's): Run and every control a batch locks stay
     // locked from the click on, as the start will lock them (job-controller.js `runPending`).
     in-out property <bool> run-pending;
+    // A confirmed cache clear not answered yet, and a Run of `deferred-mode` clicked meanwhile
+    // (the host's): that Run is sent once the clear is answered, as the webview's Intent chain
+    // holds it. Neither is in `locked`: clearing locks nothing, and the Run's `run-pending` does.
+    in-out property <bool> cache-clearing;
+    in-out property <bool> run-deferred;
+    in-out property <Mode> deferred-mode;
     // What a batch locks: the settings, the presets, the subtitle controls and Open folder.
     out property <bool> locked: busy || run-pending;
     // Each mode's job controls: the bottom bar's and the tab's status pill. Before the first
