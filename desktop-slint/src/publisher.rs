@@ -23,8 +23,6 @@ use std::sync::{Arc, Mutex, PoisonError};
 struct Pending {
     /// The newest View State not yet taken.
     state: Option<ViewState>,
-    /// The ends of jobs, in order, each after the state it ended in.
-    dones: Vec<JobDone>,
     /// The `seq` of the newest View State ever pushed: an older one is never applied.
     newest: Option<u64>,
     /// Whether a hop is on its way, which takes everything pushed until it runs.
@@ -39,7 +37,6 @@ impl Default for Pending {
     fn default() -> Self {
         Self {
             state: None,
-            dones: Vec::new(),
             newest: None,
             scheduled: false,
             lists: [ModeList::new(Mode::Remux), ModeList::new(Mode::Extract)],
@@ -62,8 +59,6 @@ pub(crate) struct Taken {
     pub(crate) state: Option<ViewState>,
     /// The remux and the extract list's update.
     pub(crate) lists: [Update; 2],
-    /// The ends of jobs, applied after the state.
-    pub(crate) dones: Vec<JobDone>,
     /// The remux and the extract console's patch.
     pub(crate) logs: [LogPatch; 2],
 }
@@ -144,13 +139,6 @@ impl Coalescer {
         !std::mem::replace(&mut pending.scheduled, true)
     }
 
-    /// Queues `done` behind the states pushed before it. Returns whether to schedule a hop.
-    pub(crate) fn push_done(&self, done: &JobDone) -> bool {
-        let mut pending = self.lock();
-        pending.dones.push(done.clone());
-        !std::mem::replace(&mut pending.scheduled, true)
-    }
-
     /// Draws `batch` in its mode's console, or keeps it for after the load. Returns whether to
     /// schedule a hop.
     pub(crate) fn push_log(&self, batch: &LogBatch) -> bool {
@@ -172,16 +160,14 @@ impl Coalescer {
         self.lock().logs[run_log::slot(mode)].text()
     }
 
-    /// No hop is on its way any more, nor will one come: the dones, which only grow, go. The
-    /// rest stays bounded (the newest state, each list's update, the consoles' kept lines).
+    /// No hop is on its way any more, nor will one come. What is pending stays, bounded (the
+    /// newest state, each list's update, the consoles' kept lines).
     fn unschedule(&self) {
-        let mut pending = self.lock();
-        pending.scheduled = false;
-        pending.dones.clear();
+        self.lock().scheduled = false;
     }
 
-    /// Everything pushed since the last take: the state and each mode's update to apply first,
-    /// then the dones. Clears the scheduled flag under the same lock, so a push after this
+    /// Everything pushed since the last take: the state, each mode's update and each console's
+    /// patch. Clears the scheduled flag under the same lock, so a push after this
     /// schedules its own hop.
     pub(crate) fn take(&self) -> Taken {
         let mut pending = self.lock();
@@ -189,7 +175,6 @@ impl Coalescer {
         Taken {
             lists: pending.lists.each_mut().map(ModeList::take),
             state: pending.state.take(),
-            dones: std::mem::take(&mut pending.dones),
             logs: pending.logs.each_mut().map(Console::take_patch),
         }
     }
@@ -344,7 +329,6 @@ pub(crate) fn hop(pending: &Coalescer, edits: &Edits, window: &slint::Weak<App>)
     let Taken {
         state,
         lists: [remux, extract],
-        dones: _unshown,
         logs: [remux_log, extract_log],
     } = pending.take();
     let Some(app) = window.upgrade() else {
@@ -360,7 +344,6 @@ pub(crate) fn hop(pending: &Coalescer, edits: &Edits, window: &slint::Weak<App>)
     apply(&app, Mode::Extract, extract);
     run_log::apply(&app, Mode::Remux, remux_log);
     run_log::apply(&app, Mode::Extract, extract_log);
-    // Nothing renders a job's end, as in the webview: the state it ended in shows it.
 }
 
 impl Publisher for SlintPublisher {
@@ -376,11 +359,8 @@ impl Publisher for SlintPublisher {
         }
     }
 
-    fn done(&self, done: &JobDone) {
-        if self.pending.push_done(done) {
-            self.schedule();
-        }
-    }
+    // Nothing renders a job's end, as in the webview: the View State it ended in shows it.
+    fn done(&self, _done: &JobDone) {}
 }
 
 /// Shows `rows` in `model`: in place when it is a `VecModel` of as many rows, writing only the rows
@@ -548,14 +528,6 @@ mod tests {
         }
     }
 
-    fn done(job_id: u64) -> JobDone {
-        JobDone {
-            mode: "remux",
-            job_id,
-            code: 0,
-        }
-    }
-
     #[test]
     fn a_burst_schedules_one_hop_that_takes_the_newest_state() {
         let pending = Coalescer::default();
@@ -566,29 +538,11 @@ mod tests {
 
         let taken = pending.take();
         assert_eq!(taken.state.map(|s| s.seq), Some(3));
-        assert!(taken.dones.is_empty());
         // Nothing is left, and an older state after the take is still dropped.
         assert!(!pending.push_state(&state(2)));
         assert_eq!(pending.take().state.map(|s| s.seq), None);
         // A newer one after the take schedules its own hop.
         assert!(pending.push_state(&state(4)));
         assert_eq!(pending.take().state.map(|s| s.seq), Some(4));
-    }
-
-    #[test]
-    fn a_done_is_taken_with_the_state_it_ended_in_and_applied_after_it() {
-        let pending = Coalescer::default();
-        assert!(pending.push_state(&state(5)));
-        assert!(!pending.push_done(&done(7)));
-
-        let Taken { state, dones, .. } = pending.take();
-        assert_eq!(state.map(|s| s.seq), Some(5));
-        assert_eq!(dones.iter().map(|d| d.job_id).collect::<Vec<_>>(), [7]);
-
-        // A done alone schedules a hop; the state it ended in went out with an earlier one.
-        assert!(pending.push_done(&done(8)));
-        let Taken { state, dones, .. } = pending.take();
-        assert!(state.is_none());
-        assert_eq!(dones.iter().map(|d| d.job_id).collect::<Vec<_>>(), [8]);
     }
 }
