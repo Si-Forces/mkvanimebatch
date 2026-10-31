@@ -807,6 +807,9 @@ export component App inherits Window {
             if root.sheet-open: Rectangle {
                 background: Theme.dim;
                 FocusScope {
+                    // Under a dialog it takes no focus, as the sheet's controls: a screen reader's
+                    // Focus action on a control behind moves the focus on, to the dialog's.
+                    enabled: !root.dialog-open;
                     key-pressed(event) => {
                         if event.text == Key.Escape {
                             root.close-sheet();

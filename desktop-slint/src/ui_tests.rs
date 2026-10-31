@@ -3107,6 +3107,32 @@ pub(crate) fn focused(app: &App) -> String {
     app.global::<Focus>().get_current().into()
 }
 
+/// A screen reader's Focus action on the control labelled `label`: Slint's winit backend runs
+/// AccessKit's `Action::Focus` as a focus by the pointer on the control's node, which moves on, in
+/// the window's order, to the first item from it that takes the focus.
+fn screen_reader_focus(app: &App, label: &str) {
+    use i_slint_core::accessibility::AccessibleStringProperty;
+    use i_slint_core::input::FocusReason;
+    use i_slint_core::item_tree::ItemRc;
+    use i_slint_core::window::WindowInner;
+    let window = WindowInner::from_pub(app.window());
+    let root = ItemRc::new_root(window.component());
+    let mut item = root.clone();
+    loop {
+        if item.is_visible()
+            && item
+                .accessible_string_property(AccessibleStringProperty::Label)
+                .as_deref()
+                == Some(label)
+        {
+            window.set_focus_item(&item, true, FocusReason::PointerClick);
+            return;
+        }
+        item = item.next_focus_item();
+        assert!(item != root, "no control labelled {label:?}");
+    }
+}
+
 /// Presses Tab until the custom control of `key` has the focus.
 pub(crate) fn tab_to(app: &App, key: &str) {
     for _ in 0..400 {
@@ -3237,9 +3263,16 @@ fn tab_walks_the_custom_controls_in_order_and_enter_or_space_activates_them() {
     app.hide().unwrap();
 }
 
-/// Presses `step` until the custom control of `to` has the focus, and returns the row picks it passed, each checked to be in the window: a focused row scrolls into
-/// view.
+/// Presses `step` until the custom control of `to` has the focus, and returns the row picks it
+/// passed, each checked to be whole inside the list: a focused row scrolls into view.
 fn row_picks_on_the_way(app: &App, step: slint::platform::Key, to: &str) -> Vec<String> {
+    let list = ElementHandle::find_by_element_id(app, "QueuePane::list")
+        .next()
+        .expect("the queue's list");
+    let (top, bottom) = (
+        list.absolute_position().y,
+        list.absolute_position().y + list.size().height,
+    );
     let mut picks = Vec::new();
     for _ in 0..400 {
         key(app, step);
@@ -3250,7 +3283,11 @@ fn row_picks_on_the_way(app: &App, step: slint::platform::Key, to: &str) -> Vec<
         if let Some(id) = now.strip_prefix("pick:remux:") {
             let pick = only(app, id);
             let (y, height) = (pick.absolute_position().y, pick.size().height);
-            assert!(y >= 0.0 && y + height <= 640.0, "{id} in view, at {y}");
+            assert!(
+                y >= top && y + height <= bottom,
+                "{id} in the list ({top}..{bottom}), at {y}..{}",
+                y + height
+            );
             picks.push(id.to_string());
         }
     }
@@ -3259,8 +3296,8 @@ fn row_picks_on_the_way(app: &App, step: slint::platform::Key, to: &str) -> Vec<
 
 /// Tab walks every row of a long queue in order, the ones a ListView has not made yet (out of
 /// view) too, each scrolled into view, then on to the bottom bar; Shift+Tab from Run walks them
-/// back, as the webview's DOM order does. A filter's hidden rows are passed, and a scrolled list
-/// is entered at its first shown row.
+/// back, as the webview's DOM order does. A filter's hidden rows are passed, a scrolled list is
+/// entered at its first shown row, and a locked selection walks the picks alone.
 #[test]
 fn tab_and_shift_tab_reach_every_row_of_a_long_queue() {
     use slint::platform::Key;
@@ -3317,13 +3354,28 @@ fn tab_and_shift_tab_reach_every_row_of_a_long_queue() {
     let mut back = row_picks_on_the_way(&app, Key::Backtab, "remux:None");
     back.reverse();
     assert_eq!(back, todo);
+
+    // A batch locks the selection: each row's checkbox is disabled, so its pick is its first
+    // control and, with Move up / Move down disabled too, its last.
+    state.seq = 2;
+    state.remux.controls.selection_locked = true;
+    publisher.show(&state);
+    publisher.show_filter(Mode::Remux, QueueFilter::All);
+    frame(&app);
+    tab_to(&app, "remux:Failed");
+    assert_eq!(row_picks_on_the_way(&app, Key::Tab, "run"), ids);
+    let mut back = row_picks_on_the_way(&app, Key::Backtab, "remux:Failed");
+    back.reverse();
+    assert_eq!(back, ids);
     app.hide().unwrap();
 }
 
 /// The settings sheet and the confirm dialog make the window behind them inert, as the webview's
 /// `showModal()` does: a screen reader's action on a control behind one (the mode tab, the title
 /// bar's) does nothing and reads as disabled, a dialog over the sheet makes the sheet inert too
-/// (a custom control, a fluent checkbox, a text field), and the topmost one's controls still act.
+/// (a custom control, a stepper, a select, a fluent checkbox, a text field), and the topmost one's
+/// controls still act. A screen reader's Focus action on a control behind gives it no focus: the
+/// focus moves on into the topmost layer, so Esc still reaches it and typing reaches no field.
 #[test]
 fn a_sheet_or_a_dialog_makes_the_window_behind_it_inert() {
     use mkv_anime_batch_slint_ui::DialogTexts;
@@ -3332,7 +3384,14 @@ fn a_sheet_or_a_dialog_makes_the_window_behind_it_inert() {
     // Tall enough for the sheet's Run options to show unscrolled.
     app.window()
         .set_size(slint::LogicalSize::new(920.0, 1100.0));
-    apply(&app, &ViewState::new(None));
+    // An Inspector with an error, whose selectable text is a Tab stop behind the sheet.
+    let mut state = ViewState::new(None);
+    state.remux.rows = Arc::new(vec![row("Show - 01.mkv")]);
+    state.remux.empty = None;
+    let mut view = sample_view();
+    view.error = Some("Inspection failed".into());
+    state.remux.inspector = Some(view);
+    apply(&app, &state);
     app.show().unwrap();
     frame(&app);
     let answers = Rc::new(RefCell::new(Vec::new()));
@@ -3364,16 +3423,66 @@ fn a_sheet_or_a_dialog_makes_the_window_behind_it_inert() {
         assert_eq!(closes.get(), 0, "the title bar is inert");
     };
     let dry_run = || only(&app, "Dry run (plan only, write nothing)");
+    let sheet_calls = Rc::new(Cell::new(0));
+    let count = Rc::clone(&sheet_calls);
+    app.global::<Sheet>()
+        .on_step_key(move |_, _| count.set(count.get() + 1));
+    let count = Rc::clone(&sheet_calls);
+    app.global::<Sheet>()
+        .on_clear_cache(move || count.set(count.get() + 1));
+    let count = Rc::clone(&sheet_calls);
+    app.global::<Sheet>()
+        .on_browse(move |_| count.set(count.get() + 1));
+    let bitrate = || select_of(&app, "Opus bitrate");
 
-    // The sheet: the window behind it is inert; its own checkbox acts.
+    // The sheet: the window behind it is inert, and takes no focus: Esc still closes the sheet.
     app.invoke_open_sheet(Mode::Remux, "".into());
     frame(&app);
     window_is_inert();
+    screen_reader_focus(&app, "Extract");
+    // Shift+Tab from there stays in the sheet: the queue's entry stop behind it takes no focus.
+    key(&app, slint::platform::Key::Backtab);
+    key(&app, slint::platform::Key::Escape);
+    assert!(!app.get_sheet_open(), "Extract took no focus");
+    // Its own checkbox acts.
+    app.invoke_open_sheet(Mode::Remux, "".into());
+    frame(&app);
     dry_run().invoke_accessible_default_action();
     assert!(app.get_remux_form().dry_run);
 
-    // A dialog over the sheet: the sheet is inert too; Cancel answers.
+    // A dialog over the sheet: the sheet is inert too, its select's open list closes; Cancel
+    // answers.
+    bitrate().invoke_accessible_expand_action();
+    frame(&app);
+    assert_eq!(bitrate().accessible_expanded(), Some(true));
     show_dialog();
+    assert_eq!(
+        bitrate().accessible_expanded(),
+        Some(false),
+        "the list closes"
+    );
+    bitrate().invoke_accessible_expand_action();
+    frame(&app);
+    assert_eq!(
+        bitrate().accessible_expanded(),
+        Some(false),
+        "the select is inert"
+    );
+    only(&app, "Increase workers").invoke_accessible_default_action();
+    only(&app, "Clear inspection cache…").invoke_accessible_default_action();
+    only(&app, "Browse for the Input folder").invoke_accessible_default_action();
+    assert_eq!(
+        sheet_calls.get(),
+        0,
+        "the stepper, Clear inspection cache and Browse… are inert"
+    );
+    let complexity = app.get_remux_form().complexity;
+    only(&app, "Encoder complexity").invoke_accessible_increment_action();
+    assert_eq!(
+        app.get_remux_form().complexity,
+        complexity,
+        "the slider is inert"
+    );
     window_is_inert();
     only(&app, "Done").invoke_accessible_default_action();
     assert!(app.get_sheet_open(), "Done is inert");
@@ -3381,8 +3490,24 @@ fn a_sheet_or_a_dialog_makes_the_window_behind_it_inert() {
     assert!(app.get_remux_form().dry_run, "the checkbox is inert");
     only(&app, "Input folder").set_accessible_value("/elsewhere");
     assert_eq!(app.get_remux_form().input_dir, "", "the field is inert");
+    screen_reader_focus(&app, "Input folder");
+    key(&app, "x");
+    assert_eq!(
+        app.get_remux_form().input_dir,
+        "",
+        "the field took no focus"
+    );
     only(&app, "Cancel").invoke_accessible_default_action();
     assert_eq!(*answers.borrow(), [false]);
+    close_dialog();
+
+    // Again: a Focus action on the window behind both lands on the dialog, not on the sheet
+    // under it, so Esc answers the dialog.
+    show_dialog();
+    screen_reader_focus(&app, "Extract");
+    key(&app, slint::platform::Key::Escape);
+    assert_eq!(*answers.borrow(), [false, false], "Esc answers the dialog");
+    assert!(app.get_sheet_open());
     close_dialog();
 
     // The sheet alone again: Done closes it.
@@ -3393,7 +3518,7 @@ fn a_sheet_or_a_dialog_makes_the_window_behind_it_inert() {
     show_dialog();
     window_is_inert();
     only(&app, "Clear cache").invoke_accessible_default_action();
-    assert_eq!(*answers.borrow(), [false, true]);
+    assert_eq!(*answers.borrow(), [false, false, true]);
     close_dialog();
 
     // Nothing open: Extract acts.

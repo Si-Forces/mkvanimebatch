@@ -17,9 +17,9 @@ export global Focus {
     in-out property <int> restore-serial;
 
     // The control a reset's new rows make that takes the focus as it is made (a moved episode's
-    // Move up / Move down): `restore` reaches only the controls already made. Any control's
-    // focus clears it, and so do the first rows the reset makes (QueuePane's `rows-made`), so one
-    // made later, scrolled into view, takes no focus.
+    // Move up / Move down, or the row a Tab scrolls in): `restore` reaches only the controls
+    // already made. Any control's focus clears it, and so do the first rows the reset makes
+    // (QueuePane's `rows-made`), so one made later, scrolled into view, takes no focus.
     in-out property <string> follow-key;
 
     // The last Tab went backward (Shift+Tab), set by the window's key scope: the queue list's
@@ -29,7 +29,9 @@ export global Focus {
     // The window's settings sheet and confirm dialog are open (App's `sheet-open` and
     // `dialog-open`, bound to these). Like `<dialog>.showModal()`, the topmost one makes every
     // control outside it inert: a control in a lower layer than `modal` (Pressable's and
-    // TextField's `layer`) does nothing, a screen reader's action included, and reads as disabled.
+    // TextField's `layer`) does nothing, a screen reader's action included, takes no focus (a
+    // screen reader's Focus action moves it on, to the next control that can take it), and reads
+    // as disabled.
     in-out property <bool> sheet-open;
     in-out property <bool> dialog-open;
     // The topmost open layer: 0 the window, 1 the sheet, 2 the dialog (over the sheet too).
@@ -124,15 +126,16 @@ export component Pressable inherits Rectangle {
     }
     accessible-action-default => { root.activate(); }
 
-    // A disabled control is passed over: a programmatic focus would move on to the next one.
+    // A disabled or inert control is passed over: a programmatic focus would move on to the next
+    // one.
     property <int> restore: Focus.restore-serial;
     changed restore => {
-        if root.enabled && root.focus-key != "" && Focus.restore-key == root.focus-key {
+        if root.live && root.focus-key != "" && Focus.restore-key == root.focus-key {
             keys.focus();
         }
     }
     init => {
-        if root.enabled && Focus.follow-key != "" && Focus.follow-key == root.focus-key {
+        if root.live && Focus.follow-key != "" && Focus.follow-key == root.focus-key {
             keys.focus();
         }
     }
@@ -145,7 +148,7 @@ export component Pressable inherits Rectangle {
     }
 
     keys := FocusScope {
-        enabled: root.enabled;
+        enabled: root.live;
         focus-gained(reason) => {
             Focus.current = root.focus-key;
             Focus.follow-key = "";
@@ -217,13 +220,13 @@ export component Pressable inherits Rectangle {
 export component TextField inherits Rectangle {
     in-out property <string> text <=> input.text;
     in property <string> placeholder;
-    in property <bool> enabled <=> input.enabled;
+    in property <bool> enabled: true;
     in property <bool> read-only <=> input.read-only;
     in property <string> font-family <=> input.font-family;
     in property <TextHorizontalAlignment> horizontal-alignment <=> input.horizontal-alignment;
     in property <InputType> input-type <=> input.input-type;
-    // The modal layer it sits in, as Pressable's: under a sheet or a dialog over it, a screen
-    // reader cannot edit it.
+    // The modal layer it sits in, as Pressable's: under a sheet or a dialog over it, it takes
+    // neither the focus nor an edit, a screen reader's included.
     in property <int> layer;
     out property <bool> has-focus: input.has-focus;
     callback edited(text: string);
@@ -241,19 +244,22 @@ export component TextField inherits Rectangle {
     opacity: root.enabled ? 1 : 0.75;
     forward-focus: input;
     accessible-role: text-input;
-    accessible-enabled: root.enabled && root.layer >= Focus.modal;
+    accessible-enabled: input.enabled;
     accessible-read-only: root.read-only;
     accessible-value: root.text;
     accessible-placeholder-text: root.placeholder;
     // A screen reader's edit, refused as typing is: not in a disabled, read-only or inert field.
     accessible-action-set-value(value) => {
-        if !root.enabled || root.read-only || root.layer < Focus.modal {
+        if !input.enabled || root.read-only {
             return;
         }
         root.text = value;
         root.edited(value);
     }
     accessible-action-set-selection-offsets(anchor, focus) => {
+        if !input.enabled {
+            return;
+        }
         input.set-selection-offsets(anchor, focus);
     }
 
@@ -323,6 +329,7 @@ export component TextField inherits Rectangle {
             width: max(1px, parent.width - 2 * root.inset);
             clip: true;
             input := TextInput {
+                enabled: root.enabled && root.layer >= Focus.modal;
                 // How far the text slid left (zero or negative) to keep the caret in view.
                 property <length> scroll;
                 // Where the caret can sit, from the clip's left edge.

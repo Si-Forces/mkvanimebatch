@@ -255,6 +255,10 @@ component EpRow inherits Rectangle {
         focus-on-click: false;
         focus-on-tab-navigation: false;
         capture-key-pressed(event) => {
+            // Slint moves no focus on Tab with Ctrl, Alt or Meta, so neither does a row.
+            if event.modifiers.control || event.modifiers.alt || event.modifiers.meta {
+                return reject;
+            }
             let back = event.text == Key.Backtab || (event.text == Key.Tab && event.modifiers.shift);
             if !back && event.text == Key.Tab && root.item.next >= 0
                 && (root.locked || root.filtered ? pick.focused : down.focused) {
@@ -277,7 +281,11 @@ component EpRow inherits Rectangle {
             property <bool> focus-within: check.focused || pick.focused || up.focused || down.focused;
             // Which of them has it: one taken from the keyboard scrolls the row into view, as a
             // browser's focus does; not one a press took (the row would move under the pointer).
-            property <int> focused-control: check.focused ? 1 : pick.focused ? 2 : up.focused ? 3 : down.focused ? 4 : 0;
+            property <int> focused-control: check.focused ? 1
+                : pick.focused ? 2
+                : up.focused ? 3
+                : down.focused ? 4
+                : 0;
             changed focused-control => {
                 if self.focused-control != 0 && Focus.keyboard {
                     root.scroll-into-view();
@@ -573,7 +581,8 @@ export component QueuePane inherits Rectangle {
     // its last going back. Made already, it takes the focus back (`Focus.restore`); out of view,
     // as its row is made (`Focus.follow-key`).
     function hand-focus(row: int, forward: bool) {
-        let key = (forward ? root.first-control : root.last-control) + root.name + ":" + root.rows[row].id;
+        let key = (forward ? root.first-control : root.last-control) + root.name + ":"
+            + root.rows[row].id;
         list.ensure-row-visible(row, ScrollBehavior.instant);
         Focus.restore(key);
         // Last: at 45cb2b3 the generated Rust moves a local set into a global's property, so a
@@ -584,8 +593,9 @@ export component QueuePane inherits Rectangle {
     // locked (the checkbox) or a filter shows (Move up / Move down).
     property <string> first-control: root.head.selection-locked ? "pick:" : "check:";
     property <string> last-control: root.head.selection-locked || root.filtered ? "pick:" : "down:";
-    // Tab can enter the list: it shows a shown row.
-    property <bool> enterable: !root.head.card-shown && root.head.first >= 0;
+    // Tab can enter the list: no card covers it, the filter shows a row, and no sheet or dialog
+    // makes it inert.
+    property <bool> enterable: !root.head.card-shown && root.head.first >= 0 && Focus.modal == 0;
 
     // A filter chip clicked: the filter wins over a reveal still waiting for its layout.
     function filter(filter: QueueFilter) {
@@ -617,7 +627,8 @@ export component QueuePane inherits Rectangle {
     property <int> rows-made;
     // The first rows made after a reset disarm `Focus.follow-key` (this handler runs once that
     // pass made them): a moved episode's row not made then (scrolled out) or disabled takes no
-    // focus when a scroll makes it later.
+    // focus when a scroll makes it later. A Tab hand-off (`hand-focus`) arms it after that, for
+    // the row its scroll makes.
     changed rows-made => {
         Focus.follow-key = "";
     }
@@ -792,7 +803,7 @@ export component QueuePane inherits Rectangle {
                     key: root.name + ":" + row.id;
                     scroll: root.list-scroll;
                     changed pinned => { root.pin(self.instance, self.pinned); }
-                    tab-to(row, forward) => { root.hand-focus(row, forward); }
+                    tab-to(to, forward) => { root.hand-focus(to, forward); }
                     scroll-into-view => { list.ensure-row-visible(index, ScrollBehavior.instant); }
                     toggle => { root.set-selected(row.id, !row.selected); }
                     pick => { root.inspect(row.id); }
