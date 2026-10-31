@@ -22,6 +22,10 @@ export global Focus {
     // made later, scrolled into view, takes no focus.
     in-out property <string> follow-key;
 
+    // The last Tab went backward (Shift+Tab), set by the window's key scope: the queue list's
+    // entry stops each take the focus one way only.
+    in-out property <bool> backward;
+
     public function restore(key: string) {
         self.restore-key = key;
         self.restore-serial += 1;

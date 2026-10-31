@@ -3237,6 +3237,89 @@ fn tab_walks_the_custom_controls_in_order_and_enter_or_space_activates_them() {
     app.hide().unwrap();
 }
 
+/// Presses `step` until the custom control of `to` has the focus, and returns the row picks it passed, each checked to be in the window: a focused row scrolls into
+/// view.
+fn row_picks_on_the_way(app: &App, step: slint::platform::Key, to: &str) -> Vec<String> {
+    let mut picks = Vec::new();
+    for _ in 0..400 {
+        key(app, step);
+        let now = focused(app);
+        if now == to {
+            return picks;
+        }
+        if let Some(id) = now.strip_prefix("pick:remux:") {
+            let pick = only(app, id);
+            let (y, height) = (pick.absolute_position().y, pick.size().height);
+            assert!(y >= 0.0 && y + height <= 640.0, "{id} in view, at {y}");
+            picks.push(id.to_string());
+        }
+    }
+    panic!("{step:?} never reached {to:?}");
+}
+
+/// Tab walks every row of a long queue in order, the ones a ListView has not made yet (out of
+/// view) too, each scrolled into view, then on to the bottom bar; Shift+Tab from Run walks them
+/// back, as the webview's DOM order does. A filter's hidden rows are passed, and a scrolled list
+/// is entered at its first shown row.
+#[test]
+fn tab_and_shift_tab_reach_every_row_of_a_long_queue() {
+    use slint::platform::Key;
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    let publisher = SlintPublisher::new(&app);
+    let mut state = three_releases();
+    publisher.show(&state);
+    app.show().unwrap();
+    frame(&app);
+    let ids: Vec<String> = app
+        .get_remux_rows()
+        .iter()
+        .map(|row| row.id.to_string())
+        .collect();
+    assert_eq!((ids.len(), ids[43].as_str()), (44, "c03"));
+
+    tab_to(&app, "remux:None");
+    assert_eq!(row_picks_on_the_way(&app, Key::Tab, "run"), ids);
+    // Entered from below with the list scrolled to its top: the last row.
+    app.invoke_reveal(Mode::Remux, 0);
+    frame(&app);
+    let mut back = row_picks_on_the_way(&app, Key::Backtab, "remux:None");
+    back.reverse();
+    assert_eq!(back, ids);
+
+    // Entered from above with the list scrolled to its end: the first row.
+    app.invoke_reveal(Mode::Remux, 43);
+    frame(&app);
+    assert!(app.get_remux_scroll() < 0.0);
+    key(&app, Key::Tab);
+    frame(&app);
+    assert_eq!(focused(&app), "check:remux:a00");
+
+    // Every third row done, under To do: the rest, both ways.
+    state.seq = 1;
+    let mut rows = state.remux.rows.to_vec();
+    for row in rows.iter_mut().step_by(3) {
+        row.bucket = Some(Bucket::Done);
+    }
+    state.remux.rows = Arc::new(rows);
+    publisher.show(&state);
+    publisher.show_filter(Mode::Remux, QueueFilter::Todo);
+    frame(&app);
+    let todo: Vec<String> = ids
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| i % 3 != 0)
+        .map(|(_, id)| id.clone())
+        .collect();
+    tab_to(&app, "remux:None");
+    assert_eq!(row_picks_on_the_way(&app, Key::Tab, "run"), todo);
+    let mut back = row_picks_on_the_way(&app, Key::Backtab, "remux:None");
+    back.reverse();
+    assert_eq!(back, todo);
+    app.hide().unwrap();
+}
+
 /// A control focused from the keyboard draws its ring; one pressed with the pointer does not,
 /// until a key is typed (a modifier alone does not count), as `:focus-visible` does.
 #[test]

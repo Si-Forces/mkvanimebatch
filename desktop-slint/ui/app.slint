@@ -487,7 +487,8 @@ export component App inherits Window {
         // control on macOS) toggles the theme from anywhere, a field, the sheet, a dialog or the
         // Appearance menu included, so it is caught before the focused item. Esc closes the
         // Appearance menu, else the Log drawer unless the sheet or the dialog, which take it
-        // themselves, is open; it bubbles here from whatever has the focus.
+        // themselves, is open; it bubbles here from whatever has the focus. It notes which way each
+        // Tab goes (`Focus.backward`) for the queue list's entry stops.
         keys := FocusScope {
             focus-on-click: false;
             focus-on-tab-navigation: false;
@@ -496,6 +497,9 @@ export component App inherits Window {
                 if event.text.to-lowercase() == "t" && !event.repeat && (event.modifiers.control || event.modifiers.meta) {
                     Theme.toggle();
                     return accept;
+                }
+                if event.text == Key.Tab || event.text == Key.Backtab {
+                    Focus.backward = event.text == Key.Backtab || event.modifiers.shift;
                 }
                 // A key the user typed shows the focused control's ring (:focus-visible), not a
                 // modifier alone nor a shortcut.
