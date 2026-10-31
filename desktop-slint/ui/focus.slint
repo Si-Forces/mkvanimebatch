@@ -36,11 +36,14 @@ export component FocusRing inherits Rectangle {
     in property <length> around-width;
     in property <length> around-height;
     in property <length> radius;
+    // Square, as CSS draws an outline around a 0 radius: the text field sets it. Off, a control
+    // with per-corner radii alone (a stepper's -/+) keeps its rounded ring.
+    in property <bool> square;
     x: -self.gap - 2px;
     y: -self.gap - 2px;
     width: self.around-width + 2 * (self.gap + 2px);
     height: self.around-height + 2 * (self.gap + 2px);
-    border-radius: self.radius + self.gap + 2px;
+    border-radius: self.square ? 0px : self.radius + self.gap + 2px;
     border-width: 2px;
     border-color: Theme.accent;
 }
@@ -186,10 +189,14 @@ export component Pressable inherits Rectangle {
 // A text field (index.html's `<input>`, style.css `.field`): a bare TextInput in the field's box,
 // with no clear button, as the webview's input has none. Like the std LineEdit it has a context
 // menu (Undo, Redo, Cut, Copy, Paste, Select All), keeps the caret in view by scrolling a text
-// longer than the field, and reads as a text input with its value and placeholder, which a screen
-// reader can set as typed. The placeholder is drawn in Theme.hint and hidden while the field has
-// the focus, where an input method's preedit text would draw over it. Any focus draws the ring:
-// `:focus-visible` matches a focused text input whether a key or the pointer focused it.
+// longer than the field, and reads as a text input with its value and placeholder. A screen
+// reader's set-value edits it as an edit does, except in a disabled or read-only field; input-type
+// does not filter it, the host checks the value as it checks any edit. The placeholder is drawn in
+// Theme.hint while the field is empty, focused too, until a key is typed or an input method
+// composes, as the webview's. Any focus draws the ring: `:focus-visible` matches a focused text
+// input whether a key or the pointer focused it.
+// It follows Slint's internal/compiler/widgets/common/lineedit-base.slint at 45cb2b3: diff it
+// against that file when the Slint pin moves.
 export component TextField inherits Rectangle {
     in-out property <string> text <=> input.text;
     in property <string> placeholder;
@@ -230,9 +237,9 @@ export component TextField inherits Rectangle {
         input.set-selection-offsets(anchor, focus);
     }
 
-    if root.text == "" && !root.has-focus: Text {
+    if root.text == "" && input.preedit-text == "": Text {
         x: root.inset;
-        width: root.width - 2 * root.inset;
+        width: max(0px, root.width - 2 * root.inset);
         text: root.placeholder;
         color: Theme.hint;
         font-family: input.font-family;
@@ -324,6 +331,7 @@ export component TextField inherits Rectangle {
         around-width: root.width;
         around-height: root.height;
         radius: root.border-radius;
+        square: root.border-radius <= 0px;
     }
 }
 

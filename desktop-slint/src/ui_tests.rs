@@ -1157,6 +1157,13 @@ fn a_focused_field_shows_no_clear_button_and_reads_as_a_text_input() {
     let field = only(&app, label);
     assert_eq!(field.accessible_role(), Some(AccessibleRole::TextInput));
     assert_eq!(field.accessible_value().as_deref(), Some("10"));
+    // The field alone reads as the text input: its inner TextInput is not announced again.
+    assert_eq!(
+        text_input_of(&app, label).accessible_role(),
+        Some(AccessibleRole::None)
+    );
+    // The fluent LineEdit's clear icon (LineEditClearIcon, an Image holding a TouchArea) showed
+    // while focused: a focus that adds a TouchArea brings it back.
     let presses = || {
         only(&app, label)
             .query_descendants()
@@ -1202,6 +1209,40 @@ fn a_focused_field_shows_no_clear_button_and_reads_as_a_text_input() {
         "10",
         "a locked field keeps its text"
     );
+    app.hide().unwrap();
+}
+
+/// An empty field keeps its placeholder once it has the focus, as the webview's does, until a key
+/// is typed.
+#[test]
+fn an_empty_focused_field_keeps_its_placeholder() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window()
+        .set_size(slint::LogicalSize::new(920.0, 1100.0));
+    apply(&app, &ViewState::new(None));
+    app.show().unwrap();
+    app.invoke_open_sheet(Mode::Remux, "".into());
+    let tick = || i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1));
+    tick();
+    let placeholders = || {
+        only(&app, "Workers")
+            .query_descendants()
+            .match_type_name("Text")
+            .find_all()
+            .len()
+    };
+    assert_eq!(app.get_remux_form().workers, "");
+    assert_eq!(placeholders(), 1, "shown while unfocused");
+    let field = only(&app, "Workers");
+    pointer(&app, &field, true);
+    pointer(&app, &field, false);
+    tick();
+    assert_eq!(app.global::<Sheet>().get_focused(), "workers");
+    assert_eq!(placeholders(), 1, "still shown once focused");
+    key(&app, "5");
+    tick();
+    assert_eq!(placeholders(), 0, "gone once a digit is typed");
     app.hide().unwrap();
 }
 
@@ -1284,9 +1325,11 @@ fn the_folder_fields_type_in_jetbrains_mono() {
     app.set_remux_form(form);
     app.invoke_open_sheet(Mode::Remux, "".into());
     i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1));
-    // JetBrains Mono advances every glyph 0.6em; Onest's "i" is about a quarter of that.
+    // JetBrains Mono advances every glyph 0.6em; Onest's "i" is about a quarter of that, so its
+    // text would only fill the clip, the field less its 11px inset on each side.
+    let field = only(&app, "Input folder").size().width;
     let width = text_input_of(&app, "Input folder").size().width;
-    assert!(width > 80.0 * 12.0 * 0.6 * 0.9, "monospaced: {width}");
+    assert!(width > field - 22.0, "monospaced: {width} in {field}");
     app.hide().unwrap();
 }
 

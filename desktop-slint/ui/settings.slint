@@ -292,13 +292,14 @@ component DraftEdit inherits TextField {
             Sheet.leave(root.key);
         }
     }
-    // .input-error's 2px halo, around the err border.
+    // .input-error's 2px halo, around the err border; square around a square field, as a spread
+    // shadow is around a 0 radius.
     if root.flagged: Rectangle {
         x: -2px;
         y: -2px;
         width: root.width + 4px;
         height: root.height + 4px;
-        border-radius: root.border-radius + 2px;
+        border-radius: root.border-radius > 0px ? root.border-radius + 2px : 0px;
         border-width: 2px;
         border-color: Theme.err-soft;
     }
