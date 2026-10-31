@@ -217,8 +217,10 @@ component EpRow inherits Rectangle {
     callback move-down();
     // Tab off its last control, or Shift+Tab off its first, to the shown row `row`.
     callback tab-to(row: int, forward: bool);
-    // A control of the row took the focus from the keyboard: the row scrolls into view.
-    callback scroll-into-view();
+    // A control of the row took the focus from the keyboard: the row scrolls into view, below
+    // the release header pinned at the list's top, if any (`under-pin`: the row's body starts
+    // within the 30px that header covers).
+    callback scroll-into-view(under-pin: bool);
 
     // The row spans the list's top edge: its run's header pins there (`position: sticky`), unless
     // the row's own header shows whole at the top. One comparison per row laid out, on a scroll.
@@ -288,7 +290,7 @@ component EpRow inherits Rectangle {
                 : 0;
             changed focused-control => {
                 if self.focused-control != 0 && Focus.keyboard {
-                    root.scroll-into-view();
+                    root.scroll-into-view(root.y + root.head-height + root.scroll < 30px);
                 }
             }
 
@@ -577,13 +579,26 @@ export component QueuePane inherits Rectangle {
         }
     }
 
+    // Scrolls shown row `row` fully into view. A row above the list's top lands at its top edge,
+    // under the release header pinned there (30px) when the row has one (a queue of more than one
+    // release), so going up (`up`) the shown row before it is scrolled in first: the row lands
+    // below that one, which is taller than the header. With no header it stays at the edge. The
+    // two calls run before a layout, so for a row not made yet the landing is an estimate, which
+    // the row's keyboard focus (`under-pin`) corrects on the laid-out rows.
+    function show-row(row: int, up: bool) {
+        if up && root.rows[row].head != "" && root.rows[row].prev >= 0 {
+            list.ensure-row-visible(root.rows[row].prev, ScrollBehavior.instant);
+        }
+        list.ensure-row-visible(row, ScrollBehavior.instant);
+    }
+
     // Hands the focus to shown row `row`, scrolled into view: to its first control going forward,
     // its last going back. Made already, it takes the focus back (`Focus.restore`); out of view,
     // as its row is made (`Focus.follow-key`).
     function hand-focus(row: int, forward: bool) {
         let key = (forward ? root.first-control : root.last-control) + root.name + ":"
             + root.rows[row].id;
-        list.ensure-row-visible(row, ScrollBehavior.instant);
+        root.show-row(row, !forward);
         Focus.restore(key);
         // Last: at 45cb2b3 the generated Rust moves a local set into a global's property, so a
         // later read of `key` would not compile.
@@ -804,7 +819,7 @@ export component QueuePane inherits Rectangle {
                     scroll: root.list-scroll;
                     changed pinned => { root.pin(self.instance, self.pinned); }
                     tab-to(to, forward) => { root.hand-focus(to, forward); }
-                    scroll-into-view => { list.ensure-row-visible(index, ScrollBehavior.instant); }
+                    scroll-into-view(under-pin) => { root.show-row(index, under-pin); }
                     toggle => { root.set-selected(row.id, !row.selected); }
                     pick => { root.inspect(row.id); }
                     move-up => { root.reorder(row.id, true); }

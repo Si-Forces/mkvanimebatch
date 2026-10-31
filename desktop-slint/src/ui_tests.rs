@@ -3263,9 +3263,25 @@ fn tab_walks_the_custom_controls_in_order_and_enter_or_space_activates_them() {
     app.hide().unwrap();
 }
 
-/// Presses `step` until the custom control of `to` has the focus, and returns the row picks it
-/// passed, each checked to be whole inside the list: a focused row scrolls into view.
-fn row_picks_on_the_way(app: &App, step: slint::platform::Key, to: &str) -> Vec<String> {
+/// The change handlers a key set off, then the time for the smooth scroll Slint starts as a
+/// control out of view takes the focus: advancing the clock runs the handlers again and lays the
+/// lists out (which makes a row a Tab scrolls in, and focuses it), and the handlers that layout
+/// set off run last. Unlike `frame`, it searches no tree, so a long walk stays fast.
+fn settle() {
+    slint::platform::update_timers_and_animations();
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(300));
+    slint::platform::update_timers_and_animations();
+}
+
+/// A key pressed, then `settle`.
+fn key_and_settle(app: &App, step: slint::platform::Key) {
+    key(app, step);
+    settle();
+}
+
+/// Checks the pick of row `id` whole inside the list and below the release header pinned at its
+/// top, when one shows: a focused row scrolls fully into view.
+fn assert_row_in_view(app: &App, id: &str) {
     let list = ElementHandle::find_by_element_id(app, "QueuePane::list")
         .next()
         .expect("the queue's list");
@@ -3273,21 +3289,39 @@ fn row_picks_on_the_way(app: &App, step: slint::platform::Key, to: &str) -> Vec<
         list.absolute_position().y,
         list.absolute_position().y + list.size().height,
     );
+    // The pinned header is a GroupHead, 30px tall.
+    let clear = if app.get_remux_pinned().is_empty() {
+        top
+    } else {
+        top + 30.0
+    };
+    let pick = only(app, id);
+    let (y, height) = (pick.absolute_position().y, pick.size().height);
+    assert!(
+        y >= clear && y + height <= bottom,
+        "{id} in the list ({top}..{bottom}), below the pinned header ({clear}), at {y}..{}",
+        y + height
+    );
+}
+
+/// Presses `step` until the custom control of `to` has the focus, and returns the row picks it
+/// passed, each checked to be in view, below the pinned header. A focus leaves no row armed to
+/// take it again.
+fn row_picks_on_the_way(app: &App, step: slint::platform::Key, to: &str) -> Vec<String> {
     let mut picks = Vec::new();
     for _ in 0..400 {
-        key(app, step);
+        key_and_settle(app, step);
         let now = focused(app);
+        assert_eq!(
+            app.global::<Focus>().get_follow_key(),
+            "",
+            "{now} took the focus: no row waits for it"
+        );
         if now == to {
             return picks;
         }
         if let Some(id) = now.strip_prefix("pick:remux:") {
-            let pick = only(app, id);
-            let (y, height) = (pick.absolute_position().y, pick.size().height);
-            assert!(
-                y >= top && y + height <= bottom,
-                "{id} in the list ({top}..{bottom}), at {y}..{}",
-                y + height
-            );
+            assert_row_in_view(app, id);
             picks.push(id.to_string());
         }
     }
@@ -3296,8 +3330,9 @@ fn row_picks_on_the_way(app: &App, step: slint::platform::Key, to: &str) -> Vec<
 
 /// Tab walks every row of a long queue in order, the ones a ListView has not made yet (out of
 /// view) too, each scrolled into view, then on to the bottom bar; Shift+Tab from Run walks them
-/// back, as the webview's DOM order does. A filter's hidden rows are passed, a scrolled list is
-/// entered at its first shown row, and a locked selection walks the picks alone.
+/// back, as the webview's DOM order does, each below the release header pinned at the list's
+/// top. A filter's hidden rows are passed, a scrolled list is entered at its first shown row (from
+/// below at its last control), and a locked selection walks the picks alone.
 #[test]
 fn tab_and_shift_tab_reach_every_row_of_a_long_queue() {
     use slint::platform::Key;
@@ -3318,9 +3353,11 @@ fn tab_and_shift_tab_reach_every_row_of_a_long_queue() {
 
     tab_to(&app, "remux:None");
     assert_eq!(row_picks_on_the_way(&app, Key::Tab, "run"), ids);
-    // Entered from below with the list scrolled to its top: the last row.
+    // Entered from below with the list scrolled to its top: the last row, at its last control.
     app.invoke_reveal(Mode::Remux, 0);
     frame(&app);
+    key_and_settle(&app, Key::Backtab);
+    assert_eq!(focused(&app), "down:remux:c03");
     let mut back = row_picks_on_the_way(&app, Key::Backtab, "remux:None");
     back.reverse();
     assert_eq!(back, ids);
@@ -3332,6 +3369,18 @@ fn tab_and_shift_tab_reach_every_row_of_a_long_queue() {
     key(&app, Key::Tab);
     frame(&app);
     assert_eq!(focused(&app), "check:remux:a00");
+
+    // A row under the pinned header that takes the focus from the keyboard (a closing dialog
+    // gives it back) scrolls clear of the header too.
+    app.invoke_reveal(Mode::Remux, 25);
+    frame(&app);
+    assert_eq!(app.get_remux_pinned(), "S2");
+    app.global::<Focus>().set_keyboard(true);
+    app.global::<Focus>()
+        .invoke_restore("check:remux:b05".into());
+    settle();
+    assert_eq!(focused(&app), "check:remux:b05");
+    assert_row_in_view(&app, "b05");
 
     // Every third row done, under To do: the rest, both ways.
     state.seq = 1;
@@ -3370,12 +3419,106 @@ fn tab_and_shift_tab_reach_every_row_of_a_long_queue() {
     app.hide().unwrap();
 }
 
+/// Shift+Tab from Run into a list scrolled far from its end jumps to the last row, which makes
+/// every row anew; with the last release's first row then whole at the top, its own header
+/// shows, and the header pinned before the jump goes.
+#[test]
+fn a_far_tab_into_the_list_leaves_no_stale_pinned_header() {
+    use slint::platform::Key;
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    // 20 rows, 20 more, then 8 in a third release: 82px for its first row (with its header),
+    // 52px for each other.
+    let mut state = three_releases();
+    let rows: Vec<Row> = (0..48)
+        .map(|i| Row {
+            release: [".", "S2", "S3"][(i / 20).min(2)].into(),
+            ..row(&format!(
+                "{}{:02}",
+                ["a", "b", "c"][(i / 20).min(2)],
+                i % 20
+            ))
+        })
+        .collect();
+    state.remux.library = presentation::library(Some("/media/Show"), &rows);
+    state.remux.rows = Arc::new(rows);
+    SlintPublisher::new(&app).show(&state);
+    app.show().unwrap();
+    frame(&app);
+    // The list as tall as the third release.
+    let list = || {
+        ElementHandle::find_by_element_id(&app, "QueuePane::list")
+            .next()
+            .unwrap()
+            .size()
+            .height
+    };
+    let height = 640.0 + 82.0 + 7.0 * 52.0 - list();
+    app.window()
+        .set_size(slint::LogicalSize::new(920.0, height));
+    frame(&app);
+    assert_eq!(list(), 82.0 + 7.0 * 52.0);
+
+    app.set_remux_scroll(-500.0);
+    frame(&app);
+    assert_eq!(app.get_remux_pinned(), "MEDIA \u{203a} SHOW");
+    app.global::<Focus>().invoke_restore("run".into());
+    frame(&app);
+    assert_eq!(focused(&app), "run");
+    key_and_settle(&app, Key::Backtab);
+    assert_eq!(focused(&app), "down:remux:c07");
+    assert_eq!(
+        app.get_remux_pinned(),
+        "",
+        "S3's own header shows at the top"
+    );
+    app.hide().unwrap();
+}
+
+/// A queue of one release pins no header: a row focused from the keyboard at the list's top edge
+/// stays there, and Shift+Tab lands the row above at that edge, as a browser's focus scrolls it in.
+#[test]
+fn shift_tab_in_a_one_release_queue_lands_each_row_at_the_lists_top() {
+    use slint::platform::Key;
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    let mut state = three_releases();
+    let rows: Vec<Row> = (0..20).map(|i| row(&format!("a{i:02}"))).collect();
+    state.remux.library = presentation::library(Some("/media/Show"), &rows);
+    state.remux.rows = Arc::new(rows);
+    SlintPublisher::new(&app).show(&state);
+    app.show().unwrap();
+    frame(&app);
+    let y = |id: &str| {
+        only(&app, &format!("Include {id} in the batch"))
+            .absolute_position()
+            .y
+    };
+    let top = y("a00");
+
+    app.invoke_reveal(Mode::Remux, 10);
+    frame(&app);
+    app.global::<Focus>().set_keyboard(true);
+    app.global::<Focus>()
+        .invoke_restore("check:remux:a10".into());
+    settle();
+    assert_eq!(focused(&app), "check:remux:a10");
+    assert_eq!(y("a10"), top, "a10 stays at the top");
+    key_and_settle(&app, Key::Backtab);
+    assert_eq!(focused(&app), "down:remux:a09");
+    assert_eq!(y("a09"), top, "a09 lands at the top");
+    app.hide().unwrap();
+}
+
 /// The settings sheet and the confirm dialog make the window behind them inert, as the webview's
 /// `showModal()` does: a screen reader's action on a control behind one (the mode tab, the title
 /// bar's) does nothing and reads as disabled, a dialog over the sheet makes the sheet inert too
 /// (a custom control, a stepper, a select, a fluent checkbox, a text field), and the topmost one's
 /// controls still act. A screen reader's Focus action on a control behind gives it no focus: the
-/// focus moves on into the topmost layer, so Esc still reaches it and typing reaches no field.
+/// focus moves on into the topmost layer, so Esc still reaches it and typing reaches no field. A
+/// field's menu and the Appearance menu close as a layer opens over them.
 #[test]
 fn a_sheet_or_a_dialog_makes_the_window_behind_it_inert() {
     use mkv_anime_batch_slint_ui::DialogTexts;
@@ -3497,13 +3640,35 @@ fn a_sheet_or_a_dialog_makes_the_window_behind_it_inert() {
         "",
         "the field took no focus"
     );
+    // The sheet asked to put the cursor in a field under the dialog: the dialog keeps the focus.
+    assert_eq!(focused(&app), "Cancel");
+    app.invoke_open_sheet(Mode::Remux, "input_dir".into());
+    frame(&app);
+    assert_eq!(focused(&app), "Cancel", "the inert field takes no focus");
     only(&app, "Cancel").invoke_accessible_default_action();
     assert_eq!(*answers.borrow(), [false]);
     close_dialog();
 
+    // A field's menu open as a dialog shows closes: its entries would edit the inert field.
+    let popups = || {
+        i_slint_core::window::WindowInner::from_pub(app.window())
+            .active_popups()
+            .len()
+    };
+    let field = only(&app, "Input folder");
+    let (at, size) = (field.absolute_position(), field.size());
+    let position = slint::LogicalPosition::new(at.x + size.width / 2.0, at.y + size.height / 2.0);
+    let button = slint::platform::PointerEventButton::Right;
+    app.window()
+        .dispatch_event(slint::platform::WindowEvent::PointerPressed { position, button });
+    app.window()
+        .dispatch_event(slint::platform::WindowEvent::PointerReleased { position, button });
+    assert_eq!(popups(), 1, "the field's menu opens");
+
     // Again: a Focus action on the window behind both lands on the dialog, not on the sheet
     // under it, so Esc answers the dialog.
     show_dialog();
+    assert_eq!(popups(), 0, "the field's menu closes");
     screen_reader_focus(&app, "Extract");
     key(&app, slint::platform::Key::Escape);
     assert_eq!(*answers.borrow(), [false, false], "Esc answers the dialog");
@@ -3520,6 +3685,16 @@ fn a_sheet_or_a_dialog_makes_the_window_behind_it_inert() {
     only(&app, "Clear cache").invoke_accessible_default_action();
     assert_eq!(*answers.borrow(), [false, false, true]);
     close_dialog();
+
+    // The Appearance menu closes as a dialog or the sheet opens, set open directly too.
+    for open in [App::set_dialog_open, App::set_sheet_open] {
+        app.set_appearance_open(true);
+        open(&app, true);
+        frame(&app);
+        assert!(!app.get_appearance_open(), "the Appearance menu closes");
+        open(&app, false);
+        frame(&app);
+    }
 
     // Nothing open: Extract acts.
     let extract = only(&app, "Extract");

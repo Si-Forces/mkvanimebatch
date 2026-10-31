@@ -229,6 +229,8 @@ export component TextField inherits Rectangle {
     // neither the focus nor an edit, a screen reader's included.
     in property <int> layer;
     out property <bool> has-focus: input.has-focus;
+    // Enabled, and not inert under a sheet or a dialog over its layer, as Pressable's.
+    out property <bool> live: root.enabled && root.layer >= Focus.modal;
     callback edited(text: string);
     callback accepted(text: string);
     // .field's 1px border and 10px side padding, where the text and the placeholder start.
@@ -250,14 +252,14 @@ export component TextField inherits Rectangle {
     accessible-placeholder-text: root.placeholder;
     // A screen reader's edit, refused as typing is: not in a disabled, read-only or inert field.
     accessible-action-set-value(value) => {
-        if !input.enabled || root.read-only {
+        if !root.live || root.read-only {
             return;
         }
         root.text = value;
         root.edited(value);
     }
     accessible-action-set-selection-offsets(anchor, focus) => {
-        if !input.enabled {
+        if !root.live {
             return;
         }
         input.set-selection-offsets(anchor, focus);
@@ -276,36 +278,69 @@ export component TextField inherits Rectangle {
         accessible-role: none;
     }
 
-    ContextMenuArea {
-        enabled: root.enabled;
+    // A menu open as the field turns inert (a dialog shows) closes, and its entries do nothing
+    // then: the TextInput's edit functions do not check `enabled`. The menu's `enabled` and each
+    // entry's check are a second guard behind `close()`, which cannot close a native menu
+    // (Windows, macOS).
+    changed live => {
+        if !self.live {
+            menu.close();
+        }
+    }
+    menu := ContextMenuArea {
+        enabled: root.live;
         Menu {
             if !root.read-only: MenuItem {
                 title: "Undo";
-                activated => { input.undo(); }
+                activated => {
+                    if root.live {
+                        input.undo();
+                    }
+                }
             }
             if !root.read-only: MenuItem {
                 title: "Redo";
-                activated => { input.redo(); }
+                activated => {
+                    if root.live {
+                        input.redo();
+                    }
+                }
             }
             if !root.read-only: MenuSeparator { }
             if !root.read-only: MenuItem {
                 title: "Cut";
                 enabled: input.has-selection;
-                activated => { input.cut(); }
+                activated => {
+                    if root.live {
+                        input.cut();
+                    }
+                }
             }
             MenuItem {
                 title: "Copy";
                 enabled: input.has-selection;
-                activated => { input.copy(); }
+                activated => {
+                    if root.live {
+                        input.copy();
+                    }
+                }
             }
             if !root.read-only: MenuItem {
                 title: "Paste";
-                activated => { input.paste(); }
+                activated => {
+                    if root.live {
+                        input.paste();
+                    }
+                }
             }
             MenuItem {
                 title: "Select All";
                 enabled: root.text != "";
-                activated => { input.select-all(); }
+                activated => {
+                    if root.live {
+                        input.select-all();
+                    }
+                }
             }
         }
 
@@ -329,7 +364,7 @@ export component TextField inherits Rectangle {
             width: max(1px, parent.width - 2 * root.inset);
             clip: true;
             input := TextInput {
-                enabled: root.enabled && root.layer >= Focus.modal;
+                enabled: root.live;
                 // How far the text slid left (zero or negative) to keep the caret in view.
                 property <length> scroll;
                 // Where the caret can sit, from the clip's left edge.

@@ -174,10 +174,14 @@ component CommitEdit inherits TextField {
     accessible-label: root.label;
     init => { self.take-focus(); }
     changed grab-focus => { self.take-focus(); }
+    // An inert or disabled field takes none: its focus() would move the focus on, out of the
+    // top layer.
     function take-focus() {
         if self.grab-focus {
             self.grab-focus = false;
-            root.focus();
+            if self.live {
+                root.focus();
+            }
         }
     }
     function commit() {

@@ -269,10 +269,10 @@ component DraftEdit inherits TextField {
     border-color: root.flagged ? Theme.err : Theme.line;
     init => { self.grab(); }
     changed serial => { self.grab(); }
-    // A disabled field is passed over, as Pressable's restore does: its focus() would move the
-    // focus on, out of the sheet once every control after it is locked.
+    // A disabled or inert field is passed over, as Pressable's restore does: its focus() would
+    // move the focus on, out of the sheet once every control after it is locked.
     function grab() {
-        if root.enabled && Sheet.focus-key == root.key && root.key != "" {
+        if root.live && Sheet.focus-key == root.key && root.key != "" {
             root.focus();
             // A field made with the focus reports no change of it.
             if root.has-focus {
@@ -314,6 +314,8 @@ component FolderField inherits Field {
     in property <string> placeholder;
     in property <bool> enabled;
     in property <bool> flagged;
+    // The confirm dialog shows over the sheet (SettingsSheet's `dialog-open`).
+    in property <bool> dialog-open;
     HorizontalLayout {
         spacing: 6px;
         DraftEdit {
@@ -330,7 +332,7 @@ component FolderField inherits Field {
             text: "Browse…";
             // Inert under the dialog (only the sheet has folder fields), as the sheet's other
             // fluent widgets: their screen reader actions ignore anything but `enabled`.
-            enabled: root.enabled && !Focus.dialog-open;
+            enabled: root.enabled && !root.dialog-open;
             accessible-label: "Browse for the " + root.label;
             changed has-focus => {
                 if self.has-focus {
@@ -503,8 +505,9 @@ export component SettingsSheet inherits GlassPane {
             done-button.focus();
         }
     }
+    // A dialog over the sheet keeps the focus: Done's focus() would move it on, out of the dialog.
     function focus-done() {
-        if Sheet.focused == "" {
+        if Sheet.focused == "" && !root.dialog-open {
             done-button.focus();
         }
     }
@@ -653,6 +656,7 @@ export component SettingsSheet inherits GlassPane {
                             value <=> root.form.input-dir;
                             placeholder: "Release folder with the MKV episodes";
                             enabled: !root.locked;
+                            dialog-open: root.dialog-open;
                             flagged: root.invalid == "input_dir";
                         }
                         FolderField {
@@ -661,6 +665,7 @@ export component SettingsSheet inherits GlassPane {
                             value <=> root.form.out-dir;
                             placeholder: root.out-placeholder;
                             enabled: !root.locked;
+                            dialog-open: root.dialog-open;
                         }
                         FolderField {
                             label: "Fonts directory";
@@ -668,6 +673,7 @@ export component SettingsSheet inherits GlassPane {
                             value <=> root.form.fonts-dir;
                             placeholder: "Auto: fonts folder";
                             enabled: !root.locked;
+                            dialog-open: root.dialog-open;
                         }
                         if root.remux: FolderField {
                             label: "Assets directory";
@@ -675,6 +681,7 @@ export component SettingsSheet inherits GlassPane {
                             value <=> root.form.assets-dir;
                             placeholder: "Optional fallback for subtitles";
                             enabled: !root.locked;
+                            dialog-open: root.dialog-open;
                         }
                     }
 

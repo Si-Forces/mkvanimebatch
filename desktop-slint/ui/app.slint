@@ -334,11 +334,21 @@ export component App inherits Window {
         }
     }
 
-    // The dialog closed: what had the focus takes it back, as a closing <dialog> gives it back.
-    // Over the sheet, its field puts the cursor back, or Done takes it (the sheet's fallback);
-    // with no sheet the window's key scope takes it first, so Esc still reaches it when the
-    // control is gone or locked (the removed dialog dropped the focus).
+    // The Appearance menu closes as the sheet or a dialog opens, also when `sheet-open` or
+    // `dialog-open` is set without `open-sheet` or `show-dialog`: its choices would act behind it.
+    changed sheet-open => {
+        if self.sheet-open {
+            root.appearance-open = false;
+        }
+    }
+    // The dialog opened: the Appearance menu closes. It closed: what had the focus takes it back,
+    // as a closing <dialog> gives it back. Over the sheet, its field puts the cursor back, or Done
+    // takes it (the sheet's fallback); with no sheet the window's key scope takes it first, so Esc
+    // still reaches it when the control is gone or locked (the removed dialog dropped the focus).
     changed dialog-open => {
+        if self.dialog-open {
+            root.appearance-open = false;
+        }
         if !self.dialog-open {
             if self.sheet-open && self.dialog-field != "" {
                 Sheet.focus-key = self.dialog-field;
