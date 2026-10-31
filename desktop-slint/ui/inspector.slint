@@ -1,9 +1,9 @@
 // Redesign C's Episode Inspector (desktop-tauri/ui/index.html .insp, style.css) and the Library's
 // entries (.library-tree). Layout and bindings only: the host maps every text
 // (desktop-slint/src/inspector.rs) and does what the controls ask.
-import { LineEdit, ScrollView } from "std-widgets.slint";
+import { ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { Focus, FocusRing, Pressable, Select, TipCard } from "focus.slint";
+import { Focus, FocusRing, Pressable, Select, TextField, TipCard } from "focus.slint";
 import { LinkButton, RowTone } from "queue.slint";
 import { SectionHead } from "settings.slint";
 
@@ -163,30 +163,21 @@ component Labelled inherits VerticalLayout {
 
 // A text field that commits as a webview `change` does: on Enter or when it loses focus, once
 // edited since the last commit.
-// `dirty` is the pane's, shared by its fields: a commit sends them all. The placeholder is drawn
-// here in Theme.hint, as the sheet's DraftEdit does: the fluent LineEdit's own is near white in the
-// dark theme and its colour cannot be set.
-component CommitEdit inherits Rectangle {
-    in-out property <string> text <=> edit.text;
-    in property <string> placeholder;
-    in property <bool> enabled <=> edit.enabled;
+// `dirty` is the pane's, shared by its fields: a commit sends them all.
+component CommitEdit inherits TextField {
     in property <string> label;
     in-out property <bool> dirty;
     // Takes the focus when set, or when the field is made with it set, and clears it.
     in-out property <bool> grab-focus;
     callback committed();
     callback typed(text: string);
-    min-width: 0px;
-    horizontal-stretch: 1;
-    min-height: edit.min-height;
-    preferred-height: edit.preferred-height;
-    forward-focus: edit;
+    accessible-label: root.label;
     init => { self.take-focus(); }
     changed grab-focus => { self.take-focus(); }
     function take-focus() {
         if self.grab-focus {
             self.grab-focus = false;
-            edit.focus();
+            root.focus();
         }
     }
     function commit() {
@@ -195,32 +186,15 @@ component CommitEdit inherits Rectangle {
             root.committed();
         }
     }
-    edit := LineEdit {
-        width: root.width;
-        height: root.height;
-        accessible-label: root.label;
-        accessible-placeholder-text: root.placeholder;
-        edited(text) => {
-            root.dirty = true;
-            root.typed(text);
-        }
-        accepted => { root.commit(); }
-        changed has-focus => {
-            if !self.has-focus {
-                root.commit();
-            }
-        }
+    edited(text) => {
+        root.dirty = true;
+        root.typed(text);
     }
-    // Inset as the LineEdit's text (fluent pads it 12px); hidden while the field has the focus,
-    // where an input method's preedit text would draw over it.
-    if edit.text == "" && !edit.has-focus: Text {
-        x: 12px;
-        width: root.width - 24px;
-        text: root.placeholder;
-        color: root.enabled ? Theme.hint : Theme.hint.with-alpha(0.6);
-        vertical-alignment: center;
-        overflow: elide;
-        accessible-role: none;
+    accepted => { root.commit(); }
+    changed has-focus => {
+        if !self.has-focus {
+            root.commit();
+        }
     }
 }
 

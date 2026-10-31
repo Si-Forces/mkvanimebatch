@@ -36,11 +36,14 @@ export component FocusRing inherits Rectangle {
     in property <length> around-width;
     in property <length> around-height;
     in property <length> radius;
+    // Square, as CSS draws an outline around a 0 radius: the text field sets it. Off, a control
+    // with per-corner radii alone (a stepper's -/+) keeps its rounded ring.
+    in property <bool> square;
     x: -self.gap - 2px;
     y: -self.gap - 2px;
     width: self.around-width + 2 * (self.gap + 2px);
     height: self.around-height + 2 * (self.gap + 2px);
-    border-radius: self.radius + self.gap + 2px;
+    border-radius: self.square ? 0px : self.radius + self.gap + 2px;
     border-width: 2px;
     border-color: Theme.accent;
 }
@@ -183,6 +186,155 @@ export component Pressable inherits Rectangle {
     }
 }
 
+// A text field (index.html's `<input>`, style.css `.field`): a bare TextInput in the field's box,
+// with no clear button, as the webview's input has none. Like the std LineEdit it has a context
+// menu (Undo, Redo, Cut, Copy, Paste, Select All), keeps the caret in view by scrolling a text
+// longer than the field, and reads as a text input with its value and placeholder. A screen
+// reader's set-value edits it as an edit does, except in a disabled or read-only field; input-type
+// does not filter it, the host checks the value as it checks any edit. The placeholder is drawn in
+// Theme.hint while the field is empty, focused too, until a key is typed or an input method
+// composes, as the webview's. Any focus draws the ring: `:focus-visible` matches a focused text
+// input whether a key or the pointer focused it.
+// It follows Slint's internal/compiler/widgets/common/lineedit-base.slint at 45cb2b3: diff it
+// against that file when the Slint pin moves.
+export component TextField inherits Rectangle {
+    in-out property <string> text <=> input.text;
+    in property <string> placeholder;
+    in property <bool> enabled <=> input.enabled;
+    in property <bool> read-only <=> input.read-only;
+    in property <string> font-family <=> input.font-family;
+    in property <TextHorizontalAlignment> horizontal-alignment <=> input.horizontal-alignment;
+    in property <InputType> input-type <=> input.input-type;
+    out property <bool> has-focus: input.has-focus;
+    callback edited(text: string);
+    callback accepted(text: string);
+    // .field's 1px border and 10px side padding, where the text and the placeholder start.
+    property <length> inset: 11px;
+
+    min-width: 0px;
+    horizontal-stretch: 1;
+    height: 34px;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Theme.line;
+    background: Theme.field;
+    opacity: root.enabled ? 1 : 0.75;
+    forward-focus: input;
+    accessible-role: text-input;
+    accessible-enabled: root.enabled;
+    accessible-read-only: root.read-only;
+    accessible-value: root.text;
+    accessible-placeholder-text: root.placeholder;
+    // A screen reader's edit, refused as typing is: not in a disabled or read-only field.
+    accessible-action-set-value(value) => {
+        if !root.enabled || root.read-only {
+            return;
+        }
+        root.text = value;
+        root.edited(value);
+    }
+    accessible-action-set-selection-offsets(anchor, focus) => {
+        input.set-selection-offsets(anchor, focus);
+    }
+
+    if root.text == "" && input.preedit-text == "": Text {
+        x: root.inset;
+        width: max(0px, root.width - 2 * root.inset);
+        text: root.placeholder;
+        color: Theme.hint;
+        font-family: input.font-family;
+        font-size: input.font-size;
+        horizontal-alignment: root.horizontal-alignment;
+        vertical-alignment: center;
+        overflow: elide;
+        accessible-role: none;
+    }
+
+    ContextMenuArea {
+        enabled: root.enabled;
+        Menu {
+            if !root.read-only: MenuItem {
+                title: "Undo";
+                activated => { input.undo(); }
+            }
+            if !root.read-only: MenuItem {
+                title: "Redo";
+                activated => { input.redo(); }
+            }
+            if !root.read-only: MenuSeparator { }
+            if !root.read-only: MenuItem {
+                title: "Cut";
+                enabled: input.has-selection;
+                activated => { input.cut(); }
+            }
+            MenuItem {
+                title: "Copy";
+                enabled: input.has-selection;
+                activated => { input.copy(); }
+            }
+            if !root.read-only: MenuItem {
+                title: "Paste";
+                activated => { input.paste(); }
+            }
+            MenuItem {
+                title: "Select All";
+                enabled: root.text != "";
+                activated => { input.select-all(); }
+            }
+        }
+
+        // A press in the side padding focuses the field too, as anywhere in an `<input>`'s box:
+        // the clip below takes only the presses inside it.
+        TouchArea {
+            enabled: root.enabled;
+            mouse-cursor: MouseCursor.text;
+            pointer-event(event) => {
+                if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
+                    input.focus();
+                }
+            }
+        }
+
+        // The text inside the inset, clipped: a text longer than the field slides so the caret
+        // stays in view. The clip is at least 1px wide: an empty clip hides the TextInput, which
+        // then cannot take the focus.
+        Rectangle {
+            x: root.inset;
+            width: max(1px, parent.width - 2 * root.inset);
+            clip: true;
+            input := TextInput {
+                // How far the text slid left (zero or negative) to keep the caret in view.
+                property <length> scroll;
+                // Where the caret can sit, from the clip's left edge.
+                property <length> room: parent.width - self.text-cursor-width;
+                x: self.scroll.clamp(self.room - self.width, 0px);
+                width: max(1px, self.room, self.preferred-width);
+                height: 100%;
+                vertical-alignment: center;
+                font-size: 12px;
+                color: Theme.fg;
+                selection-background-color: Theme.accent-ring;
+                selection-foreground-color: Theme.fg;
+                // The field reads as the text input.
+                accessible-role: none;
+                // The least slide that brings the caret, at `at.x + scroll`, back within 0..room.
+                cursor-position-changed(at) => {
+                    self.scroll = self.scroll.clamp(-at.x, self.room - at.x);
+                }
+                edited => { root.edited(self.text); }
+                accepted => { root.accepted(self.text); }
+            }
+        }
+    }
+
+    if root.has-focus: FocusRing {
+        around-width: root.width;
+        around-height: root.height;
+        radius: root.border-radius;
+        square: root.border-radius <= 0px;
+    }
+}
+
 // A select (index.html's `<select>`, style.css `.field`): it shows the entry picked, and a click,
 // Enter, Space or a screen reader's action opens the list of its entries under it. In the list the
 // arrows move the highlight only; a click, Enter or Space picks an entry, Esc or a click outside
@@ -204,8 +356,8 @@ export component Select inherits Pressable {
 
     min-width: 0px;
     horizontal-stretch: 1;
-    // The height of the fluent fields beside it.
-    height: 32px;
+    // style.css `.field`, as the text fields beside it.
+    height: 34px;
     border-radius: 8px;
     border-width: 1px;
     border-color: Theme.line;
@@ -241,12 +393,14 @@ export component Select inherits Pressable {
     }
 
     HorizontalLayout {
-        padding-left: 10px;
+        // .field's 1px border and 10px padding.
+        padding-left: 11px;
         padding-right: 10px;
         spacing: 6px;
         Text {
             text: root.value;
             color: Theme.fg;
+            font-size: 12px;
             vertical-alignment: center;
             overflow: elide;
             horizontal-stretch: 1;
