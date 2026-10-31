@@ -1123,6 +1123,216 @@ fn the_number_fields_and_the_complexity_show_their_tooltips_on_hover() {
     app.hide().unwrap();
 }
 
+/// The text input inside the field labelled `label`.
+fn text_input_of(app: &App, label: &str) -> ElementHandle {
+    let mut found = only(app, label)
+        .query_descendants()
+        .match_type_name("TextInput")
+        .find_all();
+    assert_eq!(found.len(), 1, "one text input in {label:?}");
+    found.pop().unwrap()
+}
+
+/// A focused field with text shows no clear button, as the webview's `<input>` has none: nothing
+/// a pointer can press appears in it, and the complexity box keeps its room for "10". The text
+/// starts at `.field`'s inset. Each field reads as a text input with its value and placeholder,
+/// and a locked one refuses a screen reader's edit.
+#[test]
+fn a_focused_field_shows_no_clear_button_and_reads_as_a_text_input() {
+    use i_slint_backend_testing::AccessibleRole;
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window()
+        .set_size(slint::LogicalSize::new(920.0, 1100.0));
+    apply(&app, &ViewState::new(None));
+    app.show().unwrap();
+    let mut form = app.get_remux_form();
+    form.complexity = "10".into();
+    app.set_remux_form(form);
+    app.invoke_open_sheet(Mode::Remux, "".into());
+    let tick = || i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1));
+    tick();
+
+    let label = "Encoder complexity value";
+    let field = only(&app, label);
+    assert_eq!(field.accessible_role(), Some(AccessibleRole::TextInput));
+    assert_eq!(field.accessible_value().as_deref(), Some("10"));
+    // The field alone reads as the text input: its inner TextInput is not announced again.
+    assert_eq!(
+        text_input_of(&app, label).accessible_role(),
+        Some(AccessibleRole::None)
+    );
+    // The fluent LineEdit's clear icon (LineEditClearIcon, an Image holding a TouchArea) showed
+    // while focused: a focus that adds a TouchArea brings it back.
+    let presses = || {
+        only(&app, label)
+            .query_descendants()
+            .match_type_name("TouchArea")
+            .find_all()
+            .len()
+    };
+    let room = || text_input_of(&app, label).size().width;
+    let unfocused = room();
+    let unfocused_presses = presses();
+    // The text starts where `.field`'s does: inside its 1px border and 10px padding.
+    let inset = text_input_of(&app, label).absolute_position().x - field.absolute_position().x;
+    assert_eq!(inset, 11.0, "the text's inset");
+    pointer(&app, &field, true);
+    pointer(&app, &field, false);
+    tick();
+    assert_eq!(app.global::<Sheet>().get_focused(), "complexity");
+    assert_eq!(
+        presses(),
+        unfocused_presses,
+        "no clear button in the focused field"
+    );
+    assert_eq!(room(), unfocused, "the focus takes no room from the text");
+    assert!(
+        unfocused >= 24.0,
+        "room for two digits at 12px: {unfocused}"
+    );
+
+    let folder = only(&app, "Fonts directory");
+    assert_eq!(folder.accessible_role(), Some(AccessibleRole::TextInput));
+    assert_eq!(folder.accessible_value().as_deref(), Some(""));
+    assert_eq!(
+        folder.accessible_placeholder_text().as_deref(),
+        Some("Auto: fonts folder")
+    );
+
+    // Locked by a batch, a field refuses a screen reader's edit, as it refuses typing.
+    app.set_busy(true);
+    tick();
+    only(&app, label).set_accessible_value("3");
+    assert_eq!(
+        app.get_remux_form().complexity,
+        "10",
+        "a locked field keeps its text"
+    );
+    app.hide().unwrap();
+}
+
+/// An empty field keeps its placeholder once it has the focus, as the webview's does, until a key
+/// is typed.
+#[test]
+fn an_empty_focused_field_keeps_its_placeholder() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window()
+        .set_size(slint::LogicalSize::new(920.0, 1100.0));
+    apply(&app, &ViewState::new(None));
+    app.show().unwrap();
+    app.invoke_open_sheet(Mode::Remux, "".into());
+    let tick = || i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1));
+    tick();
+    let placeholders = || {
+        only(&app, "Workers")
+            .query_descendants()
+            .match_type_name("Text")
+            .find_all()
+            .len()
+    };
+    assert_eq!(app.get_remux_form().workers, "");
+    assert_eq!(placeholders(), 1, "shown while unfocused");
+    let field = only(&app, "Workers");
+    pointer(&app, &field, true);
+    pointer(&app, &field, false);
+    tick();
+    assert_eq!(app.global::<Sheet>().get_focused(), "workers");
+    assert_eq!(placeholders(), 1, "still shown once focused");
+    key(&app, "5");
+    tick();
+    assert_eq!(placeholders(), 0, "gone once a digit is typed");
+    app.hide().unwrap();
+}
+
+/// A text longer than its field slides left as it is typed, so its end, with the caret, stays in
+/// view; Home brings its start back, End its end, and a text cut back to fit sits at the start. A
+/// press in the field's side padding focuses it, as anywhere in an `<input>`'s box.
+#[test]
+fn a_text_longer_than_its_field_keeps_the_caret_in_view() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window()
+        .set_size(slint::LogicalSize::new(920.0, 1200.0));
+    let mut assigned = sample_view();
+    assigned.assignment = Some(mkv_core::request::TrackAssignment {
+        target_video: "Season 1/ep1.mkv".into(),
+        asset_path: "Season 1/ep1.ass".into(),
+        track_type: Default::default(),
+        language: Some("eng".into()),
+        title: None,
+        offset_ms: None,
+    });
+    let mut state = ViewState::new(None);
+    state.remux.rows = Arc::new(vec![row("Season 1/ep1.mkv")]);
+    state.remux.empty = None;
+    state.remux.inspector = Some(assigned);
+    apply(&app, &state);
+    app.show().unwrap();
+
+    let field = only(&app, "Track title");
+    let (at, size) = (field.absolute_position(), field.size());
+    // Pressed in the padding, outside the text's clip: the keys below reach it only if it focused.
+    click_at(&app, at.x + 4.0, at.y + size.height / 2.0);
+    let typed = "W".repeat(40);
+    for letter in typed.chars() {
+        key(&app, letter.to_string());
+    }
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1));
+    assert_eq!(app.get_sub_title(), typed.as_str());
+    let text = || {
+        let text = text_input_of(&app, "Track title");
+        (text.absolute_position().x, text.size().width)
+    };
+    // The clip: the field less `.field`'s 11px inset on each side.
+    let (left, right) = (at.x + 11.0, at.x + size.width - 11.0);
+    let end_in_view = |(x, width): (f32, f32)| x < left && x + width <= right;
+    assert!(text().1 > size.width, "longer than the field");
+    assert!(
+        end_in_view(text()),
+        "its end in view: {:?} in {left}..{right}",
+        text()
+    );
+    let tick = || i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1));
+    key(&app, slint::platform::Key::Home);
+    tick();
+    assert_eq!(text().0, left, "Home shows its start");
+    key(&app, slint::platform::Key::End);
+    tick();
+    assert!(end_in_view(text()), "End shows its end again: {:?}", text());
+    for _ in 0..36 {
+        key(&app, slint::platform::Key::Backspace);
+    }
+    tick();
+    assert_eq!(app.get_sub_title(), "WWWW");
+    assert_eq!(text().0, left, "a text that fits sits at the start");
+    app.hide().unwrap();
+}
+
+/// The folder fields type in JetBrains Mono (.field.mono): a run of narrow letters is as wide as
+/// any other, wider than the field, where Onest's would fit in it.
+#[test]
+fn the_folder_fields_type_in_jetbrains_mono() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window()
+        .set_size(slint::LogicalSize::new(920.0, 1100.0));
+    apply(&app, &ViewState::new(None));
+    app.show().unwrap();
+    let mut form = app.get_remux_form();
+    form.input_dir = "i".repeat(80).into();
+    app.set_remux_form(form);
+    app.invoke_open_sheet(Mode::Remux, "".into());
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1));
+    // JetBrains Mono advances every glyph 0.6em; Onest's "i" is about a quarter of that, so its
+    // text would only fill the clip, the field less its 11px inset on each side.
+    let field = only(&app, "Input folder").size().width;
+    let width = text_input_of(&app, "Input folder").size().width;
+    assert!(width > field - 22.0, "monospaced: {width} in {field}");
+    app.hide().unwrap();
+}
+
 /// Scrolls the pane at `x` to its end with the mouse wheel, or back to its top for `up`.
 fn scroll(app: &App, x: f32, up: bool) {
     app.window()
