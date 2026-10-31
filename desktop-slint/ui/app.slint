@@ -251,6 +251,12 @@ export component App inherits Window {
     // What had the focus when the dialog showed: a Pressable's key, or the sheet's field.
     property <string> dialog-return;
     property <string> dialog-field;
+    // The sheet and the dialog are made one pass of change handlers after they open (`changed
+    // sheet-open` / `dialog-open` sets these): a select's list or a field's menu open under them
+    // closes in a handler of that pass, and Slint then gives the focus back to the control that
+    // opened it, which is inert and moves it on, out of a layer made with the focus already.
+    property <bool> sheet-made;
+    property <bool> dialog-made;
 
     // The shown mode's list asks; the host sends the Intent for `mode`.
     callback set-selected(id: string, selected: bool);
@@ -334,18 +340,22 @@ export component App inherits Window {
         }
     }
 
-    // The Appearance menu closes as the sheet or a dialog opens, also when `sheet-open` or
-    // `dialog-open` is set without `open-sheet` or `show-dialog`: its choices would act behind it.
+    // The sheet is made a pass later (`sheet-made`). The Appearance menu closes as the sheet or a
+    // dialog opens, also when `sheet-open` or `dialog-open` is set without `open-sheet` or
+    // `show-dialog`: its choices would act behind it.
     changed sheet-open => {
+        root.sheet-made = self.sheet-open;
         if self.sheet-open {
             root.appearance-open = false;
         }
     }
-    // The dialog opened: the Appearance menu closes. It closed: what had the focus takes it back,
-    // as a closing <dialog> gives it back. Over the sheet, its field puts the cursor back, or Done
-    // takes it (the sheet's fallback); with no sheet the window's key scope takes it first, so Esc
-    // still reaches it when the control is gone or locked (the removed dialog dropped the focus).
+    // The dialog opened: it is made a pass later (`dialog-made`), and the Appearance menu closes.
+    // It closed: what had the focus takes it back, as a closing <dialog> gives it back. Over the
+    // sheet, its field puts the cursor back, or Done takes it (the sheet's fallback); with no
+    // sheet the window's key scope takes it first, so Esc still reaches it when the control is
+    // gone or locked (the removed dialog dropped the focus).
     changed dialog-open => {
+        root.dialog-made = self.dialog-open;
         if self.dialog-open {
             root.appearance-open = false;
         }
@@ -814,7 +824,7 @@ export component App inherits Window {
 
             // The settings sheet of the mode shown (#settings-sheet), over a backdrop that covers the
             // window: a click on it or Esc closes the sheet.
-            if root.sheet-open: Rectangle {
+            if root.sheet-open && root.sheet-made: Rectangle {
                 background: Theme.dim;
                 FocusScope {
                     // Under a dialog it takes no focus, as the sheet's controls: a screen reader's
@@ -870,7 +880,7 @@ export component App inherits Window {
             }
 
             // The confirm dialog (#confirm-modal), over the sheet too.
-            if root.dialog-open: ConfirmDialog {
+            if root.dialog-open && root.dialog-made: ConfirmDialog {
                 texts: root.dialog;
                 serial: root.dialog-serial;
                 answered(confirmed) => { root.dialog-answered(confirmed); }
