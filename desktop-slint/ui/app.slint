@@ -248,7 +248,8 @@ export component App inherits Window {
     // The control that takes the focus back when the sheet closes (a `Focus` key): the gear that
     // opened it, Run after a refused Run, else the one that had the focus.
     property <string> sheet-return;
-    // What had the focus when the dialog showed: a Pressable's key, or the sheet's field.
+    // What had the focus when the dialog showed: a Pressable's key, or the sheet's field, or the
+    // field `open-sheet` asked for under the dialog.
     property <string> dialog-return;
     property <string> dialog-field;
     // The sheet and the dialog are made one pass of change handlers after they open (`changed
@@ -306,6 +307,11 @@ export component App inherits Window {
         root.mode = mode;
         Sheet.focus-key = key;
         Sheet.focus-serial += 1;
+        // Under a dialog the field cannot take the focus (a Run refused as a notice shows): it
+        // takes it as the dialog closes, in place of what had it before.
+        if root.dialog-open && key != "" {
+            root.dialog-field = key;
+        }
         if !root.sheet-open {
             root.sheet-return = key != "" ? "run" : root.appearance-open ? "Appearance" : Focus.current;
             root.sheet-open = true;
@@ -351,9 +357,9 @@ export component App inherits Window {
     }
     // The dialog opened: it is made a pass later (`dialog-made`), and the Appearance menu closes.
     // It closed: what had the focus takes it back, as a closing <dialog> gives it back. Over the
-    // sheet, its field puts the cursor back, or Done takes it (the sheet's fallback); with no
-    // sheet the window's key scope takes it first, so Esc still reaches it when the control is
-    // gone or locked (the removed dialog dropped the focus).
+    // sheet, its field (or the one asked for under it) takes the cursor, or Done takes it (the
+    // sheet's fallback); with no sheet the window's key scope takes it first, so Esc still
+    // reaches it when the control is gone or locked (the removed dialog dropped the focus).
     changed dialog-open => {
         root.dialog-made = self.dialog-open;
         if self.dialog-open {

@@ -3649,6 +3649,12 @@ fn a_sheet_or_a_dialog_makes_the_window_behind_it_inert() {
     only(&app, "Cancel").invoke_accessible_default_action();
     assert_eq!(*answers.borrow(), [false]);
     close_dialog();
+    // It takes it as the dialog closes.
+    assert_eq!(
+        app.global::<Sheet>().get_focused(),
+        "input_dir",
+        "the field asked for under the dialog takes the focus"
+    );
 
     // A field's menu open as a dialog shows closes: its entries would edit the inert field.
     let popups = || {

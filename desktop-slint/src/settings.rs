@@ -1187,8 +1187,8 @@ mod tests {
     }
 
     /// After a refused Run the sheet opens on the flagged field, or moves the cursor there when
-    /// it is open; nothing opens with no field flagged. The narrowest window scrolls the field
-    /// into view.
+    /// it is open, or once a notice over it closes; nothing opens with no field flagged. The
+    /// narrowest window scrolls the field into view.
     #[test]
     fn a_refused_run_opens_the_sheet_on_the_flagged_field() {
         i_slint_backend_testing::init_no_event_loop();
@@ -1252,6 +1252,29 @@ mod tests {
             "an open sheet moves the cursor"
         );
         assert!(visible("Input folder"), "and scrolls back up to it");
+
+        // Refused while a notice shows over the sheet: the field takes the cursor, scrolled
+        // in, as the notice closes.
+        app.invoke_show_dialog();
+        ticks();
+        state.seq = 3;
+        state.remux.draft.invalid = Some("ffmpeg_threads");
+        publisher.show(&state);
+        assert!(open_on_flagged(&app, Mode::Remux));
+        ticks();
+        assert_ne!(
+            sheet.get_focused(),
+            "ffmpeg_threads",
+            "not under the notice"
+        );
+        app.set_dialog_open(false);
+        ticks();
+        assert_eq!(
+            sheet.get_focused(),
+            "ffmpeg_threads",
+            "the cursor is in the flagged field once the notice closes"
+        );
+        assert!(visible("FFmpeg threads"), "scrolled into view");
         app.hide().unwrap();
     }
 
