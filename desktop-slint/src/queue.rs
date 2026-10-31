@@ -43,6 +43,11 @@ fn shows(row: &Row, filter: QueueFilter) -> bool {
     bucket_of(filter).is_none_or(|bucket| row.bucket == Some(bucket))
 }
 
+/// A row's index as a Slint `int`, -1 for none.
+fn shown_at(index: Option<usize>) -> i32 {
+    index.map_or(-1, to_slint_count)
+}
+
 /// A count as a Slint `int`, saturating.
 fn to_slint_count(n: usize) -> i32 {
     i32::try_from(n).unwrap_or(i32::MAX)
@@ -109,10 +114,17 @@ pub(crate) fn map_rows(
             }
         }
     }
+    // Each shown row's neighbours among the shown rows, which Tab and Shift+Tab go to.
+    let mut neighbours = vec![(-1, -1); rows.len()];
+    for (n, &i) in shown.iter().enumerate() {
+        let prev = n.checked_sub(1).map(|p| shown[p]);
+        neighbours[i] = (shown_at(prev), shown_at(shown.get(n + 1).copied()));
+    }
     rows.iter()
         .zip(heads)
+        .zip(neighbours)
         .enumerate()
-        .map(|(index, (row, head))| QueueRow {
+        .map(|(index, ((row, head), (prev, next)))| QueueRow {
             id: row.id.as_str().into(),
             num: format!("{:02}", index + 1).into(),
             name: row.name.as_str().into(),
@@ -142,6 +154,8 @@ pub(crate) fn map_rows(
                 .unwrap_or_default(),
             head_count: head.as_ref().map_or(0, |&(_, n, _)| to_slint_count(n)),
             opens: head.is_some_and(|(.., opens)| opens),
+            prev,
+            next,
         })
         .collect()
 }
@@ -234,6 +248,8 @@ pub(crate) fn map_head(view: &ModeView, filter: QueueFilter, rows_shown: bool) -
             .as_ref()
             .map_or("", |inspector| inspector.id.as_str())
             .into(),
+        first: shown_at(view.rows.iter().position(|row| shows(row, filter))),
+        last: shown_at(view.rows.iter().rposition(|row| shows(row, filter))),
     }
 }
 
@@ -560,6 +576,43 @@ mod tests {
         assert_eq!(mapped[3].label, NOT_IN_BATCH);
     }
 
+    /// Tab's way through the list: each shown row names the shown rows beside it, past the
+    /// hidden ones, and the head the first and the last shown.
+    #[test]
+    fn rows_name_their_shown_neighbours_and_the_head_the_ends() {
+        let queue = [
+            row("a", ".", Some(Bucket::Done)),
+            row("b", ".", Some(Bucket::Todo)),
+            row("c", ".", Some(Bucket::Done)),
+            row("d", ".", Some(Bucket::Done)),
+            row("e", ".", Some(Bucket::Todo)),
+            row("f", ".", Some(Bucket::Done)),
+        ];
+        let links = |filter| {
+            map_rows(&queue, &[], filter)
+                .iter()
+                .map(|row| (row.prev, row.next))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            links(QueueFilter::All),
+            [(-1, 1), (0, 2), (1, 3), (2, 4), (3, 5), (4, -1)]
+        );
+        assert_eq!(
+            links(QueueFilter::Todo),
+            [(-1, -1), (-1, 4), (-1, -1), (-1, -1), (1, -1), (-1, -1)]
+        );
+        let mut view = ViewState::new(None).remux;
+        view.rows = Arc::new(queue.to_vec());
+        let ends = |filter| {
+            let head = map_head(&view, filter, true);
+            (head.first, head.last)
+        };
+        assert_eq!(ends(QueueFilter::All), (0, 5));
+        assert_eq!(ends(QueueFilter::Todo), (1, 4));
+        assert_eq!(ends(QueueFilter::Failed), (-1, -1));
+    }
+
     #[test]
     fn release_headers_count_the_rows_the_filter_shows() {
         let entry = |release: Option<&str>, group_label: &str| LibraryEntry {
@@ -724,7 +777,8 @@ mod tests {
             matches!(list.take().rows, Some(RowPatch::Rows(rows)) if rows.iter().map(|(i, _)| *i).collect::<Vec<_>>() == [1])
         );
 
-        // A filter change patches the rows it hides and the filter a mapping raced with is redone.
+        // A filter change patches the rows it hides, and the shown neighbours' links (Tab's way),
+        // and the filter a mapping raced with is redone.
         list.filter = QueueFilter::Done;
         let remapped = map_rows(&view.rows, &view.library, QueueFilter::Done);
         // Mapped with a filter that changed since: dropped, the newer remap stages its own.
@@ -733,7 +787,7 @@ mod tests {
         let update = list.take();
         assert_eq!(update.head.map(|head| head.filter), Some(QueueFilter::Done));
         assert!(
-            matches!(update.rows, Some(RowPatch::Rows(rows)) if rows.iter().map(|(i, r)| (*i, r.shown)).collect::<Vec<_>>() == [(0, false)])
+            matches!(update.rows, Some(RowPatch::Rows(rows)) if rows.iter().map(|(i, r)| (*i, r.shown, r.prev)).collect::<Vec<_>>() == [(0, false, -1), (1, true, -1)])
         );
         view.rows = Arc::new((*view.rows).clone());
         list.put(

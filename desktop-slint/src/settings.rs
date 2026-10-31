@@ -707,8 +707,9 @@ pub(crate) fn wire(app: &App, send: Intents, edits: Edits) {
         }
     });
 
-    // A held stepper repeats until released; one of a sheet that closed under the pointer, or
-    // locked by a batch that started, stops, as its release may never arrive.
+    // A held stepper repeats until released; one of a sheet that closed under the pointer,
+    // locked by a batch that started, or made inert by a dialog shown over it, stops, as its
+    // release may never arrive.
     let repeater = Rc::new(Repeater::default());
     let (d, held, shown) = (drafts.clone(), Rc::clone(&repeater), app.as_weak());
     sheet.on_step_pressed(move |name, up| {
@@ -721,7 +722,7 @@ pub(crate) fn wire(app: &App, send: Intents, edits: Edits) {
             let Some(app) = window.upgrade() else {
                 return;
             };
-            if !app.get_sheet_open() || app.get_locked() {
+            if !app.get_sheet_open() || app.get_locked() || app.get_dialog_open() {
                 if let Some(repeater) = stop.upgrade() {
                     repeater.release();
                 }
@@ -1186,8 +1187,8 @@ mod tests {
     }
 
     /// After a refused Run the sheet opens on the flagged field, or moves the cursor there when
-    /// it is open; nothing opens with no field flagged. The narrowest window scrolls the field
-    /// into view.
+    /// it is open, or once a notice over it closes; nothing opens with no field flagged. The
+    /// narrowest window scrolls the field into view.
     #[test]
     fn a_refused_run_opens_the_sheet_on_the_flagged_field() {
         i_slint_backend_testing::init_no_event_loop();
@@ -1251,6 +1252,29 @@ mod tests {
             "an open sheet moves the cursor"
         );
         assert!(visible("Input folder"), "and scrolls back up to it");
+
+        // Refused while a notice shows over the sheet: the field takes the cursor, scrolled
+        // in, as the notice closes.
+        app.invoke_show_dialog();
+        ticks();
+        state.seq = 3;
+        state.remux.draft.invalid = Some("ffmpeg_threads");
+        publisher.show(&state);
+        assert!(open_on_flagged(&app, Mode::Remux));
+        ticks();
+        assert_ne!(
+            sheet.get_focused(),
+            "ffmpeg_threads",
+            "not under the notice"
+        );
+        app.set_dialog_open(false);
+        ticks();
+        assert_eq!(
+            sheet.get_focused(),
+            "ffmpeg_threads",
+            "the cursor is in the flagged field once the notice closes"
+        );
+        assert!(visible("FFmpeg threads"), "scrolled into view");
         app.hide().unwrap();
     }
 
@@ -1652,16 +1676,18 @@ mod tests {
         app.hide().unwrap();
     }
 
-    /// A stepper held as its sheet closes, or as a batch locks it, stops: its release never
-    /// comes, so it steps no more once the sheet opens again or the batch ends (a locked step
-    /// sends nothing, but a repeat left running would step again then).
+    /// A stepper held as its sheet closes, as a batch locks it, or as a dialog shows over it,
+    /// stops: its release never comes, so it steps no more once the sheet opens again, the batch
+    /// ends or the dialog closes (a locked step sends nothing, but a repeat left running would
+    /// step again then).
     #[test]
-    fn a_held_stepper_stops_when_its_sheet_closes_or_locks() {
+    fn a_held_stepper_stops_when_its_sheet_closes_locks_or_goes_inert() {
         i_slint_backend_testing::init_no_event_loop();
         let (_runtime, app, publisher) = wired();
-        // The sheet closed, or a batch running; and back.
+        // The sheet closed, a batch running, or a dialog over the sheet; and back.
         let stop = |how: &str, stopped: bool| match how {
             "closed" => app.set_sheet_open(!stopped),
+            "under a dialog" => app.set_dialog_open(stopped),
             _ => app.set_busy(stopped),
         };
         let later = || {
@@ -1670,7 +1696,7 @@ mod tests {
             }
         };
         app.set_sheet_open(true);
-        for how in ["closed", "locked"] {
+        for how in ["closed", "locked", "under a dialog"] {
             let before = sent(&publisher, Workers);
             app.global::<Sheet>()
                 .invoke_step_pressed("workers".into(), true);

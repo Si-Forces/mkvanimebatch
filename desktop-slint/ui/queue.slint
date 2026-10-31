@@ -36,6 +36,10 @@ export struct QueueRow {
     head: string,
     head-count: int,
     opens: bool,
+    // The shown rows before and after it, where Tab and Shift+Tab go from its controls (-1 for
+    // none, and on a hidden row).
+    prev: int,
+    next: int,
 }
 
 export struct QueueHead {
@@ -57,6 +61,10 @@ export struct QueueHead {
     selection-locked: bool,
     // The row the Episode Inspector shows.
     inspected: string,
+    // The first and the last row the filter shows (-1 for none): where Tab enters the list from
+    // the controls above it, and Shift+Tab from those after it.
+    first: int,
+    last: int,
 }
 
 // The spinning rings' turn, one for all of them: still under Reduce motion, as style.css's
@@ -207,6 +215,12 @@ component EpRow inherits Rectangle {
     callback pick();
     callback move-up();
     callback move-down();
+    // Tab off its last control, or Shift+Tab off its first, to the shown row `row`.
+    callback tab-to(row: int, forward: bool);
+    // A control of the row took the focus from the keyboard: the row scrolls into view, below
+    // the release header pinned at the list's top, if any (`under-pin`: the row's body starts
+    // within the 30px that header covers).
+    callback scroll-into-view(under-pin: bool);
 
     // The row spans the list's top edge: its run's header pins there (`position: sticky`), unless
     // the row's own header shows whole at the top. One comparison per row laid out, on a scroll.
@@ -235,165 +249,202 @@ component EpRow inherits Rectangle {
         count: root.item.head-count;
     }
 
-    // The list's side padding (.list: 0 12px).
-    if item.shown: body := TouchArea {
-        x: 12px;
-        y: root.head-height;
-        width: parent.width - 24px;
-        height: 52px;
-        // A control of the row has the focus: Move up / Move down show (.ep-row:focus-within).
-        property <bool> focus-within: check.focused || pick.focused || up.focused || down.focused;
-
-        Rectangle {
-            border-radius: 10px;
-            background: root.inspected ? Theme.accent-soft : body.has-hover ? Theme.hover : transparent;
-            border-width: root.inspected ? 1px : 0px;
-            border-color: Theme.accent-ring;
+    // The list's side padding (.list: 0 12px). Tab off the row's last control and Shift+Tab off
+    // its first go to the next or the previous shown row, which a ListView may not have made
+    // yet (out of view): the pane scrolls it in and hands it the focus. Within the row, and out
+    // of the list past its first or last shown row, Tab goes on as the window orders it.
+    if item.shown: FocusScope {
+        focus-on-click: false;
+        focus-on-tab-navigation: false;
+        capture-key-pressed(event) => {
+            // Slint moves no focus on Tab with Ctrl, Alt or Meta, so neither does a row.
+            if event.modifiers.control || event.modifiers.alt || event.modifiers.meta {
+                return reject;
+            }
+            let back = event.text == Key.Backtab || (event.text == Key.Tab && event.modifiers.shift);
+            if !back && event.text == Key.Tab && root.item.next >= 0
+                && (root.locked || root.filtered ? pick.focused : down.focused) {
+                root.tab-to(root.item.next, true);
+                return accept;
+            }
+            if back && root.item.prev >= 0 && (root.locked ? pick.focused : check.focused) {
+                root.tab-to(root.item.prev, false);
+                return accept;
+            }
+            reject
         }
 
-        HorizontalLayout {
-            padding-left: 10px;
-            padding-right: 4px;
-            spacing: 10px;
-
-            // The checkbox (.ep-select-check).
-            VerticalLayout {
-                alignment: center;
-                check := Pressable {
-                    width: 16px;
-                    height: 16px;
-                    border-radius: 4px;
-                    background: root.item.selected ? Theme.accent : Theme.field;
-                    border-width: root.item.selected ? 0px : 1.5px;
-                    border-color: Theme.mute;
-                    opacity: root.locked ? 0.5 : 1;
-                    enabled: !root.locked;
-                    cursor: default;
-                    focus-key: "check:" + root.key;
-                    accessible-role: checkbox;
-                    accessible-checkable: true;
-                    accessible-checked: root.item.selected;
-                    accessible-label: root.item.check-label;
-                    clicked => { root.toggle(); }
-
-                    if root.item.selected: Path {
-                        width: 10px;
-                        height: 10px;
-                        viewbox-width: 10;
-                        viewbox-height: 10;
-                        commands: "M 1.5 5.2 L 4 7.7 L 8.5 2.5";
-                        stroke: Theme.accent-fg;
-                        stroke-width: 1.8px;
-                        accessible-role: none;
-                    }
+        body := TouchArea {
+            x: 12px;
+            y: root.head-height;
+            width: parent.width - 24px;
+            height: 52px;
+            // A control of the row has the focus: Move up / Move down show (.ep-row:focus-within).
+            property <bool> focus-within: check.focused || pick.focused || up.focused || down.focused;
+            // Which of them has it: one taken from the keyboard scrolls the row into view, as a
+            // browser's focus does; not one a press took (the row would move under the pointer).
+            property <int> focused-control: check.focused ? 1
+                : pick.focused ? 2
+                : up.focused ? 3
+                : down.focused ? 4
+                : 0;
+            changed focused-control => {
+                if self.focused-control != 0 && Focus.keyboard {
+                    root.scroll-into-view(root.y + root.head-height + root.scroll < 30px);
                 }
             }
 
-            // The pick (.ep-pick): number, name and meta line; it inspects the row. Read as the
-            // name, then the meta line; the webview's button also reads the row number.
-            pick := Pressable {
-                horizontal-stretch: 1;
-                border-radius: 8px;
-                focus-key: "pick:" + root.key;
-                accessible-label: root.item.name;
-                accessible-description: root.item.meta;
-                clicked => { root.pick(); }
-                HorizontalLayout {
-                    spacing: 12px;
-                    opacity: root.item.selected ? 1 : 0.45;
-                    Text {
-                        width: 44px;
-                        text: root.item.num;
-                        color: Theme.fg;
-                        font-family: "Unbounded";
-                        font-size: 17px;
-                        font-weight: 700;
-                        vertical-alignment: center;
-                        accessible-role: none;
-                    }
-                    VerticalLayout {
-                        alignment: center;
-                        Text {
-                            text: root.item.name;
-                            color: Theme.fg;
-                            font-weight: 600;
-                            overflow: elide;
-                            accessible-role: none;
-                        }
-                        Text {
-                            text: root.item.meta;
-                            color: root.item.meta-error ? Theme.err : Theme.path;
-                            font-size: 12px;
-                            overflow: elide;
-                            accessible-role: none;
-                        }
-                    }
-                }
-            }
-
-            // The status (.ep-status): the mark, then the label in the row's tone; its `title`
-            // the hover tooltip.
             Rectangle {
-                max-width: 150px;
-                accessible-role: text;
-                accessible-label: root.item.label;
-                accessible-description: root.item.title;
-                HorizontalLayout {
-                    spacing: 8px;
-                    alignment: end;
-                    if root.item.mark == RowMark.ring || root.item.mark == RowMark.spin: VerticalLayout {
-                        alignment: center;
-                        Ring {
-                            progress: root.item.progress;
-                            spinning: root.item.mark == RowMark.spin;
-                        }
-                    }
-                    if root.item.mark == RowMark.ok || root.item.mark == RowMark.err: VerticalLayout {
-                        alignment: center;
-                        Glyph {
-                            stroke: root.tone-color;
-                            glyph: root.item.mark == RowMark.ok ? "M5 12.5l4.5 4.5L19 7.5" : "M6 6l12 12M18 6L6 18";
-                        }
-                    }
-                    Text {
-                        text: root.item.label;
-                        color: root.tone-color;
-                        font-size: 12px;
-                        vertical-alignment: center;
-                        overflow: elide;
-                        accessible-role: none;
-                    }
-                }
-                if root.item.title != "": Tooltip {
-                    TipCard {
-                        text: root.item.title;
-                    }
-                }
+                border-radius: 10px;
+                background: root.inspected ? Theme.accent-soft : body.has-hover ? Theme.hover : transparent;
+                border-width: root.inspected ? 1px : 0px;
+                border-color: Theme.accent-ring;
             }
 
-            // Move up / Move down (.ep-reorder): shown on hover or with a row control focused;
-            // while a filter shows, gone from the accessibility tree too, their width kept
-            // (style.css's `visibility: hidden`), and disabled, so no programmatic focus
-            // (`Focus.restore`, `follow-key`) reaches them: a hidden scope still takes it.
-            Rectangle {
-                width: 22px;
-                visible: !root.filtered;
-                opacity: body.has-hover || body.focus-within ? 1 : 0;
+            HorizontalLayout {
+                padding-left: 10px;
+                padding-right: 4px;
+                spacing: 10px;
+
+                // The checkbox (.ep-select-check).
                 VerticalLayout {
                     alignment: center;
-                    up := ReorderButton {
-                        glyph: "M6 15l6-6 6 6";
-                        enabled: !root.locked && !root.filtered;
-                        focus-key: "up:" + root.key;
-                        accessible-label: "Move up";
-                        clicked => { root.move-up(); }
+                    check := Pressable {
+                        width: 16px;
+                        height: 16px;
+                        border-radius: 4px;
+                        background: root.item.selected ? Theme.accent : Theme.field;
+                        border-width: root.item.selected ? 0px : 1.5px;
+                        border-color: Theme.mute;
+                        opacity: root.locked ? 0.5 : 1;
+                        enabled: !root.locked;
+                        cursor: default;
+                        focus-key: "check:" + root.key;
+                        accessible-role: checkbox;
+                        accessible-checkable: true;
+                        accessible-checked: root.item.selected;
+                        accessible-label: root.item.check-label;
+                        clicked => { root.toggle(); }
+
+                        if root.item.selected: Path {
+                            width: 10px;
+                            height: 10px;
+                            viewbox-width: 10;
+                            viewbox-height: 10;
+                            commands: "M 1.5 5.2 L 4 7.7 L 8.5 2.5";
+                            stroke: Theme.accent-fg;
+                            stroke-width: 1.8px;
+                            accessible-role: none;
+                        }
                     }
-                    down := ReorderButton {
-                        glyph: "M6 9l6 6 6-6";
-                        enabled: !root.locked && !root.filtered;
-                        focus-key: "down:" + root.key;
-                        accessible-label: "Move down";
-                        clicked => { root.move-down(); }
+                }
+
+                // The pick (.ep-pick): number, name and meta line; it inspects the row. Read as the
+                // name, then the meta line; the webview's button also reads the row number.
+                pick := Pressable {
+                    horizontal-stretch: 1;
+                    border-radius: 8px;
+                    focus-key: "pick:" + root.key;
+                    accessible-label: root.item.name;
+                    accessible-description: root.item.meta;
+                    clicked => { root.pick(); }
+                    HorizontalLayout {
+                        spacing: 12px;
+                        opacity: root.item.selected ? 1 : 0.45;
+                        Text {
+                            width: 44px;
+                            text: root.item.num;
+                            color: Theme.fg;
+                            font-family: "Unbounded";
+                            font-size: 17px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                            accessible-role: none;
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            Text {
+                                text: root.item.name;
+                                color: Theme.fg;
+                                font-weight: 600;
+                                overflow: elide;
+                                accessible-role: none;
+                            }
+                            Text {
+                                text: root.item.meta;
+                                color: root.item.meta-error ? Theme.err : Theme.path;
+                                font-size: 12px;
+                                overflow: elide;
+                                accessible-role: none;
+                            }
+                        }
+                    }
+                }
+
+                // The status (.ep-status): the mark, then the label in the row's tone; its `title`
+                // the hover tooltip.
+                Rectangle {
+                    max-width: 150px;
+                    accessible-role: text;
+                    accessible-label: root.item.label;
+                    accessible-description: root.item.title;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: end;
+                        if root.item.mark == RowMark.ring || root.item.mark == RowMark.spin: VerticalLayout {
+                            alignment: center;
+                            Ring {
+                                progress: root.item.progress;
+                                spinning: root.item.mark == RowMark.spin;
+                            }
+                        }
+                        if root.item.mark == RowMark.ok || root.item.mark == RowMark.err: VerticalLayout {
+                            alignment: center;
+                            Glyph {
+                                stroke: root.tone-color;
+                                glyph: root.item.mark == RowMark.ok ? "M5 12.5l4.5 4.5L19 7.5" : "M6 6l12 12M18 6L6 18";
+                            }
+                        }
+                        Text {
+                            text: root.item.label;
+                            color: root.tone-color;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            overflow: elide;
+                            accessible-role: none;
+                        }
+                    }
+                    if root.item.title != "": Tooltip {
+                        TipCard {
+                            text: root.item.title;
+                        }
+                    }
+                }
+
+                // Move up / Move down (.ep-reorder): shown on hover or with a row control focused;
+                // while a filter shows, gone from the accessibility tree too, their width kept
+                // (style.css's `visibility: hidden`), and disabled, so no programmatic focus
+                // (`Focus.restore`, `follow-key`) reaches them: a hidden scope still takes it.
+                Rectangle {
+                    width: 22px;
+                    visible: !root.filtered;
+                    opacity: body.has-hover || body.focus-within ? 1 : 0;
+                    VerticalLayout {
+                        alignment: center;
+                        up := ReorderButton {
+                            glyph: "M6 15l6-6 6 6";
+                            enabled: !root.locked && !root.filtered;
+                            focus-key: "up:" + root.key;
+                            accessible-label: "Move up";
+                            clicked => { root.move-up(); }
+                        }
+                        down := ReorderButton {
+                            glyph: "M6 9l6 6 6-6";
+                            enabled: !root.locked && !root.filtered;
+                            focus-key: "down:" + root.key;
+                            accessible-label: "Move down";
+                            clicked => { root.move-down(); }
+                        }
                     }
                 }
             }
@@ -528,6 +579,39 @@ export component QueuePane inherits Rectangle {
         }
     }
 
+    // Scrolls shown row `row` fully into view. A row above the list's top lands at its top edge,
+    // under the release header pinned there (30px) when the row has one (a queue of more than one
+    // release), so going up (`up`) the shown row before it is scrolled in first: the row lands
+    // below that one, which is taller than the header. With no header it stays at the edge. The
+    // two calls run before a layout, so for a row not made yet the landing is an estimate, which
+    // the row's keyboard focus (`under-pin`) corrects on the laid-out rows.
+    function show-row(row: int, up: bool) {
+        if up && root.rows[row].head != "" && root.rows[row].prev >= 0 {
+            list.ensure-row-visible(root.rows[row].prev, ScrollBehavior.instant);
+        }
+        list.ensure-row-visible(row, ScrollBehavior.instant);
+    }
+
+    // Hands the focus to shown row `row`, scrolled into view: to its first control going forward,
+    // its last going back. Made already, it takes the focus back (`Focus.restore`); out of view,
+    // as its row is made (`Focus.follow-key`).
+    function hand-focus(row: int, forward: bool) {
+        let key = (forward ? root.first-control : root.last-control) + root.name + ":"
+            + root.rows[row].id;
+        root.show-row(row, !forward);
+        Focus.restore(key);
+        // Last: at 45cb2b3 the generated Rust moves a local set into a global's property, so a
+        // later read of `key` would not compile.
+        Focus.follow-key = key;
+    }
+    // A row's first and last control that takes the focus: its checkbox and Move down, unless
+    // locked (the checkbox) or a filter shows (Move up / Move down).
+    property <string> first-control: root.head.selection-locked ? "pick:" : "check:";
+    property <string> last-control: root.head.selection-locked || root.filtered ? "pick:" : "down:";
+    // Tab can enter the list: no card covers it, the filter shows a row, and no sheet or dialog
+    // makes it inert.
+    property <bool> enterable: !root.head.card-shown && root.head.first >= 0 && Focus.modal == 0;
+
     // A filter chip clicked: the filter wins over a reveal still waiting for its layout.
     function filter(filter: QueueFilter) {
         root.reveal-pending = -1;
@@ -558,7 +642,8 @@ export component QueuePane inherits Rectangle {
     property <int> rows-made;
     // The first rows made after a reset disarm `Focus.follow-key` (this handler runs once that
     // pass made them): a moved episode's row not made then (scrolled out) or disabled takes no
-    // focus when a scroll makes it later.
+    // focus when a scroll makes it later. A Tab hand-off (`hand-focus`) arms it after that, for
+    // the row its scroll makes.
     changed rows-made => {
         Focus.follow-key = "";
     }
@@ -697,6 +782,16 @@ export component QueuePane inherits Rectangle {
         // it to a row (`reveal`).
         Rectangle {
             vertical-stretch: 1;
+            // Where Tab enters the list from the controls above it: the first shown row takes
+            // the focus, as the webview's first row in the DOM does, even with the list scrolled
+            // (Tab would take the first row made). Shift+Tab passes it.
+            FocusScope {
+                width: 0px;
+                height: 0px;
+                focus-on-click: false;
+                focus-on-tab-navigation: root.enterable && !Focus.backward;
+                focus-gained => { root.hand-focus(root.head.first, true); }
+            }
             list := ListView {
                 width: parent.width;
                 height: parent.height;
@@ -723,11 +818,23 @@ export component QueuePane inherits Rectangle {
                     key: root.name + ":" + row.id;
                     scroll: root.list-scroll;
                     changed pinned => { root.pin(self.instance, self.pinned); }
+                    tab-to(to, forward) => { root.hand-focus(to, forward); }
+                    scroll-into-view(under-pin) => { root.show-row(index, under-pin); }
                     toggle => { root.set-selected(row.id, !row.selected); }
                     pick => { root.inspect(row.id); }
                     move-up => { root.reorder(row.id, true); }
                     move-down => { root.reorder(row.id, false); }
                 }
+            }
+
+            // Where Shift+Tab enters the list from the controls after it: the last shown row takes
+            // the focus, not the last one made. Tab passes it.
+            FocusScope {
+                width: 0px;
+                height: 0px;
+                focus-on-click: false;
+                focus-on-tab-navigation: root.enterable && Focus.backward;
+                focus-gained => { root.hand-focus(root.head.last, false); }
             }
 
             // The pinned header (style.css's sticky .ep-group-head), over the rows at the list's
