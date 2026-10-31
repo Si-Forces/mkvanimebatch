@@ -188,7 +188,8 @@ export component App inherits Window {
     in property <string> log-copy-label: "Copy";
     // The confirm dialog shown, if open (`show-dialog`); the host bumps `dialog-serial` for each it
     // shows, and closes it.
-    in-out property <bool> dialog-open;
+    // While it is open, every control outside it is inert (`Focus.modal`).
+    in-out property <bool> dialog-open <=> Focus.dialog-open;
     in property <DialogTexts> dialog;
     in property <int> dialog-serial;
     // Each mode's Library and Episode Inspector; the subtitle section's ladder and select entries
@@ -239,8 +240,9 @@ export component App inherits Window {
     in property <[PresetItem]> presets;
     in property <ChipTexts> chips;
     in property <SheetLimits> sheet-limits;
-    // The settings sheet of the mode shown is open.
-    in-out property <bool> sheet-open;
+    // The settings sheet of the mode shown is open; the window behind it is inert meanwhile
+    // (`Focus.modal`).
+    in-out property <bool> sheet-open <=> Focus.sheet-open;
     // The title bar's Appearance menu is open.
     in-out property <bool> appearance-open;
     // The control that takes the focus back when the sheet closes (a `Focus` key): the gear that

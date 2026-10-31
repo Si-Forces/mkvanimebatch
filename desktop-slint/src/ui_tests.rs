@@ -3320,6 +3320,90 @@ fn tab_and_shift_tab_reach_every_row_of_a_long_queue() {
     app.hide().unwrap();
 }
 
+/// The settings sheet and the confirm dialog make the window behind them inert, as the webview's
+/// `showModal()` does: a screen reader's action on a control behind one (the mode tab, the title
+/// bar's) does nothing and reads as disabled, a dialog over the sheet makes the sheet inert too
+/// (a custom control, a fluent checkbox, a text field), and the topmost one's controls still act.
+#[test]
+fn a_sheet_or_a_dialog_makes_the_window_behind_it_inert() {
+    use mkv_anime_batch_slint_ui::DialogTexts;
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    // Tall enough for the sheet's Run options to show unscrolled.
+    app.window()
+        .set_size(slint::LogicalSize::new(920.0, 1100.0));
+    apply(&app, &ViewState::new(None));
+    app.show().unwrap();
+    frame(&app);
+    let answers = Rc::new(RefCell::new(Vec::new()));
+    let log = Rc::clone(&answers);
+    app.on_dialog_answered(move |confirmed| log.borrow_mut().push(confirmed));
+    let closes = Rc::new(Cell::new(0));
+    let counter = Rc::clone(&closes);
+    app.on_close_window(move || counter.set(counter.get() + 1));
+    let show_dialog = || {
+        app.set_dialog(DialogTexts {
+            title: "Clear the inspection cache?".into(),
+            text: "Every folder is inspected again.".into(),
+            confirm: "Clear cache".into(),
+            notice: false,
+        });
+        app.invoke_show_dialog();
+        frame(&app);
+    };
+    let close_dialog = || {
+        app.set_dialog_open(false);
+        frame(&app);
+    };
+    let window_is_inert = || {
+        let extract = only(&app, "Extract");
+        assert_eq!(extract.accessible_enabled(), Some(false));
+        extract.invoke_accessible_default_action();
+        assert_eq!(app.get_mode(), Mode::Remux, "Extract is inert");
+        only(&app, "Close window").invoke_accessible_default_action();
+        assert_eq!(closes.get(), 0, "the title bar is inert");
+    };
+    let dry_run = || only(&app, "Dry run (plan only, write nothing)");
+
+    // The sheet: the window behind it is inert; its own checkbox acts.
+    app.invoke_open_sheet(Mode::Remux, "".into());
+    frame(&app);
+    window_is_inert();
+    dry_run().invoke_accessible_default_action();
+    assert!(app.get_remux_form().dry_run);
+
+    // A dialog over the sheet: the sheet is inert too; Cancel answers.
+    show_dialog();
+    window_is_inert();
+    only(&app, "Done").invoke_accessible_default_action();
+    assert!(app.get_sheet_open(), "Done is inert");
+    dry_run().invoke_accessible_default_action();
+    assert!(app.get_remux_form().dry_run, "the checkbox is inert");
+    only(&app, "Input folder").set_accessible_value("/elsewhere");
+    assert_eq!(app.get_remux_form().input_dir, "", "the field is inert");
+    only(&app, "Cancel").invoke_accessible_default_action();
+    assert_eq!(*answers.borrow(), [false]);
+    close_dialog();
+
+    // The sheet alone again: Done closes it.
+    only(&app, "Done").invoke_accessible_default_action();
+    assert!(!app.get_sheet_open());
+
+    // A dialog over the window: the window is inert; Clear cache answers.
+    show_dialog();
+    window_is_inert();
+    only(&app, "Clear cache").invoke_accessible_default_action();
+    assert_eq!(*answers.borrow(), [false, true]);
+    close_dialog();
+
+    // Nothing open: Extract acts.
+    let extract = only(&app, "Extract");
+    assert_eq!(extract.accessible_enabled(), Some(true));
+    extract.invoke_accessible_default_action();
+    assert_eq!(app.get_mode(), Mode::Extract);
+    app.hide().unwrap();
+}
+
 /// A control focused from the keyboard draws its ring; one pressed with the pointer does not,
 /// until a key is typed (a modifier alone does not count), as `:focus-visible` does.
 #[test]

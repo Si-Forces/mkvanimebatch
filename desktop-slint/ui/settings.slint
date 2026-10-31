@@ -264,6 +264,8 @@ component DraftEdit inherits TextField {
     property <int> serial: Sheet.focus-serial;
     accessible-label: root.label;
     accessible-description: root.description;
+    // Only the sheet has them.
+    layer: 1;
     border-color: root.flagged ? Theme.err : Theme.line;
     init => { self.grab(); }
     changed serial => { self.grab(); }
@@ -326,7 +328,9 @@ component FolderField inherits Field {
         }
         Button {
             text: "Browse…";
-            enabled: root.enabled;
+            // Inert under the dialog (only the sheet has folder fields), as the sheet's other
+            // fluent widgets: their screen reader actions ignore anything but `enabled`.
+            enabled: root.enabled && !Focus.dialog-open;
             accessible-label: "Browse for the " + root.label;
             changed has-focus => {
                 if self.has-focus {
@@ -356,6 +360,8 @@ component StepButton inherits Pressable {
     opacity: root.enabled ? 1 : 0.5;
     cursor: default;
     pointer-click: false;
+    // Only the sheet has them.
+    layer: 1;
     accessible-label: root.label;
     focus-key: "step:" + root.key + (root.up ? "+" : "-");
     changed focused => {
@@ -588,6 +594,7 @@ export component SettingsSheet inherits GlassPane {
                 }
                 // .cap.btn-accent: takes the focus when the sheet opens, so Enter or Space closes it.
                 done-button := CapButton {
+                    layer: 1;
                     text: "Done";
                     clicked => { root.done(); }
                 }
@@ -687,6 +694,7 @@ export component SettingsSheet inherits GlassPane {
                                         model: root.bitrates;
                                         current-index <=> root.form.bitrate;
                                         enabled: !root.locked;
+                                        layer: 1;
                                         accessible-label: "Opus bitrate";
                                         changed focused => {
                                             if self.focused {
@@ -732,7 +740,8 @@ export component SettingsSheet inherits GlassPane {
                                             maximum: root.limits.complexity-max;
                                             step: 1;
                                             value <=> root.complexity;
-                                            enabled: !root.locked;
+                                            // Inert under the dialog, as Browse….
+                                            enabled: !root.locked && !root.dialog-open;
                                             accessible-label: "Encoder complexity";
                                             accessible-description: root.limits.complexity-tip;
                                             // Whole steps alone, as a range input's: fluent's
@@ -828,7 +837,7 @@ export component SettingsSheet inherits GlassPane {
                         CheckBox {
                             text: "Dry run (plan only, write nothing)";
                             checked <=> root.form.dry-run;
-                            enabled: !root.locked;
+                            enabled: !root.locked && !root.dialog-open;
                             toggled => { Sheet.edited("dry_run"); }
                             changed has-focus => {
                                 if self.has-focus {
@@ -839,7 +848,7 @@ export component SettingsSheet inherits GlassPane {
                         CheckBox {
                             text: "Bypass inspection cache";
                             checked <=> root.form.no-cache;
-                            enabled: !root.locked;
+                            enabled: !root.locked && !root.dialog-open;
                             toggled => { Sheet.edited("no_cache"); }
                             changed has-focus => {
                                 if self.has-focus {
@@ -852,6 +861,7 @@ export component SettingsSheet inherits GlassPane {
                             clear-cache := PillButton {
                                 text: "Clear inspection cache…";
                                 enabled: !root.locked;
+                                layer: 1;
                                 clicked => { Sheet.clear-cache(); }
                                 changed focused => {
                                     if self.focused {

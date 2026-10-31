@@ -26,6 +26,15 @@ export global Focus {
     // entry stops each take the focus one way only.
     in-out property <bool> backward;
 
+    // The window's settings sheet and confirm dialog are open (App's `sheet-open` and
+    // `dialog-open`, bound to these). Like `<dialog>.showModal()`, the topmost one makes every
+    // control outside it inert: a control in a lower layer than `modal` (Pressable's and
+    // TextField's `layer`) does nothing, a screen reader's action included, and reads as disabled.
+    in-out property <bool> sheet-open;
+    in-out property <bool> dialog-open;
+    // The topmost open layer: 0 the window, 1 the sheet, 2 the dialog (over the sheet too).
+    out property <int> modal: dialog-open ? 2 : sheet-open ? 1 : 0;
+
     public function restore(key: string) {
         self.restore-key = key;
         self.restore-serial += 1;
@@ -87,6 +96,8 @@ export component Pressable inherits Rectangle {
     // A held Return activates it again at the key's repeat rate; a control that turns into
     // another (Run into Stop) or flips the window (the theme toggle) activates once a press.
     in property <bool> repeats: true;
+    // The modal layer it sits in (`Focus.modal`): 1 in the settings sheet, 2 in the dialog.
+    in property <int> layer;
     in property <MouseCursor> cursor: MouseCursor.pointer;
     callback clicked();
     // Every pointer event over it, after a left press took the focus.
@@ -96,15 +107,17 @@ export component Pressable inherits Rectangle {
     out property <bool> ring: keys.has-focus && Focus.keyboard;
     out property <bool> hovered: touch.has-hover;
     out property <bool> pressed: touch.pressed;
+    // Enabled, and not inert under a sheet or a dialog over its layer: it can act.
+    out property <bool> live: root.enabled && root.layer >= Focus.modal;
 
     forward-focus: keys;
     accessible-role: button;
-    accessible-enabled: root.enabled;
+    accessible-enabled: root.live;
     accessible-description: root.tip;
     // A screen reader's activation focuses it first, as a click does, so a dialog or the sheet it
     // opens gives the focus back to it, and a typed field it leaves commits.
     protected function activate() {
-        if root.enabled {
+        if root.live {
             keys.focus();
             root.clicked();
         }
@@ -149,7 +162,7 @@ export component Pressable inherits Rectangle {
         // activates once a press, as the browser's does on its release. A disabled scope that
         // keeps the focus still gets keys (Slint's `enabled` refuses only focus and presses).
         key-pressed(event) => {
-            if !root.enabled {
+            if !root.live {
                 return reject;
             }
             if (event.text == Key.Return && (root.repeats || !event.repeat)) || (event.text == Key.Space && !event.repeat) {
@@ -171,7 +184,7 @@ export component Pressable inherits Rectangle {
             root.pointer(event);
         }
         clicked => {
-            if root.pointer-click {
+            if root.pointer-click && root.live {
                 root.clicked();
             }
         }
@@ -209,6 +222,9 @@ export component TextField inherits Rectangle {
     in property <string> font-family <=> input.font-family;
     in property <TextHorizontalAlignment> horizontal-alignment <=> input.horizontal-alignment;
     in property <InputType> input-type <=> input.input-type;
+    // The modal layer it sits in, as Pressable's: under a sheet or a dialog over it, a screen
+    // reader cannot edit it.
+    in property <int> layer;
     out property <bool> has-focus: input.has-focus;
     callback edited(text: string);
     callback accepted(text: string);
@@ -225,13 +241,13 @@ export component TextField inherits Rectangle {
     opacity: root.enabled ? 1 : 0.75;
     forward-focus: input;
     accessible-role: text-input;
-    accessible-enabled: root.enabled;
+    accessible-enabled: root.enabled && root.layer >= Focus.modal;
     accessible-read-only: root.read-only;
     accessible-value: root.text;
     accessible-placeholder-text: root.placeholder;
-    // A screen reader's edit, refused as typing is: not in a disabled or read-only field.
+    // A screen reader's edit, refused as typing is: not in a disabled, read-only or inert field.
     accessible-action-set-value(value) => {
-        if !root.enabled || root.read-only {
+        if !root.enabled || root.read-only || root.layer < Focus.modal {
             return;
         }
         root.text = value;
@@ -346,8 +362,8 @@ export component TextField inherits Rectangle {
 // the wheel, so the wheel scrolls the pane under it, as over a WebKitGTK select; that select steps
 // on the arrows, this one deliberately does not: only a pick changes it. `picked` fires once a
 // pick, for the entry shown too, `changed` false for that one (a select sends no change for it:
-// its host passes over it). Disabled, or with no entry, it picks nothing, and a list open as it
-// is disabled closes.
+// its host passes over it). Disabled or inert (`live`), or with no entry, it picks nothing, and a
+// list open as it is disabled or made inert closes.
 export component Select inherits Pressable {
     in property <[string]> model;
     in-out property <int> current-index;
@@ -381,15 +397,15 @@ export component Select inherits Pressable {
             popup.show();
         }
     }
-    changed enabled => {
-        if !root.enabled {
+    changed live => {
+        if !root.live {
             popup.close();
         }
     }
 
     function pick(index: int) {
         popup.close();
-        if root.enabled && index >= 0 && index < root.model.length {
+        if root.live && index >= 0 && index < root.model.length {
             let changed = index != root.current-index;
             root.current-index = index;
             root.picked(index, changed);
