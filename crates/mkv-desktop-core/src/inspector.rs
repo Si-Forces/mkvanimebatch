@@ -6,7 +6,7 @@
 use crate::actor::ModeView;
 use crate::presentation::{
     candidate_tier, first_text, inspector_crumbs, path_segments, pretty_path, remux_audio_text,
-    row_error, status_tone, subtitle_ladder, Tier, Tone, NOT_IN_BATCH,
+    row_error, status_tone, subtitle_ladder, ReleaseSubtitles, Tier, Tone, NOT_IN_BATCH,
 };
 use crate::queue::Row;
 use crate::snapshot::ItemStatus;
@@ -262,8 +262,7 @@ fn subtitle_section(
     let assigned = assignment.map(|assignment| assignment.asset_path.to_string_lossy());
     let assets_dir = view.draft.assets_dir.as_deref().unwrap_or_default().trim();
     let ladder = subtitle_ladder(
-        &row.release,
-        candidates,
+        &ReleaseSubtitles::new(&row.release, candidates),
         meta.and_then(|meta| meta.sub_summary.as_deref()),
         assigned.as_deref(),
         assets_dir,
