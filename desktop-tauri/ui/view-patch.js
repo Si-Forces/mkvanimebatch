@@ -39,7 +39,8 @@ export function nextState(applied, payload) {
     if ("rows" in fields) {
       rows[mode] = "all";
     } else if (rowChanges) {
-      // A copy, so the rows array the caller still holds keeps its rows.
+      // A copy, so the rows array the caller still holds keeps its rows, and because the Queue
+      // Tracker tells a mode whose rows did not change by that array's identity.
       view.rows = [...view.rows];
       for (const [index, row] of rowChanges) view.rows[index] = row;
       rows[mode] = rowChanges.map(([index]) => index);
