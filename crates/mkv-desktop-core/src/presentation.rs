@@ -170,26 +170,19 @@ pub fn job_only_meta(
 }
 
 /// The meta line of an inspected manifest row: what a run writes for it (remux), or what it
-/// holds (extract). `candidates` are its release's subtitle candidates; `assignment` is the
-/// asset path of its Track Assignment; `bitrate` and `assets_dir` are the remux draft's, trimmed.
+/// holds (extract). `subs` sums up its release's subtitle candidates; `assignment` is the asset
+/// path of its Track Assignment; `bitrate` and `assets_dir` are the remux draft's, trimmed.
 pub fn inspected_meta(
     remux: bool,
     meta: &InspectionMetadata,
-    release: &str,
-    candidates: &[String],
+    subs: &ReleaseSubtitles,
     assignment: Option<&str>,
     bitrate: &str,
     assets_dir: &str,
 ) -> String {
     let fonts = meta.fonts_count.unwrap_or(0);
     if remux {
-        let ladder = subtitle_ladder(
-            release,
-            candidates,
-            meta.sub_summary.as_deref(),
-            assignment,
-            assets_dir,
-        );
+        let ladder = subtitle_ladder(subs, meta.sub_summary.as_deref(), assignment, assets_dir);
         format!(
             "{} · {} · {fonts} fonts",
             remux_audio_text(Some(meta), bitrate),
@@ -339,30 +332,44 @@ fn files_text(paths: &[&String]) -> String {
     }
 }
 
+/// What a release's subtitle candidates give the ladder: the detail of its same folder rung and
+/// of its parent folder rung. A queue rebuild builds one per release, so the release's rows
+/// share one pass over the candidates, which list every ancestor directory's subtitles.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReleaseSubtitles {
+    same: String,
+    ancestor: String,
+}
+
+impl ReleaseSubtitles {
+    /// The summary of `candidates`, the subtitle candidates of `release`.
+    pub fn new(release: &str, candidates: &[String]) -> Self {
+        let (same, ancestor): (Vec<&String>, Vec<&String>) = candidates
+            .iter()
+            .partition(|path| candidate_tier(path, release) == Tier::Same);
+        Self {
+            same: files_text(&same),
+            ancestor: files_text(&ancestor),
+        }
+    }
+}
+
 /// The subtitle precedence ladder of one item (ADR-0004): manual > same folder > embedded >
 /// parent folder > assets dir. A Track Assignment is "Used". Without one, the highest rung that
 /// found anything is "Auto": the engine tries it first but matches files to episodes itself, so
 /// the ladder does not claim which file wins. The assets dir is a setting, not a found file, so
-/// it is only ever a "Fallback".
+/// it is only ever a "Fallback". `subs` sums up the item's release's subtitle candidates.
 pub fn subtitle_ladder(
-    release: &str,
-    candidates: &[String],
+    subs: &ReleaseSubtitles,
     embedded: Option<&str>,
     assignment: Option<&str>,
     assets_dir: &str,
 ) -> Vec<Rung> {
-    let tiered = |tier: Tier| {
-        let paths: Vec<&String> = candidates
-            .iter()
-            .filter(|path| candidate_tier(path, release) == tier)
-            .collect();
-        files_text(&paths)
-    };
     let details = [
         assignment.unwrap_or_default().to_string(),
-        tiered(Tier::Same),
+        subs.same.clone(),
         embedded.unwrap_or_default().to_string(),
-        tiered(Tier::Ancestor),
+        subs.ancestor.clone(),
         assets_dir.to_string(),
     ];
     let winner = details[..4].iter().position(|detail| !detail.is_empty());
@@ -1151,8 +1158,9 @@ mod tests {
             fonts_count: Some(3),
             ..InspectionMetadata::default()
         };
+        let none = ReleaseSubtitles::default();
         let remux =
-            |assignment, bitrate| inspected_meta(true, &meta, ".", &[], assignment, bitrate, "");
+            |assignment, bitrate| inspected_meta(true, &meta, &none, assignment, bitrate, "");
         assert_eq!(
             remux(None, "192k"),
             "FLAC 2.0 → Opus 192k · Embedded subs · 3 fonts"
@@ -1163,16 +1171,16 @@ mod tests {
             "FLAC 2.0 → Opus 256k · Manual subs · 3 fonts"
         );
         assert_eq!(
-            inspected_meta(false, &meta, ".", &[], None, "192k", ""),
+            inspected_meta(false, &meta, &none, None, "192k", ""),
             "ASS (ind) · 3 fonts"
         );
         let bare = InspectionMetadata::default();
         assert_eq!(
-            inspected_meta(false, &bare, ".", &[], None, "", ""),
+            inspected_meta(false, &bare, &none, None, "", ""),
             "No subs · 0 fonts"
         );
         assert_eq!(
-            inspected_meta(true, &bare, ".", &[], None, "", "/assets"),
+            inspected_meta(true, &bare, &none, None, "", "/assets"),
             "No audio · Assets dir fallback · 0 fonts"
         );
     }
@@ -1190,7 +1198,8 @@ mod tests {
         let tags = |ladder: &[Rung]| -> Vec<(&str, &str)> {
             ladder.iter().map(|rung| (rung.key, rung.tag)).collect()
         };
-        let auto = subtitle_ladder("Season 1", &candidates, Some("ASS (ENG)"), None, "");
+        let season = ReleaseSubtitles::new("Season 1", &candidates);
+        let auto = subtitle_ladder(&season, Some("ASS (ENG)"), None, "");
         assert_eq!(
             tags(&auto),
             [
@@ -1205,20 +1214,27 @@ mod tests {
         assert_eq!(auto[3].detail, "2 subtitle files");
         assert_eq!(subtitle_source_text(&auto), "Same folder subs");
 
-        let manual = subtitle_ladder("Season 1", &candidates, None, Some("/x/fixed.ass"), "");
+        let manual = subtitle_ladder(&season, None, Some("/x/fixed.ass"), "");
         assert_eq!(manual[0].tag, "Used");
         assert_eq!(manual[1].tag, "Found");
         assert_eq!(subtitle_source_text(&manual), "Manual subs");
 
         // The root release lists only root files as "same folder".
-        let root = subtitle_ladder(".", &["Show - 01.ass".into()], None, None, "");
+        let root = subtitle_ladder(
+            &ReleaseSubtitles::new(".", &["Show - 01.ass".into()]),
+            None,
+            None,
+            "",
+        );
         assert_eq!(root[1].tag, "Auto");
+        let none = ReleaseSubtitles::new(".", &[]);
+        assert_eq!(none, ReleaseSubtitles::default());
         assert_eq!(
-            subtitle_source_text(&subtitle_ladder(".", &[], None, None, "")),
+            subtitle_source_text(&subtitle_ladder(&none, None, None, "")),
             "No subs"
         );
         // A configured assets dir is a fallback setting, never a found file.
-        let assets_only = subtitle_ladder(".", &[], None, None, "/assets");
+        let assets_only = subtitle_ladder(&none, None, None, "/assets");
         assert_eq!(assets_only[4].tag, "Fallback");
         assert!(!assets_only.iter().any(|rung| rung.chosen));
         assert_eq!(subtitle_source_text(&assets_only), "Assets dir fallback");

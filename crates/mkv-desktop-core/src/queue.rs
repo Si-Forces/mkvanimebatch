@@ -6,7 +6,7 @@
 
 use crate::presentation::{
     bucket, failed_meta, inspected_meta, job_only_meta, status_label, status_title, status_tone,
-    Bucket, Tone,
+    Bucket, ReleaseSubtitles, Tone,
 };
 use crate::snapshot::{ItemSnapshot, ItemStatus, JobSnapshot};
 use mkv_core::manifest::{InspectionManifest, ManifestItem};
@@ -421,7 +421,9 @@ impl Queue {
     }
 
     /// Builds the `RowBase` of every manifest item again, unless the manifest, the Track
-    /// Assignments and `inputs` are those it was built from.
+    /// Assignments and `inputs` are those it was built from. Each release's subtitle candidates
+    /// are summed up once per build, not once per row: they list every ancestor directory's
+    /// subtitles, so a library's root subtitles reach every release.
     fn refresh_base(&mut self, inputs: &MetaInputs) {
         let key = (self.manifest_rev, self.assignments_rev, inputs.clone());
         if self.base.key.as_ref() == Some(&key) {
@@ -432,6 +434,19 @@ impl Queue {
             self.base.key = Some(key);
             return;
         };
+        // Only a remux meta line names the subtitle source.
+        let subs: HashMap<&str, ReleaseSubtitles> = if inputs.remux {
+            manifest
+                .subtitle_candidates
+                .iter()
+                .map(|(release, candidates)| {
+                    (release.as_str(), ReleaseSubtitles::new(release, candidates))
+                })
+                .collect()
+        } else {
+            HashMap::new()
+        };
+        let no_subs = ReleaseSubtitles::default();
         self.base.rows = manifest
             .items
             .iter()
@@ -441,9 +456,10 @@ impl Queue {
                         (format!("Inspection failed: {error}"), true)
                     }
                     _ => {
-                        let candidates = Some(entry.release.as_str())
+                        let release_subs = Some(entry.release.as_str())
                             .filter(|release| !release.is_empty())
-                            .and_then(|release| manifest.subtitle_candidates.get(release));
+                            .and_then(|release| subs.get(release))
+                            .unwrap_or(&no_subs);
                         let assignment = self
                             .assignments
                             .get(&entry.id.to_string())
@@ -451,8 +467,7 @@ impl Queue {
                         let meta = inspected_meta(
                             inputs.remux,
                             &entry.metadata,
-                            &entry.release,
-                            candidates.map_or(&[][..], Vec::as_slice),
+                            release_subs,
                             assignment.as_deref(),
                             &inputs.bitrate,
                             &inputs.assets_dir,
@@ -947,6 +962,65 @@ mod tests {
         queue.accept(manifest, "/anime".into());
         meta(&mut queue, &remux("256k", "/assets"));
         assert_eq!(queue.base.builds, 6);
+    }
+
+    // Releases that share the root's subtitles each read their own tiers from them.
+    #[test]
+    fn test_each_release_reads_its_subtitle_tiers_from_shared_root_candidates() {
+        let mut manifest = manifest_of(&["Season 1/ep1", "Season 2/ep1", "ep1", "ep2", "ep3"]);
+        for (item, release) in manifest
+            .items
+            .iter_mut()
+            .zip(["Season 1", "Season 2", ".", "", "."])
+        {
+            item.release = release.into();
+        }
+        manifest.items[4].inspection_error = Some("boom".into());
+        let candidates = |paths: &[&str]| paths.iter().map(|path| path.to_string()).collect();
+        manifest.subtitle_candidates = BTreeMap::from([
+            (
+                "Season 1".into(),
+                candidates(&["Season 1/a.ass", "root.ass"]),
+            ),
+            ("Season 2".into(), candidates(&["root.ass"])),
+            (".".into(), candidates(&["root.ass"])),
+            // An empty release is no release: its row looks up no candidates.
+            (String::new(), candidates(&["root.ass"])),
+        ]);
+        let mut queue = Queue::default();
+        queue.accept(manifest, "/anime".into());
+        let now = Instant::now();
+        let metas = |queue: &mut Queue, inputs: &MetaInputs| -> Vec<String> {
+            queue
+                .rows(None, inputs, now)
+                .into_iter()
+                .map(|row| row.meta)
+                .collect()
+        };
+        assert_eq!(
+            metas(&mut queue, &remux("", "")),
+            [
+                "No audio · Same folder subs · 0 fonts",
+                "No audio · Parent folder subs · 0 fonts",
+                "No audio · Same folder subs · 0 fonts",
+                "No audio · No subs · 0 fonts",
+                "Inspection failed: boom",
+            ]
+        );
+        let extract = MetaInputs {
+            remux: false,
+            ..remux("", "")
+        };
+        assert_eq!(
+            metas(&mut queue, &extract),
+            [
+                "No subs · 0 fonts",
+                "No subs · 0 fonts",
+                "No subs · 0 fonts",
+                "No subs · 0 fonts",
+                "Inspection failed: boom",
+            ]
+        );
     }
 
     #[test]
