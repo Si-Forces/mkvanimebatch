@@ -420,12 +420,14 @@ export component ConfirmDialog inherits Rectangle {
                     alignment: end;
                     // Hidden, it keeps its place left of the confirm button, which stays at the end.
                     cancel := PillButton {
+                        layer: 2;
                         visible: !root.texts.notice;
                         enabled: !root.texts.notice;
                         text: "Cancel";
                         clicked => { root.answered(false); }
                     }
                     confirm := CapButton {
+                        layer: 2;
                         text: root.texts.confirm;
                         clicked => { root.answered(true); }
                     }
