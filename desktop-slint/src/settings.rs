@@ -1187,8 +1187,9 @@ mod tests {
     }
 
     /// After a refused Run the sheet opens on the flagged field, or moves the cursor there when
-    /// it is open, or once a notice over it closes; nothing opens with no field flagged. The
-    /// narrowest window scrolls the field into view.
+    /// it is open, or, under a notice, once that closes (shown over the sheet, or over the window
+    /// the sheet then opens in); nothing opens with no field flagged. The narrowest window scrolls
+    /// the field into view.
     #[test]
     fn a_refused_run_opens_the_sheet_on_the_flagged_field() {
         i_slint_backend_testing::init_no_event_loop();
@@ -1206,6 +1207,12 @@ mod tests {
             for _ in 0..3 {
                 mock_elapsed_time(Duration::from_millis(1));
             }
+        };
+        // The sheet's panel is made (the gear shares its label, not its role).
+        let sheet_made = || {
+            use i_slint_backend_testing::{AccessibleRole, ElementHandle};
+            ElementHandle::find_by_accessible_label(&app, "Remux settings")
+                .any(|element| element.accessible_role() == Some(AccessibleRole::Groupbox))
         };
         // The field labelled `label` lies within the sheet.
         let visible = |label: &str| {
@@ -1275,6 +1282,35 @@ mod tests {
             "the cursor is in the flagged field once the notice closes"
         );
         assert!(visible("FFmpeg threads"), "scrolled into view");
+
+        // Refused while a notice shows over the window: the sheet opens under it, and the field
+        // takes the cursor, scrolled in, as the notice closes.
+        app.invoke_close_sheet();
+        ticks();
+        assert!(!sheet_made(), "the old sheet is gone");
+        app.invoke_show_dialog();
+        ticks();
+        state.seq = 4;
+        publisher.show(&state);
+        assert!(open_on_flagged(&app, Mode::Remux));
+        ticks();
+        assert!(sheet_made(), "the sheet opens under the notice");
+        assert_ne!(
+            sheet.get_focused(),
+            "ffmpeg_threads",
+            "not under the notice"
+        );
+        app.set_dialog_open(false);
+        ticks();
+        assert_eq!(
+            sheet.get_focused(),
+            "ffmpeg_threads",
+            "the cursor is in the flagged field once the notice over the window closes"
+        );
+        assert!(
+            visible("FFmpeg threads"),
+            "scrolled into view in the new sheet"
+        );
         app.hide().unwrap();
     }
 
