@@ -188,7 +188,8 @@ export component App inherits Window {
     in property <string> log-copy-label: "Copy";
     // The confirm dialog shown, if open (`show-dialog`); the host bumps `dialog-serial` for each it
     // shows, and closes it.
-    in-out property <bool> dialog-open;
+    // While it is open, every control outside it is inert (`Focus.modal`).
+    in-out property <bool> dialog-open <=> Focus.dialog-open;
     in property <DialogTexts> dialog;
     in property <int> dialog-serial;
     // Each mode's Library and Episode Inspector; the subtitle section's ladder and select entries
@@ -239,16 +240,24 @@ export component App inherits Window {
     in property <[PresetItem]> presets;
     in property <ChipTexts> chips;
     in property <SheetLimits> sheet-limits;
-    // The settings sheet of the mode shown is open.
-    in-out property <bool> sheet-open;
+    // The settings sheet of the mode shown is open; the window behind it is inert meanwhile
+    // (`Focus.modal`).
+    in-out property <bool> sheet-open <=> Focus.sheet-open;
     // The title bar's Appearance menu is open.
     in-out property <bool> appearance-open;
     // The control that takes the focus back when the sheet closes (a `Focus` key): the gear that
     // opened it, Run after a refused Run, else the one that had the focus.
     property <string> sheet-return;
-    // What had the focus when the dialog showed: a Pressable's key, or the sheet's field.
+    // What had the focus when the dialog showed: a Pressable's key, or the sheet's field, or the
+    // field `open-sheet` asked for under the dialog.
     property <string> dialog-return;
     property <string> dialog-field;
+    // The sheet and the dialog are made one pass of change handlers after they open (`changed
+    // sheet-open` / `dialog-open` sets these): a select's list or a field's menu open under them
+    // closes in a handler of that pass, and Slint then gives the focus back to the control that
+    // opened it, which is inert and moves it on, out of a layer made with the focus already.
+    property <bool> sheet-made;
+    property <bool> dialog-made;
 
     // The shown mode's list asks; the host sends the Intent for `mode`.
     callback set-selected(id: string, selected: bool);
@@ -298,6 +307,11 @@ export component App inherits Window {
         root.mode = mode;
         Sheet.focus-key = key;
         Sheet.focus-serial += 1;
+        // Under a dialog the field cannot take the focus (a Run refused as a notice shows): it
+        // takes it as the dialog closes, in place of what had it before.
+        if root.dialog-open && key != "" {
+            root.dialog-field = key;
+        }
         if !root.sheet-open {
             root.sheet-return = key != "" ? "run" : root.appearance-open ? "Appearance" : Focus.current;
             root.sheet-open = true;
@@ -332,11 +346,25 @@ export component App inherits Window {
         }
     }
 
-    // The dialog closed: what had the focus takes it back, as a closing <dialog> gives it back.
-    // Over the sheet, its field puts the cursor back, or Done takes it (the sheet's fallback);
-    // with no sheet the window's key scope takes it first, so Esc still reaches it when the
-    // control is gone or locked (the removed dialog dropped the focus).
+    // The sheet is made a pass later (`sheet-made`). The Appearance menu closes as the sheet or a
+    // dialog opens, also when `sheet-open` or `dialog-open` is set without `open-sheet` or
+    // `show-dialog`: its choices would act behind it.
+    changed sheet-open => {
+        root.sheet-made = self.sheet-open;
+        if self.sheet-open {
+            root.appearance-open = false;
+        }
+    }
+    // The dialog opened: it is made a pass later (`dialog-made`), and the Appearance menu closes.
+    // It closed: what had the focus takes it back, as a closing <dialog> gives it back. Over the
+    // sheet, its field (or the one asked for under it) takes the cursor, or Done takes it (the
+    // sheet's fallback); with no sheet the window's key scope takes it first, so Esc still
+    // reaches it when the control is gone or locked (the removed dialog dropped the focus).
     changed dialog-open => {
+        root.dialog-made = self.dialog-open;
+        if self.dialog-open {
+            root.appearance-open = false;
+        }
         if !self.dialog-open {
             if self.sheet-open && self.dialog-field != "" {
                 Sheet.focus-key = self.dialog-field;
@@ -487,7 +515,8 @@ export component App inherits Window {
         // control on macOS) toggles the theme from anywhere, a field, the sheet, a dialog or the
         // Appearance menu included, so it is caught before the focused item. Esc closes the
         // Appearance menu, else the Log drawer unless the sheet or the dialog, which take it
-        // themselves, is open; it bubbles here from whatever has the focus.
+        // themselves, is open; it bubbles here from whatever has the focus. It notes which way each
+        // Tab goes (`Focus.backward`) for the queue list's entry stops.
         keys := FocusScope {
             focus-on-click: false;
             focus-on-tab-navigation: false;
@@ -496,6 +525,9 @@ export component App inherits Window {
                 if event.text.to-lowercase() == "t" && !event.repeat && (event.modifiers.control || event.modifiers.meta) {
                     Theme.toggle();
                     return accept;
+                }
+                if event.text == Key.Tab || event.text == Key.Backtab {
+                    Focus.backward = event.text == Key.Backtab || event.modifiers.shift;
                 }
                 // A key the user typed shows the focused control's ring (:focus-visible), not a
                 // modifier alone nor a shortcut.
@@ -798,9 +830,12 @@ export component App inherits Window {
 
             // The settings sheet of the mode shown (#settings-sheet), over a backdrop that covers the
             // window: a click on it or Esc closes the sheet.
-            if root.sheet-open: Rectangle {
+            if root.sheet-open && root.sheet-made: Rectangle {
                 background: Theme.dim;
                 FocusScope {
+                    // Under a dialog it takes no focus, as the sheet's controls: a screen reader's
+                    // Focus action on a control behind moves the focus on, to the dialog's.
+                    enabled: !root.dialog-open;
                     key-pressed(event) => {
                         if event.text == Key.Escape {
                             root.close-sheet();
@@ -851,7 +886,7 @@ export component App inherits Window {
             }
 
             // The confirm dialog (#confirm-modal), over the sheet too.
-            if root.dialog-open: ConfirmDialog {
+            if root.dialog-open && root.dialog-made: ConfirmDialog {
                 texts: root.dialog;
                 serial: root.dialog-serial;
                 answered(confirmed) => { root.dialog-answered(confirmed); }

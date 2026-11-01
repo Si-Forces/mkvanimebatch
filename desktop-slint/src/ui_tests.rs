@@ -3107,6 +3107,32 @@ pub(crate) fn focused(app: &App) -> String {
     app.global::<Focus>().get_current().into()
 }
 
+/// A screen reader's Focus action on the control labelled `label`: Slint's winit backend runs
+/// AccessKit's `Action::Focus` as a focus by the pointer on the control's node, which moves on, in
+/// the window's order, to the first item from it that takes the focus.
+fn screen_reader_focus(app: &App, label: &str) {
+    use i_slint_core::accessibility::AccessibleStringProperty;
+    use i_slint_core::input::FocusReason;
+    use i_slint_core::item_tree::ItemRc;
+    use i_slint_core::window::WindowInner;
+    let window = WindowInner::from_pub(app.window());
+    let root = ItemRc::new_root(window.component());
+    let mut item = root.clone();
+    loop {
+        if item.is_visible()
+            && item
+                .accessible_string_property(AccessibleStringProperty::Label)
+                .as_deref()
+                == Some(label)
+        {
+            window.set_focus_item(&item, true, FocusReason::PointerClick);
+            return;
+        }
+        item = item.next_focus_item();
+        assert!(item != root, "no control labelled {label:?}");
+    }
+}
+
 /// Presses Tab until the custom control of `key` has the focus.
 pub(crate) fn tab_to(app: &App, key: &str) {
     for _ in 0..400 {
@@ -3234,6 +3260,789 @@ fn tab_walks_the_custom_controls_in_order_and_enter_or_space_activates_them() {
     tab_to(&app, "Extract");
     key(&app, Key::Return);
     assert_eq!(app.get_mode(), Mode::Extract);
+    app.hide().unwrap();
+}
+
+/// The change handlers a key set off, then the time for the smooth scroll Slint starts as a
+/// control out of view takes the focus: advancing the clock runs the handlers again and lays the
+/// lists out (which makes a row a Tab scrolls in, and focuses it), and the handlers that layout
+/// set off run last. Unlike `frame`, it searches no tree, so a long walk stays fast.
+fn settle() {
+    slint::platform::update_timers_and_animations();
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(300));
+    slint::platform::update_timers_and_animations();
+}
+
+/// A key pressed, then `settle`.
+fn key_and_settle(app: &App, step: slint::platform::Key) {
+    key(app, step);
+    settle();
+}
+
+/// Checks the pick of row `id` whole inside the list and below the release header pinned at its
+/// top, when one shows: a focused row scrolls fully into view.
+fn assert_row_in_view(app: &App, id: &str) {
+    let list = ElementHandle::find_by_element_id(app, "QueuePane::list")
+        .next()
+        .expect("the queue's list");
+    let (top, bottom) = (
+        list.absolute_position().y,
+        list.absolute_position().y + list.size().height,
+    );
+    // The pinned header is a GroupHead, 30px tall.
+    let clear = if app.get_remux_pinned().is_empty() {
+        top
+    } else {
+        top + 30.0
+    };
+    let pick = only(app, id);
+    let (y, height) = (pick.absolute_position().y, pick.size().height);
+    assert!(
+        y >= clear && y + height <= bottom,
+        "{id} in the list ({top}..{bottom}), below the pinned header ({clear}), at {y}..{}",
+        y + height
+    );
+}
+
+/// Presses `step` until the custom control of `to` has the focus, and returns the row picks it
+/// passed, each checked to be in view, below the pinned header. A focus leaves no row armed to
+/// take it again.
+fn row_picks_on_the_way(app: &App, step: slint::platform::Key, to: &str) -> Vec<String> {
+    let mut picks = Vec::new();
+    for _ in 0..400 {
+        key_and_settle(app, step);
+        let now = focused(app);
+        assert_eq!(
+            app.global::<Focus>().get_follow_key(),
+            "",
+            "{now} took the focus: no row waits for it"
+        );
+        if now == to {
+            return picks;
+        }
+        if let Some(id) = now.strip_prefix("pick:remux:") {
+            assert_row_in_view(app, id);
+            picks.push(id.to_string());
+        }
+    }
+    panic!("{step:?} never reached {to:?}");
+}
+
+/// Tab walks every row of a long queue in order, the ones a ListView has not made yet (out of
+/// view) too, each scrolled into view, then on to the bottom bar; Shift+Tab from Run walks them
+/// back, as the webview's DOM order does, each below the release header pinned at the list's
+/// top. A filter's hidden rows are passed, a scrolled list is entered at its first shown row (from
+/// below at its last control), and a locked selection walks the picks alone.
+#[test]
+fn tab_and_shift_tab_reach_every_row_of_a_long_queue() {
+    use slint::platform::Key;
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    let publisher = SlintPublisher::new(&app);
+    let mut state = three_releases();
+    publisher.show(&state);
+    app.show().unwrap();
+    frame(&app);
+    let ids: Vec<String> = app
+        .get_remux_rows()
+        .iter()
+        .map(|row| row.id.to_string())
+        .collect();
+    assert_eq!((ids.len(), ids[43].as_str()), (44, "c03"));
+
+    tab_to(&app, "remux:None");
+    assert_eq!(row_picks_on_the_way(&app, Key::Tab, "run"), ids);
+    // Entered from below with the list scrolled to its top: the last row, at its last control.
+    app.invoke_reveal(Mode::Remux, 0);
+    frame(&app);
+    key_and_settle(&app, Key::Backtab);
+    assert_eq!(focused(&app), "down:remux:c03");
+    let mut back = row_picks_on_the_way(&app, Key::Backtab, "remux:None");
+    back.reverse();
+    assert_eq!(back, ids);
+
+    // Entered from above with the list scrolled to its end: the first row.
+    app.invoke_reveal(Mode::Remux, 43);
+    frame(&app);
+    assert!(app.get_remux_scroll() < 0.0);
+    key(&app, Key::Tab);
+    frame(&app);
+    assert_eq!(focused(&app), "check:remux:a00");
+
+    // A row under the pinned header that takes the focus from the keyboard (a closing dialog
+    // gives it back) scrolls clear of the header too.
+    app.invoke_reveal(Mode::Remux, 25);
+    frame(&app);
+    assert_eq!(app.get_remux_pinned(), "S2");
+    app.global::<Focus>().set_keyboard(true);
+    app.global::<Focus>()
+        .invoke_restore("check:remux:b05".into());
+    settle();
+    assert_eq!(focused(&app), "check:remux:b05");
+    assert_row_in_view(&app, "b05");
+
+    // Every third row done, under To do: the rest, both ways.
+    state.seq = 1;
+    let mut rows = state.remux.rows.to_vec();
+    for row in rows.iter_mut().step_by(3) {
+        row.bucket = Some(Bucket::Done);
+    }
+    state.remux.rows = Arc::new(rows);
+    publisher.show(&state);
+    publisher.show_filter(Mode::Remux, QueueFilter::Todo);
+    frame(&app);
+    let todo: Vec<String> = ids
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| i % 3 != 0)
+        .map(|(_, id)| id.clone())
+        .collect();
+    tab_to(&app, "remux:None");
+    assert_eq!(row_picks_on_the_way(&app, Key::Tab, "run"), todo);
+    let mut back = row_picks_on_the_way(&app, Key::Backtab, "remux:None");
+    back.reverse();
+    assert_eq!(back, todo);
+
+    // A batch locks the selection: each row's checkbox is disabled, so its pick is its first
+    // control and, with Move up / Move down disabled too, its last.
+    state.seq = 2;
+    state.remux.controls.selection_locked = true;
+    publisher.show(&state);
+    publisher.show_filter(Mode::Remux, QueueFilter::All);
+    frame(&app);
+    tab_to(&app, "remux:Failed");
+    assert_eq!(row_picks_on_the_way(&app, Key::Tab, "run"), ids);
+    let mut back = row_picks_on_the_way(&app, Key::Backtab, "remux:Failed");
+    back.reverse();
+    assert_eq!(back, ids);
+    app.hide().unwrap();
+}
+
+/// Shift+Tab from Run into a list scrolled far from its end jumps to the last row, which makes
+/// every row anew; with the last release's first row then whole at the top, its own header
+/// shows, and the header pinned before the jump goes.
+#[test]
+fn a_far_tab_into_the_list_leaves_no_stale_pinned_header() {
+    use slint::platform::Key;
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    // 20 rows, 20 more, then 8 in a third release: 82px for its first row (with its header),
+    // 52px for each other.
+    let mut state = three_releases();
+    let rows: Vec<Row> = (0..48)
+        .map(|i| Row {
+            release: [".", "S2", "S3"][(i / 20).min(2)].into(),
+            ..row(&format!(
+                "{}{:02}",
+                ["a", "b", "c"][(i / 20).min(2)],
+                i % 20
+            ))
+        })
+        .collect();
+    state.remux.library = presentation::library(Some("/media/Show"), &rows);
+    state.remux.rows = Arc::new(rows);
+    SlintPublisher::new(&app).show(&state);
+    app.show().unwrap();
+    frame(&app);
+    // The list as tall as the third release.
+    let list = || {
+        ElementHandle::find_by_element_id(&app, "QueuePane::list")
+            .next()
+            .unwrap()
+            .size()
+            .height
+    };
+    let height = 640.0 + 82.0 + 7.0 * 52.0 - list();
+    app.window()
+        .set_size(slint::LogicalSize::new(920.0, height));
+    frame(&app);
+    assert_eq!(list(), 82.0 + 7.0 * 52.0);
+
+    app.set_remux_scroll(-500.0);
+    frame(&app);
+    assert_eq!(app.get_remux_pinned(), "MEDIA \u{203a} SHOW");
+    app.global::<Focus>().invoke_restore("run".into());
+    frame(&app);
+    assert_eq!(focused(&app), "run");
+    key_and_settle(&app, Key::Backtab);
+    assert_eq!(focused(&app), "down:remux:c07");
+    assert_eq!(
+        app.get_remux_pinned(),
+        "",
+        "S3's own header shows at the top"
+    );
+    app.hide().unwrap();
+}
+
+/// A queue of one release pins no header: a row focused from the keyboard at the list's top edge
+/// stays there, and Shift+Tab lands the row above at that edge, as a browser's focus scrolls it in.
+#[test]
+fn shift_tab_in_a_one_release_queue_lands_each_row_at_the_lists_top() {
+    use slint::platform::Key;
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    let mut state = three_releases();
+    let rows: Vec<Row> = (0..20).map(|i| row(&format!("a{i:02}"))).collect();
+    state.remux.library = presentation::library(Some("/media/Show"), &rows);
+    state.remux.rows = Arc::new(rows);
+    SlintPublisher::new(&app).show(&state);
+    app.show().unwrap();
+    frame(&app);
+    let y = |id: &str| {
+        only(&app, &format!("Include {id} in the batch"))
+            .absolute_position()
+            .y
+    };
+    let top = y("a00");
+
+    app.invoke_reveal(Mode::Remux, 10);
+    frame(&app);
+    app.global::<Focus>().set_keyboard(true);
+    app.global::<Focus>()
+        .invoke_restore("check:remux:a10".into());
+    settle();
+    assert_eq!(focused(&app), "check:remux:a10");
+    assert_eq!(y("a10"), top, "a10 stays at the top");
+    key_and_settle(&app, Key::Backtab);
+    assert_eq!(focused(&app), "down:remux:a09");
+    assert_eq!(y("a09"), top, "a09 lands at the top");
+    app.hide().unwrap();
+}
+
+/// The settings sheet and the confirm dialog make the window behind them inert, as the webview's
+/// `showModal()` does: a screen reader's action on a control behind one (the mode tab, the title
+/// bar's) does nothing and reads as disabled, a dialog over the sheet makes the sheet inert too
+/// (a custom control, a stepper, a select, a fluent checkbox, a text field), and the topmost one's
+/// controls still act. A screen reader's Focus action on a control behind gives it no focus: the
+/// focus moves on into the topmost layer, so Esc still reaches it and typing reaches no field. A
+/// field's menu and the Appearance menu close as a layer opens over them.
+#[test]
+fn a_sheet_or_a_dialog_makes_the_window_behind_it_inert() {
+    use mkv_anime_batch_slint_ui::DialogTexts;
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    // Tall enough for the sheet's Run options to show unscrolled.
+    app.window()
+        .set_size(slint::LogicalSize::new(920.0, 1100.0));
+    // An Inspector with an error, whose selectable text is a Tab stop behind the sheet.
+    let mut state = ViewState::new(None);
+    state.remux.rows = Arc::new(vec![row("Show - 01.mkv")]);
+    state.remux.empty = None;
+    let mut view = sample_view();
+    view.error = Some("Inspection failed".into());
+    state.remux.inspector = Some(view);
+    apply(&app, &state);
+    app.show().unwrap();
+    frame(&app);
+    let answers = Rc::new(RefCell::new(Vec::new()));
+    let log = Rc::clone(&answers);
+    app.on_dialog_answered(move |confirmed| log.borrow_mut().push(confirmed));
+    let closes = Rc::new(Cell::new(0));
+    let counter = Rc::clone(&closes);
+    app.on_close_window(move || counter.set(counter.get() + 1));
+    let show_dialog = || {
+        app.set_dialog(DialogTexts {
+            title: "Clear the inspection cache?".into(),
+            text: "Every folder is inspected again.".into(),
+            confirm: "Clear cache".into(),
+            notice: false,
+        });
+        app.invoke_show_dialog();
+        frame(&app);
+    };
+    let close_dialog = || {
+        app.set_dialog_open(false);
+        frame(&app);
+    };
+    let window_is_inert = || {
+        let extract = only(&app, "Extract");
+        assert_eq!(extract.accessible_enabled(), Some(false));
+        extract.invoke_accessible_default_action();
+        assert_eq!(app.get_mode(), Mode::Remux, "Extract is inert");
+        only(&app, "Close window").invoke_accessible_default_action();
+        assert_eq!(closes.get(), 0, "the title bar is inert");
+    };
+    let dry_run = || only(&app, "Dry run (plan only, write nothing)");
+    let sheet_calls = Rc::new(Cell::new(0));
+    let count = Rc::clone(&sheet_calls);
+    app.global::<Sheet>()
+        .on_step_key(move |_, _| count.set(count.get() + 1));
+    let count = Rc::clone(&sheet_calls);
+    app.global::<Sheet>()
+        .on_clear_cache(move || count.set(count.get() + 1));
+    let count = Rc::clone(&sheet_calls);
+    app.global::<Sheet>()
+        .on_browse(move |_| count.set(count.get() + 1));
+    let bitrate = || select_of(&app, "Opus bitrate");
+
+    // The sheet: the window behind it is inert, and takes no focus: Esc still closes the sheet.
+    app.invoke_open_sheet(Mode::Remux, "".into());
+    frame(&app);
+    window_is_inert();
+    screen_reader_focus(&app, "Extract");
+    // Shift+Tab from there stays in the sheet: the queue's entry stop behind it takes no focus.
+    key(&app, slint::platform::Key::Backtab);
+    key(&app, slint::platform::Key::Escape);
+    assert!(!app.get_sheet_open(), "Extract took no focus");
+    // Its own checkbox acts.
+    app.invoke_open_sheet(Mode::Remux, "".into());
+    frame(&app);
+    dry_run().invoke_accessible_default_action();
+    assert!(app.get_remux_form().dry_run);
+
+    // A dialog over the sheet: the sheet is inert too, its select's open list closes; Cancel
+    // answers.
+    bitrate().invoke_accessible_expand_action();
+    frame(&app);
+    assert_eq!(bitrate().accessible_expanded(), Some(true));
+    show_dialog();
+    assert_eq!(
+        bitrate().accessible_expanded(),
+        Some(false),
+        "the list closes"
+    );
+    assert_eq!(focused(&app), "Cancel", "the list closed under Cancel");
+    bitrate().invoke_accessible_expand_action();
+    frame(&app);
+    assert_eq!(
+        bitrate().accessible_expanded(),
+        Some(false),
+        "the select is inert"
+    );
+    only(&app, "Increase workers").invoke_accessible_default_action();
+    only(&app, "Clear inspection cache…").invoke_accessible_default_action();
+    only(&app, "Browse for the Input folder").invoke_accessible_default_action();
+    assert_eq!(
+        sheet_calls.get(),
+        0,
+        "the stepper, Clear inspection cache and Browse… are inert"
+    );
+    let complexity = app.get_remux_form().complexity;
+    only(&app, "Encoder complexity").invoke_accessible_increment_action();
+    assert_eq!(
+        app.get_remux_form().complexity,
+        complexity,
+        "the slider is inert"
+    );
+    window_is_inert();
+    only(&app, "Done").invoke_accessible_default_action();
+    assert!(app.get_sheet_open(), "Done is inert");
+    dry_run().invoke_accessible_default_action();
+    assert!(app.get_remux_form().dry_run, "the checkbox is inert");
+    only(&app, "Input folder").set_accessible_value("/elsewhere");
+    assert_eq!(app.get_remux_form().input_dir, "", "the field is inert");
+    screen_reader_focus(&app, "Input folder");
+    key(&app, "x");
+    assert_eq!(
+        app.get_remux_form().input_dir,
+        "",
+        "the field took no focus"
+    );
+    // The sheet asked to put the cursor in a field under the dialog: the dialog keeps the focus.
+    assert_eq!(focused(&app), "Cancel");
+    app.invoke_open_sheet(Mode::Remux, "input_dir".into());
+    frame(&app);
+    assert_eq!(focused(&app), "Cancel", "the inert field takes no focus");
+    only(&app, "Cancel").invoke_accessible_default_action();
+    assert_eq!(*answers.borrow(), [false]);
+    close_dialog();
+    // It takes it as the dialog closes.
+    assert_eq!(
+        app.global::<Sheet>().get_focused(),
+        "input_dir",
+        "the field asked for under the dialog takes the focus"
+    );
+
+    // A field's menu open as a dialog shows closes: its entries would edit the inert field.
+    let popups = || {
+        i_slint_core::window::WindowInner::from_pub(app.window())
+            .active_popups()
+            .len()
+    };
+    let field = only(&app, "Input folder");
+    let (at, size) = (field.absolute_position(), field.size());
+    let position = slint::LogicalPosition::new(at.x + size.width / 2.0, at.y + size.height / 2.0);
+    let button = slint::platform::PointerEventButton::Right;
+    app.window()
+        .dispatch_event(slint::platform::WindowEvent::PointerPressed { position, button });
+    app.window()
+        .dispatch_event(slint::platform::WindowEvent::PointerReleased { position, button });
+    assert_eq!(popups(), 1, "the field's menu opens");
+
+    // Again: a Focus action on the window behind both lands on the dialog, not on the sheet
+    // under it, so Esc answers the dialog.
+    show_dialog();
+    assert_eq!(popups(), 0, "the field's menu closes");
+    assert_eq!(focused(&app), "Cancel", "the menu closed under Cancel");
+    screen_reader_focus(&app, "Extract");
+    key(&app, slint::platform::Key::Escape);
+    assert_eq!(*answers.borrow(), [false, false], "Esc answers the dialog");
+    assert!(app.get_sheet_open());
+    close_dialog();
+
+    // The sheet alone again: Done closes it.
+    only(&app, "Done").invoke_accessible_default_action();
+    assert!(!app.get_sheet_open());
+
+    // A dialog over the window: the window is inert; Clear cache answers.
+    show_dialog();
+    window_is_inert();
+    only(&app, "Clear cache").invoke_accessible_default_action();
+    assert_eq!(*answers.borrow(), [false, false, true]);
+    close_dialog();
+
+    // The Appearance menu closes as a dialog or the sheet opens, set open directly too.
+    for open in [App::set_dialog_open, App::set_sheet_open] {
+        app.set_appearance_open(true);
+        open(&app, true);
+        frame(&app);
+        assert!(!app.get_appearance_open(), "the Appearance menu closes");
+        open(&app, false);
+        frame(&app);
+    }
+
+    // Nothing open: Extract acts.
+    let extract = only(&app, "Extract");
+    assert_eq!(extract.accessible_enabled(), Some(true));
+    extract.invoke_accessible_default_action();
+    assert_eq!(app.get_mode(), Mode::Extract);
+    app.hide().unwrap();
+}
+
+/// Shift+Tab as a desktop keyboard sends it, Tab with Shift held (winit has no Backtab), enters
+/// the list from below at its last row and hands the focus back row by row, past the rows not made
+/// yet; with Shift released Tab goes forward again. Ctrl+Tab on a row's last control moves no
+/// focus, as Slint moves none on Tab with Ctrl.
+#[test]
+fn shift_held_tab_walks_the_queue_back_and_ctrl_tab_stays_in_the_row() {
+    use slint::platform::{Key, WindowEvent};
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    SlintPublisher::new(&app).show(&three_releases());
+    app.show().unwrap();
+    frame(&app);
+    let ids: Vec<String> = app
+        .get_remux_rows()
+        .iter()
+        .map(|row| row.id.to_string())
+        .collect();
+    let modifier = |key: Key, pressed: bool| {
+        let text = key.into();
+        app.window().dispatch_event(if pressed {
+            WindowEvent::KeyPressed { text }
+        } else {
+            WindowEvent::KeyReleased { text }
+        });
+    };
+
+    tab_to(&app, "run");
+    // The list at its top: its last row is not made.
+    app.invoke_reveal(Mode::Remux, 0);
+    frame(&app);
+    modifier(Key::Shift, true);
+    key_and_settle(&app, Key::Tab);
+    assert_eq!(focused(&app), "down:remux:c03", "entered from below");
+    let mut back = row_picks_on_the_way(&app, Key::Tab, "check:remux:b10");
+    back.reverse();
+    assert_eq!(back, ids[30..]);
+    modifier(Key::Shift, false);
+    key_and_settle(&app, Key::Tab);
+    assert_eq!(focused(&app), "pick:remux:b10", "Tab goes forward again");
+
+    tab_to(&app, "down:remux:b10");
+    modifier(Key::Control, true);
+    key_and_settle(&app, Key::Tab);
+    modifier(Key::Control, false);
+    assert_eq!(focused(&app), "down:remux:b10", "Ctrl+Tab moves no focus");
+    app.hide().unwrap();
+}
+
+/// The controls whose enabled state is wrong for the topmost open layer (`layer`, its own
+/// element): a control outside it that does not read as disabled, or one inside it that does. A
+/// control is an element a screen reader can act on, by its role: a list item only when it is
+/// selectable (the subtitle ladder's rungs are not). Each is named by its role, label and place,
+/// which tell the layer's from the ones behind. Every label in `behind` must name a control found
+/// outside the layer, so a sweep that narrows to the layer or misses a part of the window fails
+/// instead of passing on what it never checked.
+fn modal_offenders(app: &App, layer: &ElementHandle, behind: &[&str]) -> Vec<String> {
+    use i_slint_backend_testing::{AccessibleRole as R, ElementQuery};
+    let is_control = |element: &ElementHandle| match element.accessible_role() {
+        Some(
+            R::Button
+            | R::Checkbox
+            | R::Combobox
+            | R::Slider
+            | R::Spinbox
+            | R::Tab
+            | R::TextInput
+            | R::Switch
+            | R::RadioButton,
+        ) => true,
+        Some(R::ListItem) => element.accessible_item_selectable() == Some(true),
+        _ => false,
+    };
+    let name = |element: &ElementHandle| {
+        let (at, size) = (element.absolute_position(), element.size());
+        format!(
+            "{:?} {:?} at {},{} {}x{}",
+            element.accessible_role().unwrap(),
+            element.accessible_label().unwrap_or_default(),
+            at.x,
+            at.y,
+            size.width,
+            size.height
+        )
+    };
+    let top: std::collections::HashSet<String> = layer
+        .query_descendants()
+        .match_predicate(is_control)
+        .find_all()
+        .iter()
+        .map(name)
+        .collect();
+    assert!(!top.is_empty(), "the layer has controls");
+    let all = ElementQuery::from_root(app)
+        .match_descendants()
+        .match_predicate(is_control)
+        .find_all();
+    let checked: std::collections::HashSet<String> = all
+        .iter()
+        .filter(|element| !top.contains(&name(element)))
+        .filter_map(|element| element.accessible_label().map(String::from))
+        .collect();
+    let missed: Vec<&str> = behind
+        .iter()
+        .copied()
+        .filter(|label| !checked.contains(*label))
+        .collect();
+    assert_eq!(
+        missed,
+        Vec::<&str>::new(),
+        "controls the sweep did not find behind the layer"
+    );
+    let offenders: std::collections::BTreeSet<String> = all
+        .iter()
+        .filter_map(|element| {
+            let inside = top.contains(&name(element));
+            let disabled = element.accessible_enabled() == Some(false);
+            (inside == disabled).then(|| {
+                let side = if inside { "in the layer" } else { "behind it" };
+                format!("{} ({side})", name(element))
+            })
+        })
+        .collect();
+    offenders.into_iter().collect()
+}
+
+/// Controls every sweep finds behind the topmost layer: the title bar, the side bar, a row, the
+/// Inspector and the Log drawer.
+const WINDOW_CONTROLS: [&str; 6] = [
+    "Close window",
+    "Extract",
+    "Run remux",
+    "Include a00 in the batch",
+    "Track title",
+    "Copy",
+];
+
+/// Every control behind the topmost open layer reads as disabled in the accessibility tree, and
+/// every control of that layer as enabled: behind the sheet, behind a dialog over the sheet (the
+/// sheet's own controls too) and behind a dialog over the window. A control left unguarded fails
+/// here by name.
+#[test]
+fn the_accessibility_tree_reads_every_control_behind_the_top_layer_as_disabled() {
+    use mkv_anime_batch_slint_ui::DialogTexts;
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window()
+        .set_size(slint::LogicalSize::new(920.0, 1100.0));
+    // Rows, an Inspector with its fields and a selectable error, the Log drawer open.
+    let mut state = three_releases();
+    let mut view = sample_view();
+    view.error = Some("Inspection failed".into());
+    view.assignment = Some(mkv_core::request::TrackAssignment {
+        target_video: "Season 1/ep1.mkv".into(),
+        asset_path: "Season 1/ep1.ass".into(),
+        track_type: Default::default(),
+        language: Some("eng".into()),
+        title: None,
+        offset_ms: None,
+    });
+    state.remux.inspector = Some(view);
+    apply(&app, &state);
+    app.set_log_open(true);
+    app.show().unwrap();
+    frame(&app);
+    let dialog = || {
+        ElementHandle::find_by_accessible_label(&app, "Clear the inspection cache?")
+            .find(|element| {
+                element.accessible_role() == Some(i_slint_backend_testing::AccessibleRole::Groupbox)
+            })
+            .expect("the dialog")
+    };
+    let show_dialog = || {
+        app.set_dialog(DialogTexts {
+            title: "Clear the inspection cache?".into(),
+            text: "Every folder is inspected again.".into(),
+            confirm: "Clear cache".into(),
+            notice: false,
+        });
+        app.invoke_show_dialog();
+        frame(&app);
+    };
+
+    app.invoke_open_sheet(Mode::Remux, "".into());
+    frame(&app);
+    let sheet = sheet_panel(&app, "Remux settings").expect("the sheet");
+    assert_eq!(
+        modal_offenders(&app, &sheet, &WINDOW_CONTROLS),
+        Vec::<String>::new(),
+        "the sheet"
+    );
+    show_dialog();
+    assert_eq!(
+        modal_offenders(
+            &app,
+            &dialog(),
+            &[
+                &WINDOW_CONTROLS[..],
+                &[
+                    "Done",
+                    "Dry run (plan only, write nothing)",
+                    "Browse for the Input folder",
+                    "Encoder complexity",
+                    "Opus bitrate",
+                    "Increase workers",
+                    "Input folder",
+                ]
+            ]
+            .concat()
+        ),
+        Vec::<String>::new(),
+        "a dialog over the sheet"
+    );
+    app.set_dialog_open(false);
+    app.set_sheet_open(false);
+    frame(&app);
+    show_dialog();
+    assert_eq!(
+        modal_offenders(&app, &dialog(), &WINDOW_CONTROLS),
+        Vec::<String>::new(),
+        "a dialog over the window"
+    );
+    app.hide().unwrap();
+}
+
+/// A dialog that shows over an open popup (the bitrate select's list, a field's menu, over the
+/// sheet or over the window) keeps the focus on its first button as the popup closes under it,
+/// so Enter or Space answers it; the sheet that opens over a field's menu keeps it on Done.
+/// Slint gives a closed popup's focus back to the control that opened it, which is inert by then.
+#[test]
+fn a_layer_keeps_its_focus_when_a_popup_under_it_closes() {
+    use mkv_anime_batch_slint_ui::DialogTexts;
+    use slint::platform::Key;
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window()
+        .set_size(slint::LogicalSize::new(920.0, 1100.0));
+    // An Inspector with an assigned subtitle, whose fields show.
+    let mut assigned = sample_view();
+    assigned.assignment = Some(mkv_core::request::TrackAssignment {
+        target_video: "Season 1/ep1.mkv".into(),
+        asset_path: "Season 1/ep1.ass".into(),
+        track_type: Default::default(),
+        language: Some("eng".into()),
+        title: None,
+        offset_ms: None,
+    });
+    let mut state = ViewState::new(None);
+    state.remux.rows = Arc::new(vec![row("Season 1/ep1.mkv")]);
+    state.remux.empty = None;
+    state.remux.inspector = Some(assigned);
+    apply(&app, &state);
+    app.show().unwrap();
+    frame(&app);
+    let answers = Rc::new(RefCell::new(Vec::new()));
+    let log = Rc::clone(&answers);
+    app.on_dialog_answered(move |confirmed| log.borrow_mut().push(confirmed));
+    let show_dialog = |notice: bool| {
+        app.set_dialog(DialogTexts {
+            title: "Clear the inspection cache?".into(),
+            text: "Every folder is inspected again.".into(),
+            confirm: if notice { "OK" } else { "Clear cache" }.into(),
+            notice,
+        });
+        app.invoke_show_dialog();
+        frame(&app);
+    };
+    let close_dialog = || {
+        app.set_dialog_open(false);
+        frame(&app);
+    };
+    let popups = || {
+        i_slint_core::window::WindowInner::from_pub(app.window())
+            .active_popups()
+            .len()
+    };
+    let open_menu = |label: &str| {
+        use slint::platform::{PointerEventButton, WindowEvent};
+        let field = only(&app, label);
+        let (at, size) = (field.absolute_position(), field.size());
+        let position =
+            slint::LogicalPosition::new(at.x + size.width / 2.0, at.y + size.height / 2.0);
+        let button = PointerEventButton::Right;
+        app.window()
+            .dispatch_event(WindowEvent::PointerPressed { position, button });
+        app.window()
+            .dispatch_event(WindowEvent::PointerReleased { position, button });
+        assert_eq!(popups(), 1, "{label}'s menu opens");
+    };
+
+    // Over the sheet, its bitrate list open: Cancel has the focus, Enter answers.
+    app.invoke_open_sheet(Mode::Remux, "".into());
+    frame(&app);
+    select_of(&app, "Opus bitrate").invoke_accessible_expand_action();
+    frame(&app);
+    assert_eq!(popups(), 1, "the list opens");
+    show_dialog(false);
+    assert_eq!(popups(), 0, "the list closes");
+    assert_eq!(focused(&app), "Cancel", "over the bitrate list");
+    key(&app, Key::Return);
+    assert_eq!(*answers.borrow(), [false]);
+    close_dialog();
+
+    // Over the sheet, a field's menu open: Space answers.
+    open_menu("Input folder");
+    show_dialog(false);
+    assert_eq!(popups(), 0, "the menu closes");
+    assert_eq!(focused(&app), "Cancel", "over the sheet field's menu");
+    key(&app, Key::Space);
+    assert_eq!(*answers.borrow(), [false, false]);
+    close_dialog();
+    only(&app, "Done").invoke_accessible_default_action();
+    assert!(!app.get_sheet_open());
+
+    // Over the window, an Inspector field's menu open: a notice's OK has it.
+    open_menu("Track title");
+    show_dialog(true);
+    assert_eq!(popups(), 0, "the menu closes");
+    assert_eq!(focused(&app), "OK", "over the Inspector field's menu");
+    key(&app, Key::Return);
+    assert_eq!(*answers.borrow(), [false, false, true]);
+    close_dialog();
+
+    // The sheet over an Inspector field's menu: Done has it, and Enter closes the sheet.
+    open_menu("Track title");
+    app.invoke_open_sheet(Mode::Remux, "".into());
+    frame(&app);
+    assert_eq!(popups(), 0, "the menu closes");
+    assert_eq!(focused(&app), "Done", "the sheet over the field's menu");
+    key(&app, Key::Return);
+    assert!(!app.get_sheet_open(), "Enter on Done closes the sheet");
     app.hide().unwrap();
 }
 
