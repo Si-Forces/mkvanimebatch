@@ -438,19 +438,120 @@ test("a published meta line redraws its card in place, a failure's in the error 
   assert.equal(card.meta.className, "ep-meta");
 });
 
-test("a patch's changed-rows indices redraw only those cards, and leave the others untouched", t => {
+test("a row_changes patch swaps only its rows into the index and redraws only their cards", t => {
   setupMockEnvironment(t);
   const tracker = new QueueTracker("remux", noDispatch);
-  tracker.applyView(accepted(PATCHED_IDS.map(id => detailedRow(id))));
+  const view = accepted(PATCHED_IDS.map(id => detailedRow(id)));
+  tracker.applyView(view);
+  const { rows, order } = tracker;
   const check = id => tracker.cards.get(id).checkbox;
   // Marks a redraw of these cards would overwrite.
   check("01.mkv").checked = "untouched";
   check("03.mkv").checked = "untouched";
 
-  tracker.applyView(accepted(PATCHED_IDS.map(id => detailedRow(id, { selected: id !== "02.mkv" }))), [1]);
+  // As `nextState` merges `row_changes`: a copy of the rows with the changed ones replaced.
+  const patched = [...view.rows];
+  patched[1] = detailedRow("02.mkv", { selected: false });
+  tracker.applyView({ ...view, rows: patched }, [1]);
+  assert.equal(tracker.rows, rows);
+  assert.equal(tracker.order, order);
+  assert.equal(tracker.rows.get("02.mkv"), patched[1]);
+  assert.equal(tracker.rows.get("01.mkv"), view.rows[0]);
   assert.equal(check("02.mkv").checked, false);
   assert.equal(check("01.mkv").checked, "untouched");
   assert.equal(check("03.mkv").checked, "untouched");
+});
+
+test("a view whose rows a publication left alone keeps the row index and its order", t => {
+  setupMockEnvironment(t);
+  const tracker = new QueueTracker("remux", noDispatch);
+  const view = accepted(PATCHED_IDS.map(id => detailedRow(id)));
+  tracker.applyView(view);
+  const { rows, order } = tracker;
+  let changes = 0;
+  tracker.onChange = () => changes++;
+
+  // The mode a patch did not touch arrives as the same ModeView: nothing to redraw.
+  tracker.applyView(view, []);
+  assert.equal(changes, 0);
+  // A patch of its other fields keeps the same rows array.
+  tracker.applyView({ ...view, count_text: "2 / 3 Selected" }, []);
+  assert.equal(changes, 1);
+  assert.equal(tracker.rows, rows);
+  assert.equal(tracker.order, order);
+});
+
+test("an inspector-only patch moves the highlight without touching the row index", t => {
+  setupMockEnvironment(t);
+  const tracker = new QueueTracker("remux", noDispatch);
+  const view = accepted(PATCHED_IDS.map(id => detailedRow(id)), 1, { inspector: { id: "01.mkv" } });
+  tracker.applyView(view);
+  const inspected = id => tracker.cards.get(id).el.classList.contains("is-inspected");
+  assert.ok(inspected("01.mkv"));
+
+  tracker.applyView({ ...view, inspector: { id: "02.mkv" } }, []);
+  assert.ok(inspected("02.mkv"));
+  assert.equal(inspected("01.mkv"), false);
+});
+
+test("a row changed in a view the tracker missed still reaches the row index with the next patch", t => {
+  setupMockEnvironment(t);
+  const tracker = new QueueTracker("remux", noDispatch);
+  const v0 = accepted(PATCHED_IDS.map(id => detailedRow(id)));
+  tracker.applyView(v0);
+
+  // `applyState` threw before this tracker saw v1, which finished 01.mkv.
+  const v1 = { ...v0, rows: [...v0.rows] };
+  v1.rows[0] = detailedRow("01.mkv", { bucket: "done" });
+  const v2 = { ...v1, rows: [...v1.rows] };
+  v2.rows[1] = detailedRow("02.mkv", { selected: false });
+  tracker.applyView(v2, [1]);
+  assert.equal(tracker.rows.get("01.mkv").bucket, "done");
+  assert.equal(tracker.rows.get("02.mkv"), v2.rows[1]);
+});
+
+test("a row_changes patch mid-render redraws the mounted card, and a pending card mounts from the patch", t => {
+  const { renderFrame, renderFrames } = setupMockEnvironment(t, { deferFrames: true });
+  const tracker = new QueueTracker("remux", noDispatch);
+  const oldPerformance = globalThis.performance;
+  let clock = 0;
+  globalThis.performance = { now: () => (clock += 10) }; // One card per animation frame.
+  t.after(() => { globalThis.performance = oldPerformance; });
+
+  const view = accepted(PATCHED_IDS.map(id => detailedRow(id)));
+  tracker.applyView(view);
+  renderFrame();
+  assert.equal(tracker.cards.size, 1);
+  const mounted = tracker.cards.get("01.mkv");
+
+  const patched = [...view.rows];
+  patched[0] = detailedRow("01.mkv", { meta: "Failed · mkvmerge exited with 2", meta_error: true });
+  patched[2] = detailedRow("03.mkv", { meta: "FLAC 2.0 → Opus 192k · Embedded subs · 5 fonts" });
+  tracker.applyView({ ...view, rows: patched }, [0, 2]);
+  renderFrames();
+  assert.equal(tracker.cards.size, 3);
+  assert.equal(tracker.cards.get("01.mkv"), mounted);
+  assert.equal(tracker.cards.get("01.mkv").meta.textContent, "Failed · mkvmerge exited with 2");
+  assert.equal(tracker.cards.get("03.mkv").meta.textContent, "FLAC 2.0 → Opus 192k · Embedded subs · 5 fonts");
+});
+
+test("an index list over other row IDs rebuilds the row index", t => {
+  setupMockEnvironment(t);
+  const tracker = new QueueTracker("remux", noDispatch);
+  const view = accepted(PATCHED_IDS.map(id => detailedRow(id)));
+  tracker.applyView(view);
+
+  // The same count with another ID at a listed index.
+  const swapped = ["04.mkv", "02.mkv", "03.mkv"].map(id => detailedRow(id));
+  tracker.applyView({ ...view, rows: swapped }, [0]);
+  assert.deepEqual(tracker.order, ["04.mkv", "02.mkv", "03.mkv"]);
+  assert.deepEqual([...tracker.rows.values()], swapped);
+
+  // Another count, with the same IDs at the indices it keeps.
+  const other = ["04.mkv", "02.mkv"].map(id => detailedRow(id));
+  tracker.applyView({ ...view, rows: other }, [0]);
+  assert.deepEqual(tracker.order, ["04.mkv", "02.mkv"]);
+  assert.deepEqual([...tracker.rows.values()], other);
 });
 
 test("a re-inspection of the directory shown redraws a changed row in place and keeps every card", t => {
