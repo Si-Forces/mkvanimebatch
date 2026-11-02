@@ -155,8 +155,8 @@ pub fn inspected_row<'a>(rows: &'a [Row], pick: Option<&str>) -> Option<(usize, 
 }
 
 /// The inspector of the row at index `at` of `view`, for a remux view when `remux`. `entry` is
-/// its manifest entry (none for a row only the Job Snapshot lists) and `job_error` the job's
-/// error for it.
+/// its manifest entry (none for a row only the Job Snapshot lists), `job_error` the job's error
+/// for it, and `subs` the queue's summary of its release's subtitle candidates (remux only).
 pub fn inspector_view(
     remux: bool,
     view: &ModeView,
@@ -164,6 +164,7 @@ pub fn inspector_view(
     row: &Row,
     entry: Option<&ManifestItem>,
     job_error: Option<&str>,
+    subs: &ReleaseSubtitles,
 ) -> InspectorView {
     let meta = entry.map(|entry| &entry.metadata);
     let inspection_error = entry
@@ -208,7 +209,7 @@ pub fn inspector_view(
     };
     let assignment = view.assignments.get(&row.id).cloned();
     let (ladder, options) = if remux {
-        subtitle_section(view, row, meta, assignment.as_ref())
+        subtitle_section(view, row, meta, assignment.as_ref(), subs)
     } else {
         (Vec::new(), Vec::new())
     };
@@ -253,16 +254,17 @@ fn subtitle_section(
     row: &Row,
     meta: Option<&mkv_core::manifest::InspectionMetadata>,
     assignment: Option<&TrackAssignment>,
+    subs: &ReleaseSubtitles,
 ) -> (Vec<LadderRung>, Vec<Choice>) {
-    // A row the manifest does not list has no release, so no candidates.
-    let candidates = Some(row.release.as_str())
-        .filter(|release| !release.is_empty())
-        .and_then(|release| view.subtitle_candidates.get(release))
+    // A row the manifest does not list has release "", which the queue lists no candidates for.
+    let candidates = view
+        .subtitle_candidates
+        .get(&row.release)
         .map_or(&[][..], Vec::as_slice);
     let assigned = assignment.map(|assignment| assignment.asset_path.to_string_lossy());
     let assets_dir = view.draft.assets_dir.as_deref().unwrap_or_default().trim();
     let ladder = subtitle_ladder(
-        &ReleaseSubtitles::new(&row.release, candidates),
+        subs,
         meta.and_then(|meta| meta.sub_summary.as_deref()),
         assigned.as_deref(),
         assets_dir,
@@ -309,6 +311,24 @@ mod tests {
     use super::*;
     use crate::actor::ViewState;
     use crate::queue::test_support::manifest_of;
+    use std::sync::Arc;
+
+    /// `inspector_view` with the summary the queue keeps of the row's release's candidates.
+    fn inspect(
+        remux: bool,
+        view: &ModeView,
+        at: usize,
+        row: &Row,
+        entry: Option<&ManifestItem>,
+        job_error: Option<&str>,
+    ) -> InspectorView {
+        let candidates = view
+            .subtitle_candidates
+            .get(&row.release)
+            .map_or(&[][..], Vec::as_slice);
+        let subs = ReleaseSubtitles::new(&row.release, candidates);
+        inspector_view(remux, view, at, row, entry, job_error, &subs)
+    }
 
     fn rows(ids: &[&str]) -> Vec<Row> {
         ids.iter().map(|id| Row::test(id)).collect()
@@ -332,7 +352,7 @@ mod tests {
     /// `Season 1/ep1.mkv`, inspected with FLAC audio, a video tag and two fonts.
     fn remux_view() -> (ModeView, ManifestItem) {
         let mut view = ViewState::new(None).remux;
-        view.subtitle_candidates.insert(
+        Arc::make_mut(&mut view.subtitle_candidates).insert(
             "Season 1".into(),
             vec!["Season 1/ep1.ass".into(), "Subs/ep1 [alt].ass".into()],
         );
@@ -360,7 +380,7 @@ mod tests {
         view.draft.out_dir = " /out/Show ".into();
         view.draft.fonts_dir = "/fonts".into();
         let row = remux_row();
-        let inspector = inspector_view(true, &view, 2, &row, Some(&entry), None);
+        let inspector = inspect(true, &view, 2, &row, Some(&entry), None);
         assert_eq!(inspector.number, "03");
         assert_eq!(inspector.title, "ep1.mkv");
         assert_eq!(inspector.crumbs, ["Season 1"]);
@@ -382,7 +402,7 @@ mod tests {
         // A folder set to the root has no crumbs, yet is set: the view draws no placeholder.
         let mut root = view.clone();
         root.draft.out_dir = "/".into();
-        let at_root = inspector_view(true, &root, 2, &row, Some(&entry), None);
+        let at_root = inspect(true, &root, 2, &row, Some(&entry), None);
         assert_eq!(at_root.out_crumbs, Some(vec![]));
         assert_eq!(inspector.fonts_head, "Fonts · 2");
         assert_eq!(inspector.fonts, "2 attached fonts · folder: fonts");
@@ -435,7 +455,7 @@ mod tests {
             offset_ms: None,
         };
         view.assignments.insert(row.id.clone(), assignment.clone());
-        let inspector = inspector_view(true, &view, 0, &row, Some(&entry), None);
+        let inspector = inspect(true, &view, 0, &row, Some(&entry), None);
         assert_eq!(
             inspector.options.last(),
             Some(&Choice {
@@ -450,11 +470,11 @@ mod tests {
         assert_eq!(inspector.assignment, Some(assignment));
         // A candidate that is assigned is not offered twice.
         view.assignments.get_mut(&row.id).unwrap().asset_path = "Season 1/ep1.ass".into();
-        let inspector = inspector_view(true, &view, 0, &row, Some(&entry), None);
+        let inspector = inspect(true, &view, 0, &row, Some(&entry), None);
         assert_eq!(inspector.options.len(), 3);
         // An empty path is no custom file: Automatic is the only empty option.
         view.assignments.get_mut(&row.id).unwrap().asset_path = "".into();
-        let inspector = inspector_view(true, &view, 0, &row, Some(&entry), None);
+        let inspector = inspect(true, &view, 0, &row, Some(&entry), None);
         assert_eq!(inspector.options.len(), 3);
     }
 
@@ -480,7 +500,7 @@ mod tests {
         let (mut view, entry) = remux_view();
         let row = remux_row();
         view.assignments.insert(row.id.clone(), with(Some("fre")));
-        let inspector = inspector_view(true, &view, 0, &row, Some(&entry), None);
+        let inspector = inspect(true, &view, 0, &row, Some(&entry), None);
         let wire = serde_json::to_value(&inspector).unwrap();
         assert_eq!(
             (&wire["language_choice"], &wire["custom_language"]),
@@ -552,12 +572,12 @@ mod tests {
             label: "Failed".into(),
             ..remux_row()
         };
-        let inspector = inspector_view(true, &view, 0, &failed, Some(&entry), Some("mkvmerge 2"));
+        let inspector = inspect(true, &view, 0, &failed, Some(&entry), Some("mkvmerge 2"));
         assert_eq!(inspector.error.as_deref(), Some("mkvmerge 2"));
         assert_eq!(inspector.pill.tone, Tone::Err);
         // A failure without an error text, or with an empty one, reads the default one.
         for error in [None, Some("")] {
-            let inspector = inspector_view(true, &view, 0, &failed, Some(&entry), error);
+            let inspector = inspect(true, &view, 0, &failed, Some(&entry), error);
             assert_eq!(inspector.error.as_deref(), Some("Failed"), "{error:?}");
         }
 
@@ -567,7 +587,7 @@ mod tests {
             selected: false,
             ..remux_row()
         };
-        let inspector = inspector_view(true, &view, 0, &row, Some(&entry), None);
+        let inspector = inspect(true, &view, 0, &row, Some(&entry), None);
         assert_eq!(inspector.error.as_deref(), Some("EBML header missing"));
         assert_eq!(inspector.video, "Inspection failed");
         assert_eq!(
@@ -590,7 +610,7 @@ mod tests {
         let view = ViewState::new(None).extract;
         entry.metadata.fonts_count = Some(1);
         let row = remux_row();
-        let inspector = inspector_view(false, &view, 0, &row, Some(&entry), None);
+        let inspector = inspect(false, &view, 0, &row, Some(&entry), None);
         assert_eq!(inspector.video, "HEVC 1080p");
         assert_eq!(
             (inspector.audio_label, inspector.audio.as_str()),
@@ -600,7 +620,7 @@ mod tests {
         assert!(inspector.ladder.is_empty() && inspector.options.is_empty());
         assert!(inspector.out_crumbs.is_none());
         entry.metadata.sub_summary = None;
-        let inspector = inspector_view(false, &view, 0, &row, Some(&entry), None);
+        let inspector = inspect(false, &view, 0, &row, Some(&entry), None);
         assert_eq!(inspector.audio, "None");
 
         // No manifest entry: nothing inspected.
@@ -609,7 +629,7 @@ mod tests {
             in_manifest: false,
             ..Row::test("Other/ep9.mkv")
         };
-        let inspector = inspector_view(true, &ViewState::new(None).remux, 0, &job_only, None, None);
+        let inspector = inspect(true, &ViewState::new(None).remux, 0, &job_only, None, None);
         assert_eq!(
             (inspector.video.as_str(), inspector.audio.as_str()),
             ("Unknown", "Unknown")

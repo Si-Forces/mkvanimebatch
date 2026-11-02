@@ -6,7 +6,7 @@
 
 use crate::presentation::{
     bucket, failed_meta, inspected_meta, job_only_meta, status_label, status_title, status_tone,
-    Bucket, ReleaseSubtitles, Tone,
+    Bucket, ReleaseSubtitles, Tone, NO_SUBTITLES,
 };
 use crate::snapshot::{ItemSnapshot, ItemStatus, JobSnapshot};
 use mkv_core::manifest::{InspectionManifest, ManifestItem};
@@ -115,6 +115,14 @@ struct BaseCache {
     /// How often `rows` was built.
     #[cfg(test)]
     builds: usize,
+    /// The `manifest_rev` `subs` was built from: they depend on the manifest alone, so a draft
+    /// or Track Assignment edit that rebuilds `rows` reuses them.
+    subs_rev: Option<u64>,
+    /// Each release's `ReleaseSubtitles` (remux only: only a remux meta line names the source).
+    subs: HashMap<String, ReleaseSubtitles>,
+    /// How many `ReleaseSubtitles` this cache built (not every `ReleaseSubtitles::new`).
+    #[cfg(test)]
+    subs_built: usize,
 }
 
 /// The queue of one mode.
@@ -140,6 +148,9 @@ pub struct Queue {
     vanished_selected_ids: Vec<String>,
     /// Track Assignments (remux only), by item ID.
     assignments: BTreeMap<String, TrackAssignment>,
+    /// The accepted manifest's subtitle candidates, built once per manifest and shared with every
+    /// view of it.
+    candidates: Arc<BTreeMap<String, Vec<String>>>,
     /// Bumped whenever the manifest is replaced, so a view knows when to rebuild its rows.
     manifest_rev: u64,
     /// Bumped whenever a Track Assignment is set or cleared, which changes a row's meta line.
@@ -164,14 +175,19 @@ impl Queue {
         &self.assignments
     }
 
-    pub fn subtitle_candidates(&self) -> BTreeMap<String, Vec<String>> {
-        // A folder with no episodes shows none: a candidate is offered per item's release, and the
-        // webview cleared them for an empty manifest before S2 too.
-        self.manifest
-            .as_ref()
-            .filter(|manifest| !manifest.items.is_empty())
-            .map(|manifest| manifest.subtitle_candidates.clone())
-            .unwrap_or_default()
+    /// The accepted manifest's subtitle candidates by Release Directory, shared: a pointer copy.
+    pub fn subtitle_candidates(&self) -> Arc<BTreeMap<String, Vec<String>>> {
+        Arc::clone(&self.candidates)
+    }
+
+    /// The summary of `release`'s subtitle candidates, as the remux rows of the accepted manifest
+    /// last built it: none for a release without candidates, and none before those rows.
+    pub fn release_subtitles(&self, release: &str) -> &ReleaseSubtitles {
+        if self.base.subs_rev == Some(self.manifest_rev) {
+            self.base.subs.get(release).unwrap_or(&NO_SUBTITLES)
+        } else {
+            &NO_SUBTITLES
+        }
     }
 
     /// The accepted manifest's entry of `id`.
@@ -262,6 +278,20 @@ impl Queue {
             self.vanished_selected_ids.clear();
             self.assignments.clear();
         }
+        // A folder with no episodes shows none: a candidate is offered per item's release, and the
+        // webview cleared them for an empty manifest before S2 too. An empty release is no release
+        // (the engine names the root `.`, and a row the manifest does not list has release ""),
+        // so it lists none: every lookup of "" here, in the rows and in the inspector finds none.
+        self.candidates = Arc::new(if manifest.items.is_empty() {
+            BTreeMap::new()
+        } else {
+            manifest
+                .subtitle_candidates
+                .iter()
+                .filter(|(release, _)| !release.is_empty())
+                .map(|(release, candidates)| (release.clone(), candidates.clone()))
+                .collect()
+        });
         self.manifest = Some(manifest);
         self.manifest_rev += 1;
     }
@@ -422,8 +452,8 @@ impl Queue {
 
     /// Builds the `RowBase` of every manifest item again, unless the manifest, the Track
     /// Assignments and `inputs` are those it was built from. Each release's subtitle candidates
-    /// are summed up once per build, not once per row: they list every ancestor directory's
-    /// subtitles, so a library's root subtitles reach every release.
+    /// are summed up once per manifest, not once per row or per build: they list every ancestor
+    /// directory's subtitles, so a library's root subtitles reach every release.
     fn refresh_base(&mut self, inputs: &MetaInputs) {
         let key = (self.manifest_rev, self.assignments_rev, inputs.clone());
         if self.base.key.as_ref() == Some(&key) {
@@ -435,18 +465,21 @@ impl Queue {
             return;
         };
         // Only a remux meta line names the subtitle source.
-        let subs: HashMap<&str, ReleaseSubtitles> = if inputs.remux {
-            manifest
-                .subtitle_candidates
+        if inputs.remux && self.base.subs_rev != Some(self.manifest_rev) {
+            self.base.subs = self
+                .candidates
                 .iter()
                 .map(|(release, candidates)| {
-                    (release.as_str(), ReleaseSubtitles::new(release, candidates))
+                    (release.clone(), ReleaseSubtitles::new(release, candidates))
                 })
-                .collect()
-        } else {
-            HashMap::new()
-        };
-        let no_subs = ReleaseSubtitles::default();
+                .collect();
+            self.base.subs_rev = Some(self.manifest_rev);
+            #[cfg(test)]
+            {
+                self.base.subs_built += self.base.subs.len();
+            }
+        }
+        let subs = &self.base.subs;
         self.base.rows = manifest
             .items
             .iter()
@@ -456,10 +489,8 @@ impl Queue {
                         (format!("Inspection failed: {error}"), true)
                     }
                     _ => {
-                        let release_subs = Some(entry.release.as_str())
-                            .filter(|release| !release.is_empty())
-                            .and_then(|release| subs.get(release))
-                            .unwrap_or(&no_subs);
+                        // Only a remux meta line reads it.
+                        let release_subs = subs.get(&entry.release).unwrap_or(&NO_SUBTITLES);
                         let assignment = self
                             .assignments
                             .get(&entry.id.to_string())
@@ -962,6 +993,71 @@ mod tests {
         queue.accept(manifest, "/anime".into());
         meta(&mut queue, &remux("256k", "/assets"));
         assert_eq!(queue.base.builds, 6);
+    }
+
+    #[test]
+    fn test_each_release_is_summed_up_once_per_manifest_and_its_candidates_are_shared() {
+        let mut manifest = manifest_of(&["Season 1/ep1", "Season 2/ep1", "ep1"]);
+        for (item, release) in manifest.items.iter_mut().zip(["Season 1", "Season 2", "."]) {
+            item.release = release.into();
+        }
+        manifest.subtitle_candidates = BTreeMap::from([
+            (
+                "Season 1".into(),
+                vec!["Season 1/a.ass".into(), "root.ass".into()],
+            ),
+            ("Season 2".into(), vec!["root.ass".into()]),
+            (".".into(), vec!["root.ass".into()]),
+            (String::new(), vec!["root.ass".into()]),
+        ]);
+        let mut queue = Queue::default();
+        queue.accept(manifest.clone(), "/anime".into());
+        let candidates = queue.subtitle_candidates();
+        assert!(Arc::ptr_eq(&candidates, &queue.subtitle_candidates()));
+        // An empty release is no release, so the shared candidates list none for it.
+        assert_eq!(
+            candidates.keys().collect::<Vec<_>>(),
+            [".", "Season 1", "Season 2"]
+        );
+        // Extract rows sum nothing up, and neither does a view before the remux rows.
+        queue.rows(None, &MetaInputs::default(), Instant::now());
+        assert_eq!(queue.base.subs_built, 0);
+        assert_eq!(queue.release_subtitles("Season 1"), &NO_SUBTITLES);
+
+        let season_1 = ReleaseSubtitles::new("Season 1", &candidates["Season 1"]);
+        queue.rows(None, &remux("192k", ""), Instant::now());
+        assert_eq!(queue.base.subs_built, 3);
+        assert_eq!(queue.release_subtitles("Season 1"), &season_1);
+        assert_eq!(queue.release_subtitles(""), &NO_SUBTITLES);
+        // A bitrate, an assets dir or a Track Assignment rebuilds the rows, not the summaries.
+        queue.rows(None, &remux("256k", ""), Instant::now());
+        queue.rows(None, &remux("256k", "/assets"), Instant::now());
+        queue.assign(subtitle("ep1", "/subs/ep1.ass"));
+        queue.rows(None, &remux("256k", "/assets"), Instant::now());
+        queue.clear_assignment("ep1");
+        queue.rows(None, &remux("256k", "/assets"), Instant::now());
+        assert_eq!((queue.base.builds, queue.base.subs_built), (6, 3));
+        assert!(Arc::ptr_eq(&candidates, &queue.subtitle_candidates()));
+
+        // A new manifest sums its releases up again, and shares its own candidates.
+        manifest.subtitle_candidates.remove("Season 1");
+        queue.accept(manifest, "/anime".into());
+        assert!(!Arc::ptr_eq(&candidates, &queue.subtitle_candidates()));
+        assert_eq!(queue.release_subtitles("Season 1"), &NO_SUBTITLES);
+        queue.rows(None, &remux("256k", "/assets"), Instant::now());
+        assert_eq!(queue.base.subs_built, 5);
+        assert_eq!(queue.release_subtitles("Season 1"), &NO_SUBTITLES);
+        let season_2 = ReleaseSubtitles::new("Season 2", &["root.ass".to_owned()]);
+        assert_eq!(queue.release_subtitles("Season 2"), &season_2);
+        queue.reset();
+        assert!(queue.subtitle_candidates().is_empty());
+        assert_eq!(queue.release_subtitles("Season 2"), &NO_SUBTITLES);
+
+        // A folder with no episodes offers no candidates, whatever its manifest lists.
+        let mut empty = manifest_of(&[]);
+        empty.subtitle_candidates = BTreeMap::from([(".".into(), vec!["root.ass".into()])]);
+        queue.accept(empty, "/anime".into());
+        assert!(queue.subtitle_candidates().is_empty());
     }
 
     // Releases that share the root's subtitles each read their own tiers from them.

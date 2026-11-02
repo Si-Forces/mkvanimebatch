@@ -290,10 +290,9 @@ pub enum Tier {
 }
 
 /// `Same` when the candidate sits in the item's Release Directory, else `Ancestor`. Both are
-/// root-relative POSIX paths from the manifest; an empty release is the root.
+/// root-relative POSIX paths from the manifest, the root being `.`.
 pub fn candidate_tier(path: &str, release: &str) -> Tier {
     let dir = path.rfind('/').map_or(".", |at| &path[..at]);
-    let release = if release.is_empty() { "." } else { release };
     if dir == release {
         Tier::Same
     } else {
@@ -333,13 +332,19 @@ fn files_text(paths: &[&String]) -> String {
 }
 
 /// What a release's subtitle candidates give the ladder: the detail of its same folder rung and
-/// of its parent folder rung. A queue rebuild builds one per release, so the release's rows
-/// share one pass over the candidates, which list every ancestor directory's subtitles.
+/// of its parent folder rung. A remux queue builds one per release per manifest, which its rows
+/// and its Episode Inspector share: the candidates list every ancestor directory's subtitles.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReleaseSubtitles {
     same: String,
     ancestor: String,
 }
+
+/// The summary of no candidates.
+pub static NO_SUBTITLES: ReleaseSubtitles = ReleaseSubtitles {
+    same: String::new(),
+    ancestor: String::new(),
+};
 
 impl ReleaseSubtitles {
     /// The summary of `candidates`, the subtitle candidates of `release`.
@@ -1245,7 +1250,6 @@ mod tests {
         );
         assert_eq!(candidate_tier("Show - 01.ass", "Season 1"), Tier::Ancestor);
         assert_eq!(candidate_tier("Show - 01.ass", "."), Tier::Same);
-        assert_eq!(candidate_tier("Show - 01.ass", ""), Tier::Same);
     }
 
     #[test]
