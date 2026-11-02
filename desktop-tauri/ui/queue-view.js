@@ -7,6 +7,7 @@ const EMPTY_VIEW = {
   directory: null,
   manifest_rev: 0,
   library: [],
+  rows: [],
   inspector: null,
 };
 
@@ -149,10 +150,28 @@ export class QueueTracker {
    *   (`nextState` in `view-patch.js`), or "all"; only their cards are redrawn
    */
   applyView(view, changedRows = "all") {
+    // The mode a patch did not touch arrives as the same ModeView (`nextState`).
+    if (view === this.view) return;
     const previous = this.view;
+    // Rows a publication left alone keep their index. A `row_changes` patch keeps the ID at every
+    // index (`view_patch.rs`), so only the rows that are not the last view's objects are swapped
+    // in. They are found by identity, not from `changedRows`, so a view this tracker missed (an
+    // earlier step of `applyState` threw) still reaches the index. Another ID or count rebuilds it.
+    if (view.rows !== previous.rows) {
+      const old = previous.rows;
+      const sameIds = view.rows.length === this.order.length
+        && view.rows.every((row, index) => row.id === this.order[index]);
+      if (sameIds) {
+        view.rows.forEach((row, index) => {
+          if (row !== old[index]) this.rows.set(row.id, row);
+        });
+      } else {
+        this.rows = new Map(view.rows.map(row => [row.id, row]));
+        this.order = view.rows.map(row => row.id);
+      }
+    }
+    // After the index, so a view the index step threw on is not taken as the last one.
     this.view = view;
-    this.rows = new Map(view.rows.map(row => [row.id, row]));
-    this.order = view.rows.map(row => row.id);
     this.setCountText(view.count_text);
 
     if (view.scan?.state === "scanning") this.showScanning(previous, view.scan.directory);
