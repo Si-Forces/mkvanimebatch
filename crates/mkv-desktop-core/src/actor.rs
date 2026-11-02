@@ -231,8 +231,10 @@ pub struct ModeView {
     pub scan: ScanView,
     /// Changes whenever the manifest behind `rows` is replaced.
     pub manifest_rev: u64,
-    /// External subtitles a human can assign, by Release Directory.
-    pub subtitle_candidates: BTreeMap<String, Vec<String>>,
+    /// External subtitles a human can assign, by Release Directory. Shared with the queue, which
+    /// builds it once per manifest, so a view rebuilt during a job copies a pointer. Serializes as
+    /// the map itself.
+    pub subtitle_candidates: Arc<BTreeMap<String, Vec<String>>>,
     /// Shared, so a copy of an unchanged mode, such as the one a webview adapter keeps to diff
     /// against, is a pointer copy. Serializes as the list itself.
     pub rows: Arc<Vec<Row>>,
@@ -1387,6 +1389,9 @@ impl<P: Publisher, I: Inspector, L: Launcher, S: Sampler> Core<P, I, L, S> {
             PipelineMode::Remux => &self.last_published.remux,
             PipelineMode::Extract => &self.last_published.extract,
         };
+        // The Choices come from the view and the ladder from the queue: one manifest's only while
+        // every queue change rebuilds its mode's view before this runs.
+        debug_assert_eq!(view.manifest_rev, state.queue.manifest_rev());
         let (at, row) = inspected_row(&view.rows, state.inspected.as_deref())?;
         let job_error = self
             .snapshot
@@ -1402,6 +1407,7 @@ impl<P: Publisher, I: Inspector, L: Launcher, S: Sampler> Core<P, I, L, S> {
             row,
             entry,
             job_error,
+            state.queue.release_subtitles(&row.release),
         ))
     }
 

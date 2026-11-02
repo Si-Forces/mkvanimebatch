@@ -79,6 +79,8 @@ fn mode_patch(prev: &ModeView, next: &ModeView) -> Result<Option<Value>> {
     changed(&mut patch, "directory", &prev.directory, directory)?;
     changed(&mut patch, "scan", &prev.scan, scan)?;
     changed(&mut patch, "manifest_rev", &prev.manifest_rev, manifest_rev)?;
+    // Shared by every view of one manifest, so `Arc<T: Eq>` equality compares no map but a new
+    // manifest's.
     changed(
         &mut patch,
         "subtitle_candidates",
@@ -158,6 +160,7 @@ mod tests {
     use mkv_desktop_core::inspector::inspector_view;
     use mkv_desktop_core::presentation::{
         chips, controls, empty_list, Bucket, Filters, Hold, LibraryEntry, Progress, Tone,
+        NO_SUBTITLES,
     };
     use mkv_desktop_core::queue::Row;
     use mkv_desktop_core::snapshot::{BatchStatus, ItemStatus};
@@ -259,6 +262,25 @@ mod tests {
         // A mode rebuilt into equal rows is still unchanged.
         same.remux.rows = Arc::new((*prev.remux.rows).clone());
         assert_eq!(patch(&prev, &same), json!({ "seq": 5, "base": 4 }));
+        // So are equal subtitle candidates another manifest shares; other ones go whole.
+        let candidates = |paths: &[&str]| {
+            let paths = paths.iter().map(|path| path.to_string()).collect();
+            Arc::new(std::collections::BTreeMap::from([(".".to_string(), paths)]))
+        };
+        let mut prev = prev;
+        prev.remux.subtitle_candidates = candidates(&["ep1.ass"]);
+        let mut same = next(&prev);
+        same.remux.subtitle_candidates = candidates(&["ep1.ass"]);
+        assert_eq!(patch(&prev, &same), json!({ "seq": 5, "base": 4 }));
+        same.remux.subtitle_candidates = candidates(&["ep2.ass"]);
+        assert_eq!(
+            patch(&prev, &same),
+            json!({
+                "seq": 5,
+                "base": 4,
+                "remux": { "subtitle_candidates": { ".": ["ep2.ass"] } },
+            })
+        );
     }
 
     #[test]
@@ -390,7 +412,7 @@ mod tests {
         let prev = state(1, &["ep1", "ep2"]);
         let mut picked = next(&prev);
         let view = &picked.remux;
-        let inspector = inspector_view(true, view, 1, &view.rows[1], None, None);
+        let inspector = inspector_view(true, view, 1, &view.rows[1], None, None, &NO_SUBTITLES);
         picked.remux.inspector = Some(inspector.clone());
         let hold = Hold {
             owner: Some(PipelineMode::Remux),
@@ -467,7 +489,15 @@ mod tests {
             group_label: "anime".into(),
         }];
         let view = &scanned.remux;
-        scanned.remux.inspector = Some(inspector_view(true, view, 0, &view.rows[0], None, None));
+        scanned.remux.inspector = Some(inspector_view(
+            true,
+            view,
+            0,
+            &view.rows[0],
+            None,
+            None,
+            &NO_SUBTITLES,
+        ));
         let mut starting = next(&scanned);
         starting.run.phase = Phase::Starting;
         starting.busy = true;

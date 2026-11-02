@@ -536,9 +536,7 @@ fn test_view_state_wire_shape() {
         ..empty(REMUX)
     };
     let row = serde_json::to_value(&remux.rows[0]).unwrap();
-    remux
-        .subtitle_candidates
-        .insert(".".into(), vec!["ep1.ass".into()]);
+    remux.subtitle_candidates = Arc::new(BTreeMap::from([(".".into(), vec!["ep1.ass".into()])]));
     remux.assignments.insert(
         "ep1".into(),
         TrackAssignment {
@@ -1325,6 +1323,40 @@ async fn test_a_publication_rebuilds_only_the_view_of_a_mode_that_changed() {
     assert_eq!(state.extract.draft.out_dir, "/out");
     assert_eq!(state.remux.rows[0].progress, Some(4.0));
     assert!(state.extract.rows.iter().all(|row| !row.participant));
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_a_jobs_publications_share_the_subtitle_candidates_of_their_manifest() {
+    let mut manifest = manifest_of(&["ep1", "ep2"]);
+    manifest.subtitle_candidates = BTreeMap::from([(".".into(), vec!["ep1.ass".into()])]);
+    let inspector = FakeInspector::default().with("/anime", manifest);
+    let publisher = RecordingPublisher::default();
+    let core = ready(publisher.clone(), inspector);
+    core.dispatch(scan(REMUX, "/anime", false)).await.unwrap();
+    let before = publisher.states().len();
+
+    let sink = core.job_sink();
+    sink.started(&started(1));
+    sink.event(&batch_start(&["ep1"]));
+    sink.event(&item_start("ep1"));
+    for step in 0..3 {
+        sink.event(&item_progress("ep1", f64::from(step)));
+        tokio::time::sleep(PUBLISH_INTERVAL * 2).await;
+    }
+
+    // Every publication rebuilt the remux view, yet none copied the candidates.
+    let states = publisher.states()[before - 1..].to_vec();
+    assert!(states.len() > 3, "{} publications", states.len());
+    let (first, last) = (&states[0].remux, &states[states.len() - 1].remux);
+    assert!(!Arc::ptr_eq(&first.rows, &last.rows));
+    assert!(states.windows(2).all(|pair| Arc::ptr_eq(
+        &pair[0].remux.subtitle_candidates,
+        &pair[1].remux.subtitle_candidates
+    )));
+    assert_eq!(last.subtitle_candidates["."], ["ep1.ass"]);
+    // The inspector reads the queue's summary of the release.
+    let same = &last.inspector.as_ref().unwrap().ladder[1];
+    assert_eq!((same.key, same.detail.as_str()), ("same", "ep1.ass"));
 }
 
 #[tokio::test(start_paused = true)]
