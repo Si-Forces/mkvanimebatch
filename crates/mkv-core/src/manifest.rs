@@ -12,7 +12,7 @@ use crate::inspect::inspect_videos;
 use crate::item_id::{get_item_id, ItemId};
 use crate::request::resolve_selected_items;
 use crate::scan::{
-    scan_assets, scan_mkv_files, InspectedVideo, ParsedFile, PersistentInspectCache, ScanCache,
+    list_subtitle_files, scan_mkv_files, InspectedVideo, ParsedFile, PersistentInspectCache,
 };
 
 pub const MANIFEST_VERSION: u64 = 2;
@@ -306,17 +306,14 @@ fn list_subtitles_by_dir(
     input_dir: &Path,
     cancel_token: Option<&CancellationToken>,
 ) -> Option<HashMap<PathBuf, Vec<String>>> {
-    let mut scan_cache = ScanCache::default();
     let mut subs_by_dir = HashMap::new();
     for directory in directories {
         if is_cancelled(cancel_token) {
             return None;
         }
-        let assets = scan_assets(directory, Some(&mut scan_cache));
-        let ids: Vec<String> = assets
-            .subs
+        let ids: Vec<String> = list_subtitle_files(directory)
             .iter()
-            .map(|s| get_item_id(&s.path, input_dir))
+            .map(|path| get_item_id(path, input_dir))
             .collect();
         if !ids.is_empty() {
             subs_by_dir.insert(directory.clone(), ids);

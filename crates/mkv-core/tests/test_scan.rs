@@ -424,7 +424,7 @@ fn test_scan_assets_grouping() {
 }
 
 /// A directory reached through a second spelling gets the first spelling's results back, so
-/// asset paths, and the subtitle IDs derived from them, keep that spelling.
+/// asset paths keep that spelling.
 #[cfg(unix)]
 #[test]
 fn test_scan_assets_cache_keeps_first_spelling() {
