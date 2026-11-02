@@ -444,6 +444,44 @@ fn is_file_entry(file_type: std::fs::FileType, path: &Path) -> bool {
     file_type.is_file() || (file_type.is_symlink() && path.is_file())
 }
 
+/// The files directly in `dir` (regular files, or symlinks to one) whose name is valid UTF-8,
+/// each with its [`path_ext_lower`] extension, in `read_dir` order. An unreadable directory
+/// yields nothing, and an unreadable entry is skipped.
+fn dir_files(dir: &Path) -> impl Iterator<Item = (PathBuf, String)> {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            let file_type = entry.file_type().ok()?;
+            if !is_file_entry(file_type, &path) || path.file_name()?.to_str().is_none() {
+                return None;
+            }
+            let ext = path_ext_lower(&path);
+            Some((path, ext))
+        })
+}
+
+fn is_subtitle_ext(ext: &str) -> bool {
+    ext == ".ass" || ext == ".srt"
+}
+
+/// The subtitle files (`.ass`, `.srt`) directly in `dir`, sorted with the same key as
+/// [`scan_assets`]' `subs`. Unlike `scan_assets`, it opens no file, classifies no chapter XML
+/// or cover, and parses no episode.
+pub(crate) fn list_subtitle_files(dir: &Path) -> Vec<PathBuf> {
+    let mut subs: Vec<PathBuf> = dir_files(dir)
+        .filter(|(_, ext)| is_subtitle_ext(ext))
+        .map(|(path, _)| path)
+        .collect();
+    // The same key as `scan_assets`' sort: `ParsedFile::name` is the lossy file name.
+    subs.sort_by_cached_key(|path| {
+        natural_sort_key(&path.file_name().unwrap_or_default().to_string_lossy())
+    });
+    subs
+}
+
 /// Scans directory entries, grouping files into subs (.ass, .srt), chapters (.xml verified
 /// via `is_chapter_xml`), and cover images applicable to the directory's videos (.mkv).
 pub fn scan_assets(dir: &Path, mut cache: Option<&mut ScanCache>) -> Arc<ScanResults> {
@@ -460,31 +498,17 @@ pub fn scan_assets(dir: &Path, mut cache: Option<&mut ScanCache>) -> Arc<ScanRes
     let mut covers = Vec::new();
     let mut cover_candidates = Vec::new();
 
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if !is_file_entry(file_type, &path) {
-                continue;
+    for (path, ext) in dir_files(dir) {
+        if ext == ".mkv" {
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                video_stems.insert(stem.to_owned());
             }
-            if path.file_name().and_then(|s| s.to_str()).is_none() {
-                continue;
-            }
-            let ext = path_ext_lower(&path);
-
-            if ext == ".mkv" {
-                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    video_stems.insert(stem.to_owned());
-                }
-            } else if ext == ".ass" || ext == ".srt" {
-                subs.push(create_parsed_file(&path));
-            } else if ext == ".xml" && is_chapter_xml(&path) {
-                chapters.push(create_parsed_file(&path));
-            } else if COVER_EXTENSIONS.contains(&ext.as_str()) {
-                cover_candidates.push(path);
-            }
+        } else if is_subtitle_ext(&ext) {
+            subs.push(create_parsed_file(&path));
+        } else if ext == ".xml" && is_chapter_xml(&path) {
+            chapters.push(create_parsed_file(&path));
+        } else if COVER_EXTENSIONS.contains(&ext.as_str()) {
+            cover_candidates.push(path);
         }
     }
     for path in cover_candidates {
@@ -954,6 +978,44 @@ impl Default for PersistentInspectCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_list_subtitle_files_matches_scan_assets_subs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        for name in [
+            "ep10.ass",
+            "ep2.ass",
+            "Ep3.ASS",
+            "ep1.srt",
+            "ep1.ass",
+            "ep1.mkv",
+            "cover.jpg",
+            "notes.txt",
+        ] {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+        std::fs::write(dir.join("chapters.xml"), b"<?xml?><Chapters>").unwrap();
+        std::fs::create_dir(dir.join("sub.ass")).unwrap();
+
+        let scanned = scan_assets(dir, None);
+        assert_eq!(scanned.chapters.len(), 1);
+        assert_eq!(scanned.covers.len(), 1);
+        let expected: Vec<PathBuf> = scanned.subs.iter().map(|s| s.path.clone()).collect();
+
+        let listed = list_subtitle_files(dir);
+        assert_eq!(listed, expected);
+        // The equality above is circular (both use `dir_files` and `is_subtitle_ext`), so the
+        // names are pinned too. No two tie in the sort, so the order does not hang on `read_dir`.
+        let names: Vec<_> = listed
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            ["ep1.ass", "ep1.srt", "ep2.ass", "Ep3.ASS", "ep10.ass"]
+        );
+    }
 
     #[test]
     fn test_json_messages_reads_the_document_arrays() {
