@@ -578,7 +578,7 @@ fn test_two_ambiguous_chapters_remain_unclaimed() {
         fs::write(tmp.path().join(name), CHAPTER_XML).unwrap();
     }
     let resolver = discover(&[tmp.path().to_path_buf()], None);
-    assert_eq!(resolver.chap_index.unmatched().len(), 2);
+    assert_eq!(resolver.chap_index.unmatched().count(), 2);
     assert!(claim_leftover_chapters(&videos, &HashMap::new(), &resolver).is_empty());
 }
 
@@ -741,8 +741,8 @@ fn test_release_preparer_resolves_each_release_directory_from_shared_ancestor_su
     fs::write(&ep_s1, b"vid1").unwrap();
     fs::write(&ep_s2, b"vid2").unwrap();
 
-    // One preparer serves both seasons, so the second reuses the root subtitles' classification.
-    // The cache itself is asserted in the `assets` unit tests.
+    // One preparer serves both seasons, so the second reuses the root's index. The sharing itself
+    // is asserted in the `assets` unit tests.
     let mut preparer = ReleasePreparer::default();
 
     let prepared1 = preparer.prepare(&season1, &root, None, None);
@@ -774,8 +774,7 @@ fn test_release_preparer_discovers_unparsed_subtitles() {
     )
     .unwrap();
 
-    // They are not eagerly classified (the `assets` unit tests assert the cache stays empty),
-    // but they still count as discovered subtitles.
+    // They still count as discovered subtitles.
     let prepared = ReleasePreparer::default().prepare(&season, &root, None, None);
     assert!(prepared.resolver.has_subtitles());
 }
@@ -787,25 +786,26 @@ fn test_sub_classification_cache_preserves_resolution_identity() {
     let season = root.join("Season 01");
     fs::create_dir_all(&season).unwrap();
 
-    let sub_path = root.join("Show - 01.ass");
+    let sub_path = root.join("Show - 01.eng.ass");
     fs::write(&sub_path, b"[Script Info]\n").unwrap();
     let vid_path = season.join("Show - 01.mkv");
     fs::write(&vid_path, b"video").unwrap();
     let vid = create_parsed_file(&vid_path);
+    let search_dirs = ancestor_dirs(&season, &root);
 
-    let uncached = ReleasePreparer::default().prepare(&season, &root, None, None);
-    let uncached_res = uncached.resolver.resolve_for(&vid, None, None, None);
+    let uncached = discover(&search_dirs, None).resolve_for(&vid, None, None, None);
 
-    // A preparer that already prepared a sibling Release Directory holds the root subtitle's
-    // classification, so this run reads it from the cache.
-    let sibling = root.join("Season 02");
-    fs::create_dir_all(&sibling).unwrap();
-    let mut preparer = ReleasePreparer::default();
-    preparer.prepare(&sibling, &root, None, None);
-    let cached = preparer.prepare(&season, &root, None, None);
-    let cached_res = cached.resolver.resolve_for(&vid, None, None, None);
+    // A second discovery sharing the caches reads the root subtitle's classification from the
+    // cache.
+    let mut scan_cache = ScanCache::default();
+    let mut classifications = HashMap::new();
+    AssetResolver::discover(&search_dirs, None, &mut scan_cache, &mut classifications);
+    assert!(classifications.contains_key(&sub_path));
+    let cached = AssetResolver::discover(&search_dirs, None, &mut scan_cache, &mut classifications)
+        .resolve_for(&vid, None, None, None);
 
-    assert_eq!(uncached_res, cached_res);
+    assert_eq!(uncached.subtitle_lang, "eng");
+    assert_eq!(uncached, cached);
 }
 
 #[test]

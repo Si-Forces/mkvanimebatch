@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::domain::{
     ancestor_dirs, detect_sub_lang, is_dialogue_track, lang_label, lang_mkv_tag, natural_sort_key,
@@ -12,7 +13,6 @@ use crate::domain::{
 use crate::fonts::{find_fonts_dir, scan_fonts, FontInfo};
 use crate::scan::{
     path_ext_lower, scan_assets, InspectedVideo, InspectionResult, ParsedFile, ScanCache,
-    ScanResults,
 };
 
 fn ep_key(info: &EpisodeInfo) -> String {
@@ -29,15 +29,18 @@ pub struct PreparedRelease {
 
 /// Prepares the Release Directories of one batch: resolves each one's fonts directory and
 /// indexes its assets. Use one preparer per batch. Release Directories that share ancestors
-/// would re-scan and re-classify the same files, so the preparer caches those results. A result
-/// equals the one a fresh preparer would return, except that a directory reached through a
-/// second spelling keeps the path spelling of its first scan (see [`ScanCache`]).
+/// would re-scan and re-index the same files, so the preparer caches those results: each
+/// directory is indexed once, and every resolver that searches it shares that index. A
+/// result equals the one a fresh preparer would return, except that a directory reached through
+/// a second spelling keeps the path spelling of its first scan (see [`ScanCache`]).
 #[derive(Debug, Default)]
 pub struct ReleasePreparer {
     scan_cache: ScanCache,
     fonts_dir_cache: HashMap<PathBuf, PathBuf>,
     font_cache: HashMap<PathBuf, FontInfo>,
-    sub_classification_cache: HashMap<PathBuf, SubClassification>,
+    /// Each indexed directory's segments, keyed by the spelling the directory was reached by.
+    /// The contents come from the [`ScanCache`], so they follow its spelling rule.
+    dir_indices: HashMap<PathBuf, DirIndex>,
 }
 
 impl ReleasePreparer {
@@ -71,12 +74,14 @@ impl ReleasePreparer {
                     .unwrap_or_else(|| mkv_dir.join("fonts"))
             }
         };
-        let resolver = AssetResolver::discover(
-            &search_dirs,
-            assets_dir,
-            &mut self.scan_cache,
-            &mut self.sub_classification_cache,
-        );
+        let resolver = AssetResolver::from_dir_indices(&search_dirs, assets_dir, |dir| {
+            if let Some(hit) = self.dir_indices.get(dir) {
+                return hit.clone();
+            }
+            let built = DirIndex::build(dir, &mut self.scan_cache, None);
+            self.dir_indices.insert(dir.to_path_buf(), built.clone());
+            built
+        });
         PreparedRelease {
             fonts_dir,
             resolver,
@@ -99,9 +104,8 @@ struct SubEntry {
 
 /// Subtitle scoring fields derived purely from one file's stem and extension.
 ///
-/// Every release directory re-indexes the same shared ancestor assets, so these
-/// are derived once per file and memoized in a run-wide cache rather than
-/// recomputed for each (asset, release directory) pair.
+/// `AssetResolver::discover` callers that share one cache across calls derive them once per
+/// file. A `ReleasePreparer` keeps no such cache: it indexes each directory spelling once.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubClassification {
     pub lang: String,
@@ -131,12 +135,33 @@ fn file_name_of(path: &Path) -> String {
         .unwrap_or_default()
 }
 
+/// The segment `add` appends to: the last one, copied first when another index shares it, so
+/// a shared segment (a Release Preparer's indexed directory, or a clone's) is never written.
+fn owned_tail<T: Clone + Default>(segments: &mut Vec<Arc<T>>) -> &mut T {
+    if segments.is_empty() {
+        segments.push(Arc::default());
+    }
+    Arc::make_mut(
+        segments
+            .last_mut()
+            .expect("a tail segment was just ensured"),
+    )
+}
+
+/// One directory's subtitles (or, for an index built with `SubIndex::add`, every added one).
 #[derive(Debug, Clone, Default)]
-pub struct SubIndex {
+struct SubSegment {
     index: HashMap<String, Vec<SubEntry>>,
     index_paths: HashMap<String, HashSet<PathBuf>>,
     directories: Vec<PathBuf>,
     has_unparsed: bool,
+}
+
+/// Subtitles per episode key, as a list of segments in index order. Lookups read the segments
+/// as one sequence, so splitting the same files into segments never changes a result.
+#[derive(Debug, Clone, Default)]
+pub struct SubIndex {
+    segments: Vec<Arc<SubSegment>>,
 }
 
 impl SubIndex {
@@ -145,33 +170,17 @@ impl SubIndex {
     }
 
     pub fn add(&mut self, sub_file: ParsedFile) {
-        self.add_classified(sub_file, None);
+        owned_tail(&mut self.segments).add_classified(sub_file, None);
     }
 
-    /// Adds a subtitle, reusing `classification` from the run-wide memo when the caller
-    /// has one. Pass `None` to derive the classification on the spot.
-    fn add_classified(&mut self, sub_file: ParsedFile, classification: Option<SubClassification>) {
-        let Some(parsed) = &sub_file.parsed else {
-            self.has_unparsed = true;
-            return;
-        };
-
-        let key = ep_key(parsed);
-        let paths = self.index_paths.entry(key.clone()).or_default();
-        if paths.contains(&sub_file.path) {
-            return;
-        }
-        paths.insert(sub_file.path.clone());
-        if let Some(dir) = sub_file.path.parent() {
-            if !self.directories.iter().any(|existing| existing == dir) {
-                self.directories.push(dir.to_path_buf());
-            }
-        }
-        let classification = classification.unwrap_or_else(|| classify_sub(&sub_file));
-        self.index.entry(key).or_default().push(SubEntry {
-            file: sub_file,
-            classification,
-        });
+    /// The entries for `key` across every segment, in index order. A path indexed in two
+    /// segments (one directory indexed twice) appears twice; the later copy has a larger index
+    /// and an otherwise equal priority, so `lookup_ranked` never picks it.
+    fn entries<'a>(&'a self, key: &'a str) -> impl Iterator<Item = &'a SubEntry> {
+        self.segments
+            .iter()
+            .filter_map(move |segment| segment.index.get(key))
+            .flatten()
     }
 
     fn lookup_ranked(
@@ -179,9 +188,7 @@ impl SubIndex {
         parsed: &EpisodeInfo,
         rank: impl Fn(&Path) -> Option<usize>,
     ) -> Option<(PathBuf, String)> {
-        let entries = self.index.get(&ep_key(parsed))?;
-        entries
-            .iter()
+        self.entries(&ep_key(parsed))
             .enumerate()
             .filter_map(|(idx, entry)| {
                 let file_parsed = entry.file.parsed.as_ref()?;
@@ -218,26 +225,82 @@ impl SubIndex {
         })
     }
 
+    /// Ranks directories by first appearance in index order: the assets directory before its
+    /// parent.
     fn lookup_fallback(&self, parsed: &EpisodeInfo) -> Option<(PathBuf, String)> {
         self.lookup_ranked(parsed, |candidate| {
-            self.directories.iter().position(|dir| dir == candidate)
+            self.segments
+                .iter()
+                .flat_map(|segment| &segment.directories)
+                .position(|dir| dir == candidate)
         })
     }
 
     pub fn is_empty(&self) -> bool {
-        self.index.is_empty() && !self.has_unparsed
+        self.segments
+            .iter()
+            .all(|segment| segment.index.is_empty() && !segment.has_unparsed)
+    }
+}
+
+impl SubSegment {
+    /// Adds a subtitle, reusing `classification` from the caller's cache when it has one.
+    /// Pass `None` to derive it on the spot.
+    fn add_classified(&mut self, sub_file: ParsedFile, classification: Option<SubClassification>) {
+        let Some(parsed) = &sub_file.parsed else {
+            self.has_unparsed = true;
+            return;
+        };
+
+        let key = ep_key(parsed);
+        let paths = self.index_paths.entry(key.clone()).or_default();
+        if paths.contains(&sub_file.path) {
+            return;
+        }
+        paths.insert(sub_file.path.clone());
+        if let Some(dir) = sub_file.path.parent() {
+            if !self.directories.iter().any(|existing| existing == dir) {
+                self.directories.push(dir.to_path_buf());
+            }
+        }
+        let classification = classification.unwrap_or_else(|| classify_sub(&sub_file));
+        self.index.entry(key).or_default().push(SubEntry {
+            file: sub_file,
+            classification,
+        });
     }
 }
 
 // ─── CHAPTER INDEX ───────────────────────────────────────────────────────────
 
+/// One directory's chapter files (or, for an index built with `ChapterIndex::add`, every added
+/// one).
 #[derive(Debug, Clone, Default)]
-pub struct ChapterIndex {
-    /// Every chapter file per episode key with its season, in index order. The release-tree
-    /// index is filled nearest directory first; the `--assets-dir` index holds the assets
-    /// directory before its parent (scan order, not ancestor distance).
+struct ChapterSegment {
+    /// Every chapter file per episode key with its season, in add order.
     index: HashMap<String, Vec<(PathBuf, String)>>,
     unmatched: Vec<PathBuf>,
+}
+
+impl ChapterSegment {
+    fn add(&mut self, xml_file: &ParsedFile) {
+        if let Some(parsed) = &xml_file.parsed {
+            self.index
+                .entry(ep_key(parsed))
+                .or_default()
+                .push((xml_file.path.clone(), parsed.season.clone()));
+        } else {
+            self.unmatched.push(xml_file.path.clone());
+        }
+    }
+}
+
+/// Chapter files as a list of segments in index order. The release-tree index is filled
+/// nearest directory first; the `--assets-dir` index holds the assets directory before its
+/// parent (scan order, not ancestor distance). Lookups read the segments as one sequence.
+#[derive(Debug, Clone, Default)]
+pub struct ChapterIndex {
+    segments: Vec<Arc<ChapterSegment>>,
 }
 
 impl ChapterIndex {
@@ -253,14 +316,7 @@ impl ChapterIndex {
     /// `lookup_with_warning` takes the first compatible file's directory as the nearest one
     /// and does not dedupe.
     pub fn add(&mut self, xml_file: &ParsedFile) {
-        if let Some(parsed) = &xml_file.parsed {
-            self.index
-                .entry(ep_key(parsed))
-                .or_default()
-                .push((xml_file.path.clone(), parsed.season.clone()));
-        } else {
-            self.unmatched.push(xml_file.path.clone());
-        }
+        owned_tail(&mut self.segments).add(xml_file);
     }
 
     pub fn lookup(&self, parsed: &EpisodeInfo) -> Option<PathBuf> {
@@ -272,10 +328,12 @@ impl ChapterIndex {
     /// with a compatible file wins, then an exact season over an unknown one, then index order.
     /// A file of another known season is no candidate, so it is never named.
     fn lookup_with_warning(&self, parsed: &EpisodeInfo) -> Option<(PathBuf, Option<String>)> {
+        let key = ep_key(parsed);
         let compatible = self
-            .index
-            .get(&ep_key(parsed))?
+            .segments
             .iter()
+            .filter_map(|segment| segment.index.get(&key))
+            .flatten()
             .filter(|(_, season)| seasons_match(&parsed.season, season));
         // The first compatible file is in the nearest directory, so `beside` is never empty.
         let dir = compatible.clone().next()?.0.parent();
@@ -302,9 +360,11 @@ impl ChapterIndex {
         Some((chosen.0.clone(), warning))
     }
 
-    /// Chapter files whose names carry no episode number.
-    pub fn unmatched(&self) -> &[PathBuf] {
-        &self.unmatched
+    /// Chapter files whose names carry no episode number, in index order.
+    pub fn unmatched(&self) -> impl Iterator<Item = &Path> {
+        self.segments
+            .iter()
+            .flat_map(|segment| segment.unmatched.iter().map(PathBuf::as_path))
     }
 }
 
@@ -329,8 +389,7 @@ struct CoverEntry {
 
 /// Orders covers by `(directory rank, open)`, then by kind, name and path. An open cover (an
 /// episode cover with a non-exact season, or any other kind) ranks after an exact one in the
-/// same directory. In `CoverIndex::add`, the `directory_winner` comparison passes only directory
-/// covers, which are always open (the constant `true` in `(rank, true)`).
+/// same directory. Two covers compare equal only when they share a path.
 fn compare_ranked_covers(
     a_rank: (usize, bool),
     a: &CoverEntry,
@@ -344,24 +403,21 @@ fn compare_ranked_covers(
         .then_with(|| a.file.path.cmp(&b.file.path))
 }
 
+/// One directory's covers (or, for an index built with `CoverIndex::add`, every added one).
+/// The `*_entries` maps hold indices into `entries`.
 #[derive(Debug, Clone, Default)]
-pub struct CoverIndex {
+struct CoverSegment {
     entries: Vec<CoverEntry>,
     paths: HashSet<PathBuf>,
+    /// Each directory's rank within this segment, by first appearance.
     directory_ranks: HashMap<PathBuf, usize>,
     episode_entries: HashMap<EpisodeType, HashMap<String, HashMap<PathBuf, Vec<usize>>>>,
     adjacent_entries: HashMap<PathBuf, HashMap<String, Vec<usize>>>,
     directory_entries: HashMap<PathBuf, Vec<usize>>,
-    /// (rank, entry index) of the best directory cover.
-    directory_winner: Option<(usize, usize)>,
 }
 
-impl CoverIndex {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn add(&mut self, image_file: ParsedFile) {
+impl CoverSegment {
+    fn add(&mut self, image_file: ParsedFile) {
         let ext = path_ext_lower(&image_file.path);
         if !COVER_EXTENSIONS.contains(&ext.as_str()) || !self.paths.insert(image_file.path.clone())
         {
@@ -391,11 +447,10 @@ impl CoverIndex {
         };
 
         let entry_index = self.entries.len();
-        let mut directory_rank = None;
         if let Some(dir) = image_file.path.parent() {
             let dir = dir.to_path_buf();
             let next_rank = self.directory_ranks.len();
-            directory_rank = Some(*self.directory_ranks.entry(dir.clone()).or_insert(next_rank));
+            self.directory_ranks.entry(dir.clone()).or_insert(next_rank);
             match kind {
                 CoverKind::Underscore | CoverKind::Dot => {
                     if let Some(episode) = &episode {
@@ -404,7 +459,7 @@ impl CoverIndex {
                             .or_default()
                             .entry(episode.ep.clone())
                             .or_default()
-                            .entry(dir.clone())
+                            .entry(dir)
                             .or_default()
                             .push(entry_index);
                     }
@@ -431,32 +486,44 @@ impl CoverIndex {
             episode,
             kind,
         });
-        if matches!(kind, CoverKind::Cover | CoverKind::Folder) {
-            if let Some(rank) = directory_rank {
-                let candidate = &self.entries[entry_index];
-                let is_best = self.directory_winner.is_none_or(|(best_rank, best_index)| {
-                    compare_ranked_covers(
-                        (rank, true),
-                        candidate,
-                        (best_rank, true),
-                        &self.entries[best_index],
-                    ) == std::cmp::Ordering::Less
-                });
-                if is_best {
-                    self.directory_winner = Some((rank, entry_index));
-                }
-            }
-        }
+    }
+}
+
+/// Covers as a list of segments in index order. The ranking is a total order up to a shared
+/// path, so the order candidates are gathered in never changes a lookup.
+#[derive(Debug, Clone, Default)]
+pub struct CoverIndex {
+    segments: Vec<Arc<CoverSegment>>,
+}
+
+impl CoverIndex {
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    fn lookup_ranked(
-        &self,
+    pub fn add(&mut self, image_file: ParsedFile) {
+        owned_tail(&mut self.segments).add(image_file);
+    }
+
+    /// `dir`'s rank by first appearance in index order: its rank in the first segment that
+    /// holds it, after every directory of the segments before.
+    fn directory_rank(&self, dir: &Path) -> Option<usize> {
+        let mut offset = 0;
+        for segment in &self.segments {
+            if let Some(rank) = segment.directory_ranks.get(dir) {
+                return Some(offset + rank);
+            }
+            offset += segment.directory_ranks.len();
+        }
+        None
+    }
+
+    fn lookup_ranked<'a>(
         video: &ParsedFile,
-        candidates: impl Iterator<Item = (usize, usize)>,
+        candidates: impl Iterator<Item = (&'a CoverEntry, usize)>,
     ) -> Option<PathBuf> {
         candidates
-            .filter_map(|(index, distance)| {
-                let entry = &self.entries[index];
+            .filter_map(|(entry, distance)| {
                 // Only episode covers carry a season; every other kind counts as open.
                 let mut open = true;
                 if matches!(entry.kind, CoverKind::Underscore | CoverKind::Dot) {
@@ -475,67 +542,68 @@ impl CoverIndex {
     pub fn lookup(&self, video: &ParsedFile) -> Option<PathBuf> {
         let parent = video.path.parent()?;
         let parsed = video.parsed.as_ref();
-        let directory_candidates = parent
-            .ancestors()
-            .enumerate()
-            .flat_map(|(distance, dir)| {
-                let episodes = parsed.and_then(|parsed| {
-                    self.episode_entries
-                        .get(&parsed.ep_type)?
-                        .get(&parsed.ep)?
-                        .get(dir)
-                });
-                let covers = self.directory_entries.get(dir);
-                episodes
-                    .into_iter()
-                    .flat_map(move |indices| {
-                        indices.iter().copied().map(move |index| (index, distance))
+        let directory_candidates =
+            parent
+                .ancestors()
+                .enumerate()
+                .flat_map(move |(distance, dir)| {
+                    self.segments.iter().flat_map(move |segment| {
+                        let episodes = parsed.and_then(|parsed| {
+                            segment
+                                .episode_entries
+                                .get(&parsed.ep_type)?
+                                .get(&parsed.ep)?
+                                .get(dir)
+                        });
+                        let covers = segment.directory_entries.get(dir);
+                        episodes
+                            .into_iter()
+                            .chain(covers)
+                            .flatten()
+                            .map(move |&index| (&segment.entries[index], distance))
                     })
-                    .chain(covers.into_iter().flat_map(move |indices| {
-                        indices.iter().copied().map(move |index| (index, distance))
-                    }))
-            })
-            .chain(
-                self.adjacent_entries
-                    .get(parent)
-                    .and_then(|entries| entries.get(video.stem.as_str()))
-                    .into_iter()
-                    .flat_map(|indices| indices.iter().copied().map(|index| (index, 0))),
-            );
-        self.lookup_ranked(video, directory_candidates)
+                });
+        let adjacent_candidates = self.segments.iter().flat_map(|segment| {
+            segment
+                .adjacent_entries
+                .get(parent)
+                .and_then(|entries| entries.get(video.stem.as_str()))
+                .into_iter()
+                .flatten()
+                .map(move |&index| (&segment.entries[index], 0))
+        });
+        Self::lookup_ranked(video, directory_candidates.chain(adjacent_candidates))
     }
 
+    /// Ranks covers by directory rank. Every directory cover is a candidate: the best of them
+    /// is the directory cover any video may take, and the others never beat it.
     fn lookup_fallback(&self, video: &ParsedFile) -> Option<PathBuf> {
-        let episode_candidates = video
-            .parsed
-            .as_ref()
-            .and_then(|parsed| {
-                self.episode_entries
-                    .get(&parsed.ep_type)
-                    .and_then(|entries| entries.get(&parsed.ep))
+        let parsed = video.parsed.as_ref();
+        let parent = video.path.parent();
+        let candidates = self
+            .segments
+            .iter()
+            .flat_map(move |segment| {
+                let episodes = parsed
+                    .and_then(|parsed| {
+                        segment
+                            .episode_entries
+                            .get(&parsed.ep_type)?
+                            .get(&parsed.ep)
+                    })
+                    .into_iter()
+                    .flat_map(|by_dir| by_dir.values());
+                let adjacent = parent
+                    .and_then(|dir| segment.adjacent_entries.get(dir))
+                    .and_then(|entries| entries.get(video.stem.as_str()));
+                episodes
+                    .chain(adjacent)
+                    .chain(segment.directory_entries.values())
+                    .flatten()
+                    .map(move |&index| &segment.entries[index])
             })
-            .into_iter()
-            .flat_map(|entries| entries.values())
-            .flat_map(|indices| indices.iter().copied());
-        let adjacent_candidates = video
-            .path
-            .parent()
-            .and_then(|dir| self.adjacent_entries.get(dir))
-            .and_then(|entries| entries.get(video.stem.as_str()))
-            .into_iter()
-            .flat_map(|indices| indices.iter().copied());
-        let candidates = episode_candidates
-            .chain(adjacent_candidates)
-            .filter_map(|index| {
-                let entry = &self.entries[index];
-                self.directory_ranks
-                    .get(entry.file.path.parent()?)
-                    .copied()
-                    .map(|rank| (index, rank))
-            })
-            // `directory_winner` is (rank, index); the candidates are (index, distance).
-            .chain(self.directory_winner.map(|(rank, index)| (index, rank)));
-        self.lookup_ranked(video, candidates)
+            .filter_map(|entry| Some((entry, self.directory_rank(entry.file.path.parent()?)?)));
+        Self::lookup_ranked(video, candidates)
     }
 }
 
@@ -606,30 +674,59 @@ impl SubResolution {
     }
 }
 
-fn populate_indices(
-    assets: &ScanResults,
-    sub_index: &mut SubIndex,
-    chap_index: &mut ChapterIndex,
-    cover_index: &mut CoverIndex,
-    sub_classification_cache: &mut HashMap<PathBuf, SubClassification>,
-) {
-    for sub in &assets.subs {
-        let classification = sub.parsed.is_some().then(|| {
-            if let Some(hit) = sub_classification_cache.get(&sub.path) {
-                hit.clone()
-            } else {
-                let fresh = classify_sub(sub);
-                sub_classification_cache.insert(sub.path.clone(), fresh.clone());
-                fresh
-            }
-        });
-        sub_index.add_classified(sub.clone(), classification);
+/// One directory's subtitle, chapter and cover segments. Immutable once built, so every resolver
+/// whose search or fallback directories include the directory can share them.
+#[derive(Debug, Clone)]
+struct DirIndex {
+    subs: Arc<SubSegment>,
+    chapters: Arc<ChapterSegment>,
+    covers: Arc<CoverSegment>,
+}
+
+impl DirIndex {
+    /// Indexes the assets `scan_assets` finds directly in `dir`, in scan order, reading and
+    /// filling `sub_classification_cache` when given one.
+    fn build(
+        dir: &Path,
+        scan_cache: &mut ScanCache,
+        mut sub_classification_cache: Option<&mut HashMap<PathBuf, SubClassification>>,
+    ) -> Self {
+        let assets = scan_assets(dir, Some(scan_cache));
+        let mut subs = SubSegment::default();
+        for sub in &assets.subs {
+            let classification = match sub_classification_cache.as_deref_mut() {
+                Some(cache) if sub.parsed.is_some() => Some(match cache.get(&sub.path) {
+                    Some(hit) => hit.clone(),
+                    None => {
+                        let fresh = classify_sub(sub);
+                        cache.insert(sub.path.clone(), fresh.clone());
+                        fresh
+                    }
+                }),
+                _ => None,
+            };
+            subs.add_classified(sub.clone(), classification);
+        }
+        let mut chapters = ChapterSegment::default();
+        for chap in &assets.chapters {
+            chapters.add(chap);
+        }
+        let mut covers = CoverSegment::default();
+        for cov in &assets.covers {
+            covers.add(cov.clone());
+        }
+        Self {
+            subs: Arc::new(subs),
+            chapters: Arc::new(chapters),
+            covers: Arc::new(covers),
+        }
     }
-    for chap in &assets.chapters {
-        chap_index.add(chap);
-    }
-    for cov in &assets.covers {
-        cover_index.add(cov.clone());
+
+    /// Appends this directory's segments after the ones already in the indices.
+    fn append_to(self, subs: &mut SubIndex, chapters: &mut ChapterIndex, covers: &mut CoverIndex) {
+        subs.segments.push(self.subs);
+        chapters.segments.push(self.chapters);
+        covers.segments.push(self.covers);
     }
 }
 
@@ -654,25 +751,31 @@ impl AssetResolver {
 
     /// Indexes the assets of `search_dirs` (ordered root first, indexed deepest first) and,
     /// when given, of `assets_dir` and its parent as the fallback indices. Directory-level
-    /// font resolution is owned by `ReleasePreparer`.
+    /// font resolution is owned by `ReleasePreparer`, which also shares each directory's index
+    /// across the resolvers of a batch; this builds every directory's index afresh.
     pub fn discover(
         search_dirs: &[PathBuf],
         assets_dir: Option<&Path>,
         scan_cache: &mut ScanCache,
         sub_classification_cache: &mut HashMap<PathBuf, SubClassification>,
     ) -> Self {
+        Self::from_dir_indices(search_dirs, assets_dir, |dir| {
+            DirIndex::build(dir, scan_cache, Some(&mut *sub_classification_cache))
+        })
+    }
+
+    /// [`Self::discover`] with each directory's index taken from `index_dir`.
+    fn from_dir_indices(
+        search_dirs: &[PathBuf],
+        assets_dir: Option<&Path>,
+        mut index_dir: impl FnMut(&Path) -> DirIndex,
+    ) -> Self {
         let mut sub_index = SubIndex::new();
         let mut chap_index = ChapterIndex::new();
         let mut cover_index = CoverIndex::new();
 
         for d in search_dirs.iter().rev() {
-            populate_indices(
-                &scan_assets(d, Some(&mut *scan_cache)),
-                &mut sub_index,
-                &mut chap_index,
-                &mut cover_index,
-                sub_classification_cache,
-            );
+            index_dir(d).append_to(&mut sub_index, &mut chap_index, &mut cover_index);
         }
 
         let mut fallback_sub_index = None;
@@ -684,21 +787,11 @@ impl AssetResolver {
             let mut fb_chap = ChapterIndex::new();
             let mut fb_cov = CoverIndex::new();
 
-            let mut fallback_dirs = vec![assets.to_path_buf()];
-            if let Some(parent) = assets.parent() {
-                if parent != assets && parent.is_dir() {
-                    fallback_dirs.push(parent.to_path_buf());
-                }
-            }
-
-            for fb_dir in fallback_dirs {
-                populate_indices(
-                    &scan_assets(&fb_dir, Some(&mut *scan_cache)),
-                    &mut fb_sub,
-                    &mut fb_chap,
-                    &mut fb_cov,
-                    sub_classification_cache,
-                );
+            let parent = assets
+                .parent()
+                .filter(|&parent| parent != assets && parent.is_dir());
+            for fb_dir in std::iter::once(assets).chain(parent) {
+                index_dir(fb_dir).append_to(&mut fb_sub, &mut fb_chap, &mut fb_cov);
             }
 
             fallback_sub_index = Some(fb_sub);
@@ -858,7 +951,8 @@ pub fn claim_leftover_chapters(
     inspection_results: &HashMap<PathBuf, InspectionResult>,
     resolver: &AssetResolver,
 ) -> HashMap<PathBuf, PathBuf> {
-    let [sole_chapter] = resolver.chap_index.unmatched() else {
+    let mut unmatched = resolver.chap_index.unmatched();
+    let (Some(sole_chapter), None) = (unmatched.next(), unmatched.next()) else {
         return HashMap::new();
     };
 
@@ -874,7 +968,7 @@ pub fn claim_leftover_chapters(
     });
 
     match (candidates.next(), candidates.next()) {
-        (Some(video), None) => HashMap::from([(video.path.clone(), sole_chapter.clone())]),
+        (Some(video), None) => HashMap::from([(video.path.clone(), sole_chapter.to_path_buf())]),
         _ => HashMap::new(),
     }
 }
@@ -884,40 +978,12 @@ mod tests {
     use std::fs;
 
     use super::*;
+    use crate::scan::create_parsed_file;
 
     #[test]
-    fn test_preparer_classifies_shared_ancestor_subtitles_once() {
+    fn test_discover_does_not_classify_unparsed_subtitles() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("Anime");
-        let season1 = root.join("Season 01");
-        let season2 = root.join("Season 02");
-        for dir in [&season1, &season2] {
-            fs::create_dir_all(dir).unwrap();
-        }
-        let sub_s1 = root.join("Show - S01E01.ind.ass");
-        let sub_s2 = root.join("Show - S02E01.eng.ass");
-        for sub in [&sub_s1, &sub_s2] {
-            fs::write(sub, b"[Script Info]\n").unwrap();
-        }
-
-        let mut preparer = ReleasePreparer::default();
-        preparer.prepare(&season1, &root, None, None);
-
-        // The first Release Directory classified both subtitles of the shared root.
-        assert_eq!(preparer.sub_classification_cache[&sub_s1].lang, "ind");
-        assert_eq!(preparer.sub_classification_cache[&sub_s2].lang, "eng");
-        let classified = preparer.sub_classification_cache.clone();
-
-        // The sibling has no subtitles of its own, so it adds nothing and drops nothing.
-        preparer.prepare(&season2, &root, None, None);
-        assert_eq!(preparer.sub_classification_cache, classified);
-    }
-
-    #[test]
-    fn test_preparer_does_not_classify_unparsed_subtitles() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("Anime");
-        let season = root.join("Season 01");
+        let season = tmp.path().join("Season 01");
         fs::create_dir_all(&season).unwrap();
         fs::write(season.join("credits_roll.ass"), b"[Script Info]\n").unwrap();
         fs::write(
@@ -926,11 +992,324 @@ mod tests {
         )
         .unwrap();
 
-        let mut preparer = ReleasePreparer::default();
-        let prepared = preparer.prepare(&season, &root, None, None);
+        let mut cache = HashMap::new();
+        let resolver = AssetResolver::discover(
+            std::slice::from_ref(&season),
+            None,
+            &mut ScanCache::default(),
+            &mut cache,
+        );
 
         // Unparsed subtitles are not eagerly classified, but they still count as discovered.
-        assert!(preparer.sub_classification_cache.is_empty());
-        assert!(prepared.resolver.has_subtitles());
+        assert!(cache.is_empty());
+        assert!(resolver.has_subtitles());
+    }
+
+    #[test]
+    fn test_adding_to_a_clone_leaves_the_original_index_alone() {
+        let dir = Path::new("/anime");
+        let file = |name: &str| create_parsed_file(dir.join(name));
+        let episode = file("Show - 01.mkv");
+        let parsed = episode.parsed.clone().unwrap();
+
+        let mut subs = SubIndex::new();
+        subs.add(file("Show - 01.ass"));
+        let mut chapters = ChapterIndex::new();
+        chapters.add(&file("Show - 01.xml"));
+        let mut covers = CoverIndex::new();
+        covers.add(file("cover.jpg"));
+        let (sub_before, chapter_before, cover_before) = (
+            subs.lookup_same_dir(&parsed, dir),
+            chapters.lookup_with_warning(&parsed),
+            covers.lookup_fallback(&episode),
+        );
+
+        let (mut more_subs, mut more_chapters, mut more_covers) =
+            (subs.clone(), chapters.clone(), covers.clone());
+        more_subs.add(file("Show - 01.ind.ass"));
+        more_chapters.add(&file("Show - 01.alt.xml"));
+        more_covers.add(file("Show - 01_cover.jpg"));
+
+        // The originals still answer as before.
+        assert_eq!(subs.lookup_same_dir(&parsed, dir), sub_before);
+        assert_eq!(chapters.lookup_with_warning(&parsed), chapter_before);
+        assert_eq!(covers.lookup_fallback(&episode), cover_before);
+        // The clones answer like one index built with every add.
+        let mut all_subs = SubIndex::new();
+        all_subs.add(file("Show - 01.ass"));
+        all_subs.add(file("Show - 01.ind.ass"));
+        let mut all_chapters = ChapterIndex::new();
+        all_chapters.add(&file("Show - 01.xml"));
+        all_chapters.add(&file("Show - 01.alt.xml"));
+        let mut all_covers = CoverIndex::new();
+        all_covers.add(file("cover.jpg"));
+        all_covers.add(file("Show - 01_cover.jpg"));
+        assert_eq!(
+            more_subs.lookup_same_dir(&parsed, dir),
+            all_subs.lookup_same_dir(&parsed, dir)
+        );
+        assert_eq!(
+            more_chapters.lookup_with_warning(&parsed),
+            all_chapters.lookup_with_warning(&parsed)
+        );
+        assert_eq!(
+            more_covers.lookup_fallback(&episode),
+            all_covers.lookup_fallback(&episode)
+        );
+        // Not vacuous: each add changed its clone's answer.
+        assert!(more_chapters
+            .lookup_with_warning(&parsed)
+            .unwrap()
+            .1
+            .is_some());
+        assert_eq!(
+            more_covers.lookup_fallback(&episode),
+            Some(dir.join("Show - 01_cover.jpg"))
+        );
+        assert_ne!(more_subs.lookup_same_dir(&parsed, dir), sub_before);
+    }
+
+    /// A library root and an assets directory shared by two seasons, with ties inside and
+    /// across directories. Returns (root, season 1, season 2, assets directory).
+    fn shared_asset_tree(base: &Path) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+        let root = base.join("Anime");
+        let season1 = root.join("Season 01");
+        let season2 = root.join("Season 02");
+        let assets = base.join("assets").join("Season 01");
+        for dir in [&season1, &season2, &assets] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        let chapter_xml =
+            b"<?xml version='1.0'?><Chapters><EditionEntry></EditionEntry></Chapters>";
+        let files: [(&Path, &[&str]); 4] = [
+            (
+                &root,
+                &[
+                    "Show - 01.ass",
+                    "Show - 01.eng.ass",
+                    "Show - S01E01.eng.ass",
+                    "Show - S02E01.ind.ass",
+                    "Show - 02.xml",
+                    "Show - S01E02.xml",
+                    "chapters.xml",
+                    "cover.jpg",
+                    "folder.png",
+                    "Show - 01_cover.jpg",
+                    "Show - 02_cover.jpg",
+                ],
+            ),
+            (
+                &season1,
+                &[
+                    "Show - S01E01.mkv",
+                    "Show - S01E02.mkv",
+                    "Show - 03.mkv",
+                    "Show - S01E04.mkv",
+                    "Show - 02.ind.ass",
+                    "Show - 01.xml",
+                    "Show - 03.png",
+                    "Show - 02.cover.jpg",
+                ],
+            ),
+            (
+                &assets,
+                &[
+                    "Show - 03.eng.ass",
+                    "Show - 04.xml",
+                    "Show - S01E04.xml",
+                    "Show - 04_cover.jpg",
+                    "folder.jpg",
+                ],
+            ),
+            (
+                assets.parent().unwrap(),
+                &[
+                    "Show - 03.ind.ass",
+                    "Show - 04.ass",
+                    "folder.jpg",
+                    "cover.png",
+                ],
+            ),
+        ];
+        for (dir, names) in files {
+            for name in names {
+                let path = dir.join(name);
+                let body: &[u8] = if name.ends_with(".xml") {
+                    chapter_xml
+                } else {
+                    b"x"
+                };
+                fs::write(path, body).unwrap();
+            }
+        }
+        (root, season1, season2, assets)
+    }
+
+    /// Whether two indices hold the very same segments, in the same order.
+    fn same_segments<T>(a: &[Arc<T>], b: &[Arc<T>]) -> bool {
+        a.len() == b.len() && a.iter().zip(b).all(|(x, y)| Arc::ptr_eq(x, y))
+    }
+
+    #[test]
+    fn test_preparer_shares_each_directory_index_across_releases() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, season1, season2, assets) = shared_asset_tree(tmp.path());
+
+        let mut preparer = ReleasePreparer::default();
+        let first = preparer
+            .prepare(&season1, &root, None, Some(&assets))
+            .resolver;
+        let second = preparer
+            .prepare(&season2, &root, None, Some(&assets))
+            .resolver;
+
+        // The release tree is indexed deepest first, so the shared root is the last segment.
+        let root_segments = |resolver: &AssetResolver| {
+            (
+                resolver.sub_index.segments.last().map(Arc::as_ptr),
+                resolver.chap_index.segments.last().map(Arc::as_ptr),
+                resolver.cover_index.segments.last().map(Arc::as_ptr),
+            )
+        };
+        assert_eq!(root_segments(&first), root_segments(&second));
+        // Both releases resolve the same assets directory, so they share its fallback index too.
+        let (a, b) = (&first, &second);
+        assert_eq!(a.fallback_sub_index.as_ref().unwrap().segments.len(), 2);
+        assert!(same_segments(
+            &a.fallback_sub_index.as_ref().unwrap().segments,
+            &b.fallback_sub_index.as_ref().unwrap().segments
+        ));
+        assert!(same_segments(
+            &a.fallback_chap_index.as_ref().unwrap().segments,
+            &b.fallback_chap_index.as_ref().unwrap().segments
+        ));
+        assert!(same_segments(
+            &a.fallback_cover_index.as_ref().unwrap().segments,
+            &b.fallback_cover_index.as_ref().unwrap().segments
+        ));
+    }
+
+    /// Every lookup of one episode, for comparing two resolvers.
+    #[derive(Debug, PartialEq)]
+    struct Lookups {
+        resolved: ResolvedAssets,
+        ancestor_sub: Option<(PathBuf, String)>,
+        fallback_sub: Option<(PathBuf, String)>,
+        chapter: Option<(PathBuf, Option<String>)>,
+        fallback_chapter: Option<(PathBuf, Option<String>)>,
+        fallback_cover: Option<PathBuf>,
+    }
+
+    #[test]
+    fn test_shared_segments_resolve_like_one_index_built_by_add() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, season1, season2, assets) = shared_asset_tree(tmp.path());
+
+        // Season 2 goes first, so season 1 reads the root through a shared segment.
+        let mut preparer = ReleasePreparer::default();
+        preparer.prepare(&season2, &root, None, Some(&assets));
+        let segmented = preparer
+            .prepare(&season1, &root, None, Some(&assets))
+            .resolver;
+        assert_eq!(segmented.sub_index.segments.len(), 2);
+
+        // The same files in the same order, each index in one segment of its own.
+        let flat_indices = |dirs: &[PathBuf]| {
+            let (mut subs, mut chapters, mut covers) =
+                (SubIndex::new(), ChapterIndex::new(), CoverIndex::new());
+            for dir in dirs {
+                let found = scan_assets(dir, None);
+                found.subs.iter().for_each(|f| subs.add(f.clone()));
+                found.chapters.iter().for_each(|f| chapters.add(f));
+                found.covers.iter().for_each(|f| covers.add(f.clone()));
+            }
+            assert_eq!(subs.segments.len(), 1);
+            (subs, chapters, covers)
+        };
+        let (sub_index, chap_index, cover_index) = flat_indices(&[season1.clone(), root.clone()]);
+        let (fb_sub, fb_chap, fb_cov) =
+            flat_indices(&[assets.clone(), assets.parent().unwrap().to_path_buf()]);
+        let flat = AssetResolver {
+            sub_index,
+            chap_index,
+            cover_index,
+            fallback_sub_index: Some(fb_sub),
+            fallback_chap_index: Some(fb_chap),
+            fallback_cover_index: Some(fb_cov),
+        };
+
+        assert_eq!(segmented.has_subtitles(), flat.has_subtitles());
+        assert_eq!(
+            segmented.chap_index.unmatched().collect::<Vec<_>>(),
+            flat.chap_index.unmatched().collect::<Vec<_>>()
+        );
+        let mut resolved = Vec::new();
+        for name in [
+            "Show - S01E01.mkv",
+            "Show - S01E02.mkv",
+            "Show - 03.mkv",
+            "Show - S01E04.mkv",
+        ] {
+            let video = create_parsed_file(season1.join(name));
+            let parsed = video.parsed.clone().unwrap();
+            let lookups = |resolver: &AssetResolver| Lookups {
+                resolved: resolver.resolve_for(&video, None, None, None),
+                ancestor_sub: resolver.sub_index.lookup_ancestors(&parsed, &season1),
+                fallback_sub: resolver
+                    .fallback_sub_index
+                    .as_ref()
+                    .unwrap()
+                    .lookup_fallback(&parsed),
+                chapter: resolver.chap_index.lookup_with_warning(&parsed),
+                fallback_chapter: resolver
+                    .fallback_chap_index
+                    .as_ref()
+                    .unwrap()
+                    .lookup_with_warning(&parsed),
+                fallback_cover: resolver
+                    .fallback_cover_index
+                    .as_ref()
+                    .unwrap()
+                    .lookup_fallback(&video),
+            };
+            let result = lookups(&segmented);
+            assert_eq!(result, lookups(&flat), "{name}");
+            resolved.push(result);
+        }
+        let [ep1, ep2, ep3, ep4] = resolved.try_into().unwrap();
+        // The comparison is not vacuous: the tiers and tie-breaks above all took effect.
+        // Within the root, the exact season beats unknown ones of a better language and category.
+        assert_eq!(
+            ep1.resolved.subtitle_file,
+            Some(root.join("Show - S01E01.eng.ass"))
+        );
+        assert_eq!(
+            ep1.resolved.cover_file,
+            Some(root.join("Show - 01_cover.jpg"))
+        );
+        assert_eq!(
+            ep2.resolved.subtitle_file,
+            Some(season1.join("Show - 02.ind.ass"))
+        );
+        // The nearer directory beats a better kind: season 1's dot cover over the root's.
+        assert_eq!(
+            ep2.resolved.cover_file,
+            Some(season1.join("Show - 02.cover.jpg"))
+        );
+        // The exact season beats the unknown one beside it, which the warning names.
+        let (chapter, warning) = ep2.chapter.unwrap();
+        assert_eq!(chapter, root.join("Show - S01E02.xml"));
+        assert!(warning.unwrap().contains("ignoring 'Show - 02.xml'"));
+        assert_eq!(
+            ep3.fallback_sub.unwrap().0,
+            assets.join("Show - 03.eng.ass")
+        );
+        assert_eq!(ep3.resolved.cover_file, Some(season1.join("Show - 03.png")));
+        let (chapter, warning) = ep4.fallback_chapter.unwrap();
+        assert_eq!(chapter, assets.join("Show - S01E04.xml"));
+        assert!(warning.unwrap().contains("ignoring 'Show - 04.xml'"));
+        assert_eq!(ep4.fallback_cover, Some(assets.join("Show - 04_cover.jpg")));
+        // The assets directory ranks ahead of its parent, so its folder beats the parent's cover.
+        assert_eq!(ep1.fallback_cover, Some(assets.join("folder.jpg")));
     }
 }
