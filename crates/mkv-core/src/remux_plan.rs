@@ -155,7 +155,7 @@ impl<'a> RemuxPlanner<'a> {
             job: PlannedJob {
                 video: file.path.clone(),
                 video_name: file.name.clone(),
-                output_file: self.output_file(file),
+                output_file: remux_output_file(file, self.input_dir, self.out_dir),
                 subtitle_file: res_assets.subtitle_file,
                 subtitle_label: res_assets.subtitle_label,
                 subtitle_mkv_lang: res_assets.subtitle_mkv_lang,
@@ -172,25 +172,29 @@ impl<'a> RemuxPlanner<'a> {
             font_info: Arc::clone(&dir_prep.font_info),
         }))
     }
+}
 
-    /// `<out dir>/<stem>.mkv`; without an output directory the file goes to `Output/` beside
-    /// its source.
-    fn output_file(&self, file: &ParsedFile) -> PathBuf {
-        let base = file
-            .path
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "video".to_string());
-        let out_stem = match &file.parsed {
-            Some(parsed) => output_stem(&base, &parsed.ep_type, &parsed.ep),
-            None => base,
-        };
-        let out_dir = resolve_output_dir(&file.path, self.input_dir, self.out_dir);
-        if self.out_dir.is_none() {
-            out_dir.join("Output").join(format!("{out_stem}.mkv"))
-        } else {
-            out_dir.join(format!("{out_stem}.mkv"))
-        }
+/// Where `file` is remuxed to: `<out dir>/<stem>.mkv` in the mirrored directory under
+/// `out_dir`, or in `Output/` beside its source without one.
+pub(crate) fn remux_output_file(
+    file: &ParsedFile,
+    input_dir: &Path,
+    out_dir: Option<&Path>,
+) -> PathBuf {
+    let base = file
+        .path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "video".to_string());
+    let out_stem = match &file.parsed {
+        Some(parsed) => output_stem(&base, &parsed.ep_type, &parsed.ep),
+        None => base,
+    };
+    let dir = resolve_output_dir(&file.path, input_dir, out_dir);
+    if out_dir.is_none() {
+        dir.join("Output").join(format!("{out_stem}.mkv"))
+    } else {
+        dir.join(format!("{out_stem}.mkv"))
     }
 }
 

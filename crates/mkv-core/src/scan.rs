@@ -544,6 +544,12 @@ pub fn scan_assets(dir: &Path, mut cache: Option<&mut ScanCache>) -> Arc<ScanRes
     result
 }
 
+/// Whether discovery skips a directory of this name as an output directory: `Output`, in any
+/// ASCII case.
+pub(crate) fn is_output_dir_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("output")
+}
+
 /// Finds the `.mkv` files under `dir_path`, descending into subdirectories when `recursive`,
 /// except `Output`, fonts directories, and anything under `ignore_paths`. A file reached by
 /// two spellings is listed once. The result is naturally sorted by path.
@@ -613,7 +619,7 @@ pub fn scan_mkv_files(
                     }
                 }
             } else if is_dir && recursive {
-                if name.eq_ignore_ascii_case("output")
+                if is_output_dir_name(name)
                     || FONT_DIR_NAMES.iter().any(|d| name.eq_ignore_ascii_case(d))
                 {
                     continue;

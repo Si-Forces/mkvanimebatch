@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 regex = "1.10"
 fancy-regex = "0.19"
+icu_normalizer = { version = "2.3", default-features = false, features = ["compiled_data"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tracing = "0.1"
@@ -21,6 +22,7 @@ parking_lot = "0.12"
 tempfile = "3"
 tokio = { version = "1", features = ["sync", "rt", "process", "macros", "io-util", "time"] }
 tokio-util = "0.7"
+unicase = "2.10"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread"] }

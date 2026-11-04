@@ -649,6 +649,148 @@ async fn test_pipeline_rejects_every_unmatched_selection_before_batch_start() {
     }
 }
 
+// Linux only: the colliding sources differ only by case, which takes a case-sensitive file
+// system; the default Windows and macOS ones are not.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn test_remux_rejects_colliding_destinations_before_batch_start() {
+    let input = tempdir().unwrap();
+    let output = tempdir().unwrap();
+    let cache_dir = tempdir().unwrap();
+    let names = [
+        "Show - 01.mkv",
+        "Show - 01.MKV",
+        "Season 1/Show - 02.mkv",
+        "season 1/Show - 02.mkv",
+        "Show - 03.mkv",
+    ];
+    let videos: Vec<_> = names.iter().map(|name| input.path().join(name)).collect();
+    for video in &videos {
+        fs::create_dir_all(video.parent().unwrap()).unwrap();
+        fs::write(video, b"video").unwrap();
+    }
+    let video_refs: Vec<&Path> = videos.iter().map(|video| video.as_path()).collect();
+    let dry_run = |out_dir: Option<&Path>, selected_items: Option<Vec<String>>| {
+        run_batch(
+            PipelineConfig {
+                out_dir: out_dir.map(Path::to_path_buf),
+                selected_items,
+                dry_run: true,
+                cache: Some(seeded_cache(
+                    cache_dir.path(),
+                    &video_refs,
+                    &video_metadata("A_AAC"),
+                )),
+                ..config(PipelineMode::Remux, input.path())
+            },
+            CancellationToken::new(),
+        )
+    };
+
+    // Beside each source, `Show - 01` collides byte for byte and `Show - 02` by case only. Under
+    // --out-dir the mirrored `Season 1/` and `season 1/` collide by case.
+    for (out_dir, destinations) in [
+        (
+            None,
+            [
+                input.path().join("Output/Show - 01.mkv"),
+                input.path().join("Season 1/Output/Show - 02.mkv"),
+            ],
+        ),
+        (
+            Some(output.path()),
+            [
+                output.path().join("Show - 01.mkv"),
+                output.path().join("Season 1/Show - 02.mkv"),
+            ],
+        ),
+    ] {
+        let (result, events) = dry_run(out_dir, None).await;
+        let err = result.unwrap_err();
+        assert!(
+            err.starts_with("Multiple items would write the same remux output: "),
+            "{err}"
+        );
+        for id in &names[..4] {
+            assert!(err.contains(&format!("'{id}'")), "{err}");
+        }
+        assert!(!err.contains("Show - 03"), "{err}");
+        for destination in destinations {
+            assert!(
+                err.to_lowercase()
+                    .contains(&destination.display().to_string().to_lowercase()),
+                "{err}"
+            );
+        }
+        assert!(
+            events.is_empty(),
+            "a collision must abort before BatchStart"
+        );
+        assert!(!input.path().join("Output").exists());
+        assert_eq!(fs::read_dir(output.path()).unwrap().count(), 0);
+    }
+
+    // Deselecting all but one item of each group clears the collision.
+    let selected = ["Show - 01.MKV", "season 1/Show - 02.mkv", "Show - 03.mkv"];
+    for out_dir in [None, Some(output.path())] {
+        let (result, events) = dry_run(out_dir, Some(selected.map(String::from).to_vec())).await;
+        let summary = result.unwrap();
+        assert_eq!((summary.total, summary.errors), (3, 0), "{:?}", summary.log);
+        assert!(matches!(events.first(), Some(JobEvent::BatchStart { .. })));
+    }
+}
+
+/// An --out-dir above the input mirrors `in/Show - 01.mkv` to `<input>/Show - 01.mkv`, where it
+/// would replace the unselected source there. The batch is refused before BatchStart; a mirrored
+/// path that stays outside the input is accepted.
+#[tokio::test]
+async fn test_remux_refuses_an_ancestor_out_dir_landing_in_the_input() {
+    let tmp = tempdir().unwrap();
+    let cache_dir = tempdir().unwrap();
+    let input = tmp.path().join("in");
+    let videos = [
+        input.join("Show - 01.mkv"),
+        input.join("in/Show - 01.mkv"),
+        input.join("Season 1/Show - 02.mkv"),
+    ];
+    for video in &videos {
+        fs::create_dir_all(video.parent().unwrap()).unwrap();
+        fs::write(video, b"video").unwrap();
+    }
+    let video_refs: Vec<&Path> = videos.iter().map(|video| video.as_path()).collect();
+    let dry_run = |selected: &[&str]| {
+        run_batch(
+            PipelineConfig {
+                out_dir: Some(tmp.path().to_path_buf()),
+                selected_items: Some(selected.iter().map(|id| id.to_string()).collect()),
+                dry_run: true,
+                cache: Some(seeded_cache(
+                    cache_dir.path(),
+                    &video_refs,
+                    &video_metadata("A_AAC"),
+                )),
+                ..config(PipelineMode::Remux, &input)
+            },
+            CancellationToken::new(),
+        )
+    };
+
+    let (result, events) = dry_run(&["in/Show - 01.mkv", "Season 1/Show - 02.mkv"]).await;
+    assert_eq!(
+        result.unwrap_err(),
+        format!(
+            "Remux output would land inside the input directory, where it could replace a source or be rediscovered by the next run: 'in/Show - 01.mkv' -> '{}'",
+            videos[0].display()
+        )
+    );
+    assert!(events.is_empty(), "the refusal must come before BatchStart");
+
+    let (result, events) = dry_run(&["Season 1/Show - 02.mkv"]).await;
+    let summary = result.unwrap();
+    assert_eq!((summary.total, summary.errors), (1, 0), "{:?}", summary.log);
+    assert!(matches!(events.first(), Some(JobEvent::BatchStart { .. })));
+}
+
 #[tokio::test]
 async fn test_pipeline_extract_persists_font_hash_memo() {
     let in_tmp = tempdir().unwrap();
