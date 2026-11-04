@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 # Builds the GitHub release page for a tag from docs/release-notes.md.
-# Used by .github/workflows/release.yml (the release-notes check and the Linux build job).
+# Used by .github/workflows/release.yml (the release-notes check and the publish job).
 #
 # Usage:
+#   scripts/release-body.sh check <tag> <commit>
+#       Refuse to release <tag> from <commit> unless the tag is v<version> with
+#       notes for <version>, <version> is the workspace version, and the tag, if
+#       origin already has it, peels to <commit>. Print "prerelease=true" when the
+#       version has a "-" before any "+" build metadata, else "prerelease=false".
 #   scripts/release-body.sh notes <version> [notes-file]
 #       Print the notes of the "## <version>" section: the intro and the
 #       "### Downloads" subsection are dropped, other "###" headings become "##".
@@ -129,7 +134,47 @@ EOF
   printf '| `libgtk-3.so.0` | `%s` |\n' "$GTK"
 }
 
+check() {
+  local tag="$1" commit="$2" version cargo_version remote
+  # The tag can come from a dispatch input and reaches the ::error:: lines below, so
+  # refuse anything that is not a plain version tag (a newline could inject workflow commands).
+  if [[ ! "$tag" =~ ^v[0-9A-Za-z.+-]+$ ]]; then
+    echo "::error::the release tag is not of the form v<version>" >&2
+    return 1
+  fi
+  version="${tag#v}"
+  notes "$version" "$root/docs/release-notes.md" > /dev/null
+  cargo_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' "$root/Cargo.toml")"
+  cargo_version="${cargo_version%%$'\n'*}"
+  if [ "$version" != "$cargo_version" ]; then
+    echo "::error::tag $tag does not match the workspace version $cargo_version" >&2
+    return 1
+  fi
+
+  # An annotated tag lists its tag object as refs/tags/X and its commit as refs/tags/X^{}.
+  remote="$(git -C "$root" ls-remote origin "refs/tags/$tag" "refs/tags/$tag^{}" |
+    T="refs/tags/$tag" awk '$2 == ENVIRON["T"] { tag = $1 } $2 == ENVIRON["T"] "^{}" { peeled = $1 }
+      END { print (peeled != "" ? peeled : tag) }')" || {
+    echo "::error::could not list tag $tag on origin" >&2
+    return 1
+  }
+  if [ -n "$remote" ] && [ "$remote" != "$commit" ]; then
+    echo "::error::tag $tag points at $remote, not at the built commit $commit; to republish it, dispatch the workflow from the tag" >&2
+    return 1
+  fi
+
+  if [[ "${version%%+*}" == *-* ]]; then
+    echo "prerelease=true"
+  else
+    echo "prerelease=false"
+  fi
+}
+
 case "${1:-}" in
+  check)
+    [ $# -eq 3 ] || { echo "usage: $0 check <tag> <commit>" >&2; exit 2; }
+    check "$2" "$3"
+    ;;
   notes)
     [ $# -ge 2 ] && [ $# -le 3 ] || { echo "usage: $0 notes <version> [notes-file]" >&2; exit 2; }
     notes "$2" "${3:-$root/docs/release-notes.md}"
@@ -139,7 +184,7 @@ case "${1:-}" in
     page "$2" "$3" "${4:-$root/docs/release-notes.md}"
     ;;
   *)
-    echo "usage: $0 notes <version> [notes-file] | page <version> <bundle-dir> [notes-file]" >&2
+    echo "usage: $0 check <tag> <commit> | notes <version> [notes-file] | page <version> <bundle-dir> [notes-file]" >&2
     exit 2
     ;;
 esac

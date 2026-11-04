@@ -13,8 +13,10 @@ on:
         description: "Release tag (e.g. v1.0.0)"
         required: true
 
+# Keyed by tag, not ref, so a tag push and a dispatch from another ref for the same tag
+# cannot publish at once.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ inputs.version_tag || github.ref_name }}
   cancel-in-progress: false
 
 # A tag push leaves inputs.version_tag empty, so this falls back to the pushed tag.
@@ -36,11 +38,16 @@ jobs:
   # ────────────────────────────────────────────────────────────────────────────
   # 2. Release Notes and Version Check
   # ────────────────────────────────────────────────────────────────────────────
-  # Fail before any build if the release page could not be generated: build-linux
+  # Fail before any build if the release page could not be generated: publish
   # needs a "## <version>" section in docs/release-notes.md (pre-release tags too),
   # and the bundle names it lists come from the workspace version.
+  #
+  # A tag that already exists on origin must peel to the commit this run builds, so a
+  # dispatch from main cannot overwrite a published release with unreleased code. To
+  # republish a release, dispatch the workflow from the tag itself (ref = the tag). A
+  # tag that does not exist yet passes, and publish creates it at the built commit.
   release-notes:
-    name: Check Release Notes and Version
+    name: Check Release Notes, Version and Tag
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -49,35 +56,21 @@ jobs:
         with:
           persist-credentials: false
 
-      # A dispatch input reaches the ::error:: lines below, so refuse anything that is not
-      # a plain version tag (a newline in it could inject workflow commands).
-      - name: Check release notes and version
-        run: |
-          if [[ ! "$RELEASE_TAG" =~ ^v[0-9A-Za-z.+-]+$ ]]; then
-            echo "::error::the release tag is not of the form v<version>"
-            exit 1
-          fi
-          version="${RELEASE_TAG#v}"
-          scripts/release-body.sh notes "$version" > /dev/null
-          cargo_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
-          if [ "$version" != "$cargo_version" ]; then
-            echo "::error::tag $RELEASE_TAG does not match the workspace version $cargo_version"
-            exit 1
-          fi
+      # The script refuses a tag that is not a plain v<version> before using it.
+      - name: Check release notes, version and tag
+        run: scripts/release-body.sh check "$RELEASE_TAG" "$GITHUB_SHA" > /dev/null
 
   # ────────────────────────────────────────────────────────────────────────────
   # 3. Desktop GUI & CLI Build — Windows (Runs ONLY after verification passes)
   # ────────────────────────────────────────────────────────────────────────────
   build-windows:
-    name: Build & Release — Windows
+    name: Build — Windows
     needs: [verify, release-notes]
     # The image ci.yml verifies on, though without its Dev Drive.
     runs-on: windows-2025
     # The first build of a release is usually a rust-cache miss: cold builds took 19-36
     # minutes (issue #95). A killed release build costs the release, so leave headroom.
     timeout-minutes: 60
-    permissions:
-      contents: write
 
     steps:
       - name: Checkout repository
@@ -175,32 +168,36 @@ jobs:
             }
           }
 
-      # Uploads assets only. build-linux runs in parallel on the same tag and is
-      # the sole owner of the release name and body (see "Publish Linux bundles
-      # to release"), so leaving them unset here avoids a last-writer-wins race.
-      - name: Publish Windows files to release
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+      # Every file here becomes a release asset (publish takes the whole artifact). The
+      # release keeps its own copies, so the artifact need not outlive the run.
+      - name: Upload Windows release files
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          tag_name: ${{ env.RELEASE_TAG }}
-          files: |
+          name: release-windows
+          path: |
             windows-artifacts/mkv-anime-batch.exe
             windows-artifacts/MKV_Anime_Batch_Portable_win64.zip
             mkv-cli-x86_64-pc-windows-msvc.zip
             mkv-cli-x86_64-pc-windows-msvc.zip.sha256
-          draft: false
-          prerelease: false
+          if-no-files-found: error
+          retention-days: 1
+          # Mostly archives and packages, so compression buys little.
+          compression-level: 0
 
   # ────────────────────────────────────────────────────────────────────────────
   # 4. Desktop GUI & CLI Build — Linux (Runs ONLY after verification passes)
   # ────────────────────────────────────────────────────────────────────────────
   build-linux:
-    name: Build & Release — Linux
+    name: Build — Linux
     needs: [verify, release-notes]
     runs-on: ubuntu-24.04
     # Cold builds took 16-21 minutes (issue #95); the apt step alone is bounded at about 9.
     timeout-minutes: 30
-    permissions:
-      contents: write
+    # The AppImage runtime versions the release body embeds; only this job can read them.
+    outputs:
+      webkit_version: ${{ steps.verify-linux.outputs.webkit_version }}
+      jsc_version: ${{ steps.verify-linux.outputs.jsc_version }}
+      gtk_version: ${{ steps.verify-linux.outputs.gtk_version }}
 
     steps:
       - name: Checkout repository
@@ -273,6 +270,7 @@ jobs:
           find target desktop-tauri -type f -name "*.AppImage" -exec cp {} /tmp/linux-release/ \;
           find target desktop-tauri -type f -name "*.deb" -exec cp {} /tmp/linux-release/ \;
           find target desktop-tauri -type f -name "*.rpm" -exec cp {} /tmp/linux-release/ \;
+          cp mkv-cli-x86_64-unknown-linux-gnu.tar.gz mkv-cli-x86_64-unknown-linux-gnu.tar.gz.sha256 /tmp/linux-release/
           # Tauri keeps the spaces of productName, which GitHub would turn into dots on upload.
           for f in /tmp/linux-release/*' '*; do
             if [ -e "$f" ]; then mv "$f" "${f// /_}"; fi
@@ -381,36 +379,84 @@ jobs:
 
           cat "$manifest"
 
+      # Every file in the directory becomes a release asset; see the same step in build-windows.
+      - name: Upload Linux release files
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-linux
+          path: /tmp/linux-release/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 5. Publish (Runs ONLY after both builds pass)
+  # ────────────────────────────────────────────────────────────────────────────
+  # The one job that writes the release, so a failed build publishes nothing. A new
+  # release, stable or pre-release, stays a draft until every asset is uploaded, then goes
+  # public with its full body. It publishes whatever files the build jobs uploaded, but
+  # its needs list and body step still name the Linux Tauri build (#192).
+  publish:
+    name: Publish Release
+    needs: [build-windows, build-linux]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Each artifact lands in its own directory: release/release-windows, release/release-linux.
+      - name: Download release files
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: release-*
+          path: release
+
       # Builds the release page. The prose for this version comes from
       # docs/release-notes.md; the rest is generic or filled from the verified
       # AppImage runtime versions.
       - name: Build release body
-        shell: bash
         env:
-          WEBKIT: ${{ steps.verify-linux.outputs.webkit_version }}
-          JSC: ${{ steps.verify-linux.outputs.jsc_version }}
-          GTK: ${{ steps.verify-linux.outputs.gtk_version }}
+          WEBKIT: ${{ needs.build-linux.outputs.webkit_version }}
+          JSC: ${{ needs.build-linux.outputs.jsc_version }}
+          GTK: ${{ needs.build-linux.outputs.gtk_version }}
         run: |
           version="${RELEASE_TAG#v}"
-          scripts/release-body.sh page "$version" /tmp/linux-release > "$RUNNER_TEMP/release-body.md"
+          scripts/release-body.sh page "$version" release/release-linux > "$RUNNER_TEMP/release-body.md"
 
-      # Sole owner of the release's name and body. The body documents both
-      # platforms because one release carries both platforms' assets, and it
-      # embeds the AppImage runtime versions that only this job can compute.
-      # build-windows runs in parallel and uploads assets without touching the
-      # body, so the outcome does not depend on which job finishes first.
-      - name: Publish Linux bundles to release
+      # Again, right before publishing: the builds take up to an hour, and the tag may
+      # have been pushed to another commit meanwhile. Its prerelease output is the one used.
+      - name: Re-check the tag
+        id: recheck
+        run: scripts/release-body.sh check "$RELEASE_TAG" "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+
+      # target_commitish is stored on the draft, so publishing it creates a missing tag at the
+      # built commit rather than at the default branch's head; an existing tag already peels
+      # to it (the re-check above).
+      # draft: true keeps a new release a draft (the action itself drafts only stable
+      # releases); a re-run finds and reuses that draft, and an existing release keeps its
+      # state.
+      - name: Upload release
+        id: release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: ${{ env.RELEASE_TAG }}
+          target_commitish: ${{ github.sha }}
           name: "MKV Anime Batch ${{ env.RELEASE_TAG }}"
           body_path: ${{ runner.temp }}/release-body.md
-          files: |
-            /tmp/linux-release/*.AppImage
-            /tmp/linux-release/*.deb
-            /tmp/linux-release/*.rpm
-            /tmp/linux-release/APPIMAGE-RUNTIME.txt
-            mkv-cli-x86_64-unknown-linux-gnu.tar.gz
-            mkv-cli-x86_64-unknown-linux-gnu.tar.gz.sha256
-          draft: false
-          prerelease: false
+          files: release/**/*
+          fail_on_unmatched_files: true
+          draft: true
+          prerelease: ${{ steps.recheck.outputs.prerelease }}
+
+      # Publishing the draft also creates a missing tag. Already public on a republish.
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.release.outputs.id }}
+        run: gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" -F draft=false > /dev/null
