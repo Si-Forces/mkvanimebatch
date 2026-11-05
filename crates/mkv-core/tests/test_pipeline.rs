@@ -6,8 +6,9 @@ use std::sync::Arc;
 
 use tempfile::tempdir;
 
-use common::{run_batch, seeded_cache, video_metadata};
+use common::{run_batch, seeded_cache, video_metadata, ScriptedRunner, Step};
 use mkv_core::fonts::FontHashMemo;
+use mkv_core::media_tool::MediaTool;
 use mkv_core::pipeline::{
     create_event_channel, create_log_channel, BatchPipeline, CancellationToken, ItemOutcome,
     JobEvent, LogLine, PipelineConfig, PipelineMode,
@@ -962,4 +963,159 @@ async fn test_remux_dry_run_ignores_duplicate_chapters_of_unselected_episodes() 
         "{log:#?}"
     );
     assert!(duplicate_chapter_lines(&log).is_empty(), "{log:#?}");
+}
+
+/// Remuxes `selected` (every video when `None`) through a scripted mkvmerge and returns the
+/// chapter file each item was muxed with, in batch order. `videos` are paths under `root`, each
+/// probing from the seeded cache as its metadata, with a sibling subtitle so no item is skipped.
+/// Only the selected videos may become items: the batch announces and settles those alone.
+async fn remuxed_chapter_files(
+    root: &Path,
+    videos: &[(&str, &mkv_core::scan::MkvmergeMetadata)],
+    selected: Option<&[&str]>,
+) -> Vec<Option<String>> {
+    let out = tempdir().unwrap();
+    let cache = seeded_cache(root, &[], &video_metadata("A_AAC"));
+    for (name, metadata) in videos {
+        let video = root.join(name);
+        fs::create_dir_all(video.parent().unwrap()).unwrap();
+        fs::write(&video, b"dummy mkv").unwrap();
+        fs::write(video.with_extension("ass"), b"[Script Info]\n").unwrap();
+        cache.put_path(&video, (*metadata).clone());
+    }
+    let items = selected.map_or(videos.len(), <[&str]>::len);
+    let runner = Arc::new(ScriptedRunner::new((0..items).map(|_| {
+        Step::exited(MediaTool::Mkvmerge, 0, "", "").writes_output(b"remuxed")
+    })));
+
+    // Large enough that the undrained channel never parks the batch.
+    let (tx, mut rx) = create_event_channel(256);
+    let summary = BatchPipeline::new(
+        PipelineConfig {
+            out_dir: Some(out.path().to_path_buf()),
+            selected_items: selected.map(|ids| ids.iter().map(|id| id.to_string()).collect()),
+            cache: Some(cache),
+            workers: 1,
+            io_jobs: 1,
+            ..config(PipelineMode::Remux, root)
+        },
+        Some(tx),
+        CancellationToken::new(),
+    )
+    .with_media_tool_runner(runner.clone())
+    .run()
+    .await
+    .unwrap();
+    assert_eq!(
+        (summary.total, summary.completed, summary.errors),
+        (items, items, 0),
+        "{summary:#?}"
+    );
+    let mut item_events = 0;
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            JobEvent::BatchStart { total, .. } => assert_eq!(total, items),
+            JobEvent::ItemStart { .. } | JobEvent::ItemComplete { .. } => item_events += 1,
+            _ => {}
+        }
+    }
+    assert_eq!(item_events, 2 * items);
+
+    runner
+        .calls()
+        .into_iter()
+        .map(|(_, args)| {
+            let at = args.iter().position(|arg| arg == "--chapters")?;
+            Some(args[at + 1].clone())
+        })
+        .collect()
+}
+
+/// A leftover chapter file is judged against the whole Release Directory: a release of
+/// several chapterless episodes leaves it unclaimed whether one episode or all are selected,
+/// the unselected ones being probed and found chapterless.
+#[tokio::test]
+async fn test_remux_subset_never_claims_a_leftover_the_full_run_leaves_alone() {
+    let tmp = tempdir().unwrap();
+    write_chapters(tmp.path(), &["chapters.xml"]);
+    let plain = video_metadata("A_AAC");
+    let videos = [
+        ("Show - 01.mkv", &plain),
+        ("Show - 02.mkv", &plain),
+        ("Show - 03.mkv", &plain),
+    ];
+
+    let full = remuxed_chapter_files(tmp.path(), &videos, None).await;
+    assert_eq!(full, [None, None, None]);
+    let subset = remuxed_chapter_files(tmp.path(), &videos, Some(&["Show - 02.mkv"])).await;
+    assert_eq!(subset, [None]);
+}
+
+/// The common retry: episodes 02-04 carry embedded chapters and 01 does not. The unselected
+/// episodes of a directory with one unnumbered chapter file are probed, so re-running 01 alone
+/// claims the file just as the full run does.
+#[tokio::test]
+async fn test_remux_subset_claims_the_leftover_the_full_run_claims() {
+    let tmp = tempdir().unwrap();
+    write_chapters(tmp.path(), &["chapters.xml"]);
+    let plain = video_metadata("A_AAC");
+    let mut embedded = video_metadata("A_AAC");
+    embedded.chapters = vec![mkv_core::scan::MkvChapter {
+        num_entries: Some(3),
+    }];
+    let videos = [
+        ("Show - 01.mkv", &plain),
+        ("Show - 02.mkv", &embedded),
+        ("Show - 03.mkv", &embedded),
+        ("Show - 04.mkv", &embedded),
+    ];
+    let chapters = Some(
+        tmp.path()
+            .join("chapters.xml")
+            .to_string_lossy()
+            .into_owned(),
+    );
+
+    let full = remuxed_chapter_files(tmp.path(), &videos, None).await;
+    assert_eq!(full, [chapters.clone(), None, None, None]);
+    let subset = remuxed_chapter_files(tmp.path(), &videos, Some(&["Show - 01.mkv"])).await;
+    assert_eq!(subset, [chapters]);
+}
+
+/// A single-episode release still claims its only leftover chapter file.
+#[tokio::test]
+async fn test_remux_single_episode_release_claims_its_leftover_chapters() {
+    let tmp = tempdir().unwrap();
+    write_chapters(tmp.path(), &["chapters.xml"]);
+    let plain = video_metadata("A_AAC");
+
+    let claimed = remuxed_chapter_files(tmp.path(), &[("Show - 01.mkv", &plain)], None).await;
+    let chapters = tmp
+        .path()
+        .join("chapters.xml")
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(claimed, [Some(chapters)]);
+}
+
+#[tokio::test]
+async fn test_remux_nested_release_claims_only_its_own_leftover_chapters() {
+    let tmp = tempdir().unwrap();
+    write_chapters(tmp.path(), &["chapters.xml"]);
+    write_chapters(&tmp.path().join("Specials"), &["chapters.xml"]);
+    let plain = video_metadata("A_AAC");
+    let videos = [
+        ("Show - 01.mkv", &plain),
+        ("Specials/Show - SP01.mkv", &plain),
+    ];
+    // Joined per component: Windows reports the scanned path with backslashes only.
+    let chapters = |dir: &Path| Some(dir.join("chapters.xml").to_string_lossy().into_owned());
+    let specials = tmp.path().join("Specials");
+
+    // Each Release Directory claims its own file, the input root included.
+    let full = remuxed_chapter_files(tmp.path(), &videos, None).await;
+    assert_eq!(full, [chapters(tmp.path()), chapters(&specials)]);
+    let subset =
+        remuxed_chapter_files(tmp.path(), &videos, Some(&["Specials/Show - SP01.mkv"])).await;
+    assert_eq!(subset, [chapters(&specials)]);
 }

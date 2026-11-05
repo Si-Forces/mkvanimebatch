@@ -207,7 +207,9 @@ mod tests {
 
     use super::*;
     use crate::domain::{MkvTrack, TrackProperties};
-    use crate::pipeline::{prepare_release_dirs, CancellationToken, PipelineConfig};
+    use crate::pipeline::{
+        claim_release_chapters, prepare_release_dirs, CancellationToken, PipelineConfig,
+    };
     use crate::request::AssignmentKind;
     use crate::scan::{create_parsed_file, MkvmergeMetadata};
 
@@ -260,7 +262,9 @@ mod tests {
     }
 
     /// Prepares the Release Directories of `videos` the way `run_remux` does, then hands the
-    /// planner and the prepared directories to `f`.
+    /// planner and the prepared directories to `f`. `run_remux` also judges a leftover chapter
+    /// claim by each directory's unselected videos, so `videos` must be every video of those
+    /// directories, with `inspections` for each, for a claim to match a batch.
     fn with_planner<T>(
         config: &PipelineConfig,
         inspections: &HashMap<PathBuf, InspectionResult>,
@@ -274,13 +278,10 @@ mod tests {
                 .or_default()
                 .push(video.clone());
         }
-        let prepared_dirs = prepare_release_dirs(
-            &videos_by_dir,
-            inspections,
-            config,
-            &CancellationToken::new(),
-        )
-        .expect("planning is never cancelled in these tests");
+        let mut prepared_dirs =
+            prepare_release_dirs(&videos_by_dir, config, &CancellationToken::new())
+                .expect("planning is never cancelled in these tests");
+        claim_release_chapters(&mut prepared_dirs, &videos_by_dir, inspections);
         let planner = RemuxPlanner::new(
             &config.input_dir,
             config.out_dir.as_deref(),
