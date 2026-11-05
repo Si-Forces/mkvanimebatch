@@ -347,10 +347,25 @@ pub async fn generate_inspection_manifest(
     if is_cancelled(cancel_token) {
         return cancelled(persistent_cache.as_deref());
     }
+    let discovered = scan_mkv_files(input_dir, true, None);
+    generate_inspection_manifest_for(input_dir, &discovered, persistent_cache, cancel_token).await
+}
 
-    let all_mkvs = scan_mkv_files(input_dir, true, None);
-    if all_mkvs.is_empty() {
-        prune_and_save_cache(persistent_cache.as_deref(), input_dir, &all_mkvs);
+/// [`generate_inspection_manifest`] over files already discovered, so a caller that checks the
+/// discovered files first inspects exactly the files it checked. `discovered` must be the full
+/// result of `scan_mkv_files(input_dir, true, None)`: the cache is pruned of every file not in it.
+pub async fn generate_inspection_manifest_for(
+    input_dir: &Path,
+    discovered: &[ParsedFile],
+    persistent_cache: Option<Arc<PersistentInspectCache>>,
+    cancel_token: Option<&CancellationToken>,
+) -> Result<InspectionManifest, String> {
+    if is_cancelled(cancel_token) {
+        return cancelled(persistent_cache.as_deref());
+    }
+
+    if discovered.is_empty() {
+        prune_and_save_cache(persistent_cache.as_deref(), input_dir, discovered);
         return Ok(InspectionManifest {
             version: MANIFEST_VERSION,
             subtitle_candidates: BTreeMap::new(),
@@ -359,7 +374,7 @@ pub async fn generate_inspection_manifest(
         });
     }
 
-    let release_dirs: BTreeSet<PathBuf> = all_mkvs
+    let release_dirs: BTreeSet<PathBuf> = discovered
         .iter()
         .filter_map(|video| video.path.parent().map(Path::to_path_buf))
         .collect();
@@ -401,7 +416,7 @@ pub async fn generate_inspection_manifest(
     // `inspect_videos` flushes the cache on every exit, cancelled or not.
     let token = cancel_token.cloned().unwrap_or_default();
     let Some(inspections) = inspect_videos(
-        &all_mkvs,
+        discovered,
         persistent_cache.as_ref(),
         crate::cpu::default_workers(),
         &token,
@@ -411,8 +426,8 @@ pub async fn generate_inspection_manifest(
         return Err(CANCELLED_ERROR.to_string());
     };
 
-    let mut items = Vec::with_capacity(all_mkvs.len());
-    for (mkv, inspection) in all_mkvs.iter().zip(inspections) {
+    let mut items = Vec::with_capacity(discovered.len());
+    for (mkv, inspection) in discovered.iter().zip(inspections) {
         let (metadata, inspection_error) = match inspection.video {
             Some(video) => (extract_mkv_metadata(&video), None),
             None => (InspectionMetadata::default(), inspection.error),
@@ -434,7 +449,7 @@ pub async fn generate_inspection_manifest(
         });
     }
 
-    prune_and_save_cache(persistent_cache.as_deref(), input_dir, &all_mkvs);
+    prune_and_save_cache(persistent_cache.as_deref(), input_dir, discovered);
 
     Ok(InspectionManifest {
         version: MANIFEST_VERSION,
@@ -852,6 +867,30 @@ mod tests {
             resolved_with(Some(&outside_assets), "03"),
             Some(outside_assets.join("Show - 03.eng.ass"))
         );
+    }
+
+    #[tokio::test]
+    async fn test_generate_inspection_manifest_for_lists_only_the_discovered_files() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let input_dir = temp_dir.path().join("input");
+        std::fs::create_dir(&input_dir).unwrap();
+        let cache =
+            PersistentInspectCache::new(Some(temp_dir.path().join("inspect_cache.json")), true);
+        for name in ["ep01.mkv", "ep02.mkv"] {
+            std::fs::write(input_dir.join(name), b"video content").unwrap();
+            cache.put_path(&input_dir.join(name), MkvmergeMetadata::default());
+        }
+        let discovered = scan_mkv_files(&input_dir, true, None);
+        // A file added after discovery is not inspected: `--plan` lists what it checked.
+        std::fs::write(input_dir.join("ep03.mkv"), b"video content").unwrap();
+
+        let manifest =
+            generate_inspection_manifest_for(&input_dir, &discovered, Some(Arc::new(cache)), None)
+                .await
+                .unwrap();
+
+        let ids: Vec<&str> = manifest.items.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(ids, ["ep01.mkv", "ep02.mkv"]);
     }
 
     #[tokio::test]
