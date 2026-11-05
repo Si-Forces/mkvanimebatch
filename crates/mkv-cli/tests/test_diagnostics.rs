@@ -1,4 +1,5 @@
-//! Engine Diagnostics reach stderr, filtered by `RUST_LOG`, while stdout stays the `--plan` JSON.
+//! Engine Diagnostics reach stderr, filtered by `RUST_LOG`, while stdout stays the `--plan` JSON;
+//! a refused `--plan` exits 1 with its error on stderr.
 
 use std::path::Path;
 use std::process::{Command, Output};
@@ -61,4 +62,25 @@ fn test_rust_log_error_hides_the_warning() {
         "{stderr}"
     );
     serde_json::from_slice::<serde_json::Value>(&output.stdout).expect("stdout is JSON");
+}
+
+// Linux only: the colliding sources differ only by case, which takes a case-sensitive file
+// system; the default Windows and macOS ones are not.
+#[cfg(target_os = "linux")]
+#[test]
+fn test_colliding_remux_plan_exits_1_with_the_error_on_stderr() {
+    let input = tempfile::tempdir().unwrap();
+    for name in ["ep01.mkv", "ep01.MKV"] {
+        std::fs::write(input.path().join(name), b"not a matroska file").unwrap();
+    }
+    let home = tempfile::tempdir().unwrap();
+    let output = run_plan(input.path(), home.path(), None);
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.starts_with("Error: Multiple items would write the same remux output: "),
+        "{stderr}"
+    );
+    assert!(output.stdout.is_empty(), "{output:?}");
 }

@@ -3836,6 +3836,7 @@ version = "1.1.0"
 dependencies = [
  "blake2",
  "fancy-regex",
+ "icu_normalizer",
  "parking_lot",
  "regex",
  "serde",
@@ -3844,6 +3845,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "unicase",
 ]
 
 [[package]]

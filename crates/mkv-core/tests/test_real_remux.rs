@@ -377,6 +377,66 @@ async fn test_real_remux_transcoded_flac_keeps_chapters_once() {
     assert_eq!(entries, 2, "{:?}", summary.log);
 }
 
+/// `Show - 01.mkv` and `Show - 01.MKV` would both be remuxed to `Output/Show - 01.mkv`, the
+/// second promotion replacing the first. The batch is refused before any media work instead.
+/// Linux only: the two sources need a case-sensitive file system.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn test_real_remux_refuses_sources_sharing_a_destination() {
+    if !media_tools_available() {
+        return;
+    }
+    let tmp = tempdir().unwrap();
+    let input = tmp.path().join("input");
+    fs::create_dir_all(&input).unwrap();
+    let lower = input.join("Show - 01.mkv");
+    let upper = input.join("Show - 01.MKV");
+    media_command(
+        Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=16x16:r=1:d=1",
+                "-c:v",
+                "mpeg4",
+                "-y",
+            ])
+            .arg(&lower),
+    );
+    fs::copy(&lower, &upper).unwrap();
+    let source = fs::read(&lower).unwrap();
+    fs::write(
+        input.join("Show - 01.eng.srt"),
+        b"1\n00:00:00,000 --> 00:00:00,900\nENGLISH\n",
+    )
+    .unwrap();
+
+    let err = BatchPipeline::new(
+        PipelineConfig {
+            mode: PipelineMode::Remux,
+            input_dir: input.clone(),
+            no_cache: true,
+            ..Default::default()
+        },
+        None,
+        CancellationToken::new(),
+    )
+    .run()
+    .await
+    .unwrap_err();
+
+    assert!(
+        err.contains("'Show - 01.mkv'") && err.contains("'Show - 01.MKV'"),
+        "{err}"
+    );
+    assert!(!input.join("Output").exists(), "{err}");
+    assert_eq!(fs::read(&lower).unwrap(), source);
+    assert_eq!(fs::read(&upper).unwrap(), source);
+}
+
 /// ffmpeg arguments that keep it running in real time for an hour (`-re` stops it rendering
 /// the silence at once), tagged with `marker` so a test can find the process by its command
 /// line.

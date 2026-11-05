@@ -6,10 +6,12 @@ use std::io::IsTerminal;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use mkv_core::manifest::{generate_inspection_manifest, InspectionManifest};
-use mkv_core::pipeline::{create_event_channel, BatchPipeline, CancellationToken};
+use mkv_core::manifest::{generate_inspection_manifest_for, InspectionManifest};
+use mkv_core::pipeline::{
+    check_remux_destinations, create_event_channel, BatchPipeline, CancellationToken, PipelineMode,
+};
 use mkv_core::request::BatchRequest;
-use mkv_core::scan::PersistentInspectCache;
+use mkv_core::scan::{scan_mkv_files, PersistentInspectCache};
 use tracing_subscriber::filter::{EnvFilter, LevelFilter};
 
 /// Routes Engine Diagnostics to stderr, keeping stdout for `--plan` JSON, `--events` NDJSON and the
@@ -29,13 +31,26 @@ fn init_diagnostics() {
         .try_init();
 }
 
-/// Builds the `--plan` manifest, restricted to and ordered by `selected_items` when set.
+/// Builds the `--plan` manifest, restricted to and ordered by `selected_items` when set. A remux
+/// plan first refuses, before any probe, the selected items a run would refuse for their
+/// destinations. The input is scanned once, so the manifest lists exactly the files checked.
 async fn generate_plan_manifest(
     request: &BatchRequest,
     cache: Option<Arc<PersistentInspectCache>>,
     cancel_token: Option<&CancellationToken>,
 ) -> Result<InspectionManifest, String> {
-    let manifest = generate_inspection_manifest(&request.input_dir, cache, cancel_token).await?;
+    let discovered = scan_mkv_files(&request.input_dir, true, None);
+    if request.mode == PipelineMode::Remux {
+        check_remux_destinations(
+            &discovered,
+            &request.input_dir,
+            request.out_dir.as_deref(),
+            request.selected_items.as_deref(),
+        )?;
+    }
+    let manifest =
+        generate_inspection_manifest_for(&request.input_dir, &discovered, cache, cancel_token)
+            .await?;
     match &request.selected_items {
         Some(selected) => manifest.select_items(selected),
         None => Ok(manifest),
@@ -200,6 +215,45 @@ mod tests {
             .unwrap();
         let ids: Vec<&str> = manifest.items.iter().map(|item| item.id.as_str()).collect();
         assert_eq!(ids, vec!["ep02.mkv", "ep01.mkv"]);
+    }
+
+    // Linux only: the colliding sources differ only by case, which takes a case-sensitive file
+    // system; the default Windows and macOS ones are not.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_cli_plan_refuses_colliding_remux_destinations() {
+        let dir = tempdir().unwrap();
+        write_files(
+            dir.path(),
+            &["Show - 01.mkv", "Show - 01.MKV", "Show - 02.mkv"],
+        );
+        let plan = |extra: &[&str]| {
+            let mut argv = vec!["--input-dir", path_arg(dir.path()), "--plan"];
+            argv.extend_from_slice(extra);
+            let parsed = parse_args_from(argv).unwrap();
+            async move { generate_plan_manifest(&parsed.request, None, None).await }
+        };
+
+        // The two IDs tie in natural order, so they keep the directory's listing order.
+        let err = plan(&[]).await.unwrap_err();
+        let destination = dir.path().join("Output/Show - 01.mkv");
+        let expected = |ids: &str| {
+            format!(
+                "Multiple items would write the same remux output: {ids} -> '{}'",
+                destination.display()
+            )
+        };
+        assert!(
+            err == expected("'Show - 01.MKV', 'Show - 01.mkv'")
+                || err == expected("'Show - 01.mkv', 'Show - 01.MKV'"),
+            "{err}"
+        );
+
+        let manifest = plan(&["--selected-item", "Show - 01.MKV"]).await.unwrap();
+        let ids: Vec<&str> = manifest.items.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(ids, vec!["Show - 01.MKV"]);
+        // Extract writes no remux output, so the pair is planned.
+        assert_eq!(plan(&["--extract"]).await.unwrap().items.len(), 3);
     }
 
     #[tokio::test]

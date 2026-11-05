@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
+use std::io;
 use std::ops::RangeInclusive;
 use std::path::{Component, Path, PathBuf};
 
@@ -83,6 +84,66 @@ fn names_no_contained_path(raw: &str) -> bool {
     folded.trim().is_empty()
         || ItemId::parse(raw).as_str().is_empty()
         || !is_contained_relative_path(&folded)
+}
+
+/// `path` resolved one component at a time, as creating it would walk it: a relative path starts
+/// at the canonical current directory, and after each name the path so far is canonicalized
+/// again when it exists, so a symlink is followed even when reached after a missing `..`. A `..`
+/// pops the last component, which is canonical or a name that does not exist yet, so no symlink.
+/// On Windows the path is first made absolute as Windows does it (`GetFullPathNameW`, through
+/// `std::path::absolute`), which collapses `..` lexically against the current directory as set,
+/// even after a junction or symlink.
+///
+/// This compares spellings, not file identity: a bind mount, a hard link or another Windows root
+/// for the same volume (`\\?\`, a `subst` drive) is not recognized.
+///
+/// # Errors
+///
+/// Fails closed, so a caller never mistakes an unresolved path for one outside a root: when the
+/// current directory cannot be read or canonicalized, when an existing component cannot be
+/// canonicalized (any error but `NotFound`, which marks a name still to be created), or when
+/// Windows cannot make the path absolute.
+pub(crate) fn resolve_spelling(path: &Path) -> io::Result<PathBuf> {
+    resolve_spelling_from(path, std::env::current_dir)
+}
+
+/// [`resolve_spelling`] with the current-directory lookup passed in, so a test can fail it
+/// without changing the process's current directory.
+fn resolve_spelling_from(
+    path: &Path,
+    current_dir: impl FnOnce() -> io::Result<PathBuf>,
+) -> io::Result<PathBuf> {
+    #[cfg(windows)]
+    let path = &std::path::absolute(path)?;
+    let mut resolved = if path.is_absolute() {
+        PathBuf::new()
+    } else {
+        current_dir()?.canonicalize()?
+    };
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) => resolved.push(component),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            Component::RootDir | Component::Normal(_) => {
+                resolved.push(component);
+                match resolved.canonicalize() {
+                    Ok(canonical) => resolved = canonical,
+                    Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                    Err(err) => return Err(err),
+                }
+            }
+        }
+    }
+    Ok(resolved)
+}
+
+/// Whether `path` is `root` or lies beneath it, compared by components after resolving both
+/// spellings, so a symlinked alias of `root` counts and `/a/input-out` is not under `/a/input`.
+fn is_at_or_under(path: &Path, root: &Path) -> io::Result<bool> {
+    Ok(resolve_spelling(path)?.starts_with(resolve_spelling(root)?))
 }
 
 fn has_mkv_extension(path: &str) -> bool {
@@ -372,6 +433,26 @@ impl BatchRequest {
                     "Output directory path points to an existing file: '{}'",
                     d.display()
                 ));
+            }
+            // Remux writes `.mkv` files the next run would rediscover, and an out_dir equal to
+            // the input mirrors each output onto its source. Any root at or inside the input is
+            // refused, even one under an `Output` directory that discovery skips. The pipeline
+            // checks each planned destination again before probing.
+            if self.mode == PipelineMode::Remux {
+                let inside = is_at_or_under(d, &self.input_dir).map_err(|err| {
+                    format!(
+                        "Cannot determine whether the output directory '{}' is outside the input directory '{}': {err}",
+                        d.display(),
+                        self.input_dir.display()
+                    )
+                })?;
+                if inside {
+                    return Err(format!(
+                        "Output directory must be outside the input directory in remux mode: '{}' is within '{}'",
+                        d.display(),
+                        self.input_dir.display()
+                    ));
+                }
             }
         }
 
@@ -1342,6 +1423,234 @@ mod tests {
         req.out_dir = Some(file_path);
         let err_out = resolved(&req).unwrap_err();
         assert!(err_out.contains("Output directory path points to an existing file"));
+    }
+
+    #[test]
+    fn test_validate_refuses_a_remux_out_dir_at_or_under_the_input() {
+        let tmp = tempdir().unwrap();
+        let input = tmp.path().join("input");
+        std::fs::create_dir(&input).unwrap();
+        let with_out_dir = |mode: PipelineMode, out_dir: PathBuf| {
+            resolved(&BatchRequest {
+                mode,
+                out_dir: Some(out_dir),
+                ..minimal_request(&input)
+            })
+        };
+
+        let refused = [
+            input.clone(),
+            input.join("Remuxed"),
+            input.join("Remuxed/Season 1"),
+            // Discovery skips `Output`, but the rule stays simple.
+            input.join("Output"),
+            tmp.path().join("input/../input/Remuxed"),
+            // Missing components are resolved lexically.
+            input.join("missing/../Remuxed"),
+        ];
+        for out_dir in refused {
+            let err = with_out_dir(PipelineMode::Remux, out_dir.clone()).unwrap_err();
+            assert_eq!(
+                err,
+                format!(
+                    "Output directory must be outside the input directory in remux mode: '{}' is within '{}'",
+                    out_dir.display(),
+                    input.display()
+                )
+            );
+            assert!(with_out_dir(PipelineMode::Extract, out_dir).is_ok());
+        }
+
+        for out_dir in [
+            tmp.path().join("input-out"),
+            tmp.path().to_path_buf(),
+            tmp.path().join("out/Remuxed"),
+            input.join("missing/../../Remuxed"),
+        ] {
+            assert!(
+                with_out_dir(PipelineMode::Remux, out_dir.clone()).is_ok(),
+                "{}",
+                out_dir.display()
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_validate_refuses_a_remux_out_dir_through_a_symlink_alias() {
+        let tmp = tempdir().unwrap();
+        let input = tmp.path().join("input");
+        std::fs::create_dir(&input).unwrap();
+        let alias = tmp.path().join("alias");
+        std::os::unix::fs::symlink(&input, &alias).unwrap();
+        // Either side may be the alias: the out_dir as typed, the input as the request holds it.
+        for (input_dir, out_dir) in [
+            (&input, alias.clone()),
+            (&input, alias.join("Remuxed")),
+            (&alias, input.join("Remuxed")),
+        ] {
+            let err = resolved(&BatchRequest {
+                mode: PipelineMode::Remux,
+                out_dir: Some(out_dir.clone()),
+                ..minimal_request(input_dir)
+            })
+            .unwrap_err();
+            assert_eq!(
+                err,
+                format!(
+                    "Output directory must be outside the input directory in remux mode: '{}' is within '{}'",
+                    out_dir.display(),
+                    input_dir.display()
+                )
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_validate_follows_a_symlink_reached_after_a_missing_parent() {
+        let tmp = tempdir().unwrap();
+        let input = tmp.path().join("input");
+        let elsewhere = tmp.path().join("elsewhere");
+        let outside = tmp.path().join("outside");
+        for dir in [&input, &elsewhere, &outside] {
+            std::fs::create_dir(dir).unwrap();
+        }
+        std::os::unix::fs::symlink(&input, outside.join("alias")).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, outside.join("away")).unwrap();
+        let with_out_dir = |out_dir: &PathBuf| {
+            resolved(&BatchRequest {
+                mode: PipelineMode::Remux,
+                out_dir: Some(out_dir.clone()),
+                ..minimal_request(&input)
+            })
+        };
+
+        // `missing` does not exist, so creating the out_dir makes it and then follows `alias`.
+        for out_dir in [
+            outside.join("missing/../alias"),
+            outside.join("missing/../alias/Remuxed"),
+        ] {
+            let err = with_out_dir(&out_dir).unwrap_err();
+            assert!(
+                err.starts_with("Output directory must be outside the input directory"),
+                "{err}"
+            );
+        }
+        for out_dir in [
+            outside.join("missing/../away"),
+            outside.join("missing/../away/Remuxed"),
+        ] {
+            assert!(with_out_dir(&out_dir).is_ok(), "{}", out_dir.display());
+        }
+    }
+
+    // Not on Windows, where `std::path::absolute` reads the current directory itself.
+    #[cfg(not(windows))]
+    #[test]
+    fn test_resolve_spelling_starts_a_relative_path_at_the_current_directory() {
+        let tmp = tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("in")).unwrap();
+        let cwd = || Ok(tmp.path().to_path_buf());
+        assert_eq!(
+            resolve_spelling_from(Path::new("missing/../in/Remuxed"), cwd).unwrap(),
+            tmp.path().canonicalize().unwrap().join("in/Remuxed")
+        );
+        // A current directory that cannot be read (deleted, say) fails closed: the path is
+        // unresolved, not outside anything.
+        let deleted = || Err(io::Error::from(io::ErrorKind::NotFound));
+        assert!(resolve_spelling_from(Path::new("in/Remuxed"), deleted).is_err());
+        let gone = || Ok(tmp.path().join("gone"));
+        assert!(resolve_spelling_from(Path::new("in/Remuxed"), gone).is_err());
+        // An absolute path never reads it.
+        assert!(resolve_spelling_from(&tmp.path().join("in"), deleted).is_ok());
+    }
+
+    // Unix only: the relative spelling climbs from the current directory to the file system root.
+    #[cfg(unix)]
+    #[test]
+    fn test_validate_resolves_a_relative_out_dir_against_the_current_directory() {
+        let tmp = tempdir().unwrap();
+        let input = tmp.path().join("input");
+        std::fs::create_dir(&input).unwrap();
+        let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
+        let to_root: PathBuf = cwd.components().skip(1).map(|_| "..").collect();
+        let relative =
+            |path: &Path| to_root.join(path.canonicalize().unwrap().strip_prefix("/").unwrap());
+        let with_out_dir = |out_dir: PathBuf| {
+            resolved(&BatchRequest {
+                mode: PipelineMode::Remux,
+                out_dir: Some(out_dir),
+                ..minimal_request(&input)
+            })
+        };
+
+        let out_dir = relative(&input).join("Remuxed");
+        assert!(out_dir.is_relative());
+        let err = with_out_dir(out_dir.clone()).unwrap_err();
+        assert!(
+            err.starts_with("Output directory must be outside the input directory"),
+            "{err}"
+        );
+        assert!(with_out_dir(relative(tmp.path()).join("Remuxed")).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_validate_refuses_a_remux_out_dir_it_cannot_resolve() {
+        let tmp = tempdir().unwrap();
+        let input = tmp.path().join("input");
+        std::fs::create_dir(&input).unwrap();
+        let file = tmp.path().join("file");
+        std::fs::write(&file, b"").unwrap();
+        // Canonicalizing `file/out` fails with ENOTDIR, not NotFound.
+        let out_dir = file.join("out");
+        let err = resolved(&BatchRequest {
+            mode: PipelineMode::Remux,
+            out_dir: Some(out_dir.clone()),
+            ..minimal_request(&input)
+        })
+        .unwrap_err();
+        assert!(
+            err.starts_with(&format!(
+                "Cannot determine whether the output directory '{}' is outside the input directory '{}': ",
+                out_dir.display(),
+                input.display()
+            )),
+            "{err}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_validate_collapses_parent_dirs_lexically_on_windows() {
+        let tmp = tempdir().unwrap();
+        let input = tmp.path().join("input");
+        let deep = tmp.path().join("elsewhere").join("deep");
+        std::fs::create_dir(&input).unwrap();
+        std::fs::create_dir_all(&deep).unwrap();
+        // Creating a symlink needs Developer Mode or elevation; CI's runner has it.
+        if let Err(err) = std::os::windows::fs::symlink_dir(&deep, input.join("link")) {
+            eprintln!("skipped: cannot create a directory symlink ({err})");
+            return;
+        }
+        // The link must resolve, or the check would pass without following it.
+        assert_eq!(
+            input.join("link").canonicalize().unwrap(),
+            deep.canonicalize().unwrap()
+        );
+        // Windows writes `input\link\..\Remuxed` to `input\Remuxed`, whatever `link` is.
+        let out_dir = input.join("link").join("..").join("Remuxed");
+        let err = resolved(&BatchRequest {
+            mode: PipelineMode::Remux,
+            out_dir: Some(out_dir),
+            ..minimal_request(&input)
+        })
+        .unwrap_err();
+        assert!(
+            err.starts_with("Output directory must be outside the input directory"),
+            "{err}"
+        );
     }
 
     #[test]

@@ -9,9 +9,11 @@ use std::time::Instant;
 
 pub use crate::domain::ItemOutcome;
 pub use crate::log_line::{LogKind, LogLine};
+use icu_normalizer::DecomposingNormalizerBorrowed;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Semaphore};
 pub use tokio_util::sync::CancellationToken;
+use unicase::UniCase;
 
 use crate::assets::{claim_leftover_chapters, ReleasePreparer};
 use crate::domain::{resolve_output_dir, IO_GOVERNOR_CLOSED};
@@ -21,11 +23,13 @@ use crate::inspect::inspect_videos;
 use crate::item_id::ItemId;
 use crate::media_tool::{warning_log_line, MediaToolRunner, SubprocessRunner};
 use crate::remux::{execute_remux_job, RemuxOptions};
-use crate::remux_plan::{PreparedDir, RemuxPlan, RemuxPlanner, RemuxWork};
-use crate::request::{resolve_selected_items, EffectiveSettings, TrackAssignment};
+use crate::remux_plan::{remux_output_file, PreparedDir, RemuxPlan, RemuxPlanner, RemuxWork};
+use crate::request::{
+    resolve_selected_items, resolve_spelling, EffectiveSettings, TrackAssignment,
+};
 use crate::scan::{
-    get_or_probe_video, scan_mkv_files, InspectedVideo, InspectionResult, ParsedFile,
-    PersistentInspectCache,
+    get_or_probe_video, is_output_dir_name, scan_mkv_files, InspectedVideo, InspectionResult,
+    ParsedFile, PersistentInspectCache,
 };
 
 pub const EVENT_VERSION: u64 = 1;
@@ -373,6 +377,160 @@ fn validate_assignment_targets(
     ))
 }
 
+/// The Unicode canonical caseless form of `path` (D145: NFD, full case folding, NFD again), so
+/// names differing only in case or Unicode normalization compare equal, as a case-folding or
+/// normalizing file system (ext4 casefold, APFS, NTFS, exFAT) may store them as one name: `ς`
+/// and `σ`, `ß` and `ss`, precomposed `é` and `e` + U+0301. Default-ignorable code points are
+/// kept, not dropped.
+fn caseless_key(path: &str) -> String {
+    let nfd = DecomposingNormalizerBorrowed::new_nfd();
+    nfd.normalize(&UniCase::new(nfd.normalize(path)).to_folded_case())
+        .into_owned()
+}
+
+/// Whether a resolved remux destination lies at or under the resolved input directory, outside
+/// every directory discovery skips as an output directory. Only the components below the input
+/// count, so an input that is itself named `Output` gets no exemption.
+fn lands_in_input(destination: &Path, input_dir: &Path) -> bool {
+    destination.strip_prefix(input_dir).is_ok_and(|relative| {
+        !relative.parent().is_some_and(|dirs| {
+            dirs.components()
+                .any(|dir| dir.as_os_str().to_str().is_some_and(is_output_dir_name))
+        })
+    })
+}
+
+/// Requires each remux destination of the batch to lie outside the input directory, unless under
+/// an `Output` directory discovery skips, to be no `discovered` source, and to be distinct, so no
+/// promotion replaces a source or another item's output. Fails naming every offending Item ID and
+/// its planned destination.
+///
+/// Each destination's directory is resolved as [`BatchRequest`](crate::request::BatchRequest)
+/// validation resolves `out_dir`, so a symlink inside the output root that leads into the input,
+/// or two output directories aliasing one, are caught. Each source is resolved through its file
+/// name too, so a symlink inside the input that leads out to where an output lands is caught.
+/// Resolved paths compare by [`caseless_key`], as the output may sit on a file system that folds
+/// case or normalizes Unicode: a false positive is an explicit error the user resolves by
+/// deselecting an item, a false negative a silent overwrite. Path comparison is not file
+/// identity, so bind mounts, hard links and alternate Windows roots are not detected. A path that
+/// cannot be resolved fails closed.
+fn validate_remux_destinations(
+    files: &[ParsedFile],
+    discovered: &[ParsedFile],
+    input_dir: &Path,
+    out_dir: Option<&Path>,
+) -> Result<(), String> {
+    let resolved_input = resolve_spelling(input_dir).map_err(|err| {
+        format!(
+            "Cannot determine whether remux outputs are outside the input directory '{}': {err}",
+            input_dir.display()
+        )
+    })?;
+    // A discovered source exists, so one `canonicalize` resolves it; only a source gone since
+    // discovery takes the component walk.
+    let mut source_keys = HashSet::with_capacity(discovered.len());
+    for source in discovered {
+        let resolved = match source.path.canonicalize() {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                resolve_spelling(&source.path)
+            }
+            resolved => resolved,
+        }
+        .map_err(|err| {
+            format!(
+                "Cannot determine whether a remux output would replace the source '{}': {err}",
+                ItemId::of(&source.path, input_dir)
+            )
+        })?;
+        source_keys.insert(caseless_key(&resolved.to_string_lossy()));
+    }
+    // Items of one release share a destination directory, so each is resolved once.
+    let mut resolved_dirs: HashMap<PathBuf, PathBuf> = HashMap::new();
+    let mut inside: Vec<String> = Vec::new();
+    let mut replacing: Vec<String> = Vec::new();
+    let mut group_by_key: HashMap<String, usize> = HashMap::with_capacity(files.len());
+    let mut groups: Vec<(PathBuf, Vec<ItemId>)> = Vec::new();
+    for file in files {
+        let destination = remux_output_file(file, input_dir, out_dir);
+        let id = ItemId::of(&file.path, input_dir);
+        // Promotion renames into the directory, replacing the entry there, so only the
+        // directory is resolved: an existing output that is a symlink is replaced, not followed.
+        let dir = destination.parent().unwrap_or(Path::new(""));
+        let resolved_dir = match resolved_dirs.entry(dir.to_path_buf()) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => entry.insert(resolve_spelling(dir).map_err(|err| {
+                format!(
+                    "Cannot determine whether the remux output of '{id}', '{}', is outside the input directory: {err}",
+                    destination.display()
+                )
+            })?),
+        };
+        let resolved = resolved_dir.join(destination.file_name().unwrap_or_default());
+        if lands_in_input(&resolved, &resolved_input) {
+            inside.push(format!("'{id}' -> '{}'", destination.display()));
+        }
+        let key = caseless_key(&resolved.to_string_lossy());
+        if source_keys.contains(&key) {
+            replacing.push(format!("'{id}' -> '{}'", destination.display()));
+        }
+        match group_by_key.entry(key) {
+            Entry::Occupied(entry) => groups[*entry.get()].1.push(id),
+            Entry::Vacant(entry) => {
+                entry.insert(groups.len());
+                groups.push((destination, vec![id]));
+            }
+        }
+    }
+    if !inside.is_empty() {
+        return Err(format!(
+            "Remux output would land inside the input directory, where it could replace a source or be rediscovered by the next run: {}",
+            inside.join("; ")
+        ));
+    }
+    if !replacing.is_empty() {
+        return Err(format!(
+            "Remux output would replace a source video: {}",
+            replacing.join("; ")
+        ));
+    }
+
+    let collisions: Vec<String> = groups
+        .iter()
+        .filter(|(_, ids)| ids.len() > 1)
+        .map(|(destination, ids)| {
+            let ids: Vec<String> = ids.iter().map(|id| format!("'{id}'")).collect();
+            format!("{} -> '{}'", ids.join(", "), destination.display())
+        })
+        .collect();
+    if collisions.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "Multiple items would write the same remux output: {}",
+        collisions.join("; ")
+    ))
+}
+
+/// Selects the items of a remux batch from `discovered` as a run does, and refuses them as the
+/// run would when a destination lands inside the input, replaces a source, or two share one,
+/// without probing anything. `--plan` calls it on the list it then inspects, so a plan fails
+/// where its run would and checks exactly the files it lists.
+///
+/// # Errors
+///
+/// The run's error for discovered files sharing an Item ID, for an unmatched selection, for a
+/// destination inside the input or onto a source, for colliding destinations, or for a source
+/// or destination that cannot be resolved.
+pub fn check_remux_destinations(
+    discovered: &[ParsedFile],
+    input_dir: &Path,
+    out_dir: Option<&Path>,
+    selected_items: Option<&[String]>,
+) -> Result<(), String> {
+    let files = apply_selected_items(discovered.to_vec(), input_dir, selected_items)?;
+    validate_remux_destinations(&files, discovered, input_dir, out_dir)
+}
+
 /// Orders planning outcomes by batch position, settling every item without one as cancelled.
 fn settle_cancelled_planning_items(
     files: &[ParsedFile],
@@ -569,21 +727,29 @@ impl BatchPipeline {
         &self,
     ) -> Result<(Vec<ParsedFile>, PipelineSummary), String> {
         let mut summary = PipelineSummary::default();
-        let files = scan_mkv_files(&self.config.input_dir, true, None);
+        let discovered = scan_mkv_files(&self.config.input_dir, true, None);
         let files = apply_selected_items(
-            files,
+            discovered.clone(),
             &self.config.input_dir,
             self.config.selected_items.as_deref(),
         )?;
 
         if self.config.mode == PipelineMode::Remux {
             // Fail closed before any batch or media work: a supplied assignment that no discovered
-            // item can consume aborts the run instead of falling back to automatic resolution.
+            // item can consume aborts the run instead of falling back to automatic resolution,
+            // and a destination inside the input, onto a source, or shared by two items aborts
+            // it instead of overwriting either.
             validate_assignment_targets(
                 self.config.track_assignments.as_deref().unwrap_or_default(),
                 &files,
                 &self.config.input_dir,
                 self.config.selected_items.as_deref(),
+            )?;
+            validate_remux_destinations(
+                &files,
+                &discovered,
+                &self.config.input_dir,
+                self.config.out_dir.as_deref(),
             )?;
         }
         summary.total = files.len();
@@ -1155,6 +1321,233 @@ mod tests {
             ..PipelineConfig::default()
         };
         BatchPipeline::new(config, None, CancellationToken::new())
+    }
+
+    #[test]
+    fn test_remux_destinations_compare_as_caseless_unicode() {
+        let check = |a: &str, b: &str| {
+            let files = [parsed_file(a), parsed_file(b)];
+            validate_remux_destinations(&files, &files, Path::new("/anime"), None)
+        };
+        for (a, b) in [
+            ("Show - 01.mkv", "show - 01.MKV"),
+            ("Show \u{3c3} - 01.mkv", "Show \u{3c2} - 01.mkv"),
+            ("Stra\u{df}e - 01.mkv", "Strasse - 01.mkv"),
+            ("Caf\u{e9} - 01.mkv", "Cafe\u{301} - 01.mkv"),
+            ("CAF\u{c9} - 01.mkv", "cafe\u{301} - 01.mkv"),
+        ] {
+            let err = check(a, b).unwrap_err();
+            assert!(
+                err.starts_with("Multiple items would write the same remux output: ")
+                    && err.contains(&format!("'{a}', '{b}'")),
+                "{a} / {b}: {err}"
+            );
+        }
+        for (a, b) in [
+            ("Show - 01.mkv", "Show - 02.mkv"),
+            ("Caf\u{e9} - 01.mkv", "Cafe - 01.mkv"),
+            ("Show \u{3c3} - 01.mkv", "Show s - 01.mkv"),
+        ] {
+            assert_eq!(check(a, b), Ok(()), "{a} / {b}");
+        }
+    }
+
+    /// The remux destinations check over `rels` under `input`, each a discovered file.
+    fn check_destinations(
+        input: &Path,
+        rels: &[&str],
+        out_dir: Option<&Path>,
+    ) -> Result<(), String> {
+        let files: Vec<ParsedFile> = rels
+            .iter()
+            .map(|rel| create_parsed_file(input.join(rel)))
+            .collect();
+        validate_remux_destinations(&files, &files, input, out_dir)
+    }
+
+    #[test]
+    fn test_remux_destinations_accept_equal_names_in_different_releases() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("input");
+        let rels = ["Show A/Show - 01.mkv", "Show B/Show - 01.mkv"];
+        for out_dir in [None, Some(tmp.path().join("out"))] {
+            assert_eq!(
+                check_destinations(&input, &rels, out_dir.as_deref()),
+                Ok(()),
+                "{out_dir:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_remux_destinations_refuse_landing_inside_the_input() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = tmp.path().join("a");
+        let input = parent.join("in");
+        for dir in ["in", "Season 1"] {
+            std::fs::create_dir_all(input.join(dir)).unwrap();
+        }
+        // An --out-dir above the input mirrors `in/x.mkv` to `<input>/x.mkv`, beside the sources.
+        let err = check_destinations(
+            &input,
+            &[
+                "in/Show - 01.mkv",
+                "in/Show - 02.mkv",
+                "Season 1/Show - 03.mkv",
+            ],
+            Some(&parent),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            format!(
+                "Remux output would land inside the input directory, where it could replace a source or be rediscovered by the next run: 'in/Show - 01.mkv' -> '{}'; 'in/Show - 02.mkv' -> '{}'",
+                input.join("Show - 01.mkv").display(),
+                input.join("Show - 02.mkv").display()
+            )
+        );
+        // Mirrored paths that stay outside the input, and the default `Output/` layout, pass.
+        assert_eq!(
+            check_destinations(&input, &["Season 1/Show - 03.mkv"], Some(&parent)),
+            Ok(())
+        );
+        assert_eq!(
+            check_destinations(&input, &["in/Show - 01.mkv", "Show - 02.mkv"], None),
+            Ok(())
+        );
+        // Only components below the input exempt: an input named `Output` gets none, so an
+        // --out-dir equal to it still lands each output beside its source.
+        let output_input = tmp.path().join("Output");
+        std::fs::create_dir(&output_input).unwrap();
+        let err =
+            check_destinations(&output_input, &["Show - 01.mkv"], Some(&output_input)).unwrap_err();
+        assert!(
+            err.starts_with("Remux output would land inside the input directory"),
+            "{err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_remux_destinations_follow_symlinks_in_the_output() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("input");
+        let out = tmp.path().join("out");
+        let real = tmp.path().join("real");
+        for dir in [input.join("Season 1"), out.clone(), real.clone()] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::os::unix::fs::symlink(input.join("Season 1"), out.join("Season 1")).unwrap();
+        std::os::unix::fs::symlink(&real, out.join("A")).unwrap();
+        std::os::unix::fs::symlink(&real, out.join("B")).unwrap();
+
+        // `out/Season 1` is the source's own directory: the output would replace the source.
+        let err = check_destinations(&input, &["Season 1/Show - 01.mkv"], Some(&out)).unwrap_err();
+        assert_eq!(
+            err,
+            format!(
+                "Remux output would land inside the input directory, where it could replace a source or be rediscovered by the next run: 'Season 1/Show - 01.mkv' -> '{}'",
+                out.join("Season 1/Show - 01.mkv").display()
+            )
+        );
+        // `out/A` and `out/B` are one directory, so the two outputs collide.
+        let err = check_destinations(&input, &["A/Show - 01.mkv", "B/Show - 01.mkv"], Some(&out))
+            .unwrap_err();
+        assert_eq!(
+            err,
+            format!(
+                "Multiple items would write the same remux output: 'A/Show - 01.mkv', 'B/Show - 01.mkv' -> '{}'",
+                out.join("A/Show - 01.mkv").display()
+            )
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_remux_destinations_refuse_replacing_a_source_reached_through_a_symlink() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("in");
+        let out = tmp.path().join("out");
+        for dir in [input.join("Other"), out.join("Show"), out.join("Other")] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        for file in [
+            input.join("Other/Show - 01.mkv"),
+            out.join("Show/Show - 01.mkv"),
+            out.join("Show - 02.mkv"),
+            out.join("Other/Show - 01.mkv"),
+        ] {
+            std::fs::write(file, b"").unwrap();
+        }
+        // A directory and a file inside the input that lead to where their own outputs land,
+        // and an unselected source whose file is where a selected item's output lands.
+        symlink(out.join("Show"), input.join("Show")).unwrap();
+        symlink(out.join("Show - 02.mkv"), input.join("Show - 02.mkv")).unwrap();
+        symlink(out.join("Other/Show - 01.mkv"), input.join("Link - 01.mkv")).unwrap();
+        let discovered = scan_mkv_files(&input, true, None);
+        assert_eq!(discovered.len(), 4);
+        let check = |item: &str| {
+            check_remux_destinations(&discovered, &input, Some(&out), Some(&[item.to_owned()]))
+        };
+        for item in ["Show/Show - 01.mkv", "Show - 02.mkv", "Other/Show - 01.mkv"] {
+            assert_eq!(
+                check(item),
+                Err(format!(
+                    "Remux output would replace a source video: '{item}' -> '{}'",
+                    out.join(item).display()
+                ))
+            );
+        }
+        assert_eq!(check("Link - 01.mkv"), Ok(()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_remux_destinations_fail_closed_when_a_directory_cannot_be_resolved() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("input");
+        std::fs::create_dir(&input).unwrap();
+        let file = tmp.path().join("file");
+        std::fs::write(&file, b"").unwrap();
+        // `file/out` exists as no directory and is not missing either: canonicalizing it fails
+        // with ENOTDIR, which must not read as "outside the input".
+        let err =
+            check_destinations(&input, &["Show - 01.mkv"], Some(&file.join("out"))).unwrap_err();
+        assert!(
+            err.starts_with(&format!(
+                "Cannot determine whether the remux output of 'Show - 01.mkv', '{}', is outside the input directory: ",
+                file.join("out/Show - 01.mkv").display()
+            )),
+            "{err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_remux_destinations_fail_closed_when_a_source_or_the_input_cannot_be_resolved() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("input");
+        std::fs::create_dir(&input).unwrap();
+        std::fs::write(input.join("file"), b"").unwrap();
+        // A source beneath a regular file canonicalizes with ENOTDIR, not NotFound.
+        let err = check_destinations(&input, &["file/Show - 01.mkv"], None).unwrap_err();
+        assert!(
+            err.starts_with(
+                "Cannot determine whether a remux output would replace the source 'file/Show - 01.mkv': "
+            ),
+            "{err}"
+        );
+
+        let input = input.join("file/input");
+        let err = check_destinations(&input, &["Show - 01.mkv"], None).unwrap_err();
+        assert!(
+            err.starts_with(&format!(
+                "Cannot determine whether remux outputs are outside the input directory '{}': ",
+                input.display()
+            )),
+            "{err}"
+        );
     }
 
     #[test]
