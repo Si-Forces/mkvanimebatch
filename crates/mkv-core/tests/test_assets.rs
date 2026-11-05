@@ -600,6 +600,34 @@ fn test_sole_leftover_claimed_by_only_eligible_video() {
     assert_eq!(claims, HashMap::from([(ep2, chap_xml)]));
 }
 
+/// A video whose probe failed counts as having no embedded chapters, so it stays a candidate.
+#[test]
+fn test_failed_probe_counts_as_no_embedded_chapters() {
+    let tmp = tempdir().unwrap();
+    let chap_xml = tmp.path().join("chapters.xml");
+    fs::write(&chap_xml, CHAPTER_XML).unwrap();
+    let ep1 = tmp.path().join("Show - 01.mkv");
+    let ep2 = tmp.path().join("Show - 02.mkv");
+    let videos = vec![create_parsed_file(&ep1), create_parsed_file(&ep2)];
+    let resolver = discover(&[tmp.path().to_path_buf()], None);
+    let failed = || InspectionResult::failure("bad header");
+
+    let with_chapters = InspectionResult::success(MkvmergeMetadata {
+        chapters: vec![MkvChapter {
+            num_entries: Some(5),
+        }],
+        ..Default::default()
+    });
+    let inspections = HashMap::from([(ep1.clone(), failed()), (ep2.clone(), with_chapters)]);
+    let claims = claim_leftover_chapters(&videos, &inspections, &resolver);
+    assert_eq!(claims, HashMap::from([(ep1.clone(), chap_xml)]));
+
+    let plain = InspectionResult::success(MkvmergeMetadata::default());
+    let inspections = HashMap::from([(ep1, failed()), (ep2, plain)]);
+    let claims = claim_leftover_chapters(&videos, &inspections, &resolver);
+    assert!(claims.is_empty());
+}
+
 #[test]
 fn test_no_claim_when_candidate_has_source_chapters() {
     let tmp = tempdir().unwrap();
@@ -622,6 +650,115 @@ fn test_no_claim_when_candidate_has_source_chapters() {
 
     let claims = claim_leftover_chapters(&videos, &inspections, &resolver);
     assert!(claims.is_empty());
+}
+
+/// Prepares each video's Release Directory under `root` as a batch does and returns every
+/// leftover chapter claim, none of the videos having embedded chapters. Each video is claimed
+/// for on its own, so a batch matches only when no two `videos` share a directory.
+fn leftover_claims(
+    root: &Path,
+    assets_dir: Option<&Path>,
+    videos: &[&Path],
+) -> HashMap<PathBuf, PathBuf> {
+    let mut preparer = ReleasePreparer::default();
+    let mut claims = HashMap::new();
+    for video in videos {
+        fs::create_dir_all(video.parent().unwrap()).unwrap();
+        let resolver = preparer
+            .prepare(video.parent().unwrap(), root, None, assets_dir)
+            .resolver;
+        let release = [create_parsed_file(video)];
+        claims.extend(claim_leftover_chapters(
+            &release,
+            &HashMap::new(),
+            &resolver,
+        ));
+    }
+    claims
+}
+
+#[test]
+fn test_ancestor_leftover_chapters_never_reach_a_nested_release() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    let root_chapters = root.join("chapters.xml");
+    fs::write(&root_chapters, CHAPTER_XML).unwrap();
+    let episode = root.join("Show - 01.mkv");
+    let special = root.join("Specials").join("Show - SP01.mkv");
+
+    let claims = leftover_claims(root, None, &[&episode, &special]);
+    assert_eq!(claims, HashMap::from([(episode, root_chapters)]));
+}
+
+#[test]
+fn test_nested_release_claims_its_own_leftover_beside_an_ancestor_one() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    let specials = root.join("Specials");
+    fs::create_dir_all(&specials).unwrap();
+    for dir in [root, specials.as_path()] {
+        fs::write(dir.join("chapters.xml"), CHAPTER_XML).unwrap();
+    }
+    let special = specials.join("Show - SP01.mkv");
+
+    let claims = leftover_claims(root, None, &[&special]);
+    assert_eq!(
+        claims,
+        HashMap::from([(special, specials.join("chapters.xml"))])
+    );
+}
+
+/// The directory boundary holds however the index was built: one filled through
+/// `ChapterIndex::add` keeps every file in one segment.
+#[test]
+fn test_flat_index_never_claims_a_root_leftover_for_a_nested_video() {
+    let tmp = tempdir().unwrap();
+    let root_chapters = tmp.path().join("chapters.xml");
+    fs::write(&root_chapters, CHAPTER_XML).unwrap();
+    let mut chap_index = ChapterIndex::new();
+    chap_index.add(&create_parsed_file(&root_chapters));
+    let resolver = AssetResolver {
+        chap_index,
+        ..Default::default()
+    };
+
+    let special = create_parsed_file(tmp.path().join("Specials").join("Show - SP01.mkv"));
+    assert!(claim_leftover_chapters(&[special], &HashMap::new(), &resolver).is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn test_leftover_chapters_match_a_directory_spelled_through_an_alias() {
+    let tmp = tempdir().unwrap();
+    let real = tmp.path().join("real");
+    fs::create_dir(&real).unwrap();
+    let chapters = real.join("chapters.xml");
+    fs::write(&chapters, CHAPTER_XML).unwrap();
+    let alias = tmp.path().join("alias");
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    // The index spells the directory one way and the video another, as a shared scan does.
+    let mut chap_index = ChapterIndex::new();
+    chap_index.add(&create_parsed_file(&chapters));
+    let resolver = AssetResolver {
+        chap_index,
+        ..Default::default()
+    };
+
+    let video = create_parsed_file(alias.join("Show - 01.mkv"));
+    let claims = claim_leftover_chapters(std::slice::from_ref(&video), &HashMap::new(), &resolver);
+    assert_eq!(claims, HashMap::from([(video.path, chapters)]));
+}
+
+#[test]
+fn test_assets_dir_leftover_chapters_are_never_claimed() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("Anime");
+    let assets = tmp.path().join("assets");
+    fs::create_dir_all(&assets).unwrap();
+    fs::write(assets.join("chapters.xml"), CHAPTER_XML).unwrap();
+
+    let episode = root.join("Show - 01.mkv");
+    assert!(leftover_claims(&root, Some(&assets), &[&episode]).is_empty());
 }
 
 #[test]

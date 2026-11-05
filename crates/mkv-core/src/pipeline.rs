@@ -557,18 +557,18 @@ fn settle_cancelled_planning_items(
         .collect()
 }
 
-/// Runs the Asset Resolver and font scan over each Release Directory. The pass is synchronous
-/// file I/O with no `.await`, so `cancel_token` is checked before each directory; returns
-/// `None` once it is cancelled.
+/// Runs the Asset Resolver and font scan over each Release Directory; the leftover chapter
+/// claims are left to [`claim_release_chapters`]. The pass is synchronous file I/O with no
+/// `.await`, so `cancel_token` is checked before each directory; returns `None` once it is
+/// cancelled.
 pub(crate) fn prepare_release_dirs<'a>(
     videos_by_dir: &BTreeMap<&'a Path, Vec<ParsedFile>>,
-    all_inspections: &HashMap<PathBuf, InspectionResult>,
     config: &PipelineConfig,
     cancel_token: &CancellationToken,
 ) -> Option<HashMap<&'a Path, PreparedDir>> {
     let mut preparer = ReleasePreparer::default();
     let mut prepared_dirs = HashMap::with_capacity(videos_by_dir.len());
-    for (&mkv_dir, dir_videos) in videos_by_dir {
+    for &mkv_dir in videos_by_dir.keys() {
         if cancel_token.is_cancelled() {
             return None;
         }
@@ -583,19 +583,68 @@ pub(crate) fn prepare_release_dirs<'a>(
             resolved_assets_dir.as_deref(),
         );
         let font_info = preparer.fonts(&prepared.fonts_dir);
-        let chapter_claims =
-            claim_leftover_chapters(dir_videos, all_inspections, &prepared.resolver);
 
         prepared_dirs.insert(
             mkv_dir,
             PreparedDir {
                 resolver: prepared.resolver,
                 font_info: Arc::new(font_info),
-                chapter_claims,
+                chapter_claims: HashMap::new(),
             },
         );
     }
     Some(prepared_dirs)
+}
+
+/// The unselected videos of `videos_by_dir` that a leftover chapter claim needs probed: the
+/// parsed ones of each Release Directory holding exactly one chapter file of its own with no
+/// episode number, the only directories where a claim is possible. An unparsed video is never
+/// a candidate. `files` are the batch's videos.
+fn leftover_claim_siblings(
+    videos_by_dir: &BTreeMap<&Path, Vec<ParsedFile>>,
+    prepared_dirs: &HashMap<&Path, PreparedDir>,
+    files: &[ParsedFile],
+) -> Vec<ParsedFile> {
+    let selected: HashSet<&Path> = files.iter().map(|file| file.path.as_path()).collect();
+    videos_by_dir
+        .iter()
+        .filter(|(dir, _)| {
+            prepared_dirs.get(*dir).is_some_and(|prepared| {
+                prepared
+                    .resolver
+                    .chap_index
+                    .sole_unmatched_in(dir)
+                    .is_some()
+            })
+        })
+        .flat_map(|(_, videos)| videos)
+        .filter(|video| video.parsed.is_some() && !selected.contains(video.path.as_path()))
+        .cloned()
+        .collect()
+}
+
+/// Claims each Release Directory's leftover chapter file, judging every video of it in
+/// `videos_by_dir` by `inspections` (`claim_leftover_chapters`).
+pub(crate) fn claim_release_chapters(
+    prepared_dirs: &mut HashMap<&Path, PreparedDir>,
+    videos_by_dir: &BTreeMap<&Path, Vec<ParsedFile>>,
+    inspections: &HashMap<PathBuf, InspectionResult>,
+) {
+    for (dir, prepared) in prepared_dirs {
+        if let Some(videos) = videos_by_dir.get(dir) {
+            prepared.chapter_claims =
+                claim_leftover_chapters(videos, inspections, &prepared.resolver);
+        }
+    }
+}
+
+/// A batch whose `BatchStart` has been emitted.
+struct StartedBatch {
+    /// The batch's items, in batch order.
+    files: Vec<ParsedFile>,
+    /// Every discovered file, selected or not.
+    discovered: Vec<ParsedFile>,
+    summary: PipelineSummary,
 }
 
 /// Why a spawned batch item did not complete.
@@ -723,9 +772,7 @@ impl BatchPipeline {
         }
     }
 
-    async fn prepare_batch_and_emit_start(
-        &self,
-    ) -> Result<(Vec<ParsedFile>, PipelineSummary), String> {
+    async fn prepare_batch_and_emit_start(&self) -> Result<StartedBatch, String> {
         let mut summary = PipelineSummary::default();
         let discovered = scan_mkv_files(&self.config.input_dir, true, None);
         let files = apply_selected_items(
@@ -777,7 +824,11 @@ impl BatchPipeline {
             self.emit_batch_complete(true, false).await;
         }
 
-        Ok((files, summary))
+        Ok(StartedBatch {
+            files,
+            discovered,
+            summary,
+        })
     }
 
     /// Runs `items` as `(item, payload)` on at most `max_workers` concurrent tasks,
@@ -923,7 +974,9 @@ impl BatchPipeline {
     }
 
     async fn run_extract(&self) -> Result<PipelineSummary, String> {
-        let (files, mut summary) = self.prepare_batch_and_emit_start().await?;
+        let StartedBatch {
+            files, mut summary, ..
+        } = self.prepare_batch_and_emit_start().await?;
         if files.is_empty() {
             return Ok(summary);
         }
@@ -1119,22 +1172,50 @@ impl BatchPipeline {
     }
 
     async fn run_remux(&self) -> Result<PipelineSummary, String> {
-        let (files, mut summary) = self.prepare_batch_and_emit_start().await?;
+        let StartedBatch {
+            files,
+            discovered,
+            mut summary,
+        } = self.prepare_batch_and_emit_start().await?;
         if files.is_empty() {
             return Ok(summary);
         }
 
-        let mut videos_by_dir: BTreeMap<&Path, Vec<ParsedFile>> = BTreeMap::new();
-        for file in &files {
-            let parent = file.path.parent().unwrap_or(Path::new("."));
-            videos_by_dir.entry(parent).or_default().push(file.clone());
+        // Each batch video's Release Directory with every video discovered in it, selected or
+        // not, so a leftover chapter claim is judged against the whole release.
+        let mut videos_by_dir: BTreeMap<&Path, Vec<ParsedFile>> = files
+            .iter()
+            .map(|file| (file.path.parent().unwrap_or(Path::new(".")), Vec::new()))
+            .collect();
+        for file in discovered {
+            if let Some(dir_videos) =
+                videos_by_dir.get_mut(file.path.parent().unwrap_or(Path::new(".")))
+            {
+                dir_videos.push(file);
+            }
         }
 
-        let cache = self.inspect_cache();
+        let Some(mut prepared_dirs) =
+            prepare_release_dirs(&videos_by_dir, &self.config, &self.cancel_token)
+        else {
+            return Ok(self.cancel_before_planning(&files, summary).await);
+        };
 
-        // Probe every batch video concurrently, across release directories, before planning.
+        // Probe every batch video concurrently, across release directories, before planning,
+        // with the unselected videos a leftover chapter claim needs, so a subset run claims as
+        // the full run does. Those are probed only: they never become items.
+        let probed: Vec<ParsedFile> = files
+            .iter()
+            .cloned()
+            .chain(leftover_claim_siblings(
+                &videos_by_dir,
+                &prepared_dirs,
+                &files,
+            ))
+            .collect();
+        let cache = self.inspect_cache();
         let Some(inspections) = inspect_videos(
-            &files,
+            &probed,
             (!self.config.no_cache).then_some(&cache),
             self.max_workers(),
             &self.cancel_token,
@@ -1143,20 +1224,12 @@ impl BatchPipeline {
         else {
             return Ok(self.cancel_before_planning(&files, summary).await);
         };
-        let all_inspections: HashMap<PathBuf, InspectionResult> = files
-            .iter()
-            .map(|file| file.path.clone())
+        let all_inspections: HashMap<PathBuf, InspectionResult> = probed
+            .into_iter()
+            .map(|file| file.path)
             .zip(inspections)
             .collect();
-
-        let Some(prepared_dirs) = prepare_release_dirs(
-            &videos_by_dir,
-            &all_inspections,
-            &self.config,
-            &self.cancel_token,
-        ) else {
-            return Ok(self.cancel_before_planning(&files, summary).await);
-        };
+        claim_release_chapters(&mut prepared_dirs, &videos_by_dir, &all_inspections);
 
         let mut remux_work: Vec<(BatchItemInfo, RemuxWork)> = Vec::new();
         let mut planning_outcomes = Vec::new();
@@ -1301,6 +1374,8 @@ impl BatchPipeline {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
     use crate::scan::create_parsed_file;
 
@@ -1587,15 +1662,73 @@ mod tests {
         let mut video = parsed_file("ep01.mkv");
         video.path = temp_dir.path().join("ep01.mkv");
         let videos_by_dir = BTreeMap::from([(temp_dir.path(), vec![video])]);
-        let inspections = HashMap::new();
         let cancel_token = CancellationToken::new();
 
-        let prepared = prepare_release_dirs(&videos_by_dir, &inspections, &config, &cancel_token);
+        let prepared = prepare_release_dirs(&videos_by_dir, &config, &cancel_token);
         assert_eq!(prepared.map(|dirs| dirs.len()), Some(1));
 
         cancel_token.cancel();
-        let prepared = prepare_release_dirs(&videos_by_dir, &inspections, &config, &cancel_token);
+        let prepared = prepare_release_dirs(&videos_by_dir, &config, &cancel_token);
         assert!(prepared.is_none());
+    }
+
+    /// Only a Release Directory holding exactly one unnumbered chapter file of its own has its
+    /// unselected parsed videos probed: not one with two, nor one whose only such file is an
+    /// ancestor's.
+    #[test]
+    fn leftover_claim_siblings_come_only_from_directories_with_one_own_leftover() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let two = root.join("Two");
+        let specials = root.join("Specials");
+        for dir in [&two, &specials] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        let xml = b"<?xml version='1.0'?><Chapters><EditionEntry></EditionEntry></Chapters>";
+        for chapters in [
+            root.join("chapters.xml"),
+            two.join("chapters_a.xml"),
+            two.join("chapters_b.xml"),
+        ] {
+            fs::write(chapters, xml).unwrap();
+        }
+        let video = |dir: &Path, name: &str| create_parsed_file(dir.join(name));
+        let files = [
+            video(root, "Show - 01.mkv"),
+            video(&two, "Show - 01.mkv"),
+            video(&specials, "Show - SP01.mkv"),
+        ];
+        // An unparsed video is never a leftover candidate, so it is never probed for one.
+        let unparsed = video(root, "Show - NCOP.mkv");
+        assert!(unparsed.parsed.is_none());
+        let videos_by_dir = BTreeMap::from([
+            (
+                root,
+                vec![
+                    files[0].clone(),
+                    video(root, "Show - 02.mkv"),
+                    unparsed.clone(),
+                ],
+            ),
+            (
+                two.as_path(),
+                vec![files[1].clone(), video(&two, "Show - 02.mkv")],
+            ),
+            (
+                specials.as_path(),
+                vec![files[2].clone(), video(&specials, "Show - SP02.mkv")],
+            ),
+        ]);
+        let config = PipelineConfig {
+            input_dir: root.to_path_buf(),
+            ..Default::default()
+        };
+        let prepared =
+            prepare_release_dirs(&videos_by_dir, &config, &CancellationToken::new()).unwrap();
+
+        let siblings = leftover_claim_siblings(&videos_by_dir, &prepared, &files);
+        let paths: Vec<&Path> = siblings.iter().map(|file| file.path.as_path()).collect();
+        assert_eq!(paths, [root.join("Show - 02.mkv")]);
     }
 
     #[tokio::test(flavor = "current_thread")]
