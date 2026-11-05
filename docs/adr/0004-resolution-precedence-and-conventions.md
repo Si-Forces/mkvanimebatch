@@ -1,6 +1,6 @@
 # 0004. Resolution Precedence and Naming Conventions
 
-> **Status**: Accepted (amended by ADR-0008; amended 2026-09-24, 2026-09-28, 2026-10-09)
+> **Status**: Accepted (amended by ADR-0008; amended 2026-09-24, 2026-09-28, 2026-10-09, 2026-11-05)
 > **Date**: 2026-03-15
 > **Context**: Media Engine Context
 
@@ -90,3 +90,12 @@ Both revisions are implemented. The ordering stated in the body is shipped behav
 - **Section 4 — cover names:** nearest directory, then exact before open (a directory cover and a bare-stem cover count as open), then kind, natural file name and full path.
 
 The Log Channel warning for several chapter files of one episode now names the same-directory files that match the video's season but were not chosen, and a duplicate in another directory is no longer an Engine Diagnostic, being the ladder working as designed. A season-2 video can therefore get a different subtitle, chapter file or cover than before.
+
+## Amendment — 2026-11-05 (leftover chapter file: the Release Directory, whole and alone)
+
+**Chapter files with no episode number.** Such a file is claimed for the one video that has neither a matching chapter file nor embedded chapters, when it is the Release Directory's only such file. Two parts of that rule are now fixed:
+
+- **The candidates are the whole Release Directory, not the selection.** The candidates used to be the selected videos only, so with twelve chapterless episodes and one unnumbered `chapters.xml` a full run left the file alone, but a run of one selected episode muxed it into that episode. Now every parsed discovered video of the directory is a candidate, selected or not, subject to the same chapter exclusions: a matching chapter file or embedded chapters. To judge the unselected ones as a full run does, the batch probes them before planning, through the same inspection path and persistent cache, but only in a Release Directory that holds exactly one unnumbered chapter file of its own, the only directories where a claim is possible. They are probed only: they get no item events, no summary counts, no Log Channel lines and no outputs. An unselected video whose probe fails counts as a candidate. Subset and full runs therefore agree: re-running episode 01 alone, when 02–12 carry embedded chapters, claims the file for 01 just as the full run does. The cost is a few header reads, mostly answered by the cache, in such directories alone. Claims apply only to selected items.
+- **Only the Release Directory's own files count.** The unnumbered files of every search directory, from the input root down, used to count as the release's, so a root `chapters.xml` next to `Show - 01.mkv` went to `Specials/Show - SP1.mkv`, and a legitimate unnumbered file in `Specials/` was never claimed because the root one made it ambiguous. Now only the unnumbered files in the video's own directory count, both for "the only such file" and for the claim. An unnumbered file in an ancestor directory is never claimed, and one in `--assets-dir` never was.
+
+An unnumbered file names no episode, so the only evidence tying it to a video is that it sits in that video's folder with nothing else it could belong to; a file higher up belongs to the videos beside it. Numbered chapter matching is unchanged: nearest directory, exact season before open, index order, then the `--assets-dir` fallback. A subset run whose unselected videos make the claim ambiguous, or a release whose only unnumbered chapter file is in a parent folder, can therefore get no chapters where it used to get that file.

@@ -12,7 +12,8 @@ use crate::domain::{
 };
 use crate::fonts::{find_fonts_dir, scan_fonts, FontInfo};
 use crate::scan::{
-    path_ext_lower, scan_assets, InspectedVideo, InspectionResult, ParsedFile, ScanCache,
+    canonical_or_self, path_ext_lower, scan_assets, InspectedVideo, InspectionResult, ParsedFile,
+    ScanCache,
 };
 
 fn ep_key(info: &EpisodeInfo) -> String {
@@ -365,6 +366,22 @@ impl ChapterIndex {
         self.segments
             .iter()
             .flat_map(|segment| segment.unmatched.iter().map(PathBuf::as_path))
+    }
+
+    /// The chapter file with no episode number directly in `dir`, when `dir` holds exactly one:
+    /// the only file a leftover chapter claim can hand out there (ADR-0004). A file's directory
+    /// that is spelled differently from `dir` is compared canonically, as the scan cache shares
+    /// one directory's index under the first spelling that reached it.
+    pub fn sole_unmatched_in(&self, dir: &Path) -> Option<&Path> {
+        let canonical_dir = canonical_or_self(dir);
+        let mut own = self.unmatched().filter(|path| {
+            path.parent()
+                .is_some_and(|parent| parent == dir || canonical_or_self(parent) == canonical_dir)
+        });
+        match (own.next(), own.next()) {
+            (Some(sole), None) => Some(sole),
+            _ => None,
+        }
     }
 }
 
@@ -944,15 +961,24 @@ impl AssetResolver {
     }
 }
 
-/// Assigns the release's only episode-less chapter file to its only episode that has neither a
-/// matching chapter file nor embedded chapters. Any ambiguity leaves it unclaimed.
+/// Assigns the Release Directory's only episode-less chapter file to its only episode that has
+/// neither a matching chapter file nor embedded chapters. Any ambiguity leaves it unclaimed.
+///
+/// `videos` are every discovered video of one Release Directory, selected or not, so a subset
+/// run judges the directory as a full run does; the batch probes the unselected ones of a
+/// directory where a claim is possible. A video absent from `inspection_results`, or whose probe
+/// failed, counts as having no embedded chapters. Only a file directly in the videos' directory
+/// counts: an ancestor's or an `--assets-dir` file is never claimed (ADR-0004).
 pub fn claim_leftover_chapters(
     videos: &[ParsedFile],
     inspection_results: &HashMap<PathBuf, InspectionResult>,
     resolver: &AssetResolver,
 ) -> HashMap<PathBuf, PathBuf> {
-    let mut unmatched = resolver.chap_index.unmatched();
-    let (Some(sole_chapter), None) = (unmatched.next(), unmatched.next()) else {
+    let Some(sole_chapter) = videos
+        .first()
+        .and_then(|video| video.path.parent())
+        .and_then(|dir| resolver.chap_index.sole_unmatched_in(dir))
+    else {
         return HashMap::new();
     };
 

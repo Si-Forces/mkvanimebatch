@@ -218,7 +218,9 @@ One audio track is kept. Japanese is preferred, then undetermined language (`und
 
 ### Chapters and covers
 
-- **Chapters**: an `.xml` file containing a `<Chapters>` element, whose name parses to the episode. The nearest folder wins. A chapter file in the release folders replaces the video's own chapters. A release's single chapter file with no episode number, and `--assets-dir` chapters, are used only when the video has none.
+- **Chapters**: an `.xml` file containing a `<Chapters>` element, whose name parses to the episode. The nearest folder wins. A chapter file in the release folders replaces the video's own chapters; `--assets-dir` chapters are used only when the video has none.
+  - A chapter file with no episode number is used only from the video's own folder, when it is that folder's only one and exactly one video there has neither a matching chapter file nor chapters of its own. One in a parent folder or `--assets-dir` is never used.
+  - Running some episodes gives each the same chapters as running the whole folder: the episodes you did not select are still checked for chapters of their own.
 - **Covers**: `cover.<ext>` and `folder.<ext>` apply to a folder and its subfolders. `<video-stem>_cover.<ext>`, `<video-stem>.cover.<ext>`, and `<video-stem>.<ext>` apply to one episode. The nearest folder wins, then `_cover`, `.cover`, the bare stem, `cover`, and `folder`, in that order. The bare-stem form only matches a video in the same folder. Covers in the release folders replace embedded artwork; `--assets-dir` covers are used only when the video has none.
 
 ### Fonts

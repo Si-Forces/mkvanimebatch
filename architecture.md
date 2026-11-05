@@ -251,7 +251,7 @@ flowchart TD
    - **Clearing**: `clear()` empties the instance and deletes the file, and discards a save in flight so it cannot restore the cleared entries. The desktop `clear_cache` clears the session instance when it is loaded; otherwise it deletes the file unparsed and starts the session from an empty instance. It is allowed during a running job; later puts persist. `--clear-cache` deletes the file without parsing it.
 
 4. **Bulk inspection (`inspect.rs`)**:
-   - `inspect_videos(files, cache, workers, cancel_token)` is the one place a file set is probed concurrently; preflight inspection (`generate_inspection_manifest`) and remux planning (`run_remux`) both call it (ADR-0013 Amendment 13). It spawns one task per file, bounded by a semaphore of `cpu::probe_concurrency(workers)` permits (`workers` is `cpu::default_workers()` for preflight and the Effective Settings' worker count, `max_workers()`, for a run), and each task goes through `get_or_probe_video`, so the cache lookup and store overlap with probing and are aborted with it.
+   - `inspect_videos(files, cache, workers, cancel_token)` is the one place a file set is probed concurrently; preflight inspection (`generate_inspection_manifest`) and remux planning (`run_remux`) both call it (ADR-0013 Amendment 13). `run_remux` adds the unselected videos a leftover chapter claim needs (§4.2 item 5); only the batch videos become items. It spawns one task per file, bounded by a semaphore of `cpu::probe_concurrency(workers)` permits (`workers` is `cpu::default_workers()` for preflight and the Effective Settings' worker count, `max_workers()`, for a run), and each task goes through `get_or_probe_video`, so the cache lookup and store overlap with probing and are aborted with it.
    - It returns one `InspectionResult` per file in input order, so callers have no missing case, or `None` once the token fires, after aborting the outstanding tasks. A probe task that panics becomes `Probe task failed: <reason>` for its own file and is logged once.
    - It calls `save_shared` on every exit, cancelled or not. It never prunes: only the completed preflight scan does (see Pruning above).
 
@@ -259,7 +259,7 @@ flowchart TD
 
 ### 4.2 Asset Resolution & Fansub Heuristics
 
-A release's search directories are the input root and every directory down to the video's directory. External subtitles, XML chapters, and covers are indexed from those directories and, when `--assets-dir` is given, from the assets directory (the subdirectory mirroring the release's position when it exists, else the assets root) and its parent as fallback indices.
+A release's search directories are the input root and every directory down to the video's directory. External subtitles, XML chapters, and covers are indexed from those directories and, when `--assets-dir` is given, from the assets directory (the subdirectory mirroring the release's position when it exists, else the assets root) and its parent as fallback indices. A chapter file with no episode number is the exception to that search: only one in the video's own Release Directory can be claimed (see item 5 below).
 
 ```mermaid
 flowchart TD
@@ -318,7 +318,7 @@ flowchart TD
    - Only a FLAC (`A_FLAC`) selection is transcoded; any other codec is copied.
 
 5. **Chapter & cover conventions (ADR-0004)**:
-   - Chapters: any `.xml` file whose first 4 KiB contain `<Chapters` followed by a space or `>` (case-insensitive) is a chapter file. It matches a video when its file stem parses to the same episode, with a compatible season (equal, or either unknown); no `_chapters` suffix is required. Among compatible files the nearest directory wins, then an exact season over an unknown one, then index order; the `--assets-dir` chapter index lists the assets directory before its parent (scan order, not ancestor distance). A chapter file with no episode number is claimed only when it is the release's only such file and exactly one parsed video has neither a matching chapter file nor embedded chapters (`claim_leftover_chapters`); otherwise it stays unclaimed. Claimed and `--assets-dir` chapters apply only to videos without embedded chapters. When the chosen file's directory holds other chapter files that are compatible with the item's season but were not chosen, the item that uses it logs `  Warning: More than one chapter file for this episode in '<dir>': using '<kept>', ignoring '<a>', '<b>'` (after `Processing:` in a run, after its `[DRY-RUN]` line in a dry run), naming them in index order. A file of another known season is never named, and a duplicate in another directory gets no warning.
+   - Chapters: any `.xml` file whose first 4 KiB contain `<Chapters` followed by a space or `>` (case-insensitive) is a chapter file. It matches a video when its file stem parses to the same episode, with a compatible season (equal, or either unknown); no `_chapters` suffix is required. Among compatible files the nearest directory wins, then an exact season over an unknown one, then index order; the `--assets-dir` chapter index lists the assets directory before its parent (scan order, not ancestor distance). A chapter file with no episode number is claimed only when it is the only such file in the Release Directory itself and exactly one parsed video of that directory has neither a matching chapter file nor embedded chapters (`claim_leftover_chapters`); otherwise it stays unclaimed. One in an ancestor directory or in `--assets-dir` is never claimed. The candidates are every parsed discovered video of the directory, selected or not. In a Release Directory with exactly one unnumbered chapter file of its own, `run_remux` probes the unselected parsed videos too, in the same `inspect_videos` call as the batch, so a subset run claims exactly as the full run does; those videos get no item events, summary counts, Log Channel lines or outputs, and one whose probe fails counts as a candidate (ADR-0004 amendment 2026-11-05). Claimed and `--assets-dir` chapters apply only to videos without embedded chapters. When the chosen file's directory holds other chapter files that are compatible with the item's season but were not chosen, the item that uses it logs `  Warning: More than one chapter file for this episode in '<dir>': using '<kept>', ignoring '<a>', '<b>'` (after `Processing:` in a run, after its `[DRY-RUN]` line in a dry run), naming them in index order. A file of another known season is never named, and a duplicate in another directory gets no warning.
    - Covers: directory covers are `cover.<ext>` and `folder.<ext>`. Episode covers are `<name>_cover.<ext>` and `<name>.cover.<ext>` where `<name>` parses to the video's episode, plus an adjacent `<video-stem>.<ext>`. A `*_cover` file whose name does not parse to an episode is never a directory cover. The nearest applicable directory wins before cover kind. Within a directory, an episode cover with an exact season (both known and equal) beats one with an unknown season, and a directory cover and every non-episode kind (the bare stem, including a `*_cover` file whose name does not parse) count as open; then ranking is episode `_cover` > `.cover` > adjacent bare stem > directory `cover` > `folder`. The bare-stem form requires the identical parent directory, so a root bare cover never attaches to a nested same-stem video. Because the fallback index ranks by the assets directory's own layout rather than the video's ancestors, a bare-stem cover inside `--assets-dir` only matches a video in that same directory; use `cover.<ext>`/`folder.<ext>` or the `_cover`/`.cover` forms for cross-directory `--assets-dir` covers. Equal-tier candidates break ties by natural file-name order, then full path. Release-tree covers supersede embedded artwork; `--assets-dir` covers apply only when the source has no cover attachment.
 
 ---
@@ -404,9 +404,10 @@ flowchart TD
     Select --> Targets["validate_assignment_targets\neach target matches exactly one video"]
     Targets --> Dests["validate_remux_destinations\nno output inside the input,\nnone onto a source, none shared"]
     Dests --> Start["Emit JobEvent::BatchStart"]
-    Start --> Probe["inspect_videos: probe all videos concurrently\n(workers * 2).clamp(2, 16) semaphore"]
-    Probe --> Prep["Per release directory:\nReleasePreparer::prepare and ::fonts,\nclaim_leftover_chapters"]
-    Prep --> Plan["Plan in batch order:\nRemuxPlanner decides one Remux Plan per item,\nrun_remux emits skipped / error / planned outcomes\nand collects the planned jobs"]
+    Start --> Prep["Per release directory:\nReleasePreparer::prepare and ::fonts"]
+    Prep --> Probe["inspect_videos: probe all batch videos concurrently,\nplus the unselected parsed ones of a directory with one\nunnumbered chapter file of its own\n(workers * 2).clamp(2, 16) semaphore"]
+    Probe --> Claim["Per release directory:\nclaim_leftover_chapters over every\ndiscovered video of the directory"]
+    Claim --> Plan["Plan in batch order:\nRemuxPlanner decides one Remux Plan per item,\nrun_remux emits skipped / error / planned outcomes\nand collects the planned jobs"]
     Plan --> Schedule["run_items: tokio JoinSet\nat most `workers` tasks in flight"]
 
     subgraph ItemTask["Per-item task"]
@@ -447,7 +448,7 @@ Extract mode skips bulk probing and planning up front: each item task probes its
 2. **Global work queue (ADR-0011)**:
    - Planned jobs from every release directory form one queue in batch order, so workers do not idle at directory boundaries. Asset resolution stays per directory.
 3. **Cooperative cancellation (`CancellationToken`)**:
-   - Checked while probing, after probing, before each Release Directory's asset pass, before planning each item, and before each task launch. Preflight inspection also checks it before each directory of its subtitle pass. A directory's pass already under way runs to completion. Each item's work future races the token in a `tokio::select!`, so a stop drops the in-flight work at its next await point.
+   - Checked before each Release Directory's asset pass, while probing, before planning each item, and before each task launch. Preflight inspection also checks it before each directory of its subtitle pass. A directory's pass already under way runs to completion. Each item's work future races the token in a `tokio::select!`, so a stop drops the in-flight work at its next await point.
    - Child processes are spawned by `SubprocessRunner` (§4.6) with `kill_on_drop(true)`, and scratch directories are `TempDir`s, so dropping the work kills the tools and removes staged files. After a stop, `run_items` aborts the remaining tasks and settles every in-flight and unstarted item as `cancelled`.
 4. **Item duration (ADR-0009)**:
    - The engine takes `Instant::now()` when it starts an item and puts `elapsed().as_secs_f64()` in `JobEvent::ItemComplete { duration_sec: Some(..) }` for every started item, whether it completed, failed, or was cancelled.
@@ -774,7 +775,7 @@ sequenceDiagram
     Cmd-->>UI: view-state (BatchStart: the participant rows; the batch clock runs)
     Note over Cmd,UI: Presentation Heartbeat: each whole second of the job's clock, while the batch clock runs and the view is visible, view-state (the processing rows' labels and the clock)
 
-    Note over Pipe: Probe, prepare release directories, plan
+    Note over Pipe: Prepare release directories, probe (batch plus leftover-claim siblings), claim leftover chapters, plan
     Pipe-->>Cmd: ItemComplete for skipped / failed-probe items
     Cmd-->>UI: view-state (settled rows)
 
