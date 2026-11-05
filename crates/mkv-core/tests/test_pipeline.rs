@@ -792,6 +792,195 @@ async fn test_remux_refuses_an_ancestor_out_dir_landing_in_the_input() {
     assert!(matches!(events.first(), Some(JobEvent::BatchStart { .. })));
 }
 
+/// `Show - 01.mkv` and `Show - 01.MKV` would name their Sidecars from one file stem, so an
+/// extract batch holding both is refused before BatchStart, in a dry run and a real one, and
+/// writes nothing; selecting one of them runs it.
+// Linux only: the colliding sources differ only by case, which takes a case-sensitive file
+// system; the default Windows and macOS ones are not.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn test_extract_rejects_items_whose_sidecars_share_names_before_batch_start() {
+    let input = tempdir().unwrap();
+    let cache_dir = tempdir().unwrap();
+    let videos = [
+        input.path().join("Show - 01.mkv"),
+        input.path().join("Show - 01.MKV"),
+    ];
+    for video in &videos {
+        fs::write(video, b"video").unwrap();
+    }
+    let mut metadata = video_metadata("A_AAC");
+    metadata.tracks.push(mkv_core::domain::MkvTrack {
+        id: Some(2),
+        track_type: "subtitles".to_string(),
+        codec: Some("S_TEXT/ASS".to_string()),
+        properties: mkv_core::domain::TrackProperties {
+            codec_id: Some("S_TEXT/ASS".to_string()),
+            language: Some("eng".to_string()),
+            ..Default::default()
+        },
+    });
+    let video_refs: Vec<&Path> = videos.iter().map(|video| video.as_path()).collect();
+    let run = |dry_run: bool, selected: Option<&[&str]>, runner: Arc<ScriptedRunner>| {
+        let (tx, mut rx) = create_event_channel(256);
+        let pipeline = BatchPipeline::new(
+            PipelineConfig {
+                selected_items: selected.map(|ids| ids.iter().map(|id| id.to_string()).collect()),
+                dry_run,
+                cache: Some(seeded_cache(cache_dir.path(), &video_refs, &metadata)),
+                // Keeps the run off the user's default font hash memo.
+                font_hash_memo: Some(Arc::new(parking_lot::Mutex::new(FontHashMemo::new(
+                    cache_dir.path().join("font_hash_memo.json"),
+                )))),
+                workers: 1,
+                io_jobs: 1,
+                ..config(PipelineMode::Extract, input.path())
+            },
+            Some(tx),
+            CancellationToken::new(),
+        )
+        .with_media_tool_runner(runner);
+        async move {
+            let result = pipeline.run().await;
+            let mut events = Vec::new();
+            while let Ok(event) = rx.try_recv() {
+                events.push(event);
+            }
+            (result, events)
+        }
+    };
+    let entries = || {
+        let mut names: Vec<String> = fs::read_dir(input.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    };
+
+    // The two IDs tie in natural order, so they keep the directory's listing order.
+    let destination = input.path().join("Show - 01");
+    let expected = |ids: &str| {
+        format!(
+            "Multiple items would extract files with the same names: {ids} -> '{}'",
+            destination.display()
+        )
+    };
+    for dry_run in [true, false] {
+        // An empty script: any Media Tool invocation panics.
+        let runner = Arc::new(ScriptedRunner::new([]));
+        let (result, events) = run(dry_run, None, runner.clone()).await;
+        let err = result.unwrap_err();
+        assert!(
+            err == expected("'Show - 01.mkv', 'Show - 01.MKV'")
+                || err == expected("'Show - 01.MKV', 'Show - 01.mkv'"),
+            "dry run {dry_run}: {err}"
+        );
+        assert!(
+            events.is_empty(),
+            "a collision must abort before BatchStart"
+        );
+        assert!(runner.calls().is_empty());
+        assert_eq!(entries(), ["Show - 01.MKV", "Show - 01.mkv"]);
+    }
+
+    let (result, events) = run(
+        true,
+        Some(&["Show - 01.MKV"]),
+        Arc::new(ScriptedRunner::new([])),
+    )
+    .await;
+    assert_eq!(result.unwrap().total, 1);
+    assert!(matches!(events.first(), Some(JobEvent::BatchStart { .. })));
+
+    let runner = Arc::new(ScriptedRunner::new([Step::exited(
+        MediaTool::Mkvextract,
+        0,
+        "",
+        "",
+    )
+    .writes_extract_targets(b"[Script Info]\n")]));
+    let (result, _events) = run(false, Some(&["Show - 01.MKV"]), runner.clone()).await;
+    let summary = result.unwrap();
+    assert_eq!(
+        (summary.total, summary.completed, summary.errors),
+        (1, 1, 0),
+        "{summary:#?}"
+    );
+    assert_eq!(runner.calls().len(), 1);
+    let subtitles: Vec<String> = entries()
+        .into_iter()
+        .filter(|name| name.ends_with(".ass"))
+        .collect();
+    assert_eq!(subtitles.len(), 1, "{:?}", entries());
+}
+
+/// `out/A` is a dangling link to `B`: extracting `B/Show - 01.mkv` creates `out/B`, after which
+/// `A/Show - 01.mkv` would extract into the same directory and replace B's Sidecars. The link
+/// cannot be resolved before the run, so the batch is refused before BatchStart.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_extract_rejects_an_output_dir_through_a_dangling_symlink_before_batch_start() {
+    let input = tempdir().unwrap();
+    let out = tempdir().unwrap();
+    let cache_dir = tempdir().unwrap();
+    let videos = [
+        input.path().join("A").join("Show - 01.mkv"),
+        input.path().join("B").join("Show - 01.mkv"),
+    ];
+    for video in &videos {
+        fs::create_dir_all(video.parent().unwrap()).unwrap();
+        fs::write(video, b"video").unwrap();
+    }
+    std::os::unix::fs::symlink("B", out.path().join("A")).unwrap();
+    let video_refs: Vec<&Path> = videos.iter().map(|video| video.as_path()).collect();
+    let metadata = video_metadata("A_AAC");
+    let expected = format!(
+        "Cannot determine the extract destination of 'A/Show - 01.mkv', '{}': '{}' is a symlink whose target does not exist",
+        out.path().join("A").join("Show - 01").display(),
+        out.path().canonicalize().unwrap().join("A").display()
+    );
+
+    for dry_run in [true, false] {
+        // An empty script: any Media Tool invocation panics.
+        let runner = Arc::new(ScriptedRunner::new([]));
+        let (tx, mut rx) = create_event_channel(256);
+        let pipeline = BatchPipeline::new(
+            PipelineConfig {
+                selected_items: Some(vec!["B/Show - 01.mkv".into(), "A/Show - 01.mkv".into()]),
+                out_dir: Some(out.path().to_path_buf()),
+                dry_run,
+                cache: Some(seeded_cache(cache_dir.path(), &video_refs, &metadata)),
+                // Keeps the run off the user's default font hash memo.
+                font_hash_memo: Some(Arc::new(parking_lot::Mutex::new(FontHashMemo::new(
+                    cache_dir.path().join("font_hash_memo.json"),
+                )))),
+                workers: 1,
+                io_jobs: 1,
+                ..config(PipelineMode::Extract, input.path())
+            },
+            Some(tx),
+            CancellationToken::new(),
+        )
+        .with_media_tool_runner(runner.clone());
+        assert_eq!(
+            pipeline.run().await.unwrap_err(),
+            expected,
+            "dry run {dry_run}"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "the refusal must come before BatchStart"
+        );
+        assert!(runner.calls().is_empty());
+        let entries: Vec<_> = fs::read_dir(out.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, ["A"], "dry run {dry_run}");
+    }
+}
+
 #[tokio::test]
 async fn test_pipeline_extract_persists_font_hash_memo() {
     let in_tmp = tempdir().unwrap();
