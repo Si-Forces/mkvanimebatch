@@ -16,11 +16,13 @@ Issue tracker conventions are in `docs/agents/issue-tracker.md`. If that file is
 
 ### 1. Pin the fixed point
 
-Whatever the user said is the fixed point (a commit SHA, branch name, tag, `main`, `HEAD~5`, etc.). If they didn't specify one, default to the upstream (`@{upstream}`, else `origin/HEAD`) and state the assumption in one line; ask only when neither resolves. Uncommitted work under review: diff the working tree against the fixed point (`git diff <fixed-point>`) instead.
+Whatever the user said is the fixed point (a commit SHA, branch name, tag, `main`, `HEAD~5`, etc.). If they didn't specify one, default to the branch's PR target (`origin/<baseRefName>`, from `gh pr view <branch-or-number> --json baseRefName`) or, for an unpushed branch stacked on another, the branch it forked from; else the default branch (`origin/HEAD`), not the branch's own upstream (once pushed, that holds the branch's own commits). State the assumption in one line; ask only when none resolves.
 
 Capture the diff command once: `git diff <fixed-point>...HEAD` (three-dot, so the comparison is against the merge-base). Also note the list of commits via `git log <fixed-point>..HEAD --oneline`.
 
-Before going further, confirm the fixed point resolves (`git rev-parse <fixed-point>`) and the diff is non-empty. A bad ref or empty diff should fail here, not inside two parallel sub-agents.
+Uncommitted work under review: diff the working tree against the merge-base instead (`git diff $(git merge-base <fixed-point> HEAD)`), so commits that landed on the fixed point after the branch forked don't read as reversions. That diff leaves out untracked files: list them from the repo root with `git ls-files --others --exclude-standard` and pass the paths to both sub-agents.
+
+Before going further, confirm the fixed point resolves (`git rev-parse <fixed-point>`) and the diff (with any untracked files) is non-empty. A bad ref or empty diff should fail here, not inside two parallel sub-agents.
 
 ### 2. Identify the spec source
 
@@ -61,13 +63,13 @@ Launch both with the Agent tool (`general-purpose`: they read files and run git)
 
 **Standards sub-agent prompt** should include:
 
-- The full diff command and commit list.
+- The full diff command and commit list, plus any untracked file paths.
 - The list of standards-source files you found in step 3, **plus the smell baseline from step 3** pasted in full (the sub-agent has no other access to it).
 - The brief: "Report, per file/hunk where relevant, (a) every place the diff violates a documented standard: cite the standard (file + the rule); and (b) any baseline smell you spot: name it and quote the hunk. Distinguish hard violations from judgement calls: documented-standard breaches can be hard, but baseline smells are always judgement calls, and a documented repo standard overrides the baseline. Skip anything tooling enforces. Under 400 words."
 
 **Spec sub-agent prompt** should include:
 
-- The diff command and commit list.
+- The diff command and commit list, plus any untracked file paths.
 - The path or fetched contents of the spec.
 - The brief: "Report: (a) requirements the spec asked for that are missing or partial; (b) behavior in the diff that wasn't asked for (scope creep); (c) requirements that look implemented but where the implementation looks wrong. Quote the spec line for each finding. Under 400 words."
 
