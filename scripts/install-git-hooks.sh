@@ -58,8 +58,8 @@ from the index, since git diff cannot see that edit. The refusal lists the files
 clear the bits.
 To bypass: git commit --no-verify (skips commit-msg and pre-commit), SKIP_SLOW_GATES=1 git push.
 
-Review a range with the code-review skill (Standards + Spec, parallel
-sub-agents), then record it before pushing:
+Review a range with the code-review skill (Standards + Spec; AGENTS.md
+names its path), then record it before pushing:
   scripts/review-gate.sh record-range <base> <head> "Standards+Spec over <base>..<head>, findings fixed"
 
 Check what is still unreviewed:  scripts/review-gate.sh status

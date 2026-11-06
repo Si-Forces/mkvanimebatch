@@ -64,7 +64,7 @@ CI also runs `cargo audit` (ignores in `.cargo/audit.toml`) and actionlint. Its 
 
 ### Code review for every commit
 
-Every change needs a Standards + Spec review before it is finalized; `jj gpush` refuses a non-empty commit without a recorded review. Run the code-review skill on the full committed diff (both axes in parallel sub-agents; the sub-agents work from the diff and source alone, with no cargo runs), then fix or explicitly accept the findings. `jj commit` is a local snapshot, so the practical sequence is commit → review → record → `jj gpush`; amend with `jj squash`/`jj describe` and re-review/re-record if findings land after the commit.
+Every change needs a Standards + Spec review before it is finalized; `jj gpush` refuses a non-empty commit without a recorded review. Run the code-review skill on the full committed diff (both axes in parallel sub-agents; the sub-agents work from the diff and source alone, with no cargo runs), then fix or explicitly accept the findings. There are two copies of it: Claude Code loads `anthropic-skills:code-review` (not the built-in `/code-review`); other agents, or Claude Code without that skill, read `.agents/skills/code-review/SKILL.md`. `jj commit` is a local snapshot, so the practical sequence is commit → review → record → `jj gpush`; amend with `jj squash`/`jj describe` and re-review/re-record if findings land after the commit.
 
 Record the review or `jj gpush` refuses the push:
 
