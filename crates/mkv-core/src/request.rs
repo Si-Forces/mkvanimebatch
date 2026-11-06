@@ -88,8 +88,9 @@ fn names_no_contained_path(raw: &str) -> bool {
 
 /// `path` resolved one component at a time, as creating it would walk it: a relative path starts
 /// at the canonical current directory, and after each name the path so far is canonicalized
-/// again when it exists, so a symlink is followed even when reached after a missing `..`. A `..`
-/// pops the last component, which is canonical or a name that does not exist yet, so no symlink.
+/// again when it exists, so a symlink is followed even when reached after a missing `..`. Only a
+/// name that is absent, not a dangling symlink, is appended as spelled. A `..` pops the last
+/// component, which is canonical or an absent name, so no symlink.
 /// On Windows the path is first made absolute as Windows does it (`GetFullPathNameW`, through
 /// `std::path::absolute`), which collapses `..` lexically against the current directory as set,
 /// even after a junction or symlink.
@@ -101,8 +102,10 @@ fn names_no_contained_path(raw: &str) -> bool {
 ///
 /// Fails closed, so a caller never mistakes an unresolved path for one outside a root: when the
 /// current directory cannot be read or canonicalized, when an existing component cannot be
-/// canonicalized (any error but `NotFound`, which marks a name still to be created), or when
-/// Windows cannot make the path absolute.
+/// canonicalized (any error but `NotFound`, which marks a name still to be created), when a
+/// component is a dangling symlink (where it leads is not known before its target exists, and
+/// creating the target, here or for another item, would make the link live and alias two output
+/// directories), or when Windows cannot make the path absolute.
 pub(crate) fn resolve_spelling(path: &Path) -> io::Result<PathBuf> {
     resolve_spelling_from(path, std::env::current_dir)
 }
@@ -131,7 +134,26 @@ fn resolve_spelling_from(
                 resolved.push(component);
                 match resolved.canonicalize() {
                     Ok(canonical) => resolved = canonical,
-                    Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                    // A dangling symlink is NotFound too, but whatever creates its target, such
+                    // as another item, makes the link live and moves where the path leads: only
+                    // an absent name is appended as spelled.
+                    Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                        match resolved.symlink_metadata() {
+                            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                            Err(err) => return Err(err),
+                            // Absent a moment ago: fail closed rather than read it twice.
+                            Ok(meta) if !meta.file_type().is_symlink() => return Err(err),
+                            Ok(_) => {
+                                return Err(io::Error::new(
+                                    io::ErrorKind::NotFound,
+                                    format!(
+                                        "'{}' is a symlink whose target does not exist",
+                                        resolved.display()
+                                    ),
+                                ))
+                            }
+                        }
+                    }
                     Err(err) => return Err(err),
                 }
             }
@@ -1593,6 +1615,36 @@ mod tests {
             "{err}"
         );
         assert!(with_out_dir(relative(tmp.path()).join("Remuxed")).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_validate_refuses_a_remux_out_dir_through_a_dangling_symlink() {
+        let tmp = tempdir().unwrap();
+        let input = tmp.path().join("input");
+        std::fs::create_dir(&input).unwrap();
+        // `out` leads to `input/Remuxed`, which does not exist yet: where the out_dir leads is
+        // unknown until that target exists, so it is refused, not taken as outside the input.
+        let link = tmp.path().join("out");
+        std::os::unix::fs::symlink(input.join("Remuxed"), &link).unwrap();
+        for out_dir in [link.clone(), link.join("Season 1")] {
+            let err = resolved(&BatchRequest {
+                mode: PipelineMode::Remux,
+                out_dir: Some(out_dir.clone()),
+                ..minimal_request(&input)
+            })
+            .unwrap_err();
+            assert_eq!(
+                err,
+                format!(
+                    "Cannot determine whether the output directory '{}' is outside the input directory '{}': '{}' is a symlink whose target does not exist",
+                    out_dir.display(),
+                    input.display(),
+                    tmp.path().canonicalize().unwrap().join("out").display()
+                )
+            );
+        }
+        assert!(!input.join("Remuxed").exists());
     }
 
     #[cfg(unix)]

@@ -3,13 +3,13 @@
 use std::path::{Path, PathBuf};
 
 use crate::domain::{
-    parse_episode, promote_file, safe_filename, select_best_subtitle_track, EpisodeInfo,
-    COVER_EXTENSIONS, SUBPROCESS_TIMEOUT,
+    parse_episode, promote_file, resolve_output_dir, safe_filename, select_best_subtitle_track,
+    EpisodeInfo, COVER_EXTENSIONS, SUBPROCESS_TIMEOUT,
 };
 use crate::fonts::{FontClaimsGuard, FontPromotion, FontRegistry};
 use crate::log_line::LogLine;
 use crate::media_tool::{self, MediaTool, MediaToolRunner};
-use crate::scan::{path_ext_lower, InspectedVideo};
+use crate::scan::{path_ext_lower, InspectedVideo, ParsedFile};
 
 #[derive(Debug, Default, Clone)]
 pub struct ExtractSummary {
@@ -18,6 +18,16 @@ pub struct ExtractSummary {
     pub extracted_cover: Option<PathBuf>,
     pub extracted_fonts: usize,
     pub log: Vec<LogLine>,
+}
+
+/// The directory `file`'s Sidecars are extracted to: its mirrored directory under `out_dir`, or
+/// beside its source without one. The destination check and the run both take it from here.
+pub(crate) fn extract_output_dir(
+    file: &ParsedFile,
+    input_dir: &Path,
+    out_dir: Option<&Path>,
+) -> PathBuf {
+    resolve_output_dir(&file.path, input_dir, out_dir)
 }
 
 /// Stem shared by extracted subtitle and chapter files: `{stem}_{EpLabel}{ep}` when the
