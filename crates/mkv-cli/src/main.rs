@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use mkv_core::manifest::{generate_inspection_manifest_for, InspectionManifest};
 use mkv_core::pipeline::{
-    check_remux_destinations, create_event_channel, BatchPipeline, CancellationToken, PipelineMode,
+    check_destinations, create_event_channel, BatchPipeline, CancellationToken,
 };
 use mkv_core::request::BatchRequest;
 use mkv_core::scan::{scan_mkv_files, PersistentInspectCache};
@@ -31,23 +31,22 @@ fn init_diagnostics() {
         .try_init();
 }
 
-/// Builds the `--plan` manifest, restricted to and ordered by `selected_items` when set. A remux
-/// plan first refuses, before any probe, the selected items a run would refuse for their
-/// destinations. The input is scanned once, so the manifest lists exactly the files checked.
+/// Builds the `--plan` manifest, restricted to and ordered by `selected_items` when set. It first
+/// refuses, before any probe, the selected items a run would refuse for their destinations. The
+/// input is scanned once, so the manifest lists exactly the files checked.
 async fn generate_plan_manifest(
     request: &BatchRequest,
     cache: Option<Arc<PersistentInspectCache>>,
     cancel_token: Option<&CancellationToken>,
 ) -> Result<InspectionManifest, String> {
     let discovered = scan_mkv_files(&request.input_dir, true, None);
-    if request.mode == PipelineMode::Remux {
-        check_remux_destinations(
-            &discovered,
-            &request.input_dir,
-            request.out_dir.as_deref(),
-            request.selected_items.as_deref(),
-        )?;
-    }
+    check_destinations(
+        request.mode,
+        &discovered,
+        &request.input_dir,
+        request.out_dir.as_deref(),
+        request.selected_items.as_deref(),
+    )?;
     let manifest =
         generate_inspection_manifest_for(&request.input_dir, &discovered, cache, cancel_token)
             .await?;
@@ -252,8 +251,77 @@ mod tests {
         let manifest = plan(&["--selected-item", "Show - 01.MKV"]).await.unwrap();
         let ids: Vec<&str> = manifest.items.iter().map(|item| item.id.as_str()).collect();
         assert_eq!(ids, vec!["Show - 01.MKV"]);
-        // Extract writes no remux output, so the pair is planned.
-        assert_eq!(plan(&["--extract"]).await.unwrap().items.len(), 3);
+    }
+
+    // Linux only: the colliding sources differ only by case, which takes a case-sensitive file
+    // system; the default Windows and macOS ones are not.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_cli_plan_refuses_extract_items_whose_sidecars_share_names() {
+        let dir = tempdir().unwrap();
+        write_files(
+            dir.path(),
+            &["Show - 01.mkv", "Show - 01.MKV", "Show - 02.mkv"],
+        );
+        let plan = |extra: &[&str]| {
+            let mut argv = vec!["--input-dir", path_arg(dir.path()), "--plan", "--extract"];
+            argv.extend_from_slice(extra);
+            let parsed = parse_args_from(argv).unwrap();
+            async move { generate_plan_manifest(&parsed.request, None, None).await }
+        };
+
+        // The two IDs tie in natural order, so they keep the directory's listing order.
+        let err = plan(&[]).await.unwrap_err();
+        let destination = dir.path().join("Show - 01");
+        let expected = |ids: &str| {
+            format!(
+                "Multiple items would extract files with the same names: {ids} -> '{}'",
+                destination.display()
+            )
+        };
+        assert!(
+            err == expected("'Show - 01.MKV', 'Show - 01.mkv'")
+                || err == expected("'Show - 01.mkv', 'Show - 01.MKV'"),
+            "{err}"
+        );
+
+        let manifest = plan(&["--selected-item", "Show - 01.MKV"]).await.unwrap();
+        let ids: Vec<&str> = manifest.items.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(ids, vec!["Show - 01.MKV"]);
+    }
+
+    /// `out/A` is a dangling link to `B`, which extracting `B/Show - 01.mkv` would create, so
+    /// `A/Show - 01.mkv` would then extract over B's files: the plan fails as the run would.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_cli_plan_refuses_an_extract_output_dir_through_a_dangling_symlink() {
+        let dir = tempdir().unwrap();
+        let out = tempdir().unwrap();
+        write_files(dir.path(), &["A/Show - 01.mkv", "B/Show - 01.mkv"]);
+        std::os::unix::fs::symlink("B", out.path().join("A")).unwrap();
+        let parsed = parse_args_from([
+            "--input-dir",
+            path_arg(dir.path()),
+            "--out-dir",
+            path_arg(out.path()),
+            "--plan",
+            "--extract",
+            "--no-cache",
+        ])
+        .unwrap();
+
+        let err = generate_plan_manifest(&parsed.request, None, None)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            format!(
+                "Cannot determine the extract destination of 'A/Show - 01.mkv', '{}': '{}' is a symlink whose target does not exist",
+                out.path().join("A").join("Show - 01").display(),
+                out.path().canonicalize().unwrap().join("A").display()
+            )
+        );
+        assert!(!out.path().join("B").exists());
     }
 
     #[tokio::test]
