@@ -62,6 +62,8 @@ CI also runs `cargo audit` (ignores in `.cargo/audit.toml`) and actionlint. Its 
 
 ## Workflow rules
 
+In a Claude Code cloud session, read "Claude Code cloud sessions" at the end of this section first.
+
 ### Code review for every commit
 
 Every change needs a Standards + Spec review before it is finalized; `jj gpush` refuses a non-empty commit without a recorded review. Run the code-review skill on the full committed diff (both axes in parallel sub-agents; the sub-agents work from the diff and source alone, with no cargo runs), then fix or explicitly accept the findings. There are two copies of it: Claude Code loads `anthropic-skills:code-review` (not the built-in `/code-review`); other agents, or Claude Code without that skill, read `.agents/skills/code-review/SKILL.md`. Keep the two identical: change one, then copy it to the other (the claude.ai copy is re-uploaded). `jj commit` is a local snapshot, so the practical sequence is commit → review → record → `jj gpush`; amend with `jj squash`/`jj describe` and re-review/re-record if findings land after the commit.
@@ -106,10 +108,10 @@ This repo is developed on a 4-core, 8 GB laptop, where a full workspace build us
 
 A cloud session (`CLAUDE_CODE_REMOTE=true`) commits and pushes its own `claude/...` branch with plain git, so the jj and git-hook rules above apply only to local clones:
 
-- Don't install jj or the hooks there. jj would detach HEAD from the session branch, pre-push would refuse the push (no recorded review, and a full test run), and commit-msg would refuse a Claude co-author trailer.
-- Use `git commit`, and run by hand what the gates would: `cargo fmt --all`, the clippy command and targeted tests for Rust changes, and the Node checks for UI or `scripts/` changes. CI runs the rest.
-- `.claude/settings.json` sets `attribution.commit` to `""` for every Claude Code session, local ones included. Upstream reports say it can be ignored (see the `scripts/hooks/commit-msg` header), so nothing in the cloud enforces the trailer ban.
-- Before merging a cloud branch, check it locally: `jj git fetch`, `jj new <branch>@origin`, then `jj gate` (the trailer ban, fmt, clippy), the code-review skill over `origin/main..origin/<branch>`, and `scripts/review-gate.sh record-range origin/main origin/<branch> "..."`. A merge on GitHub consults neither the gate nor the ledger.
+- Don't install jj or the hooks there. jj would detach HEAD from the session branch, pre-push would refuse a push without a recorded review, and commit-msg would refuse a Claude co-author trailer.
+- Use `git commit`, and run by hand what the gates would: `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings` and targeted tests for Rust, Cargo or Slint UI changes, and the Node checks ("CI formatting & lint gate") for UI or `scripts/` changes. CI runs the rest; the Standards + Spec review is the maintainer's check below.
+- The trailer ban still holds. `.claude/settings.json` sets `attribution.commit` to `""` for every Claude Code session, but upstream reports say it can be ignored (see the `scripts/hooks/commit-msg` header), and nothing in the cloud enforces the ban. After each `git commit`, read `git log -1 --format=%B`, and if a trailer names an AI agent as co-author, remove it with `git commit --amend -m "<the message without that trailer>"` before the next commit.
+- The maintainer's check, in a local clone before merging a cloud branch (not a cloud-session step): `jj git fetch`, `jj new <branch>@origin`, then `jj gate` (the trailer ban over the branch's commits, plus fmt, clippy and `node --check` for what changed), the code-review skill over `origin/main..origin/<branch>`, and `scripts/review-gate.sh record-range origin/main origin/<branch> "..."`. A merge on GitHub consults neither the gate nor the ledger, so this is the branch's only enforced trailer check and its Standards + Spec review.
 
 ## Agent skills
 
