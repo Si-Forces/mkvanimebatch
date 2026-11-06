@@ -2,8 +2,9 @@
 # Review-gate ledger for AGENTS.md's "always review before committing" rule.
 #
 # A git hook cannot run the Standards+Spec review itself: that needs the agent runtime.
-# What it CAN enforce is that no commit is pushed without a review recorded for it, which
-# moves the check to push time, where "this diff is too small to review" cannot skip it.
+# What it CAN enforce is that no commit is pushed without a review recorded for it (commits
+# already on origin/main excepted, see verify_push), which moves the check to push time, where
+# "this diff is too small to review" cannot skip it.
 #
 # Entries are keyed by `git patch-id` of the commit's diff against its first parent. A
 # review survives a rebase or amend that leaves the diff unchanged, but a different change
@@ -133,20 +134,22 @@ status() {
 # gives them a patch-id no ledger entry has, so a branch rebased onto main would otherwise
 # be refused for main's own commits. Fails closed on any endpoint it cannot resolve.
 verify_push() { # <remote-sha> <local-sha>
-  local base head commits sha n=0 exclude=()
+  local base head commits sha n=0 exclude=() from fork
   head=$(require_commit "$2")
   if [[ "$1" =~ ^0+$ ]]; then base=$(review_base "$head"); else base=$(require_commit "$1"); fi
+  # The range a refusal suggests: from the old remote tip, or from the fork point with
+  # origin/main when a rebase put main's commits after that tip, so it names only what is
+  # checked. With no shared history (an orphan branch, a shallow clone) it keeps the old tip.
+  from=$base
   # Without origin/main nothing is skipped, which only checks more.
-  if git rev-parse --verify --quiet origin/main > /dev/null; then exclude=(^origin/main); fi
+  if git rev-parse --verify --quiet origin/main > /dev/null; then
+    exclude=(^origin/main)
+    if fork=$(git merge-base origin/main "$head") && ! git merge-base --is-ancestor "$fork" "$base"; then
+      from=$fork
+    fi
+  fi
   # An assignment, not a for-list substitution, so a failed rev-list trips set -e.
   commits=$(git rev-list "$head" "^$base" "${exclude[@]}")
-  # The range to suggest: from the old remote tip, or from the fork point with origin/main when
-  # a rebase put main's commits after that tip, so the suggestion names only what is checked.
-  local from=$base fork
-  if [ ${#exclude[@]} -gt 0 ]; then
-    fork=$(git merge-base origin/main "$head") || die "$head shares no history with origin/main"
-    git merge-base --is-ancestor "$fork" "$base" || from=$fork
-  fi
   for sha in $commits; do
     if ! is_reviewed "$sha"; then
       {

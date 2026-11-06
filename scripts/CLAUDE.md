@@ -21,7 +21,9 @@ scripts/review-gate.sh record-range <base> <head> "Standards+Spec over <base>..<
 scripts/review-gate.sh status    # commits since origin/main that still lack a review
 ```
 
-The ledger keys each commit on the `git patch-id` of its diff, so a review survives a rebase or amend that leaves the diff unchanged. The push check (pre-push and `jj gpush`) skips commits already on `origin/main`. They are assumed reviewed, having landed through a PR, but a squash merge gives them a patch-id no ledger entry has, so a branch rebased onto `main` would otherwise be refused for `main`'s own commits. Repo scripts use `node`, not Python: ADR-0010 removed Python from dev and CI environments.
+The ledger keys each commit on the `git patch-id` of its diff, so a review survives a rebase or amend that leaves the diff unchanged. Repo scripts use `node`, not Python: ADR-0010 removed Python from dev and CI environments.
+
+The push check (pre-push and `jj gpush`) skips commits already on `origin/main`. They are assumed reviewed, having landed through a PR, but a squash merge gives them a patch-id no ledger entry has, so a branch rebased onto `main` would otherwise be refused for `main`'s own commits.
 
 ## Jujutsu (jj)
 
