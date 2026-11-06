@@ -4,7 +4,8 @@
 # Why a hook rather than a Claude Code setting: `attribution.commit: ""` in settings.json is
 # the documented lever, but it has open upstream reports of having no effect, so the trailer
 # can still land (anthropics/claude-code#45137, #65657). This hook is the enforceable half:
-# git records no commit whose trailer block names an AI agent.
+# git records no commit whose trailer block names an AI agent. The repo sets the setting too
+# (.claude/settings.json), which is all a Claude Code cloud session has: it runs no hooks.
 #
 # Scope is the trailer block only. A line of prose that mentions one, or a context line in a
 # `git commit -v` diff, is not a trailer and must not block the commit -- the next commit

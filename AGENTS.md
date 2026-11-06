@@ -79,7 +79,7 @@ Use the branch's actual fork point instead of `origin/main` if it differs. Revie
 
 The repo is colocated (`jj git init --colocate`): `.git` still exists, but commit with jj, not `git commit`.
 
-- New clone: run `scripts/install-git-hooks.sh` and `scripts/install-jj-aliases.sh` once. The repo-level jj config is not tracked; if `trunk()` is unknown, run `jj config set --repo 'revset-aliases."trunk()"' 'main@origin'`.
+- New local clone: run `scripts/install-git-hooks.sh` and `scripts/install-jj-aliases.sh` once. The repo-level jj config is not tracked; if `trunk()` is unknown, run `jj config set --repo 'revset-aliases."trunk()"' 'main@origin'`.
 - `jj gate` before `jj new` or `jj commit`, and again after any amend: it bans AI co-author trailers and runs fmt/clippy or UI syntax checks for what changed.
 - `jj gpush` instead of `jj git push`: it adds the review-ledger check and runs the test suites when `@` (or an empty `@-`) is the pushed tip. `jj` never runs git hooks, so plain `git push` still fires `scripts/hooks/pre-push`.
 - Emergency bypasses: `SKIP_REVIEW_GATE=1` and `SKIP_SLOW_GATES=1`; plain `jj git push` bypasses all jj gates. Don't use these to skip work.
@@ -101,6 +101,15 @@ This repo is developed on a 4-core, 8 GB laptop, where a full workspace build us
 - Let `jj gpush` (or the git pre-push hook) be the one `cargo test --workspace` run: push from a clean working copy, without `SKIP_SLOW_GATES`. For a commit that stays local, run `cargo test --workspace` once, after the last change.
 - Run one cargo process at a time across the main checkout and all worktrees, and in multi-agent work give cargo to a single agent.
 - Run the bench self-check only when you change `benches/`; Linux CI runs it.
+
+### Claude Code cloud sessions
+
+A cloud session (`CLAUDE_CODE_REMOTE=true`) commits and pushes its own `claude/...` branch with plain git, so the jj and git-hook rules above apply only to local clones:
+
+- Don't install jj or the hooks there. jj would detach HEAD from the session branch, pre-push would refuse the push (no recorded review, and a full test run), and commit-msg would refuse a Claude co-author trailer.
+- Use `git commit`, and run by hand what the gates would: `cargo fmt --all`, the clippy command and targeted tests for Rust changes, and the Node checks for UI or `scripts/` changes. CI runs the rest.
+- `.claude/settings.json` sets `attribution.commit` to `""` for every Claude Code session, local ones included. Upstream reports say it can be ignored (see the `scripts/hooks/commit-msg` header), so nothing in the cloud enforces the trailer ban.
+- Before merging a cloud branch, check it locally: `jj git fetch`, `jj new <branch>@origin`, then `jj gate` (the trailer ban, fmt, clippy), the code-review skill over `origin/main..origin/<branch>`, and `scripts/review-gate.sh record-range origin/main origin/<branch> "..."`. A merge on GitHub consults neither the gate nor the ledger.
 
 ## Agent skills
 
