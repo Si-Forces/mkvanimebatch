@@ -143,7 +143,7 @@ verify_push() { # <remote-sha> <local-sha>
         echo "❌ [review-gate] refusing to push: $(git rev-parse --short "$sha") has no recorded review."
         echo "   $(git log -1 --format=%s "$sha")"
         echo ""
-        echo "   Run the code-review skill (Standards + Spec, parallel sub-agents) over"
+        echo "   Run the code-review skill (Standards + Spec; AGENTS.md names its path) over"
         echo "   $(git rev-parse --short "$base")..$(git rev-parse --short "$head"), fix or explicitly accept the findings, then:"
         echo "     scripts/review-gate.sh record-range $(git rev-parse --short "$base") $(git rev-parse --short "$head") \"<what you reviewed>\""
         echo ""
