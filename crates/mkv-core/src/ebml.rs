@@ -3,8 +3,9 @@
 //! Reads Tracks (video, audio, subtitles), Attachments (fonts, covers), and whether Chapters
 //! exist, without running a Media Tool. A truncated tail or a malformed SeekHead entry ends the
 //! scan without failing. Any error (not an EBML/Matroska file, a Cluster before any SeekHead, a
-//! malformed Tracks or Attachments element, no track found, I/O failure) makes the caller fall
-//! back to `mkvmerge -J` (ADR-0006).
+//! malformed Tracks or Attachments subtree, no track found, I/O failure) makes the caller fall
+//! back to `mkvmerge -J` (ADR-0006). Inside a SeekHead, Tracks or Attachments, an element that
+//! ends past its parent is malformed.
 
 use std::fs::File;
 use std::io::{self, BufReader, Read, Seek};
@@ -164,6 +165,26 @@ fn read_vint_length<R: Read>(reader: &mut R) -> io::Result<u64> {
     Ok(value)
 }
 
+/// Reads the header of a child of the element ending at `parent_end`: its ID, length and end.
+/// A child that ends past its parent is malformed: the parent's loop would read the elements
+/// after the parent as children, then read them again once it returns, which makes overlapping
+/// elements quadratic (#181).
+fn read_child_header<R: Read + Seek>(
+    reader: &mut EbmlReader<R>,
+    parent_end: u64,
+) -> io::Result<(u32, u64, u64)> {
+    let id = read_element_id(reader)?;
+    let len = read_vint_length(reader)?;
+    let end = reader.element_end(len, "EBML child length overflow")?;
+    if end > parent_end {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("EBML element {id:#X} overruns its parent"),
+        ));
+    }
+    Ok((id, len, end))
+}
+
 fn read_uint<R: Read>(reader: &mut R, size: u64) -> io::Result<u64> {
     if size > 8 {
         return Err(invalid_data("Uint size > 8"));
@@ -192,9 +213,10 @@ fn read_string<R: Read>(reader: &mut R, size: u64) -> io::Result<String> {
 }
 
 /// Native EBML probe for Matroska files. Returns `Err` when the file is not Matroska, a
-/// Cluster precedes any SeekHead, a Tracks or Attachments element is malformed, no track is
+/// Cluster precedes any SeekHead, a Tracks or Attachments subtree is malformed, no track is
 /// found, or I/O fails; `probe_video` then falls back to `mkvmerge -J`. A truncated tail or a
-/// malformed SeekHead entry ends the scan without failing.
+/// malformed SeekHead entry ends the scan without failing. Inside a SeekHead, Tracks or
+/// Attachments, an element that ends past its parent is malformed.
 pub fn probe_ebml_native(path: &Path) -> Result<MkvmergeMetadata, String> {
     probe(path).map_err(|e| e.to_string())
 }
@@ -336,32 +358,22 @@ fn read_seek_head<R: Read + Seek>(
     targets: &mut SeekTargets,
 ) -> io::Result<()> {
     while reader.pos() < end {
-        let Ok(entry_id) = read_element_id(reader) else {
-            break;
-        };
-        let Ok(entry_len) = read_vint_length(reader) else {
+        // An entry past the SeekHead is malformed too: it would walk the top-level elements
+        // after the SeekHead, which the caller then reads again (#181).
+        let Ok((entry_id, _, entry_end)) = read_child_header(reader, end) else {
             break;
         };
         if entry_id != ID_SEEK {
-            if reader.skip(entry_len).is_err() {
+            if reader.seek_to(entry_end).is_err() {
                 break;
             }
             continue;
         }
 
-        let Ok(entry_end) = reader.element_end(entry_len, "Seek entry length overflow") else {
-            break;
-        };
         let mut target_id: Option<u32> = None;
         let mut target_pos: Option<u64> = None;
         while reader.pos() < entry_end {
-            let Ok(child) = read_element_id(reader) else {
-                break;
-            };
-            let Ok(child_len) = read_vint_length(reader) else {
-                break;
-            };
-            let Ok(child_end) = reader.element_end(child_len, "Seek child length overflow") else {
+            let Ok((child, child_len, child_end)) = read_child_header(reader, entry_end) else {
                 break;
             };
             match child {
@@ -411,9 +423,7 @@ fn parse_tracks_block<R: Read + Seek>(
     let end = reader.element_end(len, "Tracks block length overflow")?;
     let mut track_idx = tracks.len() as u32;
     while reader.pos() < end {
-        let entry_id = read_element_id(reader)?;
-        let entry_len = read_vint_length(reader)?;
-        let entry_end = reader.element_end(entry_len, "Track entry length overflow")?;
+        let (entry_id, entry_len, entry_end) = read_child_header(reader, end)?;
         if entry_id == ID_TRACK_ENTRY {
             let mut track = parse_track_entry(reader, entry_len)?;
             track.id = Some(track_idx);
@@ -434,9 +444,7 @@ fn parse_attachments_block<R: Read + Seek>(
     let end = reader.element_end(len, "Attachments block length overflow")?;
     let mut att_id = (attachments.len() + 1) as u32;
     while reader.pos() < end {
-        let file_id = read_element_id(reader)?;
-        let file_len = read_vint_length(reader)?;
-        let entry_end = reader.element_end(file_len, "Attached file length overflow")?;
+        let (file_id, file_len, entry_end) = read_child_header(reader, end)?;
         if file_id == ID_ATTACHED_FILE {
             let mut att = parse_attached_file(reader, file_len)?;
             att.id = Some(att_id);
@@ -462,8 +470,7 @@ fn parse_track_entry<R: Read + Seek>(reader: &mut EbmlReader<R>, len: u64) -> io
     let mut channels: Option<u32> = None;
 
     while reader.pos() < end {
-        let child_id = read_element_id(reader)?;
-        let child_len = read_vint_length(reader)?;
+        let (child_id, child_len, child_end) = read_child_header(reader, end)?;
 
         match child_id {
             ID_TRACK_TYPE => {
@@ -486,10 +493,8 @@ fn parse_track_entry<R: Read + Seek>(reader: &mut EbmlReader<R>, len: u64) -> io
                 read_uint(reader, child_len)?;
             }
             ID_VIDEO => {
-                let v_end = reader.element_end(child_len, "Video element length overflow")?;
-                while reader.pos() < v_end {
-                    let vid_child = read_element_id(reader)?;
-                    let vid_len = read_vint_length(reader)?;
+                while reader.pos() < child_end {
+                    let (vid_child, vid_len, vid_end) = read_child_header(reader, child_end)?;
                     match vid_child {
                         ID_PIXEL_WIDTH => {
                             pixel_width = Some(read_uint(reader, vid_len)? as u32);
@@ -498,23 +503,21 @@ fn parse_track_entry<R: Read + Seek>(reader: &mut EbmlReader<R>, len: u64) -> io
                             pixel_height = Some(read_uint(reader, vid_len)? as u32);
                         }
                         _ => {
-                            reader.skip(vid_len)?;
+                            reader.seek_to(vid_end)?;
                         }
                     }
                 }
             }
             ID_AUDIO => {
                 let mut explicit_channels: Option<u32> = None;
-                let a_end = reader.element_end(child_len, "Audio element length overflow")?;
-                while reader.pos() < a_end {
-                    let aud_child = read_element_id(reader)?;
-                    let aud_len = read_vint_length(reader)?;
+                while reader.pos() < child_end {
+                    let (aud_child, aud_len, aud_end) = read_child_header(reader, child_end)?;
                     match aud_child {
                         ID_CHANNELS => {
                             explicit_channels = Some(read_uint(reader, aud_len)? as u32);
                         }
                         _ => {
-                            reader.skip(aud_len)?;
+                            reader.seek_to(aud_end)?;
                         }
                     }
                 }
@@ -522,7 +525,7 @@ fn parse_track_entry<R: Read + Seek>(reader: &mut EbmlReader<R>, len: u64) -> io
                 channels = Some(explicit_channels.unwrap_or(1));
             }
             _ => {
-                reader.skip(child_len)?;
+                reader.seek_to(child_end)?;
             }
         }
     }
@@ -574,8 +577,7 @@ fn parse_attached_file<R: Read + Seek>(
     let mut size: Option<u64> = None;
 
     while reader.pos() < end {
-        let child_id = read_element_id(reader)?;
-        let child_len = read_vint_length(reader)?;
+        let (child_id, child_len, child_end) = read_child_header(reader, end)?;
 
         match child_id {
             ID_FILE_NAME => {
@@ -586,10 +588,10 @@ fn parse_attached_file<R: Read + Seek>(
             }
             ID_FILE_DATA => {
                 size = Some(child_len);
-                reader.skip(child_len)?;
+                reader.seek_to(child_end)?;
             }
             _ => {
-                reader.skip(child_len)?;
+                reader.seek_to(child_end)?;
             }
         }
     }
@@ -655,6 +657,35 @@ mod tests {
         let mut buf = vec![0x83, 0x81, 0x02];
         buf.extend_from_slice(audio_block);
         buf
+    }
+
+    #[test]
+    fn test_seek_entry_overrunning_its_seek_head_ends_the_scan_at_the_seek_head() {
+        // A 14-byte SeekHead: one Seek entry (0x4DBB) of `size` listing Tracks (SeekID
+        // 0x1654AE6B) at SeekPosition 0x10, then a top-level Void (0xEC, size 0) after it.
+        let seek_head = |size: u8| {
+            let mut buf = vec![0x4D, 0xBB, size, 0x53, 0xAB, 0x84, 0x16, 0x54, 0xAE, 0x6B];
+            buf.extend([0x53, 0xAC, 0x81, 0x10, 0xEC, 0x80]);
+            buf
+        };
+        let head_end = 14;
+
+        // An entry ending exactly at the SeekHead's end is read.
+        let mut targets = SeekTargets::default();
+        let mut reader = EbmlReader::new(Cursor::new(seek_head(0x8B)));
+        read_seek_head(&mut reader, head_end, &mut targets).unwrap();
+        assert_eq!((targets.tracks, reader.pos()), (Some(0x10), head_end));
+
+        // One byte longer, it would read the Void after the SeekHead: the scan ends instead.
+        let mut targets = SeekTargets::default();
+        let mut reader = EbmlReader::new(Cursor::new(seek_head(0x8C)));
+        read_seek_head(&mut reader, head_end, &mut targets).unwrap();
+        assert_eq!(targets.tracks, None);
+        assert!(
+            reader.pos() <= 3,
+            "read past the SeekHead to {}",
+            reader.pos()
+        );
     }
 
     #[test]

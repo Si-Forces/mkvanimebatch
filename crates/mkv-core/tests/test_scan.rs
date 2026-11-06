@@ -804,6 +804,167 @@ fn test_corrupted_track_entry_fails_native_probe() {
     );
 }
 
+/// Two TrackEntries. The first holds a Video or Audio `master` element with one 3-byte `leaf`
+/// child, the master element's size declared `overrun` bytes longer than the leaf.
+fn tracks_with_master(track_type: u8, master: u8, leaf: [u8; 3], overrun: u8) -> Vec<u8> {
+    let mut payload = vec![0xAE, 0x88]; // TrackEntry (length 8)
+    payload.extend([0x83, 0x81, track_type]); // TrackType
+    payload.extend([master, 0x80 | (3 + overrun)]);
+    payload.extend(leaf);
+    payload.extend(VALID_VIDEO_TRACK_ENTRY);
+    mkv_with_tracks_payload(&payload)
+}
+
+/// Asserts that the native probe of `bytes` fails because element `id` (as `0x..`) overruns
+/// its parent.
+fn assert_native_probe_overrun(mkv: &Path, bytes: &[u8], id: &str) {
+    fs::write(mkv, bytes).unwrap();
+    let ebml_res = mkv_core::ebml::probe_ebml_native(mkv);
+    assert!(
+        ebml_res
+            .as_ref()
+            .is_err_and(|e| e.contains(&format!("EBML element {id} overruns its parent"))),
+        "Expected element {id} to overrun its parent, got: {ebml_res:?}"
+    );
+}
+
+#[test]
+fn test_video_or_audio_or_its_leaf_overrunning_its_parent_fails_native_probe() {
+    let tmp = tempdir().unwrap();
+    let overrun = VALID_VIDEO_TRACK_ENTRY.len() as u8;
+    // (TrackType, Video or Audio ID, PixelWidth = 16 or Channels = 2)
+    let cases = [(1, 0xE0, [0xB0, 0x81, 0x10]), (2, 0xE1, [0x9F, 0x81, 0x02])];
+    for (track_type, master, leaf) in cases {
+        let mkv = tmp.path().join(format!("master_{master:02X}.mkv"));
+
+        fs::write(&mkv, tracks_with_master(track_type, master, leaf, 0)).unwrap();
+        let meta = mkv_core::ebml::probe_ebml_native(&mkv).unwrap();
+        assert_eq!(
+            meta.tracks.len(),
+            2,
+            "well-formed control, master element {master:02X}"
+        );
+
+        // First the master element spans the second entry; re-reading it made overlapping
+        // entries quadratic (#181). Then the leaf, declared 3 bytes, overruns the master element.
+        let master_overrun = tracks_with_master(track_type, master, leaf, overrun);
+        assert_native_probe_overrun(&mkv, &master_overrun, &format!("{master:#X}"));
+        let leaf_overrun = tracks_with_master(track_type, master, [leaf[0], 0x83, leaf[2]], 0);
+        assert_native_probe_overrun(&mkv, &leaf_overrun, &format!("{:#X}", leaf[0]));
+    }
+}
+
+const TRACKS_ID: [u8; 4] = [0x16, 0x54, 0xAE, 0x6B];
+const ATTACHMENTS_ID: [u8; 4] = [0x19, 0x41, 0xA4, 0x69];
+const TRACK_ENTRY_ID: [u8; 1] = [0xAE];
+const ATTACHED_FILE_ID: [u8; 2] = [0x61, 0xA7];
+/// FileName = "a".
+const FILE_NAME_A: [u8; 4] = [0x46, 0x6E, 0x81, b'a'];
+
+/// An EBML element `id` around `payload`, its size declared `extra` bytes longer. The size is
+/// always an 8-byte VINT, so the element's length does not depend on `extra`.
+fn element(id: &[u8], payload: &[u8], extra: usize) -> Vec<u8> {
+    let mut elem = id.to_vec();
+    elem.push(0x01);
+    elem.extend(&((payload.len() + extra) as u64).to_be_bytes()[1..]);
+    elem.extend_from_slice(payload);
+    elem
+}
+
+/// `elements` as the payload of a Segment.
+fn mkv_with_segment(elements: &[u8]) -> Vec<u8> {
+    let mut data = EBML_HEADER_AND_SEGMENT_ID.to_vec();
+    data.extend(element(&[], elements, 0)); // the Segment's size, then its payload
+    data
+}
+
+/// `n` `parent` elements, each holding one `child` element around `payload`. With `overlap`,
+/// each child's size also spans every parent after its own.
+fn chain(parent: &[u8], child: &[u8], payload: &[u8], n: usize, overlap: bool) -> Vec<u8> {
+    let parent_len = element(parent, &element(child, payload, 0), 0).len();
+    (0..n)
+        .flat_map(|i| {
+            let rest = if overlap { (n - 1 - i) * parent_len } else { 0 };
+            element(parent, &element(child, payload, rest), 0)
+        })
+        .collect()
+}
+
+#[test]
+fn test_overlapping_track_entries_or_attached_files_fail_native_probe() {
+    const N: usize = 32;
+    let tmp = tempdir().unwrap();
+    let mkv = tmp.path().join("chain.mkv");
+    // TrackNumber = 1 and TrackType = 1 (video), without the TrackEntry header.
+    let track_fields = &VALID_VIDEO_TRACK_ENTRY[2..];
+    let one_track = element(&TRACKS_ID, &VALID_VIDEO_TRACK_ENTRY, 0);
+    let tracks_chain = |overlap| chain(&TRACKS_ID, &TRACK_ENTRY_ID, track_fields, N, overlap);
+    let attachments_chain = |overlap| {
+        let files = chain(&ATTACHMENTS_ID, &ATTACHED_FILE_ID, &FILE_NAME_A, N, overlap);
+        [one_track.as_slice(), &files].concat()
+    };
+
+    // Each entry ending exactly at its parent's end is well formed.
+    fs::write(&mkv, mkv_with_segment(&tracks_chain(false))).unwrap();
+    let meta = mkv_core::ebml::probe_ebml_native(&mkv).unwrap();
+    assert_eq!(meta.tracks.len(), N);
+    fs::write(&mkv, mkv_with_segment(&attachments_chain(false))).unwrap();
+    let meta = mkv_core::ebml::probe_ebml_native(&mkv).unwrap();
+    assert_eq!(meta.attachments.len(), N);
+
+    // Each entry spanning the parents after its own read them all, then the top-level scan
+    // read them again: quadratic in N (#181).
+    assert_native_probe_overrun(&mkv, &mkv_with_segment(&tracks_chain(true)), "0xAE");
+    assert_native_probe_overrun(&mkv, &mkv_with_segment(&attachments_chain(true)), "0x61A7");
+}
+
+#[test]
+fn test_a_leaf_overrunning_its_track_entry_or_attached_file_fails_native_probe() {
+    let tmp = tempdir().unwrap();
+    let mkv = tmp.path().join("leaf.mkv");
+    let track_fields = &VALID_VIDEO_TRACK_ENTRY[2..];
+    let one_track = element(&TRACKS_ID, &VALID_VIDEO_TRACK_ENTRY, 0);
+    // A CodecID in a TrackEntry, and a FileName in an AttachedFile, declared `extra` bytes
+    // longer than the parent holds.
+    let codec_id = |extra| {
+        let entry = element(
+            &TRACK_ENTRY_ID,
+            &[track_fields, &element(&[0x86], b"V_X", extra)].concat(),
+            0,
+        );
+        mkv_with_segment(&element(&TRACKS_ID, &entry, 0))
+    };
+    let file_name = |extra| {
+        let file = element(&ATTACHED_FILE_ID, &element(&[0x46, 0x6E], b"a", extra), 0);
+        mkv_with_segment(&[one_track.as_slice(), &element(&ATTACHMENTS_ID, &file, 0)].concat())
+    };
+
+    fs::write(&mkv, codec_id(0)).unwrap();
+    let meta = mkv_core::ebml::probe_ebml_native(&mkv).unwrap();
+    assert_eq!(meta.tracks[0].codec.as_deref(), Some("V_X"));
+    fs::write(&mkv, file_name(0)).unwrap();
+    let meta = mkv_core::ebml::probe_ebml_native(&mkv).unwrap();
+    assert_eq!(meta.attachments[0].file_name.as_deref(), Some("a"));
+
+    assert_native_probe_overrun(&mkv, &codec_id(1), "0x86");
+    assert_native_probe_overrun(&mkv, &file_name(1), "0x466E");
+}
+
+#[test]
+fn test_a_seek_entry_overrunning_its_seek_head_does_not_fail_native_probe() {
+    let tmp = tempdir().unwrap();
+    let mkv = tmp.path().join("seek_overrun.mkv");
+    // A SeekHead holding only a Seek header (0x4DBB) declaring 16 bytes, which would reach
+    // into the Tracks after it.
+    let seek_head = element(&[0x11, 0x4D, 0x9B, 0x74], &[0x4D, 0xBB, 0x90], 0);
+    let one_track = element(&TRACKS_ID, &VALID_VIDEO_TRACK_ENTRY, 0);
+    fs::write(&mkv, mkv_with_segment(&[seek_head, one_track].concat())).unwrap();
+
+    // The malformed entry ends the SeekHead scan, as documented; the probe goes on.
+    let meta = mkv_core::ebml::probe_ebml_native(&mkv).unwrap();
+    assert_eq!(meta.tracks.len(), 1);
+}
+
 #[test]
 fn test_truncated_tracks_block_fails_native_probe() {
     let tmp = tempdir().unwrap();
