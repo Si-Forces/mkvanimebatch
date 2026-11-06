@@ -128,14 +128,25 @@ status() {
 
 # Checks the commits git is actually pushing, not the checked-out HEAD, so pushing a side
 # branch cannot be waved through by having main reviewed. A new remote branch (all-zero
-# remote sha) is checked from its fork point with origin/main. Fails closed on any
-# endpoint it cannot resolve.
+# remote sha) is checked from its fork point with origin/main. Commits already on
+# origin/main are skipped and assumed reviewed, having landed through a PR: a squash merge
+# gives them a patch-id no ledger entry has, so a branch rebased onto main would otherwise
+# be refused for main's own commits. Fails closed on any endpoint it cannot resolve.
 verify_push() { # <remote-sha> <local-sha>
-  local base head commits sha n=0
+  local base head commits sha n=0 exclude=()
   head=$(require_commit "$2")
   if [[ "$1" =~ ^0+$ ]]; then base=$(review_base "$head"); else base=$(require_commit "$1"); fi
+  # Without origin/main nothing is skipped, which only checks more.
+  if git rev-parse --verify --quiet origin/main > /dev/null; then exclude=(^origin/main); fi
   # An assignment, not a for-list substitution, so a failed rev-list trips set -e.
-  commits=$(git rev-list "$base..$head")
+  commits=$(git rev-list "$head" "^$base" "${exclude[@]}")
+  # The range to suggest: from the old remote tip, or from the fork point with origin/main when
+  # a rebase put main's commits after that tip, so the suggestion names only what is checked.
+  local from=$base fork
+  if [ ${#exclude[@]} -gt 0 ]; then
+    fork=$(git merge-base origin/main "$head") || die "$head shares no history with origin/main"
+    git merge-base --is-ancestor "$fork" "$base" || from=$fork
+  fi
   for sha in $commits; do
     if ! is_reviewed "$sha"; then
       {
@@ -144,8 +155,8 @@ verify_push() { # <remote-sha> <local-sha>
         echo "   $(git log -1 --format=%s "$sha")"
         echo ""
         echo "   Run the code-review skill (Standards + Spec; AGENTS.md names its path) over"
-        echo "   $(git rev-parse --short "$base")..$(git rev-parse --short "$head"), fix or explicitly accept the findings, then:"
-        echo "     scripts/review-gate.sh record-range $(git rev-parse --short "$base") $(git rev-parse --short "$head") \"<what you reviewed>\""
+        echo "   $(git rev-parse --short "$from")..$(git rev-parse --short "$head"), fix or explicitly accept the findings, then:"
+        echo "     scripts/review-gate.sh record-range $(git rev-parse --short "$from") $(git rev-parse --short "$head") \"<what you reviewed>\""
         echo ""
         echo "   Emergency override: SKIP_REVIEW_GATE=1 git push"
       } >&2
