@@ -89,6 +89,9 @@ fn format_sync_args(track_id: u32, offset_ms: i64) -> Vec<String> {
 
 /// Builds the `mkvmerge` arguments.
 ///
+/// The kept subtitle and audio tracks are marked default whatever flags the source gave them.
+/// The video track's flags and an embedded subtitle's forced flag stay as the source has them.
+///
 /// `default_sub_offset_ms` applies to an embedded subtitle, and to an external one whose
 /// `custom_offset_ms` is `None`. A custom offset replaces it, never adds to it.
 pub fn build_mkvmerge_args(
@@ -109,6 +112,8 @@ pub fn build_mkvmerge_args(
         (None, Some(sid)) => {
             args.push("--subtitle-tracks".to_string());
             args.push(sid.to_string());
+            args.push("--default-track-flag".to_string());
+            args.push(format!("{sid}:yes"));
             args.extend(format_sync_args(sid, default_sub_offset_ms));
         }
         _ => args.push("--no-subtitles".to_string()),
@@ -118,6 +123,8 @@ pub fn build_mkvmerge_args(
         (None, Some(audio_id)) => {
             args.push("--audio-tracks".to_string());
             args.push(audio_id.to_string());
+            args.push("--default-track-flag".to_string());
+            args.push(format!("{audio_id}:yes"));
         }
         _ => args.push("--no-audio".to_string()),
     }
@@ -163,6 +170,8 @@ pub fn build_mkvmerge_args(
             args.push("--track-name".to_string());
             args.push(format!("0:{}", selection.audio_name));
         }
+        args.push("--default-track-flag".to_string());
+        args.push("0:yes".to_string());
         args.push(opus.to_string_lossy().into_owned());
     }
 
