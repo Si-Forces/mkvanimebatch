@@ -75,15 +75,20 @@ fn has_pair(args: &[String], flag: &str, value: &str) -> bool {
     args.windows(2).any(|pair| pair == [flag, value])
 }
 
-/// Whether `--no-chapters` applies to `input`. mkvmerge file options bind to the next input
-/// file, so only the options between the previous `/dummy/` path and `input` count.
-fn chapters_dropped_from(args: &[String], input: &str) -> bool {
+/// The file options that apply to `input`. mkvmerge file options bind to the next input file,
+/// so only the options between the previous `/dummy/` path and `input` count.
+fn options_for<'a>(args: &'a [String], input: &str) -> &'a [String] {
     let at = args.iter().position(|a| a == input).unwrap();
-    args[..at]
+    let start = args[..at]
         .iter()
-        .rev()
-        .take_while(|a| !a.starts_with("/dummy/"))
-        .any(|a| a == "--no-chapters")
+        .rposition(|a| a.starts_with("/dummy/"))
+        .map_or(0, |prev| prev + 1);
+    &args[start..at]
+}
+
+/// Whether `--no-chapters` applies to `input`.
+fn chapters_dropped_from(args: &[String], input: &str) -> bool {
+    options_for(args, input).contains(&"--no-chapters".to_string())
 }
 
 const REMUX_OPTIONS: RemuxOptions<'static> = RemuxOptions {
@@ -179,6 +184,53 @@ fn test_embedded_subtitle_sync_args() {
     assert!(has_pair(&args, "--subtitle-tracks", "3"));
     assert!(has_pair(&args, "--sync", "3:1500"));
     assert!(!mkvmerge_args(&job, None, 0).contains(&"--sync".to_string()));
+}
+
+/// The output marks default the subtitle and audio tracks the selector kept, whatever flags the
+/// source gave them, so players show them without the viewer choosing (#177).
+#[test]
+fn test_kept_embedded_subtitle_and_copied_audio_marked_default() {
+    let mut job = job(
+        Path::new("/dummy/video.mkv"),
+        PathBuf::from("/dummy/out.mkv"),
+        None,
+    );
+    job.embedded_sub_id = Some(3);
+
+    let args = mkvmerge_args(&job, None, 0);
+    let source = options_for(&args, "/dummy/video.mkv");
+    assert!(
+        has_pair(source, "--default-track-flag", "3:yes"),
+        "{args:?}"
+    );
+    assert!(
+        has_pair(source, "--default-track-flag", "1:yes"),
+        "{args:?}"
+    );
+}
+
+/// The transcoded Opus file is marked default explicitly rather than by mkvmerge's default, and
+/// the source audio it replaces is not marked default.
+#[test]
+fn test_transcoded_audio_marked_default() {
+    let args = mkvmerge_args(&subtitle_job(), Some(Path::new("/dummy/audio.opus")), 0);
+    assert!(
+        has_pair(
+            options_for(&args, "/dummy/audio.opus"),
+            "--default-track-flag",
+            "0:yes"
+        ),
+        "{args:?}"
+    );
+    // The replaced source audio (id 1) is not flagged.
+    assert!(
+        !has_pair(
+            options_for(&args, "/dummy/video.mkv"),
+            "--default-track-flag",
+            "1:yes"
+        ),
+        "{args:?}"
+    );
 }
 
 #[test]

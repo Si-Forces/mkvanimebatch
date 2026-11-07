@@ -382,8 +382,8 @@ sequenceDiagram
    - Embedded subtitle: `--sync <track_id>:<ms>` from the global `default_sub_offset_ms` only.
    - Negative and positive offsets are passed to mkvmerge unchanged.
 3. **mkvmerge arguments (`build_mkvmerge_args`)**, writing to a temporary file in the scratch directory:
-   - Source file: `--video-tracks <id>`; `--audio-tracks <id>` when the audio is copied, `--no-audio` when it is transcoded; `--subtitle-tracks <id>` for an embedded subtitle, else `--no-subtitles`; `--no-chapters` when an external chapter file is used; `--attachments <ids>` keeps the source cover (when no external cover is used) and the source fonts (when the release has none), else `--no-attachments`.
-   - Transcoded audio: the Opus file as a second input with `--no-chapters` (ffmpeg copies the source chapters into it) and the source track's `--language` and `--track-name`.
+   - Source file: `--video-tracks <id>`; `--audio-tracks <id> --default-track-flag <id>:yes` when the audio is copied, `--no-audio` when it is transcoded; `--subtitle-tracks <id> --default-track-flag <id>:yes` for an embedded subtitle, else `--no-subtitles`; `--no-chapters` when an external chapter file is used; `--attachments <ids>` keeps the source cover (when no external cover is used) and the source fonts (when the release has none), else `--no-attachments`.
+   - Transcoded audio: the Opus file as a second input with `--no-chapters` (ffmpeg copies the source chapters into it) and the source track's `--language` and `--track-name`, plus `--default-track-flag 0:yes`.
    - External subtitle: `--language` (assignment language, else the detected language), `--track-name` (assignment title, else the language label), `--default-track-flag 0:yes`.
    - `--chapters <file>` for an external chapter file.
    - External cover: `--attachment-name cover<ext> --attachment-mime-type <mime> --attach-file <cover>`.
