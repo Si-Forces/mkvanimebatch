@@ -375,6 +375,162 @@ async fn test_real_remux_transcoded_flac_keeps_chapters_once() {
         .filter_map(|chapter| chapter.num_entries)
         .sum();
     assert_eq!(entries, 2, "{:?}", summary.log);
+    // The Opus track is the output's only audio, marked default (#177).
+    let audio_defaults: Vec<bool> = track_default_flags(&output.join("Show - 01.mkv"))
+        .into_iter()
+        .filter(|(kind, ..)| kind == "audio")
+        .map(|(.., default)| default)
+        .collect();
+    assert_eq!(audio_defaults, [true], "{:?}", summary.log);
+}
+
+/// Each track of `mkv` as (type, language, default flag), read from `mkvmerge -J`, since
+/// `MkvTrack` does not carry the default flag.
+fn track_default_flags(mkv: &Path) -> Vec<(String, String, bool)> {
+    let identify = Command::new("mkvmerge")
+        .arg("-J")
+        .arg(mkv)
+        .output()
+        .expect("mkvmerge must be installed");
+    assert!(identify.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&identify.stdout).unwrap();
+    json["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|track| {
+            let properties = &track["properties"];
+            (
+                track["type"].as_str().unwrap().to_owned(),
+                properties["language"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+                properties["default_track"].as_bool().unwrap(),
+            )
+        })
+        .collect()
+}
+
+/// The selector keeps the Indonesian subtitle and the Japanese audio over the English tracks the
+/// source marked default; the output must mark the kept tracks default, or players may not play
+/// or show them (#177).
+#[tokio::test]
+async fn test_real_remux_marks_the_kept_tracks_default() {
+    if !media_tools_available() {
+        return;
+    }
+    let tmp = tempdir().unwrap();
+    let input = tmp.path().join("input");
+    fs::create_dir_all(&input).unwrap();
+    let english = tmp.path().join("english.srt");
+    fs::write(&english, b"1\n00:00:00,000 --> 00:00:00,900\nENGLISH\n").unwrap();
+    let indonesian = tmp.path().join("indonesian.srt");
+    fs::write(
+        &indonesian,
+        b"1\n00:00:00,000 --> 00:00:00,900\nINDONESIAN\n",
+    )
+    .unwrap();
+    let raw = tmp.path().join("raw.mkv");
+    // Track ids: 0 video, 1 English audio, 2 Japanese audio, 3 English and 4 Indonesian
+    // subtitles.
+    media_command(
+        Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=16x16:r=1:d=1",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=d=1",
+                "-i",
+            ])
+            .arg(&english)
+            .arg("-i")
+            .arg(&indonesian)
+            .args([
+                "-map",
+                "0:v",
+                "-map",
+                "1:a",
+                "-map",
+                "1:a",
+                "-map",
+                "2:s",
+                "-map",
+                "3:s",
+                "-c:v",
+                "mpeg4",
+                "-c:a",
+                "pcm_s16le",
+                "-c:s",
+                "srt",
+                "-metadata:s:a:0",
+                "language=eng",
+                "-metadata:s:a:1",
+                "language=jpn",
+                "-metadata:s:s:0",
+                "language=eng",
+                "-metadata:s:s:1",
+                "language=ind",
+                "-y",
+            ])
+            .arg(&raw),
+    );
+    media_command(
+        Command::new("mkvmerge")
+            .arg("-o")
+            .arg(input.join("Show - 01.mkv"))
+            .args([
+                "--default-track-flag",
+                "1:yes",
+                "--default-track-flag",
+                "2:no",
+                "--default-track-flag",
+                "3:yes",
+                "--default-track-flag",
+                "4:no",
+            ])
+            .arg(&raw),
+    );
+
+    let output = tmp.path().join("out");
+    let summary = BatchPipeline::new(
+        PipelineConfig {
+            mode: PipelineMode::Remux,
+            input_dir: input,
+            out_dir: Some(output.clone()),
+            no_cache: true,
+            ..Default::default()
+        },
+        None,
+        CancellationToken::new(),
+    )
+    .run()
+    .await
+    .unwrap();
+    assert_eq!(
+        (summary.completed, summary.errors),
+        (1, 0),
+        "{:?}",
+        summary.log
+    );
+
+    let flags = track_default_flags(&output.join("Show - 01.mkv"));
+    let kept: Vec<(&str, &str, bool)> = flags
+        .iter()
+        .filter(|(kind, ..)| kind != "video")
+        .map(|(kind, language, default)| (kind.as_str(), language.as_str(), *default))
+        .collect();
+    assert_eq!(
+        kept,
+        [("audio", "jpn", true), ("subtitles", "ind", true)],
+        "{flags:?}"
+    );
 }
 
 /// `Show - 01.mkv` and `Show - 01.MKV` would both be remuxed to `Output/Show - 01.mkv`, the
