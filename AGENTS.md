@@ -103,7 +103,7 @@ This repo is developed on a 4-core, 8 GB laptop, where a full workspace build us
 - Let `jj gpush` (or the git pre-push hook) be the one `cargo test --workspace` run: push from a clean working copy, without `SKIP_SLOW_GATES`. For a commit that stays local, run `cargo test --workspace` once, after the last change.
 - Run one cargo process at a time across the main checkout and all worktrees, and in multi-agent work give cargo to a single agent.
 - Run the bench self-check only when you change `benches/`; Linux CI runs it.
-- To show that new tests catch their guards, run `scripts/mutants-diff.sh <base> -p <crate> [-p <crate>...]`, with one `-p` per changed crate, once on committed Rust work before review. It builds those crates from scratch in a copy, so it counts as a heavy build like the workspace run.
+- To show that new tests catch their guards, run `scripts/mutants-diff.sh <base> -p <crate> [-p <crate>...]`, with one `-p` per changed crate, once on committed Rust work before review. Use the branch's actual fork point as `<base>` (`git merge-base origin/main HEAD`), not a moved `origin/main`, or it also mutates main's newer code. It builds those crates from scratch in a copy, so it counts as a heavy build like the workspace run.
 
 ## Agent skills
 

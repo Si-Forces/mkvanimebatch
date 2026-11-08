@@ -6,15 +6,21 @@
 #
 # Run it on committed work (under jj: after `jj commit` or `jj squash`, with @ empty), because
 # cargo-mutants mutates a copy of the working tree and the diff's line numbers must match it.
-# Exit status is cargo-mutants': 0 all mutants caught (or no Rust changed), 2 some missed, 3 some
-# timed out, 4 the unmutated tests fail. The script's own refusals are 64 (usage or unknown
-# base), 65 (dirty tree) and 69 (cargo-mutants missing). Needs `cargo install cargo-mutants
-# --locked`. A run builds the crate from scratch in its copy: about 4 minutes for a small
-# mkv-core diff.
+# Pass the branch's fork point as <base> (`git merge-base origin/main HEAD`), or the commit
+# before a fix round: the diff is <base> against HEAD, so a <base> that main has moved past also
+# mutates main's newer code.
+#
+# Exit status is cargo-mutants': 0 all mutants caught (or no Rust changed), 1 a usage error (a
+# bad -p, say), 2 some missed, 3 some timed out, 4 the unmutated tests fail, 70 an internal
+# error. The script's own refusals are 64 (usage or unknown base), 65 (dirty tree) and 69
+# (cargo-mutants missing); a git command that fails stops it with git's own status. Needs
+# `cargo install cargo-mutants --locked`. A run builds the crate from scratch in its copy: about
+# 4 minutes for a small mkv-core diff.
 #
 # The copy and its target dir go to MUTANTS_TMPDIR (default ~/.cache/mkv-mutants), never /tmp:
-# /tmp is a RAM-backed tmpfs on the dev laptop. The report goes to MUTANTS_OUT (default
-# $MUTANTS_TMPDIR/out), outside the repo, so jj never snapshots it.
+# /tmp is a RAM-backed tmpfs on the dev laptop. TMPDIR, TMP and TEMP all point there, since
+# Rust's temp_dir() reads TMPDIR on Unix and TMP/TEMP on Windows. The report goes to MUTANTS_OUT
+# (default $MUTANTS_TMPDIR/out), outside the repo, so jj never snapshots it.
 set -euo pipefail
 
 if [[ $# -lt 1 || $1 == -* ]]; then
@@ -30,8 +36,11 @@ git rev-parse --verify --quiet "$base^{commit}" >/dev/null || { echo "unknown ba
 # cargo-mutants copies the working tree, so it must hold exactly HEAD. git status misses edits
 # behind an assume-unchanged or skip-worktree bit; the hooks' helper finds those.
 source "$root/scripts/hooks/hidden-changes.sh"
+# Both are plain assignments so that a failing git stops the script (set -e) rather than reading
+# as a clean tree; a substitution inside [[ ]] would not.
 hidden=$(hidden_changes)
-if [[ -n $(git status --porcelain --untracked-files=normal) || -n $hidden ]]; then
+dirty=$(git status --porcelain --untracked-files=normal)
+if [[ -n $dirty || -n $hidden ]]; then
   echo "working tree differs from HEAD; commit first (jj: jj commit, or jj squash with @ empty)" >&2
   [[ -z $hidden ]] || explain_hidden_changes "$hidden"
   exit 65
@@ -59,7 +68,7 @@ git diff --no-ext-diff --no-color --src-prefix=a/ --dst-prefix=b/ "$base" HEAD -
 stamp="$out/run.stamp"
 touch "$stamp"
 status=0
-TMPDIR=$tmp cargo mutants --in-diff "$diff" --output "$out" --no-shuffle "$@" || status=$?
+TMPDIR=$tmp TMP=$tmp TEMP=$tmp cargo mutants --in-diff "$diff" --output "$out" --no-shuffle "$@" || status=$?
 # Only a run that tested mutants writes a report (0 all caught, 2 missed, 3 timed out); --list
 # and an empty diff exit 0 without one.
 if [[ ($status == 0 || $status == 2 || $status == 3) && "$out/mutants.out/outcomes.json" -nt "$stamp" ]]; then

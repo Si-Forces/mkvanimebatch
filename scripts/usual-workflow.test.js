@@ -63,6 +63,12 @@ test("rejects missing, blank and mistyped args", async () => {
     { mode: "fix" },
     { mode: "review" },
     { repo: "" },
+    { issue: "abc" },
+    { issue: "178; rm -rf ~" },
+    { base: "5a2a0ce; rm -rf ~" },
+    { base: "-rf" },
+    { bookmark: "fix/x $(id)" },
+    { mode: "fix", prev: "abc 1234" },
   ];
   for (const patch of bad) {
     await assert.rejects(run({ ...ARGS, ...patch }, {}), /usual workflow:/, JSON.stringify(patch));
@@ -97,4 +103,71 @@ test("logs the review steps when the re-review finds nothing", async () => {
   const { prompts, logs } = await run(ARGS, { implement: DONE, "re-review": { findings: [] } });
   assert.equal(prompts["follow-up"], undefined);
   assert.match(logs.at(-1), /record-range/);
+});
+
+const FINDING = { severity: "minor", file: "a.rs", summary: "s", evidence: "e", suggested_fix: "f" };
+
+test("a fix round scopes the mutation check and the re-review to prev", async () => {
+  const { prompts } = await run(
+    { ...ARGS, mode: "fix", prev: "abc1234" },
+    { fix: DONE, "re-review": { findings: [] } },
+  );
+  assert.match(prompts.fix, /bookmark fix\/x is commit abc1234 on main 5a2a0ce/);
+  assert.match(prompts.fix, /mutants-diff\.sh abc1234 -p mkv-core/);
+  assert.match(prompts["re-review"], /`git diff abc1234 fix\/x`/);
+  assert.match(prompts["re-review"], /whole change `git diff 5a2a0ce fix\/x`/);
+});
+
+test("stops with no follow-up when the re-review returns nothing", async () => {
+  const { prompts, logs } = await run(ARGS, { implement: DONE });
+  assert.equal(prompts["follow-up"], undefined);
+  assert.ok(logs.some((l) => /Re-review failed or was skipped/.test(l)), logs.join("\n"));
+  assert.match(logs.at(-1), /record-range 5a2a0ce fix\/x/);
+});
+
+test("the follow-up pins <R> to the bookmark before its first edit", async () => {
+  const { prompts } = await run(ARGS, {
+    implement: DONE,
+    "re-review": { findings: [FINDING] },
+    "follow-up": { ...DONE, status: "blocked" },
+  });
+  assert.match(prompts["follow-up"], /work is in bookmark fix\/x/);
+  assert.match(prompts["follow-up"], /`git rev-parse fix\/x` before your first edit: that commit id is <R>/);
+});
+
+test("logs every agent's loaded skills", async () => {
+  const { logs } = await run(ARGS, {
+    implement: { ...DONE, skills_loaded: ["a:impl"] },
+    "re-review": { skills_loaded: ["a:rr"], findings: [FINDING] },
+    "follow-up": { ...DONE, skills_loaded: ["a:fu"], fixed: ["s"] },
+    "last-commit review": { skills_loaded: [], findings: [] },
+  });
+  for (const line of [
+    "Implement loaded skills: a:impl",
+    "Re-review loaded skills: a:rr",
+    "Follow-up loaded skills: a:fu",
+    "Last-commit review loaded skills: none",
+  ]) {
+    assert.ok(logs.includes(line), `${line}\n---\n${logs.join("\n")}`);
+  }
+});
+
+test("flags unresolved last-commit findings before the review steps", async () => {
+  const { logs } = await run(ARGS, {
+    implement: DONE,
+    "re-review": { findings: [FINDING] },
+    "follow-up": { ...DONE, fixed: ["s"] },
+    "last-commit review": { findings: [FINDING, FINDING] },
+  });
+  assert.match(logs.at(-2), /Last-commit review: 2 UNRESOLVED findings/);
+  assert.match(logs.at(-1), /record-range/);
+});
+
+test("a blocked implement says the bookmark may not exist; a blocked fix does not", async () => {
+  const blocked = { ...DONE, status: "blocked", skills_loaded: ["a:impl"] };
+  const impl = await run(ARGS, { implement: blocked });
+  assert.ok(impl.logs.includes("Implement loaded skills: a:impl"), impl.logs.join("\n"));
+  assert.match(impl.logs.at(-2), /Check whether bookmark fix\/x exists/);
+  const fix = await run({ ...ARGS, mode: "fix", prev: "abc1234" }, { fix: blocked });
+  assert.ok(!fix.logs.some((l) => /Check whether bookmark/.test(l)), fix.logs.join("\n"));
 });

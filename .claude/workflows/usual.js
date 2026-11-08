@@ -40,6 +40,10 @@ if (missing.length) throw new Error(`usual workflow: missing or blank args ${mis
 if (!['implement', 'fix'].includes(A.mode)) throw new Error(`usual workflow: mode must be implement or fix, got ${A.mode}`)
 if (!Array.isArray(A.crates) || !A.crates.length || !A.crates.every(isName)) throw new Error('usual workflow: crates must be a non-empty array of crate names')
 if (A.skills !== undefined && !(Array.isArray(A.skills) && A.skills.every(isName))) throw new Error('usual workflow: skills must be an array of skill names')
+// These go unquoted into the shell commands the agents run, like crates and skills.
+if (!/^[1-9]\d*$/.test(String(A.issue))) throw new Error(`usual workflow: issue must be an issue number, got ${A.issue}`)
+const isRef = (v) => /^[\w.\/@^~][\w.\/@^~-]*$/.test(v)
+for (const k of ['base', 'bookmark', ...(A.mode === 'fix' ? ['prev'] : [])]) if (!isRef(A[k])) throw new Error(`usual workflow: ${k} must be a commit or bookmark name, got ${A[k]}`)
 
 const REPO = A.repo || '/home/sifaha/My Project/mkvanimebatch'
 const NOTES = A.notes || '/home/sifaha/My Project/mkvanimebatch-notes/audit-fixes'
@@ -85,14 +89,14 @@ const WORK_SCHEMA = {
 }
 const FINDINGS_SCHEMA = {
   type: 'object',
-  properties: { findings: { type: 'array', items: { type: 'object', properties: {
+  properties: { skills_loaded: { type: 'array', items: { type: 'string' } }, findings: { type: 'array', items: { type: 'object', properties: {
     severity: { type: 'string', enum: ['blocker', 'major', 'minor', 'nit'] },
     file: { type: 'string' }, line: { type: 'integer' }, summary: { type: 'string' },
     evidence: { type: 'string' }, suggested_fix: { type: 'string' },
   }, required: ['severity', 'file', 'summary', 'evidence', 'suggested_fix'] } } },
-  required: ['findings'],
+  required: ['skills_loaded', 'findings'],
 }
-const review = (scope, body) => `Review in ${REPO}. Read-only: no edits, no cargo builds or tests, no GitHub writes; \`rg\` is available. Load the \`anthropic-skills:rust-skills\` skill first. Scope: ${scope}.
+const review = (scope, body) => `Review in ${REPO}. Read-only: no edits, no cargo builds or tests, no GitHub writes; \`rg\` is available. Load the \`anthropic-skills:rust-skills\` skill first and report the skills you loaded in \`skills_loaded\`. Scope: ${scope}.
 SPEC: ${A.spec}
 ${body}
 STANDARDS: AGENTS.md, CODING_STANDARDS.md (apply every rule), the area CLAUDE.md files for what the diff touches, and the glossary terms in the CONTEXT.md files; ponytail's minimal diff; accurate doc comments, the surrounding style, 100-column wrap; #[cfg] code clean on both Linux and Windows; tests never change the current directory.
@@ -120,8 +124,14 @@ ${mutants(SCOPE_FROM)}
 
 Finally ${FIX_MODE ? `update ${NOTES_FILE} wherever it no longer matches the code` : `write ${NOTES_FILE} (it becomes the PR body): Summary (what and why, closes #${A.issue}), Evidence (tests and results, fail-without-fix checks, mutation check, gate), Merge Danger, Open questions, Manual checks`}.`, { label: FIX_MODE ? 'fix' : 'implement', phase: 'Implement', model: 'opus', effort: 'high', schema: WORK_SCHEMA })
 
-if (!impl || impl.status !== 'done') { log('Implement blocked or failed; stopping.'); nextSteps(); return { impl } }
-skillsLog('Implement', impl)
+if (impl) skillsLog(FIX_MODE ? 'Fix' : 'Implement', impl)
+if (!impl || impl.status !== 'done') {
+  log(`${FIX_MODE ? 'Fix' : 'Implement'} ${impl ? 'blocked' : 'failed or was skipped'}; stopping.`)
+  // A blocked implement may have stopped before creating the bookmark.
+  if (!FIX_MODE) log(`Check whether bookmark ${BM} exists (\`jj bookmark list ${BM}\`); if it does not, nothing was committed and no review is owed.`)
+  nextSteps()
+  return { impl }
+}
 
 phase('Re-review')
 const rereview = await agent(review(
@@ -132,6 +142,7 @@ Tests: each guard the diff adds has a test that reaches it, and every mutation-c
 ), { label: 're-review', phase: 'Re-review', model: 'sonnet', effort: 'xhigh', schema: FINDINGS_SCHEMA })
 
 if (!rereview) { log('Re-review failed or was skipped; stopping with no review.'); nextSteps(); return { impl, rereview } }
+skillsLog('Re-review', rereview)
 const findings = rereview.findings
 log(`Re-review: ${findings.length} findings`)
 if (!findings.length) { nextSteps(); return { impl, findings } }
@@ -161,5 +172,11 @@ Check that each fix is correct and complete, each rejection is sound, new tests 
 ), { label: 'last-commit review', phase: 'Last-commit review', model: 'sonnet', effort: 'xhigh', schema: FINDINGS_SCHEMA })
 
 if (!last) log('Last-commit review failed or was skipped; the follow-up is unreviewed.')
+else {
+  skillsLog('Last-commit review', last)
+  log(last.findings.length
+    ? `Last-commit review: ${last.findings.length} UNRESOLVED findings (in the result's \`last\`); fix or accept them before the review below.`
+    : 'Last-commit review: 0 findings')
+}
 nextSteps()
 return { impl, findings, follow, last }
