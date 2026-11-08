@@ -8,9 +8,10 @@ use crate::job::{display_canonical_path, wait_until, JobConfig, JobSink, JobStat
 use mkv_core::pipeline::{CancellationToken, PipelineConfig, PipelineMode};
 use mkv_core::request::{BatchRequest, EffectiveSettings};
 use mkv_core::scan::PersistentInspectCache;
+use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::OnceCell;
@@ -20,12 +21,17 @@ struct ActiveScan {
     cancel_token: CancellationToken,
 }
 
-/// The Directory Inspection registry: at most one inspection runs at a time, across both modes,
-/// and a new one cancels the one before it. Shared behind an `Arc`, so an inspection that runs off
-/// the Desktop Core actor holds the registry its teardown waits on.
+/// The Directory Inspection registry: at most one inspection runs at a time, across both modes.
+/// The Inspection Coordinator schedules each inspection on the Desktop Core actor, numbered in the
+/// order it starts them, and the one numbered last wins: it cancels a running older one, and an
+/// older one that registers after it is refused. Every scheduled inspection stays pending, with its
+/// cancel token, until it ends, so a Stop can cancel and wait on it whether it is still
+/// canonicalizing or already running. Shared behind an `Arc`, so an inspection that runs off the
+/// actor holds the registry its teardown waits on.
 pub struct ScanState {
     active: Mutex<Option<ActiveScan>>,
-    next_id: AtomicU64,
+    /// Every scheduled inspection that has not ended, by ID.
+    pending: Mutex<HashMap<u64, CancellationToken>>,
     start_lock: Mutex<()>,
     accepting_starts: AtomicBool,
 }
@@ -34,12 +40,16 @@ impl Default for ScanState {
     fn default() -> Self {
         Self {
             active: Mutex::new(None),
-            next_id: AtomicU64::new(1),
+            pending: Mutex::new(HashMap::new()),
             start_lock: Mutex::new(()),
             accepting_starts: AtomicBool::new(true),
         }
     }
 }
+
+/// What `begin` answers an inspection a Stop or a Close cancelled or a newer one overtook, and what
+/// a stopped start's forced scan settles with: what a cancelled inspection answers too.
+pub(crate) const INSPECTION_CANCELLED: &str = "Inspection cancelled";
 
 impl ScanState {
     pub fn is_active(&self) -> bool {
@@ -54,35 +64,38 @@ impl ScanState {
         }
     }
 
-    /// Registers a Directory Inspection of `dir`, which the caller has already canonicalized,
-    /// and returns its registration and cancel token. The caller canonicalizes before this
-    /// because the start lock's guard is not `Send` and so cannot be held across that await; the
-    /// accepting check repeats under the lock for a shutdown that began meanwhile. A previous
-    /// inspection is cancelled, and the new one replaces it as the active scan; the previous
-    /// registration's drop then leaves the new one alone. Keep the registration alive until the
-    /// inspection ends: its drop is what tells teardown the inspection has finished.
-    pub fn begin(
-        self: &Arc<Self>,
-        dir: &Path,
-    ) -> Result<(ScanRegistration, CancellationToken), String> {
-        let start_lock = self.start_lock.lock().map_err(|e| e.to_string())?;
-        self.ensure_accepting_starts()?;
-        if !dir.is_dir() {
-            return Err("Directory does not exist or is not a directory".into());
-        }
-        stop_registered_scan(self)?;
-
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+    /// Schedules Directory Inspection `id`, pending with a cancel token of its own until the
+    /// returned `Inspection` drops. Keep it alive until the inspection ends: its drop is what tells
+    /// a Stop the inspection has ended.
+    pub fn schedule(self: &Arc<Self>, id: u64) -> Inspection {
         let cancel_token = CancellationToken::new();
-        *self.active.lock().map_err(|e| e.to_string())? = Some(ActiveScan {
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.insert(id, cancel_token.clone());
+        }
+        Inspection {
+            state: Arc::clone(self),
             id,
-            cancel_token: cancel_token.clone(),
-        });
-        drop(start_lock);
-        let state = Arc::clone(self);
-        Ok((ScanRegistration { state, id }, cancel_token))
+            cancel_token,
+        }
     }
 
+    /// Cancels inspection `id` alone, then waits up to `timeout` for it to end. One no longer
+    /// pending has ended already: the actor schedules an inspection before a Stop can name it.
+    pub(crate) fn stop_inspection(&self, id: u64, timeout: Duration) -> Result<(), String> {
+        if let Some(cancel_token) = self.pending.lock().map_err(|e| e.to_string())?.get(&id) {
+            cancel_token.cancel();
+        }
+        wait_until(timeout, "directory inspection", || {
+            Ok(!self
+                .pending
+                .lock()
+                .map_err(|e| e.to_string())?
+                .contains_key(&id))
+        })
+    }
+
+    /// Waits for the registered inspection alone. One that has not registered yet owns no child
+    /// process, and `begin` refuses it once the app closes, so a Close need not wait on it.
     fn wait_until_empty(&self, timeout: Duration) -> Result<(), String> {
         wait_until(timeout, "directory inspection", || {
             Ok(self.active.lock().map_err(|e| e.to_string())?.is_none())
@@ -90,19 +103,64 @@ impl ScanState {
     }
 }
 
-/// A running Directory Inspection. Its drop is the only place that vacates the active scan, and
-/// only while the scan is still its own.
-pub struct ScanRegistration {
+/// One scheduled Directory Inspection, from its scheduling until it ends: while its directory is
+/// canonicalized, once it registers, and while it runs. Its drop ends it: it leaves the pending
+/// inspections, and vacates the active scan while that is still its own.
+#[must_use = "dropping it ends the inspection"]
+pub struct Inspection {
     state: Arc<ScanState>,
     id: u64,
+    cancel_token: CancellationToken,
 }
 
-impl Drop for ScanRegistration {
+impl Inspection {
+    /// Registers this inspection of `dir`, which the caller has already canonicalized, as the
+    /// active scan, and returns its cancel token. The caller canonicalizes before this because the
+    /// start lock's guard is not `Send` and so cannot be held across that await; the accepting
+    /// check repeats under the lock for a shutdown that began meanwhile. An older running
+    /// inspection is cancelled, and this one replaces it; the older one's drop then leaves this one
+    /// alone.
+    ///
+    /// # Errors
+    ///
+    /// Refuses, without cancelling anything, while the app closes, when `dir` is not a directory,
+    /// when a Stop or a Close already cancelled this inspection, and when a newer inspection is
+    /// registered.
+    pub fn begin(&self, dir: &Path) -> Result<CancellationToken, String> {
+        let start_lock = self.state.start_lock.lock().map_err(|e| e.to_string())?;
+        self.state.ensure_accepting_starts()?;
+        if !dir.is_dir() {
+            return Err("Directory does not exist or is not a directory".into());
+        }
+        if self.cancel_token.is_cancelled() {
+            return Err(INSPECTION_CANCELLED.into());
+        }
+        let mut active = self.state.active.lock().map_err(|e| e.to_string())?;
+        if let Some(scan) = active.as_ref() {
+            if scan.id > self.id {
+                return Err(INSPECTION_CANCELLED.into());
+            }
+            scan.cancel_token.cancel();
+        }
+        *active = Some(ActiveScan {
+            id: self.id,
+            cancel_token: self.cancel_token.clone(),
+        });
+        drop(active);
+        drop(start_lock);
+        Ok(self.cancel_token.clone())
+    }
+}
+
+impl Drop for Inspection {
     fn drop(&mut self) {
         if let Ok(mut active) = self.state.active.lock() {
             if active.as_ref().is_some_and(|scan| scan.id == self.id) {
                 *active = None;
             }
+        }
+        if let Ok(mut pending) = self.state.pending.lock() {
+            pending.remove(&self.id);
         }
     }
 }
@@ -119,20 +177,29 @@ fn combine_errors(errors: impl IntoIterator<Item = Option<String>>) -> Result<()
     }
 }
 
+/// What a Stop tears down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopTarget {
+    /// The launched job with this ID, and no Directory Inspection.
+    Job(u64),
+    /// A start before its launch, which has no job yet: only its own preflight inspection, `None`
+    /// until the actor has scheduled it. A scan the user began is never cancelled.
+    Start { inspection: Option<u64> },
+}
+
+/// Tears down `target`, and returns once it is torn down or the wait for it timed out.
 pub fn stop_job_inner(
     state: &JobState,
     scan_state: &ScanState,
-    job_id: Option<u64>,
+    target: StopTarget,
 ) -> Result<(), String> {
-    if let Some(expected_id) = job_id {
-        if !state.holds_slot(expected_id)? {
-            return Ok(());
-        }
+    match target {
+        StopTarget::Job(job_id) => state.stop(Some(job_id), STOP_TIMEOUT),
+        StopTarget::Start {
+            inspection: Some(id),
+        } => scan_state.stop_inspection(id, STOP_TIMEOUT),
+        StopTarget::Start { inspection: None } => Ok(()),
     }
-    // Stopping the job must proceed even if scan teardown fails; report both.
-    let scan_error = stop_scan(scan_state).err();
-    let job_error = state.stop(job_id, STOP_TIMEOUT).err();
-    combine_errors([scan_error, job_error])
 }
 
 fn stop_scan(state: &ScanState) -> Result<(), String> {
@@ -140,7 +207,7 @@ fn stop_scan(state: &ScanState) -> Result<(), String> {
     stop_registered_scan(state)
 }
 
-/// Cancels the active scan but leaves it registered: its `ScanRegistration` vacates it when the
+/// Cancels the active scan but leaves it registered: its `Inspection` vacates it when the
 /// inspection actually ends, so `wait_until_empty` waits for that rather than for the cancel.
 fn stop_registered_scan(state: &ScanState) -> Result<(), String> {
     let active = state.active.lock().map_err(|e| e.to_string())?;
@@ -188,6 +255,11 @@ pub fn begin_shutdown(job_state: &JobState, scan_state: &ScanState) -> bool {
     if let Ok(lock) = scan_state.active.lock() {
         if let Some(scan) = lock.as_ref() {
             scan.cancel_token.cancel();
+        }
+    }
+    if let Ok(pending) = scan_state.pending.lock() {
+        for cancel_token in pending.values() {
+            cancel_token.cancel();
         }
     }
     let scan_starting = scan_state.start_lock.try_lock().is_err();
@@ -326,9 +398,10 @@ pub trait Launcher: Send + Sync + 'static {
         sink: ActorSink,
     ) -> impl Future<Output = Result<u64, String>> + Send;
 
-    /// Stops job `job_id` (any job when `None`) and the Directory Inspection, and returns once
-    /// both are torn down.
-    fn stop(&self, job_id: Option<u64>) -> impl Future<Output = Result<(), String>> + Send;
+    /// Stops `target`: a launched job, two-phase, or a start before its launch together with its
+    /// own preflight inspection, which it waits up to 2 s to end. Returns once that is torn down,
+    /// or why it is not.
+    fn stop(&self, target: StopTarget) -> impl Future<Output = Result<(), String>> + Send;
 }
 
 /// The `Launcher` of the app: the Job Slot, the Directory Inspection registry and the session
@@ -359,9 +432,9 @@ impl Launcher for EngineLauncher {
         blocking(move || launch(&job, sink, &cache, request)).await
     }
 
-    async fn stop(&self, job_id: Option<u64>) -> Result<(), String> {
+    async fn stop(&self, target: StopTarget) -> Result<(), String> {
         let (job, scan) = (self.job.clone(), Arc::clone(&self.scan));
-        blocking(move || stop_job_inner(&job, &scan, job_id)).await
+        blocking(move || stop_job_inner(&job, &scan, target)).await
     }
 }
 
@@ -371,8 +444,28 @@ mod tests {
     use crate::job::test_support::{job_state, poison, runtime, RecordingSink};
     use crate::snapshot::JobSnapshot;
 
+    /// Spins until `ready`, or for at most 5 s, so a test whose stop never comes fails instead of
+    /// hanging. Returns whether `ready` came.
+    fn spin_until(ready: impl Fn() -> bool) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !ready() {
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::yield_now();
+        }
+        true
+    }
+
+    /// Inspection `id` of `dir`, scheduled and registered, with its cancel token.
+    fn begun(state: &Arc<ScanState>, id: u64, dir: &Path) -> (Inspection, CancellationToken) {
+        let inspection = state.schedule(id);
+        let token = inspection.begin(dir).unwrap();
+        (inspection, token)
+    }
+
     #[test]
-    fn test_stale_stop_job_does_not_stop_active_scan() {
+    fn test_stopping_a_job_leaves_every_inspection_alone() {
         let scan_state = ScanState::default();
         let token = CancellationToken::new();
         *scan_state.active.lock().unwrap() = Some(ActiveScan {
@@ -382,24 +475,212 @@ mod tests {
 
         let job = job_state();
         job.occupy(7);
-        assert!(stop_job_inner(&job, &scan_state, Some(99)).is_ok());
-        assert!(stop_job_inner(&job_state(), &scan_state, Some(99)).is_ok());
+        assert!(stop_job_inner(&job, &scan_state, StopTarget::Job(99)).is_ok());
+        assert!(stop_job_inner(&job_state(), &scan_state, StopTarget::Job(99)).is_ok());
+        // A job's own Stop too, even while the registry is unusable.
+        poison(&scan_state.start_lock);
+        let job = job_state();
+        job.occupy(7);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                assert!(
+                    spin_until(|| job.current_cancelled()),
+                    "the job was not stopped"
+                );
+                job.vacate();
+            });
+            assert_eq!(
+                stop_job_inner(&job, &scan_state, StopTarget::Job(7)),
+                Ok(())
+            );
+        });
 
         assert!(scan_state.is_active());
         assert!(!token.is_cancelled());
     }
 
     #[test]
-    fn test_stop_job_proceeds_when_scan_teardown_fails() {
-        let scan_state = ScanState::default();
-        poison(&scan_state.start_lock);
-
+    fn test_stopping_a_start_cancels_only_its_own_inspection() {
         let job = job_state();
         job.occupy(7);
+        let scan_state = Arc::new(ScanState::default());
+        let tmp = tempfile::tempdir().unwrap();
+        let (_user_scan, user_token) = begun(&scan_state, 1, tmp.path());
 
-        let error = stop_job_inner(&job, &scan_state, Some(7)).unwrap_err();
-        assert!(error.contains("poisoned"));
-        assert!(job.current_cancelled());
+        // Its inspection has not begun, or has ended already: the user's scan runs on, and the
+        // Stop has nothing to wait on.
+        let none = StopTarget::Start { inspection: None };
+        assert_eq!(stop_job_inner(&job, &scan_state, none), Ok(()));
+        let ended = StopTarget::Start {
+            inspection: Some(2),
+        };
+        assert_eq!(stop_job_inner(&job, &scan_state, ended), Ok(()));
+        assert!(!user_token.is_cancelled());
+        assert!(scan_state.is_active());
+        assert!(!job.current_cancelled(), "a start has no job to stop");
+    }
+
+    #[test]
+    fn test_the_engine_launcher_stops_a_start_through_its_inspection() {
+        let launcher = EngineLauncher {
+            job: job_state(),
+            scan: Arc::default(),
+            cache: InspectCacheState::default(),
+        };
+        let target = StopTarget::Start {
+            inspection: Some(1),
+        };
+        let inspection = launcher.scan.schedule(1);
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+
+        let refused = std::thread::scope(|scope| {
+            let ending = scope.spawn(move || {
+                let cancelled = spin_until(|| inspection.cancel_token.is_cancelled());
+                (cancelled, inspection.begin(dir).is_err())
+            });
+            assert_eq!(runtime().block_on(launcher.stop(target)), Ok(()));
+            ending.join().unwrap()
+        });
+
+        assert_eq!(refused, (true, true));
+    }
+
+    #[test]
+    fn test_a_late_older_inspection_is_refused_and_leaves_the_newer_one_running() {
+        let scan_state = Arc::new(ScanState::default());
+        let tmp = tempfile::tempdir().unwrap();
+        let (newer, newer_token) = begun(&scan_state, 2, tmp.path());
+        let older = scan_state.schedule(1);
+
+        assert_eq!(
+            older.begin(tmp.path()).err().as_deref(),
+            Some(INSPECTION_CANCELLED)
+        );
+        assert!(!newer_token.is_cancelled());
+        assert!(scan_state.is_active());
+        // Once the newer one ended, nothing newer runs, and an older one may.
+        drop(newer);
+        assert!(older.begin(tmp.path()).is_ok());
+    }
+
+    #[test]
+    fn test_a_start_stop_waits_until_its_still_canonicalizing_inspection_ends() {
+        let scan_state = Arc::new(ScanState::default());
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let (_user_scan, user_token) = begun(&scan_state, 1, dir);
+        // Scheduled, not begun: stands in for one still canonicalizing its directory.
+        let inspection = scan_state.schedule(2);
+        let ended = AtomicBool::new(false);
+        let ended_ref = &ended;
+
+        std::thread::scope(|scope| {
+            let ending = scope.spawn(move || {
+                let cancelled = spin_until(|| inspection.cancel_token.is_cancelled());
+                // What its begin answers once its directory is canonicalized.
+                let begun = inspection.begin(dir).err();
+                ended_ref.store(true, Ordering::SeqCst);
+                drop(inspection);
+                (cancelled, begun)
+            });
+            assert_eq!(scan_state.stop_inspection(2, STOP_TIMEOUT), Ok(()));
+            assert!(
+                ended.load(Ordering::SeqCst),
+                "the Stop returned before its cancelled inspection ended"
+            );
+            let (cancelled, begun) = ending.join().unwrap();
+            assert!(cancelled, "the Stop cancelled nothing");
+            assert_eq!(begun.as_deref(), Some(INSPECTION_CANCELLED));
+        });
+        assert!(!user_token.is_cancelled(), "the refusal cancelled nothing");
+
+        // Still canonicalizing past the wait: the Stop answers why.
+        let _held = scan_state.schedule(3);
+        let error = scan_state
+            .stop_inspection(3, Duration::from_millis(20))
+            .unwrap_err();
+        assert!(error.contains("Timed out"), "{error}");
+    }
+
+    #[test]
+    fn test_a_stopped_inspection_stays_cancelled_however_many_stops_follow_it() {
+        let scan_state = Arc::new(ScanState::default());
+        let tmp = tempfile::tempdir().unwrap();
+        let inspections: Vec<Inspection> = (1..=9).map(|id| scan_state.schedule(id)).collect();
+
+        for id in 1..=9 {
+            let error = scan_state
+                .stop_inspection(id, Duration::from_millis(5))
+                .unwrap_err();
+            assert!(error.contains("Timed out"), "{id}: {error}");
+        }
+
+        // Each one is still pending, so each one is still cancelled, the first included.
+        for inspection in &inspections {
+            assert_eq!(
+                inspection.begin(tmp.path()).err().as_deref(),
+                Some(INSPECTION_CANCELLED),
+                "{}",
+                inspection.id
+            );
+        }
+        assert!(!scan_state.is_active());
+    }
+
+    #[test]
+    fn test_a_start_stop_waits_until_its_registered_inspection_ends() {
+        let scan_state = Arc::new(ScanState::default());
+        let tmp = tempfile::tempdir().unwrap();
+        let (inspection, token) = begun(&scan_state, 3, tmp.path());
+        let released = AtomicBool::new(false);
+
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                // Stands in for an inspection that ends a while after its cancel.
+                spin_until(|| token.is_cancelled());
+                std::thread::sleep(Duration::from_millis(100));
+                released.store(true, Ordering::SeqCst);
+                drop(inspection);
+            });
+            scan_state.stop_inspection(3, STOP_TIMEOUT).unwrap();
+            assert!(
+                released.load(Ordering::SeqCst),
+                "the Stop returned before its cancelled inspection ended"
+            );
+        });
+
+        let (_inspection, token) = begun(&scan_state, 4, tmp.path());
+        let error = scan_state
+            .stop_inspection(4, Duration::from_millis(50))
+            .unwrap_err();
+        assert!(error.contains("Timed out"), "{error}");
+        assert!(token.is_cancelled());
+    }
+
+    #[test]
+    fn test_close_cancels_the_registered_and_the_still_canonicalizing_inspections() {
+        let (job, scan_state) = (job_state(), Arc::new(ScanState::default()));
+        let tmp = tempfile::tempdir().unwrap();
+        let (inspection, token) = begun(&scan_state, 1, tmp.path());
+        let canonicalizing = scan_state.schedule(2);
+
+        assert!(begin_shutdown(&job, &scan_state));
+        assert!(token.is_cancelled());
+        assert!(canonicalizing.cancel_token.is_cancelled());
+        // One still canonicalizing registers nothing once it gets there.
+        assert!(canonicalizing.begin(tmp.path()).is_err());
+        drop(inspection);
+        // The cleanup does not wait on it: unregistered, it owns no child process.
+        assert_eq!(cleanup_owned_processes(&job, &scan_state), Ok(()));
+        assert!(!scan_state.is_active());
+
+        // A cancelled close leaves it cancelled, as it leaves the registered one.
+        cancel_shutdown(&job, &scan_state);
+        assert_eq!(
+            canonicalizing.begin(tmp.path()).err().as_deref(),
+            Some(INSPECTION_CANCELLED)
+        );
     }
 
     #[test]
@@ -464,7 +745,7 @@ mod tests {
 
         assert!(stop_registered_scan(&state).is_ok());
         assert!(token.is_cancelled());
-        // Still registered: only the inspection's own registration vacates it.
+        // Still registered: only the inspection's own drop vacates it.
         assert!(state.is_active());
     }
 
@@ -472,18 +753,16 @@ mod tests {
     fn test_cleanup_waits_until_the_scan_registration_drops() {
         let (job, scan_state) = (job_state(), Arc::new(ScanState::default()));
         let tmp = tempfile::tempdir().unwrap();
-        let (registration, token) = scan_state.begin(tmp.path()).unwrap();
+        let (inspection, token) = begun(&scan_state, 1, tmp.path());
         let released = AtomicBool::new(false);
 
         std::thread::scope(|scope| {
             scope.spawn(|| {
                 // Stands in for an inspection that ends a while after its cancel.
-                while !token.is_cancelled() {
-                    std::thread::yield_now();
-                }
+                spin_until(|| token.is_cancelled());
                 std::thread::sleep(Duration::from_millis(100));
                 released.store(true, Ordering::SeqCst);
-                drop(registration);
+                drop(inspection);
             });
             cleanup_owned_processes(&job, &scan_state).unwrap();
             assert!(
@@ -492,7 +771,7 @@ mod tests {
             );
         });
 
-        let (_registration, _token) = scan_state.begin(tmp.path()).unwrap();
+        let (_inspection, _token) = begun(&scan_state, 2, tmp.path());
         let error =
             cleanup_owned_processes_with_timeout(&job, &scan_state, Duration::from_millis(50))
                 .unwrap_err();
@@ -504,32 +783,32 @@ mod tests {
     fn test_begin_replaces_and_cancels_the_previous_scan() {
         let scan_state = Arc::new(ScanState::default());
         let tmp = tempfile::tempdir().unwrap();
-        let (first, first_token) = scan_state.begin(tmp.path()).unwrap();
-        let (_second, second_token) = scan_state.begin(tmp.path()).unwrap();
+        let (first, first_token) = begun(&scan_state, 1, tmp.path());
+        let (_second, second_token) = begun(&scan_state, 2, tmp.path());
         assert!(first_token.is_cancelled());
 
         drop(first);
         assert!(scan_state.is_active(), "the old drop vacated the new scan");
         assert!(!second_token.is_cancelled());
-        assert!(scan_state.begin(&tmp.path().join("missing")).is_err());
+        let missing = tmp.path().join("missing");
+        assert!(scan_state.schedule(3).begin(&missing).is_err());
     }
 
     #[test]
-    fn test_scan_registration_drop_clears_active_scan() {
+    fn test_an_inspection_drop_clears_the_active_scan_and_ends_it() {
         let state = Arc::new(ScanState::default());
+        let inspection = state.schedule(1);
         let token = CancellationToken::new();
         *state.active.lock().unwrap() = Some(ActiveScan {
             id: 1,
             cancel_token: token.clone(),
         });
 
-        drop(ScanRegistration {
-            state: Arc::clone(&state),
-            id: 1,
-        });
+        drop(inspection);
 
         assert!(!state.is_active());
         assert!(!token.is_cancelled());
+        assert!(state.pending.lock().unwrap().is_empty());
     }
 
     /// What `launch` needs to run a request: a job state, a sink recording what its jobs report,

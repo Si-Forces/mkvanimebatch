@@ -408,9 +408,10 @@ pub(crate) mod tests {
     use mkv_core::manifest::{InspectionManifest, ManifestItem};
     use mkv_core::request::{BatchRequest, EffectiveSettings};
     use mkv_desktop_core::actor::{ActorSink, Core, Ports};
-    use mkv_desktop_core::control::Launcher;
+    use mkv_desktop_core::control::{Launcher, StopTarget};
     use mkv_desktop_core::inspection::Inspector;
     use mkv_desktop_core::telemetry::{Sampler, TelemetryData};
+    use std::future::Future;
     use std::time::Duration;
     use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
@@ -422,7 +423,12 @@ pub(crate) mod tests {
             Ok(path)
         }
 
-        async fn inspect(&self, _: String, _: bool) -> Result<InspectionManifest, String> {
+        fn inspect(
+            &self,
+            _: u64,
+            _: String,
+            _: bool,
+        ) -> impl Future<Output = Result<InspectionManifest, String>> + Send + use<> {
             let item = |id: &str| ManifestItem {
                 id: ItemId::parse(id),
                 name: id.into(),
@@ -431,12 +437,12 @@ pub(crate) mod tests {
                 inspection_error: None,
                 extra: Default::default(),
             };
-            Ok(InspectionManifest {
+            std::future::ready(Ok(InspectionManifest {
                 version: 2,
                 subtitle_candidates: Default::default(),
                 items: ["a", "b", "c"].map(item).into(),
                 extra: Default::default(),
-            })
+            }))
         }
 
         async fn clear_cache(&self) -> Result<(), String> {
@@ -461,8 +467,13 @@ pub(crate) mod tests {
             Episodes.identity(path).await
         }
 
-        async fn inspect(&self, path: String, force: bool) -> Result<InspectionManifest, String> {
-            Episodes.inspect(path, force).await
+        fn inspect(
+            &self,
+            id: u64,
+            path: String,
+            force: bool,
+        ) -> impl Future<Output = Result<InspectionManifest, String>> + Send + use<> {
+            Episodes.inspect(id, path, force)
         }
 
         async fn clear_cache(&self) -> Result<(), String> {
@@ -483,7 +494,7 @@ pub(crate) mod tests {
             Err("no jobs".into())
         }
 
-        async fn stop(&self, _: Option<u64>) -> Result<(), String> {
+        async fn stop(&self, _: StopTarget) -> Result<(), String> {
             Ok(())
         }
     }

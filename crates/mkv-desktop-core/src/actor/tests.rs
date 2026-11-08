@@ -1,4 +1,5 @@
 use super::*;
+use crate::control::StopTarget;
 use crate::inspector::{Choice, LadderRung, Pill};
 use crate::presentation::Tone;
 use crate::queue::test_support::manifest_of;
@@ -1030,6 +1031,10 @@ pub(super) fn subtitle(id: &str, path: &str, title: Option<&str>) -> TrackAssign
 pub(super) struct FakeInspector {
     pub(super) manifests: Arc<Mutex<HashMap<String, InspectionManifest>>>,
     inspected: Arc<Mutex<Vec<(String, bool)>>>,
+    /// The in-flight ID of each `inspect`, in call order.
+    ids: Arc<Mutex<Vec<u64>>>,
+    /// The task each `inspect` was called in, in call order.
+    callers: Arc<Mutex<Vec<Option<tokio::task::Id>>>>,
     /// What `clear_cache` answers: `Ok` when `None`.
     pub(super) clear_error: Arc<Mutex<Option<String>>>,
 }
@@ -1049,6 +1054,14 @@ impl FakeInspector {
     pub(super) fn inspected(&self) -> Vec<(String, bool)> {
         self.inspected.lock().unwrap().clone()
     }
+
+    pub(super) fn ids(&self) -> Vec<u64> {
+        self.ids.lock().unwrap().clone()
+    }
+
+    pub(super) fn callers(&self) -> Vec<Option<tokio::task::Id>> {
+        self.callers.lock().unwrap().clone()
+    }
 }
 
 impl Inspector for FakeInspector {
@@ -1063,19 +1076,25 @@ impl Inspector for FakeInspector {
         Ok(trimmed.to_string())
     }
 
-    async fn inspect(
+    fn inspect(
         &self,
+        id: u64,
         identity: String,
         no_cache: bool,
-    ) -> Result<InspectionManifest, String> {
+    ) -> impl Future<Output = Result<InspectionManifest, String>> + Send + use<> {
+        self.ids.lock().unwrap().push(id);
+        self.callers.lock().unwrap().push(tokio::task::try_id());
         self.inspected
             .lock()
             .unwrap()
             .push((identity.clone(), no_cache));
-        tokio::time::sleep(INSPECTION).await;
-        assert!(identity != "/panic", "inspector panicked");
-        let manifest = self.manifests.lock().unwrap().get(&identity).cloned();
-        manifest.ok_or_else(|| format!("cannot inspect {identity}"))
+        let manifests = Arc::clone(&self.manifests);
+        async move {
+            tokio::time::sleep(INSPECTION).await;
+            assert!(identity != "/panic", "inspector panicked");
+            let manifest = manifests.lock().unwrap().get(&identity).cloned();
+            manifest.ok_or_else(|| format!("cannot inspect {identity}"))
+        }
     }
 
     async fn clear_cache(&self) -> Result<(), String> {
@@ -1846,7 +1865,7 @@ async fn test_the_defaults_are_published_once_the_actor_has_read_them() {
 /// What a `FakeLauncher` was told, and how it answers.
 #[derive(Default)]
 pub(super) struct LauncherScript {
-    /// Each call, in order: `resolve`, `launch`, `stop None` or `stop Some(id)`.
+    /// Each call, in order: `resolve`, `launch`, or `stop` and its `StopTarget`.
     calls: Vec<String>,
     launched: Vec<BatchRequest>,
     pub(super) resolve_error: Option<String>,
@@ -1923,13 +1942,17 @@ impl Launcher for FakeLauncher {
         Ok(job_id)
     }
 
-    async fn stop(&self, job_id: Option<u64>) -> Result<(), String> {
-        self.script().calls.push(format!("stop {job_id:?}"));
+    async fn stop(&self, target: StopTarget) -> Result<(), String> {
+        self.script().calls.push(format!("stop {target:?}"));
         tokio::time::sleep(STOP).await;
         let mut script = self.script();
         if let Some(error) = script.stop_error.clone() {
             return Err(error);
         }
+        let job_id = match target {
+            StopTarget::Job(job_id) => Some(job_id),
+            StopTarget::Start { .. } => None,
+        };
         if let Some(at) = script.jobs.iter().position(|job| Some(job.0) == job_id) {
             let (job_id, mode, sink) = script.jobs.remove(at);
             sink.done(&JobDone {

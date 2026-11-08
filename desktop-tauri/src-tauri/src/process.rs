@@ -42,7 +42,9 @@ pub async fn close_window(window: tauri::Window, app: AppHandle) -> Result<(), S
 mod tests {
     use super::*;
     use mkv_core::pipeline::{CancellationToken, PipelineSummary};
-    use mkv_desktop_core::control::{cleanup_owned_processes_with_timeout, stop_job_inner};
+    use mkv_desktop_core::control::{
+        cleanup_owned_processes_with_timeout, stop_job_inner, StopTarget,
+    };
     use mkv_desktop_core::job::test_support::RecordingSink;
     use mkv_desktop_core::job::JobConfig;
     use mkv_desktop_core::snapshot::test_support::effective_settings;
@@ -111,7 +113,7 @@ mod tests {
         let start = Instant::now();
         let stop = tauri::async_runtime::spawn(run_teardown(
             app.handle().clone(),
-            move |state, scan_state| stop_job_inner(state, scan_state, Some(job_id)),
+            move |state, scan_state| stop_job_inner(state, scan_state, StopTarget::Job(job_id)),
         ));
         tauri::async_runtime::block_on(async {
             tokio::time::timeout(Duration::from_secs(2), token.cancelled())
