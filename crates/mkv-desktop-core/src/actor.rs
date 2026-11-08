@@ -1146,16 +1146,30 @@ impl<P: Publisher, I: Inspector, L: Launcher, S: Sampler> Core<P, I, L, S> {
         if self.mode(mode).request != request {
             return self.reply_scan(reply, Ok(false));
         }
-        // A start's scan whose start ended or is stopping inspects nothing: its Stop could only
-        // cancel an inspection already registered.
-        if let &ScanReply::Preflight(attempt) = &reply {
-            let stopping = self.coordinator.phase() == Phase::Stopping;
-            if stopping || self.current(attempt).is_none() {
-                return self.reply_scan(reply, Ok(false));
+        // A start's scan whose start ended or is stopping inspects nothing: its Stop cancels only
+        // an inspection the start had begun.
+        let preflight = match &reply {
+            ScanReply::Preflight(attempt) => Some(*attempt),
+            ScanReply::Intent(_) => None,
+        };
+        let ended = preflight.is_some_and(|attempt| self.start_over(attempt));
+        let early = if ended {
+            Some(Ok(false))
+        } else {
+            self.scan_refusal(mode, &reply)
+                .map(|refusal| Err(refusal.into()))
+        };
+        if let Some(answer) = early {
+            // This request is the mode's newest, so a "Scanning" is a scan's it overtook, whose
+            // result no longer counts: nothing else would end it. Defensive on a start's ended
+            // scan: no scan of the mode can be "Scanning" then, since a Run is refused while its
+            // mode scans and a start refuses every scan the user begins.
+            let state = self.mode(mode);
+            if matches!(state.scan, ScanView::Scanning { .. }) {
+                state.scan = ScanView::Idle;
+                self.touch(mode);
             }
-        }
-        if let Some(refusal) = self.scan_refusal(mode, &reply) {
-            return self.reply_scan(reply, Err(refusal.into()));
+            return self.reply_scan(reply, answer);
         }
         let state = self.mode(mode);
         state.token += 1;
@@ -1180,14 +1194,19 @@ impl<P: Publisher, I: Inspector, L: Launcher, S: Sampler> Core<P, I, L, S> {
         let Some(id) = self.in_flight.join(key, force, waiter) else {
             return;
         };
-        let inspector = Arc::clone(&self.inspector);
+        // Scheduled here, on the actor, so it is pending before the start's Stop can name it.
+        let inspection = self.inspector.inspect(id, directory, no_cache);
+        // What the start's Stop cancels.
+        if let Some(start) = preflight.and_then(|attempt| self.current(attempt)) {
+            start.inspection = Some(id);
+        }
         let inbox = self.inbox.clone();
         let runtime = self.runtime.clone();
         self.runtime.spawn(async move {
-            // The inspection runs in a task of its own so a panic in it still settles its scans,
-            // as a failure, instead of leaving the mode scanning and its key in flight.
+            // The inspection's future runs in a task of its own so a panic in it still settles its
+            // scans, as a failure, instead of leaving the mode scanning and its key in flight.
             let result = runtime
-                .spawn(async move { inspector.inspect(directory, no_cache).await })
+                .spawn(inspection)
                 .await
                 .unwrap_or_else(|e| Err(format!("Inspection failed: {e}")));
             if let Some(inbox) = inbox.upgrade() {
@@ -1211,9 +1230,7 @@ impl<P: Publisher, I: Inspector, L: Launcher, S: Sampler> Core<P, I, L, S> {
             // A start's scan that settles after its start ended or while it stops is overtaken:
             // a Stop cancels its inspection, which must not fail the mode's scan.
             let overtaken = match waiter.reply {
-                ScanReply::Preflight(attempt) => {
-                    self.coordinator.phase() == Phase::Stopping || self.current(attempt).is_none()
-                }
+                ScanReply::Preflight(attempt) => self.start_over(attempt),
                 ScanReply::Intent(_) => false,
             };
             let state = self.mode(waiter.mode);

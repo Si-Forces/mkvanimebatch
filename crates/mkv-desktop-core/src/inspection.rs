@@ -3,10 +3,13 @@
 //! `EngineInspector` adapter does both with `mkv-core`, and tests script a fake. The in-flight
 //! registry lets the scans of one key share one inspection.
 //!
-//! One Directory Inspection runs at a time across both modes: `ScanState::begin` cancels the one
-//! before it, so a scan of another directory, in either view, fails a scan still inspecting. Two
-//! scans of the same key share one inspection instead, so the Remux and Extract views can both
-//! show one directory.
+//! One Directory Inspection runs at a time across both modes, and the one started last wins. The
+//! actor schedules each inspection in `ScanState` when it starts it, numbered in start order, so a
+//! Stop that names it finds it pending from then until it ends. Once its directory is
+//! canonicalized, `Inspection::begin` registers it: it cancels an older one, so a scan of another
+//! directory, in either view, fails a scan still inspecting, and it refuses an older one that
+//! registers late, or one a Stop cancelled. Two scans of the same key share one inspection instead,
+//! so the Remux and Extract views can both show one directory.
 
 use crate::control::{InspectCacheState, ScanState};
 use crate::job::display_canonical_path;
@@ -17,18 +20,23 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 /// What the actor needs to scan a directory, and to clear the inspect cache those scans use. Each
-/// runs off the actor.
+/// future runs off the actor.
 pub trait Inspector: Send + Sync + 'static {
     /// The Directory Identity of `path`, or why it has none.
     fn identity(&self, path: String) -> impl Future<Output = Result<String, String>> + Send;
 
     /// The Inspection Manifest of the directory `identity` names, bypassing the inspect cache
-    /// when `no_cache`.
+    /// when `no_cache`. `id` numbers the inspection: the in-flight registry's, in the order the
+    /// actor started them. The call itself runs on the actor and schedules the inspection, so a
+    /// Stop can name it from then on; the future it returns borrows nothing and runs off the actor.
+    /// The actor makes the call inline, so it must return at once and must not panic: everything
+    /// else belongs in the future.
     fn inspect(
         &self,
+        id: u64,
         identity: String,
         no_cache: bool,
-    ) -> impl Future<Output = Result<InspectionManifest, String>> + Send;
+    ) -> impl Future<Output = Result<InspectionManifest, String>> + Send + use<Self>;
 
     /// Empties the session inspect cache and deletes its file.
     fn clear_cache(&self) -> impl Future<Output = Result<(), String>> + Send;
@@ -60,28 +68,35 @@ impl Inspector for EngineInspector {
             .map(|(_, identity)| identity)
     }
 
-    async fn inspect(
+    fn inspect(
         &self,
+        id: u64,
         identity: String,
         no_cache: bool,
-    ) -> Result<InspectionManifest, String> {
-        // A closing app refuses before it touches the path. Canonicalizing runs before
-        // `ScanState::begin` takes the start lock, whose guard cannot be held across this await.
-        self.scan.ensure_accepting_starts()?;
-        let (dir, identity) = canonicalize_directory(identity).await?;
-        let (_registration, cancel_token) = self.scan.begin(&dir)?;
-        let cache = if no_cache {
-            None
-        } else {
-            Some(self.cache.shared().await?)
-        };
-        let mut manifest =
-            mkv_core::manifest::generate_inspection_manifest(&dir, cache, Some(&cancel_token))
-                .await?;
-        manifest
-            .extra
-            .insert("canonical_dir".to_string(), identity.into());
-        Ok(manifest)
+    ) -> impl Future<Output = Result<InspectionManifest, String>> + Send + use<> {
+        let (scan, cache) = (Arc::clone(&self.scan), self.cache.clone());
+        // Pending from now until the future ends or drops, canonicalizing included, which is what
+        // a Stop cancels and waits on.
+        let inspection = scan.schedule(id);
+        async move {
+            // A closing app refuses before it touches the path. Canonicalizing runs before
+            // `begin` takes the start lock, whose guard cannot be held across this await.
+            scan.ensure_accepting_starts()?;
+            let (dir, identity) = canonicalize_directory(identity).await?;
+            let cancel_token = inspection.begin(&dir)?;
+            let cache = if no_cache {
+                None
+            } else {
+                Some(cache.shared().await?)
+            };
+            let mut manifest =
+                mkv_core::manifest::generate_inspection_manifest(&dir, cache, Some(&cancel_token))
+                    .await?;
+            manifest
+                .extra
+                .insert("canonical_dir".to_string(), identity.into());
+            Ok(manifest)
+        }
     }
 
     async fn clear_cache(&self) -> Result<(), String> {
@@ -116,7 +131,8 @@ impl<W> Default for InFlight<W> {
 
 impl<W> InFlight<W> {
     /// Adds `waiter` to the running inspection of `key`, unless `force` or none runs. Returns the
-    /// ID of the inspection the caller must then start, or `None` when it joined one.
+    /// ID of the inspection the caller must then start, or `None` when it joined one. IDs grow in
+    /// the order inspections start, which is how `ScanState` tells the newest one.
     pub fn join(&mut self, key: InspectionKey, force: bool, waiter: W) -> Option<u64> {
         if !force {
             if let Some(id) = self.current.get(&key) {
@@ -259,7 +275,7 @@ mod tests {
         let spelled = tmp.path().join(".").to_string_lossy().into_owned();
         let inspector = engine();
 
-        let manifest = block_on(inspector.inspect(spelled.clone(), true)).unwrap();
+        let manifest = block_on(inspector.inspect(1, spelled.clone(), true)).unwrap();
         let identity = block_on(inspector.identity(spelled)).unwrap();
 
         assert_eq!(
@@ -268,6 +284,22 @@ mod tests {
         );
         // The registration ended with the inspection.
         assert!(!inspector.scan.is_active());
+    }
+
+    #[test]
+    fn test_an_inspection_is_pending_from_its_call_until_its_future_drops() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inspector = engine();
+
+        // Not yet polled: a Stop that names it already finds it, and so waits on it.
+        let inspection = inspector.inspect(7, tmp.path().to_string_lossy().into_owned(), true);
+        let wait = std::time::Duration::from_millis(20);
+        let error = inspector.scan.stop_inspection(7, wait).unwrap_err();
+        assert!(error.contains("Timed out"), "{error}");
+
+        // Dropped unpolled, it has ended, and the Stop has nothing left to wait on.
+        drop(inspection);
+        assert_eq!(inspector.scan.stop_inspection(7, wait), Ok(()));
     }
 
     #[cfg(unix)]
@@ -292,7 +324,7 @@ mod tests {
 
         let error = block_on(inspector.identity(missing.clone())).unwrap_err();
         assert!(error.starts_with("Invalid directory path: "), "{error}");
-        let error = block_on(inspector.inspect(missing, true)).unwrap_err();
+        let error = block_on(inspector.inspect(1, missing, true)).unwrap_err();
         assert!(error.starts_with("Invalid directory path: "), "{error}");
     }
 }
