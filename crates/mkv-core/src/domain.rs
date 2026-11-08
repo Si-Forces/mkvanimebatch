@@ -413,6 +413,8 @@ pub fn detect_sub_lang(sub_stem: &str) -> String {
 
 // ─── EPISODE PARSER ──────────────────────────────────────────────────────────
 
+// The lone-digit season lookbehinds in SEASON_PATTERNS repeat the words of OVA_PATTERN,
+// SPECIAL_PATTERN and the EP marker in EP_NUM_MARKER_RE; change them together.
 static OVA_PATTERN: LazyLock<FancyRegex> =
     LazyLock::new(|| FancyRegex::new(r"(?i)(?<!\w)(OVA|OAD|ONA)(?=\d|\W|$)").unwrap());
 
@@ -453,9 +455,22 @@ static SEASON_PATTERNS: LazyLock<Vec<FancyRegex>> = LazyLock::new(|| {
     vec![
         FancyRegex::new(r"(?i)[Ss]eason\s*(\d{1,2})").unwrap(),
         FancyRegex::new(r"\bS(\d{1,2})\b(?![EePp])").unwrap(),
-        FancyRegex::new(r"(?<=[a-zA-Z])\s+(\d{1})\s+(?=[a-zA-Z])").unwrap(),
+        // A lone digit between two words, unless the word before it is one of the parser's own
+        // marker words ("Ep 5", "OVA 3", "Special 2"), whose number it is.
+        // Keep these words in sync with OVA_PATTERN, SPECIAL_PATTERN and EP_NUM_MARKER_RE.
+        FancyRegex::new(concat!(
+            r"(?i)(?<=[a-z])(?<!\bep)(?<!\bepisode)(?<!\bova)(?<!\boad)(?<!\bona)",
+            r"(?<!\bspecial)(?<!\bspecials)(?<!\bsp)\s+(\d{1})\s+(?=[a-z])",
+        ))
+        .unwrap(),
     ]
 });
+
+/// Innermost bracketed or parenthesized text, which the bare-number fallback searches last
+/// ("[AAC 2.0]"). It holds no bracket of the same kind, so masking it repeatedly peels nested
+/// pairs ("[Audio [AAC] 5.1]") one level at a time.
+static BRACKETED_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\[[^\[\]]*\]|\([^()]*\)").unwrap());
 
 static TYPED_EP_GLUED: LazyLock<FancyRegex> =
     LazyLock::new(|| FancyRegex::new(r"^\s*(\d{1,4}(?:\.\d{1,2}(?![0-9pib]))?)").unwrap());
@@ -479,12 +494,22 @@ fn first_captured_group<'a>(caps: &'a fancy_regex::Captures<'a, str>) -> Option<
     None
 }
 
-fn last_fallback_ep(text: &str) -> Option<&str> {
-    EP_NUM_FALLBACK_RE
-        .captures_iter(text)
-        .flatten()
-        .filter_map(|m| m.get(1).map(|v| v.as_str()))
-        .last()
+/// The last bare number outside brackets and parentheses, else the last one anywhere, formatted
+/// as an episode number: `Show 01 [AAC 2.0]` is 01, `[Group] Show [BD 05]` still 05.
+fn last_fallback_ep(text: &str) -> Option<String> {
+    let last = |text: &str| {
+        EP_NUM_FALLBACK_RE
+            .captures_iter(text)
+            .flatten()
+            .filter_map(|m| m.get(1).map(|v| v.as_str()))
+            .last()
+            .map(format_ep)
+    };
+    let mut outside = text.to_string();
+    while BRACKETED_RE.is_match(&outside) {
+        outside = BRACKETED_RE.replace_all(&outside, " ").into_owned();
+    }
+    last(&outside).or_else(|| last(text))
 }
 
 fn parse_typed_ep(name: &str, pattern: &FancyRegex) -> String {
@@ -506,8 +531,8 @@ fn parse_typed_ep(name: &str, pattern: &FancyRegex) -> String {
         }
     }
 
-    if let Some(val) = last_fallback_ep(remainder) {
-        return format_ep(val);
+    if let Some(ep) = last_fallback_ep(remainder) {
+        return ep;
     }
 
     "00".to_string()
@@ -537,8 +562,9 @@ pub fn parse_episode(name: &str) -> Option<EpisodeInfo> {
                 if let Ok(s_num) = m.as_str().parse::<u32>() {
                     season = s_num.to_string();
                     let match_range = caps.get(0).unwrap().range();
+                    // A space, not nothing, so the neighbours are never glued together.
                     normalized = format!(
-                        "{}{}",
+                        "{} {}",
                         &normalized[..match_range.start],
                         &normalized[match_range.end..]
                     );
@@ -566,32 +592,45 @@ pub fn parse_episode(name: &str) -> Option<EpisodeInfo> {
         return Some(EpisodeInfo::new(s_num.to_string(), EpisodeType::Part, ep));
     }
 
-    if let Ok(Some(_)) = OVA_PATTERN.find(&normalized) {
+    // A type qualifier counts when there is no episode marker or one follows it: a qualifier
+    // before the first marker always has one after it, and so does "Show - 2nd Season OVA - 01".
+    // When every marker comes before it, it is a word in the episode title
+    // ("Show - 07 - Special Service"). The bare-number fallback is not a marker.
+    let marker = EP_NUM_MARKER_RE
+        .captures(normalized.as_str())
+        .ok()
+        .flatten();
+    let qualifier_counts = |pattern: &FancyRegex| {
+        pattern.find(&normalized).ok().flatten().is_some_and(|q| {
+            marker.is_none()
+                || EP_NUM_MARKER_RE
+                    .find_from_pos(&normalized, q.end())
+                    .ok()
+                    .flatten()
+                    .is_some()
+        })
+    };
+
+    if qualifier_counts(&OVA_PATTERN) {
         let ep = parse_typed_ep(&normalized, &OVA_PATTERN);
         return Some(EpisodeInfo::new(season, EpisodeType::Ova, ep));
     }
 
-    if let Ok(Some(_)) = SPECIAL_PATTERN.find(&normalized) {
+    if qualifier_counts(&SPECIAL_PATTERN) {
         let ep = parse_typed_ep(&normalized, &SPECIAL_PATTERN);
         return Some(EpisodeInfo::new(season, EpisodeType::Special, ep));
     }
 
-    if let Ok(Some(caps)) = EP_NUM_MARKER_RE.captures(normalized.as_str()) {
-        if let Some(val) = first_captured_group(&caps) {
-            return Some(EpisodeInfo::new(
-                season,
-                EpisodeType::Episode,
-                format_ep(val),
-            ));
-        }
-    }
-
-    if let Some(val) = last_fallback_ep(&normalized) {
+    if let Some(val) = marker.as_ref().and_then(first_captured_group) {
         return Some(EpisodeInfo::new(
             season,
             EpisodeType::Episode,
             format_ep(val),
         ));
+    }
+
+    if let Some(ep) = last_fallback_ep(&normalized) {
+        return Some(EpisodeInfo::new(season, EpisodeType::Episode, ep));
     }
 
     None
