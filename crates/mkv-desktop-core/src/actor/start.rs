@@ -5,7 +5,7 @@
 //! failed teardown, and the clear of the log once a Run's request resolved.
 
 use super::{Core, CoreHandle, Msg, Outcome, Publisher, Reply, ScanReply, ScanView};
-use crate::control::Launcher;
+use crate::control::{Launcher, StopTarget, INSPECTION_CANCELLED};
 use crate::coordinator::{preflight, Captured, Phase};
 use crate::inspection::Inspector;
 use crate::log::error_line;
@@ -35,6 +35,8 @@ pub(super) struct Start {
     captured: Captured,
     /// From its `JobStarted` on.
     pub(super) job_id: Option<u64>,
+    /// The in-flight ID of its forced scan's inspection, once the actor has scheduled it.
+    pub(super) inspection: Option<u64>,
     /// Answered when the start settles.
     run_reply: Option<Reply>,
     /// Whether a teardown is in flight, whose `StopSettled` answers the Stops waiting on it.
@@ -74,6 +76,15 @@ impl<P: Publisher, I: Inspector, L: Launcher, S: Sampler> Core<P, I, L, S> {
     /// The start of `attempt`, unless a newer one replaced it or it ended.
     pub(super) fn current(&mut self, attempt: u64) -> Option<&mut Start> {
         self.start.as_mut().filter(|start| start.attempt == attempt)
+    }
+
+    /// Whether the start of `attempt` is over for its forced scan: it ended, or it is stopping.
+    pub(super) fn start_over(&self, attempt: u64) -> bool {
+        self.coordinator.phase() == Phase::Stopping
+            || !self
+                .start
+                .as_ref()
+                .is_some_and(|start| start.attempt == attempt)
     }
 
     /// Whether the current start launched job `job_id`.
@@ -119,6 +130,7 @@ impl<P: Publisher, I: Inspector, L: Launcher, S: Sampler> Core<P, I, L, S> {
             request: request.clone(),
             captured,
             job_id: None,
+            inspection: None,
             run_reply: Some(reply),
             stop_issued: false,
         });
@@ -226,7 +238,7 @@ impl<P: Publisher, I: Inspector, L: Launcher, S: Sampler> Core<P, I, L, S> {
         let reply = start.run_reply.take();
         if !self.coordinator.launched() {
             // Stopping: the Stop waited for the job ID.
-            self.issue_stop(attempt, Some(job_id));
+            self.issue_stop(attempt);
         }
         self.dirty = true;
         if let Some(reply) = reply {
@@ -234,15 +246,15 @@ impl<P: Publisher, I: Inspector, L: Launcher, S: Sampler> Core<P, I, L, S> {
         }
     }
 
-    /// Stops `mode`'s start or job. A start still resolving or scanning is cancelled by stopping
-    /// the inspection; one launching is stopped once its job ID is known.
+    /// Stops `mode`'s start or job. A start still resolving or scanning is cancelled together
+    /// with its own inspection; one launching is stopped once its job ID is known.
     pub(super) fn stop_batch(&mut self, mode: PipelineMode, reply: Reply) {
         let owned = self
             .start
             .as_ref()
             .filter(|_| self.coordinator.owner() == Some(mode))
-            .map(|start| (start.attempt, start.step, start.job_id));
-        let Some((attempt, step, job_id)) = owned else {
+            .map(|start| (start.attempt, start.step));
+        let Some((attempt, step)) = owned else {
             return self.answer(reply, Ok(false));
         };
         // Only a launched job's teardown is announced: a start still launching stops once it
@@ -254,25 +266,29 @@ impl<P: Publisher, I: Inspector, L: Launcher, S: Sampler> Core<P, I, L, S> {
         // A Stop while one is pending waits on the same teardown.
         if self.coordinator.request_stop() {
             self.dirty = true;
-            match step {
-                Step::Resolving | Step::Scanning => self.issue_stop(attempt, None),
-                Step::Launching => {}
-                Step::Launched => self.issue_stop(attempt, job_id),
+            if step != Step::Launching {
+                self.issue_stop(attempt);
             }
         }
         self.flush();
     }
 
-    /// Tears down the start of `attempt` off the actor: job `job_id`, or none yet, and the
-    /// Directory Inspection.
-    fn issue_stop(&mut self, attempt: u64, job_id: Option<u64>) {
+    /// Tears down the start of `attempt` off the actor: its job once launched, else its own
+    /// inspection. A scan the user began, in either mode, runs on.
+    fn issue_stop(&mut self, attempt: u64) {
         let Some(start) = self.current(attempt) else {
             return;
         };
         start.stop_issued = true;
         let mode = start.mode;
+        let target = match start.job_id {
+            Some(job_id) => StopTarget::Job(job_id),
+            None => StopTarget::Start {
+                inspection: start.inspection,
+            },
+        };
         let launcher = Arc::clone(&self.launcher);
-        self.off_actor(async move { launcher.stop(job_id).await }, move |result| {
+        self.off_actor(async move { launcher.stop(target).await }, move |result| {
             Msg::StopSettled {
                 attempt,
                 mode,
@@ -299,6 +315,13 @@ impl<P: Publisher, I: Inspector, L: Launcher, S: Sampler> Core<P, I, L, S> {
         let step = self.current(attempt).map(|start| start.step);
         match (step, &result) {
             (Some(Step::Resolving | Step::Scanning), _) => {
+                // Its forced scan settles first, overtaken (the phase is still Stopping), so its
+                // mode no longer shows "Scanning" once the Stops answer, even when the inspection
+                // outlived the teardown's wait. A start refuses every scan the user begins, so no
+                // other scan waits on that inspection, whose own result later settles nothing.
+                if let Some(id) = self.current(attempt).and_then(|start| start.inspection) {
+                    self.inspected(id, Err(INSPECTION_CANCELLED.into()));
+                }
                 self.finish_start(Outcome::Cancelled, Ok(false));
             }
             (Some(Step::Launched), Ok(())) => {
@@ -518,7 +541,7 @@ mod tests {
         // A second Stop waits on the same teardown.
         assert_eq!(core.dispatch(stop(REMUX)).await, Ok(true));
         assert_eq!(stopping.await.unwrap(), Ok(true));
-        assert_eq!(launcher.calls(), ["resolve", "launch", "stop Some(1)"]);
+        assert_eq!(launcher.calls(), ["resolve", "launch", "stop Job(1)"]);
         // Read straight after the answer: the job is over, not stopping.
         let state = core.state().await.unwrap();
         assert_eq!(state.run, RunView::default());
@@ -646,7 +669,10 @@ mod tests {
         assert_eq!(core.dispatch(stop(REMUX)).await, Ok(true));
         assert_eq!(running.await.unwrap(), Ok(false));
         tokio::time::sleep(RESOLVE).await;
-        assert_eq!(launcher.calls(), ["resolve", "stop None"]);
+        assert_eq!(
+            launcher.calls(),
+            ["resolve", "stop Start { inspection: None }"]
+        );
         assert_eq!(inspector.inspected().len(), 1, "no forced scan");
         let state = core.state().await.unwrap();
         assert_eq!(state.run, RunView::default());
@@ -684,14 +710,176 @@ mod tests {
 
         assert_eq!(core.dispatch(stop(REMUX)).await, Ok(true));
         assert_eq!(running.await.unwrap(), Ok(false));
-        // The forced scan still settles, after the start ended.
+        // The stopped inspection's own result arrives after the start ended and settles nothing.
         tokio::time::sleep(INSPECTION).await;
         assert_eq!(inspector.inspected().len(), 2);
-        assert_eq!(launcher.calls(), ["resolve", "stop None"]);
+        // The Stop names the ID the forced scan's inspection was started with.
+        assert_eq!(inspector.ids().last(), Some(&2));
+        // Both inspections were called in one task, the actor's, so the forced one was pending
+        // before its Stop could name it; a call in a spawned task would run in a task of its own.
+        let callers = inspector.callers();
+        assert!(callers[0].is_some());
+        assert_eq!(callers[0], callers[1]);
+        assert_eq!(
+            launcher.calls(),
+            ["resolve", "stop Start { inspection: Some(2) }"]
+        );
         let state = core.state().await.unwrap();
         assert_eq!(state.run.phase, Phase::Idle);
         assert_eq!(state.remux.outcome, Some(Outcome::Cancelled));
         assert_eq!(state.remux.scan, ScanView::Idle);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_a_stop_answers_once_its_still_inspecting_forced_scan_no_longer_shows_scanning() {
+        let launcher = FakeLauncher::default();
+        let (core, _publisher, inspector) = run_core(&launcher).await;
+        let rows = core.state().await.unwrap().remux.rows;
+        let running = pending(&core, run(REMUX));
+        tokio::time::sleep(RESOLVE + INSPECTION / 4).await;
+
+        // The teardown settles in `STOP`, while the forced inspection still runs.
+        assert_eq!(core.dispatch(stop(REMUX)).await, Ok(true));
+        let state = core.state().await.unwrap();
+        assert_eq!(state.remux.scan, ScanView::Idle);
+        assert_eq!(state.remux.rows, rows);
+        assert_eq!(state.run.phase, Phase::Idle);
+        assert_eq!(running.await.unwrap(), Ok(false));
+        // The next Run is not refused as scanning, and the stopped inspection settles nothing.
+        assert_eq!(core.dispatch(run(REMUX)).await, Ok(true));
+        assert_eq!(inspector.inspected().len(), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_a_stopped_inspections_late_result_leaves_a_newer_scan_of_its_key_scanning() {
+        let launcher = FakeLauncher::default();
+        let (core, _publisher, inspector) = run_core(&launcher).await;
+        // The queue holds `/fast`, so a scan of the draft's `/anime` inspects instead of reusing.
+        assert_eq!(core.dispatch(scan(REMUX, "/fast", false)).await, Ok(true));
+        let rows = core.state().await.unwrap().remux.rows;
+        let running = pending(&core, run(REMUX));
+        tokio::time::sleep(RESOLVE + INSPECTION / 4).await;
+        assert_eq!(core.dispatch(stop(REMUX)).await, Ok(true));
+        assert_eq!(running.await.unwrap(), Ok(false));
+
+        // The forced scan's key, still inspecting: this scan must not join it.
+        let scanning = pending(&core, scan(REMUX, "/anime", false));
+        tokio::time::sleep(INSPECTION * 3 / 4).await;
+        // The stopped inspection's result has landed; this scan's own reads the manifest later.
+        inspector
+            .manifests
+            .lock()
+            .unwrap()
+            .insert("/anime".into(), manifest_of(&["new"]));
+        let state = core.state().await.unwrap();
+        assert_eq!(
+            state.remux.scan,
+            ScanView::Scanning {
+                directory: "/anime".into()
+            }
+        );
+        assert_eq!(state.remux.rows, rows);
+
+        assert_eq!(scanning.await.unwrap(), Ok(true));
+        let state = core.state().await.unwrap();
+        assert_eq!(state.remux.scan, ScanView::Idle);
+        let ids: Vec<&str> = state.remux.rows.iter().map(|row| row.id.as_str()).collect();
+        assert_eq!(ids, ["new"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_stopping_a_launched_job_leaves_the_other_modes_scan_running() {
+        let launcher = FakeLauncher::default();
+        let (core, _publisher, _inspector) = run_core(&launcher).await;
+        assert_eq!(core.dispatch(run(REMUX)).await, Ok(true));
+        let scanning = pending(&core, scan(EXTRACT, "/fast", false));
+        tokio::time::sleep(INSPECTION / 4).await;
+
+        assert_eq!(core.dispatch(stop(REMUX)).await, Ok(true));
+        // The job's Stop names the job alone. The fake launcher cancels no inspection, so this
+        // checks the target sent and that the actor leaves the scan be. That a `Job` target cancels
+        // no inspection is `test_stopping_a_job_leaves_every_inspection_alone` in control.rs.
+        assert_eq!(launcher.calls(), ["resolve", "launch", "stop Job(1)"]);
+        assert_eq!(scanning.await.unwrap(), Ok(true));
+        let state = core.state().await.unwrap();
+        assert_eq!(state.extract.scan, ScanView::Idle);
+        assert_eq!(state.extract.rows.len(), 1);
+        assert_eq!(state.remux.outcome, Some(Outcome::Cancelled));
+    }
+
+    /// `run_core`, with the remux queue and draft on `/slow` instead, whose path resolves in
+    /// `SLOW`: a Run's forced scan then resolves in `RESOLVE + SLOW`. The extract queue holds
+    /// `/fast`.
+    async fn slow_run_core(launcher: &FakeLauncher) -> (CoreHandle, FakeInspector) {
+        let (core, _publisher, inspector) = run_core(launcher).await;
+        inspector.manifests.lock().unwrap().extend([
+            ("/slow".to_string(), manifest_of(&["slow"])),
+            ("/fast".to_string(), manifest_of(&["fast"])),
+        ]);
+        assert_eq!(core.dispatch(scan(REMUX, "/slow", false)).await, Ok(true));
+        type_input(&core, REMUX, "/slow").await;
+        assert_eq!(core.dispatch(scan(EXTRACT, "/fast", false)).await, Ok(true));
+        (core, inspector)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_a_scan_refused_once_resolved_ends_the_scanning_of_the_scan_it_overtook() {
+        let launcher = FakeLauncher::default();
+        let (core, _inspector) = slow_run_core(&launcher).await;
+        let rows = core.state().await.unwrap().extract.rows;
+        let overtaken = pending(&core, scan(EXTRACT, "/anime", false));
+        tokio::time::sleep(INSPECTION / 2).await;
+        assert!(matches!(
+            core.state().await.unwrap().extract.scan,
+            ScanView::Scanning { .. }
+        ));
+        // Overtakes the scan still inspecting, and resolves its path once the Run is accepted.
+        let refused = pending(&core, scan(EXTRACT, "/slow", false));
+        let running = pending(&core, run(REMUX));
+
+        assert_eq!(overtaken.await.unwrap(), Ok(false));
+        assert_eq!(refused.await.unwrap(), Err(SCAN_STARTING.into()));
+        let state = core.state().await.unwrap();
+        assert_eq!(state.run.phase, Phase::Starting);
+        assert_eq!(state.extract.scan, ScanView::Idle);
+        assert_eq!(state.extract.rows, rows);
+        assert_eq!(running.await.unwrap(), Ok(true));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_a_scan_refused_once_resolved_leaves_a_failed_scan_failed() {
+        let launcher = FakeLauncher::default();
+        let (core, _inspector) = slow_run_core(&launcher).await;
+        assert_eq!(
+            core.dispatch(scan(EXTRACT, "/none", false)).await,
+            Ok(false)
+        );
+        assert_eq!(core.state().await.unwrap().extract.scan, ScanView::Failed);
+        let refused = pending(&core, scan(EXTRACT, "/slow", false));
+        let running = pending(&core, run(REMUX));
+
+        assert_eq!(refused.await.unwrap(), Err(SCAN_STARTING.into()));
+        assert_eq!(core.state().await.unwrap().extract.scan, ScanView::Failed);
+        assert_eq!(running.await.unwrap(), Ok(true));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_a_stale_scan_resolving_leaves_the_newer_scans_scanning() {
+        let launcher = FakeLauncher::default();
+        let (core, _inspector) = slow_run_core(&launcher).await;
+        let stale = pending(&core, scan(EXTRACT, "/slow", false));
+        tokio::time::sleep(SLOW - INSPECTION / 2).await;
+        let newer = pending(&core, scan(EXTRACT, "/anime", false));
+
+        assert_eq!(stale.await.unwrap(), Ok(false));
+        assert_eq!(
+            core.state().await.unwrap().extract.scan,
+            ScanView::Scanning {
+                directory: "/anime".into()
+            }
+        );
+        assert_eq!(newer.await.unwrap(), Ok(true));
+        assert_eq!(core.state().await.unwrap().extract.scan, ScanView::Idle);
     }
 
     #[tokio::test(start_paused = true)]
@@ -730,7 +918,7 @@ mod tests {
         // The launch did start the job.
         assert_eq!(running.await.unwrap(), Ok(true));
         assert_eq!(stopping.await.unwrap(), Ok(true));
-        assert_eq!(launcher.calls(), ["resolve", "launch", "stop Some(1)"]);
+        assert_eq!(launcher.calls(), ["resolve", "launch", "stop Job(1)"]);
         let state = core.state().await.unwrap();
         assert_eq!(state.run.phase, Phase::Idle);
         assert_eq!(state.remux.outcome, Some(Outcome::Cancelled));

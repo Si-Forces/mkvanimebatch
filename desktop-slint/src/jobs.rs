@@ -239,10 +239,11 @@ pub(crate) mod tests {
     use mkv_core::pipeline::PipelineMode;
     use mkv_core::request::{BatchRequest, EffectiveSettings};
     use mkv_desktop_core::actor::{ActorSink, Core, CoreHandle, Outcome, Ports, ScanView};
-    use mkv_desktop_core::control::Launcher;
+    use mkv_desktop_core::control::{Launcher, StopTarget};
     use mkv_desktop_core::draft::DraftChanges;
     use mkv_desktop_core::inspection::Inspector;
     use mkv_desktop_core::presentation::{controls, Hold};
+    use std::future::Future;
     use std::time::Duration;
 
     fn new_app() -> App {
@@ -374,7 +375,7 @@ pub(crate) mod tests {
             Err("no jobs".into())
         }
 
-        async fn stop(&self, _: Option<u64>) -> Result<(), String> {
+        async fn stop(&self, _: StopTarget) -> Result<(), String> {
             Ok(())
         }
     }
@@ -395,8 +396,13 @@ pub(crate) mod tests {
             Ok(path)
         }
 
-        async fn inspect(&self, _: String, _: bool) -> Result<InspectionManifest, String> {
-            std::future::pending().await
+        fn inspect(
+            &self,
+            _: u64,
+            _: String,
+            _: bool,
+        ) -> impl Future<Output = Result<InspectionManifest, String>> + Send + use<> {
+            std::future::pending()
         }
 
         async fn clear_cache(&self) -> Result<(), String> {

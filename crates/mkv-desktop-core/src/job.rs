@@ -227,12 +227,6 @@ impl JobState {
         self.0.slot.lock().is_ok_and(|slot| slot.is_some())
     }
 
-    /// Whether the slot holds job `job_id`.
-    pub(crate) fn holds_slot(&self, job_id: u64) -> Result<bool, String> {
-        let lock = self.0.slot.lock().map_err(|e| e.to_string())?;
-        Ok(lock.as_ref().is_some_and(|slot| slot.id == job_id))
-    }
-
     /// Refuses new jobs. A start already past this gate still lands in the slot, which
     /// `cancel_current` then cancels.
     pub(crate) fn close_starts(&self) {
