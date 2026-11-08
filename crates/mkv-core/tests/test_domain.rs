@@ -111,13 +111,116 @@ fn test_parse_episode_cases() {
         ("Show 4k 60fps - 02.mkv", ("", "E", "02")),
     ];
 
-    for (filename, (season, ep_type, ep)) in cases {
+    assert_parses(&cases);
+}
+
+fn assert_parses(cases: &[(&str, (&str, &str, &str))]) {
+    for &(filename, (season, ep_type, ep)) in cases {
         assert_eq!(
             parse_episode(filename),
             Some(EpisodeInfo::new(season, ep_type, ep)),
             "Failed on filename: {filename}"
         );
     }
+}
+
+#[test]
+fn test_parse_episode_marker_before_qualifier_is_an_episode() {
+    assert_parses(&[
+        // A qualifier with no marker after it is a word in the episode title
+        (
+            "[SubsPlease] Show - 07 - Special Service [1080p]",
+            ("", "E", "07"),
+        ),
+        ("Show - 07 - The OVA Club", ("", "E", "07")),
+        ("Show - 07 - Special 2 Part", ("", "E", "07")),
+        ("Show - 01 [OVA]", ("", "E", "01")),
+        // A qualifier before any marker, or with none, still types the episode
+        ("Show OVA - 03", ("", "OVA", "03")),
+        ("Show - OVA", ("", "OVA", "00")),
+        ("Mob Psycho 100 OVA - 01", ("", "OVA", "01")),
+        // OVA still beats Special, but only a qualifier with a marker after it, or with no marker
+        // at all, counts
+        ("Show Special OVA - 03", ("", "OVA", "03")),
+        ("Show SP - 03 - OVA Club", ("", "SP", "03")),
+        // The bare-number fallback is not a marker
+        ("Show 07 Special Service", ("", "SP", "00")),
+        // Not only a dash marker: any marker before the qualifier makes an episode
+        ("Show [03] OVA", ("", "E", "03")),
+        ("Show EP03 OVA", ("", "E", "03")),
+        ("Show 第03話 OVA", ("", "E", "03")),
+        // A marker word's own number is the episode, not a later dash marker's
+        ("Show Ep 5 Title - 01", ("", "E", "05")),
+        ("Show OVA 2 Part - 01", ("", "OVA", "02")),
+        ("Show Sp 2 Title - 01", ("", "SP", "02")),
+        // Even with a number after it, a qualifier after the last marker is title text
+        ("Show - 07 - OVA 01", ("", "E", "07")),
+    ]);
+}
+
+#[test]
+fn test_parse_episode_qualifier_followed_by_a_marker_counts() {
+    // A title number read as a marker comes first, but the qualifier still has its own marker
+    assert_parses(&[
+        ("Show - 2nd Season OVA - 01", ("", "OVA", "01")),
+        ("Gundam - 08th MS Team OVA - 01", ("", "OVA", "01")),
+        ("Show (2) OVA - 01", ("", "OVA", "01")),
+        ("Show 第2期 OVA - 01", ("", "OVA", "01")),
+        ("[5.1] Show OVA - 01", ("", "OVA", "01")),
+        // A marker that starts right where the qualifier ends follows it
+        ("Show OVA-01", ("", "OVA", "01")),
+        ("Show OVA[03]", ("", "OVA", "03")),
+        ("Show Special-01", ("", "SP", "01")),
+        ("Show SP[03]", ("", "SP", "03")),
+    ]);
+}
+
+#[test]
+fn test_parse_episode_lone_digit_after_marker_word_is_not_a_season() {
+    assert_parses(&[
+        ("Show Ep 5 Title", ("", "E", "05")),
+        ("Show ep 5 Title", ("", "E", "05")),
+        ("Show Episode 7 Title", ("", "E", "07")),
+        ("Show OVA 3.eng", ("", "OVA", "03")),
+        ("Show Special 2.ind", ("", "SP", "02")),
+        ("Show OAD 3.eng", ("", "OVA", "03")),
+        ("Show ONA 3.eng", ("", "OVA", "03")),
+        ("Show Specials 2.ind", ("", "SP", "02")),
+        ("Show SP 2.ind", ("", "SP", "02")),
+        // A lone-digit season still parses, and its removal never glues the neighbours
+        ("Show 2 OVA 01", ("2", "OVA", "01")),
+        ("Show 2 Part - 01", ("2", "E", "01")),
+        // Only the whole word counts: "Nova" is not "OVA"
+        ("Nova 2 Part - 01", ("2", "E", "01")),
+        // A two-digit number is never a lone-digit season
+        ("Show OVA 03.eng", ("", "OVA", "03")),
+        // A lone-digit season before a bare qualifier leaves it with no number
+        ("Show 2 OVA", ("2", "OVA", "00")),
+    ]);
+}
+
+#[test]
+fn test_parse_episode_fallback_prefers_numbers_outside_brackets() {
+    assert_parses(&[
+        ("Show 01 [AAC 2.0]", ("", "E", "01")),
+        ("Show 01 [FLAC 5.1]", ("", "E", "01")),
+        ("Show 01 (FLAC 5.1)", ("", "E", "01")),
+        // With no number outside brackets, a bracketed one still counts
+        ("[Group] Show [BD 05]", ("", "E", "05")),
+        ("[Show Title 05] [1080p]", ("", "E", "05")),
+        ("[Group] Show OVA [Disc 2]", ("", "OVA", "02")),
+        // The number after a qualifier takes the same fallback
+        ("Show OVA Bonus 01 [AAC 2.0]", ("", "OVA", "01")),
+        // A title number outside brackets beats a bracketed episode with no marker
+        ("[Group] Mob Psycho 100 [BD 05]", ("", "E", "100")),
+        // A nested bracket is masked whole, not up to its inner closing one
+        ("[Group] [Audio [AAC] 5.1] Show [BD 01]", ("", "E", "01")),
+        ("Show OVA [Audio [AAC] 5.1] [BD 01]", ("", "OVA", "01")),
+        ("[Group] (Audio (AAC) 5.1) Show [BD 01]", ("", "E", "01")),
+        ("Show OVA (Audio (AAC) 5.1) [BD 01]", ("", "OVA", "01")),
+        // An unclosed bracket masks nothing, so the number after it is outside
+        ("[Group Show 01 [AAC 2.0]", ("", "E", "01")),
+    ]);
 }
 
 #[test]

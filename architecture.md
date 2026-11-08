@@ -290,7 +290,8 @@ flowchart TD
    - A video with no match is skipped. A video whose name has no episode number is skipped unless it has a manual assignment.
 
 2. **Episode identity parsing (`parse_episode`)**:
-   - Recognizes `S01E02`/`S1E2`, `S01P02` parts, season markers (`Season 1`, standalone `S1`), type qualifiers (`OVA`, `OAD`, `ONA`, `Special`, `SP`), and episode markers (`- 02`, `[02]`, `(02)`, `EP02`, `Episode 2`, `第02話`), with a bare-number fallback. `.[±N.Ns]` offset tags are ignored. An explicit `SxxExx`/`SxxPxx` beats a type qualifier, which may just be a word in the episode title (`S01E07 - Special Service` is an episode).
+   - Recognizes `S01E02`/`S1E2`, `S01P02` parts, season markers (`Season 1`, standalone `S1`, and a lone digit between two words as in `Show 2 Part - 01`, except after the marker words `Ep`, `Episode`, `OVA`, `OAD`, `ONA`, `Special(s)` and `SP`, so `Show Ep 5 Title` is episode 05), type qualifiers (`OVA`, `OAD`, `ONA`, `Special`, `SP`), and episode markers (`- 02`, `[02]`, `(02)`, `EP02`, `Episode 2`, `第02話`), with a bare-number fallback that prefers a number outside brackets and parentheses, searching bracketed text only when there is none (`Show 01 [AAC 2.0]` is episode 01, `[Group] Show [BD 05]` episode 05). `.[±N.Ns]` offset tags are ignored.
+   - A type qualifier counts only when an episode marker follows it or there is no marker at all; when every marker comes before it, it is just a word in the episode title: `Show - 07 - Special Service` is episode 07, `Show OVA - 03` is OVA 03, and `Show - 2nd Season OVA - 01` is OVA 01 although `- 2nd` reads as a marker. The bare-number fallback is not a marker (`Show 07 Special Service` is SP 00). An explicit `SxxExx`/`SxxPxx` beats a type qualifier wherever it stands (`S01E07 - Special Service` is an episode).
    - Keeps fractional episode numbers (`01.5`, `02.5`) without truncation (ADR-0004).
 
 3. **Subtitle scoring (`score_subtitle_category`)**:
