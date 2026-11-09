@@ -43,3 +43,6 @@ graphify-out/
 # LSP server
 jsconfig.json
 lsp.json
+
+# PR and review notes (local, kept out of jj snapshots)
+mkvanimebatch-notes/

@@ -51,7 +51,7 @@ for (const k of ['base', ...(A.mode === 'fix' ? ['prev'] : [])]) if (!isCommitId
 if (!/^\w+(?:[.\/-]\w+)*$/.test(A.bookmark)) throw new Error(`usual workflow: bookmark must be a bookmark name, got ${A.bookmark}`)
 
 const REPO = A.repo || '/home/sifaha/My Project/mkvanimebatch'
-const NOTES = A.notes || '/home/sifaha/My Project/mkvanimebatch-notes/audit-fixes'
+const NOTES = A.notes || '/home/sifaha/My Project/mkvanimebatch/mkvanimebatch-notes/audit-fixes'
 const NOTES_FILE = `${NOTES}/pr-${A.issue}.md`
 const BM = A.bookmark
 const FIX_MODE = A.mode === 'fix'
