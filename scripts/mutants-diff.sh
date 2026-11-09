@@ -10,8 +10,9 @@
 # before a fix round: the diff is <base> against HEAD, so a <base> that main has moved past also
 # mutates main's newer code.
 #
-# Exit status is cargo-mutants': 0 all mutants caught (or no Rust changed), 1 a usage error (a
-# bad -p, say), 2 some missed, 3 some timed out, 4 the unmutated tests fail, 70 an internal
+# Exit status is cargo-mutants': 0 all mutants caught, or none tested (no Rust changed, or the
+# diff changed no line cargo-mutants mutates, such as tests or comments: both say so), 1 a usage
+# error (a bad -p, say), 2 some missed, 3 some timed out, 4 the unmutated tests fail, 70 an internal
 # error. The script's own refusals are 64 (usage or unknown base), 65 (dirty tree) and 69
 # (cargo-mutants missing); a git command that fails stops it with git's own status. Needs
 # `cargo install cargo-mutants --locked`. A run builds the crate from scratch in its copy: about
@@ -48,7 +49,7 @@ fi
 
 rust_files=$(git diff --name-only "$base" HEAD -- '*.rs')
 if [[ -z $rust_files ]]; then
-  echo "no Rust changes since $base; nothing to mutate"
+  echo "no Rust changes since $base; no mutants were tested"
   exit 0
 fi
 command -v cargo-mutants >/dev/null || { echo "cargo-mutants missing: cargo install cargo-mutants --locked" >&2; exit 69; }
@@ -78,5 +79,7 @@ if [[ ($status == 0 || $status == 2 || $status == 3) && "$out/mutants.out/outcom
       cat "$out/mutants.out/$f.txt"
     fi
   done
+elif [[ $status == 0 ]]; then
+  echo "--- no mutants were tested (the diff has no mutable line, or --list was given)"
 fi
 exit "$status"

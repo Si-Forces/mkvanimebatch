@@ -36,17 +36,21 @@ const makeBin = (name, withMutants) => {
   if (withMutants) {
     script("cargo-mutants", "exit 0\n");
     // `cargo mutants ...`: records its args, temp-dir env and diff, writes a report when
-    // FAKE_MISSED is set, and exits with FAKE_STATUS.
+    // FAKE_REPORT, FAKE_MISSED or FAKE_TIMEOUT is set (the last two also fill missed.txt and
+    // timeout.txt), and exits with FAKE_STATUS.
     script("cargo", `printf '%s\\n' "$@" > "$FAKE_LOG/args"
 printf 'TMPDIR=%s\\nTMP=%s\\nTEMP=%s\\n' "$TMPDIR" "$TMP" "$TEMP" > "$FAKE_LOG/env"
 while [ $# -gt 0 ]; do
   case $1 in --in-diff) cp "$2" "$FAKE_LOG/diff"; shift ;; --output) out=$2; shift ;; esac
   shift
 done
-if [ -n "$FAKE_MISSED" ]; then
+if [ -n "$FAKE_REPORT$FAKE_MISSED$FAKE_TIMEOUT" ]; then
   mkdir -p "$out/mutants.out"
   echo '{}' > "$out/mutants.out/outcomes.json"
-  printf '%s\\n' "$FAKE_MISSED" > "$out/mutants.out/missed.txt"
+  : > "$out/mutants.out/missed.txt"
+  : > "$out/mutants.out/timeout.txt"
+  [ -z "$FAKE_MISSED" ] || printf '%s\\n' "$FAKE_MISSED" > "$out/mutants.out/missed.txt"
+  [ -z "$FAKE_TIMEOUT" ] || printf '%s\\n' "$FAKE_TIMEOUT" > "$out/mutants.out/timeout.txt"
 fi
 exit "\${FAKE_STATUS:-0}"
 `);
@@ -153,7 +157,7 @@ test("exits 0 without cargo when no Rust changed since base", () => {
   const repo = fixture();
   const r = run(repo, [repo.c2], {}, BIN_NO_MUTANTS);
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /no Rust changes since/);
+  assert.match(r.stdout, /no Rust changes since .*; no mutants were tested/);
 });
 
 test("refuses when cargo-mutants is missing", () => {
@@ -195,10 +199,11 @@ test("prints only this run's report, and only for a run that tested mutants", ()
   // Exit 4 (the unmutated tests fail) writes a report too, but it is not a mutation result.
   const broken = run(repo, [repo.c1], { FAKE_STATUS: "4", FAKE_MISSED: "new survivor" });
   assert.equal(broken.status, 4);
-  assert.doesNotMatch(broken.stdout, /survivor/);
-  const timedOut = run(repo, [repo.c1], { FAKE_STATUS: "3", FAKE_MISSED: "slow one" });
+  assert.doesNotMatch(broken.stdout, /survivor|no mutants were tested/);
+  const timedOut = run(repo, [repo.c1], { FAKE_STATUS: "3", FAKE_TIMEOUT: "slow one" });
   assert.equal(timedOut.status, 3);
-  assert.match(timedOut.stdout, /slow one/);
+  assert.match(timedOut.stdout, /--- timeout:\nslow one/);
+  assert.doesNotMatch(timedOut.stdout, /--- missed:/);
 });
 
 test("a base that a later amend rewrote scopes the run to the amend alone", () => {
@@ -224,4 +229,24 @@ test("a base that a later amend rewrote scopes the run to the amend alone", () =
   assert.equal(docs.status, 0, docs.stderr);
   assert.match(docs.stdout, /no Rust changes since/);
   assert.equal(docs.args, undefined);
+});
+
+test("MUTANTS_OUT moves the diff and the report off the temp dir", () => {
+  const repo = fixture();
+  const out = path.join(tmp, "elsewhere");
+  const r = run(repo, [repo.c1], { MUTANTS_OUT: out, FAKE_STATUS: "2", FAKE_MISSED: "a.rs:1: replace a" });
+  assert.equal(r.status, 2, r.stderr);
+  assert.deepEqual(r.args.trim().split("\n").slice(1, 5), ["--in-diff", `${out}/in.diff`, "--output", out]);
+  assert.match(r.stdout, /--- missed:\na\.rs:1: replace a/);
+});
+
+test("exit 0 says when no mutant was tested, and stays quiet when all were caught", () => {
+  const repo = fixture();
+  // cargo-mutants exits 0 with no report when the diff selects no mutants.
+  const none = run(repo, [repo.c1]);
+  assert.equal(none.status, 0, none.stderr);
+  assert.match(none.stdout, /no mutants were tested/);
+  const caught = run(repo, [repo.c1], { FAKE_REPORT: "1" });
+  assert.equal(caught.status, 0, caught.stderr);
+  assert.doesNotMatch(caught.stdout, /no mutants were tested|---/);
 });

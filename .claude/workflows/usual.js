@@ -14,9 +14,9 @@ export const meta = {
 // non-blank strings (issue may also be a positive integer):
 //   mode         'implement' (new commit on a new bookmark) or 'fix' (fold a review round into the bookmark)
 //   issue        issue number, e.g. '178'
-//   base         the main commit the bookmark sits on, e.g. '5a2a0ce'
+//   base         the main commit id the bookmark sits on, e.g. '5a2a0ce' (an id, not a ref)
 //   bookmark     e.g. 'fix/episode-parser-markers'
-//   prev         fix mode only: the bookmark's commit before this round (the round's review scope)
+//   prev         fix mode only: the bookmark's commit id before this round (the round's review scope)
 //   scratch      this session's scratchpad directory (gate and mutants logs go there)
 //   reading      the docs, code and tests to read first (paths and symbols)
 //   tests        targeted test commands while iterating
@@ -42,10 +42,13 @@ if (!Array.isArray(A.crates) || !A.crates.length || !A.crates.every(isName)) thr
 if (A.skills !== undefined && !(Array.isArray(A.skills) && A.skills.every(isName))) throw new Error('usual workflow: skills must be an array of skill names')
 // These go unquoted into the shell commands the agents run, like crates and skills.
 if (!/^[1-9]\d*$/.test(String(A.issue))) throw new Error(`usual workflow: issue must be an issue number, got ${A.issue}`)
-// Plain git refs only: review-gate.sh and git diff cannot resolve jj forms such as @- or
-// name@origin, and an unquoted leading ~ is a shell tilde expansion.
-const isRef = (v) => /^\w[\w.\/^~-]*$/.test(v)
-for (const k of ['base', 'bookmark', ...(A.mode === 'fix' ? ['prev'] : [])]) if (!isRef(A[k])) throw new Error(`usual workflow: ${k} must be a commit or bookmark name, got ${A[k]}`)
+// Commit ids, not refs: HEAD, a bookmark or origin/main can move during the run, which would
+// empty the mutation and review scopes, and jj revsets cannot resolve git forms such as HEAD~1.
+const isCommitId = (v) => /^[0-9a-f]{7,40}$/.test(v)
+for (const k of ['base', ...(A.mode === 'fix' ? ['prev'] : [])]) if (!isCommitId(A[k])) throw new Error(`usual workflow: ${k} must be a commit id, got ${A[k]}`)
+// Word runs joined by single . / or -: no @ (jj's name@remote), no trailing - (jj's parents
+// operator), no .. (git refuses it), nothing the shell expands.
+if (!/^\w+(?:[.\/-]\w+)*$/.test(A.bookmark)) throw new Error(`usual workflow: bookmark must be a bookmark name, got ${A.bookmark}`)
 
 const REPO = A.repo || '/home/sifaha/My Project/mkvanimebatch'
 const NOTES = A.notes || '/home/sifaha/My Project/mkvanimebatch-notes/audit-fixes'
@@ -56,6 +59,8 @@ const SCOPE_FROM = FIX_MODE ? A.prev : A.base
 const PKGS = A.crates.map((c) => `-p ${c}`).join(' ')
 const SKILL_LIST = ['anthropic-skills:ponytail', 'anthropic-skills:rust-skills', ...(A.skills || [])]
 const SKILLS = `Before your first edit, load these skills with the Skill tool and follow them: ${SKILL_LIST.map((s) => `\`${s}\``).join(', ')}. Report the ones you loaded in \`skills_loaded\`.`
+// Single-quotes a path for the shell, so $, " and spaces in it stay literal.
+const shQuote = (s) => `'${s.replaceAll("'", `'\\''`)}'`
 const FOLD = `\`jj squash --into ${BM}\`, then update its message with \`jj describe -r ${BM} --stdin\` if it no longer matches (start from \`git log -1 --format=%B ${BM}\`)`
 
 const ctx = (state) => `
@@ -63,14 +68,14 @@ Issue #${A.issue} (Si-Forces/mkvanimebatch; \`gh issue view ${A.issue}\`, read-o
 ${state}
 jj: \`jj commit --stdin\` does not exist. A message written from a file must not contain jj graph characters such as │ or ○. Conventional commit message with a body that says why. Keep an empty @ on top of the bookmark; check with \`jj log -r '${A.base}:: | @'\`.
 Read first: ${A.reading}
-Machine (4 cores, 8 GB): while iterating run only ${A.tests}; run \`${A.final_tests}\` once at the end. Never \`cargo test --workspace\` or the bench; Slint and Tauri crates build only inside \`jj gate\`. \`jj gate\`: redirect its output to a log in ${A.scratch} and check the exit status; never pipe it through tail. jj gate's clippy runs on Linux only, so if the diff has #[cfg] code, also run \`cargo clippy ${PKGS} --all-targets --target x86_64-pc-windows-msvc -- -D warnings\` (check only); run \`jj gate\` after the last edit.
+Machine (4 cores, 8 GB): while iterating run only ${A.tests}; run \`${A.final_tests}\` once at the end. Never \`cargo test --workspace\` or the bench; Slint and Tauri crates build only inside \`jj gate\`. \`jj gate\`: redirect its output to a log in ${shQuote(A.scratch)} and check the exit status; never pipe it through tail. jj gate's clippy runs on Linux only, so if the diff has #[cfg] code, also run \`cargo clippy ${PKGS} --all-targets --target x86_64-pc-windows-msvc -- -D warnings\` (check only); run \`jj gate\` after the last edit.
 Tests never change the process current directory. Never cite review or audit finding numbers in code, comments or messages (#${A.issue} in the commit body is fine). Never push, never open or edit a PR, never write to GitHub. Search with \`rg\`.`
 
 const STATE = FIX_MODE
   ? `State: bookmark ${BM} is commit ${A.prev} on main ${A.base}; @ is an empty change on top. Fold your changes in with ${FOLD}.`
   : `State: @ is an empty change on main@origin ${A.base}. Commit with \`jj commit -m\` (or \`jj describe --stdin\` then \`jj new\`), then \`jj bookmark create ${BM} -r @-\`. Fold any later change into it with ${FOLD}.`
 
-const mutants = (from) => `Mutation check, once: with the work committed (@ empty), run \`scripts/mutants-diff.sh ${from} ${PKGS} > "${A.scratch}/mutants-${A.issue}.log" 2>&1\` and read the log's tail. Exit 0 = every mutant caught (or no Rust changed), 2 = some missed, 3 = some timed out; any other status means the script or the unmutated tests failed, so read the log and fix that first. For each missed mutant, add a test that kills it, or give a one-line reason it is equivalent or harmless. Commit those tests like any other change (\`cargo fmt --all\`, the targeted tests, \`jj gate\`, fold into ${BM}, @ empty again). Record the counts and every survivor with its resolution in \`mutants\` and in ${NOTES_FILE}'s Evidence section.`
+const mutants = (from) => `Mutation check: with the work committed (@ empty), run \`scripts/mutants-diff.sh ${from} ${PKGS} > ${shQuote(`${A.scratch}/mutants-${A.issue}.log`)} 2>&1\` and read the log's tail. Exit 0 = every mutant caught, unless the log says no mutants were tested (the diff changed no mutable Rust line; say so in \`mutants\`); 2 = some missed, 3 = some timed out; any other status means the script or the unmutated tests failed, so read the log and fix that first. For each missed mutant, add a test that kills it, or give a one-line reason it is equivalent or harmless. Commit those tests like any other change (\`cargo fmt --all\`, the targeted tests, \`jj gate\`, fold into ${BM}, @ empty again), then rerun the same command with \`--iterate\` added, which retests only the mutants not yet caught, and confirm each one you added a test for is now caught. Record the counts and every survivor with its resolution in \`mutants\` and in ${NOTES_FILE}'s Evidence section.`
 
 const WORK_SCHEMA = {
   type: 'object',
@@ -105,6 +110,17 @@ STANDARDS: AGENTS.md, CODING_STANDARDS.md (apply every rule), the area CLAUDE.md
 Report only real defects, with evidence (file:line + quote).`
 const report = (r) => ({ fixed: r.fixed, rejected: r.rejected, tests: r.tests, fails_without_fix: r.fails_without_fix, mutants: r.mutants, behaviour_changes: r.behaviour_changes, open_questions: r.open_questions })
 const skillsLog = (who, r) => log(`${who} loaded skills: ${(r.skills_loaded || []).join(', ') || 'none'}`)
+// agent() returns null when skipped or dead after retries, but throws on a budget ceiling or an
+// unsatisfiable schema; both take the same stop path below, so the owed-review reminder is
+// always logged.
+const callAgent = async (prompt, opts) => {
+  try {
+    return await agent(prompt, opts)
+  } catch (e) {
+    log(`${opts.label} threw: ${e?.message ?? e}`)
+    return null
+  }
+}
 // Every exit after a commit: the workflow's re-review is not the Standards + Spec review AGENTS.md requires.
 const nextSteps = () => log(`Next, by hand: the code-review skill over ${A.base}..${BM}, fix or accept its findings, then \`scripts/review-gate.sh record-range ${A.base} ${BM} "..."\` before \`jj gpush\`.`)
 
@@ -112,7 +128,7 @@ phase('Implement')
 const implTask = FIX_MODE
   ? `Fix the items below in the ${BM} commit. Verify each against the code first; reject the ones that are wrong with a one-line reason.`
   : `Implement #${A.issue} in one commit${A.commit_hint ? `, e.g. "${A.commit_hint}"` : ''}.`
-const impl = await agent(`${ctx(STATE)}
+const impl = await callAgent(`${ctx(STATE)}
 ${SKILLS}
 
 ${implTask}
@@ -136,7 +152,7 @@ if (!impl || impl.status !== 'done') {
 }
 
 phase('Re-review')
-const rereview = await agent(review(
+const rereview = await callAgent(review(
   `\`git diff ${SCOPE_FROM} ${BM}\` (\`git log ${A.base}..${BM}\`)${FIX_MODE ? `, in the context of the whole change \`git diff ${A.base} ${BM}\`` : ''}`,
   `The implementer reports: ${JSON.stringify(report(impl))}. PR notes: ${NOTES_FILE}.
 Check both axes. SPEC axis: every requirement met, nothing unasked-for added; hand-trace each expected input through the new code. ${A.review_focus || ''}
@@ -150,7 +166,7 @@ log(`Re-review: ${findings.length} findings`)
 if (!findings.length) { nextSteps(); return { impl, findings } }
 
 phase('Follow-up')
-const follow = await agent(`${ctx(`State: the #${A.issue} work is in bookmark ${BM}; @ should be an empty child of it. Note \`git rev-parse ${BM}\` before your first edit: that commit id is <R>. Fold changes in with ${FOLD}.`)}
+const follow = await callAgent(`${ctx(`State: the #${A.issue} work is in bookmark ${BM}; @ should be an empty child of it. Note \`git rev-parse ${BM}\` before your first edit: that commit id is <R>. Fold changes in with ${FOLD}.`)}
 ${SKILLS}
 
 A Sonnet re-review of ${BM} reported:
@@ -167,7 +183,7 @@ if (!follow || follow.status !== 'done' || !follow.fixed.length) {
 }
 
 phase('Last-commit review')
-const last = await agent(review(
+const last = await callAgent(review(
   `\`git diff ${SCOPE_FROM} ${BM}\`, focused on what these findings touched`,
   `The re-review findings were: ${JSON.stringify(findings)}. The follow-up reports: ${JSON.stringify(report(follow))}.
 Check that each fix is correct and complete, each rejection is sound, new tests fail without their fix, nothing regressed, and ${NOTES_FILE} matches the code. Both axes.`,
