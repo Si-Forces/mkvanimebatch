@@ -4,9 +4,9 @@ export const meta = {
   whenToUse: 'Implementing a settled issue design, or a review round on an unpushed or open PR, in mkvanimebatch; Rust changes only, since both modes require crates and the mutation check. Pass the issue-specific parts as args; see the ARGS comment at the top of the script. Its re-review is internal: the code-review skill and the review-gate record still follow by hand.',
   phases: [
     { title: 'Implement', detail: 'tests first, targeted tests, gate, commit, mutation check', model: 'opus' },
-    { title: 'Re-review', detail: 'Standards + Spec, read-only', model: 'sonnet' },
+    { title: 'Re-review', detail: 'Standards + Spec, read-only, code-reviewer agent', model: 'sonnet' },
     { title: 'Follow-up', detail: 'only if the re-review reports findings', model: 'opus' },
-    { title: 'Last-commit review', detail: 'only if the follow-up fixed something', model: 'sonnet' },
+    { title: 'Last-commit review', detail: 'code-reviewer agent, only if the follow-up fixed something', model: 'sonnet' },
   ],
 }
 
@@ -103,11 +103,13 @@ const FINDINGS_SCHEMA = {
   }, required: ['severity', 'file', 'summary', 'evidence', 'suggested_fix'] } } },
   required: ['skills_loaded', 'findings'],
 }
+// Reviews run as the code-reviewer agent (~/.claude/agents/code-reviewer.md, which needs Bash
+// and Skill in its tools); its Critical/Required/Optional/Nit labels map onto the schema's.
 const review = (scope, body) => `Review in ${REPO}. Read-only: no edits, no cargo builds or tests, no GitHub writes; \`rg\` is available. Load the \`anthropic-skills:rust-skills\` skill first and report the skills you loaded in \`skills_loaded\`. Scope: ${scope}.
 SPEC: ${A.spec}
 ${body}
 STANDARDS: AGENTS.md, CODING_STANDARDS.md (apply every rule), the area CLAUDE.md files for what the diff touches, and the glossary terms in the CONTEXT.md files; ponytail's minimal diff; accurate doc comments, the surrounding style, 100-column wrap; #[cfg] code clean on both Linux and Windows; tests never change the current directory.
-Report only real defects, with evidence (file:line + quote).`
+Report only real defects, with evidence (file:line + quote). Severity: Critical is blocker, Required is major, Optional is minor, Nit is nit; no praise or verdict; fill only the schema's fields.`
 const report = (r) => ({ fixed: r.fixed, rejected: r.rejected, tests: r.tests, fails_without_fix: r.fails_without_fix, mutants: r.mutants, behaviour_changes: r.behaviour_changes, open_questions: r.open_questions })
 const skillsLog = (who, r) => log(`${who} loaded skills: ${(r.skills_loaded || []).join(', ') || 'none'}`)
 // agent() returns null when skipped or dead after retries, but throws on a budget ceiling or an
@@ -157,7 +159,7 @@ const rereview = await callAgent(review(
   `The implementer reports: ${JSON.stringify(report(impl))}. PR notes: ${NOTES_FILE}.
 Check both axes. SPEC axis: every requirement met, nothing unasked-for added; hand-trace each expected input through the new code. ${A.review_focus || ''}
 Tests: each guard the diff adds has a test that reaches it, and every mutation-check survivor has a test or a sound reason. Docs, the commit message (\`git log -1 --format=%B ${BM}\`: no │/○, no AI trailer) and the PR notes match the code.`,
-), { label: 're-review', phase: 'Re-review', model: 'sonnet', effort: 'xhigh', schema: FINDINGS_SCHEMA })
+), { label: 're-review', phase: 'Re-review', model: 'sonnet', effort: 'xhigh', agentType: 'code-reviewer', schema: FINDINGS_SCHEMA })
 
 if (!rereview) { log('Re-review failed or was skipped; stopping with no review.'); nextSteps(); return { impl, rereview } }
 skillsLog('Re-review', rereview)
@@ -187,7 +189,7 @@ const last = await callAgent(review(
   `\`git diff ${SCOPE_FROM} ${BM}\`, focused on what these findings touched`,
   `The re-review findings were: ${JSON.stringify(findings)}. The follow-up reports: ${JSON.stringify(report(follow))}.
 Check that each fix is correct and complete, each rejection is sound, new tests fail without their fix, nothing regressed, and ${NOTES_FILE} matches the code. Both axes.`,
-), { label: 'last-commit review', phase: 'Last-commit review', model: 'sonnet', effort: 'xhigh', schema: FINDINGS_SCHEMA })
+), { label: 'last-commit review', phase: 'Last-commit review', model: 'sonnet', effort: 'xhigh', agentType: 'code-reviewer', schema: FINDINGS_SCHEMA })
 
 if (!last) log('Last-commit review failed or was skipped; the follow-up is unreviewed.')
 else {
