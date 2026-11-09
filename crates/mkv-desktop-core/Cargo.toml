@@ -19,7 +19,7 @@ test-support = ["tokio/rt-multi-thread"]
 
 [dependencies]
 mkv-core = { path = "../mkv-core" }
-# `rc` serializes the Arcs that share a ModeView's rows and subtitle candidates as their contents.
+# `rc` serializes the Arc that shares a ModeView's rows as its contents.
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 sysinfo = "0.33"

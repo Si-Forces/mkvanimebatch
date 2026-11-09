@@ -156,7 +156,12 @@ pub fn inspected_row<'a>(rows: &'a [Row], pick: Option<&str>) -> Option<(usize, 
 
 /// The inspector of the row at index `at` of `view`, for a remux view when `remux`. `entry` is
 /// its manifest entry (none for a row only the Job Snapshot lists), `job_error` the job's error
-/// for it, and `subs` the queue's summary of its release's subtitle candidates (remux only).
+/// for it, `candidates` the subtitle candidates the queue offers its release, and `subs` the
+/// queue's summary of them (both remux only).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each is one source the inspector reads, as the actor holds them"
+)]
 pub fn inspector_view(
     remux: bool,
     view: &ModeView,
@@ -164,6 +169,7 @@ pub fn inspector_view(
     row: &Row,
     entry: Option<&ManifestItem>,
     job_error: Option<&str>,
+    candidates: &[String],
     subs: &ReleaseSubtitles,
 ) -> InspectorView {
     let meta = entry.map(|entry| &entry.metadata);
@@ -209,7 +215,7 @@ pub fn inspector_view(
     };
     let assignment = view.assignments.get(&row.id).cloned();
     let (ladder, options) = if remux {
-        subtitle_section(view, row, meta, assignment.as_ref(), subs)
+        subtitle_section(view, row, meta, assignment.as_ref(), candidates, subs)
     } else {
         (Vec::new(), Vec::new())
     };
@@ -254,13 +260,9 @@ fn subtitle_section(
     row: &Row,
     meta: Option<&mkv_core::manifest::InspectionMetadata>,
     assignment: Option<&TrackAssignment>,
+    candidates: &[String],
     subs: &ReleaseSubtitles,
 ) -> (Vec<LadderRung>, Vec<Choice>) {
-    // A row the manifest does not list has release "", which the queue lists no candidates for.
-    let candidates = view
-        .subtitle_candidates
-        .get(&row.release)
-        .map_or(&[][..], Vec::as_slice);
     let assigned = assignment.map(|assignment| assignment.asset_path.to_string_lossy());
     let assets_dir = view.draft.assets_dir.as_deref().unwrap_or_default().trim();
     let ladder = subtitle_ladder(
@@ -311,9 +313,11 @@ mod tests {
     use super::*;
     use crate::actor::ViewState;
     use crate::queue::test_support::manifest_of;
-    use std::sync::Arc;
 
-    /// `inspector_view` with the summary the queue keeps of the row's release's candidates.
+    /// The subtitle candidates of the `Season 1` release: no other release has any.
+    const SEASON_1: [&str; 2] = ["Season 1/ep1.ass", "Subs/ep1 [alt].ass"];
+
+    /// `inspector_view` with the row's release's candidates and the queue's summary of them.
     fn inspect(
         remux: bool,
         view: &ModeView,
@@ -322,12 +326,13 @@ mod tests {
         entry: Option<&ManifestItem>,
         job_error: Option<&str>,
     ) -> InspectorView {
-        let candidates = view
-            .subtitle_candidates
-            .get(&row.release)
-            .map_or(&[][..], Vec::as_slice);
-        let subs = ReleaseSubtitles::new(&row.release, candidates);
-        inspector_view(remux, view, at, row, entry, job_error, &subs)
+        let candidates: Vec<String> = if row.release == "Season 1" {
+            SEASON_1.map(str::to_string).into()
+        } else {
+            Vec::new()
+        };
+        let subs = ReleaseSubtitles::new(&row.release, &candidates);
+        inspector_view(remux, view, at, row, entry, job_error, &candidates, &subs)
     }
 
     fn rows(ids: &[&str]) -> Vec<Row> {
@@ -348,14 +353,10 @@ mod tests {
         assert!(inspected_row(&[], Some("ep1")).is_none());
     }
 
-    /// A remux view whose `Season 1` release holds two candidates, and its manifest entry for
-    /// `Season 1/ep1.mkv`, inspected with FLAC audio, a video tag and two fonts.
+    /// A remux view, and its manifest entry for `Season 1/ep1.mkv` (whose release holds the
+    /// `SEASON_1` candidates), inspected with FLAC audio, a video tag and two fonts.
     fn remux_view() -> (ModeView, ManifestItem) {
-        let mut view = ViewState::new(None).remux;
-        Arc::make_mut(&mut view.subtitle_candidates).insert(
-            "Season 1".into(),
-            vec!["Season 1/ep1.ass".into(), "Subs/ep1 [alt].ass".into()],
-        );
+        let view = ViewState::new(None).remux;
         let mut entry = manifest_of(&["Season 1/ep1.mkv"]).items.remove(0);
         entry.release = "Season 1".into();
         entry.metadata.video_tag = Some("HEVC 1080p".into());

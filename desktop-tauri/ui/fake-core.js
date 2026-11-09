@@ -74,7 +74,6 @@ export function modeView(rows = [], fields = {}, mode = "remux") {
     directory: null,
     scan: { state: "idle" },
     manifest_rev: 0,
-    subtitle_candidates: {},
     rows: published,
     vanished_selected_ids: [],
     assignments: {},

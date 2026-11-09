@@ -1,6 +1,6 @@
 # 0001. Sidecar Contract and Structured Planning
 
-> **Status**: Superseded by ADR-0007, ADR-0008, ADR-0010 (amended 2026-09-28, 2026-10-08)
+> **Status**: Superseded by ADR-0007, ADR-0008, ADR-0010 (amended 2026-09-28, 2026-10-08, 2026-11-09)
 > **Date**: 2026-03-01
 > **Context**: Media Engine Context & Desktop Application Bridge
 
@@ -78,3 +78,11 @@ The GUI addendum limited candidates to the input-root ancestor chain (item 4 of 
 Options considered:
 - **(A) Document the boundary.** *Chosen*: no schema or behavior change.
 - **(B) Manifest v3 with out-of-root candidates.** *Rejected*: it breaks the `--plan` output and the desktop, and inspection would depend on a form field.
+
+## Amendment — 2026-11-09 (the desktop builds the choices)
+
+Item 2 of "Manifest v2" says the frontend resolves `subtitle_candidates[item.release]` when the assignment UI opens. The decision stands as written, but the desktop no longer works that way, and this amendment states how it does.
+
+- **The Desktop Core builds the assignment choices.** Its Episode Inspector lists the choices of the inspected item from the accepted manifest's `subtitle_candidates` for the item's release: none for an empty release, and none when the manifest has no items. No frontend resolves candidates.
+- **The published ModeView carries no candidates.** Neither mode's ModeView has a `subtitle_candidates` field; a view reads the choices from the published Inspector.
+- **The manifest is unchanged.** Its `subtitle_candidates`, the CLI `--plan` output and the ADR-0014 pruning stay as they are.
