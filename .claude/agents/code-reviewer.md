@@ -1,4 +1,6 @@
 ---
+# Adapted from addyosmani/agent-skills 0.6.15, agents/code-reviewer.md
+# (MIT License, Copyright (c) 2025 Addy Osmani; full text in .agents/LICENSE-agent-skills).
 name: code-reviewer
 description: Senior code reviewer that evaluates changes across five dimensions — correctness, readability, architecture, security, and performance. Runs the usual workflow's review steps; it does not replace the code-review skill's Standards + Spec review that AGENTS.md requires for every commit.
 tools: Read, Grep, Glob, Bash, Skill
@@ -102,5 +104,6 @@ When the caller gives an output schema or format, as the usual workflow does, us
 
 - **Invoke directly when:** the user asks for a review of a specific change, file, or PR.
 - **Invoke via:** the `usual` workflow (`.claude/workflows/usual.js`), whose Re-review and Last-commit review steps run as this agent. Bash and Skill are in `tools` so those reviews can read the diff with `git` and `rg` and load `anthropic-skills:rust-skills`; the workflow's prompt keeps the review read-only.
+- **Not the commit review:** AGENTS.md still requires the code-review skill's Standards + Spec review for every commit. This review is extra; never record it with `scripts/review-gate.sh`.
 - **Deeper passes:** if a change needs a dedicated security or test pass, recommend it in your report; the caller decides whether to run one.
-- **Source of truth:** this repo copy. In this repo it takes precedence over a user-level `~/.claude/agents/code-reviewer.md` of the same name, so make persona changes here.
+- **Source of truth:** this repo copy. In this repo it takes precedence over a user-level `~/.claude/agents/code-reviewer.md` of the same name, so make persona changes here, then copy them to the Codex mirror, `.codex/agents/code-reviewer.toml`.
