@@ -6,7 +6,7 @@
 # with no fix recorded, so the trailer can still land (anthropics/claude-code#45137, #65657).
 # This hook is the enforceable half: git records no commit whose trailer block names an AI
 # agent. The repo sets the setting too (.claude/settings.json); cloud sessions install no git
-# hooks (AGENTS.md).
+# hooks (docs/agents/cloud-sessions.md).
 #
 # Scope is the trailer block only. A line of prose that mentions one, or a context line in a
 # `git commit -v` diff, is not a trailer and must not block the commit -- the next commit

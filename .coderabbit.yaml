@@ -1,0 +1,6 @@
+# Docstring Coverage counts every item, private ones too, and has no repo gate behind it: three
+# PRs (#195, #198, #206) failed it with every new public item documented.
+reviews:
+  pre_merge_checks:
+    docstrings:
+      mode: "off"
