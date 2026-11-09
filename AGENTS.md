@@ -62,7 +62,7 @@ CI also runs `cargo audit` (ignores in `.cargo/audit.toml`) and actionlint. Its 
 
 ## Workflow rules
 
-In a Claude Code cloud session, read "Claude Code cloud sessions" at the end of this section first.
+In a Claude Code cloud session (`CLAUDE_CODE_REMOTE=true`), or before merging a cloud session's branch, read `docs/agents/cloud-sessions.md` first.
 
 ### Code review for every commit
 
@@ -103,15 +103,7 @@ This repo is developed on a 4-core, 8 GB laptop, where a full workspace build us
 - Let `jj gpush` (or the git pre-push hook) be the one `cargo test --workspace` run: push from a clean working copy, without `SKIP_SLOW_GATES`. For a commit that stays local, run `cargo test --workspace` once, after the last change.
 - Run one cargo process at a time across the main checkout and all worktrees, and in multi-agent work give cargo to a single agent.
 - Run the bench self-check only when you change `benches/`; Linux CI runs it.
-
-### Claude Code cloud sessions
-
-A cloud session (`CLAUDE_CODE_REMOTE=true`) commits and pushes its own `claude/...` branch with plain git, so the jj and git-hook rules above apply only to local clones:
-
-- Don't install jj or the hooks there. jj would detach HEAD from the session branch, pre-push would refuse a push without a recorded review, and commit-msg would refuse a Claude co-author trailer.
-- Use `git commit`, and run by hand what the gates would: `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings` and targeted tests for Rust, Cargo or Slint UI changes, and the Node checks ("CI formatting & lint gate") for UI or `scripts/` changes. CI runs the rest; the Standards + Spec review is the maintainer's check below.
-- The trailer ban still holds. `.claude/settings.json` sets `attribution.commit` to `""` for every Claude Code session, but upstream reports say it can be ignored (see the `scripts/hooks/commit-msg` header), and nothing in the cloud enforces the ban. After each `git commit`, read `git log -1 --format=%B`, and if a trailer names an AI agent as co-author, remove it with `git commit --amend -m "<the message without that trailer>"` before the next commit.
-- The maintainer's check, in a local clone before merging a cloud branch (not a cloud-session step): `jj git fetch`, `jj new <branch>@origin`, then `jj gate` (the trailer ban over the branch's commits, plus fmt, clippy and `node --check` for what changed), the code-review skill over `origin/main..origin/<branch>`, and `scripts/review-gate.sh record-range origin/main origin/<branch> "..."`. A merge on GitHub consults neither the gate nor the ledger, so this is the branch's only enforced trailer check and its Standards + Spec review.
+- To show that new tests catch their guards, run `scripts/mutants-diff.sh <base> -p <crate> [-p <crate>...]`, with one `-p` per changed crate, once on committed Rust work before review. Use the branch's actual fork point as `<base>` (`git merge-base origin/main HEAD`), not a moved `origin/main`, or it also mutates main's newer code. It builds those crates from scratch in a copy, so it counts as a heavy build like the workspace run.
 
 ## Agent skills
 

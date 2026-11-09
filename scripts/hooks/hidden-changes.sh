@@ -1,4 +1,4 @@
-# Sourced by pre-commit and pre-push; not a hook itself.
+# Sourced by pre-commit, pre-push and scripts/mutants-diff.sh; not a hook itself.
 #
 # git diff trusts assume-unchanged and skip-worktree entries, so edits to those files are
 # invisible to the hooks' dirty-tree checks. These helpers find the ones that really differ.
