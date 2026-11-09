@@ -11,7 +11,7 @@ command -v jj > /dev/null || { echo "jj is required." >&2; exit 1; }
 root=$(jj workspace root)
 
 # The gates run these; a missing or non-executable one would only fail later, mid-gate.
-for f in scripts/jj-gate.sh scripts/hooks/commit-msg scripts/review-gate.sh; do
+for f in scripts/jj-gate.sh scripts/hooks/commit-msg scripts/hooks/home-path.sh scripts/review-gate.sh; do
   if [ ! -x "$root/$f" ]; then
     echo "$f is missing or not executable; refusing to set the aliases." >&2
     echo "Run: chmod +x $f  (or jj restore $f if it was deleted)" >&2
@@ -36,13 +36,15 @@ jj config set --repo working-copy.eol-conversion input
 
 cat <<'MSG'
 jj repo config set (aliases, and working-copy.eol-conversion = input):
-  jj gate           commit-msg trailer ban over trunk()..@, then cargo fmt/clippy when Rust or
-                    Cargo files changed, node --check on changed UI modules. Run before `jj new`.
-  jj gpush [args]   the trailer ban, the review-gate ledger and the test suites for what
-                    `jj git push [args]` would push, then the push. Use it instead of
-                    `jj git push`.
+  jj gate           commit-msg trailer ban over trunk()..@, the home-path check on the stack's
+                    diff, then cargo fmt/clippy when Rust or Cargo files changed, node --check
+                    on changed UI modules. Run before `jj new`.
+  jj gpush [args]   the trailer ban, the home-path check, the review-gate ledger and the test
+                    suites for what `jj git push [args]` would push, then the push. Use it
+                    instead of `jj git push`.
 
-Bypass: SKIP_REVIEW_GATE=1 / SKIP_SLOW_GATES=1 jj gpush, or plain `jj git push`.
+Bypass: SKIP_REVIEW_GATE=1 / SKIP_SLOW_GATES=1 jj gpush (the home-path check still runs),
+or plain `jj git push`, which skips every gate.
 `git push` still fires scripts/hooks/pre-push (core.hooksPath stays set).
 
 Record a review before pushing (HEAD is @- in a colocated repo):

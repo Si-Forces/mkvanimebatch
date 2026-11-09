@@ -3,8 +3,8 @@
 # Wired up per clone by scripts/install-jj-aliases.sh as `jj gate` and `jj gpush`.
 #
 # Usage:
-#   scripts/jj-gate.sh check              fast gates over trunk()..@ (the pre-commit + commit-msg checks)
-#   scripts/jj-gate.sh push [push args]   review ledger + test suites, then `jj git push [push args]` with no new snapshot
+#   scripts/jj-gate.sh check              fast gates over trunk()..@ (the pre-commit + commit-msg checks, home-path included)
+#   scripts/jj-gate.sh push [push args]   home-path check + review ledger + test suites, then `jj git push [push args]` with no new snapshot
 #
 # jj has no index, so "what is being committed" is the working-copy commit @. Every jj command
 # snapshots the tree first, so the gates check @ as of that snapshot; the push reads its plan and

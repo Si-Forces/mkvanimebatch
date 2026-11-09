@@ -42,9 +42,14 @@ test("allows generic home paths, removed lines and context", () => {
   assert.equal(run("").status, 0);
 });
 
-test("matches HOME only as a whole path, in any case", () => {
+test("matches HOME only as whole path segments, in any case", () => {
   assert.equal(run(diff("a.rs", `+mod x; // ${home}z/lib.rs`)).status, 0, "a longer name");
-  assert.equal(run(diff("a.rs", `+let p = "src${home}";`)).status, 0, "inside another path");
+  assert.equal(run(diff("a.rs", `+let p = "src${home}";`)).status, 1, "inside another path");
+  assert.equal(run(diff("a.sh", `+gcc -I${home}/include`)).status, 1, "after a flag");
+  assert.equal(run(diff("a.sh", `+cp /mnt/backup${home}/x .`)).status, 1, "under a mount point");
+  // A one-segment home, like /root, must start a path.
+  assert.equal(run(diff("a.rs", "+mod x; // src/no-such-root/lib.rs"), { HOME: "/no-such-root" }).status, 0, "one segment inside a path");
+  assert.equal(run(diff("a.sh", "+cd /no-such-root/x"), { HOME: "/no-such-root" }).status, 1, "one segment starting a path");
   assert.equal(run(diff("a.md", `+[doc](file://${home}/doc.md)`)).status, 1, "after a file URL");
   assert.equal(run(diff("a.md", `+see ${home}`)).status, 1, "at the end of a line");
   assert.equal(run(diff("a.md", `+cloned into ${home}.`)).status, 1, "at the end of a sentence");
@@ -81,6 +86,7 @@ test("checks USERPROFILE with backslashes and with forward slashes", () => {
   assert.equal(run(escaped, env).status, 1, "escaped in a string");
   // bash before 4.3 keeps the quotes of a quoted replacement, as macOS's bash 3.2 does.
   assert.equal(run(escaped, { ...env, BASH_COMPAT: "42" }).status, 1, "escaped, on an old bash");
+  assert.equal(run(diff("a.bat", "+cl -IC:\\Users\\tester\\inc"), env).status, 1, "after a flag");
   assert.equal(run(diff("a.js", "+'C:/Users/other/repo'"), env).status, 0);
 });
 

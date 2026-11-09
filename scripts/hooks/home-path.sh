@@ -45,13 +45,14 @@ for h in "$home" "$real" "$profile" "${profile//"$bs"//}" "$doubled"; do
 done
 
 # ENVIRON, not awk -v, which would read the backslashes of a Windows path as escapes.
-# A home counts only as a whole path segment run: /root does not match src/root.rs, and
-# /home/al does not match /home/alice, though a full stop that ends a sentence still ends the
-# path. Case is ignored, as Windows paths are.
+# A home counts only as a whole path segment run: /home/al does not match /home/alice, though
+# a full stop that ends a sentence still ends the path. A one-segment home such as /root must
+# also start a path, so it does not match src/root.rs; a longer one names the user wherever it
+# starts, as in -I/home/al/include or /mnt/backup/home/al. Case is ignored, as Windows paths are.
 # File headers are the ---/+++ lines between "diff --git" and the first hunk; after that, a
 # line starting "+++" is an added line that starts with "++".
 hits=$(HOMES="$homes" awk '
-  function names_home(line, h,    s, p, q, before, after) {
+  function names_home(line, h, anywhere,    s, p, q, before, after) {
     s = line
     while ((p = index(s, h)) > 0) {
       before = (p > 1) ? substr(s, p - 1, 1) : ""
@@ -59,12 +60,16 @@ hits=$(HOMES="$homes" awk '
       # sentence (". " or "...").
       for (q = p + length(h); substr(s, q, 1) == "."; q++) {}
       after = substr(s, q, 1)
-      if (before !~ /[a-z0-9._~-]/ && after !~ /[a-z0-9._~-]/) return p + length(line) - length(s)
+      if ((anywhere || before !~ /[a-z0-9._~-]/) && after !~ /[a-z0-9._~-]/) return p + length(line) - length(s)
       s = substr(s, p + 1)
     }
     return 0
   }
-  BEGIN { n = split(tolower(ENVIRON["HOMES"]), home, "\n") }
+  BEGIN {
+    n = split(tolower(ENVIRON["HOMES"]), home, "\n")
+    # A separator after the first character: more than one segment, so it may start anywhere.
+    for (i = 1; i <= n; i++) { t = substr(home[i], 2); anywhere[i] = index(t, "/") || index(t, "\\") }
+  }
   /^commit [0-9a-f]+$/ { commit = substr($2, 1, 12) " "; next }
   /^diff --git / { header = 1; next }
   header && /^\+\+\+ / { file = substr($0, 5); sub(/^b\//, "", file); next }
@@ -72,7 +77,7 @@ hits=$(HOMES="$homes" awk '
   !header && /^\+/ {
     line = substr($0, 2)
     for (i = 1; i <= n; i++) {
-      p = (home[i] == "") ? 0 : names_home(tolower(line), home[i])
+      p = (home[i] == "") ? 0 : names_home(tolower(line), home[i], anywhere[i])
       if (!p) continue
       # The match with some context, not a whole minified or generated line.
       from = (p > 40) ? p - 40 : 1
