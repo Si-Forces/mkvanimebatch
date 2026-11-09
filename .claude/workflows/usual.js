@@ -26,16 +26,19 @@ export const meta = {
 //   review_focus optional: what the reviewer should hand-trace beyond the spec
 //   commit_hint  optional: conventional commit subject
 //   skills       optional array of extra skills, e.g. ['slint:slint', 'anthropic-skills:domain-modeling']
-//   repo         optional checkout the agents work in (default below: the maintainer's main checkout)
-//   notes        optional PR-notes directory (default below); the notes file is pr-<issue>.md
+//   repo         the checkout the agents work in: the session's working directory (`pwd`)
+//   notes        the PR-notes directory, normally <main checkout>/mkvanimebatch-notes/audit-fixes
+//                (gitignored, so a worktree lacks it); the notes file is pr-<issue>.md
+// repo and notes have no default: an absolute path written in this file would publish the
+// maintainer's home directory, and the gates refuse one (scripts/hooks/home-path.sh).
 
 const A = args || {}
-const TEXT = ['mode', 'issue', 'base', 'bookmark', 'scratch', 'reading', 'tests', 'final_tests', 'spec']
+const TEXT = ['mode', 'issue', 'base', 'bookmark', 'scratch', 'reading', 'tests', 'final_tests', 'spec', 'repo', 'notes']
 const isText = (v) => typeof v === 'string' && v.trim() !== ''
 const isName = (v) => typeof v === 'string' && /^[\w:-]+$/.test(v)
 const missing = TEXT.filter((k) => !isText(A[k]) && !(k === 'issue' && Number.isInteger(A[k]) && A[k] > 0))
 if (A.mode === 'fix' && !isText(A.prev)) missing.push('prev')
-for (const k of ['repo', 'notes', 'review_focus', 'commit_hint']) if (A[k] !== undefined && !isText(A[k])) missing.push(k)
+for (const k of ['review_focus', 'commit_hint']) if (A[k] !== undefined && !isText(A[k])) missing.push(k)
 if (missing.length) throw new Error(`usual workflow: missing or blank args ${missing.join(', ')}`)
 if (!['implement', 'fix'].includes(A.mode)) throw new Error(`usual workflow: mode must be implement or fix, got ${A.mode}`)
 if (!Array.isArray(A.crates) || !A.crates.length || !A.crates.every(isName)) throw new Error('usual workflow: crates must be a non-empty array of crate names')
@@ -50,8 +53,8 @@ for (const k of ['base', ...(A.mode === 'fix' ? ['prev'] : [])]) if (!isCommitId
 // operator), no .. (git refuses it), nothing the shell expands.
 if (!/^\w+(?:[.\/-]\w+)*$/.test(A.bookmark)) throw new Error(`usual workflow: bookmark must be a bookmark name, got ${A.bookmark}`)
 
-const REPO = A.repo || '~/My Project/mkvanimebatch'
-const NOTES = A.notes || '~/My Project/mkvanimebatch/mkvanimebatch-notes/audit-fixes'
+const REPO = A.repo
+const NOTES = A.notes
 const NOTES_FILE = `${NOTES}/pr-${A.issue}.md`
 const BM = A.bookmark
 const FIX_MODE = A.mode === 'fix'
@@ -64,7 +67,7 @@ const shQuote = (s) => `'${s.replaceAll("'", `'\\''`)}'`
 const FOLD = `\`jj squash --into ${BM}\`, then update its message with \`jj describe -r ${BM} --stdin\` if it no longer matches (start from \`git log -1 --format=%B ${BM}\`)`
 
 const ctx = (state) => `
-Issue #${A.issue} (Si-Forces/mkvanimebatch; \`gh issue view ${A.issue}\`, read-only). Repo: ${REPO}${A.repo ? '' : ', main checkout'}, colocated jj.
+Issue #${A.issue} (Si-Forces/mkvanimebatch; \`gh issue view ${A.issue}\`, read-only). Repo: ${REPO}, colocated jj.
 ${state}
 jj: \`jj commit --stdin\` does not exist. A message written from a file must not contain jj graph characters such as │ or ○. Conventional commit message with a body that says why. Keep an empty @ on top of the bookmark; check with \`jj log -r '${A.base}:: | @'\`.
 Read first: ${A.reading}

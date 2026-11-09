@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Push-time gates: the review-gate ledger for each pushed ref, then the slow test suites.
+# Push-time gates: the home-path check and the review-gate ledger for each pushed ref, then
+# the slow test suites.
 # Enabled per clone by scripts/install-git-hooks.sh.
 set -euo pipefail
 
@@ -13,6 +14,12 @@ done
 [ "${#updates[@]}" -gt 0 ] || exit 0
 
 root=$(git rev-parse --show-toplevel)
+
+# Each commit being published, before any bypass: a leaked path cannot be taken back.
+for update in "${updates[@]}"; do
+  read -r _ local_sha <<< "$update"
+  "$root/scripts/hooks/home-path.sh" --published "$local_sha" || exit 1
+done
 
 # The ledger check is cheap, so it runs before the test suites.
 if [ "${SKIP_REVIEW_GATE:-0}" = "1" ]; then

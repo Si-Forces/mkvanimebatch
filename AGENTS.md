@@ -82,9 +82,9 @@ Use the branch's actual fork point instead of `origin/main` if it differs. Revie
 The repo is colocated (`jj git init --colocate`): `.git` still exists, but commit with jj, not `git commit`.
 
 - New local clone: run `scripts/install-git-hooks.sh` and `scripts/install-jj-aliases.sh` once. The repo-level jj config is not tracked; if `trunk()` is unknown, run `jj config set --repo 'revset-aliases."trunk()"' 'main@origin'`.
-- `jj gate` before `jj new` or `jj commit`, and again after any amend: it bans AI co-author trailers and runs fmt/clippy or UI syntax checks for what changed.
+- `jj gate` before `jj new` or `jj commit`, and again after any amend: it bans AI co-author trailers and your own home-directory path (`scripts/hooks/home-path.sh`; write relative paths or placeholders), and runs fmt/clippy or UI syntax checks for what changed.
 - `jj gpush` instead of `jj git push`: it adds the review-ledger check and runs the test suites when `@` (or an empty `@-`) is the pushed tip. `jj` never runs git hooks, so plain `git push` still fires `scripts/hooks/pre-push`.
-- Emergency bypasses: `SKIP_REVIEW_GATE=1` and `SKIP_SLOW_GATES=1`; plain `jj git push` bypasses all jj gates. Don't use these to skip work.
+- Emergency bypasses: `SKIP_REVIEW_GATE=1` and `SKIP_SLOW_GATES=1`; plain `jj git push` bypasses all jj gates, including the home-path check, which the variables don't skip. Don't use these to skip work.
 - Never end a commit description with an AI co-author trailer.
 - `jj gpush` refuses a pushed `@-` when `@` has changes on top and `@` itself is not also pushed; commit or `jj new` first.
 - Scope `jj restore` to paths: a bare `jj restore` also discards new files in `@`.

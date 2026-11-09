@@ -60,6 +60,10 @@ check() {
   done
 
   check_messages || fail=1
+  # What the stack adds since it forked from trunk (a diff from trunk itself would show trunk's
+  # newer changes reversed); the push re-checks each published commit.
+  jj diff --from 'fork_point(trunk() | @)' --to @ --git --context 0 --color never |
+    scripts/hooks/home-path.sh || fail=1
 
   if [ "$rust" -eq 1 ]; then
     echo "[jj-gate] cargo fmt --check (workspace)..."
@@ -121,9 +125,11 @@ push() {
     { [ "$deletes" -gt 0 ] || [[ "$dry" == *"Nothing changed."* && "$dry" != *"Changes to push"* ]]; } ||
       die "cannot read the output of jj git push --dry-run:"$'\n'"$dry"$'\n'"Bypass: jj git push"
   else
-    # The trailer ban is part of the push, as commit-msg is part of every commit under git.
+    # The trailer ban is part of the push, as commit-msg is part of every commit under git, and
+    # so is pre-push's home-path check over each published commit.
     for u in "${updates[@]}"; do
       check_messages "trunk()..${u#* }" || exit 1
+      scripts/hooks/home-path.sh --published "${u#* }" || exit 1
     done
     if [ "${SKIP_REVIEW_GATE:-0}" = "1" ]; then
       echo "[review-gate] SKIP_REVIEW_GATE=1 — pushing unreviewed."

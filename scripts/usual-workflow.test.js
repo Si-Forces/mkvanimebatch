@@ -23,6 +23,8 @@ const ARGS = {
   final_tests: "cargo test -p mkv-core",
   crates: ["mkv-core"],
   spec: "the design",
+  repo: "/src/main checkout",
+  notes: "/src/main checkout/notes",
 };
 
 // Answers each agent by label; returns the prompts and log lines.
@@ -63,8 +65,6 @@ test("rejects missing, blank and mistyped args", async () => {
     { skills: [""] },
     { mode: "fix" },
     { mode: "review" },
-    { repo: "" },
-    { notes: " " },
     { review_focus: 3 },
     { commit_hint: [] },
     { issue: "abc" },
@@ -93,7 +93,7 @@ test("rejects missing, blank and mistyped args", async () => {
     { bookmark: "fix/x." },
   ];
   // Each required text arg, missing and blank.
-  for (const k of ["mode", "issue", "base", "bookmark", "scratch", "reading", "tests", "final_tests", "spec"]) {
+  for (const k of ["mode", "issue", "base", "bookmark", "scratch", "reading", "tests", "final_tests", "spec", "repo", "notes"]) {
     bad.push({ [k]: undefined }, { [k]: " " });
   }
   for (const patch of bad) {
@@ -101,7 +101,7 @@ test("rejects missing, blank and mistyped args", async () => {
   }
 });
 
-test("accepts a numeric issue, a repo override and a fix round with prev", async () => {
+test("accepts a numeric issue, another repo and a fix round with prev", async () => {
   await run({ ...ARGS, base: "5a2a0ceb130a785635663629c8c19d9f03c6368d" }, {});
   await run({ ...ARGS, bookmark: "fix/episode-parser_markers.v2" }, {});
   const { prompts, logs } = await run(
@@ -122,7 +122,8 @@ test("runs every phase, quotes the log path and ends with the review steps", asy
     "last-commit review": { findings: [] },
   });
   assert.deepEqual(Object.keys(prompts), ["implement", "re-review", "follow-up", "last-commit review"]);
-  assert.match(prompts.implement, /Repo: \/home\/sifaha\/My Project\/mkvanimebatch, main checkout,/);
+  assert.match(prompts.implement, /Repo: \/src\/main checkout, colocated jj\./);
+  assert.ok(prompts.implement.includes("/src/main checkout/notes/pr-178.md"));
   assert.ok(prompts.implement.includes("mutants-diff.sh 5a2a0ce -p mkv-core > '/tmp/scratch dir/mutants-178.log'"));
   assert.match(prompts.implement, /a log in '\/tmp\/scratch dir'/);
   // Exit 0 can mean nothing was tested, and a survivor's new test is confirmed by a rerun.
