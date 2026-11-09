@@ -537,7 +537,6 @@ fn test_view_state_wire_shape() {
         ..empty(REMUX)
     };
     let row = serde_json::to_value(&remux.rows[0]).unwrap();
-    remux.subtitle_candidates = Arc::new(BTreeMap::from([(".".into(), vec!["ep1.ass".into()])]));
     remux.assignments.insert(
         "ep1".into(),
         TrackAssignment {
@@ -714,7 +713,6 @@ fn test_view_state_wire_shape() {
                 "directory": "/anime",
                 "scan": { "state": "scanning", "directory": "/anime" },
                 "manifest_rev": 2,
-                "subtitle_candidates": { ".": ["ep1.ass"] },
                 // The shared rows serialize as the list itself.
                 "rows": [row],
                 "vanished_selected_ids": ["ep9"],
@@ -753,7 +751,6 @@ fn test_view_state_wire_shape() {
                 "directory": null,
                 "scan": { "state": "failed" },
                 "manifest_rev": 0,
-                "subtitle_candidates": {},
                 "rows": [],
                 "vanished_selected_ids": [],
                 "assignments": {},
@@ -1345,37 +1342,92 @@ async fn test_a_publication_rebuilds_only_the_view_of_a_mode_that_changed() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn test_a_jobs_publications_share_the_subtitle_candidates_of_their_manifest() {
-    let mut manifest = manifest_of(&["ep1", "ep2"]);
-    manifest.subtitle_candidates = BTreeMap::from([(".".into(), vec!["ep1.ass".into()])]);
+async fn test_the_inspector_offers_its_releases_candidates_and_no_view_publishes_them() {
+    let mut manifest = manifest_of(&["ep1", "Season 1/ep2", "Extras/ep3"]);
+    manifest.items[1].release = "Season 1".into();
+    manifest.items[2].release = "Extras".into();
+    manifest.subtitle_candidates = BTreeMap::from([
+        (".".into(), vec!["ep1.ass".into()]),
+        (
+            "Season 1".into(),
+            vec!["Season 1/ep2.ass".into(), "ep1.ass".into()],
+        ),
+    ]);
     let inspector = FakeInspector::default().with("/anime", manifest);
     let publisher = RecordingPublisher::default();
     let core = ready(publisher.clone(), inspector);
     core.dispatch(scan(REMUX, "/anime", false)).await.unwrap();
-    let before = publisher.states().len();
+    core.dispatch(scan(EXTRACT, "/anime", false)).await.unwrap();
+    let shown = |state: &ViewState| state.remux.inspector.clone().unwrap();
+    let options = |inspector: &InspectorView| -> Vec<(String, String)> {
+        inspector
+            .options
+            .iter()
+            .map(|choice| (choice.value.clone(), choice.label.clone()))
+            .collect()
+    };
+    let pairs = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|&(value, label)| (value.into(), label.into()))
+            .collect()
+    };
 
-    let sink = core.job_sink();
-    sink.started(&started(1));
-    sink.event(&batch_start(&["ep1"]));
-    sink.event(&item_start("ep1"));
-    for step in 0..3 {
-        sink.event(&item_progress("ep1", f64::from(step)));
-        tokio::time::sleep(PUBLISH_INTERVAL * 2).await;
+    let state = publisher.states().last().unwrap().clone();
+    let root = shown(&state);
+    assert_eq!(
+        options(&root),
+        pairs(&[
+            ("", "Automatic (follow the ladder)"),
+            ("ep1.ass", "ep1.ass (Same folder)"),
+        ])
+    );
+    // The ladder reads the queue's summary of the same release.
+    assert_eq!(
+        (root.ladder[1].key, root.ladder[1].detail.as_str()),
+        ("same", "ep1.ass")
+    );
+    // Extract has no Track Assignments, so no Choices.
+    assert!(state.extract.inspector.unwrap().options.is_empty());
+
+    let pick = Intent::Inspect {
+        mode: REMUX,
+        id: Some("Season 1/ep2".into()),
+    };
+    assert_eq!(core.dispatch(pick).await, Ok(true));
+    let state = publisher.states().last().unwrap().clone();
+    let nested = shown(&state);
+    assert_eq!(
+        options(&nested),
+        pairs(&[
+            ("", "Automatic (follow the ladder)"),
+            ("Season 1/ep2.ass", "Season 1 › ep2.ass (Same folder)"),
+            ("ep1.ass", "ep1.ass (Parent folder)"),
+        ])
+    );
+    assert_eq!(
+        (nested.ladder[3].key, nested.ladder[3].detail.as_str()),
+        ("ancestor", "ep1.ass")
+    );
+    // A release without candidates offers only the ladder.
+    let pick = Intent::Inspect {
+        mode: REMUX,
+        id: Some("Extras/ep3".into()),
+    };
+    assert_eq!(core.dispatch(pick).await, Ok(true));
+    let extras = shown(publisher.states().last().unwrap());
+    assert_eq!(
+        options(&extras),
+        pairs(&[("", "Automatic (follow the ladder)")])
+    );
+
+    // The published View State carries the Choices, not the candidates.
+    let wire = serde_json::to_value(publisher.states().last().unwrap()).unwrap();
+    for mode in ["remux", "extract"] {
+        let view = wire[mode].as_object().unwrap();
+        assert!(view.contains_key("manifest_rev"), "{mode}");
+        assert!(!view.contains_key("subtitle_candidates"), "{mode}");
     }
-
-    // Every publication rebuilt the remux view, yet none copied the candidates.
-    let states = publisher.states()[before - 1..].to_vec();
-    assert!(states.len() > 3, "{} publications", states.len());
-    let (first, last) = (&states[0].remux, &states[states.len() - 1].remux);
-    assert!(!Arc::ptr_eq(&first.rows, &last.rows));
-    assert!(states.windows(2).all(|pair| Arc::ptr_eq(
-        &pair[0].remux.subtitle_candidates,
-        &pair[1].remux.subtitle_candidates
-    )));
-    assert_eq!(last.subtitle_candidates["."], ["ep1.ass"]);
-    // The inspector reads the queue's summary of the release.
-    let same = &last.inspector.as_ref().unwrap().ladder[1];
-    assert_eq!((same.key, same.detail.as_str()), ("same", "ep1.ass"));
 }
 
 #[tokio::test(start_paused = true)]

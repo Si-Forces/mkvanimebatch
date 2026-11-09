@@ -42,7 +42,7 @@ impl<R: Runtime> Publisher for WebviewPublisher<R> {
             Some(Ok(patch)) => self.app.emit(VIEW_STATE, patch),
             _ => self.app.emit(VIEW_STATE, state),
         };
-        // The rows and subtitle candidates are shared, so this copy costs neither.
+        // The rows are shared, so this copy does not copy them.
         *last = Some(state.clone());
     }
 
