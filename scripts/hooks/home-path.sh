@@ -16,33 +16,72 @@ set -euo pipefail
 
 if [ "${1:-}" = --published ]; then
   [ -n "${2:-}" ] || { echo "❌ [home-path] usage: home-path.sh --published <sha>" >&2; exit 1; }
-  diff=$(git log -p -U0 --no-color --no-ext-diff --format='commit %H' "$2" --not --remotes) ||
+  diff=$(git log -p -U0 --no-color --no-ext-diff --no-textconv --format='commit %H' "$2" --not --remotes) ||
     { echo "❌ [home-path] cannot list the commits in $2 to check them." >&2; exit 1; }
 else
   diff=$(cat) || { echo "❌ [home-path] cannot read the diff." >&2; exit 1; }
 fi
 
-homes="" home=${HOME:-} profile=${USERPROFILE:-} bs='\'
-# A trailing slash would stop "$HOME/x" from matching; a HOME of / becomes empty, and awk
-# skips an empty home.
-home=${home%/}
-# The resolved form too, for a home reached through a symlink. "$home/" so an empty home
-# resolves to /, which is then stripped like HOME, rather than to the current directory as
-# `cd ""` does before bash 5.3.
-real=$(cd "$home/" 2> /dev/null && pwd -P) || real=""
-real=${real%/}
-# USERPROFILE as written, with forward slashes, and with the doubled backslashes a TOML or
-# JSON string needs. The doubling is a loop, not ${profile//...}: how a replacement string's
-# backslashes and quotes come out differs between bash 3.2, 4.3 and 5.2.
-doubled="" rest=$profile
-while [[ $rest == *"$bs"* ]]; do
-  doubled+="${rest%%"$bs"*}$bs$bs"
-  rest=${rest#*"$bs"}
+bs='\'
+# Replaces every <from> in <string> with <to>, into REPLY. A loop, not ${s//from/to}: how a
+# replacement string's backslashes and quotes come out differs between bash 3.2, 4.3 and 5.2.
+replace_all() { # <string> <from> <to>
+  local rest=$1
+  REPLY=""
+  while [[ $rest == *"$2"* ]]; do
+    REPLY+="${rest%%"$2"*}$3"
+    rest=${rest#*"$2"}
+  done
+  REPLY+=$rest
+}
+
+[ -n "${HOME:-}${USERPROFILE:-}" ] ||
+  echo "⚠  [home-path] neither HOME nor USERPROFILE is set, so there is no home directory to look for." >&2
+
+# Trailing separators would stop "$HOME/x" from matching. A HOME of / becomes empty, as does a
+# USERPROFILE of only a drive (C:\), and awk skips an empty home. USERPROFILE is taken with
+# backslashes, whichever it was set with; the other forms come from that below.
+home=${HOME:-}
+while [[ $home == */ ]]; do home=${home%/}; done
+replace_all "${USERPROFILE:-}" / "$bs"
+profile=$REPLY
+while [[ $profile == *"$bs" ]]; do profile=${profile%"$bs"}; done
+[[ $profile =~ ^[A-Za-z]:$ ]] && profile=""
+
+# The resolved form too, for a home reached through a symlink. Only an absent home has none:
+# every other failure refuses rather than check less. A missing name looks the same as one
+# under a folder that cannot be searched, so absent means its nearest existing ancestor can be.
+cannot_resolve() { echo "❌ [home-path] cannot resolve HOME ($home): $1." >&2; exit 1; }
+real=""
+if [ -n "$home" ]; then
+  if real=$(cd "$home" 2> /dev/null && pwd -P); then
+    real=${real%/}
+  elif [ -L "$home" ]; then
+    cannot_resolve "a dangling symlink or a symlink loop"
+  elif [ -e "$home" ]; then
+    cannot_resolve "not a folder this user can enter"
+  else
+    up=$home
+    until [ -e "$up" ] || [ -L "$up" ] || [ "$up" = / ] || [ "$up" = . ]; do up=$(dirname "$up"); done
+    (cd "$up" 2> /dev/null) || cannot_resolve "$up cannot be searched"
+    real=""
+  fi
+fi
+
+# Each form as written and with the \/ some JSON writers put for /; USERPROFILE also with
+# forward slashes, and with the doubled backslashes a TOML or JSON string needs.
+homes=""
+add_home() { homes+="$1"$'\n'; }
+replace_all "$profile" "$bs" /
+forward=$REPLY
+for h in "$home" "$real" "$forward"; do
+  add_home "$h"
+  replace_all "$h" / "$bs/"
+  add_home "$REPLY"
 done
-doubled+=$rest
-for h in "$home" "$real" "$profile" "${profile//"$bs"//}" "$doubled"; do
-  homes+="$h"$'\n'
-done
+add_home "$profile"
+replace_all "$profile" "$bs" "$bs$bs"
+add_home "$REPLY"
 
 # ENVIRON, not awk -v, which would read the backslashes of a Windows path as escapes.
 # A home counts only as a whole path segment run: /home/al does not match /home/alice, though

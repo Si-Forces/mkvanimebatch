@@ -53,6 +53,6 @@ for f in "${staged_js[@]}"; do
 done
 
 # The staged diff, so an unstaged edit can neither hide nor fake a hit.
-git diff --cached -U0 --no-color --no-ext-diff | "$(dirname "$0")/home-path.sh" || fail=1
+git diff --cached -U0 --no-color --no-ext-diff --no-textconv | "$(dirname "$0")/home-path.sh" || fail=1
 
 exit "$fail"
