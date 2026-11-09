@@ -63,12 +63,18 @@ test("rejects missing, blank and mistyped args", async () => {
     { mode: "fix" },
     { mode: "review" },
     { repo: "" },
+    { notes: " " },
+    { review_focus: 3 },
+    { commit_hint: [] },
     { issue: "abc" },
     { issue: "178; rm -rf ~" },
     { base: "5a2a0ce; rm -rf ~" },
     { base: "-rf" },
     { bookmark: "fix/x $(id)" },
     { mode: "fix", prev: "abc 1234" },
+    { mode: "fix", prev: "@-" },
+    { base: "main@origin" },
+    { base: "~" },
   ];
   for (const patch of bad) {
     await assert.rejects(run({ ...ARGS, ...patch }, {}), /usual workflow:/, JSON.stringify(patch));
@@ -76,12 +82,15 @@ test("rejects missing, blank and mistyped args", async () => {
 });
 
 test("accepts a numeric issue, a repo override and a fix round with prev", async () => {
+  for (const ref of ["HEAD~1", "HEAD^2", "origin/main"]) {
+    await run({ ...ARGS, base: ref }, {});
+  }
   const { prompts, logs } = await run(
     { ...ARGS, issue: 178, mode: "fix", prev: "abc1234", repo: "/src/clone" },
     { fix: { ...DONE, status: "blocked" } },
   );
   assert.match(prompts.fix, /pr-178\.md/);
-  assert.match(prompts.fix, /Repo: \/src\/clone,/);
+  assert.match(prompts.fix, /Repo: \/src\/clone, colocated jj\./);
   // A blocked round may already have committed, so the owed review is still named.
   assert.match(logs.at(-1), /record-range 5a2a0ce fix\/x/);
 });
@@ -94,6 +103,7 @@ test("runs every phase, quotes the log path and ends with the review steps", asy
     "last-commit review": { findings: [] },
   });
   assert.deepEqual(Object.keys(prompts), ["implement", "re-review", "follow-up", "last-commit review"]);
+  assert.match(prompts.implement, /Repo: \/home\/sifaha\/My Project\/mkvanimebatch, main checkout,/);
   assert.match(prompts.implement, /mutants-diff\.sh 5a2a0ce -p mkv-core > "\/tmp\/scratch dir\/mutants-178\.log"/);
   assert.match(prompts["follow-up"], /mutants-diff\.sh <R> -p mkv-core/);
   assert.match(logs.at(-1), /record-range 5a2a0ce fix\/x/);
@@ -170,4 +180,17 @@ test("a blocked implement says the bookmark may not exist; a blocked fix does no
   assert.match(impl.logs.at(-2), /Check whether bookmark fix\/x exists/);
   const fix = await run({ ...ARGS, mode: "fix", prev: "abc1234" }, { fix: blocked });
   assert.ok(!fix.logs.some((l) => /Check whether bookmark/.test(l)), fix.logs.join("\n"));
+});
+
+test("no last-commit review unless the follow-up is done and fixed something", async () => {
+  for (const follow of [{ ...DONE, fixed: [] }, { ...DONE, status: "blocked", fixed: ["s"] }]) {
+    const { prompts, logs } = await run(ARGS, {
+      implement: DONE,
+      "re-review": { findings: [FINDING] },
+      "follow-up": follow,
+    });
+    assert.equal(prompts["last-commit review"], undefined, JSON.stringify(follow));
+    assert.match(logs.at(-2), /no last-commit review/);
+    assert.match(logs.at(-1), /record-range 5a2a0ce fix\/x/);
+  }
 });

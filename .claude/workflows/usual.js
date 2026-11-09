@@ -1,7 +1,7 @@
 export const meta = {
   name: 'usual',
   description: 'The usual issue loop: Opus high implements (or fixes a review round), Sonnet xhigh re-reviews read-only, Opus follow-up and Sonnet last-commit review only when needed; nothing is pushed',
-  whenToUse: 'Implementing a settled issue design, or a review round on an unpushed or open PR, in mkvanimebatch. Pass the issue-specific parts as args; see the ARGS comment at the top of the script. Its re-review is internal: the code-review skill and the review-gate record still follow by hand.',
+  whenToUse: 'Implementing a settled issue design, or a review round on an unpushed or open PR, in mkvanimebatch; Rust changes only, since both modes require crates and the mutation check. Pass the issue-specific parts as args; see the ARGS comment at the top of the script. Its re-review is internal: the code-review skill and the review-gate record still follow by hand.',
   phases: [
     { title: 'Implement', detail: 'tests first, targeted tests, gate, commit, mutation check', model: 'opus' },
     { title: 'Re-review', detail: 'Standards + Spec, read-only', model: 'sonnet' },
@@ -42,7 +42,9 @@ if (!Array.isArray(A.crates) || !A.crates.length || !A.crates.every(isName)) thr
 if (A.skills !== undefined && !(Array.isArray(A.skills) && A.skills.every(isName))) throw new Error('usual workflow: skills must be an array of skill names')
 // These go unquoted into the shell commands the agents run, like crates and skills.
 if (!/^[1-9]\d*$/.test(String(A.issue))) throw new Error(`usual workflow: issue must be an issue number, got ${A.issue}`)
-const isRef = (v) => /^[\w.\/@^~][\w.\/@^~-]*$/.test(v)
+// Plain git refs only: review-gate.sh and git diff cannot resolve jj forms such as @- or
+// name@origin, and an unquoted leading ~ is a shell tilde expansion.
+const isRef = (v) => /^\w[\w.\/^~-]*$/.test(v)
 for (const k of ['base', 'bookmark', ...(A.mode === 'fix' ? ['prev'] : [])]) if (!isRef(A[k])) throw new Error(`usual workflow: ${k} must be a commit or bookmark name, got ${A[k]}`)
 
 const REPO = A.repo || '/home/sifaha/My Project/mkvanimebatch'
@@ -57,7 +59,7 @@ const SKILLS = `Before your first edit, load these skills with the Skill tool an
 const FOLD = `\`jj squash --into ${BM}\`, then update its message with \`jj describe -r ${BM} --stdin\` if it no longer matches (start from \`git log -1 --format=%B ${BM}\`)`
 
 const ctx = (state) => `
-Issue #${A.issue} (Si-Forces/mkvanimebatch; \`gh issue view ${A.issue}\`, read-only). Repo: ${REPO}, main checkout, colocated jj.
+Issue #${A.issue} (Si-Forces/mkvanimebatch; \`gh issue view ${A.issue}\`, read-only). Repo: ${REPO}${A.repo ? '' : ', main checkout'}, colocated jj.
 ${state}
 jj: \`jj commit --stdin\` does not exist. A message written from a file must not contain jj graph characters such as │ or ○. Conventional commit message with a body that says why. Keep an empty @ on top of the bookmark; check with \`jj log -r '${A.base}:: | @'\`.
 Read first: ${A.reading}

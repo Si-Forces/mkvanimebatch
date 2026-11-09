@@ -63,7 +63,7 @@ const GIT_ENV = {
 };
 
 // A repo holding the script under test: c1 adds a.rs and README, c2 changes both, c3 changes
-// README only. Returns { dir, c1, c2 }.
+// README only. Returns { dir, c1, c2, git, write }; git and write act on the repo.
 const fixture = () => {
   const dir = fs.mkdtempSync(path.join(tmp, "repo-"));
   const git = (...args) => {
@@ -89,7 +89,7 @@ const fixture = () => {
   const c2 = git("rev-parse", "HEAD");
   write("README", "three\n");
   git("commit", "-qam", "c3");
-  return { dir, c1, c2 };
+  return { dir, c1, c2, git, write };
 };
 
 const run = (repo, args, env = {}, bin = BIN) => {
@@ -199,4 +199,29 @@ test("prints only this run's report, and only for a run that tested mutants", ()
   const timedOut = run(repo, [repo.c1], { FAKE_STATUS: "3", FAKE_MISSED: "slow one" });
   assert.equal(timedOut.status, 3);
   assert.match(timedOut.stdout, /slow one/);
+});
+
+test("a base that a later amend rewrote scopes the run to the amend alone", () => {
+  // A fix round passes the bookmark's commit from before the round, which a squash has since
+  // rewritten, so it is no longer an ancestor of HEAD. Its merge-base with HEAD would widen the
+  // run back to the whole change.
+  const repo = fixture();
+  repo.write("a.rs", "fn a() { b() }\nfn c() {}\n");
+  repo.git("commit", "-qam", "c4");
+  const before = repo.git("rev-parse", "HEAD");
+  repo.write("a.rs", "fn a() { b() }\nfn c() {}\nfn d() {}\n");
+  repo.git("commit", "-q", "--amend", "-am", "c4 amended");
+  const r = run(repo, [before]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.diff, /^\+fn d\(\) \{\}$/m);
+  assert.doesNotMatch(r.diff, /^\+fn c\(\) \{\}$/m);
+
+  // An amend that leaves the Rust alone has nothing to mutate.
+  const amended = repo.git("rev-parse", "HEAD");
+  repo.write("README", "four\n");
+  repo.git("commit", "-q", "--amend", "-am", "c4 amended again");
+  const docs = run(repo, [amended]);
+  assert.equal(docs.status, 0, docs.stderr);
+  assert.match(docs.stdout, /no Rust changes since/);
+  assert.equal(docs.args, undefined);
 });
