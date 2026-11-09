@@ -103,8 +103,8 @@ const FINDINGS_SCHEMA = {
   }, required: ['severity', 'file', 'summary', 'evidence', 'suggested_fix'] } } },
   required: ['skills_loaded', 'findings'],
 }
-// Reviews run as the code-reviewer agent (~/.claude/agents/code-reviewer.md, which needs Bash
-// and Skill in its tools); its Critical/Required/Optional/Nit labels map onto the schema's.
+// Reviews run as the code-reviewer agent (.claude/agents/code-reviewer.md, shipped in the repo
+// so every session has it); its Critical/Required/Optional/Nit labels map onto the schema's.
 const review = (scope, body) => `Review in ${REPO}. Read-only: no edits, no cargo builds or tests, no GitHub writes; \`rg\` is available. Load the \`anthropic-skills:rust-skills\` skill first and report the skills you loaded in \`skills_loaded\`. Scope: ${scope}.
 SPEC: ${A.spec}
 ${body}
