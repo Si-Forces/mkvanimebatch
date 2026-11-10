@@ -7,6 +7,8 @@
 #
 # Usage:
 #   home-path.sh                     checks the unified diff on stdin
+#   home-path.sh --staged            checks the staged diff, so an unstaged edit can neither
+#                                    hide nor fake a hit
 #   home-path.sh --published <sha>   checks each commit in <sha> (a full commit id) that no
 #                                    remote-tracking ref holds, one at a time: a path added in
 #                                    one commit and removed in a later one is still in the
@@ -18,23 +20,35 @@
 # Run by pre-commit, pre-push and scripts/jj-gate.sh; not a hook itself.
 set -euo pipefail
 
-usage() { echo "❌ [home-path] usage: home-path.sh [--published <sha>]" >&2; exit 1; }
-if [ "${1:-}" = --published ]; then
-  # A full commit id only: a ref or path could hold the home, and git's error would print it;
-  # git's own errors are dropped for the same reason. The prefixes are set because
-  # diff.noprefix and diff.mnemonicPrefix would change them, and --no-relative because
-  # diff.relative would drop each file outside the current folder. A push sends the original
-  # objects, so git log must not read git replace refs or an info/grafts file, which could
-  # hide a commit from it; the graft file named here cannot exist.
-  [ $# -eq 2 ] && [[ $2 =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] || usage
-  diff=$(GIT_GRAFT_FILE=/dev/null/none git --no-replace-objects log -p --root -c -U0 --no-color \
-    --no-relative --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/ \
-    --format='commit %H' "$2" --not --remotes 2> /dev/null | tr -d '\0') ||
-    { echo "❌ [home-path] cannot list the commits in $2 to check them (git log $2 says why)." >&2; exit 1; }
-else
-  [ $# -eq 0 ] || usage # a sha without --published would wait on stdin
-  diff=$(tr -d '\0') || { echo "❌ [home-path] cannot read the diff." >&2; exit 1; }
-fi
+usage() { echo "❌ [home-path] usage: home-path.sh [--staged | --published <sha>]" >&2; exit 1; }
+# What both git commands pass, so that no git setting hides a line or misnames a file. The
+# prefixes are set because diff.noprefix and diff.mnemonicPrefix would change them, and
+# --no-relative because diff.relative would drop each file outside the current folder. git's
+# own errors are dropped: they could print a path that holds the home.
+shown=(-U0 --no-color --no-relative --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/)
+case ${1:-} in
+  --published)
+    # A full commit id only: a ref or path could hold the home, and git's error would print
+    # it. A push sends the original objects, so git log must not read git replace refs or an
+    # info/grafts file, which could hide a commit from it; the graft file named here cannot
+    # exist.
+    [ $# -eq 2 ] && [[ $2 =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] || usage
+    diff=$(GIT_GRAFT_FILE=/dev/null/none git --no-replace-objects log -p --root -c "${shown[@]}" \
+      --format='commit %H' "$2" --not --remotes 2> /dev/null | tr -d '\0') ||
+      { echo "❌ [home-path] cannot list the commits in $2 to check them (git log $2 says why)." >&2; exit 1; }
+    ;;
+  --staged)
+    # A git replace ref on HEAD could stand a tree that already holds the line in for the one
+    # the commit extends.
+    [ $# -eq 1 ] || usage
+    diff=$(git --no-replace-objects diff --cached "${shown[@]}" 2> /dev/null | tr -d '\0') ||
+      { echo "❌ [home-path] cannot read the staged diff (git diff --cached says why)." >&2; exit 1; }
+    ;;
+  *)
+    [ $# -eq 0 ] || usage # a sha without --published would wait on stdin
+    diff=$(tr -d '\0') || { echo "❌ [home-path] cannot read the diff." >&2; exit 1; }
+    ;;
+esac
 # Without tr, bash drops a NUL byte (text past git's binary sniff may hold one) with a warning
 # that names this script's path, which may hold the home.
 

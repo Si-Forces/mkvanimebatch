@@ -361,10 +361,14 @@ test("--published checks each commit no remote-tracking ref holds, past git sett
   // A ref or path, whose text git's own error would print, gets the usage line, and so does
   // a short id, a missing one, an extra argument, or a sha without --published, which would
   // otherwise wait on stdin.
-  const usage = { status: 1, stderr: "❌ [home-path] usage: home-path.sh [--published <sha>]\n" };
-  for (const args of [["--published", `${home}/bad-ref`], ["--published", fix.slice(0, 12)], ["--published"], ["--published", fix, "x"], [fix]]) {
+  const usage = { status: 1, stderr: "❌ [home-path] usage: home-path.sh [--staged | --published <sha>]\n" };
+  for (const args of [["--published", `${home}/bad-ref`], ["--published", fix.slice(0, 12)], ["--published"], ["--published", fix, "x"], [fix], ["--staged", "x"]]) {
     assert.deepEqual(run("", {}, { args, cwd: repo }), usage, args.join(" "));
   }
+  // --staged fails closed too, without git's error, which names the path it was given.
+  assert.deepEqual(run("", { GIT_DIR: path.join(home, "no-repo") }, { args: ["--staged"], cwd: repo }), {
+    status: 1, stderr: "❌ [home-path] cannot read the staged diff (git diff --cached says why).\n",
+  });
 });
 
 test("--published reads the objects a push sends, past git replace, grafts and NUL bytes", () => {
