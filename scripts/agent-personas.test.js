@@ -31,7 +31,7 @@ test("each persona keeps its limits", () => {
   const readOnly = "Read-only: do not edit files, commit, or push. Do not run cargo unless";
   assert.ok(shared(claude).includes(readOnly)); // and so the Codex copy, by the first test
   assert.ok(codex("security-auditor").includes(readOnly));
-  assert.ok(codex("test-engineer").includes("Run targeted tests only, never `cargo test --workspace`, and one cargo process at a time"));
+  assert.ok(codex("test-engineer").includes("Run targeted tests only, never `cargo test --workspace` (the parent task owns the one workspace run), and one cargo process at a time"));
 });
 
 // No TOML parser without npm, so the shape: comments, three string keys, and instructions in
