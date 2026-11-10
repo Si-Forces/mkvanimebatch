@@ -167,7 +167,7 @@ test("ignores trailing separators on USERPROFILE and HOME", () => {
 
 test("a doubled separator inside HOME or USERPROFILE counts squeezed and as set", () => {
   hit(run(diff("a.sh", "+ls /no-such-home/tester/x"), { HOME: "/no-such-home//tester" }));
-  hit(run(diff("a.sh", "+ls /no-such-home//tester/x"), { HOME: "/no-such-home//tester/" }), "as set");
+  hit(run(diff("a.sh", "+ls /no-such-home//tester/x"), { HOME: "/no-such-home//tester/" }), "doubled in both");
   // Only a run of slashes is squeezed in the line, so a doubled backslash matches as set.
   const odd = { HOME: "/no-such-home/we\\\\ird/tester" };
   hit(run(diff("a.sh", "+ls /no-such-home/we\\\\ird/tester/x"), odd), "HOME as set, with a doubled backslash");
@@ -309,6 +309,11 @@ test("checks the resolved form of a symlinked HOME", () => {
   // A relative HOME is resolved from the current folder, not from CDPATH.
   fs.mkdirSync(path.join(tmp, "elsewhere", "tester"), { recursive: true });
   hit(run(diff("a.js", `+'${home}/repo'`), { HOME: "tester", CDPATH: path.join(tmp, "elsewhere") }), "CDPATH");
+  // Nor a drive path, which gets no ./ because it is absolute on Git Bash: here it is relative.
+  fs.mkdirSync(path.join(tmp, "elsewhere", "C:", "Users"), { recursive: true });
+  fs.symlinkSync(home, path.join(tmp, "elsewhere", "C:", "Users", "x"));
+  const drive = run(diff("a.js", `+'${home}/repo'`), { HOME: "C:/Users/x", CDPATH: path.join(tmp, "elsewhere") });
+  assert.deepEqual(drive, { status: 0, stderr: "" }, "a drive path and CDPATH");
   // Nor is a HOME of - read as cd's "the previous folder".
   fs.symlinkSync(home, path.join(tmp, "-"));
   hit(run(diff("a.js", `+'${home}/repo'`), { HOME: "-" }), "a HOME of -");

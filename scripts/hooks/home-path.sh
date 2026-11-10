@@ -22,8 +22,9 @@ set -euo pipefail
 
 usage() { echo "❌ [home-path] usage: home-path.sh [--staged | --published <sha>]" >&2; exit 1; }
 # What both git commands pass, so that no git setting hides a line or misnames a file. The
-# prefixes are set because diff.noprefix and diff.mnemonicPrefix would change them, and
-# --no-relative because diff.relative would drop each file outside the current folder. --text
+# prefixes are set because diff.noprefix and diff.mnemonicPrefix would change them (a file's
+# name is read from its +++ line, so a/ is there only to match b/), and --no-relative because
+# diff.relative would drop each file outside the current folder. --text
 # prints the lines of a file git takes for binary (by a -diff or binary attribute, or a NUL in
 # its first 8000 bytes), where it would otherwise say only that the files differ; a merge's
 # combined diff (-c) ignores it, so what a resolution adds to such a file stays unread. git's
@@ -78,8 +79,9 @@ squeeze() { # <path>
 }
 
 # Trailing separators would stop "$HOME/x" from matching. A doubled one would too, so each
-# variable counts as set and squeezed. USERPROFILE is taken with backslashes, whichever it was
-# set with; the other forms come from that below.
+# variable counts as set and squeezed; for HOME, as set matters only for a doubled backslash,
+# since a run of slashes in the scanned line is read as one. USERPROFILE is taken with
+# backslashes, whichever it was set with; the other forms come from that below.
 home_as_set=${HOME:-}
 while [[ $home_as_set == */ ]]; do home_as_set=${home_as_set%/}; done
 squeeze "$home_as_set"
@@ -98,10 +100,11 @@ real=""
 if [ -n "$home" ]; then
   # A relative HOME as ./HOME, so cd neither searches CDPATH nor reads a leading - as an option.
   # A drive path (C:/Users/x) is left alone: it is absolute on Git Bash, the one place a HOME
-  # is set that way. Elsewhere ./C: is the same folder, so no test can tell the two apart.
+  # is set that way. Elsewhere it is a relative path, so CDPATH is emptied for the cd; with
+  # that, ./C: is the same folder there, and no test can tell the two apart.
   dir=$home
   [[ $dir == /* || $dir =~ ^[A-Za-z]: ]] || dir=./$dir
-  if ! real=$(cd "$dir" 2> /dev/null && pwd -P); then
+  if ! real=$(CDPATH= cd "$dir" 2> /dev/null && pwd -P); then
     [ -e "$dir" ] && cannot_resolve "not a folder this user can enter" # or a symlink to one
     [ -L "$dir" ] && cannot_resolve "a dangling symlink or a symlink loop"
     up=$dir
