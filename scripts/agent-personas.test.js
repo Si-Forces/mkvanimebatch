@@ -29,9 +29,16 @@ test("both code-reviewer descriptions say the review does not replace Standards 
 
 test("each persona keeps its limits", () => {
   const readOnly = "Read-only: do not edit files, commit, or push. Do not run cargo unless";
-  assert.ok(shared(claude).includes(readOnly)); // and so the Codex copy, by the first test
-  assert.ok(codex("security-auditor").includes(readOnly));
+  // Shared, and so in the Codex copy too, by the first test.
+  assert.ok(shared(claude).includes(`${readOnly} the caller explicitly gives you cargo; without it, say the build was not verified`));
+  assert.ok(codex("security-auditor").includes(`${readOnly} the parent task explicitly gives you cargo.`));
   assert.ok(codex("test-engineer").includes("Run targeted tests only, never `cargo test --workspace` (the parent task owns the one workspace run), and one cargo process at a time"));
+  assert.ok(codex("test-engineer").includes("Do not commit or push; the parent task does both."));
+  // The Composition sections differ, so each keeps this bullet by itself; the Codex one also
+  // names the skill's path.
+  for (const text of [claude, codex("code-reviewer")]) {
+    assert.match(text, /^- \*\*Not the commit review:\*\* AGENTS\.md still requires the code-review skill's Standards \+ Spec review (?:\(`\.agents\/skills\/code-review\/SKILL\.md`\) )?for every commit\. This review is extra; never record it with `scripts\/review-gate\.sh`\.$/m);
+  }
 });
 
 // No TOML parser without npm, so the shape: comments, three string keys, and instructions in
