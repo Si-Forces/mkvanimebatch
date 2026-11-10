@@ -377,8 +377,11 @@ test("--published checks each commit no remote-tracking ref holds, past git sett
   for (const args of [["--published", `${home}/bad-ref`], ["--published", fix.slice(0, 12)], ["--published"], ["--published", fix, "x"], [fix], ["--staged", "x"]]) {
     assert.deepEqual(run("", {}, { args, cwd: repo }), usage, args.join(" "));
   }
-  // --staged fails closed too, without git's error, which names the path it was given.
-  assert.deepEqual(run("", { GIT_DIR: path.join(home, "no-repo") }, { args: ["--staged"], cwd: repo }), {
+});
+
+test("--staged fails closed when git cannot read the index, with only the script's own line", () => {
+  // git's error names the path it was given, which could hold the home.
+  assert.deepEqual(run("", { GIT_DIR: path.join(home, "no-repo") }, { args: ["--staged"] }), {
     status: 1, stderr: "❌ [home-path] cannot read the staged diff (git diff --cached says why).\n",
   });
 });

@@ -27,8 +27,10 @@ usage() { echo "❌ [home-path] usage: home-path.sh [--staged | --published <sha
 # prints the lines of a file git takes for binary (by a -diff or binary attribute, or a NUL in
 # its first 8000 bytes), where it would otherwise say only that the files differ; a merge's
 # combined diff (-c) ignores it, so what a resolution adds to such a file stays unread. git's
-# own errors are dropped: they could print a path that holds the home.
-shown=(-U0 --text --no-color --no-relative --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/)
+# own errors are dropped: they could print a path that holds the home. So are NUL bytes, in
+# every mode (--text prints the ones a file holds): bash drops one with a warning that names
+# this script's path, which may hold the home.
+diff_flags=(-U0 --text --no-color --no-relative --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/)
 case ${1:-} in
   --published)
     # A full commit id only: a ref or path could hold the home, and git's error would print
@@ -36,7 +38,7 @@ case ${1:-} in
     # info/grafts file, which could hide a commit from it; the graft file named here cannot
     # exist.
     [ $# -eq 2 ] && [[ $2 =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] || usage
-    diff=$(GIT_GRAFT_FILE=/dev/null/none git --no-replace-objects log -p --root -c "${shown[@]}" \
+    diff=$(GIT_GRAFT_FILE=/dev/null/none git --no-replace-objects log -p --root -c "${diff_flags[@]}" \
       --format='commit %H' "$2" --not --remotes 2> /dev/null | tr -d '\0') ||
       { echo "❌ [home-path] cannot list the commits in $2 to check them (git log $2 says why)." >&2; exit 1; }
     ;;
@@ -44,7 +46,7 @@ case ${1:-} in
     # A git replace ref on HEAD could stand a tree that already holds the line in for the one
     # the commit extends.
     [ $# -eq 1 ] || usage
-    diff=$(git --no-replace-objects diff --cached "${shown[@]}" 2> /dev/null | tr -d '\0') ||
+    diff=$(git --no-replace-objects diff --cached "${diff_flags[@]}" 2> /dev/null | tr -d '\0') ||
       { echo "❌ [home-path] cannot read the staged diff (git diff --cached says why)." >&2; exit 1; }
     ;;
   *)
@@ -52,8 +54,6 @@ case ${1:-} in
     diff=$(tr -d '\0') || { echo "❌ [home-path] cannot read the diff." >&2; exit 1; }
     ;;
 esac
-# Without tr, bash drops a NUL byte (--text prints the ones a file holds) with a warning that
-# names this script's path, which may hold the home.
 
 bs='\'
 # Replaces every <from> in <string> with <to>, into REPLY. A loop, not ${s//from/to}: how a
@@ -97,6 +97,8 @@ cannot_resolve() { echo "❌ [home-path] cannot resolve HOME: $1." >&2; exit 1; 
 real=""
 if [ -n "$home" ]; then
   # A relative HOME as ./HOME, so cd neither searches CDPATH nor reads a leading - as an option.
+  # A drive path (C:/Users/x) is left alone: it is absolute on Git Bash, the one place a HOME
+  # is set that way. Elsewhere ./C: is the same folder, so no test can tell the two apart.
   dir=$home
   [[ $dir == /* || $dir =~ ^[A-Za-z]: ]] || dir=./$dir
   if ! real=$(cd "$dir" 2> /dev/null && pwd -P); then
