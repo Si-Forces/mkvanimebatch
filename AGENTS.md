@@ -66,7 +66,7 @@ In a Claude Code cloud session (`CLAUDE_CODE_REMOTE=true`), or before merging a 
 
 ### Code review for every commit
 
-Every change needs a Standards + Spec review before it is finalized; `jj gpush` refuses a non-empty commit without a recorded review. Run the code-review skill on the full committed diff (both axes in parallel sub-agents; the sub-agents work from the diff and source alone, with no cargo runs), then fix or explicitly accept the findings. There are two copies of it: Claude Code loads `anthropic-skills:code-review` (not the built-in `/code-review`); other agents, or Claude Code without that skill, read `.agents/skills/code-review/SKILL.md`. Keep the two identical: change one, then copy it to the other (the claude.ai copy is re-uploaded). The `code-reviewer` agent persona has two copies too: `.claude/agents/code-reviewer.md` is the source, and `.codex/agents/code-reviewer.toml` mirrors it for Codex; change the first, then copy it to the second. `jj commit` is a local snapshot, so the practical sequence is commit → review → record → `jj gpush`; amend with `jj squash`/`jj describe` and re-review/re-record if findings land after the commit.
+Every change needs a Standards + Spec review before it is finalized; `jj gpush` refuses a non-empty commit without a recorded review. Run the code-review skill on the full committed diff (both axes in parallel sub-agents; the sub-agents work from the diff and source alone, with no cargo runs), then fix or explicitly accept the findings. There are two copies of it: Claude Code loads `anthropic-skills:code-review` (not the built-in `/code-review`); other agents, or Claude Code without that skill, read `.agents/skills/code-review/SKILL.md`. Keep the two identical: change one, then copy it to the other (the claude.ai copy is re-uploaded). `jj commit` is a local snapshot, so the practical sequence is commit → review → record → `jj gpush`; amend with `jj squash`/`jj describe` and re-review/re-record if findings land after the commit.
 
 Record the review or `jj gpush` refuses the push:
 
@@ -114,6 +114,12 @@ Issues and specs live in GitHub Issues (`Si-Forces/mkvanimebatch`). Use the `gh`
 ### Triage labels
 
 Canonical triage roles map to GitHub labels (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`); see `docs/agents/triage-labels.md` for the mapping and any missing label to create first.
+
+### Agent personas
+
+`.claude/agents/code-reviewer.md` and `.codex/agents/code-reviewer.toml` are one persona for two tools. From the `# Senior Code Reviewer` heading to the `## Composition` heading the two are identical (`scripts/agent-personas.test.js` checks it): change that part in the `.md`, then copy it to the `.toml`. The descriptions and Composition sections differ on purpose. The persona's review is extra and never replaces the Standards + Spec review.
+
+`.codex/agents/security-auditor.toml` and `test-engineer.toml` are adapted from agent-skills 0.6.15 (MIT, `.agents/LICENSE-agent-skills`) with repo notes added; they do not follow upstream.
 
 ### Domain docs
 
