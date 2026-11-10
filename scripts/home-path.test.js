@@ -39,7 +39,8 @@ const sh = (cwd, cmd, args, env = {}) => {
 // A fresh git repo; git(...) asserts success and returns stdout.
 // hostile: git settings that would each hide an added line from a plain `git diff` or
 // `git log -p`: a textconv driver that prints nothing, forced colour, an external diff that
-// prints nothing (`git diff` only), and no diff for the first commit (`git log` only).
+// prints nothing (`git diff` only), no diff for the first commit (`git log` only), and no
+// a/ b/ prefixes, which would report a file under a folder named b/ without it.
 const gitRepo = (name, { hostile = false } = {}) => {
   const dir = path.join(tmp, name);
   fs.mkdirSync(dir);
@@ -55,6 +56,7 @@ const gitRepo = (name, { hostile = false } = {}) => {
     git("config", "diff.external", "true");
     git("config", "color.ui", "always");
     git("config", "log.showRoot", "false");
+    git("config", "diff.noprefix", "true");
   }
   return { dir, git };
 };
@@ -91,6 +93,8 @@ test("matches HOME only as whole path segments, in any case", () => {
   hit(run(diff("a.md", `+see ${home}`)), "at the end of a line");
   hit(run(diff("a.md", `+cloned into ${home}.`)), "at the end of a sentence");
   hit(run(diff("a.md", `+cloned into ${home}...`)), "before an ellipsis");
+  hit(run(diff("a.md", `+see ${home}...more`)), "before an ellipsis and more text");
+  hit(run(diff("a.sh", `+git diff ${home}..main`)), "in a git range");
   assert.equal(run(diff("a.md", `+cp ${home}.bak/x .`)).status, 0, "a sibling with a suffix");
   hit(run(diff("a.md", `+see ${home.toUpperCase()}/x`)), "in another case");
 });
@@ -103,6 +107,13 @@ test("names the commit in git log output", () => {
   // git writes "+++ b/<name><tab>" for a name that holds a space.
   const spaced = run(`diff --git a/my file.md b/my file.md\n--- a/my file.md\t\n+++ b/my file.md\t\n@@ -0,0 +1 @@\n+${home}/x\n`);
   assert.ok(spaced.stderr.includes("     my file.md:1\n"), spaced.stderr);
+});
+
+test("a file header is not content, even before the first hunk", () => {
+  // Repo-relative names are not read, so a fixture folder shaped like the home passes.
+  const named = `a${home}/x`;
+  const deleted = `diff --git ${named} b/y\ndeleted file mode 100644\n--- ${named}\n+++ /dev/null\n@@ -1 +0,0 @@\n-clean\n`;
+  assert.deepEqual(run(deleted), { status: 0, stderr: "" });
 });
 
 test("a +++ or --- line inside a hunk is content, not a file header", () => {
@@ -142,6 +153,14 @@ test("ignores trailing separators on USERPROFILE and HOME", () => {
   // A drive alone names nobody, as a HOME of / does not.
   assert.equal(run(diff("a.ps1", "+cd C:\\tools"), { USERPROFILE: "C:\\" }).status, 0);
   hit(run(diff("a.sh", "+ls /no-such-home/tester/x"), { HOME: "/no-such-home/tester//" }));
+});
+
+test("a doubled separator inside HOME or USERPROFILE counts squeezed and as set", () => {
+  hit(run(diff("a.sh", "+ls /no-such-home/tester/x"), { HOME: "/no-such-home//tester" }));
+  hit(run(diff("a.sh", "+ls /no-such-home//tester/x"), { HOME: "/no-such-home//tester/" }), "as set");
+  const profile = { USERPROFILE: "C:\\Users\\\\tester\\" };
+  hit(run(diff("a.ps1", "+cd C:\\Users\\tester\\repo"), profile));
+  hit(run(diff("a.ps1", "+cd C:\\Users\\\\tester\\repo"), profile), "USERPROFILE as set");
 });
 
 test("checks the \\/ a JSON writer may put for /", () => {
@@ -223,6 +242,23 @@ test("checks the resolved form of a symlinked HOME", () => {
   const link = path.join(tmp, "link");
   fs.symlinkSync(home, link);
   hit(run(diff("a.js", `+'${home}/repo'`), { HOME: link }));
+  // A relative HOME is resolved from the current folder, not from CDPATH.
+  fs.mkdirSync(path.join(tmp, "elsewhere", "tester"), { recursive: true });
+  hit(run(diff("a.js", `+'${home}/repo'`), { HOME: "tester", CDPATH: path.join(tmp, "elsewhere") }), "CDPATH");
+  // Nor is a HOME of - read as cd's "the previous folder".
+  fs.symlinkSync(home, path.join(tmp, "-"));
+  hit(run(diff("a.js", `+'${home}/repo'`), { HOME: "-" }), "a HOME of -");
+});
+
+test("the locale changes neither the case folding nor the parse", () => {
+  // A Turkish locale folds I to a dotless i. Where it is not installed, awk falls back to C.
+  const turkish = { HOME: "/no-such-home/TESTERI", LC_ALL: "tr_TR.UTF-8" };
+  hit(run(diff("a.sh", "+ls /no-such-home/testeri/x"), turkish), "Turkish");
+  // A diff is bytes: a line that is not UTF-8 must not derail the lines after it.
+  const bytes = Buffer.concat([Buffer.from(diff("a.bin", "+clean")), Buffer.from("+"), Buffer.from([0xff, 0xfe]), Buffer.from(` ${home}/x\n`)]);
+  const r = run(bytes, { LC_ALL: "C.UTF-8" });
+  hit(r);
+  assert.ok(r.stderr.includes("     a.bin:2\n") && !r.stderr.includes("warning"), r.stderr);
 });
 
 test("a HOME of / checks nothing, and a trailing slash on HOME is ignored", () => {
@@ -263,12 +299,45 @@ test("--published checks each commit no remote-tracking ref holds, past git sett
   const fresh = run("", {}, { args: ["--published", first], cwd: repo });
   hit(fresh);
   assert.ok(fresh.stderr.includes(`${first.slice(0, 12)} f.txt:1\n`), fresh.stderr);
-  // A sha git cannot read fails closed, and so does a missing one.
-  assert.equal(run("", {}, { args: ["--published", "0".repeat(40)], cwd: repo }).status, 1);
-  assert.match(run("", {}, { args: ["--published"], cwd: repo }).stderr, /usage/);
-  // Nor does a ref or path, whose text git's own error would print.
-  const named = run("", {}, { args: ["--published", `${home}/bad-ref`], cwd: repo });
-  assert.deepEqual(named, { status: 1, stderr: "❌ [home-path] usage: home-path.sh --published <sha>\n" });
+  // A sha git cannot read fails closed, with only the script's own line: git's error could
+  // name a path.
+  const unknown = "0".repeat(40);
+  assert.deepEqual(run("", {}, { args: ["--published", unknown], cwd: repo }), {
+    status: 1, stderr: `❌ [home-path] cannot list the commits in ${unknown} to check them (git log ${unknown} says why).\n`,
+  });
+  // A ref or path, whose text git's own error would print, gets the usage line, and so does
+  // a short id, a missing one, an extra argument, or a sha without --published, which would
+  // otherwise wait on stdin.
+  const usage = { status: 1, stderr: "❌ [home-path] usage: home-path.sh [--published <sha>]\n" };
+  for (const args of [["--published", `${home}/bad-ref`], ["--published", fix.slice(0, 12)], ["--published"], ["--published", fix, "x"], [fix]]) {
+    assert.deepEqual(run("", {}, { args, cwd: repo }), usage, args.join(" "));
+  }
+});
+
+test("--published checks what a merge resolution adds, and nothing a parent already has", () => {
+  const { dir: repo, git } = gitRepo("merge", { hostile: true });
+  fs.mkdirSync(path.join(repo, "b")); // a folder named like git's b/ prefix, to keep in the report
+  const commit = (content) => {
+    fs.writeFileSync(path.join(repo, "b", "f.txt"), content);
+    git("add", "-A");
+    git("commit", "-q", "-m", "c");
+    return git("rev-parse", "HEAD");
+  };
+  commit("1\n2\n3\n4\n5\n");
+  git("checkout", "-q", "-b", "side");
+  // Published already, so not this push's to refuse, though the merge brings it in.
+  git("update-ref", "refs/remotes/origin/main", commit(`1\n${home}/old\n3\nside\n5\n`));
+  git("checkout", "-q", "main");
+  commit("1\n2\n3\n4\nmain\n");
+  sh(repo, "git", ["merge", "-q", "--no-commit", "side"]); // conflicts, which the resolution settles
+  // Line 4 replaces a line from each parent, so the hunk's dropped lines come before it.
+  fs.writeFileSync(path.join(repo, "b", "f.txt"), `1\n${home}/old\n3\n${home}/new\nmain\n`);
+  git("add", "-A");
+  git("commit", "-q", "-m", "merge");
+  const merge = git("rev-parse", "HEAD");
+  const r = run("", {}, { args: ["--published", merge], cwd: repo });
+  hit(r);
+  assert.equal(r.stderr.split("\n").filter((l) => l.startsWith("     ")).join("\n"), `     ${merge.slice(0, 12)} b/f.txt:4`);
 });
 
 // The wiring: each gate runs the check, and before its SKIP_* bypasses. The repos get copies of
@@ -288,16 +357,17 @@ test("pre-commit refuses a staged leak, and pre-push one in any pushed commit", 
   git("config", "core.hooksPath", path.dirname(script));
   sh(dir, "git", ["init", "-q", "--bare", path.join(tmp, "hooked.git")]);
   git("remote", "add", "origin", path.join(tmp, "hooked.git"));
+  fs.mkdirSync(path.join(dir, "b"));
   const commit = (content, ...flags) => {
-    fs.writeFileSync(path.join(dir, "f.txt"), content);
-    git("add", "f.txt", ".gitattributes");
+    fs.writeFileSync(path.join(dir, "b", "f.txt"), content);
+    git("add", "b/f.txt", ".gitattributes");
     return sh(dir, "git", ["commit", "-q", "-m", "c", ...flags]); // may fail, unlike git()
   };
 
   assert.equal(commit("clean\n").status, 0);
   const leak = commit(`${home}/secret\n`);
   assert.equal(leak.status, 1, leak.out);
-  assert.match(leak.out, /name your home directory/);
+  assert.match(leak.out, /name your home directory[^]*\n {5}b\/f\.txt:1\n/);
   assert.equal(sh(dir, "git", ["push", "-q", "origin", "main"], SKIP).status, 0, "a clean push");
 
   // Added then removed is still published; the bypasses do not skip the check.

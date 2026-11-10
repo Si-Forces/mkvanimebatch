@@ -7,21 +7,28 @@
 #
 # Usage:
 #   home-path.sh                     checks the unified diff on stdin
-#   home-path.sh --published <sha>   checks each commit in <sha> that no remote-tracking ref
-#                                    holds, one at a time: a path added in one commit and
-#                                    removed in a later one is still in the pushed history
+#   home-path.sh --published <sha>   checks each commit in <sha> (a full commit id) that no
+#                                    remote-tracking ref holds, one at a time: a path added in
+#                                    one commit and removed in a later one is still in the
+#                                    pushed history. A merge counts for the lines its
+#                                    resolution adds, which no parent has.
 # Prints the file and line number of each added line that names the home directory and exits
 # 1, else exits 0. Not the line's text: gate output gets pasted into PR descriptions, which
 # nothing checks.
 # Run by pre-commit, pre-push and scripts/jj-gate.sh; not a hook itself.
 set -euo pipefail
 
+usage() { echo "❌ [home-path] usage: home-path.sh [--published <sha>]" >&2; exit 1; }
 if [ "${1:-}" = --published ]; then
-  # A commit id only: a ref or path could hold the home, and git's error would print it.
-  [[ "${2:-}" =~ ^[0-9a-fA-F]{4,64}$ ]] || { echo "❌ [home-path] usage: home-path.sh --published <sha>" >&2; exit 1; }
-  diff=$(git log -p --root -U0 --no-color --no-ext-diff --no-textconv --format='commit %H' "$2" --not --remotes) ||
-    { echo "❌ [home-path] cannot list the commits in $2 to check them." >&2; exit 1; }
+  # A full commit id only: a ref or path could hold the home, and git's error would print it;
+  # git's own errors are dropped for the same reason. The prefixes are set because
+  # diff.noprefix and diff.mnemonicPrefix would change them.
+  [ $# -eq 2 ] && [[ $2 =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] || usage
+  diff=$(git log -p --root -c -U0 --no-color --no-ext-diff --no-textconv \
+    --src-prefix=a/ --dst-prefix=b/ --format='commit %H' "$2" --not --remotes 2> /dev/null) ||
+    { echo "❌ [home-path] cannot list the commits in $2 to check them (git log $2 says why)." >&2; exit 1; }
 else
+  [ $# -eq 0 ] || usage # a sha without --published would wait on stdin
   diff=$(cat) || { echo "❌ [home-path] cannot read the diff." >&2; exit 1; }
 fi
 
@@ -38,13 +45,27 @@ replace_all() { # <string> <from> <to>
   REPLY+=$rest
 }
 
-# Trailing separators would stop "$HOME/x" from matching. USERPROFILE is taken with
-# backslashes, whichever it was set with; the other forms come from that below.
-home=${HOME:-}
-while [[ $home == */ ]]; do home=${home%/}; done
+# Makes doubled separators single, into REPLY.
+squeeze() { # <path>
+  local sep
+  REPLY=$1
+  for sep in / "$bs"; do
+    while [[ $REPLY == *"$sep$sep"* ]]; do replace_all "$REPLY" "$sep$sep" "$sep"; done
+  done
+}
+
+# Trailing separators would stop "$HOME/x" from matching. A doubled one would too, so each
+# variable counts as set and squeezed. USERPROFILE is taken with backslashes, whichever it was
+# set with; the other forms come from that below.
+home_as_set=${HOME:-}
+while [[ $home_as_set == */ ]]; do home_as_set=${home_as_set%/}; done
+squeeze "$home_as_set"
+home=$REPLY
 replace_all "${USERPROFILE:-}" / "$bs"
+profile_as_set=$REPLY
+while [[ $profile_as_set == *"$bs" ]]; do profile_as_set=${profile_as_set%"$bs"}; done
+squeeze "$profile_as_set"
 profile=$REPLY
-while [[ $profile == *"$bs" ]]; do profile=${profile%"$bs"}; done
 
 # The resolved form too, for a home reached through a symlink. Only an absent home has none:
 # every other failure refuses rather than check less. A missing name looks the same as one
@@ -52,14 +73,13 @@ while [[ $profile == *"$bs" ]]; do profile=${profile%"$bs"}; done
 cannot_resolve() { echo "❌ [home-path] cannot resolve HOME: $1." >&2; exit 1; }
 real=""
 if [ -n "$home" ]; then
-  if real=$(cd "$home" 2> /dev/null && pwd -P); then
-    real=${real%/}
-  elif [ -L "$home" ]; then
-    cannot_resolve "a dangling symlink or a symlink loop"
-  elif [ -e "$home" ]; then
-    cannot_resolve "not a folder this user can enter"
-  else
-    up=$home
+  # A relative HOME as ./HOME, so cd neither searches CDPATH nor reads a leading - as an option.
+  dir=$home
+  [[ $dir == /* || $dir =~ ^[A-Za-z]: ]] || dir=./$dir
+  if ! real=$(cd "$dir" 2> /dev/null && pwd -P); then
+    [ -L "$dir" ] && cannot_resolve "a dangling symlink or a symlink loop"
+    [ -e "$dir" ] && cannot_resolve "not a folder this user can enter"
+    up=$dir
     until [ -e "$up" ] || [ -L "$up" ] || [ "$up" = / ] || [ "$up" = . ]; do up=$(dirname "$up"); done
     (cd "$up" 2> /dev/null) || cannot_resolve "something above it is not a folder this user can search"
     real=""
@@ -69,20 +89,15 @@ fi
 # A path of one segment, such as /root, /app or C:\app, is the same on every machine and names
 # nobody, so it is not looked for; nor is what / or a drive alone (C:\) leave. Each form is
 # judged by itself: a one-segment HOME may resolve to a longer path that does name someone.
-names_someone() { # <path>: true when it has more than one segment, a drive and doubled separators aside
-  local path=$1 sep
+names_someone() { # <path>: true when it has more than one segment, a drive aside
+  local path=$1
   [[ $path =~ ^[A-Za-z]: ]] && path=${path:2}
-  for sep in / "$bs"; do
-    while [[ $path == *"$sep$sep"* ]]; do
-      replace_all "$path" "$sep$sep" "$sep"
-      path=$REPLY
-    done
-  done
   [[ ${path:1} == */* || ${path:1} == *"$bs"* ]]
 }
-names_someone "$home" || home=""
+# The squeezed form decides for both: //root as set is still one segment.
+names_someone "$home" || { home=""; home_as_set=""; }
 names_someone "$real" || real=""
-names_someone "$profile" || profile=""
+names_someone "$profile" || { profile=""; profile_as_set=""; }
 
 # USERPROFILE also with forward slashes, and with the doubled backslashes a TOML or JSON
 # string needs.
@@ -90,41 +105,56 @@ replace_all "$profile" "$bs" /
 forward=$REPLY
 replace_all "$profile" "$bs" "$bs$bs"
 homes=""
-for h in "$home" "$real" "$profile" "$forward" "$REPLY"; do
+for h in "$home" "$home_as_set" "$real" "$profile" "$profile_as_set" "$forward" "$REPLY"; do
   homes+="$h"$'\n'
 done
 [ -n "$home$real$profile" ] ||
   echo "⚠  [home-path] HOME and USERPROFILE name no home directory (unset, /, a drive alone, or one segment such as /root), so nothing is checked." >&2
 
-# ENVIRON, not awk -v, which would read the backslashes of a Windows path as escapes.
+# ENVIRON, not awk -v, which would read the backslashes of a Windows path as escapes. LC_ALL=C,
+# as a diff is bytes, not text: tolower() then folds only A-Z (a Turkish locale folds I to a
+# dotless i), and bytes that are not UTF-8 neither derail gawk nor stop BSD awk.
 # A home counts wherever it starts, as in -I/home/al/include or /mnt/backup/home/al, but only
 # up to the end of a segment: /home/al does not match /home/alice, though a full stop that
 # ends a sentence still ends the path. Case is ignored, as Windows paths are.
-# File headers are the ---/+++ lines between "diff --git" and the first hunk; after that, a
-# line starting "+++" is an added line that starts with "++".
-hits=$(HOMES="$homes" awk '
+# File headers are the ---/+++ lines between "diff --git" (or a merge's "diff --combined") and
+# the first hunk; after that, a line starting "+++" is an added line that starts with "++".
+hits=$(HOMES="$homes" LC_ALL=C awk '
   function names_home(line, h,    s, p, q) {
     s = line
     while ((p = index(s, h)) > 0) {
-      # Full stops then a name character continue the name (".bak"); otherwise they end a
-      # sentence (". " or "...").
-      for (q = p + length(h); substr(s, q, 1) == "."; q++) {}
-      if (substr(s, q, 1) !~ /[a-z0-9._~-]/) return 1
+      # A full stop then a name character continues the name (".bak"); otherwise it ends a
+      # sentence (". " or "...") or starts a git range ("..main").
+      q = p + length(h)
+      if (substr(s, q, 1) == ".") q++
+      if (substr(s, q, 1) !~ /[a-z0-9_~-]/) return 1
       s = substr(s, p + 1)
     }
     return 0
   }
   BEGIN { n = split(tolower(ENVIRON["HOMES"]), home, "\n") }
   /^commit [0-9a-f]+$/ { commit = substr($2, 1, 12) " "; next }
-  /^diff --git / { header = 1; next }
+  /^diff --(git|combined|cc) / { header = 1; next }
   # git ends a name that holds a space with a tab.
   header && /^\+\+\+ / { file = substr($0, 5); sub(/^b\//, "", file); sub(/\t$/, "", file); next }
-  # "@@ -a,b +c,d @@": c is the number of the first line the hunk leaves in the file.
-  /^@@/ { header = 0; match($0, /\+[0-9]+/); number = substr($0, RSTART + 1, RLENGTH - 1) + 0; next }
-  /^\+/ {
+  # "@@ -a,b +c,d @@", or for a merge one @ and one -a,b per parent more: c is the number of
+  # the first line the hunk leaves in the file.
+  /^@@/ {
+    header = 0
+    match($0, /^@+/); parents = RLENGTH - 1
+    match($0, /\+[0-9]+/); number = substr($0, RSTART + 1, RLENGTH - 1) + 0
+    next
+  }
+  # A line starts with one mark per parent: "-" for a line the result drops, "+" for one that
+  # parent lacks. Only a line every parent lacks is new here; one a parent has was checked in
+  # that parent, or is published already.
+  !header && /^[-+ ]/ {
+    mark = substr($0, 1, parents)
+    if (mark ~ /-/) next
+    if (mark ~ / /) { number++; next }
     # The \/ some JSON writers put for / is read as /, so one rule covers both spellings; so
     # is \\/, that escape inside another string.
-    line = tolower(substr($0, 2))
+    line = tolower(substr($0, parents + 1))
     gsub(/\\+\//, "/", line)
     for (i = 1; i <= n; i++) {
       if (home[i] == "" || !names_home(line, home[i])) continue
@@ -133,7 +163,6 @@ hits=$(HOMES="$homes" awk '
     }
     number++
   }
-  /^ / { number++ }
 ' <<< "$diff") || { echo "❌ [home-path] cannot scan the diff." >&2; exit 1; }
 
 [ -z "$hits" ] && exit 0

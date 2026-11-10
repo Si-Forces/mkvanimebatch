@@ -52,7 +52,9 @@ for f in "${staged_js[@]}"; do
     { echo "❌ [pre-commit] node --check failed: $f" >&2; fail=1; }
 done
 
-# The staged diff, so an unstaged edit can neither hide nor fake a hit.
-git diff --cached -U0 --no-color --no-ext-diff --no-textconv | "$(dirname "$0")/home-path.sh" || fail=1
+# The staged diff, so an unstaged edit can neither hide nor fake a hit. The prefixes are set
+# because diff.noprefix and diff.mnemonicPrefix would change them.
+git diff --cached -U0 --no-color --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/ |
+  "$(dirname "$0")/home-path.sh" || fail=1
 
 exit "$fail"
