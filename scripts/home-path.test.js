@@ -391,6 +391,28 @@ test("--published reads the objects a push sends, past git replace, grafts and N
   hit(r, "info/grafts");
 });
 
+test("--staged and --published read a file git takes for binary as text", () => {
+  const { dir: repo, git, commit } = gitRepo("binary");
+  git("config", "core.hooksPath", path.dirname(script));
+  fs.writeFileSync(path.join(repo, ".gitattributes"), "*.dat -diff\n");
+  git("update-ref", "refs/remotes/origin/main", commit("base\n"));
+  // By an attribute, or by a NUL in its first 8000 bytes: git would print only that the
+  // binary files differ.
+  for (const file of ["a.dat", "b.bin"]) {
+    fs.writeFileSync(path.join(repo, file), `x\0y\n${home}/secret\n`);
+    git("add", "-A");
+    const staged = sh(repo, "git", ["commit", "-q", "-m", "c"]);
+    assert.equal(staged.status, 1, staged.out);
+    // Without tr, bash's warning about the NUL would name the script's path.
+    assert.ok(staged.out.includes(`     ${file}:2\n`) && !staged.out.includes("warning"), staged.out);
+    git("commit", "-q", "--no-verify", "-m", "c");
+    const sha = git("rev-parse", "HEAD");
+    const r = run("", {}, { args: ["--published", sha], cwd: repo });
+    hit(r, file);
+    assert.ok(r.stderr.includes(`${sha.slice(0, 12)} ${file}:2\n`), r.stderr);
+  }
+});
+
 test("--published checks what a merge resolution adds, and nothing a parent already has", () => {
   const { dir: repo, git, commit: commitTo } = gitRepo("merge", { hostile: true });
   fs.mkdirSync(path.join(repo, "b")); // a folder named like git's b/ prefix, to keep in the report

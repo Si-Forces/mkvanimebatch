@@ -23,9 +23,12 @@ set -euo pipefail
 usage() { echo "❌ [home-path] usage: home-path.sh [--staged | --published <sha>]" >&2; exit 1; }
 # What both git commands pass, so that no git setting hides a line or misnames a file. The
 # prefixes are set because diff.noprefix and diff.mnemonicPrefix would change them, and
-# --no-relative because diff.relative would drop each file outside the current folder. git's
+# --no-relative because diff.relative would drop each file outside the current folder. --text
+# prints the lines of a file git takes for binary (by a -diff or binary attribute, or a NUL in
+# its first 8000 bytes), where it would otherwise say only that the files differ; a merge's
+# combined diff (-c) ignores it, so what a resolution adds to such a file stays unread. git's
 # own errors are dropped: they could print a path that holds the home.
-shown=(-U0 --no-color --no-relative --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/)
+shown=(-U0 --text --no-color --no-relative --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/)
 case ${1:-} in
   --published)
     # A full commit id only: a ref or path could hold the home, and git's error would print
@@ -49,8 +52,8 @@ case ${1:-} in
     diff=$(tr -d '\0') || { echo "❌ [home-path] cannot read the diff." >&2; exit 1; }
     ;;
 esac
-# Without tr, bash drops a NUL byte (text past git's binary sniff may hold one) with a warning
-# that names this script's path, which may hold the home.
+# Without tr, bash drops a NUL byte (--text prints the ones a file holds) with a warning that
+# names this script's path, which may hold the home.
 
 bs='\'
 # Replaces every <from> in <string> with <to>, into REPLY. A loop, not ${s//from/to}: how a
