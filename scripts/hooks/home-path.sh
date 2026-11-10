@@ -197,9 +197,10 @@ hits=$(HOMES="$homes" DASHED="$home"$'\n'"$real"$'\n'"$profile" LC_ALL=C awk '
     if (mark ~ /-/) next
     if (mark ~ / /) { number++; next }
     # The \/ some JSON writers put for / is read as /, so one rule covers both spellings; so
-    # is \\/, that escape inside another string.
+    # is \\/, that escape inside another string. A run of them is read as one /, as HOME is
+    # squeezed.
     line = tolower(substr($0, parents + 1))
-    gsub(/\\+\//, "/", line)
+    gsub(/(\\*\/)+/, "/", line)
     hit = 0
     for (i = 1; i <= n && !hit; i++) hit = home[i] != "" && names_home(line, home[i], "[a-z0-9_~-]", "")
     for (i = 1; i <= d && !hit; i++) hit = dashed[i] != "" && names_home(line, dashed[i], "[a-z0-9]", "[a-z0-9]")

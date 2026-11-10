@@ -168,6 +168,9 @@ test("ignores trailing separators on USERPROFILE and HOME", () => {
 test("a doubled separator inside HOME or USERPROFILE counts squeezed and as set", () => {
   hit(run(diff("a.sh", "+ls /no-such-home/tester/x"), { HOME: "/no-such-home//tester" }));
   hit(run(diff("a.sh", "+ls /no-such-home//tester/x"), { HOME: "/no-such-home//tester/" }), "as set");
+  // Only a run of slashes is squeezed in the line, so a doubled backslash matches as set.
+  const odd = { HOME: "/no-such-home/we\\\\ird/tester" };
+  hit(run(diff("a.sh", "+ls /no-such-home/we\\\\ird/tester/x"), odd), "HOME as set, with a doubled backslash");
   const profile = { USERPROFILE: "C:\\Users\\\\tester\\" };
   hit(run(diff("a.ps1", "+cd C:\\Users\\tester\\repo"), profile));
   hit(run(diff("a.ps1", "+cd C:\\Users\\\\tester\\repo"), profile), "USERPROFILE as set");
@@ -181,6 +184,15 @@ test("checks the \\/ a JSON writer may put for /", () => {
   // That escape inside another string doubles the backslash.
   const twice = `${home}/x`.replaceAll("/", "\\\\/");
   hit(run(diff("a.js", `+const s = "{\\"p\\":\\"${twice}\\"}";`)), "escaped twice");
+});
+
+test("reads a doubled / in the line as one", () => {
+  // HOME is squeezed, so the line is too: a shell or a joined path writes // freely.
+  hit(run(diff("a.sh", `+ls ${home.replaceAll("/", "//")}//x`)), "every separator doubled");
+  hit(run(diff("a.sh", `+ls ${path.dirname(home)}///${path.basename(home)}`)), "tripled, at the end");
+  hit(run(diff("a.json", `+{"p":"${home.replaceAll("/", "\\/\\/")}"}`)), "doubled and escaped");
+  hit(run(diff("a.js", "+'C://Users//tester/repo'"), { USERPROFILE: "C:\\Users\\tester" }), "USERPROFILE");
+  assert.equal(run(diff("a.sh", `+ls ${home}z//x ${path.dirname(home)}//other`)).status, 0, "siblings");
 });
 
 // Claude Code's spelling of a working directory in its scratchpad and memory paths.
@@ -224,7 +236,7 @@ test("checks the dashed spelling Claude Code gives a working directory", () => {
 
 test("a home of one segment names nobody, so it is not looked for", () => {
   const lines = ["+cd /no-such-root/x", "+cd //no-such-root/x", "+cd C:\\app\\x", "+cd C:\\\\app\\x", "+cd -no-such-root-x", "+cd C--app-x"];
-  for (const env of [{ HOME: "/no-such-root" }, { HOME: "//no-such-root/", USERPROFILE: "C:\\app" }, { HOME: "/", USERPROFILE: "C:\\\\app" }]) {
+  for (const env of [{ HOME: "/no-such-root" }, { HOME: "//no-such-root/", USERPROFILE: "C:\\app" }, { HOME: "/", USERPROFILE: "C:\\\\app" }, { HOME: "C:\\\\app" }]) {
     const r = run(diff("a.sh", ...lines), env);
     assert.equal(r.status, 0);
     assert.match(r.stderr, /name no home directory/);
