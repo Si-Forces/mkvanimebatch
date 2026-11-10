@@ -85,6 +85,7 @@ test("allows generic home paths, removed lines and context", () => {
 
 test("matches HOME only as whole path segments, in any case", () => {
   assert.equal(run(diff("a.rs", `+mod x; // ${home}z/lib.rs`)).status, 0, "a longer name");
+  assert.equal(run(diff("a.sh", `+ls ${home}_old ${home}-2 ${home}2 ${home}~`)).status, 0, "siblings");
   hit(run(diff("a.rs", `+let p = "src${home}";`)), "inside another path");
   hit(run(diff("a.sh", `+gcc -I${home}/include`)), "after a flag");
   hit(run(diff("a.sh", `+cp /mnt/backup${home}/x .`)), "under a mount point");
@@ -378,6 +379,20 @@ test("pre-commit refuses a staged leak, and pre-push one in any pushed commit", 
   assert.match(push.out, /name your home directory/);
 });
 
+test("pre-commit checks a staged leak before a dirty Rust tree stops it", () => {
+  const { dir, git } = gitRepo("dirty");
+  git("config", "core.hooksPath", path.dirname(script));
+  fs.writeFileSync(path.join(dir, "a.rs"), "fn a() {}\n");
+  git("add", "a.rs");
+  git("commit", "-q", "--no-verify", "-m", "base"); // no cargo workspace to check here
+  fs.writeFileSync(path.join(dir, "b.rs"), `// ${home}/b.rs\n`);
+  git("add", "b.rs");
+  fs.writeFileSync(path.join(dir, "a.rs"), "fn a() { }\n"); // unstaged, so the hook stops before cargo
+  const r = sh(dir, "git", ["commit", "-q", "-m", "c"]);
+  assert.equal(r.status, 1, r.out);
+  assert.match(r.out, /name your home directory[^]*Rust\/Cargo files differ from the index/);
+});
+
 test("pre-push checks every pushed ref, not only the first", () => {
   const { dir, git } = gitRepo("two-refs");
   const commit = (content) => {
@@ -405,11 +420,17 @@ const hasJj = spawnSync("jj", ["--version"]).status === 0;
 test("jj-gate.sh check and push (jj gate, jj gpush) refuse a leak", { skip: !hasJj && "jj is not installed" }, () => {
   const { dir, git } = gitRepo("jj");
   copyScripts(dir, ["scripts/jj-gate.sh", "scripts/hooks/home-path.sh", "scripts/hooks/commit-msg", "scripts/review-gate.sh"]);
+  // An old leak already on main, which trunk removes after the stack below forks: the check
+  // diffs from the fork point, so the stack does not count it as re-added.
+  fs.writeFileSync(path.join(dir, "old.txt"), `${home}/old\n`);
   git("add", "-A");
   git("commit", "-q", "-m", "base");
   sh(dir, "git", ["init", "-q", "--bare", path.join(tmp, "jj.git")]);
   git("remote", "add", "origin", path.join(tmp, "jj.git"));
+  git("rm", "-q", "old.txt");
+  git("commit", "-q", "-m", "trunk drops the old leak");
   git("push", "-q", "origin", "main");
+  git("reset", "-q", "--hard", "HEAD~"); // the stack below starts from the fork point, not trunk
   const config = path.join(tmp, "jj.toml");
   fs.writeFileSync(config, '[user]\nname = "t"\nemail = "t@example.com"\n[revset-aliases]\n"trunk()" = "main@origin"\n');
   const jj = (...a) => sh(dir, "jj", a, { JJ_CONFIG: config });
@@ -419,16 +440,21 @@ test("jj-gate.sh check and push (jj gate, jj gpush) refuse a leak", { skip: !has
   fs.writeFileSync(path.join(dir, "f.txt"), `${home}/secret\n`);
   const check = gate("check");
   assert.equal(check.status, 1, check.out);
-  assert.match(check.out, /name your home directory/);
+  // The refusals name only the stack's own leak: old.txt is trunk's, and gone from it.
+  assert.match(check.out, /name your home directory[^]*\n {5}f\.txt:1\n/);
+  assert.doesNotMatch(check.out, /old\.txt/);
   fs.writeFileSync(path.join(dir, "f.txt"), "clean\n");
   assert.equal(gate("check").status, 0, "a clean stack");
 
   fs.writeFileSync(path.join(dir, "f.txt"), `${home}/secret\n`);
   assert.equal(jj("commit", "-m", "leak").status, 0);
+  const leak = jj("log", "--no-graph", "-r", "@-", "-T", "commit_id").out.trim();
   fs.writeFileSync(path.join(dir, "f.txt"), "clean\n");
   assert.equal(jj("commit", "-m", "fix").status, 0);
   assert.equal(jj("bookmark", "create", "topic", "-r", "@-").status, 0);
   const push = gate("push", "-b", "topic");
   assert.equal(push.status, 1, push.out);
-  assert.match(push.out, /name your home directory/);
+  // Per commit: the leak's own commit, though the pushed tip removes it again.
+  assert.match(push.out, new RegExp(`name your home directory[^]*\\n {5}${leak.slice(0, 12)} f\\.txt:1\\n`));
+  assert.doesNotMatch(push.out, /old\.txt/);
 });
