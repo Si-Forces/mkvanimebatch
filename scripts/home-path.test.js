@@ -87,12 +87,6 @@ test("matches HOME only as whole path segments, in any case", () => {
   hit(run(diff("a.sh", `+gcc -I${home}/include`)), "after a flag");
   hit(run(diff("a.sh", `+cp /mnt/backup${home}/x .`)), "under a mount point");
   hit(run(diff("a.sh", `+cp ${home}z/a ${home}/b`)), "after an occurrence that does not count");
-  // A one-segment home, like /root, must start a path.
-  assert.equal(run(diff("a.rs", "+mod x; // src/no-such-root/lib.rs"), { HOME: "/no-such-root" }).status, 0, "one segment inside a path");
-  hit(run(diff("a.sh", "+cd /no-such-root/x"), { HOME: "/no-such-root" }), "one segment starting a path");
-  assert.equal(run(diff("a.json", '+{"p":"src\\/no-such-root\\/x"}'), { HOME: "/no-such-root" }).status, 0, "one segment inside an escaped path");
-  hit(run(diff("a.json", '+{"p":"\\/no-such-root\\/x"}'), { HOME: "/no-such-root" }), "one segment starting an escaped path");
-  assert.equal(run(diff("a.js", '+const s = "{\\"p\\":\\"src\\\\/no-such-root/x\\"}";'), { HOME: "/no-such-root" }).status, 0, "one segment inside a twice-escaped path");
   hit(run(diff("a.md", `+[doc](file://${home}/doc.md)`)), "after a file URL");
   hit(run(diff("a.md", `+see ${home}`)), "at the end of a line");
   hit(run(diff("a.md", `+cloned into ${home}.`)), "at the end of a sentence");
@@ -155,6 +149,30 @@ test("checks the \\/ a JSON writer may put for /", () => {
   hit(run(diff("a.json", `+{"p":"${escaped}"}`)));
   const env = { USERPROFILE: "C:\\Users\\tester" };
   hit(run(diff("a.json", '+{"p":"C:\\/Users\\/tester\\/x"}'), env), "USERPROFILE");
+  // That escape inside another string doubles the backslash.
+  const twice = `${home}/x`.replaceAll("/", "\\\\/");
+  hit(run(diff("a.js", `+const s = "{\\"p\\":\\"${twice}\\"}";`)), "escaped twice");
+});
+
+test("a home of one segment names nobody, so it is not looked for", () => {
+  const lines = ["+cd /no-such-root/x", "+cd //no-such-root/x", "+cd C:\\app\\x", "+cd C:\\\\app\\x"];
+  for (const env of [{ HOME: "/no-such-root" }, { HOME: "//no-such-root/", USERPROFILE: "C:\\app" }, { HOME: "/", USERPROFILE: "C:\\\\app" }]) {
+    const r = run(diff("a.sh", ...lines), env);
+    assert.equal(r.status, 0);
+    assert.match(r.stderr, /name no home directory/);
+  }
+  // Each form by itself: a one-segment HOME that resolves to a longer path is looked for
+  // there. A one-segment folder sits directly under /, where only root can make one, so a
+  // relative HOME stands in for it.
+  fs.symlinkSync(home, path.join(tmp, "short"));
+  const r = run(diff("a.js", `+'${home}/repo'`), { HOME: "short" });
+  hit(r);
+  assert.doesNotMatch(r.stderr, /name no home directory/);
+  // And the other way: a longer HOME that resolves to one segment is looked for only as written.
+  const top = ["/tmp", "/usr", "/var"].find((d) => fs.existsSync(d) && fs.realpathSync(d) === d);
+  assert.ok(top, "a folder directly under / that is not a symlink");
+  fs.symlinkSync(top, path.join(tmp, "to-top"));
+  assert.deepEqual(run(diff("a.sh", `+ls ${top}/x`), { HOME: path.join(tmp, "to-top") }), { status: 0, stderr: "" });
 });
 
 test("refuses a HOME it cannot resolve, and warns when there is no home to look for", () => {
@@ -163,7 +181,7 @@ test("refuses a HOME it cannot resolve, and warns when there is no home to look 
   const loop = path.join(tmp, "loop");
   fs.symlinkSync(path.join(tmp, "loop2"), loop);
   fs.symlinkSync(loop, path.join(tmp, "loop2"));
-  for (const h of [dangling, loop]) {
+  for (const h of [dangling, loop, "dangling"]) { // the last one relative: one segment
     const r = run(diff("a.txt", "+clean"), { HOME: h });
     assert.equal(r.status, 1, h);
     assert.match(r.stderr, /cannot resolve HOME.*symlink/);

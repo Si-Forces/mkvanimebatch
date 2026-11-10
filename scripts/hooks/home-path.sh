@@ -38,15 +38,13 @@ replace_all() { # <string> <from> <to>
   REPLY+=$rest
 }
 
-# Trailing separators would stop "$HOME/x" from matching. A HOME of / becomes empty, as does a
-# USERPROFILE of only a drive (C:\), and awk skips an empty home. USERPROFILE is taken with
+# Trailing separators would stop "$HOME/x" from matching. USERPROFILE is taken with
 # backslashes, whichever it was set with; the other forms come from that below.
 home=${HOME:-}
 while [[ $home == */ ]]; do home=${home%/}; done
 replace_all "${USERPROFILE:-}" / "$bs"
 profile=$REPLY
 while [[ $profile == *"$bs" ]]; do profile=${profile%"$bs"}; done
-[[ $profile =~ ^[A-Za-z]:$ ]] && profile=""
 
 # The resolved form too, for a home reached through a symlink. Only an absent home has none:
 # every other failure refuses rather than check less. A missing name looks the same as one
@@ -68,6 +66,24 @@ if [ -n "$home" ]; then
   fi
 fi
 
+# A path of one segment, such as /root, /app or C:\app, is the same on every machine and names
+# nobody, so it is not looked for; nor is what / or a drive alone (C:\) leave. Each form is
+# judged by itself: a one-segment HOME may resolve to a longer path that does name someone.
+names_someone() { # <path>: true when it has more than one segment, a drive and doubled separators aside
+  local path=$1 sep
+  [[ $path =~ ^[A-Za-z]: ]] && path=${path:2}
+  for sep in / "$bs"; do
+    while [[ $path == *"$sep$sep"* ]]; do
+      replace_all "$path" "$sep$sep" "$sep"
+      path=$REPLY
+    done
+  done
+  [[ ${path:1} == */* || ${path:1} == *"$bs"* ]]
+}
+names_someone "$home" || home=""
+names_someone "$real" || real=""
+names_someone "$profile" || profile=""
+
 # USERPROFILE also with forward slashes, and with the doubled backslashes a TOML or JSON
 # string needs.
 replace_all "$profile" "$bs" /
@@ -77,35 +93,28 @@ homes=""
 for h in "$home" "$real" "$profile" "$forward" "$REPLY"; do
   homes+="$h"$'\n'
 done
-[ -n "$home$profile" ] ||
-  echo "⚠  [home-path] HOME and USERPROFILE name no home directory (unset, /, or a drive alone), so nothing is checked." >&2
+[ -n "$home$real$profile" ] ||
+  echo "⚠  [home-path] HOME and USERPROFILE name no home directory (unset, /, a drive alone, or one segment such as /root), so nothing is checked." >&2
 
 # ENVIRON, not awk -v, which would read the backslashes of a Windows path as escapes.
-# A home counts only as a whole path segment run: /home/al does not match /home/alice, though
-# a full stop that ends a sentence still ends the path. A one-segment home such as /root must
-# also start a path, so it does not match src/root.rs; a longer one names the user wherever it
-# starts, as in -I/home/al/include or /mnt/backup/home/al. Case is ignored, as Windows paths are.
+# A home counts wherever it starts, as in -I/home/al/include or /mnt/backup/home/al, but only
+# up to the end of a segment: /home/al does not match /home/alice, though a full stop that
+# ends a sentence still ends the path. Case is ignored, as Windows paths are.
 # File headers are the ---/+++ lines between "diff --git" and the first hunk; after that, a
 # line starting "+++" is an added line that starts with "++".
 hits=$(HOMES="$homes" awk '
-  function names_home(line, h, unanchored,    s, p, q, before, after) {
+  function names_home(line, h,    s, p, q) {
     s = line
     while ((p = index(s, h)) > 0) {
-      before = (p > 1) ? substr(s, p - 1, 1) : ""
       # Full stops then a name character continue the name (".bak"); otherwise they end a
       # sentence (". " or "...").
       for (q = p + length(h); substr(s, q, 1) == "."; q++) {}
-      after = substr(s, q, 1)
-      if ((unanchored || before !~ /[a-z0-9._~-]/) && after !~ /[a-z0-9._~-]/) return 1
+      if (substr(s, q, 1) !~ /[a-z0-9._~-]/) return 1
       s = substr(s, p + 1)
     }
     return 0
   }
-  BEGIN {
-    n = split(tolower(ENVIRON["HOMES"]), home, "\n")
-    # A separator after the first character: more than one segment, so it may start anywhere.
-    for (i = 1; i <= n; i++) { t = substr(home[i], 2); anywhere[i] = index(t, "/") || index(t, "\\") }
-  }
+  BEGIN { n = split(tolower(ENVIRON["HOMES"]), home, "\n") }
   /^commit [0-9a-f]+$/ { commit = substr($2, 1, 12) " "; next }
   /^diff --git / { header = 1; next }
   # git ends a name that holds a space with a tab.
@@ -118,7 +127,7 @@ hits=$(HOMES="$homes" awk '
     line = tolower(substr($0, 2))
     gsub(/\\+\//, "/", line)
     for (i = 1; i <= n; i++) {
-      if (home[i] == "" || !names_home(line, home[i], anywhere[i])) continue
+      if (home[i] == "" || !names_home(line, home[i])) continue
       printf "     %s%s:%d\n", commit, file, number
       break
     }
