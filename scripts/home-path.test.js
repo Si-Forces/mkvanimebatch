@@ -37,8 +37,10 @@ const sh = (cwd, cmd, args, env = {}) => {
   return { status: r.status, out: `${r.stdout}${r.stderr}${r.error ?? ""}` };
 };
 // A fresh git repo; git(...) asserts success and returns stdout.
-// With textconv, a driver that shows nothing for *.txt, which must not hide a leak.
-const gitRepo = (name, { textconv = false } = {}) => {
+// hostile: git settings that would each hide an added line from a plain `git diff` or
+// `git log -p`: a textconv driver that prints nothing, forced colour, an external diff that
+// prints nothing (`git diff` only), and no diff for the first commit (`git log` only).
+const gitRepo = (name, { hostile = false } = {}) => {
   const dir = path.join(tmp, name);
   fs.mkdirSync(dir);
   const git = (...a) => {
@@ -47,21 +49,29 @@ const gitRepo = (name, { textconv = false } = {}) => {
     return r.out.trim();
   };
   git("init", "-q", "-b", "main");
-  if (textconv) {
+  if (hostile) {
     fs.writeFileSync(path.join(dir, ".gitattributes"), "*.txt diff=hide\n");
     git("config", "diff.hide.textconv", "sed d");
+    git("config", "diff.external", "true");
+    git("config", "color.ui", "always");
+    git("config", "log.showRoot", "false");
   }
   return { dir, git };
 };
+// A refusal for naming the home, not for some other failure.
+const hit = (r, message) => {
+  assert.equal(r.status, 1, message);
+  assert.match(r.stderr, /name your home directory/, message);
+};
 const diff = (file, ...lines) => `diff --git a/${file} b/${file}\n--- a/${file}\n+++ b/${file}\n@@ -1 +1 @@\n${lines.join("\n")}\n`;
 
-test("refuses an added line naming HOME, with the file and the line", () => {
+test("refuses an added line naming HOME, with the file and line number but not the text", () => {
   const r = run(diff("a.js", `+const REPO = '${home}/My Project/repo'`));
-  assert.equal(r.status, 1);
-  assert.match(r.stderr, /name your home directory/);
-  assert.ok(r.stderr.includes(`a.js: const REPO = '${home}/My Project/repo'`), r.stderr);
+  hit(r);
   // HOME and its resolved form are the same path here: one line per hit, not one per form.
-  assert.equal(r.stderr.split("a.js:").length - 1, 1, r.stderr);
+  assert.equal(r.stderr.split("a.js:1\n").length - 1, 1, r.stderr);
+  // The report may end up in a PR description, which nothing checks.
+  assert.ok(!r.stderr.includes(home) && !r.stderr.includes("My Project"), r.stderr);
 });
 
 test("allows generic home paths, removed lines and context", () => {
@@ -73,70 +83,81 @@ test("allows generic home paths, removed lines and context", () => {
 
 test("matches HOME only as whole path segments, in any case", () => {
   assert.equal(run(diff("a.rs", `+mod x; // ${home}z/lib.rs`)).status, 0, "a longer name");
-  assert.equal(run(diff("a.rs", `+let p = "src${home}";`)).status, 1, "inside another path");
-  assert.equal(run(diff("a.sh", `+gcc -I${home}/include`)).status, 1, "after a flag");
-  assert.equal(run(diff("a.sh", `+cp /mnt/backup${home}/x .`)).status, 1, "under a mount point");
+  hit(run(diff("a.rs", `+let p = "src${home}";`)), "inside another path");
+  hit(run(diff("a.sh", `+gcc -I${home}/include`)), "after a flag");
+  hit(run(diff("a.sh", `+cp /mnt/backup${home}/x .`)), "under a mount point");
+  hit(run(diff("a.sh", `+cp ${home}z/a ${home}/b`)), "after an occurrence that does not count");
   // A one-segment home, like /root, must start a path.
   assert.equal(run(diff("a.rs", "+mod x; // src/no-such-root/lib.rs"), { HOME: "/no-such-root" }).status, 0, "one segment inside a path");
-  assert.equal(run(diff("a.sh", "+cd /no-such-root/x"), { HOME: "/no-such-root" }).status, 1, "one segment starting a path");
-  assert.equal(run(diff("a.md", `+[doc](file://${home}/doc.md)`)).status, 1, "after a file URL");
-  assert.equal(run(diff("a.md", `+see ${home}`)).status, 1, "at the end of a line");
-  assert.equal(run(diff("a.md", `+cloned into ${home}.`)).status, 1, "at the end of a sentence");
-  assert.equal(run(diff("a.md", `+cloned into ${home}...`)).status, 1, "before an ellipsis");
+  hit(run(diff("a.sh", "+cd /no-such-root/x"), { HOME: "/no-such-root" }), "one segment starting a path");
+  assert.equal(run(diff("a.json", '+{"p":"src\\/no-such-root\\/x"}'), { HOME: "/no-such-root" }).status, 0, "one segment inside an escaped path");
+  hit(run(diff("a.json", '+{"p":"\\/no-such-root\\/x"}'), { HOME: "/no-such-root" }), "one segment starting an escaped path");
+  assert.equal(run(diff("a.js", '+const s = "{\\"p\\":\\"src\\\\/no-such-root/x\\"}";'), { HOME: "/no-such-root" }).status, 0, "one segment inside a twice-escaped path");
+  hit(run(diff("a.md", `+[doc](file://${home}/doc.md)`)), "after a file URL");
+  hit(run(diff("a.md", `+see ${home}`)), "at the end of a line");
+  hit(run(diff("a.md", `+cloned into ${home}.`)), "at the end of a sentence");
+  hit(run(diff("a.md", `+cloned into ${home}...`)), "before an ellipsis");
   assert.equal(run(diff("a.md", `+cp ${home}.bak/x .`)).status, 0, "a sibling with a suffix");
-  assert.equal(run(diff("a.md", `+see ${home.toUpperCase()}/x`)).status, 1, "in another case");
+  hit(run(diff("a.md", `+see ${home.toUpperCase()}/x`)), "in another case");
 });
 
 test("names the commit in git log output", () => {
   const sha = "0123456789abcdef0123456789abcdef01234567";
   const r = run(`commit ${sha}\n${diff(".codex/x.toml", `+see ${home}/Downloads/doc.md`)}`);
-  assert.equal(r.status, 1);
-  assert.ok(r.stderr.includes("0123456789ab .codex/x.toml: see "), r.stderr);
+  hit(r);
+  assert.ok(r.stderr.includes("0123456789ab .codex/x.toml:1\n"), r.stderr);
+  // git writes "+++ b/<name><tab>" for a name that holds a space.
+  const spaced = run(`diff --git a/my file.md b/my file.md\n--- a/my file.md\t\n+++ b/my file.md\t\n@@ -0,0 +1 @@\n+${home}/x\n`);
+  assert.ok(spaced.stderr.includes("     my file.md:1\n"), spaced.stderr);
 });
 
 test("a +++ or --- line inside a hunk is content, not a file header", () => {
   const r = run(`${diff("a.sql", "-- old")}+++ ${home}/notes\n`);
-  assert.equal(r.status, 1);
-  assert.ok(r.stderr.includes(`a.sql: ++ ${home}/notes`), r.stderr);
+  hit(r);
+  assert.ok(r.stderr.includes("a.sql:1\n"), r.stderr);
 });
 
-test("shows a long line only around the match", () => {
-  const r = run(diff("min.js", `+${"a".repeat(200)} ${home}/x ${"b".repeat(200)}`));
-  assert.equal(r.status, 1);
-  assert.match(r.stderr, new RegExp(`min\\.js: \\.\\.\\.a{39} ${home.replaceAll("/", "\\/")}/x b+\\.\\.\\.`));
+test("numbers a line by its place in the new file", () => {
+  const r = run(
+    "diff --git a/a.md b/a.md\n--- a/a.md\n+++ b/a.md\n" +
+      `@@ -1,2 +1,3 @@\n context\n+clean\n+${home}/x\n` +
+      `@@ -10 +20,2 @@\n-old\n+clean\n+${home}/y\n`,
+  );
+  hit(r);
+  assert.ok(r.stderr.includes("a.md:3\n") && r.stderr.includes("a.md:21\n"), r.stderr);
 });
 
 test("checks USERPROFILE with backslashes and with forward slashes", () => {
   const env = { USERPROFILE: "C:\\Users\\tester" };
-  assert.equal(run(diff("a.ps1", "+cd C:\\Users\\tester\\repo"), env).status, 1);
-  assert.equal(run(diff("a.ps1", "+cd c:\\users\\tester\\repo"), env).status, 1);
-  assert.equal(run(diff("a.js", "+'C:/Users/tester/repo'"), env).status, 1);
+  hit(run(diff("a.ps1", "+cd C:\\Users\\tester\\repo"), env));
+  hit(run(diff("a.ps1", "+cd c:\\users\\tester\\repo"), env));
+  hit(run(diff("a.js", "+'C:/Users/tester/repo'"), env));
   const escaped = diff("a.toml", '+path = "C:\\\\Users\\\\tester\\\\repo"');
-  assert.equal(run(escaped, env).status, 1, "escaped in a string");
+  hit(run(escaped, env), "escaped in a string");
   // bash before 4.3 keeps the quotes of a quoted replacement, as macOS's bash 3.2 does.
-  assert.equal(run(escaped, { ...env, BASH_COMPAT: "42" }).status, 1, "escaped, on an old bash");
-  assert.equal(run(diff("a.bat", "+cl -IC:\\Users\\tester\\inc"), env).status, 1, "after a flag");
+  hit(run(escaped, { ...env, BASH_COMPAT: "42" }), "escaped, on an old bash");
+  hit(run(diff("a.bat", "+cl -IC:\\Users\\tester\\inc"), env), "after a flag");
   assert.equal(run(diff("a.js", "+'C:/Users/other/repo'"), env).status, 0);
 });
 
 test("ignores trailing separators on USERPROFILE and HOME", () => {
   const line = diff("a.ps1", "+cd C:\\Users\\tester\\repo");
   for (const p of ["C:\\Users\\tester\\", "C:/Users/tester/", "C:\\Users\\tester\\\\"]) {
-    assert.equal(run(line, { USERPROFILE: p }).status, 1, p);
+    hit(run(line, { USERPROFILE: p }), p);
   }
   // A drive alone names nobody, as a HOME of / does not.
   assert.equal(run(diff("a.ps1", "+cd C:\\tools"), { USERPROFILE: "C:\\" }).status, 0);
-  assert.equal(run(diff("a.sh", "+ls /no-such-home/tester/x"), { HOME: "/no-such-home/tester//" }).status, 1);
+  hit(run(diff("a.sh", "+ls /no-such-home/tester/x"), { HOME: "/no-such-home/tester//" }));
 });
 
 test("checks the \\/ a JSON writer may put for /", () => {
   const escaped = `${home}/x`.replaceAll("/", "\\/");
-  assert.equal(run(diff("a.json", `+{"p":"${escaped}"}`)).status, 1);
+  hit(run(diff("a.json", `+{"p":"${escaped}"}`)));
   const env = { USERPROFILE: "C:\\Users\\tester" };
-  assert.equal(run(diff("a.json", '+{"p":"C:\\/Users\\/tester\\/x"}'), env).status, 1, "USERPROFILE");
+  hit(run(diff("a.json", '+{"p":"C:\\/Users\\/tester\\/x"}'), env), "USERPROFILE");
 });
 
-test("refuses a HOME it cannot resolve, and warns when no home is set", () => {
+test("refuses a HOME it cannot resolve, and warns when there is no home to look for", () => {
   const dangling = path.join(tmp, "dangling");
   fs.symlinkSync(path.join(tmp, "nowhere"), dangling);
   const loop = path.join(tmp, "loop");
@@ -149,29 +170,41 @@ test("refuses a HOME it cannot resolve, and warns when no home is set", () => {
   }
   const file = path.join(tmp, "a-file");
   fs.writeFileSync(file, "");
-  assert.match(run(diff("a.txt", "+clean"), { HOME: file }).stderr, /not a folder/);
+  assert.match(run(diff("a.txt", "+clean"), { HOME: file }).stderr, /HOME: not a folder this user can enter/);
   if (process.getuid?.() !== 0) { // root enters any directory
     const locked = path.join(tmp, "locked");
     fs.mkdirSync(locked, { mode: 0o000 });
     try {
-      assert.equal(run(diff("a.txt", "+clean"), { HOME: locked }).status, 1, "no permission");
+      assert.match(run(diff("a.txt", "+clean"), { HOME: locked }).stderr, /HOME: not a folder this user can enter/, "no permission");
       // Under a folder that cannot be searched, a missing home cannot be told from a hidden one.
       const r = run(diff("a.txt", "+clean"), { HOME: path.join(locked, "tester") });
       assert.equal(r.status, 1, "under no permission");
-      assert.match(r.stderr, /cannot be searched/);
+      assert.match(r.stderr, /above it is not a folder/);
     } finally {
       fs.chmodSync(locked, 0o700); // so the cleanup can remove it
     }
   }
-  const r = run(diff("a.txt", "+clean"), { HOME: undefined });
-  assert.equal(r.status, 0);
-  assert.match(r.stderr, /neither HOME nor USERPROFILE is set/);
+  // Under a dangling symlink the same holds; under missing folders the home is just absent.
+  const under = run(diff("a.txt", "+clean"), { HOME: path.join(dangling, "tester") });
+  assert.equal(under.status, 1, "under a dangling symlink");
+  assert.match(under.stderr, /above it is not a folder/);
+  assert.ok(!under.stderr.includes(tmp), "no message names the home it could not resolve");
+  const absent = run(diff("a.txt", "+clean"), { HOME: "/no-such-home/tester" });
+  assert.deepEqual(absent, { status: 0, stderr: "" }, "two missing levels");
+  for (const env of [{ HOME: undefined }, { HOME: "/" }, { HOME: "/", USERPROFILE: "C:\\" }]) {
+    const r = run(diff("a.txt", "+clean"), env);
+    assert.equal(r.status, 0);
+    assert.match(r.stderr, /name no home directory/);
+  }
+  // USERPROFILE alone is a home to look for.
+  const windows = run(diff("a.txt", "+clean"), { HOME: "/", USERPROFILE: "C:\\Users\\tester" });
+  assert.deepEqual(windows, { status: 0, stderr: "" });
 });
 
 test("checks the resolved form of a symlinked HOME", () => {
   const link = path.join(tmp, "link");
   fs.symlinkSync(home, link);
-  assert.equal(run(diff("a.js", `+'${home}/repo'`), { HOME: link }).status, 1);
+  hit(run(diff("a.js", `+'${home}/repo'`), { HOME: link }));
 });
 
 test("a HOME of / checks nothing, and a trailing slash on HOME is ignored", () => {
@@ -181,11 +214,11 @@ test("a HOME of / checks nothing, and a trailing slash on HOME is ignored", () =
   const work = path.join(tmp, "work");
   fs.mkdirSync(work);
   assert.equal(run(diff("a.sh", `+ls ${work}/x`), { HOME: "/" }, { cwd: work }).status, 0);
-  assert.equal(run(diff("a.sh", "+ls /no-such-home/tester/x"), { HOME: "/no-such-home/tester/" }).status, 1);
+  hit(run(diff("a.sh", "+ls /no-such-home/tester/x"), { HOME: "/no-such-home/tester/" }));
 });
 
-test("--published checks each commit no remote-tracking ref holds, past any textconv", () => {
-  const { dir: repo, git } = gitRepo("repo", { textconv: true });
+test("--published checks each commit no remote-tracking ref holds, past git settings that hide lines", () => {
+  const { dir: repo, git } = gitRepo("repo", { hostile: true });
   const commit = (content) => {
     fs.writeFileSync(path.join(repo, "f.txt"), content);
     git("add", "-A");
@@ -200,14 +233,24 @@ test("--published checks each commit no remote-tracking ref holds, past any text
   // The leak is in history even though the tip removed it.
   git("update-ref", "refs/remotes/origin/main", base);
   const r = published();
-  assert.equal(r.status, 1);
-  assert.ok(r.stderr.includes(`${leak.slice(0, 12)} f.txt: ${home}/secret`), r.stderr);
+  hit(r);
+  assert.ok(r.stderr.includes(`${leak.slice(0, 12)} f.txt:1\n`), r.stderr);
   // Already public: not this push's to refuse.
   git("update-ref", "refs/remotes/origin/main", leak);
   assert.equal(published().status, 0);
+  // With nothing published yet, the first commit counts too.
+  git("update-ref", "-d", "refs/remotes/origin/main");
+  git("checkout", "-q", "--orphan", "fresh");
+  const first = commit(`${home}/secret\n`);
+  const fresh = run("", {}, { args: ["--published", first], cwd: repo });
+  hit(fresh);
+  assert.ok(fresh.stderr.includes(`${first.slice(0, 12)} f.txt:1\n`), fresh.stderr);
   // A sha git cannot read fails closed, and so does a missing one.
   assert.equal(run("", {}, { args: ["--published", "0".repeat(40)], cwd: repo }).status, 1);
   assert.match(run("", {}, { args: ["--published"], cwd: repo }).stderr, /usage/);
+  // Nor does a ref or path, whose text git's own error would print.
+  const named = run("", {}, { args: ["--published", `${home}/bad-ref`], cwd: repo });
+  assert.deepEqual(named, { status: 1, stderr: "❌ [home-path] usage: home-path.sh --published <sha>\n" });
 });
 
 // The wiring: each gate runs the check, and before its SKIP_* bypasses. The repos get copies of
@@ -223,9 +266,8 @@ const copyScripts = (dir, files) => {
 const SKIP = { SKIP_REVIEW_GATE: "1", SKIP_SLOW_GATES: "1" };
 
 test("pre-commit refuses a staged leak, and pre-push one in any pushed commit", () => {
-  const { dir, git } = gitRepo("hooked", { textconv: true });
+  const { dir, git } = gitRepo("hooked", { hostile: true });
   git("config", "core.hooksPath", path.dirname(script));
-  copyScripts(dir, ["scripts/hooks/home-path.sh"]); // pre-push calls it from the repo root
   sh(dir, "git", ["init", "-q", "--bare", path.join(tmp, "hooked.git")]);
   git("remote", "add", "origin", path.join(tmp, "hooked.git"));
   const commit = (content, ...flags) => {
@@ -246,6 +288,29 @@ test("pre-commit refuses a staged leak, and pre-push one in any pushed commit", 
   const push = sh(dir, "git", ["push", "-q", "origin", "main"], SKIP);
   assert.notEqual(push.status, 0, push.out);
   assert.match(push.out, /name your home directory/);
+});
+
+test("pre-push checks every pushed ref, not only the first", () => {
+  const { dir, git } = gitRepo("two-refs");
+  const commit = (content) => {
+    fs.writeFileSync(path.join(dir, "f.txt"), content);
+    git("add", "f.txt");
+    git("commit", "-q", "-m", "c");
+    return git("rev-parse", "HEAD");
+  };
+  const base = commit("base\n");
+  git("update-ref", "refs/remotes/origin/main", base);
+  const clean = commit("clean\n");
+  git("checkout", "-q", "-b", "topic", base);
+  const leak = commit(`${home}/secret\n`);
+  // The lines git writes to the hook, one per pushed ref.
+  const refs = (...shas) => shas.map((sha, i) => `refs/heads/b${i} ${sha} refs/heads/b${i} ${"0".repeat(40)}\n`).join("");
+  const prePush = (stdin) => {
+    const r = spawnSync("bash", [path.join(path.dirname(script), "pre-push"), "origin", "url"], { input: stdin, cwd: dir, encoding: "utf8", env: envFor(SKIP) });
+    return { status: r.status, stderr: r.stderr };
+  };
+  assert.equal(prePush(refs(clean)).status, 0, "a clean ref");
+  hit(prePush(refs(clean, leak)), "the second ref");
 });
 
 const hasJj = spawnSync("jj", ["--version"]).status === 0;

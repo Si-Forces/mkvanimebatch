@@ -24,7 +24,7 @@ const ARGS = {
   crates: ["mkv-core"],
   spec: "the design",
   repo: "/src/main checkout",
-  notes: "/src/main checkout/notes",
+  notes: "/elsewhere/pr notes",
 };
 
 // Answers each agent by label; returns the prompts and log lines.
@@ -123,7 +123,7 @@ test("runs every phase, quotes the log path and ends with the review steps", asy
   });
   assert.deepEqual(Object.keys(prompts), ["implement", "re-review", "follow-up", "last-commit review"]);
   assert.match(prompts.implement, /Repo: \/src\/main checkout, colocated jj\./);
-  assert.ok(prompts.implement.includes("/src/main checkout/notes/pr-178.md"));
+  assert.ok(prompts.implement.includes("/elsewhere/pr notes/pr-178.md"));
   assert.ok(prompts.implement.includes("mutants-diff.sh 5a2a0ce -p mkv-core > '/tmp/scratch dir/mutants-178.log'"));
   assert.match(prompts.implement, /a log in '\/tmp\/scratch dir'/);
   // Exit 0 can mean nothing was tested, and a survivor's new test is confirmed by a rerun.

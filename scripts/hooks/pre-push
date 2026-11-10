@@ -18,7 +18,7 @@ root=$(git rev-parse --show-toplevel)
 # Each commit being published, before any bypass: a leaked path cannot be taken back.
 for update in "${updates[@]}"; do
   read -r _ local_sha <<< "$update"
-  "$root/scripts/hooks/home-path.sh" --published "$local_sha" || exit 1
+  "$(dirname "$0")/home-path.sh" --published "$local_sha" || exit 1
 done
 
 # The ledger check is cheap, so it runs before the test suites.

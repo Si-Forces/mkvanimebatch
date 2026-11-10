@@ -10,13 +10,16 @@
 #   home-path.sh --published <sha>   checks each commit in <sha> that no remote-tracking ref
 #                                    holds, one at a time: a path added in one commit and
 #                                    removed in a later one is still in the pushed history
-# Prints each added line that names the home directory and exits 1, else exits 0.
+# Prints the file and line number of each added line that names the home directory and exits
+# 1, else exits 0. Not the line's text: gate output gets pasted into PR descriptions, which
+# nothing checks.
 # Run by pre-commit, pre-push and scripts/jj-gate.sh; not a hook itself.
 set -euo pipefail
 
 if [ "${1:-}" = --published ]; then
-  [ -n "${2:-}" ] || { echo "❌ [home-path] usage: home-path.sh --published <sha>" >&2; exit 1; }
-  diff=$(git log -p -U0 --no-color --no-ext-diff --no-textconv --format='commit %H' "$2" --not --remotes) ||
+  # A commit id only: a ref or path could hold the home, and git's error would print it.
+  [[ "${2:-}" =~ ^[0-9a-fA-F]{4,64}$ ]] || { echo "❌ [home-path] usage: home-path.sh --published <sha>" >&2; exit 1; }
+  diff=$(git log -p --root -U0 --no-color --no-ext-diff --no-textconv --format='commit %H' "$2" --not --remotes) ||
     { echo "❌ [home-path] cannot list the commits in $2 to check them." >&2; exit 1; }
 else
   diff=$(cat) || { echo "❌ [home-path] cannot read the diff." >&2; exit 1; }
@@ -35,9 +38,6 @@ replace_all() { # <string> <from> <to>
   REPLY+=$rest
 }
 
-[ -n "${HOME:-}${USERPROFILE:-}" ] ||
-  echo "⚠  [home-path] neither HOME nor USERPROFILE is set, so there is no home directory to look for." >&2
-
 # Trailing separators would stop "$HOME/x" from matching. A HOME of / becomes empty, as does a
 # USERPROFILE of only a drive (C:\), and awk skips an empty home. USERPROFILE is taken with
 # backslashes, whichever it was set with; the other forms come from that below.
@@ -50,8 +50,8 @@ while [[ $profile == *"$bs" ]]; do profile=${profile%"$bs"}; done
 
 # The resolved form too, for a home reached through a symlink. Only an absent home has none:
 # every other failure refuses rather than check less. A missing name looks the same as one
-# under a folder that cannot be searched, so absent means its nearest existing ancestor can be.
-cannot_resolve() { echo "❌ [home-path] cannot resolve HOME ($home): $1." >&2; exit 1; }
+# under something that cannot be searched, so absent means its nearest existing ancestor can be.
+cannot_resolve() { echo "❌ [home-path] cannot resolve HOME: $1." >&2; exit 1; }
 real=""
 if [ -n "$home" ]; then
   if real=$(cd "$home" 2> /dev/null && pwd -P); then
@@ -63,25 +63,22 @@ if [ -n "$home" ]; then
   else
     up=$home
     until [ -e "$up" ] || [ -L "$up" ] || [ "$up" = / ] || [ "$up" = . ]; do up=$(dirname "$up"); done
-    (cd "$up" 2> /dev/null) || cannot_resolve "$up cannot be searched"
+    (cd "$up" 2> /dev/null) || cannot_resolve "something above it is not a folder this user can search"
     real=""
   fi
 fi
 
-# Each form as written and with the \/ some JSON writers put for /; USERPROFILE also with
-# forward slashes, and with the doubled backslashes a TOML or JSON string needs.
-homes=""
-add_home() { homes+="$1"$'\n'; }
+# USERPROFILE also with forward slashes, and with the doubled backslashes a TOML or JSON
+# string needs.
 replace_all "$profile" "$bs" /
 forward=$REPLY
-for h in "$home" "$real" "$forward"; do
-  add_home "$h"
-  replace_all "$h" / "$bs/"
-  add_home "$REPLY"
-done
-add_home "$profile"
 replace_all "$profile" "$bs" "$bs$bs"
-add_home "$REPLY"
+homes=""
+for h in "$home" "$real" "$profile" "$forward" "$REPLY"; do
+  homes+="$h"$'\n'
+done
+[ -n "$home$profile" ] ||
+  echo "⚠  [home-path] HOME and USERPROFILE name no home directory (unset, /, or a drive alone), so nothing is checked." >&2
 
 # ENVIRON, not awk -v, which would read the backslashes of a Windows path as escapes.
 # A home counts only as a whole path segment run: /home/al does not match /home/alice, though
@@ -91,7 +88,7 @@ add_home "$REPLY"
 # File headers are the ---/+++ lines between "diff --git" and the first hunk; after that, a
 # line starting "+++" is an added line that starts with "++".
 hits=$(HOMES="$homes" awk '
-  function names_home(line, h, anywhere,    s, p, q, before, after) {
+  function names_home(line, h, unanchored,    s, p, q, before, after) {
     s = line
     while ((p = index(s, h)) > 0) {
       before = (p > 1) ? substr(s, p - 1, 1) : ""
@@ -99,7 +96,7 @@ hits=$(HOMES="$homes" awk '
       # sentence (". " or "...").
       for (q = p + length(h); substr(s, q, 1) == "."; q++) {}
       after = substr(s, q, 1)
-      if ((anywhere || before !~ /[a-z0-9._~-]/) && after !~ /[a-z0-9._~-]/) return p + length(line) - length(s)
+      if ((unanchored || before !~ /[a-z0-9._~-]/) && after !~ /[a-z0-9._~-]/) return 1
       s = substr(s, p + 1)
     }
     return 0
@@ -111,19 +108,23 @@ hits=$(HOMES="$homes" awk '
   }
   /^commit [0-9a-f]+$/ { commit = substr($2, 1, 12) " "; next }
   /^diff --git / { header = 1; next }
-  header && /^\+\+\+ / { file = substr($0, 5); sub(/^b\//, "", file); next }
-  /^@@/ { header = 0; next }
-  !header && /^\+/ {
-    line = substr($0, 2)
+  # git ends a name that holds a space with a tab.
+  header && /^\+\+\+ / { file = substr($0, 5); sub(/^b\//, "", file); sub(/\t$/, "", file); next }
+  # "@@ -a,b +c,d @@": c is the number of the first line the hunk leaves in the file.
+  /^@@/ { header = 0; match($0, /\+[0-9]+/); number = substr($0, RSTART + 1, RLENGTH - 1) + 0; next }
+  /^\+/ {
+    # The \/ some JSON writers put for / is read as /, so one rule covers both spellings; so
+    # is \\/, that escape inside another string.
+    line = tolower(substr($0, 2))
+    gsub(/\\+\//, "/", line)
     for (i = 1; i <= n; i++) {
-      p = (home[i] == "") ? 0 : names_home(tolower(line), home[i], anywhere[i])
-      if (!p) continue
-      # The match with some context, not a whole minified or generated line.
-      from = (p > 40) ? p - 40 : 1
-      printf "     %s%s: %s%s%s\n", commit, file, (from > 1 ? "..." : ""), substr(line, from, 120), (from + 120 <= length(line) ? "..." : "")
+      if (home[i] == "" || !names_home(line, home[i], anywhere[i])) continue
+      printf "     %s%s:%d\n", commit, file, number
       break
     }
+    number++
   }
+  /^ / { number++ }
 ' <<< "$diff") || { echo "❌ [home-path] cannot scan the diff." >&2; exit 1; }
 
 [ -z "$hits" ] && exit 0
