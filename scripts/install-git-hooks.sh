@@ -48,9 +48,9 @@ cat <<'MSG'
 Hooks enabled (core.hooksPath = scripts/hooks):
   commit-msg : refuses a message carrying an AI co-author trailer (Claude, Copilot, and
                the like). A co-author naming a human is left alone.
-  pre-commit : cargo fmt --check + clippy -D warnings when Rust or Cargo files are staged,
-               node --check on staged UI modules, then the home-path check on the staged
-               diff
+  pre-commit : the home-path check on the staged diff, then cargo fmt --check + clippy
+               -D warnings when Rust, Cargo or desktop-slint/ui files are staged, and
+               node --check on staged desktop-tauri/ui and scripts/ JavaScript
   pre-push   : the home-path check on each published commit, the review-gate ledger
                check, then cargo test --workspace and node --test when HEAD is pushed
                (other pushed tips only get a warning)

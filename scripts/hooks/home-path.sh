@@ -22,15 +22,21 @@ usage() { echo "❌ [home-path] usage: home-path.sh [--published <sha>]" >&2; ex
 if [ "${1:-}" = --published ]; then
   # A full commit id only: a ref or path could hold the home, and git's error would print it;
   # git's own errors are dropped for the same reason. The prefixes are set because
-  # diff.noprefix and diff.mnemonicPrefix would change them.
+  # diff.noprefix and diff.mnemonicPrefix would change them, and --no-relative because
+  # diff.relative would drop each file outside the current folder. A push sends the original
+  # objects, so git log must not read git replace refs or an info/grafts file, which could
+  # hide a commit from it; the graft file named here cannot exist.
   [ $# -eq 2 ] && [[ $2 =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] || usage
-  diff=$(git log -p --root -c -U0 --no-color --no-ext-diff --no-textconv \
-    --src-prefix=a/ --dst-prefix=b/ --format='commit %H' "$2" --not --remotes 2> /dev/null) ||
+  diff=$(GIT_GRAFT_FILE=/dev/null/none git --no-replace-objects log -p --root -c -U0 --no-color \
+    --no-relative --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/ \
+    --format='commit %H' "$2" --not --remotes 2> /dev/null | tr -d '\0') ||
     { echo "❌ [home-path] cannot list the commits in $2 to check them (git log $2 says why)." >&2; exit 1; }
 else
   [ $# -eq 0 ] || usage # a sha without --published would wait on stdin
-  diff=$(cat) || { echo "❌ [home-path] cannot read the diff." >&2; exit 1; }
+  diff=$(tr -d '\0') || { echo "❌ [home-path] cannot read the diff." >&2; exit 1; }
 fi
+# Without tr, bash drops a NUL byte (text past git's binary sniff may hold one) with a warning
+# that names this script's path, which may hold the home.
 
 bs='\'
 # Replaces every <from> in <string> with <to>, into REPLY. A loop, not ${s//from/to}: how a
@@ -77,12 +83,11 @@ if [ -n "$home" ]; then
   dir=$home
   [[ $dir == /* || $dir =~ ^[A-Za-z]: ]] || dir=./$dir
   if ! real=$(cd "$dir" 2> /dev/null && pwd -P); then
+    [ -e "$dir" ] && cannot_resolve "not a folder this user can enter" # or a symlink to one
     [ -L "$dir" ] && cannot_resolve "a dangling symlink or a symlink loop"
-    [ -e "$dir" ] && cannot_resolve "not a folder this user can enter"
     up=$dir
     until [ -e "$up" ] || [ -L "$up" ] || [ "$up" = / ] || [ "$up" = . ]; do up=$(dirname "$up"); done
     (cd "$up" 2> /dev/null) || cannot_resolve "something above it is not a folder this user can search"
-    real=""
   fi
 fi
 
@@ -119,22 +124,44 @@ done
 # ends a sentence still ends the path. Case is ignored, as Windows paths are.
 # File headers are the ---/+++ lines between "diff --git" (or a merge's "diff --combined") and
 # the first hunk; after that, a line starting "+++" is an added line that starts with "++".
-hits=$(HOMES="$homes" LC_ALL=C awk '
-  function names_home(line, h,    s, p, q) {
+hits=$(HOMES="$homes" DASHED="$home"$'\n'"$real"$'\n'"$profile" LC_ALL=C awk '
+  # name is what the character after h must not be; lead, when set, the one before it.
+  function names_home(line, h, name, lead,    s, p, q, at) {
     s = line
+    at = 0 # where s starts in line, less one
     while ((p = index(s, h)) > 0) {
-      # A full stop then a name character continues the name (".bak"); otherwise it ends a
-      # sentence (". " or "...") or starts a git range ("..main").
+      at += p
+      # In a plain path, a full stop then a name character continues the name (".bak");
+      # otherwise it ends a sentence (". " or "...") or starts a git range ("..main"). The
+      # dashed spelling has a - for each full stop in the name, so there one starts an extension.
       q = p + length(h)
-      if (substr(s, q, 1) == ".") q++
-      if (substr(s, q, 1) !~ /[a-z0-9_~-]/) return 1
+      if (lead == "" && substr(s, q, 1) == ".") q++
+      # A match at the start of the line has nothing before it; awks differ on what
+      # substr(line, 0, 1) returns (gawk gives the first character of the line).
+      if (substr(s, q, 1) !~ name &&
+          (lead == "" || at == 1 || substr(line, at - 1, 1) !~ lead)) return 1
       s = substr(s, p + 1)
     }
     return 0
   }
-  BEGIN { n = split(tolower(ENVIRON["HOMES"]), home, "\n") }
+  BEGIN {
+    n = split(tolower(ENVIRON["HOMES"]), home, "\n")
+    # Claude Code names a project folder after its working directory with each UTF-16 unit but
+    # an ASCII letter or digit turned into -, as in -home-al-repo, so that spelling counts too.
+    # A character outside the Basic Multilingual Plane is two units, so it gets two.
+    # Bytes here: dropping UTF-8 continuation bytes leaves one byte per character, and the lead
+    # byte of a 4-byte character, the only kind outside that plane, becomes two -.
+    # Such a name starts a path or follows a separator, and a - ends a segment of it.
+    d = split(ENVIRON["DASHED"], dashed, "\n")
+    for (i = 1; i <= d; i++) {
+      gsub(/[\200-\277]/, "", dashed[i])
+      gsub(/[\360-\367]/, "--", dashed[i])
+      gsub(/[^A-Za-z0-9]/, "-", dashed[i])
+      dashed[i] = tolower(dashed[i])
+    }
+  }
   /^commit [0-9a-f]+$/ { commit = substr($2, 1, 12) " "; next }
-  /^diff --(git|combined|cc) / { header = 1; next }
+  /^diff --(git|combined) / { header = 1; next }
   # git ends a name that holds a space with a tab.
   header && /^\+\+\+ / { file = substr($0, 5); sub(/^b\//, "", file); sub(/\t$/, "", file); next }
   # "@@ -a,b +c,d @@", or for a merge one @ and one -a,b per parent more: c is the number of
@@ -156,11 +183,10 @@ hits=$(HOMES="$homes" LC_ALL=C awk '
     # is \\/, that escape inside another string.
     line = tolower(substr($0, parents + 1))
     gsub(/\\+\//, "/", line)
-    for (i = 1; i <= n; i++) {
-      if (home[i] == "" || !names_home(line, home[i])) continue
-      printf "     %s%s:%d\n", commit, file, number
-      break
-    }
+    hit = 0
+    for (i = 1; i <= n && !hit; i++) hit = home[i] != "" && names_home(line, home[i], "[a-z0-9_~-]", "")
+    for (i = 1; i <= d && !hit; i++) hit = dashed[i] != "" && names_home(line, dashed[i], "[a-z0-9]", "[a-z0-9]")
+    if (hit) printf "     %s%s:%d\n", commit, file, number
     number++
   }
 ' <<< "$diff") || { echo "❌ [home-path] cannot scan the diff." >&2; exit 1; }

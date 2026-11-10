@@ -39,8 +39,10 @@ const sh = (cwd, cmd, args, env = {}) => {
 // A fresh git repo; git(...) asserts success and returns stdout.
 // hostile: git settings that would each hide an added line from a plain `git diff` or
 // `git log -p`: a textconv driver that prints nothing, forced colour, an external diff that
-// prints nothing (`git diff` only), no diff for the first commit (`git log` only), and no
-// a/ b/ prefixes, which would report a file under a folder named b/ without it.
+// prints nothing (`git diff` only), no diff for the first commit (`git log` only), no a/ b/
+// prefixes, which would report a file under a folder named b/ without it, and diff.relative,
+// which would drop each file outside the folder git runs in.
+// commit(content, file) writes file (f.txt by default), commits everything, returns the sha.
 const gitRepo = (name, { hostile = false } = {}) => {
   const dir = path.join(tmp, name);
   fs.mkdirSync(dir);
@@ -57,8 +59,15 @@ const gitRepo = (name, { hostile = false } = {}) => {
     git("config", "color.ui", "always");
     git("config", "log.showRoot", "false");
     git("config", "diff.noprefix", "true");
+    git("config", "diff.relative", "true");
   }
-  return { dir, git };
+  const commit = (content, file = "f.txt") => {
+    fs.writeFileSync(path.join(dir, file), content);
+    git("add", "-A");
+    git("commit", "-q", "-m", "c");
+    return git("rev-parse", "HEAD");
+  };
+  return { dir, git, commit };
 };
 // A refusal for naming the home, not for some other failure.
 const hit = (r, message) => {
@@ -174,8 +183,47 @@ test("checks the \\/ a JSON writer may put for /", () => {
   hit(run(diff("a.js", `+const s = "{\\"p\\":\\"${twice}\\"}";`)), "escaped twice");
 });
 
+// Claude Code's spelling of a working directory in its scratchpad and memory paths.
+const dashed = (p) => p.replace(/[^A-Za-z0-9]/g, "-");
+
+test("checks the dashed spelling Claude Code gives a working directory", () => {
+  hit(run(diff("a.log", `+see /tmp/claude-1000/${dashed(home)}-My-Project-repo/scratchpad/x.log`)));
+  hit(run(diff("a.log", `+see ${dashed(home).toUpperCase()}`)), "at the end, in another case");
+  assert.equal(run(diff("a.log", `+see ${dashed(home)}z-x ${dashed(home)}2-x`)).status, 0, "a longer name");
+  hit(run(diff("a.log", "+see C--Users-tester-repo"), { USERPROFILE: "C:\\Users\\tester" }), "USERPROFILE");
+  // Nothing comes before it at the start of a line, though gawk's substr(line, 0, 1) is the
+  // line's first character.
+  const windows = { USERPROFILE: "C:\\Users\\tester", HOME: "/" };
+  hit(run(diff("a.log", "+C--Users-tester-repo"), windows), "USERPROFILE at the start of a line");
+  hit(run(diff("a.log", "+tester-x-repo"), { HOME: "tester/x" }), "a relative HOME at the start of a line");
+  assert.equal(run(diff("a.log", "+xC--Users-tester-repo"), windows).status, 0, "inside a word");
+  const absent = { HOME: "/no-such-home/tester" };
+  hit(run(diff("a.log", "+aa x-no-such-home-tester-a /-no-such-home-tester-b"), absent), "after an occurrence that does not count");
+  // A full stop inside the name is already a -, so one after it starts an extension.
+  hit(run(diff("a.log", "+see /tmp/claude/-no-such-home-tester.jsonl"), absent), "before an extension");
+  hit(run(diff("a.log", "+see -no-such-home-tester."), absent), "at the end of a sentence");
+  hit(run(diff("a.log", "+see -no-such-home-tester-x"), { HOME: "/no-such-home/tester" }), "a HOME with no resolved form");
+  // One - for each UTF-16 unit that is not an ASCII letter or digit: one for a character in
+  // the Basic Multilingual Plane, however many bytes it takes, and two for one outside it.
+  for (const LC_ALL of ["C", "C.UTF-8"]) {
+    hit(run(diff("a.log", "+see /tmp/claude-1000/-no-such-home-jos--repo/x"), { HOME: "/no-such-home/josé", LC_ALL }), `accented, ${LC_ALL}`);
+    hit(run(diff("a.log", "+see -no-such-home----repo"), { HOME: "/no-such-home/山田", LC_ALL }), `CJK, ${LC_ALL}`);
+    hit(run(diff("a.log", "+see -no-such-home-a---repo"), { HOME: "/no-such-home/a😀", LC_ALL }), `emoji, ${LC_ALL}`);
+    const inside = { HOME: "/no-such-home/a😀b", LC_ALL };
+    hit(run(diff("a.log", "+see -no-such-home-a--b-repo"), inside), `emoji inside, ${LC_ALL}`);
+    assert.equal(run(diff("a.log", "+see -no-such-home-a-b-repo"), inside).status, 0, `one - for an emoji, ${LC_ALL}`);
+  }
+  hit(run(diff("a.log", "+see C--Users-Jos--repo"), { USERPROFILE: "C:\\Users\\José" }), "non-ASCII USERPROFILE");
+  // It starts a path or follows a separator, unlike the same letters inside a word.
+  assert.equal(run(diff("a.css", "+.manage-no-such-users-admin-panel, .v2-no-such-users-admin {}"), { HOME: "/no-such-users/admin" }).status, 0);
+  assert.equal(run(diff("a.md", "+See the take-no-such-home-dev-guide."), { HOME: "/no-such-home/dev" }).status, 0);
+  // The resolved form too: Claude Code may name the folder by it.
+  fs.symlinkSync(home, path.join(tmp, "dash-link"));
+  hit(run(diff("a.log", `+see ${dashed(home)}-x`), { HOME: path.join(tmp, "dash-link") }), "resolved");
+});
+
 test("a home of one segment names nobody, so it is not looked for", () => {
-  const lines = ["+cd /no-such-root/x", "+cd //no-such-root/x", "+cd C:\\app\\x", "+cd C:\\\\app\\x"];
+  const lines = ["+cd /no-such-root/x", "+cd //no-such-root/x", "+cd C:\\app\\x", "+cd C:\\\\app\\x", "+cd -no-such-root-x", "+cd C--app-x"];
   for (const env of [{ HOME: "/no-such-root" }, { HOME: "//no-such-root/", USERPROFILE: "C:\\app" }, { HOME: "/", USERPROFILE: "C:\\\\app" }]) {
     const r = run(diff("a.sh", ...lines), env);
     assert.equal(r.status, 0);
@@ -208,7 +256,10 @@ test("refuses a HOME it cannot resolve, and warns when there is no home to look 
   }
   const file = path.join(tmp, "a-file");
   fs.writeFileSync(file, "");
-  assert.match(run(diff("a.txt", "+clean"), { HOME: file }).stderr, /HOME: not a folder this user can enter/);
+  fs.symlinkSync(file, path.join(tmp, "to-file")); // a symlink, but not a dangling one
+  for (const h of [file, path.join(tmp, "to-file")]) {
+    assert.match(run(diff("a.txt", "+clean"), { HOME: h }).stderr, /HOME: not a folder this user can enter/, h);
+  }
   if (process.getuid?.() !== 0) { // root enters any directory
     const locked = path.join(tmp, "locked");
     fs.mkdirSync(locked, { mode: 0o000 });
@@ -260,6 +311,10 @@ test("the locale changes neither the case folding nor the parse", () => {
   const r = run(bytes, { LC_ALL: "C.UTF-8" });
   hit(r);
   assert.ok(r.stderr.includes("     a.bin:2\n") && !r.stderr.includes("warning"), r.stderr);
+  // bash drops a NUL with a warning naming the script's path, which can hold the home.
+  const nul = run(diff("a.txt", "+a\0b", `+${home}/x`));
+  hit(nul);
+  assert.ok(nul.stderr.includes("     a.txt:2\n") && !nul.stderr.includes("warning"), nul.stderr);
 });
 
 test("a HOME of / checks nothing, and a trailing slash on HOME is ignored", () => {
@@ -273,17 +328,13 @@ test("a HOME of / checks nothing, and a trailing slash on HOME is ignored", () =
 });
 
 test("--published checks each commit no remote-tracking ref holds, past git settings that hide lines", () => {
-  const { dir: repo, git } = gitRepo("repo", { hostile: true });
-  const commit = (content) => {
-    fs.writeFileSync(path.join(repo, "f.txt"), content);
-    git("add", "-A");
-    git("commit", "-q", "-m", "c");
-    return git("rev-parse", "HEAD");
-  };
+  const { dir: repo, git, commit } = gitRepo("repo", { hostile: true });
   const base = commit("base\n");
   const leak = commit(`${home}/secret\n`);
   const fix = commit("clean\n");
-  const published = (env = {}) => run("", env, { args: ["--published", fix], cwd: repo });
+  // From a subfolder, where diff.relative would drop f.txt.
+  fs.mkdirSync(path.join(repo, "sub"));
+  const published = (env = {}) => run("", env, { args: ["--published", fix], cwd: path.join(repo, "sub") });
 
   // The leak is in history even though the tip removed it.
   git("update-ref", "refs/remotes/origin/main", base);
@@ -300,12 +351,13 @@ test("--published checks each commit no remote-tracking ref holds, past git sett
   const fresh = run("", {}, { args: ["--published", first], cwd: repo });
   hit(fresh);
   assert.ok(fresh.stderr.includes(`${first.slice(0, 12)} f.txt:1\n`), fresh.stderr);
-  // A sha git cannot read fails closed, with only the script's own line: git's error could
-  // name a path.
-  const unknown = "0".repeat(40);
-  assert.deepEqual(run("", {}, { args: ["--published", unknown], cwd: repo }), {
-    status: 1, stderr: `❌ [home-path] cannot list the commits in ${unknown} to check them (git log ${unknown} says why).\n`,
-  });
+  // A sha git cannot read, SHA-1 or SHA-256, fails closed, with only the script's own line:
+  // git's error could name a path.
+  for (const unknown of ["0".repeat(40), "0".repeat(64)]) {
+    assert.deepEqual(run("", {}, { args: ["--published", unknown], cwd: repo }), {
+      status: 1, stderr: `❌ [home-path] cannot list the commits in ${unknown} to check them (git log ${unknown} says why).\n`,
+    });
+  }
   // A ref or path, whose text git's own error would print, gets the usage line, and so does
   // a short id, a missing one, an extra argument, or a sha without --published, which would
   // otherwise wait on stdin.
@@ -315,15 +367,30 @@ test("--published checks each commit no remote-tracking ref holds, past git sett
   }
 });
 
+test("--published reads the objects a push sends, past git replace, grafts and NUL bytes", () => {
+  const { dir: repo, git, commit } = gitRepo("replaced");
+  const base = commit("base\n");
+  const leak = commit(`${home}/secret\n`);
+  // Text past git's 8000-byte binary sniff may hold a NUL.
+  const fix = commit(`${"x".repeat(9000)}\0\nclean\n`);
+  git("update-ref", "refs/remotes/origin/main", base);
+  const published = () => run("", {}, { args: ["--published", fix], cwd: repo });
+  // A replace ref or a graft that makes base the cleanup's parent would hide the leak from
+  // a plain git log; the push still sends it.
+  git("replace", "--graft", fix, base);
+  let r = published();
+  hit(r, "git replace");
+  assert.ok(r.stderr.includes(`${leak.slice(0, 12)} f.txt:1\n`) && !r.stderr.includes("warning"), r.stderr);
+  git("replace", "-d", fix);
+  fs.writeFileSync(path.join(repo, ".git", "info", "grafts"), `${fix} ${base}\n`);
+  r = published();
+  hit(r, "info/grafts");
+});
+
 test("--published checks what a merge resolution adds, and nothing a parent already has", () => {
-  const { dir: repo, git } = gitRepo("merge", { hostile: true });
+  const { dir: repo, git, commit: commitTo } = gitRepo("merge", { hostile: true });
   fs.mkdirSync(path.join(repo, "b")); // a folder named like git's b/ prefix, to keep in the report
-  const commit = (content) => {
-    fs.writeFileSync(path.join(repo, "b", "f.txt"), content);
-    git("add", "-A");
-    git("commit", "-q", "-m", "c");
-    return git("rev-parse", "HEAD");
-  };
+  const commit = (content) => commitTo(content, path.join("b", "f.txt"));
   commit("1\n2\n3\n4\n5\n");
   git("checkout", "-q", "-b", "side");
   // Published already, so not this push's to refuse, though the merge brings it in.
@@ -379,6 +446,25 @@ test("pre-commit refuses a staged leak, and pre-push one in any pushed commit", 
   assert.match(push.out, /name your home directory/);
 });
 
+test("pre-commit diffs from the HEAD the commit extends, not a replacement", () => {
+  const { dir, git } = gitRepo("replaced-head");
+  git("config", "core.hooksPath", path.dirname(script));
+  const commit = (content, ...flags) => {
+    fs.writeFileSync(path.join(dir, "f.txt"), content);
+    git("add", "f.txt");
+    return sh(dir, "git", ["commit", "-q", "-m", "c", ...flags]);
+  };
+  assert.equal(commit("clean\n").status, 0);
+  // A stand-in for HEAD whose tree already holds the line.
+  assert.equal(commit(`${home}/secret\n`, "--no-verify").status, 0);
+  const standIn = git("rev-parse", "HEAD");
+  git("reset", "-q", "--hard", "HEAD~");
+  git("replace", "HEAD", standIn);
+  const r = commit(`${home}/secret\n`);
+  assert.equal(r.status, 1, r.out);
+  assert.match(r.out, /name your home directory/);
+});
+
 test("pre-commit checks a staged leak before a dirty Rust tree stops it", () => {
   const { dir, git } = gitRepo("dirty");
   git("config", "core.hooksPath", path.dirname(script));
@@ -394,13 +480,7 @@ test("pre-commit checks a staged leak before a dirty Rust tree stops it", () => 
 });
 
 test("pre-push checks every pushed ref, not only the first", () => {
-  const { dir, git } = gitRepo("two-refs");
-  const commit = (content) => {
-    fs.writeFileSync(path.join(dir, "f.txt"), content);
-    git("add", "f.txt");
-    git("commit", "-q", "-m", "c");
-    return git("rev-parse", "HEAD");
-  };
+  const { dir, git, commit } = gitRepo("two-refs");
   const base = commit("base\n");
   git("update-ref", "refs/remotes/origin/main", base);
   const clean = commit("clean\n");
@@ -443,6 +523,12 @@ test("jj-gate.sh check and push (jj gate, jj gpush) refuse a leak", { skip: !has
   // The refusals name only the stack's own leak: old.txt is trunk's, and gone from it.
   assert.match(check.out, /name your home directory[^]*\n {5}f\.txt:1\n/);
   assert.doesNotMatch(check.out, /old\.txt/);
+  // Under forced colour too. jj log's coloured ids fail the description check there, so the
+  // gate fails either way; only the report shows the diff was read.
+  const colour = path.join(tmp, "jj-colour.toml");
+  fs.writeFileSync(colour, `${fs.readFileSync(config, "utf8")}[ui]\ncolor = "always"\n`);
+  const coloured = sh(dir, "bash", ["scripts/jj-gate.sh", "check"], { JJ_CONFIG: colour, ...SKIP });
+  assert.match(coloured.out, /name your home directory[^]*\n {5}f\.txt:1\n/);
   fs.writeFileSync(path.join(dir, "f.txt"), "clean\n");
   assert.equal(gate("check").status, 0, "a clean stack");
 

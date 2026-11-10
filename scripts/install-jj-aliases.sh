@@ -37,8 +37,9 @@ jj config set --repo working-copy.eol-conversion input
 cat <<'MSG'
 jj repo config set (aliases, and working-copy.eol-conversion = input):
   jj gate           commit-msg trailer ban over trunk()..@, the home-path check on the stack's
-                    diff, then cargo fmt/clippy when Rust or Cargo files changed, node --check
-                    on changed UI modules. Run before `jj new`.
+                    diff, then cargo fmt/clippy when Rust, Cargo or desktop-slint/ui files
+                    changed, node --check on changed desktop-tauri/ui and scripts/ JavaScript.
+                    Run before `jj new`.
   jj gpush [args]   the trailer ban, the home-path check, the review-gate ledger and the test
                     suites for what `jj git push [args]` would push, then the push. Use it
                     instead of `jj git push`.
