@@ -142,6 +142,28 @@ test("numbers a line by its place in the new file", () => {
   assert.ok(r.stderr.includes("a.md:3\n") && r.stderr.includes("a.md:21\n"), r.stderr);
 });
 
+test("counts a blank context line, which diff.suppressBlankEmpty writes with no leading space", () => {
+  const r = run(
+    "diff --git a/a.md b/a.md\n--- a/a.md\n+++ b/a.md\n" + `@@ -1,3 +1,5 @@\n 1\n\n 3\n+clean\n+${home}/x\n`,
+  );
+  hit(r);
+  assert.ok(r.stderr.includes("a.md:5\n"), r.stderr);
+});
+
+test("--published counts a blank context line git adds back to a -U0 diff", () => {
+  // -U0 asks for no context; diff.interHunkContext and GIT_DIFF_OPTS put some back anyway.
+  const { dir: repo, git, commit } = gitRepo("blank-context");
+  git("config", "diff.suppressBlankEmpty", "true");
+  git("update-ref", "refs/remotes/origin/main", commit("1\n\n3\n\n5\n\n7\n\n9\n"));
+  const tip = commit(`1\n\n3\n\n5\nX\n7\n\n9\n${home}/x\n`);
+  for (const env of [{ GIT_DIFF_OPTS: "-u9" }, { GIT_DIFF_OPTS: undefined }]) {
+    if (env.GIT_DIFF_OPTS === undefined) git("config", "diff.interHunkContext", "9");
+    const r = run("", env, { args: ["--published", tip], cwd: repo });
+    hit(r, JSON.stringify(env));
+    assert.ok(r.stderr.includes(`${tip.slice(0, 12)} f.txt:10\n`), r.stderr);
+  }
+});
+
 test("checks USERPROFILE with backslashes and with forward slashes", () => {
   const env = { USERPROFILE: "C:\\Users\\tester" };
   hit(run(diff("a.ps1", "+cd C:\\Users\\tester\\repo"), env));
@@ -317,6 +339,12 @@ test("checks the resolved form of a symlinked HOME", () => {
   // Nor is a HOME of - read as cd's "the previous folder".
   fs.symlinkSync(home, path.join(tmp, "-"));
   hit(run(diff("a.js", `+'${home}/repo'`), { HOME: "-" }), "a HOME of -");
+  // A backslash is an ordinary character in a POSIX file name, so HOME is resolved as it is
+  // set: a squeezed doubled backslash would name a folder that does not exist, and the
+  // resolved form would be lost.
+  const doubled = path.join(tmp, "we\\\\ird");
+  fs.symlinkSync(home, doubled);
+  hit(run(diff("a.js", `+'${home}/repo'`), { HOME: doubled }), "a doubled backslash in HOME's own name");
 });
 
 test("the locale changes neither the case folding nor the parse", () => {

@@ -84,8 +84,6 @@ squeeze() { # <path>
 # backslashes, whichever it was set with; the other forms come from that below.
 home_as_set=${HOME:-}
 while [[ $home_as_set == */ ]]; do home_as_set=${home_as_set%/}; done
-squeeze "$home_as_set"
-home=$REPLY
 replace_all "${USERPROFILE:-}" / "$bs"
 profile_as_set=$REPLY
 while [[ $profile_as_set == *"$bs" ]]; do profile_as_set=${profile_as_set%"$bs"}; done
@@ -95,14 +93,17 @@ profile=$REPLY
 # The resolved form too, for a home reached through a symlink. Only an absent home has none:
 # every other failure refuses rather than check less. A missing name looks the same as one
 # under something that cannot be searched, so absent means its nearest existing ancestor can be.
+# HOME is resolved as it is set, not squeezed: a backslash is an ordinary character in a POSIX
+# file name, so a squeezed doubled one names a different folder, and cd reads a run of / as one
+# by itself. Stripping the trailing separators is enough to keep cd "" out of reach.
 cannot_resolve() { echo "❌ [home-path] cannot resolve HOME: $1." >&2; exit 1; }
 real=""
-if [ -n "$home" ]; then
+if [ -n "$home_as_set" ]; then
   # A relative HOME as ./HOME, so cd neither searches CDPATH nor reads a leading - as an option.
   # A drive path (C:/Users/x) is left alone: it is absolute on Git Bash, the one place a HOME
   # is set that way. Elsewhere it is a relative path, so CDPATH is emptied for the cd; with
   # that, ./C: is the same folder there, and no test can tell the two apart.
-  dir=$home
+  dir=$home_as_set
   [[ $dir == /* || $dir =~ ^[A-Za-z]: ]] || dir=./$dir
   if ! real=$(CDPATH= cd "$dir" 2> /dev/null && pwd -P); then
     [ -e "$dir" ] && cannot_resolve "not a folder this user can enter" # or a symlink to one
@@ -112,6 +113,9 @@ if [ -n "$home" ]; then
     (cd "$up" 2> /dev/null) || cannot_resolve "something above it is not a folder this user can search"
   fi
 fi
+# Squeezed only now: the match forms want it, the cd above does not.
+squeeze "$home_as_set"
+home=$REPLY
 
 # A path of one segment, such as /root, /app or C:\app, is the same on every machine and names
 # nobody, so it is not looked for; nor is what / or a drive alone (C:\) leave. Each form is
@@ -194,6 +198,12 @@ hits=$(HOMES="$homes" DASHED="$home"$'\n'"$real"$'\n'"$profile" LC_ALL=C awk '
     match($0, /\+[0-9]+/); number = substr($0, RSTART + 1, RLENGTH - 1) + 0
     next
   }
+  # diff.suppressBlankEmpty writes a blank context line with no mark at all, and context
+  # reaches a -U0 diff through diff.interHunkContext or GIT_DIFF_OPTS, so such a line must
+  # still advance the count. (An added or removed blank line keeps its mark.) No !header here:
+  # the blank lines git log writes around each "commit" line, and any a file header might hold,
+  # are all above a hunk, where @@ sets the count outright.
+  /^$/ { number++; next }
   # A line starts with one mark per parent: "-" for a line the result drops, "+" for one that
   # parent lacks. Only a line every parent lacks is new here; one a parent has was checked in
   # that parent, or is published already.
