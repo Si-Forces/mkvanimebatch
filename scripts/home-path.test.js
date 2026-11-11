@@ -92,7 +92,7 @@ test("allows generic home paths, removed lines and context", () => {
   assert.equal(run("").status, 0);
 });
 
-test("matches HOME only as whole path segments, in any case", () => {
+test("matches HOME with ASCII case folding and the documented segment boundaries", () => {
   assert.equal(run(diff("a.rs", `+mod x; // ${home}z/lib.rs`)).status, 0, "a longer name");
   assert.equal(run(diff("a.sh", `+ls ${home}_old ${home}-2 ${home}2 ${home}~`)).status, 0, "siblings");
   hit(run(diff("a.rs", `+let p = "src${home}";`)), "inside another path");
@@ -107,6 +107,53 @@ test("matches HOME only as whole path segments, in any case", () => {
   hit(run(diff("a.sh", `+git diff ${home}..main`)), "in a git range");
   assert.equal(run(diff("a.md", `+cp ${home}.bak/x .`)).status, 0, "a sibling with a suffix");
   hit(run(diff("a.md", `+see ${home.toUpperCase()}/x`)), "in another case");
+  for (const suffix of ["+x", "./x", "..x", "é/x"]) {
+    hit(run(diff("a.md", `+see ${home}${suffix}`)), `conservative boundary: ${suffix}`);
+  }
+});
+
+test("redacts literal and dashed home spellings in reported file names", () => {
+  const windows = "C:\\Users\\tester";
+  const fixtures = [
+    { file: `foo${home}/f.txt`, hidden: home },
+    { file: `foo${home.toUpperCase()}/f.txt`, hidden: home.toUpperCase() },
+    { file: `foo${home}/again${home}/again${home}/again${home}/f.txt`, hidden: home },
+    { file: `foo/${dashed(home)}/f.txt`, hidden: dashed(home) },
+    { file: `foo/${windows}/f.txt`, hidden: windows },
+    { file: `foo/${windows}${home}/f.txt`, hidden: windows },
+    { file: `foo${home}/${windows}/f.txt`, hidden: windows },
+    {
+      file: `foo/${windows.replaceAll("\\", "\\\\")}/f.txt`,
+      hidden: windows.replaceAll("\\", "\\\\"),
+    },
+  ];
+  for (const { file, hidden } of fixtures) {
+    const r = run(diff(file, `+see ${home}/x`), { USERPROFILE: windows });
+    hit(r, file);
+    assert.ok(r.stderr.includes("<home>") && r.stderr.includes("/f.txt:1\n"), r.stderr);
+    assert.ok(!r.stderr.includes(hidden), r.stderr);
+    assert.ok(!r.stderr.toLowerCase().includes(home.toLowerCase()), r.stderr);
+  }
+  // Exercise git-generated headers too, including its quoted form for a filename with a quote.
+  const { dir, git } = gitRepo("report-home");
+  const file = `foo${home}/f".txt`;
+  fs.mkdirSync(path.join(dir, path.dirname(file)), { recursive: true });
+  fs.writeFileSync(path.join(dir, file), `${home}/x\n`);
+  git("add", "-A");
+  const staged = run("", {}, { args: ["--staged"], cwd: dir });
+  hit(staged);
+  assert.ok(staged.stderr.includes("<home>") && !staged.stderr.includes(home), staged.stderr);
+});
+
+test("filename redaction consumes the original text without rescanning its placeholder", () => {
+  // The newline-delimited home list splits this valid POSIX name, leaving a home of "home".
+  // Replacing and rescanning the entire name would then replace "home" inside <home> forever.
+  const r = spawnSync("bash", [script], {
+    input: diff("home.txt", "+home/x"), cwd: tmp, encoding: "utf8", timeout: 2000,
+    env: envFor({ HOME: "/no-such-home/check\nhome" }),
+  });
+  hit(r);
+  assert.match(r.stderr, /     <home>\.txt:1\n/);
 });
 
 test("names the commit in git log output", () => {
@@ -124,6 +171,18 @@ test("a file header is not content, even before the first hunk", () => {
   const named = `a${home}/x`;
   const deleted = `diff --git ${named} b/y\ndeleted file mode 100644\n--- ${named}\n+++ /dev/null\n@@ -1 +0,0 @@\n-clean\n`;
   assert.deepEqual(run(deleted), { status: 0, stderr: "" });
+});
+
+test("stdin diff --cc recognizes headers and reports the result file and line", () => {
+  const header = (file) => `diff --cc ${file}\nindex a,b..c\n` +
+    `--- a/${file}\n+++ b/${file}\n@@@ -1 -1 +1 @@@\n`;
+  // A filename that resembles the home must never be scanned as added content.
+  assert.deepEqual(run(`${header(`foo${home}/f.txt`)}++clean\n`), {
+    status: 0, stderr: "",
+  });
+  const r = run(`${header("merged.txt")}++${home}/x\n`);
+  hit(r);
+  assert.match(r.stderr, /     merged\.txt:1\n/);
 });
 
 test("a +++ or --- line inside a hunk is content, not a file header", () => {
@@ -254,6 +313,18 @@ test("checks the dashed spelling Claude Code gives a working directory", () => {
   // The resolved form too: Claude Code may name the folder by it.
   fs.symlinkSync(home, path.join(tmp, "dash-link"));
   hit(run(diff("a.log", `+see ${dashed(home)}-x`), { HOME: path.join(tmp, "dash-link") }), "resolved");
+});
+
+test("checks dashed as-set homes with doubled backslashes and a different resolved spelling", () => {
+  const absent = "/no-such-home/we\\\\ird/tester";
+  hit(run(diff("a.log", `+${dashed(absent)}-repo`), { HOME: absent }), "absent HOME as set");
+  const alias = path.join(tmp, "dash-we\\\\ird");
+  fs.symlinkSync(home, alias);
+  hit(run(diff("a.log", `+${dashed(alias)}-repo`), { HOME: alias }), "symlinked HOME as set");
+  const profile = "C:\\\\\\Users\\\\\\tester";
+  hit(run(diff("a.log", `+${dashed(profile)}-repo`), {
+    HOME: "/", USERPROFILE: profile,
+  }), "USERPROFILE as set");
 });
 
 test("a home of one segment names nobody, so it is not looked for", () => {

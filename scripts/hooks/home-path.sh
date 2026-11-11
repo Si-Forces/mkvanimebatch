@@ -6,7 +6,7 @@
 # counts, so generic fixtures such as /home/user/show stay allowed.
 #
 # Usage:
-#   home-path.sh                     checks the unified diff on stdin
+#   home-path.sh                     checks a git unified or combined diff on stdin
 #   home-path.sh --staged            checks the staged diff, so an unstaged edit can neither
 #                                    hide nor fake a hit
 #   home-path.sh --published <sha>   checks each commit in <sha> (a full commit id) that no
@@ -14,9 +14,9 @@
 #                                    one commit and removed in a later one is still in the
 #                                    pushed history. A merge counts for the lines its
 #                                    resolution adds, which no parent has.
-# Prints the file and line number of each added line that names the home directory and exits
-# 1, else exits 0. Not the line's text: gate output gets pasted into PR descriptions, which
-# nothing checks.
+# Prints the file and line number of each hit, redacting recognized home spellings from the
+# file name, and exits 1, else exits 0. Not the line's text: gate output gets pasted into PR
+# descriptions, which nothing checks.
 # Run by pre-commit, pre-push and scripts/jj-gate.sh; not a hook itself.
 set -euo pipefail
 
@@ -31,7 +31,8 @@ usage() { echo "❌ [home-path] usage: home-path.sh [--staged | --published <sha
 # own errors are dropped: they could print a path that holds the home. So are NUL bytes, in
 # every mode (--text prints the ones a file holds): bash drops one with a warning that names
 # this script's path, which may hold the home.
-diff_flags=(-U0 --text --no-color --no-relative --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/)
+diff_flags=(-U0 --text --no-color --no-relative --no-ext-diff --no-textconv
+  --src-prefix=a/ --dst-prefix=b/)
 case ${1:-} in
   --published)
     # A full commit id only: a ref or path could hold the home, and git's error would print
@@ -39,16 +40,19 @@ case ${1:-} in
     # info/grafts file, which could hide a commit from it; the graft file named here cannot
     # exist.
     [ $# -eq 2 ] && [[ $2 =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] || usage
-    diff=$(GIT_GRAFT_FILE=/dev/null/none git --no-replace-objects log -p --root -c "${diff_flags[@]}" \
+    diff=$(GIT_GRAFT_FILE=/dev/null/none git --no-replace-objects log \
+      -p --root -c "${diff_flags[@]}" \
       --format='commit %H' "$2" --not --remotes 2> /dev/null | tr -d '\0') ||
-      { echo "❌ [home-path] cannot list the commits in $2 to check them (git log $2 says why)." >&2; exit 1; }
+      { echo "❌ [home-path] cannot list the commits in $2 to check them (git log $2 says why)." >&2
+        exit 1; }
     ;;
   --staged)
     # A git replace ref on HEAD could stand a tree that already holds the line in for the one
     # the commit extends.
     [ $# -eq 1 ] || usage
     diff=$(git --no-replace-objects diff --cached "${diff_flags[@]}" 2> /dev/null | tr -d '\0') ||
-      { echo "❌ [home-path] cannot read the staged diff (git diff --cached says why)." >&2; exit 1; }
+      { echo "❌ [home-path] cannot read the staged diff (git diff --cached says why)." >&2
+        exit 1; }
     ;;
   *)
     [ $# -eq 0 ] || usage # a sha without --published would wait on stdin
@@ -109,8 +113,11 @@ if [ -n "$home_as_set" ]; then
     [ -e "$dir" ] && cannot_resolve "not a folder this user can enter" # or a symlink to one
     [ -L "$dir" ] && cannot_resolve "a dangling symlink or a symlink loop"
     up=$dir
-    until [ -e "$up" ] || [ -L "$up" ] || [ "$up" = / ] || [ "$up" = . ]; do up=$(dirname "$up"); done
-    (cd "$up" 2> /dev/null) || cannot_resolve "something above it is not a folder this user can search"
+    until [ -e "$up" ] || [ -L "$up" ] || [ "$up" = / ] || [ "$up" = . ]; do
+      up=$(dirname "$up")
+    done
+    (cd "$up" 2> /dev/null) ||
+      cannot_resolve "something above it is not a folder this user can search"
   fi
 fi
 # Squeezed only now: the match forms want it, the cd above does not.
@@ -140,17 +147,18 @@ for h in "$home" "$home_as_set" "$real" "$profile" "$profile_as_set" "$forward" 
   homes+="$h"$'\n'
 done
 [ -n "$home$real$profile" ] ||
-  echo "⚠  [home-path] HOME and USERPROFILE name no home directory (unset, /, a drive alone, or one segment such as /root), so nothing is checked." >&2
+  echo "⚠  [home-path] HOME and USERPROFILE name no home directory (unset, /, a drive alone," \
+    "or one segment such as /root), so nothing is checked." >&2
 
 # ENVIRON, not awk -v, which would read the backslashes of a Windows path as escapes. LC_ALL=C,
 # as a diff is bytes, not text: tolower() then folds only A-Z (a Turkish locale folds I to a
 # dotless i), and bytes that are not UTF-8 neither derail gawk nor stop BSD awk.
 # A home counts wherever it starts, as in -I/home/al/include or /mnt/backup/home/al, but only
 # up to the end of a segment: /home/al does not match /home/alice, though a full stop that
-# ends a sentence still ends the path. Case is ignored, as Windows paths are.
-# File headers are the ---/+++ lines between "diff --git" (or a merge's "diff --combined") and
-# the first hunk; after that, a line starting "+++" is an added line that starts with "++".
-hits=$(HOMES="$homes" DASHED="$home"$'\n'"$real"$'\n'"$profile" LC_ALL=C awk '
+# ends a sentence still ends the path. ASCII case is ignored, as Windows paths are.
+# File headers are the ---/+++ lines between "diff --git" (or a merge's "diff --combined" or
+# "diff --cc") and the first hunk; after that, "+++" is an added line starting with "++".
+hits=$(HOMES="$homes" LC_ALL=C awk '
   # name is what the character after h must not be; lead, when set, the one before it.
   function names_home(line, h, name, lead,    s, p, q, at) {
     s = line
@@ -170,6 +178,21 @@ hits=$(HOMES="$homes" DASHED="$home"$'\n'"$real"$'\n'"$profile" LC_ALL=C awk '
     }
     return 0
   }
+  # Consume the original name once, so no candidate can match an inserted placeholder.
+  # Literal matching also keeps regexp characters in a home harmless.
+  function redact(file,    out, at, size, i, h, p) {
+    while (1) {
+      at = 0
+      for (i = 1; i <= 2 * n; i++) {
+        h = i <= n ? home[i] : dashed[i - n]
+        p = h == "" ? 0 : index(tolower(file), h)
+        if (p > 0 && (at == 0 || p < at)) { at = p; size = length(h) }
+      }
+      if (at == 0) return out file
+      out = out substr(file, 1, at - 1) "<home>"
+      file = substr(file, at + size)
+    }
+  }
   BEGIN {
     n = split(tolower(ENVIRON["HOMES"]), home, "\n")
     # Claude Code names a project folder after its working directory with each UTF-16 unit but
@@ -178,8 +201,9 @@ hits=$(HOMES="$homes" DASHED="$home"$'\n'"$real"$'\n'"$profile" LC_ALL=C awk '
     # Bytes here: dropping UTF-8 continuation bytes leaves one byte per character, and the lead
     # byte of a 4-byte character, the only kind outside that plane, becomes two -.
     # Such a name starts a path or follows a separator, and a - ends a segment of it.
-    d = split(ENVIRON["DASHED"], dashed, "\n")
-    for (i = 1; i <= d; i++) {
+    # Use every plain spelling, including as-set homes whose doubled separators survive.
+    for (i = 1; i <= n; i++) {
+      dashed[i] = home[i]
       gsub(/[\200-\277]/, "", dashed[i])
       gsub(/[\360-\367]/, "--", dashed[i])
       gsub(/[^A-Za-z0-9]/, "-", dashed[i])
@@ -187,9 +211,13 @@ hits=$(HOMES="$homes" DASHED="$home"$'\n'"$real"$'\n'"$profile" LC_ALL=C awk '
     }
   }
   /^commit [0-9a-f]+$/ { commit = substr($2, 1, 12) " "; next }
-  /^diff --(git|combined) / { header = 1; next }
+  /^diff --(git|combined|cc) / { header = 1; next }
   # git ends a name that holds a space with a tab.
-  header && /^\+\+\+ / { file = substr($0, 5); sub(/^b\//, "", file); sub(/\t$/, "", file); next }
+  header && /^\+\+\+ / {
+    file = substr($0, 5); sub(/^b\//, "", file); sub(/\t$/, "", file)
+    file = redact(file)
+    next
+  }
   # "@@ -a,b +c,d @@", or for a merge one @ and one -a,b per parent more: c is the number of
   # the first line the hunk leaves in the file.
   /^@@/ {
@@ -217,8 +245,10 @@ hits=$(HOMES="$homes" DASHED="$home"$'\n'"$real"$'\n'"$profile" LC_ALL=C awk '
     line = tolower(substr($0, parents + 1))
     gsub(/(\\*\/)+/, "/", line)
     hit = 0
-    for (i = 1; i <= n && !hit; i++) hit = home[i] != "" && names_home(line, home[i], "[a-z0-9_~-]", "")
-    for (i = 1; i <= d && !hit; i++) hit = dashed[i] != "" && names_home(line, dashed[i], "[a-z0-9]", "[a-z0-9]")
+    for (i = 1; i <= n && !hit; i++)
+      hit = home[i] != "" && names_home(line, home[i], "[a-z0-9_~-]", "")
+    for (i = 1; i <= n && !hit; i++)
+      hit = dashed[i] != "" && names_home(line, dashed[i], "[a-z0-9]", "[a-z0-9]")
     if (hit) printf "     %s%s:%d\n", commit, file, number
     number++
   }
@@ -227,5 +257,6 @@ hits=$(HOMES="$homes" DASHED="$home"$'\n'"$real"$'\n'"$profile" LC_ALL=C awk '
 [ -z "$hits" ] && exit 0
 echo "❌ [home-path] these added lines name your home directory, which would be published:" >&2
 printf '%s\n' "$hits" >&2
-echo "   Use a relative path, ~, or a placeholder such as <repo>, then rewrite the commit that adds it." >&2
+echo "   Use a relative path, ~, or a placeholder such as <repo>," \
+  "then rewrite the commit that adds it." >&2
 exit 1

@@ -12,14 +12,48 @@ Enable the tracked hooks once per clone with `scripts/install-git-hooks.sh`, whi
 
 `scripts/hooks/home-path.sh` is the **home-path check**. An agent that copies an absolute path from its session would publish the committer's username and folder layout, and once pushed, an amend or force-push cannot take it back: GitHub keeps the old commit until GitHub Support purges it. So the check refuses any added line in a diff that names the committer's own home:
 
+- **Coverage:** local Git commits and pushes run it once the hooks are installed and
+  `core.hooksPath` still selects `scripts/hooks`. Under jj, run `jj gate` before committing
+  and use `jj gpush` to push; `jj commit` itself runs no gate. The identities come from the
+  checking process's `HOME` and `USERPROFILE`, so another machine's home is not covered.
+  [Cloud sessions](../docs/agents/cloud-sessions.md) install no hooks and have no enforced
+  home-path check before publication; their maintainer check runs afterwards.
 - **What counts:** `$HOME`, its resolved form, and `USERPROFILE` (with either slash, or the doubled backslashes of a TOML or JSON string), each also in the dashed spelling Claude Code gives a working directory in its scratchpad and memory paths (`-home-<user>-repo`, one `-` for each UTF-16 unit that is not an ASCII letter or digit, so two for an emoji), where it starts a path or follows a separator. Only the committer's home counts, so generic test paths such as `/home/user/show` pass.
 - **How it matches:** wherever the home starts (as in `-I/home/<user>/include`), up to the end of a path segment, in any ASCII case. A full stop or ellipsis that ends a sentence, or the `..` of a git range, still ends the path. `\/` and `\\/` are read as `/`, and a run of slashes as one. The finer rules are in the script's comments.
 - **No home to look for:** a home of one segment, such as `/root` or `C:\app`, is the same on every machine and names nobody, so it is not looked for. When neither variable names a home (unset, `/`, a drive alone, or one segment) the check only warns: in a container or CI job whose `HOME` is `/root`, nothing is checked, and that warning is the only sign. A `HOME` it cannot resolve (a dangling symlink, a symlink loop, a folder it cannot enter or search) refuses.
-- **The report:** each hit as `file:line`, or `<commit> file:line`, never the line's text, because gate output gets pasted into PR descriptions, which nothing checks. The file name is printed as git gives it (see Limits). Fix a refusal with a relative path, `~` or a placeholder such as `<repo>`, then rewrite the commit that adds it.
+- **The report:** each hit as `file:line`, or `<commit> file:line`, never the line's text,
+  because gate output gets pasted into PR descriptions, which nothing checks. Recognized
+  literal and dashed home occurrences in the original file name are replaced by `<home>`, ignoring
+  ASCII case; other parts keep git's spelling (see Limits). Fix a refusal with a relative
+  path, `~` or a placeholder such as `<repo>`, then rewrite the commit that adds it.
 - **Where it runs:** pre-commit and `jj gate` check what is being committed: pre-commit runs `home-path.sh --staged`, which reads the staged diff itself, and `jj gate` pipes in the stack's diff from its fork point. pre-push and `jj gpush` run `home-path.sh --published <sha>` (a full commit id), which runs `git log` itself over each commit in `<sha>` that no remote-tracking ref holds, one at a time, so a path added and then removed still counts. A merge counts for the lines its resolution adds, which no parent has. pre-commit is stricter: when a conflicted merge is concluded with `git commit`, it diffs the index against `HEAD`, so a line the other parent brings in counts as added even when it is already published; `git commit --no-verify` is the way past it.
 - **What git settings cannot change:** `--staged` and `--published` run git with one list of flags (`--text`, `--no-color`, `--no-ext-diff`, `--no-textconv`, `--no-relative`, the `a/` `b/` prefixes) and `--no-replace-objects`, and `--published` also with `--root` and no graft file, so forced colour, an external diff, a textconv driver, a `-diff` or `binary` attribute, a NUL byte that makes git take a file for binary, `diff.noprefix`, `git replace`, `info/grafts`, `log.showRoot=false` or `diff.relative` (which would drop each file outside the folder git runs from) can neither hide a line nor misname a file, but for a merge resolution in a binary file (see Limits). `jj diff` reads none of those settings, and has no `--text` of its own: for a file jj takes for binary it prints only that the files differ, so `jj gate` does not read one (see Limits). `jj gpush` does read it, because it runs `--published`.
-- **Bypasses:** it runs before `SKIP_REVIEW_GATE` and `SKIP_SLOW_GATES` are read, so neither skips it; only `git commit --no-verify`, `git push --no-verify` and plain `jj git push` do.
-- **Limits:** it does not read commit or tag messages (#220), file names, or text outside git such as PR descriptions. `--published` does not read what a merge resolution adds to a file git takes for binary (#222), since `git log -c` ignores `--text`; pre-commit reads it when the merge is concluded with `git commit`. `jj gate` reads no file jj takes for binary at all, since `jj diff` has no `--text` (#222); `jj gpush` reads it. Of the Windows spellings it misses mixed separators inside the home (`C:\Users/<user>/x`), the WSL form (`/mnt/c/Users/<user>/x`), and backslashes escaped twice (`C:\\\\Users\\\\<user>`, four per separator). A folder named in the dashed spelling is not read as a file name, but its name shows in the report when a line inside it hits; and a flag or CSS modifier that begins with the dashed spelling (`--<a>-<b>` for a home `/<a>/<b>`) is refused. It misses a home with a space written as `%20` or `\ `, or a `/` written as `%2F` or `\u002f`, and refuses a sibling such as `<home>+x`. It prints a file name git quotes (non-ASCII, or one holding a tab or quote) in its quoted form. A commit any remote-tracking ref holds counts as published, so with a second remote, a commit pushed there first is not checked when it later goes to GitHub. In a clone with no remote-tracking refs it scans the whole history, which still holds an old home path.
+- **Bypasses:** with the hooks installed and active, the check runs before
+  `SKIP_REVIEW_GATE` and `SKIP_SLOW_GATES` are read, so neither skips it.
+  `git commit --no-verify` (also `-n`), `git push --no-verify` and plain `jj git push` bypass
+  the respective gates. An unconfigured clone, a redirected `core.hooksPath` or edited hooks
+  can also avoid the check. With no qualifying home, the check runs but only warns (above).
+- **Limits:** it does not reject file names alone, commit or tag messages (#220), or text
+  outside git such as PR descriptions. `--published` does not read what a merge resolution
+  adds to a file git takes for binary (#222), since `git log -c` ignores `--text`; pre-commit
+  reads it when the merge is concluded with `git commit`. `jj gate` reads no file jj takes
+  for binary at all, since `jj diff` has no `--text` (#222); `jj gpush` reads it. Of the Windows
+  spellings it misses mixed separators inside the home (`C:\Users/<user>/x`), the WSL form
+  (`/mnt/c/Users/<user>/x`), and backslashes escaped twice (`C:\\\\Users\\\\<user>`, four per
+  separator). A flag or CSS modifier that begins with the dashed spelling (`--<a>-<b>` for a
+  home `/<a>/<b>`) is refused. It misses a home with a space written as `%20` or `\ `, or a `/`
+  written as `%2F` or `\u002f`, and refuses siblings such as `<home>+x`, `<home>./x`,
+  `<home>..x` or `<home>é/x`; the ASCII boundary heuristic favors refusal. A file name git
+  quotes (non-ASCII, or one holding a tab or quote) stays quoted; encoded home spellings in
+  that name may remain visible. A commit any remote-tracking ref holds counts as published,
+  so with a second remote, a commit pushed there first is not checked when it later goes to
+  GitHub. A CI checkout or fetch can likewise make `--published <sha>` scan nothing; it is
+  not a scan of already published history. In a clone with no remote-tracking refs it scans
+  the whole history, which still holds an old home path.
+- **Shell support:** the standalone checker supports Bash 3.2. The real pre-commit hook uses
+  `mapfile -d`, requiring Bash 4.4 or newer, and the jj gate uses `mapfile`, requiring Bash 4
+  or newer. The full `home-path.test.js` suite runs these hooks and therefore needs Bash 4.4
+  or newer; on macOS select a newer Bash through `PATH` before running it.
 
 The two dirty-tree checks (pre-commit's, when it runs cargo, and pre-push's, before its test gate) also refuse while an assume-unchanged or skip-worktree file is missing or differs from the index, since git diff cannot see that. Pre-commit looks only at the files cargo reads (Rust, Cargo and `desktop-slint/ui`); pre-push looks at every flagged file. A flagged file that still matches the index passes. The refusal says how to fix it. `scripts/mutants-diff.sh` makes the same check over every flagged file, since cargo-mutants copies the working tree. To bypass pre-commit's check, use `git commit --no-verify`, which skips all of commit-msg and pre-commit; to bypass pre-push's, use `SKIP_SLOW_GATES=1`, which skips its test gate. In a sparse checkout the out-of-cone files are missing, so pre-push refuses whenever it reaches its test gate, and pre-commit refuses when it runs cargo while any file cargo reads is out of the cone. Those refusals hold only while `scripts/` is in the cone: outside it the hooks are missing too, and git runs no gate at all.
 
