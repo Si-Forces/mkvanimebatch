@@ -82,10 +82,10 @@ squeeze() { # <path>
   done
 }
 
-# Trailing separators would stop "$HOME/x" from matching. A doubled one would too, so each
-# variable counts as set and squeezed; for HOME, as set matters only for a doubled backslash,
-# since a run of slashes in the scanned line is read as one. USERPROFILE is taken with
-# backslashes, whichever it was set with; the other forms come from that below.
+# Trailing separators would stop "$HOME/x" from matching. Keep each variable as set and
+# squeezed: literal backslashes matter in POSIX homes, and repeated separators survive in
+# dashed spellings and filenames. USERPROFILE uses backslashes here; the other forms come
+# from that below.
 home_as_set=${HOME:-}
 while [[ $home_as_set == */ ]]; do home_as_set=${home_as_set%/}; done
 replace_all "${USERPROFILE:-}" / "$bs"
@@ -180,6 +180,7 @@ hits=$(HOMES="$homes" LC_ALL=C awk '
   }
   # Walk the original name, including hidden bytes: a later match can overlap and extend
   # the hidden span. Inserted placeholders are never scanned, and homes are matched literally.
+  # covered_until is exclusive, so an empty home (ending at p) hides no bytes.
   function redact(file,    out, lower, p, i, h, covered_until, hidden) {
     lower = tolower(file)
     for (p = 1; p <= length(file); p++) {
@@ -239,12 +240,9 @@ hits=$(HOMES="$homes" LC_ALL=C awk '
     mark = substr($0, 1, parents)
     if (mark ~ /-/) next
     if (mark ~ / /) { number++; next }
-    # The \/ some JSON writers put for / is read as /, so one rule covers both spellings; so
-    # is \\/, that escape inside another string. A run of them is read as one /, as HOME is
-    # squeezed.
-    # Scan the line with slash runs squeezed (a POSIX path can repeat a slash,
-    # and a literal backslash before it must survive) and with \/ decoded (a JSON
-    # writer escapes /; that decode must not erase the backslash).
+    # Keep a slash-squeezed form with literal POSIX backslashes, plus a decoded form where
+    # JSON \/ (or \\/ inside another string) becomes /. Decode runs together so escaped
+    # or plain repeated slashes also read as one /.
     squeezed = tolower(substr($0, parents + 1))
     gsub(/\/+/, "/", squeezed)
     line = squeezed
@@ -253,9 +251,9 @@ hits=$(HOMES="$homes" LC_ALL=C awk '
     for (i = 1; i <= n && !hit; i++)
       hit = home[i] != "" && (names_home(squeezed, home[i], "[a-z0-9_~-]", "") ||
         names_home(line, home[i], "[a-z0-9_~-]", ""))
+    # Dashed homes use only [a-z0-9-]; slash decoding changes no match or boundary.
     for (i = 1; i <= n && !hit; i++)
-      hit = dashed[i] != "" && (names_home(squeezed, dashed[i], "[a-z0-9]", "[a-z0-9]") ||
-        names_home(line, dashed[i], "[a-z0-9]", "[a-z0-9]"))
+      hit = dashed[i] != "" && names_home(line, dashed[i], "[a-z0-9]", "[a-z0-9]")
     if (hit) printf "     %s%s:%d\n", commit, file, number
     number++
   }

@@ -351,14 +351,18 @@ test("checks a POSIX home whose own name holds a backslash before a slash, also 
   assert.match(published.stderr, /\n {5}(?:[0-9a-f]+ )?f\.txt:2\n/);
 });
 
-test("checks the home as set when it repeats a slash and the resolved home differs", () => {
+test("checks squeezed, dashed and filename spellings of HOME with repeated slashes", () => {
   const real = path.join(tmp, "as-set-real");
   fs.mkdirSync(real);
   fs.mkdirSync(path.join(real, "home"));
   const link = path.join(tmp, "as-set-link");
   fs.symlinkSync(real, link);
   const asSet = `${link}//home`;
-  hit(run(diff("a.js", `+see ${asSet}/x`), { HOME: asSet }), "as set");
+  hit(run(diff("a.js", `+see ${asSet}/x`), { HOME: asSet }), "squeezed");
+  hit(run(diff("a.log", `+see ${dashed(asSet)}-repo`), { HOME: asSet }), "dashed as set");
+  const report = run(diff(`foo${asSet}/f.txt`, `+see ${asSet}/x`), { HOME: asSet });
+  hit(report, "filename as set");
+  assert.ok(report.stderr.includes("     foo<home>/f.txt:1\n"), report.stderr);
 });
 
 test("redacts the longest recognized home when two start at the same place", () => {
