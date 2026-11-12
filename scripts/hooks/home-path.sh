@@ -186,7 +186,12 @@ hits=$(HOMES="$homes" LC_ALL=C awk '
       for (i = 1; i <= 2 * n; i++) {
         h = i <= n ? home[i] : dashed[i - n]
         p = h == "" ? 0 : index(tolower(file), h)
-        if (p > 0 && (at == 0 || p < at)) { at = p; size = length(h) }
+        # Keep the longest form when several start here, so a shorter home that
+        # prefixes another cannot leave the tail of the longer one in the report.
+        if (p > 0 &&
+            (at == 0 || p < at || (p == at && length(h) > size))) {
+          at = p; size = length(h)
+        }
       }
       if (at == 0) return out file
       out = out substr(file, 1, at - 1) "<home>"
@@ -242,13 +247,18 @@ hits=$(HOMES="$homes" LC_ALL=C awk '
     # The \/ some JSON writers put for / is read as /, so one rule covers both spellings; so
     # is \\/, that escape inside another string. A run of them is read as one /, as HOME is
     # squeezed.
-    line = tolower(substr($0, parents + 1))
+    # The line is scanned as written and with \/ decoded: decoding removes a
+    # literal backslash that a POSIX home can hold before a slash.
+    raw = tolower(substr($0, parents + 1))
+    line = raw
     gsub(/(\\*\/)+/, "/", line)
     hit = 0
     for (i = 1; i <= n && !hit; i++)
-      hit = home[i] != "" && names_home(line, home[i], "[a-z0-9_~-]", "")
+      hit = home[i] != "" && (names_home(raw, home[i], "[a-z0-9_~-]", "") ||
+        names_home(line, home[i], "[a-z0-9_~-]", ""))
     for (i = 1; i <= n && !hit; i++)
-      hit = dashed[i] != "" && names_home(line, dashed[i], "[a-z0-9]", "[a-z0-9]")
+      hit = dashed[i] != "" && (names_home(raw, dashed[i], "[a-z0-9]", "[a-z0-9]") ||
+        names_home(line, dashed[i], "[a-z0-9]", "[a-z0-9]"))
     if (hit) printf "     %s%s:%d\n", commit, file, number
     number++
   }

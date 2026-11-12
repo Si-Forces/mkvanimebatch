@@ -19,7 +19,7 @@ Enable the tracked hooks once per clone with `scripts/install-git-hooks.sh`, whi
   [Cloud sessions](../docs/agents/cloud-sessions.md) install no hooks and have no enforced
   home-path check before publication; their maintainer check runs afterwards.
 - **What counts:** `$HOME`, its resolved form, and `USERPROFILE` (with either slash, or the doubled backslashes of a TOML or JSON string), each also in the dashed spelling Claude Code gives a working directory in its scratchpad and memory paths (`-home-<user>-repo`, one `-` for each UTF-16 unit that is not an ASCII letter or digit, so two for an emoji), where it starts a path or follows a separator. Only the committer's home counts, so generic test paths such as `/home/user/show` pass.
-- **How it matches:** wherever the home starts (as in `-I/home/<user>/include`), up to the end of a path segment, in any ASCII case. A full stop or ellipsis that ends a sentence, or the `..` of a git range, still ends the path. `\/` and `\\/` are read as `/`, and a run of slashes as one. The finer rules are in the script's comments.
+- **How it matches:** wherever the home starts (as in `-I/home/<user>/include`), up to the end of a path segment, in any ASCII case. A full stop or ellipsis that ends a sentence, or the `..` of a git range, still ends the path. `\/` and `\\/` are read as `/`, and a run of slashes as one. The line is scanned as written too, so a literal backslash before a slash in a POSIX home still matches. The finer rules are in the script's comments.
 - **No home to look for:** a home of one segment, such as `/root` or `C:\app`, is the same on every machine and names nobody, so it is not looked for. When neither variable names a home (unset, `/`, a drive alone, or one segment) the check only warns: in a container or CI job whose `HOME` is `/root`, nothing is checked, and that warning is the only sign. A `HOME` it cannot resolve (a dangling symlink, a symlink loop, a folder it cannot enter or search) refuses.
 - **The report:** each hit as `file:line`, or `<commit> file:line`, never the line's text,
   because gate output gets pasted into PR descriptions, which nothing checks. Recognized
@@ -48,8 +48,9 @@ Enable the tracked hooks once per clone with `scripts/install-git-hooks.sh`, whi
   that name may remain visible. A commit any remote-tracking ref holds counts as published,
   so with a second remote, a commit pushed there first is not checked when it later goes to
   GitHub. A CI checkout or fetch can likewise make `--published <sha>` scan nothing; it is
-  not a scan of already published history. In a clone with no remote-tracking refs it scans
-  the whole history, which still holds an old home path.
+  not a scan of already published history. A clone of the pre-scrub history, or one that
+  fetches its old commits, still holds the old path; the current rewritten history does not.
+  The old commits stay on GitHub until GitHub Support purges them.
 - **Shell support:** the standalone checker supports Bash 3.2. The real pre-commit hook uses
   `mapfile -d`, requiring Bash 4.4 or newer, and the jj gate uses `mapfile`, requiring Bash 4
   or newer. The full `home-path.test.js` suite runs these hooks and therefore needs Bash 4.4

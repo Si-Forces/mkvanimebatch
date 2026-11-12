@@ -327,6 +327,31 @@ test("checks dashed as-set homes with doubled backslashes and a different resolv
   }), "USERPROFILE as set");
 });
 
+test("checks a POSIX home whose own name holds a backslash before a slash", () => {
+  const base = path.join(tmp, "slash-home");
+  fs.mkdirSync(base);
+  const weird = path.join(base, "we\\");
+  fs.mkdirSync(weird);
+  const literal = path.join(weird, "home");
+  fs.mkdirSync(literal);
+  hit(run(diff("a.js", `+see ${literal}/x`), { HOME: literal }), "stdin");
+  const { dir: repo, git, commit } = gitRepo("slash-home-repo");
+  fs.writeFileSync(path.join(repo, "f.txt"), `${literal}/x\n`);
+  git("add", "-A");
+  hit(run("", { HOME: literal }, { args: ["--staged"], cwd: repo }), "--staged");
+  const sha = commit(`${literal}/x\n`);
+  hit(run("", { HOME: literal }, { args: ["--published", sha], cwd: repo }), "--published");
+});
+
+test("redacts the longest recognized home when two start at the same place", () => {
+  const r = run(diff("foo/C:/Users/anna/f.txt", "+see C:/Users/ann/x"), {
+    HOME: "C:/Users/ann",
+    USERPROFILE: "C:\\Users\\anna",
+  });
+  hit(r);
+  assert.ok(r.stderr.includes("     foo/<home>/f.txt:1\n"), r.stderr);
+});
+
 test("a home of one segment names nobody, so it is not looked for", () => {
   const lines = ["+cd /no-such-root/x", "+cd //no-such-root/x", "+cd C:\\app\\x", "+cd C:\\\\app\\x", "+cd -no-such-root-x", "+cd C--app-x"];
   for (const env of [{ HOME: "/no-such-root" }, { HOME: "//no-such-root/", USERPROFILE: "C:\\app" }, { HOME: "/", USERPROFILE: "C:\\\\app" }, { HOME: "C:\\\\app" }]) {
