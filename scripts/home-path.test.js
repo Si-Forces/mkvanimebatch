@@ -327,20 +327,38 @@ test("checks dashed as-set homes with doubled backslashes and a different resolv
   }), "USERPROFILE as set");
 });
 
-test("checks a POSIX home whose own name holds a backslash before a slash", () => {
+test("checks a POSIX home whose own name holds a backslash before a slash, also with the slash repeated", () => {
   const base = path.join(tmp, "slash-home");
   fs.mkdirSync(base);
   const weird = path.join(base, "we\\");
   fs.mkdirSync(weird);
   const literal = path.join(weird, "home");
   fs.mkdirSync(literal);
-  hit(run(diff("a.js", `+see ${literal}/x`), { HOME: literal }), "stdin");
+  const combined = literal.replace("\\/", "\\//");
+  const lines = [`+see ${literal}/x`, `+see ${combined}/x`];
+  const stdin = run(diff("a.js", ...lines), { HOME: literal });
+  hit(stdin, "stdin");
+  assert.match(stdin.stderr, /\n {5}a\.js:2\n/);
   const { dir: repo, git, commit } = gitRepo("slash-home-repo");
-  fs.writeFileSync(path.join(repo, "f.txt"), `${literal}/x\n`);
+  fs.writeFileSync(path.join(repo, "f.txt"), `${lines.join("\n")}\n`);
   git("add", "-A");
-  hit(run("", { HOME: literal }, { args: ["--staged"], cwd: repo }), "--staged");
-  const sha = commit(`${literal}/x\n`);
-  hit(run("", { HOME: literal }, { args: ["--published", sha], cwd: repo }), "--published");
+  const staged = run("", { HOME: literal }, { args: ["--staged"], cwd: repo });
+  hit(staged, "--staged");
+  assert.match(staged.stderr, /\n {5}f\.txt:2\n/);
+  const sha = commit(`${lines.join("\n")}\n`);
+  const published = run("", { HOME: literal }, { args: ["--published", sha], cwd: repo });
+  hit(published, "--published");
+  assert.match(published.stderr, /\n {5}(?:[0-9a-f]+ )?f\.txt:2\n/);
+});
+
+test("checks the home as set when it repeats a slash and the resolved home differs", () => {
+  const real = path.join(tmp, "as-set-real");
+  fs.mkdirSync(real);
+  fs.mkdirSync(path.join(real, "home"));
+  const link = path.join(tmp, "as-set-link");
+  fs.symlinkSync(real, link);
+  const asSet = `${link}//home`;
+  hit(run(diff("a.js", `+see ${asSet}/x`), { HOME: asSet }), "as set");
 });
 
 test("redacts the longest recognized home when two start at the same place", () => {

@@ -247,17 +247,19 @@ hits=$(HOMES="$homes" LC_ALL=C awk '
     # The \/ some JSON writers put for / is read as /, so one rule covers both spellings; so
     # is \\/, that escape inside another string. A run of them is read as one /, as HOME is
     # squeezed.
-    # The line is scanned as written and with \/ decoded: decoding removes a
-    # literal backslash that a POSIX home can hold before a slash.
-    raw = tolower(substr($0, parents + 1))
-    line = raw
+    # Scan the line with slash runs squeezed (a POSIX path can repeat a slash,
+    # and a literal backslash before it must survive) and with \/ decoded (a JSON
+    # writer escapes /; that decode must not erase the backslash).
+    squeezed = tolower(substr($0, parents + 1))
+    gsub(/\/+/, "/", squeezed)
+    line = squeezed
     gsub(/(\\*\/)+/, "/", line)
     hit = 0
     for (i = 1; i <= n && !hit; i++)
-      hit = home[i] != "" && (names_home(raw, home[i], "[a-z0-9_~-]", "") ||
+      hit = home[i] != "" && (names_home(squeezed, home[i], "[a-z0-9_~-]", "") ||
         names_home(line, home[i], "[a-z0-9_~-]", ""))
     for (i = 1; i <= n && !hit; i++)
-      hit = dashed[i] != "" && (names_home(raw, dashed[i], "[a-z0-9]", "[a-z0-9]") ||
+      hit = dashed[i] != "" && (names_home(squeezed, dashed[i], "[a-z0-9]", "[a-z0-9]") ||
         names_home(line, dashed[i], "[a-z0-9]", "[a-z0-9]"))
     if (hit) printf "     %s%s:%d\n", commit, file, number
     number++
