@@ -18,7 +18,13 @@ Enable the tracked hooks once per clone with `scripts/install-git-hooks.sh`, whi
   checking process's `HOME` and `USERPROFILE`, so another machine's home is not covered.
   [Cloud sessions](../docs/agents/cloud-sessions.md) install no hooks and have no enforced
   home-path check before publication; their maintainer check runs afterwards.
-- **What counts:** `$HOME`, its resolved form, and `USERPROFILE` (with either slash, or the doubled backslashes of a TOML or JSON string), each also in the dashed spelling Claude Code gives a working directory in its scratchpad and memory paths (`-home-<user>-repo`, one `-` for each UTF-16 unit that is not an ASCII letter or digit, so two for an emoji), where it starts a path or follows a separator. Only the committer's home counts, so generic test paths such as `/home/user/show` pass.
+- **What counts:** `$HOME`, its resolved form, and `USERPROFILE` (with either slash, or the
+  doubled backslashes of a TOML or JSON string), each also in the dashed spelling Claude Code
+  gives a working directory in its scratchpad and memory paths (`-home-<user>-repo`, one `-`
+  for each UTF-16 unit that is not an ASCII letter or digit, so two for an emoji). A dashed
+  match starts the line or follows a byte other than an ASCII letter or digit; `_`, `+`, `.`
+  and `-` all qualify. Only the committer's home counts, so generic test paths such as
+  `/home/user/show` pass.
 - **How it matches:** wherever the home starts (as in `-I/home/<user>/include`), up to the end of a path segment, in any ASCII case. A full stop or ellipsis that ends a sentence, or the `..` of a git range, still ends the path. `\/` and `\\/` are read as `/`, and a run of slashes as one. The line is scanned with slash runs squeezed and with `\/` decoded, so a literal backslash before a slash in a POSIX home still matches even when the path repeats the slash. The finer rules are in the script's comments.
 - **No home to look for:** a home of one segment, such as `/root` or `C:\app`, is the same on every machine and names nobody, so it is not looked for. When neither variable names a home (unset, `/`, a drive alone, or one segment) the check only warns: in a container or CI job whose `HOME` is `/root`, nothing is checked, and that warning is the only sign. A `HOME` it cannot resolve (a dangling symlink, a symlink loop, a folder it cannot enter or search) refuses.
 - **The report:** each hit as `file:line`, or `<commit> file:line`, never the line's text,
@@ -33,8 +39,9 @@ Enable the tracked hooks once per clone with `scripts/install-git-hooks.sh`, whi
   `git commit --no-verify` (also `-n`), `git push --no-verify` and plain `jj git push` bypass
   the respective gates. An unconfigured clone, a redirected `core.hooksPath` or edited hooks
   can also avoid the check. With no qualifying home, the check runs but only warns (above).
-- **Limits:** it does not reject file names alone, commit or tag messages (#220), or text
-  outside git such as PR descriptions. `--published` does not read what a merge resolution
+- **Limits:** it does not reject file names alone or text outside git such as PR descriptions.
+  Commit and tag messages are also unchecked; #220 tracks message coverage only.
+  `--published` does not read what a merge resolution
   adds to a file git takes for binary (#222), since `git log -c` ignores `--text`; pre-commit
   reads it when the merge is concluded with `git commit`. `jj gate` reads no file jj takes
   for binary at all, since `jj diff` has no `--text` (#222); `jj gpush` reads it. Of the Windows
@@ -44,13 +51,16 @@ Enable the tracked hooks once per clone with `scripts/install-git-hooks.sh`, whi
   home `/<a>/<b>`) is refused. It misses a home with a space written as `%20` or `\ `, or a `/`
   written as `%2F` or `\u002f`, and refuses siblings such as `<home>+x`, `<home>./x`,
   `<home>..x` or `<home>é/x`; the ASCII boundary heuristic favors refusal. A file name git
-  quotes (non-ASCII, or one holding a tab or quote) stays quoted; encoded home spellings in
-  that name may remain visible. A commit any remote-tracking ref holds counts as published,
+  quotes (non-ASCII, or one holding a tab, quote or backslash) stays quoted; encoded home
+  spellings in that name may remain visible. A commit any remote-tracking ref holds counts as published,
   so with a second remote, a commit pushed there first is not checked when it later goes to
   GitHub. A CI checkout or fetch can likewise make `--published <sha>` scan nothing; it is
   not a scan of already published history. A clone of the pre-scrub history, or one that
-  fetches its old commits, still holds the old path; the current rewritten history does not.
-  The old commits stay on GitHub until GitHub Support purges them.
+  fetches its old commits, still holds the original leaked links. The base workflow test's
+  escaped absolute-path assertion also remains reachable in this branch's ancestry.
+  The original leaked commits stay on GitHub until GitHub Support purges them.
+  The checker buffers the full diff and report in shell variables, so peak memory grows with
+  the input history and number of hits. Runtime measurements do not bound memory use.
 - **Shell support:** the standalone checker supports Bash 3.2. The real pre-commit hook uses
   `mapfile -d`, requiring Bash 4.4 or newer, and the jj gate uses `mapfile`, requiring Bash 4
   or newer. The full `home-path.test.js` suite runs these hooks and therefore needs Bash 4.4

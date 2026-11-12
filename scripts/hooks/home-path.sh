@@ -201,7 +201,8 @@ hits=$(HOMES="$homes" LC_ALL=C awk '
     # A character outside the Basic Multilingual Plane is two units, so it gets two.
     # Bytes here: dropping UTF-8 continuation bytes leaves one byte per character, and the lead
     # byte of a 4-byte character, the only kind outside that plane, becomes two -.
-    # Such a name starts a path or follows a separator, and a - ends a segment of it.
+    # Such a name starts the line or follows any byte except an ASCII letter or digit;
+    # a - ends its segment.
     # Use every plain spelling, including as-set homes whose doubled separators survive.
     for (i = 1; i <= n; i++) {
       dashed[i] = home[i]
