@@ -114,6 +114,16 @@ test("accepts a numeric issue, another repo and a fix round with prev", async ()
   assert.match(logs.at(-1), /record-range 5a2a0ce fix\/x/);
 });
 
+test("includes valid optional skills, commit hint and review focus in the agent prompts", async () => {
+  const { prompts } = await run({
+    ...ARGS, skills: ["slint:slint"], commit_hint: "fix(core): settle cancellation",
+    review_focus: "trace cancellation during promotion",
+  }, { implement: DONE, "re-review": { findings: [] } });
+  assert.match(prompts.implement, /slint:slint/);
+  assert.match(prompts.implement, /fix\(core\): settle cancellation/);
+  assert.match(prompts["re-review"], /trace cancellation during promotion/);
+});
+
 test("runs every phase, quotes the log path and ends with the review steps", async () => {
   const { prompts, logs } = await run(ARGS, {
     implement: DONE,

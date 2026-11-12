@@ -9,18 +9,19 @@
 #   home-path.sh                     checks a git unified or combined diff on stdin
 #   home-path.sh --staged            checks the staged diff, so an unstaged edit can neither
 #                                    hide nor fake a hit
-#   home-path.sh --published <sha>   checks each commit in <sha> (a full commit id) that no
-#                                    remote-tracking ref holds, one at a time: a path added in
-#                                    one commit and removed in a later one is still in the
-#                                    pushed history. A merge counts for the lines its
-#                                    resolution adds, which no parent has.
+#   home-path.sh --published <old> <new> [remote]
+#                                    checks each commit in old..new, including fetched ones.
+#                                    Both ids are full; old=0 means a new ref. For a new ref,
+#                                    only that remote's main is a trusted baseline, if known;
+#                                    otherwise all reachable history is checked. A merge
+#                                    counts for lines its resolution adds, which no parent has.
 # Prints the file and line number of each hit, redacting recognized home spellings from the
 # file name, and exits 1, else exits 0. Not the line's text: gate output gets pasted into PR
 # descriptions, which nothing checks.
 # Run by pre-commit, pre-push and scripts/jj-gate.sh; not a hook itself.
 set -euo pipefail
 
-usage() { echo "❌ [home-path] usage: home-path.sh [--staged | --published <sha>]" >&2; exit 1; }
+usage() { echo "❌ [home-path] usage: home-path.sh [--staged | --published <old> <new> [remote]]" >&2; exit 1; }
 # What both git commands pass, so that no git setting hides a line or misnames a file. The
 # prefixes are set because diff.noprefix and diff.mnemonicPrefix would change them (a file's
 # name is read from its +++ line, so a/ is there only to match b/), and --no-relative because
@@ -28,36 +29,65 @@ usage() { echo "❌ [home-path] usage: home-path.sh [--staged | --published <sha
 # prints the lines of a file git takes for binary (by a -diff or binary attribute, or a NUL in
 # its first 8000 bytes), where it would otherwise say only that the files differ; a merge's
 # combined diff (-c) ignores it, so what a resolution adds to such a file stays unread. git's
-# own errors are dropped: they could print a path that holds the home. So are NUL bytes, in
-# every mode (--text prints the ones a file holds): bash drops one with a warning that names
-# this script's path, which may hold the home.
+# own errors are dropped: they could print a path that holds the home. NUL bytes are removed
+# in every mode (--text prints the ones a file holds).
 diff_flags=(-U0 --text --no-color --no-relative --no-ext-diff --no-textconv
   --src-prefix=a/ --dst-prefix=b/)
-case ${1:-} in
+mode=${1:-}
+# Keep the array nonempty for Bash 3.2 with nounset; --not alone excludes nothing.
+exclude=(--not)
+case $mode in
   --published)
     # A full commit id only: a ref or path could hold the home, and git's error would print
     # it. A push sends the original objects, so git log must not read git replace refs or an
-    # info/grafts file, which could hide a commit from it; the graft file named here cannot
-    # exist.
-    [ $# -eq 2 ] && [[ $2 =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] || usage
-    diff=$(GIT_GRAFT_FILE=/dev/null/none git --no-replace-objects log \
-      -p --root -c "${diff_flags[@]}" \
-      --format='commit %H' "$2" --not --remotes 2> /dev/null | tr -d '\0') ||
-      { echo "❌ [home-path] cannot list the commits in $2 to check them (git log $2 says why)." >&2
-        exit 1; }
+    # info/grafts file, which could hide a commit from it. /dev/null supplies no grafts.
+    [ $# -ge 3 ] && [ $# -le 4 ] &&
+      [[ $2 =~ ^(0|[0-9a-f]{40}|[0-9a-f]{64})$ && $3 =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] || usage
+    old=$2 new=$3
+    if [[ $old =~ ^0+$ ]]; then
+      # A fetched topic is still incoming to main. Never exclude every remote-tracking ref.
+      # An unknown destination (including a URL) has no trusted baseline: scan from the root.
+      old=""
+      if [ $# -eq 4 ]; then
+        # A remote may fetch privately and push elsewhere. Trust its fetched main only when
+        # one push URL equals its fetch URL. Sentinels keep trailing newlines distinguishable.
+        fetch_url=$(git remote get-url "$4" 2> /dev/null && printf .) || fetch_url=""
+        push_urls=$(git remote get-url --push --all "$4" 2> /dev/null && printf .) || push_urls=""
+        fetch_url=${fetch_url%$'\n.'} push_urls=${push_urls%$'\n.'}
+        if [[ -n $fetch_url && $fetch_url != *$'\n'* && $fetch_url == "$push_urls" ]]; then
+          old=$(git --no-replace-objects rev-parse --verify --quiet "refs/remotes/$4/main^{commit}" 2> /dev/null) || old=""
+        fi
+      fi
+    fi
+    [ -z "$old" ] || exclude=(--not "$old")
     ;;
   --staged)
     # A git replace ref on HEAD could stand a tree that already holds the line in for the one
     # the commit extends.
     [ $# -eq 1 ] || usage
-    diff=$(git --no-replace-objects diff --cached "${diff_flags[@]}" 2> /dev/null | tr -d '\0') ||
-      { echo "❌ [home-path] cannot read the staged diff (git diff --cached says why)." >&2
-        exit 1; }
     ;;
   *)
     [ $# -eq 0 ] || usage # a sha without --published would wait on stdin
-    diff=$(tr -d '\0') || { echo "❌ [home-path] cannot read the diff." >&2; exit 1; }
     ;;
+esac
+
+read_diff() {
+  case $mode in
+    --published)
+      GIT_GRAFT_FILE=/dev/null git --no-replace-objects log -p --root -c "${diff_flags[@]}" \
+        --format='commit %H' "$new" "${exclude[@]}" 2> /dev/null ||
+        { echo "❌ [home-path] cannot list the commits to check (git log says why)." >&2; return 1; } ;;
+    --staged)
+      git --no-replace-objects diff --cached "${diff_flags[@]}" 2> /dev/null ||
+        { echo "❌ [home-path] cannot read the staged diff (git diff --cached says why)." >&2; return 1; } ;;
+    *) cat || { echo "❌ [home-path] cannot read the diff." >&2; return 1; } ;;
+  esac
+}
+
+# A line-based diff cannot represent an identity containing a newline. Refuse it as a whole
+# instead of splitting it into unrelated, possibly one-segment names.
+case ${HOME:-}${USERPROFILE:-} in
+  *$'\n'*) echo "❌ [home-path] HOME and USERPROFILE must not contain newlines." >&2; exit 1 ;;
 esac
 
 bs='\'
@@ -109,12 +139,16 @@ if [ -n "$home_as_set" ]; then
   # that, ./C: is the same folder there, and no test can tell the two apart.
   dir=$home_as_set
   [[ $dir == /* || $dir =~ ^[A-Za-z]: ]] || dir=./$dir
-  if ! real=$(CDPATH= cd "$dir" 2> /dev/null && pwd -P); then
+  # The sentinel preserves a canonical folder name ending in newline through substitution.
+  if real=$(CDPATH= cd "$dir" 2> /dev/null && pwd -P 2> /dev/null && printf .); then
+    real=${real%$'\n.'}
+    case $real in *$'\n'*) cannot_resolve "the resolved name contains a newline" ;; esac
+  else
     [ -e "$dir" ] && cannot_resolve "not a folder this user can enter" # or a symlink to one
     [ -L "$dir" ] && cannot_resolve "a dangling symlink or a symlink loop"
     up=$dir
     until [ -e "$up" ] || [ -L "$up" ] || [ "$up" = / ] || [ "$up" = . ]; do
-      up=$(dirname "$up")
+      case $up in */*) up=${up%/*}; [ -n "$up" ] || up=/ ;; *) up=. ;; esac
     done
     (CDPATH= cd "$up" 2> /dev/null) ||
       cannot_resolve "something above it is not a folder this user can search"
@@ -137,15 +171,31 @@ names_someone "$home" || { home=""; home_as_set=""; }
 names_someone "$real" || real=""
 names_someone "$profile" || { profile=""; profile_as_set=""; }
 
+# A POSIX home may contain literal doubled backslashes and repeated forward slashes at once.
+# Preserve its backslashes while normalizing slashes, independently of squeeze() above.
+home_slashes=$home_as_set
+while [[ $home_slashes == *//* ]]; do
+  replace_all "$home_slashes" // /
+  home_slashes=$REPLY
+done
+
 # USERPROFILE also with forward slashes, and with the doubled backslashes a TOML or JSON
 # string needs.
 replace_all "$profile" "$bs" /
 forward=$REPLY
 replace_all "$profile" "$bs" "$bs$bs"
 homes=""
-for h in "$home" "$home_as_set" "$real" "$profile" "$profile_as_set" "$forward" "$REPLY"; do
+for h in "$home" "$home_as_set" "$home_slashes" "$real" "$profile" "$profile_as_set" "$forward" "$REPLY"; do
   homes+="$h"$'\n'
 done
+# Native UTF-16 replacement matches Claude Code, without an awk byte/locale approximation.
+# The JSON-doubled spelling is only a literal form, never another project-folder identity.
+dashed=$(MSYS_NO_PATHCONV=1 node -e '
+const homes = process.argv.slice(1);
+if (homes.some(p => p.includes("\ufffd"))) process.exit(1);
+process.stdout.write(homes.map(p => p.replace(/[^A-Za-z0-9]/g, "-")).join("\n"));
+' -- "$home" "$home_as_set" "$home_slashes" "$real" "$profile" "$profile_as_set" "$forward" 2> /dev/null) ||
+  { echo "❌ [home-path] cannot derive home spellings (Node and valid Unicode identities are required)." >&2; exit 1; }
 [ -n "$home$real$profile" ] ||
   echo "⚠  [home-path] HOME and USERPROFILE name no home directory (unset, /, a drive alone," \
     "or one segment such as /root), so nothing is checked." >&2
@@ -158,7 +208,7 @@ done
 # ends a sentence still ends the path. ASCII case is ignored, as Windows paths are.
 # File headers are the ---/+++ lines between "diff --git" (or a merge's "diff --combined" or
 # "diff --cc") and the first hunk; after that, "+++" is an added line starting with "++".
-hits=$(HOMES="$homes" LC_ALL=C awk '
+if read_diff | tr -d '\0' | HOMES="$homes" DASHED="$dashed" LC_ALL=C awk '
   # name is what the character after h must not be; lead, when set, the one before it.
   function names_home(line, h, name, lead,    s, p, q, at) {
     s = line
@@ -168,76 +218,116 @@ hits=$(HOMES="$homes" LC_ALL=C awk '
       # In a plain path, a full stop then a name character continues the name (".bak");
       # otherwise it ends a sentence (". " or "...") or starts a git range ("..main"). The
       # dashed spelling has a - for each full stop in the name, so there one starts an extension.
-      q = p + length(h)
-      if (lead == "" && substr(s, q, 1) == ".") q++
+      q = at + length(h)
       # A match at the start of the line has nothing before it; awks differ on what
       # substr(line, 0, 1) returns (gawk gives the first character of the line).
-      if (substr(s, q, 1) !~ name &&
-          (lead == "" || at == 1 || substr(line, at - 1, 1) !~ lead)) return 1
+      if (boundary(line, at, q, name, lead)) return 1
       s = substr(s, p + 1)
     }
     return 0
   }
+  function boundary(line, start, end, name, lead) {
+    if (name == "[a-z0-9_~-]" && substr(line, end, 1) == ".") end++
+    return substr(line, end, 1) !~ name &&
+      (lead == "" || start == 1 || substr(line, start - 1, 1) !~ lead)
+  }
+  # End of a literal home at p, allowing repeated or JSON-escaped slashes as in content.
+  function home_end(file, p, h,    j, end, c) {
+    if (h == "") return 0
+    end = p
+    for (j = 1; j <= length(h); j++) {
+      c = substr(h, j, 1)
+      if (c == "/") {
+        if (!match(substr(file, end), /^(\\*\/)+/)) return 0
+        end += RLENGTH
+      } else if (substr(file, end++, 1) != c) return 0
+    }
+    return end
+  }
   # Walk the original name, including hidden bytes: a later match can overlap and extend
   # the hidden span. Inserted placeholders are never scanned, and homes are matched literally.
-  # covered_until is exclusive, so an empty home (ending at p) hides no bytes.
-  function redact(file,    out, lower, p, i, h, covered_until, hidden) {
+  function redact(file,    out, lower, p, i, h, end, name, covered_until, hidden) {
     lower = tolower(file)
     for (p = 1; p <= length(file); p++) {
       hidden = p < covered_until
-      for (i = 1; i <= 2 * n; i++) {
+      for (i = 1; i <= n + nd; i++) {
         h = i <= n ? home[i] : dashed[i - n]
-        if (substr(lower, p, length(h)) == h && p + length(h) > covered_until)
-          covered_until = p + length(h)
+        name = i <= n ? "[a-z0-9_~-]" : "[a-z0-9]"
+        end = home_end(lower, p, h)
+        # No lead check in a report: a dashed overlap can start inside an earlier home.
+        if (end > covered_until && boundary(lower, p, end, name, "")) covered_until = end
       }
       if (!hidden) out = out (p < covered_until ? "<home>" : substr(file, p, 1))
     }
     return out
   }
+  # Git C-quotes control characters, quotes and backslashes even with core.quotePath=false.
+  # Decode its bytes before matching, then quote the safe result again for display.
+  function unquote(file,    out, p, c, oct, k, value) {
+    if (substr(file, length(file), 1) != "\"") return "<quoted filename>"
+    for (p = 2; p < length(file); p++) {
+      c = substr(file, p, 1)
+      if (c == "\\") {
+        c = substr(file, ++p, 1)
+        if (c ~ /[0-7]/) {
+          oct = substr(file, p, 3); value = 0
+          if (oct !~ /^[0-3][0-7][0-7]$/) return "<quoted filename>"
+          for (k = 1; k <= 3; k++) value = 8 * value + substr(oct, k, 1)
+          c = sprintf("%c", value); p += 2
+        } else if (c in escape) c = escape[c]
+        else return "<quoted filename>"
+      }
+      out = out c
+    }
+    return out
+  }
+  function quote(file,    out, p, c) {
+    out = "\""
+    for (p = 1; p <= length(file); p++) {
+      c = substr(file, p, 1)
+      if (c == "\\" || c == "\"") out = out "\\" c
+      else if (ord[c] < 32 || ord[c] > 126) out = out sprintf("\\%03o", ord[c])
+      else out = out c
+    }
+    return out "\""
+  }
   BEGIN {
     n = split(tolower(ENVIRON["HOMES"]), home, "\n")
-    # Claude Code names a project folder after its working directory with each UTF-16 unit but
-    # an ASCII letter or digit turned into -, as in -home-al-repo, so that spelling counts too.
-    # A character outside the Basic Multilingual Plane is two units, so it gets two.
-    # Bytes here: dropping UTF-8 continuation bytes leaves one byte per character, and the lead
-    # byte of a 4-byte character, the only kind outside that plane, becomes two -.
-    # Such a name starts the line or follows any byte except an ASCII letter or digit;
-    # a - ends its segment.
-    # Use every plain spelling, including as-set homes whose doubled separators survive.
-    for (i = 1; i <= n; i++) {
-      dashed[i] = home[i]
-      gsub(/[\200-\277]/, "", dashed[i])
-      gsub(/[\360-\367]/, "--", dashed[i])
-      gsub(/[^A-Za-z0-9]/, "-", dashed[i])
-      dashed[i] = tolower(dashed[i])
-    }
+    nd = split(tolower(ENVIRON["DASHED"]), dashed, "\n")
+    escape["a"] = "\a"; escape["b"] = "\b"; escape["t"] = "\t"; escape["n"] = "\n"
+    escape["v"] = "\v"; escape["f"] = "\f"; escape["r"] = "\r"
+    escape["\\"] = "\\"; escape["\""] = "\""
+    for (i = 1; i <= 255; i++) ord[sprintf("%c", i)] = i
   }
-  /^commit [0-9a-f]+$/ { commit = substr($2, 1, 12) " "; next }
-  /^diff --(git|combined|cc) / { header = 1; next }
+  /^commit [0-9a-f]+([ \t]|$)/ { commit = substr($2, 1, 12) " "; in_hunk = 0; next }
+  /^diff --(git|combined|cc) / { in_hunk = 0; next }
   # git ends a name that holds a space with a tab.
-  header && /^\+\+\+ / {
-    file = substr($0, 5); sub(/^b\//, "", file); sub(/\t$/, "", file)
+  !in_hunk && /^\+\+\+ / {
+    file = substr($0, 5); sub(/\t$/, "", file)
+    quoted = substr(file, 1, 1) == "\""
+    if (quoted) file = unquote(file)
+    sub(/^b\//, "/", file)
     file = redact(file)
+    sub(/^\//, "", file)
+    if (quoted) file = quote(file)
     next
   }
   # "@@ -a,b +c,d @@", or for a merge one @ and one -a,b per parent more: c is the number of
   # the first line the hunk leaves in the file.
   /^@@/ {
-    header = 0
+    in_hunk = 1
     match($0, /^@+/); parents = RLENGTH - 1
     match($0, /\+[0-9]+/); number = substr($0, RSTART + 1, RLENGTH - 1) + 0
     next
   }
   # diff.suppressBlankEmpty writes a blank context line with no mark at all, and context
   # reaches a -U0 diff through diff.interHunkContext or GIT_DIFF_OPTS, so such a line must
-  # still advance the count. (An added or removed blank line keeps its mark.) No !header here:
-  # the blank lines git log writes around each "commit" line, and any a file header might hold,
-  # are all above a hunk, where @@ sets the count outright.
-  /^$/ { number++; next }
+  # still advance the count. An added or removed blank line keeps its mark.
+  in_hunk && /^$/ { number++; next }
   # A line starts with one mark per parent: "-" for a line the result drops, "+" for one that
   # parent lacks. Only a line every parent lacks is new here; one a parent has was checked in
   # that parent, or is published already.
-  !header && /^[-+ ]/ {
+  in_hunk && /^[-+ ]/ {
     mark = substr($0, 1, parents)
     if (mark ~ /-/) next
     if (mark ~ / /) { number++; next }
@@ -253,16 +343,27 @@ hits=$(HOMES="$homes" LC_ALL=C awk '
       hit = home[i] != "" && (names_home(squeezed, home[i], "[a-z0-9_~-]", "") ||
         names_home(line, home[i], "[a-z0-9_~-]", ""))
     # Dashed homes use only [a-z0-9-]; slash decoding changes no match or boundary.
-    for (i = 1; i <= n && !hit; i++)
+    for (i = 1; i <= nd && !hit; i++)
       hit = dashed[i] != "" && names_home(line, dashed[i], "[a-z0-9]", "[a-z0-9]")
-    if (hit) printf "     %s%s:%d\n", commit, file, number
+    if (hit) {
+      if (!found++) print "❌ [home-path] these added lines name your home directory, which would be published:"
+      printf "     %s%s:%d\n", commit, file, number
+    }
     number++
   }
-' <<< "$diff") || { echo "❌ [home-path] cannot scan the diff." >&2; exit 1; }
-
-[ -z "$hits" ] && exit 0
-echo "❌ [home-path] these added lines name your home directory, which would be published:" >&2
-printf '%s\n' "$hits" >&2
-echo "   Use a relative path, ~, or a placeholder such as <repo>," \
-  "then rewrite the commit that adds it." >&2
-exit 1
+  END {
+    if (found) {
+      print "   Use a relative path, ~, or a placeholder such as <repo>, then rewrite the commit that adds it."
+      exit 1
+    }
+  }
+' >&2; then
+  exit 0
+else
+  statuses=("${PIPESTATUS[@]}")
+  # awk uses 1 for findings; producer/tr failures and awk errors also refuse.
+  if [ "${statuses[1]}" -ne 0 ] || [ "${statuses[2]}" -gt 1 ]; then
+    echo "❌ [home-path] cannot scan the diff." >&2
+  fi
+  exit 1
+fi

@@ -8,4 +8,24 @@ A cloud session (`CLAUDE_CODE_REMOTE=true`) commits and pushes its own `claude/.
 
 ## The maintainer's check
 
-In a local clone before merging a cloud branch (not a cloud-session step): `jj git fetch`, `jj new <branch>@origin`, then `jj gate` (the trailer ban over the branch's commits and the home-path check on its diff, plus fmt, clippy and `node --check` for what changed), the code-review skill over `origin/main..origin/<branch>`, and `scripts/review-gate.sh record-range origin/main origin/<branch> "..."`. A merge on GitHub consults neither the gate nor the ledger, so this is the branch's only enforced trailer and home-path check and its Standards + Spec review. For the home path it comes after publication: the branch is already on GitHub by the time it runs, and `jj gate` reads the branch's net diff, so a path added and removed again within the branch is not seen at all — it keeps a home path out of `main`, but cannot take one back.
+In a local clone before merging a cloud branch (not a cloud-session step):
+
+1. Run `jj git fetch`, then `jj new <branch>@origin` and `jj gate` for the trailer ban,
+   the net-diff home-path check, fmt, clippy and JavaScript syntax checks.
+2. Check each incoming commit, including a path added and removed within the branch:
+
+   ```bash
+   main_tip=$(git rev-parse --verify 'refs/remotes/origin/main^{commit}')
+   cloud_tip=$(git rev-parse --verify 'refs/remotes/origin/<branch>^{commit}')
+   scripts/hooks/home-path.sh --published "$main_tip" "$cloud_tip"
+   ```
+
+   Substitute the fetched branch name for `<branch>`. Use full ids from this fetch; fetching
+   the topic must not make it count as already checked.
+3. Run the code-review skill over `origin/main..origin/<branch>`, fix or accept findings,
+   then `scripts/review-gate.sh record-range origin/main origin/<branch> "..."`.
+
+A GitHub merge consults neither local gates nor the ledger, so the maintainer must complete
+these steps before merging. The home identities are the maintainer's HOME and USERPROFILE.
+The cloud branch is already published when they run: refusing its incoming history can keep
+it out of main, but cannot retract an exposed path from GitHub.

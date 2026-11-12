@@ -16,6 +16,8 @@ set -euo pipefail
 die() { echo "❌ [jj-gate] $*" >&2; exit 1; }
 
 command -v jj > /dev/null || die "jj is required"
+# Every parsed command (ids, descriptions, paths and push plans) must ignore forced colour.
+jj() { command jj --color never "$@"; }
 root=$(jj workspace root) || die "not inside a jj workspace"
 cd "$root"
 
@@ -62,7 +64,7 @@ check() {
   check_messages || fail=1
   # What the stack adds since it forked from trunk (a diff from trunk itself would show trunk's
   # newer changes reversed); the push re-checks each published commit.
-  jj diff --from 'fork_point(trunk() | @)' --to @ --git --context 0 --color never |
+  jj diff --from 'fork_point(trunk() | @)' --to @ --git --context 0 |
     scripts/hooks/home-path.sh || fail=1
 
   if [ "$rust" -eq 1 ]; then
@@ -86,7 +88,7 @@ check() {
 commit_id() { jj log -r "$1" --no-graph -T 'commit_id'; }
 
 push() {
-  local dry again line u in_plan=0 deletes=0 kind name what remote_sha to_id
+  local dry again line u remote="" in_plan=0 deletes=0 kind name what remote_sha to_id
   local -a updates=() # "<remote sha, or 0 for a new ref> <local sha>", as the pre-push hook gets them
 
   [ -x scripts/review-gate.sh ] ||
@@ -103,7 +105,9 @@ push() {
   jj log -r @ --no-graph -T '' > /dev/null || exit 1
   dry=$(jj --ignore-working-copy git push --dry-run "$@" 2>&1) || { printf '%s\n' "$dry" >&2; exit 1; }
   while IFS= read -r line; do
-    if [[ "$line" =~ ^Changes\ to\ push\  ]]; then in_plan=1; continue; fi
+    if [[ "$line" =~ ^Changes\ to\ push\ to\ (.+):$ ]]; then
+      remote=${BASH_REMATCH[1]}; in_plan=1; continue
+    fi
     [[ "$line" =~ ^[[:space:]] && "$in_plan" -eq 1 ]] || { in_plan=0; continue; }
     [[ "$line" =~ ^[[:space:]]+(bookmark|tag):[[:space:]]+(.+)[[:space:]]\[(.*)\]$ ]] ||
       die "cannot read this line of the push plan: $line. Bypass: jj git push"
@@ -129,7 +133,8 @@ push() {
     # so is pre-push's home-path check over each published commit.
     for u in "${updates[@]}"; do
       check_messages "trunk()..${u#* }" || exit 1
-      scripts/hooks/home-path.sh --published "${u#* }" || exit 1
+      # shellcheck disable=SC2086 # two validated ids, split on purpose
+      scripts/hooks/home-path.sh --published $u "$remote" || exit 1
     done
     if [ "${SKIP_REVIEW_GATE:-0}" = "1" ]; then
       echo "[review-gate] SKIP_REVIEW_GATE=1 — pushing unreviewed."
