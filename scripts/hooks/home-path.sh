@@ -116,7 +116,7 @@ if [ -n "$home_as_set" ]; then
     until [ -e "$up" ] || [ -L "$up" ] || [ "$up" = / ] || [ "$up" = . ]; do
       up=$(dirname "$up")
     done
-    (cd "$up" 2> /dev/null) ||
+    (CDPATH= cd "$up" 2> /dev/null) ||
       cannot_resolve "something above it is not a folder this user can search"
   fi
 fi
@@ -178,25 +178,20 @@ hits=$(HOMES="$homes" LC_ALL=C awk '
     }
     return 0
   }
-  # Consume the original name once, so no candidate can match an inserted placeholder.
-  # Literal matching also keeps regexp characters in a home harmless.
-  function redact(file,    out, at, size, i, h, p) {
-    while (1) {
-      at = 0
+  # Walk the original name, including hidden bytes: a later match can overlap and extend
+  # the hidden span. Inserted placeholders are never scanned, and homes are matched literally.
+  function redact(file,    out, lower, p, i, h, covered_until, hidden) {
+    lower = tolower(file)
+    for (p = 1; p <= length(file); p++) {
+      hidden = p < covered_until
       for (i = 1; i <= 2 * n; i++) {
         h = i <= n ? home[i] : dashed[i - n]
-        p = h == "" ? 0 : index(tolower(file), h)
-        # Keep the longest form when several start here, so a shorter home that
-        # prefixes another cannot leave the tail of the longer one in the report.
-        if (p > 0 &&
-            (at == 0 || p < at || (p == at && length(h) > size))) {
-          at = p; size = length(h)
-        }
+        if (substr(lower, p, length(h)) == h && p + length(h) > covered_until)
+          covered_until = p + length(h)
       }
-      if (at == 0) return out file
-      out = out substr(file, 1, at - 1) "<home>"
-      file = substr(file, at + size)
+      if (!hidden) out = out (p < covered_until ? "<home>" : substr(file, p, 1))
     }
+    return out
   }
   BEGIN {
     n = split(tolower(ENVIRON["HOMES"]), home, "\n")

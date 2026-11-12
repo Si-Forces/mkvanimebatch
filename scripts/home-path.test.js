@@ -370,6 +370,40 @@ test("redacts the longest recognized home when two start at the same place", () 
   assert.ok(r.stderr.includes("     foo/<home>/f.txt:1\n"), r.stderr);
 });
 
+test("redacts overlapping as-set and resolved homes even when they start at different places", () => {
+  const resolved = path.join(tmp, "overlap-real", "alice");
+  // The link ends with the resolved home's parent, so their spellings overlap in the name.
+  const link = path.join(tmp, "overlap-link") + path.dirname(resolved);
+  fs.mkdirSync(resolved, { recursive: true });
+  fs.mkdirSync(path.dirname(link), { recursive: true });
+  fs.symlinkSync(resolved, link);
+  const fixtures = [
+    { file: `fixtures${link}/alice/f.txt`, report: "fixtures<home>/f.txt" },
+    { file: `fixtures${link.toUpperCase()}/alice/f.txt`, report: "fixtures<home>/f.txt" },
+    { file: `fixtures/${dashed(link)}-alice/f.txt`, report: "fixtures/<home>/f.txt" },
+  ];
+  for (const { file, report } of fixtures) {
+    const r = run(diff(file, `+see ${resolved}/x`), { HOME: link });
+    hit(r, file);
+    assert.ok(r.stderr.includes(`     ${report}:1\n`), r.stderr);
+    assert.ok(!r.stderr.includes("alice"), r.stderr);
+  }
+});
+
+test("redacts chains of overlapping home occurrences and keeps separate spans separate", () => {
+  const h = "/no-such-home/no-such-home";
+  const fixtures = [
+    { file: `foo${h}/no-such-home/no-such-home/f.txt`, report: "foo<home>/f.txt" },
+    { file: `foo/${dashed(h)}-no-such-home-no-such-home/f.txt`, report: "foo/<home>/f.txt" },
+    { file: `foo${h}/spacer${h}/f.txt`, report: "foo<home>/spacer<home>/f.txt" },
+  ];
+  for (const { file, report } of fixtures) {
+    const r = run(diff(file, `+see ${h}/x`), { HOME: h });
+    hit(r, file);
+    assert.ok(r.stderr.includes(`     ${report}:1\n`), r.stderr);
+  }
+});
+
 test("a home of one segment names nobody, so it is not looked for", () => {
   const lines = ["+cd /no-such-root/x", "+cd //no-such-root/x", "+cd C:\\app\\x", "+cd C:\\\\app\\x", "+cd -no-such-root-x", "+cd C--app-x"];
   for (const env of [{ HOME: "/no-such-root" }, { HOME: "//no-such-root/", USERPROFILE: "C:\\app" }, { HOME: "/", USERPROFILE: "C:\\\\app" }, { HOME: "C:\\\\app" }]) {
@@ -459,6 +493,20 @@ test("checks the resolved form of a symlinked HOME", () => {
   const doubled = path.join(tmp, "we\\\\ird");
   fs.symlinkSync(home, doubled);
   hit(run(diff("a.js", `+'${home}/repo'`), { HOME: doubled }), "a doubled backslash in HOME's own name");
+});
+
+test("HOME's ancestor check does not search CDPATH for a drive path on POSIX", () => {
+  const cwd = path.join(tmp, "ancestor-cdpath");
+  const elsewhere = path.join(cwd, "elsewhere");
+  fs.mkdirSync(path.join(elsewhere, "C:"), { recursive: true });
+  fs.writeFileSync(path.join(cwd, "C:"), "not a directory");
+  const r = run(diff("a.txt", "+clean"), {
+    HOME: "C:/Users/alice", CDPATH: elsewhere,
+  }, { cwd });
+  assert.deepEqual(r, {
+    status: 1,
+    stderr: "❌ [home-path] cannot resolve HOME: something above it is not a folder this user can search.\n",
+  });
 });
 
 test("the locale changes neither the case folding nor the parse", () => {
