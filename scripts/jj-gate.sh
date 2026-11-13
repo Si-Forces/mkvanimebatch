@@ -31,11 +31,11 @@ check_messages() {
     { echo "❌ [jj-gate] cannot list the changes in $revset." >&2; return 1; }
   msg=$(mktemp)
   for id in $ids; do
-    jj log -r "$id" --no-graph -T 'description' > "$msg" ||
+    jj log -r "commit_id($id)" --no-graph -T 'description' > "$msg" ||
       { echo "❌ [jj-gate] cannot read the description of commit ${id:0:12}." >&2; rm -f "$msg"; return 1; }
     [ -s "$msg" ] || continue
     if ! scripts/hooks/commit-msg "$msg"; then
-      echo "   commit ${id:0:12}: fix it with: jj describe ${id:0:12}" >&2
+      echo "   commit ${id:0:12}: fix it with: jj describe 'commit_id($id)'" >&2
       fail=1
     fi
   done
@@ -85,7 +85,12 @@ check() {
 }
 
 # Full commit id of a revset that names one commit.
-commit_id() { jj log -r "$1" --no-graph -T 'commit_id'; }
+commit_id() {
+  local id
+  id=$(jj log -r "$1" --no-graph -T 'commit_id') || return 1
+  [[ "$id" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] || return 1
+  printf '%s' "$id"
+}
 
 push() {
   local dry again line u i remote="" in_plan=0 deletes=0 kind name what remote_sha to_id
@@ -119,8 +124,11 @@ push() {
       "delete "*)               deletes=$((deletes + 1)); continue ;; # nothing to review
       *) die "cannot read the push plan for $kind $name: [$what]. Bypass: jj git push" ;;
     esac
-    [ "$remote_sha" = 0 ] || remote_sha=$(commit_id "$remote_sha") || die "cannot resolve $remote_sha ($kind $name)"
-    to_id=$(commit_id "$to_id") || die "cannot resolve $to_id ($kind $name)"
+    # Plan tokens are commit IDs, not general revsets or same-named bookmarks/tags.
+    [[ "$remote_sha" =~ ^[0-9a-f]+$ && "$to_id" =~ ^[0-9a-f]+$ ]] ||
+      die "cannot read commit ids in the push plan for $kind $name"
+    [ "$remote_sha" = 0 ] || remote_sha=$(commit_id "commit_id($remote_sha)") || die "cannot resolve $remote_sha ($kind $name)"
+    to_id=$(commit_id "commit_id($to_id)") || die "cannot resolve $to_id ($kind $name)"
     updates+=("$remote_sha $to_id")
     update_remotes+=("$remote")
   done <<< "$dry"
@@ -135,7 +143,7 @@ push() {
     # so is pre-push's home-path check over each published commit.
     for i in "${!updates[@]}"; do
       u=${updates[$i]}
-      check_messages "trunk()..${u#* }" || exit 1
+      check_messages "trunk()..commit_id(${u#* })" || exit 1
       # shellcheck disable=SC2086 # two validated ids, split on purpose
       scripts/hooks/home-path.sh --published $u "${update_remotes[$i]}" || exit 1
     done
@@ -166,7 +174,10 @@ slow_gates() {
     return
   fi
   local u tip cur parent empty_wc covered=0 # empty_wc: @'s id when @ has no changes, else empty
-  cur=$(commit_id @) parent=$(commit_id '@-') empty_wc=$(jj log -r 'empty() & @' --no-graph -T 'commit_id')
+  cur=$(commit_id @) || die "cannot resolve the working-copy commit"
+  # A merge may have multiple parents; only an exact single-parent match counts below.
+  parent=$(jj log -r '@-' --no-graph -T 'commit_id') || die "cannot read the working-copy parents"
+  empty_wc=$(jj log -r 'empty() & @' --no-graph -T 'commit_id') || die "cannot check whether the working copy is empty"
   for u in "$@"; do
     tip=${u#* }
     if [ "$tip" = "$cur" ] || { [ "$tip" = "$parent" ] && [ -n "$empty_wc" ]; }; then covered=1; fi

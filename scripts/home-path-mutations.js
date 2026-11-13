@@ -16,27 +16,34 @@ const output = fs.mkdtempSync(path.join(os.tmpdir(), "home-path-mutations-"));
 process.stdout.write(`Results: ${output}\n`);
 for (const item of cases) {
   assert.equal(sources.get(item.file).split(item.from).length, 2, `${item.id}: replacement must match exactly once`);
-  assert.ok(item.expected === "caught" || (item.expected === "survived" && item.reason), item.id);
+  assert.ok(item.expected === "caught" || item.expected === "caught-timeout" || (item.expected === "survived" && item.reason), item.id);
   const titles = item.tests.flatMap(file => [...fs.readFileSync(path.join(scripts, file), "utf8")
     .matchAll(/^test\(("(?:[^"\\]|\\.)*")/gm)].map(match => JSON.parse(match[1])));
   assert.ok(titles.some(title => new RegExp(item.pattern).test(title)), `${item.id}: no test title matches`);
-  const preflight = path.join(output, `${item.id}.sh`);
+  const javascript = item.file.endsWith(".js");
+  const preflight = path.join(output, `${item.id}.${javascript ? "mjs" : "sh"}`);
   fs.writeFileSync(preflight, sources.get(item.file).replace(item.from, () => item.to));
-  const syntax = spawnSync("bash", ["-n", preflight], { encoding: "utf8" });
+  const syntax = spawnSync(javascript ? process.execPath : "bash", javascript ? ["--check", preflight] : ["-n", preflight], { encoding: "utf8" });
   assert.ifError(syntax.error);
   assert.equal(syntax.status, 0, `${item.id}: invalid syntax is not a useful mutant: ${syntax.stderr}`);
+  fs.unlinkSync(preflight);
 }
-const execute = (args, cwd, seconds) => {
+const execute = (args, cwd, seconds, temporary) => {
   const r = spawnSync("timeout", ["-k", "2s", `${seconds}s`, process.execPath, "--test", "--test-reporter=tap", ...args], {
     cwd, encoding: "utf8", maxBuffer: 16 * 1024 * 1024,
+    // A timed-out test cannot run teardown; keep its temporary files inside its owned copy.
+    env: { ...process.env, TMPDIR: temporary, TMP: temporary, TEMP: temporary },
   });
   assert.ifError(r.error);
   return r;
 };
 const files = [...new Set(cases.flatMap(item => item.tests))];
-const baseline = execute(files.map(file => path.join(scripts, file)), path.dirname(scripts), 90);
+const baselineTemp = path.join(output, "baseline-tmp");
+fs.mkdirSync(baselineTemp);
+const baseline = execute(files.map(file => path.join(scripts, file)), path.dirname(scripts), 90, baselineTemp);
 fs.writeFileSync(path.join(output, "baseline.log"), baseline.stdout + baseline.stderr);
 assert.equal(baseline.status, 0, `Baseline failed: ${output}/baseline.log`);
+fs.rmSync(baselineTemp, { recursive: true, force: true });
 const results = [];
 for (const item of cases) {
   const dir = path.join(output, item.id);
@@ -44,10 +51,7 @@ for (const item of cases) {
   fs.cpSync(scripts, path.join(dir, "scripts"), { recursive: true });
   const target = path.join(dir, "scripts", item.file);
   fs.writeFileSync(target, sources.get(item.file).replace(item.from, () => item.to));
-  const syntax = spawnSync("bash", ["-n", target], { encoding: "utf8" });
-  assert.ifError(syntax.error);
-  assert.equal(syntax.status, 0, `${item.id}: invalid syntax is not a useful mutant: ${syntax.stderr}`);
-  const run = execute([`--test-name-pattern=${item.pattern}`, ...item.tests.map(file => path.join(dir, "scripts", file))], dir, 20);
+  const run = execute([`--test-name-pattern=${item.pattern}`, ...item.tests.map(file => path.join(dir, "scripts", file))], dir, 20, dir);
   fs.writeFileSync(path.join(output, `${item.id}.log`), run.stdout + run.stderr);
   const timeout = run.status === 124 || run.status === 137;
   const caught = timeout || (run.status === 1 && /# fail [1-9]/.test(run.stdout));
@@ -60,9 +64,10 @@ for (const item of cases) {
     sources: Object.fromEntries([...sources].map(([file, text]) => [file, createHash("sha256").update(text).digest("hex")])),
     results,
   }, null, 2) + "\n");
+  if (status === item.expected) fs.rmSync(dir, { recursive: true, force: true });
   process.stdout.write(`${item.id}: ${status}${item.reason ? " — " + item.reason : ""}\n`);
 }
-const unexpected = results.filter(item => (item.status === "survived") !== (item.expected === "survived"));
+const unexpected = results.filter(item => item.status !== item.expected);
 process.stdout.write(JSON.stringify({
   total: results.length, assertions: results.filter(item => item.status === "caught").length,
   timeouts: results.filter(item => item.status === "caught-timeout").length,

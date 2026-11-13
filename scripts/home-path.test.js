@@ -177,7 +177,7 @@ test("quotes the highest filename byte in staged and published reports", { skip:
 });
 
 test("hides malformed Git-quoted filenames instead of echoing their encoded bytes", () => {
-  for (const name of ['"b/foo\\12/bar"', '"b/foo\\777/bar"', '"b/foo\\q/bar"', '"b/foo', '"', '"b/foo\\"']) {
+  for (const name of ['"b/foo\\12/bar"', '"b/foo\\777/bar"', '"b/foo\\q/bar"', '"b/foo', '"', '"b/foo\\"', `"b${home.replace(/\/([^/]+)$/, '/\\000$1')}/f.txt"`]) {
     const r = run(`diff --git a/f b/f\n--- a/f\n+++ ${name}\n@@ -0,0 +1 @@\n+${home}/x\n`);
     hit(r);
     assert.match(r.stderr, /     "<quoted filename>":1\n/);
@@ -651,7 +651,14 @@ test("the locale changes neither the case folding nor the parse", () => {
   hit(run(diff("a.sh", "+ls /no-such-home/testeri/x"), turkish), "Turkish");
   // A diff is bytes: a line that is not UTF-8 must not derail the lines after it.
   const bytes = Buffer.concat([Buffer.from(diff("a.bin", "+clean")), Buffer.from("+"), Buffer.from([0xff, 0xfe]), Buffer.from(` ${home}/x\n`)]);
-  const r = run(bytes, { LC_ALL: "C.UTF-8" });
+  // GNU tr tolerates these bytes in UTF-8; this double also enforces BSD tr's byte-locale contract.
+  const strictTr = path.join(tmp, "strict-tr.sh");
+  fs.writeFileSync(strictTr, 'tr() { [ "${LC_ALL:-}" = C ] || return 1; command tr "$@"; }\n');
+  const localeList = spawnSync("locale", ["-a"], { encoding: "utf8" });
+  const utf8 = localeList.status === 0 && localeList.stdout.split(/\r?\n/).find(name => /utf-?8$/i.test(name));
+  const byteEnv = { LC_ALL: utf8 || "POSIX", BASH_ENV: strictTr };
+  assert.equal(run(Buffer.concat([Buffer.from(diff("clean.bin", "+clean")), Buffer.from([255, 254])]), byteEnv).status, 0);
+  const r = run(bytes, byteEnv);
   hit(r);
   assert.ok(r.stderr.includes("     a.bin:2\n") && !r.stderr.includes("warning"), r.stderr);
   // bash drops a NUL with a warning naming the script's path, which can hold the home.

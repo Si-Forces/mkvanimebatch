@@ -209,7 +209,7 @@ process.stdout.write(homes.map(p => p.replace(/[^A-Za-z0-9]/g, "-")).join("\n"))
 # ends a sentence still ends the path. ASCII case is ignored, as Windows paths are.
 # File headers are the ---/+++ lines between "diff --git" (or a merge's "diff --combined" or
 # "diff --cc") and the first hunk; after that, "+++" is an added line starting with "++".
-if read_diff | tr -d '\0' | HOMES="$homes" DASHED="$dashed" LC_ALL=C awk '
+if read_diff | LC_ALL=C tr -d '\0' | HOMES="$homes" DASHED="$dashed" LC_ALL=C awk '
   # name is what the character after h must not be; lead, when set, the one before it.
   function names_home(line, h, name, lead,    s, p, q, at) {
     s = line
@@ -273,7 +273,7 @@ if read_diff | tr -d '\0' | HOMES="$homes" DASHED="$dashed" LC_ALL=C awk '
         c = substr(file, p, 1)
         if (c ~ /[0-7]/) {
           oct = substr(file, p, 3); value = 0
-          if (oct !~ /^[0-3][0-7][0-7]$/) return "<quoted filename>"
+          if (oct !~ /^[0-3][0-7][0-7]$/ || oct == "000") return "<quoted filename>"
           for (k = 1; k <= 3; k++) value = 8 * value + substr(oct, k, 1)
           c = sprintf("%c", value); p += 2
         } else if (c in escape) c = escape[c]

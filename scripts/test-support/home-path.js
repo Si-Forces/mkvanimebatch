@@ -18,10 +18,9 @@ const GIT_ENV = {
   GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.com",
   GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null",
 };
-// Only PATH, HOME, USERPROFILE and the git settings reach the script; an undefined value
-// unsets that variable.
+// Isolate child temporary files alongside the fixtures. An undefined override unsets a variable.
 const envFor = (env) => {
-  const e = { PATH: process.env.PATH, HOME: home, ...GIT_ENV, ...env };
+  const e = { PATH: process.env.PATH, HOME: home, TMPDIR: tmp, TMP: tmp, TEMP: tmp, ...GIT_ENV, ...env };
   for (const k of Object.keys(e)) if (e[k] === undefined) delete e[k];
   return e;
 };

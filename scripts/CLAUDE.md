@@ -50,7 +50,8 @@ Enable the tracked hooks once per clone with `scripts/install-git-hooks.sh`, whi
   no relative paths and fixed prefixes. Replace refs and grafts are ignored; root commits
   count. A merge counts additions absent from every parent. Pre-commit is stricter: its
   index-vs-HEAD diff can refuse a line another parent already held. The shell retains neither
-  diffs nor reports; scanner memory follows the largest line. Git has its own memory costs.
+  diffs nor reports; scanner memory follows the largest line. The NUL stripper and matcher
+  use the C locale to process arbitrary bytes. Git has its own memory costs.
 - **Bypasses:** `git commit --no-verify`, `git push --no-verify`, plain `jj git push`, missing
   or redirected hooks, and edited scripts. `SKIP_REVIEW_GATE` and `SKIP_SLOW_GATES` never skip
   this check. GitHub merges run neither local gate nor review ledger.
@@ -89,6 +90,8 @@ The repo is a colocated jj repo (`jj git init --colocate`): `.git` stays, so Git
 
 - `jj gate` runs `scripts/jj-gate.sh check` over `trunk()..@`: the commit-msg trailer ban on each description (it calls `scripts/hooks/commit-msg`), the home-path check on the stack's diff, workspace fmt and clippy when Rust, Cargo or `desktop-slint/ui` files changed since trunk, and `node --check` on changed `desktop-tauri/ui` and `scripts/` JavaScript files. jj has no index, so the gate checks the working-copy commit `@`, which every jj command snapshots first.
 - `jj gpush [args]` asks `jj git push --dry-run [args]` what would move (it refuses to push when it cannot read that plan). For each pushed ref it runs the trailer ban over `trunk()..<new tip>`, commits already on the remote branch included, the home-path check on each commit it publishes, as pre-push does, and the review-gate ledger check over the commits on neither the remote branch nor `origin/main` (for a new branch, those since its fork point with `origin/main`). It then runs `cargo test --workspace` and `node --test` when `@` (or `@-` with `@` empty) is a pushed tip. It refuses when `@` has changes on top of the pushed `@-`, warns for other tips, then reads the plan again and pushes it with no new snapshot (below). Use it instead of `jj git push`. `SKIP_REVIEW_GATE=1` and `SKIP_SLOW_GATES=1` skip the same gates as before. `git push` still fires `scripts/hooks/pre-push`.
+- Parsed old/new plan IDs and message IDs resolve explicitly as commit IDs. Hex-named
+  bookmarks or tags cannot redirect the selected commits or their description lookups.
 - `working-copy.eol-conversion = "input"` is set because `.gitattributes` normalizes CRLF to LF: git applies it on its own, jj shows every CRLF file as modified without it. Never use `input-output`; it writes CRLF into every checkout and breaks shell shebangs. jj also records the executable bit that `core.fileMode=false` hides from git.
 - Nothing stops an AI trailer at `jj describe` time; `jj gate` and `jj gpush` refuse it afterwards. There is no counterpart to the hooks' untracked-file and hidden-edit checks: jj snapshots every non-ignored file into `@`, so the tests run on `@` as pushed. The push takes no new snapshot (`--ignore-working-copy`), so an edit made while the tests run is not pushed, though the tests may have seen it; and it refuses when the plan changed while the gates ran, including when another jj command snapshotted `@` meanwhile.
 - Scope `jj restore` to paths (`jj restore <path>`); a bare `jj restore` also discards new files in `@`.
