@@ -7,8 +7,8 @@ set -euo pipefail
 
 root=$(git rev-parse --show-toplevel)
 
-# git ignores a missing or non-executable hook (at most with a hint), so check before
-# claiming anything.
+# Git ignores missing or non-executable hooks; their invoked helpers must be executable too.
+# Check both before claiming protection.
 for f in scripts/hooks/commit-msg scripts/hooks/pre-commit scripts/hooks/pre-push scripts/hooks/home-path.sh scripts/review-gate.sh; do
   if [ ! -x "$root/$f" ]; then
     echo "$f is missing or not executable; refusing to enable the hooks." >&2

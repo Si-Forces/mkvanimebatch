@@ -62,8 +62,6 @@ case $mode in
     [ -z "$old" ] || exclude=(--not "$old")
     ;;
   --staged)
-    # A git replace ref on HEAD could stand a tree that already holds the line in for the one
-    # the commit extends.
     [ $# -eq 1 ] || usage
     ;;
   *)
@@ -78,6 +76,8 @@ read_diff() {
         --format='commit %H' "$new" "${exclude[@]}" 2> /dev/null ||
         { echo "❌ [home-path] cannot list the commits to check (git log says why)." >&2; return 1; } ;;
     --staged)
+      # A replace ref on HEAD could stand a tree that already holds the line in for the one
+      # the commit extends.
       git --no-replace-objects diff --cached "${diff_flags[@]}" 2> /dev/null ||
         { echo "❌ [home-path] cannot read the staged diff (git diff --cached says why)." >&2; return 1; } ;;
     *) cat || { echo "❌ [home-path] cannot read the diff." >&2; return 1; } ;;
@@ -184,8 +184,9 @@ done
 replace_all "$profile" "$bs" /
 forward=$REPLY
 replace_all "$profile" "$bs" "$bs$bs"
+doubled=$REPLY
 homes=""
-for h in "$home" "$home_as_set" "$home_slashes" "$real" "$profile" "$profile_as_set" "$forward" "$REPLY"; do
+for h in "$home" "$home_as_set" "$home_slashes" "$real" "$profile" "$profile_as_set" "$forward" "$doubled"; do
   homes+="$h"$'\n'
 done
 # Native UTF-16 replacement matches Claude Code, without an awk byte/locale approximation.
@@ -264,11 +265,12 @@ if read_diff | tr -d '\0' | HOMES="$homes" DASHED="$dashed" LC_ALL=C awk '
   # Git C-quotes control characters, quotes and backslashes even with core.quotePath=false.
   # Decode its bytes before matching, then quote the safe result again for display.
   function unquote(file,    out, p, c, oct, k, value) {
-    if (substr(file, length(file), 1) != "\"") return "<quoted filename>"
+    if (length(file) < 2 || substr(file, length(file), 1) != "\"") return "<quoted filename>"
     for (p = 2; p < length(file); p++) {
       c = substr(file, p, 1)
       if (c == "\\") {
-        c = substr(file, ++p, 1)
+        if (++p >= length(file)) return "<quoted filename>"
+        c = substr(file, p, 1)
         if (c ~ /[0-7]/) {
           oct = substr(file, p, 3); value = 0
           if (oct !~ /^[0-3][0-7][0-7]$/) return "<quoted filename>"

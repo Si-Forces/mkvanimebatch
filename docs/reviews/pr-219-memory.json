@@ -1,0 +1,95 @@
+{
+  "environment": {
+    "os": "Fedora Linux 44 (Forty Four)",
+    "kernel": "7.3.3-200.fc44.x86_64",
+    "arch": "x64",
+    "node": "v26.7.0",
+    "bash": "GNU bash, version 5.3.9(1)-release (x86_64-redhat-linux-gnu)",
+    "awk": "GNU Awk 5.3.2, API 4.0, PMA Avon 8-g1, (GNU MPFR 4.2.2, GNU MP 6.3.0)",
+    "time": "time (GNU Time) 1.9",
+    "git": "git version 2.56.0",
+    "scannerSha256": "9d135a529d89a9058134b20d764d0841b36c2b283a6ee5061c5441263bd3786d"
+  },
+  "samples": [
+    {
+      "mode": "stdin",
+      "workload": "clean",
+      "sizeMiB": 10,
+      "records": 81920,
+      "inputBytes": 10485831,
+      "rssKiB": 47372,
+      "seconds": 1.23,
+      "exit": 0
+    },
+    {
+      "mode": "published",
+      "workload": "clean",
+      "sizeMiB": 10,
+      "commits": 160,
+      "patchBytes": 10477006,
+      "rssKiB": 47312,
+      "seconds": 0.75,
+      "exit": 0
+    },
+    {
+      "mode": "stdin",
+      "workload": "clean",
+      "sizeMiB": 80,
+      "records": 655360,
+      "inputBytes": 83886152,
+      "rssKiB": 47404,
+      "seconds": 9.15,
+      "exit": 0
+    },
+    {
+      "mode": "published",
+      "workload": "clean",
+      "sizeMiB": 80,
+      "commits": 1280,
+      "patchBytes": 84045326,
+      "rssKiB": 47472,
+      "seconds": 5.14,
+      "exit": 0
+    },
+    {
+      "mode": "stdin",
+      "workload": "hits",
+      "sizeMiB": 10,
+      "records": 81920,
+      "inputBytes": 10485831,
+      "rssKiB": 47372,
+      "seconds": 1.1,
+      "exit": 1
+    },
+    {
+      "mode": "published",
+      "workload": "hits",
+      "sizeMiB": 10,
+      "commits": 160,
+      "patchBytes": 10477006,
+      "rssKiB": 47372,
+      "seconds": 0.6,
+      "exit": 1
+    },
+    {
+      "mode": "stdin",
+      "workload": "hits",
+      "sizeMiB": 80,
+      "records": 655360,
+      "inputBytes": 83886152,
+      "rssKiB": 47464,
+      "seconds": 7.92,
+      "exit": 1
+    },
+    {
+      "mode": "published",
+      "workload": "hits",
+      "sizeMiB": 80,
+      "commits": 1280,
+      "patchBytes": 84045326,
+      "rssKiB": 47440,
+      "seconds": 4.62,
+      "exit": 1
+    }
+  ]
+}

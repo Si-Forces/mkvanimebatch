@@ -29,7 +29,8 @@ Enable the tracked hooks once per clone with `scripts/install-git-hooks.sh`, whi
   `_`, `+`, `.` and `-` before one qualify. Repeated slashes and JSON-escaped slashes count;
   literal POSIX backslashes are preserved too. Generic paths naming another user pass.
 - **No qualifying identity:** one-segment homes such as `/root` or `C:\app`, `/`, a drive alone
-  and unset variables name nobody. If neither variable qualifies, warn and check nothing.
+  and unset variables name nobody. With the required tools available, if neither variable
+  qualifies, warn and check nothing.
   This includes typical root containers. A longer resolved HOME is judged independently.
 - **Report:** `file:line` or `<commit> file:line`, never added text. Decode Git-quoted filenames
   before redacting supported home spellings, then safely quote them again. Keep a leading
@@ -56,7 +57,8 @@ Enable the tracked hooks once per clone with `scripts/install-git-hooks.sh`, whi
 - **Limits:** filenames alone (#226), PR descriptions (#227), and commit/tag messages (#220)
   remain unchecked. Binary merge resolutions and all binary files in `jj gate` remain
   unread (#222); ordinary binary additions are checked at push time. Unsupported encodings
-  include mixed Windows separators, WSL drive paths, backslashes escaped twice, `%20`,
+  include mixed Windows separators, WSL drive paths, a Windows path with each backslash
+  escaped twice (four backslashes in the line), `%20`,
   shell-escaped spaces, `%2F` and Unicode-escaped slashes. Conservative boundaries refuse
   siblings such as `<home>+x`, `<home>./x`, `<home>..x` or `<home>é/x`, and flag/CSS names
   starting with a dashed identity. Previously published GitHub objects require GitHub Support
