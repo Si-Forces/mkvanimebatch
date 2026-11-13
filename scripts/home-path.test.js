@@ -697,6 +697,14 @@ test("--staged fails closed when git cannot read the index, with only the script
   });
 });
 
+test("refuses an awk scanner failure with its own diagnostic", () => {
+  const startup = path.join(tmp, "failing-awk.bash");
+  fs.writeFileSync(startup, "awk() { return 2; }\n");
+  assert.deepEqual(run("", { BASH_ENV: startup }), {
+    status: 1, stderr: "❌ [home-path] cannot scan the diff.\n",
+  });
+});
+
 test("--published scans fetched add/remove history against the destination, including for new refs", () => {
   const { dir, git, commit } = gitRepo("fetched-history");
   git("remote", "add", "origin", path.join(tmp, "public.git"));
@@ -709,6 +717,7 @@ test("--published scans fetched add/remove history against the destination, incl
   git("update-ref", "refs/remotes/origin/main", base);
   git("update-ref", "refs/remotes/origin/cloud-topic", tip);
   git("update-ref", "refs/remotes/private/main", tip);
+  git("update-ref", "refs/remotes/unconfigured/main", tip);
   for (const args of [
     ["--published", "0", tip],
     publishedArgs(tip, base),
@@ -736,6 +745,9 @@ test("--published scans fetched add/remove history against the destination, incl
   git("config", "remote.private.pushurl", path.join(tmp, "private.git"));
   hit(run("", {}, { args: publishedArgs(tip, "0", "private"), cwd: dir }),
     "a URL's trailing newline must not disappear during comparison");
+  git("config", "remote.private.pushurl", `${path.join(tmp, "private.git")}\n`);
+  hit(run("", {}, { args: publishedArgs(tip, "0", "private"), cwd: dir }),
+    "matching URLs containing a newline cannot authorize a baseline");
   const missingBase = run("", {}, { args: publishedArgs(tip, "f".repeat(40)), cwd: dir });
   assert.equal(missingBase.status, 1);
   assert.match(missingBase.stderr, /cannot list the commits/);
@@ -944,4 +956,37 @@ test("jj-gate.sh check and push (jj gate, jj gpush) refuse a leak", { skip: !has
   // Per commit: the leak's own commit, though the pushed tip removes it again.
   assert.match(push.out, new RegExp(`name your home directory[^]*\\n {5}${leak.slice(0, 12)} f\\.txt:1\\n`));
   assert.doesNotMatch(push.out, /old\.txt/);
+
+  const privateRepo = path.join(tmp, "jj-private.git");
+  assert.equal(sh(dir, "git", ["init", "-q", "--bare", privateRepo]).status, 0);
+  git("remote", "add", "private", privateRepo);
+  git("push", "-q", "private", `${tip}:refs/heads/main`);
+  git("remote", "add", "before-origin", privateRepo);
+  git("fetch", "-q", "before-origin");
+  for (const [remotes, deletionOnly] of [
+    [["origin", "private"], false],
+    [["before-origin", "origin"], false],
+    [["origin", "private"], true],
+  ]) {
+    if (deletionOnly) {
+      git("push", "-q", "private", `${tip}:refs/heads/topic`, `${tip}:refs/heads/delete-me`);
+      assert.equal(jj("bookmark", "track", "topic", "--remote", "private").status, 0);
+      assert.equal(jj("bookmark", "track", "topic", "--remote", "origin").status, 0);
+      assert.equal(jj("bookmark", "set", "delete-me", "-r", tip).status, 0);
+      assert.equal(jj("bookmark", "track", "delete-me", "--remote", "private").status, 0);
+      assert.equal(jj("bookmark", "delete", "delete-me").status, 0);
+    }
+    const args = [...remotes.flatMap(remote => ["--remote", remote]), "-b", "topic"];
+    if (deletionOnly) args.push("-b", "delete-me");
+    const plan = jj("git", "push", "--dry-run", ...args);
+    assert.equal(plan.status, 0, plan.out);
+    for (const remote of remotes) assert.ok(plan.out.includes(`Changes to push to ${remote}:`), plan.out);
+    if (deletionOnly) assert.match(plan.out, /Changes to push to private:\n  bookmark: delete-me \[delete from [^\n]+\]\nDry-run/);
+    const multi = gate("push", ...args);
+    assert.equal(multi.status, 1, multi.out);
+    assert.match(multi.out, new RegExp(`name your home directory[^]*\\n {5}${leak.slice(0, 12)} f\\.txt:1\\n`));
+  }
+  assert.equal(jj("bookmark", "create", "clean", "-r", "main@origin").status, 0);
+  const cleanPush = gate("push", "--remote", "origin", "--remote", "private", "-b", "clean");
+  assert.equal(cleanPush.status, 0, cleanPush.out);
 });

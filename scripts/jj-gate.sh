@@ -88,8 +88,9 @@ check() {
 commit_id() { jj log -r "$1" --no-graph -T 'commit_id'; }
 
 push() {
-  local dry again line u remote="" in_plan=0 deletes=0 kind name what remote_sha to_id
+  local dry again line u i remote="" in_plan=0 deletes=0 kind name what remote_sha to_id
   local -a updates=() # "<remote sha, or 0 for a new ref> <local sha>", as the pre-push hook gets them
+  local -a update_remotes=() # same indexes as updates, including across deletion-only sections
 
   [ -x scripts/review-gate.sh ] ||
     die "scripts/review-gate.sh is missing or not executable. Run: chmod +x scripts/review-gate.sh  (or jj restore scripts/review-gate.sh)"
@@ -121,6 +122,7 @@ push() {
     [ "$remote_sha" = 0 ] || remote_sha=$(commit_id "$remote_sha") || die "cannot resolve $remote_sha ($kind $name)"
     to_id=$(commit_id "$to_id") || die "cannot resolve $to_id ($kind $name)"
     updates+=("$remote_sha $to_id")
+    update_remotes+=("$remote")
   done <<< "$dry"
 
   if [ "${#updates[@]}" -eq 0 ]; then
@@ -131,10 +133,11 @@ push() {
   else
     # The trailer ban is part of the push, as commit-msg is part of every commit under git, and
     # so is pre-push's home-path check over each published commit.
-    for u in "${updates[@]}"; do
+    for i in "${!updates[@]}"; do
+      u=${updates[$i]}
       check_messages "trunk()..${u#* }" || exit 1
       # shellcheck disable=SC2086 # two validated ids, split on purpose
-      scripts/hooks/home-path.sh --published $u "$remote" || exit 1
+      scripts/hooks/home-path.sh --published $u "${update_remotes[$i]}" || exit 1
     done
     if [ "${SKIP_REVIEW_GATE:-0}" = "1" ]; then
       echo "[review-gate] SKIP_REVIEW_GATE=1 — pushing unreviewed."
