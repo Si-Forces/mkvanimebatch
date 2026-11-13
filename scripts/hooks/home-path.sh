@@ -51,8 +51,8 @@ case $mode in
       if [ $# -eq 4 ]; then
         # A remote may fetch privately and push elsewhere. Trust its fetched main only when
         # one push URL equals its fetch URL. Sentinels keep trailing newlines distinguishable.
-        fetch_url=$(git remote get-url "$4" 2> /dev/null && printf .) || fetch_url=""
-        push_urls=$(git remote get-url --push --all "$4" 2> /dev/null && printf .) || push_urls=""
+        fetch_url=$(git remote get-url -- "$4" 2> /dev/null && printf .) || fetch_url=""
+        push_urls=$(git remote get-url --push --all -- "$4" 2> /dev/null && printf .) || push_urls=""
         fetch_url=${fetch_url%$'\n.'} push_urls=${push_urls%$'\n.'}
         if [[ -n $fetch_url && $fetch_url != *$'\n'* && $fetch_url == "$push_urls" ]]; then
           old=$(git --no-replace-objects rev-parse --verify --quiet "refs/remotes/$4/main^{commit}" 2> /dev/null) || old=""

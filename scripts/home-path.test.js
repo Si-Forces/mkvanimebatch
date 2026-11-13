@@ -730,6 +730,10 @@ test("--published scans fetched add/remove history against the destination, incl
   }
   assert.equal(run("", {}, { args: publishedArgs(tip, "0", "private"), cwd: dir }).status, 0,
     "only the named destination's main is a trusted baseline for a new ref");
+  git("remote", "add", "--", "--all", path.join(tmp, "private.git"));
+  git("update-ref", "refs/remotes/--all/main", leak);
+  assert.deepEqual(run("", {}, { args: publishedArgs(tip, "0", "--all"), cwd: dir }), { status: 0, stderr: "" },
+    "an option-like remote still supplies its trusted main");
   assert.equal(run("", {}, { args: publishedArgs(tip, tip), cwd: dir }).status, 0,
     "an unchanged destination has no incoming commits");
   git("config", "remote.private.pushurl", path.join(tmp, "elsewhere.git"));
@@ -888,7 +892,7 @@ test("pre-commit checks a staged leak before a dirty Rust tree stops it", () => 
   assert.match(r.out, /name your home directory[^]*Rust\/Cargo files differ from the index/);
 });
 
-test("pre-push checks every pushed ref, not only the first", () => {
+test("pre-push checks every ref and forwards its destination", () => {
   const { dir, git, commit } = gitRepo("two-refs");
   const base = commit("base\n");
   git("update-ref", "refs/remotes/origin/main", base);
@@ -903,6 +907,10 @@ test("pre-push checks every pushed ref, not only the first", () => {
   };
   assert.equal(prePush(refs(clean)).status, 0, "a clean ref");
   hit(prePush(refs(clean, leak)), "the second ref");
+  git("remote", "add", "origin", path.join(tmp, "two-refs.git"));
+  git("update-ref", "refs/remotes/origin/main", leak);
+  const afterAccepted = commit("clean after accepted history\n");
+  assert.deepEqual(prePush(refs(afterAccepted)), { status: 0, stderr: "" }, "a new ref trusts the destination's main");
 });
 
 const hasJj = spawnSync("jj", ["--version"]).status === 0;
