@@ -7,9 +7,9 @@ set -euo pipefail
 
 root=$(git rev-parse --show-toplevel)
 
-# git ignores a missing or non-executable hook (at most with a hint), so check before
-# claiming anything.
-for f in scripts/hooks/commit-msg scripts/hooks/pre-commit scripts/hooks/pre-push scripts/review-gate.sh; do
+# Git ignores missing or non-executable hooks; their invoked helpers must be executable too.
+# Check both before claiming protection.
+for f in scripts/hooks/commit-msg scripts/hooks/pre-commit scripts/hooks/pre-push scripts/hooks/home-path.sh scripts/review-gate.sh; do
   if [ ! -x "$root/$f" ]; then
     echo "$f is missing or not executable; refusing to enable the hooks." >&2
     echo "Run: chmod +x $f  (or git checkout -- $f if it was deleted)" >&2
@@ -48,15 +48,19 @@ cat <<'MSG'
 Hooks enabled (core.hooksPath = scripts/hooks):
   commit-msg : refuses a message carrying an AI co-author trailer (Claude, Copilot, and
                the like). A co-author naming a human is left alone.
-  pre-commit : cargo fmt --check + clippy -D warnings when Rust or Cargo files are staged,
-               node --check on staged UI modules
-  pre-push   : the review-gate ledger check, then cargo test --workspace and node --test
-               when HEAD is pushed (other pushed tips only get a warning)
+  pre-commit : the home-path check on the staged diff, then cargo fmt --check + clippy
+               -D warnings when Rust, Cargo or desktop-slint/ui files are staged, and
+               node --check on staged desktop-tauri/ui and scripts/ JavaScript
+  pre-push   : the home-path check on each published commit, the review-gate ledger
+               check, then cargo test --workspace and node --test when HEAD is pushed
+               (other pushed tips only get a warning)
 
 pre-commit and pre-push also refuse while an assume-unchanged or skip-worktree file differs
 from the index, since git diff cannot see that edit. The refusal lists the files and how to
 clear the bits.
-To bypass: git commit --no-verify (skips commit-msg and pre-commit), SKIP_SLOW_GATES=1 git push.
+To bypass: git commit --no-verify (skips commit-msg and pre-commit), git push --no-verify
+(skips pre-push). SKIP_REVIEW_GATE=1 / SKIP_SLOW_GATES=1 git push skip the ledger and the
+test suites, not the home-path check.
 
 Review a range with the code-review skill (Standards + Spec; AGENTS.md
 names its path), then record it before pushing:
