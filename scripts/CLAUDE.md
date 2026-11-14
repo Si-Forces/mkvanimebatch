@@ -8,16 +8,22 @@ Enable the tracked hooks once per clone with `scripts/install-git-hooks.sh`, whi
 
 - commit-msg refuses a message whose trailer block credits an AI agent (Claude, Copilot, `AI Bot`). It parses trailers with `git interpret-trailers`, so only real trailers count: a prose mention or a `git commit -v` context line naming one is not blocked, which keeps the commit that documents this hook committable. A co-author naming a person, including the maintainer's own `sifahaz <...@users.noreply.github.com>` line, is left alone. It refuses rather than rewriting the message, so dropping the attribution is visible.
 - pre-commit runs workspace fmt and clippy when Rust, Cargo or `desktop-slint/ui` files are staged, and `node --check` on staged `desktop-tauri/ui` and `scripts/` JavaScript files. It refuses to run cargo while any of those files differs from the index, so the check matches the commit. It runs the home-path check (below) on the staged diff first, so a refusal shows even when the dirty-tree check then stops the hook.
-- pre-push runs the home-path check on each commit it publishes (the destination ref’s old tip through its new tip, so fetched add/remove history still counts), then the **review-gate ledger** check on every pushed ref, refusing the push if any pushed commit not already on `origin/main` has no recorded review (skip it with `SKIP_REVIEW_GATE=1`). When HEAD is one of the pushed tips, it then runs `cargo test` and `node --test`, refusing if the working tree differs from HEAD, untracked Rust, Cargo, UI or `scripts/` files included (skip them with `SKIP_SLOW_GATES=1`). Other pushed tips, such as a second branch or an older tag, get only a warning. If HEAD is not pushed at all, that warning is the whole local test coverage.
+- pre-push runs the home-path check on each commit it publishes (the destination ref's old tip through its new tip, so fetched add/remove history still counts), then the **review-gate ledger** check on every pushed ref, refusing the push if any pushed commit not already on `origin/main` has no recorded review (skip it with `SKIP_REVIEW_GATE=1`). When HEAD is one of the pushed tips, it then runs `cargo test` and `node --test`, refusing if the working tree differs from HEAD, untracked Rust, Cargo, UI or `scripts/` files included (skip them with `SKIP_SLOW_GATES=1`). Other pushed tips, such as a second branch or an older tag, get only a warning. If HEAD is not pushed at all, that warning is the whole local test coverage.
+
+The JavaScript path globs also cover nested files: Bash `case` patterns such as
+`scripts/*.js` match `/`, so `scripts/test-support/*.js` is included.
+`scripts/home-path-wiring.test.js` pins that syntax coverage in pre-commit and `jj gate`.
+Workflow files in `.claude/workflows/` use runtime syntax, including top-level `return`;
+`scripts/usual-workflow.test.js` parses `usual.js` with the runtime's async-function wrapper.
 
 `scripts/hooks/home-path.sh` is the **home-path check**. An agent that copies an absolute path from its session would publish the committer's username and folder layout, and once pushed, an amend or force-push cannot take it back: GitHub keeps the old commit until GitHub Support purges it. So the check refuses any added line in a diff that names the committer's own home:
 
 - **Coverage:** active installed Git hooks, or explicit `jj gate` and `jj gpush` use. `jj commit`
-  runs no gate. Identities come from the checking process’s `HOME` and `USERPROFILE`; another
-  machine’s home is not detected. [Cloud sessions](../docs/agents/cloud-sessions.md) need the
-  maintainer’s per-commit check after fetching; it cannot undo their prior publication.
+  runs no gate. Identities come from the checking process's `HOME` and `USERPROFILE`; another
+  machine's home is not detected. [Cloud sessions](../docs/agents/cloud-sessions.md) need the
+  maintainer's per-commit check after fetching; it cannot undo their prior publication.
 - **Identities:** HOME as set and resolved, and USERPROFILE with either slash or JSON-doubled
-  backslashes. Plain and as-set identities also count in Claude Code’s dashed spelling: one
+  backslashes. Plain and as-set identities also count in Claude Code's dashed spelling: one
   dash per non-ASCII-alphanumeric UTF-16 unit (two for an emoji), computed with Node. The
   JSON-doubled representation is not a separate dashed identity. Newline identities, including
   a resolved HOME, refuse. A Unicode replacement character also refuses because Node may
@@ -34,7 +40,7 @@ Enable the tracked hooks once per clone with `scripts/install-git-hooks.sh`, whi
   This includes typical root containers. A longer resolved HOME is judged independently.
 - **Report:** `file:line` or `<commit> file:line`, never added text. Decode Git-quoted filenames
   before redacting supported home spellings, then safely quote them again. Keep a leading
-  slash while removing Git’s `b/` prefix so repo-relative `home/<user>/...` is redacted too.
+  slash while removing Git's `b/` prefix so repo-relative `home/<user>/...` is redacted too.
   Redaction checks suffix boundaries and merges overlapping spans, including dashed matches
   starting inside another home; unrelated sibling names retain their spelling. Use relative
   paths, `~` or placeholders such as `<repo>`, then rewrite the commit that added the hit.
@@ -58,9 +64,9 @@ Enable the tracked hooks once per clone with `scripts/install-git-hooks.sh`, whi
 - **Limits:** branch/bookmark/tag names (#228), filenames alone (#226), PR descriptions (#227),
   and commit/tag messages (#220) remain unchecked. Binary merge resolutions and all binary
   files in `jj gate` remain unread (#222); ordinary binary additions are checked at push time.
-  Unsupported encodings include mixed Windows separators, WSL drive paths, a Windows path with each backslash
-  escaped twice (four backslashes in the line), `%20`,
-  shell-escaped spaces, `%2F` and Unicode-escaped slashes. Conservative boundaries refuse
+  Unsupported encodings include mixed Windows separators, WSL drive paths, a Windows path
+  with each backslash escaped twice (four backslashes in the line), `%20`, shell-escaped
+  spaces, `%2F` and Unicode-escaped slashes. Conservative boundaries refuse
   siblings such as `<home>+x`, `<home>./x`, `<home>..x` or `<home>é/x`, and flag/CSS names
   starting with a dashed identity. Previously published GitHub objects require GitHub Support
   to purge; changing this checker or rewriting a branch cannot retract them.
@@ -68,6 +74,18 @@ Enable the tracked hooks once per clone with `scripts/install-git-hooks.sh`, whi
   gate need Bash 4.4+ (`mapfile -d`, process-substitution wait, empty arrays under nounset).
   The full hook test suite requires Bash 4.4+; on macOS select a newer Bash through PATH.
   jj output is forced to plain text for all parsed commands, even with `ui.color="always"`.
+
+When changing `scripts/hooks/home-path.sh` or its gate wiring, update the matching cases
+in `scripts/test-support/home-path-mutations.json`: each case names an exact source edit,
+the regression test that must catch it, and its expected outcome (with a reason for any
+survivor). `scripts/home-path-mutations.js` runs these edits in isolated copies with GNU
+timeout and writes logs plus `results.json` to a temporary directory. Run the full audit
+with `node scripts/home-path-mutations.js`, or pass a case-ID substring to select cases.
+
+Run `node scripts/bench-home-path.js > memory.json` for the manual scanner benchmark
+(GNU time and an `awk` supporting `--version` required). It measures clean and refusing
+stdin and published-history scans, and emits JSON with source/environment details,
+peak RSS, elapsed time and checked exit codes; it is not a CI timing gate.
 
 The two dirty-tree checks (pre-commit's, when it runs cargo, and pre-push's, before its test gate) also refuse while an assume-unchanged or skip-worktree file is missing or differs from the index, since git diff cannot see that. Pre-commit looks only at the files cargo reads (Rust, Cargo and `desktop-slint/ui`); pre-push looks at every flagged file. A flagged file that still matches the index passes. The refusal says how to fix it. `scripts/mutants-diff.sh` makes the same check over every flagged file, since cargo-mutants copies the working tree. To bypass pre-commit's check, use `git commit --no-verify`, which skips all of commit-msg and pre-commit; to bypass pre-push's, use `SKIP_SLOW_GATES=1`, which skips its test gate. In a sparse checkout the out-of-cone files are missing, so pre-push refuses whenever it reaches its test gate, and pre-commit refuses when it runs cargo while any file cargo reads is out of the cone. Those refusals hold only while `scripts/` is in the cone: outside it the hooks are missing too, and git runs no gate at all.
 

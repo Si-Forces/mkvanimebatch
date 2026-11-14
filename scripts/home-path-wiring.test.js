@@ -6,6 +6,45 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { script, tmp, home, envFor, run, sh, gitRepo, hit, copyScripts, SKIP, hasJj } from "./test-support/home-path.js";
 
+const nestedScript = "scripts/test-support/broken.js";
+
+test("pre-commit checks staged nested script JavaScript syntax", () => {
+  const { dir, git, commit } = gitRepo("staged-js-syntax");
+  commit("clean\n");
+  git("config", "core.hooksPath", path.dirname(script));
+  fs.mkdirSync(path.dirname(path.join(dir, nestedScript)), { recursive: true });
+  fs.writeFileSync(path.join(dir, nestedScript), "const = ;\n");
+  git("add", nestedScript);
+  fs.writeFileSync(path.join(dir, nestedScript), "export const checked = true;\n");
+  const refused = sh(dir, "git", ["commit", "-q", "-m", "syntax"]);
+  assert.equal(refused.status, 1, refused.out);
+  assert.ok(refused.out.includes(`node --check failed: ${nestedScript}`), refused.out);
+  assert.match(refused.out, /SyntaxError/);
+  git("add", nestedScript);
+  git("commit", "-q", "-m", "valid module");
+});
+
+test("jj checks nested script JavaScript syntax", { skip: !hasJj && "jj is not installed" }, () => {
+  const { dir, git, commit } = gitRepo("jj-js-syntax");
+  copyScripts(dir, ["scripts/jj-gate.sh", "scripts/hooks/home-path.sh", "scripts/hooks/commit-msg"]);
+  const base = commit("clean\n");
+  git("update-ref", "refs/remotes/origin/main", base);
+  const config = path.join(tmp, "jj-js-syntax.toml");
+  fs.writeFileSync(config, '[user]\nname="t"\nemail="t@example.com"\n[revset-aliases]\n"trunk()"="main@origin"\n');
+  const initialized = sh(dir, "jj", ["git", "init", "--colocate"], { JJ_CONFIG: config });
+  assert.equal(initialized.status, 0, initialized.out);
+  const gate = () => sh(dir, "bash", ["scripts/jj-gate.sh", "check"], { JJ_CONFIG: config });
+  fs.mkdirSync(path.dirname(path.join(dir, nestedScript)), { recursive: true });
+  fs.writeFileSync(path.join(dir, nestedScript), "const = ;\n");
+  const refused = gate();
+  assert.equal(refused.status, 1, refused.out);
+  assert.ok(refused.out.includes(`node --check failed: ${nestedScript}`), refused.out);
+  assert.match(refused.out, /SyntaxError/);
+  fs.writeFileSync(path.join(dir, nestedScript), "export const checked = true;\n");
+  const accepted = gate();
+  assert.equal(accepted.status, 0, accepted.out);
+});
+
 test("pre-commit refuses a staged leak, and pre-push one in any pushed commit", () => {
   const { dir, git } = gitRepo("hooked", { hostile: true });
   git("config", "core.hooksPath", path.dirname(script));
