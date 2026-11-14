@@ -115,6 +115,12 @@ Issues and specs live in GitHub Issues (`Si-Forces/mkvanimebatch`). Use the `gh`
 
 Canonical triage roles map to GitHub labels (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`); see `docs/agents/triage-labels.md` for the mapping and any missing label to create first.
 
+### Agent personas
+
+`.claude/agents/code-reviewer.md` and `.codex/agents/code-reviewer.toml` are one persona for two tools. From the `# Senior Code Reviewer` heading to the `## Composition` heading the two are identical (`scripts/agent-personas.test.js` checks it): change that part in the `.md`, then copy it to the `.toml`. The descriptions and Composition sections differ on purpose. The persona's review is extra and never replaces the Standards + Spec review.
+
+`.codex/agents/security-auditor.toml` and `test-engineer.toml` are adapted from agent-skills 0.6.15 (MIT, `.agents/LICENSE-agent-skills`) with repo notes added; they do not follow upstream.
+
 ### Domain docs
 
 Read `CONTEXT-MAP.md` → `crates/mkv-core/CONTEXT.md` / `desktop-tauri/CONTEXT.md`, then the relevant ADRs in `docs/adr/`, before working in an area. Use the glossary's terms. If a change contradicts an ADR, say so explicitly rather than overriding it silently. See `docs/agents/domain.md` for the layout, `architecture.md` for the detailed spec, and `README.md` for CLI options.
