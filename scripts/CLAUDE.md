@@ -55,19 +55,19 @@ Enable the tracked hooks once per clone with `scripts/install-git-hooks.sh`, whi
 - **Bypasses:** `git commit --no-verify`, `git push --no-verify`, plain `jj git push`, missing
   or redirected hooks, and edited scripts. `SKIP_REVIEW_GATE` and `SKIP_SLOW_GATES` never skip
   this check. GitHub merges run neither local gate nor review ledger.
-- **Limits:** filenames alone (#226), PR descriptions (#227), and commit/tag messages (#220)
-  remain unchecked. Binary merge resolutions and all binary files in `jj gate` remain
-  unread (#222); ordinary binary additions are checked at push time. Unsupported encodings
-  include mixed Windows separators, WSL drive paths, a Windows path with each backslash
+- **Limits:** branch/bookmark/tag names (#228), filenames alone (#226), PR descriptions (#227),
+  and commit/tag messages (#220) remain unchecked. Binary merge resolutions and all binary
+  files in `jj gate` remain unread (#222); ordinary binary additions are checked at push time.
+  Unsupported encodings include mixed Windows separators, WSL drive paths, a Windows path with each backslash
   escaped twice (four backslashes in the line), `%20`,
   shell-escaped spaces, `%2F` and Unicode-escaped slashes. Conservative boundaries refuse
   siblings such as `<home>+x`, `<home>./x`, `<home>..x` or `<home>é/x`, and flag/CSS names
   starting with a dashed identity. Previously published GitHub objects require GitHub Support
   to purge; changing this checker or rewriting a branch cannot retract them.
-- **Tools:** the checker requires Node (repo minimum 20) and Bash 3.2+. Pre-commit needs Bash
-  4.4+ (`mapfile -d`), and the jj gate needs Bash 4+. The full hook test suite requires Bash
-  4.4+; on macOS select a newer Bash through PATH. jj output is forced to plain text for all
-  parsed commands, even with `ui.color="always"`.
+- **Tools:** the checker requires Node (repo minimum 20) and Bash 3.2+. Pre-commit and the jj
+  gate need Bash 4.4+ (`mapfile -d`, process-substitution wait, empty arrays under nounset).
+  The full hook test suite requires Bash 4.4+; on macOS select a newer Bash through PATH.
+  jj output is forced to plain text for all parsed commands, even with `ui.color="always"`.
 
 The two dirty-tree checks (pre-commit's, when it runs cargo, and pre-push's, before its test gate) also refuse while an assume-unchanged or skip-worktree file is missing or differs from the index, since git diff cannot see that. Pre-commit looks only at the files cargo reads (Rust, Cargo and `desktop-slint/ui`); pre-push looks at every flagged file. A flagged file that still matches the index passes. The refusal says how to fix it. `scripts/mutants-diff.sh` makes the same check over every flagged file, since cargo-mutants copies the working tree. To bypass pre-commit's check, use `git commit --no-verify`, which skips all of commit-msg and pre-commit; to bypass pre-push's, use `SKIP_SLOW_GATES=1`, which skips its test gate. In a sparse checkout the out-of-cone files are missing, so pre-push refuses whenever it reaches its test gate, and pre-commit refuses when it runs cargo while any file cargo reads is out of the cone. Those refusals hold only while `scripts/` is in the cone: outside it the hooks are missing too, and git runs no gate at all.
 
@@ -89,7 +89,7 @@ The push check (pre-push and `jj gpush`) skips commits already on `origin/main`.
 The repo is a colocated jj repo (`jj git init --colocate`): `.git` stays, so GitHub, `gh`, CI and `git push` work unchanged. **jj never runs git hooks**, so `jj commit` and `jj git push` bypass everything above. Run `scripts/install-jj-aliases.sh` once per clone to set the repo-level jj config:
 
 - `jj gate` runs `scripts/jj-gate.sh check` over `trunk()..@`: the commit-msg trailer ban on each description (it calls `scripts/hooks/commit-msg`), the home-path check on the stack's diff, workspace fmt and clippy when Rust, Cargo or `desktop-slint/ui` files changed since trunk, and `node --check` on changed `desktop-tauri/ui` and `scripts/` JavaScript files. jj has no index, so the gate checks the working-copy commit `@`, which every jj command snapshots first.
-- `jj gpush [args]` asks `jj git push --dry-run [args]` what would move (it refuses to push when it cannot read that plan). For each pushed ref it runs the trailer ban over `trunk()..<new tip>`, commits already on the remote branch included, the home-path check on each commit it publishes, as pre-push does, and the review-gate ledger check over the commits on neither the remote branch nor `origin/main` (for a new branch, those since its fork point with `origin/main`). It then runs `cargo test --workspace` and `node --test` when `@` (or `@-` with `@` empty) is a pushed tip. It refuses when `@` has changes on top of the pushed `@-`, warns for other tips, then reads the plan again and pushes it with no new snapshot (below). Use it instead of `jj git push`. `SKIP_REVIEW_GATE=1` and `SKIP_SLOW_GATES=1` skip the same gates as before. `git push` still fires `scripts/hooks/pre-push`.
+- `jj gpush [args]` asks `jj git push --dry-run [args]` what would move (it refuses to push when it cannot read that plan). For each pushed ref it runs the trailer ban over `trunk()..<new tip>`, commits already on the remote branch included, the home-path check on each commit it publishes, as pre-push does, and the review-gate ledger check over the commits on neither the remote branch nor `origin/main` (for a new branch, those since its fork point with `origin/main`). It then runs `cargo test --workspace` and `node --test` when `@` (or its sole parent with `@` empty) is a pushed tip. It refuses a pushed parent unless `@` is empty with that sole parent, or `@` itself is also pushed; an empty merge does not cover either parent. It warns for other tips, then reads the plan again and pushes it with no new snapshot (below). Use it instead of `jj git push`. `SKIP_REVIEW_GATE=1` and `SKIP_SLOW_GATES=1` skip the same gates as before. `git push` still fires `scripts/hooks/pre-push`.
 - Parsed old/new plan IDs and message IDs resolve explicitly as commit IDs. Hex-named
   bookmarks or tags cannot redirect the selected commits or their description lookups.
 - `working-copy.eol-conversion = "input"` is set because `.gitattributes` normalizes CRLF to LF: git applies it on its own, jj shows every CRLF file as modified without it. Never use `input-output`; it writes CRLF into every checkout and breaks shell shebangs. jj also records the executable bit that `core.fileMode=false` hides from git.

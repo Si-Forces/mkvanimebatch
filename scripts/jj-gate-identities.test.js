@@ -84,7 +84,7 @@ test("jj rejects nonhex plan operands before resolving or pushing them", options
     '*" git push "*) touch "$PUSH_MARKER"; exit 99 ;;',
     '*" log -r commit_id("*) if [ "${ID_OUTPUT+x}" = x ]; then printf "%s" "$ID_OUTPUT"; exit "${ID_STATUS:-0}"; fi ;;',
     '*" log -r @ --no-graph -T commit_id "*) [ "${FAIL_QUERY:-}" != current ] || exit 1 ;;',
-    '*" log -r @- --no-graph -T commit_id "*) [ "${FAIL_QUERY:-}" != parents ] || exit 1 ;;',
+    '*" log -r @- --no-graph -T "*) [ "${FAIL_QUERY:-}" != parents ] || exit 1 ;;',
     '*" log -r empty() & @ --no-graph -T commit_id "*) [ "${FAIL_QUERY:-}" != empty ] || exit 1 ;;',
     'esac', 'exec "$REAL_JJ" "$@"', '',
   ].join("\n"));

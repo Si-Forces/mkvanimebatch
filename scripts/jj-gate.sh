@@ -166,7 +166,7 @@ push() {
   jj --ignore-working-copy git push "$@"
 }
 
-# The suites read the working tree, so they can only vouch for @ (or @- when @ is empty).
+# The suites read the working tree, so they can only vouch for @ (or its sole parent when @ is empty).
 # Other pushed tips go through untested here, with a warning, as in the pre-push hook.
 slow_gates() {
   if [ "${SKIP_SLOW_GATES:-0}" = "1" ]; then
@@ -175,8 +175,9 @@ slow_gates() {
   fi
   local u tip cur parent empty_wc covered=0 # empty_wc: @'s id when @ has no changes, else empty
   cur=$(commit_id @) || die "cannot resolve the working-copy commit"
-  # A merge may have multiple parents; only an exact single-parent match counts below.
-  parent=$(jj log -r '@-' --no-graph -T 'commit_id') || die "cannot read the working-copy parents"
+  # An empty working copy covers only its sole parent. Preserve separators to check
+  # each merge parent below without treating the merged tree as that parent's test coverage.
+  parent=$(jj log -r '@-' --no-graph -T 'commit_id ++ "\n"') || die "cannot read the working-copy parents"
   empty_wc=$(jj log -r 'empty() & @' --no-graph -T 'commit_id') || die "cannot check whether the working copy is empty"
   for u in "$@"; do
     tip=${u#* }
@@ -186,10 +187,10 @@ slow_gates() {
     tip=${u#* }
     if [ "$tip" = "$cur" ] || { [ "$tip" = "$parent" ] && [ -n "$empty_wc" ]; }; then
       continue
-    elif [ "$tip" = "$parent" ]; then
+    elif [[ $'\n'"$parent"$'\n' == *$'\n'"$tip"$'\n'* ]]; then
       # With another tip covered, the tests run on @, which holds this one too.
       [ "$covered" -eq 1 ] ||
-        die "the working copy has changes on top of the pushed commit, so the tests would not run on it. Move them aside (jj new / jj squash) or: SKIP_SLOW_GATES=1 jj gpush"
+        die "the pushed parent has no working-copy test coverage, so the tests would not run on it. Push the working-copy commit too, or run: jj new 'commit_id($tip)', then rerun jj gpush. Bypass: SKIP_SLOW_GATES=1 jj gpush"
     else
       echo "⚠  [jj-gate] ${tip:0:12} is not @ or @-; the local test suites do not cover it." >&2
     fi
