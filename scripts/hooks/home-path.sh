@@ -185,8 +185,9 @@ replace_all "$profile" "$bs" /
 forward=$REPLY
 replace_all "$profile" "$bs" "$bs$bs"
 doubled=$REPLY
+identity_forms=("$home" "$home_as_set" "$home_slashes" "$real" "$profile" "$profile_as_set" "$forward")
 homes=""
-for h in "$home" "$home_as_set" "$home_slashes" "$real" "$profile" "$profile_as_set" "$forward" "$doubled"; do
+for h in "${identity_forms[@]}" "$doubled"; do
   homes+="$h"$'\n'
 done
 # Native UTF-16 replacement matches Claude Code, without an awk byte/locale approximation.
@@ -195,7 +196,7 @@ dashed=$(MSYS_NO_PATHCONV=1 node -e '
 const homes = process.argv.slice(1);
 if (homes.some(p => p.includes("\ufffd"))) process.exit(1);
 process.stdout.write(homes.map(p => p.replace(/[^A-Za-z0-9]/g, "-")).join("\n"));
-' -- "$home" "$home_as_set" "$home_slashes" "$real" "$profile" "$profile_as_set" "$forward" 2> /dev/null) ||
+' -- "${identity_forms[@]}" 2> /dev/null) ||
   { echo "❌ [home-path] cannot derive home spellings (Node and valid Unicode identities are required)." >&2; exit 1; }
 [ -n "$home$real$profile" ] ||
   echo "⚠  [home-path] HOME and USERPROFILE name no home directory (unset, /, a drive alone," \
