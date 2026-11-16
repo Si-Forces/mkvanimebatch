@@ -127,7 +127,7 @@ const callAgent = async (prompt, opts) => {
   }
 }
 // Every exit after a commit: the workflow's re-review is not the Standards + Spec review AGENTS.md requires.
-const nextSteps = () => log(`Next, by hand: the code-review skill over ${A.base}..${BM}, fix or accept its findings, then \`scripts/review-gate.sh record-range ${A.base} ${BM} "..."\` before \`jj gpush\`.`)
+const nextSteps = () => log(`Next, by hand: the code-review skill over ${A.base}..${BM}, fix or accept its findings, then \`scripts/review-gate.sh record-range ${A.base} ${BM} "..."\` before \`jj gpush\`. Publish the final prepared PR body with \`node scripts/pr-publish.js\` (docs/agents/issue-tracker.md).`)
 
 phase('Implement')
 const implTask = FIX_MODE

@@ -19,8 +19,8 @@ done
 
 fail=0
 
-# First, so a refusal shows even when the dirty-tree check below stops the hook.
-"$(dirname "$0")/home-path.sh" --staged || fail=1
+# Refuse before compiler/syntax diagnostics can echo private source text or names.
+"$(dirname "$0")/home-path.sh" --staged || exit 1
 
 if [ "$rust" -eq 1 ]; then
   # cargo reads the working tree, so it must hold exactly what is being committed.

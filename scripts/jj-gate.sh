@@ -18,7 +18,7 @@ die() { echo "❌ [jj-gate] $*" >&2; exit 1; }
 command -v jj > /dev/null || die "jj is required"
 # Every parsed command (ids, descriptions, paths and push plans) must ignore forced colour.
 jj() { command jj --color never "$@"; }
-root=$(jj workspace root) || die "not inside a jj workspace"
+root=$(jj workspace root 2> /dev/null) || die "not inside a jj workspace"
 cd "$root"
 
 # Does the commit-msg hook's job on each description in a revset (default trunk()..@), so the
@@ -26,15 +26,19 @@ cd "$root"
 # Fails closed: an unreadable revset or description is a failure, not a pass. (This runs
 # under `||`, where set -e is off, so every step checks its own status.)
 check_messages() {
-  local revset=${1:-'trunk()..@'} ids id msg fail=0
+  local revset=${1:-'trunk()..@'} trailer_only=${2:-0} ids id msg fail=0
   ids=$(jj log -r "$revset" --no-graph -T 'commit_id ++ "\n"') ||
     { echo "❌ [jj-gate] cannot list the changes in $revset." >&2; return 1; }
+  if [ "$trailer_only" -eq 0 ]; then
+    printf '%s\n' "$ids" | node scripts/home-path-input.js messages 2> /dev/null |
+      scripts/hooks/home-path.sh --records || { echo "❌ [jj-gate] message check refused." >&2; return 1; }
+  fi
   msg=$(mktemp)
   for id in $ids; do
     jj log -r "commit_id($id)" --no-graph -T 'description' > "$msg" ||
       { echo "❌ [jj-gate] cannot read the description of commit ${id:0:12}." >&2; rm -f "$msg"; return 1; }
     [ -s "$msg" ] || continue
-    if ! scripts/hooks/commit-msg "$msg"; then
+    if ! scripts/hooks/commit-msg "$msg" --trailers-only; then
       echo "   commit ${id:0:12}: fix it with: jj describe 'commit_id($id)'" >&2
       fail=1
     fi
@@ -46,7 +50,7 @@ check_messages() {
 # Keep the path globs, the theme-init.js rule and the test commands in sync with
 # scripts/hooks/pre-commit and scripts/hooks/pre-push: both copies must gate the same files.
 check() {
-  local f fail=0 rust=0 input_type
+  local f fail=0 rust=0 input_type baseline checked conflicts
   local -a changed js=()
   # Every file the stack touches since trunk, deletions included: removing a .rs file can
   # break the build as surely as editing one. -t, not the hook's -z: jj prints paths
@@ -61,11 +65,14 @@ check() {
     esac
   done
 
-  check_messages || fail=1
+  check_messages || return 1
   # What the stack adds since it forked from trunk (a diff from trunk itself would show trunk's
   # newer changes reversed); the push re-checks each published commit.
-  jj diff --from 'fork_point(trunk() | @)' --to @ --git --context 0 |
-    scripts/hooks/home-path.sh || fail=1
+  baseline=$(commit_id 'fork_point(trunk() | @)') || die "cannot resolve one fork point"
+  checked=$(commit_id @) || die "cannot resolve the checked snapshot"
+  conflicts=$(jj log -r "commit_id($checked)" --no-graph -T conflict 2> /dev/null) || die "cannot inspect conflicts"
+  [ "$conflicts" = false ] || die "cannot check unresolved conflicts faithfully"
+  scripts/hooks/home-path.sh --between "$baseline" "$checked" || return 1
 
   if [ "$rust" -eq 1 ]; then
     echo "[jj-gate] cargo fmt --check (workspace)..."
@@ -108,27 +115,29 @@ push() {
   # reworded jj never lets an unreviewed commit through.
   # One deliberate snapshot (its warnings show once), then the plan is read without one, so it
   # compares byte for byte with the second read before the push.
-  jj log -r @ --no-graph -T '' > /dev/null || exit 1
-  dry=$(jj --ignore-working-copy git push --dry-run "$@" 2>&1) || { printf '%s\n' "$dry" >&2; exit 1; }
+  jj log -r @ --no-graph -T '' > /dev/null 2>&1 || die "cannot snapshot the checked state safely"
+  dry=$(jj --ignore-working-copy git push --dry-run "$@" 2>&1) || die "cannot read the push plan safely"
   while IFS= read -r line; do
     if [[ "$line" =~ ^Changes\ to\ push\ to\ (.+):$ ]]; then
       remote=${BASH_REMATCH[1]}; in_plan=1; continue
     fi
     [[ "$line" =~ ^[[:space:]] && "$in_plan" -eq 1 ]] || { in_plan=0; continue; }
     [[ "$line" =~ ^[[:space:]]+(bookmark|tag):[[:space:]]+(.+)[[:space:]]\[(.*)\]$ ]] ||
-      die "cannot read this line of the push plan: $line. Bypass: jj git push"
+      die "cannot read this line of the push plan safely. Bypass: jj git push"
     kind=${BASH_REMATCH[1]} name=${BASH_REMATCH[2]} what=${BASH_REMATCH[3]}
     case "$what" in
       "add to "*)               remote_sha=0; to_id=${what#add to } ;;
       "move "*" from "*" to "*) remote_sha=${what#*from }; remote_sha=${remote_sha%% to *}; to_id=${what##* to } ;;
       "delete "*)               deletes=$((deletes + 1)); continue ;; # nothing to review
-      *) die "cannot read the push plan for $kind $name: [$what]. Bypass: jj git push" ;;
+      *) die "cannot read the push plan safely. Bypass: jj git push" ;;
     esac
+    case "$kind" in bookmark) destination="refs/heads/$name" ;; tag) destination="refs/tags/$name" ;; esac
+    printf '%s' "$destination" | scripts/hooks/home-path.sh --ref || exit 1
     # Plan tokens are commit IDs, not general revsets or same-named bookmarks/tags.
     [[ "$remote_sha" =~ ^[0-9a-f]+$ && "$to_id" =~ ^[0-9a-f]+$ ]] ||
-      die "cannot read commit ids in the push plan for $kind $name"
-    [ "$remote_sha" = 0 ] || remote_sha=$(commit_id "commit_id($remote_sha)") || die "cannot resolve $remote_sha ($kind $name)"
-    to_id=$(commit_id "commit_id($to_id)") || die "cannot resolve $to_id ($kind $name)"
+      die "cannot read commit ids in the push plan"
+    [ "$remote_sha" = 0 ] || remote_sha=$(commit_id "commit_id($remote_sha)") || die "cannot resolve planned commit"
+    to_id=$(commit_id "commit_id($to_id)") || die "cannot resolve planned commit"
     updates+=("$remote_sha $to_id")
     update_remotes+=("$remote")
   done <<< "$dry"
@@ -137,13 +146,13 @@ push() {
     # Only deletions, or nothing to push. A plan header with no line read under it, or any
     # other output, is a plan this did not recognise.
     { [ "$deletes" -gt 0 ] || [[ "$dry" == *"Nothing changed."* && "$dry" != *"Changes to push"* ]]; } ||
-      die "cannot read the output of jj git push --dry-run:"$'\n'"$dry"$'\n'"Bypass: jj git push"
+      die "cannot read the output of jj git push --dry-run safely. Bypass: jj git push"
   else
     # The trailer ban is part of the push, as commit-msg is part of every commit under git, and
     # so is pre-push's home-path check over each published commit.
     for i in "${!updates[@]}"; do
       u=${updates[$i]}
-      check_messages "trunk()..commit_id(${u#* })" || exit 1
+      check_messages "trunk()..commit_id(${u#* })" 1 || exit 1
       # shellcheck disable=SC2086 # two validated ids, split on purpose
       scripts/hooks/home-path.sh --published $u "${update_remotes[$i]}" || exit 1
     done
@@ -161,9 +170,10 @@ push() {
   # Push exactly the plan the gates checked. A plain push would snapshot @ again, so a file
   # edited while the tests ran would land in a commit nobody checked; and a bookmark another
   # jj process moved meanwhile would change the plan, so refuse then.
-  again=$(jj --ignore-working-copy git push --dry-run "$@" 2>&1) || { printf '%s\n' "$again" >&2; exit 1; }
+  again=$(jj --ignore-working-copy git push --dry-run "$@" 2>&1) || die "cannot reread the push plan safely"
   [ "$again" = "$dry" ] || die "the push plan changed while the gates ran; rerun jj gpush."
-  jj --ignore-working-copy git push "$@"
+  jj --ignore-working-copy git push "$@" > /dev/null 2>&1 || die "push failed; inspect the remote state before retrying"
+  echo "[jj-gate] checked push completed."
 }
 
 # The suites read the working tree, so they can only vouch for @ (or its sole parent when @ is empty).

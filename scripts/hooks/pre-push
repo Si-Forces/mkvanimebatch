@@ -7,8 +7,9 @@ set -euo pipefail
 # git writes one "<local ref> <local sha> <remote ref> <remote sha>" line per ref.
 # Deleting a ref pushes an all-zero local sha: nothing to test or review.
 updates=()
-while read -r _local_ref local_sha _remote_ref remote_sha; do
+while read -r _local_ref local_sha remote_ref remote_sha; do
   [[ -z "$local_sha" || "$local_sha" =~ ^0+$ ]] && continue
+  printf '%s' "$remote_ref" | "$(dirname "$0")/home-path.sh" --ref || exit 1
   updates+=("$remote_sha $local_sha")
 done
 [ "${#updates[@]}" -gt 0 ] || exit 0

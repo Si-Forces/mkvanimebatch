@@ -81,6 +81,7 @@ const publishedArgs = (tip, old = "0", remote = "origin") => ["--published", old
 // the scripts the gates call by repo-relative path.
 const scriptsDir = path.dirname(path.dirname(script));
 const copyScripts = (dir, files) => {
+  if (files.includes("scripts/hooks/home-path.sh")) files = [...files, "scripts/home-path-input.js"];
   for (const f of files) {
     fs.mkdirSync(path.join(dir, path.dirname(f)), { recursive: true });
     fs.copyFileSync(path.join(scriptsDir, "..", f), path.join(dir, f));

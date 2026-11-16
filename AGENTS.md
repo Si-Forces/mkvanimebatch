@@ -79,6 +79,11 @@ Use the branch's actual fork point instead of `origin/main` if it differs. Revie
 
 ### Version control: jj
 
+PR descriptions must be published with `node scripts/pr-publish.js create` or `edit`, using
+the final prepared body. The command checks a private snapshot before sending it unchanged
+to gh; direct gh, REST fallbacks and browser edits bypass it. Read
+`docs/agents/issue-tracker.md` for the required flags before creating or updating a PR body.
+
 The repo is colocated (`jj git init --colocate`): `.git` still exists, but commit with jj, not `git commit`.
 
 - New local clone: run `scripts/install-git-hooks.sh` and `scripts/install-jj-aliases.sh` once. The repo-level jj config is not tracked; if `trunk()` is unknown, run `jj config set --repo 'revset-aliases."trunk()"' 'main@origin'`.
