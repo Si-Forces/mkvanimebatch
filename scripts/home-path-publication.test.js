@@ -16,6 +16,18 @@ test("text input checks every draft line without interpreting diff headers or sc
   }
 });
 
+test("each scan warns once when neither environment variable names a home", () => {
+  const { dir, commit } = gitRepo("single-identity-warning");
+  const base = commit("clean\n");
+  for (const args of [[], ["--text", "message"], ["--records"], ["--probe"], ["--staged"],
+    publishedArgs(base), ["--between", base, base], ["--ref"]]) {
+    const r = run(args[0] === "--ref" ? "refs/heads/clean" : "", { HOME: undefined, USERPROFILE: undefined },
+      { cwd: dir, args });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stderr.match(/name no home directory/g)?.length, 1, args.join(" ") + r.stderr);
+  }
+});
+
 test("published messages include intermediate and nested tag annotations over known commits", () => {
   const { dir, git, commit } = gitRepo("published-messages");
   const base = commit("clean\n");
@@ -119,6 +131,58 @@ test("binary merge checks accept moved parent lines and refuse new lines under h
     assert.ok(!refused.stderr.includes(home));
     assert.equal(run("", {}, { cwd: dir, args: ["--between", base, a] }).status, 0);
     assert.equal(run("", {}, { cwd: dir, args: ["--between", base, novel] }).status, 1);
+  }
+});
+
+test("binary parent reads stop and reap after all distinct candidates match, and needed read failures refuse", {
+  skip: process.platform === "win32" && "reader cleanup fixture uses POSIX signals",
+}, () => {
+  const { dir, git, commit } = gitRepo("early-parent-read");
+  fs.writeFileSync(path.join(dir, ".gitattributes"), "*.txt -diff\n");
+  const first = `${home}/first`, second = `${home}/second`;
+  const tail = Array.from({ length: 30 }, (_, n) => `tail-${n}`).join("\n");
+  const before = `${first}\n${second}\n${tail}\n`;
+  const base = commit(before), left = commit("left\n" + before);
+  const leftBlob = git("rev-parse", "HEAD:f.txt");
+  git("checkout", "-q", "-B", "other", base);
+  const right = commit("right\n" + before), rightBlob = git("rev-parse", "HEAD:f.txt");
+  fs.writeFileSync(path.join(dir, "f.txt"), `left\nright\n${tail}\n${first}\n${first}\n${second}\n`);
+  git("add", "f.txt");
+  const merged = git("commit-tree", git("write-tree"), "-p", left, "-p", right, "-m", "moved lines");
+  const realGit = sh(tmp, "bash", ["-c", "command -v git"]).out.trim();
+  const bin = path.join(tmp, "early-parent-git"); fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, "git"), [
+    '#!/usr/bin/env node',
+    'const fs = require("node:fs"), {spawnSync} = require("node:child_process");',
+    'const args = process.argv.slice(2), env = process.env;',
+    'if (args[1] !== "cat-file" || args[2] !== "blob") {',
+    '  const r = spawnSync(env.REAL_GIT, args, {stdio:"inherit"}); process.exit(r.status ?? 1);',
+    '}',
+    'const blob = args[3]; fs.appendFileSync(env.PARENT_READS, blob + "\\n");',
+    'process.on("SIGTERM", () => { fs.writeFileSync(env.PARENT_STOPPED, blob); process.exit(0); });',
+    'if (blob === env.LEFT_BLOB) {',
+    '  fs.writeSync(1, env.FIRST_LINE + "\\n");',
+    '  if (env.SCENARIO === "failure") process.exit(67);',
+    '  if (env.SCENARIO === "later") process.exit(0);',
+    '  fs.writeSync(1, env.SECOND_LINE + "\\n");',
+    '} else fs.writeSync(1, env.SECOND_LINE + "\\n");',
+    // A successful scan must stop this reader without waiting for its tail or the deadline.
+    'setTimeout(() => process.exit(68), 8000);',
+  ].join("\n"));
+  fs.chmodSync(path.join(bin, "git"), 0o755);
+  for (const scenario of ["complete", "later", "failure"]) {
+    const reads = path.join(tmp, `parent-reads-${scenario}`), stopped = path.join(tmp, `parent-stopped-${scenario}`);
+    const r = run("", { PATH: bin + path.delimiter + process.env.PATH, REAL_GIT: realGit,
+      LEFT_BLOB: leftBlob, FIRST_LINE: first, SECOND_LINE: second, SCENARIO: scenario,
+      PARENT_READS: reads, PARENT_STOPPED: stopped }, { cwd: dir, args: publishedArgs(merged, base) });
+    assert.equal(r.status, scenario === "failure" ? 1 : 0, r.stderr);
+    assert.deepEqual(fs.readFileSync(reads, "utf8").trim().split("\n"),
+      scenario === "later" ? [leftBlob, rightBlob] : [leftBlob]);
+    if (scenario === "failure") {
+      assert.match(r.stderr, /cannot inspect publication input safely/);
+      assert.equal(fs.existsSync(stopped), false);
+    } else assert.equal(fs.readFileSync(stopped, "utf8"), scenario === "later" ? rightBlob : leftBlob);
+    assert.ok(!r.stderr.includes(home), r.stderr);
   }
 });
 

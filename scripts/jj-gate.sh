@@ -100,7 +100,7 @@ commit_id() {
 }
 
 push() {
-  local dry again line u i remote="" in_plan=0 deletes=0 kind name what remote_sha to_id
+  local dry again line u i remote="" in_plan=0 deletes=0 kind name what remote_sha to_id destination
   local -a updates=() # "<remote sha, or 0 for a new ref> <local sha>", as the pre-push hook gets them
   local -a update_remotes=() # same indexes as updates, including across deletion-only sections
 
