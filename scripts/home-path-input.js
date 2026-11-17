@@ -38,8 +38,14 @@ export async function* records(stream, delimiter = 10) {
   if (length) yield Buffer.concat(parts, length);
 }
 async function* output(child, delimiter = 10) {
-  yield* records(child.stdout, delimiter);
-  if (await child.done !== 0) throw new Error("cannot read Git input");
+  try {
+    yield* records(child.stdout, delimiter);
+    if (await child.done !== 0) throw new Error("cannot read Git input");
+  } finally {
+    // A completed membership query can stop before EOF; reap that reader too.
+    child.kill();
+    await child.done;
+  }
 }
 async function small(args) {
   const child = git(args); let result = "";
@@ -212,21 +218,24 @@ async function matches(lines) {
 }
 async function inherited(lines, parents, cache) {
   const answers = [], groups = new Map();
+  let remaining = 0;
   for (const [i, line] of lines.entries()) {
     if (cache.line?.equals(line)) { answers[i] = cache.found; continue; }
     answers[i] = false;
     if (!groups.has(line.length)) groups.set(line.length, []);
     const group = groups.get(line.length);
     let needle = group.find(item => item.line.equals(line));
-    if (!needle) { needle = { line, indexes: [], found: false }; group.push(needle); }
+    if (!needle) { needle = { line, indexes: [], found: false }; group.push(needle); remaining++; }
     needle.indexes.push(i);
   }
   // Only this bounded candidate batch is indexed, never the parent-file lines.
   for (const parent of parents) {
-    if (!groups.size || /^0+$/.test(parent)) continue;
+    if (!remaining) break;
+    if (/^0+$/.test(parent)) continue;
     for await (const other of output(git(["cat-file", "blob", parent]))) {
       for (const needle of groups.get(other.length) ?? [])
-        if (!needle.found && other.equals(needle.line)) needle.found = true;
+        if (!needle.found && other.equals(needle.line)) { needle.found = true; remaining--; }
+      if (!remaining) break;
     }
   }
   for (const group of groups.values()) for (const needle of group)

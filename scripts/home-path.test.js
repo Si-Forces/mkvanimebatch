@@ -719,7 +719,11 @@ test("--published checks incoming history against the destination baseline, past
   // A ref or path, whose text git's own error would print, gets the usage line, and so does
   // a short id, a missing one, an extra argument, or a sha without --published, which would
   // otherwise wait on stdin.
-  const usage = { status: 1, stderr: "❌ [home-path] usage: home-path.sh [--staged | --published <old> <new> [remote]]\n" };
+  const usage = run("", {}, { args: ["--help"], cwd: repo });
+  assert.equal(usage.status, 1);
+  assert.match(usage.stderr, /usage:/);
+  for (const mode of ["--staged", "--published", "--between", "--ref", "--text", "--records", "--probe"])
+    assert.ok(usage.stderr.includes(mode), mode);
   for (const args of [
     ["--published", `${home}/bad-ref`], ["--published", fix.slice(0, 12)], ["--published"],
     ["--published", fix, "x"], ["--published", `${home}/bad-ref`, fix],

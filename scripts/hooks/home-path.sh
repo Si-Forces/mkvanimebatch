@@ -21,7 +21,20 @@
 # Run by pre-commit, pre-push and scripts/jj-gate.sh; not a hook itself.
 set -euo pipefail
 
-usage() { echo "❌ [home-path] usage: home-path.sh [--staged | --published <old> <new> [remote]]" >&2; exit 1; }
+usage() {
+  cat >&2 <<'USAGE'
+❌ [home-path] usage:
+  home-path.sh                              unified/combined diff on stdin
+  home-path.sh --staged
+  home-path.sh --published <old> <new> [remote]
+  home-path.sh --between <base> <tip>
+  home-path.sh --ref                        destination ref on stdin
+  home-path.sh --text <message|tag-message|pr-body>
+  home-path.sh --records                    internal octal records on stdin
+  home-path.sh --probe                      internal matcher queries on stdin
+USAGE
+  exit 1
+}
 # What both git commands pass, so that no git setting hides a line or misnames a file. The
 # prefixes are set because diff.noprefix and diff.mnemonicPrefix would change them (a file's
 # name is read from its +++ line, so a/ is there only to match b/), and --no-relative because
@@ -214,9 +227,10 @@ if (homes.some(p => p.includes("\ufffd"))) process.exit(1);
 process.stdout.write(homes.map(p => p.replace(/[^A-Za-z0-9]/g, "-")).join("\n"));
 ' -- "${identity_forms[@]}" 2> /dev/null) ||
   { echo "❌ [home-path] cannot derive home spellings (Node and valid Unicode identities are required)." >&2; exit 1; }
-[ -n "$home$real$profile" ] ||
+if [ -z "$home$real$profile" ] && [[ $mode != --staged && $mode != --published ]]; then
   echo "⚠  [home-path] HOME and USERPROFILE name no home directory (unset, /, a drive alone," \
     "or one segment such as /root), so nothing is checked." >&2
+fi
 
 extra_fail=0 extra_error=0
 case $mode in

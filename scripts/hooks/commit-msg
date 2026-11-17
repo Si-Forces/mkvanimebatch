@@ -54,8 +54,8 @@ if [ -n "$trailers" ]; then
     echo "❌ [commit-msg] refusing to commit an AI co-author trailer:"
     echo "     AI co-author attribution detected."
     echo ""
-    echo "   Drop the line above. To credit a person, name them instead: an AI"
-    echo "   co-author is never kept. Attribution is a choice, not a default."
+    echo "   Drop the Co-authored-by line that credits an AI. To credit a person,"
+    echo "   name them instead. An AI co-author is never kept."
     echo "   Bypass: git commit --no-verify"
     echo ""
   } >&2
