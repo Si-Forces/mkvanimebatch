@@ -13,8 +13,8 @@ Enable the tracked hooks once per clone with `scripts/install-git-hooks.sh`, whi
 The JavaScript path globs also cover nested files: Bash `case` patterns such as
 `scripts/*.js` match `/`, so `scripts/test-support/*.js` is included.
 `scripts/home-path-wiring.test.js` pins that syntax coverage in pre-commit and `jj gate`.
-Workflow files in `.claude/workflows/` use runtime syntax, including top-level `return`, so the
-gates' `node --check` does not cover them.
+Workflow files added under `.claude/workflows/` use runtime syntax, including top-level `return`,
+so the gates' `node --check` does not cover them.
 
 `scripts/hooks/home-path.sh` is the **home-path check**. It prevents accidental publication of
 the checking environment's home identities. Its matcher and redactor are shared by content,
