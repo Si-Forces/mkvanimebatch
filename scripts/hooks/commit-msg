@@ -18,8 +18,13 @@ set -euo pipefail
 
 # git passes the path to the message file. Refuse rather than trust it: a hook that cannot
 # read what it must inspect would approve every message.
-msg=${1:?"[commit-msg] needs the path to the commit message file"}
-[ -r "$msg" ] || { echo "❌ [commit-msg] cannot read the commit message at $msg." >&2; exit 1; }
+if [ $# -ne 1 ] && { [ $# -ne 2 ] || [ "$2" != --trailers-only ]; }; then
+  echo "❌ [commit-msg] needs a message file (and optional internal --trailers-only)." >&2; exit 1
+fi
+msg=$1
+[ -r "$msg" ] || { echo "❌ [commit-msg] cannot read the commit message." >&2; exit 1; }
+# Cleanup overrides are invisible to hooks; scan the whole draft before any trailer echo.
+if [ $# -eq 1 ]; then "$(dirname "$0")/home-path.sh" --text message < "$msg" || exit 1; fi
 
 # A trailer is a line of its own; git accepts whitespace before the colon, so allow it.
 trailer='^[[:space:]]*[Cc]o-[Aa]uthored-[Bb]y[[:space:]]*:'
@@ -35,7 +40,7 @@ by_name='^[Cc]o-[Aa]uthored-[Bb]y[[:space:]]*:[[:space:]]*ai[[:space:]]+bot[[:sp
 # An indented line stays accepted, and that matches git: it reads as paragraph continuation.
 # A message that is one bare trailer line has no trailer block, so git treats it as the
 # subject; GitHub reads it the same way, so there is no attribution to remove there.
-parsed=$(git interpret-trailers --no-divider --parse <"$msg" || true)
+parsed=$(git interpret-trailers --no-divider --parse <"$msg" 2> /dev/null || true)
 trailers=$(
   {
     printf '%s\n' "$parsed" | grep -iE "$trailer.*($address)" || true
@@ -47,7 +52,7 @@ if [ -n "$trailers" ]; then
   {
     echo ""
     echo "❌ [commit-msg] refusing to commit an AI co-author trailer:"
-    printf '%s\n' "$trailers" | sed 's/^/     /'
+    echo "     AI co-author attribution detected."
     echo ""
     echo "   Drop the line above. To credit a person, name them instead: an AI"
     echo "   co-author is never kept. Attribution is a choice, not a default."

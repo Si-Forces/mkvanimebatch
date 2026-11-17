@@ -13,6 +13,28 @@ Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all o
 
 Infer the repo from `git remote -v` — `gh` does this automatically when run inside a clone.
 
+## Publish a prepared PR description
+
+Agents must use the repository command for PR creation and description updates:
+
+```bash
+node scripts/pr-publish.js create --title 'fix(hooks): protect publication metadata' --head <pushed-bookmark> --base main --body-file <prepared.md>
+node scripts/pr-publish.js edit <number> --body-file <prepared.md>
+```
+
+Create requires an explicit title, an already-pushed head, and the final body file; `--body-file -`
+reads stdin. Optional create flags are `--base`, `--repo`, and `--draft`; edit accepts a PR number
+and optional `--repo`. The command captures the body once, checks it with the canonical home-path
+matcher, then streams that snapshot to gh. Add every footer and review table before checking.
+Generation, templates, editor/browser flows and conflicting body arguments refuse. Read/scan
+errors stop publication, diagnostics never echo body text, and clean bytes retain their newlines.
+Titles pass through without identity checking. Explicit head selection and disabled prompts
+prevent the command from publishing a branch automatically.
+
+Direct `gh pr create/edit`, `gh api` (including external skills' REST rate-limit fallbacks), and
+browser/API edits bypass this workflow. Do not use them to work around a refusal. Label-only
+`gh pr edit` operations still follow the conventions below.
+
 ## Pull requests as a triage surface
 
 **PRs as a request surface: no.** _(Set to `yes` if this repo treats external PRs as feature requests; `/triage` reads this flag.)_

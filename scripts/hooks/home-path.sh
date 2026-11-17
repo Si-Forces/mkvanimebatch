@@ -17,7 +17,7 @@
 #                                    counts for lines its resolution adds, which no parent has.
 # Prints the file and line number of each hit, redacting recognized home spellings from the
 # file name, and exits 1, else exits 0. Not the line's text: gate output gets pasted into PR
-# descriptions, which nothing checks.
+# descriptions, which agents publish through scripts/pr-publish.js.
 # Run by pre-commit, pre-push and scripts/jj-gate.sh; not a hook itself.
 set -euo pipefail
 
@@ -32,8 +32,18 @@ usage() { echo "❌ [home-path] usage: home-path.sh [--staged | --published <old
 # own errors are dropped: they could print a path that holds the home. NUL bytes are removed
 # in every mode (--text prints the ones a file holds).
 diff_flags=(-U0 --text --no-color --no-relative --no-ext-diff --no-textconv
-  --src-prefix=a/ --dst-prefix=b/)
+  --src-prefix=a/ --dst-prefix=b/ -O/dev/null --ignore-submodules=none)
 mode=${1:-}
+input_kind="" input_label=""
+case $mode in
+  --between | --ref)
+    if node "$(dirname "$0")/../home-path-input.js" "${mode#--}" "${@:2}" 2> /dev/null |
+      "$0" --records; then exit 0; else
+      extra_status=("${PIPESTATUS[@]}")
+      if [ "${extra_status[0]}" -ne 0 ]; then echo "❌ [home-path] cannot inspect publication input safely." >&2; fi
+      exit 1
+    fi ;;
+esac
 # Keep the array nonempty for Bash 3.2 with nounset; --not alone excludes nothing.
 exclude=(--not)
 case $mode in
@@ -64,6 +74,12 @@ case $mode in
   --staged)
     [ $# -eq 1 ] || usage
     ;;
+  --text)
+    [ $# -eq 2 ] && [[ $2 == message || $2 == tag-message || $2 == pr-body ]] || usage
+    input_kind=text input_label=$2 ;;
+  --records | --probe)
+    [ $# -eq 1 ] || usage
+    input_kind=${mode#--} ;;
   *)
     [ $# -eq 0 ] || usage # a sha without --published would wait on stdin
     ;;
@@ -202,6 +218,21 @@ process.stdout.write(homes.map(p => p.replace(/[^A-Za-z0-9]/g, "-")).join("\n"))
   echo "⚠  [home-path] HOME and USERPROFILE name no home directory (unset, /, a drive alone," \
     "or one segment such as /root), so nothing is checked." >&2
 
+extra_fail=0 extra_error=0
+case $mode in
+  --staged)
+    if node "$(dirname "$0")/../home-path-input.js" staged 2> /dev/null | "$0" --records; then :; else
+      extra_status=("${PIPESTATUS[@]}"); extra_fail=1
+      [ "${extra_status[0]}" -eq 0 ] || extra_error=1
+    fi ;;
+  --published)
+    if node "$(dirname "$0")/../home-path-input.js" published "$2" "$3" "${old:-0}" 2> /dev/null |
+      "$0" --records; then :; else
+      extra_status=("${PIPESTATUS[@]}"); extra_fail=1
+      [ "${extra_status[0]}" -eq 0 ] || extra_error=1
+    fi ;;
+esac
+
 # ENVIRON, not awk -v, which would read the backslashes of a Windows path as escapes. LC_ALL=C,
 # as a diff is bytes, not text: tolower() then folds only A-Z (a Turkish locale folds I to a
 # dotless i), and bytes that are not UTF-8 neither derail gawk nor stop BSD awk.
@@ -210,7 +241,13 @@ process.stdout.write(homes.map(p => p.replace(/[^A-Za-z0-9]/g, "-")).join("\n"))
 # ends a sentence still ends the path. ASCII case is ignored, as Windows paths are.
 # File headers are the ---/+++ lines between "diff --git" (or a merge's "diff --combined" or
 # "diff --cc") and the first hunk; after that, "+++" is an added line starting with "++".
-if read_diff | LC_ALL=C tr -d '\0' | HOMES="$homes" DASHED="$dashed" LC_ALL=C awk '
+out_fd=2
+[ "$input_kind" != probe ] || out_fd=1
+# Probe records are already NUL-free; tr would buffer a request awaiting its response.
+nul_filter() {
+  if [ "$input_kind" = probe ]; then cat; else LC_ALL=C tr -d '\0'; fi
+}
+if read_diff | nul_filter | HOMES="$homes" DASHED="$dashed" INPUT_KIND="$input_kind" INPUT_LABEL="$input_label" LC_ALL=C awk '
   # name is what the character after h must not be; lead, when set, the one before it.
   function names_home(line, h, name, lead,    s, p, q, at) {
     s = line
@@ -294,13 +331,60 @@ if read_diff | LC_ALL=C tr -d '\0' | HOMES="$homes" DASHED="$dashed" LC_ALL=C aw
     }
     return out "\""
   }
+  function matches(text,    squeezed, line, hit, i) {
+    squeezed = tolower(text)
+    gsub(/\/+/, "/", squeezed)
+    line = squeezed
+    gsub(/(\\*\/)+/, "/", line)
+    hit = 0
+    for (i = 1; i <= n && !hit; i++)
+      hit = home[i] != "" && (names_home(squeezed, home[i], "[a-z0-9_~-]", "") ||
+        names_home(line, home[i], "[a-z0-9_~-]", ""))
+    for (i = 1; i <= nd && !hit; i++)
+      hit = dashed[i] != "" && names_home(line, dashed[i], "[a-z0-9]", "[a-z0-9]")
+    return hit
+  }
+  function report(text) {
+    if (matches(text)) {
+      if (!found++) print "❌ [home-path] these added lines name your home directory, which would be published:"
+      if (kind == "filename" || kind == "ref") printf "     %s%s:%s\n", commit, file, kind
+      else printf "     %s%s:%d\n", commit, file, number
+    }
+  }
+  function encoded(value) {
+    return value ~ /^"(\\[0-3][0-7][0-7])*"$/ && index(value, "\\000") == 0
+  }
   BEGIN {
+    number = 1
     n = split(tolower(ENVIRON["HOMES"]), home, "\n")
     nd = split(tolower(ENVIRON["DASHED"]), dashed, "\n")
     escape["a"] = "\a"; escape["b"] = "\b"; escape["t"] = "\t"; escape["n"] = "\n"
     escape["v"] = "\v"; escape["f"] = "\f"; escape["r"] = "\r"
     escape["\\"] = "\\"; escape["\""] = "\""
     for (i = 1; i <= 255; i++) ord[sprintf("%c", i)] = i
+  }
+  ENVIRON["INPUT_KIND"] == "probe" {
+    if (!encoded($0)) { invalid = 1; exit 2 }
+    print matches(unquote($0)) ? 1 : 0
+    fflush()
+    next
+  }
+  ENVIRON["INPUT_KIND"] == "text" {
+    file = ENVIRON["INPUT_LABEL"]
+    report($0); number++; next
+  }
+  ENVIRON["INPUT_KIND"] == "records" {
+    if (NF != 5 || $2 !~ /^[0-9a-f]+$/ ||
+        !($2 == "0" || length($2) == 40 || length($2) == 64) || $3 !~ /^[0-9]+$/ ||
+        $1 !~ /^(filename|ref|binary|message|tag-message|pr-body)$/ ||
+        !encoded($4) || !encoded($5)) { invalid = 1; exit 2 }
+    kind = $1; commit = $2 == "0" ? "" : substr($2, 1, 12) " "; number = $3 + 0
+    file = unquote($4)
+    quoted = file ~ /[\001-\037\177-\377"\\]/
+    if (kind == "filename" || kind == "binary") file = "/" file
+    file = redact(file); sub(/^\//, "", file)
+    if (kind == "filename" || kind == "ref" || (kind == "binary" && quoted)) file = quote(file)
+    report(unquote($5)); next
   }
   /^commit [0-9a-f]+([ \t]|$)/ { commit = substr($2, 1, 12) " "; in_hunk = 0; next }
   /^diff --(git|combined|cc) / { in_hunk = 0; next }
@@ -337,31 +421,19 @@ if read_diff | LC_ALL=C tr -d '\0' | HOMES="$homes" DASHED="$dashed" LC_ALL=C aw
     # Keep a slash-squeezed form with literal POSIX backslashes, plus a decoded form where
     # JSON \/ (or \\/ inside another string) becomes /. Decode runs together so escaped
     # or plain repeated slashes also read as one /.
-    squeezed = tolower(substr($0, parents + 1))
-    gsub(/\/+/, "/", squeezed)
-    line = squeezed
-    gsub(/(\\*\/)+/, "/", line)
-    hit = 0
-    for (i = 1; i <= n && !hit; i++)
-      hit = home[i] != "" && (names_home(squeezed, home[i], "[a-z0-9_~-]", "") ||
-        names_home(line, home[i], "[a-z0-9_~-]", ""))
-    # Dashed homes use only [a-z0-9-]; slash decoding changes no match or boundary.
-    for (i = 1; i <= nd && !hit; i++)
-      hit = dashed[i] != "" && names_home(line, dashed[i], "[a-z0-9]", "[a-z0-9]")
-    if (hit) {
-      if (!found++) print "❌ [home-path] these added lines name your home directory, which would be published:"
-      printf "     %s%s:%d\n", commit, file, number
-    }
+    report(substr($0, parents + 1))
     number++
   }
   END {
+    if (invalid) exit 2
     if (found) {
       print "   Use a relative path, ~, or a placeholder such as <repo>, then rewrite the commit that adds it."
       exit 1
     }
   }
-' >&2; then
-  exit 0
+' >&"$out_fd"; then
+  if [ "$extra_error" -ne 0 ]; then echo "❌ [home-path] cannot inspect publication input safely." >&2; fi
+  exit "$extra_fail"
 else
   statuses=("${PIPESTATUS[@]}")
   # awk uses 1 for findings; producer/tr failures and awk errors also refuse.

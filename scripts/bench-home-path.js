@@ -77,6 +77,35 @@ const history = (dir, workload, sizeMiB) => {
   return { tip, commits, patchBytes };
 };
 
+const binaryMerge = (dir, workload, sizeMiB) => {
+  fs.mkdirSync(dir);
+  const git = (...args) => command("git", args, { cwd: dir });
+  git("init", "-q", "-b", "main"); git("config", "user.name", "bench"); git("config", "user.email", "bench@example.com");
+  fs.writeFileSync(path.join(dir, ".gitattributes"), "f.txt -diff\n");
+  const file = path.join(dir, "f.txt"), inherited = `${home}/inherited\n`;
+  const chunk = "clean".padEnd(127, " ") + "\n";
+  const count = sizeMiB * 1024 * 1024 / 128;
+  const write = moved => {
+    const fd = fs.openSync(file, "w");
+    try {
+      if (!moved) fs.writeSync(fd, inherited);
+      for (let n = 0; n < count; n += 8192) fs.writeSync(fd, chunk.repeat(8192));
+      if (moved) fs.writeSync(fd, inherited);
+    } finally { fs.closeSync(fd); }
+  };
+  write(false); git("add", "."); git("commit", "-qm", "base"); const base = git("rev-parse", "HEAD");
+  fs.appendFileSync(file, "left\n"); git("commit", "-qam", "left"); const left = git("rev-parse", "HEAD");
+  git("checkout", "-q", "-B", "other", base);
+  fs.appendFileSync(file, "right\n"); git("commit", "-qam", "right"); const right = git("rev-parse", "HEAD");
+  write(true);
+  const candidates = workload === "hits" ? 16 : 1024;
+  for (let n = 0; n < candidates; n++) fs.appendFileSync(file,
+    workload === "hits" ? `${home}/novel-${n}\n` : inherited);
+  git("add", "f.txt");
+  const tip = git("commit-tree", git("write-tree"), "-p", left, "-p", right, "-m", "resolution");
+  return { base, tip, candidates, inputBytes: fs.statSync(file).size };
+};
+
 try {
   const environment = {
     os: fs.readFileSync("/etc/os-release", "utf8").split("\n").find(s => s.startsWith("PRETTY_NAME="))?.slice(12).replaceAll('"', ""),
@@ -86,6 +115,7 @@ try {
     time: command("/usr/bin/time", ["--version"]).split("\n")[0],
     git: command("git", ["--version"]),
     scannerSha256: createHash("sha256").update(fs.readFileSync(scanner)).digest("hex"),
+    adapterSha256: createHash("sha256").update(fs.readFileSync(new URL("./home-path-input.js", import.meta.url))).digest("hex"),
   };
   const samples = [];
   for (const workload of ["clean", "hits"]) {
@@ -98,6 +128,10 @@ try {
       const dir = path.join(tmp, `${workload}-${sizeMiB}`);
       const { tip, ...historyDetails } = history(dir, workload, sizeMiB);
       samples.push(measure("published", workload, sizeMiB, dir, ["--published", "0", tip], "ignore", historyDetails));
+      const binaryDir = path.join(tmp, `binary-${workload}-${sizeMiB}`);
+      const { base, tip: binaryTip, ...binaryDetails } = binaryMerge(binaryDir, workload, sizeMiB);
+      samples.push(measure("binary-merge", workload, sizeMiB, binaryDir,
+        ["--published", base, binaryTip], "ignore", binaryDetails));
     }
   }
   process.stdout.write(JSON.stringify({ environment, samples }, null, 2) + "\n");

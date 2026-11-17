@@ -101,7 +101,8 @@ test("pre-commit checks a staged leak before a dirty Rust tree stops it", () => 
   fs.writeFileSync(path.join(dir, "a.rs"), "fn a() { }\n"); // unstaged, so the hook stops before cargo
   const r = sh(dir, "git", ["commit", "-q", "-m", "c"]);
   assert.equal(r.status, 1, r.out);
-  assert.match(r.out, /name your home directory[^]*Rust\/Cargo files differ from the index/);
+  assert.match(r.out, /name your home directory/);
+  assert.doesNotMatch(r.out, /Rust\/Cargo files differ from the index/);
 });
 
 test("pre-push checks every ref and forwards its destination", () => {
@@ -180,7 +181,7 @@ test("jj-gate.sh check and push (jj gate, jj gpush) refuse a leak", { skip: !has
   // The refusals name only the stack's own leak: old.txt is trunk's, and gone from it.
   assert.match(check.out, /name your home directory[^]*\n {5}f\.txt:1\n/);
   assert.doesNotMatch(check.out, /old\.txt/);
-  assert.match(check.out, /node --check failed: scripts\/broken\.js/);
+  assert.doesNotMatch(check.out, /node --check failed/);
   fs.unlinkSync(path.join(dir, "scripts/broken.js"));
   // All parsed jj output must ignore forced colour, including ids and push plans.
   const colour = path.join(tmp, "jj-colour.toml");
